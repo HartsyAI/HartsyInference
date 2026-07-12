@@ -33,8 +33,43 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
     private readonly Kandinsky5DecoderBlock[] _visualBlocks;
     private readonly Kandinsky5Rope _textRope;
     private readonly Kandinsky5Rope _visualRope;
+    // Second text-rope instance for the step-graph CFG pair ONLY: cond and uncond text have different seq lengths,
+    // so a single instance would rebuild its device tables (a capture-illegal sync alloc) when the paired capture
+    // switches passes. Two instances keep both passes' tables pinned simultaneously. Unused on the eager path.
+    private readonly Kandinsky5Rope _textRopeUncond;
 
     private int _disposed;
+
+    // ── Step-graph capture (HARTSY_DIT_GRAPH) — CFG-pair (LTX-0.9 ForwardPaired template) with the host boundary
+    // work (PatchEmbed, the timestep sinusoid, Unpatchify) hoisted OUTSIDE the capture. Both passes share the
+    // packed latent → shared _visualFixed; temb differs per pass (pooled differs); text proj + pooled proj are
+    // step-invariant (computed once, pinned). Restricted to b==1 (RoPE ApplyGpu is a b==1 device path) + resident
+    // (Kandinsky always preloads all weights, no streaming). See StepGraphActive. ──
+    private Tensor? _visualFixed;                          // [1, numPatches, modelDim] — shared patch-embed, per step
+    private Tensor? _textCondFixed, _textUncondFixed;      // [1, sTxt, modelDim]        — projected text, once
+    private Tensor? _pooledCondFixed, _pooledUncondFixed;  // [1, timeDim]               — projected pooled, once
+    private Tensor? _tembCondFixed, _tembUncondFixed;      // [1, timeDim]               — temb per pass, per step
+    private Tensor? _graphProjCond, _graphProjUncond;      // [1, numPatches, patchOutDim] — captured out-layer buffers
+    private long _graphSig = long.MinValue;
+    private int _graphSigCalls, _graphSigFlips;
+    private bool _graphDead;
+    private const int GraphCaptureCall = 3;
+
+    /// <summary>True while the CFG-pair step graph is engaged (opt-in flag on, the graph path ran at least once,
+    /// not self-disabled). The pipeline suppresses its per-step <c>FreeActivations</c> while this holds — the
+    /// captured graph balances its own allocations and holds the fixed buffers the capture bakes. Re-check AFTER
+    /// each paired forward so a mid-gen self-disable re-enables the sweep.</summary>
+    public bool StepGraphActive => DitStepGraph.Enabled && !_graphDead && _graphSig != long.MinValue;
+
+    /// <summary>Invalidates the captured step graph — MUST be called before the DiT weights are freed (the graph
+    /// bakes weight device pointers; a free + next-gen re-upload would replay against freed memory).</summary>
+    public void InvalidateStepGraph(IBackend backend)
+    {
+        backend.StepGraphReset();
+        if (ReferenceEquals(backend.StepGraphOwner, this)) backend.StepGraphOwner = null;
+        _graphSig = long.MinValue;
+        _graphSigCalls = 0;
+    }
 
     private Tensor? _textProjWeight, _textProjBias;
     private Tensor? _textNormWeight, _textNormBias;
@@ -66,6 +101,7 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
 
         _textRope = new Kandinsky5Rope(config.HeadDim, config.RopeMaxPeriod);
         _visualRope = new Kandinsky5Rope(config.HeadDim, config.RopeMaxPeriod);
+        _textRopeUncond = new Kandinsky5Rope(config.HeadDim, config.RopeMaxPeriod);
     }
 
     /// <summary>Loads weights using the diffusers state-dict naming. See
@@ -172,6 +208,187 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         TensorShape outShape = new TensorShape([(long)batch, _config.OutVisualDim, latT, latH, latW]);
         return ForwardCore(backend, latent, timestep, textEmbeds, pooledEmbeds,
             ropeScaleT, ropeScaleH, ropeScaleW, outShape);
+    }
+
+    /// <summary>CFG-pair forward: cond + uncond velocities for one denoising step. With HARTSY_DIT_GRAPH the whole
+    /// pair (both passes sharing the packed latent's patch-embed) is captured once and replayed via a single
+    /// cuGraphLaunch; the host boundary work (PatchEmbed, the timestep sinusoid, Unpatchify) runs OUTSIDE the
+    /// capture and refreshes the fixed buffers via CopyInto. Falls back to two eager <see cref="ForwardVideo"/>
+    /// calls when graph mode is off or self-disabled. b==1 only; returns fresh caller-owned velocities.</summary>
+    public (Tensor condVelocity, Tensor uncondVelocity) ForwardVideoPaired(IBackend backend, Tensor packedLatent,
+        float timestep, Tensor qwenCond, Tensor pooledCond, Tensor qwenUncond, Tensor pooledUncond,
+        float ropeScaleT, float ropeScaleH, float ropeScaleW)
+    {
+        ThrowIfDisposed();
+        int batch = (int)packedLatent.Shape[0];
+        int channels = (int)packedLatent.Shape[1];
+        int latT = (int)packedLatent.Shape[2];
+        int latH = (int)packedLatent.Shape[3];
+        int latW = (int)packedLatent.Shape[4];
+        TensorShape outShape = new TensorShape([(long)batch, _config.OutVisualDim, latT, latH, latW]);
+
+        bool graphMode = DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead && batch == 1;
+        if (!graphMode)
+        {
+            Tensor c = ForwardVideo(backend, packedLatent, timestep, qwenCond, pooledCond, ropeScaleT, ropeScaleH, ropeScaleW);
+            Tensor u = ForwardVideo(backend, packedLatent, timestep, qwenUncond, pooledUncond, ropeScaleT, ropeScaleH, ropeScaleW);
+            return (c, u);
+        }
+
+        (int pT, int pH, int pW) = _config.PatchSize;
+        int gridT = latT, gridH = latH / pH, gridW = latW / pW;
+        int numPatches = gridT * gridH * gridW;
+        int sTxtCond = (int)qwenCond.Shape[1];
+        int sTxtUncond = (int)qwenUncond.Shape[1];
+
+        // ── Refresh the fixed inputs OUTSIDE the capture (the per-step host excursions live here) ──
+        // Shared patch-embed (both passes use the same packed latent) → _visualFixed.
+        Tensor vis = PatchEmbed(backend, packedLatent, batch, channels, gridT, latH, latW, gridH, gridW);
+        _visualFixed ??= new Tensor(vis.Shape, DType.F32);
+        backend.CopyInto(_visualFixed, vis); vis.Dispose();
+
+        // RoPE: host precompute is a no-op after the first call for fixed geometry; device tables are built by
+        // ApplyGpu on the warm calls and stay pinned. Separate text-rope instances keep both passes' tables live.
+        int[] posCond = new int[sTxtCond]; for (int i = 0; i < sTxtCond; i++) posCond[i] = i;
+        int[] posUncond = new int[sTxtUncond]; for (int i = 0; i < sTxtUncond; i++) posUncond[i] = i;
+        _textRope.Precompute1D(posCond);
+        _textRopeUncond.Precompute1D(posUncond);
+        _visualRope.Precompute3D(_config.AxesDims, gridT, gridH, gridW, 0, ropeScaleT, ropeScaleH, ropeScaleW);
+
+        Tensor tstep = ComputeTimestepEmbedding(backend, timestep, batch);   // [1, timeDim], per-step
+
+        // ── Signature / owner management (mirror the LTX-0.9 / Krea2 CFG-pair template) ──
+        long sig = ((long)gridT * 73856093L) ^ ((long)gridH * 19349663L) ^ ((long)gridW * 83492791L)
+            ^ ((long)sTxtCond * 2654435761L) ^ ((long)sTxtUncond * 40503L);
+        bool ownerLost = !ReferenceEquals(backend.StepGraphOwner, this);
+        if (sig != _graphSig || ownerLost)
+        {
+            backend.StepGraphReset();
+            if (!ownerLost && _graphSig != long.MinValue && ++_graphSigFlips > 8)
+            {
+                _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning("[Kandinsky5 graph] signature flip storm — step-graph disabled for this session.");
+            }
+            _graphSig = sig;
+            _graphSigCalls = 0;
+            backend.StepGraphOwner = this;
+        }
+        _graphSigCalls++;
+
+        if (_graphSigCalls == 1)
+        {
+            // Step-invariant projections computed ONCE and held. _text*Fixed are read inside the capture → pin them
+            // so a pageable re-upload can't invalidate the recording; _pooled*Fixed feed the outside-capture temb Add.
+            _textCondFixed?.Dispose(); _textCondFixed = ProjectText(backend, qwenCond);
+            _textUncondFixed?.Dispose(); _textUncondFixed = ProjectText(backend, qwenUncond);
+            _pooledCondFixed?.Dispose(); _pooledCondFixed = ProjectPooled(backend, pooledCond);
+            _pooledUncondFixed?.Dispose(); _pooledUncondFixed = ProjectPooled(backend, pooledUncond);
+            backend.PreloadWeights([_textCondFixed, _textUncondFixed]);
+        }
+
+        // temb per pass = timestep sinusoid MLP + projected pooled (device Add), refreshed each step OUTSIDE capture.
+        _tembCondFixed ??= new Tensor(tstep.Shape, DType.F32);
+        { Tensor s = new Tensor(tstep.Shape, DType.F32); backend.Add(s, tstep, _pooledCondFixed!); backend.CopyInto(_tembCondFixed, s); s.Dispose(); }
+        _tembUncondFixed ??= new Tensor(tstep.Shape, DType.F32);
+        { Tensor s = new Tensor(tstep.Shape, DType.F32); backend.Add(s, tstep, _pooledUncondFixed!); backend.CopyInto(_tembUncondFixed, s); s.Dispose(); }
+        tstep.Dispose();
+
+        int patchOutDim = pH * pW * _config.OutVisualDim;
+        _graphProjCond ??= new Tensor(new TensorShape(1, numPatches, patchOutDim), DType.F32);
+        _graphProjUncond ??= new Tensor(new TensorShape(1, numPatches, patchOutDim), DType.F32);
+
+        if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
+        {
+            backend.StepGraphLaunch();
+            return (SnapshotUnpatchify(backend, _graphProjCond!, gridT, gridH, gridW, latH, latW, outShape),
+                    SnapshotUnpatchify(backend, _graphProjUncond!, gridT, gridH, gridW, latH, latW, outShape));
+        }
+
+        // Calls 1..GraphCaptureCall-1 run the pair eagerly THROUGH the fixed buffers (warm rope-table builds +
+        // weight promotions); call GraphCaptureCall records the same op sequence.
+        bool capture = _graphSigCalls == GraphCaptureCall;
+        if (capture) backend.StepGraphBegin();
+        try
+        {
+            RunPairIntoFixed(backend, numPatches);
+        }
+        catch (Exception ex) when (capture)
+        {
+            backend.StepGraphReset();
+            _graphDead = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[Kandinsky5 graph] capture invalidated — falling back to eager: {ex.Message}");
+            RunPairIntoFixed(backend, numPatches);
+            return (SnapshotUnpatchify(backend, _graphProjCond!, gridT, gridH, gridW, latH, latW, outShape),
+                    SnapshotUnpatchify(backend, _graphProjUncond!, gridT, gridH, gridW, latH, latW, outShape));
+        }
+        if (capture)
+        {
+            try
+            {
+                backend.StepGraphEndAndLaunch();
+                HartsyInference.Core.Logging.Logs.Info("[Kandinsky5 graph] CFG-pair denoise step captured; replaying via cuGraphLaunch.");
+            }
+            catch (Exception ex)
+            {
+                backend.StepGraphReset();
+                _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning($"[Kandinsky5 graph] capture failed — falling back to eager: {ex.Message}");
+                RunPairIntoFixed(backend, numPatches);
+            }
+        }
+        return (SnapshotUnpatchify(backend, _graphProjCond!, gridT, gridH, gridW, latH, latW, outShape),
+                SnapshotUnpatchify(backend, _graphProjUncond!, gridT, gridH, gridW, latH, latW, outShape));
+    }
+
+    /// <summary>The captured (or capture-warming) CFG-pair body: cond then uncond, both over the shared fixed
+    /// visual tokens, each landing its out-layer projection in its fixed buffer. Both passes captured in ONE graph
+    /// so their differing text seq lengths are baked (the LTX-0.9 RunPairIntoFixed property).</summary>
+    private void RunPairIntoFixed(IBackend backend, int numPatches)
+    {
+        RunOnePassGraph(backend, _textCondFixed!, _tembCondFixed!, _textRope, _graphProjCond!, numPatches);
+        RunOnePassGraph(backend, _textUncondFixed!, _tembUncondFixed!, _textRopeUncond, _graphProjUncond!, numPatches);
+    }
+
+    /// <summary>One conditioning pass over the shared fixed visual tokens with a pass-specific fixed text/temb and
+    /// text-rope: text encoder blocks → visual decoder blocks (cross-attend to the text output) → device out-layer,
+    /// landing in <paramref name="graphProjDst"/>. All device ops — no host reads (b==1 RoPE is the GPU path).</summary>
+    private void RunOnePassGraph(IBackend backend, Tensor textFixed, Tensor tembFixed, Kandinsky5Rope textRope,
+        Tensor graphProjDst, int numPatches)
+    {
+        Tensor curText = new Tensor(textFixed.Shape, DType.F32);
+        backend.CopyInto(curText, textFixed);
+        for (int i = 0; i < _textBlocks.Length; i++)
+        {
+            Tensor next = _textBlocks[i].Forward(backend, curText, tembFixed, textRope);
+            curText.Dispose(); curText = next;
+        }
+
+        Tensor curVisual = new Tensor(_visualFixed!.Shape, DType.F32);
+        backend.CopyInto(curVisual, _visualFixed!);
+        for (int i = 0; i < _visualBlocks.Length; i++)
+        {
+            Tensor next = _visualBlocks[i].Forward(backend, curVisual, curText, tembFixed, _visualRope);
+            curVisual.Dispose(); curVisual = next;
+        }
+        curText.Dispose();
+
+        Tensor finalProj = ApplyOutLayer(backend, curVisual, tembFixed, 1, numPatches);
+        curVisual.Dispose();
+        backend.CopyInto(graphProjDst, finalProj);
+        finalProj.Dispose();
+    }
+
+    /// <summary>Device-copies a fixed out-layer buffer into a fresh disposable tensor and unpatchifies THAT into a
+    /// caller-owned velocity. Reading the fixed buffer's DataPointer directly would D2H-AND-FREE the graph-owned
+    /// buffer the captured graph writes (the Krea2 SnapshotGraphLatent rule), corrupting later replays.</summary>
+    private Tensor SnapshotUnpatchify(IBackend backend, Tensor graphProj, int gridT, int gridH, int gridW,
+        int latH, int latW, TensorShape outShape)
+    {
+        Tensor snap = new Tensor(graphProj.Shape, DType.F32);
+        backend.CopyInto(snap, graphProj);
+        Tensor velocity = Unpatchify(snap, 1, gridT, gridH, gridW, latH, latW, outShape);
+        snap.Dispose();
+        return velocity;
     }
 
     /// <summary>Shared image/video forward over a BCTHW latent view. <paramref name="outShape"/> selects

@@ -23,6 +23,12 @@ public sealed record YoloConfig
     /// <summary>DFL distribution bin count (16 for YOLOv8).</summary>
     public int RegMax { get; init; } = 16;
 
+    /// <summary>Keypoints per detection for pose models (17 for COCO body pose). 0 = a plain detector (no keypoint head).</summary>
+    public int NumKeypoints { get; init; } = 0;
+
+    /// <summary>Values per keypoint (3 = x, y, visibility). Ignored when <see cref="NumKeypoints"/> is 0.</summary>
+    public int KptDims { get; init; } = 3;
+
     /// <summary>Per-detect-scale strides relative to input. Always <c>[8, 16, 32]</c> for YOLOv8.</summary>
     public IReadOnlyList<int> Strides { get; init; } = [8, 16, 32];
 
@@ -108,6 +114,19 @@ public sealed record YoloConfig
 
     /// <summary>YOLO11x (56.9M params, 54.7 mAP).</summary>
     public static YoloConfig YoloV11x => YoloV11l with { Name = "yolo11x", WidthMultiple = 1.50f };
+
+    /// <summary>YOLO11n-pose — the nano pose variant: 1 class (person) + a 17-keypoint (COCO body) head.
+    /// Same backbone/neck as <see cref="YoloV11n"/>; the detect head gains a cv4 keypoint branch.</summary>
+    public static YoloConfig YoloV11nPose => new()
+    {
+        Name = "yolo11n-pose",
+        DepthMultiple = 0.50f,
+        WidthMultiple = 0.25f,
+        MaxChannels = 1024,
+        NumClasses = 1,
+        NumKeypoints = 17,
+        KptDims = 3,
+    };
 
     /// <summary>Resolved per-stage backbone channels matching Ultralytics' formula
     /// <c>make_divisible(min(c_base, max_channels) * width, 8)</c> — i.e. cap to <c>max_channels</c>

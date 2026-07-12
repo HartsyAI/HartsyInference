@@ -155,10 +155,16 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
             // Safe: EulerCfgStep updates the latent in-place on the host, so nothing cross-step is GPU-only.
             // trimPool:false — steps are identical, so the pool reservation is re-used verbatim; trimming here
             // released + re-mapped multiple GB of driver memory EVERY step.
-            Backend.FreeActivations(trimPool: false);
+            // SKIP on the step-graph path (HARTSY_DIT_GRAPH): the captured graph balances its own allocations and
+            // holds the fixed input/output buffers at the addresses the capture bakes — freeing them here would
+            // corrupt the replay. Re-checked each step so a mid-gen self-disable re-enables the sweep.
+            if (!_dit.StepGraphActive) Backend.FreeActivations(trimPool: false);
         }
 
         Backend.Sync();
+        // The captured step graph bakes the DiT weight device pointers; the frees below (and the next gen's
+        // re-upload) would leave it replaying against freed memory — invalidate it before releasing the weights.
+        _dit.InvalidateStepGraph(Backend);
         if (streamer is not null)
         {
             _dit.BeforeBlockForward = null;

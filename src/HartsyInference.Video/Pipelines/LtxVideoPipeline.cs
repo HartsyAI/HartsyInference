@@ -127,6 +127,9 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape(s, _latentChannels), seed);
+        // With HARTSY_DIT_GRAPH the transformer captures the CFG-pair step and replays it; the working latent must
+        // live in its fixed buffer (denoised in place by device CfgEulerStep). Off (default), this returns `latents`.
+        Tensor stepLatent = _transformer.PrepareGraphLatent(Backend, latents);
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
 
         string? diagFile = Environment.GetEnvironmentVariable("LTX_DIAG_FILE");
@@ -139,20 +142,31 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
             Stopwatch sw = Stopwatch.StartNew();
             float t = tsteps[k], dt = t - tsteps[k + 1];
             float tEmb = t * 1000f;   // DiT timestep scaling (validation-gated)
-            Tensor vCond = _transformer.Forward(Backend, latents, promptEmbeds, tEmb, (tLat, hLat, wLat), interp, null);
-            Tensor vUncond = _transformer.Forward(Backend, latents, negativeEmbeds, tEmb, (tLat, hLat, wLat), interp, null);
+            (Tensor vCond, Tensor? vUncond, bool callerOwns) = _transformer.ForwardPaired(
+                Backend, stepLatent, promptEmbeds, negativeEmbeds, tEmb, (tLat, hLat, wLat), interp, null);
             if (dbg && (k == 0 || k == steps - 1))
-                Diag($"[LTX-DIAG] step {k}: t={t:F4} dt={dt:F4} tEmb={tEmb:F1} | vCond {Stat(vCond)} | vUncond {Stat(vUncond)} | diffL2={DiffL2(vCond, vUncond):F4} | latent {Stat(latents)}");
-            LancePipelineCommon.EulerCfgStep(latents, vCond, vUncond, guidance, dt);
-            vCond.Dispose();
-            vUncond.Dispose();
+                Diag($"[LTX-DIAG] step {k}: t={t:F4} dt={dt:F4} tEmb={tEmb:F1} | vCond {Stat(vCond)} | vUncond {Stat(vUncond!)} | diffL2={DiffL2(vCond, vUncond!):F4} | latent {Stat(stepLatent)}");
+            if (callerOwns)
+            {
+                // Eager path — host CFG Euler, byte-identical to the validated pipeline.
+                LancePipelineCommon.EulerCfgStep(stepLatent, vCond, vUncond!, guidance, dt);
+                vCond.Dispose();
+                vUncond!.Dispose();
+            }
+            else
+            {
+                // Graph path — in-place device Euler on the fixed latent; velocities are transformer-owned fixed buffers.
+                // CfgEulerStep does z += v·delta (v = guidance·pos+(1−guidance)·neg), so pass −dt to match the host
+                // EulerCfgStep's z −= v·dt with LTX's positive dt = tsteps[k] − tsteps[k+1].
+                Backend.CfgEulerStep(stepLatent, vCond, vUncond!, guidance, -dt);
+            }
             sw.Stop();
             if (onProgress is not null)
             {
                 // The working latent is token-packed [S, C]; hand preview encoders an NCHW
                 // middle-frame slice instead (small copy: h·w·128 floats). Owned here, disposed
                 // after the callback returns — encoders must not retain it.
-                Tensor previewFrame = ExtractMiddleFrame(latents, tLat, hLat, wLat, _latentChannels);
+                Tensor previewFrame = ExtractMiddleFrame(stepLatent, tLat, hLat, wLat, _latentChannels);
                 onProgress.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
                 {
                     Latent = previewFrame,
@@ -165,7 +179,9 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
 
-        Tensor vaeLatent = UnpackLatents(latents, tLat, hLat, wLat, _latentChannels);   // [1,C,T_lat,H_lat,W_lat]
+        // Unpack from the working latent (the transformer-owned fixed buffer on the graph path); dispose only the
+        // original noise tensor — the fixed buffer persists for the next generation (freed in the transformer).
+        Tensor vaeLatent = UnpackLatents(stepLatent, tLat, hLat, wLat, _latentChannels);   // [1,C,T_lat,H_lat,W_lat]
         latents.Dispose();
         return vaeLatent;
     }

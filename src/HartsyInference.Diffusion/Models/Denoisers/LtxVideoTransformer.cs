@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -23,6 +24,22 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     // runs ONCE per gen instead of ~2·steps times, and the device upload stays cache-hot across steps.
     private Tensor? _cachedCos, _cachedSin;
     private (int F, int H, int W, double T, double IH, double IW) _cosKey = (-1, -1, -1, 0, 0, 0);
+
+    // ── Step-graph state (HARTSY_DIT_GRAPH; see ForwardPaired) ──────────────────────────────────────────
+    // The captured body (proj_in → 28 blocks → final norm → proj_out, for the cond and uncond passes) reads ONLY
+    // fixed device buffers and writes the velocity buffers. Everything per-step-varying is refreshed into a fixed
+    // buffer OUTSIDE the capture: the latent (in-place device CfgEulerStep by the pipeline + PrepareGraphLatent),
+    // and the tiny timestep tensors temb6/shift/scaleP1 (the existing host TimeEmbed/final-scale build runs outside
+    // capture, then CopyInto). The projected encoders are step-invariant → computed once on call 1 and held.
+    private Tensor? _latentFixed;
+    private Tensor? _temb6Fixed, _shiftFixed, _scaleP1Fixed;
+    private Tensor? _encProjCondFixed, _encProjUncondFixed;
+    private Tensor? _graphVelCond, _graphVelUncond;
+    private long _graphSig = long.MinValue;   // grid ⊕ interp ⊕ cond/uncond encoder identity the capture is valid for
+    private int _graphSigCalls;               // calls at the current sig (capture on the 3rd — caches/promotions warm)
+    private int _graphSigFlips;               // sig alternation counter (safety: disable if it never converges)
+    private bool _graphDead;                  // permanent per-session fallback to eager
+    private const int GraphCaptureCall = 3;
 
     public LtxVideoTransformer(LtxVideoConfig config)
     {
@@ -85,6 +102,203 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         cur.Dispose();
         embedded.Dispose();
         LtxVideoDebugDump.DumpOutput(outVel);
+        return outVel;
+    }
+
+    /// <summary>Copies the working latent into the transformer-owned fixed buffer the step graph captures against,
+    /// returning that buffer for the pipeline to denoise in place (device <c>CfgEulerStep</c>). Call once, after the
+    /// initial noise is built, ONLY when graph mode is being attempted; the returned tensor is transformer-owned
+    /// (do NOT dispose it in the pipeline). Returns the original latent unchanged when graph mode is off, so the
+    /// eager path allocates nothing extra.</summary>
+    public Tensor PrepareGraphLatent(IBackend backend, Tensor latent)
+    {
+        if (!(DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported) || _graphDead)
+            return latent;
+        int s = (int)latent.Shape[0], c = (int)latent.Shape[1];
+        if (_latentFixed is null || _latentFixed.Shape[0] != s || _latentFixed.Shape[1] != c)
+        {
+            _latentFixed?.Dispose();
+            _latentFixed = new Tensor(new TensorShape(s, c), DType.F32);
+        }
+        backend.CopyInto(_latentFixed, latent);
+        return _latentFixed;
+    }
+
+    /// <summary>One denoise step for the CFG pair (cond + optional uncond), sharing the RoPE tables and — with the
+    /// step graph active (<see cref="DiTBlocks.DitStepGraph"/>, opt-in via <c>HARTSY_DIT_GRAPH=1</c> and the latent
+    /// routed through <see cref="PrepareGraphLatent"/>) — capturing the ENTIRE pair once per generation and replaying
+    /// it with a single <c>cuGraphLaunch</c> per step, erasing the host-issue tail over LTX's ~50k ops/gen. The only
+    /// per-step-varying content (timestep temb6/shift/scale) enters through fixed buffers refreshed OUTSIDE the
+    /// capture; the step-invariant projected encoders are computed once on call 1. Self-disables to eager on capture
+    /// failure. <paramref name="callerOwns"/> is true on the eager path (fresh velocities — caller disposes) and false
+    /// on the graph path (transformer-owned fixed velocity buffers, rewritten next step).</summary>
+    public (Tensor condVel, Tensor? uncondVel, bool callerOwns) ForwardPaired(
+        IBackend backend, Tensor latentTokens, Tensor condEncoder, Tensor? uncondEncoder, float timestep,
+        (int Frames, int Height, int Width) grid, (double T, double H, double W) interpScale, Tensor? encoderMask)
+    {
+        bool graphMode = DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead
+            && ReferenceEquals(latentTokens, _latentFixed);
+        if (!graphMode)
+        {
+            // Eager path — byte-identical to two calls of the validated Forward.
+            Tensor condV = Forward(backend, latentTokens, condEncoder, timestep, grid, interpScale, encoderMask);
+            Tensor? uncondV = uncondEncoder is not null
+                ? Forward(backend, latentTokens, uncondEncoder, timestep, grid, interpScale, encoderMask)
+                : null;
+            return (condV, uncondV, true);
+        }
+
+        // ── Step-graph path ──
+        // Refresh the fixed timestep buffers (the ONLY per-step-varying content the captured body reads). The host
+        // sinusoid build + final scale/shift host loop run HERE, outside the capture, then land device-side via CopyInto.
+        RefreshTimestepFixed(backend, timestep);
+
+        long sig = ((long)grid.Frames * 19349663L) ^ ((long)grid.Height * 83492791L) ^ ((long)grid.Width * 2654435761L)
+            ^ (BitConverter.DoubleToInt64Bits(interpScale.T) << 3) ^ BitConverter.DoubleToInt64Bits(interpScale.W)
+            ^ ((long)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(condEncoder) << 17)
+            ^ (uncondEncoder is not null ? (long)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(uncondEncoder) << 31 : 0);
+        bool ownerLost = !ReferenceEquals(backend.StepGraphOwner, this);
+        if (sig != _graphSig || ownerLost)
+        {
+            backend.StepGraphReset();
+            if (!ownerLost && _graphSig != long.MinValue && ++_graphSigFlips > 8)
+            {
+                _graphDead = true;
+                Logs.Warning("[LTX graph] signature flip storm — step-graph disabled for this session.");
+            }
+            _graphSig = sig;
+            _graphSigCalls = 0;
+            backend.StepGraphOwner = this;
+        }
+        else if (_graphSigCalls > GraphCaptureCall && !backend.StepGraphReady)
+        {
+            // Backend graph slot reset externally (FreeActivations) while our signature stayed valid — re-warm.
+            _graphSigCalls = 0;
+        }
+        _graphSigCalls++;
+        if (_graphSigCalls == 1)
+        {
+            // Project the step-invariant T5 encoders ONCE and hold them device-resident; pin them + the RoPE tables so
+            // the captured body reads fixed addresses (no per-step re-upload from pageable memory would invalidate capture).
+            _encProjCondFixed?.Dispose();
+            _encProjCondFixed = CaptionProject(backend, condEncoder);
+            _encProjUncondFixed?.Dispose();
+            _encProjUncondFixed = uncondEncoder is not null ? CaptionProject(backend, uncondEncoder) : null;
+            (Tensor cos, Tensor sin) = GetCosSin(grid, interpScale);
+            List<Tensor> pins = new List<Tensor> { _encProjCondFixed, cos, sin };
+            if (_encProjUncondFixed is not null) pins.Add(_encProjUncondFixed);
+            backend.PreloadWeights(pins);
+        }
+        int s = (int)latentTokens.Shape[0];
+        _graphVelCond ??= new Tensor(new TensorShape(s, _config.OutChannels), DType.F32);
+        if (uncondEncoder is not null)
+            _graphVelUncond ??= new Tensor(new TensorShape(s, _config.OutChannels), DType.F32);
+
+        if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
+        {
+            backend.StepGraphLaunch();
+            return (_graphVelCond!, uncondEncoder is not null ? _graphVelUncond : null, false);
+        }
+
+        // Calls 1..GraphCaptureCall-1 run eagerly THROUGH the fixed buffers (warming caches/promotions); call
+        // GraphCaptureCall records the graph.
+        bool capture = _graphSigCalls == GraphCaptureCall;
+        if (capture) backend.StepGraphBegin();
+        try
+        {
+            RunPairIntoFixed(backend, uncondEncoder is not null, grid, interpScale, s);
+        }
+        catch (Exception ex) when (capture)
+        {
+            backend.StepGraphReset();
+            _graphDead = true;
+            Logs.Warning($"[LTX graph] capture invalidated — falling back to eager: {ex.Message}");
+            RunPairIntoFixed(backend, uncondEncoder is not null, grid, interpScale, s);
+            return (_graphVelCond!, uncondEncoder is not null ? _graphVelUncond : null, false);
+        }
+        if (capture)
+        {
+            try
+            {
+                backend.StepGraphEndAndLaunch();
+                Logs.Info("[LTX graph] denoise step pair captured; replaying via cuGraphLaunch.");
+            }
+            catch (Exception ex)
+            {
+                backend.StepGraphReset();
+                _graphDead = true;
+                Logs.Warning($"[LTX graph] capture failed — falling back to eager: {ex.Message}");
+                RunPairIntoFixed(backend, uncondEncoder is not null, grid, interpScale, s);
+            }
+        }
+        return (_graphVelCond!, uncondEncoder is not null ? _graphVelUncond : null, false);
+    }
+
+    /// <summary>Builds the per-step timestep tensors on the eager path (host sinusoid + final scale/shift build) and
+    /// lands them in the fixed device buffers via CopyInto — done OUTSIDE the graph capture so the host excursions
+    /// (TimeEmbed's MemoryCopy, the scale/shift DataPointer loop) never run inside the recording.</summary>
+    private void RefreshTimestepFixed(IBackend backend, float timestep)
+    {
+        int dim = _config.InnerDim;
+        (Tensor temb6, Tensor embedded) = TimeEmbed(backend, timestep);
+        _temb6Fixed ??= new Tensor(new TensorShape(6, dim), DType.F32);
+        backend.CopyInto(_temb6Fixed, temb6);
+
+        // shift = ss[0]+embedded ; (1+scale) = 1+ss[1]+embedded  — the exact host build FinalLayer does, hoisted out.
+        float* ss = (float*)_finalScaleShift!.DataPointer;
+        float* em = (float*)embedded.DataPointer;
+        Tensor shift = new Tensor(new TensorShape(dim), DType.F32);
+        Tensor scaleP1 = new Tensor(new TensorShape(dim), DType.F32);
+        float* shp = (float*)shift.DataPointer; float* scp = (float*)scaleP1.DataPointer;
+        for (int d = 0; d < dim; d++) { shp[d] = ss[d] + em[d]; scp[d] = 1f + ss[dim + d] + em[d]; }
+        _shiftFixed ??= new Tensor(new TensorShape(dim), DType.F32);
+        _scaleP1Fixed ??= new Tensor(new TensorShape(dim), DType.F32);
+        backend.CopyInto(_shiftFixed, shift);
+        backend.CopyInto(_scaleP1Fixed, scaleP1);
+
+        temb6.Dispose(); embedded.Dispose(); shift.Dispose(); scaleP1.Dispose();
+    }
+
+    /// <summary>The captured (or capture-warming) step-pair body: both passes over the fixed latent, reading only the
+    /// fixed timestep/encoder buffers + cached RoPE, landing velocities in the fixed pre-capture buffers via CopyInto.</summary>
+    private void RunPairIntoFixed(IBackend backend, bool hasUncond, (int Frames, int Height, int Width) grid,
+        (double T, double H, double W) interpScale, int s)
+    {
+        (Tensor cos, Tensor sin) = GetCosSin(grid, interpScale);
+        Tensor condV = RunOnePassGraph(backend, _encProjCondFixed!, cos, sin, s);
+        backend.CopyInto(_graphVelCond!, condV);
+        condV.Dispose();
+        if (hasUncond)
+        {
+            Tensor uncondV = RunOnePassGraph(backend, _encProjUncondFixed!, cos, sin, s);
+            backend.CopyInto(_graphVelUncond!, uncondV);
+            uncondV.Dispose();
+        }
+    }
+
+    /// <summary>One conditioning pass over the fixed latent using the fixed timestep/encoder buffers: proj_in → blocks
+    /// → device final norm → proj_out. All device ops (capture-safe); no host reads.</summary>
+    private Tensor RunOnePassGraph(IBackend backend, Tensor encoderProj, Tensor cos, Tensor sin, int s)
+    {
+        int dim = _config.InnerDim;
+        Tensor hidden = new Tensor(new TensorShape(s, dim), DType.F32);
+        backend.Linear(hidden, _latentFixed!, _projInW!, _projInB);
+        Tensor cur = hidden;
+        for (int i = 0; i < _blocks.Length; i++)
+        {
+            Tensor next = _blocks[i].Forward(backend, cur, encoderProj, _temb6Fixed!, _rope, cos, sin, null);
+            cur.Dispose();
+            cur = next;
+        }
+        Tensor normed = new Tensor(new TensorShape(s, dim), DType.F32);
+        backend.LayerNormNoAffine(normed, cur, 1e-6f);
+        cur.Dispose();
+        Tensor affined = new Tensor(new TensorShape(s, dim), DType.F32);
+        backend.AffineBroadcastLastDim(affined, normed, _scaleP1Fixed!, _shiftFixed!);
+        normed.Dispose();
+        Tensor outVel = new Tensor(new TensorShape(s, _config.OutChannels), DType.F32);
+        backend.Linear(outVel, affined, _projOutW!, _projOutB);
+        affined.Dispose();
         return outVel;
     }
 
@@ -183,6 +397,11 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
             _capW1 = _capB1 = _capW2 = _capB2 = null;
             _cachedCos?.Dispose(); _cachedSin?.Dispose();
             _cachedCos = _cachedSin = null;
+            _latentFixed?.Dispose(); _temb6Fixed?.Dispose(); _shiftFixed?.Dispose(); _scaleP1Fixed?.Dispose();
+            _encProjCondFixed?.Dispose(); _encProjUncondFixed?.Dispose();
+            _graphVelCond?.Dispose(); _graphVelUncond?.Dispose();
+            _latentFixed = _temb6Fixed = _shiftFixed = _scaleP1Fixed = null;
+            _encProjCondFixed = _encProjUncondFixed = _graphVelCond = _graphVelUncond = null;
         }
         GC.SuppressFinalize(this);
     }
