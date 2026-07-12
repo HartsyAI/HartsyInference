@@ -72,7 +72,12 @@ public sealed class TextGenerationPipeline
         // sampler chain yet) and the plain dense GQA/RoPE decoder shape (SupportsGraphDecode) — MoE/MLA/
         // cross-attention/sliding-window models fall through to the verified default loop unchanged.
         bool graphDecodeRequested = request.GraphDecode ?? (Environment.GetEnvironmentVariable("HARTSY_GRAPH_DECODE") == "1");
+        // !HasJsonConstraint: graph decode's on-device argmax bypasses the CPU sampler chain entirely —
+        // including any JSON grammar step — so combining the two would silently produce unconstrained output.
+        // (Previously missing here even though DynamicBatchScheduler's equivalent admission check already
+        // excluded it — now consistent.)
         bool useGraphDecode = request.Sampling.Greedy
+            && !request.Sampling.HasJsonConstraint
             && graphDecodeRequested
             && _model.SupportsGraphDecode(_backend);
 
@@ -83,7 +88,7 @@ public sealed class TextGenerationPipeline
         bool specDecodeRequested = request.SpeculativeDecode ?? (Environment.GetEnvironmentVariable("HARTSY_SPEC_DECODE") == "1");
         bool useSpecDecode = !useGraphDecode
             && request.Sampling.Greedy
-            && !request.Sampling.JsonMode
+            && !request.Sampling.HasJsonConstraint
             && specDecodeRequested;
 
         if (useGraphDecode)

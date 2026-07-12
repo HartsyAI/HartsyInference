@@ -30,8 +30,8 @@ public sealed class SamplerChain
     /// order doesn't actually change correctness here: -infinity logits stay excluded through every
     /// downstream elementwise transform regardless of where the mask is applied — first is just clearest).
     /// <paramref name="tokenizer"/>/<paramref name="vocabSize"/> are required when
-    /// <see cref="SamplingOptions.JsonMode"/> is set (the grammar step must decode candidate token ids to
-    /// text) and otherwise unused.</summary>
+    /// <see cref="SamplingOptions.JsonMode"/> or <see cref="SamplingOptions.JsonModeSentinel"/> is set (the
+    /// grammar step must decode candidate token ids to text) and otherwise unused.</summary>
     public static SamplerChain FromOptions(SamplingOptions options, ILlmTokenizer? tokenizer = null, int vocabSize = 0)
     {
         if (options is null)
@@ -44,6 +44,12 @@ public sealed class SamplerChain
             if (tokenizer is null || vocabSize <= 0)
                 throw new ArgumentException("JsonMode requires a tokenizer and vocabSize.", nameof(options));
             steps.Add(new JsonGrammarStep(tokenizer, vocabSize));
+        }
+        else if (!string.IsNullOrEmpty(options.JsonModeSentinel))
+        {
+            if (tokenizer is null || vocabSize <= 0)
+                throw new ArgumentException("JsonModeSentinel requires a tokenizer and vocabSize.", nameof(options));
+            steps.Add(new SentinelJsonGrammarStep(tokenizer, vocabSize, options.JsonModeSentinel));
         }
         if (options.RepetitionPenalty != 1.0f)
         {

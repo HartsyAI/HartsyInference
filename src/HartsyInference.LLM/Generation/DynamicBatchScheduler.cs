@@ -327,7 +327,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         // ActiveSeq's GraphSession field doc for why this is safe and why it's a one-way admission decision
         // (never converted later).
         bool graphEligible = solo && !_graphCaptureUnavailable
-            && req.Sampling.Greedy && !req.Sampling.JsonMode
+            && req.Sampling.Greedy && !req.Sampling.HasJsonConstraint
             && (req.GraphDecode ?? (Environment.GetEnvironmentVariable("HARTSY_GRAPH_DECODE") == "1"))
             && (TestForceSupportsGraphDecode ?? _model.SupportsGraphDecode(_backend));
 

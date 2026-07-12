@@ -31,6 +31,19 @@ public sealed record SamplingOptions
     /// greedy — see <see cref="SamplerChain.Next"/>'s doc comment).</summary>
     public bool JsonMode { get; init; } = false;
 
+    /// <summary>When set to a non-empty literal (e.g. <c>"&lt;tool_call&gt;"</c>), grammar masking
+    /// (see <see cref="SentinelJsonGrammarStep"/>) activates only for the span starting right after this text
+    /// is emitted, deactivating the instant that JSON value completes — everywhere else generation is
+    /// completely unconstrained plain text. Mutually exclusive with <see cref="JsonMode"/> in intent (that
+    /// one constrains the entire response from token 0); if both are set, <see cref="JsonMode"/> wins and
+    /// this is ignored, since a whole-response constraint already subsumes any narrower one.</summary>
+    public string? JsonModeSentinel { get; init; } = null;
+
+    /// <summary>True if either JSON constraint is active — the single check call sites that need to gate an
+    /// incompatible fast path (CUDA-graph decode, speculative decode) on "some form of JSON masking is live"
+    /// should use.</summary>
+    public bool HasJsonConstraint => JsonMode || !string.IsNullOrEmpty(JsonModeSentinel);
+
     /// <summary>Default sampling options (all filters disabled, stochastic draw at temperature 1.0).</summary>
     public static SamplingOptions Default { get; } = new();
 
