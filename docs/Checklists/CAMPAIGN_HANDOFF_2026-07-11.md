@@ -57,13 +57,34 @@ new feature.
   `Animate Pose Video` / `Animate Face Video` overrides; `WanAnimateDrivingPreprocessor.BuildDrivingClips` (override
   + raw paths wired, auto falls back to raw + one-time warn); loader branches + cond-key now includes mode +
   override bytes. Behavior-preserving (default auto → raw fallback = old behavior) + adds the pre-rendered override path.
-- **Phase 1 (next):** real `FaceDetector` = YOLOv8-face (reuse YOLO backbone + 1-class + 5-landmark head; weights
-  as safetensors via a `.pt`→st convert + a new `SideModels.Entry`) + `WanAnimateFacePreprocessor` (detect→square
-  crop→512²).
-- **Phase 2:** `YoloV11PoseModel` (backbone + kpt head, 17 COCO kpts) + `SkeletonRenderer` (OpenPose palette) +
-  `WanAnimatePosePreprocessor`. Validate skeleton vs a comfy DWPose render + same-seed A/B.
-- YOLO loads from safetensors (`YoloPipeline.LoadV11`), so Phases 1/2 slot into the existing `Vision/Detection` +
-  `Vision/FaceDetection` scaffolding. Backups: `scratchpad/round12-backups/` (Phase 0 files).
+- **Pose model DONE + CPU-VALIDATED (sub-pixel vs ultralytics).** Chose **YOLOv11-pose** over a separate
+  YOLOv8-face — its 17 COCO keypoints include the 5 face points, so one model gives both the skeleton (Phase 2)
+  and the face crop (Phase 1). New in `Vision`: `YoloConfig.YoloV11nPose`, `PoseHeadV11` (composes `DetectHeadV11`
+  + cv4 kpt branch), `YoloV11PoseModel`, `YoloPosePostProcessor`, `YoloPosePipeline`, `Keypoint`/`PoseDetection`,
+  `Transform.InvertPoint`, `NMS.RunIndices` (Run delegates; 14/14 NMS tests pass). The **existing** `.pt→st`
+  converter handles the cv4 head unchanged → `Models/yolo/yolo11n-pose-folded.safetensors`. `YoloPoseRealImageTest`
+  (CpuBackend, env-gated) matches ultralytics <1px. **`PoseFaceCrop.ComputeSquareCrop`** (kpts 0–4 → square) yields
+  a well-framed 512² face crop (validated visually, `phase1-vision/face_crop.png`). All on CPU — no GPU used.
+- **Phase 1 face preprocessing WIRED + CPU-validated (extension compiles vs 44.87).** `WanAnimateFacePreprocessor`
+  (per-frame `YoloPosePipeline` → `PoseFaceCrop` → bilinear 512² square) + `ControlVideoDecoder.DecodeFramesRgb` +
+  loader lazy `GetOrCreatePose`/`ResolvePoseWeights` (weights at `<Swarm>/Models/clip/yolo11n-pose-folded.safetensors`,
+  sha `f112139b…`) threaded through `BuildDrivingClips`. Params: `Animate Auto-Preprocess Driving` (default on) +
+  pose/face overrides. **CPU filmstrip: crop tracks the moving face smoothly** (`phase1-wiring/face_filmstrip.png`).
+  Engine packed **44.87**. **Phase 1 DONE + GPU-VALIDATED (44.87 deployed):** real 14B Animate gen logged
+  `face preprocess: 16/16 frames face-detected → 512² face clip` (+2.7s, cached), output coherent; flagships
+  Z 2.84 / Krea2 4.55 (no regression). The face crop is shipped. TODO: host the pose weights for `SideModels`
+  auto-download (currently manual-placed at `Models/text_encoders/yolo11n-pose-folded.safetensors`).
+- **Phase 2 DONE + GPU-VALIDATED (44.88). FEATURE COMPLETE.** `OpenPoseRenderer` (Vision, controlnet_aux
+  `draw_bodypose` convention: COCO-17→OpenPose-18, colored limb sticks + joints) + `WanAnimatePosePreprocessor`
+  (per-frame `YoloPosePipeline` → render → pose clip) wired into `BuildPoseClip`. CPU: skeleton aligns with the
+  person. **Real full-auto 14B gen: `pose preprocess: 17/17` + `face preprocess: 16/16` (+5s, cached), coherent
+  output.** No diffusion delta vs 44.87 (flagships 2.84/4.55). **One driving video → auto face crop + pose skeleton,
+  no manual nodes — the whole in-engine preprocessing feature is shipped (44.88).**
+- **Optional polish (no correctness gaps):** DWPose 133-kpt (hands/face); host pose weights for `SideModels`
+  auto-download; temporal smoothing; merge the 2 per-frame YOLO passes; Phase 3 replace-mode.
+- **Phase 2:** `SkeletonRenderer` (COCO-17 → OpenPose-18, colored limbs) + `WanAnimatePosePreprocessor` (reuses the
+  same `YoloPosePipeline` keypoints); validate vs a comfy DWPose render + same-seed A/B.
+- Backups: `scratchpad/round12-backups/` (+ `phase1-vision/`). Note: `Kandinsky5PromptEncoder.cs` untracked = other agent's.
 
 ## ▶ START HERE next — image backlog (below) or the Animate pipeline-cache refactor above
 

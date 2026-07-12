@@ -185,5 +185,15 @@ public sealed unsafe class YoloPreprocessor
             sy2 = Math.Clamp(sy2, 0f, SourceHeight);
             return (sx1, sy1, sx2, sy2);
         }
+
+        /// <summary>Maps a single point (e.g. a pose keypoint) from letterboxed-canvas coordinates back to
+        /// source-image coordinates, clamped to the source frame.</summary>
+        public (float x, float y) InvertPoint(float x, float y)
+        {
+            float invScale = 1f / Scale;
+            float sx = Math.Clamp((x - PadLeft) * invScale, 0f, SourceWidth);
+            float sy = Math.Clamp((y - PadTop) * invScale, 0f, SourceHeight);
+            return (sx, sy);
+        }
     }
 }

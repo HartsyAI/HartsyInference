@@ -35,39 +35,60 @@ public static class NonMaxSuppression
         if (candidates.Count == 0)
             return Array.Empty<YoloDetection>();
 
-        // Copy + sort by confidence descending. We can't sort in place — the caller owns the list.
-        YoloDetection[] sorted = new YoloDetection[candidates.Count];
-        for (int i = 0; i < candidates.Count; i++)
-            sorted[i] = candidates[i];
-        Array.Sort(sorted, (a, b) => b.Confidence.CompareTo(a.Confidence));
+        IReadOnlyList<int> keptIdx = RunIndices(candidates, iouThreshold, maxDetections, classAgnostic);
+        YoloDetection[] kept = new YoloDetection[keptIdx.Count];
+        for (int i = 0; i < keptIdx.Count; i++)
+            kept[i] = candidates[keptIdx[i]];
+        return kept;
+    }
 
-        // suppressed[i]=true ⇒ this candidate was dropped by a higher-scoring one and is skipped.
-        bool[] suppressed = new bool[sorted.Length];
-        List<YoloDetection> kept = new(Math.Min(maxDetections, sorted.Length));
+    /// <summary>Same greedy NMS as <see cref="Run"/> but returns the surviving <b>indices into
+    /// <paramref name="candidates"/></b> (confidence-descending order) instead of the detections. This lets a
+    /// caller carry a per-candidate payload (e.g. pose keypoints) through NMS without re-implementing it.</summary>
+    public static IReadOnlyList<int> RunIndices(
+        IReadOnlyList<YoloDetection> candidates,
+        float iouThreshold = 0.45f,
+        int maxDetections = 300,
+        bool classAgnostic = false)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        if (iouThreshold < 0f || iouThreshold > 1f)
+            throw new ArgumentOutOfRangeException(nameof(iouThreshold), iouThreshold, "IoU threshold must be in [0, 1].");
+        if (maxDetections <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxDetections), maxDetections, "maxDetections must be positive.");
 
-        for (int i = 0; i < sorted.Length; i++)
+        int n = candidates.Count;
+        if (n == 0)
+            return Array.Empty<int>();
+
+        // Sort indices by confidence descending (the candidate list itself is not mutated).
+        int[] order = new int[n];
+        for (int i = 0; i < n; i++)
+            order[i] = i;
+        Array.Sort(order, (a, b) => candidates[b].Confidence.CompareTo(candidates[a].Confidence));
+
+        bool[] suppressed = new bool[n];
+        List<int> kept = new(Math.Min(maxDetections, n));
+        for (int ii = 0; ii < n; ii++)
         {
+            int i = order[ii];
             if (suppressed[i])
                 continue;
-            YoloDetection pick = sorted[i];
-            kept.Add(pick);
+            kept.Add(i);
             if (kept.Count >= maxDetections)
                 break;
-
-            // Compare against every lower-scored candidate. The inner loop is O(N²) worst case
-            // but in practice, after confidence filtering a typical YOLO image emits < 1000 boxes
-            // and only a few hundred survive past confidence threshold — the loop is fast enough.
-            for (int j = i + 1; j < sorted.Length; j++)
+            YoloDetection pick = candidates[i];
+            for (int jj = ii + 1; jj < n; jj++)
             {
+                int j = order[jj];
                 if (suppressed[j])
                     continue;
-                if (!classAgnostic && sorted[j].ClassId != pick.ClassId)
+                if (!classAgnostic && candidates[j].ClassId != pick.ClassId)
                     continue;
-                if (pick.Iou(sorted[j]) > iouThreshold)
+                if (pick.Iou(candidates[j]) > iouThreshold)
                     suppressed[j] = true;
             }
         }
-
         return kept;
     }
 

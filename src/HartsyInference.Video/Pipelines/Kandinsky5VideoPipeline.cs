@@ -199,10 +199,10 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
             Tensor velocity;
             if (useCfg)
             {
-                Tensor uncond = _transformer.ForwardVideo(Backend, packed, t, negQwenEmbeds!, negClipPooled!,
-                    scaleT, scaleH, scaleW);
-                Tensor cond = _transformer.ForwardVideo(Backend, packed, t, qwenEmbeds, clipPooled,
-                    scaleT, scaleH, scaleW);
+                // Paired forward: cond+uncond, captured as one CUDA graph under HARTSY_DIT_GRAPH (both passes share
+                // the packed latent's patch-embed), else two eager forwards. Same numerics either way.
+                (Tensor cond, Tensor uncond) = _transformer.ForwardVideoPaired(Backend, packed, t,
+                    qwenEmbeds, clipPooled, negQwenEmbeds!, negClipPooled!, scaleT, scaleH, scaleW);
                 velocity = CfgHelper.ApplyCfg(uncond, cond, cfgScale);
                 uncond.Dispose();
                 cond.Dispose();
@@ -232,7 +232,9 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
             // accumulate to OOM over the loop). Safe: the scheduler steps the latent on the host, and the
             // conditioning tensors are host-backed (re-uploaded per step). trimPool:false — steps are
             // identical, so the pool reservation is reused instead of a per-step driver release/re-map.
-            Backend.FreeActivations(trimPool: false);
+            // SKIP on the step-graph path: the captured graph balances its own allocations and holds the fixed
+            // buffers at the addresses the capture bakes — freeing them here would corrupt the replay.
+            if (!_transformer.StepGraphActive) Backend.FreeActivations(trimPool: false);
         }
 
         condLatent.Dispose();
@@ -242,6 +244,9 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
             NormalizeFirstFrames(noisy);
 
         Backend.Sync();
+        // The captured step graph bakes the DiT weight pointers; invalidate before freeing the weights so the next
+        // generation re-warms and re-captures instead of replaying against freed memory.
+        _transformer.InvalidateStepGraph(Backend);
         Backend.FreeWeights(_transformer.EnumerateWeights());
         return noisy;
     }

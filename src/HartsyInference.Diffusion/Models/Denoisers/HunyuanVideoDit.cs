@@ -32,6 +32,41 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
     private Tensor? _finalModW, _finalModB; // [2*hidden, hidden]
     private Tensor? _outW, _outB;           // [outCh*pT*pH*pW, hidden]
 
+    // ── Step-graph capture (HARTSY_DIT_GRAPH, opt-in) ─────────────────────────────────────────────────────────
+    // HunyuanVideo is single-forward (embedded guidance, no CFG) → the Krea2 single-forward template. The captured
+    // body is img_in → double+single blocks → final AdaLN → proj_out, reading ONLY the persistent fixed buffers
+    // below; the host boundary work (Patchify, the token refiner, BuildTemb, Unpatchify, and the pipeline's host
+    // Euler) runs OUTSIDE the capture and refreshes the fixed input buffers via CopyInto — so no space-to-depth
+    // kernel is needed. Restricted to b==1 (the block RoPE host fallback is batch>1-only) with no camera tokens.
+    // On the graph path the pipeline must NOT run its per-step FreeActivations (it would free the addresses the
+    // capture bakes; the graph balances its own allocations) — see StepGraphActive.
+    private Tensor? _patchesFixed;    // [1, sImg, patchVec]  img_in input — refreshed each step (Patchify → CopyInto)
+    private Tensor? _txtTokFixed;     // [1, sTxt, hidden]    refined text — refreshed each step (refiner → CopyInto)
+    private Tensor? _tembFixed;       // [1, hidden]          time+guidance+vector embedding — refreshed each step
+    private Tensor? _graphProjected;  // [1, sImg, outVec]    captured proj_out landing buffer (read back to Unpatchify)
+    private long _graphSig = long.MinValue;
+    private int _graphSigCalls, _graphSigFlips;
+    private bool _graphDead;
+    private const int GraphCaptureCall = 3;
+
+    /// <summary>True while the step graph is engaged for this session (opt-in flag on, the graph path has run at
+    /// least once, not self-disabled). The pipeline suppresses its per-step <c>FreeActivations</c> while this holds:
+    /// the captured graph balances its own allocations, and freeing activations would release the fixed buffers the
+    /// capture bakes. Re-check AFTER each <see cref="Forward"/> so a mid-gen self-disable re-enables the sweep.</summary>
+    public bool StepGraphActive => DitStepGraph.Enabled && !_graphDead && _graphSig != long.MinValue;
+
+    /// <summary>Invalidates the captured step graph — MUST be called whenever the DiT weights are freed (the
+    /// pipeline's post-gen <c>FreeWeights</c>): the captured graph bakes the weight device pointers, so a free +
+    /// next-gen re-upload would leave it replaying against freed memory (CUDA 700). The next generation re-warms
+    /// and re-captures.</summary>
+    public void InvalidateStepGraph(IBackend backend)
+    {
+        backend.StepGraphReset();
+        if (ReferenceEquals(backend.StepGraphOwner, this)) backend.StepGraphOwner = null;
+        _graphSig = long.MinValue;   // MinValue = "no sig": the next call resets WITHOUT counting a flip
+        _graphSigCalls = 0;
+    }
+
     public HunyuanVideoConfig Config => _cfg;
 
     /// <summary>Optional hook invoked immediately before each transformer block's forward pass (global index over
@@ -117,6 +152,18 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
         int sImg = tOut * hOut * wOut;
         int patchVec = _cfg.InChannels * pT * pH * pW;
 
+        // Step-graph fast path (opt-in): capture img_in → blocks → final → proj_out once and replay it. Only the
+        // single-forward b==1 path with no camera tokens qualifies (the block RoPE host fallback is batch>1-only,
+        // and the diagnostic block hooks would inject host reads into the capture). Requires the DiT to be RESIDENT
+        // (BeforeBlockForward null): a captured graph bakes weight device pointers, so block streaming — which
+        // re-points weights per block and runs a host prefetch hook — is incompatible. Self-disables to eager.
+        if (DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead && b == 1 && cameraTokens is null
+            && OnBlockOutput is null && BeforeBlockForward is null)
+        {
+            return ForwardGraph(backend, latent, txt, pooled, timestep, guidance,
+                hidden, pT, pH, pW, T, H, W, tOut, hOut, wOut, sImg, patchVec);
+        }
+
         // 1. Patchify → img tokens.
         Tensor patches = new(new TensorShape(b, sImg, patchVec), DType.F32);
         Patchify(latent, patches, b, _cfg.InChannels, T, H, W, pT, pH, pW, tOut, hOut, wOut);
@@ -185,6 +232,150 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
         Tensor velocity = new(new TensorShape([(long)b, _cfg.OutChannels, T, H, W]), DType.F32);
         Unpatchify(projected, velocity, b, _cfg.OutChannels, T, H, W, pT, pH, pW, tOut, hOut, wOut);
         projected.Dispose();
+        return velocity;
+    }
+
+    /// <summary>Step-graph forward for the single-forward b==1 path. Refreshes the fixed input buffers OUTSIDE the
+    /// capture (host Patchify / token refiner / BuildTemb → CopyInto), then captures (call <see cref="GraphCaptureCall"/>)
+    /// or replays (later calls) the img_in → blocks → final → proj_out body, and unpatchifies the fixed proj_out buffer
+    /// into a fresh caller-owned velocity. Warm calls 1..2 run the body eagerly through the fixed buffers so nothing
+    /// inside the capture does a first-touch allocation (RoPE tables, weight promotions). Self-disables to the eager
+    /// body on any capture failure so the generation stays correct.</summary>
+    private Tensor ForwardGraph(IBackend backend, Tensor latent, Tensor txt, Tensor pooled, float timestep,
+        float guidance, int hidden, int pT, int pH, int pW, int T, int H, int W, int tOut, int hOut, int wOut,
+        int sImg, int patchVec)
+    {
+        int outVec = _cfg.OutChannels * pT * pH * pW;
+
+        // ── Refresh the fixed inputs OUTSIDE the capture (all the per-step host excursions live here) ──
+        Tensor patches = new(new TensorShape(1, sImg, patchVec), DType.F32);
+        Patchify(latent, patches, 1, _cfg.InChannels, T, H, W, pT, pH, pW, tOut, hOut, wOut);
+        _patchesFixed ??= new Tensor(new TensorShape(1, sImg, patchVec), DType.F32);
+        backend.CopyInto(_patchesFixed, patches); patches.Dispose();
+
+        Tensor txtTok = _refiner.Forward(backend, txt, timestep);
+        _txtTokFixed ??= new Tensor(txtTok.Shape, DType.F32);
+        backend.CopyInto(_txtTokFixed, txtTok); txtTok.Dispose();
+
+        Tensor temb = BuildTemb(backend, 1, hidden, timestep, guidance, pooled);
+        _tembFixed ??= new Tensor(temb.Shape, DType.F32);
+        backend.CopyInto(_tembFixed, temb); temb.Dispose();
+
+        _graphProjected ??= new Tensor(new TensorShape(1, sImg, outVec), DType.F32);
+
+        // ── Signature / owner management (mirror Krea2ForwardPatched). The capture depends only on the token
+        // geometry; the shared backend graph slot may have been captured by another resident model. ──
+        long sig = ((long)tOut * 73856093L) ^ ((long)hOut * 19349663L) ^ ((long)wOut * 83492791L)
+            ^ ((long)_txtTokFixed!.Shape[1] * 2654435761L);
+        bool ownerLost = !ReferenceEquals(backend.StepGraphOwner, this);
+        if (sig != _graphSig || ownerLost)
+        {
+            backend.StepGraphReset();
+            if (!ownerLost && _graphSig != long.MinValue && ++_graphSigFlips > 8)
+            {
+                _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning("[HunyuanVideo graph] signature flip storm — step-graph disabled for this session.");
+                RunGraphBody(backend, hidden, hOut, wOut, tOut, sImg, outVec);
+                return UnpatchifyToVelocity(backend, T, H, W, pT, pH, pW, tOut, hOut, wOut);
+            }
+            _graphSig = sig;
+            _graphSigCalls = 0;
+            backend.StepGraphOwner = this;
+        }
+        _graphSigCalls++;
+
+        if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
+        {
+            backend.StepGraphLaunch();
+            return UnpatchifyToVelocity(backend, T, H, W, pT, pH, pW, tOut, hOut, wOut);
+        }
+
+        // Calls 1..GraphCaptureCall-1 run the body eagerly THROUGH the fixed buffers (warm caches/promotions);
+        // call GraphCaptureCall records the same op sequence.
+        bool capture = _graphSigCalls == GraphCaptureCall;
+        if (capture) backend.StepGraphBegin();
+        try
+        {
+            RunGraphBody(backend, hidden, hOut, wOut, tOut, sImg, outVec);
+        }
+        catch (Exception ex) when (capture)
+        {
+            backend.StepGraphReset();
+            _graphDead = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[HunyuanVideo graph] capture invalidated — falling back to eager: {ex.Message}");
+            RunGraphBody(backend, hidden, hOut, wOut, tOut, sImg, outVec);
+            return UnpatchifyToVelocity(backend, T, H, W, pT, pH, pW, tOut, hOut, wOut);
+        }
+        if (capture)
+        {
+            try
+            {
+                backend.StepGraphEndAndLaunch();
+                HartsyInference.Core.Logging.Logs.Info("[HunyuanVideo graph] denoise step captured; replaying via cuGraphLaunch.");
+            }
+            catch (Exception ex)
+            {
+                backend.StepGraphReset();
+                _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning($"[HunyuanVideo graph] capture failed — falling back to eager: {ex.Message}");
+                RunGraphBody(backend, hidden, hOut, wOut, tOut, sImg, outVec);
+            }
+        }
+        return UnpatchifyToVelocity(backend, T, H, W, pT, pH, pW, tOut, hOut, wOut);
+    }
+
+    /// <summary>The captured (or capture-warming) body: img_in on the fixed patchified latent → double+single blocks
+    /// (a disposable working copy of the fixed text so the block loop can free it) → device final AdaLN → proj_out,
+    /// landing in the fixed <see cref="_graphProjected"/> buffer. All device ops — no host reads (b==1 RoPE is the
+    /// GPU path, the diagnostic block hooks are gated off on this path).</summary>
+    private void RunGraphBody(IBackend backend, int hidden, int hOut, int wOut, int tOut, int sImg, int outVec)
+    {
+        Tensor img = new(new TensorShape(1, sImg, hidden), DType.F32);
+        backend.Linear(img, _patchesFixed!, _imgInW!, _imgInB!);
+        Tensor txtTok = new(_txtTokFixed!.Shape, DType.F32);
+        backend.CopyInto(txtTok, _txtTokFixed!);
+
+        for (int i = 0; i < _double.Length; i++)
+        {
+            (Tensor ni, Tensor nt) = _double[i].Forward(backend, img, txtTok, _tembFixed!, _rope, hOut, wOut, tOut);
+            img.Dispose(); txtTok.Dispose(); img = ni; txtTok = nt;
+        }
+        for (int i = 0; i < _single.Length; i++)
+        {
+            (Tensor ni, Tensor nt) = _single[i].Forward(backend, img, txtTok, _tembFixed!, _rope, hOut, wOut, tOut);
+            img.Dispose(); txtTok.Dispose(); img = ni; txtTok = nt;
+        }
+        txtTok.Dispose();
+
+        // Final AdaLN-continuous (device B==1 path, mod packed [shift, scale]) → proj_out → fixed buffer.
+        Tensor mod = new(new TensorShape(1, 2 * hidden), DType.F32);
+        Tensor tAct = new(_tembFixed!.Shape, DType.F32); backend.Silu(tAct, _tembFixed!);
+        backend.Linear(mod, tAct, _finalModW!, _finalModB!); tAct.Dispose();
+        Tensor normed = new(img.Shape, DType.F32);
+        backend.LayerNormNoAffine(normed, img, 1e-6f); img.Dispose();
+        Tensor fShift = new(new TensorShape(hidden), DType.F32); backend.SliceRows(fShift, mod, 0);
+        Tensor fScale = new(new TensorShape(hidden), DType.F32); backend.SliceRows(fScale, mod, 1); mod.Dispose();
+        Tensor fScale1 = new(new TensorShape(hidden), DType.F32); backend.AddScalar(fScale1, fScale, 1f); fScale.Dispose();
+        Tensor modded = new(normed.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(modded, normed, fScale1, fShift);
+        normed.Dispose(); fScale1.Dispose(); fShift.Dispose();
+        Tensor projected = new(new TensorShape(1, sImg, outVec), DType.F32);
+        backend.Linear(projected, modded, _outW!, _outB!); modded.Dispose();
+        backend.CopyInto(_graphProjected!, projected); projected.Dispose();
+    }
+
+    /// <summary>Device-copies the fixed proj_out buffer into a fresh disposable tensor and unpatchifies THAT into a
+    /// fresh, caller-owned velocity <c>[1, OutChannels, T, H, W]</c>. Reading <see cref="_graphProjected"/>'s
+    /// DataPointer directly would D2H-AND-FREE the graph-owned buffer the captured graph writes (the Krea2
+    /// <c>SnapshotGraphLatent</c> rule) — freeing it corrupts every subsequent replay's output.</summary>
+    private Tensor UnpatchifyToVelocity(IBackend backend, int T, int H, int W, int pT, int pH, int pW,
+        int tOut, int hOut, int wOut)
+    {
+        Tensor snap = new(_graphProjected!.Shape, DType.F32);
+        backend.CopyInto(snap, _graphProjected!);
+        Tensor velocity = new(new TensorShape([1L, _cfg.OutChannels, T, H, W]), DType.F32);
+        Unpatchify(snap, velocity, 1, _cfg.OutChannels, T, H, W, pT, pH, pW, tOut, hOut, wOut);
+        snap.Dispose();
         return velocity;
     }
 

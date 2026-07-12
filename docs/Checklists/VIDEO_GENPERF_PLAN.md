@@ -1,5 +1,49 @@
 # Video gen-perf — full audit + optimization plan (2026-07-08)
 
+> ## ▶ ACTIVE — CUDA-graph campaign (2026-07-11, `44.84`): extend step-graph capture to the video fleet
+> USER DIRECTIVE: implement the graph for LARGE models too (LTX-2.3, Wan 14B) even though our 24 GB can't
+> hold them resident to use it — bigger-GPU users benefit (a resident model is graph-eligible, and faster
+> kernels flip a compute-bound model back to launch-bound). On our 4090 the win is provable only where the
+> model fits AND is launch-bound; elsewhere verify the capture path is structurally correct and falls back
+> to eager cleanly.
+>
+> **Infra (reuse, do NOT rebuild):** `IBackend.StepGraph*` (Begin/EndAndLaunch/Launch/Reset/Owner) +
+> `CopyInto` + device `CfgEulerStep`; flags `DitStepGraph.Enabled`/`EnabledDefaultOn` (`HARTSY_DIT_GRAPH`).
+> Reference impls: `Krea2Transformer.ForwardPatched` (single-forward) and **`ChromaTransformer.ForwardPaired`
+> + `RunPairIntoFixed` (CFG-pair — the pattern all CFG video models need)**. Machine: warm calls 1..2 through
+> fixed buffers, capture on call 3, replay after; sig = grid⊕txt-identity; `StepGraphOwner` guard for
+> KEEP_MODELS alternation; `_graphSigFlips>8 ⇒ _graphDead` (permanent eager fallback); self-disable in a
+> try/catch around Begin/End; `cuDeviceGraphMemTrim` on reset.
+>
+> **Target order:** (1) **LTX-0.9 2B** — launch-bound, fits 4090, provable local win, CFG-pair; (2)
+> HunyuanVideo (single-forward embedded-guidance = cleanest, Krea2 pattern); (3) LTX-2.3 resident-prefix
+> graph (structural; eager fallback on 24 GB — the big-GPU case); (4) Wan family; (5) Kandinsky.
+>
+> ### LTX-0.9 design (the template; files: `LtxVideoTransformer.cs`, `LtxVideoBlock.cs`, `Video/Pipelines/LtxVideoPipeline.cs`)
+> It's B=1 single-stream `[S, inCh]`; CFG = two `Forward`s + host `LancePipelineCommon.EulerCfgStep`.
+> **Drain-free prereqs (device-port these host excursions out of the capture body FIRST):**
+> - `TimeEmbed` (LtxVideoTransformer.cs:107): host `DiTUtils.SinusoidalTimestepEmbedding` build + two
+>   `Buffer.MemoryCopy` reshapes ([1,dim]→[dim], [1,6·dim]→[6,dim]). Feed the raw sinusoid `[1,256]` via a
+>   FIXED buffer refreshed OUTSIDE capture (the only per-step host build); run the timestep MLP (Linear/Silu)
+>   INSIDE capture; replace the MemoryCopy reshapes with device copies (temb stays `[6,dim]` device-resident).
+> - `FinalLayer` (LtxVideoTransformer.cs:146): host loop reading `_finalScaleShift.DataPointer` + timestep-
+>   dependent `embedded.DataPointer` to build `shift`/`scaleP1`. Move to device (Add + broadcast) OR hoist to
+>   fixed buffers refreshed outside capture. (Chroma does the device version via `SliceModSlabDevice` +
+>   `ApplyContinuousNormDevice` at batch==1 — mirror that.)
+> - Euler: pipeline must keep the latent in `_latentFixed` (via new `PrepareGraphLatent`) and call device
+>   `backend.CfgEulerStep(latentFixed, condVel, uncondVel, cfg, dt)` in place — NOT the host `EulerCfgStep`.
+> - `LtxVideoBlock`: `_onesRow` is lazy-cached (safe post-warm); AUDIT any per-forward `Ones(n)` (host alloc)
+>   — must be a pre-built fixed buffer or it's capture-illegal.
+> **Add to LtxVideoTransformer (mirror Chroma):** fixed fields `_latentFixed`, `_sinusoidFixed`,
+> `_encoderProjCondFixed`/`_UncondFixed` (CaptionProject is step-invariant → compute once on call 1),
+> `_tembFixed`/`_shiftFixed`/`_scaleP1Fixed`, `_graphVelCond`/`_graphVelUncond`; graph state `_graphSig`,
+> `_graphSigCalls`, `_graphSigFlips`, `_graphDead`; `PrepareGraphLatent`, `ForwardPaired`, `RunPairIntoFixed`.
+> Keep the existing eager `Forward` intact. **Pipeline:** route latent through `PrepareGraphLatent`, call
+> `ForwardPaired`, device Euler in place; `callerOwns=false` on the graph path.
+> **Verify:** deploy `-local`; coherence (fox clip, view frames); bit-parity relL2 vs eager at 2 steps;
+> before/after warm bench (baseline 4.59 s @512×320/25f/20steps); flagship regression (Krea2<6.5, Z-Image≤3.2).
+> Expected: host-issue collapses (Krea2 saw 4.2 s→6 ms); wall win only if launch-bound at this token count.
+
 > ## Round 11 (2026-07-11) — Wan-Animate CHECKERBOARD SOLVED + motion-encoder OOM fix (`44.84-local`, details in E2E_PARITY_WORKLOG round 11 / MODEL_STATUS_VIDEO)
 > The Animate checkerboard was a **converter bug, not perf**: `ApplyFp8ScaledDequant` dropped the KJ v2 Animate
 > checkpoint's **BF16** `.scale_weight` companions (guarded `== F32`; all other Wan fp8 ckpts are F32) → fp8
