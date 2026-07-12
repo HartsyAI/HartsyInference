@@ -49,8 +49,9 @@ public unsafe class WanAnimatePipelineTests
         Tensor faceClip = Rand5d(1, 3, 4, motionSize, motionSize, seed: 10);    // 4 face frames → motion T'=1 (+zero)
         TextToImageRequest req = new() { Prompt = "x", Width = 32, Height = 32, Steps = 2, CfgScale = 5, Seed = 42 };
 
-        (byte[][] frames, int w, int h, _) = pipeline.GenerateAnimation(
+        (byte[][] frames, int w, int h, _, WanAnimateConditioning cond) = pipeline.GenerateAnimation(
             promptEmbeds, negEmbeds, referenceRgb, poseClip, faceClip, req);
+        cond.Dispose();
         Assert.Equal(5, frames.Length);   // ref latent frame trimmed before decode → the 2 generated latent frames
         Assert.Equal(32, w);
         Assert.Equal(32, h);

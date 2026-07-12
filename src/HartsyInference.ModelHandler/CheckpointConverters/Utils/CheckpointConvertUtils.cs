@@ -351,10 +351,22 @@ public static unsafe class CheckpointConvertUtils
             if (kvp.Value.DType.IsFp8 && key.EndsWith(".weight", StringComparison.Ordinal))
             {
                 string baseKey = key[..^".weight".Length];
-                if (weightScales.TryGetValue(baseKey, out Tensor? scaleT) && scaleT.DType == DType.F32)
+                // The scalar scale companion is F32 in the original Wan/Comfy fp8_scaled files, but BF16 in some
+                // repackages (Kijai WanVideo_comfy_fp8_scaled v2 — e.g. wan2.2_animate_14B). Reading a BF16 [1] scalar
+                // through (float*) reinterprets two BF16 halves as one F32 = garbage, so the `== F32` guard used to
+                // silently DROP the scale → the raw fp8 weight (±448) ran ~5× hot → the block activations exploded
+                // and every token collapsed to the dominant direction (the Wan-Animate checkerboard). Read the scalar
+                // as F32 for any real-valued scalar companion (F32 pass-through, else cast).
+                if (weightScales.TryGetValue(baseKey, out Tensor? scaleT) && scaleT.Shape.ElementCount == 1
+                    && (scaleT.DType == DType.F32 || scaleT.DType == DType.F16 || scaleT.DType == DType.BF16))
                 {
-                    float scale = ((float*)scaleT.DataPointer)[0];
-                    kvp.Value.Fp8ScaleFactor = scale;
+                    if (scaleT.DType == DType.F32)
+                        kvp.Value.Fp8ScaleFactor = ((float*)scaleT.DataPointer)[0];
+                    else
+                    {
+                        using Tensor scaleF32 = scaleT.CastTo(DType.F32);
+                        kvp.Value.Fp8ScaleFactor = ((float*)scaleF32.DataPointer)[0];
+                    }
                 }
             }
 
