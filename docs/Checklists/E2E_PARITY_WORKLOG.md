@@ -22,6 +22,40 @@ Zeta-Chroma = lodestones' Zeta-Chroma repo sampling code (x0-parameterization!) 
 the shared trunk; Radiance = lodestones Chroma-Radiance reference (pixel head); HunyuanImage/Flux.2 Dev
 are already visually correct — perf-only.
 
+**VIDEO ARC round 12 — Wan-Animate → FAMILY PARITY (44.85-local, 2026-07-11).** Animate was the only Wan
+variant without the round-6/8 warm-cache treatment. Transplanted the `WanVideoCacheEntry` pattern into
+`WanAnimateLoader`: (1) **umT5 prompt cache** (token-id keyed) + (2) **CLIP-ViT-H reference cache** (keyed
+on the raw reference-image bytes — the CLIP preprocessor resizes to 224² so it's resolution-independent),
+both host-materialized to survive activation sweeps, plus `EnsureEncoderHeadroom` DiT-eviction staging and
+`HostCopy`, exactly mirroring `WanS2VLoader`. **Result: warm-repeat prep 18.09 s → 0.00 s** (both encoders
+skipped — `umT5 prompt cache HIT` + `CLIP reference cache HIT` in the log). Cache fields added to
+`WanAnimateCacheEntry` (+Dispose). Perf pass: ported `WanAnimateTransformer.AddInPlace` (the face-adapter
+residual, ~8×/forward full `[s,dim]` host D2H+H2D) to a device `GatedResidualLastDim` (`GpuAddRows` +
+cached `_ones`, the exact `WanVideoBlock.AddRows` idiom) — removes the dominant Animate per-step host glue,
+but **per-step is unchanged (~18 s/step)** because Wan is at its fp8 compute floor (r10 finding); the real
+round-12 win is the caches. Left `AddPose` on host (1×/forward sliced add — follows the WanDitOps
+host-slicing convention). **Validated on 44.85:** cold Animate (17f 480² 20st seed 42) 6.86 min, coherent
+white/chrome android in a dynamic dance pose — checkerboard-free, ref identity, follows driving motion;
+warm (seed 43) cache HITs proven + coherent. Flagships Z-Image 2.85 s / Krea2 4.57 s (visually clean).
+Wan 1.3B T2V regression clean (shared `WanVideoBlock` untouched — my engine change is Animate-only).
+**TRAP:** running the flagship gate FIRST left Z-Image+Krea2+Animate-DiT KEEP_MODELS-resident in one 24 GB
+process → `BuildMotion` conv OOM'd (256 MB req / 68 MB free); `HartsyInferenceClearCache` (EvictAll) did
+NOT trim the CUDA mempool (MempoolKeep) so residual reservation persisted → a clean Swarm restart with
+Animate FIRST succeeded. This is the "eviction-matrix / mempool-trim on model-switch" backlog item, now
+Animate-relevant. Patches: `scratchpad/round12-backups/`.
+
+**Round 12b — conditioning cache (44.86-local, the deeper lever, DONE).** Split `WanAnimatePipeline.GenerateAnimation`
+into cached/uncached: new `WanAnimateConditioning` (host-materialized Condition + PoseLatent + MotionCond +
+MotionUncond) returned on a MISS and accepted on a HIT. The loader caches it keyed on
+SHA(driving-mp4-bytes)+SHA(ref-image-bytes)+`{w}x{h}:{frames}`; a HIT skips the pose/gray **VAE encode**, the
+**StyleGAN motion encode** (×2 CFG branches), AND the driving-video decode. Host copies re-fault to device in the
+loop (bit-identical → numerics unchanged; the tiny-config unit test + real e2e both pass). **Measured on 44.86**
+(17f 480² 20st, same driving+ref, seed 42→43): pre-loop encode phase (Wan-Animate: → first denoise step) **81.8 s
+cold → 19.1 s warm** (the residual 19 s is just the DiT re-preload); warm total gen **6.99 → 5.70 min**, prep
+**18.09 → 0.00 s**. All three cache markers HIT on warm (`umT5`/`CLIP`/`conditioning`), output coherent
+(checkerboard-free, identity, motion). Flagships Z-Image 2.80 / Krea2 4.54 (deterministic-identical, no regression).
+Signature change rippled to 2 tests (5-tuple). Wan-Animate is now at full family cache parity.
+
 **VIDEO ARC round 11 — Wan-Animate CHECKERBOARD SOLVED (44.84-local, 2026-07-11).** The ~16 px halftone
 tile (period = one DiT token = 2×2 latent patch × 8× VAE) was a **dropped fp8 weight scale**, not an
 Animate-arch bug. `CheckpointConvertUtils.ApplyFp8ScaledDequant:354` folded the `.scale_weight` companion

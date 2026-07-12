@@ -766,9 +766,10 @@ public class WanVideoGenerationTests
             _output.WriteLine($"[gen] Animate {genFrames}f {genW}x{genH}, {genSteps} steps, cfg={cfg.GuidanceScale}, renorm={cfg.CfgRescale}, clip={(clipEmbeds is not null)}...");
             WanAnimatePipeline pipeline = new(backend, transformer, vae, encoder, cfg);
             TextToImageRequest req = new() { Prompt = "animate", Width = genW, Height = genH, Steps = genSteps, CfgScale = (float)EnvD("WAN_CFG", cfg.GuidanceScale), Seed = 42 };
-            (byte[][] frames, int w, int h, _) = pipeline.GenerateAnimation(promptEmbeds, negEmbeds, reference, pose, face, req,
+            (byte[][] frames, int w, int h, _, WanAnimateConditioning animCond) = pipeline.GenerateAnimation(promptEmbeds, negEmbeds, reference, pose, face, req,
                 clipImageEmbeds: clipEmbeds,
                 onProgress: p => { if (p.Step % 5 == 0 || p.Step == p.TotalSteps) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); });
+            animCond.Dispose();
             clipEmbeds?.Dispose();
             string animDir = Path.Combine(TestPaths.OutputDir, $"wan_animate_{DateTime.Now:yyyyMMdd_HHmmss}");
             Directory.CreateDirectory(animDir);

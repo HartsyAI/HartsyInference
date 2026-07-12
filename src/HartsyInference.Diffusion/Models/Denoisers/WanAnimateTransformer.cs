@@ -27,6 +27,7 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
     private readonly WanRope _rope;
     private readonly DiTBlocks.WanForwardCaches _caches = new();
     private readonly int _patchVec;
+    private Tensor? _ones;
     private WanAnimateFaceBlock[] _faceAdapter = [];
     private int _poseChannels;
     private int _disposed;
@@ -209,8 +210,14 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
             {
                 Tensor adapted = _faceAdapter[i / FuseEvery].Forward(backend, cur, motion);
                 if (dumpDir is not null && i == 0) DumpTensor(backend, dumpDir, "11_faceadapter0_out", adapted);
-                AddInPlace(cur, adapted);
+                // Face-adapter residual on the device: the old host AddInPlace pointer-loop synced the full
+                // [s, dim] hidden state D2H, summed on CPU, and marked it host-dirty so the next block re-uploaded
+                // it — once per fused block (8×/forward at 40 layers, ×2 CFG), the dominant Animate per-step host
+                // glue. GatedResidualLastDim computes cur + 1·adapted GPU-resident (same idiom as WanVideoBlock).
+                Tensor fused = GpuAddRows(backend, cur, adapted);
+                cur.Dispose();
                 adapted.Dispose();
+                cur = fused;
             }
             if (dumpDir is not null && (i == 0 || i == 1)) DumpTensor(backend, dumpDir, $"12_block{i}_postface", cur);
         }
@@ -349,11 +356,25 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
         for (long i = 0; i < count; i++) hp[offset + i] += pp[i];
     }
 
-    private static void AddInPlace(Tensor acc, Tensor add)
+    /// <summary>Cached <c>[1, dim]</c> ones row so plain elementwise add runs as a GPU <c>GatedResidualLastDim</c>
+    /// (<c>backend.Add</c> has no CUDA kernel — same idiom as <see cref="DiTBlocks.WanVideoBlock"/>). Built once.</summary>
+    private Tensor Ones()
     {
-        long n = acc.Shape.ElementCount;
-        float* ap = (float*)acc.DataPointer, dp = (float*)add.DataPointer;
-        for (long i = 0; i < n; i++) ap[i] += dp[i];
+        if (_ones is null)
+        {
+            _ones = new Tensor(new TensorShape(1, _config.InnerDim), DType.F32);
+            float* p = (float*)_ones.DataPointer;
+            for (int i = 0; i < _config.InnerDim; i++) p[i] = 1f;
+        }
+        return _ones;
+    }
+
+    /// <summary>Device-resident elementwise add of two <c>[s, dim]</c> tensors (<c>a + 1·b</c>), avoiding a host D2H/H2D round-trip of the hidden state.</summary>
+    private Tensor GpuAddRows(IBackend backend, Tensor a, Tensor b)
+    {
+        Tensor o = new Tensor(a.Shape, DType.F32);
+        backend.GatedResidualLastDim(o, a, b, Ones());
+        return o;
     }
 
     private static Tensor SliceRows(Tensor x, int start, int len)
@@ -371,6 +392,7 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            _ones?.Dispose(); _ones = null;
             _patchW2d = _patchB = _posePatchW2d = _posePatchB = _refConvW2d = _refConvB = null;
             _projOutW = _projOutB = _finalScaleShift = null;
             _timeEmb1W = _timeEmb1B = _timeEmb2W = _timeEmb2B = _timeProjW = _timeProjB = null;
