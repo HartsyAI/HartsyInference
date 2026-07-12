@@ -79,6 +79,13 @@ internal sealed class PickleMachine
                 case 0x93: { object? n = Pop(), m = Pop(); _stack.Add(new PickleGlobal(Str(m), Str(n))); break; } // STACK_GLOBAL
                 case (byte)'Q': _stack.Add(ResolvePersid(Pop())); break;     // BINPERSID
                 case (byte)'R': Reduce(); break;                            // REDUCE
+                // NEWOBJ (proto 2) / NEWOBJ_EX (proto 4): cls.__new__(cls, *args[, **kwargs]). In a state_dict
+                // pickle the constructed object is a container (e.g. an OrderedDict/Module subclass) whose real
+                // contents arrive via the following BUILD/SETITEMS — so push a fillable dict, mirroring how
+                // REDUCE models OrderedDict. Args/kwargs/cls are inert for tensor extraction. (X-Codec's
+                // ckpt_00360000.pth uses NEWOBJ; without this the loader threw "Unsupported pickle opcode 0x81".)
+                case 0x81: { Pop(); Pop(); _stack.Add(new Dictionary<string, object?>()); break; }        // NEWOBJ (cls, args)
+                case 0x92: { Pop(); Pop(); Pop(); _stack.Add(new Dictionary<string, object?>()); break; } // NEWOBJ_EX (cls, args, kwargs)
                 case (byte)'b':                                            // BUILD (apply dict state if any)
                 {
                     object? state = Pop();

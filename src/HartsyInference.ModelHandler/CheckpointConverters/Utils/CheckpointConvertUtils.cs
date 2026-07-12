@@ -394,6 +394,46 @@ public static unsafe class CheckpointConvertUtils
         return result;
     }
 
+    /// <summary>Quantizes the large 2-D Linear weights in <paramref name="source"/> from BF16/F16 to fp8 e4m3 with a
+    /// per-tensor scale (the ComfyUI <c>fp8_scaled</c> format the native fp8 GEMM consumes via
+    /// <see cref="Tensor.Fp8ScaleFactor"/>), halving their resident footprint (2 → 1 byte/param). This is how a DiT
+    /// shipped in BF16 (e.g. the LTX-2.3 22B, ~35 GB → ~18 GB) is made to fit a 24 GB card fully resident — killing
+    /// the per-step weight streaming that dominates its step time. Only weights with at least
+    /// <paramref name="minElements"/> elements are quantized (skips norms, scale-shift tables, timestep-MLP and
+    /// projection layers, which stay BF16 for precision and cost little); everything else passes through unchanged.</summary>
+    public static Dictionary<string, Tensor> QuantizeLinearsToFp8(Dictionary<string, Tensor> source, long minElements = 1L << 20)
+    {
+        Dictionary<string, Tensor> result = new(source.Count);
+        foreach (KeyValuePair<string, Tensor> kvp in source)
+        {
+            Tensor t = kvp.Value;
+            bool quantize = kvp.Key.EndsWith(".weight", StringComparison.Ordinal)
+                && t.Shape.Rank == 2 && t.ElementCount >= minElements
+                && (t.DType == DType.BF16 || t.DType == DType.F16);
+            result[kvp.Key] = quantize ? QuantizeToFp8Scaled(t) : t;
+        }
+        return result;
+    }
+
+    /// <summary>BF16/F16 weight → fp8 e4m3 with a per-tensor scale = absmax/448 (E4M3's max magnitude), folded onto
+    /// <see cref="Tensor.Fp8ScaleFactor"/> so the GEMM computes <c>fp8_decoded · scale ≈ w</c> via cuBLAS alpha.
+    /// Uses the engine's tested F32→F8E4M3 cast on a transient F32 copy (the source is left untouched).</summary>
+    private static unsafe Tensor QuantizeToFp8Scaled(Tensor w)
+    {
+        Tensor f32 = w.CastTo(DType.F32);        // BF16/F16 → fresh F32 (source unmodified)
+        long n = f32.ElementCount;
+        float* p = (float*)f32.DataPointer;
+        float absmax = 0f;
+        for (long i = 0; i < n; i++) { float a = MathF.Abs(p[i]); if (a > absmax) absmax = a; }
+        float scale = absmax > 0f ? absmax / 448f : 1f;
+        float inv = 1f / scale;
+        for (long i = 0; i < n; i++) p[i] *= inv;
+        Tensor fp8 = f32.CastTo(DType.F8E4M3);
+        f32.Dispose();
+        fp8.Fp8ScaleFactor = scale;
+        return fp8;
+    }
+
     /// <summary>The 8 magnitudes representable by FP4 E2M1, indexed by bits [e1 e0 m]: exp==0 → {0, 0.5}
     /// (subnormal), exp>0 → 2^(exp-1) · (1 + m/2). Bit 3 of the nibble is the sign.</summary>
     private static readonly float[] E2M1Magnitudes = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];

@@ -169,9 +169,13 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             (encVideoPos, encAudioPos) = EncodeText(promptTokens);
             (encVideoNeg, encAudioNeg) = EncodeText(negativeTokens);
 
-            // Reclaim the ~12 GB Gemma encoder before the DiT — both can't be resident on 24 GB.
+            // Reclaim the ~12 GB Gemma encoder AND the ~4 GB text connectors before the DiT — none are needed
+            // during denoise (the connectors already produced the four cached embeddings). Freeing the connectors
+            // is what lets the fp8 DiT (~18 GB) fit ALL 48 blocks resident on 24 GB (no streaming + graph-eligible);
+            // a prompt-cache MISS transparently re-uploads them on the next EncodeText.
             Backend.Sync();
             Backend.FreeWeights(_gemma.EnumerateWeights());
+            Backend.FreeWeights(_connectors.EnumerateWeights());
             // Host-materialize the four embeddings so they survive activation sweeps (a never-host-read tensor
             // loses its only copy in FreeActivations), then drop the TE's device activations + pool slack so
             // the resident-prefix sizing below sees the reclaimed VRAM. The transformer's RoPE table cache is
@@ -209,7 +213,10 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             // pinned across generations; under KEEP_MODELS the prefix weights themselves also stay resident, so
             // the PreloadWeights below is a cache-hit no-op on every generation after the first.
             long blockBytes = blocks[0].EstimatedWeightBytes;
-            long headroomMb = long.TryParse(Environment.GetEnvironmentVariable("HARTSY_LTX2_HEADROOM_MB"), out long hm) ? hm : 4096;
+            // 3072 MB default headroom fits all 48 fp8 blocks (~18 GB) resident at 512×320 (freeing the connectors
+            // above reclaimed the ~4 GB that used to force streaming) while leaving room for activations + the VAE
+            // decode; the sizing auto-shrinks the resident count at larger geometries.
+            long headroomMb = long.TryParse(Environment.GetEnvironmentVariable("HARTSY_LTX2_HEADROOM_MB"), out long hm) ? hm : 3072;
             long tokenLoad = (long)sv + audioFrames;
             IEnumerable<Tensor> BlockRangeWeights(int from, int to)
             {
@@ -292,14 +299,18 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             // The latents stay GPU-resident across the whole loop; the final host read (UnpackVideoLatents) syncs.
             Backend.CfgEulerStep(videoLat, vCondV, vUncondV, guidance, -dt);
             Backend.CfgEulerStep(audioLat, vCondA, vUncondA, guidance, -dt);
-            vCondV.Dispose(); vCondA.Dispose(); vUncondV.Dispose(); vUncondA.Dispose();
+            // On the step-graph path the four velocities are transformer-owned fixed buffers (rewritten next step) —
+            // don't dispose them; on the eager path they're fresh and must be freed.
+            if (!_transformer.StepGraphActive) { vCondV.Dispose(); vCondA.Dispose(); vUncondV.Dispose(); vUncondA.Dispose(); }
 
             Backend.Sync();
             sw.Stop();
             Logs.Info($"[ltx2-phase] step {k + 1}/{steps}: {sw.ElapsedMilliseconds} ms (paired CFG)");
-            if (onProgress is not null)
+            // The preview drain reads the latent on host, which EVICTS it from the GPU — incompatible with the step
+            // graph, whose capture bakes the resident latent's device address (a re-upload would move it). Skip the
+            // preview while the graph is active (correctness > the optional live thumbnail).
+            if (onProgress is not null && !_transformer.StepGraphActive)
             {
-                // NOTE: the preview drain reads the latent on host, which evicts it from the GPU (re-upload next step).
                 Tensor preview = ExtractMiddleFrame(videoLat, tLat, hLat, wLat, videoChannels);
                 onProgress.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
                 {
@@ -311,6 +322,9 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         }
 
         Backend.Sync();
+        // The captured graph bakes the DiT weight pointers; invalidate before any FreeWeights below so the next
+        // generation re-warms and re-captures instead of replaying against freed memory.
+        _transformer.InvalidateStepGraph(Backend);
         phase.Restart();
         _transformer.BeforeBlockForward = null;
         if (streamer is not null) { streamer.EvictAll(); streamer.Dispose(); }

@@ -44,6 +44,37 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     private (int Frames, int Height, int Width, double Fps, int AudioFrames) _ropeKey = (-1, -1, -1, 0, -1);
     private Tensor? _vCosC, _vSinC, _aCosC, _aSinC, _cvCosC, _cvSinC;
 
+    // ── Step-graph capture (HARTSY_DIT_GRAPH) — the whole dual-stream CFG pair (proj_in ×4 → 48 blocks interleaved
+    // → 4 output layers) captured once and replayed. FULLY RESIDENT only (BeforeBlockForward null): a captured graph
+    // bakes weight pointers, so the streamed-block path is incompatible — on 24 GB the 22B streams and this stays
+    // eager; a bigger GPU (or HARTSY_LTX2_HEADROOM_MB=0 at a small geometry) holds all 48 resident and captures.
+    // The per-step timestep tables (8 block-modulation + embV/embA) build OUTSIDE the capture into the fixed buffers
+    // below; the latents live in the pipeline's device-Euler'd videoLat/audioLat; velocities land in fixed buffers
+    // consumed by the pipeline's device CfgEulerStep (no host read → no snapshot needed). ──
+    private Tensor? _gTVideo, _gTAudio, _gTPromptV, _gTPromptA, _gTCaVss, _gTCaAss, _gTCaVGate, _gTCaAGate, _gEmbV, _gEmbA;
+    private Tensor? _gVCondV, _gVCondA, _gVUncondV, _gVUncondA;   // the 4 fixed velocity outputs
+    private long _graphSig = long.MinValue;
+    private int _graphSigCalls, _graphSigFlips;
+    private bool _graphDead, _graphPinned;
+    private const int GraphCaptureCall = 3;
+
+    /// <summary>True once the CFG-pair step graph PATH is running (from its first call — <c>_graphSig</c> set — until
+    /// self-disable). The pipeline keeps the four velocity buffers (transformer-owned fixed buffers, rewritten next
+    /// step) instead of disposing them while this holds — including the warm calls, which already return the fixed
+    /// buffers. (LTX-2.3 has no mid-loop FreeActivations, so unlike Kandinsky this need not wait for the capture.)</summary>
+    public bool StepGraphActive => DiTBlocks.DitStepGraph.Enabled && !_graphDead && _graphSig != long.MinValue;
+
+    /// <summary>Invalidates the captured graph — MUST run before the DiT weights are freed (the graph bakes weight
+    /// pointers). The next generation re-warms and re-captures.</summary>
+    public void InvalidateStepGraph(IBackend backend)
+    {
+        backend.StepGraphReset();
+        if (ReferenceEquals(backend.StepGraphOwner, this)) backend.StepGraphOwner = null;
+        _graphSig = long.MinValue;
+        _graphSigCalls = 0;
+        _graphPinned = false;
+    }
+
     // Diagnostic (HARTSY_LTX2_PROBE=1): per-block residual-stream absmax/rms on the FIRST forward only — the
     // mandatory F16-activation go/no-go probe (streams riding >60k overflow F16). Host sync per probe, debug only.
     private static readonly bool Ltx2Probe = Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") == "1";
@@ -265,6 +296,17 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         int sv = (int)videoTokens.Shape[0], sa = (int)audioTokens.Shape[0];
         int v = _config.InnerDim, a = _config.AudioInnerDim;
 
+        // Step-graph fast path (opt-in): capture the whole CFG pair once and replay it. FULLY RESIDENT only —
+        // BeforeBlockForward null means no block streaming (a captured graph can't span re-pointered weights).
+        // Diagnostic hooks off (they inject host reads). Self-disables to eager on capture failure.
+        if (DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead
+            && BeforeBlockForward is null && OnBlockOutput is null)
+        {
+            return ForwardCfgPairGraph(backend, videoTokens, audioTokens,
+                encoderVideoCond, encoderAudioCond, encoderVideoUncond, encoderAudioUncond,
+                timestep, grid, audioFrames, fps, sigma, sv, sa, v, a);
+        }
+
         Tensor hidC = new Tensor(new TensorShape(sv, v), DType.F32);
         backend.Linear(hidC, videoTokens, _projInW!, _projInB);
         Tensor audC = new Tensor(new TensorShape(sa, a), DType.F32);
@@ -341,6 +383,179 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         Tensor audioU = OutputLayer(backend, audU, embA, _audioScaleShift!, _audioProjOutW!, _audioProjOutB, sa, a, _config.AudioOutChannels);
         hidC.Dispose(); audC.Dispose(); hidU.Dispose(); audU.Dispose(); embV.Dispose(); embA.Dispose();
         return ((videoC, audioC), (videoU, audioU));
+    }
+
+    /// <summary>Step-graph CFG-pair forward (fully-resident path). Builds the per-step timestep tables OUTSIDE the
+    /// capture into fixed buffers, then captures/replays proj_in ×4 → 48 blocks (cond+uncond interleaved) → 4 output
+    /// layers, landing the four velocities in fixed buffers the pipeline's device Euler consumes (no host read).
+    /// Warm calls 1..2 run the body eagerly through the fixed buffers; call <see cref="GraphCaptureCall"/> records it.</summary>
+    private ((Tensor Video, Tensor Audio) Cond, (Tensor Video, Tensor Audio) Uncond) ForwardCfgPairGraph(
+        IBackend backend, Tensor videoTokens, Tensor audioTokens,
+        Tensor encVCond, Tensor encACond, Tensor encVUncond, Tensor encAUncond,
+        float timestep, (int Frames, int Height, int Width) grid, int audioFrames, double fps, float sigma,
+        int sv, int sa, int v, int a)
+    {
+        // ── Build the per-step timestep tables OUTSIDE the capture; land them in the fixed buffers ──
+        (Tensor tVideo, Tensor embV) = _timeEmbed.Forward(backend, timestep);
+        (Tensor tAudio, Tensor embA) = _audioTimeEmbed.Forward(backend, timestep);
+        RefreshFixed(backend, ref _gTVideo, tVideo);
+        RefreshFixed(backend, ref _gTAudio, tAudio);
+        RefreshFixed(backend, ref _gEmbV, embV);
+        RefreshFixed(backend, ref _gEmbA, embA);
+        if (_hasPromptMod)
+        {
+            (Tensor tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, sigma); _pv.Dispose();
+            (Tensor tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, sigma); _pa.Dispose();
+            RefreshFixed(backend, ref _gTPromptV, tPromptV);
+            RefreshFixed(backend, ref _gTPromptA, tPromptA);
+        }
+        (Tensor tCaVss, Tensor _cv) = _caVideoScaleShift.Forward(backend, timestep); _cv.Dispose();
+        (Tensor tCaAss, Tensor _ca) = _caAudioScaleShift.Forward(backend, timestep); _ca.Dispose();
+        (Tensor tCaVGate, Tensor _gv) = _caVideoGate.Forward(backend, timestep * _gateScaleFactor); _gv.Dispose();
+        (Tensor tCaAGate, Tensor _ga) = _caAudioGate.Forward(backend, timestep * _gateScaleFactor); _ga.Dispose();
+        RefreshFixed(backend, ref _gTCaVss, tCaVss);
+        RefreshFixed(backend, ref _gTCaAss, tCaAss);
+        RefreshFixed(backend, ref _gTCaVGate, tCaVGate);
+        RefreshFixed(backend, ref _gTCaAGate, tCaAGate);
+
+        // ── RoPE tables (cached per grid; step-invariant) ──
+        (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
+        if (_ropeKey != ropeKey)
+        {
+            DisposeRopeCache();
+            (_vCosC, _vSinC) = _videoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+            (_aCosC, _aSinC) = _audioRope.BuildAudio(audioFrames);
+            (_cvCosC, _cvSinC) = _caVideoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+            _ropeKey = ropeKey;
+            _graphPinned = false;
+        }
+
+        // ── Signature / owner management ──
+        long sig = ((long)grid.Frames * 73856093L) ^ ((long)grid.Height * 19349663L)
+            ^ ((long)grid.Width * 83492791L) ^ ((long)audioFrames * 2654435761L);
+        bool ownerLost = !ReferenceEquals(backend.StepGraphOwner, this);
+        if (sig != _graphSig || ownerLost)
+        {
+            backend.StepGraphReset();
+            if (!ownerLost && _graphSig != long.MinValue && ++_graphSigFlips > 8)
+            {
+                _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning("[LTX-2 graph] signature flip storm — step-graph disabled for this session.");
+            }
+            _graphSig = sig; _graphSigCalls = 0; backend.StepGraphOwner = this; _graphPinned = false;
+        }
+        _graphSigCalls++;
+
+        if (_graphSigCalls == 1 && !_graphPinned)
+        {
+            // Pin the step-invariant capture inputs (the 4 connector encoders + the RoPE tables) so a pageable
+            // re-upload can't invalidate the recording.
+            List<Tensor> pins = new()
+            {
+                encVCond, encACond, encVUncond, encAUncond,
+                _vCosC!, _vSinC!, _aCosC!, _aSinC!, _cvCosC!, _cvSinC!,
+            };
+            backend.PreloadWeights(pins);
+            _graphPinned = true;
+        }
+
+        _gVCondV ??= new Tensor(new TensorShape(sv, _config.OutChannels), DType.F32);
+        _gVCondA ??= new Tensor(new TensorShape(sa, _config.AudioOutChannels), DType.F32);
+        _gVUncondV ??= new Tensor(new TensorShape(sv, _config.OutChannels), DType.F32);
+        _gVUncondA ??= new Tensor(new TensorShape(sa, _config.AudioOutChannels), DType.F32);
+
+        LtxVideo2BlockContext ctxC = MakeGraphCtx(encVCond, encACond);
+        LtxVideo2BlockContext ctxU = MakeGraphCtx(encVUncond, encAUncond);
+
+        if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
+        {
+            backend.StepGraphLaunch();
+            return ((_gVCondV!, _gVCondA!), (_gVUncondV!, _gVUncondA!));
+        }
+
+        bool capture = _graphSigCalls == GraphCaptureCall;
+        if (capture) { backend.TrimMemoryPool(); backend.StepGraphBegin(); }
+        try
+        {
+            RunCfgPairIntoFixed(backend, videoTokens, audioTokens, ctxC, ctxU, sv, sa, v, a);
+        }
+        catch (Exception ex) when (capture)
+        {
+            backend.StepGraphReset(); _graphDead = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[LTX-2 graph] capture invalidated — falling back to eager: {ex.Message}");
+            RunCfgPairIntoFixed(backend, videoTokens, audioTokens, ctxC, ctxU, sv, sa, v, a);
+            return ((_gVCondV!, _gVCondA!), (_gVUncondV!, _gVUncondA!));
+        }
+        if (capture)
+        {
+            try
+            {
+                backend.StepGraphEndAndLaunch();
+                HartsyInference.Core.Logging.Logs.Info("[LTX-2 graph] dual-stream CFG-pair denoise step captured; replaying via cuGraphLaunch.");
+            }
+            catch (Exception ex)
+            {
+                backend.StepGraphReset(); _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning($"[LTX-2 graph] capture failed — falling back to eager: {ex.Message}");
+                RunCfgPairIntoFixed(backend, videoTokens, audioTokens, ctxC, ctxU, sv, sa, v, a);
+            }
+        }
+        return ((_gVCondV!, _gVCondA!), (_gVUncondV!, _gVUncondA!));
+    }
+
+    /// <summary>Lands a freshly built per-step tensor in its fixed device buffer (device copy) and disposes the
+    /// fresh one — the fixed buffer keeps a stable address the capture bakes.</summary>
+    private static void RefreshFixed(IBackend backend, ref Tensor? fixedBuf, Tensor fresh)
+    {
+        fixedBuf ??= new Tensor(fresh.Shape, DType.F32);
+        backend.CopyInto(fixedBuf, fresh);
+        fresh.Dispose();
+    }
+
+    /// <summary>Block context wired to the FIXED per-step timestep buffers + cached RoPE (mirrors the eager MakeCtx).</summary>
+    private LtxVideo2BlockContext MakeGraphCtx(Tensor encV, Tensor encA) => new()
+    {
+        Encoder = encV, AudioEncoder = encA, EncoderMask = null, AudioEncoderMask = null,
+        TembVideo = _gTVideo!, TembAudio = _gTAudio!,
+        TembPromptVideo = _gTPromptV, TembPromptAudio = _gTPromptA,
+        TembCaVideoScaleShift = _gTCaVss!, TembCaAudioScaleShift = _gTCaAss!,
+        TembCaVideoGate = _gTCaVGate!, TembCaAudioGate = _gTCaAGate!,
+        VideoRope = _videoRope, VideoCos = _vCosC!, VideoSin = _vSinC!,
+        AudioRope = _audioRope, AudioCos = _aCosC!, AudioSin = _aSinC!,
+        CaVideoRope = _caVideoRope, CaVideoCos = _cvCosC!, CaVideoSin = _cvSinC!,
+        CaAudioRope = _audioRope, CaAudioCos = _aCosC!, CaAudioSin = _aSinC!,
+    };
+
+    /// <summary>The captured (or capture-warming) CFG-pair body: proj_in ×4 → blocks (cond then uncond per block)
+    /// → 4 output layers, landing the velocities in the fixed buffers. All device ops; reads only fixed/pinned/
+    /// resident tensors.</summary>
+    private void RunCfgPairIntoFixed(IBackend backend, Tensor videoTokens, Tensor audioTokens,
+        LtxVideo2BlockContext ctxC, LtxVideo2BlockContext ctxU, int sv, int sa, int v, int a)
+    {
+        Tensor hidC = new Tensor(new TensorShape(sv, v), DType.F32);
+        backend.Linear(hidC, videoTokens, _projInW!, _projInB);
+        Tensor audC = new Tensor(new TensorShape(sa, a), DType.F32);
+        backend.Linear(audC, audioTokens, _audioProjInW!, _audioProjInB);
+        Tensor hidU = new Tensor(new TensorShape(sv, v), DType.F32);
+        backend.CopyInto(hidU, hidC);
+        Tensor audU = new Tensor(new TensorShape(sa, a), DType.F32);
+        backend.CopyInto(audU, audC);
+
+        for (int i = 0; i < _blocks.Length; i++)
+        {
+            (hidC, audC) = _blocks[i].Forward(backend, hidC, audC, ctxC);
+            (hidU, audU) = _blocks[i].Forward(backend, hidU, audU, ctxU);
+        }
+
+        Tensor videoC = OutputLayer(backend, hidC, _gEmbV!, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
+        Tensor audioC = OutputLayer(backend, audC, _gEmbA!, _audioScaleShift!, _audioProjOutW!, _audioProjOutB, sa, a, _config.AudioOutChannels);
+        Tensor videoU = OutputLayer(backend, hidU, _gEmbV!, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
+        Tensor audioU = OutputLayer(backend, audU, _gEmbA!, _audioScaleShift!, _audioProjOutW!, _audioProjOutB, sa, a, _config.AudioOutChannels);
+        hidC.Dispose(); audC.Dispose(); hidU.Dispose(); audU.Dispose();
+
+        backend.CopyInto(_gVCondV!, videoC); backend.CopyInto(_gVCondA!, audioC);
+        backend.CopyInto(_gVUncondV!, videoU); backend.CopyInto(_gVUncondA!, audioU);
+        videoC.Dispose(); audioC.Dispose(); videoU.Dispose(); audioU.Dispose();
     }
 
     /// <summary>AdaLN-Single output, fully device-resident: <c>shift/scale = scale_shift_table + embedded</c> ([dim],

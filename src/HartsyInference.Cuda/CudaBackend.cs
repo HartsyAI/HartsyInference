@@ -302,7 +302,12 @@ public sealed class CudaBackend : IBackend
         // cuDNN convolution forward: default ON — replaces im2col→GEMM for F16/BF16 NCHW convs (the SDXL
         // UNet/VAE cost). Same self-disable-on-failure contract as the fused SDPA path.
         _convCudnn = CudnnRuntime.Available && EnvSwitch.IsEnabled("HARTSY_CONV_CUDNN", defaultOn: true);
-        _audioConvCudnn = CudnnRuntime.Available && EnvSwitch.IsEnabled("HARTSY_AUDIO_CONV_CUDNN", defaultOn: false);
+        // Audio conv1d cuDNN (1D→2D, H=1, F32 output via TF32 tensor cores): default ON. The Oobleck/EnCodec
+        // vocoder decoders are conv-bound — routing their forward convs through cuDNN is ~1.6-2× on ACE-Step
+        // end-to-end (bigger on longer audio, where the VAE decode dominates) with corr 0.9999 vs the direct
+        // kernel (same-seed A/B, verified coherent across ACE-Step/MusicGen/AudioGen). Same session-sticky
+        // self-disable-on-failure contract as the 2D path, so shapes cuDNN can't serve fall back safely.
+        _audioConvCudnn = CudnnRuntime.Available && EnvSwitch.IsEnabled("HARTSY_AUDIO_CONV_CUDNN", defaultOn: true);
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
             $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} ConvCudnn={_convCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} MempoolKeep={mempoolKeep} " +

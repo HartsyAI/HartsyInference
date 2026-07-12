@@ -55,11 +55,13 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
     private bool _graphDead;
     private const int GraphCaptureCall = 3;
 
-    /// <summary>True while the CFG-pair step graph is engaged (opt-in flag on, the graph path ran at least once,
-    /// not self-disabled). The pipeline suppresses its per-step <c>FreeActivations</c> while this holds — the
-    /// captured graph balances its own allocations and holds the fixed buffers the capture bakes. Re-check AFTER
-    /// each paired forward so a mid-gen self-disable re-enables the sweep.</summary>
-    public bool StepGraphActive => DitStepGraph.Enabled && !_graphDead && _graphSig != long.MinValue;
+    /// <summary>True once the CFG-pair step graph is being captured/replayed (from <see cref="GraphCaptureCall"/>
+    /// on), not self-disabled. The pipeline suppresses its per-step <c>FreeActivations</c> while this holds — the
+    /// captured graph balances its own allocations and holds the fixed buffers at the addresses the capture bakes.
+    /// It stays FALSE during the 1..GraphCaptureCall-1 warm passes so those run eagerly WITH the per-step sweep —
+    /// otherwise two paired warm forwards' activations pile up beside the graph's own pool and OOM at large token
+    /// counts. Re-check AFTER each paired forward so a mid-gen self-disable re-enables the sweep.</summary>
+    public bool StepGraphActive => DitStepGraph.Enabled && !_graphDead && _graphSigCalls >= GraphCaptureCall;
 
     /// <summary>Invalidates the captured step graph — MUST be called before the DiT weights are freed (the graph
     /// bakes weight device pointers; a free + next-gen re-upload would replay against freed memory).</summary>
@@ -283,7 +285,10 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
             _textUncondFixed?.Dispose(); _textUncondFixed = ProjectText(backend, qwenUncond);
             _pooledCondFixed?.Dispose(); _pooledCondFixed = ProjectPooled(backend, pooledCond);
             _pooledUncondFixed?.Dispose(); _pooledUncondFixed = ProjectPooled(backend, pooledUncond);
-            backend.PreloadWeights([_textCondFixed, _textUncondFixed]);
+            // Pin ALL step-invariant buffers into the weight cache: they are computed only on this call and read
+            // every subsequent step, so the warm-phase FreeActivations sweeps (StepGraphActive is still false until
+            // the capture call) must not reclaim them. _text* are also read inside the capture.
+            backend.PreloadWeights([_textCondFixed, _textUncondFixed, _pooledCondFixed, _pooledUncondFixed]);
         }
 
         // temb per pass = timestep sinusoid MLP + projected pooled (device Add), refreshed each step OUTSIDE capture.
@@ -307,7 +312,29 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         // Calls 1..GraphCaptureCall-1 run the pair eagerly THROUGH the fixed buffers (warm rope-table builds +
         // weight promotions); call GraphCaptureCall records the same op sequence.
         bool capture = _graphSigCalls == GraphCaptureCall;
-        if (capture) backend.StepGraphBegin();
+        if (capture)
+        {
+            // Return the default pool's retained reservation (the warm passes ran trimPool:false) to the driver so
+            // the graph's OWN stream-ordered memory pool has headroom — otherwise both are held at once.
+            backend.TrimMemoryPool();
+            // VRAM guard: the captured CFG pair's footprint is dominated by the O(numPatches²) dense self-attention
+            // buffers, which grow quadratically with the token count. At high token counts (e.g. 7168 at 512²/25f)
+            // it exceeds a 24 GB card, and a graph-pool OOM is an UNCATCHABLE hard fault — so estimate the footprint
+            // (~1.5 KB per token², calibrated: 3072 tokens captured cleanly with 17.6 GB free) and fall back to eager
+            // when free VRAM is short. A bigger GPU clears the bar and captures. Below the bar the graph engages.
+            long estBytes = (long)numPatches * numPatches * 1500L;
+            long freeBytes = backend.FreeMemoryBytes();
+            if (freeBytes < estBytes)
+            {
+                _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Info(
+                    $"[Kandinsky5 graph] {numPatches} tokens need ~{estBytes >> 20} MB but only {freeBytes >> 20} MB free — running eager (no capture).");
+                RunPairIntoFixed(backend, numPatches);
+                return (SnapshotUnpatchify(backend, _graphProjCond!, gridT, gridH, gridW, latH, latW, outShape),
+                        SnapshotUnpatchify(backend, _graphProjUncond!, gridT, gridH, gridW, latH, latW, outShape));
+            }
+            backend.StepGraphBegin();
+        }
         try
         {
             RunPairIntoFixed(backend, numPatches);
