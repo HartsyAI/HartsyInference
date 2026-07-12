@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Runtime;
@@ -25,9 +26,60 @@ public sealed class CudaBackend : IBackend
     private TensorCoreGemm? _tensorCoreGemm;
     private CudnnSdpa? _cudnnSdpa;
     private bool _cudnnSdpaDead;   // set if cuDNN INIT throws once — never retry, fall back for the session
-    // Head dims whose plan build/exec was rejected (e.g. D=256 on builds whose fused engine tops out at 128).
-    // Per-D so one unsupported arch doesn't kill the fused path for every other resident model.
-    private readonly HashSet<long> _cudnnSdpaDeadDims = new HashSet<long>();
+
+    /// <summary>Per-head-dim failure/backoff state — replaces a plain permanent-dead set. A structural
+    /// failure (e.g. D=256 on a build whose fused engine tops out at 128 — <see cref="CudnnStatusException.IsPermanent"/>)
+    /// disables that dim forever, same as before; a transient failure (e.g. the host-RAM allocation error
+    /// that motivated this — see the plan notes referenced from <see cref="TryCudnnSdpa"/>) gets bounded
+    /// backoff instead, since the resource pressure that caused it is typically external to this process
+    /// and does clear up. <see cref="ConcurrentDictionary{TKey,TValue}"/> (not a plain <c>HashSet</c>) because
+    /// this backend is a process-wide DI singleton and nothing enforces <c>InferenceQueue.MaxConcurrency</c>
+    /// stays at its default of 1 — a plain <c>HashSet</c> was never actually safe under a higher setting.</summary>
+    private sealed class DimFailureState
+    {
+        public int ConsecutiveFailures;
+        public long NextRetryAtTicks;   // Environment.TickCount64; 0 = eligible immediately
+        public bool Permanent;
+    }
+    private readonly ConcurrentDictionary<long, DimFailureState> _cudnnSdpaDimState = new();
+
+    /// <summary>Test-only fault injection for <see cref="TryCudnnSdpa"/>: when set, invoked once per attempt
+    /// with the head dim; a non-null return is thrown instead of running the real cuDNN call. Exists so the
+    /// classify/retry/backoff behavior can be tested deterministically — a real host-RAM-starvation failure
+    /// can't be reproduced on demand in a fast unit test. Null in production.</summary>
+    internal Func<long, CudnnStatusException?>? TestCudnnSdpaFaultInjector { get; set; }
+
+    /// <summary>Per-dim diagnostic snapshot for <see cref="TryCudnnSdpa"/>'s classify/retry/backoff state —
+    /// programmatically queryable observability surface (deliberately not wired into <c>/ready</c>: a
+    /// degraded-but-correct fallback to the materialized attention path is not a "can't serve traffic"
+    /// condition, matching this engine's existing health-check philosophy).</summary>
+    public IReadOnlyDictionary<long, (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt)> CudnnSdpaDimDiagnostics =>
+        _cudnnSdpaDimState.ToDictionary(
+            kv => kv.Key,
+            kv => (kv.Value.ConsecutiveFailures, kv.Value.Permanent,
+                   kv.Value.Permanent ? (DateTimeOffset?)null : DateTimeOffset.UtcNow.AddMilliseconds(kv.Value.NextRetryAtTicks - Environment.TickCount64)));
+
+    /// <summary>True if head dim <paramref name="d"/> is currently eligible for a cuDNN SDPA attempt — no
+    /// failure on record (the overwhelmingly common case: a single dictionary miss, same O(1) cost as the
+    /// plain <c>HashSet.Contains</c> this replaces), not permanently disabled, and any backoff window from a
+    /// prior transient failure has elapsed.</summary>
+    private bool CudnnSdpaDimEligible(long d)
+    {
+        if (!_cudnnSdpaDimState.TryGetValue(d, out DimFailureState? s)) return true;
+        if (s.Permanent) return false;
+        return Environment.TickCount64 >= s.NextRetryAtTicks;
+    }
+
+    // Backoff schedule for a transient cuDNN SDPA failure: short at first (the common case — a brief host-RAM
+    // blip clears within seconds), capped so a persistently-constrained box doesn't retry so often it's
+    // effectively hammering itself, but never gives up permanently on a failure class that isn't structural.
+    private static long CudnnSdpaBackoffMs(int consecutiveFailures)
+    {
+        const long baseMs = 2000, capMs = 5 * 60 * 1000;
+        int shift = Math.Min(consecutiveFailures - 1, 8);
+        return Math.Min(baseMs * (1L << shift), capMs);
+    }
+
     private CudnnConv? _cudnnConv;
     private bool _cudnnConvDead;   // any cuDNN conv failure → session fallback to the im2col path
 
@@ -2752,7 +2804,7 @@ public sealed class CudaBackend : IBackend
         // engine as a bias score-modifier; incompatible mask layouts fall through to the materialized path.
         if (CudnnMaskCompatible(mask, B, Sq, Skv) && query.DType == DType.F16 && key.DType == DType.F16
             && value.DType == DType.F16 && output.DType == DType.F16
-            && _sdpaCudnn && !_cudnnSdpaDead && !_cudnnSdpaDeadDims.Contains(D) && CudnnSdpa.ShapeSupported(D)
+            && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(D) && CudnnSdpa.ShapeSupported(D)
             && TryCudnnSdpa(output, query, key, value, mask, scale))
         {
             return;
@@ -2768,7 +2820,7 @@ public sealed class CudaBackend : IBackend
             // score-modifier), so the mask never rounds through F16 — only Q/K/V do, same as unmasked.
             // Self-disables for the session if cuDNN init/exec ever throws, falling back to the paths below.
             if (CudnnMaskCompatible(mask, B, Sq, Skv)
-                && _sdpaCudnn && !_cudnnSdpaDead && !_cudnnSdpaDeadDims.Contains(D) && CudnnSdpa.ShapeSupported(D)
+                && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(D) && CudnnSdpa.ShapeSupported(D)
                 && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled
                 && TryCudnnSdpa(output, query, key, value, mask, scale))
             {
@@ -3055,6 +3107,15 @@ public sealed class CudaBackend : IBackend
         {
             _cudnnSdpa ??= new CudnnSdpa(_stream.Handle);
 
+            // Checked right after real (or already-cached) engine construction, so an injected failure is
+            // classified the same way a real post-init failure (e.g. a BuildPlan/Execute failure) would be
+            // — the catch below branches on whether _cudnnSdpa is null, i.e. whether construction itself
+            // ever succeeded, and a fault injected before that point would be indistinguishable from a
+            // genuine init failure (permanent, session-wide), defeating the point of testing per-dim
+            // retry/backoff/classification.
+            CudnnStatusException? injected = TestCudnnSdpaFaultInjector?.Invoke(D);
+            if (injected is not null) throw injected;
+
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
@@ -3088,6 +3149,11 @@ public sealed class CudaBackend : IBackend
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
+            if (_cudnnSdpaDimState.TryRemove(D, out DimFailureState? recovered))
+            {
+                HartsyInference.Core.Logging.Logs.Info(
+                    $"[cuDNN SDPA] D={D} recovered after {recovered.ConsecutiveFailures} prior failure(s) — fused path re-engaged.");
+            }
             if (!CudnnSdpaEngaged)
             {
                 CudnnSdpaEngaged = true;
@@ -3097,18 +3163,41 @@ public sealed class CudaBackend : IBackend
         }
         catch (Exception ex)
         {
-            // Init failure (lib missing) ⇒ session-dead. A shape/engine rejection AFTER a working init (e.g.
-            // D=256 on a build whose fused engine tops out at 128) ⇒ dead for that head dim only, so other
-            // resident models (D=64/128) keep the fused path. Logged so the deploy log shows what engaged.
+            // Init failure (lib missing) ⇒ session-dead — unconditional, this is never worth retrying (the
+            // library either loads or it doesn't).
             if (_cudnnSdpa is null)
             {
                 _cudnnSdpaDead = true;
                 HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] disabled for the session (init failed): {ex.Message}");
+                return false;
+            }
+            // A failure AFTER a working init: classify by cuDNN's own status category
+            // (CudnnStatusException.IsPermanent) when we can — structural failures (e.g. D=256 on a build
+            // whose fused engine tops out at 128) are genuinely never going to succeed and stay permanently
+            // disabled for this dim, same as before. Everything else, including the exact class of failure
+            // that motivated this (a transient host-RAM allocation error), gets bounded backoff instead of
+            // a permanent kill: the resource pressure that causes it is typically external to this process
+            // (other processes on the box) and does clear up. An exception we can't positively classify
+            // (not a CudnnStatusException) stays conservative and is treated as permanent, same as today.
+            bool permanent = ex is not CudnnStatusException cse || cse.IsPermanent;
+            if (permanent)
+            {
+                _cudnnSdpaDimState[D] = new DimFailureState { Permanent = true };
+                HartsyInference.Core.Logging.Logs.Warning(
+                    $"[cuDNN SDPA] D={D} permanently disabled (structural failure) — this is the steady state for the rest of the process: {ex.Message}");
             }
             else
             {
-                _cudnnSdpaDeadDims.Add(D);
-                HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] D={D} rejected (falling back to materialized path for this head dim): {ex.Message}");
+                DimFailureState state = _cudnnSdpaDimState.AddOrUpdate(D,
+                    _ => new DimFailureState { ConsecutiveFailures = 1 },
+                    (_, existing) => { existing.ConsecutiveFailures++; return existing; });
+                long backoffMs = CudnnSdpaBackoffMs(state.ConsecutiveFailures);
+                state.NextRetryAtTicks = Environment.TickCount64 + backoffMs;
+                long? ramMb = HostMemoryInfo.AvailableBytes() is { } bytes ? bytes / (1024 * 1024) : null;
+                HartsyInference.Core.Logging.Logs.Warning(
+                    $"[cuDNN SDPA] D={D} transient failure #{state.ConsecutiveFailures} " +
+                    $"(host RAM available={(ramMb is { } mb ? $"{mb}MB" : "unknown")}) — " +
+                    $"retrying after {backoffMs / 1000.0:F1}s: {ex.Message}");
             }
             return false;
         }

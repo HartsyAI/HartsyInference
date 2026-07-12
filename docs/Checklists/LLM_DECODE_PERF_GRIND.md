@@ -319,6 +319,71 @@ Results in the STATUS UPDATE block at the top of this doc.
 
 ---
 
+## Phase 6b — Retrofit CUDA-graph decode into DynamicBatchScheduler (✅ done, 2026-07-11)
+
+**Why:** Phase 6 above shipped graph decode for `TextGenerationPipeline.Generate` only. An audit found the
+actual HTTP server's chat path (`ModelManager.GenerateChatAsync` → `DynamicBatchScheduler`) has its own
+separate eager decode loop using `PagedKvCache` and never used graph decode at all — every measured speedup
+above benefited nobody hitting the real server. Full design/plan in
+`~/.claude/plans/nested-zooming-tower.md`'s "NEW PLAN" section (6 phases: de-risking spike, pure refactor,
+admission-time capture-once, per-round dispatch + one-way retirement, CUDA correctness tests, live
+measurement).
+
+**Design, in one line:** a request admitted while the scheduler is otherwise idle (`active.Count == 0`) and
+graph-eligible gets a dedicated `FixedKvCache` (not pool-backed) and captures a graph ONCE at admission;
+falls back permanently ("one-way retirement") to the existing eager `PagedKvCache` path the moment a second
+request arrives while it's still running. `PagedKvCache` is fundamentally graph-incompatible (variable kernel
+launch count per replay AND a reallocating scratch buffer — confirmed by reading `CudaGraph`'s own "frozen
+topology/addresses" contract), so this is the only design that doesn't require a much harder paged+graph
+cache hybrid.
+
+**Real bug found and fixed along the way:** a genuinely cold model's first-ever graph capture (no prior
+eager decode of any kind) reliably failed with `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` — prefill's
+multi-token GEMM shape and a single-token GEMV-shaped forward pass promote a lazily-cast/quantized weight to
+GPU via different code paths, so the FIRST-EVER single-token access to a weight (both a per-layer projection
+AND, separately, the LM head) can trigger a non-stream-ordered "auto-promote" allocation mid-capture, which
+CUDA forbids. This is a **pre-existing bug in the original Phase 6 `GenerateGraphDecode`** (reproduced there
+identically, no scheduler code involved) that no prior test had caught — every existing graph-decode test
+happened to run an eager reference call first, incidentally warming up the exact weights capture needed.
+Fixed in both `DynamicBatchScheduler.CaptureGraphSession` and `TextGenerationPipeline.GenerateGraphDecode`:
+one throwaway single-token forward pass + `ProjectLogits` call (discarded cache/result) immediately before
+capture, forcing the promotion to happen safely outside the capture region. One-time, first-request-only
+cost. Locked in with a dedicated regression test
+(`SchedulerGraphDecodeTests.SoloAdmission_SucceedsColdWithNoPriorEagerWarmup`) that admits cold with zero
+warm-up — the scenario every prior test accidentally avoided.
+
+**Correctness, verified real (CUDA, qwen2.5-0.5b-instruct-q4_k_m):**
+- Solo scheduler request byte-identical to `TextGenerationPipeline.Generate` with graph decode on.
+- Solo scheduler request byte-identical whether graph decode is on or off (the optimization never changes
+  output).
+- Transition test: sequence A admitted alone (captures a graph), sequence B admitted while A is still
+  running (forces the heterogeneous eager path + one-way retirement for A) — both sequences' full output
+  matched their own solo, graph-decode-OFF references exactly, proving the graph→eager splice mid-generation
+  doesn't corrupt KV state (this is what actually exercises the `IKvCache.AdvanceLength` fix the retrofit
+  needed — `GenerateGraphDecode` never called it, since it never needed to hand off to a different decode
+  path mid-generation; the scheduler does).
+- Cold-start capture (see bug above) now succeeds and produces correct output.
+- 116/116 existing CPU-backend LLM tests pass unchanged (Phase 1's `ActiveSeq` cache-type widen +
+  uniform-gated-disposal refactor is behavior-neutral) + the pre-existing `GraphDecodeRepetitionPenaltyTests`
+  still passes with the warm-up fix in place.
+
+**Speed, measured live through the real `/v1/chat/completions` server (not the CLI), qwen2.5-0.5b, solo
+request, 500-token completion, greedy:** eager **111.0 tok/s** (4505ms) vs graph decode **146.6 tok/s**
+(3410ms) — **~32% faster**, real server traffic, not a microbenchmark. Short generations (~120 tokens) showed
+close to zero net win — the one-time per-sequence capture cost (~70-200ms, includes the warm-up fix above)
+needs enough decode rounds to amortize over; this is expected given the design captures a fresh graph per
+admitted sequence (no cross-request graph reuse) and matches this doc's existing framing of one-time capture
+as "expensive, once" elsewhere in this file.
+
+**Scope cuts (v1, deliberate):** no resume-after-eager-interlude (a sequence that's ever crowded loses the
+graph-decode benefit permanently, even if later solo again — resuming would need resyncing device position/
+token-id/repetition-penalty-history buffers that the eager path never touches, a materially harder problem
+for marginal benefit at the target light/moderate-load use case); no promoting an already-`PagedKvCache`
+sequence to graph-eligible later; speculative decoding is NOT retrofitted into the scheduler (harder problem
+— variable per-sequence draft lengths reshape the batch every round — explicitly separate follow-up work).
+
+---
+
 ## Phase 0 — Profile & attribute ⬜ (do this FIRST, no code changes)
 - [ ] Get a per-op time breakdown of one decode step (HARTSY_PROFILE if it does per-kernel CUDA-event timing; else add minimal CUDA-event instrumentation around op categories: qkv-matmul / attn / o-proj / gate-up-matmul / down-matmul / lm_head / norm+rope+elementwise).
 - [ ] Attribute the ~70 ms/token (Qwen3) across those categories. Confirm the matmul (esp. quant-GEMV + lm_head) share.

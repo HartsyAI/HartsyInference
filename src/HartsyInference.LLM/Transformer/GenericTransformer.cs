@@ -30,9 +30,8 @@ public sealed unsafe class GenericTransformer : IDisposable
     private Tensor? _lmHeadQuant;
     private int _disposed;
     // Graph-decode RoPE table (see EnsureRopeTableForGraphDecode): built once, lazily, at the first capacity a
-    // caller needs; rebuilt only if a LATER call needs more positions than currently built (the stale table is
-    // simply orphaned in the backend's permanent weight cache — a rare, bounded cost, not a per-call leak, since
-    // request MaxTokens is normally stable across a session).
+    // caller needs; rebuilt only if a LATER call needs more positions than currently built. The old table is
+    // disposed on rebuild (not leaked) — safe by construction, see that method's doc.
     private Tensor? _graphDecodeCos, _graphDecodeSin;
     private int _graphDecodeCapacity;
     // Gemma-4 per-layer embeddings (PLE): a top-level small embedding table + projection, shared across every
@@ -431,14 +430,22 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>Returns the graph-decode RoPE table, building (or rebuilding, if <paramref name="minCapacity"/>
     /// exceeds what's already built) it via <see cref="IBackend.BuildRopeTableDevice"/>. Cached on this
-    /// instance — see the field doc comment for why rebuilds don't accumulate per call.</summary>
+    /// instance. A rebuild disposes the orphaned old tensors instead of leaking them — safe because a rebuild
+    /// only replaces THIS field; any graph that already captured the old tensors' address keeps them alive by
+    /// reference regardless of what this field points to next, and (for the scheduler's graph-decode retrofit
+    /// specifically) a new capture can only happen while zero other graph-sessioned sequences are active — see
+    /// <see cref="Generation.DynamicBatchScheduler"/>'s admission-time solo gate — so there is never a LIVE
+    /// captured graph still depending on the table being replaced here.</summary>
     public (Tensor cos, Tensor sin) EnsureRopeTableForGraphDecode(IBackend backend, int minCapacity)
     {
         ThrowIfDisposed();
         if (_graphDecodeCos is null || _graphDecodeCapacity < minCapacity)
         {
+            Tensor? oldCos = _graphDecodeCos, oldSin = _graphDecodeSin;
             (_graphDecodeCos, _graphDecodeSin) = backend.BuildRopeTableDevice(minCapacity, _cfg.HeadDim, _cfg.RotaryDim, _cfg.RopeTheta, _cfg.RopeScaling);
             _graphDecodeCapacity = minCapacity;
+            oldCos?.Dispose();
+            oldSin?.Dispose();
         }
         return (_graphDecodeCos!, _graphDecodeSin!);
     }

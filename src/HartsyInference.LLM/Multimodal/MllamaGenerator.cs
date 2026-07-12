@@ -31,7 +31,7 @@ public sealed class MllamaGenerator
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
         {
             Temperature = 0.4f, TopP = 0.9f, RepetitionPenalty = 1.1f, Seed = 1,
-        });
+        }, _text.Tokenizer, _text.Config.VocabSize);
         GenericTransformer model = _text.Transformer;
         int hidden = _text.Config.HiddenSize;
 

@@ -82,21 +82,23 @@ Check off an item only once it's independently re-verified at cut time, not just
 - [ ] **Gap**: no documented behavior/test for what happens when the KV pool is chronically undersized for
       the actual traffic pattern (repeated `KvPoolExhaustedException` under real load) — the exhaustion
       path itself is unit-tested, but not "what does an operator see/do about it in practice."
-- [ ] **Gap, re-scoped 2026-07-11**: CUDA-graph decode and speculative decoding (both shipped and verified —
-      see `LLM_DECODE_PERF_GRIND.md`) are wired into `TextGenerationPipeline.Generate` only; the server path
-      for dense/MoE chat models (`ModelManager.GenerateChatAsync` → `DynamicBatchScheduler`) has its own
-      decode loop and uses neither, so production traffic gets none of the measured speedups today.
-      Investigated retrofitting graph decode for the "exactly one active sequence" case and found it's a
-      BIGGER lift than first estimated: CUDA graph capture needs stable buffer addresses across every replay,
-      but `PagedKvCache.Gather`'s scratch buffer used to reallocate on every single decode step (fixed below,
-      as a separate real efficiency win) and even after that fix it's still not truly fixed-address the way
-      graph capture requires (only grow-only within one generation, not pre-sized for a full max sequence).
-      Retrofitting graph decode into the batched path needs either a genuinely fixed-capacity paged-cache
-      variant or a cache-format bridge — deliberately NOT attempted this cycle to avoid rushing a change into
-      the paged/batched path's hard-won correctness guarantees (byte-identical parity tests, 30/30 concurrent
-      stress test) without its own dedicated verification pass. Batched speculative decoding across a
-      dynamically-changing multi-sequence batch (variable per-sequence draft lengths reshape the batch every
-      round) is harder still. Both remain real, scoped, follow-up work — not done in this pass.
+- [x] **CUDA-graph decode retrofitted into `DynamicBatchScheduler`, 2026-07-11.** Was wired into
+      `TextGenerationPipeline.Generate` only (Phase 6 above), meaning production server traffic got none of
+      the measured speedup. A request admitted while the scheduler is otherwise idle now gets a dedicated
+      `FixedKvCache` and captures a graph once at admission, falling back permanently ("one-way retirement")
+      to the existing eager path the moment a second request arrives while it's running. Full design in
+      `LLM_DECODE_PERF_GRIND.md`'s "Phase 6b" section and `~/.claude/plans/nested-zooming-tower.md`. Verified
+      byte-identical output (including a transition test that forces a graph→eager mid-generation splice) and
+      a real **~32% server-side speedup** on a 500-token completion (111.0 → 146.6 tok/s, live
+      `/v1/chat/completions`, not a microbenchmark). Found and fixed a genuine pre-existing bug along the way:
+      a cold model's first-ever graph capture failed with `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` (weight
+      auto-promotion during capture) — this affected the original CLI-only feature too, just never caught
+      since every prior test happened to warm up the backend with an eager call first.
+- [ ] **Gap, remains out of scope**: speculative decoding (Phase 5b, also shipped and verified — see
+      `LLM_DECODE_PERF_GRIND.md`) is still wired into `TextGenerationPipeline.Generate` only. Batching it
+      across a dynamically-changing multi-sequence batch (variable per-sequence draft lengths reshape the
+      batch every round) is a harder problem than the graph-decode retrofit above and remains real, scoped,
+      follow-up work — not attempted in this pass.
 - [x] **Real efficiency win found investigating the above**: `PagedKvCache.Gather`'s scratch buffer was
       reallocating a full GPU tensor on EVERY decode round for EVERY active sequence (its size check was
       "changed at all" instead of "too small," and `_physicallyWritten` — hence the required size — grows by

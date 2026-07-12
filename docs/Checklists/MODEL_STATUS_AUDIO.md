@@ -71,7 +71,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **Vocos / vocoders** | ✅ | Test passes. |
 | **GPT-SoVITS HuBERT / CosyVoice sub-encoders** | ✅ | Validated above. |
 | **ACE-Step v1** (music DiT 3.5B) | ✅ | DiT ~1e-8 + DCAE decoder corr 1.0 + vocoder corr 1.0; full e2e on CUDA/3060 (bf16 + `HighPrecisionGemm`) writes finite audio. |
-| **ACE-Step v1.5 turbo** (music DiT 2B) | ✅ | DiT/cond-encoder/8-step loop all corr 1.0 (~1e-6) vs torch oracle on the real Comfy-Org turbo weights; Oobleck VAE corr 0.9999999999; e2e finite tonal stereo on CUDA. |
+| **ACE-Step v1.5 turbo** (music DiT 2B) | ✅ | DiT/cond-encoder/8-step loop all corr 1.0 (~1e-6) vs torch oracle on the real Comfy-Org turbo weights; Oobleck VAE corr 0.9999999999; e2e finite tonal stereo on CUDA. **Perf 2026-07-12:** DiT rewritten host-orchestrated → GPU-resident (device modulation/gated-residual/RoPE/KV-repeat, no per-op D2H sync); bit-identical to the pre-rewrite path (CPU golden maxAbs 0), **measured 55.3 ms/step = 0.44 s for the 8-step turbo DiT at 10 s audio on a 3060** (real weights, `AceStep15DitGpuBench`). Applies to all 9 variants. Follow-ups: F16 activations (needs a split-half F16 RoPE kernel), CUDA step-graph, XL quant. |
 | **Mimi** (codec) | 🔬 | SeaNet composed-weight load fixed (DSM checkpoint); DSM 32-cb decode reconcile in progress. Shared with CSM. |
 | **MusicGen / AudioGen** | ✅ | T5-base corr 1.0 + decoder logits corr 0.999999 + EnCodec-32k decode corr 1.0; e2e on CUDA writes music-like audio. 5 bugs fixed (T5/EnCodec). |
 | **YuE** (music, Stage-1) | ✅ | Stage-1 7B LM corr 1.0 (argmax 8/8) + XCodec (SoundStream) decode corr 1.0 → generates 16 kHz vocal audio. Stage-2 multi-codebook out of scope. |

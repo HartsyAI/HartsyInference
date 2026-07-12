@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using HartsyInference.Tokenizers;
 
 namespace HartsyInference.LLM.Sampling;
@@ -17,13 +16,11 @@ namespace HartsyInference.LLM.Sampling;
 /// never affects unconstrained requests.</para>
 ///
 /// <para><b>Vocab-text cache</b>: decoding every token id to text is done ONCE per tokenizer instance (i.e.
-/// once per loaded model, not once per request) via a <see cref="ConditionalWeakTable{TKey,TValue}"/> keyed
-/// on the tokenizer — the table is immutable per-model data, safe to share across concurrently-served
-/// requests.</para></summary>
+/// once per loaded model, not once per request) via <see cref="JsonVocabText"/>, shared with
+/// <see cref="SentinelJsonGrammarStep"/> — the table is immutable per-model data, safe to share across
+/// concurrently-served requests.</para></summary>
 public sealed class JsonGrammarStep : ISamplerStep
 {
-    private static readonly ConditionalWeakTable<ILlmTokenizer, string[]> VocabTextCache = new();
-
     private readonly string[] _vocabText;
     private readonly HashSet<int> _stopIds;
     private readonly JsonGrammarState _state = new();
@@ -31,19 +28,8 @@ public sealed class JsonGrammarStep : ISamplerStep
 
     public JsonGrammarStep(ILlmTokenizer tokenizer, int vocabSize)
     {
-        _vocabText = VocabTextCache.GetValue(tokenizer, t => BuildVocabText(t, vocabSize));
+        _vocabText = JsonVocabText.GetOrBuild(tokenizer, vocabSize);
         _stopIds = [.. tokenizer.StopIds];
-    }
-
-    private static string[] BuildVocabText(ILlmTokenizer tokenizer, int vocabSize)
-    {
-        string[] table = new string[vocabSize];
-        for (int i = 0; i < vocabSize; i++)
-        {
-            try { table[i] = tokenizer.Decode([i]); }
-            catch { table[i] = string.Empty; } // some ids (partial byte-fallback pieces etc.) may not decode standalone — treat conservatively as empty rather than throwing
-        }
-        return table;
     }
 
     /// <inheritdoc/>

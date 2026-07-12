@@ -134,6 +134,22 @@ public sealed class TextGenerationPipeline
         List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
     {
         TransformerConfig cfg = _model.Config;
+
+        // A genuinely cold model's first-ever graph capture can fail with CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED:
+        // prefill's multi-token GEMM shape and a single-token GEMV-shaped forward pass apparently promote a
+        // lazily-cast/quantized weight to GPU via different code paths, so if THIS is the first single-token
+        // access ever made for some weight (both a per-layer projection AND the LM head — two separate calls,
+        // both needed), that weight's first-time "auto-promote" allocation happens mid-capture, which CUDA
+        // forbids (only stream-ordered allocations are legal inside a capture region). Weight promotion is
+        // cached on the model/backend for its whole lifetime once it happens, so this is a one-time,
+        // first-request-only cost — forcing it here, via a real single-token forward + logits projection
+        // against a throwaway cache, moves it safely outside the capture region.
+        using (FixedKvCache warmup = new(cfg.NumLayers, 1, cfg.NumKvHeads, GraphDecodeWarmupHeadDims(cfg), maxSequenceLength: 2))
+        {
+            using Tensor warmupHidden = _model.Forward(_backend, [firstToken], 0, warmup);
+            _model.ProjectLogits(_backend, warmupHidden, 1).Dispose();
+        }
+
         Tensor embedTable = _model.EnsureEmbedResidentForGraphDecode(_backend);
         (Tensor cosTable, Tensor sinTable) = _model.EnsureRopeTableForGraphDecode(_backend, cache.MaxSequenceLength);
         ulong devicePos = _backend.AllocDevicePos();
@@ -315,6 +331,13 @@ public sealed class TextGenerationPipeline
     }
 
     private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
+
+    private static int[] GraphDecodeWarmupHeadDims(TransformerConfig cfg)
+    {
+        int[] a = new int[cfg.NumLayers];
+        for (int i = 0; i < cfg.NumLayers; i++) a[i] = cfg.HeadDimFor(i);
+        return a;
+    }
 
     private static unsafe Span<float> RowAt(Tensor logits, int row, int vocab)
     {

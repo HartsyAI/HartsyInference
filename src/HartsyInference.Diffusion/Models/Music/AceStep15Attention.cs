@@ -35,56 +35,100 @@ internal sealed unsafe class AceStep15Attention
 
     /// <summary>Attention over <paramref name="x"/> <c>[1, S, H]</c>. Pass <paramref name="crossKv"/> for
     /// cross-attention (keys/values from <c>[1, L, H]</c>, no RoPE); pass RoPE tables for self-attention.</summary>
+    // GPU-residency rewrite (mirrors Krea2Attention / the verified Flux/Hunyuan ports): every glue op — head split,
+    // per-head QK-RMSNorm, split-half RoPE, GQA K/V repeat, head merge — runs as an IBackend op so the activation
+    // chain stays device-resident (the old ReshapeTo/FromMultiHead + host ApplyRopeSplitHalf + host RepeatKvHeads
+    // loops D2H-synced every intermediate around every GEMM). Head split = declaring Q/K/V directly as [1, S, H, D]
+    // (byte-identical to [1, S, H·D]) so RmsNorm normalizes over headDim with no reshape; RoPE runs on that
+    // pre-permute layout via ApplyRopeSingle (broadcast over heads → GQA-correct per tensor); then Permute0213 to
+    // [1, H, S, D] for SDPA. Activation dtype follows the input (F16 on the HARTSY_DIT_F16 path; norm/rope tables
+    // stay F32). Q and K carry per-head RMSNorm, so pre-softmax scores are bounded and the F16 SDPA path is safe.
     public Tensor Forward(IBackend backend, Tensor x, Tensor? crossKv, float[]? ropeCos, float[]? ropeSin, Tensor? mask)
     {
         int s = (int)x.Shape[1];
         Tensor kvSrc = crossKv ?? x;
         int l = (int)kvSrc.Shape[1];
         int heads = _c.NumHeads, kvHeads = _c.NumKvHeads, hd = _c.HeadDim;
+        DType act = x.DType;
 
-        Tensor qFlat = new Tensor(new TensorShape(1, s, heads * hd), DType.F32);
-        Tensor kFlat = new Tensor(new TensorShape(1, l, kvHeads * hd), DType.F32);
-        Tensor vFlat = new Tensor(new TensorShape(1, l, kvHeads * hd), DType.F32);
-        backend.Linear(qFlat, x, _qW!, null);
-        backend.Linear(kFlat, kvSrc, _kW!, null);
-        backend.Linear(vFlat, kvSrc, _vW!, null);
+        // Q/K/V declared [1, S, H, D] (byte-identical to [1, S, H·D]) so RmsNorm normalizes over headDim (= _qNorm).
+        Tensor q = new Tensor(new TensorShape(1, s, heads, hd), act);
+        backend.Linear(q, x, _qW!, null);
+        Tensor k = new Tensor(new TensorShape(1, l, kvHeads, hd), act);
+        backend.Linear(k, kvSrc, _kW!, null);
+        Tensor v = new Tensor(new TensorShape(1, l, kvHeads, hd), act);
+        backend.Linear(v, kvSrc, _vW!, null);
 
-        Tensor qMh = DiTUtils.ReshapeToMultiHead(qFlat, 1, s, heads, hd);
-        Tensor kMh = DiTUtils.ReshapeToMultiHead(kFlat, 1, l, kvHeads, hd);
-        Tensor vMh = DiTUtils.ReshapeToMultiHead(vFlat, 1, l, kvHeads, hd);
-        qFlat.Dispose(); kFlat.Dispose(); vFlat.Dispose();
-
-        Tensor qNormed = new Tensor(qMh.Shape, DType.F32);
-        Tensor kNormed = new Tensor(kMh.Shape, DType.F32);
-        backend.RmsNorm(qNormed, qMh, _qNorm!, _c.RmsNormEps);
-        backend.RmsNorm(kNormed, kMh, _kNorm!, _c.RmsNormEps);
-        qMh.Dispose(); kMh.Dispose();
+        Tensor qN = new Tensor(q.Shape, act);
+        backend.RmsNorm(qN, q, _qNorm!, _c.RmsNormEps);
+        q.Dispose();
+        Tensor kN = new Tensor(k.Shape, act);
+        backend.RmsNorm(kN, k, _kNorm!, _c.RmsNormEps);
+        k.Dispose();
 
         if (ropeCos is not null && ropeSin is not null)
         {
-            ApplyRopeSplitHalf(qNormed, ropeCos, ropeSin, heads, s, hd);
-            ApplyRopeSplitHalf(kNormed, ropeCos, ropeSin, kvHeads, l, hd);
+            // Split-half RoPE on the [1, S, H, D] layout. The half-width host table is expanded to [1, S, headDim]
+            // with duplicated halves so ApplyRopeSingle's c[i]/c[i+half] both read the pair angle — bit-identical to
+            // the old host ApplyRopeSplitHalf (a·cos − b·sin, b·cos + a·sin over pairs (i, i+half)). Self-attention:
+            // l == s, so Q and K share one table.
+            Tensor cosDev = ExpandRope(ropeCos, s, hd);
+            Tensor sinDev = ExpandRope(ropeSin, s, hd);
+            backend.ApplyRopeSingle(qN, cosDev, sinDev, hd);
+            backend.ApplyRopeSingle(kN, cosDev, sinDev, hd);
+            cosDev.Dispose(); sinDev.Dispose();
         }
 
-        Tensor kRep = kNormed, vRep = vMh;
+        Tensor qMh = new Tensor(new TensorShape(1, heads, s, hd), act);
+        backend.Permute0213(qMh, qN, s, heads, hd);
+        qN.Dispose();
+        Tensor kMh = new Tensor(new TensorShape(1, kvHeads, l, hd), act);
+        backend.Permute0213(kMh, kN, l, kvHeads, hd);
+        kN.Dispose();
+        Tensor vMh = new Tensor(new TensorShape(1, kvHeads, l, hd), act);
+        backend.Permute0213(vMh, v, l, kvHeads, hd);
+        v.Dispose();
+
+        Tensor kRep = kMh, vRep = vMh;
         if (kvHeads != heads)
         {
             int group = heads / kvHeads;
-            kRep = RepeatKvHeads(kNormed, kvHeads, group, l, hd);
-            vRep = RepeatKvHeads(vMh, kvHeads, group, l, hd);
-            kNormed.Dispose(); vMh.Dispose();
+            kRep = new Tensor(new TensorShape(1, heads, l, hd), act);
+            backend.RepeatKvHeads(kRep, kMh, kvHeads, group);
+            vRep = new Tensor(new TensorShape(1, heads, l, hd), act);
+            backend.RepeatKvHeads(vRep, vMh, kvHeads, group);
+            kMh.Dispose(); vMh.Dispose();
         }
 
-        Tensor attn = new Tensor(new TensorShape(1, heads, s, hd), DType.F32);
-        backend.ScaledDotProductAttention(attn, qNormed, kRep, vRep, mask, 1f / MathF.Sqrt(hd));
-        qNormed.Dispose(); kRep.Dispose(); vRep.Dispose();
+        Tensor attn = new Tensor(new TensorShape(1, heads, s, hd), act);
+        backend.ScaledDotProductAttention(attn, qMh, kRep, vRep, mask, 1f / MathF.Sqrt(hd), allowF16: act == DType.F16);
+        qMh.Dispose(); kRep.Dispose(); vRep.Dispose();
 
-        Tensor merged = DiTUtils.ReshapeFromMultiHead(attn, 1, s, heads, hd);
+        Tensor attnFlat = new Tensor(new TensorShape(1, s, heads * hd), act);
+        backend.Permute0213(attnFlat, attn, heads, s, hd);
         attn.Dispose();
-        Tensor projected = new Tensor(new TensorShape(1, s, _c.HiddenSize), DType.F32);
-        backend.Linear(projected, merged, _oW!, null);
-        merged.Dispose();
+        Tensor projected = new Tensor(new TensorShape(1, s, _c.HiddenSize), act);
+        backend.Linear(projected, attnFlat, _oW!, null);
+        attnFlat.Dispose();
         return projected;
+    }
+
+    /// <summary>Expands a half-width RoPE table <c>[seqLen·headDim/2]</c> to a device tensor <c>[1, seqLen, headDim]</c>
+    /// with the second half duplicating the first, so <see cref="IBackend.ApplyRopeSingle"/> (which reads
+    /// <c>c[i]</c> and <c>c[i+half]</c>) applies the same pair angle to both elements — matching split-half RoPE.</summary>
+    private static Tensor ExpandRope(float[] halfTable, int seqLen, int headDim)
+    {
+        int half = headDim / 2;
+        Tensor t = new Tensor(new TensorShape(1, seqLen, headDim), DType.F32);
+        float* p = (float*)t.DataPointer;
+        for (int s = 0; s < seqLen; s++)
+            for (int i = 0; i < half; i++)
+            {
+                float val = halfTable[s * half + i];
+                p[s * headDim + i] = val;
+                p[s * headDim + i + half] = val;
+            }
+        return t;
     }
 
     /// <summary>Half-dim RoPE tables (<c>cos/sin [seqLen, headDim/2]</c>) for the Llama/Qwen split-half rotation.</summary>
@@ -113,38 +157,6 @@ internal sealed unsafe class AceStep15Attention
             for (int j = 0; j < seqLen; j++)
                 p[(long)i * seqLen + j] = Math.Abs(i - j) <= window ? 0f : -1e30f;
         return mask;
-    }
-
-    private static void ApplyRopeSplitHalf(Tensor x, float[] cos, float[] sin, int heads, int seqLen, int headDim)
-    {
-        int half = headDim / 2;
-        float* xp = (float*)x.DataPointer;
-        for (int h = 0; h < heads; h++)
-            for (int s = 0; s < seqLen; s++)
-            {
-                long off = ((long)h * seqLen + s) * headDim;
-                int posOff = s * half;
-                for (int i = 0; i < half; i++)
-                {
-                    float c = cos[posOff + i], si = sin[posOff + i];
-                    float a = xp[off + i], b = xp[off + i + half];
-                    xp[off + i] = a * c - b * si;
-                    xp[off + i + half] = b * c + a * si;
-                }
-            }
-    }
-
-    private static Tensor RepeatKvHeads(Tensor input, int kvHeads, int groupSize, int seqLen, int headDim)
-    {
-        Tensor output = new Tensor(new TensorShape(1, kvHeads * groupSize, seqLen, headDim), DType.F32);
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long perHead = (long)seqLen * headDim;
-        for (int h = 0; h < kvHeads; h++)
-            for (int g = 0; g < groupSize; g++)
-                Buffer.MemoryCopy(inPtr + h * perHead, outPtr + ((long)h * groupSize + g) * perHead,
-                    perHead * 4, perHead * 4);
-        return output;
     }
 
     private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);

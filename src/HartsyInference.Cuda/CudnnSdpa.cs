@@ -198,19 +198,39 @@ internal sealed class CudnnSdpa : IDisposable
                     CUDNN_TYPE_BACKEND_DESCRIPTOR, maxCfgs, out returned, cfgPtr);
                 if (gst != CUDNN_STATUS_SUCCESS) returned = 0;
             }
-            for (int i = 0; i < maxCfgs; i++)
+            // TryPlan can throw (SetAttr failure, e.g. a transient host-allocation error) instead of
+            // returning ok=false — without this try/finally, an exception mid-loop would skip every
+            // remaining cfgs[i]'s destroy call (both the current index and every index not yet reached),
+            // leaking up to 32 backend descriptors per throw. Under exactly the resource-pressure
+            // conditions that cause such a throw, that leak would make the underlying pressure worse with
+            // every retry — tracked per-index so the normal (non-throwing) destroy calls below aren't
+            // double-freed here.
+            bool[] destroyed = new bool[maxCfgs];
+            try
             {
-                if (i < returned)
+                for (int i = 0; i < maxCfgs; i++)
                 {
-                    (nint exec, long ws, bool ok) = TryPlan(cfgs[i]);
-                    if (ok)
+                    if (i < returned)
                     {
-                        // free the unused cfg descriptors, keep going only to release; exec plan is retained
-                        for (int j = 0; j < maxCfgs; j++) cudnnBackendDestroyDescriptor(cfgs[j]);
-                        return (exec, ws);
+                        (nint exec, long ws, bool ok) = TryPlan(cfgs[i]);
+                        if (ok)
+                        {
+                            // free the unused cfg descriptors, keep going only to release; exec plan is retained
+                            for (int j = 0; j < maxCfgs; j++)
+                            {
+                                if (!destroyed[j]) { cudnnBackendDestroyDescriptor(cfgs[j]); destroyed[j] = true; }
+                            }
+                            return (exec, ws);
+                        }
                     }
+                    cudnnBackendDestroyDescriptor(cfgs[i]);
+                    destroyed[i] = true;
                 }
-                cudnnBackendDestroyDescriptor(cfgs[i]);
+            }
+            finally
+            {
+                for (int i = 0; i < maxCfgs; i++)
+                    if (!destroyed[i]) cudnnBackendDestroyDescriptor(cfgs[i]);
             }
         }
         throw new InvalidOperationException("cuDNN SDPA: no engine config produced a valid execution plan");
@@ -220,10 +240,20 @@ internal sealed class CudnnSdpa : IDisposable
     {
         if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR, out nint p) != CUDNN_STATUS_SUCCESS)
             return (0, 0, false);
-        void* hp = (void*)_handle;
-        void* cp = (void*)cfg;
-        SetAttr(p, CUDNN_ATTR_EXECUTION_PLAN_HANDLE, CUDNN_TYPE_HANDLE, 1, &hp);
-        SetAttr(p, CUDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &cp);
+        try
+        {
+            void* hp = (void*)_handle;
+            void* cp = (void*)cfg;
+            SetAttr(p, CUDNN_ATTR_EXECUTION_PLAN_HANDLE, CUDNN_TYPE_HANDLE, 1, &hp);
+            SetAttr(p, CUDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &cp);
+        }
+        catch
+        {
+            // SetAttr throws directly on failure (doesn't return a status) — without this, a thrown
+            // exception here would leak the just-created execution-plan descriptor `p`.
+            cudnnBackendDestroyDescriptor(p);
+            throw;
+        }
         if (cudnnBackendFinalize(p) != CUDNN_STATUS_SUCCESS)
         {
             cudnnBackendDestroyDescriptor(p);
@@ -307,13 +337,13 @@ internal sealed class CudnnSdpa : IDisposable
     {
         int st = cudnnBackendSetAttribute(desc, attr, type, count, vals);
         if (st != CUDNN_STATUS_SUCCESS)
-            throw new InvalidOperationException($"cudnnBackendSetAttribute(attr={attr}) failed: {ErrorString(st)}");
+            throw new CudnnStatusException(st, $"cudnnBackendSetAttribute(attr={attr})");
     }
 
     private static void Check(int st, string what)
     {
         if (st != CUDNN_STATUS_SUCCESS)
-            throw new InvalidOperationException($"cuDNN {what} failed: {ErrorString(st)}");
+            throw new CudnnStatusException(st, what);
     }
 
     public void Dispose()

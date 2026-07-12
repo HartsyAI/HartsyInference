@@ -63,15 +63,30 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         public required TaskCompletionSource<GenerationResult> Completion;
     }
 
-    private sealed class ActiveSeq
+    /// <summary>One active sequence's per-request state. <see cref="Cache"/> is <see cref="IKvCache"/> (not
+    /// concretely <see cref="PagedKvCache"/>) so a sequence admitted while the scheduler is otherwise idle can
+    /// use a dedicated <see cref="FixedKvCache"/> instead — see the graph-decode retrofit design in
+    /// <c>docs/Checklists/LLM_DECODE_PERF_GRIND.md</c>'s "NEW PLAN" section. <see cref="GraphSession"/> is
+    /// non-null only for such a sequence, only while it's still eligible for graph replay (see
+    /// <see cref="RunLoopAsync"/>'s one-way retirement). <see cref="Dispose"/> is intentionally the ONLY way
+    /// callers free this sequence's resources (never call <c>seq.Cache.Dispose()</c> directly) so a session
+    /// can never be forgotten at a disposal call site.</summary>
+    private sealed class ActiveSeq : IDisposable
     {
         public required PendingRequest Pending;
         public required int[] PromptIds;
-        public required PagedKvCache Cache;
+        public required IKvCache Cache;
         public required SamplerChain Sampler;
         public required HashSet<int> Stops;
         public required List<int> Generated;
         public int Next;
+        public GraphDecodeSession? GraphSession;
+
+        public void Dispose()
+        {
+            Cache.Dispose();
+            GraphSession?.Dispose();
+        }
     }
 
     /// <summary>Creates a scheduler backed by <paramref name="pool"/> (shared across every sequence this
@@ -117,6 +132,18 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     /// production; never read unless a test sets it.</summary>
     internal Func<int, Exception?>? TestFaultInjector { get; set; }
 
+    /// <summary>Test-only override for the "does this architecture/backend support graph decode" check in
+    /// <see cref="AdmitAndPrefill"/> — the CPU backend never satisfies this for real (graph decode is
+    /// CUDA-only), so a CPU-backend unit test can't otherwise reach the solo-admission graph-capture path at
+    /// all. Null in production (falls through to the real <c>_model.SupportsGraphDecode(_backend)</c> check).</summary>
+    internal bool? TestForceSupportsGraphDecode { get; set; }
+
+    /// <summary>Test-only fault injection for <see cref="CaptureGraphSession"/>: when set, invoked once per
+    /// capture attempt; a non-null return is thrown instead of actually capturing, exercising the circuit
+    /// breaker (<see cref="_graphCaptureUnavailable"/>) without needing a real CUDA capture failure. Null in
+    /// production.</summary>
+    internal Func<Exception?>? TestGraphCaptureFailureInjector { get; set; }
+
     private async Task RunGpuWork(Action work)
     {
         if (_gpuGate is null) { work(); return; }
@@ -150,13 +177,14 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                 // Filter BEFORE decoding: a cancelled/stopped/limit-reached sequence never gets fed into a
                 // wasted batched step. Iterate in reverse so RemoveAt is safe mid-loop.
                 List<ActiveSeq> feeders = new(active.Count);
+                List<ActiveSeq> evicted = [];
                 for (int i = active.Count - 1; i >= 0; i--)
                 {
                     ActiveSeq seq = active[i];
                     if (seq.Pending.Ct.IsCancellationRequested)
                     {
-                        seq.Cache.Dispose();
                         seq.Pending.Completion.TrySetCanceled(seq.Pending.Ct);
+                        evicted.Add(seq);
                         active.RemoveAt(i);
                         continue;
                     }
@@ -165,18 +193,47 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     if (stoppedNow || atLimit)
                     {
                         CompleteSeq(seq, stoppedNow);
+                        evicted.Add(seq);
                         active.RemoveAt(i);
                         continue;
                     }
                     feeders.Add(seq);
                 }
+                if (evicted.Count > 0)
+                {
+                    // A sequence's Dispose() may touch real GPU resources (currently a PagedKvCache's gather
+                    // scratch tensors; later a solo sequence's dedicated FixedKvCache buffers and, once
+                    // graph-decode sessions exist, a captured CUDA graph + its device buffers) — batch every
+                    // eviction this round into ONE gated call so disposal never races concurrent GPU work
+                    // from another gated caller (diffusion, another model's scheduler), same rationale as
+                    // every other GPU-touching step here.
+                    await RunGpuWork(() => { foreach (ActiveSeq seq in evicted) seq.Dispose(); }).ConfigureAwait(false);
+                }
                 if (feeders.Count == 0) continue;
+
+                // Dispatch: a lone feeder carrying a captured graph replays it (one launch, no per-round
+                // kernel-issuance overhead); anything else — multiple feeders, or a solo feeder with no
+                // session — takes the existing eager batched path. A feeder that has a session but is NOT
+                // alone this round gets it retired (disposed, one-way — see ActiveSeq.GraphSession's doc)
+                // before the eager round runs, so it never sits around going stale.
+                Action work = feeders.Count == 1 && feeders[0].GraphSession is { } gs
+                    ? () => ReplayGraphRound(feeders[0], gs)
+                    : () =>
+                    {
+                        foreach (ActiveSeq seq in feeders)
+                        {
+                            if (seq.GraphSession is null) continue;
+                            seq.GraphSession.Dispose();
+                            seq.GraphSession = null;
+                        }
+                        RunDecodeRound(feeders);
+                    };
 
                 try
                 {
                     Exception? injected = TestFaultInjector?.Invoke(feeders.Count);
                     if (injected is not null) throw injected;
-                    await RunGpuWork(() => RunDecodeRound(feeders)).ConfigureAwait(false);
+                    await RunGpuWork(work).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -194,20 +251,19 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     Logs.Error($"DynamicBatchScheduler: decode round failed for {feeders.Count} sequence(s), failing them and continuing", ex);
                     foreach (ActiveSeq seq in feeders)
                     {
-                        seq.Cache.Dispose();
                         seq.Pending.Completion.TrySetException(ex);
                         active.Remove(seq);
                     }
+                    await RunGpuWork(() => { foreach (ActiveSeq seq in feeders) seq.Dispose(); }).ConfigureAwait(false);
                 }
             }
         }
         finally
         {
             foreach (ActiveSeq seq in active)
-            {
-                seq.Cache.Dispose();
                 seq.Pending.Completion.TrySetException(new ObjectDisposedException(nameof(DynamicBatchScheduler)));
-            }
+            if (active.Count > 0)
+                await RunGpuWork(() => { foreach (ActiveSeq seq in active) seq.Dispose(); }).ConfigureAwait(false);
         }
     }
 
@@ -216,10 +272,14 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         while (_incoming.Reader.TryRead(out PendingRequest? pending))
         {
             if (pending.Ct.IsCancellationRequested) { pending.Completion.TrySetCanceled(pending.Ct); continue; }
+            // Recomputed fresh for EACH dequeued request, not once per drain burst — active.Count grows as
+            // this loop admits earlier requests in the same burst, so a request 2nd-or-later in a burst that
+            // arrived all at once correctly sees itself as non-solo.
+            bool solo = active.Count == 0;
             try
             {
                 ActiveSeq? seq = null;
-                await RunGpuWork(() => seq = AdmitAndPrefill(pending)).ConfigureAwait(false);
+                await RunGpuWork(() => seq = AdmitAndPrefill(pending, solo)).ConfigureAwait(false);
                 active.Add(seq!);
             }
             catch (Exception ex)
@@ -242,7 +302,13 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         }
     }
 
-    private ActiveSeq AdmitAndPrefill(PendingRequest pending)
+    /// <summary>True once a CUDA-graph capture has failed once for this scheduler's model. A capture failure
+    /// is architecture/backend-determined, not request-specific — it will fail identically for every future
+    /// solo-eligible request against this same model, so this is a circuit breaker (stop attempting capture
+    /// at all, avoiding a repeat of whatever it costs to fail) rather than a per-request retry.</summary>
+    private bool _graphCaptureUnavailable;
+
+    private ActiveSeq AdmitAndPrefill(PendingRequest pending, bool solo)
     {
         GenerationRequest req = pending.Request;
         int[] promptIds = BuildPromptIds(req);
@@ -251,9 +317,25 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         if (req.StopTokenIds is not null) { stops = [.. _stopIds]; foreach (int s in req.StopTokenIds) stops.Add(s); }
 
         TransformerConfig cfg = _model.Config;
-        // Throws KvPoolExhaustedException if the pool can't fit the prompt — propagates to the caller's
-        // SubmitAsync task as a fault, the reject policy PagedKvPool documents.
-        PagedKvCache cache = new(_pool);
+        // Only a request admitted while the scheduler is otherwise idle, and only when it's eligible for the
+        // SAME reasons TextGenerationPipeline.Generate's graph-decode dispatch requires (greedy,
+        // SupportsGraphDecode), plus non-JSON-mode (that pipeline's own graph-decode step bypasses the CPU
+        // sampler chain entirely — including JsonGrammarStep — so combining the two would silently produce
+        // non-JSON output; excluded here even though the existing single-sequence pipeline doesn't exclude
+        // it, since the server is a much larger audience for this gap than the CLI). Gets a dedicated
+        // FixedKvCache instead of drawing from the shared pool — see DynamicBatchScheduler's class doc and
+        // ActiveSeq's GraphSession field doc for why this is safe and why it's a one-way admission decision
+        // (never converted later).
+        bool graphEligible = solo && !_graphCaptureUnavailable
+            && req.Sampling.Greedy && !req.Sampling.JsonMode
+            && (req.GraphDecode ?? (Environment.GetEnvironmentVariable("HARTSY_GRAPH_DECODE") == "1"))
+            && (TestForceSupportsGraphDecode ?? _model.SupportsGraphDecode(_backend));
+
+        // Throws KvPoolExhaustedException if the pool can't fit the prompt (PagedKvCache path only) —
+        // propagates to the caller's SubmitAsync task as a fault, the reject policy PagedKvPool documents.
+        IKvCache cache = graphEligible
+            ? new FixedKvCache(cfg.NumLayers, 1, cfg.NumKvHeads, HeadDimPerLayer(cfg), promptIds.Length + req.MaxTokens + 1)
+            : new PagedKvCache(_pool);
         try
         {
             List<int> generated = new(req.MaxTokens);
@@ -263,15 +345,111 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             using (Tensor logits = _model.ProjectLogits(_backend, hidden, promptIds.Length))
                 next = sampler.Next(LastRow(logits, promptIds.Length, cfg.VocabSize), generated);
 
+            GraphDecodeSession? session = null;
+            if (graphEligible)
+            {
+                try
+                {
+                    session = CaptureGraphSession((FixedKvCache)cache, promptIds.Length, next, req.Sampling.RepetitionPenalty);
+                }
+                catch (Exception captureEx)
+                {
+                    // SupportsGraphDecode said this architecture/backend combination SHOULD work — a capture
+                    // failure past that point is a genuine, unexpected gap, not a routine per-request
+                    // condition. Trip the breaker so no future request repeats this failure, then let it
+                    // propagate — DrainIncomingAsync's existing catch already fails just this one request
+                    // cleanly without wedging the loop, matching TextGenerationPipeline's own "opt-in, clear
+                    // error, not silent mis-generation" philosophy for this same failure mode.
+                    _graphCaptureUnavailable = true;
+                    Logs.Error("DynamicBatchScheduler: CUDA-graph capture failed for a solo-eligible sequence; disabling further graph-decode admission for this model", captureEx);
+                    throw;
+                }
+            }
+
             return new ActiveSeq
             {
                 Pending = pending, PromptIds = promptIds, Cache = cache, Sampler = sampler,
-                Stops = stops, Generated = generated, Next = next,
+                Stops = stops, Generated = generated, Next = next, GraphSession = session,
             };
         }
         catch
         {
             cache.Dispose();
+            throw;
+        }
+    }
+
+    private static int[] HeadDimPerLayer(TransformerConfig cfg)
+    {
+        int[] a = new int[cfg.NumLayers];
+        for (int i = 0; i < cfg.NumLayers; i++) a[i] = cfg.HeadDimFor(i);
+        return a;
+    }
+
+    /// <summary>Captures one CUDA graph for greedy decode against <paramref name="cache"/> — mirrors
+    /// <see cref="TextGenerationPipeline"/>'s <c>GenerateGraphDecode</c> capture step exactly (same device
+    /// buffer allocations, same capture call), just returning a <see cref="GraphDecodeSession"/> that
+    /// outlives one method call instead of local variables scoped to one generation. On failure, disposes
+    /// whatever was already allocated before rethrowing — no partial session leaks.</summary>
+    private GraphDecodeSession CaptureGraphSession(FixedKvCache cache, int promptLen, int firstToken, float repetitionPenalty)
+    {
+        // Checked before any real backend call so a test can simulate a capture failure without needing an
+        // actual CUDA-capable backend (see TestGraphCaptureFailureInjector's doc) — every call attempted
+        // after this point genuinely touches the backend, so a production capture failure is always real.
+        Exception? injected = TestGraphCaptureFailureInjector?.Invoke();
+        if (injected is not null) throw injected;
+
+        // Found live testing this retrofit: a genuinely COLD model's first-ever solo admission reliably
+        // failed capture with CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED inside DenseFfn's weight projection —
+        // prefill's multi-token GEMM shape apparently promotes weights lazily via a different path than the
+        // single-token GEMV shape decode uses, so the FIRST-EVER single-token forward pass for this model
+        // can trigger a non-stream-ordered "auto-promote to GPU" allocation, which CUDA forbids mid-capture.
+        // Every later solo admission is unaffected (once promoted, a weight stays promoted for the model's
+        // lifetime) — this is a one-time, first-request-only cost. Forcing that promotion via a real
+        // single-token forward pass HERE, before capture starts, using a throwaway cache (weight promotion
+        // is cached on the model/backend, not tied to any specific cache instance, so this warms up exactly
+        // what the real capture will need without touching the real sequence's cache/position state at all)
+        // moves the failure-prone allocation safely outside the capture region. This is a pre-existing gap in
+        // TextGenerationPipeline.GenerateGraphDecode too (confirmed: reproduces there identically, no
+        // scheduler code involved) — not something this retrofit introduced, but this is the first code path
+        // that realistically hits it on a cold model (a single CLI process rarely captures graph decode
+        // completely cold the way a freshly-loaded server model's first request does).
+        // Every weight touched by a single-token-shaped (GEMV) forward pass needs this — not just the
+        // per-layer MLP/attention projections but also the LM head (ProjectLogits), which is a SEPARATE
+        // call from Forward and needs its own single-token-shaped warm-up (prefill's own ProjectLogits call
+        // uses promptLen>1 positions — a GEMM shape — so it doesn't warm the GEMV path either).
+        TransformerConfig warmupCfg = _model.Config;
+        using (FixedKvCache warmup = new(warmupCfg.NumLayers, 1, warmupCfg.NumKvHeads, HeadDimPerLayer(warmupCfg), maxSequenceLength: 2))
+        {
+            using Tensor warmupHidden = _model.Forward(_backend, [firstToken], 0, warmup);
+            _model.ProjectLogits(_backend, warmupHidden, 1).Dispose();
+        }
+
+        Tensor embedTable = _model.EnsureEmbedResidentForGraphDecode(_backend);
+        (Tensor cosTable, Tensor sinTable) = _model.EnsureRopeTableForGraphDecode(_backend, cache.MaxSequenceLength);
+        ulong devicePos = _backend.AllocDevicePos();
+        ulong deviceTokenId = _backend.AllocDeviceTokenId();
+        ulong history = _backend.AllocDeviceHistory(cache.MaxSequenceLength);
+        ulong historyCount = _backend.AllocDeviceCounter();
+        object? graph = null;
+        try
+        {
+            int pos = promptLen;
+            _backend.WriteDeviceTokenId(deviceTokenId, firstToken);
+            _backend.WriteDevicePos(devicePos, pos + 1, pos);
+            _backend.WriteDeviceCounter(historyCount, 0);
+            graph = _backend.CaptureGraph(() =>
+                _model.ForwardGraphDecodeStep(_backend, embedTable, cache, cosTable, sinTable, devicePos, deviceTokenId,
+                    history, historyCount, repetitionPenalty));
+            return new GraphDecodeSession(_backend, graph!, devicePos, deviceTokenId, history, historyCount, pos);
+        }
+        catch
+        {
+            if (graph is not null) _backend.DisposeGraph(graph);
+            _backend.FreeDevicePos(devicePos);
+            _backend.FreeDeviceTokenId(deviceTokenId);
+            _backend.FreeDeviceHistory(history);
+            _backend.FreeDeviceCounter(historyCount);
             throw;
         }
     }
@@ -301,6 +479,30 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             feeders[b].Next = feeders[b].Sampler.Next(LastRow(logits, b + 1, cfg.VocabSize), feeders[b].Generated);
     }
 
+    /// <summary>One round for a lone sequence with a captured graph — mirrors
+    /// <see cref="TextGenerationPipeline"/>'s <c>GenerateGraphDecode</c> per-step loop body exactly (add the
+    /// current token, invoke the callback, THEN replay to get the next one) so the scheduler's existing
+    /// stop/MaxTokens eviction check — which runs BEFORE this round, on <see cref="ActiveSeq.Next"/> — stays
+    /// exactly as correct here as it already is for <see cref="RunDecodeRound"/>. <see cref="IKvCache.AdvanceLength"/>
+    /// is called explicitly here (unlike the CLI path, which never needs to since it never mixes a
+    /// <see cref="FixedKvCache"/> into a later eager multi-sequence round) — required so
+    /// <see cref="ActiveSeq.Cache"/>'s position bookkeeping stays correct if this sequence is later joined by
+    /// another and falls back to <see cref="RunDecodeRound"/>'s eager path, which reads
+    /// <see cref="IKvCache.CurrentLength"/> to compute that round's position.</summary>
+    private void ReplayGraphRound(ActiveSeq seq, GraphDecodeSession gs)
+    {
+        seq.Generated.Add(seq.Next);
+        seq.Pending.OnToken?.Invoke(seq.Next);
+        int next = gs.Replay();
+        gs.Pos++;
+        gs.WriteNextPos();
+        seq.Cache.AdvanceLength(1);
+        seq.Next = next;
+    }
+
+    /// <summary>Builds the final result and completes the request's task. Does NOT dispose <paramref name="seq"/>
+    /// — callers batch every evicted sequence's disposal into one gated <see cref="RunGpuWork"/> call (see
+    /// <see cref="RunLoopAsync"/>) rather than disposing inline here, one at a time, ungated.</summary>
     private void CompleteSeq(ActiveSeq seq, bool stopped)
     {
         GenerationResult result = new()
@@ -310,7 +512,6 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             PromptTokens = seq.PromptIds.Length,
             StoppedOnStopToken = stopped,
         };
-        seq.Cache.Dispose();
         seq.Pending.Completion.TrySetResult(result);
     }
 

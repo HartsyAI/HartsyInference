@@ -26,7 +26,7 @@ public sealed unsafe class AceStep15Dit : IDisposable
     private Tensor? _projInW, _projInB, _projOutW, _projOutB;
     private Tensor? _tL1W, _tL1B, _tL2W, _tL2B, _tProjW, _tProjB;
     private Tensor? _rL1W, _rL1B, _rL2W, _rL2B, _rProjW, _rProjB;
-    private Tensor? _condEmbW, _condEmbB, _normOutW, _globalScaleShift;
+    private Tensor? _condEmbW, _condEmbB, _normOutW, _globalScaleShift, _globalScaleShiftFlat;
 
     public AceStep15Dit(AceStep15Config config) => _config = config;
 
@@ -55,6 +55,8 @@ public sealed unsafe class AceStep15Dit : IDisposable
 
         _normOutW = EnsureF32(w["decoder.norm_out.weight"]);
         _globalScaleShift = EnsureF32(w["decoder.scale_shift_table"]);
+        // Flattened [1, 2·dim] view for the device SliceRows split in FinalLayer (host indexing i·dim unchanged).
+        _globalScaleShiftFlat = _globalScaleShift.Reshape(new TensorShape(1, 2 * _config.HiddenSize));
         _projOutW = w["decoder.proj_out.1.weight"];
         _projOutB = w["decoder.proj_out.1.bias"];
     }
@@ -103,15 +105,22 @@ public sealed unsafe class AceStep15Dit : IDisposable
         Tensor? slidingMask = s > _config.SlidingWindow + 1
             ? AceStep15Attention.BuildSlidingMask(s, _config.SlidingWindow) : null;
 
+        // Device-resident layer chain: each layer returns a fresh tensor (no in-place host mutation), so the whole
+        // stack stays on-device between GEMMs — the previous per-op DataPointer host loops synced every step.
+        Tensor cur = tokens;
         for (int i = 0; i < _layers.Length; i++)
-            _layers[i].Forward(backend, tokens, cond, proj6, cos, sin,
+        {
+            Tensor next = _layers[i].Forward(backend, cur, cond, proj6, cos, sin,
                 _config.IsSlidingLayer(i) ? slidingMask : null);
+            cur.Dispose();
+            cur = next;
+        }
         slidingMask?.Dispose();
         cond.Dispose();
         proj6.Dispose();
 
-        Tensor velocity = FinalLayer(backend, tokens, temb, s, t);
-        tokens.Dispose();
+        Tensor velocity = FinalLayer(backend, cur, temb, s, t);
+        cur.Dispose();
         temb.Dispose();
         return velocity;
     }
@@ -183,21 +192,23 @@ public sealed unsafe class AceStep15Dit : IDisposable
         int dim = _config.HiddenSize, latCh = _config.LatentChannels;
         Tensor normed = new Tensor(tokens.Shape, DType.F32);
         backend.RmsNorm(normed, tokens, _normOutW!, _config.RmsNormEps);
-        float* gp = (float*)_globalScaleShift!.DataPointer;
-        float* tp = (float*)temb.DataPointer;
-        float* np = (float*)normed.DataPointer;
-        for (int i = 0; i < s; i++)
-            for (int d = 0; d < dim; d++)
-            {
-                float shift = gp[d] + tp[d];
-                float scale = gp[dim + d] + tp[d];
-                long off = (long)i * dim + d;
-                np[off] = np[off] * (1f + scale) + shift;
-            }
+        // AdaLN from the model-level table (chunk 2: shift, scale), device-resident. Both shift and scale add the
+        // SAME temb; out = normed·(1+scale)+shift. Bit-identical to the old host loop.
+        Tensor g0 = new Tensor(new TensorShape(1, dim), DType.F32);
+        Tensor g1 = new Tensor(new TensorShape(1, dim), DType.F32);
+        backend.SliceRows(g0, _globalScaleShiftFlat!, 0);
+        backend.SliceRows(g1, _globalScaleShiftFlat!, 1);
+        Tensor shiftVec = new Tensor(new TensorShape(1, dim), DType.F32);
+        Tensor scaleVec = new Tensor(new TensorShape(1, dim), DType.F32);
+        backend.Add(shiftVec, g0, temb);
+        backend.Add(scaleVec, g1, temb);
+        g0.Dispose(); g1.Dispose();
+        Tensor modded = DiTUtils.Modulate(backend, normed, shiftVec, scaleVec, normed.Shape);
+        normed.Dispose(); shiftVec.Dispose(); scaleVec.Dispose();
 
         Tensor channelsFirst = new Tensor(new TensorShape(1, dim, s), DType.F32);
-        backend.Transpose2D(channelsFirst, normed, s, dim);
-        normed.Dispose();
+        backend.Transpose2D(channelsFirst, modded, s, dim);
+        modded.Dispose();
         Tensor conv = new Tensor(new TensorShape(1, latCh, t), DType.F32);
         backend.ConvTranspose1d(conv, channelsFirst, _projOutW!, _projOutB, _config.PatchSize, 0, 0, 1, 1);
         channelsFirst.Dispose();
@@ -235,7 +246,8 @@ public sealed unsafe class AceStep15Dit : IDisposable
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
-            _scaleShift = EnsureF32(w[$"{p}.scale_shift_table"]);
+            // Flattened [1, 6·dim] for the device modulation split (SplitModulation); host indexing i·dim unchanged.
+            _scaleShift = EnsureF32(w[$"{p}.scale_shift_table"]).Reshape(new TensorShape(1, 6 * _c.HiddenSize));
             _selfNorm = EnsureF32(w[$"{p}.self_attn_norm.weight"]);
             _crossNorm = EnsureF32(w[$"{p}.cross_attn_norm.weight"]);
             _mlpNorm = EnsureF32(w[$"{p}.mlp_norm.weight"]);
@@ -256,69 +268,66 @@ public sealed unsafe class AceStep15Dit : IDisposable
             foreach (Tensor t in _mlp.EnumerateWeights()) yield return t;
         }
 
-        /// <summary>Updates <paramref name="x"/> <c>[1, S, H]</c> in place.</summary>
-        public void Forward(IBackend backend, Tensor x, Tensor cond, Tensor proj6,
+        /// <summary>Returns a fresh <c>[1, S, H]</c> tensor (input untouched) — device-resident: the AdaLN-6 split,
+        /// the two (1+scale)·norm+shift affines, the two gated residuals and the ungated cross-attn add all run as
+        /// IBackend ops (no per-op DataPointer host loops). Bit-identical F32 math to the old in-place host path.</summary>
+        public Tensor Forward(IBackend backend, Tensor x, Tensor cond, Tensor proj6,
             float[] cos, float[] sin, Tensor? mask)
         {
             int s = (int)x.Shape[1], dim = _c.HiddenSize;
-            float* table = (float*)_scaleShift!.DataPointer;
-            float* proj = (float*)proj6.DataPointer;
+            DType act = x.DType;
             TensorShape shape = new TensorShape(1, s, dim);
 
-            Tensor n1 = new Tensor(shape, DType.F32);
+            // 6 modulation vectors [1, dim] = scale_shift_table + proj6, split on-device:
+            // [shift_sa, scale_sa, gate_sa, shift_mlp, scale_mlp, gate_mlp].
+            Tensor[] mod = SplitModulation(backend, proj6, dim);
+
+            Tensor n1 = new Tensor(shape, act);
             backend.RmsNorm(n1, x, _selfNorm!, _c.RmsNormEps);
-            Modulate(n1, table, proj, dim, shiftIdx: 0, scaleIdx: 1, rows: s);
-            Tensor attn = _selfAttn.Forward(backend, n1, crossKv: null, cos, sin, mask);
+            Tensor preAttn = DiTUtils.Modulate(backend, n1, mod[0], mod[1], shape);   // (1+scale_sa)·n1 + shift_sa
             n1.Dispose();
-            GatedAdd(x, attn, table, proj, dim, gateIdx: 2, rows: s);
+            Tensor attn = _selfAttn.Forward(backend, preAttn, crossKv: null, cos, sin, mask);
+            preAttn.Dispose();
+            Tensor h1 = new Tensor(shape, act);
+            backend.GatedResidualLastDim(h1, x, attn, mod[2]);                        // x + gate_sa·attn
             attn.Dispose();
 
-            Tensor n2 = new Tensor(shape, DType.F32);
-            backend.RmsNorm(n2, x, _crossNorm!, _c.RmsNormEps);
+            Tensor n2 = new Tensor(shape, act);
+            backend.RmsNorm(n2, h1, _crossNorm!, _c.RmsNormEps);
             Tensor cross = _crossAttn.Forward(backend, n2, cond, ropeCos: null, ropeSin: null, mask: null);
             n2.Dispose();
-            AddInPlace(x, cross);
-            cross.Dispose();
+            Tensor h2 = new Tensor(shape, act);
+            backend.Add(h2, h1, cross);                                              // ungated cross-attn residual
+            h1.Dispose(); cross.Dispose();
 
-            Tensor n3 = new Tensor(shape, DType.F32);
-            backend.RmsNorm(n3, x, _mlpNorm!, _c.RmsNormEps);
-            Modulate(n3, table, proj, dim, shiftIdx: 3, scaleIdx: 4, rows: s);
-            Tensor ff = _mlp.Forward(backend, n3, 1, s);
+            Tensor n3 = new Tensor(shape, act);
+            backend.RmsNorm(n3, h2, _mlpNorm!, _c.RmsNormEps);
+            Tensor preMlp = DiTUtils.Modulate(backend, n3, mod[3], mod[4], shape);    // (1+scale_mlp)·n3 + shift_mlp
             n3.Dispose();
-            GatedAdd(x, ff, table, proj, dim, gateIdx: 5, rows: s);
-            ff.Dispose();
+            Tensor ff = _mlp.Forward(backend, preMlp, 1, s);
+            preMlp.Dispose();
+            Tensor h3 = new Tensor(shape, act);
+            backend.GatedResidualLastDim(h3, h2, ff, mod[5]);                        // h2 + gate_mlp·ff
+            h2.Dispose(); ff.Dispose();
+
+            foreach (Tensor m in mod) m.Dispose();
+            return h3;
         }
 
-        private static void Modulate(Tensor x, float* table, float* proj, int dim, int shiftIdx, int scaleIdx, int rows)
+        /// <summary>Splits <c>proj6 [1, 6·dim] + scale_shift_table [1, 6·dim]</c> into 6 <c>[1, dim]</c> vectors,
+        /// device-resident (one Add over the whole width + 6 row slices), mirroring Krea2Block.SplitModulation.</summary>
+        private Tensor[] SplitModulation(IBackend backend, Tensor proj6, int dim)
         {
-            float* xp = (float*)x.DataPointer;
-            for (int i = 0; i < rows; i++)
-                for (int d = 0; d < dim; d++)
-                {
-                    float shift = table[shiftIdx * dim + d] + proj[shiftIdx * dim + d];
-                    float scale = table[scaleIdx * dim + d] + proj[scaleIdx * dim + d];
-                    long off = (long)i * dim + d;
-                    xp[off] = xp[off] * (1f + scale) + shift;
-                }
-        }
-
-        private static void GatedAdd(Tensor target, Tensor value, float* table, float* proj, int dim, int gateIdx, int rows)
-        {
-            float* tp = (float*)target.DataPointer;
-            float* vp = (float*)value.DataPointer;
-            for (int i = 0; i < rows; i++)
-                for (int d = 0; d < dim; d++)
-                {
-                    float gate = table[gateIdx * dim + d] + proj[gateIdx * dim + d];
-                    tp[(long)i * dim + d] += gate * vp[(long)i * dim + d];
-                }
-        }
-
-        private static void AddInPlace(Tensor target, Tensor value)
-        {
-            float* tp = (float*)target.DataPointer;
-            float* vp = (float*)value.DataPointer;
-            for (long i = 0; i < target.Shape.ElementCount; i++) tp[i] += vp[i];
+            Tensor packed = new Tensor(new TensorShape(1, 6 * dim), DType.F32);
+            backend.Add(packed, proj6, _scaleShift!);
+            Tensor[] mod = new Tensor[6];
+            for (int i = 0; i < 6; i++)
+            {
+                mod[i] = new Tensor(new TensorShape(1, dim), DType.F32);
+                backend.SliceRows(mod[i], packed, i);
+            }
+            packed.Dispose();
+            return mod;
         }
 
         private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
