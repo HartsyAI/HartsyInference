@@ -37,7 +37,7 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         HashSet<int>? actionSet = config.ActionBlocks is null ? null : [.. config.ActionBlocks];
         for (int i = 0; i < config.NumLayers; i++)
         {
-            _blocks[i] = new WanVideoBlock(wan, crossAttnNorm: true);
+            _blocks[i] = new WanVideoBlock(wan, crossAttnNorm: true) { FfnDtype = DiTBlocks.DitDtype.Act };
             if (actionSet is null || actionSet.Contains(i))
                 _actionModules[i] = new MatrixGame3ActionModule(config.InnerDim,
                     keyboardDimIn: config.KeyboardDim, hiddenSize: config.ActionHiddenSize,

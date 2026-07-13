@@ -140,9 +140,21 @@ public sealed class WhisperTokenizer : IDisposable
     /// <c>"zh"</c>, <c>"yue"</c>. Throws if the code is unknown.</summary>
     public static int LanguageToTokenId(string code)
     {
-        int idx = WhisperLanguageTable.IndexOf(code);
+        int idx = WhisperLanguageTable.IndexOf(NormalizeLanguageCode(code));
         if (idx < 0) throw new ArgumentException($"Unknown Whisper language code '{code}'.", nameof(code));
         return 50_259 + idx;
+    }
+
+    /// <summary>Normalizes a caller-supplied language code to the ISO-639-1 form Whisper's table uses: lowercases
+    /// and strips any BCP-47 / locale region subtag, so <c>"en-US"</c>, <c>"en_US"</c>, and <c>"EN"</c> all map to
+    /// <c>"en"</c>. Multi-letter codes without a separator (e.g. <c>"yue"</c>) pass through unchanged. Without this,
+    /// a UI/API defaulting to a locale like <c>"en-US"</c> throws "Unknown Whisper language code".</summary>
+    private static string NormalizeLanguageCode(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return code;
+        string c = code.Trim().ToLowerInvariant();
+        int sep = c.IndexOfAny(['-', '_']);
+        return sep > 0 ? c[..sep] : c;
     }
 
     /// <summary>Returns the language code for a Whisper language token ID (50259..50357

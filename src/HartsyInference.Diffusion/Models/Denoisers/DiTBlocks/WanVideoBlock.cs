@@ -98,8 +98,11 @@ public sealed unsafe class WanVideoBlock
         Tensor n2 = LayerNorm(backend, h1, _norm2W, _norm2B, s);
         Tensor attn2 = CrossAttention(backend, n2, encoder, imageContextLen);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn2", attn2);
+        // Matrix-Game 3.0's memory-mode block builds the cross-attn residual on the NORMED hidden state
+        // (`x = norm3(x); x = x + cross_attn(x)` in wan/modules/model.py cross_attn_ffn), so norm3 is destructive.
+        // Default (whole video fleet) keeps the standard `x + cross_attn(norm3(x))` residual on the un-normed h1.
+        Tensor h2 = CrossAttnResidualNormed ? AddRows(backend, n2, attn2, s) : AddRows(backend, h1, attn2, s);
         n2.Dispose();
-        Tensor h2 = AddRows(backend, h1, attn2, s);
         h1.Dispose();
         attn2.Dispose();
 
@@ -228,9 +231,32 @@ public sealed unsafe class WanVideoBlock
         return o;
     }
 
+    /// <summary>Activation dtype for the FFN's big [s, ffn_dim] intermediate — <c>DType.F16</c> halves its
+    /// bandwidth (the dominant per-block activation), F32-accumulated in the GEMMs, tiny cast boundaries. Default
+    /// F32 keeps every existing caller (the whole video fleet) byte-identical; opt-in models (Matrix-Game 2.0) set
+    /// it to <see cref="DiTBlocks.DitDtype.Act"/>. QK/cross-attn already run F16 via <c>allowF16</c> SDPA.</summary>
+    internal DType FfnDtype = DType.F32;
+
+    /// <summary>When true, the cross-attention residual is built on the NORMED hidden state (Matrix-Game 3.0's
+    /// memory-mode block: <c>x = norm3(x); x = x + cross_attn(x)</c>). Default false = the standard Wan
+    /// <c>x + cross_attn(norm3(x))</c> residual (the whole video fleet). Opt-in per model; no video regression.</summary>
+    internal bool CrossAttnResidualNormed = false;
+
     private Tensor Ffn(IBackend backend, Tensor x, int s)
     {
         int inner = (int)_ffProjW!.Shape[0];
+        if (FfnDtype == DType.F16 && backend.SupportsF16Activations)
+        {
+            Tensor xF16 = new Tensor(x.Shape, DType.F16); backend.CastToF16(xF16, x);
+            Tensor projH = new Tensor(new TensorShape(s, inner), DType.F16); backend.Linear(projH, xF16, _ffProjW!, _ffProjB);
+            xF16.Dispose();
+            Tensor actH = new Tensor(projH.Shape, DType.F16); backend.Gelu(actH, projH); projH.Dispose();
+            Tensor outH = new Tensor(new TensorShape(s, _dim), DType.F16); backend.Linear(outH, actH, _ffOutW!, _ffOutB);
+            actH.Dispose();
+            Tensor outF = new Tensor(new TensorShape(s, _dim), DType.F32); backend.CastToF32(outF, outH);
+            outH.Dispose();
+            return outF;
+        }
         Tensor proj = new Tensor(new TensorShape(s, inner), DType.F32); backend.Linear(proj, x, _ffProjW!, _ffProjB);
         Tensor act = new Tensor(proj.Shape, DType.F32); backend.Gelu(act, proj); proj.Dispose();
         Tensor outT = new Tensor(new TensorShape(s, _dim), DType.F32); backend.Linear(outT, act, _ffOutW!, _ffOutB);

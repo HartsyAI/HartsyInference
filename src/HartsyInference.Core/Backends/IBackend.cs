@@ -1135,6 +1135,10 @@ public interface IBackend : IDisposable
     /// RMS/L2-normalized (Wan) — since unbounded scores (some fp8 archs) overflow F16 and produce black output.</param>
     void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false);
 
+    /// <summary>True when the backend has F16-activation kernels (Linear/Gelu/norms/cast). The CPU reference
+    /// backend is F32-only, so DiT F16 fast paths must gate on this and fall back to F32 when it is false.</summary>
+    bool SupportsF16Activations => false;
+
     /// <summary>FlashAttention: fused online-softmax attention that never materializes the score matrix and is
     /// grouped-query aware (no need to replicate K/V). <paramref name="query"/> is <c>[B, Hq, Tq, D]</c>;
     /// <paramref name="key"/>/<paramref name="value"/> are <c>[B, Hkv, Lk, D]</c>; <paramref name="output"/> is

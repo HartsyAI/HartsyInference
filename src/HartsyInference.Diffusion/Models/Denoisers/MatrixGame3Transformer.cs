@@ -40,7 +40,7 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
         HashSet<int>? actionSet = config.ActionBlocks is null ? null : [.. config.ActionBlocks];
         for (int i = 0; i < config.NumLayers; i++)
         {
-            _blocks[i] = new WanVideoBlock(wan, crossAttnNorm: true);
+            _blocks[i] = new WanVideoBlock(wan, crossAttnNorm: true) { CrossAttnResidualNormed = true };  // use_memory=True → destructive norm3
             if (actionSet is null || actionSet.Contains(i))
                 _actionModules[i] = new MatrixGame3ActionModule(config.InnerDim,
                     hiddenSize: config.ActionHiddenSize, streamHiddenDim: config.ActionStreamDim,
@@ -111,7 +111,7 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
     /// input <c>[S_total, PluckerPatchDim]</c>. Returns <c>[1, 48, outputFrames, H, W]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float[] frameTimesteps,
         ReadOnlySpan<int> ropeFrameIndices, int memoryFrames, int outputFrames,
-        Tensor? mouse, Tensor? keyboard, Tensor? pluckerTokens)
+        Tensor? mouse, Tensor? keyboard, Tensor? pluckerTokens, Dictionary<string, Tensor>? taps = null)
     {
         int t = (int)latent.Shape[2], hh = (int)latent.Shape[3], ww = (int)latent.Shape[4];
         (int pt, int ph, int pw) = _config.PatchSize;
@@ -136,6 +136,7 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
         Tensor encoderFixed = PadOrTruncateRows(encoder, _config.TextLen, _config.TextDim);
         Tensor encoderProj = WanDitOps.TextEmbed(backend, encoderFixed, dim, _textW1!, _textB1, _textW2!, _textB2);
         if (!ReferenceEquals(encoderFixed, encoder)) encoderFixed.Dispose();
+        if (taps is not null) { taps["patch"] = CloneCpu(hidden); taps["ctx"] = CloneCpu(encoderProj); }
 
         int tokensPerGroup = s / gt;
         int[] frameIdx = ropeFrameIndices.ToArray();
@@ -149,6 +150,12 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup, hook);
             cur.Dispose();
             cur = next;
+            if (taps is not null)
+            {
+                taps[$"b{i}"] = CloneCpu(cur);
+                if (i == 0) taps["block0"] = CloneCpu(cur);
+                if (i == _blocks.Length - 1) taps["blockLast"] = CloneCpu(cur);
+            }
         }
         cos.Dispose(); sin.Dispose(); timestepProj.Dispose(); encoderProj.Dispose();
 
@@ -228,6 +235,15 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
     }
 
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
+
+    /// <summary>Fresh host F32 copy of a tensor (parity-tap snapshot; a DataPointer read syncs CUDA tensors to host).</summary>
+    private static Tensor CloneCpu(Tensor src)
+    {
+        Tensor dst = new Tensor(src.Shape, DType.F32);
+        new ReadOnlySpan<float>((float*)src.DataPointer, (int)src.ElementCount)
+            .CopyTo(new Span<float>((float*)dst.DataPointer, (int)dst.ElementCount));
+        return dst;
+    }
 
     public void Dispose()
     {

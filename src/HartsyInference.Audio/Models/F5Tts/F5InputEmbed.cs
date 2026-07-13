@@ -127,15 +127,17 @@ internal sealed unsafe class F5ConvPosEmbed
         Tensor xCF = new(new TensorShape(1, dim, t), DType.F32);
         backend.Transpose2D(xCF, x, t, dim);
 
-        // Conv1
+        // Conv1 — grouped Conv1D on-device (weight [C_out, C_in/groups, K] matches backend.Conv1d). The old
+        // F5Ops.GroupedConv1D was a host quintuple-loop (~2.3B MACs/conv × 2 × NFE forwards) that pinned one
+        // CPU core and was ~99% of F5's wall time; backend.Conv1d routes to cuDNN / a grouped CUDA kernel.
         Tensor c1 = new(xCF.Shape, DType.F32);
-        F5Ops.GroupedConv1D(c1, xCF, _conv0W!, _conv0B!, 1, dim, t, kernel, pad, groups);
+        backend.Conv1d(c1, xCF, _conv0W!, _conv0B!, stride: 1, padLeft: pad, padRight: pad, dilation: 1, groups: groups);
         xCF.Dispose();
         F5Ops.MishInPlace(c1);
 
         // Conv2
         Tensor c2 = new(c1.Shape, DType.F32);
-        F5Ops.GroupedConv1D(c2, c1, _conv2W!, _conv2B!, 1, dim, t, kernel, pad, groups);
+        backend.Conv1d(c2, c1, _conv2W!, _conv2B!, stride: 1, padLeft: pad, padRight: pad, dilation: 1, groups: groups);
         c1.Dispose();
         F5Ops.MishInPlace(c2);
 

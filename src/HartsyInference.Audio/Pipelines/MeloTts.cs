@@ -84,7 +84,9 @@ public sealed class MeloTts : IDisposable
         MeloTtsEnglishFrontend.Result r = _frontend.Process(text);
         int t = r.PhoneIds.Length;
 
-        using Tensor jaBert = _bert.GetFeatures(backend, text, r.Word2Ph);       // [1, 768, T] — English BERT slot
+        // The BERT provider must tokenize the same number-normalized text the g2p / word2ph were built from,
+        // else the token count won't match word2ph (numbers expand to multiple word tokens).
+        using Tensor jaBert = _bert.GetFeatures(backend, r.NormalizedText, r.Word2Ph); // [1, 768, T] — English BERT slot
         using Tensor bert = new(new TensorShape(1, _cfg.BertDim, t), DType.F32); // 1024-channel slot, allocated zeroed
 
         return _pipeline.Synthesize(backend, r.PhoneIds, r.ToneIds, r.LangIds, bert, jaBert, speakerId,

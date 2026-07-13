@@ -117,8 +117,9 @@ public sealed unsafe class MatrixGame3ActionModule
     }
 
     /// <summary>Gathers the per-latent-frame action window: latent frame <c>i</c> (0-based among non-memory frames)
-    /// covers raw frames <c>[i·ratio − ratio·(window−1), i·ratio + ratio)</c>, left-padded by repeating row 0.
-    /// Memory frames produce zero windows.</summary>
+    /// covers raw frames <c>[i·ratio − ratio·window, i·ratio)</c> — 12 raw rows ending just before the frame's raw
+    /// time — left-padded by repeating row 0. Mirrors upstream's <c>pad_t = ratio·window</c> front-pad then slice
+    /// <c>padded[ratio·i : ratio·i + pad_t]</c> (action_module.py). Memory frames produce zero windows.</summary>
     private float[] BuildWindows(Tensor raw, int dim, int tt, int memoryFrames)
     {
         int winLen = WindowLength;
@@ -128,7 +129,7 @@ public sealed unsafe class MatrixGame3ActionModule
         for (int f = memoryFrames; f < tt; f++)
         {
             int local = f - memoryFrames;
-            int start = local * _ratio - _ratio * (_window - 1);
+            int start = local * _ratio - _ratio * _window;
             for (int k = 0; k < winLen; k++)
             {
                 int src = Math.Clamp(start + k, 0, rawFrames - 1);

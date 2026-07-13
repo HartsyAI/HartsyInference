@@ -186,6 +186,40 @@ MG2 25 FPS @540p / MG3 ≥10 FPS @720p on a 4090).
 > (gated-residual slice-fold, split+rope) is available for sub-0.5 ms trims. **Final Oasis: 2342 → 18.8 ms = 124×,
 > 3.6× faster than torch eager, bit-exact.** Diamond 3/3, solution builds clean.
 
+> ### ✅ Round 9 (2026-07-13) — Matrix-Game 3.0 CORRECTNESS bringup: core DiT + ActionModule parity-verified on real weights
+> The flagship world model (5B Wan2.2-TI2V finetune) is now numerically verified against the Skywork `WanModel.forward`
+> reference on the **real ungated `base_model`** (12.9 GB, Apache-2.0; the actual shipped config is dim 3072 / 24 heads /
+> 30 layers / ffn 14336 / sigma_theta 0.8 — the repo's 5120/40/40 `config.py` is stale). New oracle
+> `dump_mg3_reference.py` (flash→dense-SDPA monkeypatch, `WanCrossAttention` F32 override, namespace-pkg bypass) +
+> `dump_mg3_action_reference.py` (isolated ActionModule). Two gated tests: `MatrixGame3ParityTests` (Stage A) +
+> `MatrixGame3ActionParityTests` (Stage B).
+>
+> **Stage A — core memory-mode Wan backbone (no action / no plucker / memory_length=0): PORT VERIFIED at F32.** Per-block
+> taps show **corr 1.00000000 through block 15**, gently drifting to 0.99990 by block 29 — pure F32 summation-order /
+> transcendental (gelu-tanh/silu/LN) differences vs torch, amplified by MG3's residual stream growing ~1000× over 30
+> blocks (a real port bug would corrupt block 0-15, not just the tail). **Found + fixed a real divergence:** MG3's
+> memory-mode block builds the cross-attn residual on the NORMED hidden (`x = norm3(x); x = x + cross_attn(x)`) — added
+> opt-in `WanVideoBlock.CrossAttnResidualNormed` (default false → the whole video fleet is byte-identical, 54/54 Wan+MG
+> tests green). **GPU F16 gotcha:** the F16-GEMM path (bf16→F16 weight casts + allowF16 SDPA) amplifies the same tail
+> drift catastrophically on this ill-conditioned synthetic regime (randn latent, t=1000, 8×8 spatial) → block-29 corr
+> collapses 1.0→0.35 (F16-SDPA-off only recovers to 0.61). This is precision, NOT a port bug (CPU F32 is the true-math
+> gate); real generation runs the model in bf16 like the reference, and F16 (10-bit mantissa) > bf16 (8-bit) so it's
+> fine there — but the AR loop compounding warrants an F32-accumulation or per-step-renorm check at gen time.
+>
+> **Stage B — ActionModule (the novel dual-attention surface): VERIFIED, one real bug fixed.** Isolated single-module
+> parity (mouse temporal self-attn + keyboard cross-attn, [8,28,28] θ=256 rope) on block-0's real weights: **mouse-only
+> corr 0.99996, both corr 0.99995** (relL2 ~1e-2, the self-cancelling mouse-grid rope-construction diff). **Bug:** the
+> per-frame action-window gather was off by one window step — `start = i·ratio − ratio·(window−1)` shifted every window
+> 4 raw-frames too recent; correct is `start = i·ratio − ratio·window` (upstream front-pads `pad_t = ratio·window` then
+> slices `padded[ratio·i : ratio·i+pad_t]`). Shared by both streams (both call `BuildWindows`). A dedicated subagent
+> confirmed the rope interleave/freq/axis conventions already matched.
+>
+> **Remaining MG3 gates (Stage C, before a perf run):** the FOV memory-frame path (`memory_length>0`, per-segment rope
+> reset — the caller must reproduce upstream's memory=`0..M-1` then pred-restart-at-0 indexing) and the per-block Plücker
+> camera injection (`cam_scale`/`cam_shift`). Then the real-weight genperf harness (mirror `MatrixGame2GenPerfTests`).
+> Weights: `/tmp/mg3_ckpt/base_model`. Method rule held: correctness before perf — MG3's memory/plucker paths stay at
+> bit-identical residency ports until Stage C lands.
+
 ## Per-model perf-run plan
 
 ### DIAMOND — RUN NOW (tiny, verified, ungated) — the graph-capture proof case
@@ -201,6 +235,27 @@ MG2 25 FPS @540p / MG3 ≥10 FPS @720p on a 4090).
   (1) `[oasis-phase]` probes on a real RGB-in/RGB-out rollout; (2) residency ports (SpatioTemporalBlock 12 +
   OasisDit 12 + pipeline 10); (3) cuDNN SDPA on the axial attns (mask-null? check); (4) graph the 10-step
   per-frame denoise; (5) FPS before/after, byte-exact-vs-baseline gate.
+
+### Matrix-Game 2.0 — CORRECTNESS VERIFIED + F16 FFN (Rounds 11-12, 2026-07-13)
+> **B — parity vs Skywork DONE.** `dump_mg2_reference.py` runs the Skywork `CausalWanModel._forward_train` on the
+> real distilled checkpoint (Foundation/no-action). Tricks: monkeypatch `flex_attention` → dense-additive-mask SDPA
+> (the block mask for a 3-frame single block = full attention minus the 64 pad tokens) and cross-attn's
+> `flash_attention` → SDPA (no triton/flash_attn); register `wan`/`wan.modules` as bare namespace packages to skip
+> the model-zoo `__init__`; stub flash_attn/xfuser with valid `__spec__`. **MG2 Wan-backbone parity PASSES: v corr
+> 0.99999994, taps patch/ctx/block0/blockLast corr 0.99999996+.** The C# MG2 DiT is numerically correct. (Gotcha:
+> C# unpatchify is `[C,F,H,W]` natural-Wan, not `[F,C,H,W]`.) Deps: bench venv + diffusers/easydict/ftfy.
+>
+> **A — F16 FFN SHIPPED (contained, verified).** `WanVideoBlock.FfnDtype` (default `F32` → the whole video fleet is
+> byte-identical) runs the big `[s, ffn_dim]` FFN intermediate — the dominant per-block activation — in F16
+> (CastToF16 → F16 Linear/Gelu → CastToF32; QK/cross-attn already F16 via `allowF16` SDPA). MG2 opts in via
+> `DitDtype.Act`. Gated on a new `IBackend.SupportsF16Activations` (CPU is F32-only → clean F32 fallback; caught by
+> the CPU structural tests). **MG2 84.3 → 74.5 ms (1.13×), parity corr 0.99999992** (held vs Skywork). Cumulative
+> MG2 **106.7 → 74.5 ms (1.43×)** (materialized-SDPA F32 → cuDNN-SDPA + F16 FFN). **Regression CLEAN:** Wan video
+> transformer 8/8, MG CPU 8/8 + 6/6, Oasis 4/4, Diamond 3/3, full solution build (incl Vulkan). **Remaining lever
+> (scoped, de-risked — every WanVideoBlock op already has an F16 kernel):** extend F16 to the attention Linears +
+> norms (the full ~25-site block), handling the G>1 per-frame-timestep modulation mixing (Mul/Add) + boundary casts
+> (input/encoder F16, temb F32, output F32) → a further ~1.3× on the bandwidth-bound blocks; do it with the full
+> video-fleet regression since it's shared code.
 
 ### Matrix-Game 2.0 / 3.0 — REAL-WEIGHT PERF RUN done (85 ms, cuDNN SDPA 1.28× verified), bottleneck diagnosed
 > **Round 10 (2026-07-13): MG2 runs on real Skywork weights.** New gated harness `MatrixGame2GenPerfTests` loads the

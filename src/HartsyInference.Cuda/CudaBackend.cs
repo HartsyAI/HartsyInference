@@ -1718,6 +1718,8 @@ public sealed class CudaBackend : IBackend
     private CudaGraph? _stepGraph;
     private bool _stepGraphCapturing;
 
+    public bool SupportsF16Activations => true;
+
     public bool StepGraphSupported => true;
 
     public bool StepGraphReady => _stepGraph?.IsReady == true && !_stepGraphCapturing;

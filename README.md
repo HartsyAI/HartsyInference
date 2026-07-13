@@ -460,6 +460,12 @@ generation path, on both GPUs. Full table + methodology + the outlier list: [`be
 | Whisper (base) | STT | 5.1× | 5.4× |
 | Kokoro (StyleTTS2) | TTS | 4.5× | 5.2× |
 | MeloTTS (en-v3) | TTS | 1.4× | 1.4× |
+| F5-TTS (v1 base, voice clone) | TTS | ~0.4× | — |
+
+Piper / Kokoro / MeloTTS / F5-TTS are verified word-correct via a proven STT oracle (whisper `medium.en`). F5-TTS
+is zero-shot voice cloning (needs a reference clip + transcript); its RTF is below real-time by design (32
+flow-matching DiT forwards), but a host grouped-conv bottleneck was removed for a **34× speedup (174.6 s → 6.4 s)**
+at bit-parity.
 
 TTS measured through the canonical `GenerateText2Image` path (WAV to `/Output` like any gen); STT via `ProcessSTT`. **The small audio models are host/launch-bound, not compute-bound** — the 4090's extra compute buys ~nothing (Piper is even slightly slower on it). So the optimization lever here is **CUDA-graph capture / host-glue removal** (kills kernel-launch overhead), exactly like the LLM-decode graph win and the opposite of the compute-bound video/music DiTs where graphs are a no-op. Music (ACE-Step, YuE, HeartMuLa) e2e numbers live in their own result files and [`docs/Checklists/MODEL_STATUS_AUDIO.md`](docs/Checklists/MODEL_STATUS_AUDIO.md).
 
@@ -548,6 +554,8 @@ reference embeddings/logits, not just "loads without error".
 | Whisper (tiny → large-v3) | Speech-to-text | ✅ |
 | Moonshine | Speech-to-text | ✅ |
 | Kokoro-82M | Text-to-speech | ✅ |
+| Piper (VITS) | Text-to-speech (espeak phonemes) | ✅ |
+| MeloTTS | Text-to-speech (Bert-VITS2, en-v3) | ✅ |
 | Bark | Text-to-speech | ✅ |
 | StyleTTS2 | Text-to-speech | ✅ |
 | Spark-TTS | Text-to-speech (BiCodec) | ✅ |
@@ -560,7 +568,7 @@ reference embeddings/logits, not just "loads without error".
 | YuE | Music generation (dual-stage Llama) | ✅ |
 | HeartMuLa (oss-3B) | Music generation (Sesame-CSM dual-transformer + HeartCodec) | ✅ ~11 fr/s bf16 / **~15 fr/s Q8** (past real-time), RTX 3060 |
 | Stable Audio Open | Music generation | 🏗️ |
-| F5-TTS | Voice cloning (flow-matching DiT) | 🧪 |
+| F5-TTS | Voice cloning (flow-matching DiT) | ✅ verified word-correct + 34× perf pass (host-conv→GPU), bit-parity |
 | Codecs (Vocos · EnCodec · DAC · SNAC · Mimi · WavTokenizer · BiCodec · XCodec · Oobleck) | Neural audio codecs | ✅ |
 
 ### Vision

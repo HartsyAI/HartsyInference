@@ -139,7 +139,10 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         // Upstream forces ref_text to end with ". " so the joint char stream (ref_text + gen_text) aligns at the
         // boundary and len(ref_text) in the duration ratio is correct; without it the tempo drifts.
         string refNorm = NormalizeRefText(refText);
+        bool profG = Environment.GetEnvironmentVariable("HARTSY_F5_PROFILE") == "1";
+        System.Diagnostics.Stopwatch gsw = System.Diagnostics.Stopwatch.StartNew();
         Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refNorm), _tokenizer.Encode(targetText), options);
+        if (profG) { backend.Sync(); HartsyInference.Core.Logging.Logs.Info($"[F5 time] DiT sample loop: {gsw.Elapsed.TotalMilliseconds:0}ms"); gsw.Restart(); }
         // DEBUG: dump the pre-vocoder mel [1,melDim,T] to localize DiT-vs-vocoder (F5_DUMP_MEL=path).
         string? melPath = Environment.GetEnvironmentVariable("F5_DUMP_MEL");
         if (melPath is not null)
@@ -155,6 +158,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
             HartsyInference.Core.Logging.Logs.Info($"[F5 mel] shape [{md},{mt}] mean {s / n:F4} std {Math.Sqrt(s2 / n - (s / n) * (s / n)):F4} min {mn:F3} max {mx:F3}");
         }
         float[] audio = _vocos.Forward(backend, mel);
+        if (profG) { backend.Sync(); HartsyInference.Core.Logging.Logs.Info($"[F5 time] Vocos vocode({mel.Shape[2]} frames → {audio.Length} smp): {gsw.Elapsed.TotalMilliseconds:0}ms"); }
         mel.Dispose();
         return audio;
     }
@@ -167,6 +171,8 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         string refText, string targetText, F5TtsOptions? options = null)
     {
         ThrowIfDisposed();
+        bool prof = Environment.GetEnvironmentVariable("HARTSY_F5_PROFILE") == "1";
+        System.Diagnostics.Stopwatch _secSw = System.Diagnostics.Stopwatch.StartNew();
         MelSpectrogramExtractor.Config melCfg = MelSpectrogramExtractor.F5VocosConfig();
         int sr = melCfg.SampleRate;
         float[] mono24k = sampleRate == sr
@@ -200,6 +206,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
             for (int d = 0; d < _cfg.MelDim; d++)
                 for (int t = 0; t < tRef; t++) mp[d * tRef + t] = melData[d, t];
         }
+        if (prof) { backend.Sync(); HartsyInference.Core.Logging.Logs.Info($"[F5 time] mel-extract(ref {mono24k.Length} smp → {tRef} frames): {_secSw.Elapsed.TotalMilliseconds:0}ms"); }
         float[] audio = Generate(backend, refMel, refText, targetText, options);
         refMel.Dispose();
         return audio;

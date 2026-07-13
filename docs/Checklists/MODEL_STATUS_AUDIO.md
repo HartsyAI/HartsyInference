@@ -9,10 +9,19 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 > Measured through the SwarmUI+AudioLab path: [`benchmarks/results/audio_tts_stt_2026-07-12.md`](../../benchmarks/results/audio_tts_stt_2026-07-12.md).
 > Piper 10.4×/7.7×, Moonshine 6.5×/6.5×, Whisper-base 5.1×/5.4×, MeloTTS 1.7×/1.8× (3060/4090). **These small
 > models are host/launch-bound — the 4090 barely helps; the lever is CUDA-graph capture, not a bigger GPU.**
-> **Runtime outliers found (parity ✅ ≠ runnable):** Kokoro install 401 (`Hartsy/kokoro-82m-safetensors` repack
-> missing — needs upload); Whisper `/API/ProcessSTT` rejects the default `en-US` language (pass `en` / normalize);
-> Spark-TTS install errors "checkpoint-reconciliation-pending" (not wired for runtime despite ✅ test parity);
-> F5-TTS needs a voice-reference clip. MeloTTS is the one runnable-but-slow model (BERT+VITS optimization target).
+> **Runtime outliers found (parity ✅ ≠ runnable):** ~~Kokoro install 401~~ **FIXED 07-13** (canonical-`.pth`
+> download fallback); ~~Whisper `/API/ProcessSTT` rejects the default `en-US`~~ **FIXED 07-13**
+> (`WhisperTokenizer.LanguageToTokenId` normalizes locale codes `en-US`→`en`); Spark-TTS install errors
+> "checkpoint-reconciliation-pending" (not wired for runtime despite ✅ test parity — still open).
+>
+> ## ✅ TTS correctness + F5 perf pass (2026-07-13)
+> Verified word-correct through the canonical `GenerateText2Image` path with **whisper `medium.en`** as the oracle
+> (`base.en` dropped — it hallucinated the pangram onto broken audio) + RMS-envelope match vs a Python reference,
+> across short/long/numbers/punctuation prompts: **Kokoro, Piper, MeloTTS, F5-TTS** all fixed to word-correct.
+> MeloTTS root cause was a `PytorchPickleLoader` stride bug (transposed BERT weights → gibberish) + missing number
+> normalization. **F5-TTS given a perf pass: 174.6 s → 6.4 s (34×)** — the per-forward `F5ConvPosEmbed` grouped
+> Conv1D was a host loop; routed to `backend.Conv1d` (GPU), output bit-parity. Remaining perf target: MeloTTS
+> (1.4×, BERT+VITS host-flat) + a CUDA-graph pass on the host-bound small models.
 
 > ## ⚠️ STT reality-check (2026-07-08) — parity ✅ does NOT mean intelligible speech
 > The ✅/🔬 marks below are **numeric-parity** verdicts (corr 1.0 vs a Python reference on random/tap inputs).
@@ -24,7 +33,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 > |---|---|---|---|
 > | **Kokoro** | ✅ | "Hello world. This is a test." (4/4) | ✅ **genuinely works** |
 > | **MeloTTS** | ✅ | "Hello World, this is a test of the speech synthesizer." (5/5) | ✅ **genuinely works** |
-> | **F5-TTS** | ✅ "bit-exact" | "(laughs)" | ✗ **not intelligible** |
+> | **F5-TTS** | ✅ "bit-exact" | (07-08) "(laughs)" → (07-13, with a real voice ref) word-perfect | ✅ **works 2026-07-13** — the 07-08 run had no voice reference; given a reference clip + transcript through Swarm it transcribes word-perfect (medium.en) and clones the voice. Also 34× faster (host-conv→GPU). |
 > | **Dia-1.6B** | 🔬 | "(crickets chirping)" (0/7) | ✗ **not intelligible** — gen-loop/DAC bug (transformer parity is real, output isn't) |
 > | **Qwen3-TTS 0.6B** | ✅ "bit-exact" | — (RMS 0, silent) | ⚠️ **inconclusive** — probably driven wrong (voice-design mode on a CustomVoice ckpt) |
 >
@@ -48,13 +57,12 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **Chatterbox** (ResembleAI) | ✅ | Full S3Gen rewrite (== CosyVoice2); enc 2.6e-6 / dec 4.4e-5 / vocoder 1.6e-5; end-to-end on CUDA. |
 | **CosyVoice 2** | ✅ | Validated via the shared Chatterbox S3Gen. |
 | **Qwen3-TTS** | ✅ | Bit-exact (RoPE split-half + byte-level tokenizer fixes). |
-| **Piper** (VITS) | ✅ | corr 0.9998 vs onnxruntime; 7 VITS bugs fixed (affect all VITS). Espeak phonemization is the only gap. |
-| **Kokoro** (StyleTTS2) | ✅ | ~1e-4 on the CUDA path (added `audio_leaky_relu` / `audio_adain1d` kernels). Loader 404s until repacked. |
-| **F5-TTS** (v1 Base) | ✅ | Flow-matching DiT verified bit-exact: velocity corr 1.0, full CFM sample loop (generated mel) corr 1.0, Vocos corr 0.9999. 4 bugs fixed (ConvNeXt filler-mask, ×1000 timestep scale, erf/tanh GELU split, cond-anchored CFG + end-only ref-clamp). |
+| **Piper** (VITS) | ✅ | corr 0.9998 vs onnxruntime; 7 VITS bugs fixed (affect all VITS). **Swarm e2e word-correct 2026-07-13** — fixed the espeak language default (`en` British → the voice's `en-us` American; it was mispronouncing vowels). |
+| **Kokoro** (StyleTTS2) | ✅ | ~1e-4 on the CUDA path (added `audio_leaky_relu` / `audio_adain1d` kernels). **Swarm e2e word-correct 2026-07-13** — misaki-phoneme g2p + punctuation fix (was silently dropping words); canonical-`.pth` download fallback (was install-401). |
+| **F5-TTS** (v1 Base) | ✅ | Flow-matching DiT verified bit-exact: velocity corr 1.0, full CFM sample loop (generated mel) corr 1.0, Vocos corr 0.9999. 4 bugs fixed (ConvNeXt filler-mask, ×1000 timestep scale, erf/tanh GELU split, cond-anchored CFG + end-only ref-clamp). **Swarm e2e word-correct + perf pass 2026-07-13:** with a real voice ref it transcribes word-perfect (medium.en); **174.6 s → 6.4 s (34×)** by routing the `F5ConvPosEmbed` grouped Conv1D off the host loop to `backend.Conv1d` (GPU), output bit-parity (RMS-envelope corr 1.0000). |
 | **Kyutai TTS** (tts-1.6b-en_fr) | 🔬 | All numerical cores verified (backbone 1.3e-4, depformer 32/32, conditioner ~1e-8). Greedy e2e diverges by argmax cascade (not a bug); Mimi decode reconcile in progress. |
 | **ResembleEnhance** | 🔬 | Modules synthetic-verified + converter built; real-weight mel→mel parity pending. |
-| **F5-TTS** | 🔧 | Built + wired in SwarmUI; parity dump pending. |
-| **MeloTTS** (English-v3) | ✅ | Real-weight e2e in pure C#: g2p ids exact, BERT bit-exact, audio corr 0.9993 (len exact) vs the noise-0 reference. `MeloTts` facade (LoadFromFiles/LoadAsync/SynthesizeText) + gated parity test. |
+| **MeloTTS** (English-v3) | ✅ | Real-weight e2e in pure C#. **Swarm e2e word-correct 2026-07-13** — earlier "corr 0.9993 noise-0" was stale: the real e2e produced gibberish from a `PytorchPickleLoader` **stride bug** (bert-base-uncased Linear weights, saved as `.t()` views, loaded transposed → garbage BERT features), fixed with a stride-gather (`MakeRowMajor`, no-op for contiguous — helps all `.pth` models). Also added **number normalization** (`normalize_numbers`: years/currency/ordinals/decimals were dropped). `MeloTts` facade + gated parity test. |
 | **Spark-TTS-0.5B** | ✅ | Real-weight e2e bit-exact, fully in-engine (controllable mode): LM logits corr 1.0 (top-1 100%), greedy tokens 32/32 global + 179/179 semantic match Python, BiCodec wav corr 1.0 (factorized VQ, FSQ d-vector, AdaLN PreNet all corr 1.0). `SparkTtsPipeline.LoadFromDirectory`/`LoadAsync` + `SynthesizeControllable(text, gender, pitch, speed)`; `SparkTtsTokenizer` reuses the shared BPE + ByteLevelCodec. Zero-shot cloning would need the BiCodec encoder side (wav2vec2 + ECAPA), not built. |
 | **FishSpeech 1.5** | 🔬 | DualAR LM verified: slow (24-layer) corr 1.0, fast depth-LM (4-layer) corr 0.9999. fused-key adapter + interleaved RoPE + no embed-scale + pre-norm fast input. Only the firefly-gan-vq codec remains. |
 | **Dia-1.6B** | 🔬 | Full transformer verified bit-exact (corr 1.0): encoder (12L) + decoder (18L, cross-attn/9-ch/fused head). DenseGeneral adapter + split-half RoPE + attn scale 1.0 + KV-cache AdvanceLength fix. Only DAC wiring (shared/✅) + delay-AR remain. |
@@ -65,9 +73,9 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 
 | Model | Status | Notes |
 |---|---|---|
-| **Whisper** (tiny → large-v3) | ✅ | JFK clip transcribes correct content words (`WhisperEndToEndTests`). |
+| **Whisper** (tiny → large-v3) | ✅ | JFK clip transcribes correct content words (`WhisperEndToEndTests`). **Swarm e2e word-perfect 2026-07-13** on the real JFK clip; fixed the `en-US` default-language crash (locale-code normalization). |
 | **Whisper streaming** (RealtimeSTT) | ✅ | LocalAgreement-2 + JFK streaming. |
-| **Moonshine** | ✅ | Tests pass. |
+| **Moonshine** | ✅ | Tests pass. **Swarm e2e word-perfect 2026-07-13** on real (JFK) + synthetic clips; ~2 s for 9 s audio on the 3060. |
 | **Kyutai STT** (stt-1b / 2.6b) | 🔧 | Shares the moshi backbone; parity pending (no depformer). |
 
 ## Codec / voice conversion / music / separation
