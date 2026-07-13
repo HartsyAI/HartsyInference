@@ -107,6 +107,128 @@ public sealed unsafe class MatrixGame3ParityTests
         finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
     }
 
+    [Fact]
+    public void MemoryMode_WithMemoryFrames_MatchReference()
+    {
+        string? ditPath = Environment.GetEnvironmentVariable("MG3_DIT");
+        string? refPath = Environment.GetEnvironmentVariable("MG3_MEM_REF");
+        if (ditPath is null || refPath is null || !File.Exists(ditPath) || !File.Exists(refPath)) return; // gated
+
+        using IBackend backend = MakeBackend();
+        (MatrixGame3CheckpointConverter.ConvertedWeights cw, List<SafeTensorsLoader> loaders) = LoadDit(ditPath);
+        try
+        {
+            MatrixGame3Config config = MatrixGame3Config.Base5B with { ActionBlocks = [] };
+            MatrixGame3Transformer model = new(config);
+            IReadOnlyDictionary<string, Tensor> w = cw.Transformer;
+            if (!IsCuda)
+            {
+                Dictionary<string, Tensor> f32 = new(w.Count);
+                foreach ((string k, Tensor t) in w) f32[k] = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+                w = f32;
+            }
+            model.LoadWeights(w);
+
+            using SafeTensorsLoader rl = new(); rl.Load(refPath);
+            Tensor latRef = rl.GetTensor("latent_full");   // [48, M+F=5, 8, 8]
+            Tensor ctxRef = rl.GetTensor("context");       // [20, 4096]
+            Tensor ftRef = rl.GetTensor("frame_t");        // [3] pred timesteps
+
+            int c = (int)latRef.Shape[0], tot = (int)latRef.Shape[1], hh = (int)latRef.Shape[2], ww = (int)latRef.Shape[3];
+            const int memoryFrames = 2, outputFrames = 3;
+            Tensor latent = new(new TensorShape([1L, c, tot, hh, ww]), DType.F32);
+            new ReadOnlySpan<float>((float*)latRef.DataPointer, c * tot * hh * ww)
+                .CopyTo(new Span<float>((float*)latent.DataPointer, c * tot * hh * ww));
+
+            // Memory frames: timestep 0, historical rope indices [3,4]; pred frames: frame_t, rope [5,6,7]
+            // (matches the reference's memory_latent_idx / predict_latent_idx split).
+            float[] frameTimesteps = new float[tot];
+            for (int i = 0; i < memoryFrames; i++) frameTimesteps[i] = 0f;
+            for (int i = 0; i < outputFrames; i++) frameTimesteps[memoryFrames + i] = ((float*)ftRef.DataPointer)[i];
+            int[] ropeIdx = { 3, 4, 5, 6, 7 };
+
+            Dictionary<string, Tensor> taps = new();
+            Tensor v = model.Forward(backend, latent, ctxRef, frameTimesteps, ropeIdx,
+                memoryFrames, outputFrames, mouse: null, keyboard: null, pluckerTokens: null, taps: taps);
+
+            double earlyMinCorr = 1.0;
+            for (int i = 0; i < config.NumLayers; i++)
+            {
+                (double m, double cr, _) = Compare(taps[$"b{i}"], rl.GetTensor($"tap_b{i}"));
+                _out.WriteLine($"MG3-MEM tap b{i,-2}: maxAbs={m:E3} corr={cr:F8}");
+                if (i <= 15) earlyMinCorr = Math.Min(earlyMinCorr, cr);
+            }
+            (double maxAbs, double corr, double relL2) = Compare(v, rl.GetTensor("v_cfhw"));
+            _out.WriteLine($"MG3-MEM v: maxAbs={maxAbs:E3} corr={corr:F8} relL2={relL2:E3}  (C# {v.Shape})");
+            v.Dispose(); latent.Dispose();
+            if (IsCuda) return;   // CPU F32 is the true-math gate (see Stage A note)
+            Assert.True(earlyMinCorr > 0.99999, $"early-block corr {earlyMinCorr} (structural)");
+            Assert.True(corr > 0.999, $"final v corr {corr}");
+            Assert.True(relL2 < 0.05, $"final v relL2 {relL2}");
+        }
+        finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+    }
+
+    [Fact]
+    public void PluckerCamera_Injection_MatchReference()
+    {
+        string? ditPath = Environment.GetEnvironmentVariable("MG3_DIT");
+        string? refPath = Environment.GetEnvironmentVariable("MG3_PLK_REF");
+        if (ditPath is null || refPath is null || !File.Exists(ditPath) || !File.Exists(refPath)) return; // gated
+
+        using IBackend backend = MakeBackend();
+        (MatrixGame3CheckpointConverter.ConvertedWeights cw, List<SafeTensorsLoader> loaders) = LoadDit(ditPath);
+        try
+        {
+            MatrixGame3Config config = MatrixGame3Config.Base5B with { ActionBlocks = [] };
+            MatrixGame3Transformer model = new(config);
+            IReadOnlyDictionary<string, Tensor> w = cw.Transformer;
+            if (!IsCuda)
+            {
+                Dictionary<string, Tensor> f32 = new(w.Count);
+                foreach ((string k, Tensor t) in w) f32[k] = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+                w = f32;
+            }
+            model.LoadWeights(w);
+
+            using SafeTensorsLoader rl = new(); rl.Load(refPath);
+            Tensor xRef = rl.GetTensor("x");                  // [48, 3, 8, 8]
+            Tensor ctxRef = rl.GetTensor("context");          // [20, 4096]
+            Tensor ftRef = rl.GetTensor("frame_t");           // [3]
+            Tensor plkRef = rl.GetTensor("plucker_tokens");   // [S=48, 6144]
+
+            int c = (int)xRef.Shape[0], f = (int)xRef.Shape[1], hh = (int)xRef.Shape[2], ww = (int)xRef.Shape[3];
+            Tensor latent = new(new TensorShape([1L, c, f, hh, ww]), DType.F32);
+            new ReadOnlySpan<float>((float*)xRef.DataPointer, c * f * hh * ww)
+                .CopyTo(new Span<float>((float*)latent.DataPointer, c * f * hh * ww));
+
+            float[] frameTimesteps = new float[f];
+            for (int i = 0; i < f; i++) frameTimesteps[i] = ((float*)ftRef.DataPointer)[i];
+            int[] ropeIdx = new int[f];
+            for (int i = 0; i < f; i++) ropeIdx[i] = i;
+
+            Dictionary<string, Tensor> taps = new();
+            Tensor v = model.Forward(backend, latent, ctxRef, frameTimesteps, ropeIdx,
+                memoryFrames: 0, outputFrames: f, mouse: null, keyboard: null, pluckerTokens: plkRef, taps: taps);
+
+            double earlyMinCorr = 1.0;
+            for (int i = 0; i < config.NumLayers; i++)
+            {
+                (double m, double cr, _) = Compare(taps[$"b{i}"], rl.GetTensor($"tap_b{i}"));
+                _out.WriteLine($"MG3-PLK tap b{i,-2}: maxAbs={m:E3} corr={cr:F8}");
+                if (i <= 15) earlyMinCorr = Math.Min(earlyMinCorr, cr);
+            }
+            (double maxAbs, double corr, double relL2) = Compare(v, rl.GetTensor("v_cfhw"));
+            _out.WriteLine($"MG3-PLK v: maxAbs={maxAbs:E3} corr={corr:F8} relL2={relL2:E3}");
+            v.Dispose(); latent.Dispose();
+            if (IsCuda) return;   // CPU F32 is the true-math gate (see Stage A note)
+            Assert.True(earlyMinCorr > 0.99999, $"early-block corr {earlyMinCorr} (structural)");
+            Assert.True(corr > 0.999, $"final v corr {corr}");
+            Assert.True(relL2 < 0.05, $"final v relL2 {relL2}");
+        }
+        finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+    }
+
     private static (MatrixGame3CheckpointConverter.ConvertedWeights, List<SafeTensorsLoader>) LoadDit(string path)
     {
         if (Directory.Exists(path))

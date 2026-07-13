@@ -23,6 +23,7 @@ public sealed unsafe class OrpheusPipeline : IDisposable
     private readonly OrpheusConfig _cfg;
     private readonly Qwen2Model _backbone;
     private readonly SnacModel _codec;
+    private static readonly bool _dbg = Environment.GetEnvironmentVariable("HARTSY_ORPHEUS_DEBUG") == "1";
     private int _disposed;
 
     public OrpheusPipeline(OrpheusConfig cfg)
@@ -84,7 +85,7 @@ public sealed unsafe class OrpheusPipeline : IDisposable
             int next = NucleusSampler.Draw(logits, vocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
             logitsT.Dispose();
 
-            if (next == _cfg.EndOfSpeech) break;
+            if (next == _cfg.EndOfSpeech) { if (_dbg) Logs.Info($"[Orpheus dbg] STOP EndOfSpeech at step {step}, generated={generated.Count}"); break; }
             generated.Add(next);
             seen.Add(next);
             if (progress != null && (step & 63) == 0) progress(new GenerationProgress(step, maxTokens, sw.Elapsed.TotalMilliseconds));
@@ -95,6 +96,13 @@ public sealed unsafe class OrpheusPipeline : IDisposable
         }
         hidden.Dispose();
 
+        if (_dbg)
+        {
+            int inRange = generated.Count(g => g >= _cfg.AudioCodeBase && g < _cfg.AudioCodeBase + 7 * _cfg.CodebookSize);
+            Logs.Info($"[Orpheus dbg] total generated={generated.Count}, in-audio-range={inRange}, AudioCodeBase={_cfg.AudioCodeBase}, EndOfSpeech={_cfg.EndOfSpeech}");
+            Logs.Info($"[Orpheus dbg] first 40 tokens: {string.Join(",", generated.Take(40))}");
+            Logs.Info($"[Orpheus dbg] prompt frame: SOH={_cfg.StartOfHuman} EOT={_cfg.EndOfText} EOH={_cfg.EndOfHuman}, textTokens={textTokenIds.Length}, first text ids: {string.Join(",", textTokenIds.ToArray().Take(12))}");
+        }
         int[] codes = OrpheusCodeFrames.ExtractAudioCodes(generated, _cfg.CodeStart, _cfg.EndOfSpeech, _cfg.TokensPerFrame);
         int groups = codes.Length / _cfg.TokensPerFrame;
         if (groups == 0)

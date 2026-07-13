@@ -64,7 +64,8 @@ ACTION_CONFIG = dict(
 
 @torch.no_grad()
 def main():
-    action_config = {} if STAGE == "A" else ACTION_CONFIG
+    # A/MEM/PLK isolate the backbone/memory/camera paths (no action module); only B builds the ActionModule.
+    action_config = ACTION_CONFIG if STAGE == "B" else {}
     model = WanModel(model_type='ti2v', patch_size=(1, 2, 2), text_len=512, in_dim=48, dim=3072, ffn_dim=14336,
                      freq_dim=256, text_dim=4096, out_dim=48, num_heads=24, num_layers=30, window_size=(-1, -1),
                      qk_norm=True, cross_attn_norm=True, eps=1e-6, action_config=action_config, use_memory=True,
@@ -79,19 +80,39 @@ def main():
     F_lat, H, W = 3, 8, 8
     gt, gh, gw = F_lat, H // 2, W // 2            # 3, 4, 4
     s = gt * gh * gw                              # 48
-    x = [torch.randn(48, F_lat, H, W)]
     context = [torch.randn(20, 4096)]            # umT5 rows (padded to text_len=512 inside forward)
-    frame_t = torch.tensor([1000., 700., 400.])  # per-latent-frame timesteps
-    t = frame_t.repeat_interleave(gh * gw).unsqueeze(0)   # [1, s] per-token (frame-major token order)
+    frame_t = torch.tensor([1000., 700., 400.])  # per-latent-frame timesteps (pred frames)
 
     mouse = keyboard = None
     extra = {}
-    if STAGE != "A":
-        # RGB-rate action rows covering the F_lat latent frames: N_rgb = (F_lat-1)*ratio + 1 = 9.
-        n_rgb = (F_lat - 1) * 4 + 1
-        mouse = torch.randn(1, n_rgb, 2)
-        keyboard = torch.randn(1, n_rgb, 6)
-        extra = dict(mouse_cond=mouse, keyboard_cond=keyboard)
+    if STAGE == "MEM":
+        # M=2 FOV memory frames (clean, timestep 0, historical rope indices [3,4]) ‖ F=3 pred (rope [5,6,7]).
+        M = 2
+        x = torch.randn(1, 48, F_lat, H, W)                       # pred latent (tensor, not list, for the memory path)
+        x_memory = torch.randn(1, 48, M, H, W)
+        mem_idx, pred_idx = [3, 4], [5, 6, 7]
+        seq_len = (M + F_lat) * gh * gw                           # 80
+        t = frame_t.repeat_interleave(gh * gw).unsqueeze(0)       # [1, F*hw] per-token pred timesteps
+        timestep_memory = torch.zeros(1, M * gh * gw)             # clean frames → 0
+        extra = dict(x_memory=x_memory, timestep_memory=timestep_memory,
+                     memory_latent_idx=mem_idx, predict_latent_idx=pred_idx)
+    else:
+        x = [torch.randn(48, F_lat, H, W)]
+        seq_len = s
+        t = frame_t.repeat_interleave(gh * gw).unsqueeze(0)       # [1, s] per-token (frame-major token order)
+        if STAGE == "B":
+            # RGB-rate action rows covering the F_lat latent frames: N_rgb = (F_lat-1)*ratio + 1 = 9.
+            n_rgb = (F_lat - 1) * 4 + 1
+            mouse = torch.randn(1, n_rgb, 2)
+            keyboard = torch.randn(1, n_rgb, 6)
+            extra = dict(mouse_cond=mouse, keyboard_cond=keyboard)
+        elif STAGE == "PLK":
+            # Raw camera embedding [1, 6*256=1536, F, H, W]; the DiT patchifies (2x2) → [S, 6144] then projects.
+            from einops import rearrange
+            plucker_raw = torch.randn(1, 1536, F_lat, H, W)
+            plucker_tokens = rearrange(plucker_raw, 'b c (f c1) (h c2) (w c3) -> (b f h w) (c c1 c2 c3)',
+                                       c1=1, c2=2, c3=2)          # [S, 6144] — what the C# ProjectPlucker consumes
+            extra = dict(plucker_emb=plucker_raw)
 
     taps = {}
 
@@ -121,15 +142,20 @@ def main():
         b0.self_attn.register_forward_hook(lambda m, i, o: save_bin("b0ref_attn1", o[0]))
         b0.cross_attn.register_forward_hook(lambda m, i, o: save_bin("b0ref_attn2", o[0]))
 
-    v = model(x, t, context, s, plucker_emb=None, **extra)   # [1, 48, F, H, W] = [B, C, F, H, W]
-    v_cfhw = v[0]                                             # [C, F, H, W]
+    v = model(x, t, context, seq_len, **extra)   # [1, 48, F, H, W] = [B, C, F, H, W]
+    v_cfhw = v[0]                                 # [C, F, H, W]
 
     refs = {
-        "x": x[0], "context": context[0], "frame_t": frame_t,
-        "v_cfhw": v_cfhw,
+        "context": context[0], "frame_t": frame_t, "v_cfhw": v_cfhw,
         "tap_patch": taps['tap_patch'], "tap_ctx": taps['tap_ctx'],
         **{k: v for k, v in taps.items() if k.startswith('tap_b')},
     }
+    if STAGE == "MEM":
+        refs["latent_full"] = torch.cat([extra["x_memory"], x], dim=2)[0]   # [48, M+F, H, W] assembled sequence
+    else:
+        refs["x"] = x[0]
+    if STAGE == "PLK":
+        refs["plucker_tokens"] = plucker_tokens   # [S, 6144]
     if mouse is not None:
         refs["mouse"] = mouse[0]
         refs["keyboard"] = keyboard[0]

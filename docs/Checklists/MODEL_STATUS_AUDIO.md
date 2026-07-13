@@ -23,6 +23,23 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 > Conv1D was a host loop; routed to `backend.Conv1d` (GPU), output bit-parity. Remaining perf target: MeloTTS
 > (1.4×, BERT+VITS host-flat) + a CUDA-graph pass on the host-bound small models.
 
+> ## 🗺️ Full local-TTS Swarm runtime scoreboard (2026-07-13)
+> AudioLab declares ~19 **local** engine-backed TTS providers (+ 20 cloud-API providers — ElevenLabs/Azure/OpenAI/
+> etc. — which proxy to third parties and aren't engine models) and 6 local STT. "Has an install button" ≠ "engine
+> runtime is wired." Verified via install → `GenerateText2Image` → medium.en. Actual runnable status:
+>
+> | Status | TTS |
+> |---|---|
+> | ✅ **verified word-correct** | Kokoro, Piper, MeloTTS, F5-TTS, **Bark**, **Chatterbox**, **VibeVoice**, **FishSpeech** |
+> | 🐛 **runs but broken** | **Orpheus** — output is silent (0.34 s, RMS ~0.0006); needs debug (Kokoro/Melo-class) |
+> | ⏳ **runnable, verify in progress** | Dia (slow AR, gen pending) |
+> | 🚧 **partially wired** (loads; clone/synth path throws) | Kyutai TTS, NeuTTS (clone gated), Qwen3-TTS (voice_clone gated) |
+> | ⛔ **not wired** (install throws a clear "not runnable yet") | CosyVoice ("not yet supported by the in-process engine"), StyleTTS2 (no unified LoadWeights), Spark-TTS (config/BiCodec reconcile), Zonos (needs conditioning prefix), PocketTTS (placeholder dims), CSM (no runtime model) |
+>
+> STT (6 local): ✅ Moonshine, Whisper verified word-perfect on real (JFK) speech; Distil-Whisper / Kyutai STT /
+> RealtimeSTT / Whisper Streaming not yet installed/verified. **Slowness note:** Bark 85 s, Chatterbox 219 s,
+> VibeVoice 206 s — all correct but host/AR-bound; a perf pass (host-glue→GPU, like F5) is the follow-up.
+
 > ## ⚠️ STT reality-check (2026-07-08) — parity ✅ does NOT mean intelligible speech
 > The ✅/🔬 marks below are **numeric-parity** verdicts (corr 1.0 vs a Python reference on random/tap inputs).
 > A real-weight end-to-end pass — generate audio → resample → Whisper-base STT → content-word recall, then

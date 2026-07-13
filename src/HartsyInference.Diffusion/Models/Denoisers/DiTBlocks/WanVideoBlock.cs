@@ -79,7 +79,8 @@ public sealed unsafe class WanVideoBlock
     /// mutates the hidden state in place). <paramref name="selfAttnMask"/> is an optional additive mask broadcastable
     /// to <c>[1, heads, S, S]</c> — Matrix-Game 2's block-causal + local-window attention.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, WanRope rope, Tensor cos, Tensor sin, int tokensPerGroup,
-        Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0, string? dbg = null)
+        Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0, string? dbg = null,
+        Action<Tensor>? postSelfAttnHook = null)
     {
         int s = (int)hidden.Shape[0];
         (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor cShift, Tensor cScale, Tensor cGate) = Modulation(backend, temb);
@@ -93,6 +94,10 @@ public sealed unsafe class WanVideoBlock
         n1.Dispose();
         Tensor h1 = GatedAdd(backend, hidden, attn1, gateMsa, s, tokensPerGroup);
         attn1.Dispose();
+
+        // Optional post-self-attn injection (Matrix-Game 3.0's per-block Plücker camera modulation
+        // `x = (1+cam_scale)·x + cam_shift`, applied between the self-attn residual and cross-attn); mutates h1 in place.
+        postSelfAttnHook?.Invoke(h1);
 
         // 2. cross-attn (to umT5 text, plus optional CLIP image context for I2V)
         Tensor n2 = LayerNorm(backend, h1, _norm2W, _norm2B, s);

@@ -214,11 +214,25 @@ MG2 25 FPS @540p / MG3 ≥10 FPS @720p on a 4090).
 > slices `padded[ratio·i : ratio·i+pad_t]`). Shared by both streams (both call `BuildWindows`). A dedicated subagent
 > confirmed the rope interleave/freq/axis conventions already matched.
 >
-> **Remaining MG3 gates (Stage C, before a perf run):** the FOV memory-frame path (`memory_length>0`, per-segment rope
-> reset — the caller must reproduce upstream's memory=`0..M-1` then pred-restart-at-0 indexing) and the per-block Plücker
-> camera injection (`cam_scale`/`cam_shift`). Then the real-weight genperf harness (mirror `MatrixGame2GenPerfTests`).
-> Weights: `/tmp/mg3_ckpt/base_model`. Method rule held: correctness before perf — MG3's memory/plucker paths stay at
-> bit-identical residency ports until Stage C lands.
+> **Stage C — memory-frame + Plücker paths VERIFIED (2026-07-13).** Both remaining MG3 surfaces now match the reference
+> (`dump_mg3_reference.py` MEM/PLK stages; tests `MemoryMode_WithMemoryFrames` + `PluckerCamera_Injection`), block 0-15
+> corr ~1.0 (same F32-tight / F16-tail pattern as Stage A). **(1) FOV memory-frame path** (M=2 memory ‖ F=3 pred,
+> historical rope [3,4] + pred [5,6,7], memory timesteps 0): the existing `Forward(memoryFrames, ropeFrameIndices,
+> outputFrames)` already handled it — the single-`BuildCosSin` over concatenated `[mem_idx…, pred_idx…]` reproduces the
+> reference's per-segment split-rope exactly (rope is per-token by frame index). No code change needed; verified. **(2)
+> Per-block Plücker camera injection** — the C# `AddPlucker` was a PLACEHOLDER (GELU not SiLU, added to patch-embed once,
+> no per-block `cam_scale`/`cam_shift`). Reimplemented: `MatrixGame3Transformer.ProjectPlucker` builds the global camera
+> embedding once (`patch_embedding_wancamctrl` + `c2ws` SiLU refine + residual), then each block applies its own affine
+> via new `MatrixGame3CamInjector` (`cam_injector` SiLU refine + residual → `cam_scale`/`cam_shift` →
+> `x = (1+scale)·x + shift`) through a new generic `WanVideoBlock.postSelfAttnHook` (fires between the self-attn residual
+> and cross-attn, matching upstream position; default null → video fleet unaffected). `cam_*` keys pass the Wan converter
+> unchanged (no rename collision). PLK final-v corr 0.99947 even on GPU F16 (this path stays well-conditioned).
+>
+> **MG3 correctness is now COMPLETE for the DiT forward** (backbone + action + memory + Plücker all parity-verified).
+> Remaining before/for the perf run: (a) a combined memory+action+Plücker forward + the ActionModule's own memory path
+> (subagent note #5, action rope reset) as a belt-and-suspenders check; (b) the real-weight genperf harness (mirror
+> `MatrixGame2GenPerfTests`) + phase probe. Method rule held throughout: correctness before perf. Weights:
+> `/tmp/mg3_ckpt/base_model`.
 
 ## Per-model perf-run plan
 

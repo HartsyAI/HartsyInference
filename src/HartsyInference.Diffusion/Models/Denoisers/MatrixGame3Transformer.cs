@@ -18,6 +18,7 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
     private readonly MatrixGame3Config _config;
     private readonly WanVideoBlock[] _blocks;
     private readonly MatrixGame3ActionModule?[] _actionModules;
+    private readonly MatrixGame3CamInjector[] _camInjectors;
     private readonly WanRope _rope;
     private readonly int _patchVec;
     private int _disposed;
@@ -37,10 +38,12 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
         WanVideoConfig wan = config.ToWanConfig();
         _blocks = new WanVideoBlock[config.NumLayers];
         _actionModules = new MatrixGame3ActionModule?[config.NumLayers];
+        _camInjectors = new MatrixGame3CamInjector[config.NumLayers];
         HashSet<int>? actionSet = config.ActionBlocks is null ? null : [.. config.ActionBlocks];
         for (int i = 0; i < config.NumLayers; i++)
         {
             _blocks[i] = new WanVideoBlock(wan, crossAttnNorm: true) { CrossAttnResidualNormed = true };  // use_memory=True → destructive norm3
+            _camInjectors[i] = new MatrixGame3CamInjector(config.InnerDim);
             if (actionSet is null || actionSet.Contains(i))
                 _actionModules[i] = new MatrixGame3ActionModule(config.InnerDim,
                     hiddenSize: config.ActionHiddenSize, streamHiddenDim: config.ActionStreamDim,
@@ -84,6 +87,7 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
                 _actionModules[i]!.LoadWeights(w, $"blocks.{i}.action_model");
             else
                 _actionModules[i] = null;   // checkpoint has no module on this block
+            _camInjectors[i].TryLoadWeights(w, $"blocks.{i}");   // per-block Plücker cam_* (use_memory checkpoints only)
         }
     }
 
@@ -98,6 +102,7 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
             foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
             if (_actionModules[i] is not null)
                 foreach (Tensor t in _actionModules[i]!.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _camInjectors[i].EnumerateWeights()) yield return t;
         }
     }
 
@@ -127,7 +132,9 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
 
         (Tensor cos, Tensor sin) = _rope.BuildCosSin(ropeFrameIndices, gh, gw);
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);
-        if (pluckerTokens is not null) AddPlucker(backend, hidden, pluckerTokens, s, dim);
+        // Global Plücker embedding (patch_embedding_wancamctrl + c2ws SiLU refine) computed once; each memory-mode
+        // block then applies its own cam_scale/cam_shift affine to the post-self-attn hidden (postSelfAttnHook below).
+        Tensor? pluckerEmb = pluckerTokens is not null ? ProjectPlucker(backend, pluckerTokens, s, dim) : null;
 
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, frameTimesteps, _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);
@@ -147,7 +154,11 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
             Action<Tensor>? hook = action is null || mouse is null || keyboard is null
                 ? null
                 : h => action.Forward(backend, h, (gt, gh, gw), frameIdx, memoryFrames, mouse, keyboard);
-            Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup, hook);
+            MatrixGame3CamInjector camInj = _camInjectors[i];
+            Action<Tensor>? camHook = pluckerEmb is not null && camInj.Loaded
+                ? h => camInj.Apply(backend, h, pluckerEmb)
+                : null;
+            Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup, hook, postSelfAttnHook: camHook);
             cur.Dispose();
             cur = next;
             if (taps is not null)
@@ -157,7 +168,7 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
                 if (i == _blocks.Length - 1) taps["blockLast"] = CloneCpu(cur);
             }
         }
-        cos.Dispose(); sin.Dispose(); timestepProj.Dispose(); encoderProj.Dispose();
+        cos.Dispose(); sin.Dispose(); timestepProj.Dispose(); encoderProj.Dispose(); pluckerEmb?.Dispose();
 
         // Read out only the trailing outputFrames frames (memory/past are conditioning, not output).
         int skipFrames = gt - outputFrames;
@@ -175,32 +186,28 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
         return outVel;
     }
 
-    /// <summary>Projects per-token Plücker rays through <c>patch_embedding_wancamctrl</c> (+ the two hidden refinement
-    /// layers, residual) and adds them to the patch embeddings in place. Injection point is validation-gated.</summary>
-    private void AddPlucker(IBackend backend, Tensor hidden, Tensor pluckerTokens, int s, int dim)
+    /// <summary>Projects the per-token Plücker rays <c>[S, PluckerPatchDim]</c> to the global camera embedding
+    /// <c>[S, dim]</c>: <c>patch_embedding_wancamctrl</c> then the <c>c2ws_hidden_states_layer1/2</c> SiLU refinement
+    /// added residually (<c>wan/modules/model.py</c> forward). Computed once; consumed per-block by
+    /// <see cref="MatrixGame3CamInjector"/>. This is NOT added to the patch embeddings.</summary>
+    private Tensor ProjectPlucker(IBackend backend, Tensor pluckerTokens, int s, int dim)
     {
-        if (_pluckerProjW is null) return;
+        if (_pluckerProjW is null)
+            throw new InvalidOperationException("Plücker tokens supplied but patch_embedding_wancamctrl is not loaded.");
         if ((int)pluckerTokens.Shape[0] != s)
             throw new ArgumentException($"pluckerTokens rows {pluckerTokens.Shape[0]} != token count {s}.", nameof(pluckerTokens));
         Tensor proj = new Tensor(new TensorShape(s, dim), DType.F32);
         backend.Linear(proj, pluckerTokens, _pluckerProjW, _pluckerProjB);
-        if (_pluckerH1W is not null && _pluckerH2W is not null)
-        {
-            Tensor h1 = new Tensor(new TensorShape(s, dim), DType.F32);
-            backend.Linear(h1, proj, _pluckerH1W, _pluckerH1B);
-            Tensor a = new Tensor(h1.Shape, DType.F32); backend.Gelu(a, h1); h1.Dispose();
-            Tensor h2 = new Tensor(new TensorShape(s, dim), DType.F32);
-            backend.Linear(h2, a, _pluckerH2W, _pluckerH2B);
-            a.Dispose();
-            float* pp = (float*)proj.DataPointer;
-            float* hp2 = (float*)h2.DataPointer;
-            for (long i = 0; i < (long)s * dim; i++) pp[i] += hp2[i];
-            h2.Dispose();
-        }
-        float* hd = (float*)hidden.DataPointer;
-        float* ppf = (float*)proj.DataPointer;
-        for (long i = 0; i < (long)s * dim; i++) hd[i] += ppf[i];
-        proj.Dispose();
+        if (_pluckerH1W is null || _pluckerH2W is null) return proj;
+        Tensor h1 = new Tensor(new TensorShape(s, dim), DType.F32);
+        backend.Linear(h1, proj, _pluckerH1W, _pluckerH1B);
+        Tensor a = new Tensor(h1.Shape, DType.F32); backend.Silu(a, h1); h1.Dispose();
+        Tensor h2 = new Tensor(new TensorShape(s, dim), DType.F32);
+        backend.Linear(h2, a, _pluckerH2W, _pluckerH2B); a.Dispose();
+        Tensor outT = new Tensor(new TensorShape(s, dim), DType.F32);
+        backend.Add(outT, proj, h2);
+        proj.Dispose(); h2.Dispose();
+        return outT;
     }
 
     /// <summary>Zero-pads (or truncates) <paramref name="rows"/> <c>[n, dim]</c> to exactly <paramref name="targetRows"/>

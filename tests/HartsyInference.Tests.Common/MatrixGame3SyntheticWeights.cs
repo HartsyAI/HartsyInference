@@ -44,6 +44,15 @@ public static unsafe class MatrixGame3SyntheticWeights
             w[$"{p}.proj_keyboard.weight"] = R([dim, actionStreamDim]); w[$"{p}.proj_keyboard.bias"] = R([dim]);
             w[$"{p}.key_attn_q_norm.weight"] = R([headDim]); w[$"{p}.key_attn_k_norm.weight"] = R([headDim]);
         }
+        // Per-block Plücker camera injection (cam_* layers) — present on every block in the real use_memory checkpoint.
+        for (int i = 0; i < c.NumLayers; i++)
+        {
+            string b = $"blocks.{i}";
+            w[$"{b}.cam_injector_layer1.weight"] = R([dim, dim]); w[$"{b}.cam_injector_layer1.bias"] = R([dim]);
+            w[$"{b}.cam_injector_layer2.weight"] = R([dim, dim]); w[$"{b}.cam_injector_layer2.bias"] = R([dim]);
+            w[$"{b}.cam_scale_layer.weight"] = R([dim, dim]); w[$"{b}.cam_scale_layer.bias"] = R([dim]);
+            w[$"{b}.cam_shift_layer.weight"] = R([dim, dim]); w[$"{b}.cam_shift_layer.bias"] = R([dim]);
+        }
         return w;
     }
 
