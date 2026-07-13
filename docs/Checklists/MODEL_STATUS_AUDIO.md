@@ -5,6 +5,15 @@ family. Build detail lives in [PHASE_5_AUDIO.md](PHASE_5_AUDIO.md); the music-sp
 [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md). Parity evidence (maxAbs, bugs found)
 lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS.md](MODEL_STATUS.md).
 
+> ## 🏁 First e2e TTS/STT speed benchmarks (2026-07-12) — RTF on 3060 **and** 4090
+> Measured through the SwarmUI+AudioLab path: [`benchmarks/results/audio_tts_stt_2026-07-12.md`](../../benchmarks/results/audio_tts_stt_2026-07-12.md).
+> Piper 10.4×/7.7×, Moonshine 6.5×/6.5×, Whisper-base 5.1×/5.4×, MeloTTS 1.7×/1.8× (3060/4090). **These small
+> models are host/launch-bound — the 4090 barely helps; the lever is CUDA-graph capture, not a bigger GPU.**
+> **Runtime outliers found (parity ✅ ≠ runnable):** Kokoro install 401 (`Hartsy/kokoro-82m-safetensors` repack
+> missing — needs upload); Whisper `/API/ProcessSTT` rejects the default `en-US` language (pass `en` / normalize);
+> Spark-TTS install errors "checkpoint-reconciliation-pending" (not wired for runtime despite ✅ test parity);
+> F5-TTS needs a voice-reference clip. MeloTTS is the one runnable-but-slow model (BERT+VITS optimization target).
+
 > ## ⚠️ STT reality-check (2026-07-08) — parity ✅ does NOT mean intelligible speech
 > The ✅/🔬 marks below are **numeric-parity** verdicts (corr 1.0 vs a Python reference on random/tap inputs).
 > A real-weight end-to-end pass — generate audio → resample → Whisper-base STT → content-word recall, then

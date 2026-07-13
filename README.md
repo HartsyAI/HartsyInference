@@ -448,6 +448,20 @@ Image architectures (Flux, SD3, Ideogram) were device-ported and run much closer
 
 Per-op MatMul / Conv2D / norm / SDPA / elementwise timings against PyTorch, with full statistical method (5 trials, 95% CI, Welch's t-test), are committed under [`benchmarks/results/run_baseline_*`](benchmarks/results/) for both RTX 3060 and RTX 4090. See [`benchmarks/README.md`](benchmarks/README.md) to reproduce.
 
+### Audio (TTS / STT), end-to-end
+
+Real-time factor (RTF = generated-audio-seconds ÷ warm-gen-seconds; higher is faster) through the SwarmUI + AudioLab
+generation path, on both GPUs. Full table + methodology + the outlier list: [`benchmarks/results/audio_tts_stt_2026-07-12.md`](benchmarks/results/audio_tts_stt_2026-07-12.md).
+
+| Model | Type | RTX 3060 | RTX 4090 |
+|---|---|---|---|
+| Piper (VITS) | TTS | 10.4× | 7.7× |
+| Moonshine | STT | 6.5× | 6.5× |
+| Whisper (base) | STT | 5.1× | 5.4× |
+| MeloTTS (en-v3) | TTS | 1.7× | 1.8× |
+
+**The small audio models are host/launch-bound, not compute-bound** — the 4090's extra compute buys ~nothing (Piper is even slightly slower on it). So the optimization lever here is **CUDA-graph capture / host-glue removal** (kills kernel-launch overhead), exactly like the LLM-decode graph win and the opposite of the compute-bound video/music DiTs where graphs are a no-op. Music (ACE-Step, YuE, HeartMuLa) e2e numbers live in their own result files and [`docs/Checklists/MODEL_STATUS_AUDIO.md`](docs/Checklists/MODEL_STATUS_AUDIO.md).
+
 ---
 
 ## Supported Models

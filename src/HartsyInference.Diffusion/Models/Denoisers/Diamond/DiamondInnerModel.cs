@@ -59,13 +59,10 @@ public sealed unsafe class DiamondInnerModel
         Tensor c1a = new(c1.Shape, DType.F32); backend.Silu(c1a, c1); c1.Dispose();
         Tensor condVec = new(new TensorShape(1, cond), DType.F32); backend.Linear(condVec, c1a, _condProj2W!, _condProj2B!); c1a.Dispose();
 
-        // x = conv_in(cat(obs, noisy))
+        // x = conv_in(cat(obs, noisy)) — device channel-concat keeps the input resident (no host round-trip)
         int inCh = _cfg.ImgChannels * (_cfg.NumStepsConditioning + 1);
         Tensor cat = new(new TensorShape(1, inCh, h, w), DType.F32);
-        long plane = (long)h * w, obsCh = obs.Shape[1];
-        Buffer.MemoryCopy((float*)obs.DataPointer, (float*)cat.DataPointer, obsCh * plane * 4, obsCh * plane * 4);
-        Buffer.MemoryCopy((float*)noisy.DataPointer, (float*)cat.DataPointer + obsCh * plane,
-            (long)_cfg.ImgChannels * plane * 4, (long)_cfg.ImgChannels * plane * 4);
+        backend.Concat(cat, [obs, noisy], 1);
         Tensor x = DiamondOps.Conv(backend, cat, _convInW!, _convInB, 1, 1, _cfg.Channels[0]); cat.Dispose();
 
         // The U-Net owns `x` (it stores it as the level-0 skip and disposes it internally) — don't dispose here.

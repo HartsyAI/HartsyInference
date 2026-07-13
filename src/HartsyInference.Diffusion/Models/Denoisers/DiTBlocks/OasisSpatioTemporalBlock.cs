@@ -58,7 +58,10 @@ public sealed unsafe class OasisSpatioTemporalBlock
     public Tensor Forward(IBackend backend, Tensor x, Tensor cond, int frames, int tokensPerFrame,
         Tensor spatialCos, Tensor spatialSin, Tensor temporalCos, Tensor temporalSin, Tensor causalMask)
     {
-        Tensor cur = Clone(x);
+        // Residual carrier is rank-3 [T, sp, dim] so the device per-frame modulation/gated-residual ops index
+        // the frame axis (b) correctly; attention's flat-token host code reads the same memory unaffected.
+        Tensor cur = new(new TensorShape([(long)frames, tokensPerFrame, _dim]), DType.F32);
+        backend.CopyInto(cur, x);
         Half(backend, cur, cond, frames, tokensPerFrame, spatial: true, spatialCos, spatialSin, temporalCos, temporalSin, causalMask);
         Half(backend, cur, cond, frames, tokensPerFrame, spatial: false, spatialCos, spatialSin, temporalCos, temporalSin, causalMask);
         return cur;
@@ -67,41 +70,59 @@ public sealed unsafe class OasisSpatioTemporalBlock
     private void Half(IBackend backend, Tensor x, Tensor cond, int frames, int sp, bool spatial,
         Tensor spatialCos, Tensor spatialSin, Tensor temporalCos, Tensor temporalSin, Tensor causalMask)
     {
-        int total = frames * sp;
         (Tensor modW, Tensor? modB) = spatial ? (_sModW!, _sModB) : (_tModW!, _tModB);
-        Tensor mod = Modulation(backend, cond, frames, modW, modB);   // [T, 6·dim]
-        float* mp = (float*)mod.DataPointer;
+        Tensor mod = Modulation(backend, cond, frames, modW, modB);   // [T, 6·dim] device
 
-        // Attention sub-half.
-        Tensor n1 = Clone(x);
-        DiTUtils.LayerNormNoAffine(n1, x, 1, total, _dim, 1e-6f);
-        ModulatePerFrame(n1, mp, shiftSlot: 0, scaleSlot: 1, frames, sp);
+        // Attention sub-half: adaLN(x) = shift + (1+scale)·LayerNorm(x), all device-resident (per-frame broadcast).
+        Tensor n1 = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
+        backend.LayerNormNoAffine(n1, x, 1e-6f);
+        ApplyModulation(backend, n1, mod, frames, shiftSlot: 0, scaleSlot: 1);
         Tensor attn = spatial
             ? SpatialAttention(backend, n1, frames, sp, spatialCos, spatialSin)
             : TemporalAttention(backend, n1, frames, sp, temporalCos, temporalSin, causalMask);
         n1.Dispose();
-        GatedAddPerFrame(x, attn, mp, gateSlot: 2, frames, sp);
+        GatedResidual(backend, x, attn, mod, frames, gateSlot: 2);   // x += gate·attn (in place, device)
         attn.Dispose();
 
         // MLP sub-half.
         (Tensor fc1W, Tensor? fc1B, Tensor fc2W, Tensor? fc2B) = spatial
             ? (_sFc1W!, _sFc1B, _sFc2W!, _sFc2B)
             : (_tFc1W!, _tFc1B, _tFc2W!, _tFc2B);
-        Tensor n2 = Clone(x);
-        DiTUtils.LayerNormNoAffine(n2, x, 1, total, _dim, 1e-6f);
-        ModulatePerFrame(n2, mp, shiftSlot: 3, scaleSlot: 4, frames, sp);
-        Tensor mid = new Tensor(new TensorShape(total, _mlpHidden), DType.F32);
+        Tensor n2 = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
+        backend.LayerNormNoAffine(n2, x, 1e-6f);
+        ApplyModulation(backend, n2, mod, frames, shiftSlot: 3, scaleSlot: 4);
+        Tensor mid = new Tensor(new TensorShape(frames * sp, _mlpHidden), DType.F32);
         backend.Linear(mid, n2, fc1W, fc1B);
         n2.Dispose();
         Tensor act = new Tensor(mid.Shape, DType.F32);
         backend.Gelu(act, mid);
         mid.Dispose();
-        Tensor mlpOut = new Tensor(new TensorShape(total, _dim), DType.F32);
+        Tensor mlpOut = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
         backend.Linear(mlpOut, act, fc2W, fc2B);
         act.Dispose();
-        GatedAddPerFrame(x, mlpOut, mp, gateSlot: 5, frames, sp);
+        GatedResidual(backend, x, mlpOut, mod, frames, gateSlot: 5);
         mlpOut.Dispose();
         mod.Dispose();
+    }
+
+    /// <summary>Device per-frame adaLN: <c>x[f,i,d] = x·(1+scale[f,d]) + shift[f,d]</c> using
+    /// <see cref="IBackend.AffineBroadcastLastDim"/> on the rank-3 <c>[T, sp, dim]</c> tensor. Slices scale/shift
+    /// from the <c>[T, 6·dim]</c> modulation vector on device (no host round-trip).</summary>
+    private void ApplyModulation(IBackend backend, Tensor x, Tensor mod, int frames, int shiftSlot, int scaleSlot)
+    {
+        Tensor scale = new(new TensorShape(frames, _dim), DType.F32); backend.SliceLastDim(scale, mod, scaleSlot * _dim);
+        Tensor scaleP1 = new(new TensorShape(frames, _dim), DType.F32); backend.AddScalar(scaleP1, scale, 1f); scale.Dispose();
+        Tensor shift = new(new TensorShape(frames, _dim), DType.F32); backend.SliceLastDim(shift, mod, shiftSlot * _dim);
+        backend.AffineBroadcastLastDim(x, x, scaleP1, shift);
+        scaleP1.Dispose(); shift.Dispose();
+    }
+
+    /// <summary>Device per-frame gated residual: <c>target[f,i,d] += gate[f,d]·value[f,i,d]</c> in place.</summary>
+    private void GatedResidual(IBackend backend, Tensor target, Tensor value, Tensor mod, int frames, int gateSlot)
+    {
+        Tensor gate = new(new TensorShape(frames, _dim), DType.F32); backend.SliceLastDim(gate, mod, gateSlot * _dim);
+        backend.GatedResidualLastDim(target, target, value, gate);
+        gate.Dispose();
     }
 
     /// <summary>Per-frame bidirectional attention over each frame's tokens, batched <c>[T, heads, S, headDim]</c> with axial RoPE.</summary>
@@ -124,7 +145,7 @@ public sealed unsafe class OasisSpatioTemporalBlock
 
         Tensor merged = MergeHeads(attn, frames, sp, seqIsTemporal: false);
         attn.Dispose();
-        Tensor projected = new Tensor(new TensorShape(frames * sp, _dim), DType.F32);
+        Tensor projected = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
         backend.Linear(projected, merged, outW, outB);
         merged.Dispose();
         return projected;
@@ -150,7 +171,7 @@ public sealed unsafe class OasisSpatioTemporalBlock
 
         Tensor merged = MergeHeads(attn, frames, sp, seqIsTemporal: true);
         attn.Dispose();
-        Tensor projected = new Tensor(new TensorShape(frames * sp, _dim), DType.F32);
+        Tensor projected = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
         backend.Linear(projected, merged, outW, outB);
         merged.Dispose();
         return projected;
@@ -165,36 +186,6 @@ public sealed unsafe class OasisSpatioTemporalBlock
         backend.Linear(mod, act, modW, modB);
         act.Dispose();
         return mod;
-    }
-
-    private void ModulatePerFrame(Tensor x, float* mod, int shiftSlot, int scaleSlot, int frames, int sp)
-    {
-        float* xp = (float*)x.DataPointer;
-        for (int f = 0; f < frames; f++)
-        {
-            float* shift = mod + (long)f * 6 * _dim + (long)shiftSlot * _dim;
-            float* scale = mod + (long)f * 6 * _dim + (long)scaleSlot * _dim;
-            for (int i = 0; i < sp; i++)
-            {
-                long off = ((long)f * sp + i) * _dim;
-                for (int d = 0; d < _dim; d++) xp[off + d] = xp[off + d] * (1f + scale[d]) + shift[d];
-            }
-        }
-    }
-
-    private void GatedAddPerFrame(Tensor target, Tensor value, float* mod, int gateSlot, int frames, int sp)
-    {
-        float* tp = (float*)target.DataPointer;
-        float* vp = (float*)value.DataPointer;
-        for (int f = 0; f < frames; f++)
-        {
-            float* gate = mod + (long)f * 6 * _dim + (long)gateSlot * _dim;
-            for (int i = 0; i < sp; i++)
-            {
-                long off = ((long)f * sp + i) * _dim;
-                for (int d = 0; d < _dim; d++) tp[off + d] += gate[d] * vp[off + d];
-            }
-        }
     }
 
     /// <summary>Frame-major token rows → <c>[batch, heads, seq, headDim]</c>; spatial batches frames (seq = tokens),
@@ -268,11 +259,4 @@ public sealed unsafe class OasisSpatioTemporalBlock
                 }
     }
 
-    private static Tensor Clone(Tensor x)
-    {
-        Tensor o = new Tensor(x.Shape, DType.F32);
-        long bytes = x.Shape.ElementCount * 4;
-        Buffer.MemoryCopy((float*)x.DataPointer, (float*)o.DataPointer, bytes, bytes);
-        return o;
-    }
 }

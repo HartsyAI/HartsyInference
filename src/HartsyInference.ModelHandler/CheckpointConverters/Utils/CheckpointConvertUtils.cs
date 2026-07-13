@@ -394,25 +394,34 @@ public static unsafe class CheckpointConvertUtils
         return result;
     }
 
-    /// <summary>Quantizes the large 2-D Linear weights in <paramref name="source"/> from BF16/F16 to fp8 e4m3 with a
-    /// per-tensor scale (the ComfyUI <c>fp8_scaled</c> format the native fp8 GEMM consumes via
-    /// <see cref="Tensor.Fp8ScaleFactor"/>), halving their resident footprint (2 → 1 byte/param). This is how a DiT
-    /// shipped in BF16 (e.g. the LTX-2.3 22B, ~35 GB → ~18 GB) is made to fit a 24 GB card fully resident — killing
-    /// the per-step weight streaming that dominates its step time. Only weights with at least
-    /// <paramref name="minElements"/> elements are quantized (skips norms, scale-shift tables, timestep-MLP and
-    /// projection layers, which stay BF16 for precision and cost little); everything else passes through unchanged.</summary>
-    public static Dictionary<string, Tensor> QuantizeLinearsToFp8(Dictionary<string, Tensor> source, long minElements = 1L << 20)
+    /// <summary>In-place: quantizes the large 2-D Linear weights under <paramref name="blockKeyMarker"/> from
+    /// BF16/F16 to fp8 e4m3, ADDING a <c>.scale_weight</c> [1] F32 companion for each (the ComfyUI
+    /// <c>fp8_scaled</c> layout). Because the scale rides in a companion tensor — not the un-persisted
+    /// <see cref="Tensor.Fp8ScaleFactor"/> — the result round-trips through safetensors: write it once with
+    /// <c>SafeTensorsWriter</c> to build a persistent fp8 <b>repack</b>, then every future load reads it back and
+    /// <see cref="ApplyFp8ScaledDequant"/> folds the companions in. This halves the DiT's resident footprint
+    /// (2 → 1 byte/param; the LTX-2.3 22B goes ~35 → ~18 GB, fitting a 24 GB card fully resident and killing the
+    /// per-step streaming). Only weights with ≥ <paramref name="minElements"/> elements are touched (norms,
+    /// scale-shift tables, timestep-MLP and projections stay BF16); the VAE/TE and already-fp8 tensors are skipped.</summary>
+    public static unsafe void QuantizeDitBlocksToFp8(Dictionary<string, Tensor> weights, string blockKeyMarker,
+        long minElements = 1L << 20)
     {
-        Dictionary<string, Tensor> result = new(source.Count);
-        foreach (KeyValuePair<string, Tensor> kvp in source)
+        List<(string Key, Tensor Scale)> companions = new();
+        foreach (string key in weights.Keys.ToList())
         {
-            Tensor t = kvp.Value;
-            bool quantize = kvp.Key.EndsWith(".weight", StringComparison.Ordinal)
+            Tensor t = weights[key];
+            bool quantize = key.Contains(blockKeyMarker, StringComparison.Ordinal)
+                && key.EndsWith(".weight", StringComparison.Ordinal)
                 && t.Shape.Rank == 2 && t.ElementCount >= minElements
                 && (t.DType == DType.BF16 || t.DType == DType.F16);
-            result[kvp.Key] = quantize ? QuantizeToFp8Scaled(t) : t;
+            if (!quantize) continue;
+            Tensor fp8 = QuantizeToFp8Scaled(t);
+            Tensor scale = new Tensor(new TensorShape(1), DType.F32);
+            ((float*)scale.DataPointer)[0] = fp8.Fp8ScaleFactor;
+            weights[key] = fp8;
+            companions.Add((key[..^".weight".Length] + ".scale_weight", scale));
         }
-        return result;
+        foreach ((string k, Tensor s) in companions) weights[k] = s;
     }
 
     /// <summary>BF16/F16 weight → fp8 e4m3 with a per-tensor scale = absmax/448 (E4M3's max magnitude), folded onto

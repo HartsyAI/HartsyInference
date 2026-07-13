@@ -23,34 +23,22 @@ internal static unsafe class DiamondOps
     }
 
     /// <summary>AdaGroupNorm: no-affine group norm of <paramref name="x"/> <c>[1,C,H,W]</c>, then
-    /// <c>x·(1+scale)+shift</c> where <c>[scale,shift]=Linear(cond)</c>. Returns a fresh tensor.</summary>
+    /// <c>x·(1+scale)+shift</c> where <c>[scale,shift]=Linear(cond)</c>. Returns a fresh tensor. Fully device-
+    /// resident: <c>GroupNorm(x, γ=1+scale, β=shift)</c> is exactly this definition (affine GN with the
+    /// cond-driven per-channel scale/shift as γ/β), so the whole op runs on the backend with no host round-trip.</summary>
     public static Tensor AdaGroupNorm(IBackend backend, Tensor x, Tensor cond, Tensor linW, Tensor linB, DiamondConfig cfg)
     {
-        int c = (int)x.Shape[1], h = (int)x.Shape[2], w = (int)x.Shape[3];
-        long hw = (long)h * w;
-        int groups = Groups(c, cfg), cpg = c / groups;
+        int c = (int)x.Shape[1];
+        int groups = Groups(c, cfg);
         Tensor ss = new(new TensorShape(1, 2 * c), DType.F32);
         backend.Linear(ss, cond, linW, linB);
+        // gamma = 1 + scale = 1 + ss[:, 0:C];  beta = shift = ss[:, C:2C]  (all device tensors)
+        Tensor scale = new(new TensorShape(1, c), DType.F32); backend.SliceLastDim(scale, ss, 0);
+        Tensor gamma = new(new TensorShape(1, c), DType.F32); backend.AddScalar(gamma, scale, 1f); scale.Dispose();
+        Tensor beta = new(new TensorShape(1, c), DType.F32); backend.SliceLastDim(beta, ss, c);
         Tensor o = new(x.Shape, DType.F32);
-        float* xp = (float*)x.DataPointer, op = (float*)o.DataPointer, sp = (float*)ss.DataPointer;
-        for (int g = 0; g < groups; g++)
-        {
-            long baseC = (long)g * cpg;
-            double sum = 0, sumSq = 0;
-            long n = cpg * hw;
-            for (int cc = 0; cc < cpg; cc++)
-                for (long i = 0; i < hw; i++) { float v = xp[(baseC + cc) * hw + i]; sum += v; sumSq += (double)v * v; }
-            double mean = sum / n;
-            double inv = 1.0 / Math.Sqrt(sumSq / n - mean * mean + cfg.GnEps);
-            for (int cc = 0; cc < cpg; cc++)
-            {
-                long ch = baseC + cc;
-                float scale = sp[ch], shift = sp[c + ch];
-                for (long i = 0; i < hw; i++)
-                    op[ch * hw + i] = (float)((xp[ch * hw + i] - mean) * inv) * (1f + scale) + shift;
-            }
-        }
-        ss.Dispose();
+        backend.GroupNorm(o, x, gamma, beta, groups, cfg.GnEps);
+        ss.Dispose(); gamma.Dispose(); beta.Dispose();
         return o;
     }
 
@@ -268,7 +256,7 @@ internal sealed unsafe class DiamondUNet
             for (int j = 0; j < u.Length; j++)
             {
                 Tensor skipT = skip[skip.Length - 1 - j];   // skip[::-1]
-                Tensor catT = ConcatChannels(cur, skipT);
+                Tensor catT = ConcatChannels(backend, cur, skipT);
                 if (ownCur) cur.Dispose();
                 Tensor next = u[j].Forward(backend, catT, cond); catT.Dispose();
                 cur = next; ownCur = true;
@@ -290,13 +278,11 @@ internal sealed unsafe class DiamondUNet
         return conv;
     }
 
-    private static Tensor ConcatChannels(Tensor a, Tensor b)
+    private static Tensor ConcatChannels(IBackend backend, Tensor a, Tensor b)
     {
         int ca = (int)a.Shape[1], cb = (int)b.Shape[1], h = (int)a.Shape[2], w = (int)a.Shape[3];
-        long hw = (long)h * w;
         Tensor o = new(new TensorShape(1, ca + cb, h, w), DType.F32);
-        Buffer.MemoryCopy((float*)a.DataPointer, (float*)o.DataPointer, ca * hw * 4, ca * hw * 4);
-        Buffer.MemoryCopy((float*)b.DataPointer, (float*)o.DataPointer + ca * hw, cb * hw * 4, cb * hw * 4);
+        backend.Concat(o, [a, b], 1);   // device channel-concat — keeps decoder activations resident
         return o;
     }
 
