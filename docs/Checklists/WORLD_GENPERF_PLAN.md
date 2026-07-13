@@ -202,6 +202,21 @@ MG2 25 FPS @540p / MG3 ≥10 FPS @720p on a 4090).
   OasisDit 12 + pipeline 10); (3) cuDNN SDPA on the axial attns (mask-null? check); (4) graph the 10-step
   per-frame denoise; (5) FPS before/after, byte-exact-vs-baseline gate.
 
+### Matrix-Game 2.0 / 3.0 — REAL-WEIGHT PERF RUN done (85 ms, cuDNN SDPA 1.28× verified), bottleneck diagnosed
+> **Round 10 (2026-07-13): MG2 runs on real Skywork weights.** New gated harness `MatrixGame2GenPerfTests` loads the
+> 6.48 GB distilled DiT via `MatrixGame2CheckpointConverter.LoadAndConvert` → `MatrixGame2Transformer` (Universal
+> cfg, dim 1536, 30 Wan blocks + 15 action blocks), runs one 3-frame latent block (768 tokens) with live
+> mouse/keyboard streams, times ms/forward. **85 ms/forward (12 fwd/s), finite non-flat velocity** (std 1.37).
+> **cuDNN SDPA fix verified on real weights: 106.7 → 83.2 ms (1.28×)** (`HARTSY_SDPA_NO_F16=1` toggles it; output
+> byte-identical). Bottleneck diagnosis (measured toggles): action module NEGLIGIBLE (84.5 off vs 85.0 on — the
+> Oasis-style attention collapse doesn't apply, it's a small fraction here); `HARTSY_GEMM_F16` **0%** (not
+> GEMM-math-bound); token-scaling 2.25× tokens → 1.9× time (≈linear = **bandwidth-bound**, not launch-bound like
+> Oasis — so CUDA-graph is NOT the lever); `HARTSY_DIT_F16` **0%** (DitDtype.Act not wired for this transformer).
+> **The MG2 lever is F16 activations** (halve the 30-block Wan DiT's activation bandwidth) — needs wiring
+> `DitDtype.Act` through `MatrixGame2Transformer`/`WanVideoBlock` (touches shared video code; behind a flag with
+> per-stage relL2). MG2 weights in `/tmp/mg2_ckpt`. Numeric parity vs a Skywork reference is still the separate
+> gate (DiT already corr 0.99999473 in the status doc); the perf harness asserts finite/non-flat, not parity.
+
 ### Matrix-Game 2.0 / 3.0 — ActionModule optimized (cuDNN SDPA + residency); real-weight run = next bringup
 > **Round 9 (2026-07-13):** Applied the Oasis insight to the **shared `MatrixGame3ActionModule`** (used by MG2 AND
 > MG3). Its temporal self-attention (mouse: `[sp, heads, tt, headDim]` — batched over spatial positions × tiny
