@@ -476,4 +476,100 @@ __global__ void dit_row_gated_accum_f32(
         out[i] += g * val[i];
 }
 
+// ── Oasis spatio-temporal attention layout (device ports of the host loops) ──
+// Frame-major tokens qkv[token, 3*dim] (token = f*sp + i) → out[b, heads, seq, headDim].
+// spatial (temporal=0): b = frame f, s = spatial i, seq = sp
+// temporal(temporal=1): b = spatial i, s = frame f, seq = frames
+// One thread per output element (token, h, d) over the sliced `part` (q=0/k=1/v=2).
+__global__ void oasis_split_heads_f32(
+    float* __restrict__ out,
+    const float* __restrict__ qkv,
+    unsigned int frames, unsigned int sp, unsigned int heads, unsigned int headDim,
+    unsigned int part, unsigned int temporal)
+{
+    unsigned int dim = heads * headDim;
+    unsigned long long total = (unsigned long long)frames * sp * dim;
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+    unsigned int d = (unsigned int)(gid % headDim);
+    unsigned long long tmp = gid / headDim;
+    unsigned int h = (unsigned int)(tmp % heads);
+    unsigned long long token = tmp / heads;
+    unsigned int f = (unsigned int)(token / sp);
+    unsigned int i = (unsigned int)(token % sp);
+    unsigned int b = temporal ? i : f;
+    unsigned int s = temporal ? f : i;
+    unsigned int seq = temporal ? frames : sp;
+    unsigned long long srcIdx = token * 3ULL * dim + (unsigned long long)part * dim + (unsigned long long)h * headDim + d;
+    unsigned long long dstIdx = (((unsigned long long)b * heads + h) * seq + s) * headDim + d;
+    out[dstIdx] = qkv[srcIdx];
+}
+
+// Interleaved (2i, 2i+1) partial rotary on x[b, heads, seq, headDim]; cos/sin are [seq, rotDim].
+// Rotates only the first `rotDim` dims of each head (rest pass through). One thread per (b,h,s,pair).
+__global__ void oasis_rope_interleaved_f32(
+    float* __restrict__ x,
+    const float* __restrict__ cos,
+    const float* __restrict__ sin,
+    unsigned int batch, unsigned int heads, unsigned int seq, unsigned int headDim, unsigned int rotDim)
+{
+    unsigned int pairs = rotDim >> 1;
+    unsigned long long total = (unsigned long long)batch * heads * seq * pairs;
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+    unsigned int p = (unsigned int)(gid % pairs);
+    unsigned long long tmp = gid / pairs;
+    unsigned int s = (unsigned int)(tmp % seq);
+    unsigned long long bh = tmp / seq;              // b*heads + h
+    unsigned int i0 = 2u * p;
+    unsigned long long xOff = bh * seq * headDim + (unsigned long long)s * headDim;
+    unsigned long long cOff = (unsigned long long)s * rotDim;
+    float re = x[xOff + i0], im = x[xOff + i0 + 1];
+    float c = cos[cOff + i0], sn = sin[cOff + i0];
+    x[xOff + i0]     = re * c - im * sn;
+    x[xOff + i0 + 1] = re * sn + im * c;
+}
+
+// Inverse of split: attn[b, heads, seq, headDim] → out[token, dim] (token = f*sp + i).
+__global__ void oasis_merge_heads_f32(
+    float* __restrict__ out,
+    const float* __restrict__ attn,
+    unsigned int frames, unsigned int sp, unsigned int heads, unsigned int headDim,
+    unsigned int temporal)
+{
+    unsigned int dim = heads * headDim;
+    unsigned long long total = (unsigned long long)frames * sp * dim;
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+    unsigned int d = (unsigned int)(gid % headDim);
+    unsigned long long tmp = gid / headDim;
+    unsigned int h = (unsigned int)(tmp % heads);
+    unsigned long long token = tmp / heads;
+    unsigned int f = (unsigned int)(token / sp);
+    unsigned int i = (unsigned int)(token % sp);
+    unsigned int b = temporal ? i : f;
+    unsigned int s = temporal ? f : i;
+    unsigned int seq = temporal ? frames : sp;
+    unsigned long long srcIdx = (((unsigned long long)b * heads + h) * seq + s) * headDim + d;
+    unsigned long long dstIdx = token * dim + (unsigned long long)h * headDim + d;
+    out[dstIdx] = attn[srcIdx];
+}
+
+// Pixel quantize to 256 levels (DIAMOND): out = floor((clamp(v,-1,1)+1)*127.5)/127.5 - 1.
+// `(int)` truncation of a non-negative value == floor. Enables a drain-free EDM step for graph capture.
+__global__ void dit_pixel_quantize_f32(
+    float* __restrict__ output,
+    const float* __restrict__ input,
+    float unused,
+    unsigned int count)
+{
+    (void)unused;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    float v = input[i];
+    v = v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v);
+    int b = (int)((v + 1.0f) * 0.5f * 255.0f);
+    output[i] = (float)b / 255.0f * 2.0f - 1.0f;
+}
+
 } // extern "C"

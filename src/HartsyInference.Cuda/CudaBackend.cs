@@ -192,6 +192,10 @@ public sealed class CudaBackend : IBackend
     /// keeps F32 range with a 10-bit mantissa. Opt out with <c>HARTSY_NO_TF32=1</c>.</summary>
     private readonly bool _allowTf32;
 
+    /// <summary>HARTSY_GEMM_F16=1: use F16-mantissa (COMPUTE_32F_FAST_16F) tensor-core math for F32 GEMMs — faster
+    /// than TF32 on Ada, F32 accumulate kept. Opt-in per parity-checked model (Oasis interactive DiT).</summary>
+    private readonly bool _gemmFast16;
+
     /// <summary>HARTSY_SDPA_F16=1: force the F16 SDPA path on for ALL callers (not just allowF16 ones) — testing/override.</summary>
     private readonly bool _sdpaF16ForceOn;
     /// <summary>HARTSY_SDPA_NO_F16=1: global kill-switch for the F16 SDPA path even when a caller passes allowF16.</summary>
@@ -216,9 +220,14 @@ public sealed class CudaBackend : IBackend
     /// F32 operands when allowed (and <see cref="HighPrecisionGemm"/> — an explicit full-precision request —
     /// is off), otherwise plain 32F accumulate (mixed F16-in/F32-acc stays 32F).</summary>
     private int Compute32F(int gemmType)
-        => _allowTf32 && !HighPrecisionGemm && gemmType == CublasApi.CUDA_R_32F
-            ? CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32
-            : CublasApi.CUBLAS_COMPUTE_32F;
+    {
+        if (HighPrecisionGemm || gemmType != CublasApi.CUDA_R_32F) return CublasApi.CUBLAS_COMPUTE_32F;
+        // HARTSY_GEMM_F16=1: F16-mantissa tensor-core matmul with F32 storage+accumulate — ~2× TF32 on Ada for
+        // GEMM-heavy small-DiT loops (Oasis). Safer than F16 SDPA (which Oasis already tolerates at corr>0.9999)
+        // since accumulation stays F32; opt-in per model that has been parity-checked.
+        if (_gemmFast16) return CublasApi.CUBLAS_COMPUTE_32F_FAST_16F;
+        return _allowTf32 ? CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32 : CublasApi.CUBLAS_COMPUTE_32F;
+    }
 
     /// <summary>Creates a CUDA backend for the specified device ordinal. If ptxDir is provided, loads PTX kernels from that directory.</summary>
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)
@@ -286,6 +295,7 @@ public sealed class CudaBackend : IBackend
         EnableFp8F16Gemm = EnvFlag("HARTSY_FP8_F16");
         EnableFp8F32Gemm = EnvFlag("HARTSY_FP8_F32");
         _allowTf32 = _context.ComputeCapabilityMajor >= 8 && !EnvFlag("HARTSY_NO_TF32");
+        _gemmFast16 = _context.ComputeCapabilityMajor >= 8 && EnvFlag("HARTSY_GEMM_F16");
         // F16 SDPA is gated PER-CALL via the allowF16 arg (callers with bounded/RMS-normed scores like Wan pass true);
         // safe by default because unbounded-score archs (Z-Image fp8) don't pass it. Env: force-on all callers, or kill.
         _sdpaF16ForceOn = EnvFlag("HARTSY_SDPA_F16");
@@ -1852,6 +1862,75 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pCos);
             GpuTransferHelper.FreeDevice(pSin);
         }
+    }
+
+    /// <summary>Oasis head split: frame-major qkv[token,3·dim] → out[b,heads,seq,headDim] (device port of the host loop).</summary>
+    public void OasisSplitHeads(Tensor output, Tensor qkv, int frames, int sp, int heads, int headDim, int part, bool temporal)
+    {
+        if (output.DType != DType.F32 || qkv.DType != DType.F32) throw new NotSupportedException("CUDA OasisSplitHeads supports F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pIn = 0; bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(qkv);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchOasisSplitHeads(pOut, pIn, frames, sp, heads, headDim, part, temporal, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
+    }
+
+    /// <summary>Interleaved (2i,2i+1) partial rope on x[b,heads,seq,headDim] in place; cos/sin are [seq,rotDim].</summary>
+    public void OasisRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int batch, int heads, int seq, int headDim, int rotDim)
+    {
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32) throw new NotSupportedException("CUDA OasisRopeInterleaved supports F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pX = 0, pCos = 0, pSin = 0;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);
+            pCos = GpuTransferHelper.CopyToDevice(cos);
+            pSin = GpuTransferHelper.CopyToDevice(sin);
+            _kernels!.LaunchOasisRopeInterleaved(pX, pCos, pSin, batch, heads, seq, headDim, rotDim, _stream.Handle);
+            x._gpuSyncCallback = null; x._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));
+        }
+        finally { GpuTransferHelper.FreeDevice(pCos); GpuTransferHelper.FreeDevice(pSin); }
+    }
+
+    /// <summary>Oasis head merge: attn[b,heads,seq,headDim] → out[token,dim] (inverse of split).</summary>
+    public void OasisMergeHeads(Tensor output, Tensor attn, int frames, int sp, int heads, int headDim, bool temporal)
+    {
+        if (output.DType != DType.F32 || attn.DType != DType.F32) throw new NotSupportedException("CUDA OasisMergeHeads supports F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pIn = 0; bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(attn);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchOasisMergeHeads(pOut, pIn, frames, sp, heads, headDim, temporal, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
+    }
+
+    /// <summary>DIAMOND pixel quantize to 256 levels: out = floor((clamp(v,-1,1)+1)·127.5)/127.5 − 1 (device).</summary>
+    public void PixelQuantize(Tensor output, Tensor input)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32) throw new NotSupportedException("CUDA PixelQuantize supports F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pIn = 0; bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchPixelQuantize(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
     }
 
     /// <summary>Wan-Video interleaved in-place RoPE (shared cos/sin) — keeps q/k GPU-resident through RoPE so the

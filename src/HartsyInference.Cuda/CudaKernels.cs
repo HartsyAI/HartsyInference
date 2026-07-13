@@ -190,6 +190,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditIndexAddF32;
     private readonly nint _ditScatterRowsAfterF32;
     private readonly nint _ditSliceRowsF32;
+    private readonly nint _oasisSplitHeadsF32;
+    private readonly nint _oasisRopeInterleavedF32;
+    private readonly nint _oasisMergeHeadsF32;
+    private readonly nint _ditPixelQuantizeF32;
 
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
     private readonly CudaModule _ditF16Module;
@@ -428,6 +432,10 @@ public sealed class CudaKernels : IDisposable
         _ditIndexAddF32 = _ditF32Module.GetFunction("dit_index_add_f32");
         _ditScatterRowsAfterF32 = _ditF32Module.GetFunction("dit_scatter_rows_after_f32");
         _ditSliceRowsF32 = _ditF32Module.GetFunction("dit_slice_rows_f32");
+        _oasisSplitHeadsF32 = _ditF32Module.GetFunction("oasis_split_heads_f32");
+        _oasisRopeInterleavedF32 = _ditF32Module.GetFunction("oasis_rope_interleaved_f32");
+        _oasisMergeHeadsF32 = _ditF32Module.GetFunction("oasis_merge_heads_f32");
+        _ditPixelQuantizeF32 = _ditF32Module.GetFunction("dit_pixel_quantize_f32");
 
         // ── DiT glue (F16 I/O, F32 accumulate) — DiT F16 activation path ─
         _ditF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dit_f16.ptx"));
@@ -1751,6 +1759,49 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches add-scalar: out[i] = in[i] + c (F32).</summary>
     public void LaunchAddScalar(ulong output, ulong input, float c, int count, nint stream)
         => LaunchScaleImpl(_ditAddScalarF32, output, input, c, count, stream);
+
+    /// <summary>Pixel-quantize to 256 levels (DIAMOND EDM output; enables a drain-free graph-capturable step).</summary>
+    public void LaunchPixelQuantize(ulong output, ulong input, int count, nint stream)
+        => LaunchScaleImpl(_ditPixelQuantizeF32, output, input, 0f, count, stream);
+
+    /// <summary>Oasis head split: frame-major qkv[token,3·dim] → out[b,heads,seq,headDim] (part q/k/v, spatial/temporal).</summary>
+    public unsafe void LaunchOasisSplitHeads(ulong output, ulong qkv, int frames, int sp, int heads, int headDim, int part, bool temporal, nint stream)
+    {
+        ulong outArg = output, qkvArg = qkv;
+        uint fArg = (uint)frames, spArg = (uint)sp, hArg = (uint)heads, hdArg = (uint)headDim, pArg = (uint)part, tArg = temporal ? 1u : 0u;
+        void** args = stackalloc void*[8];
+        args[0] = &outArg; args[1] = &qkvArg; args[2] = &fArg; args[3] = &spArg;
+        args[4] = &hArg; args[5] = &hdArg; args[6] = &pArg; args[7] = &tArg;
+        long threads = (long)frames * sp * heads * headDim;
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_oasisSplitHeadsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Interleaved (2i,2i+1) partial rope on x[b,heads,seq,headDim]; cos/sin are [seq,rotDim].</summary>
+    public unsafe void LaunchOasisRopeInterleaved(ulong x, ulong cos, ulong sin, int batch, int heads, int seq, int headDim, int rotDim, nint stream)
+    {
+        ulong xArg = x, cosArg = cos, sinArg = sin;
+        uint bArg = (uint)batch, hArg = (uint)heads, sArg = (uint)seq, hdArg = (uint)headDim, rArg = (uint)rotDim;
+        void** args = stackalloc void*[8];
+        args[0] = &xArg; args[1] = &cosArg; args[2] = &sinArg; args[3] = &bArg;
+        args[4] = &hArg; args[5] = &sArg; args[6] = &hdArg; args[7] = &rArg;
+        long threads = (long)batch * heads * seq * (rotDim / 2);
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_oasisRopeInterleavedF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Oasis head merge: attn[b,heads,seq,headDim] → out[token,dim] (inverse of split).</summary>
+    public unsafe void LaunchOasisMergeHeads(ulong output, ulong attn, int frames, int sp, int heads, int headDim, bool temporal, nint stream)
+    {
+        ulong outArg = output, attnArg = attn;
+        uint fArg = (uint)frames, spArg = (uint)sp, hArg = (uint)heads, hdArg = (uint)headDim, tArg = temporal ? 1u : 0u;
+        void** args = stackalloc void*[7];
+        args[0] = &outArg; args[1] = &attnArg; args[2] = &fArg; args[3] = &spArg;
+        args[4] = &hArg; args[5] = &hdArg; args[6] = &tArg;
+        long threads = (long)frames * sp * heads * headDim;
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_oasisMergeHeadsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
 
     /// <summary>Add scalar (out = in + c) with F16 I/O (scalar stays F32).</summary>
     public void LaunchAddScalarF16(ulong output, ulong input, float c, int count, nint stream)

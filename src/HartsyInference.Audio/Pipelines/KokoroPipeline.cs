@@ -1,8 +1,10 @@
+using System.IO;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Kokoro;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelHandler.PyTorch;
 using HartsyInference.ModelHandler.SafeTensors;
 
 namespace HartsyInference.Audio.Pipelines;
@@ -109,18 +111,18 @@ public sealed class KokoroPipeline : IDisposable
     /// <c>bert_encoder.weight</c>, …) the submodules' <c>LoadWeights</c> expect.</para></summary>
     public static async Task<KokoroPipeline> LoadAsync(CancellationToken ct = default)
     {
-        Task<string> tfWeights = AudioModelCache.GetAsync(RepackRepo, RepackFile, ct: ct);
-        Task<string> tfConfig = AudioModelCache.GetAsync(RepackRepo, "config.json", ct: ct);
-        await Task.WhenAll(tfWeights, tfConfig).ConfigureAwait(false);
-
-        if (RepackSha256.Length != 0)
-            AudioModelCache.VerifySha256(tfWeights.Result, RepackSha256);
+        // Config + voice packs come from the canonical hexgrad repo. Weights: prefer the pre-flattened
+        // single-file repack, but if it isn't published/reachable, download the canonical kokoro-v1_0.pth and
+        // do the same flatten + inner-`module.`-strip in-engine (cached once), so Kokoro always installs & runs
+        // like any other model — no dependency on a separately-hosted repack that may not exist.
+        string configPath = await AudioModelCache.GetAsync("hexgrad/Kokoro-82M", "config.json", ct: ct).ConfigureAwait(false);
+        string weightsPath = await EnsureRepackedWeightsAsync(ct).ConfigureAwait(false);
 
         KokoroConfig cfg = KokoroConfig.V1;
-        KokoroPhonemeTokenizer tok = KokoroPhonemeTokenizer.LoadFromConfig(tfConfig.Result);
+        KokoroPhonemeTokenizer tok = KokoroPhonemeTokenizer.LoadFromConfig(configPath);
 
         SafeTensorsLoader loader = new();
-        loader.Load(tfWeights.Result);
+        loader.Load(weightsPath);
         Dictionary<string, Tensor> weights = loader.GetAllTensors();
 
         KokoroPlBert plBert = new(cfg);
@@ -137,6 +139,41 @@ public sealed class KokoroPipeline : IDisposable
 
         string repoDir = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M");
         return new KokoroPipeline(cfg, tok, plBert, textEnc, pred, dec, loader, repoDir);
+    }
+
+    /// <summary>Resolves the flattened single-file Kokoro weights. Prefers the published repack; if it isn't
+    /// reachable (e.g. not published), downloads the canonical hexgrad <c>kokoro-v1_0.pth</c> and converts it
+    /// once into <c>kokoro-82m.safetensors</c> beside it — recursive flatten of the dict-of-state-dicts + strip
+    /// the inner <c>module.</c> wrapper (nn.DataParallel), the exact transform <c>tools/repack</c> bakes offline,
+    /// producing the flat dotted keys the submodule <c>LoadWeights</c> methods expect.</summary>
+    private static async Task<string> EnsureRepackedWeightsAsync(CancellationToken ct)
+    {
+        try
+        {
+            string repack = await AudioModelCache.GetAsync(RepackRepo, RepackFile, ct: ct).ConfigureAwait(false);
+            if (RepackSha256.Length != 0)
+                AudioModelCache.VerifySha256(repack, RepackSha256);
+            return repack;
+        }
+        catch (Exception ex)
+        {
+            string pth = await AudioModelCache.GetAsync("hexgrad/Kokoro-82M", "kokoro-v1_0.pth", ct: ct).ConfigureAwait(false);
+            string outPath = Path.Combine(Path.GetDirectoryName(pth)!, RepackFile);
+            if (!File.Exists(outPath))
+            {
+                HartsyInference.Core.Logging.Logs.Info(
+                    $"[Kokoro] Repack '{RepackRepo}/{RepackFile}' unavailable ({ex.Message}); converting canonical kokoro-v1_0.pth → {RepackFile} (one-time).");
+                using PytorchPickleLoader pl = new();
+                pl.Load(pth, recursiveFlatten: true);
+                Dictionary<string, Tensor> flat = new(StringComparer.Ordinal);
+                foreach ((string k, Tensor v) in pl.GetAllTensors())
+                {
+                    flat[k.Replace(".module.", ".")] = v;
+                }
+                SafeTensorsWriter.Save(outPath, flat);
+            }
+            return outPath;
+        }
     }
 
     /// <summary>Synthesizes audio from an IPA phoneme string. <paramref name="voiceName"/>

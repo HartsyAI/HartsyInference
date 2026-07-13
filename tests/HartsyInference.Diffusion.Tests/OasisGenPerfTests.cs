@@ -73,6 +73,7 @@ public sealed unsafe class OasisGenPerfTests
             backend.Sync();
 
             double[] ms = new double[iters];
+            double lastCorr = corr;
             Stopwatch sw = new();
             for (int f = 0; f < iters; f++)
             {
@@ -81,12 +82,15 @@ public sealed unsafe class OasisGenPerfTests
                 backend.Sync();
                 sw.Stop();
                 ms[f] = sw.Elapsed.TotalMilliseconds;
+                if (f == iters - 1) lastCorr = Corr(v, refV);   // graph-REPLAY output when HARTSY_DIT_GRAPH=1
                 v.Dispose();
             }
             double mean = ms.Average(), p50 = Percentile(ms, 50), p99 = Percentile(ms, 99), min = ms.Min();
-            _out.WriteLine($"per-forward ms: mean={mean:F2} p50={p50:F2} p99={p99:F2} min={min:F2}");
-            _out.WriteLine($"=> 1 DDIM step/forward: {1000 / mean:F1} fwd/s;  10-step frame: {1000 / (10 * mean):F2} FPS;  parity corr={corr:F8}");
+            bool graph = Environment.GetEnvironmentVariable("HARTSY_DIT_GRAPH") == "1";
+            _out.WriteLine($"per-forward ms: mean={mean:F2} p50={p50:F2} p99={p99:F2} min={min:F2}  (graph={graph})");
+            _out.WriteLine($"=> 1 DDIM step/forward: {1000 / mean:F1} fwd/s;  10-step frame: {1000 / (10 * mean):F2} FPS;  parity corr warm={corr:F8} last={lastCorr:F8}");
             Assert.True(corr > 0.9999, $"DiT parity broke: corr={corr}");
+            Assert.True(lastCorr > 0.9999, $"DiT replay parity broke: corr={lastCorr}");
             latents.Dispose(); actions.Dispose();
         }
     }

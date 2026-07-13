@@ -113,6 +113,86 @@ public interface IBackend : IDisposable
         }
     }
 
+    // ── Oasis spatio-temporal attention layout (default host impls = numeric reference;
+    //    CudaBackend overrides with PTX kernels to keep the attention island GPU-resident) ──
+
+    /// <summary>Frame-major qkv <c>[token, 3·dim]</c> (token = f·sp+i) → <c>[b, heads, seq, headDim]</c>, slicing
+    /// <paramref name="part"/> (q/k/v). spatial (<paramref name="temporal"/>=false): b=frame, seq=sp; temporal:
+    /// b=spatial, seq=frames.</summary>
+    unsafe void OasisSplitHeads(Tensor output, Tensor qkv, int frames, int sp, int heads, int headDim, int part, bool temporal)
+    {
+        if (output.DType != DType.F32 || qkv.DType != DType.F32) throw new NotSupportedException("OasisSplitHeads default fallback only supports F32.");
+        int dim = heads * headDim;
+        int seq = temporal ? frames : sp;
+        float* src = (float*)qkv.DataPointer, dst = (float*)output.DataPointer;
+        for (int f = 0; f < frames; f++)
+            for (int i = 0; i < sp; i++)
+            {
+                long token = (long)f * sp + i;
+                int b = temporal ? i : f, s = temporal ? f : i;
+                for (int h = 0; h < heads; h++)
+                    for (int d = 0; d < headDim; d++)
+                        dst[(((long)b * heads + h) * seq + s) * headDim + d] = src[token * 3 * dim + (long)part * dim + (long)h * headDim + d];
+            }
+    }
+
+    /// <summary>Interleaved (2i,2i+1) partial rotary on <paramref name="x"/> <c>[b, heads, seq, headDim]</c> in
+    /// place; rotates the first <paramref name="rotDim"/> dims. <paramref name="cos"/>/<paramref name="sin"/> are
+    /// <c>[seq, rotDim]</c>.</summary>
+    unsafe void OasisRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int batch, int heads, int seq, int headDim, int rotDim)
+    {
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32) throw new NotSupportedException("OasisRopeInterleaved default fallback only supports F32.");
+        int pairs = rotDim / 2;
+        float* xp = (float*)x.DataPointer, cp = (float*)cos.DataPointer, sp2 = (float*)sin.DataPointer;
+        for (int b = 0; b < batch; b++)
+            for (int h = 0; h < heads; h++)
+                for (int s = 0; s < seq; s++)
+                {
+                    long xOff = (((long)b * heads + h) * seq + s) * headDim, cOff = (long)s * rotDim;
+                    for (int p = 0; p < pairs; p++)
+                    {
+                        int i0 = 2 * p;
+                        float re = xp[xOff + i0], im = xp[xOff + i0 + 1], c = cp[cOff + i0], sn = sp2[cOff + i0];
+                        xp[xOff + i0] = re * c - im * sn;
+                        xp[xOff + i0 + 1] = re * sn + im * c;
+                    }
+                }
+    }
+
+    /// <summary><c>[b, heads, seq, headDim]</c> → frame-major <c>[token, dim]</c> (inverse of <see cref="OasisSplitHeads"/>).</summary>
+    unsafe void OasisMergeHeads(Tensor output, Tensor attn, int frames, int sp, int heads, int headDim, bool temporal)
+    {
+        if (output.DType != DType.F32 || attn.DType != DType.F32) throw new NotSupportedException("OasisMergeHeads default fallback only supports F32.");
+        int dim = heads * headDim;
+        int seq = temporal ? frames : sp;
+        float* src = (float*)attn.DataPointer, dst = (float*)output.DataPointer;
+        for (int f = 0; f < frames; f++)
+            for (int i = 0; i < sp; i++)
+            {
+                long token = (long)f * sp + i;
+                int b = temporal ? i : f, s = temporal ? f : i;
+                for (int h = 0; h < heads; h++)
+                    for (int d = 0; d < headDim; d++)
+                        dst[token * dim + (long)h * headDim + d] = src[(((long)b * heads + h) * seq + s) * headDim + d];
+            }
+    }
+
+    /// <summary>DIAMOND pixel quantize to 256 levels: <c>floor((clamp(v,−1,1)+1)·127.5)/127.5 − 1</c>. Device
+    /// override makes the EDM step drain-free (graph-capturable).</summary>
+    unsafe void PixelQuantize(Tensor output, Tensor input)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32) throw new NotSupportedException("PixelQuantize default fallback only supports F32.");
+        long n = input.ElementCount;
+        float* ip = (float*)input.DataPointer, op = (float*)output.DataPointer;
+        for (long i = 0; i < n; i++)
+        {
+            float v = ip[i];
+            if (v > 1f) v = 1f; else if (v < -1f) v = -1f;
+            int b = (int)((v + 1f) * 0.5f * 255f);
+            op[i] = b / 255f * 2f - 1f;
+        }
+    }
+
     /// <summary>AdaLN modulation split (scale-only, tanh-gated). <paramref name="proj"/> is <c>[B, 4*D]</c> =
     /// chunk(scale_msa, gate_msa, scale_mlp, gate_mlp); writes four <c>[B, D]</c> tensors applying
     /// <c>1 + x</c> to scales and <c>tanh(x)</c> to gates (Ideogram 4's ComputeModulation).</summary>

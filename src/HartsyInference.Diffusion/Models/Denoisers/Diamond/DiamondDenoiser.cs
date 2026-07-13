@@ -38,33 +38,25 @@ public sealed unsafe class DiamondDenoiser
     public Tensor Denoise(IBackend backend, Tensor noisy, float sigma, Tensor obs, ReadOnlySpan<int> act, bool quantize = true)
     {
         (float cIn, float cOut, float cSkip, float cNoise) = ComputeConditioners(sigma);
-        long n = noisy.ElementCount;
-        Tensor rn = new(noisy.Shape, DType.F32);
-        float* npn = (float*)noisy.DataPointer, rp = (float*)rn.DataPointer;
-        for (long i = 0; i < n; i++) rp[i] = npn[i] * cIn;
-
-        Tensor ro = new(obs.Shape, DType.F32);
-        float* op = (float*)obs.DataPointer, rop = (float*)ro.DataPointer;
-        float invSd = 1f / _cfg.SigmaData;
-        for (long i = 0; i < obs.ElementCount; i++) rop[i] = op[i] * invSd;
+        // Device-resident EDM step (drain-free — no host DataPointer reads → graph-capturable):
+        // rn = noisy·cIn, ro = obs/sigma_data → U-Net → d = cSkip·noisy + cOut·inner, then (optional) pixel-quantize.
+        Tensor rn = new(noisy.Shape, DType.F32); backend.Scale(rn, noisy, cIn);
+        Tensor ro = new(obs.Shape, DType.F32); backend.Scale(ro, obs, 1f / _cfg.SigmaData);
 
         Tensor innerOut = _inner.Forward(backend, rn, cNoise, ro, act);
         rn.Dispose(); ro.Dispose();
 
-        Tensor d = new(noisy.Shape, DType.F32);
-        float* ip = (float*)innerOut.DataPointer, dp = (float*)d.DataPointer;
-        for (long i = 0; i < n; i++)
-        {
-            float v = cSkip * npn[i] + cOut * ip[i];
-            if (quantize)
-            {
-                if (v > 1f) v = 1f; else if (v < -1f) v = -1f;
-                int b = (int)((v + 1f) * 0.5f * 255f);      // torch .byte() truncates toward zero
-                v = b / 255f * 2f - 1f;
-            }
-            dp[i] = v;
-        }
+        Tensor skip = new(noisy.Shape, DType.F32); backend.Scale(skip, noisy, cSkip);
+        Tensor outp = new(noisy.Shape, DType.F32); backend.Scale(outp, innerOut, cOut);
         innerOut.Dispose();
+        Tensor d = new(noisy.Shape, DType.F32); backend.Add(d, skip, outp);
+        skip.Dispose(); outp.Dispose();
+        if (quantize)
+        {
+            Tensor q = new(noisy.Shape, DType.F32); backend.PixelQuantize(q, d);  // clamp[-1,1] + 256-level quantize
+            d.Dispose();
+            return q;
+        }
         return d;
     }
 }

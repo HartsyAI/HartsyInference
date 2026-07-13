@@ -455,12 +455,13 @@ generation path, on both GPUs. Full table + methodology + the outlier list: [`be
 
 | Model | Type | RTX 3060 | RTX 4090 |
 |---|---|---|---|
-| Piper (VITS) | TTS | 10.4× | 7.7× |
+| Piper (VITS) | TTS | 8.6× | 8.3× |
 | Moonshine | STT | 6.5× | 6.5× |
 | Whisper (base) | STT | 5.1× | 5.4× |
-| MeloTTS (en-v3) | TTS | 1.7× | 1.8× |
+| Kokoro (StyleTTS2) | TTS | 4.5× | 5.2× |
+| MeloTTS (en-v3) | TTS | 1.4× | 1.4× |
 
-**The small audio models are host/launch-bound, not compute-bound** — the 4090's extra compute buys ~nothing (Piper is even slightly slower on it). So the optimization lever here is **CUDA-graph capture / host-glue removal** (kills kernel-launch overhead), exactly like the LLM-decode graph win and the opposite of the compute-bound video/music DiTs where graphs are a no-op. Music (ACE-Step, YuE, HeartMuLa) e2e numbers live in their own result files and [`docs/Checklists/MODEL_STATUS_AUDIO.md`](docs/Checklists/MODEL_STATUS_AUDIO.md).
+TTS measured through the canonical `GenerateText2Image` path (WAV to `/Output` like any gen); STT via `ProcessSTT`. **The small audio models are host/launch-bound, not compute-bound** — the 4090's extra compute buys ~nothing (Piper is even slightly slower on it). So the optimization lever here is **CUDA-graph capture / host-glue removal** (kills kernel-launch overhead), exactly like the LLM-decode graph win and the opposite of the compute-bound video/music DiTs where graphs are a no-op. Music (ACE-Step, YuE, HeartMuLa) e2e numbers live in their own result files and [`docs/Checklists/MODEL_STATUS_AUDIO.md`](docs/Checklists/MODEL_STATUS_AUDIO.md).
 
 ---
 

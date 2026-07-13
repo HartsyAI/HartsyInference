@@ -81,6 +81,74 @@ MG2 25 FPS @540p / MG3 ≥10 FPS @720p on a 4090).
 > paths + `PARITY_BACKEND=cuda`); warmup then timed window with `backend.Sync()`; parity assert vs reference each
 > run. Weights: Diamond `eloialonso/diamond` Breakout.pt (54 MB), Oasis `camenduru/oasis-500m` (`.pt`→safetensors).
 
+> ### ✅ Round 2 (2026-07-12) — kernels + Python GPU baselines; Diamond BEATS reference, Oasis fully device-resident
+> Established a **no-nvcc PTX build path**: `native/cuda/nvrtc_compile.c` (build `cc -O2 -o /tmp/nvrtc_compile
+> nvrtc_compile.c -ldl`; run `LD_LIBRARY_PATH=~/.local/lib/cuda13 /tmp/nvrtc_compile in.cu out.ptx compute_80`) —
+> the box has `libnvrtc.so.13` but no `nvcc`. Wrote **4 new PTX kernels in `native/cuda/dit/dit_f32.cu`**:
+> `oasis_split_heads_f32` / `oasis_rope_interleaved_f32` / `oasis_merge_heads_f32` (device ports of the block's
+> host attention loops — interleaved+partial axial rope on `[b,h,s,d]`) and `dit_pixel_quantize_f32` (DIAMOND EDM
+> output). Wired each through `IBackend` (default host impl = numeric reference) + `CudaBackend` override +
+> `CudaKernels` launch. All parity-guarded.
+>
+> **Python GPU reference baselines (torch cu124 eager, 4090):** Oasis DiT forward **67.9 ms**; Diamond 3-step
+> frame **47.5 ms (21 FPS)**. (Script `/tmp/bench_world.py`, bench venv `/tmp/benchvenv`, `CUDA_VISIBLE_DEVICES=0`
+> = 4090 in torch fastest-first order.)
+>
+> **DIAMOND — now BEATS the reference.** Ported the whole EDM step to device (input/obs `Scale`, combine
+> `Scale`+`Add`, `PixelQuantize` kernel) + device Euler in the sampler → the 3-step denoise is now fully
+> device-resident **and drain-free (graph-capturable)**. Parity 3/3 bit-exact, coherence identical. **223 → 33 ms
+> (6.8×), 4.5 → ~30 FPS — vs torch eager 47.5 ms / 21 FPS = 1.4× FASTER than reference.** Remaining: wire
+> `StepGraph` capture (the step is now ready); marginal since Diamond already beats reference.
+>
+> **Oasis — attention island now device-resident (new kernels), bit-exact.** `SplitHeads`/`MergeHeads`/`RotateBhsd`
+> host loops → the 3 new kernels. Parity corr 0.99999928, all block taps corr ~1.0. **1327 → 923 ms; cumulative
+> 2342 → 923 ms (2.54×).** The gap to torch (68 ms) is **NOT algorithmic**: weights are resident (cached), and
+> Release == Debug (957 vs 923 ms) → it's the engine's **per-op host overhead** across ~960 op-launches/forward.
+> **The one remaining lever is CUDA-graph step capture** (record the 960-op sequence once, replay eliminates the
+> per-op host cost → expected ~torch-parity). This is the LTX-2.3-scale fixed-buffer recipe over 16 blocks — a
+> distinct subsystem, not a kernel. Secondary: fuse the tiny adaLN slice/addscalar ops (a single Oasis-adaLN
+> kernel from `mod[T,6·dim]`) to cut op count ~20%.
+
+> ### ✅ Round 3 (2026-07-12) — Oasis CUDA-graph capture: 923 → 272 ms (cumulative 2342 → 272 ms, 8.6×)
+> Wired step-graph capture into `OasisDit.Forward` (`HARTSY_DIT_GRAPH=1`, opt-in). The now-device-resident 16-block
+> loop captures once and replays with a single `cuGraphLaunch` per DDIM step; host patchify/cond-build/final-layer
+> stay OUTSIDE capture, refreshing fixed input/cond buffers (`_xFixed`/`_condFixed`) before each launch; RoPE
+> tables + causal mask are cached per (t,gh,gw) geometry sig (stable device addresses); the block output lands in
+> a non-graph-owned snapshot (`_blockOutFixed`) as the last captured op (the HunyuanVideo graph-owned-free rule).
+> Interactive AR geometry is FIXED → sig never flips → captured once, replayed every forward. Clean eager fallback
+> on any capture failure (`_graphDead`). **923 → 272 ms (3.4×), and the graph-REPLAY output is bit-exact
+> (corr 0.99999928 vs reference — verified in-harness on the 30th forward).** The captured block loop is now at its
+> **F32-kernel GPU floor** (~230 ms); the residual gap to torch's 68 ms is F32-vs-F16 kernel efficiency (torch uses
+> TF32/fused-flash) → the next lever is `DitDtype.Act` F16 + cuDNN fused SDPA (flagged, numeric-risk), plus porting
+> the host patchify/final-layer tail into the captured region. Diamond's step is likewise graph-ready but already
+> beats reference, so its capture is deferred. Regression: Diamond parity 3/3, Oasis parity 4/4 (eager) held.
+
+> ### ✅ Round 4 (2026-07-12) — Matrix-Game ActionModule safe residency ports (shared by MG2 + MG3)
+> The novel non-Wan perf surface of both Matrix-Game models is `MatrixGame3ActionModule` (mouse self-attn /
+> keyboard cross-attn, 23 host loops). Since MG2/MG3 numerics are **unverified with no weights** (correctness
+> before perf), only the unambiguously-safe, existing-op host loops were ported to device: `AddInPlace`→
+> `backend.Add`, `RmsNormHeads`→`backend.RmsNorm`, `LayerNormRows`→`LayerNormNoAffine`+`AffineBroadcastLastDim`.
+> Bit-identical-class; all 13 Matrix-Game structural tests pass (CPU). The deeper attention-layout loops
+> (`SplitQkvTemporal`/`MergeTemporal`/`ApplyRopeBatched` — like Oasis's but temporal-batched with grid-indexed
+> RoPE) need dedicated kernels AND a **measured run needs real weights + numeric verification of the ActionModule**
+> — that download+parity bringup (MG2 is closest: its Wan-backbone DiT forward is already parity-verified) is the
+> gating next phase for MG2/MG3/GameCraft, not more speculative porting.
+
+> ### Round 5 (2026-07-13) — Oasis torch-gap characterization: NOT compute-bound; the wall is kernel count
+> Chased the 272 ms → torch 68 ms gap. Findings (all measured on the 4090): **(1) TF32 is already ON by default**
+> for F32 GEMMs (`_allowTf32 = SM≥8 && !HARTSY_NO_TF32`) — the Linears already use tensor cores. **(2) Oasis
+> TOLERATES F16** — forced-F16 SDPA keeps parity (v-pred corr 0.99999930). **(3) But F16 is NOT the lever:** added
+> an opt-in `HARTSY_GEMM_F16` (`CUBLAS_COMPUTE_32F_FAST_16F`, F16-mantissa matmul / F32 accumulate — parity held at
+> corr 0.99999929) and it moved the wall **0% (273 vs 272 ms)** → the DiT is **not GEMM-compute-bound**. A back-of-
+> envelope confirms it: the whole forward is ~250 GFLOP ≈ 3 ms of TF32 GEMM, yet the wall is 272 ms. So the cost is
+> **kernel COUNT / GPU occupancy** — ~800 tiny ops/forward (16 blocks × ~50), each underutilizing the GPU even inside
+> the graph. **The remaining lever is kernel FUSION** (fused adaLN = LayerNorm+slice+addscalar+affine → 1 kernel;
+> fused attention; fused gated-residual), NOT F16/TF32/graph. That's a large effort with diminishing returns on an
+> already-8.6×, 500M model — and the op-math vs wall discrepancy (predicted ~20 ms of kernels vs 272 ms measured)
+> means the real next step is an **nsys profile of the graph replay** to find where the time actually goes, before
+> writing fusion kernels. `HARTSY_GEMM_F16` kept as harmless opt-in infra (default off; may help genuinely
+> GEMM-bound models). No regression: Diamond 3/3, Oasis 4/4 default paths unchanged.
+
 ## Per-model perf-run plan
 
 ### DIAMOND — RUN NOW (tiny, verified, ungated) — the graph-capture proof case

@@ -42,6 +42,15 @@ public sealed class EnglishG2P
         StringBuilder sb = new();
         foreach (string word in Tokenize(Normalize(text)))
         {
+            // Sentence punctuation the model uses for pauses/prosody (Kokoro's vocab has . , ? ! ; :) is
+            // carried through and ATTACHED to the preceding phonemes (misaki writes "dˈɔɡ."), with no space,
+            // so it does not become its own "word" the CMU lookup would fail on. Dropping it made adjacent
+            // sentences run together (e.g. "cow. The boy" → one slurred blob).
+            if (word.Length == 1 && word[0] is '.' or ',' or '?' or '!' or ';' or ':')
+            {
+                sb.Append(word[0]);
+                continue;
+            }
             if (sb.Length > 0)
             {
                 sb.Append(' ');
@@ -106,6 +115,12 @@ public sealed class EnglishG2P
             else if (char.IsLetter(c) || c == '\'')
             {
                 sb.Append(char.ToLowerInvariant(c));
+                i++;
+            }
+            else if (c is '.' or ',' or '?' or '!' or ';' or ':')
+            {
+                // Preserve sentence punctuation as its own token (the model has these + uses them for pauses).
+                sb.Append(' ').Append(c).Append(' ');
                 i++;
             }
             else

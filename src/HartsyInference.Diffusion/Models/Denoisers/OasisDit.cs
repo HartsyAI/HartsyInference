@@ -25,6 +25,19 @@ public sealed unsafe class OasisDit : IDisposable
     private Tensor? _finalModW, _finalModB;           // FinalLayer adaLN Linear(dim → 2·dim)
     private Tensor? _finalW, _finalB;                 // Linear(dim → p²·C)
 
+    // ── Step-graph state (HARTSY_DIT_GRAPH): the 16-block loop is fully device-resident, so it captures once and
+    //    replays with a single cuGraphLaunch per DDIM step — the interactive AR loop has FIXED geometry, so the
+    //    signature never flips and the graph is reused every forward. Host patchify/cond-build/final-layer stay
+    //    OUTSIDE capture, refreshing the fixed input/cond buffers before each launch. Geometry-invariant RoPE
+    //    tables + causal mask are cached per (t,gh,gw) sig so the captured region reads stable device addresses. ──
+    private const int GraphCaptureCall = 3;
+    private long _geomSig = long.MinValue;
+    private Tensor? _sCos, _sSin, _tCos, _tSin, _mask;
+    private Tensor? _xFixed, _condFixed, _blockOutFixed;
+    private long _graphSig = long.MinValue;
+    private int _graphSigCalls;
+    private bool _graphDead;
+
     public OasisDit(OasisDitConfig config)
     {
         _config = config;
@@ -80,30 +93,122 @@ public sealed unsafe class OasisDit : IDisposable
             throw new ArgumentException($"actions must be [{t}, {_config.ExternalCondDim}].", nameof(actions));
         if (t > _config.MaxFrames) throw new ArgumentException($"window {t} exceeds max_frames {_config.MaxFrames}.", nameof(latents));
 
+        bool prof = taps is null && Environment.GetEnvironmentVariable("HARTSY_OASIS_PHASE") == "1";
+        long tsEntry = System.Diagnostics.Stopwatch.GetTimestamp();
+
         Tensor cond = BuildCondition(backend, noiseIndices, actions, t, dim);
         Tensor x = Patchify(backend, latents, t, gh, gw);
         if (taps is not null) { taps["c"] = CloneCpu(cond); taps["xembed"] = CloneCpu(x); }
 
-        (Tensor sCos, Tensor sSin) = _spatialRope.Build(gh, gw);
-        (Tensor tCos, Tensor tSin) = _temporalRope.BuildCosSin(t, 1, 1);
-        Tensor mask = BuildCausalMask(t);
+        EnsureGeometry(backend, t, gh, gw);   // cache RoPE tables + causal mask per geometry (stable device buffers)
+
+        // ── Step-graph path: capture the device-resident 16-block loop once, replay it every forward. Requires
+        //    the plain (no-taps) path; falls back to eager cleanly on any capture failure. ──
+        bool graphMode = DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead && taps is null;
+        if (graphMode)
+        {
+            int total = t * sp;
+            _xFixed ??= new Tensor(new TensorShape(total, dim), DType.F32);
+            _condFixed ??= new Tensor(new TensorShape(t, dim), DType.F32);
+            _blockOutFixed ??= new Tensor(new TensorShape(total, dim), DType.F32);
+            backend.CopyInto(_xFixed, x); x.Dispose();
+            backend.CopyInto(_condFixed, cond); cond.Dispose();
+
+            long sig = ((long)t << 40) ^ ((long)gh << 20) ^ gw;
+            bool ownerLost = !ReferenceEquals(backend.StepGraphOwner, this);
+            if (sig != _graphSig || ownerLost)
+            {
+                backend.StepGraphReset();
+                _graphSig = sig; _graphSigCalls = 0; backend.StepGraphOwner = this;
+            }
+            _graphSigCalls++;
+
+            if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
+            {
+                if (prof)
+                {
+                    backend.Sync(); double setupMs = ElapsedMs(tsEntry); long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    backend.StepGraphLaunch(); backend.Sync(); double replayMs = ElapsedMs(t1); long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    Tensor ov = FinalLayer(backend, _blockOutFixed, _condFixed, t, sp, gh, gw); backend.Sync(); double finalMs = ElapsedMs(t2);
+                    HartsyInference.Core.Logging.Logs.Info($"[oasis-phase] setup(patchify+cond+copyfixed)={setupMs:F2} graph-replay={replayMs:F2} final(mod+unpatch)={finalMs:F2} ms");
+                    return ov;
+                }
+                backend.StepGraphLaunch();
+                return FinalLayer(backend, _blockOutFixed, _condFixed, t, sp, gh, gw);
+            }
+
+            bool capture = _graphSigCalls == GraphCaptureCall;
+            if (capture) backend.StepGraphBegin();
+            try
+            {
+                RunBlocksIntoFixed(backend, t, sp);
+            }
+            catch (Exception ex) when (capture)
+            {
+                backend.StepGraphReset(); _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning($"[Oasis graph] capture invalidated — eager fallback: {ex.Message}");
+                RunBlocksIntoFixed(backend, t, sp);
+                return FinalLayer(backend, _blockOutFixed, _condFixed, t, sp, gh, gw);
+            }
+            if (capture)
+            {
+                try { backend.StepGraphEndAndLaunch(); HartsyInference.Core.Logging.Logs.Info("[Oasis graph] block loop captured; replaying via cuGraphLaunch."); }
+                catch (Exception ex)
+                {
+                    backend.StepGraphReset(); _graphDead = true;
+                    HartsyInference.Core.Logging.Logs.Warning($"[Oasis graph] capture failed — eager fallback: {ex.Message}");
+                    RunBlocksIntoFixed(backend, t, sp);
+                }
+            }
+            return FinalLayer(backend, _blockOutFixed, _condFixed, t, sp, gh, gw);
+        }
 
         Tensor cur = x;
         for (int i = 0; i < _blocks.Length; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, cur, cond, t, sp, sCos, sSin, tCos, tSin, mask);
+            Tensor next = _blocks[i].Forward(backend, cur, cond, t, sp, _sCos!, _sSin!, _tCos!, _tSin!, _mask!);
             cur.Dispose();
             cur = next;
             if (taps is not null && i == 0) taps["block0"] = CloneCpu(cur);
             if (taps is not null && i == _blocks.Length - 1) taps["blockLast"] = CloneCpu(cur);
         }
-        sCos.Dispose(); sSin.Dispose(); tCos.Dispose(); tSin.Dispose(); mask.Dispose();
-
         Tensor outV = FinalLayer(backend, cur, cond, t, sp, gh, gw);
         cur.Dispose();
         cond.Dispose();
         return outV;
     }
+
+    /// <summary>Runs the 16-block loop over the fixed input/cond buffers and lands the result in
+    /// <see cref="_blockOutFixed"/> (a stable, non-graph-owned buffer — the last op the captured graph records,
+    /// so replay's output survives the graph-memory auto-free).</summary>
+    private void RunBlocksIntoFixed(IBackend backend, int t, int sp)
+    {
+        Tensor cur = _xFixed!;
+        bool ownCur = false;
+        for (int i = 0; i < _blocks.Length; i++)
+        {
+            Tensor next = _blocks[i].Forward(backend, cur, _condFixed!, t, sp, _sCos!, _sSin!, _tCos!, _tSin!, _mask!);
+            if (ownCur) cur.Dispose();
+            cur = next; ownCur = true;
+        }
+        backend.CopyInto(_blockOutFixed!, cur);
+        cur.Dispose();
+    }
+
+    /// <summary>Caches the geometry-invariant RoPE tables + causal mask per (t,gh,gw); rebuilds only on a
+    /// geometry change so the captured graph reads stable device addresses across forwards.</summary>
+    private void EnsureGeometry(IBackend backend, int t, int gh, int gw)
+    {
+        long sig = ((long)t << 40) ^ ((long)gh << 20) ^ gw;
+        if (sig == _geomSig && _sCos is not null) return;
+        _sCos?.Dispose(); _sSin?.Dispose(); _tCos?.Dispose(); _tSin?.Dispose(); _mask?.Dispose();
+        (_sCos, _sSin) = _spatialRope.Build(gh, gw);
+        (_tCos, _tSin) = _temporalRope.BuildCosSin(t, 1, 1);
+        _mask = BuildCausalMask(t);
+        _geomSig = sig;
+    }
+
+    private static double ElapsedMs(long ts) => (System.Diagnostics.Stopwatch.GetTimestamp() - ts) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
     private static Tensor CloneCpu(Tensor src)
     {
@@ -236,6 +341,10 @@ public sealed unsafe class OasisDit : IDisposable
         {
             _patchW2d = _patchB = _tEmb1W = _tEmb1B = _tEmb2W = _tEmb2B = null;
             _extCondW = _extCondB = _finalModW = _finalModB = _finalW = _finalB = null;
+            // Null (do not device-dispose) the graph fixed buffers + geometry caches — the context may already be
+            // torn down; the captured graph itself is owned by the backend's single slot and reset on model switch.
+            _sCos = _sSin = _tCos = _tSin = _mask = null;
+            _xFixed = _condFixed = _blockOutFixed = null;
         }
         GC.SuppressFinalize(this);
     }

@@ -43,21 +43,21 @@ public sealed unsafe class DiamondSampler
     public Tensor Sample(IBackend backend, Tensor xInit, Tensor obs, ReadOnlySpan<int> act)
     {
         Tensor x = new(xInit.Shape, DType.F32);
-        new ReadOnlySpan<float>((float*)xInit.DataPointer, (int)xInit.ElementCount)
-            .CopyTo(new Span<float>((float*)x.DataPointer, (int)x.ElementCount));
-        long n = x.ElementCount;
+        backend.CopyInto(x, xInit);
         for (int step = 0; step < _cfg.NumStepsDenoising; step++)
         {
             float sigma = _sigmas[step], nextSigma = _sigmas[step + 1];
             Tensor denoised = _denoiser.Denoise(backend, x, sigma, obs, act, quantize: true);
-            float dt = nextSigma - sigma, invSigma = 1f / sigma;
-            float* xp = (float*)x.DataPointer, dp = (float*)denoised.DataPointer;
-            for (long i = 0; i < n; i++)
-            {
-                float d = (xp[i] - dp[i]) * invSigma;   // Euler derivative
-                xp[i] += d * dt;
-            }
-            denoised.Dispose();
+            // Euler on device: x += (x − denoised)·(dt/sigma)  (drain-free — no host readback → graph-capturable).
+            float a = (nextSigma - sigma) / sigma;
+            Tensor negDen = new(x.Shape, DType.F32); backend.Scale(negDen, denoised, -1f);
+            Tensor diff = new(x.Shape, DType.F32); backend.Add(diff, x, negDen);   // x − denoised
+            negDen.Dispose(); denoised.Dispose();
+            Tensor scaled = new(x.Shape, DType.F32); backend.Scale(scaled, diff, a);
+            diff.Dispose();
+            Tensor next = new(x.Shape, DType.F32); backend.Add(next, x, scaled);
+            scaled.Dispose(); x.Dispose();
+            x = next;
         }
         return x;
     }

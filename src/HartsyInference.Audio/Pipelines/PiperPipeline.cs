@@ -73,7 +73,11 @@ public sealed class PiperPipeline : IDisposable
 
         using FileStream cfgStream = File.OpenRead(configJsonPath);
         PhonemeIdMap idMap = PhonemeIdMap.FromPiperConfig(cfgStream);
-        IPhonemizer phon = phonemizer ?? EspeakPhonemizer.FromCache();
+        // Load the phonemizer for the VOICE's espeak language (e.g. "en-us"), not the default "en" (British):
+        // the phonemizer resolves rules/dictionary at load time and ignores the per-call language arg, so a
+        // default-"en" load fed an en_US voice British phonemes (fox → fɒks id52 instead of fɑːks id51+122),
+        // which the American-trained VITS renders as garbled vowels ("fext"/"dug").
+        IPhonemizer phon = phonemizer ?? EspeakPhonemizer.FromCache(espeakVoice);
 
         return new PiperPipeline(cfg, synth, loader, phon, idMap, espeakVoice, noiseScale, lengthScale);
     }

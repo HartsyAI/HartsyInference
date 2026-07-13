@@ -163,7 +163,7 @@ public sealed unsafe class MatrixGame3ActionModule
         Tensor h2 = new Tensor(new TensorShape(tt * sp, _streamDim), DType.F32);
         backend.Linear(h2, act, _mouseMlp2W!, _mouseMlp2B);
         act.Dispose();
-        LayerNormRows(h2, _mouseLnW!, _mouseLnB, tt * sp, _streamDim);
+        LayerNormRows(backend, h2, _mouseLnW!, _mouseLnB, tt * sp, _streamDim);
 
         Tensor qkv = new Tensor(new TensorShape(tt * sp, 3 * _streamDim), DType.F32);
         backend.Linear(qkv, h2, _tQkvW!, _tQkvB);
@@ -175,8 +175,8 @@ public sealed unsafe class MatrixGame3ActionModule
         Tensor k = SplitQkvTemporal(qkv, tt, sp, 1);
         Tensor v = SplitQkvTemporal(qkv, tt, sp, 2);
         qkv.Dispose();
-        RmsNormHeads(q, _imgQNorm!);
-        RmsNormHeads(k, _imgKNorm!);
+        RmsNormHeads(backend, q, _imgQNorm!);
+        RmsNormHeads(backend, k, _imgKNorm!);
         ApplyRopeBatched(q, cos, sin, tt, gh, gw);
         ApplyRopeBatched(k, cos, sin, tt, gh, gw);
         cos.Dispose(); sin.Dispose();
@@ -190,7 +190,7 @@ public sealed unsafe class MatrixGame3ActionModule
         Tensor projected = new Tensor(new TensorShape(tt * sp, _imgDim), DType.F32);
         backend.Linear(projected, flat, _projMouseW!, _projMouseB);
         flat.Dispose();
-        AddInPlace(hidden, projected);
+        backend.Add(hidden, hidden, projected);
         projected.Dispose();
     }
 
@@ -226,7 +226,7 @@ public sealed unsafe class MatrixGame3ActionModule
         (Tensor cosT, Tensor sinT) = _rope.BuildCosSin(frameIndices, 1, 1);
         Tensor q = SplitQkvTemporal(qFlat, tt, sp, 0, stride: 1);
         qFlat.Dispose();
-        RmsNormHeads(q, _keyQNorm!);
+        RmsNormHeads(backend, q, _keyQNorm!);
         ApplyRopeBatched(q, cosT, sinT, tt, 1, 1, broadcastSpatial: true);
 
         Tensor k = new Tensor(new TensorShape([1L, _heads, tt, _headDim]), DType.F32);
@@ -242,7 +242,7 @@ public sealed unsafe class MatrixGame3ActionModule
                     vp[((long)h * tt + f) * _headDim + d] = kvp[(long)f * 2 * _streamDim + _streamDim + h * _headDim + d];
                 }
         kv.Dispose();
-        RmsNormHeads(k, _keyKNorm!);
+        RmsNormHeads(backend, k, _keyKNorm!);
         ApplyRopeBatched(k, cosT, sinT, tt, 1, 1, broadcastSpatial: true);
         cosT.Dispose(); sinT.Dispose();
 
@@ -258,7 +258,7 @@ public sealed unsafe class MatrixGame3ActionModule
         Tensor projected = new Tensor(new TensorShape(tt * sp, _imgDim), DType.F32);
         backend.Linear(projected, flat, _projKbdW!, _projKbdB);
         flat.Dispose();
-        AddInPlace(hidden, projected);
+        backend.Add(hidden, hidden, projected);
         projected.Dispose();
     }
 
@@ -298,21 +298,10 @@ public sealed unsafe class MatrixGame3ActionModule
         return o;
     }
 
-    /// <summary>Per-head RMSNorm over the trailing head dim of <c>[B, heads, seq, headDim]</c>.</summary>
-    private void RmsNormHeads(Tensor x, Tensor weight)
-    {
-        long rows = x.Shape.ElementCount / _headDim;
-        float* xp = (float*)x.DataPointer;
-        float* wp = (float*)weight.DataPointer;
-        for (long r = 0; r < rows; r++)
-        {
-            long off = r * _headDim;
-            double sum = 0;
-            for (int d = 0; d < _headDim; d++) { float v = xp[off + d]; sum += (double)v * v; }
-            float inv = 1f / MathF.Sqrt((float)(sum / _headDim) + _eps);
-            for (int d = 0; d < _headDim; d++) xp[off + d] = xp[off + d] * inv * wp[d];
-        }
-    }
+    /// <summary>Per-head RMSNorm over the trailing head dim of <c>[B, heads, seq, headDim]</c> — device
+    /// <see cref="IBackend.RmsNorm"/> (last-dim RMS × weight), in place.</summary>
+    private void RmsNormHeads(IBackend backend, Tensor x, Tensor weight)
+        => backend.RmsNorm(x, x, weight, _eps);
 
     /// <summary>Rotates <c>[sp(or 1), heads, tt, headDim]</c> with cos/sin built over the (frames, gh, gw) grid: the
     /// sequence at spatial position s uses the grid row (f, h(s), w(s)).</summary>
@@ -352,34 +341,13 @@ public sealed unsafe class MatrixGame3ActionModule
         return o;
     }
 
-    private void LayerNormRows(Tensor x, Tensor weight, Tensor? bias, int rows, int dim)
+    /// <summary>Affine LayerNorm over the trailing <paramref name="dim"/> of <paramref name="x"/> <c>[rows, dim]</c>,
+    /// in place, device-resident: no-affine LN then a row-broadcast <c>·weight + bias</c> (weight/bias are <c>[dim]</c>,
+    /// shared across all rows — <see cref="IBackend.AffineBroadcastLastDim"/> at batch 1).</summary>
+    private void LayerNormRows(IBackend backend, Tensor x, Tensor weight, Tensor? bias, int rows, int dim)
     {
-        float* xp = (float*)x.DataPointer;
-        float* wp = (float*)weight.DataPointer;
-        float* bp = bias is null ? null : (float*)bias.DataPointer;
-        for (int r = 0; r < rows; r++)
-        {
-            long off = (long)r * dim;
-            double mean = 0;
-            for (int d = 0; d < dim; d++) mean += xp[off + d];
-            mean /= dim;
-            double var = 0;
-            for (int d = 0; d < dim; d++) { double dd = xp[off + d] - mean; var += dd * dd; }
-            float inv = 1f / MathF.Sqrt((float)(var / dim) + _eps);
-            for (int d = 0; d < dim; d++)
-            {
-                float n = (float)((xp[off + d] - mean) * inv);
-                xp[off + d] = n * wp[d] + (bp is null ? 0f : bp[d]);
-            }
-        }
-    }
-
-    private static void AddInPlace(Tensor target, Tensor value)
-    {
-        long n = target.Shape.ElementCount;
-        float* tp = (float*)target.DataPointer;
-        float* vp = (float*)value.DataPointer;
-        for (long i = 0; i < n; i++) tp[i] += vp[i];
+        backend.LayerNormNoAffine(x, x, _eps);
+        backend.AffineBroadcastLastDim(x, x, weight, bias);
     }
 
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }

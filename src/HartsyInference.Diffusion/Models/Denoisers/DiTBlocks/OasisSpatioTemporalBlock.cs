@@ -132,18 +132,20 @@ public sealed unsafe class OasisSpatioTemporalBlock
         Tensor qkv = new Tensor(new TensorShape(frames * sp, 3 * _dim), DType.F32);
         backend.Linear(qkv, n, qkvW, qkvB);
 
-        Tensor q = SplitHeads(qkv, frames, sp, part: 0, seqIsTemporal: false);
-        Tensor k = SplitHeads(qkv, frames, sp, part: 1, seqIsTemporal: false);
-        Tensor v = SplitHeads(qkv, frames, sp, part: 2, seqIsTemporal: false);
+        Tensor q = SplitHeads(backend, qkv, frames, sp, part: 0, temporal: false);
+        Tensor k = SplitHeads(backend, qkv, frames, sp, part: 1, temporal: false);
+        Tensor v = SplitHeads(backend, qkv, frames, sp, part: 2, temporal: false);
         qkv.Dispose();
-        RotateBhsd(q, cos, sin);
-        RotateBhsd(k, cos, sin);
+        int rotDim = (int)cos.Shape[1];
+        backend.OasisRopeInterleaved(q, cos, sin, batch: frames, heads: _heads, seq: sp, headDim: _headDim, rotDim);
+        backend.OasisRopeInterleaved(k, cos, sin, batch: frames, heads: _heads, seq: sp, headDim: _headDim, rotDim);
 
         Tensor attn = new Tensor(new TensorShape([(long)frames, _heads, sp, _headDim]), DType.F32);
         backend.ScaledDotProductAttention(attn, q, k, v, null, 1.0f / MathF.Sqrt(_headDim));
         q.Dispose(); k.Dispose(); v.Dispose();
 
-        Tensor merged = MergeHeads(attn, frames, sp, seqIsTemporal: false);
+        Tensor merged = new(new TensorShape(frames * sp, _dim), DType.F32);
+        backend.OasisMergeHeads(merged, attn, frames, sp, _heads, _headDim, temporal: false);
         attn.Dispose();
         Tensor projected = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
         backend.Linear(projected, merged, outW, outB);
@@ -158,18 +160,20 @@ public sealed unsafe class OasisSpatioTemporalBlock
         Tensor qkv = new Tensor(new TensorShape(frames * sp, 3 * _dim), DType.F32);
         backend.Linear(qkv, n, qkvW, qkvB);
 
-        Tensor q = SplitHeads(qkv, frames, sp, part: 0, seqIsTemporal: true);
-        Tensor k = SplitHeads(qkv, frames, sp, part: 1, seqIsTemporal: true);
-        Tensor v = SplitHeads(qkv, frames, sp, part: 2, seqIsTemporal: true);
+        Tensor q = SplitHeads(backend, qkv, frames, sp, part: 0, temporal: true);
+        Tensor k = SplitHeads(backend, qkv, frames, sp, part: 1, temporal: true);
+        Tensor v = SplitHeads(backend, qkv, frames, sp, part: 2, temporal: true);
         qkv.Dispose();
-        RotateBhsd(q, cos, sin);
-        RotateBhsd(k, cos, sin);
+        int rotDim = (int)cos.Shape[1];
+        backend.OasisRopeInterleaved(q, cos, sin, batch: sp, heads: _heads, seq: frames, headDim: _headDim, rotDim);
+        backend.OasisRopeInterleaved(k, cos, sin, batch: sp, heads: _heads, seq: frames, headDim: _headDim, rotDim);
 
         Tensor attn = new Tensor(new TensorShape([(long)sp, _heads, frames, _headDim]), DType.F32);
         backend.ScaledDotProductAttention(attn, q, k, v, causalMask, 1.0f / MathF.Sqrt(_headDim));
         q.Dispose(); k.Dispose(); v.Dispose();
 
-        Tensor merged = MergeHeads(attn, frames, sp, seqIsTemporal: true);
+        Tensor merged = new(new TensorShape(frames * sp, _dim), DType.F32);
+        backend.OasisMergeHeads(merged, attn, frames, sp, _heads, _headDim, temporal: true);
         attn.Dispose();
         Tensor projected = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
         backend.Linear(projected, merged, outW, outB);
@@ -188,75 +192,14 @@ public sealed unsafe class OasisSpatioTemporalBlock
         return mod;
     }
 
-    /// <summary>Frame-major token rows → <c>[batch, heads, seq, headDim]</c>; spatial batches frames (seq = tokens),
-    /// temporal batches spatial positions (seq = frames).</summary>
-    private Tensor SplitHeads(Tensor qkv, int frames, int sp, int part, bool seqIsTemporal)
+    /// <summary>Device head-split: frame-major qkv <c>[token, 3·dim]</c> → <c>[batch, heads, seq, headDim]</c>
+    /// (spatial batches frames/seq=tokens, temporal batches spatial/seq=frames) via <see cref="IBackend.OasisSplitHeads"/>.</summary>
+    private Tensor SplitHeads(IBackend backend, Tensor qkv, int frames, int sp, int part, bool temporal)
     {
-        int batch = seqIsTemporal ? sp : frames;
-        int seq = seqIsTemporal ? frames : sp;
-        Tensor o = new Tensor(new TensorShape([(long)batch, _heads, seq, _headDim]), DType.F32);
-        float* src = (float*)qkv.DataPointer;
-        float* dst = (float*)o.DataPointer;
-        for (int f = 0; f < frames; f++)
-            for (int i = 0; i < sp; i++)
-            {
-                long token = (long)f * sp + i;
-                int b = seqIsTemporal ? i : f;
-                int s = seqIsTemporal ? f : i;
-                for (int h = 0; h < _heads; h++)
-                    Buffer.MemoryCopy(
-                        src + token * 3 * _dim + (long)part * _dim + (long)h * _headDim,
-                        dst + (((long)b * _heads + h) * seq + s) * _headDim,
-                        (long)_headDim * 4, (long)_headDim * 4);
-            }
+        int batch = temporal ? sp : frames;
+        int seq = temporal ? frames : sp;
+        Tensor o = new(new TensorShape([(long)batch, _heads, seq, _headDim]), DType.F32);
+        backend.OasisSplitHeads(o, qkv, frames, sp, _heads, _headDim, part, temporal);
         return o;
     }
-
-    private Tensor MergeHeads(Tensor attn, int frames, int sp, bool seqIsTemporal)
-    {
-        int seq = seqIsTemporal ? frames : sp;
-        Tensor o = new Tensor(new TensorShape(frames * sp, _dim), DType.F32);
-        float* src = (float*)attn.DataPointer;
-        float* dst = (float*)o.DataPointer;
-        for (int f = 0; f < frames; f++)
-            for (int i = 0; i < sp; i++)
-            {
-                long token = (long)f * sp + i;
-                int b = seqIsTemporal ? i : f;
-                int s = seqIsTemporal ? f : i;
-                for (int h = 0; h < _heads; h++)
-                    Buffer.MemoryCopy(
-                        src + (((long)b * _heads + h) * seq + s) * _headDim,
-                        dst + token * _dim + (long)h * _headDim,
-                        (long)_headDim * 4, (long)_headDim * 4);
-            }
-        return o;
-    }
-
-    /// <summary>Rotates the first <c>rotDim = cos.Shape[1]</c> dims of every head; remaining dims pass through.</summary>
-    private void RotateBhsd(Tensor x, Tensor cos, Tensor sin)
-    {
-        int batch = (int)x.Shape[0], seq = (int)x.Shape[2];
-        int rotDim = (int)cos.Shape[1];
-        int pairs = rotDim / 2;
-        float* xp = (float*)x.DataPointer;
-        float* cp = (float*)cos.DataPointer;
-        float* sp = (float*)sin.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int h = 0; h < _heads; h++)
-                for (int s = 0; s < seq; s++)
-                {
-                    long cOff = (long)s * rotDim;
-                    long xOff = (((long)b * _heads + h) * seq + s) * _headDim;
-                    for (int i = 0; i < pairs; i++)
-                    {
-                        int i0 = 2 * i;
-                        float re = xp[xOff + i0], im = xp[xOff + i0 + 1];
-                        float c = cp[cOff + i0], sn = sp[cOff + i0];
-                        xp[xOff + i0] = re * c - im * sn;
-                        xp[xOff + i0 + 1] = re * sn + im * c;
-                    }
-                }
-    }
-
 }
