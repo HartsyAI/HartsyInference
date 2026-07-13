@@ -193,6 +193,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _oasisSplitHeadsF32;
     private readonly nint _oasisRopeInterleavedF32;
     private readonly nint _oasisMergeHeadsF32;
+    private readonly nint _oasisUnpatchifyF32;
+    private readonly nint _oasisAdaLnF32;
     private readonly nint _ditPixelQuantizeF32;
 
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
@@ -435,6 +437,8 @@ public sealed class CudaKernels : IDisposable
         _oasisSplitHeadsF32 = _ditF32Module.GetFunction("oasis_split_heads_f32");
         _oasisRopeInterleavedF32 = _ditF32Module.GetFunction("oasis_rope_interleaved_f32");
         _oasisMergeHeadsF32 = _ditF32Module.GetFunction("oasis_merge_heads_f32");
+        _oasisUnpatchifyF32 = _ditF32Module.GetFunction("oasis_unpatchify_f32");
+        _oasisAdaLnF32 = _ditF32Module.GetFunction("oasis_adaln_f32");
         _ditPixelQuantizeF32 = _ditF32Module.GetFunction("dit_pixel_quantize_f32");
 
         // ── DiT glue (F16 I/O, F32 accumulate) — DiT F16 activation path ─
@@ -1801,6 +1805,32 @@ public sealed class CudaKernels : IDisposable
         long threads = (long)frames * sp * heads * headDim;
         uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_oasisMergeHeadsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Fused Oasis adaLN: LayerNorm(x)·(1+scale)+shift, scale/shift sliced from mod per frame (5 kernels → 1).</summary>
+    public unsafe void LaunchOasisAdaLn(ulong output, ulong input, ulong mod, int dim, int sp, int totalRows, int modStride, int shiftOff, int scaleOff, float eps, nint stream)
+    {
+        ulong outArg = output, inArg = input, modArg = mod;
+        uint dimArg = (uint)dim, spArg = (uint)sp, rowsArg = (uint)totalRows, msArg = (uint)modStride, shArg = (uint)shiftOff, scArg = (uint)scaleOff;
+        float epsArg = eps;
+        void** args = stackalloc void*[10];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &modArg; args[3] = &dimArg; args[4] = &spArg;
+        args[5] = &rowsArg; args[6] = &msArg; args[7] = &shArg; args[8] = &scArg; args[9] = &epsArg;
+        uint sharedMem = BlockSize * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(_oasisAdaLnF32, (uint)totalRows, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Oasis per-frame unpatchify: proj[t·sp, c·p²] → out[t,c,H,W] with [py,px,ci] inner layout.</summary>
+    public unsafe void LaunchOasisUnpatchify(ulong output, ulong proj, int frames, int channels, int gh, int gw, int patch, nint stream)
+    {
+        ulong outArg = output, projArg = proj;
+        uint fArg = (uint)frames, cArg = (uint)channels, ghArg = (uint)gh, gwArg = (uint)gw, pArg = (uint)patch;
+        void** args = stackalloc void*[7];
+        args[0] = &outArg; args[1] = &projArg; args[2] = &fArg; args[3] = &cArg;
+        args[4] = &ghArg; args[5] = &gwArg; args[6] = &pArg;
+        long threads = (long)frames * channels * (gh * patch) * (gw * patch);
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_oasisUnpatchifyF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Add scalar (out = in + c) with F16 I/O (scalar stays F32).</summary>

@@ -11,6 +11,11 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// bias, output projection with bias. See <c>docs/Research/OASIS_ARCHITECTURE.md</c> § 3.1-3.3.</summary>
 public sealed unsafe class OasisSpatioTemporalBlock
 {
+    // ── Diagnostic phase timers (HARTSY_OASIS_PHASE=1, eager path only) — Sync-bracketed GPU time per phase. ──
+    internal static readonly bool Prof = Environment.GetEnvironmentVariable("HARTSY_OASIS_PHASE") == "1";
+    internal static double TSdpa, TAttnRest, TMlp, TModNorm;
+    private static double Now() => System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
     private readonly int _dim;
     private readonly int _heads;
     private readonly int _headDim;
@@ -70,27 +75,28 @@ public sealed unsafe class OasisSpatioTemporalBlock
     private void Half(IBackend backend, Tensor x, Tensor cond, int frames, int sp, bool spatial,
         Tensor spatialCos, Tensor spatialSin, Tensor temporalCos, Tensor temporalSin, Tensor causalMask)
     {
+        if (Prof) { backend.Sync(); TModNorm -= Now(); }
         (Tensor modW, Tensor? modB) = spatial ? (_sModW!, _sModB) : (_tModW!, _tModB);
         Tensor mod = Modulation(backend, cond, frames, modW, modB);   // [T, 6·dim] device
 
-        // Attention sub-half: adaLN(x) = shift + (1+scale)·LayerNorm(x), all device-resident (per-frame broadcast).
+        // Attention sub-half: adaLN(x) = shift + (1+scale)·LayerNorm(x) — one fused kernel (per-frame slice+affine).
         Tensor n1 = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
-        backend.LayerNormNoAffine(n1, x, 1e-6f);
-        ApplyModulation(backend, n1, mod, frames, shiftSlot: 0, scaleSlot: 1);
+        backend.OasisAdaLn(n1, x, mod, _dim, sp, frames * sp, 6 * _dim, 0 * _dim, 1 * _dim, 1e-6f);
+        if (Prof) { backend.Sync(); TModNorm += Now(); TAttnRest -= Now(); }
         Tensor attn = spatial
             ? SpatialAttention(backend, n1, frames, sp, spatialCos, spatialSin)
             : TemporalAttention(backend, n1, frames, sp, temporalCos, temporalSin, causalMask);
         n1.Dispose();
         GatedResidual(backend, x, attn, mod, frames, gateSlot: 2);   // x += gate·attn (in place, device)
         attn.Dispose();
+        if (Prof) { backend.Sync(); TAttnRest += Now(); TMlp -= Now(); }
 
         // MLP sub-half.
         (Tensor fc1W, Tensor? fc1B, Tensor fc2W, Tensor? fc2B) = spatial
             ? (_sFc1W!, _sFc1B, _sFc2W!, _sFc2B)
             : (_tFc1W!, _tFc1B, _tFc2W!, _tFc2B);
         Tensor n2 = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
-        backend.LayerNormNoAffine(n2, x, 1e-6f);
-        ApplyModulation(backend, n2, mod, frames, shiftSlot: 3, scaleSlot: 4);
+        backend.OasisAdaLn(n2, x, mod, _dim, sp, frames * sp, 6 * _dim, 3 * _dim, 4 * _dim, 1e-6f);
         Tensor mid = new Tensor(new TensorShape(frames * sp, _mlpHidden), DType.F32);
         backend.Linear(mid, n2, fc1W, fc1B);
         n2.Dispose();
@@ -103,18 +109,7 @@ public sealed unsafe class OasisSpatioTemporalBlock
         GatedResidual(backend, x, mlpOut, mod, frames, gateSlot: 5);
         mlpOut.Dispose();
         mod.Dispose();
-    }
-
-    /// <summary>Device per-frame adaLN: <c>x[f,i,d] = x·(1+scale[f,d]) + shift[f,d]</c> using
-    /// <see cref="IBackend.AffineBroadcastLastDim"/> on the rank-3 <c>[T, sp, dim]</c> tensor. Slices scale/shift
-    /// from the <c>[T, 6·dim]</c> modulation vector on device (no host round-trip).</summary>
-    private void ApplyModulation(IBackend backend, Tensor x, Tensor mod, int frames, int shiftSlot, int scaleSlot)
-    {
-        Tensor scale = new(new TensorShape(frames, _dim), DType.F32); backend.SliceLastDim(scale, mod, scaleSlot * _dim);
-        Tensor scaleP1 = new(new TensorShape(frames, _dim), DType.F32); backend.AddScalar(scaleP1, scale, 1f); scale.Dispose();
-        Tensor shift = new(new TensorShape(frames, _dim), DType.F32); backend.SliceLastDim(shift, mod, shiftSlot * _dim);
-        backend.AffineBroadcastLastDim(x, x, scaleP1, shift);
-        scaleP1.Dispose(); shift.Dispose();
+        if (Prof) { backend.Sync(); TMlp += Now(); }
     }
 
     /// <summary>Device per-frame gated residual: <c>target[f,i,d] += gate[f,d]·value[f,i,d]</c> in place.</summary>
@@ -141,7 +136,11 @@ public sealed unsafe class OasisSpatioTemporalBlock
         backend.OasisRopeInterleaved(k, cos, sin, batch: frames, heads: _heads, seq: sp, headDim: _headDim, rotDim);
 
         Tensor attn = new Tensor(new TensorShape([(long)frames, _heads, sp, _headDim]), DType.F32);
-        backend.ScaledDotProductAttention(attn, q, k, v, null, 1.0f / MathF.Sqrt(_headDim));
+        if (Prof) { backend.Sync(); TSdpa -= Now(); }
+        // cuDNN fused flash attention: mask-null, D=64, F16-tolerant (verified corr>0.9999) — collapses the
+        // materialized QKᵀ→softmax→PV path that is catastrophic for these batched small-seq shapes.
+        backend.ScaledDotProductAttention(attn, q, k, v, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
+        if (Prof) { backend.Sync(); TSdpa += Now(); }
         q.Dispose(); k.Dispose(); v.Dispose();
 
         Tensor merged = new(new TensorShape(frames * sp, _dim), DType.F32);
@@ -169,7 +168,10 @@ public sealed unsafe class OasisSpatioTemporalBlock
         backend.OasisRopeInterleaved(k, cos, sin, batch: sp, heads: _heads, seq: frames, headDim: _headDim, rotDim);
 
         Tensor attn = new Tensor(new TensorShape([(long)sp, _heads, frames, _headDim]), DType.F32);
-        backend.ScaledDotProductAttention(attn, q, k, v, causalMask, 1.0f / MathF.Sqrt(_headDim));
+        if (Prof) { backend.Sync(); TSdpa -= Now(); }
+        // Temporal causal mask is [1,1,T,T] — a cuDNN-eligible [B,1,Sq,Skv] additive F32 mask; F16-tolerant.
+        backend.ScaledDotProductAttention(attn, q, k, v, causalMask, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
+        if (Prof) { backend.Sync(); TSdpa += Now(); }
         q.Dispose(); k.Dispose(); v.Dispose();
 
         Tensor merged = new(new TensorShape(frames * sp, _dim), DType.F32);

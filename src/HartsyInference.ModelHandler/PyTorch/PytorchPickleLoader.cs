@@ -76,6 +76,7 @@ public sealed class PytorchPickleLoader : IDisposable
             TensorShape shape = new(meta.Size);
             Tensor t = new(shape, meta.Storage.DType);
             ReadStorageInto(zip, meta, (byte*)t.DataPointer, shape.ElementCount * meta.Storage.DType.SizeInBytes);
+            MakeRowMajor(t, meta.Size, meta.Stride, meta.Storage.DType);
             _tensors[name] = t;
             descriptors[name] = new PytorchTensorDescriptor { Name = name, DType = meta.Storage.DType, Shape = shape };
         }
@@ -170,6 +171,7 @@ public sealed class PytorchPickleLoader : IDisposable
             long src = keyDataOffset[meta.Storage.Key] + meta.Offset * meta.Storage.DType.SizeInBytes; // storage_offset
             if (src + byteCount > length) throw new EndOfStreamException($"Tensor '{name}' storage out of range.");
             Buffer.MemoryCopy(pAll + src, (byte*)t.DataPointer, byteCount, byteCount);
+            MakeRowMajor(t, meta.Size, meta.Stride, meta.Storage.DType);
             _tensors[name] = t;
             descriptors[name] = new PytorchTensorDescriptor { Name = name, DType = meta.Storage.DType, Shape = shape };
         }
@@ -190,6 +192,41 @@ public sealed class PytorchPickleLoader : IDisposable
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         return new Dictionary<string, Tensor>(_tensors);
+    }
+
+    /// <summary>Reorders a just-materialized tensor from its torch STORAGE order into row-major (C-contiguous)
+    /// order when the tensor's <paramref name="stride"/> is non-contiguous (e.g. a transposed <c>.t()</c> view,
+    /// which <c>torch.save</c> preserves as size + non-row-major stride over shared storage). The raw copy above
+    /// wrote the storage bytes as-is; for a contiguous stride that is already correct (no-op fast path), but for a
+    /// view it yields the transpose — which silently mis-loads e.g. bert-base-uncased Linear weights. Gathers each
+    /// row-major element from its strided source position. Only fires for the rare non-contiguous case.</summary>
+    private static unsafe void MakeRowMajor(Tensor t, long[] size, long[] stride, DType dt)
+    {
+        int nd = size.Length;
+        if (nd == 0 || stride is null || stride.Length != nd) return;
+        long[] contiguous = new long[nd];
+        long acc = 1;
+        for (int i = nd - 1; i >= 0; i--) { contiguous[i] = acc; acc *= size[i]; }
+        bool isContiguous = true;
+        for (int i = 0; i < nd; i++) if (stride[i] != contiguous[i]) { isContiguous = false; break; }
+        if (isContiguous) return;
+        long n = acc;
+        int es = dt.SizeInBytes;
+        byte* data = (byte*)t.DataPointer;
+        byte* tmp = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc((nuint)(n * es));
+        try
+        {
+            Buffer.MemoryCopy(data, tmp, n * es, n * es);           // tmp = storage-order bytes we just read
+            long[] idx = new long[nd];
+            for (long r = 0; r < n; r++)
+            {
+                long srcElem = 0;
+                for (int k = 0; k < nd; k++) srcElem += idx[k] * stride[k];
+                Buffer.MemoryCopy(tmp + srcElem * es, data + r * es, es, es);
+                for (int k = nd - 1; k >= 0; k--) { if (++idx[k] < size[k]) break; idx[k] = 0; }
+            }
+        }
+        finally { System.Runtime.InteropServices.NativeMemory.Free(tmp); }
     }
 
     private static unsafe void ReadStorageInto(ZipArchive zip, PickleTensor meta, byte* dst, long byteCount)

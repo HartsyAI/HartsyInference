@@ -33,7 +33,7 @@ public sealed unsafe class OasisDit : IDisposable
     private const int GraphCaptureCall = 3;
     private long _geomSig = long.MinValue;
     private Tensor? _sCos, _sSin, _tCos, _tSin, _mask;
-    private Tensor? _xFixed, _condFixed, _blockOutFixed;
+    private Tensor? _xFixed, _condFixed, _velFixed;
     private long _graphSig = long.MinValue;
     private int _graphSigCalls;
     private bool _graphDead;
@@ -107,10 +107,10 @@ public sealed unsafe class OasisDit : IDisposable
         bool graphMode = DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead && taps is null;
         if (graphMode)
         {
-            int total = t * sp;
+            int total = t * sp, cc = _config.InChannels, hh = gh * _config.PatchSize, ww = gw * _config.PatchSize;
             _xFixed ??= new Tensor(new TensorShape(total, dim), DType.F32);
             _condFixed ??= new Tensor(new TensorShape(t, dim), DType.F32);
-            _blockOutFixed ??= new Tensor(new TensorShape(total, dim), DType.F32);
+            _velFixed ??= new Tensor(new TensorShape([(long)t, cc, hh, ww]), DType.F32);
             backend.CopyInto(_xFixed, x); x.Dispose();
             backend.CopyInto(_condFixed, cond); cond.Dispose();
 
@@ -125,44 +125,37 @@ public sealed unsafe class OasisDit : IDisposable
 
             if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
             {
-                if (prof)
-                {
-                    backend.Sync(); double setupMs = ElapsedMs(tsEntry); long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
-                    backend.StepGraphLaunch(); backend.Sync(); double replayMs = ElapsedMs(t1); long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
-                    Tensor ov = FinalLayer(backend, _blockOutFixed, _condFixed, t, sp, gh, gw); backend.Sync(); double finalMs = ElapsedMs(t2);
-                    HartsyInference.Core.Logging.Logs.Info($"[oasis-phase] setup(patchify+cond+copyfixed)={setupMs:F2} graph-replay={replayMs:F2} final(mod+unpatch)={finalMs:F2} ms");
-                    return ov;
-                }
-                backend.StepGraphLaunch();
-                return FinalLayer(backend, _blockOutFixed, _condFixed, t, sp, gh, gw);
+                backend.StepGraphLaunch();   // whole DiT compute (blocks + final layer) replays in one launch
+                return CopyOut(backend);
             }
 
             bool capture = _graphSigCalls == GraphCaptureCall;
             if (capture) backend.StepGraphBegin();
             try
             {
-                RunBlocksIntoFixed(backend, t, sp);
+                RunForwardIntoFixed(backend, t, sp, gh, gw);
             }
             catch (Exception ex) when (capture)
             {
                 backend.StepGraphReset(); _graphDead = true;
                 HartsyInference.Core.Logging.Logs.Warning($"[Oasis graph] capture invalidated — eager fallback: {ex.Message}");
-                RunBlocksIntoFixed(backend, t, sp);
-                return FinalLayer(backend, _blockOutFixed, _condFixed, t, sp, gh, gw);
+                RunForwardIntoFixed(backend, t, sp, gh, gw);
+                return CopyOut(backend);
             }
             if (capture)
             {
-                try { backend.StepGraphEndAndLaunch(); HartsyInference.Core.Logging.Logs.Info("[Oasis graph] block loop captured; replaying via cuGraphLaunch."); }
+                try { backend.StepGraphEndAndLaunch(); HartsyInference.Core.Logging.Logs.Info("[Oasis graph] full forward (blocks+final) captured; replaying via cuGraphLaunch."); }
                 catch (Exception ex)
                 {
                     backend.StepGraphReset(); _graphDead = true;
                     HartsyInference.Core.Logging.Logs.Warning($"[Oasis graph] capture failed — eager fallback: {ex.Message}");
-                    RunBlocksIntoFixed(backend, t, sp);
+                    RunForwardIntoFixed(backend, t, sp, gh, gw);
                 }
             }
-            return FinalLayer(backend, _blockOutFixed, _condFixed, t, sp, gh, gw);
+            return CopyOut(backend);
         }
 
+        if (prof) { DiTBlocks.OasisSpatioTemporalBlock.TSdpa = DiTBlocks.OasisSpatioTemporalBlock.TAttnRest = DiTBlocks.OasisSpatioTemporalBlock.TMlp = DiTBlocks.OasisSpatioTemporalBlock.TModNorm = 0; }
         Tensor cur = x;
         for (int i = 0; i < _blocks.Length; i++)
         {
@@ -172,6 +165,8 @@ public sealed unsafe class OasisDit : IDisposable
             if (taps is not null && i == 0) taps["block0"] = CloneCpu(cur);
             if (taps is not null && i == _blocks.Length - 1) taps["blockLast"] = CloneCpu(cur);
         }
+        if (prof)
+            HartsyInference.Core.Logging.Logs.Info($"[oasis-block] modNorm={DiTBlocks.OasisSpatioTemporalBlock.TModNorm:F1} attn(inc-sdpa)={DiTBlocks.OasisSpatioTemporalBlock.TAttnRest:F1} sdpa={DiTBlocks.OasisSpatioTemporalBlock.TSdpa:F1} mlp={DiTBlocks.OasisSpatioTemporalBlock.TMlp:F1} ms (16 blocks×2 halves)");
         Tensor outV = FinalLayer(backend, cur, cond, t, sp, gh, gw);
         cur.Dispose();
         cond.Dispose();
@@ -179,9 +174,10 @@ public sealed unsafe class OasisDit : IDisposable
     }
 
     /// <summary>Runs the 16-block loop over the fixed input/cond buffers and lands the result in
-    /// <see cref="_blockOutFixed"/> (a stable, non-graph-owned buffer — the last op the captured graph records,
-    /// so replay's output survives the graph-memory auto-free).</summary>
-    private void RunBlocksIntoFixed(IBackend backend, int t, int sp)
+    /// <see cref="_velFixed"/> (a stable, non-graph-owned buffer — the last op the captured graph records, so
+    /// replay's velocity survives the graph-memory auto-free). Captures the WHOLE DiT compute: 16 blocks + the
+    /// device final layer, so a single cuGraphLaunch produces the v-prediction.</summary>
+    private void RunForwardIntoFixed(IBackend backend, int t, int sp, int gh, int gw)
     {
         Tensor cur = _xFixed!;
         bool ownCur = false;
@@ -191,8 +187,10 @@ public sealed unsafe class OasisDit : IDisposable
             if (ownCur) cur.Dispose();
             cur = next; ownCur = true;
         }
-        backend.CopyInto(_blockOutFixed!, cur);
-        cur.Dispose();
+        Tensor v = FinalLayer(backend, cur, _condFixed!, t, sp, gh, gw);
+        if (ownCur) cur.Dispose();
+        backend.CopyInto(_velFixed!, v);
+        v.Dispose();
     }
 
     /// <summary>Caches the geometry-invariant RoPE tables + causal mask per (t,gh,gw); rebuilds only on a
@@ -209,6 +207,15 @@ public sealed unsafe class OasisDit : IDisposable
     }
 
     private static double ElapsedMs(long ts) => (System.Diagnostics.Stopwatch.GetTimestamp() - ts) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+    /// <summary>Returns a fresh copy of the captured-graph velocity buffer so the caller may dispose it freely
+    /// (the fixed <see cref="_velFixed"/> persists across forwards for the graph). One small device copy.</summary>
+    private Tensor CopyOut(IBackend backend)
+    {
+        Tensor o = new(_velFixed!.Shape, DType.F32);
+        backend.CopyInto(o, _velFixed!);
+        return o;
+    }
 
     private static Tensor CloneCpu(Tensor src)
     {
@@ -282,20 +289,9 @@ public sealed unsafe class OasisDit : IDisposable
         backend.Linear(mod, silu, _finalModW!, _finalModB);
         silu.Dispose();
 
-        Tensor normed = new Tensor(new TensorShape(t * sp, dim), DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, x, 1, t * sp, dim, 1e-6f);
-        float* np = (float*)normed.DataPointer;
-        float* mp = (float*)mod.DataPointer;
-        for (int f = 0; f < t; f++)
-        {
-            float* shift = mp + (long)f * 2 * dim;
-            float* scale = shift + dim;
-            for (int i = 0; i < sp; i++)
-            {
-                long off = ((long)f * sp + i) * dim;
-                for (int d = 0; d < dim; d++) np[off + d] = np[off + d] * (1f + scale[d]) + shift[d];
-            }
-        }
+        // Fused adaLN: shift + (1+scale)·LayerNorm(x). mod = [shift ‖ scale] over the last 2·dim (shiftOff 0, scaleOff dim).
+        Tensor normed = new Tensor(new TensorShape([(long)t, sp, dim]), DType.F32);
+        backend.OasisAdaLn(normed, x, mod, dim, sp, t * sp, 2 * dim, 0, dim, 1e-6f);
         mod.Dispose();
 
         int outVec = c * p * p;
@@ -303,24 +299,9 @@ public sealed unsafe class OasisDit : IDisposable
         backend.Linear(proj, normed, _finalW!, _finalB);
         normed.Dispose();
 
-        // Unpatchify back to [T, C, gridH·p, gridW·p].
-        int h = gh * p, w = gw * p;
-        Tensor outT = new Tensor(new TensorShape([(long)t, c, h, w]), DType.F32);
-        float* sp2 = (float*)proj.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        for (int f = 0; f < t; f++)
-            for (int ty = 0; ty < gh; ty++)
-                for (int tx = 0; tx < gw; tx++)
-                {
-                    long baseIdx = (((long)f * gh + ty) * gw + tx) * outVec;
-                    // Reference unpatchify: reshape(...,p,p,c) then einsum nhwpqc->nchpwq — the out-vector is
-                    // laid out [py, px, ci] (channel innermost), NOT [ci, py, px]. Read with that stride.
-                    for (int ci = 0; ci < c; ci++)
-                        for (int py = 0; py < p; py++)
-                            for (int px = 0; px < p; px++)
-                                op[(((long)f * c + ci) * h + ty * p + py) * w + tx * p + px]
-                                    = sp2[baseIdx + (py * p + px) * c + ci];
-                }
+        // Device unpatchify → [T, C, gridH·p, gridW·p] (out-vector [py,px,ci], channel innermost).
+        Tensor outT = new Tensor(new TensorShape([(long)t, c, gh * p, gw * p]), DType.F32);
+        backend.OasisUnpatchify(outT, proj, t, c, gh, gw, p);
         proj.Dispose();
         return outT;
     }
@@ -344,7 +325,7 @@ public sealed unsafe class OasisDit : IDisposable
             // Null (do not device-dispose) the graph fixed buffers + geometry caches — the context may already be
             // torn down; the captured graph itself is owned by the backend's single slot and reset on model switch.
             _sCos = _sSin = _tCos = _tSin = _mask = null;
-            _xFixed = _condFixed = _blockOutFixed = null;
+            _xFixed = _condFixed = _velFixed = null;
         }
         GC.SuppressFinalize(this);
     }

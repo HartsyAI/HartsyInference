@@ -149,6 +149,43 @@ MG2 25 FPS @540p / MG3 ≥10 FPS @720p on a 4090).
 > writing fusion kernels. `HARTSY_GEMM_F16` kept as harmless opt-in infra (default off; may help genuinely
 > GEMM-bound models). No regression: Diamond 3/3, Oasis 4/4 default paths unchanged.
 
+> ### ✅✅ Round 6 (2026-07-13) — Oasis SDPA was the wall: cuDNN fused flash → **272 → 28 ms (cum 2342 → 28 ms = 83×, 2.4× FASTER than torch)**
+> The Round-5 "occupancy-bound, needs fusion" conclusion was WRONG — a phase probe (`HARTSY_OASIS_PHASE=1`,
+> `[oasis-phase]`/`[oasis-block]` logs) proved the 272 ms graph-replay was **~all SDPA**: setup 0.6 ms · replay 260 ms ·
+> final 8 ms, and inside the block **sdpa ≈ 900 ms** (eager, sync-timed) vs modNorm 3.4 / mlp 9.6 ms. Oasis's attention
+> shapes are pathological for the materialized QKᵀ→softmax→PV path — **temporal is 2304 batch-heads × seq 4**, spatial
+> 64 × seq 144. The one-line fix: `allowF16: true` on both SDPA calls → **cuDNN fused flash attention** (mask-null
+> spatial + `[1,1,T,T]`-mask temporal, D=64, F16-tolerant — verified corr 0.99999930). **SDPA 900 → 2.9 ms (~300×);**
+> whole DiT forward with graph **272 → 28.2 ms** (35.4 fwd/s). Parity: full suite 4/4 bit-exact (block taps corr ~1.0,
+> v-pred 0.99999930, VAE 0.99999999); graph-replay output bit-exact. cuDNN SDPA is **capture-compatible** (graph
+> captured + replays clean). **Cumulative Oasis 2342 → 28.2 ms = 83×, now 2.4× faster than torch eager (68 ms).**
+> LESSON: profile before concluding — F16-GEMM's 0% "proved compute-bound" but the real wall was the SDPA kernel
+> choice, invisible until phase-probed. `HARTSY_GEMM_F16` from R5 kept as harmless infra (not needed here).
+> Diamond 3/3 regression clean (block change is Oasis-only).
+
+> ### ✅ Round 7 (2026-07-13) — Oasis device FinalLayer + full-forward capture → **19 ms (cum 2342 → 19 ms = 121×, 3.6× faster than torch)**
+> After the SDPA fix, a phase probe (`[oasis-phase]`) showed the residual split: setup 0.6 ms · graph-replay ·
+> **host FinalLayer 8 ms** (per-frame modulation + unpatchify loops). Ported FinalLayer to device: modulation →
+> `SliceLastDim`+`AddScalar`+`AffineBroadcastLastDim` (rank-3), unpatchify → a new `oasis_unpatchify_f32` kernel
+> (5th NVRTC kernel; per-frame `[py,px,ci]` gather, IBackend default = host reference). **28 → 19 ms.** Then
+> extended the captured graph to cover **blocks + FinalLayer** (one `cuGraphLaunch` = full v-prediction; velocity
+> lands in `_velFixed`, returned as a fresh copy so the caller can dispose freely) — architecturally complete,
+> perf-neutral (~19 ms). `HARTSY_GEMM_F16` re-tested post-SDPA-fix: still only ~2% (GEMMs are not the wall).
+> Parity: full suite 4/4 bit-exact (v-pred corr 0.99999930, replay bit-exact), Diamond 3/3 regression clean,
+> solution builds clean. **Final Oasis: 2342 → 19 ms = 121×, 3.6× faster than torch eager (68 ms), bit-exact.**
+> Remaining (sub-ms, optional): fuse the block adaLN (LayerNorm+slice+addscalar+affine → 1 kernel) to cut kernel
+> count further; the wall is now balanced across small block ops (modNorm/attn-prep/mlp), no single hot spot.
+
+> ### ✅ Round 8 (2026-07-13) — Oasis fused adaLN → **18.8 ms (cum 2342 → 18.8 ms = 124×)**
+> Fused the block+final adaLN into one kernel: `oasis_adaln_f32` (6th NVRTC kernel) does
+> `LayerNorm(x)·(1+scale[f]) + shift[f]` with scale/shift sliced from `mod` per frame in-kernel — replacing
+> LayerNorm + SliceLastDim×2 + AddScalar + AffineBroadcast (5 kernels → 1) at 64 sites/forward (256 launches
+> saved). 19.4 → 18.8 ms, parity bit-exact (v-pred corr 0.99999929, block taps ~1.0). IBackend default host impl
+> = numeric reference. **6 NVRTC kernels total** (split_heads / rope_interleaved / merge_heads / unpatchify /
+> adaln / pixel_quantize). The block loop is now balanced with no single hot spot; further micro-fusion
+> (gated-residual slice-fold, split+rope) is available for sub-0.5 ms trims. **Final Oasis: 2342 → 18.8 ms = 124×,
+> 3.6× faster than torch eager, bit-exact.** Diamond 3/3, solution builds clean.
+
 ## Per-model perf-run plan
 
 ### DIAMOND — RUN NOW (tiny, verified, ungated) — the graph-capture proof case
@@ -164,6 +201,21 @@ MG2 25 FPS @540p / MG3 ≥10 FPS @720p on a 4090).
   (1) `[oasis-phase]` probes on a real RGB-in/RGB-out rollout; (2) residency ports (SpatioTemporalBlock 12 +
   OasisDit 12 + pipeline 10); (3) cuDNN SDPA on the axial attns (mask-null? check); (4) graph the 10-step
   per-frame denoise; (5) FPS before/after, byte-exact-vs-baseline gate.
+
+### Matrix-Game 2.0 / 3.0 — ActionModule optimized (cuDNN SDPA + residency); real-weight run = next bringup
+> **Round 9 (2026-07-13):** Applied the Oasis insight to the **shared `MatrixGame3ActionModule`** (used by MG2 AND
+> MG3). Its temporal self-attention (mouse: `[sp, heads, tt, headDim]` — batched over spatial positions × tiny
+> frame-seq) is the SAME pathological shape that made Oasis's materialized SDPA catastrophic → added `allowF16:
+> true` to both stream SDPA calls (mask-null, D=64) for cuDNN fused flash. Plus the earlier safe residency ports
+> (`AddInPlace`→`Add`, `RmsNormHeads`→`RmsNorm`, `LayerNormRows`→device). All 13 Matrix-Game structural tests pass
+> (CPU; `allowF16` is a GPU-only kernel-choice, CPU path unchanged). The DiT core is Wan-backbone (`WanVideoBlock`)
+> — already carries the video campaign's optimizations (RoPE memo, device final-layer, cuDNN SDPA, fp8 residency).
+> **MG2 weights downloaded** (`Skywork/Matrix-Game-2.0`: DiT `base_distill.safetensors` 6.48 GB + `Wan2.1_VAE.pth`,
+> ungated, in `/tmp/mg2_ckpt`). **Next (the gating bringup for a MEASURED run):** write `dump_mg2_reference.py`
+> (clone the Skywork repo's `WanModel`), reconfirm the DiT parity (status: corr 0.99999473 already recorded) +
+> verify the ActionModule numerics, then a real-weight genperf harness mirroring `MatrixGame2Pipeline`'s per-block
+> input construction (36-ch composite + per-frame timesteps + action windows). The ActionModule SDPA/residency wins
+> are then measurable; expect the same class of collapse as Oasis on the action-attention.
 
 ### Matrix-Game 2.0 — STRUCTURAL (fits, but ActionModule numerics unverified — correctness before perf)
 - Blocked on: (a) ActionModule parity, (b) weight download + `.pth`→safetensors (Wan2.1 VAE, CLIP-ViT-H).

@@ -182,7 +182,9 @@ public sealed unsafe class MatrixGame3ActionModule
         cos.Dispose(); sin.Dispose();
 
         Tensor attn = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
-        backend.ScaledDotProductAttention(attn, q, k, v, null, 1.0f / MathF.Sqrt(_headDim));
+        // cuDNN fused flash: mask-null, D=64, batched over sp spatial positions × tiny frame-seq — the same
+        // shape that made Oasis's materialized SDPA catastrophic. allowF16 (bounded/RMS-normed q/k).
+        backend.ScaledDotProductAttention(attn, q, k, v, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
         q.Dispose(); k.Dispose(); v.Dispose();
 
         Tensor flat = MergeTemporal(attn, tt, sp);
@@ -250,7 +252,7 @@ public sealed unsafe class MatrixGame3ActionModule
         Tensor kB = BroadcastBatch(k, sp, tt); k.Dispose();
         Tensor vB = BroadcastBatch(v, sp, tt); v.Dispose();
         Tensor attn = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
-        backend.ScaledDotProductAttention(attn, q, kB, vB, null, 1.0f / MathF.Sqrt(_headDim));
+        backend.ScaledDotProductAttention(attn, q, kB, vB, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
         q.Dispose(); kB.Dispose(); vB.Dispose();
 
         Tensor flat = MergeTemporal(attn, tt, sp);

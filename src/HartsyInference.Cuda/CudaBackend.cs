@@ -1916,6 +1916,41 @@ public sealed class CudaBackend : IBackend
         finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
     }
 
+    /// <summary>Fused Oasis adaLN: out = LayerNorm(x)·(1+scale)+shift, scale/shift sliced from mod per frame.</summary>
+    public void OasisAdaLn(Tensor output, Tensor input, Tensor mod, int dim, int sp, int totalRows, int modStride, int shiftOff, int scaleOff, float eps)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32 || mod.DType != DType.F32) throw new NotSupportedException("CUDA OasisAdaLn supports F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pIn = 0, pMod = 0; bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pMod = GpuTransferHelper.CopyToDevice(mod);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchOasisAdaLn(pOut, pIn, pMod, dim, sp, totalRows, modStride, shiftOff, scaleOff, eps, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
+    }
+
+    /// <summary>Oasis per-frame unpatchify: proj[t·sp, c·p²] → out[t,c,H,W] ([py,px,ci] inner layout).</summary>
+    public void OasisUnpatchify(Tensor output, Tensor proj, int frames, int channels, int gh, int gw, int patch)
+    {
+        if (output.DType != DType.F32 || proj.DType != DType.F32) throw new NotSupportedException("CUDA OasisUnpatchify supports F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pIn = 0; bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(proj);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchOasisUnpatchify(pOut, pIn, frames, channels, gh, gw, patch, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
+    }
+
     /// <summary>DIAMOND pixel quantize to 256 levels: out = floor((clamp(v,-1,1)+1)·127.5)/127.5 − 1 (device).</summary>
     public void PixelQuantize(Tensor output, Tensor input)
     {

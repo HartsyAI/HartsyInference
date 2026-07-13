@@ -177,6 +177,50 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>Fused Oasis adaLN: <c>out[r,d] = LayerNorm(x[r])·(1+scale[f,d]) + shift[f,d]</c>, f = r/sp, with
+    /// scale/shift sliced from <c>mod[f, modStride]</c> at scaleOff/shiftOff (LayerNorm + slice×2 + addscalar +
+    /// affine-broadcast fused into one kernel). Default host impl is the numeric reference.</summary>
+    unsafe void OasisAdaLn(Tensor output, Tensor input, Tensor mod, int dim, int sp, int totalRows, int modStride, int shiftOff, int scaleOff, float eps)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32 || mod.DType != DType.F32) throw new NotSupportedException("OasisAdaLn default fallback only supports F32.");
+        float* xp = (float*)input.DataPointer, op = (float*)output.DataPointer, mp = (float*)mod.DataPointer;
+        for (int r = 0; r < totalRows; r++)
+        {
+            long off = (long)r * dim;
+            int f = r / sp;
+            float* scale = mp + (long)f * modStride + scaleOff;
+            float* shift = mp + (long)f * modStride + shiftOff;
+            double mean = 0;
+            for (int d = 0; d < dim; d++) mean += xp[off + d];
+            mean /= dim;
+            double var = 0;
+            for (int d = 0; d < dim; d++) { double dd = xp[off + d] - mean; var += dd * dd; }
+            float inv = 1f / MathF.Sqrt((float)(var / dim) + eps);
+            for (int d = 0; d < dim; d++)
+                op[off + d] = (float)((xp[off + d] - mean) * inv) * (1f + scale[d]) + shift[d];
+        }
+    }
+
+    /// <summary>Oasis per-frame unpatchify: <c>proj[t·sp, c·p²]</c> (token = f·sp + hp·gw+wp) → <c>out[t,c,H,W]</c>
+    /// with the out-vector laid <c>[py, px, ci]</c> (channel innermost). Device override keeps the final layer
+    /// GPU-resident.</summary>
+    unsafe void OasisUnpatchify(Tensor output, Tensor proj, int frames, int channels, int gh, int gw, int patch)
+    {
+        if (output.DType != DType.F32 || proj.DType != DType.F32) throw new NotSupportedException("OasisUnpatchify default fallback only supports F32.");
+        int p = patch, h = gh * p, w = gw * p, outVec = channels * p * p;
+        float* src = (float*)proj.DataPointer, dst = (float*)output.DataPointer;
+        for (int f = 0; f < frames; f++)
+            for (int ty = 0; ty < gh; ty++)
+                for (int tx = 0; tx < gw; tx++)
+                {
+                    long token = ((long)f * gh + ty) * gw + tx;
+                    for (int ci = 0; ci < channels; ci++)
+                        for (int py = 0; py < p; py++)
+                            for (int px = 0; px < p; px++)
+                                dst[(((long)f * channels + ci) * h + ty * p + py) * w + tx * p + px] = src[token * outVec + (long)(py * p + px) * channels + ci];
+                }
+    }
+
     /// <summary>DIAMOND pixel quantize to 256 levels: <c>floor((clamp(v,−1,1)+1)·127.5)/127.5 − 1</c>. Device
     /// override makes the EDM step drain-free (graph-capturable).</summary>
     unsafe void PixelQuantize(Tensor output, Tensor input)

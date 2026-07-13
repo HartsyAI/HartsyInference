@@ -555,6 +555,66 @@ __global__ void oasis_merge_heads_f32(
     out[dstIdx] = attn[srcIdx];
 }
 
+// Fused Oasis adaLN: out[r,d] = LayerNorm(x[r])·(1+scale[f,d]) + shift[f,d], f = r/sp. scale/shift are sliced
+// from mod[f, modStride] at scaleOff/shiftOff. One block per row; replaces LayerNorm + slice×2 + addscalar +
+// affine-broadcast (5 kernels → 1). blockDim must be a power of two (tree reduction).
+__global__ void oasis_adaln_f32(
+    float* __restrict__ output,
+    const float* __restrict__ input,
+    const float* __restrict__ mod,
+    unsigned int dim, unsigned int sp, unsigned int totalRows,
+    unsigned int modStride, unsigned int shiftOff, unsigned int scaleOff, float eps)
+{
+    extern __shared__ float sdata[];
+    unsigned int row = blockIdx.x;
+    if (row >= totalRows) return;
+    const float* inRow = input + (size_t)row * dim;
+    float* outRow = output + (size_t)row * dim;
+    unsigned int f = row / sp;
+    const float* scale = mod + (size_t)f * modStride + scaleOff;
+    const float* shift = mod + (size_t)f * modStride + shiftOff;
+
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) partial += inRow[i];
+    sdata[threadIdx.x] = partial; __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
+    float mean = sdata[0] / (float)dim; __syncthreads();
+
+    float vpart = 0.0f;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) { float d = inRow[i] - mean; vpart += d * d; }
+    sdata[threadIdx.x] = vpart; __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
+    float invStd = rsqrtf(sdata[0] / (float)dim + eps);
+
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+        outRow[i] = (inRow[i] - mean) * invStd * (1.0f + scale[i]) + shift[i];
+}
+
+// Oasis per-frame unpatchify: proj[t*sp, c*p*p] (token = f*sp + hp*gw+wp) → out[t, c, H, W], with the
+// out-vector laid [py, px, ci] (channel innermost), matching the reference einsum nhwpqc->nchpwq.
+// One thread per output element out[f, ci, y, x].
+__global__ void oasis_unpatchify_f32(
+    float* __restrict__ out,
+    const float* __restrict__ proj,
+    unsigned int frames, unsigned int channels, unsigned int gh, unsigned int gw, unsigned int patch)
+{
+    unsigned int W = gw * patch, H = gh * patch;
+    unsigned long long total = (unsigned long long)frames * channels * H * W;
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    unsigned int x = (unsigned int)(i % W);
+    unsigned long long r = i / W;
+    unsigned int y = (unsigned int)(r % H);
+    r /= H;
+    unsigned int ci = (unsigned int)(r % channels);
+    unsigned int f = (unsigned int)(r / channels);
+    unsigned int ty = y / patch, py = y % patch, tx = x / patch, px = x % patch;
+    unsigned int outVec = channels * patch * patch;
+    unsigned long long token = (unsigned long long)f * gh * gw + (unsigned long long)ty * gw + tx;
+    unsigned long long src = token * outVec + (unsigned long long)(py * patch + px) * channels + ci;
+    out[i] = proj[src];
+}
+
 // Pixel quantize to 256 levels (DIAMOND): out = floor((clamp(v,-1,1)+1)*127.5)/127.5 - 1.
 // `(int)` truncation of a non-negative value == floor. Enables a drain-free EDM step for graph capture.
 __global__ void dit_pixel_quantize_f32(
