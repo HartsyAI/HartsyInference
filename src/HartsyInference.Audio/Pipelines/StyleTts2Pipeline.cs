@@ -66,7 +66,7 @@ public sealed unsafe class StyleTts2Pipeline : IDisposable
         KokoroPlBert plBert = new(bb); plBert.LoadWeights(w);
         KokoroTextEncoder textEnc = new(bb); textEnc.LoadWeights(w);
         KokoroProsodyPredictor pred = new(bb); pred.LoadWeights(w);
-        KokoroIStftNetDecoder dec = new(bb); dec.LoadWeights(w);
+        KokoroIStftNetDecoder dec = new(bb, useHifiGan: true); dec.LoadWeights(w);
         StyleEncoder styleEnc = new(bb.StyleDim); styleEnc.LoadWeights(w, "style_encoder");
         StyleEncoder predEnc = new(bb.StyleDim); predEnc.LoadWeights(w, "predictor_encoder");
         StyleDenoiser denoiser = new(cfg); denoiser.LoadWeights(w, "diffusion");

@@ -25,7 +25,7 @@ Tests for both: `Hunyuan3DDinoParityTests`, `Hunyuan3DDitParityTests`, `Hunyuan3
 
 | Model | Notes |
 |---|---|
-| **TRELLIS** (image → Gaussian splat + mesh) | 🚧 **Build underway** ([TRELLIS_BUILD_PLAN.md](TRELLIS_BUILD_PLAN.md)) — architecture mapped from the reference (two-stage flow: dense sparse-structure 16³→64³ occupancy → sparse SLAT over active voxels → GS/mesh/RF decoders), phased plan + `TrellisConfig` (exact `image-large` dims) landed (Phase A). Still needs new backend ops: Conv3d, SparseTensor + sparse conv/attention, flexicubes. `GaussianSplatCloud` + PLY export already in place. |
+| **TRELLIS** (image → Gaussian splat + mesh) | 🚧 **Build underway** ([TRELLIS_BUILD_PLAN.md](TRELLIS_BUILD_PLAN.md)) — two-stage flow (dense sparse-structure 16³→64³ occupancy → sparse SLAT over active voxels → GS/mesh/RF decoders). **Phase B (stage-1 dense) DONE + parity-verified vs the real TRELLIS**: `Conv3d` (bit-exact), `SparseStructureDecoder` (corr 1.0), `SparseStructureFlow` 24-block DiT (velocity corr 0.99999866), FlowEuler interval-CFG sampler → full pipeline occupancy corr 0.99964 / 99.96% voxel agreement (`TrellisStage1ParityTests`). Remaining: Phase C sparse infra (SparseTensor + sparse conv/attention) → stage-2 SLAT flow + GS/mesh decoders. `GaussianSplatCloud` + PLY export in place. |
 | **Hunyuan3D Paint** (texture/PBR) | Out of scope for the shape pipelines (multiview diffusion + UV bake). |
 
 ## Foundation

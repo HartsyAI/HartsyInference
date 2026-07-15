@@ -55,6 +55,67 @@ public sealed unsafe class StyleEncoderParityTests
     }
 
     [Fact]
+    public void HifiGanGenerator_Matches_Reference()
+    {
+        string? ckpt = Environment.GetEnvironmentVariable("STYLE_CKPT");
+        string? refDir = Environment.GetEnvironmentVariable("HIFIGAN_REF_DIR");
+        if (ckpt is null || !File.Exists(ckpt) || refDir is null || !File.Exists(Path.Combine(refDir, "out.txt")))
+        {
+            _out.WriteLine("STYLE_CKPT / HIFIGAN_REF_DIR not set — skipping."); return;
+        }
+        PytorchPickleLoader loader = new();
+        loader.Load(ckpt, recursiveFlatten: true);
+        Dictionary<string, Tensor> w = StyleTts2Weights.Adapt(loader.GetAllTensors());
+        HartsyInference.Audio.Models.StyleTts2.StyleHifiGanGenerator gen = new(24_000);
+        gen.LoadWeights(w, "decoder.generator");
+
+        (int[] xs, float[] xv) = ReadArr(Path.Combine(refDir, "x.txt"));
+        (int[] ss, float[] sv) = ReadArr(Path.Combine(refDir, "s.txt"));
+        (int[] fs, float[] fv) = ReadArr(Path.Combine(refDir, "f0.txt"));
+        (_, float[] refOut) = ReadArr(Path.Combine(refDir, "out.txt"));
+
+        using Tensor x = ToTensor([1, xs[0], xs[1]], xv);
+        using Tensor s = ToTensor([1, ss[0]], sv);
+        using Tensor f0 = ToTensor([1, fs[0]], fv);
+        using CpuBackend backend = new();
+
+        // Source isolation: engine GenerateHarmonicSource vs the reference m_source (both noise-free).
+        if (File.Exists(Path.Combine(refDir, "har.txt")))
+        {
+            (_, float[] refHar) = ReadArr(Path.Combine(refDir, "har.txt"));
+            using Tensor f0c = ToTensor([1, 1, fs[0]], fv);
+            float[] ourHar = HartsyInference.Audio.Models.StyleTts2.StyleSineGen.Source(
+                f0c, 300, 24_000, HartsyInference.Audio.Models.Whisper.WhisperOps.EnsureF32(w["decoder.generator.m_source.l_linear.weight"]),
+                HartsyInference.Audio.Models.Whisper.WhisperOps.EnsureF32(w["decoder.generator.m_source.l_linear.bias"]));
+            int hn = Math.Min(ourHar.Length, refHar.Length);
+            _out.WriteLine($"harmonic source corr={Corr(ourHar[..hn], refHar[..hn]):F6} (ourLen={ourHar.Length} refLen={refHar.Length})");
+        }
+
+        float[] audio = gen.Forward(backend, x, s, f0);
+
+        int n = Math.Min(audio.Length, refOut.Length);
+        float corr = Corr(audio[..n], refOut[..n]);
+        double maxAbs = 0; for (int i = 0; i < n; i++) maxAbs = Math.Max(maxAbs, Math.Abs(audio[i] - refOut[i]));
+        _out.WriteLine($"HiFiGAN out: ourLen={audio.Length} refLen={refOut.Length} corr={corr:F6} maxAbs={maxAbs:F5} ourRMS={Norm(audio) / MathF.Sqrt(audio.Length):F4} refRMS={Norm(refOut) / MathF.Sqrt(refOut.Length):F4}");
+        Assert.True(corr > 0.99f, $"HiFiGAN generator corr {corr} < 0.99");
+    }
+
+    private static (int[] shape, float[] data) ReadArr(string path)
+    {
+        string[] lines = File.ReadAllLines(path);
+        int[] shape = [.. lines[0].Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(int.Parse)];
+        float[] data = [.. lines[1].Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(x => float.Parse(x, CultureInfo.InvariantCulture))];
+        return (shape, data);
+    }
+
+    private static unsafe Tensor ToTensor(int[] shape, float[] data)
+    {
+        Tensor t = new(new TensorShape([.. shape.Select(d => (long)d)]), DType.F32);
+        fixed (float* dp = data) Buffer.MemoryCopy(dp, (void*)t.DataPointer, (long)data.Length * 4, (long)data.Length * 4);
+        return t;
+    }
+
+    [Fact]
     public void StyleTts2_LibriTTS_Submodules_Load()
     {
         string? ckpt = Environment.GetEnvironmentVariable("STYLE_CKPT");

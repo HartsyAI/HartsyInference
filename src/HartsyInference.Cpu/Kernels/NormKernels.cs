@@ -174,9 +174,15 @@ public static class NormKernels
             for (int c = 0; c < channels; c++)
             {
                 long baseIdx = ((long)b * channels + c) * t;
-                VectorizedSumAndSumSq(ip + baseIdx, t, out float sum, out float sumSq);
+                VectorizedSumAndSumSq(ip + baseIdx, t, out float sum, out float _);
                 float mean = sum / t;
-                float var = sumSq / t - mean * mean;
+                // Two-pass variance in double: the single-pass E[x²]−E[x]² suffers catastrophic cancellation for
+                // long, non-zero-mean channels (float32 sumSq≈mean²·t → subtraction underflows to a slightly
+                // NEGATIVE var → sqrt(neg)=NaN). Seen with the StyleTTS2 HiFiGAN generator's ~30 k-sample stages;
+                // Kokoro's short iSTFTNet stages never triggered it. Double + centered sum is stable and exact.
+                double varAcc = 0;
+                for (int j = 0; j < t; j++) { double dv = ip[baseIdx + j] - mean; varAcc += dv * dv; }
+                float var = (float)(varAcc / t);
                 float invStd = 1.0f / MathF.Sqrt(var + eps);
 
                 float g = gp[affineBase + c];

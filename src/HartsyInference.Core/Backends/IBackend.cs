@@ -1787,6 +1787,60 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>3D pixel-shuffle (depth-to-space, TRELLIS SS-VAE upsample): <c>[N, C·r³, D, H, W] → [N, C, rD, rH, rW]</c>
+    /// with <c>out[n,c, d·r+a, h·r+b, w·r+e] = in[n, c·r³ + a·r² + b·r + e, d, h, w]</c> (a/b/e the D/H/W shuffle
+    /// indices; a most significant). Matches the reference reshape [B,C,r,r,r,D,H,W]→permute(0,1,5,2,6,3,7,4).</summary>
+    unsafe void PixelShuffle3d(Tensor output, Tensor input, int ratio)
+    {
+        if (input.DType != DType.F32 || output.DType != DType.F32)
+            throw new NotSupportedException("PixelShuffle3d default fallback only supports F32.");
+        int n = (int)input.Shape[0], cIn = (int)input.Shape[1];
+        int iD = (int)input.Shape[2], iH = (int)input.Shape[3], iW = (int)input.Shape[4];
+        int r = ratio, r3 = r * r * r, cOut = cIn / r3;
+        int oD = iD * r, oH = iH * r, oW = iW * r;
+        float* src = (float*)input.DataPointer, dst = (float*)output.DataPointer;
+        for (int b = 0; b < n; b++)
+            for (int c = 0; c < cOut; c++)
+                for (int d = 0; d < iD; d++)
+                    for (int h = 0; h < iH; h++)
+                        for (int w = 0; w < iW; w++)
+                            for (int a = 0; a < r; a++)
+                                for (int bb = 0; bb < r; bb++)
+                                    for (int e = 0; e < r; e++)
+                                    {
+                                        long ci = (long)c * r3 + a * r * r + bb * r + e;
+                                        long si = (((((long)b * cIn + ci) * iD + d) * iH + h) * iW + w);
+                                        long di = (((((long)b * cOut + c) * oD + (d * r + a)) * oH + (h * r + bb)) * oW + (w * r + e));
+                                        dst[di] = src[si];
+                                    }
+    }
+
+    /// <summary>Channel-axis LayerNorm over a 5D <c>[N,C,D,H,W]</c> tensor (TRELLIS <c>ChannelLayerNorm32</c>):
+    /// normalize across C per spatial position, then affine <paramref name="weight"/>/<paramref name="bias"/> <c>[C]</c>.
+    /// eps default 1e-5 (nn.LayerNorm default).</summary>
+    unsafe void ChannelLayerNorm3d(Tensor output, Tensor input, Tensor weight, Tensor bias, float eps)
+    {
+        if (input.DType != DType.F32 || output.DType != DType.F32 || weight.DType != DType.F32 || bias.DType != DType.F32)
+            throw new NotSupportedException("ChannelLayerNorm3d default fallback only supports F32.");
+        int n = (int)input.Shape[0], c = (int)input.Shape[1];
+        long spatial = input.Shape[2] * input.Shape[3] * input.Shape[4];
+        float* src = (float*)input.DataPointer, dst = (float*)output.DataPointer;
+        float* wt = (float*)weight.DataPointer, bs = (float*)bias.DataPointer;
+        for (int b = 0; b < n; b++)
+            for (long p = 0; p < spatial; p++)
+            {
+                long baseIdx = (long)b * c * spatial + p;
+                double mean = 0; for (int ch = 0; ch < c; ch++) mean += src[baseIdx + (long)ch * spatial]; mean /= c;
+                double var = 0; for (int ch = 0; ch < c; ch++) { double dd = src[baseIdx + (long)ch * spatial] - mean; var += dd * dd; } var /= c;
+                float invStd = (float)(1.0 / Math.Sqrt(var + eps));
+                for (int ch = 0; ch < c; ch++)
+                {
+                    long idx = baseIdx + (long)ch * spatial;
+                    dst[idx] = ((float)(src[idx] - mean)) * invStd * wt[ch] + bs[ch];
+                }
+            }
+    }
+
     /// <summary>Depthwise 2D convolution — each output channel sees exactly one input channel
     /// (groups = C). Used by YOLO11's class branch and the C2PSA positional encoding. Weight
     /// shape is <c>[C, 1, kH, kW]</c> and bias <c>[C]</c>. Default implementation is a CPU loop

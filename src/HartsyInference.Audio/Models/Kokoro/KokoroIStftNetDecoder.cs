@@ -59,9 +59,16 @@ public sealed unsafe class KokoroIStftNetDecoder
     // conv_post: final k=7 conv producing 22 = 2 * (n_fft/2 + 1) iSTFT bins
     private Tensor? _convPostW, _convPostB;
 
-    public KokoroIStftNetDecoder(KokoroConfig cfg)
+    // When true, the shared encode/decode feeds a StyleTTS2 HiFiGAN generator (LibriTTS `type: hifigan`) instead
+    // of Kokoro's iSTFTNet generator. Default false → Kokoro path is byte-for-byte unchanged.
+    private readonly bool _useHifiGan;
+    private StyleTts2.StyleHifiGanGenerator? _hifiGan;
+
+    public KokoroIStftNetDecoder(KokoroConfig cfg, bool useHifiGan = false)
     {
         _cfg = cfg;
+        _useHifiGan = useHifiGan;
+        if (useHifiGan) _hifiGan = new StyleTts2.StyleHifiGanGenerator(cfg.SampleRate);
         _encode = new AdaResLoader(dimIn: 514, dimOut: 1024, upsample: false, kernel: 3);
         for (int i = 0; i < 3; i++) _decode[i] = new AdaResLoader(dimIn: 1024 + 2 + 64, dimOut: 1024, upsample: false, kernel: 3);
         _decode[3] = new AdaResLoader(dimIn: 1024 + 2 + 64, dimOut: 512, upsample: true, kernel: 3);
@@ -88,6 +95,14 @@ public sealed unsafe class KokoroIStftNetDecoder
 
         _encode.LoadWeights(w, "decoder.encode");
         for (int i = 0; i < 4; i++) _decode[i].LoadWeights(w, $"decoder.decode.{i}");
+
+        if (_useHifiGan)
+        {
+            // The HiFiGAN generator owns its own m_source / noise_convs / noise_res / ups / resblocks / alphas /
+            // conv_post (different shapes + count than iSTFTNet), so skip the iSTFTNet generator load entirely.
+            _hifiGan!.LoadWeights(w, "decoder.generator");
+            return;
+        }
 
         _mSourceW = WhisperOps.EnsureF32(w["decoder.generator.m_source.l_linear.weight"]);
         _mSourceB = WhisperOps.EnsureF32(w["decoder.generator.m_source.l_linear.bias"]);
@@ -146,7 +161,9 @@ public sealed unsafe class KokoroIStftNetDecoder
         f0Down.Dispose();
 
         // generator consumes the ORIGINAL 2T F0 curve (not the downsampled one).
-        float[] audio = RunGenerator(backend, x, styleDecoder, f0);
+        float[] audio = _useHifiGan
+            ? _hifiGan!.Forward(backend, x, styleDecoder, f0)
+            : RunGenerator(backend, x, styleDecoder, f0);
         x.Dispose();
         return audio;
     }
