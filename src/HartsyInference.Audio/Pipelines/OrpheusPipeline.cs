@@ -23,7 +23,6 @@ public sealed unsafe class OrpheusPipeline : IDisposable
     private readonly OrpheusConfig _cfg;
     private readonly Qwen2Model _backbone;
     private readonly SnacModel _codec;
-    private static readonly bool _dbg = Environment.GetEnvironmentVariable("HARTSY_ORPHEUS_DEBUG") == "1";
     private int _disposed;
 
     public OrpheusPipeline(OrpheusConfig cfg)
@@ -54,11 +53,18 @@ public sealed unsafe class OrpheusPipeline : IDisposable
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
 
-        int[] prompt = new int[textTokenIds.Length + 3];
+        // Orpheus prompt frame (matches the reference orpheus_tts._format_prompt): the caller's text ids already
+        // carry the BOS token; wrap them as
+        //   [StartOfHuman] textTokens [EndOfText, EndOfHuman, StartOfAi, StartOfSpeech]
+        // The trailing StartOfAi + StartOfSpeech are what tell the model to begin emitting the audio-code stream —
+        // without them the model produces unconditioned/gibberish speech (verified vs the transformers reference).
+        int[] prompt = new int[textTokenIds.Length + 5];
         prompt[0] = _cfg.StartOfHuman;
         textTokenIds.CopyTo(prompt.AsSpan(1));
-        prompt[^2] = _cfg.EndOfText;
-        prompt[^1] = _cfg.EndOfHuman;
+        prompt[^4] = _cfg.EndOfText;
+        prompt[^3] = _cfg.EndOfHuman;
+        prompt[^2] = _cfg.StartOfAi;
+        prompt[^1] = _cfg.CodeStart;   // start-of-speech
 
         int cacheCap = Math.Min(_cfg.Llm.MaxPositionEmbeddings, prompt.Length + maxTokens + 8);
         using IKvCache cache = _backbone.CreateDecodeCache(cacheCap);
@@ -69,12 +75,29 @@ public sealed unsafe class OrpheusPipeline : IDisposable
         HashSet<int> seen = new();
         List<int> generated = new(maxTokens);
 
+        // The only tokens Orpheus validly emits are EndOfSpeech (128258) and the SNAC audio codes
+        // (AudioCodeBase 128266 …), all ≥ CodeStart. Restricting the sampler to [CodeStart, vocab) skips the
+        // ~128k orthographic-text logits (a small cut on the per-token host softmax+argsort). No quality change:
+        // the excluded ids are never part of a valid speech continuation.
+        // NOTE (perf pass 2026-07-14): the decode is GPU-compute-bound on the F32 backbone (~245 ms/token on a
+        // 3060), not host- or launch-bound — sampler restriction and a CUDA-graph decode both measured flat. The
+        // real lever is an F16 compute path in the shared GenericTransformer (benefits all LLM-backed audio
+        // models); scoped as a separate cross-cutting project. See docs/Checklists/AUDIO_TTS_BRINGUP_PLAN.md.
+        int sampleStart = _cfg.CodeStart;
+        int sampleCount = vocab - sampleStart;
+
+        bool prof = Environment.GetEnvironmentVariable("HARTSY_ORPHEUS_PROF") == "1";
+        double tLogits = 0, tSample = 0, tFwd = 0; int profSteps = 0;
+        Stopwatch psw = new();
+
         Tensor hidden = _backbone.Forward(backend, prompt, batch: 1, posStart: 0, cache);
         for (int step = 0; step < maxTokens; step++)
         {
             Tensor last = SliceLastFrame(hidden, _cfg.Llm.HiddenSize);
             hidden.Dispose();
+            if (prof) { backend.Sync(); psw.Restart(); }
             Tensor logitsT = _backbone.ProjectLogits(backend, last, batch: 1, t: 1);
+            if (prof) { backend.Sync(); tLogits += psw.Elapsed.TotalMilliseconds; psw.Restart(); }
             last.Dispose();
 
             Span<float> logits = new((void*)logitsT.DataPointer, vocab);
@@ -82,27 +105,24 @@ public sealed unsafe class OrpheusPipeline : IDisposable
                 foreach (int tok in seen)
                     logits[tok] = logits[tok] > 0 ? logits[tok] / penalty : logits[tok] * penalty;
 
-            int next = NucleusSampler.Draw(logits, vocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
+            int next = sampleStart + NucleusSampler.Draw(logits.Slice(sampleStart, sampleCount), sampleCount,
+                _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
             logitsT.Dispose();
+            if (prof) { tSample += psw.Elapsed.TotalMilliseconds; }
 
-            if (next == _cfg.EndOfSpeech) { if (_dbg) Logs.Info($"[Orpheus dbg] STOP EndOfSpeech at step {step}, generated={generated.Count}"); break; }
+            if (next == _cfg.EndOfSpeech) break;
             generated.Add(next);
             seen.Add(next);
             if (progress != null && (step & 63) == 0) progress(new GenerationProgress(step, maxTokens, sw.Elapsed.TotalMilliseconds));
 
-            int[] step1 = [next];
-            hidden = _backbone.Forward(backend, step1, batch: 1, posStart: cache.CurrentLength, cache);
+            if (prof) { backend.Sync(); psw.Restart(); }
+            hidden = _backbone.Forward(backend, [next], batch: 1, posStart: cache.CurrentLength, cache);
+            if (prof) { backend.Sync(); tFwd += psw.Elapsed.TotalMilliseconds; profSteps++; }
             if (cache.CurrentLength >= cacheCap - 2) break;
         }
-        hidden.Dispose();
+        if (prof && profSteps > 0)
+            Logs.Info($"[Orpheus prof] {profSteps} steps: backbone-fwd {tFwd / profSteps:0.0}ms/tok, lm_head {tLogits / profSteps:0.0}ms/tok, sample {tSample / profSteps:0.0}ms/tok");
 
-        if (_dbg)
-        {
-            int inRange = generated.Count(g => g >= _cfg.AudioCodeBase && g < _cfg.AudioCodeBase + 7 * _cfg.CodebookSize);
-            Logs.Info($"[Orpheus dbg] total generated={generated.Count}, in-audio-range={inRange}, AudioCodeBase={_cfg.AudioCodeBase}, EndOfSpeech={_cfg.EndOfSpeech}");
-            Logs.Info($"[Orpheus dbg] first 40 tokens: {string.Join(",", generated.Take(40))}");
-            Logs.Info($"[Orpheus dbg] prompt frame: SOH={_cfg.StartOfHuman} EOT={_cfg.EndOfText} EOH={_cfg.EndOfHuman}, textTokens={textTokenIds.Length}, first text ids: {string.Join(",", textTokenIds.ToArray().Take(12))}");
-        }
         int[] codes = OrpheusCodeFrames.ExtractAudioCodes(generated, _cfg.CodeStart, _cfg.EndOfSpeech, _cfg.TokensPerFrame);
         int groups = codes.Length / _cfg.TokensPerFrame;
         if (groups == 0)

@@ -66,7 +66,9 @@ public sealed unsafe class MatrixGame3ActionModule
         {
             _mouseMlp1W = w[$"{prefix}.mouse_mlp.0.weight"]; w.TryGetValue($"{prefix}.mouse_mlp.0.bias", out _mouseMlp1B);
             _mouseMlp2W = w[$"{prefix}.mouse_mlp.2.weight"]; w.TryGetValue($"{prefix}.mouse_mlp.2.bias", out _mouseMlp2B);
-            _mouseLnW = LoadF32(w, $"{prefix}.mouse_mlp.3.weight"); w.TryGetValue($"{prefix}.mouse_mlp.3.bias", out _mouseLnB);
+            // Both LayerNorm affine tensors must be F32: AffineBroadcastLastDim rejects a bf16 scale/shift (the bias was
+            // loaded as-is → bf16 → NotSupported on the GPU action path; the CPU parity run cast everything to F32 first).
+            _mouseLnW = LoadF32(w, $"{prefix}.mouse_mlp.3.weight"); _mouseLnB = LoadF32Opt(w, $"{prefix}.mouse_mlp.3.bias");
             _tQkvW = w[$"{prefix}.t_qkv.weight"]; w.TryGetValue($"{prefix}.t_qkv.bias", out _tQkvB);
             _projMouseW = w[$"{prefix}.proj_mouse.weight"]; w.TryGetValue($"{prefix}.proj_mouse.bias", out _projMouseB);
             _imgQNorm = LoadF32(w, $"{prefix}.img_attn_q_norm.weight");
@@ -143,19 +145,16 @@ public sealed unsafe class MatrixGame3ActionModule
     private void MouseStream(IBackend backend, Tensor hidden, int tt, int gh, int gw, ReadOnlySpan<int> frameIndices, float[] mouseWin)
     {
         int sp = gh * gw, winFloats = WindowLength * _mouseDim;
-        float* hp = (float*)hidden.DataPointer;
 
         // Per-token MLP input: [token features (dim) | grouped mouse window (winFloats)] — sequence axis is the frame.
+        // Device concat (the old host loop read the [S, dim] hidden D2H every mouse block). The tiny window array is
+        // uploaded once into a device tensor.
+        Tensor mouseWinT = new Tensor(new TensorShape(tt, winFloats), DType.F32);
+        fixed (float* mw = mouseWin)
+            Buffer.MemoryCopy(mw, (float*)mouseWinT.DataPointer, (long)tt * winFloats * 4, (long)tt * winFloats * 4);
         Tensor mlpIn = new Tensor(new TensorShape(tt * sp, _imgDim + winFloats), DType.F32);
-        float* mip = (float*)mlpIn.DataPointer;
-        for (int f = 0; f < tt; f++)
-            for (int s = 0; s < sp; s++)
-            {
-                long token = (long)f * sp + s;
-                Buffer.MemoryCopy(hp + token * _imgDim, mip + token * (_imgDim + winFloats), (long)_imgDim * 4, (long)_imgDim * 4);
-                for (int wf = 0; wf < winFloats; wf++)
-                    mip[token * (_imgDim + winFloats) + _imgDim + wf] = mouseWin[f * winFloats + wf];
-            }
+        backend.Mg3MouseMlpConcat(mlpIn, hidden, mouseWinT, tt, sp, _imgDim, winFloats);
+        mouseWinT.Dispose();
 
         Tensor h1 = new Tensor(new TensorShape(tt * sp, _streamDim), DType.F32);
         backend.Linear(h1, mlpIn, _mouseMlp1W!, _mouseMlp1B);
@@ -172,14 +171,14 @@ public sealed unsafe class MatrixGame3ActionModule
 
         // Temporal self-attention per spatial position, batched as [sp, heads, tt, headDim].
         (Tensor cos, Tensor sin) = _rope.BuildCosSin(frameIndices, gh, gw);
-        Tensor q = SplitQkvTemporal(qkv, tt, sp, 0);
-        Tensor k = SplitQkvTemporal(qkv, tt, sp, 1);
-        Tensor v = SplitQkvTemporal(qkv, tt, sp, 2);
+        Tensor q = SplitQkvTemporal(backend, qkv, tt, sp, 0);
+        Tensor k = SplitQkvTemporal(backend, qkv, tt, sp, 1);
+        Tensor v = SplitQkvTemporal(backend, qkv, tt, sp, 2);
         qkv.Dispose();
         RmsNormHeads(backend, q, _imgQNorm!);
         RmsNormHeads(backend, k, _imgKNorm!);
-        ApplyRopeBatched(q, cos, sin, tt, gh, gw);
-        ApplyRopeBatched(k, cos, sin, tt, gh, gw);
+        ApplyRopeBatched(backend, q, cos, sin, tt, gh, gw);
+        ApplyRopeBatched(backend, k, cos, sin, tt, gh, gw);
         cos.Dispose(); sin.Dispose();
 
         Tensor attn = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
@@ -188,7 +187,7 @@ public sealed unsafe class MatrixGame3ActionModule
         backend.ScaledDotProductAttention(attn, q, k, v, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
         q.Dispose(); k.Dispose(); v.Dispose();
 
-        Tensor flat = MergeTemporal(attn, tt, sp);
+        Tensor flat = MergeTemporal(backend, attn, tt, sp);
         attn.Dispose();
         Tensor projected = new Tensor(new TensorShape(tt * sp, _imgDim), DType.F32);
         backend.Linear(projected, flat, _projMouseW!, _projMouseB);
@@ -227,36 +226,27 @@ public sealed unsafe class MatrixGame3ActionModule
         // Q per spatial position over frames; K/V broadcast across positions. RoPE rotates the temporal axis only
         // (grid 1×1 — keys carry no spatial coordinate because they are shared by every position).
         (Tensor cosT, Tensor sinT) = _rope.BuildCosSin(frameIndices, 1, 1);
-        Tensor q = SplitQkvTemporal(qFlat, tt, sp, 0, stride: 1);
+        Tensor q = SplitQkvTemporal(backend, qFlat, tt, sp, 0, stride: 1);
         qFlat.Dispose();
         RmsNormHeads(backend, q, _keyQNorm!);
-        ApplyRopeBatched(q, cosT, sinT, tt, 1, 1, broadcastSpatial: true);
+        ApplyRopeBatched(backend, q, cosT, sinT, tt, 1, 1, broadcastSpatial: true);
 
-        Tensor k = new Tensor(new TensorShape([1L, _heads, tt, _headDim]), DType.F32);
-        Tensor v = new Tensor(new TensorShape([1L, _heads, tt, _headDim]), DType.F32);
-        float* kvp = (float*)kv.DataPointer;
-        float* kp = (float*)k.DataPointer;
-        float* vp = (float*)v.DataPointer;
-        for (int f = 0; f < tt; f++)
-            for (int h = 0; h < _heads; h++)
-                for (int d = 0; d < _headDim; d++)
-                {
-                    kp[((long)h * tt + f) * _headDim + d] = kvp[(long)f * 2 * _streamDim + h * _headDim + d];
-                    vp[((long)h * tt + f) * _headDim + d] = kvp[(long)f * 2 * _streamDim + _streamDim + h * _headDim + d];
-                }
+        // K/V are shared by every spatial position → expand kv[tt, 2·streamDim] directly to [sp, heads, tt, headDim]
+        // (device). RMS-norm + rope on the broadcast K are per-(head,frame) so all sp rows stay identical → equals the
+        // old norm-then-broadcast, without the host K/V build loop or BroadcastBatch.
+        Tensor k = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
+        Tensor v = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
+        backend.Mg3KvExpand(k, v, kv, sp, _heads, tt, _headDim);
         kv.Dispose();
         RmsNormHeads(backend, k, _keyKNorm!);
-        ApplyRopeBatched(k, cosT, sinT, tt, 1, 1, broadcastSpatial: true);
+        ApplyRopeBatched(backend, k, cosT, sinT, tt, 1, 1, broadcastSpatial: true);
         cosT.Dispose(); sinT.Dispose();
 
-        // Broadcast K/V to every spatial position.
-        Tensor kB = BroadcastBatch(k, sp, tt); k.Dispose();
-        Tensor vB = BroadcastBatch(v, sp, tt); v.Dispose();
         Tensor attn = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
-        backend.ScaledDotProductAttention(attn, q, kB, vB, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
-        q.Dispose(); kB.Dispose(); vB.Dispose();
+        backend.ScaledDotProductAttention(attn, q, k, v, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
+        q.Dispose(); k.Dispose(); v.Dispose();
 
-        Tensor flat = MergeTemporal(attn, tt, sp);
+        Tensor flat = MergeTemporal(backend, attn, tt, sp);
         attn.Dispose();
         Tensor projected = new Tensor(new TensorShape(tt * sp, _imgDim), DType.F32);
         backend.Linear(projected, flat, _projKbdW!, _projKbdB);
@@ -265,39 +255,21 @@ public sealed unsafe class MatrixGame3ActionModule
         projected.Dispose();
     }
 
-    /// <summary>Token rows <c>[(f·sp + s), stride·streamDim]</c> → batched temporal sequences <c>[sp, heads, tt, headDim]</c>, taking QKV slot <paramref name="part"/>.</summary>
-    private Tensor SplitQkvTemporal(Tensor qkv, int tt, int sp, int part, int stride = 3)
+    /// <summary>Token rows <c>[(f·sp + s), stride·streamDim]</c> → batched temporal sequences <c>[sp, heads, tt, headDim]</c>,
+    /// taking QKV slot <paramref name="part"/>. Device-resident via <see cref="IBackend.Mg3SplitQkvTemporal"/> (the host
+    /// pointer-loop was a dominant per-block cost).</summary>
+    private Tensor SplitQkvTemporal(IBackend backend, Tensor qkv, int tt, int sp, int part, int stride = 3)
     {
         Tensor o = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
-        float* src = (float*)qkv.DataPointer;
-        float* dst = (float*)o.DataPointer;
-        int rowDim = stride * _streamDim;
-        for (int f = 0; f < tt; f++)
-            for (int s = 0; s < sp; s++)
-            {
-                long token = (long)f * sp + s;
-                for (int h = 0; h < _heads; h++)
-                    Buffer.MemoryCopy(
-                        src + token * rowDim + part * _streamDim + h * _headDim,
-                        dst + (((long)s * _heads + h) * tt + f) * _headDim,
-                        (long)_headDim * 4, (long)_headDim * 4);
-            }
+        backend.Mg3SplitQkvTemporal(o, qkv, tt, sp, _heads, _headDim, part, stride);
         return o;
     }
 
-    /// <summary>Back from <c>[sp, heads, tt, headDim]</c> to token rows <c>[tt·sp, streamDim]</c>.</summary>
-    private Tensor MergeTemporal(Tensor attn, int tt, int sp)
+    /// <summary>Back from <c>[sp, heads, tt, headDim]</c> to token rows <c>[tt·sp, streamDim]</c>, device-resident.</summary>
+    private Tensor MergeTemporal(IBackend backend, Tensor attn, int tt, int sp)
     {
         Tensor o = new Tensor(new TensorShape(tt * sp, _streamDim), DType.F32);
-        float* src = (float*)attn.DataPointer;
-        float* dst = (float*)o.DataPointer;
-        for (int s = 0; s < sp; s++)
-            for (int h = 0; h < _heads; h++)
-                for (int f = 0; f < tt; f++)
-                    Buffer.MemoryCopy(
-                        src + (((long)s * _heads + h) * tt + f) * _headDim,
-                        dst + ((long)f * sp + s) * _streamDim + h * _headDim,
-                        (long)_headDim * 4, (long)_headDim * 4);
+        backend.Mg3MergeTemporal(o, attn, tt, sp, _heads, _headDim);
         return o;
     }
 
@@ -306,42 +278,13 @@ public sealed unsafe class MatrixGame3ActionModule
     private void RmsNormHeads(IBackend backend, Tensor x, Tensor weight)
         => backend.RmsNorm(x, x, weight, _eps);
 
-    /// <summary>Rotates <c>[sp(or 1), heads, tt, headDim]</c> with cos/sin built over the (frames, gh, gw) grid: the
-    /// sequence at spatial position s uses the grid row (f, h(s), w(s)).</summary>
-    private void ApplyRopeBatched(Tensor x, Tensor cos, Tensor sin, int tt, int gh, int gw, bool broadcastSpatial = false)
+    /// <summary>Rotates <c>[sp, heads, tt, headDim]</c> with cos/sin built over the (frames, gh, gw) grid: the sequence at
+    /// spatial position s uses grid row <c>f·gh·gw + s</c> (or <c>f</c> when <paramref name="broadcastSpatial"/>).
+    /// Device-resident via <see cref="IBackend.Mg3RopeBatched"/>.</summary>
+    private void ApplyRopeBatched(IBackend backend, Tensor x, Tensor cos, Tensor sin, int tt, int gh, int gw, bool broadcastSpatial = false)
     {
         int sp = (int)x.Shape[0];
-        float* xp = (float*)x.DataPointer;
-        float* cp = (float*)cos.DataPointer;
-        float* spn = (float*)sin.DataPointer;
-        int pairs = _headDim / 2;
-        for (int s = 0; s < sp; s++)
-            for (int h = 0; h < _heads; h++)
-                for (int f = 0; f < tt; f++)
-                {
-                    long gridRow = broadcastSpatial ? f : (long)f * gh * gw + s;
-                    long cOff = gridRow * _headDim;
-                    long xOff = (((long)s * _heads + h) * tt + f) * _headDim;
-                    for (int i = 0; i < pairs; i++)
-                    {
-                        int i0 = 2 * i;
-                        float re = xp[xOff + i0], im = xp[xOff + i0 + 1];
-                        float c = cp[cOff + i0], sn = spn[cOff + i0];
-                        xp[xOff + i0] = re * c - im * sn;
-                        xp[xOff + i0 + 1] = re * sn + im * c;
-                    }
-                }
-    }
-
-    private Tensor BroadcastBatch(Tensor x, int batch, int tt)
-    {
-        Tensor o = new Tensor(new TensorShape([(long)batch, _heads, tt, _headDim]), DType.F32);
-        long per = (long)_heads * tt * _headDim;
-        float* src = (float*)x.DataPointer;
-        float* dst = (float*)o.DataPointer;
-        for (int b = 0; b < batch; b++)
-            Buffer.MemoryCopy(src, dst + b * per, per * 4, per * 4);
-        return o;
+        backend.Mg3RopeBatched(x, cos, sin, sp, _heads, tt, _headDim, gh, gw, broadcastSpatial);
     }
 
     /// <summary>Affine LayerNorm over the trailing <paramref name="dim"/> of <paramref name="x"/> <c>[rows, dim]</c>,
@@ -354,4 +297,5 @@ public sealed unsafe class MatrixGame3ActionModule
     }
 
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
+    private static Tensor? LoadF32Opt(IReadOnlyDictionary<string, Tensor> w, string k) => w.TryGetValue(k, out Tensor? t) ? (t.DType == DType.F32 ? t : t.CastTo(DType.F32)) : null;
 }

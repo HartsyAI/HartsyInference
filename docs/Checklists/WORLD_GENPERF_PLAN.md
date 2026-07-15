@@ -234,6 +234,57 @@ MG2 25 FPS @540p / MG3 ≥10 FPS @720p on a 4090).
 > `MatrixGame2GenPerfTests`) + phase probe. Method rule held throughout: correctness before perf. Weights:
 > `/tmp/mg3_ckpt/base_model`.
 
+> ### ✅ Round 10 (2026-07-14) — Matrix-Game 3.0 real-weight PERF: backbone 9.8× via GPU per-head RoPE; ActionModule is next
+> Correctness gate satisfied (Round 9), so a real-weight genperf run on the 4090 (`MatrixGame3GenPerfTests`, gated
+> `MG3_PERF=1`+`MG3_DIT`; shape 5 latent frames × 32² = 1280 tokens, 30 blocks / 15 action). **Phase-probe first**
+> (`MG3_NOACTION`, `MG3_SIGMA0` toggles) found the wall was NOT compute: the backbone alone was **2052 ms**, but with
+> sigma_theta=0 (shared-cos GPU rope) it dropped to **151 ms** → the MG3 **sigma_theta per-head RoPE ran as a HOST loop**
+> (`WanRope.ApplyRotary` rank-3 branch; the rank-2 GPU `WanRopeInterleaved` only handles shared cos). **Fix: new
+> `wan_rope_interleaved_perhead` NVRTC kernel** (cos/sin `[heads,S,headDim]`, angle at `(h·S+s)·headDim+2i`) wired
+> through `IBackend.WanRopeInterleavedPerHead` (default host impl = the old loop) + `CudaBackend` override; `WanVideoBlock`
+> uses it for the rank-3 path → qn/kn stay device-resident. **Backbone 2052 → 209 ms (9.8×)**, kernel VERIFIED bit-exact
+> (GPU Stage-A block0 corr 0.99999863 == the host-loop 0.99999861). **Full pipeline (F32, action) 2609 → 1283 ms (2.0×).**
+>
+> **Two GPU-only ActionModule bugs the perf run surfaced** (the action parity had only run on CPU): `mouse_mlp.3.bias`
+> was loaded bf16 → `AffineBroadcastLastDim` NotSupported (now `LoadF32Opt`). **F16 FFN measured a NET LOSS here** (1362
+> vs F32 1255 ms) — the forward is host-bound, not FFN-bandwidth-bound, and MG3's high-gain stream carries F16 precision
+> risk → MG3 reverted to **F32 FFN** (unlike MG2; revisit after the ActionModule port). Regression clean (Wan+MG 57/57,
+> CPU action parity 1/1).
+>
+> **The remaining bottleneck is the ActionModule** (full 1283 − backbone 209 ≈ **1074 ms of host loops** across 15
+> blocks): `SplitQkvTemporal` / `MergeTemporal` / `ApplyRopeBatched` / the keyboard K-V gather / `BroadcastBatch` are all
+> host `DataPointer` pointer-loops over the temporal-batched `[sp, heads, tt, headDim]` layout (Round-4 ported only the
+> safe existing-op loops; these layout kernels were deferred). Next round = port them to device (Oasis-attention-island
+> class: a batched split/merge permute + the per-head rope already exists) + numerically verify the GPU action path
+> (only CPU-verified so far). Then F16 FFN + CUDA-graph become worthwhile. Weights `/tmp/mg3_ckpt/base_model`.
+
+> ### ✅ Round 11 (2026-07-14) — Matrix-Game 3.0 ActionModule GPU port → **11.5× cumulative (2609 → 226 ms), 4.4 fwd/s**
+> The Round-10 remaining bottleneck (the ActionModule's ~1074 ms of host pointer-loops across 15 blocks) is now
+> device-resident. **5 new NVRTC kernels** (`native/cuda/dit/mg3_action.cu`): `mg3_split_qkv_temporal` /
+> `mg3_merge_temporal` / `mg3_rope_batched` / `mg3_kv_expand` (the temporal-batched `[sp,heads,tt,headDim]` split/merge/
+> rope + keyboard K-V broadcast-expand) + `mg3_mouse_mlp_concat` (the mouse MLP input `[hidden | broadcast window]`).
+> Wired through 6 new `IBackend` methods (default host impl == the exact old loops → **CPU byte-identical, parity held
+> throughout**) + `CudaBackend` overrides; `MatrixGame3ActionModule` calls them instead of the host loops (deleted
+> `BroadcastBatch` — the keyboard K/V now expand straight to `[sp,…]`, RMS-norm + rope on the broadcast rows equal the
+> old norm-then-broadcast). **GPU action parity UNCHANGED (both corr 0.99995025, bit-identical to the host baseline).**
+>
+> **Wins, in order:** the 4 attention-rearrange kernels: full **1283 → 570 ms (2.25×)**; then the mouse-MLP concat kernel
+> (the host loop read the `[1280,3072]` `hidden` D2H every mouse block → a ~225 MB round-trip × 15 blocks): **570 → 226
+> ms (2.5×)**. Backbone-only is **222 ms** and full-with-action **226 ms** → the ActionModule now adds **~4 ms** (was
+> 1074) — fully device-resident. **Cumulative MG3 DiT forward: 2609 → 226 ms = 11.5× (0.4 → 4.4 fwd/s)**, parity
+> preserved end-to-end. Regression clean (Wan+MG 57/57, CPU action parity 1/1, full solution builds incl Vulkan).
+>
+> **The floor is now the ~226 ms backbone** (30 Wan blocks). **Push-further probe (2026-07-14):** a tiny 16-token /
+> 30-block forward still costs **45 ms** → the backbone decomposes to ~13 ms weight-read (13 GB bf16 read every forward)
+> + ~30 ms launch/glue + ~180 ms compute (at 1280 tok). **F16 FFN re-tested GPU-bound = still a NET LOSS** (276 vs 226 ms:
+> the F16 GEMM ≈ the existing TF32-tensor-core GEMM, so the CastToF16/F32 boundaries + output perturbation dominate) →
+> stays F32. **CUDA-graph would remove ~30 ms of launch overhead (~1.2× at this small shape) but is the WRONG lever for
+> the production target:** at the real 720p segment (44×80 latent × 10-15 frames ≈ 13 k tokens) the forward is
+> compute-bound and launch overhead is negligible. So the backbone is at its practical floor for this engine; remaining
+> gains (fp8 weights to halve the 13 GB weight-read, better small-GEMM occupancy) are large efforts with poor ROI.
+> **MG3 perf is DONE at 11.5× / ~226 ms / 4.4 fwd/s (5f×32²).** Next real work = benchmark at the production 720p shape
+> to get the true interactive FPS, and (separately) the MG3 AR pipeline (`MatrixGame3Pipeline`) end-to-end.
+
 ## Per-model perf-run plan
 
 ### DIAMOND — RUN NOW (tiny, verified, ungated) — the graph-capture proof case

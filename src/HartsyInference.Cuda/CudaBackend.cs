@@ -171,6 +171,11 @@ public sealed class CudaBackend : IBackend
     /// <summary>Opt-in flag for the hand-written tensor-core HGEMM in the F16 Linear path. Defaults to <c>false</c>. The kernel is validated bit-exact against cuBLAS (<c>TensorCoreGemmTests</c>) but is the unoptimized one-warp-per-tile baseline, so it is opt-in pending a perf comparison against cuBLAS on the target GPU. Only dispatches when operands and output are F16 and dimensions are aligned (M%16, N%8, K%16 == 0); otherwise falls through to cuBLAS.</summary>
     public bool EnableTensorCoreGemm { get; set; }
 
+    /// <summary>Use the fused dense BF16/F16 decode GEMV kernel for small-M (≤8) F32-activation matmuls instead of
+    /// cuBLAS GemmEx (which is inefficient at M=1). On by default — it's faster and at least as accurate as the
+    /// cuBLAS BF16 path (activations stay F32). Set <c>HARTSY_BF16_GEMV=0</c> to fall back to cuBLAS for A/B.</summary>
+    public bool EnableBf16Gemv { get; set; } = Environment.GetEnvironmentVariable("HARTSY_BF16_GEMV") != "0";
+
     /// <summary>Lazily-initialized tensor-core HGEMM launcher. Requires PTX directory and SM 8.0+.</summary>
     public TensorCoreGemm TensorCoreGemm
     {
@@ -573,6 +578,24 @@ public sealed class CudaBackend : IBackend
                 if (weight.DType == DType.Q5_K && K % 256 == 0)
                 {
                     _kernels!.LaunchMulMatVecQ5KF32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
+                // Dense 16-bit-float weights (BF16/F16 checkpoints, e.g. Orpheus and most audio LMs). cuBLAS
+                // GemmEx is inefficient at M=1; the fused GEMV reads each weight row once with an F32 accumulate
+                // (activation stays F32 — at least as accurate as the cuBLAS BF16 cast). On by default; set
+                // HARTSY_BF16_GEMV=0 to fall back to cuBLAS.
+                if (EnableBf16Gemv && _kernels!.HasFloatGemv && weight.DType == DType.BF16)
+                {
+                    _kernels!.LaunchMulMatVecBf16F32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
+                if (EnableBf16Gemv && _kernels!.HasFloatGemv && weight.DType == DType.F16)
+                {
+                    _kernels!.LaunchMulMatVecF16F32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
                     GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                     cachedOutput = true;
                     return;
@@ -2023,6 +2046,121 @@ public sealed class CudaBackend : IBackend
             // (FreeDevice skips them if they are cached activations).
             GpuTransferHelper.FreeDevice(pCos);
             GpuTransferHelper.FreeDevice(pSin);
+        }
+    }
+
+    /// <summary>Per-head interleaved RoPE (Matrix-Game 3.0 sigma_theta): cos/sin are <c>[heads, S, headDim]</c>. Ported
+    /// off the host loop that dominated the MG3 backbone (~1.9 s of a 2.05 s forward → ~0.15 s).</summary>
+    public unsafe void WanRopeInterleavedPerHead(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("RopeInterleavedPerHead");
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("CUDA WanRopeInterleavedPerHead supports F32 x/cos/sin.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        ulong pX = 0, pCos = 0, pSin = 0;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);
+            pCos = GpuTransferHelper.CopyToDevice(cos);
+            pSin = GpuTransferHelper.CopyToDevice(sin);
+            _kernels!.LaunchWanRopeInterleavedPerHead(pX, pCos, pSin, seqLen, heads, headDim, _stream.Handle);
+            GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pCos);
+            GpuTransferHelper.FreeDevice(pSin);
+        }
+    }
+
+    // ── Matrix-Game 3.0 ActionModule temporal-batched rearranges (GPU port of the host pointer-loops) ──
+
+    public void Mg3SplitQkvTemporal(Tensor outT, Tensor qkv, int tt, int sp, int heads, int headDim, int part, int stride)
+    {
+        if (outT.DType != DType.F32 || qkv.DType != DType.F32) throw new NotSupportedException("CUDA Mg3SplitQkvTemporal F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pIn = 0; bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(qkv);
+            nuint outBytes = GpuTransferHelper.ByteSize(outT);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchMg3SplitQkvTemporal(pIn, pOut, tt, sp, heads, headDim, part, stride, _stream.Handle);
+            GpuTransferHelper.CacheActivation(outT, pOut, outBytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
+    }
+
+    public void Mg3MergeTemporal(Tensor outT, Tensor attn, int tt, int sp, int heads, int headDim)
+    {
+        if (outT.DType != DType.F32 || attn.DType != DType.F32) throw new NotSupportedException("CUDA Mg3MergeTemporal F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pIn = 0; bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(attn);
+            nuint outBytes = GpuTransferHelper.ByteSize(outT);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchMg3MergeTemporal(pIn, pOut, tt, sp, heads, headDim, _stream.Handle);
+            GpuTransferHelper.CacheActivation(outT, pOut, outBytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
+    }
+
+    public void Mg3RopeBatched(Tensor x, Tensor cos, Tensor sin, int sp, int heads, int tt, int headDim, int gh, int gw, bool broadcastSpatial)
+    {
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32) throw new NotSupportedException("CUDA Mg3RopeBatched F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pX = 0, pCos = 0, pSin = 0;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);
+            pCos = GpuTransferHelper.CopyToDevice(cos);
+            pSin = GpuTransferHelper.CopyToDevice(sin);
+            _kernels!.LaunchMg3RopeBatched(pX, pCos, pSin, sp, heads, tt, headDim, gh, gw, broadcastSpatial ? 1 : 0, _stream.Handle);
+            GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));
+        }
+        finally { GpuTransferHelper.FreeDevice(pCos); GpuTransferHelper.FreeDevice(pSin); }
+    }
+
+    public void Mg3MouseMlpConcat(Tensor outT, Tensor hidden, Tensor mouseWin, int tt, int sp, int imgDim, int winFloats)
+    {
+        if (outT.DType != DType.F32 || hidden.DType != DType.F32 || mouseWin.DType != DType.F32) throw new NotSupportedException("CUDA Mg3MouseMlpConcat F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pHidden = 0, pWin = 0; bool cached = false;
+        try
+        {
+            pHidden = GpuTransferHelper.CopyToDevice(hidden);
+            pWin = GpuTransferHelper.CopyToDevice(mouseWin);
+            nuint outBytes = GpuTransferHelper.ByteSize(outT);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchMg3MouseMlpConcat(pHidden, pWin, pOut, tt, sp, imgDim, winFloats, _stream.Handle);
+            GpuTransferHelper.CacheActivation(outT, pOut, outBytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pHidden); GpuTransferHelper.FreeDevice(pWin); }
+    }
+
+    public void Mg3KvExpand(Tensor kOut, Tensor vOut, Tensor kv, int sp, int heads, int tt, int headDim)
+    {
+        if (kOut.DType != DType.F32 || vOut.DType != DType.F32 || kv.DType != DType.F32) throw new NotSupportedException("CUDA Mg3KvExpand F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pKv = 0, pK = 0, pV = 0; bool cachedK = false, cachedV = false;
+        try
+        {
+            pKv = GpuTransferHelper.CopyToDevice(kv);
+            nuint bytes = GpuTransferHelper.ByteSize(kOut);
+            pK = GpuTransferHelper.AllocateDevice(bytes);
+            pV = GpuTransferHelper.AllocateDevice(bytes);
+            _kernels!.LaunchMg3KvExpand(pKv, pK, pV, sp, heads, tt, headDim, _stream.Handle);
+            GpuTransferHelper.CacheActivation(kOut, pK, bytes); cachedK = true;
+            GpuTransferHelper.CacheActivation(vOut, pV, bytes); cachedV = true;
+        }
+        finally
+        {
+            if (!cachedK) GpuTransferHelper.FreeDevice(pK);
+            if (!cachedV) GpuTransferHelper.FreeDevice(pV);
+            GpuTransferHelper.FreeDevice(pKv);
         }
     }
 

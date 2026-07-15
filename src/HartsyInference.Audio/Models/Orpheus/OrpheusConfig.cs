@@ -28,6 +28,10 @@ public sealed record OrpheusConfig
     // ── Orpheus special / framing token IDs (canopylabs/orpheus-3b-0.1-ft) ──
     /// <summary>Marks the start of the audio-code span; parse keeps everything after the last occurrence.</summary>
     public int CodeStart { get; init; } = 128_257;
+    /// <summary>Start-of-AI-turn token appended to the prompt (before <see cref="CodeStart"/>) to hand the turn
+    /// to the model and begin the audio-code stream. Reference <c>orpheus_tts</c> end-tokens are
+    /// <c>[EndOfText, EndOfHuman, StartOfAi, CodeStart]</c>.</summary>
+    public int StartOfAi { get; init; } = 128_261;
     /// <summary>End-of-speech — the AR stop token.</summary>
     public int EndOfSpeech { get; init; } = 128_258;
     public int StartOfHuman { get; init; } = 128_259;

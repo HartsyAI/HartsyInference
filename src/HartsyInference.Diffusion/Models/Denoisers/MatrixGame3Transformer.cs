@@ -42,7 +42,9 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
         HashSet<int>? actionSet = config.ActionBlocks is null ? null : [.. config.ActionBlocks];
         for (int i = 0; i < config.NumLayers; i++)
         {
-            _blocks[i] = new WanVideoBlock(wan, crossAttnNorm: true) { CrossAttnResidualNormed = true };  // use_memory=True → destructive norm3
+            // MG3 keeps the FFN F32: measured a net loss both host-bound (cast overhead) AND GPU-bound (F16 GEMM ≈ the
+            // existing TF32 GEMM, cast overhead + output perturbation remain). Destructive norm3 = use_memory cross-residual.
+            _blocks[i] = new WanVideoBlock(wan, crossAttnNorm: true) { CrossAttnResidualNormed = true };
             _camInjectors[i] = new MatrixGame3CamInjector(config.InnerDim);
             if (actionSet is null || actionSet.Contains(i))
                 _actionModules[i] = new MatrixGame3ActionModule(config.InnerDim,

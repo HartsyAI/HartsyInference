@@ -134,9 +134,12 @@ public sealed unsafe class GenericTransformer : IDisposable
         ThrowIfDisposed();
         Tensor embedRaw = w[$"{prefix}.embed_tokens.weight"];
         _embed = EnsureF32(embedRaw);
-        // Keep the quantized embed for the tied lm_head so the decode projection runs the fused quant GEMV
-        // instead of a 622 MB-per-token F32 GEMM (Qwen 151k×1024 head was ~28% of decode time).
-        if (_cfg.TieWordEmbeddings && embedRaw.DType.IsQuantized) _lmHeadQuant = embedRaw;
+        // Keep the raw (quantized OR 16-bit-float) tied embed for the lm_head so the decode projection runs the
+        // fused GEMV over the native weight instead of a full-size F32 GEMM. For a large vocab this is the decode
+        // bottleneck: Orpheus's 156,940×3072 head was 221 ms/token (~90% of decode) as an F32 GEMM vs ~a few ms
+        // as a BF16 fused GEMV. (Qwen 151k×1024 quant head was ~28% of decode time — same fix, quant dtype.)
+        if (_cfg.TieWordEmbeddings && (embedRaw.DType.IsQuantized || embedRaw.DType == DType.BF16 || embedRaw.DType == DType.F16))
+            _lmHeadQuant = embedRaw;
         if (_cfg.AbsolutePositionEmbeddings) _posEmbed = EnsureF32(w[$"{prefix}.embed_positions.weight"]);
         if (_cfg.EmbeddingLayerNorm)
         {

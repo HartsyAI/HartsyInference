@@ -45,6 +45,8 @@ public sealed class CudaKernels : IDisposable
 
     // ── DiT glue Modules ─────────────────────────────────────────────────
     private readonly CudaModule _ditF32Module;
+    private readonly CudaModule _mg3ActionModule;
+    private readonly nint _mg3SplitQkvTemporalF32, _mg3MergeTemporalF32, _mg3RopeBatchedF32, _mg3KvExpandF32, _mg3MouseMlpConcatF32;
 
     // ── Audio conv Module + handles (codec/TTS Conv1d + ConvTranspose1d, F32) ─
     private readonly CudaModule _audioConvF32Module;
@@ -143,6 +145,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _transpose2dF16;
     private readonly nint _permute0213F16;
     private readonly nint _wanRopeInterleaved;
+    private readonly nint _wanRopeInterleavedPerHead;
     private readonly nint _wanVaeExtractFrame;
     private readonly nint _wanVaeWriteFrame;
     private readonly nint _wanVaeBuildPadded;
@@ -250,6 +253,14 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _mulMatVecQ6KF32;
     private readonly CudaModule _mulMatVecQ8_0Module;
     private readonly nint _mulMatVecQ8_0F32;
+    // Dense 16-bit-float GEMV (the BF16/F16 counterpart of the quant GEMVs, for checkpoints that ship
+    // float16 weights — Orpheus/most audio LMs. cuBLAS GemmEx is inefficient at M=1). Loaded best-effort: a
+    // load failure disables this fused path (callers fall back to cuBLAS) rather than breaking the backend.
+    private CudaModule? _mulMatVecF16Bf16Module;
+    private nint _mulMatVecBf16F32;
+    private nint _mulMatVecF16F32;
+    /// <summary>True when the dense BF16/F16 decode-GEMV kernels loaded successfully.</summary>
+    public bool HasFloatGemv { get; private set; }
     private readonly CudaModule _mulMatVecQ5_0Module;
     private readonly nint _mulMatVecQ5_0F32;
     private readonly CudaModule _mulMatVecQ4_0Module;
@@ -303,6 +314,7 @@ public sealed class CudaKernels : IDisposable
 
         _wanRopeModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "wan_rope.ptx"));
         _wanRopeInterleaved = _wanRopeModule.GetFunction("wan_rope_interleaved");
+        _wanRopeInterleavedPerHead = _wanRopeModule.GetFunction("wan_rope_interleaved_perhead");
 
         _wanVaeFramesModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "wan_vae_frames.ptx"));
         _wanVaeExtractFrame = _wanVaeFramesModule.GetFunction("wan_vae_extract_frame");
@@ -441,6 +453,13 @@ public sealed class CudaKernels : IDisposable
         _oasisAdaLnF32 = _ditF32Module.GetFunction("oasis_adaln_f32");
         _ditPixelQuantizeF32 = _ditF32Module.GetFunction("dit_pixel_quantize_f32");
 
+        _mg3ActionModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mg3_action.ptx"));
+        _mg3SplitQkvTemporalF32 = _mg3ActionModule.GetFunction("mg3_split_qkv_temporal_f32");
+        _mg3MergeTemporalF32 = _mg3ActionModule.GetFunction("mg3_merge_temporal_f32");
+        _mg3RopeBatchedF32 = _mg3ActionModule.GetFunction("mg3_rope_batched_f32");
+        _mg3KvExpandF32 = _mg3ActionModule.GetFunction("mg3_kv_expand_f32");
+        _mg3MouseMlpConcatF32 = _mg3ActionModule.GetFunction("mg3_mouse_mlp_concat_f32");
+
         // ── DiT glue (F16 I/O, F32 accumulate) — DiT F16 activation path ─
         _ditF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dit_f16.ptx"));
         _ditRmsNormF16 = _ditF16Module.GetFunction("dit_rmsnorm_f16");
@@ -518,6 +537,26 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ6KF32 = _mulMatVecQ6KModule.GetFunction("mul_mat_vec_q6k_f32");
         _mulMatVecQ8_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q8_0_f32.ptx"));
         _mulMatVecQ8_0F32 = _mulMatVecQ8_0Module.GetFunction("mul_mat_vec_q8_0_f32");
+        // On by default (HARTSY_BF16_GEMV=0 disables). The PTX targets sm_80 like the engine's other lm/world
+        // kernels, so it JITs on every GPU this engine already runs on; a genuine load failure is caught below
+        // and falls back to cuBLAS. This is a large decode win — see the lm_head GEMV note in GenericTransformer.
+        if (Environment.GetEnvironmentVariable("HARTSY_BF16_GEMV") != "0")
+        {
+            try
+            {
+                _mulMatVecF16Bf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_f16_bf16_f32.ptx"));
+                _mulMatVecBf16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_bf16_f32");
+                _mulMatVecF16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_f16_f32");
+                HasFloatGemv = true;
+            }
+            catch (Exception ex)
+            {
+                _mulMatVecF16Bf16Module?.Dispose();
+                _mulMatVecF16Bf16Module = null;
+                _mulMatVecBf16F32 = 0; _mulMatVecF16F32 = 0; HasFloatGemv = false;
+                HartsyInference.Core.Logging.Logs.Warning($"[Cuda] dense BF16/F16 decode GEMV kernel unavailable ({ex.Message}); using cuBLAS.");
+            }
+        }
         _mulMatVecQ5_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q5_0_f32.ptx"));
         _mulMatVecQ5_0F32 = _mulMatVecQ5_0Module.GetFunction("mul_mat_vec_q5_0_f32");
         _mulMatVecQ4_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q4_0_f32.ptx"));
@@ -2014,6 +2053,68 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_wanRopeInterleaved, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Per-head interleaved RoPE (MG3 sigma_theta): cos/sin are [heads, S, headDim]. F32.</summary>
+    public unsafe void LaunchWanRopeInterleavedPerHead(ulong x, ulong cos, ulong sin, int S, int heads, int headDim, nint stream)
+    {
+        ulong xA = x, cA = cos, sA = sin;
+        uint sArg = (uint)S, hArg = (uint)heads, dArg = (uint)headDim;
+        void** args = stackalloc void*[6];
+        args[0] = &xA; args[1] = &cA; args[2] = &sA; args[3] = &sArg; args[4] = &hArg; args[5] = &dArg;
+        long total = (long)S * heads * (headDim / 2);
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_wanRopeInterleavedPerHead, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>MG3 ActionModule: gather QKV slot into the batched temporal layout [sp, heads, tt, headDim].</summary>
+    public unsafe void LaunchMg3SplitQkvTemporal(ulong qkv, ulong outp, int tt, int sp, int heads, int headDim, int part, int stride, nint stream)
+    {
+        ulong a0 = qkv, a1 = outp; uint u2 = (uint)tt, u3 = (uint)sp, u4 = (uint)heads, u5 = (uint)headDim, u6 = (uint)part, u7 = (uint)stride;
+        void** args = stackalloc void*[8];
+        args[0] = &a0; args[1] = &a1; args[2] = &u2; args[3] = &u3; args[4] = &u4; args[5] = &u5; args[6] = &u6; args[7] = &u7;
+        long total = (long)sp * heads * tt * headDim; uint grid = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_mg3SplitQkvTemporalF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>MG3 ActionModule: [sp, heads, tt, headDim] back to token rows [tt·sp, streamDim].</summary>
+    public unsafe void LaunchMg3MergeTemporal(ulong attn, ulong outp, int tt, int sp, int heads, int headDim, nint stream)
+    {
+        ulong a0 = attn, a1 = outp; uint u2 = (uint)tt, u3 = (uint)sp, u4 = (uint)heads, u5 = (uint)headDim;
+        void** args = stackalloc void*[6];
+        args[0] = &a0; args[1] = &a1; args[2] = &u2; args[3] = &u3; args[4] = &u4; args[5] = &u5;
+        long total = (long)tt * sp * heads * headDim; uint grid = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_mg3MergeTemporalF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>MG3 ActionModule: interleaved rope on [sp, heads, tt, headDim]; cos/sin [gridRows, headDim].</summary>
+    public unsafe void LaunchMg3RopeBatched(ulong x, ulong cos, ulong sin, int sp, int heads, int tt, int headDim, int gh, int gw, int broadcast, nint stream)
+    {
+        ulong a0 = x, a1 = cos, a2 = sin; uint u3 = (uint)sp, u4 = (uint)heads, u5 = (uint)tt, u6 = (uint)headDim, u7 = (uint)gh, u8 = (uint)gw, u9 = (uint)broadcast;
+        void** args = stackalloc void*[10];
+        args[0] = &a0; args[1] = &a1; args[2] = &a2; args[3] = &u3; args[4] = &u4; args[5] = &u5; args[6] = &u6; args[7] = &u7; args[8] = &u8; args[9] = &u9;
+        long total = (long)sp * heads * tt * (headDim / 2); uint grid = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_mg3RopeBatchedF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>MG3 ActionModule keyboard: expand K/V [tt, 2·streamDim] → k,v [sp, heads, tt, headDim].</summary>
+    public unsafe void LaunchMg3KvExpand(ulong kv, ulong kOut, ulong vOut, int sp, int heads, int tt, int headDim, nint stream)
+    {
+        ulong a0 = kv, a1 = kOut, a2 = vOut; uint u3 = (uint)sp, u4 = (uint)heads, u5 = (uint)tt, u6 = (uint)headDim;
+        void** args = stackalloc void*[7];
+        args[0] = &a0; args[1] = &a1; args[2] = &a2; args[3] = &u3; args[4] = &u4; args[5] = &u5; args[6] = &u6;
+        long total = (long)sp * heads * tt * headDim; uint grid = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_mg3KvExpandF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>MG3 mouse stream: build MLP input [tt·sp, imgDim+winFloats] = [hidden | broadcast mouse window].</summary>
+    public unsafe void LaunchMg3MouseMlpConcat(ulong hidden, ulong mouseWin, ulong outp, int tt, int sp, int imgDim, int winFloats, nint stream)
+    {
+        ulong a0 = hidden, a1 = mouseWin, a2 = outp; uint u3 = (uint)tt, u4 = (uint)sp, u5 = (uint)imgDim, u6 = (uint)winFloats;
+        void** args = stackalloc void*[7];
+        args[0] = &a0; args[1] = &a1; args[2] = &a2; args[3] = &u3; args[4] = &u4; args[5] = &u5; args[6] = &u6;
+        long total = (long)tt * sp * (imgDim + winFloats); uint grid = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_mg3MouseMlpConcatF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Interleaved RoPE with F16 activation I/O (cos/sin stay F32). Same geometry as the F32 kernel.</summary>
     public unsafe void LaunchWanRopeInterleavedF16(ulong x, ulong cos, ulong sin, int S, int heads, int headDim, nint stream)
     {
@@ -2316,6 +2417,14 @@ public sealed class CudaKernels : IDisposable
     public void LaunchMulMatVecQ8_0F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
         => LaunchMulMatVecImpl(_mulMatVecQ8_0F32, output, input, weight, bias, N, K, M, stream);
 
+    /// <summary>Dense BF16-weight × F32-activation GEMV (F32 accumulate) for small-M decode.</summary>
+    public void LaunchMulMatVecBf16F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecBf16F32, output, input, weight, bias, N, K, M, stream);
+
+    /// <summary>Dense F16-weight × F32-activation GEMV (F32 accumulate) for small-M decode.</summary>
+    public void LaunchMulMatVecF16F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecF16F32, output, input, weight, bias, N, K, M, stream);
+
     /// <summary>Fused Q5_0 × F32 matrix-vector product for decode (M small). Same geometry as the Q4_K GEMV.
     /// Q5_0 is llama.cpp's fallback quant (in Q4_K_M-style mixed schemes) for any tensor whose K isn't a
     /// multiple of 256, so without this kernel those tensors silently miss every fused GEMV path.</summary>
@@ -2437,6 +2546,7 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ4KModule?.Dispose();
         _mulMatVecQ6KModule?.Dispose();
         _mulMatVecQ8_0Module?.Dispose();
+        _mulMatVecF16Bf16Module?.Dispose();
         _mulMatVecQ5_0Module?.Dispose();
         _mulMatVecQ4_0Module?.Dispose();
         _mulMatVecQ5KModule?.Dispose();

@@ -30,8 +30,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 >
 > | Status | TTS |
 > |---|---|
-> | ✅ **verified word-correct** | Kokoro, Piper, MeloTTS, F5-TTS, **Bark**, **Chatterbox**, **VibeVoice**, **FishSpeech** |
-> | 🐛 **runs but broken** | **Orpheus** — output is silent (0.34 s, RMS ~0.0006); needs debug (Kokoro/Melo-class) |
+> | ✅ **verified word-correct** | Kokoro, Piper, MeloTTS, F5-TTS, **Bark**, **Chatterbox**, **VibeVoice**, **FishSpeech**, **Orpheus** |
 > | ⏳ **runnable, verify in progress** | Dia (slow AR, gen pending) |
 > | 🚧 **partially wired** (loads; clone/synth path throws) | Kyutai TTS, NeuTTS (clone gated), Qwen3-TTS (voice_clone gated) |
 > | ⛔ **not wired** (install throws a clear "not runnable yet") | CosyVoice ("not yet supported by the in-process engine"), StyleTTS2 (no unified LoadWeights), Spark-TTS (config/BiCodec reconcile), Zonos (needs conditioning prefix), PocketTTS (placeholder dims), CSM (no runtime model) |

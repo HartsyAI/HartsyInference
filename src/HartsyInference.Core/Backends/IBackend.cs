@@ -462,6 +462,119 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>Matrix-Game 3.0 ActionModule: gather QKV slot <paramref name="part"/> from token rows
+    /// <c>[tt·sp, stride·streamDim]</c> (token = f·sp+s) into the batched temporal layout <c>[sp, heads, tt, headDim]</c>.
+    /// CUDA overrides with a kernel; default is the CPU reference (the old host pointer-loop).</summary>
+    unsafe void Mg3SplitQkvTemporal(Tensor outT, Tensor qkv, int tt, int sp, int heads, int headDim, int part, int stride)
+    {
+        int streamDim = heads * headDim, rowDim = stride * streamDim;
+        float* src = (float*)qkv.DataPointer, dst = (float*)outT.DataPointer;
+        for (int f = 0; f < tt; f++)
+            for (int s = 0; s < sp; s++)
+            {
+                long token = (long)f * sp + s;
+                for (int h = 0; h < heads; h++)
+                    for (int d = 0; d < headDim; d++)
+                        dst[(((long)s * heads + h) * tt + f) * headDim + d] = src[token * rowDim + part * streamDim + h * headDim + d];
+            }
+    }
+
+    /// <summary>Matrix-Game 3.0 ActionModule: inverse of <see cref="Mg3SplitQkvTemporal"/> — <c>[sp, heads, tt, headDim]</c>
+    /// back to token rows <c>[tt·sp, streamDim]</c>. CUDA overrides with a kernel; default is the CPU reference.</summary>
+    unsafe void Mg3MergeTemporal(Tensor outT, Tensor attn, int tt, int sp, int heads, int headDim)
+    {
+        int streamDim = heads * headDim;
+        float* src = (float*)attn.DataPointer, dst = (float*)outT.DataPointer;
+        for (int s = 0; s < sp; s++)
+            for (int h = 0; h < heads; h++)
+                for (int f = 0; f < tt; f++)
+                    for (int d = 0; d < headDim; d++)
+                        dst[((long)f * sp + s) * streamDim + h * headDim + d] = src[(((long)s * heads + h) * tt + f) * headDim + d];
+    }
+
+    /// <summary>Matrix-Game 3.0 ActionModule: interleaved rope on <c>[sp, heads, tt, headDim]</c>. cos/sin are
+    /// <c>[gridRows, headDim]</c>; the grid row for <c>(s, f)</c> is <c>f</c> when <paramref name="broadcastSpatial"/>
+    /// else <c>f·gh·gw + s</c>. In place. CUDA overrides with a kernel; default is the CPU reference.</summary>
+    unsafe void Mg3RopeBatched(Tensor x, Tensor cos, Tensor sin, int sp, int heads, int tt, int headDim, int gh, int gw, bool broadcastSpatial)
+    {
+        float* xp = (float*)x.DataPointer, cp = (float*)cos.DataPointer, spn = (float*)sin.DataPointer;
+        int pairs = headDim / 2;
+        for (int s = 0; s < sp; s++)
+            for (int h = 0; h < heads; h++)
+                for (int f = 0; f < tt; f++)
+                {
+                    long gridRow = broadcastSpatial ? f : (long)f * gh * gw + s;
+                    long cOff = gridRow * headDim, xOff = (((long)s * heads + h) * tt + f) * headDim;
+                    for (int i = 0; i < pairs; i++)
+                    {
+                        int i0 = 2 * i;
+                        float re = xp[xOff + i0], im = xp[xOff + i0 + 1];
+                        float c = cp[cOff + i0], sn = spn[cOff + i0];
+                        xp[xOff + i0] = re * c - im * sn;
+                        xp[xOff + i0 + 1] = re * sn + im * c;
+                    }
+                }
+    }
+
+    /// <summary>Matrix-Game 3.0 ActionModule keyboard stream: expand K/V from <c>[tt, 2·streamDim]</c> (K then V per row)
+    /// to <c>[sp, heads, tt, headDim]</c>, broadcasting across the sp spatial positions. CUDA overrides; default is the
+    /// CPU reference.</summary>
+    unsafe void Mg3KvExpand(Tensor kOut, Tensor vOut, Tensor kv, int sp, int heads, int tt, int headDim)
+    {
+        int streamDim = heads * headDim;
+        float* kvp = (float*)kv.DataPointer, kp = (float*)kOut.DataPointer, vp = (float*)vOut.DataPointer;
+        for (int s = 0; s < sp; s++)
+            for (int h = 0; h < heads; h++)
+                for (int f = 0; f < tt; f++)
+                    for (int d = 0; d < headDim; d++)
+                    {
+                        long dst = (((long)s * heads + h) * tt + f) * headDim + d;
+                        long kvBase = (long)f * 2 * streamDim + h * headDim + d;
+                        kp[dst] = kvp[kvBase]; vp[dst] = kvp[kvBase + streamDim];
+                    }
+    }
+
+    /// <summary>Matrix-Game 3.0 ActionModule mouse stream: build the MLP input <c>[tt·sp, imgDim+winFloats]</c> =
+    /// <c>[hidden token features | per-frame mouse window]</c> (the window broadcast across the sp positions of a frame;
+    /// token = f·sp+s). CUDA overrides with a kernel (the host concat read <c>hidden</c> D2H per block); default is CPU.</summary>
+    unsafe void Mg3MouseMlpConcat(Tensor outT, Tensor hidden, Tensor mouseWin, int tt, int sp, int imgDim, int winFloats)
+    {
+        int rowW = imgDim + winFloats;
+        float* hp = (float*)hidden.DataPointer, wp = (float*)mouseWin.DataPointer, op = (float*)outT.DataPointer;
+        for (int f = 0; f < tt; f++)
+            for (int s = 0; s < sp; s++)
+            {
+                long token = (long)f * sp + s;
+                for (int c = 0; c < imgDim; c++) op[token * rowW + c] = hp[token * imgDim + c];
+                for (int wf = 0; wf < winFloats; wf++) op[token * rowW + imgDim + wf] = wp[(long)f * winFloats + wf];
+            }
+    }
+
+    /// <summary>Per-head Wan interleaved in-place RoPE (Matrix-Game 3.0 sigma_theta path): identical to
+    /// <see cref="WanRopeInterleaved"/> but <paramref name="cos"/>/<paramref name="sin"/> are <c>[heads, S, headDim]</c>
+    /// (each head has its own θ), so the angle for <c>(s, head, pair i)</c> is at <c>(head·S + s)·headDim + 2i</c>.
+    /// Matches <c>WanRope.ApplyRotary</c>'s rank-3 branch. CUDA overrides with a kernel (the host loop was the dominant
+    /// MG3 backbone cost); the default is the CPU reference.</summary>
+    unsafe void WanRopeInterleavedPerHead(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
+    {
+        float* xp = (float*)x.DataPointer, cp = (float*)cos.DataPointer, sp = (float*)sin.DataPointer;
+        int pairs = headDim / 2;
+        for (int s = 0; s < seqLen; s++)
+            for (int h = 0; h < heads; h++)
+            {
+                long xoff = ((long)s * heads + h) * headDim;
+                long coff = ((long)h * seqLen + s) * headDim;
+                for (int i = 0; i < pairs; i++)
+                {
+                    int i0 = 2 * i;
+                    float re = xp[xoff + i0], im = xp[xoff + i0 + 1];
+                    float c = cp[coff + i0], sn = sp[coff + i0];
+                    xp[xoff + i0] = re * c - im * sn;
+                    xp[xoff + i0 + 1] = re * sn + im * c;
+                }
+            }
+    }
+
     /// <summary>LTX-2 "split" rotary (rotate-half, per-head cos), in-place on <paramref name="x"/>
     /// <c>[seqLen, numHeads*headDim]</c>. <paramref name="cos"/>/<paramref name="sin"/> are <c>[seqLen, dim/2]</c>
     /// laid out per-head (width <c>headDim/2</c>), one angle shared by both elements of a pair

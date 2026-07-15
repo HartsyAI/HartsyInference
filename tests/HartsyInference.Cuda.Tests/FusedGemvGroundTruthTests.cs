@@ -100,6 +100,65 @@ public sealed class FusedGemvGroundTruthTests
         }
     }
 
+    /// <summary>Dense BF16/F16 fused GEMV (the mul_mat_vec_bf16/f16_f32 kernels): the CPU reference uses the
+    /// 16-bit-ROUNDED weight (what the kernel reads after bf16/f16→f32) against the F32 activation, so the only
+    /// residual is F32 accumulation order → a tight tolerance. Covers a non-multiple-of-32 K to exercise the
+    /// strided-lane tail. M≤8 so <see cref="CudaBackend.Linear"/> takes the fused GEMV branch.</summary>
+    [Theory]
+    [InlineData("BF16", 3072, 128)]
+    [InlineData("BF16", 100, 48)]
+    [InlineData("F16", 512, 64)]
+    public unsafe void FusedGemv_Float16_MatchesRoundedReference(string dtypeName, int inDim, int outDim)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        DType dt = dtypeName == "BF16" ? DType.BF16 : DType.F16;
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+
+        const int batch = 4;
+        using CudaBackend backend = new(0, ptxDir);
+        Tensor input = new(new TensorShape(batch, inDim), DType.F32);
+        Tensor weightF32 = new(new TensorShape(outDim, inDim), DType.F32);
+        Tensor outGpu = new(new TensorShape(batch, outDim), DType.F32);
+        try
+        {
+            Random rng = new(7);
+            float* ip = (float*)input.DataPointer;
+            for (long i = 0; i < (long)batch * inDim; i++) ip[i] = (float)((rng.NextDouble() * 2.0 - 1.0) * 0.5);
+            float* wp = (float*)weightF32.DataPointer;
+            long wc = (long)outDim * inDim;
+            for (long i = 0; i < wc; i++) wp[i] = (float)((rng.NextDouble() * 2.0 - 1.0) * 0.3);
+
+            using Tensor weight16 = weightF32.CastTo(dt);          // what the kernel actually multiplies
+            using Tensor weightRounded = weight16.CastTo(DType.F32);  // same values, back in F32 for the reference
+
+            backend.Linear(outGpu, input, weight16, bias: null);
+            backend.Sync();
+
+            float* rw = (float*)weightRounded.DataPointer;
+            float* gpuOut = (float*)outGpu.DataPointer;
+            double sumAbs = 0.0; float maxAbs = 0f;
+            for (int m = 0; m < batch; m++)
+                for (int n = 0; n < outDim; n++)
+                {
+                    float acc = 0f;
+                    float* xrow = ip + (long)m * inDim;
+                    float* wrow = rw + (long)n * inDim;
+                    for (int k = 0; k < inDim; k++) acc += xrow[k] * wrow[k];
+                    float err = MathF.Abs(acc - gpuOut[m * outDim + n]);
+                    sumAbs += err; if (err > maxAbs) maxAbs = err;
+                }
+            float avgErr = (float)(sumAbs / (batch * outDim));
+            _output.WriteLine($"{dtypeName} K={inDim} N={outDim}: avg_err={avgErr:E3} max_err={maxAbs:E3}");
+            Assert.True(avgErr < 1e-4f, $"{dtypeName} fused GEMV avg_err {avgErr:E3} exceeds tolerance; max_err={maxAbs:E3}");
+        }
+        finally
+        {
+            input.Dispose(); weightF32.Dispose(); outGpu.Dispose();
+        }
+    }
+
     private static unsafe void FillQ4_0Random(Tensor t, int blocks, Random rng)
     {
         byte* p = (byte*)t.DataPointer;

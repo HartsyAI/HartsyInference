@@ -51,7 +51,14 @@ public static class AudioTextFrontend
     {
         ArgumentNullException.ThrowIfNull(text);
         string prompt = string.IsNullOrWhiteSpace(voice) ? text : $"{voice}: {text}";
-        return RequireLlama().EncodeOrdinary(prompt);
+        int[] ids = RequireLlama().EncodeOrdinary(prompt);
+        // The reference tokenizes with add_special_tokens=True → a leading BOS. The pipeline then wraps with
+        // [StartOfHuman] … [EndOfText, EndOfHuman, StartOfAi, StartOfSpeech]. Omitting the BOS leaves the model
+        // unconditioned and it produces gibberish speech (verified vs the transformers reference).
+        int[] outp = new int[ids.Length + 1];
+        outp[0] = Llama3Bos;
+        Array.Copy(ids, 0, outp, 1, ids.Length);
+        return outp;
     }
 
     /// <summary>CSM (Sesame): plain Llama-3 BPE of the text. Multi-turn conversation history, when used,

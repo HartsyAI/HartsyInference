@@ -147,8 +147,10 @@ public sealed unsafe class WanVideoBlock
             }
             else
             {
-                rope.ApplyRotary(qn, cos, sin, _heads);
-                rope.ApplyRotary(kn, cos, sin, _heads);
+                // Per-head sigma_theta rope (rank-3 cos) — GPU kernel keeps qn/kn device-resident (the host
+                // ApplyRotary loop was the dominant MG3 backbone cost); CPU falls back to the identical default impl.
+                backend.WanRopeInterleavedPerHead(qn, cos, sin, sq, _heads, _headDim);
+                backend.WanRopeInterleavedPerHead(kn, cos, sin, sk, _heads, _headDim);
             }
         }
 
