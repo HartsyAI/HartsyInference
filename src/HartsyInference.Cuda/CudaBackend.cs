@@ -2810,6 +2810,41 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Dense 3D convolution (gather form). Input/output [N,C,D,H,W], weight [Cout,Cin,kD,kH,kW] (F32).</summary>
+    public unsafe void Conv3d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int strideD, int strideH, int strideW, int padD, int padH, int padW)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("Conv3d");
+        if (input.DType != DType.F32 || output.DType != DType.F32 || weight.DType != DType.F32)
+            throw new NotSupportedException("CUDA Conv3d supports F32 only.");
+        if (input.Shape.Rank != 5 || output.Shape.Rank != 5 || weight.Shape.Rank != 5)
+            throw new ArgumentException($"Conv3d requires 5D tensors; got input {input.Shape}, output {output.Shape}, weight {weight.Shape}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int n = (int)input.Shape[0], cin = (int)input.Shape[1], iD = (int)input.Shape[2], iH = (int)input.Shape[3], iW = (int)input.Shape[4];
+        int cout = (int)output.Shape[1], oD = (int)output.Shape[2], oH = (int)output.Shape[3], oW = (int)output.Shape[4];
+        int kD = (int)weight.Shape[2], kH = (int)weight.Shape[3], kW = (int)weight.Shape[4];
+        ulong pOut = 0, pIn = 0, pW = 0, pB = 0; bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pW = GpuTransferHelper.CopyToDevice(weight);
+            pB = bias is null ? 0 : GpuTransferHelper.CopyToDevice(bias);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchConv3d(pOut, pIn, pW, pB, n, cin, cout, iD, iH, iW, oD, oH, oW, kD, kH, kW,
+                strideD, strideH, strideW, padD, padH, padW, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cached = true;
+        }
+        finally
+        {
+            if (!cached) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn); GpuTransferHelper.FreeDevice(pW);
+            if (pB != 0) GpuTransferHelper.FreeDevice(pB);
+        }
+    }
+
     public void IndexAddRows(Tensor h, Tensor table, Tensor indices)
     {
         if (h.DType != DType.F32 || table.DType != DType.F32)

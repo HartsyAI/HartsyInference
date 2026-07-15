@@ -880,4 +880,43 @@ __global__ void fourier_embed_f32(
     }
 }
 
+// Dense 3D convolution (gather form — one thread per output element, no atomics). Weight is [Cout,Cin,kD,kH,kW]
+// (PyTorch Conv3d, groups=1). out[b,co,od,oh,ow] = bias[co] + Σ_{ci,kd,kh,kw} in[b,ci,id,ih,iw]·W, id = od·sD−pD+kd.
+// For the TRELLIS sparse-structure VAE decoder (16³ latent → 64³ occupancy).
+__global__ void conv3d_f32(
+    float* __restrict__ out, const float* __restrict__ in,
+    const float* __restrict__ weight, const float* __restrict__ bias,
+    int N, int Cin, int Cout, int iD, int iH, int iW, int oD, int oH, int oW,
+    int kD, int kH, int kW, int sD, int sH, int sW, int pD, int pH, int pW)
+{
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    long total = (long)N * Cout * oD * oH * oW;
+    if (idx >= total) return;
+    int ow = (int)(idx % oW); long r = idx / oW;
+    int oh = (int)(r % oH); r /= oH;
+    int od = (int)(r % oD); r /= oD;
+    int co = (int)(r % Cout); int b = (int)(r / Cout);
+    float acc = bias ? bias[co] : 0.0f;
+    int id0 = od * sD - pD, ih0 = oh * sH - pH, iw0 = ow * sW - pW;
+    for (int ci = 0; ci < Cin; ci++)
+    {
+        const float* src = in + (((long)b * Cin + ci) * iD) * iH * iW;
+        long wOff = (((long)co * Cin + ci) * kD) * kH * kW;
+        for (int kd = 0; kd < kD; kd++)
+        {
+            int id = id0 + kd; if (id < 0 || id >= iD) continue;
+            for (int kh = 0; kh < kH; kh++)
+            {
+                int ih = ih0 + kh; if (ih < 0 || ih >= iH) continue;
+                for (int kw = 0; kw < kW; kw++)
+                {
+                    int iw = iw0 + kw; if (iw < 0 || iw >= iW) continue;
+                    acc += src[(id * iH + ih) * iW + iw] * weight[wOff + (kd * kH + kh) * kW + kw];
+                }
+            }
+        }
+    }
+    out[idx] = acc;
+}
+
 } // extern "C"

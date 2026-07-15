@@ -2,6 +2,7 @@ using HartsyInference.Audio.Models.Kokoro;
 using HartsyInference.Audio.Models.StyleTts2;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelHandler.PyTorch;
 
 namespace HartsyInference.Audio.Pipelines;
 
@@ -28,6 +29,7 @@ public sealed unsafe class StyleTts2Pipeline : IDisposable
     private readonly StyleEncoder? _predictorEncoder; // prosodic half (multispeaker only)
     private readonly StyleDenoiser _denoiser;
     private readonly StyleDiffusionSampler _sampler;
+    private IDisposable[] _retain = [];   // weight loader held for the pipeline's lifetime (tensors borrow it)
     private int _disposed;
 
     public StyleTts2Pipeline(StyleTts2Config cfg, KokoroPipeline kokoro, KokoroPlBert plBert,
@@ -42,6 +44,39 @@ public sealed unsafe class StyleTts2Pipeline : IDisposable
         _styleEncoder = styleEncoder;
         _predictorEncoder = predictorEncoder;
         _sampler = new StyleDiffusionSampler(cfg);
+    }
+
+    /// <summary>Builds the full StyleTTS2-LibriTTS pipeline from the published checkpoint
+    /// (<c>yl4579/StyleTTS2-LibriTTS/epochs_2nd_00020.pth</c>) + a StyleTTS2 vocab <c>tokenizer_config.json</c>
+    /// (<c>{"vocab": {symbol: id}}</c> for the 178-symbol set). The <c>bert/text_encoder/predictor/decoder</c>
+    /// reuse Kokoro's submodule loaders (LibriTTS dims are Kokoro-compatible); the two StarGAN-v2
+    /// <see cref="StyleEncoder"/>s and the diffusion <see cref="StyleDenoiser"/> load their StyleTTS2-specific
+    /// keys via <see cref="StyleTts2Weights.Adapt"/>.</summary>
+    public static StyleTts2Pipeline LoadFromCheckpoint(string pthPath, string tokenizerConfigPath)
+    {
+        StyleTts2Config cfg = new();
+        KokoroConfig bb = cfg.Backbone;
+
+        PytorchPickleLoader loader = new();
+        loader.Load(pthPath, recursiveFlatten: true);
+        Dictionary<string, Tensor> w = StyleTts2Weights.Adapt(loader.GetAllTensors());
+
+        KokoroPhonemeTokenizer tok = KokoroPhonemeTokenizer.LoadFromConfig(tokenizerConfigPath);
+
+        KokoroPlBert plBert = new(bb); plBert.LoadWeights(w);
+        KokoroTextEncoder textEnc = new(bb); textEnc.LoadWeights(w);
+        KokoroProsodyPredictor pred = new(bb); pred.LoadWeights(w);
+        KokoroIStftNetDecoder dec = new(bb); dec.LoadWeights(w);
+        StyleEncoder styleEnc = new(bb.StyleDim); styleEnc.LoadWeights(w, "style_encoder");
+        StyleEncoder predEnc = new(bb.StyleDim); predEnc.LoadWeights(w, "predictor_encoder");
+        StyleDenoiser denoiser = new(cfg); denoiser.LoadWeights(w, "diffusion");
+
+        KokoroPipeline kokoro = new(bb, tok, plBert, textEnc, pred, dec);
+        StyleTts2Pipeline p = new(cfg, kokoro, plBert, tok, denoiser, styleEnc, predEnc)
+        {
+            _retain = [loader]
+        };
+        return p;
     }
 
     /// <summary>Zero-shot voice cloning: extract the 256-d style directly from a reference mel
@@ -108,6 +143,7 @@ public sealed unsafe class StyleTts2Pipeline : IDisposable
         _kokoro.Dispose();
         _styleEncoder?.Dispose();
         _predictorEncoder?.Dispose();
+        foreach (IDisposable d in _retain) d.Dispose();
         GC.SuppressFinalize(this);
     }
 

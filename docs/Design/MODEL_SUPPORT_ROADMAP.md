@@ -135,8 +135,8 @@ DINOv2 conditioning in Vision) reused across models. See [PHASE_11_THREED.md](..
 
 | Model | Org | License | Notes |
 |---|---|---|---|
-| **Hunyuan3D-2** (shape) 🔧 | Tencent | weights: Tencent Hunyuan | Image→mesh: flow-match VecSet DiT + ShapeVAE occupancy → marching cubes. Built structural, numerics validation-pending. See [HUNYUAN3D_2_ARCHITECTURE.md](../Research/HUNYUAN3D_2_ARCHITECTURE.md). |
-| **TripoSR** 🔧 | Stability/Tripo | MIT | Image→mesh, feed-forward LRM → triplane → NeRF MLP → marching cubes (deterministic — easiest to validate). Built structural, numerics validation-pending. See [TRIPOSR_ARCHITECTURE.md](../Research/TRIPOSR_ARCHITECTURE.md). |
+| **Hunyuan3D-2** (shape) ✅ | Tencent | weights: Tencent Hunyuan | Image→mesh: flow-match VecSet DiT + ShapeVAE occupancy → marching cubes. **Verified e2e** (DiT corr 0.99999738, VAE corr 0.99999518) + gen-perf optimized (71.3 → 9.2 s, 1.6× off Python). See [HUNYUAN3D_2_ARCHITECTURE.md](../Research/HUNYUAN3D_2_ARCHITECTURE.md). |
+| **TripoSR** ✅ | Stability/Tripo | MIT | Image→mesh, feed-forward LRM → triplane → NeRF MLP → marching cubes. **Verified e2e** vs `tsr` (all stages corr ~1.0) + gen-perf optimized (26.2 → 2.1 s). See [TRIPOSR_ARCHITECTURE.md](../Research/TRIPOSR_ARCHITECTURE.md). |
 | **TRELLIS** ❌ | Microsoft | MIT | Image→Gaussian-splat + mesh. Deferred — needs sparse 3D conv/attention + flexicubes + splat rendering. |
 
 Reusable `.pt` (PyTorch pickle) checkpoint loader landed alongside GameCraft (`ModelHandler/PyTorch`), enabling

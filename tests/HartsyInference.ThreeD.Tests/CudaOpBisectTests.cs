@@ -255,4 +255,39 @@ public sealed unsafe class CudaOpBisectTests
         _out.WriteLine($"FourierEmbed [{count},3]->[{count},{dim}] bands={bands}: maxAbs={mx:E3} corr={corr:F8}");
         Assert.True(corr > 0.99999 && mx < 1e-5, $"FourierEmbed CUDA≠CPU maxAbs={mx} corr={corr}");
     }
+
+    [Fact]
+    public void Conv3d_VaeResBlockShape()   // TRELLIS SS-VAE decoder conv: [1,C,D,H,W] k3 s1 p1
+    {
+        using CudaBackend? cuda = Cuda(); if (cuda is null) { _out.WriteLine("SKIP no PTX"); return; }
+        using CpuBackend cpu = new();
+        int cin = 32, cout = 16, d = 16, h = 16, w = 16, k = 3, pad = 1;
+        using Tensor x = Rand(1, 1, cin, d, h, w);
+        using Tensor wt = Rand(2, cout, cin, k, k, k);
+        using Tensor b = Rand(3, cout);
+        using Tensor oc = new(new TensorShape(new long[] { 1, cout, d, h, w }), DType.F32);
+        using Tensor og = new(new TensorShape(new long[] { 1, cout, d, h, w }), DType.F32);
+        ((IBackend)cpu).Conv3d(oc, x, wt, b, 1, 1, 1, pad, pad, pad);
+        ((IBackend)cuda).Conv3d(og, x, wt, b, 1, 1, 1, pad, pad, pad);
+        (double mx, double corr) = Cmp(oc, og);
+        _out.WriteLine($"Conv3d [1,{cin},{d}³]->[1,{cout},{d}³] k{k}s1p{pad}: maxAbs={mx:E3} corr={corr:F8}");
+        Assert.True(corr > 0.99999 && mx < 1e-3, $"Conv3d CUDA≠CPU maxAbs={mx} corr={corr}");
+    }
+
+    [Fact]
+    public void Conv3d_StridedDownsample()   // strided conv (k3 s2 p1 halves each dim) — the VAE encoder/downsample path
+    {
+        using CudaBackend? cuda = Cuda(); if (cuda is null) { _out.WriteLine("SKIP no PTX"); return; }
+        using CpuBackend cpu = new();
+        int cin = 8, cout = 32, d = 16, k = 3, pad = 1, od = (d + 2 * pad - k) / 2 + 1;
+        using Tensor x = Rand(1, 1, cin, d, d, d);
+        using Tensor wt = Rand(2, cout, cin, k, k, k);
+        using Tensor oc = new(new TensorShape(new long[] { 1, cout, od, od, od }), DType.F32);
+        using Tensor og = new(new TensorShape(new long[] { 1, cout, od, od, od }), DType.F32);
+        ((IBackend)cpu).Conv3d(oc, x, wt, null, 2, 2, 2, pad, pad, pad);
+        ((IBackend)cuda).Conv3d(og, x, wt, null, 2, 2, 2, pad, pad, pad);
+        (double mx, double corr) = Cmp(oc, og);
+        _out.WriteLine($"Conv3d strided [1,{cin},{d}³]->[1,{cout},{od}³] k{k}s2p{pad}: maxAbs={mx:E3} corr={corr:F8}");
+        Assert.True(corr > 0.99999 && mx < 1e-3, $"Conv3d strided CUDA≠CPU maxAbs={mx} corr={corr}");
+    }
 }

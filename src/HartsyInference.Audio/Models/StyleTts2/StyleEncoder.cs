@@ -48,10 +48,38 @@ public sealed unsafe class StyleEncoder : IDisposable
 
     internal static Tensor ReadConv(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        // spectral_norm stores the effective weight under `.weight` in eval-exported dicts; otherwise
-        // `.weight_orig`. (Exact sigma folding is checkpoint-gated.)
+        // Eval-exported dicts store the effective weight under `.weight`; the training checkpoint stores
+        // spectral_norm's `weight_orig` + power-iteration vectors `weight_u`/`weight_v`, so fold the spectral
+        // norm here: reshape W to [out, in·kh·kw], σ = uᵀ(W·v), W_eff = W_orig / σ (torch spectral_norm).
         if (w.TryGetValue($"{prefix}.weight", out Tensor? wt)) return WhisperOps.EnsureF32(wt);
-        return WhisperOps.EnsureF32(w[$"{prefix}.weight_orig"]);
+        Tensor wOrig = WhisperOps.EnsureF32(w[$"{prefix}.weight_orig"]);
+        if (!w.TryGetValue($"{prefix}.weight_u", out Tensor? uT) || !w.TryGetValue($"{prefix}.weight_v", out Tensor? vT))
+            return wOrig;
+        return FoldSpectralNorm(wOrig, WhisperOps.EnsureF32(uT), WhisperOps.EnsureF32(vT));
+    }
+
+    /// <summary>Folds torch <c>spectral_norm</c>: σ = uᵀ(W₂ₐ·v) over W reshaped to <c>[out, in·kh·kw]</c>,
+    /// returns a new tensor <c>W_orig / σ</c> (same shape as <paramref name="wOrig"/>).</summary>
+    internal static Tensor FoldSpectralNorm(Tensor wOrig, Tensor u, Tensor v)
+    {
+        int outC = (int)wOrig.Shape[0];
+        long cols = wOrig.ElementCount / outC;
+        float* wp = (float*)wOrig.DataPointer, up = (float*)u.DataPointer, vp = (float*)v.DataPointer;
+        // σ = Σ_o u[o] · (Σ_c W[o,c]·v[c])
+        double sigma = 0;
+        for (int o = 0; o < outC; o++)
+        {
+            double row = 0;
+            long baseOff = (long)o * cols;
+            for (long c = 0; c < cols; c++) row += wp[baseOff + c] * vp[c];
+            sigma += up[o] * row;
+        }
+        float inv = sigma != 0 ? (float)(1.0 / sigma) : 1f;
+        Tensor outT = new(wOrig.Shape, DType.F32);
+        float* op = (float*)outT.DataPointer;
+        long n = wOrig.ElementCount;
+        for (long i = 0; i < n; i++) op[i] = wp[i] * inv;
+        return outT;
     }
 
     /// <summary>Extracts the 128-d style vector from a reference mel <c>[1, 1, 80, T]</c> (or
@@ -113,10 +141,14 @@ public sealed unsafe class StyleEncoder : IDisposable
         return outT;
     }
 
+    /// <summary>2× average pool matching StyleTTS2 <c>DownSample('half')</c>: height floors, but an ODD width
+    /// replicates its last column before pooling (<c>torch.cat([x, x[…,-1]])</c>), so the width becomes
+    /// <c>ceil(w/2)</c> and the boundary output = the last column's value. This keeps the shortcut's size aligned
+    /// with the residual's learned stride-2 downsample on odd time frames.</summary>
     internal static Tensor AvgPool2x(Tensor x)
     {
         int c = (int)x.Shape[1], h = (int)x.Shape[2], w = (int)x.Shape[3];
-        int oh = h / 2, ow = w / 2;
+        int oh = h / 2, ow = (w + 1) / 2;   // width: ceil (odd → replicate last column)
         Tensor outT = new(new TensorShape(1, c, oh, ow), DType.F32);
         float* ip = (float*)x.DataPointer;
         float* op = (float*)outT.DataPointer;
@@ -125,8 +157,9 @@ public sealed unsafe class StyleEncoder : IDisposable
                 for (int xx = 0; xx < ow; xx++)
                 {
                     long b = (long)cc * h * w;
-                    float s = ip[b + (2 * y) * w + 2 * xx] + ip[b + (2 * y) * w + 2 * xx + 1]
-                            + ip[b + (2 * y + 1) * w + 2 * xx] + ip[b + (2 * y + 1) * w + 2 * xx + 1];
+                    int x0 = 2 * xx, x1 = Math.Min(2 * xx + 1, w - 1);   // clamp = replicate the odd last column
+                    float s = ip[b + (2 * y) * w + x0] + ip[b + (2 * y) * w + x1]
+                            + ip[b + (2 * y + 1) * w + x0] + ip[b + (2 * y + 1) * w + x1];
                     op[(long)cc * oh * ow + y * ow + xx] = s * 0.25f;
                 }
         return outT;
@@ -156,16 +189,18 @@ public sealed unsafe class StyleEncoder : IDisposable
     }
 }
 
-/// <summary>StarGAN-v2 residual block (no normalization): <c>(residual + shortcut)/√2</c> where
-/// <c>residual = conv2(actv(avgpool?(conv1(actv(x)))))</c> and <c>shortcut = avgpool?(conv1x1?(x))</c>.
-/// Always halves the spatial size (downsample) and may change channels.</summary>
+/// <summary>StarGAN-v2 residual block (no normalization), <c>downsample='half'</c>: <c>(residual + shortcut)/√2</c>
+/// where <c>residual = conv2(actv(downsample_res(conv1(actv(x)))))</c> — <c>conv1</c> is dim_in→dim_in, the
+/// downsample is a LEARNED depthwise stride-2 conv (<c>downsample_res.conv</c>, groups=dim_in), <c>conv2</c> is
+/// dim_in→dim_out — and <c>shortcut = avgpool2×(conv1x1?(x))</c> (parameter-free avg-pool). Halves the spatial
+/// size and may change channels. All convs are spectral-norm-folded on load.</summary>
 internal sealed unsafe class ResBlk2D
 {
     private const float LeakySlope = 0.2f;
     private static readonly float _invSqrt2 = 1f / MathF.Sqrt(2f);
     private readonly int _inCh, _outCh;
     private readonly bool _learnedSc;
-    private Tensor? _conv1W, _conv1B, _conv2W, _conv2B, _conv1x1W;
+    private Tensor? _conv1W, _conv1B, _downW, _downB, _conv2W, _conv2B, _conv1x1W;
 
     public ResBlk2D(int inCh, int outCh)
     {
@@ -176,28 +211,33 @@ internal sealed unsafe class ResBlk2D
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _conv1W = StyleEncoder.ReadConv(w, $"{prefix}.conv1");
+        _conv1W = StyleEncoder.ReadConv(w, $"{prefix}.conv1");                       // [in, in, 3, 3]
         _conv1B = WhisperOps.EnsureF32(w[$"{prefix}.conv1.bias"]);
-        _conv2W = StyleEncoder.ReadConv(w, $"{prefix}.conv2");
+        _downW = StyleEncoder.ReadConv(w, $"{prefix}.downsample_res.conv");          // [in, 1, 3, 3] depthwise
+        _downB = WhisperOps.EnsureF32(w[$"{prefix}.downsample_res.conv.bias"]);
+        _conv2W = StyleEncoder.ReadConv(w, $"{prefix}.conv2");                       // [out, in, 3, 3]
         _conv2B = WhisperOps.EnsureF32(w[$"{prefix}.conv2.bias"]);
-        if (_learnedSc) _conv1x1W = StyleEncoder.ReadConv(w, $"{prefix}.conv1x1");
+        if (_learnedSc) _conv1x1W = StyleEncoder.ReadConv(w, $"{prefix}.conv1x1");   // [out, in, 1, 1], no bias
     }
 
     public Tensor Forward(IBackend backend, Tensor x)
     {
-        // Residual: actv → conv1(in→out, k3p1) → avgpool → actv → conv2(out→out, k3p1).
-        Tensor r = new(x.Shape, DType.F32);
-        Buffer.MemoryCopy((void*)x.DataPointer, (void*)r.DataPointer, x.ElementCount * 4, x.ElementCount * 4);
+        int iH = (int)x.Shape[2], iW = (int)x.Shape[3];
+        int oH = (iH + 2 - 3) / 2 + 1, oW = (iW + 2 - 3) / 2 + 1;   // stride-2, k3, pad1
+
+        // Residual: actv → conv1(in→in, k3p1) → learned depthwise downsample(stride2) → actv → conv2(in→out, k3p1).
+        Tensor r = Clone(x);
         backend.LeakyRelu(r, r, LeakySlope);
-        Tensor c1 = StyleEncoder.Conv2dSame(backend, r, _conv1W!, _conv1B!, _outCh, 3, 1);
+        Tensor c1 = StyleEncoder.Conv2dSame(backend, r, _conv1W!, _conv1B!, _inCh, 3, 1);
         r.Dispose();
-        Tensor c1d = StyleEncoder.AvgPool2x(c1);
+        Tensor c1d = new(new TensorShape(1, _inCh, oH, oW), DType.F32);
+        backend.Conv2dDepthwise(c1d, c1, _downW!, _downB!, strideH: 2, strideW: 2, padH: 1, padW: 1);
         c1.Dispose();
         backend.LeakyRelu(c1d, c1d, LeakySlope);
         Tensor residual = StyleEncoder.Conv2dSame(backend, c1d, _conv2W!, _conv2B!, _outCh, 3, 1);
         c1d.Dispose();
 
-        // Shortcut: conv1x1? → avgpool.
+        // Shortcut: conv1x1? → avgpool2×.
         Tensor sc = _learnedSc
             ? StyleEncoder.Conv2dSame(backend, x, _conv1x1W!, bias: null, _outCh, 1, 0)
             : Clone(x);
@@ -221,7 +261,7 @@ internal sealed unsafe class ResBlk2D
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] all = [_conv1W, _conv1B, _conv2W, _conv2B, _conv1x1W];
+        Tensor?[] all = [_conv1W, _conv1B, _downW, _downB, _conv2W, _conv2B, _conv1x1W];
         foreach (Tensor? t in all) if (t is not null) yield return t;
     }
 }

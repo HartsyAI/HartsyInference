@@ -25,7 +25,7 @@ Tests for both: `Hunyuan3DDinoParityTests`, `Hunyuan3DDitParityTests`, `Hunyuan3
 
 | Model | Notes |
 |---|---|
-| **TRELLIS** (image → Gaussian splat + mesh) | Not implemented — needs sparse 3D conv/attention (no backend op yet) + flexicubes + splat rendering. The `GaussianSplatCloud` type + PLY splat export are already in place as foundation. |
+| **TRELLIS** (image → Gaussian splat + mesh) | 🚧 **Build underway** ([TRELLIS_BUILD_PLAN.md](TRELLIS_BUILD_PLAN.md)) — architecture mapped from the reference (two-stage flow: dense sparse-structure 16³→64³ occupancy → sparse SLAT over active voxels → GS/mesh/RF decoders), phased plan + `TrellisConfig` (exact `image-large` dims) landed (Phase A). Still needs new backend ops: Conv3d, SparseTensor + sparse conv/attention, flexicubes. `GaussianSplatCloud` + PLY export already in place. |
 | **Hunyuan3D Paint** (texture/PBR) | Out of scope for the shape pipelines (multiview diffusion + UV bake). |
 
 ## Foundation

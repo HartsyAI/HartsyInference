@@ -48,6 +48,17 @@ End-to-end wall-clock through the **SwarmUI API** (the identical request routed 
 
 All outputs are coherent: this is a speed gap, not a correctness gap. Image architectures (Flux/SD3/Ideogram) were device-ported and run much closer; the video DiT blocks are the current frontier (no full flash-attention kernel yet, some F32-only elementwise ops, launch-overhead at small token counts).
 
+## 3D mesh (image → mesh) e2e vs Python reference (2026-07-15)
+
+Warm end-to-end seconds on an RTX 4090 vs the upstream Python reference on the same GPU. All perf changes are bit-exact or coherence-gated (`CudaOpBisectTests`). Full campaign write-up: [`results/threed_genperf_2026-07-15.md`](results/threed_genperf_2026-07-15.md).
+
+| Model | Hartsy | Python ref | gap |
+|---|---:|---:|---:|
+| TripoSR (256³ density grid) | **2.1 s** | 0.58 s | 3.6× (was 26.2 s; our GPU density decode beats the reference) |
+| Hunyuan3D-2 Shape (30 steps, grid 128, fp16) | **9.2 s** | 5.76 s | **1.6×** (was 71.3 s — 7.75× in-campaign) |
+
+The Hunyuan3D wall was a pathological `Concat` (a per-slice `cuMemcpyDtoDAsync` loop → ~280k memcpy nodes/forward) — a fused kernel cut dit-loop 27.7 → 7.5 s bit-identical. Then DINOv2-giant host loops → device, fused DiT adaLN + QKV-split-norm kernels, and a device FourierEmbed. Unlike the video DiTs, the 3D forward is now near its compute floor (batched CFG was measured and ruled out).
+
 ## Quick start
 
 ```bash

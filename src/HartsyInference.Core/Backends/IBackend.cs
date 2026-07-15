@@ -1730,6 +1730,63 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>Dense 3D convolution (gather form). Input/output are <c>[N, C, D, H, W]</c>; <paramref name="weight"/>
+    /// is <c>[C_out, C_in, kD, kH, kW]</c> (PyTorch <c>Conv3d</c>, groups=1). Output dims are
+    /// <c>(dim + 2·pad − K)/stride + 1</c>. Used by the TRELLIS sparse-structure VAE decoder (16³ latent → 64³
+    /// occupancy). Default implementation is a CPU gather loop over F32 NCDHW tensors; backends override for perf.</summary>
+    unsafe void Conv3d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int strideD, int strideH, int strideW, int padD, int padH, int padW)
+    {
+        if (input.DType != DType.F32 || output.DType != DType.F32 || weight.DType != DType.F32)
+            throw new NotSupportedException($"Conv3d default fallback only supports F32 — got input={input.DType}, output={output.DType}, weight={weight.DType}.");
+        if (input.Shape.Rank != 5 || output.Shape.Rank != 5 || weight.Shape.Rank != 5)
+            throw new ArgumentException($"Conv3d requires 5D [N,C,D,H,W] tensors; got input {input.Shape}, output {output.Shape}, weight {weight.Shape}.");
+
+        int n = (int)input.Shape[0], cIn = (int)input.Shape[1];
+        int iD = (int)input.Shape[2], iH = (int)input.Shape[3], iW = (int)input.Shape[4];
+        int cOut = (int)output.Shape[1];
+        int oD = (int)output.Shape[2], oH = (int)output.Shape[3], oW = (int)output.Shape[4];
+        int kD = (int)weight.Shape[2], kH = (int)weight.Shape[3], kW = (int)weight.Shape[4];
+        if (weight.Shape[0] != cOut || weight.Shape[1] != cIn)
+            throw new ArgumentException($"Conv3d weight [{weight.Shape[0]},{weight.Shape[1]},...] must equal [C_out={cOut}, C_in={cIn}, ...].");
+
+        float* srcBase = (float*)input.DataPointer, dstBase = (float*)output.DataPointer;
+        float* wBase = (float*)weight.DataPointer, bBase = bias is null ? null : (float*)bias.DataPointer;
+
+        for (int b = 0; b < n; b++)
+            for (int co = 0; co < cOut; co++)
+            {
+                float biasVal = bBase is null ? 0f : bBase[co];
+                float* dst = dstBase + (((long)b * cOut + co) * oD) * oH * oW;
+                for (int od = 0; od < oD; od++)
+                    for (int oh = 0; oh < oH; oh++)
+                        for (int ow = 0; ow < oW; ow++)
+                        {
+                            float acc = biasVal;
+                            int id0 = od * strideD - padD, ih0 = oh * strideH - padH, iw0 = ow * strideW - padW;
+                            for (int ci = 0; ci < cIn; ci++)
+                            {
+                                float* src = srcBase + (((long)b * cIn + ci) * iD) * iH * iW;
+                                long wOff = (((long)co * cIn + ci) * kD) * kH * kW;
+                                for (int kd = 0; kd < kD; kd++)
+                                {
+                                    int id = id0 + kd; if (id < 0 || id >= iD) continue;
+                                    for (int kh = 0; kh < kH; kh++)
+                                    {
+                                        int ih = ih0 + kh; if (ih < 0 || ih >= iH) continue;
+                                        for (int kw = 0; kw < kW; kw++)
+                                        {
+                                            int iw = iw0 + kw; if (iw < 0 || iw >= iW) continue;
+                                            acc += src[(id * iH + ih) * iW + iw] * wBase[wOff + (kd * kH + kh) * kW + kw];
+                                        }
+                                    }
+                                }
+                            }
+                            dst[(od * oH + oh) * oW + ow] = acc;
+                        }
+            }
+    }
+
     /// <summary>Depthwise 2D convolution — each output channel sees exactly one input channel
     /// (groups = C). Used by YOLO11's class branch and the C2PSA positional encoding. Weight
     /// shape is <c>[C, 1, kH, kW]</c> and bias <c>[C]</c>. Default implementation is a CPU loop

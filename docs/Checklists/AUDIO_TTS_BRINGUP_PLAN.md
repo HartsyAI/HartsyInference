@@ -114,8 +114,36 @@ harder clone work.
 ---
 
 ## Tier 3 — Full engine bring-up (large; each a real port + weight recipe)
-- **StyleTTS2** — add `StyleTts2Pipeline.LoadFromCheckpoint` (per-key load for PLBERT / text-encoder / prosody /
-  decoder / StyleEncoder / StyleDenoiser from the LibriTTS checkpoint).
+- **StyleTTS2** — 🚧 **build started 2026-07-15.** Recon done: `yl4579/StyleTTS2-LibriTTS` `epochs_2nd_00020.pth`
+  downloaded; structure = `net.{bert, bert_encoder, predictor, decoder, text_encoder, predictor_encoder,
+  style_encoder, diffusion}` (+ training-only aligner/pitch/discriminators to ignore). Config dims confirmed
+  **Kokoro-compatible** (hidden 512, style_dim 128×2, n_token 178, n_mels 80, 24 kHz, decoder 8h·3L) →
+  bert/text_encoder/predictor/decoder reuse Kokoro's submodule loaders (flatten `net.{c}.module.…`→`{c}.…`).
+  **The two style submodules are scaffolds that must be reconciled to the real checkpoint before they load
+  correctly:**
+  - *StyleEncoder* (clone path): checkpoint ResBlk = StarGAN-v2 with `conv1` dim_in→**dim_in** + a **learned
+    depthwise stride-2 downsample** (`downsample_res.conv`, groups=dim_in) on the residual, avgpool only on the
+    shortcut; the engine's `ResBlk2D` has `conv1` dim_in→dim_out + avgpool on both → **rewrite ResBlk2D** (+ needs
+    a grouped/depthwise `Conv2D`). Keys `shared.0/1-4/6`→`stem/blocks.0-3/tail`. Spectral-norm σ-fold
+    (`weight_orig`/`weight_u`/`weight_v` → `W/σ`) currently stubbed (uses `weight_orig` raw).
+  - *StyleDenoiser / diffusion* (random/perturbed): checkpoint = archinetai `Transformer1d` (`diffusion.net.blocks.N`
+    with fused `to_kv`, `attention.attention.to_out`, `norm.fc`/`norm_context.fc` AdaLN, `feed_forward.0/2`); the
+    engine's `StyleTransformerLayer` expects `unet.blocks`, separate `to_k/to_v`, `to_scale_shift` and loads
+    *leniently* (missing keys → no-op → silent garbage) → reconcile the transformer arch + write the sampler.
+  - Then `StyleTts2Pipeline.LoadFromCheckpoint` (Kokoro submodules + reconciled style path) + verify via Swarm
+    (Clone with a `reference_audio.zip` clip is the most bounded first target; Random needs the diffusion done).
+  - **Progress 2026-07-15:** ✅ **StyleEncoder reconciled + VERIFIED — corr 1.000000** vs the Python `yl4579/StyleTTS2`
+    reference (both acoustic + prosodic; norms exact). Fixes: real StarGAN-v2 ResBlk (`conv1` in→in, learned depthwise
+    stride-2 `downsample_res`, `conv2` in→out, avgpool shortcut with the odd-width **replicate-pad**) + spectral-norm
+    σ-fold + `StyleTts2Weights.Adapt` (`shared.N`→`stem/blocks/tail`). ✅ **All 6 submodules load** from LibriTTS
+    (dims Kokoro-compatible). ✅ `LoadFromCheckpoint` + 178-symbol tokenizer + engine espeak-IPA phonemizer + clone
+    pipeline wired. **BLOCKER found:** the LibriTTS decoder is **`type: hifigan`** (upsample_rates `[10,5,3,2]`=300,
+    Snake `alphas`, 9-harmonic `m_source`, `conv_post`→1-ch waveform + tanh) — **NOT Kokoro's iSTFTNet** (2-stage +
+    iSTFT), so `KokoroIStftNetDecoder` can't drive it. **Next: implement a StyleTTS2 HiFiGAN generator** (reuse
+    `SnakeResBlock` + `NsfVocoderDsp.GenerateHarmonicSource` + `ConvTranspose1d`, AdaIN-conditioned on style; 4 upsample
+    stages + per-stage noise-conv injection), verify vs the Python ref, then clone→whisper. Diffusion (Random mode)
+    still a scaffold. **Regression: all changes StyleTTS2-only** (`StyleEncoder.cs`/`StyleTts2Weights.cs`/
+    `StyleTts2Pipeline.cs`) — no shared or other-model code touched.
 - **Spark-TTS** — reconcile `SparkTtsConfig` token offsets + BiCodec decoder keys to the real checkpoint (parity
   harness already ✅; runtime weight-valid load is the gap).
 - **Zonos** — build the conditioning-prefix `[1,P,hidden]` (espeak phonemes + speaker emb + emotion/pitch/rate/lang).

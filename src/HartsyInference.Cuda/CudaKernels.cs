@@ -206,6 +206,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditLayerNormModulateF32;
     private readonly nint _ditQkvSplitNormF32;
     private readonly nint _fourierEmbedF32;
+    private readonly nint _conv3dF32;
 
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
     private readonly CudaModule _ditF16Module;
@@ -469,6 +470,7 @@ public sealed class CudaKernels : IDisposable
         _ditLayerNormModulateF32 = _ditF32Module.GetFunction("dit_layernorm_modulate_f32");
         _ditQkvSplitNormF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_f32");
         _fourierEmbedF32 = _ditF32Module.GetFunction("fourier_embed_f32");
+        _conv3dF32 = _ditF32Module.GetFunction("conv3d_f32");
 
         _mg3ActionModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mg3_action.ptx"));
         _mg3SplitQkvTemporalF32 = _mg3ActionModule.GetFunction("mg3_split_qkv_temporal_f32");
@@ -1986,6 +1988,24 @@ public sealed class CudaKernels : IDisposable
         args[0] = &dArg; args[1] = &cArg; args[2] = &countArg; args[3] = &bArg; args[4] = &dimArg;
         uint grid = (uint)(((long)count * 3 + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_fourierEmbedF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Dense 3D convolution (gather form, one thread per output element). Weight [Cout,Cin,kD,kH,kW].</summary>
+    public unsafe void LaunchConv3d(ulong outp, ulong input, ulong weight, ulong bias,
+        int n, int cin, int cout, int iD, int iH, int iW, int oD, int oH, int oW,
+        int kD, int kH, int kW, int sD, int sH, int sW, int pD, int pH, int pW, nint stream)
+    {
+        ulong oArg = outp, iArg = input, wArg = weight, bArg = bias;
+        int nA = n, cinA = cin, coutA = cout, iDA = iD, iHA = iH, iWA = iW, oDA = oD, oHA = oH, oWA = oW,
+            kDA = kD, kHA = kH, kWA = kW, sDA = sD, sHA = sH, sWA = sW, pDA = pD, pHA = pH, pWA = pW;
+        void** args = stackalloc void*[22];
+        args[0] = &oArg; args[1] = &iArg; args[2] = &wArg; args[3] = &bArg;
+        args[4] = &nA; args[5] = &cinA; args[6] = &coutA; args[7] = &iDA; args[8] = &iHA; args[9] = &iWA;
+        args[10] = &oDA; args[11] = &oHA; args[12] = &oWA; args[13] = &kDA; args[14] = &kHA; args[15] = &kWA;
+        args[16] = &sDA; args[17] = &sHA; args[18] = &sWA; args[19] = &pDA; args[20] = &pHA; args[21] = &pWA;
+        long total = (long)n * cout * oD * oH * oW;
+        uint grid = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_conv3dF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Add scalar (out = in + c) with F16 I/O (scalar stays F32).</summary>
