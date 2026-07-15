@@ -55,6 +55,7 @@ internal sealed unsafe class Hunyuan3DDoubleBlock
     public (Tensor img, Tensor txt) Forward(IBackend backend, Tensor img, Tensor txt, Tensor vec)
     {
         int nImg = (int)img.Shape[1], nTxt = (int)txt.Shape[1], total = nImg + nTxt;
+        DType act = img.DType;   // F16 on the DiT F16 path (blocks dtype-follow the cast at the loop boundary)
         float scale = 1f / MathF.Sqrt(_headDim);
         TensorShape imgShape = new(1, nImg, _width), txtShape = new(1, nTxt, _width);
         TensorShape imgHeads = new(1, nImg, _numHeads, _headDim), txtHeads = new(1, nTxt, _numHeads, _headDim);
@@ -67,18 +68,18 @@ internal sealed unsafe class Hunyuan3DDoubleBlock
         (Tensor iQ, Tensor iK, Tensor iV) = Qkv(backend, img, im[0], im[1], _imgQkvW!, _imgQkvB!, _imgQN, _imgKN, imgShape, imgHeads);
         (Tensor tQ, Tensor tK, Tensor tV) = Qkv(backend, txt, tm[0], tm[1], _txtQkvW!, _txtQkvB!, _txtQN, _txtKN, txtShape, txtHeads);
 
-        Tensor jQf = new(jointFlat, DType.F32); backend.Concat(jQf, [tQ, iQ], 1);
-        Tensor jKf = new(jointFlat, DType.F32); backend.Concat(jKf, [tK, iK], 1);
-        Tensor jVf = new(jointFlat, DType.F32); backend.Concat(jVf, [tV, iV], 1);
+        Tensor jQf = new(jointFlat, act); backend.Concat(jQf, [tQ, iQ], 1);
+        Tensor jKf = new(jointFlat, act); backend.Concat(jKf, [tK, iK], 1);
+        Tensor jVf = new(jointFlat, act); backend.Concat(jVf, [tV, iV], 1);
         iQ.Dispose(); iK.Dispose(); iV.Dispose(); tQ.Dispose(); tK.Dispose(); tV.Dispose();
-        Tensor jQ = new(jointMh, DType.F32); backend.Permute0213(jQ, jQf, total, _numHeads, _headDim); jQf.Dispose();
-        Tensor jK = new(jointMh, DType.F32); backend.Permute0213(jK, jKf, total, _numHeads, _headDim); jKf.Dispose();
-        Tensor jV = new(jointMh, DType.F32); backend.Permute0213(jV, jVf, total, _numHeads, _headDim); jVf.Dispose();
-        Tensor attn = new(jointMh, DType.F32); backend.ScaledDotProductAttention(attn, jQ, jK, jV, null, scale);
+        Tensor jQ = new(jointMh, act); backend.Permute0213(jQ, jQf, total, _numHeads, _headDim); jQf.Dispose();
+        Tensor jK = new(jointMh, act); backend.Permute0213(jK, jKf, total, _numHeads, _headDim); jKf.Dispose();
+        Tensor jV = new(jointMh, act); backend.Permute0213(jV, jVf, total, _numHeads, _headDim); jVf.Dispose();
+        Tensor attn = new(jointMh, act); backend.ScaledDotProductAttention(attn, jQ, jK, jV, null, scale, allowF16: true);
         jQ.Dispose(); jK.Dispose(); jV.Dispose();
-        Tensor attnFlat = new(jointFlat, DType.F32); backend.Permute0213(attnFlat, attn, _numHeads, total, _headDim); attn.Dispose();
-        Tensor tAttn = new(txtShape, DType.F32); backend.SliceRows(tAttn, attnFlat, 0);
-        Tensor iAttn = new(imgShape, DType.F32); backend.SliceRows(iAttn, attnFlat, nTxt);
+        Tensor attnFlat = new(jointFlat, act); backend.Permute0213(attnFlat, attn, _numHeads, total, _headDim); attn.Dispose();
+        Tensor tAttn = new(txtShape, act); backend.SliceRows(tAttn, attnFlat, 0);
+        Tensor iAttn = new(imgShape, act); backend.SliceRows(iAttn, attnFlat, nTxt);
         attnFlat.Dispose();
 
         Tensor iAfter = AttnResidual(backend, img, iAttn, _imgProjW!, _imgProjB!, im[2], imgShape); iAttn.Dispose();
@@ -95,21 +96,23 @@ internal sealed unsafe class Hunyuan3DDoubleBlock
     private (Tensor q, Tensor k, Tensor v) Qkv(IBackend backend, Tensor x, Tensor shift, Tensor scale,
         Tensor qkvW, Tensor qkvB, QkNorm qn, QkNorm kn, TensorShape flat, TensorShape heads)
     {
+        DType act = x.DType;
         Tensor mod = Hunyuan3DGpuOps.NormModulate(backend, x, shift, scale, flat);
-        Tensor qkv = new(new TensorShape(1, flat[1], 3 * _width), DType.F32); backend.Linear(qkv, mod, qkvW, qkvB); mod.Dispose();
-        Tensor q = new(heads, DType.F32); backend.SliceLastDim(q, qkv, 0);
-        Tensor k = new(heads, DType.F32); backend.SliceLastDim(k, qkv, _width);
-        Tensor v = new(heads, DType.F32); backend.SliceLastDim(v, qkv, 2 * _width);
+        Tensor qkv = new(new TensorShape(1, flat[1], 3 * _width), act); backend.Linear(qkv, mod, qkvW, qkvB); mod.Dispose();
+        Tensor q = new(heads, act); backend.SliceLastDim(q, qkv, 0);
+        Tensor k = new(heads, act); backend.SliceLastDim(k, qkv, _width);
+        Tensor v = new(heads, act); backend.SliceLastDim(v, qkv, 2 * _width);
         qkv.Dispose();
-        Tensor qOut = new(heads, DType.F32); backend.RmsNorm(qOut, q, qn.Weight, qn.Eps); q.Dispose();
-        Tensor kOut = new(heads, DType.F32); backend.RmsNorm(kOut, k, kn.Weight, kn.Eps); k.Dispose();
+        Tensor qOut = new(heads, act); backend.RmsNorm(qOut, q, qn.Weight, qn.Eps); q.Dispose();
+        Tensor kOut = new(heads, act); backend.RmsNorm(kOut, k, kn.Weight, kn.Eps); k.Dispose();
         return (qOut, kOut, v);
     }
 
     private static Tensor AttnResidual(IBackend backend, Tensor x, Tensor attn, Tensor projW, Tensor projB, Tensor gate, TensorShape shape)
     {
-        Tensor proj = new(shape, DType.F32); backend.Linear(proj, attn, projW, projB);
-        Tensor res = new(shape, DType.F32); backend.GatedResidualLastDim(res, x, proj, gate); proj.Dispose();
+        DType act = x.DType;
+        Tensor proj = new(shape, act); backend.Linear(proj, attn, projW, projB);
+        Tensor res = new(shape, act); backend.GatedResidualLastDim(res, x, proj, gate); proj.Dispose();
         return res;
     }
 
@@ -117,7 +120,7 @@ internal sealed unsafe class Hunyuan3DDoubleBlock
     {
         Tensor mod = Hunyuan3DGpuOps.NormModulate(backend, x, shift, scale, shape);
         Tensor mlp = ffn.Forward(backend, mod, 1, n); mod.Dispose();
-        Tensor res = new(shape, DType.F32); backend.GatedResidualLastDim(res, x, mlp, gate); mlp.Dispose();
+        Tensor res = new(shape, x.DType); backend.GatedResidualLastDim(res, x, mlp, gate); mlp.Dispose();
         return res;
     }
 
@@ -157,32 +160,33 @@ internal sealed unsafe class Hunyuan3DSingleBlock
     public Tensor Forward(IBackend backend, Tensor x, Tensor vec)
     {
         int s = (int)x.Shape[1];
+        DType act = x.DType;   // F16 on the DiT F16 path (dtype-follows the loop-boundary cast)
         float scale = 1f / MathF.Sqrt(_headDim);
         TensorShape flat = new(1, s, _width), heads = new(1, s, _numHeads, _headDim), mh = new(1, _numHeads, s, _headDim);
 
         Tensor[] m = Hunyuan3DGpuOps.ModParams(backend, vec, _modW!, _modB!, 3, _width);
         Tensor mod = Hunyuan3DGpuOps.NormModulate(backend, x, m[0], m[1], flat);
-        Tensor lin1 = new(new TensorShape(1, s, 3 * _width + _mlpDim), DType.F32); backend.Linear(lin1, mod, _lin1W!, _lin1B!); mod.Dispose();
-        Tensor qkv = new(new TensorShape(1, s, 3 * _width), DType.F32); backend.SliceLastDim(qkv, lin1, 0);
-        Tensor mlp = new(new TensorShape(1, s, _mlpDim), DType.F32); backend.SliceLastDim(mlp, lin1, 3 * _width);
+        Tensor lin1 = new(new TensorShape(1, s, 3 * _width + _mlpDim), act); backend.Linear(lin1, mod, _lin1W!, _lin1B!); mod.Dispose();
+        Tensor qkv = new(new TensorShape(1, s, 3 * _width), act); backend.SliceLastDim(qkv, lin1, 0);
+        Tensor mlp = new(new TensorShape(1, s, _mlpDim), act); backend.SliceLastDim(mlp, lin1, 3 * _width);
         lin1.Dispose();
 
-        Tensor q = new(heads, DType.F32); backend.SliceLastDim(q, qkv, 0);
-        Tensor k = new(heads, DType.F32); backend.SliceLastDim(k, qkv, _width);
-        Tensor v = new(heads, DType.F32); backend.SliceLastDim(v, qkv, 2 * _width);
+        Tensor q = new(heads, act); backend.SliceLastDim(q, qkv, 0);
+        Tensor k = new(heads, act); backend.SliceLastDim(k, qkv, _width);
+        Tensor v = new(heads, act); backend.SliceLastDim(v, qkv, 2 * _width);
         qkv.Dispose();
-        Tensor qn = new(heads, DType.F32); backend.RmsNorm(qn, q, _qn.Weight, _qn.Eps); q.Dispose();
-        Tensor kn = new(heads, DType.F32); backend.RmsNorm(kn, k, _kn.Weight, _kn.Eps); k.Dispose();
-        Tensor qP = new(mh, DType.F32); backend.Permute0213(qP, qn, s, _numHeads, _headDim); qn.Dispose();
-        Tensor kP = new(mh, DType.F32); backend.Permute0213(kP, kn, s, _numHeads, _headDim); kn.Dispose();
-        Tensor vP = new(mh, DType.F32); backend.Permute0213(vP, v, s, _numHeads, _headDim); v.Dispose();
-        Tensor attn = new(mh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kP, vP, null, scale); qP.Dispose(); kP.Dispose(); vP.Dispose();
-        Tensor attnFlat = new(flat, DType.F32); backend.Permute0213(attnFlat, attn, _numHeads, s, _headDim); attn.Dispose();
+        Tensor qn = new(heads, act); backend.RmsNorm(qn, q, _qn.Weight, _qn.Eps); q.Dispose();
+        Tensor kn = new(heads, act); backend.RmsNorm(kn, k, _kn.Weight, _kn.Eps); k.Dispose();
+        Tensor qP = new(mh, act); backend.Permute0213(qP, qn, s, _numHeads, _headDim); qn.Dispose();
+        Tensor kP = new(mh, act); backend.Permute0213(kP, kn, s, _numHeads, _headDim); kn.Dispose();
+        Tensor vP = new(mh, act); backend.Permute0213(vP, v, s, _numHeads, _headDim); v.Dispose();
+        Tensor attn = new(mh, act); backend.ScaledDotProductAttention(attn, qP, kP, vP, null, scale, allowF16: true); qP.Dispose(); kP.Dispose(); vP.Dispose();
+        Tensor attnFlat = new(flat, act); backend.Permute0213(attnFlat, attn, _numHeads, s, _headDim); attn.Dispose();
 
-        Tensor mlpAct = new(new TensorShape(1, s, _mlpDim), DType.F32); backend.Gelu(mlpAct, mlp); mlp.Dispose();
-        Tensor cat = new(new TensorShape(1, s, _width + _mlpDim), DType.F32); backend.Concat(cat, [attnFlat, mlpAct], 2); attnFlat.Dispose(); mlpAct.Dispose();
-        Tensor outp = new(flat, DType.F32); backend.Linear(outp, cat, _lin2W!, _lin2B!); cat.Dispose();
-        Tensor res = new(flat, DType.F32); backend.GatedResidualLastDim(res, x, outp, m[2]); outp.Dispose();
+        Tensor mlpAct = new(new TensorShape(1, s, _mlpDim), act); backend.Gelu(mlpAct, mlp); mlp.Dispose();
+        Tensor cat = new(new TensorShape(1, s, _width + _mlpDim), act); backend.Concat(cat, [attnFlat, mlpAct], 2); attnFlat.Dispose(); mlpAct.Dispose();
+        Tensor outp = new(flat, act); backend.Linear(outp, cat, _lin2W!, _lin2B!); cat.Dispose();
+        Tensor res = new(flat, act); backend.GatedResidualLastDim(res, x, outp, m[2]); outp.Dispose();
         foreach (Tensor t in m) t.Dispose();
         return res;
     }
@@ -207,12 +211,15 @@ internal static unsafe class Hunyuan3DGpuOps
         return p;
     }
 
-    /// <summary><c>(1 + scale)·LayerNormNoAffine(x, eps 1e-6) + shift</c>, scale/shift broadcast over seq ([B,W]).</summary>
+    /// <summary><c>(1 + scale)·LayerNormNoAffine(x, eps 1e-6) + shift</c>, scale/shift broadcast over seq ([B,W]).
+    /// Activation (normed/output) follows <paramref name="x"/>'s dtype (F16 on the DiT F16 path); the tiny
+    /// per-channel scale/shift stay F32 (the F16 kernels take F16 activation + F32 params).</summary>
     public static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
     {
-        Tensor normed = new(shape, DType.F32); backend.LayerNormNoAffine(normed, x, 1e-6f);
+        DType act = x.DType;
+        Tensor normed = new(shape, act); backend.LayerNormNoAffine(normed, x, 1e-6f);
         Tensor scalePlus1 = new(scale.Shape, DType.F32); backend.AddScalar(scalePlus1, scale, 1f);
-        Tensor outp = new(shape, DType.F32); backend.AffineBroadcastLastDim(outp, normed, scalePlus1, shift);
+        Tensor outp = new(shape, act); backend.AffineBroadcastLastDim(outp, normed, scalePlus1, shift);
         normed.Dispose(); scalePlus1.Dispose();
         return outp;
     }

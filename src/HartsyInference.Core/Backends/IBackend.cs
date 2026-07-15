@@ -288,6 +288,34 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>GEGLU with exact (erf) GELU gate: <paramref name="output"/> <c>[rows, inner]</c> =
+    /// <c>proj[:, :inner] · gelu_erf(proj[:, inner:])</c>, where <paramref name="proj"/> is <c>[rows, 2·inner]</c>
+    /// and <c>gelu_erf(x)=0.5x(1+erf(x/√2))</c>. Fused split+gate — replaces the per-row host loop whose
+    /// mid-forward <c>DataPointer</c> read drained the compute stream.</summary>
+    unsafe void GegluErf(Tensor output, Tensor proj, long rows, int inner)
+    {
+        if (output.DType != DType.F32 || proj.DType != DType.F32)
+            throw new NotSupportedException("GegluErf default fallback only supports F32.");
+        static float Erf(float x)
+        {
+            int sign = x < 0 ? -1 : 1;
+            x = MathF.Abs(x);
+            float t = 1f / (1f + 0.3275911f * x);
+            float y = 1f - (((((1.061405429f * t - 1.453152027f) * t) + 1.421413741f) * t - 0.284496736f) * t + 0.254829592f) * t * MathF.Exp(-x * x);
+            return sign * y;
+        }
+        float* pp = (float*)proj.DataPointer, gp = (float*)output.DataPointer;
+        for (long row = 0; row < rows; row++)
+        {
+            float* hin = pp + row * 2 * inner, gin = hin + inner, gout = gp + row * inner;
+            for (int i = 0; i < inner; i++)
+            {
+                float g = gin[i];
+                gout[i] = hin[i] * (0.5f * g * (1f + Erf(g * 0.70710678118654752440f)));
+            }
+        }
+    }
+
     /// <summary>AdaLN modulation split (scale-only, tanh-gated). <paramref name="proj"/> is <c>[B, 4*D]</c> =
     /// chunk(scale_msa, gate_msa, scale_mlp, gate_mlp); writes four <c>[B, D]</c> tensors applying
     /// <c>1 + x</c> to scales and <c>tanh(x)</c> to gates (Ideogram 4's ComputeModulation).</summary>

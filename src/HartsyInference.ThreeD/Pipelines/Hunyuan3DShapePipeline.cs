@@ -97,6 +97,9 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         int steps = request.Steps > 0 ? request.Steps : _cfg.NumInferenceSteps;
         float guidance = request.CfgScale > 0 ? request.CfgScale : _cfg.GuidanceScale;
         int gridRes = request.GridResolution > 0 ? request.GridResolution : _cfg.GridResolution;
+        bool phase = Environment.GetEnvironmentVariable("HARTSY_3D_PHASE") == "1";
+        System.Diagnostics.Stopwatch pw = System.Diagnostics.Stopwatch.StartNew();
+        void Probe(string tag) { if (phase) { Backend.Sync(); Console.WriteLine($"[hy3d-phase] {tag}: {pw.ElapsedMilliseconds} ms"); pw.Restart(); } }
 
         // 1. Image → DINOv2 conditioning tokens [1, seq, condDim].
         Tensor pixels = _preprocessor.Preprocess(request.ImageRgb, request.Width, request.Height);
@@ -104,6 +107,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         Tensor cond = _dino.Encode(Backend, pixels);
         pixels.Dispose();
         Backend.FreeWeights(_dino.EnumerateWeights());
+        Probe("dinov2-cond");
         Tensor uncond = new(cond.Shape, DType.F32); // zero (null) conditioning for CFG
 
         // 2. Flow-match denoise the VecSet latent. hy3dgen FlowMatchEulerDiscreteScheduler (shift 1): sigmas
@@ -120,7 +124,10 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
             float t = sigmas[k] * 1000f, dt = sigmas[k + 1] - sigmas[k];
             Tensor vCond = _dit.Forward(Backend, latents, cond, t);
             Tensor vUncond = _dit.Forward(Backend, latents, uncond, t);
-            FlowStepAscending(latents, vCond, vUncond, guidance, dt);
+            // Device-resident CFG + ascending Euler (matches FlowStepAscending: z += dt·(uncond + cfg·(cond−uncond))).
+            // Keeps `latents` on the GPU across the whole loop — no per-step D2H drain of the two velocities (the
+            // graph replays stay async; the stream drains only once, at the post-loop scale-factor readback).
+            Backend.CfgEulerStep(latents, vCond, vUncond, guidance, dt);
             vCond.Dispose();
             vUncond.Dispose();
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));
@@ -129,6 +136,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         Backend.FreeWeights(_dit.EnumerateWeights());
         cond.Dispose();
         uncond.Dispose();
+        Probe($"dit-loop ({steps} steps x2 CFG)");
 
         // 3. Scale the denoised latent (latents /= scale_factor), then ShapeVAE decode → occupancy → mesh.
         float inv = 1f / _cfg.VaeScaleFactor;
@@ -139,18 +147,11 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         ScalarField3D field = _vae.Decode(Backend, latents, gridRes, _cfg.BoundingBox);
         Backend.FreeWeights(_vae.EnumerateWeights());
         latents.Dispose();
+        Probe($"vae-decode ({gridRes}^3)");
 
         Mesh mesh = MeshOps.ComputeVertexNormals(MarchingCubes.Extract(field, request.IsoLevel != 0f ? request.IsoLevel : _cfg.IsoLevel));
+        Probe("marching-cubes");
         return new ThreeDResult { Mesh = mesh, Seed = seed };
     }
 
-    /// <summary>hy3dgen flow-match Euler step with 2-way CFG: <c>noise_pred = uncond + cfg·(cond − uncond)</c>,
-    /// then ascending update <c>latents += dt·noise_pred</c> (dt = σ_next − σ &gt; 0). vCond/vUncond are GPU
-    /// activations; reading their <c>DataPointer</c> lazily syncs. latents is a host tensor (re-uploaded next step).</summary>
-    private static void FlowStepAscending(Tensor latents, Tensor vCond, Tensor vUncond, float cfg, float dt)
-    {
-        long n = latents.Shape.ElementCount;
-        float* z = (float*)latents.DataPointer, c = (float*)vCond.DataPointer, u = (float*)vUncond.DataPointer;
-        for (long i = 0; i < n; i++) z[i] += dt * (u[i] + cfg * (c[i] - u[i]));
-    }
 }

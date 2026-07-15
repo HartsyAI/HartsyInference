@@ -2003,6 +2003,54 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>2D transposed convolution (device gather kernel). Weight <c>[Cin,Cout,kH,kW]</c>. Overrides the
+    /// CPU scatter-add default — the TripoSR/YOLO/Demucs upsample was running on the host.</summary>
+    public unsafe void ConvTranspose2d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int strideH, int strideW, int padH, int padW)
+    {
+        if (input.DType != DType.F32 || output.DType != DType.F32 || weight.DType != DType.F32)
+            throw new NotSupportedException("CUDA ConvTranspose2d supports F32 only.");
+        int n = (int)input.Shape[0], cIn = (int)input.Shape[1], iH = (int)input.Shape[2], iW = (int)input.Shape[3];
+        int cOut = (int)output.Shape[1], oH = (int)output.Shape[2], oW = (int)output.Shape[3];
+        int kH = (int)weight.Shape[2], kW = (int)weight.Shape[3];
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pIn = 0, pW = 0, pB = 0; bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pW = GpuTransferHelper.CopyToDevice(weight);
+            pB = bias is null ? 0 : GpuTransferHelper.CopyToDevice(bias);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchConvTranspose2d(pOut, pIn, pW, pB, n, cIn, cOut, iH, iW, oH, oW,
+                kH, kW, strideH, strideW, padH, padW, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
+        }
+        finally
+        {
+            if (!cached) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn); GpuTransferHelper.FreeDevice(pW); GpuTransferHelper.FreeDevice(pB);
+        }
+    }
+
+    /// <summary>GEGLU with exact erf gate (device): output[rows,inner] = proj[:,:inner]·gelu_erf(proj[:,inner:]).</summary>
+    public unsafe void GegluErf(Tensor output, Tensor proj, long rows, int inner)
+    {
+        if (output.DType != DType.F32 || proj.DType != DType.F32)
+            throw new NotSupportedException("CUDA GegluErf supports F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0; bool cached = false;
+        try
+        {
+            ulong pProj = GpuTransferHelper.CopyToDevice(proj);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchGegluErf(pOut, pProj, rows, inner, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); }
+    }
+
     /// <summary>DIAMOND pixel quantize to 256 levels: out = floor((clamp(v,-1,1)+1)·127.5)/127.5 − 1 (device).</summary>
     public void PixelQuantize(Tensor output, Tensor input)
     {

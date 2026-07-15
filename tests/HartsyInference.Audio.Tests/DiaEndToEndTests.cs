@@ -29,7 +29,8 @@ public sealed class DiaEndToEndTests
     [Fact]
     public async Task Text_To_Wav_To_Whisper_RecoversTargetWords()
     {
-        string diaPath = Path.Combine(AudioModelCache.GetRepoDirectory("nari-labs/Dia-1.6B"), "model.safetensors");
+        string diaPath = Environment.GetEnvironmentVariable("DIA_MODEL_PATH")
+            ?? Path.Combine(AudioModelCache.GetRepoDirectory("nari-labs/Dia-1.6B"), "model.safetensors");
         string dacPath = Path.Combine(AudioModelCache.GetRepoDirectory("descript/descript-audio-codec"), "weights.pth");
         string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base");
         if (!File.Exists(diaPath) || !File.Exists(dacPath))
@@ -71,8 +72,9 @@ public sealed class DiaEndToEndTests
             using DiaPipeline pipe = DiaPipeline.LoadFromFiles(diaPath, dacPath);
             int[] textBytes = [.. Encoding.UTF8.GetBytes(script).Select(b => (int)b)];
 
+            int seed = int.TryParse(Environment.GetEnvironmentVariable("DIA_SEED"), out int sd) ? sd : 42;
             DateTime t0 = DateTime.UtcNow;
-            float[] pcm = pipe.Generate(backend, textBytes, maxTokens: maxTokens, seed: 42);
+            float[] pcm = pipe.Generate(backend, textBytes, maxTokens: maxTokens, seed: seed);
             double secs = (DateTime.UtcNow - t0).TotalSeconds;
 
             Assert.NotEmpty(pcm);
@@ -86,7 +88,7 @@ public sealed class DiaEndToEndTests
 
             string outDir = Path.Combine(Path.GetTempPath(), "hartsyinference_tts_to_stt");
             Directory.CreateDirectory(outDir);
-            string outWav = Path.Combine(outDir, $"dia_generated_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
+            string outWav = Path.Combine(outDir, $"dia_generated_seed{seed}_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
             WavFile.WriteMono16(outWav, pcm, pipe.SampleRate);
             _out.WriteLine($"Dia generated {pcm.Length} samples ({pcm.Length / (double)pipe.SampleRate:F2}s @ {pipe.SampleRate}Hz) " +
                 $"in {secs:F1}s. RMS={rms:F4} peak={peak:F4}.");

@@ -217,12 +217,14 @@ internal sealed unsafe class DinoViTLayer
         Tensor k = new(new TensorShape(batch, seq, _hidden), DType.F32);
         Tensor v = new(new TensorShape(batch, seq, _hidden), DType.F32);
         backend.Linear(q, input, _qW!, _qB!); backend.Linear(k, input, _kW!, _kB!); backend.Linear(v, input, _vW!, _vB!);
-        Tensor qh = ToHeads(q, batch, seq), kh = ToHeads(k, batch, seq), vh = ToHeads(v, batch, seq);
+        Tensor qh = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32); backend.Permute0213(qh, q, seq, _numHeads, _headDim);
+        Tensor kh = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32); backend.Permute0213(kh, k, seq, _numHeads, _headDim);
+        Tensor vh = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32); backend.Permute0213(vh, v, seq, _numHeads, _headDim);
         q.Dispose(); k.Dispose(); v.Dispose();
         Tensor ao = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
         backend.ScaledDotProductAttention(ao, qh, kh, vh, null, 1f / MathF.Sqrt(_headDim));
         qh.Dispose(); kh.Dispose(); vh.Dispose();
-        Tensor merged = FromHeads(ao, batch, seq); ao.Dispose();
+        Tensor merged = new(new TensorShape(batch, seq, _hidden), DType.F32); backend.Permute0213(merged, ao, _numHeads, seq, _headDim); ao.Dispose();
         Tensor proj = new(new TensorShape(batch, seq, _hidden), DType.F32);
         backend.Linear(proj, merged, _oW!, _oB!); merged.Dispose();
         return proj;

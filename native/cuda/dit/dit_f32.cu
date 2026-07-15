@@ -702,4 +702,66 @@ __global__ void triplane_grid_sample_f32(
     tri_sample_plane(planes + 2 * planeSz,   C, planeH, planeW, gy, gz, outF + base + 2 * C);
 }
 
+// GEGLU with exact (erf) GELU gate: out[row,i] = proj[row,i] * gelu_erf(proj[row, inner+i]), where
+// proj is [rows, 2*inner], out is [rows, inner], gelu_erf(x) = 0.5*x*(1+erf(x/sqrt2)). Fuses the split +
+// erf-gelu + gate multiply into one device pass — replaces the per-block host loop whose proj.DataPointer
+// read drained the compute stream every block (serializing the whole backbone).
+__global__ void geglu_erf_f32(
+    float* __restrict__ out,
+    const float* __restrict__ proj,
+    unsigned long long rows, unsigned int inner)
+{
+    unsigned long long total = rows * inner;
+    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    unsigned long long row = idx / inner;
+    unsigned int i = (unsigned int)(idx % inner);
+    const float* base = proj + row * 2ULL * inner;
+    float h = base[i];
+    float g = base[inner + i];
+    out[idx] = h * (0.5f * g * (1.0f + erff(g * 0.70710678118654752440f)));
+}
+
+// 2D transposed convolution (gather form — one thread per output element, no atomics). Weight is
+// [Cin, Cout, kH, kW] (PyTorch ConvTranspose2d). out[b,co,oy,ox] = bias[co] + Σ_{ci,ky,kx} in[b,ci,iy,ix]·W,
+// where iy = (oy+pH-ky)/sH (integer, in-range). Replaces the CPU scatter-add default (was ~1.5 s for TripoSR's
+// tiny 32²→64² upsample; also used by ClipSeg/YOLO/Demucs/RVC/ResembleEnhance).
+__global__ void conv_transpose2d_f32(
+    float* __restrict__ out, const float* __restrict__ in,
+    const float* __restrict__ weight, const float* __restrict__ bias,
+    int N, int Cin, int Cout, int iH, int iW, int oH, int oW,
+    int kH, int kW, int sH, int sW, int pH, int pW)
+{
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    long total = (long)N * Cout * oH * oW;
+    if (idx >= total) return;
+    int ox = (int)(idx % oW);
+    long r = idx / oW;
+    int oy = (int)(r % oH);
+    r /= oH;
+    int co = (int)(r % Cout);
+    int b = (int)(r / Cout);
+    float acc = bias ? bias[co] : 0.0f;
+    for (int ky = 0; ky < kH; ky++)
+    {
+        int ty = oy + pH - ky;
+        if (ty % sH != 0) continue;
+        int iy = ty / sH;
+        if (iy < 0 || iy >= iH) continue;
+        for (int kx = 0; kx < kW; kx++)
+        {
+            int tx = ox + pW - kx;
+            if (tx % sW != 0) continue;
+            int ix = tx / sW;
+            if (ix < 0 || ix >= iW) continue;
+            const float* inRow = in + (((long)b * Cin) * iH + iy) * iW + ix;
+            const float* wRow = weight + ((long)co * kH + ky) * kW + kx;
+            long inStride = (long)iH * iW, wStride = (long)Cout * kH * kW;
+            for (int ci = 0; ci < Cin; ci++)
+                acc += inRow[ci * inStride] * wRow[ci * wStride];
+        }
+    }
+    out[idx] = acc;
+}
+
 } // extern "C"

@@ -51,7 +51,7 @@ internal sealed unsafe class Hunyuan3DVaeResBlock
         Tensor qP = new(mh, DType.F32); backend.Permute0213(qP, qn, n, _heads, _headDim); qn.Dispose();
         Tensor kP = new(mh, DType.F32); backend.Permute0213(kP, kn, n, _heads, _headDim); kn.Dispose();
         Tensor vP = new(mh, DType.F32); backend.Permute0213(vP, v, n, _heads, _headDim); v.Dispose();
-        Tensor attn = new(mh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kP, vP, null, scale); qP.Dispose(); kP.Dispose(); vP.Dispose();
+        Tensor attn = new(mh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kP, vP, null, scale, allowF16: true); qP.Dispose(); kP.Dispose(); vP.Dispose();
         Tensor attnFlat = new(flat, DType.F32); backend.Permute0213(attnFlat, attn, _heads, n, _headDim); attn.Dispose();
         Tensor proj = new(flat, DType.F32); backend.Linear(proj, attnFlat, _projW!, _projB!); attnFlat.Dispose();
         Tensor x1 = new(flat, DType.F32); backend.Add(x1, x, proj); proj.Dispose();
@@ -141,7 +141,7 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
         Tensor q = new(heads, DType.F32); backend.Linear(q, n1, _cqW!, null); n1.Dispose();
         Tensor qn = new(heads, DType.F32); backend.LayerNorm(qn, q, _qnW!, _qnB!, 1e-6f); q.Dispose();
         Tensor qP = new(qmh, DType.F32); backend.Permute0213(qP, qn, count, _heads, _headDim); qn.Dispose();
-        Tensor attn = new(qmh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kv.kP, kv.vP, null, scale); qP.Dispose();
+        Tensor attn = new(qmh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kv.kP, kv.vP, null, scale, allowF16: true); qP.Dispose();
         Tensor attnFlat = new(flat, DType.F32); backend.Permute0213(attnFlat, attn, _heads, count, _headDim); attn.Dispose();
         Tensor proj = new(flat, DType.F32); backend.Linear(proj, attnFlat, _cprojW!, _cprojB!); attnFlat.Dispose();
         Tensor x1 = new(flat, DType.F32); backend.Add(x1, qEmb, proj); qEmb.Dispose(); proj.Dispose();

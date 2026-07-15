@@ -196,19 +196,8 @@ internal sealed unsafe class TripoSrBlock
         int width = _cfg.Width, inner = (int)_ffProjW!.Shape[0] / 2;   // proj emits 2·inner
         Tensor proj = new(new TensorShape(1, n, 2 * inner), DType.F32); backend.Linear(proj, src, _ffProjW!, _ffProjB!);
         Tensor gated = new(new TensorShape(1, n, inner), DType.F32);
-        float* pp = (float*)proj.DataPointer; float* gp = (float*)gated.DataPointer;
-        // out = first_half * gelu(second_half), split along last dim.
-        for (long row = 0; row < n; row++)
-        {
-            float* hin = pp + row * 2 * inner;
-            float* gin = hin + inner;
-            float* gout = gp + row * inner;
-            for (int i = 0; i < inner; i++)
-            {
-                float g = gin[i];
-                gout[i] = hin[i] * (0.5f * g * (1f + VitOps.Erf(g * 0.70710678118654752440f)));
-            }
-        }
+        // out = first_half * gelu_erf(second_half), split along last dim — fused device pass (no host round-trip).
+        backend.GegluErf(gated, proj, n, inner);
         proj.Dispose();
         Tensor f2 = new(new TensorShape(1, n, width), DType.F32); backend.Linear(f2, gated, _ffOutW!, _ffOutB!); gated.Dispose();
         return f2;

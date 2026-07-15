@@ -12,6 +12,17 @@ namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 /// Reuses the verified Flux helpers (<see cref="AdaLNModulation"/>, <see cref="QkNorm"/>, <see cref="SwiGluFfn"/>).</summary>
 public sealed unsafe class Hunyuan3DDit
 {
+    // ── CUDA-graph step capture. The 48-block DiT forward is per-op-host-overhead-bound (GEMM_F16 = 0%);
+    //    capturing the device-resident block loop once and replaying it with a single cuGraphLaunch per step
+    //    collapses ~720 host launches/forward → ~0. The timestep-varying modulation vector is computed OUTSIDE
+    //    capture and CopyInto'd into _vecFixed (stable address), so the graph captures ONCE and replays all steps
+    //    (latent/cond geometry is fixed across the loop). Clean eager fallback on any capture failure. ──
+    private const int GraphCaptureCall = 3;
+    private Tensor? _imgFixed, _txtFixed, _vecFixed, _velFixed;
+    private long _graphSig = long.MinValue;
+    private int _graphSigCalls;
+    private bool _graphDead;
+
     private readonly Hunyuan3DConfig _cfg;
     private readonly Hunyuan3DDoubleBlock[] _double;
     private readonly Hunyuan3DSingleBlock[] _single;
@@ -80,26 +91,113 @@ public sealed unsafe class Hunyuan3DDit
         Tensor t1a = new(t1.Shape, DType.F32); backend.Silu(t1a, t1); t1.Dispose();
         Tensor vec = new(new TensorShape(b, width), DType.F32); backend.Linear(vec, t1a, _timeIn2W!, _timeIn2B!); t1a.Dispose();
 
-        // Double stream: (img, txt) updated jointly. GPU-resident blocks → no per-block sync/host reads.
+        // ── Step-graph path: capture the 48-block loop + final layer once, replay per step. img/txt/vec (the only
+        //    per-step-varying inputs, incl. the timestep) are refreshed into fixed buffers via CopyInto BEFORE each
+        //    launch, so the captured region reads stable device addresses. Geometry (n, scond) is fixed across the
+        //    denoise loop → captured once. Falls back to eager cleanly on any capture failure. ──
+        bool graphMode = DitStepGraph.EnabledDefaultOn && backend.StepGraphSupported && !_graphDead;
+        if (graphMode)
+        {
+            _imgFixed ??= new(new TensorShape(b, n, width), DType.F32);
+            _txtFixed ??= new(new TensorShape(b, scond, width), DType.F32);
+            _vecFixed ??= new(new TensorShape(b, width), DType.F32);
+            _velFixed ??= new(new TensorShape(b, n, _cfg.LatentChannels), DType.F32);
+            backend.CopyInto(_imgFixed, img); img.Dispose();
+            backend.CopyInto(_txtFixed, txt); txt.Dispose();
+            backend.CopyInto(_vecFixed, vec); vec.Dispose();
+
+            long sig = ((long)n << 24) ^ scond;
+            bool ownerLost = !ReferenceEquals(backend.StepGraphOwner, this);
+            if (sig != _graphSig || ownerLost)
+            {
+                backend.StepGraphReset();
+                _graphSig = sig; _graphSigCalls = 0; backend.StepGraphOwner = this;
+            }
+            _graphSigCalls++;
+
+            if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
+            {
+                backend.StepGraphLaunch();
+                return CopyOut(backend);
+            }
+
+            bool capture = _graphSigCalls == GraphCaptureCall;
+            if (capture) backend.StepGraphBegin();
+            try
+            {
+                RunBlocksIntoFixed(backend, n, scond);
+            }
+            catch (Exception ex) when (capture)
+            {
+                backend.StepGraphReset(); _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning($"[Hunyuan3D graph] capture invalidated — eager fallback: {ex.Message}");
+                RunBlocksIntoFixed(backend, n, scond);
+                return CopyOut(backend);
+            }
+            if (capture)
+            {
+                try { backend.StepGraphEndAndLaunch(); HartsyInference.Core.Logging.Logs.Info("[Hunyuan3D graph] DiT forward (48 blocks + final) captured; replaying via cuGraphLaunch."); }
+                catch (Exception ex)
+                {
+                    backend.StepGraphReset(); _graphDead = true;
+                    HartsyInference.Core.Logging.Logs.Warning($"[Hunyuan3D graph] capture failed — eager fallback: {ex.Message}");
+                    RunBlocksIntoFixed(backend, n, scond);
+                }
+            }
+            return CopyOut(backend);
+        }
+
+        Tensor velocity = RunBlocks(backend, img, txt, vec, n, scond, ownInputs: true);
+        vec.Dispose();
+        return velocity;
+    }
+
+    /// <summary>The device-resident block loop + final layer, shared by the eager and graph-capture paths.
+    /// Consumes <paramref name="img"/>/<paramref name="txt"/> (double-stream) and reads <paramref name="vec"/>
+    /// (modulation, not disposed here). When <paramref name="ownInputs"/> is false the initial img/txt are fixed
+    /// buffers (not disposed on first use).</summary>
+    private Tensor RunBlocks(IBackend backend, Tensor img, Tensor txt, Tensor vec, int n, int scond, bool ownInputs)
+    {
+        int b = (int)img.Shape[0], width = _cfg.Width;
+
+        // F16 hot path (HARTSY_DIT_F16): one cast into F16 at the block-loop boundary — the double/single blocks
+        // dtype-follow their input, so the whole loop runs in F16 (half the HBM traffic + F16 tensor-core GEMMs).
+        // The timestep-modulation vec stays F32; the final layer casts back to F32 below. Matches Python fp16.
+        DType act = DitDtype.Act;
+        if (act == DType.F16)
+        {
+            Tensor imgF = new(img.Shape, DType.F16); backend.CastToF16(imgF, img);
+            Tensor txtF = new(txt.Shape, DType.F16); backend.CastToF16(txtF, txt);
+            if (ownInputs) { img.Dispose(); txt.Dispose(); }
+            img = imgF; txt = txtF; ownInputs = true;
+        }
+
+        bool ownImg = ownInputs, ownTxt = ownInputs;
         foreach (Hunyuan3DDoubleBlock block in _double)
         {
             (Tensor ni, Tensor nt) = block.Forward(backend, img, txt, vec);
-            img.Dispose(); txt.Dispose(); img = ni; txt = nt;
+            if (ownImg) img.Dispose();
+            if (ownTxt) txt.Dispose();
+            img = ni; txt = nt; ownImg = ownTxt = true;
         }
 
         // Single stream over concat[txt, img] (txt FIRST); then drop the txt prefix (B=1 → contiguous rows).
-        Tensor joint = new(new TensorShape(b, scond + n, width), DType.F32); backend.Concat(joint, [txt, img], 1);
-        txt.Dispose(); img.Dispose();
+        Tensor joint = new(new TensorShape(b, scond + n, width), img.DType); backend.Concat(joint, [txt, img], 1);
+        img.Dispose(); txt.Dispose();
         foreach (Hunyuan3DSingleBlock block in _single)
         {
             Tensor nj = block.Forward(backend, joint, vec);
             joint.Dispose(); joint = nj;
         }
-        Tensor latentOut = new(new TensorShape(b, n, width), DType.F32); backend.SliceRows(latentOut, joint, scond);
+        Tensor latentOut = new(new TensorShape(b, n, width), joint.DType); backend.SliceRows(latentOut, joint, scond);
         joint.Dispose();
+        if (latentOut.DType != DType.F32)
+        {
+            Tensor lo32 = new(latentOut.Shape, DType.F32); backend.CastToF32(lo32, latentOut); latentOut.Dispose(); latentOut = lo32;
+        }
 
         // final_layer (LastLayer): shift,scale = chunk(adaLN(vec)) — SHIFT FIRST; x=(1+scale)·norm(x)+shift; linear→C.
-        Tensor[] fm = Hunyuan3DGpuOps.ModParams(backend, vec, _finalNormW!, _finalNormB!, 2, width); vec.Dispose();
+        Tensor[] fm = Hunyuan3DGpuOps.ModParams(backend, vec, _finalNormW!, _finalNormB!, 2, width);
         Tensor normed = new(latentOut.Shape, DType.F32); backend.LayerNormNoAffine(normed, latentOut, 1e-6f); latentOut.Dispose();
         Tensor scalePlus1 = new(fm[1].Shape, DType.F32); backend.AddScalar(scalePlus1, fm[1], 1f);
         Tensor modOut = new(normed.Shape, DType.F32); backend.AffineBroadcastLastDim(modOut, normed, scalePlus1, fm[0]);
@@ -108,6 +206,25 @@ public sealed unsafe class Hunyuan3DDit
         backend.Linear(velocity, modOut, _finalLinW!, _finalLinB!);
         modOut.Dispose();
         return velocity;
+    }
+
+    /// <summary>Runs the block loop over the fixed input buffers and lands the velocity in <see cref="_velFixed"/>
+    /// (a stable, non-graph-owned buffer — the last op the captured graph records, so replay's velocity survives
+    /// the graph-memory auto-free).</summary>
+    private void RunBlocksIntoFixed(IBackend backend, int n, int scond)
+    {
+        Tensor v = RunBlocks(backend, _imgFixed!, _txtFixed!, _vecFixed!, n, scond, ownInputs: false);
+        backend.CopyInto(_velFixed!, v);
+        v.Dispose();
+    }
+
+    /// <summary>Returns a fresh copy of the captured-graph velocity buffer so the caller may dispose it freely
+    /// (the fixed <see cref="_velFixed"/> persists across steps for the graph).</summary>
+    private Tensor CopyOut(IBackend backend)
+    {
+        Tensor o = new(_velFixed!.Shape, DType.F32);
+        backend.CopyInto(o, _velFixed!);
+        return o;
     }
 
     /// <summary>Flux sinusoidal timestep embedding, matching hy3dgen <c>timestep_embedding(t, dim, self.time_factor)</c>:

@@ -200,6 +200,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _oasisAdaLnF32;
     private readonly nint _ditPixelQuantizeF32;
     private readonly nint _triplaneGridSampleF32;
+    private readonly nint _gegluErfF32;
+    private readonly nint _convTranspose2dF32;
 
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
     private readonly CudaModule _ditF16Module;
@@ -454,6 +456,8 @@ public sealed class CudaKernels : IDisposable
         _oasisAdaLnF32 = _ditF32Module.GetFunction("oasis_adaln_f32");
         _ditPixelQuantizeF32 = _ditF32Module.GetFunction("dit_pixel_quantize_f32");
         _triplaneGridSampleF32 = _ditF32Module.GetFunction("triplane_grid_sample_f32");
+        _gegluErfF32 = _ditF32Module.GetFunction("geglu_erf_f32");
+        _convTranspose2dF32 = _ditF32Module.GetFunction("conv_transpose2d_f32");
 
         _mg3ActionModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mg3_action.ptx"));
         _mg3SplitQkvTemporalF32 = _mg3ActionModule.GetFunction("mg3_split_qkv_temporal_f32");
@@ -1887,6 +1891,34 @@ public sealed class CudaKernels : IDisposable
         args[5] = &chArg; args[6] = &hArg; args[7] = &wArg; args[8] = &radArg; args[9] = &gridArg;
         uint gridDim = (uint)(((long)count + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_triplaneGridSampleF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>2D transposed convolution (gather form). <paramref name="bias"/> may be 0.</summary>
+    public unsafe void LaunchConvTranspose2d(ulong outp, ulong input, ulong weight, ulong bias,
+        int n, int cIn, int cOut, int iH, int iW, int oH, int oW, int kH, int kW, int sH, int sW, int pH, int pW, nint stream)
+    {
+        ulong outArg = outp, inArg = input, wArg = weight, bArg = bias;
+        int nArg = n, ciArg = cIn, coArg = cOut, ihArg = iH, iwArg = iW, ohArg = oH, owArg = oW;
+        int khArg = kH, kwArg = kW, shArg = sH, swArg = sW, phArg = pH, pwArg = pW;
+        void** args = stackalloc void*[18];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &wArg; args[3] = &bArg; args[4] = &nArg;
+        args[5] = &ciArg; args[6] = &coArg; args[7] = &ihArg; args[8] = &iwArg; args[9] = &ohArg; args[10] = &owArg;
+        args[11] = &khArg; args[12] = &kwArg; args[13] = &shArg; args[14] = &swArg; args[15] = &phArg; args[16] = &pwArg;
+        long threads = (long)n * cOut * oH * oW;
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_convTranspose2dF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>GEGLU with exact erf gate: <paramref name="outp"/>[rows,inner] = proj[:,:inner]·gelu_erf(proj[:,inner:]).</summary>
+    public unsafe void LaunchGegluErf(ulong outp, ulong proj, long rows, int inner, nint stream)
+    {
+        ulong outArg = outp, projArg = proj, rowsArg = (ulong)rows;
+        uint innerArg = (uint)inner;
+        void** args = stackalloc void*[4];
+        args[0] = &outArg; args[1] = &projArg; args[2] = &rowsArg; args[3] = &innerArg;
+        long threads = rows * inner;
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_gegluErfF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Add scalar (out = in + c) with F16 I/O (scalar stays F32).</summary>

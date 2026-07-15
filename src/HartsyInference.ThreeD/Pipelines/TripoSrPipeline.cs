@@ -86,6 +86,9 @@ public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(request);
         int gridRes = request.GridResolution > 0 ? request.GridResolution : _cfg.GridResolution;
+        bool phase = Environment.GetEnvironmentVariable("HARTSY_3D_PHASE") == "1";
+        System.Diagnostics.Stopwatch pw = System.Diagnostics.Stopwatch.StartNew();
+        void Probe(string tag) { if (phase) { Backend.Sync(); Console.WriteLine($"[triposr-phase] {tag}: {pw.ElapsedMilliseconds} ms"); pw.Restart(); } }
 
         // 1. Image → DINO tokens. (request.ImageRgb is assumed foreground-on-gray; see the TODO in the doc comment.)
         Tensor pixels = _preprocessor.Preprocess(request.ImageRgb, request.Width, request.Height);
@@ -93,6 +96,7 @@ public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
         Tensor tokens = _dino.Encode(Backend, pixels);
         pixels.Dispose();
         Backend.FreeWeights(_dino.EnumerateWeights());
+        Probe("dino-encode");
         onProgress?.Invoke(new GenerationProgress(1, 3, 0));
 
         // 2. Tokens → triplane.
@@ -100,11 +104,13 @@ public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
         Triplane tri = _transformer.Forward(Backend, tokens);
         Backend.FreeWeights(_transformer.EnumerateWeights());
         tokens.Dispose();
+        Probe("transformer");
         onProgress?.Invoke(new GenerationProgress(2, 3, 0));
 
         // 3. Triplane → density field → mesh.
         Backend.PreloadWeights(_decoder.EnumerateWeights());
         ScalarField3D density = _decoder.DecodeDensityField(Backend, tri, gridRes);
+        Probe($"density-grid ({gridRes}^3)");
         float threshold = request.IsoLevel != 0f ? request.IsoLevel : _cfg.DensityThreshold;
 
         // Marching cubes treats "inside" as value < iso; the surface is density > threshold, so extract on
@@ -113,11 +119,13 @@ public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
         for (int i = 0; i < neg.Length; i++) neg[i] = -density.Values[i];
         ScalarField3D occ = new() { Values = neg, ResX = density.ResX, ResY = density.ResY, ResZ = density.ResZ, Min = density.Min, Max = density.Max };
         Mesh mesh = MeshOps.ComputeVertexNormals(MarchingCubes.Extract(occ, -threshold));
+        Probe("marching-cubes");
 
         // 4. Per-vertex colors from the decoder.
         if (mesh.TriangleCount > 0)
             mesh.VertexColors = _decoder.DecodeColors(Backend, tri, mesh.Vertices, mesh.VertexCount);
         Backend.FreeWeights(_decoder.EnumerateWeights());
+        Probe("vertex-colors");
         onProgress?.Invoke(new GenerationProgress(3, 3, 0));
 
         return new ThreeDResult { Mesh = mesh, Seed = request.Seed ?? 0 };
