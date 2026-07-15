@@ -45,31 +45,28 @@ public sealed unsafe class TriplaneNerfDecoder
 
     /// <summary>Decodes the activated density field over a <paramref name="resolution"/>³ grid spanning
     /// [−R,R]³ in <b>ij order</b> (x outermost, z innermost — matches TSR's grid_vertices). Feeds marching
-    /// cubes at <see cref="TripoSrConfig.DensityThreshold"/>.</summary>
-    public ScalarField3D DecodeDensityField(IBackend backend, Triplane tri, int resolution, int chunkSize = 32768)
+    /// cubes at <see cref="TripoSrConfig.DensityThreshold"/>. The triplane sampling + NeRF MLP run device-resident
+    /// (grid coords generated in-kernel — no host per-point loop); only the final density is read back.</summary>
+    public ScalarField3D DecodeDensityField(IBackend backend, Triplane tri, int resolution, int chunkSize = 131072)
     {
         int res = resolution;
         float r = _cfg.Radius;
         long total = (long)res * res * res;
         float[] values = new float[total];
-        float[] coords = new float[chunkSize * 3];
+        Tensor planes = BuildPlanes(tri);
+        backend.PreloadWeights([planes]);
         long produced = 0;
         while (produced < total)
         {
             int count = (int)Math.Min(chunkSize, total - produced);
-            for (int i = 0; i < count; i++)
-            {
-                long lin = produced + i;
-                // ij order: index = (ix·res + iy)·res + iz
-                int iz = (int)(lin % res), iy = (int)((lin / res) % res), ix = (int)(lin / ((long)res * res));
-                coords[i * 3] = Map(ix, res, r); coords[i * 3 + 1] = Map(iy, res, r); coords[i * 3 + 2] = Map(iz, res, r);
-            }
-            Tensor outp = Evaluate(backend, tri, coords.AsSpan(0, count * 3), count); // [1, count, 4]
+            Tensor outp = EvaluateChunk(backend, planes, tri, null, produced, count, res); // [1, count, 4]
             float* op = (float*)outp.DataPointer;
             for (int i = 0; i < count; i++) values[produced + i] = MathF.Exp(op[i * 4] + _cfg.DensityBias);
             outp.Dispose();
             produced += count;
         }
+        backend.FreeWeights([planes]);
+        planes.Dispose();
         return new ScalarField3D { Values = values, ResX = res, ResY = res, ResZ = res, Min = (-r, -r, -r), Max = (r, r, r) };
     }
 
@@ -77,7 +74,11 @@ public sealed unsafe class TriplaneNerfDecoder
     /// [−R,R]³). Used to color mesh vertices.</summary>
     public float[] DecodeColors(IBackend backend, Triplane tri, ReadOnlySpan<float> points, int count)
     {
-        Tensor outp = Evaluate(backend, tri, points, count);
+        Tensor planes = BuildPlanes(tri);
+        backend.PreloadWeights([planes]);
+        Tensor outp = EvaluateWithCoords(backend, planes, tri, points, count);
+        backend.FreeWeights([planes]);
+        planes.Dispose();
         float* op = (float*)outp.DataPointer;
         float[] rgb = new float[count * 3];
         for (int i = 0; i < count; i++)
@@ -90,10 +91,38 @@ public sealed unsafe class TriplaneNerfDecoder
     /// (<c>[density_raw, r, g, b]</c>; density pre-exp, rgb pre-sigmoid). Exposed for parity testing.</summary>
     public Tensor Evaluate(IBackend backend, Triplane tri, ReadOnlySpan<float> coords, int count)
     {
+        Tensor planes = BuildPlanes(tri);
+        backend.PreloadWeights([planes]);
+        Tensor outp = EvaluateWithCoords(backend, planes, tri, coords, count);
+        backend.FreeWeights([planes]);
+        planes.Dispose();
+        return outp;
+    }
+
+    /// <summary>Uploads the triplane features once as a <c>[3,C,H,W]</c> tensor (weight-cache resident) so the
+    /// grid-sample kernel + MLP never touch the host per point.</summary>
+    private static Tensor BuildPlanes(Triplane tri)
+    {
+        int n = 3 * tri.Channels * tri.Height * tri.Width;
+        Tensor planes = new(new TensorShape(3, tri.Channels, tri.Height, tri.Width), DType.F32);
+        tri.Features.AsSpan(0, n).CopyTo(new Span<float>((void*)planes.DataPointer, n));
+        return planes;
+    }
+
+    private Tensor EvaluateWithCoords(IBackend backend, Tensor planes, Triplane tri, ReadOnlySpan<float> coords, int count)
+    {
+        Tensor coordT = new(new TensorShape(count, 3), DType.F32);
+        coords.Slice(0, count * 3).CopyTo(new Span<float>((void*)coordT.DataPointer, count * 3));
+        Tensor outp = EvaluateChunk(backend, planes, tri, coordT, 0, count, 0);
+        coordT.Dispose();
+        return outp;
+    }
+
+    private Tensor EvaluateChunk(IBackend backend, Tensor planes, Triplane tri, Tensor? coords, long chunkStart, int count, int gridRes)
+    {
         int c = tri.Channels, feat = 3 * c, hidden = _cfg.NerfHidden;
         Tensor f = new(new TensorShape(1, count, feat), DType.F32);
-        SampleTriplane(tri, coords, count, f);
-
+        backend.TriplaneGridSample(f, planes, coords, chunkStart, count, c, tri.Height, tri.Width, _cfg.Radius, gridRes);
         Tensor h = new(new TensorShape(1, count, hidden), DType.F32);
         backend.Linear(h, f, _inW!, _inB!); f.Dispose();
         Silu(backend, ref h);
@@ -108,35 +137,10 @@ public sealed unsafe class TriplaneNerfDecoder
         return outp;
     }
 
-    private void SampleTriplane(Triplane tri, ReadOnlySpan<float> coords, int count, Tensor dst)
-    {
-        int c = tri.Channels, h = tri.Height, wd = tri.Width;
-        float r = _cfg.Radius;
-        float* dp = (float*)dst.DataPointer;
-        ReadOnlySpan<float> features = tri.Features;
-        Span<float> tmp = stackalloc float[c];
-        for (int i = 0; i < count; i++)
-        {
-            // scale_tensor([-R,R] -> [-1,1]) == p / R
-            float gx = coords[i * 3] / r, gy = coords[i * 3 + 1] / r, gz = coords[i * 3 + 2] / r;
-            long fbase = (long)i * 3 * c;
-            // indices2D stack: plane0 (x,y), plane1 (x,z), plane2 (y,z); first coord -> width, second -> height.
-            GridSampler.GridSamplePlane(features.Slice(tri.PlaneOffset(0), c * h * wd), c, h, wd, gx, gy, tmp); CopyTo(tmp, dp, fbase + 0 * c);
-            GridSampler.GridSamplePlane(features.Slice(tri.PlaneOffset(1), c * h * wd), c, h, wd, gx, gz, tmp); CopyTo(tmp, dp, fbase + 1 * c);
-            GridSampler.GridSamplePlane(features.Slice(tri.PlaneOffset(2), c * h * wd), c, h, wd, gy, gz, tmp); CopyTo(tmp, dp, fbase + 2 * c);
-        }
-    }
-
-    private static void CopyTo(ReadOnlySpan<float> src, float* dst, long offset)
-    {
-        for (int i = 0; i < src.Length; i++) dst[offset + i] = src[i];
-    }
-
     private static void Silu(IBackend backend, ref Tensor t)
     {
         Tensor o = new(t.Shape, DType.F32); backend.Silu(o, t); t.Dispose(); t = o;
     }
 
     private static float Sigmoid(float x) => 1f / (1f + MathF.Exp(-x));
-    private static float Map(int i, int res, float r) => -r + (res > 1 ? i / (float)(res - 1) : 0f) * (2f * r);
 }

@@ -632,4 +632,74 @@ __global__ void dit_pixel_quantize_f32(
     output[i] = (float)b / 255.0f * 2.0f - 1.0f;
 }
 
+// TripoSR triplane grid-sample: for each of `count` points, bilinearly sample the three orthogonal
+// feature planes (align_corners=False, zeros pad — matches GridSampler.GridSamplePlane) and write the
+// concatenated [3*C] feature vector at outF[point*3C + plane*C + c]. Coords are read from coords[point*3]
+// (xyz in [-R,R]) when gridRes==0, else generated in-kernel from the ij-order grid index (chunkStart+tid,
+// z innermost) — the density-grid hot path, no host coord buffer. Replaces the per-point host loop.
+__device__ __forceinline__ void tri_sample_plane(
+    const float* __restrict__ plane, unsigned int channels, unsigned int H, unsigned int W,
+    float ga, float gb, float* __restrict__ outC)  // ga -> width, gb -> height
+{
+    float fx = ((ga + 1.0f) * W - 1.0f) * 0.5f;
+    float fy = ((gb + 1.0f) * H - 1.0f) * 0.5f;
+    int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
+    int x1 = x0 + 1, y1 = y0 + 1;
+    float tx = fx - x0, ty = fy - y0;
+    float w00 = (1.0f - tx) * (1.0f - ty), w10 = tx * (1.0f - ty);
+    float w01 = (1.0f - tx) * ty,          w11 = tx * ty;
+    bool x0ok = x0 >= 0 && x0 < (int)W, x1ok = x1 >= 0 && x1 < (int)W;
+    bool y0ok = y0 >= 0 && y0 < (int)H, y1ok = y1 >= 0 && y1 < (int)H;
+    unsigned long long plane2d = (unsigned long long)H * W;
+    for (unsigned int c = 0; c < channels; c++)
+    {
+        const float* b = plane + c * plane2d;
+        float acc = 0.0f;
+        if (y0ok && x0ok) acc += w00 * b[y0 * (int)W + x0];
+        if (y0ok && x1ok) acc += w10 * b[y0 * (int)W + x1];
+        if (y1ok && x0ok) acc += w01 * b[y1 * (int)W + x0];
+        if (y1ok && x1ok) acc += w11 * b[y1 * (int)W + x1];
+        outC[c] = acc;
+    }
+}
+
+__global__ void triplane_grid_sample_f32(
+    float* __restrict__ outF,
+    const float* __restrict__ planes,
+    const float* __restrict__ coords,
+    unsigned long long chunkStart,
+    unsigned int count,
+    unsigned int channels, unsigned int planeH, unsigned int planeW,
+    float radius, unsigned int gridRes)
+{
+    unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= count) return;
+    float x, y, z;
+    if (gridRes > 0)
+    {
+        unsigned long long lin = chunkStart + tid;
+        unsigned int res = gridRes;
+        unsigned int iz = (unsigned int)(lin % res);
+        unsigned int iy = (unsigned int)((lin / res) % res);
+        unsigned int ix = (unsigned int)(lin / ((unsigned long long)res * res));
+        float inv = res > 1 ? 1.0f / (float)(res - 1) : 0.0f;
+        float span = 2.0f * radius;
+        x = -radius + ix * inv * span;
+        y = -radius + iy * inv * span;
+        z = -radius + iz * inv * span;
+    }
+    else
+    {
+        unsigned long long ci = (unsigned long long)tid * 3;
+        x = coords[ci]; y = coords[ci + 1]; z = coords[ci + 2];
+    }
+    float gx = x / radius, gy = y / radius, gz = z / radius;
+    unsigned int C = channels;
+    unsigned long long base = (unsigned long long)tid * 3 * C;
+    unsigned long long planeSz = (unsigned long long)C * planeH * planeW;
+    tri_sample_plane(planes,                 C, planeH, planeW, gx, gy, outF + base);
+    tri_sample_plane(planes + planeSz,       C, planeH, planeW, gx, gz, outF + base + C);
+    tri_sample_plane(planes + 2 * planeSz,   C, planeH, planeW, gy, gz, outF + base + 2 * C);
+}
+
 } // extern "C"

@@ -199,6 +199,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _oasisUnpatchifyF32;
     private readonly nint _oasisAdaLnF32;
     private readonly nint _ditPixelQuantizeF32;
+    private readonly nint _triplaneGridSampleF32;
 
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
     private readonly CudaModule _ditF16Module;
@@ -452,6 +453,7 @@ public sealed class CudaKernels : IDisposable
         _oasisUnpatchifyF32 = _ditF32Module.GetFunction("oasis_unpatchify_f32");
         _oasisAdaLnF32 = _ditF32Module.GetFunction("oasis_adaln_f32");
         _ditPixelQuantizeF32 = _ditF32Module.GetFunction("dit_pixel_quantize_f32");
+        _triplaneGridSampleF32 = _ditF32Module.GetFunction("triplane_grid_sample_f32");
 
         _mg3ActionModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mg3_action.ptx"));
         _mg3SplitQkvTemporalF32 = _mg3ActionModule.GetFunction("mg3_split_qkv_temporal_f32");
@@ -1870,6 +1872,21 @@ public sealed class CudaKernels : IDisposable
         long threads = (long)frames * channels * (gh * patch) * (gw * patch);
         uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_oasisUnpatchifyF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>TripoSR triplane grid-sample: writes <paramref name="count"/>×[3·C] features to <paramref name="outF"/>.
+    /// <paramref name="coords"/> may be 0 when <paramref name="gridRes"/>&gt;0 (coords generated in-kernel).</summary>
+    public unsafe void LaunchTriplaneGridSample(ulong outF, ulong planes, ulong coords, ulong chunkStart,
+        int count, int channels, int planeH, int planeW, float radius, int gridRes, nint stream)
+    {
+        ulong outArg = outF, planesArg = planes, coordsArg = coords, startArg = chunkStart;
+        uint cntArg = (uint)count, chArg = (uint)channels, hArg = (uint)planeH, wArg = (uint)planeW, gridArg = (uint)gridRes;
+        float radArg = radius;
+        void** args = stackalloc void*[10];
+        args[0] = &outArg; args[1] = &planesArg; args[2] = &coordsArg; args[3] = &startArg; args[4] = &cntArg;
+        args[5] = &chArg; args[6] = &hArg; args[7] = &wArg; args[8] = &radArg; args[9] = &gridArg;
+        uint gridDim = (uint)(((long)count + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_triplaneGridSampleF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Add scalar (out = in + c) with F16 I/O (scalar stays F32).</summary>

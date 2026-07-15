@@ -237,6 +237,57 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>TripoSR triplane grid-sample: for each of <paramref name="count"/> points, bilinearly samples the
+    /// three orthogonal feature planes of <paramref name="planes"/> (<c>[3,C,H,W]</c>, align_corners=False, zeros pad)
+    /// and writes the concatenated <c>[3·C]</c> feature vector into <paramref name="outputF"/> (<c>[1,count,3C]</c>).
+    /// Coords come from <paramref name="coords"/> (<c>[count,3]</c> xyz in [−R,R]) when <paramref name="gridRes"/>=0,
+    /// else are generated in-order from the ij grid index (<paramref name="chunkStart"/>+t, z innermost).</summary>
+    unsafe void TriplaneGridSample(Tensor outputF, Tensor planes, Tensor? coords, long chunkStart,
+        int count, int channels, int planeH, int planeW, float radius, int gridRes)
+    {
+        if (outputF.DType != DType.F32 || planes.DType != DType.F32)
+            throw new NotSupportedException("TriplaneGridSample default fallback only supports F32.");
+        float* pf = (float*)planes.DataPointer, of = (float*)outputF.DataPointer;
+        float* cp = coords is null ? null : (float*)coords.DataPointer;
+        int C = channels, H = planeH, W = planeW;
+        long plane2d = (long)H * W, planeSz = (long)C * H * W;
+        static void SamplePlane(float* plane, int c, int h, int w, long plane2d, float ga, float gb, float* dst)
+        {
+            float fx = ((ga + 1f) * w - 1f) * 0.5f, fy = ((gb + 1f) * h - 1f) * 0.5f;
+            int x0 = (int)MathF.Floor(fx), y0 = (int)MathF.Floor(fy), x1 = x0 + 1, y1 = y0 + 1;
+            float tx = fx - x0, ty = fy - y0;
+            float w00 = (1 - tx) * (1 - ty), w10 = tx * (1 - ty), w01 = (1 - tx) * ty, w11 = tx * ty;
+            bool x0ok = x0 >= 0 && x0 < w, x1ok = x1 >= 0 && x1 < w, y0ok = y0 >= 0 && y0 < h, y1ok = y1 >= 0 && y1 < h;
+            for (int ch = 0; ch < c; ch++)
+            {
+                float* b = plane + ch * plane2d;
+                float acc = 0f;
+                if (y0ok && x0ok) acc += w00 * b[y0 * w + x0];
+                if (y0ok && x1ok) acc += w10 * b[y0 * w + x1];
+                if (y1ok && x0ok) acc += w01 * b[y1 * w + x0];
+                if (y1ok && x1ok) acc += w11 * b[y1 * w + x1];
+                dst[ch] = acc;
+            }
+        }
+        for (int t = 0; t < count; t++)
+        {
+            float x, y, z;
+            if (gridRes > 0)
+            {
+                long lin = chunkStart + t;
+                int iz = (int)(lin % gridRes), iy = (int)((lin / gridRes) % gridRes), ix = (int)(lin / ((long)gridRes * gridRes));
+                float inv = gridRes > 1 ? 1f / (gridRes - 1) : 0f, span = 2f * radius;
+                x = -radius + ix * inv * span; y = -radius + iy * inv * span; z = -radius + iz * inv * span;
+            }
+            else { x = cp[t * 3]; y = cp[t * 3 + 1]; z = cp[t * 3 + 2]; }
+            float gx = x / radius, gy = y / radius, gz = z / radius;
+            long baseF = (long)t * 3 * C;
+            SamplePlane(pf, C, H, W, plane2d, gx, gy, of + baseF);
+            SamplePlane(pf + planeSz, C, H, W, plane2d, gx, gz, of + baseF + C);
+            SamplePlane(pf + 2 * planeSz, C, H, W, plane2d, gy, gz, of + baseF + 2 * C);
+        }
+    }
+
     /// <summary>AdaLN modulation split (scale-only, tanh-gated). <paramref name="proj"/> is <c>[B, 4*D]</c> =
     /// chunk(scale_msa, gate_msa, scale_mlp, gate_mlp); writes four <c>[B, D]</c> tensors applying
     /// <c>1 + x</c> to scales and <c>tanh(x)</c> to gates (Ideogram 4's ComputeModulation).</summary>

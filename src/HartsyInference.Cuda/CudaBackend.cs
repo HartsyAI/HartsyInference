@@ -1976,6 +1976,33 @@ public sealed class CudaBackend : IBackend
         finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
     }
 
+    /// <summary>TripoSR triplane grid-sample (device). <paramref name="planes"/> is uploaded once (weight-cache
+    /// resident via the decoder's PreloadWeights); the result <paramref name="outputF"/> stays device-resident so
+    /// the NeRF MLP Linears hit the activation cache — no host round-trip per point.</summary>
+    public unsafe void TriplaneGridSample(Tensor outputF, Tensor planes, Tensor? coords, long chunkStart,
+        int count, int channels, int planeH, int planeW, float radius, int gridRes)
+    {
+        if (outputF.DType != DType.F32 || planes.DType != DType.F32)
+            throw new NotSupportedException("CUDA TriplaneGridSample supports F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pCoords = 0; bool cached = false; bool coordsTransient = false;
+        try
+        {
+            ulong pPlanes = GpuTransferHelper.CopyToDevice(planes);
+            if (coords is not null) { pCoords = GpuTransferHelper.CopyToDevice(coords); coordsTransient = true; }
+            nuint outBytes = GpuTransferHelper.ByteSize(outputF);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchTriplaneGridSample(pOut, pPlanes, pCoords, (ulong)chunkStart, count, channels,
+                planeH, planeW, radius, gridRes, _stream.Handle);
+            GpuTransferHelper.CacheActivation(outputF, pOut, outBytes); cached = true;
+        }
+        finally
+        {
+            if (!cached) GpuTransferHelper.FreeDevice(pOut);
+            if (coordsTransient) GpuTransferHelper.FreeDevice(pCoords);
+        }
+    }
+
     /// <summary>DIAMOND pixel quantize to 256 levels: out = floor((clamp(v,-1,1)+1)·127.5)/127.5 − 1 (device).</summary>
     public void PixelQuantize(Tensor output, Tensor input)
     {

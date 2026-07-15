@@ -25,8 +25,11 @@ public sealed class TranscribeWavFileTests
     {
         string? wav = Environment.GetEnvironmentVariable("TRANSCRIBE_WAV");
         if (string.IsNullOrEmpty(wav) || !File.Exists(wav)) { _out.WriteLine("TRANSCRIBE_WAV not set/found — skipping."); return; }
-        string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base");
-        if (!File.Exists(Path.Combine(whisperDir, "model.safetensors"))) { _out.WriteLine("whisper-base not cached — skipping."); return; }
+        // Oracle model is selectable: the TTS-verify campaign dropped `base` (it hallucinates the target words
+        // onto broken audio) in favor of `medium`. Default stays base for the cheap CPU smoke.
+        string whisperRepo = Environment.GetEnvironmentVariable("TRANSCRIBE_MODEL") ?? "openai/whisper-base";
+        string whisperDir = AudioModelCache.GetRepoDirectory(whisperRepo);
+        if (!File.Exists(Path.Combine(whisperDir, "model.safetensors"))) { _out.WriteLine($"{whisperRepo} not cached — skipping."); return; }
 
         // Ensure 16 kHz mono for Whisper.
         WavFile.DecodedAudio a = WavFile.Read(wav);
@@ -36,7 +39,7 @@ public sealed class TranscribeWavFileTests
         WavFile.WriteMono16(sttWav, in16, 16_000);
 
         using CpuBackend backend = new();
-        using WhisperPipeline stt = await WhisperPipeline.LoadAsync("openai/whisper-base");
+        using WhisperPipeline stt = await WhisperPipeline.LoadAsync(whisperRepo);
         string heard = stt.TranscribeWav(backend, sttWav,
             new WhisperOptions { Language = "en", Translate = false, WithTimestamps = false }).Trim();
         _out.WriteLine($"WAV: {wav} ({mono.Length / (double)a.SampleRate:F2}s @ {a.SampleRate}Hz)");
