@@ -62,7 +62,7 @@ public sealed unsafe class Hunyuan3DShapeVae
     public (Tensor kNorm, Tensor v) PrepareKv(IBackend backend, Tensor processed) => _geo.PrepareKv(backend, processed);
 
     /// <summary>Occupancy logits for query points <c>[count,3]</c> given precomputed cross-attn K/V. Returns <c>[count]</c>.</summary>
-    public Tensor DecodePoints(IBackend backend, (Tensor kNorm, Tensor v) kv, ReadOnlySpan<float> coords, int count)
+    public Tensor DecodePoints(IBackend backend, (Tensor kNorm, Tensor v) kv, Tensor coords, int count)
         => _geo.Query(backend, kv, coords, count);
 
     /// <summary>Full grid decode: process latents once, then chunk the <paramref name="resolution"/>³ query grid
@@ -73,6 +73,11 @@ public sealed unsafe class Hunyuan3DShapeVae
     {
         if (latent.Shape.Rank != 3 || latent.Shape[0] != 1)
             throw new ArgumentException($"latent must be [1,N,C]; got {latent.Shape}.", nameof(latent));
+        // Larger chunks = fewer per-chunk host stream-drains (the occ.DataPointer readback). The old 4096 bound the
+        // MATERIALIZED cross-attn scores buffer, but the geo-decoder SDPA runs cuDNN fused-flash (allowF16), so no
+        // scores materialize — the chunk is bounded only by activation memory. HARTSY_HY3D_VAE_CHUNK overrides.
+        if (int.TryParse(Environment.GetEnvironmentVariable("HARTSY_HY3D_VAE_CHUNK"), out int envChunk) && envChunk > 0)
+            chunkSize = envChunk;
 
         Tensor processed = ProcessLatents(backend, latent);
         (Tensor kNorm, Tensor v) kv = _geo.PrepareKv(backend, processed);
@@ -98,11 +103,15 @@ public sealed unsafe class Hunyuan3DShapeVae
                 coordBuf[i * 3 + 1] = -bound + iy * step;
                 coordBuf[i * 3 + 2] = -bound + iz * step;
             }
-            Tensor occ = DecodePoints(backend, kv, coordBuf.AsSpan(0, count * 3), count);
+            // Host coords → device tensor (uploaded once per chunk); FourierEmbed then runs on-device.
+            Tensor coordsT = new(new TensorShape(count, 3), DType.F32);
+            new ReadOnlySpan<float>(coordBuf, 0, count * 3).CopyTo(new Span<float>((float*)coordsT.DataPointer, count * 3));
+            Tensor occ = DecodePoints(backend, kv, coordsT, count);
             Tensor occF = occ.DType == DType.F32 ? occ : occ.CastTo(DType.F32);
             new ReadOnlySpan<float>((float*)occF.DataPointer, count).CopyTo(values.AsSpan((int)done, count));
             if (!ReferenceEquals(occF, occ)) occF.Dispose();
             occ.Dispose();
+            coordsT.Dispose();   // after occ readback (which drains the stream) → coords upload safely complete
             done += count;
         }
         kv.kNorm.Dispose(); kv.v.Dispose();

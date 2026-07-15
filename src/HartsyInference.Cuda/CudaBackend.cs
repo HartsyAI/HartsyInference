@@ -1824,6 +1824,7 @@ public sealed class CudaBackend : IBackend
     /// uploaded; device src is DtoD'd, both stream-ordered on the compute stream.</summary>
     public unsafe void CopyInto(Tensor dst, Tensor src)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("CopyInto");
         _context.EnsureCurrent();
         EnsureKernels();
         ulong pSrc = 0;
@@ -2655,6 +2656,7 @@ public sealed class CudaBackend : IBackend
 
     public void AddScalar(Tensor output, Tensor input, float scalar)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("AddScalar");
         if (output.DType != DType.F32 || input.DType != DType.F32)
             throw new NotSupportedException("CUDA AddScalar supports F32 only.");
         _context.EnsureCurrent();
@@ -2708,6 +2710,103 @@ public sealed class CudaBackend : IBackend
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <summary>Fused adaLN modulation: out = (1+scale)·LayerNormNoAffine(in) + shift (F32 or F16 activation, F32
+    /// scale/shift). Replaces LayerNormNoAffine + AddScalar(+1) + AffineBroadcast for the DiT NormModulate.</summary>
+    public void LayerNormModulate(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("LayerNormModulate");
+        bool f16 = input.DType == DType.F16 && output.DType == DType.F16;
+        if (!f16 && (output.DType != DType.F32 || input.DType != DType.F32))
+            throw new NotSupportedException("CUDA LayerNormModulate supports F32 or F16 activations.");
+        if (scale.DType != DType.F32 || shift.DType != DType.F32)
+            throw new NotSupportedException("CUDA LayerNormModulate requires F32 scale/shift.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int dim = (int)input.Shape[input.Shape.Rank - 1];
+        int seqLen = input.Shape.Rank >= 2 ? (int)input.Shape[input.Shape.Rank - 2] : 1;
+        long rows = input.ElementCount / dim;
+        ulong pOut = 0, pIn = 0, pSc = 0, pSh = 0; bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pSc = GpuTransferHelper.CopyToDevice(scale);
+            pSh = GpuTransferHelper.CopyToDevice(shift);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchLayerNormModulate(f16, pOut, pIn, pSc, pSh, dim, seqLen, (int)rows, eps, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cached = true;
+        }
+        finally
+        {
+            if (!cached) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn); GpuTransferHelper.FreeDevice(pSc); GpuTransferHelper.FreeDevice(pSh);
+        }
+    }
+
+    /// <summary>Fused QKV split + per-head QK-RMSNorm (F32 or F16 activation, F32 weights). Writes q/k/v each
+    /// [., W] laid [token, head, d]. Replaces SliceLastDim×3 + RmsNorm×2 per attention stream.</summary>
+    public void QkvSplitNorm(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("QkvSplitNorm");
+        bool f16 = qkv.DType == DType.F16;
+        if (!f16 && qkv.DType != DType.F32)
+            throw new NotSupportedException("CUDA QkvSplitNorm supports F32 or F16 activations.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int headDim = (int)qWeight.Shape[qWeight.Shape.Rank - 1];
+        int w = (int)qkv.Shape[qkv.Shape.Rank - 1] / 3;
+        int heads = w / headDim;
+        int tokens = (int)(qkv.ElementCount / (3L * w));
+        ulong pq = 0, pk = 0, pv = 0, pQkv = 0, pQw = 0, pKw = 0; bool cached = false;
+        try
+        {
+            pQkv = GpuTransferHelper.CopyToDevice(qkv);
+            pQw = GpuTransferHelper.CopyToDevice(qWeight);
+            pKw = GpuTransferHelper.CopyToDevice(kWeight);
+            nuint bytes = GpuTransferHelper.ByteSize(q);
+            pq = GpuTransferHelper.AllocateDevice(bytes);
+            pk = GpuTransferHelper.AllocateDevice(bytes);
+            pv = GpuTransferHelper.AllocateDevice(bytes);
+            _kernels!.LaunchQkvSplitNorm(f16, pq, pk, pv, pQkv, pQw, pKw, tokens, heads, headDim, eps, _stream.Handle);
+            GpuTransferHelper.CacheActivation(q, pq, bytes);
+            GpuTransferHelper.CacheActivation(k, pk, bytes);
+            GpuTransferHelper.CacheActivation(v, pv, bytes);
+            cached = true;
+        }
+        finally
+        {
+            if (!cached) { GpuTransferHelper.FreeDevice(pq); GpuTransferHelper.FreeDevice(pk); GpuTransferHelper.FreeDevice(pv); }
+            GpuTransferHelper.FreeDevice(pQkv); GpuTransferHelper.FreeDevice(pQw); GpuTransferHelper.FreeDevice(pKw);
+        }
+    }
+
+    /// <summary>FourierEmbedder over device coords [count,3] → dst [count, 3·(2·bands+1)] (F32).</summary>
+    public void FourierEmbed(Tensor dst, Tensor coords, int count, int bands)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("FourierEmbed");
+        if (dst.DType != DType.F32 || coords.DType != DType.F32)
+            throw new NotSupportedException("CUDA FourierEmbed supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int dim = 3 * (2 * bands + 1);
+        ulong pDst = 0, pCoords = 0; bool cached = false;
+        try
+        {
+            pCoords = GpuTransferHelper.CopyToDevice(coords);
+            nuint outBytes = GpuTransferHelper.ByteSize(dst);
+            pDst = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchFourierEmbed(pDst, pCoords, count, bands, dim, _stream.Handle);
+            GpuTransferHelper.CacheActivation(dst, pDst, outBytes);
+            cached = true;
+        }
+        finally
+        {
+            if (!cached) GpuTransferHelper.FreeDevice(pDst);
+            GpuTransferHelper.FreeDevice(pCoords);
         }
     }
 
@@ -2981,6 +3080,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GPU cast FP32 → FP16 via PTX kernel.</summary>
     public void CastToF16(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("CastToF16");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -3035,6 +3135,7 @@ public sealed class CudaBackend : IBackend
 
     public void CastToF32(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("CastToF32");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -5272,6 +5373,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Concatenates tensors along the specified dimension.</summary>
     public unsafe void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("Concat");
         _context.EnsureCurrent();
         ulong[] gpuInputs = new ulong[inputs.Length];
         ulong pOut = 0;
@@ -5311,6 +5413,22 @@ public sealed class CudaBackend : IBackend
                 for (int d = dim + 1; d < output.Shape.Rank; d++)
                 {
                     innerSize *= output.Shape[d];
+                }
+
+                // Fast path: a 2-input F32/F16 concat runs as ONE kernel (one thread per output element) instead of
+                // `outer` × 2 async memcpys. The per-slice loop below was the dominant DiT cost — the Hunyuan3D
+                // single-block cat(attn, mlp) (dim=last, outer=seqLen≈4442) issued ~8900 memcpys/concat → 8.4 ms/call
+                // and ~280k graph nodes/forward. Covers every 2-input block concat; other cases keep the loop.
+                bool f16 = output.DType == DType.F16;
+                if (inputs.Length == 2 && (f16 || output.DType == DType.F32)
+                    && inputs[0].DType == output.DType && inputs[1].DType == output.DType)
+                {
+                    EnsureKernels();
+                    _kernels!.LaunchConcat2(f16, pOut, gpuInputs[0], gpuInputs[1],
+                        (int)outerSize, (int)inputs[0].Shape[dim], (int)inputs[1].Shape[dim], (int)innerSize, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+                    cachedOutput = true;
+                    return;
                 }
 
                 long outDimStride = output.Shape[dim] * innerSize;

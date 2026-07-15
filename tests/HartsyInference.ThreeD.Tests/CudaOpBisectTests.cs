@@ -148,4 +148,111 @@ public sealed unsafe class CudaOpBisectTests
         _out.WriteLine($"SDPA cross [Sq={sq},Sk={sk},D={d},H={h}]: maxAbs={mx:E3} corr={corr:F8}");
         Assert.True(corr > 0.9999, $"SDPA CUDA≠CPU maxAbs={mx} corr={corr}");
     }
+
+    // The dominant DiT cost was CudaBackend.Concat's per-outer-slice memcpy loop; it now routes 2-input concats
+    // through the dit_concat2 kernel. These pin CUDA-kernel == CPU-loop for the two hot Hunyuan3D concat shapes.
+
+    [Fact]
+    public void Concat_LastDim_SingleBlockShape()   // single-block cat(attn[1,S,W], gelu_mlp[1,S,mlp]) along dim=2
+    {
+        using CudaBackend? cuda = Cuda(); if (cuda is null) { _out.WriteLine("SKIP no PTX"); return; }
+        using CpuBackend cpu = new();
+        int s = 4442, w = 1024, mlp = 4096;
+        using Tensor a = Rand(1, 1, s, w); using Tensor b = Rand(2, 1, s, mlp);
+        using Tensor oc = new(new TensorShape(1, s, w + mlp), DType.F32);
+        using Tensor og = new(new TensorShape(1, s, w + mlp), DType.F32);
+        cpu.Concat(oc, [a, b], 2);
+        cuda.Concat(og, [a, b], 2);
+        (double mx, double corr) = Cmp(oc, og);
+        _out.WriteLine($"Concat dim2 [1,{s},{w}]+[1,{s},{mlp}]: maxAbs={mx:E3} corr={corr:F8}");
+        Assert.True(corr > 0.99999 && mx < 1e-4, $"Concat dim2 CUDA≠CPU maxAbs={mx} corr={corr}");
+    }
+
+    [Fact]
+    public void Concat_Dim1_JointShape()   // double-block joint cat(txt[1,Scond,W], img[1,N,W]) along dim=1
+    {
+        using CudaBackend? cuda = Cuda(); if (cuda is null) { _out.WriteLine("SKIP no PTX"); return; }
+        using CpuBackend cpu = new();
+        int scond = 1370, n = 3072, w = 1024;
+        using Tensor a = Rand(1, 1, scond, w); using Tensor b = Rand(2, 1, n, w);
+        using Tensor oc = new(new TensorShape(1, scond + n, w), DType.F32);
+        using Tensor og = new(new TensorShape(1, scond + n, w), DType.F32);
+        cpu.Concat(oc, [a, b], 1);
+        cuda.Concat(og, [a, b], 1);
+        (double mx, double corr) = Cmp(oc, og);
+        _out.WriteLine($"Concat dim1 [1,{scond},{w}]+[1,{n},{w}]: maxAbs={mx:E3} corr={corr:F8}");
+        Assert.True(corr > 0.99999 && mx < 1e-4, $"Concat dim1 CUDA≠CPU maxAbs={mx} corr={corr}");
+    }
+
+    [Fact]
+    public void Concat_F16_LastDim()   // F16 kernel path (round-trip cast) vs CPU F32 concat
+    {
+        using CudaBackend? cuda = Cuda(); if (cuda is null) { _out.WriteLine("SKIP no PTX"); return; }
+        using CpuBackend cpu = new();
+        int s = 2048, w = 1024, mlp = 4096;
+        using Tensor a = Rand(1, 1, s, w); using Tensor b = Rand(2, 1, s, mlp);
+        using Tensor oc = new(new TensorShape(1, s, w + mlp), DType.F32);
+        cpu.Concat(oc, [a, b], 2);
+        using Tensor a16 = new(a.Shape, DType.F16); cuda.CastToF16(a16, a);
+        using Tensor b16 = new(b.Shape, DType.F16); cuda.CastToF16(b16, b);
+        using Tensor og16 = new(new TensorShape(1, s, w + mlp), DType.F16); cuda.Concat(og16, [a16, b16], 2);
+        using Tensor og = new(og16.Shape, DType.F32); cuda.CastToF32(og, og16);
+        (double mx, double corr) = Cmp(oc, og);
+        _out.WriteLine($"Concat F16 dim2 [1,{s},{w}]+[1,{s},{mlp}]: maxAbs={mx:E3} corr={corr:F8}");
+        Assert.True(corr > 0.9999 && mx < 1e-2, $"Concat F16 CUDA≠CPU maxAbs={mx} corr={corr}");
+    }
+
+    // Fused DiT glue: adaLN modulation + QKV-split-QK-norm (the per-forward glue-fusion round). CPU default
+    // (composed reference) vs CUDA kernel.
+
+    [Fact]
+    public void LayerNormModulate_DiTShape()   // (1+scale)·LN(x)+shift, scale/shift [B,W] over seq
+    {
+        using CudaBackend? cuda = Cuda(); if (cuda is null) { _out.WriteLine("SKIP no PTX"); return; }
+        using CpuBackend cpu = new();
+        int n = 3072, w = 1024;
+        using Tensor x = Rand(1, 1, n, w); using Tensor scale = Rand(2, 1, w); using Tensor shift = Rand(3, 1, w);
+        using Tensor oc = new(x.Shape, DType.F32); using Tensor og = new(x.Shape, DType.F32);
+        ((IBackend)cpu).LayerNormModulate(oc, x, scale, shift, 1e-6f);
+        ((IBackend)cuda).LayerNormModulate(og, x, scale, shift, 1e-6f);
+        (double mx, double corr) = Cmp(oc, og);
+        _out.WriteLine($"LayerNormModulate [1,{n},{w}]: maxAbs={mx:E3} corr={corr:F8}");
+        Assert.True(corr > 0.99999 && mx < 1e-4, $"LayerNormModulate CUDA≠CPU maxAbs={mx} corr={corr}");
+    }
+
+    [Fact]
+    public void QkvSplitNorm_DiTShape()   // fused qkv[.,3W] → q,k,v[.,W] with per-head qk-rmsnorm
+    {
+        using CudaBackend? cuda = Cuda(); if (cuda is null) { _out.WriteLine("SKIP no PTX"); return; }
+        using CpuBackend cpu = new();
+        int n = 3072, heads = 16, headDim = 64, w = heads * headDim;
+        using Tensor qkv = Rand(1, 1, n, 3 * w);
+        using Tensor qW = Rand(2, headDim); using Tensor kW = Rand(3, headDim);
+        using Tensor qc = new(new TensorShape(1, n, heads, headDim), DType.F32);
+        using Tensor kc = new(new TensorShape(1, n, heads, headDim), DType.F32);
+        using Tensor vc = new(new TensorShape(1, n, heads, headDim), DType.F32);
+        using Tensor qg = new(qc.Shape, DType.F32); using Tensor kg = new(kc.Shape, DType.F32); using Tensor vg = new(vc.Shape, DType.F32);
+        ((IBackend)cpu).QkvSplitNorm(qc, kc, vc, qkv, qW, kW, 1e-6f);
+        ((IBackend)cuda).QkvSplitNorm(qg, kg, vg, qkv, qW, kW, 1e-6f);
+        (double mxq, double cq) = Cmp(qc, qg); (double mxk, double ck) = Cmp(kc, kg); (double mxv, double cv) = Cmp(vc, vg);
+        _out.WriteLine($"QkvSplitNorm [1,{n},{3 * w}]: q(maxAbs={mxq:E3} corr={cq:F8}) k({mxk:E3} {ck:F8}) v({mxv:E3} {cv:F8})");
+        Assert.True(cq > 0.99999 && ck > 0.99999 && cv > 0.99999 && mxq < 1e-4 && mxk < 1e-4 && mxv < 1e-5,
+            $"QkvSplitNorm CUDA≠CPU q({mxq},{cq}) k({mxk},{ck}) v({mxv},{cv})");
+    }
+
+    [Fact]
+    public void FourierEmbed_VaeShape()   // 8-band fourier over [count,3] coords → [count,51]
+    {
+        using CudaBackend? cuda = Cuda(); if (cuda is null) { _out.WriteLine("SKIP no PTX"); return; }
+        using CpuBackend cpu = new();
+        int count = 4096, bands = 8, dim = 3 * (2 * bands + 1);
+        using Tensor coords = Rand(1, count, 3);
+        using Tensor oc = new(new TensorShape(1, count, dim), DType.F32);
+        using Tensor og = new(new TensorShape(1, count, dim), DType.F32);
+        ((IBackend)cpu).FourierEmbed(oc, coords, count, bands);
+        ((IBackend)cuda).FourierEmbed(og, coords, count, bands);
+        (double mx, double corr) = Cmp(oc, og);
+        _out.WriteLine($"FourierEmbed [{count},3]->[{count},{dim}] bands={bands}: maxAbs={mx:E3} corr={corr:F8}");
+        Assert.True(corr > 0.99999 && mx < 1e-5, $"FourierEmbed CUDA≠CPU maxAbs={mx} corr={corr}");
+    }
 }

@@ -80,6 +80,23 @@ re-verify word-correct. Cloud-API providers (ElevenLabs/Azure/OpenAI/etc.) are o
   that. Debug instrumentation is gated (`HARTSY_ORPHEUS_DEBUG` / `_GREEDY` / `_NOPENALTY`) and harmless; can stay
   for the weights verification.
 
+### 1a-2. Dia-1.6B — ✅ FIXED 2026-07-15 (WRONG CHECKPOINT, not an engine bug)
+- **Symptom:** loops "Hello there" / non-verbal garbage ("screaming", "crying") across seeds; never reaches `[S2]`.
+- **Root cause:** the extension downloaded the **old** `nari-labs/Dia-1.6B`. The current **`nari-labs/Dia-1.6B-0626`**
+  release (drop-in — identical 343 keys + shapes, only weight *values* differ) makes the engine produce the **full
+  3-turn dialogue** and **emit EOS to stop at 11.44 s** (985 frames). Proven by a full **layer-diff A/B vs the nari
+  `dia` package** (which hardcodes `-0626`): forward/sampling/EOS/RoPE/masking all matched — the apparent "input-embed
+  divergence" was just base-vs-0626 weights. **The engine was correct the whole time.**
+- **Fix:** `SwarmUI-AudioLab` `TtsModels.cs` + `DiaTTSProvider.cs` repo `Dia-1.6B`→`Dia-1.6B-0626` (ships
+  `pytorch_model.bin` → `PytorchPickleLoader(recursiveFlatten:false)`, no engine change). Rebuild + restart Swarm
+  (AudioLab caches the loaded pipeline in memory) → `GenerateText2Image` transcribes **10/10** (medium.en).
+- **LESSON:** when a model degenerates but the forward looks faithful, **check the checkpoint version/source first** —
+  don't deep-layer-diff until the reference and the engine load the *same* weights. Also: **`base.en` was even more
+  misleading here** — verify with `medium.en`.
+- **Follow-ups:** RTF ≈ 0.036× (slowest TTS — dual-CFG 18-layer AR F32) → perf pass. Restore `HARTSY_AUDIO_CUDA_DEVICE`
+  (the restart moved audio 3060→4090). Fix the AudioLab **eviction threshold** (3 GB free is too low → 6 GB+ models OOM
+  the 3060 on a provider switch).
+
 ### 1b. Quick wins — default-voice paths of "clone-gated" models
 NeuTTS, Qwen3-TTS, Chatterbox only gate the **voice-clone** path; the **default voice** may already work. Verify
 each default-voice gen (no reference) with the oracle — likely fast passes that expand the verified set before the

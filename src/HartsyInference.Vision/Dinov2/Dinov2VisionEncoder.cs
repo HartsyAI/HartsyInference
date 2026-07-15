@@ -175,23 +175,33 @@ internal sealed unsafe class Dinov2Layer
         TensorShape shape = new(batch, seq, _hidden);
 
         Tensor n1 = new(shape, DType.F32); backend.LayerNorm(n1, x, _n1W!, _n1B!, _eps);
-        Tensor attn = Attention(backend, n1, batch, seq); n1.Dispose();
-        LayerScale(attn, _ls1, batch, seq);
+        Tensor attn = LayerScale(backend, Attention(backend, n1, batch, seq), _ls1, batch, seq); n1.Dispose();
         Tensor r1 = new(shape, DType.F32); backend.Add(r1, x, attn); attn.Dispose();
 
         Tensor n2 = new(shape, DType.F32); backend.LayerNorm(n2, r1, _n2W!, _n2B!, _eps);
-        Tensor mlp = Mlp(backend, n2, batch, seq); n2.Dispose();
-        LayerScale(mlp, _ls2, batch, seq);
+        Tensor mlp = LayerScale(backend, Mlp(backend, n2, batch, seq), _ls2, batch, seq); n2.Dispose();
         Tensor r2 = new(shape, DType.F32); backend.Add(r2, r1, mlp); r1.Dispose(); mlp.Dispose();
         return r2;
     }
 
-    private void LayerScale(Tensor t, Tensor? gamma, int batch, int seq)
+    // GPU-resident LayerScale: t[b,s,c] *= gamma[c]. Was a host DataPointer loop that drained the compute stream
+    // every block (2×/block × NumLayers → the DINOv2-giant conditioner's dominant cost). AffineBroadcastLastDim
+    // (scale-only, shift=null) broadcasts gamma[hidden] over the (b,s) rows on-device. Batch>1 keeps the host
+    // path (the affine kernel indexes scale[b·dim+d], valid for the B=1 conditioning use here).
+    private Tensor LayerScale(IBackend backend, Tensor t, Tensor? gamma, int batch, int seq)
     {
-        if (gamma is null) return; // no LayerScale (plain DINO) → identity
+        if (gamma is null) return t; // no LayerScale (plain DINO) → identity
+        if (batch == 1)
+        {
+            Tensor o = new(t.Shape, DType.F32);
+            backend.AffineBroadcastLastDim(o, t, gamma, null);
+            t.Dispose();
+            return o;
+        }
         float* tp = (float*)t.DataPointer; float* g = (float*)gamma.DataPointer;
         for (long i = 0; i < (long)batch * seq; i++)
             for (int c = 0; c < _hidden; c++) tp[i * _hidden + c] *= g[c];
+        return t;
     }
 
     private Tensor Attention(IBackend backend, Tensor input, int batch, int seq)
@@ -218,17 +228,15 @@ internal sealed unsafe class Dinov2Layer
         if (_swiglu)
         {
             // weights_in -> [.,2H], split (x1,x2); silu(x1)*x2; weights_out.
+            // GPU-resident SwiGLU: proj[.,2H] → split (x1,x2) → silu(x1)·x2 → weights_out. The old host silu-gate
+            // loop read proj.DataPointer, draining the compute stream every block (the sync-h2d-stream-drain disease).
             int twoH = (int)_swiInW!.Shape[0], h2 = twoH / 2;
+            TensorShape half = new(batch, seq, h2);
             Tensor proj = new(new TensorShape(batch, seq, twoH), DType.F32); backend.Linear(proj, input, _swiInW!, _swiInB!);
-            Tensor gated = new(new TensorShape(batch, seq, h2), DType.F32);
-            float* pp = (float*)proj.DataPointer; float* gp = (float*)gated.DataPointer;
-            long rows = (long)batch * seq;
-            for (long r = 0; r < rows; r++)
-            {
-                float* x1 = pp + r * twoH; float* x2 = x1 + h2; float* o = gp + r * h2;
-                for (int i = 0; i < h2; i++) { float a = x1[i]; o[i] = (a / (1f + MathF.Exp(-a))) * x2[i]; }
-            }
-            proj.Dispose();
+            Tensor x1 = new(half, DType.F32); backend.SliceLastDim(x1, proj, 0);
+            Tensor x2 = new(half, DType.F32); backend.SliceLastDim(x2, proj, h2); proj.Dispose();
+            Tensor sil = new(half, DType.F32); backend.Silu(sil, x1); x1.Dispose();
+            Tensor gated = new(half, DType.F32); backend.Mul(gated, sil, x2); sil.Dispose(); x2.Dispose();
             Tensor outp = new(new TensorShape(batch, seq, _hidden), DType.F32); backend.Linear(outp, gated, _swiOutW!, _swiOutB!); gated.Dispose();
             return outp;
         }
@@ -236,25 +244,5 @@ internal sealed unsafe class Dinov2Layer
         Tensor act = new(f1.Shape, DType.F32); backend.Gelu(act, f1); f1.Dispose();
         Tensor f2 = new(new TensorShape(batch, seq, _hidden), DType.F32); backend.Linear(f2, act, _fc2W!, _fc2B!); act.Dispose();
         return f2;
-    }
-
-    private Tensor ToHeads(Tensor input, int batch, int seq)
-    {
-        Tensor o = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
-        float* sp = (float*)input.DataPointer; float* dp = (float*)o.DataPointer;
-        for (int b = 0; b < batch; b++) for (int s = 0; s < seq; s++) for (int h = 0; h < _numHeads; h++)
-            new ReadOnlySpan<float>(sp + (b * seq + s) * _hidden + h * _headDim, _headDim)
-                .CopyTo(new Span<float>(dp + ((b * _numHeads + h) * seq + s) * _headDim, _headDim));
-        return o;
-    }
-
-    private Tensor FromHeads(Tensor input, int batch, int seq)
-    {
-        Tensor o = new(new TensorShape(batch, seq, _hidden), DType.F32);
-        float* sp = (float*)input.DataPointer; float* dp = (float*)o.DataPointer;
-        for (int b = 0; b < batch; b++) for (int s = 0; s < seq; s++) for (int h = 0; h < _numHeads; h++)
-            new ReadOnlySpan<float>(sp + ((b * _numHeads + h) * seq + s) * _headDim, _headDim)
-                .CopyTo(new Span<float>(dp + (b * seq + s) * _hidden + h * _headDim, _headDim));
-        return o;
     }
 }

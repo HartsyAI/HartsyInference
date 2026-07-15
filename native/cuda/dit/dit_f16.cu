@@ -313,4 +313,87 @@ __global__ void dit_chw_f32_to_hwc_u8(
     }
 }
 
+// Two-input concat along an arbitrary dim, one launch (F16 twin of dit_concat2_f32). See that kernel for the
+// [outer, aDim|bDim, inner] layout; this is the hot path for the F16 DiT block loop (all block concats are F16).
+__global__ void dit_concat2_f16(
+    __half* __restrict__ out,
+    const __half* __restrict__ a,
+    const __half* __restrict__ b,
+    unsigned int outer, unsigned int aDim, unsigned int bDim, unsigned int inner)
+{
+    unsigned int outDim = aDim + bDim;
+    unsigned long long total = (unsigned long long)outer * outDim * inner;
+    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    unsigned int innerI = (unsigned int)(idx % inner);
+    unsigned long long tmp = idx / inner;
+    unsigned int dimIdx = (unsigned int)(tmp % outDim);
+    unsigned long long o = tmp / outDim;
+    if (dimIdx < aDim)
+        out[idx] = a[((o * aDim + dimIdx) * (unsigned long long)inner) + innerI];
+    else
+        out[idx] = b[((o * bDim + (dimIdx - aDim)) * (unsigned long long)inner) + innerI];
+}
+
+// Fused adaLN modulation (F16 activation I/O, F32 scale/shift + accumulate). See dit_layernorm_modulate_f32.
+__global__ void dit_layernorm_modulate_f16(
+    __half* __restrict__ output, const __half* __restrict__ input,
+    const float* __restrict__ scale, const float* __restrict__ shift,
+    unsigned int dim, unsigned int seqLen, unsigned int totalRows, float eps)
+{
+    extern __shared__ float sdata[];
+    unsigned int row = blockIdx.x;
+    if (row >= totalRows) return;
+    const __half* inRow = input + (size_t)row * dim;
+    __half* outRow = output + (size_t)row * dim;
+    unsigned int b = row / seqLen;
+    const float* sc = scale + (size_t)b * dim;
+    const float* sh = shift + (size_t)b * dim;
+
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) partial += __half2float(inRow[i]);
+    sdata[threadIdx.x] = partial; __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
+    float mean = sdata[0] / (float)dim; __syncthreads();
+
+    float vpart = 0.0f;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) { float d = __half2float(inRow[i]) - mean; vpart += d * d; }
+    sdata[threadIdx.x] = vpart; __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
+    float invStd = rsqrtf(sdata[0] / (float)dim + eps);
+
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+        outRow[i] = __float2half((__half2float(inRow[i]) - mean) * invStd * (1.0f + sc[i]) + sh[i]);
+}
+
+// Fused QKV split + per-head QK-RMSNorm (F16 activation I/O, F32 weights + accumulate). See dit_qkv_split_norm_f32.
+__global__ void dit_qkv_split_norm_f16(
+    __half* __restrict__ q, __half* __restrict__ k, __half* __restrict__ v,
+    const __half* __restrict__ qkv, const float* __restrict__ qW, const float* __restrict__ kW,
+    unsigned int tokens, unsigned int heads, unsigned int headDim, float eps)
+{
+    extern __shared__ float sred[];
+    unsigned long long g = (unsigned long long)blockIdx.x;
+    if (g >= (unsigned long long)tokens * heads) return;
+    unsigned int h = (unsigned int)(g % heads);
+    unsigned long long token = g / heads;
+    unsigned int W = heads * headDim, d = threadIdx.x;
+    const __half* base = qkv + token * 3ULL * W;
+    unsigned long long outOff = token * W + (unsigned long long)h * headDim;
+
+    float qv = __half2float(base[(unsigned long long)h * headDim + d]);
+    sred[d] = qv * qv; __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (d < s) sred[d] += sred[d + s]; __syncthreads(); }
+    float qInv = rsqrtf(sred[0] / (float)headDim + eps); __syncthreads();
+
+    float kv = __half2float(base[W + (unsigned long long)h * headDim + d]);
+    sred[d] = kv * kv; __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (d < s) sred[d] += sred[d + s]; __syncthreads(); }
+    float kInv = rsqrtf(sred[0] / (float)headDim + eps);
+
+    q[outOff + d] = __float2half(qv * qInv * qW[d]);
+    k[outOff + d] = __float2half(kv * kInv * kW[d]);
+    v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+}
+
 } // extern "C"

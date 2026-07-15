@@ -469,6 +469,24 @@ at bit-parity.
 
 TTS measured through the canonical `GenerateText2Image` path (WAV to `/Output` like any gen); STT via `ProcessSTT`. **The small audio models are host/launch-bound, not compute-bound** — the 4090's extra compute buys ~nothing (Piper is even slightly slower on it). So the optimization lever here is **CUDA-graph capture / host-glue removal** (kills kernel-launch overhead), exactly like the LLM-decode graph win and the opposite of the compute-bound video/music DiTs where graphs are a no-op. Music (ACE-Step, YuE, HeartMuLa) e2e numbers live in their own result files and [`docs/Checklists/MODEL_STATUS_AUDIO.md`](docs/Checklists/MODEL_STATUS_AUDIO.md).
 
+### 3D mesh generation (image → mesh), end-to-end vs the Python reference
+
+Warm end-to-end seconds on the RTX 4090 (`examples/chair.png` → coherent `.glb`), against the upstream Python
+reference on the same GPU. Full campaign write-up (Rounds 1–6, per-round diagnosis + parity gates):
+[`docs/Checklists/THREED_GENPERF_PLAN.md`](docs/Checklists/THREED_GENPERF_PLAN.md).
+
+| Model | HartsyInference | Python ref | Status |
+|---|---|---|---|
+| TripoSR (256³ density grid) | **2.1 s** | 0.58 s (neural) | 12.5× vs our own start (was 26.2 s); our GPU density decode now **beats** the reference — the gap is host marching-cubes + small-GEMM occupancy |
+| Hunyuan3D-2 Shape (30 steps, grid 128, fp16) | **9.2 s** | 5.76 s | 1.6× — was 71.3 s (**7.75×** in-campaign); DiT per-forward (113 ms) now within 1.18× of the reference's 96 ms |
+
+The Hunyuan3D wins were **bit-exact / coherence-gated**, not accuracy trades: a fused `Concat` kernel (a per-slice
+`cuMemcpyDtoDAsync` loop was issuing ~280k memcpy nodes/forward → dit-loop 27.7 → 7.5 s, bit-identical mesh), the
+DINOv2-giant conditioner's per-block host loops moved to device (cond 4.1 → 0.87 s), fused DiT adaLN + QKV-split-norm
+kernels, a device FourierEmbed for the VAE, plus cuDNN fused SDPA, a DiT CUDA-graph, and F16 activations. Batched
+CFG was measured and **ruled out** — the Concat fix already removed the per-forward overhead it would amortize
+(graph-off ≈ graph-on), so the forward is now compute-bound. Both models produce coherent meshes verified end-to-end.
+
 ---
 
 ## Supported Models
@@ -595,8 +613,8 @@ reference embeddings/logits, not just "loads without error".
 
 | Model | Task | Status |
 |---|---|---|
-| TripoSR | Image → mesh (triplane/NeRF) | 🏗️ |
-| Hunyuan3D-2 (Shape) | Image/Text → mesh | 🏗️ |
+| TripoSR | Image → mesh (triplane/NeRF) | ✅ |
+| Hunyuan3D-2 (Shape) | Image/Text → mesh | ✅ |
 
 > Built on a reusable mesh / splat / triplane foundation: marching cubes, plus glTF / OBJ / PLY export.
 

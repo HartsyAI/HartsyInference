@@ -125,15 +125,15 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
     }
 
     /// <summary>Occupancy for query points <c>[count,3]</c> given precomputed (kP, vP). Returns <c>[count]</c>.</summary>
-    public Tensor Query(IBackend backend, (Tensor kP, Tensor vP) kv, ReadOnlySpan<float> coords, int count)
+    public Tensor Query(IBackend backend, (Tensor kP, Tensor vP) kv, Tensor coords, int count)
     {
         int nl = (int)kv.kP.Shape[2];
         float scale = 1f / MathF.Sqrt(_headDim);
         TensorShape flat = new(1, count, _width), heads = new(1, count, _heads, _headDim), qmh = new(1, _heads, count, _headDim);
 
-        // Fourier embed (host write of fresh input) → query_proj → query_embeddings (also the residual base).
+        // Fourier embed on-device (coords [count,3] → feat stays GPU-resident) → query_proj → query_embeddings.
         Tensor feat = new(new TensorShape(1, count, _fourierDim), DType.F32);
-        Hunyuan3DVaeOps.FourierEmbed(feat, coords, count, _bands);
+        backend.FourierEmbed(feat, coords, count, _bands);
         Tensor qEmb = new(flat, DType.F32); backend.Linear(qEmb, feat, _qProjW!, _qProjB!); feat.Dispose();
 
         // cross-attn: q = q_norm(c_q(ln_1(qEmb))); attn(q, kP, vP); x = qEmb + c_proj(attn).
@@ -166,7 +166,7 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
 }
 
 /// <summary>Host helpers for the ShapeVAE: one-time head-interleaved weight split (so fused <c>c_qkv</c>/<c>c_kv</c>
-/// become plain head-major Linears) and the FourierEmbedder (input construction — a host write, not a GPU read).</summary>
+/// become plain head-major Linears). The FourierEmbedder is now a device op (<see cref="IBackend.FourierEmbed"/>).</summary>
 internal static unsafe class Hunyuan3DVaeOps
 {
     /// <summary>Splits a fused, head-interleaved projection weight <c>[k·W, W]</c> (row layout per head [t=0..k-1]·D)
@@ -192,27 +192,4 @@ internal static unsafe class Hunyuan3DVaeOps
         return (outs[0], outs[1], k > 2 ? outs[2] : outs[1]);
     }
 
-    /// <summary>FourierEmbedder (num_freqs bands, freqs 2^i, include_pi=false, include_input=true):
-    /// out = [x(3), sin(x⊗freqs)(3·bands), cos(x⊗freqs)(3·bands)]; the sin/cos halves are coord-major.</summary>
-    public static void FourierEmbed(Tensor dst, ReadOnlySpan<float> coords, int count, int bands)
-    {
-        float* dp = (float*)dst.DataPointer;
-        int dim = 3 * (2 * bands + 1);
-        int sinBase = 3, cosBase = 3 + 3 * bands;
-        for (int i = 0; i < count; i++)
-        {
-            long o = (long)i * dim;
-            for (int c = 0; c < 3; c++)
-            {
-                float x = coords[i * 3 + c];
-                dp[o + c] = x;
-                for (int band = 0; band < bands; band++)
-                {
-                    float a = x * (1 << band);
-                    dp[o + sinBase + c * bands + band] = MathF.Sin(a);
-                    dp[o + cosBase + c * bands + band] = MathF.Cos(a);
-                }
-            }
-        }
-    }
 }

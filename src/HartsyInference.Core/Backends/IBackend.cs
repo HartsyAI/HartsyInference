@@ -113,6 +113,85 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>Fused adaLN modulation: <c>out[b,s,d] = (1 + scale[b,d])·LayerNormNoAffine(in[b,s])[d] + shift[b,d]</c>
+    /// (LayerNorm eps <paramref name="eps"/>, no affine). Input/output <c>[B,S,D]</c>; <paramref name="scale"/>/
+    /// <paramref name="shift"/> are <c>[B,D]</c> broadcast over seq. Fuses LayerNormNoAffine + (1+scale) + affine
+    /// (3 ops → 1) for the DiT NormModulate. Default host impl = the composed reference.</summary>
+    unsafe void LayerNormModulate(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32 || scale.DType != DType.F32 || shift.DType != DType.F32)
+            throw new NotSupportedException("LayerNormModulate default fallback only supports F32.");
+        int rank = input.Shape.Rank;
+        int dim = (int)input.Shape[rank - 1];
+        int seqLen = rank >= 2 ? (int)input.Shape[rank - 2] : 1;
+        long rows = input.ElementCount / dim;
+        float* pIn = (float*)input.DataPointer, pOut = (float*)output.DataPointer;
+        float* pSc = (float*)scale.DataPointer, pSh = (float*)shift.DataPointer;
+        for (long row = 0; row < rows; row++)
+        {
+            float* inRow = pIn + row * dim; float* outRow = pOut + row * dim;
+            long b = (row / seqLen);
+            float* sc = pSc + b * dim; float* sh = pSh + b * dim;
+            double mean = 0; for (int i = 0; i < dim; i++) mean += inRow[i]; mean /= dim;
+            double var = 0; for (int i = 0; i < dim; i++) { double d = inRow[i] - mean; var += d * d; } var /= dim;
+            float invStd = (float)(1.0 / Math.Sqrt(var + eps));
+            for (int i = 0; i < dim; i++) outRow[i] = ((float)(inRow[i] - mean)) * invStd * (1f + sc[i]) + sh[i];
+        }
+    }
+
+    /// <summary>Fused QKV split + per-head QK-RMSNorm: from fused <paramref name="qkv"/> <c>[.,3·W]</c>
+    /// (W = heads·headDim) writes <paramref name="q"/>/<paramref name="k"/>/<paramref name="v"/> each <c>[.,W]</c>
+    /// (laid [token, head, d]), applying <c>RMSNorm(·)·weight</c> over each head's headDim slice to q and k (v copied).
+    /// Fuses SliceLastDim×3 + RmsNorm×2 (5 → 1) per attention stream. Default host impl = the composed reference.</summary>
+    unsafe void QkvSplitNorm(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
+    {
+        if (q.DType != DType.F32 || qkv.DType != DType.F32) throw new NotSupportedException("QkvSplitNorm default fallback only supports F32.");
+        int headDim = (int)qWeight.Shape[qWeight.Shape.Rank - 1];
+        int W = (int)qkv.Shape[qkv.Shape.Rank - 1] / 3;   // fused qkv last dim = 3·W
+        int heads = W / headDim;
+        long tok = qkv.ElementCount / (3L * W);
+        float* pq = (float*)q.DataPointer, pk = (float*)k.DataPointer, pv = (float*)v.DataPointer;
+        float* pqkv = (float*)qkv.DataPointer, pqw = (float*)qWeight.DataPointer, pkw = (float*)kWeight.DataPointer;
+        for (long t = 0; t < tok; t++)
+        {
+            float* baseP = pqkv + t * 3L * W;
+            for (int h = 0; h < heads; h++)
+            {
+                float* qs = baseP + h * headDim; float* ks = baseP + W + h * headDim; float* vs = baseP + 2 * W + h * headDim;
+                long outOff = t * W + (long)h * headDim;
+                double qss = 0, kss = 0; for (int d = 0; d < headDim; d++) { qss += (double)qs[d] * qs[d]; kss += (double)ks[d] * ks[d]; }
+                float qInv = (float)(1.0 / Math.Sqrt(qss / headDim + eps)), kInv = (float)(1.0 / Math.Sqrt(kss / headDim + eps));
+                for (int d = 0; d < headDim; d++) { pq[outOff + d] = qs[d] * qInv * pqw[d]; pk[outOff + d] = ks[d] * kInv * pkw[d]; pv[outOff + d] = vs[d]; }
+            }
+        }
+    }
+
+    /// <summary>FourierEmbedder (bands freqs 2^i, include_input=true, include_pi=false): for each point i and coord
+    /// c∈{0,1,2}: <c>out[i,c]=x</c>, <c>out[i,3+c·bands+band]=sin(x·2^band)</c>, <c>out[i,3+3·bands+c·bands+band]=
+    /// cos(x·2^band)</c>. <paramref name="coords"/> is <c>[count,3]</c>; output dim = 3·(2·bands+1).</summary>
+    unsafe void FourierEmbed(Tensor dst, Tensor coords, int count, int bands)
+    {
+        if (dst.DType != DType.F32 || coords.DType != DType.F32) throw new NotSupportedException("FourierEmbed default fallback only supports F32.");
+        int dim = 3 * (2 * bands + 1);
+        int sinBase = 3, cosBase = 3 + 3 * bands;
+        float* dp = (float*)dst.DataPointer, cp = (float*)coords.DataPointer;
+        for (int i = 0; i < count; i++)
+        {
+            long o = (long)i * dim;
+            for (int c = 0; c < 3; c++)
+            {
+                float x = cp[i * 3 + c];
+                dp[o + c] = x;
+                for (int band = 0; band < bands; band++)
+                {
+                    float a = x * (1 << band);
+                    dp[o + sinBase + c * bands + band] = MathF.Sin(a);
+                    dp[o + cosBase + c * bands + band] = MathF.Cos(a);
+                }
+            }
+        }
+    }
+
     // ── Oasis spatio-temporal attention layout (default host impls = numeric reference;
     //    CudaBackend overrides with PTX kernels to keep the attention island GPU-resident) ──
 

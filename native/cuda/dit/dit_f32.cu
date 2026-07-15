@@ -764,4 +764,120 @@ __global__ void conv_transpose2d_f32(
     out[idx] = acc;
 }
 
+// Two-input concat along an arbitrary dim, in ONE launch (one thread per output element). Replaces the
+// host-side per-outer-slice cuMemcpyDtoDAsync loop in CudaBackend.Concat, which issued `outer` × 2 async
+// memcpys — catastrophic for last-dim / per-token concats (the Hunyuan3D single-block cat(attn,mlp) at
+// outer=seqLen=4442 issued ~8900 memcpys/concat → 8.4 ms/call, ~280k graph nodes/forward). Logical layout is
+// [outer, aDim|bDim, inner] with the concat on the middle axis: dim=1 concat → inner = product of trailing
+// dims; last-dim concat → inner = 1, outer = product of leading dims. Covers every 2-input concat.
+__global__ void dit_concat2_f32(
+    float* __restrict__ out,
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    unsigned int outer, unsigned int aDim, unsigned int bDim, unsigned int inner)
+{
+    unsigned int outDim = aDim + bDim;
+    unsigned long long total = (unsigned long long)outer * outDim * inner;
+    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    unsigned int innerI = (unsigned int)(idx % inner);
+    unsigned long long tmp = idx / inner;
+    unsigned int dimIdx = (unsigned int)(tmp % outDim);
+    unsigned long long o = tmp / outDim;
+    if (dimIdx < aDim)
+        out[idx] = a[((o * aDim + dimIdx) * (unsigned long long)inner) + innerI];
+    else
+        out[idx] = b[((o * bDim + (dimIdx - aDim)) * (unsigned long long)inner) + innerI];
+}
+
+// Fused adaLN modulation: out[r,d] = (1 + scale[b,d])·LayerNormNoAffine(in[r]) + shift[b,d], b = r/seqLen.
+// One block per row (tree reduction over dim). Replaces LayerNormNoAffine + AddScalar(+1) + AffineBroadcast (3 → 1)
+// — the DiT NormModulate, ~96×/forward. scale/shift are [B,dim] (per-channel, broadcast over seq).
+__global__ void dit_layernorm_modulate_f32(
+    float* __restrict__ output, const float* __restrict__ input,
+    const float* __restrict__ scale, const float* __restrict__ shift,
+    unsigned int dim, unsigned int seqLen, unsigned int totalRows, float eps)
+{
+    extern __shared__ float sdata[];
+    unsigned int row = blockIdx.x;
+    if (row >= totalRows) return;
+    const float* inRow = input + (size_t)row * dim;
+    float* outRow = output + (size_t)row * dim;
+    unsigned int b = row / seqLen;
+    const float* sc = scale + (size_t)b * dim;
+    const float* sh = shift + (size_t)b * dim;
+
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) partial += inRow[i];
+    sdata[threadIdx.x] = partial; __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
+    float mean = sdata[0] / (float)dim; __syncthreads();
+
+    float vpart = 0.0f;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) { float d = inRow[i] - mean; vpart += d * d; }
+    sdata[threadIdx.x] = vpart; __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
+    float invStd = rsqrtf(sdata[0] / (float)dim + eps);
+
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+        outRow[i] = (inRow[i] - mean) * invStd * (1.0f + sc[i]) + sh[i];
+}
+
+// Fused QKV split + per-head QK-RMSNorm: from a fused qkv[token, 3·W] (W = heads·headDim), writes q,k,v each
+// [token, W] laid [token, head, d], applying RMSNorm(·)·weight over each head's headDim slice to q and k (v copied).
+// Replaces SliceLastDim×3 + RmsNorm×2 (5 → 1) per attention stream. One block per (token, head); blockDim = headDim
+// (power of two — tree reduction). Activation follows the qkv dtype; the norm weights stay F32.
+__global__ void dit_qkv_split_norm_f32(
+    float* __restrict__ q, float* __restrict__ k, float* __restrict__ v,
+    const float* __restrict__ qkv, const float* __restrict__ qW, const float* __restrict__ kW,
+    unsigned int tokens, unsigned int heads, unsigned int headDim, float eps)
+{
+    extern __shared__ float sred[];
+    unsigned long long g = (unsigned long long)blockIdx.x;   // group = token*heads + head
+    if (g >= (unsigned long long)tokens * heads) return;
+    unsigned int h = (unsigned int)(g % heads);
+    unsigned long long token = g / heads;
+    unsigned int W = heads * headDim, d = threadIdx.x;
+    const float* base = qkv + token * 3ULL * W;
+    unsigned long long outOff = token * W + (unsigned long long)h * headDim;
+
+    float qv = base[(unsigned long long)h * headDim + d];
+    sred[d] = qv * qv; __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (d < s) sred[d] += sred[d + s]; __syncthreads(); }
+    float qInv = rsqrtf(sred[0] / (float)headDim + eps); __syncthreads();
+
+    float kv = base[W + (unsigned long long)h * headDim + d];
+    sred[d] = kv * kv; __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (d < s) sred[d] += sred[d + s]; __syncthreads(); }
+    float kInv = rsqrtf(sred[0] / (float)headDim + eps);
+
+    q[outOff + d] = qv * qInv * qW[d];
+    k[outOff + d] = kv * kInv * kW[d];
+    v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+}
+
+// FourierEmbedder (num_freqs bands, freqs 2^i, include_input=true, include_pi=false): for each point i and coord
+// c∈{0,1,2}: out[i, c] = x; out[i, 3 + c·bands + band] = sin(x·2^band); out[i, 3 + 3·bands + c·bands + band] =
+// cos(x·2^band). One thread per (point, coord). Replaces the host trig loop in the ShapeVAE geo-decoder query
+// (kept feat on device → no per-chunk H2D of the Fourier features). dim = 3·(2·bands + 1).
+__global__ void fourier_embed_f32(
+    float* __restrict__ dst, const float* __restrict__ coords,
+    unsigned int count, unsigned int bands, unsigned int dim)
+{
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= (unsigned long long)count * 3u) return;
+    unsigned int c = (unsigned int)(gid % 3u);
+    unsigned long long i = gid / 3u;
+    float x = coords[i * 3ULL + c];
+    unsigned long long o = i * dim;
+    unsigned int sinBase = 3u, cosBase = 3u + 3u * bands;
+    dst[o + c] = x;
+    for (unsigned int band = 0; band < bands; band++)
+    {
+        float a = x * (float)(1u << band);
+        dst[o + sinBase + c * bands + band] = sinf(a);
+        dst[o + cosBase + c * bands + band] = cosf(a);
+    }
+}
+
 } // extern "C"

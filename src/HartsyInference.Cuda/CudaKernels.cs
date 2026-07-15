@@ -202,6 +202,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _triplaneGridSampleF32;
     private readonly nint _gegluErfF32;
     private readonly nint _convTranspose2dF32;
+    private readonly nint _ditConcat2F32;
+    private readonly nint _ditLayerNormModulateF32;
+    private readonly nint _ditQkvSplitNormF32;
+    private readonly nint _fourierEmbedF32;
 
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
     private readonly CudaModule _ditF16Module;
@@ -214,6 +218,9 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditRopeInterleavedF16;
     private readonly nint _ditRopeF16;
     private readonly nint _ditSliceLastDimF16;
+    private readonly nint _ditConcat2F16;
+    private readonly nint _ditLayerNormModulateF16;
+    private readonly nint _ditQkvSplitNormF16;
     private readonly nint _ditRepeatKvF16;
     private readonly nint _ditSliceRowsF16;
     private readonly nint _ditChwToHwcU8;
@@ -458,6 +465,10 @@ public sealed class CudaKernels : IDisposable
         _triplaneGridSampleF32 = _ditF32Module.GetFunction("triplane_grid_sample_f32");
         _gegluErfF32 = _ditF32Module.GetFunction("geglu_erf_f32");
         _convTranspose2dF32 = _ditF32Module.GetFunction("conv_transpose2d_f32");
+        _ditConcat2F32 = _ditF32Module.GetFunction("dit_concat2_f32");
+        _ditLayerNormModulateF32 = _ditF32Module.GetFunction("dit_layernorm_modulate_f32");
+        _ditQkvSplitNormF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_f32");
+        _fourierEmbedF32 = _ditF32Module.GetFunction("fourier_embed_f32");
 
         _mg3ActionModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mg3_action.ptx"));
         _mg3SplitQkvTemporalF32 = _mg3ActionModule.GetFunction("mg3_split_qkv_temporal_f32");
@@ -477,6 +488,9 @@ public sealed class CudaKernels : IDisposable
         _ditRopeInterleavedF16 = _ditF16Module.GetFunction("dit_rope_interleaved_f16");
         _ditRopeF16 = _ditF16Module.GetFunction("dit_rope_f16");
         _ditSliceLastDimF16 = _ditF16Module.GetFunction("dit_slice_lastdim_f16");
+        _ditConcat2F16 = _ditF16Module.GetFunction("dit_concat2_f16");
+        _ditLayerNormModulateF16 = _ditF16Module.GetFunction("dit_layernorm_modulate_f16");
+        _ditQkvSplitNormF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_f16");
         _ditRepeatKvF16 = _ditF16Module.GetFunction("dit_repeat_kv_f16");
         _ditSliceRowsF16 = _ditF16Module.GetFunction("dit_slice_rows_f16");
         _ditChwToHwcU8 = _ditF16Module.GetFunction("dit_chw_f32_to_hwc_u8");
@@ -1919,6 +1933,59 @@ public sealed class CudaKernels : IDisposable
         long threads = rows * inner;
         uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_gegluErfF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Two-input concat along the [outer, aDim|bDim, inner] middle axis in ONE launch (replaces the
+    /// per-outer-slice memcpy loop). <paramref name="f16"/> selects the F16/F32 activation kernel.</summary>
+    public unsafe void LaunchConcat2(bool f16, ulong outp, ulong a, ulong b, int outer, int aDim, int bDim, int inner, nint stream)
+    {
+        ulong outArg = outp, aArg = a, bArg = b;
+        uint outerArg = (uint)outer, aArg2 = (uint)aDim, bArg2 = (uint)bDim, innerArg = (uint)inner;
+        void** args = stackalloc void*[7];
+        args[0] = &outArg; args[1] = &aArg; args[2] = &bArg;
+        args[3] = &outerArg; args[4] = &aArg2; args[5] = &bArg2; args[6] = &innerArg;
+        long threads = (long)outer * (aDim + bDim) * inner;
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(f16 ? _ditConcat2F16 : _ditConcat2F32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Fused adaLN modulation: out = (1+scale)·LayerNormNoAffine(in) + shift (one block per row).</summary>
+    public unsafe void LaunchLayerNormModulate(bool f16, ulong output, ulong input, ulong scale, ulong shift,
+        int dim, int seqLen, int totalRows, float eps, nint stream)
+    {
+        ulong outArg = output, inArg = input, scArg = scale, shArg = shift;
+        uint dimArg = (uint)dim, seqArg = (uint)seqLen, rowsArg = (uint)totalRows; float epsArg = eps;
+        void** args = stackalloc void*[8];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &scArg; args[3] = &shArg;
+        args[4] = &dimArg; args[5] = &seqArg; args[6] = &rowsArg; args[7] = &epsArg;
+        uint sharedMem = BlockSize * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(f16 ? _ditLayerNormModulateF16 : _ditLayerNormModulateF32,
+            (uint)totalRows, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Fused QKV split + per-head QK-RMSNorm (one block per (token, head); blockDim = headDim).</summary>
+    public unsafe void LaunchQkvSplitNorm(bool f16, ulong q, ulong k, ulong v, ulong qkv, ulong qW, ulong kW,
+        int tokens, int heads, int headDim, float eps, nint stream)
+    {
+        ulong qArg = q, kArg = k, vArg = v, qkvArg = qkv, qwArg = qW, kwArg = kW;
+        uint tArg = (uint)tokens, hArg = (uint)heads, hdArg = (uint)headDim; float epsArg = eps;
+        void** args = stackalloc void*[10];
+        args[0] = &qArg; args[1] = &kArg; args[2] = &vArg; args[3] = &qkvArg; args[4] = &qwArg; args[5] = &kwArg;
+        args[6] = &tArg; args[7] = &hArg; args[8] = &hdArg; args[9] = &epsArg;
+        uint grid = (uint)((long)tokens * heads);
+        uint sharedMem = (uint)headDim * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(f16 ? _ditQkvSplitNormF16 : _ditQkvSplitNormF32,
+            grid, 1, 1, (uint)headDim, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>FourierEmbedder over device coords [count,3] → dst [count, 3·(2·bands+1)] (one thread per point·coord).</summary>
+    public unsafe void LaunchFourierEmbed(ulong dst, ulong coords, int count, int bands, int dim, nint stream)
+    {
+        ulong dArg = dst, cArg = coords; uint countArg = (uint)count, bArg = (uint)bands, dimArg = (uint)dim;
+        void** args = stackalloc void*[5];
+        args[0] = &dArg; args[1] = &cArg; args[2] = &countArg; args[3] = &bArg; args[4] = &dimArg;
+        uint grid = (uint)(((long)count * 3 + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_fourierEmbedF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Add scalar (out = in + c) with F16 I/O (scalar stays F32).</summary>

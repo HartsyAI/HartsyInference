@@ -1,4 +1,13 @@
-# TTS / STT end-to-end benchmarks — 2026-07-12 (updated 2026-07-13)
+# TTS / STT end-to-end benchmarks — 2026-07-12 (updated 2026-07-15)
+
+> **Update 2026-07-15 — Dia-1.6B verified word-correct through Swarm (10/10, all 3 turns).** Root cause of the
+> long-standing "loops *Hello there* / non-verbal garbage" was the **wrong checkpoint**: the extension pulled the
+> old `nari-labs/Dia-1.6B`; the current **`nari-labs/Dia-1.6B-0626`** (drop-in — identical keys/shapes) makes the
+> engine produce the full dialogue and **EOS-stop at 11.44 s** (985 frames). The engine was correct all along
+> (proven by a layer-diff vs the nari `dia` package). **Speed:** 11.44 s of audio in **319.7 s** on the 4090
+> (`GenerateText2Image`) → **RTF ≈ 0.036×** — by far the slowest TTS here (dual-CFG stream × 18-layer decoder, F32,
+> ~325 ms/frame). Correct-but-slow; a host-glue→GPU / F16 / CUDA-graph perf pass is the follow-up (like Bark/Chatterbox).
+
 
 > **Update 2026-07-13 — TTS correctness + F5 perf pass.** Four TTS models now verified word-correct via a
 > proven STT oracle (**whisper `medium.en`** — `base.en` was dropped after it was caught *hallucinating* the
@@ -73,7 +82,8 @@ opposite of the compute-bound video/music DiTs where graphs are a no-op.
   contiguous tensors, benefits all `.pth` models). (2) No number normalization → digits/currency/ordinals dropped;
   ported `normalize_numbers`. Now correct on numbers/years/ordinals/currency. Still the perf optimization target
   (1.4×, BERT+VITS host-flat).
-- Numerically-verified-but-no-runnable-e2e (do not benchmark yet): Kyutai TTS/STT, FishSpeech, Dia, VibeVoice, NeuTTS, Orpheus, Bark, StyleTTS2 (🔧/🔬); Zonos, PocketTTS (⛔ blocked).
+- **Dia-1.6B** — **VERIFIED + FIXED 2026-07-15** (Swarm 10/10, EOS-stops 11.4s). Was the wrong checkpoint: repo `nari-labs/Dia-1.6B`→`nari-labs/Dia-1.6B-0626` (drop-in, ships `pytorch_model.bin`). RTF ≈ 0.036× (slowest TTS — dual-CFG 18-layer AR F32); perf pass pending.
+- Numerically-verified-but-no-runnable-e2e (do not benchmark yet): Kyutai TTS/STT, FishSpeech, VibeVoice, NeuTTS, StyleTTS2 (🔧/🔬); Zonos, PocketTTS (⛔ blocked).
 
 ## Remaining work
 - Larger verified TTS still to bench (need per-model setup/refs): Chatterbox, CosyVoice 2, Qwen3-TTS, GPT-SoVITS.

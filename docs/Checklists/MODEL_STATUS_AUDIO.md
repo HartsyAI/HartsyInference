@@ -30,8 +30,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 >
 > | Status | TTS |
 > |---|---|
-> | ✅ **verified word-correct** | Kokoro, Piper, MeloTTS, F5-TTS, **Bark**, **Chatterbox**, **VibeVoice**, **FishSpeech**, **Orpheus** |
-> | ⏳ **runnable, verify in progress** | Dia (slow AR, gen pending) |
+> | ✅ **verified word-correct** | Kokoro, Piper, MeloTTS, F5-TTS, **Bark**, **Chatterbox**, **VibeVoice**, **FishSpeech**, **Orpheus**, **Dia** (Swarm 10/10, all 3 turns, EOS-stops 11.4s — fixed by switching to the `Dia-1.6B-0626` checkpoint) |
 > | 🚧 **partially wired** (loads; clone/synth path throws) | Kyutai TTS, NeuTTS (clone gated), Qwen3-TTS (voice_clone gated) |
 > | ⛔ **not wired** (install throws a clear "not runnable yet") | CosyVoice ("not yet supported by the in-process engine"), StyleTTS2 (no unified LoadWeights), Spark-TTS (config/BiCodec reconcile), Zonos (needs conditioning prefix), PocketTTS (placeholder dims), CSM (no runtime model) |
 >
@@ -50,7 +49,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 > | **Kokoro** | ✅ | "Hello world. This is a test." (4/4) | ✅ **genuinely works** |
 > | **MeloTTS** | ✅ | "Hello World, this is a test of the speech synthesizer." (5/5) | ✅ **genuinely works** |
 > | **F5-TTS** | ✅ "bit-exact" | (07-08) "(laughs)" → (07-13, with a real voice ref) word-perfect | ✅ **works 2026-07-13** — the 07-08 run had no voice reference; given a reference clip + transcript through Swarm it transcribes word-perfect (medium.en) and clones the voice. Also 34× faster (host-conv→GPU). |
-> | **Dia-1.6B** | 🔬 | "(crickets chirping)" (0/7) | ✗ **not intelligible** — gen-loop/DAC bug (transformer parity is real, output isn't) |
+> | **Dia-1.6B** | ✅ | "Hello there! This is a test of the DIA text-to-speech model. It really does sound quite natural, doesn't it? Yes, the dialogue flows nicely between the two speakers." (10/10) | ✅ **fixed 2026-07-15** — the "(crickets)"/loop was the **wrong checkpoint**; `Dia-1.6B-0626` (drop-in) transcribes word-perfect through Swarm and EOS-stops at 11.4s. Not a gen-loop/DAC bug after all. |
 > | **Qwen3-TTS 0.6B** | ✅ "bit-exact" | — (RMS 0, silent) | ⚠️ **inconclusive** — probably driven wrong (voice-design mode on a CustomVoice ckpt) |
 >
 > Lesson: the whole audio suite's "verified" status rests on parity tests that are blind to whether the
@@ -81,7 +80,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **MeloTTS** (English-v3) | ✅ | Real-weight e2e in pure C#. **Swarm e2e word-correct 2026-07-13** — earlier "corr 0.9993 noise-0" was stale: the real e2e produced gibberish from a `PytorchPickleLoader` **stride bug** (bert-base-uncased Linear weights, saved as `.t()` views, loaded transposed → garbage BERT features), fixed with a stride-gather (`MakeRowMajor`, no-op for contiguous — helps all `.pth` models). Also added **number normalization** (`normalize_numbers`: years/currency/ordinals/decimals were dropped). `MeloTts` facade + gated parity test. |
 | **Spark-TTS-0.5B** | ✅ | Real-weight e2e bit-exact, fully in-engine (controllable mode): LM logits corr 1.0 (top-1 100%), greedy tokens 32/32 global + 179/179 semantic match Python, BiCodec wav corr 1.0 (factorized VQ, FSQ d-vector, AdaLN PreNet all corr 1.0). `SparkTtsPipeline.LoadFromDirectory`/`LoadAsync` + `SynthesizeControllable(text, gender, pitch, speed)`; `SparkTtsTokenizer` reuses the shared BPE + ByteLevelCodec. Zero-shot cloning would need the BiCodec encoder side (wav2vec2 + ECAPA), not built. |
 | **FishSpeech 1.5** | 🔬 | DualAR LM verified: slow (24-layer) corr 1.0, fast depth-LM (4-layer) corr 0.9999. fused-key adapter + interleaved RoPE + no embed-scale + pre-norm fast input. Only the firefly-gan-vq codec remains. |
-| **Dia-1.6B** | 🔬 | Full transformer verified bit-exact (corr 1.0): encoder (12L) + decoder (18L, cross-attn/9-ch/fused head). DenseGeneral adapter + split-half RoPE + attn scale 1.0 + KV-cache AdvanceLength fix. Only DAC wiring (shared/✅) + delay-AR remain. |
+| **Dia-1.6B** | ✅ | **Swarm e2e word-correct 2026-07-15 (10/10, all 3 turns) — root cause was the WRONG CHECKPOINT.** The full transformer was already bit-exact; the "loops *Hello there* / non-verbal garbage across seeds" symptom was the engine faithfully running the **old** `nari-labs/Dia-1.6B` release. The current **`nari-labs/Dia-1.6B-0626`** (a drop-in: identical 343 keys + shapes, only weight *values* differ — decoder-embed corr 0.297 between the two) produces the **full 3-turn dialogue** and **emits EOS to stop itself at 11.44 s** (985 frames, doesn't run to the cap). Proven by a layer-diff A/B against the nari `dia` package (which itself hardcodes `-0626`): our forward/sampling/EOS/RoPE/masking all matched — the "divergence" was just base-vs-0626 weights, not a bug. Fix = extension repo `Dia-1.6B`→`Dia-1.6B-0626` (ships `pytorch_model.bin` → `PytorchPickleLoader`, no engine change); rebuilt + restarted Swarm → `GenerateText2Image` transcribes 10/10 (medium.en). |
 | **VibeVoice / NeuTTS / Orpheus / Bark / StyleTTS2** | 🔧 | Built (varying completeness); no real-weight parity yet. Orpheus/NeuTTS are phoneme-id-blocked (caller supplies ids). |
 | **Zonos** | ⛔ | Blocked: espeak phonemes + ResNet293 speaker encoder + NovelAI sampler. Deferred. |
 

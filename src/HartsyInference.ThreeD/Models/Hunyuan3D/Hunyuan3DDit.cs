@@ -197,11 +197,9 @@ public sealed unsafe class Hunyuan3DDit
         }
 
         // final_layer (LastLayer): shift,scale = chunk(adaLN(vec)) — SHIFT FIRST; x=(1+scale)·norm(x)+shift; linear→C.
-        Tensor[] fm = Hunyuan3DGpuOps.ModParams(backend, vec, _finalNormW!, _finalNormB!, 2, width);
-        Tensor normed = new(latentOut.Shape, DType.F32); backend.LayerNormNoAffine(normed, latentOut, 1e-6f); latentOut.Dispose();
-        Tensor scalePlus1 = new(fm[1].Shape, DType.F32); backend.AddScalar(scalePlus1, fm[1], 1f);
-        Tensor modOut = new(normed.Shape, DType.F32); backend.AffineBroadcastLastDim(modOut, normed, scalePlus1, fm[0]);
-        normed.Dispose(); scalePlus1.Dispose(); fm[0].Dispose(); fm[1].Dispose();
+        Tensor[] fm = Hunyuan3DGpuOps.ModParams(backend, vec, _finalNormW!, _finalNormB!, 2, width);   // fm[0]=shift, fm[1]=scale
+        Tensor modOut = new(latentOut.Shape, DType.F32); backend.LayerNormModulate(modOut, latentOut, fm[1], fm[0], 1e-6f);
+        latentOut.Dispose(); fm[0].Dispose(); fm[1].Dispose();
         Tensor velocity = new(new TensorShape(b, n, _cfg.LatentChannels), DType.F32);
         backend.Linear(velocity, modOut, _finalLinW!, _finalLinB!);
         modOut.Dispose();

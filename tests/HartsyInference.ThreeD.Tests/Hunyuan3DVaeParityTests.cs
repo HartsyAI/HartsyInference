@@ -38,12 +38,10 @@ public sealed unsafe class Hunyuan3DVaeParityTests
         Tensor queries = rl.GetTensor("queries");      // [1,N,3]
         Tensor refOcc = rl.GetTensor("occupancy");     // [1,N,1]
         int n = (int)queries.Shape[1];
-        float[] coords = new float[n * 3];
-        new ReadOnlySpan<float>((float*)queries.DataPointer, n * 3).CopyTo(coords);
 
         Tensor processed = vae.ProcessLatents(backend, latent);
         (Tensor kNorm, Tensor v) kv = vae.PrepareKv(backend, processed);
-        Tensor occ = vae.DecodePoints(backend, kv, coords, n);
+        Tensor occ = vae.DecodePoints(backend, kv, queries, n);   // queries [1,N,3] = flat [N,3] for FourierEmbed
         processed.Dispose(); kv.kNorm.Dispose(); kv.v.Dispose();
 
         Tensor occF = occ.DType == DType.F32 ? occ : occ.CastTo(DType.F32);

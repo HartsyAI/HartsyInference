@@ -99,12 +99,9 @@ internal sealed unsafe class Hunyuan3DDoubleBlock
         DType act = x.DType;
         Tensor mod = Hunyuan3DGpuOps.NormModulate(backend, x, shift, scale, flat);
         Tensor qkv = new(new TensorShape(1, flat[1], 3 * _width), act); backend.Linear(qkv, mod, qkvW, qkvB); mod.Dispose();
-        Tensor q = new(heads, act); backend.SliceLastDim(q, qkv, 0);
-        Tensor k = new(heads, act); backend.SliceLastDim(k, qkv, _width);
-        Tensor v = new(heads, act); backend.SliceLastDim(v, qkv, 2 * _width);
-        qkv.Dispose();
-        Tensor qOut = new(heads, act); backend.RmsNorm(qOut, q, qn.Weight, qn.Eps); q.Dispose();
-        Tensor kOut = new(heads, act); backend.RmsNorm(kOut, k, kn.Weight, kn.Eps); k.Dispose();
+        // Fused split + per-head QK-RMSNorm (was SliceLastDim×3 + RmsNorm×2). Outputs [1,S,heads,headDim].
+        Tensor qOut = new(heads, act), kOut = new(heads, act), v = new(heads, act);
+        backend.QkvSplitNorm(qOut, kOut, v, qkv, qn.Weight, kn.Weight, qn.Eps); qkv.Dispose();
         return (qOut, kOut, v);
     }
 
@@ -171,15 +168,12 @@ internal sealed unsafe class Hunyuan3DSingleBlock
         Tensor mlp = new(new TensorShape(1, s, _mlpDim), act); backend.SliceLastDim(mlp, lin1, 3 * _width);
         lin1.Dispose();
 
-        Tensor q = new(heads, act); backend.SliceLastDim(q, qkv, 0);
-        Tensor k = new(heads, act); backend.SliceLastDim(k, qkv, _width);
-        Tensor v = new(heads, act); backend.SliceLastDim(v, qkv, 2 * _width);
-        qkv.Dispose();
-        Tensor qn = new(heads, act); backend.RmsNorm(qn, q, _qn.Weight, _qn.Eps); q.Dispose();
-        Tensor kn = new(heads, act); backend.RmsNorm(kn, k, _kn.Weight, _kn.Eps); k.Dispose();
-        Tensor qP = new(mh, act); backend.Permute0213(qP, qn, s, _numHeads, _headDim); qn.Dispose();
-        Tensor kP = new(mh, act); backend.Permute0213(kP, kn, s, _numHeads, _headDim); kn.Dispose();
-        Tensor vP = new(mh, act); backend.Permute0213(vP, v, s, _numHeads, _headDim); v.Dispose();
+        // Fused split + per-head QK-RMSNorm (was SliceLastDim×3 + RmsNorm×2), then permute to multihead.
+        Tensor qh = new(heads, act), kh = new(heads, act), vh = new(heads, act);
+        backend.QkvSplitNorm(qh, kh, vh, qkv, _qn.Weight, _kn.Weight, _qn.Eps); qkv.Dispose();
+        Tensor qP = new(mh, act); backend.Permute0213(qP, qh, s, _numHeads, _headDim); qh.Dispose();
+        Tensor kP = new(mh, act); backend.Permute0213(kP, kh, s, _numHeads, _headDim); kh.Dispose();
+        Tensor vP = new(mh, act); backend.Permute0213(vP, vh, s, _numHeads, _headDim); vh.Dispose();
         Tensor attn = new(mh, act); backend.ScaledDotProductAttention(attn, qP, kP, vP, null, scale, allowF16: true); qP.Dispose(); kP.Dispose(); vP.Dispose();
         Tensor attnFlat = new(flat, act); backend.Permute0213(attnFlat, attn, _numHeads, s, _headDim); attn.Dispose();
 
@@ -216,11 +210,8 @@ internal static unsafe class Hunyuan3DGpuOps
     /// per-channel scale/shift stay F32 (the F16 kernels take F16 activation + F32 params).</summary>
     public static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
     {
-        DType act = x.DType;
-        Tensor normed = new(shape, act); backend.LayerNormNoAffine(normed, x, 1e-6f);
-        Tensor scalePlus1 = new(scale.Shape, DType.F32); backend.AddScalar(scalePlus1, scale, 1f);
-        Tensor outp = new(shape, act); backend.AffineBroadcastLastDim(outp, normed, scalePlus1, shift);
-        normed.Dispose(); scalePlus1.Dispose();
+        // Fused adaLN: (1+scale)·LayerNormNoAffine(x)+shift in one kernel (was LayerNormNoAffine + AddScalar + Affine).
+        Tensor outp = new(shape, x.DType); backend.LayerNormModulate(outp, x, scale, shift, 1e-6f);
         return outp;
     }
 }

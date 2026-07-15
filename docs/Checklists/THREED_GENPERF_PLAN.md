@@ -204,6 +204,91 @@ already GPU-resident (all glue via `IBackend`, no mid-forward host reads) — th
 > levers (cuDNN SDPA, CUDA-graph, F16, device-CFG) are all applied + correct; closing the last ~5× to Python's
 > 5.76 s needs op-fusion work, not another flag.**
 
+> ### ✅ Round 5 (2026-07-15) — Hunyuan3D DiT: dit-loop 27.7 → 7.46 s (3.7×) from ONE bit-exact Concat kernel; the "occupancy-bound" diagnosis was a red herring
+> Re-profiled the graph-replayed forward on a **quiet** 4090 (461 ms/fwd — confirming Round 4's number was NOT
+> contention). The sync-profiled GPU compute summed to only ~150 ms/fwd, leaving a ~300 ms/fwd gap. Instrumenting
+> the previously-uninstrumented glue ops (added `NvtxRange` to `Concat`/`CopyInto`/`Cast*`/`AddScalar`) found the
+> wall instantly: **`Concat` = 972 calls, 8.4 ms avg, 8.2 s total — dominating everything else combined.**
+>
+> **Root cause:** `CudaBackend.Concat`'s `dim>0` path issued **one `cuMemcpyDtoDAsync` per outer element**. The
+> single-block `cat(attn[1,S,1024], gelu_mlp[1,S,4096], dim=2)` has outer=S=4442 → **~8900 tiny memcpys per concat**,
+> ×32 single blocks/forward = **~280k memcpy nodes/forward** captured into the CUDA graph — exactly the missing
+> ~300 ms. So the DiT was never "occupancy-starved tiny kernels" (Round 4's guess); it was one pathological op.
+>
+> **Fix:** new `dit_concat2_f32`/`_f16` kernel (one thread per output element, routes to input a or b via the
+> `[outer, aDim|bDim, inner]` middle-axis layout). `CudaBackend.Concat` routes any 2-input F32/F16 concat through
+> it (one launch); other cases keep the memcpy loop. **Shared op** — every model that concats along a non-leading
+> dim benefits (video/audio/LLM). Parity: new `CudaOpBisectTests` `Concat_LastDim_SingleBlockShape` /
+> `Concat_Dim1_JointShape` are **bit-exact** (maxAbs 0, corr 1.0); `Concat_F16_LastDim` corr 0.99999998.
+>
+> **Result (quiet 4090, 30 steps / grid 128):** dit-loop **27.7 → 7.46 s (3.7×)**; per-forward **461 → 124 ms**
+> (Python fp16 is ~96 ms → now only **1.3× off**). Total **71.3 → 13.8 s (cumulative 5.2×)**. Mesh **80432 verts /
+> 160968 tris — bit-identical** to Round 4 (Concat is bit-exact). Regression: all `CudaOpBisectTests` pass.
+>
+> **New phase split (4090):** dinov2-cond **4.07 s** · dit-loop **7.46 s** · vae-decode **2.11 s** · mc 0.13 s.
+> The DiT is now near Python parity per-forward. **Next targets, in ROI order:** (1) **DINOv2-giant conditioner
+> 4.07 s** (shared with the image fleet; likely its own host-glue/concat-class pathology — re-profile it). (2)
+> **batched CFG** (60 → 30 forwards) to close the last DiT gap. (3) **VAE grid decode 2.11 s**. **Lesson:** instrument
+> EVERY device op before concluding a bottleneck is "many small kernels" — an uninstrumented op hid the real wall
+> across two whole rounds (the op-profile blind spot, cf. `vae-host-loops-hidden-20s`).
+
+> ### ✅ Round 6 (2026-07-15) — DINOv2-giant conditioner 4.07 → 0.87 s (4.7×): per-block host loops → device; VAE is compute-bound
+> With the DiT no longer the wall, the phase probe put **dinov2-cond (4.07 s)** as the biggest single phase — and it
+> had the exact `sync-h2d-stream-drain` signature (4 s wall, ~150 ms GPU compute over 40 blocks). Root cause in the
+> **shared** `Dinov2VisionEncoder` (image fleet uses it too): two per-block host `DataPointer` loops that drained the
+> compute stream every block — **`LayerScale`** (gamma broadcast-multiply, 2×/block) and the **SwiGLU silu-gate**
+> (DINOv2-giant is swiglu, 1×/block). Ported both to device: LayerScale → `AffineBroadcastLastDim` (scale-only,
+> shift=null; B=1 conditioning path, host fallback for B>1); SwiGLU → `SliceLastDim`×2 + `Silu` + `Mul` (mirrors
+> `SwiGluFfn`). Also deleted the now-dead host `ToHeads`/`FromHeads` (Round 1 already moved Attention to
+> `Permute0213`). **dinov2-cond 4.07 → 0.87 s (4.7×).** Mesh 80636 verts (vs 80432) — ~0.25 % shift from
+> device-vs-host F32 silu rounding across 40 layers, coherent chair, in-distribution (F16-class).
+>
+> **VAE decode (2.08 s) — checked, not a freebie.** Hypothesis: the 512 per-chunk `occ.DataPointer` readbacks drain
+> the stream. Tested `HARTSY_HY3D_VAE_CHUNK` = 4096 / 16384 / 65536 → **2085 / 2200 / 2141 ms (flat)**. So the VAE is
+> **compute-bound** (real geo-decoder cross-attn over the full 2M-point 128³ grid + a host `FourierEmbed` whose cost
+> is constant in total points, not chunk count) — near its floor. Kept the env override (harmless) but no further
+> chase. The geo-decoder SDPA already runs fused-flash (no materialized scores → chunk is memory-, not scores-bound).
+>
+> **Cumulative Hunyuan3D: 71.3 → 10.5 s (6.8×)** — phase split dinov2 **0.87** · dit **7.37** · vae **2.08** · mc 0.13.
+> Coherent chair throughout. **vs Python 5.76 s → 1.8× off** (was 12× at the start of the campaign). Remaining lever
+> to actually *beat* Python: **batched CFG** (60 → 30 forwards; dit ~7.4 → ~4 s) — but it needs a batch-2 rewrite of
+> the double-block joint-attention seq split (`SliceRows` assumes B=1 contiguous), so it is a correctness-risky
+> refactor gated behind a flag, not a freebie. DiT per-forward (124 ms) and the VAE are both already near Python's
+> per-op floor.
+
+> ### ⛔ Round 7 (2026-07-15) — batched CFG ruled out EMPIRICALLY: the Concat fix already removed the overhead it would amortize
+> User asked to attempt batched CFG (batch cond+uncond → one batch-2 forward, 60 → 30 forwards) flag-gated. Before
+> building the batch-2 refactor (seq-slice rewrite of the double-block joint-attn split + `RunBlocks` txt-drop, both
+> `SliceRows`-B=1-bound), measured the **headroom it could ever recover** = the per-forward host overhead the graph
+> removes. Post-Concat, **graph-OFF = 141 ms/fwd vs graph-ON = 137 ms/fwd** (16 steps, grid 64) — within noise. The
+> CUDA graph barely helps anymore because the Concat pathology (its ~280k memcpy nodes/fwd) is gone; the forward is
+> now **~137 ms of near-pure compute** (sync profile: Linear + SDPA = ~85 %). **Batched CFG only helps by amortizing
+> per-forward overhead — and there is <3 % left.** Batching would do 2× the compute in one call ≈ same wall time
+> (likely worse from the larger footprint). The pre-Round-5 "dit 7.4 → 4 s" estimate assumed the old overhead was
+> still present; it isn't. **∴ not built** (correct call = don't refactor the flagship's hot path for ~0 gain).
+> Note: Python's 5.76 s ≈ 60 × 96 ms, so the reference does NOT batch CFG either — matching it is a per-forward
+> problem (124 → 96 ms, ~1.3×), not a forward-count problem. The real remaining levers are per-forward glue fusion
+> (small) and the compute-bound VAE (2.08 s) — both modest. **Lesson: measure the premise of an optimization before
+> building it; a prior fix can silently invalidate the next lever's assumption.**
+
+> ### ✅ Round 8 (2026-07-15) — per-forward glue fusion + VAE FourierEmbed on device: 10.5 → 9.2 s, all bit-exact
+> Two bit-exact fusions to close the last modest gaps. **(a) DiT glue fusion:** the NormModulate (LayerNormNoAffine +
+> AddScalar(+1) + AffineBroadcast, ~96×/fwd) → one `dit_layernorm_modulate_f32/f16` kernel; the per-stream QKV
+> attention prep (SliceLastDim×3 + RmsNorm×2) → one `dit_qkv_split_norm_f32/f16` kernel (one block per (token,head),
+> blockDim=headDim, tree-reduce). New `IBackend.LayerNormModulate`/`QkvSplitNorm` (default host = composed
+> reference) + CUDA overrides; rewired both Flux blocks + the DiT final layer. **dit-loop 7.37 → 6.80 s**
+> (124 → 113 ms/fwd; Python ~96 ms → 1.18×). Modest, exactly as Round 7 predicted for a compute-bound forward.
+> **(b) VAE FourierEmbed → device** (`fourier_embed_f32` kernel + `IBackend.FourierEmbed`, coords uploaded per
+> chunk, features stay GPU-resident): killed the host trig loop + the per-chunk H2D of the 51-dim features.
+> **vae-decode 2.08 → 1.42 s (1.5×)** — bigger than the chunk-size test implied (the host FourierEmbed was a real
+> cost, just chunk-count-independent). Parity: new `CudaOpBisectTests` `LayerNormModulate` (corr 1.0, maxAbs 9.5e-7),
+> `QkvSplitNorm` (corr 1.0, q/k maxAbs 2.4e-7, v bit-exact), `FourierEmbed` (corr 1.0, maxAbs 6e-8) — all **bit-exact**.
+> Mesh 80584 verts, coherent (in-band with every prior run). **Cumulative Hunyuan3D 71.3 → 9.2 s (7.75×)** — phase
+> split dinov2 0.87 · dit 6.80 · vae 1.42 · mc 0.14. **vs Python 5.76 s → 1.6× off.** All engine levers now applied:
+> cuDNN SDPA, CUDA-graph, F16 activations, fused Concat, device conditioner, fused DiT glue, device FourierEmbed.
+> The residual gap is the DiT per-forward (113 vs 96 ms) + VAE cross-attn compute — both near their real floors; no
+> further single lever without a fused-attention/GEMM epilogue kernel (large, low ROI).
+
 ## Method rules (from the war)
 - Phase probes before any op-level work; wall ≠ op-profile means an un-instrumented host phase.
 - **Correctness before perf** — parity/coherence gate every round; bit-identical residency ports first,
