@@ -17,7 +17,7 @@ public sealed class LensCheckpointConverter
         /// <summary>Diffusers-format transformer weights consumed by <see cref="HartsyInference.Diffusion.Models.Denoisers.LensTransformer.LoadWeights"/>.</summary>
         public required Dictionary<string, Tensor> Transformer { get; init; }
 
-        /// <summary>GPT-OSS text encoder weights (HuggingFace naming under <c>model.*</c>). MXFP4-packed MoE experts in the released checkpoints are already dequantized to F32 by <see cref="Convert"/>; ready to hand straight to the encoder loader.</summary>
+        /// <summary>GPT-OSS text encoder weights (HuggingFace naming under <c>model.*</c>). Diffusers MXFP4-packed MoE experts are dequantized to F32 by <see cref="Convert"/>; ComfyUI NVFP4-packed experts pass through PACKED from <see cref="ConvertComfyTextEncoder"/> (forward-time streaming dequant). Either way, ready to hand straight to the encoder loader.</summary>
         public required Dictionary<string, Tensor> TextEncoder { get; init; }
 
         /// <summary>Flux.2 semantic VAE weights. Same layout as Flux.2 Klein — handed off to the existing VAE loader.</summary>
@@ -134,15 +134,18 @@ public sealed class LensCheckpointConverter
         return transformer;
     }
 
-    /// <summary>Converts the ComfyUI GPT-OSS text encoder file: dequantizes NVFP4 MoE experts to F32,
-    /// renames the ComfyUI expert biases (<c>gate_up_proj.bias</c> → <c>gate_up_proj_bias</c>) to the HF
-    /// form the encoder loads, prepends the <c>model.</c> prefix, casts BF16 weights to F32 (the CPU
-    /// encoder GEMM is F32-only), and drops the <c>comfy_quant</c> blobs + the embedded <c>tokenizer_json</c>.</summary>
+    /// <summary>Converts the ComfyUI GPT-OSS text encoder file: renames the ComfyUI expert biases
+    /// (<c>gate_up_proj.bias</c> → <c>gate_up_proj_bias</c>) to the HF form the encoder loads, prepends
+    /// the <c>model.</c> prefix, casts BF16 weights to F32 (the CPU encoder GEMM is F32-only), and drops
+    /// the <c>comfy_quant</c> blobs + the embedded <c>tokenizer_json</c>.
+    /// <para><b>NVFP4 MoE expert banks pass through PACKED</b> (U8 nibbles + F8E4M3 swizzled block
+    /// scales + F32 per-expert globals, all still mmap-backed views into the file):
+    /// <see cref="HartsyInference.Diffusion.Models.TextEncoders.GptOssMoeFfn"/> dequantizes one expert
+    /// at a time transiently at forward time via <see cref="Nvfp4Codec.DequantExpertSlice"/>. Eagerly
+    /// materializing the 20B-parameter expert bank at F32 costs ~76 GB of host RAM and gets the process
+    /// OOM-killed on 64 GB hosts.</para></summary>
     public static Dictionary<string, Tensor> ConvertComfyTextEncoder(Dictionary<string, Tensor> textEncoder)
     {
-        int dq = Nvfp4Codec.DequantGptOssExpertsInPlace(textEncoder);
-        if (dq > 0) Logs.Verbose($"Lens(ComfyUI): dequantized {dq} NVFP4 GPT-OSS expert banks to F32.");
-
         Dictionary<string, Tensor> output = new(textEncoder.Count);
         foreach (KeyValuePair<string, Tensor> kvp in textEncoder)
         {
@@ -155,9 +158,21 @@ public sealed class LensCheckpointConverter
                 key.EndsWith("experts.down_proj.bias", StringComparison.Ordinal))
                 key = key[..^".bias".Length] + "_bias";
 
-            output[$"model.{key}"] = ToF32IfFloat(kvp.Value);
+            output[$"model.{key}"] = IsPackedNvfp4ExpertTensor(key, kvp.Value) ? kvp.Value : ToF32IfFloat(kvp.Value);
         }
         return output;
+    }
+
+    /// <summary>True for the three NVFP4 expert-bank tensors (<c>experts.*.weight</c> U8 packed nibbles,
+    /// <c>.weight_scale</c>, <c>.weight_scale_2</c>) that must stay in their quantized on-disk form.</summary>
+    private static bool IsPackedNvfp4ExpertTensor(string key, Tensor tensor)
+    {
+        if (!key.Contains("experts.", StringComparison.Ordinal))
+            return false;
+        if (key.EndsWith(".weight_scale", StringComparison.Ordinal) ||
+            key.EndsWith(".weight_scale_2", StringComparison.Ordinal))
+            return true;
+        return key.EndsWith(".weight", StringComparison.Ordinal) && tensor.DType == DType.U8;
     }
 
     private static Tensor ToF32IfFloat(Tensor t)

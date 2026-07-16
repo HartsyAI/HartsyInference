@@ -41,10 +41,12 @@ public sealed class LensGptOssEncoder : IDisposable
     public int NumLayers => _encoder.NumLayers;
 
     /// <summary>Loads encoder weights from a HuggingFace-format state dict (keys
-    /// <c>model.embed_tokens.weight</c>, <c>model.layers.{i}.*</c>, <c>model.norm.weight</c>). The MoE
-    /// experts must already be dequantized to F32 — the <c>LensCheckpointConverter</c> does this via
-    /// <see cref="HartsyInference.ModelHandler.Mxfp4.Mxfp4Codec.DequantGptOssExpertsInPlace"/>, so the
-    /// <c>TextEncoder</c> dict it returns is ready to pass here directly.</summary>
+    /// <c>model.embed_tokens.weight</c>, <c>model.layers.{i}.*</c>, <c>model.norm.weight</c>). MoE
+    /// experts arrive either dense F32 (the diffusers MXFP4 path dequantizes at load via
+    /// <see cref="HartsyInference.ModelHandler.Mxfp4.Mxfp4Codec.DequantGptOssExpertsInPlace"/>) or
+    /// NVFP4-packed (the ComfyUI path — kept quantized and mmap-backed; <see cref="GptOssMoeFfn"/>
+    /// streams one expert at a time at forward time so the 20B bank never materializes at F32). Both
+    /// <c>LensCheckpointConverter</c> outputs are ready to pass here directly.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights) => _encoder.LoadWeights(weights);
 
     /// <summary>Yields all weight tensors for GPU preloading.</summary>

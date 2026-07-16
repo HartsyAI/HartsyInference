@@ -1,4 +1,6 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cpu;
+using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.ModelHandler.BlockScale;
 using HartsyInference.ModelHandler.CheckpointConverters;
 using HartsyInference.ModelHandler.Mxfp8;
@@ -156,7 +158,7 @@ public sealed unsafe class LensComfyQuantTests
     // ────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void ConvertComfyTextEncoder_Remaps_RenamesBias_DropsBlobs_DequantsExperts()
+    public void ConvertComfyTextEncoder_Remaps_RenamesBias_DropsBlobs_KeepsExpertsPacked()
     {
         const int E = 1, outDim = 128, inHalf = 8; // gate_up-ish tiny: in=16
         Tensor guWeight = Reshape3d(ConstU8(E * outDim * inHalf, 1, 0x21), E, outDim, inHalf);
@@ -188,15 +190,163 @@ public sealed unsafe class LensComfyQuantTests
             // BF16 weights cast to F32 for the CPU encoder GEMM.
             Assert.Equal(DType.F32, outd["model.layers.0.self_attn.q_proj.weight"].DType);
             Assert.Equal(DType.F32, outd["model.embed_tokens.weight"].DType);
-            // Expert weight dequantized to the bare HF key, transposed [E, in, out] = [1, 16, 128], F32.
-            Tensor gu = outd["model.layers.0.mlp.experts.gate_up_proj"];
-            Assert.Equal(DType.F32, gu.DType);
-            Assert.Equal(new long[] { E, 16, outDim }, new[] { gu.Shape[0], gu.Shape[1], gu.Shape[2] });
+            // NVFP4 expert bank passes through PACKED (same tensors, no F32 materialization —
+            // GptOssMoeFfn dequantizes per expert transiently at forward time).
+            Assert.Same(guWeight, outd["model.layers.0.mlp.experts.gate_up_proj.weight"]);
+            Assert.Equal(DType.U8, outd["model.layers.0.mlp.experts.gate_up_proj.weight"].DType);
+            Assert.Same(guScale, outd["model.layers.0.mlp.experts.gate_up_proj.weight_scale"]);
+            Assert.Equal(DType.F8E4M3, outd["model.layers.0.mlp.experts.gate_up_proj.weight_scale"].DType);
+            Assert.Equal(DType.F32, outd["model.layers.0.mlp.experts.gate_up_proj.weight_scale_2"].DType);
+            Assert.False(outd.ContainsKey("model.layers.0.mlp.experts.gate_up_proj"));
             // Expert bias renamed `.bias` → `_bias` and cast to F32.
             Assert.True(outd.ContainsKey("model.layers.0.mlp.experts.gate_up_proj_bias"));
             Assert.Equal(DType.F32, outd["model.layers.0.mlp.experts.gate_up_proj_bias"].DType);
         }
         finally { foreach (Tensor t in outd.Values) t.Dispose(); }
+    }
+
+    [Fact]
+    public void Nvfp4_DequantExpertSlice_MatchesFullBankDequant()
+    {
+        const int E = 3, outDim = 160, inDim = 32; // out spans >1 swizzle row-block worth of rows; 2 groups of 16
+        int inHalf = inDim / 2;
+        // Pseudo-random nibbles, distinct per expert.
+        Tensor weight = new Tensor(new TensorShape(E, outDim, inHalf), DType.U8);
+        byte* wp = (byte*)weight.DataPointer;
+        for (int i = 0; i < E * outDim * inHalf; i++) wp[i] = (byte)((i * 37 + 11) & 0xFF);
+
+        // Swizzled scale buffer [E, 256, 4] (paddedRows = 128·ceil(160/128) = 256): varied E4M3 bytes.
+        Tensor scale = new Tensor(new TensorShape(E, 256, 4), DType.F8E4M3);
+        byte* sp = (byte*)scale.DataPointer;
+        for (int i = 0; i < E * 256 * 4; i++) sp[i] = (byte)(0x30 + (i % 16)); // small positive scales, no NaN
+
+        Tensor global = new Tensor(new TensorShape(E), DType.F32);
+        float* gp = (float*)global.DataPointer;
+        gp[0] = 0.5f; gp[1] = 1.25f; gp[2] = 2.0f;
+
+        Tensor bank = Nvfp4Codec.DequantExpert(weight, scale, global);
+        Tensor slice = new Tensor(new TensorShape(outDim, inDim), DType.F32);
+        try
+        {
+            for (int e = 0; e < E; e++)
+            {
+                Nvfp4Codec.DequantExpertSlice(weight, scale, global, e, slice);
+                // Bank is runtime-transposed [E, in, out]; the slice is on-disk row-major [out, in].
+                float* b = (float*)bank.DataPointer + (long)e * inDim * outDim;
+                float* s = (float*)slice.DataPointer;
+                for (long r = 0; r < outDim; r++)
+                    for (long c = 0; c < inDim; c++)
+                        Assert.Equal(b[c * outDim + r], s[r * inDim + c]);
+            }
+        }
+        finally { bank.Dispose(); slice.Dispose(); weight.Dispose(); scale.Dispose(); global.Dispose(); }
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // GptOssMoeFfn packed (NVFP4 streaming) vs dense forward parity
+    // ────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void MoeFfn_PackedForward_MatchesDenseForward()
+    {
+        const int hidden = 32, intermediate = 16, E = 4, topK = 2;
+        const int tokens = 6;
+        Random rng = new Random(42);
+
+        // Packed NVFP4 banks: gate_up on-disk [E, 2I, hidden/2], down [E, hidden, I/2].
+        Tensor guPacked = RandomNibbles(rng, E, 2 * intermediate, hidden / 2);
+        Tensor downPacked = RandomNibbles(rng, E, hidden, intermediate / 2);
+        Tensor guScale = RandomE4M3Scales(rng, E, 128, 4);
+        Tensor downScale = RandomE4M3Scales(rng, E, 128, 4);
+        Tensor guGlobal = Filled(0.75f, E);
+        Tensor downGlobal = Filled(1.5f, E);
+
+        // Dense reference banks = the verified full-bank dequant of the same packed data.
+        Tensor guDense = Nvfp4Codec.DequantExpert(guPacked, guScale, guGlobal);
+        Tensor downDense = Nvfp4Codec.DequantExpert(downPacked, downScale, downGlobal);
+
+        Tensor routerW = RandomF32(rng, 0.5f, E, hidden);
+        Tensor routerB = RandomF32(rng, 0.1f, E);
+        Tensor guBias = RandomF32(rng, 0.1f, E, 2 * intermediate);
+        Tensor downBias = RandomF32(rng, 0.1f, E, hidden);
+
+        Dictionary<string, Tensor> shared = new()
+        {
+            ["mlp.router.weight"] = routerW,
+            ["mlp.router.bias"] = routerB,
+            ["mlp.experts.gate_up_proj_bias"] = guBias,
+            ["mlp.experts.down_proj_bias"] = downBias,
+        };
+        Dictionary<string, Tensor> denseDict = new(shared)
+        {
+            ["mlp.experts.gate_up_proj"] = guDense,
+            ["mlp.experts.down_proj"] = downDense,
+        };
+        Dictionary<string, Tensor> packedDict = new(shared)
+        {
+            ["mlp.experts.gate_up_proj.weight"] = guPacked,
+            ["mlp.experts.gate_up_proj.weight_scale"] = guScale,
+            ["mlp.experts.gate_up_proj.weight_scale_2"] = guGlobal,
+            ["mlp.experts.down_proj.weight"] = downPacked,
+            ["mlp.experts.down_proj.weight_scale"] = downScale,
+            ["mlp.experts.down_proj.weight_scale_2"] = downGlobal,
+        };
+
+        GptOssMoeFfn dense = new GptOssMoeFfn(hidden, intermediate, E, topK, clampLimit: 7.0f, alpha: 1.702f);
+        dense.LoadWeights(denseDict, "mlp");
+        GptOssMoeFfn packed = new GptOssMoeFfn(hidden, intermediate, E, topK, clampLimit: 7.0f, alpha: 1.702f);
+        packed.LoadWeights(packedDict, "mlp");
+
+        Tensor input = RandomF32(rng, 1.0f, 1, tokens, hidden);
+        using CpuBackend backend = new CpuBackend();
+        Tensor outDense = dense.Forward(backend, input);
+        Tensor outPacked = packed.Forward(backend, input);
+        try
+        {
+            float* a = (float*)outDense.DataPointer;
+            float* b = (float*)outPacked.DataPointer;
+            for (long i = 0; i < outDense.Shape.ElementCount; i++)
+            {
+                float diff = MathF.Abs(a[i] - b[i]);
+                // Same dequant math and same per-(token, expert) kernel; only the fp accumulation
+                // order of the k expert contributions differs between token-major and expert-major.
+                float tol = 1e-4f * MathF.Max(1f, MathF.Abs(a[i]));
+                Assert.True(diff <= tol, $"idx {i}: dense={a[i]} packed={b[i]} diff={diff}");
+            }
+        }
+        finally
+        {
+            outDense.Dispose(); outPacked.Dispose(); input.Dispose();
+            guDense.Dispose(); downDense.Dispose();
+            foreach (Tensor t in packedDict.Values) t.Dispose();
+        }
+    }
+
+    private static Tensor RandomNibbles(Random rng, int e, int outDim, int inHalf)
+    {
+        Tensor t = new Tensor(new TensorShape(e, outDim, inHalf), DType.U8);
+        byte* p = (byte*)t.DataPointer;
+        for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (byte)rng.Next(256);
+        return t;
+    }
+
+    private static Tensor RandomE4M3Scales(Random rng, int e, int paddedRows, int paddedCols)
+    {
+        Tensor t = new Tensor(new TensorShape(e, paddedRows, paddedCols), DType.F8E4M3);
+        byte* p = (byte*)t.DataPointer;
+        // Positive, non-NaN E4M3 bytes (exp 5..7, any mantissa): magnitudes 2^-2 .. ~1.875.
+        for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (byte)(0x28 + rng.Next(24));
+        return t;
+    }
+
+    private static Tensor RandomF32(Random rng, float scale, params int[] dims)
+    {
+        long[] d = new long[dims.Length];
+        for (int i = 0; i < dims.Length; i++) d[i] = dims[i];
+        Tensor t = new Tensor(new TensorShape(d), DType.F32);
+        float* p = (float*)t.DataPointer;
+        for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 2 - 1) * scale;
+        return t;
     }
 
     // ────────────────────────────────────────────────────────────────────

@@ -448,8 +448,8 @@ public static unsafe class CheckpointConvertUtils
     private static readonly float[] E2M1Magnitudes = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];
 
     /// <summary>256-entry FP8-E4M3FN decode table (built once). Index = raw byte. E4M3FN: bias 7, no infinities,
-    /// exp=15/man=7 is NaN, max ±448.</summary>
-    private static readonly float[] E4M3Table = BuildE4M3Table();
+    /// exp=15/man=7 is NaN, max ±448. Shared with <see cref="HartsyInference.ModelHandler.Nvfp4.Nvfp4Codec"/>.</summary>
+    internal static readonly float[] E4M3Table = BuildE4M3Table();
 
     private static float[] BuildE4M3Table()
     {
