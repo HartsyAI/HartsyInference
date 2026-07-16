@@ -268,6 +268,19 @@ For **editing** the reference image is fed *both* to the Qwen3-VL **vision tower
 conditioning text "sees" the image) and to the DiT via VAE latents (`ref_image_patch_embedder`).
 This requires a Qwen3-VL vision tower, which the engine did not previously have (see §7).
 
+**VLM image budget is load-bearing (2026-07-16 root cause).** `pipeline_boogu.py` pre-resizes the
+reference image for the *VLM* to `max_vlm_input_pil_pixels = 384·384`, `max_vlm_input_pil_side_length
+= 768` ("matching dataset behavior exactly") — ≤ ~144 merged vision tokens in the conditioning.
+Feeding the VLM the native-resolution image (the Qwen processor's own default budget allows up to
+1024 merged tokens) drowns the instruction text in out-of-distribution vision features and the DiT
+**ignores the edit instruction entirely**, emitting a pixel-perfect reconstruction of the reference
+(verified e2e both ways on the real Edit fp8 checkpoint: 1024 tokens → instruction ignored at any
+cfg; 144 tokens → instruction followed). The DiT-side VAE ref-latent stream is unaffected (it uses
+`max_input_image_pixels`, default 2048²). Two more reference defaults the loader must match:
+the **negative** (drop-text) instruction is encoded **without** the image
+(`use_input_images_4_neg_instruct = False`; the image still conditions that pass via the ref
+latents), and the drop-all pass is skipped at `image_guidance_scale == 1` (the default).
+
 VAE latent scaling (FLUX): encode `z = (vae.encode(x).mean − 0.1159) · 0.3611`; decode
 `x = vae.decode(z / 0.3611 + 0.1159)`.
 
@@ -332,7 +345,13 @@ Implementation notes (the parity-sensitive parts):
   ids `[24,20,20]`, inject deepstack features, and tap the final hidden state. This requires an
   embeds-input + M-RoPE + deepstack path on `LlamaStyleEncoder` (a shared, parity-validated addition).
 
-**Built (2026-06-21), structural — numeric parity pending.** `Qwen3VlVisionConfig`,
+**Built (2026-06-21); vision tower real-weight parity VERIFIED (2026-07-16)** — merged tokens and
+all three deepstack taps match HF `Qwen3VLVisionModel` on the released BF16 `visual.*` weights at
+corr 1.000000 (maxAbs ≤ 2.4e-3), CPU and CUDA backends both (harness:
+`Qwen3VlVisionParityDumpTests` + `tests/python-reference/diff_qwen3vl_vision.py`). The text-only
+`EncodeEmbedsMrope` path is bit-consistent with the standard `Encode`
+(`Qwen3VlMultimodalConsistencyTests`). Remaining nit: our processor resamples bilinear where HF
+uses bicubic (pixel_values corr 0.996). `Qwen3VlVisionConfig`,
 `Qwen3VlImageProcessor` (smart-resize → CLIP-normalize → merge-block patch flatten + `grid_thw`),
 `Qwen3VlVisionEncoder` (patch-embed, bilinear-interpolated learned pos-embed, 2D split-half RoPE, 27
 full-attention blocks, final + deepstack post-shuffle mergers) and `Qwen3VlMultimodalEncoder`
