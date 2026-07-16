@@ -20,6 +20,8 @@ public sealed unsafe class Dinov2VisionEncoder
     private Tensor? _registerTokens;    // [1,regs,hidden] or null
     private Tensor? _posEmb;            // [1, 1+numPatches, hidden]
     private Tensor? _finalLnW, _finalLnB;
+    private Tensor? _posEmbInterp;      // cached interpolated pos-embed for the last non-native grid
+    private int _posEmbInterpGridH, _posEmbInterpGridW;
 
     public Dinov2Preset Preset => _preset;
     public int HiddenSize => _preset.HiddenSize;
@@ -76,7 +78,7 @@ public sealed unsafe class Dinov2VisionEncoder
         patch.Dispose();
 
         // 2. Build [CLS, patches], add position embeddings, then insert registers → [CLS, regs, patches].
-        Tensor seq = BuildSequence(batch, hidden, numPatches, patches);
+        Tensor seq = BuildSequence(batch, hidden, numPatches, patches, _posEmb!);
         patches.Dispose();
 
         // 3. Transformer layers.
@@ -91,14 +93,138 @@ public sealed unsafe class Dinov2VisionEncoder
         return outp;
     }
 
-    private Tensor BuildSequence(int batch, int hidden, int numPatches, Tensor patches)
+    /// <summary>Encodes pixels <c>[B,3,H,W]</c> (any multiple of <c>PatchSize</c>, square or not) and returns
+    /// the token sequences <c>[B, 1+regs+gridH·gridW, hidden]</c> tapped after each block index in
+    /// <paramref name="layerIndices"/>, each with the backbone's final layer norm applied — dinov2's
+    /// <c>get_intermediate_layers(…, norm=True)</c>, which the Depth-Anything DPT head consumes. Non-native
+    /// grids get the position embeddings bicubic-interpolated exactly like dinov2's
+    /// <c>interpolate_pos_encoding</c> (offset 0.1, align_corners=False, no antialias).</summary>
+    public Tensor[] EncodeIntermediates(IBackend backend, Tensor pixelValues, ReadOnlySpan<int> layerIndices)
+    {
+        if (pixelValues.Shape.Rank != 4 || pixelValues.Shape[1] != 3
+            || pixelValues.Shape[2] % _preset.PatchSize != 0 || pixelValues.Shape[3] % _preset.PatchSize != 0)
+            throw new ArgumentException($"pixelValues must be [B,3,H,W] with H,W multiples of {_preset.PatchSize}; got {pixelValues.Shape}.", nameof(pixelValues));
+
+        int batch = (int)pixelValues.Shape[0];
+        int hidden = _preset.HiddenSize;
+        int gridH = (int)pixelValues.Shape[2] / _preset.PatchSize;
+        int gridW = (int)pixelValues.Shape[3] / _preset.PatchSize;
+        int numPatches = gridH * gridW;
+
+        Tensor patch = new(new TensorShape(batch, hidden, gridH, gridW), DType.F32);
+        backend.Conv2D(patch, pixelValues, _patchW!, _patchB!, _preset.PatchSize, _preset.PatchSize, 0, 0);
+        Tensor flat = patch.Reshape(new TensorShape(batch, hidden, numPatches));
+        Tensor patches = new(new TensorShape(batch, numPatches, hidden), DType.F32);
+        backend.Transpose2D(patches, flat, hidden, numPatches);
+        patch.Dispose();
+
+        Tensor posEmb = GetPosEmbed(gridH, gridW);
+        Tensor seq = BuildSequence(batch, hidden, numPatches, patches, posEmb);
+        patches.Dispose();
+
+        int maxIndex = 0;
+        foreach (int li in layerIndices)
+        {
+            if (li < 0 || li >= _layers.Length)
+                throw new ArgumentOutOfRangeException(nameof(layerIndices), li, $"Layer index out of range for {_layers.Length}-layer backbone.");
+            if (li > maxIndex) maxIndex = li;
+        }
+
+        Tensor[] taps = new Tensor[layerIndices.Length];
+        int[] indices = layerIndices.ToArray();
+        Tensor h = seq;
+        for (int i = 0; i <= maxIndex; i++)
+        {
+            Tensor n = _layers[i].Forward(backend, h);
+            h.Dispose();
+            h = n;
+            for (int t = 0; t < indices.Length; t++)
+            {
+                if (indices[t] != i) continue;
+                Tensor normed = new(h.Shape, DType.F32);
+                backend.LayerNorm(normed, h, _finalLnW!, _finalLnB!, _preset.LayerNormEps);
+                taps[t] = normed;
+            }
+        }
+        h.Dispose();
+        return taps;
+    }
+
+    /// <summary>Native position embeddings when the grid matches the checkpoint, else the dinov2 bicubic
+    /// interpolation (patch grid scaled by <c>(grid+0.1)/nativeGrid</c>, CLS row passed through). Cached per grid.</summary>
+    private Tensor GetPosEmbed(int gridH, int gridW)
+    {
+        int nativePatches = (int)_posEmb!.Shape[1] - 1;
+        int nativeGrid = (int)Math.Round(Math.Sqrt(nativePatches));
+        if (gridH == gridW && gridH * gridW == nativePatches) return _posEmb;
+        if (_posEmbInterp is not null && _posEmbInterpGridH == gridH && _posEmbInterpGridW == gridW) return _posEmbInterp;
+
+        int hidden = _preset.HiddenSize;
+        Tensor interp = new(new TensorShape(1, 1 + gridH * gridW, hidden), DType.F32);
+        float* src = (float*)_posEmb.DataPointer;   // [1, 1+native², hidden]
+        float* dst = (float*)interp.DataPointer;
+        for (int c = 0; c < hidden; c++) dst[c] = src[c];
+
+        // dinov2 interpolate_pos_encoding: scale = (grid + 0.1) / nativeGrid, torch bicubic (A=-0.75),
+        // half-pixel mapping src = (dst+0.5)/scale - 0.5, index taps clamped to the native grid.
+        float scaleH = (gridH + 0.1f) / nativeGrid;
+        float scaleW = (gridW + 0.1f) / nativeGrid;
+        Span<float> wy = stackalloc float[4];
+        Span<float> wx = stackalloc float[4];
+        for (int oy = 0; oy < gridH; oy++)
+        {
+            float sy = (oy + 0.5f) / scaleH - 0.5f;
+            int y0 = (int)MathF.Floor(sy);
+            CubicWeights(sy - y0, wy);
+            for (int ox = 0; ox < gridW; ox++)
+            {
+                float sx = (ox + 0.5f) / scaleW - 0.5f;
+                int x0 = (int)MathF.Floor(sx);
+                CubicWeights(sx - x0, wx);
+                long dstBase = (1L + (long)oy * gridW + ox) * hidden;
+                for (int c = 0; c < hidden; c++)
+                {
+                    float acc = 0f;
+                    for (int ty = 0; ty < 4; ty++)
+                    {
+                        int yy = Math.Clamp(y0 - 1 + ty, 0, nativeGrid - 1);
+                        float row = 0f;
+                        for (int tx = 0; tx < 4; tx++)
+                        {
+                            int xx = Math.Clamp(x0 - 1 + tx, 0, nativeGrid - 1);
+                            row += wx[tx] * src[(1L + (long)yy * nativeGrid + xx) * hidden + c];
+                        }
+                        acc += wy[ty] * row;
+                    }
+                    dst[dstBase + c] = acc;
+                }
+            }
+        }
+        _posEmbInterp?.Dispose();
+        _posEmbInterp = interp;
+        _posEmbInterpGridH = gridH;
+        _posEmbInterpGridW = gridW;
+        return interp;
+    }
+
+    /// <summary>Keys-cubic convolution weights (A = −0.75, the torch/OpenCV bicubic kernel) for fraction <paramref name="f"/>.</summary>
+    internal static void CubicWeights(float f, Span<float> w)
+    {
+        const float A = -0.75f;
+        w[0] = ((A * (f + 1) - 5 * A) * (f + 1) + 8 * A) * (f + 1) - 4 * A;
+        w[1] = ((A + 2) * f - (A + 3)) * f * f + 1;
+        w[2] = ((A + 2) * (1 - f) - (A + 3)) * (1 - f) * (1 - f) + 1;
+        w[3] = 1f - w[0] - w[1] - w[2];
+    }
+
+    private Tensor BuildSequence(int batch, int hidden, int numPatches, Tensor patches, Tensor posEmb)
     {
         int regs = _preset.NumRegisterTokens;
-        int seqLen = _preset.SequenceLength;
+        int seqLen = 1 + regs + numPatches;
         Tensor seq = new(new TensorShape(batch, seqLen, hidden), DType.F32);
         float* dp = (float*)seq.DataPointer;
         float* cls = (float*)_clsToken!.DataPointer;     // [1,1,hidden]
-        float* pos = (float*)_posEmb!.DataPointer;       // [1, 1+numPatches, hidden]
+        float* pos = (float*)posEmb.DataPointer;         // [1, 1+numPatches, hidden]
         float* pat = (float*)patches.DataPointer;        // [B, numPatches, hidden]
         float* reg = _registerTokens is null ? null : (float*)_registerTokens.DataPointer;
 
@@ -243,8 +369,10 @@ internal sealed unsafe class Dinov2Layer
             Tensor outp = new(new TensorShape(batch, seq, _hidden), DType.F32); backend.Linear(outp, gated, _swiOutW!, _swiOutB!); gated.Dispose();
             return outp;
         }
+        // Exact-erf GELU: dinov2's Mlp uses nn.GELU() default. The tanh approximation compounds to ~5e-3
+        // relative feature error over 24 blocks — too coarse for Depth-Anything parity.
         Tensor f1 = new(new TensorShape(batch, seq, _inter), DType.F32); backend.Linear(f1, input, _fc1W!, _fc1B!);
-        Tensor act = new(f1.Shape, DType.F32); backend.Gelu(act, f1); f1.Dispose();
+        Tensor act = new(f1.Shape, DType.F32); backend.GeluErf(act, f1); f1.Dispose();
         Tensor f2 = new(new TensorShape(batch, seq, _hidden), DType.F32); backend.Linear(f2, act, _fc2W!, _fc2B!); act.Dispose();
         return f2;
     }

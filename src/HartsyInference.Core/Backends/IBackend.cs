@@ -395,6 +395,33 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>Exact (erf) GELU: <c>out = 0.5·x·(1+erf(x/√2))</c> — what PyTorch's default <c>nn.GELU()</c>
+    /// computes. Distinct from <see cref="Gelu"/> (the tanh approximation): the ~3e-3 pointwise gap compounds
+    /// across deep backbones (DINOv2's MLPs are exact-erf; the approximation cost Depth-Anything ~5e-3
+    /// relative feature error over 24 blocks). Default implementation is a CPU loop over F32 tensors;
+    /// backends override for performance.</summary>
+    unsafe void GeluErf(Tensor output, Tensor input)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException($"GeluErf default fallback only supports F32 — got input={input.DType}, output={output.DType}.");
+        static float Erf(float x)
+        {
+            int sign = x < 0 ? -1 : 1;
+            x = MathF.Abs(x);
+            float t = 1f / (1f + 0.3275911f * x);
+            float y = 1f - (((((1.061405429f * t - 1.453152027f) * t) + 1.421413741f) * t - 0.284496736f) * t + 0.254829592f) * t * MathF.Exp(-x * x);
+            return sign * y;
+        }
+        float* pIn = (float*)input.DataPointer;
+        float* pOut = (float*)output.DataPointer;
+        long count = output.ElementCount;
+        for (long i = 0; i < count; i++)
+        {
+            float x = pIn[i];
+            pOut[i] = 0.5f * x * (1f + Erf(x * 0.70710678118654752440f));
+        }
+    }
+
     /// <summary>AdaLN modulation split (scale-only, tanh-gated). <paramref name="proj"/> is <c>[B, 4*D]</c> =
     /// chunk(scale_msa, gate_msa, scale_mlp, gate_mlp); writes four <c>[B, D]</c> tensors applying
     /// <c>1 + x</c> to scales and <c>tanh(x)</c> to gates (Ideogram 4's ComputeModulation).</summary>
@@ -1653,6 +1680,55 @@ public interface IBackend : IDisposable
 
     /// <summary>Bilinear 2D upsample by the given scale factor.</summary>
     void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW);
+
+    /// <summary>Bilinear 2D resize of an NCHW tensor to <paramref name="output"/>'s spatial size (any
+    /// up/down factor, not just integer scales). Coordinate mapping matches PyTorch
+    /// <c>F.interpolate(mode="bilinear")</c>: with <paramref name="alignCorners"/> true, <c>src = dst·(in−1)/(out−1)</c>;
+    /// false uses the half-pixel convention <c>src = (dst+0.5)·in/out − 0.5</c> with edge clamping. Used by the
+    /// DPT fusion blocks (Depth-Anything), which upsample to the exact size of the next skip feature with
+    /// <c>align_corners=True</c>. Default implementation is a CPU loop over F32 tensors; backends may
+    /// override for performance.</summary>
+    unsafe void InterpolateBilinear2D(Tensor output, Tensor input, bool alignCorners)
+    {
+        if (input.DType != DType.F32 || output.DType != DType.F32)
+            throw new NotSupportedException($"InterpolateBilinear2D default fallback only supports F32 — got input={input.DType}, output={output.DType}.");
+        if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
+            throw new ArgumentException($"InterpolateBilinear2D requires 4D tensors; got input {input.Shape}, output {output.Shape}.");
+        if (input.Shape[0] != output.Shape[0] || input.Shape[1] != output.Shape[1])
+            throw new ArgumentException($"InterpolateBilinear2D batch/channel dims must match; got input {input.Shape}, output {output.Shape}.");
+
+        int n = (int)input.Shape[0], c = (int)input.Shape[1];
+        int inH = (int)input.Shape[2], inW = (int)input.Shape[3];
+        int outH = (int)output.Shape[2], outW = (int)output.Shape[3];
+        float* src = (float*)input.DataPointer;
+        float* dst = (float*)output.DataPointer;
+
+        for (int oy = 0; oy < outH; oy++)
+        {
+            float sy = alignCorners
+                ? (outH == 1 ? 0f : oy * (float)(inH - 1) / (outH - 1))
+                : (oy + 0.5f) * inH / outH - 0.5f;
+            int y0 = (int)MathF.Floor(sy);
+            float fy = sy - y0;
+            int y0c = Math.Clamp(y0, 0, inH - 1), y1c = Math.Clamp(y0 + 1, 0, inH - 1);
+            for (int ox = 0; ox < outW; ox++)
+            {
+                float sx = alignCorners
+                    ? (outW == 1 ? 0f : ox * (float)(inW - 1) / (outW - 1))
+                    : (ox + 0.5f) * inW / outW - 0.5f;
+                int x0 = (int)MathF.Floor(sx);
+                float fx = sx - x0;
+                int x0c = Math.Clamp(x0, 0, inW - 1), x1c = Math.Clamp(x0 + 1, 0, inW - 1);
+                for (long plane = 0; plane < (long)n * c; plane++)
+                {
+                    float* sp = src + plane * inH * inW;
+                    float v0 = sp[y0c * inW + x0c] * (1f - fx) + sp[y0c * inW + x1c] * fx;
+                    float v1 = sp[y1c * inW + x0c] * (1f - fx) + sp[y1c * inW + x1c] * fx;
+                    dst[plane * outH * outW + (long)oy * outW + ox] = v0 * (1f - fy) + v1 * fy;
+                }
+            }
+        }
+    }
 
     /// <summary>2D transposed convolution. Used by YOLO seg's Proto module for upsampling mask
     /// prototypes (k=2, s=2, p=0 doubles spatial dims). Weight shape is <c>[C_in, C_out, kH, kW]</c>

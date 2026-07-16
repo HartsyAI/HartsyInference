@@ -722,6 +722,20 @@ __global__ void geglu_erf_f32(
     out[idx] = h * (0.5f * g * (1.0f + erff(g * 0.70710678118654752440f)));
 }
 
+// Exact (erf) GELU, elementwise: out[i] = 0.5*x*(1+erf(x/sqrt2)) — PyTorch's default nn.GELU().
+// Distinct from the tanh approximation gelu: the ~3e-3 pointwise gap compounds across deep
+// backbones (DINOv2's MLPs are exact-erf; Depth-Anything parity needs it).
+__global__ void gelu_erf_f32(
+    float* __restrict__ out,
+    const float* __restrict__ in,
+    unsigned long long count)
+{
+    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    float x = in[idx];
+    out[idx] = 0.5f * x * (1.0f + erff(x * 0.70710678118654752440f));
+}
+
 // 2D transposed convolution (gather form — one thread per output element, no atomics). Weight is
 // [Cin, Cout, kH, kW] (PyTorch ConvTranspose2d). out[b,co,oy,ox] = bias[co] + Σ_{ci,ky,kx} in[b,ci,iy,ix]·W,
 // where iy = (oy+pH-ky)/sH (integer, in-range). Replaces the CPU scatter-add default (was ~1.5 s for TripoSR's

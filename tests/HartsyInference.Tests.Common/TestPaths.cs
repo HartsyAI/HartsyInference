@@ -339,6 +339,15 @@ public static class TestPaths
         public static string Base16_224 => Resolve("SIGLIP_BASE_224_PATH", Path.Combine(ModelsDir, "clip", "siglip-base-patch16-224.safetensors"));
     }
 
+    /// <summary>Depth-Anything-V2 checkpoints — the official <c>.pth</c> files from HF
+    /// <c>depth-anything/Depth-Anything-V2-Small</c> / <c>-Large</c> (torch.hub-style keys, loaded via
+    /// <c>PytorchPickleLoader</c>, no conversion needed).</summary>
+    public static class DepthAnything
+    {
+        public static string VitS => Resolve("DEPTH_ANYTHING_V2_VITS_PATH", Path.Combine(ModelsDir, "Vision", "DepthAnything", "depth_anything_v2_vits.pth"));
+        public static string VitL => Resolve("DEPTH_ANYTHING_V2_VITL_PATH", Path.Combine(ModelsDir, "Vision", "DepthAnything", "depth_anything_v2_vitl.pth"));
+    }
+
     /// <summary>YOLO checkpoint paths (Vision package). Use the Python conversion script under
     /// <c>tests/python-reference/convert_yolov8_pt_to_safetensors.py</c> to produce these from
     /// Ultralytics <c>.pt</c> files — the conversion folds BN into Conv weights for fast inference.</summary>

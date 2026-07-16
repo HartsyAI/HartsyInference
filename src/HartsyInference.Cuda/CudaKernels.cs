@@ -201,6 +201,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditPixelQuantizeF32;
     private readonly nint _triplaneGridSampleF32;
     private readonly nint _gegluErfF32;
+    private readonly nint _geluErfF32;
     private readonly nint _convTranspose2dF32;
     private readonly nint _ditConcat2F32;
     private readonly nint _ditLayerNormModulateF32;
@@ -469,6 +470,7 @@ public sealed class CudaKernels : IDisposable
         _ditPixelQuantizeF32 = _ditF32Module.GetFunction("dit_pixel_quantize_f32");
         _triplaneGridSampleF32 = _ditF32Module.GetFunction("triplane_grid_sample_f32");
         _gegluErfF32 = _ditF32Module.GetFunction("geglu_erf_f32");
+        _geluErfF32 = _ditF32Module.GetFunction("gelu_erf_f32");
         _convTranspose2dF32 = _ditF32Module.GetFunction("conv_transpose2d_f32");
         _ditConcat2F32 = _ditF32Module.GetFunction("dit_concat2_f32");
         _ditLayerNormModulateF32 = _ditF32Module.GetFunction("dit_layernorm_modulate_f32");
@@ -1943,6 +1945,16 @@ public sealed class CudaKernels : IDisposable
         long threads = rows * inner;
         uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_gegluErfF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Exact (erf) GELU, elementwise: <paramref name="outp"/>[i] = 0.5·x·(1+erf(x/√2)).</summary>
+    public unsafe void LaunchGeluErf(ulong outp, ulong input, long count, nint stream)
+    {
+        ulong outArg = outp, inArg = input, countArg = (ulong)count;
+        void** args = stackalloc void*[3];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &countArg;
+        uint gridDim = (uint)((count + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_geluErfF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Two-input concat along the [outer, aDim|bDim, inner] middle axis in ONE launch (replaces the
