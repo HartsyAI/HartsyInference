@@ -23,7 +23,7 @@ public class LanceGenerationTests
     public LanceGenerationTests(ITestOutputHelper output) => _output = output;
 
     [Fact]
-    public void Lance3B_Gpu_T2I_512()
+    public void Lance3B_Gpu_T2I()
     {
         string dir = TestPaths.Lance.Dir;
         string vaePath = TestPaths.Lance.VaePath;
@@ -36,12 +36,6 @@ public class LanceGenerationTests
         if (!File.Exists(vaePath))
         {
             _output.WriteLine($"SKIPPED: Wan2.2 VAE safetensors not found: {vaePath} (convert Wan2.2_VAE.pth first).");
-            return;
-        }
-        string vocab = TestPaths.Tokenizers.Qwen3Vocab, merges = TestPaths.Tokenizers.Qwen3Merges;
-        if (!File.Exists(vocab) || !File.Exists(merges))
-        {
-            _output.WriteLine($"SKIPPED: Qwen tokenizer not found ({vocab} / {merges}).");
             return;
         }
         string assemblyDir = Path.GetDirectoryName(typeof(LanceGenerationTests).Assembly.Location)!;
@@ -82,22 +76,34 @@ public class LanceGenerationTests
                 return;
             }
 
-            using Qwen3Tokenizer tokenizer = new(vocab, merges, maxLength: 512);
-            int[] prompt = tokenizer.EncodeChat("A photograph of an astronaut riding a horse on the moon");
-            int[] neg = tokenizer.EncodeChat("");
+            // tokenizer.json → exact byte-level BPE (Split regex reproduced); Lance ships it in the folder.
+            string tokenizerJson = Path.Combine(dir, "tokenizer.json");
+            if (!File.Exists(tokenizerJson))
+            {
+                _output.WriteLine($"SKIPPED: tokenizer.json not found in {dir}.");
+                return;
+            }
+            using FileStream tokFs = File.OpenRead(tokenizerJson);
+            GgufTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokFs);
+            LancePromptTemplate template = LancePromptTemplate.Create(tokenizer.EncodeOrdinary, cfg, video: false);
+            int[] prompt = tokenizer.EncodeOrdinary("A photograph of an astronaut riding a horse on the moon");
+            int[] neg = [];
 
-            LanceImagePipeline pipeline = new(backend, transformer, vae, cfg);
+            LanceImagePipeline pipeline = new(backend, transformer, vae, cfg, template);
+            // Upstream README-recommended T2I params: 768², 20 steps, cfg_text 4 (overridable via env).
+            int size = int.TryParse(Environment.GetEnvironmentVariable("LANCE_T2I_SIZE"), out int s) ? s : 768;
+            int steps = int.TryParse(Environment.GetEnvironmentVariable("LANCE_T2I_STEPS"), out int st) ? st : 20;
             TextToImageRequest req = new()
             {
-                Prompt = "astronaut", NegativePrompt = "", Width = 512, Height = 512,
-                Steps = cfg.NumTimesteps, CfgScale = cfg.CfgTextScale, Seed = 42,
+                Prompt = "astronaut", NegativePrompt = "", Width = size, Height = size,
+                Steps = steps, CfgScale = cfg.CfgTextScale, Seed = 42,
             };
 
-            _output.WriteLine("[4/4] Generating 512x512 (NUMERIC OUTPUT VALIDATION-PENDING)...");
+            _output.WriteLine($"[4/4] Generating {size}x{size} @ {steps} steps...");
             (byte[] rgb, int w, int h, int seed) = pipeline.GenerateFromTokens(prompt, neg, req,
                 p => _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"));
 
-            Assert.Equal(512 * 512 * 3, rgb.Length);
+            Assert.Equal(size * size * 3, rgb.Length);
             Directory.CreateDirectory(OutputDir);
             string outPath = Path.Combine(OutputDir, $"lance_3b_t2i_{DateTime.Now:yyyyMMdd_HHmmss}.bmp");
             ImagePostProcessor.SaveBmp(outPath, rgb, w, h);

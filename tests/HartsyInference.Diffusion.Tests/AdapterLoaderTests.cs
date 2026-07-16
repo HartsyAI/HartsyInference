@@ -53,8 +53,13 @@ public sealed class AdapterLoaderTests : IDisposable
     [Fact]
     public void ControlNetLoader_DetectsFluxFromTransformerBlocks()
     {
+        // Architecture-defining subset of a diffusers FluxControlNetModel header (FromDescriptors requires the
+        // embedders to derive dims). Full-depth detection + union handling live in FluxControlNetTests.
         string path = CreateSafeTensorsFile("flux-controlnet-canny.safetensors", new()
         {
+            ["x_embedder.weight"] = (DType.F32, [3072, 64], new float[3072 * 64]),
+            ["controlnet_x_embedder.weight"] = (DType.F32, [3072, 64], new float[3072 * 64]),
+            ["context_embedder.weight"] = (DType.F32, [3072, 4096], new float[3072 * 4096]),
             ["transformer_blocks.0.attn.to_q.weight"] = (DType.F32, [3072, 3072], new float[3072 * 3072]),
             ["controlnet_blocks.0.weight"] = (DType.F32, [3072, 3072], new float[3072 * 3072]),
         });
@@ -63,6 +68,9 @@ public sealed class AdapterLoaderTests : IDisposable
         Assert.Equal(ControlNetBaseModel.Flux, file.BaseModel);
         Assert.Equal(ControlNetMode.Canny, file.Mode);
         Assert.Equal(4096, file.Config.CrossAttentionDim);
+        Assert.NotNull(file.FluxConfig);
+        Assert.Equal(1, file.FluxConfig!.Depth);
+        Assert.Equal(24, file.FluxConfig.NumHeads);
     }
 
     [Fact]

@@ -146,7 +146,10 @@ public sealed class FluxSingleStreamBlock
         // F16 halves them and lets the next Linear skip its input cast since the joint
         // dtype is already F16. The proj_mlp Linear writes F16 directly into mlpInput;
         // cuBLAS still accumulates in F32 internally so accuracy is preserved.
-        Tensor mlpInput = new Tensor(mlpShape, DType.F16);
+        // CPU exception: the CPU GEMM/Gelu kernels are F32-only, so the CPU path (parity tests,
+        // FluxControlNet reference runs) keeps the MLP tail at the activation dtype.
+        DType mlpAct = backend.Device.IsCpu ? act : DType.F16;
+        Tensor mlpInput = new Tensor(mlpShape, mlpAct);
         backend.Linear(mlpInput, modulated, _projMlpWeight!, _projMlpBias);
         modulated.Dispose();
 
@@ -192,8 +195,8 @@ public sealed class FluxSingleStreamBlock
         backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
-        // ── 9. GELU(tanh) on MLP input ── (F16, matches mlpInput; CudaBackend.Gelu has an F16 path)
-        Tensor mlpActivated = new Tensor(mlpShape, DType.F16);
+        // ── 9. GELU(tanh) on MLP input ── (F16 on GPU, matches mlpInput; CudaBackend.Gelu has an F16 path)
+        Tensor mlpActivated = new Tensor(mlpShape, mlpAct);
         backend.Gelu(mlpActivated, mlpInput);
         mlpInput.Dispose();
 
@@ -203,14 +206,14 @@ public sealed class FluxSingleStreamBlock
         // so concat operands match. The cast is small (53 MB at 1024x1024), a worthwhile
         // tradeoff for a 134 MB concatted buffer at F16 instead of 267 MB at F32.
         // backend.Concat at dim 2 is a raw byte-copy, dtype-agnostic — byte-identical to
-        // the old host ConcatAlongFeatureDim.
-        Tensor attnFlatF16 = Utilities.DtypeCastHelper.EnsureDtype(backend, attnFlat, DType.F16);
+        // the old host ConcatAlongFeatureDim. (No-op cast on the CPU F32 path.)
+        Tensor attnFlatCast = Utilities.DtypeCastHelper.EnsureDtype(backend, attnFlat, mlpAct);
 
         int concatDim = _hiddenSize + _mlpDim;
         TensorShape concatShape = new TensorShape(batch, seqLen, concatDim);
-        Tensor concatted = new Tensor(concatShape, DType.F16);
-        backend.Concat(concatted, new Tensor[] { attnFlatF16, mlpActivated }, 2);
-        attnFlatF16.Dispose();
+        Tensor concatted = new Tensor(concatShape, mlpAct);
+        backend.Concat(concatted, new Tensor[] { attnFlatCast, mlpActivated }, 2);
+        attnFlatCast.Dispose();
         mlpActivated.Dispose();
 
         // proj_out's input is F16 (concatted) and its weight is fp8/F16 — joint resolution

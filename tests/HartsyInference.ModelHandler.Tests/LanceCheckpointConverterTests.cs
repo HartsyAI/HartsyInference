@@ -17,9 +17,13 @@ public class LanceCheckpointConverterTests
     [InlineData("language_model.model.layers.7.self_attn.q_proj_moe_gen.weight", B.Transformer, "layers.7.self_attn.q_proj_moe_gen.weight")]
     [InlineData("language_model.model.layers.7.mlp_moe_gen.gate_proj.weight", B.Transformer, "layers.7.mlp_moe_gen.gate_proj.weight")]
     [InlineData("language_model.model.layers.3.input_layernorm_moe_gen.weight", B.Transformer, "layers.3.input_layernorm_moe_gen.weight")]
-    // Top-level generation heads pass through unchanged.
-    [InlineData("vae_in.weight", B.Transformer, "vae_in.weight")]
-    [InlineData("vae_out.bias", B.Transformer, "vae_out.bias")]
+    // QK-norm weights (present in the real checkpoint) preserved.
+    [InlineData("language_model.model.layers.5.self_attn.q_norm.weight", B.Transformer, "layers.5.self_attn.q_norm.weight")]
+    [InlineData("language_model.model.layers.5.self_attn.k_norm_moe_gen.weight", B.Transformer, "layers.5.self_attn.k_norm_moe_gen.weight")]
+    // Top-level generation heads pass through unchanged (real names: vae2llm/llm2vae/latent_pos_embed).
+    [InlineData("vae2llm.weight", B.Transformer, "vae2llm.weight")]
+    [InlineData("llm2vae.bias", B.Transformer, "llm2vae.bias")]
+    [InlineData("latent_pos_embed.pos_embed", B.Transformer, "latent_pos_embed.pos_embed")]
     [InlineData("time_embedder.mlp.0.weight", B.Transformer, "time_embedder.mlp.0.weight")]
     // ViT / connector → editing bucket.
     [InlineData("vit.blocks.0.attn.qkv.weight", B.Vit, "vit.blocks.0.attn.qkv.weight")]
@@ -32,8 +36,7 @@ public class LanceCheckpointConverterTests
     }
 
     [Theory]
-    [InlineData("language_model.lm_head.weight")]   // tied head, unused
-    [InlineData("pos_embed_3d.pos_embed")]          // recomputed
+    [InlineData("language_model.lm_head.weight")]   // understanding-only head, unused by generation
     [InlineData("task_embed.weight")]
     [InlineData("modality_embed.weight")]
     public void RouteKey_DropsUnusedKeys(string key)
