@@ -68,6 +68,14 @@ public sealed record Dinov2Preset
         ImageSize = 518, PatchSize = 14, NumRegisterTokens = 4,
     };
 
+    /// <summary><c>facebook/dinov2-small</c> — 22M params. The Depth-Anything-V2-Small backbone.</summary>
+    public static Dinov2Preset Small => new()
+    {
+        Name = "facebook/dinov2-small",
+        HiddenSize = 384, NumLayers = 12, NumHeads = 6, IntermediateSize = 1536,
+        ImageSize = 518, PatchSize = 14,
+    };
+
     /// <summary><c>facebook/dinov2-base</c> — 86M params.</summary>
     public static Dinov2Preset Base => new()
     {

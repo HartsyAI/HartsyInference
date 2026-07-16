@@ -2,7 +2,9 @@ namespace HartsyInference.Vision;
 
 /// <summary>Small activation helpers shared by ViT-family encoders. The exact (erf) GELU is the one HF
 /// <c>ACT2FN["gelu"]</c> / <c>F.gelu</c> use — distinct from the backend's tanh-approximation <c>Gelu</c>,
-/// which drifts ~1e-3 per layer and breaks transformer parity over many layers.</summary>
+/// which drifts ~1e-3 per layer and breaks transformer parity over many layers. For a device-resident
+/// version prefer <c>IBackend.GeluErf</c> (same math, GPU kernel on CUDA); this host helper remains for
+/// in-place pointer paths.</summary>
 public static unsafe class VitOps
 {
     /// <summary>Applies exact erf GELU in place over <paramref name="n"/> floats: <c>x·0.5·(1+erf(x/√2))</c>.</summary>

@@ -2052,6 +2052,24 @@ public sealed class CudaBackend : IBackend
         finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); }
     }
 
+    /// <summary>Exact (erf) GELU, elementwise on device — PyTorch's default <c>nn.GELU()</c> (DINOv2 MLPs).</summary>
+    public unsafe void GeluErf(Tensor output, Tensor input)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("CUDA GeluErf supports F32 only.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0; bool cached = false;
+        try
+        {
+            ulong pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchGeluErf(pOut, pIn, output.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); }
+    }
+
     /// <summary>DIAMOND pixel quantize to 256 levels: out = floor((clamp(v,-1,1)+1)·127.5)/127.5 − 1 (device).</summary>
     public void PixelQuantize(Tensor output, Tensor input)
     {
