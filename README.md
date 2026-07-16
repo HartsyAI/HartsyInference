@@ -5,7 +5,7 @@
 HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpoints directly and runs inference on **CUDA**, **Vulkan**, or **CPU** — no Python, no C++ wrappers, no external processes, just NuGet packages. One engine spans native LLM text generation, diffusion image models, speech/music, vision, video, 3D mesh, and real-time interactive worlds. Targets **.NET 8 and .NET 10**.
 
 > [!IMPORTANT]
-> **The recommended way to run HartsyInference is inside [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI) via the [HartsyInference backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend)** — it registers HartsyInference as a pure-C# alternative to the ComfyUI backend, giving you a full generation UI, model management, LoRA, and video/audio output with no Python install. The engine is not building its own front-end; you can also embed it as [NuGet libraries](#quick-start-library), drive the [sample CLI](#quick-start-cli-developer-tool), or host the [OpenAI-compatible server](#how-to-use-it). For per-model status across every modality, see [Models](#models).
+> **The recommended way to run HartsyInference is inside [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI) via the [HartsyInference backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend)** — it registers HartsyInference as a pure-C# alternative to the ComfyUI backend, giving you a full generation UI, model management, LoRA, and video/audio output with no Python install. The engine is not building its own front-end; you can also embed it as [NuGet libraries](#quick-start-library) or drive the [sample CLI](#quick-start-cli-developer-tool). For per-model status across every modality, see [Models](#models).
 
 ---
 
@@ -311,7 +311,7 @@ We publish real numbers and we are honest about where we stand. HartsyInference 
 
 ### Image generation end-to-end vs ComfyUI
 
-RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identical 1024×1024 request routed to the ComfyUI backend, then the HartsyInference backend, on the same GPU. Warm median of 3 runs, randomized seeds, outputs visually verified coherent. Engine `1.0.0-alpha.46` + in-flight `44.x-local` optimization rounds, 2026-07-11 (living snapshot — updated as optimization rounds land):
+RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identical 1024×1024 request routed to the ComfyUI backend, then the HartsyInference backend, on the same GPU. Warm median of 3 runs, randomized seeds, outputs visually verified coherent. Engine `1.0.0-alpha.46` + in-flight local optimization rounds, 2026-07-11, spot-revalidated 2026-07-16 on `49.x-local` (Krea2-Turbo 4.6 s, Z-Image-Turbo 2.8 s, Flux warm gens bit-identical with the step graph on). Living snapshot — updated as optimization rounds land:
 
 | Model | HartsyInference | ComfyUI | Status |
 |---|---:|---:|---|
@@ -338,6 +338,8 @@ RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identi
 | Chroma1-Radiance (pixel-space VAE-free, 20 steps) | 54.4 s | — | 14× in one optimization round (was 12.3 min); NeRF-head GPU port + prompt cache + resident DiT; no ComfyUI baseline |
 
 These times require **zero configuration**: the engine's standard performance profile (cuDNN fused flash attention, fp8 tensor-core GEMM, F16 DiT activations, resident weights, warm activation pool) is default-on with per-feature kill-switches and graceful fallbacks — see the [Performance Guide](docs/PERFORMANCE.md).
+
+**Image conditioning features (all verified end-to-end through SwarmUI, 2026-07-16):** FLUX.1 Kontext instruction editing, FLUX.1 Fill inpaint/outpaint, FLUX.1 Canny / Depth (with an in-engine Depth-Anything-V2 annotator, parity 2.9e-7 vs the official implementation), FLUX.1 Redux image variation, SDXL + SD1.5 ControlNet (canny / depth / openpose preprocessors, multi-net stacking, start/end step windows, both diffusers and original LDM checkpoint layouts), and IP-Adapter (SDXL standard / Plus, SD1.5) — see [`docs/Checklists/MODEL_STATUS_IMAGE.md`](docs/Checklists/MODEL_STATUS_IMAGE.md).
 
 ### LLM decode vs llama.cpp
 
@@ -437,7 +439,7 @@ Index of all status docs: [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md). 
 > [!WARNING]
 > These are planned and **not yet implemented**. Tracking lives in the [roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md).
 
-- **Image:** ControlNet, IP-Adapter, LCM/Turbo distillation across more architectures, regional prompting
+- **Image:** IP-Adapter FaceID (InstantID-class), Flux-DiT ControlNet, union-type ControlNets, remaining ControlNet preprocessors (lineart / softedge / normal / segmentation), LCM/Turbo distillation across more architectures
 - **Vision:** Grounding DINO, YOLO-World, OWLv2, Florence-2, RT-DETR, depth & pose estimation, OCR, tracking
 - **Video:** HunyuanVideo, CogVideoX, longer-context temporal generation
 - **3D:** Gaussian-splat output, texture synthesis, multi-view to mesh
