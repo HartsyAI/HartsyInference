@@ -24,8 +24,13 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 ///   <item>Project out: <c>Linear(hidden, p² * out_channels)</c>, unpatchify back to <c>[B, C_out, H, W]</c>.</item>
 /// </list>
 ///
-/// <para>Editing / multi-image-input paths are intentionally out of scope (t2i only). The
-/// <c>image_index_embedding</c> table is loaded for checkpoint-key compatibility but not consumed.</para></summary>
+/// <para>Editing / multi-image-input: pass reference-image VAE latents to the
+/// <see cref="Forward(IBackend, Tensor, float, Tensor, int, IReadOnlyList{Tensor})"/> overload. Each reference is
+/// patchified through the dedicated <c>ref_image_patch_embedder</c>, tagged with its <c>image_index_embedding</c>
+/// row, refined per-image through the modulated <c>ref_image_refiner</c> blocks (attention isolated per reference,
+/// mirroring upstream's per-reference batching), and the joint stream becomes <c>[text, ref_0..N, noise]</c> with
+/// the upstream <c>pe_shift</c> 3-axis positions (each reference and the noise grid get consecutive time-axis
+/// offsets of <c>max(ref_h_tokens, ref_w_tokens)</c> past the caption length).</para></summary>
 public sealed unsafe class OmniGen2Transformer : IDisposable
 {
     private readonly OmniGen2Config _config;
@@ -33,6 +38,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
 
     private readonly OmniGen2Block[] _noiseRefiner;
     private readonly OmniGen2Block[] _contextRefiner;
+    private readonly OmniGen2Block[] _refImageRefiner;
     private readonly OmniGen2Block[] _mainBlocks;
 
     private Tensor? _xEmbedderWeight, _xEmbedderBias;
@@ -43,6 +49,9 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
     private Tensor? _normOutLinearWeight, _normOutLinearBias; // norm_out.linear_1 (AdaLN: conditioning → hidden)
     private Tensor? _projOutWeight, _projOutBias;            // norm_out.linear_2 (hidden → p²·out_channels)
     private Tensor? _imageIndexEmbedding;
+    private Tensor? _refEmbedderWeight, _refEmbedderBias;    // ref_image_patch_embedder (Linear p²·C → hidden)
+    private Tensor?[] _refCombinedBias = [];                 // per-slot ref_image_patch_embedder.bias + image_index_embedding[j]
+    private bool _hasRefStack;
 
     private int _disposed;
 
@@ -58,6 +67,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
 
         _noiseRefiner = new OmniGen2Block[config.NumRefinerLayers];
         _contextRefiner = new OmniGen2Block[config.NumRefinerLayers];
+        _refImageRefiner = new OmniGen2Block[config.NumRefinerLayers];
         _mainBlocks = new OmniGen2Block[config.NumLayers];
 
         for (int i = 0; i < config.NumRefinerLayers; i++)
@@ -68,6 +78,9 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
             _contextRefiner[i] = new OmniGen2Block(
                 config.HiddenSize, config.NumAttentionHeads, config.NumKvHeads, config.HeadDim,
                 ffnInner, conditioningDim, modulation: false, config.NormEps, config.QkNormEps);
+            _refImageRefiner[i] = new OmniGen2Block(
+                config.HiddenSize, config.NumAttentionHeads, config.NumKvHeads, config.HeadDim,
+                ffnInner, conditioningDim, modulation: true, config.NormEps, config.QkNormEps);
         }
         for (int i = 0; i < config.NumLayers; i++)
         {
@@ -106,12 +119,65 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
 
         weights.TryGetValue("image_index_embedding", out _imageIndexEmbedding);
 
+        // Reference-image stack (edit / multi-image input). Optional so pruned t2i-only checkpoints still load;
+        // Forward with refLatents throws when absent.
+        weights.TryGetValue("ref_image_patch_embedder.weight", out _refEmbedderWeight);
+        weights.TryGetValue("ref_image_patch_embedder.bias", out _refEmbedderBias);
+        _hasRefStack = _refEmbedderWeight is not null
+            && weights.ContainsKey("ref_image_refiner.0.attn.to_q.weight");
+        if (_hasRefStack)
+        {
+            for (int i = 0; i < _refImageRefiner.Length; i++)
+                _refImageRefiner[i].LoadWeights(weights, $"ref_image_refiner.{i}");
+            BuildRefCombinedBiases();
+        }
+
         for (int i = 0; i < _noiseRefiner.Length; i++)
             _noiseRefiner[i].LoadWeights(weights, $"noise_refiner.{i}");
         for (int i = 0; i < _contextRefiner.Length; i++)
             _contextRefiner[i].LoadWeights(weights, $"context_refiner.{i}");
         for (int i = 0; i < _mainBlocks.Length; i++)
             _mainBlocks[i].LoadWeights(weights, $"layers.{i}");
+    }
+
+    /// <summary>Whether the checkpoint carried the reference-image stack (<c>ref_image_patch_embedder</c> +
+    /// <c>ref_image_refiner</c>) required by the edit path.</summary>
+    public bool HasRefStack => _hasRefStack;
+
+    /// <summary>Folds <c>image_index_embedding[j]</c> into the ref patch embedder's bias so the per-reference
+    /// index tag costs nothing at runtime: upstream computes <c>ref_image_patch_embedder(x) + image_index_embedding[j]</c>
+    /// token-wise, which equals a Linear with bias <c>(bias + image_index_embedding[j])</c>. Kept in the embedder
+    /// bias' dtype so the Linear sees a homogeneous parameter set.</summary>
+    private void BuildRefCombinedBiases()
+    {
+        if (_refEmbedderBias is null || _imageIndexEmbedding is null)
+        {
+            _refCombinedBias = [];
+            return;
+        }
+        int slots = (int)_imageIndexEmbedding.Shape[0];
+        int hidden = (int)_imageIndexEmbedding.Shape[1];
+        Tensor biasF32 = _refEmbedderBias.DType == DType.F32 ? _refEmbedderBias : _refEmbedderBias.CastTo(DType.F32);
+        Tensor idxF32 = _imageIndexEmbedding.DType == DType.F32 ? _imageIndexEmbedding : _imageIndexEmbedding.CastTo(DType.F32);
+        _refCombinedBias = new Tensor?[slots];
+        float* bp = (float*)biasF32.DataPointer;
+        float* ip = (float*)idxF32.DataPointer;
+        for (int j = 0; j < slots; j++)
+        {
+            Tensor combined = new(new TensorShape(hidden), DType.F32);
+            float* cp = (float*)combined.DataPointer;
+            for (int d = 0; d < hidden; d++)
+                cp[d] = bp[d] + ip[(long)j * hidden + d];
+            if (_refEmbedderBias.DType != DType.F32)
+            {
+                Tensor cast = combined.CastTo(_refEmbedderBias.DType);
+                combined.Dispose();
+                combined = cast;
+            }
+            _refCombinedBias[j] = combined;
+        }
+        if (!ReferenceEquals(biasF32, _refEmbedderBias)) biasF32.Dispose();
+        if (!ReferenceEquals(idxF32, _imageIndexEmbedding)) idxF32.Dispose();
     }
 
     /// <summary>Enumerates every weight tensor for GPU preload.</summary>
@@ -131,11 +197,20 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         if (_projOutWeight is not null) yield return _projOutWeight;
         if (_projOutBias is not null) yield return _projOutBias;
         if (_imageIndexEmbedding is not null) yield return _imageIndexEmbedding;
+        if (_refEmbedderWeight is not null) yield return _refEmbedderWeight;
+        if (_refEmbedderBias is not null) yield return _refEmbedderBias;
+        foreach (Tensor? combined in _refCombinedBias)
+            if (combined is not null) yield return combined;
 
         foreach (OmniGen2Block b in _noiseRefiner)
             foreach (Tensor w in b.EnumerateWeights()) yield return w;
         foreach (OmniGen2Block b in _contextRefiner)
             foreach (Tensor w in b.EnumerateWeights()) yield return w;
+        if (_hasRefStack)
+        {
+            foreach (OmniGen2Block b in _refImageRefiner)
+                foreach (Tensor w in b.EnumerateWeights()) yield return w;
+        }
         foreach (OmniGen2Block b in _mainBlocks)
             foreach (Tensor w in b.EnumerateWeights()) yield return w;
     }
@@ -148,13 +223,30 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
     /// <param name="textEmbeds">Caption embeddings <c>[B, T, text_feat_dim]</c>.</param>
     /// <param name="textSeqLen">Number of valid caption tokens (textEmbeds.Shape[1]).</param>
     /// <returns>Predicted velocity <c>[B, out_channels, H, W]</c>.</returns>
-    public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds, int textSeqLen)
+    public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds, int textSeqLen) =>
+        Forward(backend, latent, timestep, textEmbeds, textSeqLen, refLatents: null);
+
+    /// <summary>Forward pass with optional reference-image conditioning (the edit / multi-image-input path).
+    /// <paramref name="refLatents"/> holds VAE latents <c>[1, in_channels, Hr, Wr]</c>, one per reference in
+    /// picture order (max <see cref="OmniGen2Config.MaxRefImages"/>); null/empty falls back to plain t2i. The
+    /// joint sequence becomes <c>[text, ref_0..N, noise]</c> and only the trailing noise tokens are projected
+    /// out, per <c>OmniGen2Transformer2DModel.forward</c>.</summary>
+    public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds, int textSeqLen,
+        IReadOnlyList<Tensor>? refLatents)
     {
         ThrowIfDisposed();
         if (latent.Shape.Rank != 4)
             throw new ArgumentException($"Latent must be 4D [B, C, H, W], got {latent.Shape}.", nameof(latent));
         if (textEmbeds.Shape.Rank != 3)
             throw new ArgumentException($"textEmbeds must be 3D [B, T, dim], got {textEmbeds.Shape}.", nameof(textEmbeds));
+
+        return refLatents is null || refLatents.Count == 0
+            ? ForwardText2Image(backend, latent, timestep, textEmbeds, textSeqLen)
+            : ForwardWithRefs(backend, latent, timestep, textEmbeds, textSeqLen, refLatents);
+    }
+
+    private Tensor ForwardText2Image(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds, int textSeqLen)
+    {
 
         int batch = (int)latent.Shape[0];
         int inChannels = (int)latent.Shape[1];
@@ -226,24 +318,212 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         }
 
 
-        // ── 9. Strip text prefix, keep image tail ──
-        (Tensor _, Tensor imgFinal) = DiTUtils.SplitAlongSeqDim(joint, textSeqLen);
+        // ── 9-12. Strip text prefix, final norm, proj_out, unpatchify ──
+        return FinishOutput(backend, joint, temb, prefixSeqLen: textSeqLen, batch, imgSeqLen, hidden,
+            conditioningDim, outChannels, hPacked, wPacked, patch);
+    }
+
+    /// <summary>Reference-image-conditioned forward. Joint stream = <c>[text, ref_0..N, noise]</c> per
+    /// <c>OmniGen2Transformer2DModel.forward</c>: refs go through <c>ref_image_patch_embedder</c> (+ the folded
+    /// <c>image_index_embedding[j]</c> bias), are refined per-reference by the modulated <c>ref_image_refiner</c>
+    /// (attention isolated to each reference, matching upstream's per-reference batching), and every stream is
+    /// rotated with upstream's <c>pe_shift</c> position ids: text token <c>s</c> at <c>(s,s,s)</c>; reference
+    /// <c>j</c>'s grid at time-axis <c>pe_shift_j</c> where <c>pe_shift</c> starts at the caption length and
+    /// advances by <c>max(ref_h_tokens, ref_w_tokens)</c> per reference; the noise grid at the final shift.</summary>
+    private Tensor ForwardWithRefs(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds,
+        int textSeqLen, IReadOnlyList<Tensor> refLatents)
+    {
+        if (!_hasRefStack)
+            throw new InvalidOperationException(
+                "OmniGen2 edit requires the ref_image_patch_embedder / ref_image_refiner weights, which this " +
+                "checkpoint does not carry (t2i-only prune?). Use the full OmniGen2 transformer checkpoint.");
+        int batch = (int)latent.Shape[0];
+        if (batch != 1)
+            throw new ArgumentException($"Reference-conditioned forward supports batch 1, got {batch}.", nameof(latent));
+        int slots = _imageIndexEmbedding is not null ? (int)_imageIndexEmbedding.Shape[0] : _config.MaxRefImages;
+        if (refLatents.Count > slots)
+            throw new ArgumentException(
+                $"OmniGen2 supports at most {slots} reference images (image_index_embedding slots), got {refLatents.Count}.",
+                nameof(refLatents));
+
+        int inChannels = (int)latent.Shape[1];
+        int latentH = (int)latent.Shape[2];
+        int latentW = (int)latent.Shape[3];
+        int patch = _config.PatchSize;
+        int hidden = _config.HiddenSize;
+        int hPacked = latentH / patch;
+        int wPacked = latentW / patch;
+        int imgSeqLen = hPacked * wPacked;
+        int outChannels = _config.OutChannels ?? inChannels;
+        int conditioningDim = _config.ConditioningDim;
+        int halfDim = _rope.HeadDim / 2;
+
+        if (latentH % patch != 0 || latentW % patch != 0)
+            throw new ArgumentException($"Latent {latentH}x{latentW} not divisible by patch {patch}.", nameof(latent));
+
+        int numRefs = refLatents.Count;
+        int[] refHPacked = new int[numRefs];
+        int[] refWPacked = new int[numRefs];
+        int[] refLen = new int[numRefs];
+        int totalRefLen = 0;
+        for (int j = 0; j < numRefs; j++)
+        {
+            Tensor r = refLatents[j];
+            if (r.Shape.Rank != 4 || r.Shape[0] != 1 || r.Shape[1] != inChannels)
+                throw new ArgumentException($"refLatents[{j}] must be [1, {inChannels}, Hr, Wr], got {r.Shape}.", nameof(refLatents));
+            if (r.Shape[2] % patch != 0 || r.Shape[3] % patch != 0)
+                throw new ArgumentException($"refLatents[{j}] {r.Shape[2]}x{r.Shape[3]} not divisible by patch {patch}.", nameof(refLatents));
+            refHPacked[j] = (int)r.Shape[2] / patch;
+            refWPacked[j] = (int)r.Shape[3] / patch;
+            refLen[j] = refHPacked[j] * refWPacked[j];
+            totalRefLen += refLen[j];
+        }
+
+        // ── 1. Patchify + embed the noise latent (x_embedder) ──
+        Tensor imgFlat = PatchifyLatent(latent, batch, inChannels, latentH, latentW, patch);
+        Tensor imgTokens = new(new TensorShape(batch, imgSeqLen, hidden), DType.F32);
+        backend.Linear(imgTokens, imgFlat, _xEmbedderWeight!, _xEmbedderBias);
+        imgFlat.Dispose();
+
+        // ── 2. Patchify + embed each reference (ref_image_patch_embedder; bias pre-folded with
+        //       image_index_embedding[j] — see BuildRefCombinedBiases) ──
+        Tensor[] refTokens = new Tensor[numRefs];
+        for (int j = 0; j < numRefs; j++)
+        {
+            Tensor refFlat = PatchifyLatent(refLatents[j], 1, inChannels, refHPacked[j] * patch, refWPacked[j] * patch, patch);
+            refTokens[j] = new Tensor(new TensorShape(1, refLen[j], hidden), DType.F32);
+            Tensor? bias = j < _refCombinedBias.Length ? _refCombinedBias[j] : _refEmbedderBias;
+            backend.Linear(refTokens[j], refFlat, _refEmbedderWeight!, bias ?? _refEmbedderBias);
+            refFlat.Dispose();
+        }
+
+        // ── 3. Caption embed: RMSNorm(text_feat_dim) → Linear(text_feat_dim → hidden) ──
+        Tensor txtNormed = new(textEmbeds.Shape, DType.F32);
+        backend.RmsNorm(txtNormed, textEmbeds, _captionNormWeight!, _config.NormEps);
+        Tensor txtTokens = new(new TensorShape(batch, textSeqLen, hidden), DType.F32);
+        backend.Linear(txtTokens, txtNormed, _captionEmbedderWeight!, _captionEmbedderBias);
+        txtNormed.Dispose();
+
+        // ── 4. Timestep embedding ──
+        Tensor temb = ComputeTimestepEmbedding(backend, timestep, batch, conditioningDim);
+
+        // ── 5. 3-axis position ids for the full [text, ref_0..N, noise] sequence (upstream pe_shift walk) ──
+        int totalSeq = textSeqLen + totalRefLen + imgSeqLen;
+        int[] timeIds = new int[totalSeq];
+        int[] heightIds = new int[totalSeq];
+        int[] widthIds = new int[totalSeq];
+        for (int s = 0; s < textSeqLen; s++)
+        {
+            timeIds[s] = s;
+            heightIds[s] = s;
+            widthIds[s] = s;
+        }
+        int peShift = textSeqLen;
+        int offset = textSeqLen;
+        for (int j = 0; j < numRefs; j++)
+        {
+            for (int s = 0; s < refLen[j]; s++)
+            {
+                int row = s / refWPacked[j];
+                timeIds[offset + s] = peShift;
+                heightIds[offset + s] = row;
+                widthIds[offset + s] = s - row * refWPacked[j];
+            }
+            peShift += Math.Max(refHPacked[j], refWPacked[j]);
+            offset += refLen[j];
+        }
+        for (int s = 0; s < imgSeqLen; s++)
+        {
+            int row = s / wPacked;
+            timeIds[offset + s] = peShift;
+            heightIds[offset + s] = row;
+            widthIds[offset + s] = s - row * wPacked;
+        }
+        (float[] ropeCos, float[] ropeSin) = _rope.BuildTableFromPositions(timeIds, heightIds, widthIds);
+
+        // ── 6. Noise refiner on noise tokens (their joint-sequence positions, i.e. the shifted time axis) ──
+        int noiseTableOffset = (textSeqLen + totalRefLen) * halfDim;
+        for (int i = 0; i < _noiseRefiner.Length; i++)
+        {
+            Tensor next = _noiseRefiner[i].Forward(backend, imgTokens, _rope,
+                ropeCos.AsSpan(noiseTableOffset, imgSeqLen * halfDim),
+                ropeSin.AsSpan(noiseTableOffset, imgSeqLen * halfDim), temb);
+            imgTokens.Dispose();
+            imgTokens = next;
+        }
+
+        // ── 7. Ref-image refiner: each reference refined separately (attention isolated per reference) ──
+        int refTableOffset = textSeqLen * halfDim;
+        for (int j = 0; j < numRefs; j++)
+        {
+            for (int i = 0; i < _refImageRefiner.Length; i++)
+            {
+                Tensor next = _refImageRefiner[i].Forward(backend, refTokens[j], _rope,
+                    ropeCos.AsSpan(refTableOffset, refLen[j] * halfDim),
+                    ropeSin.AsSpan(refTableOffset, refLen[j] * halfDim), temb);
+                refTokens[j].Dispose();
+                refTokens[j] = next;
+            }
+            refTableOffset += refLen[j] * halfDim;
+        }
+
+        // ── 8. Context refiner on text tokens (non-modulated, positions (s,s,s)) ──
+        for (int i = 0; i < _contextRefiner.Length; i++)
+        {
+            Tensor next = _contextRefiner[i].Forward(backend, txtTokens, _rope,
+                ropeCos.AsSpan(0, textSeqLen * halfDim), ropeSin.AsSpan(0, textSeqLen * halfDim), temb: null);
+            txtTokens.Dispose();
+            txtTokens = next;
+        }
+
+        // ── 9. Concat [text, ref_0..N, noise] along the sequence axis ──
+        Tensor jointSeq = txtTokens;
+        for (int j = 0; j < numRefs; j++)
+        {
+            Tensor merged = DiTUtils.ConcatAlongSeqDim(jointSeq, refTokens[j]);
+            jointSeq.Dispose();
+            refTokens[j].Dispose();
+            jointSeq = merged;
+        }
+        Tensor withNoise = DiTUtils.ConcatAlongSeqDim(jointSeq, imgTokens);
+        jointSeq.Dispose();
+        imgTokens.Dispose();
+        jointSeq = withNoise;
+
+        // ── 10. Main joint blocks over the full sequence ──
+        for (int i = 0; i < _mainBlocks.Length; i++)
+        {
+            Tensor next = _mainBlocks[i].Forward(backend, jointSeq, _rope, ropeCos, ropeSin, temb);
+            jointSeq.Dispose();
+            jointSeq = next;
+        }
+
+        // ── 11. Strip the [text, refs] prefix, final norm, proj_out, unpatchify ──
+        return FinishOutput(backend, jointSeq, temb, prefixSeqLen: textSeqLen + totalRefLen, batch, imgSeqLen,
+            hidden, conditioningDim, outChannels, hPacked, wPacked, patch);
+    }
+
+    /// <summary>Shared output tail: drops the first <paramref name="prefixSeqLen"/> tokens (text and, on the edit
+    /// path, reference tokens), applies the LuminaLayerNormContinuous final norm, projects to
+    /// <c>p²·out_channels</c>, and unpatchifies — negating per upstream's <c>return -output</c> (OmniGen2 flips the
+    /// flow direction with <c>timestep = 1 − sigma</c>, so the negated velocity matches the flow-match Euler step
+    /// <c>x_next = x + v·(σ_next − σ)</c>). Consumes (disposes) <paramref name="joint"/> and <paramref name="temb"/>.</summary>
+    private Tensor FinishOutput(IBackend backend, Tensor joint, Tensor temb, int prefixSeqLen, int batch,
+        int imgSeqLen, int hidden, int conditioningDim, int outChannels, int hPacked, int wPacked, int patch)
+    {
+        (Tensor prefix, Tensor imgFinal) = DiTUtils.SplitAlongSeqDim(joint, prefixSeqLen);
+        prefix.Dispose();
         joint.Dispose();
 
-        // ── 10. Final norm: LuminaRMSNormZero (Linear(silu(temb)) → scale, then RMSNorm * (1+scale)) ──
         Tensor normedOut = ApplyFinalNorm(backend, imgFinal, temb, batch, imgSeqLen, hidden, conditioningDim);
         imgFinal.Dispose();
         temb.Dispose();
 
-        // ── 11. proj_out: Linear(hidden → p²·out_channels) ──
         TensorShape projOutShape = new(batch, imgSeqLen, patch * patch * outChannels);
         Tensor projOut = new(projOutShape, DType.F32);
         backend.Linear(projOut, normedOut, _projOutWeight!, _projOutBias);
         normedOut.Dispose();
 
-        // ── 12. Unpatchify [B, S_img, p²·C_out] → [B, C_out, H, W], negating per upstream's `return -output`.
-        //        OmniGen2's forward flips the flow direction (timestep = 1 - sigma) and negates the velocity so the
-        //        sign matches the flow-match Euler step x_next = x + v·(σ_next − σ). ──
         Tensor velocity = UnpatchifyTokens(projOut, batch, outChannels, hPacked, wPacked, patch);
         projOut.Dispose();
 
@@ -440,6 +720,10 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
             _normOutLinearWeight = _normOutLinearBias = null;
             _projOutWeight = _projOutBias = null;
             _imageIndexEmbedding = null;
+            _refEmbedderWeight = _refEmbedderBias = null;
+            foreach (Tensor? combined in _refCombinedBias)
+                combined?.Dispose();
+            _refCombinedBias = [];
         }
         GC.SuppressFinalize(this);
     }
