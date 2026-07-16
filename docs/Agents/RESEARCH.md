@@ -3,7 +3,6 @@
 > Deep-dive into a topic and produce a complete research document for implementation agents.
 
 ## Extra Reading
-- `docs/Design/archive/RESEARCH_REQUIREMENTS.md`
 - The specific `docs/Research/` stub with its "What to Research" section
 
 ## Workflow

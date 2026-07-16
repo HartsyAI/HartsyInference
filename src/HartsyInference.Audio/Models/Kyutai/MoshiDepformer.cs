@@ -27,10 +27,11 @@ public sealed unsafe class MoshiDepformer : IDisposable
     private readonly Tensor?[] _embW = new Tensor?[DepQ - 1];      // depformer_emb[k] lookup [2049,128]
     private readonly Tensor?[] _embLr = new Tensor?[DepQ - 1];     // depformer_emb[k].low_rank [1024,128]
     private Tensor? _textW, _textOut1, _textOut2;                  // depformer_text_emb (demux)
-    private readonly Tensor?[] _selfIn = new Tensor?[Layers];      // [11·3072,1024]
-    private readonly Tensor?[] _selfOut = new Tensor?[Layers];     // [11·1024,1024]
-    private readonly Tensor?[,] _gateIn = new Tensor?[Layers, Sets];   // [4096,1024]
-    private readonly Tensor?[,] _gateOut = new Tensor?[Layers, Sets];  // [1024,2048]
+    private readonly Tensor?[,] _selfIn = new Tensor?[Layers, Sets];   // per-set QKV proj [3072,1024]
+    private readonly Tensor?[,] _selfOut = new Tensor?[Layers, Sets];  // per-set out proj [1024,1024]
+    private readonly Tensor?[,] _gateInGate = new Tensor?[Layers, Sets];  // gate half of gating.linear_in [2048,1024]
+    private readonly Tensor?[,] _gateInUp = new Tensor?[Layers, Sets];    // up half [2048,1024]
+    private readonly Tensor?[,] _gateOut = new Tensor?[Layers, Sets];     // [1024,2048]
     private readonly Tensor?[] _norm1 = new Tensor?[Layers], _norm2 = new Tensor?[Layers];
     private readonly Tensor?[] _heads = new Tensor?[DepQ];         // linears[cb] [2048,1024]
     private int _disposed;
@@ -56,13 +57,22 @@ public sealed unsafe class MoshiDepformer : IDisposable
         for (int l = 0; l < Layers; l++)
         {
             string p = $"depformer.layers.{l}";
-            _selfIn[l] = WhisperOps.EnsureF32(w[$"{p}.self_attn.in_proj_weight"]);
-            _selfOut[l] = WhisperOps.EnsureF32(w[$"{p}.self_attn.out_proj.weight"]);
+            // Pre-slice the per-weight-set projections at load. Slicing them fresh each Block call allocated a new
+            // host tensor per (codebook,layer) every frame, so the device weight cache (keyed by tensor identity)
+            // NEVER hit and re-uploaded the weight on every op — the dominant generation cost (H2D_MISS_BIG).
+            Tensor inAll = WhisperOps.EnsureF32(w[$"{p}.self_attn.in_proj_weight"]);   // [11·3·Dim, Dim]
+            Tensor outAll = WhisperOps.EnsureF32(w[$"{p}.self_attn.out_proj.weight"]); // [11·Dim, Dim]
             _norm1[l] = Flatten(WhisperOps.EnsureF32(w[$"{p}.norm1.alpha"]));
             _norm2[l] = Flatten(WhisperOps.EnsureF32(w[$"{p}.norm2.alpha"]));
             for (int s = 0; s < Sets; s++)
             {
-                _gateIn[l, s] = WhisperOps.EnsureF32(w[$"{p}.gating.{s}.linear_in.weight"]);
+                _selfIn[l, s] = SliceRows(inAll, s * 3 * Dim, 3 * Dim, Dim);
+                _selfOut[l, s] = SliceRows(outAll, s * Dim, Dim, Dim);
+                // Pre-split the fused gate|up projection ([2·GateInner, Dim]) so the SwiGLU runs entirely on the
+                // device (Silu + Mul) instead of a per-call host loop that drains the GPU for every codebook.
+                Tensor gin = WhisperOps.EnsureF32(w[$"{p}.gating.{s}.linear_in.weight"]);
+                _gateInGate[l, s] = SliceRows(gin, 0, GateInner, Dim);
+                _gateInUp[l, s] = SliceRows(gin, GateInner, GateInner, Dim);
                 _gateOut[l, s] = WhisperOps.EnsureF32(w[$"{p}.gating.{s}.linear_out.weight"]);
             }
         }
@@ -82,7 +92,6 @@ public sealed unsafe class MoshiDepformer : IDisposable
             kCache[l] = new Tensor(new TensorShape(1, Heads, DepQ, HeadDim), DType.F32);
             vCache[l] = new Tensor(new TensorShape(1, Heads, DepQ, HeadDim), DType.F32);
         }
-        string? dbgDir = Environment.GetEnvironmentVariable("KYUTAI_DEP_INTERNAL");
         try
         {
             int prev = textToken;
@@ -93,14 +102,9 @@ public sealed unsafe class MoshiDepformer : IDisposable
                 Tensor emb = cb == 0 ? TextEmbed(backend, prev) : CodeEmbed(backend, cb - 1, prev);
                 Tensor x = new(new TensorShape(1, 1, Dim), DType.F32);
                 backend.Add(x, depIn, emb); depIn.Dispose(); emb.Dispose();
-                if (dbgDir is not null && cb < 4) DumpDep(Path.Combine(dbgDir, $"our_depin_{cb}.bin"), x);
 
                 for (int l = 0; l < Layers; l++)
-                {
                     x = Block(backend, x, l, set, cb, kCache[l], vCache[l]);
-                    if (dbgDir is not null && cb < 2) DumpDep(Path.Combine(dbgDir, $"our_deplayer_{cb}_{l}.bin"), x);
-                }
-                if (dbgDir is not null && cb < 4) DumpDep(Path.Combine(dbgDir, $"our_depout_{cb}.bin"), x);
 
                 Tensor lg = WhisperOps.ProjectLinear(backend, x, _heads[cb]!, null, 1, 1, Dim, Card);
                 x.Dispose();
@@ -122,23 +126,15 @@ public sealed unsafe class MoshiDepformer : IDisposable
         }
     }
 
-    private static void DumpDep(string path, Tensor t)
-    {
-        byte[] bytes = new byte[Dim * 4];
-        fixed (byte* bp = bytes) Buffer.MemoryCopy((void*)t.DataPointer, bp, bytes.Length, bytes.Length);
-        File.WriteAllBytes(path, bytes);
-    }
-
     private Tensor Block(IBackend backend, Tensor x, int layer, int set, int cb, Tensor kCache, Tensor vCache)
     {
         TensorShape sh = new(1, 1, Dim);
         Tensor pre = new(sh, DType.F32);
         backend.RmsNorm(pre, x, _norm1[layer]!, RmsEps);
 
-        // Packed QKV: slice the set's [3·dim, dim] rows from in_proj [11·3·dim, dim].
-        Tensor inW = SliceRows(_selfIn[layer]!, set * 3 * Dim, 3 * Dim, Dim);
-        Tensor qkv = WhisperOps.ProjectLinear(backend, pre, inW, null, 1, 1, Dim, 3 * Dim);
-        inW.Dispose(); pre.Dispose();
+        // Packed QKV via the pre-sliced per-set in_proj [3·dim, dim] (stable → device-cacheable).
+        Tensor qkv = WhisperOps.ProjectLinear(backend, pre, _selfIn[layer, set]!, null, 1, 1, Dim, 3 * Dim);
+        pre.Dispose();
 
         Tensor q = HeadSlice(qkv, 0), k = HeadSlice(qkv, Dim), v = HeadSlice(qkv, 2 * Dim);
         qkv.Dispose();
@@ -151,20 +147,14 @@ public sealed unsafe class MoshiDepformer : IDisposable
         q.Dispose(); kPre.Dispose(); vPre.Dispose();
         Tensor attnFlat = HeadsToFlat(attn); attn.Dispose();
 
-        Tensor outW = SliceRows(_selfOut[layer]!, set * Dim, Dim, Dim);
-        Tensor o = WhisperOps.ProjectLinear(backend, attnFlat, outW, null, 1, 1, Dim, Dim);
-        outW.Dispose(); attnFlat.Dispose();
+        Tensor o = WhisperOps.ProjectLinear(backend, attnFlat, _selfOut[layer, set]!, null, 1, 1, Dim, Dim);
+        attnFlat.Dispose();
         Tensor afterAttn = new(sh, DType.F32);
         backend.Add(afterAttn, x, o); o.Dispose(); x.Dispose();
-        if (cb == 0 && layer == 0 && Environment.GetEnvironmentVariable("KYUTAI_DEP_INTERNAL") is string dd)
-            DumpDep(Path.Combine(dd, "our_afterattn_0_0.bin"), afterAttn);
 
         Tensor pre2 = new(sh, DType.F32);
         backend.RmsNorm(pre2, afterAttn, _norm2[layer]!, RmsEps);
-        Tensor mlp = Gating(backend, pre2, layer, set);
-        if (cb == 0 && layer == 0 && Environment.GetEnvironmentVariable("KYUTAI_DEP_INTERNAL") is string dd2)
-        { DumpDep(Path.Combine(dd2, "our_ffout_0_0.bin"), mlp); DumpDep(Path.Combine(dd2, "our_pre2_0_0.bin"), pre2); }
-        pre2.Dispose();
+        Tensor mlp = Gating(backend, pre2, layer, set); pre2.Dispose();
         Tensor result = new(sh, DType.F32);
         backend.Add(result, afterAttn, mlp); afterAttn.Dispose(); mlp.Dispose();
         return result;
@@ -172,11 +162,13 @@ public sealed unsafe class MoshiDepformer : IDisposable
 
     private Tensor Gating(IBackend backend, Tensor x, int layer, int set)
     {
-        Tensor gu = WhisperOps.ProjectLinear(backend, x, _gateIn[layer, set]!, null, 1, 1, Dim, 2 * GateInner);
-        Tensor act = new(new TensorShape(1, 1, GateInner), DType.F32);
-        float* g = (float*)gu.DataPointer; float* a = (float*)act.DataPointer;
-        for (int c = 0; c < GateInner; c++) { float gate = g[c]; a[c] = (gate / (1f + MathF.Exp(-gate))) * g[GateInner + c]; }
-        gu.Dispose();
+        // SwiGLU: silu(gate_proj(x)) * up_proj(x), all on-device (no host drain).
+        TensorShape sh = new(1, 1, GateInner);
+        Tensor gate = WhisperOps.ProjectLinear(backend, x, _gateInGate[layer, set]!, null, 1, 1, Dim, GateInner);
+        Tensor up = WhisperOps.ProjectLinear(backend, x, _gateInUp[layer, set]!, null, 1, 1, Dim, GateInner);
+        Tensor act = new(sh, DType.F32);
+        backend.Silu(act, gate); gate.Dispose();
+        backend.Mul(act, act, up); up.Dispose();
         Tensor o = WhisperOps.ProjectLinear(backend, act, _gateOut[layer, set]!, null, 1, 1, GateInner, Dim);
         act.Dispose();
         return o;

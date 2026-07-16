@@ -122,7 +122,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             throw new NotImplementedException(
                 "This Flux checkpoint is FLUX.1 Fill (x_embedder input dim 384), which requires masked-image + " +
                 "mask conditioning (64 noise + 320 packed masked-latent+mask). That conditioning path is not yet " +
-                "implemented; Canny / Depth (input dim 128) are supported. See PARAM_PARITY_FIX_PLAN.md Phase 1.6.");
+                "implemented; Canny / Depth (input dim 128) are supported.");
         }
         if (isToolsModel)
         {

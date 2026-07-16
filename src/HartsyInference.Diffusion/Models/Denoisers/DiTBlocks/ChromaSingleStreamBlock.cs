@@ -97,7 +97,7 @@ public sealed unsafe class ChromaSingleStreamBlock
     /// <param name="sdpaMask">Optional additive [B, 1, S, S] SDPA mask, pre-built once per forward by ChromaTransformer (shared; not disposed here).</param>
     // GPU-residency rewrite (Chroma-only): all glue runs as IBackend GPU ops; only RoPE stays on the CPU
     // (interleaved/GPT-J convention, no CUDA kernel — ~5s/run). Mirrors ChromaDoubleStreamBlock; batch is always 1
-    // for Chroma. Full plan: docs/Checklists/TODO_CHROMA_GPU_RESIDENCY.md
+    // for Chroma.
     public Tensor Forward(IBackend backend, Tensor x, Tensor temb, FluxRope rope, Tensor? sdpaMask)
     {
         int batch = (int)x.Shape[0];

@@ -9,10 +9,9 @@ into an occupancy/SDF field, which marching cubes turns into a mesh. Texture ("P
 > DINOv2-GIANT (1536-dim, 40 layers)**, and the ShapeVAE is a `transformer.resblocks` self-attn stack + a
 > `geo_decoder` cross-attn head — NOT the PixArt-style single-stream DiT + simple cross-attn VAE the sections
 > below describe. The current C# `Hunyuan3DDit`/`Hunyuan3DShapeVae`/`Hunyuan3DConfig` do not match and must be
-> rewritten. **The full confirmed spec + key tables + build order live in
-> [`../Checklists/E2E_3D_WORKLOG.md`](../Checklists/archive/E2E_3D_WORKLOG.md) § Hunyuan3D-2** (extracted from the real
-> weights + `hy3dgen/shapegen/models/denoisers/hunyuan3ddit.py`). The sections below are the original guess,
-> kept only for history — follow the worklog, not this.
+> rewritten. **The confirmed spec is the shipped C# `Hunyuan3DDit` / `Hunyuan3DShapeVae` / `Hunyuan3DConfig`**,
+> built and verified end-to-end against the real weights + `hy3dgen/shapegen/models/denoisers/hunyuan3ddit.py`.
+> The sections below are the original pre-build guess, kept only for history — follow the code, not this.
 
 ## Pipeline
 

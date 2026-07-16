@@ -132,8 +132,14 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
     /// step rather than a full-prefix re-run.</summary>
     public int[,] Generate(IBackend backend, KyutaiTextScheduler scheduler, IEnumerable<KyutaiTextScheduler.Entry> entries,
         Tensor cross, Tensor sumCond, int maxFrames = 250, int delaySteps = 16, int finalPadding = 4,
-        float audioTemp = 0.6f, int audioTopK = 250, float textTemp = 0.6f, int textTopK = 25, int seed = 0)
+        float audioTemp = 0.6f, int audioTopK = 250, float textTemp = 0.6f, int textTopK = 25, int seed = 0,
+        IBackend? depBackend = null)
     {
+        // The depformer works on tiny (1-token, ≤32-step) tensors whose head-split / KV-cache management runs on
+        // host pointers; on a GPU backend that forces a D2H drain per op (~500 syncs/frame). Running the whole
+        // depformer cascade on a CPU backend costs a single D2H copy of the per-frame context and then stays on
+        // host — far cheaper for these small ops. Falls back to the main backend when not supplied.
+        depBackend ??= backend;
         // moshi samples BOTH the text token (temp_text/top_k_text) and the audio codes: the sampled text token's
         // new_word/pad choice is what PACES the words through the scheduler. Greedy argmax over the text head
         // collapses to always-pad (the model is confident to articulate), so words only advance when the scheduler
@@ -176,7 +182,7 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
                 int[] audio = new int[NumCodebooks];
                 if (offset >= delaySteps)
                 {
-                    using Tensor logits = Depformer.DecodeFrameGreedy(backend, lastCtx, outTok, out audio, audioTemp, audioTopK, rng);
+                    using Tensor logits = Depformer.DecodeFrameGreedy(depBackend, lastCtx, outTok, out audio, audioTemp, audioTopK, rng);
                 }
                 lastCtx.Dispose();
                 for (int q = 0; q < NumCodebooks; q++)

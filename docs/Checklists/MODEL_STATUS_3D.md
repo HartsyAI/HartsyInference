@@ -19,7 +19,7 @@ F16 activations. Every perf change is bit-exact or coherence-gated (`CudaOpBisec
 
 Tests for both: `Hunyuan3DDinoParityTests`, `Hunyuan3DDitParityTests`, `Hunyuan3DVaeParityTests`,
 `Hunyuan3DGenerationTests` (Hunyuan3D-2); `TripoSrParityTests`, `TripoSrGenerationTests`, `CudaOpBisectTests`
-(TripoSR). Detail in [PHASE_11_THREED.md](PHASE_11_THREED.md) and [E2E_3D_WORKLOG.md](archive/E2E_3D_WORKLOG.md).
+(TripoSR). Detail in [PHASE_11_THREED.md](PHASE_11_THREED.md).
 
 ## Deferred / not started (❌)
 

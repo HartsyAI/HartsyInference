@@ -46,7 +46,8 @@ public sealed unsafe class KyutaiDepformerParityTests
         for (int cb = 0; cb < MoshiDepformer.DepQ; cb++) forced[cb] = ((int*)refTokens.DataPointer)[cb];
         using Tensor logits = dep.DecodeFrameGreedy(backend, tout, textToken, out int[] tokens, forcedPrev: forced);
 
-        // Per-codebook logit correlation (the sampling-robust parity signal).
+        // Per-codebook logit correlation (the sampling-robust parity signal — a sampling model never follows the
+        // greedy cascade, so score each codebook under identical teacher-forced context).
         for (int cb = 0; cb < MoshiDepformer.DepQ; cb++)
         {
             double sa = 0, sb = 0; float* pa = (float*)logits.DataPointer + (long)cb * MoshiDepformer.Card;
@@ -56,14 +57,6 @@ public sealed unsafe class KyutaiDepformerParityTests
             for (int c = 0; c < MoshiDepformer.Card; c++) { double da = pa[c] - ma, db = pb[c] - mb; cov += da * db; va += da * da; vb += db * db; }
             double corr = cov / Math.Sqrt(va * vb);
             if (cb < 12 || corr < 0.999) _out.WriteLine($"  cb{cb} logit corr={corr:F5} argmax mine={ArgMaxRow(pa)} ref={((int*)refTokens.DataPointer)[cb]}");
-        }
-
-        string? dbg = Environment.GetEnvironmentVariable("KYUTAI_DEP_DUMP");
-        if (dbg is not null)
-        {
-            byte[] bytes = new byte[MoshiDepformer.DepQ * MoshiDepformer.Card * 4];
-            fixed (byte* bp = bytes) Buffer.MemoryCopy((void*)logits.DataPointer, bp, bytes.Length, bytes.Length);
-            File.WriteAllBytes(dbg, bytes);
         }
 
         float* a = (float*)logits.DataPointer; float* b = (float*)refLogits.DataPointer;

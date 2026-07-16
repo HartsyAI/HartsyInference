@@ -172,7 +172,7 @@ public sealed unsafe class ChromaDoubleStreamBlock
     // Chroma/Flux use interleaved (GPT-J) pairing (`FluxRope` / `ApplyRopeInterleaved`), and the CUDA backend has
     // no interleaved-rope kernel. RoPE is ~5s/run (verified via HARTSY_SKIP_ROPE), so it stays on `rope.Forward`;
     // its D2H/H2D for Q,K is coherent with the activation cache (the sync callback evicts then re-uploads).
-    // Mirrors Ideogram4Block. Full plan: docs/Checklists/TODO_CHROMA_GPU_RESIDENCY.md. NOTE: batch is always 1
+    // Mirrors Ideogram4Block. NOTE: batch is always 1
     // for Chroma (ChromaPipeline runs CFG as two separate batch-1 passes); the seq-dim split uses that.
     public (Tensor image, Tensor text) Forward(
         IBackend backend, Tensor image, Tensor text, Tensor temb, FluxRope rope, Tensor? sdpaMask)

@@ -80,7 +80,7 @@ public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
     /// (1) a salient-object-segmentation model in HartsyInference.Vision (U²-Net / ISNet / BiRefNet → alpha mask),
     /// (2) a <c>ForegroundComposite</c> helper here (bbox-crop → pad-to-square → resize to ratio → gray-0.5
     /// composite). Then call it here when the request flags a raw/un-composited image. Tracked in
-    /// docs/Checklists/PHASE_11_THREED.md §5 and E2E_3D_WORKLOG.md.</remarks>
+    /// docs/Checklists/PHASE_11_THREED.md §5.</remarks>
     public ThreeDResult Generate(ImageTo3DRequest request, Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();

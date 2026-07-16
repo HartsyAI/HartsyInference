@@ -4,7 +4,7 @@ namespace HartsyInference.Diffusion.Requests;
 /// <see cref="TextToImageRequest.CfgScale"/> / <see cref="TextToImageRequest.Width"/> /
 /// <see cref="TextToImageRequest.Height"/> are nullable, each pipeline resolves an omitted (null) value against
 /// its model's entry here via <see cref="Resolve"/>. Values mirror the official diffusers / upstream pipeline
-/// <c>__call__</c> defaults documented in <c>docs/Checklists/PARAM_PARITY_AUDIT.md</c>.</summary>
+/// <c>__call__</c> defaults.</summary>
 public readonly record struct GenerationDefaults(int Steps, float CfgScale, int Width, int Height)
 {
     /// <summary>Resolves a request's (possibly null) Steps/CfgScale/Width/Height against these defaults.</summary>

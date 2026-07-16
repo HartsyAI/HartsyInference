@@ -1,7 +1,6 @@
 # 3D (image → mesh) gen-perf — audit + optimization plan (2026-07-14)
 
-Applying the image/video/world gen-perf playbook (`archive/WORLD_GENPERF_PLAN.md`, `archive/VIDEO_GENPERF_PLAN.md`,
-memories `radiance-perf-pass`, `cuda-graph-step-capture-recipe`, `vae-host-loops-hidden-20s`,
+Applying the image/video/world gen-perf playbook (memories `radiance-perf-pass`, `cuda-graph-step-capture-recipe`, `vae-host-loops-hidden-20s`,
 `image-genperf-host-glue-wins`, `bf16-decode-gemv-kernel`) to the **3D models** (`HartsyInference.ThreeD`).
 Both models are already ✅ correctness-verified end-to-end (`MODEL_STATUS_3D.md`); this is a dedicated
 **perf** pass. Metric = **seconds per mesh** and the explicit goal: **correct AND faster than the Python
