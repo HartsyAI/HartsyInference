@@ -5,7 +5,7 @@ namespace HartsyInference.Diffusion.Adapters;
 
 /// <summary>IP-Adapter (Image Prompt Adapter): bolts a parallel image-conditioning path onto a base UNet's cross-attention layers. The CLIP-Vision encoding of a reference image is projected into N image-prompt tokens (4 for standard, 16 for Plus), and at every cross-attention block in the UNet a separate <c>K_ip</c> / <c>V_ip</c> linear projection produces image-conditioned key/value pairs that, together with the standard text K/V, drive an additional attention computation. The two attention outputs (text-attn + scale × image-attn) are summed before the cross-attention's output projection.
 ///
-/// <para>The adapter holds two pieces of state: an <see cref="IIpAdapterImageProjection"/> that maps CLIP-Vision output to image-prompt tokens (different module for standard vs Plus / Plus-Face / Full-Face), and a flat list of per-cross-attention-layer <c>(to_k_ip, to_v_ip)</c> weight pairs keyed by integer index (<c>0</c>, <c>1</c>, …, matching the UNet's cross-attention enumeration order — diffusers' <c>attn_processors</c> dict iteration order, which our <see cref="HartsyInference.Diffusion.Models.Denoisers.UNet"/> matches).</para>
+/// <para>The adapter holds two pieces of state: an <see cref="IIpAdapterImageProjection"/> that maps CLIP-Vision output to image-prompt tokens (different module for standard vs Plus / Plus-Face / Full-Face), and a flat list of per-cross-attention-layer <c>(to_k_ip, to_v_ip)</c> weight pairs keyed by integer index. The list order is diffusers' <c>attn_processors</c> dict iteration order, which is down → up → MID LAST (diffusers registers the empty <c>up_blocks</c> ModuleList before <c>mid_block</c>), NOT the forward-traversal down → mid → up order. <see cref="HartsyInference.Diffusion.Models.Denoisers.UNet"/>.Forward maps its traversal onto this checkpoint order internally.</para>
 ///
 /// <para><b>Currently supported:</b> SDXL and SD 1.5, standard + Plus + Plus-Face (Plus-Face is the same architecture as Plus, just different training). SD 1.5 is the same mechanism at cross-attn dim 768 over the SD1.5 UNet's 16 cross-attention sub-layers.</para>
 ///
@@ -134,7 +134,7 @@ public sealed unsafe class IpAdapter : IDisposable
         return _imageProjection.Forward(backend, visionInput);
     }
 
-    /// <summary>The K_ip projection weight for cross-attention layer <paramref name="layerIdx"/> (0-based). Shape <c>[crossAttnDim, crossAttnDim]</c> — projects image-prompt tokens (per-token dim = crossAttnDim) into the same K space the UNet's text K projection produces.</summary>
+    /// <summary>The K_ip projection weight for cross-attention layer <paramref name="layerIdx"/> (0-based, in the checkpoint's down → up → mid order). Shape <c>[layerInnerDim, crossAttnDim]</c> — projects image-prompt tokens (per-token dim = crossAttnDim) into the same K space the layer's text K projection produces (inner dim varies per layer: 640/1280 on SDXL, 320/640/1280 on SD1.5).</summary>
     public Tensor GetToKIpWeight(int layerIdx) => _toKIpWeights[layerIdx];
 
     /// <summary>The V_ip projection weight for cross-attention layer <paramref name="layerIdx"/>.</summary>

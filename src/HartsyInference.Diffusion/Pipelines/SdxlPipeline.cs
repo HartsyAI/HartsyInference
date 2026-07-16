@@ -397,7 +397,8 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             }
             ipaToKIp = kArr;
             ipaToVIp = vArr;
-            ipaBaseScalesPerLayer = IpAdapterScaleSchedule.Build(ipa.WeightType, ipa.Scale, layers);
+            ipaBaseScalesPerLayer = IpAdapterScaleSchedule.Build(ipa.WeightType, ipa.Scale, layers,
+                _unet.DownCrossAttentionLayerCount, _unet.MidCrossAttentionLayerCount);
         }
         Logs.Info("Starting SDXL denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;

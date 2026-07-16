@@ -220,7 +220,8 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
             }
             ipaToKIp = kArr;
             ipaToVIp = vArr;
-            ipaBaseScalesPerLayer = IpAdapterScaleSchedule.Build(ipa.WeightType, ipa.Scale, layers);
+            ipaBaseScalesPerLayer = IpAdapterScaleSchedule.Build(ipa.WeightType, ipa.Scale, layers,
+                _unet.DownCrossAttentionLayerCount, _unet.MidCrossAttentionLayerCount);
         }
 
         Logs.Info("Starting denoising loop...");
