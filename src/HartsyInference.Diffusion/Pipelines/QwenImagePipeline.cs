@@ -46,6 +46,16 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     // vision tower) — a content signature of the ref image joins the cache key. 0 = no vision conditioning.
     private long _cachedEditSig;
 
+    // Edit-reference latent cache (single slot, keyed on the VAE-ref pixel signatures): repeat edit
+    // generations (same references, new seed/prompt) reuse the packed ref tokens instead of re-running the
+    // VAE encoder. Beyond speed, this is what keeps KEEP_MODELS residency safe for edit: the reference VAE
+    // encode needs the DiT evicted first (its Conv2D workspace cannot coexist with a ~20 GB resident DiT on
+    // 24 GB cards), so a hit avoids the evict + full re-upload entirely. The tensor stays pinned in the
+    // device weight cache until replaced or the pipeline is disposed.
+    private Tensor? _cachedPackedRef;
+    private long _cachedRefSig;
+    private (int H, int W)[] _cachedRefGrids = [];
+
     /// <summary>Cheap content signature of a reference image: FNV-1a over 1024 strided samples + dims.
     /// Collision-safe enough for a single-slot cache whose only job is "same image as last generation?".</summary>
     private static long ComputeImageSignature(Tensor image)
@@ -207,16 +217,6 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         }
         else
         {
-            if (_ditResident)
-            {
-                // The TE cannot coexist with the resident DiT (HARTSY_KEEP_MODELS); evict for this
-                // new-prompt generation and re-preload below.
-                Backend.Sync();
-                Backend.FreeWeights(_transformer.EnumerateWeights());
-                _ditResident = false;
-            }
-            Backend.PreloadWeights(_textEncoder.EnumerateWeights());
-
             // Edit-with-vision: the templated ids contain <|image_pad|> placeholders — run the multimodal
             // encode (vision tower + spliced embeds + sectioned M-RoPE). Both cond AND uncond carry the
             // image (the standard ComfyUI edit workflow feeds the reference to both conditionings).
@@ -226,6 +226,15 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             // VAE-contract references on the host (one-time, off the step loop).
             bool visionEncode = _multimodalEncoder is not null && hasEditRefs
                 && Array.IndexOf(promptTokenIds, Qwen25VlMultimodalEncoder.ImageTokenId) >= 0;
+
+            // The TE cannot coexist with the resident DiT (HARTSY_KEEP_MODELS); evict for this
+            // new-prompt generation and re-preload below. The vision tower is staged with the language
+            // tower on the vision path (and freed with it below) — the double encode (cond + uncond) would
+            // otherwise auto-promote its weights into the resident cache, permanently shrinking the DiT budget.
+            EvictResidentTransformer("text-encode phase");
+            Backend.PreloadWeights(_textEncoder.EnumerateWeights());
+            if (visionEncode)
+                Backend.PreloadWeights(_multimodalEncoder!.EnumerateVisionWeights());
             List<Tensor> visionFallbacks = new();
             Tensor[] visionImages = [];
             if (visionEncode)
@@ -279,6 +288,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (txt seqLen={condHidden.Shape[1]})");
 
             Backend.FreeWeights(_textEncoder.EnumerateWeights());
+            if (visionEncode)
+                Backend.FreeWeights(_multimodalEncoder!.EnumerateVisionWeights());
 
             // Materialize the conditioning on the host, then reclaim every encoder intermediate. The Qwen2.5-VL
             // encoder leaves hundreds of device-cached activations that otherwise linger until GC finalization —
@@ -316,6 +327,10 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
         // Build initial packed latent — t2i: packed noise * initSigma; img2img: encode + pack + AddNoise
         // at sigma[startStep]. Masked inpaint keeps the packed source + packed mask for per-step blend.
+        // A prompt-cache hit skips the TE phase's DiT eviction, so under KEEP_MODELS the DiT can still be
+        // resident here — the source VAE encode cannot run beside it (see EvictResidentTransformer).
+        if (isImg2Img)
+            EvictResidentTransformer("img2img source VAE encode");
         (Tensor packedLatent, Tensor? packedSourceLatent) =
             BuildInitialPackedLatent(request, scheduler, latentShape, packedShape, latentH, latentW, seed, startStep, keepSourceLatent: isMaskedInpaint);
         Tensor? packedMask = null;
@@ -336,49 +351,78 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         (int H, int W)[] refGrids = [];
         if (hasEditRefs)
         {
-            Stopwatch refSw = Stopwatch.StartNew();
-            List<Tensor> packedRefs = new(editRefImages!.Count);
-            refGrids = new (int, int)[editRefImages.Count];
-            int totalRefTokens = 0;
-            for (int r = 0; r < editRefImages.Count; r++)
+            long refSig = 0L;
+            foreach (Tensor editRef in editRefImages!)
+                refSig = refSig * 1000003L ^ ComputeImageSignature(editRef);
+            if (_cachedPackedRef is not null && _cachedRefSig == refSig)
             {
-                Tensor editRef = editRefImages[r];
-                int refLatentH = (int)editRef.Shape[2] / 8;
-                int refLatentW = (int)editRef.Shape[3] / 8;
-                refGrids[r] = (refLatentH / _config.PatchSize, refLatentW / _config.PatchSize);
-                Tensor refUnpacked = _vaeEncoder!.Encode(Backend, editRef);
-                Tensor packedRef = PackLatent(refUnpacked, refLatentH, refLatentW, _config.InChannels, _config.PatchSize);
-                refUnpacked.Dispose();
-                packedRefs.Add(packedRef);
-                totalRefTokens += (int)packedRef.Shape[1];
-            }
-            if (packedRefs.Count == 1)
-            {
-                packedEditRef = packedRefs[0];
+                packedEditRef = _cachedPackedRef;
+                refGrids = _cachedRefGrids;
+                Logs.Info($"[QwenImage] edit-reference latent cache hit — VAE encode skipped ({packedEditRef.Shape[1]} ref tokens)");
             }
             else
             {
-                packedEditRef = new Tensor(new TensorShape(1, totalRefTokens, patchDim), DType.F32);
-                float* dstRef = (float*)packedEditRef.DataPointer;
-                long rowOff = 0;
-                foreach (Tensor packedRef in packedRefs)
+                // Same-prompt edit re-runs reach here with the DiT still resident (the prompt cache skipped
+                // the TE phase and its eviction); the reference VAE encode cannot run beside it.
+                EvictResidentTransformer("edit-reference VAE encode");
+                // Stage the encoder weights for the encode only: multi-ref runs the encoder once per image,
+                // and the second pass would auto-promote its weights into the resident cache for good.
+                Backend.PreloadWeights(_vaeEncoder!.EnumerateWeights());
+                Stopwatch refSw = Stopwatch.StartNew();
+                List<Tensor> packedRefs = new(editRefImages.Count);
+                refGrids = new (int, int)[editRefImages.Count];
+                int totalRefTokens = 0;
+                for (int r = 0; r < editRefImages.Count; r++)
                 {
-                    long bytes = packedRef.ElementCount * sizeof(float);
-                    Buffer.MemoryCopy((void*)packedRef.DataPointer, dstRef + rowOff * patchDim, bytes, bytes);
-                    rowOff += packedRef.Shape[1];
-                    packedRef.Dispose();
+                    Tensor editRef = editRefImages[r];
+                    int refLatentH = (int)editRef.Shape[2] / 8;
+                    int refLatentW = (int)editRef.Shape[3] / 8;
+                    refGrids[r] = (refLatentH / _config.PatchSize, refLatentW / _config.PatchSize);
+                    Tensor refUnpacked = _vaeEncoder!.Encode(Backend, editRef);
+                    Tensor packedRef = PackLatent(refUnpacked, refLatentH, refLatentW, _config.InChannels, _config.PatchSize);
+                    refUnpacked.Dispose();
+                    packedRefs.Add(packedRef);
+                    totalRefTokens += (int)packedRef.Shape[1];
                 }
+                if (packedRefs.Count == 1)
+                {
+                    packedEditRef = packedRefs[0];
+                }
+                else
+                {
+                    packedEditRef = new Tensor(new TensorShape(1, totalRefTokens, patchDim), DType.F32);
+                    float* dstRef = (float*)packedEditRef.DataPointer;
+                    long rowOff = 0;
+                    foreach (Tensor packedRef in packedRefs)
+                    {
+                        long bytes = packedRef.ElementCount * sizeof(float);
+                        Buffer.MemoryCopy((void*)packedRef.DataPointer, dstRef + rowOff * patchDim, bytes, bytes);
+                        rowOff += packedRef.Shape[1];
+                        packedRef.Dispose();
+                    }
+                }
+                refSw.Stop();
+                Backend.FreeWeights(_vaeEncoder.EnumerateWeights());
+                Logs.Info($"Qwen-Image-Edit references encoded in {refSw.ElapsedMilliseconds}ms: " +
+                    $"{editRefImages.Count} image(s), {totalRefTokens} ref tokens.");
+
+                // Replace the single-slot cache. Evict the old pin BEFORE disposing: the weight cache is
+                // keyed on the tensor object, and disposing a still-registered pin would leak its device
+                // allocation into every later gen.
+                if (_cachedPackedRef is not null)
+                {
+                    Backend.FreeWeights(new[] { _cachedPackedRef });
+                    _cachedPackedRef.Dispose();
+                }
+                _cachedPackedRef = packedEditRef;
+                _cachedRefSig = refSig;
+                _cachedRefGrids = refGrids;
             }
-            refSw.Stop();
-            Logs.Info($"Qwen-Image-Edit references encoded in {refSw.ElapsedMilliseconds}ms: " +
-                $"{editRefImages.Count} image(s), {totalRefTokens} ref tokens.");
         }
 
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
-        _ditResident = true;
-
         // Materialize every tensor that must survive across steps on the host, then reclaim the VAE-encode /
-        // packing intermediates. The per-step FreeActivations below frees device buffers WITHOUT a D2H
+        // packing intermediates BEFORE the DiT re-upload below — the fp8 DiT does not fit beside a 1MP encode's
+        // conv workspace on 24 GB cards. The per-step FreeActivations below frees device buffers WITHOUT a D2H
         // sync-back, so anything still device-only here would be silently lost — the t2i initSigma path leaves
         // packedLatent as a live Backend.Scale output on the GPU.
         _ = packedLatent.DataPointer;
@@ -386,8 +430,13 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (packedMask is not null) _ = packedMask.DataPointer;
         if (packedEditRef is not null) _ = packedEditRef.DataPointer;
         Backend.FreeActivations();
+
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+        _ditResident = true;
+
         // Pin the step-invariant ref tokens as a device-resident weight: they re-enter the per-step device
-        // concat below, and a pageable host re-upload every step is an internally-syncing copy.
+        // concat below, and a pageable host re-upload every step is an internally-syncing copy. No-op on a
+        // ref-latent cache hit (still pinned from the previous generation).
         if (packedEditRef is not null)
             Backend.PreloadWeights(new List<Tensor> { packedEditRef });
 
@@ -506,16 +555,10 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             }
         }
 
-        // condHidden/uncondHidden are cross-generation caches — not disposed here.
+        // condHidden/uncondHidden and packedEditRef (the pinned ref-latent cache slot) are cross-generation
+        // caches — not disposed here; DisposeCore / cache replacement release them.
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
-        if (packedEditRef is not null)
-        {
-            // Evict the pinned device copy BEFORE disposing: the weight cache is keyed on the tensor object,
-            // and disposing a still-registered pin would leak its device allocation into every later gen.
-            Backend.FreeWeights(new[] { packedEditRef });
-            packedEditRef.Dispose();
-        }
 
         QwenImageTransformer.DumpFinalLatent(packedLatent);
 
@@ -528,6 +571,25 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
         Tensor unpacked = UnpackLatent(packedLatent, latentH, latentW, _config.InChannels, _config.PatchSize);
         packedLatent.Dispose();
+
+        // Reclaim the denoise-loop activation pool BEFORE the decoder preload: the drain-free loop never
+        // frees mid-loop, and with the DiT left resident (KEEP_MODELS) those buffers are the difference
+        // between the 1024² decode's conv workspace fitting or OOMing on 24 GB cards. Safe here: UnpackLatent
+        // above already forced the final latent's D2H sync, and everything else that survives is host-side
+        // or pinned in the weight cache. trimPool so the free-VRAM gate below measures real availability.
+        Backend.FreeActivations(trimPool: true);
+
+        // Decode VRAM gate: the full-res 3D-causal decode holds every intermediate feature map until the
+        // final FreeActivations (~4 KB/pixel live at peak, plus the banded-im2col Conv2D workspace). When
+        // the resident DiT leaves less than that, evict it — the next generation's re-upload is strictly
+        // cheaper than OOM-ing the decode (a 19 GB fp8 DiT + 1024² decode do NOT fit together on 24 GB).
+        // Cards with real headroom keep residency; non-CUDA backends have no streaming cache and skip this.
+        if (_ditResident && Backend.StreamingCache is not null)
+        {
+            long decodeReserveBytes = (long)width * height * 5120L;
+            if (Backend.StreamingCache.QueryAvailableWeightCacheBytes(decodeReserveBytes) == 0)
+                EvictResidentTransformer($"VAE decode ({width}x{height} needs ~{decodeReserveBytes / (1024 * 1024)} MB free)");
+        }
 
         // The QwenImage VAE is the WAN-2.1-family 3D causal autoencoder (decoder.conv1/upsamples/…), NOT a
         // diffusers AutoencoderKL — it must decode through QwenImageVaeDecoder (same as AnimaPipeline). The
@@ -563,6 +625,33 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
+    /// <summary>Evicts the KEEP_MODELS-resident DiT so a VRAM-heavy phase (TE encode, reference/img2img VAE encode) has headroom; the denoise-loop PreloadWeights restores residency (PreloadWeights/FreeWeights symmetry). No-op when not resident.</summary>
+    private void EvictResidentTransformer(string reason)
+    {
+        if (!_ditResident) return;
+        Logs.Debug($"[QwenImage] evicting resident DiT for {reason}");
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
+        _ditResident = false;
+    }
+
+    /// <summary>Releases the cross-generation caches: the prompt-embedding tensors and the pinned edit-reference latent (device pin evicted before dispose — the weight cache is keyed on the tensor object).</summary>
+    protected override void DisposeCore()
+    {
+        if (_cachedPackedRef is not null)
+        {
+            Backend.FreeWeights(new[] { _cachedPackedRef });
+            _cachedPackedRef.Dispose();
+            _cachedPackedRef = null;
+        }
+        _cachedCond?.Dispose();
+        _cachedCond = null;
+        _cachedCondKey = null;
+        _cachedUncond?.Dispose();
+        _cachedUncond = null;
+        _cachedUncondKey = null;
+    }
+
     /// <summary>Builds the initial packed latent for Qwen-Image denoising. T2I: fresh Gaussian noise packed and scaled by the scheduler's initial sigma. Img2img: source encoded via the Qwen-Image 3D-causal VAE encoder (already per-channel normalized to the transformer's latent space), packed via <see cref="PackLatent"/>, and combined with fresh packed noise via flow-matching <c>AddNoise</c>: <c>noisy = (1-sigma) * source + sigma * noise</c>.
     /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the packed source latent is returned as the second tuple element for per-step blending. Caller disposes both. Source is null for txt2img and plain img2img.</para></summary>
     private (Tensor packedLatent, Tensor? packedSourceLatent) BuildInitialPackedLatent(
@@ -579,9 +668,13 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
         if (request is ImageToImageRequest img2img)
         {
+            // Stage the encoder weights for this one encode — an unstaged pass auto-promotes them into the
+            // resident weight cache on repeat gens and permanently shrinks the DiT budget.
+            Backend.PreloadWeights(_vaeEncoder!.EnumerateWeights());
             Stopwatch vaeEncSw = Stopwatch.StartNew();
-            Tensor sourceUnpacked = _vaeEncoder!.Encode(Backend, img2img.SourceImage);  // [1, 16, latentH, latentW]
+            Tensor sourceUnpacked = _vaeEncoder.Encode(Backend, img2img.SourceImage);  // [1, 16, latentH, latentW]
             vaeEncSw.Stop();
+            Backend.FreeWeights(_vaeEncoder.EnumerateWeights());
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
             Tensor sourcePacked = PackLatent(sourceUnpacked, latentH, latentW, _config.InChannels, _config.PatchSize);
