@@ -2,7 +2,7 @@
 
 > **Goal:** End-to-end inference for SOTA STT, TTS, and music-generation models in pure C#.
 > **Packages:** HartsyInference.Audio (STT + TTS), HartsyInference.Music (music generation)
-> **Research scope:** all 27 audio research docs landed 2026-05-17. See [RESEARCH_REQUIREMENTS.md](../Design/RESEARCH_REQUIREMENTS.md) "Audio" sections.
+> **Research scope:** all 27 audio research docs landed 2026-05-17. See [RESEARCH_REQUIREMENTS.md](../Design/archive/RESEARCH_REQUIREMENTS.md) "Audio" sections.
 
 ---
 

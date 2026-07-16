@@ -10,6 +10,26 @@ Every existing .NET AI inference solution is either a Python wrapper, C++ wrappe
 
 Pure C# with PTX can reach near-native CUDA performance; HartsyInference applies that approach across every modality and adds cross-vendor GPU via Vulkan. LLM text generation is now first-party (see [LLM_LANGUAGE_PACKAGE.md](LLM_LANGUAGE_PACKAGE.md)); the engine no longer depends on any external LLM runtime.
 
+## Goals & Non-Goals
+
+**Goals**
+
+1. **Pure managed .NET.** No Python, no native inference libraries, no external processes — GPU access is PTX/SPIR-V via P/Invoke only.
+2. **Broad, correct model coverage.** Match a Python/C++ reference within documented tolerances, verified against real weights (not just "finite floats") — tracked in [`../Checklists/PARITY_VERIFICATION.md`](../Checklists/PARITY_VERIFICATION.md).
+3. **The best pure-C# performance we can reach.** We are transparent that we are not yet as fast as the fastest native runners (see [the benchmarks](../../benchmarks/README.md)); closing that gap (flash-attention, CUDA graphs, F16 activation paths) is an ongoing, in-the-open effort.
+4. **First-class SwarmUI integration.** New model support is not "done" until it runs end-to-end through the SwarmUI extension.
+5. **Modular packaging.** Pull in only the modality and backend you need.
+6. **Zero-GC hot paths.** Unmanaged aligned tensor storage, memory-mapped weights, `Span<T>` throughout.
+
+**Non-goals**
+
+- **A first-party UI / web app.** SwarmUI is the front-end; we build the backend for it.
+- **An OpenAI-compatible REST server as a product.** Previously scoped (old "Phase 7") and **dropped**; `HartsyInference.Server` remains only as unsupported scaffolding.
+- **A dependency on dotLLM.** LLM text generation is native in `HartsyInference.LLM`; [`../Research/DOTLLM_ARCHITECTURE.md`](../Research/DOTLLM_ARCHITECTURE.md) is retained only as a historical study that informed the native design.
+- **Training / fine-tuning.** Inference engine only.
+
+**Audience:** SwarmUI users wanting a no-Python backend; .NET developers embedding inference without a Python sidecar; contributors porting new architectures (see [`BUILD_ORDER.md`](BUILD_ORDER.md) and the agent files under [`../Agents/`](../Agents/)).
+
 ## Design Pillars
 
 | Pillar | Description |
@@ -89,17 +109,30 @@ The primary way to run the engine is the [SwarmUI HartsyInference backend extens
 | 10-30s startup | Milliseconds |
 | No C# debuggability | Full C# debuggability |
 
+## Capabilities by Modality
+
+A capability-level view; for per-model **status** (verified end-to-end vs built-but-pending) see the
+modality status docs indexed in [`../Checklists/MODEL_STATUS.md`](../Checklists/MODEL_STATUS.md), with
+[`../Checklists/PARITY_VERIFICATION.md`](../Checklists/PARITY_VERIFICATION.md) the real-weight parity
+authority.
+
+- **Core engine** — three backends behind one `IBackend` (CUDA PTX+cuBLAS, Vulkan SPIR-V, CPU AVX2/512/NEON); eager execution; direct `.safetensors`/`.gguf`/`.pt`/`.ckpt` loading incl. sharded + diffusers layouts with architecture auto-detection; GGUF + block-scaled (MXFP4/8, NVFP4) quantization with fused dequant/GEMV; HuggingFace auto-download; LoRA.
+- **LLM text generation (`HartsyInference.LLM`)** — native config-driven decoder transformer (Qwen2/Qwen3, Llama-3.x, Mistral, …) + GGUF; device-resident KV cache, sampler chain, chat templates; also powers diffusion/audio text encoders; fused Q4_K/Q6_K/Q8_0 decode + quantized `lm_head` + split-K flash-decode.
+- **Image (`HartsyInference.Diffusion`)** — UNet (SD1.5, SDXL+Refiner, inpaint) and DiT/MMDiT/NextDiT (Flux.1/.2, Chroma/Radiance, SD3, Qwen-Image, HunyuanImage, HiDream, AuraFlow, Lumina 2, ERNIE-Image, Kandinsky 5, OmniGen 2, Ideogram 4, …); t2i/i2i/inpaint + tiled VAE; text encoders CLIP/T5/UMT5/Pile-T5/Gemma-2/Qwen2.5-VL/Qwen3; full sampler set; prompt weighting/BREAK/scheduling/regional/textual-inversion/clip-skip; ControlNet + IP-Adapter loaders.
+- **Audio (`HartsyInference.Audio`)** — STT (Whisper tiny→large-v3, Moonshine); TTS (Kokoro, StyleTTS2, Bark, Spark-TTS, CosyVoice, VibeVoice, Piper/VITS, MeloTTS, F5-TTS cloning, …); music (ACE-Step, MusicGen, YuE); codecs (Vocos, EnCodec, DAC, SNAC, Mimi, WavTokenizer, BiCodec, XCodec, Oobleck); pure-C# DSP (STFT/mel/FFT, HiFi-GAN vocoders, streaming); G2P via `HartsyInference.Phonemizer` (pure-C# espeak-ng port).
+- **Vision (`HartsyInference.Vision`)** — embeddings (CLIP ViT-L/H/bigG, SigLIP/2, DINOv2/3); detection (YOLO8/11); segmentation (SAM/2/2.1, CLIPSeg); RetinaFace; PNG codec helpers.
+- **Video (`HartsyInference.Video`)** — t2v/i2v (LTX-Video, Wan 2.x T2V+I2V, Lance, Kandinsky 5 Video); shared CausalConv3d + Wan-family VAE with streaming + N-axis RoPE; ffmpeg muxing via SwarmUI.
+- **3D (`HartsyInference.ThreeD`)** — image/text→mesh (TripoSR, Hunyuan3D-2); marching cubes + glTF/OBJ/PLY export.
+- **Interactive / world (`HartsyInference.Interactive`)** — real-time action-conditioned generation (Hunyuan-GameCraft, Matrix-Game 2.0/3.0, Oasis); `IInteractiveSession` with background compute, action/camera/FOV memory.
+
 ## Design Documents Index
 
 | Document | Description |
 |---|---|
-| [Vision & Goals](VISION_AND_GOALS.md) | Why the engine exists and what it is for |
-| [Features](FEATURES.md) | Capability summary |
 | [Build Order](BUILD_ORDER.md) | Phase dependencies and sequencing |
 | [File Structure](FILE_STRUCTURE.md) | Project layout |
 | [NuGet Package Design](NUGET_PACKAGE_DESIGN.md) | Package breakdown, dependency graph |
 | [Implementation Details](IMPLEMENTATION_DETAILS.md) | Per-component technical approach |
 | [LLM Language Package](LLM_LANGUAGE_PACKAGE.md) | Native LLM text generation design |
 | [Validation Strategy](VALIDATION_STRATEGY.md) | References and validation methods |
-| [Research Requirements](RESEARCH_REQUIREMENTS.md) | Research docs needed before implementation |
-| [Model Support Roadmap](MODEL_SUPPORT_ROADMAP.md) | Phase 1-3 model support plan |
+| [Model Support Roadmap](MODEL_SUPPORT_ROADMAP.md) | Model support plan |

@@ -738,7 +738,7 @@ Ideogram 4 is trained on **structured JSON captions**, and the community pain po
 
 ## 7. Review & Merge
 
-- [x] Code review prep — session changelog at [`docs/SESSION_CHANGELOG_2026-05-06.md`](../SESSION_CHANGELOG_2026-05-06.md) summarizes Phase 4 closeout work (22 new files, 8 modified, 38 tests added, all green).
+- [x] Code review prep — Phase 4 closeout work (22 new files, 8 modified, 38 tests added, all green) was summarized in a session changelog (since removed).
 - [x] Benchmark procedure — documented at [`docs/Research/BENCHMARKING.md`](../Research/BENCHMARKING.md). Reference matrix for SDXL F16 / Flux Dev FP8 / Flux Schnell FP8 / SD3.5 Medium / Z-Image Turbo. Actual it/s collection requires a paired HartsyInference + ComfyUI run on the same hardware.
 - [ ] Performance optimization — ongoing in [`docs/Research/CUDA_PERFORMANCE.md`](../Research/CUDA_PERFORMANCE.md). Native FP8 GEMM is wired (Ada+); next force-multiplier is kernel fusion (GroupNorm+SiLU, Conv2D+bias+activation).
 - [ ] Merge to main branch — user action.

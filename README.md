@@ -710,9 +710,7 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
 | Document | Description |
 |---|---|
 | [Performance Guide](docs/PERFORMANCE.md) | The default performance profile, native library requirements, benchmark methodology |
-| [Core Design](docs/Design/CORE_DESIGN.md) | Architecture overview, design pillars, key decisions |
-| [Vision & Goals](docs/Design/VISION_AND_GOALS.md) | Why this project exists, the SwarmUI angle |
-| [Features](docs/Design/FEATURES.md) | Complete feature list across all modalities |
+| [Core Design](docs/Design/CORE_DESIGN.md) | Architecture, design pillars, key decisions, goals/non-goals, per-modality capabilities |
 | [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md) | Full model support plan |
 | [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) | Package breakdown, dependencies, install examples |
 | [File Structure](docs/Design/FILE_STRUCTURE.md) | Full project layout |
