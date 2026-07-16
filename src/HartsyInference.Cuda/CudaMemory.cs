@@ -236,6 +236,12 @@ public static class CudaMemory
                         CaptureFreeBytes += (long)sz;
                         CaptureFreeCount++;
                     }
+                    else
+                    {
+                        // A free node for memory the graph does NOT own replays on EVERY launch — the
+                        // buffer's real owner is left pointing at freed, reusable memory. Surface it.
+                        Logs.Warning($"[Cuda] step-graph capture recorded a FREE of external device ptr 0x{dptr:X} — the captured graph will re-free it on every replay.");
+                    }
                 }
             }
             CudaDriverApi.cuMemFreeAsync(dptr, stream).ThrowOnError();

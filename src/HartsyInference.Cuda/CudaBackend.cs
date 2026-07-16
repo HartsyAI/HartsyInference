@@ -586,16 +586,20 @@ public sealed class CudaBackend : IBackend
                 // GemmEx is inefficient at M=1; the fused GEMV reads each weight row once with an F32 accumulate
                 // (activation stays F32 — at least as accurate as the cuBLAS BF16 cast). On by default; set
                 // HARTSY_BF16_GEMV=0 to fall back to cuBLAS.
-                if (EnableBf16Gemv && _kernels!.HasFloatGemv && weight.DType == DType.BF16)
+                if (EnableBf16Gemv && _kernels!.HasFloatGemv && (weight.DType == DType.BF16 || weight.DType == DType.F16))
                 {
-                    _kernels!.LaunchMulMatVecBf16F32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
-                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
-                    cachedOutput = true;
-                    return;
-                }
-                if (EnableBf16Gemv && _kernels!.HasFloatGemv && weight.DType == DType.F16)
-                {
-                    _kernels!.LaunchMulMatVecF16F32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
+                    // The fused GEMV kernels take an F32 bias pointer. Checkpoints that keep their small
+                    // linears in 16-bit float ship the bias in the SAME dtype (Krea2 fp8_scaled: BF16
+                    // time-embed MLP + modulation projections) — passing it raw reinterprets two 16-bit
+                    // halves as one float and the timestep conditioning explodes → black frames. Transient
+                    // F32 cast; F32 biases (the common LLM case) pass straight through.
+                    ulong gemvBias = bias is null
+                        ? 0
+                        : CastIfNeeded(pBias, bias.DType, DType.F32, (int)bias.ElementCount, out pBiasCast);
+                    if (weight.DType == DType.BF16)
+                        _kernels!.LaunchMulMatVecBf16F32(pOutput, pInput, pWeight, gemvBias, N, K, M, _stream.Handle);
+                    else
+                        _kernels!.LaunchMulMatVecF16F32(pOutput, pInput, pWeight, gemvBias, N, K, M, _stream.Handle);
                     GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                     cachedOutput = true;
                     return;
@@ -1803,6 +1807,7 @@ public sealed class CudaBackend : IBackend
         {
             _stepGraph?.AbortCapture();
             _stepGraphCapturing = false;
+            CudaMemory.TrackCaptureWindow = false;
         }
         bool hadCapturedGraph = _stepGraph?.IsReady == true;
         _stepGraph?.Reset();
