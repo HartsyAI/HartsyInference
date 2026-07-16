@@ -67,5 +67,33 @@ test (corr ~1.0) before it counts as done. Validate on CUDA (GPU-only cache/resh
 - [x] Architecture mapped from the reference — full bit-exact spec in [`docs/Research/TRELLIS_ARCHITECTURE.md`](../Research/TRELLIS_ARCHITECTURE.md) (norm eps, adaLN chunk order, qk-rmsnorm √64, sampler 25/cfg5/interval[0.5,1]/rescale3, all weight keys, sparse conv rulebook + Morton/Hilbert serialization algorithms).
 - [~] Phase A — `TrellisConfig` (exact image-large dims) landed + compiles. TODO: DINOv2-reg conditioner (x_prenorm tap + reg preset), pipeline skeleton.
 - [x] **Phase B DONE — stage-1 dense, validated end-to-end vs the REAL TRELLIS.** `Conv3d` (IBackend + CUDA `conv3d_f32`, bit-exact) + `PixelShuffle3d` + `ChannelLayerNorm3d` (IBackend host defaults) → `SparseStructureDecoder`; `SparseStructureFlow` (24-block `SsFlowBlock`: modulated self-attn + cross-attn + tanh-GELU MLP, per-head QK-RMSNorm ×√64) → `TrellisSparseStructureSampler` (25-step FlowEuler interval-CFG). Parity (`TrellisStage1ParityTests`, real ckpt + real-model torch dumps): **SS decoder corr 1.0**, **SS flow velocity corr 0.99999866**, **full pipeline (noise→sampler→decoder→occupancy) corr 0.99964, 99.96 % voxel agreement** (active 2942 vs 2990 — borderline voxels at occ≈0 flip under F32 drift, the true-math gate). GOTCHA fixed: `Transpose2D(out,in,d1,d2)` takes SIZES not dim-indices (bisection: tok corr −0.005 → fixed with `(InCh,Tokens)` → corr 1.0). Reference loads the real dense models via sys.modules stubs (bypass rembg `__init__`) + `ATTN_BACKEND=sdpa` (no flash_attn).
-- [ ] Phase C — sparse infra (SparseTensor + submanifold conv rulebook + full/windowed/serialized attention + Morton/Hilbert). Spec ready in the arch doc; needs a Python `spconv`/`vox2seq` dump for parity.
-- [ ] Phase D–F — per above.
+- [x] **Phase C DONE + stage-2 SLAT flow parity-verified vs the REAL `SLatFlowModel`** (corr **0.99999984**). Built
+  `SparseTensor`, `SparseOps` (submanifold conv = scatter→`Conv3d`→gather; avg-pool downsample; gather upsample),
+  `SlatResBlock3d`, and `SlatFlowModel` (sparse U-Net: input_layer → io ResBlocks w/ 1 downsample → APE(coords) → 24
+  transformer blocks reusing `SsFlowBlock` (B=1 full attn = dense SDPA) → io ResBlocks w/ upsample+skip-concat →
+  out_layer). GOLD REFERENCE: ran the real `SLatFlowModel` without spconv/flash_attn by monkeypatching `SparseConv3d`
+  → the proven dense-equivalent + a fake `spconv.SparseConvTensor` (permissive `__getattr__`) + a dense
+  `sparse_scaled_dot_product_attention` (`/tmp/trellis_ref/dump_slat_flow.py`). **BUG the gold reference caught that
+  first-principles missed:** TRELLIS `SparseDownsample` = `scatter_reduce(reduce='mean')` with default
+  `include_self=True` → divides by **count+1** (the zero self is in the mean), not count. My numpy standalone had the
+  same mistake so it passed — only the real model exposed it (bisected: il/b0 corr 1.0 → b1 0.98 → downsample 0.987 →
+  fixed). Tests `TrellisStage2ParityTests` + `TrellisSparseOpsParityTests`.
+- [~] ~~Phase C keystone~~ superseded — original keystone note: `SparseTensor` (feats[N,C]+coords[N,4]+resolution), `SparseOps.SubmanifoldConv3d` (**= scatter→`Conv3d`→gather; provably equals real spconv since inactive neighbours are 0 — no spconv install needed**; `TrellisSparseOpsParityTests` corr **1.0** vs first-principles numpy), `SparseOps.Downsample` (avg-pool, bit-exact) + `Upsample` (gather via cached idx). **Key finding: the SLAT flow needs NO rulebook and NO Morton/Hilbert** — its attention is `full` (= dense SDPA over all N voxels at B=1, reuse `SsFlowBlock`) and its only coord-change is avg-pool downsample (strided conv is not used). TODO: full/cross sparse attention wrapper (B=1 dense), `AbsolutePositionEmbedder` on coords, `ModulatedSparseTransformerCrossBlock` (reuse SsFlowBlock math), assemble `SLatFlowModel` (U-Net: input_layer→io ResBlocks w/ downsample→APE→24 transformer blocks→out ResBlocks w/ upsample+skips→out_layer) + slat denormalize. Validate against real block/APE (importable, attention-only) + assembled velocity. NOTE: full real `SLatFlowModel` can't run here (needs spconv), so gate per-op + per-block, then assemble.
+- [~] **Phase E — GS decoder NETWORK done + parity-verified (corr 0.99999973 vs the real `SLatGaussianDecoder`).**
+  `SlatGaussianDecoder` (`GsBlock`): plain sparse transformer (DiT-B 768, 12 blocks, swin window-8, no modulation/
+  cross-attn/qk-norm) → layer_norm → out_layer → 448 params/voxel (32 gaussians × 14). **Windowed (swin) attention =
+  a single masked dense SDPA** over all voxels with a block-diagonal mask (attend within the same 8³ window; shift
+  alternates 0/4 → two precomputed masks) — no sort/gather/serialization needed for B=1. Gold ref: monkeypatch the
+  real `sparse_windowed_scaled_dot_product_self_attention` → torch partition (`calc_window_partition`) + per-window
+  SDPA (`/tmp/trellis_ref/dump_gs_dec.py`). Test `TrellisGsDecoderParityTests`. **TODO for first e2e:** `to_representation`
+  (build `Gaussian` from the 448 params — xyz offset + hammersley perturbation, softplus scaling, sigmoid opacity,
+  normalized rotation → `GaussianSplatCloud` → PLY) + Phase A DINOv2-reg conditioner (real image cond). Then mesh/rf decoders.
+- [x] **FIRST IMAGE→3D E2E GENERATION (2026-07-15).** `TrellisGaussianRepresentation.Build` (to_representation:
+  voxel-centre + tanh(offset + hammersley perturbation)·½·voxel_size/res, softplus scaling+bias, logit opacity,
+  y-up→z-up transform [x,−z,y] + quaternion rotate 90°X) → `GaussianSplatCloud` → `PlyWriter.SaveSplats`.
+  `TrellisSlatSampler` (FlowEuler over the SparseTensor) + `TrellisGenerationTests` wire the whole path (SS flow →
+  SS decoder → active voxels → SLAT flow → denorm(mean/std) → GS decoder → splat). **Dragon: 13115 voxels → 419680
+  gaussians → valid 27 MB 3DGS `.ply`** (xyz∈[−0.5,0.5], no NaN, sane opacity/scale). Cond fed pre-computed
+  (`/tmp/trellis_ref/dump_cond.py` runs the real `dinov2_vitl14_reg`).
+- [ ] Remaining: C# DINOv2-`vitl14_reg` conditioner (self-contained e2e) + Phase F perf (stage-2 ~290 s, host-heavy
+  submanifold conv/attn — GPU the scatter/gather + batch windowed SDPA) + mesh (flexicubes) & RF decoders + a real render check.

@@ -26,20 +26,19 @@ public sealed class StyleTts2CloneEndToEndTests
     public async Task Clone_Synthesizes_Intelligible_Speech()
     {
         string? ckpt = Environment.GetEnvironmentVariable("STYLE_CKPT");
-        string? tokCfg = Environment.GetEnvironmentVariable("STYLE_TOKENIZER");
-        string? refDir = Environment.GetEnvironmentVariable("STYLE_REF_DIR");
+        string? refWav = Environment.GetEnvironmentVariable("STYLE_REF_WAV");
         string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base");
-        if (ckpt is null || !File.Exists(ckpt) || tokCfg is null || !File.Exists(tokCfg)
-            || refDir is null || !File.Exists(Path.Combine(refDir, "mel.txt"))
+        if (ckpt is null || !File.Exists(ckpt) || refWav is null || !File.Exists(refWav)
             || !File.Exists(Path.Combine(whisperDir, "model.safetensors")))
         {
-            _out.WriteLine("STYLE_CKPT / STYLE_TOKENIZER / STYLE_REF_DIR / whisper not all present — skipping.");
+            _out.WriteLine("STYLE_CKPT / STYLE_REF_WAV / whisper not all present — skipping.");
             return;
         }
 
         string text = Environment.GetEnvironmentVariable("STYLE_TEXT")
             ?? "Hello there. This is a test of the style text to speech model.";
-        using StyleTts2Pipeline pipe = StyleTts2Pipeline.LoadFromCheckpoint(ckpt, tokCfg);
+        // Fully self-contained: in-engine 178-symbol tokenizer + reference-WAV mel front-end (no dumped files).
+        using StyleTts2Pipeline pipe = StyleTts2Pipeline.LoadFromCheckpoint(ckpt);
         using CpuBackend backend = new();
 
         // Phonemize the text to IPA (StyleTTS2's 178-symbol vocab; the tokenizer drops out-of-vocab chars).
@@ -48,8 +47,8 @@ public sealed class StyleTts2CloneEndToEndTests
         _out.WriteLine($"text: \"{text}\"");
         _out.WriteLine($"ipa:  \"{ipa}\"");
 
-        using Tensor refMel = ReadMel(Path.Combine(refDir, "mel.txt"));
-        float[] pcm = pipe.SynthesizeClone(backend, ipa, refMel, speed: 1f);
+        WavFile.DecodedAudio refAudio = WavFile.Read(refWav);
+        float[] pcm = pipe.SynthesizeCloneFromAudio(backend, ipa, refAudio.Channels[0], refAudio.SampleRate, speed: 1f);
 
         Assert.NotEmpty(pcm);
         double sumSq = 0; float peak = 0;

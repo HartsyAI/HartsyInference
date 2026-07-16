@@ -39,7 +39,11 @@ public sealed class MelSpectrogramExtractor
         bool PowerSpectrum,
         MelScale Scale = MelScale.Slaney,
         bool SlaneyNorm = true,
-        bool Center = false);
+        bool Center = false,
+        // When WinLength &lt; NFft, torch.stft/torchaudio pad the analysis window to NFft *centered*
+        // ((NFft-WinLength)/2 zeros each side) rather than left-aligning it. Most presets here have
+        // WinLength == NFft so it is moot; StyleTTS2's reference mel (win 1200 &lt; n_fft 2048) needs it.
+        bool CenterWindowInFft = false);
 
     /// <summary>Whisper preset: 16kHz, n_fft=400, hop=160, 80 mel bins, log10,
     /// power spectrum, drop-last-frame, +4/4 normalization. Used by all Whisper
@@ -213,13 +217,15 @@ public sealed class MelSpectrogramExtractor
         for (int t = 0; t < frames; t++)
         {
             int start = t * _cfg.HopLength;
-            // Windowed frame, zero-padded to FFT size.
+            // Windowed frame, zero-padded to FFT size. torch.stft centers a shorter window in the FFT frame;
+            // the default left-aligns it (moot when WinLength == NFft).
+            int woff = _cfg.CenterWindowInFft ? (_fftSize - _cfg.WinLength) / 2 : 0;
+            for (int i = 0; i < _fftSize; i++) _frame[i] = 0f;
             for (int i = 0; i < _cfg.WinLength; i++)
             {
-                float sample = (start + i) < src.Length ? src[start + i] : 0f;
-                _frame[i] = sample * _window[i];
+                float sample = (start + woff + i) < src.Length ? src[start + woff + i] : 0f;
+                _frame[woff + i] = sample * _window[i];
             }
-            for (int i = _cfg.WinLength; i < _fftSize; i++) _frame[i] = 0f;
 
             // Real FFT.
             Fft.RealTransform(_frame, _stftRe, _stftIm, _fftSize);

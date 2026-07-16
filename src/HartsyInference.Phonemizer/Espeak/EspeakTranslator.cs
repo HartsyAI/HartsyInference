@@ -397,8 +397,25 @@ internal sealed class EspeakTranslator
                     if (distanceLeft > 18) distanceLeft = 19;
                     EspeakUtf8.Read(buf, prePtr, out int lastLetterW);
                     prePtr--;
-                    int letterXbytes = EspeakUtf8.Read2(buf, prePtr, true, out int letterW) - 1;
-                    byte letter = buf[prePtr];
+                    int letterXbytes;
+                    int letterW;
+                    byte letter;
+                    if (prePtr < 0)
+                    {
+                        // Before the word's leading boundary. espeak translates within a clause buffer that is
+                        // space-padded on both sides, so a pre-context that scans past the word start reads a
+                        // space (RULE_SPACE) and letter-requiring rules fail there. Our per-word buffer only has
+                        // WordStart leading spaces, so mirror the space padding explicitly instead of indexing
+                        // out of bounds (words like "Americans" scan a letter-group further left than the pad).
+                        letterW = EspeakRuleCodes.RuleSpace;
+                        letterXbytes = 0;
+                        letter = (byte)' ';
+                    }
+                    else
+                    {
+                        letterXbytes = EspeakUtf8.Read2(buf, prePtr, true, out letterW) - 1;
+                        letter = buf[prePtr];
+                    }
                     failed = MatchBefore(buf, rb, ref rule, ref prePtr, ref distanceLeft, distanceRight, letterXbytes, letterW, lastLetterW, letter, wordFlags, ref addPoints);
                 }
 

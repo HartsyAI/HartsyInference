@@ -1841,6 +1841,49 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>Scatters active-voxel features onto a pre-zeroed dense grid <c>[1,C,R,R,R]</c> for submanifold conv:
+    /// <c>grid[c, x,y,z] = feats[v, c]</c>. <paramref name="feats"/> is <c>[N,C]</c>, <paramref name="coords"/> is
+    /// <c>[N,4]</c> int (b,x,y,z). Default host loop; CUDA overrides so the grid never round-trips the host.</summary>
+    unsafe void SparseScatterToGrid(Tensor grid, Tensor feats, Tensor coords, int channels, int resolution)
+    {
+        int n = (int)(feats.ElementCount / channels); long r3 = (long)resolution * resolution * resolution;
+        float* g = (float*)grid.DataPointer, f = (float*)feats.DataPointer; int* cp = (int*)coords.DataPointer;
+        for (int v = 0; v < n; v++)
+        {
+            long cell = (long)cp[v * 4 + 1] * resolution * resolution + (long)cp[v * 4 + 2] * resolution + cp[v * 4 + 3];
+            for (int c = 0; c < channels; c++) g[(long)c * r3 + cell] = f[(long)v * channels + c];
+        }
+    }
+
+    /// <summary>Gathers a dense grid <c>[1,C,R,R,R]</c> back to active-voxel features <c>[N,C]</c>: inverse of
+    /// <see cref="SparseScatterToGrid"/>.</summary>
+    unsafe void SparseGatherFromGrid(Tensor feats, Tensor grid, Tensor coords, int channels, int resolution)
+    {
+        int n = (int)(feats.ElementCount / channels); long r3 = (long)resolution * resolution * resolution;
+        float* g = (float*)grid.DataPointer, f = (float*)feats.DataPointer; int* cp = (int*)coords.DataPointer;
+        for (int v = 0; v < n; v++)
+        {
+            long cell = (long)cp[v * 4 + 1] * resolution * resolution + (long)cp[v * 4 + 2] * resolution + cp[v * 4 + 3];
+            for (int c = 0; c < channels; c++) f[(long)v * channels + c] = g[(long)c * r3 + cell];
+        }
+    }
+
+    /// <summary>Row gather: <c>output[j] = input[indices[j]]</c> (rows of length <paramref name="channels"/>).
+    /// <paramref name="indices"/> is <c>[m]</c> int. Used by the sparse-conv rulebook.</summary>
+    unsafe void RowGather(Tensor output, Tensor input, Tensor indices, int m, int channels)
+    {
+        float* o = (float*)output.DataPointer, i = (float*)input.DataPointer; int* idx = (int*)indices.DataPointer;
+        for (int j = 0; j < m; j++) for (int c = 0; c < channels; c++) o[(long)j * channels + c] = i[(long)idx[j] * channels + c];
+    }
+
+    /// <summary>Row scatter-add: <c>output[indices[j]] += input[j]</c> (indices unique per call). Accumulates onto an
+    /// existing <paramref name="output"/> <c>[N,channels]</c>.</summary>
+    unsafe void RowScatterAdd(Tensor output, Tensor input, Tensor indices, int m, int channels)
+    {
+        float* o = (float*)output.DataPointer, i = (float*)input.DataPointer; int* idx = (int*)indices.DataPointer;
+        for (int j = 0; j < m; j++) for (int c = 0; c < channels; c++) o[(long)idx[j] * channels + c] += i[(long)j * channels + c];
+    }
+
     /// <summary>Depthwise 2D convolution — each output channel sees exactly one input channel
     /// (groups = C). Used by YOLO11's class branch and the C2PSA positional encoding. Weight
     /// shape is <c>[C, 1, kH, kW]</c> and bias <c>[C]</c>. Default implementation is a CPU loop

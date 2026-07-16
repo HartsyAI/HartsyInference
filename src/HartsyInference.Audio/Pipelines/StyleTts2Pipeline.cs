@@ -1,5 +1,7 @@
 using HartsyInference.Audio.Models.Kokoro;
+using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.StyleTts2;
+using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelHandler.PyTorch;
@@ -52,7 +54,7 @@ public sealed unsafe class StyleTts2Pipeline : IDisposable
     /// reuse Kokoro's submodule loaders (LibriTTS dims are Kokoro-compatible); the two StarGAN-v2
     /// <see cref="StyleEncoder"/>s and the diffusion <see cref="StyleDenoiser"/> load their StyleTTS2-specific
     /// keys via <see cref="StyleTts2Weights.Adapt"/>.</summary>
-    public static StyleTts2Pipeline LoadFromCheckpoint(string pthPath, string tokenizerConfigPath)
+    public static StyleTts2Pipeline LoadFromCheckpoint(string pthPath, string? tokenizerConfigPath = null)
     {
         StyleTts2Config cfg = new();
         KokoroConfig bb = cfg.Backbone;
@@ -61,7 +63,10 @@ public sealed unsafe class StyleTts2Pipeline : IDisposable
         loader.Load(pthPath, recursiveFlatten: true);
         Dictionary<string, Tensor> w = StyleTts2Weights.Adapt(loader.GetAllTensors());
 
-        KokoroPhonemeTokenizer tok = KokoroPhonemeTokenizer.LoadFromConfig(tokenizerConfigPath);
+        // Tokenizer: the embedded 178-symbol StyleTTS2 set (self-contained) unless a config path is supplied.
+        KokoroPhonemeTokenizer tok = tokenizerConfigPath is null
+            ? KokoroPhonemeTokenizer.FromVocab(StyleTts2Symbols.BuildVocab())
+            : KokoroPhonemeTokenizer.LoadFromConfig(tokenizerConfigPath);
 
         KokoroPlBert plBert = new(bb); plBert.LoadWeights(w);
         KokoroTextEncoder textEnc = new(bb); textEnc.LoadWeights(w);
@@ -77,6 +82,45 @@ public sealed unsafe class StyleTts2Pipeline : IDisposable
             _retain = [loader]
         };
         return p;
+    }
+
+    /// <summary>StyleTTS2 reference-mel front-end, matching <c>meldataset.preprocess</c> /
+    /// <c>compute_style</c>: reference audio resampled to 24 kHz, then
+    /// <c>torchaudio.transforms.MelSpectrogram(n_mels=80, n_fft=2048, win_length=1200, hop_length=300)</c> →
+    /// <c>log(mel + 1e-5)</c> → <c>(·+4)/4</c>. <b>Critical quirk:</b> that <c>to_mel</c> passes NO
+    /// <c>sample_rate</c>/<c>f_max</c>, so torchaudio builds the mel filterbank with its DEFAULTS
+    /// (<c>sample_rate=16000</c>, <c>f_max=8000</c>) even though the audio is 24 kHz — the StyleEncoder was
+    /// trained on exactly that filterbank. So the STFT runs on 24 kHz samples (n_fft/win/hop are in samples,
+    /// rate-independent) but the filterbank is built for 16 kHz / 8 kHz. Using a 24 kHz / 12 kHz filterbank
+    /// instead yields only corr ≈ 0.93 vs the real mel — enough to stay intelligible but it warps the timbre
+    /// (wrong voice identity, "tinny" quality), so match the 16 kHz default here.</summary>
+    public static Tensor ComputeReferenceMel(ReadOnlySpan<float> pcm, int sampleRate)
+    {
+        float[] mono24 = sampleRate == 24_000 ? pcm.ToArray() : Resampler.Create(sampleRate, 24_000).Resample(pcm.ToArray());
+        // Natural-log power mel with a 1e-5 floor (≡ StyleTTS2's log(mel+1e-5) to <1 ULP for any real mel), then
+        // apply the (·+4)/4 shift. SampleRate/Fmax below drive ONLY the mel filterbank (see MelFilterbank.Get);
+        // 16000/8000 replicates torchaudio's default filterbank that meldataset.to_mel relies on.
+        MelSpectrogramExtractor.Config cfg = new(
+            SampleRate: 16_000, NFft: 2048, WinLength: 1200, HopLength: 300, NMels: 80,
+            Fmin: 0.0, Fmax: 8_000.0, Norm: MelSpectrogramExtractor.Normalization.None, DropLastStftFrame: false,
+            LogBase: MelSpectrogramExtractor.LogBase.Natural, LogFloor: 1e-5f, DynamicRangeDb: 0f,
+            NormOffset: 0f, NormScale: 1f, PowerSpectrum: true,
+            Scale: MelScale.Htk, SlaneyNorm: false, Center: true, CenterWindowInFft: true);
+        MelSpectrogramExtractor ext = new(cfg);
+        float[,] logMel = ext.Compute(mono24);                    // [80, frames] = log(max(mel, 1e-5))
+        int frames = logMel.GetLength(1);
+        Tensor mel = new(new TensorShape(1, 80, frames), DType.F32);
+        float* mp = (float*)mel.DataPointer;
+        for (int m = 0; m < 80; m++)
+            for (int t = 0; t < frames; t++) mp[m * frames + t] = (logMel[m, t] + 4f) / 4f;
+        return mel;
+    }
+
+    /// <summary>Clone from a raw reference waveform (computes the StyleTTS2 mel, then <see cref="SynthesizeClone"/>).</summary>
+    public float[] SynthesizeCloneFromAudio(IBackend backend, string phonemes, ReadOnlySpan<float> referencePcm, int sampleRate, float speed = 1f)
+    {
+        using Tensor mel = ComputeReferenceMel(referencePcm, sampleRate);
+        return SynthesizeClone(backend, phonemes, mel, speed);
     }
 
     /// <summary>Zero-shot voice cloning: extract the 256-d style directly from a reference mel

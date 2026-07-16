@@ -53,6 +53,7 @@ TTS via the canonical `GenerateText2Image` path; STT via `ProcessSTT`.
 | **Whisper** (base) | STT | 5.1× | 5.4× | 4.33 s | **word-perfect** on real speech (JFK); en-US default bug fixed (07-13) |
 | **MeloTTS** (en-v3) | TTS | 1.4× | 1.4× | 4.45 s | **now correct** (stride + number-norm fixes); BERT+VITS, host/GPU-flat |
 | **F5-TTS** (v1 base) | TTS clone | ~0.4× | — | 2.7 s | zero-shot voice clone; **174.6 s → 6.4 s (34×)** host-conv→GPU; RTF<1 (32 flow forwards), parity 1.0 |
+| **StyleTTS2** (LibriTTS) | TTS clone | — | ~1.3× | 6.4 s | **new 2026-07-15**, zero-shot clone; StyleEncoder corr 1.0 + HiFiGAN corr 0.999999; Swarm e2e Whisper 12/13; ~5 s warm wall (host/launch-bound like the other small TTS) |
 
 F5 RTF is <1 (below real-time) by design — flow-matching runs NFE×2 DiT forwards (32 at nfe=16); the **34× win**
 was removing the host grouped-conv, not the DiT math (which was always GPU-resident, 87 ms/forward). Measured on

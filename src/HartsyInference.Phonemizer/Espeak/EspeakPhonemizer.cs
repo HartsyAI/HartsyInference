@@ -114,6 +114,49 @@ public sealed class EspeakPhonemizer : IPhonemizer
         return string.Join(" ", words.Select(c => _ipa.ToIpa((List<byte>)c, _phon)));
     }
 
+    /// <summary>Sentence/clause punctuation that carries prosody (pauses, phrasing). Preserved verbatim in the
+    /// phoneme stream when <c>preservePunctuation</c> is set — TTS front-ends like StyleTTS2 encode these as their
+    /// own tokens and rely on them for phrasing. Mirrors espeak-ng's <c>preserve_punctuation</c> behaviour.</summary>
+    private const string ProsodyPunctuation = ".,!?;:…";
+
+    /// <summary>As <see cref="PhonemizeToIpa(string,string)"/>, but when <paramref name="preservePunctuation"/> is
+    /// set, sentence/clause punctuation (<see cref="ProsodyPunctuation"/>) is kept as standalone, space-delimited
+    /// tokens between clauses. Each maximal run of words up to a punctuation mark is phonemized as one clause (so
+    /// intra-clause stress/reduction is unchanged), then the punctuation is emitted verbatim. This matches the
+    /// reference <c>espeak(preserve_punctuation=True)</c> → word-tokenize pipeline that speech models were trained
+    /// on; without it the duration/prosody predictor sees a run-on utterance and slurs across phrase boundaries.</summary>
+    public string PhonemizeToIpa(string text, string language, bool preservePunctuation)
+    {
+        if (!preservePunctuation)
+            return PhonemizeToIpa(text, language);
+
+        System.Text.StringBuilder sb = new();
+        int clauseStart = 0;
+        void FlushClause(int end)
+        {
+            if (end <= clauseStart)
+                return;
+            string ipa = PhonemizeToIpa(text[clauseStart..end], language);
+            if (ipa.Length == 0)
+                return;
+            if (sb.Length > 0)
+                sb.Append(' ');
+            sb.Append(ipa);
+        }
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (ProsodyPunctuation.IndexOf(text[i]) < 0)
+                continue;
+            FlushClause(i);
+            if (sb.Length > 0)
+                sb.Append(' ');
+            sb.Append(text[i]);
+            clauseStart = i + 1;
+        }
+        FlushClause(text.Length);
+        return sb.ToString();
+    }
+
     /// <inheritdoc/>
     public int[] PhonemizeToIds(string text, string language, PhonemeIdMap idMap)
         => idMap.Encode(PhonemizeToIpa(text, language));

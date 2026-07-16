@@ -142,8 +142,24 @@ harder clone work.
     iSTFT), so `KokoroIStftNetDecoder` can't drive it. **Next: implement a StyleTTS2 HiFiGAN generator** (reuse
     `SnakeResBlock` + `NsfVocoderDsp.GenerateHarmonicSource` + `ConvTranspose1d`, AdaIN-conditioned on style; 4 upsample
     stages + per-stage noise-conv injection), verify vs the Python ref, then clone→whisper. Diffusion (Random mode)
-    still a scaffold. **Regression: all changes StyleTTS2-only** (`StyleEncoder.cs`/`StyleTts2Weights.cs`/
-    `StyleTts2Pipeline.cs`) — no shared or other-model code touched.
+    still a scaffold.
+  - **HiFiGAN generator DONE + VERIFIED 2026-07-15 → clone e2e word-intelligible.** `StyleHifiGanGenerator`
+    (corr **0.999999** vs the Python ref) + `StyleSineGen` (source corr **1.0**, StyleTTS2's frame-rate-cumsum +
+    phase×upscale linear-interp) + wired via a gated `KokoroIStftNetDecoder(useHifiGan)` (Kokoro path unchanged).
+    Clone e2e (`StyleTts2CloneEndToEndTests`) → Whisper 5/7. **Shared bug fixed:** `NormKernels.AdaInstanceNorm1d`
+    single-pass `E[x²]−E[x]²` variance NaN'd via catastrophic cancellation on the ~30 k-sample HiFiGAN stages →
+    stable two-pass double variance (Kokoro regression clean — the tests pass and the two formulas agree at
+    Kokoro's short lengths). ✅ **Swarm extension wired 2026-07-15:** `StyleTts2Model.Descriptor` (provider
+    `styletts2_tts`, registered in `AudioEngine`) → `LoadFromCheckpoint` (in-engine 178-symbol tokenizer +
+    reference-mel front-end) + `SynthesizeCloneFromAudio(req.ReferenceMono24k)` + espeak `en` IPA. ✅ **Swarm e2e
+    clone-VERIFIED 2026-07-15:** deployed via local-engine pack `alpha.48.2-local` (both extension pins →
+    `~/.local/share/hartsy-local-nuget`), installed via `AudioLabInstallEngine`, generated through
+    `/API/GenerateText2Image` with jfk.wav reference → Whisper medium.en 12/13 words, metadata sidecar present;
+    Kokoro regression word-perfect on the same live engine. ✅ **Shared espeak bug fixed:** `EspeakTranslator.MatchRule`
+    RULE_PRE branch indexed `buf[prePtr]` out of bounds when a pre-context scanned past the per-word buffer start
+    (words like "Americans") → guard the OOB read as a space boundary (espeak's clause buffer is space-padded);
+    purely additive (that branch previously always threw), fixes ALL espeak TTS. **Remaining:** Random-mode
+    diffusion (no-reference synthesis) still a scaffold.
 - **Spark-TTS** — reconcile `SparkTtsConfig` token offsets + BiCodec decoder keys to the real checkpoint (parity
   harness already ✅; runtime weight-valid load is the gap).
 - **Zonos** — build the conditioning-prefix `[1,P,hidden]` (espeak phonemes + speaker emb + emotion/pitch/rate/lang).

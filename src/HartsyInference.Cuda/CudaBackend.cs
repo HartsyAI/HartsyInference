@@ -2845,6 +2845,78 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Scatters active-voxel feats onto a pre-zeroed device grid (in-place) — see IBackend.SparseScatterToGrid.</summary>
+    public unsafe void SparseScatterToGrid(Tensor grid, Tensor feats, Tensor coords, int channels, int resolution)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("SparseScatterToGrid");
+        if (coords.DType != DType.I32) throw new NotSupportedException("SparseScatterToGrid requires I32 coords.");
+        _context.EnsureCurrent(); EnsureKernels();
+        int n = (int)(feats.ElementCount / channels);
+        ulong pGrid = 0, pFeats = 0, pCoords = 0;
+        try
+        {
+            pGrid = GpuTransferHelper.CopyToDevice(grid);
+            pFeats = GpuTransferHelper.CopyToDevice(feats);
+            pCoords = GpuTransferHelper.CopyToDevice(coords);
+            _kernels!.LaunchSparseGridScatterGather(true, pGrid, pFeats, pCoords, n, channels, resolution, _stream.Handle);
+            grid._gpuSyncCallback = null; grid._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(grid, pGrid, GpuTransferHelper.ByteSize(grid));
+        }
+        finally { GpuTransferHelper.FreeDevice(pFeats); GpuTransferHelper.FreeDevice(pCoords); }
+    }
+
+    /// <summary>Gathers a device grid back to active-voxel feats — see IBackend.SparseGatherFromGrid.</summary>
+    public unsafe void SparseGatherFromGrid(Tensor feats, Tensor grid, Tensor coords, int channels, int resolution)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("SparseGatherFromGrid");
+        if (coords.DType != DType.I32) throw new NotSupportedException("SparseGatherFromGrid requires I32 coords.");
+        _context.EnsureCurrent(); EnsureKernels();
+        int n = (int)(feats.ElementCount / channels);
+        ulong pGrid = 0, pCoords = 0, pFeats = 0; bool cached = false;
+        try
+        {
+            pGrid = GpuTransferHelper.CopyToDevice(grid);
+            pCoords = GpuTransferHelper.CopyToDevice(coords);
+            nuint bytes = GpuTransferHelper.ByteSize(feats);
+            pFeats = GpuTransferHelper.AllocateDevice(bytes);
+            _kernels!.LaunchSparseGridScatterGather(false, pGrid, pFeats, pCoords, n, channels, resolution, _stream.Handle);
+            GpuTransferHelper.CacheActivation(feats, pFeats, bytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pFeats); GpuTransferHelper.FreeDevice(pCoords); }
+    }
+
+    /// <summary>Row gather: output[j] = input[indices[j]] — see IBackend.RowGather.</summary>
+    public unsafe void RowGather(Tensor output, Tensor input, Tensor indices, int m, int channels)
+    {
+        if (indices.DType != DType.I32) throw new NotSupportedException("RowGather requires I32 indices.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pIn = 0, pIdx = 0; bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input); pIdx = GpuTransferHelper.CopyToDevice(indices);
+            nuint bytes = GpuTransferHelper.ByteSize(output); pOut = GpuTransferHelper.AllocateDevice(bytes);
+            _kernels!.LaunchRowGatherScatter(true, pOut, pIn, pIdx, m, channels, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, bytes); cached = true;
+        }
+        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); GpuTransferHelper.FreeDevice(pIdx); }
+    }
+
+    /// <summary>Row scatter-add (in-place accumulate): output[indices[j]] += input[j] — see IBackend.RowScatterAdd.</summary>
+    public unsafe void RowScatterAdd(Tensor output, Tensor input, Tensor indices, int m, int channels)
+    {
+        if (indices.DType != DType.I32) throw new NotSupportedException("RowScatterAdd requires I32 indices.");
+        _context.EnsureCurrent(); EnsureKernels();
+        ulong pOut = 0, pIn = 0, pIdx = 0;
+        try
+        {
+            pOut = GpuTransferHelper.CopyToDevice(output); pIn = GpuTransferHelper.CopyToDevice(input); pIdx = GpuTransferHelper.CopyToDevice(indices);
+            _kernels!.LaunchRowGatherScatter(false, pOut, pIn, pIdx, m, channels, _stream.Handle);
+            output._gpuSyncCallback = null; output._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(output, pOut, GpuTransferHelper.ByteSize(output));
+        }
+        finally { GpuTransferHelper.FreeDevice(pIn); GpuTransferHelper.FreeDevice(pIdx); }
+    }
+
     public void IndexAddRows(Tensor h, Tensor table, Tensor indices)
     {
         if (h.DType != DType.F32 || table.DType != DType.F32)

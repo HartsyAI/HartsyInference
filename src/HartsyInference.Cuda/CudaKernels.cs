@@ -207,6 +207,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditQkvSplitNormF32;
     private readonly nint _fourierEmbedF32;
     private readonly nint _conv3dF32;
+    private readonly nint _sparseScatterToGridF32;
+    private readonly nint _sparseGatherFromGridF32;
+    private readonly nint _rowGatherF32;
+    private readonly nint _rowScatterAddF32;
 
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
     private readonly CudaModule _ditF16Module;
@@ -471,6 +475,10 @@ public sealed class CudaKernels : IDisposable
         _ditQkvSplitNormF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_f32");
         _fourierEmbedF32 = _ditF32Module.GetFunction("fourier_embed_f32");
         _conv3dF32 = _ditF32Module.GetFunction("conv3d_f32");
+        _sparseScatterToGridF32 = _ditF32Module.GetFunction("sparse_scatter_to_grid_f32");
+        _sparseGatherFromGridF32 = _ditF32Module.GetFunction("sparse_gather_from_grid_f32");
+        _rowGatherF32 = _ditF32Module.GetFunction("row_gather_f32");
+        _rowScatterAddF32 = _ditF32Module.GetFunction("row_scatter_add_f32");
 
         _mg3ActionModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mg3_action.ptx"));
         _mg3SplitQkvTemporalF32 = _mg3ActionModule.GetFunction("mg3_split_qkv_temporal_f32");
@@ -1988,6 +1996,30 @@ public sealed class CudaKernels : IDisposable
         args[0] = &dArg; args[1] = &cArg; args[2] = &countArg; args[3] = &bArg; args[4] = &dimArg;
         uint grid = (uint)(((long)count * 3 + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_fourierEmbedF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Sparse submanifold-conv scatter/gather (one thread per voxel·channel). <paramref name="scatter"/>
+    /// selects scatter (feats→grid) vs gather (grid→feats).</summary>
+    public unsafe void LaunchSparseGridScatterGather(bool scatter, ulong grid, ulong feats, ulong coords, int n, int c, int r, nint stream)
+    {
+        ulong gArg = grid, fArg = feats, cArg = coords; int nA = n, cA = c, rA = r;
+        void** args = stackalloc void*[6];
+        // kernel signature: (grid/feats first arg, feats/grid second, coords, n, c, r)
+        args[0] = scatter ? &gArg : &fArg; args[1] = scatter ? &fArg : &gArg; args[2] = &cArg;
+        args[3] = &nA; args[4] = &cA; args[5] = &rA;
+        uint grid1 = (uint)(((long)n * c + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(scatter ? _sparseScatterToGridF32 : _sparseGatherFromGridF32,
+            grid1, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Row gather (<paramref name="gather"/>=true: out[j]=in[idx[j]]) or scatter-add (out[idx[j]]+=in[j]).</summary>
+    public unsafe void LaunchRowGatherScatter(bool gather, ulong outp, ulong input, ulong indices, int m, int c, nint stream)
+    {
+        ulong oArg = outp, iArg = input, idxArg = indices; int mA = m, cA = c;
+        void** args = stackalloc void*[5];
+        args[0] = &oArg; args[1] = &iArg; args[2] = &idxArg; args[3] = &mA; args[4] = &cA;
+        uint grid = (uint)(((long)m * c + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(gather ? _rowGatherF32 : _rowScatterAddF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Dense 3D convolution (gather form, one thread per output element). Weight [Cout,Cin,kD,kH,kW].</summary>

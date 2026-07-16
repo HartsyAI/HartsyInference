@@ -32,6 +32,16 @@ public sealed class KokoroPhonemeTokenizer
         _maxId = maxId;
     }
 
+    /// <summary>Builds a tokenizer directly from a <c>{symbol: id}</c> map (e.g. the StyleTTS2 symbol set from
+    /// <see cref="HartsyInference.Audio.Models.StyleTts2.StyleTts2Symbols"/>) — no config file needed.</summary>
+    public static KokoroPhonemeTokenizer FromVocab(IReadOnlyDictionary<string, int> vocab)
+    {
+        Dictionary<string, int> copy = new(vocab.Count, StringComparer.Ordinal);
+        int maxId = 0;
+        foreach ((string sym, int id) in vocab) { copy[sym] = id; if (id > maxId) maxId = id; }
+        return new KokoroPhonemeTokenizer(copy, maxId);
+    }
+
     /// <summary>Loads the vocab from <paramref name="configJsonPath"/> (Kokoro's
     /// <c>config.json</c>). Reads the <c>"vocab"</c> object as a flat
     /// <c>{symbol: id}</c> map.</summary>

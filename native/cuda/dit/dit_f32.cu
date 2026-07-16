@@ -919,4 +919,60 @@ __global__ void conv3d_f32(
     out[idx] = acc;
 }
 
+// Sparse submanifold-conv scatter: write active-voxel features onto a dense (pre-zeroed) grid on-device. Avoids the
+// host scatter loop + the multi-GB grid H2D that dominated the TRELLIS SLAT flow. grid is [1,C,R,R,R]; coords [N,4]
+// (b,x,y,z). One thread per (voxel, channel). cell = x·R² + y·R + z.
+__global__ void sparse_scatter_to_grid_f32(
+    float* __restrict__ grid, const float* __restrict__ feats, const int* __restrict__ coords,
+    int n, int c, int r)
+{
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    long total = (long)n * c;
+    if (idx >= total) return;
+    int ch = (int)(idx % c);
+    long v = idx / c;
+    long r3 = (long)r * r * r;
+    long cell = (long)coords[v * 4 + 1] * r * r + (long)coords[v * 4 + 2] * r + coords[v * 4 + 3];
+    grid[(long)ch * r3 + cell] = feats[v * (long)c + ch];
+}
+
+// Inverse of the scatter: gather the conv output at the active voxels back into a feature matrix [N,C].
+__global__ void sparse_gather_from_grid_f32(
+    float* __restrict__ feats, const float* __restrict__ grid, const int* __restrict__ coords,
+    int n, int c, int r)
+{
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    long total = (long)n * c;
+    if (idx >= total) return;
+    int ch = (int)(idx % c);
+    long v = idx / c;
+    long r3 = (long)r * r * r;
+    long cell = (long)coords[v * 4 + 1] * r * r + (long)coords[v * 4 + 2] * r + coords[v * 4 + 3];
+    feats[v * (long)c + ch] = grid[(long)ch * r3 + cell];
+}
+
+// Row gather: out[j] = in[indices[j]] (one thread per output element). For the sparse-conv rulebook (gather the
+// active neighbours for one kernel offset).
+__global__ void row_gather_f32(
+    float* __restrict__ out, const float* __restrict__ in, const int* __restrict__ indices, int m, int c)
+{
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (long)m * c) return;
+    int ch = (int)(idx % c);
+    long j = idx / c;
+    out[idx] = in[(long)indices[j] * c + ch];
+}
+
+// Row scatter-add: out[indices[j]] += in[j] (indices unique within a call → no atomics needed). Accumulates a
+// kernel-offset's GEMM contribution into the sparse-conv output.
+__global__ void row_scatter_add_f32(
+    float* __restrict__ out, const float* __restrict__ in, const int* __restrict__ indices, int m, int c)
+{
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (long)m * c) return;
+    int ch = (int)(idx % c);
+    long j = idx / c;
+    out[(long)indices[j] * c + ch] += in[idx];
+}
+
 } // extern "C"
