@@ -8,7 +8,7 @@ namespace HartsyInference.Diffusion.Tests;
 public sealed class FluxFillConditioningTests
 {
     [Fact]
-    public unsafe void MaskPixelsToNeutral_ZeroesMaskedRegionAcrossChannels()
+    public unsafe void MaskPixelsToNeutral_BinarizesMaskForPixelZeroing()
     {
         const int h = 8;
         const int w = 8;
@@ -17,12 +17,12 @@ public sealed class FluxFillConditioningTests
         float* sp = (float*)source.DataPointer;
         float* mp = (float*)mask.DataPointer;
         for (int i = 0; i < 3 * h * w; i++) sp[i] = 0.25f + 0.001f * i;
-        // Soft mask: left half 1 (inpaint), right half 0.25 (partial).
+        // Soft mask: left half 1 (inpaint), middle 0.6 (rounds to masked), right 0.25 (rounds to keep).
         for (int y = 0; y < h; y++)
         {
             for (int x = 0; x < w; x++)
             {
-                mp[y * w + x] = x < w / 2 ? 1.0f : 0.25f;
+                mp[y * w + x] = x < w / 4 ? 1.0f : x < w / 2 ? 0.6f : 0.25f;
             }
         }
 
@@ -35,7 +35,7 @@ public sealed class FluxFillConditioningTests
                 for (int x = 0; x < w; x++)
                 {
                     long idx = (long)c * h * w + y * w + x;
-                    float expected = sp[idx] * (1.0f - mp[y * w + x]);
+                    float expected = mp[y * w + x] >= 0.5f ? 0.0f : sp[idx];
                     Assert.Equal(expected, op[idx], 6);
                 }
             }

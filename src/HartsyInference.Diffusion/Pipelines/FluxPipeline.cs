@@ -1076,7 +1076,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         return output;
     }
 
-    /// <summary>Zeroes the masked region of a [-1,1] RGB source — <c>output = source · (1 − mask)</c>, mask broadcast over the 3 channels — producing FLUX.1 Fill's masked-image input (0 = the VAE's mid-gray).</summary>
+    /// <summary>Zeroes the masked region of a [-1,1] RGB source — <c>output = source · (1 − round(mask))</c>, mask broadcast over the 3 channels — producing FLUX.1 Fill's masked-image input (0 = the VAE's mid-gray). The mask is BINARIZED here (Comfy InpaintModelConditioning rounds it for the pixels); a soft/blurred mask would otherwise paint a half-darkened ring into the conditioning image that the model reproduces at the seam. The 256-channel conditioning mask stays continuous.</summary>
     internal static Tensor MaskPixelsToNeutral(Tensor source, Tensor mask)
     {
         long h = source.Shape[2];
@@ -1091,7 +1091,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             long cOff = c * plane;
             for (long i = 0; i < plane; i++)
             {
-                op[cOff + i] = sp[cOff + i] * (1.0f - mp[i]);
+                op[cOff + i] = mp[i] >= 0.5f ? 0.0f : sp[cOff + i];
             }
         }
         return output;
