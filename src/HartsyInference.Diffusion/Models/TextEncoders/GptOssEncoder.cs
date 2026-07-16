@@ -53,9 +53,11 @@ public sealed unsafe class GptOssEncoder : IDisposable
     public int NumLayers => _config.NumLayers;
 
     /// <summary>Loads all weights from a HuggingFace-style key dict (<c>model.embed_tokens.weight</c>,
-    /// <c>model.layers.{i}.*</c>, <c>model.norm.weight</c>). The MoE experts (<c>mlp.experts.gate_up_proj</c>,
-    /// <c>mlp.experts.down_proj</c>) and their biases are expected in F32 — pass MXFP4-packed weights
-    /// through <see cref="HartsyInference.ModelHandler.Mxfp4.Mxfp4Codec.DequantToF32"/> at load time.</summary>
+    /// <c>model.layers.{i}.*</c>, <c>model.norm.weight</c>). MoE expert banks are accepted either dense
+    /// F32 (<c>mlp.experts.gate_up_proj</c> — MXFP4 checkpoints go through
+    /// <see cref="HartsyInference.ModelHandler.Mxfp4.Mxfp4Codec.DequantToF32"/> at load) or NVFP4-packed
+    /// (<c>mlp.experts.gate_up_proj.weight</c> U8 + scale companions, kept mmap-backed and streamed
+    /// per expert at forward time) — see <see cref="GptOssMoeFfn"/>. Biases must be F32.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         Tensor rawEmbed = weights["model.embed_tokens.weight"];
