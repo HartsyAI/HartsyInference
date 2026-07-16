@@ -44,7 +44,9 @@ public static class IpAdapterLoader
     {
         string lowered = Path.GetFileNameWithoutExtension(filePath).ToLowerInvariant();
         bool isFaceId = lowered.Contains("faceid") || lowered.Contains("face_id") || descriptors.Keys.Any(k => k.Contains("id_proj", StringComparison.Ordinal));
-        bool isPlus = lowered.Contains("plus") || descriptors.ContainsKey("image_proj.norm.weight") || descriptors.ContainsKey("image_proj.proj_in.weight");
+        // Plus signature = the Resampler's proj_in / latents keys. Standard checkpoints ALSO carry
+        // image_proj.norm.* (the post-projection LayerNorm), so norm keys must NOT imply Plus.
+        bool isPlus = lowered.Contains("plus") || descriptors.ContainsKey("image_proj.proj_in.weight") || descriptors.ContainsKey("image_proj.latents");
 
         IpAdapterBaseModel baseModel = DetectBaseModel(filePath, descriptors);
         return (baseModel, isPlus, isFaceId);
@@ -91,7 +93,10 @@ public static class IpAdapterLoader
         };
         int numTokens = isPlus ? 16 : 4;
         int imageDim = 1024;
-        if (descriptors.TryGetValue("image_proj.weight", out SafeTensorDescriptor? proj) && proj.Shape.Rank == 2)
+        // The standard projection stores its Linear as image_proj.proj.weight [numTokens*crossDim, imageDim];
+        // some converted checkpoints flatten it to image_proj.weight.
+        if ((descriptors.TryGetValue("image_proj.proj.weight", out SafeTensorDescriptor? proj)
+            || descriptors.TryGetValue("image_proj.weight", out proj)) && proj.Shape.Rank == 2)
         {
             imageDim = (int)proj.Shape[1];
         }

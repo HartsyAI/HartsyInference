@@ -14,4 +14,42 @@ public sealed record ControlNetConditioning
 
     /// <summary>Conditioning strength. <c>0</c> = adapter contributes nothing, <c>1</c> = full strength (the trained-for default), values in between scale linearly. Comfy / A1111 expose this as "ControlNet Strength".</summary>
     public float Scale { get; init; } = 1.0f;
+
+    /// <summary>Step-fraction at which this ControlNet starts contributing. <c>0.0</c> = from the very first step; <c>0.5</c> = only after halfway through the schedule. Same step-fraction window semantics as <see cref="IpAdapterConditioning.StartFraction"/>.</summary>
+    public float StartFraction { get; init; } = 0.0f;
+
+    /// <summary>Step-fraction at which this ControlNet stops contributing. <c>1.0</c> = through the last step; e.g. <c>0.5</c> = only the first half (compose-then-release: spatial guidance early, free refinement late).</summary>
+    public float EndFraction { get; init; } = 1.0f;
+
+    /// <summary>True when the zero-based <paramref name="stepIndex"/> of a <paramref name="totalSteps"/>-step schedule falls inside this adapter's <c>[StartFraction, EndFraction]</c> window.</summary>
+    public bool IsActiveAtStep(int stepIndex, int totalSteps)
+        => IpAdapterScaleSchedule.StepGate(stepIndex, totalSteps, StartFraction, EndFraction) > 0f;
+
+    /// <summary>Filters a ControlNet stack down to the adapters whose start/end window covers the current step. Returns the original list unchanged when every adapter is active (the common no-window case — no allocation), <c>null</c> when none are, and a trimmed copy otherwise. Pipelines call this once per denoise step.</summary>
+    public static IReadOnlyList<ControlNetConditioning>? FilterActive(IReadOnlyList<ControlNetConditioning>? controlNets, int stepIndex, int totalSteps)
+    {
+        if (controlNets is null || controlNets.Count == 0)
+        {
+            return null;
+        }
+        int activeCount = 0;
+        for (int i = 0; i < controlNets.Count; i++)
+        {
+            if (controlNets[i].IsActiveAtStep(stepIndex, totalSteps)) activeCount++;
+        }
+        if (activeCount == controlNets.Count)
+        {
+            return controlNets;
+        }
+        if (activeCount == 0)
+        {
+            return null;
+        }
+        List<ControlNetConditioning> active = new(activeCount);
+        for (int i = 0; i < controlNets.Count; i++)
+        {
+            if (controlNets[i].IsActiveAtStep(stepIndex, totalSteps)) active.Add(controlNets[i]);
+        }
+        return active;
+    }
 }
