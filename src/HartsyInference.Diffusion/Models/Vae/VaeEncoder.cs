@@ -5,7 +5,12 @@ namespace HartsyInference.Diffusion.Models.Vae;
 
 /// <summary>AutoencoderKL VAE encoder. Converts RGB images [B, 3, H, W] in [-1, 1] to scaled latents [B, latentCh, H/8, W/8]. Mirror of <see cref="VaeDecoder"/>; supports SD1.5, SDXL, SD3, and Flux configurations.
 /// <para>Encodes deterministically by returning the posterior mean (mu), not a sample of the diagonal Gaussian. Diffusers' default img2img path samples mu + std·noise via a generator; we use the mean only. The downstream denoise loop adds its own noise via <c>scheduler.AddNoise</c>, which dominates the marginal effect of the absent VAE-side noise. This makes the encoder fully deterministic given a fixed input.</para>
-/// <para>Downsamplers use symmetric Conv2d(stride=2, padding=1, kernel=3) to match the existing IBackend.Conv2D surface. Diffusers' VAE encoder applies asymmetric F.pad((0,1,0,1)) before a padding=0 conv. Output spatial sizes match exactly for even H/W, but per-pixel values differ slightly. Practical effect is sub-pixel; img2img latents are still in-distribution.</para>
+/// <para>Downsamplers match diffusers exactly: asymmetric zero-pad (right/bottom by 1 — <c>F.pad((0,1,0,1))</c>)
+/// followed by Conv2d(stride=2, padding=0, kernel=3). A symmetric padding=1 conv produces the same output size for
+/// even H/W but samples the OPPOSITE pixel parity — each of the three stride-2 stages shifts the sampling grid by
+/// one input pixel, compounding to a ~1-latent-pixel phase error vs the reference encoder. That misalignment left
+/// latents visibly off-distribution (Flux Kontext reproduced reference textures as maze/speckle artifacts; corr vs
+/// the ComfyUI encode was 0.87 where the aligned encoder reaches 0.999+).</para>
 /// </summary>
 public sealed class VaeEncoder
 {
@@ -172,17 +177,21 @@ public sealed class VaeEncoder
                 hidden = resOut;
             }
 
-            // Downsample (all blocks except last): Conv2d(stride=2, padding=1, kernel=3)
+            // Downsample (all blocks except last): asymmetric zero-pad (0,1,0,1) + Conv2d(stride=2, padding=0,
+            // kernel=3) — the diffusers Downsample2D recipe. See the class doc for why symmetric padding is wrong.
             if (blockIdx < _downBlockResNets.Length - 1)
             {
                 int curH = (int)hidden.Shape[2];
                 int curW = (int)hidden.Shape[3];
                 int curCh = (int)hidden.Shape[1];
 
+                Tensor padded = PadRightBottom(backend, hidden, batch, curCh, curH, curW, dtype);
+                hidden.Dispose();
+
                 TensorShape downShape = new TensorShape(batch, curCh, curH / 2, curW / 2);
                 Tensor downsampled = new Tensor(downShape, dtype);
-                backend.Conv2D(downsampled, hidden, _downsampleWeights[blockIdx]!, _downsampleBiases[blockIdx], 2, 2, 1, 1);
-                hidden.Dispose();
+                backend.Conv2D(downsampled, padded, _downsampleWeights[blockIdx]!, _downsampleBiases[blockIdx], 2, 2, 0, 0);
+                padded.Dispose();
                 hidden = downsampled;
             }
         }
@@ -236,6 +245,24 @@ public sealed class VaeEncoder
 
         // 7. Apply scaling: latent = (mu - shift) * scaling
         return ApplyScaling(backend, mu);
+    }
+
+    /// <summary>Zero-pads a [B, C, H, W] tensor on the right and bottom edges by one (diffusers <c>F.pad((0,1,0,1))</c>) via two device-side concats, keeping the encode free of host glue.</summary>
+    internal static Tensor PadRightBottom(IBackend backend, Tensor input, int batch, int channels, int h, int w, DType dtype)
+    {
+        Tensor colZeros = new Tensor(new TensorShape(batch, channels, h, 1), dtype);
+        backend.Fill(colZeros, 0f);
+        Tensor widePadded = new Tensor(new TensorShape(batch, channels, h, w + 1), dtype);
+        backend.Concat(widePadded, [input, colZeros], dim: 3);
+        colZeros.Dispose();
+
+        Tensor rowZeros = new Tensor(new TensorShape(batch, channels, 1, w + 1), dtype);
+        backend.Fill(rowZeros, 0f);
+        Tensor padded = new Tensor(new TensorShape(batch, channels, h + 1, w + 1), dtype);
+        backend.Concat(padded, [widePadded, rowZeros], dim: 2);
+        widePadded.Dispose();
+        rowZeros.Dispose();
+        return padded;
     }
 
     /// <summary>Applies the inverse of <c>VaeDecoder.UndoScaling</c>: <c>latent = (mu - shift) * scaling</c>. Disposes <paramref name="mu"/> if a new tensor is returned.</summary>
