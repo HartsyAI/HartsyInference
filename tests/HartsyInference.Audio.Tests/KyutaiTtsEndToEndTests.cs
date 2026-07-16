@@ -47,13 +47,18 @@ public sealed unsafe class KyutaiTtsEndToEndTests
 
         // entries from a short sentence (one Entry per word).
         string text = Environment.GetEnvironmentVariable("KYUTAI_TEXT") ?? "hello there world";
+        // moshi script_to_entries with padding_between=1: forces per-word articulation padding of
+        // max(0, padding_between + len(tokens) - 1) = len(tokens) steps, which is what the 4.4s reference used.
+        // Without it the model pads maximally (~max_padding per word) and drifts off-distribution.
+        const int paddingBetween = 1;
         List<KyutaiTextScheduler.Entry> entries = new();
         bool firstContent = true;
         foreach (string word in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
             List<int> ids = new(tok.Encode(word));
             if (firstContent) { ids.Insert(0, KyutaiTextScheduler.Main); firstContent = false; }  // moshi: prepend speaker token
-            entries.Add(new KyutaiTextScheduler.Entry(ids, word));
+            int padding = Math.Max(0, paddingBetween + ids.Count - 1);
+            entries.Add(new KyutaiTextScheduler.Entry(ids, word, padding));
         }
 
         // Voice conditioning. A real kyutai/tts-voices embedding ships as speaker_wavs [1,512,T] (channels-first);

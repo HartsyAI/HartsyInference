@@ -12,10 +12,10 @@ namespace HartsyInference.Audio.Models.Kyutai;
 /// condition is absent, which this path does not exercise). Validated in <c>KyutaiConditionerParityTests</c>.</summary>
 public sealed unsafe class MoshiConditioner : IDisposable
 {
-    public const int Dim = 2048, CfgInner = 16, SpeakerDim = 512;
+    public const int Dim = 2048, CfgInner = 16, SpeakerDim = 512, MaxSpeakers = 5;
     private static readonly string[] CfgValues = ["1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0"];
 
-    private Tensor? _cfgEmbed, _cfgProj, _controlEmbed, _controlProj, _speakerProj;
+    private Tensor? _cfgEmbed, _cfgProj, _controlEmbed, _controlProj, _speakerProj, _speakerPadding;
     private int _disposed;
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "condition_provider.conditioners")
@@ -25,6 +25,7 @@ public sealed unsafe class MoshiConditioner : IDisposable
         _controlEmbed = WhisperOps.EnsureF32(w[$"{prefix}.control.embed.weight"]);  // [2,2048]
         _controlProj = WhisperOps.EnsureF32(w[$"{prefix}.control.output_proj.weight"]); // [2048,2048]
         _speakerProj = WhisperOps.EnsureF32(w[$"{prefix}.speaker_wavs.output_proj.weight"]); // [2048,512]
+        _speakerPadding = WhisperOps.EnsureF32(w[$"{prefix}.speaker_wavs.learnt_padding"]);  // [1,1,2048]
     }
 
     /// <summary>The cfg LUT bin for a guidance coefficient (e.g. 2.0 → 2); -1 if not a supported value.</summary>
@@ -48,14 +49,25 @@ public sealed unsafe class MoshiConditioner : IDisposable
         return ctrl;   // [1,1,Dim]
     }
 
-    /// <summary>Cross-attention source from a voice embedding <paramref name="voice"/> <c>[1,T,512]</c>:
-    /// <c>speaker_proj(voice) + sin_pos_emb</c> → <c>[1,T,2048]</c>.</summary>
-    public Tensor ComputeCross(IBackend backend, Tensor voice)
+    /// <summary>Cross-attention source from a voice embedding <paramref name="voice"/> <c>[1,T,512]</c>. Mirrors
+    /// moshi <c>make_condition_attributes</c> + <c>ConditionFuser.get_cross</c>: the voice fills the FIRST of
+    /// <see cref="MaxSpeakers"/> (=5) speaker slots, the other four are masked and so contribute the learnt
+    /// padding vector; the whole <c>maxSpeakers·T</c>-row tensor then gets a continuous sinusoidal position
+    /// embedding (<c>cross_attention_pos_emb=True</c>). Result <c>[1, maxSpeakers·T, 2048]</c>. Those padding rows
+    /// are NOT inert — cross-attention attends over all of them, so omitting them (previously the source was only
+    /// the T real rows) shifts every cross-attention output and corrupts the generated audio codes.</summary>
+    public Tensor ComputeCross(IBackend backend, Tensor voice, int maxSpeakers = MaxSpeakers)
     {
-        int t = (int)voice.Shape[1];
+        int t = (int)voice.Shape[1], total = maxSpeakers * t;
         Tensor proj = WhisperOps.ProjectLinear(backend, voice, _speakerProj!, null, 1, t, SpeakerDim, Dim);
-        AddSinEmbedding(proj, t);
-        return proj;   // [1,t,Dim]
+        Tensor cross = new(new TensorShape(1, total, Dim), DType.F32);
+        float* cp = (float*)cross.DataPointer, pp = (float*)proj.DataPointer, pad = (float*)_speakerPadding!.DataPointer;
+        Buffer.MemoryCopy(pp, cp, (long)t * Dim * 4, (long)t * Dim * 4);          // speaker 0 = real voice projection
+        for (int r = t; r < total; r++)                                            // speakers 1..4 = learnt padding
+            Buffer.MemoryCopy(pad, cp + (long)r * Dim, (long)Dim * 4, (long)Dim * 4);
+        proj.Dispose();
+        AddSinEmbedding(cross, total);                                             // continuous positions 0..total-1
+        return cross;   // [1, total, Dim]
     }
 
     private static Tensor EmbedRow(Tensor table, int row, int width)
