@@ -24,7 +24,7 @@ Pure C# with PTX can reach near-native CUDA performance; HartsyInference applies
 **Non-goals**
 
 - **A first-party UI / web app.** SwarmUI is the front-end; we build the backend for it.
-- **An OpenAI-compatible REST server as a product.** Previously scoped (old "Phase 7") and **dropped**; `HartsyInference.Server` remains only as unsupported scaffolding.
+- **An OpenAI-compatible REST server as a *product*.** SwarmUI is the recommended surface. `HartsyInference.Server` does exist and works (OpenAI-shaped `/v1/chat/completions` with continuous batching + paged KV cache, `/v1/images/generations`, model management), but it ships as a runnable sample (`IsPackable=false`), not a supported/published product.
 - **A dependency on dotLLM.** LLM text generation is native in `HartsyInference.LLM`; [`../Research/DOTLLM_ARCHITECTURE.md`](../Research/DOTLLM_ARCHITECTURE.md) is retained only as a historical study that informed the native design.
 - **Training / fine-tuning.** Inference engine only.
 

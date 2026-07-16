@@ -1,26 +1,22 @@
 # HartsyInference
 
-**A pure C#/.NET 10 AI inference engine for image, audio, vision, video, 3D, and interactive world models, with zero Python dependencies.**
+**A pure C#/.NET AI inference engine for LLMs, image, audio, vision, video, 3D, and interactive world models — with zero Python dependencies.**
 
-HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpoints directly and runs inference on **CUDA**, **Vulkan**, or **CPU**. No Python. No C++ wrappers. No external processes. Just NuGet packages. It's a complete pure-C# inference engine: LLMs + diffusion image models + speech/music + vision + video + 3D + interactive worlds.
+HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpoints directly and runs inference on **CUDA**, **Vulkan**, or **CPU** — no Python, no C++ wrappers, no external processes, just NuGet packages. One engine spans native LLM text generation, diffusion image models, speech/music, vision, video, 3D mesh, and real-time interactive worlds. Targets **.NET 8 and .NET 10**.
 
 > [!IMPORTANT]
-> **The recommended way to run HartsyInference is inside [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI) via the [HartsyInference backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend).** It registers HartsyInference as a SwarmUI backend (a pure-C# alternative to the ComfyUI backend), so you get a full generation UI, model management, LoRA, and video/audio output with no Python install. HartsyInference is not building its own front-end. You can also consume the engine directly as [NuGet libraries](#quick-start-library) or through the bundled [sample CLIs](#quick-start-cli-developer-tool).
-
-> [!NOTE]
-> HartsyInference ships with **native LLM text generation** (Qwen/Llama/Mistral/Gemma/Phi/Qwen3.5 and more, MoE/MLA giants like DeepSeek-V3 and Kimi-K2 built for bigger hardware, quantized GGUF inference), plus diffusion image models, speech-to-text, text-to-speech, music generation, vision embeddings & detection, video generation, 3D mesh, and real-time interactive world models, all in C#. See [Supported Models](#supported-models) for the full per-architecture status.
+> **The recommended way to run HartsyInference is inside [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI) via the [HartsyInference backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend)** — it registers HartsyInference as a pure-C# alternative to the ComfyUI backend, giving you a full generation UI, model management, LoRA, and video/audio output with no Python install. The engine is not building its own front-end; you can also embed it as [NuGet libraries](#quick-start-library), drive the [sample CLI](#quick-start-cli-developer-tool), or host the [OpenAI-compatible server](#how-to-use-it). For per-model status across every modality, see [Models](#models).
 
 ---
 
 ## Table of Contents
 
 - [Why HartsyInference](#why-hartsyinference)
-- [Design Pillars](#design-pillars)
 - [How to Use It (SwarmUI recommended)](#how-to-use-it)
 - [Quick Start (Library)](#quick-start-library)
 - [Quick Start (CLI, developer tool)](#quick-start-cli-developer-tool)
 - [Benchmarks](#benchmarks)
-- [Supported Models](#supported-models)
+- [Models](#models)
 - [Future Features](#future-features)
 - [Packages](#packages)
 - [Requirements](#requirements)
@@ -33,53 +29,30 @@ HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpo
 
 | | |
 |---|---|
-| **No Python** | The entire stack is C#. No `pip`, no `venv`, no subprocess marshalling, no GIL. |
-| **Pure C# CUDA** | GPU kernels are PTX, JIT-compiled through the CUDA Driver API via P/Invoke, with no native shared libraries. |
-| **Modular NuGet** | Pull in only the modality you need. `HartsyInference.Diffusion` for images, `HartsyInference.Audio` for speech, etc. |
-| **World models** | Real-time, action-conditioned interactive generation (keyboard / mouse / camera-pose → streamed frames). |
+| **No Python** | The whole stack is C# — no `pip`, no `venv`, no subprocess marshalling, no GIL. |
+| **Pure-C# GPU** | CUDA kernels are PTX, JIT-compiled through the CUDA Driver API via P/Invoke; Vulkan via SPIR-V. No native shared libraries. |
+| **Multi-backend** | One `IBackend` abstraction over CUDA (NVIDIA), Vulkan (AMD/Intel/NVIDIA), and SIMD CPU (AVX2/AVX-512/NEON). |
+| **Eager execution** | No computation graphs; ops execute immediately for predictable memory and debugging. |
 | **Zero-alloc hot paths** | Tensor data in `NativeMemory.AlignedAlloc`, weights memory-mapped, `Span<T>` everywhere. |
-| **SwarmUI-native** | Ships as a first-class [SwarmUI backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend), a pure-C# alternative to the ComfyUI backend, for a full UI with no Python. |
-
----
-
-## Design Pillars
-
-| Pillar | What It Means |
-|---|---|
-| **Pure C#** | CUDA accessed via PTX through the CUDA Driver API P/Invoke, with no native shared libraries |
-| **Eager execution** | No computation graphs; ops execute immediately for predictable memory and debugging |
-| **Zero-allocation hot paths** | Tensor data in `NativeMemory.AlignedAlloc`; model weights memory-mapped; `Span<T>` everywhere |
-| **Multi-backend** | One `IBackend` abstraction over CUDA, Vulkan, and SIMD CPU |
-| **Validated** | Every component matches a Python/C++ reference within documented tolerances |
-| **Production-grade** | Streaming progress, memory budgeting, VRAM monitoring, model hot-swap |
+| **Modular NuGet** | Pull in only the modality you need — `HartsyInference.Diffusion` for images, `HartsyInference.Audio` for speech, etc. |
+| **Validated** | Every component matches a Python/C++ reference within documented tolerances. |
+| **World models** | Real-time, action-conditioned interactive generation (keyboard / mouse / camera-pose → streamed frames). |
+| **Production-grade** | Streaming progress, memory budgeting, VRAM monitoring, model hot-swap. |
+| **SwarmUI-native** | Ships as a first-class [SwarmUI backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend), a pure-C# alternative to the ComfyUI backend. |
 
 ---
 
 ## How to Use It
 
-There are three ways to run HartsyInference, in order of how most people should reach for them.
+HartsyInference does not ship its own front-end. There are a few ways to run it, in order of how most people should reach for them.
 
-### 1. SwarmUI + the HartsyInference backend extension (recommended)
+**1. SwarmUI + the HartsyInference backend extension (recommended).** Install the [SwarmUI-HartsyInference-Backend](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend) extension to register HartsyInference as a SwarmUI backend — a pure-C# alternative to the ComfyUI backend. You get SwarmUI's full generation UI, model browser, and parameter controls with **no Python environment**, plus per-architecture model loaders, video (Wan 2.x, LTX) with ffmpeg muxing, audio/music (ACE-Step), LoRA passthrough, live previews, and automatic checkpoint conversion — all on the same engine and kernels this repo builds, consumed as pinned `HartsyInference` NuGet packages. Clone it into your SwarmUI `src/Extensions/` folder, rebuild, and add a **HartsyInference** backend under Server → Backends; see that repo's README for the model-support matrix and setup.
 
-HartsyInference does not ship its own front-end. The recommended way to actually generate with it is through **[SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI)** using the **[SwarmUI-HartsyInference-Backend](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend)** extension. The extension registers HartsyInference as a SwarmUI backend, a pure-C# alternative to the ComfyUI backend, so you get:
+**2. Library (NuGet).** Embed the engine directly in a .NET app; each modality is its own package. See [Quick Start (Library)](#quick-start-library).
 
-- SwarmUI's full generation UI, model browser, and parameter controls with **no Python environment**.
-- Per-architecture model loaders (SD/SDXL/Flux/SD3/Qwen-Image/Ideogram/Kandinsky and more), plus **video** (Wan 2.x, LTX) with ffmpeg muxing, **audio/music** (ACE-Step), LoRA passthrough, live previews, and automatic checkpoint conversion.
-- The same engine and kernels this repo builds, consumed as pinned `HartsyInference` NuGet packages.
+**3. Sample CLI (developer tool).** The bundled [`hartsy` CLI](#quick-start-cli-developer-tool) drives every modality from the terminal — the fastest way to verify a checkpoint end-to-end. It's a development/validation tool, not the intended end-user surface.
 
-Install it like any SwarmUI extension: clone `SwarmUI-HartsyInference-Backend` into your SwarmUI `src/Extensions/` folder (as `SwarmUI-HartsyInference`), rebuild SwarmUI, then add a **HartsyInference** backend under Server → Backends. See that repo's README for the current model-support matrix and setup.
-
-### 2. Library (NuGet)
-
-Embed the engine directly in a .NET app. Each modality is its own package. See [Quick Start (Library)](#quick-start-library) below.
-
-### 3. Sample CLIs (developer tool)
-
-The bundled CLIs under [`samples/`](samples/) and [`src/HartsyInference.Cli`](src/HartsyInference.Cli) are compile-tested references for verifying a checkpoint or a pipeline end-to-end from the command line. They are development and validation tools, not the intended end-user surface. See [Quick Start (CLI, developer tool)](#quick-start-cli-developer-tool) below.
-
-### 4. HTTP Server (OpenAI-compatible API)
-
-`HartsyInference.Server` hosts an OpenAI-compatible REST API — `/v1/chat/completions` (LLM/SSM chat, streaming and non-streaming, JSON-mode via `response_format: {"type":"json_object"}`), `/v1/images/generations` (SDXL today), and `/v1/models` load/list/unload. Concurrently-submitted chat requests against the same model are batched dynamically (not just queued one at a time) via a paged KV cache and a continuous-batching scheduler — see [`docs/Checklists/LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md) for the real measured numbers.
+**4. OpenAI-compatible HTTP server.** `HartsyInference.Server` hosts an OpenAI-shaped REST API: `/v1/chat/completions` (LLM/SSM chat — streaming, non-streaming, and JSON-mode — with **continuous batching** and a **paged KV cache**), `/v1/images/generations` (+ a streaming variant), and `/v1/models` load / list / pull / unload. Audio and image-edit routes are shaped for API completeness but return `501` until wired. It runs from source (`IsPackable=false`), CPU by default; set `HartsyInference:Backend=Cuda` + `HartsyInference:PtxDirectory` for GPU. See [`PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what's left before it's published.
 
 ```bash
 dotnet run --project src/HartsyInference.Server -c Release --urls http://127.0.0.1:8080
@@ -89,84 +62,32 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: applica
   -d '{"model":"/path/to/model.gguf","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-Set `HartsyInference:Backend=Cuda` (and `HartsyInference:PtxDirectory`) via config/env vars for GPU inference; defaults to CPU. Not yet published as its own package (`IsPackable=false` — run from source); see [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what's still needed before that changes.
-
 ---
 
 ## Quick Start (CLI, developer tool)
 
-The bundled CLI generates images with Stable Diffusion 1.5 and is the fastest way to verify your setup end-to-end from a terminal. It is a developer/validation tool; for day-to-day generation use the [SwarmUI extension](#how-to-use-it).
+The bundled **`hartsy`** CLI ([`src/HartsyInference.Cli`](src/HartsyInference.Cli), built on Spectre.Console) drives every modality from the terminal — the fastest way to verify a checkpoint end-to-end. It's a developer/validation tool; for day-to-day generation use the [SwarmUI extension](#how-to-use-it). Run it with **no arguments** for an interactive REPL.
 
 ```bash
-# Build the solution
 dotnet build -c Release
 
-# Generate an image on the CPU backend (default)
+# Image (diffusion checkpoint; SDXL auto-constructs). The prompt is a positional argument.
 dotnet run -c Release --project src/HartsyInference.Cli -- \
-  --prompt "a painting of a cat sitting on a windowsill" \
-  --width 512 --height 512 --steps 20 --cfg 7.5 --seed 42
+  image "a castle on a mountain at sunset, oil painting" \
+  --model-path Models/sdxl.safetensors --steps 25 -b cuda
+
+# Text — streams tokens from a local LLM (safetensors dir or .gguf)
+dotnet run -c Release --project src/HartsyInference.Cli -- \
+  text "In one sentence, what is a transformer?" -m qwen3 --model-path /models/Qwen3-0.6B -b cuda
+
+# Transcribe a WAV with Whisper
+dotnet run -c Release --project src/HartsyInference.Cli -- transcribe speech.wav -m whisper-base
 ```
 
-Run it on the GPU instead:
-
-```bash
-# NVIDIA: CUDA backend (fastest)
-dotnet run -c Release --project src/HartsyInference.Cli -- \
-  --backend cuda \
-  --prompt "a castle on a mountain at sunset, oil painting" \
-  --negative "blurry, low quality" \
-  --width 768 --height 768 --steps 25 --cfg 7.0 --seed 1234
-
-# AMD / Intel / NVIDIA: cross-vendor Vulkan backend
-dotnet run -c Release --project src/HartsyInference.Cli -- \
-  --backend vulkan --prompt "a fox in autumn leaves, studio ghibli style"
-```
-
-The CLI is a multi-task dispatcher (`--task image|text|music|vision|video|3d|interactive`). Pick the model for
-**any** task with the unified `--model` flag (and `--model-path` for a local checkpoint):
-
-```bash
-# Text generation with a local Qwen3 safetensors checkpoint
-dotnet run -c Release --project src/HartsyInference.Cli -- \
-  --task text --model qwen3 --model-path /models/Qwen3-0.6B \
-  --backend cuda --prompt "In one sentence, what is a transformer?" --text-max-tokens 80
-
-# Image generation, selecting the model by its ComfyUI-layout name
-dotnet run -c Release --project src/HartsyInference.Cli -- \
-  --task image --model StabilityAI/sd-v1-5 --prompt "a fox in autumn leaves"
-```
-
-<details>
-<summary><b>All CLI options</b></summary>
-
-```text
-Usage: HartsyInference.Cli --task <task> [options]
-
-Tasks:
-  --task image|text|music|vision|video|3d|interactive   (default: image)
-
-Global:
-  --model <name>              Model for ANY task (unified selector; overrides the per-task --*-model flags)
-  --model-path <path>         Path to a model checkpoint/dir (any task)
-  --backend cpu|vulkan|cuda   Backend to run on (default: cpu)
-  --models <dir>              Override Models root (default: <repo>/Models)
-  --output <dir>              Override Output dir   (default: <repo>/Output)
-  -h, --help                  Show this help
-
-Image task:
-  --prompt "..."  --negative "..."  --width N  --height N  --steps N  --cfg N.N  --seed N
-
-Text task:
-  --text-model qwen2|qwen3|gguf   --text-model-path <path>   --prompt "..."   --text-max-tokens N
-```
-
-</details>
+Commands span every modality — `text`, `image`, `transcribe`, `speak`, `3d`, `vision`, `music`, `video`, `world` — plus catalog helpers `list`, `models`, and `pull`. Common flags: `-b|--backend cpu|cuda|vulkan`, `-m|--model <name>`, `--model-path <path>`. Run `hartsy <command> --help` for a command's full option set.
 
 > [!TIP]
-> Image models are resolved from a ComfyUI-style layout under `<repo>/Models` (e.g. `Models/StabilityAI/sd-v1-5`). Override the root with `--models /path/to/models`. Generated images land in `<repo>/Output`. Every per-task `--*-model` flag still works as an alias for `--model`.
-
-> [!IMPORTANT]
-> The `image` and `text` tasks run end-to-end today (image is wired to the SD1.5 pipeline; text drives the config-driven LLM transformer). `music`, `vision`, `video`, `3d`, and `interactive` are placeholders in this dispatcher CLI. That **full breadth of models** is exposed through the [SwarmUI extension](#how-to-use-it), the library API, and the per-modality samples under [`samples/`](samples/).
+> `pull` downloads a model from HuggingFace (or registers a local path) into the cache; `list` and `models` show the catalog and what's already cached. Image checkpoints also resolve from a ComfyUI-style layout under `<repo>/Models`.
 
 ---
 
@@ -380,7 +301,7 @@ await foreach (VideoFrame frame in session.ReadFramesAsync())
 </details>
 
 > [!NOTE]
-> 3D and world-model pipelines are built end-to-end and structurally complete; numerical validation against reference outputs is in progress. See [Supported Models](#supported-models) for per-model status.
+> 3D and world-model pipelines are built end-to-end and structurally complete; numerical validation against reference outputs is in progress. See [Models](#models) for per-model status.
 
 ---
 
@@ -460,12 +381,16 @@ generation path, on both GPUs. Full table + methodology + the outlier list: [`be
 | Whisper (base) | STT | 5.1× | 5.4× |
 | Kokoro (StyleTTS2) | TTS | 4.5× | 5.2× |
 | MeloTTS (en-v3) | TTS | 1.4× | 1.4× |
+| Kyutai TTS (DSM, tts-1.6b) | TTS | ~0.5× | — |
 | F5-TTS (v1 base, voice clone) | TTS | ~0.4× | — |
 
 Piper / Kokoro / MeloTTS / F5-TTS are verified word-correct via a proven STT oracle (whisper `medium.en`). F5-TTS
 is zero-shot voice cloning (needs a reference clip + transcript); its RTF is below real-time by design (32
 flow-matching DiT forwards), but a host grouped-conv bottleneck was removed for a **34× speedup (174.6 s → 6.4 s)**
-at bit-parity.
+at bit-parity. **Kyutai TTS** (Delayed-Streams Modeling, in-engine e2e word-correct 2026-07-16; measured through the
+test path, not yet Swarm-deployed) generates 32 Mimi codebooks per frame through a weights-per-step depformer;
+making those per-step projections device-resident cut the 3060 gen **6.5× (63.0 → 9.7 s)** — see
+[`benchmarks/results/kyutai_tts_2026-07-16.md`](benchmarks/results/kyutai_tts_2026-07-16.md).
 
 TTS measured through the canonical `GenerateText2Image` path (WAV to `/Output` like any gen); STT via `ProcessSTT`. **The small audio models are host/launch-bound, not compute-bound** — the 4090's extra compute buys ~nothing (Piper is even slightly slower on it). So the optimization lever here is **CUDA-graph capture / host-glue removal** (kills kernel-launch overhead), exactly like the LLM-decode graph win and the opposite of the compute-bound video/music DiTs where graphs are a no-op. Music (ACE-Step, YuE, HeartMuLa) e2e numbers live in their own result files and [`docs/Checklists/MODEL_STATUS_AUDIO.md`](docs/Checklists/MODEL_STATUS_AUDIO.md).
 
@@ -489,147 +414,21 @@ CFG was measured and **ruled out** — the Concat fix already removed the per-fo
 
 ---
 
-## Supported Models
+## Models
 
-> [!NOTE]
-> **Status legend:** ✅ Complete · 🧪 Validation-pending (built end-to-end, numerics being verified) · 🏗️ Structural (interfaces wired, forward pass in progress)
+The engine covers a very wide model set across every modality. The **[benchmark tables](#benchmarks)** above show the representative models with measured numbers; the **authoritative per-model status** — verified end-to-end vs built-but-pending, with bring-up notes and real-weight parity evidence — lives in the modality status docs:
 
-### Language / Text Generation
-
-Full architecture-by-architecture bring-up notes, bugs found, and verification methodology:
-[`docs/Checklists/MODEL_STATUS_LLM.md`](docs/Checklists/MODEL_STATUS_LLM.md) (what's verified today) and
-[`docs/Checklists/LLM_MODEL_COVERAGE.md`](docs/Checklists/LLM_MODEL_COVERAGE.md) (the completion plan + history).
-
-**Dense decoders — verified end-to-end on a 3060:**
-
-| Model | Notes | Status |
+| Modality | Breadth (representative) | Status doc |
 |---|---|---|
-| Llama 1/2/3.x, Mistral, TinyLlama, SmolLM, Yi | `llama`-dialect family, interleaved RoPE | ✅ |
-| Qwen2 / Qwen2.5 (0.5B → 7B) | split-half RoPE, QKV bias | ✅ |
-| Qwen3 (0.6B → 7B) | per-head Q/K RMSNorm, decoupled head_dim | ✅ |
-| Gemma 2 / 3 (text) | GeGLU, sandwich norm, dual-RoPE, logit soft-cap | ✅ |
-| **Gemma-4** (Apr 2026 — E2B/E4B mobile) | per-layer embeddings, per-layer head-dim (global≠local), cross-layer KV-cache sharing, weightless V-norm | ✅ |
-| Phi-3 / Phi-3.5-mini / Phi-4-mini | fused QKV, LongRope, partial rotary | ✅ |
-| StableLM-2, Granite-3, Cohere Command-R (cohere2) | partial rotary+bias / scalar multipliers / parallel-residual+NoPE | ✅ |
-| Nemotron, EXAONE, RWKV-6/7, Mamba/Mamba-2 | squared-ReLU / RoPE-pairing fix / recurrent (see below) | ✅ |
-| **Qwen3.5** (Feb 2026 — 0.8B–9B dense) | **Gated DeltaNet hybrid**: regular attention every 4th layer, delta-rule linear attention the rest — new `ISsmModel`, not `GenericTransformer` | ✅ |
+| **Language / LLM** | Llama, Qwen2/Qwen3, Gemma 2/3/4, Phi, Mistral (dense); Qwen3.5 gated-DeltaNet hybrid; MoE/MLA giants (Mixtral, Qwen3-MoE, DeepSeek-V3, Kimi-K2, GPT-OSS); VLMs; embeddings/rerankers; Mamba/RWKV/T5 — quantized GGUF throughout | [MODEL_STATUS_LLM](docs/Checklists/MODEL_STATUS_LLM.md) · [coverage](docs/Checklists/LLM_MODEL_COVERAGE.md) |
+| **Image** | SD1.5 / SDXL (UNet); Flux.1/.2, SD3, Chroma / Radiance, Qwen-Image (+ Edit), HunyuanImage, HiDream, AuraFlow, Lumina 2, ERNIE-Image, Kandinsky 5, OmniGen 2, Ideogram 4 (DiT / MMDiT / NextDiT) | [MODEL_STATUS_IMAGE](docs/Checklists/MODEL_STATUS_IMAGE.md) |
+| **Audio & Music** | Whisper / Moonshine (STT); Kokoro, Piper, StyleTTS2, Bark, Spark-TTS, CosyVoice, VibeVoice, MeloTTS, F5-TTS clone (TTS); ACE-Step, MusicGen, YuE, HeartMuLa (music); 9 neural codecs | [MODEL_STATUS_AUDIO](docs/Checklists/MODEL_STATUS_AUDIO.md) |
+| **Vision** | CLIP / SigLIP / DINOv2-3 embeddings; YOLO8 / YOLO11 detection; SAM / SAM 2 / 2.1 segmentation; face detection | [MODEL_STATUS_VISION](docs/Checklists/MODEL_STATUS_VISION.md) |
+| **Video** | LTX-Video, Wan 2.x (T2V + I2V), Lance, Kandinsky 5 Video | [MODEL_STATUS_VIDEO](docs/Checklists/MODEL_STATUS_VIDEO.md) |
+| **3D** | TripoSR, Hunyuan3D-2 (image → mesh; glTF / OBJ / PLY export) | [MODEL_STATUS_3D](docs/Checklists/MODEL_STATUS_3D.md) |
+| **World / interactive** | Hunyuan-GameCraft, Matrix-Game 2.0 / 3.0, Oasis (action-conditioned, real-time) | [MODEL_STATUS_WORLD](docs/Checklists/MODEL_STATUS_WORLD.md) |
 
-**MoE / MLA — built and component-verified against HF/host references; end-to-end deferred to bigger hardware
-(all exceed 12GB):**
-
-| Model | Notes | Status |
-|---|---|---|
-| OLMoE, Granite-MoE | whole-vector Q/K norm; scalars+MoE | ✅ verified e2e (small enough) |
-| Mixtral 8x7B, Qwen3-MoE 30B-A3B/235B | config+mapper+stacked-expert split wired | 🧪 build-defer |
-| DeepSeek-V2-Lite | full MLA path built; loads, OOMs at preload on 12GB | 🧪 build-defer |
-| DeepSeek-V3 671B / Kimi-K2 1T | MLA + q-LoRA + node-limited MoE routing, slice-verified vs HF | 🧪 build-defer |
-| GPT-OSS 20B / 120B | per-head attention sinks, slice-verified vs a reference softmax | 🧪 build-defer |
-| **Gemma-4 31B-dense / 26B-A4B-MoE** | same verified E2B code path + a parallel dense+MoE FFN branch (routes IN PARALLEL with, not instead of, the dense FFN — unique to this arch) | 🧪 build-defer |
-| Qwen3.5-MoE (35B-A3B / 122B-A10B / 397B-A17B) | separate `qwen35moe` GGUF arch — not yet wired | ⬜ not started |
-
-**Vision-language (VLM):** Gemma-3-4B-vision, SmolVLM2-2.2B, LLaVA-1.5-7B, Qwen2.5-VL-3B/7B, Llama-3.2-11B-Vision
-(mllama, gated cross-attention) — all ✅ verified e2e.
-
-**Embeddings / rerankers:** bge-small, all-MiniLM-L6-v2, nomic-embed-text-v1.5, Qwen3-Embedding-0.6B (covers
-gte-Qwen2/e5-mistral), bge-reranker-v2-m3 — all ✅ cosine=1.0 vs HF. mxbai-embed-large is structurally the same
-`bert`-arch path, not independently re-run.
-
-**Non-transformer:** Mamba-1 (✅ cosine=1.0 vs HF), RWKV-6 (✅ cosine=1.0 vs the official `rwkv` package),
-T5/FLAN-T5 encoder-decoder (✅ cosine=1.0 vs HF) — RWKV-7/Mamba-2 are near-variants of the verified paths.
-
-Quantized GGUF (Q4/Q5/Q6/Q8) is ✅ supported across every model above — decode-validated per-quant against F32
-reference embeddings/logits, not just "loads without error".
-
-### Image Generation
-
-| Model | Architecture | Status |
-|---|---|---|
-| Stable Diffusion 1.5 | UNet | ✅ |
-| SDXL · SDXL Refiner | UNet (dual CLIP) | ✅ |
-| SDXL Inpaint | UNet | 🏗️ |
-| Flux.1-dev · Flux.2 | Single-stream DiT, flow-matching | ✅ |
-| Chroma · Chroma Radiance | Flux-derivative DiT | ✅ |
-| SD3 | MMDiT (3 text encoders) | ✅ |
-| Qwen-Image | MMDiT (Qwen2.5-VL) | ✅ |
-| Qwen-Image-Edit 2511 | MMDiT + Qwen2.5-VL vision tower (image editing, ≤3 reference images) | ✅ |
-| Hunyuan Image 2.1 | 17B MMDiT | ✅ |
-| HiDream i1 | MMDiT (quad encoder + MoE) | ✅ |
-| AuraFlow | MMDiT + single-DiT hybrid (Pile-T5-XL) | ✅ |
-| Lumina 2.0 | NextDiT (Gemma-2) | ✅ |
-| ERNIE-Image | Single-stream DiT (Ministral-3B) | ✅ |
-| Kandinsky 5 | DiT (Qwen2.5-VL + CLIP) | ✅ |
-| OmniGen 2 | MLLM-based DiT | ✅ |
-| Ideogram 4 | 9.3B single-stream DiT | ✅ |
-| F-Lite | DiT (Qwen) | 🧪 |
-| Lance (Image) | Unified multimodal DiT | 🧪 |
-| Z-Image Turbo | NextDiT (Qwen3-4B) | 🏗️ |
-| Anima | Cosmos-Predict2-2B (T=1) | 🏗️ |
-
-### Audio & Music
-
-| Model | Category | Status |
-|---|---|---|
-| Whisper (tiny → large-v3) | Speech-to-text | ✅ |
-| Moonshine | Speech-to-text | ✅ |
-| Kokoro-82M | Text-to-speech | ✅ |
-| Piper (VITS) | Text-to-speech (espeak phonemes) | ✅ |
-| MeloTTS | Text-to-speech (Bert-VITS2, en-v3) | ✅ |
-| Bark | Text-to-speech | ✅ |
-| StyleTTS2 | Text-to-speech | ✅ |
-| Spark-TTS | Text-to-speech (BiCodec) | ✅ |
-| CosyVoice | Text-to-speech (Qwen LM + flow) | ✅ |
-| VibeVoice | Text-to-speech (diffusion) | ✅ |
-| Fish-Speech / OpenAudio | Text-to-speech (DualAR + tiktoken tokenizer) | 🧪 |
-| MusicGen | Music generation | ✅ |
-| AudioGen | Sound-effect generation (MusicGen-arch, .bin + T5) | 🧪 |
-| ACE-Step | Music generation (flow-matching) | ✅ |
-| YuE | Music generation (dual-stage Llama) | ✅ |
-| HeartMuLa (oss-3B) | Music generation (Sesame-CSM dual-transformer + HeartCodec) | ✅ ~11 fr/s bf16 / **~15 fr/s Q8** (past real-time), RTX 3060 |
-| Stable Audio Open | Music generation | 🏗️ |
-| F5-TTS | Voice cloning (flow-matching DiT) | ✅ verified word-correct + 34× perf pass (host-conv→GPU), bit-parity |
-| Codecs (Vocos · EnCodec · DAC · SNAC · Mimi · WavTokenizer · BiCodec · XCodec · Oobleck) | Neural audio codecs | ✅ |
-
-### Vision
-
-| Model | Category | Status |
-|---|---|---|
-| CLIP (ViT-L/14, H/14, bigG/14) | Embeddings | ✅ |
-| SigLIP · SigLIP2 | Embeddings | ✅ |
-| DINOv2 · DINOv3 | Dense features | ✅ |
-| YOLO8 · YOLO11 (n → xl) | Object detection | ✅ |
-| SAM · SAM 2 · SAM 2.1 | Segmentation | ✅ |
-| RetinaFace-style face detection + landmarks | Face | ✅ |
-
-### Video
-
-| Model | Status |
-|---|---|
-| LTX-Video | 🧪 |
-| Wan 2.2 (T2V + I2V) | 🧪 |
-| Lance (Video, T2V) | 🧪 |
-| Kandinsky 5 Video | 🧪 |
-
-### 3D
-
-| Model | Task | Status |
-|---|---|---|
-| TripoSR | Image → mesh (triplane/NeRF) | ✅ |
-| Hunyuan3D-2 (Shape) | Image/Text → mesh | ✅ |
-
-> Built on a reusable mesh / splat / triplane foundation: marching cubes, plus glTF / OBJ / PLY export.
-
-### World / Interactive Models
-
-Real-time, action-conditioned generators. Keyboard / mouse / camera-pose input streams in, frames stream out.
-
-| Model | Scale / Target | Status |
-|---|---|---|
-| Hunyuan-GameCraft 1.0 | 12.5B · 704×1216 @ 33 fps | 🧪 |
-| Matrix-Game 3.0 | 5B (+28B MoE) · 720p @ 40 fps · memory-augmented | 🧪 |
-| Matrix-Game 2.0 | 1.8B · 540p @ 25 fps | 🧪 |
-| Oasis-500m | ~500M · Minecraft world model | 🧪 |
-
-See the [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md) for the full plan.
+Index of all status docs: [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md). Cross-modality real-weight parity authority: [`PARITY_VERIFICATION.md`](docs/Checklists/PARITY_VERIFICATION.md). Planned additions: [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md).
 
 ---
 
@@ -667,7 +466,7 @@ See the [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md) for the fu
 | `HartsyInference.Interactive` | Action-conditioned world models, sessions, action encoders |
 | `HartsyInference` | Meta-package: one reference that pulls in the core, all three backends, and every modality package including `HartsyInference.LLM` and `HartsyInference.Phonemizer` (`Server` and the sample `Cli` are excluded — run those from source) |
 | `HartsyInference.Cli` | Command-line sample/validation tool (not published as a package) |
-| `HartsyInference.Server` | OpenAI-compatible HTTP API host — chat completions (batched, streaming, JSON-mode), image generation, model management (not yet published as a package; run from source — see [How to Use It §4](#4-http-server-openai-compatible-api)) |
+| `HartsyInference.Server` | OpenAI-compatible HTTP API host — chat completions (continuous-batched, streaming, JSON-mode), image generation, model management. Runs from source (`IsPackable=false`), not published; see [How to Use It](#how-to-use-it). |
 
 See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependency graph and minimum install examples.
 
@@ -675,7 +474,7 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
 
 ## Requirements
 
-- **.NET 10** (SDK 10.0+)
+- **.NET 8 or .NET 10** — the libraries target `net8.0` and `net10.0`; the sample Server and CLI target `net10.0`.
 
 ### CUDA backend (NVIDIA, fastest)
 - **CUDA 13.x / 12.x** userspace libraries (cuBLAS, cuBLASLt)
@@ -720,7 +519,7 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
 
 </details>
 
-**Model status:** which models are built versus **verified end-to-end** is tracked per modality, indexed in [`docs/Checklists/MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md) ([Image](docs/Checklists/MODEL_STATUS_IMAGE.md), [Audio](docs/Checklists/MODEL_STATUS_AUDIO.md), [Video](docs/Checklists/MODEL_STATUS_VIDEO.md), [World](docs/Checklists/MODEL_STATUS_WORLD.md), [3D](docs/Checklists/MODEL_STATUS_3D.md), [Vision](docs/Checklists/MODEL_STATUS_VISION.md), [LLM](docs/Checklists/MODEL_STATUS_LLM.md)). The cross-modality real-weight parity authority is [`docs/Checklists/PARITY_VERIFICATION.md`](docs/Checklists/PARITY_VERIFICATION.md).
+**Model status & parity:** the [Models](#models) section links the per-modality status docs (indexed in [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md)); the cross-modality real-weight parity authority is [`PARITY_VERIFICATION.md`](docs/Checklists/PARITY_VERIFICATION.md).
 
 **Research & Checklists:** technical research notes live in [`docs/Research/`](docs/Research/) (model formats, GPU/compute, diffusion architectures, text encoders, audio, vision). Phase-by-phase progress is tracked in [`docs/Checklists/`](docs/Checklists/). AI coding-agent instruction files are in [`docs/Agents/`](docs/Agents/); see [CLAUDE.md](CLAUDE.md) for the dispatcher.
 
