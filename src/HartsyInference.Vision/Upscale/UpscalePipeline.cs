@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Vision.Codec;
 
 namespace HartsyInference.Vision.Upscale;
 
@@ -38,7 +39,7 @@ public sealed class UpscalePipeline : IUpscalePipeline
     /// <inheritdoc/>
     public (byte[] rgbData, int width, int height) Upscale(ReadOnlySpan<byte> rgbData, int width, int height)
     {
-        Tensor input = RgbToTensor01(rgbData, width, height);
+        Tensor input = ImageTensor.RgbToTensor01(rgbData, width, height);
         Tensor output = _inputTileSize <= 0
             ? _net.Forward(_backend, input)
             : TiledForward(input, width, height);
@@ -134,26 +135,6 @@ public sealed class UpscalePipeline : IUpscalePipeline
         Tensor result = VaeTiling.ConcatVertical(rows, outRowLimit, 1);
         for (int r = 0; r < numRows; r++) rows[r].Dispose();
         return result;
-    }
-
-    /// <summary>HWC bytes [0,255] → NCHW F32 [1,3,H,W] in [0,1].</summary>
-    private static unsafe Tensor RgbToTensor01(ReadOnlySpan<byte> rgb, int width, int height)
-    {
-        Tensor t = new Tensor(new TensorShape(1, 3, height, width), DType.F32);
-        float* o = (float*)t.DataPointer;
-        int plane = width * height;
-        for (int y = 0; y < height; y++)
-        {
-            for (int x = 0; x < width; x++)
-            {
-                int px = (y * width + x) * 3;
-                int dst = y * width + x;
-                o[dst] = rgb[px] / 255f;
-                o[plane + dst] = rgb[px + 1] / 255f;
-                o[2 * plane + dst] = rgb[px + 2] / 255f;
-            }
-        }
-        return t;
     }
 
     /// <summary>NCHW F32 [1,3,H,W] in [0,1] → HWC bytes [0,255] (clamped).</summary>

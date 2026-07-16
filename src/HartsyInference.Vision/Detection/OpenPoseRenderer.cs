@@ -31,8 +31,17 @@ public static class OpenPoseRenderer
     /// <summary>Renders all people to a black <paramref name="width"/>×<paramref name="height"/> HWC rgb24 canvas
     /// (keypoints in source-image pixels). Joints/limbs below <paramref name="visThreshold"/> are skipped.</summary>
     public static byte[] RenderBodyPose(IReadOnlyList<PoseDetection> people, int width, int height, float visThreshold = 0.3f)
+        => RenderBodyPose(people, width, height, 1f, 1f, visThreshold);
+
+    /// <summary>Scaled variant: keypoint coordinates (source-image pixels) are multiplied by
+    /// <paramref name="scaleX"/>/<paramref name="scaleY"/> before drawing — used when the skeleton canvas is a
+    /// different resolution than the image the detector ran on (e.g. ControlNet conditioning at gen resolution).</summary>
+    public static byte[] RenderBodyPose(IReadOnlyList<PoseDetection> people, int width, int height,
+        float scaleX, float scaleY, float visThreshold = 0.3f)
     {
         ArgumentNullException.ThrowIfNull(people);
+        if (width <= 0 || height <= 0)
+            throw new ArgumentException($"Canvas dimensions must be positive; got {width}x{height}.");
         byte[] canvas = new byte[(long)width * height * 3];   // zero = black
 
         // Reused per-person OpenPose-18 keypoint buffers (allocated once, not per person — CA2014).
@@ -48,12 +57,12 @@ public static class OpenPoseRenderer
                 {
                     Keypoint ls = person.Keypoints[5], rs = person.Keypoints[6];
                     vis[1] = ls.Confidence >= visThreshold && rs.Confidence >= visThreshold;
-                    px[1] = (ls.X + rs.X) * 0.5f; py[1] = (ls.Y + rs.Y) * 0.5f;
+                    px[1] = (ls.X + rs.X) * 0.5f * scaleX; py[1] = (ls.Y + rs.Y) * 0.5f * scaleY;
                     continue;
                 }
                 Keypoint kp = person.Keypoints[OpToCoco[op]];
                 vis[op] = kp.Confidence >= visThreshold;
-                px[op] = kp.X; py[op] = kp.Y;
+                px[op] = kp.X * scaleX; py[op] = kp.Y * scaleY;
             }
 
             for (int i = 0; i < Limbs.Length; i++)
