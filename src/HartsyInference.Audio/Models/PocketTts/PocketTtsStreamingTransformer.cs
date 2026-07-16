@@ -98,6 +98,102 @@ internal sealed unsafe class PocketTtsStreamingTransformer
         return cur;
     }
 
+    /// <summary>Voice-primed forward: the <paramref name="x"/> tokens (<c>[1,T,dim]</c>, the text prefix + AR
+    /// latents) are generated on top of a pre-filled per-layer KV cache <paramref name="prefixK"/>/
+    /// <paramref name="prefixV"/> (each <c>[1,heads,P,headDim]</c>, already RoPE'd at positions 0..P-1 — this is
+    /// exactly moshi's streaming state where RoPE is applied before the cache write). New q/k get RoPE positions
+    /// offset by <paramref name="prefixLen"/>; attention runs over <c>[prefix ++ new]</c> keys/values with a
+    /// causal <c>[T, P+T]</c> mask (prefix always visible). Returns the T new hidden rows <c>[1,T,dim]</c>.</summary>
+    public Tensor ForwardPrimed(IBackend backend, Tensor x, int t, Tensor[] prefixK, Tensor[] prefixV, int prefixLen, float[][]? layerBosDump = null)
+    {
+        const int batch = 1;
+        int pt = prefixLen + t;
+        Tensor cur = new(x.Shape, DType.F32);
+        Buffer.MemoryCopy((void*)x.DataPointer, (void*)cur.DataPointer, x.Shape.ElementCount * 4, x.Shape.ElementCount * 4);
+
+        Tensor mask = BuildPrimedMask(t, prefixLen, _context);
+        for (int i = 0; i < _layers; i++)
+        {
+            Tensor normed = new(cur.Shape, DType.F32);
+            backend.LayerNorm(normed, cur, _n1W[i]!, _n1B[i]!, LnEps);
+            Tensor qkv = WhisperOps.ProjectLinear(backend, normed, _inProjW[i]!, null, batch, t, _dim, 3 * _dim);
+            normed.Dispose();
+
+            Tensor q = new(new TensorShape(batch, _heads, t, _headDim), DType.F32);
+            Tensor k = new(new TensorShape(batch, _heads, t, _headDim), DType.F32);
+            Tensor v = new(new TensorShape(batch, _heads, t, _headDim), DType.F32);
+            SplitQkv(qkv, q, k, v, batch, t);
+            qkv.Dispose();
+            Rope(q, batch, t, prefixLen); Rope(k, batch, t, prefixLen);
+
+            Tensor kFull = ConcatSeq(prefixK[i], k, prefixLen, t);
+            Tensor vFull = ConcatSeq(prefixV[i], v, prefixLen, t);
+            k.Dispose(); v.Dispose();
+
+            Tensor attn = new(q.Shape, DType.F32);
+            backend.ScaledDotProductAttention(attn, q, kFull, vFull, mask, 1f / MathF.Sqrt(_headDim));
+            q.Dispose(); kFull.Dispose(); vFull.Dispose();
+            Tensor flat = new(new TensorShape(batch, t, _dim), DType.F32);
+            Merge(attn, flat, batch, t);
+            attn.Dispose();
+            Tensor outp = WhisperOps.ProjectLinear(backend, flat, _outProjW[i]!, null, batch, t, _dim, _dim);
+            flat.Dispose();
+            AddUpdate(cur, outp, _ls1[i], batch, t);
+            outp.Dispose();
+
+            Tensor normed2 = new(cur.Shape, DType.F32);
+            backend.LayerNorm(normed2, cur, _n2W[i]!, _n2B[i]!, LnEps);
+            Tensor h = WhisperOps.ProjectLinear(backend, normed2, _lin1W[i]!, null, batch, t, _dim, _ffn);
+            normed2.Dispose();
+            Activations.ErfGelu(h);
+            Tensor ff = WhisperOps.ProjectLinear(backend, h, _lin2W[i]!, null, batch, t, _ffn, _dim);
+            h.Dispose();
+            AddUpdate(cur, ff, _ls2[i], batch, t);
+            ff.Dispose();
+            if (layerBosDump is not null)
+            {
+                layerBosDump[i] = new float[_dim];
+                float* cp = (float*)cur.DataPointer + (long)(t - 1) * _dim;
+                for (int c = 0; c < _dim; c++) layerBosDump[i][c] = cp[c];
+            }
+        }
+        mask.Dispose();
+        return cur;
+    }
+
+    /// <summary>Concatenates a <c>[1,heads,P,headDim]</c> prefix and a <c>[1,heads,T,headDim]</c> tail along the
+    /// sequence dim into <c>[1,heads,P+T,headDim]</c>.</summary>
+    private Tensor ConcatSeq(Tensor prefix, Tensor tail, int p, int t)
+    {
+        Tensor outT = new(new TensorShape(1, _heads, p + t, _headDim), DType.F32);
+        float* op = (float*)outT.DataPointer, pp = (float*)prefix.DataPointer, tp = (float*)tail.DataPointer;
+        for (int h = 0; h < _heads; h++)
+        {
+            long dstH = (long)h * (p + t) * _headDim;
+            Buffer.MemoryCopy(pp + (long)h * p * _headDim, op + dstH, (long)p * _headDim * 4, (long)p * _headDim * 4);
+            Buffer.MemoryCopy(tp + (long)h * t * _headDim, op + dstH + (long)p * _headDim, (long)t * _headDim * 4, (long)t * _headDim * 4);
+        }
+        return outT;
+    }
+
+    private static Tensor BuildPrimedMask(int t, int prefixLen, int? context)
+    {
+        int pt = prefixLen + t;
+        Tensor mask = new(new TensorShape(t, pt), DType.F32);
+        float* mp = (float*)mask.DataPointer;
+        for (int qi = 0; qi < t; qi++)
+        {
+            int absQ = prefixLen + qi;
+            for (int j = 0; j < pt; j++)
+            {
+                int delta = absQ - j;   // key j is at absolute position j (prefix 0..P-1, new P..P+T-1)
+                bool ok = delta >= 0 && (context is null || delta < context.Value);
+                mp[(long)qi * pt + j] = ok ? 0f : float.NegativeInfinity;
+            }
+        }
+        return mask;
+    }
+
     private void SplitQkv(Tensor qkv, Tensor q, Tensor k, Tensor v, int batch, int t)
     {
         float* s = (float*)qkv.DataPointer;
@@ -140,7 +236,7 @@ internal sealed unsafe class PocketTtsStreamingTransformer
                 }
     }
 
-    private void Rope(Tensor x, int batch, int t)
+    private void Rope(Tensor x, int batch, int t, int posOffset = 0)
     {
         float* xp = (float*)x.DataPointer;
         int half = _headDim / 2;
@@ -152,7 +248,7 @@ internal sealed unsafe class PocketTtsStreamingTransformer
                     for (int kk = 0; kk < half; kk++)
                     {
                         float freq = MathF.Exp(kk * (-MathF.Log(_maxPeriod) * 2f / _headDim));
-                        float ang = ti * freq, cs = MathF.Cos(ang), sn = MathF.Sin(ang);
+                        float ang = (posOffset + ti) * freq, cs = MathF.Cos(ang), sn = MathF.Sin(ang);
                         float r = xp[rb + 2 * kk], im = xp[rb + 2 * kk + 1];
                         xp[rb + 2 * kk] = r * cs - im * sn;
                         xp[rb + 2 * kk + 1] = r * sn + im * cs;
