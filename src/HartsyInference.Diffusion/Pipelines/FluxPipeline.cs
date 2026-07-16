@@ -98,7 +98,9 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         int[]? negPromptTokenIdsT5 = null,
         int[]? negPromptAttentionMaskT5 = null,
         float trueCfgScale = 1.0f,
-        Tensor? kontextRefImage = null)
+        Tensor? kontextRefImage = null,
+        Tensor? reduxImageEmbeds = null,
+        float reduxApplyStartFraction = 0f)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
@@ -116,15 +118,28 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         bool isFillModel = _transformer.XEmbedInputDim >= 384;
         if (isFillModel)
         {
-            // The masked-latent + packed-mask conditioning path is not yet wired. Diagnose
-            // explicitly rather than silently concatenating a 64-wide control (which would
-            // mis-shape the 384-wide x_embedder).
-            throw new NotImplementedException(
-                "This Flux checkpoint is FLUX.1 Fill (x_embedder input dim 384), which requires masked-image + " +
-                "mask conditioning (64 noise + 320 packed masked-latent+mask). That conditioning path is not yet " +
-                "implemented; Canny / Depth (input dim 128) are supported.");
+            if (request is not ImageToImageRequest fillReq || fillReq.Mask is null)
+            {
+                throw new InvalidOperationException(
+                    "This Flux checkpoint is FLUX.1 Fill (x_embedder input dim 384) and requires a source image + mask. " +
+                    "Pass an ImageToImageRequest with SourceImage and Mask (Strength 1.0 for a standard fill/outpaint).");
+            }
+            if (fillReq.SourceImage.DType != DType.F32)
+            {
+                throw new ArgumentException($"FLUX.1 Fill SourceImage must be F32 in [-1, 1]; got {fillReq.SourceImage.DType}.", nameof(request));
+            }
+            if (_vaeEncoder is null)
+            {
+                throw new InvalidOperationException(
+                    "FLUX.1 Fill requires a VaeEncoder to encode the masked source image. Construct the pipeline with the overload that accepts one.");
+            }
+            if (controlImage is not null)
+            {
+                throw new InvalidOperationException(
+                    "FLUX.1 Fill conditions on SourceImage + Mask; controlImage is only for Canny / Depth checkpoints.");
+            }
         }
-        if (isToolsModel)
+        else if (isToolsModel)
         {
             if (controlImage is null)
             {
@@ -156,10 +171,13 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         }
         int startStep = plan.StartStep;
         Tensor? maskPixel = plan.MaskPixel;
-        bool isMaskedInpaint = maskPixel is not null;
+        // Fill conditions the transformer on the masked image + mask through the wide x_embedder;
+        // the per-step latent blend below is the VANILLA-model inpaint emulation and must not also run.
+        bool isMaskedInpaint = maskPixel is not null && !isFillModel;
 
         string baseMode = _config.GuidanceEmbed ? "Dev" : "Schnell";
-        string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+        string opMode = isFillModel ? $"fill (start={startStep}/{steps})"
+                       : isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
                        : isImg2Img ? $"img2img (start={startStep}/{steps})"
                        : "txt2img";
         Logs.Info($"Flux ({baseMode}) {opMode}: {width}x{height}, {steps} steps, guidance={guidanceScale}, seed={seed}");
@@ -288,6 +306,30 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                 "Tokenize the negative prompt with the same max length as the positive prompt.");
         }
 
+        // ── 1b. FLUX.1 Redux: append the projected SigLIP image tokens after the T5 text tokens. They ride
+        //    the joint attention as extra text tokens with the same all-zero RoPE position (diffusers
+        //    FluxPriorRedux / Comfy StyleModelApply). Callers pre-scale the embeds by the style strength;
+        //    a non-zero apply-start fraction makes the loop switch conditioning per step (host path).
+        Tensor? reduxExtendedT5 = null;
+        int reduxTokenCount = 0;
+        if (reduxImageEmbeds is not null)
+        {
+            if (regionalPlan is not null && regionalPlan.Regions.Count > 0)
+            {
+                throw new InvalidOperationException("Redux style conditioning and regional prompting cannot be combined in one request.");
+            }
+            if (reduxImageEmbeds.Shape.Rank != 3 || reduxImageEmbeds.Shape[0] != 1
+                || reduxImageEmbeds.Shape[2] != t5Embeddings.Shape[2])
+            {
+                throw new ArgumentException(
+                    $"reduxImageEmbeds must be [1, N, {t5Embeddings.Shape[2]}] (Flux text-space tokens); got {reduxImageEmbeds.Shape}.",
+                    nameof(reduxImageEmbeds));
+            }
+            reduxExtendedT5 = ConcatPackedSeqDim(t5Embeddings, reduxImageEmbeds);
+            reduxTokenCount = (int)reduxImageEmbeds.Shape[1];
+            Logs.Info($"Flux Redux: appended {reduxTokenCount} style tokens after {txtSeqLen} text tokens (applyStart={reduxApplyStartFraction:F2}).");
+        }
+
         // ── 2. Set up dynamic flow-match scheduler ─────────────────────
         TensorShape latentShape = new TensorShape(1, 16, latentH, latentW);
         int hPacked = latentH / 2;
@@ -318,7 +360,30 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         //    consumes. Since the control image is fixed across the schedule we encode it
         //    once and reuse — meaningful win on long schedules.
         Tensor? packedControl = null;
-        if (isToolsModel && controlImage is not null)
+        if (isFillModel)
+        {
+            // FLUX.1 Fill conditioning (diffusers FluxFillPipeline): per-token features are
+            // [noise 64 | masked-image latent 64 | mask 256]. The masked image is source·(1−mask)
+            // in [-1,1] (hole → 0 = the VAE's mid-gray), VAE-encoded with the normal shift/scale.
+            // The pixel mask maps each latent cell's 8×8 pixel block to 64 channels (c = sy·8+sx),
+            // then 2×2-packs to 256. Fixed across the schedule → built once, concatenated per step.
+            ImageToImageRequest fillReq = (ImageToImageRequest)request;
+            Stopwatch fillSw = Stopwatch.StartNew();
+            Tensor maskedImage = MaskPixelsToNeutral(fillReq.SourceImage, maskPixel!);
+            Tensor maskedLatent = _vaeEncoder!.Encode(Backend, maskedImage);
+            maskedImage.Dispose();
+            Tensor packedMaskedLatent = PackLatent(maskedLatent, latentH, latentW);
+            maskedLatent.Dispose();
+            Tensor mask64 = FillMaskToLatentChannels(maskPixel!, latentH, latentW);
+            Tensor packedFillMask = PackLatent(mask64, latentH, latentW);
+            mask64.Dispose();
+            packedControl = ConcatPackedFeatureDim(packedMaskedLatent, packedFillMask);
+            packedMaskedLatent.Dispose();
+            packedFillMask.Dispose();
+            fillSw.Stop();
+            Logs.Info($"Flux Fill conditioning built in {fillSw.ElapsedMilliseconds}ms (masked-latent 64 + packed mask 256).");
+        }
+        else if (isToolsModel && controlImage is not null)
         {
             if (controlImage.Shape.Rank != 4 || controlImage.Shape[0] != 1 || controlImage.Shape[1] != 3
                 || controlImage.Shape[2] != height || controlImage.Shape[3] != width)
@@ -424,8 +489,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         //    rectangle starts at the (possibly extended) text length. Collapses to the base path
         //    when no plan is given.
         bool hasRegions = regionalPlan is not null && regionalPlan.Regions.Count > 0;
-        Tensor condStream = t5Embeddings;
-        int condTxtSeqLen = txtSeqLen;
+        Tensor condStream = reduxExtendedT5 ?? t5Embeddings;
+        int condTxtSeqLen = txtSeqLen + reduxTokenCount;
         Tensor? extendedT5 = null;
         List<(int Start, int End)>? regionRanges = null;
         List<float[]>? regionGridMasks = null;
@@ -442,7 +507,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         // step-graph slot, so a persistent cross-generation graph requires skipping the sweep on the plain
         // t2i cache-warm path (the Chroma pattern — per-op disposal + the warm mem-pool keep VRAM flat).
         bool drainFree = !isMaskedInpaint && packedControl is null && packedKontextRef is null
-            && !hasRegions && !StatsEnabled;
+            && !hasRegions && !StatsEnabled
+            && (reduxExtendedT5 is null || reduxApplyStartFraction <= 0f);
         bool graphRoute = drainFree && !doTrueCfg && packedSourceLatent is null
             && DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
 
@@ -520,10 +586,17 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // transformer pass. The transformer's wider x_embedder consumes the 128-dim
             // input; velocity output is back at 64 dims (no control side in the prediction).
             Tensor transformerInput = packedControl is not null
-                ? ConcatPackedFeatureDim(packedLatent, packedControl)      // Tools: channel concat → 128-dim
+                ? ConcatPackedFeatureDim(packedLatent, packedControl)      // Tools/Fill: channel concat → 128/384-dim
                 : packedKontextRef is not null
                     ? ConcatPackedSeqDim(packedLatent, packedKontextRef)   // Kontext: sequence concat [noise;ref]
                     : packedLatent;
+
+            // Redux apply-start: before the threshold step the forward runs on the plain text stream,
+            // from it onward on the redux-extended stream (Comfy ConditioningSetTimestepRange semantics).
+            bool reduxActive = reduxExtendedT5 is null || reduxApplyStartFraction <= 0f
+                || (i - startStep) >= (int)MathF.Ceiling(reduxApplyStartFraction * (steps - startStep));
+            Tensor stepCond = reduxActive ? condStream : t5Embeddings;
+            int stepCondLen = reduxActive ? condTxtSeqLen : txtSeqLen;
 
             Tensor? regionBias = null;
             if (hasRegions)
@@ -535,8 +608,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
 
             // Forward pass: conditional velocity prediction (embedded distilled guidance rides along).
             Tensor velocityPred = _transformer.Forward(
-                Backend, transformerInput, condStream, sigma,
-                clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, regionBias,
+                Backend, transformerInput, stepCond, sigma,
+                clipPooled!, guidanceScale, stepCondLen, hPacked, wPacked, regionBias,
                 kontextRefSeqLen, kontextRefSeqLen > 0 ? hPacked : 0, kontextRefSeqLen > 0 ? wPacked : 0);
 
             // True-CFG: run a second forward with the negative conditioning (same noisy latent,
@@ -641,6 +714,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         // clipPooled / t5Embeddings / negClipPooled / negT5Embeddings are cross-generation cache entries —
         // not disposed here; replacement on a future cache miss owns their lifetime.
         extendedT5?.Dispose();
+        reduxExtendedT5?.Dispose();
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
         packedControl?.Dispose();
@@ -1002,8 +1076,54 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         return output;
     }
 
+    /// <summary>Zeroes the masked region of a [-1,1] RGB source — <c>output = source · (1 − mask)</c>, mask broadcast over the 3 channels — producing FLUX.1 Fill's masked-image input (0 = the VAE's mid-gray).</summary>
+    internal static Tensor MaskPixelsToNeutral(Tensor source, Tensor mask)
+    {
+        long h = source.Shape[2];
+        long w = source.Shape[3];
+        Tensor output = new Tensor(source.Shape, DType.F32);
+        float* sp = (float*)source.DataPointer;
+        float* mp = (float*)mask.DataPointer;
+        float* op = (float*)output.DataPointer;
+        long plane = h * w;
+        for (int c = 0; c < 3; c++)
+        {
+            long cOff = c * plane;
+            for (long i = 0; i < plane; i++)
+            {
+                op[cOff + i] = sp[cOff + i] * (1.0f - mp[i]);
+            }
+        }
+        return output;
+    }
+
+    /// <summary>Expands a pixel mask <c>[1, 1, H·8, W·8]</c> to FLUX.1 Fill's 64-channel latent-resolution form <c>[1, 64, H, W]</c>: channel <c>sy·8+sx</c> holds the mask pixel at sub-position (sy, sx) of each 8×8 block (diffusers FluxFillPipeline's view→permute→reshape).</summary>
+    internal static Tensor FillMaskToLatentChannels(Tensor maskPixel, int latentH, int latentW)
+    {
+        Tensor output = new Tensor(new TensorShape(1, 64, latentH, latentW), DType.F32);
+        float* mp = (float*)maskPixel.DataPointer;
+        float* op = (float*)output.DataPointer;
+        int pixW = latentW * 8;
+        for (int sy = 0; sy < 8; sy++)
+        {
+            for (int sx = 0; sx < 8; sx++)
+            {
+                long cOff = (long)(sy * 8 + sx) * latentH * latentW;
+                for (int i = 0; i < latentH; i++)
+                {
+                    long rowOff = (long)(i * 8 + sy) * pixW;
+                    for (int j = 0; j < latentW; j++)
+                    {
+                        op[cOff + (long)i * latentW + j] = mp[rowOff + j * 8 + sx];
+                    }
+                }
+            }
+        }
+        return output;
+    }
+
     /// <summary>Packs a latent tensor from [B, C, H, W] to [B, H/2*W/2, C*4]. Rearranges 2x2 spatial patches into channel dimension.</summary>
-    private static Tensor PackLatent(Tensor latent, int h, int w)
+    internal static Tensor PackLatent(Tensor latent, int h, int w)
     {
         int batch = (int)latent.Shape[0];
         int channels = (int)latent.Shape[1];
