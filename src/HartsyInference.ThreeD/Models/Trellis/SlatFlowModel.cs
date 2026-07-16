@@ -15,6 +15,7 @@ public sealed unsafe class SlatFlowModel
     private readonly SlatResBlock3d[] _inBlocks = new SlatResBlock3d[2];
     private readonly SlatResBlock3d[] _outBlocks = new SlatResBlock3d[2];
     private readonly SsFlowBlock[] _blocks = new SsFlowBlock[24];
+    private Tensor? _apeCache; private int[]? _apeKey;   // APE is geometry-only → cache across sampler steps (keyed by input coords ref)
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
@@ -53,16 +54,30 @@ public sealed unsafe class SlatFlowModel
         List<Tensor> skips = new();
         foreach (SlatResBlock3d b in _inBlocks) { h = b.Forward(backend, h, vec, ref down, null); skips.Add(h.Feats); }
 
-        // APE on the (downsampled) coords, added to feats.
-        Tensor ape = AbsolutePositionEmbed(h.Coords, h.Count, Width);
-        Tensor hAdd = new(h.Feats.Shape, DType.F32); backend.Add(hAdd, h.Feats, ape); ape.Dispose();
+        // APE on the (downsampled) coords, added to feats. The APE is a pure function of the voxel geometry, which is
+        // constant across all sampler steps (the sampler threads the SAME SparseTensor, mutating only feats in-place),
+        // so cache it keyed by the input coords reference — recomputing the ~3M-trig host loop every step (44×, ~15 ms
+        // each) is wasted work. Cached object is reused (not disposed), so it auto-promotes to a resident weight.
+        if (_apeCache is null || !ReferenceEquals(_apeKey, x.Coords))
+        {
+            _apeCache?.Dispose();
+            _apeCache = AbsolutePositionEmbed(h.Coords, h.Count, Width);
+            _apeKey = x.Coords;
+        }
+        Tensor hAdd = new(h.Feats.Shape, DType.F32); backend.Add(hAdd, h.Feats, _apeCache);
         h = h.Replace(hAdd);
 
+        // Thread each block's [1,n,Width] output straight into the next (no per-block reshape). As3D avoids a cache-
+        // missing view entirely when h.Feats is already [1,n,Width]. Guard the dispose so the FIRST input — which may
+        // alias the caller's h.Feats — is not freed mid-loop (h still references it until the Replace below).
+        Tensor cur = SparseOps.As3D(h.Feats);
         foreach (SsFlowBlock b in _blocks)
         {
-            Tensor nf = b.Forward(backend, h.Feats.Reshape(new TensorShape(1, h.Count, Width)), vec, cond, _ones64!);
-            h = h.Replace(nf);
+            Tensor nf = b.Forward(backend, cur, vec, cond, _ones64!);
+            if (!ReferenceEquals(cur, h.Feats)) cur.Dispose();
+            cur = nf;
         }
+        h = h.Replace(cur);
 
         (int[] idx, int[] coords, int res) up = (down!.Value.Idx, down.Value.PreCoords, down.Value.PreResolution);
         for (int j = 0; j < _outBlocks.Length; j++)
@@ -70,12 +85,12 @@ public sealed unsafe class SlatFlowModel
             Tensor skip = skips[skips.Count - 1 - j];
             int n = h.Count, c1 = h.Channels, c2 = (int)skip.Shape[skip.Shape.Rank - 1];
             Tensor cat = new(new TensorShape(1, n, c1 + c2), DType.F32);
-            backend.Concat(cat, [h.Feats.Reshape(new TensorShape(1, n, c1)), skip.Reshape(new TensorShape(1, n, c2))], 2);
+            backend.Concat(cat, [SparseOps.As3D(h.Feats), SparseOps.As3D(skip)], 2);
             h = _outBlocks[j].Forward(backend, h.Replace(cat), vec, ref down, _outBlocks[j] == _outBlocks[0] ? up : null);
         }
 
         int fc = h.Channels;   // 128 after the out-blocks (out_layer maps 128 → 8)
-        Tensor normed = new(new TensorShape(1, h.Count, fc), DType.F32); backend.LayerNormNoAffine(normed, h.Feats.Reshape(new TensorShape(1, h.Count, fc)), 1e-5f);
+        Tensor normed = new(new TensorShape(1, h.Count, fc), DType.F32); backend.LayerNormNoAffine(normed, SparseOps.As3D(h.Feats), 1e-5f);
         Tensor outFeats = SparseLinear(backend, normed, _outW!, _outB!); normed.Dispose();
         vec.Dispose();
         return h.Replace(outFeats);
@@ -85,7 +100,7 @@ public sealed unsafe class SlatFlowModel
     {
         int n = (int)(feats.ElementCount / feats.Shape[feats.Shape.Rank - 1]), cout = (int)w.Shape[0];
         Tensor o = new(new TensorShape(1, n, cout), DType.F32);
-        backend.Linear(o, feats.Reshape(new TensorShape(1, n, (int)feats.Shape[feats.Shape.Rank - 1])), w, b);
+        backend.Linear(o, SparseOps.As3D(feats), w, b);
         return o;
     }
 

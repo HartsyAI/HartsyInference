@@ -41,7 +41,30 @@ public sealed unsafe class KyutaiDepformerParityTests
         using MoshiDepformer dep = new();
         dep.LoadWeights(w);
         IBackend backend = Environment.GetEnvironmentVariable("GSV_CUDA")=="1" ? new HartsyInference.Cuda.CudaBackend(0, Environment.GetEnvironmentVariable("GSV_PTX")!) : new CpuBackend();
-        using Tensor logits = dep.DecodeFrameGreedy(backend, tout, textToken, out int[] tokens);
+        // Teacher-force with the reference tokens so each codebook is scored under identical context.
+        int[] forced = new int[MoshiDepformer.DepQ];
+        for (int cb = 0; cb < MoshiDepformer.DepQ; cb++) forced[cb] = ((int*)refTokens.DataPointer)[cb];
+        using Tensor logits = dep.DecodeFrameGreedy(backend, tout, textToken, out int[] tokens, forcedPrev: forced);
+
+        // Per-codebook logit correlation (the sampling-robust parity signal).
+        for (int cb = 0; cb < MoshiDepformer.DepQ; cb++)
+        {
+            double sa = 0, sb = 0; float* pa = (float*)logits.DataPointer + (long)cb * MoshiDepformer.Card;
+            float* pb = (float*)refLogits.DataPointer + (long)cb * MoshiDepformer.Card;
+            for (int c = 0; c < MoshiDepformer.Card; c++) { sa += pa[c]; sb += pb[c]; }
+            double ma = sa / MoshiDepformer.Card, mb = sb / MoshiDepformer.Card, cov = 0, va = 0, vb = 0;
+            for (int c = 0; c < MoshiDepformer.Card; c++) { double da = pa[c] - ma, db = pb[c] - mb; cov += da * db; va += da * da; vb += db * db; }
+            double corr = cov / Math.Sqrt(va * vb);
+            if (cb < 12 || corr < 0.999) _out.WriteLine($"  cb{cb} logit corr={corr:F5} argmax mine={ArgMaxRow(pa)} ref={((int*)refTokens.DataPointer)[cb]}");
+        }
+
+        string? dbg = Environment.GetEnvironmentVariable("KYUTAI_DEP_DUMP");
+        if (dbg is not null)
+        {
+            byte[] bytes = new byte[MoshiDepformer.DepQ * MoshiDepformer.Card * 4];
+            fixed (byte* bp = bytes) Buffer.MemoryCopy((void*)logits.DataPointer, bp, bytes.Length, bytes.Length);
+            File.WriteAllBytes(dbg, bytes);
+        }
 
         float* a = (float*)logits.DataPointer; float* b = (float*)refLogits.DataPointer;
         int* rt = (int*)refTokens.DataPointer;
@@ -64,5 +87,12 @@ public sealed unsafe class KyutaiDepformerParityTests
         // check; the logit residual is f32 attention-accumulation noise on large logits (peak ~6.9).
         Assert.Equal(0, tokenMismatches);
         Assert.True(maxAbs < 3e-2, $"depformer diverges (maxAbs={maxAbs:E4}).");
+    }
+
+    private static int ArgMaxRow(float* p)
+    {
+        int best = 0; float bv = p[0];
+        for (int i = 1; i < MoshiDepformer.Card; i++) if (p[i] > bv) { bv = p[i]; best = i; }
+        return best;
     }
 }

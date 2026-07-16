@@ -21,8 +21,8 @@ internal sealed unsafe class SlatResBlock3d
         SlatResBlock3d b = new();
         Tensor F(string k) => SparseStructureFlow.F(w, $"{p}.{k}");
         b._n1W = F("norm1.weight"); b._n1B = F("norm1.bias");
-        b._c1Slices = SparseOps.ConvWeightSlices(F("conv1.conv.weight")); b._c1B = F("conv1.conv.bias");
-        b._c2Slices = SparseOps.ConvWeightSlices(F("conv2.conv.weight")); b._c2B = F("conv2.conv.bias");
+        b._c1Slices = SparseOps.ConvWeightSlices(F("conv1.conv.weight"), f16: true); b._c1B = F("conv1.conv.bias");
+        b._c2Slices = SparseOps.ConvWeightSlices(F("conv2.conv.weight"), f16: true); b._c2B = F("conv2.conv.bias");
         b._embW = F("emb_layers.1.weight"); b._embB = F("emb_layers.1.bias");
         b._inCh = (int)b._c1Slices[0].Shape[1]; b._outCh = (int)b._c1Slices[0].Shape[0];
         b._downsample = downsample; b._upsample = upsample;
@@ -43,7 +43,7 @@ internal sealed unsafe class SlatResBlock3d
     {
         // updown FIRST (per reference).
         if (_downsample) { (SparseTensor d, int[] idx) = SparseOps.Downsample(backend, x, 2); down = new DownState(idx, x.Coords, x.Resolution); x = d; }
-        else if (_upsample) { (int[] uidx, int[] ucoords, int ures) = up!.Value; x = SparseOps.Upsample(x, uidx, ucoords, ures); }
+        else if (_upsample) { (int[] uidx, int[] ucoords, int ures) = up!.Value; x = SparseOps.Upsample(backend, x, uidx, ucoords, ures); }
 
         // emb → scale,shift  (SiLU(vec) → Linear(2*out)).
         Tensor sil = new(vec.Shape, DType.F32); backend.Silu(sil, vec);
@@ -57,7 +57,7 @@ internal sealed unsafe class SlatResBlock3d
         Tensor a1 = new(h1.Shape, DType.F32); backend.Silu(a1, h1); h1.Dispose();
         SparseTensor hc = SparseOps.SubmanifoldConv3dSparse(backend, x.Replace(a1), _c1Slices, _c1B); a1.Dispose();   // → [.,outCh]
 
-        Tensor h2 = new(new TensorShape(1, n, _outCh), DType.F32); backend.LayerNormModulate(h2, hc.Feats.Reshape(new TensorShape(1, n, _outCh)), scale, shift, 1e-6f);
+        Tensor h2 = new(new TensorShape(1, n, _outCh), DType.F32); backend.LayerNormModulate(h2, SparseOps.As3D(hc.Feats), scale, shift, 1e-6f);
         Tensor a2 = new(h2.Shape, DType.F32); backend.Silu(a2, h2); h2.Dispose();
         SparseTensor conv2 = SparseOps.SubmanifoldConv3dSparse(backend, hc.Replace(a2), _c2Slices, _c2B); a2.Dispose();
         scale.Dispose(); shift.Dispose();

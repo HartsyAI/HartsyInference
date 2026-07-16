@@ -131,10 +131,19 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
     /// and self-attention runs through a <see cref="FixedKvCache"/>, so each frame is a single-token backbone
     /// step rather than a full-prefix re-run.</summary>
     public int[,] Generate(IBackend backend, KyutaiTextScheduler scheduler, IEnumerable<KyutaiTextScheduler.Entry> entries,
-        Tensor cross, Tensor sumCond, int maxFrames = 250, int delaySteps = 16, int finalPadding = 4)
+        Tensor cross, Tensor sumCond, int maxFrames = 250, int delaySteps = 16, int finalPadding = 4,
+        float audioTemp = 0.6f, int audioTopK = 250, float textTemp = 0.6f, int textTopK = 25, int seed = 0)
     {
+        // moshi samples BOTH the text token (temp_text/top_k_text) and the audio codes: the sampled text token's
+        // new_word/pad choice is what PACES the words through the scheduler. Greedy argmax over the text head
+        // collapses to always-pad (the model is confident to articulate), so words only advance when the scheduler
+        // FORCES one every max_padding steps — stretching the frame count and desynchronising the audio (mush).
+        Random rng = new(seed);
+        // Per-stream delays from the checkpoint config: [text=0, cb0(semantic)=0, cb1..cb31(acoustic)=2].
+        // (Codebook 0 must stay delay 0 — it carries the semantic content the acoustic codebooks follow; giving
+        // it delay 2 mis-aligns the whole cascade by two frames and scrambles the audio.)
         int[] delays = new int[1 + NumCodebooks];
-        for (int k = 1; k < 1 + NumCodebooks; k++) delays[k] = 2;   // [0(text),0(cb0),2×31]
+        for (int k = 2; k < 1 + NumCodebooks; k++) delays[k] = 2;
         int maxDelay = 2, ct = maxFrames + maxDelay + 2;
         int[] initial = new int[1 + NumCodebooks];
         initial[0] = TextCard;                                       // text initial = 8000
@@ -142,6 +151,8 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
         int[,] cache = new int[1 + NumCodebooks, ct];
 
         KyutaiTextScheduler.State state = scheduler.NewState(entries);
+        string? dbgDir = Environment.GetEnvironmentVariable("KYUTAI_DEBUG_DUMP");
+        if (dbgDir is not null && sumCond is not null) DumpF32(Path.Combine(dbgDir, "our_condsum.bin"), sumCond, Dim);
         List<int[]> emitted = new();
         using MoshiTransformer.CrossKvCache crossKv = Backbone.PrecomputeCrossKv(backend, cross);
         using FixedKvCache selfCache = new(numLayers: 16, batch: 1,
@@ -156,12 +167,16 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
 
                 using Tensor frameEmbed = EmbedFrame(backend, textIn, audioIn);
                 Tensor lastCtx = StepText(backend, frameEmbed, sumCond, crossKv, selfCache, offset, out Tensor textLogits);
-                int textTok;
-                using (Tensor textIdx = new(new TensorShape(1), DType.I32))   // device-resident argmax; only the id syncs back
+                // Sample the text token (moshi sample_token, temp_text/top_k_text) — NOT argmax; the sampled
+                // new_word/pad choice paces the words. textLogits is [1,1,TextCard]; sample on the host.
+                ReadOnlySpan<float> textSpan = new((void*)textLogits.DataPointer, TextCard);
+                if (dbgDir is not null && offset < 8)
                 {
-                    backend.ArgMaxLastDim(textIdx, textLogits);               // textLogits is [1,1,TextCard]
-                    textTok = ((int*)textIdx.DataPointer)[0];
+                    DumpF32(Path.Combine(dbgDir, $"our_tout_f{offset}.bin"), lastCtx, Dim);
+                    DumpF32(Path.Combine(dbgDir, $"our_tlogits_f{offset}.bin"), textLogits, TextCard);
+                    DumpF32(Path.Combine(dbgDir, $"our_frameemb_f{offset}.bin"), frameEmbed, Dim);
                 }
+                int textTok = textTemp > 0f ? SampleTopK(textSpan, textTemp, textTopK, rng) : ArgMax(textSpan);
                 textLogits.Dispose();
 
                 int outTok = scheduler.Process(offset, state, textTok, out _);
@@ -169,7 +184,7 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
                 int[] audio = new int[NumCodebooks];
                 if (offset >= delaySteps)
                 {
-                    using Tensor logits = Depformer.DecodeFrameGreedy(backend, lastCtx, outTok, out audio);
+                    using Tensor logits = Depformer.DecodeFrameGreedy(backend, lastCtx, outTok, out audio, audioTemp, audioTopK, rng);
                 }
                 lastCtx.Dispose();
                 for (int q = 0; q < NumCodebooks; q++)
@@ -205,6 +220,39 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
     {
         foreach (int c in frame) if (c < 0 || c >= AudioCard) return false;
         return true;
+    }
+
+    private static void DumpF32(string path, Tensor t, int n)
+    {
+        byte[] bytes = new byte[n * 4];
+        fixed (byte* bp = bytes) Buffer.MemoryCopy((void*)t.DataPointer, bp, n * 4, n * 4);
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static int ArgMax(ReadOnlySpan<float> v)
+    {
+        int best = 0; float bv = v[0];
+        for (int i = 1; i < v.Length; i++) if (v[i] > bv) { bv = v[i]; best = i; }
+        return best;
+    }
+
+    // Top-k temperature sampling (moshi sample_token): scale by temp, keep the topK highest, softmax, multinomial.
+    private static int SampleTopK(ReadOnlySpan<float> logits, float temp, int topK, Random rng)
+    {
+        int n = logits.Length;
+        int k = topK <= 0 ? n : Math.Min(topK, n);
+        int[] idx = new int[n];
+        for (int i = 0; i < n; i++) idx[i] = i;
+        float[] vals = new float[n];
+        for (int i = 0; i < n; i++) vals[i] = logits[i];
+        Array.Sort(idx, (a, b) => vals[b].CompareTo(vals[a]));   // descending by logit
+        float max = vals[idx[0]] / temp;
+        double sum = 0;
+        double[] p = new double[k];
+        for (int j = 0; j < k; j++) { p[j] = Math.Exp(vals[idx[j]] / temp - max); sum += p[j]; }
+        double r = rng.NextDouble() * sum, acc = 0;
+        for (int j = 0; j < k; j++) { acc += p[j]; if (r <= acc) return idx[j]; }
+        return idx[k - 1];
     }
 
     private static Tensor Row(Tensor table, int row)

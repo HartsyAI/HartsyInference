@@ -71,7 +71,8 @@ public sealed unsafe class MoshiDepformer : IDisposable
 
     /// <summary>Greedy (argmax) decode of all 32 codebooks for one temporal frame; returns the per-codebook
     /// logits <c>[DepQ, Card]</c>. <paramref name="textToken"/> seeds the cb-0 step. Deterministic, for parity.</summary>
-    public Tensor DecodeFrameGreedy(IBackend backend, Tensor transformerOut, int textToken, out int[] tokens)
+    public Tensor DecodeFrameGreedy(IBackend backend, Tensor transformerOut, int textToken, out int[] tokens,
+        float temp = 0f, int topK = 0, Random? rng = null, int[]? forcedPrev = null)
     {
         Tensor logits = new(new TensorShape(DepQ, Card), DType.F32);
         tokens = new int[DepQ];
@@ -81,6 +82,7 @@ public sealed unsafe class MoshiDepformer : IDisposable
             kCache[l] = new Tensor(new TensorShape(1, Heads, DepQ, HeadDim), DType.F32);
             vCache[l] = new Tensor(new TensorShape(1, Heads, DepQ, HeadDim), DType.F32);
         }
+        string? dbgDir = Environment.GetEnvironmentVariable("KYUTAI_DEP_INTERNAL");
         try
         {
             int prev = textToken;
@@ -91,16 +93,26 @@ public sealed unsafe class MoshiDepformer : IDisposable
                 Tensor emb = cb == 0 ? TextEmbed(backend, prev) : CodeEmbed(backend, cb - 1, prev);
                 Tensor x = new(new TensorShape(1, 1, Dim), DType.F32);
                 backend.Add(x, depIn, emb); depIn.Dispose(); emb.Dispose();
+                if (dbgDir is not null && cb < 4) DumpDep(Path.Combine(dbgDir, $"our_depin_{cb}.bin"), x);
 
                 for (int l = 0; l < Layers; l++)
+                {
                     x = Block(backend, x, l, set, cb, kCache[l], vCache[l]);
+                    if (dbgDir is not null && cb < 2) DumpDep(Path.Combine(dbgDir, $"our_deplayer_{cb}_{l}.bin"), x);
+                }
+                if (dbgDir is not null && cb < 4) DumpDep(Path.Combine(dbgDir, $"our_depout_{cb}.bin"), x);
 
                 Tensor lg = WhisperOps.ProjectLinear(backend, x, _heads[cb]!, null, 1, 1, Dim, Card);
                 x.Dispose();
                 Buffer.MemoryCopy((void*)lg.DataPointer, (float*)logits.DataPointer + (long)cb * Card, Card * 4, Card * 4);
-                int tok = ArgMax(new ReadOnlySpan<float>((void*)lg.DataPointer, Card));
+                ReadOnlySpan<float> lgSpan = new((void*)lg.DataPointer, Card);
+                int tok = temp > 0f && rng is not null ? SampleTopK(lgSpan, temp, topK, rng) : ArgMax(lgSpan);
                 lg.Dispose();
-                tokens[cb] = tok; prev = tok;
+                tokens[cb] = tok;
+                // Teacher forcing (parity): feed the reference's previous-codebook token as the next step's input,
+                // so each codebook's logits are compared under identical context (a sampling model never follows
+                // the greedy cascade, so greedy-cascade divergence is not itself a bug).
+                prev = forcedPrev is not null ? forcedPrev[cb] : tok;
             }
             return logits;
         }
@@ -108,6 +120,13 @@ public sealed unsafe class MoshiDepformer : IDisposable
         {
             for (int l = 0; l < Layers; l++) { kCache[l].Dispose(); vCache[l].Dispose(); }
         }
+    }
+
+    private static void DumpDep(string path, Tensor t)
+    {
+        byte[] bytes = new byte[Dim * 4];
+        fixed (byte* bp = bytes) Buffer.MemoryCopy((void*)t.DataPointer, bp, bytes.Length, bytes.Length);
+        File.WriteAllBytes(path, bytes);
     }
 
     private Tensor Block(IBackend backend, Tensor x, int layer, int set, int cb, Tensor kCache, Tensor vCache)
@@ -137,10 +156,15 @@ public sealed unsafe class MoshiDepformer : IDisposable
         outW.Dispose(); attnFlat.Dispose();
         Tensor afterAttn = new(sh, DType.F32);
         backend.Add(afterAttn, x, o); o.Dispose(); x.Dispose();
+        if (cb == 0 && layer == 0 && Environment.GetEnvironmentVariable("KYUTAI_DEP_INTERNAL") is string dd)
+            DumpDep(Path.Combine(dd, "our_afterattn_0_0.bin"), afterAttn);
 
         Tensor pre2 = new(sh, DType.F32);
         backend.RmsNorm(pre2, afterAttn, _norm2[layer]!, RmsEps);
-        Tensor mlp = Gating(backend, pre2, layer, set); pre2.Dispose();
+        Tensor mlp = Gating(backend, pre2, layer, set);
+        if (cb == 0 && layer == 0 && Environment.GetEnvironmentVariable("KYUTAI_DEP_INTERNAL") is string dd2)
+        { DumpDep(Path.Combine(dd2, "our_ffout_0_0.bin"), mlp); DumpDep(Path.Combine(dd2, "our_pre2_0_0.bin"), pre2); }
+        pre2.Dispose();
         Tensor result = new(sh, DType.F32);
         backend.Add(result, afterAttn, mlp); afterAttn.Dispose(); mlp.Dispose();
         return result;
@@ -245,6 +269,30 @@ public sealed unsafe class MoshiDepformer : IDisposable
         int best = 0; float bv = v[0];
         for (int i = 1; i < v.Length; i++) if (v[i] > bv) { bv = v[i]; best = i; }
         return best;
+    }
+
+    /// <summary>Top-k temperature sampling (moshi <c>sample_token</c>): scale logits by <paramref name="temp"/>,
+    /// keep the <paramref name="topK"/> highest, softmax over them, then multinomial-sample with
+    /// <paramref name="rng"/>. Kyutai TTS was trained for sampling (audio temp 0.8 / top-k 250); greedy argmax
+    /// collapses the code cascade to non-speech.</summary>
+    private static int SampleTopK(ReadOnlySpan<float> logits, float temp, int topK, Random rng)
+    {
+        int n = logits.Length;
+        int k = topK <= 0 ? n : Math.Min(topK, n);
+        // Indices of the k largest logits (k is small vs n; a full index sort is fine here).
+        int[] idx = new int[n];
+        for (int i = 0; i < n; i++) idx[i] = i;
+        float[] vals = new float[n];
+        for (int i = 0; i < n; i++) vals[i] = logits[i];
+        Array.Sort(idx, (a, b) => vals[b].CompareTo(vals[a]));   // descending by logit
+
+        float max = vals[idx[0]] / temp;
+        double sum = 0;
+        double[] p = new double[k];
+        for (int j = 0; j < k; j++) { p[j] = Math.Exp(vals[idx[j]] / temp - max); sum += p[j]; }
+        double r = rng.NextDouble() * sum, acc = 0;
+        for (int j = 0; j < k; j++) { acc += p[j]; if (r <= acc) return idx[j]; }
+        return idx[k - 1];
     }
 
     public void Dispose()

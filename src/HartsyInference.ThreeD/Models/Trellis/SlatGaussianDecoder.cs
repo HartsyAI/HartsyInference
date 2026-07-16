@@ -18,8 +18,8 @@ public sealed unsafe class SlatGaussianDecoder
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _inW = F(w, "input_layer.weight"); _inB = F(w, "input_layer.bias");
-        _outW = F(w, "out_layer.weight"); _outB = F(w, "out_layer.bias");
+        _inW = w["input_layer.weight"]; _inB = F(w, "input_layer.bias");   // GEMM weight native F16 (F32-accum GEMM); see SsFlowBlock
+        _outW = w["out_layer.weight"]; _outB = F(w, "out_layer.bias");
         for (int i = 0; i < 12; i++) _blocks[i] = GsBlock.Load(w, $"blocks.{i}");
     }
 
@@ -42,11 +42,19 @@ public sealed unsafe class SlatGaussianDecoder
         // Two block-diagonal window masks (shift 0 and window/2), reused across alternating blocks.
         Tensor mask0 = WindowMask(backend, x.Coords, n, 0);
         Tensor mask4 = WindowMask(backend, x.Coords, n, WindowSize / 2);
+        // Thread each block's [1,n,Width] output straight into the next; As3D avoids a cache-missing view when the
+        // feats are already [1,n,Width]. Guard the dispose so the aliased first input (h.Feats) is not freed mid-loop.
+        Tensor cur = SparseOps.As3D(h.Feats);
         for (int i = 0; i < 12; i++)
-            h = h.Replace(_blocks[i].Forward(backend, h.Feats.Reshape(new TensorShape(1, n, Width)), (i % 2 == 0) ? mask0 : mask4, n));
+        {
+            Tensor nf = _blocks[i].Forward(backend, cur, (i % 2 == 0) ? mask0 : mask4, n);
+            if (!ReferenceEquals(cur, h.Feats)) cur.Dispose();
+            cur = nf;
+        }
+        h = h.Replace(cur);
         mask0.Dispose(); mask4.Dispose();
 
-        Tensor normed = new(new TensorShape(1, n, Width), DType.F32); backend.LayerNormNoAffine(normed, h.Feats.Reshape(new TensorShape(1, n, Width)), 1e-5f);
+        Tensor normed = new(new TensorShape(1, n, Width), DType.F32); backend.LayerNormNoAffine(normed, SparseOps.As3D(h.Feats), 1e-5f);
         Tensor outFeats = SlatLinear(backend, normed, _outW!, _outB!, n); normed.Dispose();
         return h.Replace(outFeats);
     }
@@ -72,9 +80,9 @@ public sealed unsafe class SlatGaussianDecoder
 
     internal static Tensor SlatLinear(IBackend backend, Tensor feats, Tensor w, Tensor b, int n)
     {
-        int cin = (int)feats.Shape[feats.Shape.Rank - 1], cout = (int)w.Shape[0];
+        int cout = (int)w.Shape[0];
         Tensor o = new(new TensorShape(1, n, cout), DType.F32);
-        backend.Linear(o, feats.Reshape(new TensorShape(1, n, cin)), w, b);
+        backend.Linear(o, SparseOps.As3D(feats), w, b);
         return o;
     }
 
@@ -113,10 +121,11 @@ internal sealed unsafe class GsBlock
     {
         GsBlock b = new();
         Tensor F(string k) => SparseStructureFlow.F(w, $"{p}.{k}");
-        b._qkvW = F("attn.to_qkv.weight"); b._qkvB = F("attn.to_qkv.bias");
-        b._oW = F("attn.to_out.weight"); b._oB = F("attn.to_out.bias");
-        b._m0W = F("mlp.mlp.0.weight"); b._m0B = F("mlp.mlp.0.bias");
-        b._m2W = F("mlp.mlp.2.weight"); b._m2B = F("mlp.mlp.2.bias");
+        Tensor Fw(string k) => w[$"{p}.{k}"];   // GEMM weight native F16 (F32-accum GEMM); norms are non-affine here
+        b._qkvW = Fw("attn.to_qkv.weight"); b._qkvB = F("attn.to_qkv.bias");
+        b._oW = Fw("attn.to_out.weight"); b._oB = F("attn.to_out.bias");
+        b._m0W = Fw("mlp.mlp.0.weight"); b._m0B = F("mlp.mlp.0.bias");
+        b._m2W = Fw("mlp.mlp.2.weight"); b._m2B = F("mlp.mlp.2.bias");
         return b;
     }
 
@@ -133,7 +142,7 @@ internal sealed unsafe class GsBlock
         Tensor qP = new(mh, DType.F32); backend.Permute0213(qP, q, n, H, Hd); q.Dispose();
         Tensor kP = new(mh, DType.F32); backend.Permute0213(kP, k, n, H, Hd); k.Dispose();
         Tensor vP = new(mh, DType.F32); backend.Permute0213(vP, v, n, H, Hd); v.Dispose();
-        Tensor attn = new(mh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kP, vP, mask, Scale, allowF16: false);
+        Tensor attn = new(mh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kP, vP, mask, Scale, allowF16: true);
         qP.Dispose(); kP.Dispose(); vP.Dispose();
         Tensor attnFlat = new(flat, DType.F32); backend.Permute0213(attnFlat, attn, H, n, Hd); attn.Dispose();
         Tensor o = new(flat, DType.F32); backend.Linear(o, attnFlat, _oW, _oB); attnFlat.Dispose();

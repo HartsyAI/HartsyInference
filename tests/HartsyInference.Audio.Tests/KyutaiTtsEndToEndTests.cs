@@ -48,10 +48,12 @@ public sealed unsafe class KyutaiTtsEndToEndTests
         // entries from a short sentence (one Entry per word).
         string text = Environment.GetEnvironmentVariable("KYUTAI_TEXT") ?? "hello there world";
         List<KyutaiTextScheduler.Entry> entries = new();
+        bool firstContent = true;
         foreach (string word in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
-            IReadOnlyList<int> ids = tok.Encode(word);
-            entries.Add(new KyutaiTextScheduler.Entry(new List<int>(ids), word));
+            List<int> ids = new(tok.Encode(word));
+            if (firstContent) { ids.Insert(0, KyutaiTextScheduler.Main); firstContent = false; }  // moshi: prepend speaker token
+            entries.Add(new KyutaiTextScheduler.Entry(ids, word));
         }
 
         // Voice conditioning. A real kyutai/tts-voices embedding ships as speaker_wavs [1,512,T] (channels-first);
@@ -78,13 +80,15 @@ public sealed unsafe class KyutaiTtsEndToEndTests
             for (int i = 0; i < spk * 512; i++) vp[i] = ((i % 17) / 17f) - 0.5f;
         }
         using Tensor cross = gen.Conditioner.ComputeCross(backend, voice);
-        using Tensor sumCond = gen.Conditioner.ComputeSum(backend, MoshiConditioner.CfgBin(1.0f));
+        // CFG-distilled model: the guidance coefficient is a conditioning input, and moshi's TTS default is 2.0
+        // (cfg=1.0 = no guidance → the text isn't enforced → fluent-but-unconditioned speech).
+        using Tensor sumCond = gen.Conditioner.ComputeSum(backend, MoshiConditioner.CfgBin(2.0f));
         voice.Dispose();
 
-        KyutaiTextScheduler scheduler = new();
+        KyutaiTextScheduler scheduler = new(secondStreamAhead: 2, maxPadding: 8, initialPadding: 2);
         int maxFrames = int.TryParse(Environment.GetEnvironmentVariable("KYUTAI_MAXFRAMES"), out int mf) ? mf : 32;
         long t0 = Environment.TickCount64;
-        int[,] codes = gen.Generate(backend, scheduler, entries, cross, sumCond, maxFrames: maxFrames);
+        int[,] codes = gen.Generate(backend, scheduler, entries, cross, sumCond, maxFrames: maxFrames, audioTemp: 0.6f);
         double secs = (Environment.TickCount64 - t0) / 1000.0;
         int n = codes.GetLength(1);
         _out.WriteLine($"{entries.Count} words → {n} code frames in {secs:0.0}s.");

@@ -21,16 +21,21 @@ internal sealed unsafe class SsFlowBlock
     {
         SsFlowBlock b = new();
         Tensor F(string k) => SparseStructureFlow.F(w, $"{p}.{k}");
-        b._modW = F("adaLN_modulation.1.weight"); b._modB = F("adaLN_modulation.1.bias");
+        // Projection GEMM weights kept NATIVE F16 (checkpoint dtype, no upcast): with an F32 activation
+        // ResolveGemmDtype→F16 → an F16 tensor-core GEMM with F32 accumulation (~2× vs the TF32 F32 GEMM), half the
+        // weight VRAM, and no per-call weight cast. Norm/affine params (norm2, qk-gamma) stay F32 — F16-affine op
+        // support is uneven and those are cheap. Parity gated by TrellisStage1/Stage2ParityTests.
+        Tensor Fw(string k) => w[$"{p}.{k}"];
+        b._modW = Fw("adaLN_modulation.1.weight"); b._modB = F("adaLN_modulation.1.bias");
         b._n2W = F("norm2.weight"); b._n2B = F("norm2.bias");
-        b._qkvW = F("self_attn.to_qkv.weight"); b._qkvB = F("self_attn.to_qkv.bias");
-        b._oW = F("self_attn.to_out.weight"); b._oB = F("self_attn.to_out.bias");
+        b._qkvW = Fw("self_attn.to_qkv.weight"); b._qkvB = F("self_attn.to_qkv.bias");
+        b._oW = Fw("self_attn.to_out.weight"); b._oB = F("self_attn.to_out.bias");
         b._qGamma = F("self_attn.q_rms_norm.gamma"); b._kGamma = F("self_attn.k_rms_norm.gamma");
-        b._cqW = F("cross_attn.to_q.weight"); b._cqB = F("cross_attn.to_q.bias");
-        b._ckvW = F("cross_attn.to_kv.weight"); b._ckvB = F("cross_attn.to_kv.bias");
-        b._coW = F("cross_attn.to_out.weight"); b._coB = F("cross_attn.to_out.bias");
-        b._m0W = F("mlp.mlp.0.weight"); b._m0B = F("mlp.mlp.0.bias");
-        b._m2W = F("mlp.mlp.2.weight"); b._m2B = F("mlp.mlp.2.bias");
+        b._cqW = Fw("cross_attn.to_q.weight"); b._cqB = F("cross_attn.to_q.bias");
+        b._ckvW = Fw("cross_attn.to_kv.weight"); b._ckvB = F("cross_attn.to_kv.bias");
+        b._coW = Fw("cross_attn.to_out.weight"); b._coB = F("cross_attn.to_out.bias");
+        b._m0W = Fw("mlp.mlp.0.weight"); b._m0B = F("mlp.mlp.0.bias");
+        b._m2W = Fw("mlp.mlp.2.weight"); b._m2B = F("mlp.mlp.2.bias");
         return b;
     }
 
@@ -55,7 +60,7 @@ internal sealed unsafe class SsFlowBlock
         Tensor q = Head(backend, qkv, 0, n), k = Head(backend, qkv, W, n), v = Head(backend, qkv, 2 * W, n); qkv.Dispose();
         Tensor qP = PermQkNorm(backend, q, n, _qGamma, ones64), kP = PermQkNorm(backend, k, n, _kGamma, ones64);
         Tensor vP = new(mh, DType.F32); backend.Permute0213(vP, v, n, H, Hd); v.Dispose();
-        Tensor attn = new(mh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kP, vP, null, Scale, allowF16: false);
+        Tensor attn = new(mh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kP, vP, null, Scale, allowF16: true);
         qP.Dispose(); kP.Dispose(); vP.Dispose();
         Tensor attnFlat = new(flat, DType.F32); backend.Permute0213(attnFlat, attn, H, n, Hd); attn.Dispose();
         Tensor sOut = new(flat, DType.F32); backend.Linear(sOut, attnFlat, _oW, _oB); attnFlat.Dispose();
@@ -64,13 +69,16 @@ internal sealed unsafe class SsFlowBlock
         // ── cross-attention (affine norm2, ungated) ──
         Tensor hc = new(flat, DType.F32); backend.LayerNorm(hc, x1, _n2W, _n2B, 1e-6f);
         Tensor cq = new(new TensorShape(1, n, W), DType.F32); backend.Linear(cq, hc, _cqW, _cqB); hc.Dispose();
-        Tensor cqP = new(mh, DType.F32); backend.Permute0213(cqP, cq.Reshape(heads), n, H, Hd); cq.Dispose();
+        // Feed cq DIRECTLY (not cq.Reshape(heads)): [1,n,W] and [1,n,H,Hd] share memory and Permute0213 uses the
+        // explicit n,H,Hd args — a Reshape view is a fresh Tensor identity that cache-misses the activation and forces
+        // a full D2H+H2D round-trip of the 16 MB cq every block (was the dominant TRELLIS H2D_MISS_BIG cost).
+        Tensor cqP = new(mh, DType.F32); backend.Permute0213(cqP, cq, n, H, Hd); cq.Dispose();
         Tensor kv = new(new TensorShape(1, lc, 2 * W), DType.F32); backend.Linear(kv, cond, _ckvW, _ckvB);
         Tensor ck = Head(backend, kv, 0, lc), cv = Head(backend, kv, W, lc); kv.Dispose();
         TensorShape kvMh = new(1, H, lc, Hd);
         Tensor ckP = new(kvMh, DType.F32); backend.Permute0213(ckP, ck, lc, H, Hd); ck.Dispose();
         Tensor cvP = new(kvMh, DType.F32); backend.Permute0213(cvP, cv, lc, H, Hd); cv.Dispose();
-        Tensor cAttn = new(mh, DType.F32); backend.ScaledDotProductAttention(cAttn, cqP, ckP, cvP, null, Scale, allowF16: false);
+        Tensor cAttn = new(mh, DType.F32); backend.ScaledDotProductAttention(cAttn, cqP, ckP, cvP, null, Scale, allowF16: true);
         cqP.Dispose(); ckP.Dispose(); cvP.Dispose();
         Tensor cAttnFlat = new(flat, DType.F32); backend.Permute0213(cAttnFlat, cAttn, H, n, Hd); cAttn.Dispose();
         Tensor cOut = new(flat, DType.F32); backend.Linear(cOut, cAttnFlat, _coW, _coB); cAttnFlat.Dispose();
