@@ -11,7 +11,7 @@ namespace HartsyInference.Diffusion.Adapters;
 ///
 /// <para>Implementation reuses <see cref="DownBlock"/>, <see cref="UNetResNetBlock"/>, <see cref="CrossAttentionBlock"/>, <see cref="TimestepEmbedding"/>, and <see cref="AdditionEmbedding"/> verbatim — the diffusers ControlNet uses the same module shapes as the base UNet, so checkpoint key names line up 1:1 (<c>down_blocks.{i}.resnets.{j}.*</c>, <c>mid_block.resnets.{i}.*</c>, etc.). Only the hint encoder and the zero conv tower are new.</para>
 ///
-/// <para><b>Flux ControlNet</b> uses a different architecture (DiT blocks, no UNet down/mid) and is not yet supported here — separate adapter class needed. <see cref="ControlNetBaseModel.Sd15"/> and <see cref="ControlNetBaseModel.Sdxl"/> are wired now.</para></summary>
+/// <para><b>Flux ControlNet</b> uses a different architecture (DiT blocks, no UNet down/mid) and lives in the separate <see cref="FluxControlNet"/> adapter. This class covers <see cref="ControlNetBaseModel.Sd15"/> and <see cref="ControlNetBaseModel.Sdxl"/>.</para></summary>
 public sealed unsafe class ControlNet : IDisposable
 {
     private readonly ControlNetConfig _config;
@@ -44,7 +44,7 @@ public sealed unsafe class ControlNet : IDisposable
         {
             throw new NotSupportedException(
                 "Flux ControlNet uses a DiT-based architecture and is not handled by this adapter. " +
-                "Use the Flux-specific ControlNet path when implemented.");
+                "Construct a FluxControlNet from ControlNetFile.FluxConfig instead.");
         }
         _config = config;
         _baseConfig = baseConfig;

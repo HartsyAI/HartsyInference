@@ -22,6 +22,9 @@ public static class ControlNetLoader
                 ? DetectBaseModelLdm(loader.Descriptors)
                 : DetectBaseModel(loader.Descriptors);
             ControlNetMode mode = modeOverride ?? DetectMode(filePath);
+            FluxControlNetConfig? fluxConfig = baseModel == ControlNetBaseModel.Flux
+                ? FluxControlNetConfig.FromDescriptors(loader.Descriptors)
+                : null;
             ControlNetConfig config = baseModel switch
             {
                 ControlNetBaseModel.Sd15 => ControlNetConfig.Sd15(mode),
@@ -30,8 +33,8 @@ public static class ControlNetLoader
                 {
                     BaseModel = ControlNetBaseModel.Flux,
                     Mode = mode,
-                    BlockOutChannels = [3072, 3072, 3072],
-                    CrossAttentionDim = 4096,
+                    BlockOutChannels = [fluxConfig!.HiddenSize, fluxConfig.HiddenSize, fluxConfig.HiddenSize],
+                    CrossAttentionDim = fluxConfig.ContextInDim,
                 },
                 _ => throw new HartsyInferenceException($"Unsupported ControlNet base model {baseModel} for '{filePath}'."),
             };
@@ -40,7 +43,9 @@ public static class ControlNetLoader
             if (isLdmLayout)
                 weights = ControlNetCheckpointConverter.Convert(weights, isSdxl: baseModel == ControlNetBaseModel.Sdxl);
 
-            Logs.Info($"Loaded ControlNet '{Path.GetFileName(filePath)}' (base={baseModel}, mode={mode}, layout={(isLdmLayout ? "ldm→diffusers" : "diffusers")}, tensors={weights.Count}).");
+            string arch = fluxConfig is null ? ""
+                : $", flux depth={fluxConfig.Depth}+{fluxConfig.DepthSingleBlocks}, union={(fluxConfig.IsUnion ? $"yes({fluxConfig.NumMode})" : "no")}";
+            Logs.Info($"Loaded ControlNet '{Path.GetFileName(filePath)}' (base={baseModel}, mode={mode}, layout={(isLdmLayout ? "ldm→diffusers" : "diffusers")}, tensors={weights.Count}{arch}).");
 
             ControlNetFile file = new()
             {
@@ -48,6 +53,7 @@ public static class ControlNetLoader
                 BaseModel = baseModel,
                 Mode = mode,
                 Config = config,
+                FluxConfig = fluxConfig,
                 Weights = weights,
             };
             file.AttachLoader(loader);
@@ -91,7 +97,10 @@ public static class ControlNetLoader
 
     private static ControlNetBaseModel DetectBaseModel(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors)
     {
-        if (descriptors.ContainsKey("controlnet_blocks.0.weight") || descriptors.Keys.Any(k => k.StartsWith("transformer_blocks.", StringComparison.Ordinal)))
+        if (descriptors.ContainsKey("controlnet_x_embedder.weight")
+            || descriptors.ContainsKey("controlnet_mode_embedder.weight")
+            || descriptors.ContainsKey("controlnet_blocks.0.weight")
+            || descriptors.Keys.Any(k => k.StartsWith("transformer_blocks.", StringComparison.Ordinal)))
             return ControlNetBaseModel.Flux;
 
         if (descriptors.TryGetValue("down_blocks.0.attentions.0.proj_in.weight", out SafeTensorDescriptor? projIn))
