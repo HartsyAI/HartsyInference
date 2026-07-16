@@ -18,23 +18,35 @@ public sealed unsafe class Qwen3VlImageProcessor
     private readonly Qwen3VlVisionConfig _config;
     private readonly int _minPixels;
     private readonly int _maxPixels;
+    private readonly int _maxSideLength;
 
     /// <summary>Creates an image processor. <paramref name="minPixels"/>/<paramref name="maxPixels"/> bound the resized
-    /// pixel count (defaults pick a ~256–1024 token budget at patch 16 / merge 2).</summary>
-    public Qwen3VlImageProcessor(Qwen3VlVisionConfig config, int minPixels = 0, int maxPixels = 0)
+    /// pixel count (defaults pick a ~256–1024 token budget at patch 16 / merge 2); <paramref name="maxSideLength"/>
+    /// optionally caps the longer side (0 = uncapped). Boogu-Image's reference pipeline feeds the VLM at most
+    /// 384·384 pixels with side ≤ 768 (its training-data budget) — callers replicating it pass those here.</summary>
+    public Qwen3VlImageProcessor(Qwen3VlVisionConfig config, int minPixels = 0, int maxPixels = 0, int maxSideLength = 0)
     {
         _config = config;
         int factor = config.PatchSize * config.SpatialMergeSize;
         _minPixels = minPixels > 0 ? minPixels : factor * factor * 4;
         _maxPixels = maxPixels > 0 ? maxPixels : factor * factor * 1024;
+        _maxSideLength = maxSideLength;
     }
 
-    /// <summary>Smart-resizes (h, w) to multiples of <c>patch·merge</c> within the pixel budget, preserving aspect.</summary>
+    /// <summary>Smart-resizes (h, w) to multiples of <c>patch·merge</c> within the pixel budget (and the optional
+    /// side-length cap), preserving aspect.</summary>
     public (int height, int width) SmartResize(int height, int width)
     {
         int factor = _config.PatchSize * _config.SpatialMergeSize;
         if (height < factor) height = factor;
         if (width < factor) width = factor;
+
+        if (_maxSideLength > 0 && Math.Max(height, width) > _maxSideLength)
+        {
+            double beta = (double)Math.Max(height, width) / _maxSideLength;
+            height = Math.Max(factor, (int)Math.Floor(height / beta));
+            width = Math.Max(factor, (int)Math.Floor(width / beta));
+        }
 
         int hBar = Math.Max(factor, (int)Math.Round((double)height / factor) * factor);
         int wBar = Math.Max(factor, (int)Math.Round((double)width / factor) * factor);
