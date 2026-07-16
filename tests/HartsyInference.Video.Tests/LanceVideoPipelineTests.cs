@@ -25,6 +25,7 @@ public class LanceVideoPipelineTests
         {
             HiddenSize = 32, NumLayers = 2, NumHeads = 4, NumKvHeads = 2,
             IntermediateSize = 64, MropeSection = (2, 1, 1), VocabSize = 64, QkNorm = false,
+            BosTokenId = 60, EosTokenId = 61, VisionStartTokenId = 62, VisionEndTokenId = 63, ImStartTokenId = 59,
         };
 
         LanceTransformer transformer = new(cfg);
@@ -64,6 +65,7 @@ public class LanceVideoPipelineTests
         {
             HiddenSize = 32, NumLayers = 1, NumHeads = 4, NumKvHeads = 2,
             IntermediateSize = 64, MropeSection = (2, 1, 1), VocabSize = 64,
+            BosTokenId = 60, EosTokenId = 61, VisionStartTokenId = 62, VisionEndTokenId = 63, ImStartTokenId = 59,
         };
         LanceTransformer transformer = new(cfg);
         transformer.LoadWeights(LanceSyntheticWeights.BuildTransformer(cfg));
@@ -124,6 +126,7 @@ public class LanceVideoPipelineTests
         {
             HiddenSize = 32, NumLayers = 2, NumHeads = 4, NumKvHeads = 2,
             IntermediateSize = 64, MropeSection = (2, 1, 1), VocabSize = 64,
+            BosTokenId = 60, EosTokenId = 61, VisionStartTokenId = 62, VisionEndTokenId = 63, ImStartTokenId = 59,
         };
         LanceTransformer transformer = new(cfg);
         transformer.LoadWeights(LanceSyntheticWeights.BuildTransformer(cfg));

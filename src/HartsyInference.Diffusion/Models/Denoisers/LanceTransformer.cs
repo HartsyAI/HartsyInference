@@ -4,11 +4,11 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>Lance (ByteDance, Apache-2.0) MoT-augmented Qwen2.5-VL backbone for the **generation** path (T2I/T2V velocity prediction). Ported from <c>modeling/lance/{lance.py, qwen2_navit.py}</c>.
+/// <summary>Lance (ByteDance, Apache-2.0) MoT-augmented Qwen2.5-VL backbone for the **generation** path (T2I/T2V velocity prediction). Ported from <c>modeling/lance/{lance.py, qwen2_navit.py}</c> and reconciled against the real <c>Lance_3B</c> checkpoint keys.
 ///
-/// <para>This is the unified-sequence transformer: a packed sequence carries text tokens (und role) and noisy/clean VAE tokens (gen role); each <see cref="LanceMoTBlock"/> routes per role through its parameter set and runs one joint attention. Text tokens are embedded via <c>embed_tokens</c>; VAE tokens via <c>vae_in</c> (patched-latent → hidden) plus a frozen 3D sin-cos position embed plus the timestep embedding. After 36 blocks, the gen tokens are read out via <c>vae_out</c> back to patched-latent space.</para>
+/// <para>This is the unified-sequence transformer: a packed sequence carries text tokens (und role, including the <c>&lt;|vision_start|&gt;</c>/<c>&lt;|vision_end|&gt;</c> sentinels) and noisy VAE tokens (gen role); each <see cref="LanceMoTBlock"/> routes per role through its parameter set and runs one joint attention. Text tokens are embedded via <c>embed_tokens</c>; VAE tokens via <c>vae2llm</c> (48-dim latent pixel → hidden) plus the checkpoint's frozen <c>latent_pos_embed</c> row (indexed <c>t·64² + h·64 + w</c>) plus the timestep embedding. After 36 blocks, the gen tokens are read out via <c>llm2vae</c> back to latent space.</para>
 ///
-/// <para>Sequence layout (positions, MaPE offsets, the sparse attention mask) is the pipeline's job — this class takes the role partition + precomputed M-RoPE cos/sin + an optional mask, keeping it reusable. The frozen 3D position table is recomputed via <see cref="DiTUtils.Sincos3DPositionEmbedding"/> (deterministic — identical to the stored frozen parameter).</para></summary>
+/// <para>Sequence layout (positions, the sparse attention mask) is the pipeline's job — this class takes the role partition + precomputed M-RoPE cos/sin + an optional mask, keeping it reusable.</para></summary>
 public sealed unsafe class LanceTransformer : IDisposable
 {
     private readonly LanceConfig _config;
@@ -16,11 +16,12 @@ public sealed unsafe class LanceTransformer : IDisposable
     private readonly Multimodal3DRope _rope;
     private int _disposed;
 
-    private Tensor? _embedTokens;          // [vocab, hidden] (cast to F32 at load)
-    private Tensor? _vaeInW, _vaeInB;      // Linear(192 → hidden)
-    private Tensor? _vaeOutW, _vaeOutB;    // Linear(hidden → 192)
+    private Tensor? _embedTokens;              // [vocab, hidden] (cast to F32 at load)
+    private Tensor? _vae2llmW, _vae2llmB;      // Linear(48 → hidden)
+    private Tensor? _llm2vaeW, _llm2vaeB;      // Linear(hidden → 48)
+    private Tensor? _latentPosEmbed;           // frozen sin-cos table [maxT·64·64, hidden] (cast to F32)
     private Tensor? _timeMlp0W, _timeMlp0B, _timeMlp2W, _timeMlp2B;
-    private Tensor? _normUnd, _normGen;    // final RMSNorm per role
+    private Tensor? _normUnd, _normGen;        // final RMSNorm per role
 
     public LanceTransformer(LanceConfig config)
     {
@@ -34,14 +35,15 @@ public sealed unsafe class LanceTransformer : IDisposable
 
     public LanceConfig Config => _config;
 
-    /// <summary>Loads weights. Expects the converter to have stripped the <c>language_model.model.</c> prefix off the backbone keys (→ <c>embed_tokens</c>, <c>layers.{i}.*</c>, <c>norm</c>, <c>norm_moe_gen</c>) and merged the top-level Lance heads (<c>vae_in</c>, <c>vae_out</c>, <c>time_embedder.mlp.{0,2}</c>).</summary>
+    /// <summary>Loads weights using the REAL checkpoint key names. Expects the converter to have stripped the <c>language_model.model.</c> prefix off the backbone keys (→ <c>embed_tokens</c>, <c>layers.{i}.*</c>, <c>norm</c>, <c>norm_moe_gen</c>) and passed the top-level Lance heads through unchanged (<c>vae2llm.*</c>, <c>llm2vae.*</c>, <c>latent_pos_embed.pos_embed</c>, <c>time_embedder.mlp.{0,2}.*</c>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         _embedTokens = LoadF32(weights, "embed_tokens.weight");
-        _vaeInW = weights["vae_in.weight"];
-        weights.TryGetValue("vae_in.bias", out _vaeInB);
-        _vaeOutW = weights["vae_out.weight"];
-        weights.TryGetValue("vae_out.bias", out _vaeOutB);
+        _vae2llmW = weights["vae2llm.weight"];
+        weights.TryGetValue("vae2llm.bias", out _vae2llmB);
+        _llm2vaeW = weights["llm2vae.weight"];
+        weights.TryGetValue("llm2vae.bias", out _llm2vaeB);
+        _latentPosEmbed = LoadF32(weights, "latent_pos_embed.pos_embed");
         _timeMlp0W = weights["time_embedder.mlp.0.weight"];
         weights.TryGetValue("time_embedder.mlp.0.bias", out _timeMlp0B);
         _timeMlp2W = weights["time_embedder.mlp.2.weight"];
@@ -55,7 +57,7 @@ public sealed unsafe class LanceTransformer : IDisposable
     /// <summary>Enumerates all weights for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        foreach (Tensor? t in new[] { _embedTokens, _vaeInW, _vaeInB, _vaeOutW, _vaeOutB,
+        foreach (Tensor? t in new[] { _embedTokens, _vae2llmW, _vae2llmB, _llm2vaeW, _llm2vaeB,
             _timeMlp0W, _timeMlp0B, _timeMlp2W, _timeMlp2B, _normUnd, _normGen })
             if (t is not null) yield return t;
         for (int i = 0; i < _blocks.Length; i++)
@@ -64,16 +66,16 @@ public sealed unsafe class LanceTransformer : IDisposable
 
     /// <summary>Predicts velocity for the noisy VAE tokens.</summary>
     /// <param name="backend">Compute backend.</param>
-    /// <param name="textTokenIds">Text token ids, placed at <paramref name="undIdx"/> positions in order.</param>
-    /// <param name="patchedLatent">Noisy VAE tokens <c>[nVae, patchFeatureDim=192]</c>, placed at <paramref name="genIdx"/> positions in order.</param>
-    /// <param name="latentGrid">Latent grid <c>(T, H, W)</c> for the frozen 3D position embed (T·H·W must equal nVae).</param>
+    /// <param name="textTokenIds">Text token ids (incl. vision sentinels), placed at <paramref name="undIdx"/> positions in order.</param>
+    /// <param name="latentTokens">Noisy VAE tokens <c>[nVae, PatchFeatureDim]</c>, placed at <paramref name="genIdx"/> positions in order.</param>
+    /// <param name="latentPosIds">Row index into the frozen <c>latent_pos_embed</c> table per VAE token (<c>t·64² + h·64 + w</c>); length nVae.</param>
     /// <param name="timestep">Flow-matching time in [0,1] (already logit-normal-shifted by the pipeline).</param>
-    /// <param name="positionIds">Full M-RoPE positions <c>[seq, 3]</c> (with MaPE offsets applied by the pipeline).</param>
+    /// <param name="positionIds">Full M-RoPE positions <c>[seq, 3]</c> from the pipeline's <c>get_rope_index</c> replica.</param>
     /// <param name="undIdx">Sequence positions of und (text) tokens.</param>
     /// <param name="genIdx">Sequence positions of gen (VAE) tokens.</param>
     /// <param name="attentionMask">Optional additive mask <c>[1,1,seq,seq]</c>; null = full attention.</param>
-    /// <returns>Velocity <c>[nVae, 192]</c> in gen-token order.</returns>
-    public Tensor Forward(IBackend backend, int[] textTokenIds, Tensor patchedLatent, (int T, int H, int W) latentGrid,
+    /// <returns>Velocity <c>[nVae, PatchFeatureDim]</c> in gen-token order.</returns>
+    public Tensor Forward(IBackend backend, int[] textTokenIds, Tensor latentTokens, int[] latentPosIds,
         float timestep, Tensor positionIds, int[] undIdx, int[] genIdx, Tensor? attentionMask)
     {
         int seq = undIdx.Length + genIdx.Length;
@@ -81,23 +83,21 @@ public sealed unsafe class LanceTransformer : IDisposable
         int nVae = genIdx.Length;
         if (textTokenIds.Length != undIdx.Length)
             throw new ArgumentException($"textTokenIds {textTokenIds.Length} != undIdx {undIdx.Length}.");
-        if ((int)patchedLatent.Shape[0] != nVae)
-            throw new ArgumentException($"patchedLatent rows {patchedLatent.Shape[0]} != genIdx {nVae}.");
-        if ((long)latentGrid.T * latentGrid.H * latentGrid.W != nVae)
-            throw new ArgumentException($"latentGrid {latentGrid} product != nVae {nVae}.");
+        if ((int)latentTokens.Shape[0] != nVae)
+            throw new ArgumentException($"latentTokens rows {latentTokens.Shape[0]} != genIdx {nVae}.");
+        if (latentPosIds.Length != nVae)
+            throw new ArgumentException($"latentPosIds {latentPosIds.Length} != nVae {nVae}.");
 
         // ── Build packed sequence [seq, hidden] ──
         Tensor h = new Tensor(new TensorShape(seq, hidden), DType.F32);
         new Span<float>((float*)h.DataPointer, checked((int)((long)seq * hidden))).Clear();
         EmbedText(h, textTokenIds, undIdx, hidden);
 
-        // VAE tokens: vae_in(patchedLatent) + pos3d + timestep
+        // VAE tokens: vae2llm(latent) + latent_pos_embed[posId] + timestep embed
         Tensor vaeHidden = new Tensor(new TensorShape(nVae, hidden), DType.F32);
-        backend.Linear(vaeHidden, patchedLatent, _vaeInW!, _vaeInB);
-        Tensor pos3d = DiTUtils.Sincos3DPositionEmbedding(latentGrid.T, latentGrid.H, latentGrid.W, hidden);
+        backend.Linear(vaeHidden, latentTokens, _vae2llmW!, _vae2llmB);
         Tensor tEmb = ComputeTimestepEmbedding(backend, timestep);
-        AddVaeConditioning(vaeHidden, pos3d, tEmb, nVae, hidden);
-        pos3d.Dispose();
+        AddVaeConditioning(vaeHidden, latentPosIds, tEmb, nVae, hidden);
         tEmb.Dispose();
         ScatterRows(vaeHidden, genIdx, h, hidden);
         vaeHidden.Dispose();
@@ -118,14 +118,14 @@ public sealed unsafe class LanceTransformer : IDisposable
         cos.Dispose();
         sin.Dispose();
 
-        // ── Final norm (gen role) + vae_out on gen tokens ──
+        // ── Final norm (gen role) + llm2vae on gen tokens ──
         Tensor genHidden = GatherRows(cur, genIdx, hidden);
         cur.Dispose();
         Tensor genNormed = new Tensor(genHidden.Shape, DType.F32);
         backend.RmsNorm(genNormed, genHidden, _normGen!, _config.RmsNormEps);
         genHidden.Dispose();
         Tensor velocity = new Tensor(new TensorShape(nVae, _config.PatchFeatureDim), DType.F32);
-        backend.Linear(velocity, genNormed, _vaeOutW!, _vaeOutB);
+        backend.Linear(velocity, genNormed, _llm2vaeW!, _llm2vaeB);
         genNormed.Dispose();
         LanceDebugDump.DumpOutput(velocity);
         return velocity;
@@ -133,30 +133,39 @@ public sealed unsafe class LanceTransformer : IDisposable
 
     private void EmbedText(Tensor h, int[] tokenIds, int[] undIdx, int hidden)
     {
+        long vocabRows = _embedTokens!.Shape[0];
         float* hPtr = (float*)h.DataPointer;
-        float* eptr = (float*)_embedTokens!.DataPointer;
+        float* eptr = (float*)_embedTokens.DataPointer;
         for (int i = 0; i < tokenIds.Length; i++)
         {
+            if ((uint)tokenIds[i] >= (uint)vocabRows)
+                throw new ArgumentOutOfRangeException(nameof(tokenIds), $"token id {tokenIds[i]} out of range for the {vocabRows}-row embedding.");
             long src = (long)tokenIds[i] * hidden;
             long dst = (long)undIdx[i] * hidden;
             Buffer.MemoryCopy(eptr + src, hPtr + dst, (long)hidden * 4, (long)hidden * 4);
         }
     }
 
-    private static void AddVaeConditioning(Tensor vaeHidden, Tensor pos3d, Tensor tEmb, int nVae, int hidden)
+    private void AddVaeConditioning(Tensor vaeHidden, int[] latentPosIds, Tensor tEmb, int nVae, int hidden)
     {
+        long tableRows = _latentPosEmbed!.Shape[0];
         float* vh = (float*)vaeHidden.DataPointer;
-        float* pe = (float*)pos3d.DataPointer;
+        float* pe = (float*)_latentPosEmbed.DataPointer;
         float* te = (float*)tEmb.DataPointer; // [1, hidden]
         for (int i = 0; i < nVae; i++)
         {
+            int row = latentPosIds[i];
+            if ((uint)row >= (uint)tableRows)
+                throw new ArgumentOutOfRangeException(nameof(latentPosIds),
+                    $"latent pos id {row} out of range for the checkpoint's {tableRows}-row latent_pos_embed table (grid too large for this variant).");
             long off = (long)i * hidden;
+            long peOff = (long)row * hidden;
             for (int d = 0; d < hidden; d++)
-                vh[off + d] += pe[off + d] + te[d];
+                vh[off + d] += pe[peOff + d] + te[d];
         }
     }
 
-    /// <summary>Timestep embedding: sinusoidal (256, <c>[cos,sin]</c>) → Linear → SiLU → Linear → <c>[1, hidden]</c>.</summary>
+    /// <summary>Timestep embedding: sinusoidal (256, <c>[cos,sin]</c>) → Linear → SiLU → Linear → <c>[1, hidden]</c>. The input is the raw shifted flow time (upstream feeds t∈[0,1] directly, no ×1000).</summary>
     private Tensor ComputeTimestepEmbedding(IBackend backend, float timestep)
     {
         int freqDim = _config.TimestepFrequencyDim;
@@ -203,7 +212,8 @@ public sealed unsafe class LanceTransformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            _embedTokens = _vaeInW = _vaeInB = _vaeOutW = _vaeOutB = null;
+            _embedTokens = _vae2llmW = _vae2llmB = _llm2vaeW = _llm2vaeB = null;
+            _latentPosEmbed = null;
             _timeMlp0W = _timeMlp0B = _timeMlp2W = _timeMlp2B = null;
             _normUnd = _normGen = null;
         }

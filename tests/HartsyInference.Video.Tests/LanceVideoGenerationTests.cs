@@ -27,8 +27,6 @@ public class LanceVideoGenerationTests
         string dir = TestPaths.Lance.VideoDir, vaePath = TestPaths.Lance.VaePath;
         if (!Directory.Exists(dir)) { _output.WriteLine($"SKIPPED: Lance video folder not found: {dir}"); return; }
         if (!File.Exists(vaePath)) { _output.WriteLine($"SKIPPED: Wan2.2 VAE safetensors not found: {vaePath}."); return; }
-        string vocab = TestPaths.Tokenizers.Qwen3Vocab, merges = TestPaths.Tokenizers.Qwen3Merges;
-        if (!File.Exists(vocab) || !File.Exists(merges)) { _output.WriteLine("SKIPPED: Qwen tokenizer not found."); return; }
         string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(LanceVideoGenerationTests).Assembly.Location)!, "Ptx");
         if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
 
@@ -52,11 +50,16 @@ public class LanceVideoGenerationTests
             const double MinGb = 24.0;
             if (freeGb < MinGb) { _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM; Lance video needs ≥{MinGb} GB."); return; }
 
-            using Qwen3Tokenizer tokenizer = new(vocab, merges, maxLength: 512);
-            int[] prompt = tokenizer.EncodeChat("a cinematic shot of a cat walking through a garden");
-            int[] neg = tokenizer.EncodeChat("");
+            string tokenizerJson = Path.Combine(dir, "tokenizer.json");
+            if (!File.Exists(tokenizerJson)) { _output.WriteLine($"SKIPPED: tokenizer.json not found in {dir}."); return; }
+            using FileStream tokFs = File.OpenRead(tokenizerJson);
+            GgufTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokFs);
+            HartsyInference.Diffusion.Pipelines.LancePromptTemplate template =
+                HartsyInference.Diffusion.Pipelines.LancePromptTemplate.Create(tokenizer.EncodeOrdinary, cfg, video: true);
+            int[] prompt = tokenizer.EncodeOrdinary("a cinematic shot of a cat walking through a garden");
+            int[] neg = [];
 
-            LanceVideoPipeline pipeline = new(backend, transformer, vae, cfg);
+            LanceVideoPipeline pipeline = new(backend, transformer, vae, cfg, template);
             TextToImageRequest req = new() { Prompt = "cat", NegativePrompt = "", Width = 512, Height = 512, Steps = cfg.NumTimesteps, CfgScale = cfg.CfgTextScale, Seed = 42 };
 
             string outDir = Path.Combine(TestPaths.OutputDir, $"lance_video_{DateTime.Now:yyyyMMdd_HHmmss}");

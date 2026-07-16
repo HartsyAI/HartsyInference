@@ -4,11 +4,11 @@ using HartsyInference.ModelHandler.SafeTensors;
 
 namespace HartsyInference.ModelHandler.CheckpointConverters;
 
-/// <summary>Loads Lance (ByteDance, Apache-2.0) checkpoints. Lance ships <c>{variant}/model.safetensors</c> (the MoT backbone + generation heads), a frozen <c>Qwen2.5-VL-ViT/vit.safetensors</c> (editing/understanding only), and <c>Wan2.2_VAE.pth</c> (the 3D causal VAE — a PyTorch <c>.pth</c>, NOT safetensors).
+/// <summary>Loads Lance (ByteDance, Apache-2.0) checkpoints. Lance ships <c>{variant}/model.safetensors</c> (the MoT backbone + generation heads), a frozen <c>Qwen2.5-VL-ViT/vit.safetensors</c> (editing/understanding only, separate file), and <c>Wan2.2_VAE.pth</c> (the 3D causal VAE — a PyTorch <c>.pth</c>, NOT safetensors).
 ///
-/// <para>The MoT dual-stream weights are already stored as sibling keys (<c>*_moe_gen</c>) in <c>model.safetensors</c>, so no demux is needed — this converter strips the <c>language_model.model.</c> prefix off backbone keys (→ <c>embed_tokens</c>, <c>layers.{i}.*</c>, <c>norm</c>, <c>norm_moe_gen</c>), passes through the generation heads (<c>vae_in</c>, <c>vae_out</c>, <c>time_embedder.*</c>), and drops what the T2I path doesn't use (<c>lm_head</c> tied head, <c>pos_embed_3d</c> recomputed, <c>vit.*</c>/<c>connector.*</c> editing-only, <c>task_embed</c>/<c>modality_embed</c>).</para>
+/// <para>Real checkpoint key families (confirmed against <c>Lance_3B/model.safetensors</c>, 2026-07): <c>language_model.model.layers.{i}.*</c> with <c>*_moe_gen</c> siblings (incl. per-head <c>q_norm</c>/<c>k_norm</c>), <c>language_model.model.{embed_tokens,norm,norm_moe_gen}</c>, <c>language_model.lm_head</c> (unused by generation), plus top-level heads <c>vae2llm.*</c> (Linear 48→2048), <c>llm2vae.*</c> (2048→48), <c>latent_pos_embed.pos_embed</c> (frozen sin-cos [4096,2048]), <c>time_embedder.mlp.{0,2}.*</c>. This converter strips the <c>language_model.model.</c> prefix off backbone keys and passes the top-level heads through unchanged; <c>lm_head</c> is dropped.</para>
 ///
-/// <para><b>VAE note:</b> <c>Wan2.2_VAE.pth</c> must be converted to safetensors offline (the <see cref="SafeTensorsLoader"/> can't parse <c>.pth</c>); point <see cref="LoadVae"/> at the converted file. <b>Exact tensor key names are validation-pending</b> — confirm against a key dump on first run (research doc Open Question #1).</para></summary>
+/// <para><b>VAE note:</b> <c>Wan2.2_VAE.pth</c> must be converted to safetensors offline (the <see cref="SafeTensorsLoader"/> can't parse <c>.pth</c>); point <see cref="LoadVae"/> at the converted file (the same file the Wan2.2 video loader uses).</para></summary>
 public sealed class LanceCheckpointConverter
 {
     /// <summary>Result buckets from <c>model.safetensors</c>.</summary>
@@ -120,8 +120,8 @@ public sealed class LanceCheckpointConverter
         if (key.StartsWith("vit.", StringComparison.Ordinal) || key.StartsWith("connector.", StringComparison.Ordinal))
             return (LanceBucket.Vit, key);
 
-        if (key.Contains("lm_head") || key.StartsWith("pos_embed_3d", StringComparison.Ordinal)
-            || key.StartsWith("task_embed", StringComparison.Ordinal) || key.StartsWith("modality_embed", StringComparison.Ordinal))
+        if (key.Contains("lm_head") || key.StartsWith("task_embed", StringComparison.Ordinal)
+            || key.StartsWith("modality_embed", StringComparison.Ordinal))
             return (LanceBucket.Drop, null);
 
         if (key.StartsWith("language_model.model.", StringComparison.Ordinal))
@@ -129,6 +129,6 @@ public sealed class LanceCheckpointConverter
         if (key.StartsWith("language_model.", StringComparison.Ordinal))
             return (LanceBucket.Transformer, key["language_model.".Length..]);
 
-        return (LanceBucket.Transformer, key);   // top-level heads: vae_in, vae_out, time_embedder.*
+        return (LanceBucket.Transformer, key);   // top-level heads: vae2llm, llm2vae, latent_pos_embed, time_embedder.*
     }
 }
