@@ -119,6 +119,12 @@ public sealed class CudaGraph : IDisposable
         CudaDriverApi.cuStreamEndCapture(_stream, out nint graph).ThrowOnError();
         try
         {
+            string? dotPath = Environment.GetEnvironmentVariable("HARTSY_GRAPH_DOT");
+            if (!string.IsNullOrEmpty(dotPath))
+            {
+                int dotRc = CudaDriverApi.cuGraphDebugDotPrint(graph, dotPath, 1);
+                Logs.Info($"[CudaGraph] DOT dump rc={dotRc} → {dotPath}");
+            }
             DestroyExec();
             CudaDriverApi.cuGraphInstantiate(out _graphExec, graph, _instantiateFlags).ThrowOnError();
         }

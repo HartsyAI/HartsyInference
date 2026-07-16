@@ -679,16 +679,30 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             bool emitPreview = onProgress is not null && (!drainFree || (i - startStep) % 4 == 3 || i == steps - 1);
             if (emitPreview)
             {
-                Tensor previewLatent = LatentPreview.UnpackFluxStylePacked(packedLatent, latentH, latentW, channels: 16);
+                // Graph route: packedLatent is the transformer-owned FIXED buffer whose device address is
+                // baked into the captured step graph. A host DataPointer read (which the unpack does) would
+                // D2H-and-FREE that buffer via the activation sync callback — every later replay then reads
+                // freed, reused pool memory (warm-gen noise; whether it shows is pool-reuse luck, which is
+                // why 512² passed while 1024² speckled). Preview from an address-preserving device snapshot
+                // instead — the same rule Chroma's preview hook already follows.
+                Tensor previewSource = graphRoute ? _transformer.SnapshotGraphLatent(Backend) : packedLatent;
                 try
                 {
-                    onProgress!.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                    Tensor previewLatent = LatentPreview.UnpackFluxStylePacked(previewSource, latentH, latentW, channels: 16);
+                    try
                     {
-                        Latent = previewLatent,
-                        LatentArch = LatentArchitecture.Flux,
-                    });
+                        onProgress!.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                        {
+                            Latent = previewLatent,
+                            LatentArch = LatentArchitecture.Flux,
+                        });
+                    }
+                    finally { previewLatent.Dispose(); }
                 }
-                finally { previewLatent.Dispose(); }
+                finally
+                {
+                    if (!ReferenceEquals(previewSource, packedLatent)) previewSource.Dispose();
+                }
             }
             else if (onProgress is not null)
             {
