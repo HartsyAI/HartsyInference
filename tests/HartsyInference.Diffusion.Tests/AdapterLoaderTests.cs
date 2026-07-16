@@ -78,6 +78,149 @@ public sealed class AdapterLoaderTests : IDisposable
     }
 
     [Fact]
+    public void ControlNetLoader_LdmLayout_Sd15_ConvertsToDiffusersKeys()
+    {
+        // Miniature of a control_v11p_sd15_* checkpoint: control_model.-prefixed LDM keys covering
+        // every ControlNet-specific tower plus one representative of each encoder key family.
+        string path = CreateSafeTensorsFile("control_v11p_sd15_canny_fp16.safetensors", new()
+        {
+            ["control_model.input_blocks.0.0.weight"] = (DType.F32, [8, 4, 3, 3], new float[8 * 4 * 3 * 3]),
+            ["control_model.input_blocks.0.0.bias"] = (DType.F32, [8], new float[8]),
+            ["control_model.input_blocks.1.0.in_layers.0.weight"] = (DType.F32, [8], new float[8]),
+            ["control_model.input_blocks.1.0.emb_layers.1.weight"] = (DType.F32, [8, 16], new float[8 * 16]),
+            ["control_model.input_blocks.3.0.op.weight"] = (DType.F32, [8, 8, 3, 3], new float[8 * 8 * 3 * 3]),
+            ["control_model.input_blocks.4.1.transformer_blocks.0.attn2.to_k.weight"] = (DType.F32, [8, 768], new float[8 * 768]),
+            ["control_model.time_embed.0.weight"] = (DType.F32, [16, 8], new float[16 * 8]),
+            ["control_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight"] = (DType.F32, [8, 8], new float[8 * 8]),
+            ["control_model.middle_block.2.out_layers.3.weight"] = (DType.F32, [8, 8, 3, 3], new float[8 * 8 * 3 * 3]),
+            ["control_model.input_hint_block.0.weight"] = (DType.F32, [4, 3, 3, 3], new float[4 * 3 * 3 * 3]),
+            ["control_model.input_hint_block.6.weight"] = (DType.F32, [4, 4, 3, 3], new float[4 * 4 * 3 * 3]),
+            ["control_model.input_hint_block.14.weight"] = (DType.F32, [8, 4, 3, 3], new float[8 * 4 * 3 * 3]),
+            ["control_model.zero_convs.0.0.weight"] = (DType.F32, [8, 8, 1, 1], new float[8 * 8]),
+            ["control_model.zero_convs.0.0.bias"] = (DType.F32, [8], new float[8]),
+            ["control_model.middle_block_out.0.weight"] = (DType.F32, [8, 8, 1, 1], new float[8 * 8]),
+        });
+
+        using ControlNetFile file = ControlNetLoader.Load(path);
+        Assert.Equal(ControlNetBaseModel.Sd15, file.BaseModel);
+        Assert.Equal(ControlNetMode.Canny, file.Mode);
+        Assert.Equal(768, file.Config.CrossAttentionDim);
+
+        Assert.Contains("conv_in.weight", file.Weights);
+        Assert.Contains("conv_in.bias", file.Weights);
+        Assert.Contains("down_blocks.0.resnets.0.norm1.weight", file.Weights);
+        Assert.Contains("down_blocks.0.resnets.0.time_emb_proj.weight", file.Weights);
+        Assert.Contains("down_blocks.0.downsamplers.0.conv.weight", file.Weights);
+        Assert.Contains("down_blocks.1.attentions.0.transformer_blocks.0.attn2.to_k.weight", file.Weights);
+        Assert.Contains("time_embedding.linear_1.weight", file.Weights);
+        Assert.Contains("mid_block.attentions.0.transformer_blocks.0.attn1.to_q.weight", file.Weights);
+        Assert.Contains("mid_block.resnets.1.conv2.weight", file.Weights);
+        Assert.Contains("controlnet_cond_embedding.conv_in.weight", file.Weights);
+        Assert.Contains("controlnet_cond_embedding.blocks.2.weight", file.Weights);
+        Assert.Contains("controlnet_cond_embedding.conv_out.weight", file.Weights);
+        Assert.Contains("controlnet_down_blocks.0.weight", file.Weights);
+        Assert.Contains("controlnet_down_blocks.0.bias", file.Weights);
+        Assert.Contains("controlnet_mid_block.weight", file.Weights);
+
+        // Every LDM key must have been consumed — no control_model.* survivors.
+        Assert.Equal(15, file.Weights.Count);
+        Assert.DoesNotContain(file.Weights.Keys, k => k.StartsWith("control_model.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ControlNetLoader_LdmLayout_Sdxl_DetectsFromLabelEmbAndContextDim()
+    {
+        string path = CreateSafeTensorsFile("controlnet-xl-ldm-depth.safetensors", new()
+        {
+            ["control_model.input_blocks.0.0.weight"] = (DType.F32, [8, 4, 3, 3], new float[8 * 4 * 3 * 3]),
+            ["control_model.label_emb.0.0.weight"] = (DType.F32, [16, 32], new float[16 * 32]),
+            ["control_model.input_blocks.4.1.transformer_blocks.0.attn2.to_k.weight"] = (DType.F32, [8, 2048], new float[8 * 2048]),
+            ["control_model.zero_convs.0.0.weight"] = (DType.F32, [8, 8, 1, 1], new float[8 * 8]),
+        });
+
+        using ControlNetFile file = ControlNetLoader.Load(path);
+        Assert.Equal(ControlNetBaseModel.Sdxl, file.BaseModel);
+        Assert.Equal(2048, file.Config.CrossAttentionDim);
+        Assert.Contains("add_embedding.linear_1.weight", file.Weights);
+        Assert.Contains("down_blocks.1.attentions.0.transformer_blocks.0.attn2.to_k.weight", file.Weights);
+        Assert.Contains("controlnet_down_blocks.0.weight", file.Weights);
+    }
+
+    [Fact]
+    public void ControlNetLoader_LdmLayout_Sd21ContextDim_Throws()
+    {
+        string path = CreateSafeTensorsFile("controlnet-sd21-canny.safetensors", new()
+        {
+            ["control_model.input_blocks.4.1.transformer_blocks.0.attn2.to_k.weight"] = (DType.F32, [8, 1024], new float[8 * 1024]),
+            ["control_model.zero_convs.0.0.weight"] = (DType.F32, [8, 8, 1, 1], new float[8 * 8]),
+        });
+
+        Assert.Throws<HartsyInferenceException>(() => ControlNetLoader.Load(path));
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void ControlNetLoader_RealLdmCheckpoint_LoadsAndConverts()
+    {
+        // Real lllyasviel/comfyanonymous fp16 repack in LDM layout. Header parse + mmap only — no GPU.
+        string dir = Environment.GetEnvironmentVariable("HARTSY_CONTROLNET_DIR")
+            ?? "/home/hartsy/Desktop/Swarm/SwarmUI.not too old/Models/controlnet";
+        string path = Path.Combine(dir, "control_v11p_sd15_canny_fp16.safetensors");
+        if (!File.Exists(path)) return;
+
+        using ControlNetFile file = ControlNetLoader.Load(path);
+        Assert.Equal(ControlNetBaseModel.Sd15, file.BaseModel);
+        Assert.Equal(ControlNetMode.Canny, file.Mode);
+        Assert.Equal(340, file.Weights.Count);
+        Assert.Contains("conv_in.weight", file.Weights);
+        Assert.Contains("controlnet_cond_embedding.conv_in.weight", file.Weights);
+        Assert.Contains("controlnet_cond_embedding.conv_out.weight", file.Weights);
+        Assert.Contains("controlnet_mid_block.weight", file.Weights);
+        for (int i = 0; i < 12; i++)
+        {
+            Assert.Contains($"controlnet_down_blocks.{i}.weight", file.Weights);
+            Assert.Contains($"controlnet_down_blocks.{i}.bias", file.Weights);
+        }
+
+        // The converted dictionary must satisfy the full diffusers ControlNet layout end-to-end.
+        using ControlNet adapter = new ControlNet(file.Config, UNetConfig.Sd15);
+        adapter.LoadWeights(file.Weights);
+        Assert.Equal(12, adapter.DownResidualCount);
+
+        foreach ((string name, ControlNetMode expectedMode) in new (string, ControlNetMode)[]
+        {
+            ("control_v11p_sd15_openpose_fp16.safetensors", ControlNetMode.OpenPose),
+            ("control_v11f1p_sd15_depth_fp16.safetensors", ControlNetMode.Depth),
+        })
+        {
+            string siblingPath = Path.Combine(dir, name);
+            if (!File.Exists(siblingPath)) continue;
+            using ControlNetFile sibling = ControlNetLoader.Load(siblingPath);
+            Assert.Equal(ControlNetBaseModel.Sd15, sibling.BaseModel);
+            Assert.Equal(expectedMode, sibling.Mode);
+            Assert.Contains("controlnet_mid_block.weight", sibling.Weights);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void ControlNetLoader_RealDiffusersXlCheckpoint_StillLoads()
+    {
+        // diffusers_xl_canny_full ships in diffusers layout already — must keep taking the
+        // non-converting path untouched by the LDM support.
+        string dir = Environment.GetEnvironmentVariable("HARTSY_CONTROLNET_DIR")
+            ?? "/home/hartsy/Desktop/Swarm/SwarmUI.not too old/Models/controlnet";
+        string path = Path.Combine(dir, "diffusers_xl_canny_full.safetensors");
+        if (!File.Exists(path)) return;
+
+        using ControlNetFile file = ControlNetLoader.Load(path);
+        Assert.Equal(ControlNetBaseModel.Sdxl, file.BaseModel);
+        Assert.Equal(ControlNetMode.Canny, file.Mode);
+        Assert.Contains("add_embedding.linear_1.weight", file.Weights);
+        Assert.Contains("controlnet_mid_block.weight", file.Weights);
+    }
+
+    [Fact]
     public void ControlNetLoader_UnrecognizedFile_Throws()
     {
         string path = CreateSafeTensorsFile("garbage.safetensors", new()
