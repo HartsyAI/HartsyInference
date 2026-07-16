@@ -108,7 +108,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Generates an image from pre-computed GPT-OSS multi-layer text embeddings. Four positive captures + four negative captures (same length per layer; positives and negatives can differ in S_txt — they are aligned by the pipeline). Each capture is <c>[B, S_txt, 2880]</c> matching <see cref="LensConfig.EncoderHiddenDim"/>.</summary>
+    /// <summary>Generates an image from pre-computed GPT-OSS multi-layer text embeddings. Four positive captures + four negative captures (same length per layer; positives and negatives may differ in S_txt — cond and uncond run as separate forwards at their natural lengths). Each capture is <c>[B, S_txt, 2880]</c> matching <see cref="LensConfig.EncoderHiddenDim"/>.</summary>
     /// <param name="positiveLayers">Positive-prompt hidden states captured at <see cref="LensConfig.SelectedEncoderLayers"/>. Must have exactly 4 entries.</param>
     /// <param name="negativeLayers">Negative-prompt hidden states (same layer order as <paramref name="positiveLayers"/>). Required when <c>request.CfgScale &gt; 1.0</c>; ignored otherwise.</param>
     /// <param name="request">Generation parameters. <c>request.CfgScale</c> falls back to <see cref="LensConfig.DefaultCfgScale"/> if unset. <c>request.Steps</c> falls back to <see cref="LensConfig.DefaultSteps"/>.</param>
@@ -152,18 +152,15 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(shift);
         scheduler.SetTimesteps(steps);
 
-        // ── 2. Align positive/negative to a shared S_txt by right-zero-padding ──
-        IReadOnlyList<Tensor> alignedPos = positiveLayers;
-        IReadOnlyList<Tensor>? alignedNeg = negativeLayers;
-        if (useCfg && negativeLayers is not null)
-            (alignedPos, alignedNeg) = AlignTextLayers(positiveLayers, negativeLayers);
-
-        // ── 3. Initial noise in packed token form ─────────────────
+        // ── 2. Initial noise in packed token form ─────────────────
+        // (No pos/neg length alignment: the reference right-pads + masks only because it batches
+        // cond and uncond into one batch-of-2 forward. We run two separate forwards, each at its
+        // prompt's natural S_txt — mathematically identical to the masked reference.)
         TensorShape packedShape = new TensorShape(1, imgSeqLen, _config.InChannels);
         Tensor packedLatent = SeedGenerator.CreateNoise(packedShape, seed);
         Logs.Verbose($"Initial latent: shape={packedLatent.Shape}, init_sigma={scheduler.InitialNoiseSigma:F4}");
 
-        // ── 4. Denoising loop ─────────────────────────────────────
+        // ── 3. Denoising loop ─────────────────────────────────────
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = 0; i < steps; i++)
         {
@@ -173,15 +170,15 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             Tensor noisePred;
             if (useCfg)
             {
-                Tensor condPred = _transformer.Forward(Backend, packedLatent, alignedPos, sigma, patH, patW);
-                Tensor uncondPred = _transformer.Forward(Backend, packedLatent, alignedNeg!, sigma, patH, patW);
+                Tensor condPred = _transformer.Forward(Backend, packedLatent, positiveLayers, sigma, patH, patW);
+                Tensor uncondPred = _transformer.Forward(Backend, packedLatent, negativeLayers!, sigma, patH, patW);
                 noisePred = ApplyNormRescaledCfg(condPred, uncondPred, cfgScale);
                 condPred.Dispose();
                 uncondPred.Dispose();
             }
             else
             {
-                noisePred = _transformer.Forward(Backend, packedLatent, alignedPos, sigma, patH, patW);
+                noisePred = _transformer.Forward(Backend, packedLatent, positiveLayers, sigma, patH, patW);
             }
 
             TensorShape stepShape = new TensorShape(1, imgSeqLen, _config.InChannels);
@@ -311,43 +308,6 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             if (negatives[i].Shape[1] != n0)
                 throw new ArgumentException($"negativeLayers[{i}] seq_len {negatives[i].Shape[1]} disagrees with negativeLayers[0] seq_len {n0}.");
         }
-    }
-
-    /// <summary>Right-zero-pads positive and negative layer lists so they share a common S_txt. Mirrors upstream's <c>_align_text_features</c>. The mask side is not modeled here — Lens' transformer does not consume a per-batch mask in this pipeline (the attention mask defaults to all-valid for the t2i case).</summary>
-    private static (IReadOnlyList<Tensor> pos, IReadOnlyList<Tensor> neg) AlignTextLayers(
-        IReadOnlyList<Tensor> positives, IReadOnlyList<Tensor> negatives)
-    {
-        int posLen = (int)positives[0].Shape[1];
-        int negLen = (int)negatives[0].Shape[1];
-        if (posLen == negLen) return (positives, negatives);
-
-        int target = Math.Max(posLen, negLen);
-        Tensor[] posOut = new Tensor[positives.Count];
-        Tensor[] negOut = new Tensor[negatives.Count];
-        for (int i = 0; i < positives.Count; i++)
-        {
-            posOut[i] = posLen < target ? RightZeroPadSeq(positives[i], target) : positives[i];
-            negOut[i] = negLen < target ? RightZeroPadSeq(negatives[i], target) : negatives[i];
-        }
-        return (posOut, negOut);
-    }
-
-    private static Tensor RightZeroPadSeq(Tensor t, int target)
-    {
-        int batch = (int)t.Shape[0];
-        int seqLen = (int)t.Shape[1];
-        int channels = (int)t.Shape[2];
-        TensorShape outShape = new TensorShape(batch, target, channels);
-        Tensor padded = new Tensor(outShape, DType.F32);
-        float* inPtr = (float*)t.DataPointer;
-        float* outPtr = (float*)padded.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            long copyBytes = (long)seqLen * channels * sizeof(float);
-            Buffer.MemoryCopy(inPtr + b * seqLen * channels, outPtr + b * target * channels, copyBytes, copyBytes);
-            // Remainder of [b * target + seqLen .. b * target + target) is zero from allocation.
-        }
-        return padded;
     }
 
     /// <summary>Unpacks [B, S, C] to [B, C, H, W] (no spatial reshuffle — packed dim is already row-major H*W).</summary>
