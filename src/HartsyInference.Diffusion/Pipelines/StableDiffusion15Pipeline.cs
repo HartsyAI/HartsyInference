@@ -51,6 +51,7 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         int[] negativePromptTokenIds,
         TextToImageRequest request,
         Action<GenerationProgress>? onProgress = null,
+        IReadOnlyList<ControlNetConditioning>? controlNets = null,
         IReadOnlyList<IpAdapterConditioning>? ipAdapters = null,
         ConditioningSchedule? conditioningSchedule = null)
     {
@@ -100,7 +101,7 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         }
 
         // 4. Denoise loop (both paths run the same loop from their respective startStep)
-        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, plan.StartStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, ipAdapters, onProgress, conditioningSchedule);
+        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, plan.StartStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, controlNets, ipAdapters, onProgress, conditioningSchedule);
 
         textEmbeddings.Dispose();
         sourceLatent?.Dispose();
@@ -195,6 +196,7 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         Tensor? sourceLatent,
         Tensor? latentMask,
         int seed,
+        IReadOnlyList<ControlNetConditioning>? controlNets,
         IReadOnlyList<IpAdapterConditioning>? ipAdapters,
         Action<GenerationProgress>? onProgress,
         ConditioningSchedule? conditioningSchedule = null)
@@ -273,10 +275,27 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
                 ? textEmbeddings
                 : conditioningSchedule.Variants[conditioningSchedule.Resolve(i, totalSteps)];
 
+            // ControlNet (single pass per step, cond branch only — residuals shared across
+            // CFG branches, same as SdxlPipeline / diffusers guess_mode=True). Each adapter
+            // is gated by its [start, end] step-fraction window. SD1.5 has no pooled / ADM
+            // conditioning, so those ControlNet inputs stay null/empty.
+            Tensor[]? cnDownRes = null;
+            Tensor? cnMidRes = null;
+            IReadOnlyList<ControlNetConditioning>? activeControlNets = ControlNetConditioning.FilterActive(controlNets, i, totalSteps);
+            if (activeControlNets is not null)
+            {
+                int seqLenCN = (int)stepEmbeddings.Shape[1];
+                int hiddenSizeCN = (int)stepEmbeddings.Shape[2];
+                Tensor condEmbForCN = CfgHelper.SliceBatchElement(stepEmbeddings, 1, seqLenCN, hiddenSizeCN);
+                (cnDownRes, cnMidRes) = ControlNet.ForwardStacked(Backend, activeControlNets, scaledLatent, t, condEmbForCN, condPooled: null, sizeCondition: default);
+                condEmbForCN.Dispose();
+            }
+
             Tensor noisePred;
             if (cfgScale > 1.0f)
             {
                 noisePred = ClassifierFreeGuidanceStep(scaledLatent, t, stepEmbeddings, cfgScale,
+                    cnDownRes, cnMidRes,
                     activeIpaTokens, activeIpaK, activeIpaV, activeIpaScales);
             }
             else
@@ -285,9 +304,15 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
                 int hiddenSize = (int)stepEmbeddings.Shape[2];
                 Tensor condEmb = CfgHelper.SliceBatchElement(stepEmbeddings, 1, seqLen, hiddenSize);
                 noisePred = _unet.Forward(Backend, scaledLatent, t, condEmb, null, default,
-                    null, null,
+                    cnDownRes, cnMidRes,
                     activeIpaTokens, activeIpaK, activeIpaV, activeIpaScales);
                 condEmb.Dispose();
+            }
+
+            if (cnDownRes is not null)
+            {
+                foreach (Tensor d in cnDownRes) d.Dispose();
+                cnMidRes?.Dispose();
             }
 
             if (scaledLatent != latent) scaledLatent.Dispose();
@@ -332,8 +357,9 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         return latent;
     }
 
-    /// <summary>Runs classifier-free guidance: noise_pred = uncond + cfg_scale * (cond - uncond). Optionally injects IP-Adapter image-attention contribution into both UNet branches.</summary>
+    /// <summary>Runs classifier-free guidance: noise_pred = uncond + cfg_scale * (cond - uncond). Optionally injects ControlNet residuals (shared across both branches — diffusers' guess_mode=True behavior, same as <see cref="SdxlPipeline"/>) and IP-Adapter image-attention contribution into both UNet branches.</summary>
     private Tensor ClassifierFreeGuidanceStep(Tensor latent, float timestep, Tensor textEmbeddings, float cfgScale,
+        IReadOnlyList<Tensor>? cnDownRes = null, Tensor? cnMidRes = null,
         Tensor? ipaImageTokens = null, IReadOnlyList<Tensor>? ipaToKIpAll = null, IReadOnlyList<Tensor>? ipaToVIpAll = null, IReadOnlyList<float>? ipaScalePerLayer = null)
     {
         int seqLen = (int)textEmbeddings.Shape[1];
@@ -342,13 +368,13 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         Tensor uncondEmb = CfgHelper.SliceBatchElement(textEmbeddings, 0, seqLen, hiddenSize);
         Tensor condEmb = CfgHelper.SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
 
-        // Run UNet twice. SD1.5 has no SDXL ADM conditioning; pooled / sizeCondition / CN
-        // residuals stay null. IPA params are passed identically to both branches.
+        // Run UNet twice. SD1.5 has no SDXL ADM conditioning; pooled / sizeCondition stay
+        // null. CN residuals and IPA params are passed identically to both branches.
         Tensor uncondNoise = _unet.Forward(Backend, latent, timestep, uncondEmb, null, default,
-            null, null,
+            cnDownRes, cnMidRes,
             ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaScalePerLayer);
         Tensor condNoise = _unet.Forward(Backend, latent, timestep, condEmb, null, default,
-            null, null,
+            cnDownRes, cnMidRes,
             ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaScalePerLayer);
         uncondEmb.Dispose();
         condEmb.Dispose();

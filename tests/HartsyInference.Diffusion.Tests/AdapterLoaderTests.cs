@@ -2,7 +2,9 @@ using System.Text;
 using System.Text.Json;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Adapters;
+using HartsyInference.Diffusion.Models.Denoisers;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -133,6 +135,172 @@ public sealed class AdapterLoaderTests : IDisposable
         using IpAdapterFile file = IpAdapterLoader.Load(path);
         Assert.True(file.Config.IsFaceId);
         Assert.Contains("ArcFace", file.Config.ClipImageModel);
+    }
+
+    [Fact]
+    public void IpAdapterLoader_StandardWithNormKeys_NotDetectedAsPlus()
+    {
+        // Real ip-adapter_sd15.safetensors carries image_proj.norm.{weight,bias} (the standard
+        // projection's post-Linear LayerNorm) — the norm key must NOT trip Plus detection.
+        string path = CreateSafeTensorsFile("ip-adapter_sd15_std.safetensors", new()
+        {
+            ["image_proj.proj.weight"] = (DType.F32, [768 * 4, 1024], new float[768 * 4 * 1024]),
+            ["image_proj.proj.bias"] = (DType.F32, [768 * 4], new float[768 * 4]),
+            ["image_proj.norm.weight"] = (DType.F32, [768], new float[768]),
+            ["image_proj.norm.bias"] = (DType.F32, [768], new float[768]),
+            ["ip_adapter.1.to_k_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+            ["ip_adapter.1.to_v_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+        });
+
+        using IpAdapterFile file = IpAdapterLoader.Load(path);
+        Assert.Equal(IpAdapterBaseModel.Sd15, file.BaseModel);
+        Assert.False(file.Config.IsPlus);
+        Assert.Equal(4, file.Config.NumImageTokens);
+        Assert.Equal(768, file.Config.CrossAttentionDim);
+        Assert.Equal(1024, file.Config.ImageEmbeddingDim);
+    }
+
+    [Fact]
+    public void IpAdapter_Sd15Standard_LoadsAndProjectsFromSyntheticCheckpoint()
+    {
+        // Tiny SD1.5 standard checkpoint in the real key layout (2 cross-attn layers instead of 16).
+        string path = CreateSafeTensorsFile("ip-adapter_sd15_tiny.safetensors", new()
+        {
+            ["image_proj.proj.weight"] = (DType.F32, [768 * 4, 1024], new float[768 * 4 * 1024]),
+            ["image_proj.proj.bias"] = (DType.F32, [768 * 4], new float[768 * 4]),
+            ["image_proj.norm.weight"] = (DType.F32, [768], OnesArray(768)),
+            ["image_proj.norm.bias"] = (DType.F32, [768], new float[768]),
+            ["ip_adapter.1.to_k_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+            ["ip_adapter.1.to_v_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+            ["ip_adapter.3.to_k_ip.weight"] = (DType.F32, [640, 768], new float[640 * 768]),
+            ["ip_adapter.3.to_v_ip.weight"] = (DType.F32, [640, 768], new float[640 * 768]),
+        });
+
+        using IpAdapterFile file = IpAdapterLoader.Load(path);
+        using IpAdapter adapter = new IpAdapter(file.Config);
+        adapter.LoadWeights(file.Weights);
+
+        Assert.Equal(2, adapter.CrossAttentionLayerCount);
+        Assert.Equal(4, adapter.NumImageTokens);
+        Assert.Equal(new TensorShape(320, 768), adapter.GetToKIpWeight(0).Shape);
+        Assert.Equal(new TensorShape(640, 768), adapter.GetToVIpWeight(1).Shape);
+
+        using CpuBackend backend = new CpuBackend();
+        using Tensor clipEmbed = new Tensor(new TensorShape(1, 1024), DType.F32);
+        clipEmbed.AsSpan<float>().Clear();
+        using Tensor tokens = adapter.ProjectImage(backend, clipEmbed);
+        Assert.Equal(new TensorShape(1, 4, 768), tokens.Shape);
+        foreach (float v in tokens.AsSpan<float>())
+        {
+            Assert.Equal(0f, v);
+        }
+    }
+
+    [Fact]
+    public void IpAdapter_Sd15Plus_ConstructsResampler()
+    {
+        using IpAdapter adapter = new IpAdapter(IpAdapterConfig.Sd15Plus);
+        Assert.Equal(16, adapter.NumImageTokens);
+        Assert.IsType<IpAdapterPlusResampler>(adapter.ImageProjection);
+    }
+
+    [Fact]
+    public void ControlNetConditioning_DefaultWindow_IsAlwaysActive()
+    {
+        using ControlNet controlNet = new ControlNet(ControlNetConfig.Sd15(ControlNetMode.Canny), UNetConfig.Sd15);
+        using Tensor condImage = new Tensor(new TensorShape(1, 3, 8, 8), DType.F32);
+        ControlNetConditioning conditioning = new() { Adapter = controlNet, ConditionImage = condImage };
+        for (int i = 0; i < 20; i++)
+        {
+            Assert.True(conditioning.IsActiveAtStep(i, 20));
+        }
+    }
+
+    [Fact]
+    public void ControlNetConditioning_StartEndWindow_GatesSteps()
+    {
+        using ControlNet controlNet = new ControlNet(ControlNetConfig.Sd15(ControlNetMode.Canny), UNetConfig.Sd15);
+        using Tensor condImage = new Tensor(new TensorShape(1, 3, 8, 8), DType.F32);
+        ControlNetConditioning conditioning = new()
+        {
+            Adapter = controlNet,
+            ConditionImage = condImage,
+            StartFraction = 0.25f,
+            EndFraction = 0.75f,
+        };
+        // fraction = step / totalSteps with 20 steps → active iff 0.25 <= i/20 <= 0.75 → i in [5, 15].
+        Assert.False(conditioning.IsActiveAtStep(4, 20));
+        Assert.True(conditioning.IsActiveAtStep(5, 20));
+        Assert.True(conditioning.IsActiveAtStep(15, 20));
+        Assert.False(conditioning.IsActiveAtStep(16, 20));
+    }
+
+    [Fact]
+    public void ControlNetConditioning_FilterActive_HandlesAllNoneAndPartial()
+    {
+        using ControlNet controlNet = new ControlNet(ControlNetConfig.Sd15(ControlNetMode.Canny), UNetConfig.Sd15);
+        using Tensor condImage = new Tensor(new TensorShape(1, 3, 8, 8), DType.F32);
+        ControlNetConditioning early = new()
+        {
+            Adapter = controlNet,
+            ConditionImage = condImage,
+            EndFraction = 0.4f,
+        };
+        ControlNetConditioning late = new()
+        {
+            Adapter = controlNet,
+            ConditionImage = condImage,
+            StartFraction = 0.6f,
+        };
+        List<ControlNetConditioning> stack = [early, late];
+
+        Assert.Null(ControlNetConditioning.FilterActive(null, 0, 20));
+        Assert.Null(ControlNetConditioning.FilterActive([], 0, 20));
+
+        // Step 0 (fraction 0): only the early adapter.
+        IReadOnlyList<ControlNetConditioning>? atStart = ControlNetConditioning.FilterActive(stack, 0, 20);
+        Assert.NotNull(atStart);
+        Assert.Same(early, Assert.Single(atStart));
+
+        // Step 10 (fraction 0.5): neither window covers it.
+        Assert.Null(ControlNetConditioning.FilterActive(stack, 10, 20));
+
+        // Step 19 (fraction 0.95): only the late adapter.
+        IReadOnlyList<ControlNetConditioning>? atEnd = ControlNetConditioning.FilterActive(stack, 19, 20);
+        Assert.NotNull(atEnd);
+        Assert.Same(late, Assert.Single(atEnd));
+
+        // All active → the original list instance comes back (no per-step allocation).
+        List<ControlNetConditioning> alwaysOn = [new() { Adapter = controlNet, ConditionImage = condImage }];
+        Assert.Same(alwaysOn, ControlNetConditioning.FilterActive(alwaysOn, 10, 20));
+    }
+
+    [Fact]
+    public void ControlNet_Sd15AndSdxl_ResidualCounts_MatchBaseUNetSkipLayout()
+    {
+        // SD1.5: 1 conv_in + 4 blocks × 2 resnet skips + 3 downsample skips = 12.
+        using ControlNet sd15 = new ControlNet(ControlNetConfig.Sd15(ControlNetMode.Canny), UNetConfig.Sd15);
+        Assert.Equal(12, sd15.DownResidualCount);
+
+        // SDXL: 1 conv_in + 3 blocks × 2 resnet skips + 2 downsample skips = 9.
+        using ControlNet sdxl = new ControlNet(ControlNetConfig.Sdxl(ControlNetMode.Depth), UNetConfig.SdxlBase);
+        Assert.Equal(9, sdxl.DownResidualCount);
+    }
+
+    [Fact]
+    public void UNet_CrossAttentionLayerCounts_MatchIpAdapterCheckpointLayout()
+    {
+        // ip-adapter_sd15 ships 16 K/V pairs; SDXL adapters ship 70. The UNet's enumeration
+        // must land on the same counts or UNet.Forward rejects the flat K/V lists.
+        Assert.Equal(16, new UNet(UNetConfig.Sd15).CrossAttentionLayerCount);
+        Assert.Equal(70, new UNet(UNetConfig.SdxlBase).CrossAttentionLayerCount);
+    }
+
+    private static float[] OnesArray(int count)
+    {
+        float[] result = new float[count];
+        Array.Fill(result, 1f);
+        return result;
     }
 
     private string CreateSafeTensorsFile(string name, Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors)

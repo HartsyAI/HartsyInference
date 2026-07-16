@@ -254,6 +254,47 @@ public sealed unsafe class ControlNet : IDisposable
         return (downResiduals, midResidual);
     }
 
+    /// <summary>Runs every supplied ControlNet at the current step and sums their residuals into a single set. Each ControlNet sees the same latent + timestep + cond text embedding and produces its own per-skip residual stack and mid residual; this helper collapses them by element-wise addition so the UNet path doesn't need to know how many ControlNets are stacked. For SD1.5 pass <paramref name="condPooled"/> = null and an empty <paramref name="sizeCondition"/>. Caller owns and disposes all returned tensors.</summary>
+    public static (Tensor[] downResiduals, Tensor midResidual) ForwardStacked(
+        IBackend backend,
+        IReadOnlyList<ControlNetConditioning> controlNets,
+        Tensor latent,
+        float timestep,
+        Tensor condTextEmb,
+        Tensor? condPooled,
+        ReadOnlySpan<float> sizeCondition)
+    {
+        ControlNetConditioning first = controlNets[0];
+        (Tensor[] down, Tensor mid) = first.Adapter.Forward(backend, latent, first.ConditionImage, timestep, condTextEmb, condPooled, sizeCondition, first.Scale);
+        for (int c = 1; c < controlNets.Count; c++)
+        {
+            ControlNetConditioning next = controlNets[c];
+            (Tensor[] downNext, Tensor midNext) = next.Adapter.Forward(backend, latent, next.ConditionImage, timestep, condTextEmb, condPooled, sizeCondition, next.Scale);
+            if (downNext.Length != down.Length)
+            {
+                foreach (Tensor d in downNext) d.Dispose();
+                midNext.Dispose();
+                throw new InvalidOperationException(
+                    $"Stacked ControlNet residual count mismatch: {down.Length} vs {downNext.Length}. " +
+                    "All stacked ControlNets must target the same base UNet config.");
+            }
+            for (int i = 0; i < down.Length; i++)
+            {
+                Tensor sum = new Tensor(down[i].Shape, down[i].DType);
+                backend.Add(sum, down[i], downNext[i]);
+                down[i].Dispose();
+                downNext[i].Dispose();
+                down[i] = sum;
+            }
+            Tensor sumMid = new Tensor(mid.Shape, mid.DType);
+            backend.Add(sumMid, mid, midNext);
+            mid.Dispose();
+            midNext.Dispose();
+            mid = sumMid;
+        }
+        return (down, mid);
+    }
+
     /// <summary>Yields all weight tensors for GPU preloading / freeing.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {

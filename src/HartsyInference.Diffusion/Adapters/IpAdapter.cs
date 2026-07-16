@@ -7,9 +7,9 @@ namespace HartsyInference.Diffusion.Adapters;
 ///
 /// <para>The adapter holds two pieces of state: an <see cref="IIpAdapterImageProjection"/> that maps CLIP-Vision output to image-prompt tokens (different module for standard vs Plus / Plus-Face / Full-Face), and a flat list of per-cross-attention-layer <c>(to_k_ip, to_v_ip)</c> weight pairs keyed by integer index (<c>0</c>, <c>1</c>, …, matching the UNet's cross-attention enumeration order — diffusers' <c>attn_processors</c> dict iteration order, which our <see cref="HartsyInference.Diffusion.Models.Denoisers.UNet"/> matches).</para>
 ///
-/// <para><b>Currently supported:</b> SDXL standard + Plus + Plus-Face (same architecture as Plus, just different training).</para>
+/// <para><b>Currently supported:</b> SDXL and SD 1.5, standard + Plus + Plus-Face (Plus-Face is the same architecture as Plus, just different training). SD 1.5 is the same mechanism at cross-attn dim 768 over the SD1.5 UNet's 16 cross-attention sub-layers.</para>
 ///
-/// <para><b>Not yet implemented:</b> SD 1.5 IPA (mechanical clone — same architecture, different cross-attn dim 768 and base model wiring not yet plumbed); FaceID variants (use InsightFace ArcFace embeddings instead of CLIP-Vision; different image encoder + projection); Flux IPA (DiT cross-attention has a different shape).</para></summary>
+/// <para><b>Not yet implemented:</b> FaceID variants (use InsightFace ArcFace embeddings instead of CLIP-Vision; different image encoder + projection); Flux IPA (DiT cross-attention has a different shape).</para></summary>
 public sealed unsafe class IpAdapter : IDisposable
 {
     private readonly IpAdapterConfig _config;
@@ -52,23 +52,24 @@ public sealed unsafe class IpAdapter : IDisposable
             : new IpAdapterStandardProjection(config.CrossAttentionDim, config.NumImageTokens);
     }
 
-    /// <summary>Builds the Plus Resampler with the canonical hyperparameters for the detected base model. SDXL Plus uses <c>depth=4, hidden=1024, heads=12, head_dim=64</c> (so inner=768) — these are the values the released SDXL Plus checkpoints were trained with.</summary>
+    /// <summary>Builds the Plus Resampler with the canonical hyperparameters for the detected base model, matching the released tencent-ailab checkpoints: SD1.5 Plus uses <c>dim=768, heads=12</c> (proj_in <c>[768, 1280]</c>, to_q <c>[768, 768]</c> in ip-adapter-plus_sd15); SDXL Plus uses <c>dim=1280, heads=20</c> (proj_in <c>[1280, 1280]</c>, to_q <c>[1280, 1280]</c> in ip-adapter-plus_sdxl_vit-h). Both are <c>depth=4, head_dim=64, ff_mult=4</c> over CLIP-Vision-H penultimate hidden states (1280-dim), projected out to the base UNet's cross-attention dim.</summary>
     private static IpAdapterPlusResampler BuildPlusResampler(IpAdapterConfig config)
     {
-        // For SDXL Plus: 4 layers, hidden=1024, heads=12, head_dim=64 → inner_dim=768.
-        // Embedding dim = 1280 (CLIP-Vision-H hidden), output_dim = 2048 (SDXL cross_attn_dim).
+        bool isSd15 = config.BaseModel == IpAdapterBaseModel.Sd15;
+        int hiddenDim = isSd15 ? 768 : 1280;
+        int numHeads = isSd15 ? 12 : 20;
         return new IpAdapterPlusResampler(
-            embeddingDim: 1280,           // CLIP-Vision-H/14 hidden_size
-            hiddenDim: 1024,              // Resampler working dim
-            numHeads: 12,                 // PerceiverAttention heads
-            headDim: 64,                  // Per-head dim → inner_dim = 12 * 64 = 768
+            embeddingDim: 1280,           // CLIP-Vision-H/14 hidden_size (penultimate hidden states)
+            hiddenDim: hiddenDim,         // Resampler working dim (= inner_dim: to_q is square in the checkpoints)
+            numHeads: numHeads,
+            headDim: 64,
             numTokens: config.NumImageTokens,
             outputDim: config.CrossAttentionDim,
             depth: 4,                     // 4 alternating attention + FFN layers
             ffMultiplier: 4);
     }
 
-    /// <summary>Loads the IP-Adapter checkpoint. Drives the image projection's load and counts <c>ip_adapter.{i}.to_k_ip.weight</c> entries to discover the cross-attention layer count, then loads each per-layer K/V pair. Throws if the count doesn't match what the standard SDXL UNet has (70 cross-attn layers).</summary>
+    /// <summary>Loads the IP-Adapter checkpoint. Drives the image projection's load and counts <c>ip_adapter.{i}.to_k_ip.weight</c> entries to discover the cross-attention layer count (16 for SD1.5, 70 for SDXL), then loads each per-layer K/V pair. The base UNet validates the count against its own enumeration in <c>UNet.Forward</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         // 1. Image projection
