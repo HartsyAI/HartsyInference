@@ -151,8 +151,6 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
         int[,] cache = new int[1 + NumCodebooks, ct];
 
         KyutaiTextScheduler.State state = scheduler.NewState(entries);
-        string? dbgDir = Environment.GetEnvironmentVariable("KYUTAI_DEBUG_DUMP");
-        if (dbgDir is not null && sumCond is not null) DumpF32(Path.Combine(dbgDir, "our_condsum.bin"), sumCond, Dim);
         List<int[]> emitted = new();
         using MoshiTransformer.CrossKvCache crossKv = Backbone.PrecomputeCrossKv(backend, cross);
         using FixedKvCache selfCache = new(numLayers: 16, batch: 1,
@@ -170,12 +168,6 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
                 // Sample the text token (moshi sample_token, temp_text/top_k_text) — NOT argmax; the sampled
                 // new_word/pad choice paces the words. textLogits is [1,1,TextCard]; sample on the host.
                 ReadOnlySpan<float> textSpan = new((void*)textLogits.DataPointer, TextCard);
-                if (dbgDir is not null && offset < 8)
-                {
-                    DumpF32(Path.Combine(dbgDir, $"our_tout_f{offset}.bin"), lastCtx, Dim);
-                    DumpF32(Path.Combine(dbgDir, $"our_tlogits_f{offset}.bin"), textLogits, TextCard);
-                    DumpF32(Path.Combine(dbgDir, $"our_frameemb_f{offset}.bin"), frameEmbed, Dim);
-                }
                 int textTok = textTemp > 0f ? SampleTopK(textSpan, textTemp, textTopK, rng) : ArgMax(textSpan);
                 textLogits.Dispose();
 
@@ -220,13 +212,6 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
     {
         foreach (int c in frame) if (c < 0 || c >= AudioCard) return false;
         return true;
-    }
-
-    private static void DumpF32(string path, Tensor t, int n)
-    {
-        byte[] bytes = new byte[n * 4];
-        fixed (byte* bp = bytes) Buffer.MemoryCopy((void*)t.DataPointer, bp, n * 4, n * 4);
-        File.WriteAllBytes(path, bytes);
     }
 
     private static int ArgMax(ReadOnlySpan<float> v)
