@@ -21,6 +21,11 @@ public sealed class ControlNetFile : IDisposable
     /// <summary>Auto-derived config based on the detected base model and the standard preset for that family.</summary>
     public required ControlNetConfig Config { get; init; }
 
+    /// <summary>Full DiT config derived from the checkpoint header when <see cref="BaseModel"/> is
+    /// <see cref="ControlNetBaseModel.Flux"/> (block depths, union mode count, guidance); null otherwise.
+    /// Feed it to <see cref="FluxControlNet(FluxControlNetConfig)"/>.</summary>
+    public FluxControlNetConfig? FluxConfig { get; init; }
+
     /// <summary>All parsed tensors keyed by diffusers-format name. For LDM-layout checkpoints (<c>control_model.*</c>) the keys have been converted; for diffusers-layout files they are the original safetensors keys.</summary>
     public required IReadOnlyDictionary<string, Tensor> Weights { get; init; }
 
