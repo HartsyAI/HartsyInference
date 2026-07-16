@@ -147,16 +147,8 @@ public sealed unsafe class DepthAnythingPreprocessor
     }
 
     /// <summary>Renders a [0,1] depth buffer as interleaved-RGB24 grayscale (255 = nearest).</summary>
-    public static byte[] ToGrayscaleRgb24(ReadOnlySpan<float> unitDepth)
-    {
-        byte[] rgb = new byte[unitDepth.Length * 3];
-        for (int i = 0; i < unitDepth.Length; i++)
-        {
-            byte g = (byte)Math.Clamp((int)MathF.Round(unitDepth[i] * 255f), 0, 255);
-            rgb[i * 3] = g; rgb[i * 3 + 1] = g; rgb[i * 3 + 2] = g;
-        }
-        return rgb;
-    }
+    public static byte[] ToGrayscaleRgb24(ReadOnlySpan<float> unitDepth) =>
+        Codec.ImageTensor.UnitGrayscaleToRgb24(unitDepth);
 
     /// <summary>Rounds to the nearest multiple of 14, bumping up when that would fall below the lower bound
     /// (the official <c>constrain_to_multiple_of</c> with <c>min_val</c>).</summary>
