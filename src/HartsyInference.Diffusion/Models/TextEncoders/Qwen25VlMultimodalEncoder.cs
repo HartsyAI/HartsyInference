@@ -47,6 +47,9 @@ public sealed unsafe class Qwen25VlMultimodalEncoder
         _mropeSection = mropeSection ?? [16, 24, 24];
     }
 
+    /// <summary>Vision-tower weights, for pipeline-phase PreloadWeights/FreeWeights staging. The language tower is staged separately by the owner (it is shared with the text-only path); without an explicit free the tower's weights auto-promote into the resident cache on the second encode (cond + uncond) and permanently shrink the DiT budget.</summary>
+    public IEnumerable<Tensor> EnumerateVisionWeights() => _vision.EnumerateWeights();
+
     /// <summary>Number of merged vision tokens (= <c>&lt;|image_pad|&gt;</c> placeholders the template must
     /// contain) that <paramref name="image"/> will produce, without running the tower. Used by callers to
     /// build the templated token sequence before encoding.</summary>
