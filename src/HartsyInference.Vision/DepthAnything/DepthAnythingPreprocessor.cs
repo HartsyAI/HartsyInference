@@ -91,6 +91,10 @@ public sealed unsafe class DepthAnythingPreprocessor
     /// (bilinear, <c>align_corners=True</c> like the official <c>infer_image</c>) and min-max normalizes to
     /// [0,1]. Returns a row-major <c>dstWidth·dstHeight</c> buffer; 1 = nearest.</summary>
     public static float[] PostprocessToUnit(Tensor depth, int dstWidth, int dstHeight)
+        => PostprocessToUnit(depth, dstWidth, dstHeight, minMaxNormalize: true);
+
+    /// <summary>Resize + scale variant: <paramref name="minMaxNormalize"/> true = full-range min-max stretch (the comfyui_controlnet_aux convention SD ControlNets expect); false = max-only scaling (<c>depth / max</c>, the BFL FLUX.1-Depth reference form — no min subtraction, so far regions keep their natural non-zero level instead of saturating to black; the stretched distribution made FLUX Depth hallucinate caption-bar/web-UI content on real scenes).</summary>
+    public static float[] PostprocessToUnit(Tensor depth, int dstWidth, int dstHeight, bool minMaxNormalize)
     {
         if (depth.Shape.Rank != 4 || depth.Shape[0] != 1 || depth.Shape[1] != 1)
             throw new ArgumentException($"depth must be [1,1,h,w]; got {depth.Shape}.", nameof(depth));
@@ -115,7 +119,20 @@ public sealed unsafe class DepthAnythingPreprocessor
                 resized[(long)oy * dstWidth + ox] = v0 * (1f - fy) + v1 * fy;
             }
         }
-        NormalizeToUnit(resized);
+        if (minMaxNormalize)
+        {
+            NormalizeToUnit(resized);
+        }
+        else
+        {
+            float max = 0f;
+            foreach (float v in resized) if (v > max) max = v;
+            if (max > 0f)
+            {
+                float inv = 1f / max;
+                for (long i = 0; i < resized.LongLength; i++) resized[i] *= inv;
+            }
+        }
         return resized;
     }
 
