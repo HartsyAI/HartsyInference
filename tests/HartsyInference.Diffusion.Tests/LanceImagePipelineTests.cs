@@ -22,10 +22,12 @@ public unsafe class LanceImagePipelineTests
         CpuBackend backend = new();
 
         // Tiny backbone: hidden 32, 2 layers, 4 heads : 2 KV (head_dim 8), ffn 64, mrope (2,1,1) sums to 4 = head_dim/2.
+        // Sentinel ids remapped into the tiny 64-entry vocab (the bare template embeds BOS/EOS/vision sentinels).
         LanceConfig cfg = new()
         {
             HiddenSize = 32, NumLayers = 2, NumHeads = 4, NumKvHeads = 2,
             IntermediateSize = 64, MropeSection = (2, 1, 1), VocabSize = 64, QkNorm = false,
+            BosTokenId = 60, EosTokenId = 61, VisionStartTokenId = 62, VisionEndTokenId = 63, ImStartTokenId = 59,
         };
         int vocab = cfg.VocabSize;
 

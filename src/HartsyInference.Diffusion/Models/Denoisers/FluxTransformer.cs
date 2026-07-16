@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
@@ -250,14 +251,19 @@ public sealed unsafe class FluxTransformer : IDisposable
     /// <param name="txtSeqLen">Text sequence length.</param>
     /// <param name="hPacked">Packed image height (latent_h / 2).</param>
     /// <param name="wPacked">Packed image width (latent_w / 2).</param>
+    /// <param name="controlNetResiduals">Optional Flux DiT ControlNet residuals for this step (see
+    /// <see cref="Adapters.FluxControlNet"/>). Injected additively into the double-block image stream and the
+    /// image rows of the single-block stream with diffusers' interval mapping. Requires batch 1 and no Kontext
+    /// reference tokens; pipelines route ControlNet steps through the eager host path (never the step graph).</param>
     /// <returns>Predicted velocity [B, imgSeqLen, 64].</returns>
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor t5Embeddings, float sigma,
         Tensor clipPooled, float guidanceScale, int txtSeqLen, int hPacked, int wPacked, Tensor? attnBias = null,
-        int refSeqLen = 0, int refHPacked = 0, int refWPacked = 0)
+        int refSeqLen = 0, int refHPacked = 0, int refWPacked = 0,
+        Adapters.FluxControlNetResiduals? controlNetResiduals = null)
     {
         Tensor tembOuter = ComputeTimestepEmbedding(backend, sigma, clipPooled, guidanceScale, (int)packedLatent.Shape[0]);
         Tensor velocity = ForwardWithTemb(backend, packedLatent, t5Embeddings, tembOuter, txtSeqLen, hPacked, wPacked,
-            attnBias, refSeqLen, refHPacked, refWPacked);
+            attnBias, refSeqLen, refHPacked, refWPacked, controlNetResiduals);
         tembOuter.Dispose();
         return velocity;
     }
@@ -266,7 +272,8 @@ public sealed unsafe class FluxTransformer : IDisposable
     /// path computes temb inside the capture from fixed device sin buffers). Does NOT dispose temb.</summary>
     private Tensor ForwardWithTemb(IBackend backend, Tensor packedLatent, Tensor t5Embeddings, Tensor temb,
         int txtSeqLen, int hPacked, int wPacked, Tensor? attnBias,
-        int refSeqLen, int refHPacked, int refWPacked)
+        int refSeqLen, int refHPacked, int refWPacked,
+        Adapters.FluxControlNetResiduals? controlNetResiduals = null)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
@@ -291,11 +298,62 @@ public sealed unsafe class FluxTransformer : IDisposable
         //       tables AND re-uploads the GPU cos/sin tables; it ran EVERY forward before) ──
         EnsureRope(txtSeqLen, hPacked, wPacked, refSeqLen, refHPacked, refWPacked);
 
+        // ── 4a. ControlNet residual prep: batch-1 / no-Kontext only (residuals are sized to the noise grid).
+        //       Under the F16 weight-damp regime the token streams ride at ResidualDamp scale (damped embedder
+        //       + branch-output weights — active even on the F32 loop below), so externally-computed residuals
+        //       must be damped by the same factor to stay consistent; the final no-affine LayerNorm cancels it.
+        //       Single-block residuals cover only the image rows — pad each with zero text rows ONCE so the
+        //       per-block injection is a plain device Add (interval mapping reuses the same padded tensor). ──
+        Tensor[]? cnDoubleResiduals = null;
+        Tensor[]? cnSinglePadded = null;
+        bool ownsCnDoubles = false;
+        if (controlNetResiduals is not null)
+        {
+            if (batch != 1)
+                throw new HartsyInferenceException("Flux ControlNet residual injection requires batch 1.");
+            if (refSeqLen > 0)
+                throw new HartsyInferenceException("Flux ControlNet residuals cannot be combined with Kontext reference tokens.");
+            float residualDamp = _f16Mode ? ChromaF16.ResidualDamp : 1.0f;
+            cnDoubleResiduals = controlNetResiduals.DoubleBlockResiduals;
+            if (residualDamp != 1.0f && cnDoubleResiduals.Length > 0)
+            {
+                Tensor[] damped = new Tensor[cnDoubleResiduals.Length];
+                for (int i = 0; i < cnDoubleResiduals.Length; i++)
+                {
+                    damped[i] = new Tensor(cnDoubleResiduals[i].Shape, DType.F32);
+                    backend.Scale(damped[i], cnDoubleResiduals[i], residualDamp);
+                }
+                cnDoubleResiduals = damped;
+                ownsCnDoubles = true;
+            }
+            if (controlNetResiduals.SingleBlockResiduals.Length > 0)
+            {
+                Tensor txtZeros = new Tensor(new TensorShape(1, txtSeqLen, hidden), DType.F32);
+                txtZeros.AsSpan<float>().Clear();
+                cnSinglePadded = new Tensor[controlNetResiduals.SingleBlockResiduals.Length];
+                for (int i = 0; i < cnSinglePadded.Length; i++)
+                {
+                    Tensor res = controlNetResiduals.SingleBlockResiduals[i];
+                    Tensor source = res;
+                    if (residualDamp != 1.0f)
+                    {
+                        source = new Tensor(res.Shape, DType.F32);
+                        backend.Scale(source, res, residualDamp);
+                    }
+                    cnSinglePadded[i] = new Tensor(new TensorShape(1, totalSeqLen, hidden), DType.F32);
+                    backend.Concat(cnSinglePadded[i], new Tensor[] { txtZeros, source }, 1);
+                    if (!ReferenceEquals(source, res)) source.Dispose();
+                }
+                txtZeros.Dispose();
+            }
+        }
+
         // ── 4b. F16 block loop (HARTSY_DIT_F16, B=1): one cast per stream before the loop — every block
         //       activation follows, halving the bandwidth-bound glue traffic and making all 57 SDPAs
         //       zero-cast cuDNN F16. Streams are already at ResidualDamp scale from the damped embedders.
-        //       Cast back to F32 after the loop for the final norm (which cancels the damp) + Euler step. ──
-        bool f16Loop = _f16Mode && batch == 1;
+        //       Cast back to F32 after the loop for the final norm (which cancels the damp) + Euler step.
+        //       ControlNet steps stay F32 (residual Add needs matching dtype; CN steps are host-path anyway). ──
+        bool f16Loop = _f16Mode && batch == 1 && controlNetResiduals is null;
         if (f16Loop)
         {
             Tensor imgF16 = new Tensor(imgTokShape, DType.F16);
@@ -313,6 +371,8 @@ public sealed unsafe class FluxTransformer : IDisposable
         Tensor currentImg = imgTokens;
         Tensor currentTxt = txtTokens;
 
+        int cnDoubleInterval = cnDoubleResiduals is { Length: > 0 }
+            ? (int)Math.Ceiling((double)_config.Depth / cnDoubleResiduals.Length) : 0;
         for (int i = 0; i < _config.Depth; i++)
         {
             BeforeBlockForward?.Invoke(i);
@@ -325,6 +385,16 @@ public sealed unsafe class FluxTransformer : IDisposable
 
             currentImg = newImg;
             currentTxt = newTxt;
+
+            // ControlNet residual (diffusers interval mapping: base block i ← residual i / ceil(depth/count)).
+            if (cnDoubleInterval > 0)
+            {
+                Tensor res = cnDoubleResiduals![Math.Min(i / cnDoubleInterval, cnDoubleResiduals.Length - 1)];
+                Tensor injected = new Tensor(currentImg.Shape, currentImg.DType);
+                backend.Add(injected, currentImg, res);
+                currentImg.Dispose();
+                currentImg = injected;
+            }
         }
 
         // ── 6. Concatenate text + image for single-stream processing. B=1: device row-concat (the old
@@ -344,12 +414,36 @@ public sealed unsafe class FluxTransformer : IDisposable
         txtTokens.Dispose();
 
         // ── 7. Single-stream blocks ──
+        int cnSingleInterval = cnSinglePadded is { Length: > 0 }
+            ? (int)Math.Ceiling((double)_config.DepthSingleBlocks / cnSinglePadded.Length) : 0;
         for (int i = 0; i < _config.DepthSingleBlocks; i++)
         {
             BeforeBlockForward?.Invoke(_config.Depth + i);
             Tensor newX = _singleBlocks[i].Forward(backend, x, temb, _rope, attnBias);
             x.Dispose();
             x = newX;
+
+            // ControlNet single-block residual: padded with zero text rows, so a plain Add touches only the
+            // image rows (diffusers adds to the image hidden_states only).
+            if (cnSingleInterval > 0)
+            {
+                Tensor res = cnSinglePadded![Math.Min(i / cnSingleInterval, cnSinglePadded.Length - 1)];
+                Tensor injected = new Tensor(x.Shape, x.DType);
+                backend.Add(injected, x, res);
+                x.Dispose();
+                x = injected;
+            }
+        }
+
+        // ControlNet scratch: the damped double-residual copies and the padded single residuals are
+        // transformer-owned; the caller's original residual tensors are untouched.
+        if (ownsCnDoubles)
+        {
+            foreach (Tensor t in cnDoubleResiduals!) t.Dispose();
+        }
+        if (cnSinglePadded is not null)
+        {
+            foreach (Tensor t in cnSinglePadded) t.Dispose();
         }
 
         // ── 8. Extract image tokens: discard text tokens (and, for Kontext, the trailing reference tokens).
@@ -636,8 +730,10 @@ public sealed unsafe class FluxTransformer : IDisposable
         return temb;
     }
 
-    /// <summary>Sinusoidal timestep embedding with flip_sin_to_cos=True. Output: [cos_0..cos_127, sin_0..sin_127].</summary>
-    private static void ComputeSinusoidalTimestep(Tensor output, float timestep, int batch)
+    /// <summary>Sinusoidal timestep embedding with flip_sin_to_cos=True. Output: [cos_0..cos_127, sin_0..sin_127].
+    /// Internal so <see cref="Adapters.FluxControlNet"/> (which mirrors this transformer's time_text_embed) reuses
+    /// the exact same embedding.</summary>
+    internal static void ComputeSinusoidalTimestep(Tensor output, float timestep, int batch)
     {
         float* outPtr = (float*)output.DataPointer;
         int halfDim = 128;

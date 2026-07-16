@@ -10,13 +10,11 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Lance (ByteDance, Apache-2.0) text-to-image pipeline. Wires the verified components — <see cref="LanceTransformer"/> (MoT backbone), <see cref="LanceLatentPatch"/> (latent↔token handoff), <see cref="Wan22VaeDecoder"/> — into the T2I path distilled from upstream <c>lance.py</c> <c>validation_gen</c>.
+/// <summary>Lance (ByteDance, Apache-2.0) text-to-image pipeline. Wires <see cref="LanceTransformer"/> (MoT backbone), the packed-sequence builders in <see cref="LancePipelineCommon"/>, and <see cref="Wan22VaeDecoder"/> into the T2I path from upstream <c>validation_gen</c> (reconciled against the real <c>Lance_3B</c> checkpoint).
 ///
-/// <para><b>Status: built, first-run validation pending.</b> The component blocks are individually unit-tested, but the sequence packing, the MaPE position offsets, and the CFG combine are numerically validation-gated against the real Lance checkpoint (no weights in this environment). Debug-dump hooks (<c>LANCE_DEBUG_DIR</c>) are wired in the transformer for the layer-diff.</para>
+/// <para>Per upstream inference defaults: 2-way text CFG gated to shifted time in <c>(0.4, 1]</c> with global renorm; the uncond branch is the same chat-templated sequence with the caption removed (or the negative prompt substituted when provided). Vision CFG / editing (the frozen Qwen2.5-VL ViT) is not part of this release's T2I path.</para>
 ///
-/// <para>T2I uses standard 2-way text CFG (cond prompt vs uncond/negative prompt). The 3-way vision CFG and image-editing path require the frozen Qwen2.5-VL ViT (deferred). Video (T&gt;1) requires the VAE streaming decode (Phase 9).</para>
-///
-/// <para>Spatial math: VAE downsamples 16×, the transformer patchifies (1,2,2), so for an H×W image the VAE latent is <c>[48, 1, H/16, W/16]</c> and the transformer token grid is <c>(1, H/32, W/32)</c> with 192-dim tokens. H and W must be divisible by 32.</para></summary>
+/// <para>Spatial math: the VAE downsamples 16× and the transformer patchifies (1,1,1), so an H×W image gives a <c>[48, 1, H/16, W/16]</c> latent = <c>(1, H/16, W/16)</c> token grid of 48-dim tokens. H and W must be divisible by 16, and H/16, W/16 ≤ 64 (the frozen position table).</para></summary>
 public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
 {
     private const int VaeChannels = 48;
@@ -25,31 +23,33 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
     private readonly Wan22VaeDecoder _vae;
     private readonly Wan22VaeEncoder? _vaeEncoder;
     private readonly LanceConfig _config;
+    private readonly LancePromptTemplate _template;
 
     /// <summary>Creates a Lance T2I pipeline. Img2img is unavailable; use the overload accepting a <see cref="Wan22VaeEncoder"/> to enable it.</summary>
-    public LanceImagePipeline(IBackend backend, LanceTransformer transformer, Wan22VaeDecoder vae, LanceConfig config)
-        : this(backend, transformer, vae, vaeEncoder: null, config)
+    public LanceImagePipeline(IBackend backend, LanceTransformer transformer, Wan22VaeDecoder vae, LanceConfig config,
+        LancePromptTemplate? promptTemplate = null)
+        : this(backend, transformer, vae, vaeEncoder: null, config, promptTemplate)
     {
     }
 
-    /// <summary>Creates a Lance pipeline with both VAE halves loaded — required for img2img (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>). Masked inpaint is NOT supported (see <see cref="GenerateFromTokens"/>).</summary>
+    /// <summary>Creates a Lance pipeline with both VAE halves loaded — required for img2img (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>). Masked inpaint is NOT supported. <paramref name="promptTemplate"/> should be the chat-templated scaffold from <see cref="LancePromptTemplate.Create"/>; null falls back to the bare (<c>text_template=false</c>) layout.</summary>
     public LanceImagePipeline(IBackend backend, LanceTransformer transformer, Wan22VaeDecoder vae,
-        Wan22VaeEncoder? vaeEncoder, LanceConfig config)
+        Wan22VaeEncoder? vaeEncoder, LanceConfig config, LancePromptTemplate? promptTemplate = null)
         : base(backend)
     {
         _transformer = transformer;
         _vae = vae;
         _vaeEncoder = vaeEncoder;
         _config = config;
+        _template = promptTemplate ?? LancePromptTemplate.Bare(config);
     }
 
-    /// <summary>Generates an image from chat-templated prompt + negative-prompt token ids (Qwen2 BPE). Steps/CFG from <paramref name="request"/>.
+    /// <summary>Generates an image from raw caption token ids (plain Qwen2 BPE — the chat scaffold is added internally from the prompt template). <paramref name="negativeTokenIds"/> empty replicates the upstream uncond (caption dropped); non-empty substitutes it as the uncond caption.
     /// <para>An <see cref="ImageToImageRequest"/> selects img2img: the source is encoded through the Wan2.2 VAE
-    /// (normalized latent), converted to Lance's 192-dim token space (channel-last + (1,2,2) patchify) and mixed with
-    /// fresh noise at <c>t = tsteps[startStep]</c> (<c>x = (1−t)·src + t·noise</c>, matching the Euler loop's
-    /// <c>x_t = (1−t)·x0 + t·ε</c> convention) — requires a <see cref="Wan22VaeEncoder"/> on construction. Masked
-    /// inpaint is not supported (throws <see cref="NotSupportedException"/>): the 32× effective downscale leaves one
-    /// mask cell per 32×32-pixel block, too coarse for blend-on-vanilla. Strength=0 short-circuits to byte-identical
+    /// (normalized latent), flattened to 48-dim tokens and mixed with fresh noise at <c>t = tsteps[startStep]</c>
+    /// (<c>x = (1−t)·src + t·noise</c>) — requires a <see cref="Wan22VaeEncoder"/> on construction. Masked
+    /// inpaint is not supported (throws <see cref="NotSupportedException"/>): the 16× downscale leaves one mask
+    /// cell per 16×16-pixel block, too coarse for blend-on-vanilla. Strength=0 short-circuits to byte-identical
     /// pass-through.</para></summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds, int[] negativeTokenIds, TextToImageRequest request,
@@ -60,17 +60,16 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
         if (isImg2Img && _vaeEncoder is null)
             throw new InvalidOperationException("ImageToImageRequest requires a Wan22VaeEncoder. Construct the pipeline with the overload that accepts one.");
         if (isImg2Img && ((ImageToImageRequest)request).Mask is not null)
-            throw new NotSupportedException("Lance masked inpaint is not supported: the 32× effective downscale (VAE 16× × patch 2×) leaves one mask cell per 32×32-pixel block, too coarse for blend-on-vanilla.");
+            throw new NotSupportedException("Lance masked inpaint is not supported: the 16x VAE downscale leaves one mask cell per 16x16-pixel block, too coarse for blend-on-vanilla.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int width = request.Width ?? GenerationDefaults.Generic.Width;
         int height = request.Height ?? GenerationDefaults.Generic.Height;
-        const int totalDownscale = 32;   // VAE 16× × transformer patch 2×
-        if (width % totalDownscale != 0 || height % totalDownscale != 0)
-            throw new ArgumentException($"Width and height must be divisible by {totalDownscale} for Lance.");
+        int downscale = _config.VaeDownsampleSpatial * _config.LatentPatchSize.H;
+        if (width % downscale != 0 || height % downscale != 0)
+            throw new ArgumentException($"Width and height must be divisible by {downscale} for Lance.");
 
-        int vaeLatentH = height / 16, vaeLatentW = width / 16;
-        int gridT = 1, gridH = vaeLatentH / 2, gridW = vaeLatentW / 2;
+        int gridT = 1, gridH = height / downscale, gridW = width / downscale;
         int nVae = gridT * gridH * gridW;
         int steps = request.Steps ?? _config.NumTimesteps;
         float cfg = request.CfgScale ?? _config.CfgTextScale;
@@ -86,49 +85,48 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
 
         string opMode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "T2I";
         Logs.Info($"Lance {opMode}: {width}x{height}, {steps} steps, cfg={cfg}, seed={seed} (grid {gridT}x{gridH}x{gridW}, {nVae} tokens)");
-        Logs.Warning("Lance pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
         Stopwatch sw = Stopwatch.StartNew();
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
 
-        // Build cond / uncond sequence metadata.
-        (Tensor condPos, int[] condUnd, int[] condGen) = LancePipelineCommon.BuildSequence(promptTokenIds.Length, gridT, gridH, gridW);
-        (Tensor uncondPos, int[] uncondUnd, int[] uncondGen) = LancePipelineCommon.BuildSequence(negativeTokenIds.Length, gridT, gridH, gridW);
+        using LanceSequence cond = LancePipelineCommon.BuildGenSequence(_template, promptTokenIds, _config, gridT, gridH, gridW);
+        using LanceSequence uncond = LancePipelineCommon.BuildGenSequence(_template, negativeTokenIds, _config, gridT, gridH, gridW);
+        int[] latentPosIds = LancePipelineCommon.BuildLatentPositionIds(gridT, gridH, gridW, _config.MaxLatentSize);
 
-        // Logit-normal-shifted timestep grid (t: 1 → 0).
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
-
-        // Initial 192-dim token latents (t2i: pure noise; img2img: encoded source mixed with noise at tsteps[startStep]).
         Tensor latents = BuildInitialTokenLatents(request, tsteps, nVae, seed, startStep);
 
         for (int k = startStep; k < steps; k++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = tsteps[k];
-            float tNext = tsteps[k + 1];
-            float dt = t - tNext;
+            float dt = t - tsteps[k + 1];
 
-            Tensor vCond = _transformer.Forward(Backend, promptTokenIds, latents, (gridT, gridH, gridW), t, condPos, condUnd, condGen, null);
-            Tensor vUncond = _transformer.Forward(Backend, negativeTokenIds, latents, (gridT, gridH, gridW), t, uncondPos, uncondUnd, uncondGen, null);
-
-            // 2-way text CFG: v = uncond + cfg·(cond − uncond); Euler: z -= v·dt.
-            LancePipelineCommon.EulerCfgStep(latents, vCond, vUncond, cfg, dt);
+            Tensor vCond = _transformer.Forward(Backend, cond.TextTokenIds, latents, latentPosIds, t,
+                cond.PositionIds, cond.UndIdx, cond.GenIdx, cond.AttentionMask);
+            // Upstream cfg_interval=[0.4,1]: late low-noise steps run cond-only (skips the uncond forward entirely).
+            if (cfg > 1f && t > _config.CfgIntervalMin)
+            {
+                Tensor vUncond = _transformer.Forward(Backend, uncond.TextTokenIds, latents, latentPosIds, t,
+                    uncond.PositionIds, uncond.UndIdx, uncond.GenIdx, uncond.AttentionMask);
+                LancePipelineCommon.CfgRenormGlobalInPlace(vCond, vUncond, cfg, _config.CfgRenormMin);
+                vUncond.Dispose();
+            }
+            LancePipelineCommon.EulerStep(latents, vCond, dt);
             vCond.Dispose();
-            vUncond.Dispose();
 
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
-        condPos.Dispose(); uncondPos.Dispose();
-
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
 
         // tokens → channel-last latent → [1,48,1,Hlat,Wlat] → VAE decode.
-        Tensor latentCl = LanceLatentPatch.Unpatchify(latents, gridT, gridH, gridW, 1, 2, 2, VaeChannels);
+        (int pt, int ph, int pw) = _config.LatentPatchSize;
+        Tensor latentCl = LanceLatentPatch.Unpatchify(latents, gridT, gridH, gridW, pt, ph, pw, VaeChannels);
         latents.Dispose();
-        Tensor vaeLatent = LancePipelineCommon.ChannelLastToBcthw(latentCl);   // [1,48,1,vaeLatentH,vaeLatentW]
+        Tensor vaeLatent = LancePipelineCommon.ChannelLastToBcthw(latentCl);   // [1,48,1,H/16,W/16]
         latentCl.Dispose();
 
         Tensor rgb = _vae.Decode(Backend, vaeLatent);       // [1,3,1,H,W]
@@ -142,9 +140,9 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
         return (bytes, width, height, seed);
     }
 
-    /// <summary>Builds the initial token-space latents <c>[nVae, 192]</c>. T2I: pure seeded noise. Img2img: the
+    /// <summary>Builds the initial token-space latents <c>[nVae, 48]</c>. T2I: pure seeded noise. Img2img: the
     /// source image goes <c>Wan22VaeEncoder.EncodeFrame</c> (<c>[1,48,1,H/16,W/16]</c>, normalized latent space —
-    /// the same space the T2I loop denoises and the decoder consumes) → channel-last → <c>(1,2,2)</c> patchify →
+    /// the same space the T2I loop denoises and the decoder consumes) → channel-last → token flatten →
     /// <c>Img2ImgSetup.MixAtSigma</c> with the fresh noise at <c>t = tsteps[startStep]</c>.</summary>
     private Tensor BuildInitialTokenLatents(TextToImageRequest request, float[] tsteps,
         int nVae, int seed, int startStep)
@@ -163,7 +161,8 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
 
         Tensor channelLast = LancePipelineCommon.BcthwToChannelLast(encoded);   // [1, H/16, W/16, 48]
         encoded.Dispose();
-        Tensor sourceTokens = LanceLatentPatch.Patchify(channelLast, 1, 2, 2);  // [nVae, 192]
+        (int pt, int ph, int pw) = _config.LatentPatchSize;
+        Tensor sourceTokens = LanceLatentPatch.Patchify(channelLast, pt, ph, pw);  // [nVae, 48]
         channelLast.Dispose();
         if ((int)sourceTokens.Shape[0] != nVae)
             throw new InvalidOperationException($"Encoded source produced {sourceTokens.Shape[0]} tokens, expected {nVae}.");

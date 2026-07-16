@@ -1,6 +1,16 @@
 # Lance — Research Notes
 
-> Status: Complete — **image T2I + video T2V IMPLEMENTED 2026-06-08** (both structurally verified end-to-end on CPU; numeric validation vs checkpoint pending). Last Updated: 2026-06-08 | Video: `LanceVideoPipeline` + Wan2.2 VAE streaming decode (`feat_cache`) + frame-streaming/encoders all built — see PHASE_9 § 6.
+> Status: Complete — **image T2I + video T2V IMPLEMENTED 2026-06-08** (both structurally verified end-to-end on CPU; numeric validation vs checkpoint pending). Last Updated: 2026-07-16 | Video: `LanceVideoPipeline` + Wan2.2 VAE streaming decode (`feat_cache`) + frame-streaming/encoders all built — see PHASE_9 § 6.
+>
+> **REAL-CHECKPOINT RECONCILIATION (2026-07-16, first released `Lance_3B/model.safetensors`, 11.8 GB BF16 — NOT the 24.7 GB from the pre-release table).** Facts that override guesses below (source: real key dump + `inference_lance.sh` + the released GitHub code):
+> - **Latent patch is `(1,1,1)`**, NOT (1,2,2): `vae2llm = Linear(48→2048)`, `llm2vae = Linear(2048→48)` — one token per 48-channel latent pixel; total spatial downscale is **16×** (not 32×). Head keys are `vae2llm.*` / `llm2vae.*` (not `vae_in`/`vae_out`).
+> - **QK-RMSNorm is ON** (OQ#3 resolved): per-head `q_norm`/`k_norm` [128] with `_moe_gen` siblings in every layer (`--llm_qk_norm true` und+gen).
+> - **`max_latent_size = 64`** (not 32); the frozen `latent_pos_embed.pos_embed` [4096, 2048] table (1 frame × 64×64) SHIPS in the checkpoint and is indexed `t·64² + h·64 + w` (`get_flattened_position_ids_extrapolate_video`). Load it, don't recompute.
+> - **Positions:** released inference runs `--apply_qwen_2_5_vl_pos_emb true` → Qwen2.5-VL `get_rope_index` M-RoPE (text 1-D, vision block 3-D anchored at the first pad; video temporal step = `tokens_per_second` 2). **MaPE (OQ#2) does NOT apply to pure T2I/T2V** — `shift_position_ids` only shifts `full_noise`/`full` splits (editing refs), and the T2I target block is mode `"noise"`.
+> - **Sequence:** ChatML template (`text_template=true`) with a fixed per-task system prompt; the vision block is `<|vision_start|><|video_pad|>×N<|vision_end|>` (video_pad 151656 even for images!) followed by `<|im_end|>`. The **noise split includes both sentinels** (bidirectional inside, invisible from outside). Uncond = same sequence with the caption tokens (modality 0) removed.
+> - **Sampling (OQ#4/#5 resolved):** 2-way text CFG only for T2I, `cfg_interval=[0.4, 1.0]` (cond-only below t=0.4), `cfg_renorm_type="global"` with `cfg_renorm_min=0` (`v *= clamp(‖v_cond‖/‖v_cfg‖, 0, 1)`); timestep fed to the embedder is the raw shifted t∈[0,1].
+> - **No ViT/connector/task/modality embeds in this checkpoint** — T2I-only release; `lm_head` present but unused by generation.
+> - Engine: `LanceCheckpointConverter`/`LanceTransformer`/`LancePipelineCommon`/`LanceImagePipeline` reconciled; parity via `tests/python-reference/dump_lance_reference.py` + `LanceRealWeightParityTests` + `diff_lance_layers.py`.
 >
 > **BUILD STATUS (2026-06-08):** Lance image T2I is built and runs end-to-end (see PHASE_4 § Lance). Several open questions below were resolved while building from the verbatim upstream source (pulled raw):
 > - **OQ#2 (MaPE offsets):** NOT in `get_rope_index` (that's stock Qwen2.5-VL M-RoPE). They live in `data/common.py` `shift_position_ids` — `pos_shift=1000`; modality type-4 (gen/noisy) temporal rebased to the 1000 range, type-3 (clean-VAE) to 2000. Spatial axes unchanged.

@@ -4,6 +4,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Adapters;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -100,12 +101,22 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         float trueCfgScale = 1.0f,
         Tensor? kontextRefImage = null,
         Tensor? reduxImageEmbeds = null,
-        float reduxApplyStartFraction = 0f)
+        float reduxApplyStartFraction = 0f,
+        IReadOnlyList<Adapters.FluxControlNetConditioning>? fluxControlNets = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
         if (isImg2Img && _vaeEncoder is null)
             throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
+
+        bool hasFluxCn = fluxControlNets is { Count: > 0 };
+        if (hasFluxCn)
+        {
+            if (_vaeEncoder is null)
+                throw new InvalidOperationException("Flux ControlNet conditioning requires a VaeEncoder (the control image is VAE-encoded). Construct the pipeline with the overload that accepts one.");
+            if (kontextRefImage is not null)
+                throw new InvalidOperationException("Flux ControlNet conditioning cannot be combined with a Kontext reference image.");
+        }
 
         // FLUX.1 Tools detection: vanilla Flux has x_embed input dim 64 (16 latent channels
         // × 2×2 packing). Canny / Depth have 128 (64 noise + 64 packed VAE-encoded control,
@@ -422,6 +433,30 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             Logs.Info($"Flux Kontext reference encoded: {kontextRefSeqLen} tokens.");
         }
 
+        // ── 3d. Flux DiT ControlNets: VAE-encode + 2×2-pack each control image ONCE (fixed across the
+        //    schedule, like the Tools control). Per step the packed control rides into each adapter's
+        //    controlnet_x_embedder — the residuals it produces are what varies with the latent/timestep.
+        Tensor[]? cnPackedControls = null;
+        if (hasFluxCn)
+        {
+            cnPackedControls = new Tensor[fluxControlNets!.Count];
+            for (int c = 0; c < fluxControlNets.Count; c++)
+            {
+                Tensor cnImage = fluxControlNets[c].ControlImage;
+                if (cnImage.Shape.Rank != 4 || cnImage.Shape[0] != 1 || cnImage.Shape[1] != 3
+                    || cnImage.Shape[2] != height || cnImage.Shape[3] != width)
+                {
+                    throw new ArgumentException(
+                        $"Flux ControlNet image {c} shape must be [1, 3, {height}, {width}] (matching request); got {cnImage.Shape}.",
+                        nameof(fluxControlNets));
+                }
+                Tensor cnLatent = _vaeEncoder!.Encode(Backend, cnImage);
+                cnPackedControls[c] = PackLatent(cnLatent, latentH, latentW);
+                cnLatent.Dispose();
+            }
+            Logs.Info($"Flux ControlNet: encoded {cnPackedControls.Length} control image(s) to packed latents.");
+        }
+
         // ── 4. Denoising loop ─────────────────────────────────────────
         // Two paths depending on whether the backend can stream:
         //   - StreamingCache != null (CUDA): use BlockStreamingController so resident
@@ -484,6 +519,13 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             Backend.PreloadWeights(_transformer.EnumerateWeights());
         }
 
+        // ControlNet adapter weights ride beside the DiT for the whole loop (they run every step).
+        if (hasFluxCn)
+        {
+            foreach (Adapters.FluxControlNetConditioning cn in fluxControlNets!)
+                Backend.PreloadWeights(cn.Adapter.EnumerateWeights());
+        }
+
         // ── 4b. Regional conditioning: append region T5 streams + prepare per-step attention bias.
         //    Image tokens follow the text tokens in Flux's joint [txt|img] attention, so the bias
         //    rectangle starts at the (possibly extended) text length. Collapses to the base path
@@ -507,7 +549,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         // step-graph slot, so a persistent cross-generation graph requires skipping the sweep on the plain
         // t2i cache-warm path (the Chroma pattern — per-op disposal + the warm mem-pool keep VRAM flat).
         bool drainFree = !isMaskedInpaint && packedControl is null && packedKontextRef is null
-            && !hasRegions && !StatsEnabled
+            && !hasFluxCn && !hasRegions && !StatsEnabled
             && (reduxExtendedT5 is null || reduxApplyStartFraction <= 0f);
         bool graphRoute = drainFree && !doTrueCfg && packedSourceLatent is null
             && DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
@@ -518,6 +560,10 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         _ = condStream.DataPointer;
         _ = packedLatent.DataPointer;
         if (packedControl is not null) _ = packedControl.DataPointer;
+        if (cnPackedControls is not null)
+        {
+            foreach (Tensor cnPacked in cnPackedControls) _ = cnPacked.DataPointer;
+        }
         if (packedKontextRef is not null) _ = packedKontextRef.DataPointer;
         if (packedSourceLatent is not null) _ = packedSourceLatent.DataPointer;
         if (packedMask is not null) _ = packedMask.DataPointer;
@@ -606,11 +652,30 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                     condTxtSeqLen + imgSeqLen, condTxtSeqLen, imgSeqLen, regionRanges!, regionGridMasks!, regionWeights!);
             }
 
+            // Flux DiT ControlNets: run every active adapter against the current latent + its packed control
+            // and sum the residual stacks (diffusers FluxMultiControlNetModel union stacking). The residuals
+            // feed both the conditional and (for true-CFG) the unconditional transformer pass this step.
+            Adapters.FluxControlNetResiduals? cnResiduals = null;
+            if (hasFluxCn)
+            {
+                for (int c = 0; c < fluxControlNets!.Count; c++)
+                {
+                    Adapters.FluxControlNetConditioning cn = fluxControlNets[c];
+                    if (!cn.IsActiveAtStep(i, steps)) continue;
+                    Adapters.FluxControlNetResiduals next = cn.Adapter.Forward(
+                        Backend, packedLatent, cnPackedControls![c], sigma, t5Embeddings, clipPooled!,
+                        guidanceScale, hPacked, wPacked,
+                        cn.UnionMode is FluxUnionControlMode unionMode ? (int)unionMode : null, cn.Scale);
+                    cnResiduals = cnResiduals is null ? next : SumControlNetResiduals(cnResiduals, next);
+                }
+            }
+
             // Forward pass: conditional velocity prediction (embedded distilled guidance rides along).
             Tensor velocityPred = _transformer.Forward(
                 Backend, transformerInput, stepCond, sigma,
                 clipPooled!, guidanceScale, stepCondLen, hPacked, wPacked, regionBias,
-                kontextRefSeqLen, kontextRefSeqLen > 0 ? hPacked : 0, kontextRefSeqLen > 0 ? wPacked : 0);
+                kontextRefSeqLen, kontextRefSeqLen > 0 ? hPacked : 0, kontextRefSeqLen > 0 ? wPacked : 0,
+                cnResiduals);
 
             // True-CFG: run a second forward with the negative conditioning (same noisy latent,
             // same timestep, same embedded guidanceScale) and combine with standard CFG. The
@@ -622,13 +687,15 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                 Tensor velocityNeg = _transformer.Forward(
                     Backend, transformerInput, negT5Embeddings!, sigma,
                     negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked, null,
-                    kontextRefSeqLen, kontextRefSeqLen > 0 ? hPacked : 0, kontextRefSeqLen > 0 ? wPacked : 0);
+                    kontextRefSeqLen, kontextRefSeqLen > 0 ? hPacked : 0, kontextRefSeqLen > 0 ? wPacked : 0,
+                    cnResiduals);
                 Tensor combined = CfgHelper.ApplyCfg(velocityNeg, velocityPred, trueCfgScale);
                 velocityNeg.Dispose();
                 velocityPred.Dispose();
                 velocityPred = combined;
             }
 
+            cnResiduals?.DisposeAll();
             regionBias?.Dispose();
             if (transformerInput != packedLatent) transformerInput.Dispose();
 
@@ -733,6 +800,17 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         packedMask?.Dispose();
         packedControl?.Dispose();
         packedKontextRef?.Dispose();
+        if (cnPackedControls is not null)
+        {
+            foreach (Tensor cnPacked in cnPackedControls) cnPacked.Dispose();
+        }
+        if (hasFluxCn)
+        {
+            // ControlNet weights always evict after the loop (adapters are per-request conditioning, not a
+            // resident model) — frees room for the VAE decode.
+            foreach (Adapters.FluxControlNetConditioning cn in fluxControlNets!)
+                Backend.FreeWeights(cn.Adapter.EnumerateWeights());
+        }
 
         // Tear down the streaming controller (frees still-resident blocks) and free the
         // shared weights, making room for VAE decode on tight VRAM budgets. On the eager path under
@@ -930,6 +1008,39 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             return (scaled, null);
         }
         return (packedNoise, null);
+    }
+
+    /// <summary>Sums two Flux ControlNet residual stacks element-wise (multi-ControlNet stacking). Consumes both
+    /// inputs' tensors and returns a stack of fresh sums.</summary>
+    private Adapters.FluxControlNetResiduals SumControlNetResiduals(
+        Adapters.FluxControlNetResiduals acc, Adapters.FluxControlNetResiduals next)
+    {
+        if (acc.DoubleBlockResiduals.Length != next.DoubleBlockResiduals.Length
+            || acc.SingleBlockResiduals.Length != next.SingleBlockResiduals.Length)
+        {
+            acc.DisposeAll();
+            next.DisposeAll();
+            throw new InvalidOperationException(
+                "Stacked Flux ControlNets produced mismatched residual counts " +
+                $"({acc.DoubleBlockResiduals.Length}+{acc.SingleBlockResiduals.Length} vs " +
+                $"{next.DoubleBlockResiduals.Length}+{next.SingleBlockResiduals.Length}) — all stacked adapters " +
+                "must share the same block depths.");
+        }
+        SumInto(acc.DoubleBlockResiduals, next.DoubleBlockResiduals);
+        SumInto(acc.SingleBlockResiduals, next.SingleBlockResiduals);
+        return acc;
+    }
+
+    private void SumInto(Tensor[] acc, Tensor[] next)
+    {
+        for (int i = 0; i < acc.Length; i++)
+        {
+            Tensor sum = new Tensor(acc[i].Shape, acc[i].DType);
+            Backend.Add(sum, acc[i], next[i]);
+            acc[i].Dispose();
+            next[i].Dispose();
+            acc[i] = sum;
+        }
     }
 
     /// <summary>Builds a prompt-cache key from the CLIP-L token ids, the CLIP EOS position (the pooled vector
