@@ -71,6 +71,7 @@ public static unsafe class SparseOps
                             d[(long)co * cin + ci] = s[((((long)co * k + kd) * k + kh) * k + kw) * cin + ci];
                     slices[(kd * k + kh) * k + kw] = o;
                 }
+        GC.KeepAlive(wf);   // s points into wf's buffer; the per-slice allocs can GC-collect the otherwise-dead wf mid-loop
         return slices;
     }
 
@@ -85,6 +86,7 @@ public static unsafe class SparseOps
 
         Tensor outFeats = new(new TensorShape(1, n, cout), DType.F32); backend.Fill(outFeats, 0f);
         int[] inBuf = new int[n], outBuf = new int[n];
+        List<Tensor> temps = new();   // disposed after one Sync — freeing device buffers mid-async-kernel races (AV)
         for (int kd = 0; kd < 3; kd++)
             for (int kh = 0; kh < 3; kh++)
                 for (int kw = 0; kw < 3; kw++)
@@ -101,8 +103,10 @@ public static unsafe class SparseOps
                     Tensor gathered = new(new TensorShape(1, m, cin), DType.F32); backend.RowGather(gathered, x.Feats, inT, m, cin);
                     Tensor gemm = new(new TensorShape(1, m, cout), DType.F32); backend.Linear(gemm, gathered, wSlices[(kd * 3 + kh) * 3 + kw], null);
                     backend.RowScatterAdd(outFeats, gemm, outT, m, cout);
-                    gathered.Dispose(); gemm.Dispose(); inT.Dispose(); outT.Dispose();
+                    temps.Add(inT); temps.Add(outT); temps.Add(gathered); temps.Add(gemm);
                 }
+        backend.Sync();
+        foreach (Tensor t in temps) t.Dispose();
         if (bias is not null)
         {
             Tensor ones = new(new TensorShape(1, cout), DType.F32); backend.Fill(ones, 1f);

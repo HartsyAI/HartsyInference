@@ -10,6 +10,7 @@ coherent chair `.glb`; tri-counts differ by iso/marching-cubes settings, not cor
 |---|---|---|---|
 | **TripoSR** (256³ density grid) | **2.1 s** | 0.58 s (neural) | was 26.2 s (12.5×); our GPU density decode beats the reference — residual gap = host marching-cubes + small-GEMM occupancy |
 | **Hunyuan3D-2 Shape** (30 steps, grid 128, fp16) | **9.2 s** | 5.76 s | was 71.3 s (7.75×); 1.6× off the reference |
+| **TRELLIS-image-large** (image → 3DGS splat, 25+25 steps) | **~65 s** | — (no local baseline) | full C# path, every stage parity-verified (0.9999+); Python e2e baseline pending (needs spconv + the DINOv2-reg conditioner port). Stage-2 SLAT flow **290 → 35.5 s (8.2×)** this round |
 
 ## Hunyuan3D-2 phase split (4090, 30 steps / grid 128)
 
@@ -20,6 +21,23 @@ coherent chair `.glb`; tri-counts differ by iso/marching-cubes settings, not cor
 | ShapeVAE decode (128³) | 2.2 s | 1.42 s |
 | Marching cubes (host) | 0.14 s | 0.14 s |
 | **Total** | **71.3 s** | **9.2 s** |
+
+## TRELLIS phase split (4090, dragon cond, 13115 active voxels)
+
+| Phase | Before stage-2 pass | Now (2026-07-15) |
+|---|---|---|
+| Weights load | 5.6 s | 5.6 s |
+| Stage 1 (SS flow 25× + SS decoder → active voxels) | 20.9 s | 20.9 s |
+| **Stage 2 (SLAT flow 25× over active voxels)** | **~290 s** | **35.5 s** |
+| GS decode + `to_representation` → PLY | 2.8 s | 2.8 s |
+| **Total** | **~320 s** | **~65 s** |
+
+Stage-2 mover: the submanifold `Conv3d` ran **dense over a full `res³` grid** (2.1 GB grid at 2048 channels,
+3789 ms/conv) — nearly all of stage-2. Replaced with an **spconv rulebook** (`SparseOps.SubmanifoldConv3dSparse`):
+a coord hash builds per-kernel-offset (in,out) index pairs → per offset `RowGather` → cuBLAS GEMM (the offset's
+`[Cout,Cin]` weight slice) → `RowScatterAdd` — only the active voxels, no multi-GB grid, ~20–90× less compute at
+high channel counts. New `row_gather_f32`/`row_scatter_add_f32` kernels + `IBackend.RowGather`/`RowScatterAdd`.
+Velocity parity preserved: SLAT flow corr **0.99999983** (was 0.99999984); rulebook-conv unit corr 0.99999996.
 
 ## What moved it (all coherence-/parity-gated; see `docs/Checklists/THREED_GENPERF_PLAN.md` Rounds 1–8)
 

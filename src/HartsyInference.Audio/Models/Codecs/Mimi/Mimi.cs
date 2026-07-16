@@ -39,6 +39,8 @@ public sealed unsafe class Mimi
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         w = NormalizeKeys(w);
+        if (MimiDsmWeights.IsDsm(w))
+            w = MimiDsmWeights.Adapt(w);   // moshi-native DSM checkpoint → HF layout for the decode-path loaders
         _rvq.LoadWeights(w);
         _decoderTransformer.LoadWeights(w);
         _decoder.LoadWeights(w);

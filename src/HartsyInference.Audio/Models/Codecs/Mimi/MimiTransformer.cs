@@ -16,6 +16,7 @@ internal sealed unsafe class MimiTransformer
     private readonly MimiConfig _cfg;
     private readonly string _prefix;
     private readonly int _layers, _heads, _headDim, _dim, _ffn;
+    private bool _interleavedRope;   // moshi/DSM checkpoints rotate interleaved pairs; HF permutes → split-half
     private const float LnEps = 1e-5f;
 
     private readonly Tensor?[] _n1W, _n1B, _n2W, _n2B, _qW, _kW, _vW, _oW, _fc1W, _fc2W, _ls1, _ls2;
@@ -32,22 +33,60 @@ internal sealed unsafe class MimiTransformer
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
+        // Two on-disk layouts share this forward: the HF `transformers` MimiModel naming (input_layernorm /
+        // split q,k,v_proj / mlp.fc1,fc2 / self_attn_layer_scale — kyutai/mimi, PocketTTS) and the moshi-native
+        // DSM naming (an extra `.transformer.` level, norm1/norm2, a FUSED self_attn.in_proj_weight [3·dim,dim],
+        // out_proj, linear1/linear2, layer_scale_1/2 — the tts-1.6b-en_fr `tokenizer-*.safetensors`). Detect and
+        // adapt; the math (pre-norm, split-half RoPE, sliding-window causal attn, LayerScale, GELU FFN) is identical.
+        bool dsm = w.ContainsKey($"{_prefix}.transformer.layers.0.norm1.weight");
+        _interleavedRope = dsm;
         for (int i = 0; i < _layers; i++)
         {
-            string p = $"{_prefix}.layers.{i}";
-            _n1W[i] = WhisperOps.EnsureF32(w[$"{p}.input_layernorm.weight"]);
-            _n1B[i] = WhisperOps.EnsureF32(w[$"{p}.input_layernorm.bias"]);
-            _n2W[i] = WhisperOps.EnsureF32(w[$"{p}.post_attention_layernorm.weight"]);
-            _n2B[i] = WhisperOps.EnsureF32(w[$"{p}.post_attention_layernorm.bias"]);
-            _qW[i] = WhisperOps.EnsureF32(w[$"{p}.self_attn.q_proj.weight"]);
-            _kW[i] = WhisperOps.EnsureF32(w[$"{p}.self_attn.k_proj.weight"]);
-            _vW[i] = WhisperOps.EnsureF32(w[$"{p}.self_attn.v_proj.weight"]);
-            _oW[i] = WhisperOps.EnsureF32(w[$"{p}.self_attn.o_proj.weight"]);
-            _fc1W[i] = WhisperOps.EnsureF32(w[$"{p}.mlp.fc1.weight"]);
-            _fc2W[i] = WhisperOps.EnsureF32(w[$"{p}.mlp.fc2.weight"]);
-            _ls1[i] = WhisperOps.EnsureF32(w[$"{p}.self_attn_layer_scale.scale"]);
-            _ls2[i] = WhisperOps.EnsureF32(w[$"{p}.mlp_layer_scale.scale"]);
+            if (dsm)
+            {
+                string p = $"{_prefix}.transformer.layers.{i}";
+                _n1W[i] = WhisperOps.EnsureF32(w[$"{p}.norm1.weight"]);
+                _n1B[i] = WhisperOps.EnsureF32(w[$"{p}.norm1.bias"]);
+                _n2W[i] = WhisperOps.EnsureF32(w[$"{p}.norm2.weight"]);
+                _n2B[i] = WhisperOps.EnsureF32(w[$"{p}.norm2.bias"]);
+                Tensor inProj = WhisperOps.EnsureF32(w[$"{p}.self_attn.in_proj_weight"]);  // [3·dim, dim] = [Q;K;V]
+                _qW[i] = SliceRows(inProj, 0, _dim);
+                _kW[i] = SliceRows(inProj, _dim, 2 * _dim);
+                _vW[i] = SliceRows(inProj, 2 * _dim, 3 * _dim);
+                _oW[i] = WhisperOps.EnsureF32(w[$"{p}.self_attn.out_proj.weight"]);
+                _fc1W[i] = WhisperOps.EnsureF32(w[$"{p}.linear1.weight"]);
+                _fc2W[i] = WhisperOps.EnsureF32(w[$"{p}.linear2.weight"]);
+                _ls1[i] = WhisperOps.EnsureF32(w[$"{p}.layer_scale_1.scale"]);
+                _ls2[i] = WhisperOps.EnsureF32(w[$"{p}.layer_scale_2.scale"]);
+            }
+            else
+            {
+                string p = $"{_prefix}.layers.{i}";
+                _n1W[i] = WhisperOps.EnsureF32(w[$"{p}.input_layernorm.weight"]);
+                _n1B[i] = WhisperOps.EnsureF32(w[$"{p}.input_layernorm.bias"]);
+                _n2W[i] = WhisperOps.EnsureF32(w[$"{p}.post_attention_layernorm.weight"]);
+                _n2B[i] = WhisperOps.EnsureF32(w[$"{p}.post_attention_layernorm.bias"]);
+                _qW[i] = WhisperOps.EnsureF32(w[$"{p}.self_attn.q_proj.weight"]);
+                _kW[i] = WhisperOps.EnsureF32(w[$"{p}.self_attn.k_proj.weight"]);
+                _vW[i] = WhisperOps.EnsureF32(w[$"{p}.self_attn.v_proj.weight"]);
+                _oW[i] = WhisperOps.EnsureF32(w[$"{p}.self_attn.o_proj.weight"]);
+                _fc1W[i] = WhisperOps.EnsureF32(w[$"{p}.mlp.fc1.weight"]);
+                _fc2W[i] = WhisperOps.EnsureF32(w[$"{p}.mlp.fc2.weight"]);
+                _ls1[i] = WhisperOps.EnsureF32(w[$"{p}.self_attn_layer_scale.scale"]);
+                _ls2[i] = WhisperOps.EnsureF32(w[$"{p}.mlp_layer_scale.scale"]);
+            }
         }
+    }
+
+    /// <summary>Copies rows <c>[r0, r1)</c> of a <c>[R, inDim]</c> row-major weight into a fresh owned
+    /// <c>[r1-r0, inDim]</c> tensor (splits a fused <c>in_proj_weight</c> into q/k/v). Runs once at load.</summary>
+    private static Tensor SliceRows(Tensor w, int r0, int r1)
+    {
+        int inDim = (int)w.Shape[1];
+        Tensor outT = new(new TensorShape(r1 - r0, inDim), DType.F32);
+        Buffer.MemoryCopy((float*)w.DataPointer + (long)r0 * inDim, (void*)outT.DataPointer,
+            (long)(r1 - r0) * inDim * 4, (long)(r1 - r0) * inDim * 4);
+        return outT;
     }
 
     /// <summary>x channels-last <c>[B,T,dim]</c> -> <c>[B,T,dim]</c>.</summary>
@@ -74,8 +113,8 @@ internal sealed unsafe class MimiTransformer
             WhisperOps.ReshapeToMultiHead4D(kMh, k, batch, t, _heads, _headDim);
             WhisperOps.ReshapeToMultiHead4D(vMh, v, batch, t, _heads, _headDim);
             q.Dispose(); k.Dispose(); v.Dispose();
-            ApplyRoPE(qMh, batch, _heads, t, _headDim, _cfg.TransformerRopeTheta);
-            ApplyRoPE(kMh, batch, _heads, t, _headDim, _cfg.TransformerRopeTheta);
+            ApplyRoPE(qMh, batch, _heads, t, _headDim, _cfg.TransformerRopeTheta, _interleavedRope);
+            ApplyRoPE(kMh, batch, _heads, t, _headDim, _cfg.TransformerRopeTheta, _interleavedRope);
 
             Tensor attn = new(qMh.Shape, DType.F32);
             backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, 1f / MathF.Sqrt(_headDim));
@@ -143,8 +182,10 @@ internal sealed unsafe class MimiTransformer
         return mask;
     }
 
-    // split-half (rotate_half) RoPE on [B,H,T,D]
-    private static void ApplyRoPE(Tensor x, int batch, int heads, int t, int headDim, float theta)
+    // RoPE on [B,H,T,D]. HF `transformers` Mimi permutes q/k so a split-half (rotate_half) rotation applies
+    // (pairs (i, i+D/2)); the moshi/DSM checkpoint keeps the native interleaved layout (pairs (2p, 2p+1)). Both
+    // share the frequency schedule freq_p = theta^(-2p/D).
+    private static void ApplyRoPE(Tensor x, int batch, int heads, int t, int headDim, float theta, bool interleave)
     {
         float* xp = (float*)x.DataPointer;
         int half = headDim / 2;
@@ -153,13 +194,15 @@ internal sealed unsafe class MimiTransformer
                 for (int ti = 0; ti < t; ti++)
                 {
                     long rb = (((long)b * heads + h) * t + ti) * headDim;
-                    for (int kk = 0; kk < half; kk++)
+                    for (int p = 0; p < half; p++)
                     {
-                        float freq = MathF.Pow(theta, -2f * kk / headDim);
+                        float freq = MathF.Pow(theta, -2f * p / headDim);
                         float ang = ti * freq, cs = MathF.Cos(ang), sn = MathF.Sin(ang);
-                        float x0 = xp[rb + kk], x1 = xp[rb + half + kk];
-                        xp[rb + kk] = x0 * cs - x1 * sn;
-                        xp[rb + half + kk] = x0 * sn + x1 * cs;
+                        int i0 = interleave ? 2 * p : p;
+                        int i1 = interleave ? 2 * p + 1 : half + p;
+                        float x0 = xp[rb + i0], x1 = xp[rb + i1];
+                        xp[rb + i0] = x0 * cs - x1 * sn;
+                        xp[rb + i1] = x0 * sn + x1 * cs;
                     }
                 }
     }

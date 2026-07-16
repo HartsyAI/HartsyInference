@@ -158,8 +158,24 @@ harder clone work.
     Kokoro regression word-perfect on the same live engine. ✅ **Shared espeak bug fixed:** `EspeakTranslator.MatchRule`
     RULE_PRE branch indexed `buf[prePtr]` out of bounds when a pre-context scanned past the per-word buffer start
     (words like "Americans") → guard the OOB read as a space boundary (espeak's clause buffer is space-padded);
-    purely additive (that branch previously always threw), fixes ALL espeak TTS. **Remaining:** Random-mode
-    diffusion (no-reference synthesis) still a scaffold.
+    purely additive (that branch previously always threw), fixes ALL espeak TTS. ✅ **Quality fixes 2026-07-15
+    (48.4-local):** reference-mel filterbank 24k/12k→16k/8k + window-centering (torchaudio default `to_mel`, mel
+    corr 0.93→0.9994, fixes tinny timbre); phonemes were the "wave"/slur (PROVED: our phonemes → real python model
+    reproduce the garble) → extension `en`→`en-us` + new `PhonemizeToIpa(preservePunctuation:true)` (vocab already
+    maps `.`/`,` identically); natural sentence now Swarm→Whisper WORD-PERFECT.
+    🚧 **STATUS: usable but not perfect — quality follow-up deferred (moving to next model).** Remaining issues the
+    user still hears (intermittent "drops to a whisper" + an end-of-clip glitch). TODO leads (also in
+    `StyleTts2Pipeline.SynthesizeClone`):
+    1. **End glitch** — reference `inference()` returns `out[..., :-50]` ("weird pulse at the end… fix later"); we
+       don't trim. Trim ~50 trailing samples in the StyleTTS2 clone path (not the shared Kokoro path). *(quick win)*
+    2. **"Drops to a whisper"** — likely unstable F0/N from feeding the prosody predictor the RAW reference prosodic
+       style at 100%. Real inference runs the **diffusion style sampler** and blends `s = 0.7·diffusion + 0.3·ref`
+       (beta), which stabilizes prosody; our `StyleDiffusionSampler`/`StyleDenoiser` are still a scaffold. Implement
+       ADPM2 + `KarrasSchedule(1e-4, 3.0, rho=9)` + the alpha/beta blend. Also check F0Ntrain input (ref feeds the
+       aligned `predictor.text_encoder` output `d`; we feed aligned raw `d_bert`) and whether F0→0 kills voicing.
+    3. **espeak stress** — our port mis-stresses articles ("a"→ˈeɪ) / drops word stress ("there"→no ˈ) vs espeak-ng.
+    4. Confirm the hifigan 1-frame asr/en shift is applied where StyleTTS2 expects (A/B looked near-neutral).
+    5. Random-mode (no-reference) synthesis still a scaffold (also needs the diffusion sampler).
 - **Spark-TTS** — reconcile `SparkTtsConfig` token offsets + BiCodec decoder keys to the real checkpoint (parity
   harness already ✅; runtime weight-valid load is the gap).
 - **Zonos** — build the conditioning-prefix `[1,P,hidden]` (espeak phonemes + speaker emb + emotion/pitch/rate/lang).

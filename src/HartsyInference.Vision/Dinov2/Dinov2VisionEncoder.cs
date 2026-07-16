@@ -55,8 +55,10 @@ public sealed unsafe class Dinov2VisionEncoder
     }
 
     /// <summary>Encodes preprocessed pixels <c>[B,3,imageSize,imageSize]</c> into the token sequence
-    /// <c>[B, seqLen, hidden]</c> (CLS + registers + patches), after the final layer norm.</summary>
-    public Tensor Encode(IBackend backend, Tensor pixelValues)
+    /// <c>[B, seqLen, hidden]</c> (CLS + registers + patches). With <paramref name="applyFinalNorm"/> true
+    /// (default) the backbone's final layer norm is applied; set false to return dinov2's <c>x_prenorm</c>
+    /// (the block output before <c>norm</c>) — what the TRELLIS conditioner taps.</summary>
+    public Tensor Encode(IBackend backend, Tensor pixelValues, bool applyFinalNorm = true)
     {
         if (pixelValues.Shape.Rank != 4 || pixelValues.Shape[1] != 3
             || pixelValues.Shape[2] != _preset.ImageSize || pixelValues.Shape[3] != _preset.ImageSize)
@@ -81,7 +83,8 @@ public sealed unsafe class Dinov2VisionEncoder
         Tensor h = seq;
         for (int i = 0; i < _layers.Length; i++) { Tensor n = _layers[i].Forward(backend, h); h.Dispose(); h = n; }
 
-        // 4. Final layer norm.
+        // 4. Final layer norm (skipped for the x_prenorm tap).
+        if (!applyFinalNorm) return h;
         Tensor outp = new(h.Shape, DType.F32);
         backend.LayerNorm(outp, h, _finalLnW!, _finalLnB!, _preset.LayerNormEps);
         h.Dispose();

@@ -54,11 +54,29 @@ public sealed unsafe class KyutaiTtsEndToEndTests
             entries.Add(new KyutaiTextScheduler.Entry(new List<int>(ids), word));
         }
 
-        // fixed deterministic voice [1,8,512] (structural; not a specific speaker).
-        int spk = 8;
-        Tensor voice = new(new TensorShape(1, spk, 512), DType.F32);
-        float* vp = (float*)voice.DataPointer;
-        for (int i = 0; i < spk * 512; i++) vp[i] = ((i % 17) / 17f) - 0.5f;
+        // Voice conditioning. A real kyutai/tts-voices embedding ships as speaker_wavs [1,512,T] (channels-first);
+        // transpose to [1,T,512] for the conditioner. Without KYUTAI_VOICE, fall back to a fixed synthetic voice
+        // (structural only — not a specific speaker).
+        string? vpth = Environment.GetEnvironmentVariable("KYUTAI_VOICE");
+        Tensor voice;
+        if (!Missing(vpth))
+        {
+            using SafeTensorsLoader vw = new(); vw.Load(vpth!);
+            Tensor sw = vw.GetAllTensors()["speaker_wavs"];   // [1, 512, T]
+            int spkDim = (int)sw.Shape[1], tv = (int)sw.Shape[2];
+            voice = new(new TensorShape(1, tv, spkDim), DType.F32);
+            float* dp = (float*)voice.DataPointer; float* srp = (float*)sw.DataPointer;
+            for (int c = 0; c < spkDim; c++)
+                for (int ti = 0; ti < tv; ti++) dp[(long)ti * spkDim + c] = srp[(long)c * tv + ti];
+            _out.WriteLine($"voice: {Path.GetFileName(vpth)} [1,{tv},{spkDim}]");
+        }
+        else
+        {
+            int spk = 8;
+            voice = new(new TensorShape(1, spk, 512), DType.F32);
+            float* vp = (float*)voice.DataPointer;
+            for (int i = 0; i < spk * 512; i++) vp[i] = ((i % 17) / 17f) - 0.5f;
+        }
         using Tensor cross = gen.Conditioner.ComputeCross(backend, voice);
         using Tensor sumCond = gen.Conditioner.ComputeSum(backend, MoshiConditioner.CfgBin(1.0f));
         voice.Dispose();
@@ -87,8 +105,8 @@ public sealed unsafe class KyutaiTtsEndToEndTests
                 using SafeTensorsLoader mimiW = new(); mimiW.Load(mp!);
                 Mimi mimi = new(MimiConfig.Mimi24kHzDsm);
                 mimi.LoadWeights(mimiW.GetAllTensors());
-                Tensor codeT = new(new TensorShape(1, MoshiTtsGenerator.NumCodebooks, n), DType.F32);
-                float* cp = (float*)codeT.DataPointer;
+                Tensor codeT = new(new TensorShape(1, MoshiTtsGenerator.NumCodebooks, n), DType.I32);
+                int* cp = (int*)codeT.DataPointer;
                 for (int k = 0; k < MoshiTtsGenerator.NumCodebooks; k++)
                     for (int f = 0; f < n; f++) cp[(long)k * n + f] = codes[k, f];
                 using Tensor audio = mimi.Decode(backend, codeT, batch: 1, tFrames: n);

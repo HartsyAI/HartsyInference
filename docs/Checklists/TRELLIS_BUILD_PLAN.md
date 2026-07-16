@@ -65,7 +65,20 @@ test (corr ~1.0) before it counts as done. Validate on CUDA (GPU-only cache/resh
 
 ## Status
 - [x] Architecture mapped from the reference — full bit-exact spec in [`docs/Research/TRELLIS_ARCHITECTURE.md`](../Research/TRELLIS_ARCHITECTURE.md) (norm eps, adaLN chunk order, qk-rmsnorm √64, sampler 25/cfg5/interval[0.5,1]/rescale3, all weight keys, sparse conv rulebook + Morton/Hilbert serialization algorithms).
-- [~] Phase A — `TrellisConfig` (exact image-large dims) landed + compiles. TODO: DINOv2-reg conditioner (x_prenorm tap + reg preset), pipeline skeleton.
+- [x] **Phase A DONE (2026-07-15) — DINOv2-vitl14-reg conditioner, parity-verified (corr 0.99994861 vs the real
+  `dinov2_vitl14_reg`).** `TrellisConfig` (image-large dims) + `TrellisImageConditioner` = the shared
+  `Dinov2VisionEncoder` with a new `Dinov2Preset.LargeReg` (ViT-L/24L/16H + **4 register tokens**, native 518px so
+  pos_embed is used directly, no interpolation) tapped at **`x_prenorm`** (new `applyFinalNorm:false` on `Encode`)
+  → **non-affine** `LayerNormNoAffine` (eps 1e-5) = the reference `dino(t,is_training=True)['x_prenorm']` then
+  `F.layer_norm(feats,[1024])`. Weights = the torch.hub `dinov2_vitl14_reg4_pretrain.pth` remapped to HF keys
+  (`/tmp/trellis_ref/convert_dinov2_reg.py`: splits fused `attn.qkv` [3H,H] → q/k/v rows, `ls*.gamma`→`layer_scale*.lambda1`,
+  etc.) → `dinov2_vitl14_reg.safetensors`. **Spec/converter proven exact**: a torch F32 forward with the converted
+  weights matches the reference cond to maxAbs 1.9e-4 (corr 1.0); the C# residual (corr 0.99994861, maxAbs ~0.7 on
+  DINOv2's high-norm outlier tokens, ref magnitude ~13) is TF32/SDPA GEMM noise over 24 layers — the reference cond
+  was itself dumped on CUDA (TF32), so TF32-vs-TF32, not a bug (`corr` is the gate). Test `TrellisConditionerParityTests`.
+  `TrellisGenerationTests` now computes the cond **in-engine** when the remapped weights are present (12967 voxels →
+  414944 gaussians → valid 26 MB PLY) — TRELLIS is self-contained on the network side; only the raw-image
+  premultiply-alpha/LANCZOS crop remains in Python (as with TripoSR/Hunyuan3D background removal).
 - [x] **Phase B DONE — stage-1 dense, validated end-to-end vs the REAL TRELLIS.** `Conv3d` (IBackend + CUDA `conv3d_f32`, bit-exact) + `PixelShuffle3d` + `ChannelLayerNorm3d` (IBackend host defaults) → `SparseStructureDecoder`; `SparseStructureFlow` (24-block `SsFlowBlock`: modulated self-attn + cross-attn + tanh-GELU MLP, per-head QK-RMSNorm ×√64) → `TrellisSparseStructureSampler` (25-step FlowEuler interval-CFG). Parity (`TrellisStage1ParityTests`, real ckpt + real-model torch dumps): **SS decoder corr 1.0**, **SS flow velocity corr 0.99999866**, **full pipeline (noise→sampler→decoder→occupancy) corr 0.99964, 99.96 % voxel agreement** (active 2942 vs 2990 — borderline voxels at occ≈0 flip under F32 drift, the true-math gate). GOTCHA fixed: `Transpose2D(out,in,d1,d2)` takes SIZES not dim-indices (bisection: tok corr −0.005 → fixed with `(InCh,Tokens)` → corr 1.0). Reference loads the real dense models via sys.modules stubs (bypass rembg `__init__`) + `ATTN_BACKEND=sdpa` (no flash_attn).
 - [x] **Phase C DONE + stage-2 SLAT flow parity-verified vs the REAL `SLatFlowModel`** (corr **0.99999984**). Built
   `SparseTensor`, `SparseOps` (submanifold conv = scatter→`Conv3d`→gather; avg-pool downsample; gather upsample),
@@ -95,5 +108,19 @@ test (corr ~1.0) before it counts as done. Validate on CUDA (GPU-only cache/resh
   SS decoder → active voxels → SLAT flow → denorm(mean/std) → GS decoder → splat). **Dragon: 13115 voxels → 419680
   gaussians → valid 27 MB 3DGS `.ply`** (xyz∈[−0.5,0.5], no NaN, sane opacity/scale). Cond fed pre-computed
   (`/tmp/trellis_ref/dump_cond.py` runs the real `dinov2_vitl14_reg`).
-- [ ] Remaining: C# DINOv2-`vitl14_reg` conditioner (self-contained e2e) + Phase F perf (stage-2 ~290 s, host-heavy
-  submanifold conv/attn — GPU the scatter/gather + batch windowed SDPA) + mesh (flexicubes) & RF decoders + a real render check.
+- [x] **Phase F stage-2 perf pass (2026-07-15) — SLAT flow 290 → 35.5 s (8.2×), parity preserved (velocity corr
+  0.99999983).** The killer was `SubmanifoldConv3d` running a **dense** `Conv3d` over a full `res³` grid at up to
+  2048 channels (a 2.1 GB grid, 3789 ms/conv on profiling) — ~all of stage-2. Replaced with a **spconv rulebook**
+  (`SparseOps.SubmanifoldConv3dSparse` + `ConvWeightSlices`): a coord hash builds per-kernel-offset (in,out) index
+  pairs → per offset `RowGather` → cuBLAS GEMM (the offset's `[Cout,Cin]` weight slice) → `RowScatterAdd`, ~20–90×
+  less compute than the dense grid at high channel counts (only active voxels, no multi-GB grid). New `row_gather_f32`
+  / `row_scatter_add_f32` CUDA kernels + `IBackend.RowGather`/`RowScatterAdd` (host defaults). Rulebook conv unit
+  parity `TrellisSparseOpsParityTests.SubmanifoldConv3dSparse_MatchesReference` corr 0.99999996 (maxAbs 1.2e-2, F32
+  GEMM accumulation). Full generation now **~65 s** (load 5.6 · stage1 20.9 · **stage2 35.5** · gs-decode 2.8),
+  same 419680 gaussians / valid 27 MB PLY. **GOTCHA fixed:** `ConvWeightSlices` AV'd at weight-load — a GC-finalizer
+  race: `wf` (the F32-cast weight) had its last managed use at `s = wf.DataPointer`, then the 27 per-slice `new
+  Tensor` allocations pressured GC into collecting/finalizing the now-dead `wf`, freeing its native buffer mid-loop
+  → dangling `s` → AccessViolation. Fix = `GC.KeepAlive(wf)` after the write loops.
+- [ ] Remaining: raw-image preprocessing (premultiply-alpha bbox crop + 518 LANCZOS resize) for a fully in-engine
+  CLI path (network conditioner is done) + further Phase F (stage-1 20.9 s / GS-decode windowed-SDPA batching, F16,
+  graphs — apply the gen-perf playbook) + mesh (flexicubes) & RF decoders + a real render check.

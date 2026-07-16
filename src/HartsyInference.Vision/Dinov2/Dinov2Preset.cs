@@ -57,6 +57,17 @@ public sealed record Dinov2Preset
         ImageSize = 518, PatchSize = 14,
     };
 
+    /// <summary><c>dinov2_vitl14_reg</c> — ViT-L/14 with 4 register tokens (the TRELLIS image conditioner).
+    /// Same backbone as <see cref="Large"/> plus 4 learned registers → 1 + 4 + 37² = 1374 tokens at 518px.
+    /// Native 518px (pos_embed already 37×37, no interpolation); GELU MLP (fc1/fc2). Weights = the torch.hub
+    /// checkpoint remapped to HF keys (see <c>convert_dinov2_reg.py</c>).</summary>
+    public static Dinov2Preset LargeReg => new()
+    {
+        Name = "dinov2_vitl14_reg",
+        HiddenSize = 1024, NumLayers = 24, NumHeads = 16, IntermediateSize = 4096,
+        ImageSize = 518, PatchSize = 14, NumRegisterTokens = 4,
+    };
+
     /// <summary><c>facebook/dinov2-base</c> — 86M params.</summary>
     public static Dinov2Preset Base => new()
     {

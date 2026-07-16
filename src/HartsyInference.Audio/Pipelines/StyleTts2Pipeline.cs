@@ -123,6 +123,23 @@ public sealed unsafe class StyleTts2Pipeline : IDisposable
         return SynthesizeClone(backend, phonemes, mel, speed);
     }
 
+    // TODO(StyleTTS2 quality — remaining after the 48.4-local mel + en-us/punctuation fixes; user still hears
+    // intermittent "drops to a whisper" + an end-of-clip glitch). Leads, most-actionable first:
+    //   1. END GLITCH — the reference `inference()` returns `out[..., :-50]` with the comment "weird pulse at the
+    //      end of the model, need to be fixed later". We return the decoder output untrimmed. Trim the trailing
+    //      ~50 samples (HiFiGAN warm-down pulse) in the StyleTTS2 clone path (NOT the shared Kokoro/iSTFTNet path).
+    //   2. "DROPS TO A WHISPER" — likely unstable F0/N (pitch/energy) from feeding the prosody predictor the RAW
+    //      reference prosodic style at 100%. The real inference runs the DIFFUSION style sampler and blends
+    //      s = 0.7*diffusion + 0.3*reference (beta=0.7); the diffusion-predicted style is text-conditioned and
+    //      STABILIZES prosody. Our StyleDiffusionSampler/StyleDenoiser are still a scaffold. Options: (a) implement
+    //      the ADPM2 + KarrasSchedule(sigma_min=1e-4,sigma_max=3,rho=9) sampler over StyleDenoiser and do the
+    //      alpha/beta blend; (b) short of that, investigate whether F0Ntrain input is right (reference feeds the
+    //      ALIGNED predictor.text_encoder output `d`, we feed aligned raw d_bert) and whether F0 dips to 0 (→ the
+    //      SineGen UV mask kills voicing → whisper).
+    //   3. PHONEMIZER STRESS — our espeak port mis-stresses unstressed articles ("a" → ˈeɪ) and drops some word
+    //      stress ("there" → no ˈ) vs espeak-ng; can perturb the predicted prosody. Port-accuracy issue.
+    //   4. Verify F0Ntrain / the hifigan 1-frame asr/en shift (reference applies it for decoder.type=="hifigan";
+    //      A/B showed it was near-neutral on one sentence but confirm it is applied where StyleTTS2 expects).
     /// <summary>Zero-shot voice cloning: extract the 256-d style directly from a reference mel
     /// <c>[1, 80, T]</c> (acoustic ⊕ prosodic) and synthesize <paramref name="phonemes"/> in that voice.</summary>
     public float[] SynthesizeClone(IBackend backend, string phonemes, Tensor referenceMel, float speed = 1f)

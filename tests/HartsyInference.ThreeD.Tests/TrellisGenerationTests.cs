@@ -40,8 +40,24 @@ public sealed unsafe class TrellisGenerationTests
         SlatGaussianDecoder gsDec = new(); gsDec.LoadWeights(Load(dir, "slat_dec_gs_swin8_B_64l8gs32_fp16"));
 
         using SafeTensorsLoader cl = new(); cl.Load(condFile);
-        Tensor cond = cl.GetTensor("cond");   // [1, 1374, 1024]
         Tensor mean = cl.GetTensor("mean"); Tensor std = cl.GetTensor("std");
+
+        // Image cond: computed in-engine by the C# DINOv2-vitl14-reg conditioner when the remapped weights are
+        // present (self-contained path); else fall back to the pre-computed reference cond. The conditioner is fed
+        // the preprocessed input (`prep`) — the raw-image premultiply-alpha/LANCZOS crop is the one remaining
+        // Python step (as with TripoSR/Hunyuan3D background removal).
+        string dinoFile = "/tmp/trellis_ref/dinov2_vitl14_reg.safetensors";
+        Tensor cond;
+        if (File.Exists(dinoFile))
+        {
+            using SafeTensorsLoader dl = new(); dl.Load(dinoFile);
+            TrellisImageConditioner conditioner = new(); conditioner.LoadWeights(dl.GetAllTensors());
+            backend.PreloadWeights(conditioner.EnumerateWeights());
+            cond = conditioner.Encode(backend, cl.GetTensor("prep"));
+            backend.FreeWeights(conditioner.EnumerateWeights());
+            _out.WriteLine($"cond computed in-engine (DINOv2-reg conditioner) {cond.Shape}");
+        }
+        else { cond = cl.GetTensor("cond"); _out.WriteLine("cond loaded pre-computed (dino weights absent)"); }
         Tensor negCond = new(cond.Shape, DType.F32); backend.Fill(negCond, 0f);
         _out.WriteLine($"loaded in {sw.Elapsed.TotalSeconds:F1}s");
 
