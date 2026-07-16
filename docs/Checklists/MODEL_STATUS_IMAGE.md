@@ -98,7 +98,7 @@ Instruction/edit models reuse the base transformer with image-conditioning slots
 | SDXL ControlNet | ✅ canny (strong adherence), depth mode, 2-net stacking, start/end step window. LDM (`control_model.*`) + diffusers layouts both load (new `ControlNetCheckpointConverter`, 340/340 key parity vs the diffusers pair). Union-type CN (control-type embedding) NOT supported. `diffusers_xl_depth_full` is weak — prefer `xinsir/controlnet-depth-sdxl`. |
 | SD1.5 ControlNet | ✅ pipeline wiring landed 07-16; canny + depth verified e2e (watercolor apple / vase). |
 | IP-Adapter SDXL std/Plus + SD1.5 std | ✅ verified e2e (subject/style transfer; Plus = near-identity). THE black-output root cause: checkpoints store the per-layer K/V list in diffusers **enumeration order (down → up → mid LAST)**, engine consumed traversal order → wrong weights/NaN. Also fixed: Plus misdetection via `image_proj.norm.weight` (standard files have it too), SDXL Plus resampler dims (1280/20-heads, not 1024/12), IPA cache entries evicting the base pipeline at MaxCachedPipelines=1. FaceID = Wave 2. |
-| Preprocessors | Canny (fixed: no pre-blur + L1 magnitude — old maps were near-empty), Depth-Anything-V2 (in-engine). OpenPose/lineart/softedge/normal/seg pending (preprocessor subsystem). |
+| Preprocessors | Canny (fixed: no pre-blur + L1 magnitude — old maps were near-empty), Depth-Anything-V2 (in-engine, parity 2.9e-7), OpenPose (engine `OpenPosePreprocessor`: YOLO11-pose reuse + BODY-18 render; SD15 openpose CN verified e2e). lineart/softedge/normal/seg + raw-map passthrough pending. |
 
 ## How to promote a 🔧 to ✅
 
