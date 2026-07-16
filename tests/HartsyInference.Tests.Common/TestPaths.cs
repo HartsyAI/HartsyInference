@@ -348,6 +348,15 @@ public static class TestPaths
         public static string VitL => Resolve("DEPTH_ANYTHING_V2_VITL_PATH", Path.Combine(ModelsDir, "Vision", "DepthAnything", "depth_anything_v2_vitl.pth"));
     }
 
+    /// <summary>ControlNet annotator checkpoints (lllyasviel/Annotators, non-gated).</summary>
+    public static class Annotators
+    {
+        public static string Hed => Resolve("ANNOTATOR_HED_PATH", Path.Combine(ModelsDir, "Vision", "Annotators", "ControlNetHED.pth"));
+        public static string LineartRealistic => Resolve("ANNOTATOR_LINEART_PATH", Path.Combine(ModelsDir, "Vision", "Annotators", "sk_model.pth"));
+        public static string LineartCoarse => Resolve("ANNOTATOR_LINEART_COARSE_PATH", Path.Combine(ModelsDir, "Vision", "Annotators", "sk_model2.pth"));
+        public static string NormalBae => Resolve("ANNOTATOR_NORMALBAE_PATH", Path.Combine(ModelsDir, "Vision", "Annotators", "scannet.pt"));
+    }
+
     /// <summary>YOLO checkpoint paths (Vision package). Use the Python conversion script under
     /// <c>tests/python-reference/convert_yolov8_pt_to_safetensors.py</c> to produce these from
     /// Ultralytics <c>.pt</c> files — the conversion folds BN into Conv weights for fast inference.</summary>

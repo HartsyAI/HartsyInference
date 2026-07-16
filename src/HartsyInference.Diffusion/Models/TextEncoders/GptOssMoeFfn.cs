@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelHandler.Nvfp4;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 
@@ -38,7 +39,16 @@ namespace HartsyInference.Diffusion.Models.TextEncoders;
 /// </code>
 /// Reference: <c>GptOssTopKRouter</c> + <c>GptOssExperts</c> in <c>modeling_gpt_oss.py</c>. The custom
 /// gated activation matches OpenAI's open-weights GLU variant — see <see cref="LlamaStyleEncoderConfig.ClampedSwiGluLimit"/>
-/// and <see cref="LlamaStyleEncoderConfig.ClampedSwiGluAlpha"/>.</summary>
+/// and <see cref="LlamaStyleEncoderConfig.ClampedSwiGluAlpha"/>.
+///
+/// <para><b>Expert weight storage — two mutually exclusive modes:</b> (a) <b>dense F32</b> banks under
+/// the bare <c>experts.gate_up_proj</c> / <c>experts.down_proj</c> keys (the diffusers MXFP4 path
+/// dequantizes at load); (b) <b>NVFP4-packed</b> banks under <c>experts.gate_up_proj.weight</c> (U8) +
+/// <c>.weight_scale</c> + <c>.weight_scale_2</c> (the ComfyUI <c>gpt_oss_20b_nvfp4</c> file). Packed
+/// banks stay mmap-backed and are dequantized ONE EXPERT AT A TIME transiently during
+/// <see cref="Forward"/> (~100 MB peak instead of ~76 GB for the full 20B bank at F32 — the latter
+/// OOM-kills 64 GB hosts). The packed forward groups tokens by routed expert so each expert bank is
+/// dequantized exactly once per layer forward.</para></summary>
 public sealed unsafe class GptOssMoeFfn
 {
     private readonly int _hidden;
@@ -50,10 +60,19 @@ public sealed unsafe class GptOssMoeFfn
 
     private Tensor? _routerWeight;
     private Tensor? _routerBias;
-    private Tensor? _expertsGateUp;       // [numExperts, hidden, 2*intermediate]
+    private Tensor? _expertsGateUp;       // dense F32 [numExperts, hidden, 2*intermediate]
     private Tensor? _expertsGateUpBias;   // [numExperts, 2*intermediate]
-    private Tensor? _expertsDown;         // [numExperts, intermediate, hidden]
+    private Tensor? _expertsDown;         // dense F32 [numExperts, intermediate, hidden]
     private Tensor? _expertsDownBias;     // [numExperts, hidden]
+
+    // NVFP4-packed alternative to _expertsGateUp/_expertsDown (see class doc): U8 nibbles [E, out, in/2]
+    // + swizzled F8E4M3 block scales + F32 per-expert globals, dequantized per expert at forward time.
+    private Tensor? _gateUpPacked;
+    private Tensor? _gateUpBlockScale;
+    private Tensor? _gateUpGlobalScale;
+    private Tensor? _downPacked;
+    private Tensor? _downBlockScale;
+    private Tensor? _downGlobalScale;
 
     /// <summary>Creates a GPT-OSS MoE FFN.</summary>
     /// <param name="hiddenSize">Input/output channel count (2880 for GPT-OSS).</param>
@@ -75,22 +94,48 @@ public sealed unsafe class GptOssMoeFfn
         _alpha = alpha;
     }
 
-    /// <summary>Loads MoE weights under <paramref name="prefix"/> (typical: <c>model.layers.{i}.mlp</c>).</summary>
+    /// <summary>Loads MoE weights under <paramref name="prefix"/> (typical: <c>model.layers.{i}.mlp</c>).
+    /// Expert banks are accepted either dense F32 (bare <c>experts.gate_up_proj</c> key) or NVFP4-packed
+    /// (<c>experts.gate_up_proj.weight</c> U8 + scale companions) — see the class doc.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
         _routerWeight = weights[$"{prefix}.router.weight"];
         _routerBias = weights[$"{prefix}.router.bias"];
-        _expertsGateUp = weights[$"{prefix}.experts.gate_up_proj"];
         _expertsGateUpBias = weights[$"{prefix}.experts.gate_up_proj_bias"];
-        _expertsDown = weights[$"{prefix}.experts.down_proj"];
         _expertsDownBias = weights[$"{prefix}.experts.down_proj_bias"];
 
         ValidateShape(_routerWeight, "router.weight", _numExperts, _hidden);
         ValidateShape(_routerBias, "router.bias", _numExperts);
-        ValidateShape(_expertsGateUp, "experts.gate_up_proj", _numExperts, _hidden, 2 * _intermediate);
         ValidateShape(_expertsGateUpBias, "experts.gate_up_proj_bias", _numExperts, 2 * _intermediate);
-        ValidateShape(_expertsDown, "experts.down_proj", _numExperts, _intermediate, _hidden);
         ValidateShape(_expertsDownBias, "experts.down_proj_bias", _numExperts, _hidden);
+
+        if (weights.TryGetValue($"{prefix}.experts.gate_up_proj", out Tensor? gateUpDense))
+        {
+            _expertsGateUp = gateUpDense;
+            _expertsDown = weights[$"{prefix}.experts.down_proj"];
+            ValidateShape(_expertsGateUp, "experts.gate_up_proj", _numExperts, _hidden, 2 * _intermediate);
+            ValidateShape(_expertsDown, "experts.down_proj", _numExperts, _intermediate, _hidden);
+            return;
+        }
+
+        if (!weights.ContainsKey($"{prefix}.experts.gate_up_proj.weight"))
+            throw new InvalidOperationException(
+                $"MoE experts missing under '{prefix}.experts' — expected dense F32 'gate_up_proj'/'down_proj' " +
+                "or NVFP4-packed 'gate_up_proj.weight' (+ '.weight_scale'/'.weight_scale_2') keys.");
+
+        _gateUpPacked = weights[$"{prefix}.experts.gate_up_proj.weight"];
+        _gateUpBlockScale = weights[$"{prefix}.experts.gate_up_proj.weight_scale"];
+        _gateUpGlobalScale = weights[$"{prefix}.experts.gate_up_proj.weight_scale_2"];
+        _downPacked = weights[$"{prefix}.experts.down_proj.weight"];
+        _downBlockScale = weights[$"{prefix}.experts.down_proj.weight_scale"];
+        _downGlobalScale = weights[$"{prefix}.experts.down_proj.weight_scale_2"];
+
+        // On-disk packed layout is [E, out, in/2]: gate_up out = 2*intermediate, in = hidden;
+        // down out = hidden, in = intermediate. Two FP4 elements per byte.
+        ValidateShape(_gateUpPacked, "experts.gate_up_proj.weight", _numExperts, 2 * _intermediate, _hidden / 2);
+        ValidateShape(_downPacked, "experts.down_proj.weight", _numExperts, _hidden, _intermediate / 2);
+        ValidateShape(_gateUpGlobalScale, "experts.gate_up_proj.weight_scale_2", _numExperts);
+        ValidateShape(_downGlobalScale, "experts.down_proj.weight_scale_2", _numExperts);
     }
 
     /// <summary>Enumerates every weight tensor for GPU preloading.</summary>
@@ -102,15 +147,22 @@ public sealed unsafe class GptOssMoeFfn
         if (_expertsGateUpBias is not null) yield return _expertsGateUpBias;
         if (_expertsDown is not null) yield return _expertsDown;
         if (_expertsDownBias is not null) yield return _expertsDownBias;
+        if (_gateUpPacked is not null) yield return _gateUpPacked;
+        if (_gateUpBlockScale is not null) yield return _gateUpBlockScale;
+        if (_gateUpGlobalScale is not null) yield return _gateUpGlobalScale;
+        if (_downPacked is not null) yield return _downPacked;
+        if (_downBlockScale is not null) yield return _downBlockScale;
+        if (_downGlobalScale is not null) yield return _downGlobalScale;
     }
 
     /// <summary>Forward pass. Input/output shape: <c>[B, S, hidden]</c>, F32.
-    /// <para>Implementation note: this is the reference CPU path — loop over (batch×seq) tokens, route
-    /// each to top-k experts, run the GPT-OSS-style clamped GLU per (token, expert) pair, accumulate.
-    /// Asymptotically <c>O(B·S·k·hidden·intermediate)</c>. A real-production CUDA path would batch tokens
-    /// per expert (gather → expert GEMM → scatter), but for the Lens encoder running on short prompts
-    /// (≤512 tokens, 24 layers, k=4) this CPU loop completes in ~1-2 seconds on commodity hardware —
-    /// fast enough for the single pre-denoise forward pass.</para></summary>
+    /// <para>Implementation note: this is the reference CPU path. Dense mode loops over (batch×seq)
+    /// tokens, routing each to top-k experts and running the GPT-OSS-style clamped GLU per (token,
+    /// expert) pair. Packed (NVFP4) mode inverts the loop — tokens are grouped by routed expert so each
+    /// expert bank is dequantized to a transient F32 slice exactly once per forward (memory-bounded:
+    /// slice scratch only, never the full bank) and evaluated as batched GEMMs. Both modes compute the
+    /// same math (fp accumulation order differs). Asymptotically <c>O(B·S·k·hidden·intermediate)</c> —
+    /// fine for the Lens encoder's single pre-denoise pass over ≤512-token prompts.</para></summary>
     public Tensor Forward(IBackend backend, Tensor input)
     {
         int batch = (int)input.Shape[0];
@@ -123,42 +175,216 @@ public sealed unsafe class GptOssMoeFfn
         Tensor logits = new Tensor(logitsShape, DType.F32);
         backend.Linear(logits, input, _routerWeight!, _routerBias);
 
-        // Step 2: per-token top-k selection + softmax over top-k only
-        // Step 3: per-token MoE evaluation
-        float* logitsPtr = (float*)logits.DataPointer;
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
+        // Step 2: per-token top-k selection + softmax over top-k only.
+        int[] slotExpert = new int[tokens * _topK];
+        float[] slotScore = new float[tokens * _topK];
+        ComputeRouting(logits, tokens, slotExpert, slotScore);
+        logits.Dispose();
 
         // Zero output up-front — we accumulate into it.
+        float* outPtr = (float*)output.DataPointer;
         long outElements = output.Shape.ElementCount;
         for (long i = 0; i < outElements; i++) outPtr[i] = 0f;
 
-        // Scratch buffers reused per token.
-        float[] gateUpScratch = new float[2 * _intermediate];
-        float[] gatedScratch = new float[_intermediate];
+        // Step 3: MoE evaluation.
+        if (_expertsGateUp is not null)
+            ForwardDense(input, output, tokens, slotExpert, slotScore);
+        else
+            ForwardPacked(backend, input, output, tokens, slotExpert, slotScore);
+        return output;
+    }
+
+    /// <summary>Fills the flat per-slot routing tables: slot <c>t·topK + j</c> holds token <c>t</c>'s
+    /// j-th expert index and its softmax-over-top-k score.</summary>
+    private void ComputeRouting(Tensor logits, int tokens, int[] slotExpert, float[] slotScore)
+    {
+        float* logitsPtr = (float*)logits.DataPointer;
         Span<int> topKIdx = stackalloc int[_topK];
         Span<float> topKLogits = stackalloc float[_topK];
         Span<float> topKScores = stackalloc float[_topK];
 
         for (int t = 0; t < tokens; t++)
         {
-            float* tokLogits = logitsPtr + (long)t * _numExperts;
-            float* tokIn = inPtr + (long)t * _hidden;
-            float* tokOut = outPtr + (long)t * _hidden;
-
-            TopKRouter(tokLogits, topKIdx, topKLogits);
+            TopKRouter(logitsPtr + (long)t * _numExperts, topKIdx, topKLogits);
             SoftmaxOverTopK(topKLogits, topKScores);
-
             for (int j = 0; j < _topK; j++)
             {
-                int expertIdx = topKIdx[j];
-                float weight = topKScores[j];
-                AccumulateExpert(tokIn, tokOut, expertIdx, weight, gateUpScratch, gatedScratch);
+                slotExpert[t * _topK + j] = topKIdx[j];
+                slotScore[t * _topK + j] = topKScores[j];
             }
         }
+    }
 
-        logits.Dispose();
-        return output;
+    /// <summary>Token-major evaluation over the dense F32 expert banks.</summary>
+    private void ForwardDense(Tensor input, Tensor output, int tokens, int[] slotExpert, float[] slotScore)
+    {
+        float* inPtr = (float*)input.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+        float* gateUpBank = (float*)_expertsGateUp!.DataPointer;
+        float* gateUpBiasBank = (float*)_expertsGateUpBias!.DataPointer;
+        float* downBank = (float*)_expertsDown!.DataPointer;
+        float* downBiasBank = (float*)_expertsDownBias!.DataPointer;
+        long gateUpPerExpert = (long)_hidden * (2 * _intermediate);
+        long downPerExpert = (long)_intermediate * _hidden;
+
+        // Scratch buffers reused per token.
+        float[] gateUpScratch = new float[2 * _intermediate];
+        float[] gatedScratch = new float[_intermediate];
+
+        for (int t = 0; t < tokens; t++)
+        {
+            float* tokIn = inPtr + (long)t * _hidden;
+            float* tokOut = outPtr + (long)t * _hidden;
+            for (int j = 0; j < _topK; j++)
+            {
+                int slot = t * _topK + j;
+                int e = slotExpert[slot];
+                AccumulateExpertKernel(tokIn, tokOut,
+                    gateUpBank + e * gateUpPerExpert, gateUpBiasBank + (long)e * (2 * _intermediate),
+                    downBank + e * downPerExpert, downBiasBank + (long)e * _hidden,
+                    slotScore[slot], gateUpScratch, gatedScratch);
+            }
+        }
+    }
+
+    /// <summary>Expert-major evaluation over the NVFP4-packed banks. Tokens are bucketed by routed
+    /// expert (CSR layout); each expert with a non-empty bucket is dequantized ONCE into two transient
+    /// F32 slices in the on-disk <c>[out, in]</c> orientation, its routed tokens are gathered into one
+    /// matrix, and the expert runs as two <c>backend.Linear</c> GEMMs (gather → GEMM → clamped-GLU →
+    /// GEMM → scatter). Memory-bounded: peak transient is <c>maxDegreeOfParallelism</c> expert slices
+    /// (~100 MB each for GPT-OSS-20B) + a per-slot contributions buffer, regardless of bank size.
+    /// Experts run in parallel race-free: each (token, slot) contribution row is owned by exactly one
+    /// expert, and a serial reduction folds the rows into the shared output afterwards.</summary>
+    private void ForwardPacked(IBackend backend, Tensor input, Tensor output, int tokens,
+        int[] slotExpert, float[] slotScore)
+    {
+        int totalSlots = tokens * _topK;
+        int[] counts = new int[_numExperts];
+        for (int s = 0; s < totalSlots; s++) counts[slotExpert[s]]++;
+        int[] starts = new int[_numExperts + 1];
+        for (int e = 0; e < _numExperts; e++) starts[e + 1] = starts[e] + counts[e];
+        int[] slotsByExpert = new int[totalSlots];
+        int[] cursor = new int[_numExperts];
+        Array.Copy(starts, cursor, _numExperts);
+        for (int s = 0; s < totalSlots; s++) slotsByExpert[cursor[slotExpert[s]]++] = s;
+
+        List<int> activeExperts = new(_numExperts);
+        for (int e = 0; e < _numExperts; e++)
+            if (starts[e + 1] > starts[e]) activeExperts.Add(e);
+
+        int twoI = 2 * _intermediate;
+        Tensor contributions = new Tensor(new TensorShape(totalSlots, _hidden), DType.F32);
+        try
+        {
+            float* inPtr = (float*)input.DataPointer;
+            float* contribPtr = (float*)contributions.DataPointer;
+            float* gateUpBiasBank = (float*)_expertsGateUpBias!.DataPointer;
+            float* downBiasBank = (float*)_expertsDownBias!.DataPointer;
+            int topK = _topK;
+            int hidden = _hidden;
+            int intermediate = _intermediate;
+            float clampLimit = _clampLimit;
+            float alpha = _alpha;
+
+            // Parallelism bounded by slice memory (each worker holds ~100 MB of dequant slices) and by
+            // the CPU GEMM being single-threaded per call.
+            ParallelOptions po = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 2, 1, 8),
+            };
+            Parallel.ForEach(activeExperts, po,
+                () => (GateUp: new Tensor(new TensorShape(twoI, hidden), DType.F32),
+                       Down: new Tensor(new TensorShape(hidden, intermediate), DType.F32)),
+                (e, _, slices) =>
+                {
+                    int begin = starts[e];
+                    int n = starts[e + 1] - begin;
+
+                    Nvfp4Codec.DequantExpertSlice(_gateUpPacked!, _gateUpBlockScale!, _gateUpGlobalScale!, e, slices.GateUp);
+                    Nvfp4Codec.DequantExpertSlice(_downPacked!, _downBlockScale!, _downGlobalScale!, e, slices.Down);
+                    float* gateUpB = gateUpBiasBank + (long)e * twoI;
+                    float* downB = downBiasBank + (long)e * hidden;
+
+                    // Gather this expert's routed token rows into one [n, hidden] matrix.
+                    Tensor x = new Tensor(new TensorShape(n, hidden), DType.F32);
+                    Tensor gateUpOut = new Tensor(new TensorShape(n, twoI), DType.F32);
+                    Tensor gated = new Tensor(new TensorShape(n, intermediate), DType.F32);
+                    Tensor downOut = new Tensor(new TensorShape(n, hidden), DType.F32);
+                    try
+                    {
+                        float* xPtr = (float*)x.DataPointer;
+                        for (int i = 0; i < n; i++)
+                        {
+                            int t = slotsByExpert[begin + i] / topK;
+                            Buffer.MemoryCopy(inPtr + (long)t * hidden, xPtr + (long)i * hidden,
+                                hidden * sizeof(float), hidden * sizeof(float));
+                        }
+
+                        backend.Linear(gateUpOut, x, slices.GateUp, null);
+
+                        // GPT-OSS clamped gated activation, bias folded in here (the GEMM ran bias-free):
+                        // gate = (gu[2k] + b[2k]).clamp(max=L); up = (gu[2k+1] + b[2k+1]).clamp(-L, L);
+                        // gated = (up + 1) · gate · sigmoid(α·gate).
+                        float* guPtr = (float*)gateUpOut.DataPointer;
+                        float* gatedPtr = (float*)gated.DataPointer;
+                        for (int i = 0; i < n; i++)
+                        {
+                            float* guRow = guPtr + (long)i * twoI;
+                            float* gatedRow = gatedPtr + (long)i * intermediate;
+                            for (int k = 0; k < intermediate; k++)
+                            {
+                                float g = guRow[2 * k] + gateUpB[2 * k];
+                                float u = guRow[2 * k + 1] + gateUpB[2 * k + 1];
+                                if (g > clampLimit) g = clampLimit;
+                                if (u > clampLimit) u = clampLimit;
+                                else if (u < -clampLimit) u = -clampLimit;
+                                float sig = 1.0f / (1.0f + MathF.Exp(-alpha * g));
+                                gatedRow[k] = (u + 1.0f) * g * sig;
+                            }
+                        }
+
+                        backend.Linear(downOut, gated, slices.Down, null);
+
+                        // Scatter: contribution row for slot s = score · (down_out + down_bias).
+                        float* downPtr = (float*)downOut.DataPointer;
+                        for (int i = 0; i < n; i++)
+                        {
+                            int slot = slotsByExpert[begin + i];
+                            float score = slotScore[slot];
+                            float* src = downPtr + (long)i * hidden;
+                            float* dstRow = contribPtr + (long)slot * hidden;
+                            for (int h = 0; h < hidden; h++)
+                                dstRow[h] = score * (src[h] + downB[h]);
+                        }
+                    }
+                    finally
+                    {
+                        x.Dispose();
+                        gateUpOut.Dispose();
+                        gated.Dispose();
+                        downOut.Dispose();
+                    }
+                    return slices;
+                },
+                slices =>
+                {
+                    slices.GateUp.Dispose();
+                    slices.Down.Dispose();
+                });
+
+            // Serial reduction: fold every slot's contribution into its token's output row.
+            float* outPtr = (float*)output.DataPointer;
+            for (int slot = 0; slot < totalSlots; slot++)
+            {
+                float* src = contribPtr + (long)slot * _hidden;
+                float* dst = outPtr + (long)(slot / _topK) * _hidden;
+                for (int h = 0; h < _hidden; h++) dst[h] += src[h];
+            }
+        }
+        finally
+        {
+            contributions.Dispose();
+        }
     }
 
     /// <summary>Selects the top-<see cref="_topK"/> expert indices for a token by raw logit value.
@@ -220,15 +446,14 @@ public sealed unsafe class GptOssMoeFfn
     }
 
     /// <summary>Runs one expert on one token and accumulates <c>weight · expert(input)</c> into <paramref name="tokOut"/>.
-    /// gate/up are interleaved in <c>gate_up_proj</c>'s last dim (cols 0,2,4,... are gate; 1,3,5,... are up).</summary>
-    private void AccumulateExpert(float* tokIn, float* tokOut, int expertIdx, float weight,
+    /// gate/up are interleaved in <c>gate_up_proj</c>'s last dim (cols 0,2,4,... are gate; 1,3,5,... are up).
+    /// Weight pointers address ONE expert's matrices in the runtime layout (<c>gateUpW</c>:
+    /// <c>[hidden, 2·intermediate]</c>, <c>downW</c>: <c>[intermediate, hidden]</c>) — the dense path
+    /// passes bank-offset pointers, the packed path passes the transient dequant slices.</summary>
+    private void AccumulateExpertKernel(float* tokIn, float* tokOut,
+        float* gateUpW, float* gateUpB, float* downW, float* downB, float weight,
         float[] gateUpScratch, float[] gatedScratch)
     {
-        float* gateUpW = (float*)_expertsGateUp!.DataPointer + (long)expertIdx * _hidden * (2 * _intermediate);
-        float* gateUpB = (float*)_expertsGateUpBias!.DataPointer + (long)expertIdx * (2 * _intermediate);
-        float* downW = (float*)_expertsDown!.DataPointer + (long)expertIdx * _intermediate * _hidden;
-        float* downB = (float*)_expertsDownBias!.DataPointer + (long)expertIdx * _hidden;
-
         // Step A: gate_up = tokIn @ gate_up_proj[expert] + bias
         //   gate_up_proj[expert] has shape [hidden, 2*intermediate]
         //   tokIn has shape [hidden]
