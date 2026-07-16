@@ -251,10 +251,18 @@ public sealed unsafe class GptOssMoeFfn
     /// expert (CSR layout); each expert with a non-empty bucket is dequantized ONCE into two transient
     /// F32 slices in the on-disk <c>[out, in]</c> orientation, its routed tokens are gathered into one
     /// matrix, and the expert runs as two <c>backend.Linear</c> GEMMs (gather → GEMM → clamped-GLU →
-    /// GEMM → scatter). Memory-bounded: peak transient is <c>maxDegreeOfParallelism</c> expert slices
-    /// (~100 MB each for GPT-OSS-20B) + a per-slot contributions buffer, regardless of bank size.
-    /// Experts run in parallel race-free: each (token, slot) contribution row is owned by exactly one
-    /// expert, and a serial reduction folds the rows into the shared output afterwards.</summary>
+    /// GEMM → scatter into per-slot contribution rows, folded serially afterwards). Memory-bounded:
+    /// peak transient is the live expert slices (~100 MB each for GPT-OSS-20B) + the contributions
+    /// buffer, regardless of bank size.
+    /// <para><b>Concurrency contract:</b> on the CPU backend experts run in parallel with per-worker
+    /// reusable slices (the CPU ops are stateless; each (token, slot) contribution row is owned by
+    /// exactly one expert). On GPU backends experts run STRICTLY SEQUENTIALLY with a FRESH slice tensor
+    /// per expert: the CUDA backend's stream, reference-keyed weight/activation caches, lazy D2H sync
+    /// callbacks, and upload auto-promotion are none of them safe against concurrent calls or against
+    /// reusing a Tensor object whose bytes changed — the parallel+reuse shape corrupted the GPU cache
+    /// bookkeeping and the native heap in production (<c>malloc(): unsorted double linked list
+    /// corrupted</c>). Each expert ends with <c>Sync</c> + <c>FreeWeights</c> before its slices are
+    /// disposed so no async op or cache entry outlives the host memory.</para></summary>
     private void ForwardPacked(IBackend backend, Tensor input, Tensor output, int tokens,
         int[] slotExpert, float[] slotScore)
     {
@@ -278,99 +286,53 @@ public sealed unsafe class GptOssMoeFfn
         {
             float* inPtr = (float*)input.DataPointer;
             float* contribPtr = (float*)contributions.DataPointer;
-            float* gateUpBiasBank = (float*)_expertsGateUpBias!.DataPointer;
-            float* downBiasBank = (float*)_expertsDownBias!.DataPointer;
-            int topK = _topK;
-            int hidden = _hidden;
-            int intermediate = _intermediate;
-            float clampLimit = _clampLimit;
-            float alpha = _alpha;
 
-            // Parallelism bounded by slice memory (each worker holds ~100 MB of dequant slices) and by
-            // the CPU GEMM being single-threaded per call.
-            ParallelOptions po = new ParallelOptions
+            if (backend.Device.IsCpu)
             {
-                MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 2, 1, 8),
-            };
-            Parallel.ForEach(activeExperts, po,
-                () => (GateUp: new Tensor(new TensorShape(twoI, hidden), DType.F32),
-                       Down: new Tensor(new TensorShape(hidden, intermediate), DType.F32)),
-                (e, _, slices) =>
+                // Parallelism bounded by slice memory (each worker holds ~100 MB of dequant slices) and
+                // by the CPU GEMM being single-threaded per call.
+                ParallelOptions po = new ParallelOptions
                 {
-                    int begin = starts[e];
-                    int n = starts[e + 1] - begin;
-
-                    Nvfp4Codec.DequantExpertSlice(_gateUpPacked!, _gateUpBlockScale!, _gateUpGlobalScale!, e, slices.GateUp);
-                    Nvfp4Codec.DequantExpertSlice(_downPacked!, _downBlockScale!, _downGlobalScale!, e, slices.Down);
-                    float* gateUpB = gateUpBiasBank + (long)e * twoI;
-                    float* downB = downBiasBank + (long)e * hidden;
-
-                    // Gather this expert's routed token rows into one [n, hidden] matrix.
-                    Tensor x = new Tensor(new TensorShape(n, hidden), DType.F32);
-                    Tensor gateUpOut = new Tensor(new TensorShape(n, twoI), DType.F32);
-                    Tensor gated = new Tensor(new TensorShape(n, intermediate), DType.F32);
-                    Tensor downOut = new Tensor(new TensorShape(n, hidden), DType.F32);
+                    MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 2, 1, 8),
+                };
+                Parallel.ForEach(activeExperts, po,
+                    () => (GateUp: new Tensor(new TensorShape(twoI, _hidden), DType.F32),
+                           Down: new Tensor(new TensorShape(_hidden, _intermediate), DType.F32)),
+                    (e, _, slices) =>
+                    {
+                        RunPackedExpert(backend, e, starts, slotsByExpert, slotScore,
+                            inPtr, contribPtr, slices.GateUp, slices.Down);
+                        return slices;
+                    },
+                    slices =>
+                    {
+                        slices.GateUp.Dispose();
+                        slices.Down.Dispose();
+                    });
+            }
+            else
+            {
+                // GPU backends: sequential experts, fresh slices — see the concurrency contract above.
+                foreach (int e in activeExperts)
+                {
+                    Tensor gateUpSlice = new Tensor(new TensorShape(twoI, _hidden), DType.F32);
+                    Tensor downSlice = new Tensor(new TensorShape(_hidden, _intermediate), DType.F32);
                     try
                     {
-                        float* xPtr = (float*)x.DataPointer;
-                        for (int i = 0; i < n; i++)
-                        {
-                            int t = slotsByExpert[begin + i] / topK;
-                            Buffer.MemoryCopy(inPtr + (long)t * hidden, xPtr + (long)i * hidden,
-                                hidden * sizeof(float), hidden * sizeof(float));
-                        }
-
-                        backend.Linear(gateUpOut, x, slices.GateUp, null);
-
-                        // GPT-OSS clamped gated activation, bias folded in here (the GEMM ran bias-free):
-                        // gate = (gu[2k] + b[2k]).clamp(max=L); up = (gu[2k+1] + b[2k+1]).clamp(-L, L);
-                        // gated = (up + 1) · gate · sigmoid(α·gate).
-                        float* guPtr = (float*)gateUpOut.DataPointer;
-                        float* gatedPtr = (float*)gated.DataPointer;
-                        for (int i = 0; i < n; i++)
-                        {
-                            float* guRow = guPtr + (long)i * twoI;
-                            float* gatedRow = gatedPtr + (long)i * intermediate;
-                            for (int k = 0; k < intermediate; k++)
-                            {
-                                float g = guRow[2 * k] + gateUpB[2 * k];
-                                float u = guRow[2 * k + 1] + gateUpB[2 * k + 1];
-                                if (g > clampLimit) g = clampLimit;
-                                if (u > clampLimit) u = clampLimit;
-                                else if (u < -clampLimit) u = -clampLimit;
-                                float sig = 1.0f / (1.0f + MathF.Exp(-alpha * g));
-                                gatedRow[k] = (u + 1.0f) * g * sig;
-                            }
-                        }
-
-                        backend.Linear(downOut, gated, slices.Down, null);
-
-                        // Scatter: contribution row for slot s = score · (down_out + down_bias).
-                        float* downPtr = (float*)downOut.DataPointer;
-                        for (int i = 0; i < n; i++)
-                        {
-                            int slot = slotsByExpert[begin + i];
-                            float score = slotScore[slot];
-                            float* src = downPtr + (long)i * hidden;
-                            float* dstRow = contribPtr + (long)slot * hidden;
-                            for (int h = 0; h < hidden; h++)
-                                dstRow[h] = score * (src[h] + downB[h]);
-                        }
+                        RunPackedExpert(backend, e, starts, slotsByExpert, slotScore,
+                            inPtr, contribPtr, gateUpSlice, downSlice);
                     }
                     finally
                     {
-                        x.Dispose();
-                        gateUpOut.Dispose();
-                        gated.Dispose();
-                        downOut.Dispose();
+                        // Drain the stream, then drop any cached/auto-promoted device copies keyed by
+                        // these tensors BEFORE freeing their host memory.
+                        backend.Sync();
+                        backend.FreeWeights([gateUpSlice, downSlice]);
+                        gateUpSlice.Dispose();
+                        downSlice.Dispose();
                     }
-                    return slices;
-                },
-                slices =>
-                {
-                    slices.GateUp.Dispose();
-                    slices.Down.Dispose();
-                });
+                }
+            }
 
             // Serial reduction: fold every slot's contribution into its token's output row.
             float* outPtr = (float*)output.DataPointer;
@@ -384,6 +346,89 @@ public sealed unsafe class GptOssMoeFfn
         finally
         {
             contributions.Dispose();
+        }
+    }
+
+    /// <summary>Evaluates one packed expert: dequant into <paramref name="gateUpSlice"/> /
+    /// <paramref name="downSlice"/>, gather routed tokens, two <c>backend.Linear</c> GEMMs with the
+    /// clamped-GLU between them, scatter into the per-slot contribution rows. All host reads of GEMM
+    /// outputs go through <c>DataPointer</c> (which lazily syncs GPU-cached activations), so on GPU
+    /// backends the stream is drained before the transient tensors are disposed.</summary>
+    private void RunPackedExpert(IBackend backend, int e, int[] starts, int[] slotsByExpert,
+        float[] slotScore, float* inPtr, float* contribPtr, Tensor gateUpSlice, Tensor downSlice)
+    {
+        int begin = starts[e];
+        int n = starts[e + 1] - begin;
+        int twoI = 2 * _intermediate;
+        int hidden = _hidden;
+        int intermediate = _intermediate;
+        float clampLimit = _clampLimit;
+        float alpha = _alpha;
+
+        Nvfp4Codec.DequantExpertSlice(_gateUpPacked!, _gateUpBlockScale!, _gateUpGlobalScale!, e, gateUpSlice);
+        Nvfp4Codec.DequantExpertSlice(_downPacked!, _downBlockScale!, _downGlobalScale!, e, downSlice);
+        float* gateUpB = (float*)_expertsGateUpBias!.DataPointer + (long)e * twoI;
+        float* downB = (float*)_expertsDownBias!.DataPointer + (long)e * hidden;
+
+        // Gather this expert's routed token rows into one [n, hidden] matrix.
+        Tensor x = new Tensor(new TensorShape(n, hidden), DType.F32);
+        Tensor gateUpOut = new Tensor(new TensorShape(n, twoI), DType.F32);
+        Tensor gated = new Tensor(new TensorShape(n, intermediate), DType.F32);
+        Tensor downOut = new Tensor(new TensorShape(n, hidden), DType.F32);
+        try
+        {
+            float* xPtr = (float*)x.DataPointer;
+            for (int i = 0; i < n; i++)
+            {
+                int t = slotsByExpert[begin + i] / _topK;
+                Buffer.MemoryCopy(inPtr + (long)t * hidden, xPtr + (long)i * hidden,
+                    hidden * sizeof(float), hidden * sizeof(float));
+            }
+
+            backend.Linear(gateUpOut, x, gateUpSlice, null);
+
+            // GPT-OSS clamped gated activation, bias folded in here (the GEMM ran bias-free):
+            // gate = (gu[2k] + b[2k]).clamp(max=L); up = (gu[2k+1] + b[2k+1]).clamp(-L, L);
+            // gated = (up + 1) · gate · sigmoid(α·gate).
+            float* guPtr = (float*)gateUpOut.DataPointer;
+            float* gatedPtr = (float*)gated.DataPointer;
+            for (int i = 0; i < n; i++)
+            {
+                float* guRow = guPtr + (long)i * twoI;
+                float* gatedRow = gatedPtr + (long)i * intermediate;
+                for (int k = 0; k < intermediate; k++)
+                {
+                    float g = guRow[2 * k] + gateUpB[2 * k];
+                    float u = guRow[2 * k + 1] + gateUpB[2 * k + 1];
+                    if (g > clampLimit) g = clampLimit;
+                    if (u > clampLimit) u = clampLimit;
+                    else if (u < -clampLimit) u = -clampLimit;
+                    float sig = 1.0f / (1.0f + MathF.Exp(-alpha * g));
+                    gatedRow[k] = (u + 1.0f) * g * sig;
+                }
+            }
+
+            backend.Linear(downOut, gated, downSlice, null);
+
+            // Scatter: contribution row for slot s = score · (down_out + down_bias). Reading
+            // downOut.DataPointer also drains any pending GPU work on this expert's tensors.
+            float* downPtr = (float*)downOut.DataPointer;
+            for (int i = 0; i < n; i++)
+            {
+                int slot = slotsByExpert[begin + i];
+                float score = slotScore[slot];
+                float* src = downPtr + (long)i * hidden;
+                float* dstRow = contribPtr + (long)slot * hidden;
+                for (int h = 0; h < hidden; h++)
+                    dstRow[h] = score * (src[h] + downB[h]);
+            }
+        }
+        finally
+        {
+            x.Dispose();
+            gateUpOut.Dispose();
+            gated.Dispose();
+            downOut.Dispose();
         }
     }
 
