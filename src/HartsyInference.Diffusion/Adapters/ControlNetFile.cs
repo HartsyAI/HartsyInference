@@ -21,7 +21,7 @@ public sealed class ControlNetFile : IDisposable
     /// <summary>Auto-derived config based on the detected base model and the standard preset for that family.</summary>
     public required ControlNetConfig Config { get; init; }
 
-    /// <summary>All parsed tensors keyed by their original safetensors key.</summary>
+    /// <summary>All parsed tensors keyed by diffusers-format name. For LDM-layout checkpoints (<c>control_model.*</c>) the keys have been converted; for diffusers-layout files they are the original safetensors keys.</summary>
     public required IReadOnlyDictionary<string, Tensor> Weights { get; init; }
 
     internal void AttachLoader(SafeTensorsLoader loader) => _loader = loader;

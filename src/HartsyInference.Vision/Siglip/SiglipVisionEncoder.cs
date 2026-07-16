@@ -100,6 +100,24 @@ public sealed unsafe class SiglipVisionEncoder
     /// <summary>Encodes a preprocessed image into a <c>[1, embeddingDim]</c> tensor (un-normalized; caller L2-normalizes as needed).</summary>
     public Tensor Encode(IBackend backend, Tensor pixelValues)
     {
+        int batch = (int)pixelValues.Shape[0];
+        int hidden = _preset.HiddenSize;
+
+        Tensor h = EncodeHiddenStates(backend, pixelValues);
+
+        // Attention pooling head: probe (1 query) attends over patch tokens.
+        Tensor pooled = AttentionPool(backend, h, batch, hidden);
+        h.Dispose();
+
+        // Head MLP: LN → FC1 + GELU → FC2 → residual add.
+        Tensor embedding = HeadMlp(backend, pooled, batch, hidden);
+        pooled.Dispose();
+        return embedding;
+    }
+
+    /// <summary>Encodes a preprocessed image into the post-layernorm patch-token hidden states <c>[B, numPatches, hiddenSize]</c> — HF's <c>last_hidden_state</c>, the form FLUX.1 Redux consumes (the attention-pooling head is skipped).</summary>
+    public Tensor EncodeHiddenStates(IBackend backend, Tensor pixelValues)
+    {
         if (pixelValues.Shape.Rank != 4 || pixelValues.Shape[1] != 3
             || pixelValues.Shape[2] != _preset.ImageSize || pixelValues.Shape[3] != _preset.ImageSize)
         {
@@ -140,15 +158,7 @@ public sealed unsafe class SiglipVisionEncoder
             h.Dispose();
             h = normed;
         }
-
-        // 5. Attention pooling head: probe (1 query) attends over patch tokens.
-        Tensor pooled = AttentionPool(backend, h, batch, hidden);
-        h.Dispose();
-
-        // 6. Head MLP: LN → FC1 + GELU → FC2 → residual add.
-        Tensor embedding = HeadMlp(backend, pooled, batch, hidden);
-        pooled.Dispose();
-        return embedding;
+        return h;
     }
 
     private void AddPositionEmbedding(Tensor seq, int batch)

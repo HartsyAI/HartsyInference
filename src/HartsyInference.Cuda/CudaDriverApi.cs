@@ -248,6 +248,11 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuGraphDestroy(nint graph);
 
+    /// <summary>Writes a DOT-format dump of the graph's nodes (kernels, memcpys, alloc/free nodes with their
+    /// parameters when flags=1 VERBOSE). Diagnostic only.</summary>
+    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int cuGraphDebugDotPrint(nint graph, string path, uint flags);
+
     /// <summary>Returns the device's graph-memory-pool reserves to the OS. Memory allocated by captured
     /// allocation nodes (stream-ordered allocs recorded during graph capture) lives in a per-device GRAPH pool
     /// that <c>cuGraphExecDestroy</c> does NOT release and <c>cuMemPoolTrimTo</c> does not touch — without this

@@ -83,9 +83,22 @@ Instruction/edit models reuse the base transformer with image-conditioning slots
 | Model | Notes |
 |---|---|
 | **Boogu-Image 0.1 Edit** | Image-edit variant of Boogu-Image (same 10B backbone + reference-image conditioning). Needs the edit conditioning path + weights (fp8/GGUF) + e2e test. |
-| **Flux.1 Kontext** | Already built (`FluxToolsConfig` Kontext, `flux1-dev-kontext_fp8_scaled.safetensors` local) — edit/instruction path exists; e2e visual verification pending. |
+| **Flux.1 Kontext** | ✅ **07-16 e2e (`49.6-local`)**: clean instruction edit (apple recolor, composition/identity preserved). THE texture-corruption root cause: `VaeEncoder` stride-2 downsample used symmetric padding where diffusers/BFL use asymmetric `(0,1,0,1)` — encode corr vs ComfyUI 0.871 → **0.999993**. Kontext exposed it (conditions on the ref latent verbatim); img2img always masked it. Fix benefits ALL image-conditioned flows (img2img/inpaint/Fill/Tools, SD15/SDXL/SD3/Flux). PHASE_3_DEVIATIONS #45. |
+| **Flux.1 Fill** | ✅ **07-16 e2e (`49.1-local`)**: engine 384-ch conditioning implemented ([noise 64 \| masked latent 64 \| packed mask 256], diffusers-parity pack order unit-tested), FluxLoader detects 384-wide x_embedder + requires Init+Mask (strength defaults 1.0). Swarm verify: masked apple → photoreal strawberry bowl, surroundings preserved. Mask-edge seam fixed by binarizing the pixel-zeroing mask (Comfy parity); re-verify after next deploy. |
+| **Flux.1 Canny** | ✅ **07-16 e2e (`49.1-local`)**: full pipeline (edge map → VAE → 128-ch concat) verified — marble apple following the reference contour exactly (guidance 30, BFL-recommended). ROOT-CAUSE FIX: extension CannyPreprocessor produced near-EMPTY maps on real photos (gaussian σ1.4 pre-blur crushed gradients below the 200 threshold + L2 vs cv2's L1 magnitude); removed blur + L1 → cv2.Canny(100,200)-class maps. Debug aid: `HARTSY_DUMP_CONTROL=dir` dumps the conditioning map PNG. |
+| **Flux.1 Depth** | ✅ **07-16 e2e (`49.4-local`)**: depth-faithful gens (synthetic-map ball test + cropped-reference apple, both clean). The "web junk" was flux1-depth MODEL behavior on depth maps containing flat caption-strip-like bands (this test photo's table front face) — not a bug; both the Academia fp8 and an F16 conversion behave identically. In-engine **Depth-Anything-V2** annotator (DINOv2 reuse + DPT head, parity 2.9e-7 rel; ViT-L auto-download; `fluxScaling` max-only option matches BFL's reference form). Known minor: thin edge-fringe strip — A/B vs Comfy pending. Guidance 10 recommended (BFL). |
+| **Flux.1 Redux** | ✅ **07-16 e2e (`49.1-local`)**: new engine `ReduxImageEncoder` (redux_up/silu/redux_down) + `SiglipVisionEncoder.EncodeHiddenStates` + FluxPipeline seq-append (+ per-step apply-start switch); extension `ReduxResolver` reads Comfy's `usestylemodel` + strength params (multiply×merge both reduce to a scalar on the redux tokens — derived + documented), SigLIP so400m/14-384 side-model auto-download. Swarm verify: reference-dominant image variation (expected Comfy `StyleModelApply` behavior at high strength; scale knob confirmed applied). |
 | **Microsoft Lens / Lens-Turbo / Lens-Base** | 3.8B dual-stream MMDiT + GPT-OSS MoE encoder + Flux.2 VAE. |
 | **Lance (ByteDance) image** | Unified multimodal 3B-active (MoT + MaPE); shares backbone with Lance video. |
+
+## Conditioning adapters (ControlNet / IP-Adapter) — ✅ 07-16 (`49.7-local`)
+
+| Feature | Status |
+|---|---|
+| SDXL ControlNet | ✅ canny (strong adherence), depth mode, 2-net stacking, start/end step window. LDM (`control_model.*`) + diffusers layouts both load (new `ControlNetCheckpointConverter`, 340/340 key parity vs the diffusers pair). Union-type CN (control-type embedding) NOT supported. `diffusers_xl_depth_full` is weak — prefer `xinsir/controlnet-depth-sdxl`. |
+| SD1.5 ControlNet | ✅ pipeline wiring landed 07-16; canny + depth verified e2e (watercolor apple / vase). |
+| IP-Adapter SDXL std/Plus + SD1.5 std | ✅ verified e2e (subject/style transfer; Plus = near-identity). THE black-output root cause: checkpoints store the per-layer K/V list in diffusers **enumeration order (down → up → mid LAST)**, engine consumed traversal order → wrong weights/NaN. Also fixed: Plus misdetection via `image_proj.norm.weight` (standard files have it too), SDXL Plus resampler dims (1280/20-heads, not 1024/12), IPA cache entries evicting the base pipeline at MaxCachedPipelines=1. FaceID = Wave 2. |
+| Preprocessors | Canny (fixed: no pre-blur + L1 magnitude — old maps were near-empty), Depth-Anything-V2 (in-engine). OpenPose/lineart/softedge/normal/seg pending (preprocessor subsystem). |
 
 ## How to promote a 🔧 to ✅
 

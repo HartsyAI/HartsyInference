@@ -339,6 +339,15 @@ public static class TestPaths
         public static string Base16_224 => Resolve("SIGLIP_BASE_224_PATH", Path.Combine(ModelsDir, "clip", "siglip-base-patch16-224.safetensors"));
     }
 
+    /// <summary>Depth-Anything-V2 checkpoints — the official <c>.pth</c> files from HF
+    /// <c>depth-anything/Depth-Anything-V2-Small</c> / <c>-Large</c> (torch.hub-style keys, loaded via
+    /// <c>PytorchPickleLoader</c>, no conversion needed).</summary>
+    public static class DepthAnything
+    {
+        public static string VitS => Resolve("DEPTH_ANYTHING_V2_VITS_PATH", Path.Combine(ModelsDir, "Vision", "DepthAnything", "depth_anything_v2_vits.pth"));
+        public static string VitL => Resolve("DEPTH_ANYTHING_V2_VITL_PATH", Path.Combine(ModelsDir, "Vision", "DepthAnything", "depth_anything_v2_vitl.pth"));
+    }
+
     /// <summary>YOLO checkpoint paths (Vision package). Use the Python conversion script under
     /// <c>tests/python-reference/convert_yolov8_pt_to_safetensors.py</c> to produce these from
     /// Ultralytics <c>.pt</c> files — the conversion folds BN into Conv weights for fast inference.</summary>
@@ -377,6 +386,15 @@ public static class TestPaths
         public static string Qwen3Vocab    => Resolve("QWEN3_VOCAB_PATH",     Path.Combine(Qwen3Dir, "vocab.json"));
         public static string Qwen3Merges   => Resolve("QWEN3_MERGES_PATH",    Path.Combine(Qwen3Dir, "merges.txt"));
         public static string Qwen3Config   => Resolve("QWEN3_CONFIG_PATH",    Path.Combine(Qwen3Dir, "config.json"));
+    }
+
+    /// <summary>IP-Adapter checkpoints + the CLIP-Vision-H image encoder they were trained against. Assets are not bundled — tests skip when missing.</summary>
+    public static class IpAdapter
+    {
+        public static string SdxlStandard => Resolve("IPA_SDXL_PATH",       Path.Combine(ModelsDir, "ipadapter", "ip-adapter_sdxl_vit-h.safetensors"));
+        public static string SdxlPlus     => Resolve("IPA_SDXL_PLUS_PATH",  Path.Combine(ModelsDir, "ipadapter", "ip-adapter-plus_sdxl_vit-h.safetensors"));
+        public static string Sd15Standard => Resolve("IPA_SD15_PATH",       Path.Combine(ModelsDir, "ipadapter", "ip-adapter_sd15.safetensors"));
+        public static string ClipVisionH  => Resolve("CLIP_VISION_H_PATH",  Path.Combine(ModelsDir, "clip_vision", "clip-vision-h-14.safetensors"));
     }
 
     /// <summary>Resolves a cross-runtime reference image path inside OutputDir/References.</summary>

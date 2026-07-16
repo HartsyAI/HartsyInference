@@ -92,7 +92,8 @@ public sealed class SdxlCheckpointConverter
 
     // ── UNet Key Conversion ──────────────────────────────────────────
 
-    private static string? ConvertUNetKey(string ldmKey)
+    /// <summary>Converts one LDM UNet key (after stripping the <c>model.diffusion_model.</c> prefix) to its diffusers name, or null when the key has no diffusers counterpart. Also used by <see cref="ControlNetCheckpointConverter"/> for the encoder half of SDXL ControlNets.</summary>
+    public static string? ConvertUNetKey(string ldmKey)
     {
         if (ldmKey.StartsWith("input_blocks.0.0."))
             return "conv_in." + ldmKey["input_blocks.0.0.".Length..];

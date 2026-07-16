@@ -193,25 +193,40 @@ public sealed class UNet
         return _addEmbedding?.Forward(backend, pooledTextEmb, sizeCondition, batch);
     }
 
-    /// <summary>Total cross-attention sub-layer count this UNet exposes — sum of the count across all down blocks, the mid block, and all up blocks (in that order). IP-Adapter checkpoints store one <c>to_k_ip</c> / <c>to_v_ip</c> pair per cross-attention sub-layer; the count must match exactly.</summary>
-    public int CrossAttentionLayerCount
+    /// <summary>Total cross-attention sub-layer count this UNet exposes — sum of the count across all down blocks, the mid block, and all up blocks. IP-Adapter checkpoints store one <c>to_k_ip</c> / <c>to_v_ip</c> pair per cross-attention sub-layer; the count must match exactly. Note the checkpoint LIST order is down → up → mid (see <c>Forward</c>).</summary>
+    public int CrossAttentionLayerCount => DownCrossAttentionLayerCount + MidCrossAttentionLayerCount + UpCrossAttentionLayerCount;
+
+    /// <summary>Cross-attention sub-layer count across the down (encoder) blocks — the first segment of the IPA checkpoint list. 24 for SDXL, 6 for SD1.5.</summary>
+    public int DownCrossAttentionLayerCount
     {
         get
         {
             int count = 0;
             for (int i = 0; i < _downBlocks.Length; i++) count += _downBlocks[i].CrossAttentionLayerCount;
-            count += _midAttention.NumTransformerBlocks;
+            return count;
+        }
+    }
+
+    /// <summary>Cross-attention sub-layer count of the mid block — the LAST segment of the IPA checkpoint list. 10 for SDXL, 1 for SD1.5.</summary>
+    public int MidCrossAttentionLayerCount => _midAttention.NumTransformerBlocks;
+
+    /// <summary>Cross-attention sub-layer count across the up (decoder) blocks — the middle segment of the IPA checkpoint list, directly after the down segment. 36 for SDXL, 9 for SD1.5.</summary>
+    public int UpCrossAttentionLayerCount
+    {
+        get
+        {
+            int count = 0;
             for (int i = 0; i < _upBlocks.Length; i++) count += _upBlocks[i].CrossAttentionLayerCount;
             return count;
         }
     }
 
     /// <summary>Forward pass with optional SDXL ADM, ControlNet residuals, and IP-Adapter image-attention injection.
-    /// <para>When IPA params are supplied, each cross-attention sub-layer in the UNet runs an additional attention pass over <paramref name="ipaImageTokens"/> using its dedicated <c>to_k_ip</c> / <c>to_v_ip</c> projection from <paramref name="ipaToKIpAll"/> / <paramref name="ipaToVIpAll"/>; results are scaled by <paramref name="ipaScale"/> and added to the text-attention output before the cross-attention's shared <c>to_out</c>. The K/V lists are flat — one entry per cross-attention sub-layer, in down→mid→up traversal order — and must have length equal to <see cref="CrossAttentionLayerCount"/>.</para></summary>
+    /// <para>When IPA params are supplied, each cross-attention sub-layer in the UNet runs an additional attention pass over <paramref name="ipaImageTokens"/> using its dedicated <c>to_k_ip</c> / <c>to_v_ip</c> projection from <paramref name="ipaToKIpAll"/> / <paramref name="ipaToVIpAll"/>; results are scaled by <paramref name="ipaScale"/> and added to the text-attention output before the cross-attention's shared <c>to_out</c>. The K/V lists are flat — one entry per cross-attention sub-layer, in the CHECKPOINT order (diffusers' <c>attn_processors</c> enumeration: down → up → mid last, NOT the down → mid → up traversal order) — and must have length equal to <see cref="CrossAttentionLayerCount"/>. This forward maps its traversal onto that order internally.</para></summary>
     /// <param name="ipaImageTokens">Image-prompt tokens <c>[B, numImageTokens, crossAttentionDim]</c> from <see cref="HartsyInference.Diffusion.Adapters.IpAdapter.ProjectImage"/>. Null = no IPA.</param>
-    /// <param name="ipaToKIpAll">Per-cross-attention-sub-layer K_ip projection weights, in UNet traversal order. Length must match <see cref="CrossAttentionLayerCount"/>.</param>
+    /// <param name="ipaToKIpAll">Per-cross-attention-sub-layer K_ip projection weights, in checkpoint order (down → up → mid). Length must match <see cref="CrossAttentionLayerCount"/>.</param>
     /// <param name="ipaToVIpAll">Same as <paramref name="ipaToKIpAll"/> but for V_ip.</param>
-    /// <param name="ipaScalePerLayer">Per-cross-attn-layer IP-Adapter scale array. Same length as <paramref name="ipaToKIpAll"/>. The pipeline computes this from the user's base scale + weight type + step-fraction gating once per step. Layers with scale 0 short-circuit the image attention entirely.</param>
+    /// <param name="ipaScalePerLayer">Per-cross-attn-layer IP-Adapter scale array, indexed in the same checkpoint order as <paramref name="ipaToKIpAll"/>. The pipeline computes this from the user's base scale + weight type + step-fraction gating once per step. Layers with scale 0 short-circuit the image attention entirely.</param>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeddings, Tensor? pooledTextEmb, ReadOnlySpan<float> sizeCondition,
         IReadOnlyList<Tensor>? controlNetDownResiduals, Tensor? controlNetMidResidual,
         Tensor? ipaImageTokens, IReadOnlyList<Tensor>? ipaToKIpAll, IReadOnlyList<Tensor>? ipaToVIpAll, IReadOnlyList<float>? ipaScalePerLayer,
@@ -273,7 +288,13 @@ public sealed class UNet
 
         // 4. Down blocks — collect all skip connections.
         //    IPA: maintain a flat offset into the per-cross-attn-layer K/V lists, advancing
-        //    by each block's cross-attn count. Order matches diffusers: down → mid → up.
+        //    by each block's cross-attn count. The checkpoint list order is diffusers'
+        //    attn_processors enumeration: down → up → MID LAST (diffusers registers the
+        //    empty up_blocks ModuleList before mid_block, so named_children puts mid after
+        //    up). Down starts at 0, the up blocks continue directly after down, and the mid
+        //    block takes the final NumTransformerBlocks entries. Verified against the
+        //    tencent-ailab checkpoints by per-layer inner dims: SDXL to_k_ip rows run
+        //    [640×4, 1280×20 | 1280×30, 640×6 | 1280×10] = down | up | mid.
         List<Tensor> allSkips = new List<Tensor> { UNetBlockHelpers.CloneOnDevice(backend, hidden) };
         int ipaOffset = 0;
         for (int i = 0; i < _downBlocks.Length; i++)
@@ -308,12 +329,15 @@ public sealed class UNet
         }
 
         // 5. Mid block — IPA injects on the single CrossAttentionBlock between the two ResNets.
+        //    Its K_ip/V_ip pairs are the LAST NumTransformerBlocks entries of the checkpoint
+        //    list (see the ordering note above); the running cursor stays at the down total
+        //    so the up blocks continue from it.
         Tensor midRes0 = _midResNet0.Forward(backend, hidden, temb);
         hidden.Dispose();
 
+        int ipaMidOffset = hasIpa ? ipaToKIpAll!.Count - _midAttention.NumTransformerBlocks : 0;
         Tensor midAttn = _midAttention.Forward(backend, midRes0, textEmbeddings,
-            ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaOffset, ipaScalePerLayer);
-        ipaOffset += _midAttention.NumTransformerBlocks;
+            ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaMidOffset, ipaScalePerLayer);
         midRes0.Dispose();
 
         Tensor midRes1 = _midResNet1.Forward(backend, midAttn, temb);

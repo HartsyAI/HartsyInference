@@ -397,7 +397,8 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             }
             ipaToKIp = kArr;
             ipaToVIp = vArr;
-            ipaBaseScalesPerLayer = IpAdapterScaleSchedule.Build(ipa.WeightType, ipa.Scale, layers);
+            ipaBaseScalesPerLayer = IpAdapterScaleSchedule.Build(ipa.WeightType, ipa.Scale, layers,
+                _unet.DownCrossAttentionLayerCount, _unet.MidCrossAttentionLayerCount);
         }
         Logs.Info("Starting SDXL denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
@@ -443,17 +444,21 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             // ControlNet (single pass per step, cond branch only — residuals shared across
             // CFG branches when CFG is on. This matches diffusers' guess_mode=True behavior;
             // running CN twice for strict cond/uncond parity is a future optimization).
-            // Skip during refiner phase (zero-conv residuals are base-UNet-shaped).
+            // Skip during refiner phase (zero-conv residuals are base-UNet-shaped). Each
+            // adapter is additionally gated by its [start, end] step-fraction window.
             Tensor[]? cnDownRes = null;
             Tensor? cnMidRes = null;
-            if (!inRefinerPhase && controlNets is not null && controlNets.Count > 0)
+            IReadOnlyList<ControlNetConditioning>? activeControlNets = inRefinerPhase
+                ? null
+                : ControlNetConditioning.FilterActive(controlNets, i, totalSteps);
+            if (activeControlNets is not null)
             {
                 int seqLenCN = (int)textEmbeddings.Shape[1];
                 int hiddenSizeCN = (int)textEmbeddings.Shape[2];
                 int pooledDimCN = (int)pooledOutput.Shape[1];
                 Tensor condEmbForCN = CfgHelper.SliceBatchElement(textEmbeddings, 1, seqLenCN, hiddenSizeCN);
                 Tensor condPooledForCN = CfgHelper.SliceBatchElement1D(pooledOutput, 1, pooledDimCN);
-                (cnDownRes, cnMidRes) = RunControlNets(controlNets, unetInput, t, condEmbForCN, condPooledForCN, sizeCondition);
+                (cnDownRes, cnMidRes) = ControlNet.ForwardStacked(Backend, activeControlNets, unetInput, t, condEmbForCN, condPooledForCN, sizeCondition);
                 condEmbForCN.Dispose();
                 condPooledForCN.Dispose();
             }
@@ -733,46 +738,6 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         uncondF32.Dispose();
         condF32.Dispose();
         return output;
-    }
-
-    /// <summary>Runs every supplied ControlNet at the current step and sums their residuals into a single set. Each ControlNet sees the same latent + timestep + cond text embedding and produces its own per-skip residual stack and mid residual; this helper collapses them by element-wise addition so the UNet path doesn't need to know how many ControlNets are stacked.</summary>
-    private (Tensor[] downResiduals, Tensor midResidual) RunControlNets(
-        IReadOnlyList<ControlNetConditioning> controlNets,
-        Tensor latent,
-        float timestep,
-        Tensor condTextEmb,
-        Tensor condPooled,
-        ReadOnlySpan<float> sizeCondition)
-    {
-        ControlNetConditioning first = controlNets[0];
-        (Tensor[] down, Tensor mid) = first.Adapter.Forward(Backend, latent, first.ConditionImage, timestep, condTextEmb, condPooled, sizeCondition, first.Scale);
-        for (int c = 1; c < controlNets.Count; c++)
-        {
-            ControlNetConditioning next = controlNets[c];
-            (Tensor[] downNext, Tensor midNext) = next.Adapter.Forward(Backend, latent, next.ConditionImage, timestep, condTextEmb, condPooled, sizeCondition, next.Scale);
-            if (downNext.Length != down.Length)
-            {
-                foreach (Tensor d in downNext) d.Dispose();
-                midNext.Dispose();
-                throw new InvalidOperationException(
-                    $"Stacked ControlNet residual count mismatch: {down.Length} vs {downNext.Length}. " +
-                    "All stacked ControlNets must target the same base UNet config.");
-            }
-            for (int i = 0; i < down.Length; i++)
-            {
-                Tensor sum = new Tensor(down[i].Shape, down[i].DType);
-                Backend.Add(sum, down[i], downNext[i]);
-                down[i].Dispose();
-                downNext[i].Dispose();
-                down[i] = sum;
-            }
-            Tensor sumMid = new Tensor(mid.Shape, mid.DType);
-            Backend.Add(sumMid, mid, midNext);
-            mid.Dispose();
-            midNext.Dispose();
-            mid = sumMid;
-        }
-        return (down, mid);
     }
 
     /// <summary>Gets GPU cache stats string if the backend supports it.</summary>

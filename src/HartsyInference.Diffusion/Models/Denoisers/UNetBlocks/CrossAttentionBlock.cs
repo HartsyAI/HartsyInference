@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
@@ -187,7 +188,7 @@ public sealed class CrossAttentionBlock
 }
 
 /// <summary>Attention sub-block: LayerNorm → MultiHeadAttention → Residual. Used for both self-attention and cross-attention.</summary>
-internal sealed unsafe class TransformerSubBlock
+internal sealed class TransformerSubBlock
 {
     private readonly int _channels;
     private readonly int _numHeads;
@@ -349,6 +350,15 @@ internal sealed unsafe class TransformerSubBlock
         // the text attention before to_out, scaled by ipaScale (the user's "IP-Adapter strength").
         if (hasIpa)
         {
+            // Fail fast on a K_ip/V_ip row-count mismatch: a wrong-layer weight (e.g. a
+            // misordered checkpoint list) would otherwise under-fill or overrun the GEMM
+            // output buffer — silent NaN / memory corruption instead of an error.
+            if ((int)toKIp!.Shape[0] != _channels || (int)toVIp!.Shape[0] != _channels)
+            {
+                throw new HartsyInferenceException(
+                    $"IP-Adapter K_ip/V_ip weight rows ({toKIp!.Shape[0]}/{toVIp!.Shape[0]}) don't match this cross-attention layer's inner dim ({_channels}). " +
+                    "The per-layer K/V list is misordered or from a different UNet config (expected diffusers attn_processors order: down → up → mid).");
+            }
             int imgSeqLen = (int)ipaImageTokens!.Shape[1];
             // Project to_k_ip and to_v_ip — shape [_channels, contextDim], no bias.
             Tensor ipKeyFlat = new Tensor(new TensorShape(batch, imgSeqLen, _channels), dtype);
@@ -372,9 +382,17 @@ internal sealed unsafe class TransformerSubBlock
             ipKeyMh.Dispose();
             ipValueMh.Dispose();
 
-            // attnOut += ipaScale * imgAttnOut
-            AccumulateScaled(attnOut, imgAttnOut, ipaScale);
+            // attnOut = attnOut + ipaScale * imgAttnOut, entirely on-device (a host
+            // DataPointer accumulate here would drain the stream twice per layer per branch
+            // and re-upload the attention output — the classic mid-forward host-glue trap).
+            Tensor imgScaled = new Tensor(qMhShape, dtype);
+            backend.Scale(imgScaled, imgAttnOut, ipaScale);
             imgAttnOut.Dispose();
+            Tensor combined = new Tensor(qMhShape, dtype);
+            backend.Add(combined, attnOut, imgScaled);
+            imgScaled.Dispose();
+            attnOut.Dispose();
+            attnOut = combined;
         }
         queryMh.Dispose();
 
@@ -394,35 +412,6 @@ internal sealed unsafe class TransformerSubBlock
         projected.Dispose();
 
         return output;
-    }
-
-    /// <summary>In-place accumulate: <c>target += scale * addend</c>. Both tensors must have identical shapes and dtypes. Used by IPA to fold image-attention output into the text-attention output before the shared <c>to_out</c> projection. Handled in F32 / F16 directly to avoid an extra backend op for what amounts to a fused-multiply-add over the attention output buffer.</summary>
-    private static void AccumulateScaled(Tensor target, Tensor addend, float scale)
-    {
-        long count = target.ElementCount;
-        if (target.DType == DType.F32)
-        {
-            float* tp = (float*)target.DataPointer;
-            float* ap = (float*)addend.DataPointer;
-            for (long i = 0; i < count; i++) tp[i] += scale * ap[i];
-        }
-        else if (target.DType == DType.F16)
-        {
-            // F16 stored as ushort half-precision; round-trip through F32 for the accumulate
-            // to avoid catastrophic precision loss on small contributions.
-            ushort* tp = (ushort*)target.DataPointer;
-            ushort* ap = (ushort*)addend.DataPointer;
-            for (long i = 0; i < count; i++)
-            {
-                float t = (float)BitConverter.UInt16BitsToHalf(tp[i]);
-                float a = (float)BitConverter.UInt16BitsToHalf(ap[i]);
-                tp[i] = BitConverter.HalfToUInt16Bits((Half)(t + scale * a));
-            }
-        }
-        else
-        {
-            throw new NotSupportedException($"AccumulateScaled doesn't support dtype {target.DType}.");
-        }
     }
 
 }

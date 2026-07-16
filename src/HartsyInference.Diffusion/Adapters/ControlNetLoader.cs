@@ -1,11 +1,12 @@
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelHandler.CheckpointConverters;
 using HartsyInference.ModelHandler.SafeTensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>Opens a ControlNet safetensors file, detects the base model architecture from key signatures and tensor shapes, and returns the parsed weight dictionary plus an auto-derived config. The actual <see cref="ControlNet.LoadWeights"/> step is the consumer's responsibility once that path is implemented; this loader handles file parsing and detection only.</summary>
+/// <summary>Opens a ControlNet safetensors file, detects the base model architecture from key signatures and tensor shapes, and returns the parsed weight dictionary plus an auto-derived config. Accepts both diffusers-layout files and LDM-layout checkpoints (<c>control_model.*</c> keys — the original lllyasviel releases and fp16 repacks), converting the latter to diffusers keys via <see cref="ControlNetCheckpointConverter"/> so <see cref="ControlNet.LoadWeights"/> can consume <see cref="ControlNetFile.Weights"/> directly.</summary>
 public static class ControlNetLoader
 {
     /// <summary>Loads a ControlNet safetensors file with auto-detection. Throws <see cref="HartsyInferenceException"/> if the base model cannot be inferred.</summary>
@@ -16,7 +17,10 @@ public static class ControlNetLoader
         {
             loader.Load(filePath);
 
-            ControlNetBaseModel baseModel = DetectBaseModel(loader.Descriptors);
+            bool isLdmLayout = ControlNetCheckpointConverter.IsLdmLayout(loader.Descriptors.Keys);
+            ControlNetBaseModel baseModel = isLdmLayout
+                ? DetectBaseModelLdm(loader.Descriptors)
+                : DetectBaseModel(loader.Descriptors);
             ControlNetMode mode = modeOverride ?? DetectMode(filePath);
             ControlNetConfig config = baseModel switch
             {
@@ -33,8 +37,10 @@ public static class ControlNetLoader
             };
 
             Dictionary<string, Tensor> weights = loader.GetAllTensors();
+            if (isLdmLayout)
+                weights = ControlNetCheckpointConverter.Convert(weights, isSdxl: baseModel == ControlNetBaseModel.Sdxl);
 
-            Logs.Info($"Loaded ControlNet '{Path.GetFileName(filePath)}' (base={baseModel}, mode={mode}, tensors={weights.Count}).");
+            Logs.Info($"Loaded ControlNet '{Path.GetFileName(filePath)}' (base={baseModel}, mode={mode}, layout={(isLdmLayout ? "ldm→diffusers" : "diffusers")}, tensors={weights.Count}).");
 
             ControlNetFile file = new()
             {
@@ -52,6 +58,35 @@ public static class ControlNetLoader
             loader.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Base-model detection for LDM-layout checkpoints (before key conversion): SDXL carries <c>label_emb</c> (ADM conditioning); otherwise the cross-attention context width in any <c>attn2.to_k.weight</c> discriminates (768 = SD1.5, 2048 = SDXL, 1024 = SD2.x which is unsupported).</summary>
+    private static ControlNetBaseModel DetectBaseModelLdm(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors)
+    {
+        foreach (KeyValuePair<string, SafeTensorDescriptor> kvp in descriptors)
+        {
+            string ldmKey = ControlNetCheckpointConverter.StripPrefix(kvp.Key);
+            if (ldmKey.StartsWith("label_emb.", StringComparison.Ordinal))
+                return ControlNetBaseModel.Sdxl;
+        }
+
+        foreach (KeyValuePair<string, SafeTensorDescriptor> kvp in descriptors)
+        {
+            if (!kvp.Key.EndsWith("attn2.to_k.weight", StringComparison.Ordinal) || kvp.Value.Shape.Rank != 2)
+                continue;
+            long contextDim = kvp.Value.Shape[1];
+            return contextDim switch
+            {
+                768 => ControlNetBaseModel.Sd15,
+                2048 => ControlNetBaseModel.Sdxl,
+                _ => throw new HartsyInferenceException(
+                    $"Unsupported LDM ControlNet cross-attention context dim {contextDim} (key '{kvp.Key}'). " +
+                    "Only SD1.5 (768) and SDXL (2048) ControlNets are supported."),
+            };
+        }
+
+        // Minimal/truncated checkpoints without attention keys: SD1.5 is the only family shipped this way.
+        return ControlNetBaseModel.Sd15;
     }
 
     private static ControlNetBaseModel DetectBaseModel(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors)

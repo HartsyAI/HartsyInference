@@ -159,6 +159,67 @@ public sealed class FusedGemvGroundTruthTests
         }
     }
 
+    /// <summary>Regression for the Krea2 fp8_scaled black-frame bug: checkpoints that keep small linears in
+    /// 16-bit float ship the BIAS in the same dtype (Krea2's BF16 time-embed MLP), and the fused GEMV kernels
+    /// take an F32 bias pointer — the dispatch must transiently cast a non-F32 bias, not pass it raw (which
+    /// reinterprets two 16-bit halves as one float and explodes the output).</summary>
+    [Theory]
+    [InlineData("BF16", 256, 96)]
+    [InlineData("F16", 512, 64)]
+    public unsafe void FusedGemv_Float16_With16BitBias_MatchesRoundedReference(string dtypeName, int inDim, int outDim)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        DType dt = dtypeName == "BF16" ? DType.BF16 : DType.F16;
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+
+        const int batch = 1;
+        using CudaBackend backend = new(0, ptxDir);
+        Tensor input = new(new TensorShape(batch, inDim), DType.F32);
+        Tensor weightF32 = new(new TensorShape(outDim, inDim), DType.F32);
+        Tensor biasF32 = new(new TensorShape(outDim), DType.F32);
+        Tensor outGpu = new(new TensorShape(batch, outDim), DType.F32);
+        try
+        {
+            Random rng = new(13);
+            float* ip = (float*)input.DataPointer;
+            for (long i = 0; i < (long)batch * inDim; i++) ip[i] = (float)((rng.NextDouble() * 2.0 - 1.0) * 0.5);
+            float* wp = (float*)weightF32.DataPointer;
+            for (long i = 0; i < (long)outDim * inDim; i++) wp[i] = (float)((rng.NextDouble() * 2.0 - 1.0) * 0.3);
+            float* bp = (float*)biasF32.DataPointer;
+            for (int i = 0; i < outDim; i++) bp[i] = (float)((rng.NextDouble() * 2.0 - 1.0) * 0.8);
+
+            using Tensor weight16 = weightF32.CastTo(dt);
+            using Tensor weightRounded = weight16.CastTo(DType.F32);
+            using Tensor bias16 = biasF32.CastTo(dt);
+            using Tensor biasRounded = bias16.CastTo(DType.F32);
+
+            backend.Linear(outGpu, input, weight16, bias16);
+            backend.Sync();
+
+            float* rw = (float*)weightRounded.DataPointer;
+            float* rb = (float*)biasRounded.DataPointer;
+            float* gpuOut = (float*)outGpu.DataPointer;
+            double sumAbs = 0.0; float maxAbs = 0f;
+            for (int n = 0; n < outDim; n++)
+            {
+                float acc = rb[n];
+                float* wrow = rw + (long)n * inDim;
+                for (int k = 0; k < inDim; k++) acc += ip[k] * wrow[k];
+                float err = MathF.Abs(acc - gpuOut[n]);
+                sumAbs += err; if (err > maxAbs) maxAbs = err;
+            }
+            float avgErr = (float)(sumAbs / outDim);
+            _output.WriteLine($"{dtypeName}+bias K={inDim} N={outDim}: avg_err={avgErr:E3} max_err={maxAbs:E3}");
+            Assert.True(avgErr < 1e-4f, $"{dtypeName} fused GEMV with 16-bit bias avg_err {avgErr:E3} exceeds tolerance; max_err={maxAbs:E3}");
+        }
+        finally
+        {
+            input.Dispose(); weightF32.Dispose(); biasF32.Dispose(); outGpu.Dispose();
+        }
+    }
+
     private static unsafe void FillQ4_0Random(Tensor t, int blocks, Random rng)
     {
         byte* p = (byte*)t.DataPointer;
