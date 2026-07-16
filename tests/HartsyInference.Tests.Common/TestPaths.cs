@@ -388,6 +388,15 @@ public static class TestPaths
         public static string Qwen3Config   => Resolve("QWEN3_CONFIG_PATH",    Path.Combine(Qwen3Dir, "config.json"));
     }
 
+    /// <summary>IP-Adapter checkpoints + the CLIP-Vision-H image encoder they were trained against. Assets are not bundled — tests skip when missing.</summary>
+    public static class IpAdapter
+    {
+        public static string SdxlStandard => Resolve("IPA_SDXL_PATH",       Path.Combine(ModelsDir, "ipadapter", "ip-adapter_sdxl_vit-h.safetensors"));
+        public static string SdxlPlus     => Resolve("IPA_SDXL_PLUS_PATH",  Path.Combine(ModelsDir, "ipadapter", "ip-adapter-plus_sdxl_vit-h.safetensors"));
+        public static string Sd15Standard => Resolve("IPA_SD15_PATH",       Path.Combine(ModelsDir, "ipadapter", "ip-adapter_sd15.safetensors"));
+        public static string ClipVisionH  => Resolve("CLIP_VISION_H_PATH",  Path.Combine(ModelsDir, "clip_vision", "clip-vision-h-14.safetensors"));
+    }
+
     /// <summary>Resolves a cross-runtime reference image path inside OutputDir/References.</summary>
     public static string ReferenceImage(string envVar, string fileName) =>
         Resolve(envVar, Path.Combine(OutputDir, "References", fileName));
