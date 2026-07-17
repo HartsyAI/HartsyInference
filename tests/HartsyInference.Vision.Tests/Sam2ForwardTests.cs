@@ -41,7 +41,7 @@ public sealed class Sam2ForwardTests
         encoder.LoadWeights(BuildEncoderWeights(cfg, seed: 11), string.Empty);
 
         Tensor image = Fill([1, 3, cfg.ImageSize, cfg.ImageSize], seed: 99);
-        Tensor embedding = encoder.Forward(backend, image);
+        Tensor embedding = encoder.Forward(backend, image).VisionFeatures;
 
         int expected = cfg.ImageSize / encoder.FeatureStride; // 256 / 16 = 16
         Assert.Equal(4, embedding.Shape.Rank);
@@ -139,7 +139,8 @@ public sealed class Sam2ForwardTests
         }
 
         using IBackend backend = new CpuBackend();
-        Sam2Config cfg = Sam2Config.HieraBasePlus;
+        // Canonical env-gated checkpoint is sam2.1-hiera-tiny (see Sam2RealWeightParityTests for numeric parity).
+        Sam2Config cfg = Sam2Config.HieraTiny;
         using SamPipeline pipeline = SamPipeline.Load(backend, cfg, path);
 
         Tensor image = Fill([1, 3, cfg.ImageSize, cfg.ImageSize], seed: 1);
@@ -239,10 +240,10 @@ public sealed class Sam2ForwardTests
                 w[$"{p}norm{nrm}.weight"] = Fill([dim], s++);
                 w[$"{p}norm{nrm}.bias"] = Fill([dim], s++);
             }
-            w[$"{p}mlp.lin1.weight"] = Fill([mlpHidden, dim], s++);
-            w[$"{p}mlp.lin1.bias"] = Fill([mlpHidden], s++);
-            w[$"{p}mlp.lin2.weight"] = Fill([dim, mlpHidden], s++);
-            w[$"{p}mlp.lin2.bias"] = Fill([dim], s++);
+            w[$"{p}mlp.layers.0.weight"] = Fill([mlpHidden, dim], s++);
+            w[$"{p}mlp.layers.0.bias"] = Fill([mlpHidden], s++);
+            w[$"{p}mlp.layers.1.weight"] = Fill([dim, mlpHidden], s++);
+            w[$"{p}mlp.layers.1.bias"] = Fill([dim], s++);
         }
 
         AddAttn(w, "transformer.final_attn_token_to_image.", dim, crossInternal, ref s);

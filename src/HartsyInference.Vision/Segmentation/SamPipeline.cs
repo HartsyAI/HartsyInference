@@ -88,7 +88,8 @@ public sealed unsafe class SamPipeline : IVisionPipeline
             points[i] = Require(weights, $"point_embeddings.{i}.weight");
         }
         Tensor notAPoint = Require(weights, "not_a_point_embed.weight");
-        return new SamPromptEncoder(pe, points, notAPoint);
+        weights.TryGetValue("no_mask_embed.weight", out Tensor? noMask);
+        return new SamPromptEncoder(pe, points, notAPoint, noMask);
     }
 
     /// <summary>Segments <paramref name="image"/> (<c>[1,3,H,W]</c>, model-resolution) for <paramref name="prompt"/>.
@@ -99,15 +100,18 @@ public sealed unsafe class SamPipeline : IVisionPipeline
         ArgumentNullException.ThrowIfNull(image);
         try
         {
-            Tensor embedding = _encoder.Forward(_backend, image); // [1, dim, Hf, Wf]
+            SamImageFeatures features = _encoder.Forward(_backend, image);
+            Tensor embedding = features.VisionFeatures; // [1, dim, Hf, Wf]
             int hf = (int)embedding.Shape[2];
             int wf = (int)embedding.Shape[3];
 
             Tensor densePe = _promptEncoder.BuildDensePositionalEncoding(hf, wf);
             Tensor sparse = _promptEncoder.EncodeSparse(prompt, imageW, imageH);
+            Tensor? dense = _promptEncoder.BuildNoMaskDenseEmbedding(hf, wf);
 
             (Tensor maskLogits, Tensor iouScores) = _maskDecoder.Forward(
-                _backend, embedding, densePe, sparse, denseEmbeddings: null, multimaskOutput: true);
+                _backend, embedding, densePe, sparse, dense, multimaskOutput: true,
+                features.HighResStride4, features.HighResStride8);
 
             return BuildResults(maskLogits, iouScores, imageW, imageH);
         }

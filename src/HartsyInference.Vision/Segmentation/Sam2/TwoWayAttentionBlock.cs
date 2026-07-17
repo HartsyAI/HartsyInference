@@ -49,11 +49,12 @@ public sealed class TwoWayAttentionBlock
         _norm3B = F32(weights, $"{prefix}norm3.bias");
         _norm4W = F32(weights, $"{prefix}norm4.weight");
         _norm4B = F32(weights, $"{prefix}norm4.bias");
-        // SAM names the token MLP's two linears lin1/lin2 (MLPBlock), distinct from the layers.N heads.
-        _mlpLin1W = F32(weights, $"{prefix}mlp.lin1.weight");
-        _mlpLin1B = F32(weights, $"{prefix}mlp.lin1.bias");
-        _mlpLin2W = F32(weights, $"{prefix}mlp.lin2.weight");
-        _mlpLin2B = F32(weights, $"{prefix}mlp.lin2.bias");
+        // SAM 2's two-way transformer MLP is the generic MLP module keyed mlp.layers.0 / mlp.layers.1
+        // (SAM v1's MLPBlock used lin1/lin2 — the real sam2 checkpoint uses layers.N).
+        _mlpLin1W = F32(weights, $"{prefix}mlp.layers.0.weight");
+        _mlpLin1B = F32(weights, $"{prefix}mlp.layers.0.bias");
+        _mlpLin2W = F32(weights, $"{prefix}mlp.layers.1.weight");
+        _mlpLin2B = F32(weights, $"{prefix}mlp.layers.1.bias");
     }
 
     /// <summary>Yields every loaded weight tensor.</summary>

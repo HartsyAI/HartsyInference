@@ -12,11 +12,11 @@ namespace HartsyInference.Vision.Segmentation.Sam2;
 ///
 /// <para><b>Parity note:</b> key names follow the Meta <c>sam2</c> checkpoint layout
 /// (<c>trunk.patch_embed.proj.*</c>, <c>trunk.blocks.{i}.{norm1,attn.qkv,attn.proj,norm2,mlp.layers.0,mlp.layers.1}</c>,
-/// <c>trunk.pos_embed[_window]</c>, <c>neck.convs.{j}.conv.*</c>). Two simplifications vs. the reference
-/// are documented inline and are correctness-unverified against real weights: (1) the per-block
-/// <c>global_att_blocks</c> override is not modeled — window size comes purely from the per-stage
-/// <see cref="Sam2Config.EncoderWindowSizes"/>; (2) positional-embed interpolation uses bilinear where the
-/// reference uses bicubic.</para></summary>
+/// <c>trunk.pos_embed[_window]</c>, <c>neck.convs.{j}.conv.*</c>). Verified against real
+/// <c>sam2_hiera_tiny</c> weights: the per-block <c>global_att_blocks</c> override (window 0),
+/// bicubic background-pos-embed interpolation, and the FPN neck's <c>fpn_top_down_levels=[2,3]</c> +
+/// nearest-neighbour top-down fusion are all modeled. The neck returns the stride-16 embedding plus the
+/// stride-4/stride-8 levels the mask decoder's high-res feature path consumes.</para></summary>
 public sealed unsafe class HieraImageEncoder : ISamImageEncoder
 {
     private const float LnEps = 1e-6f;
@@ -69,6 +69,7 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
 
         // First block of stages 1..3 pools the query (q_stride = 2) — matches Hiera q_pool = 3.
         HashSet<int> qPoolBlocks = new() { _stageEnds[0] + 1, _stageEnds[1] + 1, _stageEnds[2] + 1 };
+        HashSet<int> globalAttBlocks = new(config.EncoderGlobalAttentionBlocks ?? []);
 
         _blocks = new HieraBlock[depth];
         int curStage = 1;
@@ -77,8 +78,9 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
         for (int i = 0; i < depth; i++)
         {
             int dimOut = dim;
-            // Window size uses the stage index BEFORE a stage transition increments it (Hiera ordering).
-            int window = config.EncoderWindowSizes[curStage - 1];
+            // Window size uses the stage index BEFORE a stage transition increments it (Hiera ordering);
+            // global_att_blocks force full (window 0) attention regardless of the stage window.
+            int window = globalAttBlocks.Contains(i) ? 0 : config.EncoderWindowSizes[curStage - 1];
             if (i - 1 >= 0 && Array.IndexOf(_stageEnds, i - 1) >= 0)
             {
                 dimOut = dim * 2;
@@ -134,7 +136,7 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
     }
 
     /// <inheritdoc/>
-    public Tensor Forward(IBackend backend, Tensor pixelValues)
+    public SamImageFeatures Forward(IBackend backend, Tensor pixelValues)
     {
         ArgumentNullException.ThrowIfNull(backend);
         if (pixelValues.Shape.Rank != 4 || pixelValues.Shape[0] != 1 || pixelValues.Shape[1] != 3)
@@ -175,10 +177,12 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
         return NeckForward(backend, stageFeats, stageH, stageW);
     }
 
-    /// <summary>FPN neck: 1×1 lateral convs to <see cref="_promptDim"/> channels, then top-down fusion
-    /// (upsample the coarser level, add). Returns the stride-16 level (stage index 2), which is the SAM 2
-    /// image embedding.</summary>
-    private Tensor NeckForward(IBackend backend, Tensor[] stageFeats, int[] stageH, int[] stageW)
+    /// <summary>FPN neck (Meta <c>FpnNeck</c>): 1×1 lateral convs to <see cref="_promptDim"/> channels, then a
+    /// top-down fusion that — matching <c>fpn_top_down_levels=[2,3]</c> — only adds the nearest-neighbour
+    /// upsampled coarser level at stage 2. Stages 0/1 stay as their raw lateral projections. Returns the
+    /// stride-16 embedding (stage 2) plus the stride-4 (stage 0) and stride-8 (stage 1) levels for the mask
+    /// decoder's high-res feature path.</summary>
+    private SamImageFeatures NeckForward(IBackend backend, Tensor[] stageFeats, int[] stageH, int[] stageW)
     {
         Tensor[] lateral = new Tensor[4];
         for (int s = 0; s < 4; s++)
@@ -187,20 +191,19 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
             backend.Conv2D(lateral[s], stageFeats[s], _neckConvW[s]!, _neckConvB[s]!, 1, 1, 0, 0);
         }
 
-        Tensor prev = lateral[3];
-        Tensor[] fused = new Tensor[4];
-        fused[3] = prev;
-        for (int s = 2; s >= 0; s--)
-        {
-            Tensor up = new Tensor(new TensorShape(1, _promptDim, stageH[s], stageW[s]), DType.F32);
-            backend.InterpolateBilinear2D(up, prev, alignCorners: false);
-            Tensor sum = new Tensor(up.Shape, DType.F32);
-            backend.Add(sum, lateral[s], up);
-            prev = sum;
-            fused[s] = sum;
-        }
+        // Only stage 2 receives the top-down contribution (fpn_top_down_levels=[2,3]); stage 3 is its own
+        // lateral, stages 0/1 pass through un-fused. Top-down interpolation is nearest-neighbour (×2).
+        Tensor up = new Tensor(new TensorShape(1, _promptDim, stageH[2], stageW[2]), DType.F32);
+        backend.UpsampleNearest2D(up, lateral[3], stageH[2] / stageH[3], stageW[2] / stageW[3]);
+        Tensor stride16 = new Tensor(up.Shape, DType.F32);
+        backend.Add(stride16, lateral[2], up);
 
-        return fused[2];
+        return new SamImageFeatures
+        {
+            VisionFeatures = stride16,
+            HighResStride4 = lateral[0],
+            HighResStride8 = lateral[1],
+        };
     }
 
     /// <summary>Interpolates the background pos-embed to the token grid, adds the tiled window pos-embed, and
@@ -210,8 +213,7 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
         if (_posEmbed is null || _posEmbedWindow is null)
             return tokens;
 
-        Tensor interp = new Tensor(new TensorShape(1, _embedDim, hp, wp), DType.F32);
-        backend.InterpolateBilinear2D(interp, _posEmbed, alignCorners: false);
+        Tensor interp = BicubicInterp(_posEmbed, _embedDim, hp, wp);
 
         Tensor tiled = TileWindow(_posEmbedWindow, _embedDim, hp, wp);
 
@@ -222,6 +224,62 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
         Tensor outT = new Tensor(tokens.Shape, DType.F32);
         backend.Add(outT, tokens, gridNhwc);
         return outT;
+    }
+
+    /// <summary>Bicubic upsample of a <c>[1,C,inH,inW]</c> grid to <c>[1,C,outH,outW]</c>, matching PyTorch
+    /// <c>F.interpolate(mode="bicubic", align_corners=False)</c> (cubic convolution, a=-0.75, edge-clamped).
+    /// Host math on a loaded weight, run once per forward on the small background pos-embed.</summary>
+    private static Tensor BicubicInterp(Tensor input, int c, int outH, int outW)
+    {
+        int inH = (int)input.Shape[2];
+        int inW = (int)input.Shape[3];
+        Tensor outT = new Tensor(new TensorShape(1, c, outH, outW), DType.F32);
+        float* src = (float*)input.DataPointer;
+        float* dst = (float*)outT.DataPointer;
+        float scaleH = (float)inH / outH;
+        float scaleW = (float)inW / outW;
+        Span<float> wx = stackalloc float[4];
+        Span<float> wy = stackalloc float[4];
+        for (int oy = 0; oy < outH; oy++)
+        {
+            float sy = (oy + 0.5f) * scaleH - 0.5f;
+            int fy = (int)MathF.Floor(sy);
+            CubicWeights(sy - fy, wy);
+            for (int ox = 0; ox < outW; ox++)
+            {
+                float sx = (ox + 0.5f) * scaleW - 0.5f;
+                int fx = (int)MathF.Floor(sx);
+                CubicWeights(sx - fx, wx);
+                for (int ch = 0; ch < c; ch++)
+                {
+                    float acc = 0f;
+                    for (int ky = 0; ky < 4; ky++)
+                    {
+                        int iy = Math.Clamp(fy - 1 + ky, 0, inH - 1);
+                        float row = 0f;
+                        for (int kx = 0; kx < 4; kx++)
+                        {
+                            int ix = Math.Clamp(fx - 1 + kx, 0, inW - 1);
+                            row += wx[kx] * src[((long)ch * inH + iy) * inW + ix];
+                        }
+                        acc += wy[ky] * row;
+                    }
+                    dst[((long)ch * outH + oy) * outW + ox] = acc;
+                }
+            }
+        }
+        return outT;
+    }
+
+    /// <summary>Four cubic-convolution taps (a=-0.75) for a fractional offset <paramref name="t"/> in [0,1).</summary>
+    private static void CubicWeights(float t, Span<float> w)
+    {
+        const float A = -0.75f;
+        float t1 = t + 1f, t2 = t, t3 = 1f - t, t4 = 2f - t;
+        w[0] = ((A * t1 - 5f * A) * t1 + 8f * A) * t1 - 4f * A;
+        w[1] = ((A + 2f) * t2 - (A + 3f)) * t2 * t2 + 1f;
+        w[2] = ((A + 2f) * t3 - (A + 3f)) * t3 * t3 + 1f;
+        w[3] = ((A * t4 - 5f * A) * t4 + 8f * A) * t4 - 4f * A;
     }
 
     /// <summary>Tiles a <c>[1,C,wh,ww]</c> window pos-embed over a <c>[1,C,H,W]</c> grid by wrapping indices —

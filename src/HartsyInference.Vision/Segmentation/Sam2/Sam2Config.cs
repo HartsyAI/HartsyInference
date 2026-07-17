@@ -20,6 +20,13 @@ public sealed record Sam2Config
     /// <summary>Window sizes per stage for windowed attention (0 = global).</summary>
     public int[] EncoderWindowSizes { get; init; } = [8, 4, 14, 7];
 
+    /// <summary>Absolute block indices that use global (non-windowed) attention, overriding the per-stage
+    /// window size — Hiera's <c>global_att_blocks</c>. Defaults match <c>sam2.1_hiera_base_plus</c>.</summary>
+    public int[] EncoderGlobalAttentionBlocks { get; init; } = [12, 16, 20];
+
+    /// <summary>Whether the IoU-prediction head applies a sigmoid to its logits (SAM 2.1 = true).</summary>
+    public bool IouPredictionUseSigmoid { get; init; } = true;
+
     /// <summary>Channel dim shared by the prompt encoder, mask decoder, and image-feature projection.</summary>
     public int PromptEmbedDim { get; init; } = 256;
 
@@ -42,6 +49,7 @@ public sealed record Sam2Config
         EncoderStageDepths = [1, 2, 7, 2],
         EncoderNumHeads = 1,
         EncoderWindowSizes = [8, 4, 14, 7],
+        EncoderGlobalAttentionBlocks = [5, 7, 9],
     };
 
     /// <summary>sam2.1 hiera small.</summary>
@@ -51,6 +59,7 @@ public sealed record Sam2Config
         EncoderStageDepths = [1, 2, 11, 2],
         EncoderNumHeads = 1,
         EncoderWindowSizes = [8, 4, 14, 7],
+        EncoderGlobalAttentionBlocks = [7, 10, 13],
     };
 
     /// <summary>sam2.1 hiera base+ (default).</summary>
@@ -63,5 +72,6 @@ public sealed record Sam2Config
         EncoderStageDepths = [2, 6, 36, 4],
         EncoderNumHeads = 2,
         EncoderWindowSizes = [8, 4, 16, 8],
+        EncoderGlobalAttentionBlocks = [23, 33, 43],
     };
 }
