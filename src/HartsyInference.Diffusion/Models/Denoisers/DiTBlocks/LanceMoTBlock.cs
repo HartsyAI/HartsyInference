@@ -98,128 +98,197 @@ public sealed unsafe class LanceMoTBlock
                 foreach (Tensor t in n.EnumerateWeights()) yield return t;
     }
 
-    /// <summary>Forward over a packed <c>[seq, hidden]</c> sequence. <paramref name="undIdx"/> / <paramref name="genIdx"/> partition the rows by modality role; <paramref name="cos"/>/<paramref name="sin"/> are <c>[seq, headDim]</c>; <paramref name="mask"/> is an optional additive attention mask <c>[1,1,seq,seq]</c> (null = full attention).</summary>
-    public Tensor Forward(IBackend backend, Tensor x, Tensor cos, Tensor sin, Multimodal3DRope rope,
-        int[] undIdx, int[] genIdx, Tensor? mask)
+    /// <summary>Forward over a packed <c>[seq, hidden]</c> sequence laid out as three contiguous role segments:
+    /// und rows <c>[0, nPre)</c>, gen rows <c>[nPre, nPre+nGen)</c>, und rows <c>[nPre+nGen, seq)</c> (the layout
+    /// <c>LancePipelineCommon.BuildGenSequence</c> always produces — <see cref="Denoisers.LanceTransformer"/>
+    /// validates it). <paramref name="cos"/>/<paramref name="sin"/> are <c>[1, seq, headDim]</c>;
+    /// <paramref name="mask"/> is an optional additive attention mask <c>[1,1,seq,seq]</c> (null = full attention).</summary>
+    // GPU-residency rewrite: the old path routed roles via host gather/scatter memcpys (DataPointer reads), plus
+    // host RoPE / head permutes / GQA expand / residual adds — every one a full-stream D2H drain, many times per
+    // block × 36 blocks × CFG, which was the ~12 s/step cost. Contiguous role segments make routing a pair of
+    // device SliceRows/Concat ops; RoPE is the ApplyRopeSingle rotate-half kernel (per-tensor, so GQA's 16:2 head
+    // mismatch is fine); permutes are Permute0213; the GQA expand is RepeatKvHeads.
+    public Tensor Forward(IBackend backend, Tensor x, Tensor cos, Tensor sin, int nPre, int nGen, Tensor? mask)
     {
         int seq = (int)x.Shape[0];
 
-        // ── input norm (role-routed) ──
-        Tensor normed = RoleNorm(backend, x, undIdx, genIdx, _inNorm!, _inNormg!, seq);
-        // ── attention (role-routed QKV/O, joint GQA SDPA) ──
-        Tensor attn = Attention(backend, normed, cos, sin, rope, undIdx, genIdx, mask, seq);
+        Tensor normed = RoleNorm(backend, x, nPre, nGen, _inNorm!, _inNormg!, seq);
+        Tensor attn = Attention(backend, normed, cos, sin, nPre, nGen, mask, seq);
         normed.Dispose();
-        Tensor afterAttn = AddRows(x, attn, seq);
+        Tensor afterAttn = new Tensor(x.Shape, DType.F32);
+        backend.Add(afterAttn, x, attn);
         attn.Dispose();
 
-        // ── post-attn norm + SwiGLU MLP (role-routed) ──
-        Tensor normed2 = RoleNorm(backend, afterAttn, undIdx, genIdx, _postNorm!, _postNormg!, seq);
-        Tensor mlp = RoleMlp(backend, normed2, undIdx, genIdx, seq);
+        Tensor normed2 = RoleNorm(backend, afterAttn, nPre, nGen, _postNorm!, _postNormg!, seq);
+        Tensor mlp = RoleMlp(backend, normed2, nPre, nGen, seq);
         normed2.Dispose();
-        Tensor result = AddRows(afterAttn, mlp, seq);
+        Tensor result = new Tensor(x.Shape, DType.F32);
+        backend.Add(result, afterAttn, mlp);
         afterAttn.Dispose();
         mlp.Dispose();
         return result;
     }
 
-    private Tensor Attention(IBackend backend, Tensor normed, Tensor cos, Tensor sin, Multimodal3DRope rope,
-        int[] undIdx, int[] genIdx, Tensor? mask, int seq)
+    private Tensor Attention(IBackend backend, Tensor normed, Tensor cos, Tensor sin,
+        int nPre, int nGen, Tensor? mask, int seq)
     {
-        TensorShape qShape = new TensorShape(seq, _numHeads, _headDim);
-        TensorShape kvShape = new TensorShape(seq, _numKvHeads, _headDim);
-        Tensor q = new Tensor(qShape, DType.F32);
-        Tensor k = new Tensor(kvShape, DType.F32);
-        Tensor v = new Tensor(kvShape, DType.F32);
-
-        // Project each role's subset with its path's weights, scatter into the joint Q/K/V.
-        ProjectRole(backend, normed, undIdx, _qW!, _qB, _kW!, _kB, _vW!, _vB, _qNorm, _kNorm, q, k, v);
-        ProjectRole(backend, normed, genIdx, _qWg!, _qBg, _kWg!, _kBg, _vWg!, _vBg, _qNormg, _kNormg, q, k, v);
-
-        // RoPE over the full sequence (Q and K).
-        rope.ApplyRotary(q, cos, sin);
-        rope.ApplyRotary(k, cos, sin);
-
-        // GQA: expand K/V to numHeads, permute to [1, H, seq, D], joint SDPA.
-        Tensor qMh = PermuteToBhsd(q, seq, _numHeads);
-        Tensor kMh = ExpandKvToBhsd(k, seq);
-        Tensor vMh = ExpandKvToBhsd(v, seq);
-        q.Dispose(); k.Dispose(); v.Dispose();
-
         float scale = 1.0f / MathF.Sqrt(_headDim);
+
+        // Role-routed Q/K/V over the three contiguous segments, concatenated back into joint [1, seq, H, D]
+        // ([B, L, H, D] views over the flat rows — dim-0 concat is a contiguous device copy).
+        (Tensor q, Tensor k, Tensor v) = ProjectQkvJoint(backend, normed, nPre, nGen, seq);
+
+        // RoPE (rotate-half, cos/sin broadcast over heads) on the pre-permute layout; per-tensor kernel because
+        // GQA Q (16 heads) and K (2 heads) stride differently.
+        backend.ApplyRopeSingle(q, cos, sin);
+        backend.ApplyRopeSingle(k, cos, sin);
+
+        // [1, L, H, D] → [1, H, L, D]; GQA-expand K/V to the query head count.
+        int rep = _numHeads / _numKvHeads;
+        Tensor qMh = new Tensor(new TensorShape(1, _numHeads, seq, _headDim), DType.F32);
+        backend.Permute0213(qMh, q, seq, _numHeads, _headDim);
+        q.Dispose();
+        Tensor kSmall = new Tensor(new TensorShape(1, _numKvHeads, seq, _headDim), DType.F32);
+        backend.Permute0213(kSmall, k, seq, _numKvHeads, _headDim);
+        k.Dispose();
+        Tensor vSmall = new Tensor(new TensorShape(1, _numKvHeads, seq, _headDim), DType.F32);
+        backend.Permute0213(vSmall, v, seq, _numKvHeads, _headDim);
+        v.Dispose();
+
+        Tensor kMh = new Tensor(new TensorShape(1, _numHeads, seq, _headDim), DType.F32);
+        backend.RepeatKvHeads(kMh, kSmall, _numKvHeads, rep);
+        kSmall.Dispose();
+        Tensor vMh = new Tensor(new TensorShape(1, _numHeads, seq, _headDim), DType.F32);
+        backend.RepeatKvHeads(vMh, vSmall, _numKvHeads, rep);
+        vSmall.Dispose();
+
+        // Joint SDPA. allowF16: Lance ships QK-RMSNorm (bounded scores) and the additive mask is finite (-1e9),
+        // so the cuDNN fused engine (mask as an fp32 bias score-modifier) is range-safe.
         Tensor attnOut = new Tensor(new TensorShape(1, _numHeads, seq, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, mask, scale);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, mask, scale, allowF16: true);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
-        Tensor flat = PermuteFromBhsd(attnOut, seq);   // [seq, hidden]
+        Tensor flat = new Tensor(new TensorShape(seq, _hidden), DType.F32);
+        backend.Permute0213(flat, attnOut, _numHeads, seq, _headDim);
         attnOut.Dispose();
 
-        // o_proj (role-routed).
-        Tensor outProj = new Tensor(new TensorShape(seq, _hidden), DType.F32);
-        new Span<float>((float*)outProj.DataPointer, checked((int)((long)seq * _hidden))).Clear();
-        ProjectOut(backend, flat, undIdx, _oW!, outProj);
-        ProjectOut(backend, flat, genIdx, _oWg!, outProj);
+        // o_proj (role-routed, bias-less).
+        Tensor outProj = RoleLinear(backend, flat, nPre, nGen, seq, _hidden, _oW!, null, _oWg!, null);
         flat.Dispose();
         return outProj;
     }
 
-    private void ProjectRole(IBackend backend, Tensor normed, int[] idx,
-        Tensor qW, Tensor? qB, Tensor kW, Tensor? kB, Tensor vW, Tensor? vB,
-        QkNorm? qNorm, QkNorm? kNorm, Tensor qDst, Tensor kDst, Tensor vDst)
+    /// <summary>Role-routed QKV: each contiguous segment goes through its role's projections (+ optional per-head
+    /// QK-RMSNorm), then the segments are concatenated back in sequence order. Returns joint
+    /// <c>q [1, seq, H, D]</c>, <c>k/v [1, seq, Hkv, D]</c>.</summary>
+    private (Tensor q, Tensor k, Tensor v) ProjectQkvJoint(IBackend backend, Tensor normed, int nPre, int nGen, int seq)
     {
-        int n = idx.Length;
-        if (n == 0) return;
-        Tensor sub = Gather(normed, idx, _hidden);
-
-        Tensor qSub = new Tensor(new TensorShape(n, _numHeads * _headDim), DType.F32);
-        Tensor kSub = new Tensor(new TensorShape(n, _numKvHeads * _headDim), DType.F32);
-        Tensor vSub = new Tensor(new TensorShape(n, _numKvHeads * _headDim), DType.F32);
-        backend.Linear(qSub, sub, qW, qB);
-        backend.Linear(kSub, sub, kW, kB);
-        backend.Linear(vSub, sub, vW, vB);
-        sub.Dispose();
-
-        if (_qkNorm)
+        Tensor[] qSegs = new Tensor[3];
+        Tensor[] kSegs = new Tensor[3];
+        Tensor[] vSegs = new Tensor[3];
+        int segCount = 0;
+        int offset = 0;
+        Span<int> segLens = stackalloc int[3] { nPre, nGen, seq - nPre - nGen };
+        for (int s = 0; s < 3; s++)
         {
-            Tensor qn = new Tensor(qSub.Shape, DType.F32);
-            Tensor kn = new Tensor(kSub.Shape, DType.F32);
-            qNorm!.Forward(qn, qSub, n * _numHeads);
-            kNorm!.Forward(kn, kSub, n * _numKvHeads);
-            qSub.Dispose(); kSub.Dispose();
-            qSub = qn; kSub = kn;
+            int n = segLens[s];
+            if (n == 0) continue;
+            bool gen = s == 1;
+            Tensor sub = new Tensor(new TensorShape(n, _hidden), DType.F32);
+            backend.SliceRows(sub, normed, offset);
+
+            Tensor qSub = new Tensor(new TensorShape(n, _numHeads, _headDim), DType.F32);
+            backend.Linear(qSub, sub, gen ? _qWg! : _qW!, gen ? _qBg : _qB);
+            Tensor kSub = new Tensor(new TensorShape(n, _numKvHeads, _headDim), DType.F32);
+            backend.Linear(kSub, sub, gen ? _kWg! : _kW!, gen ? _kBg : _kB);
+            Tensor vSub = new Tensor(new TensorShape(n, _numKvHeads, _headDim), DType.F32);
+            backend.Linear(vSub, sub, gen ? _vWg! : _vW!, gen ? _vBg : _vB);
+            sub.Dispose();
+
+            if (_qkNorm)
+            {
+                QkNorm qNorm = gen ? _qNormg! : _qNorm!;
+                QkNorm kNorm = gen ? _kNormg! : _kNorm!;
+                Tensor qn = new Tensor(qSub.Shape, DType.F32);
+                backend.RmsNorm(qn, qSub, qNorm.Weight, qNorm.Eps);
+                qSub.Dispose();
+                qSub = qn;
+                Tensor kn = new Tensor(kSub.Shape, DType.F32);
+                backend.RmsNorm(kn, kSub, kNorm.Weight, kNorm.Eps);
+                kSub.Dispose();
+                kSub = kn;
+            }
+
+            qSegs[segCount] = qSub;
+            kSegs[segCount] = kSub;
+            vSegs[segCount] = vSub;
+            segCount++;
+            offset += n;
         }
 
-        ScatterHeads(qSub, idx, qDst, _numHeads);
-        ScatterHeads(kSub, idx, kDst, _numKvHeads);
-        ScatterHeads(vSub, idx, vDst, _numKvHeads);
-        qSub.Dispose(); kSub.Dispose(); vSub.Dispose();
+        Tensor q = ConcatSegments(backend, qSegs.AsSpan(0, segCount), new TensorShape(1, seq, _numHeads, _headDim));
+        Tensor k = ConcatSegments(backend, kSegs.AsSpan(0, segCount), new TensorShape(1, seq, _numKvHeads, _headDim));
+        Tensor v = ConcatSegments(backend, vSegs.AsSpan(0, segCount), new TensorShape(1, seq, _numKvHeads, _headDim));
+        for (int i = 0; i < segCount; i++)
+        {
+            qSegs[i].Dispose();
+            kSegs[i].Dispose();
+            vSegs[i].Dispose();
+        }
+        return (q, k, v);
     }
 
-    private void ProjectOut(IBackend backend, Tensor flat, int[] idx, Tensor oW, Tensor dst)
+    /// <summary>Role-routed Linear over the three contiguous segments → concatenated <c>[seq, outDim]</c>.</summary>
+    private Tensor RoleLinear(IBackend backend, Tensor input, int nPre, int nGen, int seq, int outDim,
+        Tensor undW, Tensor? undB, Tensor genW, Tensor? genB)
     {
-        int n = idx.Length;
-        if (n == 0) return;
-        Tensor sub = Gather(flat, idx, _hidden);
-        Tensor outSub = new Tensor(new TensorShape(n, _hidden), DType.F32);
-        backend.Linear(outSub, sub, oW, null);
-        sub.Dispose();
-        Scatter(outSub, idx, dst, _hidden);
-        outSub.Dispose();
+        Tensor[] segs = new Tensor[3];
+        int segCount = 0;
+        int offset = 0;
+        Span<int> segLens = stackalloc int[3] { nPre, nGen, seq - nPre - nGen };
+        for (int s = 0; s < 3; s++)
+        {
+            int n = segLens[s];
+            if (n == 0) continue;
+            bool gen = s == 1;
+            Tensor sub = new Tensor(new TensorShape(n, _hidden), DType.F32);
+            backend.SliceRows(sub, input, offset);
+            Tensor outSub = new Tensor(new TensorShape(n, outDim), DType.F32);
+            backend.Linear(outSub, sub, gen ? genW : undW, gen ? genB : undB);
+            sub.Dispose();
+            segs[segCount++] = outSub;
+            offset += n;
+        }
+        Tensor result = ConcatSegments(backend, segs.AsSpan(0, segCount), new TensorShape(seq, outDim));
+        for (int i = 0; i < segCount; i++) segs[i].Dispose();
+        return result;
     }
 
-    private Tensor RoleMlp(IBackend backend, Tensor normed, int[] undIdx, int[] genIdx, int seq)
+    private Tensor RoleMlp(IBackend backend, Tensor normed, int nPre, int nGen, int seq)
     {
-        Tensor outT = new Tensor(new TensorShape(seq, _hidden), DType.F32);
-        new Span<float>((float*)outT.DataPointer, checked((int)((long)seq * _hidden))).Clear();
-        SwiGluRole(backend, normed, undIdx, _gateW!, _upW!, _downW!, outT);
-        SwiGluRole(backend, normed, genIdx, _gateWg!, _upWg!, _downWg!, outT);
-        return outT;
+        Tensor[] segs = new Tensor[3];
+        int segCount = 0;
+        int offset = 0;
+        Span<int> segLens = stackalloc int[3] { nPre, nGen, seq - nPre - nGen };
+        for (int s = 0; s < 3; s++)
+        {
+            int n = segLens[s];
+            if (n == 0) continue;
+            bool gen = s == 1;
+            Tensor sub = new Tensor(new TensorShape(n, _hidden), DType.F32);
+            backend.SliceRows(sub, normed, offset);
+            segs[segCount++] = SwiGlu(backend, sub, n,
+                gen ? _gateWg! : _gateW!, gen ? _upWg! : _upW!, gen ? _downWg! : _downW!);
+            sub.Dispose();
+            offset += n;
+        }
+        Tensor result = ConcatSegments(backend, segs.AsSpan(0, segCount), new TensorShape(seq, _hidden));
+        for (int i = 0; i < segCount; i++) segs[i].Dispose();
+        return result;
     }
 
-    private void SwiGluRole(IBackend backend, Tensor normed, int[] idx, Tensor gateW, Tensor upW, Tensor downW, Tensor dst)
+    private Tensor SwiGlu(IBackend backend, Tensor sub, int n, Tensor gateW, Tensor upW, Tensor downW)
     {
-        int n = idx.Length;
-        if (n == 0) return;
-        Tensor sub = Gather(normed, idx, _hidden);
         Tensor gate = new Tensor(new TensorShape(n, _ffn), DType.F32);
         backend.Linear(gate, sub, gateW, null);
         Tensor act = new Tensor(new TensorShape(n, _ffn), DType.F32);
@@ -227,127 +296,49 @@ public sealed unsafe class LanceMoTBlock
         gate.Dispose();
         Tensor up = new Tensor(new TensorShape(n, _ffn), DType.F32);
         backend.Linear(up, sub, upW, null);
-        sub.Dispose();
         Tensor prod = new Tensor(new TensorShape(n, _ffn), DType.F32);
         backend.Mul(prod, act, up);
-        act.Dispose(); up.Dispose();
+        act.Dispose();
+        up.Dispose();
         Tensor outSub = new Tensor(new TensorShape(n, _hidden), DType.F32);
         backend.Linear(outSub, prod, downW, null);
         prod.Dispose();
-        Scatter(outSub, idx, dst, _hidden);
-        outSub.Dispose();
+        return outSub;
     }
 
-    private Tensor RoleNorm(IBackend backend, Tensor x, int[] undIdx, int[] genIdx, Tensor undW, Tensor genW, int seq)
+    private Tensor RoleNorm(IBackend backend, Tensor x, int nPre, int nGen, Tensor undW, Tensor genW, int seq)
     {
-        Tensor outT = new Tensor(new TensorShape(seq, _hidden), DType.F32);
-        new Span<float>((float*)outT.DataPointer, checked((int)((long)seq * _hidden))).Clear();
-        NormRole(backend, x, undIdx, undW, outT);
-        NormRole(backend, x, genIdx, genW, outT);
-        return outT;
+        Tensor[] segs = new Tensor[3];
+        int segCount = 0;
+        int offset = 0;
+        Span<int> segLens = stackalloc int[3] { nPre, nGen, seq - nPre - nGen };
+        for (int s = 0; s < 3; s++)
+        {
+            int n = segLens[s];
+            if (n == 0) continue;
+            Tensor sub = new Tensor(new TensorShape(n, _hidden), DType.F32);
+            backend.SliceRows(sub, x, offset);
+            Tensor normedSeg = new Tensor(sub.Shape, DType.F32);
+            backend.RmsNorm(normedSeg, sub, s == 1 ? genW : undW, _eps);
+            sub.Dispose();
+            segs[segCount++] = normedSeg;
+            offset += n;
+        }
+        Tensor result = ConcatSegments(backend, segs.AsSpan(0, segCount), new TensorShape(seq, _hidden));
+        for (int i = 0; i < segCount; i++) segs[i].Dispose();
+        return result;
     }
 
-    private void NormRole(IBackend backend, Tensor x, int[] idx, Tensor normW, Tensor dst)
+    /// <summary>Concatenates row segments into <paramref name="shape"/> (single segment = device copy). Dim-0
+    /// concat is a contiguous device copy regardless of the output view's rank.</summary>
+    private static Tensor ConcatSegments(IBackend backend, ReadOnlySpan<Tensor> segs, TensorShape shape)
     {
-        int n = idx.Length;
-        if (n == 0) return;
-        Tensor sub = Gather(x, idx, _hidden);
-        Tensor normed = new Tensor(sub.Shape, DType.F32);
-        backend.RmsNorm(normed, sub, normW, _eps);
-        sub.Dispose();
-        Scatter(normed, idx, dst, _hidden);
-        normed.Dispose();
-    }
-
-    // ── row gather/scatter + head reshapes ──
-    private static Tensor Gather(Tensor src, int[] idx, int dim)
-    {
-        Tensor outT = new Tensor(new TensorShape(idx.Length, dim), DType.F32);
-        float* s = (float*)src.DataPointer;
-        float* d = (float*)outT.DataPointer;
-        for (int i = 0; i < idx.Length; i++)
-            Buffer.MemoryCopy(s + (long)idx[i] * dim, d + (long)i * dim, (long)dim * 4, (long)dim * 4);
-        return outT;
-    }
-
-    private static void Scatter(Tensor src, int[] idx, Tensor dst, int dim)
-    {
-        float* s = (float*)src.DataPointer;
-        float* d = (float*)dst.DataPointer;
-        for (int i = 0; i < idx.Length; i++)
-            Buffer.MemoryCopy(s + (long)i * dim, d + (long)idx[i] * dim, (long)dim * 4, (long)dim * 4);
-    }
-
-    /// <summary>Scatter a <c>[n, heads*headDim]</c> sub-buffer into a <c>[seq, heads, headDim]</c> joint tensor at the given row indexes.</summary>
-    private void ScatterHeads(Tensor src, int[] idx, Tensor dst, int heads)
-    {
-        int rowLen = heads * _headDim;
-        float* s = (float*)src.DataPointer;
-        float* d = (float*)dst.DataPointer;
-        for (int i = 0; i < idx.Length; i++)
-            Buffer.MemoryCopy(s + (long)i * rowLen, d + (long)idx[i] * rowLen, (long)rowLen * 4, (long)rowLen * 4);
-    }
-
-    private Tensor PermuteToBhsd(Tensor x, int seq, int heads)
-    {
-        Tensor outT = new Tensor(new TensorShape(1, heads, seq, _headDim), DType.F32);
-        float* s = (float*)x.DataPointer;
-        float* d = (float*)outT.DataPointer;
-        for (int p = 0; p < seq; p++)
-            for (int h = 0; h < heads; h++)
-            {
-                long sOff = ((long)p * heads + h) * _headDim;
-                long dOff = ((long)h * seq + p) * _headDim;
-                Buffer.MemoryCopy(s + sOff, d + dOff, (long)_headDim * 4, (long)_headDim * 4);
-            }
-        return outT;
-    }
-
-    /// <summary>Expand <c>[seq, numKv, headDim]</c> to <c>[1, numHeads, seq, headDim]</c> by repeating each KV head <c>numHeads/numKv</c> times (GQA).</summary>
-    private Tensor ExpandKvToBhsd(Tensor kv, int seq)
-    {
-        int rep = _numHeads / _numKvHeads;
-        Tensor outT = new Tensor(new TensorShape(1, _numHeads, seq, _headDim), DType.F32);
-        float* s = (float*)kv.DataPointer;
-        float* d = (float*)outT.DataPointer;
-        for (int p = 0; p < seq; p++)
-            for (int kvh = 0; kvh < _numKvHeads; kvh++)
-            {
-                long sOff = ((long)p * _numKvHeads + kvh) * _headDim;
-                for (int r = 0; r < rep; r++)
-                {
-                    int h = kvh * rep + r;
-                    long dOff = ((long)h * seq + p) * _headDim;
-                    Buffer.MemoryCopy(s + sOff, d + dOff, (long)_headDim * 4, (long)_headDim * 4);
-                }
-            }
-        return outT;
-    }
-
-    private Tensor PermuteFromBhsd(Tensor x, int seq)
-    {
-        Tensor outT = new Tensor(new TensorShape(seq, _hidden), DType.F32);
-        float* s = (float*)x.DataPointer;
-        float* d = (float*)outT.DataPointer;
-        for (int h = 0; h < _numHeads; h++)
-            for (int p = 0; p < seq; p++)
-            {
-                long sOff = ((long)h * seq + p) * _headDim;
-                long dOff = (long)p * _hidden + (long)h * _headDim;
-                Buffer.MemoryCopy(s + sOff, d + dOff, (long)_headDim * 4, (long)_headDim * 4);
-            }
-        return outT;
-    }
-
-    private static Tensor AddRows(Tensor a, Tensor b, int seq)
-    {
-        Tensor outT = new Tensor(a.Shape, DType.F32);
-        long n = a.Shape.ElementCount;
-        float* pa = (float*)a.DataPointer;
-        float* pb = (float*)b.DataPointer;
-        float* po = (float*)outT.DataPointer;
-        for (long i = 0; i < n; i++) po[i] = pa[i] + pb[i];
-        return outT;
+        Tensor result = new Tensor(shape, DType.F32);
+        if (segs.Length == 1)
+            backend.CopyInto(result, segs[0]);
+        else
+            backend.Concat(result, segs, 0);
+        return result;
     }
 
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)

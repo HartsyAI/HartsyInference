@@ -117,8 +117,10 @@ public unsafe class LanceBackboneTests
     {
         LanceConfig c = LanceConfig.Image;
         Assert.Equal(128, c.HeadDim);          // 2048 / 16
-        Assert.Equal(192, c.PatchFeatureDim);  // 48 × 1 × 2 × 2
+        Assert.Equal(48, c.PatchFeatureDim);   // 48 × 1 × 1 × 1 — real checkpoint's vae2llm is Linear(48→2048)
         Assert.Equal(8, c.NumHeads / c.NumKvHeads); // GQA factor
+        Assert.True(c.QkNorm);                 // real checkpoint ships q_norm/k_norm [128]
+        Assert.Equal(64, c.MaxLatentSize);     // latent_pos_embed table is 64·64 rows per frame
     }
 
     // ── helpers ──

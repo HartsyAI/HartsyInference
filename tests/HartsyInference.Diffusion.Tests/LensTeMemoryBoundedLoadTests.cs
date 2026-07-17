@@ -1,6 +1,9 @@
 using System.Diagnostics;
+using System.Reflection;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
+using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.ModelHandler.CheckpointConverters;
 using HartsyInference.ModelHandler.SafeTensors;
@@ -12,8 +15,13 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>Real-weight regression harness for the Lens GPT-OSS NVFP4 text-encoder load path. The old
 /// load eagerly dequantized the 20B-parameter MoE expert bank to F32 (~76 GB) and got the host process
 /// OOM-killed on 64 GB boxes; the fixed path keeps the packed bank mmap-backed and streams one expert
-/// at a time at forward time. This test loads the real ~13 GB ComfyUI checkpoint, runs one real encode,
-/// and asserts peak host RSS (<c>/proc/self/status VmHWM</c>) stays far below the danger zone.</summary>
+/// at a time at forward time. This test loads the real ~13 GB ComfyUI checkpoint, runs TWO back-to-back
+/// real encodes (native heap corruption from backend misuse historically surfaced on the second), and
+/// asserts peak host RSS (<c>/proc/self/status VmHWM</c>) stays far below the danger zone.
+/// <para>Backend: CPU by default; set <c>LENS_TE_BACKEND=cuda</c> to run the encode through a
+/// <see cref="CudaBackend"/> (combine with <c>CUDA_VISIBLE_DEVICES</c> to pick the GPU) — this is the
+/// SwarmUI production configuration that crashed with <c>malloc(): unsorted double linked list
+/// corrupted</c> before the sequential-expert CUDA path landed.</para></summary>
 public sealed class LensTeMemoryBoundedLoadTests
 {
     private readonly ITestOutputHelper _output;
@@ -37,6 +45,9 @@ public sealed class LensTeMemoryBoundedLoadTests
             return;
         }
 
+        using IBackend backend = CreateBackend(out string backendName);
+        _output.WriteLine($"Backend: {backendName}");
+
         _output.WriteLine($"VmHWM before load: {ReadVmHwmKb() / 1048576.0:F2} GB");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -52,35 +63,55 @@ public sealed class LensTeMemoryBoundedLoadTests
         Assert.True(afterLoadKb < PeakRssBudgetKb,
             $"Peak RSS after TE load is {afterLoadKb / 1048576.0:F2} GB — expected < {PeakRssBudgetKb / 1048576.0:F0} GB.");
 
-        // One real encode on CPU. 112 synthetic-but-valid token ids (> the 97-token chat wrapper the
-        // Lens front-end strips) exercise embedding, all 24 blocks including the streamed NVFP4 MoE,
-        // and the 4-layer capture path over the real weights.
-        int[] tokenIds = new int[112];
-        for (int i = 0; i < tokenIds.Length; i++) tokenIds[i] = 1000 + i * 13;
-        using CpuBackend backend = new CpuBackend();
-        sw.Restart();
-        List<Tensor> features = encoder.EncodeForLens(backend, tokenIds);
-        sw.Stop();
+        // TWO real encodes back-to-back. 112 synthetic-but-valid token ids (> the 97-token chat wrapper
+        // the Lens front-end strips) exercise embedding, all 24 blocks including the streamed NVFP4 MoE,
+        // and the 4-layer capture path over the real weights. The second pass catches state corruption
+        // (stale GPU cache entries, use-after-free of reused tensors) that a single pass can miss.
+        for (int pass = 0; pass < 2; pass++)
+        {
+            int[] tokenIds = new int[112];
+            for (int i = 0; i < tokenIds.Length; i++) tokenIds[i] = 1000 + i * 13 + pass;
 
-        long afterEncodeKb = ReadVmHwmKb();
-        _output.WriteLine($"Encode (112 tokens, 24 layers) took {sw.Elapsed.TotalSeconds:F1}s; " +
-                          $"VmHWM after encode: {afterEncodeKb / 1048576.0:F2} GB");
-        try
-        {
-            Assert.Equal(4, features.Count);
-            foreach (Tensor feature in features)
+            sw.Restart();
+            List<Tensor> features = encoder.EncodeForLens(backend, tokenIds);
+            sw.Stop();
+
+            long afterEncodeKb = ReadVmHwmKb();
+            _output.WriteLine($"Encode pass {pass + 1} (112 tokens, 24 layers, {backendName}) took " +
+                              $"{sw.Elapsed.TotalSeconds:F1}s; VmHWM: {afterEncodeKb / 1048576.0:F2} GB");
+            try
             {
-                Assert.Equal(new long[] { 1, 112 - LensGptOssEncoder.DefaultTextOffset, 2880 },
-                    new[] { feature.Shape[0], feature.Shape[1], feature.Shape[2] });
-                AssertFiniteAndNonTrivial(feature);
+                Assert.Equal(4, features.Count);
+                foreach (Tensor feature in features)
+                {
+                    Assert.Equal(new long[] { 1, 112 - LensGptOssEncoder.DefaultTextOffset, 2880 },
+                        new[] { feature.Shape[0], feature.Shape[1], feature.Shape[2] });
+                    AssertFiniteAndNonTrivial(feature);
+                }
+                Assert.True(afterEncodeKb < PeakRssBudgetKb,
+                    $"Peak RSS after encode is {afterEncodeKb / 1048576.0:F2} GB — expected < {PeakRssBudgetKb / 1048576.0:F0} GB.");
             }
-            Assert.True(afterEncodeKb < PeakRssBudgetKb,
-                $"Peak RSS after encode is {afterEncodeKb / 1048576.0:F2} GB — expected < {PeakRssBudgetKb / 1048576.0:F0} GB.");
+            finally
+            {
+                foreach (Tensor feature in features) feature.Dispose();
+            }
         }
-        finally
+    }
+
+    /// <summary>CPU backend by default; <c>LENS_TE_BACKEND=cuda</c> builds a <see cref="CudaBackend"/>
+    /// on device 0 of the visible set with the test bin's PTX directory.</summary>
+    private IBackend CreateBackend(out string backendName)
+    {
+        if (!string.Equals(Environment.GetEnvironmentVariable("LENS_TE_BACKEND"), "cuda", StringComparison.OrdinalIgnoreCase))
         {
-            foreach (Tensor feature in features) feature.Dispose();
+            backendName = "CPU";
+            return new CpuBackend();
         }
+
+        string assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
+        string ptxDir = Path.Combine(assemblyDir, "Ptx");
+        backendName = $"CUDA (CUDA_VISIBLE_DEVICES={Environment.GetEnvironmentVariable("CUDA_VISIBLE_DEVICES") ?? "unset"})";
+        return new CudaBackend(deviceOrdinal: 0, ptxDir: Directory.Exists(ptxDir) ? ptxDir : null);
     }
 
     private static unsafe void AssertFiniteAndNonTrivial(Tensor t)

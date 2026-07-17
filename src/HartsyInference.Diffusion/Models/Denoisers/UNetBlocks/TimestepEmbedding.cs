@@ -45,21 +45,28 @@ public sealed unsafe class TimestepEmbedding
     /// <summary>Computes timestep embeddings for a batch of timesteps. Returns [B, timeDim].</summary>
     public Tensor Forward(IBackend backend, ReadOnlySpan<float> timesteps, int batch)
     {
-        // 1. Sinusoidal positional embedding: [B, embeddingDim]
         Tensor sinEmb = ComputeSinusoidalEmbedding(timesteps, batch);
+        Tensor output = ForwardEmbedding(backend, sinEmb);
+        sinEmb.Dispose();
+        return output;
+    }
 
-        // 2. Linear1: [B, embeddingDim] → [B, timeDim]
+    /// <summary>Runs only the MLP half on a caller-built embedding vector [B, embeddingDim] → [B, timeDim]. diffusers' <c>TimestepEmbedding</c> is used this way for non-timestep inputs too (e.g. the union ControlNet's sinusoid-encoded control-type vector).</summary>
+    public Tensor ForwardEmbedding(IBackend backend, Tensor embedding)
+    {
+        int batch = (int)embedding.Shape[0];
+
+        // 1. Linear1: [B, embeddingDim] → [B, timeDim]
         TensorShape outShape = new TensorShape(batch, _timeDim);
         Tensor linear1Out = new Tensor(outShape, DType.F32);
-        backend.Linear(linear1Out, sinEmb, _linear1Weight!, _linear1Bias!);
-        sinEmb.Dispose();
+        backend.Linear(linear1Out, embedding, _linear1Weight!, _linear1Bias!);
 
-        // 3. SiLU activation
+        // 2. SiLU activation
         Tensor siluOut = new Tensor(outShape, DType.F32);
         backend.Silu(siluOut, linear1Out);
         linear1Out.Dispose();
 
-        // 4. Linear2: [B, timeDim] → [B, timeDim]
+        // 3. Linear2: [B, timeDim] → [B, timeDim]
         Tensor linear2Out = new Tensor(outShape, DType.F32);
         backend.Linear(linear2Out, siluOut, _linear2Weight!, _linear2Bias!);
         siluOut.Dispose();

@@ -12,6 +12,11 @@ public sealed unsafe class LensTransformer : IDisposable
     private readonly LensRope _rope;
     private int _disposed;
 
+    // Per-prompt text-token cache: the four encoder captures are constant across denoise steps, so the
+    // txt_norm → concat → txt_in stack runs ONCE per prompt instead of once per forward (2 entries: cond + uncond,
+    // keyed on the caller's encoder-layer list reference). Cleared on Dispose.
+    private readonly List<(object Key, Tensor Tokens)> _txtTokenCache = new(2);
+
     private Tensor? _imgInWeight, _imgInBias;
 
     private Tensor?[] _txtNormWeights;
@@ -112,6 +117,10 @@ public sealed unsafe class LensTransformer : IDisposable
                 nameof(encoderLayers));
 
         int batch = (int)packedLatent.Shape[0];
+        // The GPU-resident path (SliceRows chunking, contiguous seq-dim concat/split) relies on batch-1 layout;
+        // the pipeline always runs CFG as two batch-1 forwards, matching Qwen-Image/Chroma.
+        if (batch != 1)
+            throw new ArgumentException($"LensTransformer.Forward is batch-1 only (got batch={batch}); run CFG as separate forwards.", nameof(packedLatent));
         int imgSeqLen = (int)packedLatent.Shape[1];
         int txtSeqLen = (int)encoderLayers[0].Shape[1];
         int hidden = _config.HiddenSize;
@@ -123,14 +132,12 @@ public sealed unsafe class LensTransformer : IDisposable
         backend.Linear(imgTokens, packedLatent, _imgInWeight!, _imgInBias);
         LensDebugDump.Dump("img_in", imgTokens);
 
-        Tensor concatenatedTxt = ConcatTxtFeatures(backend, encoderLayers, batch, txtSeqLen, encDim, numLayers);
-        LensDebugDump.Dump("txt_concat", concatenatedTxt);
-
+        // Text tokens are step-invariant — served from the per-prompt cache; the block loop consumes and
+        // disposes its text stream, so hand it a device copy of the cached tensor.
+        Tensor cachedTxt = GetOrBuildTextTokens(backend, encoderLayers, batch, txtSeqLen, encDim, numLayers);
         TensorShape txtTokShape = new TensorShape(batch, txtSeqLen, hidden);
         Tensor txtTokens = new Tensor(txtTokShape, DType.F32);
-        backend.Linear(txtTokens, concatenatedTxt, _txtInWeight!, _txtInBias);
-        concatenatedTxt.Dispose();
-        LensDebugDump.Dump("txt_in", txtTokens);
+        backend.CopyInto(txtTokens, cachedTxt);
 
         Tensor temb = ComputeTimestepEmbedding(backend, timestep, batch);
         LensDebugDump.Dump("time_text_embed", temb);
@@ -167,10 +174,17 @@ public sealed unsafe class LensTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Per-layer RMSNorm with its own learnable scale, then channel-concat along the last dim into <c>[B, S_txt, numLayers * encDim]</c>. Upstream: <c>cat([txt_norm[i](encoder[i]) for i in range(4)], dim=-1)</c>.</summary>
-    private Tensor ConcatTxtFeatures(IBackend backend, IReadOnlyList<Tensor> encoderLayers,
+    /// <summary>Returns the cached text tokens for this encoder-capture set, building them on first use:
+    /// per-layer RMSNorm (own learnable scale) → channel-concat along the last dim (<c>[B, S_txt, 4·2880]</c>,
+    /// upstream <c>cat([txt_norm[i](encoder[i]) for i in range(4)], dim=-1)</c>) → <c>txt_in</c> Linear. All on
+    /// the backend so the result stays device-resident. Keyed on the caller's list reference (cond + uncond).</summary>
+    private Tensor GetOrBuildTextTokens(IBackend backend, IReadOnlyList<Tensor> encoderLayers,
         int batch, int txtSeqLen, int encDim, int numLayers)
     {
+        for (int i = 0; i < _txtTokenCache.Count; i++)
+            if (ReferenceEquals(_txtTokenCache[i].Key, encoderLayers))
+                return _txtTokenCache[i].Tokens;
+
         Tensor[] normed = new Tensor[numLayers];
         for (int i = 0; i < numLayers; i++)
         {
@@ -178,34 +192,27 @@ public sealed unsafe class LensTransformer : IDisposable
             backend.RmsNorm(normed[i], encoderLayers[i], _txtNormWeights[i]!, 1e-5f);
         }
 
-        int outDim = numLayers * encDim;
-        TensorShape outShape = new TensorShape(batch, txtSeqLen, outDim);
-        Tensor concat = new Tensor(outShape, DType.F32);
-
-        float*[] srcPtrs = new float*[numLayers];
-        for (int i = 0; i < numLayers; i++)
-            srcPtrs[i] = (float*)normed[i].DataPointer;
-        float* outPtr = (float*)concat.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < txtSeqLen; s++)
-            {
-                int outBase = (b * txtSeqLen + s) * outDim;
-                int srcBase = (b * txtSeqLen + s) * encDim;
-                for (int layer = 0; layer < numLayers; layer++)
-                {
-                    int dstOffset = outBase + layer * encDim;
-                    for (int d = 0; d < encDim; d++)
-                        outPtr[dstOffset + d] = srcPtrs[layer][srcBase + d];
-                }
-            }
-        }
-
+        TensorShape concatShape = new TensorShape(batch, txtSeqLen, numLayers * encDim);
+        Tensor concat = new Tensor(concatShape, DType.F32);
+        backend.Concat(concat, normed, 2);
         for (int i = 0; i < numLayers; i++)
             normed[i].Dispose();
+        LensDebugDump.Dump("txt_concat", concat);
 
-        return concat;
+        TensorShape txtTokShape = new TensorShape(batch, txtSeqLen, _config.HiddenSize);
+        Tensor txtTokens = new Tensor(txtTokShape, DType.F32);
+        backend.Linear(txtTokens, concat, _txtInWeight!, _txtInBias);
+        concat.Dispose();
+        LensDebugDump.Dump("txt_in", txtTokens);
+
+        // 2 live entries (cond + uncond); a third distinct prompt evicts the oldest.
+        if (_txtTokenCache.Count >= 2)
+        {
+            _txtTokenCache[0].Tokens.Dispose();
+            _txtTokenCache.RemoveAt(0);
+        }
+        _txtTokenCache.Add((encoderLayers, txtTokens));
+        return txtTokens;
     }
 
     private Tensor ComputeTimestepEmbedding(IBackend backend, float timestep, int batch)
@@ -233,7 +240,7 @@ public sealed unsafe class LensTransformer : IDisposable
         return temb;
     }
 
-    /// <summary>AdaLN-Continuous final layer: <c>SiLU(temb) → Linear(hidden → 2*hidden) → [shift, scale]</c> → LayerNorm-no-affine + modulate → <c>proj_out</c>. Diffusers <c>AdaLayerNormContinuous(elementwise_affine=False, eps=1e-6)</c> chunks <c>[shift, scale]</c> in that order — matches Qwen-Image and SD3 final layers.</summary>
+    /// <summary>AdaLN-Continuous final layer: <c>SiLU(temb) → Linear(hidden → 2*hidden) → [scale, shift]</c> → LayerNorm-no-affine + modulate → <c>proj_out</c>. <b>Lens chunks <c>[scale, shift]</c> — scale FIRST</b> (upstream: <c>scale, shift = torch.chunk(emb, 2, dim=-1)</c>), the opposite of Flux's LastLayer and of the diffusers-default <c>[shift, scale]</c> used by Qwen-Image/SD3 final layers. All ops run on the backend so the hidden stream never leaves the device (the old host modulation loop drained the stream once per forward).</summary>
     private Tensor ApplyFinalLayer(IBackend backend, Tensor hidden, Tensor temb, int batch, int seqLen)
     {
         int dim = _config.HiddenSize;
@@ -249,30 +256,21 @@ public sealed unsafe class LensTransformer : IDisposable
         backend.Linear(modParams, activated, _normOutLinearWeight!, _normOutLinearBias);
         activated.Dispose();
 
-        Tensor normed = new Tensor(hidShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, hidden, batch, seqLen, dim);
-
-        Tensor modulated = new Tensor(hidShape, DType.F32);
-        float* modPtr = (float*)modParams.DataPointer;
-        float* normPtr = (float*)normed.DataPointer;
-        float* outModPtr = (float*)modulated.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            int modBase = b * dim * 2;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int vecOffset = (b * seqLen + s) * dim;
-                for (int d = 0; d < dim; d++)
-                {
-                    float shift = modPtr[modBase + d];
-                    float scale = modPtr[modBase + dim + d];
-                    outModPtr[vecOffset + d] = normPtr[vecOffset + d] * (1.0f + scale) + shift;
-                }
-            }
-        }
-        normed.Dispose();
+        // B=1 on the inference path: chunk p of the flat [1, 2*dim] projection is the contiguous element
+        // range [p*dim, (p+1)*dim) — exactly SliceRows' contract. Scale is chunk 0, shift chunk 1.
+        TensorShape chunkShape = new TensorShape(batch, dim);
+        Tensor scaleChunk = new Tensor(chunkShape, DType.F32);
+        backend.SliceRows(scaleChunk, modParams, 0);
+        Tensor shiftChunk = new Tensor(chunkShape, DType.F32);
+        backend.SliceRows(shiftChunk, modParams, 1);
         modParams.Dispose();
+
+        Tensor normed = new Tensor(hidShape, DType.F32);
+        backend.LayerNormNoAffine(normed, hidden, 1e-6f);
+        Tensor modulated = DiTUtils.Modulate(backend, normed, shiftChunk, scaleChunk, hidShape);
+        normed.Dispose();
+        scaleChunk.Dispose();
+        shiftChunk.Dispose();
         LensDebugDump.Dump("norm_out", modulated);
 
         TensorShape outShape = new TensorShape(batch, seqLen, outDim);
@@ -286,11 +284,13 @@ public sealed unsafe class LensTransformer : IDisposable
     private static Tensor CastToF32IfNeeded(Tensor t) =>
         t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
-    /// <summary>Releases all tensor references.</summary>
+    /// <summary>Releases all tensor references and the per-prompt text-token cache.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            for (int i = 0; i < _txtTokenCache.Count; i++) _txtTokenCache[i].Tokens.Dispose();
+            _txtTokenCache.Clear();
             _imgInWeight = null; _imgInBias = null;
             for (int i = 0; i < _txtNormWeights.Length; i++) _txtNormWeights[i] = null;
             _txtInWeight = null; _txtInBias = null;

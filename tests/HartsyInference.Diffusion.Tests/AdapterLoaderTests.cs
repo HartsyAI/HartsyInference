@@ -53,8 +53,13 @@ public sealed class AdapterLoaderTests : IDisposable
     [Fact]
     public void ControlNetLoader_DetectsFluxFromTransformerBlocks()
     {
+        // Architecture-defining subset of a diffusers FluxControlNetModel header (FromDescriptors requires the
+        // embedders to derive dims). Full-depth detection + union handling live in FluxControlNetTests.
         string path = CreateSafeTensorsFile("flux-controlnet-canny.safetensors", new()
         {
+            ["x_embedder.weight"] = (DType.F32, [3072, 64], new float[3072 * 64]),
+            ["controlnet_x_embedder.weight"] = (DType.F32, [3072, 64], new float[3072 * 64]),
+            ["context_embedder.weight"] = (DType.F32, [3072, 4096], new float[3072 * 4096]),
             ["transformer_blocks.0.attn.to_q.weight"] = (DType.F32, [3072, 3072], new float[3072 * 3072]),
             ["controlnet_blocks.0.weight"] = (DType.F32, [3072, 3072], new float[3072 * 3072]),
         });
@@ -63,6 +68,9 @@ public sealed class AdapterLoaderTests : IDisposable
         Assert.Equal(ControlNetBaseModel.Flux, file.BaseModel);
         Assert.Equal(ControlNetMode.Canny, file.Mode);
         Assert.Equal(4096, file.Config.CrossAttentionDim);
+        Assert.NotNull(file.FluxConfig);
+        Assert.Equal(1, file.FluxConfig!.Depth);
+        Assert.Equal(24, file.FluxConfig.NumHeads);
     }
 
     [Fact]
@@ -200,6 +208,28 @@ public sealed class AdapterLoaderTests : IDisposable
             Assert.Equal(expectedMode, sibling.Mode);
             Assert.Contains("controlnet_mid_block.weight", sibling.Weights);
         }
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void ControlNetLoader_RealSegCheckpoint_LoadsAndConverts()
+    {
+        // control_v11p_sd15_seg conditioned on ADE20K palette maps (UperNetSegPreprocessor output).
+        string dir = Environment.GetEnvironmentVariable("HARTSY_CONTROLNET_DIR")
+            ?? "/home/hartsy/Desktop/Swarm/SwarmUI.not too old/Models/controlnet";
+        string path = Path.Combine(dir, "control_v11p_sd15_seg_fp16.safetensors");
+        if (!File.Exists(path)) return;
+
+        using ControlNetFile file = ControlNetLoader.Load(path);
+        Assert.Equal(ControlNetBaseModel.Sd15, file.BaseModel);
+        Assert.Equal(ControlNetMode.Segmentation, file.Mode);
+        Assert.Equal(340, file.Weights.Count);
+        Assert.Contains("controlnet_cond_embedding.conv_in.weight", file.Weights);
+        Assert.Contains("controlnet_mid_block.weight", file.Weights);
+
+        using ControlNet adapter = new ControlNet(file.Config, UNetConfig.Sd15);
+        adapter.LoadWeights(file.Weights);
+        Assert.Equal(12, adapter.DownResidualCount);
     }
 
     [Fact]
@@ -348,6 +378,264 @@ public sealed class AdapterLoaderTests : IDisposable
     }
 
     [Fact]
+    public void IpAdapterLoader_DetectsFaceId_FromLoraKeySignature()
+    {
+        // Neutral filename — detection must come from the embedded LoRA half's key signature
+        // (ip_adapter.{i}.*_lora.down.weight) and derive dims from the FaceID MLP proj shapes.
+        string path = CreateSafeTensorsFile("mystery-adapter.safetensors", new()
+        {
+            ["image_proj.proj.0.weight"] = (DType.F32, [1024, 512], new float[1024 * 512]),
+            ["image_proj.proj.0.bias"] = (DType.F32, [1024], new float[1024]),
+            ["image_proj.proj.2.weight"] = (DType.F32, [3072, 1024], new float[3072 * 1024]),
+            ["image_proj.proj.2.bias"] = (DType.F32, [3072], new float[3072]),
+            ["image_proj.norm.weight"] = (DType.F32, [768], OnesArray(768)),
+            ["image_proj.norm.bias"] = (DType.F32, [768], new float[768]),
+            ["ip_adapter.0.to_q_lora.down.weight"] = (DType.F32, [4, 320], new float[4 * 320]),
+            ["ip_adapter.0.to_q_lora.up.weight"] = (DType.F32, [320, 4], new float[320 * 4]),
+            ["ip_adapter.1.to_k_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+            ["ip_adapter.1.to_v_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+        });
+
+        using IpAdapterFile file = IpAdapterLoader.Load(path);
+        Assert.True(file.Config.IsFaceId);
+        Assert.False(file.Config.IsPlus);
+        Assert.Equal(IpAdapterBaseModel.Sd15, file.BaseModel);
+        Assert.Equal(512, file.Config.ImageEmbeddingDim);
+        Assert.Equal(4, file.Config.NumImageTokens);
+        Assert.Contains("ArcFace", file.Config.ClipImageModel);
+    }
+
+    [Fact]
+    public void IpAdapter_FaceId_LoadsAndProjects_SyntheticCheckpoint()
+    {
+        // Tiny FaceID checkpoint in the real (flattened .bin) key layout: MLP proj + embedded LoRA keys
+        // (which LoadWeights must SKIP) + 2 cross-attn K/V pairs at the odd combined-attn indices.
+        string path = CreateSafeTensorsFile("ip-adapter-faceid_sd15_tiny.safetensors", new()
+        {
+            ["image_proj.proj.0.weight"] = (DType.F32, [1024, 512], new float[1024 * 512]),
+            ["image_proj.proj.0.bias"] = (DType.F32, [1024], OnesArray(1024)),
+            ["image_proj.proj.2.weight"] = (DType.F32, [3072, 1024], new float[3072 * 1024]),
+            ["image_proj.proj.2.bias"] = (DType.F32, [3072], RampArray(3072)),
+            ["image_proj.norm.weight"] = (DType.F32, [768], OnesArray(768)),
+            ["image_proj.norm.bias"] = (DType.F32, [768], new float[768]),
+            ["ip_adapter.0.to_q_lora.down.weight"] = (DType.F32, [4, 320], new float[4 * 320]),
+            ["ip_adapter.0.to_q_lora.up.weight"] = (DType.F32, [320, 4], new float[320 * 4]),
+            ["ip_adapter.1.to_k_lora.down.weight"] = (DType.F32, [4, 768], new float[4 * 768]),
+            ["ip_adapter.1.to_k_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+            ["ip_adapter.1.to_v_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+            ["ip_adapter.3.to_k_ip.weight"] = (DType.F32, [640, 768], new float[640 * 768]),
+            ["ip_adapter.3.to_v_ip.weight"] = (DType.F32, [640, 768], new float[640 * 768]),
+        });
+
+        using IpAdapterFile file = IpAdapterLoader.Load(path);
+        Assert.True(file.Config.IsFaceId);
+        using IpAdapter adapter = new IpAdapter(file.Config);
+        adapter.LoadWeights(file.Weights);
+
+        Assert.Equal(2, adapter.CrossAttentionLayerCount);
+        Assert.Equal(4, adapter.NumImageTokens);
+        Assert.IsType<IpAdapterFaceIdProjection>(adapter.ImageProjection);
+
+        using CpuBackend backend = new CpuBackend();
+        using Tensor faceEmbed = new Tensor(new TensorShape(1, 512), DType.F32);
+        faceEmbed.AsSpan<float>().Clear();
+        using Tensor tokens = adapter.ProjectImage(backend, faceEmbed);
+        Assert.Equal(new TensorShape(1, 4, 768), tokens.Shape);
+        foreach (float v in tokens.AsSpan<float>())
+        {
+            Assert.True(float.IsFinite(v));
+        }
+    }
+
+    [Fact]
+    public void IpAdapterLoader_DetectsFaceIdPlusV2_FromFilenameAndPerceiverKeys()
+    {
+        // Shape-probed subset of ip-adapter-faceid-plusv2_sd15.bin (detection + BuildConfig don't
+        // touch the resampler layer weights, so those are omitted to keep the file small).
+        string path = CreateSafeTensorsFile("ip-adapter-faceid-plusv2_sd15.safetensors", new()
+        {
+            ["image_proj.proj.0.weight"] = (DType.F32, [1024, 512], new float[1024 * 512]),
+            ["image_proj.proj.2.weight"] = (DType.F32, [3072, 1024], new float[3072 * 1024]),
+            ["image_proj.norm.weight"] = (DType.F32, [768], OnesArray(768)),
+            ["image_proj.perceiver_resampler.proj_in.weight"] = (DType.F32, [768, 1280], new float[768 * 1280]),
+            ["ip_adapter.1.to_k_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+            ["ip_adapter.1.to_v_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+        });
+
+        using IpAdapterFile file = IpAdapterLoader.Load(path);
+        Assert.Equal(IpAdapterBaseModel.Sd15, file.BaseModel);
+        Assert.True(file.Config.IsFaceId);
+        Assert.True(file.Config.IsPlus);
+        Assert.True(file.Config.IsFaceIdV2);
+        Assert.Equal(512, file.Config.ImageEmbeddingDim);
+        Assert.Equal(1280, file.Config.ClipEmbeddingDim);
+        Assert.Equal(4, file.Config.NumImageTokens);
+        Assert.Equal(768, file.Config.CrossAttentionDim);
+    }
+
+    [Fact]
+    public void IpAdapterLoader_FaceIdPlus_WithoutV2Name_IsNotV2()
+    {
+        string path = CreateSafeTensorsFile("ip-adapter-faceid-plus_sd15.safetensors", new()
+        {
+            ["image_proj.proj.0.weight"] = (DType.F32, [1024, 512], new float[1024 * 512]),
+            ["image_proj.proj.2.weight"] = (DType.F32, [3072, 1024], new float[3072 * 1024]),
+            ["image_proj.norm.weight"] = (DType.F32, [768], OnesArray(768)),
+            ["image_proj.perceiver_resampler.proj_in.weight"] = (DType.F32, [768, 1280], new float[768 * 1280]),
+            ["ip_adapter.1.to_k_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+            ["ip_adapter.1.to_v_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+        });
+
+        using IpAdapterFile file = IpAdapterLoader.Load(path);
+        Assert.True(file.Config.IsFaceId);
+        Assert.True(file.Config.IsPlus);
+        Assert.False(file.Config.IsFaceIdV2);
+    }
+
+    [Fact]
+    public void IpAdapter_FaceIdPlus_LoadsAndProjects_SyntheticWeights()
+    {
+        // Tiny ProjPlusModel: crossDim=128 (2 heads × 64), clipDim=96, idDim=64, 4 tokens, depth 4.
+        const int cross = 128, clip = 96, id = 64, tokens = 4, seq = 5;
+        Dictionary<string, Tensor> weights = new();
+        AddTensor(weights, "image_proj.proj.0.weight", [id * 2, id]);
+        AddTensor(weights, "image_proj.proj.0.bias", [id * 2]);
+        AddTensor(weights, "image_proj.proj.2.weight", [tokens * cross, id * 2]);
+        AddTensor(weights, "image_proj.proj.2.bias", [tokens * cross]);
+        AddTensor(weights, "image_proj.norm.weight", [cross], fill: 1f);
+        AddTensor(weights, "image_proj.norm.bias", [cross]);
+        AddTensor(weights, "image_proj.perceiver_resampler.proj_in.weight", [cross, clip]);
+        AddTensor(weights, "image_proj.perceiver_resampler.proj_in.bias", [cross]);
+        AddTensor(weights, "image_proj.perceiver_resampler.proj_out.weight", [cross, cross]);
+        AddTensor(weights, "image_proj.perceiver_resampler.proj_out.bias", [cross]);
+        AddTensor(weights, "image_proj.perceiver_resampler.norm_out.weight", [cross], fill: 1f);
+        AddTensor(weights, "image_proj.perceiver_resampler.norm_out.bias", [cross]);
+        for (int i = 0; i < 4; i++)
+        {
+            string layer = $"image_proj.perceiver_resampler.layers.{i}";
+            AddTensor(weights, $"{layer}.0.norm1.weight", [cross], fill: 1f);
+            AddTensor(weights, $"{layer}.0.norm1.bias", [cross]);
+            AddTensor(weights, $"{layer}.0.norm2.weight", [cross], fill: 1f);
+            AddTensor(weights, $"{layer}.0.norm2.bias", [cross]);
+            AddTensor(weights, $"{layer}.0.to_q.weight", [cross, cross]);
+            AddTensor(weights, $"{layer}.0.to_kv.weight", [2 * cross, cross]);
+            AddTensor(weights, $"{layer}.0.to_out.weight", [cross, cross]);
+            AddTensor(weights, $"{layer}.1.0.weight", [cross], fill: 1f);
+            AddTensor(weights, $"{layer}.1.0.bias", [cross]);
+            AddTensor(weights, $"{layer}.1.1.weight", [4 * cross, cross]);
+            AddTensor(weights, $"{layer}.1.3.weight", [cross, 4 * cross]);
+        }
+        AddTensor(weights, "ip_adapter.1.to_k_ip.weight", [64, cross]);
+        AddTensor(weights, "ip_adapter.1.to_v_ip.weight", [64, cross]);
+
+        IpAdapterConfig config = new()
+        {
+            BaseModel = IpAdapterBaseModel.Sd15,
+            ClipImageModel = "InsightFace ArcFace + ViT-H/14",
+            ImageEmbeddingDim = id,
+            NumImageTokens = tokens,
+            CrossAttentionDim = cross,
+            ClipEmbeddingDim = clip,
+            IsPlus = true,
+            IsFaceId = true,
+            IsFaceIdV2 = true,
+        };
+        using IpAdapter adapter = new(config);
+        adapter.LoadWeights(weights);
+        Assert.IsType<IpAdapterFaceIdPlusProjection>(adapter.ImageProjection);
+        Assert.Equal(tokens, adapter.NumImageTokens);
+
+        using CpuBackend backend = new CpuBackend();
+        using Tensor faceEmbed = MakeRamp([1, id], scale: 0.01f);
+        using Tensor clipEmbeds = MakeRamp([1, seq, clip], scale: 0.02f);
+
+        // Single-input path must refuse — FaceID-Plus needs both inputs.
+        Assert.Throws<InvalidOperationException>(() => adapter.ProjectImage(backend, faceEmbed));
+
+        using Tensor tokensOut = adapter.ProjectImage(backend, faceEmbed, clipEmbeds, shortcutScale: 1.0f);
+        Assert.Equal(new TensorShape(1, tokens, cross), tokensOut.Shape);
+        foreach (float v in tokensOut.AsSpan<float>())
+        {
+            Assert.True(float.IsFinite(v));
+        }
+
+        // v2 shortcut algebra on the same weights: out(s) = mlp + s·r  ⇒  out(1) − out(0.5) = 0.5·r ≠ 0.
+        using Tensor half = adapter.ProjectImage(backend, faceEmbed, clipEmbeds, shortcutScale: 0.5f);
+        float diff = 0f;
+        ReadOnlySpan<float> a = tokensOut.AsSpan<float>();
+        ReadOnlySpan<float> b = half.AsSpan<float>();
+        for (int i = 0; i < a.Length; i++) diff += MathF.Abs(a[i] - b[i]);
+        Assert.True(diff > 0f, "shortcut scale had no effect on a v2 FaceID-Plus projection.");
+
+        foreach (Tensor t in weights.Values) t.Dispose();
+    }
+
+    private static void AddTensor(Dictionary<string, Tensor> weights, string key, long[] shape, float fill = float.NaN)
+    {
+        Tensor t = new Tensor(new TensorShape(shape), DType.F32);
+        Span<float> span = t.AsSpan<float>();
+        if (float.IsNaN(fill))
+        {
+            // Small deterministic pseudo-random values keep the forward numerically tame.
+            for (int i = 0; i < span.Length; i++) span[i] = ((i * 37 + key.Length * 11) % 19 - 9) * 0.01f;
+        }
+        else
+        {
+            span.Fill(fill);
+        }
+        weights[key] = t;
+    }
+
+    private static Tensor MakeRamp(long[] shape, float scale)
+    {
+        Tensor t = new Tensor(new TensorShape(shape), DType.F32);
+        Span<float> span = t.AsSpan<float>();
+        for (int i = 0; i < span.Length; i++) span[i] = ((i % 23) - 11) * scale;
+        return t;
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void IpAdapter_FaceId_RealBinCheckpoint_LoadsAndProjects()
+    {
+        // Real h94/IP-Adapter-FaceID torch-pickle checkpoint (ip-adapter-faceid_sdxl.bin or _sd15.bin).
+        string? binPath = Environment.GetEnvironmentVariable("FACEID_BIN");
+        if (string.IsNullOrEmpty(binPath) || !File.Exists(binPath))
+        {
+            return; // SKIPPED: set FACEID_BIN to a real ip-adapter-faceid_*.bin
+        }
+
+        using IpAdapterFile file = IpAdapterLoader.Load(binPath);
+        Assert.True(file.Config.IsFaceId);
+        Assert.Equal(512, file.Config.ImageEmbeddingDim);
+        Assert.Equal(4, file.Config.NumImageTokens);
+
+        using IpAdapter adapter = new IpAdapter(file.Config);
+        adapter.LoadWeights(file.Weights);
+        int expectedLayers = file.BaseModel == IpAdapterBaseModel.Sdxl ? 70 : 16;
+        Assert.Equal(expectedLayers, adapter.CrossAttentionLayerCount);
+
+        using CpuBackend backend = new CpuBackend();
+        using Tensor faceEmbed = new Tensor(new TensorShape(1, 512), DType.F32);
+        Span<float> span = faceEmbed.AsSpan<float>();
+        Random rng = new(42);
+        float sumSq = 0f;
+        for (int i = 0; i < span.Length; i++) { span[i] = (float)(rng.NextDouble() * 2 - 1); sumSq += span[i] * span[i]; }
+        float inv = 1f / MathF.Sqrt(sumSq);
+        for (int i = 0; i < span.Length; i++) span[i] *= inv;
+
+        using Tensor tokens = adapter.ProjectImage(backend, faceEmbed);
+        Assert.Equal(new TensorShape(1, file.Config.NumImageTokens, file.Config.CrossAttentionDim), tokens.Shape);
+        float sumAbs = 0f;
+        foreach (float v in tokens.AsSpan<float>())
+        {
+            Assert.True(float.IsFinite(v));
+            sumAbs += MathF.Abs(v);
+        }
+        Assert.True(sumAbs > 0f, "FaceID projection produced all-zero tokens on a real checkpoint.");
+    }
+
+    [Fact]
     public void ControlNetConditioning_DefaultWindow_IsAlwaysActive()
     {
         using ControlNet controlNet = new ControlNet(ControlNetConfig.Sd15(ControlNetMode.Canny), UNetConfig.Sd15);
@@ -443,6 +731,13 @@ public sealed class AdapterLoaderTests : IDisposable
     {
         float[] result = new float[count];
         Array.Fill(result, 1f);
+        return result;
+    }
+
+    private static float[] RampArray(int count)
+    {
+        float[] result = new float[count];
+        for (int i = 0; i < count; i++) result[i] = (i % 17) * 0.05f;
         return result;
     }
 

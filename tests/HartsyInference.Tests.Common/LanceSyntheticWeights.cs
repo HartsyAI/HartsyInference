@@ -8,7 +8,7 @@ public static unsafe class LanceSyntheticWeights
 {
     private static int _seed = 1000;
 
-    /// <summary>Builds a full `LanceTransformer` weight dict for the given (tiny) config: embed/vae_in/vae_out/time_embedder/norms + per-layer MoT und + `_moe_gen` siblings.</summary>
+    /// <summary>Builds a full `LanceTransformer` weight dict for the given (tiny) config using the REAL checkpoint key layout: embed/vae2llm/llm2vae/latent_pos_embed/time_embedder/norms + per-layer MoT und + `_moe_gen` siblings (incl. `q_norm`/`k_norm` when the config enables QK-norm).</summary>
     public static Dictionary<string, Tensor> BuildTransformer(LanceConfig c)
     {
         int hidden = c.HiddenSize, heads = c.NumHeads, kv = c.NumKvHeads, hd = c.HeadDim, ffn = c.IntermediateSize;
@@ -16,8 +16,10 @@ public static unsafe class LanceSyntheticWeights
         Dictionary<string, Tensor> w = new()
         {
             ["embed_tokens.weight"] = R([c.VocabSize, hidden]),
-            ["vae_in.weight"] = R([hidden, patch]), ["vae_in.bias"] = R([hidden]),
-            ["vae_out.weight"] = R([patch, hidden]), ["vae_out.bias"] = R([patch]),
+            ["vae2llm.weight"] = R([hidden, patch]), ["vae2llm.bias"] = R([hidden]),
+            ["llm2vae.weight"] = R([patch, hidden]), ["llm2vae.bias"] = R([patch]),
+            // 4 latent frames of capacity so tiny video tests (gridT ≤ 4) index in range; the real image ckpt ships 1 frame (4096 rows).
+            ["latent_pos_embed.pos_embed"] = R([4L * c.MaxLatentSize * c.MaxLatentSize, hidden]),
             ["time_embedder.mlp.0.weight"] = R([hidden, c.TimestepFrequencyDim]), ["time_embedder.mlp.0.bias"] = R([hidden]),
             ["time_embedder.mlp.2.weight"] = R([hidden, hidden]), ["time_embedder.mlp.2.bias"] = R([hidden]),
             ["norm.weight"] = R([hidden]), ["norm_moe_gen.weight"] = R([hidden]),
@@ -31,6 +33,11 @@ public static unsafe class LanceSyntheticWeights
                 w[$"{p}.self_attn.k_proj{suf}.weight"] = R([kvDim, hidden]); w[$"{p}.self_attn.k_proj{suf}.bias"] = R([kvDim]);
                 w[$"{p}.self_attn.v_proj{suf}.weight"] = R([kvDim, hidden]); w[$"{p}.self_attn.v_proj{suf}.bias"] = R([kvDim]);
                 w[$"{p}.self_attn.o_proj{suf}.weight"] = R([hidden, qDim]);
+                if (c.QkNorm)
+                {
+                    w[$"{p}.self_attn.q_norm{suf}.weight"] = R([hd]);
+                    w[$"{p}.self_attn.k_norm{suf}.weight"] = R([hd]);
+                }
                 w[$"{p}.mlp{suf}.gate_proj.weight"] = R([ffn, hidden]);
                 w[$"{p}.mlp{suf}.up_proj.weight"] = R([ffn, hidden]);
                 w[$"{p}.mlp{suf}.down_proj.weight"] = R([hidden, ffn]);

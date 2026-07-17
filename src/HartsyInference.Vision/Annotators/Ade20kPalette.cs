@@ -1,0 +1,55 @@
+namespace HartsyInference.Vision.Annotators;
+
+/// <summary>The standard 150-class ADE20K color palette used by controlnet_aux / comfyui_controlnet_aux
+/// (<c>ade_palette()</c>) and the diffusers seg-ControlNet examples — the exact colors
+/// <c>control_v11p_sd15_seg</c> was conditioned on. Entries are packed <c>0xRRGGBB</c>.</summary>
+public static class Ade20kPalette
+{
+    /// <summary>Number of ADE20K classes.</summary>
+    public const int ClassCount = 150;
+
+    private static readonly uint[] Colors =
+    [
+        0x787878, 0xB47878, 0x06E6E6, 0x503232, 0x04C803, 0x787850, 0x8C8C8C, 0xCC05FF,
+        0xE6E6E6, 0x04FA07, 0xE005FF, 0xEBFF07, 0x96053D, 0x787846, 0x08FF33, 0xFF0652,
+        0x8FFF8C, 0xCCFF04, 0xFF3307, 0xCC4603, 0x0066C8, 0x3DE6FA, 0xFF0633, 0x0B66FF,
+        0xFF0747, 0xFF09E0, 0x0907E6, 0xDCDCDC, 0xFF095C, 0x7009FF, 0x08FFD6, 0x07FFE0,
+        0xFFB806, 0x0AFF47, 0xFF290A, 0x07FFFF, 0xE0FF08, 0x6608FF, 0xFF3D06, 0xFFC207,
+        0xFF7A08, 0x00FF14, 0xFF0829, 0xFF0599, 0x0633FF, 0xEB0CFF, 0xA09614, 0x00A3FF,
+        0x8C8C8C, 0xFA0A0F, 0x14FF00, 0x1FFF00, 0xFF1F00, 0xFFE000, 0x99FF00, 0x0000FF,
+        0xFF4700, 0x00EBFF, 0x00ADFF, 0x1F00FF, 0x0BC8C8, 0xFF5200, 0x00FFF5, 0x003DFF,
+        0x00FF70, 0x00FF85, 0xFF0000, 0xFFA300, 0xFF6600, 0xC2FF00, 0x008FFF, 0x33FF00,
+        0x0052FF, 0x00FF29, 0x00FFAD, 0x0A00FF, 0xADFF00, 0x00FF99, 0xFF5C00, 0xFF00FF,
+        0xFF00F5, 0xFF0066, 0xFFAD00, 0xFF0014, 0xFFB8B8, 0x001FFF, 0x00FF3D, 0x0047FF,
+        0xFF00CC, 0x00FFC2, 0x00FF52, 0x000AFF, 0x0070FF, 0x3300FF, 0x00C2FF, 0x007AFF,
+        0x00FFA3, 0xFF9900, 0x00FF0A, 0xFF7000, 0x8FFF00, 0x5200FF, 0xA3FF00, 0xFFEB00,
+        0x08B8AA, 0x8500FF, 0x00FF5C, 0xB800FF, 0xFF001F, 0x00B8FF, 0x00D6FF, 0xFF0070,
+        0x5CFF00, 0x00E0FF, 0x70E0FF, 0x46B8A0, 0xA300FF, 0x9900FF, 0x47FF00, 0xFF00A3,
+        0xFFCC00, 0xFF008F, 0x00FFEB, 0x85FF00, 0xFF00EB, 0xF500FF, 0xFF007A, 0xFFF500,
+        0x0ABED4, 0xD6FF00, 0x00CCFF, 0x1400FF, 0xFFFF00, 0x0099FF, 0x0029FF, 0x00FFCC,
+        0x2900FF, 0x29FF00, 0xAD00FF, 0x00F5FF, 0x4700FF, 0x7A00FF, 0x00FFB8, 0x005CFF,
+        0xB8FF00, 0x0085FF, 0xFFD600, 0x19C2C2, 0x66FF00, 0x5C00FF,
+    ];
+
+    /// <summary>Packed <c>0xRRGGBB</c> color for a class index.</summary>
+    public static uint Color(int classIndex)
+    {
+        if (classIndex < 0 || classIndex >= ClassCount)
+            throw new ArgumentOutOfRangeException(nameof(classIndex), $"ADE20K class index must be in [0,{ClassCount}); got {classIndex}.");
+        return Colors[classIndex];
+    }
+
+    /// <summary>Colorizes a class-index map into interleaved RGB24 bytes.</summary>
+    public static byte[] Colorize(ReadOnlySpan<byte> classMap)
+    {
+        byte[] rgb = new byte[classMap.Length * 3];
+        for (int i = 0; i < classMap.Length; i++)
+        {
+            uint c = Color(classMap[i]);
+            rgb[i * 3] = (byte)(c >> 16);
+            rgb[i * 3 + 1] = (byte)(c >> 8);
+            rgb[i * 3 + 2] = (byte)c;
+        }
+        return rgb;
+    }
+}

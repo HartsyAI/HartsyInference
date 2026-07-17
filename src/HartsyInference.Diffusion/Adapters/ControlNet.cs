@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
@@ -11,7 +12,7 @@ namespace HartsyInference.Diffusion.Adapters;
 ///
 /// <para>Implementation reuses <see cref="DownBlock"/>, <see cref="UNetResNetBlock"/>, <see cref="CrossAttentionBlock"/>, <see cref="TimestepEmbedding"/>, and <see cref="AdditionEmbedding"/> verbatim — the diffusers ControlNet uses the same module shapes as the base UNet, so checkpoint key names line up 1:1 (<c>down_blocks.{i}.resnets.{j}.*</c>, <c>mid_block.resnets.{i}.*</c>, etc.). Only the hint encoder and the zero conv tower are new.</para>
 ///
-/// <para><b>Flux ControlNet</b> uses a different architecture (DiT blocks, no UNet down/mid) and is not yet supported here — separate adapter class needed. <see cref="ControlNetBaseModel.Sd15"/> and <see cref="ControlNetBaseModel.Sdxl"/> are wired now.</para></summary>
+/// <para><b>Flux ControlNet</b> uses a different architecture (DiT blocks, no UNet down/mid) and lives in the separate <see cref="FluxControlNet"/> adapter. This class covers <see cref="ControlNetBaseModel.Sd15"/> and <see cref="ControlNetBaseModel.Sdxl"/>.</para></summary>
 public sealed unsafe class ControlNet : IDisposable
 {
     private readonly ControlNetConfig _config;
@@ -29,6 +30,8 @@ public sealed unsafe class ControlNet : IDisposable
 
     // ── ControlNet-specific ─────────────────────────────────────────
     private readonly ControlNetCondEmbedding _condEmbedding;
+    /// <summary>Union-checkpoint fusion modules (task embedding + fusion transformer + control-type embedding); null for single-mode checkpoints — the plain path is untouched.</summary>
+    private readonly ControlNetUnionFusion? _unionFusion;
     /// <summary>1×1 zero-initialized convs, one per UNet skip injection point. Count derived from the base config: <c>1 (conv_in)</c> plus, for each down block, <c>LayersPerBlock</c> resnet/attn skips and <c>1</c> downsample skip when the block downsamples.</summary>
     private readonly Tensor?[] _zeroConvDownWeights;
     private readonly Tensor?[] _zeroConvDownBiases;
@@ -44,7 +47,7 @@ public sealed unsafe class ControlNet : IDisposable
         {
             throw new NotSupportedException(
                 "Flux ControlNet uses a DiT-based architecture and is not handled by this adapter. " +
-                "Use the Flux-specific ControlNet path when implemented.");
+                "Construct a FluxControlNet from ControlNetFile.FluxConfig instead.");
         }
         _config = config;
         _baseConfig = baseConfig;
@@ -81,6 +84,11 @@ public sealed unsafe class ControlNet : IDisposable
         _midResNet1 = new UNetResNetBlock(midCh, midCh, timeDim);
 
         _condEmbedding = new ControlNetCondEmbedding(config.ConditioningChannels, baseConfig.ModelChannels);
+        if (config.UnionControlTypeCount > 0)
+        {
+            _unionFusion = new ControlNetUnionFusion(
+                config.UnionControlTypeCount, baseConfig.ModelChannels, timeDim, baseConfig.AdditionTimeEmbedDim);
+        }
 
         // Skip count: 1 (conv_in) + per-block (LayersPerBlock + downsample-or-not).
         int numDownSkips = 1;
@@ -111,6 +119,7 @@ public sealed unsafe class ControlNet : IDisposable
         _midAttention.LoadWeights(weights, "mid_block.attentions.0");
         _midResNet1.LoadWeights(weights, "mid_block.resnets.1");
         _condEmbedding.LoadWeights(weights);
+        _unionFusion?.LoadWeights(weights);
         for (int i = 0; i < _zeroConvDownWeights.Length; i++)
         {
             _zeroConvDownWeights[i] = weights[$"controlnet_down_blocks.{i}.weight"];
@@ -129,6 +138,7 @@ public sealed unsafe class ControlNet : IDisposable
     /// <param name="pooledTextEmb">SDXL: pooled CLIP-G output <c>[B, 1280]</c>. Null for SD1.5.</param>
     /// <param name="sizeCondition">SDXL: micro-conditioning scalars <c>[origH, origW, cropTop, cropLeft, targetH, targetW]</c>. Empty for SD1.5.</param>
     /// <param name="conditioningScale">Multiplier applied to every output residual (0 = ControlNet contributes nothing, 1 = full strength). Per-block control would require structural changes to the zero-conv layout — out of scope for v1.</param>
+    /// <param name="unionControlTypeIndex">Union checkpoints only: which control type <paramref name="conditionImage"/> is (a <see cref="SdxlUnionControlType"/> value / <c>task_embedding</c> row index). Required for union checkpoints, must be null for single-mode ones.</param>
     /// <returns><c>downResiduals</c>: one per UNet skip slot, in skip-list order; <c>midResidual</c>: residual added onto the mid block's output. Caller owns and must dispose all returned tensors.</returns>
     public (Tensor[] downResiduals, Tensor midResidual) Forward(
         IBackend backend,
@@ -138,9 +148,22 @@ public sealed unsafe class ControlNet : IDisposable
         Tensor textEmbeddings,
         Tensor? pooledTextEmb,
         ReadOnlySpan<float> sizeCondition,
-        float conditioningScale = 1.0f)
+        float conditioningScale = 1.0f,
+        int? unionControlTypeIndex = null)
     {
         ThrowIfDisposed();
+        if (_unionFusion is not null && unionControlTypeIndex is null)
+        {
+            throw new HartsyInferenceException(
+                "This is a union ControlNet checkpoint — Forward requires a unionControlTypeIndex " +
+                "(set ControlNetConditioning.UnionControlType to the conditioning image's type).");
+        }
+        if (_unionFusion is null && unionControlTypeIndex is not null)
+        {
+            throw new HartsyInferenceException(
+                $"unionControlTypeIndex {unionControlTypeIndex} was passed to a single-mode ControlNet " +
+                "(no task_embedding in the checkpoint). Clear ControlNetConditioning.UnionControlType.");
+        }
         int batch = (int)latent.Shape[0];
         int height = (int)latent.Shape[2];
         int width = (int)latent.Shape[3];
@@ -156,6 +179,17 @@ public sealed unsafe class ControlNet : IDisposable
         Span<float> timesteps = stackalloc float[batch];
         timesteps.Fill(timestep);
         Tensor temb = _timeEmbedding.Forward(backend, timesteps, batch);
+        if (_unionFusion is not null)
+        {
+            // Union: control-type embedding is summed into temb BEFORE the ADM addition
+            // embedding — matches diffusers' emb = emb + control_emb; emb = emb + aug_emb order.
+            Tensor controlEmb = _unionFusion.ComputeControlEmbedding(backend, unionControlTypeIndex!.Value, batch);
+            Tensor combinedControl = new Tensor(temb.Shape, DType.F32);
+            backend.Add(combinedControl, temb, controlEmb);
+            temb.Dispose();
+            controlEmb.Dispose();
+            temb = combinedControl;
+        }
         if (_addEmbedding is not null && pooledTextEmb is not null)
         {
             Tensor addEmb = _addEmbedding.Forward(backend, pooledTextEmb, sizeCondition, batch);
@@ -179,9 +213,19 @@ public sealed unsafe class ControlNet : IDisposable
         Tensor hidden = new Tensor(convInShape, dtype);
         backend.Conv2D(hidden, latent, _convInWeight!, _convInBias, 1, 1, 1, 1);
 
-        // 4. Inject conditioning hint: hidden = hidden + condHint
-        Tensor sumHidden = new Tensor(hidden.Shape, dtype);
-        backend.Add(sumHidden, hidden, condHint);
+        // 4. Inject conditioning hint. Plain: hidden = hidden + condHint. Union: the fusion
+        //    transformer additionally contributes a per-channel bias from the pooled tokens
+        //    (hidden = hidden + condHint + spatial_ch_projs(fused cond token)).
+        Tensor sumHidden;
+        if (_unionFusion is not null)
+        {
+            sumHidden = _unionFusion.FuseConditionHint(backend, hidden, condHint, unionControlTypeIndex!.Value);
+        }
+        else
+        {
+            sumHidden = new Tensor(hidden.Shape, dtype);
+            backend.Add(sumHidden, hidden, condHint);
+        }
         hidden.Dispose();
         condHint.Dispose();
         hidden = sumHidden;
@@ -265,11 +309,11 @@ public sealed unsafe class ControlNet : IDisposable
         ReadOnlySpan<float> sizeCondition)
     {
         ControlNetConditioning first = controlNets[0];
-        (Tensor[] down, Tensor mid) = first.Adapter.Forward(backend, latent, first.ConditionImage, timestep, condTextEmb, condPooled, sizeCondition, first.Scale);
+        (Tensor[] down, Tensor mid) = first.Adapter.Forward(backend, latent, first.ConditionImage, timestep, condTextEmb, condPooled, sizeCondition, first.Scale, (int?)first.UnionControlType);
         for (int c = 1; c < controlNets.Count; c++)
         {
             ControlNetConditioning next = controlNets[c];
-            (Tensor[] downNext, Tensor midNext) = next.Adapter.Forward(backend, latent, next.ConditionImage, timestep, condTextEmb, condPooled, sizeCondition, next.Scale);
+            (Tensor[] downNext, Tensor midNext) = next.Adapter.Forward(backend, latent, next.ConditionImage, timestep, condTextEmb, condPooled, sizeCondition, next.Scale, (int?)next.UnionControlType);
             if (downNext.Length != down.Length)
             {
                 foreach (Tensor d in downNext) d.Dispose();
@@ -306,6 +350,10 @@ public sealed unsafe class ControlNet : IDisposable
             foreach (Tensor w in _addEmbedding.EnumerateWeights()) yield return w;
         }
         foreach (Tensor w in _condEmbedding.EnumerateWeights()) yield return w;
+        if (_unionFusion is not null)
+        {
+            foreach (Tensor w in _unionFusion.EnumerateWeights()) yield return w;
+        }
         for (int i = 0; i < _downBlocks.Length; i++)
         {
             foreach (Tensor w in _downBlocks[i].EnumerateWeights()) yield return w;
@@ -334,6 +382,7 @@ public sealed unsafe class ControlNet : IDisposable
             Array.Clear(_zeroConvDownBiases);
             _zeroConvMidWeight = null; _zeroConvMidBias = null;
             _condEmbedding.Dispose();
+            _unionFusion?.Dispose();
         }
         GC.SuppressFinalize(this);
     }
