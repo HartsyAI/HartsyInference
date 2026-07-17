@@ -51,4 +51,38 @@ public sealed class ClipPresetSurfaceTests
         Assert.False(ClipPreset.OpenClipHuge.VisionConfig.UseQuickGelu);
         Assert.False(ClipPreset.OpenClipBigG.VisionConfig.UseQuickGelu);
     }
+
+    [Fact]
+    public void MetaClip_HasMatchingProjectionDims_AndQuickGelu()
+    {
+        // MetaCLIP v1 is the OpenAI CLIP arch (quick-GELU) re-trained — a genuine drop-in.
+        foreach (ClipPreset p in new[] { ClipPreset.MetaClipB16, ClipPreset.MetaClipL14, ClipPreset.MetaClipH14 })
+        {
+            Assert.Equal(p.TextConfig.ProjectionDim, p.VisionConfig.ProjectionDim);
+            Assert.Equal(p.EmbeddingDim, p.VisionConfig.ProjectionDim);
+            Assert.True(p.TextConfig.UseQuickGelu, $"{p.Name} text tower should be quick-GELU");
+            Assert.True(p.VisionConfig.UseQuickGelu, $"{p.Name} vision tower should be quick-GELU");
+        }
+    }
+
+    [Fact]
+    public void MetaClipB16_HasViTB16Shapes()
+    {
+        ClipPreset p = ClipPreset.MetaClipB16;
+        Assert.Equal(512, p.EmbeddingDim);
+        Assert.Equal(512, p.TextConfig.HiddenSize);
+        Assert.Equal(768, p.VisionConfig.HiddenSize);
+        Assert.Equal(16, p.VisionConfig.PatchSize);
+    }
+
+    [Fact]
+    public void EvaClip_TextTowerShapesPresent()
+    {
+        // EVA-CLIP's text tower is a standard CLIP transformer; the vision tower is EVA-02 (not a
+        // drop-in) — that limitation is documented on the preset, not asserted as a passing gate here.
+        ClipPreset p = ClipPreset.EvaClip02B16;
+        Assert.Equal(512, p.TextConfig.HiddenSize);
+        Assert.Equal(512, p.TextConfig.ProjectionDim);
+        Assert.Equal(16, p.VisionConfig.PatchSize);
+    }
 }

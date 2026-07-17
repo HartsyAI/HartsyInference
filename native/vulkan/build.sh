@@ -73,6 +73,8 @@ DTYPE_KERNELS=(
     upsample_bilinear2d
     matmul_tiled
     mask_add
+    maxpool2d
+    depthwise_conv2d
 )
 
 SINGLE_KERNELS=(
