@@ -28,16 +28,19 @@ public sealed unsafe class SamPositionalEncoding
         if (!ReferenceEquals(f32, gaussianMatrix)) f32.Dispose();
     }
 
-    /// <summary>Encodes a pixel coordinate (cell-centered, normalized by the image size) into a
-    /// <c>[EmbedDim]</c> vector written to <paramref name="destination"/>.</summary>
-    public void Encode(float x, float y, int imageWidth, int imageHeight, Span<float> destination)
+    /// <summary>Encodes a pixel coordinate (normalized by the image size) into a <c>[EmbedDim]</c> vector written
+    /// to <paramref name="destination"/>. <paramref name="cellCenter"/> adds the +0.5 the reference uses for the
+    /// dense grid (<c>get_dense_pe</c>); sparse prompt points pass <c>false</c> (<c>forward_with_coords</c>).</summary>
+    public void Encode(float x, float y, int imageWidth, int imageHeight, Span<float> destination, bool cellCenter = true)
     {
         if (destination.Length < EmbedDim)
             throw new ArgumentException($"Destination must hold at least {EmbedDim} floats.", nameof(destination));
 
-        // Normalize to [0,1] cell-centered, then to [-1,1].
-        float nx = (x + 0.5f) / imageWidth * 2f - 1f;
-        float ny = (y + 0.5f) / imageHeight * 2f - 1f;
+        // Normalize to [0,1] (cell-centered for the dense grid only), then to [-1,1].
+        float cx = cellCenter ? x + 0.5f : x;
+        float cy = cellCenter ? y + 0.5f : y;
+        float nx = cx / imageWidth * 2f - 1f;
+        float ny = cy / imageHeight * 2f - 1f;
 
         for (int f = 0; f < _numPosFeats; f++)
         {
