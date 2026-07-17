@@ -103,6 +103,10 @@ public static class ModelCatalog
             E("wan", vid, "Wan 2.2 (T2V + I2V)", "DiT + Wan VAE", vp),
             E("lance-video", vid, "Lance (Video, T2V)", "unified multimodal DiT", vp),
             E("kandinsky5-video", vid, "Kandinsky 5 Video", "DiT", vp),
+            // Cosmos-Predict1 Video2World — discrete-token autoregressive video continuation (T5-11B cross-attn +
+            // DV8x16x16 tokenizer + AR backbone). Engine-only; run via the sample invocation in VideoCommand help.
+            E("cosmos-predict1-5b-v2w", vid, "Cosmos-Predict1 5B Video2World", "AR discrete-token transformer", vp),
+            E("cosmos-predict1-13b-v2w", vid, "Cosmos-Predict1 13B Video2World", "AR discrete-token transformer", vp),
 
             // 3D
             E("triposr", d3, "TripoSR", "triplane / NeRF", st),
