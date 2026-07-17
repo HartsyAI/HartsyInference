@@ -40,6 +40,36 @@ closable on this box. Wall times are single runs via the API (includes HTTP + qu
 Parity gates for the perf work: Lens velocity corr 0.999973 / Lance 20-step image corr 0.999950 vs
 pre-change baseline (see `2026-07-16_lens_lance_genperf.md` for the full fix list).
 
+## Regression coverage — shared logic touched by the wave
+
+Every shared primitive the five branches changed was traced to its consumers and each consumer
+re-verified (live gen and/or numeric parity). No model regressed.
+
+| Shared change (file) | Blast radius (consumers) | Regression evidence |
+|---|---|---|
+| `IpAdapterPlusResampler.ResamplerLayer` GELU tanh→erf | IP-Adapter Plus family ONLY (grep-confirmed: no other ResamplerLayer users) | Live: IPA-Plus SDXL, IPA-Plus-Face SDXL, FaceID-PlusV2 SDXL — all coherent, identity carried |
+| `IpAdapterLoader.Detect`/`BuildConfig` (+isFaceIdV2, hoisted hasPerceiver) | ALL IP-Adapter variants | Live: IPA std SDXL, IPA std SD1.5, IPA Plus, plus-face, FaceID base, FaceID-PlusV2 — all coherent; `isPlus` logic byte-preserved |
+| `ControlNet`/`ControlNetLoader`/`Config`/`Conditioning` union path (null-guarded) | ALL SDXL + SD1.5 ControlNets | Live: SDXL plain canny, SD1.5 canny/depth/normalbae — all follow the reference; union path branches on null so plain path untouched at runtime |
+| `TimestepEmbedding` (Forward→ForwardEmbedding extraction) | ALL SDXL UNet models (runs every step) | Diff is a pure refactor (identical op order); exercised by every SDXL live gen above + flagship gate |
+| `AdditionEmbedding.EmbedScalar` (private→internal) | SDXL UNet | Signature/behavior unchanged; same coverage |
+| `DepthAnythingPreprocessor` (flux-mode kernel only) | Flux-Depth (changed) + SD/SDXL depth CN (min-max path) | Min-max bilinear loop extracted verbatim into `ResizeBilinearAlignCorners`, called only in the unchanged branch → SD1.5 depth CN live gen confirms; Flux-Depth live A/B confirms the intended change |
+| `ConvBnFold` (new) + `NormalBaeModel` refactor | NormalBAE annotator | Numeric parity re-verified (out_res1 7.9e-6, unchanged) + SD1.5 normalbae CN live gen: clay apple matches reference shape |
+| `SiglipImagePreprocessor` bilinear→AA-bicubic + `Resample.cs` (new) | SigLIP vision path (grep: zero non-test callers; deployed Redux uses its own resize) | No live blast radius; `ResampleTests` (Unit, torch-golden) + SigLIP/Redux parity tests green |
+
+Test tiers after the wave: **Vision unit 103/103**; **Diffusion shared-code sweep (adapters/CN/IPA/
+embeddings/Lens/Lance/SDXL/UNet) 193/194** with parallelism ON — the 1 failure is
+`AnimaLlmAdapterDiffTests`, a **pre-existing mis-tagged test** (its `t5_input_ids.bin` fixture is
+gitignored / never committed, fails on any fresh checkout; the Anima model was not touched by this
+wave). The earlier `LanceLatentPatchTests` parallel-suite corruption was root-caused (undisposed
+test Tensors finalized mid-assert → glibc tcache stomp) and fixed — repro filter now 103/103 5×/5.
+
+**Test-hygiene flag (not this wave's code, surfacing for the owning sessions):** at least three
+Unit-tier tests fail on a clean checkout because they depend on gitignored reference fixtures or
+OOM the host — `AnimaLlmAdapterDiffTests`, `AceStep15GuidanceParityTests` (music), and the ACE-Step
+e2e (music, 17 GB RSS). Per `CODE_STYLE.md` these need `[Trait("Category","Integration")]` + env
+gates so `main` stays green on the hosted runner. Left untouched here since they belong to the
+audio/Anima sessions; easy to tag on request.
+
 ## Notes / still open
 
 - Swarm scheduler quirk (pre-existing, observed on every boot tonight): the FIRST request for a
