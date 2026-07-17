@@ -58,6 +58,35 @@ public static unsafe class GdMath
         for (int i = 0; i < v.Length; i++) v[i] *= inv;
     }
 
+    /// <summary>DETR sinusoidal position embedding of anchor coordinates (<c>encode_sinusoidal_position_embedding</c>):
+    /// each coordinate → <paramref name="numPosFeats"/> interleaved sin/cos features; per-coordinate embeddings are
+    /// concatenated, with the first two coordinates (x, y) swapped for 2-D+ inputs. Returns
+    /// <c>[coords.Length * numPosFeats]</c>.</summary>
+    public static float[] EncodeSinusoid(ReadOnlySpan<float> coords, int numPosFeats, float temperature = 10000f)
+    {
+        float scale = 2f * MathF.PI;
+        float[] dimT = new float[numPosFeats];
+        for (int k = 0; k < numPosFeats; k++)
+            dimT[k] = MathF.Pow(temperature, 2f * (k / 2) / numPosFeats);
+        int nc = coords.Length;
+        float[][] embs = new float[nc][];
+        for (int c = 0; c < nc; c++)
+        {
+            float[] e = new float[numPosFeats];
+            for (int m = 0; m < numPosFeats; m += 2)
+            {
+                e[m] = MathF.Sin(coords[c] * scale / dimT[m]);
+                e[m + 1] = MathF.Cos(coords[c] * scale / dimT[m + 1]);
+            }
+            embs[c] = e;
+        }
+        if (nc >= 2) (embs[0], embs[1]) = (embs[1], embs[0]);
+        float[] outp = new float[(long)nc * numPosFeats];
+        for (int c = 0; c < nc; c++)
+            Array.Copy(embs[c], 0, outp, (long)c * numPosFeats, numPosFeats);
+        return outp;
+    }
+
     /// <summary>Swin relative-position index for a <paramref name="ws"/>×<paramref name="ws"/> window, flattened to
     /// <c>[ws*ws * ws*ws]</c>. Each entry indexes into <c>relative_position_bias_table[(2ws-1)^2, heads]</c>.</summary>
     public static int[] SwinRelativePositionIndex(int ws)

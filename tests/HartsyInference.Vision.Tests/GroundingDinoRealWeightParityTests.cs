@@ -154,6 +154,76 @@ public sealed class GroundingDinoRealWeightParityTests
         Assert.True(cT > 0.99, $"encoder_text corr too low: {cT:F6}");
     }
 
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void DetectorFromEncoderDumps_MatchesReference()
+    {
+        if (!TryPaths(out string ckpt, out string refDir))
+            return;
+
+        using IBackend backend = new CpuBackend();
+        using SafeTensorsLoader loader = new();
+        loader.Load(ckpt);
+        System.Collections.Generic.Dictionary<string, Tensor> w = loader.GetAllTensors();
+
+        GroundingDinoConfig cfg = GroundingDinoConfig.Tiny;
+        int[] ids = LoadI64(Path.Combine(refDir, "input_input_ids.i64"));
+        int t = ids.Length;
+        int[][] shapes = [[100, 134], [50, 67], [25, 34], [13, 17]];
+        int[] levelStart = [0, 13400, 16750, 17600];
+
+        using Tensor encVision = LoadF32Tensor(Path.Combine(refDir, "encoder_vision.bin"), new TensorShape(1, 17821, cfg.DModel));
+        using Tensor encText = LoadF32Tensor(Path.Combine(refDir, "encoder_text.bin"), new TensorShape(1, t, cfg.DModel));
+
+        using GroundingDinoDetector detector = new(cfg);
+        detector.LoadWeights(w);
+        GroundingDinoDetector.Output outp = detector.Forward(backend, encVision, encText, t, shapes, levelStart);
+
+        // vocab for phrase decoding
+        string vocabPath = Path.Combine(Path.GetDirectoryName(ckpt)!, "vocab.txt");
+        string[] vocab = File.Exists(vocabPath) ? GroundingDinoPipeline.LoadVocab(vocabPath) : Array.Empty<string>();
+        List<GroundingDinoDetection> dets = GroundingDinoPipeline.PostProcess(outp.Logits, outp.PredBoxes, ids, vocab, 480, 640);
+        outp.Logits.Dispose();
+        outp.PredBoxes.Dispose();
+
+        _out.WriteLine($"C# detections ({dets.Count}):");
+        foreach (GroundingDinoDetection dd in dets)
+            _out.WriteLine($"  [{dd.X0:F1},{dd.Y0:F1},{dd.X1:F1},{dd.Y1:F1}] score={dd.Score:F4} '{dd.Label}'");
+
+        // Oracle detections (from manifest.json)
+        (float[] box, float score, string label)[] oracle =
+        [
+            ([344.541f, 23.179f, 637.324f, 374.527f], 0.4878f, "a cat"),
+            ([12.228f, 52.015f, 316.895f, 472.613f], 0.4505f, "a cat"),
+            ([38.775f, 70.055f, 176.653f, 118.041f], 0.4651f, "a remote control"),
+        ];
+
+        foreach ((float[] ob, float os, string ol) in oracle)
+        {
+            double bestIou = 0; float bestScore = 0; string bestLabel = "";
+            foreach (GroundingDinoDetection dd in dets)
+            {
+                double iou = Iou(ob, [dd.X0, dd.Y0, dd.X1, dd.Y1]);
+                if (iou > bestIou) { bestIou = iou; bestScore = dd.Score; bestLabel = dd.Label; }
+            }
+            _out.WriteLine($"oracle '{ol}' s={os:F3} -> bestIoU={bestIou:F4} score={bestScore:F4} label='{bestLabel}'");
+            Assert.True(bestIou >= 0.9, $"top-box IoU too low for '{ol}': {bestIou:F4}");
+            Assert.Equal(ol, bestLabel);
+            Assert.True(Math.Abs(bestScore - os) < 0.05, $"score off for '{ol}': {bestScore:F4} vs {os:F4}");
+        }
+    }
+
+    private static double Iou(float[] a, float[] b)
+    {
+        float ix0 = Math.Max(a[0], b[0]), iy0 = Math.Max(a[1], b[1]);
+        float ix1 = Math.Min(a[2], b[2]), iy1 = Math.Min(a[3], b[3]);
+        float iw = Math.Max(0, ix1 - ix0), ih = Math.Max(0, iy1 - iy0);
+        float inter = iw * ih;
+        float areaA = (a[2] - a[0]) * (a[3] - a[1]);
+        float areaB = (b[2] - b[0]) * (b[3] - b[1]);
+        return inter / (areaA + areaB - inter + 1e-9);
+    }
+
     private static unsafe Tensor LoadF32Tensor(string path, TensorShape shape)
     {
         float[] data = LoadF32(path);
