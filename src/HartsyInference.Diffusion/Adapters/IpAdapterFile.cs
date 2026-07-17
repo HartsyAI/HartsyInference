@@ -1,15 +1,14 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.SafeTensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>A loaded IP-Adapter safetensors file with auto-detected variant (Standard / Plus / FaceID), base model, and parsed weight dictionary. The file's mmap-backed data is owned by this instance.</summary>
+/// <summary>A loaded IP-Adapter checkpoint (safetensors, or the torch-pickle <c>.bin</c> FaceID ships) with auto-detected variant (Standard / Plus / FaceID), base model, and parsed weight dictionary. The underlying loader (mmap for safetensors, owned tensor copies for pickle) is owned by this instance.</summary>
 public sealed class IpAdapterFile : IDisposable
 {
-    private SafeTensorsLoader? _loader;
+    private IDisposable? _loader;
     private int _disposed;
 
-    /// <summary>Path of the loaded safetensors file.</summary>
+    /// <summary>Path of the loaded checkpoint file.</summary>
     public required string FilePath { get; init; }
 
     /// <summary>Auto-detected base model architecture (Sd15, Sdxl, or Flux).</summary>
@@ -21,7 +20,7 @@ public sealed class IpAdapterFile : IDisposable
     /// <summary>All parsed tensors keyed by their original safetensors key.</summary>
     public required IReadOnlyDictionary<string, Tensor> Weights { get; init; }
 
-    internal void AttachLoader(SafeTensorsLoader loader) => _loader = loader;
+    internal void AttachLoader(IDisposable loader) => _loader = loader;
 
     public void Dispose()
     {

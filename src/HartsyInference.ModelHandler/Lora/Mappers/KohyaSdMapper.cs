@@ -151,6 +151,10 @@ public static class KohyaSdMapper
             "F16" => (float)BitConverter.UInt16BitsToHalf(*(ushort*)p),
             "BF16" => BitConverter.Int32BitsToSingle(*(ushort*)p << 16),
             "F64" => (float)*(double*)p,
+            // Integer alphas appear in the wild — h94's IP-Adapter FaceID companion LoRAs store
+            // alpha=128 as int64 scalars.
+            "I64" => *(long*)p,
+            "I32" => *(int*)p,
             _ => throw new HartsyInferenceException($"Unsupported alpha dtype: {t.DType.Name}"),
         };
     }
