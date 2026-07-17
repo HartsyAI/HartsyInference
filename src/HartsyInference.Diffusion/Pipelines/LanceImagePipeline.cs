@@ -87,7 +87,9 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
         Logs.Info($"Lance {opMode}: {width}x{height}, {steps} steps, cfg={cfg}, seed={seed} (grid {gridT}x{gridH}x{gridW}, {nVae} tokens)");
         Stopwatch sw = Stopwatch.StartNew();
 
+        Stopwatch preloadSw = Stopwatch.StartNew();
         Backend.PreloadWeights(_transformer.EnumerateWeights());
+        Logs.Info($"Transformer preload done in {preloadSw.ElapsedMilliseconds}ms");
 
         using LanceSequence cond = LancePipelineCommon.BuildGenSequence(_template, promptTokenIds, _config, gridT, gridH, gridW);
         using LanceSequence uncond = LancePipelineCommon.BuildGenSequence(_template, negativeTokenIds, _config, gridT, gridH, gridW);
@@ -129,8 +131,10 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
         Tensor vaeLatent = LancePipelineCommon.ChannelLastToBcthw(latentCl);   // [1,48,1,H/16,W/16]
         latentCl.Dispose();
 
+        Stopwatch vaeSw = Stopwatch.StartNew();
         Tensor rgb = _vae.Decode(Backend, vaeLatent);       // [1,3,1,H,W]
         vaeLatent.Dispose();
+        Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
         byte[] bytes = Rgb5dToBytes(rgb);
         rgb.Dispose();

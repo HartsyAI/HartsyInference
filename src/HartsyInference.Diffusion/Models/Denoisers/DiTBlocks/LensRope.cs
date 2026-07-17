@@ -10,6 +10,15 @@ public sealed unsafe class LensRope
     private readonly int _theta;
     private readonly int _headDim;
 
+    // Cached joint cos/sin tables in the [S, headDim] layout IBackend.WanRopeInterleaved reads (the angle for
+    // pair i duplicated at indices 2i and 2i+1). Position-only, so one host build serves every block of every
+    // step — replacing the per-block host ApplyRotationBatched, which was a D2H+H2D round trip of Q AND K per
+    // stream per block (the dominant Lens step cost). Keyed on the full sequence layout; a resolution or
+    // prompt-length change rebuilds. Joint order is [img, txt] (Lens's concat order — opposite of Qwen-Image).
+    private (int ImgH, int ImgW, int Txt, int TxtStart) _jointTableKey = (-1, -1, -1, -1);
+    private Tensor? _jointCos;
+    private Tensor? _jointSin;
+
     /// <summary>Creates a Lens RoPE with the given axis split. Lens always uses <c>scale_rope=True</c> — height/width positions are split into negative+positive halves around 0. Frame axis stays at <c>[0]</c> for image-only inference (frame=1).</summary>
     public LensRope(int[]? axesDim = null, int theta = 10000)
     {
@@ -69,6 +78,92 @@ public sealed unsafe class LensRope
 
     /// <summary>Computes the position offset for text tokens in <c>scale_rope=True</c> mode. Matches upstream's <c>max_vid_index = max(height // 2, width // 2)</c>.</summary>
     public static int ComputeTextPositionStart(int hPacked, int wPacked) => Math.Max(hPacked / 2, wPacked / 2);
+
+    /// <summary>Rotates Q and K in-place for the JOINT <c>[img, txt]</c> sequence in one host pass — bit-identical
+    /// to calling <see cref="ApplyImage"/> then <see cref="ApplyText"/> on the separate streams before concatenation
+    /// (RoPE is per-row independent). Batch&gt;1 fallback for the device rope path; both Q and K must be
+    /// <c>[B, numHeads, imgSeqLen + txtSeqLen, headDim]</c>.</summary>
+    public void ApplyJoint(Tensor q, Tensor k, int batch, int numHeads, int hPacked, int wPacked,
+        int txtSeqLen, int txtPositionStart)
+    {
+        int imgSeqLen = hPacked * wPacked;
+        int totalSeqLen = imgSeqLen + txtSeqLen;
+        int halfDim = _headDim / 2;
+        float[] cosTable = new float[totalSeqLen * halfDim];
+        float[] sinTable = new float[totalSeqLen * halfDim];
+
+        int[] rowPositions = ComputeCenteredPositions(hPacked);
+        int[] colPositions = ComputeCenteredPositions(wPacked);
+        for (int s = 0; s < imgSeqLen; s++)
+        {
+            int row = s / wPacked;
+            int col = s - row * wPacked;
+            FillTokenFreqs(cosTable, sinTable, s, frame: 0, height: rowPositions[row], width: colPositions[col]);
+        }
+        for (int s = 0; s < txtSeqLen; s++)
+        {
+            int pos = txtPositionStart + s;
+            FillTokenFreqs(cosTable, sinTable, imgSeqLen + s, frame: pos, height: pos, width: pos);
+        }
+
+        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, totalSeqLen);
+    }
+
+    /// <summary>Builds (or returns the cached) joint <c>[img, txt]</c> cos/sin tables for the device rope path,
+    /// <c>[S, headDim]</c> F32 in the <see cref="Core.Backends.IBackend.WanRopeInterleaved"/> convention (pair i's
+    /// angle duplicated at indices 2i and 2i+1). Same position math as <see cref="ApplyImage"/> +
+    /// <see cref="ApplyText"/> — RoPE is per-row independent, so rotating the GPU-concatenated joint sequence once
+    /// is bit-identical to the two per-stream host passes it replaces. Mirrors QwenImageRope.GetOrBuildJointTables.</summary>
+    public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(int hPacked, int wPacked, int txtSeqLen, int txtPositionStart)
+    {
+        (int, int, int, int) key = (hPacked, wPacked, txtSeqLen, txtPositionStart);
+        if (_jointCos is not null && _jointSin is not null && _jointTableKey == key)
+            return (_jointCos, _jointSin);
+        _jointCos?.Dispose();
+        _jointSin?.Dispose();
+
+        int imgSeqLen = hPacked * wPacked;
+        int totalSeqLen = imgSeqLen + txtSeqLen;
+        int halfDim = _headDim / 2;
+        float[] cosTable = new float[totalSeqLen * halfDim];
+        float[] sinTable = new float[totalSeqLen * halfDim];
+
+        int[] rowPositions = ComputeCenteredPositions(hPacked);
+        int[] colPositions = ComputeCenteredPositions(wPacked);
+        for (int s = 0; s < imgSeqLen; s++)
+        {
+            int row = s / wPacked;
+            int col = s - row * wPacked;
+            FillTokenFreqs(cosTable, sinTable, s, frame: 0, height: rowPositions[row], width: colPositions[col]);
+        }
+        for (int s = 0; s < txtSeqLen; s++)
+        {
+            int pos = txtPositionStart + s;
+            FillTokenFreqs(cosTable, sinTable, imgSeqLen + s, frame: pos, height: pos, width: pos);
+        }
+
+        Tensor cos = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
+        Tensor sin = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
+        float* cp = (float*)cos.DataPointer;
+        float* sp = (float*)sin.DataPointer;
+        for (int s = 0; s < totalSeqLen; s++)
+        {
+            for (int i = 0; i < halfDim; i++)
+            {
+                float c = cosTable[s * halfDim + i];
+                float sn = sinTable[s * halfDim + i];
+                long off = (long)s * _headDim + 2 * i;
+                cp[off] = c;
+                cp[off + 1] = c;
+                sp[off] = sn;
+                sp[off + 1] = sn;
+            }
+        }
+        _jointCos = cos;
+        _jointSin = sin;
+        _jointTableKey = key;
+        return (cos, sin);
+    }
 
     private static int[] ComputeCenteredPositions(int len)
     {

@@ -23,6 +23,14 @@ public sealed unsafe class LanceTransformer : IDisposable
     private Tensor? _timeMlp0W, _timeMlp0B, _timeMlp2W, _timeMlp2B;
     private Tensor? _normUnd, _normGen;        // final RMSNorm per role
 
+    // Step-invariant per-prompt state, keyed on the caller's array/tensor references (cond + uncond entries).
+    // Text-segment embeds, the gathered latent-pos rows, and the M-RoPE cos/sin tables are all constant across
+    // the denoise loop, so each builds once per prompt instead of once per forward. Cleared on Dispose.
+    private readonly RefCache _textSegmentCache = new();
+    private readonly RefCache _posEmbedCache = new();
+    private readonly RefCache _cosSinCache = new();
+    private Tensor? _onesRow;                  // [1, hidden] of 1.0f for the broadcast-add of the timestep embed
+
     public LanceTransformer(LanceConfig config)
     {
         _config = config;
@@ -88,38 +96,52 @@ public sealed unsafe class LanceTransformer : IDisposable
         if (latentPosIds.Length != nVae)
             throw new ArgumentException($"latentPosIds {latentPosIds.Length} != nVae {nVae}.");
 
-        // ── Build packed sequence [seq, hidden] ──
-        Tensor h = new Tensor(new TensorShape(seq, hidden), DType.F32);
-        new Span<float>((float*)h.DataPointer, checked((int)((long)seq * hidden))).Clear();
-        EmbedText(h, textTokenIds, undIdx, hidden);
+        // ── Contiguous role layout (BuildGenSequence's invariant): und [0, nPre) + [nPre+nVae, seq), gen the
+        // middle run. The GPU-resident block path routes roles via contiguous row slices instead of the old
+        // host gather/scatter, so validate the layout once up front. ──
+        (int nPre, int nTail) = ValidateContiguousLayout(undIdx, genIdx, seq);
 
-        // VAE tokens: vae2llm(latent) + latent_pos_embed[posId] + timestep embed
-        Tensor vaeHidden = new Tensor(new TensorShape(nVae, hidden), DType.F32);
-        backend.Linear(vaeHidden, latentTokens, _vae2llmW!, _vae2llmB);
+        // ── Build packed sequence [seq, hidden] on the device: cached text segments + per-step VAE tokens ──
+        (Tensor txtPre, Tensor txtTail) = GetOrBuildTextSegments(textTokenIds, nPre, nTail, hidden);
+
+        // VAE tokens: vae2llm(latent) + latent_pos_embed[posId] + timestep embed (broadcast over rows).
+        Tensor vaeProj = new Tensor(new TensorShape(nVae, hidden), DType.F32);
+        backend.Linear(vaeProj, latentTokens, _vae2llmW!, _vae2llmB);
+        Tensor posRows = GetOrBuildPosEmbedRows(latentPosIds, nVae, hidden);
+        Tensor vaePlusPos = new Tensor(vaeProj.Shape, DType.F32);
+        backend.Add(vaePlusPos, vaeProj, posRows);
+        vaeProj.Dispose();
         Tensor tEmb = ComputeTimestepEmbedding(backend, timestep);
-        AddVaeConditioning(vaeHidden, latentPosIds, tEmb, nVae, hidden);
+        _onesRow ??= CreateOnesRow(hidden);
+        Tensor vaeHidden = new Tensor(vaePlusPos.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(vaeHidden, vaePlusPos, _onesRow, tEmb);
+        vaePlusPos.Dispose();
         tEmb.Dispose();
-        ScatterRows(vaeHidden, genIdx, h, hidden);
+
+        Tensor h = new Tensor(new TensorShape(seq, hidden), DType.F32);
+        if (nTail > 0)
+            backend.Concat(h, new[] { txtPre, vaeHidden, txtTail }, 0);
+        else
+            backend.Concat(h, new[] { txtPre, vaeHidden }, 0);
         vaeHidden.Dispose();
         LanceDebugDump.Dump("packed_in", h);
 
-        // ── M-RoPE cos/sin ──
-        (Tensor cos, Tensor sin) = _rope.BuildCosSin(positionIds);
+        // ── M-RoPE cos/sin (cached per prompt: positions are step-invariant) ──
+        (Tensor cos, Tensor sin) = GetOrBuildCosSin(positionIds);
 
         // ── 36 MoT blocks ──
         Tensor cur = h;
         for (int i = 0; i < _blocks.Length; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, cur, cos, sin, _rope, undIdx, genIdx, attentionMask);
+            Tensor next = _blocks[i].Forward(backend, cur, cos, sin, nPre, nVae, attentionMask);
             cur.Dispose();
             cur = next;
             LanceDebugDump.Dump($"layers.{i}", cur);
         }
-        cos.Dispose();
-        sin.Dispose();
 
-        // ── Final norm (gen role) + llm2vae on gen tokens ──
-        Tensor genHidden = GatherRows(cur, genIdx, hidden);
+        // ── Final norm (gen role) + llm2vae on gen tokens (contiguous rows [nPre, nPre+nVae)) ──
+        Tensor genHidden = new Tensor(new TensorShape(nVae, hidden), DType.F32);
+        backend.SliceRows(genHidden, cur, nPre);
         cur.Dispose();
         Tensor genNormed = new Tensor(genHidden.Shape, DType.F32);
         backend.RmsNorm(genNormed, genHidden, _normGen!, _config.RmsNormEps);
@@ -131,38 +153,95 @@ public sealed unsafe class LanceTransformer : IDisposable
         return velocity;
     }
 
-    private void EmbedText(Tensor h, int[] tokenIds, int[] undIdx, int hidden)
+    /// <summary>Asserts the packed layout is und-prefix / gen-run / und-tail and returns the segment sizes.</summary>
+    private static (int nPre, int nTail) ValidateContiguousLayout(int[] undIdx, int[] genIdx, int seq)
     {
-        long vocabRows = _embedTokens!.Shape[0];
-        float* hPtr = (float*)h.DataPointer;
-        float* eptr = (float*)_embedTokens.DataPointer;
-        for (int i = 0; i < tokenIds.Length; i++)
+        int nGen = genIdx.Length;
+        int nPre = nGen > 0 ? genIdx[0] : undIdx.Length;
+        for (int i = 0; i < nGen; i++)
+            if (genIdx[i] != nPre + i)
+                throw new ArgumentException($"genIdx must be one contiguous run (genIdx[{i}]={genIdx[i]}, expected {nPre + i}).", nameof(genIdx));
+        for (int i = 0; i < undIdx.Length; i++)
         {
-            if ((uint)tokenIds[i] >= (uint)vocabRows)
-                throw new ArgumentOutOfRangeException(nameof(tokenIds), $"token id {tokenIds[i]} out of range for the {vocabRows}-row embedding.");
-            long src = (long)tokenIds[i] * hidden;
-            long dst = (long)undIdx[i] * hidden;
-            Buffer.MemoryCopy(eptr + src, hPtr + dst, (long)hidden * 4, (long)hidden * 4);
+            int expected = i < nPre ? i : nGen + i;
+            if (undIdx[i] != expected)
+                throw new ArgumentException($"undIdx must be the prefix+tail around the gen run (undIdx[{i}]={undIdx[i]}, expected {expected}).", nameof(undIdx));
         }
+        return (nPre, seq - nPre - nGen);
     }
 
-    private void AddVaeConditioning(Tensor vaeHidden, int[] latentPosIds, Tensor tEmb, int nVae, int hidden)
+    /// <summary>Returns the cached <c>(prefix, tail)</c> text-segment embeds for this token array, gathering rows
+    /// from <c>embed_tokens</c> on first use (host gather once per prompt; the tensors upload once by reference).</summary>
+    private (Tensor pre, Tensor tail) GetOrBuildTextSegments(int[] textTokenIds, int nPre, int nTail, int hidden)
     {
+        Tensor[]? cached = _textSegmentCache.Get(textTokenIds);
+        if (cached is not null) return (cached[0], cached[1]);
+
+        long vocabRows = _embedTokens!.Shape[0];
+        float* eptr = (float*)_embedTokens.DataPointer;
+        Tensor pre = new Tensor(new TensorShape(nPre, hidden), DType.F32);
+        Tensor tail = new Tensor(new TensorShape(Math.Max(nTail, 1), hidden), DType.F32);
+        float* prePtr = (float*)pre.DataPointer;
+        float* tailPtr = (float*)tail.DataPointer;
+        for (int i = 0; i < textTokenIds.Length; i++)
+        {
+            if ((uint)textTokenIds[i] >= (uint)vocabRows)
+                throw new ArgumentOutOfRangeException(nameof(textTokenIds), $"token id {textTokenIds[i]} out of range for the {vocabRows}-row embedding.");
+            float* dst = i < nPre ? prePtr + (long)i * hidden : tailPtr + (long)(i - nPre) * hidden;
+            Buffer.MemoryCopy(eptr + (long)textTokenIds[i] * hidden, dst, (long)hidden * 4, (long)hidden * 4);
+        }
+        _textSegmentCache.Put(textTokenIds, [pre, tail]);
+        return (pre, tail);
+    }
+
+    /// <summary>Returns the cached <c>[nVae, hidden]</c> gathered <c>latent_pos_embed</c> rows for this pos-id array.</summary>
+    private Tensor GetOrBuildPosEmbedRows(int[] latentPosIds, int nVae, int hidden)
+    {
+        Tensor[]? cached = _posEmbedCache.Get(latentPosIds);
+        if (cached is not null) return cached[0];
+
         long tableRows = _latentPosEmbed!.Shape[0];
-        float* vh = (float*)vaeHidden.DataPointer;
         float* pe = (float*)_latentPosEmbed.DataPointer;
-        float* te = (float*)tEmb.DataPointer; // [1, hidden]
+        Tensor rows = new Tensor(new TensorShape(nVae, hidden), DType.F32);
+        float* dst = (float*)rows.DataPointer;
         for (int i = 0; i < nVae; i++)
         {
             int row = latentPosIds[i];
             if ((uint)row >= (uint)tableRows)
                 throw new ArgumentOutOfRangeException(nameof(latentPosIds),
                     $"latent pos id {row} out of range for the checkpoint's {tableRows}-row latent_pos_embed table (grid too large for this variant).");
-            long off = (long)i * hidden;
-            long peOff = (long)row * hidden;
-            for (int d = 0; d < hidden; d++)
-                vh[off + d] += pe[peOff + d] + te[d];
+            Buffer.MemoryCopy(pe + (long)row * hidden, dst + (long)i * hidden, (long)hidden * 4, (long)hidden * 4);
         }
+        _posEmbedCache.Put(latentPosIds, [rows]);
+        return rows;
+    }
+
+    /// <summary>Returns the cached <c>[1, seq, headDim]</c> M-RoPE cos/sin tables for this position tensor.</summary>
+    private (Tensor cos, Tensor sin) GetOrBuildCosSin(Tensor positionIds)
+    {
+        Tensor[]? cached = _cosSinCache.Get(positionIds);
+        if (cached is not null) return (cached[0], cached[1]);
+
+        (Tensor cos, Tensor sin) = _rope.BuildCosSin(positionIds);
+        // Re-home into owned [1, seq, headDim] tensors (the rank ApplyRopeSingle broadcasts over heads) with
+        // stable references — the device cache is keyed by tensor identity, so a per-forward view would re-upload.
+        long rows = cos.Shape[0], dim = cos.Shape[1];
+        Tensor cos3 = new Tensor(new TensorShape(1, rows, dim), DType.F32);
+        Tensor sin3 = new Tensor(new TensorShape(1, rows, dim), DType.F32);
+        long bytes = rows * dim * sizeof(float);
+        Buffer.MemoryCopy((float*)cos.DataPointer, (float*)cos3.DataPointer, bytes, bytes);
+        Buffer.MemoryCopy((float*)sin.DataPointer, (float*)sin3.DataPointer, bytes, bytes);
+        cos.Dispose();
+        sin.Dispose();
+        _cosSinCache.Put(positionIds, [cos3, sin3]);
+        return (cos3, sin3);
+    }
+
+    private static Tensor CreateOnesRow(int hidden)
+    {
+        Tensor ones = new Tensor(new TensorShape(1, hidden), DType.F32);
+        new Span<float>((float*)ones.DataPointer, hidden).Fill(1.0f);
+        return ones;
     }
 
     /// <summary>Timestep embedding: sinusoidal (256, <c>[cos,sin]</c>) → Linear → SiLU → Linear → <c>[1, hidden]</c>. The input is the raw shifted flow time (upstream feeds t∈[0,1] directly, no ×1000).</summary>
@@ -184,24 +263,6 @@ public sealed unsafe class LanceTransformer : IDisposable
         return outT;
     }
 
-    private static Tensor GatherRows(Tensor src, int[] idx, int dim)
-    {
-        Tensor outT = new Tensor(new TensorShape(idx.Length, dim), DType.F32);
-        float* s = (float*)src.DataPointer;
-        float* d = (float*)outT.DataPointer;
-        for (int i = 0; i < idx.Length; i++)
-            Buffer.MemoryCopy(s + (long)idx[i] * dim, d + (long)i * dim, (long)dim * 4, (long)dim * 4);
-        return outT;
-    }
-
-    private static void ScatterRows(Tensor src, int[] idx, Tensor dst, int dim)
-    {
-        float* s = (float*)src.DataPointer;
-        float* d = (float*)dst.DataPointer;
-        for (int i = 0; i < idx.Length; i++)
-            Buffer.MemoryCopy(s + (long)i * dim, d + (long)idx[i] * dim, (long)dim * 4, (long)dim * 4);
-    }
-
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
     {
         Tensor t = w[key];
@@ -212,11 +273,47 @@ public sealed unsafe class LanceTransformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            _textSegmentCache.Clear();
+            _posEmbedCache.Clear();
+            _cosSinCache.Clear();
+            _onesRow?.Dispose();
+            _onesRow = null;
             _embedTokens = _vae2llmW = _vae2llmB = _llm2vaeW = _llm2vaeB = null;
             _latentPosEmbed = null;
             _timeMlp0W = _timeMlp0B = _timeMlp2W = _timeMlp2B = null;
             _normUnd = _normGen = null;
         }
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>Two-entry reference-keyed tensor cache (cond + uncond); a third distinct key evicts the oldest.</summary>
+    private sealed class RefCache
+    {
+        private readonly List<(object Key, Tensor[] Vals)> _entries = new(2);
+
+        public Tensor[]? Get(object key)
+        {
+            for (int i = 0; i < _entries.Count; i++)
+                if (ReferenceEquals(_entries[i].Key, key))
+                    return _entries[i].Vals;
+            return null;
+        }
+
+        public void Put(object key, Tensor[] vals)
+        {
+            if (_entries.Count >= 2)
+            {
+                foreach (Tensor t in _entries[0].Vals) t.Dispose();
+                _entries.RemoveAt(0);
+            }
+            _entries.Add((key, vals));
+        }
+
+        public void Clear()
+        {
+            for (int i = 0; i < _entries.Count; i++)
+                foreach (Tensor t in _entries[i].Vals) t.Dispose();
+            _entries.Clear();
+        }
     }
 }

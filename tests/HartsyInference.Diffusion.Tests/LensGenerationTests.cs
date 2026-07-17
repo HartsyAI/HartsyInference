@@ -57,12 +57,15 @@ public sealed class LensGenerationTests
         (int[] posTokens, _) = tokenizer.BuildChatInputs(prompt);
         _output.WriteLine($"[2/3] Prompt tokens: {posTokens.Length} (wrapper {GptOssTokenizer.DefaultTxtOffset})");
 
+        // Step/size env overrides (parity probes run 1 step; perf baselines the default 8 @ 1024²).
+        int steps = int.TryParse(Environment.GetEnvironmentVariable("LENS_T2I_STEPS"), out int st) ? st : 8;
+        int size = int.TryParse(Environment.GetEnvironmentVariable("LENS_T2I_SIZE"), out int sz) ? sz : 1024;
         TextToImageRequest request = new()
         {
             Prompt = prompt,
-            Width = 1024,
-            Height = 1024,
-            Steps = 8,
+            Width = size,
+            Height = size,
+            Steps = steps,
             CfgScale = 1.0f,
             Seed = 42,
         };
@@ -79,7 +82,9 @@ public sealed class LensGenerationTests
         _output.WriteLine($"Saved: {outputPath}");
 
         // Uniform-noise guard: a coherent image has strong per-row structure; noise does not.
-        AssertNotUniformNoise(rgb, w, h);
+        // Skipped for truncated (parity-probe) schedules — a 1-step partial denoise is legitimately noisy.
+        if (steps >= 4)
+            AssertNotUniformNoise(rgb, w, h);
     }
 
     /// <summary>Fails on the classic never-validated-port signature: per-pixel IID noise. Coherent images have neighboring-pixel correlation far above noise's ~0.</summary>
