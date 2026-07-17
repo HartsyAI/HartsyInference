@@ -393,6 +393,14 @@ public sealed unsafe class Tensor : IDisposable
                     dst[i] = (ushort)(BitConverter.SingleToUInt32Bits(f) >> 16);
                 }
             }
+            else if (DType == DType.F64 && targetDtype == DType.F32)
+            {
+                // PyTorch pickle checkpoints occasionally store parameters as float64 (e.g. LDA heads).
+                ReadOnlySpan<double> src = new ReadOnlySpan<double>(ptr, (int)count);
+                Span<float> dst = new Span<float>(result.DataPointer, (int)count);
+                for (int i = 0; i < (int)count; i++)
+                    dst[i] = (float)src[i];
+            }
             else
             {
                 throw new HartsyInferenceException(

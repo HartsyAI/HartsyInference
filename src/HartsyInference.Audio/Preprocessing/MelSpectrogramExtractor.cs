@@ -43,7 +43,10 @@ public sealed class MelSpectrogramExtractor
         // When WinLength &lt; NFft, torch.stft/torchaudio pad the analysis window to NFft *centered*
         // ((NFft-WinLength)/2 zeros each side) rather than left-aligning it. Most presets here have
         // WinLength == NFft so it is moot; StyleTTS2's reference mel (win 1200 &lt; n_fft 2048) needs it.
-        bool CenterWindowInFft = false);
+        bool CenterWindowInFft = false,
+        // Zonos's speaker front-end applies log(mel + floor) (additive) rather than log(max(mel, floor))
+        // (clamp). The two agree for mel ≫ floor but diverge near-silent bins; Zonos needs the additive form.
+        bool AdditiveLogFloor = false);
 
     /// <summary>Whisper preset: 16kHz, n_fft=400, hop=160, 80 mel bins, log10,
     /// power spectrum, drop-last-frame, +4/4 normalization. Used by all Whisper
@@ -128,6 +131,33 @@ public sealed class MelSpectrogramExtractor
         Scale: MelScale.Htk,
         SlaneyNorm: false,
         Center: true);
+
+    /// <summary>Zonos speaker-encoder logFbank front-end: torchaudio <c>MelSpectrogram(sr=16k, n_fft=512,
+    /// win=400, hop=160, n_mels=80, power=2, center=True, norm=None, mel_scale="htk")</c> then
+    /// <c>log(mel + 1e-6)</c>. The per-mel time-mean subtraction that follows in the reference is applied by the
+    /// caller (<c>ZonosSpeakerEncoder</c>) since it needs the full frame block. Win 400 &lt; n_fft 512 → the
+    /// analysis window is centered in the FFT frame.</summary>
+    public static Config Zonos16kConfig() => new(
+        SampleRate: 16_000,
+        NFft: 512,
+        WinLength: 400,
+        HopLength: 160,
+        NMels: 80,
+        Fmin: 0.0,
+        Fmax: 8000.0,
+        Norm: Normalization.None,
+        DropLastStftFrame: false,
+        LogBase: LogBase.Natural,
+        LogFloor: 1e-6f,
+        DynamicRangeDb: 0f,
+        NormOffset: 0f,
+        NormScale: 1f,
+        PowerSpectrum: true,
+        Scale: MelScale.Htk,
+        SlaneyNorm: false,
+        Center: true,
+        CenterWindowInFft: true,
+        AdditiveLogFloor: true);
 
     /// <summary>Standard HiFiGAN preset: 22.05kHz, n_fft=1024, hop=256, 80 mel bins.
     /// Magnitude spectrum, no normalization.</summary>
@@ -257,7 +287,7 @@ public sealed class MelSpectrogramExtractor
             float floor = _cfg.LogFloor ?? 1e-10f;
             for (int m = 0; m < _cfg.NMels; m++)
             {
-                float v = MathF.Max(_melCol[m], floor);
+                float v = _cfg.AdditiveLogFloor ? _melCol[m] + floor : MathF.Max(_melCol[m], floor);
                 float l = _cfg.LogBase == LogBase.Log10 ? MathF.Log10(v) : MathF.Log(v);
                 output[m, t] = l;
                 if (l > globalMax) globalMax = l;
@@ -316,7 +346,7 @@ public sealed class MelSpectrogramExtractor
         float floor = _cfg.LogFloor ?? 1e-10f;
         for (int m = 0; m < _cfg.NMels; m++)
         {
-            float v = MathF.Max(_melCol[m], floor);
+            float v = _cfg.AdditiveLogFloor ? _melCol[m] + floor : MathF.Max(_melCol[m], floor);
             float l = _cfg.LogBase == LogBase.Log10 ? MathF.Log10(v) : MathF.Log(v);
             melColumn[m] = l;
         }

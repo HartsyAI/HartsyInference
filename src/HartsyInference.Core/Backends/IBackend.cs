@@ -18,6 +18,11 @@ public interface IBackend : IDisposable
     /// <summary>Device memory (free, total) in bytes; (0,0) when not applicable (CPU backend).</summary>
     (long FreeBytes, long TotalBytes) GetVramInfo() => (0, 0);
 
+    /// <summary>When true, F32 GEMMs use full 32-bit compute instead of TF32 tensor-core math. Models whose
+    /// autoregressive loops accumulate error over many steps (e.g. Zonos) require this to match the reference.
+    /// No-op on backends without TF32 (CPU/Vulkan).</summary>
+    bool HighPrecisionGemm { get => false; set { } }
+
     /// <summary>Capabilities of this backend.</summary>
     BackendCapabilities Capabilities { get; }
 

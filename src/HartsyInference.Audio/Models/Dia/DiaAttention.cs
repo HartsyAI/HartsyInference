@@ -15,15 +15,21 @@ public sealed unsafe class DiaAttention
 {
     private readonly int _qHeads, _kvHeads, _headDim, _qInDim, _kvInDim, _outDim;
     private readonly bool _useRope;
+    private readonly bool _interleavedRope;
+    private readonly float _attnScale;
     private Tensor? _qW, _kW, _vW, _oW;
     // Cross-attention precomputed K/V (constant across decode steps).
     private Tensor? _crossK, _crossV;
     private int _crossLen;
 
-    public DiaAttention(int qHeads, int kvHeads, int headDim, int qInDim, int kvInDim, int outDim, bool useRope)
+    /// <param name="attnScale">Softmax logit scale. Dia pre-scales Q and passes 1.0; models that rely on SDPA's
+    /// default scaling (e.g. Zonos) pass <c>1/√head_dim</c>.</param>
+    public DiaAttention(int qHeads, int kvHeads, int headDim, int qInDim, int kvInDim, int outDim, bool useRope,
+        bool interleavedRope = false, float attnScale = 1f)
     {
         _qHeads = qHeads; _kvHeads = kvHeads; _headDim = headDim;
         _qInDim = qInDim; _kvInDim = kvInDim; _outDim = outDim; _useRope = useRope;
+        _interleavedRope = interleavedRope; _attnScale = attnScale;
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
@@ -54,9 +60,17 @@ public sealed unsafe class DiaAttention
 
         if (_useRope)
         {
-            // Dia uses split-half (NeoX) RoPE (chunk(x, 2)), not the GPT-J interleaved form.
-            DiaWeights.RopeSplitHalfInPlace(qMh, _qHeads, t, _headDim, posStart, cos!, sin!);
-            DiaWeights.RopeSplitHalfInPlace(kMh, _kvHeads, t, _headDim, posStart, cos!, sin!);
+            // Dia uses split-half (NeoX) RoPE (chunk(x, 2)); Zonos uses the GPT-J interleaved form.
+            if (_interleavedRope)
+            {
+                DiaWeights.RopeInterleavedInPlace(qMh, _qHeads, t, _headDim, posStart, cos!, sin!);
+                DiaWeights.RopeInterleavedInPlace(kMh, _kvHeads, t, _headDim, posStart, cos!, sin!);
+            }
+            else
+            {
+                DiaWeights.RopeSplitHalfInPlace(qMh, _qHeads, t, _headDim, posStart, cos!, sin!);
+                DiaWeights.RopeSplitHalfInPlace(kMh, _kvHeads, t, _headDim, posStart, cos!, sin!);
+            }
         }
 
         Tensor kUse, vUse;
@@ -113,9 +127,9 @@ public sealed unsafe class DiaAttention
             DiaHeads.RepeatKv(kRep, kMh, _kvHeads, group, kvLen, _headDim);
             DiaHeads.RepeatKv(vRep, vMh, _kvHeads, group, kvLen, _headDim);
         }
-        // Dia applies NO 1/sqrt(head_dim) scaling (the reference passes scale=1.0).
+        // Dia pre-scales Q so its scale is 1.0; Zonos relies on SDPA's default 1/sqrt(head_dim) (see ctor).
         Tensor attn = new(new TensorShape(1, _qHeads, t, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kRep, vRep, mask, 1f);
+        backend.ScaledDotProductAttention(attn, qMh, kRep, vRep, mask, _attnScale);
         if (group != 1) { kRep.Dispose(); vRep.Dispose(); }
         Tensor flat = new(new TensorShape(1, t, _qHeads * _headDim), DType.F32);
         DiaHeads.HeadsToFlat(flat, attn, t, _qHeads, _headDim); attn.Dispose();

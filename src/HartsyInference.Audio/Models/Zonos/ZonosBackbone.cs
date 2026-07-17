@@ -98,8 +98,9 @@ public sealed unsafe class ZonosBlock
     public ZonosBlock(ZonosConfig cfg)
     {
         _cfg = cfg;
-        _attn = new DiaAttention(cfg.NumHeads, cfg.NumKvHeads, cfg.HeadDim, cfg.Hidden, cfg.Hidden, cfg.Hidden, useRope: true);
-        _mlp = new DiaMlp(cfg.Hidden, cfg.FfnIntermediate);
+        _attn = new DiaAttention(cfg.NumHeads, cfg.NumKvHeads, cfg.HeadDim, cfg.Hidden, cfg.Hidden, cfg.Hidden,
+            useRope: true, interleavedRope: true, attnScale: 1f / MathF.Sqrt(cfg.HeadDim));
+        _mlp = new DiaMlp(cfg.Hidden, cfg.FfnIntermediate, siluOnFirstHalf: false);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)

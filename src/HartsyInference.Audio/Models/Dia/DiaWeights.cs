@@ -73,4 +73,27 @@ public static unsafe class DiaWeights
                 }
             }
     }
+
+    /// <summary>GPT-J interleaved RoPE: rotates adjacent element pairs <c>(2d, 2d+1)</c> using the same
+    /// <paramref name="cos"/>/<paramref name="sin"/> tables (identical inv-freqs, only the pairing differs from
+    /// <see cref="RopeSplitHalfInPlace"/>). Used by Zonos (<c>rotary_emb_interleaved=true</c>).</summary>
+    public static void RopeInterleavedInPlace(Tensor t, int heads, int seqLen, int headDim, int posStart,
+        float[] cos, float[] sin)
+    {
+        int half = headDim / 2;
+        float* p = (float*)t.DataPointer;
+        for (int h = 0; h < heads; h++)
+            for (int s = 0; s < seqLen; s++)
+            {
+                long baseOff = ((long)h * seqLen + s) * headDim;
+                int row = (posStart + s) * half;
+                for (int d = 0; d < half; d++)
+                {
+                    float c = cos[row + d], sn = sin[row + d];
+                    float x1 = p[baseOff + 2 * d], x2 = p[baseOff + 2 * d + 1];
+                    p[baseOff + 2 * d] = x1 * c - x2 * sn;
+                    p[baseOff + 2 * d + 1] = x2 * c + x1 * sn;
+                }
+            }
+    }
 }

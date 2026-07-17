@@ -329,15 +329,17 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] **Reconcile on checkpoint load:** NeuCodec key spelling, the RoPE convention (torchtune vs interleaved), the iSTFT "same"-padding edge handling, and the FSQ project_out presence; NeuCodec **encoder** (ref-audio → codes) for live cloning is deferred (caller supplies pre-encoded ref codes).
 - [ ] eSpeak phonemizer + Qwen tokenizer for the prompt — token-ids-in for now (caller phonemizes/tokenizes), same convention as the other TTS models.
 
-### Zonos-v0.1 (transformer) — BUILT (structural, synthetic-forward verified); checkpoint-gated
-> `Zyphra/Zonos-v0.1-transformer` (~2B). Llama-style GQA decoder (**LayerNorm**, interleaved RoPE) → 9-codebook
-> DAC 44.1 kHz (k+1 delay) conditioned on a phoneme + speaker + controls prefix. Research:
-> [`ZONOS_ARCHITECTURE.md`](../Research/ZONOS_ARCHITECTURE.md). Files under [`Models/Zonos/`](../../src/HartsyInference.Audio/Models/Zonos/) + [`ZonosPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/ZonosPipeline.cs).
-- [x] [`ZonosConfig.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosConfig.cs) — backbone (2048/26L/GQA 16:4/head_dim 128/SwiGLU 8192/θ=10000) + codebooks (9, in-vocab 1026, out-vocab 1025, EOS 1024, masked 1025) + delay k+1 + CFG 2.0. **Tested.**
-- [x] [`ZonosBackbone.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosBackbone.cs) — 26 LayerNorm blocks **reusing `DiaAttention` + `DiaMlp`** (split fused `in_proj`, remap `fc1/fc2` at load). **Synthetic-weights forward verified** (finite).
-- [x] [`ZonosCodebooks.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosCodebooks.cs) — 9 summed embeddings + 9 stacked heads. **Tested.** [`ZonosFourierConditioner.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosFourierConditioner.cs) — Gaussian random-feature cos/sin. **Tested.**
-- [x] [`ZonosPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/ZonosPipeline.cs) — cond/uncond backbones (shared weights) → delayed-AR over 9 codebooks → CFG → cb0 EOS + 9-step flush → revert → DAC decode.
-- [ ] **Reconcile/deferred:** espeak-ng phonemization + the full conditioning-prefix assembly (speaker/integer/passthrough conditioners), ResNet293 speaker encoder, the NovelAI "unified" sampler, and the interleaved-RoPE convention check.
+### Zonos-v0.1 (transformer) — REAL-WEIGHT PARITY VERIFIED (07-16); e2e voice-cloning TTS
+> `Zyphra/Zonos-v0.1-transformer` (~2B) + separate `Zyphra/Zonos-v0.1-speaker-embedding` (ResNet293). Llama-style
+> GQA decoder (**LayerNorm**, **interleaved RoPE**, **SDPA scale 1/√head_dim**) → 9-codebook DAC 44.1 kHz (k+1
+> delay) conditioned on a phoneme + speaker + controls prefix. Research:
+> [`ZONOS_ARCHITECTURE.md`](../Research/ZONOS_ARCHITECTURE.md). Files under [`Models/Zonos/`](../../src/HartsyInference.Audio/Models/Zonos/) + [`ZonosPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/ZonosPipeline.cs) + [`ZonosTts.cs`](../../src/HartsyInference.Audio/Pipelines/ZonosTts.cs).
+- [x] [`ZonosConfig.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosConfig.cs) — backbone (2048/26L/GQA 16:4/head_dim 128/SwiGLU 8192/θ=10000) + codebooks (9, in-vocab 1026, out-vocab 1025, EOS 1024, masked 1025) + delay k+1 + CFG 2.0 + rep-penalty 3.0/window 2. **Tested.**
+- [x] [`ZonosBackbone.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosBackbone.cs) — 26 LayerNorm blocks reusing `DiaAttention` + `DiaMlp` (parameterized this pass: **interleaved RoPE**, **`up·silu(gate)` MLP half-order**, **`1/√head_dim` attention scale** — three parity bugs fixed). **Prefill logits corr 1.000000 + argmax exact for all 9 codebooks vs upstream (F32 CPU).**
+- [x] [`ZonosSpeakerEncoder.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosSpeakerEncoder.cs) — ResNet293_based: logFbank (16 kHz `MelSpectrogramExtractor.Zonos16kConfig`) → SimAM BasicBlocks [10,20,64,3]/widths [64,128,256,512] (BN folded into conv at load) → Conv1d ASP → bottleneck 256 → LDA 128. **mel corr 1.000000, 128-d embedding corr 1.000000 vs `SpeakerEmbeddingLDA`.**
+- [x] [`ZonosConditioning.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosConditioning.cs) — 7-conditioner prefix + CFG-uncond branch (uncond_vectors; language index = id−(−1)). **cond + uncond prefix corr 1.000000.** [`ZonosPhonemeTokenizer.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosPhonemeTokenizer.cs) — espeak IPA → fixed 189-symbol table. **Exact vs reference ids; espeak segmental parity.**
+- [x] [`ZonosPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/ZonosPipeline.cs) — cond/uncond backbones → delayed-AR over 9 codebooks → CFG + min-p + repetition penalty → cb0 EOS + 9-step flush → revert → DAC decode. **Greedy codes bit-exact through 24 AR steps vs upstream** (divergence at step 25 is F32 argmax numerical drift). [`ZonosTts.cs`](../../src/HartsyInference.Audio/Pipelines/ZonosTts.cs) — e2e facade (ref clip → speaker → phonemes → prefix → generate).
+- [x] Extension `zonos_tts` (`ZonosModel.cs`) wired: model + DAC + ResNet293 `.pt` + LDA `.pt`, 24 kHz ref → 16 kHz resample, voice-clone required.
 
 ### Higgs Audio v2
 - [ ] Llama-3.2-3B with DualFFN (per-token-type routing) — extends the native Llama decoder

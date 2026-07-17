@@ -37,13 +37,14 @@ public sealed unsafe class AudioEncodersTests
             StageWidths = [8, 16],
             StageBlocks = [1, 1],
             PooledFreq = 40,        // 80-mel, strides [1,2] → 40
-            NormGroups = 4,
+            AspAttentionDim = 16,
             BottleneckDim = 32,
             EmbedDim = 128,
         };
         using CpuBackend backend = new();
         using ZonosSpeakerEncoder enc = new(c);
-        enc.LoadWeights(ZonosSpeakerWeights(c));
+        (Dictionary<string, Tensor> w, Dictionary<string, Tensor> lda) = ZonosSpeakerWeights(c);
+        enc.LoadWeights(w, lda);
 
         int t = 48;
         using Tensor mel = F3(1, c.NumMels, t);
@@ -120,15 +121,15 @@ public sealed unsafe class AudioEncodersTests
 
     // ── synthetic weight dictionaries ──
 
-    private static Dictionary<string, Tensor> ZonosSpeakerWeights(ZonosSpeakerConfig c)
+    /// <summary>Builds synthetic ResNet293-scheme weights (folded-conv keys) + the separate LDA dict.
+    /// running_var is filled positive so the folded BatchNorm has a real square root.</summary>
+    private static (Dictionary<string, Tensor>, Dictionary<string, Tensor>) ZonosSpeakerWeights(ZonosSpeakerConfig c)
     {
-        string p = "speaker_encoder";
         Dictionary<string, Tensor> w = new()
         {
-            [$"{p}.stem.conv.weight"] = F4(c.BaseWidth, 1, 3, 3),
-            [$"{p}.stem.norm.weight"] = F1(c.BaseWidth),
-            [$"{p}.stem.norm.bias"] = F1(c.BaseWidth),
+            ["front.conv1.weight"] = F4(c.BaseWidth, 1, 3, 3),
         };
+        Bn(w, "front.bn1", c.BaseWidth);
         int inC = c.BaseWidth;
         for (int s = 0; s < c.StageBlocks.Count; s++)
         {
@@ -136,32 +137,47 @@ public sealed unsafe class AudioEncodersTests
             int stride = s == 0 ? 1 : 2;
             for (int b = 0; b < c.StageBlocks[s]; b++)
             {
-                string bp = $"{p}.stages.{s}.blocks.{b}";
+                string bp = $"front.layer{s + 1}.{b}";
                 int blockStride = b == 0 ? stride : 1;
                 int blockIn = b == 0 ? inC : outC;
                 w[$"{bp}.conv1.weight"] = F4(outC, blockIn, 3, 3);
-                w[$"{bp}.norm1.weight"] = F1(outC);
-                w[$"{bp}.norm1.bias"] = F1(outC);
+                Bn(w, $"{bp}.bn1", outC);
                 w[$"{bp}.conv2.weight"] = F4(outC, outC, 3, 3);
-                w[$"{bp}.norm2.weight"] = F1(outC);
-                w[$"{bp}.norm2.bias"] = F1(outC);
+                Bn(w, $"{bp}.bn2", outC);
                 if (blockStride != 1 || blockIn != outC)
-                    w[$"{bp}.downsample.weight"] = F4(outC, blockIn, 1, 1);
+                {
+                    w[$"{bp}.downsample.0.weight"] = F4(outC, blockIn, 1, 1);
+                    Bn(w, $"{bp}.downsample.1", outC);
+                }
             }
             inC = outC;
         }
         int poolIn = c.StageWidths[^1] * c.PooledFreq;
-        w[$"{p}.asp.attention.weight"] = F2(poolIn, poolIn);
-        w[$"{p}.asp.attention.bias"] = F1(poolIn);
-        w[$"{p}.asp.score.weight"] = F2(poolIn, poolIn);
-        w[$"{p}.asp.score.bias"] = F1(poolIn);
-        w[$"{p}.bottleneck.weight"] = F2(c.BottleneckDim, 2 * poolIn);
-        w[$"{p}.bottleneck.bias"] = F1(c.BottleneckDim);
-        w[$"{p}.bottleneck_norm.weight"] = F1(c.BottleneckDim);
-        w[$"{p}.bottleneck_norm.bias"] = F1(c.BottleneckDim);
-        w[$"{p}.lda.weight"] = F2(c.EmbedDim, c.BottleneckDim);
-        w[$"{p}.lda.bias"] = F1(c.EmbedDim);
-        return w;
+        w["pooling.attention.0.weight"] = F3(c.AspAttentionDim, poolIn, 1);
+        w["pooling.attention.0.bias"] = F1(c.AspAttentionDim);
+        Bn(w, "pooling.attention.2", c.AspAttentionDim);
+        w["pooling.attention.3.weight"] = F3(poolIn, c.AspAttentionDim, 1);
+        w["pooling.attention.3.bias"] = F1(poolIn);
+        w["bottleneck.weight"] = F2(c.BottleneckDim, 2 * poolIn);
+        w["bottleneck.bias"] = F1(c.BottleneckDim);
+        Dictionary<string, Tensor> lda = new()
+        {
+            ["weight"] = F2(c.EmbedDim, c.BottleneckDim),
+            ["bias"] = F1(c.EmbedDim),
+        };
+        return (w, lda);
+    }
+
+    /// <summary>Adds a synthetic BatchNorm parameter set (running_var forced positive) under <paramref name="p"/>.</summary>
+    private static void Bn(Dictionary<string, Tensor> w, string p, int c)
+    {
+        w[$"{p}.weight"] = F1(c);
+        w[$"{p}.bias"] = F1(c);
+        w[$"{p}.running_mean"] = F1(c);
+        Tensor v = new(new TensorShape(c), DType.F32);
+        float* vp = (float*)v.DataPointer;
+        for (int i = 0; i < c; i++) vp[i] = 0.5f + 0.5f * (i % 3);
+        w[$"{p}.running_var"] = v;
     }
 
     private static Dictionary<string, Tensor> ZonosCondWeights(int phonemeVocab, int numLanguages)

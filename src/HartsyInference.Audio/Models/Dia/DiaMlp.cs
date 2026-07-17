@@ -5,13 +5,19 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Audio.Models.Dia;
 
 /// <summary>Dia SwiGLU MLP with a <b>fused</b> gate+up projection (<c>gate_up_proj</c> → 2·ffn, split into
-/// gate|up, <c>silu(gate)*up</c>, then <c>down_proj</c>). No biases.</summary>
+/// gate|up, <c>silu(gate)*up</c>, then <c>down_proj</c>). No biases. When <paramref name="siluOnFirstHalf"/> is
+/// <c>false</c> the halves are <c>up|gate</c> and the activation is <c>up·silu(gate)</c> — Zonos's
+/// <c>FeedForward</c> (<c>y, gate = fc1.chunk(2); fc2(y·silu(gate))</c>).</summary>
 public sealed unsafe class DiaMlp
 {
     private readonly int _dim, _ffn;
+    private readonly bool _siluOnFirstHalf;
     private Tensor? _gateUpW, _downW;
 
-    public DiaMlp(int dim, int ffn) { _dim = dim; _ffn = ffn; }
+    public DiaMlp(int dim, int ffn, bool siluOnFirstHalf = true)
+    {
+        _dim = dim; _ffn = ffn; _siluOnFirstHalf = siluOnFirstHalf;
+    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
@@ -31,10 +37,13 @@ public sealed unsafe class DiaMlp
             long abase = (long)s * _ffn;
             for (int i = 0; i < _ffn; i++)
             {
-                float g = gup[gbase + i];
-                float u = gup[gbase + _ffn + i];
-                float silu = g / (1f + MathF.Exp(-g));
-                ap[abase + i] = silu * u;
+                // first|second halves; silu is applied to the gate half (first when _siluOnFirstHalf).
+                float first = gup[gbase + i];
+                float second = gup[gbase + _ffn + i];
+                float gate = _siluOnFirstHalf ? first : second;
+                float up = _siluOnFirstHalf ? second : first;
+                float silu = gate / (1f + MathF.Exp(-gate));
+                ap[abase + i] = silu * up;
             }
         }
         gu.Dispose();
