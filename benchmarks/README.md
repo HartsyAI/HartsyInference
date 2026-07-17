@@ -59,6 +59,14 @@ Warm end-to-end seconds on an RTX 4090 vs the upstream Python reference on the s
 
 The Hunyuan3D wall was a pathological `Concat` (a per-slice `cuMemcpyDtoDAsync` loop → ~280k memcpy nodes/forward) — a fused kernel cut dit-loop 27.7 → 7.5 s bit-identical. Then DINOv2-giant host loops → device, fused DiT adaLN + QKV-split-norm kernels, and a device FourierEmbed. Unlike the video DiTs, the 3D forward is now near its compute floor (batched CFG was measured and ruled out).
 
+## Image conditioning features + Lens/Lance genperf (2026-07-16/17)
+
+Correctness/feature campaign for the image special-abilities set (ControlNet incl. union-type + FLUX-DiT + segmentation, IP-Adapter incl. FaceID / FaceID-Plus/PlusV2, FLUX Kontext/Fill/Canny/Depth/Redux, OmniGen2/Boogu/Qwen edits) — all live-verified through the SwarmUI API on an RTX 4090. Includes the shared-logic regression matrix (every changed primitive re-verified against its consumers, no model regressed) and the Lens/Lance generation-perf pass. Write-ups:
+
+- [`results/image_conditioning_2026-07-16.md`](results/image_conditioning_2026-07-16.md) — Wave 1/2 feature verifications + the 14 engine bugs the campaign surfaced.
+- [`results/image_deferred_wave_2026-07-17.md`](results/image_deferred_wave_2026-07-17.md) — deferred-wave (seg / union / FaceID-PlusV2 / Flux-depth kernel fix / Lens+Lance perf), flagship regression gate, and the shared-logic regression-coverage matrix.
+- [`results/2026-07-16_lens_lance_genperf.md`](results/2026-07-16_lens_lance_genperf.md) — Lens 14.4→0.55 s/step (26×) and Lance 12.8→0.33 s/step (39×), parity-gated.
+
 ## Quick start
 
 ```bash
