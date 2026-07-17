@@ -54,10 +54,10 @@ public static class IpAdapterLoader
 
         try
         {
-            (IpAdapterBaseModel baseModel, bool isPlus, bool isFaceId) = Detect(filePath, weights);
-            IpAdapterConfig config = BuildConfig(baseModel, isPlus, isFaceId, weights);
+            (IpAdapterBaseModel baseModel, bool isPlus, bool isFaceId, bool isFaceIdV2) = Detect(filePath, weights);
+            IpAdapterConfig config = BuildConfig(baseModel, isPlus, isFaceId, weights, isFaceIdV2);
 
-            Logs.Info($"Loaded IP-Adapter '{Path.GetFileName(filePath)}' (base={baseModel}, plus={isPlus}, faceId={isFaceId}, tensors={weights.Count}).");
+            Logs.Info($"Loaded IP-Adapter '{Path.GetFileName(filePath)}' (base={baseModel}, plus={isPlus}, faceId={isFaceId}, faceIdV2={isFaceIdV2}, tensors={weights.Count}).");
 
             IpAdapterFile file = new()
             {
@@ -76,9 +76,9 @@ public static class IpAdapterLoader
         }
     }
 
-    /// <summary>Detects (baseModel, isPlus, isFaceId) from the filename and weight-key signatures. Public so the
-    /// detection logic is unit-testable against synthetic key sets.</summary>
-    public static (IpAdapterBaseModel baseModel, bool isPlus, bool isFaceId) Detect(string filePath, IReadOnlyDictionary<string, Tensor> weights)
+    /// <summary>Detects (baseModel, isPlus, isFaceId, isFaceIdV2) from the filename and weight-key signatures.
+    /// Public so the detection logic is unit-testable against synthetic key sets.</summary>
+    public static (IpAdapterBaseModel baseModel, bool isPlus, bool isFaceId, bool isFaceIdV2) Detect(string filePath, IReadOnlyDictionary<string, Tensor> weights)
     {
         string lowered = Path.GetFileNameWithoutExtension(filePath).ToLowerInvariant();
         // FaceID signature: the checkpoint carries the embedded rank-128 LoRA half (ip_adapter.{i}.to_q_lora.*)
@@ -89,12 +89,17 @@ public static class IpAdapterLoader
         // Plus signature = a resampler: proj_in / latents keys (standard Plus) or the FaceID-Plus perceiver.
         // Standard checkpoints ALSO carry image_proj.norm.* (the post-projection LayerNorm), so norm keys must
         // NOT imply Plus; for FaceID files "plus" in the filename is authoritative (ProjPlusModel).
+        bool hasPerceiver = weights.Keys.Any(k => k.StartsWith("image_proj.perceiver_resampler.", StringComparison.Ordinal));
         bool isPlus = lowered.Contains("plus") || weights.ContainsKey("image_proj.proj_in.weight")
             || weights.ContainsKey("image_proj.latents")
-            || weights.Keys.Any(k => k.StartsWith("image_proj.perceiver_resampler.", StringComparison.Ordinal));
+            || hasPerceiver;
+        // FaceID-Plus v2 is structurally identical to v1 (same ProjPlusModel keys), differing only in
+        // training (shortcut path enabled) — the filename is the only signal (h94 ships "plusv2").
+        bool isFaceIdV2 = isFaceId && isPlus
+            && (lowered.Contains("plusv2") || lowered.Contains("plus-v2") || lowered.Contains("plus_v2"));
 
         IpAdapterBaseModel baseModel = DetectBaseModel(filePath, weights);
-        return (baseModel, isPlus, isFaceId);
+        return (baseModel, isPlus, isFaceId, isFaceIdV2);
     }
 
     private static IpAdapterBaseModel DetectBaseModel(string filePath, IReadOnlyDictionary<string, Tensor> weights)
@@ -129,7 +134,7 @@ public static class IpAdapterLoader
 
     /// <summary>Derives the variant config from the detected flags and projection tensor shapes. Public so the
     /// shape-derivation logic is unit-testable against synthetic weight dicts.</summary>
-    public static IpAdapterConfig BuildConfig(IpAdapterBaseModel baseModel, bool isPlus, bool isFaceId, IReadOnlyDictionary<string, Tensor> weights)
+    public static IpAdapterConfig BuildConfig(IpAdapterBaseModel baseModel, bool isPlus, bool isFaceId, IReadOnlyDictionary<string, Tensor> weights, bool isFaceIdV2 = false)
     {
         int crossDim = baseModel switch
         {
@@ -140,11 +145,13 @@ public static class IpAdapterLoader
         };
         int numTokens = isPlus ? 16 : 4;
         int imageDim = 1024;
+        int clipEmbeddingDim = 1280;
         if (isFaceId)
         {
             // FaceID MLP: proj.0 [hidden, idDim] gives the ArcFace embed dim (512); proj.2
-            // [numTokens*crossDim, hidden] gives the token count (4 plain, 16 portrait).
+            // [numTokens*crossDim, hidden] gives the token count (4 plain + Plus, 16 portrait).
             imageDim = 512;
+            numTokens = 4;
             if (weights.TryGetValue("image_proj.proj.0.weight", out Tensor? proj0) && proj0.Shape.Rank == 2)
             {
                 imageDim = (int)proj0.Shape[1];
@@ -152,6 +159,11 @@ public static class IpAdapterLoader
             if (weights.TryGetValue("image_proj.proj.2.weight", out Tensor? proj2) && proj2.Shape.Rank == 2)
             {
                 numTokens = (int)(proj2.Shape[0] / crossDim);
+            }
+            // FaceID-Plus perceiver: proj_in [crossDim, clipDim] gives the CLIP-Vision hidden size (1280 ViT-H).
+            if (weights.TryGetValue("image_proj.perceiver_resampler.proj_in.weight", out Tensor? projIn) && projIn.Shape.Rank == 2)
+            {
+                clipEmbeddingDim = (int)projIn.Shape[1];
             }
         }
         // The standard projection stores its Linear as image_proj.proj.weight [numTokens*crossDim, imageDim];
@@ -164,12 +176,16 @@ public static class IpAdapterLoader
         return new IpAdapterConfig
         {
             BaseModel = baseModel,
-            ClipImageModel = isFaceId ? "InsightFace ArcFace" : "ViT-H/14",
+            ClipImageModel = isFaceId
+                ? isPlus ? "InsightFace ArcFace + ViT-H/14" : "InsightFace ArcFace"
+                : "ViT-H/14",
             ImageEmbeddingDim = imageDim,
             NumImageTokens = numTokens,
             CrossAttentionDim = crossDim,
             IsPlus = isPlus,
             IsFaceId = isFaceId,
+            IsFaceIdV2 = isFaceIdV2,
+            ClipEmbeddingDim = clipEmbeddingDim,
         };
     }
 }
