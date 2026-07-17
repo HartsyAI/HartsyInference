@@ -43,6 +43,13 @@ public sealed class ZonosPhonemeTests
         }
 
         EspeakPhonemizer ph = EspeakPhonemizer.FromDataDirectory(dataDir, "en-us");
+        string? customText = Environment.GetEnvironmentVariable("ZONOS_TEXT");
+        if (!string.IsNullOrEmpty(customText))
+        {
+            string cipa = ZonosPhonemeTokenizer.NormalizePunctuation(ph.PhonemizeToIpa(customText, "en-us", preservePunctuation: true));
+            _out.WriteLine($"engine ipa (custom): {cipa}");
+            return;
+        }
         string raw = ph.PhonemizeToIpa("Hello, this is a test of the Zonos text to speech system.", "en-us", preservePunctuation: true);
         string ipa = ZonosPhonemeTokenizer.NormalizePunctuation(raw);
         _out.WriteLine($"engine ipa: {ipa}");

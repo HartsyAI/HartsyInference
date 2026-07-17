@@ -123,7 +123,7 @@ public sealed unsafe class ZonosSpeakerEncoder : IDisposable
         int h = nMels, w = t;
 
         Tensor x = ApplyConv(backend, img, _stem!, 1, 1, ref h, ref w);
-        Relu(x);
+        Relu(backend, x);
 
         foreach (Stage stage in _stages)
             foreach (SimAmBlock block in stage.Blocks)
@@ -162,12 +162,12 @@ public sealed unsafe class ZonosSpeakerEncoder : IDisposable
         int inH = h, inW = w;
         int outH = h, outW = w;
         Tensor h1 = ApplyConv(backend, x, block.Conv1, block.Stride, 1, ref outH, ref outW);
-        Relu(h1);
+        Relu(backend, h1);
         int th = outH, tw = outW;
         Tensor h2 = ApplyConv(backend, h1, block.Conv2, 1, 1, ref th, ref tw);
         h1.Dispose();
 
-        SimAm(h2, block.OutChannels, outH, outW);
+        SimAm(backend, h2, block.OutChannels, outH, outW);
 
         Tensor shortcut;
         if (block.Down is not null)
@@ -185,7 +185,7 @@ public sealed unsafe class ZonosSpeakerEncoder : IDisposable
         backend.Add(sum, h2, shortcut);
         h2.Dispose();
         shortcut.Dispose();
-        Relu(sum);
+        Relu(backend, sum);
 
         h = outH;
         w = outW;
@@ -207,8 +207,9 @@ public sealed unsafe class ZonosSpeakerEncoder : IDisposable
 
     /// <summary>SimAM in-place: per-channel energy weighting <c>x·sigmoid(e)</c> where
     /// <c>e = d²/(4·(v+λ)) + 0.5</c>, <c>d = x − mean</c>, <c>v = Σd²/(H·W−1)</c> over each channel plane.</summary>
-    private void SimAm(Tensor x, int c, int h, int w)
+    private void SimAm(IBackend backend, Tensor x, int c, int h, int w)
     {
+        backend.Sync();   // x was just written by a GPU conv; block on it before host reads (avoids async-free race)
         float* p = (float*)x.DataPointer;
         long plane = (long)h * w;
         float n = plane - 1 > 0 ? plane - 1 : 1;
@@ -241,11 +242,12 @@ public sealed unsafe class ZonosSpeakerEncoder : IDisposable
         int attDim = _cfg.AspAttentionDim;
         Tensor a0 = new(new TensorShape(1, attDim, w), DType.F32);
         backend.Conv1d(a0, feat, _aspAttn0W!, _aspAttn0B, 1, 0, 0, 1, 1);
-        Relu(a0);
+        Relu(backend, a0);
         ApplyBatchNorm1d(a0, attDim, w);
         Tensor scores = new(new TensorShape(1, poolIn, w), DType.F32);
         backend.Conv1d(scores, a0, _aspAttn3W!, _aspAttn3B, 1, 0, 0, 1, 1);
         a0.Dispose();
+        backend.Sync();   // scores was just written by the GPU conv; block before the host softmax + stats
         SoftmaxOverTime(scores, poolIn, w);
 
         float* sp = (float*)scores.DataPointer;   // [poolIn, W] attention weights
@@ -294,8 +296,9 @@ public sealed unsafe class ZonosSpeakerEncoder : IDisposable
             }
     }
 
-    private static void Relu(Tensor x)
+    private static void Relu(IBackend backend, Tensor x)
     {
+        backend.Sync();   // block on the preceding GPU op before this host read/modify (avoids async-free race)
         float* p = (float*)x.DataPointer;
         long n = x.ElementCount;
         for (long i = 0; i < n; i++) if (p[i] < 0f) p[i] = 0f;
