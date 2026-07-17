@@ -3,6 +3,7 @@ using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Dia;
 
@@ -88,6 +89,55 @@ public sealed unsafe class DiaAttention
         qMh.Dispose();
         if (cache is not null || !ReferenceEquals(kUse, kMh)) { kUse.Dispose(); vUse.Dispose(); }
         return result;
+    }
+
+    /// <summary>GPU-resident self-attention (decode + prefill) for autoregressive decoders on a
+    /// <see cref="IBackend.FlashDecodeSupported"/> backend. Mirrors the LLM GenericTransformer decode path: Q/K/V
+    /// project straight into head-shaped tensors, GPU interleaved RoPE, in-place append into a fixed-capacity
+    /// device KV cache, then GQA-aware FlashAttention over the resident buffer — no host reshape/rope/repeat glue
+    /// and no O(n²) K/V re-upload. <paramref name="cosGpu"/>/<paramref name="sinGpu"/> are <c>[1, t, headDim]</c>
+    /// (first headDim/2 lanes = the interleaved-pair angles for absolute positions [posStart, posStart+t)). The
+    /// caller advances the cache length once after all layers. Requires the interleaved RoPE form (Zonos).</summary>
+    public Tensor SelfForwardFlash(IBackend backend, Tensor x, int t, int posStart, IKvCache cache, int layerIndex,
+        Tensor cosGpu, Tensor sinGpu)
+    {
+        // Project directly into head-shaped [1, t, H, headDim] (identical memory to [1, t, H*headDim]); avoids the
+        // host FlatToHeads copy and keeps the activation GPU-resident.
+        Tensor q = new(new TensorShape(1, t, _qHeads, _headDim), DType.F32);
+        Tensor k = new(new TensorShape(1, t, _kvHeads, _headDim), DType.F32);
+        Tensor v = new(new TensorShape(1, t, _kvHeads, _headDim), DType.F32);
+        backend.Linear(q, x, _qW!, null);
+        backend.Linear(k, x, _kW!, null);
+        backend.Linear(v, x, _vW!, null);
+
+        if (_useRope)
+        {
+            backend.ApplyRopeInterleaved(q, cosGpu, sinGpu);
+            backend.ApplyRopeInterleaved(k, cosGpu, sinGpu);
+        }
+
+        // [1, t, H, D] → [1, H, t, D] for cache append + flash (GPU permute keeps residency).
+        Tensor qMh = new(new TensorShape(1, _qHeads, t, _headDim), DType.F32);
+        Tensor kMh = new(new TensorShape(1, _kvHeads, t, _headDim), DType.F32);
+        Tensor vMh = new(new TensorShape(1, _kvHeads, t, _headDim), DType.F32);
+        backend.Permute0213(qMh, q, t, _qHeads, _headDim); q.Dispose();
+        backend.Permute0213(kMh, k, t, _kvHeads, _headDim); k.Dispose();
+        backend.Permute0213(vMh, v, t, _kvHeads, _headDim); v.Dispose();
+
+        cache.AppendStep(backend, layerIndex, kMh, vMh); kMh.Dispose(); vMh.Dispose();
+        Tensor kFull = cache.KeyPrefix(layerIndex);   // [1, Hkv, maxSeq, D], valid = posStart + t
+        Tensor vFull = cache.ValuePrefix(layerIndex);
+        int kvLen = posStart + t, group = _qHeads / _kvHeads;
+
+        Tensor attn = new(new TensorShape(1, _qHeads, t, _headDim), DType.F32);
+        backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, _attnScale);
+        qMh.Dispose();
+
+        Tensor flat = new(new TensorShape(1, t, _qHeads * _headDim), DType.F32);
+        backend.Permute0213(flat, attn, _qHeads, t, _headDim); attn.Dispose();   // [1, H, t, D] → [1, t, H*D]
+        Tensor outT = new(new TensorShape(1, t, _outDim), DType.F32);
+        backend.Linear(outT, flat, _oW!, null); flat.Dispose();
+        return outT;
     }
 
     /// <summary>Projects and caches the encoder K/V once for cross-attention.</summary>

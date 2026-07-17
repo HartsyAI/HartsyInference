@@ -202,6 +202,25 @@ launch-bound**. That shapes which optimizations pay off:
 
 Verify audio coherence on every run; a fast broken decode is not a result.
 
+### Audio — autoregressive TTS (Zonos-v0.1 transformer)
+
+Same **ms/frame** metric, different model. Zonos decodes 9 delayed codebooks autoregressively; a frame = 512
+samples @ 44.1 kHz ≈ **11.6 ms** of audio (real-time = 11.6 ms/frame). Measured on an **RTX 4090**, **F32** (TF32
+degenerates over the AR loop — F32 is deliberate), warm. Full write-up: [`benchmarks/results/zonos_tts_2026-07-17.md`](../benchmarks/results/zonos_tts_2026-07-17.md).
+
+| Config | ms/frame | ≈ realtime (AR decode) | vs baseline |
+|---|---:|---:|---:|
+| host-glue decode (baseline) | ~203 | ~0.057× (17.5× slower) | 1.0× |
+| **GPU-resident decode** (`DiaAttention.SelfForwardFlash` + `FixedKvCache` + GQA `FlashAttention`) | **~32** | **~0.34× (2.9× slower)** | **~6.3×** |
+
+The whole attention block ran host `Buffer.MemoryCopy`/loops on GPU tensors (host RoPE + `DiaHeads` reshapes +
+`RepeatKv` + host KV append), breaking the CUDA activation-residency cache and re-uploading the O(n²) growing K/V
+every step (`H2D_MISS` 1059 ms). A resident path mirroring the LLM `GenericTransformer` — head-shaped Q/K/V
+projections → GPU rope → in-place `FixedKvCache` append → GQA-native `FlashAttention` (no K/V replication), gated on
+new `IBackend.FlashDecodeSupported` (CPU/Vulkan keep the host path) — dropped `H2D_MISS` to 213 ms and left the
+decode **GPU-compute-bound on F32 Linear GEMVs**. Launch overhead is negligible (non-sync ≈ sync wall), so a CUDA
+graph adds little; F16 weights are the next lever but risky. Greedy stays bit-parity; gallery gen whisper-verbatim.
+
 ---
 
 ## 6. Experimental and diagnostic switches

@@ -1,4 +1,14 @@
-# TTS / STT end-to-end benchmarks — 2026-07-12 (updated 2026-07-15)
+# TTS / STT end-to-end benchmarks — 2026-07-12 (updated 2026-07-17)
+
+> **Update 2026-07-17 — Zonos-v0.1 (transformer) voice-clone verified + given a decode perf pass: ~6× (203 → 32
+> ms/frame).** Was previously ⛔ blocked (below); now Swarm-deployed (`Audio Models/Zonos/transformer`) and
+> whisper-verbatim. The entire attention block ran host `Buffer.MemoryCopy`/loops on GPU tensors (host RoPE +
+> `DiaHeads` reshapes + `RepeatKv` + host KV append), which broke the CUDA activation-residency cache and
+> re-uploaded the O(n²) growing K/V every step. A GPU-resident decode path (mirroring the LLM `GenericTransformer`:
+> `DiaAttention.SelfForwardFlash` + `FixedKvCache` in-place append + GQA-native `FlashAttention`, gated on new
+> `IBackend.FlashDecodeSupported`) took the full stochastic path **203 → 32 ms/frame (RTF 17.5× → 2.9× slower than
+> real time)**; greedy stays bit-parity. Now GPU-compute-bound on F32 Linear GEMVs (F16 is the next lever but risky
+> — F32 is deliberate, TF32 degenerates over the AR loop). Full write-up: [`zonos_tts_2026-07-17.md`](zonos_tts_2026-07-17.md).
 
 > **Update 2026-07-15 — Dia-1.6B verified word-correct through Swarm (10/10, all 3 turns).** Root cause of the
 > long-standing "loops *Hello there* / non-verbal garbage" was the **wrong checkpoint**: the extension pulled the
@@ -84,7 +94,8 @@ opposite of the compute-bound video/music DiTs where graphs are a no-op.
   ported `normalize_numbers`. Now correct on numbers/years/ordinals/currency. Still the perf optimization target
   (1.4×, BERT+VITS host-flat).
 - **Dia-1.6B** — **VERIFIED + FIXED 2026-07-15** (Swarm 10/10, EOS-stops 11.4s). Was the wrong checkpoint: repo `nari-labs/Dia-1.6B`→`nari-labs/Dia-1.6B-0626` (drop-in, ships `pytorch_model.bin`). RTF ≈ 0.036× (slowest TTS — dual-CFG 18-layer AR F32); perf pass pending.
-- Numerically-verified-but-no-runnable-e2e (do not benchmark yet): Kyutai TTS/STT, FishSpeech, VibeVoice, NeuTTS, StyleTTS2 (🔧/🔬); Zonos, PocketTTS (⛔ blocked).
+- **Zonos-v0.1** — **VERIFIED + PERF PASS 2026-07-17** (was ⛔ blocked). Swarm-deployed (`Audio Models/Zonos/transformer`), voice-clone whisper-verbatim; GPU-resident decode → ~6× (203 → 32 ms/frame stochastic, RTF 2.9× slower than real time). See [`zonos_tts_2026-07-17.md`](zonos_tts_2026-07-17.md).
+- Numerically-verified-but-no-runnable-e2e (do not benchmark yet): Kyutai TTS/STT, FishSpeech, VibeVoice, NeuTTS, StyleTTS2 (🔧/🔬); PocketTTS (⛔ blocked).
 
 ## Remaining work
 - Larger verified TTS still to bench (need per-model setup/refs): Chatterbox, CosyVoice 2, Qwen3-TTS, GPT-SoVITS.

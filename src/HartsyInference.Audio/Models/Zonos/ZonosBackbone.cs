@@ -4,6 +4,7 @@ using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Zonos;
 
@@ -56,6 +57,51 @@ public sealed unsafe class ZonosBackbone : IDisposable
             return normed;
         }
         finally { mask?.Dispose(); }
+    }
+
+    /// <summary>GPU-resident forward (decode + prefill) over a fixed-capacity device KV cache, used on a
+    /// <see cref="IBackend.FlashDecodeSupported"/> backend. Same math as <see cref="Forward"/> but every block runs
+    /// on-device (GPU RoPE + in-place KV append + GQA FlashAttention), eliminating the per-layer host reshape/rope/
+    /// repeat round-trips and the O(n²) K/V re-upload of the streaming path.</summary>
+    public Tensor ForwardResident(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache)
+    {
+        // Interleaved-RoPE angle tables for absolute positions [posStart, posStart+t), shaped [1, t, headDim] with
+        // the first headDim/2 lanes populated (matching ApplyRopeInterleaved's cp[pos*headDim + i], i<half).
+        Tensor cosGpu = BuildRopeSlice(_cos!, posStart, t);
+        Tensor sinGpu = BuildRopeSlice(_sin!, posStart, t);
+        try
+        {
+            Tensor hidden = embeds;
+            bool owns = false;
+            for (int i = 0; i < _blocks.Length; i++)
+            {
+                Tensor next = _blocks[i].ForwardResident(backend, hidden, t, posStart, cache, i, cosGpu, sinGpu);
+                if (owns) hidden.Dispose();
+                hidden = next; owns = true;
+            }
+            cache.AdvanceLength(t);
+            Tensor normed = new(hidden.Shape, DType.F32);
+            backend.LayerNorm(normed, hidden, _finalNormW!, _finalNormB!, _cfg.NormEps);
+            if (owns) hidden.Dispose();
+            return normed;
+        }
+        finally { cosGpu.Dispose(); sinGpu.Dispose(); }
+    }
+
+    /// <summary>Builds a <c>[1, t, headDim]</c> RoPE angle slice for absolute positions [posStart, posStart+t) from
+    /// the half-width table (<c>[maxSeq, headDim/2]</c>): lane i&lt;headDim/2 = table[(pos)*half + i], rest zero.</summary>
+    private Tensor BuildRopeSlice(float[] table, int posStart, int t)
+    {
+        int hd = _cfg.HeadDim, half = hd / 2;
+        Tensor outT = new(new TensorShape(1, t, hd), DType.F32);
+        float* p = (float*)outT.DataPointer;
+        for (long i = 0; i < (long)t * hd; i++) p[i] = 0f;
+        for (int s = 0; s < t; s++)
+        {
+            long row = (long)(posStart + s) * half;
+            for (int i = 0; i < half; i++) p[(long)s * hd + i] = table[row + i];
+        }
+        return outT;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -137,6 +183,28 @@ public sealed unsafe class ZonosBlock
         Tensor pre = new(new TensorShape(1, t, h), DType.F32);
         backend.LayerNorm(pre, x, _normW!, _normB!, _cfg.NormEps);
         Tensor attn = _attn.SelfForward(backend, pre, t, posStart, cache, layer, mask, cos, sin);
+        pre.Dispose();
+        Tensor afterAttn = new(x.Shape, DType.F32);
+        backend.Add(afterAttn, x, attn); attn.Dispose();
+
+        Tensor pre2 = new(new TensorShape(1, t, h), DType.F32);
+        backend.LayerNorm(pre2, afterAttn, _norm2W!, _norm2B!, _cfg.NormEps);
+        Tensor mlp = _mlp.Forward(backend, pre2, t); pre2.Dispose();
+        Tensor outT = new(x.Shape, DType.F32);
+        backend.Add(outT, afterAttn, mlp); afterAttn.Dispose(); mlp.Dispose();
+        return outT;
+    }
+
+    /// <summary>GPU-resident block: same <c>x += attn(LN(x)); x += mlp(LN2(x))</c> as <see cref="Forward"/>, but
+    /// attention runs on-device via <see cref="DiaAttention.SelfForwardFlash"/> (no host reshape/rope/repeat). The
+    /// SwiGLU MLP keeps its host path — a small, non-cascading per-layer cost relative to the attention.</summary>
+    public Tensor ForwardResident(IBackend backend, Tensor x, int t, int posStart, IKvCache cache, int layer,
+        Tensor cosGpu, Tensor sinGpu)
+    {
+        int h = _cfg.Hidden;
+        Tensor pre = new(new TensorShape(1, t, h), DType.F32);
+        backend.LayerNorm(pre, x, _normW!, _normB!, _cfg.NormEps);
+        Tensor attn = _attn.SelfForwardFlash(backend, pre, t, posStart, cache, layer, cosGpu, sinGpu);
         pre.Dispose();
         Tensor afterAttn = new(x.Shape, DType.F32);
         backend.Add(afterAttn, x, attn); attn.Dispose();

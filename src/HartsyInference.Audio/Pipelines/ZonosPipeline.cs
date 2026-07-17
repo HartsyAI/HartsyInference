@@ -8,6 +8,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 using DacModel = HartsyInference.Audio.Models.Codecs.Dac.Dac;
 
 namespace HartsyInference.Audio.Pipelines;
@@ -106,8 +107,8 @@ public sealed unsafe class ZonosPipeline : IDisposable
         int rw = _cfg.RepetitionWindow;
 
         int pCond = (int)condPrefix.Shape[1], pUncond = (int)uncondPrefix.Shape[1];
-        using StreamingKvCache cacheC = new(_cfg.NumLayers, 1, _cfg.NumKvHeads, cap + pCond, _cfg.HeadDim);
-        using StreamingKvCache cacheU = new(_cfg.NumLayers, 1, _cfg.NumKvHeads, cap + pUncond, _cfg.HeadDim);
+        using IKvCache cacheC = NewCache(backend, cap + pCond);
+        using IKvCache cacheU = NewCache(backend, cap + pUncond);
 
         // Full-F32 GEMM: TF32 (the GPU default) accumulates ~1e-3 error per forward which, over the AR loop,
         // flips a sampled argmax and degenerates generation (verified: TF32 → babble/early-EOS, F32 → reference
@@ -120,8 +121,8 @@ public sealed unsafe class ZonosPipeline : IDisposable
         backend.PreloadWeights(_codebooks.EnumerateWeights());
 
         // Prefill both branches with their conditioning prefix.
-        _bb.Forward(backend, condPrefix, pCond, 0, cacheC).Dispose();
-        _bb.Forward(backend, uncondPrefix, pUncond, 0, cacheU).Dispose();
+        RunBackbone(backend, condPrefix, pCond, 0, cacheC).Dispose();
+        RunBackbone(backend, uncondPrefix, pUncond, 0, cacheU).Dispose();
 
         uint rng = DeterministicRng.Seed(seed);
         int[,] grid = new int[cap, ch];
@@ -190,24 +191,39 @@ public sealed unsafe class ZonosPipeline : IDisposable
         int ch = _cfg.Channels;
         float cfg = float.IsNaN(cfgScale) ? _cfg.CfgScale : cfgScale;
         int pCond = (int)condPrefix.Shape[1], pUncond = (int)uncondPrefix.Shape[1];
-        using StreamingKvCache cacheC = new(_cfg.NumLayers, 1, _cfg.NumKvHeads, pCond + 1, _cfg.HeadDim);
-        using StreamingKvCache cacheU = new(_cfg.NumLayers, 1, _cfg.NumKvHeads, pUncond + 1, _cfg.HeadDim);
-        _bb.Forward(backend, condPrefix, pCond, 0, cacheC).Dispose();
-        _bb.Forward(backend, uncondPrefix, pUncond, 0, cacheU).Dispose();
+        using IKvCache cacheC = NewCache(backend, pCond + 1);
+        using IKvCache cacheU = NewCache(backend, pUncond + 1);
+        RunBackbone(backend, condPrefix, pCond, 0, cacheC).Dispose();
+        RunBackbone(backend, uncondPrefix, pUncond, 0, cacheU).Dispose();
         Span<int> frame = stackalloc int[ch];
         for (int c = 0; c < ch; c++) frame[c] = _cfg.MaskedToken;
         return StepCfg(backend, frame, pCond, pUncond, cacheC, cacheU, cfg);
     }
 
+    /// <summary>Dispatches one backbone forward to the GPU-resident fixed-cache path (flash-capable backends) or
+    /// the host streaming path (CPU/Vulkan). Both are numerically equivalent; the resident path avoids the
+    /// per-layer host reshape/rope/repeat round-trips and the O(n²) K/V re-upload.</summary>
+    private Tensor RunBackbone(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache) =>
+        backend.FlashDecodeSupported
+            ? _bb.ForwardResident(backend, embeds, t, posStart, cache)
+            : _bb.Forward(backend, embeds, t, posStart, (StreamingKvCache)cache);
+
+    /// <summary>Allocates the KV cache backing that matches the backend: a fixed-capacity device cache
+    /// (in-place GPU append) when flash-decode is supported, else the host streaming cache.</summary>
+    private IKvCache NewCache(IBackend backend, int maxSeq) =>
+        backend.FlashDecodeSupported
+            ? new FixedKvCache(_cfg.NumLayers, 1, _cfg.NumKvHeads, _cfg.HeadDim, maxSeq)
+            : new StreamingKvCache(_cfg.NumLayers, 1, _cfg.NumKvHeads, maxSeq, _cfg.HeadDim);
+
     private float[][] StepCfg(IBackend backend, ReadOnlySpan<int> frame, int posC, int posU,
-        StreamingKvCache cacheC, StreamingKvCache cacheU, float cfg)
+        IKvCache cacheC, IKvCache cacheU, float cfg)
     {
         Tensor embC = _codebooks.EmbedFrame(frame);
-        Tensor hidC = _bb.Forward(backend, embC, 1, posC, cacheC); embC.Dispose();
+        Tensor hidC = RunBackbone(backend, embC, 1, posC, cacheC); embC.Dispose();
         float[][] lc = _codebooks.Heads(backend, hidC); hidC.Dispose();
 
         Tensor embU = _codebooks.EmbedFrame(frame);
-        Tensor hidU = _bb.Forward(backend, embU, 1, posU, cacheU); embU.Dispose();
+        Tensor hidU = RunBackbone(backend, embU, 1, posU, cacheU); embU.Dispose();
         float[][] lu = _codebooks.Heads(backend, hidU); hidU.Dispose();
 
         for (int c = 0; c < _cfg.Channels; c++)

@@ -1442,6 +1442,12 @@ public interface IBackend : IDisposable
     /// backend is F32-only, so DiT F16 fast paths must gate on this and fall back to F32 when it is false.</summary>
     bool SupportsF16Activations => false;
 
+    /// <summary>True when the backend has the GPU-resident decode toolkit — <see cref="ApplyRopeInterleaved"/>,
+    /// <see cref="KvCacheAppend"/>, <see cref="Permute0213"/>, and <see cref="FlashAttention"/> — so autoregressive
+    /// decoders (e.g. Zonos) can run the block fully on-device with a fixed-capacity KV cache instead of the host
+    /// reshape/rope/repeat glue. Gate the resident fast path on this and fall back to the host path when false.</summary>
+    bool FlashDecodeSupported => false;
+
     /// <summary>FlashAttention: fused online-softmax attention that never materializes the score matrix and is
     /// grouped-query aware (no need to replicate K/V). <paramref name="query"/> is <c>[B, Hq, Tq, D]</c>;
     /// <paramref name="key"/>/<paramref name="value"/> are <c>[B, Hkv, Lk, D]</c>; <paramref name="output"/> is

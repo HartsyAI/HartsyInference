@@ -1747,6 +1747,8 @@ public sealed class CudaBackend : IBackend
 
     public bool SupportsF16Activations => true;
 
+    public bool FlashDecodeSupported => true;
+
     public bool StepGraphSupported => true;
 
     public bool StepGraphReady => _stepGraph?.IsReady == true && !_stepGraphCapturing;
