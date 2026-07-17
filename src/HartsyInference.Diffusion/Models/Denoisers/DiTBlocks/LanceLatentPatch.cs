@@ -34,6 +34,9 @@ public static unsafe class LanceLatentPatch
                                     dst[token * featDim + feat] = src[srcOff];
                                 }
                 }
+        // latentCl is JIT-dead once DataPointer has been read: if the caller passed an unrooted temporary,
+        // a GC during the copy loop finalizes it and frees `src` mid-read (same class as Tensor.Reshape's fix).
+        GC.KeepAlive(latentCl);
         return tokens;
     }
 
@@ -66,6 +69,8 @@ public static unsafe class LanceLatentPatch
                                     dst[dstOff] = src[token * featDim + feat];
                                 }
                 }
+        // Same premature-finalization guard as Patchify, for the borrowed `tokens` input.
+        GC.KeepAlive(tokens);
         return latent;
     }
 }
