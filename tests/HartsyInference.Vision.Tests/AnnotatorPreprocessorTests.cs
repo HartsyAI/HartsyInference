@@ -183,4 +183,42 @@ public sealed unsafe class AnnotatorPreprocessorTests
         Assert.Equal(0f, safe[0]);                 // floor(0.75)/2 = 0
         Assert.Equal(255f / 255f, safe[2], 6);     // 1.5 clips to 255
     }
+
+    [Fact]
+    public void Ade20kPalette_MatchesControlnetAuxAnchors()
+    {
+        Assert.Equal(150, Ade20kPalette.ClassCount);
+        Assert.Equal(0x787878u, Ade20kPalette.Color(0));   // wall [120,120,120]
+        Assert.Equal(0x0066C8u, Ade20kPalette.Color(20));  // car [0,102,200]
+        Assert.Equal(0x5C00FFu, Ade20kPalette.Color(149)); // last entry [92,0,255]
+        Assert.Throws<ArgumentOutOfRangeException>(() => Ade20kPalette.Color(150));
+
+        byte[] rgb = Ade20kPalette.Colorize([0, 149]);
+        Assert.Equal([120, 120, 120, 92, 0, 255], rgb);
+    }
+
+    [Fact]
+    public void UperNetSegPreprocess_NormalizesWithImageNetStats()
+    {
+        byte[] rgb = [255, 0, 128, 255, 0, 128, 255, 0, 128, 255, 0, 128];
+        using Tensor t = UperNetSegPreprocessor.Preprocess(rgb, 2, 2);
+        Assert.Equal(new TensorShape(1, 3, 2, 2), t.Shape);
+        ReadOnlySpan<float> s = t.AsReadOnlySpan<float>();
+        Assert.Equal((1f - 0.485f) / 0.229f, s[0], 5);
+        Assert.Equal((0f - 0.456f) / 0.224f, s[4], 5);
+        Assert.Equal((128f / 255f - 0.406f) / 0.225f, s[8], 5);
+    }
+
+    [Fact]
+    public void UperNetSegArgmax_TakesLowestIndexOnTies()
+    {
+        using Tensor logits = new(new TensorShape(1, 3, 1, 2), DType.F32);
+        Span<float> s = logits.AsSpan<float>();
+        // Planar [K, H·W]: pixel 0 sees {1, 1, 0.5} — tie between classes 0 and 1 → 0.
+        // Pixel 1 sees {0, 2, 3} → 2.
+        s[0] = 1f; s[2] = 1f; s[4] = 0.5f;
+        s[1] = 0f; s[3] = 2f; s[5] = 3f;
+        byte[] classes = UperNetSegPreprocessor.Argmax(logits);
+        Assert.Equal([0, 2], classes);
+    }
 }
