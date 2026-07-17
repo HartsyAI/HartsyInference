@@ -116,6 +116,44 @@ public sealed class GroundingDinoRealWeightParityTests
         Assert.True(cP > 0.999, $"lvl_pos_embed corr too low: {cP:F6}");
     }
 
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void Encoder_MatchesReference()
+    {
+        if (!TryPaths(out string ckpt, out string refDir))
+            return;
+
+        using IBackend backend = new CpuBackend();
+        using SafeTensorsLoader loader = new();
+        loader.Load(ckpt);
+        System.Collections.Generic.Dictionary<string, Tensor> w = loader.GetAllTensors();
+
+        GroundingDinoConfig cfg = GroundingDinoConfig.Tiny;
+        int[] ids = LoadI64(Path.Combine(refDir, "input_input_ids.i64"));
+        (bool[] attend, int[] positionIds) = GroundingDinoTextPrompt.Build(ids);
+        int[][] shapes = [[100, 134], [50, 67], [25, 34], [13, 17]];
+        int[] levelStart = [0, 13400, 16750, 17600];
+        int nimg = 17821, t = ids.Length;
+
+        using Tensor vision = LoadF32Tensor(Path.Combine(refDir, "enc_in_vision.bin"), new TensorShape(1, nimg, cfg.DModel));
+        using Tensor vpos = LoadF32Tensor(Path.Combine(refDir, "enc_in_vpos.bin"), new TensorShape(1, nimg, cfg.DModel));
+        using Tensor text = LoadF32Tensor(Path.Combine(refDir, "text_features.bin"), new TensorShape(1, t, cfg.DModel));
+
+        using GroundingDinoEncoder enc = new(cfg);
+        enc.LoadWeights(w);
+        (Tensor ev, Tensor et) = enc.Forward(backend, vision, vpos, text, attend, positionIds, shapes, levelStart);
+
+        float[] refV = LoadF32(Path.Combine(refDir, "encoder_vision.bin"));
+        float[] refT = LoadF32(Path.Combine(refDir, "encoder_text.bin"));
+        (double cV, double mV) = Compare(ev, refV);
+        (double cT, double mT) = Compare(et, refT);
+        _out.WriteLine($"encoder_vision: corr={cV:F6} maxAbs={mV:E3} (n={refV.Length})");
+        _out.WriteLine($"encoder_text:   corr={cT:F6} maxAbs={mT:E3} (n={refT.Length})");
+        ev.Dispose(); et.Dispose();
+        Assert.True(cV > 0.99, $"encoder_vision corr too low: {cV:F6}");
+        Assert.True(cT > 0.99, $"encoder_text corr too low: {cT:F6}");
+    }
+
     private static unsafe Tensor LoadF32Tensor(string path, TensorShape shape)
     {
         float[] data = LoadF32(path);
