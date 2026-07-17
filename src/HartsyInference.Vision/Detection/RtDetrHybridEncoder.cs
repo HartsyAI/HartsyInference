@@ -1,255 +1,356 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Vision.Detection.Blocks;
 
 namespace HartsyInference.Vision.Detection;
 
-/// <summary>RT-DETR hybrid encoder: projects the three backbone feature maps to the transformer
-/// hidden dim, runs <b>AIFI</b> (Attention-based Intra-scale Feature Interaction — one transformer
-/// encoder block, with a 2D sincos position embedding, on the flattened top level S5), then fuses
-/// the scales with a CNN <b>CCFM</b> (CSP-style Cross-scale Feature-fusion Module) laid out as an
-/// FPN top-down + PAN bottom-up path.
-/// <para>The AIFI self-attention adds the position embedding to the fused QKV input (rather than to
-/// q/k only as in the reference) — a documented structural simplification for the fused-QKV path.
-/// The CCFM RepBlocks are approximated by a 1×1 reduce conv over the concatenated pair; this keeps
-/// the fusion shape-correct while parity against the reference RepC3 stack is deferred.</para></summary>
+/// <summary>RT-DETR hybrid encoder (CCFM): an AIFI transformer block applied to the lowest-resolution
+/// feature level, then a top-down FPN and bottom-up PAN built from <see cref="CspRepLayer"/> fusion
+/// blocks, lateral 1×1 convs, and stride-2 downsample convs. Input is the three encoder-input-projected
+/// feature maps (all 256-channel, strides 8/16/32); output is the three fused maps at the same shapes.</summary>
 public sealed class RtDetrHybridEncoder
 {
     private readonly RtDetrConfig _config;
+    private readonly EncoderLayer _aifi;                 // encoder.encoder.0.layers.0
+    private readonly RtDetrConv[] _lateralConvs;         // encoder.lateral_convs.{0,1}
+    private readonly CspRepLayer[] _fpnBlocks;           // encoder.fpn_blocks.{0,1}
+    private readonly RtDetrConv[] _downsampleConvs;      // encoder.downsample_convs.{0,1}
+    private readonly CspRepLayer[] _panBlocks;           // encoder.pan_blocks.{0,1}
 
-    // Per-level 1x1 projection to hidden dim (input_proj). No activation (BN-folded conv only).
-    private readonly ConvBnSilu _inputProj0;   // C3 -> hidden
-    private readonly ConvBnSilu _inputProj1;   // C4 -> hidden
-    private readonly ConvBnSilu _inputProj2;   // C5 -> hidden
-
-    // AIFI transformer encoder block on the top level.
-    private readonly RtDetrLinear _aifiQkv;     // hidden -> 3*hidden
-    private readonly RtDetrLinear _aifiProj;    // hidden -> hidden
-    private readonly RtDetrLayerNorm _aifiNorm1;
-    private readonly RtDetrLayerNorm _aifiNorm2;
-    private readonly RtDetrLinear _aifiFc1;     // hidden -> ffn
-    private readonly RtDetrLinear _aifiFc2;     // ffn -> hidden
-
-    // CCFM fusion convs. Fuse = 1x1 (2*hidden -> hidden); Down = 3x3 stride-2 (hidden -> hidden).
-    private readonly ConvBnSilu _fuse4;   // up(S5) ++ S4 -> F4
-    private readonly ConvBnSilu _fuse3;   // up(F4) ++ S3 -> P3
-    private readonly ConvBnSilu _down3;   // P3 (stride 2)
-    private readonly ConvBnSilu _fuseN4;  // down(P3) ++ F4 -> N4
-    private readonly ConvBnSilu _down4;   // N4 (stride 2)
-    private readonly ConvBnSilu _fuseN5;  // down(N4) ++ S5 -> N5
-
-    /// <summary>Constructs the encoder from a config.</summary>
+    /// <summary>Builds the hybrid encoder from a config.</summary>
     public RtDetrHybridEncoder(RtDetrConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
         _config = config;
-        int h = config.HiddenDim;
-        int ffn = config.FeedForwardDim;
-
-        _inputProj0 = new ConvBnSilu(h, strideH: 1, strideW: 1, padH: 0, padW: 0, useSilu: false);
-        _inputProj1 = new ConvBnSilu(h, strideH: 1, strideW: 1, padH: 0, padW: 0, useSilu: false);
-        _inputProj2 = new ConvBnSilu(h, strideH: 1, strideW: 1, padH: 0, padW: 0, useSilu: false);
-
-        _aifiQkv = new RtDetrLinear(3 * h);
-        _aifiProj = new RtDetrLinear(h);
-        _aifiNorm1 = new RtDetrLayerNorm(h, config.LayerNormEps);
-        _aifiNorm2 = new RtDetrLayerNorm(h, config.LayerNormEps);
-        _aifiFc1 = new RtDetrLinear(ffn);
-        _aifiFc2 = new RtDetrLinear(h);
-
-        _fuse4 = new ConvBnSilu(h, strideH: 1, strideW: 1, padH: 0, padW: 0);
-        _fuse3 = new ConvBnSilu(h, strideH: 1, strideW: 1, padH: 0, padW: 0);
-        _down3 = new ConvBnSilu(h, strideH: 2, strideW: 2, padH: 1, padW: 1);
-        _fuseN4 = new ConvBnSilu(h, strideH: 1, strideW: 1, padH: 0, padW: 0);
-        _down4 = new ConvBnSilu(h, strideH: 2, strideW: 2, padH: 1, padW: 1);
-        _fuseN5 = new ConvBnSilu(h, strideH: 1, strideW: 1, padH: 0, padW: 0);
+        _aifi = new EncoderLayer(config);
+        _lateralConvs = [new RtDetrConv(1, 1, 0, 0, RtDetrActivation.Silu), new RtDetrConv(1, 1, 0, 0, RtDetrActivation.Silu)];
+        _fpnBlocks = [new CspRepLayer(config), new CspRepLayer(config)];
+        _downsampleConvs = [new RtDetrConv(2, 2, 1, 1, RtDetrActivation.Silu), new RtDetrConv(2, 2, 1, 1, RtDetrActivation.Silu)];
+        _panBlocks = [new CspRepLayer(config), new CspRepLayer(config)];
     }
 
-    /// <summary>Loads encoder weights under <paramref name="prefix"/> (default <c>"encoder"</c>).</summary>
+    /// <summary>Loads encoder weights. <paramref name="prefix"/> is <c>model.encoder</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _inputProj0.LoadWeights(weights, $"{prefix}.input_proj.0.conv");
-        _inputProj1.LoadWeights(weights, $"{prefix}.input_proj.1.conv");
-        _inputProj2.LoadWeights(weights, $"{prefix}.input_proj.2.conv");
-
-        _aifiQkv.LoadWeights(weights, $"{prefix}.aifi.qkv");
-        _aifiProj.LoadWeights(weights, $"{prefix}.aifi.proj");
-        _aifiNorm1.LoadWeights(weights, $"{prefix}.aifi.norm1");
-        _aifiNorm2.LoadWeights(weights, $"{prefix}.aifi.norm2");
-        _aifiFc1.LoadWeights(weights, $"{prefix}.aifi.ffn.fc1");
-        _aifiFc2.LoadWeights(weights, $"{prefix}.aifi.ffn.fc2");
-
-        _fuse4.LoadWeights(weights, $"{prefix}.ccfm.fuse4.conv");
-        _fuse3.LoadWeights(weights, $"{prefix}.ccfm.fuse3.conv");
-        _down3.LoadWeights(weights, $"{prefix}.ccfm.down3.conv");
-        _fuseN4.LoadWeights(weights, $"{prefix}.ccfm.fuse_n4.conv");
-        _down4.LoadWeights(weights, $"{prefix}.ccfm.down4.conv");
-        _fuseN5.LoadWeights(weights, $"{prefix}.ccfm.fuse_n5.conv");
+        _aifi.LoadWeights(weights, $"{prefix}.encoder.0.layers.0");
+        for (int i = 0; i < 2; i++)
+        {
+            _lateralConvs[i].LoadWeights(weights, $"{prefix}.lateral_convs.{i}.conv");
+            _fpnBlocks[i].LoadWeights(weights, $"{prefix}.fpn_blocks.{i}");
+            _downsampleConvs[i].LoadWeights(weights, $"{prefix}.downsample_convs.{i}.conv");
+            _panBlocks[i].LoadWeights(weights, $"{prefix}.pan_blocks.{i}");
+        }
     }
 
     /// <summary>Yields every encoder weight for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        foreach (Tensor t in _inputProj0.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _inputProj1.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _inputProj2.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _aifiQkv.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _aifiProj.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _aifiNorm1.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _aifiNorm2.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _aifiFc1.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _aifiFc2.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _fuse4.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _fuse3.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _down3.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _fuseN4.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _down4.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _fuseN5.EnumerateWeights()) yield return t;
-    }
-
-    /// <summary>Runs the encoder. Returns the three fused multi-scale memory maps <c>(P3, N4, N5)</c>
-    /// each <c>[1, hidden, H_l, W_l]</c> at strides 8/16/32 — the caller owns and disposes all three.</summary>
-    public (Tensor P3, Tensor N4, Tensor N5) Forward(IBackend backend, Tensor c3, Tensor c4, Tensor c5)
-    {
-        // Project every level to the hidden dim.
-        Tensor s3 = _inputProj0.Forward(backend, c3);
-        Tensor s4 = _inputProj1.Forward(backend, c4);
-        Tensor s5Proj = _inputProj2.Forward(backend, c5);
-
-        // AIFI on the top level.
-        Tensor s5 = ApplyAifi(backend, s5Proj);
-        s5Proj.Dispose();
-
-        // FPN top-down: up(S5) ++ S4 -> F4 ; up(F4) ++ S3 -> P3.
-        Tensor s5Up = Upsample2x(backend, s5);
-        Tensor cat4 = ConcatChannel(backend, s5Up, s4);
-        s5Up.Dispose(); s4.Dispose();
-        Tensor f4 = _fuse4.Forward(backend, cat4); cat4.Dispose();
-
-        Tensor f4Up = Upsample2x(backend, f4);
-        Tensor cat3 = ConcatChannel(backend, f4Up, s3);
-        f4Up.Dispose(); s3.Dispose();
-        Tensor p3 = _fuse3.Forward(backend, cat3); cat3.Dispose();
-
-        // PAN bottom-up: down(P3) ++ F4 -> N4 ; down(N4) ++ S5 -> N5.
-        Tensor p3Down = _down3.Forward(backend, p3);
-        Tensor catN4 = ConcatChannel(backend, p3Down, f4);
-        p3Down.Dispose(); f4.Dispose();
-        Tensor n4 = _fuseN4.Forward(backend, catN4); catN4.Dispose();
-
-        Tensor n4Down = _down4.Forward(backend, n4);
-        Tensor catN5 = ConcatChannel(backend, n4Down, s5);
-        n4Down.Dispose(); s5.Dispose();
-        Tensor n5 = _fuseN5.Forward(backend, catN5); catN5.Dispose();
-
-        return (p3, n4, n5);
-    }
-
-    /// <summary>One transformer encoder layer on the flattened top level with a 2D sincos position
-    /// embedding: self-attention (post-norm) + FFN. Input/output are <c>[1, hidden, H, W]</c>.</summary>
-    private Tensor ApplyAifi(IBackend backend, Tensor feat)
-    {
-        int hidden = _config.HiddenDim;
-        int height = (int)feat.Shape[2];
-        int width = (int)feat.Shape[3];
-        int tokens = height * width;
-
-        // Flatten NCHW -> [1, HW, C].
-        Tensor src = new Tensor(new TensorShape(1, tokens, hidden), DType.F32);
-        backend.Transpose2D(src, feat, hidden, tokens);
-
-        // Add the 2D sincos position embedding, then run fused-QKV self-attention.
-        Tensor pos = BuildSinCosPositionEmbedding(height, width, hidden);
-        Tensor srcPos = new Tensor(src.Shape, DType.F32);
-        backend.Add(srcPos, src, pos);
-        pos.Dispose();
-
-        Tensor qkv = _aifiQkv.Forward(backend, srcPos);
-        srcPos.Dispose();
-        Tensor q = new Tensor(new TensorShape(1, tokens, hidden), DType.F32);
-        Tensor k = new Tensor(new TensorShape(1, tokens, hidden), DType.F32);
-        Tensor v = new Tensor(new TensorShape(1, tokens, hidden), DType.F32);
-        backend.Split([q, k, v], qkv, dim: 2);
-        qkv.Dispose();
-
-        Tensor attn = RtDetrAttention.MultiHead(backend, q, k, v, _config.NumHeads, _config.HeadDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
-        Tensor attnProj = _aifiProj.Forward(backend, attn);
-        attn.Dispose();
-
-        // Residual + norm1.
-        Tensor res1 = new Tensor(src.Shape, DType.F32);
-        backend.Add(res1, src, attnProj);
-        src.Dispose(); attnProj.Dispose();
-        Tensor norm1 = _aifiNorm1.Forward(backend, res1);
-
-        // FFN: fc1 -> GELU -> fc2, residual + norm2.
-        Tensor fc1 = _aifiFc1.Forward(backend, norm1);
-        backend.Gelu(fc1, fc1);
-        Tensor fc2 = _aifiFc2.Forward(backend, fc1);
-        fc1.Dispose();
-        Tensor res2 = new Tensor(norm1.Shape, DType.F32);
-        backend.Add(res2, norm1, fc2);
-        norm1.Dispose(); fc2.Dispose(); res1.Dispose();
-        Tensor norm2 = _aifiNorm2.Forward(backend, res2);
-        res2.Dispose();
-
-        // Un-flatten [1, HW, C] -> NCHW.
-        Tensor outFeat = new Tensor(new TensorShape(1, hidden, height, width), DType.F32);
-        backend.Transpose2D(outFeat, norm2, tokens, hidden);
-        norm2.Dispose();
-        return outFeat;
-    }
-
-    /// <summary>Builds the RT-DETR 2D sincos position embedding <c>[1, H·W, hidden]</c> (token order
-    /// h-major, matching the flattened NCHW layout). Each quarter of the channel axis encodes
-    /// sin(x)/cos(x)/sin(y)/cos(y) at geometric frequencies (temperature 10000).</summary>
-    private static unsafe Tensor BuildSinCosPositionEmbedding(int height, int width, int hidden)
-    {
-        int tokens = height * width;
-        int posDim = hidden / 4;
-        Tensor pos = new Tensor(new TensorShape(1, tokens, hidden), DType.F32);
-        float* p = (float*)pos.DataPointer;
-        Span<float> omega = stackalloc float[posDim];
-        for (int i = 0; i < posDim; i++)
-            omega[i] = 1f / MathF.Pow(10000f, (float)i / posDim);
-
-        for (int y = 0; y < height; y++)
+        foreach (Tensor t in _aifi.EnumerateWeights()) yield return t;
+        for (int i = 0; i < 2; i++)
         {
-            for (int x = 0; x < width; x++)
-            {
-                long baseOff = (long)(y * width + x) * hidden;
-                for (int i = 0; i < posDim; i++)
-                {
-                    float wx = x * omega[i];
-                    float wy = y * omega[i];
-                    p[baseOff + i] = MathF.Sin(wx);
-                    p[baseOff + posDim + i] = MathF.Cos(wx);
-                    p[baseOff + 2 * posDim + i] = MathF.Sin(wy);
-                    p[baseOff + 3 * posDim + i] = MathF.Cos(wy);
-                }
-            }
+            foreach (Tensor t in _lateralConvs[i].EnumerateWeights()) yield return t;
+            foreach (Tensor t in _fpnBlocks[i].EnumerateWeights()) yield return t;
+            foreach (Tensor t in _downsampleConvs[i].EnumerateWeights()) yield return t;
+            foreach (Tensor t in _panBlocks[i].EnumerateWeights()) yield return t;
         }
-        return pos;
     }
 
-    private static Tensor Upsample2x(IBackend backend, Tensor input)
+    /// <summary>Runs the hybrid encoder over the three projected feature maps (all owned by the caller,
+    /// not consumed). Returns the three fused PAN maps (strides 8/16/32). Caller owns all three.</summary>
+    public (Tensor P0, Tensor P1, Tensor P2) Forward(IBackend backend, Tensor f0, Tensor f1, Tensor f2)
     {
-        int c = (int)input.Shape[1];
-        int h = (int)input.Shape[2];
-        int w = (int)input.Shape[3];
-        Tensor output = new Tensor(new TensorShape(1, c, h * 2, w * 2), DType.F32);
-        backend.UpsampleNearest2D(output, input, 2, 2);
+        // AIFI on the top level (index 2).
+        Tensor aifi2 = _aifi.Forward(backend, f2);
+
+        // Top-down FPN.  fpn = [aifi2]; lateral+upsample+concat+fpn_block, then reverse.
+        Tensor lat0 = _lateralConvs[0].Forward(backend, aifi2);
+        aifi2.Dispose();
+        Tensor up0 = NearestUpsample2x(lat0);
+        Tensor cat0 = ConcatChannels(backend, up0, f1);
+        up0.Dispose();
+        Tensor p1Fpn = _fpnBlocks[0].Forward(backend, cat0);   // 40x40
+        cat0.Dispose();
+
+        Tensor lat1 = _lateralConvs[1].Forward(backend, p1Fpn);
+        p1Fpn.Dispose();
+        Tensor up1 = NearestUpsample2x(lat1);
+        Tensor cat1 = ConcatChannels(backend, up1, f0);
+        up1.Dispose();
+        Tensor p0Fpn = _fpnBlocks[1].Forward(backend, cat1);   // 80x80
+        cat1.Dispose();
+
+        // fpn_feature_maps reversed = [p0Fpn(80), lat1(40), lat0(20)].
+        // Bottom-up PAN.  pan = [p0Fpn]; downsample+concat+pan_block.
+        Tensor out0 = p0Fpn;   // stride 8
+
+        Tensor down0 = _downsampleConvs[0].Forward(backend, out0);
+        Tensor pcat0 = ConcatChannels(backend, down0, lat1);
+        down0.Dispose(); lat1.Dispose();
+        Tensor out1 = _panBlocks[0].Forward(backend, pcat0);   // stride 16
+        pcat0.Dispose();
+
+        Tensor down1 = _downsampleConvs[1].Forward(backend, out1);
+        Tensor pcat1 = ConcatChannels(backend, down1, lat0);
+        down1.Dispose(); lat0.Dispose();
+        Tensor out2 = _panBlocks[1].Forward(backend, pcat1);   // stride 32
+        pcat1.Dispose();
+
+        return (out0, out1, out2);
+    }
+
+    /// <summary>Nearest-neighbour ×2 upsample of a <c>[1,C,H,W]</c> map. Owns the returned tensor.</summary>
+    internal static unsafe Tensor NearestUpsample2x(Tensor input)
+    {
+        int n = (int)input.Shape[0], c = (int)input.Shape[1], h = (int)input.Shape[2], w = (int)input.Shape[3];
+        int oH = h * 2, oW = w * 2;
+        Tensor output = new Tensor(new TensorShape(n, c, oH, oW), DType.F32);
+        float* ip = (float*)input.DataPointer, op = (float*)output.DataPointer;
+        for (long plane = 0; plane < (long)n * c; plane++)
+        {
+            float* src = ip + plane * h * w;
+            float* dst = op + plane * oH * oW;
+            for (int oy = 0; oy < oH; oy++)
+                for (int ox = 0; ox < oW; ox++)
+                    dst[oy * oW + ox] = src[(oy / 2) * w + (ox / 2)];
+        }
         return output;
     }
 
-    private static Tensor ConcatChannel(IBackend backend, Tensor a, Tensor b)
+    /// <summary>Concatenates two <c>[1,C,H,W]</c> maps along the channel axis. Owns the returned tensor.</summary>
+    internal static Tensor ConcatChannels(IBackend backend, Tensor a, Tensor b)
     {
-        int c = (int)(a.Shape[1] + b.Shape[1]);
-        int h = (int)a.Shape[2];
-        int w = (int)a.Shape[3];
-        Tensor output = new Tensor(new TensorShape(1, c, h, w), DType.F32);
+        int ca = (int)a.Shape[1], cb = (int)b.Shape[1];
+        int h = (int)a.Shape[2], w = (int)a.Shape[3];
+        Tensor output = new Tensor(new TensorShape(1, ca + cb, h, w), DType.F32);
         backend.Concat(output, [a, b], dim: 1);
         return output;
+    }
+
+    /// <summary>RepVGG block: parallel 3×3 and 1×1 convs summed, then SiLU.</summary>
+    private sealed class RepVgg
+    {
+        private readonly RtDetrConv _conv1;   // 3x3
+        private readonly RtDetrConv _conv2;   // 1x1
+
+        public RepVgg()
+        {
+            _conv1 = new RtDetrConv(1, 1, 1, 1, RtDetrActivation.None);
+            _conv2 = new RtDetrConv(1, 1, 0, 0, RtDetrActivation.None);
+        }
+
+        public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+        {
+            _conv1.LoadWeights(weights, $"{prefix}.conv1.conv");
+            _conv2.LoadWeights(weights, $"{prefix}.conv2.conv");
+        }
+
+        public IEnumerable<Tensor> EnumerateWeights()
+        {
+            foreach (Tensor t in _conv1.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _conv2.EnumerateWeights()) yield return t;
+        }
+
+        public Tensor Forward(IBackend backend, Tensor x)
+        {
+            Tensor a = _conv1.Forward(backend, x);
+            Tensor b = _conv2.Forward(backend, x);
+            Span<float> sa = a.AsSpan<float>();
+            ReadOnlySpan<float> sb = b.AsSpan<float>();
+            for (int i = 0; i < sa.Length; i++)
+            {
+                float v = sa[i] + sb[i];
+                sa[i] = v / (1f + MathF.Exp(-v));   // SiLU
+            }
+            b.Dispose();
+            return a;
+        }
+    }
+
+    /// <summary>CSP RepVGG fusion layer: two 1×1 entry convs, three RepVGG bottlenecks on one branch,
+    /// their sum, then a 1×1 exit conv (all SiLU).</summary>
+    private sealed class CspRepLayer
+    {
+        private readonly RtDetrConv _conv1;
+        private readonly RtDetrConv _conv2;
+        private readonly RepVgg[] _bottlenecks;
+        private readonly RtDetrConv _conv3;
+
+        public CspRepLayer(RtDetrConfig config)
+        {
+            _conv1 = new RtDetrConv(1, 1, 0, 0, RtDetrActivation.Silu);
+            _conv2 = new RtDetrConv(1, 1, 0, 0, RtDetrActivation.Silu);
+            _bottlenecks = [new RepVgg(), new RepVgg(), new RepVgg()];
+            _conv3 = new RtDetrConv(1, 1, 0, 0, RtDetrActivation.Silu);
+        }
+
+        public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+        {
+            _conv1.LoadWeights(weights, $"{prefix}.conv1.conv");
+            _conv2.LoadWeights(weights, $"{prefix}.conv2.conv");
+            for (int i = 0; i < _bottlenecks.Length; i++)
+                _bottlenecks[i].LoadWeights(weights, $"{prefix}.bottlenecks.{i}");
+            _conv3.LoadWeights(weights, $"{prefix}.conv3.conv");
+        }
+
+        public IEnumerable<Tensor> EnumerateWeights()
+        {
+            foreach (Tensor t in _conv1.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _conv2.EnumerateWeights()) yield return t;
+            foreach (RepVgg b in _bottlenecks)
+                foreach (Tensor t in b.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _conv3.EnumerateWeights()) yield return t;
+        }
+
+        public Tensor Forward(IBackend backend, Tensor x)
+        {
+            Tensor h1 = _conv1.Forward(backend, x);
+            foreach (RepVgg b in _bottlenecks)
+            {
+                Tensor next = b.Forward(backend, h1);
+                h1.Dispose();
+                h1 = next;
+            }
+            Tensor h2 = _conv2.Forward(backend, x);
+            Span<float> s1 = h1.AsSpan<float>();
+            ReadOnlySpan<float> s2 = h2.AsSpan<float>();
+            for (int i = 0; i < s1.Length; i++)
+                s1[i] += s2[i];
+            h2.Dispose();
+            Tensor outp = _conv3.Forward(backend, h1);
+            h1.Dispose();
+            return outp;
+        }
+    }
+
+    /// <summary>The AIFI transformer encoder layer (post-norm): self-attention with the 2D sincos
+    /// position embedding added to queries and keys, then a GELU feed-forward, each with a residual +
+    /// LayerNorm.</summary>
+    private sealed class EncoderLayer
+    {
+        private readonly RtDetrConfig _config;
+        private readonly RtDetrLinear _qProj, _kProj, _vProj, _outProj;
+        private readonly RtDetrLayerNorm _selfAttnLayerNorm;
+        private readonly RtDetrLinear _fc1, _fc2;
+        private readonly RtDetrLayerNorm _finalLayerNorm;
+
+        public EncoderLayer(RtDetrConfig config)
+        {
+            _config = config;
+            int d = config.HiddenDim;
+            _qProj = new RtDetrLinear(d);
+            _kProj = new RtDetrLinear(d);
+            _vProj = new RtDetrLinear(d);
+            _outProj = new RtDetrLinear(d);
+            _selfAttnLayerNorm = new RtDetrLayerNorm(d, config.LayerNormEps);
+            _fc1 = new RtDetrLinear(config.FeedForwardDim);
+            _fc2 = new RtDetrLinear(d);
+            _finalLayerNorm = new RtDetrLayerNorm(d, config.LayerNormEps);
+        }
+
+        public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+        {
+            _qProj.LoadWeights(weights, $"{prefix}.self_attn.q_proj");
+            _kProj.LoadWeights(weights, $"{prefix}.self_attn.k_proj");
+            _vProj.LoadWeights(weights, $"{prefix}.self_attn.v_proj");
+            _outProj.LoadWeights(weights, $"{prefix}.self_attn.out_proj");
+            _selfAttnLayerNorm.LoadWeights(weights, $"{prefix}.self_attn_layer_norm");
+            _fc1.LoadWeights(weights, $"{prefix}.fc1");
+            _fc2.LoadWeights(weights, $"{prefix}.fc2");
+            _finalLayerNorm.LoadWeights(weights, $"{prefix}.final_layer_norm");
+        }
+
+        public IEnumerable<Tensor> EnumerateWeights()
+        {
+            foreach (Tensor t in _qProj.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _kProj.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _vProj.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _outProj.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _selfAttnLayerNorm.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _fc1.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _fc2.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _finalLayerNorm.EnumerateWeights()) yield return t;
+        }
+
+        /// <summary>Runs AIFI over a <c>[1,C,H,W]</c> feature map: flatten to tokens, self-attend with the
+        /// sincos pos-embed, feed-forward, then reshape back to <c>[1,C,H,W]</c>. Owns the returned tensor;
+        /// does not consume <paramref name="featureMap"/>.</summary>
+        public Tensor Forward(IBackend backend, Tensor featureMap)
+        {
+            int c = (int)featureMap.Shape[1], h = (int)featureMap.Shape[2], w = (int)featureMap.Shape[3];
+            int s = h * w;
+            Tensor x = FlattenToTokens(featureMap);                                   // [1, S, C]
+            Tensor pos = RtDetrPositionEmbedding.Build2dSincos(h, w, c, _config.PositionalEncodingTemperature);  // [1, S, C]
+
+            Tensor qkIn = AddTensors(x, pos);
+            Tensor q = _qProj.Forward(backend, qkIn);
+            Tensor k = _kProj.Forward(backend, qkIn);
+            qkIn.Dispose();
+            Tensor v = _vProj.Forward(backend, x);
+            Tensor attn = RtDetrAttention.MultiHead(backend, q, k, v, _config.NumHeads, _config.HeadDim);
+            q.Dispose(); k.Dispose(); v.Dispose();
+            Tensor attnOut = _outProj.Forward(backend, attn);
+            attn.Dispose();
+
+            AddInto(x, attnOut);        // residual
+            attnOut.Dispose();
+            Tensor normed = _selfAttnLayerNorm.Forward(backend, x);
+            x.Dispose();
+            pos.Dispose();
+
+            Tensor ff1 = _fc1.Forward(backend, normed);
+            Tensor act = new Tensor(ff1.Shape, DType.F32);
+            backend.GeluErf(act, ff1);
+            ff1.Dispose();
+            Tensor ff2 = _fc2.Forward(backend, act);
+            act.Dispose();
+            AddInto(normed, ff2);       // residual
+            ff2.Dispose();
+            Tensor outTokens = _finalLayerNorm.Forward(backend, normed);
+            normed.Dispose();
+
+            Tensor result = TokensToFeatureMap(outTokens, c, h, w);
+            outTokens.Dispose();
+            return result;
+        }
+
+        private static unsafe Tensor FlattenToTokens(Tensor featureMap)
+        {
+            int c = (int)featureMap.Shape[1], h = (int)featureMap.Shape[2], w = (int)featureMap.Shape[3];
+            int s = h * w;
+            Tensor tokens = new Tensor(new TensorShape(1, s, c), DType.F32);
+            float* src = (float*)featureMap.DataPointer, dst = (float*)tokens.DataPointer;
+            for (int ci = 0; ci < c; ci++)
+                for (int p = 0; p < s; p++)
+                    dst[(long)p * c + ci] = src[(long)ci * s + p];
+            return tokens;
+        }
+
+        private static unsafe Tensor TokensToFeatureMap(Tensor tokens, int c, int h, int w)
+        {
+            int s = h * w;
+            Tensor fm = new Tensor(new TensorShape(1, c, h, w), DType.F32);
+            float* src = (float*)tokens.DataPointer, dst = (float*)fm.DataPointer;
+            for (int p = 0; p < s; p++)
+                for (int ci = 0; ci < c; ci++)
+                    dst[(long)ci * s + p] = src[(long)p * c + ci];
+            return fm;
+        }
+
+        private static Tensor AddTensors(Tensor a, Tensor b)
+        {
+            Tensor outp = new Tensor(a.Shape, DType.F32);
+            Span<float> o = outp.AsSpan<float>();
+            ReadOnlySpan<float> sa = a.AsSpan<float>(), sb = b.AsSpan<float>();
+            for (int i = 0; i < o.Length; i++)
+                o[i] = sa[i] + sb[i];
+            return outp;
+        }
+
+        private static void AddInto(Tensor acc, Tensor add)
+        {
+            Span<float> a = acc.AsSpan<float>();
+            ReadOnlySpan<float> b = add.AsSpan<float>();
+            for (int i = 0; i < a.Length; i++)
+                a[i] += b[i];
+        }
     }
 }

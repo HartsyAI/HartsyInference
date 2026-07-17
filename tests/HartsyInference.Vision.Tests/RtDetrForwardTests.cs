@@ -2,72 +2,78 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.Vision.Codec;
 using HartsyInference.Vision.Detection;
 using Xunit;
 using Xunit.Abstractions;
 
 namespace HartsyInference.Vision.Tests;
 
-/// <summary>Structural tests for the RT-DETR port: a shape-correct forward over synthetic weights,
-/// the pipeline post-processing contract, and a pure-unit check of the deformable bilinear sampler.
-/// Numerics vs a reference checkpoint are validation-pending (see the env-gated Integration stub).</summary>
+/// <summary>RT-DETR (PekingU/rtdetr_r18vd) tests: fast unit checks for the config, the BN-folding
+/// checkpoint converter, and the deformable bilinear sampler; plus an env-gated real-weight parity
+/// test against the <c>transformers RTDetrForObjectDetection</c> oracle on <c>bus.png</c>.</summary>
 public sealed class RtDetrForwardTests
 {
     private readonly ITestOutputHelper _output;
 
     public RtDetrForwardTests(ITestOutputHelper output) => _output = output;
 
-    /// <summary>Tiny config — small enough for the perf-naive host deformable loop, still exercising
-    /// every module (backbone, AIFI, CCFM, query selection, one deformable decoder layer, heads).</summary>
-    private static RtDetrConfig TinyConfig => new()
-    {
-        Name = "rtdetr-tiny",
-        BackboneChannels = [8, 16, 16, 24, 32],
-        BackboneRepeat = 1,
-        HiddenDim = 32,
-        NumHeads = 4,
-        NumDecoderLayers = 1,
-        NumQueries = 8,
-        NumClasses = 4,
-        NumLevels = 3,
-        NumPoints = 2,
-        FeedForwardDim = 64,
-    };
+    /// <summary>The transformers oracle top detections on <c>bus.png</c> (810×1080), pixel xyxy.</summary>
+    private static readonly (int Label, float Score, float X1, float Y1, float X2, float Y2)[] OracleBus =
+    [
+        (5, 0.9534f, 15.5f, 232.8f, 806.2f, 746.9f),   // bus
+        (0, 0.9468f, 49.2f, 397.6f, 247.0f, 907.2f),   // person
+        (0, 0.9219f, 223.2f, 405.7f, 343.9f, 860.4f),  // person
+        (0, 0.8782f, 667.9f, 393.8f, 809.7f, 882.9f),  // person
+        (0, 0.7549f, -0.2f, 552.1f, 75.6f, 872.0f),    // person
+    ];
 
-    private static RtDetrModel BuildTinyModel()
+    [Fact]
+    public void Config_R18vd_Validates()
     {
-        RtDetrConfig cfg = TinyConfig;
-        RtDetrModel model = new(cfg);
-        model.LoadWeights(RtDetrSyntheticWeights.Build(cfg));
-        return model;
-    }
-
-    private static Tensor MakeInput(int size)
-    {
-        Tensor input = new(new TensorShape(1, 3, size, size), DType.F32);
-        Span<float> span = input.AsSpan<float>();
-        for (int i = 0; i < span.Length; i++)
-            span[i] = ((i * 37) % 255) / 255f;
-        return input;
+        RtDetrConfig cfg = RtDetrConfig.R18vd;
+        cfg.Validate();
+        Assert.Equal(256, cfg.HiddenDim);
+        Assert.Equal(32, cfg.HeadDim);
+        Assert.Equal(128, cfg.RepHiddenChannels);
+        Assert.Equal(3, cfg.NumDecoderLayers);
     }
 
     [Fact]
-    public void Config_Presets_ValidateAndCoverAllWeights()
+    public void Converter_FoldsBatchNorm_AndDropsBnBuffers()
     {
-        // Config invariants.
-        RtDetrConfig.R50.Validate();
-        RtDetrConfig.R18.Validate();
-        Assert.Equal(RtDetrConfig.R50.HiddenDim, RtDetrConfig.R50.HeadDim * RtDetrConfig.R50.NumHeads);
-        Assert.Equal((512, 1024, 2048), RtDetrConfig.R50.NeckInputChannels);
+        // One 1×1 conv (2 out, 1 in) + BN. Fold math: scale = gamma/sqrt(var+eps),
+        // w' = w*scale, b' = beta - mean*scale.  eps = 1e-5.
+        const float eps = 1e-5f;
+        Dictionary<string, Tensor> raw = new()
+        {
+            ["m.conv.weight"] = Vec(new TensorShape(2, 1, 1, 1), 2f, -3f),
+            ["m.norm.weight"] = Vec(new TensorShape(2), 4f, 5f),   // gamma
+            ["m.norm.bias"] = Vec(new TensorShape(2), 1f, -1f),    // beta
+            ["m.norm.running_mean"] = Vec(new TensorShape(2), 0.5f, 2f),
+            ["m.norm.running_var"] = Vec(new TensorShape(2), 3f, 0.25f),
+            ["m.norm.num_batches_tracked"] = Vec(new TensorShape(1), 7f),
+            ["head.weight"] = Vec(new TensorShape(1), 9f),          // untouched passthrough
+        };
 
-        // Every enumerated model weight is exactly one loaded synthetic tensor — proves LoadWeights
-        // and EnumerateWeights agree on the key set (no missing / extra keys).
-        RtDetrConfig cfg = TinyConfig;
-        Dictionary<string, Tensor> weights = RtDetrSyntheticWeights.Build(cfg);
-        RtDetrModel model = new(cfg);
-        model.LoadWeights(weights);
-        int enumerated = model.EnumerateWeights().Count();
-        Assert.Equal(weights.Count, enumerated);
+        Dictionary<string, Tensor> conv = RtDetrCheckpointConverter.Convert(raw);
+
+        Assert.True(conv.ContainsKey("m.conv.weight"));
+        Assert.True(conv.ContainsKey("m.conv.bias"));
+        Assert.False(conv.ContainsKey("m.norm.weight"));
+        Assert.False(conv.ContainsKey("m.norm.running_var"));
+        Assert.False(conv.ContainsKey("m.norm.num_batches_tracked"));
+        Assert.True(conv.ContainsKey("head.weight"));
+
+        float scale0 = 4f / MathF.Sqrt(3f + eps);
+        float scale1 = 5f / MathF.Sqrt(0.25f + eps);
+        Span<float> w = conv["m.conv.weight"].AsSpan<float>();
+        Span<float> b = conv["m.conv.bias"].AsSpan<float>();
+        Assert.Equal(2f * scale0, w[0], 4);
+        Assert.Equal(-3f * scale1, w[1], 4);
+        Assert.Equal(1f - 0.5f * scale0, b[0], 4);
+        Assert.Equal(-1f - 2f * scale1, b[1], 4);
     }
 
     [Fact]
@@ -77,101 +83,22 @@ public sealed class RtDetrForwardTests
         float[] grid = [0f, 1f, 2f, 3f];
         Span<float> dst = stackalloc float[1];
 
-        // Center sample = mean of the four corners = 1.5.
-        RtDetrDecoder.BilinearSampleZeroPad(grid, tokenBase: 0, height: 2, width: 2, rowStride: 1, channelOffset: 0, channels: 1, px: 0.5f, py: 0.5f, dst);
+        RtDetrDecoder.BilinearSampleZeroPad(grid, 0, 2, 2, 1, 0, 1, px: 0.5f, py: 0.5f, dst);
         Assert.Equal(1.5f, dst[0], 5);
 
-        // Exact grid point (1,1) = 3.
         RtDetrDecoder.BilinearSampleZeroPad(grid, 0, 2, 2, 1, 0, 1, px: 1f, py: 1f, dst);
         Assert.Equal(3f, dst[0], 5);
 
-        // Off the left edge — the only in-bounds neighbour is (0,0) whose value is 0, so the
-        // zero-padded sample is 0 regardless of weight.
         RtDetrDecoder.BilinearSampleZeroPad(grid, 0, 2, 2, 1, 0, 1, px: -0.5f, py: 0f, dst);
         Assert.Equal(0f, dst[0], 5);
     }
 
-    [Trait("Category", "SyntheticSmoke")]
-    [Fact]
-    public void Model_Forward_ProducesExpectedShapes()
-    {
-        using IBackend backend = new CpuBackend();
-        RtDetrModel model = BuildTinyModel();
-        using Tensor input = MakeInput(64);
-
-        (Tensor cls, Tensor boxes) = model.Forward(backend, input);
-        try
-        {
-            Assert.Equal(3, cls.Shape.Rank);
-            Assert.Equal(1, (int)cls.Shape[0]);
-            Assert.Equal(model.NumQueries, (int)cls.Shape[1]);
-            Assert.Equal(model.NumClasses, (int)cls.Shape[2]);
-
-            Assert.Equal(3, boxes.Shape.Rank);
-            Assert.Equal(model.NumQueries, (int)boxes.Shape[1]);
-            Assert.Equal(4, (int)boxes.Shape[2]);
-
-            // Boxes are cxcywh in [0,1] (sigmoid output).
-            foreach (float v in boxes.AsSpan<float>())
-                Assert.InRange(v, 0f, 1f);
-        }
-        finally
-        {
-            cls.Dispose();
-            boxes.Dispose();
-        }
-    }
-
-    [Trait("Category", "SyntheticSmoke")]
-    [Fact]
-    public void DecoderLayer_HiddenState_HasQueryByHiddenShape()
-    {
-        using IBackend backend = new CpuBackend();
-        RtDetrModel model = BuildTinyModel();
-        using Tensor input = MakeInput(64);
-
-        using Tensor hidden = model.ForwardHiddenState(backend, input);
-        Assert.Equal(3, hidden.Shape.Rank);
-        Assert.Equal(1, (int)hidden.Shape[0]);
-        Assert.Equal(model.NumQueries, (int)hidden.Shape[1]);
-        Assert.Equal(model.Config.HiddenDim, (int)hidden.Shape[2]);
-    }
-
-    [Trait("Category", "SyntheticSmoke")]
-    [Fact]
-    public void Pipeline_Detect_ReturnsCappedNormalizedResults()
-    {
-        using IBackend backend = new CpuBackend();
-        RtDetrModel model = BuildTinyModel();
-        using RtDetrPipeline pipeline = new(backend, model, inputSize: 64);
-
-        const int srcW = 80, srcH = 60;
-        byte[] rgb = new byte[srcW * srcH * 3];
-        for (int i = 0; i < rgb.Length; i++)
-            rgb[i] = (byte)((i * 53) % 256);
-
-        IReadOnlyList<DetectionResult> results = pipeline.Detect(rgb, srcW, srcH, confidenceThreshold: 0f);
-        _output.WriteLine($"rtdetr-tiny produced {results.Count} detections (cap {model.NumQueries})");
-
-        Assert.True(results.Count <= model.NumQueries, "NMS-free decoder must emit at most NumQueries detections.");
-        for (int i = 1; i < results.Count; i++)
-            Assert.True(results[i - 1].Confidence >= results[i].Confidence, "results must be sorted by confidence descending.");
-        foreach (DetectionResult d in results)
-        {
-            Assert.InRange(d.X, 0f, 1f);
-            Assert.InRange(d.Y, 0f, 1f);
-            Assert.InRange(d.Width, 0f, 1f);
-            Assert.InRange(d.Height, 0f, 1f);
-            Assert.InRange(d.Confidence, 0f, 1f);
-            Assert.InRange(d.ClassIndex, 0, model.NumClasses - 1);
-        }
-    }
-
-    /// <summary>Real-weight parity — gated on <c>RTDETR_PATH</c>. Skips cleanly when unset; a real
-    /// checkpoint + reference boxes are needed to graduate this out of a stub.</summary>
+    /// <summary>Real-weight parity — gated on <c>RTDETR_PATH</c> (the rtdetr_r18vd safetensors). Runs
+    /// the full pipeline on the bundled bus.png and checks the top detection's label + box IoU + score
+    /// against the transformers oracle.</summary>
     [Trait("Category", "Integration")]
     [Fact]
-    public void RealWeights_Parity_Stub()
+    public void RealWeights_Parity_BusImage()
     {
         string? path = Environment.GetEnvironmentVariable("RTDETR_PATH");
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
@@ -180,9 +107,88 @@ public sealed class RtDetrForwardTests
             return;
         }
 
+        string busPath = Path.Combine(AppContext.BaseDirectory, "TestData", "bus.png");
+        Assert.True(File.Exists(busPath), $"bus.png not found at {busPath}");
+        (byte[] rgb, int w, int h) = PngDecoder.Decode(File.ReadAllBytes(busPath));
+
         using IBackend backend = new CpuBackend();
-        using RtDetrPipeline pipeline = new(backend, RtDetrConfig.R50, path, inputSize: 640);
-        Assert.Equal("rtdetr-r50", pipeline.ModelName);
-        // Parity assertions vs a reference detection set are pending real RT-DETR weight conversion.
+        using RtDetrPipeline pipeline = new(backend, RtDetrConfig.R18vd, path, inputSize: 640);
+        Assert.Equal("rtdetr_r18vd", pipeline.ModelName);
+
+        IReadOnlyList<DetectionResult> results = pipeline.Detect(rgb, w, h, confidenceThreshold: 0.3f);
+        _output.WriteLine($"C# produced {results.Count} detections on bus.png ({w}x{h}):");
+        foreach (DetectionResult d in results)
+            _output.WriteLine($"  label={d.ClassIndex} score={d.Confidence:F4} box=[{d.X * w:F1},{d.Y * h:F1},{(d.X + d.Width) * w:F1},{(d.Y + d.Height) * h:F1}]");
+
+        Assert.NotEmpty(results);
+
+        // Top detection must be the bus (label 5) with high IoU + score against the oracle.
+        DetectionResult top = results[0];
+        (int Label, float Score, float X1, float Y1, float X2, float Y2) oracleTop = OracleBus[0];
+        Assert.Equal(oracleTop.Label, top.ClassIndex);
+        float topIou = Iou(top, w, h, oracleTop);
+        _output.WriteLine($"Top detection IoU vs oracle bus = {topIou:F4}, score {top.Confidence:F4} (oracle {oracleTop.Score:F4})");
+        Assert.True(topIou >= 0.9f, $"Top box IoU {topIou:F3} < 0.9");
+        Assert.True(MathF.Abs(top.Confidence - oracleTop.Score) < 0.05f, $"Top score {top.Confidence:F3} vs oracle {oracleTop.Score:F3}");
+
+        // Every oracle detection must be matched (same label + IoU >= 0.9); collect score pairs.
+        List<float> csScores = new(), refScores = new();
+        foreach ((int Label, float Score, float X1, float Y1, float X2, float Y2) oracle in OracleBus)
+        {
+            DetectionResult? best = null;
+            float bestIou = 0f;
+            foreach (DetectionResult d in results)
+            {
+                if (d.ClassIndex != oracle.Label) continue;
+                float iou = Iou(d, w, h, oracle);
+                if (iou > bestIou) { bestIou = iou; best = d; }
+            }
+            Assert.True(best is not null && bestIou >= 0.9f,
+                $"No C# detection matched oracle (label {oracle.Label}, box [{oracle.X1},{oracle.Y1},{oracle.X2},{oracle.Y2}]); best IoU {bestIou:F3}");
+            csScores.Add(best!.Confidence);
+            refScores.Add(oracle.Score);
+        }
+
+        float corr = Pearson(csScores, refScores);
+        _output.WriteLine($"Score correlation vs oracle = {corr:F4}");
+        Assert.True(corr >= 0.9f, $"Score correlation {corr:F3} < 0.9");
+    }
+
+    private static float Iou(DetectionResult d, int w, int h, (int Label, float Score, float X1, float Y1, float X2, float Y2) o)
+    {
+        float ax1 = d.X * w, ay1 = d.Y * h, ax2 = (d.X + d.Width) * w, ay2 = (d.Y + d.Height) * h;
+        float ix1 = MathF.Max(ax1, o.X1), iy1 = MathF.Max(ay1, o.Y1);
+        float ix2 = MathF.Min(ax2, o.X2), iy2 = MathF.Min(ay2, o.Y2);
+        float iw = MathF.Max(0f, ix2 - ix1), ih = MathF.Max(0f, iy2 - iy1);
+        float inter = iw * ih;
+        float areaA = MathF.Max(0f, ax2 - ax1) * MathF.Max(0f, ay2 - ay1);
+        float areaB = (o.X2 - o.X1) * (o.Y2 - o.Y1);
+        float union = areaA + areaB - inter;
+        return union <= 0f ? 0f : inter / union;
+    }
+
+    private static float Pearson(List<float> a, List<float> b)
+    {
+        int n = a.Count;
+        if (n < 2) return 1f;
+        float ma = 0f, mb = 0f;
+        for (int i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+        ma /= n; mb /= n;
+        float sab = 0f, saa = 0f, sbb = 0f;
+        for (int i = 0; i < n; i++)
+        {
+            float da = a[i] - ma, db = b[i] - mb;
+            sab += da * db; saa += da * da; sbb += db * db;
+        }
+        return (saa <= 0f || sbb <= 0f) ? 1f : sab / MathF.Sqrt(saa * sbb);
+    }
+
+    private static Tensor Vec(TensorShape shape, params float[] values)
+    {
+        Tensor t = new(shape, DType.F32);
+        Span<float> s = t.AsSpan<float>();
+        for (int i = 0; i < values.Length && i < s.Length; i++)
+            s[i] = values[i];
+        return t;
     }
 }
