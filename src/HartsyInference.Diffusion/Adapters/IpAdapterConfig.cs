@@ -24,6 +24,12 @@ public sealed record IpAdapterConfig
     /// <summary>Whether this is a face-specific adapter.</summary>
     public bool IsFaceId { get; init; }
 
+    /// <summary>FaceID-Plus <b>v2</b>: the projection was trained with the shortcut path enabled (<c>out = mlp_tokens + scale × resampler(mlp_tokens, clip)</c>, user-facing "FaceID V2 weight" = scale). Structurally identical to FaceID-Plus v1 so this comes from the checkpoint filename (<c>plusv2</c>), not from key signatures. Only meaningful when <see cref="IsFaceId"/> and <see cref="IsPlus"/> are both set.</summary>
+    public bool IsFaceIdV2 { get; init; }
+
+    /// <summary>CLIP-Vision hidden size consumed by the FaceID-Plus perceiver resampler's <c>proj_in</c> (1280 for the ViT-H/14 encoder all released FaceID-Plus checkpoints use). Unused by other variants.</summary>
+    public int ClipEmbeddingDim { get; init; } = 1280;
+
     /// <summary>Conditioning scale applied to IP-Adapter outputs.</summary>
     public float Scale { get; init; } = 1.0f;
 

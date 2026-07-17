@@ -448,10 +448,150 @@ public sealed class AdapterLoaderTests : IDisposable
     }
 
     [Fact]
-    public void IpAdapter_FaceIdPlus_IsRefused()
+    public void IpAdapterLoader_DetectsFaceIdPlusV2_FromFilenameAndPerceiverKeys()
     {
-        IpAdapterConfig config = IpAdapterConfig.Sd15Plus with { IsFaceId = true };
-        Assert.Throws<NotSupportedException>(() => new IpAdapter(config));
+        // Shape-probed subset of ip-adapter-faceid-plusv2_sd15.bin (detection + BuildConfig don't
+        // touch the resampler layer weights, so those are omitted to keep the file small).
+        string path = CreateSafeTensorsFile("ip-adapter-faceid-plusv2_sd15.safetensors", new()
+        {
+            ["image_proj.proj.0.weight"] = (DType.F32, [1024, 512], new float[1024 * 512]),
+            ["image_proj.proj.2.weight"] = (DType.F32, [3072, 1024], new float[3072 * 1024]),
+            ["image_proj.norm.weight"] = (DType.F32, [768], OnesArray(768)),
+            ["image_proj.perceiver_resampler.proj_in.weight"] = (DType.F32, [768, 1280], new float[768 * 1280]),
+            ["ip_adapter.1.to_k_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+            ["ip_adapter.1.to_v_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+        });
+
+        using IpAdapterFile file = IpAdapterLoader.Load(path);
+        Assert.Equal(IpAdapterBaseModel.Sd15, file.BaseModel);
+        Assert.True(file.Config.IsFaceId);
+        Assert.True(file.Config.IsPlus);
+        Assert.True(file.Config.IsFaceIdV2);
+        Assert.Equal(512, file.Config.ImageEmbeddingDim);
+        Assert.Equal(1280, file.Config.ClipEmbeddingDim);
+        Assert.Equal(4, file.Config.NumImageTokens);
+        Assert.Equal(768, file.Config.CrossAttentionDim);
+    }
+
+    [Fact]
+    public void IpAdapterLoader_FaceIdPlus_WithoutV2Name_IsNotV2()
+    {
+        string path = CreateSafeTensorsFile("ip-adapter-faceid-plus_sd15.safetensors", new()
+        {
+            ["image_proj.proj.0.weight"] = (DType.F32, [1024, 512], new float[1024 * 512]),
+            ["image_proj.proj.2.weight"] = (DType.F32, [3072, 1024], new float[3072 * 1024]),
+            ["image_proj.norm.weight"] = (DType.F32, [768], OnesArray(768)),
+            ["image_proj.perceiver_resampler.proj_in.weight"] = (DType.F32, [768, 1280], new float[768 * 1280]),
+            ["ip_adapter.1.to_k_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+            ["ip_adapter.1.to_v_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
+        });
+
+        using IpAdapterFile file = IpAdapterLoader.Load(path);
+        Assert.True(file.Config.IsFaceId);
+        Assert.True(file.Config.IsPlus);
+        Assert.False(file.Config.IsFaceIdV2);
+    }
+
+    [Fact]
+    public void IpAdapter_FaceIdPlus_LoadsAndProjects_SyntheticWeights()
+    {
+        // Tiny ProjPlusModel: crossDim=128 (2 heads × 64), clipDim=96, idDim=64, 4 tokens, depth 4.
+        const int cross = 128, clip = 96, id = 64, tokens = 4, seq = 5;
+        Dictionary<string, Tensor> weights = new();
+        AddTensor(weights, "image_proj.proj.0.weight", [id * 2, id]);
+        AddTensor(weights, "image_proj.proj.0.bias", [id * 2]);
+        AddTensor(weights, "image_proj.proj.2.weight", [tokens * cross, id * 2]);
+        AddTensor(weights, "image_proj.proj.2.bias", [tokens * cross]);
+        AddTensor(weights, "image_proj.norm.weight", [cross], fill: 1f);
+        AddTensor(weights, "image_proj.norm.bias", [cross]);
+        AddTensor(weights, "image_proj.perceiver_resampler.proj_in.weight", [cross, clip]);
+        AddTensor(weights, "image_proj.perceiver_resampler.proj_in.bias", [cross]);
+        AddTensor(weights, "image_proj.perceiver_resampler.proj_out.weight", [cross, cross]);
+        AddTensor(weights, "image_proj.perceiver_resampler.proj_out.bias", [cross]);
+        AddTensor(weights, "image_proj.perceiver_resampler.norm_out.weight", [cross], fill: 1f);
+        AddTensor(weights, "image_proj.perceiver_resampler.norm_out.bias", [cross]);
+        for (int i = 0; i < 4; i++)
+        {
+            string layer = $"image_proj.perceiver_resampler.layers.{i}";
+            AddTensor(weights, $"{layer}.0.norm1.weight", [cross], fill: 1f);
+            AddTensor(weights, $"{layer}.0.norm1.bias", [cross]);
+            AddTensor(weights, $"{layer}.0.norm2.weight", [cross], fill: 1f);
+            AddTensor(weights, $"{layer}.0.norm2.bias", [cross]);
+            AddTensor(weights, $"{layer}.0.to_q.weight", [cross, cross]);
+            AddTensor(weights, $"{layer}.0.to_kv.weight", [2 * cross, cross]);
+            AddTensor(weights, $"{layer}.0.to_out.weight", [cross, cross]);
+            AddTensor(weights, $"{layer}.1.0.weight", [cross], fill: 1f);
+            AddTensor(weights, $"{layer}.1.0.bias", [cross]);
+            AddTensor(weights, $"{layer}.1.1.weight", [4 * cross, cross]);
+            AddTensor(weights, $"{layer}.1.3.weight", [cross, 4 * cross]);
+        }
+        AddTensor(weights, "ip_adapter.1.to_k_ip.weight", [64, cross]);
+        AddTensor(weights, "ip_adapter.1.to_v_ip.weight", [64, cross]);
+
+        IpAdapterConfig config = new()
+        {
+            BaseModel = IpAdapterBaseModel.Sd15,
+            ClipImageModel = "InsightFace ArcFace + ViT-H/14",
+            ImageEmbeddingDim = id,
+            NumImageTokens = tokens,
+            CrossAttentionDim = cross,
+            ClipEmbeddingDim = clip,
+            IsPlus = true,
+            IsFaceId = true,
+            IsFaceIdV2 = true,
+        };
+        using IpAdapter adapter = new(config);
+        adapter.LoadWeights(weights);
+        Assert.IsType<IpAdapterFaceIdPlusProjection>(adapter.ImageProjection);
+        Assert.Equal(tokens, adapter.NumImageTokens);
+
+        using CpuBackend backend = new CpuBackend();
+        using Tensor faceEmbed = MakeRamp([1, id], scale: 0.01f);
+        using Tensor clipEmbeds = MakeRamp([1, seq, clip], scale: 0.02f);
+
+        // Single-input path must refuse — FaceID-Plus needs both inputs.
+        Assert.Throws<InvalidOperationException>(() => adapter.ProjectImage(backend, faceEmbed));
+
+        using Tensor tokensOut = adapter.ProjectImage(backend, faceEmbed, clipEmbeds, shortcutScale: 1.0f);
+        Assert.Equal(new TensorShape(1, tokens, cross), tokensOut.Shape);
+        foreach (float v in tokensOut.AsSpan<float>())
+        {
+            Assert.True(float.IsFinite(v));
+        }
+
+        // v2 shortcut algebra on the same weights: out(s) = mlp + s·r  ⇒  out(1) − out(0.5) = 0.5·r ≠ 0.
+        using Tensor half = adapter.ProjectImage(backend, faceEmbed, clipEmbeds, shortcutScale: 0.5f);
+        float diff = 0f;
+        ReadOnlySpan<float> a = tokensOut.AsSpan<float>();
+        ReadOnlySpan<float> b = half.AsSpan<float>();
+        for (int i = 0; i < a.Length; i++) diff += MathF.Abs(a[i] - b[i]);
+        Assert.True(diff > 0f, "shortcut scale had no effect on a v2 FaceID-Plus projection.");
+
+        foreach (Tensor t in weights.Values) t.Dispose();
+    }
+
+    private static void AddTensor(Dictionary<string, Tensor> weights, string key, long[] shape, float fill = float.NaN)
+    {
+        Tensor t = new Tensor(new TensorShape(shape), DType.F32);
+        Span<float> span = t.AsSpan<float>();
+        if (float.IsNaN(fill))
+        {
+            // Small deterministic pseudo-random values keep the forward numerically tame.
+            for (int i = 0; i < span.Length; i++) span[i] = ((i * 37 + key.Length * 11) % 19 - 9) * 0.01f;
+        }
+        else
+        {
+            span.Fill(fill);
+        }
+        weights[key] = t;
+    }
+
+    private static Tensor MakeRamp(long[] shape, float scale)
+    {
+        Tensor t = new Tensor(new TensorShape(shape), DType.F32);
+        Span<float> span = t.AsSpan<float>();
+        for (int i = 0; i < span.Length; i++) span[i] = ((i % 23) - 11) * scale;
+        return t;
     }
 
     [Fact]

@@ -104,21 +104,26 @@ public static class FaceAlignment
     }
 
     /// <summary>Estimates the similarity from detected keypoints to the first <c>points.Length/2</c> rows of
-    /// the ArcFace template and warps the source image into a 112×112 aligned RGB crop (bilinear sampling,
-    /// black border). <paramref name="rgbPixels"/> is HWC-packed RGB u8.</summary>
-    public static byte[] AlignToTemplate(ReadOnlySpan<byte> rgbPixels, int width, int height, ReadOnlySpan<float> points)
+    /// the ArcFace template and warps the source image into an <paramref name="outputSize"/>² aligned RGB crop
+    /// (bilinear sampling, black border). <paramref name="rgbPixels"/> is HWC-packed RGB u8. The template is
+    /// scaled by <c>outputSize / 112</c>, matching insightface <c>norm_crop(image_size=…)</c> for multiples of
+    /// 112 — FaceID-Plus feeds the same alignment at 224 to CLIP-Vision.</summary>
+    public static byte[] AlignToTemplate(ReadOnlySpan<byte> rgbPixels, int width, int height, ReadOnlySpan<float> points, int outputSize = CropSize)
     {
         int n = points.Length / 2;
         if (n < 2 || n > 5)
             throw new ArgumentException($"Expected 2–5 (x,y) keypoints matching the template rows; got {n}.");
+        if (outputSize <= 0 || outputSize % CropSize != 0)
+            throw new ArgumentException($"outputSize must be a positive multiple of {CropSize} (insightface norm_crop contract); got {outputSize}.", nameof(outputSize));
+        float ratio = outputSize / (float)CropSize;
         Span<float> dst = stackalloc float[n * 2];
         for (int i = 0; i < n; i++)
         {
-            dst[2 * i] = Template[i, 0];
-            dst[2 * i + 1] = Template[i, 1];
+            dst[2 * i] = Template[i, 0] * ratio;
+            dst[2 * i + 1] = Template[i, 1] * ratio;
         }
         Affine2x3 srcToDst = EstimateSimilarity(points, dst);
-        return WarpAffine(rgbPixels, width, height, srcToDst, CropSize, CropSize);
+        return WarpAffine(rgbPixels, width, height, srcToDst, outputSize, outputSize);
     }
 
     /// <summary>Warps the source image with <paramref name="srcToDst"/> into a <paramref name="outWidth"/>×

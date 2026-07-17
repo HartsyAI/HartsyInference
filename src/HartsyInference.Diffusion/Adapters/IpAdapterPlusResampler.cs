@@ -257,7 +257,9 @@ internal sealed unsafe class ResamplerLayer
         ffNormed.Dispose();
         TensorShape fc1Shape = new TensorShape(batch, numLatents, _ffInnerDim);
         Tensor activated = new Tensor(fc1Shape, DType.F32);
-        backend.Gelu(activated, fc1);
+        // The reference FeedForward uses nn.GELU() (exact erf form) — the tanh approximation's ~3e-3
+        // pointwise gap compounds over the 4 residual layers and breaks 0.9999-corr parity.
+        backend.GeluErf(activated, fc1);
         fc1.Dispose();
         Tensor fc2 = IpaLinear.Apply(backend, activated, _ffLinear2Weight!, null, batch, numLatents, _ffInnerDim, _hiddenDim);
         activated.Dispose();

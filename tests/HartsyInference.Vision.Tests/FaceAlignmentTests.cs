@@ -115,6 +115,41 @@ public sealed class FaceAlignmentTests
     }
 
     [Fact]
+    public void AlignToTemplate_OutputSize224_ScalesTemplate()
+    {
+        // Same synthetic layout as the 112 test; at outputSize=224 (FaceID-Plus CLIP crop, insightface
+        // norm_crop(image_size=224) semantics) the colors must land at 2× the template coordinates.
+        const int size = 200;
+        byte[] rgb = new byte[size * size * 3];
+        float[] pts = [60f, 80f, 140f, 80f, 100f, 120f];
+        byte[][] colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+        for (int p = 0; p < 3; p++)
+        {
+            int cx = (int)pts[2 * p], cy = (int)pts[2 * p + 1];
+            for (int dy = -6; dy <= 6; dy++)
+                for (int dx = -6; dx <= 6; dx++)
+                {
+                    int off = ((cy + dy) * size + cx + dx) * 3;
+                    rgb[off] = colors[p][0]; rgb[off + 1] = colors[p][1]; rgb[off + 2] = colors[p][2];
+                }
+        }
+
+        byte[] aligned = FaceAlignment.AlignToTemplate(rgb, size, size, pts, outputSize: 224);
+        Assert.Equal(224 * 224 * 3, aligned.Length);
+        for (int p = 0; p < 3; p++)
+        {
+            int tx = (int)MathF.Round(FaceAlignment.Template[p, 0] * 2f);
+            int ty = (int)MathF.Round(FaceAlignment.Template[p, 1] * 2f);
+            int off = (ty * 224 + tx) * 3;
+            Assert.True(aligned[off + p] > 200,
+                $"scaled template point {p} at ({tx},{ty}) expected channel {p} bright, got ({aligned[off]},{aligned[off + 1]},{aligned[off + 2]})");
+        }
+
+        // Non-multiple-of-112 sizes violate the insightface norm_crop contract.
+        Assert.Throws<ArgumentException>(() => FaceAlignment.AlignToTemplate(rgb, size, size, pts, outputSize: 200));
+    }
+
+    [Fact]
     public void TryGetAlignmentPoints_OrdersEyesByImageX()
     {
         // COCO order: 0 nose, 1 left-eye, 2 right-eye. Give "left eye" the LARGER x (mirrored image) —
