@@ -24,8 +24,8 @@ detail lives in [PHASE_6_VISION.md](PHASE_6_VISION.md). Vision-tower parity for 
 
 | Model | Status | Notes |
 |---|---|---|
-| **SAM 2 / MobileSAM** | 🚧 | `SamPipeline` + `SamMaskDecoder` API reserved; throws until the Hiera encoder + two-way mask decoder are built. |
-| **Face detection / landmarks** | 🚧 | `FaceDetector` + `LandmarkExtractor` placeholders (YOLOv8-Face / RetinaFace / InsightFace, backbone-agnostic). |
+| **SAM 2 / MobileSAM** | ✅ | **Real-weight VERIFIED (2026-07-17, `facebook/sam2-hiera-tiny`):** Hiera windowed-attn encoder + two-way mask decoder built; best-mask **IoU 0.9972** vs HF `Sam2Model`, image-embed **corr 0.999**. Bringup fixed 7 real arch bugs (mask-decoder `mlp.layers` keys, `global_att_blocks`, bicubic pos-embed, FPN nearest top-down, high-res feature path, `obj_score_token` off-by-one, dense no-mask embed + IoU sigmoid). `Sam2RealWeightParityTests` (env-gated `SAM2_CHECKPOINT_PATH`+`SAM2_REF_DIR`) passes; seg-overlay artifact produced. |
+| **Face detection / landmarks** | ✅ | **Real-weight VERIFIED (2026-07-17, `akanametov/yolo-face` widerface-Pose):** YOLOv8-Face detector (v8 trunk + `cv4` 5-pt landmark branch) → box **IoU 0.9999**, landmark **mean 0.025 px / max 0.042 px** vs ultralytics; detector → `FaceAlignment` → `ArcFace` **512-d L2-norm 1.0**. Reuses the verified YOLO stack; guessed key layout was correct. Env-gated `YOLOV8_FACE_PATH`+`ARCFACE_WEIGHTS_PATH` integration test passes. |
 
 ## Deferred (❌)
 
