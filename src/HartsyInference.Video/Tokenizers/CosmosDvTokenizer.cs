@@ -28,6 +28,7 @@ public sealed unsafe class CosmosDvTokenizer : IDiscreteVideoTokenizer, IDisposa
     private readonly int _vocabSize;
     private CausalConv3d[]? _encoderConvs;
     private CausalConv3d[]? _decoderConvs;
+    private CosmosDvEncoder? _encoder;
     private int _disposed;
 
     /// <summary>Builds the tokenizer for the given config (default DV8x16x16). Conv weights are loaded separately
@@ -71,18 +72,45 @@ public sealed unsafe class CosmosDvTokenizer : IDiscreteVideoTokenizer, IDisposa
         if (c != _levels.Length) throw new ArgumentException($"channel count {c} must equal FSQ dims {_levels.Length}.");
         int n = t * h * w;
 
-        // FSQ consumes channels-last [B, N, C]; the conv output is channels-first [B, C, T, H, W]. Rearrange host-side
-        // (the tokenizer runs once per clip — not a GPU hot path).
-        using Tensor zLast = new Tensor(new TensorShape(b, n, c), DType.F32);
-        float* src = (float*)continuous.DataPointer;
-        float* dst = (float*)zLast.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (int ci = 0; ci < c; ci++)
-                for (int i = 0; i < n; i++)
-                    dst[((long)bi * n + i) * c + ci] = src[((long)bi * c + ci) * n + i];
-
+        // Cosmos FSQuantizer: parity-aware tanh bound with atanh shift + eps 1e-3 (lucidrains/Cosmos), NOT the
+        // shared Core.Fsq (which uses atan + eps 1e-6 — a different, non-Cosmos bound). Channels-first
+        // [B,C,T,H,W] → the 6 channels are the FSQ axes, packed by the mixed-radix basis. Runs host-side.
         Tensor codes = new Tensor(new TensorShape(b, n), DType.I32);
-        Fsq.Quantize(codes, zLast, _levels);
+        int* cp = (int*)codes.DataPointer;
+        float* src = (float*)continuous.DataPointer;
+
+        Span<float> halfL = stackalloc float[c];
+        Span<float> shift = stackalloc float[c];
+        Span<int> halfW = stackalloc int[c];
+        Span<int> basis = stackalloc int[c];
+        const float eps = 1e-3f;
+        int place = 1;
+        for (int d = 0; d < c; d++)
+        {
+            int L = _levels[d];
+            halfL[d] = (L - 1) * (1f + eps) / 2f;
+            float offset = (L % 2 == 0) ? 0.5f : 0f;
+            shift[d] = MathF.Atanh(offset / halfL[d]);
+            halfW[d] = L / 2;
+            basis[d] = place; place *= L;
+        }
+        for (int bi = 0; bi < b; bi++)
+            for (int i = 0; i < n; i++)
+            {
+                int code = 0;
+                for (int d = 0; d < c; d++)
+                {
+                    int L = _levels[d];
+                    float offset = (L % 2 == 0) ? 0.5f : 0f;
+                    float z = src[((long)bi * c + d) * n + i];
+                    float bounded = MathF.Tanh(z + shift[d]) * halfL[d] - offset;
+                    int zhat = (int)MathF.Round(bounded, MidpointRounding.ToEven);
+                    int digit = zhat + halfW[d];
+                    if (digit < 0) digit = 0; else if (digit >= L) digit = L - 1;
+                    code += digit * basis[d];
+                }
+                cp[(long)bi * n + i] = code;
+            }
         return codes;
     }
 
@@ -111,15 +139,23 @@ public sealed unsafe class CosmosDvTokenizer : IDiscreteVideoTokenizer, IDisposa
     public Tensor Encode(IBackend backend, Tensor video)
     {
         ThrowIfDisposed();
-        if (_encoderConvs is null)
-            throw new NotSupportedException("CosmosDvTokenizer.Encode requires the converted encoder.jit weights and the " +
-                "resolved conv stage schedule (research-doc Open Q §10). Load them via LoadWeights first.");
-        Tensor wavelet = HaarWavelet3D.Forward(video, _cfg.HaarLevels);
-        Tensor features = RunConvStack(backend, _encoderConvs, wavelet);
-        wavelet.Dispose();
-        Tensor codes = QuantizeToCodes(features);
-        features.Dispose();
+        if (_encoder is null)
+            throw new NotSupportedException("CosmosDvTokenizer.Encode requires the DV tokenizer weights. Load the shipped " +
+                "model.pt (network.* set) via CosmosDvTokenizerConverter and pass them to LoadWeights first.");
+        Tensor continuous = _encoder.Encode(backend, video);   // [1,6,Tl,Hl,Wl] pre-FSQ
+        Tensor codes = QuantizeToCodes(continuous);
+        continuous.Dispose();
         return codes;
+    }
+
+    /// <summary>Runs the encoder up to the pre-FSQ continuous latent <c>[1,6,Tl,Hl,Wl]</c> (before quantization).
+    /// Exposed for parity verification against <c>encoder.jit</c>'s continuous output.</summary>
+    public Tensor EncodeContinuous(IBackend backend, Tensor video)
+    {
+        ThrowIfDisposed();
+        if (_encoder is null)
+            throw new NotSupportedException("CosmosDvTokenizer.EncodeContinuous requires loaded DV tokenizer weights.");
+        return _encoder.Encode(backend, video);
     }
 
     /// <inheritdoc/>
@@ -157,13 +193,16 @@ public sealed unsafe class CosmosDvTokenizer : IDiscreteVideoTokenizer, IDisposa
         return current;
     }
 
-    /// <summary>Wires the loaded encoder/decoder causal-conv stacks (built by <c>CosmosDvTokenizerConverter</c>
-    /// from the converted JIT weights). Called at integration once the exact stage schedule is known.</summary>
-    public void LoadWeights(CausalConv3d[] encoderConvs, CausalConv3d[] decoderConvs)
+    /// <summary>Wires the DV encoder from the loaded <c>network.*</c> tokenizer weights (F32; produced by
+    /// <see cref="HartsyInference.ModelHandler.CheckpointConverters.CosmosDvTokenizerConverter"/> with
+    /// <c>castToF32: true</c>). Keys are the prefix-stripped module names (e.g. <c>encoder.conv_in.0.conv3d.weight</c>,
+    /// <c>quant_conv.conv3d.weight</c>).</summary>
+    public void LoadWeights(Dictionary<string, Tensor> weightsF32)
     {
         ThrowIfDisposed();
-        _encoderConvs = encoderConvs ?? throw new ArgumentNullException(nameof(encoderConvs));
-        _decoderConvs = decoderConvs ?? throw new ArgumentNullException(nameof(decoderConvs));
+        ArgumentNullException.ThrowIfNull(weightsF32);
+        _encoder?.Dispose();
+        _encoder = new CosmosDvEncoder(weightsF32);
     }
 
     /// <summary>All conv weights for GPU preload (empty until <see cref="LoadWeights"/> runs).</summary>
@@ -185,6 +224,8 @@ public sealed unsafe class CosmosDvTokenizer : IDiscreteVideoTokenizer, IDisposa
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _encoder?.Dispose();
+        _encoder = null;
         _encoderConvs = null;
         _decoderConvs = null;
     }
