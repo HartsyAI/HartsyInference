@@ -1,9 +1,15 @@
+using System.Globalization;
+using System.Text;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Vision.Codec;
 using HartsyInference.Vision.Detection;
+using HartsyInference.Vision.Face;
 using HartsyInference.Vision.FaceDetection;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Vision.Tests;
 
@@ -16,6 +22,10 @@ public sealed class FaceDetectorForwardTests
     private const int RegMax = 16;
     private const int NumPoints = 5;
     private const int KptDims = 3;
+
+    private readonly ITestOutputHelper _output;
+
+    public FaceDetectorForwardTests(ITestOutputHelper output) => _output = output;
 
     /// <summary>Head forward over random synthetic weights: asserts the box/class tensor is <c>[1, 4+1, A]</c> and the
     /// landmark tensor is <c>[1, 5·ndim, A]</c> over the same anchor count. This is the channel guarantee the whole
@@ -174,27 +184,116 @@ public sealed class FaceDetectorForwardTests
         }
     }
 
-    /// <summary>Real-weight end-to-end parity — env-gated. Set <c>YOLOV8_FACE_PATH</c> to a converted YOLOv8-Face
-    /// safetensors to exercise the full pipeline on the GPU lane; unset skips cleanly.</summary>
+    /// <summary>Real-weight end-to-end parity — env-gated. Set <c>YOLOV8_FACE_PATH</c> to a folded YOLOv8-Face
+    /// safetensors (see <c>tests/python-reference/convert_yolov8_pt_to_safetensors.py</c> on a widerface Pose
+    /// checkpoint, e.g. akanametov/yolo-face <c>yolov8n-face.pt</c>). Runs the full detector on a real photo
+    /// (<c>TestData/bus.png</c> by default, or <c>FACE_TEST_IMAGE</c>), asserts faces + 5 in-bounds landmarks,
+    /// dumps detections to <c>FACE_OUT_JSON</c> for the external oracle diff, and — when <c>ARCFACE_WEIGHTS_PATH</c>
+    /// is set — closes the loop to a normalized 512-d ArcFace identity embedding. Unset gates skip cleanly.</summary>
     [Fact]
     [Trait("Category", "Integration")]
-    public void FaceDetector_RealWeights_RunsOrSkips()
+    public void FaceDetector_RealWeights_DetectsFacesLandmarksAndEmbeds()
     {
         string? path = Environment.GetEnvironmentVariable("YOLOV8_FACE_PATH");
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
-            return; // Skip: no checkpoint provisioned on this machine.
+        {
+            _output.WriteLine("SKIPPED: YOLOV8_FACE_PATH unset or missing.");
+            return;
+        }
+
+        string image = Environment.GetEnvironmentVariable("FACE_TEST_IMAGE")
+            ?? Path.Combine(AppContext.BaseDirectory, "TestData", "bus.png");
+        if (!File.Exists(image))
+        {
+            _output.WriteLine($"SKIPPED: test image not found: {image}");
+            return;
+        }
+
+        (byte[] rgb, int w, int h) = PngDecoder.DecodeFromFile(image);
 
         using IBackend backend = new CpuBackend();
         using FaceDetector detector = new(backend, YoloV8FaceConfig.YoloV8nFace(), path, inputSize: 640);
+        IReadOnlyList<DetectedFace> faces = detector.DetectFaces(rgb, w, h, confidenceThreshold: 0.25f, iouThreshold: 0.45f);
 
-        // A 1×1 gray image just proves the forward + decode path runs end-to-end on real weights without throwing;
-        // real parity (box/landmark accuracy) belongs to a fixtured image comparison once one is committed.
-        int w = 64, h = 64;
-        byte[] rgb = new byte[w * h * 3];
-        Array.Fill(rgb, (byte)128);
-        IReadOnlyList<DetectedFace> faces = detector.DetectFaces(rgb, w, h, confidenceThreshold: 0.25f);
+        _output.WriteLine($"Detected {faces.Count} faces on {Path.GetFileName(image)} ({w}x{h})");
+        Assert.NotEmpty(faces);
         foreach (DetectedFace f in faces)
-            Assert.Equal(10, f.Landmarks.ToXyArray().Length);
+        {
+            Assert.Equal(NumPoints * 2, f.Landmarks.ToXyArray().Length);
+            Assert.InRange(f.Box.X1, 0f, w);
+            Assert.InRange(f.Box.Y1, 0f, h);
+            Assert.InRange(f.Box.X2, 0f, w);
+            Assert.InRange(f.Box.Y2, 0f, h);
+            Assert.True(f.Box.X2 > f.Box.X1 && f.Box.Y2 > f.Box.Y1, $"Degenerate box: {f.Box}");
+            for (int k = 0; k < Landmark5.Count; k++)
+            {
+                Assert.InRange(f.Landmarks[k].X, 0f, w);
+                Assert.InRange(f.Landmarks[k].Y, 0f, h);
+            }
+            _output.WriteLine($"  conf={f.Confidence:F3} box=({f.Box.X1:F1},{f.Box.Y1:F1},{f.Box.X2:F1},{f.Box.Y2:F1}) " +
+                $"eyeL=({f.Landmarks.LeftEye.X:F1},{f.Landmarks.LeftEye.Y:F1}) nose=({f.Landmarks.Nose.X:F1},{f.Landmarks.Nose.Y:F1})");
+        }
+
+        string? outJson = Environment.GetEnvironmentVariable("FACE_OUT_JSON");
+        if (!string.IsNullOrEmpty(outJson))
+        {
+            WriteDetectionsJson(outJson, w, h, faces);
+            _output.WriteLine($"Wrote C# detections to {outJson}");
+        }
+
+        // ArcFace closes detector → 5 landmarks → template align → 512-d identity embedding.
+        string? arc = Environment.GetEnvironmentVariable("ARCFACE_WEIGHTS_PATH")
+            ?? Environment.GetEnvironmentVariable("ARCFACE_WEIGHTS");
+        if (!string.IsNullOrEmpty(arc) && File.Exists(arc))
+        {
+            using SafeTensorsLoader arcLoader = new();
+            arcLoader.Load(arc);
+            ArcFaceModel arcFace = new();
+            arcFace.LoadWeights(arcLoader.GetAllTensors());
+            float[] emb = FaceDetector.EmbedFace(backend, arcFace, rgb, w, h, faces[0]);
+            Assert.Equal(ArcFaceModel.EmbeddingDim, emb.Length);
+            double norm = 0;
+            foreach (float v in emb)
+            {
+                Assert.True(float.IsFinite(v), "ArcFace embedding has a non-finite value.");
+                norm += (double)v * v;
+            }
+            norm = Math.Sqrt(norm);
+            Assert.Equal(1.0, norm, 2); // EmbedNormalized L2-normalizes.
+            _output.WriteLine($"ArcFace embedding: dim={emb.Length} L2-norm={norm:F5} first4=[{emb[0]:F4},{emb[1]:F4},{emb[2]:F4},{emb[3]:F4}]");
+        }
+        else
+        {
+            _output.WriteLine("ArcFace embedding step skipped (ARCFACE_WEIGHTS_PATH unset).");
+        }
+    }
+
+    /// <summary>Serializes detections to a small JSON the Python oracle-diff reads (box xyxy + 5 landmarks in source px).</summary>
+    private static void WriteDetectionsJson(string outPath, int w, int h, IReadOnlyList<DetectedFace> faces)
+    {
+        CultureInfo ci = CultureInfo.InvariantCulture;
+        StringBuilder sb = new();
+        sb.Append("{\"src_w\":").Append(w).Append(",\"src_h\":").Append(h).Append(",\"detections\":[");
+        for (int i = 0; i < faces.Count; i++)
+        {
+            DetectedFace f = faces[i];
+            if (i > 0) sb.Append(',');
+            sb.Append("{\"box\":[")
+              .Append(f.Box.X1.ToString("R", ci)).Append(',').Append(f.Box.Y1.ToString("R", ci)).Append(',')
+              .Append(f.Box.X2.ToString("R", ci)).Append(',').Append(f.Box.Y2.ToString("R", ci)).Append(']')
+              .Append(",\"conf\":").Append(f.Confidence.ToString("R", ci))
+              .Append(",\"landmarks\":[");
+            for (int k = 0; k < Landmark5.Count; k++)
+            {
+                if (k > 0) sb.Append(',');
+                FaceLandmark p = f.Landmarks[k];
+                sb.Append('[').Append(p.X.ToString("R", ci)).Append(',').Append(p.Y.ToString("R", ci))
+                  .Append(',').Append(p.Score.ToString("R", ci)).Append(']');
+            }
+            sb.Append("]}");
+        }
+        sb.Append("]}");
+        File.WriteAllText(outPath, sb.ToString());
     }
 
     private static unsafe void SetChannel(Tensor t, int anchors, int channel, int anchor, float value)
