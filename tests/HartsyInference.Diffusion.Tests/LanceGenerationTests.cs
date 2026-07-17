@@ -16,6 +16,7 @@ using HartsyInference.Tokenizers;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>End-to-end Lance T2I generation against a real checkpoint. Skips cleanly when the variant folder, the converted Wan2.2 VAE safetensors, the Qwen2 tokenizer, or the PTX dir are missing — none are bundled. This is the manual-validation entry point: the pipeline is structurally verified by <see cref="LanceImagePipelineTests"/>, but numeric output vs the reference is validation-pending. Set <c>LANCE_3B_DIR</c> + <c>LANCE_VAE_PATH</c>.</summary>
+[Trait("Category", "Integration")]
 public class LanceGenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;

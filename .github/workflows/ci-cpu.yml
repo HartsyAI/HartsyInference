@@ -53,6 +53,11 @@ jobs:
           #                              validated. Graduates back to Unit once it has real parity.
           #   Network=Real             — hits the network, run manually.
           # See docs/CODE_STYLE.md ("Test tiers") for the rule new tests must follow.
+          # The gate is TRAIT-ONLY — no FullyQualifiedName!~ name-substring blocklist. Name-based
+          # exclusion silently missed newly-added heavy tests AND wrongly hid legitimate Unit tests
+          # (wiring/config/DSP tests whose names happened to contain "Diff"/"Img2Img"/"Smoke"/...).
+          # Every heavy test now carries the correct [Trait("Category", ...)]; the TestTierLintTests
+          # meta-test fails the build if an untagged test reaches for a checkpoint/GPU/network.
           dotnet test HartsyInference.sln --configuration Release --no-build \
-            --filter "Category!=Integration&Category!=GpuIntegration&Category!=Slow&Category!=SyntheticSmoke&Network!=Real&FullyQualifiedName!~Generation&FullyQualifiedName!~Img2Img&FullyQualifiedName!~Diff&FullyQualifiedName!~Ssim&FullyQualifiedName!~Vulkan&FullyQualifiedName!~Smoke" \
+            --filter "Category!=Integration&Category!=GpuIntegration&Category!=Slow&Category!=SyntheticSmoke&Network!=Real" \
             --logger "console;verbosity=normal"

@@ -19,6 +19,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <c>tdrussell/diffusion-pipe/models/llm_adapter.py</c> forward.
 ///
 /// Skips cleanly when the Python reference dump or the Anima checkpoint is missing.</summary>
+[Trait("Category", "Integration")]
 public unsafe class AnimaLlmAdapterDiffTests
 {
     private readonly ITestOutputHelper _output;

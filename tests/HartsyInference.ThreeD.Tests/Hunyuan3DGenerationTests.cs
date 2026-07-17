@@ -16,6 +16,7 @@ namespace HartsyInference.ThreeD.Tests;
 /// holding the single <c>hunyuan3d-dit-v2-0/model*.safetensors</c>, which bundles DiT+VAE+conditioner) +
 /// <c>HY3D_IMAGE</c> (a foreground-on-gray PNG). <c>HY3D_STEPS</c>/<c>HY3D_GRID</c> tune speed (block glue is
 /// CPU-resident until the GPU-residency perf pass, so keep steps/grid small for a first coherence check).</summary>
+[Trait("Category", "Integration")]
 public sealed class Hunyuan3DGenerationTests
 {
     private readonly ITestOutputHelper _out;

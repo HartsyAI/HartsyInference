@@ -17,6 +17,7 @@ using HartsyInference.Tokenizers;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>End-to-end SD3.5 image generation tests against single-file safetensor checkpoints. Auto-detects MMDiT-X dual-attention layers and QK-norm from the converted weights, then preloads the transformer + VAE to GPU before the denoise loop. Tests skip cleanly when checkpoints, tokenizers, or the PTX directory are missing — they're intended to run on a developer GPU box, not CI.</summary>
+[Trait("Category", "Integration")]
 public class Sd35GenerationTests
 {
     private static string ClipVocab => TestPaths.Tokenizers.ClipVocab;

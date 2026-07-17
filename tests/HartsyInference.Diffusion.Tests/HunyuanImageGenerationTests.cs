@@ -21,6 +21,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// insufficient VRAM (Hunyuan Image is 17B; FP16 transformer is ~34 GB so realistically needs a Q4_K
 /// GGUF dump + the K-quant reader to fit on consumer cards). The pipeline body still has unfinished
 /// sections — when the test does run with a checkpoint, it will surface those as a clear skip.</summary>
+[Trait("Category", "Integration")]
 public sealed class HunyuanImageGenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;

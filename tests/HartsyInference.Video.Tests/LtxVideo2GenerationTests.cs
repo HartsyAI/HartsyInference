@@ -23,6 +23,7 @@ namespace HartsyInference.Video.Tests;
 /// (DiT + video VAE + audio VAE + vocoder) plus the external Gemma-3-12B fp8 text encoder → <see cref="LtxVideo2Pipeline"/>
 /// → BMP frame sequence (+ optional waveform). Skips cleanly when artifacts are missing or VRAM is insufficient.
 /// First-run validation entry — numerics validation-pending.</summary>
+[Trait("Category", "Integration")]
 public class LtxVideo2GenerationTests
 {
     private readonly ITestOutputHelper _output;

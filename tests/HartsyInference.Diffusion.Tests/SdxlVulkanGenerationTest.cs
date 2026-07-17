@@ -25,6 +25,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// Skips when the SDXL checkpoint or Vulkan loader is unavailable. Saves the result to
 /// <c>Output/sdxl_vulkan_*.bmp</c>.
 /// </summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class SdxlVulkanGenerationTest
 {
     private readonly ITestOutputHelper _output;

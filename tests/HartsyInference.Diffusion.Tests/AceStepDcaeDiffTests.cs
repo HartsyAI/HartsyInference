@@ -22,6 +22,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// Run order: this test (writes weights + C# dumps) → <c>python3 tests/python-reference/dump_ace_step_dcae.py</c>
 /// → <c>python3 tests/python-reference/diff_ace_step_dcae.py</c>.</summary>
 [Collection("AceStepParity")]
+[Trait("Category", "SyntheticSmoke")]
 public unsafe class AceStepDcaeDiffTests
 {
     private readonly ITestOutputHelper _output;

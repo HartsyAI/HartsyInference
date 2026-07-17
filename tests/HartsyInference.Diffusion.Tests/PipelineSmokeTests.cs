@@ -14,6 +14,7 @@ using Xunit;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Smoke tests verifying the complete pipeline code path with tiny random weights. Does not produce meaningful images — validates structure only.</summary>
+[Trait("Category", "Integration")]
 public sealed class PipelineSmokeTests : IDisposable
 {
     private readonly CpuBackend _backend;

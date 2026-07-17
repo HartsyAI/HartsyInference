@@ -4,6 +4,7 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Vulkan.Tests;
 
+[Trait("Category", "GpuIntegration")]
 public sealed class VulkanDeviceInfoTest
 {
     private readonly ITestOutputHelper _out;

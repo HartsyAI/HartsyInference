@@ -22,6 +22,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// concat → Flux2Transformer denoising → BN-style un-normalize + 2×2 unpatchify → VAE decode),
 /// and saves a BMP for visual inspection.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class Flux2GenerationTests
 {
     private static string Klein4BPath => TestPaths.Flux2.Klein;

@@ -21,6 +21,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>SSIM acceptance gate for Flux Dev / Flux Schnell. Compares pipeline output against PNGs produced by `tests/python-reference/dump_flux_reference_image.py`. Strict gate (0.85) when the matching <c>init_noise_seed{N}.bin</c> binary is present (16-channel unpacked F32 noise feeds <see cref="TextToImageRequest.InitialNoise"/>); loose gate (0.30) fallback otherwise.
 ///
 /// Note: Flux Schnell's strict SSIM is harder to hit than Dev's because the 4-step distilled scheduler amplifies any small numerical drift over fewer steps. The 0.85 threshold leaves headroom for that.</summary>
+[Trait("Category", "Integration")]
 public sealed class FluxSsimTests
 {
     private const double StrictSsimThreshold = 0.85;

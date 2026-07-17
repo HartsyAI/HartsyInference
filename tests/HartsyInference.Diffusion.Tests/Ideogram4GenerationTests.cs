@@ -20,6 +20,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>End-to-end Ideogram 4 image generation. Skips cleanly when the checkpoint folder, Qwen3-VL tokenizer, or PTX dir are missing — none are bundled. Set <c>IDEOGRAM4_DIR</c> to a root folder with diffusers (<c>transformer/</c>, <c>unconditional_transformer/</c>, <c>text_encoder/</c>, <c>vae/</c>) or Comfy-Org (<c>diffusion_models/</c>, <c>text_encoders/</c>, <c>vae/</c>) layout.
 ///
 /// NOTE: Ideogram 4 runs TWO 9.3B transformers concurrently (asymmetric CFG), so this needs a very-high-VRAM host. The VRAM probe skips below a conservative threshold rather than OOM-failing. The implementation is end-to-end wired; this test runs when the weights + VRAM are present.</summary>
+[Trait("Category", "Integration")]
 public class Ideogram4GenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;

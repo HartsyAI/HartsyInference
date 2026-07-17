@@ -22,6 +22,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// (RoPE temporal-axis = 1 distinguishes them). The transformer output is sliced back to the noise tokens.
 /// The Kontext checkpoint is transformer-only; encoders + VAE come from the Dev FP8 file. Skips cleanly when
 /// artifacts or the reference RGB are missing.</summary>
+[Trait("Category", "Integration")]
 public sealed class FluxKontextGenerationTests
 {
     private static string KontextPath => TestPaths.Flux.Kontext;

@@ -16,6 +16,7 @@ using HartsyInference.Video.Pipelines;
 namespace HartsyInference.Video.Tests;
 
 /// <summary>End-to-end Lance T2V generation against a real checkpoint, streamed to a frame sequence. Skips cleanly when <c>LANCE_3B_VIDEO_DIR</c> / <c>LANCE_VAE_PATH</c> / Qwen tokenizer / PTX dir are missing, or VRAM is insufficient. The manual-validation entry point — numerics are validation-pending (the pipeline is structurally verified by <see cref="LanceVideoPipelineTests"/>).</summary>
+[Trait("Category", "Integration")]
 public class LanceVideoGenerationTests
 {
     private readonly ITestOutputHelper _output;

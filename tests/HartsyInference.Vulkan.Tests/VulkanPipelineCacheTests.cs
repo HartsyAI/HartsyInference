@@ -11,6 +11,7 @@ namespace HartsyInference.Vulkan.Tests;
 /// match the current device, so the test asserts the file grows after first-use, not that
 /// build time drops (build time is noisy and driver-dependent).
 /// </summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class VulkanPipelineCacheTests
 {
     private readonly ITestOutputHelper _output;

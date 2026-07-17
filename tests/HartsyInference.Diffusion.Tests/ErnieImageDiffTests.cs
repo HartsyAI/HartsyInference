@@ -17,6 +17,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// with `ERNIE_IMAGE_DEBUG_DIR` set, then leaves the dump for `diff_ernie_image_layers.py`.
 ///
 /// Skips cleanly when the Python reference dump or the ERNIE-Image checkpoint dir is missing.</summary>
+[Trait("Category", "Integration")]
 public unsafe class ErnieImageDiffTests
 {
     private readonly ITestOutputHelper _output;

@@ -23,6 +23,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <para><b>Memory profile</b>: peak ~20 GB anon-RSS during the BFL→diffusers QKV split + FP8 T5/CLIP/VAE load. Won't fit a 32 GB system if the calling environment has a tight cgroup limit (e.g. when dotnet inherits the browser's session memcg). <see cref="SkipWhenMemoryConstrained"/> probes for this and skips early with a clear message.</para>
 ///
 /// <para>The Phase D wiring (CudaBackend.Linear handling quantized weights via GPU dequant kernels) is exercised by <see cref="FluxGgufLinearTests.Linear_RealQ4_K_FromCity96Gguf_ProducesSaneOutput"/> against real city96 data — that test runs cleanly in any environment.</para></summary>
+[Trait("Category", "Integration")]
 public sealed class FluxGgufGenerationTests
 {
     private const long MinAnonRamRequiredGb = 25;

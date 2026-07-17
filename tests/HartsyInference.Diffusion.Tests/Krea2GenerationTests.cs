@@ -21,6 +21,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// VAE from the staged <c>Krea2/{Base,Turbo}/</c> dir via <see cref="Krea2CheckpointConverter"/>. Conditioning uses the
 /// SAME ChatML encode template + 34-token prefix drop as Qwen-Image (per docs/Research/KREA2.md §3). Skips cleanly when
 /// weights are absent. fp8 (~13 GB) → <c>CacheWeightCasts=false</c> for transient dequant on the 4090.</summary>
+[Trait("Category", "Integration")]
 public class Krea2GenerationTests
 {
     private readonly ITestOutputHelper _output;

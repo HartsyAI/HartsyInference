@@ -495,7 +495,22 @@ Unit test and **must pass on any machine with no GPU and no weights.**
 model has documented real-weight parity (see `docs/Checklists/PARITY_VERIFICATION.md`), delete the
 trait so it graduates to the Unit gate. This keeps `main` green while a model is being brought up,
 without hiding it: the parity checklist is the ledger of what still needs to graduate. Never make
-CI green by deleting a test or by widening the name-substring blocklist — tag the tier instead.
+CI green by deleting a test — tag the tier instead.
+
+**The gate is trait-only.** `ci-cpu.yml` filters purely on `[Trait("Category", ...)]` / `[Trait("Network", ...)]`
+— there is no `FullyQualifiedName!~…` name-substring blocklist (it was deleted: it silently missed heavy
+tests whose names didn't match, and wrongly hid legitimate Unit tests whose names happened to contain
+`Diff`/`Img2Img`/`Smoke`/`Vulkan`). An untagged test is a Unit test and **must pass with no GPU and no
+checkpoints** — either it touches none, or it skip-guards (returns early) when the resource is absent.
+`TestTierLintTests` (in `HartsyInference.Core.Tests`) enforces this: it fails the build if an untagged
+test instantiates a GPU backend or reads gitignored `python-reference` fixtures without a recognized guard.
+Widen its recognized-guard set (or drop `// tier-lint: guarded` on the line) rather than reintroducing a
+name blocklist.
+
+**Committed fixtures vs gitignored reference data.** The global `*.bin` gitignore means Python-generated
+reference tensors under `tests/python-reference/` are **not** committed — any test that reads them is
+Integration-tier and must skip-guard. If a fixture is small, deterministic, and you want its test in the
+Unit gate, commit it under a gitignore exception (e.g. `!tests/**/fixtures/*.bin`) so it ships with the repo.
 
 ## What NOT to Do
 

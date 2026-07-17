@@ -23,6 +23,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// (separately from any LlmAdapter issues).</para>
 ///
 /// Skips cleanly when the Python reference dump or the Anima checkpoint is missing.</summary>
+[Trait("Category", "Integration")]
 public unsafe class AnimaDiffTests
 {
     private readonly ITestOutputHelper _output;

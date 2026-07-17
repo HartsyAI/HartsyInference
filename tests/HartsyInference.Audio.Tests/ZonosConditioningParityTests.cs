@@ -123,13 +123,17 @@ public sealed unsafe class ZonosConditioningParityTests
         l2e = Math.Sqrt(l2e); l2g = Math.Sqrt(l2g);
         _out.WriteLine($"speaker emb: engine L2={l2e:F4} golden L2={l2g:F4} cos={dot / (l2e * l2g + 1e-12):F6}");
 
+        // The engine's own EmbedFromWav must reproduce the golden speaker embedding (direction) closely.
+        Assert.True(dot / (l2e * l2g + 1e-12) > 0.999, "engine speaker embedding cosine vs golden");
+
         int langId = ZonosLanguages.DefaultId;
         _out.WriteLine($"ZonosLanguages.DefaultId={langId} (conditioning test used 24)");
+        double worstCorr = 1.0, worstMax = 0.0;
         foreach ((string tag, Tensor semb) in new[] { ("GOLD-SPK", spkGold), ("ENGINE-SPK", spkEng) })
         {
             Tensor pref = cond.BuildPrefix(backend, phonemes, semb, emotion,
                 fmax: 22050f, pitchStd: 20f, speakingRate: 15f, languageId: langId, conditional: true);
-            float* q = (float*)pref.DataPointer;   // [P, D]
+            float* q = (float*)pref.DataPointer;   // channels-last [P, D]
             _out.WriteLine($"--- {tag}: per-token corr/maxAbs (tokens {p - 8}..{p - 1}) ---");
             for (int s = Math.Max(0, p - 8); s < p; s++)
             {
@@ -143,10 +147,17 @@ public sealed unsafe class ZonosConditioningParityTests
                 double cov = sab / d - (sa / d) * (sb / d);
                 double corr = cov / (Math.Sqrt((saa / d - (sa / d) * (sa / d)) * (sbb / d - (sb / d) * (sb / d))) + 1e-12);
                 _out.WriteLine($"  tok{s}: corr={corr:F5} maxAbs={mx:E2}");
+                if (corr < worstCorr) worstCorr = corr;
+                if (mx > worstMax) worstMax = mx;
             }
             pref.Dispose();
         }
         spkGold.Dispose(); spkEng.Dispose(); (backend as IDisposable)?.Dispose();
+
+        // Per-token guard: catches a channels-first/last layout regression at the ZonosConditioning→pipeline seam
+        // (a transposed prefix collapses per-token correlation to ~0 while whole-prefix corr stays high).
+        Assert.True(worstCorr > 0.99, $"worst per-token prefix corr {worstCorr:F4} (layout/assembly regression?)");
+        Assert.True(worstMax < 0.05, $"worst per-token maxAbs {worstMax:E2}");
     }
 
     private static int[] LoadIds(string dir)

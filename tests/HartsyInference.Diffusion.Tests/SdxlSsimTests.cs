@@ -23,6 +23,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <para><b>Strict gate (0.90) when reference noise is available</b> — the Python reference dump writes <c>init_noise_seed42.bin</c> alongside the PNGs; the test loads it as a F32 tensor and passes it via <see cref="TextToImageRequest.InitialNoise"/>, eliminating the RNG mismatch between PyTorch's <c>torch.Generator</c> and HartsyInference's <c>SeedGenerator</c>. With matched noise + matched weights, identical pipelines should produce SSIM ≥ 0.95; the 0.90 gate leaves headroom for F16 GEMM rounding through cuBLAS and small scheduler-step floating-point drift.</para>
 ///
 /// <para><b>Loose gate (0.30) fallback</b> if the noise binary is absent — catches catastrophic regressions (NaN propagation, broken VAE, wrong scheduler) but lets RNG-driven differences pass.</para></summary>
+[Trait("Category", "Integration")]
 public sealed class SdxlSsimTests
 {
     private const double StrictSsimThreshold = 0.90;

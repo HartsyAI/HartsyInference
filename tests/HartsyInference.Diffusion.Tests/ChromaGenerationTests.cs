@@ -22,6 +22,7 @@ namespace HartsyInference.Diffusion.Tests;
 ///
 /// Skips cleanly when any of the required artifacts is missing. Mirrors the AuraFlow tests' "look up via
 /// <see cref="TestPaths"/>, skip with a hint" pattern.</summary>
+[Trait("Category", "Integration")]
 public class ChromaGenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;

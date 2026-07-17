@@ -17,6 +17,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// `CHROMA_DEBUG_DIR` set, then leaves the dump for `diff_chroma_layers.py`.
 ///
 /// Skips cleanly when the Python reference dump or the Chroma checkpoint is missing.</summary>
+[Trait("Category", "Integration")]
 public unsafe class ChromaDiffTests
 {
     private readonly ITestOutputHelper _output;

@@ -14,6 +14,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// near-uniform image (low spatial variance, no high-frequency grid), whereas a structurally-broken decoder
 /// (wrong conv/upsample layout, 3D-vs-2D kernel mismatch, bad weightnorm) emits a periodic grid regardless of
 /// input. This isolates "is the garbage in the VAE or upstream (transformer/denoising)?" without a 13-min run.</summary>
+[Trait("Category", "Integration")]
 public unsafe class QwenImageVaeSmokeTests
 {
     private readonly ITestOutputHelper _output;

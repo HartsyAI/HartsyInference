@@ -18,6 +18,7 @@ namespace HartsyInference.Audio.Tests;
 /// the full HiFi-GAN+iSTFT generator is staged for a follow-up. The tests therefore
 /// only assert structural facts (non-empty audio, finite samples, weight load success);
 /// quality assertions will follow once the generator is wired.</para></summary>
+[Trait("Category", "Integration")]
 public sealed class KokoroPipelineSmokeTests
 {
     private readonly ITestOutputHelper _out;

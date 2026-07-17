@@ -19,6 +19,7 @@ using Xunit.Abstractions;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>End-to-end Flux+LoRA generation tests. The primary path validates AI Toolkit (ostris/ai-toolkit) format LoRAs since that is the dominant Flux trainer; secondary tests cover Kohya and diffusers PEFT formats. All tests skip cleanly when the appropriate FLUX_*_LORA_PATH env var is not set.</summary>
+[Trait("Category", "Integration")]
 public sealed class FluxLoraGenerationTests
 {
     private static string FluxSingleFilePath => TestPaths.Flux.Schnell;

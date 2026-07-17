@@ -21,6 +21,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>End-to-end HiDream i1 generation. Skips cleanly when any of the four text encoders, the
 /// transformer, the VAE, the tokenizer assets, or the PTX directory is missing. Also skips when free
 /// VRAM is below the threshold required for the FP16 transformer.</summary>
+[Trait("Category", "Integration")]
 public sealed class HiDreamGenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;

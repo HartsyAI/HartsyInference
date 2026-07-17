@@ -24,6 +24,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// gate <c>HARTSYINFERENCE_RUN_ACE_GPU=1</c>). Output lands in <c>Output/ace_step_*.wav</c>. The three NN components
 /// are numerically parity-verified separately (AceStep{Dit,Dcae,Vocoder}DiffTests, corr ~1.0 vs numpy refs); these
 /// tests prove the plumbing end-to-end on real weights.</summary>
+[Trait("Category", "Integration")]
 public unsafe class AceStepGenerationTests
 {
     private readonly ITestOutputHelper _output;
@@ -67,6 +68,7 @@ public unsafe class AceStepGenerationTests
     }
 
     [Fact]
+    [Trait("Category", "Slow")]
     public void Generate_ShortInstrumental_WritesWav()
     {
         string root = TestPaths.AceStep.RootDir;

@@ -22,6 +22,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// Skips cleanly when any of the required artifacts is missing (the user must download them and
 /// either place them at the default paths or set the corresponding env vars).
 /// Default paths are documented in <see cref="TestPaths.AuraFlow"/>.</summary>
+[Trait("Category", "Integration")]
 public class AuraFlowGenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;

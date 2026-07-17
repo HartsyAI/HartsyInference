@@ -161,12 +161,6 @@ public sealed unsafe class ZonosPipeline : IDisposable
                 }
                 int tok = Sample(logits[c], c, grid, s, temp, mp, rp, rw, ref rng);
                 grid[target, c] = tok;
-                if (c == 0 && s < 12 && Environment.GetEnvironmentVariable("HARTSY_ZONOS_DEBUG") == "1")
-                {
-                    int am = 0; float av = logits[0][0];
-                    for (int i = 1; i < _cfg.OutputVocab; i++) if (logits[0][i] > av) { av = logits[0][i]; am = i; }
-                    Logs.Info($"[Zonos.dbg] s={s} cb0 argmax={am}({av:F2}) eosLogit={logits[0][_cfg.EosToken]:F2} sampled={tok}");
-                }
                 if (c == 0 && tok == _cfg.EosToken && eosStep < 0) eosStep = s;
             }
             if (eosStep >= 0 && s >= eosStep + maxDelay) { lastStep = target; break; }

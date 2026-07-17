@@ -18,6 +18,7 @@ using Xunit.Abstractions;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>End-to-end SDXL+LoRA generation test. Loads an SDXL checkpoint, merges a LoRA into the UNet/CLIP weights via LoraStack, runs the full CPU pipeline, and verifies the output is non-degenerate. Skips cleanly when SDXL_LORA_PATH is not set or files are missing.</summary>
+[Trait("Category", "Integration")]
 public class SdxlLoraGenerationTests
 {
     private static string SdxlCheckpointPath => TestPaths.Sdxl.SingleFile;

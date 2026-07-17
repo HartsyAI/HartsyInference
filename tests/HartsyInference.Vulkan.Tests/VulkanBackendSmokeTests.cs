@@ -9,6 +9,7 @@ namespace HartsyInference.Vulkan.Tests;
 /// Vulkan-capable physical device is visible — that way CI can include this
 /// project on machines with or without a GPU.
 /// </summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class VulkanBackendSmokeTests
 {
     private static bool VulkanAvailable()

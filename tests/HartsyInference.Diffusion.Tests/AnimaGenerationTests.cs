@@ -20,6 +20,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// is not ported as a first-class component; the test consumes pre-computed F32 embeddings (the same
 /// format diffusers' pipeline accepts via <c>prompt_embeds</c>). Skips cleanly when artifacts or VRAM
 /// are insufficient.</summary>
+[Trait("Category", "Integration")]
 public sealed class AnimaGenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;

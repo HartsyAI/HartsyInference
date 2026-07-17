@@ -16,6 +16,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// dependency). Validates: weights load, tokenizer encodes, forward pass returns finite hidden states
 /// of the right shape. Doesn't validate against a Python reference — that's a separate validation task.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class Qwen3EncoderSmokeTests
 {
     private static string Qwen3WeightsPath => TestPaths.TextEncoders.Qwen3_4B;

@@ -10,6 +10,7 @@ namespace HartsyInference.Vulkan.Tests;
 /// per-call time + dispatch count. Confirms on CURRENT code whether Linear is per-dispatch-overhead-bound
 /// and how many dispatches a FP8 Linear costs (input cast + weight cast(s) + matmul + bias). Run with the
 /// env set; read the dumped profile. Skips when Vulkan is unavailable.</summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class VulkanLinearProfileMeasurement
 {
     private readonly ITestOutputHelper _out;

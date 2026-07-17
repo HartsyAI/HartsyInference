@@ -24,6 +24,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// the resulting image to <c>Output/flux_schnell_vulkan_*.bmp</c> alongside the
 /// CUDA-generated reference image so they can be visually compared.
 /// </summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class FluxVulkanGenerationTest
 {
     private readonly ITestOutputHelper _output;

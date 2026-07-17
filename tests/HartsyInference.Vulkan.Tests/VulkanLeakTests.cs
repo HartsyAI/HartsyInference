@@ -10,6 +10,7 @@ namespace HartsyInference.Vulkan.Tests;
 /// activation cache, transient upload buffers, and deferred-free list don't leak across step
 /// boundaries — the exact pattern that bit us as deviation #5 (transient buffer leak).
 /// </summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class VulkanLeakTests
 {
     private readonly ITestOutputHelper _output;

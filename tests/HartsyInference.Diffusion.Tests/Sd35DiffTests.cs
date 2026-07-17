@@ -13,6 +13,7 @@ using HartsyInference.Tests.Common;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Layer-by-layer diff test for SD3.5 against a diffusers reference. Loads the Python-saved synthetic inputs (latent + raw context + pooled + timestep), runs the C# Sd3Transformer through the CPU backend with <c>SD3_DEBUG_DIR</c> set, then writes per-block dumps for diff_sd35_layers.py to compare. Mirrors <c>ZImageDiffTests.Transformer_Matches_PythonReference_LayerByLayer</c> from PHASE_3_DEVIATIONS #28.</summary>
+[Trait("Category", "Integration")]
 public unsafe class Sd35DiffTests
 {
     private readonly ITestOutputHelper _output;

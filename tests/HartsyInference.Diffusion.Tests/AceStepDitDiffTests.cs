@@ -21,6 +21,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// → <c>python3 tests/python-reference/diff_ace_step_layers.py</c>. (Lyric Conformer + BuildContext are validated
 /// separately; here the context is fed directly so the DiT math is isolated.)</summary>
 [Collection("AceStepParity")]
+[Trait("Category", "SyntheticSmoke")]
 public unsafe class AceStepDitDiffTests
 {
     private readonly ITestOutputHelper _output;

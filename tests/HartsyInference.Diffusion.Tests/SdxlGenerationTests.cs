@@ -26,6 +26,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// WARNING: These tests are SLOW on CPU. A 256x256 image with 5 steps takes ~60+ minutes.
 /// Set SDXL_SINGLE_FILE_PATH and CLIP_TOKENIZER_DIR environment variables or use defaults.
 /// </summary>
+[Trait("Category", "Integration")]
 public class SdxlGenerationTests
 {
     private static string SdxlCheckpointPath => TestPaths.Sdxl.SingleFile;

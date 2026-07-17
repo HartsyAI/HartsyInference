@@ -25,6 +25,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// Qwen-Image / Krea 2). The negative stream is the empty string under the same template, used for single-CFG
 /// (<c>text_guidance_scale</c>). The 10.6 GB TE is freed right after encode so the 10.3 GB fp8 transformer fits the
 /// 4090 alongside the VAE. Skips cleanly when weights / PTX / VRAM are absent.</para></summary>
+[Trait("Category", "Integration")]
 public sealed class BooguImageGenerationTests
 {
     private readonly ITestOutputHelper _output;

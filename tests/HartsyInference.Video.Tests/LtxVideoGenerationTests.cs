@@ -23,6 +23,7 @@ namespace HartsyInference.Video.Tests;
 /// DiT + VAE): T5-XXL encode (extracted from the SD3.5 bundle, like Chroma) → <see cref="LtxVideoPipeline"/> →
 /// BMP frame sequence. Skips cleanly when artifacts are missing or VRAM is insufficient. The manual first-run
 /// validation entry — numerics are validation-pending (structure is verified by <see cref="LtxVideoPipelineTests"/>).</summary>
+[Trait("Category", "Integration")]
 public class LtxVideoGenerationTests
 {
     private readonly ITestOutputHelper _output;

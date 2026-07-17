@@ -19,6 +19,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// pre-computed embeddings shipped as raw F32 binaries — the same format Diffusers' pipeline
 /// accepts via <c>prompt_embeds_qwen</c> / <c>prompt_embeds_clip</c>. Tests skip cleanly when any
 /// artifact is missing.</summary>
+[Trait("Category", "Integration")]
 public class Kandinsky5GenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;

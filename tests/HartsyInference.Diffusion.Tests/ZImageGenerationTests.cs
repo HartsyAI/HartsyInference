@@ -22,6 +22,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// Z-Image-Turbo is 8 NFE distilled, CFG=1.0 (single forward per step), no negative prompt.
 /// VAE is sourced from a Flux.1 dev checkpoint (Z-Image's vae/config.json says <c>_name_or_path: "flux-dev"</c>).
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class ZImageGenerationTests
 {
     private static string ZImageCheckpointPath => TestPaths.ZImage.Turbo;

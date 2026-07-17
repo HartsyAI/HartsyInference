@@ -26,6 +26,7 @@ namespace HartsyInference.Audio.Tests;
 ///   <item>Run a single diffusion-head v-prediction step.</item>
 ///   <item>Forward through both <c>SpeechConnector</c>s.</item>
 /// </list></para></summary>
+[Trait("Category", "Integration")]
 public sealed class VibeVoiceStage1SmokeTests : IDisposable
 {
     private readonly ITestOutputHelper _out;

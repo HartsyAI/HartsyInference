@@ -19,6 +19,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>End-to-end ERNIE-Image (Baidu, Apache-2.0) image generation against the diffusers folder layout. Skips cleanly when the checkpoint folder, text encoder, or VAE are missing — these aren't bundled. Default paths are documented in <see cref="TestPaths.ErnieImage"/>.
 ///
 /// The text encoder is Mistral3 ("ministral3" per <c>baidu/ERNIE-Image/text_encoder/config.json</c>), run via <see cref="ErnieImageLlamaTextEncoder"/> over <see cref="LlamaStyleEncoderConfig.Ministral3B"/>. Real prompts are tokenized with <see cref="ErnieTokenizer"/> when a <c>tokenizer.json</c> is found (set <c>ERNIE_TOKENIZER_JSON</c>, or drop it at <c>{modelDir}/tokenizer.json</c> / <c>{modelDir}/tokenizer/tokenizer.json</c>); otherwise a hardcoded token fallback keeps the wiring testable without the file.</summary>
+[Trait("Category", "Integration")]
 public class ErnieImageGenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;

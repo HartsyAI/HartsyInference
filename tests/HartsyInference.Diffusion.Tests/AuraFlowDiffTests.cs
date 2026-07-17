@@ -18,6 +18,7 @@ namespace HartsyInference.Diffusion.Tests;
 ///
 /// Mirrors `Sd35DiffTests` from PHASE_3_DEVIATIONS #28 methodology. Skips cleanly when the
 /// Python reference dump or the AuraFlow checkpoint is missing.</summary>
+[Trait("Category", "Integration")]
 public unsafe class AuraFlowDiffTests
 {
     private readonly ITestOutputHelper _output;

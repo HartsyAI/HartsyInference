@@ -19,6 +19,7 @@ using HartsyInference.Tokenizers;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>End-to-end Qwen-Image generation smoke test. Expects three artifacts: a Qwen-Image transformer checkpoint, a Qwen2.5-VL-7B text encoder checkpoint, and a 16-channel Qwen-Image VAE. Skips cleanly when any of those paths or the Qwen3 BPE tokenizer assets are missing — Qwen-Image isn't bundled with the repo, so this test is intended to run on a developer GPU box, not CI.</summary>
+[Trait("Category", "Integration")]
 public class QwenImageGenerationTests
 {
     private readonly ITestOutputHelper _output;

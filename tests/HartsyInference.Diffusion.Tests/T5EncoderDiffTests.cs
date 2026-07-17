@@ -16,6 +16,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>Numerical validation gate for T5-XXL: encodes the prompts dumped by `tests/python-reference/dump_t5_xxl_hidden_states.py` and asserts the C# hidden states match the HuggingFace transformers reference within F32 noise. Skips cleanly when the reference dump or any prerequisite asset is missing.
 ///
 /// <para>Tolerance: <see cref="CpuAvgErrTol"/> for CPU (1e-5 F32 reference vs F32 implementation), <see cref="GpuAvgErrTol"/> for GPU (slightly looser to absorb F32 → F16 rounding through cuBLAS GEMM).</para></summary>
+[Trait("Category", "Integration")]
 public sealed class T5EncoderDiffTests
 {
     private const float CpuAvgErrTol = 1e-4f;

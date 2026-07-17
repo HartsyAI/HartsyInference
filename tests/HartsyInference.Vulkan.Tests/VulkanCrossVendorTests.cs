@@ -12,6 +12,7 @@ namespace HartsyInference.Vulkan.Tests;
 /// "read warp[laneId], guarded by < numSubgroups" combine silently dropped partials 8..31 and
 /// produced wrong results. The strided fold fixes that for all subgroup sizes. Run these against
 /// both the NVIDIA device and llvmpipe (set VK_ICD_FILENAMES to the lvp ICD) to cover both regimes.</summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class VulkanCrossVendorTests
 {
     private readonly ITestOutputHelper _out;

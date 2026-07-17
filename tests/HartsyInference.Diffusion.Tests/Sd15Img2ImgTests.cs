@@ -22,6 +22,7 @@ namespace HartsyInference.Diffusion.Tests;
 ///
 /// All checkpoint-dependent tests skip cleanly when <c>SD15_SINGLE_FILE_PATH</c> / CLIP tokenizer files are absent.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class Sd15Img2ImgTests
 {
     private readonly ITestOutputHelper _output;

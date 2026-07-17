@@ -21,6 +21,7 @@ namespace HartsyInference.Video.Tests;
 /// stack (Qwen2.5-VL + CLIP-L) is supplied as the same pre-computed embeddings the T2I e2e uses
 /// (snow-leopard prompt, dumped via <c>tests/python-reference/dump_kandinsky5_embeddings.py</c>).
 /// Skips cleanly when any artifact is missing. Numerics validation-pending vs the reference pipeline.</summary>
+[Trait("Category", "Integration")]
 public class Kandinsky5VideoGenerationTests
 {
     private readonly ITestOutputHelper _output;

@@ -25,6 +25,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// later layer diverges, the bug is downstream in the decoder body.</para>
 ///
 /// Skips cleanly when the Python reference dump or the Qwen-Image VAE checkpoint is missing.</summary>
+[Trait("Category", "Integration")]
 public unsafe class QwenImageVaeDiffTests
 {
     private readonly ITestOutputHelper _output;

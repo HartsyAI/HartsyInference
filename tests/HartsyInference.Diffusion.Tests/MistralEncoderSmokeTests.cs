@@ -16,6 +16,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// no final RMSNorm, GQA 32:8, BF16 embed table + FP8-scaled projections) and that the FP8
 /// scale companions are correctly folded by <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class MistralEncoderSmokeTests
 {
     private static string MistralWeightsPath => TestPaths.TextEncoders.Mistral3SmallFp8;

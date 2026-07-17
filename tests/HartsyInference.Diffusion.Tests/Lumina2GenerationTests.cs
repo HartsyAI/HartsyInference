@@ -18,6 +18,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// the test consumes pre-computed F32 caption embeddings (the same format the diffusers pipeline accepts
 /// via <c>prompt_embeds</c>). Skips cleanly when checkpoint, VAE, embeddings, or PTX are missing, or when
 /// the GPU has insufficient free VRAM for the FP16 transformer.</summary>
+[Trait("Category", "Integration")]
 public sealed class Lumina2GenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;

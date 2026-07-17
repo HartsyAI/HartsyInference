@@ -24,6 +24,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// Skipped when checkpoints, VAE source, Qwen3 weights, or Vulkan loader are unavailable. Saves
 /// the resulting image to <c>Output/zimage_*_vulkan_*.bmp</c> alongside the CUDA reference.
 /// </summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class ZImageVulkanGenerationTest
 {
     private readonly ITestOutputHelper _output;

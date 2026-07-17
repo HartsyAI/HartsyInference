@@ -10,6 +10,7 @@ namespace HartsyInference.Vulkan.Tests;
 /// products exactly in int32, so the result is compared against an exact int64 reference (only the
 /// final float scale rounds), giving a tight tolerance. The feature is HW-accelerated on
 /// NVIDIA/AMD/Intel; tests self-skip on a device that lacks it (e.g. llvmpipe).</summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class VulkanInt8GemmTests
 {
     private readonly ITestOutputHelper _out;

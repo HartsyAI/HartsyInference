@@ -6,6 +6,7 @@ using Xunit.Abstractions;
 namespace HartsyInference.Vulkan.Tests;
 
 /// <summary>Probe the device features via separate per-struct queries to isolate the chain bug.</summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class VulkanFeatureProbe
 {
     private readonly ITestOutputHelper _out;

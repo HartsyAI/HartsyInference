@@ -25,6 +25,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// Mirrors <see cref="FluxVulkanGenerationTest"/>'s skip-when-missing structure so the test
 /// is harmless on machines without the SD1.5 checkpoint or Vulkan loader.
 /// </summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class Sd15VulkanGenerationTest
 {
     private readonly ITestOutputHelper _output;

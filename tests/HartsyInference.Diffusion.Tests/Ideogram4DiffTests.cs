@@ -20,6 +20,7 @@ namespace HartsyInference.Diffusion.Tests;
 ///
 /// Run order: <c>python3 tests/python-reference/dump_ideogram4_full_forward.py</c> first,
 /// then this test, then <c>python3 tests/python-reference/diff_ideogram4_layers.py</c>.</summary>
+[Trait("Category", "Integration")]
 public unsafe class Ideogram4DiffTests
 {
     private readonly ITestOutputHelper _output;

@@ -23,6 +23,7 @@ namespace HartsyInference.Video.Tests;
 /// LLaVA-Llama-3-8B (fp8) + CLIP-L → <see cref="HunyuanVideoPipeline"/> → BMP frame sequence. Skips cleanly when
 /// artifacts / PTX dir are missing. The 24 GB bf16 DiT is block-streamed. Manual first-run validation entry —
 /// numerics validation-pending (structure verified by the parity + synthetic-weight tests).</summary>
+[Trait("Category", "Integration")]
 public class HunyuanVideoGenerationTests
 {
     private readonly ITestOutputHelper _output;

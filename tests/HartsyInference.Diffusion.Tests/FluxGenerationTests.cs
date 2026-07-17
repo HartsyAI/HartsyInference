@@ -27,6 +27,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// Set FLUX_SINGLE_FILE_PATH, CLIP_VOCAB_PATH, CLIP_MERGES_PATH, and T5_SPIECE_MODEL_PATH
 /// environment variables or use defaults.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class FluxGenerationTests
 {
     private static string FluxSingleFilePath => TestPaths.Flux.Schnell;

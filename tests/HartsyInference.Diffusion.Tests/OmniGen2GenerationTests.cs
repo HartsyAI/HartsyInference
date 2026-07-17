@@ -21,6 +21,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// artifact or the GPU's free VRAM is insufficient. The transformer's <c>Forward</c> is currently a
 /// scaffold that throws <see cref="NotImplementedException"/> with a clear marker — the test catches
 /// that and skips with a "first-run wiring needed" message.</summary>
+[Trait("Category", "Integration")]
 public sealed class OmniGen2GenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;

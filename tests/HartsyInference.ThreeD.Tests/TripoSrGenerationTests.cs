@@ -16,6 +16,7 @@ namespace HartsyInference.ThreeD.Tests;
 /// runs the full DINO → triplane → NeRF → marching-cubes path on CUDA, and writes a <c>.glb</c> for visual
 /// inspection. Gated on <c>TRIPOSR_WEIGHTS</c> (the safetensors) + <c>TRIPOSR_IMAGE</c> (a conditioning PNG,
 /// e.g. <c>/tmp/TripoSR/examples/chair.png</c>). Skips cleanly when unset or when no GPU/PTX is present.</summary>
+[Trait("Category", "Integration")]
 public sealed class TripoSrGenerationTests
 {
     private readonly ITestOutputHelper _out;
