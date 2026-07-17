@@ -17,6 +17,7 @@ public sealed unsafe class SamPromptEncoder
     private readonly SamPositionalEncoding _pe;
     private readonly float[][] _pointEmbeddings; // [4][embedDim]
     private readonly float[] _notAPoint;         // [embedDim]
+    private readonly float[]? _noMaskEmbed;      // [embedDim]  (dense embedding when no mask prompt)
     private readonly int _embedDim;
 
     /// <summary>Embedding dimensionality.</summary>
@@ -26,7 +27,9 @@ public sealed unsafe class SamPromptEncoder
     /// <param name="pe">Positional encoder built from the Gaussian matrix.</param>
     /// <param name="pointEmbeddings">Four learned <c>[embedDim]</c> embeddings (bg, fg, box-tl, box-br).</param>
     /// <param name="notAPointEmbedding">The padding embedding <c>[embedDim]</c>.</param>
-    public SamPromptEncoder(SamPositionalEncoding pe, IReadOnlyList<Tensor> pointEmbeddings, Tensor notAPointEmbedding)
+    /// <param name="noMaskEmbedding">The learned dense embedding used when no mask prompt is given (optional).</param>
+    public SamPromptEncoder(SamPositionalEncoding pe, IReadOnlyList<Tensor> pointEmbeddings, Tensor notAPointEmbedding,
+        Tensor? noMaskEmbedding = null)
     {
         if (pointEmbeddings.Count != 4)
             throw new ArgumentException($"SAM expects 4 point embeddings (bg, fg, box-tl, box-br); got {pointEmbeddings.Count}.", nameof(pointEmbeddings));
@@ -39,6 +42,51 @@ public sealed unsafe class SamPromptEncoder
             _pointEmbeddings[i] = ToF32Array(pointEmbeddings[i], _embedDim);
         }
         _notAPoint = ToF32Array(notAPointEmbedding, _embedDim);
+        _noMaskEmbed = noMaskEmbedding is null ? null : ToF32Array(noMaskEmbedding, _embedDim);
+    }
+
+    /// <summary>Builds the dense mask embedding <c>[1, embedDim, height, width]</c> the mask decoder adds to the
+    /// image embedding when no mask prompt is supplied — SAM's <c>no_mask_embed.weight</c> broadcast across the
+    /// grid. Returns <c>null</c> when the encoder was built without a no-mask embedding.</summary>
+    public unsafe Tensor? BuildNoMaskDenseEmbedding(int height, int width)
+    {
+        if (_noMaskEmbed is null)
+            return null;
+        Tensor outT = new Tensor(new TensorShape(1, _embedDim, height, width), DType.F32);
+        float* o = (float*)outT.DataPointer;
+        long plane = (long)height * width;
+        for (int d = 0; d < _embedDim; d++)
+        {
+            float v = _noMaskEmbed[d];
+            for (long i = 0; i < plane; i++) o[d * plane + i] = v;
+        }
+        return outT;
+    }
+
+    /// <summary>Builds the dense positional-encoding grid <c>[1, embedDim, height, width]</c> the mask decoder
+    /// adds to the image tokens — SAM's <c>prompt_encoder.get_dense_pe()</c>. Each grid cell is encoded with the
+    /// same Gaussian PE as the sparse prompts (cell-centered, normalized by the grid size), so prompt and image
+    /// positions share one coordinate frame.</summary>
+    public Tensor BuildDensePositionalEncoding(int height, int width)
+    {
+        if (height <= 0 || width <= 0)
+            throw new ArgumentException($"Dense PE grid must be positive; got {height}x{width}.");
+
+        Tensor outT = new Tensor(new TensorShape(1, _embedDim, height, width), DType.F32);
+        float* o = (float*)outT.DataPointer;
+        Span<float> scratch = stackalloc float[_embedDim];
+        for (int i = 0; i < height; i++)
+        {
+            for (int j = 0; j < width; j++)
+            {
+                _pe.Encode(j, i, width, height, scratch);
+                for (int d = 0; d < _embedDim; d++)
+                {
+                    o[((long)d * height + i) * width + j] = scratch[d];
+                }
+            }
+        }
+        return outT;
     }
 
     /// <summary>Encodes a prompt into sparse token embeddings <c>[1, numTokens, embedDim]</c>. Token order:
@@ -57,7 +105,7 @@ public sealed unsafe class SamPromptEncoder
         int t = 0;
         foreach (SamPointPrompt p in prompt.Points)
         {
-            _pe.Encode(p.X, p.Y, imageWidth, imageHeight, scratch);
+            _pe.Encode(p.X, p.Y, imageWidth, imageHeight, scratch, cellCenter: false);
             float[] typeEmbed = _pointEmbeddings[p.Foreground ? 1 : 0];
             WriteToken(o, t++, scratch, typeEmbed);
         }
@@ -65,9 +113,9 @@ public sealed unsafe class SamPromptEncoder
         if (hasBox)
         {
             SamBoxPrompt b = prompt.Box!.Value;
-            _pe.Encode(b.X0, b.Y0, imageWidth, imageHeight, scratch);
+            _pe.Encode(b.X0, b.Y0, imageWidth, imageHeight, scratch, cellCenter: false);
             WriteToken(o, t++, scratch, _pointEmbeddings[2]);
-            _pe.Encode(b.X1, b.Y1, imageWidth, imageHeight, scratch);
+            _pe.Encode(b.X1, b.Y1, imageWidth, imageHeight, scratch, cellCenter: false);
             WriteToken(o, t++, scratch, _pointEmbeddings[3]);
         }
         else

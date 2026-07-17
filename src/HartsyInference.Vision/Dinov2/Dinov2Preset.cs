@@ -34,8 +34,14 @@ public sealed record Dinov2Preset
     /// <summary>Patch size (14 for all standard DINOv2 variants).</summary>
     public required int PatchSize { get; init; }
 
-    /// <summary>Number of learned register tokens (0 for plain DINOv2; 4 for the <c>-reg</c> variants).</summary>
+    /// <summary>Number of learned register tokens (0 for plain DINOv2; 4 for the <c>-reg</c> variants and all DINOv3 ViTs).</summary>
     public int NumRegisterTokens { get; init; }
+
+    /// <summary>True for DINOv3 ViT variants, which replace DINOv2's learned+interpolated absolute position
+    /// embeddings with <b>rotary position embeddings (RoPE)</b> applied inside attention. <see cref="Dinov2VisionEncoder"/>
+    /// does not yet implement RoPE, so a DINOv3 preset loads structurally but will NOT match the reference until
+    /// RoPE support is added — real-weight parity for these presets is blocked on that encoder work, not config.</summary>
+    public bool UsesRotaryPositionEmbedding { get; init; }
 
     /// <summary>LayerNorm epsilon.</summary>
     public float LayerNormEps { get; init; } = 1e-6f;
@@ -93,5 +99,36 @@ public sealed record Dinov2Preset
         Name = "facebook/dinov2-giant",
         HiddenSize = 1536, NumLayers = 40, NumHeads = 24, IntermediateSize = 4096,
         ImageSize = 518, PatchSize = 14,
+    };
+
+    // ── DINOv3 ViT variants ──────────────────────────────────────────────
+    // DINOv3 (Meta, 2025) keeps DINOv2's CLS + 4 register tokens, LayerScale, and (for L and up) a gated
+    // SwiGLU FFN — all already handled here — but swaps absolute position embeddings for RoPE and uses a
+    // 16px patch. RoPE is NOT implemented in Dinov2VisionEncoder, so these presets are correct in every
+    // dimension yet cannot reach cos-sim parity until the encoder gains RoPE. UsesRotaryPositionEmbedding
+    // flags that so a loader/test can gate on it rather than silently emitting wrong features.
+
+    /// <summary><c>facebook/dinov3-vits16</c> — DINOv3 ViT-S/16 (RoPE; parity blocked on encoder RoPE support).</summary>
+    public static Dinov2Preset V3Small16 => new()
+    {
+        Name = "facebook/dinov3-vits16",
+        HiddenSize = 384, NumLayers = 12, NumHeads = 6, IntermediateSize = 1536,
+        ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true,
+    };
+
+    /// <summary><c>facebook/dinov3-vitb16</c> — DINOv3 ViT-B/16 (RoPE; parity blocked on encoder RoPE support).</summary>
+    public static Dinov2Preset V3Base16 => new()
+    {
+        Name = "facebook/dinov3-vitb16",
+        HiddenSize = 768, NumLayers = 12, NumHeads = 12, IntermediateSize = 3072,
+        ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true,
+    };
+
+    /// <summary><c>facebook/dinov3-vitl16</c> — DINOv3 ViT-L/16, SwiGLU FFN (RoPE; parity blocked on encoder RoPE support).</summary>
+    public static Dinov2Preset V3Large16 => new()
+    {
+        Name = "facebook/dinov3-vitl16",
+        HiddenSize = 1024, NumLayers = 24, NumHeads = 16, IntermediateSize = 4096,
+        ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true,
     };
 }

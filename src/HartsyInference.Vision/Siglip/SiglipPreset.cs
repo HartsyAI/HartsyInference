@@ -79,4 +79,62 @@ public sealed record SiglipPreset
         PatchSize = 14,
         EmbeddingDim = 1152,
     };
+
+    // ── SigLIP 2 fixed-resolution variants ───────────────────────────────
+    // SigLIP 2's fixed-resolution (non-NaFlex) vision towers are the SigLIP ViT + attention-pooling
+    // head unchanged — same weight key names (`vision_model.embeddings.*`, `vision_model.head.*`), so
+    // they load through this encoder with no remap. Only the NaFlex variants (variable aspect-ratio
+    // patch packing) differ structurally and are out of scope here.
+
+    /// <summary><c>google/siglip2-base-patch16-224</c> — SigLIP 2 base, 224/16 grid.</summary>
+    public static SiglipPreset V2Base16_224 => new()
+    {
+        Name = "google/siglip2-base-patch16-224",
+        HiddenSize = 768,
+        NumLayers = 12,
+        NumHeads = 12,
+        IntermediateSize = 3072,
+        ImageSize = 224,
+        PatchSize = 16,
+        EmbeddingDim = 768,
+    };
+
+    /// <summary><c>google/siglip2-large-patch16-384</c> — SigLIP 2 large, 384/16 grid.</summary>
+    public static SiglipPreset V2Large16_384 => new()
+    {
+        Name = "google/siglip2-large-patch16-384",
+        HiddenSize = 1024,
+        NumLayers = 24,
+        NumHeads = 16,
+        IntermediateSize = 4096,
+        ImageSize = 384,
+        PatchSize = 16,
+        EmbeddingDim = 1024,
+    };
+
+    /// <summary><c>google/siglip2-so400m-patch14-384</c> — SigLIP 2 shape-optimized 400M, 384/14 grid.</summary>
+    public static SiglipPreset V2So400m14_384 => new()
+    {
+        Name = "google/siglip2-so400m-patch14-384",
+        HiddenSize = 1152,
+        NumLayers = 27,
+        NumHeads = 16,
+        IntermediateSize = 4304,
+        ImageSize = 384,
+        PatchSize = 14,
+        EmbeddingDim = 1152,
+    };
+
+    /// <summary><c>google/siglip2-giant-opt-patch16-384</c> — SigLIP 2 giant, 384/16 grid, 40 layers.</summary>
+    public static SiglipPreset V2Giant16_384 => new()
+    {
+        Name = "google/siglip2-giant-opt-patch16-384",
+        HiddenSize = 1536,
+        NumLayers = 40,
+        NumHeads = 16,
+        IntermediateSize = 6144,
+        ImageSize = 384,
+        PatchSize = 16,
+        EmbeddingDim = 1536,
+    };
 }

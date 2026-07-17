@@ -61,4 +61,106 @@ public sealed record ClipPreset
             UseQuickGelu = false,
         },
     };
+
+    // ── MetaCLIP (Meta, CC-licensed) ─────────────────────────────────────
+    // MetaCLIP v1 (facebook/metaclip-*-fullcc2.5b) re-trains the OpenAI CLIP architecture on MetaCLIP
+    // data. The HF checkpoints ship in the standard CLIPModel layout (text_model.* / vision_model.* /
+    // {text,visual}_projection) with quick-GELU, so ClipModelLoader loads them with no remap — genuine
+    // drop-in replacements for the OpenAI presets above.
+
+    /// <summary><c>facebook/metaclip-b16-fullcc2.5b</c> — MetaCLIP ViT-B/16. Text hidden=512 (8 heads),
+    /// vision hidden=768 patch16, shared projection=512, quick-GELU.</summary>
+    public static ClipPreset MetaClipB16 => new()
+    {
+        Name = "facebook/metaclip-b16-fullcc2.5b",
+        TextConfig = new ClipTextEncoderConfig
+        {
+            HiddenSize = 512,
+            IntermediateSize = 2048,
+            NumLayers = 12,
+            NumHeads = 8,
+            MaxPositionEmbeddings = 77,
+            VocabSize = 49408,
+            UseQuickGelu = true,
+            ProjectionDim = 512,
+        },
+        VisionConfig = new ClipVisionEncoderConfig
+        {
+            HiddenSize = 768,
+            NumLayers = 12,
+            NumHeads = 12,
+            IntermediateSize = 3072,
+            ImageSize = 224,
+            PatchSize = 16,
+            ProjectionDim = 512,
+            UseQuickGelu = true,
+        },
+    };
+
+    /// <summary><c>facebook/metaclip-l14-fullcc2.5b</c> — MetaCLIP ViT-L/14. Same shapes as OpenAI CLIP-L,
+    /// shared projection=768, quick-GELU.</summary>
+    public static ClipPreset MetaClipL14 => new()
+    {
+        Name = "facebook/metaclip-l14-fullcc2.5b",
+        TextConfig = ClipTextEncoderConfig.Sd15 with { ProjectionDim = 768 },
+        VisionConfig = ClipVisionEncoderConfig.ViTL14 with { ProjectionDim = 768 },
+    };
+
+    /// <summary><c>facebook/metaclip-h14-fullcc2.5b</c> — MetaCLIP ViT-H/14. Text hidden=1024 (24 layers),
+    /// vision hidden=1280 patch14, shared projection=1024, quick-GELU (unlike LAION's OpenCLIP-H which is standard GELU).</summary>
+    public static ClipPreset MetaClipH14 => new()
+    {
+        Name = "facebook/metaclip-h14-fullcc2.5b",
+        TextConfig = new ClipTextEncoderConfig
+        {
+            HiddenSize = 1024,
+            IntermediateSize = 4096,
+            NumLayers = 24,
+            NumHeads = 16,
+            MaxPositionEmbeddings = 77,
+            VocabSize = 49408,
+            UseQuickGelu = true,
+            ProjectionDim = 1024,
+        },
+        VisionConfig = ClipVisionEncoderConfig.ViTH14 with { UseQuickGelu = true },
+    };
+
+    // ── EVA-CLIP (BAAI) ──────────────────────────────────────────────────
+    // EVA-CLIP's TEXT tower is a standard CLIP text transformer (loads through ClipTextEncoder), but its
+    // VISION tower is EVA-02: 2D RoPE, SwiGLU FFN, and extra sub-LayerNorms — NOT a vanilla CLIP ViT.
+    // ClipVisionEncoder implements none of those, and the timm/OpenCLIP checkpoint keys (visual.blocks.*,
+    // rope.*) differ from the CLIPModel layout ClipModelLoader expects. So this preset carries the correct
+    // dimensions for the text side and documents the vision side as parity-blocked on EVA vision-tower
+    // support + a key remap — it is NOT a drop-in like MetaCLIP. Included so the config exists once that
+    // encoder work lands; do not treat its vision cos-sim as a passing gate until then.
+
+    /// <summary><c>BAAI/EVA02-CLIP-B-16</c> — text tower loads as standard CLIP; the EVA-02 vision tower
+    /// (RoPE + SwiGLU + sub-LN) is NOT yet supported by <see cref="ClipVisionEncoder"/>. See the section
+    /// comment: vision-side parity is blocked on encoder work, not config.</summary>
+    public static ClipPreset EvaClip02B16 => new()
+    {
+        Name = "BAAI/EVA02-CLIP-B-16",
+        TextConfig = new ClipTextEncoderConfig
+        {
+            HiddenSize = 512,
+            IntermediateSize = 2048,
+            NumLayers = 12,
+            NumHeads = 8,
+            MaxPositionEmbeddings = 77,
+            VocabSize = 49408,
+            UseQuickGelu = true,
+            ProjectionDim = 512,
+        },
+        VisionConfig = new ClipVisionEncoderConfig
+        {
+            HiddenSize = 768,
+            NumLayers = 12,
+            NumHeads = 12,
+            IntermediateSize = 2048,
+            ImageSize = 224,
+            PatchSize = 16,
+            ProjectionDim = 512,
+            UseQuickGelu = false,
+        },
+    };
 }
