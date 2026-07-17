@@ -56,23 +56,6 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     private long _cachedRefSig;
     private (int H, int W)[] _cachedRefGrids = [];
 
-    /// <summary>Cheap content signature of a reference image: FNV-1a over 1024 strided samples + dims.
-    /// Collision-safe enough for a single-slot cache whose only job is "same image as last generation?".</summary>
-    private static long ComputeImageSignature(Tensor image)
-    {
-        float* p = (float*)image.DataPointer;
-        long n = image.ElementCount;
-        long stride = Math.Max(1, n / 1024);
-        ulong h = 14695981039346656037UL;
-        for (long i = 0; i < n; i += stride)
-        {
-            h ^= (uint)BitConverter.SingleToInt32Bits(p[i]);
-            h *= 1099511628211UL;
-        }
-        h ^= (ulong)image.Shape[2] << 32 ^ (ulong)image.Shape[3];
-        return (long)h;
-    }
-
     /// <summary>Creates a Qwen-Image pipeline. Caller is responsible for the lifetime of the components — they may be reused across pipelines. Img2img is unavailable; use the overload accepting a <see cref="QwenImageVaeEncoder"/> to enable it.</summary>
     public QwenImagePipeline(IBackend backend, LlamaStyleEncoder textEncoder,
         QwenImageTransformer transformer, QwenImageVaeDecoder vaeDecoder, QwenImageConfig config)
@@ -199,7 +182,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         {
             IReadOnlyList<Tensor> sigSource = editRefVisionImages is { Count: > 0 } ? editRefVisionImages : editRefImages!;
             foreach (Tensor sigImg in sigSource)
-                editSig = editSig * 1000003L ^ ComputeImageSignature(sigImg);
+                editSig = editSig * 1000003L ^ ImageSignature.Compute(sigImg);
         }
         bool condHit = _cachedCond is not null && _cachedCondDrop == promptDropIndex
             && _cachedEditSig == editSig
@@ -353,7 +336,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         {
             long refSig = 0L;
             foreach (Tensor editRef in editRefImages!)
-                refSig = refSig * 1000003L ^ ComputeImageSignature(editRef);
+                refSig = refSig * 1000003L ^ ImageSignature.Compute(editRef);
             if (_cachedPackedRef is not null && _cachedRefSig == refSig)
             {
                 packedEditRef = _cachedPackedRef;

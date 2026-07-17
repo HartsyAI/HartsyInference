@@ -33,7 +33,8 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 > | ✅ **verified word-correct** | Kokoro, Piper, MeloTTS, F5-TTS, **Bark**, **Chatterbox**, **VibeVoice**, **FishSpeech**, **Orpheus**, **Dia** (Swarm 10/10, all 3 turns, EOS-stops 11.4s — fixed by switching to the `Dia-1.6B-0626` checkpoint), **Kyutai TTS** (DSM, in-engine e2e word-correct 2026-07-16; **Swarm-deployed + verified word-perfect 2026-07-16**) |
 > | 🚧 **partially wired** (loads; clone/synth path throws) | NeuTTS (clone gated), Qwen3-TTS (voice_clone gated) |
 > | 🚧 **build started 2026-07-15** | **StyleTTS2** (LibriTTS) — recon done: checkpoint downloaded, structure mapped, dims confirmed Kokoro-compatible (hidden 512 / style 128×2 / n_token 178 / 24 kHz / decoder 8h·3L → bert/text_encoder/predictor/decoder reuse Kokoro loaders). Remaining: reconcile the two style submodules to the real checkpoint (StyleEncoder ResBlk uses a **learned depthwise downsample** `downsample_res.conv` + `conv1` is dim_in→dim_in, not the scaffold's avgpool/dim_out; diffusion transformer uses archinetai `net.blocks`/fused-`to_kv`/`norm.fc`-AdaLN, not the scaffold's `unet.blocks`) + spectral-norm σ-fold + write `LoadFromCheckpoint`. See `AUDIO_TTS_BRINGUP_PLAN.md`. |
-> | ⛔ **not wired** (install throws a clear "not runnable yet") | CosyVoice ("not yet supported by the in-process engine"), Spark-TTS (config/BiCodec reconcile), Zonos (needs conditioning prefix), PocketTTS (placeholder dims), CSM (no runtime model) |
+> | ✅ **Swarm-deployed 2026-07-16** (extension wired, whisper word-perfect) | **Kyutai TTS**, **Spark-TTS** (controllable mode), **PocketTTS** (voice-KV-primed continuous-latent flow-LM; full engine port, parity corr 1.0) |
+> | ⛔ **not wired** (install throws a clear "not runnable yet") | CosyVoice ("not yet supported by the in-process engine"), Zonos (needs conditioning prefix), CSM (no runtime model) |
 >
 > STT (6 local): ✅ Moonshine, Whisper verified word-perfect on real (JFK) speech; Distil-Whisper / Kyutai STT /
 > RealtimeSTT / Whisper Streaming not yet installed/verified. **Slowness note:** Bark 85 s, Chatterbox 219 s,
@@ -116,7 +117,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **Demucs** (separation) | 🔧 | Built; parity pending. |
 | **CSM** (Sesame) | 🔧 | Uses Mimi; parity pending. |
 | **Stable Audio Open / DiffRhythm / AudioLDM 2 / ACE-Step XL** | ❌/🔧 | Music roadmap; see [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md) for the per-model build state and ROI order. |
-| **PocketTTS** (continuous-latent) | ⛔ | Gated `kyutai/pocket-tts`; config dims are placeholders. Reuses the moshi backbone. |
+| **PocketTTS** (continuous-latent) | ✅ | **Swarm-deployed + parity-verified 2026-07-16.** Production voiced path built on the verified cores: `PocketTtsStreamingTransformer.ForwardPrimed` (voice-KV prefix + RoPE offset), `PocketTtsFlowLm.GenerateVoiced` (LUT conditioner + out_eos stop + noise std=√temp), `PocketTtsVoice` (KV-state loader), rewritten `PocketTtsPipeline` (SentencePiece + emb_std/mean denorm). All transformer layers + hidden + latents **corr 1.000000** vs `pocket_tts` 2.1.0. Voice REQUIRED (default `alba`). Weights = non-gated `kyutai/pocket-tts-without-voice-cloning` `languages/english/` (NOT the generic `tts_*.safetensors`). Whisper `medium.en` word-perfect via `/API/GenerateText2Image`. |
 
 ## Notes
 

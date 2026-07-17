@@ -131,29 +131,6 @@ public sealed unsafe class PocketTtsModelTests
         DisposeAll(w);
     }
 
-    [Fact]
-    public void Pipeline_VoicePrimingFromAudio_GeneratesFiniteAudio()
-    {
-        PocketTtsConfig cfg = TinyConfig();
-        Dictionary<string, Tensor> w = AllWeights(cfg);
-        using CpuBackend backend = new();
-
-        using PocketTtsPipeline pipeline = new(cfg);
-        pipeline.LoadWeights(w);
-
-        int hop = 4;
-        float[] prompt = new float[8 * hop];
-        for (int i = 0; i < prompt.Length; i++) prompt[i] = Rand();
-        using Tensor voice = pipeline.BuildVoiceFromAudio(backend, prompt);
-
-        int[] text = [3, 7, 1];
-        float[] audio = pipeline.Synthesize(backend, text, voiceName: null, voiceState: voice, seed: 1, numFrames: 4);
-
-        Assert.NotEmpty(audio);
-        foreach (float s in audio) Assert.True(float.IsFinite(s), "primed audio sample must be finite");
-        DisposeAll(w);
-    }
-
     // ── Weight synthesis ──
 
     private static Dictionary<string, Tensor> AllWeights(PocketTtsConfig cfg)
