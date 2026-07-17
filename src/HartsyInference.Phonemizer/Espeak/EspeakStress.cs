@@ -177,7 +177,11 @@ internal sealed class EspeakStress
         if ((dflags & 0x8) != 0)
         {
             stressedSyllable = (int)(dflags & 0x3);
-            unstressedWord = true;
+            // The 0x8 stress-field bit marks a word "reduce to unstressed" ($u = 0x48). But $u+ (0x4c) additionally
+            // sets FLAG_STRESS_END (0x200) — "reduce to unstressed, but stress at end of clause" — and in the
+            // espeak-ng 1.51 the phonemizer uses, such words (e.g. "this", "that") keep primary stress in normal
+            // positions, not just at clause end. Only plain $u (no FLAG_STRESS_END) actually reduces here.
+            unstressedWord = (dflags & FlagStressEnd) == 0;
         }
 
         int maxStressInput = GetVowelStress(phonetic, vowelStress, out int vowelCount, ref stressedSyllable, 1);
@@ -402,6 +406,10 @@ internal sealed class EspeakStress
         _ = control;
         return output;
     }
+
+    /// <summary>Dictionary flag "full stress if at end of clause" (translate.h FLAG_STRESS_END); set by the $u+
+    /// list attribute in addition to the 0x8 unstressed-field bit.</summary>
+    private const uint FlagStressEnd = 0x200;
 
     // stress_flags (translate.h S_*).
     private const int S_NoDim = 0x02;

@@ -76,6 +76,79 @@ public sealed unsafe class ZonosConditioningParityTests
         Assert.True(uc > 0.9995, $"uncond prefix corr {uc}");
     }
 
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void EnginePrefix_PerToken_LocalizesDivergence()
+    {
+        string? modelPath = Environment.GetEnvironmentVariable("ZONOS_MODEL");
+        string? golden = Environment.GetEnvironmentVariable("ZONOS_GOLDEN");
+        string? spkW = Environment.GetEnvironmentVariable("ZONOS_SPK_WEIGHTS");
+        string? spkL = Environment.GetEnvironmentVariable("ZONOS_SPK_LDA");
+        if (string.IsNullOrEmpty(modelPath) || !File.Exists(modelPath) || string.IsNullOrEmpty(golden) || !Directory.Exists(golden)
+            || string.IsNullOrEmpty(spkW) || string.IsNullOrEmpty(spkL)) { _out.WriteLine("Skipped."); return; }
+
+        SafeTensorsLoader wl = new(); wl.Load(modelPath);
+        IReadOnlyDictionary<string, Tensor> w = wl.GetAllTensors();
+        int[] phonemes = LoadIds(golden);
+        float[] goldCond = LoadBin(golden, "cond_prefix", out int[] shape);
+        float[] spk = LoadBin(golden, "spk_lda128", out _);
+        int p = shape[1], d = shape[2];
+
+        IBackend backend = Environment.GetEnvironmentVariable("ZONOS_CUDA") == "1"
+            ? new HartsyInference.Cuda.CudaBackend(0, Environment.GetEnvironmentVariable("ZONOS_PTX")!)
+            : new CpuBackend();
+        backend.HighPrecisionGemm = true;
+        using ZonosConditioning cond = new(); cond.LoadWeights(w);
+
+        float[] emotion = [0.3077f, 0.0256f, 0.0256f, 0.0256f, 0.0256f, 0.0256f, 0.2564f, 0.3077f];
+        float esum = 0; foreach (float e in emotion) esum += e;
+        for (int i = 0; i < emotion.Length; i++) emotion[i] /= esum;
+
+        // Golden speaker embedding.
+        Tensor spkGold = new(new TensorShape(1, ZonosConditioning.SpeakerDim), DType.F32);
+        fixed (float* sp = spk) Buffer.MemoryCopy(sp, (void*)spkGold.DataPointer, spk.Length * 4L, spk.Length * 4L);
+
+        // Engine EmbedFromWav on the golden reference clip (the exact ZonosTts path).
+        using HartsyInference.ModelHandler.PyTorch.PytorchPickleLoader swl = new(); swl.Load(spkW!);
+        using HartsyInference.ModelHandler.PyTorch.PytorchPickleLoader sll = new(); sll.Load(spkL!);
+        ZonosSpeakerEncoder enc = new(ZonosSpeakerConfig.Default);
+        enc.LoadWeights(swl.GetAllTensors(), sll.GetAllTensors());
+        float[] refWav = LoadBin(golden, "spk_wav16k", out _);
+        Tensor spkEng = enc.EmbedFromWav(backend, refWav);
+
+        // Report the engine embedding scale vs golden.
+        float* ge = (float*)spkEng.DataPointer;
+        double l2e = 0, l2g = 0, dot = 0;
+        for (int i = 0; i < 128; i++) { l2e += ge[i] * ge[i]; l2g += spk[i] * spk[i]; dot += ge[i] * spk[i]; }
+        l2e = Math.Sqrt(l2e); l2g = Math.Sqrt(l2g);
+        _out.WriteLine($"speaker emb: engine L2={l2e:F4} golden L2={l2g:F4} cos={dot / (l2e * l2g + 1e-12):F6}");
+
+        int langId = ZonosLanguages.DefaultId;
+        _out.WriteLine($"ZonosLanguages.DefaultId={langId} (conditioning test used 24)");
+        foreach ((string tag, Tensor semb) in new[] { ("GOLD-SPK", spkGold), ("ENGINE-SPK", spkEng) })
+        {
+            Tensor pref = cond.BuildPrefix(backend, phonemes, semb, emotion,
+                fmax: 22050f, pitchStd: 20f, speakingRate: 15f, languageId: langId, conditional: true);
+            float* q = (float*)pref.DataPointer;   // [P, D]
+            _out.WriteLine($"--- {tag}: per-token corr/maxAbs (tokens {p - 8}..{p - 1}) ---");
+            for (int s = Math.Max(0, p - 8); s < p; s++)
+            {
+                double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0, mx = 0;
+                for (int c = 0; c < d; c++)
+                {
+                    double x = q[(long)s * d + c], y = goldCond[(long)s * d + c];
+                    sa += x; sb += y; saa += x * x; sbb += y * y; sab += x * y;
+                    if (Math.Abs(x - y) > mx) mx = Math.Abs(x - y);
+                }
+                double cov = sab / d - (sa / d) * (sb / d);
+                double corr = cov / (Math.Sqrt((saa / d - (sa / d) * (sa / d)) * (sbb / d - (sb / d) * (sb / d))) + 1e-12);
+                _out.WriteLine($"  tok{s}: corr={corr:F5} maxAbs={mx:E2}");
+            }
+            pref.Dispose();
+        }
+        spkGold.Dispose(); spkEng.Dispose(); (backend as IDisposable)?.Dispose();
+    }
+
     private static int[] LoadIds(string dir)
     {
         using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "phonemes.json")));
@@ -85,16 +158,16 @@ public sealed unsafe class ZonosConditioningParityTests
         return ids;
     }
 
-    /// <summary>Compares engine channels-first <c>[1, D, P]</c> against golden channels-last <c>[1, P, D]</c>.</summary>
+    /// <summary>Compares the engine channels-last prefix <c>[1, P, D]</c> against golden <c>[1, P, D]</c>.</summary>
     private static (double corr, double maxAbs) CompareTransposed(Tensor cf, float[] golden, int p, int d)
     {
-        float* q = (float*)cf.DataPointer;   // [D, P]
+        float* q = (float*)cf.DataPointer;   // [P, D]
         double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0, maxAbs = 0;
         long n = (long)p * d;
         for (int s = 0; s < p; s++)
             for (int c = 0; c < d; c++)
             {
-                double x = q[(long)c * p + s];
+                double x = q[(long)s * d + c];
                 double y = golden[(long)s * d + c];
                 sa += x; sb += y; saa += x * x; sbb += y * y; sab += x * y;
                 double diff = Math.Abs(x - y);

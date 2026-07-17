@@ -16,8 +16,8 @@ namespace HartsyInference.Audio.Models.Zonos;
 ///   <item>language_id → an integer <c>Embedding(105 → 2048)</c>, one token</item>
 /// </list>
 ///
-/// <para>Output is channels-first <c>[1, 2048, P]</c> where <c>P = phonemeCount + 6</c> — the layout the Zonos
-/// backbone consumes after the conditioner. The IntegerConditioner is built inline (a plain embedding lookup
+/// <para>Output is channels-last <c>[1, P, 2048]</c> where <c>P = phonemeCount + 6</c> — the standard
+/// <c>[B, seq, hidden]</c> layout the Zonos backbone consumes. The IntegerConditioner is built inline (a plain embedding lookup
 /// with an optional learned uncond vector). The Fourier conditioners reuse
 /// <see cref="ZonosFourierConditioner"/>.</para></summary>
 public sealed unsafe class ZonosConditioning : IDisposable
@@ -69,7 +69,7 @@ public sealed unsafe class ZonosConditioning : IDisposable
         _normB = WhisperOps.EnsureF32(w[$"{prefix}.norm.bias"]);
     }
 
-    /// <summary>Assembles the conditioning prefix and returns it channels-first <c>[1, 2048, P]</c>. When
+    /// <summary>Assembles the conditioning prefix and returns it channels-last <c>[1, P, 2048]</c>. When
     /// <paramref name="conditional"/> is <c>false</c> this builds the CFG unconditional branch: the espeak
     /// phonemes are kept (espeak is the only required conditioner) while speaker / emotion / fmax / pitch_std /
     /// speaking_rate / language_id are each replaced by their learned <c>uncond_vector</c>.</summary>
@@ -129,11 +129,10 @@ public sealed unsafe class ZonosConditioning : IDisposable
         backend.LayerNorm(normed, proj, _normW!, _normB!, 1e-5f);
         proj.Dispose();
 
-        // Channels-last [1, P, 2048] → channels-first [1, 2048, P].
-        Tensor cf = new(new TensorShape(1, DModel, p), DType.F32);
-        backend.Transpose2D(cf, normed, p, DModel);
-        normed.Dispose();
-        return cf;
+        // Return channels-last [1, P, 2048] — the standard [B, seq, hidden] layout the backbone (and
+        // ZonosPipeline.Generate/Prefill, which read Shape[1] as the sequence length) consume. This matches the
+        // reference prefix_conditioner output [1, P, 2048].
+        return normed;
     }
 
     /// <summary>Reads a <c>[2048]</c> uncond_vector into a fresh array (zeros if absent).</summary>

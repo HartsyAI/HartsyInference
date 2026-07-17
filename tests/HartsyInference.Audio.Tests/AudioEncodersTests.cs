@@ -69,8 +69,9 @@ public sealed unsafe class AudioEncodersTests
         using Tensor prefix = cond.BuildPrefix(backend, phonemes, speaker, emotion,
             fmax: 22050f, pitchStd: 45f, speakingRate: 15f, languageId: 3);
 
-        Assert.Equal(ZonosConditioning.DModel, (int)prefix.Shape[1]);
-        Assert.Equal(phonemes.Length + 6, (int)prefix.Shape[2]);
+        // Channels-last [1, P, DModel] — the [B, seq, hidden] layout the backbone/pipeline consume.
+        Assert.Equal(phonemes.Length + 6, (int)prefix.Shape[1]);
+        Assert.Equal(ZonosConditioning.DModel, (int)prefix.Shape[2]);
         AssertFinite(prefix);
     }
 
