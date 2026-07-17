@@ -1,4 +1,4 @@
-using HartsyInference.Audio.Models.Bert;
+using HartsyInference.ModelHandler.TextEncoders.Bert;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Tokenizers;

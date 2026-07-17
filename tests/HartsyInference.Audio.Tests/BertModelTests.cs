@@ -1,4 +1,4 @@
-using HartsyInference.Audio.Models.Bert;
+using HartsyInference.ModelHandler.TextEncoders.Bert;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.ModelHandler.PyTorch;
