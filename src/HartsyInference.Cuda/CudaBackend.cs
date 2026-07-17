@@ -4257,6 +4257,91 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    public unsafe void MaxPool2D(Tensor output, Tensor input, int kernelH, int kernelW,
+        int strideH, int strideW, int padH, int padW)
+    {
+        if (output.DType != DType.F32 && output.DType != DType.F16)
+            throw new NotSupportedException($"CUDA MaxPool2D supports F32/F16 output — got {output.DType}.");
+        if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
+            throw new ArgumentException($"MaxPool2D requires [N, C, H, W] tensors; got input {input.Shape} / output {output.Shape}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        int n = (int)input.Shape[0], c = (int)input.Shape[1], iH = (int)input.Shape[2], iW = (int)input.Shape[3];
+        int oH = (int)output.Shape[2], oW = (int)output.Shape[3];
+
+        ulong pOut = 0, pIn = 0, inCast = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            ulong inTyped = CastIfNeeded(pIn, input.DType, output.DType, (int)input.ElementCount, out inCast);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            _kernels!.LaunchMaxPool2D(output.DType, pOut, inTyped, n, c, iH, iW, oH, oW,
+                kernelH, kernelW, strideH, strideW, padH, padW, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            if (inCast != 0) CudaMemory.FreeAsync(inCast, _stream.Handle);
+        }
+    }
+
+    public unsafe void Conv2dDepthwise(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int strideH, int strideW, int padH, int padW)
+    {
+        if (output.DType != DType.F32 && output.DType != DType.F16)
+            throw new NotSupportedException($"CUDA Conv2dDepthwise supports F32/F16 output — got {output.DType}.");
+        if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
+            throw new ArgumentException($"Conv2dDepthwise requires [N, C, H, W] tensors; got input {input.Shape} / output {output.Shape}.");
+        if (weight.Shape.Rank != 4 || weight.Shape[1] != 1)
+            throw new ArgumentException($"Conv2dDepthwise weight must be [C, 1, kH, kW]; got {weight.Shape}.");
+        if (input.Shape[1] != weight.Shape[0] || output.Shape[1] != weight.Shape[0])
+            throw new ArgumentException("Conv2dDepthwise requires input/output channel count to equal weight channel count.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        int n = (int)input.Shape[0], c = (int)input.Shape[1], iH = (int)input.Shape[2], iW = (int)input.Shape[3];
+        int oH = (int)output.Shape[2], oW = (int)output.Shape[3];
+        int kH = (int)weight.Shape[2], kW = (int)weight.Shape[3];
+
+        ulong pOut = 0, pIn = 0, pW = 0, pB = 0, inCast = 0, wCast = 0, bCast = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pW = GpuTransferHelper.CopyToDevice(weight);
+            pB = bias is null ? 0 : GpuTransferHelper.CopyToDevice(bias);
+            ulong inTyped = CastIfNeeded(pIn, input.DType, output.DType, (int)input.ElementCount, out inCast);
+            ulong wTyped = CastIfNeeded(pW, weight.DType, output.DType, (int)weight.ElementCount, out wCast);
+            ulong bTyped = bias is null ? 0 : CastIfNeeded(pB, bias.DType, output.DType, (int)bias.ElementCount, out bCast);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            _kernels!.LaunchDepthwiseConv2D(output.DType, pOut, inTyped, wTyped, bTyped, bias is null ? 0 : 1,
+                n, c, iH, iW, oH, oW, kH, kW, strideH, strideW, padH, padW, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pW);
+            if (pB != 0) GpuTransferHelper.FreeDevice(pB);
+            if (inCast != 0) CudaMemory.FreeAsync(inCast, _stream.Handle);
+            if (wCast != 0) CudaMemory.FreeAsync(wCast, _stream.Handle);
+            if (bCast != 0) CudaMemory.FreeAsync(bCast, _stream.Handle);
+        }
+    }
+
     public void Silu(Tensor output, Tensor input)
     {
         using NvtxRange _nvtx = NvtxRange.Push("Silu");

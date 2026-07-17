@@ -11,6 +11,8 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _layernormModule;
     private readonly CudaModule _spatialModule;
     private readonly CudaModule _im2colBandedModule;
+    private readonly CudaModule _maxpool2dModule;
+    private readonly CudaModule _depthwiseConv2dModule;
     private readonly CudaModule _softmaxModule;
     private readonly CudaModule _transposeModule;
     private readonly CudaModule _wanRopeModule;
@@ -134,6 +136,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _im2colBandedF32;
     private readonly nint _im2colBandedF16;
     private readonly nint _im2colBandedBf16;
+    private readonly nint _maxpool2dF32;
+    private readonly nint _maxpool2dF16;
+    private readonly nint _depthwiseConv2dF32;
+    private readonly nint _depthwiseConv2dF16;
 
     // ── Softmax function handles ─────────────────────────────────────────
     private readonly nint _softmaxF32;
@@ -320,6 +326,14 @@ public sealed class CudaKernels : IDisposable
         _im2colBandedF32 = _im2colBandedModule.GetFunction("im2col_banded_f32");
         _im2colBandedF16 = _im2colBandedModule.GetFunction("im2col_banded_f16");
         _im2colBandedBf16 = _im2colBandedModule.GetFunction("im2col_banded_bf16");
+
+        _maxpool2dModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "maxpool2d.ptx"));
+        _maxpool2dF32 = _maxpool2dModule.GetFunction("maxpool2d_f32");
+        _maxpool2dF16 = _maxpool2dModule.GetFunction("maxpool2d_f16");
+
+        _depthwiseConv2dModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "depthwise_conv2d.ptx"));
+        _depthwiseConv2dF32 = _depthwiseConv2dModule.GetFunction("depthwise_conv2d_f32");
+        _depthwiseConv2dF16 = _depthwiseConv2dModule.GetFunction("depthwise_conv2d_f16");
 
         _softmaxModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "softmax_f32.ptx"));
         _softmaxF32 = _softmaxModule.GetFunction("softmax_f32");
@@ -1236,6 +1250,83 @@ public sealed class CudaKernels : IDisposable
         args[14] = &chanOffArg;
 
         long totalElements = (long)channels * kH * kW * bandRows * outW;
+        uint gridDim = (uint)((totalElements + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>2D max-pool over an NCHW tensor; one thread per output element. Dtype selects the F32 or F16 kernel.</summary>
+    public unsafe void LaunchMaxPool2D(DType dtype, ulong output, ulong input,
+        int n, int channels, int inH, int inW, int outH, int outW,
+        int kernelH, int kernelW, int strideH, int strideW, int padH, int padW, nint stream)
+    {
+        nint func = dtype == DType.F16 ? _maxpool2dF16 : _maxpool2dF32;
+        ulong outArg = output, inArg = input;
+        uint nArg = (uint)n, chArg = (uint)channels, inHArg = (uint)inH, inWArg = (uint)inW;
+        uint outHArg = (uint)outH, outWArg = (uint)outW;
+        uint kHArg = (uint)kernelH, kWArg = (uint)kernelW;
+        uint strHArg = (uint)strideH, strWArg = (uint)strideW;
+        uint padHArg = (uint)padH, padWArg = (uint)padW;
+
+        void** args = stackalloc void*[14];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &nArg;
+        args[3] = &chArg;
+        args[4] = &inHArg;
+        args[5] = &inWArg;
+        args[6] = &outHArg;
+        args[7] = &outWArg;
+        args[8] = &kHArg;
+        args[9] = &kWArg;
+        args[10] = &strHArg;
+        args[11] = &strWArg;
+        args[12] = &padHArg;
+        args[13] = &padWArg;
+
+        long totalElements = (long)n * channels * outH * outW;
+        uint gridDim = (uint)((totalElements + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Depthwise 2D conv (groups==channels) over an NCHW tensor; weight is <c>[C,1,kH,kW]</c>, bias
+    /// optional. One thread per output element. Dtype selects the F32 or F16 kernel.</summary>
+    public unsafe void LaunchDepthwiseConv2D(DType dtype, ulong output, ulong input, ulong weight, ulong bias,
+        int hasBias, int n, int channels, int inH, int inW, int outH, int outW,
+        int kH, int kW, int strideH, int strideW, int padH, int padW, nint stream)
+    {
+        nint func = dtype == DType.F16 ? _depthwiseConv2dF16 : _depthwiseConv2dF32;
+        ulong outArg = output, inArg = input, wArg = weight, bArg = bias;
+        int hasBiasArg = hasBias;
+        uint nArg = (uint)n, chArg = (uint)channels, inHArg = (uint)inH, inWArg = (uint)inW;
+        uint outHArg = (uint)outH, outWArg = (uint)outW;
+        uint kHArg = (uint)kH, kWArg = (uint)kW;
+        uint strHArg = (uint)strideH, strWArg = (uint)strideW;
+        uint padHArg = (uint)padH, padWArg = (uint)padW;
+
+        void** args = stackalloc void*[17];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &wArg;
+        args[3] = &bArg;
+        args[4] = &hasBiasArg;
+        args[5] = &nArg;
+        args[6] = &chArg;
+        args[7] = &inHArg;
+        args[8] = &inWArg;
+        args[9] = &outHArg;
+        args[10] = &outWArg;
+        args[11] = &kHArg;
+        args[12] = &kWArg;
+        args[13] = &strHArg;
+        args[14] = &strWArg;
+        args[15] = &padHArg;
+        args[16] = &padWArg;
+
+        long totalElements = (long)n * channels * outH * outW;
         uint gridDim = (uint)((totalElements + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(
             func, gridDim, 1, 1, BlockSize, 1, 1,
@@ -2689,6 +2780,8 @@ public sealed class CudaKernels : IDisposable
         _groupnormModule?.Dispose();
         _layernormModule?.Dispose();
         _spatialModule?.Dispose();
+        _maxpool2dModule?.Dispose();
+        _depthwiseConv2dModule?.Dispose();
         _softmaxModule?.Dispose();
         _transposeModule?.Dispose();
         _gegluModule?.Dispose();

@@ -1604,6 +1604,92 @@ public sealed class VulkanBackend : IBackend
         catch { outBuf.Dispose(); throw; }
     }
 
+    public void MaxPool2D(Tensor output, Tensor input, int kernelH, int kernelW,
+        int strideH, int strideW, int padH, int padW)
+    {
+        if (output.DType != DType.F32 && output.DType != DType.F16)
+            throw new NotSupportedException($"Vulkan MaxPool2D supports F32/F16 output — got {output.DType}.");
+        using OpScope _op = EnterOp();
+        int N = (int)input.Shape[0], C = (int)input.Shape[1], iH = (int)input.Shape[2], iW = (int)input.Shape[3];
+        int oH = (int)output.Shape[2], oW = (int)output.Shape[3];
+        VulkanBuffer inBuf = GetBuffer(input);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            string shader = "maxpool2d" + DtypeSuffix(output.DType);
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
+            };
+            VulkanKernel k = GetKernel(shader, 2, spec);
+            Span<byte> pc = stackalloc byte[12 * 4];
+            BinaryWriteUInt(pc, 0, (uint)N);
+            BinaryWriteUInt(pc, 4, (uint)C);
+            BinaryWriteUInt(pc, 8, (uint)iH);
+            BinaryWriteUInt(pc, 12, (uint)iW);
+            BinaryWriteUInt(pc, 16, (uint)oH);
+            BinaryWriteUInt(pc, 20, (uint)oW);
+            BinaryWriteUInt(pc, 24, (uint)kernelH);
+            BinaryWriteUInt(pc, 28, (uint)kernelW);
+            BinaryWriteUInt(pc, 32, (uint)strideH);
+            BinaryWriteUInt(pc, 36, (uint)strideW);
+            BinaryWriteUInt(pc, 40, (uint)padH);
+            BinaryWriteUInt(pc, 44, (uint)padW);
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LOCAL_X_1D));
+            CacheOutput(output, outBuf);
+        }
+        catch { outBuf.Dispose(); throw; }
+    }
+
+    public void Conv2dDepthwise(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int strideH, int strideW, int padH, int padW)
+    {
+        if (output.DType != DType.F32 && output.DType != DType.F16)
+            throw new NotSupportedException($"Vulkan Conv2dDepthwise supports F32/F16 output — got {output.DType}.");
+        if (weight.Shape.Rank != 4 || weight.Shape[1] != 1)
+            throw new ArgumentException($"Conv2dDepthwise weight must be [C, 1, kH, kW]; got {weight.Shape}.");
+        using OpScope _op = EnterOp();
+        int N = (int)input.Shape[0], C = (int)input.Shape[1], iH = (int)input.Shape[2], iW = (int)input.Shape[3];
+        int oH = (int)output.Shape[2], oW = (int)output.Shape[3];
+        int kH = (int)weight.Shape[2], kW = (int)weight.Shape[3];
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer wBuf = GetBuffer(weight);
+        // The bias binding is always populated; when there is no bias the input buffer is bound as a
+        // never-read placeholder and the hasBias push-constant flag gates the shader read.
+        VulkanBuffer biasBuf = bias is null ? inBuf : GetBuffer(bias);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            string shader = "depthwise_conv2d" + DtypeSuffix(output.DType);
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
+            };
+            VulkanKernel k = GetKernel(shader, 4, spec);
+            Span<byte> pc = stackalloc byte[13 * 4];
+            BinaryWriteUInt(pc, 0, bias is null ? 0u : 1u);
+            BinaryWriteUInt(pc, 4, (uint)N);
+            BinaryWriteUInt(pc, 8, (uint)C);
+            BinaryWriteUInt(pc, 12, (uint)iH);
+            BinaryWriteUInt(pc, 16, (uint)iW);
+            BinaryWriteUInt(pc, 20, (uint)oH);
+            BinaryWriteUInt(pc, 24, (uint)oW);
+            BinaryWriteUInt(pc, 28, (uint)kH);
+            BinaryWriteUInt(pc, 32, (uint)kW);
+            BinaryWriteUInt(pc, 36, (uint)strideH);
+            BinaryWriteUInt(pc, 40, (uint)strideW);
+            BinaryWriteUInt(pc, 44, (uint)padH);
+            BinaryWriteUInt(pc, 48, (uint)padW);
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, wBuf.Handle, biasBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LOCAL_X_1D));
+            CacheOutput(output, outBuf);
+        }
+        catch { outBuf.Dispose(); throw; }
+    }
+
     // ── Data movement ───────────────────────────────────────────────────
 
     public unsafe void CopyTo(Tensor destination, Tensor source)
