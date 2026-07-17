@@ -41,6 +41,32 @@ public sealed unsafe class SamPromptEncoder
         _notAPoint = ToF32Array(notAPointEmbedding, _embedDim);
     }
 
+    /// <summary>Builds the dense positional-encoding grid <c>[1, embedDim, height, width]</c> the mask decoder
+    /// adds to the image tokens — SAM's <c>prompt_encoder.get_dense_pe()</c>. Each grid cell is encoded with the
+    /// same Gaussian PE as the sparse prompts (cell-centered, normalized by the grid size), so prompt and image
+    /// positions share one coordinate frame.</summary>
+    public Tensor BuildDensePositionalEncoding(int height, int width)
+    {
+        if (height <= 0 || width <= 0)
+            throw new ArgumentException($"Dense PE grid must be positive; got {height}x{width}.");
+
+        Tensor outT = new Tensor(new TensorShape(1, _embedDim, height, width), DType.F32);
+        float* o = (float*)outT.DataPointer;
+        Span<float> scratch = stackalloc float[_embedDim];
+        for (int i = 0; i < height; i++)
+        {
+            for (int j = 0; j < width; j++)
+            {
+                _pe.Encode(j, i, width, height, scratch);
+                for (int d = 0; d < _embedDim; d++)
+                {
+                    o[((long)d * height + i) * width + j] = scratch[d];
+                }
+            }
+        }
+        return outT;
+    }
+
     /// <summary>Encodes a prompt into sparse token embeddings <c>[1, numTokens, embedDim]</c>. Token order:
     /// each point in order, then box corners (if any), then one padding token when no box is present.</summary>
     public Tensor EncodeSparse(SamPrompt prompt, int imageWidth, int imageHeight)
