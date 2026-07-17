@@ -39,3 +39,17 @@ a perf round — medians unchanged from the 07-11 table where re-measured).
 - VaeEncoder symmetric downsample padding → every img2img/Fill/Tools/Kontext encode off-grid (fixed).
 - IP-Adapter consumed checkpoint K/V lists in the wrong layer order → black output (fixed).
 - Qwen-Image-Edit 2511: ref VAE encode OOMs beside the resident DiT at 768²+ on 24GB (staging fix in flight).
+
+## Evening additions (49.13→49.21-local, all live-verified via SwarmUI)
+
+| Feature | Evidence |
+|---|---|
+| Lance 3B T2I | real-checkpoint reconciliation (7 arch fixes), velocity parity corr 1.000000; live clean apple 768² |
+| Lens Turbo + Base | full bring-up (tokenizer/OOM/CUDA-MoE/4 correctness bugs); DiT parity corr 1.0; live astronaut-on-moon (turbo cfg 1) + lighthouse (base cfg 4); ~25-30s/step host-bound (perf follow-up) |
+| Boogu-Image-Edit | VLM 384² token budget fix; live yellow-pear edit, scene preserved |
+| Qwen-Image-Edit 2511 | VRAM staging regression fixed (ref-latent cache + eviction guards); live 1024² red-suit edit |
+| Flux DiT ControlNet | union Pro-2.0 adapter, parity 3.7e-9 vs diffusers; live contour-locked glass apple |
+| HED/Lineart/NormalBAE annotators | parity ≤7.9e-6 (several bit-exact); live lineart oil painting + normalbae clay apple |
+| OmniGen2 edit | upstream dual-guidance math (shared ApplyDualCfg); live green-apple edit 1024² |
+| IP-Adapter FaceID | ArcFace IR-50 parity cosine 1.000000; live identity-carrying portrait @0.9 |
+| Final flagship gate | Krea2-Turbo 4.56s warm, Z-Image-Turbo 2.81s warm, Kontext spot clean |
