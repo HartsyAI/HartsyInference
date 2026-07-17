@@ -1,6 +1,10 @@
 using Xunit;
+using Xunit.Abstractions;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Codecs;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cpu;
+using HartsyInference.ModelHandler.CheckpointConverters;
 using HartsyInference.Video.Tokenizers;
 
 namespace HartsyInference.Video.Tests;
@@ -12,6 +16,119 @@ namespace HartsyInference.Video.Tests;
 public unsafe class CosmosTokenizerTests
 {
     private static readonly int[] DvLevels = [8, 8, 8, 5, 5, 5];
+
+    private readonly ITestOutputHelper _output;
+    public CosmosTokenizerTests(ITestOutputHelper output) => _output = output;
+
+    // ── Real-weight parity vs encoder.jit (env-gated) ─────────────────────────────────────────────
+    // Requires COSMOS_DV_MODEL = path to the shipped model.pt, and COSMOS_DV_REF = directory holding the
+    // Python-generated fixtures cosmos_input.{bin,hdr}, cosmos_ref_continuous.{bin,hdr}, cosmos_ref_indices.{bin,hdr}
+    // (produced by scratchpad/cosmos_ref.py, whose conv-body output is bit-exact to encoder.jit in F32).
+    private const string ModelEnv = "COSMOS_DV_MODEL";
+    private const string RefEnv = "COSMOS_DV_REF";
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void CosmosDvTokenizer_Encode_ParityVsEncoderJit()
+    {
+        string? modelPath = Environment.GetEnvironmentVariable(ModelEnv);
+        string? refDir = Environment.GetEnvironmentVariable(RefEnv);
+        if (string.IsNullOrWhiteSpace(modelPath) || !File.Exists(modelPath))
+        { _output.WriteLine($"SKIPPED: {ModelEnv} not set / model.pt missing."); return; }
+        if (string.IsNullOrWhiteSpace(refDir) || !Directory.Exists(refDir))
+        { _output.WriteLine($"SKIPPED: {RefEnv} not set / fixture dir missing."); return; }
+
+        (float[] input, int[] inShape) = LoadBinF32(Path.Combine(refDir, "cosmos_input"));
+        (float[] refCont, int[] cShape) = LoadBinF32(Path.Combine(refDir, "cosmos_ref_continuous"));
+        (int[] refIdx, int[] iShape) = LoadBinI32(Path.Combine(refDir, "cosmos_ref_indices"));
+
+        (Dictionary<string, Tensor> weights, IDisposable loader) = CosmosDvTokenizerConverter.Load(modelPath, castToF32: true);
+        using IDisposable _l = loader;
+        _output.WriteLine($"Loaded {weights.Count} network.* tokenizer tensors from {Path.GetFileName(modelPath)}.");
+
+        using CosmosDvTokenizer tok = new(CosmosDvTokenizerConfig.Dv8x16x16);
+        tok.LoadWeights(weights);
+        using IBackend backend = new CpuBackend();
+
+        using Tensor video = new(new TensorShape(inShape.Select(i => (long)i).ToArray()), DType.F32);
+        new Span<float>(input).CopyTo(new Span<float>((float*)video.DataPointer, input.Length));
+
+        // (1) continuous latent parity
+        using Tensor cont = tok.EncodeContinuous(backend, video);
+        Assert.Equal(cShape.Length, cont.Shape.Rank);
+        for (int r = 0; r < cShape.Length; r++) Assert.Equal(cShape[r], (int)cont.Shape[r]);
+        float* cp = (float*)cont.DataPointer;
+        float maxAbs = 0f; double sse = 0;
+        for (int i = 0; i < refCont.Length; i++)
+        {
+            float d = MathF.Abs(cp[i] - refCont[i]); if (d > maxAbs) maxAbs = d; sse += (double)d * d;
+        }
+        _output.WriteLine($"Continuous latent [{string.Join(',', cShape)}]: max|Δ|={maxAbs:E4}, RMSE={Math.Sqrt(sse / refCont.Length):E4} (F32 vs encoder.jit conv-body).");
+
+        // (2) FSQ token indices parity
+        using Tensor codes = tok.Encode(backend, video);
+        int n = (int)codes.Shape[1];
+        int* codep = (int*)codes.DataPointer;
+        int match = 0, unexplained = 0;
+        int cChan = cShape[1];
+        for (int i = 0; i < n; i++)
+        {
+            if (codep[i] == refIdx[i]) { match++; continue; }
+            // A mismatch is legitimate ONLY if some channel's FSQ bound sits on a half-integer rounding boundary,
+            // where the ~1e-5 conv-accumulation difference (F32 BLAS vs torch) lands on opposite sides of round().
+            bool tie = false;
+            System.Text.StringBuilder sb = new($"  token#{i} C#={codep[i]} ref={refIdx[i]}:");
+            for (int d = 0; d < cChan; d++)
+            {
+                float z = cp[(long)d * n + i], zr = refCont[(long)d * n + i];
+                int L = DvLevels[d]; float halfL = (L - 1) * (1f + 1e-3f) / 2f;
+                float offset = (L % 2 == 0) ? 0.5f : 0f; float shift = MathF.Atanh(offset / halfL);
+                float bC = MathF.Tanh(z + shift) * halfL - offset;
+                // The round() decision boundary is at a half-integer (x.5); a tie is when bC sits within tol of it.
+                float distToHalf = 0.5f - MathF.Abs(bC - MathF.Round(bC, MidpointRounding.ToEven));
+                if (distToHalf < 2e-3f) tie = true;
+                sb.Append($" [d{d} zC={z:F6} zR={zr:F6} bound={bC:F5} distToHalf={distToHalf:F5}]");
+            }
+            if (!tie) unexplained++;
+            _output.WriteLine(sb.ToString());
+        }
+        _output.WriteLine($"FSQ tokens: {match}/{n} bit-exact ({100.0 * match / n:F2}%), {unexplained} unexplained (non-tie) mismatches. " +
+            $"first C#={string.Join(',', Enumerable.Range(0, Math.Min(8, n)).Select(i => codep[i]))} ref={string.Join(',', refIdx.Take(8))}");
+
+        // Gate 1: continuous latent parity (F32 recompute vs encoder.jit's conv-body, bit-exact in Python).
+        Assert.True(maxAbs < 1e-3f, $"continuous max|Δ| {maxAbs:E4} exceeds 1e-3.");
+        // Gate 2: FSQ token indices. Every mismatch must be an FSQ half-integer rounding tie (no architecture/formula
+        // error); ties are inherent to differing F32 conv accumulation order vs PyTorch and cannot be eliminated.
+        Assert.Equal(0, unexplained);
+        Assert.True(match >= 0.9 * n, $"token match {match}/{n} below tolerance (only rounding-boundary ties permitted).");
+    }
+
+    private static (float[] data, int[] shape) LoadBinF32(string stem)
+    {
+        int[] shape = ParseHdr(stem + ".hdr", out string dt);
+        Assert.Equal("float32", dt);
+        byte[] bytes = File.ReadAllBytes(stem + ".bin");
+        float[] data = new float[bytes.Length / 4];
+        Buffer.BlockCopy(bytes, 0, data, 0, bytes.Length);
+        return (data, shape);
+    }
+
+    private static (int[] data, int[] shape) LoadBinI32(string stem)
+    {
+        int[] shape = ParseHdr(stem + ".hdr", out string dt);
+        Assert.Equal("int32", dt);
+        byte[] bytes = File.ReadAllBytes(stem + ".bin");
+        int[] data = new int[bytes.Length / 4];
+        Buffer.BlockCopy(bytes, 0, data, 0, bytes.Length);
+        return (data, shape);
+    }
+
+    private static int[] ParseHdr(string path, out string dtype)
+    {
+        string[] parts = File.ReadAllText(path).Trim().Split('|');
+        dtype = parts[1];
+        return parts[0].Split(',').Select(int.Parse).ToArray();
+    }
 
     [Fact]
     public void Fsq_VocabAndBasis_MatchDv8x16x16()

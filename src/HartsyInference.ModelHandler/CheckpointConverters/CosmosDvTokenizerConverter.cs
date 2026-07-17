@@ -24,10 +24,25 @@ public static class CosmosDvTokenizerConverter
     public static (Dictionary<string, Tensor> Weights, IDisposable Loader) Load(string path, bool castToF32 = false)
     {
         (Dictionary<string, Tensor> raw, IDisposable loader) = ReadRaw(path);
+
+        // The shipped 720p checkpoint (model.pt) carries the live tokenizer weights under the "network." prefix
+        // (BF16, 318 tensors) alongside a full-precision EMA mirror under "ema.network-…" (332 tensors, dash-joined
+        // keys) and the optimizer state. encoder.jit is the BF16 export of the "network." set (verified bit-exact),
+        // so those are the parity weights — select them and drop the prefix. If the file is instead an off-ship
+        // per-module extraction (encoder.safetensors / decoder.pt) with no "network." keys, fall through to the
+        // legacy prefix-strip so the converter still consumes it.
+        bool hasNetwork = false;
+        foreach (string k in raw.Keys)
+            if (k.StartsWith("network.", StringComparison.Ordinal)) { hasNetwork = true; break; }
+
         Dictionary<string, Tensor> mapped = new(raw.Count);
         foreach (KeyValuePair<string, Tensor> kv in raw)
         {
-            string key = StripPrefix(kv.Key);
+            if (hasNetwork)
+            {
+                if (!kv.Key.StartsWith("network.", StringComparison.Ordinal)) continue;   // skip ema.* / optimizer
+            }
+            string key = hasNetwork ? kv.Key.Substring("network.".Length) : StripPrefix(kv.Key);
             Tensor value = kv.Value;
             if (castToF32 && value.DType != DType.F32 && !value.DType.IsQuantized)
                 value = value.CastTo(DType.F32);
