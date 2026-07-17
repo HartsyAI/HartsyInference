@@ -93,7 +93,7 @@ public sealed unsafe class DepthAnythingPreprocessor
     public static float[] PostprocessToUnit(Tensor depth, int dstWidth, int dstHeight)
         => PostprocessToUnit(depth, dstWidth, dstHeight, minMaxNormalize: true);
 
-    /// <summary>Resize + scale variant: <paramref name="minMaxNormalize"/> true = full-range min-max stretch (the comfyui_controlnet_aux convention SD ControlNets expect); false = max-only scaling (<c>depth / max</c>, the BFL FLUX.1-Depth reference form — no min subtraction, so far regions keep their natural non-zero level instead of saturating to black; the stretched distribution made FLUX Depth hallucinate caption-bar/web-UI content on real scenes).</summary>
+    /// <summary>Resize + scale variant: <paramref name="minMaxNormalize"/> true = full-range min-max stretch (the comfyui_controlnet_aux convention SD ControlNets expect); false = max-only scaling (<c>depth / max</c>, the BFL FLUX.1-Depth reference form — no min subtraction, so far regions keep their natural non-zero level instead of saturating to black; the stretched distribution made FLUX Depth hallucinate caption-bar/web-UI content on real scenes). The resize kernel follows the same split: min-max mode uses bilinear <c>align_corners=True</c> (official <c>infer_image</c>, what comfyui_controlnet_aux feeds SD ControlNets); flux mode uses antialiased bicubic <c>align_corners=False</c> (BFL's <c>DepthImageEncoder</c> — <c>F.interpolate(mode="bicubic", antialias=True)</c> — so the conditioning map carries the same edge profile FLUX.1-Depth was trained on).</summary>
     public static float[] PostprocessToUnit(Tensor depth, int dstWidth, int dstHeight, bool minMaxNormalize)
     {
         if (depth.Shape.Rank != 4 || depth.Shape[0] != 1 || depth.Shape[1] != 1)
@@ -102,29 +102,16 @@ public sealed unsafe class DepthAnythingPreprocessor
         float* src = (float*)depth.DataPointer;
         float[] resized = new float[(long)dstWidth * dstHeight];
 
-        for (int oy = 0; oy < dstHeight; oy++)
-        {
-            float sy = dstHeight == 1 ? 0f : oy * (float)(inH - 1) / (dstHeight - 1);
-            int y0 = (int)MathF.Floor(sy);
-            float fy = sy - y0;
-            int y0c = Math.Clamp(y0, 0, inH - 1), y1c = Math.Clamp(y0 + 1, 0, inH - 1);
-            for (int ox = 0; ox < dstWidth; ox++)
-            {
-                float sx = dstWidth == 1 ? 0f : ox * (float)(inW - 1) / (dstWidth - 1);
-                int x0 = (int)MathF.Floor(sx);
-                float fx = sx - x0;
-                int x0c = Math.Clamp(x0, 0, inW - 1), x1c = Math.Clamp(x0 + 1, 0, inW - 1);
-                float v0 = src[y0c * inW + x0c] * (1f - fx) + src[y0c * inW + x1c] * fx;
-                float v1 = src[y1c * inW + x0c] * (1f - fx) + src[y1c * inW + x1c] * fx;
-                resized[(long)oy * dstWidth + ox] = v0 * (1f - fy) + v1 * fy;
-            }
-        }
         if (minMaxNormalize)
         {
+            ResizeBilinearAlignCorners(src, inW, inH, resized, dstWidth, dstHeight);
             NormalizeToUnit(resized);
         }
         else
         {
+            // torch's antialias=True path uses the PIL A = −0.5 kernel (not the non-AA −0.75 kernel).
+            ReadOnlySpan<float> plane = new((void*)src, inH * inW);
+            Codec.Resample.BicubicPlane(plane, inW, inH, resized, dstWidth, dstHeight, a: -0.5f, antialias: true);
             float max = 0f;
             foreach (float v in resized) if (v > max) max = v;
             if (max > 0f)
@@ -149,6 +136,29 @@ public sealed unsafe class DepthAnythingPreprocessor
     /// <summary>Renders a [0,1] depth buffer as interleaved-RGB24 grayscale (255 = nearest).</summary>
     public static byte[] ToGrayscaleRgb24(ReadOnlySpan<float> unitDepth) =>
         Codec.ImageTensor.UnitGrayscaleToRgb24(unitDepth);
+
+    /// <summary>Bilinear <c>align_corners=True</c> plane resize — the official <c>infer_image</c> depth
+    /// upsample convention.</summary>
+    private static void ResizeBilinearAlignCorners(float* src, int inW, int inH, float[] dst, int dstWidth, int dstHeight)
+    {
+        for (int oy = 0; oy < dstHeight; oy++)
+        {
+            float sy = dstHeight == 1 ? 0f : oy * (float)(inH - 1) / (dstHeight - 1);
+            int y0 = (int)MathF.Floor(sy);
+            float fy = sy - y0;
+            int y0c = Math.Clamp(y0, 0, inH - 1), y1c = Math.Clamp(y0 + 1, 0, inH - 1);
+            for (int ox = 0; ox < dstWidth; ox++)
+            {
+                float sx = dstWidth == 1 ? 0f : ox * (float)(inW - 1) / (dstWidth - 1);
+                int x0 = (int)MathF.Floor(sx);
+                float fx = sx - x0;
+                int x0c = Math.Clamp(x0, 0, inW - 1), x1c = Math.Clamp(x0 + 1, 0, inW - 1);
+                float v0 = src[y0c * inW + x0c] * (1f - fx) + src[y0c * inW + x1c] * fx;
+                float v1 = src[y1c * inW + x0c] * (1f - fx) + src[y1c * inW + x1c] * fx;
+                dst[(long)oy * dstWidth + ox] = v0 * (1f - fy) + v1 * fy;
+            }
+        }
+    }
 
     /// <summary>Rounds to the nearest multiple of 14, bumping up when that would fall below the lower bound
     /// (the official <c>constrain_to_multiple_of</c> with <c>min_val</c>).</summary>

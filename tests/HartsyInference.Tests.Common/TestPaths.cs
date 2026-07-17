@@ -339,6 +339,15 @@ public static class TestPaths
         public static string Base16_224 => Resolve("SIGLIP_BASE_224_PATH", Path.Combine(ModelsDir, "clip", "siglip-base-patch16-224.safetensors"));
     }
 
+    /// <summary>FLUX.1 Redux side models — ComfyUI-layout single files: <c>sigclip_vision_patch14_384</c>
+    /// is the HF SiglipVisionModel state dict (with the <c>vision_model.</c> key prefix), the style model
+    /// holds the <c>redux_up/redux_down</c> projector.</summary>
+    public static class Redux
+    {
+        public static string SigclipVision384 => Resolve("SIGCLIP_VISION_384_PATH", Path.Combine(ModelsDir, "clip_vision", "sigclip_vision_patch14_384.safetensors"));
+        public static string StyleModel => Resolve("FLUX_REDUX_PATH", Path.Combine(ModelsDir, "style_models", "flux1-redux-dev.safetensors"));
+    }
+
     /// <summary>Depth-Anything-V2 checkpoints — the official <c>.pth</c> files from HF
     /// <c>depth-anything/Depth-Anything-V2-Small</c> / <c>-Large</c> (torch.hub-style keys, loaded via
     /// <c>PytorchPickleLoader</c>, no conversion needed).</summary>

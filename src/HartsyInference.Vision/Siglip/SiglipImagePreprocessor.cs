@@ -1,20 +1,22 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.Vision.Codec;
 
 namespace HartsyInference.Vision.Siglip;
 
-/// <summary>SigLIP image preprocessing — square bilinear resize + symmetric normalize. Differs
+/// <summary>SigLIP image preprocessing — square resize + symmetric normalize. Differs
 /// from CLIP in two ways:
 /// <list type="bullet">
 ///   <item><b>No aspect-preserving short-edge resize + center crop.</b> SigLIP stretches directly to <c>imageSize × imageSize</c>.</item>
 ///   <item><b>Symmetric normalize</b>: mean=std=[0.5, 0.5, 0.5] (the Inception convention) rather than CLIP's per-channel ImageNet-derived values.</item>
 /// </list>
+/// The resize is antialiased bicubic (a = −0.5), matching HF <c>SiglipImageProcessor</c>'s PIL
+/// <c>BICUBIC</c> path. A plain (non-antialiased) kernel aliases on downscales and measurably shifts the
+/// patch-token embeddings (FLUX.1 Redux conditioning corr dropped to 0.94 on a 810×1080 → 384² input).
 /// Input is HWC-packed RGB u8; output is <c>[1, 3, size, size]</c> F32 ready for the SigLIP
 /// vision encoder.</summary>
 public sealed unsafe class SiglipImagePreprocessor
 {
     private readonly int _imageSize;
-    private const float Mean = 0.5f;
-    private const float InvStd = 1f / 0.5f; // = 2.0
 
     public int ImageSize => _imageSize;
 
@@ -33,43 +35,19 @@ public sealed unsafe class SiglipImagePreprocessor
         if (rgbPixels.Length != expected)
             throw new ArgumentException($"rgbPixels length {rgbPixels.Length} != expected {expected}.", nameof(rgbPixels));
 
+        float[] resized = new float[(long)_imageSize * _imageSize * 3];
+        Resample.BicubicHwc8(rgbPixels, srcWidth, srcHeight, 3, resized, _imageSize, _imageSize,
+            a: -0.5f, antialias: true, quantizeU8: true);
+
         Tensor output = new(new TensorShape(1, 3, _imageSize, _imageSize), DType.F32);
         float* outPtr = (float*)output.DataPointer;
         long plane = (long)_imageSize * _imageSize;
-
-        // Bilinear resize directly to imageSize × imageSize. Apply normalize inline.
-        float scaleX = (float)srcWidth / _imageSize;
-        float scaleY = (float)srcHeight / _imageSize;
-
-        for (int oy = 0; oy < _imageSize; oy++)
+        for (long i = 0; i < plane; i++)
         {
-            float sy = (oy + 0.5f) * scaleY - 0.5f;
-            int sy0 = (int)MathF.Floor(sy);
-            float fy = sy - sy0;
-            int y0 = Math.Clamp(sy0, 0, srcHeight - 1);
-            int y1 = Math.Clamp(sy0 + 1, 0, srcHeight - 1);
-            float wy1 = fy, wy0 = 1f - fy;
-
-            for (int ox = 0; ox < _imageSize; ox++)
+            for (int c = 0; c < 3; c++)
             {
-                float sx = (ox + 0.5f) * scaleX - 0.5f;
-                int sx0 = (int)MathF.Floor(sx);
-                float fx = sx - sx0;
-                int x0 = Math.Clamp(sx0, 0, srcWidth - 1);
-                int x1 = Math.Clamp(sx0 + 1, 0, srcWidth - 1);
-                float wx1 = fx, wx0 = 1f - fx;
-
-                long dstPos = oy * _imageSize + ox;
-                for (int c = 0; c < 3; c++)
-                {
-                    byte p00 = rgbPixels[(y0 * srcWidth + x0) * 3 + c];
-                    byte p01 = rgbPixels[(y0 * srcWidth + x1) * 3 + c];
-                    byte p10 = rgbPixels[(y1 * srcWidth + x0) * 3 + c];
-                    byte p11 = rgbPixels[(y1 * srcWidth + x1) * 3 + c];
-                    float v = (p00 * wx0 + p01 * wx1) * wy0 + (p10 * wx0 + p11 * wx1) * wy1;
-                    // /255 → normalize: (v/255 - 0.5) / 0.5 = v/127.5 - 1
-                    outPtr[c * plane + dstPos] = v * (1f / 127.5f) - 1f;
-                }
+                // /255 → normalize: (v/255 - 0.5) / 0.5 = v/127.5 - 1
+                outPtr[c * plane + i] = resized[i * 3 + c] * (1f / 127.5f) - 1f;
             }
         }
         return output;
