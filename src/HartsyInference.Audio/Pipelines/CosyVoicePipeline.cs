@@ -27,6 +27,7 @@ public sealed class CosyVoicePipeline : IDisposable
     private readonly HiFTNetVocoder _vocoder;
     private readonly CamPlusSpeakerEncoder? _speakerEncoder;
     private readonly S3Tokenizer? _s3;
+    private bool _preloaded;
     private int _disposed;
 
     public CosyVoicePipeline(CosyVoiceConfig cfg, CosyVoiceQwenLm lm, CosyVoiceFlow flow,
@@ -62,6 +63,50 @@ public sealed class CosyVoicePipeline : IDisposable
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
 
+        // Full-F32 GEMM across the whole pipeline. The Qwen speech-token LM is autoregressive, and TF32's ~1e-3
+        // per-forward error accumulates over the decode loop and flips sampled argmaxes (verified on Zonos: TF32 →
+        // babble, F32 → reference parity). Save/restore so we don't disturb the caller's backend state.
+        bool prevHighPrec = backend.HighPrecisionGemm;
+        backend.HighPrecisionGemm = true;
+        try
+        {
+            PreloadWeights(backend);
+            return SynthesizeCore(backend, textTokenIds, speakerEmbed, referenceAudio, referenceSampleRate,
+                referenceTextTokens, seed, sw);
+        }
+        finally { backend.HighPrecisionGemm = prevHighPrec; }
+    }
+
+    /// <summary>Bulk-uploads every component's weights to the device once (idempotent — the GPU weight cache keys by
+    /// tensor reference). Without this each Linear/Conv re-uploads its weight per call: the pre-preload profile was
+    /// ~62k <c>H2D_MISS</c> transfers (~3.7 s) dominating the run. No-op on backends without a weight cache.</summary>
+    private void PreloadWeights(IBackend backend)
+    {
+        if (_preloaded) return;
+        backend.PreloadWeights(EnumerateWeights());
+        _preloaded = true;
+    }
+
+    private IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor t in _lm.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _flow.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _vocoder.EnumerateWeights()) yield return t;
+        if (_speakerEncoder is not null)
+            foreach (Tensor t in _speakerEncoder.EnumerateWeights()) yield return t;
+        if (_s3 is not null)
+            foreach (Tensor t in _s3.EnumerateWeights()) yield return t;
+    }
+
+    private float[] SynthesizeCore(IBackend backend,
+        int[] textTokenIds,
+        Tensor? speakerEmbed,
+        ReadOnlySpan<float> referenceAudio,
+        int referenceSampleRate,
+        int[]? referenceTextTokens,
+        int seed,
+        Stopwatch sw)
+    {
         int[] promptSpeechTokens = [];
         Tensor? promptMel = null;
         Tensor spk;

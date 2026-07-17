@@ -99,7 +99,28 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         mu.Dispose();
         spk.Dispose();
         cond.Dispose();
-        return outMel;
+
+        // The solve produces mel for the whole [prompt ++ target] token span (the prompt region is pinned to the
+        // reference mel via `cond`). The reference returns only the generated tail — trim the prompt frames so the
+        // vocoder doesn't replay the reference clip before the target speech.
+        int promptFrames = Math.Min(promptSpeechTokens.Length * UpsampleConformerEncoder.TokenMelRatio, tMel);
+        if (promptFrames <= 0) return outMel;
+        Tensor tail = TrimPromptFrames(outMel, mel, tMel, promptFrames);
+        outMel.Dispose();
+        return tail;
+    }
+
+    /// <summary>Returns a fresh <c>[1, mel, tMel-promptFrames]</c> holding the generated tail of a channels-first
+    /// mel, dropping the leading prompt region.</summary>
+    private static Tensor TrimPromptFrames(Tensor full, int mel, int tMel, int promptFrames)
+    {
+        int keep = tMel - promptFrames;
+        Tensor tail = new(new TensorShape(1, mel, keep), DType.F32);
+        float* sp = (float*)full.DataPointer;
+        float* dp = (float*)tail.DataPointer;
+        for (int c = 0; c < mel; c++)
+            Buffer.MemoryCopy(sp + (long)c * tMel + promptFrames, dp + (long)c * keep, (long)keep * 4, (long)keep * 4);
+        return tail;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

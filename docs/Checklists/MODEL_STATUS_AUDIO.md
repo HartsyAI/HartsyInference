@@ -33,8 +33,8 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 > | ✅ **verified word-correct** | Kokoro, Piper, MeloTTS, F5-TTS, **Bark**, **Chatterbox**, **VibeVoice**, **FishSpeech**, **Orpheus**, **Dia** (Swarm 10/10, all 3 turns, EOS-stops 11.4s — fixed by switching to the `Dia-1.6B-0626` checkpoint), **Kyutai TTS** (DSM, in-engine e2e word-correct 2026-07-16; **Swarm-deployed + verified word-perfect 2026-07-16**) |
 > | 🚧 **partially wired** (loads; clone/synth path throws) | NeuTTS (clone gated), Qwen3-TTS (voice_clone gated) |
 > | 🚧 **build started 2026-07-15** | **StyleTTS2** (LibriTTS) — recon done: checkpoint downloaded, structure mapped, dims confirmed Kokoro-compatible (hidden 512 / style 128×2 / n_token 178 / 24 kHz / decoder 8h·3L → bert/text_encoder/predictor/decoder reuse Kokoro loaders). Remaining: reconcile the two style submodules to the real checkpoint (StyleEncoder ResBlk uses a **learned depthwise downsample** `downsample_res.conv` + `conv1` is dim_in→dim_in, not the scaffold's avgpool/dim_out; diffusion transformer uses archinetai `net.blocks`/fused-`to_kv`/`norm.fc`-AdaLN, not the scaffold's `unet.blocks`) + spectral-norm σ-fold + write `LoadFromCheckpoint`. See `AUDIO_TTS_BRINGUP_PLAN.md`. |
-> | ✅ **Swarm-deployed 2026-07-16/17** (extension wired, whisper word-perfect) | **Kyutai TTS**, **Spark-TTS** (controllable mode), **PocketTTS** (voice-KV-primed continuous-latent flow-LM; full engine port, parity corr 1.0), **Zonos-v0.1** (transformer; voice-clone, gallery gen verbatim `Audio Models/Zonos/transformer`) |
-> | ⛔ **not wired** (install throws a clear "not runnable yet") | CosyVoice ("not yet supported by the in-process engine"), CSM (no runtime model) |
+> | ✅ **Swarm-deployed 2026-07-16/17** (extension wired, whisper word-perfect) | **Kyutai TTS**, **Spark-TTS** (controllable mode), **PocketTTS** (voice-KV-primed continuous-latent flow-LM; full engine port, parity corr 1.0), **Zonos-v0.1** (transformer; voice-clone, gallery gen verbatim `Audio Models/Zonos/transformer`), **CosyVoice 2** (0.5B; zero-shot clone, gallery gen `Audio Models/CosyVoice/2-0.5b`, whisper word-perfect 2026-07-17, ~34 s/clip) |
+> | ⛔ **not wired** (install throws a clear "not runnable yet") | CSM (no runtime model) |
 >
 > STT (6 local): ✅ Moonshine, Whisper verified word-perfect on real (JFK) speech; Distil-Whisper / Kyutai STT /
 > RealtimeSTT / Whisper Streaming not yet installed/verified. **Slowness note:** Bark 85 s, Chatterbox 219 s,
@@ -72,7 +72,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 |---|---|---|
 | **GPT-SoVITS v2** | ✅ | HuBERT 1.07e-5, s1 GPT + s2 SoVITS verified, EN end-to-end → 32 kHz on real `lj1995` weights. |
 | **Chatterbox** (ResembleAI) | ✅ | Full S3Gen rewrite (== CosyVoice2); enc 2.6e-6 / dec 4.4e-5 / vocoder 1.6e-5; end-to-end on CUDA. |
-| **CosyVoice 2** | ✅ | Validated via the shared Chatterbox S3Gen. |
+| **CosyVoice 2** | ✅ | Full zero-shot clone e2e on real weights (Qwen LM `llm.pt` + OT-CFM `flow.pt` + HiFTNet `hift.pt`, default key maps correct); S3 tokenizer + CAM++ loaded from chatterbox `s3gen.safetensors` (frozen, identical — CosyVoice's own ONNX fuses Conv+BN / mangles names). Swarm-deployed + whisper word-perfect 2026-07-17. |
 | **Qwen3-TTS** | ✅ | Bit-exact (RoPE split-half + byte-level tokenizer fixes). |
 | **Piper** (VITS) | ✅ | corr 0.9998 vs onnxruntime; 7 VITS bugs fixed (affect all VITS). **Swarm e2e word-correct 2026-07-13** — fixed the espeak language default (`en` British → the voice's `en-us` American; it was mispronouncing vowels). |
 | **Kokoro** (StyleTTS2) | ✅ | ~1e-4 on the CUDA path (added `audio_leaky_relu` / `audio_adain1d` kernels). **Swarm e2e word-correct 2026-07-13** — misaki-phoneme g2p + punctuation fix (was silently dropping words); canonical-`.pth` download fallback (was install-401). |
