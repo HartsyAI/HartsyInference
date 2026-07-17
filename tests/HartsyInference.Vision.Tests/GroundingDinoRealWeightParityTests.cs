@@ -213,6 +213,57 @@ public sealed class GroundingDinoRealWeightParityTests
         }
     }
 
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void EndToEnd_MatchesReference()
+    {
+        if (!TryPaths(out string ckpt, out string refDir))
+            return;
+
+        using IBackend backend = new CpuBackend();
+        using SafeTensorsLoader loader = new();
+        loader.Load(ckpt);
+        System.Collections.Generic.Dictionary<string, Tensor> w = loader.GetAllTensors();
+
+        GroundingDinoConfig cfg = GroundingDinoConfig.Tiny;
+        int[] ids = LoadI64(Path.Combine(refDir, "input_input_ids.i64"));
+        using Tensor pixels = LoadF32Tensor(Path.Combine(refDir, "input_pixel_values.bin"), new TensorShape(1, 3, 800, 1066));
+
+        using GroundingDinoModel model = new(cfg);
+        model.LoadWeights(w);
+        GroundingDinoDetector.Output outp = model.Forward(backend, pixels, ids);
+
+        string vocabPath = Path.Combine(Path.GetDirectoryName(ckpt)!, "vocab.txt");
+        string[] vocab = File.Exists(vocabPath) ? GroundingDinoPipeline.LoadVocab(vocabPath) : Array.Empty<string>();
+        List<GroundingDinoDetection> dets = GroundingDinoPipeline.PostProcess(outp.Logits, outp.PredBoxes, ids, vocab, 480, 640);
+        outp.Logits.Dispose();
+        outp.PredBoxes.Dispose();
+
+        _out.WriteLine($"C# end-to-end detections ({dets.Count}):");
+        foreach (GroundingDinoDetection dd in dets)
+            _out.WriteLine($"  [{dd.X0:F1},{dd.Y0:F1},{dd.X1:F1},{dd.Y1:F1}] score={dd.Score:F4} '{dd.Label}'");
+
+        (float[] box, float score, string label)[] oracle =
+        [
+            ([344.541f, 23.179f, 637.324f, 374.527f], 0.4878f, "a cat"),
+            ([12.228f, 52.015f, 316.895f, 472.613f], 0.4505f, "a cat"),
+            ([38.775f, 70.055f, 176.653f, 118.041f], 0.4651f, "a remote control"),
+        ];
+        foreach ((float[] ob, float os, string ol) in oracle)
+        {
+            double bestIou = 0; float bestScore = 0; string bestLabel = "";
+            foreach (GroundingDinoDetection dd in dets)
+            {
+                double iou = Iou(ob, [dd.X0, dd.Y0, dd.X1, dd.Y1]);
+                if (iou > bestIou) { bestIou = iou; bestScore = dd.Score; bestLabel = dd.Label; }
+            }
+            _out.WriteLine($"oracle '{ol}' s={os:F3} -> bestIoU={bestIou:F4} score={bestScore:F4} label='{bestLabel}'");
+            Assert.True(bestIou >= 0.9, $"end-to-end top-box IoU too low for '{ol}': {bestIou:F4}");
+            Assert.Equal(ol, bestLabel);
+            Assert.True(Math.Abs(bestScore - os) < 0.06, $"end-to-end score off for '{ol}': {bestScore:F4} vs {os:F4}");
+        }
+    }
+
     private static double Iou(float[] a, float[] b)
     {
         float ix0 = Math.Max(a[0], b[0]), iy0 = Math.Max(a[1], b[1]);
