@@ -404,6 +404,19 @@ public static class TestPaths
         public static string SdxlPlus     => Resolve("IPA_SDXL_PLUS_PATH",  Path.Combine(ModelsDir, "ipadapter", "ip-adapter-plus_sdxl_vit-h.safetensors"));
         public static string Sd15Standard => Resolve("IPA_SD15_PATH",       Path.Combine(ModelsDir, "ipadapter", "ip-adapter_sd15.safetensors"));
         public static string ClipVisionH  => Resolve("CLIP_VISION_H_PATH",  Path.Combine(ModelsDir, "clip_vision", "clip-vision-h-14.safetensors"));
+
+        /// <summary>FaceID checkpoint (h94/IP-Adapter-FaceID torch-pickle .bin) + its companion kohya UNet LoRA.</summary>
+        public static string SdxlFaceId     => Resolve("IPA_SDXL_FACEID_PATH",      Path.Combine(ModelsDir, "ipadapter", "ip-adapter-faceid_sdxl.bin"));
+        public static string SdxlFaceIdLora => Resolve("IPA_SDXL_FACEID_LORA_PATH", Path.Combine(ModelsDir, "ipadapter", "ip-adapter-faceid_sdxl_lora.safetensors"));
+
+        /// <summary>ArcFace IR-50 face-embedding weights (buffalo_l w600k_r50 converted via convert_arcface_onnx.py).</summary>
+        public static string ArcFace        => Resolve("ARCFACE_WEIGHTS_PATH",      Path.Combine(ModelsDir, "ipadapter", "arcface_w600k_r50.safetensors"));
+
+        /// <summary>Folded YOLO11n-pose weights used for face keypoint detection (convert_yolov8_pt_to_safetensors.py).</summary>
+        public static string PoseWeights    => Resolve("FACEID_POSE_PATH",          Path.Combine(ModelsDir, "clip", "yolo11n-pose-folded.safetensors"));
+
+        /// <summary>A clean single-person portrait photo (PNG) used as the FaceID identity reference.</summary>
+        public static string PortraitImage  => Resolve("FACEID_PORTRAIT_PATH",      Path.Combine(OutputDir, "References", "portrait.png"));
     }
 
     /// <summary>Resolves a cross-runtime reference image path inside OutputDir/References.</summary>

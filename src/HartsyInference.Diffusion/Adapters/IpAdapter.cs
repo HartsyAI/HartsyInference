@@ -7,9 +7,9 @@ namespace HartsyInference.Diffusion.Adapters;
 ///
 /// <para>The adapter holds two pieces of state: an <see cref="IIpAdapterImageProjection"/> that maps CLIP-Vision output to image-prompt tokens (different module for standard vs Plus / Plus-Face / Full-Face), and a flat list of per-cross-attention-layer <c>(to_k_ip, to_v_ip)</c> weight pairs keyed by integer index. The list order is diffusers' <c>attn_processors</c> dict iteration order, which is down → up → MID LAST (diffusers registers the empty <c>up_blocks</c> ModuleList before <c>mid_block</c>), NOT the forward-traversal down → mid → up order. <see cref="HartsyInference.Diffusion.Models.Denoisers.UNet"/>.Forward maps its traversal onto this checkpoint order internally.</para>
 ///
-/// <para><b>Currently supported:</b> SDXL and SD 1.5, standard + Plus + Plus-Face (Plus-Face is the same architecture as Plus, just different training). SD 1.5 is the same mechanism at cross-attn dim 768 over the SD1.5 UNet's 16 cross-attention sub-layers.</para>
+/// <para><b>Currently supported:</b> SDXL and SD 1.5, standard + Plus + Plus-Face (Plus-Face is the same architecture as Plus, just different training) + plain FaceID (ArcFace 512-d identity embedding → <see cref="IpAdapterFaceIdProjection"/> MLP; the K/V mechanism is identical, keyed at the cross-attn indices of the checkpoint's combined attn enumeration). SD 1.5 is the same mechanism at cross-attn dim 768 over the SD1.5 UNet's 16 cross-attention sub-layers. NOTE: FaceID checkpoints also ship a rank-128 LoRA over ALL UNet attention layers — that half is applied through the normal LoRA infrastructure (the released kohya <c>*_lora.safetensors</c> companion), not by this class.</para>
 ///
-/// <para><b>Not yet implemented:</b> FaceID variants (use InsightFace ArcFace embeddings instead of CLIP-Vision; different image encoder + projection); Flux IPA (DiT cross-attention has a different shape).</para></summary>
+/// <para><b>Not yet implemented:</b> FaceID-Plus / Plus-v2 (mix CLIP-Vision patch features with the ArcFace embed through a perceiver resampler); Flux IPA (DiT cross-attention has a different shape).</para></summary>
 public sealed unsafe class IpAdapter : IDisposable
 {
     private readonly IpAdapterConfig _config;
@@ -40,16 +40,18 @@ public sealed unsafe class IpAdapter : IDisposable
                 "Flux IP-Adapter uses a DiT-based cross-attention layout and isn't handled by this adapter. " +
                 "A separate Flux-specific IP-Adapter class is needed.");
         }
-        if (config.IsFaceId)
+        if (config.IsFaceId && config.IsPlus)
         {
             throw new NotSupportedException(
-                "IP-Adapter FaceID uses InsightFace ArcFace embeddings instead of CLIP-Vision and ships a " +
-                "different image encoder. Not yet supported by this implementation.");
+                "IP-Adapter FaceID-Plus / Plus-v2 mixes CLIP-Vision features with the ArcFace embedding through " +
+                "a perceiver resampler (ProjPlusModel) that isn't implemented yet. Use the plain FaceID checkpoint.");
         }
         _config = config;
-        _imageProjection = config.IsPlus
-            ? BuildPlusResampler(config)
-            : new IpAdapterStandardProjection(config.CrossAttentionDim, config.NumImageTokens);
+        _imageProjection = config.IsFaceId
+            ? new IpAdapterFaceIdProjection(config.CrossAttentionDim, config.NumImageTokens)
+            : config.IsPlus
+                ? BuildPlusResampler(config)
+                : new IpAdapterStandardProjection(config.CrossAttentionDim, config.NumImageTokens);
     }
 
     /// <summary>Builds the Plus Resampler with the canonical hyperparameters for the detected base model, matching the released tencent-ailab checkpoints: SD1.5 Plus uses <c>dim=768, heads=12</c> (proj_in <c>[768, 1280]</c>, to_q <c>[768, 768]</c> in ip-adapter-plus_sd15); SDXL Plus uses <c>dim=1280, heads=20</c> (proj_in <c>[1280, 1280]</c>, to_q <c>[1280, 1280]</c> in ip-adapter-plus_sdxl_vit-h). Both are <c>depth=4, head_dim=64, ff_mult=4</c> over CLIP-Vision-H penultimate hidden states (1280-dim), projected out to the base UNet's cross-attention dim.</summary>
@@ -127,7 +129,7 @@ public sealed unsafe class IpAdapter : IDisposable
         }
     }
 
-    /// <summary>Project a CLIP-Vision output tensor into image-prompt tokens. For standard the input is the visual_projection CLS embed (<c>[B, projDim]</c>); for Plus the input is the penultimate layer's full hidden states (<c>[B, seqLen, hiddenSize]</c>). Returns <c>[B, numTokens, crossAttnDim]</c>.</summary>
+    /// <summary>Project an image-encoder output tensor into image-prompt tokens. For standard the input is the CLIP visual_projection CLS embed (<c>[B, projDim]</c>); for Plus the penultimate layer's full hidden states (<c>[B, seqLen, hiddenSize]</c>); for FaceID the L2-normalized ArcFace identity embedding (<c>[B, 512]</c>). Returns <c>[B, numTokens, crossAttnDim]</c>.</summary>
     public Tensor ProjectImage(IBackend backend, Tensor visionInput)
     {
         ThrowIfDisposed();
