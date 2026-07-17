@@ -1,0 +1,21 @@
+Licensed by NVIDIA Corporation under the NVIDIA Open Model License
+
+================================================================================
+Cosmos-Predict1 Video2World (5B / 13B) and the Cosmos-Tokenize1-DV8x16x16-720p
+tokenizer weights are distributed by NVIDIA under the NVIDIA Open Model License
+(OML, June 2024). The cosmos-predict1 reference *code* on GitHub is Apache-2.0.
+
+This NOTICE must accompany any redistribution of the Cosmos-Predict1 weights or
+any Derivative Model built from them.
+
+Permitted (per OML): commercial use, derivative models, output ownership stays
+with the user, relicensing of your own derivatives.
+
+Hard restriction (load-bearing): the license terminates automatically if you
+circumvent NVIDIA's safety guardrails. HartsyInference does NOT port NVIDIA's
+guardrail pipeline (text classifier + face-blur + content filter) — it is not
+architecturally required for inference — and does NOT ship any code that detects
+or removes guardrail enforcement. This is the same posture taken for Anima. The
+user is responsible for content review of generated videos. See
+docs/Research/COSMOS_PREDICT1_VIDEO2WORLD_ARCHITECTURE.md § License for detail.
+================================================================================

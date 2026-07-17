@@ -8,6 +8,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
+    <!-- Cosmos-Predict1 V2W reuses the LLM AR primitives: FixedKvCache / IKvCache and the SamplerChain
+         (temperature / top-p). LLM depends only on Core / ModelHandler / Tokenizers, so no cycle (Audio → LLM
+         is the same established precedent). -->
+    <ProjectReference Include="..\HartsyInference.LLM\HartsyInference.LLM.csproj" />
   </ItemGroup>
 
 </Project>
