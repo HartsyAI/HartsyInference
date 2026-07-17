@@ -21,6 +21,9 @@ public sealed record ControlNetConditioning
     /// <summary>Step-fraction at which this ControlNet stops contributing. <c>1.0</c> = through the last step; e.g. <c>0.5</c> = only the first half (compose-then-release: spatial guidance early, free refinement late).</summary>
     public float EndFraction { get; init; } = 1.0f;
 
+    /// <summary>Union checkpoints (xinsir union SDXL): which conditioning type the control image is. Must be null for single-mode checkpoints and non-null for union checkpoints (<see cref="ControlNetConfig.UnionControlTypeCount"/> &gt; 0) — <see cref="ControlNet.Forward"/> enforces both directions. Stack the same union adapter multiple times with different images/types to combine controls (residuals sum, the diffusers MultiControlNetUnion convention).</summary>
+    public SdxlUnionControlType? UnionControlType { get; init; }
+
     /// <summary>True when the zero-based <paramref name="stepIndex"/> of a <paramref name="totalSteps"/>-step schedule falls inside this adapter's <c>[StartFraction, EndFraction]</c> window.</summary>
     public bool IsActiveAtStep(int stepIndex, int totalSteps)
         => IpAdapterScaleSchedule.StepGate(stepIndex, totalSteps, StartFraction, EndFraction) > 0f;
