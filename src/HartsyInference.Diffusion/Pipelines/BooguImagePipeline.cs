@@ -229,8 +229,10 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
             if (doubleGuide)
             {
                 // 3-tensor double guidance — no 2-tensor device fusion; keep the host combine + step.
+                // Boogu's cond + (tg−1)(cond − dropText) + (ig−1)(dropText − dropAll) is algebraically the shared
+                // dual-CFG form uncond + ig·(mid − uncond) + tg·(cond − mid) — see CfgHelper.ApplyDualCfg.
                 Tensor dropAll = _transformer.Forward(Backend, latent, t, dropAllEmbeddings!, null);
-                Tensor velocity = CombineDoubleGuidance(cond, dropText, dropAll, textGuidanceScale, imageGuidanceScale);
+                Tensor velocity = CfgHelper.ApplyDualCfg(cond, dropText, dropAll, textGuidanceScale, imageGuidanceScale);
                 dropAll.Dispose();
                 Tensor newLatent = new(latentShape, DType.F32);
                 scheduler.Step(newLatent, velocity, latent, i);
@@ -271,19 +273,4 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         return (rgb, width, height, seed);
     }
 
-    /// <summary><c>pred = cond + (tg − 1)·(cond − dropText) + (ig − 1)·(dropText − dropAll)</c>, elementwise.</summary>
-    private static unsafe Tensor CombineDoubleGuidance(Tensor cond, Tensor dropText, Tensor dropAll, float tg, float ig)
-    {
-        Tensor output = new(cond.Shape, DType.F32);
-        float* c = (float*)cond.DataPointer;
-        float* dt = (float*)dropText.DataPointer;
-        float* da = (float*)dropAll.DataPointer;
-        float* o = (float*)output.DataPointer;
-        long n = cond.ElementCount;
-        float tgm = tg - 1.0f;
-        float igm = ig - 1.0f;
-        for (long i = 0; i < n; i++)
-            o[i] = c[i] + tgm * (c[i] - dt[i]) + igm * (dt[i] - da[i]);
-        return output;
-    }
 }

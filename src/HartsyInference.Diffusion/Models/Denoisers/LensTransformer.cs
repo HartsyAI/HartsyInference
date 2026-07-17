@@ -233,7 +233,7 @@ public sealed unsafe class LensTransformer : IDisposable
         return temb;
     }
 
-    /// <summary>AdaLN-Continuous final layer: <c>SiLU(temb) → Linear(hidden → 2*hidden) → [shift, scale]</c> → LayerNorm-no-affine + modulate → <c>proj_out</c>. Diffusers <c>AdaLayerNormContinuous(elementwise_affine=False, eps=1e-6)</c> chunks <c>[shift, scale]</c> in that order — matches Qwen-Image and SD3 final layers.</summary>
+    /// <summary>AdaLN-Continuous final layer: <c>SiLU(temb) → Linear(hidden → 2*hidden) → [scale, shift]</c> → LayerNorm-no-affine + modulate → <c>proj_out</c>. <b>Lens chunks <c>[scale, shift]</c> — scale FIRST</b> (upstream: <c>scale, shift = torch.chunk(emb, 2, dim=-1)</c>), the opposite of Flux's LastLayer and of the diffusers-default <c>[shift, scale]</c> used by Qwen-Image/SD3 final layers.</summary>
     private Tensor ApplyFinalLayer(IBackend backend, Tensor hidden, Tensor temb, int batch, int seqLen)
     {
         int dim = _config.HiddenSize;
@@ -265,8 +265,8 @@ public sealed unsafe class LensTransformer : IDisposable
                 int vecOffset = (b * seqLen + s) * dim;
                 for (int d = 0; d < dim; d++)
                 {
-                    float shift = modPtr[modBase + d];
-                    float scale = modPtr[modBase + dim + d];
+                    float scale = modPtr[modBase + d];
+                    float shift = modPtr[modBase + dim + d];
                     outModPtr[vecOffset + d] = normPtr[vecOffset + d] * (1.0f + scale) + shift;
                 }
             }

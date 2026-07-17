@@ -128,6 +128,35 @@ public static unsafe class CfgHelper
         return output;
     }
 
+    /// <summary>Dual (text + image) classifier-free guidance for reference-image edit pipelines:
+    /// <c>output = uncond + imageScale·(imageCond − uncond) + textScale·(cond − imageCond)</c>, elementwise.
+    /// This is the OmniGen2 triple-pass combine (<c>pipeline_omnigen2.py</c>:
+    /// <c>model_pred_uncond + image_guidance_scale·(model_pred_ref − model_pred_uncond) +
+    /// text_guidance_scale·(model_pred − model_pred_ref)</c>, where <c>model_pred</c> = positive text + refs,
+    /// <c>model_pred_ref</c> = negative text + refs, <c>model_pred_uncond</c> = negative text, no refs).
+    /// Boogu-Image's double guidance <c>cond + (tg−1)·(cond − dropText) + (ig−1)·(dropText − dropAll)</c> expands to
+    /// the same expression (<c>tg·cond + (ig−tg)·mid + (1−ig)·uncond</c>) with <c>mid = dropText</c>,
+    /// <c>uncond = dropAll</c>, so both pipelines share this combine. All inputs must be F32 with identical shape;
+    /// output is a new F32 tensor. Inputs are NOT disposed — caller owns the lifetime.</summary>
+    public static Tensor ApplyDualCfg(Tensor cond, Tensor imageCond, Tensor uncond, float textScale, float imageScale)
+    {
+        if (cond.DType != DType.F32 || imageCond.DType != DType.F32 || uncond.DType != DType.F32)
+            throw new ArgumentException(
+                $"ApplyDualCfg requires F32 inputs; got cond={cond.DType}, imageCond={imageCond.DType}, uncond={uncond.DType}.");
+        if (!cond.Shape.Equals(imageCond.Shape) || !cond.Shape.Equals(uncond.Shape))
+            throw new ArgumentException(
+                $"ApplyDualCfg shape mismatch: cond={cond.Shape}, imageCond={imageCond.Shape}, uncond={uncond.Shape}.");
+        Tensor output = new Tensor(cond.Shape, DType.F32);
+        float* c = (float*)cond.DataPointer;
+        float* m = (float*)imageCond.DataPointer;
+        float* u = (float*)uncond.DataPointer;
+        float* o = (float*)output.DataPointer;
+        long n = cond.ElementCount;
+        for (long i = 0; i < n; i++)
+            o[i] = u[i] + imageScale * (m[i] - u[i]) + textScale * (c[i] - m[i]);
+        return output;
+    }
+
     /// <summary>Concatenates two [B, seqLen, dimA] and [B, seqLen, dimB] tensors along the last dimension → [B, seqLen, dimA + dimB]. Used by SDXL-family pipelines to stitch CLIP-L and CLIP-G hidden states into the 2048-wide text embedding the UNet expects. F32 only.</summary>
     public static Tensor ConcatLastDim(Tensor a, Tensor b)
     {

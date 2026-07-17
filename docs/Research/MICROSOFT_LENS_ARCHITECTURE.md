@@ -209,7 +209,7 @@ hidden = norm_out(hidden, temb)   # diffusers AdaLayerNormContinuous: hidden * (
 return proj_out(hidden)            # [B, S_img, 128]
 ```
 
-`AdaLayerNormContinuous(elementwise_affine=False, eps=1e-6)` is a single `Linear(1536 → 3072)` that produces `[shift, scale]` from `temb`, applied to a LayerNorm-without-affine of the input. **The chunk order is `[shift, scale]`** (matching diffusers — the `Sd3.5` AdaLN-Continuous final layer in this codebase already uses this exact pattern, see `Sd3Transformer.cs` and `QwenImageTransformer.cs`).
+`AdaLayerNormContinuous(elementwise_affine=False, eps=1e-6)` is a single `Linear(1536 → 3072)` that produces the modulation from `temb`, applied to a LayerNorm-without-affine of the input. **CORRECTION (2026-07-16, verified against the actual release + ComfyUI port): the chunk order is `[scale, shift]` — scale FIRST** (`scale, shift = torch.chunk(emb, 2, dim=-1)`), the OPPOSITE of the diffusers default `[shift, scale]` used by the SD3.5/Qwen-Image final layers in this codebase. Getting this backwards produces uniform noise (caught by the real-weight layer diff).
 
 Output `[B, S_img, 128]` is the **packed** prediction. Unpacking happens in the pipeline:
 
@@ -225,13 +225,17 @@ rearrange(out, "b (h w) (c p1 p2) -> b c (h p1) (w p2)", p1=2, p2=2, h=latent_h,
 1. resolve_resolution(base_resolution, aspect_ratio)         # 1024 or 1440 base × 9 aspect ratios
 2. (optional) PromptReasoner.refine(prompt)                  # LLM-rewriting via the same GPT-OSS, OFF by default
 3. encode_prompt: build chat template, tokenize, GPT-OSS.encode_layers → 4 layer hidden states + mask
-   - chat template:
-     [system]    "Describe the image by detailing the color, shape, size, texture, quantity,
-                  text, spatial relationships of the objects and background."
-     [user]      <prompt>
-     [assistant] thinking="Need to generate one image according to the description.", content=""
-     (rendered text is split at "<|return|>"; everything before kept)
-   - tokenized with right-padding (max_length=512), GPT-OSS BPE
+   - chat template — the FULL GPT-OSS Harmony render (verified 2026-07-16 against the release; the
+     wrapper below up to and including `<|start|>user<|message|>` tokenizes to EXACTLY 97 tokens):
+     <|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\n
+     Knowledge cutoff: 2024-06\nCurrent date: 2026-05-23\n\nReasoning: medium\n\n
+     # Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>
+     <|start|>developer<|message|># Instructions\n\n{image-description instruction}\n\n<|end|>
+     <|start|>user<|message|>{prompt}<|end|>
+     <|start|>assistant<|channel|>analysis<|message|>Need to generate one image according to the description.<|end|>
+     <|start|>assistant<|channel|>final<|message|>
+     (the "Current date" is PINNED to 2026-05-23 — it is part of the fixed 97-token wrapper)
+   - tokenized with right-padding (max_length=512, pad = <|endoftext|> 199999), o200k_harmony BPE
    - 97-token offset is stripped from the front of the hidden states (the system + chat-template
      wrapper occupies exactly 97 tokens — this is precomputed and stored as DEFAULT_TXT_OFFSET)
 4. align text features: pad pos/neg to common S_txt
