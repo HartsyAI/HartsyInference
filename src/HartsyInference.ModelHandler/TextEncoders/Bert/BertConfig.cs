@@ -1,4 +1,4 @@
-namespace HartsyInference.Audio.Models.Bert;
+namespace HartsyInference.ModelHandler.TextEncoders.Bert;
 
 /// <summary>Configuration for a standard HuggingFace BERT encoder. Defaults match
 /// <c>chinese-roberta-wwm-ext-large</c> (the GPT-SoVITS text-conditioning BERT): 24 post-norm layers, hidden
@@ -41,4 +41,8 @@ public sealed record BertConfig
     {
         Hidden = 768, NumLayers = 12, NumHeads = 12, Intermediate = 3072, VocabSize = 21128,
     };
+
+    /// <summary>Grounding DINO text tower (<c>bert-base-uncased</c> topology): 12 layers, hidden 768, 12 heads,
+    /// intermediate 3072, vocab 30522.</summary>
+    public static BertConfig GroundingDino => BaseUncased;
 }

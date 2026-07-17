@@ -1,5 +1,5 @@
 using HartsyInference.Audio.Cache;
-using HartsyInference.Audio.Models.Bert;
+using HartsyInference.ModelHandler.TextEncoders.Bert;
 using HartsyInference.Audio.Models.MeloTts;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
