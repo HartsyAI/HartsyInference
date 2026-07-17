@@ -355,6 +355,7 @@ public static class TestPaths
         public static string LineartRealistic => Resolve("ANNOTATOR_LINEART_PATH", Path.Combine(ModelsDir, "Vision", "Annotators", "sk_model.pth"));
         public static string LineartCoarse => Resolve("ANNOTATOR_LINEART_COARSE_PATH", Path.Combine(ModelsDir, "Vision", "Annotators", "sk_model2.pth"));
         public static string NormalBae => Resolve("ANNOTATOR_NORMALBAE_PATH", Path.Combine(ModelsDir, "Vision", "Annotators", "scannet.pt"));
+        public static string UperNetSeg => Resolve("ANNOTATOR_UPERNET_SEG_PATH", Path.Combine(ModelsDir, "Vision", "Annotators", "upernet_convnext_small.bin"));
     }
 
     /// <summary>YOLO checkpoint paths (Vision package). Use the Python conversion script under

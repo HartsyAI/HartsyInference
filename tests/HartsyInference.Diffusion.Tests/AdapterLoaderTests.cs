@@ -212,6 +212,28 @@ public sealed class AdapterLoaderTests : IDisposable
 
     [Fact]
     [Trait("Category", "Integration")]
+    public void ControlNetLoader_RealSegCheckpoint_LoadsAndConverts()
+    {
+        // control_v11p_sd15_seg conditioned on ADE20K palette maps (UperNetSegPreprocessor output).
+        string dir = Environment.GetEnvironmentVariable("HARTSY_CONTROLNET_DIR")
+            ?? "/home/hartsy/Desktop/Swarm/SwarmUI.not too old/Models/controlnet";
+        string path = Path.Combine(dir, "control_v11p_sd15_seg_fp16.safetensors");
+        if (!File.Exists(path)) return;
+
+        using ControlNetFile file = ControlNetLoader.Load(path);
+        Assert.Equal(ControlNetBaseModel.Sd15, file.BaseModel);
+        Assert.Equal(ControlNetMode.Segmentation, file.Mode);
+        Assert.Equal(340, file.Weights.Count);
+        Assert.Contains("controlnet_cond_embedding.conv_in.weight", file.Weights);
+        Assert.Contains("controlnet_mid_block.weight", file.Weights);
+
+        using ControlNet adapter = new ControlNet(file.Config, UNetConfig.Sd15);
+        adapter.LoadWeights(file.Weights);
+        Assert.Equal(12, adapter.DownResidualCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public void ControlNetLoader_RealDiffusersXlCheckpoint_StillLoads()
     {
         // diffusers_xl_canny_full ships in diffusers layout already — must keep taking the
