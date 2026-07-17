@@ -160,6 +160,10 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         Tensor packedLatent = SeedGenerator.CreateNoise(packedShape, seed);
         Logs.Verbose($"Initial latent: shape={packedLatent.Shape}, init_sigma={scheduler.InitialNoiseSigma:F4}");
 
+        // Bulk-upload the DiT before the loop (PreloadWeights/FreeWeights symmetry — the first step otherwise
+        // pays a per-op cache-miss H2D per weight; no-op on backends without a weight cache).
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+
         // ── 3. Denoising loop ─────────────────────────────────────
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = 0; i < steps; i++)
@@ -214,6 +218,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
 
         // ── 8. VAE decode ─────────────────────────────────────────
         Logs.Verbose("Decoding latents (tiled F32 path)...");
+        Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
         Stopwatch vaeSw = Stopwatch.StartNew();
         Tensor image = _vaeDecoder.DecodeTiled(Backend, latent32);
         latent32.Dispose();
