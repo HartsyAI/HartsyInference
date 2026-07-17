@@ -25,10 +25,11 @@ public static class ControlNetLoader
             FluxControlNetConfig? fluxConfig = baseModel == ControlNetBaseModel.Flux
                 ? FluxControlNetConfig.FromDescriptors(loader.Descriptors)
                 : null;
+            int unionControlTypes = DetectUnionControlTypes(loader.Descriptors, baseModel, isLdmLayout);
             ControlNetConfig config = baseModel switch
             {
                 ControlNetBaseModel.Sd15 => ControlNetConfig.Sd15(mode),
-                ControlNetBaseModel.Sdxl => ControlNetConfig.Sdxl(mode),
+                ControlNetBaseModel.Sdxl => ControlNetConfig.Sdxl(mode) with { UnionControlTypeCount = unionControlTypes },
                 ControlNetBaseModel.Flux => new ControlNetConfig
                 {
                     BaseModel = ControlNetBaseModel.Flux,
@@ -43,7 +44,8 @@ public static class ControlNetLoader
             if (isLdmLayout)
                 weights = ControlNetCheckpointConverter.Convert(weights, isSdxl: baseModel == ControlNetBaseModel.Sdxl);
 
-            string arch = fluxConfig is null ? ""
+            string arch = fluxConfig is null
+                ? (unionControlTypes > 0 ? $", union={unionControlTypes} control types" : "")
                 : $", flux depth={fluxConfig.Depth}+{fluxConfig.DepthSingleBlocks}, union={(fluxConfig.IsUnion ? $"yes({fluxConfig.NumMode})" : "no")}";
             Logs.Info($"Loaded ControlNet '{Path.GetFileName(filePath)}' (base={baseModel}, mode={mode}, layout={(isLdmLayout ? "ldm→diffusers" : "diffusers")}, tensors={weights.Count}{arch}).");
 
@@ -64,6 +66,23 @@ public static class ControlNetLoader
             loader.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Detects xinsir-style union SDXL checkpoints by their extra keys: a <c>task_embedding</c> table plus the <c>control_add_embedding</c> MLP (diffusers <c>ControlNetUnionModel</c>). Returns the task-embedding row count (6 standard / 8 ProMax), or 0 for single-mode checkpoints. Union checkpoints only ship in diffusers layout.</summary>
+    private static int DetectUnionControlTypes(
+        IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors, ControlNetBaseModel baseModel, bool isLdmLayout)
+    {
+        if (isLdmLayout || baseModel != ControlNetBaseModel.Sdxl)
+            return 0;
+        if (!descriptors.TryGetValue("task_embedding", out SafeTensorDescriptor? taskEmb)
+            || !descriptors.ContainsKey("control_add_embedding.linear_1.weight"))
+            return 0;
+        if (taskEmb.Shape.Rank != 2)
+        {
+            throw new HartsyInferenceException(
+                $"Union ControlNet task_embedding must be rank-2 [numTypes, channels]; got {taskEmb.Shape}.");
+        }
+        return (int)taskEmb.Shape[0];
     }
 
     /// <summary>Base-model detection for LDM-layout checkpoints (before key conversion): SDXL carries <c>label_emb</c> (ADM conditioning); otherwise the cross-attention context width in any <c>attn2.to_k.weight</c> discriminates (768 = SD1.5, 2048 = SDXL, 1024 = SD2.x which is unsupported).</summary>

@@ -27,6 +27,9 @@ public sealed record ControlNetConfig
     /// <summary>Cross-attention dimension (must match base model).</summary>
     public int CrossAttentionDim { get; init; } = 768;
 
+    /// <summary>Number of control types in a union checkpoint's <c>task_embedding</c> table (xinsir union SDXL: 6 standard / 8 ProMax). <c>0</c> for single-mode ControlNets. When positive, <see cref="ControlNet.Forward"/> requires a control-type index and routes through the union fusion path.</summary>
+    public int UnionControlTypeCount { get; init; } = 0;
+
     /// <summary>SD 1.5 ControlNet preset.</summary>
     public static ControlNetConfig Sd15(ControlNetMode mode) => new()
     {

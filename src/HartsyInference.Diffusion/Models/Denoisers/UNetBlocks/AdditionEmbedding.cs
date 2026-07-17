@@ -101,8 +101,8 @@ public sealed unsafe class AdditionEmbedding
         return output;
     }
 
-    /// <summary>Embeds a single scalar value using sinusoidal positional encoding. Same function as timestep embedding.</summary>
-    private static void EmbedScalar(float* output, int offset, float value, int dim)
+    /// <summary>Embeds a single scalar value using sinusoidal positional encoding (cos-first, freq_shift 0 — diffusers <c>Timesteps</c> with SDXL's config). Shared with the union ControlNet's control-type encoding.</summary>
+    internal static void EmbedScalar(float* output, int offset, float value, int dim)
     {
         int halfDim = dim / 2;
         float logBase = -MathF.Log(10000.0f) / halfDim;
