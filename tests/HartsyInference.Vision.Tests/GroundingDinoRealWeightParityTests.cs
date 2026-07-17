@@ -79,6 +79,43 @@ public sealed class GroundingDinoRealWeightParityTests
         }
     }
 
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void Neck_MatchesReference()
+    {
+        if (!TryPaths(out string ckpt, out string refDir))
+            return;
+
+        using IBackend backend = new CpuBackend();
+        using SafeTensorsLoader loader = new();
+        loader.Load(ckpt);
+        System.Collections.Generic.Dictionary<string, Tensor> w = loader.GetAllTensors();
+
+        GroundingDinoConfig cfg = GroundingDinoConfig.Tiny;
+        using GroundingDinoNeck neck = new(cfg);
+        neck.LoadWeights(w);
+
+        Tensor[] feats =
+        [
+            LoadF32Tensor(Path.Combine(refDir, "backbone_feat_0.bin"), new TensorShape(1, 192, 100, 134)),
+            LoadF32Tensor(Path.Combine(refDir, "backbone_feat_1.bin"), new TensorShape(1, 384, 50, 67)),
+            LoadF32Tensor(Path.Combine(refDir, "backbone_feat_2.bin"), new TensorShape(1, 768, 25, 34)),
+        ];
+        GroundingDinoNeck.Result r = neck.Forward(backend, feats);
+        foreach (Tensor t in feats) t.Dispose();
+
+        float[] refSource = LoadF32(Path.Combine(refDir, "enc_in_vision.bin"));
+        float[] refPos = LoadF32(Path.Combine(refDir, "enc_in_vpos.bin"));
+        (double cS, double mS) = Compare(r.SourceFlatten, refSource);
+        (double cP, double mP) = Compare(r.PositionFlatten, refPos);
+        _out.WriteLine($"source_flatten: corr={cS:F6} maxAbs={mS:E3} (tokens={r.TotalTokens})");
+        _out.WriteLine($"lvl_pos_embed:  corr={cP:F6} maxAbs={mP:E3}");
+        r.SourceFlatten.Dispose();
+        r.PositionFlatten.Dispose();
+        Assert.True(cS > 0.999, $"source_flatten corr too low: {cS:F6}");
+        Assert.True(cP > 0.999, $"lvl_pos_embed corr too low: {cP:F6}");
+    }
+
     private static unsafe Tensor LoadF32Tensor(string path, TensorShape shape)
     {
         float[] data = LoadF32(path);
