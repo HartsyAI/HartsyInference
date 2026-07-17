@@ -45,6 +45,51 @@ public sealed class GroundingDinoRealWeightParityTests
         Assert.True(maxAbs < 5e-3, $"text-tower max-abs diff too high: {maxAbs:E3}");
     }
 
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void SwinBackbone_MatchesReference()
+    {
+        if (!TryPaths(out string ckpt, out string refDir))
+            return;
+
+        using IBackend backend = new CpuBackend();
+        using SafeTensorsLoader loader = new();
+        loader.Load(ckpt);
+        System.Collections.Generic.Dictionary<string, Tensor> w = loader.GetAllTensors();
+
+        GroundingDinoConfig cfg = GroundingDinoConfig.Tiny;
+        using SwinBackbone swin = new(cfg);
+        swin.LoadWeights(w);
+
+        using Tensor pixels = LoadF32Tensor(Path.Combine(refDir, "input_pixel_values.bin"), new TensorShape(1, 3, 800, 1066));
+        Tensor[] feats = swin.Forward(backend, pixels);
+        try
+        {
+            for (int i = 0; i < feats.Length; i++)
+            {
+                float[] reference = LoadF32(Path.Combine(refDir, $"backbone_feat_{i}.bin"));
+                (double corr, double maxAbs) = Compare(feats[i], reference);
+                _out.WriteLine($"backbone_feat_{i} {feats[i].Shape}: corr={corr:F6} maxAbs={maxAbs:E3} (n={reference.Length})");
+                Assert.True(corr > 0.99, $"backbone_feat_{i} correlation too low: {corr:F6}");
+            }
+        }
+        finally
+        {
+            foreach (Tensor t in feats) t.Dispose();
+        }
+    }
+
+    private static unsafe Tensor LoadF32Tensor(string path, TensorShape shape)
+    {
+        float[] data = LoadF32(path);
+        Tensor t = new(shape, DType.F32);
+        if (data.Length != t.ElementCount)
+            throw new InvalidOperationException($"size mismatch loading {path}: {data.Length} vs {t.ElementCount}");
+        fixed (float* src = data)
+            Buffer.MemoryCopy(src, (void*)t.DataPointer, (long)data.Length * 4, (long)data.Length * 4);
+        return t;
+    }
+
     private static bool TryPaths(out string ckpt, out string refDir)
     {
         ckpt = Environment.GetEnvironmentVariable("GROUNDING_DINO_PATH") ?? "";
