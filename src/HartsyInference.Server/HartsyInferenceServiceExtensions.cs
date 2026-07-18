@@ -8,7 +8,8 @@ using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Transformer;
-using HartsyInference.Server.Imaging;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Requests;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -32,7 +33,13 @@ public static class HartsyInferenceServiceExtensions
         });
 
         services.AddSingleton(new InferenceQueue(options.MaxConcurrency, options.MaxQueueDepth));
-        services.AddSingleton(sp => new ModelManager(sp.GetRequiredService<IBackend>(), options, sp.GetRequiredService<InferenceQueue>()));
+        EngineOptions engineOptions = new EngineOptions
+        {
+            ModelCacheDirectory = options.ModelCacheDirectory,
+            KvPageSize = options.KvPageSize,
+            KvPoolBytesBudget = options.KvPoolBytesBudget,
+        };
+        services.AddSingleton(sp => new ModelManager(sp.GetRequiredService<IBackend>(), engineOptions, sp.GetRequiredService<InferenceQueue>()));
         return services;
     }
 
@@ -242,6 +249,32 @@ public static class HartsyInferenceServiceExtensions
         });
     }
 
+    // Adapter: OpenAI image DTO → the engine's native ImageRequest (parse "WxH", carry the extension fields).
+    private static ImageRequest ToImageRequest(ImageGenerationRequest req)
+    {
+        (int width, int height) = ParseSize(req.Size);
+        return new ImageRequest
+        {
+            Prompt = req.Prompt,
+            NegativePrompt = req.NegativePrompt,
+            Width = width,
+            Height = height,
+            Steps = req.Steps,
+            CfgScale = req.CfgScale,
+            Seed = req.Seed,
+            ClipSkip = req.ClipSkip ?? 0,
+        };
+    }
+
+    private static (int width, int height) ParseSize(string? size)
+    {
+        if (string.IsNullOrWhiteSpace(size)) return (1024, 1024);
+        string[] parts = size.Split('x', 'X');
+        if (parts.Length == 2 && int.TryParse(parts[0], out int w) && int.TryParse(parts[1], out int h))
+            return (w, h);
+        return (1024, 1024);
+    }
+
     private static GenerationRequest BuildGenerationRequest(ChatCompletionRequest req)
     {
         SamplingOptions baseSampling = SamplingOptions.Default;
@@ -335,8 +368,8 @@ public static class HartsyInferenceServiceExtensions
                     int n = Math.Max(1, req.N);
                     for (int i = 0; i < n; i++)
                     {
-                        (byte[] rgb, int w, int h, int _) = mm.GenerateImage(req.Model!, req);
-                        byte[] png = PngImageWriter.Encode(rgb, w, h);
+                        (byte[] rgb, int w, int h, int _) = mm.GenerateImage(req.Model!, ToImageRequest(req));
+                        byte[] png = PngEncoder.Encode(rgb, w, h);
                         outImages.Add(new ImageData { B64Json = Convert.ToBase64String(png) });
                     }
                     return await Task.FromResult(outImages);
@@ -374,9 +407,9 @@ public static class HartsyInferenceServiceExtensions
             {
                 try
                 {
-                    (byte[] rgb, int w, int h, int _) = mm.GenerateImage(req.Model!, req, p =>
+                    (byte[] rgb, int w, int h, int _) = mm.GenerateImage(req.Model!, ToImageRequest(req), p =>
                         events.Writer.TryWrite($"event: progress\ndata: {{\"step\":{p.Step},\"total\":{p.TotalSteps}}}\n\n"));
-                    byte[] png = PngImageWriter.Encode(rgb, w, h);
+                    byte[] png = PngEncoder.Encode(rgb, w, h);
                     events.Writer.TryWrite($"event: complete\ndata: {{\"b64_json\":\"{Convert.ToBase64String(png)}\"}}\n\n");
                 }
                 catch (Exception ex)

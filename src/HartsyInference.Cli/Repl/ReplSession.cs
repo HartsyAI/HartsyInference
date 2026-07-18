@@ -37,11 +37,8 @@ public sealed class ReplSession : IDisposable
         new("quit", "exit"),
     };
 
-    private readonly ModalityDispatch _dispatch = CommandRunner.Dispatch;
-    private readonly Dictionary<string, IModalityRunner> _runners = new(StringComparer.OrdinalIgnoreCase);
+    private readonly InferenceEngine _engine = new InferenceEngine();
 
-    private IBackend? _backend;
-    private string _backendSelector = "auto";
     private Modality _modality = Modality.Text;
     private ParamState _params = new ParamState(Modality.Text);
     private string _model = "";
@@ -50,7 +47,7 @@ public sealed class ReplSession : IDisposable
     /// <summary>Runs the read-eval-print loop until the user exits (or EOF). Always returns 0.</summary>
     public int Run()
     {
-        CliTheme.RenderBanner(_backendSelector);
+        CliTheme.RenderBanner(_engine.BackendSelector);
         AnsiConsole.MarkupLine($"[#9aa4af]Type a prompt to generate, or[/] [{CliTheme.Accent}]/help[/] [#9aa4af]for commands.[/] [#9aa4af]Ctrl+C or[/] [{CliTheme.Accent}]/quit[/] [#9aa4af]to exit.[/]");
         AnsiConsole.WriteLine();
 
@@ -160,14 +157,14 @@ public sealed class ReplSession : IDisposable
         _params = new ParamState(modality);
         _model = "";
         AnsiConsole.MarkupLine($"[#9aa4af]mode →[/] [{CliTheme.Accent}]{Modalities.ToCliName(modality)}[/]" +
-            (_dispatch.IsSupported(modality) ? "" : " [yellow](not wired yet)[/]"));
+            (_engine.IsSupported(modality) ? "" : " [yellow](not wired yet)[/]"));
     }
 
     private void SetBackend(string selector)
     {
         if (selector.Length == 0)
         {
-            AnsiConsole.MarkupLine($"[#9aa4af]backend is[/] [{CliTheme.Accent}]{Markup.Escape(BackendFactory.Describe(_backendSelector))}[/]");
+            AnsiConsole.MarkupLine($"[#9aa4af]backend is[/] [{CliTheme.Accent}]{Markup.Escape(_engine.BackendDescription)}[/]");
             return;
         }
         if (!BackendFactory.ValidSelectors.Contains(selector, StringComparer.OrdinalIgnoreCase))
@@ -175,9 +172,8 @@ public sealed class ReplSession : IDisposable
             AnsiConsole.MarkupLine($"[red]Unknown backend '{Markup.Escape(selector)}'.[/] Valid: {string.Join(", ", BackendFactory.ValidSelectors)}.");
             return;
         }
-        _backendSelector = selector.ToLowerInvariant();
-        DisposeLoaded();
-        AnsiConsole.MarkupLine($"[#9aa4af]backend →[/] [{CliTheme.Accent}]{Markup.Escape(BackendFactory.Describe(_backendSelector))}[/]");
+        _engine.SetBackend(selector.ToLowerInvariant());
+        AnsiConsole.MarkupLine($"[#9aa4af]backend →[/] [{CliTheme.Accent}]{Markup.Escape(_engine.BackendDescription)}[/]");
     }
 
     private void SetParam(string arg)
@@ -313,7 +309,7 @@ public sealed class ReplSession : IDisposable
         table.AddColumn($"[{CliTheme.Accent}]value[/]");
         table.AddRow("mode", Modalities.ToCliName(_modality));
         table.AddRow("model", _model.Length == 0 ? "(default)" : Markup.Escape(_model));
-        table.AddRow("backend", Markup.Escape(BackendFactory.Describe(_backendSelector)));
+        table.AddRow("backend", Markup.Escape(_engine.BackendDescription));
         table.AddRow("output", Markup.Escape(_outputDir ?? "(default)"));
         foreach (KeyValuePair<string, string> kv in _params.Values)
             table.AddRow(Markup.Escape(kv.Key), Markup.Escape(kv.Value));
@@ -322,7 +318,7 @@ public sealed class ReplSession : IDisposable
 
     private void Generate(string prompt)
     {
-        if (!_dispatch.IsSupported(_modality))
+        if (!_engine.IsSupported(_modality))
         {
             AnsiConsole.MarkupLine($"[yellow]The '{Modalities.ToCliName(_modality)}' modality is not wired yet.[/]");
             return;
@@ -335,14 +331,12 @@ public sealed class ReplSession : IDisposable
         try
         {
             ModelSpec spec = ModelResolver.Resolve(_model, null, _modality);
-            IBackend backend = EnsureBackend();
-            IModalityRunner runner = GetOrLoadRunner(spec, backend);
-
             IProgressSink sink = new ConsoleProgressSink();
+            _engine.Load(spec, sink);
             if (_modality == Modality.Text)
                 AnsiConsole.Write(new Rule($"[{CliTheme.Accent}]response[/]").LeftJustified().RuleStyle("grey"));
 
-            GeneratedArtifact artifact = _dispatch.Get(_modality).Run(runner, prompt, _params, sink, CancellationToken.None);
+            GeneratedArtifact artifact = _engine.Generate(spec, prompt, _params, sink, CancellationToken.None);
             ResultPresenter.Present(artifact, quiet: false);
 
             string? saved = ArtifactWriter.Write(artifact, _outputDir, prompt, force: _outputDir is not null);
@@ -356,27 +350,6 @@ public sealed class ReplSession : IDisposable
         AnsiConsole.WriteLine();
     }
 
-    private IModalityRunner GetOrLoadRunner(ModelSpec spec, IBackend backend)
-    {
-        string key = $"{_modality}:{spec.LocalPath ?? spec.Requested}";
-        if (_runners.TryGetValue(key, out IModalityRunner? cached))
-            return cached;
-
-        IModalityRunner runner = _dispatch.Get(_modality).Load(spec, backend, new ConsoleProgressSink());
-        _runners[key] = runner;
-        return runner;
-    }
-
-    private IBackend EnsureBackend() => _backend ??= BackendFactory.Create(_backendSelector);
-
-    private void DisposeLoaded()
-    {
-        foreach (IModalityRunner runner in _runners.Values)
-            runner.Dispose();
-        _runners.Clear();
-        _backend?.Dispose();
-        _backend = null;
-    }
 
     private static void PrintHelp()
     {
@@ -404,5 +377,5 @@ public sealed class ReplSession : IDisposable
     }
 
     /// <inheritdoc/>
-    public void Dispose() => DisposeLoaded();
+    public void Dispose() => _engine.Dispose();
 }

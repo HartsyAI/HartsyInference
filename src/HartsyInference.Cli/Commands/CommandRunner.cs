@@ -1,19 +1,15 @@
 using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
-using HartsyInference.Core.Backends;
 using Spectre.Console;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Shared generation lifecycle for the modality commands: header, backend construction, model load, run,
-/// artifact save, cancellation, and error handling. Each command supplies only its result presentation.</summary>
+/// <summary>Shared generation lifecycle for the modality commands: header, run via the <see cref="InferenceEngine"/>,
+/// artifact save, cancellation, and error handling. The engine owns backend + model load; this only adds the
+/// CLI-side header, result presentation, and persistence.</summary>
 public static class CommandRunner
 {
-    /// <summary>The process-wide dispatch registry, shared by every command and the REPL.</summary>
-    public static ModalityDispatch Dispatch { get; } = new ModalityDispatch();
-
-    /// <summary>Runs one generation end to end. <paramref name="present"/> renders the modality-specific result
-    /// after <paramref name="prompt"/> is processed; artifact persistence and lifecycle are handled here.</summary>
+    /// <summary>Runs one generation end to end through the engine facade.</summary>
     public static int Run(
         Modality modality,
         ModelSpec spec,
@@ -35,24 +31,21 @@ public static class CommandRunner
         };
         Console.CancelKeyPress += onCancel;
 
-        IBackend? backend = null;
-        IModalityRunner? runner = null;
+        using InferenceEngine engine = new InferenceEngine(backendSelector);
         try
         {
             if (!quiet)
             {
                 AnsiConsole.MarkupLine($"[#9aa4af]model[/] [{CliTheme.Accent}]{Markup.Escape(headerLabel)}[/]   " +
-                    $"[#9aa4af]backend[/] [{CliTheme.Accent}]{Markup.Escape(BackendFactory.Describe(backendSelector))}[/]");
+                    $"[#9aa4af]backend[/] [{CliTheme.Accent}]{Markup.Escape(engine.BackendDescription)}[/]");
             }
 
-            backend = BackendFactory.Create(backendSelector);
-            IModalityHandler handler = Dispatch.Get(modality);
-            runner = handler.Load(spec, backend, sink);
+            engine.Load(spec, sink);
 
             if (!quiet && showResponseRule)
                 AnsiConsole.Write(new Rule($"[{CliTheme.Accent}]response[/]").LeftJustified().RuleStyle("grey"));
 
-            GeneratedArtifact artifact = handler.Run(runner, prompt, parameters, sink, cts.Token);
+            GeneratedArtifact artifact = engine.Generate(spec, prompt, parameters, sink, cts.Token);
             ResultPresenter.Present(artifact, quiet);
 
             string? saved = ArtifactWriter.Write(artifact, outputDir, prompt, force: outputDir is not null);
@@ -73,8 +66,6 @@ public static class CommandRunner
         finally
         {
             Console.CancelKeyPress -= onCancel;
-            runner?.Dispose();
-            backend?.Dispose();
         }
     }
 }

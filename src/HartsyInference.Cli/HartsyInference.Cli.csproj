@@ -10,6 +10,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Using Include="HartsyInference.Engine" />
+    <Using Include="HartsyInference.Engine.Dispatch" />
+    <Using Include="HartsyInference.Engine.Dispatch.Handlers" />
+    <Using Include="HartsyInference.Engine.Requests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Spectre.Console" />
     <PackageReference Include="Spectre.Console.Cli" />
   </ItemGroup>
@@ -32,6 +39,7 @@
     <ProjectReference Include="..\HartsyInference.ThreeD\HartsyInference.ThreeD.csproj" />
     <ProjectReference Include="..\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
     <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
+    <ProjectReference Include="..\HartsyInference.Engine\HartsyInference.Engine.csproj" />
   </ItemGroup>
 
 </Project>
