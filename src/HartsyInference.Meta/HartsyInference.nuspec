@@ -19,6 +19,7 @@
         <dependency id="HartsyInference.Cpu" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Cuda" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Diffusion" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Engine" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Interactive" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.LLM" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.ModelHandler" version="$version$" exclude="Build,Analyzers" />
@@ -35,6 +36,7 @@
         <dependency id="HartsyInference.Cpu" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Cuda" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Diffusion" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Engine" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Interactive" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.LLM" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.ModelHandler" version="$version$" exclude="Build,Analyzers" />

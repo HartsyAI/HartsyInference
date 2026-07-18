@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Registry;
 using HartsyInference.ModelHandler.Registry;
 using Spectre.Console;
 
