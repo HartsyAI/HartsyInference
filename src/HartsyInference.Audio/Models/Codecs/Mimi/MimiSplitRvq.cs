@@ -138,34 +138,47 @@ internal sealed unsafe class MimiSplitRvq
         // input_proj: 1x1 conv (latentDim -> codebook_dim) per frame.
         Tensor proj = new(new TensorShape(batch, _codebookDim, t), DType.F32);
         backend.Conv1d(proj, latent, inW, inB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
-        float* rp = (float*)proj.DataPointer;   // residual, updated in place; layout [B, dim, T] (channel-major)
+        // residual, updated in place; layout [B, dim, T] (channel-major). The nearest-neighbour search over the
+        // full 2048-entry codebooks is the dominant cost of Mimi encode (Kyutai STT: ~2.4 B host FLOPs, ~6 s);
+        // the codebook chain (i) is sequential (each subtracts before the next) but the frames (ti) within a
+        // codebook are independent — each touches only its own column — so parallelize across cores. Pointers are
+        // captured as nint (lambdas can't close over raw pointers) and rematerialized inside the body.
+        nint rpAddr = (nint)proj.DataPointer, cpAddr = (nint)cp;
+        int dim = _codebookDim, tt = t;
 
         for (int i = first; i < last; i++)
         {
-            float* emb = (float*)_embed[i]!.DataPointer;   // [vocab, dim]
+            nint embAddr = (nint)_embed[i]!.DataPointer;   // [vocab, dim]
             int vocab = (int)_embed[i]!.Shape[0];
+            int codebookRow = i;
             for (int b = 0; b < batch; b++)
-                for (int ti = 0; ti < t; ti++)
+            {
+                int bb = b;
+                System.Threading.Tasks.Parallel.For(0, tt, ti =>
                 {
-                    // Nearest codebook vector to residual[b, :, ti] (channel stride = t).
-                    long baseIdx = (long)b * _codebookDim * t + ti;
+                    float* rp = (float*)rpAddr;
+                    float* emb = (float*)embAddr;
+                    int* cpl = (int*)cpAddr;
+                    // Nearest codebook vector to residual[bb, :, ti] (channel stride = tt).
+                    long baseIdx = (long)bb * dim * tt + ti;
                     int best = 0; float bestDist = float.MaxValue;
                     for (int v = 0; v < vocab; v++)
                     {
-                        long eb = (long)v * _codebookDim;
+                        long eb = (long)v * dim;
                         float dist = 0f;
-                        for (int d = 0; d < _codebookDim; d++)
+                        for (int d = 0; d < dim; d++)
                         {
-                            float diff = rp[baseIdx + (long)d * t] - emb[eb + d];
+                            float diff = rp[baseIdx + (long)d * tt] - emb[eb + d];
                             dist += diff * diff;
                         }
                         if (dist < bestDist) { bestDist = dist; best = v; }
                     }
-                    cp[((long)i * batch + b) * t + ti] = best;   // [K, batch, T]
+                    cpl[((long)codebookRow * batch + bb) * tt + ti] = best;   // [K, batch, T]
                     // Subtract the chosen codebook vector to form the next residual.
-                    long cb = (long)best * _codebookDim;
-                    for (int d = 0; d < _codebookDim; d++) rp[baseIdx + (long)d * t] -= emb[cb + d];
-                }
+                    long cb = (long)best * dim;
+                    for (int d = 0; d < dim; d++) rp[baseIdx + (long)d * tt] -= emb[cb + d];
+                });
+            }
         }
         proj.Dispose();
     }

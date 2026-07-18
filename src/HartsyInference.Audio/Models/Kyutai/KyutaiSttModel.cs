@@ -1,8 +1,8 @@
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.Whisper;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Kyutai;
 
@@ -109,8 +109,12 @@ public sealed unsafe class KyutaiSttModel : IDisposable
     }
 
     /// <summary>Runs one Helium step over a prebuilt frame embedding and returns the final hidden state.</summary>
-    public Tensor Step(IBackend backend, Tensor frameEmbed, int posStart, StreamingKvCache cache)
+    public Tensor Step(IBackend backend, Tensor frameEmbed, int posStart, IKvCache cache)
         => _backbone.ForwardEmbeds(backend, frameEmbed, batch: 1, t: 1, posStart, cache);
+
+    /// <summary>Allocates the efficient device-resident incremental decode cache (FixedKvCache + FlashAttention)
+    /// for the Helium backbone — replaces the O(n²) host-concat StreamingKvCache in the per-frame decode loop.</summary>
+    public IKvCache CreateDecodeCache(int maxSeqLen) => _backbone.CreateDecodeCache(maxSeqLen);
 
     /// <summary>Projects a final hidden state to text logits over the first <c>TextVocab</c> rows of the
     /// shared (tied) embedding.</summary>

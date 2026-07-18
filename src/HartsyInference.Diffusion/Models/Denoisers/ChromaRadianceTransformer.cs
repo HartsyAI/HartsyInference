@@ -119,14 +119,11 @@ public sealed class ChromaRadianceTransformer : IDisposable
         Tensor embed = _nerfHead.EmbedPixels(backend, rgb);
         Tensor tokens = _patchifier.Forward(backend, rgb);
 
-        // ForwardCore consumes its token input — device-copy for the second pass before the first runs.
-        Tensor? tokensUncond = null;
-        if (uncondContext is not null)
-        {
-            tokensUncond = new Tensor(tokens.Shape, tokens.DType);
-            backend.CopyInto(tokensUncond, tokens);
-        }
-
+        // ForwardCore consumes (disposes) its token input. The uncond pass needs the same tokens — RE-PATCHIFY
+        // (a ~3 ms stride-16 conv on the unchanged rgb, deterministic → identical tokens) instead of the old
+        // `new Tensor + CopyInto`: that copy's CopyToDevice(dst) uploaded the fresh 50 MB host buffer H2D every
+        // step only to overwrite it with the device-to-device copy — a per-step serializing ~33 ms round trip
+        // (profiled: 20× CopyInto = 0.66 s + H2D-miss traffic). The re-patchify is issued after the cond pass.
         Tensor imgOutCond = _backbone.ForwardCore(
             backend, tokens, condContext, modTable, condTxtLen, hPacked, wPacked, condMask);
         Tensor condX0 = _nerfHead.ForwardFromEmbed(backend, embed, imgOutCond, rgb.Shape);
@@ -136,8 +133,9 @@ public sealed class ChromaRadianceTransformer : IDisposable
         if (uncondContext is not null)
         {
             int uncondTxtLen = (int)uncondContext.Shape[1];
+            Tensor tokensUncond = _patchifier.Forward(backend, rgb);
             Tensor imgOutUncond = _backbone.ForwardCore(
-                backend, tokensUncond!, uncondContext, modTable, uncondTxtLen, hPacked, wPacked, uncondMask);
+                backend, tokensUncond, uncondContext, modTable, uncondTxtLen, hPacked, wPacked, uncondMask);
             uncondX0 = _nerfHead.ForwardFromEmbed(backend, embed, imgOutUncond, rgb.Shape);
             imgOutUncond.Dispose();
         }

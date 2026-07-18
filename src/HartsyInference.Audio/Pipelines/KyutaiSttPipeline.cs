@@ -1,10 +1,10 @@
 using System.Diagnostics;
 using HartsyInference.Audio.Models.Kyutai;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 using MimiModel = HartsyInference.Audio.Models.Codecs.Mimi.Mimi;
 
 namespace HartsyInference.Audio.Pipelines;
@@ -62,8 +62,9 @@ public sealed unsafe class KyutaiSttPipeline : IDisposable
         // overwrite to `audio_bos_token_id`). The predicted text token at each position feeds the next.
         int nPos = tFrames + 1;
         int cacheCap = Math.Min(_cfg.Helium.MaxPositionEmbeddings, nPos + 1);
-        using StreamingKvCache cache = new(_cfg.Helium.NumHiddenLayers, batch: 1,
-            _cfg.Helium.NumKeyValueHeads, cacheCap, _cfg.Helium.HeadDim);
+        // Device-resident FixedKvCache + FlashAttention (O(n)) instead of the host-concat StreamingKvCache (O(n²),
+        // re-uploaded the growing KV prefix over PCIe every frame — the dominant cost of the AR decode).
+        using IKvCache cache = _model.CreateDecodeCache(cacheCap);
 
         int prevText = _cfg.TextBos;
         int kUse = Math.Min(nQ, _cfg.NumCodebooks);
