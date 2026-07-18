@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.LanguageModels.Gpt;
 
@@ -12,7 +13,8 @@ namespace HartsyInference.Audio.Models.LanguageModels.Gpt;
 /// adds the learned positional embedding, runs the block stack, returns the final-LayerNorm hidden state.
 /// Supports causal and non-causal (full bidirectional, e.g. Bark-Fine). AR decoding is incremental: one
 /// cache-capturing prefill <see cref="Forward"/> then O(T) per-token <see cref="ForwardStep"/> calls against
-/// the <see cref="GptKvCache"/>.</summary>
+/// a device-resident <see cref="IKvCache"/> — projections, attention (FlashAttention) and the K/V cache all
+/// stay on the backend, so nothing crosses back to the host mid-forward.</summary>
 public sealed unsafe class GptBackbone : IDisposable
 {
     private readonly GptConfig _cfg;
@@ -44,40 +46,45 @@ public sealed unsafe class GptBackbone : IDisposable
     }
 
     /// <summary>Runs the stack over <paramref name="inputEmbeds"/> <c>[1, T, hidden]</c>, adding learned
-    /// positions from index 0. Causal unless <paramref name="nonCausal"/>. Returns <c>[1, T, hidden]</c>.
-    /// Pass <paramref name="cache"/> to capture every layer's K/V for the prompt (prefill), enabling
-    /// incremental continuation via <see cref="ForwardStep"/>.</summary>
-    public Tensor Forward(IBackend backend, Tensor inputEmbeds, bool nonCausal = false, GptKvCache? cache = null)
+    /// positions from the cache's committed length (0 for a fresh sequence). When <paramref name="cache"/> is
+    /// supplied, this is the incremental-decode PREFILL: every layer's K/V for the prompt are appended into the
+    /// device cache and attention runs causally via FlashAttention, enabling continuation via
+    /// <see cref="ForwardStep"/>. When <paramref name="cache"/> is null, it is a plain full-sequence forward
+    /// (causal unless <paramref name="nonCausal"/>) — used by the bidirectional Bark-Fine stage. Returns
+    /// <c>[1, T, hidden]</c>.</summary>
+    public Tensor Forward(IBackend backend, Tensor inputEmbeds, bool nonCausal = false, IKvCache? cache = null)
     {
         ThrowIfDisposed();
         int t = (int)inputEmbeds.Shape[1];
         int h = _cfg.Hidden;
-        if (cache is not null && t > cache.Capacity)
+        int posStart = cache?.CurrentLength ?? 0;
+        if (cache is not null && posStart + t > _cfg.BlockSize)
         {
-            throw new ArgumentException($"Prompt length {t} exceeds KV cache capacity {cache.Capacity}.");
+            throw new ArgumentException($"Prefill length {t} at offset {posStart} exceeds block size {_cfg.BlockSize}.");
         }
 
-        Tensor hidden = new(inputEmbeds.Shape, DType.F32);
-        float* ip = (float*)inputEmbeds.DataPointer;
-        float* op = (float*)hidden.DataPointer;
-        float* pe = (float*)_posEmbed!.DataPointer;
-        for (int s = 0; s < t; s++)
-        {
-            long off = (long)s * h;
-            for (int c = 0; c < h; c++) op[off + c] = ip[off + c] + pe[off + c];
-        }
+        Tensor hidden = AddPositions(inputEmbeds, t, h, posStart);
 
-        Tensor? causalMask = (!nonCausal && t > 1) ? BuildCausalMask(t) : null;
-        for (int i = 0; i < _blocks.Length; i++)
-        {
-            Tensor next = _blocks[i].Forward(backend, hidden, causalMask, cache?.Layers[i]);
-            hidden.Dispose();
-            hidden = next;
-        }
-        causalMask?.Dispose();
         if (cache is not null)
         {
-            cache.Length = t;
+            for (int i = 0; i < _blocks.Length; i++)
+            {
+                Tensor next = _blocks[i].ForwardCached(backend, hidden, cache, i, posStart);
+                hidden.Dispose();
+                hidden = next;
+            }
+            cache.AdvanceLength(t);
+        }
+        else
+        {
+            Tensor? causalMask = (!nonCausal && t > 1) ? BuildCausalMask(t) : null;
+            for (int i = 0; i < _blocks.Length; i++)
+            {
+                Tensor next = _blocks[i].Forward(backend, hidden, causalMask);
+                hidden.Dispose();
+                hidden = next;
+            }
+            causalMask?.Dispose();
         }
 
         Tensor normed = new(hidden.Shape, DType.F32);
@@ -86,42 +93,55 @@ public sealed unsafe class GptBackbone : IDisposable
         return normed;
     }
 
-    /// <summary>Creates an empty K/V cache sized to the model's block size, for use with
-    /// <see cref="Forward"/> (prefill) + <see cref="ForwardStep"/> (per-token decode).</summary>
-    public GptKvCache CreateCache() => new(_cfg.NumLayers, _cfg.BlockSize, _cfg.Hidden);
+    /// <summary>Creates an empty device-resident K/V cache sized to the model's block size, for use with
+    /// <see cref="Forward"/> (prefill) + <see cref="ForwardStep"/> (per-token decode). Bark is MHA, so the
+    /// K/V head count equals the query head count.</summary>
+    public IKvCache CreateCache() => KvCaches.ForDecode(_cfg.NumLayers, _cfg.NumHeads, _cfg.HeadDim, _cfg.BlockSize);
 
     /// <summary>Incremental decode: runs one token's embedding <c>[1, 1, hidden]</c> through the stack against
-    /// the cache (appending its K/V at position <see cref="GptKvCache.Length"/>), and returns the final-LayerNorm
-    /// hidden state <c>[1, 1, hidden]</c>. Equivalent to the last position of a full-sequence causal
-    /// <see cref="Forward"/> over the cached prefix plus this token, at O(T) instead of O(T²).</summary>
-    public Tensor ForwardStep(IBackend backend, Tensor inputEmbed, GptKvCache cache)
+    /// the cache (appending its K/V at position <see cref="IKvCache.CurrentLength"/>), and returns the
+    /// final-LayerNorm hidden state <c>[1, 1, hidden]</c>. Equivalent to the last position of a full-sequence
+    /// causal <see cref="Forward"/> over the cached prefix plus this token, at O(T) instead of O(T²).</summary>
+    public Tensor ForwardStep(IBackend backend, Tensor inputEmbed, IKvCache cache)
     {
         ThrowIfDisposed();
-        int pos = cache.Length;
-        if (pos >= cache.Capacity)
+        int pos = cache.CurrentLength;
+        if (pos >= _cfg.BlockSize)
         {
-            throw new InvalidOperationException($"KV cache is full ({cache.Capacity}); the caller must stop at the model's block size.");
+            throw new InvalidOperationException($"KV cache is full ({_cfg.BlockSize}); the caller must stop at the model's block size.");
         }
         int h = _cfg.Hidden;
 
-        Tensor hidden = new(new TensorShape(1, 1, h), DType.F32);
-        float* ip = (float*)inputEmbed.DataPointer;
-        float* op = (float*)hidden.DataPointer;
-        float* pe = (float*)_posEmbed!.DataPointer + (long)pos * h;
-        for (int c = 0; c < h; c++) op[c] = ip[c] + pe[c];
-
+        Tensor hidden = AddPositions(inputEmbed, 1, h, pos);
         for (int i = 0; i < _blocks.Length; i++)
         {
-            Tensor next = _blocks[i].ForwardStep(backend, hidden, cache.Layers[i], pos);
+            Tensor next = _blocks[i].ForwardCached(backend, hidden, cache, i, pos);
             hidden.Dispose();
             hidden = next;
         }
-        cache.Length = pos + 1;
+        cache.AdvanceLength(1);
 
         Tensor normed = new(hidden.Shape, DType.F32);
         backend.LayerNorm(normed, hidden, _lnFGamma!, _lnFBeta!, 1e-5f);
         hidden.Dispose();
         return normed;
+    }
+
+    /// <summary>Adds the learned absolute position embedding (positions <c>[posStart, posStart+t)</c>) to the
+    /// input embeddings, returning a fresh <c>[1, t, hidden]</c> tensor. Host-side: the input is a freshly
+    /// host-built embedding table lookup (no prior device op), so this touches no device memory.</summary>
+    private Tensor AddPositions(Tensor inputEmbeds, int t, int h, int posStart)
+    {
+        Tensor hidden = new(inputEmbeds.Shape, DType.F32);
+        float* ip = (float*)inputEmbeds.DataPointer;
+        float* op = (float*)hidden.DataPointer;
+        float* pe = (float*)_posEmbed!.DataPointer + (long)posStart * h;
+        for (int s = 0; s < t; s++)
+        {
+            long off = (long)s * h;
+            for (int c = 0; c < h; c++) op[off + c] = ip[off + c] + pe[off + c];
+        }
+        return hidden;
     }
 
     private static Tensor BuildCausalMask(int t)

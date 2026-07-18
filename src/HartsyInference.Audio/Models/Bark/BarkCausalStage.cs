@@ -4,13 +4,14 @@ using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Bark;
 
 /// <summary>A causal Bark stage (semantic or coarse) — a single token embedding table + the shared
 /// <see cref="GptBackbone"/> + an output head, generating tokens autoregressively with the shared
 /// <see cref="NucleusSampler"/>. Decodes incrementally: one cache-capturing prefill, then KV-cached
-/// single-token steps (see <see cref="GptKvCache"/>).</summary>
+/// single-token steps against a device-resident <see cref="IKvCache"/>.</summary>
 public sealed unsafe class BarkCausalStage : IDisposable
 {
     private readonly GptConfig _gpt;
@@ -54,7 +55,7 @@ public sealed unsafe class BarkCausalStage : IDisposable
         List<int> generated = new(Math.Min(maxTokens, 256));
         uint rng = DeterministicRng.Seed(seed);
 
-        GptKvCache cache = _backbone.CreateCache();
+        using IKvCache cache = _backbone.CreateCache();
         int t0 = Math.Min(seq.Count, _gpt.BlockSize);
         Tensor embeds = EmbedTail(seq, t0, h);
         Tensor hidden = _backbone.Forward(backend, embeds, nonCausal: false, cache);
@@ -111,7 +112,7 @@ public sealed unsafe class BarkCausalStage : IDisposable
         }
         Buffer.MemoryCopy(tab + (long)bark.SemanticInferToken * h, pp + 256L * h, h * 4, h * 4);
 
-        GptKvCache cache = _backbone.CreateCache();
+        using IKvCache cache = _backbone.CreateCache();
         Tensor hidden = _backbone.Forward(backend, prefill, nonCausal: false, cache);
         prefill.Dispose();
         Tensor last = SliceLast(hidden, h);
@@ -131,7 +132,7 @@ public sealed unsafe class BarkCausalStage : IDisposable
                 break;
             }
             generated.Add(next);
-            if (n == maxTokens - 1)
+            if (n == maxTokens - 1 || cache.CurrentLength >= _gpt.BlockSize)
             {
                 break;
             }
@@ -162,8 +163,13 @@ public sealed unsafe class BarkCausalStage : IDisposable
 
         List<int> coarse = new(nSteps);   // model-space ids (already offset by semVocab + book*CodebookSize)
         int nStep = 0;
+        // One device-resident cache reused across windows: each window re-prefills a fresh context (≤256
+        // semantic + COARSE_INFER + ≤630 coarse history + ≤60 steps < block size), so Reset() clears it rather
+        // than reallocating the per-layer GPU buffers every window.
+        using IKvCache cache = _backbone.CreateCache();
         while (nStep < nSteps)
         {
+            cache.Reset();
             // Rebuild the window context: semantic slice around the current position, right-padded to 256.
             int semIdx = (int)Math.Round(nStep / ratio);
             int s0 = Math.Max(0, semIdx - maxSemHistory);
@@ -179,7 +185,6 @@ public sealed unsafe class BarkCausalStage : IDisposable
                 prompt.Add(coarse[i]);
             }
 
-            GptKvCache cache = _backbone.CreateCache();
             Tensor embeds = EmbedTail(prompt, prompt.Count, h);
             Tensor hidden = _backbone.Forward(backend, embeds, nonCausal: false, cache);
             embeds.Dispose();

@@ -2,6 +2,7 @@ using HartsyInference.Audio.Models.Bark;
 using HartsyInference.Audio.Models.LanguageModels.Gpt;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;
@@ -84,12 +85,12 @@ public sealed unsafe class GptBackboneTests
         float* ap = (float*)allEmbeds.DataPointer;
 
         // Incremental: prefill the first 4 positions, then step tokens 4..8 one at a time.
-        GptKvCache cache = bb.CreateCache();
+        using IKvCache cache = bb.CreateCache();
         Tensor prefill = new(new TensorShape(1, prefillLen, cfg.Hidden), DType.F32);
         new ReadOnlySpan<float>(ap, prefillLen * cfg.Hidden).CopyTo(prefill.AsSpan<float>());
         using Tensor prefillOut = bb.Forward(backend, prefill, nonCausal: false, cache);
         prefill.Dispose();
-        Assert.Equal(prefillLen, cache.Length);
+        Assert.Equal(prefillLen, cache.CurrentLength);
 
         float[][] stepOuts = new float[totalLen][];
         for (int pos = prefillLen; pos < totalLen; pos++)
@@ -100,7 +101,7 @@ public sealed unsafe class GptBackboneTests
             one.Dispose();
             stepOuts[pos] = new Span<float>((void*)stepOut.DataPointer, cfg.Hidden).ToArray();
         }
-        Assert.Equal(totalLen, cache.Length);
+        Assert.Equal(totalLen, cache.CurrentLength);
 
         // Reference: one full causal forward over all 9 positions.
         using Tensor fullOut = bb.Forward(backend, allEmbeds, nonCausal: false);

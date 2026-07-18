@@ -37,11 +37,21 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 > | ⛔ **not wired** (install throws a clear "not runnable yet") | CSM (no runtime model) |
 >
 > STT (6 local): ✅ Moonshine, Whisper verified word-perfect on real (JFK) speech; Distil-Whisper / Kyutai STT /
-> RealtimeSTT / Whisper Streaming not yet installed/verified. **Slowness note:** Bark 85 s, Chatterbox 219 s
-> still host/AR-bound; **VibeVoice DONE 2026-07-17 → RTF 0.78** (134 s → 6.47 s on an 8.27 s clip, 20.7×,
+> RealtimeSTT / Whisper Streaming not yet installed/verified. **Bark DONE 2026-07-18 → RTF 2.30** (82.62 s →
+> 12.23 s on a 5.32 s clip, 6.75×; behavior-preserving, whisper word-perfect, token stream unchanged). Root
+> cause was `GptBlock.ForwardStep` running the whole decode-step attention on the CPU host (24 device syncs +
+> host K/V + host attention loop per step); fix = migrate Bark's decode to the shared device-resident
+> `FixedKvCache` + `FlashAttention` (the same path the fast Chatterbox-T3/`GenericTransformer` use), plus
+> fine-stage host-glue→device. Zero new kernels. See `benchmarks/results/bark_tts_2026-07-18.md`.
+> **VibeVoice DONE 2026-07-17 → RTF 0.78** (134 s → 6.47 s on an 8.27 s clip, 20.7×,
 > faster-than-real-time; VAE causal convs CPU `float*`→`backend.Conv1d`, then batched-CFG + diffusion-head
-> host-glue→GPU; output corr 0.999585; see `benchmarks/results/vibevoice_tts_2026-07-17.md`). Bark/Chatterbox
-> perf remain the host-glue→GPU follow-up.
+> host-glue→GPU; output corr 0.999585; see `benchmarks/results/vibevoice_tts_2026-07-17.md`).
+> **Chatterbox DONE (no work needed) 2026-07-18 → RTF 0.69–0.90**, warm 3.51 s / 5.08 s audio (stages
+> T3 1.49 s / Flow 1.66 s / Vocoder 0.35 s) and 12.36 s / 13.80 s audio on a long clip; whisper word-perfect.
+> The old "219 s" figure predated the 07-17 CosyVoice2 S3Gen GPU-residency refactor, which Chatterbox's
+> S3Gen reuses verbatim — it inherited the speedup for free. See `benchmarks/results/chatterbox_tts_2026-07-18.md`.
+> All three of the previously-slow correct TTS models (VibeVoice, Chatterbox, Bark) are now faster-than- or
+> near-real-time; no known unusably-slow correct TTS model remains.
 
 > ## ⚠️ STT reality-check (2026-07-08) — parity ✅ does NOT mean intelligible speech
 > The ✅/🔬 marks below are **numeric-parity** verdicts (corr 1.0 vs a Python reference on random/tap inputs).
