@@ -23,6 +23,7 @@ internal sealed unsafe class MimiSplitRvq
     // per-codebook reconstructed embeddings [vocab, dim] (semantic first, then acoustic)
     private Tensor?[] _embed = [];
     private Tensor? _semOutW, _semOutB, _acoOutW, _acoOutB;
+    private Tensor? _semInW, _semInB, _acoInW, _acoInB;   // input_proj (latent -> codebook_dim), encode path
 
     public MimiSplitRvq(string prefix, int numSemantic, int numTotal, int codebookDim, int latentDim)
     {
@@ -45,6 +46,11 @@ internal sealed unsafe class MimiSplitRvq
         _semOutB = TryGet(w, $"{_p}.semantic_residual_vector_quantizer.output_proj.bias");
         _acoOutW = WhisperOps.EnsureF32(w[$"{_p}.acoustic_residual_vector_quantizer.output_proj.weight"]);
         _acoOutB = TryGet(w, $"{_p}.acoustic_residual_vector_quantizer.output_proj.bias");
+        // Encode-path input projections (latent -> codebook_dim); optional (only present for the encode path).
+        _semInW = TryGet(w, $"{_p}.semantic_residual_vector_quantizer.input_proj.weight");
+        _semInB = TryGet(w, $"{_p}.semantic_residual_vector_quantizer.input_proj.bias");
+        _acoInW = TryGet(w, $"{_p}.acoustic_residual_vector_quantizer.input_proj.weight");
+        _acoInB = TryGet(w, $"{_p}.acoustic_residual_vector_quantizer.input_proj.bias");
     }
 
     private static Tensor? TryGet(IReadOnlyDictionary<string, Tensor> w, string k)
@@ -105,6 +111,65 @@ internal sealed unsafe class MimiSplitRvq
         return total;
     }
 
+    /// <summary>latent embeddings <c>[B, latentDim, T]</c> -> codes <c>[B, K, T]</c> (Int32), semantic
+    /// codebooks first then acoustic. Mirror of <see cref="Decode"/>: the semantic and acoustic RVQs each run
+    /// independently over the SAME latent (their own <c>input_proj</c>), and within each RVQ the codes are a
+    /// nearest-neighbour residual chain — pick the closest codebook vector, subtract it, repeat. Requires the
+    /// <c>input_proj</c> weights (present in the full codec checkpoint).</summary>
+    public Tensor Encode(IBackend backend, Tensor latent, int batch, int t)
+    {
+        if (_semInW is null || _acoInW is null)
+            throw new InvalidOperationException("MimiSplitRvq.Encode requires the quantizer input_proj weights.");
+        // Codebook-major [K, batch, T] — the layout Mimi consumers read (nQ = Shape[0]); the RVQ decode's
+        // [B, K, T] reader sees the identical k-major memory at batch=1.
+        Tensor codes = new(new TensorShape(_numTotal, batch, t), DType.I32);
+        int* cp = (int*)codes.DataPointer;
+
+        // Semantic RVQ (codebooks [0, _numSemantic)) then acoustic RVQ (the rest), each over its own projection.
+        EncodeRvq(backend, latent, batch, t, _semInW!, _semInB, 0, _numSemantic, cp);
+        EncodeRvq(backend, latent, batch, t, _acoInW!, _acoInB, _numSemantic, _numTotal, cp);
+        return codes;
+    }
+
+    /// <summary>Runs one residual VQ (codebooks <c>[first, last)</c>) over <paramref name="latent"/> projected by
+    /// <paramref name="inW"/>, writing indices into <paramref name="cp"/> at codebook rows <c>[first, last)</c>.</summary>
+    private void EncodeRvq(IBackend backend, Tensor latent, int batch, int t, Tensor inW, Tensor? inB, int first, int last, int* cp)
+    {
+        // input_proj: 1x1 conv (latentDim -> codebook_dim) per frame.
+        Tensor proj = new(new TensorShape(batch, _codebookDim, t), DType.F32);
+        backend.Conv1d(proj, latent, inW, inB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+        float* rp = (float*)proj.DataPointer;   // residual, updated in place; layout [B, dim, T] (channel-major)
+
+        for (int i = first; i < last; i++)
+        {
+            float* emb = (float*)_embed[i]!.DataPointer;   // [vocab, dim]
+            int vocab = (int)_embed[i]!.Shape[0];
+            for (int b = 0; b < batch; b++)
+                for (int ti = 0; ti < t; ti++)
+                {
+                    // Nearest codebook vector to residual[b, :, ti] (channel stride = t).
+                    long baseIdx = (long)b * _codebookDim * t + ti;
+                    int best = 0; float bestDist = float.MaxValue;
+                    for (int v = 0; v < vocab; v++)
+                    {
+                        long eb = (long)v * _codebookDim;
+                        float dist = 0f;
+                        for (int d = 0; d < _codebookDim; d++)
+                        {
+                            float diff = rp[baseIdx + (long)d * t] - emb[eb + d];
+                            dist += diff * diff;
+                        }
+                        if (dist < bestDist) { bestDist = dist; best = v; }
+                    }
+                    cp[((long)i * batch + b) * t + ti] = best;   // [K, batch, T]
+                    // Subtract the chosen codebook vector to form the next residual.
+                    long cb = (long)best * _codebookDim;
+                    for (int d = 0; d < _codebookDim; d++) rp[baseIdx + (long)d * t] -= emb[cb + d];
+                }
+        }
+        proj.Dispose();
+    }
+
     private static void Zero(Tensor t)
     {
         float* p = (float*)t.DataPointer;
@@ -119,5 +184,9 @@ internal sealed unsafe class MimiSplitRvq
         if (_semOutB is not null) yield return _semOutB;
         if (_acoOutW is not null) yield return _acoOutW;
         if (_acoOutB is not null) yield return _acoOutB;
+        if (_semInW is not null) yield return _semInW;
+        if (_semInB is not null) yield return _semInB;
+        if (_acoInW is not null) yield return _acoInW;
+        if (_acoInB is not null) yield return _acoInB;
     }
 }

@@ -32,8 +32,13 @@ public sealed record KyutaiSttConfig
     /// <summary>Text PAD token id (emitted on frames with no word); stripped from the transcript.</summary>
     public int TextPad { get; init; } = 3;
 
-    /// <summary>Audio BOS / initial code id fed before real codes appear.</summary>
+    /// <summary>Audio BOS / initial code id fed before real codes appear (per-codebook local id, the last row
+    /// of each codebook's <see cref="CodebookVocab"/> range).</summary>
     public int AudioBos { get; init; } = 2_048;
+
+    /// <summary>Text BOS token id fed as the initial text-stream input at the BOS frame (HF
+    /// <c>bos_token_id</c>). A row in the shared table above the sampled text vocab.</summary>
+    public int TextBos { get; init; } = 48_000;
 
     /// <summary>Silence prepended before the audio, in seconds (left delay).</summary>
     public float AudioSilencePrefixSeconds { get; init; } = 1.0f;

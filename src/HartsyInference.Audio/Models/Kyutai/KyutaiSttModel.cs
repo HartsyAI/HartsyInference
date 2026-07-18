@@ -15,6 +15,7 @@ public sealed unsafe class KyutaiSttModel : IDisposable
     private readonly KyutaiSttConfig _cfg;
     private readonly Qwen2Model _backbone;
     private Tensor? _embed;
+    private Tensor? _head;    // separate text output head (lm_head.weight); null → tied to _embed
     private int _disposed;
 
     public KyutaiSttConfig Config => _cfg;
@@ -27,12 +28,70 @@ public sealed unsafe class KyutaiSttModel : IDisposable
     }
 
     /// <summary>Loads the shared embedding table (<c>model.embed_tokens.embed_tokens.weight</c>) and the
-    /// headless Helium body (layers + final norm).</summary>
+    /// headless Helium body (layers + final norm), reconciling the <c>-trfs</c> checkpoint layout first.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "model",
         string embedKey = "model.embed_tokens.embed_tokens.weight")
     {
         _embed = WhisperOps.EnsureF32(w[embedKey]);
-        _backbone.LoadWeightsHeadless(w, prefix);
+        // The -trfs checkpoint carries a SEPARATE text head (lm_head.weight [TextVocab, hidden]); use it when
+        // present — the shared embed_tokens table is NOT tied to the output projection here. Fall back to the
+        // tied embed rows for checkpoints that omit lm_head.
+        _head = w.TryGetValue("lm_head.weight", out Tensor? h) ? WhisperOps.EnsureF32(h) : null;
+        _backbone.LoadWeightsHeadless(ReconcileHeliumLayout(w, prefix), prefix);
+    }
+
+    /// <summary>The kyutai <c>-trfs</c> (HF Transformers) checkpoint ships the Helium body in a layout the shared
+    /// <see cref="Qwen2Model"/>/GenericTransformer loader doesn't read directly: each attention projection is
+    /// wrapped as <c>{q,k,v,o}_proj.linear.weight</c> (an extra <c>.linear</c> from the quant-aware Linear
+    /// module), and the gated MLP is a single fused <c>mlp.fc1.weight</c> <c>[2·inter, hidden]</c> (gate ‖ up,
+    /// in that order — moshi's <c>linear_in</c> then <c>view(…,2,-1)</c>) plus <c>mlp.fc2.weight</c> (down).
+    /// Rewrite those to the standard <c>{q,k,v,o}_proj.weight</c> / <c>gate_proj|up_proj|down_proj.weight</c>
+    /// keys. A checkpoint that lacks the <c>.linear</c> marker passes through unchanged, so a future
+    /// moshi-native load still works.</summary>
+    private static IReadOnlyDictionary<string, Tensor> ReconcileHeliumLayout(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        if (!w.ContainsKey($"{prefix}.layers.0.self_attn.q_proj.linear.weight")) return w;   // not the -trfs layout
+        Dictionary<string, Tensor> outW = new(w.Count);
+        foreach (KeyValuePair<string, Tensor> kv in w)
+        {
+            string k = kv.Key;
+            if (k.EndsWith(".linear.weight", StringComparison.Ordinal) && k.Contains(".self_attn.", StringComparison.Ordinal))
+            {
+                outW[string.Concat(k.AsSpan(0, k.Length - ".linear.weight".Length), ".weight")] = kv.Value;
+            }
+            else if (k.EndsWith(".mlp.fc1.weight", StringComparison.Ordinal))
+            {
+                string basep = k[..^".fc1.weight".Length];
+                (Tensor gate, Tensor up) = SplitFusedRows(kv.Value);
+                outW[basep + ".gate_proj.weight"] = gate;
+                outW[basep + ".up_proj.weight"] = up;
+            }
+            else if (k.EndsWith(".mlp.fc2.weight", StringComparison.Ordinal))
+            {
+                outW[k[..^".fc2.weight".Length] + ".down_proj.weight"] = kv.Value;
+            }
+            else
+            {
+                outW[k] = kv.Value;
+            }
+        }
+        return outW;
+    }
+
+    /// <summary>Splits a fused <c>[2·rows, cols]</c> weight into its two contiguous row-halves (dtype-preserving
+    /// byte copy) — recovers <c>gate</c> (first half) and <c>up</c> (second half) from the checkpoint's fused
+    /// <c>fc1</c>.</summary>
+    private static (Tensor Gate, Tensor Up) SplitFusedRows(Tensor fused)
+    {
+        int rows = (int)fused.Shape[0], cols = (int)fused.Shape[1];
+        int half = rows / 2;
+        long halfBytes = fused.DType.ComputeByteCount((long)half * cols);
+        Tensor gate = new(new TensorShape(half, cols), fused.DType);
+        Tensor up = new(new TensorShape(half, cols), fused.DType);
+        byte* src = (byte*)fused.DataPointer;
+        Buffer.MemoryCopy(src, (void*)gate.DataPointer, halfBytes, halfBytes);
+        Buffer.MemoryCopy(src + halfBytes, (void*)up.DataPointer, halfBytes, halfBytes);
+        return (gate, up);
     }
 
     /// <summary>Builds the per-frame input embedding <c>[1,1,hidden]</c> = text-row + Σ audio-code rows.</summary>
@@ -58,13 +117,14 @@ public sealed unsafe class KyutaiSttModel : IDisposable
     public Tensor ProjectText(IBackend backend, Tensor hidden)
     {
         if (_embed is null) throw new InvalidOperationException("KyutaiSttModel weights not loaded.");
-        return WhisperOps.ProjectLinear(backend, hidden, _embed, null, 1, 1,
+        return WhisperOps.ProjectLinear(backend, hidden, _head ?? _embed, null, 1, 1,
             _cfg.Helium.HiddenSize, _cfg.TextVocab);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
         if (_embed is not null) yield return _embed;
+        if (_head is not null) yield return _head;
         foreach (Tensor t in _backbone.EnumerateWeights()) yield return t;
     }
 

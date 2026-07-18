@@ -56,20 +56,28 @@ public sealed unsafe class KyutaiSttPipeline : IDisposable
         int tFrames = (int)codes.Shape[2];
         int* cp = (int*)codes.DataPointer;
 
-        int cacheCap = Math.Min(_cfg.Helium.MaxPositionEmbeddings, tFrames + 4);
+        // The delayed-streams input is one position longer than the audio: position 0 is a BOS frame (audio =
+        // AudioBos for every codebook, text = TextBos), and thereafter the audio is offset by −1 so position p
+        // consumes audio frame p−1 (HF `prepare_inputs_for_generation`: `positions - start - 1`, position-0
+        // overwrite to `audio_bos_token_id`). The predicted text token at each position feeds the next.
+        int nPos = tFrames + 1;
+        int cacheCap = Math.Min(_cfg.Helium.MaxPositionEmbeddings, nPos + 1);
         using StreamingKvCache cache = new(_cfg.Helium.NumHiddenLayers, batch: 1,
             _cfg.Helium.NumKeyValueHeads, cacheCap, _cfg.Helium.HeadDim);
 
-        int prevText = _cfg.TextPad;
+        int prevText = _cfg.TextBos;
         int kUse = Math.Min(nQ, _cfg.NumCodebooks);
         Span<int> frameCodes = stackalloc int[kUse];
         List<int> tokens = new(tFrames);
 
-        for (int t = 0; t < tFrames && t < cacheCap - 1; t++)
+        for (int p = 0; p < nPos && p < cacheCap - 1; p++)
         {
-            for (int k = 0; k < kUse; k++) frameCodes[k] = cp[(long)k * tFrames + t];
+            if (p == 0)
+                for (int k = 0; k < kUse; k++) frameCodes[k] = _cfg.AudioBos;
+            else
+                for (int k = 0; k < kUse; k++) frameCodes[k] = cp[(long)k * tFrames + (p - 1)];
             Tensor embed = _model.EmbedFrame(prevText, frameCodes);
-            Tensor hidden = _model.Step(backend, embed, posStart: t, cache);
+            Tensor hidden = _model.Step(backend, embed, posStart: p, cache);
             embed.Dispose();
             Tensor logits = _model.ProjectText(backend, hidden);
             hidden.Dispose();
@@ -78,7 +86,7 @@ public sealed unsafe class KyutaiSttPipeline : IDisposable
             logits.Dispose();
             if (next != _cfg.TextPad) tokens.Add(next);
             prevText = next;
-            if (progress != null && (t & 63) == 0) progress(new(t, tFrames, sw.Elapsed.TotalMilliseconds));
+            if (progress != null && (p & 63) == 0) progress(new(p, nPos, sw.Elapsed.TotalMilliseconds));
         }
         codes.Dispose();
         sw.Stop();

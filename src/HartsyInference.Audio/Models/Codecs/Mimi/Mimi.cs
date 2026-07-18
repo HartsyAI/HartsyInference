@@ -22,11 +22,21 @@ public sealed unsafe class Mimi
     public int NCodebooks => Config.TotalCodebooks;
 
     private const int UpStride = 2, UpKernel = 4;
+    private const int DownStride = 2, DownKernel = 4;
 
     private readonly MimiSplitRvq _rvq;
     private readonly MimiTransformer _decoderTransformer;
     private readonly MimiSeanetDecoder _decoder;
     private Tensor? _upsampleW;     // [latentDim, 1, 4] depthwise convtr
+
+    // Encode path (audio -> codes), lazily loaded on first Encode: SEANet encoder + encoder transformer +
+    // strided downsample conv (the mirror of decode's upsample). Kept optional so decode-only consumers
+    // (CSM) don't pay for it.
+    private readonly MimiTransformer _encoderTransformer;
+    private readonly MimiSeanetEncoder _encoder;
+    private Tensor? _downsampleW;   // [latentDim, latentDim, 4] strided conv
+    private Tensor? _downsampleB;
+    private bool _encodeLoaded;
 
     public Mimi(MimiConfig cfg)
     {
@@ -34,6 +44,8 @@ public sealed unsafe class Mimi
         _rvq = new MimiSplitRvq("quantizer", cfg.NumSemanticCodebooks, cfg.TotalCodebooks, cfg.CodebookDim, cfg.LatentDim);
         _decoderTransformer = new MimiTransformer(cfg, "decoder_transformer");
         _decoder = new MimiSeanetDecoder("decoder", cfg.LatentDim);
+        _encoderTransformer = new MimiTransformer(cfg, "encoder_transformer");
+        _encoder = new MimiSeanetEncoder("encoder", cfg.LatentDim);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
@@ -45,6 +57,17 @@ public sealed unsafe class Mimi
         _decoderTransformer.LoadWeights(w);
         _decoder.LoadWeights(w);
         _upsampleW = Whisper.WhisperOps.EnsureF32(w["upsample.conv.weight"]);
+
+        // Load the encode path too when the checkpoint carries the encoder (STT needs audio->codes; the
+        // -trfs / full Mimi checkpoint ships encoder.* / encoder_transformer.* / downsample.conv.*).
+        if (w.ContainsKey("encoder.layers.0.conv.weight") && w.ContainsKey("downsample.conv.weight"))
+        {
+            _encoder.LoadWeights(w);
+            _encoderTransformer.LoadWeights(w);
+            _downsampleW = Whisper.WhisperOps.EnsureF32(w["downsample.conv.weight"]);
+            _downsampleB = w.TryGetValue("downsample.conv.bias", out Tensor? db) ? Whisper.WhisperOps.EnsureF32(db) : null;
+            _encodeLoaded = true;
+        }
     }
 
     /// <summary>Decodes <c>[B, K, T]</c> Int32 codes (K = total codebooks) to PCM <c>[B, 1, T*frame_size]</c>.</summary>
@@ -74,9 +97,38 @@ public sealed unsafe class Mimi
         return pcm;
     }
 
-    /// <summary>Encode (audio -> codes) is not yet ported to the HF layout (decode is the path CSM/Kyutai use).</summary>
+    /// <summary>Encodes PCM <c>[B, 1, tPcm]</c> to codes <c>[B, K, T]</c> (Int32, K = total codebooks). Mirror of
+    /// <see cref="Decode"/> / HF <c>MimiModel._encode_frame</c>: SEANet encoder → encoder transformer → strided
+    /// downsample conv → split-RVQ nearest-neighbour encode. <paramref name="tPcm"/> should be a multiple of the
+    /// SEANet downsample product (960); the caller pads to a frame boundary.</summary>
     public Tensor Encode(IBackend backend, Tensor pcm, int batch, int tPcm)
-        => throw new NotSupportedException("Mimi encode (audio->codes) is not yet wired for the HF layout; decode is verified.");
+    {
+        if (!_encodeLoaded) throw new InvalidOperationException("Mimi encode path not loaded (checkpoint lacks encoder.*/downsample.*).");
+        int latent = Config.LatentDim;
+
+        Tensor emb = _encoder.Forward(backend, pcm, batch, tPcm);   // [B, latent, tEnc] (25 Hz)
+        int tEnc = (int)emb.Shape[2];
+
+        // encoder transformer runs channels-last over the SEANet output.
+        Tensor cl = new(new TensorShape(batch, tEnc, latent), DType.F32);
+        backend.Transpose2D(cl, emb, latent, tEnc);
+        emb.Dispose();
+        Tensor ctx = _encoderTransformer.Forward(backend, cl, batch, tEnc);
+        cl.Dispose();
+        Tensor ctxCf = new(new TensorShape(batch, latent, tEnc), DType.F32);
+        backend.Transpose2D(ctxCf, ctx, tEnc, latent);
+        ctx.Dispose();
+
+        // Strided causal downsample (25 Hz → 12.5 Hz): left-pad (kernel-stride).
+        int tDown = tEnc / DownStride;
+        Tensor down = new(new TensorShape(batch, latent, tDown), DType.F32);
+        backend.Conv1d(down, ctxCf, _downsampleW!, _downsampleB, stride: DownStride, padLeft: DownKernel - DownStride, padRight: 0, dilation: 1, groups: 1);
+        ctxCf.Dispose();
+
+        Tensor codes = _rvq.Encode(backend, down, batch, tDown);
+        down.Dispose();
+        return codes;
+    }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
@@ -84,6 +136,13 @@ public sealed unsafe class Mimi
         foreach (Tensor t in _decoderTransformer.EnumerateWeights()) yield return t;
         foreach (Tensor t in _decoder.EnumerateWeights()) yield return t;
         if (_upsampleW is not null) yield return _upsampleW;
+        if (_encodeLoaded)
+        {
+            foreach (Tensor t in _encoder.EnumerateWeights()) yield return t;
+            foreach (Tensor t in _encoderTransformer.EnumerateWeights()) yield return t;
+            if (_downsampleW is not null) yield return _downsampleW;
+            if (_downsampleB is not null) yield return _downsampleB;
+        }
     }
 
     private static IReadOnlyDictionary<string, Tensor> NormalizeKeys(IReadOnlyDictionary<string, Tensor> w)
