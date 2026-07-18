@@ -10,7 +10,7 @@ public static class CacheView
     public static int Render()
     {
         ModelCacheStore cache = new ModelCacheStore();
-        AnsiConsole.MarkupLine($"[grey]cache:[/] [{CliTheme.Accent}]{Markup.Escape(cache.CacheDirectory)}[/]");
+        AnsiConsole.MarkupLine($"[#9aa4af]cache:[/] [{CliTheme.Accent}]{Markup.Escape(cache.CacheDirectory)}[/]");
 
         List<string> ids = cache.CachedModelIds.OrderBy(id => id, StringComparer.OrdinalIgnoreCase).ToList();
         if (ids.Count == 0)
@@ -21,17 +21,17 @@ public static class CacheView
 
         Table table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
         table.AddColumn($"[{CliTheme.Accent}]model[/]");
-        table.AddColumn("[grey]architecture[/]");
-        table.AddColumn("[grey]size[/]");
-        table.AddColumn("[grey]path[/]");
+        table.AddColumn("[#9aa4af]architecture[/]");
+        table.AddColumn("[#9aa4af]size[/]");
+        table.AddColumn("[#9aa4af]path[/]");
 
         foreach (string id in ids)
         {
             ModelInfo? info = cache.Get(id);
-            string arch = info?.Architecture is { Length: > 0 } a ? Markup.Escape(a) : "[grey]?[/]";
-            string size = info is not null ? FormatBytes(info.FileSize) : "[grey]?[/]";
-            string path = info?.LocalPath is { Length: > 0 } p ? Markup.Escape(p) : "[grey]?[/]";
-            table.AddRow($"[{CliTheme.Accent}]{Markup.Escape(id)}[/]", arch, size, $"[grey]{path}[/]");
+            string arch = info?.Architecture is { Length: > 0 } a ? Markup.Escape(a) : "[#9aa4af]?[/]";
+            string size = info is not null ? FormatBytes(info.FileSize) : "[#9aa4af]?[/]";
+            string path = info?.LocalPath is { Length: > 0 } p ? Markup.Escape(p) : "[#9aa4af]?[/]";
+            table.AddRow($"[{CliTheme.Accent}]{Markup.Escape(id)}[/]", arch, size, $"[#9aa4af]{path}[/]");
         }
 
         AnsiConsole.Write(table);
@@ -41,7 +41,7 @@ public static class CacheView
     private static string FormatBytes(long bytes)
     {
         if (bytes <= 0)
-            return "[grey]?[/]";
+            return "[#9aa4af]?[/]";
         string[] units = { "B", "KB", "MB", "GB", "TB" };
         double value = bytes;
         int unit = 0;

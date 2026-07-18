@@ -41,13 +41,13 @@ public static class ResultPresenter
                 TerminalImage.Render(rgb, artifact.PreviewWidth, artifact.PreviewHeight);
             }
             if (!string.IsNullOrEmpty(artifact.Text))
-                AnsiConsole.MarkupLine($"[grey]{Markup.Escape(artifact.Text)}[/]");
+                AnsiConsole.MarkupLine($"[#9aa4af]{Markup.Escape(artifact.Text)}[/]");
         }
 
         string footer = string.Join(" · ", artifact.Meta
             .Where(kv => !kv.Key.Equals("model", StringComparison.OrdinalIgnoreCase))
             .Select(kv => $"{kv.Key} {kv.Value}"));
         if (footer.Length > 0)
-            AnsiConsole.MarkupLine($"[grey]{Markup.Escape(footer)}[/]");
+            AnsiConsole.MarkupLine($"[#9aa4af]{Markup.Escape(footer)}[/]");
     }
 }

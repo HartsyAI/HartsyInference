@@ -41,8 +41,8 @@ public static class CommandRunner
         {
             if (!quiet)
             {
-                AnsiConsole.MarkupLine($"[grey]model[/] [{CliTheme.Accent}]{Markup.Escape(headerLabel)}[/]   " +
-                    $"[grey]backend[/] [{CliTheme.Accent}]{Markup.Escape(BackendFactory.Describe(backendSelector))}[/]");
+                AnsiConsole.MarkupLine($"[#9aa4af]model[/] [{CliTheme.Accent}]{Markup.Escape(headerLabel)}[/]   " +
+                    $"[#9aa4af]backend[/] [{CliTheme.Accent}]{Markup.Escape(BackendFactory.Describe(backendSelector))}[/]");
             }
 
             backend = BackendFactory.Create(backendSelector);
@@ -57,7 +57,7 @@ public static class CommandRunner
 
             string? saved = ArtifactWriter.Write(artifact, outputDir, prompt, force: outputDir is not null);
             if (saved is not null)
-                AnsiConsole.MarkupLine($"[grey]saved[/] [{CliTheme.Accent}]{Markup.Escape(saved)}[/]");
+                AnsiConsole.MarkupLine($"[#9aa4af]saved[/] [{CliTheme.Accent}]{Markup.Escape(saved)}[/]");
 
             return 0;
         }

@@ -157,19 +157,22 @@ public static class LineEditor
     private static void WriteSuggestion(SlashCommand cmd, bool selected)
     {
         (byte r, byte g, byte b) = CliTheme.AccentRgb;
+        (byte mr, byte mg, byte mb) = CliTheme.MutedRgb;
         string blue = $"\x1b[38;2;{r};{g};{b}m";
+        string muted = $"\x1b[38;2;{mr};{mg};{mb}m";
         string name = "/" + cmd.Name;
         if (selected)
             Console.Write($"\x1b[48;2;24;52;70m{blue} ▸ {name,-12}\x1b[0m\x1b[48;2;24;52;70m \x1b[38;2;170;190;205m{cmd.Description}\x1b[0m");
         else
-            Console.Write($"{blue}   {name,-12}\x1b[0m \x1b[38;2;120;120;120m{cmd.Description}\x1b[0m");
+            Console.Write($"{blue}   {name,-12}\x1b[0m {muted}{cmd.Description}\x1b[0m");
     }
 
     private static string BuildPrompt(string mode)
     {
         (byte r, byte g, byte b) = CliTheme.AccentRgb;
+        (byte mr, byte mg, byte mb) = CliTheme.MutedRgb;
         string blue = $"\x1b[38;2;{r};{g};{b}m";
-        const string grey = "\x1b[90m";
+        string grey = $"\x1b[38;2;{mr};{mg};{mb}m";
         const string reset = "\x1b[0m";
         return $"{blue}hartsy{reset} {grey}({mode}){reset} {blue}›{reset} ";
     }

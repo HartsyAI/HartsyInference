@@ -37,14 +37,14 @@ public sealed class PreviewCommand : Command<PreviewCommand.Settings>
         (byte[] rgb, int width, int height) = Decode(settings.Image);
         if (!TerminalImage.IsSupported)
         {
-            AnsiConsole.MarkupLine("[yellow]Inline preview unavailable[/] [grey](stdout is redirected, NO_COLOR, or HARTSY_NO_IMAGE=1).[/]");
-            AnsiConsole.MarkupLine($"[grey]{width}x{height} · {Markup.Escape(Path.GetFileName(settings.Image))}[/]");
+            AnsiConsole.MarkupLine("[yellow]Inline preview unavailable[/] [#9aa4af](stdout is redirected, NO_COLOR, or HARTSY_NO_IMAGE=1).[/]");
+            AnsiConsole.MarkupLine($"[#9aa4af]{width}x{height} · {Markup.Escape(Path.GetFileName(settings.Image))}[/]");
             return 0;
         }
 
         AnsiConsole.WriteLine();
         TerminalImage.Render(rgb, width, height, maxCellWidth: Math.Max(8, settings.Width));
-        AnsiConsole.MarkupLine($"[grey]{width.ToString(CultureInfo.InvariantCulture)}x{height.ToString(CultureInfo.InvariantCulture)} · {Markup.Escape(Path.GetFileName(settings.Image))}[/]");
+        AnsiConsole.MarkupLine($"[#9aa4af]{width.ToString(CultureInfo.InvariantCulture)}x{height.ToString(CultureInfo.InvariantCulture)} · {Markup.Escape(Path.GetFileName(settings.Image))}[/]");
         return 0;
     }
 
