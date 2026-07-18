@@ -17,6 +17,7 @@ public sealed class FixedKvCache : IKvCache, IDisposable
     private readonly Tensor[] _k;
     private readonly Tensor[] _v;
     private int _currentLength;
+    private bool _resident;
     private int _disposed;
 
     public int NumLayers => _k.Length;
@@ -71,6 +72,14 @@ public sealed class FixedKvCache : IKvCache, IDisposable
     public void AppendStep(IBackend backend, int layer, Tensor newK, Tensor newV)
     {
         ThrowIfDisposed();
+        // First append: place every layer's K/V buffer directly on the device (no per-buffer H2D of the zeroed
+        // host allocation). Backends without a device treat this as a no-op and fall back to lazy upload. The tail
+        // beyond the valid length is never read, so the buffers are left uninitialized.
+        if (!_resident)
+        {
+            _resident = true;
+            for (int i = 0; i < _k.Length; i++) { backend.ResidentAllocateKv(_k[i]); backend.ResidentAllocateKv(_v[i]); }
+        }
         int tNew = (int)newK.Shape[2];
         if (_currentLength + tNew > MaxSequenceLength)
             throw new InvalidOperationException($"FixedKvCache overflow: current={_currentLength}, adding={tNew}, max={MaxSequenceLength}.");

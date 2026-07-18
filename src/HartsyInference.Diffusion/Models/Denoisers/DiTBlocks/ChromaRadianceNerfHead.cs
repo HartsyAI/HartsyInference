@@ -126,6 +126,18 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
         }
     }
 
+    /// <summary>F16 residual-damp un-fold: the Radiance backbone runs its block loop at <c>ChromaF16.ResidualDamp</c>
+    /// scale (it has no <c>x_embedder</c>/<c>proj_out</c> to carry the damp like classic Chroma), so the img tokens
+    /// reaching this head ride at that scale. img tokens feed ONLY the per-block <c>param_generator</c> Linear, so
+    /// folding <paramref name="factor"/> (= 1/ResidualDamp) into each param_generator GEMM alpha computes the
+    /// generated weights at full scale — exact, because the GEMM epilogue adds the (unscaled) bias AFTER alpha.</summary>
+    public void UndampImgInput(float factor)
+    {
+        for (int i = 0; i < _depth; i++)
+            if (_paramGenWeight[i] is not null)
+                _paramGenWeight[i]!.Fp8ScaleFactor *= factor;
+    }
+
     /// <summary>Enumerates weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {

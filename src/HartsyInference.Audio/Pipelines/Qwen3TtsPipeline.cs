@@ -193,7 +193,12 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
         {
             int h = _cfg.Talker.HiddenSize;
             int prefillLen = prefill.Count;
-            int cap = Math.Min(_cfg.Talker.MaxPositionEmbeddings, prefillLen + _cfg.MaxNewTokens + 8);
+            // Cap the generation (and thus the KV footprint) to a realistic single-utterance length. MaxNewTokens is
+            // 8192 frames = 655 s at 12.5 Hz, which nobody reaches; the fixed KV buffer is sized to it (28 layers ×
+            // K+V), so bounding it here keeps the per-gen device KV allocation ~4× smaller without truncating any
+            // real utterance (2048 frames = 164 s).
+            int maxFrames = Math.Min(_cfg.MaxNewTokens, 2048);
+            int cap = Math.Min(_cfg.Talker.MaxPositionEmbeddings, prefillLen + maxFrames + 8);
             using IKvCache cache = _talker.Backbone.CreateDecodeCache(cap);
             uint rng = DeterministicRng.Seed(seed);
 
@@ -236,7 +241,7 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
             List<int> generated = new(256);
             bool[] seen = new bool[_cfg.CodecHeadOut];
 
-            for (int f = 0; f < _cfg.MaxNewTokens; f++)
+            for (int f = 0; f < maxFrames; f++)
             {
                 Tensor hid = curHidden!;
                 // EOS is masked until MinNewTokens frames exist (reference min_new_tokens=2); control ids other

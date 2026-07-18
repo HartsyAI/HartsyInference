@@ -106,6 +106,10 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         int totalSeqLen = imgSeqLen + txtSeqLen;
         float scale = 1.0f / MathF.Sqrt(_headDim);
 
+        // Stream activation dtype follows the input (F16 on the HARTSY_DIT_F16 hot path). Modulation params stay F32
+        // (temb is F32); QK-norm weights + RoPE tables F32; SDPA already F16 via allowF16. See HunyuanImageBlock.
+        DType act = image.DType;
+
         TensorShape jointShape = new TensorShape(batch, totalSeqLen, _hiddenSize);
         // [B, S, H, D] view (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
         TensorShape jointHeads = new TensorShape(batch, totalSeqLen, _numHeads, _headDim);
@@ -113,7 +117,7 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         TensorShape mlpShape = new TensorShape(batch, totalSeqLen, _mlpDim);
 
         // ── 1. Concat [img, txt] along the seq dim (image first) ──
-        Tensor joint = new Tensor(jointShape, DType.F32);
+        Tensor joint = new Tensor(jointShape, act);
         backend.Concat(joint, new Tensor[] { image, text }, 1);
 
         Tensor[] mod = _modulation.Forward(backend, temb);
@@ -122,26 +126,26 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         Tensor modulated = DiTUtils.NormModulate(backend, joint, mod[0], mod[1], jointShape);
 
         // ── 3. Q/K/V (declared [B, S, H, D]) + parallel MLP proj/GELU ──
-        Tensor q = new Tensor(jointHeads, DType.F32);
+        Tensor q = new Tensor(jointHeads, act);
         backend.Linear(q, modulated, _toQWeight!, _toQBias);
-        Tensor k = new Tensor(jointHeads, DType.F32);
+        Tensor k = new Tensor(jointHeads, act);
         backend.Linear(k, modulated, _toKWeight!, _toKBias);
-        Tensor v = new Tensor(jointHeads, DType.F32);
+        Tensor v = new Tensor(jointHeads, act);
         backend.Linear(v, modulated, _toVWeight!, _toVBias);
 
-        Tensor mlpProj = new Tensor(mlpShape, DType.F32);
+        Tensor mlpProj = new Tensor(mlpShape, act);
         backend.Linear(mlpProj, modulated, _projMlpWeight!, _projMlpBias);
         modulated.Dispose();
 
-        Tensor mlpActivated = new Tensor(mlpShape, DType.F32);
+        Tensor mlpActivated = new Tensor(mlpShape, act);
         backend.Gelu(mlpActivated, mlpProj);
         mlpProj.Dispose();
 
         // ── 4. QK-norm (per-head RMSNorm over the last dim = headDim) ──
-        Tensor qn = new Tensor(jointHeads, DType.F32);
+        Tensor qn = new Tensor(jointHeads, act);
         backend.RmsNorm(qn, q, _normQ.Weight, _normQ.Eps);
         q.Dispose();
-        Tensor kn = new Tensor(jointHeads, DType.F32);
+        Tensor kn = new Tensor(jointHeads, act);
         backend.RmsNorm(kn, k, _normK.Weight, _normK.Eps);
         k.Dispose();
 
@@ -158,13 +162,13 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         }
 
         // ── 6. Permute [B, S, H, D] → [B, H, S, D] ──
-        Tensor qMh = new Tensor(mhShape, DType.F32);
+        Tensor qMh = new Tensor(mhShape, act);
         backend.Permute0213(qMh, qn, totalSeqLen, _numHeads, _headDim);
         qn.Dispose();
-        Tensor kMh = new Tensor(mhShape, DType.F32);
+        Tensor kMh = new Tensor(mhShape, act);
         backend.Permute0213(kMh, kn, totalSeqLen, _numHeads, _headDim);
         kn.Dispose();
-        Tensor vMh = new Tensor(mhShape, DType.F32);
+        Tensor vMh = new Tensor(mhShape, act);
         backend.Permute0213(vMh, v, totalSeqLen, _numHeads, _headDim);
         v.Dispose();
 
@@ -173,31 +177,31 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
 
         // ── 7. Joint scaled dot-product attention (no mask) ──
         // allowF16: Q/K are RMS-normed above → bounded scores → F16/cuDNN-fused attention is safe (43.23 gate).
-        Tensor attnOut = new Tensor(mhShape, DType.F32);
+        Tensor attnOut = new Tensor(mhShape, act);
         backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale, allowF16: true);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();
 
         // ── 8. Permute back [B, H, S, D] → [B, S, hidden] ──
-        Tensor attnFlat = new Tensor(jointShape, DType.F32);
+        Tensor attnFlat = new Tensor(jointShape, act);
         backend.Permute0213(attnFlat, attnOut, _numHeads, totalSeqLen, _headDim);
         attnOut.Dispose();
 
         // ── 9. Concat [attn, mlp] along the feature dim, then proj_out ──
         int concatDim = _hiddenSize + _mlpDim;
         TensorShape concatShape = new TensorShape(batch, totalSeqLen, concatDim);
-        Tensor concatted = new Tensor(concatShape, DType.F32);
+        Tensor concatted = new Tensor(concatShape, act);
         backend.Concat(concatted, new Tensor[] { attnFlat, mlpActivated }, 2);
         attnFlat.Dispose();
         mlpActivated.Dispose();
 
-        Tensor projOut = new Tensor(jointShape, DType.F32);
+        Tensor projOut = new Tensor(jointShape, act);
         backend.Linear(projOut, concatted, _projOutWeight!, _projOutBias);
         concatted.Dispose();
 
         // ── 10. Single gated residual + split [img, txt] (B=1: contiguous rows) ──
-        Tensor result = new Tensor(jointShape, DType.F32);
+        Tensor result = new Tensor(jointShape, act);
         backend.GatedResidualLastDim(result, joint, projOut, mod[2]);
         joint.Dispose();
         projOut.Dispose();
@@ -206,9 +210,9 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
 
         TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape txtOutShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
-        Tensor imgOut = new Tensor(imgOutShape, DType.F32);
+        Tensor imgOut = new Tensor(imgOutShape, act);
         backend.SliceRows(imgOut, result, 0);
-        Tensor txtOut = new Tensor(txtOutShape, DType.F32);
+        Tensor txtOut = new Tensor(txtOutShape, act);
         backend.SliceRows(txtOut, result, imgSeqLen);
         result.Dispose();
 

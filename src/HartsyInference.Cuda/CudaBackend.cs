@@ -5089,6 +5089,23 @@ public sealed class CudaBackend : IBackend
 
     /// <summary>In-place KV-cache append (device-to-device strided write); keeps the fixed-capacity cache buffer
     /// GPU-resident with no reallocation.</summary>
+    public unsafe void ResidentAllocateKv(Tensor buffer)
+    {
+        // Allocate the KV buffer straight on the device and register it as a resident activation WITHOUT copying
+        // the host tensor's (zeroed) contents — the first KvCacheAppend then hits the activation cache instead of
+        // uploading the whole buffer over PCIe. The tail beyond CurrentLength is never read (FlashAttention gets the
+        // exact kvLen), so leaving it uninitialized is correct. Idempotent: skip if already resident.
+        if (GpuTransferHelper.IsActivationCached(buffer)) return;
+        _context.EnsureCurrent();
+        nuint bytes = GpuTransferHelper.ByteSize(buffer);
+        ulong dptr = GpuTransferHelper.AllocateDevice(bytes);
+        // KvCacheAppend writes in place through this pointer; mark it cache-owned so no dispose/sync callback frees
+        // it out from under the append (matches how KvCacheAppend re-caches the buffer below).
+        buffer._gpuSyncCallback = null;
+        buffer._gpuDisposeCallback = null;
+        GpuTransferHelper.CacheActivation(buffer, dptr, bytes);
+    }
+
     public unsafe void KvCacheAppend(Tensor buffer, Tensor newKv, int offset)
     {
         if (buffer.DType != DType.F32 || newKv.DType != DType.F32)

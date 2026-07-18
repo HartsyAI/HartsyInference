@@ -154,7 +154,7 @@ rounds land:
 |---|---:|---:|---|
 | Z-Image-Turbo | **2.76 s** | 3.1 s | Faster than ComfyUI |
 | Krea2-Turbo | **4.52 s** | 6.5 s | Faster than ComfyUI |
-| Krea2-Base | 30.3 s | — | CFG path validated 07-10 (28 st/cfg 4.5); no Comfy baseline yet |
+| Krea2-Base | **30.3 s** | 42.13 s | Faster than ComfyUI (0.72×) — Comfy baseline added 07-18 (`image_python_baselines_2026-07-18.md`) |
 | Qwen-Image | **39.4 s** | 54.8 s | Faster than ComfyUI |
 | Qwen-Image-Edit 2511 | 93 s | 87.8 s | 1.05× — image editing w/ up to 3 reference images (vision-conditioned); GPU-compute-bound, BF16 activations queued |
 | ERNIE-Image | **20.0 s** | 23.9 s | Faster than ComfyUI (was 49.6 s / 2.1× slower) |
@@ -167,13 +167,13 @@ rounds land:
 | Flux-Schnell | **3.6 s** | 3.04 s | 1.18× — Flux-family kit transplant done (`44.38-local`) |
 | Flux.2 Klein 4B | **2.36 s** | 1.85 s | 1.28× — Flux-family kit transplant done (`44.38-local`). Distilled variant: 4 steps/CFG 1 official |
 | SDXL | **2.93 s** | 3.7 s | Faster than ComfyUI (was 33.9 s / 9.2× slower two rounds ago) |
-| Lumina-Image 2.0 | **17.7 s** | — | 37× in one round (was 650 s); no ComfyUI baseline (can't load the diffusers-format file) |
+| Lumina-Image 2.0 | 17.7 s | **10.05 s** | 1.76× — Comfy baseline added 07-18 (native `lumina2` @25 st/cfg4); perf pass queued. Was 650 s (37× in one round) |
 | OmniGen 2 | **19.21 s** | 13.0 s | 1.48× — perf pass 07-18 (`alpha.54→60`): re-benched baseline 132.6 s (a regression had crept in) → 19.21 s (**6.90×**). Device RoPE (host Q/K-drain → cached device tables; the 4× win) + drain-free loop (`ForwardPacked` + `CfgEulerStep` + device patchify/unpatchify — also fixed the cpu-glue-async-race crash) + F16 activations + fully-device Concat/Split. Also fixed a **cross-model** bug: `DiTUtils.ConcatAlongSeqDim`/`SplitAlongSeqDim` were F32-hardcoded → 2× OOB read on F16 buffers. Remaining <13 s path is a project (op fusion + a text-padding/mask rewrite to unblock CUDA-graph/batched-CFG — cond/uncond have different lengths, single-slot StepGraph API). Full log: `benchmarks/results/omnigen2_perf_2026-07-18.md` |
-| Flux.2 Dev 32B (Q4_K_S GGUF, 20 st) | 52.6 s | — | First e2e 07-10 (native GGUF + live Mistral-Small-3 TE); no ComfyUI baseline (comfy backend can't route the GGUF); eager loop 2.6 s/step (28-st warm 73.9 s on `44.71-local` = same per-step rate; step graph opt-in). Model-switch NRE **fixed + validated 07-11** (Dev→Krea2→Dev in one process, no restart) |
-| HunyuanImage 2.1 17B (Q4_K_M GGUF, 2048², 20 st) | **74.1 s** | — | Was 77.0 s; `44.71-local` TE prompt cache (repeat prompt skips the 7B Qwen2.5-VL encode + TE⇄DiT swap) + token-space drain-free loop; no ComfyUI baseline (comfy backend can't route the GGUF) |
+| Flux.2 Dev 32B (Q4_K_S GGUF, 20 st) | **52.6 s** | 54.37 s | ~Tied/faster than ComfyUI (0.97×) — Comfy baseline added 07-18 (via city96 GGUF node). First e2e 07-10 (native GGUF + live Mistral-Small-3 TE); eager loop 2.6 s/step (28-st warm 73.9 s on `44.71-local` = same per-step rate; step graph opt-in). Model-switch NRE **fixed + validated 07-11** (Dev→Krea2→Dev in one process, no restart) |
+| HunyuanImage 2.1 17B (Q4_K_M GGUF, 2048², 20 st) | **~50.0 s** | 48.08 s | **1.04× — matched** (07-18 A/B on `alpha.61`: F16 49.8–50.1 s, F32 49.9 s — statistically identical). The handoff's 74.1 s was **stale** (alpha `44.71`, 07-11); prior TE-cache + drain-free-loop work had already ground it to ~50 s. **F16-activation opt-in (`DitDtype.Act`) is perf-NEUTRAL here** — the Q4_K weights dequant to F32 in the GEMM regardless of activation dtype (unlike fp8's F16-act-quant path), so the DiT GEMM is the F32 floor. To go below Comfy needs a **Q4→F16 dequant-GEMM** path (matches Comfy's fp16 GGUF GEMM). Was 77.0 s |
 | HiDream-i1 17B (fp8, 25 st, cfg 5) | 44.0 s | 35.2 s | 1.25× — first official row 07-11 (`44.71-local`): activation-memory pass unblocked 1024²-CFG (was FAILED/OOM in the 07-05 run); warm ×3 44.0 s flat, peak 20.6 GB, coherent |
-| F-Lite 10B (30 st, cfg 6) | 61.5 s | — | First correct run 07-11 (4 reference bugs fixed via byte-level python oracle; 47× block-port speedup); no ComfyUI baseline |
-| Chroma1-Radiance (pixel-space, 20 st, cfg 3.5) | 54.4 s | — | Was 735.6 s first-e2e (36.9 s/step → 2.65 s/step, 14× on `44.73-local`): NeRF-head GPU port (was ~50k host-tile Linears/forward) + ForwardPaired + prompt cache + DiT residency + drain-free loop; parity corr 0.99996 vs pre-port; no ComfyUI baseline yet |
+| F-Lite 10B (30 st, cfg 6) | **61.5 s** | 122.98 s | Faster than Python (0.50×, **memory-bound caveat**) — no ComfyUI arch; Python ref = diffusers `f_lite` with **sequential CPU offload** (10B+T5-XXL ≈ 29 GB > 24 GB, so resident/model-offload both OOM). On a ≥40 GB GPU diffusers would run resident and likely be faster; read as "beats diffusers-on-24 GB". First correct run 07-11 (4 reference bugs; 47× block-port) |
+| Chroma1-Radiance (pixel-space, 20 st, cfg 3.5) | 54.4 s | **24.68 s** | 2.20× — **worst image gap**, Comfy baseline added 07-18 (native `chroma_radiance`, `latest_x0_full_20M_dataset_run_1024`); perf pass queued. Was 735.6 s first-e2e (36.9 s/step → 2.65 s/step, 14× on `44.73-local`): NeRF-head GPU port + ForwardPaired + prompt cache + DiT residency + drain-free loop; parity corr 0.99996 vs pre-port |
 
 ---
 

@@ -1,0 +1,12 @@
+[
+  {
+    "name": "Flux2-Dev",
+    "model": "flux2-dev-Q4_K_S.gguf",
+    "params": { "width": 1024, "height": 1024, "steps": 20, "cfgscale": 1.0 }
+  },
+  {
+    "name": "ChromaRadiance",
+    "model": "latest_x0_full_20M_dataset_run_1024.safetensors",
+    "params": { "width": 1024, "height": 1024, "steps": 20, "cfgscale": 3.5 }
+  }
+]

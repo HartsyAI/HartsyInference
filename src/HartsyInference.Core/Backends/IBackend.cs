@@ -997,6 +997,15 @@ public interface IBackend : IDisposable
     /// is non-zero (graph-replayable); otherwise identical to <see cref="KvCacheAppend"/> at host <paramref name="offset"/>.</summary>
     void KvCacheAppendDev(Tensor buffer, Tensor newKv, int offset, ulong devicePos) => KvCacheAppend(buffer, newKv, offset);
 
+    /// <summary>Pre-allocates a fixed KV-cache buffer directly on the device and marks it resident, so the first
+    /// <see cref="KvCacheAppend"/> writes into it in place instead of first uploading its (host) contents across
+    /// PCIe. The tail beyond the valid length is never read (FlashAttention is given the exact kvLen), so the
+    /// allocation is left uninitialized — no host→device copy and no device memset. Default no-op: backends
+    /// without a device (CPU) keep using the host buffer directly, and any backend that skips this still works via
+    /// the lazy upload-on-first-append path. This removes a full-buffer H2D per generation — e.g. an AR TTS talker
+    /// with a 28-layer, 8k-position cache was re-uploading ~1.9 GB of zeroed KV every gen.</summary>
+    void ResidentAllocateKv(Tensor buffer) { }
+
     /// <summary>Self-attention FlashAttention whose kvLen/qOffset come from the device position buffer when
     /// <paramref name="devicePos"/> is non-zero (graph-replayable, forces the fixed-grid path); otherwise identical
     /// to <see cref="FlashAttention"/> at the host <paramref name="kvLen"/>/<paramref name="qOffset"/>.</summary>

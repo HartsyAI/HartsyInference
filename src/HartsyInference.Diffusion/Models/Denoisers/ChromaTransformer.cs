@@ -45,11 +45,17 @@ public sealed unsafe class ChromaTransformer : IDisposable
     // proj_out: Linear(hidden_size, patch_size² * out_channels=64, bias=True)
     private Tensor? _projOutWeight, _projOutBias;
 
-    /// <summary>True when this instance runs the audited F16 block loop (classic Chroma + HARTSY_DIT_F16):
-    /// token streams are cast to F16 around the block loop and the residual stream rides at
-    /// <see cref="ChromaF16.ResidualDamp"/> scale (exact — see <see cref="ChromaF16"/>). Radiance instances
-    /// stay F32/undamped (their NeRF head is un-audited).</summary>
+    /// <summary>True when this instance runs the F16 block loop (HARTSY_DIT_F16): token streams are cast to F16
+    /// around the block loop and the residual stream rides at <see cref="ChromaF16.ResidualDamp"/> scale (exact —
+    /// see <see cref="ChromaF16"/>). Now enabled for Radiance too: it has no <c>x_embedder</c>/<c>proj_out</c> to
+    /// carry the damp, so the img stream is scaled into the damped regime at the ForwardCore F16 cast (see
+    /// <see cref="_isRadiance"/>) and un-damped at the NeRF head's param_generator GEMM alpha.</summary>
     private bool _f16Mode;
+
+    /// <summary>True for a Radiance backbone (loaded with <c>requireImageProjections: false</c> — conv patchifier
+    /// replaces <c>x_embedder</c>, NeRF head replaces <c>proj_out</c>). The F16 img-stream damp then happens at the
+    /// ForwardCore cast instead of the (absent) img embedder.</summary>
+    private bool _isRadiance;
 
     private int _disposed;
 
@@ -93,7 +99,8 @@ public sealed unsafe class ChromaTransformer : IDisposable
     /// residual damping) stays classic-Chroma-only until the Radiance head is audited.</summary>
     internal void LoadWeightsInternal(IReadOnlyDictionary<string, Tensor> weights, bool requireImageProjections)
     {
-        _f16Mode = requireImageProjections && DitDtype.Act == DType.F16;
+        _f16Mode = DitDtype.Act == DType.F16;
+        _isRadiance = !requireImageProjections;
         float branchDamp = _f16Mode ? ChromaF16.ResidualDamp : 1.0f;
 
         if (requireImageProjections)
@@ -119,11 +126,16 @@ public sealed unsafe class ChromaTransformer : IDisposable
             // Enter the damped-residual regime at the embedders: both token streams start at damp scale, so the
             // whole residual stream (which the block-output damping keeps at that scale) fits F16 in the late
             // blocks. The final no-affine LayerNorm cancels the factor exactly, so proj_out is untouched.
-            _xEmbedWeight!.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
-            _xEmbedBias = ChromaF16.DampBias(_xEmbedBias!, ChromaF16.ResidualDamp);
+            // Radiance has no x_embedder (conv patchifier) — its img stream is damped at the ForwardCore F16 cast
+            // instead; the txt embedder (context_embedder) is present in both and damped here.
+            if (_xEmbedWeight is not null)
+            {
+                _xEmbedWeight.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
+                _xEmbedBias = ChromaF16.DampBias(_xEmbedBias!, ChromaF16.ResidualDamp);
+            }
             _contextEmbedWeight.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
             _contextEmbedBias = ChromaF16.DampBias(_contextEmbedBias!, ChromaF16.ResidualDamp);
-            Logs.Info($"[Chroma] F16 block loop active (residual damp 1/{1.0f / ChromaF16.ResidualDamp:F0})");
+            Logs.Info($"[Chroma] F16 block loop active (residual damp 1/{1.0f / ChromaF16.ResidualDamp:F0}, radiance={_isRadiance})");
         }
 
         _approximator.LoadWeights(weights);
@@ -439,6 +451,17 @@ public sealed unsafe class ChromaTransformer : IDisposable
         bool f16Loop = _f16Mode && batch == 1;
         if (f16Loop)
         {
+            // Radiance carries the residual damp into the img stream HERE (no x_embedder to fold it into at load,
+            // unlike classic Chroma). Scale the F32 patchifier tokens by ResidualDamp before the cast so the whole
+            // residual rides at damp scale; the NeRF head's param_generator GEMM alpha un-damps it (see
+            // ChromaRadianceTransformer.LoadWeights). Classic's img is already damped at x_embedder → no-op here.
+            if (_isRadiance)
+            {
+                Tensor imgDamped = new Tensor(img.Shape, DType.F32);
+                backend.Scale(imgDamped, img, ChromaF16.ResidualDamp);
+                img.Dispose();
+                img = imgDamped;
+            }
             Tensor imgF16 = new Tensor(img.Shape, DType.F16);
             backend.CastToF16(imgF16, img);
             img.Dispose();

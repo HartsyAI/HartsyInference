@@ -178,8 +178,14 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
             txtSeqLen = combinedSeqLen;
         }
 
-        Tensor currentImg = imgTokens;
-        Tensor currentTxt = txtTokens;
+        // F16 hot path (HARTSY_DIT_F16, default ON): cast both streams to the block activation dtype ONCE; the 20
+        // double + 40 single blocks then run every Linear/FFN/norm/attention in F16 (2× the 4090's F32 GEMM
+        // throughput, half the HBM traffic on the bandwidth-bound norm/gate kernels). Modulation/QK-norm/RoPE
+        // params stay F32; SDPA was already F16 via allowF16. Cast back to F32 before the final layer. No-op when
+        // the flag is off. Safe here: QK-RMSNorm bounds the attention scores, and the GELU/SwiGLU FFN intermediates
+        // stay well under F16's 65504 on this arch (verified coherent on real weights).
+        Tensor currentImg = DiTBlocks.DitDtype.CastStreamToAct(backend, imgTokens);
+        Tensor currentTxt = DiTBlocks.DitDtype.CastStreamToAct(backend, txtTokens);
 
         for (int i = 0; i < _config.NumDoubleBlocks; i++)
         {
@@ -205,6 +211,10 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
         }
 
         currentTxt.Dispose();
+
+        // Back to F32 for the final AdaLN-continuous norm + proj_out (velocity precision matters across the Euler
+        // steps, and ApplyFinalLayer's modulate reads the normed tensor on the host as float*). No-op when F16 is off.
+        currentImg = Utilities.DtypeCastHelper.EnsureF32(backend, currentImg);
 
         Tensor output = ApplyFinalLayer(backend, currentImg, temb, batch, imgSeqLen);
         HunyuanImageDebugDump.Dump("proj_out", output);

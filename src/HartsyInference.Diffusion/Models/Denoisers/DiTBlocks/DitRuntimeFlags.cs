@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 
@@ -18,6 +19,19 @@ public static class DitDtype
 {
     public static readonly DType Act =
         EnvSwitch.IsEnabled("HARTSY_DIT_F16", defaultOn: true) ? DType.F16 : DType.F32;
+
+    /// <summary>Casts an F32 block-input stream to <see cref="Act"/> (F16 on the <c>HARTSY_DIT_F16</c> hot path, else
+    /// a no-op passthrough that returns the source unchanged). Disposes the source when it casts. Device-resident.
+    /// Shared entry point for the opted-in DiTs (OmniGen2 keeps a private copy for its ref-conditioning variant).</summary>
+    public static Tensor CastStreamToAct(IBackend backend, Tensor f32Stream)
+    {
+        if (Act == DType.F32)
+            return f32Stream;
+        Tensor casted = new(f32Stream.Shape, Act);
+        backend.CastToF16(casted, f32Stream);
+        f32Stream.Dispose();
+        return casted;
+    }
 }
 
 /// <summary>Per-process switch for CUDA-graph capture of a DiT denoise step (<c>HARTSY_DIT_GRAPH</c>): a model

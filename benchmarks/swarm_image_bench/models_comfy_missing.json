@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Krea2-Base",
+    "model": "Krea2/krea2_raw_fp8_scaled.safetensors",
+    "params": { "width": 1024, "height": 1024, "steps": 28, "cfgscale": 4.5 }
+  },
+  {
+    "name": "Lumina2",
+    "model": "split_files/diffusion_models/lumina_2_model_bf16.safetensors",
+    "params": { "width": 1024, "height": 1024, "steps": 25, "cfgscale": 4.0 }
+  },
+  {
+    "name": "HunyuanImage-2.1",
+    "model": "HunyuanImage2.1-Q4_K_M.gguf",
+    "params": { "width": 2048, "height": 2048, "steps": 20, "cfgscale": 3.5 }
+  }
+]

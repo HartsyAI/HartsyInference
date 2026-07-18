@@ -466,6 +466,8 @@ internal static unsafe class GpuTransferHelper
     /// uploads check this to skip already-resident tensors.</summary>
     internal static bool IsWeightCached(Tensor weight) => Resolve().WeightCache.ContainsKey(weight);
 
+    internal static bool IsActivationCached(Tensor tensor) => Resolve().ActivationCache.ContainsKey(tensor);
+
     /// <summary>Registers an already-uploaded weight in the cache. The caller is
     /// responsible for the alloc + H2D copy (sync or async); this just records the
     /// tensor → dptr mapping and bumps the byte counter.</summary>

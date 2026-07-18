@@ -612,10 +612,10 @@ public sealed unsafe class Qwen3TtsVocoder : IDisposable
             Tensor c1 = CausalConv(backend, a1, _conv1W!, _conv1B, _channels, t, _kernel, _dilation); a1.Dispose();
             Tensor a2 = new(c1.Shape, DType.F32); backend.Snake(a2, c1, _alpha2!, _beta2); c1.Dispose();
             Tensor c2 = CausalConv(backend, a2, _conv2W!, _conv2B, _channels, t, 1, 1); a2.Dispose();
-            float* xp = (float*)x.DataPointer;
-            float* cp = (float*)c2.DataPointer;
-            long n = x.ElementCount;
-            for (long i = 0; i < n; i++) cp[i] += xp[i];
+            // Residual add on-device: at the late decoder blocks these tensors are the full upsampled length
+            // (millions of samples). A host loop here reads c2/x back over PCIe and re-uploads, breaking the
+            // decoder's device residency between blocks; backend.Add keeps it on the GPU.
+            backend.Add(c2, c2, x);
             return c2;
         }
 
