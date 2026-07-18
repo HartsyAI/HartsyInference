@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Vision.Detection;
 
 namespace HartsyInference.Vision.Detection.GroundingDino;
 
@@ -168,8 +169,10 @@ public sealed unsafe class GroundingDinoEncoder : IDisposable
     {
         private readonly GroundingDinoConfig _cfg;
         private readonly int _embed, _heads, _hd;
-        private Tensor? _lnVW, _lnVB, _lnTW, _lnTB, _visParam, _txtParam;
-        private Tensor? _vProjW, _vProjB, _tProjW, _tProjB, _vvW, _vvB, _tvW, _tvB, _ovW, _ovB, _otW, _otB;
+        private Tensor? _lnVW, _lnVB, _lnTW, _lnTB;
+        private Tensor? _vProjW, _vProjB, _tProjW, _tProjB, _vvW, _vvB, _tvW, _tvB;
+        // Output projections pre-scaled by the per-channel vision_param / text_param so the residual is a plain add.
+        private Tensor? _ovWs, _ovBs, _otWs, _otBs;
 
         public BiAttentionFusion(GroundingDinoConfig cfg)
         {
@@ -183,21 +186,23 @@ public sealed unsafe class GroundingDinoEncoder : IDisposable
         {
             _lnVW = w[$"{prefix}.layer_norm_vision.weight"]; _lnVB = w[$"{prefix}.layer_norm_vision.bias"];
             _lnTW = w[$"{prefix}.layer_norm_text.weight"]; _lnTB = w[$"{prefix}.layer_norm_text.bias"];
-            _visParam = w[$"{prefix}.vision_param"]; _txtParam = w[$"{prefix}.text_param"];
             string a = $"{prefix}.attn";
             _vProjW = w[$"{a}.vision_proj.weight"]; _vProjB = w[$"{a}.vision_proj.bias"];
             _tProjW = w[$"{a}.text_proj.weight"]; _tProjB = w[$"{a}.text_proj.bias"];
             _vvW = w[$"{a}.values_vision_proj.weight"]; _vvB = w[$"{a}.values_vision_proj.bias"];
             _tvW = w[$"{a}.values_text_proj.weight"]; _tvB = w[$"{a}.values_text_proj.bias"];
-            _ovW = w[$"{a}.out_vision_proj.weight"]; _ovB = w[$"{a}.out_vision_proj.bias"];
-            _otW = w[$"{a}.out_text_proj.weight"]; _otB = w[$"{a}.out_text_proj.bias"];
+            // Fold vision_param/text_param (per-output-channel residual gates) into the output projections:
+            // vision += param ⊙ (Wx+b)  ==  vision += (param⊙W)x + (param⊙b), so it becomes a plain GPU add.
+            _ovWs = ScaleRows(w[$"{a}.out_vision_proj.weight"], w[$"{prefix}.vision_param"]);
+            _ovBs = ScaleVec(w[$"{a}.out_vision_proj.bias"], w[$"{prefix}.vision_param"]);
+            _otWs = ScaleRows(w[$"{a}.out_text_proj.weight"], w[$"{prefix}.text_param"]);
+            _otBs = ScaleVec(w[$"{a}.out_text_proj.bias"], w[$"{prefix}.text_param"]);
         }
 
         public (Tensor Vision, Tensor Text) Forward(IBackend backend, Tensor visionIn, Tensor textIn)
         {
             int d = _cfg.DModel, nimg = (int)visionIn.Shape[1], t = (int)textIn.Shape[1];
             int embed = _embed, heads = _heads, hd = _hd;
-            float scale = 1f / MathF.Sqrt(hd);
 
             Tensor vision = new(visionIn.Shape, DType.F32);
             backend.LayerNorm(vision, visionIn, _lnVW!, _lnVB!, _cfg.LayerNormEps);
@@ -209,75 +214,48 @@ public sealed unsafe class GroundingDinoEncoder : IDisposable
             Tensor vv = Lin(backend, vision, _vvW!, _vvB!, nimg, embed);
             Tensor tv = Lin(backend, text, _tvW!, _tvB!, t, embed);
 
-            float* vqP = (float*)vq.DataPointer, tkP = (float*)tk.DataPointer;
-            float* vvP = (float*)vv.DataPointer, tvP = (float*)tv.DataPointer;
-
-            // Per head: scores[i,j] = scale * vq[i]·tk[j]. vision_out[i] = softmax_j(scores)·tv[j];
-            // text_out[j] = softmax_i(scores)·vv[i].
-            Tensor visionAttn = new(new TensorShape(1, nimg, embed), DType.F32);
-            Tensor textAttn = new(new TensorShape(1, t, embed), DType.F32);
-            float* vaP = (float*)visionAttn.DataPointer, taP = (float*)textAttn.DataPointer;
-            for (long i = 0; i < (long)t * embed; i++) taP[i] = 0f;
-
-            float[] scoresRow = new float[t];
-            // We need column softmax for text too; accumulate per-head with a scores matrix per head.
-            for (int h = 0; h < heads; h++)
-            {
-                float[] scoreMat = new float[(long)nimg * t];
-                for (int i = 0; i < nimg; i++)
-                {
-                    long vqOff = (long)i * embed + (long)h * hd;
-                    for (int j = 0; j < t; j++)
-                    {
-                        long tkOff = (long)j * embed + (long)h * hd;
-                        float dot = 0f;
-                        for (int c = 0; c < hd; c++) dot += vqP[vqOff + c] * tkP[tkOff + c];
-                        scoreMat[(long)i * t + j] = dot * scale;
-                    }
-                }
-                // vision output: softmax over j (text), weighted sum of text_value
-                for (int i = 0; i < nimg; i++)
-                {
-                    for (int j = 0; j < t; j++) scoresRow[j] = scoreMat[(long)i * t + j];
-                    GdMath.Softmax(scoresRow);
-                    long vaOff = (long)i * embed + (long)h * hd;
-                    for (int c = 0; c < hd; c++)
-                    {
-                        float acc = 0f;
-                        for (int j = 0; j < t; j++) acc += scoresRow[j] * tvP[(long)j * embed + (long)h * hd + c];
-                        vaP[vaOff + c] = acc;
-                    }
-                }
-                // text output: softmax over i (vision), weighted sum of vision_value
-                float[] col = new float[nimg];
-                for (int j = 0; j < t; j++)
-                {
-                    for (int i = 0; i < nimg; i++) col[i] = scoreMat[(long)i * t + j];
-                    GdMath.Softmax(col);
-                    long taOff = (long)j * embed + (long)h * hd;
-                    for (int c = 0; c < hd; c++)
-                    {
-                        float acc = 0f;
-                        for (int i = 0; i < nimg; i++) acc += col[i] * vvP[(long)i * embed + (long)h * hd + c];
-                        taP[taOff + c] = acc;
-                    }
-                }
-            }
+            // Bi-directional cross-attention as two GPU SDPA passes over the shared vq·tkᵀ score matrix:
+            //   vision_out = softmax_text(vq·tkᵀ)·tv  = attn(Q=vq, K=tk, V=tv)
+            //   text_out   = softmax_vision(vq·tkᵀ)·vv = attn(Q=tk, K=vq, V=vv)
+            Tensor visionAttn = RtDetrAttention.MultiHead(backend, vq, tk, tv, heads, hd);  // [1, nimg, embed]
+            Tensor textAttn = RtDetrAttention.MultiHead(backend, tk, vq, vv, heads, hd);    // [1, t, embed]
             vq.Dispose(); tk.Dispose(); vv.Dispose(); tv.Dispose();
 
-            Tensor deltaV = Lin(backend, visionAttn, _ovW!, _ovB!, nimg, d);
-            Tensor deltaT = Lin(backend, textAttn, _otW!, _otB!, t, d);
+            Tensor deltaV = Lin(backend, visionAttn, _ovWs!, _ovBs!, nimg, d);  // already param-scaled
+            Tensor deltaT = Lin(backend, textAttn, _otWs!, _otBs!, t, d);
             visionAttn.Dispose(); textAttn.Dispose();
 
-            // residual on the LayerNormed features with per-channel param scaling
-            float* vp = (float*)vision.DataPointer, dvp = (float*)deltaV.DataPointer, vparam = (float*)_visParam!.DataPointer;
-            for (int i = 0; i < nimg; i++)
-                for (int c = 0; c < d; c++) vp[(long)i * d + c] += vparam[c] * dvp[(long)i * d + c];
-            float* tp = (float*)text.DataPointer, dtp = (float*)deltaT.DataPointer, tparam = (float*)_txtParam!.DataPointer;
-            for (int i = 0; i < t; i++)
-                for (int c = 0; c < d; c++) tp[(long)i * d + c] += tparam[c] * dtp[(long)i * d + c];
-            deltaV.Dispose(); deltaT.Dispose();
-            return (vision, text);
+            Tensor visionOut = new(vision.Shape, DType.F32);
+            backend.Add(visionOut, vision, deltaV);
+            Tensor textOut = new(text.Shape, DType.F32);
+            backend.Add(textOut, text, deltaT);
+            vision.Dispose(); text.Dispose(); deltaV.Dispose(); deltaT.Dispose();
+            return (visionOut, textOut);
+        }
+
+        /// <summary>Returns a copy of the <c>[rows, cols]</c> weight with each output row r multiplied by <paramref name="scale"/>[r].</summary>
+        private static Tensor ScaleRows(Tensor weight, Tensor scale)
+        {
+            int rows = (int)weight.Shape[0], cols = (int)weight.Shape[1];
+            Tensor o = new(weight.Shape, DType.F32);
+            float* wp = (float*)weight.DataPointer, sp = (float*)scale.DataPointer, op = (float*)o.DataPointer;
+            for (int r = 0; r < rows; r++)
+            {
+                float s = sp[r];
+                long baseOff = (long)r * cols;
+                for (int c = 0; c < cols; c++) op[baseOff + c] = wp[baseOff + c] * s;
+            }
+            return o;
+        }
+
+        /// <summary>Returns a copy of the length-n vector with each element i multiplied by <paramref name="scale"/>[i].</summary>
+        private static Tensor ScaleVec(Tensor vec, Tensor scale)
+        {
+            int n = (int)vec.Shape[0];
+            Tensor o = new(vec.Shape, DType.F32);
+            float* vp = (float*)vec.DataPointer, sp = (float*)scale.DataPointer, op = (float*)o.DataPointer;
+            for (int i = 0; i < n; i++) op[i] = vp[i] * sp[i];
+            return o;
         }
 
         private static Tensor Lin(IBackend backend, Tensor input, Tensor w, Tensor? b, int rows, int outDim)
@@ -287,7 +265,10 @@ public sealed unsafe class GroundingDinoEncoder : IDisposable
             return o;
         }
 
-        public void Dispose() { }
+        public void Dispose()
+        {
+            _ovWs?.Dispose(); _ovBs?.Dispose(); _otWs?.Dispose(); _otBs?.Dispose();
+        }
     }
 
     /// <summary>Text self-attention enhancer: masked MHA (4 heads) + ReLU FFN, pre/post LayerNorm residuals.</summary>
@@ -319,23 +300,27 @@ public sealed unsafe class GroundingDinoEncoder : IDisposable
             backend.Add(qk, text, textPos);   // queries = keys = text + pos; values = text
             Tensor attn = _attn.Forward(backend, qk, qk, text, mask);
             qk.Dispose();
-            AddInPlace(attn, text);
-            Tensor h = new(attn.Shape, DType.F32);
-            backend.LayerNorm(h, attn, _lnBeforeW!, _lnBeforeB!, _cfg.LayerNormEps);
+            Tensor res1 = new(attn.Shape, DType.F32);
+            backend.Add(res1, attn, text);
             attn.Dispose();
+            Tensor h = new(res1.Shape, DType.F32);
+            backend.LayerNorm(h, res1, _lnBeforeW!, _lnBeforeB!, _cfg.LayerNormEps);
+            res1.Dispose();
 
             int inner = _cfg.EncoderFfnDim / 2;
             Tensor fc1 = new(new TensorShape(1, t, inner), DType.F32);
             backend.Linear(fc1, h, _fc1W!, _fc1B);
-            GdMath.Relu(fc1);
+            backend.Clamp(fc1, fc1, 0f, float.MaxValue);   // ReLU on GPU
             Tensor fc2 = new(new TensorShape(1, t, d), DType.F32);
             backend.Linear(fc2, fc1, _fc2W!, _fc2B);
             fc1.Dispose();
-            AddInPlace(fc2, h);
-            h.Dispose();
-            Tensor outT = new(fc2.Shape, DType.F32);
-            backend.LayerNorm(outT, fc2, _lnAfterW!, _lnAfterB!, _cfg.LayerNormEps);
+            Tensor res2 = new(fc2.Shape, DType.F32);
+            backend.Add(res2, fc2, h);
             fc2.Dispose();
+            h.Dispose();
+            Tensor outT = new(res2.Shape, DType.F32);
+            backend.LayerNorm(outT, res2, _lnAfterW!, _lnAfterB!, _cfg.LayerNormEps);
+            res2.Dispose();
             return outT;
         }
 
@@ -371,32 +356,30 @@ public sealed unsafe class GroundingDinoEncoder : IDisposable
             backend.Add(query, vision, visionPos);
             Tensor attn = _attn.Forward(backend, query, vision, refPoints, 2, shapes, levelStart);
             query.Dispose();
-            AddInPlace(attn, vision);
-            Tensor h = new(attn.Shape, DType.F32);
-            backend.LayerNorm(h, attn, _lnW!, _lnB!, _cfg.LayerNormEps);
+            Tensor res1 = new(attn.Shape, DType.F32);
+            backend.Add(res1, attn, vision);
             attn.Dispose();
+            Tensor h = new(res1.Shape, DType.F32);
+            backend.LayerNorm(h, res1, _lnW!, _lnB!, _cfg.LayerNormEps);
+            res1.Dispose();
 
             Tensor fc1 = new(new TensorShape(1, nimg, _cfg.EncoderFfnDim), DType.F32);
             backend.Linear(fc1, h, _fc1W!, _fc1B);
-            GdMath.Relu(fc1);
+            backend.Clamp(fc1, fc1, 0f, float.MaxValue);   // ReLU on GPU
             Tensor fc2 = new(new TensorShape(1, nimg, d), DType.F32);
             backend.Linear(fc2, fc1, _fc2W!, _fc2B);
             fc1.Dispose();
-            AddInPlace(fc2, h);
-            h.Dispose();
-            Tensor outT = new(fc2.Shape, DType.F32);
-            backend.LayerNorm(outT, fc2, _finalLnW!, _finalLnB!, _cfg.LayerNormEps);
+            Tensor res2 = new(fc2.Shape, DType.F32);
+            backend.Add(res2, fc2, h);
             fc2.Dispose();
+            h.Dispose();
+            Tensor outT = new(res2.Shape, DType.F32);
+            backend.LayerNorm(outT, res2, _finalLnW!, _finalLnB!, _cfg.LayerNormEps);
+            res2.Dispose();
             return outT;
         }
 
         public void Dispose() => _attn.Dispose();
-    }
-
-    private static void AddInPlace(Tensor dst, Tensor src)
-    {
-        float* d = (float*)dst.DataPointer, s = (float*)src.DataPointer;
-        for (long i = 0; i < dst.ElementCount; i++) d[i] += s[i];
     }
 
     private static Tensor Copy(Tensor src)
