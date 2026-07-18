@@ -9,10 +9,10 @@ namespace HartsyInference.Vision.Detection.GroundingDino;
 /// pre-downsampling feature maps (channels 192/384/768), each passed through its <c>hidden_states_norms</c> LayerNorm
 /// and returned as <c>[1, C, H, W]</c>.
 ///
-/// <para>Windowing, cyclic shift, padding and patch merging run as host loops (matching the engine's Whisper/CLIP
-/// helper idiom); the per-token linear projections, LayerNorms and the patch-embed convolution route through
-/// <see cref="IBackend"/>. Window attention (scores + relative bias + shift mask + softmax) is computed on the host
-/// over the small window token blocks.</para></summary>
+/// <para>Cyclic shift, padding, window partition/reverse and patch merging run as host layout shuffles (matching the
+/// engine's Whisper/CLIP helper idiom); the per-token linear projections, LayerNorms, activations, residual adds and
+/// the patch-embed convolution route through <see cref="IBackend"/>. Window attention is a single batched GPU SDPA
+/// (windows = batch) with the relative-position bias and shift mask folded into an additive score mask.</para></summary>
 public sealed unsafe class SwinBackbone : IDisposable
 {
     private readonly GroundingDinoConfig _cfg;
@@ -173,13 +173,14 @@ public sealed unsafe class SwinBackbone : IDisposable
         Tensor v = Linear(backend, xs, blk.VW!, blk.VB!, nTok, dim, dim);
         xs.Dispose();
 
-        // window attention on host, producing context [hp*wp, C]
-        float[] context = WindowAttention(q, k, v, hp, wp, dim, heads, ws, shift, blk.RelBiasTable!);
+        // Batched windowed SDPA on the GPU (windows = batch); context is on the shifted grid [1, hp*wp, C].
+        Tensor context = WindowAttention(backend, q, k, v, hp, wp, dim, heads, ws, shift, blk.RelBiasTable!);
         q.Dispose(); k.Dispose(); v.Dispose();
 
         // reverse shift + unpad -> [H,W,C] -> [1,HW,C]
         Tensor attnOut = new(new TensorShape(1, (long)h * wdt, dim), DType.F32);
         {
+            float* cp = (float*)context.DataPointer;
             float* ap = (float*)attnOut.DataPointer;
             for (int y = 0; y < h; y++)
                 for (int xx = 0; xx < wdt; xx++)
@@ -188,86 +189,156 @@ public sealed unsafe class SwinBackbone : IDisposable
                     if (shift > 0) { sy = ((y - shift) % hp + hp) % hp; sx = ((xx - shift) % wp + wp) % wp; }
                     long src = ((long)sy * wp + sx) * dim;
                     long dst = ((long)y * wdt + xx) * dim;
-                    for (int c = 0; c < dim; c++) ap[dst + c] = context[src + c];
+                    for (int c = 0; c < dim; c++) ap[dst + c] = cp[src + c];
                 }
         }
+        context.Dispose();
 
-        // o_proj + residual
-        Tensor o = Linear(backend, attnOut, blk.OW!, blk.OB!, h * wdt, dim, dim);
+        // o_proj + residual (fresh output tensor — backend.Add does not support aliasing an input)
+        Tensor oProj = Linear(backend, attnOut, blk.OW!, blk.OB!, h * wdt, dim, dim);
         attnOut.Dispose();
-        AddInPlace(o, input);
+        Tensor attnRes = new(oProj.Shape, DType.F32);
+        backend.Add(attnRes, oProj, input);
+        oProj.Dispose();
 
         // MLP branch (post-norm residual)
-        Tensor lnA = new(o.Shape, DType.F32);
-        backend.LayerNorm(lnA, o, blk.LnAfterW!, blk.LnAfterB!, _cfg.SwinLayerNormEps);
+        Tensor lnA = new(attnRes.Shape, DType.F32);
+        backend.LayerNorm(lnA, attnRes, blk.LnAfterW!, blk.LnAfterB!, _cfg.SwinLayerNormEps);
         int inner = (int)(_cfg.SwinMlpRatio * dim);
         Tensor fc1 = Linear(backend, lnA, blk.Fc1W!, blk.Fc1B!, h * wdt, dim, inner);
         lnA.Dispose();
-        GdMath.ErfGelu(fc1);
+        backend.GeluErf(fc1, fc1);
         Tensor fc2 = Linear(backend, fc1, blk.Fc2W!, blk.Fc2B!, h * wdt, inner, dim);
         fc1.Dispose();
-        AddInPlace(fc2, o);
-        o.Dispose();
-        return fc2;
+        Tensor outT = new(fc2.Shape, DType.F32);
+        backend.Add(outT, fc2, attnRes);
+        fc2.Dispose();
+        attnRes.Dispose();
+        return outT;
     }
 
-    private float[] WindowAttention(Tensor q, Tensor k, Tensor v, int hp, int wp, int dim, int heads, int ws, int shift, Tensor relTable)
+    /// <summary>Batched windowed multi-head self-attention on the GPU: partitions the (already shifted) grid into
+    /// non-overlapping windows — the SDPA batch dimension — reshapes to <c>[nW, heads, wa, hd]</c>, runs
+    /// <see cref="IBackend.ScaledDotProductAttention"/> with a fully materialized additive mask
+    /// <c>[nW, heads, wa, wa]</c> (relative-position bias per head, plus a −100 term across cyclic-shift region
+    /// boundaries for shifted blocks), merges the heads, and stitches the windows back. Returns the context on the
+    /// shifted grid <c>[1, hp*wp, dim]</c>.</summary>
+    private Tensor WindowAttention(IBackend backend, Tensor q, Tensor k, Tensor v, int hp, int wp, int dim, int heads, int ws, int shift, Tensor relTable)
     {
         int hd = dim / heads;
         int wa = ws * ws;
         int nWh = hp / ws, nWw = wp / ws, nW = nWh * nWw;
         float scale = 1f / MathF.Sqrt(hd);
+
+        Tensor qWin = PartitionWindows(q, hp, wp, ws, dim);
+        Tensor kWin = PartitionWindows(k, hp, wp, ws, dim);
+        Tensor vWin = PartitionWindows(v, hp, wp, ws, dim);
+        Tensor qh = ToHeads(backend, qWin, nW, wa, heads, hd);
+        Tensor kh = ToHeads(backend, kWin, nW, wa, heads, hd);
+        Tensor vh = ToHeads(backend, vWin, nW, wa, heads, hd);
+        qWin.Dispose(); kWin.Dispose(); vWin.Dispose();
+
+        Tensor mask = BuildWindowMask(nW, heads, wa, ws, nWw, shift, relTable, hp, wp);
+        Tensor attn = new(new TensorShape(nW, heads, wa, hd), DType.F32);
+        backend.ScaledDotProductAttention(attn, qh, kh, vh, mask, scale);
+        qh.Dispose(); kh.Dispose(); vh.Dispose(); mask.Dispose();
+
+        // Merge heads [nW, heads, wa, hd] -> [nW, wa, heads*hd], then stitch windows back to the grid.
+        Tensor merged = new(new TensorShape(nW, wa, heads, hd), DType.F32);
+        backend.Permute0213(merged, attn, heads, wa, hd);
+        attn.Dispose();
+        Tensor mergedFlat = merged.Reshape(new TensorShape(nW, wa, dim));
+        Tensor context = UnpartitionWindows(mergedFlat, hp, wp, ws, dim);
+        merged.Dispose();
+        return context;
+    }
+
+    /// <summary><c>[nW, wa, heads*hd]</c> -> <c>[nW, heads, wa, hd]</c> (reshape to heads, swap the seq/head axes).</summary>
+    private static Tensor ToHeads(IBackend backend, Tensor win, int nW, int wa, int heads, int hd)
+    {
+        Tensor reshaped = win.Reshape(new TensorShape(nW, wa, heads, hd));
+        Tensor outT = new(new TensorShape(nW, heads, wa, hd), DType.F32);
+        backend.Permute0213(outT, reshaped, wa, heads, hd);
+        return outT;
+    }
+
+    /// <summary>Builds the additive attention mask <c>[nW, heads, wa, wa]</c>: per-head relative-position bias plus,
+    /// for shifted blocks, a −100 term wherever two window positions fall in different cyclic-shift regions. Fully
+    /// materialized (element count == score matrix) so the CPU/CUDA SDPA add it directly — a per-head-broadcast
+    /// shape would be silently dropped by the CUDA mask path.</summary>
+    private static Tensor BuildWindowMask(int nW, int heads, int wa, int ws, int nWw, int shift, Tensor relTable, int hp, int wp)
+    {
         int[] relIndex = GdMath.SwinRelativePositionIndex(ws);
-        float* rt = (float*)relTable.DataPointer;   // [ (2ws-1)^2, heads ]
-        // shift attn mask region ids per padded position
         int[] regionId = shift > 0 ? ShiftRegionIds(hp, wp, ws, shift) : Array.Empty<int>();
-
-        float* qp = (float*)q.DataPointer, kp = (float*)k.DataPointer, vp = (float*)v.DataPointer;
-        float[] context = new float[(long)hp * wp * dim];
-
-        float[] scores = new float[wa];
-        for (int wy = 0; wy < nWh; wy++)
-            for (int wx = 0; wx < nWw; wx++)
-            {
-                // token global index for (local i) in this window
-                int baseY = wy * ws, baseX = wx * ws;
-                for (int h = 0; h < heads; h++)
+        Tensor mask = new(new TensorShape(nW, heads, wa, wa), DType.F32);
+        float* rt = (float*)relTable.DataPointer;   // [(2ws-1)^2, heads]
+        float* mp = (float*)mask.DataPointer;
+        for (int w = 0; w < nW; w++)
+        {
+            int baseY = (w / nWw) * ws, baseX = (w % nWw) * ws;
+            for (int hh = 0; hh < heads; hh++)
+                for (int i = 0; i < wa; i++)
                 {
-                    for (int i = 0; i < wa; i++)
+                    int ri = 0;
+                    if (shift > 0)
                     {
                         int iy = baseY + i / ws, ix = baseX + i % ws;
-                        long qOff = ((long)iy * wp + ix) * dim + (long)h * hd;
-                        float maxv = float.NegativeInfinity;
-                        for (int j = 0; j < wa; j++)
+                        ri = regionId[(long)iy * wp + ix];
+                    }
+                    long rowOff = (((long)w * heads + hh) * wa + i) * wa;
+                    for (int j = 0; j < wa; j++)
+                    {
+                        float bias = rt[(long)relIndex[i * wa + j] * heads + hh];
+                        if (shift > 0)
                         {
                             int jy = baseY + j / ws, jx = baseX + j % ws;
-                            long kOff = ((long)jy * wp + jx) * dim + (long)h * hd;
-                            float dot = 0f;
-                            for (int c = 0; c < hd; c++) dot += qp[qOff + c] * kp[kOff + c];
-                            dot *= scale;
-                            dot += rt[(long)relIndex[i * wa + j] * heads + h];
-                            if (shift > 0 && regionId[(long)iy * wp + ix] != regionId[(long)jy * wp + jx]) dot += -100f;
-                            scores[j] = dot;
-                            if (dot > maxv) maxv = dot;
+                            if (regionId[(long)jy * wp + jx] != ri) bias += -100f;
                         }
-                        float sum = 0f;
-                        for (int j = 0; j < wa; j++) { float e = MathF.Exp(scores[j] - maxv); scores[j] = e; sum += e; }
-                        float inv = 1f / sum;
-                        long cOff = ((long)iy * wp + ix) * dim + (long)h * hd;
-                        for (int c = 0; c < hd; c++)
-                        {
-                            float acc = 0f;
-                            for (int j = 0; j < wa; j++)
-                            {
-                                int jy = baseY + j / ws, jx = baseX + j % ws;
-                                acc += scores[j] * vp[((long)jy * wp + jx) * dim + (long)h * hd + c];
-                            }
-                            context[cOff + c] = acc * inv;
-                        }
+                        mp[rowOff + j] = bias;
                     }
                 }
+        }
+        return mask;
+    }
+
+    /// <summary>Partitions a row-major grid <c>[1, hp*wp, dim]</c> (hp/wp already multiples of <paramref name="ws"/>)
+    /// into <c>[nW, ws*ws, dim]</c> windows. Host layout shuffle (no math).</summary>
+    private static Tensor PartitionWindows(Tensor grid, int hp, int wp, int ws, int dim)
+    {
+        int nWw = wp / ws, nWh = hp / ws, nW = nWh * nWw, wa = ws * ws;
+        Tensor outT = new(new TensorShape(nW, wa, dim), DType.F32);
+        float* src = (float*)grid.DataPointer;
+        float* dst = (float*)outT.DataPointer;
+        for (int py = 0; py < hp; py++)
+            for (int px = 0; px < wp; px++)
+            {
+                int win = (py / ws) * nWw + (px / ws);
+                int local = (py % ws) * ws + (px % ws);
+                long s = ((long)py * wp + px) * dim;
+                long d = ((long)win * wa + local) * dim;
+                for (int c = 0; c < dim; c++) dst[d + c] = src[s + c];
             }
-        return context;
+        return outT;
+    }
+
+    /// <summary>Inverse of <see cref="PartitionWindows"/>: gathers <c>[nW, ws*ws, dim]</c> windows back into the
+    /// row-major grid <c>[1, hp*wp, dim]</c>.</summary>
+    private static Tensor UnpartitionWindows(Tensor windows, int hp, int wp, int ws, int dim)
+    {
+        int nWw = wp / ws, wa = ws * ws;
+        Tensor outT = new(new TensorShape(1, (long)hp * wp, dim), DType.F32);
+        float* src = (float*)windows.DataPointer;
+        float* dst = (float*)outT.DataPointer;
+        for (int py = 0; py < hp; py++)
+            for (int px = 0; px < wp; px++)
+            {
+                int win = (py / ws) * nWw + (px / ws);
+                int local = (py % ws) * ws + (px % ws);
+                long s = ((long)win * wa + local) * dim;
+                long d = ((long)py * wp + px) * dim;
+                for (int c = 0; c < dim; c++) dst[d + c] = src[s + c];
+            }
+        return outT;
     }
 
     private static int[] ShiftRegionIds(int hp, int wp, int ws, int shift)
@@ -368,12 +439,6 @@ public sealed unsafe class SwinBackbone : IDisposable
         Tensor output = new(new TensorShape(1, rows, outDim), DType.F32);
         backend.Linear(output, input, weight, bias);
         return output;
-    }
-
-    private static void AddInPlace(Tensor dst, Tensor src)
-    {
-        float* d = (float*)dst.DataPointer, s = (float*)src.DataPointer;
-        for (long i = 0; i < dst.ElementCount; i++) d[i] += s[i];
     }
 
     public void Dispose()

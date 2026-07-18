@@ -41,7 +41,7 @@ public sealed unsafe class GroundingDinoMlp : IDisposable
             Tensor y = new(new TensorShape(1, rows, _outDims[i]), DType.F32);
             backend.Linear(y, x, _w[i]!, _b[i]);
             if (ownX) x.Dispose();
-            if (i < _numLayers - 1) GdMath.Relu(y);
+            if (i < _numLayers - 1) backend.Clamp(y, y, 0f, float.MaxValue);   // GPU ReLU
             x = y;
             ownX = true;
         }

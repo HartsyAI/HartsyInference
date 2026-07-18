@@ -40,15 +40,19 @@ public sealed unsafe class GroundingDinoMultiheadAttention : IDisposable
         Tensor qH = new(new TensorShape(1, nh, sq, hd), DType.F32);
         Tensor kH = new(new TensorShape(1, nh, skv, hd), DType.F32);
         Tensor vH = new(new TensorShape(1, nh, skv, hd), DType.F32);
-        ToHeads(qH, q, sq, nh, hd); ToHeads(kH, k, skv, nh, hd); ToHeads(vH, v, skv, nh, hd);
+        // [1, S, nh*hd] -> [1, nh, S, hd] on the GPU (was a per-token host loop).
+        backend.Permute0213(qH, q, sq, nh, hd);
+        backend.Permute0213(kH, k, skv, nh, hd);
+        backend.Permute0213(vH, v, skv, nh, hd);
         q.Dispose(); k.Dispose(); v.Dispose();
 
         Tensor attn = new(new TensorShape(1, nh, sq, hd), DType.F32);
         backend.ScaledDotProductAttention(attn, qH, kH, vH, additiveMask, 1f / MathF.Sqrt(hd));
         qH.Dispose(); kH.Dispose(); vH.Dispose();
 
+        // Merge heads: [1, nh, sq, hd] -> [1, sq, nh*hd] on the GPU (was a per-token host loop).
         Tensor ctx = new(new TensorShape(1, sq, h), DType.F32);
-        FromHeads(ctx, attn, sq, nh, hd);
+        backend.Permute0213(ctx, attn, nh, sq, hd);
         attn.Dispose();
         Tensor o = Lin(backend, ctx, _oW!, _oB, sq, h);
         ctx.Dispose();
@@ -60,24 +64,6 @@ public sealed unsafe class GroundingDinoMultiheadAttention : IDisposable
         Tensor o = new(new TensorShape(1, rows, outDim), DType.F32);
         backend.Linear(o, input, w, b);
         return o;
-    }
-
-    private static void ToHeads(Tensor dst, Tensor src, int s, int nh, int hd)
-    {
-        float* sp = (float*)src.DataPointer, dp = (float*)dst.DataPointer;
-        for (int t = 0; t < s; t++)
-            for (int hh = 0; hh < nh; hh++)
-                for (int c = 0; c < hd; c++)
-                    dp[((long)hh * s + t) * hd + c] = sp[(long)t * nh * hd + hh * hd + c];
-    }
-
-    private static void FromHeads(Tensor dst, Tensor src, int s, int nh, int hd)
-    {
-        float* sp = (float*)src.DataPointer, dp = (float*)dst.DataPointer;
-        for (int t = 0; t < s; t++)
-            for (int hh = 0; hh < nh; hh++)
-                for (int c = 0; c < hd; c++)
-                    dp[(long)t * nh * hd + hh * hd + c] = sp[((long)hh * s + t) * hd + c];
     }
 
     public void Dispose()

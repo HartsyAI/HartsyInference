@@ -152,25 +152,29 @@ public sealed unsafe class GroundingDinoDecoder : IDisposable
         {
             int nq = (int)hiddenIn.Shape[1], d = _cfg.DModel;
 
-            // self-attention
+            // self-attention (residual add on the GPU into a fresh tensor — never alias out==in on CUDA)
             Tensor qk = new(hiddenIn.Shape, DType.F32);
             backend.Add(qk, hiddenIn, queryPos);
             Tensor sa = _selfAttn.Forward(backend, qk, qk, hiddenIn, null);
             qk.Dispose();
-            AddInPlace(sa, hiddenIn);
-            Tensor h1 = new(sa.Shape, DType.F32);
-            backend.LayerNorm(h1, sa, _selfLnW!, _selfLnB!, _cfg.LayerNormEps);
+            Tensor saRes = new(sa.Shape, DType.F32);
+            backend.Add(saRes, sa, hiddenIn);
             sa.Dispose();
+            Tensor h1 = new(saRes.Shape, DType.F32);
+            backend.LayerNorm(h1, saRes, _selfLnW!, _selfLnB!, _cfg.LayerNormEps);
+            saRes.Dispose();
 
             // text cross-attention
             Tensor q2 = new(h1.Shape, DType.F32);
             backend.Add(q2, h1, queryPos);
             Tensor ta = _textCrossAttn.Forward(backend, q2, encoderText, encoderText, null);
             q2.Dispose();
-            AddInPlace(ta, h1);
-            Tensor h2 = new(ta.Shape, DType.F32);
-            backend.LayerNorm(h2, ta, _textLnW!, _textLnB!, _cfg.LayerNormEps);
+            Tensor taRes = new(ta.Shape, DType.F32);
+            backend.Add(taRes, ta, h1);
             ta.Dispose();
+            Tensor h2 = new(taRes.Shape, DType.F32);
+            backend.LayerNorm(h2, taRes, _textLnW!, _textLnB!, _cfg.LayerNormEps);
+            taRes.Dispose();
             h1.Dispose();
 
             // deformable image cross-attention
@@ -178,31 +182,29 @@ public sealed unsafe class GroundingDinoDecoder : IDisposable
             backend.Add(q3, h2, queryPos);
             Tensor da = _deformAttn.Forward(backend, q3, encoderVision, refInput, 4, shapes, levelStart);
             q3.Dispose();
-            AddInPlace(da, h2);
-            Tensor h3 = new(da.Shape, DType.F32);
-            backend.LayerNorm(h3, da, _crossLnW!, _crossLnB!, _cfg.LayerNormEps);
+            Tensor daRes = new(da.Shape, DType.F32);
+            backend.Add(daRes, da, h2);
             da.Dispose();
+            Tensor h3 = new(daRes.Shape, DType.F32);
+            backend.LayerNorm(h3, daRes, _crossLnW!, _crossLnB!, _cfg.LayerNormEps);
+            daRes.Dispose();
             h2.Dispose();
 
-            // FFN
+            // FFN (GPU ReLU via in-place Clamp)
             Tensor fc1 = new(new TensorShape(1, nq, _cfg.DecoderFfnDim), DType.F32);
             backend.Linear(fc1, h3, _fc1W!, _fc1B);
-            GdMath.Relu(fc1);
+            backend.Clamp(fc1, fc1, 0f, float.MaxValue);
             Tensor fc2 = new(new TensorShape(1, nq, d), DType.F32);
             backend.Linear(fc2, fc1, _fc2W!, _fc2B);
             fc1.Dispose();
-            AddInPlace(fc2, h3);
-            h3.Dispose();
-            Tensor outT = new(fc2.Shape, DType.F32);
-            backend.LayerNorm(outT, fc2, _finalLnW!, _finalLnB!, _cfg.LayerNormEps);
+            Tensor fc2Res = new(fc2.Shape, DType.F32);
+            backend.Add(fc2Res, fc2, h3);
             fc2.Dispose();
+            h3.Dispose();
+            Tensor outT = new(fc2Res.Shape, DType.F32);
+            backend.LayerNorm(outT, fc2Res, _finalLnW!, _finalLnB!, _cfg.LayerNormEps);
+            fc2Res.Dispose();
             return outT;
-        }
-
-        private static void AddInPlace(Tensor dst, Tensor src)
-        {
-            float* dd = (float*)dst.DataPointer, ss = (float*)src.DataPointer;
-            for (long i = 0; i < dst.ElementCount; i++) dd[i] += ss[i];
         }
 
         public void Dispose()
