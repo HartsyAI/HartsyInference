@@ -13,6 +13,7 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _im2colBandedModule;
     private readonly CudaModule _maxpool2dModule;
     private readonly CudaModule _depthwiseConv2dModule;
+    private readonly CudaModule _msdaModule;
     private readonly CudaModule _softmaxModule;
     private readonly CudaModule _transposeModule;
     private readonly CudaModule _wanRopeModule;
@@ -141,6 +142,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _maxpool2dF16;
     private readonly nint _depthwiseConv2dF32;
     private readonly nint _depthwiseConv2dF16;
+    private readonly nint _msdaForwardF32;
 
     // ── Softmax function handles ─────────────────────────────────────────
     private readonly nint _softmaxF32;
@@ -335,6 +337,9 @@ public sealed class CudaKernels : IDisposable
         _depthwiseConv2dModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "depthwise_conv2d.ptx"));
         _depthwiseConv2dF32 = _depthwiseConv2dModule.GetFunction("depthwise_conv2d_f32");
         _depthwiseConv2dF16 = _depthwiseConv2dModule.GetFunction("depthwise_conv2d_f16");
+
+        _msdaModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "msda.ptx"));
+        _msdaForwardF32 = _msdaModule.GetFunction("msda_forward_f32");
 
         _softmaxModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "softmax_f32.ptx"));
         _softmaxF32 = _softmaxModule.GetFunction("softmax_f32");
@@ -1301,6 +1306,42 @@ public sealed class CudaKernels : IDisposable
         uint gridDim = (uint)((totalElements + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(
             func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Multi-scale deformable attention forward. One thread per (query, head, channel); softmax over
+    /// <c>levels·points</c> is folded in. Pointer args are all F32 device buffers except <paramref name="shapes"/>
+    /// (<c>int[levels*2]</c> h,w) and <paramref name="levelStart"/> (<c>int[levels]</c>).</summary>
+    public unsafe void LaunchMsdaForward(ulong output, ulong value, ulong sampOff, ulong attn, ulong refPoints,
+        ulong shapes, ulong levelStart, int nq, int heads, int hd, int levels, int points, int coords,
+        int refQueryStride, int refLevelStride, nint stream)
+    {
+        ulong outArg = output, valArg = value, offArg = sampOff, atArg = attn, refArg = refPoints;
+        ulong shArg = shapes, lsArg = levelStart;
+        uint nqArg = (uint)nq, hArg = (uint)heads, hdArg = (uint)hd, lvArg = (uint)levels;
+        uint ptArg = (uint)points, coArg = (uint)coords, rqArg = (uint)refQueryStride, rlArg = (uint)refLevelStride;
+
+        void** args = stackalloc void*[15];
+        args[0] = &outArg;
+        args[1] = &valArg;
+        args[2] = &offArg;
+        args[3] = &atArg;
+        args[4] = &refArg;
+        args[5] = &shArg;
+        args[6] = &lsArg;
+        args[7] = &nqArg;
+        args[8] = &hArg;
+        args[9] = &hdArg;
+        args[10] = &lvArg;
+        args[11] = &ptArg;
+        args[12] = &coArg;
+        args[13] = &rqArg;
+        args[14] = &rlArg;
+
+        long total = (long)nq * heads * hd;
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            _msdaForwardF32, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
@@ -2794,6 +2835,7 @@ public sealed class CudaKernels : IDisposable
         _spatialModule?.Dispose();
         _maxpool2dModule?.Dispose();
         _depthwiseConv2dModule?.Dispose();
+        _msdaModule?.Dispose();
         _softmaxModule?.Dispose();
         _transposeModule?.Dispose();
         _gegluModule?.Dispose();

@@ -47,34 +47,8 @@ public sealed class VibeVoicePipeline : IDisposable
     private float _speechScalingFactor;
     private float _speechBiasFactor;
 
+    private bool _preloaded;
     private int _disposed;
-
-    // ── TEMP phase profiler (VV_PROFILE=1) — remove before shipping. Sync-bounded wall time per stage. ──
-    private static readonly bool _profOn = Environment.GetEnvironmentVariable("VV_PROFILE") == "1";
-    private static readonly Dictionary<string, double> _profMs = new();
-    private static readonly Dictionary<string, int> _profN = new();
-    private static long ProfStart(IBackend backend)
-    {
-        if (!_profOn) return 0;
-        backend.Sync();
-        return System.Diagnostics.Stopwatch.GetTimestamp();
-    }
-    private static void ProfEnd(IBackend backend, string key, long t0)
-    {
-        if (!_profOn) return;
-        backend.Sync();
-        double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-        _profMs[key] = _profMs.GetValueOrDefault(key) + ms;
-        _profN[key] = _profN.GetValueOrDefault(key) + 1;
-    }
-    public static void ProfDump()
-    {
-        if (!_profOn) return;
-        Console.Error.WriteLine("── VibeVoice phase profile (ms total / calls) ──");
-        foreach (KeyValuePair<string, double> kv in _profMs.OrderByDescending(k => k.Value))
-            Console.Error.WriteLine($"  {kv.Key,-18} {kv.Value,10:F1} ms  ({_profN[kv.Key]} calls)");
-        _profMs.Clear(); _profN.Clear();
-    }
 
     public VibeVoiceConfig Config => _cfg;
 
@@ -163,6 +137,7 @@ public sealed class VibeVoicePipeline : IDisposable
         float temperature = 0.95f, float topP = 0.95f, int seed = 0)
     {
         ThrowIfDisposed();
+        PreloadWeights(backend);
         uint rng = HartsyInference.Audio.Dsp.DeterministicRng.Seed(seed);
         uint noiseRng = HartsyInference.Audio.Dsp.DeterministicRng.Seed(seed ^ 0x51ED270B);   // separate stream for per-frame diffusion noise
         VibeVoiceProcessor.PreparedPrompt prep = _processor.Prepare(lines, voiceWavPaths);
@@ -182,7 +157,6 @@ public sealed class VibeVoicePipeline : IDisposable
         using IKvCache? negKvCache = cfgActive ? _lm.CreateDecodeCache(cacheCap) : null;
 
         // ── Prefill ─────────────────────────────────────────────────────────
-        long _tPrefill = ProfStart(backend);
         // 1. Encode each voice prompt through the acoustic VAE → [1, N_i, 64] mean latents.
         Tensor[] voiceLatents = new Tensor[prep.Voices.Length];
         for (int i = 0; i < prep.Voices.Length; i++)
@@ -202,7 +176,6 @@ public sealed class VibeVoicePipeline : IDisposable
         // prefillHidden shape: [1, promptLen, hidden]. We need the LAST-position hidden
         // state — that's the LM's read-out at the trailing <|vision_start|> cursor and is
         // used to condition the first diffusion step.
-        ProfEnd(backend, "prefill", _tPrefill);
 
         // ── AR loop ─────────────────────────────────────────────────────────
         List<float[]> audioChunks = new();
@@ -232,13 +205,11 @@ public sealed class VibeVoicePipeline : IDisposable
             {
                 // Project the last hidden state to logits, mask to the constrained vocab,
                 // sample (greedy for determinism in v1).
-                long _tSample = ProfStart(backend);
                 using Tensor logits = _lm.ProjectLogits(backend, lastHidden!, batch: 1, t: 1);
                 // Greedy once CFG is on (upstream do_sample=False); the temperature/top-p path
                 // was a workaround for the missing-guidance ramble. DoSample restores stochastic.
                 float effTemp = _cfg.DoSample ? temperature : 0f;
                 int nextToken = SampleConstrained(logits, effTemp, topP, ref rng);
-                ProfEnd(backend, "sample+logits", _tSample);
                 progress?.Report(step);
 
                 if (nextToken == VibeVoiceTokenizer.EndOfTextTokenId)
@@ -284,12 +255,10 @@ public sealed class VibeVoicePipeline : IDisposable
                     }
 
                     // Run 20 DDPM steps, v-prediction, cosine, CFG-combined cond/uncond.
-                    long _tDiff = ProfStart(backend);
                     Tensor noiseLatent = SampleNoise(_cfg.AcousticVaeDim, ref noiseRng);
                     Tensor denoised = DenoiseLatent(backend, noiseLatent, cond, negCond);
                     negCond?.Dispose();
                     noiseLatent.Dispose();
-                    ProfEnd(backend, "diffusion", _tDiff);
 
                     // Un-normalize: raw_latent = latent / scaling - bias.
                     UnnormalizeLatentInPlace(denoised, _speechScalingFactor, _speechBiasFactor);
@@ -297,17 +266,14 @@ public sealed class VibeVoicePipeline : IDisposable
                     // Decode one frame (1 latent) through the acoustic VAE → 3200 samples.
                     // Stream through the persistent acoustic cache so this frame's decode
                     // sees the prior frames' receptive-field tail.
-                    long _tAco = ProfStart(backend);
                     using Tensor frameAudio = _acoustic.Decode(backend, denoised, batch: 1, acousticCache, sampleIndices);
                     float[] chunk = TensorToPcm(frameAudio);
                     audioChunks.Add(chunk);
-                    ProfEnd(backend, "acoustic_decode", _tAco);
 
                     // Build next-step embed: acoustic_connector(latent) + semantic_connector(sem_features).
                     Tensor latentNormalized = ReNormalizeLatent(denoised, _speechScalingFactor, _speechBiasFactor);
                     denoised.Dispose();
 
-                    long _tSem = ProfStart(backend);
                     Tensor acousticEmbed = _acousticConnector.Forward(backend, latentNormalized, batch: 1, seqLen: 1);
                     Tensor? semanticEmbed = null;
                     if (_semantic is not null && _semanticConnector is not null)
@@ -320,14 +286,12 @@ public sealed class VibeVoicePipeline : IDisposable
                         semanticEmbed = _semanticConnector.Forward(backend, semFeat, batch: 1, seqLen: 1);
                     }
                     latentNormalized.Dispose();
-                    ProfEnd(backend, "semantic_encode", _tSem);
 
                     // Combine into a single [1, 1, hidden] embed and run one LM step.
                     using Tensor stepEmbed = AddEmbeds(acousticEmbed, semanticEmbed);
                     acousticEmbed.Dispose();
                     semanticEmbed?.Dispose();
 
-                    long _tLm = ProfStart(backend);
                     Tensor newHidden = _lm.ForwardEmbeds(backend, stepEmbed, batch: 1, t: 1, posStart: kvCache.CurrentLength, kvCache);
                     lastHidden!.Dispose();
                     lastHidden = SliceLastFrame(newHidden, _lmCfg.HiddenSize);
@@ -343,18 +307,15 @@ public sealed class VibeVoicePipeline : IDisposable
                         negLastHidden = SliceLastFrame(negNew, _lmCfg.HiddenSize);
                         negNew.Dispose();
                     }
-                    ProfEnd(backend, "lm_step", _tLm);
                 }
                 else
                 {
                     // Non-diffusion token: feed its embedding back to the LM.
-                    long _tLm = ProfStart(backend);
                     int[] singleTok = [nextToken];
                     Tensor newHidden = _lm.Forward(backend, singleTok, batch: 1, posStart: kvCache.CurrentLength, kvCache);
                     lastHidden!.Dispose();
                     lastHidden = SliceLastFrame(newHidden, _lmCfg.HiddenSize);
                     newHidden.Dispose();
-                    ProfEnd(backend, "lm_step", _tLm);
                 }
 
                 prevToken = nextToken;
@@ -379,6 +340,31 @@ public sealed class VibeVoicePipeline : IDisposable
             offset += c.Length;
         }
         return audio;
+    }
+
+    /// <summary>Bulk-uploads every component's weights to the backend once (idempotent). Without
+    /// this the first synthesis pays a per-op cache-miss H2D transfer on each weight; the acoustic
+    /// VAE decoder + semantic encoder + diffusion head run thousands of ops per clip, so the
+    /// scattered first-touch transfers otherwise dominate the cold gen. No-op on backends without
+    /// a weight cache (CPU / Vulkan). Never paired with FreeWeights — VibeVoice keeps every
+    /// component resident for the whole autoregressive loop.</summary>
+    public void PreloadWeights(IBackend backend)
+    {
+        if (_preloaded) return;
+        _preloaded = true;
+        backend.PreloadWeights(EnumerateWeights());
+    }
+
+    private IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor t in _lm.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _acoustic.EnumerateWeights()) yield return t;
+        if (_semantic is not null)
+            foreach (Tensor t in _semantic.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _acousticConnector.EnumerateWeights()) yield return t;
+        if (_semanticConnector is not null)
+            foreach (Tensor t in _semanticConnector.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _diffusionHead.EnumerateWeights()) yield return t;
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────

@@ -4295,6 +4295,61 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    public unsafe void DeformableAttention(Tensor output, Tensor value, Tensor sampOff, Tensor attnLogits,
+        Tensor refPoints, ReadOnlySpan<int> spatialShapes, ReadOnlySpan<int> levelStart,
+        int heads, int levels, int points, int coords, int refQueryStride, int refLevelStride)
+    {
+        if (output.DType != DType.F32 || value.DType != DType.F32 || sampOff.DType != DType.F32
+            || attnLogits.DType != DType.F32 || refPoints.DType != DType.F32)
+            throw new NotSupportedException("CUDA DeformableAttention supports F32 only.");
+        if (coords != 2 && coords != 4)
+            throw new ArgumentException($"DeformableAttention coords must be 2 or 4, got {coords}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        int nq = (int)output.Shape[1];
+        int d = (int)output.Shape[output.Shape.Rank - 1];
+        int hd = d / heads;
+        nuint shBytes = (nuint)(spatialShapes.Length * sizeof(int));
+        nuint lsBytes = (nuint)(levelStart.Length * sizeof(int));
+
+        ulong pOut = 0, pVal = 0, pOff = 0, pAt = 0, pRef = 0, pShapes = 0, pLevelStart = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pVal = GpuTransferHelper.CopyToDevice(value);
+            pOff = GpuTransferHelper.CopyToDevice(sampOff);
+            pAt = GpuTransferHelper.CopyToDevice(attnLogits);
+            pRef = GpuTransferHelper.CopyToDevice(refPoints);
+
+            pShapes = CudaMemory.AllocateAsync(shBytes, _stream.Handle);
+            pLevelStart = CudaMemory.AllocateAsync(lsBytes, _stream.Handle);
+            fixed (int* shp = spatialShapes)
+                CudaMemory.CopyHostToDeviceAsync(pShapes, shp, shBytes, _stream.Handle);
+            fixed (int* lsp = levelStart)
+                CudaMemory.CopyHostToDeviceAsync(pLevelStart, lsp, lsBytes, _stream.Handle);
+
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            _kernels!.LaunchMsdaForward(pOut, pVal, pOff, pAt, pRef, pShapes, pLevelStart,
+                nq, heads, hd, levels, points, coords, refQueryStride, refLevelStride, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pVal);
+            GpuTransferHelper.FreeDevice(pOff);
+            GpuTransferHelper.FreeDevice(pAt);
+            GpuTransferHelper.FreeDevice(pRef);
+            if (pShapes != 0) CudaMemory.FreeAsync(pShapes, _stream.Handle);
+            if (pLevelStart != 0) CudaMemory.FreeAsync(pLevelStart, _stream.Handle);
+        }
+    }
+
     public unsafe void Conv2dDepthwise(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int strideH, int strideW, int padH, int padW)
     {

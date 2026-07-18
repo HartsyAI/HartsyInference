@@ -264,78 +264,22 @@ public sealed class RtDetrDecoder
         {
             int q = _config.NumQueries;
             int heads = _config.NumHeads;
-            int headDim = _config.HeadDim;
             int levels = _config.NumLevels;
             int points = _config.NumPoints;
             int d = _config.HiddenDim;
 
             Tensor value = _valueProj.Forward(backend, sourceFlatten);   // [1, S, d]
             Tensor offsetsT = _samplingOffsets.Forward(backend, queries); // [1, Q, heads*levels*points*2]
-            Tensor weightsT = _attentionWeights.Forward(backend, queries); // [1, Q, heads*levels*points]
+            Tensor weightsT = _attentionWeights.Forward(backend, queries); // [1, Q, heads*levels*points] (raw logits)
 
-            ReadOnlySpan<float> valueSpan = value.AsSpan<float>();
-            ReadOnlySpan<float> offsets = offsetsT.AsSpan<float>();
-            Span<float> weights = weightsT.AsSpan<float>();
-            ReadOnlySpan<float> reference = referencePoints.AsSpan<float>();
+            // Flatten level shapes to [levels*2] (h,w); softmax over levels*points is folded into the backend op.
+            Span<int> shapesFlat = stackalloc int[levels * 2];
+            for (int l = 0; l < levels; l++) { shapesFlat[l * 2] = levelShapes[l].H; shapesFlat[l * 2 + 1] = levelShapes[l].W; }
 
-            // Softmax attention weights over (levels*points) per (query, head).
-            int lp = levels * points;
-            for (int qi = 0; qi < q; qi++)
-                for (int h = 0; h < heads; h++)
-                {
-                    int baseW = (qi * heads + h) * lp;
-                    float max = float.NegativeInfinity;
-                    for (int j = 0; j < lp; j++)
-                        if (weights[baseW + j] > max) max = weights[baseW + j];
-                    float sum = 0f;
-                    for (int j = 0; j < lp; j++)
-                    {
-                        float e = MathF.Exp(weights[baseW + j] - max);
-                        weights[baseW + j] = e;
-                        sum += e;
-                    }
-                    for (int j = 0; j < lp; j++)
-                        weights[baseW + j] /= sum;
-                }
-
+            // RT-DETR shares one [q,4] reference across all levels: refQueryStride=4 (coords), refLevelStride=0.
             Tensor output = new Tensor(new TensorShape(1, q, d), DType.F32);
-            Span<float> outSpan = output.AsSpan<float>();
-            Span<float> sample = stackalloc float[headDim];
-            int rowStride = d;   // value laid [token, heads*headDim]
-
-            for (int qi = 0; qi < q; qi++)
-            {
-                float cx = reference[qi * 4 + 0];
-                float cy = reference[qi * 4 + 1];
-                float rw = reference[qi * 4 + 2];
-                float rh = reference[qi * 4 + 3];
-                for (int h = 0; h < heads; h++)
-                {
-                    int channelOffset = h * headDim;
-                    int outBase = (qi * heads + h) * headDim;
-                    for (int c = 0; c < headDim; c++)
-                        outSpan[outBase + c] = 0f;
-                    for (int l = 0; l < levels; l++)
-                    {
-                        int hL = levelShapes[l].H, wL = levelShapes[l].W;
-                        int tokenBase = levelStart[l] * rowStride;
-                        for (int p = 0; p < points; p++)
-                        {
-                            int offIdx = qi * (heads * levels * points * 2) + h * (levels * points * 2) + l * (points * 2) + p * 2;
-                            float ox = offsets[offIdx];
-                            float oy = offsets[offIdx + 1];
-                            float locx = cx + ox / points * rw * 0.5f;
-                            float locy = cy + oy / points * rh * 0.5f;
-                            float pxCoord = locx * wL - 0.5f;
-                            float pyCoord = locy * hL - 0.5f;
-                            float aw = weights[(qi * heads + h) * lp + l * points + p];
-                            BilinearSampleZeroPad(valueSpan, tokenBase, hL, wL, rowStride, channelOffset, headDim, pxCoord, pyCoord, sample);
-                            for (int c = 0; c < headDim; c++)
-                                outSpan[outBase + c] += aw * sample[c];
-                        }
-                    }
-                }
-            }
+            backend.DeformableAttention(output, value, offsetsT, weightsT, referencePoints, shapesFlat, levelStart,
+                heads, levels, points, 4, 4, 0);
 
             value.Dispose();
             offsetsT.Dispose();

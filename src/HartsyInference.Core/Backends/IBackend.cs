@@ -2112,6 +2112,99 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>Multi-scale deformable attention (Deformable DETR) forward — the shared compute behind
+    /// Grounding DINO's encoder self-attention / decoder cross-attention and RT-DETR's decoder. For each
+    /// (query, head, channel) it softmaxes the <c>levels·points</c> attention logits, bilinearly samples
+    /// (grid_sample, align_corners=false, zero-pad) the multi-scale <paramref name="value"/> maps at the
+    /// predicted locations, and accumulates the weighted taps. Softmax is folded in so callers stay
+    /// GPU-resident. Reference points are addressed as <c>refPoints[q·refQueryStride + l·refLevelStride + coord]</c>
+    /// — GDINO passes per-level refs (<c>refQueryStride=levels·coords</c>, <c>refLevelStride=coords</c>),
+    /// RT-DETR shares one ref across levels (<c>refQueryStride=coords</c>, <c>refLevelStride=0</c>). Default
+    /// implementation is a CPU loop over F32 tensors; backends override for performance.</summary>
+    unsafe void DeformableAttention(Tensor output, Tensor value, Tensor sampOff, Tensor attnLogits,
+        Tensor refPoints, ReadOnlySpan<int> spatialShapes, ReadOnlySpan<int> levelStart,
+        int heads, int levels, int points, int coords, int refQueryStride, int refLevelStride)
+    {
+        if (output.DType != DType.F32 || value.DType != DType.F32 || sampOff.DType != DType.F32
+            || attnLogits.DType != DType.F32 || refPoints.DType != DType.F32)
+            throw new NotSupportedException("DeformableAttention default fallback only supports F32.");
+        if (coords != 2 && coords != 4)
+            throw new ArgumentException($"DeformableAttention coords must be 2 or 4, got {coords}.");
+
+        int nq = (int)output.Shape[1];
+        int d = (int)output.Shape[output.Shape.Rank - 1];
+        int hd = d / heads;
+        int lp = levels * points;
+
+        float* offP = (float*)sampOff.DataPointer;
+        float* atP = (float*)attnLogits.DataPointer;
+        float* valP = (float*)value.DataPointer;
+        float* refP = (float*)refPoints.DataPointer;
+        float* outP = (float*)output.DataPointer;
+
+        for (int q = 0; q < nq; q++)
+        {
+            long refBase = (long)q * refQueryStride;
+            for (int h = 0; h < heads; h++)
+            {
+                long outOff = ((long)q * heads + h) * hd;
+                for (int c = 0; c < hd; c++) outP[outOff + c] = 0f;
+
+                // softmax denominator over lp for this (query, head)
+                long aBase = ((long)q * heads + h) * lp;
+                float amax = float.NegativeInfinity;
+                for (int i = 0; i < lp; i++) { float v = atP[aBase + i]; if (v > amax) amax = v; }
+                float asum = 0f;
+                for (int i = 0; i < lp; i++) asum += MathF.Exp(atP[aBase + i] - amax);
+                float invSum = 1f / asum;
+
+                for (int l = 0; l < levels; l++)
+                {
+                    int hL = spatialShapes[l * 2 + 0], wL = spatialShapes[l * 2 + 1], start = levelStart[l];
+                    long refOff = refBase + (long)l * refLevelStride;
+                    float refX = refP[refOff + 0], refY = refP[refOff + 1];
+                    float refW = coords == 4 ? refP[refOff + 2] : 0f;
+                    float refH = coords == 4 ? refP[refOff + 3] : 0f;
+                    for (int p = 0; p < points; p++)
+                    {
+                        long offIdx = ((((long)q * heads + h) * levels + l) * points + p) * 2;
+                        float ox = offP[offIdx + 0], oy = offP[offIdx + 1];
+                        float locX, locY;
+                        if (coords == 2)
+                        {
+                            locX = refX + ox / wL;
+                            locY = refY + oy / hL;
+                        }
+                        else
+                        {
+                            locX = refX + ox / points * refW * 0.5f;
+                            locY = refY + oy / points * refH * 0.5f;
+                        }
+                        float weight = MathF.Exp(atP[aBase + l * points + p] - amax) * invSum;
+                        float gx = 2f * locX - 1f, gy = 2f * locY - 1f;
+                        float ix = ((gx + 1f) * wL - 1f) * 0.5f;
+                        float iy = ((gy + 1f) * hL - 1f) * 0.5f;
+                        int x0 = (int)MathF.Floor(ix), y0 = (int)MathF.Floor(iy);
+                        int x1 = x0 + 1, y1 = y0 + 1;
+                        float wx1 = ix - x0, wx0 = 1f - wx1, wy1 = iy - y0, wy0 = 1f - wy1;
+                        bool x0ok = x0 >= 0 && x0 < wL, x1ok = x1 >= 0 && x1 < wL;
+                        bool y0ok = y0 >= 0 && y0 < hL, y1ok = y1 >= 0 && y1 < hL;
+                        long chanOff = (long)h * hd;
+                        for (int c = 0; c < hd; c++)
+                        {
+                            float acc = 0f;
+                            if (y0ok && x0ok) acc += wy0 * wx0 * valP[((long)start + (long)y0 * wL + x0) * d + chanOff + c];
+                            if (y0ok && x1ok) acc += wy0 * wx1 * valP[((long)start + (long)y0 * wL + x1) * d + chanOff + c];
+                            if (y1ok && x0ok) acc += wy1 * wx0 * valP[((long)start + (long)y1 * wL + x0) * d + chanOff + c];
+                            if (y1ok && x1ok) acc += wy1 * wx1 * valP[((long)start + (long)y1 * wL + x1) * d + chanOff + c];
+                            outP[outOff + c] += weight * acc;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ── Data Movement ───────────────────────────────────────────────────
 
     /// <summary>Copy tensor data to a different device.</summary>
