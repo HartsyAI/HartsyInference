@@ -247,51 +247,68 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
 
     private Tensor ForwardText2Image(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds, int textSeqLen)
     {
-
-        int batch = (int)latent.Shape[0];
         int inChannels = (int)latent.Shape[1];
         int latentH = (int)latent.Shape[2];
         int latentW = (int)latent.Shape[3];
         int patch = _config.PatchSize;
-        int hidden = _config.HiddenSize;
         int hPacked = latentH / patch;
         int wPacked = latentW / patch;
-        int imgSeqLen = hPacked * wPacked;
         int outChannels = _config.OutChannels ?? inChannels;
-        int patchVolume = patch * patch * inChannels;
-        int conditioningDim = _config.ConditioningDim;
 
         if (latentH % patch != 0 || latentW % patch != 0)
             throw new ArgumentException($"Latent {latentH}x{latentW} not divisible by patch {patch}.", nameof(latent));
 
-        // ── 1. Patchify latent [B, C, H, W] → [B, S_img, p²·C] ──
-        Tensor imgFlat = PatchifyLatent(latent, batch, inChannels, latentH, latentW, patch);
+        // NCHW convenience wrapper over the packed path: patchify once, run the packed forward, unpatchify once.
+        // The packed forward already realized upstream's `return -output`, so this unpatchify does NOT negate.
+        Tensor packed = DiTUtils.PatchifyNCHW(latent, patch);
+        Tensor velPacked = ForwardPacked(backend, packed, timestep, textEmbeds, textSeqLen, hPacked, wPacked);
+        packed.Dispose();
+        Tensor velocity = new(new TensorShape(1, outChannels, latentH, latentW), DType.F32);
+        backend.UnpatchifyTokens(velocity, velPacked, outChannels, hPacked, wPacked, patch, innerChannelFastest: true);
+        velPacked.Dispose();
+        OmniGen2DebugDump.Dump("output_velocity", velocity);
+        return velocity;
+    }
 
-        // ── 2. Patch embed: Linear(p²·C → hidden) ──
-        TensorShape imgEmbShape = new(batch, imgSeqLen, hidden);
-        Tensor imgTokens = new(imgEmbShape, DType.F32);
-        backend.Linear(imgTokens, imgFlat, _xEmbedderWeight!, _xEmbedderBias);
-        imgFlat.Dispose();
+    /// <summary>Packed-latent forward for the drain-free denoise loop. Takes the already-patchified token latent
+    /// <c>[1, imgSeqLen, p²·in_channels]</c> (never consumed — caller owns it) and returns the packed velocity
+    /// <c>[1, imgSeqLen, p²·out_channels]</c>, negated per upstream's <c>return -output</c>. Skips the per-forward
+    /// host patchify/unpatchify D2H drains (the <c>cpu-glue-async-race</c> crash source) so the latent stays
+    /// GPU-resident across the whole sampling loop — the pipeline patchifies once, runs <see cref="CfgEulerStep"/>
+    /// per step, and unpatchifies once.</summary>
+    public Tensor ForwardPacked(IBackend backend, Tensor packedLatent, float timestep, Tensor textEmbeds,
+        int textSeqLen, int hPacked, int wPacked)
+    {
+        ThrowIfDisposed();
+        const int batch = 1;
+        int hidden = _config.HiddenSize;
+        int inChannels = _config.InChannels;
+        int patch = _config.PatchSize;
+        int imgSeqLen = hPacked * wPacked;
+        int outChannels = _config.OutChannels ?? inChannels;
+        int conditioningDim = _config.ConditioningDim;
+        if (packedLatent.Shape.Rank != 3 || packedLatent.Shape[1] != imgSeqLen)
+            throw new ArgumentException($"Packed latent must be [1, {imgSeqLen}, p²·C], got {packedLatent.Shape}.", nameof(packedLatent));
 
-        // ── 3. Caption embed: RMSNorm(text_feat_dim) → Linear(text_feat_dim → hidden) ──
+        // ── Patch embed (on the already-packed latent) ──
+        Tensor imgTokens = new(new TensorShape(batch, imgSeqLen, hidden), DType.F32);
+        backend.Linear(imgTokens, packedLatent, _xEmbedderWeight!, _xEmbedderBias);
+
+        // ── Caption embed: RMSNorm(text_feat_dim) → Linear(text_feat_dim → hidden) ──
         Tensor txtNormed = new(textEmbeds.Shape, DType.F32);
         backend.RmsNorm(txtNormed, textEmbeds, _captionNormWeight!, _config.NormEps);
-        TensorShape txtEmbShape = new(batch, textSeqLen, hidden);
-        Tensor txtTokens = new(txtEmbShape, DType.F32);
+        Tensor txtTokens = new(new TensorShape(batch, textSeqLen, hidden), DType.F32);
         backend.Linear(txtTokens, txtNormed, _captionEmbedderWeight!, _captionEmbedderBias);
         txtNormed.Dispose();
 
-        // F16 hot path (HARTSY_DIT_F16): cast the two token streams to F16 once before the refiner/main block
-        // stacks — the blocks run entirely in F16 (QK-normed attention + Lumina SwiGLU keep the intermediates in
-        // range; ~half the GEMM/HBM cost). The once-per-forward embed/timestep paths stay F32; the tail is cast
-        // back after the main blocks (velocity precision matters across the Euler step). No-op when the flag is off.
+        // F16 hot path (HARTSY_DIT_F16): cast both streams to F16 once; the blocks run entirely in F16. Safe now
+        // that ConcatAlongSeqDim/SplitAlongSeqDim are dtype-aware (they were F32-hardcoded → 2× OOB read on the
+        // F16 buffers = the intermittent segfault). No-op when the flag is off.
         imgTokens = CastStreamToAct(backend, imgTokens);
         txtTokens = CastStreamToAct(backend, txtTokens);
 
-        // ── 4. Timestep embedding: sinusoidal(t * scale) → SiLU MLP → conditioning ──
         Tensor temb = ComputeTimestepEmbedding(backend, timestep, batch, conditioningDim);
 
-        // ── 5. Noise refiner: image tokens with image RoPE ──
         for (int i = 0; i < _noiseRefiner.Length; i++)
         {
             Tensor next = _noiseRefiner[i].Forward(backend, imgTokens, _rope, RopeApplyMode.Image,
@@ -299,9 +316,6 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
             imgTokens.Dispose();
             imgTokens = next;
         }
-
-
-        // ── 6. Context refiner: text tokens with text RoPE (no modulation) ──
         for (int i = 0; i < _contextRefiner.Length; i++)
         {
             Tensor next = _contextRefiner[i].Forward(backend, txtTokens, _rope, RopeApplyMode.Text,
@@ -309,13 +323,12 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
             txtTokens.Dispose();
             txtTokens = next;
         }
-
-        // ── 7. Concat [text, image] along sequence axis ──
-        Tensor joint = DiTUtils.ConcatAlongSeqDim(txtTokens, imgTokens);
+        // Device concat [text, image] (dim 1) — keeps the forward fully GPU-resident (the host ConcatAlongSeqDim
+        // drained both streams to the CPU every forward, and its host DataPointer reads block CUDA-graph capture).
+        Tensor joint = new(new TensorShape(batch, textSeqLen + imgSeqLen, hidden), imgTokens.DType);
+        backend.Concat(joint, new[] { txtTokens, imgTokens }, dim: 1);
         txtTokens.Dispose();
         imgTokens.Dispose();
-
-        // ── 8. Main joint blocks ──
         for (int i = 0; i < _mainBlocks.Length; i++)
         {
             Tensor next = _mainBlocks[i].Forward(backend, joint, _rope, RopeApplyMode.Joint,
@@ -323,11 +336,45 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
             joint.Dispose();
             joint = next;
         }
+        return FinishOutputPacked(backend, joint, temb, prefixSeqLen: textSeqLen, batch, imgSeqLen, hidden,
+            conditioningDim, outChannels, patch);
+    }
 
+    /// <summary>Packed-space output tail: strips the text prefix, applies the final AdaLN-continuous norm and
+    /// proj_out (in F32), and negates (upstream <c>return -output</c>) — returning the packed velocity
+    /// <c>[1, imgSeqLen, p²·out_channels]</c> without the host unpatchify. Consumes <paramref name="joint"/> and
+    /// <paramref name="temb"/>.</summary>
+    private Tensor FinishOutputPacked(IBackend backend, Tensor joint, Tensor temb, int prefixSeqLen, int batch,
+        int imgSeqLen, int hidden, int conditioningDim, int outChannels, int patch)
+    {
+        // Device slice of the trailing image tokens (drop the [text] prefix) — replaces the host SplitAlongSeqDim
+        // drain, keeping the tail GPU-resident and CUDA-graph-capturable.
+        Tensor imgFinal = new(new TensorShape(batch, imgSeqLen, hidden), joint.DType);
+        backend.SliceRows(imgFinal, joint, prefixSeqLen);
+        joint.Dispose();
 
-        // ── 9-12. Strip text prefix, final norm, proj_out, unpatchify ──
-        return FinishOutput(backend, joint, temb, prefixSeqLen: textSeqLen, batch, imgSeqLen, hidden,
-            conditioningDim, outChannels, hPacked, wPacked, patch);
+        if (imgFinal.DType != DType.F32)
+        {
+            Tensor imgFinalF32 = new(imgFinal.Shape, DType.F32);
+            backend.CastToF32(imgFinalF32, imgFinal);
+            imgFinal.Dispose();
+            imgFinal = imgFinalF32;
+        }
+
+        Tensor normedOut = ApplyFinalNorm(backend, imgFinal, temb, batch, imgSeqLen, hidden, conditioningDim);
+        imgFinal.Dispose();
+        temb.Dispose();
+
+        Tensor projOut = new(new TensorShape(batch, imgSeqLen, patch * patch * outChannels), DType.F32);
+        backend.Linear(projOut, normedOut, _projOutWeight!, _projOutBias);
+        normedOut.Dispose();
+
+        // Realize upstream OmniGen2's `return -output` in packed token space (device negate); the drain-free loop
+        // consumes this negated velocity directly via CfgEulerStep and unpatchifies the clean latent once at the end.
+        Tensor velocity = new(projOut.Shape, DType.F32);
+        backend.Scale(velocity, projOut, -1.0f);
+        projOut.Dispose();
+        return velocity;
     }
 
     /// <summary>Reference-image-conditioned forward. Joint stream = <c>[text, ref_0..N, noise]</c> per

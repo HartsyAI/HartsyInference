@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
@@ -102,54 +103,51 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         Stopwatch sw = Stopwatch.StartNew();
 
         TensorShape latentShape = new(1, _config.InChannels, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
+        int hPacked = latentH / _config.PatchSize;
+        int wPacked = latentW / _config.PatchSize;
+
+        // Drain-free denoise loop (the Boogu/Z-Image pattern): patchify the seeded noise to token space ONCE and
+        // keep the latent GPU-resident in [1, imgSeqLen, p²·C] across the whole loop. ForwardPacked skips the
+        // per-forward host patchify/unpatchify D2H drains (also the cpu-glue-async-race crash source) and returns
+        // the negated packed velocity; CfgEulerStep does the CFG combine + flow-match Euler step in one in-place
+        // device op (x += (g·cond + (1-g)·uncond)·dt, dt = σ_next − σ). One device unpatchify feeds the VAE.
+        Tensor noiseNchw = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor latent = DiTUtils.PatchifyNCHW(noiseNchw, _config.PatchSize);
+        noiseNchw.Dispose();
 
         FlowMatchEulerDiscreteScheduler scheduler = new(3.0f);
         scheduler.SetTimesteps(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         int textSeqLen = (int)captionEmbeddings.Shape[1];
+        int negSeqLen = negativeCaptionEmbeddings is null ? 0 : (int)negativeCaptionEmbeddings.Shape[1];
 
-        // Bulk-upload transformer weights before the denoise loop. Paired with FreeWeights
-        // below the VAE handoff. No-op on backends without a weight cache.
         Backend.PreloadWeights(_transformer.EnumerateWeights());
 
         for (int i = 0; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
-            // scheduler.Timesteps are sigma·1000; OmniGen2Transformer wants the raw flow-match sigma in [0,1]
-            // (it flips to 1 - sigma internally and negates its output to match scheduler.Step's x + v·dt).
+            // scheduler.Timesteps are sigma·1000; the transformer wants the raw flow-match sigma in [0,1].
             float t = timesteps[i] / 1000.0f;
+            float dt = scheduler.Dt(i);
 
-            Tensor velocity = _transformer.Forward(Backend, latent, t, captionEmbeddings, textSeqLen);
-
-            // VALIDATION-PENDING: verify vs diffusers OmniGen2Pipeline.
-            // cfg_range gating: diffusers applies CFG only when start <= (i/num_steps) <= end, otherwise it
-            // uses the bare conditional ("text_image" / cond) prediction. Match that fraction-of-schedule test.
+            // cfg_range gating: CFG only when start <= i/steps <= end, otherwise the bare conditional (upstream).
             float schedFraction = steps > 1 ? (float)i / steps : 0f;
             bool inCfgRange = schedFraction >= rangeStart && schedFraction <= rangeEnd;
 
+            Tensor cond = _transformer.ForwardPacked(Backend, latent, t, captionEmbeddings, textSeqLen, hPacked, wPacked);
             if (guidanceActive && inCfgRange)
             {
-                int negSeqLen = (int)negativeCaptionEmbeddings!.Shape[1];
-                Tensor uncond = _transformer.Forward(Backend, latent, t, negativeCaptionEmbeddings, negSeqLen);
-
-                // t2i path (no input image): reduces to standard CFG with the text guidance scale,
-                // pred = uncond + text_guidance_scale * (cond - uncond).
-                Tensor combined = CfgHelper.ApplyCfg(uncond, velocity, effectiveTextGuidance);
+                Tensor uncond = _transformer.ForwardPacked(Backend, latent, t, negativeCaptionEmbeddings!, negSeqLen, hPacked, wPacked);
+                Backend.CfgEulerStep(latent, cond, uncond, effectiveTextGuidance, dt);
                 uncond.Dispose();
-                velocity.Dispose();
-                velocity = combined;
-
-                // Input-image conditioning with the full triple pass (imageGuidanceScale > 1) lives in
-                // EditFromEmbeddings; t2i has no input image, so only the text-guidance term applies here.
+                // Triple-pass image guidance lives in EditFromEmbeddings; t2i uses only the text-guidance term.
                 _ = imageGuidanceScale;
             }
-
-            Tensor newLatent = new(latentShape, DType.F32);
-            scheduler.Step(newLatent, velocity, latent, i);
-            velocity.Dispose();
-            latent.Dispose();
-            latent = newLatent;
+            else
+            {
+                Backend.CfgEulerStep(latent, cond, cond, 1.0f, dt);   // bare conditional (pos=neg → v=cond)
+            }
+            cond.Dispose();
 
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
@@ -158,8 +156,14 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
 
-        Tensor decoded = _vaeDecoder.Decode(Backend, latent);
+        // One device unpatchify back to NCHW for the VAE (the latent never left the GPU during the loop).
+        Tensor latentNchw = new(latentShape, DType.F32);
+        Backend.UnpatchifyTokens(latentNchw, latent, _config.InChannels, hPacked, wPacked, _config.PatchSize,
+            innerChannelFastest: true);
         latent.Dispose();
+
+        Tensor decoded = _vaeDecoder.Decode(Backend, latentNchw);
+        latentNchw.Dispose();
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(decoded);
         decoded.Dispose();
 

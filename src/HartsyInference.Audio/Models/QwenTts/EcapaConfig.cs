@@ -1,8 +1,10 @@
 namespace HartsyInference.Audio.Models.QwenTts;
 
-/// <summary>Configuration for the ECAPA-TDNN speaker encoder used by Qwen3-TTS x-vector voice cloning. Mirrors
-/// the SpeechBrain ECAPA-TDNN topology (3 SE-Res2Blocks with dilations 2/3/4, channel 512, Res2 scale 8,
-/// SE bottleneck 128, attentive statistics pooling → 192-d embedding).</summary>
+/// <summary>Configuration for the ECAPA-TDNN speaker encoder used by Qwen3-TTS x-vector voice cloning
+/// (<c>speaker_encoder.*</c> in the Base checkpoint). Matches the reference <c>Qwen3TTSSpeakerEncoder</c>:
+/// a TDNN stem + three SE-Res2Net blocks (dilations 2/3/4) → multi-layer aggregation (concat of the three
+/// SE-Res2 outputs) → attentive statistics pooling → a final 1×1 conv to the embedding. <b>No BatchNorm</b>
+/// (TDNN blocks are Conv1d+ReLU only) and <b>no post-fc projection</b> — the fc output IS the x-vector.</summary>
 public sealed record EcapaConfig
 {
     /// <summary>Mel-bin count of the input feature sequence.</summary>
@@ -18,15 +20,19 @@ public sealed record EcapaConfig
     public IReadOnlyList<int> KernelSizes { get; init; } = [3, 3, 3];
     public IReadOnlyList<int> Dilations { get; init; } = [2, 3, 4];
 
-    /// <summary>Res2Net scale (number of within-channel groups).</summary>
+    /// <summary>Multi-layer-aggregation channels (concat of the 3 SE-Res2 outputs = 3×512 = 1536).</summary>
+    public int MfaChannels { get; init; } = 1_536;
+
+    /// <summary>Attentive-statistics-pooling attention bottleneck channels.</summary>
+    public int AttentionChannels { get; init; } = 128;
+
+    /// <summary>Res2Net scale (number of within-channel chunks).</summary>
     public int Res2Scale { get; init; } = 8;
     public int SeBottleneck { get; init; } = 128;
 
-    /// <summary>Final speaker-embedding dimension.</summary>
+    /// <summary>Final speaker-embedding dimension (fc output = enc_dim). This IS the injected x-vector width and
+    /// must equal the talker hidden size (2048 for 1.7B).</summary>
     public int EmbeddingDim { get; init; } = 2_048;
-
-    /// <summary>Talker speaker-conditioning width the embedding is projected to.</summary>
-    public int ConditioningDim { get; init; } = 2_048;
 
     /// <summary>Input waveform sample rate (Hz) for mel-feature extraction.</summary>
     public int SampleRate { get; init; } = 24_000;

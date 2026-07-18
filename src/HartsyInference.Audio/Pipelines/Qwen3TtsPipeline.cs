@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.QwenTts;
+using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Logging;
@@ -24,13 +25,27 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
 {
     private static readonly bool DebugCodes = Environment.GetEnvironmentVariable("QWEN3_DEBUG") == "1";
 
+    /// <summary>Codec-stream sentinel marking the prefill position where the ECAPA x-vector embedding is
+    /// injected in place of a token lookup (voice_clone). Any value the codec vocab never uses.</summary>
+    private const int SpeakerEmbedSentinel = int.MinValue;
+
     private readonly Qwen3TtsConfig _cfg;
     private readonly Qwen3TtsTalker _talker;
     private readonly Qwen3MtpCodePredictor _mtp;
     private readonly Qwen3TtsVocoder _vocoder;
     private readonly MimiModel _refCodec;
     private readonly EcapaSpeakerEncoder _ecapa;
+    private readonly MelSpectrogramExtractor _ecapaMel = new(EcapaMelConfig);
     private int _disposed;
+
+    /// <summary>128-bin log-mel front-end for the ECAPA speaker encoder — matches the reference
+    /// <c>mel_spectrogram</c>: n_fft 1024 / hop 256 / win 1024, slaney filterbank, fmin 0 / fmax 12000,
+    /// magnitude spectrum, natural log with a 1e-5 floor.</summary>
+    private static MelSpectrogramExtractor.Config EcapaMelConfig => new(
+        SampleRate: 24_000, NFft: 1_024, WinLength: 1_024, HopLength: 256, NMels: 128,
+        Fmin: 0.0, Fmax: 12_000.0, Norm: MelSpectrogramExtractor.Normalization.None, DropLastStftFrame: false,
+        LogBase: MelSpectrogramExtractor.LogBase.Natural, LogFloor: 1e-5f, DynamicRangeDb: 0f,
+        NormOffset: 0f, NormScale: 1f, PowerSpectrum: false, Scale: MelScale.Slaney, SlaneyNorm: true, Center: true);
 
     public Qwen3TtsConfig Config => _cfg;
     public int SampleRate => _cfg.Vocoder.SampleRate;
@@ -83,15 +98,35 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
         return GenerateFromPrefill(backend, BuildPrefill(textTokens, speakerToken: -1, languageId), seed, progress);
     }
 
-    /// <summary>Voice-clone synthesis: Mimi-encodes a 24 kHz reference clip to seed the codec context and/or an
-    /// ECAPA x-vector. <b>Structural/ICL path pending real-weights validation</b>; custom_voice/voice_design are the
-    /// verified modes. <paramref name="refPcm"/> may be empty.</summary>
-    public float[] SynthesizeVoiceClone(IBackend backend, ReadOnlySpan<int> textTokens, ReadOnlySpan<float> refPcm,
+    /// <summary>Voice-clone synthesis (x-vector mode, the Base checkpoint's <c>x_vector_only</c> path): the
+    /// reference clip's ECAPA speaker embedding is injected at the codec speaker position in place of a
+    /// preset-speaker token, cloning the timbre. <paramref name="refPcm24k"/> is a mono 24 kHz reference clip
+    /// (~3 s+); pass <paramref name="refMel"/> to reuse a precomputed 128-bin log-mel instead. Requires the
+    /// ECAPA weights to be loaded (Base checkpoint only).</summary>
+    public float[] SynthesizeVoiceClone(IBackend backend, ReadOnlySpan<int> textTokens, ReadOnlySpan<float> refPcm24k,
         Tensor? refMel = null, int languageId = -1, int seed = 0, Action<GenerationProgress>? progress = null)
     {
         ThrowIfDisposed();
-        if (refMel is not null) { Tensor cond = _ecapa.Encode(backend, refMel); cond.Dispose(); }
-        return GenerateFromPrefill(backend, BuildPrefill(textTokens, speakerToken: -1, languageId), seed, progress);
+        Tensor mel = refMel ?? BuildEcapaMel(refPcm24k);
+        Tensor spkEmbed = _ecapa.Encode(backend, mel);   // [1, EmbeddingDim] == talker hidden
+        if (refMel is null) mel.Dispose();
+        try
+        {
+            return GenerateFromPrefill(backend, BuildPrefill(textTokens, SpeakerEmbedSentinel, languageId), seed, progress, spkEmbed);
+        }
+        finally { spkEmbed.Dispose(); }
+    }
+
+    /// <summary>Computes the ECAPA 128-bin log-mel <c>[1, 128, T]</c> from a mono 24 kHz reference clip.</summary>
+    private Tensor BuildEcapaMel(ReadOnlySpan<float> pcm24k)
+    {
+        float[,] mel = _ecapaMel.Compute(pcm24k);   // [nMels, T], already natural-log
+        int nMels = mel.GetLength(0), t = mel.GetLength(1);
+        Tensor outT = new(new TensorShape(1, nMels, t), DType.F32);
+        float* op = (float*)outT.DataPointer;
+        for (int m = 0; m < nMels; m++)
+            for (int s = 0; s < t; s++) op[(long)m * t + s] = mel[m, s];
+        return outT;
     }
 
     /// <summary>Builds the dual-stream prefill as ordered (text-side token, codec-side token) pairs, reproducing the
@@ -109,7 +144,9 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
         List<int> codec = new(8);
         if (languageId >= 0) { codec.Add(_cfg.CodecThink); codec.Add(_cfg.CodecThinkBos); codec.Add(languageId); codec.Add(_cfg.CodecThinkEos); }
         else { codec.Add(_cfg.CodecNoThink); codec.Add(_cfg.CodecThinkBos); codec.Add(_cfg.CodecThinkEos); }
-        if (speakerToken >= 0) codec.Add(speakerToken);
+        // Speaker position: a preset-speaker codec token (custom_voice), the x-vector sentinel (voice_clone —
+        // resolved to the raw ECAPA embedding in GenerateFromPrefill), or omitted (voice_design).
+        if (speakerToken >= 0 || speakerToken == SpeakerEmbedSentinel) codec.Add(speakerToken);
         codec.Add(_cfg.CodecPad);
         codec.Add(_cfg.CodecBos);
 
@@ -149,7 +186,7 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
     /// previous frame's full 16-codebook codec feedback (talker codebook-0 embed + the 15 code-predictor acoustic
     /// embeds). The 16-code grid is then decoded to PCM.</summary>
     private float[] GenerateFromPrefill(IBackend backend, List<(int Text, int Codec)> prefill, int seed,
-        Action<GenerationProgress>? progress)
+        Action<GenerationProgress>? progress, Tensor? speakerEmbed = null)
     {
         Stopwatch sw = Stopwatch.StartNew();
         try
@@ -165,9 +202,22 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
             float* pe = (float*)prefillEmbed.DataPointer;
             for (int i = 0; i < prefillLen; i++)
             {
-                Tensor e = _talker.EmbedStep(backend, prefill[i].Text, prefill[i].Codec);
-                Buffer.MemoryCopy((void*)e.DataPointer, pe + (long)i * h, h * 4, h * 4);
-                e.Dispose();
+                if (prefill[i].Codec == SpeakerEmbedSentinel)
+                {
+                    // x-vector clone: text-side embed (tts_pad) + the raw ECAPA speaker embedding (no codec lookup).
+                    Tensor e = _talker.EmbedStep(backend, prefill[i].Text, -1);
+                    float* ep = (float*)e.DataPointer;
+                    float* sp = (float*)speakerEmbed!.DataPointer;
+                    for (int c = 0; c < h; c++) ep[c] += sp[c];
+                    Buffer.MemoryCopy((void*)e.DataPointer, pe + (long)i * h, h * 4, h * 4);
+                    e.Dispose();
+                }
+                else
+                {
+                    Tensor e = _talker.EmbedStep(backend, prefill[i].Text, prefill[i].Codec);
+                    Buffer.MemoryCopy((void*)e.DataPointer, pe + (long)i * h, h * 4, h * 4);
+                    e.Dispose();
+                }
             }
             Tensor hiddenAll = _talker.Forward(backend, prefillEmbed, prefillLen, 0, cache);
             prefillEmbed.Dispose();

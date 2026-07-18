@@ -163,22 +163,24 @@ public static unsafe class DiTUtils
         int dim = (int)a.Shape[2];
         int seqOut = seqA + seqB;
 
+        // Dtype-aware byte copy: the output inherits the input dtype and all offsets/lengths use the actual
+        // element size. Reading these as float* with sizeof(float) would over-read an F16 buffer by 2× (OOB →
+        // heap corruption) — the F16 activation-path crash. F32 behaviour is byte-identical to before.
+        int elem = a.DType.SizeInBytes;
         TensorShape outShape = new TensorShape(batch, seqOut, dim);
-        Tensor output = new Tensor(outShape, DType.F32);
+        Tensor output = new Tensor(outShape, a.DType);
 
-        float* aPtr = (float*)a.DataPointer;
-        float* bPtr = (float*)b.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
+        byte* aPtr = (byte*)a.DataPointer;
+        byte* bPtr = (byte*)b.DataPointer;
+        byte* outPtr = (byte*)output.DataPointer;
 
         for (int bIdx = 0; bIdx < batch; bIdx++)
         {
-            int aSrcOffset = bIdx * seqA * dim;
-            int aDstOffset = bIdx * seqOut * dim;
-            Buffer.MemoryCopy(aPtr + aSrcOffset, outPtr + aDstOffset, seqA * dim * sizeof(float), seqA * dim * sizeof(float));
-
-            int bSrcOffset = bIdx * seqB * dim;
-            int bDstOffset = bIdx * seqOut * dim + seqA * dim;
-            Buffer.MemoryCopy(bPtr + bSrcOffset, outPtr + bDstOffset, seqB * dim * sizeof(float), seqB * dim * sizeof(float));
+            long aBytes = (long)seqA * dim * elem;
+            long bBytes = (long)seqB * dim * elem;
+            long dstBase = (long)bIdx * seqOut * dim * elem;
+            Buffer.MemoryCopy(aPtr + (long)bIdx * seqA * dim * elem, outPtr + dstBase, aBytes, aBytes);
+            Buffer.MemoryCopy(bPtr + (long)bIdx * seqB * dim * elem, outPtr + dstBase + aBytes, bBytes, bBytes);
         }
 
         return output;
@@ -192,22 +194,25 @@ public static unsafe class DiTUtils
         int dim = (int)combined.Shape[2];
         int secondSeqLen = totalSeq - firstSeqLen;
 
+        // Dtype-aware byte copy (see ConcatAlongSeqDim): output inherits the input dtype; float*/sizeof(float)
+        // would over-read an F16 buffer by 2× → heap corruption. F32 behaviour is byte-identical to before.
+        int elem = combined.DType.SizeInBytes;
         TensorShape firstShape = new TensorShape(batch, firstSeqLen, dim);
         TensorShape secondShape = new TensorShape(batch, secondSeqLen, dim);
-        Tensor first = new Tensor(firstShape, DType.F32);
-        Tensor second = new Tensor(secondShape, DType.F32);
+        Tensor first = new Tensor(firstShape, combined.DType);
+        Tensor second = new Tensor(secondShape, combined.DType);
 
-        float* srcPtr = (float*)combined.DataPointer;
-        float* firstPtr = (float*)first.DataPointer;
-        float* secondPtr = (float*)second.DataPointer;
+        byte* srcPtr = (byte*)combined.DataPointer;
+        byte* firstPtr = (byte*)first.DataPointer;
+        byte* secondPtr = (byte*)second.DataPointer;
 
         for (int bIdx = 0; bIdx < batch; bIdx++)
         {
-            int srcBase = bIdx * totalSeq * dim;
-            Buffer.MemoryCopy(srcPtr + srcBase, firstPtr + bIdx * firstSeqLen * dim,
-                firstSeqLen * dim * sizeof(float), firstSeqLen * dim * sizeof(float));
-            Buffer.MemoryCopy(srcPtr + srcBase + firstSeqLen * dim, secondPtr + bIdx * secondSeqLen * dim,
-                secondSeqLen * dim * sizeof(float), secondSeqLen * dim * sizeof(float));
+            long srcBase = (long)bIdx * totalSeq * dim * elem;
+            long firstBytes = (long)firstSeqLen * dim * elem;
+            long secondBytes = (long)secondSeqLen * dim * elem;
+            Buffer.MemoryCopy(srcPtr + srcBase, firstPtr + (long)bIdx * firstSeqLen * dim * elem, firstBytes, firstBytes);
+            Buffer.MemoryCopy(srcPtr + srcBase + firstBytes, secondPtr + (long)bIdx * secondSeqLen * dim * elem, secondBytes, secondBytes);
         }
 
         return (first, second);

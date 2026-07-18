@@ -1096,3 +1096,39 @@ did not reproduce. Multi-model sessions no longer need restarts between GGUF swi
 
 **Zeta-Chroma carried clean:** the 44.70 BF16 `in_ln` decoder-head fix is in this build; status promoted
 to ✅ VERIFIED CLEAN in MODEL_STATUS_IMAGE.md.
+
+## 2026-07-18 — OmniGen 2 perf pass: warm **132.6s → 19.21s (6.90×)** — engine `alpha.54→60`
+
+Re-benched the OmniGen2 baseline first (per request): it had **regressed to 132.6s** (worse than the 07-10
+90.5s — a change between then and now slowed it). Then a full perf pass on the 4090 (1024²/20st/cfg4, warm
+median via the Swarm API), deployed live to the Hartsy backend.
+
+| Build | Hartsy warm median | GPU util | vs prev | vs ComfyUI 13.0s |
+|---|---:|---:|---|---|
+| Baseline (re-benched, `alpha.53`) | 132.6s | 29% | — | 10.2× slower |
+| + Device RoPE (`alpha.54`) | 32.66s | 77% | **4.06×** | 2.51× |
+| + F16 SDPA/activations (`alpha.55–56`) | ~32.4s | 77% | ~neutral | — |
+| + Drain-free loop F32 (`alpha.58`) | 22.96s | 84% | 1.42× | 1.77× |
+| + Drain-free loop F16 (`alpha.59`) | 20.53s | 84% | 1.12× | 1.58× |
+| + Device Concat/Split (`alpha.60`, SHIPPED) | **19.21s** | ~90% | 1.07× | **1.48×** |
+
+Levers: (1) **device RoPE** — `OmniGen2Block` ran a host `rope.Apply` loop that D2H-drained Q/K every block
+(~2900 round-trips/gen, util 29%); wired the device `WanRopeInterleaved` on pre-permute [B,S,H,D] with cached
+tables (bit-exact) → the 4× win. (2) **drain-free loop** — `ForwardPacked` keeps the latent packed & GPU-resident
+across all 40 forwards; `CfgEulerStep` + device patchify/unpatchify; removes per-step D2H AND the
+`cpu-glue-async-race` crash. (3) **F16 activations** + cuDNN flash SDPA (modest — not GEMM-bound). (4) **device
+Concat/Split** (`backend.Concat` + `SliceRows`) — forward now fully device-resident.
+
+**Cross-model bug fixed:** `DiTUtils.ConcatAlongSeqDim`/`SplitAlongSeqDim` were F32-hardcoded host loops; fed F16
+tensors they over-read the half-size buffer by 2× → heap corruption → intermittent segfault (the F16 crash).
+Made dtype-aware. 36 call sites (Flux/SD3/HiDream/ZImage/Boogu/…) — any F16 caller was at risk.
+
+**Not under 13s (project-scale from here).** util ~90% → ceiling ~16-17s; F16 barely helped so the wall is
+~1000 tiny memory-bound kernels/step. CUDA-graph is BLOCKED: cond/uncond have different text lengths (unpadded,
+ComfyUI-parity) → different graph shapes, and the `StepGraph` API is single-slot. Beating 13s needs a
+text-padding+masking rewrite (to unblock CUDA-graph/batched-CFG) + op fusion (fused QKV, fused FFN). Full
+scoreboard + plan: `benchmarks/results/omnigen2_perf_2026-07-18.md`.
+
+**Deploy env note (changed since the 44.x era):** SwarmUI now runs **net10** (rollForward Major); must launch
+with `DOTNET_ROOT=/usr/lib/dotnet` (net10-only) or the extension's net10 engine DLLs fail
+`System.Runtime 10.0.0.0 not found`. Extension consumes lib/net10.0 (DLL-drop shortcut broken — full pack needed).
