@@ -2,6 +2,7 @@ using HartsyInference.Cli.Commands;
 using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using HartsyInference.Core.Backends;
+using HartsyInference.Vision.Codec;
 using Spectre.Console;
 
 namespace HartsyInference.Cli.Repl;
@@ -30,6 +31,7 @@ public sealed class ReplSession : IDisposable
         new("reset", "reset parameters to defaults"),
         new("list", "browse the model catalog"),
         new("models", "show the local model cache"),
+        new("preview", "display an image inline"),
         new("clear", "clear the screen"),
         new("quit", "exit"),
     };
@@ -128,6 +130,9 @@ public sealed class ReplSession : IDisposable
             case "models":
                 CacheView.Render();
                 break;
+            case "preview":
+                RenderPreview(arg);
+                break;
             case "clear":
                 AnsiConsole.Clear();
                 break;
@@ -176,6 +181,34 @@ public sealed class ReplSession : IDisposable
             AnsiConsole.MarkupLine($"[grey]{Markup.Escape(kv[0])} →[/] [{CliTheme.Accent}]{Markup.Escape(kv[1])}[/]");
         else
             AnsiConsole.MarkupLine($"[red]'{Markup.Escape(kv[0])}' is not a parameter for {Modalities.ToCliName(_modality)}.[/] Try [{CliTheme.Accent}]/show[/].");
+    }
+
+    private static void RenderPreview(string arg)
+    {
+        string path = arg.Trim().Trim('"');
+        if (path.Length == 0)
+        {
+            AnsiConsole.MarkupLine("[red]Usage:[/] /preview <image.png>");
+            return;
+        }
+        if (!File.Exists(path))
+        {
+            AnsiConsole.MarkupLine($"[red]Image not found:[/] {Markup.Escape(path)}");
+            return;
+        }
+        try
+        {
+            (byte[] rgb, int width, int height) = path.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase)
+                ? BmpEncoder.Decode(File.ReadAllBytes(path))
+                : PngDecoder.DecodeFromFile(path);
+            AnsiConsole.WriteLine();
+            TerminalImage.Render(rgb, width, height);
+            AnsiConsole.MarkupLine($"[grey]{width}x{height} · {Markup.Escape(Path.GetFileName(path))}[/]");
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"[red]Could not preview:[/] {Markup.Escape(ex.Message)}");
+        }
     }
 
     private void ShowState()
@@ -262,6 +295,7 @@ public sealed class ReplSession : IDisposable
             ("/reset", "reset parameters to defaults"),
             ("/list [modality]", "browse the model catalog"),
             ("/models", "show the local model cache"),
+            ("/preview <image>", "display an image inline"),
             ("/clear", "clear the screen"),
             ("/quit", "exit"),
         };

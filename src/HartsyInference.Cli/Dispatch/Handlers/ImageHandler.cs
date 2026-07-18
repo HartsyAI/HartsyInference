@@ -77,13 +77,16 @@ public sealed class ImageHandler : IModalityHandler
             p => progress.Step(p.Step, $"{p.ElapsedMs:F0}ms"));
         progress.EndSteps();
 
-        byte[] bmp = BmpEncoder.Encode(rgb, outWidth, outHeight);
+        byte[] png = PngEncoder.Encode(rgb, outWidth, outHeight);
         GeneratedArtifact artifact = new GeneratedArtifact
         {
             Kind = ArtifactKind.Image,
-            FileBytes = bmp,
-            Extension = "bmp",
+            FileBytes = png,
+            Extension = "png",
             Text = $"{outWidth}x{outHeight} image (seed {usedSeed})",
+            PreviewRgb = rgb,
+            PreviewWidth = outWidth,
+            PreviewHeight = outHeight,
         };
         artifact.Meta["model"] = image.ModelId;
         artifact.Meta["size"] = $"{outWidth}x{outHeight}";

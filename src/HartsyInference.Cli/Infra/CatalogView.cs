@@ -29,6 +29,7 @@ public static class CatalogView
         table.AddColumn("[grey]name[/]");
         table.AddColumn("[grey]architecture[/]");
         table.AddColumn("[grey]status[/]");
+        table.AddColumn("[grey]cli[/]");
 
         foreach (CatalogEntry e in entries)
         {
@@ -36,13 +37,15 @@ public static class CatalogView
             string name = Markup.Escape(e.DisplayName);
             string arch = $"[grey]{Markup.Escape(e.Architecture)}[/]";
             string status = CliTheme.StatusMarkup(e.Status);
+            string cli = e.CliDrivable ? "[green]✓[/]" : "[grey]–[/]";
             if (filter is null)
-                table.AddRow($"[grey]{Modalities.ToCliName(e.Modality)}[/]", id, name, arch, status);
+                table.AddRow($"[grey]{Modalities.ToCliName(e.Modality)}[/]", id, name, arch, status, cli);
             else
-                table.AddRow(id, name, arch, status);
+                table.AddRow(id, name, arch, status, cli);
         }
 
         AnsiConsole.Write(table);
+        AnsiConsole.MarkupLine("[grey]cli[/] [green]✓[/] [grey]= runnable from this CLI today ·[/] [grey]–[/] [grey]= engine-supported, use the SwarmUI extension or library API.[/]");
         return entries.Count;
     }
 }

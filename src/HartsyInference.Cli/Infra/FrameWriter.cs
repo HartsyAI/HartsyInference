@@ -1,6 +1,6 @@
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>Writes a sequence of RGB24 video frames as numbered BMP files into a fresh subdirectory.</summary>
+/// <summary>Writes a sequence of RGB24 video frames as numbered PNG files into a fresh subdirectory.</summary>
 public static class FrameWriter
 {
     /// <summary>Writes <paramref name="frames"/> (each <c>width*height*3</c> RGB bytes) into a new subdirectory of
@@ -11,7 +11,7 @@ public static class FrameWriter
         string dir = NextDir(baseDir, Slug.Make(slug));
         Directory.CreateDirectory(dir);
         for (int i = 0; i < frames.Length; i++)
-            File.WriteAllBytes(Path.Combine(dir, $"frame_{i + 1:D4}.bmp"), BmpEncoder.Encode(frames[i], width, height));
+            File.WriteAllBytes(Path.Combine(dir, $"frame_{i + 1:D4}.png"), PngEncoder.Encode(frames[i], width, height));
         return dir;
     }
 

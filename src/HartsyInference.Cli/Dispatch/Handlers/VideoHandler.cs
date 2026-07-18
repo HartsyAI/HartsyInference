@@ -100,8 +100,11 @@ public sealed class VideoHandler : IModalityHandler
         GeneratedArtifact artifact = new GeneratedArtifact
         {
             Kind = ArtifactKind.Video,
-            Extension = "bmp",
+            Extension = "png",
             Text = $"{frames.Length} frames ({width}x{height}) → {dir}",
+            PreviewRgb = frames.Length > 0 ? frames[0] : null,
+            PreviewWidth = width,
+            PreviewHeight = height,
         };
         artifact.Meta["model"] = video.ModelId;
         artifact.Meta["frames"] = frames.Length.ToString(CultureInfo.InvariantCulture);

@@ -64,7 +64,7 @@ public sealed class MusicHandler : IModalityHandler
         int[] ids = music.Tokenizer.Encode(prompt);
         using Tensor t5States = music.TextEncoder.Encode(music.Backend, new[] { ids });
 
-        int duration = parameters.GetInt("duration", 30);
+        int duration = parameters.GetInt("duration", 10);
         int seed = parameters.GetInt("seed", -1);
 
         progress.Stage($"Generating {duration}s of music …");

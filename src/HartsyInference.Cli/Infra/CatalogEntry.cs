@@ -18,6 +18,11 @@ public sealed record CatalogEntry
     /// <summary>Real-weight validation maturity.</summary>
     public required ModelStatus Status { get; init; }
 
+    /// <summary>Whether the CLI can actually drive this model today. The engine supports every catalogued architecture,
+    /// but the CLI's per-modality handlers currently wire only a subset; the rest are reachable via the SwarmUI
+    /// extension or the library API. This keeps <c>hartsy list</c> honest about what <c>hartsy &lt;cmd&gt;</c> can run.</summary>
+    public bool CliDrivable { get; init; }
+
     /// <summary>HuggingFace repo id used by <c>hartsy pull</c> when no local copy is given, when known.</summary>
     public string? HuggingFaceRepo { get; init; }
 }

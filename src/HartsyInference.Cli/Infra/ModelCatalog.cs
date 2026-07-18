@@ -17,8 +17,8 @@ public static class ModelCatalog
     public static CatalogEntry? Find(string id) =>
         Entries.FirstOrDefault(e => string.Equals(e.Id, id, StringComparison.OrdinalIgnoreCase));
 
-    private static CatalogEntry E(string id, Modality modality, string name, string arch, ModelStatus status) =>
-        new CatalogEntry { Id = id, Modality = modality, DisplayName = name, Architecture = arch, Status = status };
+    private static CatalogEntry E(string id, Modality modality, string name, string arch, ModelStatus status, bool cli = false) =>
+        new CatalogEntry { Id = id, Modality = modality, DisplayName = name, Architecture = arch, Status = status, CliDrivable = cli };
 
     private static List<CatalogEntry> Build()
     {
@@ -38,15 +38,15 @@ public static class ModelCatalog
         return new List<CatalogEntry>
         {
             // Text / LLM
-            E("qwen2", txt, "Qwen2.5 (0.5B → 7B)", "Qwen2 dense transformer", ok),
-            E("qwen3", txt, "Qwen3 (0.6B → 7B)", "Qwen3 dense transformer", ok),
-            E("llama3", txt, "Llama-3.x", "Llama dense transformer", st),
-            E("mistral", txt, "Mistral (dense)", "Mistral dense transformer", st),
-            E("gguf", txt, "Quantized GGUF (Q4/Q8)", "config-driven, any GGUF LLM", ok),
+            E("qwen2", txt, "Qwen2.5 (0.5B → 7B)", "Qwen2 dense transformer", ok, cli: true),
+            E("qwen3", txt, "Qwen3 (0.6B → 7B)", "Qwen3 dense transformer", ok, cli: true),
+            E("llama3", txt, "Llama-3.x", "Llama dense transformer", st, cli: true),
+            E("mistral", txt, "Mistral (dense)", "Mistral dense transformer", st, cli: true),
+            E("gguf", txt, "Quantized GGUF (Q4/Q8)", "config-driven, any GGUF LLM", ok, cli: true),
 
             // Image / diffusion
             E("sd15", img, "Stable Diffusion 1.5", "UNet", ok),
-            E("sdxl", img, "SDXL", "UNet (dual CLIP)", ok),
+            E("sdxl", img, "SDXL", "UNet (dual CLIP)", ok, cli: true),
             E("sdxl-refiner", img, "SDXL Refiner", "UNet (dual CLIP)", ok),
             E("sdxl-inpaint", img, "SDXL Inpaint", "UNet", st),
             E("flux1", img, "Flux.1-dev", "single-stream DiT, flow-matching", ok),
@@ -69,10 +69,11 @@ public static class ModelCatalog
             E("anima", img, "Anima", "Cosmos-Predict2-2B (T=1)", st),
 
             // Transcription
-            E("whisper", stt, "Whisper (tiny → large-v3)", "encoder-decoder", ok),
+            E("whisper", stt, "Whisper (tiny → large-v3)", "encoder-decoder", ok, cli: true),
             E("moonshine", stt, "Moonshine", "encoder-decoder", ok),
 
             // Text-to-speech
+            E("piper", tts, "Piper (en_US-lessac-medium, …)", "VITS + espeak phonemes", ok, cli: true),
             E("kokoro", tts, "Kokoro-82M", "StyleTTS-family vocoder", ok),
             E("bark", tts, "Bark", "GPT-style TTS", ok),
             E("styletts2", tts, "StyleTTS2", "style-diffusion TTS", ok),
@@ -83,23 +84,23 @@ public static class ModelCatalog
             E("f5-tts", tts, "F5-TTS", "voice cloning, flow-matching DiT", vp),
 
             // Music / audio generation
-            E("musicgen", mus, "MusicGen", "transformer + EnCodec", ok),
+            E("musicgen", mus, "MusicGen", "transformer + EnCodec", ok, cli: true),
             E("audiogen", mus, "AudioGen", "MusicGen-arch + T5", vp),
             E("ace-step", mus, "ACE-Step", "flow-matching DiT", ok),
             E("yue", mus, "YuE", "dual-stage Llama", ok),
             E("stable-audio", mus, "Stable Audio Open", "latent diffusion", st),
 
             // Vision
-            E("clip", vis, "CLIP (ViT-L/14, H/14, bigG/14)", "ViT embeddings", ok),
+            E("clip", vis, "CLIP (ViT-L/14, H/14, bigG/14)", "ViT embeddings", ok, cli: true),
             E("siglip", vis, "SigLIP · SigLIP2", "ViT embeddings", ok),
             E("dinov2", vis, "DINOv2 · DINOv3", "dense features", ok),
-            E("yolo8", vis, "YOLO8 (n → xl)", "object detection", ok),
-            E("yolo11", vis, "YOLO11 (n → xl)", "object detection", ok),
+            E("yolo8", vis, "YOLO8 (n → xl)", "object detection", ok, cli: true),
+            E("yolo11", vis, "YOLO11 (n → xl)", "object detection", ok, cli: true),
             E("sam", vis, "SAM · SAM 2 · SAM 2.1", "segmentation", ok),
             E("retinaface", vis, "RetinaFace", "face detection + landmarks", ok),
 
             // Video
-            E("ltx-video", vid, "LTX-Video", "DiT + video VAE", vp),
+            E("ltx-video", vid, "LTX-Video", "DiT + video VAE", vp, cli: true),
             E("wan", vid, "Wan 2.2 (T2V + I2V)", "DiT + Wan VAE", vp),
             E("lance-video", vid, "Lance (Video, T2V)", "unified multimodal DiT", vp),
             E("kandinsky5-video", vid, "Kandinsky 5 Video", "DiT", vp),
@@ -109,14 +110,14 @@ public static class ModelCatalog
             E("cosmos-predict1-13b-v2w", vid, "Cosmos-Predict1 13B Video2World", "AR discrete-token transformer", vp),
 
             // 3D
-            E("triposr", d3, "TripoSR", "triplane / NeRF", st),
-            E("hunyuan3d", d3, "Hunyuan3D-2 (Shape)", "Flux MMDiT + VecSet VAE", st),
+            E("triposr", d3, "TripoSR", "triplane / NeRF", st, cli: true),
+            E("hunyuan3d", d3, "Hunyuan3D-2 (Shape)", "Flux MMDiT + VecSet VAE", st, cli: true),
 
             // Interactive / world models
             E("hunyuan-gamecraft", act, "Hunyuan-GameCraft 1.0", "HunyuanVideo MM-DiT", vp),
             E("matrix-game-3", act, "Matrix-Game 3.0", "5B (+28B MoE) memory-augmented", vp),
             E("matrix-game-2", act, "Matrix-Game 2.0", "Wan2.1-lineage 1.8B", vp),
-            E("oasis", act, "Oasis-500m", "axial-attention DiT", vp),
+            E("oasis", act, "Oasis-500m", "axial-attention DiT", vp, cli: true),
         };
     }
 }

@@ -82,8 +82,11 @@ public sealed class InteractiveHandler : IModalityHandler
         GeneratedArtifact artifact = new GeneratedArtifact
         {
             Kind = ArtifactKind.Video,
-            Extension = "bmp",
+            Extension = "png",
             Text = $"{frames.Length} frames ({outWidth}x{outHeight}, action: forward) → {dir}",
+            PreviewRgb = frames.Length > 0 ? frames[0] : null,
+            PreviewWidth = outWidth,
+            PreviewHeight = outHeight,
         };
         artifact.Meta["model"] = interactive.ModelId;
         artifact.Meta["frames"] = frames.Length.ToString(CultureInfo.InvariantCulture);
