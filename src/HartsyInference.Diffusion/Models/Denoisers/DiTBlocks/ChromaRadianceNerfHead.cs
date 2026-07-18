@@ -222,13 +222,23 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
         if (paramDim != 3 * chunk)
             throw new ArgumentException($"param_generator out dim {paramDim} != 3·{nh}·{inner}; NeRF head dims inconsistent.");
 
-        Tensor x = embed;
+        // F16 hot path (HARTSY_DIT_F16): run the per-pixel GLU stream + the batched hypernetwork matmuls (the
+        // profiled ~1.6 s BatchedMatMul + the norm/silu/add HBM) in F16. The `param_generator` GEMM and its
+        // L2-normalize stay F32: imgTokens arrive at ResidualDamp scale and the param_generator GEMM alpha
+        // UN-DAMPS them to FULL scale, which can exceed F16's 65504 BEFORE the normalize clamps it — F32 there
+        // avoids that overflow. The normalized weights (unit-norm) and the RMS-normed pixel stream are bounded,
+        // so they cast down to F16 safely for the matmuls. Cast back to F32 for the final unpatchify + pixel conv.
+        DType act = DitDtype.Act;
+        Tensor x;
+        if (act == DType.F32) x = embed;
+        else { x = new Tensor(embed.Shape, act); backend.CastToF16(x, embed); }
+
         int tile = (int)Math.Min(PatchTileSize, bn);
         int tileCount = (int)((bn + tile - 1) / tile);
         for (int d = 0; d < _depth; d++)
         {
             // ── x = x + (silu(xn·W1) ⊙ (xn·W2))·W3, xn = RMSNorm(x) — batched over patches, in patch tiles. ──
-            Tensor xn = new Tensor(x.Shape, DType.F32);
+            Tensor xn = new Tensor(x.Shape, act);
             backend.RmsNorm(xn, x, _normScale[d]!, NormEps);
 
             Tensor[] outTiles = new Tensor[tileCount];
@@ -237,7 +247,8 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
                 int start = t * tile;
                 int count = (int)Math.Min(tile, bn - start);
 
-                // ── Per-patch generated weights: one GEMM over the tile, then chunk split [W1, W2, W3]. ──
+                // ── Per-patch generated weights: one GEMM over the tile (F32, un-damp overflow guard), then
+                //    chunk split [W1, W2, W3] + L2-normalize (F32), then cast the unit-norm weights to `act`. ──
                 Tensor tokensTile;
                 if (tileCount == 1)
                 {
@@ -252,13 +263,9 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
                 backend.Linear(genParams, tokensTile, _paramGenWeight[d]!, _paramGenBias[d]);
                 if (!ReferenceEquals(tokensTile, imgTokens)) tokensTile.Dispose();
 
-                // Chunks are viewed row-major [inDim, outDim] per patch (fc1/fc2: [nh, inner], fc3: [inner, nh])
-                // and L2-normalized along the INPUT dim per output unit (F.normalize(dim=-2)). Batched-transpose
-                // to put the normalize dim last, RMSNorm with the constant 1/sqrt(dim) scale (== exact L2
-                // normalize), then transpose back to the [in, out] layout BatchedMatMul consumes directly.
-                Tensor w1 = NormalizedChunk(backend, genParams, offset: 0, inDim: nh, outDim: inner, count, _l2ScaleNh!);
-                Tensor w2 = NormalizedChunk(backend, genParams, offset: (int)chunk, inDim: nh, outDim: inner, count, _l2ScaleNh!);
-                Tensor w3 = NormalizedChunk(backend, genParams, offset: (int)(2 * chunk), inDim: inner, outDim: nh, count, _l2ScaleInner!);
+                Tensor w1 = ToAct(backend, NormalizedChunk(backend, genParams, offset: 0, inDim: nh, outDim: inner, count, _l2ScaleNh!), act);
+                Tensor w2 = ToAct(backend, NormalizedChunk(backend, genParams, offset: (int)chunk, inDim: nh, outDim: inner, count, _l2ScaleNh!), act);
+                Tensor w3 = ToAct(backend, NormalizedChunk(backend, genParams, offset: (int)(2 * chunk), inDim: inner, outDim: nh, count, _l2ScaleInner!), act);
                 genParams.Dispose();
 
                 Tensor xnTile;
@@ -268,26 +275,26 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
                 }
                 else
                 {
-                    xnTile = new Tensor(new TensorShape(count, pix, nh), DType.F32);
+                    xnTile = new Tensor(new TensorShape(count, pix, nh), act);
                     backend.SliceRows(xnTile, xn, start * pix);
                 }
-                Tensor gate = new Tensor(new TensorShape(count, pix, inner), DType.F32);
+                Tensor gate = new Tensor(new TensorShape(count, pix, inner), act);
                 backend.BatchedMatMul(gate, xnTile, w1);
-                Tensor value = new Tensor(new TensorShape(count, pix, inner), DType.F32);
+                Tensor value = new Tensor(new TensorShape(count, pix, inner), act);
                 backend.BatchedMatMul(value, xnTile, w2);
                 if (!ReferenceEquals(xnTile, xn)) xnTile.Dispose();
                 w1.Dispose();
                 w2.Dispose();
 
-                Tensor gateSilu = new Tensor(gate.Shape, DType.F32);
+                Tensor gateSilu = new Tensor(gate.Shape, act);
                 backend.Silu(gateSilu, gate);
                 gate.Dispose();
-                Tensor glu = new Tensor(gateSilu.Shape, DType.F32);
+                Tensor glu = new Tensor(gateSilu.Shape, act);
                 backend.Mul(glu, gateSilu, value);
                 gateSilu.Dispose();
                 value.Dispose();
 
-                Tensor blockOut = new Tensor(new TensorShape(count, pix, nh), DType.F32);
+                Tensor blockOut = new Tensor(new TensorShape(count, pix, nh), act);
                 backend.BatchedMatMul(blockOut, glu, w3);
                 glu.Dispose();
                 w3.Dispose();
@@ -302,33 +309,36 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
             }
             else
             {
-                blockOutFull = new Tensor(new TensorShape(bn, pix, nh), DType.F32);
+                blockOutFull = new Tensor(new TensorShape(bn, pix, nh), act);
                 backend.Concat(blockOutFull, outTiles, dim: 0);
                 for (int t = 0; t < tileCount; t++) outTiles[t].Dispose();
             }
 
-            Tensor xNew = new Tensor(x.Shape, DType.F32);
+            Tensor xNew = new Tensor(x.Shape, act);
             backend.Add(xNew, x, blockOutFull);
             blockOutFull.Dispose();
             if (!ReferenceEquals(x, embed)) x.Dispose();
             x = xNew;
         }
 
-        // ── Final RMSNorm, fold patch tokens back to image layout, final conv → x0 [B, 3, H, W]. ──
-        Tensor xnFinal = new Tensor(x.Shape, DType.F32);
+        // ── Final RMSNorm, back to F32 for the unpatchify + pixel conv, fold to image layout, conv → x0. ──
+        Tensor xnFinal = new Tensor(x.Shape, act);
         backend.RmsNorm(xnFinal, x, _finalNormScale!, NormEps);
         if (!ReferenceEquals(x, embed)) x.Dispose();
+        Tensor xnFinalF32;
+        if (xnFinal.DType == DType.F32) xnFinalF32 = xnFinal;
+        else { xnFinalF32 = new Tensor(xnFinal.Shape, DType.F32); backend.CastToF32(xnFinalF32, xnFinal); xnFinal.Dispose(); }
 
         Tensor features = new Tensor(new TensorShape(batch, nh, height, width), DType.F32);
         if (batch == 1)
         {
-            backend.UnpatchifyTokens(features, xnFinal, nh, hPacked, wPacked, p, innerChannelFastest: true);
+            backend.UnpatchifyTokens(features, xnFinalF32, nh, hPacked, wPacked, p, innerChannelFastest: true);
         }
         else
         {
-            UnpatchifyBatched(backend, features, xnFinal, batch, seqLen, nh, hPacked, wPacked, p, height, width);
+            UnpatchifyBatched(backend, features, xnFinalF32, batch, seqLen, nh, hPacked, wPacked, p, height, width);
         }
-        xnFinal.Dispose();
+        xnFinalF32.Dispose();
 
         int outChannels = (int)_finalConvWeight.Shape[0];
         Tensor x0 = new Tensor(new TensorShape(batch, outChannels, height, width), DType.F32);
@@ -459,6 +469,17 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
     }
 
     private static Tensor AsF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+
+    /// <summary>Device-casts <paramref name="t"/> to the DiT activation dtype <paramref name="act"/> and DISPOSES
+    /// the source (for the freshly-built normalized-weight chunks). No-op passthrough when already that dtype.</summary>
+    private static Tensor ToAct(IBackend backend, Tensor t, DType act)
+    {
+        if (t.DType == act) return t;
+        Tensor c = new Tensor(t.Shape, act);
+        if (act == DType.F16) backend.CastToF16(c, t); else backend.CastToF32(c, t);
+        t.Dispose();
+        return c;
+    }
 
     /// <summary>Releases weight references.</summary>
     public void Dispose()

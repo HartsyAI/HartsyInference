@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Kyutai;
 
@@ -15,7 +16,9 @@ namespace HartsyInference.Audio.Models.Kyutai;
 /// <c>out_proj.weight</c> [11·1024,1024] by <c>s</c> and using the per-set <c>gating.{s}</c>); project through
 /// the per-codebook head <c>linears[cb]</c> (1024→2048). Norms are RMSNorm-alpha (eps 1e-5); the
 /// <c>depformer_norms</c> before the head are Identity. Validated against the real checkpoint in
-/// <c>KyutaiDepformerParityTests</c>. TODO(gpu-residency): the head-split / cache helpers loop on host pointers.</para></summary>
+/// <c>KyutaiDepformerParityTests</c>. The per-block attention is fully device-resident (SliceLastDim + Permute0213
+/// for the head split, a <see cref="FixedKvCache"/> + <see cref="IBackend.FlashAttention"/> over the depth prefix)
+/// — no host-pointer KV copies, which were ~1000 D2H drains per frame.</para></summary>
 public sealed unsafe class MoshiDepformer : IDisposable
 {
     public const int Dim = 1024, Heads = 16, HeadDim = 64, Layers = 4, Sets = 11, DepQ = 32;
@@ -86,47 +89,39 @@ public sealed unsafe class MoshiDepformer : IDisposable
     {
         Tensor logits = new(new TensorShape(DepQ, Card), DType.F32);
         tokens = new int[DepQ];
-        Tensor[] kCache = new Tensor[Layers], vCache = new Tensor[Layers];
-        for (int l = 0; l < Layers; l++)
+        // Device-resident depth KV cache (FixedKvCache + FlashAttention) instead of the per-block host-pointer
+        // copies (WriteStep/Prefix/HeadSlice/HeadsToFlat) that forced ~Layers·8 D2H drains per codebook — ~1000
+        // host round-trips per frame on a GPU backend, the dominant cost of Kyutai TTS generation.
+        using FixedKvCache depthCache = new(Layers, batch: 1, numKvHeads: Heads, headDim: HeadDim, maxSequenceLength: DepQ);
+        int prev = textToken;
+        for (int cb = 0; cb < DepQ; cb++)
         {
-            kCache[l] = new Tensor(new TensorShape(1, Heads, DepQ, HeadDim), DType.F32);
-            vCache[l] = new Tensor(new TensorShape(1, Heads, DepQ, HeadDim), DType.F32);
-        }
-        try
-        {
-            int prev = textToken;
-            for (int cb = 0; cb < DepQ; cb++)
-            {
-                int set = Schedule[cb];
-                Tensor depIn = WhisperOps.ProjectLinear(backend, transformerOut, _inProj[set]!, null, 1, 1, MainDim, Dim);
-                Tensor emb = cb == 0 ? TextEmbed(backend, prev) : CodeEmbed(backend, cb - 1, prev);
-                Tensor x = new(new TensorShape(1, 1, Dim), DType.F32);
-                backend.Add(x, depIn, emb); depIn.Dispose(); emb.Dispose();
+            int set = Schedule[cb];
+            Tensor depIn = WhisperOps.ProjectLinear(backend, transformerOut, _inProj[set]!, null, 1, 1, MainDim, Dim);
+            Tensor emb = cb == 0 ? TextEmbed(backend, prev) : CodeEmbed(backend, cb - 1, prev);
+            Tensor x = new(new TensorShape(1, 1, Dim), DType.F32);
+            backend.Add(x, depIn, emb); depIn.Dispose(); emb.Dispose();
 
-                for (int l = 0; l < Layers; l++)
-                    x = Block(backend, x, l, set, cb, kCache[l], vCache[l]);
+            for (int l = 0; l < Layers; l++)
+                x = Block(backend, x, l, set, cb, depthCache);
+            depthCache.AdvanceLength(1);   // all Layers appended this codebook's row at position cb; advance once
 
-                Tensor lg = WhisperOps.ProjectLinear(backend, x, _heads[cb]!, null, 1, 1, Dim, Card);
-                x.Dispose();
-                Buffer.MemoryCopy((void*)lg.DataPointer, (float*)logits.DataPointer + (long)cb * Card, Card * 4, Card * 4);
-                ReadOnlySpan<float> lgSpan = new((void*)lg.DataPointer, Card);
-                int tok = temp > 0f && rng is not null ? SampleTopK(lgSpan, temp, topK, rng) : ArgMax(lgSpan);
-                lg.Dispose();
-                tokens[cb] = tok;
-                // Teacher forcing (parity): feed the reference's previous-codebook token as the next step's input,
-                // so each codebook's logits are compared under identical context (a sampling model never follows
-                // the greedy cascade, so greedy-cascade divergence is not itself a bug).
-                prev = forcedPrev is not null ? forcedPrev[cb] : tok;
-            }
-            return logits;
+            Tensor lg = WhisperOps.ProjectLinear(backend, x, _heads[cb]!, null, 1, 1, Dim, Card);
+            x.Dispose();
+            Buffer.MemoryCopy((void*)lg.DataPointer, (float*)logits.DataPointer + (long)cb * Card, Card * 4, Card * 4);
+            ReadOnlySpan<float> lgSpan = new((void*)lg.DataPointer, Card);
+            int tok = temp > 0f && rng is not null ? SampleTopK(lgSpan, temp, topK, rng) : ArgMax(lgSpan);
+            lg.Dispose();
+            tokens[cb] = tok;
+            // Teacher forcing (parity): feed the reference's previous-codebook token as the next step's input,
+            // so each codebook's logits are compared under identical context (a sampling model never follows
+            // the greedy cascade, so greedy-cascade divergence is not itself a bug).
+            prev = forcedPrev is not null ? forcedPrev[cb] : tok;
         }
-        finally
-        {
-            for (int l = 0; l < Layers; l++) { kCache[l].Dispose(); vCache[l].Dispose(); }
-        }
+        return logits;
     }
 
-    private Tensor Block(IBackend backend, Tensor x, int layer, int set, int cb, Tensor kCache, Tensor vCache)
+    private Tensor Block(IBackend backend, Tensor x, int layer, int set, int cb, FixedKvCache depthCache)
     {
         TensorShape sh = new(1, 1, Dim);
         Tensor pre = new(sh, DType.F32);
@@ -136,16 +131,22 @@ public sealed unsafe class MoshiDepformer : IDisposable
         Tensor qkv = WhisperOps.ProjectLinear(backend, pre, _selfIn[layer, set]!, null, 1, 1, Dim, 3 * Dim);
         pre.Dispose();
 
-        Tensor q = HeadSlice(qkv, 0), k = HeadSlice(qkv, Dim), v = HeadSlice(qkv, 2 * Dim);
+        // Slice q/k/v and reshape to heads entirely on-device (SliceLastDim + Permute0213), append this codebook's
+        // K/V into the device cache, and FlashAttention over the [0..cb] prefix — no host pointer copies, no D2H.
+        Tensor q1 = new(sh, DType.F32); backend.SliceLastDim(q1, qkv, 0);
+        Tensor k1 = new(sh, DType.F32); backend.SliceLastDim(k1, qkv, Dim);
+        Tensor v1 = new(sh, DType.F32); backend.SliceLastDim(v1, qkv, 2 * Dim);
         qkv.Dispose();
-        WriteStep(kCache, k, cb); k.Dispose();
-        WriteStep(vCache, v, cb); v.Dispose();
-        Tensor kPre = Prefix(kCache, cb + 1), vPre = Prefix(vCache, cb + 1);
+        Tensor qMh = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32); backend.Permute0213(qMh, q1, 1, Heads, HeadDim); q1.Dispose();
+        Tensor kMh = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32); backend.Permute0213(kMh, k1, 1, Heads, HeadDim); k1.Dispose();
+        Tensor vMh = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32); backend.Permute0213(vMh, v1, 1, Heads, HeadDim); v1.Dispose();
+        depthCache.AppendStep(backend, layer, kMh, vMh); kMh.Dispose(); vMh.Dispose();
 
         Tensor attn = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, q, kPre, vPre, null, 1f / MathF.Sqrt(HeadDim));
-        q.Dispose(); kPre.Dispose(); vPre.Dispose();
-        Tensor attnFlat = HeadsToFlat(attn); attn.Dispose();
+        backend.FlashAttention(attn, qMh, depthCache.KeyPrefix(layer), depthCache.ValuePrefix(layer),
+            kvLen: cb + 1, kvGroup: 1, causal: true, qOffset: cb, scale: 1f / MathF.Sqrt(HeadDim));
+        qMh.Dispose();
+        Tensor attnFlat = new(sh, DType.F32); backend.Permute0213(attnFlat, attn, Heads, 1, HeadDim); attn.Dispose();
 
         Tensor o = WhisperOps.ProjectLinear(backend, attnFlat, _selfOut[layer, set]!, null, 1, 1, Dim, Dim);
         attnFlat.Dispose();
@@ -208,37 +209,6 @@ public sealed unsafe class MoshiDepformer : IDisposable
     {
         Tensor outT = new(new TensorShape(1, 1, lr), DType.F32);
         Buffer.MemoryCopy((float*)table.DataPointer + (long)token * lr, (void*)outT.DataPointer, lr * 4, lr * 4);
-        return outT;
-    }
-
-    // [1,1,3·dim] column slice → [1,Heads,1,HeadDim].
-    private static Tensor HeadSlice(Tensor qkv, int colOff)
-    {
-        Tensor outT = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32);
-        Buffer.MemoryCopy((float*)qkv.DataPointer + colOff, (void*)outT.DataPointer, Dim * 4, Dim * 4);
-        return outT;
-    }
-
-    private static Tensor HeadsToFlat(Tensor attn)
-    {
-        Tensor outT = new(new TensorShape(1, 1, Dim), DType.F32);
-        Buffer.MemoryCopy((void*)attn.DataPointer, (void*)outT.DataPointer, Dim * 4, Dim * 4);
-        return outT;
-    }
-
-    private static void WriteStep(Tensor cache, Tensor proj, int pos)
-    {
-        float* cp = (float*)cache.DataPointer; float* pp = (float*)proj.DataPointer;
-        for (int h = 0; h < Heads; h++)
-            Buffer.MemoryCopy(pp + (long)h * HeadDim, cp + ((long)h * DepQ + pos) * HeadDim, HeadDim * 4, HeadDim * 4);
-    }
-
-    private static Tensor Prefix(Tensor cache, int len)
-    {
-        Tensor outT = new(new TensorShape(1, Heads, len, HeadDim), DType.F32);
-        float* cp = (float*)cache.DataPointer; float* op = (float*)outT.DataPointer;
-        for (int h = 0; h < Heads; h++)
-            Buffer.MemoryCopy(cp + (long)h * DepQ * HeadDim, op + (long)h * len * HeadDim, (long)len * HeadDim * 4, (long)len * HeadDim * 4);
         return outT;
     }
 

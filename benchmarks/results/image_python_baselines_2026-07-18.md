@@ -60,13 +60,13 @@ standalone Python reference, not a head-to-head.
 
 Perf-pass queue after re-benching on `alpha.61/62` (several handoff numbers were stale):
 1. **Lumina-Image 2.0 ~1.76×** (17.7 s vs 10.05 s) — needs a re-bench + profile (already F16; lever unknown).
-2. **ChromaRadiance — perf pass done, honest fp8-vs-fp8 = 1.07× (not beaten).** The 54.4 s was stale (already
-   31.2 s). F16 backbone opt-in (coherent) gave only −1 s — a SYNC profile showed **Linear = 58 %, BF16-weight-HBM-
-   bound**, so the lever was **fp8 weight requant** (`QuantizeDitBlocksToFp8` on the block Linears, native fp8
-   tensor-core GEMM): **31.18 → 30.27 (F16) → 22.53 s (fp8)**, coherent, peak VRAM 22→14 GB. **Honest bench**
-   (both fp8; Comfy `--fp8_e4m3fn-unet --fast fp8_matrix_mult`): **Comfy 21.07 vs ours 22.53 → 1.07×, still ~1.5 s
-   behind.** (Comfy fp8 *without* fp8_matrix_mult = 26.37 — slower than its own BF16 24.68; my first "beats Comfy"
-   was the apples-to-oranges our-fp8-vs-Comfy-BF16.) All benchmark numbers here are 4090 warm median.
+2. **ChromaRadiance — perf pass done, honest fp8-vs-fp8 = 1.02× (MATCHED).** The 54.4 s was stale (already
+   31.2 s). Levers: **fp8 weight requant** (`QuantizeDitBlocksToFp8`, native fp8 tensor-core GEMM) 31.18→22.53;
+   CopyInto→re-patchify 22.37; **F16 NeRF head** (F32 hypernetwork BatchedMatMul+GLU → F16 tensor cores; the un-damp
+   `param_generator`+L2-normalize stay F32 for F16-overflow safety) 21.46 s — all coherent, peak VRAM 22→14 GB.
+   **Honest bench** (both fp8; Comfy `--fp8_e4m3fn-unet --fast fp8_matrix_mult` = 21.07): **1.02×, within run-noise.**
+   (Comfy fp8 *without* fp8_matrix_mult = 26.37 — slower than its own BF16 24.68; the first "beats Comfy" was the
+   apples-to-oranges our-fp8-vs-Comfy-BF16.) 4090 warm median; GPU-compute-bound (~100 % util).
 
 **HunyuanImage-2.1 is NOT slower** — the 74.1 s in the original handoff was stale (alpha `44.71`); a re-bench on
 `alpha.61` shows **~50.0 s = 1.04× of Comfy, matched.** An F16-activation opt-in was tried (2026-07-18, `alpha.61`)
