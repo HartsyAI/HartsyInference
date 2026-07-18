@@ -51,6 +51,9 @@ public static class Program
                 .WithDescription("Generate a video (BMP frame sequence) from a prompt with LTX-Video (CUDA).");
             config.AddCommand<InteractiveCommand>("world")
                 .WithDescription("Roll out an Oasis world model from a first-frame image (canned action plan).");
+            config.AddCommand<PreviewCommand>("preview")
+                .WithDescription("Display an image (PNG/BMP) inline in the terminal.")
+                .WithExample("preview", "output/a-fox-in-snow-0001.png");
             config.AddCommand<ListCommand>("list")
                 .WithDescription("List models in the catalog, optionally filtered by modality.")
                 .WithExample("list", "image")

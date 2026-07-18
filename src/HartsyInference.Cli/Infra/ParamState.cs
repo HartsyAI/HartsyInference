@@ -92,7 +92,7 @@ public sealed class ParamState
                 _values["speed"] = "1.0";
                 break;
             case Modality.Music:
-                _values["duration"] = "30";
+                _values["duration"] = "10";
                 _values["seed"] = "-1";
                 break;
             case Modality.Transcribe:
@@ -102,7 +102,7 @@ public sealed class ParamState
                 break;
             case Modality.Vision:
                 _values["mode"] = "embed";
-                _values["confidence"] = "0.5";
+                _values["confidence"] = "0.25";
                 break;
             case Modality.Video:
                 _values["width"] = "704";
@@ -114,8 +114,8 @@ public sealed class ParamState
                 _values["seed"] = "-1";
                 break;
             case Modality.ThreeD:
-                _values["grid"] = "256";
-                _values["steps"] = "50";
+                _values["grid"] = "0";
+                _values["steps"] = "0";
                 _values["seed"] = "-1";
                 break;
             case Modality.Interactive:

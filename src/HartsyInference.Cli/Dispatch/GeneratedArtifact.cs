@@ -20,6 +20,16 @@ public sealed class GeneratedArtifact
     /// tokens), so the presenter should not reprint it.</summary>
     public bool Streamed { get; init; }
 
+    /// <summary>Raw RGB24 pixels (row-major, top-to-bottom) for an inline terminal preview; null when there is nothing
+    /// to show. For video/world results this is the first frame.</summary>
+    public byte[]? PreviewRgb { get; init; }
+
+    /// <summary>Pixel width of <see cref="PreviewRgb"/>.</summary>
+    public int PreviewWidth { get; init; }
+
+    /// <summary>Pixel height of <see cref="PreviewRgb"/>.</summary>
+    public int PreviewHeight { get; init; }
+
     /// <summary>Free-form metadata surfaced to the user (seed, tok/s, dimensions, stop reason).</summary>
     public Dictionary<string, string> Meta { get; } = new(StringComparer.OrdinalIgnoreCase);
 }

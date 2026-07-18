@@ -1,3 +1,4 @@
+using HartsyInference.Cli.Infra;
 using Spectre.Console;
 
 namespace HartsyInference.Cli.Dispatch;
@@ -32,9 +33,15 @@ public static class ResultPresenter
                 AnsiConsole.WriteLine(artifact.Text ?? "");
             }
         }
-        else if (!string.IsNullOrEmpty(artifact.Text))
+        else
         {
-            AnsiConsole.MarkupLine($"[grey]{Markup.Escape(artifact.Text)}[/]");
+            if (artifact.PreviewRgb is { Length: > 0 } rgb && TerminalImage.IsSupported)
+            {
+                AnsiConsole.WriteLine();
+                TerminalImage.Render(rgb, artifact.PreviewWidth, artifact.PreviewHeight);
+            }
+            if (!string.IsNullOrEmpty(artifact.Text))
+                AnsiConsole.MarkupLine($"[grey]{Markup.Escape(artifact.Text)}[/]");
         }
 
         string footer = string.Join(" · ", artifact.Meta

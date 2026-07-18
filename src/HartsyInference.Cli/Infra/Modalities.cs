@@ -8,13 +8,13 @@ public static class Modalities
     {
         Modality.Image => "image",
         Modality.Text => "text",
-        Modality.Speech => "speech",
+        Modality.Speech => "speak",
         Modality.Music => "music",
         Modality.Transcribe => "transcribe",
         Modality.Vision => "vision",
         Modality.Video => "video",
         Modality.ThreeD => "3d",
-        Modality.Interactive => "interactive",
+        Modality.Interactive => "world",
         _ => modality.ToString().ToLowerInvariant(),
     };
 

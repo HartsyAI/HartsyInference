@@ -52,6 +52,41 @@ public static class BmpEncoder
         return bmp;
     }
 
+    /// <summary>Decodes a bottom-up 24-bit BMP (the format <see cref="Encode"/> produces) back into row-major,
+    /// top-to-bottom RGB24. Used to preview BMP artifacts (image/video frames) inline.</summary>
+    public static (byte[] rgb, int width, int height) Decode(byte[] bmp)
+    {
+        if (bmp.Length < 54 || bmp[0] != 'B' || bmp[1] != 'M')
+            throw new ArgumentException("Not a BMP file.");
+        int dataOffset = ReadI32(bmp, 10);
+        int width = ReadI32(bmp, 18);
+        int height = ReadI32(bmp, 22);
+        int bpp = bmp[28] | (bmp[29] << 8);
+        if (bpp != 24)
+            throw new NotSupportedException($"Only 24-bit BMP is supported (got {bpp}-bit).");
+
+        int rowStride = width * 3;
+        int rowPadded = (rowStride + 3) & ~3;
+        byte[] rgb = new byte[rowStride * height];
+        for (int y = 0; y < height; y++)
+        {
+            int srcRow = dataOffset + (height - 1 - y) * rowPadded;
+            int dstRow = y * rowStride;
+            for (int x = 0; x < width; x++)
+            {
+                int src = srcRow + x * 3;
+                int dst = dstRow + x * 3;
+                rgb[dst + 0] = bmp[src + 2];
+                rgb[dst + 1] = bmp[src + 1];
+                rgb[dst + 2] = bmp[src + 0];
+            }
+        }
+        return (rgb, width, height);
+    }
+
+    private static int ReadI32(byte[] buffer, int offset) =>
+        buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16) | (buffer[offset + 3] << 24);
+
     private static void WriteI32(byte[] buffer, int offset, int value)
     {
         buffer[offset + 0] = (byte)value;
