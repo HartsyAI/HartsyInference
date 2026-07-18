@@ -38,7 +38,7 @@ public sealed class ListCommand : Command<ListCommand.Settings>
 
         int count = CatalogView.Render(filter, settings.VerifiedOnly);
         if (count > 0)
-            AnsiConsole.MarkupLine($"[grey]{count} model(s). Use[/] [{CliTheme.Accent}]hartsy list <modality>[/] [grey]to filter, or[/] [{CliTheme.Accent}]--verified[/][grey].[/]");
+            AnsiConsole.MarkupLine($"[#9aa4af]{count} model(s). Use[/] [{CliTheme.Accent}]hartsy list <modality>[/] [#9aa4af]to filter, or[/] [{CliTheme.Accent}]--verified[/][#9aa4af].[/]");
         return 0;
     }
 }

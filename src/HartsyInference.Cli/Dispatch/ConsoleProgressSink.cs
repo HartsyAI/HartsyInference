@@ -14,7 +14,7 @@ public sealed class ConsoleProgressSink : IProgressSink
     {
         if (string.IsNullOrEmpty(message))
             return;
-        AnsiConsole.MarkupLine($"[grey]{Markup.Escape(message)}[/]");
+        AnsiConsole.MarkupLine($"[#9aa4af]{Markup.Escape(message)}[/]");
     }
 
     /// <inheritdoc/>
@@ -40,6 +40,6 @@ public sealed class ConsoleProgressSink : IProgressSink
     {
         Console.WriteLine();
         if (!string.IsNullOrEmpty(summary))
-            AnsiConsole.MarkupLine($"[grey]{Markup.Escape(summary)}[/]");
+            AnsiConsole.MarkupLine($"[#9aa4af]{Markup.Escape(summary)}[/]");
     }
 }

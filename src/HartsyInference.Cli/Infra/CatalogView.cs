@@ -24,28 +24,28 @@ public static class CatalogView
 
         Table table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
         if (filter is null)
-            table.AddColumn("[grey]modality[/]");
+            table.AddColumn("[#9aa4af]modality[/]");
         table.AddColumn($"[{CliTheme.Accent}]model[/]");
-        table.AddColumn("[grey]name[/]");
-        table.AddColumn("[grey]architecture[/]");
-        table.AddColumn("[grey]status[/]");
-        table.AddColumn("[grey]cli[/]");
+        table.AddColumn("[#9aa4af]name[/]");
+        table.AddColumn("[#9aa4af]architecture[/]");
+        table.AddColumn("[#9aa4af]status[/]");
+        table.AddColumn("[#9aa4af]cli[/]");
 
         foreach (CatalogEntry e in entries)
         {
             string id = $"[{CliTheme.Accent}]{Markup.Escape(e.Id)}[/]";
             string name = Markup.Escape(e.DisplayName);
-            string arch = $"[grey]{Markup.Escape(e.Architecture)}[/]";
+            string arch = $"[#9aa4af]{Markup.Escape(e.Architecture)}[/]";
             string status = CliTheme.StatusMarkup(e.Status);
-            string cli = e.CliDrivable ? "[green]✓[/]" : "[grey]–[/]";
+            string cli = e.CliDrivable ? "[green]✓[/]" : "[#9aa4af]–[/]";
             if (filter is null)
-                table.AddRow($"[grey]{Modalities.ToCliName(e.Modality)}[/]", id, name, arch, status, cli);
+                table.AddRow($"[#9aa4af]{Modalities.ToCliName(e.Modality)}[/]", id, name, arch, status, cli);
             else
                 table.AddRow(id, name, arch, status, cli);
         }
 
         AnsiConsole.Write(table);
-        AnsiConsole.MarkupLine("[grey]cli[/] [green]✓[/] [grey]= runnable from this CLI today ·[/] [grey]–[/] [grey]= engine-supported, use the SwarmUI extension or library API.[/]");
+        AnsiConsole.MarkupLine("[#9aa4af]cli[/] [green]✓[/] [#9aa4af]= runnable from this CLI today ·[/] [#9aa4af]–[/] [#9aa4af]= engine-supported, use the SwarmUI extension or library API.[/]");
         return entries.Count;
     }
 }

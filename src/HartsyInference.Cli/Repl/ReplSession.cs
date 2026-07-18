@@ -23,7 +23,8 @@ public sealed class ReplSession : IDisposable
         new("video", "switch to video generation"),
         new("3d", "switch to 3D mesh generation"),
         new("world", "switch to world-model rollout"),
-        new("model", "set the model (id or path)"),
+        new("model", "pick a model (or set id/path)"),
+        new("params", "set generation parameters interactively"),
         new("backend", "set the compute backend"),
         new("set", "set a generation parameter"),
         new("output", "set the artifact output directory"),
@@ -50,7 +51,7 @@ public sealed class ReplSession : IDisposable
     public int Run()
     {
         CliTheme.RenderBanner(_backendSelector);
-        AnsiConsole.MarkupLine($"[grey]Type a prompt to generate, or[/] [{CliTheme.Accent}]/help[/] [grey]for commands.[/] [grey]Ctrl+C or[/] [{CliTheme.Accent}]/quit[/] [grey]to exit.[/]");
+        AnsiConsole.MarkupLine($"[#9aa4af]Type a prompt to generate, or[/] [{CliTheme.Accent}]/help[/] [#9aa4af]for commands.[/] [#9aa4af]Ctrl+C or[/] [{CliTheme.Accent}]/quit[/] [#9aa4af]to exit.[/]");
         AnsiConsole.WriteLine();
 
         while (true)
@@ -73,7 +74,7 @@ public sealed class ReplSession : IDisposable
             }
         }
 
-        AnsiConsole.MarkupLine("[grey]bye.[/]");
+        AnsiConsole.MarkupLine("[#9aa4af]bye.[/]");
         return 0;
     }
 
@@ -104,15 +105,25 @@ public sealed class ReplSession : IDisposable
                     AnsiConsole.MarkupLine($"[red]Unknown mode '{Markup.Escape(arg)}'.[/] Options: {string.Join(", ", Modalities.All.Select(Modalities.ToCliName))}.");
                 break;
             case "model":
-                _model = arg;
-                AnsiConsole.MarkupLine($"[grey]model →[/] [{CliTheme.Accent}]{Markup.Escape(arg.Length == 0 ? "(default)" : arg)}[/]");
+                if (arg.Length == 0)
+                {
+                    PickModel();
+                }
+                else
+                {
+                    _model = arg;
+                    AnsiConsole.MarkupLine($"[#9aa4af]model →[/] [{CliTheme.Accent}]{Markup.Escape(arg)}[/]");
+                }
+                break;
+            case "params":
+                EditParams();
                 break;
             case "backend":
                 SetBackend(arg);
                 break;
             case "output":
                 _outputDir = arg.Length == 0 ? null : arg;
-                AnsiConsole.MarkupLine($"[grey]output →[/] [{CliTheme.Accent}]{Markup.Escape(_outputDir ?? "(default)")}[/]");
+                AnsiConsole.MarkupLine($"[#9aa4af]output →[/] [{CliTheme.Accent}]{Markup.Escape(_outputDir ?? "(default)")}[/]");
                 break;
             case "set":
                 SetParam(arg);
@@ -122,7 +133,7 @@ public sealed class ReplSession : IDisposable
                 break;
             case "reset":
                 _params.Reset();
-                AnsiConsole.MarkupLine("[grey]parameters reset to defaults.[/]");
+                AnsiConsole.MarkupLine("[#9aa4af]parameters reset to defaults.[/]");
                 break;
             case "list":
                 CatalogView.Render(Modalities.TryParse(arg, out Modality lf) ? lf : null, verifiedOnly: false);
@@ -148,7 +159,7 @@ public sealed class ReplSession : IDisposable
         _modality = modality;
         _params = new ParamState(modality);
         _model = "";
-        AnsiConsole.MarkupLine($"[grey]mode →[/] [{CliTheme.Accent}]{Modalities.ToCliName(modality)}[/]" +
+        AnsiConsole.MarkupLine($"[#9aa4af]mode →[/] [{CliTheme.Accent}]{Modalities.ToCliName(modality)}[/]" +
             (_dispatch.IsSupported(modality) ? "" : " [yellow](not wired yet)[/]"));
     }
 
@@ -156,7 +167,7 @@ public sealed class ReplSession : IDisposable
     {
         if (selector.Length == 0)
         {
-            AnsiConsole.MarkupLine($"[grey]backend is[/] [{CliTheme.Accent}]{Markup.Escape(BackendFactory.Describe(_backendSelector))}[/]");
+            AnsiConsole.MarkupLine($"[#9aa4af]backend is[/] [{CliTheme.Accent}]{Markup.Escape(BackendFactory.Describe(_backendSelector))}[/]");
             return;
         }
         if (!BackendFactory.ValidSelectors.Contains(selector, StringComparer.OrdinalIgnoreCase))
@@ -166,7 +177,7 @@ public sealed class ReplSession : IDisposable
         }
         _backendSelector = selector.ToLowerInvariant();
         DisposeLoaded();
-        AnsiConsole.MarkupLine($"[grey]backend →[/] [{CliTheme.Accent}]{Markup.Escape(BackendFactory.Describe(_backendSelector))}[/]");
+        AnsiConsole.MarkupLine($"[#9aa4af]backend →[/] [{CliTheme.Accent}]{Markup.Escape(BackendFactory.Describe(_backendSelector))}[/]");
     }
 
     private void SetParam(string arg)
@@ -178,7 +189,7 @@ public sealed class ReplSession : IDisposable
             return;
         }
         if (_params.TrySet(kv[0], kv[1]))
-            AnsiConsole.MarkupLine($"[grey]{Markup.Escape(kv[0])} →[/] [{CliTheme.Accent}]{Markup.Escape(kv[1])}[/]");
+            AnsiConsole.MarkupLine($"[#9aa4af]{Markup.Escape(kv[0])} →[/] [{CliTheme.Accent}]{Markup.Escape(kv[1])}[/]");
         else
             AnsiConsole.MarkupLine($"[red]'{Markup.Escape(kv[0])}' is not a parameter for {Modalities.ToCliName(_modality)}.[/] Try [{CliTheme.Accent}]/show[/].");
     }
@@ -203,7 +214,7 @@ public sealed class ReplSession : IDisposable
                 : PngDecoder.DecodeFromFile(path);
             AnsiConsole.WriteLine();
             TerminalImage.Render(rgb, width, height);
-            AnsiConsole.MarkupLine($"[grey]{width}x{height} · {Markup.Escape(Path.GetFileName(path))}[/]");
+            AnsiConsole.MarkupLine($"[#9aa4af]{width}x{height} · {Markup.Escape(Path.GetFileName(path))}[/]");
         }
         catch (Exception ex)
         {
@@ -211,10 +222,94 @@ public sealed class ReplSession : IDisposable
         }
     }
 
+    // Transcribe (Whisper) and Speak (Piper) download a sensible default on first use, so they don't need a local pick.
+    private static bool NeedsModelSelection(Modality modality) =>
+        modality is not (Modality.Transcribe or Modality.Speech);
+
+    /// <summary>Scans the models folder for the current modality and lets the user pick one (or enter a path/id), then
+    /// optionally walk its parameters. Returns false when nothing is chosen (empty folder or cancelled).</summary>
+    private bool PickModel()
+    {
+        IReadOnlyList<DiscoveredModel> models = LocalModelScanner.Scan(_modality);
+        if (models.Count == 0)
+        {
+            string folders = string.Join(", ", LocalModelScanner.SearchedFolders(_modality));
+            AnsiConsole.MarkupLine(
+                $"[yellow]No {Modalities.ToCliName(_modality)} models found[/] under [{CliTheme.Accent}]{Markup.Escape(RepoPaths.ModelsRoot())}[/] " +
+                $"[{CliTheme.Muted}]({Markup.Escape(folders)})[/].");
+            AnsiConsole.MarkupLine($"[{CliTheme.Muted}]Set one explicitly with[/] [{CliTheme.Accent}]/model <path|id>[/][{CliTheme.Muted}], or download with[/] [{CliTheme.Accent}]hartsy pull[/][{CliTheme.Muted}].[/]");
+            return false;
+        }
+
+        List<string> choices = models.Select(m => m.IsDirectory ? $"{m.Label}/" : $"{m.Label}   {FormatBytes(m.SizeBytes)}").ToList();
+        choices.Add("✎ enter a path or model id manually…");
+
+        string name = Modalities.ToCliName(_modality);
+        string article = "aeiou".Contains(char.ToLowerInvariant(name[0])) ? "an" : "a";
+        int idx = InteractivePrompt.SelectIndex($"Select {article} {name} model", choices);
+        if (idx < 0)
+        {
+            AnsiConsole.MarkupLine($"[{CliTheme.Muted}]cancelled.[/]");
+            return false;
+        }
+
+        if (idx == models.Count)
+        {
+            string? manual = InteractivePrompt.Ask("model path or id");
+            if (string.IsNullOrWhiteSpace(manual))
+                return false;
+            _model = manual.Trim();
+        }
+        else
+        {
+            _model = models[idx].Path;
+        }
+
+        AnsiConsole.MarkupLine($"[#9aa4af]model →[/] [{CliTheme.Accent}]{Markup.Escape(_model)}[/]");
+        if (_params.Values.Count > 0 && InteractivePrompt.Confirm("Set generation parameters now?", defaultYes: false))
+            EditParams();
+        return true;
+    }
+
+    /// <summary>Walks each tunable for the current modality, letting the user keep (Enter) or change it.</summary>
+    private void EditParams()
+    {
+        if (_params.Values.Count == 0)
+        {
+            AnsiConsole.MarkupLine($"[{CliTheme.Muted}]The '{Modalities.ToCliName(_modality)}' mode has no tunable parameters.[/]");
+            return;
+        }
+
+        AnsiConsole.MarkupLine($"[{CliTheme.Muted}]Enter a new value or press Enter to keep the current one.[/]");
+        foreach (string key in _params.Values.Keys.ToList())
+        {
+            string current = _params.Get(key) ?? "";
+            string? value = InteractivePrompt.Ask(key, current);
+            if (value is not null && value != current)
+                _params.TrySet(key, value);
+        }
+        ShowState();
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes <= 0)
+            return "";
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double value = bytes;
+        int unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+        return $"{value:0.#} {units[unit]}";
+    }
+
     private void ShowState()
     {
         Table table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
-        table.AddColumn("[grey]setting[/]");
+        table.AddColumn("[#9aa4af]setting[/]");
         table.AddColumn($"[{CliTheme.Accent}]value[/]");
         table.AddRow("mode", Modalities.ToCliName(_modality));
         table.AddRow("model", _model.Length == 0 ? "(default)" : Markup.Escape(_model));
@@ -233,6 +328,10 @@ public sealed class ReplSession : IDisposable
             return;
         }
 
+        // No model chosen yet for a modality that needs one: offer the on-disk models to pick from instead of erroring.
+        if (_model.Length == 0 && NeedsModelSelection(_modality) && !PickModel())
+            return;
+
         try
         {
             ModelSpec spec = ModelResolver.Resolve(_model, null, _modality);
@@ -248,7 +347,7 @@ public sealed class ReplSession : IDisposable
 
             string? saved = ArtifactWriter.Write(artifact, _outputDir, prompt, force: _outputDir is not null);
             if (saved is not null)
-                AnsiConsole.MarkupLine($"[grey]saved[/] [{CliTheme.Accent}]{Markup.Escape(saved)}[/]");
+                AnsiConsole.MarkupLine($"[#9aa4af]saved[/] [{CliTheme.Accent}]{Markup.Escape(saved)}[/]");
         }
         catch (Exception ex)
         {
@@ -287,7 +386,8 @@ public sealed class ReplSession : IDisposable
             ("<prompt>", "generate with the current mode/model/params"),
             ("/text /image /speak /music /transcribe /vision /video /3d /world", "switch mode"),
             ("/mode <name>", "switch mode explicitly"),
-            ("/model <id|path>", "set the model (empty = default)"),
+            ("/model [id|path]", "pick a model from disk, or set one explicitly"),
+            ("/params", "step through and set generation parameters"),
             ("/backend <auto|cpu|cuda|vulkan>", "set the compute backend"),
             ("/set <key> <value>", "set a generation parameter"),
             ("/output <dir>", "set the artifact output directory"),
@@ -300,7 +400,7 @@ public sealed class ReplSession : IDisposable
             ("/quit", "exit"),
         };
         foreach ((string key, string desc) in rows)
-            AnsiConsole.MarkupLine($"  [{CliTheme.Accent}]{Markup.Escape(key)}[/]  [grey]{Markup.Escape(desc)}[/]");
+            AnsiConsole.MarkupLine($"  [{CliTheme.Accent}]{Markup.Escape(key)}[/]  [#9aa4af]{Markup.Escape(desc)}[/]");
     }
 
     /// <inheritdoc/>

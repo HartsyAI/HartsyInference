@@ -66,8 +66,8 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
 
             string arch = loaded.Info.Architecture is { Length: > 0 } a ? a : "unknown";
             AnsiConsole.MarkupLine($"[green]✓[/] pulled [{CliTheme.Accent}]{Markup.Escape(settings.Model)}[/]");
-            AnsiConsole.MarkupLine($"  [grey]architecture:[/] {Markup.Escape(arch)}");
-            AnsiConsole.MarkupLine($"  [grey]path:[/] {Markup.Escape(loaded.Info.LocalPath)}");
+            AnsiConsole.MarkupLine($"  [#9aa4af]architecture:[/] {Markup.Escape(arch)}");
+            AnsiConsole.MarkupLine($"  [#9aa4af]path:[/] {Markup.Escape(loaded.Info.LocalPath)}");
             registry.Unload(settings.Model);
             return 0;
         }
