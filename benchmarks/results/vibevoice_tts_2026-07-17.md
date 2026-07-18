@@ -23,10 +23,33 @@ The diffusion head was only ~9 %.
 | **semantic_encode** (per frame ×62) | 394 ms/fr | **11.5 ms/fr** | 34× |
 | diffusion head (per frame ×62, 20 steps × 2 CFG) | 88 ms/fr | 88 ms/fr | — (untouched) |
 | lm_step (per token) | 31 ms | 31 ms | — |
-| **`Synthesize` total (8.27 s clip)** | **134.4 s (RTF 16.26)** | **9.08 s (RTF 1.10)** | **14.8×** |
+| **`Synthesize` total (8.27 s clip) — VAE pass only** | **134.4 s (RTF 16.26)** | **9.08 s (RTF 1.10)** | **14.8×** |
 
 (Profiled total with the temporary `Sync()` boundaries was 10.21 s / RTF 1.23; the production run without them is
 9.08 s / RTF 1.10.)
+
+### Round 2 — diffusion head (after the VAE pass, it was the new top cost at ~53 %)
+
+Two further wins took it from 9.08 s to **6.47 s (RTF 0.78, faster than real-time; 20.7× cumulative)**:
+
+1. **Batched CFG** (9.08 → 7.21 s): upstream feeds the *same* noisy latent to the conditional and
+   unconditional halves, so the head ran twice per step (N=1 each). The head is FFN-only (no cross-frame
+   mixing), so cond + uncond stack into **one N=2 forward** — halving the head's tiny-GEMV launch count.
+   `DenoiseLatent` builds `[speech;speech]` / `[cond;negCond]` via `backend.Concat` and combines the `[1,2,64]`
+   output on the host (`CombineCfgBatched`).
+2. **Head host-glue → GPU** (7.21 → 6.47 s): the head's per-forward `SliceAlongLastDim` (×14),
+   `AdaLnModulate` (×5), `AdaLnGatedAdd` (×4), and `RmsNormNoAffine` (×1) were CPU `float*` loops — ~25
+   device→host syncs per forward × ~1 240 forwards. Ported to resident ops: slice → `SliceLastDim`; modulate
+   `x·(1+scale)+shift` → `AddScalar`+`Mul`+`Add`; gated residual → `Mul`+`Add`; affine-free RMSNorm →
+   `RmsNorm` with a precomputed all-ones weight. Still zero new kernels.
+
+| `Synthesize` total (8.27 s clip) | 134.4 s | 9.08 s | 7.21 s | **6.47 s** |
+|---|---|---|---|---|
+| RTF | 16.26 | 1.10 | 0.87 | **0.78** |
+| | baseline | +GPU VAE | +batched CFG | +head residency |
+
+After round 2 the four remaining stages are **balanced** (diffusion / LM / acoustic-decode / semantic-encode ≈
+31 / 31 / 24 / 11 %); no single dominant cost remains.
 
 ## Fix — the whole VAE moved on-device, reusing existing `IBackend` ops (zero new kernels)
 
@@ -59,11 +82,22 @@ identically-named EnCodec `SConv1d`), so no other model shares this code — no 
 End-to-end word-correctness through the Swarm gallery was established 2026-07-13 and is inherited unchanged; a
 gallery re-verify is the recommended final sign-off.
 
-## Remaining headroom (not pursued)
+## Round 3 — CUDA-graph capture of the head step: TRIED, REVERTED (no-go)
 
-The diffusion head is now the largest single cost (~53 %, 88 ms/frame). It's **launch-bound**: 62 frames × 20 steps
-× 2 CFG = 2 480 forwards, each ~60 tiny `Linear` GEMVs (N=1) plus host-glue (`AdaLnModulate`/`AdaLnGatedAdd`/
-`RmsNormNoAffine`/`SliceAlongLastDim`/sinusoidal timestep embed). The real lever is a **CUDA-graph capture** of the
-per-step head (as noted for CosyVoice's CFM decoder); a timestep-embedding cache is tempting but would pin
-activation tensors across the AR loop (GPU-residency use-after-free hazard). RTF 1.10 (warm ~9 s/clip) is a good
-stopping point — better than CosyVoice's RTF 1.34.
+Captured the shape-invariant N=2 head step (fixed device input buffers refreshed via `CopyInto` outside the
+capture window; one capture replayed for all 20 steps × every token — the head step-refactored into a host-read-free
+`RunFromSin` core with the sinusoidal timestep embed materialized outside). Capture succeeded cleanly (80 allocs /
+79 frees, 1 launch/step via `cuGraphLaunch`), but it was a **double no-go**:
+
+- **Wall-neutral** (6.47 → 6.49 s). After round 2's host-glue→GPU port the N=2 head step is **GPU-compute-bound**,
+  not host-launch-bound — collapsing its launches into one graph launch buys nothing, and the per-step `CopyInto`
+  refresh of the fixed inputs adds back what it saves. (Same lesson as the image DiTs where the step-graph is
+  wall-neutral when GPU-bound.)
+- **Diverged the generation.** Graph replay perturbed the TF32-sensitive AR feedback (the diffusion output
+  re-encodes into the LM's next-token conditioning) enough to flip the token stream — output length 62 → 64 tokens
+  and the audio content changed. Not acceptable.
+
+Reverted to the round-2 eager batched-CFG path (kept the clean `RunFromSin`/`ComputeSinusoidal`/`TimestepMlp`
+refactor, which is behavior-identical). **Final: RTF 0.78, corr 0.999585 — a strong stopping point**, well past
+CosyVoice's RTF 1.34. The only remaining theoretical lever (a batched multi-KV-cache LM forward for the pos/neg CFG
+streams) is high-effort for the ~19% the LM occupies and out of scope here.

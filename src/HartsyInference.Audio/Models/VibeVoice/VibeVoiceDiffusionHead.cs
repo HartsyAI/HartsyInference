@@ -41,6 +41,7 @@ internal sealed unsafe class VibeVoiceDiffusionHead
 
     private readonly HeadLayerWeights[] _layers;
     private FinalLayerWeights _finalLayer;
+    private Tensor? _onesHidden;          // [H] all-ones weight → affine-free RMSNorm via IBackend.RmsNorm
 
     public VibeVoiceDiffusionHead(VibeVoiceDiffusionHeadConfig config, string prefix)
     {
@@ -78,6 +79,10 @@ internal sealed unsafe class VibeVoiceDiffusionHead
             AdaLnW = WhisperOps.EnsureF32(w[$"{_prefix}.final_layer.adaLN_modulation.1.weight"]),
             LinW = WhisperOps.EnsureF32(w[$"{_prefix}.final_layer.linear.weight"]),
         };
+
+        _onesHidden = new Tensor(new TensorShape(_hiddenSize), DType.F32);
+        float* ones = (float*)_onesHidden.DataPointer;
+        for (int i = 0; i < _hiddenSize; i++) ones[i] = 1f;
     }
 
     /// <summary>One denoising step. <paramref name="noisyLatents"/> and
@@ -97,33 +102,11 @@ internal sealed unsafe class VibeVoiceDiffusionHead
         if (timesteps.Length != n)
             throw new ArgumentException($"timesteps length ({timesteps.Length}) must match N ({n}).", nameof(timesteps));
 
-        // x = noisy_images_proj(noisy_latents)  →  [1, N, H]
-        Tensor x = WhisperOps.ProjectLinear(backend, noisyLatents, _noisyProjW!, null, 1, n, _latentSize, _hiddenSize);
-
-        // t = t_embedder(timesteps)  →  [1, N, H]
-        Tensor t = BuildTimestepEmbedding(backend, timesteps, n);
-
-        // condition_proj = cond_proj(condition)  →  [1, N, H]
-        Tensor cProj = WhisperOps.ProjectLinear(backend, condition, _condProjW!, null, 1, n, _hiddenSize, _hiddenSize);
-
-        // c = condition_proj + t  →  [1, N, H]
-        Tensor c = new(cProj.Shape, DType.F32);
-        backend.Add(c, cProj, t);
-        cProj.Dispose();
-        t.Dispose();
-
-        // 4× HeadLayer.
-        for (int i = 0; i < _layers.Length; i++)
-        {
-            Tensor next = HeadLayerForward(backend, x, c, _layers[i], n);
-            x.Dispose();
-            x = next;
-        }
-
-        // Final layer → [1, N, latent_size].
-        Tensor result = FinalLayerForward(backend, x, c, n);
-        x.Dispose();
-        c.Dispose();
+        // Sinusoidal timestep embedding (host) → then the fully-device core.
+        Tensor sinEmb = new(new TensorShape(1, n, SinDim), DType.F32);
+        ComputeSinusoidal(sinEmb, timesteps, n);
+        Tensor result = RunFromSin(backend, noisyLatents, sinEmb, condition, n);
+        sinEmb.Dispose();
         return result;
     }
 
@@ -138,6 +121,7 @@ internal sealed unsafe class VibeVoiceDiffusionHead
         }
         if (_finalLayer.AdaLnW is not null) yield return _finalLayer.AdaLnW;
         if (_finalLayer.LinW is not null) yield return _finalLayer.LinW;
+        if (_onesHidden is not null) yield return _onesHidden;
     }
 
     // ---- Internals --------------------------------------------------------
@@ -149,28 +133,26 @@ internal sealed unsafe class VibeVoiceDiffusionHead
         backend.Silu(cAct, c);
         Tensor mod = WhisperOps.ProjectLinear(backend, cAct, l.AdaLnW!, null, 1, n, _hiddenSize, 3 * _hiddenSize);
         cAct.Dispose();
-        // Split into shift_ffn, scale_ffn, gate_ffn — each [N, H] in row-major layout.
-        Tensor shift = SliceAlongLastDim(mod, n, 3 * _hiddenSize, 0, _hiddenSize);
-        Tensor scale = SliceAlongLastDim(mod, n, 3 * _hiddenSize, _hiddenSize, _hiddenSize);
-        Tensor gate = SliceAlongLastDim(mod, n, 3 * _hiddenSize, 2 * _hiddenSize, _hiddenSize);
+        // Split into shift_ffn, scale_ffn, gate_ffn — each [1, N, H] (device-resident slices).
+        Tensor shift = SliceGpu(backend, mod, n, 0);
+        Tensor scale = SliceGpu(backend, mod, n, _hiddenSize);
+        Tensor gate = SliceGpu(backend, mod, n, 2 * _hiddenSize);
         mod.Dispose();
 
-        // normed = RMSNorm(x) with elementwise affine.
+        // normed = RMSNorm(x) with elementwise affine, then modulate(normed, shift, scale).
         Tensor normed = new(x.Shape, DType.F32);
         backend.RmsNorm(normed, x, l.NormW!, _config.RmsNormEps);
-
-        // normed = modulate(normed, shift, scale)  ↦  normed * (1 + scale) + shift, in place.
-        VibeVoiceOps.AdaLnModulate(normed, shift, scale, n, _hiddenSize);
+        Tensor modulated = ModulateGpu(backend, normed, shift, scale);
+        normed.Dispose();
         shift.Dispose();
         scale.Dispose();
 
         // SwiGLU FFN.
-        Tensor swi = SwiGluForward(backend, normed, l.GateW!, l.UpW!, l.DownW!, n);
-        normed.Dispose();
+        Tensor swi = SwiGluForward(backend, modulated, l.GateW!, l.UpW!, l.DownW!, n);
+        modulated.Dispose();
 
         // result = x + gate * swi.
-        Tensor result = new(x.Shape, DType.F32);
-        VibeVoiceOps.AdaLnGatedAdd(result, x, gate, swi, n, _hiddenSize);
+        Tensor result = GatedAddGpu(backend, x, gate, swi);
         gate.Dispose();
         swi.Dispose();
         return result;
@@ -184,22 +166,55 @@ internal sealed unsafe class VibeVoiceDiffusionHead
         Tensor mod = WhisperOps.ProjectLinear(backend, cAct, _finalLayer.AdaLnW!, null, 1, n, _hiddenSize, 2 * _hiddenSize);
         cAct.Dispose();
 
-        Tensor shift = SliceAlongLastDim(mod, n, 2 * _hiddenSize, 0, _hiddenSize);
-        Tensor scale = SliceAlongLastDim(mod, n, 2 * _hiddenSize, _hiddenSize, _hiddenSize);
+        Tensor shift = SliceGpu(backend, mod, n, 0);
+        Tensor scale = SliceGpu(backend, mod, n, _hiddenSize);
         mod.Dispose();
 
-        // norm_final has elementwise_affine=False — divide by RMS only, no weight.
+        // norm_final has elementwise_affine=False — RMSNorm with an all-ones weight = divide by RMS only.
         Tensor normed = new(x.Shape, DType.F32);
-        RmsNormNoAffine(normed, x, n, _hiddenSize, _config.RmsNormEps);
-
-        VibeVoiceOps.AdaLnModulate(normed, shift, scale, n, _hiddenSize);
+        backend.RmsNorm(normed, x, _onesHidden!, _config.RmsNormEps);
+        Tensor modulated = ModulateGpu(backend, normed, shift, scale);
+        normed.Dispose();
         shift.Dispose();
         scale.Dispose();
 
         // Linear projection back to latent_size.
-        Tensor result = WhisperOps.ProjectLinear(backend, normed, _finalLayer.LinW!, null, 1, n, _hiddenSize, _latentSize);
-        normed.Dispose();
+        Tensor result = WhisperOps.ProjectLinear(backend, modulated, _finalLayer.LinW!, null, 1, n, _hiddenSize, _latentSize);
+        modulated.Dispose();
         return result;
+    }
+
+    // adaLN chunk: contiguous [1, N, H] slice of a [1, N, kH] tensor along the last dim (GPU-resident).
+    private Tensor SliceGpu(IBackend backend, Tensor src, int n, int startCol)
+    {
+        Tensor result = new(new TensorShape(1, n, _hiddenSize), DType.F32);
+        backend.SliceLastDim(result, src, startCol);
+        return result;
+    }
+
+    // adaLN modulate: out = x * (1 + scale) + shift (all [1, N, H]), composed from resident elementwise ops.
+    private static Tensor ModulateGpu(IBackend backend, Tensor x, Tensor shift, Tensor scale)
+    {
+        Tensor sc1 = new(scale.Shape, DType.F32);
+        backend.AddScalar(sc1, scale, 1f);
+        Tensor scaled = new(x.Shape, DType.F32);
+        backend.Mul(scaled, x, sc1);
+        sc1.Dispose();
+        Tensor outp = new(x.Shape, DType.F32);
+        backend.Add(outp, scaled, shift);
+        scaled.Dispose();
+        return outp;
+    }
+
+    // gated residual: out = residual + gate * value (all [1, N, H]), resident.
+    private static Tensor GatedAddGpu(IBackend backend, Tensor residual, Tensor gate, Tensor value)
+    {
+        Tensor gv = new(value.Shape, DType.F32);
+        backend.Mul(gv, gate, value);
+        Tensor outp = new(residual.Shape, DType.F32);
+        backend.Add(outp, residual, gv);
+        gv.Dispose();
+        return outp;
     }
 
     private Tensor SwiGluForward(IBackend backend, Tensor x, Tensor gateW, Tensor upW, Tensor downW, int n)
@@ -223,31 +238,45 @@ internal sealed unsafe class VibeVoiceDiffusionHead
         return result;
     }
 
-    private Tensor BuildTimestepEmbedding(IBackend backend, ReadOnlySpan<float> timesteps, int n)
-    {
-        // 1) Sinusoidal embedding [N, 256] = [cos(t*freqs), sin(t*freqs)].
-        const int freqDim = 256;
-        const int half = freqDim / 2;
-        const float maxPeriod = 10_000f;
-        Tensor sinEmb = new(new TensorShape(1, n, freqDim), DType.F32);
-        float* sp = (float*)sinEmb.DataPointer;
-        for (int i = 0; i < n; i++)
-        {
-            float ts = timesteps[i];
-            int rowBase = i * freqDim;
-            for (int k = 0; k < half; k++)
-            {
-                float freq = MathF.Exp(-MathF.Log(maxPeriod) * k / half);
-                float arg = ts * freq;
-                sp[rowBase + k] = MathF.Cos(arg);
-                sp[rowBase + half + k] = MathF.Sin(arg);
-            }
-        }
-        // freqDim is even (256), so no extra zero-pad column needed.
+    private const int SinDim = 256;
 
-        // 2) MLP: Linear(256, H) → SiLU → Linear(H, H).
-        Tensor h1 = WhisperOps.ProjectLinear(backend, sinEmb, _tEmbMlp0W!, null, 1, n, freqDim, _hiddenSize);
-        sinEmb.Dispose();
+    /// <summary>The fully-device core of one denoising step (no host reads) — CUDA-graph-capturable:
+    /// noisy_proj + t_embedder MLP + cond_proj → 4 head layers → final. <paramref name="sinEmb"/> is the
+    /// precomputed sinusoidal timestep embedding <c>[1, N, 256]</c> (the only host-computed input, materialized
+    /// outside the capture window). Returns a fresh <c>[1, N, latent]</c> tensor.</summary>
+    private Tensor RunFromSin(IBackend backend, Tensor noisyLatents, Tensor sinEmb, Tensor condition, int n)
+    {
+        // x = noisy_images_proj(noisy_latents)  →  [1, N, H]
+        Tensor x = WhisperOps.ProjectLinear(backend, noisyLatents, _noisyProjW!, null, 1, n, _latentSize, _hiddenSize);
+
+        // t = t_embedder MLP: Linear(256, H) → SiLU → Linear(H, H)  →  [1, N, H]
+        Tensor t = TimestepMlp(backend, sinEmb, n);
+
+        // condition_proj = cond_proj(condition)  →  [1, N, H]
+        Tensor cProj = WhisperOps.ProjectLinear(backend, condition, _condProjW!, null, 1, n, _hiddenSize, _hiddenSize);
+
+        // c = condition_proj + t  →  [1, N, H]
+        Tensor c = new(cProj.Shape, DType.F32);
+        backend.Add(c, cProj, t);
+        cProj.Dispose();
+        t.Dispose();
+
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            Tensor next = HeadLayerForward(backend, x, c, _layers[i], n);
+            x.Dispose();
+            x = next;
+        }
+
+        Tensor result = FinalLayerForward(backend, x, c, n);
+        x.Dispose();
+        c.Dispose();
+        return result;
+    }
+
+    private Tensor TimestepMlp(IBackend backend, Tensor sinEmb, int n)
+    {
+        Tensor h1 = WhisperOps.ProjectLinear(backend, sinEmb, _tEmbMlp0W!, null, 1, n, SinDim, _hiddenSize);
         Tensor act = new(h1.Shape, DType.F32);
         backend.Silu(act, h1);
         h1.Dispose();
@@ -256,40 +285,24 @@ internal sealed unsafe class VibeVoiceDiffusionHead
         return result;
     }
 
-    private static void RmsNormNoAffine(Tensor output, Tensor input, int n, int d, float eps)
+    /// <summary>Sinusoidal timestep embedding <c>[1, N, 256] = [cos(t·freqs), sin(t·freqs)]</c> (host).</summary>
+    private static void ComputeSinusoidal(Tensor sinEmb, ReadOnlySpan<float> timesteps, int n)
     {
-        float* ip = (float*)input.DataPointer;
-        float* op = (float*)output.DataPointer;
+        const int half = SinDim / 2;
+        const float maxPeriod = 10_000f;
+        float* sp = (float*)sinEmb.DataPointer;
         for (int i = 0; i < n; i++)
         {
-            int rowBase = i * d;
-            double sumSq = 0d;
-            for (int k = 0; k < d; k++)
+            float ts = timesteps[i];
+            int rowBase = i * SinDim;
+            for (int k = 0; k < half; k++)
             {
-                float v = ip[rowBase + k];
-                sumSq += (double)v * v;
+                float freq = MathF.Exp(-MathF.Log(maxPeriod) * k / half);
+                float arg = ts * freq;
+                sp[rowBase + k] = MathF.Cos(arg);
+                sp[rowBase + half + k] = MathF.Sin(arg);
             }
-            float invRms = 1f / MathF.Sqrt((float)(sumSq / d) + eps);
-            for (int k = 0; k < d; k++) op[rowBase + k] = ip[rowBase + k] * invRms;
         }
-    }
-
-    /// <summary>Allocates a fresh <c>[1, N, segDim]</c> tensor copying a contiguous slice
-    /// along the last axis of <paramref name="src"/> (shape <c>[1, N, fullDim]</c>).
-    /// Implements the AdaLN <c>.chunk(k, dim=-1)</c> idiom by repeated calls with disjoint
-    /// <paramref name="startCol"/> offsets.</summary>
-    private static Tensor SliceAlongLastDim(Tensor src, int n, int fullDim, int startCol, int segDim)
-    {
-        Tensor result = new(new TensorShape(1, n, segDim), DType.F32);
-        float* sp = (float*)src.DataPointer;
-        float* dp = (float*)result.DataPointer;
-        for (int i = 0; i < n; i++)
-        {
-            int srcBase = i * fullDim + startCol;
-            int dstBase = i * segDim;
-            for (int k = 0; k < segDim; k++) dp[dstBase + k] = sp[srcBase + k];
-        }
-        return result;
     }
 
     private struct HeadLayerWeights

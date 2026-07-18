@@ -442,25 +442,41 @@ public sealed class VibeVoicePipeline : IDisposable
 
         Tensor speech = noiseLatent;
         bool ownsSpeech = false;
+        int latent = _cfg.AcousticVaeDim;
+        int hidden = _lmCfg.HiddenSize;
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+
+        // Batched CFG: upstream feeds the SAME noisy latent to the conditional and unconditional halves, so
+        // instead of two N=1 head forwards we stack them into ONE N=2 forward (row 0 = cond, row 1 = uncond) —
+        // the head is FFN-only with no cross-frame mixing, so each row is exactly its own pass. Halves the
+        // head's tiny-GEMV launch count. condB is fixed across a token's 20 steps → built once here.
+        // Combine: eps = uncond + cfg·(cond−uncond).
+        // (CUDA-graph capture of the N=2 head step was tried and reverted: after the host-glue→GPU port the
+        //  step is GPU-compute-bound, so the graph was wall-neutral — and capture/replay perturbed the
+        //  TF32-sensitive AR feedback enough to diverge the generation. Not worth it.)
+        Tensor? condB = null;
+        if (useCfg)
+        {
+            condB = new(new TensorShape(1, 2, hidden), DType.F32);
+            backend.Concat(condB, [cond, negCond!], dim: 1);
+        }
         for (int step = 0; step < timesteps.Length; step++)
         {
-            float[] tBatch = [timesteps[step]];
-            // Positive (conditional) head pass. Upstream batches cond+uncond and feeds the
-            // SAME noisy latent to both halves — we run two passes on `speech` and combine:
-            //   eps = uncond + cfg_scale * (cond - uncond).
-            Tensor vCond = _diffusionHead.Forward(backend, speech, tBatch, cond);
             Tensor vPred;
             if (useCfg)
             {
-                Tensor vUncond = _diffusionHead.Forward(backend, speech, tBatch, negCond!);
-                vPred = CombineCfg(vUncond, vCond, cfg);
-                vUncond.Dispose();
-                vCond.Dispose();
+                Tensor speechB = new(new TensorShape(1, 2, latent), DType.F32);
+                backend.Concat(speechB, [speech, speech], dim: 1);
+                float[] tBatch2 = [timesteps[step], timesteps[step]];
+                Tensor vB = _diffusionHead.Forward(backend, speechB, tBatch2, condB!);
+                vPred = CombineCfgBatched(vB, cfg, latent);
+                speechB.Dispose();
+                vB.Dispose();
             }
             else
             {
-                vPred = vCond;
+                float[] tBatch = [timesteps[step]];
+                vPred = _diffusionHead.Forward(backend, speech, tBatch, cond);
             }
             Tensor next = scheduler.Step(vPred, speech, step);
             vPred.Dispose();
@@ -468,6 +484,7 @@ public sealed class VibeVoicePipeline : IDisposable
             speech = next;
             ownsSpeech = true;
         }
+        condB?.Dispose();
 
         if (!ownsSpeech)
         {
@@ -535,15 +552,14 @@ public sealed class VibeVoicePipeline : IDisposable
         return allowed[order[keep - 1]];
     }
 
-    // CFG combine: eps = uncond + cfg_scale * (cond - uncond). Latents are tiny ([1,1,64]).
-    private static unsafe Tensor CombineCfg(Tensor uncond, Tensor cond, float cfg)
+    // CFG combine from a batched [1, 2, latent] head output (row 0 = cond, row 1 = uncond):
+    //   eps = uncond + cfg_scale * (cond - uncond). Latents are tiny (latent=64) so the tail stays host.
+    private static unsafe Tensor CombineCfgBatched(Tensor vBatched, float cfg, int latent)
     {
-        Tensor result = new(cond.Shape, DType.F32);
-        long n = cond.ElementCount;
-        float* rp = (float*)result.DataPointer;
-        float* cp = (float*)cond.DataPointer;
-        float* up = (float*)uncond.DataPointer;
-        for (long i = 0; i < n; i++) rp[i] = up[i] + cfg * (cp[i] - up[i]);
+        Tensor result = new(new TensorShape(1, 1, latent), DType.F32);
+        float* v = (float*)vBatched.DataPointer;
+        float* r = (float*)result.DataPointer;
+        for (int i = 0; i < latent; i++) r[i] = v[latent + i] + cfg * (v[i] - v[latent + i]);
         return result;
     }
 
