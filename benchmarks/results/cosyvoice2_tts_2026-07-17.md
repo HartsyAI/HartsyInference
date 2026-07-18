@@ -22,25 +22,45 @@ Timbre clones the reference clip. The prompt-mel prefix is trimmed (`CosyVoiceFl
 longer replays the reference sentence before the target — before the fix, whisper heard the reference transcript
 prepended to every clip.
 
-## Timing + the one perf fix applied (weight preload)
+## Perf pass — GPU-resident CFM flow decoder (5.7× warm)
 
-The first profile (`HARTSY_PROFILE_SYNC`) was dominated by **~62k `H2D_MISS` transfers (~3.7 s)** — the pipeline
-never called `backend.PreloadWeights`, so every Linear/Conv re-uploaded its weight from CPU each call (the exact
-anti-pattern AGENTS.md warns about). Added a one-time idempotent `CosyVoicePipeline.PreloadWeights` (bulk-uploads
-LM + flow + vocoder + S3 + CAM++; the GPU cache keys by tensor reference so it's free after the first call).
+Phase timing (`backend.Sync()` boundaries, 6.0 s clip) located the cost — **not** the LM as expected:
 
-| Metric | Value |
-|---|---|
-| Swarm gallery gen — **cold** (first gen: 1.9 GB LM disk-load + preload) | 35.5 s |
-| Swarm gallery gen — **warm** (resident pipeline, preload done) | **28.9 s** |
-| Gated e2e `Synthesize`-only (6.0 s audio, includes first-call preload) | 26.7 s (RTF 4.48) |
+| Phase | Before | After |
+|---|---|---|
+| prep (S3 + CAM++ + mels) | 1332 ms | 1259 ms |
+| **LM** (149 speech tokens, AR) | 968 ms | 945 ms |
+| **flow** (CFM: conformer + 10 Euler × 2 CFG estimator) | **24 645 ms** | **5 237 ms** |
+| vocoder | 549 ms | 527 ms |
+| **`Synthesize` total** | 27 495 ms (RTF 4.61) | **7 969 ms (RTF 1.34)** |
 
-Warm RTF ≈ 3× slower than real time. The remaining cost is the **autoregressive speech-token LM decode**:
-`CosyVoiceQwenLm.GenerateSpeechTokens` drives ~400 eager `Qwen2Model.ForwardEmbeds` steps (host per-step embed
-write + slice + eager per-op attention). The real lever is switching that loop to the GPU-resident CUDA-graph decode
-path (`ForwardGraphDecodeStepEmbeds` + device positions/cos-sin tables/`ArgMaxInto`, the same route the LLM sampler
-uses and Zonos mirrored for its 203 → 32 ms/frame ~6× win). That is a focused follow-up (target ~6–10 s/clip);
-it touches `CosyVoiceQwenLm`'s decode loop, not the already-correct math.
+The LM was already fast (~1 s) — it reuses the LLM package's `GenericTransformer` + `FixedKvCache`. The bottleneck
+was the **CFM velocity estimator** (`CausalConditionalDecoder`), run 20× per gen (10 Euler × 2 CFG), each forward
+saturated with host-glue that read `(float*)DataPointer` on GPU tensors → a device→host sync every call: host `Mish`
+(29×/fwd), host `ExactGelu` (56×/fwd), host `ToHeads`/`FromHeads` head reshapes (112×/fwd), host residual/time-emb
+adds, host `PackInput`/`ConcatChannels`. The sync profile screamed **~62k `H2D_MISS` + host loops**.
+
+Fix — moved the whole estimator on-device, reusing existing `IBackend` ops where they existed and adding one kernel:
+- **`Mish`** — new `audio_mish_f32` PTX kernel (`native/cuda/audio/audio_activations_f32.cu`) + `IBackend.Mish`
+  (default host impl, CUDA override). This is the only new kernel.
+- `ExactGelu` → `backend.GeluErf` (erf kernel, already existed).
+- `ToHeads`/`FromHeads` → `backend.Permute0213`.
+- time-emb broadcast add → `backend.BroadcastAdd`; residual/attn adds → `backend.Add`.
+- `PackInput` (spk time-broadcast + 4-way channel concat) → `backend.RepeatTime` + `backend.Concat`; `ConcatChannels`
+  → `backend.Concat`.
+
+Plus a one-time idempotent `CosyVoicePipeline.PreloadWeights` (the pipeline never preloaded → per-op weight
+re-upload). Correctness preserved: e2e whisper stays word-perfect; the shared estimator's other consumer
+(**Chatterbox**) re-verified word-perfect through the gallery. Math unchanged — pure residency refactor.
+
+| Swarm gallery gen | Before | After |
+|---|---|---|
+| **cold** (first gen: LM disk-load + preload) | 35.5 s | **11.3 s** |
+| **warm** (resident pipeline) | 28.9 s | **5.1 s (5.7×)** |
+
+Remaining headroom (not pursued): the flow is now launch-overhead-bound (~32k small `Linear` launches across the 20
+estimator forwards); a CUDA-graph capture of the estimator step would cut host launch cost further, at graph-capture
+complexity. RTF 1.34 (warm ~5 s/clip) is a good stopping point.
 
 ## Weight-load recipe (the actual bring-up work)
 

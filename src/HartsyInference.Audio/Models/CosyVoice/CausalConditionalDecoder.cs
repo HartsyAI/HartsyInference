@@ -105,7 +105,7 @@ public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
         Tensor timeEmb = TimeEmbedding(backend, t);          // [1, 1, time_embed_dim]
 
         // Pack [x, μ, spk-broadcast, cond] → [1, 320, T].
-        Tensor h = PackInput(x, mu, spk, cond, _mel, tt);
+        Tensor h = PackInput(backend, x, mu, spk, cond, _mel, tt);
 
         // Down block: resnet → 4 transformers → save skip → causal-conv downsample.
         Tensor d = _downResnet.Forward(backend, h, timeEmb); h.Dispose();
@@ -122,7 +122,7 @@ public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
         }
 
         // Up block: concat([cur, skip]) on channels → resnet → 4 transformers → causal-conv upsample.
-        Tensor catted = ConcatChannels(cur, skip, _ch, _ch, tt); cur.Dispose(); skip.Dispose();
+        Tensor catted = ConcatChannels(backend, cur, skip, _ch, _ch, tt); cur.Dispose(); skip.Dispose();
         Tensor u = _upResnet.Forward(backend, catted, timeEmb); catted.Dispose();
         u = RunAttn(backend, _upAttn, u, tt);
         Tensor upSampled = CausalConv(backend, u, _upSampleW!, _upSampleB!, _ch, _ch, tt); u.Dispose();
@@ -202,45 +202,27 @@ public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
         Tensor outT = new(new TensorShape(1, outCh, t), DType.F32);
         backend.Transpose2D(outT, normed, t, outCh);
         normed.Dispose();
-        Mish((float*)outT.DataPointer, outT.ElementCount);
+        backend.Mish(outT, outT);
         return outT;
     }
 
-    internal static void Mish(float* p, long n)
+    /// <summary>Packs <c>[x, μ, spk-broadcast, cond]</c> into <c>[1, 4·mel, T]</c> on the device: the speaker
+    /// vector <c>[1, mel, 1]</c> is time-broadcast via <see cref="IBackend.RepeatTime"/>, then all four
+    /// channel-first blocks are concatenated with <see cref="IBackend.Concat"/> — no host copies.</summary>
+    private static Tensor PackInput(IBackend backend, Tensor x, Tensor mu, Tensor spk, Tensor cond, int mel, int t)
     {
-        for (long i = 0; i < n; i++)
-        {
-            float v = p[i];
-            float sp = v > 20f ? v : MathF.Log(1f + MathF.Exp(v));   // softplus
-            p[i] = v * MathF.Tanh(sp);
-        }
-    }
-
-    private static Tensor PackInput(Tensor x, Tensor mu, Tensor spk, Tensor cond, int mel, int t)
-    {
+        Tensor spkBroad = new(new TensorShape(1, mel, t), DType.F32);
+        backend.RepeatTime(spkBroad, spk, t);
         Tensor packed = new(new TensorShape(1, mel * 4, t), DType.F32);
-        float* pp = (float*)packed.DataPointer;
-        long bytes = (long)mel * t * 4;
-        Buffer.MemoryCopy((float*)x.DataPointer, pp, bytes, bytes);
-        Buffer.MemoryCopy((float*)mu.DataPointer, pp + (long)mel * t, bytes, bytes);
-        float* spkp = (float*)spk.DataPointer;
-        for (int c = 0; c < mel; c++)
-        {
-            float v = spkp[c];
-            long baseOff = (long)(2 * mel + c) * t;
-            for (int j = 0; j < t; j++) pp[baseOff + j] = v;
-        }
-        Buffer.MemoryCopy((float*)cond.DataPointer, pp + (long)3 * mel * t, bytes, bytes);
+        backend.Concat(packed, [x, mu, spkBroad, cond], dim: 1);
+        spkBroad.Dispose();
         return packed;
     }
 
-    private static Tensor ConcatChannels(Tensor a, Tensor b, int aCh, int bCh, int t)
+    private static Tensor ConcatChannels(IBackend backend, Tensor a, Tensor b, int aCh, int bCh, int t)
     {
         Tensor outT = new(new TensorShape(1, aCh + bCh, t), DType.F32);
-        float* op = (float*)outT.DataPointer;
-        long aBytes = (long)aCh * t * 4, bBytes = (long)bCh * t * 4;
-        Buffer.MemoryCopy((float*)a.DataPointer, op, aBytes, aBytes);
-        Buffer.MemoryCopy((float*)b.DataPointer, op + (long)aCh * t, bBytes, bBytes);
+        backend.Concat(outT, [a, b], dim: 1);
         return outT;
     }
 
@@ -296,21 +278,13 @@ internal sealed unsafe class CausalResnet1D
         int t = (int)x.Shape[2];
         Tensor h = CausalConditionalDecoder.CausalBlock(backend, x, _b1ConvW!, _b1ConvB!, _b1LnW!, _b1LnB!, _inCh, _outCh, t);
 
-        // mlp = Mish(time_emb) → Linear(D→outCh); add broadcast over T.
+        // mlp = Mish(time_emb) → Linear(D→outCh); add broadcast over T (per-channel bias over the time axis).
         int dIn = (int)timeEmb.Shape[2];
         Tensor te = new(timeEmb.Shape, DType.F32);
-        backend.CopyTo(te, timeEmb);
-        CausalConditionalDecoder.Mish((float*)te.DataPointer, te.ElementCount);
+        backend.Mish(te, timeEmb);
         Tensor tproj = WhisperOps.ProjectLinear(backend, te, _mlpW!, _mlpB, 1, 1, dIn, _outCh);
         te.Dispose();
-        float* hp = (float*)h.DataPointer;
-        float* tp = (float*)tproj.DataPointer;
-        for (int c = 0; c < _outCh; c++)
-        {
-            float add = tp[c];
-            long baseOff = (long)c * t;
-            for (int j = 0; j < t; j++) hp[baseOff + j] += add;
-        }
+        backend.BroadcastAdd(h, tproj, _outCh, t);
         tproj.Dispose();
 
         Tensor h2 = CausalConditionalDecoder.CausalBlock(backend, h, _b2ConvW!, _b2ConvB!, _b2LnW!, _b2LnB!, _outCh, _outCh, t);
@@ -319,10 +293,7 @@ internal sealed unsafe class CausalResnet1D
         // Residual: res_conv (1×1) on x.
         Tensor res = new(new TensorShape(1, _outCh, t), DType.F32);
         backend.Conv1d(res, x, _resConvW!, _resConvB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
-        float* h2p = (float*)h2.DataPointer;
-        float* rp = (float*)res.DataPointer;
-        long n = h2.ElementCount;
-        for (long i = 0; i < n; i++) h2p[i] += rp[i];
+        backend.Add(h2, h2, res);
         res.Dispose();
         return h2;
     }
@@ -376,81 +347,33 @@ internal sealed unsafe class MatchaTransformerBlock
         Tensor v = WhisperOps.ProjectLinear(backend, normed, _vW!, null, 1, t, c, _inner);
         normed.Dispose();
 
-        Tensor qH = ToHeads(q, t), kH = ToHeads(k, t), vH = ToHeads(v, t);
+        // [1, T, inner] → [1, H, T, d] for SDPA (contiguous inner = H·d, so this is a plain 0213 permute).
+        Tensor qH = new(new TensorShape(1, _heads, t, _headDim), DType.F32); backend.Permute0213(qH, q, t, _heads, _headDim);
+        Tensor kH = new(new TensorShape(1, _heads, t, _headDim), DType.F32); backend.Permute0213(kH, k, t, _heads, _headDim);
+        Tensor vH = new(new TensorShape(1, _heads, t, _headDim), DType.F32); backend.Permute0213(vH, v, t, _heads, _headDim);
         q.Dispose(); k.Dispose(); v.Dispose();
         Tensor attn = new(new TensorShape(1, _heads, t, _headDim), DType.F32);
         backend.ScaledDotProductAttention(attn, qH, kH, vH, mask: null, 1f / MathF.Sqrt(_headDim));
         qH.Dispose(); kH.Dispose(); vH.Dispose();
-        Tensor merged = FromHeads(attn, t);     // [1, T, inner]
+        Tensor merged = new(new TensorShape(1, t, _inner), DType.F32);   // [1, H, T, d] → [1, T, inner]
+        backend.Permute0213(merged, attn, _heads, t, _headDim);
         attn.Dispose();
         Tensor o = WhisperOps.ProjectLinear(backend, merged, _oW!, _oB, 1, t, _inner, c);
         merged.Dispose();
         Tensor x = new(seq.Shape, DType.F32);
-        backend.CopyTo(x, seq);
-        Add(x, o); o.Dispose();
+        backend.Add(x, seq, o); o.Dispose();
 
-        // Feed-forward sub-layer (GELU).
+        // Feed-forward sub-layer (diffusers GELU = exact erf, not tanh-approx).
         Tensor n3 = new(x.Shape, DType.F32);
         backend.LayerNorm(n3, x, _norm3W!, _norm3B!, 1e-5f);
         int ffDim = (int)_ff0W!.Shape[0];
         Tensor f0 = WhisperOps.ProjectLinear(backend, n3, _ff0W!, _ff0B, 1, t, c, ffDim);
         n3.Dispose();
-        ExactGelu((float*)f0.DataPointer, f0.ElementCount);   // diffusers GELU is exact erf, not tanh-approx
+        backend.GeluErf(f0, f0);
         Tensor f2 = WhisperOps.ProjectLinear(backend, f0, _ff2W!, _ff2B, 1, t, ffDim, c);
         f0.Dispose();
-        Add(x, f2); f2.Dispose();
+        backend.Add(x, x, f2); f2.Dispose();
         return x;
-    }
-
-    private Tensor ToHeads(Tensor seq, int t)
-    {
-        Tensor outT = new(new TensorShape(1, _heads, t, _headDim), DType.F32);   // [B=1, H, T, d] for SDPA
-        float* ip = (float*)seq.DataPointer;        // [1, t, inner]
-        float* op = (float*)outT.DataPointer;
-        for (int h = 0; h < _heads; h++)
-            for (int j = 0; j < t; j++)
-                for (int d = 0; d < _headDim; d++)
-                    op[((long)h * t + j) * _headDim + d] = ip[(long)j * _inner + h * _headDim + d];
-        return outT;
-    }
-
-    private Tensor FromHeads(Tensor heads, int t)
-    {
-        Tensor outT = new(new TensorShape(1, t, _inner), DType.F32);
-        float* ip = (float*)heads.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        for (int h = 0; h < _heads; h++)
-            for (int j = 0; j < t; j++)
-                for (int d = 0; d < _headDim; d++)
-                    op[(long)j * _inner + h * _headDim + d] = ip[((long)h * t + j) * _headDim + d];
-        return outT;
-    }
-
-    private static void Add(Tensor dst, Tensor src)
-    {
-        float* dp = (float*)dst.DataPointer;
-        float* sp = (float*)src.DataPointer;
-        long n = dst.ElementCount;
-        for (long i = 0; i < n; i++) dp[i] += sp[i];
-    }
-
-    /// <summary>Exact (erf-based) GELU: <c>0.5·x·(1 + erf(x/√2))</c>, matching diffusers' default
-    /// <c>approximate="none"</c>. Uses the Abramowitz-Stegun 7.1.26 erf (max abs error ≈ 1.5e-7).</summary>
-    internal static void ExactGelu(float* p, long n)
-    {
-        const float a1 = 0.254829592f, a2 = -0.284496736f, a3 = 1.421413741f, a4 = -1.453152027f, a5 = 1.061405429f, pp = 0.3275911f;
-        const float invSqrt2 = 0.70710678f;
-        for (long i = 0; i < n; i++)
-        {
-            float x = p[i];
-            float z = x * invSqrt2;
-            float sign = z < 0 ? -1f : 1f;
-            float az = MathF.Abs(z);
-            float tt = 1f / (1f + pp * az);
-            float poly = ((((a5 * tt + a4) * tt + a3) * tt + a2) * tt + a1) * tt;
-            float erf = sign * (1f - poly * MathF.Exp(-az * az));
-            p[i] = 0.5f * x * (1f + erf);
-        }
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

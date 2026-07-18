@@ -4375,6 +4375,32 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    public void Mish(Tensor output, Tensor input)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("Mish");
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("CUDA Mish supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchAudioMish(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
     #endregion
 
     #region Element-wise

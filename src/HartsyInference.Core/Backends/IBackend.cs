@@ -1538,6 +1538,23 @@ public interface IBackend : IDisposable
     /// <summary>SiLU activation (x * sigmoid(x)).</summary>
     void Silu(Tensor output, Tensor input);
 
+    /// <summary>Mish activation (x * tanh(softplus(x))). The Matcha/CosyVoice CFM decoder's block activation.
+    /// Default host implementation over F32; CUDA overrides with a kernel to keep the flow decoder GPU-resident.</summary>
+    unsafe void Mish(Tensor output, Tensor input)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("Mish default fallback only supports F32.");
+        long count = output.ElementCount;
+        float* pOut = (float*)output.DataPointer;
+        float* pIn = (float*)input.DataPointer;
+        for (long i = 0; i < count; i++)
+        {
+            float x = pIn[i];
+            float sp = x > 20f ? x : MathF.Log(1f + MathF.Exp(x));
+            pOut[i] = x * MathF.Tanh(sp);
+        }
+    }
+
     /// <summary>Sigmoid activation (1 / (1 + exp(-x))). Used by LSTM gating.</summary>
     void Sigmoid(Tensor output, Tensor input);
 

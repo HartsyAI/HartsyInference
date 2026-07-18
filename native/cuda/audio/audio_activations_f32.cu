@@ -43,6 +43,20 @@ extern "C" __global__ void audio_tanh_f32(
     output[i] = tanhf(input[i]);
 }
 
+// Mish: x * tanh(softplus(x)) = x * tanh(ln(1+e^x)). Matcha/CosyVoice CFM decoder activation.
+// Overflow-guarded softplus (x>20 -> x) matches the C# reference exactly.
+extern "C" __global__ void audio_mish_f32(
+    float* __restrict__ output,
+    const float* __restrict__ input,
+    int count)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    float x = input[i];
+    float sp = (x > 20.0f) ? x : log1pf(expf(x));
+    output[i] = x * tanhf(sp);
+}
+
 extern "C" __global__ void audio_elu_f32(
     float* __restrict__ output,
     const float* __restrict__ input,

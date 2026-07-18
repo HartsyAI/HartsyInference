@@ -58,6 +58,7 @@ public sealed class CudaKernels : IDisposable
     // ── Audio activation Module + handles (Sigmoid / Elu / Snake, F32) ───
     private readonly CudaModule _audioActF32Module;
     private readonly nint _audioSigmoidF32;
+    private readonly nint _audioMishF32;
     private readonly nint _audioEluF32;
     private readonly nint _audioLeakyReluF32;
     private readonly nint _audioSnakeF32;
@@ -528,6 +529,7 @@ public sealed class CudaKernels : IDisposable
 
         _audioActF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "audio_activations_f32.ptx"));
         _audioSigmoidF32 = _audioActF32Module.GetFunction("audio_sigmoid_f32");
+        _audioMishF32 = _audioActF32Module.GetFunction("audio_mish_f32");
         _audioEluF32 = _audioActF32Module.GetFunction("audio_elu_f32");
         _audioLeakyReluF32 = _audioActF32Module.GetFunction("audio_leaky_relu_f32");
         _audioSnakeF32 = _audioActF32Module.GetFunction("audio_snake_f32");
@@ -740,6 +742,16 @@ public sealed class CudaKernels : IDisposable
         args[0] = &outArg; args[1] = &inArg; args[2] = &countArg;
         uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
         CudaDriverApi.cuLaunchKernel(_audioSigmoidF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    public unsafe void LaunchAudioMish(ulong output, ulong input, int count, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        int countArg = count;
+        void** args = stackalloc void*[3];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &countArg;
+        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(_audioMishF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches the audio Elu activation over <paramref name="count"/> F32 elements.</summary>
