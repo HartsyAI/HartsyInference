@@ -281,6 +281,13 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         backend.Linear(txtTokens, txtNormed, _captionEmbedderWeight!, _captionEmbedderBias);
         txtNormed.Dispose();
 
+        // F16 hot path (HARTSY_DIT_F16): cast the two token streams to F16 once before the refiner/main block
+        // stacks — the blocks run entirely in F16 (QK-normed attention + Lumina SwiGLU keep the intermediates in
+        // range; ~half the GEMM/HBM cost). The once-per-forward embed/timestep paths stay F32; the tail is cast
+        // back after the main blocks (velocity precision matters across the Euler step). No-op when the flag is off.
+        imgTokens = CastStreamToAct(backend, imgTokens);
+        txtTokens = CastStreamToAct(backend, txtTokens);
+
         // ── 4. Timestep embedding: sinusoidal(t * scale) → SiLU MLP → conditioning ──
         Tensor temb = ComputeTimestepEmbedding(backend, timestep, batch, conditioningDim);
 
@@ -515,6 +522,16 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         prefix.Dispose();
         joint.Dispose();
 
+        // Back to F32 for the final AdaLN norm + proj_out + Euler step (velocity precision matters across steps).
+        // No-op on the F32 edit path (ForwardWithRefs never casts its stream to F16).
+        if (imgFinal.DType != DType.F32)
+        {
+            Tensor imgFinalF32 = new(imgFinal.Shape, DType.F32);
+            backend.CastToF32(imgFinalF32, imgFinal);
+            imgFinal.Dispose();
+            imgFinal = imgFinalF32;
+        }
+
         Tensor normedOut = ApplyFinalNorm(backend, imgFinal, temb, batch, imgSeqLen, hidden, conditioningDim);
         imgFinal.Dispose();
         temb.Dispose();
@@ -691,6 +708,19 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
     private static Tensor? CastToF32IfNeeded(Tensor? t) =>
         t is null ? null : t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
+    /// <summary>Casts an F32 block-input stream to the DiT activation dtype (F16 on the <c>HARTSY_DIT_F16</c> hot
+    /// path, else a no-op passthrough). Disposes the source when it casts. Device-resident.</summary>
+    private static Tensor CastStreamToAct(IBackend backend, Tensor f32Stream)
+    {
+        DType act = DiTBlocks.DitDtype.Act;
+        if (act == DType.F32)
+            return f32Stream;
+        Tensor casted = new(f32Stream.Shape, act);
+        backend.CastToF16(casted, f32Stream);
+        f32Stream.Dispose();
+        return casted;
+    }
+
     private static int ComputeFfnInnerDim(OmniGen2Config config)
     {
         // Upstream LuminaFeedForward (OmniGen2TransformerBlock) is constructed with inner_dim = 4 * dim, then an
@@ -712,6 +742,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            _rope.Dispose();
             _xEmbedderWeight = _xEmbedderBias = null;
             _captionNormWeight = null;
             _captionEmbedderWeight = _captionEmbedderBias = null;

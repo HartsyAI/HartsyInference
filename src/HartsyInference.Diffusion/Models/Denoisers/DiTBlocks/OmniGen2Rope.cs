@@ -18,11 +18,22 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// Rotation pair layout matches Flux/Qwen-Image: <c>(real, imag) = vec[2i], vec[2i+1]</c>.
 /// <para>Editing/reference-image positions (<c>l_effective_ref_img_len</c> path) are intentionally not modeled
 /// here — this implementation is t2i-only.</para></summary>
-public sealed unsafe class OmniGen2Rope
+public sealed unsafe class OmniGen2Rope : IDisposable
 {
     private readonly int[] _axesDim;
     private readonly int _theta;
     private readonly int _headDim;
+
+    // Device rope-table caches (WanRopeInterleaved [S, headDim] layout). Positions are step-invariant and
+    // size-invariant, so a table built once is reused across every block and every denoise step of a generation
+    // (and across generations at the same geometry) — this is what turns the per-block host Q/K drain into a
+    // single device kernel. One slot per stream type used concurrently in a forward (text / image / joint).
+    private Tensor? _textCos, _textSin;
+    private int _textKey = -1;
+    private Tensor? _imageCos, _imageSin;
+    private (int h, int w, int t) _imageKey = (-1, -1, -1);
+    private Tensor? _jointCos, _jointSin;
+    private (int txt, int h, int w) _jointKey = (-1, -1, -1);
 
     /// <summary>Creates a 3-axis OmniGen2 RoPE.</summary>
     /// <param name="axesDim">Per-axis dimensions <c>(time, height, width)</c>; each must be even. Sum must equal head_dim.</param>
@@ -229,6 +240,63 @@ public sealed unsafe class OmniGen2Rope
             }
         }
         return (cos, sin);
+    }
+
+    /// <summary>Returns the cached device <c>(cos, sin)</c> tables for a text-only stream (positions <c>(s,s,s)</c>),
+    /// building them on first use. <c>[txtSeqLen, headDim]</c> in the <see cref="Core.Backends.IBackend.WanRopeInterleaved"/>
+    /// convention — bit-equivalent to the host <see cref="ApplyText"/> path minus the per-block Q/K D2H drain.</summary>
+    public (Tensor Cos, Tensor Sin) GetOrBuildTextTables(int txtSeqLen)
+    {
+        if (_textCos is not null && _textSin is not null && _textKey == txtSeqLen)
+            return (_textCos, _textSin);
+        _textCos?.Dispose();
+        _textSin?.Dispose();
+        (float[] cos, float[] sin) = BuildTextTable(txtSeqLen);
+        (_textCos, _textSin) = ExpandToDeviceTables(cos, sin);
+        _textKey = txtSeqLen;
+        return (_textCos, _textSin);
+    }
+
+    /// <summary>Returns the cached device <c>(cos, sin)</c> tables for an image-only stream (positions
+    /// <c>(timeOffset, row, col)</c>), building them on first use. <c>[hPacked·wPacked, headDim]</c>.</summary>
+    public (Tensor Cos, Tensor Sin) GetOrBuildImageTables(int hPacked, int wPacked, int timeOffset)
+    {
+        (int, int, int) key = (hPacked, wPacked, timeOffset);
+        if (_imageCos is not null && _imageSin is not null && _imageKey == key)
+            return (_imageCos, _imageSin);
+        _imageCos?.Dispose();
+        _imageSin?.Dispose();
+        (float[] cos, float[] sin) = BuildImageTable(hPacked, wPacked, timeOffset);
+        (_imageCos, _imageSin) = ExpandToDeviceTables(cos, sin);
+        _imageKey = key;
+        return (_imageCos, _imageSin);
+    }
+
+    /// <summary>Returns the cached device <c>(cos, sin)</c> tables for the joint <c>[text, image]</c> stream,
+    /// building them on first use. <c>[txtSeqLen + hPacked·wPacked, headDim]</c>.</summary>
+    public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(int txtSeqLen, int hPacked, int wPacked)
+    {
+        (int, int, int) key = (txtSeqLen, hPacked, wPacked);
+        if (_jointCos is not null && _jointSin is not null && _jointKey == key)
+            return (_jointCos, _jointSin);
+        _jointCos?.Dispose();
+        _jointSin?.Dispose();
+        (float[] cos, float[] sin) = BuildJointTable(txtSeqLen, hPacked, wPacked);
+        (_jointCos, _jointSin) = ExpandToDeviceTables(cos, sin);
+        _jointKey = key;
+        return (_jointCos, _jointSin);
+    }
+
+    /// <summary>Frees the cached device rope tables.</summary>
+    public void Dispose()
+    {
+        _textCos?.Dispose();
+        _textSin?.Dispose();
+        _imageCos?.Dispose();
+        _imageSin?.Dispose();
+        _jointCos?.Dispose();
+        _jointSin?.Dispose();
+        _textCos = _textSin = _imageCos = _imageSin = _jointCos = _jointSin = null;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

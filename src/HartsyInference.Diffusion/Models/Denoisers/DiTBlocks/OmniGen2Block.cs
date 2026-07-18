@@ -154,6 +154,7 @@ public sealed unsafe class OmniGen2Block
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
         TensorShape hShape = new TensorShape(batch, seqLen, _hiddenSize);
+        DType act = hidden.DType;
 
         Tensor? gateMsa = null;
         Tensor? scaleMlp = null;
@@ -167,14 +168,14 @@ public sealed unsafe class OmniGen2Block
         }
         else
         {
-            norm1Out = new Tensor(hShape, DType.F32);
+            norm1Out = new Tensor(hShape, act);
             backend.RmsNorm(norm1Out, hidden, _norm1Weight!, _normEps);
         }
 
         Tensor attnOut = ComputeSelfAttention(backend, norm1Out, rope, ropeMode, hPacked, wPacked, timeOffset, batch, seqLen);
         norm1Out.Dispose();
 
-        Tensor norm2Out = new Tensor(hShape, DType.F32);
+        Tensor norm2Out = new Tensor(hShape, act);
         backend.RmsNorm(norm2Out, attnOut, _norm2Weight!, _normEps);
         attnOut.Dispose();
 
@@ -186,12 +187,12 @@ public sealed unsafe class OmniGen2Block
         }
         else
         {
-            afterAttn = new Tensor(hShape, DType.F32);
+            afterAttn = new Tensor(hShape, act);
             backend.Add(afterAttn, hidden, norm2Out);
             norm2Out.Dispose();
         }
 
-        Tensor ffnNorm1Out = new Tensor(hShape, DType.F32);
+        Tensor ffnNorm1Out = new Tensor(hShape, act);
         backend.RmsNorm(ffnNorm1Out, afterAttn, _ffnNorm1Weight!, _normEps);
 
         Tensor mlpInput;
@@ -208,7 +209,7 @@ public sealed unsafe class OmniGen2Block
         Tensor mlpOut = ApplyLuminaSwiGluFfn(backend, mlpInput, batch, seqLen);
         mlpInput.Dispose();
 
-        Tensor ffnNorm2Out = new Tensor(hShape, DType.F32);
+        Tensor ffnNorm2Out = new Tensor(hShape, act);
         backend.RmsNorm(ffnNorm2Out, mlpOut, _ffnNorm2Weight!, _normEps);
         mlpOut.Dispose();
 
@@ -225,7 +226,7 @@ public sealed unsafe class OmniGen2Block
         }
         else
         {
-            output = new Tensor(hShape, DType.F32);
+            output = new Tensor(hShape, act);
             backend.Add(output, afterAttn, ffnNorm2Out);
             afterAttn.Dispose();
             ffnNorm2Out.Dispose();
@@ -245,6 +246,7 @@ public sealed unsafe class OmniGen2Block
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
         TensorShape hShape = new TensorShape(batch, seqLen, _hiddenSize);
+        DType act = hidden.DType;
 
         Tensor? gateMsa = null, scaleMlp = null, gateMlp = null;
         Tensor norm1Out;
@@ -256,14 +258,14 @@ public sealed unsafe class OmniGen2Block
         }
         else
         {
-            norm1Out = new Tensor(hShape, DType.F32);
+            norm1Out = new Tensor(hShape, act);
             backend.RmsNorm(norm1Out, hidden, _norm1Weight!, _normEps);
         }
 
         Tensor attnOut = ComputeSelfAttentionWithTable(backend, norm1Out, rope, ropeCos, ropeSin, batch, seqLen);
         norm1Out.Dispose();
 
-        Tensor norm2Out = new Tensor(hShape, DType.F32);
+        Tensor norm2Out = new Tensor(hShape, act);
         backend.RmsNorm(norm2Out, attnOut, _norm2Weight!, _normEps);
         attnOut.Dispose();
 
@@ -275,12 +277,12 @@ public sealed unsafe class OmniGen2Block
         }
         else
         {
-            afterAttn = new Tensor(hShape, DType.F32);
+            afterAttn = new Tensor(hShape, act);
             backend.Add(afterAttn, hidden, norm2Out);
             norm2Out.Dispose();
         }
 
-        Tensor ffnNorm1Out = new Tensor(hShape, DType.F32);
+        Tensor ffnNorm1Out = new Tensor(hShape, act);
         backend.RmsNorm(ffnNorm1Out, afterAttn, _ffnNorm1Weight!, _normEps);
 
         Tensor mlpInput;
@@ -297,7 +299,7 @@ public sealed unsafe class OmniGen2Block
         Tensor mlpOut = ApplyLuminaSwiGluFfn(backend, mlpInput, batch, seqLen);
         mlpInput.Dispose();
 
-        Tensor ffnNorm2Out = new Tensor(hShape, DType.F32);
+        Tensor ffnNorm2Out = new Tensor(hShape, act);
         backend.RmsNorm(ffnNorm2Out, mlpOut, _ffnNorm2Weight!, _normEps);
         mlpOut.Dispose();
 
@@ -313,7 +315,7 @@ public sealed unsafe class OmniGen2Block
         }
         else
         {
-            output = new Tensor(hShape, DType.F32);
+            output = new Tensor(hShape, act);
             backend.Add(output, afterAttn, ffnNorm2Out);
             afterAttn.Dispose();
             ffnNorm2Out.Dispose();
@@ -398,13 +400,13 @@ public sealed unsafe class OmniGen2Block
         projected.Dispose();
 
         TensorShape hShape = new TensorShape(batch, seqLen, _hiddenSize);
-        Tensor rms = new Tensor(hShape, DType.F32);
+        Tensor rms = new Tensor(hShape, input.DType);
         backend.RmsNorm(rms, input, _norm1Weight!, _normEps);
 
         Tensor scalePlus1 = new Tensor(paramShape, DType.F32);
         backend.AddScalar(scalePlus1, scaleMsa, 1.0f);
         scaleMsa.Dispose();
-        Tensor normed = new Tensor(hShape, DType.F32);
+        Tensor normed = new Tensor(hShape, input.DType);
         backend.AffineBroadcastLastDim(normed, rms, scalePlus1, null);
         rms.Dispose();
         scalePlus1.Dispose();
@@ -416,64 +418,67 @@ public sealed unsafe class OmniGen2Block
         int hPacked, int wPacked, int timeOffset, int batch, int seqLen)
     {
         // Q/K/V projected as [B, S, H, D] (byte-identical to [B, S, H·D]) so QK-norm RmsNorm normalizes over the
-        // head dim and Permute0213 needs no reshape view. GPU-resident; only the interleaved RoPE stays on the CPU.
-        Tensor q = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), DType.F32);
+        // head dim and Permute0213 needs no reshape view. Fully GPU-resident. `act` = the stream dtype (F16 on the
+        // HARTSY_DIT_F16 hot path, else F32); QK-norm bounds the attention scores so F16 SDPA is safe.
+        DType act = input.DType;
+        Tensor q = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), act);
         backend.Linear(q, input, _toQWeight!, null);
-        Tensor k = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), DType.F32);
+        Tensor k = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), act);
         backend.Linear(k, input, _toKWeight!, null);
-        Tensor v = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), DType.F32);
+        Tensor v = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), act);
         backend.Linear(v, input, _toVWeight!, null);
 
-        Tensor qn = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), DType.F32);
+        Tensor qn = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), act);
         backend.RmsNorm(qn, q, _normQ.Weight, _normQ.Eps);
         q.Dispose();
-        Tensor kn = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), DType.F32);
+        Tensor kn = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), act);
         backend.RmsNorm(kn, k, _normK.Weight, _normK.Eps);
         k.Dispose();
 
-        Tensor qMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
+        // Device RoPE on the pre-permute [B, S, H, D] layout: rotation is per-(s, h) independent, so applying it
+        // here is bit-equivalent to the old post-permute host pass — minus the per-block Q/K D2H drain + re-upload
+        // that made this the dominant host cost. Tables are position-only, cached across every block and step.
+        (Tensor ropeCos, Tensor ropeSin) = ropeMode switch
+        {
+            RopeApplyMode.Text => rope.GetOrBuildTextTables(seqLen),
+            RopeApplyMode.Image => rope.GetOrBuildImageTables(hPacked, wPacked, timeOffset),
+            RopeApplyMode.Joint => rope.GetOrBuildJointTables(seqLen - hPacked * wPacked, hPacked, wPacked),
+            _ => throw new ArgumentOutOfRangeException(nameof(ropeMode), ropeMode,
+                "OmniGen2Block requires a Text/Image/Joint RoPE mode."),
+        };
+        backend.WanRopeInterleaved(qn, ropeCos, ropeSin, seqLen, _numQHeads, _headDim);
+        backend.WanRopeInterleaved(kn, ropeCos, ropeSin, seqLen, _numKvHeads, _headDim);
+
+        Tensor qMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), act);
         backend.Permute0213(qMh, qn, seqLen, _numQHeads, _headDim);
         qn.Dispose();
-        Tensor kMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), DType.F32);
+        Tensor kMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), act);
         backend.Permute0213(kMh, kn, seqLen, _numKvHeads, _headDim);
         kn.Dispose();
-        Tensor vMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), DType.F32);
+        Tensor vMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), act);
         backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
         v.Dispose();
 
-        if (ropeMode == RopeApplyMode.Text)
-        {
-            rope.ApplyText(qMh, kMh, batch, _numQHeads, _numKvHeads, seqLen);
-        }
-        else if (ropeMode == RopeApplyMode.Image)
-        {
-            rope.ApplyImage(qMh, kMh, batch, _numQHeads, _numKvHeads, hPacked, wPacked, timeOffset);
-        }
-        else if (ropeMode == RopeApplyMode.Joint)
-        {
-            int txtSeqLen = seqLen - hPacked * wPacked;
-            rope.ApplyJoint(qMh, kMh, batch, _numQHeads, _numKvHeads, txtSeqLen, hPacked, wPacked);
-        }
-
-        Tensor kRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), DType.F32);
+        Tensor kRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), act);
         backend.RepeatKvHeads(kRep, kMh, _numKvHeads, _kvGroupSize);
-        Tensor vRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), DType.F32);
+        Tensor vRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), act);
         backend.RepeatKvHeads(vRep, vMh, _numKvHeads, _kvGroupSize);
         kMh.Dispose();
         vMh.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale);
+        Tensor attnMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), act);
+        // cuDNN F16 flash attention (head_dim 120 is admitted by the widened cuDNN gate); softmax-bounded, safe.
+        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale, allowF16: true);
         qMh.Dispose();
         kRep.Dispose();
         vRep.Dispose();
 
-        Tensor attnFlat = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
+        Tensor attnFlat = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), act);
         backend.Permute0213(attnFlat, attnMh, _numQHeads, seqLen, _headDim);
         attnMh.Dispose();
 
-        Tensor projected = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
+        Tensor projected = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), act);
         backend.Linear(projected, attnFlat, _toOutWeight!, null);
         attnFlat.Dispose();
         return projected;
@@ -481,23 +486,24 @@ public sealed unsafe class OmniGen2Block
 
     private Tensor ApplyLuminaSwiGluFfn(IBackend backend, Tensor input, int batch, int seqLen)
     {
+        DType act = input.DType;
         TensorShape ffShape = new TensorShape(batch, seqLen, _ffnInnerDim);
-        Tensor h1 = new Tensor(ffShape, DType.F32);
-        Tensor h3 = new Tensor(ffShape, DType.F32);
+        Tensor h1 = new Tensor(ffShape, act);
+        Tensor h3 = new Tensor(ffShape, act);
         backend.Linear(h1, input, _ffnLinear1Weight!, null);
         backend.Linear(h3, input, _ffnLinear3Weight!, null);
 
-        Tensor h1Activated = new Tensor(ffShape, DType.F32);
+        Tensor h1Activated = new Tensor(ffShape, act);
         backend.Silu(h1Activated, h1);
         h1.Dispose();
 
-        Tensor gated = new Tensor(ffShape, DType.F32);
+        Tensor gated = new Tensor(ffShape, act);
         backend.Mul(gated, h1Activated, h3);
         h1Activated.Dispose();
         h3.Dispose();
 
         TensorShape outShape = new TensorShape(batch, seqLen, _hiddenSize);
-        Tensor output = new Tensor(outShape, DType.F32);
+        Tensor output = new Tensor(outShape, act);
         backend.Linear(output, gated, _ffnLinear2Weight!, null);
         gated.Dispose();
         return output;
@@ -508,7 +514,7 @@ public sealed unsafe class OmniGen2Block
     {
         Tensor scalePlus1 = new Tensor(new TensorShape(batch, _hiddenSize), DType.F32);
         backend.AddScalar(scalePlus1, scaleMlp, 1.0f);
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), input.DType);
         backend.AffineBroadcastLastDim(output, input, scalePlus1, null);
         scalePlus1.Dispose();
         return output;
@@ -521,7 +527,7 @@ public sealed unsafe class OmniGen2Block
     {
         Tensor gateTanh = new Tensor(new TensorShape(batch, _hiddenSize), DType.F32);
         backend.Tanh(gateTanh, gate);
-        Tensor output = new Tensor(residual.Shape, DType.F32);
+        Tensor output = new Tensor(residual.Shape, residual.DType);
         backend.GatedResidualLastDim(output, residual, value, gateTanh);
         gateTanh.Dispose();
         return output;
