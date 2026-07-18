@@ -122,8 +122,8 @@ internal sealed class VibeVoiceTokenizerEncoder
         {
             // Downsample / stem.
             Tensor down = cache is null
-                ? _downsamples[i].Forward(current, batch, t)
-                : _downsamples[i].ForwardStreaming(current, batch, t, cache, sampleIndices);
+                ? _downsamples[i].Forward(backend, current, batch, t)
+                : _downsamples[i].ForwardStreaming(backend, current, batch, t, cache, sampleIndices);
             if (ownsCurrent) current.Dispose();
             current = down;
             ownsCurrent = true;
@@ -142,16 +142,15 @@ internal sealed class VibeVoiceTokenizerEncoder
         // Optional pre-head norm.
         if (_lastNormW is not null)
         {
-            Tensor normed = new(current.Shape, DType.F32);
-            VibeVoiceOps.RmsNormChannelsFirst(normed, current, _lastNormW!, batch, (int)current.Shape[1], t, _config.LayerNormEps);
+            Tensor normed = VibeVoiceOps.RmsNormChannelsFirstGpu(backend, current, _lastNormW!, batch, (int)current.Shape[1], t, _config.LayerNormEps);
             current.Dispose();
             current = normed;
         }
 
         // Head projection (1×1-ish — kernel=7, stride=1, so T preserved).
         Tensor head = cache is null
-            ? _head.Forward(current, batch, t)
-            : _head.ForwardStreaming(current, batch, t, cache, sampleIndices);
+            ? _head.Forward(backend, current, batch, t)
+            : _head.ForwardStreaming(backend, current, batch, t, cache, sampleIndices);
         current.Dispose();
         return head;
     }

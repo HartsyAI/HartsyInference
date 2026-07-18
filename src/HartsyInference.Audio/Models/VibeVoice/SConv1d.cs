@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Whisper;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
@@ -59,8 +60,10 @@ internal sealed unsafe class SConv1d
     }
 
     /// <summary>Non-streaming forward. Input <c>[B, C_in, T_in]</c>, output
-    /// <c>[B, C_out, T_out]</c>. T_out depends on stride and the right-pad budget.</summary>
-    public Tensor Forward(Tensor input, int batch, int tIn)
+    /// <c>[B, C_out, T_out]</c>. T_out depends on stride and the right-pad budget. Routed to
+    /// <see cref="IBackend.Conv1d"/> (GPU-resident) — the causal left-pad budget and the
+    /// stride-alignment right-pad map directly onto its asymmetric <c>padLeft/padRight</c>.</summary>
+    public Tensor Forward(IBackend backend, Tensor input, int batch, int tIn)
     {
         if (_weight is null) throw new InvalidOperationException($"SConv1d '{LayerId}' weights not loaded.");
         int padTotal = ContextSize;
@@ -69,8 +72,7 @@ internal sealed unsafe class SConv1d
         int tOut = (tPadded - Dilation * (KernelSize - 1) - 1) / Stride + 1;
 
         Tensor output = new(new TensorShape(batch, OutChannels, tOut), DType.F32);
-        VibeVoiceOps.CausalConv1d(output, input, _weight!, _bias,
-            batch, InChannels, OutChannels, tIn, KernelSize, Stride, Dilation, Groups, extraRight);
+        backend.Conv1d(output, input, _weight!, _bias, Stride, padTotal, extraRight, Dilation, Groups);
         return output;
     }
 
@@ -83,72 +85,49 @@ internal sealed unsafe class SConv1d
     /// next chunk's cached history (plus its own new samples) recover them. This matches
     /// the published Python behavior where <c>self.conv(input_with_context)</c> is called
     /// directly without an explicit pad step.</para></summary>
-    public Tensor ForwardStreaming(Tensor input, int batch, int tIn, VibeVoiceTokenizerStreamingCache cache, ReadOnlySpan<int> sampleIndices)
+    public Tensor ForwardStreaming(IBackend backend, Tensor input, int batch, int tIn, VibeVoiceTokenizerStreamingCache cache, ReadOnlySpan<int> sampleIndices)
     {
         if (_weight is null) throw new InvalidOperationException($"SConv1d '{LayerId}' weights not loaded.");
 
         int ctx = ContextSize;
         Tensor? cached = cache.Get(LayerId, sampleIndices, InChannels);
-        int cachedLen = cached is null ? 0 : (int)cached.Shape[cached.Shape.Rank - 1];
+        int cachedLen = cached is null ? ctx : (int)cached.Shape[cached.Shape.Rank - 1];
 
-        // Build the [B, C_in, cachedLen + tIn] working tensor by copying cached + input.
+        // Build [B, C_in, cachedLen + tIn] on-device: the cached history (or a zero pad on the
+        // first chunk) provides the left receptive field, so the conv itself runs with no
+        // padding budget. GPU Concat keeps the large input tensor resident.
         int tCombined = cachedLen + tIn;
         Tensor combined = new(new TensorShape(batch, InChannels, tCombined), DType.F32);
-        float* dst = (float*)combined.DataPointer;
-        float* xPtr = (float*)input.DataPointer;
         if (cached is not null)
         {
-            float* cPtr = (float*)cached.DataPointer;
-            for (int b = 0; b < batch; b++)
-                for (int c = 0; c < InChannels; c++)
-                {
-                    int dstBase = (b * InChannels + c) * tCombined;
-                    int srcBase = (b * InChannels + c) * cachedLen;
-                    for (int t = 0; t < cachedLen; t++) dst[dstBase + t] = cPtr[srcBase + t];
-                }
+            backend.Concat(combined, [cached, input], dim: 2);
+            cached.Dispose();
         }
         else
         {
-            // First chunk — initialize the cache region with zeros (matches Python
-            // "cached_states = torch.zeros(B, C, ctx)" fallback when no cache exists yet).
-            int zeroLen = ctx;
-            tCombined = zeroLen + tIn;
-            combined.Dispose();
-            combined = new(new TensorShape(batch, InChannels, tCombined), DType.F32);
-            dst = (float*)combined.DataPointer;
-            cachedLen = zeroLen;
-            // Zero-init for [0, ctx).
-            for (long i = 0; i < (long)batch * InChannels * zeroLen; i++) dst[i] = 0f;
+            // First chunk — zero-pad the cache region (Python "cached_states = zeros(B, C, ctx)").
+            Tensor zeros = new(new TensorShape(batch, InChannels, ctx), DType.F32);
+            backend.Fill(zeros, 0f);
+            backend.Concat(combined, [zeros, input], dim: 2);
+            zeros.Dispose();
         }
-        cached?.Dispose();
 
-        // Copy new input samples after the cached region.
-        for (int b = 0; b < batch; b++)
-            for (int c = 0; c < InChannels; c++)
-            {
-                int dstBase = (b * InChannels + c) * tCombined + cachedLen;
-                int srcBase = (b * InChannels + c) * tIn;
-                for (int t = 0; t < tIn; t++) dst[dstBase + t] = xPtr[srcBase + t];
-            }
-
-        // Run the inner conv against the combined buffer with NO further padding
-        // (padTotal=0, extraRight=0). The cached prefix already provides the left
-        // receptive field.
-        int tPadded = tCombined; // no extra pad
-        int tOut = (tPadded - Dilation * (KernelSize - 1) - 1) / Stride + 1;
+        // Conv with NO further padding (padLeft=0, padRight=0) — the prefix IS the left pad.
+        int tOut = (tCombined - Dilation * (KernelSize - 1) - 1) / Stride + 1;
         if (tOut <= 0)
         {
             combined.Dispose();
-            // Still store what we have for next chunk.
-            cache.Set(LayerId, sampleIndices, BuildEmptyTail(batch));
+            cache.Set(LayerId, sampleIndices, new Tensor(new TensorShape(batch, InChannels, 0), DType.F32));
             return new Tensor(new TensorShape(batch, OutChannels, 0), DType.F32);
         }
 
         Tensor output = new(new TensorShape(batch, OutChannels, tOut), DType.F32);
-        RunConvNoPad(output, combined, _weight!, _bias, batch, InChannels, OutChannels, tCombined, KernelSize, Stride, Dilation, Groups);
+        backend.Conv1d(output, combined, _weight!, _bias, Stride, 0, 0, Dilation, Groups);
 
         // Stash the trailing ContextSize input samples into the cache for the next chunk.
-        Tensor newTail = SliceTail(combined, batch, InChannels, tCombined, ctx);
+        int tKeep = Math.Min(ctx, tCombined);
+        Tensor newTail = new(new TensorShape(batch, InChannels, tKeep), DType.F32);
+        backend.SliceLastDim(newTail, combined, tCombined - tKeep);
         cache.Set(LayerId, sampleIndices, newTail);
         newTail.Dispose();
         combined.Dispose();
@@ -159,76 +138,5 @@ internal sealed unsafe class SConv1d
     {
         if (_weight is not null) yield return _weight;
         if (_bias is not null) yield return _bias;
-    }
-
-    private Tensor BuildEmptyTail(int batch)
-    {
-        return new Tensor(new TensorShape(batch, InChannels, 0), DType.F32);
-    }
-
-    /// <summary>Slices the trailing <paramref name="tail"/> samples from a channels-first
-    /// <c>[B, C, T]</c> tensor, allocating a fresh owning tensor for the result.</summary>
-    private static Tensor SliceTail(Tensor src, int batch, int channels, int tFull, int tail)
-    {
-        int tKeep = Math.Min(tail, tFull);
-        Tensor result = new(new TensorShape(batch, channels, tKeep), DType.F32);
-        float* sp = (float*)src.DataPointer;
-        float* dp = (float*)result.DataPointer;
-        int srcStart = tFull - tKeep;
-        for (int b = 0; b < batch; b++)
-            for (int c = 0; c < channels; c++)
-            {
-                int srcBase = (b * channels + c) * tFull + srcStart;
-                int dstBase = (b * channels + c) * tKeep;
-                for (int t = 0; t < tKeep; t++) dp[dstBase + t] = sp[srcBase + t];
-            }
-        return result;
-    }
-
-    /// <summary>Direct conv with zero left/right padding budget. Layout matches
-    /// <see cref="VibeVoiceOps.CausalConv1d"/> but without the padding offset — used only
-    /// from the streaming path where the cached history IS the left padding.</summary>
-    private static void RunConvNoPad(Tensor output, Tensor input, Tensor weight, Tensor? bias,
-        int batch, int cIn, int cOut, int tIn, int kernel, int stride, int dilation, int groups)
-    {
-        int inPerGroup = cIn / groups;
-        int outPerGroup = cOut / groups;
-        int tOut = (tIn - dilation * (kernel - 1) - 1) / stride + 1;
-
-        float* ip = (float*)input.DataPointer;
-        float* op = (float*)output.DataPointer;
-        float* wp = (float*)weight.DataPointer;
-        float* bp = bias is null ? null : (float*)bias.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int oc = 0; oc < cOut; oc++)
-            {
-                int group = oc / outPerGroup;
-                int icStart = group * inPerGroup;
-                float biasV = bp is null ? 0f : bp[oc];
-                int wRow = oc * inPerGroup * kernel;
-                int outBase = (b * cOut + oc) * tOut;
-
-                for (int j = 0; j < tOut; j++)
-                {
-                    int jSrcStart = j * stride;
-                    float acc = biasV;
-                    for (int ic = 0; ic < inPerGroup; ic++)
-                    {
-                        int inCh = icStart + ic;
-                        int inBase = (b * cIn + inCh) * tIn;
-                        int wBase = wRow + ic * kernel;
-                        for (int k = 0; k < kernel; k++)
-                        {
-                            int src = jSrcStart + k * dilation;
-                            if ((uint)src < (uint)tIn)
-                                acc += ip[inBase + src] * wp[wBase + k];
-                        }
-                    }
-                    op[outBase + j] = acc;
-                }
-            }
-        }
     }
 }

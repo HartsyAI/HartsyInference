@@ -42,8 +42,8 @@ internal sealed unsafe class VibeVoiceConvNeXtBlock
 
     private Tensor? _normW;
     private Tensor? _ffnNormW;
-    private Tensor? _gamma;
-    private Tensor? _ffnGamma;
+    private Tensor? _gammaW;        // layer scale as [dim,1,1] depthwise-conv kernel
+    private Tensor? _ffnGammaW;     // FFN layer scale as [dim,1,1] depthwise-conv kernel
     private Tensor? _ffn1W, _ffn1B;
     private Tensor? _ffn2W, _ffn2B;
 
@@ -69,8 +69,8 @@ internal sealed unsafe class VibeVoiceConvNeXtBlock
     {
         _normW = WhisperOps.EnsureF32(w[$"{_prefix}.norm.weight"]);
         _ffnNormW = WhisperOps.EnsureF32(w[$"{_prefix}.ffn_norm.weight"]);
-        _gamma = WhisperOps.EnsureF32(w[$"{_prefix}.gamma"]);
-        _ffnGamma = WhisperOps.EnsureF32(w[$"{_prefix}.ffn_gamma"]);
+        _gammaW = VibeVoiceOps.ToChannelScaleWeight(w[$"{_prefix}.gamma"], _dim);
+        _ffnGammaW = VibeVoiceOps.ToChannelScaleWeight(w[$"{_prefix}.ffn_gamma"], _dim);
         _ffn1W = WhisperOps.EnsureF32(w[$"{_prefix}.ffn.linear1.weight"]);
         _ffn1B = WhisperOps.EnsureF32(w[$"{_prefix}.ffn.linear1.bias"]);
         _ffn2W = WhisperOps.EnsureF32(w[$"{_prefix}.ffn.linear2.weight"]);
@@ -89,28 +89,27 @@ internal sealed unsafe class VibeVoiceConvNeXtBlock
     {
         if (_normW is null) throw new InvalidOperationException($"VibeVoiceConvNeXtBlock '{_prefix}' weights not loaded.");
 
-        // --- mixer path ---
-        Tensor normed = new(x.Shape, DType.F32);
-        VibeVoiceOps.RmsNormChannelsFirst(normed, x, _normW!, batch, _dim, t, _normEps);
+        // --- mixer path (fully on-device) ---
+        Tensor normed = VibeVoiceOps.RmsNormChannelsFirstGpu(backend, x, _normW!, batch, _dim, t, _normEps);
 
         Tensor mixed = cache is null
-            ? _mixer.Forward(normed, batch, t)
-            : _mixer.ForwardStreaming(normed, batch, t, cache, sampleIndices);
+            ? _mixer.Forward(backend, normed, batch, t)
+            : _mixer.ForwardStreaming(backend, normed, batch, t, cache, sampleIndices);
         normed.Dispose();
 
         // The depthwise mixer keeps T unchanged (stride=1). Sanity-check.
         if ((int)mixed.Shape[2] != t)
             throw new InvalidOperationException($"Mixer changed time dim: expected {t}, got {mixed.Shape[2]}.");
 
-        VibeVoiceOps.LayerScaleApplyCF(mixed, _gamma!, batch, _dim, t);
-
-        Tensor afterMixer = new(x.Shape, DType.F32);
-        backend.Add(afterMixer, x, mixed);
+        Tensor mixedScaled = VibeVoiceOps.ChannelScaleGpu(backend, mixed, _gammaW!, batch, _dim, t);
         mixed.Dispose();
 
+        Tensor afterMixer = new(x.Shape, DType.F32);
+        backend.Add(afterMixer, x, mixedScaled);
+        mixedScaled.Dispose();
+
         // --- ffn path ---
-        Tensor normed2 = new(afterMixer.Shape, DType.F32);
-        VibeVoiceOps.RmsNormChannelsFirst(normed2, afterMixer, _ffnNormW!, batch, _dim, t, _normEps);
+        Tensor normed2 = VibeVoiceOps.RmsNormChannelsFirstGpu(backend, afterMixer, _ffnNormW!, batch, _dim, t, _normEps);
 
         // Transpose [B, C, T] → [B, T, C] for channels-last FFN.
         Tensor cl = new(new TensorShape(batch, t, _dim), DType.F32);
@@ -131,18 +130,19 @@ internal sealed unsafe class VibeVoiceConvNeXtBlock
         backend.Transpose2D(cf, down, t, _dim);
         down.Dispose();
 
-        VibeVoiceOps.LayerScaleApplyCF(cf, _ffnGamma!, batch, _dim, t);
+        Tensor cfScaled = VibeVoiceOps.ChannelScaleGpu(backend, cf, _ffnGammaW!, batch, _dim, t);
+        cf.Dispose();
 
         Tensor result = new(afterMixer.Shape, DType.F32);
-        backend.Add(result, afterMixer, cf);
+        backend.Add(result, afterMixer, cfScaled);
         afterMixer.Dispose();
-        cf.Dispose();
+        cfScaled.Dispose();
         return result;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] all = [_normW, _ffnNormW, _gamma, _ffnGamma, _ffn1W, _ffn1B, _ffn2W, _ffn2B];
+        Tensor?[] all = [_normW, _ffnNormW, _gammaW, _ffnGammaW, _ffn1W, _ffn1B, _ffn2W, _ffn2B];
         foreach (Tensor? t in all) if (t is not null) yield return t;
         foreach (Tensor t in _mixer.EnumerateWeights()) yield return t;
     }

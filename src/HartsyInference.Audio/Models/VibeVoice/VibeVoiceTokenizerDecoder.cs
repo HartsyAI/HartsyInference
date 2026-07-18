@@ -120,8 +120,8 @@ internal sealed class VibeVoiceTokenizerDecoder
     {
         // Stem.
         Tensor current = cache is null
-            ? _stem.Forward(latent, batch, tLatent)
-            : _stem.ForwardStreaming(latent, batch, tLatent, cache, sampleIndices);
+            ? _stem.Forward(backend, latent, batch, tLatent)
+            : _stem.ForwardStreaming(backend, latent, batch, tLatent, cache, sampleIndices);
         int t = (int)current.Shape[2];
 
         // Stage 0 blocks (run BEFORE the first transpose — see Python's per-stage loop:
@@ -137,8 +137,8 @@ internal sealed class VibeVoiceTokenizerDecoder
         for (int i = 1; i < _depths.Length; i++)
         {
             Tensor up = cache is null
-                ? _upsamples[i - 1].Forward(current, batch, t)
-                : _upsamples[i - 1].ForwardStreaming(current, batch, t, cache, sampleIndices);
+                ? _upsamples[i - 1].Forward(backend, current, batch, t)
+                : _upsamples[i - 1].ForwardStreaming(backend, current, batch, t, cache, sampleIndices);
             current.Dispose();
             current = up;
             t = (int)current.Shape[2];
@@ -154,16 +154,15 @@ internal sealed class VibeVoiceTokenizerDecoder
         // Optional pre-head norm.
         if (_lastNormW is not null)
         {
-            Tensor normed = new(current.Shape, DType.F32);
-            VibeVoiceOps.RmsNormChannelsFirst(normed, current, _lastNormW!, batch, (int)current.Shape[1], t, _config.LayerNormEps);
+            Tensor normed = VibeVoiceOps.RmsNormChannelsFirstGpu(backend, current, _lastNormW!, batch, (int)current.Shape[1], t, _config.LayerNormEps);
             current.Dispose();
             current = normed;
         }
 
         // Head projection.
         Tensor head = cache is null
-            ? _head.Forward(current, batch, t)
-            : _head.ForwardStreaming(current, batch, t, cache, sampleIndices);
+            ? _head.Forward(backend, current, batch, t)
+            : _head.ForwardStreaming(backend, current, batch, t, cache, sampleIndices);
         current.Dispose();
         return head;
     }

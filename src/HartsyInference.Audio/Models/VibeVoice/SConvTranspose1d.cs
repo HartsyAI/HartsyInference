@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Whisper;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
@@ -49,54 +50,47 @@ internal sealed unsafe class SConvTranspose1d
     }
 
     /// <summary>Non-streaming forward. Input <c>[B, C_in, T_in]</c> →
-    /// <c>[B, C_out, T_in * stride]</c> after the causal right-trim.</summary>
-    public Tensor Forward(Tensor input, int batch, int tIn)
+    /// <c>[B, C_out, T_in * stride]</c> after the causal right-trim. Routed to
+    /// <see cref="IBackend.ConvTranspose1d"/> with <c>padLeft=0, padRight=K-stride</c>
+    /// (trim_right_ratio=1.0), which yields exactly <c>T_in·stride</c> output samples.</summary>
+    public Tensor Forward(IBackend backend, Tensor input, int batch, int tIn)
     {
         if (_weight is null) throw new InvalidOperationException($"SConvTranspose1d '{LayerId}' weights not loaded.");
         int tOut = tIn * Stride;
         Tensor output = new(new TensorShape(batch, OutChannels, tOut), DType.F32);
-        VibeVoiceOps.CausalConvTranspose1d(output, input, _weight!, _bias, batch, InChannels, OutChannels, tIn, KernelSize, Stride);
+        backend.ConvTranspose1d(output, input, _weight!, _bias, Stride, 0, KernelSize - Stride, 1, 1);
         return output;
     }
 
     /// <summary>Streaming forward — returns only the output samples produced by this
     /// chunk's new input.</summary>
-    public Tensor ForwardStreaming(Tensor input, int batch, int tIn, VibeVoiceTokenizerStreamingCache cache, ReadOnlySpan<int> sampleIndices)
+    public Tensor ForwardStreaming(IBackend backend, Tensor input, int batch, int tIn, VibeVoiceTokenizerStreamingCache cache, ReadOnlySpan<int> sampleIndices)
     {
         if (_weight is null) throw new InvalidOperationException($"SConvTranspose1d '{LayerId}' weights not loaded.");
 
         Tensor? cached = cache.Get(LayerId, sampleIndices, InChannels);
         int cachedLen = cached is null ? 0 : (int)cached.Shape[cached.Shape.Rank - 1];
 
-        // Build full_input = cached + input.
+        // Build full_input = cached + input on-device (no zero-pad prepend on the first chunk —
+        // the transpose streaming convention runs on the raw chunk and returns the new portion).
         int tFull = cachedLen + tIn;
-        Tensor fullInput = new(new TensorShape(batch, InChannels, tFull), DType.F32);
-        float* dst = (float*)fullInput.DataPointer;
-        float* xPtr = (float*)input.DataPointer;
+        Tensor fullInput;
         if (cached is not null)
         {
-            float* cPtr = (float*)cached.DataPointer;
-            for (int b = 0; b < batch; b++)
-                for (int c = 0; c < InChannels; c++)
-                {
-                    int dstBase = (b * InChannels + c) * tFull;
-                    int srcBase = (b * InChannels + c) * cachedLen;
-                    for (int t = 0; t < cachedLen; t++) dst[dstBase + t] = cPtr[srcBase + t];
-                }
+            fullInput = new(new TensorShape(batch, InChannels, tFull), DType.F32);
+            backend.Concat(fullInput, [cached, input], dim: 2);
+            cached.Dispose();
         }
-        for (int b = 0; b < batch; b++)
-            for (int c = 0; c < InChannels; c++)
-            {
-                int dstBase = (b * InChannels + c) * tFull + cachedLen;
-                int srcBase = (b * InChannels + c) * tIn;
-                for (int t = 0; t < tIn; t++) dst[dstBase + t] = xPtr[srcBase + t];
-            }
-        cached?.Dispose();
+        else
+        {
+            fullInput = new(input.Shape, DType.F32);
+            backend.CopyInto(fullInput, input);
+        }
 
-        // Run the full transposed conv with built-in right trim. Output T = tFull * stride.
+        // Full transposed conv with built-in right trim (padRight = K - stride). T = tFull * stride.
         int tOutFull = tFull * Stride;
         Tensor fullOutput = new(new TensorShape(batch, OutChannels, tOutFull), DType.F32);
-        VibeVoiceOps.CausalConvTranspose1d(fullOutput, fullInput, _weight!, _bias, batch, InChannels, OutChannels, tFull, KernelSize, Stride);
+        backend.ConvTranspose1d(fullOutput, fullInput, _weight!, _bias, Stride, 0, KernelSize - Stride, 1, 1);
 
         Tensor output;
         if (cachedLen == 0)
@@ -110,21 +104,14 @@ internal sealed unsafe class SConvTranspose1d
             int expected = tIn * Stride;
             int take = Math.Min(expected, tOutFull);
             output = new(new TensorShape(batch, OutChannels, take), DType.F32);
-            float* sp = (float*)fullOutput.DataPointer;
-            float* dp = (float*)output.DataPointer;
-            int srcStart = tOutFull - take;
-            for (int b = 0; b < batch; b++)
-                for (int c = 0; c < OutChannels; c++)
-                {
-                    int srcBase = (b * OutChannels + c) * tOutFull + srcStart;
-                    int dstBase = (b * OutChannels + c) * take;
-                    for (int t = 0; t < take; t++) dp[dstBase + t] = sp[srcBase + t];
-                }
+            backend.SliceLastDim(output, fullOutput, tOutFull - take);
             fullOutput.Dispose();
         }
 
         // Stash the trailing ContextSize input samples into the cache.
-        Tensor newTail = SliceTail(fullInput, batch, InChannels, tFull, ContextSize);
+        int tKeep = Math.Min(ContextSize, tFull);
+        Tensor newTail = new(new TensorShape(batch, InChannels, tKeep), DType.F32);
+        backend.SliceLastDim(newTail, fullInput, tFull - tKeep);
         cache.Set(LayerId, sampleIndices, newTail);
         newTail.Dispose();
         fullInput.Dispose();
@@ -136,22 +123,5 @@ internal sealed unsafe class SConvTranspose1d
     {
         if (_weight is not null) yield return _weight;
         if (_bias is not null) yield return _bias;
-    }
-
-    private static Tensor SliceTail(Tensor src, int batch, int channels, int tFull, int tail)
-    {
-        int tKeep = Math.Min(tail, tFull);
-        Tensor result = new(new TensorShape(batch, channels, tKeep), DType.F32);
-        float* sp = (float*)src.DataPointer;
-        float* dp = (float*)result.DataPointer;
-        int srcStart = tFull - tKeep;
-        for (int b = 0; b < batch; b++)
-            for (int c = 0; c < channels; c++)
-            {
-                int srcBase = (b * channels + c) * tFull + srcStart;
-                int dstBase = (b * channels + c) * tKeep;
-                for (int t = 0; t < tKeep; t++) dp[dstBase + t] = sp[srcBase + t];
-            }
-        return result;
     }
 }

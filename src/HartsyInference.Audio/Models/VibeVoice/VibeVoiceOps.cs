@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
@@ -182,6 +183,50 @@ internal static unsafe class VibeVoiceOps
                 }
             }
         }
+    }
+
+    /// <summary>GPU-resident channels-first RMSNorm: RMS over the channel axis of a
+    /// <c>[B, C, T]</c> tensor with a per-channel scale <paramref name="weight"/> (<c>[C]</c>).
+    /// Composed from existing backend ops (transpose → last-dim <see cref="IBackend.RmsNorm"/>
+    /// → transpose) so the whole VAE block stays on-device — avoiding the per-op device→host
+    /// sync the host <see cref="RmsNormChannelsFirst"/> forced. <see cref="IBackend.RmsNorm"/>
+    /// uses <c>1/sqrt(meanSq + eps)</c>, matching the host reference bit-for-bit.
+    /// Returns a fresh <c>[B, C, T]</c> tensor; caller disposes.</summary>
+    public static Tensor RmsNormChannelsFirstGpu(IBackend backend, Tensor x, Tensor weight, int batch, int channels, int t, float eps)
+    {
+        Tensor cl = new(new TensorShape(batch, t, channels), DType.F32);
+        backend.Transpose2D(cl, x, channels, t);
+        Tensor normed = new(cl.Shape, DType.F32);
+        backend.RmsNorm(normed, cl, weight, eps);
+        cl.Dispose();
+        Tensor cf = new(new TensorShape(batch, channels, t), DType.F32);
+        backend.Transpose2D(cf, normed, t, channels);
+        normed.Dispose();
+        return cf;
+    }
+
+    /// <summary>GPU-resident per-channel scale of a channels-first <c>[B, C, T]</c> tensor by
+    /// <paramref name="scaleWeight"/> shaped as a <c>[C, 1, 1]</c> depthwise conv kernel:
+    /// <c>out[b,c,t] = x[b,c,t] · scaleWeight[c]</c>. A groups=C, kernel=1 <see cref="IBackend.Conv1d"/>
+    /// computes exactly that, reusing the resident conv path (ConvNeXt "layer scale"), so no
+    /// host round-trip and no weight mutation. Returns a fresh tensor; caller disposes.</summary>
+    public static Tensor ChannelScaleGpu(IBackend backend, Tensor x, Tensor scaleWeight, int batch, int channels, int t)
+    {
+        Tensor output = new(new TensorShape(batch, channels, t), DType.F32);
+        backend.Conv1d(output, x, scaleWeight, null, 1, 0, 0, 1, channels);
+        return output;
+    }
+
+    /// <summary>Copies a per-channel scale vector (<c>[C]</c>, any layout) into a fresh owning
+    /// <c>[C, 1, 1]</c> depthwise-conv kernel for <see cref="ChannelScaleGpu"/>.</summary>
+    public static unsafe Tensor ToChannelScaleWeight(Tensor gamma, int channels)
+    {
+        using Tensor g = gamma.DType == DType.F32 ? null! : gamma.CastTo(DType.F32);
+        float* src = (float*)(g is null ? gamma.DataPointer : g.DataPointer);
+        Tensor w = new(new TensorShape(channels, 1, 1), DType.F32);
+        float* dst = (float*)w.DataPointer;
+        for (int c = 0; c < channels; c++) dst[c] = src[c];
+        return w;
     }
 
     /// <summary>RMSNorm over the channel axis of a <c>[B, C, T]</c> tensor with a
