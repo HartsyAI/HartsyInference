@@ -105,6 +105,40 @@ public sealed record MoonshineConfig
     /// 64 × 3 × 2 = 384 for the stock base, giving a 16kHz/384 ≈ 41.67 Hz encoder rate.</summary>
     public int TotalDownsample => Conv1Stride * Conv2Stride * Conv3Stride;
 
+    // ── 2nd-gen streaming variants (UsefulSensors/moonshine-streaming-{tiny,small,medium}) ──
+    // A completely different encoder front-end/attention pattern (see MoonshineStreamingEncoder);
+    // the decoder is architecturally IDENTICAL to the fields/block-order below (RoPE self-attn +
+    // cross-attn + SwiGLU MLP, plain weight-only LayerNorm) — MoonshineDecoder is reused as-is for
+    // streaming, driven by these same fields plus TieWordEmbeddings=false (untied proj_out).
+
+    /// <summary>Audio sample rate the encoder embedder expects (streaming models only).</summary>
+    public int SampleRate { get; init; } = 16_000;
+
+    /// <summary>Streaming embedder frame length in ms — <c>frame_len = round(SampleRate*FrameMs/1000)</c>
+    /// raw samples per frame (80 samples at 16kHz/5ms). Streaming encoder only.</summary>
+    public double FrameMs { get; init; } = 5.0;
+
+    /// <summary>Streaming encoder embedder causal-conv kernel/stride (both conv1 and conv2 share these —
+    /// verified identical k=5/s=2 for both stages on tiny/small/medium).</summary>
+    public int StreamingConvKernel { get; init; } = 5;
+    public int StreamingConvStride { get; init; } = 2;
+
+    /// <summary>Per-encoder-layer sliding-window attention span <c>(left, right)</c> in encoder frames —
+    /// null for the original (non-streaming) Moonshine, required for streaming variants. <c>left</c>
+    /// includes the query position itself; <c>right</c> is strict future look-ahead.</summary>
+    public (int Left, int Right)[]? SlidingWindows { get; init; }
+
+    // ── Streaming encoder's OWN dims (distinct from the decoder's HiddenSize/NumHeads/HeadDim/
+    // IntermediateSize above — verified from the real checkpoints: small/medium's encoder_hidden_size
+    // (620/768) differs from the decoder hidden_size (512/640), and encoder head_dim is an EXPLICIT
+    // config field that does NOT divide evenly out of encoder_hidden_size/encoder_num_heads for those
+    // two variants (620/8=77.5, not the real head_dim of 64) — so it can't be a computed property like
+    // the decoder's HeadDim is. Unused (0) for the original non-streaming Moonshine.
+    public int EncoderHiddenSize { get; init; }
+    public int EncoderNumHeads { get; init; }
+    public int EncoderHeadDim { get; init; }
+    public int EncoderIntermediateSize { get; init; }
+
     // ── Presets ────────────────────────────────────────────────────────────────
 
     /// <summary>tiny — 27M params, hidden=288, 6 layers, head_dim=36.</summary>
@@ -129,5 +163,78 @@ public sealed record MoonshineConfig
         IntermediateSize = 1664,
         VocabSize = 32_768,
         PartialRotaryFactor = 0.62f,
+    };
+
+    // ── 2nd-gen streaming presets — dims verified from the real UsefulSensors/moonshine-streaming-{tiny,
+    // small,medium} config.json files. Decoder fields (HiddenSize/NumHeads/IntermediateSize) are the
+    // TOP-LEVEL config values; Encoder* fields are the nested "encoder_config" values. TieWordEmbeddings
+    // is false for all three (separate top-level proj_out.weight, not shared with embed_tokens).
+
+    /// <summary>streaming-tiny — 44.1M params. Encoder/decoder dims coincide (both 320-wide, head_dim 40)
+    /// only for this variant; small/medium do not (see their presets).</summary>
+    public static MoonshineConfig StreamingTiny => new()
+    {
+        HiddenSize = 320,
+        DecoderLayers = 6,
+        EncoderLayers = 6,
+        NumHeads = 8,
+        IntermediateSize = 1280,
+        VocabSize = 32_768,
+        PartialRotaryFactor = 0.8f,
+        TieWordEmbeddings = false,
+        MaxTextPositions = 448,
+        SampleRate = 16_000,
+        FrameMs = 5.0,
+        EncoderHiddenSize = 320,
+        EncoderNumHeads = 8,
+        EncoderHeadDim = 40,
+        EncoderIntermediateSize = 1280,
+        SlidingWindows = [(16, 4), (16, 4), (16, 0), (16, 0), (16, 4), (16, 4)],
+    };
+
+    /// <summary>streaming-small — 0.1B params.</summary>
+    public static MoonshineConfig StreamingSmall => new()
+    {
+        HiddenSize = 512,
+        DecoderLayers = 10,
+        EncoderLayers = 10,
+        NumHeads = 8,
+        IntermediateSize = 2048,
+        VocabSize = 32_768,
+        PartialRotaryFactor = 0.5f,
+        TieWordEmbeddings = false,
+        MaxTextPositions = 448,
+        SampleRate = 16_000,
+        FrameMs = 5.0,
+        EncoderHiddenSize = 620,
+        EncoderNumHeads = 8,
+        EncoderHeadDim = 64,
+        EncoderIntermediateSize = 2480,
+        SlidingWindows = [(16, 4), (16, 4), (16, 0), (16, 0), (16, 0), (16, 0), (16, 0), (16, 0), (16, 4), (16, 4)],
+    };
+
+    /// <summary>streaming-medium — 0.3B params, outperforms Whisper large-v3 per the model card.</summary>
+    public static MoonshineConfig StreamingMedium => new()
+    {
+        HiddenSize = 640,
+        DecoderLayers = 14,
+        EncoderLayers = 14,
+        NumHeads = 10,
+        IntermediateSize = 2560,
+        VocabSize = 32_768,
+        PartialRotaryFactor = 0.5f,
+        TieWordEmbeddings = false,
+        MaxTextPositions = 448,
+        SampleRate = 16_000,
+        FrameMs = 5.0,
+        EncoderHiddenSize = 768,
+        EncoderNumHeads = 10,
+        EncoderHeadDim = 64,
+        EncoderIntermediateSize = 3072,
+        SlidingWindows =
+        [
+            (16, 4), (16, 4), (16, 0), (16, 0), (16, 0), (16, 0), (16, 0),
+            (16, 0), (16, 0), (16, 0), (16, 0), (16, 0), (16, 4), (16, 4),
+        ],
     };
 }

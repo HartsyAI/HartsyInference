@@ -25,6 +25,7 @@ public sealed unsafe class MoonshineDecoder : IDisposable
 
     private Tensor? _embedTokens;  // [vocab, hidden]
     private Tensor? _finalNormWeight;
+    private Tensor? _projOut;      // [vocab, hidden] — untied LM head (streaming variants only)
 
     private float[]? _cosTable, _sinTable;
     private bool _loaded;
@@ -45,6 +46,10 @@ public sealed unsafe class MoonshineDecoder : IDisposable
         for (int i = 0; i < _layers.Length; i++)
             _layers[i].LoadWeights(weights, $"{prefix}.layers.{i}");
         _finalNormWeight = WhisperOps.EnsureF32(weights[$"{prefix}.norm.weight"]);
+
+        // Untied LM head (streaming variants): a top-level `proj_out.weight`, NOT under `{prefix}.`.
+        if (!_cfg.TieWordEmbeddings)
+            _projOut = WhisperOps.EnsureF32(weights["proj_out.weight"]);
 
         // RoPE table sized to MaxTextPositions (194). Self-attention positions never
         // exceed that — we throw at decode time if a request would.
@@ -172,7 +177,7 @@ public sealed unsafe class MoonshineDecoder : IDisposable
     private void ComputeLogits(Tensor hidden, Tensor logits, int vocab, int d)
     {
         float* h = (float*)hidden.DataPointer;
-        float* w = (float*)_embedTokens!.DataPointer;
+        float* w = (float*)(_projOut ?? _embedTokens)!.DataPointer;
         float* l = (float*)logits.DataPointer;
         for (int v = 0; v < vocab; v++)
         {
@@ -189,6 +194,7 @@ public sealed unsafe class MoonshineDecoder : IDisposable
         foreach (MoonshineDecoderLayer layer in _layers)
             foreach (Tensor t in layer.EnumerateWeights()) yield return t;
         if (_finalNormWeight is not null) yield return _finalNormWeight;
+        if (_projOut is not null) yield return _projOut;
     }
 
     private void ThrowIfDisposed()

@@ -14,13 +14,18 @@ using HartsyInference.Tokenizers;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>End-to-end real-weight generation through <see cref="StableAudioPipeline"/>: T5-base prompt encode →
-/// <see cref="StableAudioNumberEmbedder"/> timing token → <see cref="StableAudioDit"/> 8-step pingpong denoise →
+/// <see cref="StableAudioNumberEmbedder"/> timing token → <see cref="StableAudioDit"/> pingpong denoise →
 /// <see cref="OobleckVae"/> decode → stereo WAV. The individual components are separately real-weight-verified
 /// bit-exact (StableAudioDitParityTests / OobleckVaeParityTests / StableAudioNumberEmbedderParityTests); this
 /// proves the plumbing runs end-to-end and produces finite, non-silent audio (no Python reference for the full
 /// composed pipeline — sanity-checked the same way the audio-verify campaign checks other models: finite
-/// samples + RMS envelope). Skip-guarded when the checkpoint or T5-base weights are absent.</summary>
+/// samples + RMS envelope). Runs only 2 steps (not the distilled model's real 8) — this test targets plumbing,
+/// not audio quality; the DiT always denoises the full 256-token trained latent regardless of step count, and
+/// on this engine's naive (non-BLAS) CPU backend that is ~90-100B MACs per forward call, so even 2 steps takes
+/// several minutes — <c>[Trait("Category","Slow")]</c> like <c>AceStepGenerationTests</c>. Skip-guarded when the
+/// checkpoint or T5-base weights are absent.</summary>
 [Trait("Category", "Integration")]
+[Trait("Category", "Slow")]
 public unsafe class StableAudioGenerationTests
 {
     private readonly ITestOutputHelper _output;
@@ -67,7 +72,7 @@ public unsafe class StableAudioGenerationTests
 
         StableAudioPipeline pipeline = new(backend, dit, (IAudioLatentDecoder)vae, timing, cfg);
         (float[] left, float[] right, int rate, int seed) = pipeline.Generate(
-            textEmbeds, secondsTotal: 3.0, steps: 8, seed: 0,
+            textEmbeds, secondsTotal: 3.0, steps: 2, seed: 0,
             onProgress: p => _output.WriteLine($"step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"));
 
         Directory.CreateDirectory(TestPaths.OutputDir);
