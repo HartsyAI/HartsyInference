@@ -149,7 +149,7 @@ public sealed class ModelRegistry : IDisposable
         }
 
         string destination = cache.GetCachePath(repoId, Path.GetFileName(chosen.FileName));
-        await hub.DownloadFileAsync(repoId, chosen.FileName, destination, progress, ct).ConfigureAwait(false);
+        await hub.DownloadFileAsync(repoId, chosen.FileName, destination, progress, sha256: null, ct).ConfigureAwait(false);
 
         cache.Add(new ModelInfo
         {
