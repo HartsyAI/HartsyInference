@@ -19,7 +19,8 @@ A single meta-package (`HartsyInference`) is published for consumers who want th
 | Package | Description | Dependencies |
 |---|---|---|
 | **Core** | Tensor types, `IBackend`, `IScheduler`, `IModel`, interfaces, enums, logs | net8.0 / net10.0 |
-| **ModelHandler** | Safetensors/GGUF/PyTorch-pickle loaders, registry, HF Hub download, caching | Core |
+| **ModelHandler** | Safetensors/GGUF/PyTorch-pickle loaders, architecture detection/layout resolution, quant/LoRA | Core |
+| **Engine** | **The service layer / single source of truth.** Model lifecycle (registry, HF Hub download, cache), the `InferenceEngine` facade + per-modality dispatch/handlers, backend factory, native request/result DTOs, inference queue. Everything "load a model + generate" lives here; the CLI, HTTP server, and SwarmUI extension are thin wrappers over it. | all modality + backend packages, ModelHandler |
 | **Tokenizers** | BPE (CLIP), SentencePiece (T5), Whisper tokenizer | Core, Microsoft.ML.Tokenizers |
 | **Phonemizer** | Pure-C# espeak-ng-style G2P / IPA phonemization for phoneme-input TTS | Core |
 | **Cpu** | SIMD kernels: Conv2D, GroupNorm, SDPA, matmul via `System.Runtime.Intrinsics` | Core |
@@ -54,7 +55,10 @@ The engine is consumed three ways, in priority order:
 2. **NuGet libraries:** reference the meta-package or individual modality packages.
 3. **Sample CLIs:** the per-modality apps under `samples/` and `src/HartsyInference.Cli` (developer and verification tools).
 
-> **Dropped: first-party server.** `HartsyInference.Server` physically exists in `src/` as abandoned ASP.NET scaffolding. It is **not** a supported or advertised path: there is no OpenAI-compatible server product, and none is planned. Do not depend on it.
+> **The service layer (`HartsyInference.Engine`) is the single source of truth.** It owns model lifecycle + the
+> `InferenceEngine` facade + all modality dispatch. The CLI is a thin wrapper over it, and `HartsyInference.Server`
+> is a thin OpenAI-compatible HTTP adapter over it (endpoint mapping + DTOs + auth) — the orchestration it used to
+> own (`ModelManager`, queue) now lives in Engine. See `docs/Design/ENGINE_REFACTOR_PLAN.md`.
 
 ### Utility (not shipped)
 
@@ -81,7 +85,11 @@ The engine is consumed three ways, in priority order:
                 |
          Interactive (Phase 10 — world models)
 
-  Consumers: SwarmUI backend extension (external repo) · CLIs · apps
+                        │  (all modality + backend packages)
+                        ▼
+                     Engine  ← service layer / single source of truth
+                        │
+  Consumers (thin wrappers): CLI · Server (HTTP adapter) · SwarmUI backend extension · direct library use
 ```
 
 LLM depends only on Core + ModelHandler + Tokenizers (not on the visual stack). Phonemizer depends on Core.

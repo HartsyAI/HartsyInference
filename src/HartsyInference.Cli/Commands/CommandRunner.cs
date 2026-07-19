@@ -34,6 +34,8 @@ public static class CommandRunner
         using InferenceEngine engine = new InferenceEngine(backendSelector);
         try
         {
+            spec = ModelAcquisition.EnsurePresent(spec);
+
             if (!quiet)
             {
                 AnsiConsole.MarkupLine($"[#9aa4af]model[/] [{CliTheme.Accent}]{Markup.Escape(headerLabel)}[/]   " +

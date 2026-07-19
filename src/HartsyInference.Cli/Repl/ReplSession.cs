@@ -330,7 +330,7 @@ public sealed class ReplSession : IDisposable
 
         try
         {
-            ModelSpec spec = ModelResolver.Resolve(_model, null, _modality);
+            ModelSpec spec = ModelAcquisition.EnsurePresent(ModelResolver.Resolve(_model, null, _modality));
             IProgressSink sink = new ConsoleProgressSink();
             _engine.Load(spec, sink);
             if (_modality == Modality.Text)
