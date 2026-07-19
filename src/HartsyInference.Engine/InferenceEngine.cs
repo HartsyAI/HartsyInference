@@ -1,6 +1,9 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Services;
+using HartsyInference.ModelHandler.Registry;
 
 namespace HartsyInference.Engine;
 
@@ -13,6 +16,7 @@ public sealed class InferenceEngine : IInferenceEngine
 {
     private readonly ModalityDispatch _dispatch = new ModalityDispatch();
     private readonly Dictionary<string, IModalityRunner> _runners = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IRecipePipeline> _recipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private string _backendSelector;
     private IBackend? _backend;
 
@@ -115,6 +119,35 @@ public sealed class InferenceEngine : IInferenceEngine
         return handler.Run(runner, prompt, parameters, progress, ct);
     }
 
+    /// <summary>The compute backend, constructed on first use. Used by the typed services that drive pipelines directly
+    /// (the recipe registry) rather than through a modality handler.</summary>
+    internal IBackend Backend => EnsureBackend();
+
+    /// <summary>Detects the checkpoint architecture for <paramref name="spec"/>, resolves its recipe, and constructs
+    /// (or returns a cached) pipeline. Throws when no recipe is registered for the detected family yet.</summary>
+    internal IRecipePipeline GetOrConstructRecipe(ModelSpec spec)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                "No checkpoint found for this model. Pass a checkpoint via --model-path or let the catalog fetch it first.");
+        }
+
+        string key = $"recipe:{spec.LocalPath}";
+        if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
+            return cached;
+
+        ModelArchitecture arch = PipelineFactory.DetectArchitecture(spec.LocalPath);
+        IArchitectureRecipe recipe = RecipeRegistry.Resolve(arch)
+            ?? throw new NotSupportedException(
+                $"Detected {arch}, but its recipe has not been lifted into the Engine yet (E-IMG-3). " +
+                $"Currently drivable: {string.Join(", ", RecipeRegistry.RegisteredNames)}.");
+
+        IRecipePipeline pipeline = recipe.Construct(new RecipeContext { CheckpointPath = spec.LocalPath, Backend = EnsureBackend() });
+        _recipePipelines[key] = pipeline;
+        return pipeline;
+    }
+
     private IModalityRunner GetOrLoadRunner(ModelSpec spec, IModalityHandler handler, IProgressSink progress)
     {
         string key = $"{spec.Modality}:{spec.LocalPath ?? spec.Requested}";
@@ -132,6 +165,9 @@ public sealed class InferenceEngine : IInferenceEngine
         foreach (IModalityRunner runner in _runners.Values)
             runner.Dispose();
         _runners.Clear();
+        foreach (IRecipePipeline pipeline in _recipePipelines.Values)
+            pipeline.Dispose();
+        _recipePipelines.Clear();
         _backend?.Dispose();
         _backend = null;
     }
