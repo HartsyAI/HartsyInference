@@ -127,7 +127,11 @@ public sealed unsafe class T5Block
         queryMh.Dispose();
         keyMh.Dispose();
         valueMh.Dispose();
-        combinedMask?.Dispose();
+        // BuildAttentionMask's batch==1/no-mask fast path returns positionBias itself (not a copy) — that
+        // tensor is caller-owned (T5TextEncoder's shared or per-layer cache, reused across blocks/calls), so
+        // only dispose combinedMask when it's a distinct tensor this method actually allocated.
+        if (combinedMask is not null && !ReferenceEquals(combinedMask, positionBias))
+            combinedMask.Dispose();
 
         // Reshape back: [B, numHeads, seqLen, headDim] → [B, seqLen, dModel]
         Tensor merged = new Tensor(hidShape, DType.F32);
