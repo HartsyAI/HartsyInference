@@ -474,13 +474,21 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] GGUF Q4/Q8 DiT path for low-RAM boxes (community quants exist; would drop the 13 GB F32 requirement)
 
 ### Stable Audio Open
-- [ ] `OobleckVae.cs` — 5-stage Conv1D + snake activation + weight-norm (no GroupNorm), 2048× downsample, 64-ch latent
-- [ ] `StableAudioDit.cs` — 1536 / 24L / 24 heads (Q) / 12 KV heads (cross-attn), AdaLN-6, RoPE, SwiGLU
-- [ ] `FourierFeatures1D` for timing embedding
-- [ ] Timing conditioning (seconds_start + seconds_total → cross-attn tokens + global AdaLN)
-- [ ] T5 reuse from HartsyInference.Diffusion
+> Open Small dims are weight-VERIFIED against the real `FastVideo/stable-audio-open-small-Diffusers` safetensors
+> (not just the diffusers port — cross-checked against upstream `stable_audio_tools` source directly). This
+> corrected the research doc in several places: 8h×128hd (not 16×64), symmetric 8/8 cross-attn KV (12-KV-head
+> MQA is diffusers-only, not present in the `stable_audio_tools`-derived checkpoint), true per-head QK-LayerNorm
+> (eps 1e-6, weight+bias), partial split-half RoPE (dim 64 of 128, θ=10000, NOT interleaved pairs), no per-block
+> AdaLN (prepend-global-token conditioning), `seconds_total` max 256s (not 512). See `StableAudioDitConfig.cs`.
+- [x] [`StableAudioDitConfig.cs`](../../src/HartsyInference.Diffusion/Models/Denoisers/StableAudioDitConfig.cs) — Open Small (verified) + Open 1.0 (unverified, carried from research) presets
+- [x] [`StableAudioDit.cs`](../../src/HartsyInference.Diffusion/Models/Denoisers/StableAudioDit.cs) — preprocess_conv residual → project_in → prepend global (timestep+timing) token → 16× `TransformerBlock` (pre-LN self-attn w/ QK-LN+partial RoPE → cross-attend-norm cross-attn w/ QK-LN, GQA-aware for Open 1.0 → ff-norm GLU-SwiGLU) → project_out → drop global token → postprocess_conv residual. [`StableAudioRope.cs`](../../src/HartsyInference.Diffusion/Models/Denoisers/DiTBlocks/StableAudioRope.cs) (partial split-half RoPE, loads checkpoint's `inv_freq` verbatim rather than recomputing from θ).
+- [x] **Real-weight parity VERIFIED (2026-07-18)** — [`StableAudioDitParityTests.cs`](../../tests/HartsyInference.Diffusion.Tests/StableAudioDitParityTests.cs) + [`gen_reference.py`](../../tests/python-reference/stable_audio_open_small_parity/gen_reference.py): loads the real Open Small checkpoint into BOTH our `StableAudioDit` and the upstream `stable_audio_tools.models.dit.DiffusionTransformer` (independent PyTorch library, all keys matched with zero renaming besides the block-norm gamma/beta naming quirk — see script docstring), same fixed random inputs → **cosine 1.000000, maxAbsDiff 7.6e-6**. Env/checkpoint-gated (Integration tier), skips cleanly without the ~1.9GB checkpoint.
+- [x] `OobleckVae.cs` (pre-existing, shared with ACE-Step 1.5) — 5-stage Conv1D + snake activation + weight-norm (no GroupNorm), 2048× downsample, 64-ch latent. Its `LoadWeights` expects a flat `nn.Sequential` numeric-index layout (the ACE-Step 1.5 dialect); Stable Audio Open Small's real checkpoint is the diffusers NAMED-submodule dialect (`encoder.block.{i}.res_unit1.snake1`, `decoder.block.{i}.conv_t1`, ...) — new [`OobleckKeyRemap.cs`](../../src/HartsyInference.Audio/Models/Codecs/Oobleck/OobleckKeyRemap.cs) renames named→flat (pure key rename, no data copy, no changes to the validated encoder/decoder code) so both dialects load through one path.
+- [x] **Real-weight parity VERIFIED (2026-07-18)** — [`OobleckVaeParityTests.cs`](../../tests/HartsyInference.Diffusion.Tests/OobleckVaeParityTests.cs) + [`gen_vae_reference.py`](../../tests/python-reference/stable_audio_open_small_parity/gen_vae_reference.py): the real VAE checkpoint loads into diffusers' own `AutoencoderOobleck` with `strict=True` (zero renaming — it IS the diffusers layout) and into ours via `OobleckKeyRemap`, same random latent → `Decode` → **cosine 1.000000, maxAbsDiff 6.1e-7**.
+- [ ] Timing conditioner (`NumberEmbedder`: clamp/normalize → `LearnedPositionalEmbedding` Fourier → Linear(257→768)) + T5 reuse from HartsyInference.Diffusion — the DiT takes raw (pre-projection) cross-attn/global cond tensors, composing T5+timing tokens is the caller's (pipeline's) job
 - [ ] `dpmpp-3m-sde` scheduler (Open 1.0 v-prediction)
-- [ ] Pingpong scheduler (Open Small distilled)
+- [ ] Pingpong scheduler (Open Small rectified-flow, 8-step, no CFG)
+- [ ] `StableAudioPipeline` wiring (T5 → DiT → Oobleck decode → WAV)
 
 ### MusicGen + AudioGen — BUILT (text-only mono); checkpoint-gated validation pending
 > One generic stack serves both — they share the AudioCraft recipe and differ only in codec config. Files

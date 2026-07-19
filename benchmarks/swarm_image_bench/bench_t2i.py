@@ -51,9 +51,13 @@ class VramSampler:
     def join(self):
         self._thread.join()
 
+EXACT_BACKEND_ID = None  # set from --exact-backend-id; pins routing via T2IParamTypes.ExactBackendID
+
 def one_gen(sid, model, params, seed, prompt=PROMPT):
     payload = {"session_id": sid, "images": 1, "model": model, "prompt": prompt,
                "seed": seed, **params}
+    if EXACT_BACKEND_ID is not None:
+        payload["exactbackendid"] = EXACT_BACKEND_ID
     t0 = time.perf_counter()
     r = http_post("/API/GenerateText2Image", payload)
     dt = time.perf_counter() - t0
@@ -101,7 +105,12 @@ def main():
     ap.add_argument("--config", required=True, help="JSON list of {name,model,params}")
     ap.add_argument("--out", required=True)
     ap.add_argument("--only", nargs="*", help="subset of model names")
+    ap.add_argument("--exact-backend-id", type=int, default=None,
+                     help="pin routing via exactbackendid JSON param (T2IParamTypes.ExactBackendID) "
+                          "instead of relying on which backend happens to be enabled")
     args = ap.parse_args()
+    global EXACT_BACKEND_ID
+    EXACT_BACKEND_ID = args.exact_backend_id
     models = json.load(open(args.config))
     if args.only:
         models = [m for m in models if m["name"] in args.only]
