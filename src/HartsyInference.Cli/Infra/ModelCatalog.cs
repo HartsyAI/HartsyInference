@@ -67,6 +67,21 @@ public static class ModelCatalog
             E("lance-image", img, "Lance (Image)", "unified multimodal DiT", vp),
             E("zimage", img, "Z-Image Turbo", "NextDiT (Qwen3-4B)", st),
             E("anima", img, "Anima", "Cosmos-Predict2-2B (T=1)", st),
+            new CatalogEntry
+            {
+                Id = "krea2",
+                Modality = img,
+                DisplayName = "Krea 2 Turbo",
+                Architecture = "Krea2 DiT (Qwen3-VL-4B + Qwen-Image VAE)",
+                Status = ok,
+                CliDrivable = false, // pipeline exists; Engine image-path wiring + real-weight verification pending
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Comfy-Org/Krea-2", RepoPath = "diffusion_models/krea2_turbo_fp8_scaled.safetensors", TargetSubdir = "Stable-Diffusion/Krea2", Role = "transformer" },
+                    new() { Repo = "Comfy-Org/Krea-2", RepoPath = "text_encoders/qwen3vl_4b_bf16.safetensors", TargetSubdir = "text_encoders", Role = "text encoder" },
+                    new() { Repo = "Comfy-Org/Krea-2", RepoPath = "vae/qwen_image_vae.safetensors", TargetSubdir = "VAE/QwenImage", Role = "vae" },
+                },
+            },
 
             // Transcription
             E("whisper", stt, "Whisper (tiny → large-v3)", "encoder-decoder", ok, cli: true),

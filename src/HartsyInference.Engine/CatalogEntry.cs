@@ -25,4 +25,9 @@ public sealed record CatalogEntry
 
     /// <summary>HuggingFace repo id used by <c>hartsy pull</c> when no local copy is given, when known.</summary>
     public string? HuggingFaceRepo { get; init; }
+
+    /// <summary>The complete set of files this model needs to run (transformer + text encoder + VAE + …). When the
+    /// model is selected but not present, the CLI offers to download exactly these into their target folders. Empty
+    /// when no preset download is defined.</summary>
+    public IReadOnlyList<ModelAsset> Assets { get; init; } = Array.Empty<ModelAsset>();
 }
