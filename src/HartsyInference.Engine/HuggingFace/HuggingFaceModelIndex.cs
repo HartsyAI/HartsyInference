@@ -41,7 +41,7 @@ public sealed class HuggingFaceModelIndex
         string tempDir = Path.Combine(Path.GetTempPath(), "hartsyinference", "config_cache");
         string tempFile = Path.Combine(tempDir, $"{repoId.Replace('/', '_')}_config.json");
 
-        await client.DownloadFileAsync(repoId, "config.json", tempFile, null, ct).ConfigureAwait(false);
+        await client.DownloadFileAsync(repoId, "config.json", tempFile, null, sha256: null, ct).ConfigureAwait(false);
 
         try
         {

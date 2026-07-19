@@ -18,6 +18,15 @@ public sealed record ModelAsset
     /// <summary>Human label for what this file is: "transformer", "text encoder", or "vae".</summary>
     public required string Role { get; init; }
 
-    /// <summary>The on-disk file name (basename of <see cref="RepoPath"/>).</summary>
-    public string FileName => Path.GetFileName(RepoPath);
+    /// <summary>Canonical save name when it differs from the repo file name (a side model is often published under
+    /// a different name, e.g. save "t5xxl_fp8_e4m3fn.safetensors" as "t5xxl_enconly.safetensors"). May contain a
+    /// nested subfolder segment (e.g. "Flux/ae.safetensors"). Null keeps the repo file name.</summary>
+    public string? TargetName { get; init; }
+
+    /// <summary>SHA-256 hex hash for post-download verification; null/empty skips verification (discouraged — a
+    /// size-correct but byte-corrupt file loads as NaN).</summary>
+    public string? Sha256 { get; init; }
+
+    /// <summary>The on-disk file name (<see cref="TargetName"/> when set, else the basename of <see cref="RepoPath"/>).</summary>
+    public string FileName => TargetName ?? Path.GetFileName(RepoPath);
 }

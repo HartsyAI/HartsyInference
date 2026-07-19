@@ -126,12 +126,16 @@ public sealed class HuggingFaceClient : IDisposable
         return info;
     }
 
-    /// <summary>Downloads a single file from a model repository to the specified local path, reporting progress as a fraction from 0.0 to 1.0.</summary>
+    /// <summary>Downloads a single file from a model repository to the specified local path, reporting progress as a
+    /// fraction from 0.0 to 1.0. Stages to a <c>.tmp</c> file, optionally verifies its SHA-256 against
+    /// <paramref name="sha256"/> (a corrupt mid-flight download is deleted and the call fails), then atomically moves
+    /// it into place.</summary>
     public async Task DownloadFileAsync(
         string repoId,
         string fileName,
         string destinationPath,
         IProgress<double>? progress,
+        string? sha256,
         CancellationToken ct)
     {
         ThrowIfDisposed();
@@ -182,6 +186,9 @@ public sealed class HuggingFaceClient : IDisposable
             }
 
             progress?.Report(1.0);
+
+            if (!string.IsNullOrEmpty(sha256))
+                await VerifySha256Async(tempPath, sha256, $"{repoId}/{fileName}", ct).ConfigureAwait(false);
         }
         catch
         {
@@ -191,6 +198,19 @@ public sealed class HuggingFaceClient : IDisposable
 
         File.Move(tempPath, destinationPath, overwrite: true);
         Logs.Info($"HuggingFace: download complete \"{repoId}/{fileName}\" ({new FileInfo(destinationPath).Length} bytes)");
+    }
+
+    /// <summary>Computes the SHA-256 of <paramref name="path"/> and throws when it does not match <paramref name="expected"/>.</summary>
+    private static async Task VerifySha256Async(string path, string expected, string label, CancellationToken ct)
+    {
+        await using FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, DownloadBufferSize, useAsync: true);
+        byte[] hash = await System.Security.Cryptography.SHA256.HashDataAsync(stream, ct).ConfigureAwait(false);
+        string actual = Convert.ToHexString(hash).ToLowerInvariant();
+        if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"SHA-256 mismatch for \"{label}\": expected {expected}, got {actual}. The download was corrupted; the partial file was discarded.");
+        }
     }
 
     /// <summary>Lists all files in a model repository.</summary>
