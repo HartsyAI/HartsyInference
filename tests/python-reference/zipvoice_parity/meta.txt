@@ -1,0 +1,7 @@
+fm_T=17
+fm_in_dim=300
+fm_out_dim=100
+fm_t=0.3
+te_T=9
+te_in_dim=192
+te_out_dim=100
