@@ -1,0 +1,197 @@
+using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.CheckpointConverters.Utils;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
+
+namespace HartsyInference.Engine.Recipes.Image;
+
+/// <summary>HiDream-I1 recipe (Full / Dev): an MMDiT with FOUR text encoders — CLIP-L, CLIP-G, T5-XXL, and Llama-3.1-8B (run as a multi-layer feature extractor). Lifted from the SwarmUI backend's <c>HiDreamLoader</c>: an all-in-one checkpoint's bundled components win, and anything it omits resolves from the canonical side models (<see cref="SideModels.HiDreamClipL"/>, <see cref="SideModels.HiDreamClipG"/>, <see cref="SideModels.T5XxlEnconly"/>, <see cref="SideModels.Llama31_8B"/>, <see cref="SideModels.FluxAe"/> — HiDream reuses the Flux VAE). Constructs and drives through <see cref="HiDreamRecipePipeline"/>.</summary>
+public sealed class HiDreamRecipe : IArchitectureRecipe
+{
+    /// <inheritdoc/>
+    public string Name => "hidream";
+
+    /// <inheritdoc/>
+    public bool Matches(string familyId) => string.Equals(familyId, "hidream", StringComparison.OrdinalIgnoreCase);
+
+    /// <inheritdoc/>
+    public IRecipePipeline Construct(RecipeContext context)
+    {
+        // The Llama-3.1 branch needs a real 128k-vocab BPE tokenizer, shipped as an embedded resource only when the
+        // asset files were present at build time. Without it HiDream output is noise — refuse at load, as the loader did.
+        if (!EmbeddedTokenizerResources.HasLlama3Assets)
+        {
+            throw new InvalidOperationException(
+                "HiDream needs the Llama-3.1 tokenizer, which isn't embedded in this HartsyInference build. " +
+                "Extract vocab.json + merges.txt from the Llama-3.1 tokenizer.json into " +
+                "src/HartsyInference.Tokenizers/Resources/ as llama3_vocab.json + llama3_merges.txt, then rebuild.");
+        }
+
+        // TODO(E-IMG-4): honor user-picked CLIP-L / CLIP-G / T5 / Llama / VAE overrides from ImageRequest.Components
+        // (the SwarmUI loader read T2IParamTypes.ClipLModel/ClipGModel/T5XXLModel/LLaMAModel/VAE).
+        (HiDreamCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader mainLoader) = HiDreamCheckpointConverter.LoadAndConvert(context.CheckpointPath);
+        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { mainLoader };
+        try
+        {
+            if (converted.Transformer.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    $"HiDream checkpoint '{Path.GetFileName(context.CheckpointPath)}' contains no transformer weights " +
+                    "(looked for caption_projection.* / double_stream_blocks.*).");
+            }
+            Logs.Info($"[HiDreamRecipe] Parsed checkpoint: {converted.Transformer.Count} transformer tensors, fp8_mix={converted.IsFp8Mix}.");
+
+            HiDreamConfig config = HiDreamConfig.AutoDetect(converted.Transformer);
+            HiDreamTransformer transformer = new HiDreamTransformer(config);
+            transformer.LoadWeights(CastToF32(converted.Transformer));
+
+            ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
+            if (converted.ClipL.Count > 0)
+            {
+                clipL.LoadWeights(converted.ClipL, prefix: "text_model");
+            }
+            else
+            {
+                Dictionary<string, Tensor> w = LoadSideModel(SideModels.HiDreamClipL, "text_encoders.clip_l.transformer.", loaders);
+                clipL.LoadWeights(w, prefix: "text_model");
+            }
+
+            ClipTextEncoder clipG = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipG);
+            if (converted.ClipG.Count > 0)
+            {
+                clipG.LoadWeights(converted.ClipG, prefix: "text_model");
+            }
+            else
+            {
+                Dictionary<string, Tensor> w = LoadSideModel(SideModels.HiDreamClipG, "text_encoders.clip_g.transformer.", loaders);
+                clipG.LoadWeights(w, prefix: "text_model");
+            }
+
+            T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.Xxl);
+            if (converted.T5.Count > 0)
+            {
+                t5.LoadWeights(converted.T5);
+            }
+            else
+            {
+                t5.LoadWeights(LoadSideModel(SideModels.T5XxlEnconly, "text_encoders.t5xxl.transformer.", loaders));
+            }
+
+            LlamaStyleEncoder llama = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Llama31_8B);
+            if (converted.Llama.Count > 0)
+            {
+                llama.LoadWeights(converted.Llama);
+            }
+            else
+            {
+                llama.LoadWeights(LoadSideModel(SideModels.Llama31_8B, "text_encoders.llama.transformer.", loaders));
+            }
+
+            VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
+            if (converted.Vae.Count > 0)
+            {
+                vae.LoadWeights(CastToF32(converted.Vae));
+            }
+            else
+            {
+                string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
+                vaeLoader.Load(vaePath);
+                loaders.Add(vaeLoader);
+                // The canonical flux ae.safetensors is BFL-native LDM naming; VaeDecoder wants diffusers keys.
+                vae.LoadWeights(CastToF32(ConvertVaeFromStandalone(vaeLoader.GetAllTensors())));
+            }
+
+            HiDreamPipeline pipeline = new HiDreamPipeline(context.Backend, clipL, clipG, t5, llama, transformer, vae, config);
+            Logs.Info("[HiDreamRecipe] HiDream ready (4 text encoders; scheduler=flow-match).");
+            return new HiDreamRecipePipeline(pipeline, new ClipTokenizer(), new T5Tokenizer(maxLength: 256), new LlamaTokenizer(maxLength: 256), t5, llama, transformer, loaders);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("[HiDreamRecipe] Construction failed.", ex);
+            foreach (SafeTensorsLoader loader in loaders)
+            {
+                loader.Dispose();
+            }
+            throw;
+        }
+    }
+
+    /// <summary>Resolves + loads one standalone side-model file, registering its loader for disposal and stripping the Comfy <paramref name="comfyPrefix"/> wrapper off every key.</summary>
+    private static Dictionary<string, Tensor> LoadSideModel(ModelAsset asset, string comfyPrefix, List<SafeTensorsLoader> loaders)
+    {
+        string path = ModelDownloader.EnsureSideModelAsync(asset, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        SafeTensorsLoader loader = new SafeTensorsLoader();
+        loader.Load(path);
+        loaders.Add(loader);
+        Dictionary<string, Tensor> weights = StripStandalonePrefix(loader.GetAllTensors(), comfyPrefix);
+        if (weights.Count == 0)
+        {
+            throw new InvalidOperationException($"Side model '{path}' has no usable tensors.");
+        }
+        return weights;
+    }
+
+    /// <summary>Casts F16/BF16 weights to F32 (the precision the HiDream transformer and the Flux VAE decoder are validated at), passing already-F32 tensors through.</summary>
+    private static Dictionary<string, Tensor> CastToF32(Dictionary<string, Tensor> weights)
+    {
+        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);
+        foreach (KeyValuePair<string, Tensor> kv in weights)
+        {
+            result[kv.Key] = (kv.Value.DType == DType.F16 || kv.Value.DType == DType.BF16) ? kv.Value.CastTo(DType.F32) : kv.Value;
+        }
+        return result;
+    }
+
+    /// <summary>Strips a Comfy <c>text_encoders.*.transformer.</c> wrapper prefix and drops the <c>position_ids</c> buffer the encoders don't consume.</summary>
+    private static Dictionary<string, Tensor> StripStandalonePrefix(IReadOnlyDictionary<string, Tensor> raw, string comfyPrefix)
+    {
+        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
+        foreach (KeyValuePair<string, Tensor> kv in raw)
+        {
+            if (kv.Key.StartsWith(comfyPrefix, StringComparison.Ordinal))
+            {
+                string rest = kv.Key[comfyPrefix.Length..];
+                if (!rest.EndsWith("position_ids", StringComparison.Ordinal))
+                {
+                    result[rest] = kv.Value;
+                }
+            }
+            else
+            {
+                result[kv.Key] = kv.Value;
+            }
+        }
+        return result;
+    }
+
+    /// <summary>Normalizes a standalone Flux VAE file into diffusers key naming: strips a Comfy/LDM wrapper prefix, then routes every key through <see cref="CheckpointConvertUtils.ConvertVaeKey"/> (null drops non-VAE keys).</summary>
+    private static Dictionary<string, Tensor> ConvertVaeFromStandalone(IReadOnlyDictionary<string, Tensor> raw)
+    {
+        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
+        foreach (KeyValuePair<string, Tensor> kv in raw)
+        {
+            string ldmKey = kv.Key;
+            if (ldmKey.StartsWith("first_stage_model.", StringComparison.Ordinal))
+            {
+                ldmKey = ldmKey["first_stage_model.".Length..];
+            }
+            else if (ldmKey.StartsWith("vae.", StringComparison.Ordinal))
+            {
+                ldmKey = ldmKey["vae.".Length..];
+            }
+            string? diffusersKey = CheckpointConvertUtils.ConvertVaeKey(ldmKey);
+            if (diffusersKey is not null)
+            {
+                result[diffusersKey] = kv.Value;
+            }
+        }
+        return result;
+    }
+}
