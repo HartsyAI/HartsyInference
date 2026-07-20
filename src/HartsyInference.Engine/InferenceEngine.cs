@@ -17,6 +17,7 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly ModalityDispatch _dispatch = new ModalityDispatch();
     private readonly Dictionary<string, IModalityRunner> _runners = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, IRecipePipeline> _recipePipelines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IVideoRecipePipeline> _videoRecipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private string _backendSelector;
     private IBackend? _backend;
 
@@ -137,15 +138,61 @@ public sealed class InferenceEngine : IInferenceEngine
         if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
             return cached;
 
-        ModelArchitecture arch = PipelineFactory.DetectArchitecture(spec.LocalPath);
-        IArchitectureRecipe recipe = RecipeRegistry.Resolve(arch)
+        string familyId = ResolveFamilyId(spec);
+        IArchitectureRecipe recipe = RecipeRegistry.Resolve(familyId)
             ?? throw new NotSupportedException(
-                $"Detected {arch}, but its recipe has not been lifted into the Engine yet (E-IMG-3). " +
+                $"Model family '{familyId}' has no recipe lifted into the Engine yet (E-IMG-3). " +
                 $"Currently drivable: {string.Join(", ", RecipeRegistry.RegisteredNames)}.");
 
         IRecipePipeline pipeline = recipe.Construct(new RecipeContext { CheckpointPath = spec.LocalPath, Backend = EnsureBackend() });
         _recipePipelines[key] = pipeline;
         return pipeline;
+    }
+
+    /// <summary>Resolves the video recipe for <paramref name="spec"/> and constructs (or returns a cached) pipeline.
+    /// Throws when no video recipe is registered for the family yet.</summary>
+    internal IVideoRecipePipeline GetOrConstructVideoRecipe(ModelSpec spec)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                "No checkpoint found for this model. Pass a checkpoint via --model-path or let the catalog fetch it first.");
+        }
+
+        string key = $"video-recipe:{spec.LocalPath}";
+        if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))
+            return cached;
+
+        string familyId = ResolveFamilyId(spec);
+        IVideoRecipe recipe = VideoRecipeRegistry.Resolve(familyId)
+            ?? throw new NotSupportedException(
+                $"Video family '{familyId}' has no recipe lifted into the Engine yet (E-IMG-3). " +
+                $"Currently drivable: {string.Join(", ", VideoRecipeRegistry.RegisteredNames)}.");
+
+        IVideoRecipePipeline pipeline = recipe.Construct(new RecipeContext { CheckpointPath = spec.LocalPath, Backend = EnsureBackend() });
+        _videoRecipePipelines[key] = pipeline;
+        return pipeline;
+    }
+
+    /// <summary>The family id (catalog slug) for <paramref name="spec"/>: the catalog id when present, else a slug
+    /// mapped from the coarse tensor-signature architecture the Engine can detect from a raw checkpoint.</summary>
+    private static string ResolveFamilyId(ModelSpec spec)
+    {
+        if (spec.Catalog is not null)
+            return spec.Catalog.Id;
+        ModelArchitecture arch = PipelineFactory.DetectArchitecture(spec.LocalPath!);
+        return arch switch
+        {
+            ModelArchitecture.Sdxl => "sdxl",
+            ModelArchitecture.SdxlRefiner => "sdxl-refiner",
+            ModelArchitecture.StableDiffusion15 => "sd15",
+            ModelArchitecture.StableDiffusion3 => "sd3",
+            ModelArchitecture.Flux1 => "flux1",
+            ModelArchitecture.Flux2 => "flux2",
+            ModelArchitecture.AuraFlow => "auraflow",
+            ModelArchitecture.Chroma => "chroma",
+            _ => arch.ToString().ToLowerInvariant(),
+        };
     }
 
     private IModalityRunner GetOrLoadRunner(ModelSpec spec, IModalityHandler handler, IProgressSink progress)
@@ -168,6 +215,9 @@ public sealed class InferenceEngine : IInferenceEngine
         foreach (IRecipePipeline pipeline in _recipePipelines.Values)
             pipeline.Dispose();
         _recipePipelines.Clear();
+        foreach (IVideoRecipePipeline pipeline in _videoRecipePipelines.Values)
+            pipeline.Dispose();
+        _videoRecipePipelines.Clear();
         _backend?.Dispose();
         _backend = null;
     }

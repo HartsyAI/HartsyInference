@@ -27,5 +27,28 @@ public static class RecipeRegistry
     private static List<IArchitectureRecipe> BuildDefaults() => new List<IArchitectureRecipe>
     {
         new Image.SdxlRecipe(),
+        new Image.ZImageRecipe(),
+        new Image.ChromaRecipe(),
+        new Image.Sd15Recipe(),
+        new Image.Sd3Recipe(),
+        new Image.AuraFlowRecipe(),
+        new Image.FLiteRecipe(),
+        new Image.Flux1Recipe(),
+        new Image.Flux2Recipe(),
+        new Image.Lumina2Recipe(),
+        new Image.QwenImageRecipe(),
+        new Image.HunyuanImageRecipe(),
+        new Image.OmniGen2Recipe(),
+        new Image.Krea2Recipe(),
+        new Image.HiDreamRecipe(),
+        new Image.Ideogram4Recipe(),
+        new Image.ErnieImageRecipe(),
+        new Image.Kandinsky5Recipe(),
+        new Image.AnimaRecipe(),
+        new Image.LanceImageRecipe(),
+        new Image.ChromaRadianceRecipe(),
+        new Image.ZetaChromaRecipe(),
+        new Image.BooguImageRecipe(),
+        new Image.LensRecipe(),
     };
 }

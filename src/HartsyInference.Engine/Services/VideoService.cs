@@ -1,9 +1,13 @@
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Video-generation service. Wired by the architecture-recipe phase (E-IMG-3); not yet available.</summary>
+/// <summary>Video-generation service: resolves the checkpoint's family recipe from the
+/// <see cref="VideoRecipeRegistry"/>, constructs (and caches) the pipeline, and streams the decoded frames as they
+/// become available. Composition features are applied by the feature-resolver phase (E-IMG-4); a request that sets
+/// one is rejected rather than silently ignored.</summary>
 public sealed class VideoService : IVideoService
 {
     private readonly InferenceEngine _engine;
@@ -12,6 +16,27 @@ public sealed class VideoService : IVideoService
     internal VideoService(InferenceEngine engine) => _engine = engine;
 
     /// <inheritdoc/>
-    public IAsyncEnumerable<VideoFrame> GenerateAsync(ModelSpec spec, VideoRequest request, IProgress<StepPreview>? progress = null, CancellationToken cancel = default) =>
-        throw new NotSupportedException("Video generation is wired by the architecture-recipe phase (E-IMG-3); not yet available.");
+    public async IAsyncEnumerable<VideoFrame> GenerateAsync(ModelSpec spec, VideoRequest request, IProgress<StepPreview>? progress = null,
+        [EnumeratorCancellation] CancellationToken cancel = default)
+    {
+        if (request.Loras is not null)
+        {
+            throw new NotSupportedException(
+                "Video composition features (LoRA) are applied by the feature-resolver phase (E-IMG-4); not yet available.");
+        }
+
+        IReadOnlyList<VideoFrame> frames = await Task.Run(
+            () =>
+            {
+                IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(spec);
+                return pipeline.Generate(request, progress, cancel);
+            },
+            cancel).ConfigureAwait(false);
+
+        foreach (VideoFrame frame in frames)
+        {
+            cancel.ThrowIfCancellationRequested();
+            yield return frame;
+        }
+    }
 }
