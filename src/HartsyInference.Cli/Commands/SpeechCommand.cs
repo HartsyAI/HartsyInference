@@ -18,9 +18,9 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         [Description("The text to speak.")]
         public string Text { get; init; } = "";
 
-        /// <summary>Piper voice id (e.g. en_US-lessac-medium) or leave empty for the default.</summary>
+        /// <summary>Speech model id, optionally with a variant (e.g. piper:en_US-lessac-medium, kokoro:af_heart).</summary>
         [CommandOption("-m|--model|--voice")]
-        [Description("Piper voice id (e.g. en_US-lessac-medium). Empty uses the default voice.")]
+        [Description("Speech model, optionally 'id:variant' (e.g. piper:en_US-lessac-medium, kokoro:af_heart). Empty uses the default.")]
         public string Model { get; init; } = "";
 
         /// <summary>Path to a local Piper .onnx voice.</summary>
