@@ -15,8 +15,8 @@ public static class ModelResolver
         [Modality.Transcribe] = "Audio",
         [Modality.Vision] = "Vision",
         [Modality.Video] = "Video",
-        [Modality.ThreeD] = "3D",
-        [Modality.Interactive] = "Interactive",
+        [Modality.Mesh] = "3D",
+        [Modality.World] = "Interactive",
     };
 
     /// <summary>Resolves a model selection for <paramref name="modality"/>. <paramref name="modelArg"/> may be a catalog

@@ -3,10 +3,12 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
+
+using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -22,6 +24,9 @@ public sealed class LanceVideoRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lance-video", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Lance Video's official sampling settings: 30 steps at text-CFG 4.0 (<c>LanceConfig.NumTimesteps</c>/<c>CfgTextScale</c>).</summary>
+    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 30, CfgScale = 4.0f };
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
@@ -49,7 +54,7 @@ public sealed class LanceVideoRecipe : IVideoRecipe
             (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
             owned.AddRange(vaeLoaders);
             Wan22VaeDecoder vae = new Wan22VaeDecoder();
-            vae.LoadWeights(VideoRecipeUtils.CastWeights(vaeWeightsRaw, DType.F32));
+            vae.LoadWeights(VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32));
 
             // Byte-level BPE straight out of the checkpoint's tokenizer.json (exact pre-tokenizer Split regex); the
             // two-file Qwen2Tokenizer path mis-splits space+punct sequences and is a fallback only.

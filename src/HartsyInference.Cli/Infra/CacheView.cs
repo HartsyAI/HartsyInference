@@ -1,5 +1,5 @@
 using HartsyInference.Engine.Registry;
-using HartsyInference.ModelHandler.Registry;
+using HartsyInference.ModelAssets.Registry;
 using Spectre.Console;
 
 namespace HartsyInference.Cli.Infra;

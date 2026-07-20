@@ -1,7 +1,7 @@
-using HartsyInference.ModelHandler.TextEncoders.Bert;
+using HartsyInference.ModelAssets.TextEncoders.Bert;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.PyTorch;
+using HartsyInference.ModelAssets.PyTorch;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;

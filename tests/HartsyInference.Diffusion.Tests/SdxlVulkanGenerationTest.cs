@@ -7,9 +7,9 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Tests.Helpers;
 using HartsyInference.Diffusion.Utilities;
-using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.Tests.Common;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Vulkan;
 using Xunit;
 using Xunit.Abstractions;
@@ -122,7 +122,7 @@ public sealed class SdxlVulkanGenerationTest
     {
         Stopwatch sw = Stopwatch.StartNew();
         _output.WriteLine($"[1/7] Loading checkpoint: {Path.GetFileName(SdxlSingleFilePath)}");
-        (SdxlCheckpointConverter.ConvertedWeights converted, HartsyInference.ModelHandler.SafeTensors.SafeTensorsLoader loader) =
+        (SdxlCheckpointConverter.ConvertedWeights converted, HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader loader) =
             SdxlCheckpointConverter.LoadAndConvert(SdxlSingleFilePath);
         sw.Stop();
         _output.WriteLine($"  Loaded in {sw.ElapsedMilliseconds}ms");

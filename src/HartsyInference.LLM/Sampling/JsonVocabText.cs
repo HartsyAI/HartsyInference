@@ -1,5 +1,5 @@
 using System.Runtime.CompilerServices;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Sampling;
 

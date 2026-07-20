@@ -1,5 +1,5 @@
 using HartsyInference.LLM.Sampling;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 
 namespace HartsyInference.LLM.Tests;

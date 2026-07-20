@@ -1,7 +1,7 @@
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
-using HartsyInference.ModelHandler.Gguf;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Ssm;
 

@@ -7,7 +7,7 @@ using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -127,7 +127,7 @@ public sealed unsafe class ZonosGenerateParityTests
             || string.IsNullOrEmpty(g) || string.IsNullOrEmpty(outWav)) { _out.WriteLine("Skipped."); return; }
 
         SafeTensorsLoader wl = new(); wl.Load(modelPath);
-        HartsyInference.ModelHandler.PyTorch.PytorchPickleLoader dl = new(); dl.Load(dacPath);
+        HartsyInference.ModelAssets.PyTorch.PytorchPickleLoader dl = new(); dl.Load(dacPath);
         ZonosPipeline pipe = new(ZonosConfig.V0_1Transformer);
         pipe.LoadWeights(wl.GetAllTensors(), dl.GetAllTensors());
 

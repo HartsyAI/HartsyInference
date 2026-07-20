@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Engine.Features;
 

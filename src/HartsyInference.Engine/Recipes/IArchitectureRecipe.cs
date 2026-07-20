@@ -16,4 +16,13 @@ public interface IArchitectureRecipe
 
     /// <summary>Builds the pipeline for <paramref name="context"/>. The result is cached and reused across requests.</summary>
     IRecipePipeline Construct(RecipeContext context);
+
+    /// <summary>Composition features this recipe actually applies; the default declares none, so a family that has not
+    /// been wired rejects every composition object with a precise error instead of silently ignoring it.</summary>
+    ImageFeatures Supports => ImageFeatures.None;
+
+    /// <summary>This family's officially recommended sampling settings, used to fill the request tunables the caller
+    /// left null. The generic 20-step / CFG-7.5 fallback keeps a recipe that has not declared its own numbers working;
+    /// variant-dependent families refine it further via <see cref="IRecipePipeline.VariantDefaults"/>.</summary>
+    ImageDefaults Defaults => ImageDefaults.Standard;
 }

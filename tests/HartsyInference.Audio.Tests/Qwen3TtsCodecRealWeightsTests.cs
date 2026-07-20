@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using HartsyInference.Audio.Models.QwenTts;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
 

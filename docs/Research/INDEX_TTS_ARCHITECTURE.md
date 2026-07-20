@@ -352,7 +352,7 @@ Per project rule "validate against references": compare on three fronts:
 #### 9.7 What we deliberately do not implement
 
 - **Training/fine-tuning paths.** Discriminators, GAN losses, GRL+classifier heads, EMA codebook update, KL warm-up — all training-only, omit from the inference distribution.
-- **vLLM-style paged attention.** Out of scope for HartsyInference's first release; revisit when HartsyInference.Server adds batched serving.
+- **vLLM-style paged attention.** Out of scope for HartsyInference's first release; revisit when HartsyInference.API adds batched serving.
 - **CUDA fused kernels for Snake-Beta.** The NVIDIA BigVGAN repo provides one for 1.5–3× speedup; write a PTX equivalent only after the pure-C# pipeline lands and we have a baseline RTF to compare against.
 
 ---

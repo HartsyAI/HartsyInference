@@ -3,7 +3,7 @@ using Xunit.Abstractions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Video.Tests;
 

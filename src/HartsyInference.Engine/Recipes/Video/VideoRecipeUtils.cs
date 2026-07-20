@@ -167,18 +167,6 @@ internal static class VideoRecipeUtils
     /// <summary>Packs one interleaved-RGB24 still into the <c>[1, 3, 1, H, W]</c> reference tensor in [-1, 1].</summary>
     internal static Tensor RgbToReferenceTensor(byte[] rgb24, int width, int height) => TileRgbToClip(rgb24, width, height, 1);
 
-    /// <summary>Casts a VAE weight dictionary to <paramref name="target"/>, leaving tensors already at that dtype
-    /// untouched (the extension's <c>VaePrecisionHelper.CastVaeWeights</c>; the Wan VAE resnets overflow at F16).</summary>
-    internal static Dictionary<string, Tensor> CastWeights(IReadOnlyDictionary<string, Tensor> weights, DType target)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);
-        foreach (KeyValuePair<string, Tensor> kv in weights)
-        {
-            result[kv.Key] = kv.Value.DType == target ? kv.Value : kv.Value.CastTo(target);
-        }
-        return result;
-    }
-
     /// <summary>Strips a Comfy wrapper prefix (e.g. <c>text_encoders.t5xxl.transformer.</c>) from a standalone
     /// text-encoder safetensors file, passing unprefixed keys through.</summary>
     internal static Dictionary<string, Tensor> StripPrefix(IReadOnlyDictionary<string, Tensor> raw, string prefix)

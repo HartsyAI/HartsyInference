@@ -5,7 +5,7 @@ using HartsyInference.Audio.Models.PocketTts;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
 

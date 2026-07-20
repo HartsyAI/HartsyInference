@@ -79,17 +79,17 @@ public sealed class InteractiveCommand : Command<InteractiveCommand.Settings>
             return 1;
         }
 
-        ParamState parameters = new ParamState(Modality.Interactive) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
+        ParamState parameters = new ParamState(Modality.World) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("frames", settings.Frames.ToString(CultureInfo.InvariantCulture));
         parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         Dictionary<string, string> aux = new Dictionary<string, string> { ["vae-path"] = settings.VaePath! };
-        ModelSpec baseSpec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Interactive);
+        ModelSpec baseSpec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.World);
         ModelSpec spec = baseSpec with { Aux = aux };
         string label = spec.Catalog?.Id ?? settings.Model;
 
-        return CommandRunner.Run(Modality.Interactive, spec, settings.Image, parameters, settings.Backend, settings.Quiet,
+        return CommandRunner.Run(Modality.World, spec, settings.Image, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false);
     }
 }

@@ -3,7 +3,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.HuggingFace;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -18,6 +18,15 @@ public sealed class LensRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lens", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Lens's official sampling settings: 20 steps at CFG 5.0, 1024x1024 (<c>LensConfig.Default</c>); a Lens-Turbo checkpoint narrows this to 4 guidance-free steps via <see cref="LensRecipePipeline.VariantDefaults"/>.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 20, CfgScale = 5.0f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
+
+    /// <summary>Lens-Turbo's official sampling settings: 4 distilled steps, guidance-free (<c>LensConfig.Turbo</c>).</summary>
+    public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)

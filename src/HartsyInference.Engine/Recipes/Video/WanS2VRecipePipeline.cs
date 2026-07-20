@@ -9,8 +9,8 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
@@ -65,9 +65,9 @@ public sealed class WanS2VRecipePipeline : IVideoRecipePipeline
 
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps > 0 ? request.Steps : _config.NumInferenceSteps;
+        int steps = request.Steps ?? _config.NumInferenceSteps;
         int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 81, step: _config.VaeTemporalCompression);
-        float cfgScale = request.CfgScale <= 0 ? _config.GuidanceScale : request.CfgScale;
+        float cfgScale = request.CfgScale ?? _config.GuidanceScale;
         (int width, int height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
 
         int[] promptTokens = _tokenizer.Encode(prompt);
@@ -110,7 +110,7 @@ public sealed class WanS2VRecipePipeline : IVideoRecipePipeline
                 Height = height,
                 Steps = steps,
                 CfgScale = cfgScale,
-                Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
                 FlowShift = DefaultFlowShift,
             };
 

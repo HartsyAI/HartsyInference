@@ -5,8 +5,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -33,15 +33,19 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
         _loaders = loaders;
     }
 
+    /// <summary>A Klein checkpoint (no guidance embedding) is CFG-distilled and few-step, so it resolves against <see cref="Flux2Recipe.KleinDefaults"/> rather than Dev's 50 steps.</summary>
+    public ImageDefaults? VariantDefaults => _config.GuidanceEmbed ? Flux2Recipe.FamilyDefaults : Flux2Recipe.KleinDefaults;
+
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
-        int steps = request.Steps <= 0 ? (_config.GuidanceEmbed ? 28 : 10) : request.Steps;
+        int steps = request.Steps ?? (_config.GuidanceEmbed ? Flux2Recipe.FamilyDefaults.Steps : Flux2Recipe.KleinDefaults.Steps);
         // Flux.2 rounds image dims down to a multiple of 16 (VAE 8× × 2×2 patch).
-        int width = (request.Width / 16) * 16;
-        int height = (request.Height / 16) * 16;
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        int width = (reqWidth / 16) * 16;
+        int height = (reqHeight / 16) * 16;
         // Klein has no guidance embedding; Dev uses guidance ~3.5 (BFL distillation target).
         float guidance = _config.GuidanceEmbed ? 3.5f : 0f;
 
@@ -56,7 +60,7 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
             Width = width,
             Height = height,
             Steps = steps,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         Action<GenerationProgress> bridge = p =>

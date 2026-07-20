@@ -1,7 +1,7 @@
 using Xunit;
 using Xunit.Abstractions;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.Video.Models.Cosmos;
 using HartsyInference.Video.Tokenizers;
 

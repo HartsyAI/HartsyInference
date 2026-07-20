@@ -4,7 +4,7 @@ using Xunit.Abstractions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Music;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;

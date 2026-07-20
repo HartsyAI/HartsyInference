@@ -13,11 +13,7 @@ public static class SamplingParamResolver
     public static int ResolveSteps(ImageRequest request, int fallback)
     {
         ArgumentNullException.ThrowIfNull(request);
-        int steps = request.Steps;
-        if (steps <= 0)
-        {
-            steps = fallback;
-        }
+        int steps = request.Steps ?? fallback;
         double endEarly = request.EndStepsEarly ?? 0.0;
         if (endEarly > 0)
         {
@@ -59,7 +55,7 @@ public static class SamplingParamResolver
     public static int? ResolveClipSkip(ImageRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        int stopAt = request.ClipSkip;
+        int stopAt = request.ClipSkip ?? 0;
         if (stopAt is 0 or -1)
         {
             return null;

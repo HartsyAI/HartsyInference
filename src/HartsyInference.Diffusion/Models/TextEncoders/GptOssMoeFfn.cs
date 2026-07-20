@@ -1,6 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.Nvfp4;
+using HartsyInference.ModelAssets.Nvfp4;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 

@@ -4,11 +4,11 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
-
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>OmniGen 2 recipe (VectorSpaceLab, 4B MMDiT, Apache-2.0). The checkpoint is the fp16 transformer; the Qwen2.5-VL-3B text encoder (<see cref="SideModels.Qwen2_5_VL_3B"/>) and the FLUX.1 16-channel VAE (<see cref="SideModels.FluxAe"/>) resolve as side models. Lifted from the SwarmUI backend's <c>OmniGen2Loader</c>; the text encoder lives OUTSIDE the pipeline, so <see cref="OmniGen2RecipePipeline"/> live-encodes the caption and calls the embeddings overload.</summary>
@@ -19,6 +19,12 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "omnigen2", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>OmniGen2's official sampling settings: 28 steps at text-guidance 4.0, 1024x1024 (<c>GenerationDefaults.OmniGen2</c>).</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 4.0f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -51,10 +57,8 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
             textEncoder.LoadWeights(teLoader.GetAllTensors());
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-            SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
-            vaeLoader.Load(vaePath);
+            (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
             loaders.Add(vaeLoader);
-            Dictionary<string, Tensor> vaeWeights = LoadFluxVaeF32(vaeLoader.GetAllTensors());
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
             vae.LoadWeights(vaeWeights);
             // The encoder half is what the deferred reference-image edit path needs; constructing with it keeps
@@ -76,23 +80,6 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
             }
             throw;
         }
-    }
-
-    /// <summary>Normalizes a standalone FLUX.1 <c>ae.safetensors</c> into diffusers key naming and upcasts 16-bit weights to F32 (the F32 VAE path); unknown keys are dropped. Inlines the SwarmUI backend's <c>LoaderVaeUtils.LoadFluxVaeF32</c>.</summary>
-    private static Dictionary<string, Tensor> LoadFluxVaeF32(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            string? diffusersKey = CheckpointConvertUtils.ConvertVaeKey(kv.Key);
-            if (diffusersKey is null)
-            {
-                continue;
-            }
-            DType dtype = kv.Value.DType;
-            result[diffusersKey] = (dtype == DType.F16 || dtype == DType.BF16) ? kv.Value.CastTo(DType.F32) : kv.Value;
-        }
-        return result;
     }
 
     /// <summary>Casts F16/F32 weights to BF16 (others pass through) — same footprint as F16 with F32's exponent range, so CFG-amplified activations cannot overflow.</summary>

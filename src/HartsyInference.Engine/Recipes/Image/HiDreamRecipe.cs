@@ -4,11 +4,11 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
-
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>HiDream-I1 recipe (Full / Dev): an MMDiT with FOUR text encoders — CLIP-L, CLIP-G, T5-XXL, and Llama-3.1-8B (run as a multi-layer feature extractor). Lifted from the SwarmUI backend's <c>HiDreamLoader</c>: an all-in-one checkpoint's bundled components win, and anything it omits resolves from the canonical side models (<see cref="SideModels.HiDreamClipL"/>, <see cref="SideModels.HiDreamClipG"/>, <see cref="SideModels.T5XxlEnconly"/>, <see cref="SideModels.Llama31_8B"/>, <see cref="SideModels.FluxAe"/> — HiDream reuses the Flux VAE). Constructs and drives through <see cref="HiDreamRecipePipeline"/>.</summary>
@@ -20,6 +20,12 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hidream", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>HiDream-I1's official sampling settings: 28 steps at CFG 5.0, 1024x1024. Kept from the lifted loader rather than <c>GenerationDefaults.HiDreamFull</c> (50/5.0) because Full/Dev/Fast are not distinguishable from the weights and Dev is the shipped checkpoint.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 5.0f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
+
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
     {
@@ -30,7 +36,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             throw new InvalidOperationException(
                 "HiDream needs the Llama-3.1 tokenizer, which isn't embedded in this HartsyInference build. " +
                 "Extract vocab.json + merges.txt from the Llama-3.1 tokenizer.json into " +
-                "src/HartsyInference.Tokenizers/Resources/ as llama3_vocab.json + llama3_merges.txt, then rebuild.");
+                "src/HartsyInference.ModelAssets.Tokenizers/Resources/ as llama3_vocab.json + llama3_merges.txt, then rebuild.");
         }
 
         // TODO(E-IMG-4): honor user-picked CLIP-L / CLIP-G / T5 / Llama / VAE overrides from ImageRequest.Components
@@ -101,11 +107,10 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             else
             {
                 string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-                SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
-                vaeLoader.Load(vaePath);
+                (Dictionary<string, Tensor> standaloneVae, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
                 loaders.Add(vaeLoader);
                 // The canonical flux ae.safetensors is BFL-native LDM naming; VaeDecoder wants diffusers keys.
-                vae.LoadWeights(CastToF32(ConvertVaeFromStandalone(vaeLoader.GetAllTensors())));
+                vae.LoadWeights(standaloneVae);
             }
 
             HiDreamPipeline pipeline = new HiDreamPipeline(context.Backend, clipL, clipG, t5, llama, transformer, vae, config);
@@ -166,30 +171,6 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             else
             {
                 result[kv.Key] = kv.Value;
-            }
-        }
-        return result;
-    }
-
-    /// <summary>Normalizes a standalone Flux VAE file into diffusers key naming: strips a Comfy/LDM wrapper prefix, then routes every key through <see cref="CheckpointConvertUtils.ConvertVaeKey"/> (null drops non-VAE keys).</summary>
-    private static Dictionary<string, Tensor> ConvertVaeFromStandalone(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            string ldmKey = kv.Key;
-            if (ldmKey.StartsWith("first_stage_model.", StringComparison.Ordinal))
-            {
-                ldmKey = ldmKey["first_stage_model.".Length..];
-            }
-            else if (ldmKey.StartsWith("vae.", StringComparison.Ordinal))
-            {
-                ldmKey = ldmKey["vae.".Length..];
-            }
-            string? diffusersKey = CheckpointConvertUtils.ConvertVaeKey(ldmKey);
-            if (diffusersKey is not null)
-            {
-                result[diffusersKey] = kv.Value;
             }
         }
         return result;

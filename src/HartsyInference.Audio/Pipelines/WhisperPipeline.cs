@@ -6,8 +6,8 @@ using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Audio.Pipelines;
 
@@ -22,9 +22,12 @@ namespace HartsyInference.Audio.Pipelines;
 /// string text = pipe.TranscribeWav("input.wav");
 /// </code></para>
 ///
-/// <para>Greedy decoding only in v1. Beam search, temperature fallback, long-form
-/// audio (sequential or chunked), and word-level timestamps land in subsequent
-/// passes; the encoder and decoder modules already expose the necessary state hooks.</para></summary>
+/// <para>Greedy decoding only in v1. Beam search, temperature fallback, and long-form
+/// audio (sequential or chunked) land in subsequent passes; the encoder and decoder
+/// modules already expose the necessary state hooks. <see cref="SegmentAudio"/> gives
+/// SEGMENT-level timestamps from the model's native <c>&lt;|t|&gt;</c> tokens; true
+/// word-level alignment is not available because it needs cross-attention DTW and
+/// <c>WhisperDecoder</c> runs fused SDPA without surfacing attention weights.</para></summary>
 public sealed class WhisperPipeline : IAudioPipeline, IDisposable
 {
     private readonly WhisperConfig _cfg;
@@ -107,8 +110,35 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     {
         ThrowIfDisposed();
         WhisperOptions opts = options ?? new WhisperOptions();
+        (float[,] mel, double _) = PrepareMel(audio, sampleRate);
+        return TranscribeFromMel(backend, mel, opts);
+    }
 
-        // 1. Resample to 16 kHz if needed.
+    /// <summary>Transcribes with Whisper's native <c>&lt;|t|&gt;</c> timestamp tokens enabled and returns the decoded
+    /// spans. <b>Segment granularity, not word granularity</b> — see <see cref="WhisperSegment"/>. Like
+    /// <see cref="TranscribeAudio"/> this covers only the first 30 s of the clip (single-chunk decode); longer audio
+    /// is silently clipped, so no segment can start past 30 s. Returns an empty list when greedy decoding produced no
+    /// well-formed timestamp pair (the decoder does not enforce OpenAI's timestamp rules).</summary>
+    public IReadOnlyList<WhisperSegment> SegmentAudio(IBackend backend, float[] audio, int sampleRate, WhisperOptions? options = null)
+    {
+        ThrowIfDisposed();
+        WhisperOptions opts = options ?? new WhisperOptions();
+        (float[,] mel, double seconds) = PrepareMel(audio, sampleRate);
+        return SegmentFromMel(backend, mel, seconds, opts);
+    }
+
+    /// <summary>Timestamped decode from a pre-computed mel; <paramref name="audioSeconds"/> only closes a span the
+    /// model left open. Mirrors <see cref="TranscribeFromMel"/> for tests that inject their own mel.</summary>
+    public IReadOnlyList<WhisperSegment> SegmentFromMel(IBackend backend, float[,] mel, double audioSeconds, WhisperOptions options)
+    {
+        ThrowIfDisposed();
+        List<int> tokens = DecodeTokens(backend, mel, options with { WithTimestamps = true });
+        return ParseSegments(tokens, audioSeconds);
+    }
+
+    /// <summary>Resamples to 16 kHz, zero-pads/clips to the 30 s chunk, and returns the mel plus the pre-pad duration.</summary>
+    private (float[,] Mel, double Seconds) PrepareMel(float[] audio, int sampleRate)
+    {
         float[] mono16k = audio;
         if (sampleRate != 16_000)
         {
@@ -116,17 +146,12 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             mono16k = resampler.Resample(audio);
         }
 
-        // 2. Zero-pad / clip to exactly 30 s (480 000 samples).
+        // Zero-pad / clip to exactly 30 s (480 000 samples).
         const int n30s = 30 * 16_000;
         float[] padded = new float[n30s];
         int copyLen = Math.Min(mono16k.Length, n30s);
         Array.Copy(mono16k, padded, copyLen);
-
-        // 3. Mel spectrogram.
-        float[,] mel = _melExtractor.Compute(padded);
-
-        // 4. Run pipeline.
-        return TranscribeFromMel(backend, mel, opts);
+        return (_melExtractor.Compute(padded), copyLen / 16_000.0);
     }
 
     /// <summary>Lower-level entry point that takes a pre-computed mel spectrogram of
@@ -135,6 +160,13 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     public string TranscribeFromMel(IBackend backend, float[,] mel, WhisperOptions options)
     {
         ThrowIfDisposed();
+        return _tokenizer.Decode(DecodeTokens(backend, mel, options).ToArray());
+    }
+
+    /// <summary>Encoder forward + greedy decode, returning the raw generated ids (timestamp tokens included when
+    /// <see cref="WhisperOptions.WithTimestamps"/> is set).</summary>
+    private List<int> DecodeTokens(IBackend backend, float[,] mel, WhisperOptions options)
+    {
         int nMels = mel.GetLength(0);
         int nFrames = mel.GetLength(1);
         if (nMels != _cfg.NumMelBins)
@@ -157,7 +189,47 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         finally { encoded.Dispose(); }
     }
 
-    private string GreedyDecode(IBackend backend, WhisperDecoder.DecodeState state, WhisperOptions opts)
+    /// <summary>Splits the generated ids on <c>&lt;|t|&gt;</c> tokens into timestamped spans. Times are reported
+    /// verbatim from the tokens (never clamped or interpolated); only a span the model left open is closed, at
+    /// <paramref name="audioSeconds"/>.</summary>
+    private List<WhisperSegment> ParseSegments(List<int> tokens, double audioSeconds)
+    {
+        List<WhisperSegment> segments = [];
+        List<int> buffer = [];
+        double? start = null;
+        foreach (int id in tokens)
+        {
+            if (!WhisperTokenizer.IsTimestamp(id))
+            {
+                buffer.Add(id);
+                continue;
+            }
+            double at = WhisperTokenizer.TimestampToSeconds(id);
+            if (start is not null && buffer.Count > 0)
+            {
+                Emit(segments, buffer, start.Value, at);
+            }
+            buffer.Clear();
+            start = at;
+        }
+        if (start is not null && buffer.Count > 0)
+        {
+            Emit(segments, buffer, start.Value, Math.Max(start.Value, Math.Min(audioSeconds, 30.0)));
+        }
+        return segments;
+    }
+
+    /// <summary>Decodes one buffered span and appends it when it has non-empty text and a non-negative duration.</summary>
+    private void Emit(List<WhisperSegment> segments, List<int> buffer, double start, double end)
+    {
+        string text = _tokenizer.Decode(buffer.ToArray()).Trim();
+        if (text.Length > 0 && end >= start)
+        {
+            segments.Add(new WhisperSegment { Text = text, Start = start, End = end });
+        }
+    }
+
+    private List<int> GreedyDecode(IBackend backend, WhisperDecoder.DecodeState state, WhisperOptions opts)
     {
         // Prompt: [SOT, <|lang|>, transcribe|translate, <|notimestamps|>?].
         int[] prompt = _tokenizer.BuildPromptIds(opts.Language, opts.Translate, opts.WithTimestamps);
@@ -182,7 +254,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             stepLogits.Dispose();
         }
 
-        return _tokenizer.Decode(generated.ToArray());
+        return generated;
     }
 
     /// <summary>Greedy argmax with the standard Whisper suppress list applied. We

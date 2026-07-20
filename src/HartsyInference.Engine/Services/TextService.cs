@@ -13,15 +13,15 @@ using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Multimodal;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Ssm;
-using HartsyInference.ModelHandler.Gguf;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Services;
 
 /// <summary>Text-generation service: owns per-device model slots, GGUF/SSM loading, chat-template application,
 /// sampling, the multimodal VLM path, and token streaming — all against the native <see cref="TextRequest"/>
 /// contract. Lifted from SwarmUI's HartsyLocalLLMProvider with the host-app coupling stripped.</summary>
-public sealed class TextService : ITextService
+public sealed class TextService : ITextService, IDisposable
 {
     /// <summary>OpenAI-CLIP normalization for the mllama image processor (splice encoders expose their own).</summary>
     private static readonly float[] MllamaMean = [0.48145466f, 0.4578275f, 0.40821073f];
@@ -31,6 +31,10 @@ public sealed class TextService : ITextService
     /// GPU path can't consume onto host buffers atop the mmap, so peak host usage exceeds the file size (~1.5-2x
     /// observed); 2.5x is a safety margin so a big model fails cleanly instead of OOM-killing the process.</summary>
     private const double RamHeadroomMultiplier = 2.5;
+
+    /// <summary>How long <see cref="Unload"/> waits for an in-flight generation before giving up on a slot. Long
+    /// enough to cover a full completion, bounded so a host's "free memory" call can never hang forever.</summary>
+    private const int UnloadWaitSeconds = 120;
 
     private readonly InferenceEngine _engine;
     private readonly ConcurrentDictionary<string, TextDeviceSlot> _slots = new(StringComparer.OrdinalIgnoreCase);
@@ -289,8 +293,60 @@ public sealed class TextService : ITextService
         }
     }
 
-    /// <summary>Frees the slot's loaded model, keeping its backend/device alive. Caller holds <c>slot.Lock</c>.</summary>
-    private static void UnloadSlot(TextDeviceSlot slot)
+    /// <inheritdoc/>
+    public bool Unload(string? device = null)
+    {
+        if (!string.IsNullOrWhiteSpace(device))
+        {
+            return _slots.TryGetValue(NormalizeDeviceKey(device), out TextDeviceSlot? slot) && UnloadDeviceSlot(slot);
+        }
+        bool freed = false;
+        foreach (TextDeviceSlot slot in _slots.Values)
+        {
+            freed |= UnloadDeviceSlot(slot);
+        }
+        return freed;
+    }
+
+    /// <summary>Takes the slot's generation lock so the release cannot race an in-flight request, then frees the model
+    /// AND the slot's backend — <see cref="UnloadSlot"/> alone deliberately keeps the device context alive for the next
+    /// load, which is not enough when the host is reclaiming memory.</summary>
+    private static bool UnloadDeviceSlot(TextDeviceSlot slot)
+    {
+        if (!slot.Lock.Wait(TimeSpan.FromSeconds(UnloadWaitSeconds)))
+        {
+            Logs.Warning($"[TextService] Unload timed out waiting on an in-flight generation ({UnloadWaitSeconds}s) — "
+                + $"'{slot.LoadedPath}' stays resident.");
+            return false;
+        }
+        try
+        {
+            bool freed = UnloadSlot(slot);
+            if (slot.Backend is not null)
+            {
+                try { slot.Backend.Dispose(); }
+                catch (Exception ex) { Logs.Debug($"[TextService] Backend dispose on unload failed: {ex.Message}"); }
+                slot.Backend = null;
+                freed = true;
+            }
+            return freed;
+        }
+        finally
+        {
+            slot.Lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public void Dispose()
+    {
+        Unload();
+        _slots.Clear();
+    }
+
+    /// <summary>Frees the slot's loaded model, keeping its backend/device alive. Caller holds <c>slot.Lock</c>.
+    /// Returns whether a model was actually resident.</summary>
+    private static bool UnloadSlot(TextDeviceSlot slot)
     {
         slot.SpliceVision?.Dispose();
         slot.SpliceVision = null;
@@ -319,6 +375,7 @@ public sealed class TextService : ITextService
             GC.WaitForPendingFinalizers();
             GC.Collect();
         }
+        return hadModel;
     }
 
     /// <summary>Refuses to load when there isn't enough free host RAM to survive dequantization, so a big model
@@ -534,9 +591,7 @@ public sealed class TextService : ITextService
             int colon = key.IndexOf(':');
             if (colon >= 0 && int.TryParse(key[(colon + 1)..], out int n))
                 ordinal = n;
-            return ordinal == 0
-                ? BackendFactory.Create("cuda")
-                : new CudaBackend(deviceOrdinal: ordinal, ptxDir: Path.Combine(AppContext.BaseDirectory, BackendFactory.PtxDirName));
+            return BackendFactory.CreateCuda(ordinal);
         }
         throw new HartsyInferenceException($"Local LLM device '{deviceKey}' is not supported — choose CUDA or CPU.");
     }

@@ -1,6 +1,6 @@
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.Gguf;
+using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Transformer;
 

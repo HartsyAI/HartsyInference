@@ -52,10 +52,10 @@ HartsyInference does not ship its own front-end. There are a few ways to run it,
 
 **3. Sample CLI (developer tool).** The bundled [`hartsy` CLI](#quick-start-cli-developer-tool) drives every modality from the terminal — the fastest way to verify a checkpoint end-to-end. It's a development/validation tool, not the intended end-user surface.
 
-**4. OpenAI-compatible HTTP server.** `HartsyInference.Server` hosts an OpenAI-shaped REST API: `/v1/chat/completions` (LLM/SSM chat — streaming, non-streaming, and JSON-mode — with **continuous batching** and a **paged KV cache**), `/v1/images/generations` (+ a streaming variant), and `/v1/models` load / list / pull / unload. Audio and image-edit routes are shaped for API completeness but return `501` until wired. It runs from source (`IsPackable=false`), CPU by default; set `HartsyInference:Backend=Cuda` + `HartsyInference:PtxDirectory` for GPU. See [`PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what's left before it's published.
+**4. OpenAI-compatible HTTP server.** `HartsyInference.API` hosts an OpenAI-shaped REST API: `/v1/chat/completions` (LLM/SSM chat — streaming, non-streaming, and JSON-mode — with **continuous batching** and a **paged KV cache**), `/v1/images/generations` (+ a streaming variant), and `/v1/models` load / list / pull / unload. Audio and image-edit routes are shaped for API completeness but return `501` until wired. It runs from source (`IsPackable=false`), CPU by default; set `HartsyInference:Backend=Cuda` + `HartsyInference:PtxDirectory` for GPU. See [`PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what's left before it's published.
 
 ```bash
-dotnet run --project src/HartsyInference.Server -c Release --urls http://127.0.0.1:8080
+dotnet run --project src/HartsyInference.API -c Release --urls http://127.0.0.1:8080
 curl -X POST http://127.0.0.1:8080/v1/models/load -H "Content-Type: application/json" \
   -d '{"model":"/path/to/model.gguf"}'
 curl -X POST http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
@@ -103,8 +103,8 @@ Each modality is its own NuGet package. Expand a section below for the install r
 
 ```xml
 <PackageReference Include="HartsyInference.Diffusion" />
-<PackageReference Include="HartsyInference.ModelHandler" />
-<PackageReference Include="HartsyInference.Tokenizers" />
+<PackageReference Include="HartsyInference.ModelAssets" />
+<PackageReference Include="HartsyInference.ModelAssets.Tokenizers" />
 <PackageReference Include="HartsyInference.Cuda" />
 ```
 
@@ -118,8 +118,8 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 // Resolve a ComfyUI-style layout: tokenizer vocab/merges, text encoder, unet, vae
 ModelPaths paths = ModelPaths.FromComfyLayout("Models", "StabilityAI/sd-v1-5");
@@ -179,7 +179,7 @@ static Dictionary<string, Tensor> LoadF32(string path)
 
 ```xml
 <PackageReference Include="HartsyInference.LLM" />
-<PackageReference Include="HartsyInference.Tokenizers" />
+<PackageReference Include="HartsyInference.ModelAssets.Tokenizers" />
 <PackageReference Include="HartsyInference.Cuda" />
 ```
 
@@ -276,18 +276,18 @@ if (result.Mesh is not null)
 <summary><b>Interactive World Model</b>: real-time, action-conditioned</summary>
 
 ```xml
-<PackageReference Include="HartsyInference.Interactive" />
+<PackageReference Include="HartsyInference.World" />
 <PackageReference Include="HartsyInference.Cuda" />
 ```
 
 ```csharp
 using HartsyInference.Conditioning;
-using HartsyInference.Interactive.Sessions;
+using HartsyInference.World.Sessions;
 using HartsyInference.Video;
 
 // A session pushes one ActionInput per frame in and streams VideoFrames out indefinitely.
 // Build the concrete session from a model-specific IFrameStepper (e.g. GameCraftFrameStepper);
-// see the HartsyInference.Interactive.Tests for full wiring.
+// see the HartsyInference.World.Tests for full wiring.
 await using IInteractiveSession session = new BackgroundComputeSession(stepper, targetFps: 24);
 
 await foreach (VideoFrame frame in session.ReadFramesAsync())
@@ -352,7 +352,7 @@ RTX 3060 12GB, CUDA, batch=1, 128-token greedy decode, warm, tokens/sec. Same GG
 | Mistral-7B-v0.3 | Q4_K_M | 66.5 | ~30.7 | **32.0** (1.02×) | **2.08×** |
 | Gemma-3-1B | Q4_K_M | 229.8 | ~79.7 | not eligible (sliding-window + softcap) | 2.88× |
 
-CUDA graphs remove kernel-*launch* overhead, so the win scales inversely with model size: dramatic on small models (Qwen3), marginal on large ones already bound by GEMV memory bandwidth (Mistral — the engine reads ~22% of the bandwidth llama.cpp does there, a separate un-fixed bottleneck). Graph decode requires greedy sampling and the plain decoder shape — MoE, MLA, cross-attention, sliding-window, and SSM models fall through to the eager path unchanged — but it now correctly applies repetition penalty on-device rather than silently ignoring it (the only sampler stage that can change greedy's picked token; temperature/top-k/top-p/min-p are all argmax-preserving so they don't need a device kernel). Fused quantized GEMV now covers Q4_K/Q5_K/Q6_K/Q8_0/Q5_0/Q4_0 — every quant format in the default coverage matrix except the rarer K-quants (Q2_K/Q3_K) and IQ-formats, which still fall to a CPU dequant path. Prefill (prompt processing) is much faster and not the bottleneck. The server (`HartsyInference.Server`) additionally supports **continuous batching** — concurrently-submitted requests against the same model share decode rounds instead of running one at a time — and a **paged KV cache**, both independent of graph decode. Details: [`LLM_THROUGHPUT_BENCHMARK.md`](docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) + [`LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md).
+CUDA graphs remove kernel-*launch* overhead, so the win scales inversely with model size: dramatic on small models (Qwen3), marginal on large ones already bound by GEMV memory bandwidth (Mistral — the engine reads ~22% of the bandwidth llama.cpp does there, a separate un-fixed bottleneck). Graph decode requires greedy sampling and the plain decoder shape — MoE, MLA, cross-attention, sliding-window, and SSM models fall through to the eager path unchanged — but it now correctly applies repetition penalty on-device rather than silently ignoring it (the only sampler stage that can change greedy's picked token; temperature/top-k/top-p/min-p are all argmax-preserving so they don't need a device kernel). Fused quantized GEMV now covers Q4_K/Q5_K/Q6_K/Q8_0/Q5_0/Q4_0 — every quant format in the default coverage matrix except the rarer K-quants (Q2_K/Q3_K) and IQ-formats, which still fall to a CPU dequant path. Prefill (prompt processing) is much faster and not the bottleneck. The server (`HartsyInference.API`) additionally supports **continuous batching** — concurrently-submitted requests against the same model share decode rounds instead of running one at a time — and a **paged KV cache**, both independent of graph decode. Details: [`LLM_THROUGHPUT_BENCHMARK.md`](docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) + [`LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md).
 
 ### Diffusion / video end-to-end vs ComfyUI
 
@@ -453,22 +453,22 @@ Index of all status docs: [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md). 
 | Package | Description |
 |---|---|
 | `HartsyInference.Core` | Tensor types, `IBackend`, schedulers, pipeline interfaces |
-| `HartsyInference.ModelHandler` | Safetensors / GGUF / PyTorch loaders, quantization, LoRA, model registry, HuggingFace download |
-| `HartsyInference.Tokenizers` | CLIP, T5, Whisper, SentencePiece, Qwen, Llama tokenizers |
+| `HartsyInference.ModelAssets` | Safetensors / GGUF / PyTorch loaders, quantization, LoRA, model registry, HuggingFace download |
+| `HartsyInference.ModelAssets.Tokenizers` | CLIP, T5, Whisper, SentencePiece, Qwen, Llama tokenizers |
 | `HartsyInference.Cpu` | CPU backend with AVX2 / AVX-512 / NEON SIMD kernels |
 | `HartsyInference.Cuda` | CUDA backend with PTX kernels and cuBLAS |
 | `HartsyInference.Vulkan` | Cross-vendor Vulkan backend (SPIR-V compute) |
 | `HartsyInference.LLM` | Native LLM text generation (Qwen, Llama, Mistral, GGUF inference, chat templates) |
-| `HartsyInference.Phonemizer` | Pure-C# grapheme-to-phoneme (espeak-ng port) for TTS front-ends |
+| `HartsyInference.Audio.Phonemizer` | Pure-C# grapheme-to-phoneme (espeak-ng port) for TTS front-ends |
 | `HartsyInference.Diffusion` | Image pipelines (SD/SDXL/Flux/SD3/MMDiT/NextDiT), VAE, LoRA |
 | `HartsyInference.Audio` | STT, TTS, music generation, and neural audio codecs |
 | `HartsyInference.Vision` | CLIP/SigLIP/DINO embeddings, YOLO detection, SAM segmentation, face |
 | `HartsyInference.Video` | LTX-Video, Wan, Lance, Kandinsky video generation |
 | `HartsyInference.ThreeD` | Image/text → 3D mesh; glTF/OBJ/PLY export, marching cubes |
-| `HartsyInference.Interactive` | Action-conditioned world models, sessions, action encoders |
-| `HartsyInference` | Meta-package: one reference that pulls in the core, all three backends, and every modality package including `HartsyInference.LLM` and `HartsyInference.Phonemizer` (`Server` and the sample `Cli` are excluded — run those from source) |
+| `HartsyInference.World` | Action-conditioned world models, sessions, action encoders |
+| `HartsyInference` | Meta-package: one reference that pulls in the core, all three backends, and every modality package including `HartsyInference.LLM` and `HartsyInference.Audio.Phonemizer` (`Server` and the sample `Cli` are excluded — run those from source) |
 | `HartsyInference.Cli` | Command-line sample/validation tool (not published as a package) |
-| `HartsyInference.Server` | OpenAI-compatible HTTP API host — chat completions (continuous-batched, streaming, JSON-mode), image generation, model management. Runs from source (`IsPackable=false`), not published; see [How to Use It](#how-to-use-it). |
+| `HartsyInference.API` | OpenAI-compatible HTTP API host — chat completions (continuous-batched, streaming, JSON-mode), image generation, model management. Runs from source (`IsPackable=false`), not published; see [How to Use It](#how-to-use-it). |
 
 See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependency graph and minimum install examples.
 

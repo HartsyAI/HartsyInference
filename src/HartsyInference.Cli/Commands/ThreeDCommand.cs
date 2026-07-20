@@ -74,16 +74,16 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
             return 1;
         }
 
-        ParamState parameters = new ParamState(Modality.ThreeD) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
+        ParamState parameters = new ParamState(Modality.Mesh) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("grid", settings.Grid.ToString(CultureInfo.InvariantCulture));
         parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
-        ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.ThreeD);
+        ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Mesh);
         string label = spec.Catalog?.Id ?? settings.Model;
         string outputDir = settings.Output ?? RepoPaths.OutputRoot();
 
-        return CommandRunner.Run(Modality.ThreeD, spec, settings.Image, parameters, settings.Backend, settings.Quiet,
+        return CommandRunner.Run(Modality.Mesh, spec, settings.Image, parameters, settings.Backend, settings.Quiet,
             outputDir, label, showResponseRule: false);
     }
 }

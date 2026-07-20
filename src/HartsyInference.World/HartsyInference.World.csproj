@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.World</PackageId>
+    <Description>Interactive world models for HartsyInference — action-conditioned real-time streaming sessions, camera/Plücker conditioning, FOV memory retrieval, and Matrix-Game pipelines. (Phase 10)</Description>
+    <RootNamespace>HartsyInference.World</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Video\HartsyInference.Video.csproj" />
+  </ItemGroup>
+
+</Project>

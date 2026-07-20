@@ -13,7 +13,7 @@ HartsyInference/
 │   ├── HartsyInference.LLM / Diffusion / Audio / Vision / Video / Interactive / ThreeD
 │   ├── HartsyInference.Meta        (dependencies-only meta-package)
 │   ├── HartsyInference.Cli         (developer / verification CLI)
-│   └── HartsyInference.Server      (abandoned ASP.NET scaffolding — not a product)
+│   └── HartsyInference.API      (abandoned ASP.NET scaffolding — not a product)
 ├── tests/ / samples/ / benchmarks/ / docs/ / native/
 ```
 
@@ -43,7 +43,7 @@ HartsyInference/
 
 ---
 
-## src/HartsyInference.ModelHandler/
+## src/HartsyInference.ModelAssets/
 
 | File | Description |
 |---|---|
@@ -64,7 +64,7 @@ HartsyInference/
 
 ---
 
-## src/HartsyInference.Tokenizers/
+## src/HartsyInference.ModelAssets.Tokenizers/
 
 | File | Description |
 |---|---|
@@ -75,7 +75,7 @@ HartsyInference/
 
 ---
 
-## src/HartsyInference.Phonemizer/
+## src/HartsyInference.Audio.Phonemizer/
 
 Pure-C# G2P / IPA phonemization (an espeak-ng-style port) for phoneme-input TTS models. Depends on Core only.
 
@@ -210,7 +210,7 @@ seq2seq. Depends on Core + ModelHandler + Tokenizers. See [LLM_LANGUAGE_PACKAGE.
 
 ---
 
-## src/HartsyInference.Interactive/  (Phase 10 — world models)
+## src/HartsyInference.World/  (Phase 10 — world models)
 
 | File | Description |
 |---|---|
@@ -252,7 +252,7 @@ Vision, Video, Interactive) plus the backends. Used for local runs and parity ch
 
 ---
 
-## src/HartsyInference.Server/  (abandoned — not a product)
+## src/HartsyInference.API/  (abandoned — not a product)
 
 ASP.NET scaffolding left in the tree from the dropped Phase 7 server. **Not supported or advertised**; there is
 no OpenAI-compatible server product and none is planned. Kept only so the code is not lost; do not depend on it.
@@ -274,16 +274,16 @@ One test project per package plus shared fixtures and Python references.
 | Project | Scope |
 |---|---|
 | `HartsyInference.Core.Tests` | Tensor, TensorShape, NativeBuffer, finalizer cleanup |
-| `HartsyInference.ModelHandler.Tests` | Safetensors, GGUF, PyTorch-pickle loaders |
+| `HartsyInference.ModelAssets.Tests` | Safetensors, GGUF, PyTorch-pickle loaders |
 | `HartsyInference.Cpu.Tests` | MatMul, Conv2D, Norm, Attention kernels |
 | `HartsyInference.Cuda.Tests` | CUDA kernels, multi-backend isolation |
 | `HartsyInference.Vulkan.Tests` | SPIR-V kernels vs CPU/CUDA reference |
-| `HartsyInference.Tokenizers.Tests` / `HartsyInference.Phonemizer.Tests` | Tokenizer + G2P parity |
+| `HartsyInference.ModelAssets.Tokenizers.Tests` / `HartsyInference.Audio.Phonemizer.Tests` | Tokenizer + G2P parity |
 | `HartsyInference.LLM.Tests` | Generic transformer, sampler chain, chat templates, decode parity |
 | `HartsyInference.Diffusion.Tests` | Schedulers, tokenizer, pipeline integration |
 | `HartsyInference.Audio.Tests` / `HartsyInference.Vision.Tests` | STT/TTS + CLIP/YOLO/SAM |
-| `HartsyInference.Video.Tests` / `HartsyInference.Interactive.Tests` / `HartsyInference.ThreeD.Tests` | Video, world-model, and 3D pipelines |
-| `HartsyInference.Server.Tests` | Legacy scaffolding tests (server is dropped) |
+| `HartsyInference.Video.Tests` / `HartsyInference.World.Tests` / `HartsyInference.ThreeD.Tests` | Video, world-model, and 3D pipelines |
+| `HartsyInference.API.Tests` | Legacy scaffolding tests (server is dropped) |
 | `HartsyInference.Tests.Common` / `python-reference/` | Shared test helpers + Python golden-reference scripts |
 
 ---

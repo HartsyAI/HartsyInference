@@ -1,5 +1,5 @@
 using System.Text;
-using HartsyInference.Phonemizer.Espeak;
+using HartsyInference.Audio.Phonemizer.Espeak;
 
 namespace HartsyInference.Audio.Models.Zonos;
 

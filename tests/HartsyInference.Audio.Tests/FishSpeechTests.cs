@@ -3,7 +3,7 @@ using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.PyTorch;
+using HartsyInference.ModelAssets.PyTorch;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;

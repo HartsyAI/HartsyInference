@@ -2,7 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
-using HartsyInference.ModelHandler.Gguf;
+using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Ssm;
 

@@ -446,7 +446,7 @@ Notes:
 
 - `HartsyInference.Audio` — frontend (fbank + LFR + CMVN), SenseVoice model, FireRedASR-AED model, FireRedASR-LLM **pipeline orchestration**.
 - `HartsyInference.Audio` depends on `HartsyInference.Core` (tensors, CUDA) and — for FireRedASR-LLM only — on `HartsyInference.LLM` (Qwen2 decoder). That HartsyInference.LLM dependency must be a **soft / optional** package reference so users who only want SenseVoice or FireRedASR-AED don't pay for it. Suggested split: `HartsyInference.Audio.FireRedLlm` as a separate small package that pulls in `HartsyInference.LLM`, while base `HartsyInference.Audio` covers SenseVoice + FireRedASR-AED.
-- Tokenizers: SentencePiece runtime already needed by HartsyInference.LLM; promote it to a shared `HartsyInference.Tokenizers` package (or reuse HartsyInference.LLM's) to avoid duplication.
+- Tokenizers: SentencePiece runtime already needed by HartsyInference.LLM; promote it to a shared `HartsyInference.ModelAssets.Tokenizers` package (or reuse HartsyInference.LLM's) to avoid duplication.
 
 #### 9.6 Validation targets
 

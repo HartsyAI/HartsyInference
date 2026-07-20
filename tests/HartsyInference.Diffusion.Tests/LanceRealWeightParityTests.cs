@@ -4,8 +4,8 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -138,7 +138,7 @@ public unsafe class LanceRealWeightParityTests
         // tokenizer.json → GgufTokenizer: byte-level BPE with the exact pre-tokenizer Split regex.
         // (The two-file Qwen2Tokenizer path mis-splits space+punct like ' "' — 330 vs [220, 1].)
         using FileStream fs = File.OpenRead(tokenizerJson);
-        HartsyInference.Tokenizers.GgufTokenizer tokenizer = HartsyInference.Tokenizers.HfTokenizerJson.LoadByteLevelBpe(fs);
+        HartsyInference.ModelAssets.Tokenizers.GgufTokenizer tokenizer = HartsyInference.ModelAssets.Tokenizers.HfTokenizerJson.LoadByteLevelBpe(fs);
         LancePromptTemplate template = LancePromptTemplate.Create(tokenizer.EncodeOrdinary, LanceConfig.Image, video: false);
 
         Assert.Equal(ReadIntArray(root, "prefix_tokens"), template.PrefixTokens);

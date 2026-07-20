@@ -7,8 +7,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -49,8 +49,8 @@ public sealed unsafe class Kandinsky5RecipePipeline : IRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps <= 0 ? 50 : request.Steps;
-        float cfg = request.CfgScale <= 0 ? 1.0f : request.CfgScale;
+        int steps = request.Steps ?? Kandinsky5Recipe.FamilyDefaults.Steps;
+        float cfg = request.CfgScale ?? Kandinsky5Recipe.FamilyDefaults.CfgScale;
         bool useCfg = cfg > 1.0f;
 
         // TODO(E-IMG-4/5): img2img/inpaint, LoRA, ControlNet, IP-Adapter, refiner, regional prompting and
@@ -85,7 +85,7 @@ public sealed unsafe class Kandinsky5RecipePipeline : IRecipePipeline
                 Height = request.Height,
                 Steps = steps,
                 CfgScale = cfg,
-                Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
             };
 
             Action<GenerationProgress> bridge = p =>

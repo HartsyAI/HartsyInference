@@ -6,11 +6,11 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Ssm;
 using HartsyInference.LLM.Transformer;
-using HartsyInference.ModelHandler.Gguf;
-using HartsyInference.ModelHandler.Gguf.KeyMappers;
+using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.Gguf.KeyMappers;
 using HartsyInference.Engine.Registry;
-using HartsyInference.ModelHandler.Registry;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Registry;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine;
 

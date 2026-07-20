@@ -1,6 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.Audio.Models.Codecs.Snac;
 

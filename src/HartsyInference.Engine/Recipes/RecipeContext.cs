@@ -16,4 +16,8 @@ public sealed record RecipeContext
 
     /// <summary>Optional swappable-component overrides; null keeps the recipe's defaults.</summary>
     public ComponentOverrides? Components { get; init; }
+
+    /// <summary>LoRA stack to merge into the loaded weights at construction; null for none. LoRA is baked into the
+    /// weights, so the constructed pipeline is cached under a key that includes this stack.</summary>
+    public LoraStack? Loras { get; init; }
 }

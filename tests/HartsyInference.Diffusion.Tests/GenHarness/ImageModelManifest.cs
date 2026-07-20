@@ -2,7 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Tests.Common;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Diffusion.Tests.GenHarness;
 

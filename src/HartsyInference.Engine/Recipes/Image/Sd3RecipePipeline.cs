@@ -3,8 +3,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -54,16 +54,9 @@ public sealed class Sd3RecipePipeline : IRecipePipeline
 
         // TODO(E-IMG-4/5): img2img / inpaint are not yet mapped — the SwarmUI loader built an
         // ImageToImageRequest here. Text-to-image only.
-        TextToImageRequest inner = new TextToImageRequest
+        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative) with
         {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = request.Steps <= 0 ? null : request.Steps,
-            CfgScale = request.CfgScale <= 0 ? null : (float?)request.CfgScale,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
-            ClipSkip = request.ClipSkip <= 0 ? null : request.ClipSkip,
+            ClipSkip = RecipeRequestMapper.MapClipSkip(request.ClipSkip),
         };
 
         Action<GenerationProgress> bridge = p =>
@@ -92,7 +85,7 @@ public sealed class Sd3RecipePipeline : IRecipePipeline
                 ["arch"] = "sd3",
                 ["size"] = $"{width}x{height}",
                 ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
-                ["steps"] = request.Steps.ToString(CultureInfo.InvariantCulture),
+                ["steps"] = (request.Steps ?? Sd3Recipe.FamilyDefaults.Steps).ToString(CultureInfo.InvariantCulture),
             },
         };
     }

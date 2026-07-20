@@ -7,7 +7,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates an image from a prompt with a diffusion checkpoint (SDXL today), saving a BMP.</summary>
+/// <summary>Generates an image from a prompt with any registered diffusion family, saving a PNG.</summary>
 public sealed class ImageCommand : Command<ImageCommand.Settings>
 {
     /// <summary>Options for <c>hartsy image</c>.</summary>
@@ -20,12 +20,12 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
 
         /// <summary>Model id (catalog) or path. Optional when <c>--model-path</c> is given.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id (e.g. sdxl) or a local path. Optional when --model-path is given.")]
+        [Description("Catalog model id (sdxl, flux1, zimage, chroma, qwen-image, krea2, boogu, lens, ...) or a local path. Optional when --model-path is given.")]
         public string Model { get; init; } = "";
 
-        /// <summary>Path to an SDXL .safetensors checkpoint.</summary>
+        /// <summary>Path to a diffusion checkpoint in any registered family's layout.</summary>
         [CommandOption("--model-path")]
-        [Description("Path to an SDXL .safetensors checkpoint.")]
+        [Description("Path to a .safetensors/.gguf diffusion checkpoint of any registered family; pair it with -m <family> when the layout is ambiguous.")]
         public string? ModelPath { get; init; }
 
         /// <summary>Compute backend selector.</summary>
@@ -38,25 +38,40 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Negative prompt.")]
         public string Negative { get; init; } = "";
 
-        /// <summary>Image width in pixels.</summary>
+        /// <summary>Image width in pixels; unset uses the family's native width.</summary>
         [CommandOption("--width")]
-        [Description("Image width in pixels.")]
-        public int Width { get; init; } = 1024;
+        [Description("Image width in pixels (default: the model family's native width).")]
+        public int? Width { get; init; }
 
-        /// <summary>Image height in pixels.</summary>
+        /// <summary>Image height in pixels; unset uses the family's native height.</summary>
         [CommandOption("--height")]
-        [Description("Image height in pixels.")]
-        public int Height { get; init; } = 1024;
+        [Description("Image height in pixels (default: the model family's native height).")]
+        public int? Height { get; init; }
 
-        /// <summary>Number of denoising steps.</summary>
+        /// <summary>Number of denoising steps; unset uses the family's officially recommended count.</summary>
         [CommandOption("--steps")]
-        [Description("Number of denoising steps.")]
-        public int Steps { get; init; } = 20;
+        [Description("Number of denoising steps (default: the model family's recommended count).")]
+        public int? Steps { get; init; }
 
-        /// <summary>Classifier-free guidance scale.</summary>
+        /// <summary>Classifier-free guidance scale; unset uses the family's officially recommended scale.</summary>
         [CommandOption("--cfg")]
-        [Description("Classifier-free guidance scale.")]
-        public float Cfg { get; init; } = 7.5f;
+        [Description("Guidance scale (default: the model family's recommended scale; 1.0 for distilled/turbo models).")]
+        public float? Cfg { get; init; }
+
+        /// <summary>Sampler name; unset uses the family's canonical sampler.</summary>
+        [CommandOption("--sampler")]
+        [Description("Sampler name, e.g. euler, ddim, dpmpp_2m, lcm (default: the model family's sampler).")]
+        public string? Sampler { get; init; }
+
+        /// <summary>Scheduler / sigma-schedule name; unset uses the family's canonical schedule.</summary>
+        [CommandOption("--scheduler")]
+        [Description("Scheduler / sigma-schedule name (default: the model family's schedule).")]
+        public string? Scheduler { get; init; }
+
+        /// <summary>Flow-match sigma shift; unset uses the family's trained shift.</summary>
+        [CommandOption("--sigma-shift")]
+        [Description("Flow-match sigma shift (default: the model family's trained shift).")]
+        public double? SigmaShift { get; init; }
 
         /// <summary>RNG seed; &lt; 0 randomizes.</summary>
         [CommandOption("--seed")]
@@ -89,12 +104,17 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
             return 1;
         }
 
+        // Only flags the user actually passed are forwarded; anything omitted stays unset so the engine applies the
+        // resolved family's official defaults instead of a generic guess.
         ParamState parameters = new ParamState(Modality.Image) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("negative", settings.Negative);
-        parameters.Put("width", settings.Width.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("height", settings.Height.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("cfg", settings.Cfg.ToString(CultureInfo.InvariantCulture));
+        PutIfSet(parameters, "width", settings.Width);
+        PutIfSet(parameters, "height", settings.Height);
+        PutIfSet(parameters, "steps", settings.Steps);
+        PutIfSet(parameters, "cfg", settings.Cfg);
+        PutIfSet(parameters, "sampler", settings.Sampler);
+        PutIfSet(parameters, "scheduler", settings.Scheduler);
+        PutIfSet(parameters, "sigma-shift", settings.SigmaShift);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Image);
@@ -104,5 +124,23 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
 
         return CommandRunner.Run(Modality.Image, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
             outputDir, label, showResponseRule: false);
+    }
+
+    /// <summary>Forwards a tunable only when the user actually passed the flag; an omitted flag leaves the key empty so it reaches the engine as null.</summary>
+    private static void PutIfSet(ParamState parameters, string key, IFormattable? value)
+    {
+        if (value is not null)
+        {
+            parameters.Put(key, value.ToString(null, CultureInfo.InvariantCulture));
+        }
+    }
+
+    /// <summary>Forwards a string tunable only when the user actually passed a non-empty value.</summary>
+    private static void PutIfSet(ParamState parameters, string key, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            parameters.Put(key, value);
+        }
     }
 }

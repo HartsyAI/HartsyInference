@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Vision.Embeddings;
 
 namespace HartsyInference.Vision.Clip;

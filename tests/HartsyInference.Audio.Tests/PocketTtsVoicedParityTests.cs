@@ -5,8 +5,8 @@ using System.Linq;
 using HartsyInference.Audio.Models.PocketTts;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 using Xunit.Abstractions;
 

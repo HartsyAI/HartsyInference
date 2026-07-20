@@ -1,7 +1,7 @@
 # Release — NuGet Publication
 
 > **Goal:** Publish the HartsyInference modality packages to NuGet.org under the **HartsyAI** org
-> (https://github.com/HartsyAI/HartsyInference). `HartsyInference.Server` is abandoned scaffolding and
+> (https://github.com/HartsyAI/HartsyInference). `HartsyInference.API` is abandoned scaffolding and
 > is not published as a product; the engine is consumed via the SwarmUI backend extension, the NuGet
 > libraries, and the sample CLIs.
 

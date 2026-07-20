@@ -43,7 +43,7 @@ HartsyInference itself ships under permissive licensing (the project's own LICEN
 - **Documentation in `samples/` and any pipeline README must lead with these restrictions.** Do not write code samples that implicitly download the weights.
 - **Tests that exercise this pipeline must be opt-in (skipped by default)** behind the same acceptance flag, exactly the way other restricted-weight test paths are gated in the repo.
 - **Generated Outputs carry the use restrictions with them.** Downstream users redistributing inference results must be told they cannot be used to train competing models.
-- **The pipeline must be in its own NuGet package** (e.g. `HartsyInference.Interactive.HunyuanGameCraft`) so that depending on `HartsyInference.Interactive` does not pull in this code path or imply license acceptance.
+- **The pipeline must be in its own NuGet package** (e.g. `HartsyInference.World.HunyuanGameCraft`) so that depending on `HartsyInference.World` does not pull in this code path or imply license acceptance.
 
 If at any point Tencent retracts or changes the license, or if the project decides the compliance overhead is not worth carrying, this entire package should be removable with no impact on any other HartsyInference module. Implementers: read the full LICENSE file in the GitHub repo before writing a line of code.
 
@@ -558,10 +558,10 @@ The reference image plays no further role after chunk 0. Action symbol `a_N` and
 
 ## Implementation Notes
 
-(For the HartsyInference port. Phase 10 / `HartsyInference.Interactive.HunyuanGameCraft`.)
+(For the HartsyInference port. Phase 10 / `HartsyInference.World.HunyuanGameCraft`.)
 
 1. **Project structure.**
-    - `src/HartsyInference.Interactive.HunyuanGameCraft/` — separate NuGet package so it doesn't pollute `HartsyInference.Interactive` for users who can't or won't accept the license.
+    - `src/HartsyInference.World.HunyuanGameCraft/` — separate NuGet package so it doesn't pollute `HartsyInference.World` for users who can't or won't accept the license.
     - Subfolders: `Models/Backbone/HunyuanVideoTransformer.cs`, `Models/Camera/CameraNet.cs`, `Models/Camera/PluckerEmbedding.cs`, `Models/Camera/ActionToPose.cs`, `Pipelines/HunyuanGameCraftPipeline.cs`, `Schedulers/FlowMatchDiscreteScheduler.cs` (if not already shared).
     - Shared with future `HartsyInference.Video.HunyuanVideo`: `Models/Backbone/HunyuanVideoTransformer.cs` (parameterize block counts), `Models/Vae/HunyuanVideo3DCausalVae.cs`, `TextEncoders/LlavaLlamaTextEncoder.cs`. Plan accordingly: build these in `HartsyInference.Video` first, depend on them from the Interactive package.
 2. **License-acceptance gate.** First thing the loader does:
@@ -592,4 +592,4 @@ The reference image plays no further role after chunk 0. Action symbol `a_N` and
 14. **Validation.** Reproduce the first frame of `asset/village.png + "w 0.2"` exactly (within bf16 tolerance) against the Python reference. Numeric tolerance budget: max-abs ≤ 1e-2 on the final decoded RGB frame after one chunk; mean-abs ≤ 1e-3. (Tight because flow-matching + CFG amplifies small precision errors over 50 steps.)
 15. **Sample app.** `samples/HunyuanGameCraft.Interactive/` — a console app that takes `--reference-image`, `--prompt`, and reads action keys from stdin (`w/a/s/d`) to produce chunks on demand. Must display the license warning before doing anything.
 16. **Documentation in `docs/Checklists/PHASE_10_INTERACTIVE.md`** must call out the license gate as a separate checklist item from "implement transformer" / "implement CameraNet" / "implement VAE decode."
-17. **Do not** auto-resolve the model on `dotnet add package HartsyInference.Interactive.HunyuanGameCraft`. The first call into the package must explain how to acquire weights with full license context.
+17. **Do not** auto-resolve the model on `dotnet add package HartsyInference.World.HunyuanGameCraft`. The first call into the package must explain how to acquire weights with full license context.

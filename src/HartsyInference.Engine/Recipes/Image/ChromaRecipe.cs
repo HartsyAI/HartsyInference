@@ -4,11 +4,11 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
-
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Chroma recipe (Lodestone Rock's 8.9B Flux derivative: T5-only, no CLIP/pooled conditioning, joint-attention DiT, same VAE as Flux.1). Lifted from the SwarmUI backend's <c>ChromaLoader</c>; the checkpoint is the DiT, the T5-XXL text encoder and Flux VAE are resolved as side models. Constructs and drives through <see cref="ChromaRecipePipeline"/>.</summary>
@@ -19,6 +19,12 @@ public sealed class ChromaRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "chroma", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Chroma's official sampling settings: 35 steps at guidance 5.0, 1024x1024 (<c>ChromaConfig.DefaultSteps</c>/<c>ChromaConfig.DefaultCfgScale</c>).</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 35, CfgScale = 5.0f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -56,9 +62,7 @@ public sealed class ChromaRecipe : IArchitectureRecipe
         T5Tokenizer tokenizer = new T5Tokenizer(maxLength: 512);
 
         // 3. Load the Flux VAE (Chroma reuses it verbatim).
-        SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
-        vaeLoader.Load(vaePath);
-        Dictionary<string, Tensor> vaeWeights = LoadVaeFromStandalone(vaeLoader.GetAllTensors());
+        (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
         if (vaeWeights.Count == 0)
         {
             vaeLoader.Dispose();
@@ -88,30 +92,6 @@ public sealed class ChromaRecipe : IArchitectureRecipe
             else
             {
                 result[kv.Key] = kv.Value;
-            }
-        }
-        return result;
-    }
-
-    /// <summary>Normalizes a standalone Flux VAE safetensors file into the diffusers key naming the VAE decoder expects (strips a Comfy prefix, then routes every key through <see cref="CheckpointConvertUtils.ConvertVaeKey"/> which maps LDM names and passes already-diffusers names through unchanged).</summary>
-    private static Dictionary<string, Tensor> LoadVaeFromStandalone(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            string ldmKey = kv.Key;
-            if (ldmKey.StartsWith("first_stage_model.", StringComparison.Ordinal))
-            {
-                ldmKey = ldmKey["first_stage_model.".Length..];
-            }
-            else if (ldmKey.StartsWith("vae.", StringComparison.Ordinal))
-            {
-                ldmKey = ldmKey["vae.".Length..];
-            }
-            string? diffusersKey = CheckpointConvertUtils.ConvertVaeKey(ldmKey);
-            if (diffusersKey is not null)
-            {
-                result[diffusersKey] = kv.Value;
             }
         }
         return result;

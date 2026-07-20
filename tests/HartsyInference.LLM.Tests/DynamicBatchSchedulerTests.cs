@@ -3,7 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Transformer;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 
 namespace HartsyInference.LLM.Tests;

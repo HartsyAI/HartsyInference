@@ -7,7 +7,7 @@ using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Codecs.NeuCodec;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
 

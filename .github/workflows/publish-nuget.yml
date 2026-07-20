@@ -90,7 +90,7 @@ jobs:
       - name: Verify complete package set
         run: |
           VER="1.0.0-${{ steps.ver.outputs.suffix }}"
-          EXPECTED="HartsyInference HartsyInference.Core HartsyInference.Cpu HartsyInference.Cuda HartsyInference.Vulkan HartsyInference.ModelHandler HartsyInference.Tokenizers HartsyInference.Diffusion HartsyInference.Audio HartsyInference.Vision HartsyInference.Video HartsyInference.Interactive HartsyInference.ThreeD HartsyInference.Phonemizer HartsyInference.LLM"
+          EXPECTED="HartsyInference HartsyInference.Core HartsyInference.Cpu HartsyInference.Cuda HartsyInference.Vulkan HartsyInference.ModelAssets HartsyInference.ModelAssets.Tokenizers HartsyInference.Diffusion HartsyInference.Audio HartsyInference.Vision HartsyInference.Video HartsyInference.World HartsyInference.ThreeD HartsyInference.Audio.Phonemizer HartsyInference.LLM"
           missing=0
           for pkg in $EXPECTED; do
             if [ ! -f "artifacts/${pkg}.${VER}.nupkg" ]; then

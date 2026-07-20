@@ -1,10 +1,10 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.TextEncoders;
-using HartsyInference.ModelHandler.BlockScale;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.Mxfp8;
-using HartsyInference.ModelHandler.Nvfp4;
+using HartsyInference.ModelAssets.BlockScale;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Mxfp8;
+using HartsyInference.ModelAssets.Nvfp4;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;

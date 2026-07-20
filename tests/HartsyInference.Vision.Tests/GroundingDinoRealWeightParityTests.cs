@@ -3,7 +3,7 @@ using System.IO;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Vision.Detection.GroundingDino;
 using Xunit;
 using Xunit.Abstractions;

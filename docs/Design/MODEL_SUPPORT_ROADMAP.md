@@ -111,7 +111,7 @@ Highest-priority models; all target CUDA + Vulkan via `IBackend`.
 
 ### Interactive / World Models (Phase 10)
 
-Action-conditioned, real-time, frame-by-frame video generators — distinct from offline video diffusion. Take typed input events (keyboard scancodes, mouse deltas, gamepad sticks, camera pose) and emit a streamed frame per step. New `HartsyInference.Interactive` package. See [INTERACTIVE_INFERENCE.md](../Research/INTERACTIVE_INFERENCE.md) for the cross-cutting foundation.
+Action-conditioned, real-time, frame-by-frame video generators — distinct from offline video diffusion. Take typed input events (keyboard scancodes, mouse deltas, gamepad sticks, camera pose) and emit a streamed frame per step. New `HartsyInference.World` package. See [INTERACTIVE_INFERENCE.md](../Research/INTERACTIVE_INFERENCE.md) for the cross-cutting foundation.
 
 | Model | Org | License | Notes |
 |---|---|---|---|

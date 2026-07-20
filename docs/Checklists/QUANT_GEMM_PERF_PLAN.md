@@ -48,7 +48,7 @@ Traced on 2026-06-30. The engine already has the right machinery, but the fast p
 | Tensor-core HGEMM (`hgemm_mma_sm80.ptx`) | **built, default OFF** (`EnableTensorCoreGemm=false`, PTX fragment layout unverified) | [TensorCoreGemm.cs](../../src/HartsyInference.Cuda/TensorCoreGemm.cs) |
 | cuBLASLt epilogue fusion (bias in GEMM) | **built, default OFF** (`EnableEpilogueFusion=false`) | [CudaBackend.cs:77](../../src/HartsyInference.Cuda/CudaBackend.cs#L77) |
 | GGUF on-the-fly dequant GEMM (`QuantizedMatMul`) | wired for **LLM only**, gated by `LowVramQuant`; no diffusion/audio/video uses it | [GenericTransformer.cs:48](../../src/HartsyInference.LLM/Transformer/GenericTransformer.cs#L48) |
-| GGUF for diffusion / T5 | dequant to F16/F32 **at load** (no inference VRAM saving) | [GgufModelLoader.cs:95](../../src/HartsyInference.ModelHandler/Gguf/GgufModelLoader.cs#L95) |
+| GGUF for diffusion / T5 | dequant to F16/F32 **at load** (no inference VRAM saving) | [GgufModelLoader.cs:95](../../src/HartsyInference.ModelAssets/Gguf/GgufModelLoader.cs#L95) |
 | Vulkan int8 GEMM (`matmul_int8`) | kernel exists, **not wired to any model's weights** | [VulkanBackend.cs:612](../../src/HartsyInference.Vulkan/VulkanBackend.cs#L612) |
 | Attention (`lm_flash_attn_f32`) | correct but does a full block barrier+reduction **per key** (algorithmic loss) | [flash_attn_f32.cu:52](../../native/cuda/lm/flash_attn_f32.cu#L52) |
 

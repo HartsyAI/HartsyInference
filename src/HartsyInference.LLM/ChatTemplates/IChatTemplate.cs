@@ -1,5 +1,5 @@
 using System.Collections.Generic;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.ChatTemplates;
 

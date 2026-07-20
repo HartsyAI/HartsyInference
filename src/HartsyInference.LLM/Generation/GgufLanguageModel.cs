@@ -1,8 +1,8 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Transformer;
-using HartsyInference.ModelHandler.Gguf;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Generation;
 

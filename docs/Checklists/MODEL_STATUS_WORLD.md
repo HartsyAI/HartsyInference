@@ -29,6 +29,6 @@ All built end-to-end with structural tests passing; numeric parity pending.
 
 ## Notes
 
-The `HartsyInference.Interactive` package (sessions / actions / camera / FOV memory) + the FlowUniPC and
+The `HartsyInference.World` package (sessions / actions / camera / FOV memory) + the FlowUniPC and
 FlowMatchDmd schedulers + a shared `ActionModule` back these models. World models share the 3D-video VAE
 foundation with [the video models](MODEL_STATUS_VIDEO.md).

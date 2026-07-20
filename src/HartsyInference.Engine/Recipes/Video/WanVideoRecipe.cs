@@ -3,11 +3,13 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
+
+using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -44,6 +46,9 @@ public sealed class WanVideoRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Wan's official sampling settings: 50 steps at guidance 5.0 (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
+    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 5.0f };
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
@@ -93,7 +98,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
             string vaePath = ModelDownloader.EnsureSideModelAsync(isWan21 ? SideModels.Wan21Vae : SideModels.Wan22Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
             (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
             loaders.AddRange(vaeLoaders);
-            Dictionary<string, Tensor> vaeWeights = VideoRecipeUtils.CastWeights(vaeWeightsRaw, DType.F32);
+            Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
             IWanVaeDecoder vaeDecoder;
             IWanVaeEncoder vaeEncoder;
             if (isWan21)

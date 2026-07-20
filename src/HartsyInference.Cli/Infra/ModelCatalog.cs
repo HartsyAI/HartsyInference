@@ -29,8 +29,8 @@ public static class ModelCatalog
         const Modality stt = Modality.Transcribe;
         const Modality vis = Modality.Vision;
         const Modality vid = Modality.Video;
-        const Modality d3 = Modality.ThreeD;
-        const Modality act = Modality.Interactive;
+        const Modality d3 = Modality.Mesh;
+        const Modality act = Modality.World;
         const ModelStatus ok = ModelStatus.Verified;
         const ModelStatus vp = ModelStatus.ValidationPending;
         const ModelStatus st = ModelStatus.Structural;
@@ -47,8 +47,10 @@ public static class ModelCatalog
             // Image / diffusion
             E("sd15", img, "Stable Diffusion 1.5", "UNet", ok),
             E("sdxl", img, "SDXL", "UNet (dual CLIP)", ok, cli: true),
-            E("sdxl-refiner", img, "SDXL Refiner", "UNet (dual CLIP)", ok),
-            E("sdxl-inpaint", img, "SDXL Inpaint", "UNet", st),
+            // No "sdxl-refiner" / "sdxl-inpaint" entries: neither is a standalone text-to-image family, so neither can
+            // have an IArchitectureRecipe. The refiner is reachable as ImageRequest.Refiner on the sdxl entry (loaded by
+            // Features/SdxlRefinerLoader), and inpainting as ImageRequest.Inpaint — listing them as selectable models
+            // only produced a "no recipe lifted" throw.
             E("flux1", img, "Flux.1-dev", "single-stream DiT, flow-matching", ok),
             E("flux2", img, "Flux.2", "single-stream DiT, flow-matching", ok),
             E("chroma", img, "Chroma", "Flux-derivative DiT", ok),
@@ -67,6 +69,9 @@ public static class ModelCatalog
             E("lance-image", img, "Lance (Image)", "unified multimodal DiT", vp),
             E("zimage", img, "Z-Image Turbo", "NextDiT (Qwen3-4B)", st),
             E("anima", img, "Anima", "Cosmos-Predict2-2B (T=1)", st),
+            E("zeta-chroma", img, "Zeta-Chroma", "Chroma-derivative DiT (Qwen3-4B)", st),
+            E("boogu", img, "Boogu Image", "single-stream DiT (Qwen3-VL-8B + Flux VAE)", st),
+            E("lens", img, "Lens · Lens-Turbo", "48-layer MoE DiT (Microsoft Lens)", st),
             new CatalogEntry
             {
                 Id = "krea2",
@@ -75,11 +80,14 @@ public static class ModelCatalog
                 Architecture = "Krea2 DiT (Qwen3-VL-4B + Qwen-Image VAE)",
                 Status = ok,
                 CliDrivable = false, // pipeline exists; Engine image-path wiring + real-weight verification pending
+                // Side models come straight from SideModels — the same SHA-256-pinned entries Krea2Recipe
+                // downloads — so the catalog can never disagree with what the engine actually loads. Only the
+                // transformer is spelled out here: it is the checkpoint itself and has no SideModels entry.
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "Comfy-Org/Krea-2", RepoPath = "diffusion_models/krea2_turbo_fp8_scaled.safetensors", TargetSubdir = "Stable-Diffusion/Krea2", Role = "transformer" },
-                    new() { Repo = "Comfy-Org/Krea-2", RepoPath = "text_encoders/qwen3vl_4b_bf16.safetensors", TargetSubdir = "text_encoders", Role = "text encoder" },
-                    new() { Repo = "Comfy-Org/Krea-2", RepoPath = "vae/qwen_image_vae.safetensors", TargetSubdir = "VAE/QwenImage", Role = "vae" },
+                    SideModels.Qwen3VL_4B,
+                    SideModels.QwenImageVae,
                 },
             },
 

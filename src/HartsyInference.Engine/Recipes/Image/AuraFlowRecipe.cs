@@ -5,10 +5,10 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
-
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>AuraFlow v0.2 / v0.3 recipe (fal/AuraFlow, MMDiT + single-DiT hybrid). The single-file checkpoint bundles the transformer, the Pile-T5-XL text encoder, and the SDXL-family VAE under one safetensors; nothing is resolved as a side model. Lifted from the SwarmUI backend's <c>AuraFlowLoader</c>; constructs the components and drives generation through <see cref="AuraFlowRecipePipeline"/>.</summary>
@@ -19,6 +19,12 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "auraflow", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>AuraFlow's official sampling settings: 50 steps at guidance 3.5, 1024x1024 (diffusers <c>AuraFlowPipeline.__call__</c>, mirrored by <c>GenerationDefaults.AuraFlow</c>).</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 3.5f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -41,8 +47,8 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
 
         // AuraFlow reuses the SDXL VAE — same F16-overflow problem. BF16 on Ampere+ (F32-equivalent range),
         // F32 otherwise. Never F16, which overflows the SDXL VAE resnets. (Inlined VaePrecisionHelper policy.)
-        DType vaeDtype = context.Backend.Capabilities.SupportsBF16 ? DType.BF16 : DType.F32;
-        Dictionary<string, Tensor> vaeWeights = CastWeights(converted.Vae, vaeDtype);
+        DType vaeDtype = VaePrecisionHelper.PreferredVaeDtype(context.Backend);
+        Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(converted.Vae, vaeDtype);
         VaeDecoder vae = new VaeDecoder(VaeConfig.AuraFlow);
         vae.LoadWeights(vaeWeights);
 
@@ -55,16 +61,5 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
         AuraFlowPipeline pipeline = new AuraFlowPipeline(context.Backend, t5, transformer, vae, config);
         Logs.Info("[AuraFlowRecipe] AuraFlow ready.");
         return new AuraFlowRecipePipeline(pipeline, tokenizer, mainLoader);
-    }
-
-    /// <summary>Casts a VAE weight dictionary to <paramref name="target"/>, leaving tensors already at that dtype untouched (the SDXL-VAE BF16/F32 precision policy — never F16).</summary>
-    private static Dictionary<string, Tensor> CastWeights(Dictionary<string, Tensor> weights, DType target)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);
-        foreach (KeyValuePair<string, Tensor> kv in weights)
-        {
-            result[kv.Key] = kv.Value.DType == target ? kv.Value : kv.Value.CastTo(target);
-        }
-        return result;
     }
 }

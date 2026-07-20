@@ -5,8 +5,8 @@ using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.PyTorch;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.PyTorch;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -49,7 +49,7 @@ public sealed class CosyVoiceE2eTests
         PytorchPickleLoader llmL = new(); llmL.Load(llmPath);
         PytorchPickleLoader flowL = new(); flowL.Load(flowPath);
         PytorchPickleLoader hiftL = new(); hiftL.Load(hiftPath);
-        HartsyInference.ModelHandler.SafeTensors.SafeTensorsLoader s3genL = new(); s3genL.Load(s3genPath);
+        HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader s3genL = new(); s3genL.Load(s3genPath);
 
         CosyVoiceConfig cfg = CosyVoiceConfig.V2_0_5B;
         CosyVoiceQwenLm lm = new(cfg); lm.LoadWeights(llmL.GetAllTensors());

@@ -56,7 +56,7 @@ The engine is consumed three ways, in priority order:
 3. **Sample CLIs:** the per-modality apps under `samples/` and `src/HartsyInference.Cli` (developer and verification tools).
 
 > **The service layer (`HartsyInference.Engine`) is the single source of truth.** It owns model lifecycle + the
-> `InferenceEngine` facade + all modality dispatch. The CLI is a thin wrapper over it, and `HartsyInference.Server`
+> `InferenceEngine` facade + all modality dispatch. The CLI is a thin wrapper over it, and `HartsyInference.API`
 > is a thin OpenAI-compatible HTTP adapter over it (endpoint mapping + DTOs + auth) — the orchestration it used to
 > own (`ModelManager`, queue) now lives in Engine. See `docs/Design/ENGINE_REFACTOR_PLAN.md`.
 
@@ -106,14 +106,14 @@ LLM depends only on Core + ModelHandler + Tokenizers (not on the visual stack). 
 ```xml
 <PackageReference Include="HartsyInference.Diffusion" />
 <PackageReference Include="HartsyInference.Cuda" />
-<PackageReference Include="HartsyInference.ModelHandler" />
+<PackageReference Include="HartsyInference.ModelAssets" />
 ```
 
 **AMD image gen:**
 ```xml
 <PackageReference Include="HartsyInference.Diffusion" />
 <PackageReference Include="HartsyInference.Vulkan" />
-<PackageReference Include="HartsyInference.ModelHandler" />
+<PackageReference Include="HartsyInference.ModelAssets" />
 ```
 
 **SwarmUI backend:** installed as a SwarmUI extension from [SwarmUI-HartsyInference-Backend](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend), not a NuGet reference in your own project. The extension pins the engine packages it needs.
@@ -122,8 +122,8 @@ LLM depends only on Core + ModelHandler + Tokenizers (not on the visual stack). 
 ```xml
 <PackageReference Include="HartsyInference.LLM" />
 <PackageReference Include="HartsyInference.Cuda" />
-<PackageReference Include="HartsyInference.ModelHandler" />
-<PackageReference Include="HartsyInference.Tokenizers" />
+<PackageReference Include="HartsyInference.ModelAssets" />
+<PackageReference Include="HartsyInference.ModelAssets.Tokenizers" />
 ```
 
 **Audio-only (CPU):**
@@ -137,12 +137,12 @@ LLM depends only on Core + ModelHandler + Tokenizers (not on the visual stack). 
 <PackageReference Include="HartsyInference.Diffusion" />
 <PackageReference Include="HartsyInference.Cuda" />
 <PackageReference Include="HartsyInference.Vulkan" />
-<PackageReference Include="HartsyInference.ModelHandler" />
+<PackageReference Include="HartsyInference.ModelAssets" />
 ```
 
 **Interactive world model (game-engine integration):**
 ```xml
-<PackageReference Include="HartsyInference.Interactive" />
+<PackageReference Include="HartsyInference.World" />
 <PackageReference Include="HartsyInference.Cuda" />
 <!-- Brings Video + Diffusion + ModelHandler transitively -->
 ```

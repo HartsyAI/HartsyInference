@@ -37,7 +37,7 @@ public sealed class Sam2RealWeightParityTests
         using IBackend backend = new CpuBackend();
         Sam2Config cfg = Sam2Config.HieraTiny;
 
-        (Sam2Converter.Groups groups, HartsyInference.ModelHandler.SafeTensors.SafeTensorsLoader loader) =
+        (Sam2Converter.Groups groups, HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader loader) =
             Sam2Converter.LoadAndConvert(ckpt);
         using (loader)
         {

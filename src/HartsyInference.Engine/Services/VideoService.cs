@@ -29,7 +29,8 @@ public sealed class VideoService : IVideoService
             () =>
             {
                 IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(spec);
-                return pipeline.Generate(request, progress, cancel);
+                VideoRequest resolved = InferenceEngine.VideoDefaultsFor(spec).Apply(request);
+                return pipeline.Generate(resolved, progress, cancel);
             },
             cancel).ConfigureAwait(false);
 

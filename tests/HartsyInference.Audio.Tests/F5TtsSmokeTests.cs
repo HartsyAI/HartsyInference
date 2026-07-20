@@ -87,7 +87,7 @@ public sealed class F5TtsSmokeTests
         if (!File.Exists(path)) return;
 
         F5TtsConfig cfg = F5TtsConfig.V1Base;
-        using ModelHandler.SafeTensors.SafeTensorsLoader ld = new();
+        using ModelAssets.SafeTensors.SafeTensorsLoader ld = new();
         ld.Load(path);
         using F5Dit dit = new(cfg);
         dit.LoadWeights(ld.GetAllTensors());

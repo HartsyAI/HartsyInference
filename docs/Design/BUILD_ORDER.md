@@ -141,7 +141,7 @@ Phase 12: Native LLM text generation — new HartsyInference.LLM package
 
 ## Phase 7 — Server (DROPPED)
 
-The OpenAI-compatible REST server is no longer a goal. The `HartsyInference.Server` package remains in `src/` as abandoned ASP.NET scaffolding, but no server product is built or planned. The engine is consumed via the SwarmUI backend extension, NuGet libraries, and the sample CLIs.
+The OpenAI-compatible REST server is no longer a goal. The `HartsyInference.API` package remains in `src/` as abandoned ASP.NET scaffolding, but no server product is built or planned. The engine is consumed via the SwarmUI backend extension, NuGet libraries, and the sample CLIs.
 
 ## Phase 8 — SwarmUI Extension
 **Goal:** Register HartsyInference as a SwarmUI backend, an alternative to the ComfyUI backend.
@@ -165,7 +165,7 @@ The OpenAI-compatible REST server is no longer a goal. The `HartsyInference.Serv
 
 | Deliverable | Package | Description |
 |---|---|---|
-| `HartsyInference.Interactive` (new package) | Interactive | New package for action-conditioned, real-time, frame-by-frame world models. Depends on Video + Diffusion + ModelHandler. |
+| `HartsyInference.World` (new package) | Interactive | New package for action-conditioned, real-time, frame-by-frame world models. Depends on Video + Diffusion + ModelHandler. |
 | `IInteractiveSession` streaming loop | Interactive | Real-time event pump: (read action → encode → step → decode → present) at 25-40 FPS |
 | Action vocabs: keyboard, mouse, gamepad, camera-pose | Interactive | Per-model `IActionEncoder` implementations; reuse the Phase 9 abstraction |
 | Matrix-Game 2.0 pipeline (Skywork, MIT, 1.8B) | Interactive | First interactive world model. 540p @ 25 FPS, SkyReels-V2/Wan lineage. Apache/MIT-style permissive. |

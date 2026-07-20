@@ -2,7 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Adapters;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Vision.Siglip;
 using ImagePromptRequest = HartsyInference.Engine.Requests.IpAdapter;
 

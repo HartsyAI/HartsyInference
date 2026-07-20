@@ -1,5 +1,5 @@
 using Microsoft.ML.Tokenizers;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 

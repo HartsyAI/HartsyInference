@@ -105,6 +105,28 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
     public (float[] Left, float[] Right, int SampleRate, int Seed) Generate(
         Tensor textHidden, Tensor? lyricHidden, double durationSeconds, AceStep15GenerateOptions opts,
         Tensor? timbreLatent = null, Tensor? lmHints = null, Action<GenerationProgress>? onProgress = null)
+        => GenerateCore(textHidden, lyricHidden, durationSeconds, opts, editPlan: null, timbreLatent, lmHints, onProgress, CancellationToken.None);
+
+    /// <summary>Audio-conditioned generation: <paramref name="editPlan"/> supplies the <c>src_latents</c> slot, the
+    /// per-frame chunk mask (1 = generate, 0 = preserve) and the schedule entry point, which together drive
+    /// continuation, repaint and cover. Preserved frames are re-asserted from the source after every step (the standard
+    /// repaint re-noise), so they survive rather than merely conditioning. A null plan is byte-identical to the plain
+    /// text-to-music path. <b>Parity-pending: no part of this path is verified against real weights.</b> Two deliberate
+    /// divergences: the reference preserves purely through the context (it always runs the full schedule from noise and
+    /// never re-asserts the source), and the reference's cover strength blends a cover-instruction and a
+    /// text2music-instruction velocity per step instead of moving the schedule entry point. Cover here also feeds raw
+    /// 25 Hz Oobleck latents where upstream feeds FSQ-detokenized 5 Hz hints (that tokenizer is not ported). The mask
+    /// polarity follows upstream's boolean <c>ones()</c> mask.</summary>
+    public (float[] Left, float[] Right, int SampleRate, int Seed) Generate(
+        Tensor textHidden, Tensor? lyricHidden, double durationSeconds, AceStep15GenerateOptions opts,
+        AceStep15EditPlan? editPlan, Tensor? timbreLatent = null, Tensor? lmHints = null,
+        Action<GenerationProgress>? onProgress = null, CancellationToken cancel = default)
+        => GenerateCore(textHidden, lyricHidden, durationSeconds, opts, editPlan, timbreLatent, lmHints, onProgress, cancel);
+
+    private (float[] Left, float[] Right, int SampleRate, int Seed) GenerateCore(
+        Tensor textHidden, Tensor? lyricHidden, double durationSeconds, AceStep15GenerateOptions opts,
+        AceStep15EditPlan? editPlan, Tensor? timbreLatent, Tensor? lmHints,
+        Action<GenerationProgress>? onProgress, CancellationToken cancel)
     {
         ThrowIfDisposed();
         if (durationSeconds < 1 || durationSeconds > 600)
@@ -118,6 +140,27 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
             : Math.Clamp(opts.InferSteps ?? 50, 1, 200);
         float[] timesteps = AceStep15Config.GetTimesteps(wantSteps, opts.Shift ?? _config.FlowShift, snapShift: _config.IsTurbo);
         int steps = timesteps.Length;
+
+        Tensor? srcLatents = lmHints;
+        float[]? chunkMask = null;
+        bool silenceMaskedFrames = false;
+        int startIndex = 0;
+        if (editPlan is not null)
+        {
+            if (lmHints is not null)
+            {
+                throw new ArgumentException("An edit plan and LM hints both occupy the src_latents slot — supply only one.", nameof(editPlan));
+            }
+            editPlan.Validate(frames, _config.LatentChannels);
+            srcLatents = editPlan.SrcLatent;
+            chunkMask = editPlan.ChunkMask;
+            silenceMaskedFrames = editPlan.SilenceMaskedFrames;
+            // Enter the descending table at the first sigma the plan allows; at least one step always runs.
+            while (startIndex < steps - 1 && timesteps[startIndex] > editPlan.StartSigmaFraction)
+            {
+                startIndex++;
+            }
+        }
 
         // Turbo bakes guidance into distillation — upstream force-clamps to 1.0 (their issue #927: CFG on
         // turbo = noise/NaN). Base/sft need the learned null_condition_emb for the uncond branch.
@@ -139,7 +182,8 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         Logs.Info($"ACE-Step 1.5 {(_config.IsTurbo ? "turbo" : "base/sft")}: {durationSeconds:0}s ({frames} latent frames), {steps} steps, " +
             $"shift={opts.Shift ?? _config.FlowShift}, cfg={(useCfg ? guidance : 1f)}{(useCfg && opts.UseAdg ? " (ADG)" : useCfg ? " (APG)" : "")}, " +
             $"method={(sde ? "sde" : "ode")}, dcw={dcw.IsActive}, lyrics={(lyricHidden is null ? 0 : lyricHidden.Shape[lyricHidden.Shape.Rank - 2])} tokens, " +
-            $"timbre={(timbreLatent is not null)}, hints={(lmHints is not null)}, seed={actualSeed}");
+            $"timbre={(timbreLatent is not null)}, hints={(lmHints is not null)}, seed={actualSeed}" +
+            $"{(editPlan is null ? "" : $", edit=[start step {startIndex}/{steps}, sigma {timesteps[startIndex]:0.000}]")}");
 
         Backend.PreloadWeights(_encoder.EnumerateWeights());
         Tensor conditions = _encoder.EncodeConditions(Backend, textHidden, lyricHidden, timbreLatent);
@@ -159,16 +203,28 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
                 Buffer.MemoryCopy(ne, np + (long)i * condDim, condDim * 4, condDim * 4);
         }
 
-        Tensor context = BuildContextLatents(frames, lmHints);
+        Tensor context = BuildContextLatents(frames, srcLatents, chunkMask, silenceMaskedFrames);
         Tensor z = SeedGenerator.CreateNoise(new TensorShape(1, frames, _config.LatentChannels), actualSeed);
         long elems = z.Shape.ElementCount;
+        if (editPlan is not null)
+        {
+            // Flow-matching forward noising at the entry sigma: z = (1 - t)·src + t·noise (t = 1 leaves pure noise).
+            float sigmaStart = timesteps[startIndex];
+            float* initZ = (float*)z.DataPointer;
+            float* initSrc = (float*)editPlan.SrcLatent.DataPointer;
+            for (long e = 0; e < elems; e++)
+            {
+                initZ[e] = (1f - sigmaStart) * initSrc[e] + sigmaStart * initZ[e];
+            }
+        }
 
         Backend.PreloadWeights(_dit.EnumerateWeights());
         Stopwatch sw = Stopwatch.StartNew();
         try
         {
-            for (int i = 0; i < steps; i++)
+            for (int i = startIndex; i < steps; i++)
             {
+                cancel.ThrowIfCancellationRequested();
                 float sigma = timesteps[i];
                 float sigmaNext = i < steps - 1 ? timesteps[i + 1] : 0f;   // final step integrates to 0
                 Tensor vt = _dit.Forward(Backend, z, context, conditions, sigma, sigma);   // r = t (all variants)
@@ -222,8 +278,12 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
                     dcw.Apply(z, denoised, sigma);
                     denoised.Dispose();
                 }
+                if (chunkMask is not null)
+                {
+                    RestorePreservedFrames(z, editPlan!.SrcLatent, chunkMask, sigmaNext, unchecked(actualSeed + 7919 * (i + 1)));
+                }
                 vt.Dispose();
-                onProgress?.Invoke(new GenerationProgress(i + 1, steps, sw.Elapsed.TotalMilliseconds));
+                onProgress?.Invoke(new GenerationProgress(i - startIndex + 1, steps - startIndex, sw.Elapsed.TotalMilliseconds));
             }
         }
         finally
@@ -265,30 +325,72 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         return (left, right, _config.SampleRate, actualSeed);
     }
 
-    /// <summary>Builds <c>context_latents [1, T, 128]</c> = src ‖ chunk-mask per frame: src = phase-2
-    /// <paramref name="lmHints"/> when given, else the silence latent tiled; mask = 1.0 (upstream's
-    /// full-generation bool ones() mask — its "auto" 2.0 assign clamps to True=1.0; repaint's explicit
-    /// 0/1 spans are a later feature).</summary>
-    private Tensor BuildContextLatents(int frames, Tensor? lmHints)
+    /// <summary>Builds <c>context_latents [1, T, 128]</c> = src ‖ chunk-mask per frame: src = <paramref name="srcLatents"/>
+    /// (LM hints or an edit plan's source) when given, else the silence latent tiled; mask = <paramref name="chunkMask"/>
+    /// when given, else 1.0 everywhere (upstream's full-generation bool ones() mask — its "auto" 2.0 assign clamps to
+    /// True=1.0). With <paramref name="silenceMaskedFrames"/> the src row of every generate-masked frame becomes the
+    /// tiled silence latent, which is upstream's repaint rule and also gives a continuation's appended tail a src row.</summary>
+    private Tensor BuildContextLatents(int frames, Tensor? srcLatents, float[]? chunkMask, bool silenceMaskedFrames)
     {
         int latCh = _config.LatentChannels;
-        if (lmHints is not null && (lmHints.Shape.Rank != 3 || lmHints.Shape[1] != frames || (int)lmHints.Shape[2] != latCh))
-            throw new ArgumentException($"lm hints must be [1, {frames}, {latCh}]; got {lmHints.Shape}.", nameof(lmHints));
-        if (lmHints is null) EnsureSilenceFrames();
+        if (srcLatents is not null && (srcLatents.Shape.Rank != 3 || srcLatents.Shape[1] != frames || (int)srcLatents.Shape[2] != latCh))
+            throw new ArgumentException($"src latents must be [1, {frames}, {latCh}]; got {srcLatents.Shape}.", nameof(srcLatents));
+        if (chunkMask is not null && chunkMask.Length != frames)
+            throw new ArgumentException($"chunk mask must have {frames} entries; got {chunkMask.Length}.", nameof(chunkMask));
+        bool maskedToSilence = silenceMaskedFrames && chunkMask is not null;
+        if (srcLatents is null || maskedToSilence) EnsureSilenceFrames();
 
         Tensor context = new Tensor(new TensorShape(1, frames, 2 * latCh), DType.F32);
         float* cp = (float*)context.DataPointer;
-        float* hp = lmHints is not null ? (float*)lmHints.DataPointer : (float*)_silenceFrames!.DataPointer;
-        int srcPeriod = lmHints is not null ? frames : (int)_silenceFrames!.Shape[0];
+        float* hp = srcLatents is not null ? (float*)srcLatents.DataPointer : null;
+        float* sp = _silenceFrames is not null ? (float*)_silenceFrames.DataPointer : null;
+        int silencePeriod = _silenceFrames is not null ? (int)_silenceFrames.Shape[0] : 1;
         for (int i = 0; i < frames; i++)
         {
             long rowOff = (long)i * 2 * latCh;
-            Buffer.MemoryCopy(hp + (long)(i % srcPeriod) * latCh, cp + rowOff, latCh * 4, latCh * 4);
-            // Full-generation chunk mask = 1.0. Upstream builds a bool ones() mask; its "auto" 2.0 assign
-            // clamps to True on the bool tensor, so the model only ever sees 1.0 (2.0 → muffled/quiet).
-            for (int c = 0; c < latCh; c++) cp[rowOff + latCh + c] = 1f;
+            float mask = chunkMask is null ? 1f : chunkMask[i];
+            bool useSilence = srcLatents is null || (maskedToSilence && mask > 0.5f);
+            float* row = useSilence ? sp + (long)(i % silencePeriod) * latCh : hp + (long)i * latCh;
+            Buffer.MemoryCopy(row, cp + rowOff, latCh * 4, latCh * 4);
+            for (int c = 0; c < latCh; c++) cp[rowOff + latCh + c] = mask;
         }
         return context;
+    }
+
+    /// <summary>Re-asserts the source over every masked-preserve frame (mask &lt; 0.5) after a denoise step: the standard
+    /// repaint re-noise <c>z = (1 − t_next)·src + t_next·noise</c>, which collapses to writing the clean source back on
+    /// the final step (t_next = 0). Without it a 0 mask only conditions the DiT instead of preserving the audio.</summary>
+    private static void RestorePreservedFrames(Tensor z, Tensor src, float[] chunkMask, float sigmaNext, int noiseSeed)
+    {
+        int frames = chunkMask.Length;
+        int latCh = (int)z.Shape[2];
+        bool anyPreserved = false;
+        for (int f = 0; f < frames && !anyPreserved; f++)
+        {
+            anyPreserved = chunkMask[f] < 0.5f;
+        }
+        if (!anyPreserved)
+        {
+            return;
+        }
+        Tensor? noise = sigmaNext > 0f ? SeedGenerator.CreateNoise(z.Shape, noiseSeed) : null;
+        float* zp = (float*)z.DataPointer;
+        float* sp = (float*)src.DataPointer;
+        float* np = noise is not null ? (float*)noise.DataPointer : null;
+        for (int f = 0; f < frames; f++)
+        {
+            if (chunkMask[f] >= 0.5f)
+            {
+                continue;
+            }
+            long off = (long)f * latCh;
+            for (int c = 0; c < latCh; c++)
+            {
+                long e = off + c;
+                zp[e] = np is null ? sp[e] : (1f - sigmaNext) * sp[e] + sigmaNext * np[e];
+            }
+        }
+        noise?.Dispose();
     }
 
     /// <summary>Computes the silence src latent once: 1 s of digital silence through the VAE encoder (the research

@@ -3,7 +3,7 @@ using HartsyInference.Audio.Models.SparkTts;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Cpu;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 using Xunit.Abstractions;
 

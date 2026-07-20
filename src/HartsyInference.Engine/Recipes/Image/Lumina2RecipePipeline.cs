@@ -7,8 +7,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -49,8 +49,8 @@ public sealed class Lumina2RecipePipeline : IRecipePipeline
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
         // <=0 defers to the Lumina-2 reference default (4.0, always runs a negative pass); a positive value overrides.
-        float cfg = request.CfgScale <= 0 ? 4.0f : request.CfgScale;
-        int steps = request.Steps <= 0 ? 25 : request.Steps;
+        float cfg = request.CfgScale ?? Lumina2Recipe.FamilyDefaults.CfgScale;
+        int steps = request.Steps ?? Lumina2Recipe.FamilyDefaults.Steps;
 
         Tensor condEmbeds = GetOrEncode(prompt);
         // The pipeline requires negative embeddings whenever cfg > 1 (the reference always runs a negative pass at
@@ -65,7 +65,7 @@ public sealed class Lumina2RecipePipeline : IRecipePipeline
             Height = request.Height,
             Steps = steps,
             CfgScale = cfg,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         Action<GenerationProgress> bridge = p =>

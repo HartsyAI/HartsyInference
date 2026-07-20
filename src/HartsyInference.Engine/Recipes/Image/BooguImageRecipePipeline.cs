@@ -8,8 +8,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -52,19 +52,20 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps > 0 ? request.Steps : 25;
+        int steps = request.Steps ?? BooguImageRecipe.FamilyDefaults.Steps;
         // Text guidance from CFG scale (Boogu Base works well ~2–5; Turbo = 1). The negative prompt drives the uncond pass.
-        float textGuidance = request.CfgScale;
+        float textGuidance = request.CfgScale ?? BooguImageRecipe.FamilyDefaults.CfgScale;
 
         // TODO(E-IMG-4): reference-image editing (request.Img2Img) needs the Qwen3-VL vision tower + the pipeline's
         // EditFromEmbeddings path. Text-to-image only.
 
         // Output size must be a multiple of 16 (2×2 patchify × 8× VAE).
-        int snappedW = Math.Clamp(request.Width / 16 * 16, 256, 2048);
-        int snappedH = Math.Clamp(request.Height / 16 * 16, 256, 2048);
-        if (snappedW != request.Width || snappedH != request.Height)
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        int snappedW = Math.Clamp(reqWidth / 16 * 16, 256, 2048);
+        int snappedH = Math.Clamp(reqHeight / 16 * 16, 256, 2048);
+        if (snappedW != reqWidth || snappedH != reqHeight)
         {
-            Logs.Info($"[BooguImageRecipe] Snapped resolution {request.Width}x{request.Height} → {snappedW}x{snappedH} (multiple of 16, 256–2048).");
+            Logs.Info($"[BooguImageRecipe] Snapped resolution {reqWidth}x{reqHeight} → {snappedW}x{snappedH} (multiple of 16, 256–2048).");
         }
 
         TextToImageRequest inner = new TextToImageRequest
@@ -75,7 +76,7 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
             Height = snappedH,
             Steps = steps,
             CfgScale = textGuidance,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         bool needNeg = textGuidance > 1.0f;

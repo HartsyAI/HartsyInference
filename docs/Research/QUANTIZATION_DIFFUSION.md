@@ -311,7 +311,7 @@ model/
 
 ## Implementation Notes
 
-### For HartsyInference.ModelHandler
+### For HartsyInference.ModelAssets
 
 1. **GGUF loader must support per-component precision.** The model handler should accept separate paths and quant configs for backbone, VAE, and each text encoder. Default: Q8_0 backbone, FP16 everything else.
 

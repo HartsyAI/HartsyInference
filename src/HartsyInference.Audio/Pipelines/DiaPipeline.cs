@@ -71,12 +71,12 @@ public sealed unsafe class DiaPipeline : IDisposable
     {
         if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
         {
-            HartsyInference.ModelHandler.SafeTensors.SafeTensorsLoader l = new();
+            HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader l = new();
             l.Load(path);
             retain.Add(l);
             return l.GetAllTensors();
         }
-        HartsyInference.ModelHandler.PyTorch.PytorchPickleLoader pk = new();
+        HartsyInference.ModelAssets.PyTorch.PytorchPickleLoader pk = new();
         // Non-recursive: the descript DAC .pth is a flat state_dict under a {state_dict, metadata} envelope.
         // FlattenStateDict drops the `state_dict.` wrapper (recursive flatten KEEPS it, so keys came out as
         // `state_dict.encoder.block.0.weight_g` and the weight-norm fuse missed them → KeyNotFound on `.weight`).

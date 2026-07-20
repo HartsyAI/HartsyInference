@@ -9,7 +9,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.Cuda" />
     <InternalsVisibleTo Include="HartsyInference.Vulkan" />
-    <InternalsVisibleTo Include="HartsyInference.ModelHandler" />
+    <InternalsVisibleTo Include="HartsyInference.ModelAssets" />
     <InternalsVisibleTo Include="HartsyInference.Core.Tests" />
   </ItemGroup>
 

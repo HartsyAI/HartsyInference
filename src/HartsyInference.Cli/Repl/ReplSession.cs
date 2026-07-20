@@ -312,7 +312,7 @@ public sealed class ReplSession : IDisposable
         table.AddRow("backend", Markup.Escape(_engine.BackendDescription));
         table.AddRow("output", Markup.Escape(_outputDir ?? "(default)"));
         foreach (KeyValuePair<string, string> kv in _params.Values)
-            table.AddRow(Markup.Escape(kv.Key), Markup.Escape(kv.Value));
+            table.AddRow(Markup.Escape(kv.Key), kv.Value.Length == 0 ? "(model default)" : Markup.Escape(kv.Value));
         AnsiConsole.Write(table);
     }
 
@@ -331,12 +331,12 @@ public sealed class ReplSession : IDisposable
         try
         {
             ModelSpec spec = ModelAcquisition.EnsurePresent(ModelResolver.Resolve(_model, null, _modality));
-            IProgressSink sink = new ConsoleProgressSink();
-            _engine.Load(spec, sink);
             if (_modality == Modality.Text)
                 AnsiConsole.Write(new Rule($"[{CliTheme.Accent}]response[/]").LeftJustified().RuleStyle("grey"));
 
-            GeneratedArtifact artifact = _engine.Generate(spec, prompt, _params, sink, CancellationToken.None);
+            GeneratedArtifact artifact = GenerationDispatch
+                .RunAsync(_engine, spec, prompt, _params, _outputDir, quiet: false, CancellationToken.None)
+                .GetAwaiter().GetResult();
             ResultPresenter.Present(artifact, quiet: false);
 
             string? saved = ArtifactWriter.Write(artifact, _outputDir, prompt, force: _outputDir is not null);

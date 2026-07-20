@@ -5,7 +5,7 @@ using HartsyInference.Audio.Models.Bark;
 using HartsyInference.Audio.Models.LanguageModels.Gpt;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
 

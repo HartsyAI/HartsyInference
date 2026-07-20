@@ -1,5 +1,5 @@
 using HartsyInference.Core.Logging;
-using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters;
 
 namespace HartsyInference.Diffusion.Quality;
 

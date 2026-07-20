@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 using HartsyInference.Diffusion.Models.Denoisers;
-using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -22,7 +22,7 @@ public class SdxlRefinerLoadTest
             return; // skip when the checkpoint isn't present
         }
 
-        (SdxlRefinerCheckpointConverter.ConvertedWeights converted, HartsyInference.ModelHandler.SafeTensors.SafeTensorsLoader loader) =
+        (SdxlRefinerCheckpointConverter.ConvertedWeights converted, HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader loader) =
             SdxlRefinerCheckpointConverter.LoadAndConvert(RefinerPath);
         try
         {

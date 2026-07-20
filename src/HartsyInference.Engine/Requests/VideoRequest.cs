@@ -16,11 +16,11 @@ public sealed record VideoRequest
     /// <summary>Output height in pixels.</summary>
     public int Height { get; init; } = 480;
 
-    /// <summary>Number of denoising steps.</summary>
-    public int Steps { get; init; } = 30;
+    /// <summary>Number of denoising steps; null uses the family's officially recommended step count.</summary>
+    public int? Steps { get; init; }
 
-    /// <summary>Classifier-free guidance scale.</summary>
-    public float CfgScale { get; init; } = 6.0f;
+    /// <summary>Classifier-free guidance scale; null uses the family's officially recommended scale.</summary>
+    public float? CfgScale { get; init; }
 
     /// <summary>RNG seed; negative means a random seed is chosen per request.</summary>
     public long Seed { get; init; } = -1;

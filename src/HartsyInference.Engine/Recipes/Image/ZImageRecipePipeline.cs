@@ -6,8 +6,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -43,9 +43,9 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps;
+        int steps = request.Steps ?? ZImageRecipe.FamilyDefaults.Steps;
         // Z-Image CFG: <=0 (or 1) means Turbo (no CFG, single forward). >1 is Base and requires a negative encode.
-        float cfg = request.CfgScale <= 0 ? 1.0f : request.CfgScale;
+        float cfg = request.CfgScale ?? ZImageRecipe.FamilyDefaults.CfgScale;
         bool needNegative = cfg > 1.0f;
         int penultimateIdx = _qwen.NumLayers - 1;
 
@@ -82,7 +82,7 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
             Width = request.Width,
             Height = request.Height,
             Steps = steps,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         try

@@ -6,8 +6,8 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
@@ -47,11 +47,11 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps > 0 ? request.Steps : _config.NumInferenceSteps;
+        int steps = request.Steps ?? _config.NumInferenceSteps;
         (int width, int height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
         int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 121, step: _config.VaeTemporalCompression);
         int frameRate = request.Fps > 0 ? request.Fps : 24;
-        float cfgScale = request.CfgScale <= 0 ? _config.GuidanceScale : request.CfgScale;
+        float cfgScale = request.CfgScale ?? _config.GuidanceScale;
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
@@ -64,7 +64,7 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
             Height = height,
             Steps = steps,
             CfgScale = cfgScale,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         Action<GenerationProgress> bridge = p =>

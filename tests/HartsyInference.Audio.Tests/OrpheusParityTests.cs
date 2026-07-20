@@ -6,7 +6,7 @@ using HartsyInference.Audio.Models.Orpheus;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
 

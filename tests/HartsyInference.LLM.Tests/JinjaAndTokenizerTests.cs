@@ -1,5 +1,5 @@
 using HartsyInference.LLM.ChatTemplates;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 
 namespace HartsyInference.LLM.Tests;
