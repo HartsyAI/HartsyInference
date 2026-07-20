@@ -6,8 +6,8 @@ using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Phonemizer.Espeak;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Audio.Phonemizer.Espeak;
 
 namespace HartsyInference.Audio.Pipelines;
 

@@ -1,6 +1,6 @@
 using System.Globalization;
-using HartsyInference.Phonemizer;
-using HartsyInference.Phonemizer.Espeak;
+using HartsyInference.Audio.Phonemizer;
+using HartsyInference.Audio.Phonemizer.Espeak;
 
 namespace HartsyInference.Audio.Models.ZipVoice;
 
