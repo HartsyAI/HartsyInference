@@ -9,6 +9,15 @@ namespace HartsyInference.Audio.Models.ZipVoice;
 /// are plain <c>nn.Linear</c>/<c>nn.Conv1d</c> at inference — the "scale" only affected random init before
 /// training and is already baked into the checkpoint's saved weights, so ordinary <see cref="IBackend.Linear"/>
 /// / <see cref="IBackend.Conv1d"/> calls are used throughout this port with no extra runtime scaling.</summary>
+// TODO(gpu-residency): SwooshL/R (this file) and BiasNorm.Forward (below) remain host `float*` loops — SwooshL/R
+// need a Softplus/Exp/Log primitive and BiasNorm needs a per-row sum-of-squares reduction, neither of which is
+// exposed on IBackend (searched: no Log/Exp/Softplus elementwise op, no generic per-row-scalar-broadcast op).
+// Adding either would need a new PTX kernel (the established pattern elsewhere, e.g. Mish/Prelu/RepeatKvHeads),
+// but this sandbox has no nvcc/CUDA compiler available (only a pip ptxas without the nvcc frontend) — see the
+// ZipVoice perf-pass entry in docs/Checklists/PHASE_5_AUDIO.md. Everything else in the Zipformer encoder layer
+// (residual adds, broadcast adds, bypass highway, GLU gate, attention value-mixing, NonlinAttention, the
+// attention content-score term) was converted to GPU-resident IBackend calls; these two remain the last
+// unavoidable host-touch points per layer without a new kernel.
 internal static unsafe class ZipformerScaling
 {
     /// <summary>SwooshL(x) = softplus(x - 4) - 0.08x - 0.035. Used by <c>FeedforwardModule.out_proj</c>.</summary>

@@ -35,6 +35,11 @@ internal sealed unsafe class ZipformerEncoderLayer
     private readonly ZipformerBiasNorm _norm;
     private readonly ZipformerBypass _bypassMid, _bypass;
 
+    /// <summary>Cached <c>[1, dim]</c> ones row for the GPU-resident "a + 1·b" / "a + 1·bias(broadcast)"
+    /// idioms (<see cref="IBackend.GatedResidualLastDim"/> / <see cref="IBackend.AffineBroadcastLastDim"/>) —
+    /// same pattern used throughout the DiT blocks (e.g. <c>LtxVideoBlock.OnesRow</c>).</summary>
+    private Tensor? _onesDim;
+
     public ZipformerEncoderLayer(int dim, int numHeads, int queryHeadDim, int posHeadDim, int posDim,
         int valueHeadDim, int feedforwardDim, int cnnKernel)
     {
@@ -77,32 +82,34 @@ internal sealed unsafe class ZipformerEncoderLayer
         Tensor attnWeights = _attnWeights.Forward(backend, src, posEmb, t);
         Tensor headZero = SliceHead0(attnWeights, t);
 
-        Tensor cur = stageTimeEmb is not null ? AddBroadcast(src, stageTimeEmb, t) : Copy(src, t);
+        Tensor cur = new(new TensorShape(1, t, _dim), DType.F32);
+        if (stageTimeEmb is not null) backend.AffineBroadcastLastDim(cur, src, OnesDim(), stageTimeEmb);
+        else backend.CopyTo(cur, src);
 
-        AddInPlace(cur, _ff1.Forward(backend, cur, t), t);
-        AddInPlace(cur, _nonlinAttention.Forward(backend, cur, headZero, t), t);
+        AddInPlace(backend, cur, _ff1.Forward(backend, cur, t));
+        AddInPlace(backend, cur, _nonlinAttention.Forward(backend, cur, headZero, t));
         headZero.Dispose();
-        AddInPlace(cur, _selfAttn1.Forward(backend, cur, attnWeights, t), t);
+        AddInPlace(backend, cur, _selfAttn1.Forward(backend, cur, attnWeights, t));
 
-        if (stageTimeEmb is not null) AddBroadcastInPlace(cur, stageTimeEmb, t);
-        AddInPlace(cur, _conv1.Forward(backend, cur, t), t);
-        AddInPlace(cur, _ff2.Forward(backend, cur, t), t);
+        if (stageTimeEmb is not null) AddBroadcastInPlace(backend, cur, stageTimeEmb);
+        AddInPlace(backend, cur, _conv1.Forward(backend, cur, t));
+        AddInPlace(backend, cur, _ff2.Forward(backend, cur, t));
 
-        Tensor afterMid = _bypassMid.Forward(src, cur, t);
+        Tensor afterMid = _bypassMid.Forward(backend, src, cur, t);
         cur.Dispose();
         cur = afterMid;
 
-        AddInPlace(cur, _selfAttn2.Forward(backend, cur, attnWeights, t), t);
+        AddInPlace(backend, cur, _selfAttn2.Forward(backend, cur, attnWeights, t));
         attnWeights.Dispose();
 
-        if (stageTimeEmb is not null) AddBroadcastInPlace(cur, stageTimeEmb, t);
-        AddInPlace(cur, _conv2.Forward(backend, cur, t), t);
-        AddInPlace(cur, _ff3.Forward(backend, cur, t), t);
+        if (stageTimeEmb is not null) AddBroadcastInPlace(backend, cur, stageTimeEmb);
+        AddInPlace(backend, cur, _conv2.Forward(backend, cur, t));
+        AddInPlace(backend, cur, _ff3.Forward(backend, cur, t));
 
         Tensor normed = _norm.Forward(cur, t);
         cur.Dispose();
 
-        Tensor output = _bypass.Forward(src, normed, t);
+        Tensor output = _bypass.Forward(backend, src, normed, t);
         normed.Dispose();
         return output;
     }
@@ -131,45 +138,28 @@ internal sealed unsafe class ZipformerEncoderLayer
         return head0;
     }
 
-    private Tensor Copy(Tensor x, int t)
+    /// <summary>GPU-resident in-place residual add: <c>dst += src</c>, via <see cref="IBackend.GatedResidualLastDim"/>
+    /// with a constant ones gate (<c>dst = dst + 1·src</c>) — replaces a host <c>float*</c> loop that forced a
+    /// device→host sync on every sub-block call (was the dominant per-layer round-trip count).</summary>
+    private void AddInPlace(IBackend backend, Tensor dst, Tensor src)
     {
-        Tensor output = new(new TensorShape(1, t, _dim), DType.F32);
-        Buffer.MemoryCopy((float*)x.DataPointer, (float*)output.DataPointer,
-            (long)t * _dim * sizeof(float), (long)t * _dim * sizeof(float));
-        return output;
-    }
-
-    private Tensor AddBroadcast(Tensor x, Tensor bias, int t)
-    {
-        Tensor output = new(new TensorShape(1, t, _dim), DType.F32);
-        float* xp = (float*)x.DataPointer;
-        float* bp = (float*)bias.DataPointer;
-        float* op = (float*)output.DataPointer;
-        for (int i = 0; i < t; i++)
-        {
-            long off = (long)i * _dim;
-            for (int d = 0; d < _dim; d++) op[off + d] = xp[off + d] + bp[d];
-        }
-        return output;
-    }
-
-    private void AddBroadcastInPlace(Tensor x, Tensor bias, int t)
-    {
-        float* xp = (float*)x.DataPointer;
-        float* bp = (float*)bias.DataPointer;
-        for (int i = 0; i < t; i++)
-        {
-            long off = (long)i * _dim;
-            for (int d = 0; d < _dim; d++) xp[off + d] += bp[d];
-        }
-    }
-
-    private static void AddInPlace(Tensor dst, Tensor src, int t)
-    {
-        float* dp = (float*)dst.DataPointer;
-        float* sp = (float*)src.DataPointer;
-        long n = dst.ElementCount;
-        for (long i = 0; i < n; i++) dp[i] += sp[i];
+        backend.GatedResidualLastDim(dst, dst, src, OnesDim());
         src.Dispose();
+    }
+
+    /// <summary>GPU-resident in-place broadcast add: <c>x[i,:] += bias[:]</c> for every row, via
+    /// <see cref="IBackend.AffineBroadcastLastDim"/> with scale=1 (pure broadcast add).</summary>
+    private void AddBroadcastInPlace(IBackend backend, Tensor x, Tensor bias)
+        => backend.AffineBroadcastLastDim(x, x, OnesDim(), bias);
+
+    private Tensor OnesDim()
+    {
+        if (_onesDim is null)
+        {
+            _onesDim = new Tensor(new TensorShape(1, _dim), DType.F32);
+            float* p = (float*)_onesDim.DataPointer;
+            for (int i = 0; i < _dim; i++) p[i] = 1f;
+        }
+        return _onesDim;
     }
 }

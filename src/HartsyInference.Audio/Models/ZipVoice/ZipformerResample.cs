@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Whisper;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.ZipVoice;
@@ -19,20 +20,21 @@ internal sealed unsafe class ZipformerBypass
         => _scale = WhisperOps.EnsureF32(w[key]);
 
     /// <summary><paramref name="orig"/>/<paramref name="src"/> are <c>[1, T, dim]</c>. Returns a new
-    /// <c>[1, T, dim]</c> tensor (does not dispose inputs).</summary>
-    public Tensor Forward(Tensor orig, Tensor src, int t)
+    /// <c>[1, T, dim]</c> tensor (does not dispose inputs). GPU-resident: <c>diff = src + (-1)·orig</c>
+    /// (<see cref="IBackend.Scale"/> + <see cref="IBackend.Add"/>) then
+    /// <c>out = orig + bypass_scale·diff</c> (<see cref="IBackend.GatedResidualLastDim"/>) — replaces a host
+    /// <c>float*</c> loop.</summary>
+    public Tensor Forward(IBackend backend, Tensor orig, Tensor src, int t)
     {
+        Tensor negOrig = new(new TensorShape(1, t, _dim), DType.F32);
+        backend.Scale(negOrig, orig, -1f);
+        Tensor diff = new(new TensorShape(1, t, _dim), DType.F32);
+        backend.Add(diff, src, negOrig);
+        negOrig.Dispose();
+
         Tensor output = new(new TensorShape(1, t, _dim), DType.F32);
-        float* op = (float*)output.DataPointer;
-        float* origP = (float*)orig.DataPointer;
-        float* srcP = (float*)src.DataPointer;
-        float* scaleP = (float*)_scale!.DataPointer;
-        for (int i = 0; i < t; i++)
-        {
-            long off = (long)i * _dim;
-            for (int d = 0; d < _dim; d++)
-                op[off + d] = origP[off + d] + (srcP[off + d] - origP[off + d]) * scaleP[d];
-        }
+        backend.GatedResidualLastDim(output, orig, diff, _scale!);
+        diff.Dispose();
         return output;
     }
 
