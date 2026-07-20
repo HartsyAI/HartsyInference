@@ -9,11 +9,11 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Vision.Codec;
 
 namespace HartsyInference.Diffusion.Tests;

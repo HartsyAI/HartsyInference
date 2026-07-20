@@ -6,9 +6,9 @@ using HartsyInference.Audio.Models.Zonos;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.PyTorch;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Phonemizer.Espeak;
+using HartsyInference.ModelAssets.PyTorch;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Audio.Phonemizer.Espeak;
 using Xunit;
 using Xunit.Abstractions;
 

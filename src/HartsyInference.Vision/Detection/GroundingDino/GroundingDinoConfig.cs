@@ -1,4 +1,4 @@
-using HartsyInference.ModelHandler.TextEncoders.Bert;
+using HartsyInference.ModelAssets.TextEncoders.Bert;
 
 namespace HartsyInference.Vision.Detection.GroundingDino;
 

@@ -1,6 +1,6 @@
 using System.Linq;
 using System.Text;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Audio.Frontends;
 
@@ -23,9 +23,9 @@ public static class AudioTextFrontend
         if (!EmbeddedTokenizerResources.HasLlama3TokenizerJson)
         {
             throw new InvalidOperationException(
-                "The Llama-3 tokenizer.json is not embedded in HartsyInference.Tokenizers, so the Llama-family "
+                "The Llama-3 tokenizer.json is not embedded in HartsyInference.ModelAssets.Tokenizers, so the Llama-family "
                 + "audio front-ends (Orpheus, CSM, FishSpeech) can't tokenize text. Drop a Llama-3.x tokenizer.json "
-                + "in HartsyInference.Tokenizers/Resources/ as llama3_tokenizer.json, then rebuild.");
+                + "in HartsyInference.ModelAssets.Tokenizers/Resources/ as llama3_tokenizer.json, then rebuild.");
         }
         return _llama.Value;
     }
@@ -85,8 +85,8 @@ public static class AudioTextFrontend
         if (!EmbeddedTokenizerResources.HasQwen3TokenizerJson)
         {
             throw new InvalidOperationException(
-                "The Qwen tokenizer.json is not embedded in HartsyInference.Tokenizers. Drop a Qwen2.5/3 "
-                + "tokenizer.json in HartsyInference.Tokenizers/Resources/ as qwen3_tokenizer.json, then rebuild.");
+                "The Qwen tokenizer.json is not embedded in HartsyInference.ModelAssets.Tokenizers. Drop a Qwen2.5/3 "
+                + "tokenizer.json in HartsyInference.ModelAssets.Tokenizers/Resources/ as qwen3_tokenizer.json, then rebuild.");
         }
         return _qwen3.Value.EncodeOrdinary(text);
     }

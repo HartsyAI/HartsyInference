@@ -125,7 +125,7 @@ Check off an item only once it's independently re-verified at cut time, not just
 - [x] `LLM_DECODE_PERF_GRIND.md` and `QUANT_GEMM_PERF_PLAN.md` record every measured perf claim with a
       real number and a gate, not just "should be faster."
 - [x] `CHANGELOG.md` exists and is kept current per release.
-- [ ] **Gap**: no public-facing API reference/quickstart specifically for `HartsyInference.Server`'s HTTP
+- [ ] **Gap**: no public-facing API reference/quickstart specifically for `HartsyInference.API`'s HTTP
       API (the `/v1/chat/completions` shape, `response_format`, streaming) — currently only documented
       inline in code comments and this checklist family. Worth a short standalone doc before 1.0.0 since
       external consumers of the server won't read the engine's internal perf-grind docs.

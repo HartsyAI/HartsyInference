@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
-using MergedLoraStack = HartsyInference.ModelHandler.Lora.LoraStack;
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Features;
 

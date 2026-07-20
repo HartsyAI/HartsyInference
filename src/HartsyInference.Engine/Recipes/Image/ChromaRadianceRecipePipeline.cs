@@ -4,8 +4,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -34,8 +34,8 @@ public sealed class ChromaRadianceRecipePipeline : IRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps > 0 ? request.Steps : _config.DefaultSteps;
-        float cfgScale = request.CfgScale <= 0 ? _config.DefaultCfgScale : request.CfgScale;
+        int steps = request.Steps ?? _config.DefaultSteps;
+        float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
 
         // TODO(E-IMG-4): img2img/inpaint (request.Img2Img/Inpaint) is not yet mapped — text-to-image only.
 
@@ -52,7 +52,7 @@ public sealed class ChromaRadianceRecipePipeline : IRecipePipeline
             Height = request.Height,
             Steps = steps,
             CfgScale = cfgScale,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         Action<GenerationProgress> bridge = p =>

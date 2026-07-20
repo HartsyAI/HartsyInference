@@ -1,6 +1,6 @@
 # Matrix-Game 2.0 — Research Notes
 
-> Status: Complete (HF model card + GitHub source + paper + per-task configs captured; safetensors key dump still required) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.Interactive (Matrix-Game 2.0 pipeline, Phase 10)
+> Status: Complete (HF model card + GitHub source + paper + per-task configs captured; safetensors key dump still required) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.World (Matrix-Game 2.0 pipeline, Phase 10)
 > Source of truth: [SkyworkAI/Matrix-Game GitHub](https://github.com/SkyworkAI/Matrix-Game/tree/main/Matrix-Game-2), [HF `Skywork/Matrix-Game-2.0`](https://huggingface.co/Skywork/Matrix-Game-2.0), [arXiv 2508.13009](https://arxiv.org/abs/2508.13009)
 > License: **MIT** (confirmed on HF model card and on the Matrix-Game-2 GitHub README)
 > Related: future `MATRIX_GAME_3_ARCHITECTURE.md` (the 5B sibling), [`FLOW_MATCHING_AUDIO.md`](FLOW_MATCHING_AUDIO.md) (flow-matching scheduler background), [`VAE_ARCHITECTURE.md`](VAE_ARCHITECTURE.md), [`FLUX_ARCHITECTURE.md`](FLUX_ARCHITECTURE.md) (AdaLN modulation lineage)
@@ -15,7 +15,7 @@ Real-time streaming is achieved by **(a)** converting the bidirectional DiT into
 
 The VAE is the **Wan2.1 3D causal VAE** (16 latent channels, **8 × 8 spatial / 4 × temporal** compression, 508 MB). Input image conditioning is dual: the input image is **VAE-encoded** (concatenated with the noisy latent along the channel dim → `in_dim = 36`) **and** passed through a frozen **CLIP-ViT-H/14 XLM-RoBERTa** encoder (4.77 GB) for "visual context" that is consumed by the I2V cross-attention. Action conditioning is **deterministic** (no learned router): every other denoising step, current-frame mouse deltas pass through an MLP and self-attention (acting like RoPE'd cross-attention over the spatial token grid) and keyboard one-hots pass through MLP + cross-attention.
 
-For HartsyInference, Matrix-Game 2.0 is best treated as a **new `HartsyInference.Interactive` package built on top of a Wan2.1-family DiT backbone** that will be shared with Matrix-Game 3.0 once we add it. The same DiT, RoPE, AdaLN, action-module, KV-cache, and Wan VAE primitives are reusable across both — only the backbone weights (1.3B vs 5B), action-block coverage (15 vs 30 blocks), and resolution (352×640 vs 1280×720) change.
+For HartsyInference, Matrix-Game 2.0 is best treated as a **new `HartsyInference.World` package built on top of a Wan2.1-family DiT backbone** that will be shared with Matrix-Game 3.0 once we add it. The same DiT, RoPE, AdaLN, action-module, KV-cache, and Wan VAE primitives are reusable across both — only the backbone weights (1.3B vs 5B), action-block coverage (15 vs 30 blocks), and resolution (352×640 vs 1280×720) change.
 
 ## Detailed Findings
 
@@ -797,9 +797,9 @@ Source-of-truth files (canonical paths inside that subtree):
 
 ### How this maps to HartsyInference packages
 
-Matrix-Game 2.0 motivates a **new `HartsyInference.Interactive` NuGet package**. Suggested layout:
+Matrix-Game 2.0 motivates a **new `HartsyInference.World` NuGet package**. Suggested layout:
 
-- **`HartsyInference.Interactive`** (new) — adds:
+- **`HartsyInference.World`** (new) — adds:
   - `Models/MatrixGame2/MatrixGame2Config.cs`, `Models/MatrixGame2/CausalWanModel.cs`, `Models/MatrixGame2/CausalWanBlock.cs`, `Models/MatrixGame2/ActionModule.cs`.
   - `Pipelines/MatrixGame2Pipeline.cs` (offline `Bench_actions_*` driver).
   - `Pipelines/MatrixGame2StreamingPipeline.cs` (interactive driver with `IActionStream` interface).
@@ -811,7 +811,7 @@ Matrix-Game 2.0 motivates a **new `HartsyInference.Interactive` NuGet package**.
   - `Models/TextEncoders/OpenClipViTH14Image.cs` (image-only forward — text tower NOT needed).
   - `Schedulers/FlowMatchDmdScheduler.cs` — discrete-step Flow-Match with `warp_denoising_step` + `timestep_shift=5.0`. Reusable for any DMD-distilled flow model.
 
-- **`HartsyInference.ModelHandler`** (existing) — adds:
+- **`HartsyInference.ModelAssets`** (existing) — adds:
   - `CheckpointConverters/MatrixGame2CheckpointConverter.cs` — loads one of `base_distill / gta_keyboard2dim / templerun_7dim_onlykey .safetensors`, splits into per-block buckets, separates `action_model.*` from `self_attn.*` / `cross_attn.*` / `ffn.*`, handles the dual mouse-path/keyboard-path projections.
   - `CheckpointConverters/Wan21VaePthConverter.cs` (or recommend offline conversion to `.safetensors`).
   - `CheckpointConverters/OpenClipViTH14CheckpointConverter.cs` — parse the 4.77 GB `.pth`, take only the visual tower (~1.0 GB FP16).
@@ -894,7 +894,7 @@ Once Matrix-Game 3.0 lands:
 - Replace the 1.3B `CausalWanModel` with the 5B version (dim ≈ 3072, layers ≈ 30-ish, heads ≈ 24).
 - Action modules: same class, more blocks possibly.
 - Add: long-horizon memory retrieval module (camera-pose query → frozen memory bank K/V), frame self-correction loop (synthetic-frame re-injection during inference for drift correction).
-- Both Matrix-Game 2.0 and 3.0 can ship from the same `HartsyInference.Interactive` package with a model-card discriminator.
+- Both Matrix-Game 2.0 and 3.0 can ship from the same `HartsyInference.World` package with a model-card discriminator.
 
 ---
 

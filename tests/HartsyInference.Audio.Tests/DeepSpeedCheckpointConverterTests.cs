@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;

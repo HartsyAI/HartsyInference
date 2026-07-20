@@ -1,5 +1,5 @@
 using HartsyInference.LLM.ChatTemplates;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Generation;
 

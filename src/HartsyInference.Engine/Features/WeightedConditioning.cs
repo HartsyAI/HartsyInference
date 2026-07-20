@@ -3,7 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Utilities;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Features;
 

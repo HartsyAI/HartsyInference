@@ -12,23 +12,23 @@ public sealed record ImageRequest
     /// <summary>The negative prompt, or null/empty for none.</summary>
     public string? NegativePrompt { get; init; }
 
-    /// <summary>Output width in pixels.</summary>
-    public int Width { get; init; } = 1024;
+    /// <summary>Output width in pixels; null uses the family's native training width.</summary>
+    public int? Width { get; init; }
 
-    /// <summary>Output height in pixels.</summary>
-    public int Height { get; init; } = 1024;
+    /// <summary>Output height in pixels; null uses the family's native training height.</summary>
+    public int? Height { get; init; }
 
-    /// <summary>Number of denoising steps.</summary>
-    public int Steps { get; init; } = 20;
+    /// <summary>Number of denoising steps; null uses the family's officially recommended step count.</summary>
+    public int? Steps { get; init; }
 
-    /// <summary>Classifier-free guidance scale.</summary>
-    public float CfgScale { get; init; } = 7.5f;
+    /// <summary>Classifier-free guidance scale; null uses the family's officially recommended scale (1.0 for distilled models).</summary>
+    public float? CfgScale { get; init; }
 
     /// <summary>RNG seed; negative means a random seed is chosen per request.</summary>
     public long Seed { get; init; } = -1;
 
-    /// <summary>CLIP-skip: number of final text-encoder layers to skip (0 = none).</summary>
-    public int ClipSkip { get; init; }
+    /// <summary>CLIP-skip: number of final text-encoder layers to skip; null/0 = none.</summary>
+    public int? ClipSkip { get; init; }
 
     /// <summary>Sampler name (e.g. "euler", "dpmpp_2m"); null uses the recipe default.</summary>
     public string? Sampler { get; init; }

@@ -14,6 +14,11 @@ public interface IInferenceEngine : IDisposable
     /// <summary>Switches the compute backend, disposing every loaded model bound to the old device.</summary>
     void SetBackend(string selector);
 
+    /// <summary>Drops every loaded model across all modalities and returns their device memory, leaving the engine
+    /// usable — the next request reloads. For a host's "free memory" control; <see cref="IDisposable.Dispose"/> is the
+    /// full teardown that also releases the backend.</summary>
+    void FreeMemory();
+
     /// <summary>Whether a handler is wired for <paramref name="modality"/>.</summary>
     bool IsSupported(Modality modality);
 

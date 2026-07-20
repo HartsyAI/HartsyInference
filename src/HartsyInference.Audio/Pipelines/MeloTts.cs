@@ -1,11 +1,11 @@
 using HartsyInference.Audio.Cache;
-using HartsyInference.ModelHandler.TextEncoders.Bert;
+using HartsyInference.ModelAssets.TextEncoders.Bert;
 using HartsyInference.Audio.Models.MeloTts;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.PyTorch;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.PyTorch;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Audio.Pipelines;
 

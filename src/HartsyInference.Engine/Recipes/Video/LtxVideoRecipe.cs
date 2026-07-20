@@ -3,10 +3,12 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
+
+using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -27,6 +29,9 @@ public sealed class LtxVideoRecipe : IVideoRecipe
     public bool Matches(string familyId) =>
         string.Equals(familyId, "ltx-video", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "lightricks-ltx-video", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>LTX-Video's official sampling settings: 50 steps at guidance 3.0 (<c>LtxVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
+    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 3.0f };
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
@@ -64,7 +69,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
                     layersPerBlock: [5, 5, 5, 5], patchSize: 4, isCausal: false, timestepConditioned: true,
                     upsampleFactor: [2, 2, 2], upsampleResidual: [true, true, true])
                 : new LtxVideoVaeDecoder();
-            vae.LoadWeights(VideoRecipeUtils.CastWeights(conv.Vae, DType.F32));
+            vae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.Vae, DType.F32));
 
             // 13B fp8 weights stay fp8-resident (~13 GB); caching their F16 casts would roughly double VRAM and OOM a
             // 24 GB card — dequant transiently per GEMM instead (the verified 13B recipe, matching the Wan fp8 path).

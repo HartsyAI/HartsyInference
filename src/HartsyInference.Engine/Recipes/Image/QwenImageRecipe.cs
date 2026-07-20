@@ -5,10 +5,10 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.Gguf;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -20,6 +20,12 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "qwen-image", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Qwen-Image's official sampling settings: 50 steps at true-CFG 4.0, 1024x1024 (diffusers <c>QwenImagePipeline.__call__</c>, mirrored by <c>GenerationDefaults.QwenImage</c>).</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 4.0f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)

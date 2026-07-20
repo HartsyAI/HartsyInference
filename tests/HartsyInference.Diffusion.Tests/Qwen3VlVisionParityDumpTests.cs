@@ -5,7 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.TextEncoders;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Diffusion.Tests;
 

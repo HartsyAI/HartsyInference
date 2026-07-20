@@ -11,11 +11,11 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Diffusion.Tests", "tests\HartsyInference.Diffusion.Tests\HartsyInference.Diffusion.Tests.csproj", "{BC10C496-A15D-91B4-0A6D-BB0EEE842E2C}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Tokenizers.Tests", "tests\HartsyInference.Tokenizers.Tests\HartsyInference.Tokenizers.Tests.csproj", "{C041C900-86A7-F517-6913-B7571318AECA}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.ModelAssets.Tokenizers.Tests", "tests\HartsyInference.ModelAssets.Tokenizers.Tests\HartsyInference.ModelAssets.Tokenizers.Tests.csproj", "{C041C900-86A7-F517-6913-B7571318AECA}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Core.Tests", "tests\HartsyInference.Core.Tests\HartsyInference.Core.Tests.csproj", "{4A8BAD45-EE8C-E67D-9BE6-0DD13F8996D9}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.ModelHandler.Tests", "tests\HartsyInference.ModelHandler.Tests\HartsyInference.ModelHandler.Tests.csproj", "{5ACF7A0A-30CE-A852-336D-49D34749A5D9}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.ModelAssets.Tests", "tests\HartsyInference.ModelAssets.Tests\HartsyInference.ModelAssets.Tests.csproj", "{5ACF7A0A-30CE-A852-336D-49D34749A5D9}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Cpu.Tests", "tests\HartsyInference.Cpu.Tests\HartsyInference.Cpu.Tests.csproj", "{05D69375-EFFB-551A-8E33-CD3D8BF126AD}"
 EndProject
@@ -25,11 +25,9 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Video", "sr
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Cpu", "src\HartsyInference.Cpu\HartsyInference.Cpu.csproj", "{56742822-F1F6-FF87-7A91-418108FF6631}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Tokenizers", "src\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj", "{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.ModelAssets", "src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj", "{10FFB865-C42E-1E7F-5858-B658C530ABBD}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.ModelHandler", "src\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj", "{10FFB865-C42E-1E7F-5858-B658C530ABBD}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Server", "src\HartsyInference.Server\HartsyInference.Server.csproj", "{25F3485B-A8E5-2DC0-C3B4-528004166D84}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.API", "src\HartsyInference.API\HartsyInference.API.csproj", "{25F3485B-A8E5-2DC0-C3B4-528004166D84}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Cuda", "src\HartsyInference.Cuda\HartsyInference.Cuda.csproj", "{55268D49-3FA1-273F-4F0D-72743535A778}"
 EndProject
@@ -59,9 +57,9 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Vision.Test
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Video.Tests", "tests\HartsyInference.Video.Tests\HartsyInference.Video.Tests.csproj", "{DECE2786-0E37-406E-86B0-71A2352BE90A}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Interactive", "src\HartsyInference.Interactive\HartsyInference.Interactive.csproj", "{371E8334-2226-4A07-9AAA-03BA887E65C6}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.World", "src\HartsyInference.World\HartsyInference.World.csproj", "{371E8334-2226-4A07-9AAA-03BA887E65C6}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Interactive.Tests", "tests\HartsyInference.Interactive.Tests\HartsyInference.Interactive.Tests.csproj", "{34E7E1AF-8806-4607-93A9-37A0DDE74363}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.World.Tests", "tests\HartsyInference.World.Tests\HartsyInference.World.Tests.csproj", "{34E7E1AF-8806-4607-93A9-37A0DDE74363}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.ThreeD", "src\HartsyInference.ThreeD\HartsyInference.ThreeD.csproj", "{E37ED1BB-497B-404D-8105-D8396DCF806D}"
 EndProject
@@ -71,9 +69,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.LLM", "src\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.LLM.Tests", "tests\HartsyInference.LLM.Tests\HartsyInference.LLM.Tests.csproj", "{007AD313-81AD-4E77-A108-5BECB05820AD}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Phonemizer", "src\HartsyInference.Phonemizer\HartsyInference.Phonemizer.csproj", "{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Phonemizer.Tests", "tests\HartsyInference.Phonemizer.Tests\HartsyInference.Phonemizer.Tests.csproj", "{7142B6FA-B353-4E42-90A1-FF913552FE09}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Audio.Phonemizer.Tests", "tests\HartsyInference.Audio.Phonemizer.Tests\HartsyInference.Audio.Phonemizer.Tests.csproj", "{7142B6FA-B353-4E42-90A1-FF913552FE09}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Meta", "src\HartsyInference.Meta\HartsyInference.Meta.csproj", "{30CFFBF2-4ED4-4E2C-9805-7A8353B1EAFB}"
 EndProject
@@ -185,18 +181,6 @@ Global
 		{56742822-F1F6-FF87-7A91-418108FF6631}.Release|x64.Build.0 = Release|Any CPU
 		{56742822-F1F6-FF87-7A91-418108FF6631}.Release|x86.ActiveCfg = Release|Any CPU
 		{56742822-F1F6-FF87-7A91-418108FF6631}.Release|x86.Build.0 = Release|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Debug|x64.ActiveCfg = Debug|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Debug|x64.Build.0 = Debug|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Debug|x86.ActiveCfg = Debug|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Debug|x86.Build.0 = Debug|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Release|Any CPU.Build.0 = Release|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Release|x64.ActiveCfg = Release|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Release|x64.Build.0 = Release|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Release|x86.ActiveCfg = Release|Any CPU
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4}.Release|x86.Build.0 = Release|Any CPU
 		{10FFB865-C42E-1E7F-5858-B658C530ABBD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{10FFB865-C42E-1E7F-5858-B658C530ABBD}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{10FFB865-C42E-1E7F-5858-B658C530ABBD}.Debug|x64.ActiveCfg = Debug|Any CPU
@@ -461,18 +445,6 @@ Global
 		{007AD313-81AD-4E77-A108-5BECB05820AD}.Release|x64.Build.0 = Release|Any CPU
 		{007AD313-81AD-4E77-A108-5BECB05820AD}.Release|x86.ActiveCfg = Release|Any CPU
 		{007AD313-81AD-4E77-A108-5BECB05820AD}.Release|x86.Build.0 = Release|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Debug|x64.ActiveCfg = Debug|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Debug|x64.Build.0 = Debug|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Debug|x86.ActiveCfg = Debug|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Debug|x86.Build.0 = Debug|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Release|Any CPU.Build.0 = Release|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Release|x64.ActiveCfg = Release|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Release|x64.Build.0 = Release|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Release|x86.ActiveCfg = Release|Any CPU
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7}.Release|x86.Build.0 = Release|Any CPU
 		{7142B6FA-B353-4E42-90A1-FF913552FE09}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{7142B6FA-B353-4E42-90A1-FF913552FE09}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7142B6FA-B353-4E42-90A1-FF913552FE09}.Debug|x64.ActiveCfg = Debug|Any CPU
@@ -522,7 +494,6 @@ Global
 		{95E633CD-EC46-5DC9-564D-74A563E74CCD} = {66320409-64EC-F7C5-3DEF-65E7510DAAD1}
 		{388005E3-A169-747D-D1B4-DAD41A4E806F} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{56742822-F1F6-FF87-7A91-418108FF6631} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
-		{33EA021E-CFD9-C1B6-47A0-C13A7FEA42A4} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{10FFB865-C42E-1E7F-5858-B658C530ABBD} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{25F3485B-A8E5-2DC0-C3B4-528004166D84} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{55268D49-3FA1-273F-4F0D-72743535A778} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
@@ -545,7 +516,6 @@ Global
 		{61B98FD9-3066-49D6-850D-A1C5BAA584D4} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{6320AD8B-AC6F-4573-8B6B-4986428BCEF1} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{007AD313-81AD-4E77-A108-5BECB05820AD} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
-		{4DA2DB7E-03F4-4EDC-82C3-5A15AC0F5DC7} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{7142B6FA-B353-4E42-90A1-FF913552FE09} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{30CFFBF2-4ED4-4E2C-9805-7A8353B1EAFB} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{C810C2E5-62EF-4291-8C34-65D9570B1429} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}

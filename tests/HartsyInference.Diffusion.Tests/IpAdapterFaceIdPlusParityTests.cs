@@ -2,7 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Adapters;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 using Xunit;
 using Xunit.Abstractions;

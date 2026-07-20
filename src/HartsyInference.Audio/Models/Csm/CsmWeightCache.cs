@@ -1,6 +1,6 @@
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.Gguf;
+using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.Audio.Models.Csm;
 

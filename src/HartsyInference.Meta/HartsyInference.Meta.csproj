@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <!-- Meta-package: no source, no compiled output of its own — it exists purely to declare
-         dependencies on all 14 modality/backend packages so consumers can add one reference
+         dependencies on all 12 modality/backend packages so consumers can add one reference
          instead of enumerating every sub-package. -->
     <PackageId>HartsyInference</PackageId>
     <AssemblyName>HartsyInference.Meta</AssemblyName>

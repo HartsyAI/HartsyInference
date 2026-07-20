@@ -171,7 +171,7 @@ public static class TestPaths
     }
 
     /// <summary>HunyuanVideo (Tencent 13B T2V) paths. The DiT single-file is the Comfy-Org repacked bf16 (original
-    /// Tencent naming — <see cref="HartsyInference.ModelHandler.CheckpointConverters.HunyuanVideoCheckpointConverter"/>
+    /// Tencent naming — <see cref="HartsyInference.ModelAssets.CheckpointConverters.HunyuanVideoCheckpointConverter"/>
     /// remaps to the hybrid DiT layout); the VAE is the HunyuanVideo 3D VAE; the primary text encoder is
     /// LLaVA-Llama-3-8B (fp8 scaled) run via <c>LlamaStyleEncoder</c>(Llama31_8B) and CLIP-L for the pooled vector.
     /// The Llama-3 + CLIP tokenizers are the embedded/standalone assets.</summary>
@@ -203,7 +203,7 @@ public static class TestPaths
 
     /// <summary>Krea 2 (12.9B single-stream MMDiT). fp8_scaled checkpoints staged as
     /// <c>Krea2/{Base,Turbo}/</c> each with the transformer file in root + <c>text_encoder/</c> (Qwen3-VL-4B) +
-    /// <c>vae/</c> (Qwen-Image VAE) — the dir layout <see cref="HartsyInference.ModelHandler.CheckpointConverters.Krea2CheckpointConverter"/> expects (pass the dir as rootPath).</summary>
+    /// <c>vae/</c> (Qwen-Image VAE) — the dir layout <see cref="HartsyInference.ModelAssets.CheckpointConverters.Krea2CheckpointConverter"/> expects (pass the dir as rootPath).</summary>
     public static class Krea2
     {
         public static string BaseDir  => Resolve("KREA2_BASE_DIR",  Path.Combine(ModelsDir, "Stable-Diffusion", "Krea2", "Base"));
@@ -212,7 +212,7 @@ public static class TestPaths
 
     /// <summary>Boogu-Image 0.1 (10B OmniGen2/Lumina lineage). Comfy fp8_scaled, staged as <c>Boogu/{Base,Turbo,Edit}/</c>
     /// each with <c>transformer/</c> (fp8) + <c>mllm/</c> (Qwen3-VL-8B) + <c>vae/</c> (Flux VAE) — the layout
-    /// <see cref="HartsyInference.ModelHandler.CheckpointConverters.BooguImageCheckpointConverter"/> expects.</summary>
+    /// <see cref="HartsyInference.ModelAssets.CheckpointConverters.BooguImageCheckpointConverter"/> expects.</summary>
     public static class Boogu
     {
         public static string BaseDir  => Resolve("BOOGU_BASE_DIR",  Path.Combine(ModelsDir, "Stable-Diffusion", "Boogu", "Base"));

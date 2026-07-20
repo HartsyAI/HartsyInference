@@ -3,8 +3,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -38,16 +38,7 @@ public sealed class FLiteRecipePipeline : IRecipePipeline
         int[]? negTokens = string.IsNullOrWhiteSpace(negative) ? null : _tokenizer.Encode(negative);
         int[]? negMask = negTokens is null ? null : promptMask;
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = request.Steps <= 0 ? null : request.Steps,
-            CfgScale = request.CfgScale <= 0 ? null : (float?)request.CfgScale,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
-        };
+        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative);
 
         Action<GenerationProgress> bridge = p =>
         {
@@ -69,7 +60,7 @@ public sealed class FLiteRecipePipeline : IRecipePipeline
                 ["arch"] = "f-lite",
                 ["size"] = $"{width}x{height}",
                 ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
-                ["steps"] = request.Steps.ToString(CultureInfo.InvariantCulture),
+                ["steps"] = (request.Steps ?? FLiteRecipe.FamilyDefaults.Steps).ToString(CultureInfo.InvariantCulture),
             },
         };
     }

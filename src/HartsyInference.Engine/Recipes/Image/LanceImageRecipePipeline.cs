@@ -4,8 +4,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -37,10 +37,9 @@ public sealed class LanceImageRecipePipeline : IRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps > 0 ? request.Steps : _config.NumTimesteps;
-        float cfgScale = request.CfgScale <= 0 ? _config.CfgTextScale : request.CfgScale;
-        int width = request.Width;
-        int height = request.Height;
+        int steps = request.Steps ?? _config.NumTimesteps;
+        float cfgScale = request.CfgScale ?? _config.CfgTextScale;
+        (int width, int height) = RecipeRequestMapper.Size(request);
         if (width % SizeMultiple != 0 || height % SizeMultiple != 0)
         {
             int fixedW = Math.Max(SizeMultiple, width / SizeMultiple * SizeMultiple);
@@ -64,7 +63,7 @@ public sealed class LanceImageRecipePipeline : IRecipePipeline
             Height = height,
             Steps = steps,
             CfgScale = cfgScale,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         Action<GenerationProgress> bridge = p =>

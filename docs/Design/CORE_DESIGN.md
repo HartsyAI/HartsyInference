@@ -24,7 +24,7 @@ Pure C# with PTX can reach near-native CUDA performance; HartsyInference applies
 **Non-goals**
 
 - **A first-party UI / web app.** SwarmUI is the front-end; we build the backend for it.
-- **An OpenAI-compatible REST server as a *product*.** SwarmUI is the recommended surface. `HartsyInference.Server` does exist and works (OpenAI-shaped `/v1/chat/completions` with continuous batching + paged KV cache, `/v1/images/generations`, model management), but it ships as a runnable sample (`IsPackable=false`), not a supported/published product.
+- **An OpenAI-compatible REST server as a *product*.** SwarmUI is the recommended surface. `HartsyInference.API` does exist and works (OpenAI-shaped `/v1/chat/completions` with continuous batching + paged KV cache, `/v1/images/generations`, model management), but it ships as a runnable sample (`IsPackable=false`), not a supported/published product.
 - **A dependency on dotLLM.** LLM text generation is native in `HartsyInference.LLM`; [`../Research/DOTLLM_ARCHITECTURE.md`](../Research/DOTLLM_ARCHITECTURE.md) is retained only as a historical study that informed the native design.
 - **Training / fine-tuning.** Inference engine only.
 
@@ -119,11 +119,11 @@ authority.
 - **Core engine** — three backends behind one `IBackend` (CUDA PTX+cuBLAS, Vulkan SPIR-V, CPU AVX2/512/NEON); eager execution; direct `.safetensors`/`.gguf`/`.pt`/`.ckpt` loading incl. sharded + diffusers layouts with architecture auto-detection; GGUF + block-scaled (MXFP4/8, NVFP4) quantization with fused dequant/GEMV; HuggingFace auto-download; LoRA.
 - **LLM text generation (`HartsyInference.LLM`)** — native config-driven decoder transformer (Qwen2/Qwen3, Llama-3.x, Mistral, …) + GGUF; device-resident KV cache, sampler chain, chat templates; also powers diffusion/audio text encoders; fused Q4_K/Q6_K/Q8_0 decode + quantized `lm_head` + split-K flash-decode.
 - **Image (`HartsyInference.Diffusion`)** — UNet (SD1.5, SDXL+Refiner, inpaint) and DiT/MMDiT/NextDiT (Flux.1/.2, Chroma/Radiance, SD3, Qwen-Image, HunyuanImage, HiDream, AuraFlow, Lumina 2, ERNIE-Image, Kandinsky 5, OmniGen 2, Ideogram 4, …); t2i/i2i/inpaint + tiled VAE; text encoders CLIP/T5/UMT5/Pile-T5/Gemma-2/Qwen2.5-VL/Qwen3; full sampler set; prompt weighting/BREAK/scheduling/regional/textual-inversion/clip-skip; ControlNet + IP-Adapter loaders.
-- **Audio (`HartsyInference.Audio`)** — STT (Whisper tiny→large-v3, Moonshine); TTS (Kokoro, StyleTTS2, Bark, Spark-TTS, CosyVoice, VibeVoice, Piper/VITS, MeloTTS, F5-TTS cloning, …); music (ACE-Step, MusicGen, YuE); codecs (Vocos, EnCodec, DAC, SNAC, Mimi, WavTokenizer, BiCodec, XCodec, Oobleck); pure-C# DSP (STFT/mel/FFT, HiFi-GAN vocoders, streaming); G2P via `HartsyInference.Phonemizer` (pure-C# espeak-ng port).
+- **Audio (`HartsyInference.Audio`)** — STT (Whisper tiny→large-v3, Moonshine); TTS (Kokoro, StyleTTS2, Bark, Spark-TTS, CosyVoice, VibeVoice, Piper/VITS, MeloTTS, F5-TTS cloning, …); music (ACE-Step, MusicGen, YuE); codecs (Vocos, EnCodec, DAC, SNAC, Mimi, WavTokenizer, BiCodec, XCodec, Oobleck); pure-C# DSP (STFT/mel/FFT, HiFi-GAN vocoders, streaming); G2P via `HartsyInference.Audio.Phonemizer` (pure-C# espeak-ng port).
 - **Vision (`HartsyInference.Vision`)** — embeddings (CLIP ViT-L/H/bigG, SigLIP/2, DINOv2/3); detection (YOLO8/11); segmentation (SAM/2/2.1, CLIPSeg); RetinaFace; PNG codec helpers.
 - **Video (`HartsyInference.Video`)** — t2v/i2v (LTX-Video, Wan 2.x T2V+I2V, Lance, Kandinsky 5 Video); shared CausalConv3d + Wan-family VAE with streaming + N-axis RoPE; ffmpeg muxing via SwarmUI.
 - **3D (`HartsyInference.ThreeD`)** — image/text→mesh (TripoSR, Hunyuan3D-2); marching cubes + glTF/OBJ/PLY export.
-- **Interactive / world (`HartsyInference.Interactive`)** — real-time action-conditioned generation (Hunyuan-GameCraft, Matrix-Game 2.0/3.0, Oasis); `IInteractiveSession` with background compute, action/camera/FOV memory.
+- **Interactive / world (`HartsyInference.World`)** — real-time action-conditioned generation (Hunyuan-GameCraft, Matrix-Game 2.0/3.0, Oasis); `IInteractiveSession` with background compute, action/camera/FOV memory.
 
 ## Design Documents Index
 

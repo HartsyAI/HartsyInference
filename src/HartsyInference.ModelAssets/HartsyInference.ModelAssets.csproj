@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.ModelAssets</PackageId>
+    <Description>Everything you load off disk to make a model, for HartsyInference — weight containers (SafeTensors, GGUF, PyTorch pickle, ONNX), quantization codecs (NF4, MXFP4, MXFP8, NVFP4, BlockScale), checkpoint converters, LoRA, the architecture registry, and tokenizers.</Description>
+    <RootNamespace>HartsyInference.ModelAssets</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.Tokenizers" />
+  </ItemGroup>
+
+  <!-- Embedded canonical tokenizer vocabularies. ~11 MB total (uncompressed); the
+       assembly winds up ~12 MB. This is the price of being able to spin up a tokenizer
+       without making the user hunt down vocab/merges/spiece files separately, the way
+       Python's `transformers` library does by bundling them inside its wheel.
+
+       LogicalName flattens the path so resource lookups are stable across folder moves. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Tokenizers\Resources\clip_vocab.json"   LogicalName="HartsyInference.ModelAssets.Tokenizers.Resources.clip_vocab.json" />
+    <EmbeddedResource Include="Tokenizers\Resources\clip_merges.txt"   LogicalName="HartsyInference.ModelAssets.Tokenizers.Resources.clip_merges.txt" />
+    <EmbeddedResource Include="Tokenizers\Resources\t5_spiece.model"   LogicalName="HartsyInference.ModelAssets.Tokenizers.Resources.t5_spiece.model" />
+    <EmbeddedResource Include="Tokenizers\Resources\umt5_spiece.model" LogicalName="HartsyInference.ModelAssets.Tokenizers.Resources.umt5_spiece.model" />
+    <EmbeddedResource Include="Tokenizers\Resources\qwen3_vocab.json"  LogicalName="HartsyInference.ModelAssets.Tokenizers.Resources.qwen3_vocab.json" />
+    <EmbeddedResource Include="Tokenizers\Resources\qwen3_merges.txt"  LogicalName="HartsyInference.ModelAssets.Tokenizers.Resources.qwen3_merges.txt" />
+    <!-- Chatterbox text tokenizer.json (~25 KB, plain-char BPE, vocab 704). Small enough to always embed so
+         Chatterbox TTS is self-contained (the user supplies only the model weights). -->
+    <EmbeddedResource Include="Tokenizers\Resources\chatterbox_tokenizer.json" LogicalName="HartsyInference.ModelAssets.Tokenizers.Resources.chatterbox_tokenizer.json" />
+  </ItemGroup>
+
+  <!-- Llama-3.1 tokenizer assets (HiDream's fourth text encoder). These ship separately from the
+       source tree (vocab.json is ~5 MB) and are pulled in only when present, so a fresh checkout
+       still compiles. To enable HiDream: extract vocab.json + merges.txt from the Llama-3.1
+       tokenizer.json and drop them in Tokenizers/Resources/ as llama3_vocab.json + llama3_merges.txt,
+       then rebuild. EmbeddedTokenizerResources.HasLlama3Assets reports whether they were embedded. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Tokenizers\Resources\llama3_vocab.json"  LogicalName="HartsyInference.ModelAssets.Tokenizers.Resources.llama3_vocab.json"  Condition="Exists('Tokenizers\Resources\llama3_vocab.json')" />
+    <EmbeddedResource Include="Tokenizers\Resources\llama3_merges.txt"  LogicalName="HartsyInference.ModelAssets.Tokenizers.Resources.llama3_merges.txt"  Condition="Exists('Tokenizers\Resources\llama3_merges.txt')" />
+  </ItemGroup>
+
+  <!-- Canonical Llama-3 tokenizer.json (~17 MB), the single artifact the Llama-3.x repos ship. Consumed by
+       HfTokenizerJson to build the byte-level BPE core directly (Orpheus / CSM audio front-ends), so no manual
+       vocab.json + merges.txt extraction is needed. Conditional so a checkout without the asset still compiles;
+       EmbeddedTokenizerResources.HasLlama3TokenizerJson reports whether it was embedded. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Tokenizers\Resources\llama3_tokenizer.json" LogicalName="HartsyInference.ModelAssets.Tokenizers.Resources.llama3_tokenizer.json" Condition="Exists('Tokenizers\Resources\llama3_tokenizer.json')" />
+  </ItemGroup>
+
+  <!-- Canonical Qwen2.5/3 tokenizer.json (~11 MB). Consumed via HfTokenizerJson so the family split regex
+       reproduces HF ids exactly (the vocab+merges two-file form misses merges like ":\n\n" and "/A").
+       Used by the ACE-Step 1.5 text/lyric conditioning. Conditional so a checkout without it still compiles. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Tokenizers\Resources\qwen3_tokenizer.json" LogicalName="HartsyInference.ModelAssets.Tokenizers.Resources.qwen3_tokenizer.json" Condition="Exists('Tokenizers\Resources\qwen3_tokenizer.json')" />
+  </ItemGroup>
+
+</Project>

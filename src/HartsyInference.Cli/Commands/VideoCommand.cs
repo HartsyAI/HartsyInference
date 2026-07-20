@@ -63,10 +63,15 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Number of frames ((n-1) divisible by 8).")]
         public int Frames { get; init; } = 25;
 
-        /// <summary>Denoising steps.</summary>
+        /// <summary>Denoising steps; unset uses the family's officially recommended count.</summary>
         [CommandOption("--steps")]
-        [Description("Denoising steps.")]
-        public int Steps { get; init; } = 30;
+        [Description("Denoising steps (default: the model family's recommended count).")]
+        public int? Steps { get; init; }
+
+        /// <summary>Guidance scale; unset uses the family's officially recommended scale.</summary>
+        [CommandOption("--cfg")]
+        [Description("Guidance scale (default: the model family's recommended scale).")]
+        public float? Cfg { get; init; }
 
         /// <summary>Frames per second for playback naming.</summary>
         [CommandOption("--fps")]
@@ -109,7 +114,14 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         parameters.Put("width", settings.Width.ToString(CultureInfo.InvariantCulture));
         parameters.Put("height", settings.Height.ToString(CultureInfo.InvariantCulture));
         parameters.Put("frames", settings.Frames.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
+        if (settings.Steps is int videoSteps)
+        {
+            parameters.Put("steps", videoSteps.ToString(CultureInfo.InvariantCulture));
+        }
+        if (settings.Cfg is float videoCfg)
+        {
+            parameters.Put("cfg", videoCfg.ToString(CultureInfo.InvariantCulture));
+        }
         parameters.Put("fps", settings.Fps.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 

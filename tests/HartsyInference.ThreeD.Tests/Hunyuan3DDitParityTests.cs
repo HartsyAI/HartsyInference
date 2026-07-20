@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ThreeD.Models.Hunyuan3D;
 using Xunit;
 using Xunit.Abstractions;

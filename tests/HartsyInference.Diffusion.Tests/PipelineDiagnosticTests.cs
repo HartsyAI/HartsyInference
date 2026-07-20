@@ -8,9 +8,9 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Diffusion.Tests;
 

@@ -3,7 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;

@@ -4,7 +4,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Codecs;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.Video.Tokenizers;
 
 namespace HartsyInference.Video.Tests;

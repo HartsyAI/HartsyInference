@@ -1,7 +1,7 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
-using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;

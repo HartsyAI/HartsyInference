@@ -41,7 +41,7 @@ DotLLM.Telemetry       ← Performance counters
 
 Source: [dotLLM solution structure](https://github.com/kkokosa/dotLLM)
 
-**HartsyInference adoption:** Mirror this exact layering: `HartsyInference.Core` → `HartsyInference.Cpu`/`HartsyInference.Cuda` → `HartsyInference.Diffusion`/`Audio`/`Vision` → `HartsyInference.Server`.
+**HartsyInference adoption:** Mirror this exact layering: `HartsyInference.Core` → `HartsyInference.Cpu`/`HartsyInference.Cuda` → `HartsyInference.Diffusion`/`Audio`/`Vision` → `HartsyInference.API`.
 
 ### Dual Tensor Types: ITensor + TensorRef
 

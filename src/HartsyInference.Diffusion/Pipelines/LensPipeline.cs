@@ -60,7 +60,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
     /// the encoder's GPU weights after the encode pass so the DiT has maximum VRAM available — same
     /// pattern as <see cref="Flux2Pipeline"/> / <see cref="Sd3Pipeline"/>.</summary>
     /// <param name="positiveTokenIds">Chat-templated tokens for the positive prompt (rendered by
-    /// <see cref="HartsyInference.Tokenizers.GptOssTokenizer.BuildChatInputs"/>).</param>
+    /// <see cref="HartsyInference.ModelAssets.Tokenizers.GptOssTokenizer.BuildChatInputs"/>).</param>
     /// <param name="negativeTokenIds">Chat-templated tokens for the negative prompt. Required when
     /// <c>request.CfgScale &gt; 1.0</c>; pass <c>null</c> when CFG is disabled (Lens-Turbo).</param>
     /// <param name="request">Generation parameters.</param>

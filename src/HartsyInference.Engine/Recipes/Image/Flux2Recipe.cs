@@ -5,9 +5,9 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.HuggingFace;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -23,6 +23,15 @@ public sealed class Flux2Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Flux.2 Dev's official sampling settings: 50 steps at guidance 4.0, 1024x1024 (<c>GenerationDefaults.Flux2</c>); the distilled Klein variants narrow this via <see cref="Flux2RecipePipeline.VariantDefaults"/>.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 4.0f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
+
+    /// <summary>Flux.2 Klein's sampling settings: 10 steps at guidance 4.0 — the Klein checkpoints are CFG-distilled few-step models, so they carry no guidance embedding.</summary>
+    public static ImageDefaults KleinDefaults { get; } = new ImageDefaults { Steps = 10, CfgScale = 4.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)

@@ -1,5 +1,5 @@
 using HartsyInference.Diffusion.Models.Vae;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;

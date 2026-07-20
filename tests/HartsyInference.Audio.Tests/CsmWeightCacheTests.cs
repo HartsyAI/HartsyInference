@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using HartsyInference.Audio.Models.Csm;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.Gguf;
+using HartsyInference.ModelAssets.Gguf;
 using Xunit;
 using Xunit.Abstractions;
 

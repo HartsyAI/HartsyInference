@@ -4,7 +4,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
-using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -60,7 +60,7 @@ public unsafe class AceStep15DitParityTests
 
         CpuBackend backend = new();
         AceStep15Config cfg = new();
-        (Dictionary<string, Tensor> weights, HartsyInference.ModelHandler.SafeTensors.SafeTensorsLoader loader) =
+        (Dictionary<string, Tensor> weights, HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader loader) =
             AceStepCheckpointConverter.LoadModel15(ckpt, castToF32: true);
         AceStep15Dit dit = new(cfg); dit.LoadWeights(weights);
         AceStep15ConditionEncoder encoder = new(cfg); encoder.LoadWeights(weights);

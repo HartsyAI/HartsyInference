@@ -69,7 +69,7 @@ Three states per type:
 
 **Why are the IQ-types codec-pending?** The i-quant family uses 256-byte / 512-byte importance-weighted lookup tables baked into ggml. Reading them requires embedding those tables verbatim. Low-priority for diffusion since they're rare for image models; common only for LLM Q1_S / IQ2_* extreme-compression variants.
 
-The codecs not yet implemented all hit "codec not registered" in the registry — explicit error, not silent corruption. Adding one is mechanical: drop a `Codec_<Type>.cs` in `src/HartsyInference.ModelHandler/Gguf/Codecs/` and register it in `GgufCodecRegistry.BuildRegistry`.
+The codecs not yet implemented all hit "codec not registered" in the registry — explicit error, not silent corruption. Adding one is mechanical: drop a `Codec_<Type>.cs` in `src/HartsyInference.ModelAssets/Gguf/Codecs/` and register it in `GgufCodecRegistry.BuildRegistry`.
 
 ### Architecture coverage (key mappers)
 
@@ -101,21 +101,21 @@ Offline utility that quantizes a HartsyInference model to a GGUF file. Mirrors l
 
 ### Files shipped (~900 lines)
 
-- [`GgufWriter.cs`](../../src/HartsyInference.ModelHandler/Gguf/GgufWriter.cs) — header + descriptor + tensor data emission. Inverse of `GgufLoader`. Two-pass design: register tensors → `Flush()` writes header + descriptor table + zero-padded data section. Includes inverse `MapDTypeToGgufId` covering every registered DType.
-- [`GgufQuantizer.cs`](../../src/HartsyInference.ModelHandler/Gguf/GgufQuantizer.cs) — orchestrator. `ConvertSafetensorsToGguf(input, output, policy, architecture)` for the file-to-file path; `ConvertDictionaryToGguf` for the dict-to-file path. Returns `GgufQuantizationReport` with per-DType counts.
-- [`GgufQuantPolicies.cs`](../../src/HartsyInference.ModelHandler/Gguf/GgufQuantPolicies.cs) — predefined mix policies that mirror llama.cpp's `LLAMA_FTYPE_*`:
+- [`GgufWriter.cs`](../../src/HartsyInference.ModelAssets/Gguf/GgufWriter.cs) — header + descriptor + tensor data emission. Inverse of `GgufLoader`. Two-pass design: register tensors → `Flush()` writes header + descriptor table + zero-padded data section. Includes inverse `MapDTypeToGgufId` covering every registered DType.
+- [`GgufQuantizer.cs`](../../src/HartsyInference.ModelAssets/Gguf/GgufQuantizer.cs) — orchestrator. `ConvertSafetensorsToGguf(input, output, policy, architecture)` for the file-to-file path; `ConvertDictionaryToGguf` for the dict-to-file path. Returns `GgufQuantizationReport` with per-DType counts.
+- [`GgufQuantPolicies.cs`](../../src/HartsyInference.ModelAssets/Gguf/GgufQuantPolicies.cs) — predefined mix policies that mirror llama.cpp's `LLAMA_FTYPE_*`:
   - `Q8_0` — uniform Q8_0 backbone, F16 norms/biases (~50% of F16 size)
   - `Q4_K_S` — uniform Q4_K, F16 norms (~25% of F16, fastest, lowest fidelity)
   - `Q4_K_M` — Q4_K backbone + Q6_K for V/output projections (~30% of F16, popular default)
   - `Q5_K_M` — Q5_K backbone + Q6_K for V/output (~37% of F16)
   - `Q6_K` — uniform Q6_K, F16 norms (~44% of F16, near-lossless)
 - Reverse codec direction (`QuantizeFromF32`) implemented for **Q8_0, Q4_K, Q5_K, Q6_K** — covers every dtype the policies use. Uses simplified `MakeQkx2Quants` (initial pass, no iterative refinement; ~5% PPL gap to canonical ggml output).
-- Shared K-quant helpers in [`Codecs/QkxQuantizer.cs`](../../src/HartsyInference.ModelHandler/Gguf/Codecs/QkxQuantizer.cs): `MakeQkx2Quants`, `MakeSymmetricScale`, `PackScaleMinK4` (inverse of `GetScaleMinK4`).
+- Shared K-quant helpers in [`Codecs/QkxQuantizer.cs`](../../src/HartsyInference.ModelAssets/Gguf/Codecs/QkxQuantizer.cs): `MakeQkx2Quants`, `MakeSymmetricScale`, `PackScaleMinK4` (inverse of `GetScaleMinK4`).
 - CLI: [`samples/ConvertSafetensorsToGguf/Program.cs`](../../samples/ConvertSafetensorsToGguf/Program.cs). Usage: `convert-safetensors-to-gguf input.safetensors output.gguf q4_k_m flux`.
-- Round-trip tests in [`GgufQuantizerTests.cs`](../../tests/HartsyInference.ModelHandler.Tests/GgufQuantizerTests.cs) — 5 tests covering Q8_0 / Q4_K_M / Q5_K_M end-to-end (dict → GGUF → loader → dequantize) with RMSE budgets verified against llama.cpp's documented quality deltas.
+- Round-trip tests in [`GgufQuantizerTests.cs`](../../tests/HartsyInference.ModelAssets.Tests/GgufQuantizerTests.cs) — 5 tests covering Q8_0 / Q4_K_M / Q5_K_M end-to-end (dict → GGUF → loader → dequantize) with RMSE budgets verified against llama.cpp's documented quality deltas.
 
 ### Bug fix surfaced during Phase C
-The Q6_K dequantizer had a hardcoded scale-index pattern (used `scH[0/2/4/6]` regardless of element position) that masked itself in the all-uniform-scale unit test. Round-trip testing through the new quantize path uncovered it: ggml's canonical `dequantize_row_q6_K` uses `is = l/16` so scale indices alternate between `scH[0..6]` and `scH[1..7]` per 16-element half. Now fixed in [`Codec_Q6_K.cs`](../../src/HartsyInference.ModelHandler/Gguf/Codecs/Codec_Q6_K.cs).
+The Q6_K dequantizer had a hardcoded scale-index pattern (used `scH[0/2/4/6]` regardless of element position) that masked itself in the all-uniform-scale unit test. Round-trip testing through the new quantize path uncovered it: ggml's canonical `dequantize_row_q6_K` uses `is = l/16` so scale indices alternate between `scH[0..6]` and `scH[1..7]` per 16-element half. Now fixed in [`Codec_Q6_K.cs`](../../src/HartsyInference.ModelAssets/Gguf/Codecs/Codec_Q6_K.cs).
 
 ### Quality vs canonical ggml
 Round-trip RMSE on uniform-noise data:
@@ -200,12 +200,12 @@ To run end-to-end on this hardware: 64 GB host or run outside the constrained cg
    public static readonly DType MyNewQuant = new("MY_NEW_QUANT", 0, true, blockBytes, blockElems);
    ```
 
-2. **Add the GGUF type ID mapping** in `src/HartsyInference.ModelHandler/Gguf/GgufLoader.cs:MapGgufType`:
+2. **Add the GGUF type ID mapping** in `src/HartsyInference.ModelAssets/Gguf/GgufLoader.cs:MapGgufType`:
    ```csharp
    42 => DType.MyNewQuant,
    ```
 
-3. **Implement the codec** at `src/HartsyInference.ModelHandler/Gguf/Codecs/Codec_MyNewQuant.cs`:
+3. **Implement the codec** at `src/HartsyInference.ModelAssets/Gguf/Codecs/Codec_MyNewQuant.cs`:
    ```csharp
    public sealed unsafe class Codec_MyNewQuant : GgufCodecBase
    {
@@ -219,11 +219,11 @@ To run end-to-end on this hardware: 64 GB host or run outside the constrained cg
    Register(r, new Codec_MyNewQuant());
    ```
 
-5. **Add a round-trip test** in `tests/HartsyInference.ModelHandler.Tests/GgufCodecRegistryTests.cs` with hand-built canonical block bytes verified against `ggml-quants.c`.
+5. **Add a round-trip test** in `tests/HartsyInference.ModelAssets.Tests/GgufCodecRegistryTests.cs` with hand-built canonical block bytes verified against `ggml-quants.c`.
 
 ## Adding a new architecture key mapper
 
-1. **Implement** at `src/HartsyInference.ModelHandler/Gguf/KeyMappers/MyArchKeyMapper.cs`:
+1. **Implement** at `src/HartsyInference.ModelAssets/Gguf/KeyMappers/MyArchKeyMapper.cs`:
    ```csharp
    public sealed class MyArchKeyMapper : IGgufKeyMapper
    {
@@ -238,6 +238,6 @@ To run end-to-end on this hardware: 64 GB host or run outside the constrained cg
    Register(r, new MyArchKeyMapper());
    ```
 
-3. **Add detection tests** in `tests/HartsyInference.ModelHandler.Tests/GgufKeyMapperTests.cs`.
+3. **Add detection tests** in `tests/HartsyInference.ModelAssets.Tests/GgufKeyMapperTests.cs`.
 
 That's it — every existing pipeline immediately works with the new architecture. **Zero per-pipeline changes.**

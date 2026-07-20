@@ -17,8 +17,8 @@ public static class LocalModelScanner
         Modality.Music => new(new[] { "Music", "audiogen", "musicgen" }, new[] { ".safetensors" }, Recurse: false, IncludeDirs: true),
         Modality.Speech => new(new[] { "tts", "TTS", "piper", "Voices", "Audio" }, new[] { ".onnx" }, Recurse: true, IncludeDirs: false),
         Modality.Video => new(new[] { "Video", "video" }, new[] { ".safetensors" }, Recurse: true, IncludeDirs: false),
-        Modality.ThreeD => new(new[] { "3D", "ThreeD", "threed" }, Array.Empty<string>(), Recurse: false, IncludeDirs: true),
-        Modality.Interactive => new(new[] { "Interactive", "World", "world" }, Array.Empty<string>(), Recurse: false, IncludeDirs: true),
+        Modality.Mesh => new(new[] { "3D", "ThreeD", "threed" }, Array.Empty<string>(), Recurse: false, IncludeDirs: true),
+        Modality.World => new(new[] { "Interactive", "World", "world" }, Array.Empty<string>(), Recurse: false, IncludeDirs: true),
         _ => new(Array.Empty<string>(), Array.Empty<string>(), Recurse: false, IncludeDirs: false),
     };
 

@@ -6,8 +6,8 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;

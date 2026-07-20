@@ -4,9 +4,9 @@ using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Utilities;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.Gguf;
-using HartsyInference.ModelHandler.Gguf.KeyMappers;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.Gguf.KeyMappers;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;

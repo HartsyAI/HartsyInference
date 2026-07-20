@@ -3,8 +3,8 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Models;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.HuggingFace;
-using HartsyInference.ModelHandler.Registry;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.Registry;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Engine.Registry;
 

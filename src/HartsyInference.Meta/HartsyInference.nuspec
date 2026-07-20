@@ -20,12 +20,10 @@
         <dependency id="HartsyInference.Cuda" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Diffusion" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Engine" version="$version$" exclude="Build,Analyzers" />
-        <dependency id="HartsyInference.Interactive" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.World" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.LLM" version="$version$" exclude="Build,Analyzers" />
-        <dependency id="HartsyInference.ModelHandler" version="$version$" exclude="Build,Analyzers" />
-        <dependency id="HartsyInference.Phonemizer" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.ModelAssets" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.ThreeD" version="$version$" exclude="Build,Analyzers" />
-        <dependency id="HartsyInference.Tokenizers" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Video" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Vision" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Vulkan" version="$version$" exclude="Build,Analyzers" />
@@ -37,12 +35,10 @@
         <dependency id="HartsyInference.Cuda" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Diffusion" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Engine" version="$version$" exclude="Build,Analyzers" />
-        <dependency id="HartsyInference.Interactive" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.World" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.LLM" version="$version$" exclude="Build,Analyzers" />
-        <dependency id="HartsyInference.ModelHandler" version="$version$" exclude="Build,Analyzers" />
-        <dependency id="HartsyInference.Phonemizer" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.ModelAssets" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.ThreeD" version="$version$" exclude="Build,Analyzers" />
-        <dependency id="HartsyInference.Tokenizers" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Video" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Vision" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Vulkan" version="$version$" exclude="Build,Analyzers" />

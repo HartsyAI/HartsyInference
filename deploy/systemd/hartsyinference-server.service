@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 # Adjust to wherever the server is published, e.g. `dotnet publish -c Release` output.
 WorkingDirectory=/opt/hartsyinference
-ExecStart=/usr/bin/dotnet /opt/hartsyinference/HartsyInference.Server.dll
+ExecStart=/usr/bin/dotnet /opt/hartsyinference/HartsyInference.API.dll
 
 # --- Configuration ---
 # Every HartsyInferenceServerOptions field can be set via HartsyInference__<Field> (ASP.NET Core's

@@ -8,15 +8,14 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
-    <ProjectReference Include="..\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
     <ProjectReference Include="..\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
     <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
     <ProjectReference Include="..\HartsyInference.LLM\HartsyInference.LLM.csproj" />
-    <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
     <ProjectReference Include="..\HartsyInference.Audio\HartsyInference.Audio.csproj" />
     <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
     <ProjectReference Include="..\HartsyInference.Video\HartsyInference.Video.csproj" />
-    <ProjectReference Include="..\HartsyInference.Interactive\HartsyInference.Interactive.csproj" />
+    <ProjectReference Include="..\HartsyInference.World\HartsyInference.World.csproj" />
     <ProjectReference Include="..\HartsyInference.ThreeD\HartsyInference.ThreeD.csproj" />
     <ProjectReference Include="..\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
   </ItemGroup>

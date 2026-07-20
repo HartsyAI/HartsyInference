@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.TextEncoders;
+using HartsyInference.ModelAssets.TextEncoders;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 

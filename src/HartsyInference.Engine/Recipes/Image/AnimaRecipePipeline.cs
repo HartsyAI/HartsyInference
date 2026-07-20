@@ -8,8 +8,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -53,8 +53,8 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps;
-        float cfg = request.CfgScale <= 0 ? 1.0f : request.CfgScale;
+        int steps = request.Steps ?? AnimaRecipe.FamilyDefaults.Steps;
+        float cfg = request.CfgScale ?? AnimaRecipe.FamilyDefaults.CfgScale;
 
         // TODO(E-IMG-4): img2img/inpaint (request.Img2Img/Inpaint) is not yet mapped — text-to-image only.
 
@@ -86,7 +86,7 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
             Width = request.Width,
             Height = request.Height,
             Steps = steps,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         try

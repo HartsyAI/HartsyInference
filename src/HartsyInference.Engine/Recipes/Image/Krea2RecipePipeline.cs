@@ -7,8 +7,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -43,6 +43,9 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
         _loaders = loaders;
     }
 
+    /// <summary>A Turbo/TDM checkpoint samples in 8 guidance-free steps, so it resolves against <see cref="Krea2Recipe.TurboDefaults"/> rather than Base's 28 steps at CFG 4.5.</summary>
+    public ImageDefaults? VariantDefaults => _isTurbo ? Krea2Recipe.TurboDefaults : Krea2Recipe.FamilyDefaults;
+
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
@@ -50,16 +53,17 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
         // Turbo: 8 steps, guidance off. Base: 28 steps, CFG 4.5.
-        int steps = request.Steps <= 0 ? (_isTurbo ? 8 : 28) : request.Steps;
-        float cfg = _isTurbo ? 1.0f : (request.CfgScale <= 0 ? 4.5f : request.CfgScale);
+        int steps = request.Steps ?? (_isTurbo ? Krea2Recipe.TurboDefaults.Steps : Krea2Recipe.FamilyDefaults.Steps);
+        float cfg = _isTurbo ? Krea2Recipe.TurboDefaults.CfgScale : (request.CfgScale ?? Krea2Recipe.FamilyDefaults.CfgScale);
         bool useCfg = cfg > 1.0f;
 
         // Width/height must be multiples of 16 (2×2 patchify × 8× VAE), clamped to 128–4096.
-        int width = Math.Clamp(request.Width / 16 * 16, 128, 4096);
-        int height = Math.Clamp(request.Height / 16 * 16, 128, 4096);
-        if (width != request.Width || height != request.Height)
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        int width = Math.Clamp(reqWidth / 16 * 16, 128, 4096);
+        int height = Math.Clamp(reqHeight / 16 * 16, 128, 4096);
+        if (width != reqWidth || height != reqHeight)
         {
-            Logs.Info($"[Krea2RecipePipeline] Snapped {request.Width}x{request.Height} → {width}x{height} (multiple of 16, 128–4096).");
+            Logs.Info($"[Krea2RecipePipeline] Snapped {reqWidth}x{reqHeight} → {width}x{height} (multiple of 16, 128–4096).");
         }
 
         // TODO(E-IMG-4/5): img2img/inpaint, LoRA, ControlNet, IP-Adapter and regional prompting are deferred.
@@ -74,7 +78,7 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
             Height = height,
             Steps = steps,
             CfgScale = cfg,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         Action<GenerationProgress> bridge = p =>

@@ -3,8 +3,8 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
@@ -44,8 +44,8 @@ public sealed class LanceVideoRecipePipeline : IVideoRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps > 0 ? request.Steps : _config.NumTimesteps;
-        float cfgScale = request.CfgScale <= 0 ? _config.CfgTextScale : request.CfgScale;
+        int steps = request.Steps ?? _config.NumTimesteps;
+        float cfgScale = request.CfgScale ?? _config.CfgTextScale;
         (int width, int height) = VideoRecipeUtils.ResolveResolution(request, SizeMultiple);
         int numFrames = Math.Min(MaxFrames, VideoRecipeUtils.ResolveFrames(request, modelDefault: 81, step: 4));
 
@@ -61,7 +61,7 @@ public sealed class LanceVideoRecipePipeline : IVideoRecipePipeline
             Height = height,
             Steps = steps,
             CfgScale = cfgScale,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         Action<GenerationProgress> bridge = p =>

@@ -3,7 +3,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Adapters;
 using HartsyInference.Diffusion.Models.TextEncoders;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Vision.Detection;
 using HartsyInference.Vision.Face;
 using HartsyInference.Vision.FaceDetection;

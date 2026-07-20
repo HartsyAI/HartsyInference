@@ -4,7 +4,7 @@ using HartsyInference.Audio.Models.StyleTts2;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.PyTorch;
+using HartsyInference.ModelAssets.PyTorch;
 
 namespace HartsyInference.Audio.Pipelines;
 

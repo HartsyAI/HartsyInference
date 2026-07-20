@@ -5,11 +5,11 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.HuggingFace;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
-
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Lumina-Image-2.0 recipe (Alpha-VLLM 2B NextDiT, Apache-2.0). Lifted from the SwarmUI backend's <c>Lumina2Loader</c>: the checkpoint is the diffusers-format transformer; the Gemma-2-2B text encoder (<see cref="SideModels.Gemma2_2B"/>) and the FLUX.1 16-channel VAE (<see cref="SideModels.FluxAe"/>) resolve as side models. Conditioning is a LIVE Gemma-2 encode (system-prompt-prefixed, <c>hidden_states[-2]</c>) driven inside <see cref="Lumina2RecipePipeline"/>; the pipeline itself owns the timestep inversion and velocity negation. Constructs and drives through <see cref="Lumina2RecipePipeline"/>.</summary>
@@ -30,6 +30,12 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lumina2", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Lumina-Image-2.0's official sampling settings: 30 steps at guidance 4.0, 1024x1024 (diffusers <c>Lumina2Pipeline.__call__</c>, mirrored by <c>GenerationDefaults.Lumina2</c>).</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 30, CfgScale = 4.0f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -58,7 +64,7 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Gemma2_2B);
             textEncoder.LoadWeights(teLoader.GetAllTensors());
 
-            (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoadFluxVaeF32(vaePath);
+            (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
             loaders.Add(vaeLoader);
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
             vae.LoadWeights(vaeWeights);
@@ -77,34 +83,6 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
             {
                 loader.Dispose();
             }
-            throw;
-        }
-    }
-
-    /// <summary>Loads a FLUX.1-family VAE file and returns diffusers-keyed F32 weights (16-bit weights upcast to F32 — the F32 VAE path Lumina-2 uses); keys already in diffusers naming pass through unchanged. The returned loader owns the tensor memory. Inlined from the SwarmUI backend's <c>LoaderVaeUtils.LoadFluxVaeF32</c>.</summary>
-    private static (Dictionary<string, Tensor> weights, SafeTensorsLoader loader) LoadFluxVaeF32(string filePath)
-    {
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(filePath);
-        try
-        {
-            Dictionary<string, Tensor> result = new Dictionary<string, Tensor>();
-            foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-            {
-                string? diffusersKey = CheckpointConvertUtils.ConvertVaeKey(kvp.Key);
-                if (diffusersKey is null)
-                {
-                    continue;
-                }
-                DType dt = kvp.Value.DType;
-                result[diffusersKey] = (dt == DType.F16 || dt == DType.BF16) ? kvp.Value.CastTo(DType.F32) : kvp.Value;
-            }
-            return (result, loader);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[Lumina2Recipe] Failed to load Flux VAE '{Path.GetFileName(filePath)}'.", ex);
-            loader.Dispose();
             throw;
         }
     }

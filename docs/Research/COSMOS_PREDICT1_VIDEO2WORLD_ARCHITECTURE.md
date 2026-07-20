@@ -1,6 +1,6 @@
 # Cosmos-Predict1 Video2World — Research Notes
 
-> Status: Complete (code + configs + tokenizer captured; HF tensor key dump still required) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.Video (Phase 9, AR video continuation pipeline). Discrete tokenizer (Cosmos DV) + AR transformer infra reused by HartsyInference.Interactive (Phase 10) for action-conditioned world models.
+> Status: Complete (code + configs + tokenizer captured; HF tensor key dump still required) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.Video (Phase 9, AR video continuation pipeline). Discrete tokenizer (Cosmos DV) + AR transformer infra reused by HartsyInference.World (Phase 10) for action-conditioned world models.
 > License: NVIDIA Open Model License (commercial OK — see § License)
 > Source of truth: [nvidia-cosmos/cosmos-predict1 GitHub](https://github.com/nvidia-cosmos/cosmos-predict1), [arXiv 2501.03575 "Cosmos World Foundation Model Platform for Physical AI"](https://arxiv.org/abs/2501.03575), [HF nvidia/Cosmos-Predict1-5B-Video2World](https://huggingface.co/nvidia/Cosmos-Predict1-5B-Video2World), [HF nvidia/Cosmos-Predict1-13B-Video2World](https://huggingface.co/nvidia/Cosmos-Predict1-13B-Video2World), [HF nvidia/Cosmos-Tokenizer-DV8x16x16](https://huggingface.co/nvidia/Cosmos-Tokenizer-DV8x16x16)
 > Related: [`LANCE_ARCHITECTURE.md`](LANCE_ARCHITECTURE.md) (joint image+video unified pipeline lineage), [`TEXT_ENCODERS.md`](TEXT_ENCODERS.md) (T5-11B is used here), [`VAE_ARCHITECTURE.md`](VAE_ARCHITECTURE.md) (continuous side of Cosmos Tokenizer family for diffusion decoder), and the forthcoming `WORLD_MODELS_AR_ACTION.md` (Phase 10, action-conditioned world models built on the same DV-token primitives)
@@ -16,7 +16,7 @@ Cosmos-Predict1 Video2World (V2W) is NVIDIA's discrete-token **autoregressive vi
 3. **Cross-attn-every-layer adapter** — light, frozen-base finetune that turns the base AR LM into a conditioned video generator. The same hook is what an action-conditioned world model will reuse, just swapping T5 embeddings for action embeddings (or concatenating both).
 4. **3D RoPE** — per-axis split of `head_dim` into temporal/H/W ranges.
 
-For HartsyInference this means: **build Cosmos V2W in `HartsyInference.Video` (Phase 9)** as `CosmosV2WPipeline`, and design the DV tokenizer + AR backbone + 3D RoPE as standalone reusable types under `HartsyInference.Video/Models/Cosmos/` so Phase 10 (`HartsyInference.Interactive`) can compose them with an `ActionEmbedder`.
+For HartsyInference this means: **build Cosmos V2W in `HartsyInference.Video` (Phase 9)** as `CosmosV2WPipeline`, and design the DV tokenizer + AR backbone + 3D RoPE as standalone reusable types under `HartsyInference.Video/Models/Cosmos/` so Phase 10 (`HartsyInference.World`) can compose them with an `ActionEmbedder`.
 
 Predict1 has been **superseded by Cosmos-Predict2 / Cosmos-Predict2.5** in the diffusion family — Predict2.5-2B (Oct 6 2025) is **diffusion, not AR** and replaces the diffusion-side Predict1 pipelines. The autoregressive V2W path remains Predict1's domain; there is no AR Predict2.5 as of 2026-05-24. So Predict1 5B/13B V2W are still the SOTA AR-token world models from NVIDIA.
 
@@ -646,7 +646,7 @@ Source-of-truth files (always cite these in implementation PRs):
 
 - `Pipelines/CosmosDDPipeline.cs` — 7B latent DiT decoder. Only needed for quality mode; defer to a second PR.
 
-**`HartsyInference.ModelHandler`** adds:
+**`HartsyInference.ModelAssets`** adds:
 
 - `CheckpointConverters/CosmosArCheckpointConverter.cs` — load NVIDIA's `model.pt`-converted safetensors (after the one-off PyTorch script). Maps tensor keys to `CosmosArTransformer` parameters; demuxes the cross-attn sibling weights into a separate dict if present.
 - `CheckpointConverters/CosmosDvTokenizerConverter.cs` — load DV encoder/decoder weights (after a separate conversion script that extracts state from the JIT).
@@ -656,7 +656,7 @@ Source-of-truth files (always cite these in implementation PRs):
 
 - `T5_11B.cs` — T5-11B encoder (24 layers, hidden 1024, 64 heads, FFN 65536, SentencePiece tokenizer). **Distinct from T5-XXL.** If the codebase already has a generic T5 encoder, this is a config selection only.
 
-**`HartsyInference.Interactive`** (Phase 10 — *future*, this doc is the foundation):
+**`HartsyInference.World`** (Phase 10 — *future*, this doc is the foundation):
 
 - `Models/CosmosLike/ActionEmbedder.cs` — MLP/matrix embed of action vector → context tokens.
 - `Pipelines/CosmosActionPipeline.cs` — composes `CosmosArTransformer` + `CosmosDvTokenizer` + `ActionEmbedder`. **Reuses ~95% of Phase 9 code; only the conditioning stream differs.**

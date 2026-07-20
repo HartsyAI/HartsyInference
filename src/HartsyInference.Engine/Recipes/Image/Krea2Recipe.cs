@@ -5,10 +5,10 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -20,6 +20,15 @@ public sealed class Krea2Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "krea2", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Krea 2 Base's official sampling settings: 28 steps at CFG 4.5, 1024x1024 (<c>Krea2Config.Base</c>); a Turbo/TDM checkpoint narrows this to 8 guidance-free steps via <see cref="Krea2RecipePipeline.VariantDefaults"/>.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 4.5f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
+
+    /// <summary>Krea 2 Turbo/TDM's official sampling settings: 8 distilled steps, guidance-free (<c>Krea2Config.Turbo</c>).</summary>
+    public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 8, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)

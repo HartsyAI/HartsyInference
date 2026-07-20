@@ -14,7 +14,7 @@ using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.PyTorch;
+using HartsyInference.ModelAssets.PyTorch;
 using Xunit;
 using Xunit.Abstractions;
 

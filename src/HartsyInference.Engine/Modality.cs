@@ -25,8 +25,8 @@ public enum Modality
     Video,
 
     /// <summary>Image/text-to-3D mesh generation.</summary>
-    ThreeD,
+    Mesh,
 
     /// <summary>Action-conditioned interactive world models.</summary>
-    Interactive,
+    World,
 }

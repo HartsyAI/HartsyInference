@@ -4,11 +4,13 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
+
+using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -26,6 +28,9 @@ public sealed class WanS2VRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-s2v", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Wan S2V's official sampling settings: 50 steps at guidance 5.0 (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
+    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 5.0f };
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
@@ -57,7 +62,7 @@ public sealed class WanS2VRecipe : IVideoRecipe
 
             (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
             loaders.AddRange(vaeLoaders);
-            Dictionary<string, Tensor> vaeWeights = VideoRecipeUtils.CastWeights(vaeWeightsRaw, DType.F32);
+            Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
             Wan21VaeDecoder vaeDecoder = new Wan21VaeDecoder();
             vaeDecoder.LoadWeights(vaeWeights);
             Wan21VaeEncoder vaeEncoder = new Wan21VaeEncoder();

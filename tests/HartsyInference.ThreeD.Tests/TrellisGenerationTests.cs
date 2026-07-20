@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Cuda;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Models.Trellis;

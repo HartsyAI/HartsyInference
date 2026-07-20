@@ -1,21 +1,23 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.Registry;
+using HartsyInference.ModelAssets.Registry;
 
 namespace HartsyInference.Engine;
 
-/// <summary>The single in-process entry point for running inference: owns the compute backend, a cache of loaded
-/// per-model runners, the modality dispatch, and the typed per-capability services. A consumer (CLI, HTTP API,
-/// SwarmUI, direct library use) constructs one, calls the service it needs (<see cref="Images"/>, <see cref="Text"/>,
-/// …), and disposes it. Progress flows through each service's <c>IProgress</c>/stream; results are returned as typed
-/// records.</summary>
+/// <summary>The single in-process entry point for running inference: owns the compute backend, the caches of loaded
+/// pipelines, and the typed per-capability services. A consumer (CLI, HTTP API, SwarmUI, direct library use)
+/// constructs one, calls the service it needs (<see cref="Images"/>, <see cref="Text"/>, …), and disposes it.
+/// Progress flows through each service's <c>IProgress</c>/stream; results are returned as typed records.</summary>
 public sealed class InferenceEngine : IInferenceEngine
 {
-    private readonly ModalityDispatch _dispatch = new ModalityDispatch();
-    private readonly Dictionary<string, IModalityRunner> _runners = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>How long a release waits for an in-flight audio generation before dropping its pipelines anyway.</summary>
+    private const int AudioUnloadWaitSeconds = 120;
+
     private readonly Dictionary<string, IRecipePipeline> _recipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, IVideoRecipePipeline> _videoRecipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private string _backendSelector;
@@ -58,7 +60,7 @@ public sealed class InferenceEngine : IInferenceEngine
     public string BackendDescription => BackendFactory.Describe(_backendSelector);
 
     /// <inheritdoc/>
-    public bool IsSupported(Modality modality) => _dispatch.IsSupported(modality);
+    public bool IsSupported(Modality modality) => Modalities.All.Contains(modality);
 
     /// <inheritdoc/>
     public IImagesService Images => _images.Value;
@@ -93,31 +95,11 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public IWorldService World => _world.Value;
 
-    /// <summary>Pre-loads the runner for <paramref name="spec"/> without generating (so a caller can print a header
-    /// between load and run). Returns the same cached instance the services will use.</summary>
-    public IModalityRunner Load(ModelSpec spec, IProgressSink progress) =>
-        GetOrLoadRunner(spec, _dispatch.Get(spec.Modality), progress);
-
     /// <inheritdoc/>
     public void SetBackend(string selector)
     {
         _backendSelector = selector;
         DisposeLoaded();
-    }
-
-    /// <summary>Transitional generic generation entry used by the CLI until every modality has a complete typed
-    /// service. New consumers (the SwarmUI extension, library users) should use the typed services
-    /// (<see cref="Images"/>, <see cref="Text"/>, …); this is removed once the CLI is rewired onto them.</summary>
-    public GeneratedArtifact Generate(ModelSpec spec, string prompt, ParamState parameters, IProgressSink progress, CancellationToken ct) =>
-        RunHandler(spec, prompt, parameters, progress, ct);
-
-    /// <summary>Loads (or reuses a cached) runner for <paramref name="spec"/> and runs its handler. The internal
-    /// bridge the typed services drive; every generation flows through here.</summary>
-    internal GeneratedArtifact RunHandler(ModelSpec spec, string prompt, ParamState parameters, IProgressSink progress, CancellationToken ct)
-    {
-        IModalityHandler handler = _dispatch.Get(spec.Modality);
-        IModalityRunner runner = GetOrLoadRunner(spec, handler, progress);
-        return handler.Run(runner, prompt, parameters, progress, ct);
     }
 
     /// <summary>The compute backend, constructed on first use. Used by the typed services that drive pipelines directly
@@ -126,7 +108,7 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>Detects the checkpoint architecture for <paramref name="spec"/>, resolves its recipe, and constructs
     /// (or returns a cached) pipeline. Throws when no recipe is registered for the detected family yet.</summary>
-    internal IRecipePipeline GetOrConstructRecipe(ModelSpec spec)
+    internal IRecipePipeline GetOrConstructRecipe(ModelSpec spec, ImageRequest? request = null)
     {
         if (spec.LocalPath is null)
         {
@@ -134,19 +116,54 @@ public sealed class InferenceEngine : IInferenceEngine
                 "No checkpoint found for this model. Pass a checkpoint via --model-path or let the catalog fetch it first.");
         }
 
-        string key = $"recipe:{spec.LocalPath}";
+        // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity.
+        string key = $"recipe:{spec.LocalPath}|{RecipeCacheKey.Describe(request)}";
         if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
             return cached;
 
+        IArchitectureRecipe recipe = ResolveRecipe(spec);
+        IRecipePipeline pipeline = recipe.Construct(new RecipeContext
+        {
+            CheckpointPath = spec.LocalPath,
+            Backend = EnsureBackend(),
+            Components = request?.Components,
+            Loras = request?.Loras,
+        });
+        _recipePipelines[key] = pipeline;
+        return pipeline;
+    }
+
+    /// <summary>The composition features the recipe for <paramref name="spec"/> declares it can apply. Resolved through
+    /// the same family-id + registry lookup <see cref="GetOrConstructRecipe"/> uses, so the answer can never disagree
+    /// with the pipeline that will actually run.</summary>
+    internal ImageFeatures SupportedFeatures(ModelSpec spec) => ResolveRecipe(spec).Supports;
+
+    /// <summary>The officially recommended defaults for <paramref name="spec"/>: the constructed pipeline's
+    /// variant-resolved numbers when it declares them, else the recipe's family-level ones. Resolved through the same
+    /// family-id + registry lookup <see cref="GetOrConstructRecipe"/> uses, so the answer can never disagree with the
+    /// pipeline that will actually run.</summary>
+    internal ImageDefaults DefaultsFor(ModelSpec spec, IRecipePipeline pipeline)
+    {
+        ArgumentNullException.ThrowIfNull(pipeline);
+        return pipeline.VariantDefaults ?? ResolveRecipe(spec).Defaults;
+    }
+
+    /// <summary>The officially recommended video defaults for <paramref name="spec"/>, resolved through the same
+    /// family-id + registry lookup <see cref="GetOrConstructVideoRecipe"/> uses.</summary>
+    internal static VideoDefaults VideoDefaultsFor(ModelSpec spec)
+        => VideoRecipeRegistry.Resolve(ResolveFamilyId(spec))?.Defaults ?? VideoDefaults.Standard;
+
+    /// <summary>The family id (catalog slug) that <paramref name="spec"/> resolves to, for diagnostics.</summary>
+    internal static string FamilyIdFor(ModelSpec spec) => ResolveFamilyId(spec);
+
+    /// <summary>Resolves the registered recipe for <paramref name="spec"/>, or throws naming what is drivable.</summary>
+    private static IArchitectureRecipe ResolveRecipe(ModelSpec spec)
+    {
         string familyId = ResolveFamilyId(spec);
-        IArchitectureRecipe recipe = RecipeRegistry.Resolve(familyId)
+        return RecipeRegistry.Resolve(familyId)
             ?? throw new NotSupportedException(
                 $"Model family '{familyId}' has no recipe lifted into the Engine yet (E-IMG-3). " +
                 $"Currently drivable: {string.Join(", ", RecipeRegistry.RegisteredNames)}.");
-
-        IRecipePipeline pipeline = recipe.Construct(new RecipeContext { CheckpointPath = spec.LocalPath, Backend = EnsureBackend() });
-        _recipePipelines[key] = pipeline;
-        return pipeline;
     }
 
     /// <summary>Resolves the video recipe for <paramref name="spec"/> and constructs (or returns a cached) pipeline.
@@ -195,31 +212,66 @@ public sealed class InferenceEngine : IInferenceEngine
         };
     }
 
-    private IModalityRunner GetOrLoadRunner(ModelSpec spec, IModalityHandler handler, IProgressSink progress)
-    {
-        string key = $"{spec.Modality}:{spec.LocalPath ?? spec.Requested}";
-        if (_runners.TryGetValue(key, out IModalityRunner? cached))
-            return cached;
-        IModalityRunner runner = handler.Load(spec, EnsureBackend(), progress);
-        _runners[key] = runner;
-        return runner;
-    }
-
     private IBackend EnsureBackend() => _backend ??= BackendFactory.Create(_backendSelector);
 
-    private void DisposeLoaded()
+    /// <inheritdoc/>
+    public void FreeMemory() => ReleaseLoaded(disposeBackend: false);
+
+    private void DisposeLoaded() => ReleaseLoaded(disposeBackend: true);
+
+    /// <summary>Drops every loaded model across all modalities. With <paramref name="disposeBackend"/> the device goes
+    /// too (teardown / backend switch); without it the backend survives and just has its device memory released, which
+    /// is the "free memory" a host asks for between jobs.</summary>
+    private void ReleaseLoaded(bool disposeBackend)
     {
-        foreach (IModalityRunner runner in _runners.Values)
-            runner.Dispose();
-        _runners.Clear();
         foreach (IRecipePipeline pipeline in _recipePipelines.Values)
             pipeline.Dispose();
         _recipePipelines.Clear();
         foreach (IVideoRecipePipeline pipeline in _videoRecipePipelines.Values)
             pipeline.Dispose();
         _videoRecipePipelines.Clear();
-        _backend?.Dispose();
-        _backend = null;
+        // IsValueCreated throughout, so releasing memory never forces a service (and its caches) into existence.
+        if (_vision.IsValueCreated)
+        {
+            _vision.Value.Dispose();
+        }
+        if (_mesh.IsValueCreated)
+        {
+            _mesh.Value.Dispose();
+        }
+        if (_world.IsValueCreated)
+        {
+            _world.Value.Dispose();
+        }
+        // TextService owns its own per-device backends and multi-GB dequantized host buffers, so it must be released
+        // explicitly — nothing else here reaches its slots.
+        if (_text.IsValueCreated)
+        {
+            _text.Value.Dispose();
+        }
+        // Audio pipelines are cached process-wide by the audio catalogs; drop them here so none outlives the backend
+        // it was constructed against.
+        Audio.AudioRuntime.UnloadAll(AudioUnloadWaitSeconds);
+        if (disposeBackend)
+        {
+            _backend?.Dispose();
+            _backend = null;
+            return;
+        }
+        // Disposal only drops host references; the promoted GPU copies are freed on the finalizer queue, so force it
+        // before asking the driver for the memory back or the card stays full.
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        try
+        {
+            _backend?.FreeAllDeviceMemory();
+            _backend?.TrimMemoryPool();
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[Engine] Releasing device memory failed: {ex.Message}");
+        }
     }
 
     /// <inheritdoc/>

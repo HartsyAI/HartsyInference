@@ -1,6 +1,6 @@
 # LoRA Key Mapping — Implementation Reference
 
-> Authoritative table of LoRA safetensors key patterns supported in v1, and the canonical HartsyInference weight keys they map to. Every mapper in `src/HartsyInference.ModelHandler/Lora/Mappers/` codifies the rules in this doc.
+> Authoritative table of LoRA safetensors key patterns supported in v1, and the canonical HartsyInference weight keys they map to. Every mapper in `src/HartsyInference.ModelAssets/Lora/Mappers/` codifies the rules in this doc.
 
 ## Supported formats (v1)
 

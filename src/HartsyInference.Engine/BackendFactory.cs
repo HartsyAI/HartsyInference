@@ -18,14 +18,49 @@ public static class BackendFactory
     /// <summary>Valid selector tokens accepted on the command line.</summary>
     public static IReadOnlyList<string> ValidSelectors { get; } = new[] { "auto", "cpu", "cuda", "vulkan" };
 
+    /// <summary>Explicit kernel-directory override; wins over auto-detection. For hosts that deploy the compiled
+    /// kernels somewhere other than beside the engine assemblies.</summary>
+    public static string? KernelDirOverride { get; set; }
+
+    /// <summary>Directory holding compiled kernels, resolved relative to THIS assembly rather than the entry
+    /// application: when the engine is hosted inside another app (a SwarmUI extension loaded into its own
+    /// <c>AssemblyLoadContext</c>) <see cref="AppContext.BaseDirectory"/> is the host's bin dir, not the engine's,
+    /// and the kernels ship beside the engine DLLs. Falls back to <see cref="AppContext.BaseDirectory"/> when the
+    /// assembly location is unavailable (single-file publish) or the resolved directory does not exist.</summary>
+    public static string KernelDir(string subdir)
+    {
+        if (!string.IsNullOrWhiteSpace(KernelDirOverride))
+        {
+            return Path.Combine(KernelDirOverride, subdir);
+        }
+        string asmDir = Path.GetDirectoryName(typeof(BackendFactory).Assembly.Location) ?? "";
+        string candidate = Path.Combine(string.IsNullOrEmpty(asmDir) ? AppContext.BaseDirectory : asmDir, subdir);
+        if (!Directory.Exists(candidate))
+        {
+            string fallback = Path.Combine(AppContext.BaseDirectory, subdir);
+            if (Directory.Exists(fallback))
+            {
+                return fallback;
+            }
+        }
+        return candidate;
+    }
+
+    /// <summary>Constructs a CUDA backend on <paramref name="ordinal"/> with the resolved PTX directory. Single place,
+    /// so every caller (facade, TextService, recipes) agrees on where kernels live.</summary>
+    public static IBackend CreateCuda(int ordinal) => new CudaBackend(ordinal, KernelDir(PtxDirName));
+
+    /// <summary>Constructs a Vulkan backend on <paramref name="ordinal"/> with the resolved SPIR-V directory.</summary>
+    public static IBackend CreateVulkan(int ordinal) => new VulkanBackend(ordinal, KernelDir(SpirvDirName));
+
     /// <summary>Constructs the backend named by <paramref name="selector"/>, mapping <c>auto</c> via <see cref="Resolve"/>.</summary>
     public static IBackend Create(string selector)
     {
         string chosen = Resolve(selector);
         return chosen switch
         {
-            "cuda" => new CudaBackend(deviceOrdinal: 0, ptxDir: Path.Combine(AppContext.BaseDirectory, PtxDirName)),
-            "vulkan" => new VulkanBackend(deviceOrdinal: 0, spvDir: Path.Combine(AppContext.BaseDirectory, SpirvDirName)),
+            "cuda" => CreateCuda(0),
+            "vulkan" => CreateVulkan(0),
             "cpu" => new CpuBackend(),
             _ => throw new ArgumentException($"Unknown backend '{selector}'. Valid: {string.Join(", ", ValidSelectors)}."),
         };

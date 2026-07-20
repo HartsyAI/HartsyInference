@@ -6,14 +6,14 @@
 # AccessViolationException) that .NET Core cannot catch in-process, so process-level restart is the actual
 # mitigation for that class of failure, not a workaround for something fixable in code.
 #
-# Usage: deploy/run-with-restart.sh /path/to/HartsyInference.Server.dll [extra dotnet args...]
+# Usage: deploy/run-with-restart.sh /path/to/HartsyInference.API.dll [extra dotnet args...]
 # Configure via env vars before invoking, e.g.:
-#   ASPNETCORE_URLS=http://0.0.0.0:5099 HartsyInference__Backend=Cuda deploy/run-with-restart.sh ./HartsyInference.Server.dll
+#   ASPNETCORE_URLS=http://0.0.0.0:5099 HartsyInference__Backend=Cuda deploy/run-with-restart.sh ./HartsyInference.API.dll
 
 set -u
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 /path/to/HartsyInference.Server.dll [extra dotnet args...]" >&2
+  echo "Usage: $0 /path/to/HartsyInference.API.dll [extra dotnet args...]" >&2
   exit 1
 fi
 

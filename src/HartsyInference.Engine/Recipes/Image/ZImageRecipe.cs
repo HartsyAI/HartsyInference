@@ -5,11 +5,11 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
-
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Z-Image recipe (Tongyi Lab NextDiT): the checkpoint carries the transformer only; the Qwen3-4B text encoder and the Flux VAE are resolved as side models. Lifted from the SwarmUI backend's <c>ZImageLoader</c>; constructs the components and drives generation through <see cref="ZImageRecipePipeline"/>.</summary>
@@ -20,6 +20,12 @@ public sealed class ZImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "zimage", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Z-Image Turbo's official sampling settings: 8 steps, guidance-free (CFG 1.0), 1024x1024 (<c>GenerationDefaults.ZImageTurbo</c>).</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 8, CfgScale = 1.0f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -58,9 +64,7 @@ public sealed class ZImageRecipe : IArchitectureRecipe
 
         // 3. Load the Flux VAE (Z-Image reuses it verbatim). BF16 on Ampere+ (F32-equivalent range, halves the
         //    full-res decode workspace), F32 otherwise — the SDXL-VAE precision policy.
-        SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
-        vaeLoader.Load(vaePath);
-        Dictionary<string, Tensor> vaeWeights = LoadVaeWeights(vaeLoader.GetAllTensors());
+        (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
         if (vaeWeights.Count == 0)
         {
             vaeLoader.Dispose();
@@ -68,8 +72,7 @@ public sealed class ZImageRecipe : IArchitectureRecipe
             zLoader.Dispose();
             throw new InvalidOperationException($"VAE file '{vaePath}' has no usable VAE tensors.");
         }
-        DType vaeDtype = context.Backend.Capabilities.SupportsBF16 ? DType.BF16 : DType.F32;
-        vaeWeights = CastWeights(vaeWeights, vaeDtype);
+        vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeights, VaePrecisionHelper.PreferredVaeDtype(context.Backend));
         VaeDecoder vae = new VaeDecoder(VaeConfig.ZImage);
         vae.LoadWeights(vaeWeights);
         VaeEncoder vaeEncoder = new VaeEncoder(VaeConfig.ZImage);
@@ -78,40 +81,5 @@ public sealed class ZImageRecipe : IArchitectureRecipe
         ZImagePipeline pipeline = new ZImagePipeline(context.Backend, transformer, vae, vaeEncoder, zConfig);
         Logs.Info("[ZImageRecipe] Z-Image ready.");
         return new ZImageRecipePipeline(pipeline, qwen, tokenizer, context.Backend, zLoader, qwenLoader, vaeLoader);
-    }
-
-    /// <summary>Normalizes a standalone Flux/Z-Image VAE safetensors file into the diffusers key naming the VAE decoder expects (strips a Comfy prefix, then routes every key through <see cref="CheckpointConvertUtils.ConvertVaeKey"/> which maps LDM names and passes already-diffusers names through unchanged).</summary>
-    private static Dictionary<string, Tensor> LoadVaeWeights(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            string ldmKey = kv.Key;
-            if (ldmKey.StartsWith("first_stage_model.", StringComparison.Ordinal))
-            {
-                ldmKey = ldmKey["first_stage_model.".Length..];
-            }
-            else if (ldmKey.StartsWith("vae.", StringComparison.Ordinal))
-            {
-                ldmKey = ldmKey["vae.".Length..];
-            }
-            string? diffusersKey = CheckpointConvertUtils.ConvertVaeKey(ldmKey);
-            if (diffusersKey is not null)
-            {
-                result[diffusersKey] = kv.Value;
-            }
-        }
-        return result;
-    }
-
-    /// <summary>Casts a VAE weight dictionary to <paramref name="target"/>, leaving tensors already at that dtype untouched (the SDXL-VAE BF16/F32 precision policy — never F16, which overflows the SDXL/Flux VAE resnets).</summary>
-    private static Dictionary<string, Tensor> CastWeights(Dictionary<string, Tensor> weights, DType target)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);
-        foreach (KeyValuePair<string, Tensor> kv in weights)
-        {
-            result[kv.Key] = kv.Value.DType == target ? kv.Value : kv.Value.CastTo(target);
-        }
-        return result;
     }
 }

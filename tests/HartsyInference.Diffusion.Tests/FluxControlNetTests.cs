@@ -3,7 +3,7 @@ using System.Text.Json;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Adapters;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;

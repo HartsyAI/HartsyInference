@@ -1,4 +1,4 @@
-# Deploying `HartsyInference.Server`
+# Deploying `HartsyInference.API`
 
 Two files here exist for one reason: **some native/unsafe code paths in this engine can raise a
 corrupted-state exception (e.g. `AccessViolationException`) that .NET Core cannot catch in-process** — the
@@ -27,7 +27,7 @@ a bad model path in config) — after 5 restarts in 60s the unit is left `failed
 ## Bash wrapper (containers without an init system, ad-hoc use)
 
 ```bash
-./deploy/run-with-restart.sh /path/to/HartsyInference.Server.dll
+./deploy/run-with-restart.sh /path/to/HartsyInference.API.dll
 ```
 
 Same restart-with-backoff and crash-loop-breaker behavior as the systemd unit, configurable via

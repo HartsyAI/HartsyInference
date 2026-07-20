@@ -6,10 +6,10 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
-
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Boogu-Image recipe (<c>boogu-project/Boogu-Image</c>, 10B): an OmniGen2/Lumina-2 lineage DiT (8 dual-stream + 32 single-stream blocks, GQA 28:7) conditioned on Qwen3-VL-8B (<see cref="SideModels.Qwen3VL_8B"/>) and decoded by the FLUX.1 VAE (<see cref="SideModels.FluxAe"/>). Lifted from the SwarmUI backend's <c>BooguImageLoader</c>; constructs the components and drives generation through <see cref="BooguImageRecipePipeline"/>.</summary>
@@ -23,6 +23,12 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "boogu", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Boogu's sampling settings: 25 steps at text-guidance 3.5, 1024x1024 — the step count is the lifted loader's, and 3.5 sits in the 2-5 band the base model is documented to work in (Turbo wants 1.0).</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 25, CfgScale = 3.5f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -63,13 +69,7 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
 
             // The auto-downloaded flux_ae.safetensors ships BFL-native LDM keys; ConvertVaeKey remaps LDM → diffusers
             // and passes already-diffusers keys through unchanged (a raw load throws on mid_block.resnets.0).
-            (Dictionary<string, Tensor> vaeW, SafeTensorsLoader vaeL) = LoadComponent(vaePath, key =>
-            {
-                string ldmKey = key.StartsWith("first_stage_model.", StringComparison.Ordinal) ? key["first_stage_model.".Length..]
-                    : key.StartsWith("vae.", StringComparison.Ordinal) ? key["vae.".Length..]
-                    : key;
-                return CheckpointConvertUtils.ConvertVaeKey(ldmKey);
-            }, applyFp8Dequant: false);
+            (Dictionary<string, Tensor> vaeW, SafeTensorsLoader vaeL) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
             loaders.Add(vaeL);
 
             BooguImageConfig config = BooguImageConfig.V01;

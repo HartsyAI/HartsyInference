@@ -7,8 +7,8 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -40,16 +40,17 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
         string prompt = request.Prompt;
 
         // Width/height must be multiples of 16 (2x2 patchify x 8x VAE), range 256-2048.
-        int snappedW = Math.Clamp(request.Width / 16 * 16, 256, 2048);
-        int snappedH = Math.Clamp(request.Height / 16 * 16, 256, 2048);
-        if (snappedW != request.Width || snappedH != request.Height)
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        int snappedW = Math.Clamp(reqWidth / 16 * 16, 256, 2048);
+        int snappedH = Math.Clamp(reqHeight / 16 * 16, 256, 2048);
+        if (snappedW != reqWidth || snappedH != reqHeight)
         {
-            Logs.Info($"[Ideogram4] Snapped resolution {request.Width}x{request.Height} -> {snappedW}x{snappedH}.");
+            Logs.Info($"[Ideogram4] Snapped resolution {reqWidth}x{reqHeight} -> {snappedW}x{snappedH}.");
         }
 
         // Steps pick the nearest official preset; the preset owns the guidance schedule (gw~7 main + gw~3 polish)
         // and the logit-normal mu/std, so CfgScale and the negative prompt are intentionally not consumed.
-        int steps = request.Steps <= 0 ? 20 : request.Steps;
+        int steps = request.Steps ?? Ideogram4Recipe.FamilyDefaults.Steps;
         Ideogram4SamplerPreset preset = steps <= 14 ? Ideogram4SamplerPreset.Turbo12
             : steps >= 40 ? Ideogram4SamplerPreset.Quality48
             : Ideogram4SamplerPreset.Default20;
@@ -84,7 +85,7 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
             Height = snappedH,
             Steps = preset.NumSteps,
             CfgScale = 7.0f,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         Action<GenerationProgress> bridge = p =>

@@ -64,7 +64,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     private static Tensor EnsureF32(Tensor t)
     {
         if (t.DType == DType.F32) return t;
-        if (t.DType.IsQuantized) return HartsyInference.ModelHandler.Gguf.GgufDequantizer.Dequantize(t, DType.F32);
+        if (t.DType.IsQuantized) return HartsyInference.ModelAssets.Gguf.GgufDequantizer.Dequantize(t, DType.F32);
         return t.CastTo(DType.F32);
     }
 

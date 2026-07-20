@@ -5,10 +5,12 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
+
+using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -32,6 +34,9 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         string.Equals(familyId, "ltx-video-2", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "ltx-video2", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "lightricks-ltx-video-2", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>LTX-Video 2's official sampling settings: 50 steps at guidance 3.0 (<c>LtxVideo2Config.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
+    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 3.0f };
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
@@ -77,7 +82,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
 
             (float[]? videoMean, float[]? videoStd) = ReadStats(conv.Vae, config.InChannels);
             LtxVideo2VaeDecoder vae = new LtxVideo2VaeDecoder(latentsMean: videoMean, latentsStd: videoStd);
-            vae.LoadWeights(VideoRecipeUtils.CastWeights(conv.Vae, DType.F32));
+            vae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.Vae, DType.F32));
 
             LtxAudioVaeDecoder? audioVae = null;
             LtxAudioVocoder? vocoder = null;
@@ -88,7 +93,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 // Audio latent stats are stored over the packed feature axis (8 latent ch x 16 mel = 128).
                 (audioMean, audioStd) = ReadStats(conv.AudioVae, config.AudioInChannels);
                 audioVae = new LtxAudioVaeDecoder();
-                audioVae.LoadWeights(VideoRecipeUtils.CastWeights(conv.AudioVae, DType.F32));
+                audioVae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.AudioVae, DType.F32));
                 vocoder = new LtxAudioVocoder();
                 vocoder.LoadWeights(conv.Vocoder);
                 Logs.Info("[LtxVideo2Recipe] Audio decode wired (VAE + vocoder).");

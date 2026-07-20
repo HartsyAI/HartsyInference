@@ -7,7 +7,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -150,7 +150,7 @@ public class CrossRuntimeValidationTests
         // Encode text (same tokens as Python)
         string prompt = "a painting of a cat sitting on a windowsill";
         string negativePrompt = "blurry, bad quality";
-        using HartsyInference.Tokenizers.ClipTokenizer tokenizer = new(
+        using HartsyInference.ModelAssets.Tokenizers.ClipTokenizer tokenizer = new(
             Path.Combine(ModelDir, "tokenizer", "vocab.json"),
             Path.Combine(ModelDir, "tokenizer", "merges.txt"));
 
@@ -318,7 +318,7 @@ public class CrossRuntimeValidationTests
             teLoader.Load(Path.Combine(ModelDir, "text_encoder", "model.fp16.safetensors"));
             textEncoder.LoadWeights(CastWeightsToF32(teLoader.GetAllTensors()), "text_model");
 
-            using HartsyInference.Tokenizers.ClipTokenizer tokenizer = new(
+            using HartsyInference.ModelAssets.Tokenizers.ClipTokenizer tokenizer = new(
                 Path.Combine(ModelDir, "tokenizer", "vocab.json"),
                 Path.Combine(ModelDir, "tokenizer", "merges.txt"));
             int[] promptTokens = tokenizer.Encode("a painting of a cat sitting on a windowsill");

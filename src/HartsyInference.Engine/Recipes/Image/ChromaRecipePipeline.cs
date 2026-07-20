@@ -3,8 +3,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -33,9 +33,8 @@ public sealed class ChromaRecipePipeline : IRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps;
-        // <=0 defers to the pipeline's ChromaConfig default (5.0); a positive request value overrides it.
-        float? cfg = request.CfgScale <= 0 ? null : request.CfgScale;
+        int steps = request.Steps ?? ChromaRecipe.FamilyDefaults.Steps;
+        float cfg = request.CfgScale ?? ChromaRecipe.FamilyDefaults.CfgScale;
 
         // TODO(E-IMG-4): img2img/inpaint (request.Img2Img/Inpaint) not yet mapped — text-to-image only.
 
@@ -52,7 +51,7 @@ public sealed class ChromaRecipePipeline : IRecipePipeline
             Height = request.Height,
             Steps = steps,
             CfgScale = cfg,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         Action<GenerationProgress> bridge = p =>

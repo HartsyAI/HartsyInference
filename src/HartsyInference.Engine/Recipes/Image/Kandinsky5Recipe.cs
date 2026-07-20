@@ -4,11 +4,11 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
-
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Kandinsky 5.0 T2I-Lite recipe (kandinskylab, ~6B DiT): the checkpoint is the transformer — either a single repackaged safetensors or a diffusers <c>transformer/</c> shard directory — and the dual text stack (Qwen2.5-VL-7B sequence embeddings via <see cref="SideModels.Qwen2_5_VL_7B"/> + CLIP-L pooled via <see cref="SideModels.ClipL"/>) plus the 16-channel Flux VAE (<see cref="SideModels.FluxAe"/>) resolve as side models.
@@ -20,6 +20,12 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "kandinsky5", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Kandinsky-5's official image sampling settings: 50 steps at guidance 3.5, 1024x1024 (<c>GenerationDefaults.Kandinsky5Image</c>).</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 3.5f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -74,11 +80,10 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
             clipL.LoadWeights(ConvertClipLFromStandalone(clipLoader.GetAllTensors()), prefix: "text_model");
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-            SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
-            vaeLoader.Load(vaePath);
+            (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
             loaders.Add(vaeLoader);
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
-            vae.LoadWeights(CastToF32(ConvertVaeFromStandalone(vaeLoader.GetAllTensors())));
+            vae.LoadWeights(vaeWeights);
 
             // Scheduler shift 5.0 and the Flux VAE scale/shift are the Lite defaults baked into the ctor.
             Kandinsky5Pipeline pipeline = new Kandinsky5Pipeline(context.Backend, transformer, vae, config);
@@ -115,41 +120,6 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
             {
                 result[key] = kv.Value;
             }
-        }
-        return result;
-    }
-
-    /// <summary>Normalizes a standalone Flux VAE file into diffusers key naming: strips a Comfy/LDM wrapper prefix, then routes every key through <see cref="CheckpointConvertUtils.ConvertVaeKey"/> (null drops non-VAE keys).</summary>
-    private static Dictionary<string, Tensor> ConvertVaeFromStandalone(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            string ldmKey = kv.Key;
-            if (ldmKey.StartsWith("first_stage_model.", StringComparison.Ordinal))
-            {
-                ldmKey = ldmKey["first_stage_model.".Length..];
-            }
-            else if (ldmKey.StartsWith("vae.", StringComparison.Ordinal))
-            {
-                ldmKey = ldmKey["vae.".Length..];
-            }
-            string? diffusersKey = CheckpointConvertUtils.ConvertVaeKey(ldmKey);
-            if (diffusersKey is not null)
-            {
-                result[diffusersKey] = kv.Value;
-            }
-        }
-        return result;
-    }
-
-    /// <summary>Casts F16/BF16 VAE weights to F32 (the precision the Flux VAE decoder is validated at), passing already-F32 tensors through.</summary>
-    private static Dictionary<string, Tensor> CastToF32(Dictionary<string, Tensor> weights)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);
-        foreach (KeyValuePair<string, Tensor> kv in weights)
-        {
-            result[kv.Key] = (kv.Value.DType == DType.F16 || kv.Value.DType == DType.BF16) ? kv.Value.CastTo(DType.F32) : kv.Value;
         }
         return result;
     }

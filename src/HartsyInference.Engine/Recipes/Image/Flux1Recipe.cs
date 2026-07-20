@@ -4,10 +4,12 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -18,7 +20,19 @@ public sealed class Flux1Recipe : IArchitectureRecipe
     public string Name => "flux1";
 
     /// <inheritdoc/>
+    public ImageFeatures Supports => ImageFeatures.Lora | ImageFeatures.ControlNet | ImageFeatures.VariationSeed;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux1", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Flux.1 Dev's official sampling settings: 28 steps at distilled guidance 3.5, 1024x1024 (<c>GenerationDefaults.FluxDev</c>); a Schnell checkpoint narrows this to 4 steps via <see cref="Flux1RecipePipeline.VariantDefaults"/>.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 3.5f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageDefaults Defaults => FamilyDefaults;
+
+    /// <summary>Flux.1 Schnell's official sampling settings: 4 steps, guidance-free by distillation (<c>GenerationDefaults.FluxSchnell</c>).</summary>
+    public static ImageDefaults SchnellDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -37,6 +51,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
         }
 
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { mainLoader };
+        MergedLoraStack? loraStack = null;
         try
         {
             Dictionary<string, Tensor> clipLWeights = converted.ClipL;
@@ -64,10 +79,8 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             if (vaeWeights.Count == 0)
             {
                 string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-                SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
-                vaeLoader.Load(vaePath);
+                (vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
                 loaders.Add(vaeLoader);
-                vaeWeights = ConvertVaeFromStandalone(vaeLoader.GetAllTensors());
                 Logs.Info("[Flux1Recipe] Flux VAE resolved as side model.");
             }
             if (clipLWeights.Count == 0 || t5Weights.Count == 0 || vaeWeights.Count == 0)
@@ -89,6 +102,12 @@ public sealed class Flux1Recipe : IArchitectureRecipe
                 Logs.Info("[Flux1Recipe] fp8 checkpoint on non-native-FP8 hardware: CacheWeightCasts disabled (fp8-resident, transient per-GEMM dequant).");
             }
 
+            loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras),
+                context.Backend,
+                transformerWeights: transformerWeights,
+                clipLWeights: clipLWeights);
+
             FluxTransformer transformer = new FluxTransformer(config);
             transformer.LoadWeights(transformerWeights);
 
@@ -105,11 +124,12 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             ClipTokenizer clipTok = new ClipTokenizer();
             T5Tokenizer t5Tok = new T5Tokenizer(maxLength: hasGuidance ? 512 : 256);
             Logs.Info($"[Flux1Recipe] Flux.1 ready (Dev={hasGuidance}).");
-            return new Flux1RecipePipeline(pipeline, clipTok, t5Tok, hasGuidance, loaders);
+            return new Flux1RecipePipeline(pipeline, clipTok, t5Tok, hasGuidance, loaders, loraStack);
         }
         catch (Exception ex)
         {
             Logs.Error("[Flux1Recipe] Construction failed.", ex);
+            loraStack?.Dispose();
             foreach (SafeTensorsLoader loader in loaders)
             {
                 loader.Dispose();
@@ -157,30 +177,6 @@ public sealed class Flux1Recipe : IArchitectureRecipe
         {
             string key = kv.Key.StartsWith(ComfyPrefix, StringComparison.Ordinal) ? kv.Key[ComfyPrefix.Length..] : kv.Key;
             result[key] = kv.Value;
-        }
-        return result;
-    }
-
-    /// <summary>Normalizes a standalone Flux VAE file into diffusers key naming: strips a Comfy prefix, then routes every key through <see cref="CheckpointConvertUtils.ConvertVaeKey"/> (maps LDM-native names and passes diffusers names through unchanged).</summary>
-    private static Dictionary<string, Tensor> ConvertVaeFromStandalone(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            string ldmKey = kv.Key;
-            if (ldmKey.StartsWith("first_stage_model.", StringComparison.Ordinal))
-            {
-                ldmKey = ldmKey["first_stage_model.".Length..];
-            }
-            else if (ldmKey.StartsWith("vae.", StringComparison.Ordinal))
-            {
-                ldmKey = ldmKey["vae.".Length..];
-            }
-            string? diffusersKey = CheckpointConvertUtils.ConvertVaeKey(ldmKey);
-            if (diffusersKey is not null)
-            {
-                result[diffusersKey] = kv.Value;
-            }
         }
         return result;
     }

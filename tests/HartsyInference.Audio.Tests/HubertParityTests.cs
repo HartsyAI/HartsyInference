@@ -3,8 +3,8 @@ using System.IO;
 using HartsyInference.Audio.Models.Hubert;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.PyTorch;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.PyTorch;
+using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
 

@@ -1,6 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.TextEncoders.Bert;
+using HartsyInference.ModelAssets.TextEncoders.Bert;
 
 namespace HartsyInference.Vision.Detection.GroundingDino;
 

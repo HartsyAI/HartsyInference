@@ -3,8 +3,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -35,16 +35,7 @@ public sealed class AuraFlowRecipePipeline : IRecipePipeline
         int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
         int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = request.Steps <= 0 ? null : request.Steps,
-            CfgScale = request.CfgScale <= 0 ? null : (float?)request.CfgScale,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
-        };
+        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative);
 
         Action<GenerationProgress> bridge = p =>
         {
@@ -66,7 +57,7 @@ public sealed class AuraFlowRecipePipeline : IRecipePipeline
                 ["arch"] = "auraflow",
                 ["size"] = $"{width}x{height}",
                 ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
-                ["steps"] = request.Steps.ToString(CultureInfo.InvariantCulture),
+                ["steps"] = (request.Steps ?? AuraFlowRecipe.FamilyDefaults.Steps).ToString(CultureInfo.InvariantCulture),
             },
         };
     }

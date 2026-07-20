@@ -133,4 +133,4 @@ One config-driven `GenericTransformer` (Qwen2/Qwen3/Llama/Mistral) drives decode
 
 ## Server — dropped
 
-The `HartsyInference.Server` ASP.NET scaffolding remains in `src/` but is **abandoned**. There is no OpenAI-compatible server product and none is planned. The engine is consumed via the SwarmUI backend extension, NuGet libraries, and sample CLIs.
+The `HartsyInference.API` ASP.NET scaffolding remains in `src/` but is **abandoned**. There is no OpenAI-compatible server product and none is planned. The engine is consumed via the SwarmUI backend extension, NuGet libraries, and sample CLIs.

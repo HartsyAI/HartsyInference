@@ -4,7 +4,7 @@ using Spectre.Console;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Shared generation lifecycle for the modality commands: header, run via the <see cref="InferenceEngine"/>,
+/// <summary>Shared generation lifecycle for the modality commands: header, run via the engine's typed services,
 /// artifact save, cancellation, and error handling. The engine owns backend + model load; this only adds the
 /// CLI-side header, result presentation, and persistence.</summary>
 public static class CommandRunner
@@ -21,8 +21,6 @@ public static class CommandRunner
         string headerLabel,
         bool showResponseRule)
     {
-        IProgressSink sink = quiet ? new NullProgressSink() : new ConsoleProgressSink();
-
         using CancellationTokenSource cts = new CancellationTokenSource();
         ConsoleCancelEventHandler onCancel = (_, e) =>
         {
@@ -42,12 +40,12 @@ public static class CommandRunner
                     $"[#9aa4af]backend[/] [{CliTheme.Accent}]{Markup.Escape(engine.BackendDescription)}[/]");
             }
 
-            engine.Load(spec, sink);
-
             if (!quiet && showResponseRule)
                 AnsiConsole.Write(new Rule($"[{CliTheme.Accent}]response[/]").LeftJustified().RuleStyle("grey"));
 
-            GeneratedArtifact artifact = engine.Generate(spec, prompt, parameters, sink, cts.Token);
+            GeneratedArtifact artifact = GenerationDispatch
+                .RunAsync(engine, spec, prompt, parameters, outputDir, quiet, cts.Token)
+                .GetAwaiter().GetResult();
             ResultPresenter.Present(artifact, quiet);
 
             string? saved = ArtifactWriter.Write(artifact, outputDir, prompt, force: outputDir is not null);

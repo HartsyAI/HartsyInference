@@ -4,7 +4,7 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -23,14 +23,17 @@ public sealed class LensRecipePipeline : IRecipePipeline
         _tokenizer = tokenizer;
     }
 
+    /// <summary>The loaded <see cref="LensConfig"/> already carries the variant's official step count and CFG (Turbo 4/1.0, standard 20/5.0), so the defaults are read straight off it.</summary>
+    public ImageDefaults? VariantDefaults => new ImageDefaults { Steps = _config.DefaultSteps, CfgScale = _config.DefaultCfgScale, Width = 1024, Height = 1024 };
+
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps > 0 ? request.Steps : _config.DefaultSteps;
-        float cfgScale = request.CfgScale <= 0 ? _config.DefaultCfgScale : request.CfgScale;
+        int steps = request.Steps ?? _config.DefaultSteps;
+        float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
 
         // TODO(E-IMG-4): img2img/inpaint (request.Img2Img/Inpaint) is not yet mapped — text-to-image only.
 
@@ -46,7 +49,7 @@ public sealed class LensRecipePipeline : IRecipePipeline
             Height = request.Height,
             Steps = steps,
             CfgScale = cfgScale,
-            Seed = request.Seed < 0 ? null : (int?)(int)(request.Seed & 0x7FFFFFFF),
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
         Action<GenerationProgress> bridge = p =>

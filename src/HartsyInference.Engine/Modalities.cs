@@ -3,7 +3,7 @@ namespace HartsyInference.Engine;
 /// <summary>Parsing and display helpers for <see cref="Modality"/>, bridging enum values and their CLI names.</summary>
 public static class Modalities
 {
-    /// <summary>The CLI token for a modality, e.g. <see cref="Modality.ThreeD"/> renders as "3d".</summary>
+    /// <summary>The CLI token for a modality, e.g. <see cref="Modality.Mesh"/> renders as "3d".</summary>
     public static string ToCliName(Modality modality) => modality switch
     {
         Modality.Image => "image",
@@ -13,8 +13,8 @@ public static class Modalities
         Modality.Transcribe => "transcribe",
         Modality.Vision => "vision",
         Modality.Video => "video",
-        Modality.ThreeD => "3d",
-        Modality.Interactive => "world",
+        Modality.Mesh => "3d",
+        Modality.World => "world",
         _ => modality.ToString().ToLowerInvariant(),
     };
 
@@ -35,9 +35,9 @@ public static class Modalities
             case "vision": modality = Modality.Vision; return true;
             case "video": modality = Modality.Video; return true;
             case "3d":
-            case "threed": modality = Modality.ThreeD; return true;
+            case "threed": modality = Modality.Mesh; return true;
             case "interactive":
-            case "world": modality = Modality.Interactive; return true;
+            case "world": modality = Modality.World; return true;
             default: return false;
         }
     }
@@ -46,6 +46,6 @@ public static class Modalities
     public static IReadOnlyList<Modality> All { get; } = new[]
     {
         Modality.Image, Modality.Text, Modality.Speech, Modality.Music, Modality.Transcribe,
-        Modality.Vision, Modality.Video, Modality.ThreeD, Modality.Interactive,
+        Modality.Vision, Modality.Video, Modality.Mesh, Modality.World,
     };
 }
