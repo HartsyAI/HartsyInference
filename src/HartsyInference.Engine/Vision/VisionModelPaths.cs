@@ -78,12 +78,35 @@ public static class VisionModelPaths
     /// falls back to the first checkpoint in <paramref name="explicitPath"/>. Null when absent.</summary>
     public static string? FindYolo(string? nameOrPath, string? explicitPath)
     {
-        string? byName = ModelFileLocator.Find(nameOrPath, YoloFolder, "yolo", "Yolo");
-        if (byName is not null)
+        // A checkpoint the caller named explicitly always wins over a name probe — otherwise a stray
+        // same-named file in the models folder silently shadows the file the user actually asked for.
+        string? explicitResolved = FindCheckpoint(explicitPath, YoloFolder);
+        if (explicitResolved is not null)
         {
-            return byName;
+            return explicitResolved;
         }
-        return FindCheckpoint(explicitPath, YoloFolder);
+        string? byName = ModelFileLocator.Find(nameOrPath, YoloFolder, "yolo", "Yolo");
+        return PreferSafetensors(byName);
+    }
+
+    /// <summary>Redirects an Ultralytics <c>.pt</c> hit to a converted safetensors sibling when one exists; the engine
+    /// reads safetensors, so returning the pickle would only fail later with a confusing header error.</summary>
+    private static string? PreferSafetensors(string? path)
+    {
+        if (path is null || !path.EndsWith(".pt", StringComparison.OrdinalIgnoreCase))
+        {
+            return path;
+        }
+        string stem = path[..^3];
+        foreach (string candidate in new[] { stem + "-folded.safetensors", stem + ".safetensors" })
+        {
+            if (File.Exists(candidate))
+            {
+                Logs.Info($"[Vision] '{Path.GetFileName(path)}' is an Ultralytics pickle; using '{Path.GetFileName(candidate)}' instead.");
+                return candidate;
+            }
+        }
+        return path;
     }
 
     /// <summary>Finds a SAM 2 checkpoint used to refine boxes into pixel-accurate masks. Null when absent — callers
