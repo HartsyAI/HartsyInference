@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Schedulers;
 using Xunit;
 
@@ -40,9 +41,10 @@ public sealed unsafe class StableAudioPingPongSchedulerTests
         Tensor velocity = MakeTensor([0.5f, 0.25f, -0.5f]);
         Tensor noise = MakeTensor([1f, 1f, 1f]);
 
-        scheduler.Step(sample, velocity, noise, stepIndex: 0);
+        using CpuBackend backend = new();
+        Tensor result = scheduler.Step(backend, sample, velocity, noise, stepIndex: 0);
 
-        float* sp = (float*)sample.DataPointer;
+        float* sp = (float*)result.DataPointer;
         float x0_0 = 2f - t0 * 0.5f, expected0 = (1f - t1) * x0_0 + t1 * 1f;
         float x0_1 = -1f - t0 * 0.25f, expected1 = (1f - t1) * x0_1 + t1 * 1f;
         float x0_2 = 0.5f - t0 * -0.5f, expected2 = (1f - t1) * x0_2 + t1 * 1f;
@@ -62,9 +64,10 @@ public sealed unsafe class StableAudioPingPongSchedulerTests
         Tensor velocity = MakeTensor([0.5f]);
         Tensor noise = MakeTensor([999f]);
 
-        scheduler.Step(sample, velocity, noise, stepIndex: 7);
+        using CpuBackend backend = new();
+        Tensor result = scheduler.Step(backend, sample, velocity, noise, stepIndex: 7);
 
-        float* sp = (float*)sample.DataPointer;
+        float* sp = (float*)result.DataPointer;
         float expected = 2f - scheduler.Sigmas[7] * 0.5f;
         Assert.InRange(sp[0], expected - Tolerance, expected + Tolerance);
     }

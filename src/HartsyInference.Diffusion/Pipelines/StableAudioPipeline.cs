@@ -78,9 +78,11 @@ public sealed unsafe class StableAudioPipeline : DiffusionPipelineBase
             {
                 Tensor v = _dit.Forward(Backend, z, condTokens, timingToken, scheduler.Sigmas[i]);
                 Tensor fresh = SeedGenerator.CreateNoise(z.Shape, actualSeed + i + 1);
-                scheduler.Step(z, v, fresh, i);
+                Tensor zNext = scheduler.Step(Backend, z, v, fresh, i);
                 v.Dispose();
                 fresh.Dispose();
+                z.Dispose();
+                z = zNext;
                 onProgress?.Invoke(new GenerationProgress(i + 1, inferSteps, sw.Elapsed.TotalMilliseconds));
             }
         }

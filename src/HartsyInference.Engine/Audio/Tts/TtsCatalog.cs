@@ -68,6 +68,7 @@ internal static class TtsCatalog
         ["styletts2"] = StyleTts2Model.Descriptor,
         ["zonos"] = ZonosModel.Descriptor,
         ["gptsovits"] = GptSoVitsModel.Descriptor,
+        ["zipvoice"] = ZipVoiceModel.Descriptor,
     };
 
     /// <summary>VibeVoice 1.5B — long-form multi-speaker synthesis; built-in tokenizer, requires a 24 kHz reference.</summary>

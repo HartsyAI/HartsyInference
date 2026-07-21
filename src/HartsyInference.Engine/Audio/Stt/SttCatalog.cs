@@ -23,6 +23,7 @@ internal static class SttCatalog
         ["whisper"] = Whisper,
         ["distilwhisper"] = DistilWhisper,
         ["moonshine"] = Moonshine,
+        ["moonshinestreaming"] = MoonshineStreaming,
         ["kyutaistt"] = Kyutai,
         ["whisperstreaming"] = WhisperStreaming,
     };
@@ -77,6 +78,19 @@ internal static class SttCatalog
         LoadAsync = async (repo, cancel) =>
         {
             MoonshinePipeline pipeline = await MoonshinePipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
+            return new SttRunner((backend, audio, _) => pipeline.TranscribeAudio(backend, audio, 16_000), pipeline);
+        },
+    };
+
+    /// <summary>Useful Sensors 2nd-gen streaming Moonshine (tiny/small/medium) — a distinct architecture from the
+    /// original (sliding-window encoder, untied LM head), driven full-utterance through the same greedy decode as
+    /// <see cref="Moonshine"/>. No language/task tokens — those request fields are ignored.</summary>
+    internal static SttModelDescriptor MoonshineStreaming { get; } = new SttModelDescriptor
+    {
+        ResolveRepo = ResolveMoonshineStreamingRepo,
+        LoadAsync = async (repo, cancel) =>
+        {
+            MoonshineStreamingPipeline pipeline = await MoonshineStreamingPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
             return new SttRunner((backend, audio, _) => pipeline.TranscribeAudio(backend, audio, 16_000), pipeline);
         },
     };
@@ -246,5 +260,24 @@ internal static class SttCatalog
         return id.Contains("tiny", StringComparison.OrdinalIgnoreCase)
             ? "UsefulSensors/moonshine-tiny"
             : "UsefulSensors/moonshine-base";
+    }
+
+    /// <summary>Streaming-Moonshine variant → HF repo (tiny/small/medium exist upstream; defaults to tiny).</summary>
+    private static string ResolveMoonshineStreamingRepo(string variant)
+    {
+        string id = (variant ?? string.Empty).Trim();
+        if (id.Contains('/', StringComparison.Ordinal))
+        {
+            return id;
+        }
+        if (id.Contains("medium", StringComparison.OrdinalIgnoreCase))
+        {
+            return "UsefulSensors/moonshine-streaming-medium";
+        }
+        if (id.Contains("small", StringComparison.OrdinalIgnoreCase))
+        {
+            return "UsefulSensors/moonshine-streaming-small";
+        }
+        return "UsefulSensors/moonshine-streaming-tiny";
     }
 }

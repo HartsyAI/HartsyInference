@@ -60,6 +60,7 @@ internal static class MusicCatalog
         [AudioWeightsCatalog.AceStepId] = AceStepMusicModel.Descriptor,
         [AudioWeightsCatalog.YueId] = YueMusicModel.Descriptor,
         ["heartmula"] = HeartMulaMusicModel.Descriptor,
+        ["stableaudio"] = StableAudioMusicModel.Descriptor,
     };
 
     /// <summary>Resolves a placed checkpoint for the registry-backed families: an explicit local path wins, then the
