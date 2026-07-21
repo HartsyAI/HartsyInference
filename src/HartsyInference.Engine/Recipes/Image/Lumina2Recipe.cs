@@ -48,9 +48,9 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
         try
         {
-            (Lumina2CheckpointConverter.ConvertedWeights converted, SafeTensorsLoader transformerLoader) =
+            (Lumina2CheckpointConverter.ConvertedWeights converted, IReadOnlyList<SafeTensorsLoader> transformerLoaders) =
                 Lumina2CheckpointConverter.LoadAndConvert(context.CheckpointPath);
-            loaders.Add(transformerLoader);
+            loaders.AddRange(transformerLoaders);
             Dictionary<string, Tensor> transformerWeights = CastWeightsToF32(converted.Transformer);
 
             Lumina2Config config = Lumina2Config.FromWeights(transformerWeights);

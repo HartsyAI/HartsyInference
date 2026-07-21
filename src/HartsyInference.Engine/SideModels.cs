@@ -27,6 +27,20 @@ public static class SideModels
         Sha256 = "0a07449cf1141c0ec86e653c00465f6f0d79c6e58a2c60c8bcf4203d0e4ec4f6"
     };
 
+    /// <summary>Pile-T5-XL SentencePiece tokenizer (32128 vocab, LLaMA-derived — same size as Google T5 v1.1 but
+    /// different token-ID assignments). Required for AuraFlow conditioning: the embedded Google-T5 spiece
+    /// denoises into a coherent image but not the prompted one (wrong token ids). Canonical EleutherAI source;
+    /// byte-identical to the copy fal/AuraFlow-v0.3 ships under tokenizer/tokenizer.model.</summary>
+    public static readonly ModelAsset PileT5XlSpiece = new ModelAsset
+    {
+        Repo = "EleutherAI/pile-t5-xl",
+        RepoPath = "spiece.model",
+        TargetSubdir = "Tokenizers/T5",
+        TargetName = "pile_t5xl_spiece.model",
+        Role = "tokenizer",
+        Sha256 = "9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347"
+    };
+
     /// <summary>CLIP-L (SD1.5/SDXL/SD3/Flux text encoder).</summary>
     public static readonly ModelAsset ClipL = new ModelAsset
     {

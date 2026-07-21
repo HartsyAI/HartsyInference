@@ -19,6 +19,11 @@ public static class GgufKeyMapperRegistry
         // order and a Radiance/Zeta checkpoint is a strict key-superset of classic Chroma / Z-Image.
         Register(r, new ChromaRadianceKeyMapper());
         Register(r, new ZetaChromaKeyMapper());
+        // HunyuanImageKeyMapper before FluxKeyMapper: FluxKeyMapper.MatchesByKeys only checks for
+        // double_blocks./single_blocks. presence, which HunyuanImage's Tencent-style GGUF also has (plus its
+        // distinguishing byt5_in./img_attn_qkv. keys) — without this ordering Flux's broader check wins the
+        // race and every HunyuanImage GGUF silently loads as garbage Flux weights (black-image bug, 2026-07-21).
+        Register(r, new HunyuanImageKeyMapper());
         Register(r, new FluxKeyMapper());
         Register(r, new Flux2KeyMapper());
         Register(r, new SdxlKeyMapper());
@@ -29,7 +34,6 @@ public static class GgufKeyMapperRegistry
         Register(r, new AuraFlowKeyMapper());
         Register(r, new ZImageKeyMapper());
         Register(r, new ErnieImageKeyMapper());
-        Register(r, new HunyuanImageKeyMapper());
         Register(r, new QwenImageKeyMapper());
         // Gemma before Llama: Gemma's heuristic (sandwich norms) is a strict superset of the llama-family keys.
         Register(r, new GemmaKeyMapper());

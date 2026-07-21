@@ -79,31 +79,46 @@ internal sealed unsafe class ZipformerEncoderLayer
 
         Tensor cur = stageTimeEmb is not null ? AddBroadcast(src, stageTimeEmb, t) : Copy(src, t);
 
-        AddInPlace(cur, _ff1.Forward(backend, cur, t), t);
-        AddInPlace(cur, _nonlinAttention.Forward(backend, cur, headZero, t), t);
+        cur = AddDevice(backend, cur, _ff1.Forward(backend, cur, t));
+        cur = AddDevice(backend, cur, _nonlinAttention.Forward(backend, cur, headZero, t));
         headZero.Dispose();
-        AddInPlace(cur, _selfAttn1.Forward(backend, cur, attnWeights, t), t);
+        cur = AddDevice(backend, cur, _selfAttn1.Forward(backend, cur, attnWeights, t));
 
         if (stageTimeEmb is not null) AddBroadcastInPlace(cur, stageTimeEmb, t);
-        AddInPlace(cur, _conv1.Forward(backend, cur, t), t);
-        AddInPlace(cur, _ff2.Forward(backend, cur, t), t);
+        cur = AddDevice(backend, cur, _conv1.Forward(backend, cur, t));
+        cur = AddDevice(backend, cur, _ff2.Forward(backend, cur, t));
 
         Tensor afterMid = _bypassMid.Forward(src, cur, t);
         cur.Dispose();
         cur = afterMid;
 
-        AddInPlace(cur, _selfAttn2.Forward(backend, cur, attnWeights, t), t);
+        cur = AddDevice(backend, cur, _selfAttn2.Forward(backend, cur, attnWeights, t));
         attnWeights.Dispose();
 
         if (stageTimeEmb is not null) AddBroadcastInPlace(cur, stageTimeEmb, t);
-        AddInPlace(cur, _conv2.Forward(backend, cur, t), t);
-        AddInPlace(cur, _ff3.Forward(backend, cur, t), t);
+        cur = AddDevice(backend, cur, _conv2.Forward(backend, cur, t));
+        cur = AddDevice(backend, cur, _ff3.Forward(backend, cur, t));
 
         Tensor normed = _norm.Forward(cur, t);
         cur.Dispose();
 
         Tensor output = _bypass.Forward(src, normed, t);
         normed.Dispose();
+        return output;
+    }
+
+    /// <summary><c>a + b</c> via <see cref="IBackend.Add"/> (GPU-resident) instead of a host <c>DataPointer</c>
+    /// read/write loop — called 8× per layer (~4096× across one full ZipVoice generation: 16 fm_decoder layers
+    /// × 16 sampling steps × 2 for CFG cond/uncond), so even though each individual add is cheap
+    /// (<c>O(T·dim)</c>), the sync-per-call cost compounded across that many invocations was a real remaining
+    /// cost after the attention-weights fix. Disposes both inputs, matching the old <c>AddInPlace</c>'s
+    /// disposal of <paramref name="b"/> (the caller already owned/reassigned <paramref name="a"/>).</summary>
+    private static Tensor AddDevice(IBackend backend, Tensor a, Tensor b)
+    {
+        Tensor output = new(a.Shape, DType.F32);
+        backend.Add(output, a, b);
+        a.Dispose();
+        b.Dispose();
         return output;
     }
 
@@ -166,12 +181,4 @@ internal sealed unsafe class ZipformerEncoderLayer
         }
     }
 
-    private static void AddInPlace(Tensor dst, Tensor src, int t)
-    {
-        float* dp = (float*)dst.DataPointer;
-        float* sp = (float*)src.DataPointer;
-        long n = dst.ElementCount;
-        for (long i = 0; i < n; i++) dp[i] += sp[i];
-        src.Dispose();
-    }
 }

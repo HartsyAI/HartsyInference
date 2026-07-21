@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.HuggingFace;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -36,20 +37,36 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
     {
-        // TODO(E-IMG-4/5): GGUF transformer input (Dev 32B ships as Q4_K_S), split-file / user overrides from
-        // ImageRequest.Components, and img2img are deferred — this ports the safetensors text-to-image core.
-        SafeTensorsLoader transformerLoader = new SafeTensorsLoader();
-        transformerLoader.Load(context.CheckpointPath);
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { transformerLoader };
+        // TODO(E-IMG-4/5): split-file / user overrides from ImageRequest.Components, and img2img are deferred —
+        // this ports the text-to-image core.
+        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        IDisposable? ggufHandle = null;
         try
         {
-            Dictionary<string, Tensor> rawWeights = transformerLoader.GetAllTensors();
+            // GGUF repacks ship BFL-native keys (Flux2KeyMapper: "we just pass through") — the quants stay
+            // native (transient per-GEMM dequant); BF16 GGUF tensors still need the F16 cast below.
+            bool isGguf = context.CheckpointPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase);
+            Dictionary<string, Tensor> rawWeights;
+            if (isGguf)
+            {
+                GgufModelLoader.LoadedGgufModel gguf = GgufModelLoader.Load(context.CheckpointPath);
+                ggufHandle = gguf;
+                rawWeights = GgufModelLoader.RelabelRank2ToPyTorchOrder(gguf.Weights);
+            }
+            else
+            {
+                SafeTensorsLoader transformerLoader = new SafeTensorsLoader();
+                transformerLoader.Load(context.CheckpointPath);
+                loaders.Add(transformerLoader);
+                rawWeights = transformerLoader.GetAllTensors();
+            }
             // Pre-cast BF16 → F16 on CPU (F16 keeps the same footprint as BF16 and F16↔F32 is supported on every op).
+            // GGUF-quantized tensors (Q4_K etc.) stay native — they dequant transiently per-GEMM elsewhere, and
+            // a plain CastTo throws for quantized dtypes (needs GgufDequantizer instead).
             Dictionary<string, Tensor> castWeights = new Dictionary<string, Tensor>(rawWeights.Count);
             foreach (KeyValuePair<string, Tensor> kvp in rawWeights)
             {
-                DType d = kvp.Value.DType;
-                castWeights[kvp.Key] = (d == DType.F32 || d == DType.F16) ? kvp.Value : kvp.Value.CastTo(DType.F16);
+                castWeights[kvp.Key] = kvp.Value.DType == DType.BF16 ? kvp.Value.CastTo(DType.F16) : kvp.Value;
             }
 
             Flux2Config config = DetectConfigFromTransformerWeights(castWeights, GuessConfigFromFilename(Path.GetFileName(context.CheckpointPath)) ?? Flux2Config.Klein4B);
@@ -125,7 +142,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
                 hiddenLayers: null,
                 bnEps: 1e-5f);
             Logs.Info($"[Flux2Recipe] Flux.2 ready ({DescribeConfig(config)}).");
-            return new Flux2RecipePipeline(pipeline, config, qwenTokenizer, mistralTokenizer, MistralDevSystemPrompt, encoder, loaders);
+            return new Flux2RecipePipeline(pipeline, config, qwenTokenizer, mistralTokenizer, MistralDevSystemPrompt, encoder, loaders, ggufHandle);
         }
         catch (Exception ex)
         {
@@ -134,6 +151,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             {
                 loader.Dispose();
             }
+            ggufHandle?.Dispose();
             throw;
         }
     }

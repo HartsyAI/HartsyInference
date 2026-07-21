@@ -30,13 +30,39 @@ public sealed class Lumina2CheckpointConverter
         public required bool IsFp8Mix { get; init; }
     }
 
-    /// <summary>Loads and partitions a Lumina-Image-2.0 single-file checkpoint.</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
+    /// <summary>Loads and partitions a Lumina-Image-2.0 checkpoint: a single file, or one shard of a diffusers
+    /// multi-shard release (detected via a sibling <c>*.safetensors.index.json</c> in the same directory — the
+    /// real <c>Alpha-VLLM/Lumina-Image-2.0</c> diffusers weights ship as 2 shards; every other shard alongside
+    /// <paramref name="checkpointPath"/> is merged in too).</summary>
+    public static (ConvertedWeights weights, IReadOnlyList<SafeTensorsLoader> loaders) LoadAndConvert(string checkpointPath)
     {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        ConvertedWeights converted = Convert(loader.GetAllTensors());
-        return (converted, loader);
+        string? dir = Path.GetDirectoryName(checkpointPath);
+        bool isMultiShard = !string.IsNullOrEmpty(dir) && Directory.GetFiles(dir, "*.safetensors.index.json").Length > 0;
+
+        List<SafeTensorsLoader> loaders = new();
+        Dictionary<string, Tensor> merged = new();
+        try
+        {
+            string[] shardPaths = isMultiShard
+                ? Directory.GetFiles(dir!, "*.safetensors").OrderBy(p => p, StringComparer.Ordinal).ToArray()
+                : new[] { checkpointPath };
+            foreach (string shardPath in shardPaths)
+            {
+                SafeTensorsLoader loader = new();
+                loader.Load(shardPath);
+                loaders.Add(loader);
+                foreach (KeyValuePair<string, Tensor> kv in loader.GetAllTensors())
+                    merged[kv.Key] = kv.Value;
+            }
+        }
+        catch
+        {
+            foreach (SafeTensorsLoader loader in loaders) loader.Dispose();
+            throw;
+        }
+
+        ConvertedWeights converted = Convert(merged);
+        return (converted, loaders);
     }
 
     /// <summary>Partitions a flat dict of Lumina-Image-2.0 safetensors keys.</summary>

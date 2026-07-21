@@ -52,11 +52,11 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
         VaeDecoder vae = new VaeDecoder(VaeConfig.AuraFlow);
         vae.LoadWeights(vaeWeights);
 
-        // TODO(E-IMG-5): AuraFlow needs the Pile-T5-XL SentencePiece (same 32128 vocab as Google T5 v1.1 but
-        // different token-ID assignments); the SwarmUI loader downloaded pile_t5xl_spiece.model. The embedded
-        // Google-T5 spiece used here still denoises into a coherent image but not the prompted one — resolving
-        // the Pile-T5 spiece is required for real-weight parity.
-        T5Tokenizer tokenizer = new T5Tokenizer(maxLength: 256);
+        // Pile-T5-XL needs its OWN SentencePiece (same 32128 vocab size as Google T5 v1.1 but different
+        // token-ID assignments) — the embedded Google-T5 spiece denoises into a coherent image but not the
+        // prompted one, since every token id maps to the wrong piece.
+        string spiecePath = ModelDownloader.EnsureSideModelAsync(SideModels.PileT5XlSpiece, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        T5Tokenizer tokenizer = new T5Tokenizer(spiecePath, maxLength: 256);
 
         AuraFlowPipeline pipeline = new AuraFlowPipeline(context.Backend, t5, transformer, vae, config);
         Logs.Info("[AuraFlowRecipe] AuraFlow ready.");

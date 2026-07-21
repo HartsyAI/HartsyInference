@@ -158,30 +158,36 @@ public sealed class HuggingFaceClient : IDisposable
         string tempPath = destinationPath + ".tmp";
         try
         {
-            await using Stream sourceStream = await response.Content
-                .ReadAsStreamAsync(ct)
-                .ConfigureAwait(false);
-            await using FileStream destinationStream = new FileStream(
-                tempPath,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None,
-                DownloadBufferSize,
-                useAsync: true);
-
-            byte[] buffer = new byte[DownloadBufferSize];
-            long bytesRead = 0L;
-            int read;
-
-            while ((read = await sourceStream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+            // The write stream must be fully disposed (releasing its FileShare.None lock) before
+            // VerifySha256Async reopens tempPath for reading below — nested block so the `await using`
+            // cleanup runs at THIS scope's closing brace, not the outer try's, otherwise the verify-read
+            // races the still-open write handle and throws "process cannot access the file".
             {
-                await destinationStream.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
-                bytesRead += read;
+                await using Stream sourceStream = await response.Content
+                    .ReadAsStreamAsync(ct)
+                    .ConfigureAwait(false);
+                await using FileStream destinationStream = new FileStream(
+                    tempPath,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None,
+                    DownloadBufferSize,
+                    useAsync: true);
 
-                if (totalBytes > 0)
+                byte[] buffer = new byte[DownloadBufferSize];
+                long bytesRead = 0L;
+                int read;
+
+                while ((read = await sourceStream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
                 {
-                    double fraction = (double)bytesRead / totalBytes;
-                    progress?.Report(fraction);
+                    await destinationStream.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                    bytesRead += read;
+
+                    if (totalBytes > 0)
+                    {
+                        double fraction = (double)bytesRead / totalBytes;
+                        progress?.Report(fraction);
+                    }
                 }
             }
 

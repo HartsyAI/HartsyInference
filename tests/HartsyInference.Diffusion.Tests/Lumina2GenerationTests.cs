@@ -72,13 +72,13 @@ public sealed class Lumina2GenerationTests
         Stopwatch sw = Stopwatch.StartNew();
 
         _output.WriteLine($"[1/5] Loading + converting transformer: {Path.GetFileName(TestPaths.Lumina2.Transformer)}");
-        (Lumina2CheckpointConverter.ConvertedWeights converted, SafeTensorsLoader transformerLoader) =
+        (Lumina2CheckpointConverter.ConvertedWeights converted, IReadOnlyList<SafeTensorsLoader> transformerLoaders) =
             Lumina2CheckpointConverter.LoadAndConvert(TestPaths.Lumina2.Transformer);
         _output.WriteLine($"  Loaded in {sw.ElapsedMilliseconds}ms ({converted.Transformer.Count} keys, fp8={converted.IsFp8Mix})");
 
         try
         {
-            using (transformerLoader)
+            try
             {
                 Dictionary<string, Tensor> transformerWeights = CastWeightsToF32(converted.Transformer);
 
@@ -148,6 +148,10 @@ public sealed class Lumina2GenerationTests
 
                 totalSw.Stop();
                 _output.WriteLine($"\nTotal: {totalSw.Elapsed.TotalSeconds:F1}s");
+            }
+            finally
+            {
+                foreach (SafeTensorsLoader l in transformerLoaders) l.Dispose();
             }
         }
         catch (NotImplementedException nie)

@@ -20,9 +20,10 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
     private readonly string _mistralSystemPrompt;
     private readonly LlamaStyleEncoder _encoder;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly IDisposable? _ggufHandle;
 
-    /// <summary>Wraps the constructed Flux.2 pipeline plus its tokenizer, taking ownership of every disposable. Exactly one of <paramref name="qwenTokenizer"/> (Klein) / <paramref name="mistralTokenizer"/> (Dev) is non-null.</summary>
-    public Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config config, Qwen3Tokenizer? qwenTokenizer, ErnieTokenizer? mistralTokenizer, string mistralSystemPrompt, LlamaStyleEncoder encoder, List<SafeTensorsLoader> loaders)
+    /// <summary>Wraps the constructed Flux.2 pipeline plus its tokenizer, taking ownership of every disposable. Exactly one of <paramref name="qwenTokenizer"/> (Klein) / <paramref name="mistralTokenizer"/> (Dev) is non-null. <paramref name="ggufHandle"/> is non-null when the transformer loaded from a GGUF file (keeps the mmap alive for any pass-through F16 tensor still referencing it).</summary>
+    public Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config config, Qwen3Tokenizer? qwenTokenizer, ErnieTokenizer? mistralTokenizer, string mistralSystemPrompt, LlamaStyleEncoder encoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle = null)
     {
         _pipeline = pipeline;
         _config = config;
@@ -31,6 +32,7 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
         _mistralSystemPrompt = mistralSystemPrompt;
         _encoder = encoder;
         _loaders = loaders;
+        _ggufHandle = ggufHandle;
     }
 
     /// <summary>A Klein checkpoint (no guidance embedding) is CFG-distilled and few-step, so it resolves against <see cref="Flux2Recipe.KleinDefaults"/> rather than Dev's 50 steps.</summary>
@@ -111,5 +113,6 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
         {
             loader.Dispose();
         }
+        _ggufHandle?.Dispose();
     }
 }
