@@ -123,9 +123,11 @@ internal sealed unsafe class ZipformerEncoderLayer
         foreach (Tensor t in _bypass.EnumerateWeights()) yield return t;
     }
 
+    /// <summary>2D <c>[T,T]</c> — matches <see cref="IBackend.MatMul"/>'s exact-2D-shape expectation
+    /// (<see cref="ZipformerNonlinAttention"/> is the only consumer).</summary>
     private Tensor SliceHead0(Tensor attnWeights, int t)
     {
-        Tensor head0 = new(new TensorShape(1, t, t), DType.F32);
+        Tensor head0 = new(new TensorShape(t, t), DType.F32);
         Buffer.MemoryCopy((float*)attnWeights.DataPointer, (float*)head0.DataPointer,
             (long)t * t * sizeof(float), (long)t * t * sizeof(float));
         return head0;

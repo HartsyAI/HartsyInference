@@ -67,11 +67,11 @@ public static class ModelCatalog
             E("ideogram4", img, "Ideogram 4", "9.3B single-stream DiT", ok),
             E("f-lite", img, "F-Lite", "DiT (Qwen)", vp),
             E("lance-image", img, "Lance (Image)", "unified multimodal DiT", vp),
-            E("zimage", img, "Z-Image Turbo", "NextDiT (Qwen3-4B)", st),
-            E("anima", img, "Anima", "Cosmos-Predict2-2B (T=1)", st),
-            E("zeta-chroma", img, "Zeta-Chroma", "Chroma-derivative DiT (Qwen3-4B)", st),
-            E("boogu", img, "Boogu Image", "single-stream DiT (Qwen3-VL-8B + Flux VAE)", st),
-            E("lens", img, "Lens · Lens-Turbo", "48-layer MoE DiT (Microsoft Lens)", st),
+            E("zimage", img, "Z-Image Turbo", "NextDiT (Qwen3-4B)", ok),
+            E("anima", img, "Anima", "Cosmos-Predict2-2B (T=1)", ok),
+            E("zeta-chroma", img, "Zeta-Chroma", "Chroma-derivative DiT (Qwen3-4B)", ok),
+            E("boogu", img, "Boogu Image", "single-stream DiT (Qwen3-VL-8B + Flux VAE)", ok),
+            E("lens", img, "Lens · Lens-Turbo", "48-layer MoE DiT (Microsoft Lens)", ok),
             new CatalogEntry
             {
                 Id = "krea2",
@@ -79,7 +79,8 @@ public static class ModelCatalog
                 DisplayName = "Krea 2 Turbo",
                 Architecture = "Krea2 DiT (Qwen3-VL-4B + Qwen-Image VAE)",
                 Status = ok,
-                CliDrivable = false, // pipeline exists; Engine image-path wiring + real-weight verification pending
+                CliDrivable = false, // real-weight verified via --model-path (see MODEL_STATUS_IMAGE.md); the
+                // catalog-slug path (`-m krea2`, this Assets-driven auto-download) has not been exercised end-to-end yet
                 // Side models come straight from SideModels — the same SHA-256-pinned entries Krea2Recipe
                 // downloads — so the catalog can never disagree with what the engine actually loads. Only the
                 // transformer is spelled out here: it is the checkpoint itself and has no SideModels entry.

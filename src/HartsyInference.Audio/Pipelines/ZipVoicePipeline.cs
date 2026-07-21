@@ -188,20 +188,23 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
             float dt = timesteps[step + 1] - timesteps[step];
 
             Tensor vCond = _model.ForwardVelocity(backend, x, textCondition, speechCondition, totalFrames, t);
+            Tensor xNext;
             if (opts.GuidanceScale != 0f)
             {
                 bool speechUncondZeroed = t > 0.5f;
                 Tensor speechForUncond = speechUncondZeroed ? zeroSpeech : speechCondition;
                 float g = speechUncondZeroed ? opts.GuidanceScale : opts.GuidanceScale * 2f;
                 Tensor vUncond = _model.ForwardVelocity(backend, x, zeroText, speechForUncond, totalFrames, t);
-                ApplyCfgAndStep(x, vCond, vUncond, g, dt, totalFrames, featDim);
+                xNext = ApplyCfgAndStep(backend, x, vCond, vUncond, g, dt);
                 vUncond.Dispose();
             }
             else
             {
-                StepInPlace(x, vCond, dt, totalFrames, featDim);
+                xNext = StepDevice(backend, x, vCond, dt);
             }
             vCond.Dispose();
+            x.Dispose();
+            x = xNext;
         }
         zeroText.Dispose();
         zeroSpeech.Dispose();
@@ -220,25 +223,38 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
         return ts;
     }
 
-    private static unsafe void ApplyCfgAndStep(Tensor x, Tensor vCond, Tensor vUncond, float g, float dt, int t, int dim)
+    /// <summary><c>x + dt·((1+g)·vCond − g·vUncond)</c>, fully GPU-resident (chained <see cref="IBackend.Scale"/>/
+    /// <see cref="IBackend.Add"/>) — was a host <c>DataPointer</c> loop that read/wrote the loop-carried latent
+    /// every one of the 16 sampling steps, forcing a device↔host round trip right before the next step's
+    /// backbone forward pass needed <c>x</c> back on-device.</summary>
+    private static Tensor ApplyCfgAndStep(IBackend backend, Tensor x, Tensor vCond, Tensor vUncond, float g, float dt)
     {
-        float* xp = (float*)x.DataPointer;
-        float* cp = (float*)vCond.DataPointer;
-        float* up = (float*)vUncond.DataPointer;
-        long n = (long)t * dim;
-        for (long i = 0; i < n; i++)
-        {
-            float v = (1f + g) * cp[i] - g * up[i];
-            xp[i] += dt * v;
-        }
+        Tensor scaledCond = new(vCond.Shape, DType.F32);
+        backend.Scale(scaledCond, vCond, 1f + g);
+        Tensor scaledUncond = new(vUncond.Shape, DType.F32);
+        backend.Scale(scaledUncond, vUncond, -g);
+        Tensor combined = new(x.Shape, DType.F32);
+        backend.Add(combined, scaledCond, scaledUncond);
+        scaledCond.Dispose(); scaledUncond.Dispose();
+
+        Tensor scaledStep = new(x.Shape, DType.F32);
+        backend.Scale(scaledStep, combined, dt);
+        combined.Dispose();
+        Tensor xNext = new(x.Shape, DType.F32);
+        backend.Add(xNext, x, scaledStep);
+        scaledStep.Dispose();
+        return xNext;
     }
 
-    private static unsafe void StepInPlace(Tensor x, Tensor v, float dt, int t, int dim)
+    /// <summary><c>x + dt·v</c>, GPU-resident — the no-CFG counterpart of <see cref="ApplyCfgAndStep"/>.</summary>
+    private static Tensor StepDevice(IBackend backend, Tensor x, Tensor v, float dt)
     {
-        float* xp = (float*)x.DataPointer;
-        float* vp = (float*)v.DataPointer;
-        long n = (long)t * dim;
-        for (long i = 0; i < n; i++) xp[i] += dt * vp[i];
+        Tensor scaledV = new(x.Shape, DType.F32);
+        backend.Scale(scaledV, v, dt);
+        Tensor xNext = new(x.Shape, DType.F32);
+        backend.Add(xNext, x, scaledV);
+        scaledV.Dispose();
+        return xNext;
     }
 
     private static unsafe Tensor ToChannelsLastScaled(float[,] melData, int t, int dim, float scale)
