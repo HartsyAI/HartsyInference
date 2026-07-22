@@ -35,12 +35,13 @@ public sealed class TextDecodeThroughputBenchmark
             .Where(File.Exists)];
     }
 
-    private readonly record struct RunResult(double TgTps, double TtftMs, int TokenCount);
+    private readonly record struct RunResult(double TgTps, double TtftMs, int TokenCount, long D2hSyncCount);
 
-    private static RunResult RunOnce(TextGenerationPipeline pipeline, bool graphDecode)
+    private static RunResult RunOnce(TextGenerationPipeline pipeline, CudaBackend backend, bool graphDecode)
     {
         List<long> stamps = [];
         Stopwatch sw = Stopwatch.StartNew();
+        backend.ResetD2hSyncCount();
         GenerationResult result = pipeline.Generate(new GenerationRequest
         {
             Prompt = Prompt,
@@ -48,13 +49,14 @@ public sealed class TextDecodeThroughputBenchmark
             Sampling = SamplingOptions.Default with { Greedy = true },
             GraphDecode = graphDecode,
         }, onToken: _ => stamps.Add(sw.ElapsedTicks));
+        long syncs = backend.GetD2hSyncCount();
         if (stamps.Count < 2)
-            return new RunResult(0, 0, stamps.Count);
+            return new RunResult(0, 0, stamps.Count, syncs);
         double ticksPerSec = Stopwatch.Frequency;
         double ttftMs = stamps[0] / ticksPerSec * 1000.0;
         double decodeWindowSec = (stamps[^1] - stamps[0]) / ticksPerSec;
         double tg = decodeWindowSec > 0 ? (stamps.Count - 1) / decodeWindowSec : 0;
-        return new RunResult(tg, ttftMs, result.TokenIds.Count);
+        return new RunResult(tg, ttftMs, result.TokenIds.Count, syncs);
     }
 
     private static double Median(IEnumerable<double> xs)
@@ -80,26 +82,43 @@ public sealed class TextDecodeThroughputBenchmark
             bool graphEligible = model.Transformer.SupportsGraphDecode(backend);
 
             // Warmup (JIT, weight preload, first-launch overhead) — discarded.
-            RunOnce(pipeline, graphDecode: false);
+            RunOnce(pipeline, backend, graphDecode: false);
 
             List<double> tgOff = [];
-            for (int i = 0; i < Reps; i++) tgOff.Add(RunOnce(pipeline, graphDecode: false).TgTps);
+            List<long> syncOff = [];
+            for (int i = 0; i < Reps; i++)
+            {
+                RunResult r = RunOnce(pipeline, backend, graphDecode: false);
+                tgOff.Add(r.TgTps);
+                syncOff.Add(r.D2hSyncCount);
+            }
 
             List<double> tgOn = [];
+            List<long> syncOn = [];
             if (graphEligible)
             {
-                RunOnce(pipeline, graphDecode: true);   // warmup + capture
-                for (int i = 0; i < Reps; i++) tgOn.Add(RunOnce(pipeline, graphDecode: true).TgTps);
+                RunOnce(pipeline, backend, graphDecode: true);   // warmup + capture
+                for (int i = 0; i < Reps; i++)
+                {
+                    RunResult r = RunOnce(pipeline, backend, graphDecode: true);
+                    tgOn.Add(r.TgTps);
+                    syncOn.Add(r.D2hSyncCount);
+                }
             }
 
             string name = $"{Path.GetFileName(path)} (arch={model.Architecture})";
-            _output.WriteLine($"{name}: graph-off tg median = {Median(tgOff):F2} tok/s (reps: {string.Join(", ", tgOff.Select(x => x.ToString("F1")))})");
+            _output.WriteLine($"{name}: graph-off tg median = {Median(tgOff):F2} tok/s (reps: {string.Join(", ", tgOff.Select(x => x.ToString("F1")))}) [D2H syncs: {string.Join(",", syncOff)}]");
             if (graphEligible)
-                _output.WriteLine($"{name}: graph-on  tg median = {Median(tgOn):F2} tok/s (reps: {string.Join(", ", tgOn.Select(x => x.ToString("F1")))})");
+                _output.WriteLine($"{name}: graph-on  tg median = {Median(tgOn):F2} tok/s (reps: {string.Join(", ", tgOn.Select(x => x.ToString("F1")))}) [D2H syncs: {string.Join(",", syncOn)}]");
             else
                 _output.WriteLine($"{name}: graph decode NOT eligible for this architecture (structural check failed)");
 
             Assert.True(Median(tgOff) > 0, $"{name}: graph-off produced no measurable decode throughput");
+            // Per LLM_THROUGHPUT_BENCHMARK.md: mid-decode D2H syncs invalidate the tg number (each one stalls
+            // the GPU pipeline). ~1 sync/run is fine (e.g. the final result readback); more indicates a stray
+            // sync point was reintroduced in the decode loop.
+            if (graphEligible)
+                Assert.True(syncOn.Max() <= 2, $"{name}: graph-on decode has {syncOn.Max()} D2H syncs — tg number is not trustworthy");
         }
     }
 }

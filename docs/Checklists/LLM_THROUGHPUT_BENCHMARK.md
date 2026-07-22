@@ -81,13 +81,46 @@ Engine-side pp/tg come **for free** from the `TextGenerationPipeline.Generate(re
 | OLMoE-1B-7B Q4_K_M (MoE) | 5857.5 ± 55.9 | 283.27 ± 2.08 |
 | Mistral-7B-v0.3 Q4_K_M | 2131.6 ± 31.7 | 66.46 ± 0.76 |
 
-## Phase 1 — Tier 1: engine micro-benchmark ⬜
+## Phase 1 — Tier 1: engine micro-benchmark ✅ (2026-07-22, via `TextDecodeThroughputBenchmark.cs`, llama-cpp-python baseline instead of llama-bench)
 
-- [ ] New project `benchmarks/HartsyInference.LlmBench/` (console, references `HartsyInference.LLM` + `HartsyInference.Cuda`; copies `Ptx/` to output).
-- [ ] Per model: `GgufLanguageModel.Load(path, lowVramQuant:true)` → `PreloadWeights` → warmup → N reps of prefill(512)+decode(128), capturing per-token timestamps + `GetD2hSyncCount()`.
-- [ ] Compute pp/tg median ± stddev; assert D2H≈0; emit `benchmarks/results/llmbench_<host>_<date>.json` + a CSV.
-- [ ] Run `llama-bench` on the same 7 GGUFs with identical params; parse its JSON.
-- [ ] Join into a comparison table: `model | quant | llama.cpp pp/tg | engine pp/tg | ratio (engine÷llama)`.
+Built as `tests/HartsyInference.Cuda.Tests/TextDecodeThroughputBenchmark.cs` — real production path
+(`TextGenerationPipeline.Generate`, not a hand-rolled loop), warmup + 5 reps × 128-token greedy decode,
+per-token timestamps via the `onToken` callback, `GetD2hSyncCount()` asserted ≤2 (graph-on decode must be
+~0 mid-decode syncs or the tg number isn't trustworthy — see Decisions below). Reports both graph-off and
+graph-on (`GraphDecode=true`, our best config) medians. Python-side baseline used **llama-cpp-python**
+(the llama.cpp CUDA engine via a Python binding) instead of `llama-bench` directly, since the box has no
+system CUDA toolkit — built llama-cpp-python from source against pip-installed `nvidia-cuda-nvcc`/
+`nvidia-cuda-runtime`/`nvidia-cublas` wheels (see `MODEL_STATUS_LLM.md`'s glm4 section for the toolchain
+details; same discovery applies here). Same frozen prompt/params on both sides
+(`benchmarks/python-baseline/bench_llama_cpp_python.py`).
+
+**⚠ Measurement gotcha hit and fixed**: this box has two GPUs (3060 index 0, 4090 index 1 in `nvidia-smi`'s
+PCI-bus ordering). `CUDA_VISIBLE_DEVICES=0` alone is **not sufficient** to pin the 3060 — CUDA's default
+device ordering is `FASTEST_FIRST`, so plain `CUDA_VISIBLE_DEVICES=0` silently selects the **4090** as CUDA
+device 0, not the 3060. Symptom: both engines' measured tg roughly doubled between sessions with no code
+change, and the ratio between them looked to flip (a "we're faster than llama.cpp!" reading that evaporated
+on a supposedly-identical re-run). Root cause confirmed via `nvidia-smi dmon -s u` sampled live during a
+run: without the flag, GPU **index 1** (4090) hit 70-82% utilization while GPU 0 sat idle; with the flag,
+GPU 0 (3060) hit ~90%. **Fix: always set both `CUDA_DEVICE_ORDER=PCI_BUS_ID` and `CUDA_VISIBLE_DEVICES=0`
+together** to target the 3060 — checked via `nvidia-smi -L` (PCI order) name match, not by index alone.
+Anchor-verified against this doc's own documented llama.cpp baseline for `llama-3.2-1b-instruct-q8_0.gguf`
+(215.91 tok/s, Results table below) — a fresh llama-cpp-python run with the flag set landed at 190.34 tok/s
+(same ballpark, unlike the ~400 tok/s misattributed-to-4090 reading), confirming the fix is real, not another
+misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0` on both sides.**
+
+**Results (RTX 3060, `--low-vram-quant`, greedy, 128 tok, graph-on = our best config):**
+
+| Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (ours÷llama, graph-on) |
+|---|---|---|---|---|
+| Llama-3.2-1B-Instruct Q8_0 | 128.72 tok/s | 142.14 tok/s | 190.34 tok/s | **0.75× (1.34× slower)** |
+| Qwen3-4B Q4_K_M | 54.44 tok/s | 60.05 tok/s | 85.59 tok/s | **0.70× (1.43× slower)** |
+
+Not faster than Python/llama.cpp on either model even with CUDA-graph decode (our best available config) —
+per the user's instruction this triggers the perf-pass requirement below.
+
+- [ ] `llama-bench` itself (vs. llama-cpp-python) not run this pass — no system CUDA toolkit; the pip-wheel
+  toolchain builds llama-cpp-python fine but not the full llama.cpp CLI suite. Same underlying engine either
+  way, so the comparison is still apples-to-apples for the CUDA compute path.
 
 ## Phase 2 — Tier 2: Swarm API integration benchmark (the real test) ⬜
 

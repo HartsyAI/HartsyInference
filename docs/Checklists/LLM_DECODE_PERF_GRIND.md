@@ -22,6 +22,26 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > on-device MoE routing (would unlock olmoe/qwen2moe/granitemoe for graphing), the big-model GEMV
 > memory-access-pattern redesign (blocked on `ncu` access last attempt).
 
+> **STATUS UPDATE (2026-07-22): `ncu` access re-attempted, still blocked — confirmed a driver policy, not a
+> toolchain gap.** This session discovered pip-installable standalone CUDA toolkit wheels
+> (`nvidia-cuda-nvcc`/`nvidia-cuda-runtime`/`nvidia-cublas`) work on this box with no system CUDA install
+> (see `MODEL_STATUS_LLM.md`'s glm4 section) — that includes `nsight-compute` (`ncu`), which was previously
+> assumed simply absent. It isn't: `ncu --set basic ... dotnet ...` connects to the target process fine but
+> fails with `ERR_NVGPUCTRPERM` — the GeForce driver restricts GPU performance-counter access to admin users
+> regardless of which `ncu` binary/version launches it. This needs a system-level fix (`sudo`-gated kernel
+> module parameter + reload, or profiling as root), not a code or toolchain change, and wasn't attempted
+> without explicit user sign-off. **The GEMV memory-access-pattern redesign lever stays blocked** — Phase 5's
+> conclusion (memory-bound, not ALU-bound; `dp4a` int8 built, numerically exact, no speedup) still stands, so
+> there's no new evidence to guess a redesign from. Two new benchmark data points added this session (via
+> `TextDecodeThroughputBenchmark.cs` vs a fresh llama-cpp-python build — see `LLM_THROUGHPUT_BENCHMARK.md`):
+> **Llama-3.2-1B-Instruct Q8_0: 142.14 tok/s graph-on vs llama-cpp-python 190.34 (1.34× slower)** — notably
+> *better* than the 2026-07-10 entry's 1.72× gap for the same model (measurement-methodology difference:
+> llama-cpp-python here vs `llama-bench` there; still an improvement, not a regression). **Qwen3-4B Q4_K_M
+> (new size, not previously benchmarked — only Qwen3-0.6B was): 60.05 tok/s graph-on vs 85.59 (1.43× slower)**,
+> in the same range as the rest of this doc's gaps. Neither is faster than llama.cpp; no code change made this
+> pass since every already-identified lever (CUDA graphs) is already on, and the next lever needs `ncu` data
+> this session couldn't obtain.
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

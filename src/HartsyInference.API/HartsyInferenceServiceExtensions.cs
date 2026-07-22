@@ -30,14 +30,14 @@ public static class HartsyInferenceServiceExtensions
         return services;
     }
 
-    /// <summary>Maps health/settings/admin probes and optional API-key auth. Generation endpoints (native +
-    /// OpenAI-compat) are wired onto <see cref="IInferenceEngine"/> in a follow-up phase.</summary>
+    /// <summary>Maps health/settings/admin probes, optional API-key auth, and native + OpenAI-compat generation
+    /// endpoints — all onto <see cref="IInferenceEngine"/>.</summary>
     public static void MapHartsyInferenceEndpoints(this WebApplication app)
     {
         HartsyInferenceServerOptions options = app.Services.GetRequiredService<HartsyInferenceServerOptions>();
 
         // Last-resort safety net: catches any exception a route handler doesn't already handle itself and turns
-        // it into a structured, logged 500 instead of a bare/blank response. Registered first so it wraps every
+        // it into a structured, logged response instead of a bare/blank one. Registered first so it wraps every
         // middleware/route below it. This does NOT and cannot catch a corrupted-state exception (e.g.
         // AccessViolationException from native/unsafe code) — the CLR terminates the process before any handler,
         // including this one, gets a chance to run; that class of failure needs process-level supervision (see
@@ -49,7 +49,18 @@ public static class HartsyInferenceServiceExtensions
                 Exception? ex = ctx.Features.Get<IExceptionHandlerPathFeature>()?.Error;
                 ILogger log = ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("HartsyInference.UnhandledException");
                 log.LogError(ex, "Unhandled exception on {Method} {Path}", ctx.Request.Method, ctx.Request.Path);
-                await WriteError(ctx, StatusCodes.Status500InternalServerError, "An unexpected server error occurred.", "server_error");
+
+                // A malformed/incomplete JSON body (e.g. a missing `required` field) fails minimal-API's own body
+                // binding and throws BadHttpRequestException BEFORE the route handler runs — that carries the
+                // real client-error status (400) in .StatusCode. Passing it through here instead of collapsing
+                // everything to 500 is what makes "missing required field" behave like a 400, not a server fault.
+                if (ex is Microsoft.AspNetCore.Http.BadHttpRequestException badRequest)
+                {
+                    await WriteErrorAsync(ctx, badRequest.StatusCode, badRequest.Message, "invalid_request_error");
+                    return;
+                }
+
+                await WriteErrorAsync(ctx, StatusCodes.Status500InternalServerError, "An unexpected server error occurred.", "server_error");
             });
         });
 
@@ -64,7 +75,7 @@ public static class HartsyInferenceServiceExtensions
                     || ctx.Request.Path.StartsWithSegments("/version");
                 if (!isProbe && !IsAuthorized(ctx, options.ApiKey!))
                 {
-                    await WriteError(ctx, StatusCodes.Status401Unauthorized, "Invalid or missing API key.", "invalid_request_error");
+                    await WriteErrorAsync(ctx, StatusCodes.Status401Unauthorized, "Invalid or missing API key.", "invalid_request_error");
                     return;
                 }
                 await next();
@@ -74,6 +85,9 @@ public static class HartsyInferenceServiceExtensions
         app.MapHealthEndpoints();
         app.MapSettingsEndpoints();
         app.MapAdminEndpoints();
+        app.MapImageEndpoints();
+        app.MapTextEndpoints();
+        app.MapCompatEndpoints();
     }
 
     private static bool IsAuthorized(HttpContext ctx, string apiKey)
@@ -93,7 +107,7 @@ public static class HartsyInferenceServiceExtensions
     internal static IResult Problem(int status, string message, string type) =>
         Results.Json(OpenAiError.Make(message, type), statusCode: status);
 
-    private static async Task WriteError(HttpContext ctx, int status, string message, string type)
+    internal static async Task WriteErrorAsync(HttpContext ctx, int status, string message, string type)
     {
         ctx.Response.StatusCode = status;
         await ctx.Response.WriteAsJsonAsync(OpenAiError.Make(message, type));
