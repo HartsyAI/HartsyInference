@@ -336,6 +336,155 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > the actual benchmarked config, not just a plausible profiler reading in a different one — worth keeping as
 > the standing rule for any future work on this doc.
 
+> **STATUS UPDATE (2026-07-22, same session, continued): QKV + gate/up projection fusion — built, verified,
+> shipped. Small but real win, smaller than the isolated-kernel pricing predicted (a real, understood cost —
+> not another profiler-artifact false lead).** Direct answer to "why is llama.cpp faster, we should be able to
+> match C++": it isn't a language issue (the GPU runs identical PTX regardless of what launched it, and
+> graph-decode already erases most host-dispatch overhead) — llama.cpp fuses Q/K/V into one projection and
+> gate/up into one, so every GEMV call is large enough to fill the GPU. We issued them separately: `ncu` on the
+> real Llama-3.2-1B K/V projection shape (N=512) showed **0.38 full waves across 28 SMs** — the same
+> class of occupancy stall split-K fixed for attention, this time in the GEMV dispatch itself.
+>
+> **Implementation** (`GenericTransformer.cs`): at load time, `ConcatRows` byte-concatenates the separate
+> Q/K/V (and gate/up) weight/bias tensors into one fused tensor per layer — safe generically across every
+> dtype including block-quantized formats, since a GGUF/our quant block never spans two output rows (each row
+> is an independent whole number of blocks; confirmed against every fused-GEMV kernel's own block-layout
+> assumption). Gated to `hasOwnKv` (skips Gemma-4 KV-sharing/MLA layers, which never reach this code — no
+> explicit exclusion needed) and a dtype-match guard (mixed-quant GGUF schemes occasionally assign a
+> different quant type per tensor by shape; falls back to the untouched separate-projection path if Q/K/V
+> or gate/up ever disagree). One fused `Linear`/`QuantizedMatMul` call replaces three (QKV) or two (gate/up),
+> then `IBackend.SliceLastDim` (an existing primitive, already used elsewhere for exactly this "split a fused
+> tensor into contiguous chunks" job — not new kernel code) splits the output back into separate q/k/v or
+> gate/up tensors. QK-norm (Qwen3) is unaffected — it's applied to the already-sliced q/k tensors exactly as
+> before; fusion only changes the projection dispatch, nothing downstream. Wired into all three real decode
+> paths: eager `Forward`, graph-decode `ForwardGraphStep`, and the HTTP server's batched `ForwardBatchDecode`.
+>
+> **Correctness**: CPU-backend `HartsyInference.LLM.Tests` (131/131, exercises `SliceLastDim`'s default
+> fallback with synthetic weights), CUDA `HartsyInference.Cuda.Tests` (153/157, same 4 pre-existing unrelated
+> failures as every checkpoint this session), and a direct CLI A/B on real checkpoints — Llama-3.2-1B and
+> Qwen3-4B both produce **character-for-character identical output**, graph-decode on vs off, and Qwen3-4B's
+> output matches the exact text from an earlier unrelated session checkpoint (independent confirmation).
+>
+> **Measured, clean `TextDecodeThroughputBenchmark` runs, repeated for stability**: Llama-3.2-1B graph-on
+> **156.0 → 157-158 tok/s (~1-1.5%)**, graph-off **128.5 → 138-140 tok/s (~7-9%, bigger — eager has no
+> graph-capture launch-overhead baseline already subtracting from the win)**; Qwen3-4B graph-on **69.9 → 70.2-
+> 70.6 tok/s (~1%)**, graph-off **61.7 → 61.9-62.1 (~0.5%)**. Smaller than the isolated `ncu` GEMV-kernel-time
+> pricing predicted (~4% for Llama) — the gap is real, not noise: that estimate only measured the fused-GEMV
+> saving, not the cost of `SliceLastDim` splitting the output back apart afterward (3 slice calls for QKV, 2
+> for gate/up, each a real kernel launch), which eats back a meaningful fraction of the raw GEMV saving. Kept
+> anyway — it's a real, consistent, correctness-verified, low-risk positive, not another reverted false lead.
+>
+> **Known tradeoff, not yet addressed**: the fused weight is a byte-level copy, not a replacement — the
+> original separate Q/K/V and gate/up weights stay resident too (both `EnumerateWeights`-preloaded), so this
+> roughly doubles VRAM for the fused tensors specifically (~680MB extra for Llama-1B's non-lm_head weights,
+> proportionally similar for other sizes). No OOM observed in any testing this session, but freeing the
+> originals once fusion succeeds (they'd need their widths cached as plain ints first, since a few call sites
+> read `.Shape[0]` off them) is a real, scoped follow-up if VRAM pressure becomes an issue on a smaller card.
+
+> **STATUS UPDATE (2026-07-22, same session, continued): R4 row-interleaved GEMV redesign — investigated,
+> premise refuted by measurement, NOT built.** This was handed over by the parallel `performance-grind` agent's
+> `INFERENCE_ACCEL_GRIND.md` (its H5 item, explicitly delegated to "the LLM agent"), citing this doc's own
+> stale "~22% of bandwidth vs llama.cpp's ~80%" estimate as justification. Re-measured first, per this doc's
+> own rule of not building on stale numbers.
+>
+> **Fresh `ncu --set full` on the real Q4_K `mul_mat_vec_q4k_f32` kernel** (standalone probe, no model load,
+> Qwen3-4B's actual `ffn_gate.weight` shape K=2560 N=9728): **DRAM Throughput 68.65%, Compute (SM) Throughput
+> 74.59%, Memory Throughput 76.03% — compute and memory are co-limiting, not the ~22%-bandwidth-bound picture
+> the delegated task assumed.** That 22% number predates this session's fused-GEMV work (Phase 0-era);
+> superseded. At 68.65% DRAM with ALU already at 74.6%, a perfect coalescing fix can only push the bottleneck
+> fully onto ALU (per-element nibble-unpack/dequant, which is layout-invariant) — the real achievable win is a
+> fraction of the naive "41.5% Est. Speedup" `ncu` flags on the load instructions, which is an isolated-issue
+> number of exactly the kind that already burned the CUDA-graph-arena and attention-prefetch attempts earlier
+> this session.
+>
+> **Localized the flagged inefficiency anyway** (`ncu --page source --print-source sass`, matching raw
+> addresses against the kernel source): the two `LDG.E.128.CONSTANT` instructions carrying the reported excess
+> sectors are the activation-vector reads (`xa`/`xb2`, the two `float4` loads of `input`), not the
+> `get_scale_min_k4` scattered scale-byte reads originally suspected. Root cause: `blockDim.y = WARPS_PER_BLOCK
+> = 8` warps per block all cover the same batch row `m` (different output rows `n`), so all 8 independently
+> re-read the identical K-float input row — L1 absorbs most of it (94.83% hit rate) but not all, and the
+> residual shows up as real L2/DRAM sector traffic. This is the same redundancy R4's "input-vector reuse"
+> half targets.
+>
+> **Built and measured the direct fix for that redundancy** (no full R4 row-repack needed): a second kernel
+> entry point (`mul_mat_vec_q4k_f32_shmem`) that cooperatively stages the shared input row into shared memory
+> once per block (`__syncthreads()`), then all 8 warps read from shared instead of re-hitting global/L1 —
+> gated on `K * sizeof(float)` fitting a 96 KB opted-in shared-memory budget (`cuFuncSetAttribute`,
+> `CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES`), falling back to the untouched original kernel otherwise.
+> Verified correct: all 7 `FusedGemvGroundTruthTests` pass bit-exact. **Measured net regression**: clean
+> probe timing at the same real shape went from **63.05us/call (baseline) to ~70.2-70.7us/call (~11% slower,
+> reproduced 3×)** — the block-wide `__syncthreads()` barrier serializes all 8 warps behind the slowest
+> loader, which costs more than the redundant-read savings recover. **Reverted.**
+>
+> **Conclusion, reported back to the coordination doc**: the R4 premise (bandwidth-bound decode GEMV) doesn't
+> hold at current shapes post-fusion — this kernel is compute/memory co-limited, the input-vector-reuse half
+> of R4 was tried directly (shared-memory staging) and measured a net loss, and the coalescing half would only
+> capture a fraction of ALU-capped headroom even if built. Not worth the full row-interleaved weight-repack
+> rewrite (new load-time layout transform, new kernel, per-quant-type surface) on this evidence. If decode GEMV
+> throughput needs another pass later, the next real lever is the FP16-activation-pipeline idea already queued
+> in the dotLLM list below (halves activation bytes, independent of this finding), not R4.
+
+> **STATUS UPDATE (2026-07-22, same session, continued): full-decode-step re-profile — confirmed the
+> remaining ~1.21x gap is real GEMV bandwidth efficiency (~68% vs llama.cpp's ~70%), NOT a system/host-overhead
+> problem. Chased and ruled out two false leads first (both documented in detail because they looked
+> compelling before being tested) — re-enabled the dp4a int8-activation GEMV path as a real, small,
+> re-measured win.**
+>
+> **Full-decode `nsys` re-profile (Llama-3.2-1B, real production path, graph-on)**: `mul_mat_vec_q8_0_f32`
+> is 71.3% of total decode GPU time across 4 shape buckets (gate/up-fused N=16384 41%, O-proj+down-proj
+> N=2048 31%, lm_head N=128256 20%, QKV-fused N=3072 9%) — all four cluster at **235-270 GB/s effective**
+> (3060 peak 360 GB/s), i.e. uniformly ~65-75% of peak with no single broken shape, confirming (with real
+> production shapes, not just the isolated `ffn_gate` probe) the R4 block's conclusion above: this is a
+> genuinely near-roofline kernel, not one hiding an easy fix.
+>
+> **False lead #1 — "half of decode wall-time is host overhead, not GPU work" — REFUTED, was a graph-replay
+> profiler undercount.** A `cuda_gpu_kern_sum` on a graph-decode-ONLY trace (isolated via a standalone probe,
+> same no-model-loading-under-profiler pattern used all session) showed only 260 `mul_mat_vec_q8_0_f32`
+> instances and 13.7% overall GPU-busy time across the trace span — `nsys --trace=cuda` does not reliably
+> decompose CUDA-graph-replay into one timeline entry per node the way it does for eager launches (the same
+> class of graph-tracing distortion that burned the CUDA-graph-arena false lead earlier this session — now
+> confirmed as a recurring pitfall of profiling this engine's graph-decode path specifically, not a one-off).
+> The eager-inclusive trace's 71.3%/48,478-instance figure is the trustworthy one.
+>
+> **False lead #2 — "the GPU's PCIe link is downgraded to Gen1, explaining a ~6ms D2H sync tax" — REFUTED,
+> was an idle-vs-load measurement confound.** `cuda_api_sum` on the same trace showed `cuMemcpyDtoH_v2` (the
+> per-token sampled-token-id readback) averaging **5.95ms/call** across 516 calls — suspiciously large for a
+> 4-byte transfer. `lspci -vv` on the 3060's slot showed `LnkSta: Speed 2.5GT/s (downgraded)` against an
+> `LnkCap` of 8GT/s, which looked like a real hardware fault (and would explain a fixed per-call tax
+> independent of workload, matching the tight 3.6-6.5ms range observed). Tried and ruled out `CU_CTX_SCHED_SPIN`
+> (no primary-context scheduling flag was ever set; added one, zero measured effect, reverted — a context
+> **not** shared with any other library-initiated retain in this process, so the flag did take) and GPU
+> clock locking (`nvidia-smi -lgc`, also zero effect) before questioning the PCIe premise itself. **Killed by
+> three independent checks**: (1) decode-window weight streaming never crosses PCIe at all — it's
+> VRAM-to-SM, so even a real Gen1 downgrade could only tax the 4-byte token-id copy, not decode throughput;
+> (2) re-read `LnkSta` *during* an active 800-token run — **8GT/s**, full speed; the "downgraded" reading was
+> the driver's normal idle power-save state (`lspci` was run between test runs), not a fault; (3) PCIe ASPM
+> L1 exit latency is documented at <4us — nothing in the PCIe spec produces a consistent multi-millisecond
+> tax. Reconciled what the 5.95ms actually is: `cuMemcpyDtoH` is blocking, so it waits for that token's real
+> GPU work (weight streaming) to drain — 1.32GB (Llama-1B Q8_0 file size) × 159 tok/s ≈ 210 GB/s sustained ≈
+> textbook memory-bound decode, consistent with the ncu-measured 68.65% DRAM finding above. There is no
+> separable host-overhead tax to cut; the wait time **is** the bandwidth-bound work. (`CU_CTX_SCHED_SPIN`
+> change reverted — no measured gain, and spin-wait burns a CPU core for nothing, this doc's standing
+> revert-on-no-gain rule.)
+>
+> **Real, positive result found while re-checking assumptions: the existing dp4a int8-activation GEMV path
+> (`HARTSY_DP4A_ON`, opt-in, `CudaBackend.cs` ~line 511) was carrying a stale "not faster here" comment.**
+> Re-measured on Qwen3-4B (the model that actually has Q4_K tensors — Llama-3.2-1B is Q8_0-only and never
+> exercises this branch) post this session's split-K + QKV/gate-up-fusion changes: **71.35 → 72.77 tok/s,
+> +2%, reproduced 3x each way, clean separation from the ~0.1-0.3 tok/s noise band in each set.** Small, but
+> real and consistent with the ncu finding that this kernel is compute/memory co-limited (74.6% ALU) — cutting
+> per-element ALU work via dp4a int8 dot-products should help, and now measurably does, whatever the
+> now-outdated comment claimed. Comment corrected in place; **not** flipped to default-on this session — no
+> dedicated correctness test exists for this path yet and the win hasn't been swept across shapes/quant types/
+> models. Scoped as the next real kernel-level lever; full design handoff: `LLM_GEMV_KERNEL_HANDOFF.md`.
+>
+> **Bottom line for "why are we still ~1.2x slower than llama.cpp"**: decode is memory-bandwidth-bound weight
+> streaming for both engines (batch=1, GPU saturated, not host-idle) — we sustain ~65-75% of the 3060's peak
+> VRAM bandwidth across every real production GEMV shape, llama.cpp somewhat more. That efficiency delta,
+> which lives entirely inside the GEMV kernel (ALU-side dequant cost on a co-limited kernel, per the R4
+> investigation and the dp4a result above), is the whole gap. Not a language issue, not a host-dispatch issue,
+> not a system/PCIe issue — confirmed by direct measurement, not assumption, on all three counts this session.
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a
@@ -737,7 +886,7 @@ dotLLM is the same architecture as us (pure C#, PTX-via-Driver-API, unmanaged/mm
 - [🔧] **Fused quantized GEMV for Q8_0 / Q4_K / Q6_K** — they have all three; we now have Q4_K (Phase 1). Extend to Q6_K (lm_head!) + Q8_0 → **this is Phase 2**, confirmed.
 - [ ] **FP16 activation pipeline for decode** — they run decode activations in FP16 with a "custom quantized GEMV + FP16 activation pipeline"; we run **F32 activations**. FP16 halves activation bandwidth and lets the GEMV read FP16 x. → new **Phase 3b**.
 - [ ] **Projection fusion: Q/K/V (3→1) and Gate/Up (2→1)** — "saves ~72 dispatches/layer" and shares the input read. → folds into **Phase 4**.
-- [ ] **Row-interleaved (R4) weight repacking + 4-row GEMV** — repack 4 consecutive rows' quant blocks contiguously at load so a warp-group reads coalesced and reuses the input vector across 4 rows. Direct upgrade to our GEMV. → **Phase 1.5**.
+- [🚫] **Row-interleaved (R4) weight repacking + 4-row GEMV** — investigated 2026-07-22: fresh `ncu` shows the decode GEMV is compute/memory co-limited (68.65% DRAM / 74.6% ALU), not the bandwidth-bound picture this bullet assumed; the input-vector-reuse half was tried directly (shared-memory staging, no repack) and measured an **11% regression** (`__syncthreads()` barrier cost > redundant-read savings). Not worth the full repack on this evidence — see the dated status block above.
 - [ ] **Fused RMSNorm+quantize (decode)** — eliminate the norm-output intermediate; produce the (F16/quantized) activation the next GEMV wants in one pass. → **Phase 4**.
 - [ ] **Speculative decoding** (draft-verify-accept + KV rollback) — large decode-latency win, orthogonal to kernels. → later phase.
 - [ ] **Paged KV-cache + KV quantization (Q8_0/Q4_0)** — PagedAttention, prefix cache, 3.7-7.1× KV memory. Serving/memory, enables batching. → later phase.

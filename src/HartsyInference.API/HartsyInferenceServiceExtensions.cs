@@ -1,13 +1,24 @@
+using System.Diagnostics;
+using System.Threading.RateLimiting;
 using HartsyInference.API.Endpoints;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Services;
 using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Primitives;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 
 namespace HartsyInference.API;
 
 /// <summary>DI registration and endpoint mapping for the HartsyInference server.</summary>
 public static class HartsyInferenceServiceExtensions
 {
+    /// <summary>The <c>HttpContext.Items</c> key the auth middleware stashes a resolved <see cref="ApiKeyIdentity"/>
+    /// under, for the rate limiter's partition key, <see cref="UsageTracker"/>'s counter key, and the request's
+    /// <see cref="Activity"/> tag to share without re-parsing headers.</summary>
+    internal const string ApiKeyIdentityItemKey = "HartsyInference.ApiKeyIdentity";
+
     /// <summary>Registers the inference engine facade and its concurrency gate.</summary>
     public static IServiceCollection AddHartsyInference(this IServiceCollection services, Action<HartsyInferenceServerOptions>? configure = null)
     {
@@ -33,17 +44,66 @@ public static class HartsyInferenceServiceExtensions
 
         services.AddSingleton(new WorldSessionRegistry(TimeSpan.FromMinutes(options.WorldSessionIdleTimeoutMinutes)));
 
+        // Production-hardening surface: caller identity, per-caller usage, and the domain-specific metrics
+        // ApiMetrics adds on top of ASP.NET Core's own request instrumentation (see WithMetrics below).
+        services.AddSingleton(new ApiKeyStore(options));
+        services.AddSingleton<UsageTracker>();
+        services.AddSingleton<ApiMetrics>();
+
+        // Per-caller rate limiting, layered ABOVE the InferenceQueue capacity gate -- a distinct failure mode
+        // (quota exhausted vs. server momentarily saturated), given a distinct error `type` in OnRejected below
+        // so a client can tell the two apart. Fixed-window with QueueLimit 0: reject immediately rather than
+        // queueing here too, since InferenceQueue already owns queueing semantics for the actual generation work.
+        services.AddRateLimiter(rl =>
+        {
+            rl.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+            {
+                if (IsProbePath(ctx.Request.Path))
+                    return RateLimitPartition.GetNoLimiter("probe");
+
+                ApiKeyIdentity? identity = ctx.Items.TryGetValue(ApiKeyIdentityItemKey, out object? v) ? v as ApiKeyIdentity : null;
+                string partitionKey = identity?.Name ?? ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+                int permitLimit = identity?.RateLimitPerMinute ?? options.DefaultRateLimitPerMinute;
+
+                return RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = permitLimit,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0,
+                });
+            });
+            rl.OnRejected = async (context, ct) =>
+            {
+                context.HttpContext.Response.Headers.RetryAfter = "60";
+                await WriteErrorAsync(context.HttpContext, StatusCodes.Status429TooManyRequests,
+                    "Rate limit exceeded for this API key.", "rate_limit_exceeded");
+            };
+        });
+
+        // Metrics: ASP.NET Core's own instrumentation (request duration/count/in-flight) plus ApiMetrics'
+        // domain-specific series, scraped in Prometheus text format at GET /metrics (mapped below).
+        // Tracing: auto-instruments every request as an Activity honoring the W3C traceparent header; the auth
+        // middleware below tags it with the resolved caller identity so traces/logs are correlatable by caller.
+        services.AddOpenTelemetry()
+            .WithMetrics(b => b.AddAspNetCoreInstrumentation().AddMeter(ApiMetrics.MeterName).AddPrometheusExporter())
+            .WithTracing(b => b.AddAspNetCoreInstrumentation());
+
+        services.AddOpenApi();
+
         services.ConfigureHttpJsonOptions(o =>
             o.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
 
         return services;
     }
 
-    /// <summary>Maps health/settings/admin probes, optional API-key auth, and native + OpenAI-compat generation
-    /// endpoints — all onto <see cref="IInferenceEngine"/>.</summary>
+    /// <summary>Maps health/settings/admin probes, API-key auth + per-key rate limiting + usage metering,
+    /// observability endpoints, and native + OpenAI-compat generation endpoints — all onto <see cref="IInferenceEngine"/>.</summary>
     public static void MapHartsyInferenceEndpoints(this WebApplication app)
     {
         HartsyInferenceServerOptions options = app.Services.GetRequiredService<HartsyInferenceServerOptions>();
+        ApiKeyStore apiKeyStore = app.Services.GetRequiredService<ApiKeyStore>();
+        UsageTracker usageTracker = app.Services.GetRequiredService<UsageTracker>();
+        ApiMetrics metrics = app.Services.GetRequiredService<ApiMetrics>();
 
         // Last-resort safety net: catches any exception a route handler doesn't already handle itself and turns
         // it into a structured, logged response instead of a bare/blank one. Registered first so it wraps every
@@ -74,22 +134,54 @@ public static class HartsyInferenceServiceExtensions
         });
 
         // Optional API-key gate over everything except the liveness/readiness/version probes — those need to
-        // stay reachable for an orchestrator's health checks regardless of auth config.
-        if (!string.IsNullOrEmpty(options.ApiKey))
+        // stay reachable for an orchestrator's health checks regardless of auth config. Resolves the caller to a
+        // named identity (not just a bool) and stashes it for the rate limiter, usage tracker, and tracing below.
+        if (apiKeyStore.HasAnyKeys)
         {
             app.Use(async (ctx, next) =>
             {
-                bool isProbe = ctx.Request.Path.StartsWithSegments("/health")
-                    || ctx.Request.Path.StartsWithSegments("/ready")
-                    || ctx.Request.Path.StartsWithSegments("/version");
-                if (!isProbe && !IsAuthorized(ctx, options.ApiKey!))
+                if (IsProbePath(ctx.Request.Path)) { await next(); return; }
+
+                string? presented = ResolvePresentedKey(ctx);
+                if (presented is null || !apiKeyStore.TryResolve(presented, out ApiKeyIdentity identity))
                 {
                     await WriteErrorAsync(ctx, StatusCodes.Status401Unauthorized, "Invalid or missing API key.", "invalid_request_error");
                     return;
                 }
+                ctx.Items[ApiKeyIdentityItemKey] = identity;
+                Activity.Current?.SetTag("hartsyinference.caller", identity.Name);
                 await next();
             });
         }
+
+        // Usage metering: wraps rate limiting (not the other way round) so a 429 rejection still counts against
+        // the caller's usage record, not just successful requests. Coarse per-top-level-route-segment modality
+        // tag derived from the path rather than per-endpoint metadata — keeps this to one place instead of
+        // touching all ~25 route files. Exceptions are recorded as errors and rethrown unchanged for
+        // UseExceptionHandler above to turn into a response.
+        app.Use(async (ctx, next) =>
+        {
+            bool isError = false;
+            try
+            {
+                await next();
+                isError = ctx.Response.StatusCode >= 400;
+            }
+            catch
+            {
+                isError = true;
+                throw;
+            }
+            finally
+            {
+                string identityName = ctx.Items.TryGetValue(ApiKeyIdentityItemKey, out object? v) && v is ApiKeyIdentity id ? id.Name : "anonymous";
+                string modality = ModalityFromPath(ctx.Request.Path);
+                usageTracker.Record(identityName, modality, isError);
+                metrics.RecordRequest(modality, isError ? "error" : "ok");
+            }
+        });
+
+        app.UseRateLimiter();
 
         app.MapHealthEndpoints();
         app.MapSettingsEndpoints();
@@ -102,18 +194,45 @@ public static class HartsyInferenceServiceExtensions
         app.MapVideoEndpoints();
         app.MapWorldEndpoints();
         app.MapCompatEndpoints();
+
+        // Observability/discovery surface. Neither is a liveness/readiness probe, so both stay behind the same
+        // auth gate as /admin/* when a key is configured (queue depth and route shapes are ops-sensitive, same
+        // reasoning as /admin/queue already being gated).
+        app.MapPrometheusScrapingEndpoint("/metrics");
+        app.MapOpenApi();
     }
 
-    private static bool IsAuthorized(HttpContext ctx, string apiKey)
+    private static bool IsProbePath(PathString path) =>
+        path.StartsWithSegments("/health") || path.StartsWithSegments("/ready") || path.StartsWithSegments("/version");
+
+    /// <summary>Coarse modality tag for usage/metrics, derived from the route path so this doesn't require
+    /// touching every endpoint file to attach metadata: the first segment after <c>/v1/native/</c> for native
+    /// routes, otherwise a fixed bucket per route group.</summary>
+    private static string ModalityFromPath(PathString path)
     {
-        if (ctx.Request.Headers.TryGetValue("x-api-key", out Microsoft.Extensions.Primitives.StringValues k) && k == apiKey) return true;
-        if (ctx.Request.Headers.Authorization.ToString() is { } auth &&
-            auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) &&
-            auth["Bearer ".Length..] == apiKey)
+        string p = path.Value ?? "";
+        const string nativePrefix = "/v1/native/";
+        if (p.StartsWith(nativePrefix, StringComparison.OrdinalIgnoreCase))
         {
-            return true;
+            string rest = p[nativePrefix.Length..];
+            int slash = rest.IndexOf('/');
+            return slash >= 0 ? rest[..slash] : rest;
         }
-        return false;
+        if (p.StartsWith("/v1/", StringComparison.OrdinalIgnoreCase)) return "compat";
+        if (p.StartsWith("/admin/", StringComparison.OrdinalIgnoreCase)) return "admin";
+        if (IsProbePath(path) || p.StartsWith("/settings", StringComparison.OrdinalIgnoreCase)) return "probe";
+        if (p.StartsWith("/metrics", StringComparison.OrdinalIgnoreCase) || p.StartsWith("/openapi", StringComparison.OrdinalIgnoreCase)) return "meta";
+        return "other";
+    }
+
+    private static string? ResolvePresentedKey(HttpContext ctx)
+    {
+        if (ctx.Request.Headers.TryGetValue("x-api-key", out StringValues k) && !StringValues.IsNullOrEmpty(k))
+            return k.ToString();
+        string auth = ctx.Request.Headers.Authorization.ToString();
+        if (auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            return auth["Bearer ".Length..];
+        return null;
     }
 
     /// <summary>Structured error response, OpenAI-shaped for continuity with the compat routes that will land

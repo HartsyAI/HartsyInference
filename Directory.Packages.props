@@ -2,6 +2,9 @@
 
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <!-- Lets a PackageVersion below pin a TRANSITIVE dependency's version (e.g. Microsoft.OpenApi, pulled in by
+         Microsoft.AspNetCore.OpenApi) without needing a direct PackageReference to it in any project. -->
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
 
   <!-- Core dependencies -->
@@ -18,6 +21,15 @@
   <!-- Server dependencies -->
   <ItemGroup>
     <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
+    <!-- Microsoft.AspNetCore.OpenApi 10.0.0 pulls in Microsoft.OpenApi 2.0.0 transitively, which has a known
+         high-severity advisory (GHSA-v5pm-xwqc-g5wc, stack overflow parsing a circular schema reference).
+         Pin the patched line via CentralPackageTransitivePinningEnabled above; no direct reference needed. -->
+    <PackageVersion Include="Microsoft.OpenApi" Version="2.7.5" />
+    <!-- Prometheus exporter has been beta-only upstream for the entire lifetime of the OpenTelemetry .NET
+         project (still true as of 1.16.x); there is no stable release to pin instead. -->
+    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.16.0" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.17.0" />
+    <PackageVersion Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.16.0-beta.1" />
   </ItemGroup>
 
   <!-- Testing -->

@@ -72,6 +72,35 @@ public sealed unsafe class GenericTransformer : IDisposable
         return t.CastTo(DType.F32);
     }
 
+    /// <summary>Concatenates weight (<c>[N,K]</c>) or bias (<c>[N]</c>) tensors along dim 0 (output rows) via a
+    /// plain byte-level copy — correct for any dtype, including block-quantized formats, because a GGUF/our
+    /// quant block never spans two output rows (each row is an independent whole number of blocks; confirmed
+    /// against every fused-GEMV kernel's block-layout assumption). Load-time only (called once per layer while
+    /// building the layer's weights, not on the decode hot path) — used to fuse separate Q/K/V or gate/up
+    /// projections into a single larger GEMV dispatch. All parts must share dtype and (for 2D) K.</summary>
+    private static Tensor ConcatRows(params Tensor[] parts)
+    {
+        DType dt = parts[0].DType;
+        long elementsPerRow = parts[0].ElementCount / parts[0].Shape[0];
+        long totalRows = 0;
+        foreach (Tensor p in parts) totalRows += p.Shape[0];
+        TensorShape outShape = parts[0].Shape.Rank == 1
+            ? new TensorShape(totalRows)
+            : new TensorShape(totalRows, parts[0].Shape[1]);
+        Tensor result = new(outShape, dt);
+        long rowBytes = dt.ComputeByteCount(elementsPerRow);
+        byte* dst = (byte*)result.DataPointer;
+        long offset = 0;
+        foreach (Tensor p in parts)
+        {
+            byte* src = (byte*)p.DataPointer;
+            long bytes = p.Shape[0] * rowBytes;
+            Buffer.MemoryCopy(src, dst + offset, bytes, bytes);
+            offset += bytes;
+        }
+        return result;
+    }
+
     /// <summary>Loads an RMSNorm weight to F32, optionally baking Gemma's <c>(1 + weight)</c> offset into a
     /// fresh tensor (so the runtime norm op is the standard one and no borrowed GGUF mmap / cached weight is
     /// mutated in place).</summary>
@@ -730,6 +759,15 @@ public sealed unsafe class GenericTransformer : IDisposable
         private Tensor? _normBias, _postNormBias;   // LayerNorm biases (input / pre-MLP); zero for Cohere, real for StableLM
         private Tensor? _parFfnNorm, _parFfnNormBias;   // GPT-NeoX parallel-residual: a SECOND norm feeding the FFN from the raw residual (Cohere has none → reuses the attn norm)
         private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB;
+        // Fused Q+K+V projection weight/bias, built once at load time by concatenating _qW/_kW/_vW row-wise
+        // (byte-level — safe for any dtype including block-quantized formats, since quant blocks never span
+        // rows). Non-null only when this layer has its own K/V (not Gemma-4 KV-sharing). One GEMV dispatch
+        // instead of three: at decode (N small), each of Q/K/V independently under-occupies the GPU (measured
+        // via ncu: the K/V shapes specifically hit as few as 0.38 full waves across all SMs on a 28-SM GPU) —
+        // fusing raises the effective N so the SAME kernel fills the GPU properly. QK-norm (Qwen3) is applied
+        // AFTER slicing the fused output back into q/k/v, exactly as it was applied after the separate
+        // projections before — fusion only changes the projection dispatch, not anything downstream.
+        private Tensor? _qkvW, _qkvB;
         private Tensor? _qNorm, _kNorm, _qNormBias, _kNormBias;
         private Tensor? _sink;   // GPT-OSS: per-head attention-sink logits [Hq]
         private Tensor? _alibiSlopes;   // ALiBi: per-head slopes [Hq] (MPT/BLOOM/Falcon-classic); these models use no RoPE
@@ -737,6 +775,9 @@ public sealed unsafe class GenericTransformer : IDisposable
         private Tensor? _qAProj, _qANorm, _qBProj;      // MLA q-LoRA: Q down-proj (+norm) and up-proj (DeepSeek-V3/Kimi)
         private Tensor? _gateW, _upW, _downW;
         private Tensor? _gateB, _upB, _downB;   // FFN biases (GPT-2 / Falcon / BLOOM / MPT lineage)
+        // Fused gate+up projection weight/bias (dense SwiGLU/GeGLU layers only — MoE routes separately and
+        // never reaches DenseFfn's non-MoE path). Same rationale/technique as _qkvW above.
+        private Tensor? _gateUpW, _gateUpB;
         private MoeFeedForward? _moe;   // non-null on MoE layers (replaces the dense SwiGLU above)
         private Multimodal.MllamaCrossAttentionLayer? _crossAttn;   // non-null on mllama gated cross-attention layers
         // Gemma-4 per-layer embeddings (PLE): this layer's own gate/proj/post-norm (the top-level token
@@ -847,6 +888,17 @@ public sealed unsafe class GenericTransformer : IDisposable
                 // GPT-2 / Falcon / BLOOM also bias the output projection (Qwen2 does not — load only if present).
                 if (w.TryGetValue($"{prefix}.self_attn.o_proj.bias", out Tensor? ob)) _oB = EnsureF32(ob);
             }
+            // Fused Q+K+V dispatch (see _qkvW's doc comment) — only when this layer has its own K/V and all
+            // three share a dtype (mixed-quant GGUF schemes occasionally substitute a different quant type per
+            // tensor based on shape; K is shared across Q/K/V so this is expected to always hold in practice,
+            // but the check keeps an edge case safely falling back to the existing separate-projection path
+            // instead of building a nonsensical concatenation).
+            if (hasOwnKv && _qW.DType == _kW!.DType && _qW.DType == _vW!.DType)
+            {
+                _qkvW = ConcatRows(_qW, _kW, _vW);
+                if (_qB is not null && _kB is not null && _vB is not null)
+                    _qkvB = ConcatRows(_qB, _kB, _vB);
+            }
             if (_cfg.QkNorm)
             {
                 _qNorm = LoadNorm(w[$"{prefix}.self_attn.q_norm.weight"], _cfg.RmsNormAddOne);
@@ -939,6 +991,15 @@ public sealed unsafe class GenericTransformer : IDisposable
                     if (w.TryGetValue($"{prefix}.mlp.up_proj.bias", out Tensor? ub)) _upB = EnsureF32(ub);
                     if (w.TryGetValue($"{prefix}.mlp.down_proj.bias", out Tensor? db)) _downB = EnsureF32(db);
                 }
+                // Fused gate+up dispatch — same rationale/technique as _qkvW (see its doc comment). Dense
+                // SwiGLU/GeGLU only (non-gated FFNs have no gate_proj to fuse with); dtype-match guard for the
+                // same mixed-quant-scheme edge case.
+                if (_cfg.GatedFfn && _gateW is not null && _gateW.DType == _upW!.DType)
+                {
+                    _gateUpW = ConcatRows(_gateW, _upW);
+                    if (_gateB is not null && _upB is not null)
+                        _gateUpB = ConcatRows(_gateB, _upB);
+                }
             }
         }
 
@@ -986,13 +1047,12 @@ public sealed unsafe class GenericTransformer : IDisposable
             // Shape[0] is outDim (matches CudaBackend.LinearImpl's own N = weight.Shape[0] reading).
             TensorShape ff = new(1, n, (int)_upW!.Shape[0]);
             Tensor up = new(ff, DType.F32);
-            Project(backend, up, preMlp, _upW!, _upB, _cfg.LowVramQuant);
             Tensor comb;
             if (_cfg.GatedFfn)
             {
                 // Gated SwiGLU/GeGLU: down(act(gate(x)) · up(x)).
                 Tensor gate = new(ff, DType.F32);
-                Project(backend, gate, preMlp, _gateW!, _gateB, _cfg.LowVramQuant);
+                ProjectGateUp(backend, gate, up, preMlp, n, _cfg.LowVramQuant);
                 Tensor gateAct = new(ff, DType.F32);
                 Activate(backend, gateAct, gate);
                 gate.Dispose();
@@ -1003,6 +1063,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             else
             {
                 // Non-gated MLP (GPT-2 / Falcon / BLOOM / MPT / Nemotron): down(act(up(x))).
+                Project(backend, up, preMlp, _upW!, _upB, _cfg.LowVramQuant);
                 comb = new(ff, DType.F32);
                 Activate(backend, comb, up);
                 up.Dispose();
@@ -1012,6 +1073,26 @@ public sealed unsafe class GenericTransformer : IDisposable
             Project(backend, mlpOut, comb, _downW!, _downB, _cfg.LowVramQuant);
             comb.Dispose();
             return mlpOut;
+        }
+
+        /// <summary>Projects gate+up, using the fused <see cref="_gateUpW"/> dispatch when available (one GEMV
+        /// instead of two — see its doc comment), falling back to two separate calls otherwise. Splitting back
+        /// apart is <see cref="IBackend.SliceLastDim"/> (gate offset 0, up offset nGate) — a real device copy,
+        /// not a zero-cost view, but tiny relative to the GEMV bandwidth the fusion saves.</summary>
+        private void ProjectGateUp(IBackend backend, Tensor gate, Tensor up, Tensor preMlp, int n, bool lowVram)
+        {
+            if (_gateUpW is not null)
+            {
+                int nGate = (int)_gateW!.Shape[0], nUp = (int)_upW!.Shape[0];
+                Tensor combined = new(new TensorShape(1, n, nGate + nUp), DType.F32);
+                Project(backend, combined, preMlp, _gateUpW, _gateUpB, lowVram);
+                backend.SliceLastDim(gate, combined, 0);
+                backend.SliceLastDim(up, combined, nGate);
+                combined.Dispose();
+                return;
+            }
+            Project(backend, gate, preMlp, _gateW!, _gateB, lowVram);
+            Project(backend, up, preMlp, _upW!, _upB, lowVram);
         }
 
         /// <summary>Gemma-4's parallel dense+MoE FFN (only on <see cref="TransformerConfig.ParallelDenseMoeBranch"/>
@@ -1083,7 +1164,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _parFfnNorm, _parFfnNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _vNormOnes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _gateB, _upW, _upB, _downW, _downB, _pleInpGate, _pleProj, _plePostNorm, _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale];
+            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _parFfnNorm, _parFfnNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _qkvW, _qkvB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _vNormOnes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _gateB, _upW, _upB, _gateUpW, _gateUpB, _downW, _downB, _pleInpGate, _pleProj, _plePostNorm, _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
             if (_crossAttn is not null) foreach (Tensor t in _crossAttn.EnumerateWeights()) yield return t;
@@ -1102,6 +1183,34 @@ public sealed unsafe class GenericTransformer : IDisposable
         {
             if (_cfg.NormPlacement == NormPlacement.PostNorm) backend.CopyTo(outp, inp);
             else Normalize(backend, outp, inp, norm!, bias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+        }
+
+        /// <summary>Projects Q/K/V, using the fused <see cref="_qkvW"/> dispatch when available (one GEMV
+        /// instead of three — see its doc comment) — QK-norm, if any, is applied by the caller AFTER this
+        /// returns, exactly as it was applied after the separate projections before; fusion only changes how
+        /// the projection itself dispatches. Falls back to three separate calls when there's no fused weight
+        /// (KV-sharing layers, MLA, the mixed-dtype edge case) or no K/V this layer owns. <paramref name="q"/>/
+        /// <paramref name="k"/>/<paramref name="v"/> must already be allocated at their target shape by the
+        /// caller (unchanged from the pre-fusion calling convention).</summary>
+        private void ProjectQkv(IBackend backend, Tensor q, Tensor? k, Tensor? v, Tensor pre, int t, bool hasOwnKv, bool lowVram)
+        {
+            if (_qkvW is not null && hasOwnKv && k is not null && v is not null)
+            {
+                int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0], nv = (int)_vW!.Shape[0];
+                Tensor qkvOut = new(new TensorShape(1, t, nq + nk + nv), DType.F32);
+                Project(backend, qkvOut, pre, _qkvW, _qkvB, lowVram);
+                backend.SliceLastDim(q, qkvOut, 0);
+                backend.SliceLastDim(k, qkvOut, nq);
+                backend.SliceLastDim(v, qkvOut, nq + nk);
+                qkvOut.Dispose();
+                return;
+            }
+            Project(backend, q, pre, _qW!, _qB, lowVram);
+            if (hasOwnKv && k is not null && v is not null)
+            {
+                Project(backend, k, pre, _kW!, _kB, lowVram);
+                Project(backend, v, pre, _vW!, _vB, lowVram);
+            }
         }
 
         public Tensor Forward(IBackend backend, Tensor hidden, int t, int posStart,
@@ -1127,14 +1236,12 @@ public sealed unsafe class GenericTransformer : IDisposable
             bool fullNorm = _cfg.QkNorm && _cfg.QkNormFullDim;
             Tensor q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, t, hq, d), DType.F32);
             Tensor? k = null, v = null;
-            Project(backend, q, pre, _qW!, _qB, _cfg.LowVramQuant);
             if (hasOwnKv)
             {
                 k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, t, hkv, d), DType.F32);
                 v = new(new TensorShape(1, t, hkv, d), DType.F32);
-                Project(backend, k, pre, _kW!, _kB, _cfg.LowVramQuant);
-                Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
             }
+            ProjectQkv(backend, q, k, v, pre, t, hasOwnKv, _cfg.LowVramQuant);
             if (!_cfg.ParallelResidual) pre.Dispose();   // parallel residual reuses `pre` for the FFN below
 
             // Gemma-4: weightless RMSNorm on V (v / rms(v), no learned scale — the "weight" is a constant ones
@@ -1308,9 +1415,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             Tensor q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, t, hq, d), DType.F32);
             Tensor k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, t, hkv, d), DType.F32);
             Tensor v = new(new TensorShape(1, t, hkv, d), DType.F32);
-            Project(backend, q, pre, _qW!, _qB, _cfg.LowVramQuant);
-            Project(backend, k, pre, _kW!, _kB, _cfg.LowVramQuant);
-            Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
+            ProjectQkv(backend, q, k, v, pre, t, hasOwnKv: true, _cfg.LowVramQuant);
             pre.Dispose();
 
             if (_cfg.QkNorm)
@@ -1535,9 +1640,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             Tensor q = new(fullNorm ? new TensorShape(1, b, _cfg.QDim) : new TensorShape(1, b, hq, d), DType.F32);
             Tensor k = new(fullNorm ? new TensorShape(1, b, _cfg.KvDim) : new TensorShape(1, b, hkv, d), DType.F32);
             Tensor v = new(new TensorShape(1, b, hkv, d), DType.F32);
-            Project(backend, q, pre, _qW!, _qB, _cfg.LowVramQuant);
-            Project(backend, k, pre, _kW!, _kB, _cfg.LowVramQuant);
-            Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
+            ProjectQkv(backend, q, k, v, pre, b, hasOwnKv: true, _cfg.LowVramQuant);
             if (!_cfg.ParallelResidual) pre.Dispose();
 
             if (_cfg.QkNorm)

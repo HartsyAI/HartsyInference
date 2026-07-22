@@ -21,4 +21,13 @@
     <ProjectReference Include="..\HartsyInference.Engine\HartsyInference.Engine.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Production-hardening surface: OpenAPI spec generation + OpenTelemetry metrics/tracing with a
+         Prometheus-format scrape endpoint. -->
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" />
+  </ItemGroup>
+
 </Project>

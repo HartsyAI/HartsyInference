@@ -1,9 +1,10 @@
 name: Publish to NuGet
 
 # Auto-publishes the HartsyInference packages to NuGet.org on every push to main that
-# touches source or packaging. The version is 1.0.0-<VersionSuffix>, read from
+# touches source or packaging. The version is <VersionPrefix>-<VersionSuffix>, both read from
 # Directory.Build.props (the single source of truth) — bump <VersionSuffix> there before
-# each release and pin the SAME version in the SwarmUI extension csproj so all three match.
+# each release (bump <VersionPrefix> too for a real semver major/minor) and pin the SAME
+# version in the SwarmUI extension csproj so all three match.
 # NuGet.org forbids re-pushing an existing version, but the push step uses --skip-duplicate,
 # so pushing without bumping is a harmless no-op. Trigger manually via "Run workflow" to
 # override the suffix for a one-off.
@@ -55,7 +56,7 @@ jobs:
             8.0.x
             10.0.x
 
-      - name: Compute version suffix
+      - name: Compute version
         id: ver
         run: |
           SUFFIX="${{ github.event.inputs.version_suffix }}"
@@ -69,8 +70,16 @@ jobs:
             echo "::error::Could not read <VersionSuffix> from Directory.Build.props."
             exit 1
           fi
+          # <VersionPrefix> is NOT overridable via workflow_dispatch -- it's a real semver major/minor, not a
+          # per-release knob like the suffix, so it always comes from the props file.
+          PREFIX=$(sed -n 's:.*<VersionPrefix>\(.*\)</VersionPrefix>.*:\1:p' Directory.Build.props | head -1)
+          if [ -z "$PREFIX" ]; then
+            echo "::error::Could not read <VersionPrefix> from Directory.Build.props."
+            exit 1
+          fi
           echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
-          echo "Publishing version: 1.0.0-$SUFFIX"
+          echo "version=$PREFIX-$SUFFIX" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $PREFIX-$SUFFIX"
 
       - name: Pack libraries
         env:
@@ -89,7 +98,7 @@ jobs:
       # missing packages on the feed. Verify the full set is present BEFORE pushing.
       - name: Verify complete package set
         run: |
-          VER="1.0.0-${{ steps.ver.outputs.suffix }}"
+          VER="${{ steps.ver.outputs.version }}"
           # Tokenizers folded into ModelAssets and Phonemizer into Audio, so neither ships as its own package.
           # API and Cli are IsPackable=false. Engine is the service layer consumers actually depend on.
           EXPECTED="HartsyInference HartsyInference.Core HartsyInference.Cpu HartsyInference.Cuda HartsyInference.Vulkan HartsyInference.ModelAssets HartsyInference.Diffusion HartsyInference.Audio HartsyInference.Vision HartsyInference.Video HartsyInference.World HartsyInference.ThreeD HartsyInference.LLM HartsyInference.Engine"

@@ -511,9 +511,13 @@ public sealed class CudaBackend : IBackend
                 if (weight.DType == DType.Q4_K && K % 256 == 0 && EnvFlag("HARTSY_DP4A_ON"))
                 {
                     // dp4a path (opt-in): quantize the activation to int8 (Q8_1) once, then int8 GEMV via __dp4a.
-                    // Numerically exact vs the float kernel, but NOT faster here — the vectorized float GEMV is
-                    // memory-latency-bound, not ALU-bound, so cutting ALU doesn't help and the extra quantize
-                    // kernel offsets it. Kept behind a flag for GPUs/shapes where ALU is the limiter.
+                    // Numerically exact vs the float kernel. Re-measured 2026-07-22 (post split-K + QKV/gate-up
+                    // fusion, RTX 3060, real Qwen3-4B decode): +2% end-to-end (71.35 -> 72.77 tok/s, reproduced
+                    // 3x each way) — small but real, not the "not faster here" this comment used to claim (that
+                    // finding predates this session's kernel/dispatch changes and no longer holds). Still opt-in:
+                    // no dedicated correctness test for this path yet and the win hasn't been swept across
+                    // shapes/quant types — see docs/Checklists/LLM_GEMV_KERNEL_HANDOFF.md before flipping the
+                    // default or extending it to Q5_K/Q6_K/Q8_0.
                     int kblocks = M * (K / 32);
                     ulong pXq = GpuTransferHelper.AllocateDevice((nuint)((long)M * K));
                     ulong pXd = GpuTransferHelper.AllocateDevice((nuint)((long)kblocks * sizeof(float)));

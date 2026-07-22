@@ -112,22 +112,23 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 
 | Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (ours÷llama, graph-on) |
 |---|---|---|---|---|
-| Llama-3.2-1B-Instruct Q8_0 | 128.49 → **134.49 tok/s** | **155.28 tok/s** | 190.34 tok/s | **0.82× (1.23× slower)**, was 1.34× |
-| Qwen3-4B Q4_K_M | 54.44 → 58.7 → **60.64 tok/s** | 60.05 → **70.09 tok/s** | 85.59 tok/s | **0.82× (1.22× slower)**, was 1.34× |
+| Llama-3.2-1B-Instruct Q8_0 | 128.49 → 134.49 → **~139 tok/s** | 155.28 → **~157 tok/s** | 190.34 tok/s | **~0.82× (~1.21× slower)**, was 1.34× |
+| Qwen3-4B Q4_K_M | 54.44 → 58.7 → 60.64 → **~62.0 tok/s** | 60.05 → 70.09 → **~70.4 tok/s** | 85.59 tok/s | **~0.82× (~1.21× slower)**, was 1.34× |
 
-Three real kernel-level fixes landed this session, all `ncu`/`nsys`-guided (profiler access unblocked via
-`sudo` — per-invocation elevation, not a persistent system change; see `LLM_DECODE_PERF_GRIND.md` for how):
-(1) a Q6_K GEMV latency-bound-load fix (Qwen3-4B only, no Q6_K tensors in Q8_0 llama); (2) a split-K
-flash-decode attention **split-count formula fix for the graph-decode path** — the existing split-K decode
-path was real and already engaging, but its split count was capped far below the actual sweet spot (an A/B
-sweep found tok/s rising monotonically from the shipped default through 3-4× more splits before plateauing);
-(3) the **same fix applied to the separate eager (graph-OFF) split-count formula** — a smaller but real win
-that also generalizes to every graph-decode-ineligible architecture (MoE, sliding-window/softcap, MLA), which
-never touches fix (2) at all. Fixing the graph-decode formula's target-occupancy constant lifted graph-on
-throughput ~9% on **both** models, including the Q8_0 llama model the Q6_K fix didn't touch — the bigger and
-more broadly-applicable win of the three. Full root-cause, the A/B sweep data, and correctness verification
-are in `LLM_DECODE_PERF_GRIND.md`'s 2026-07-22 entries. Still not faster than Python/llama.cpp on either
-model, but the gap is now materially narrower (1.34x → ~1.22-1.23x).
+Four real fixes landed this session, all `ncu`/`nsys`-guided (profiler access unblocked via `sudo` —
+per-invocation elevation, not a persistent system change; see `LLM_DECODE_PERF_GRIND.md` for how): (1) a
+Q6_K GEMV latency-bound-load fix (Qwen3-4B only, no Q6_K tensors in Q8_0 llama); (2)+(3) split-K flash-decode
+attention **split-count formula fixes** for both the graph-decode and eager dispatch paths — the split-K path
+was real and already engaging, but its split count was capped far below the actual sweet spot (~9% on both
+models); (4) **QKV + gate/up projection fusion** — llama.cpp fuses these projections into fewer, larger GEMV
+calls; we didn't, so the small ones (K/V projections) ran the GPU at as little as 0.38 waves across all SMs.
+Fused at load time (byte-level weight concatenation, generic across dtypes) and wired into every decode path;
+correctness verified byte-identical. Smaller win than (2)+(3) (~1-1.5% graph-on, ~7-9% graph-off) — the raw
+GEMV saving is real but partly offset by the cost of splitting the fused output back apart afterward. Full
+root-cause, verification, and the known VRAM tradeoff are in `LLM_DECODE_PERF_GRIND.md`'s 2026-07-22 entries.
+Still not faster than Python/llama.cpp on either model, but the gap is now ~1.34x → ~1.21x, and every
+remaining lever found this session either has no headroom left (GEMV kernels near-roofline) or needs a
+genuine kernel-memory-access-pattern redesign (not a dispatch/fusion change) to close further.
 
 - [ ] `llama-bench` itself (vs. llama-cpp-python) not run this pass — no system CUDA toolkit; the pip-wheel
   toolchain builds llama-cpp-python fine but not the full llama.cpp CLI suite. Same underlying engine either

@@ -14,8 +14,23 @@ public sealed class HartsyInferenceServerOptions
     /// leave null to use the default assembly-relative resolution.</summary>
     public string? KernelDirectory { get; set; }
 
-    /// <summary>Optional API key. When set, requests must present it via <c>Authorization: Bearer</c> or <c>x-api-key</c>.</summary>
+    /// <summary>Optional single shared API key. When set, requests must present it via <c>Authorization: Bearer</c>
+    /// or <c>x-api-key</c>. Sugar for the common single-tenant case — folded into <see cref="ApiKeys"/> as an
+    /// entry named <c>"default"</c> at startup (see <c>AddHartsyInference</c>). Prefer <see cref="ApiKeys"/>
+    /// directly when multiple callers need distinct identities/rate limits.</summary>
     public string? ApiKey { get; set; }
+
+    /// <summary>Named API keys, each resolving to its own caller identity for usage metering, tracing, and
+    /// per-key rate limiting. Bindable from configuration as <c>HartsyInference:ApiKeys:0:Key</c> etc. If both
+    /// this and <see cref="ApiKey"/> are set, both are honored (the legacy key is folded in as one more entry).
+    /// If neither is set, auth is disabled entirely and every route (except <c>/admin/*</c>-equivalent-sensitive
+    /// ones like <c>/metrics</c>) is open.</summary>
+    public List<ApiKeyOptions> ApiKeys { get; set; } = [];
+
+    /// <summary>Requests-per-minute ceiling applied to a resolved caller identity that doesn't set its own
+    /// <see cref="ApiKeyOptions.RateLimitPerMinute"/>, and to unauthenticated callers (partitioned by remote IP)
+    /// when auth is disabled entirely.</summary>
+    public int DefaultRateLimitPerMinute { get; set; } = 300;
 
     /// <summary>Maximum concurrent inference requests for the "fast" modalities (image/text/speech/transcribe/
     /// voice-convert/fx/vision/mesh — everything that completes in seconds).</summary>
@@ -38,4 +53,21 @@ public sealed class HartsyInferenceServerOptions
 
     /// <summary>Model cache directory for HuggingFace downloads (null = default <c>~/.hartsyinference/models</c>).</summary>
     public string? ModelCacheDirectory { get; set; }
+}
+
+/// <summary>One entry in <see cref="HartsyInferenceServerOptions.ApiKeys"/> — a secret plus the identity/limits
+/// it resolves to.</summary>
+public sealed class ApiKeyOptions
+{
+    /// <summary>The secret value a caller presents via <c>Authorization: Bearer</c> or <c>x-api-key</c>.</summary>
+    public string? Key { get; set; }
+
+    /// <summary>Identity label for this key — used as the usage-metering key, the rate-limiter partition key, and
+    /// the tracing tag on every request this key authenticates. Defaults to <c>"default"</c> when unset, matching
+    /// the legacy single-<see cref="HartsyInferenceServerOptions.ApiKey"/> fold-in.</summary>
+    public string Name { get; set; } = "default";
+
+    /// <summary>Per-key requests-per-minute override. Null falls back to
+    /// <see cref="HartsyInferenceServerOptions.DefaultRateLimitPerMinute"/>.</summary>
+    public int? RateLimitPerMinute { get; set; }
 }

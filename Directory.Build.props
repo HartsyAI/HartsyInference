@@ -18,8 +18,8 @@
        (Note: never put a double-hyphen in this XML comment; it makes MSBuild fail to parse this file,
        which blanks TargetFrameworks and breaks restore with "Invalid framework identifier".) -->
   <PropertyGroup>
-    <VersionPrefix>1.0.0</VersionPrefix>
-    <VersionSuffix>alpha.52</VersionSuffix>
+    <VersionPrefix>2.0.0</VersionPrefix>
+    <VersionSuffix>alpha.1</VersionSuffix>
   </PropertyGroup>
 
   <!-- Package metadata shared across all projects -->
