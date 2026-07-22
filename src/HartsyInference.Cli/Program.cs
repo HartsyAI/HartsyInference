@@ -47,6 +47,19 @@ public static class Program
             config.AddCommand<MusicCommand>("music")
                 .WithDescription("Generate music from a prompt with MusicGen (saves a WAV).")
                 .WithExample("music", "\"lofi hip hop, mellow piano\"", "--model-path", "musicgen-small.safetensors");
+            config.AddCommand<ConvertCommand>("convert")
+                .WithDescription("Re-voice a source clip with RVC or OpenVoice (saves a WAV).")
+                .WithExample("convert", "source.wav", "-m", "openvoice", "--target", "reference.wav");
+            config.AddBranch("fx", fx =>
+            {
+                fx.SetDescription("Audio effects: stem separation (Demucs) and speech enhancement (Resemble-Enhance).");
+                fx.AddCommand<FxSeparateCommand>("separate")
+                    .WithDescription("Split a mix into stems with Demucs (saves one WAV per stem).")
+                    .WithExample("fx", "separate", "mix.wav", "-m", "demucs");
+                fx.AddCommand<FxEnhanceCommand>("enhance")
+                    .WithDescription("Denoise and enhance a recording with Resemble-Enhance (saves a WAV).")
+                    .WithExample("fx", "enhance", "noisy.wav");
+            });
             config.AddCommand<VideoCommand>("video")
                 .WithDescription("Generate a video (BMP frame sequence) from a prompt with LTX-Video (CUDA).");
             config.AddCommand<InteractiveCommand>("world")

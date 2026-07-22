@@ -15,6 +15,8 @@ public static class Modalities
         Modality.Video => "video",
         Modality.Mesh => "3d",
         Modality.World => "world",
+        Modality.VoiceConvert => "convert",
+        Modality.Fx => "fx",
         _ => modality.ToString().ToLowerInvariant(),
     };
 
@@ -38,6 +40,9 @@ public static class Modalities
             case "threed": modality = Modality.Mesh; return true;
             case "interactive":
             case "world": modality = Modality.World; return true;
+            case "convert":
+            case "voiceconvert": modality = Modality.VoiceConvert; return true;
+            case "fx": modality = Modality.Fx; return true;
             default: return false;
         }
     }
@@ -46,6 +51,6 @@ public static class Modalities
     public static IReadOnlyList<Modality> All { get; } = new[]
     {
         Modality.Image, Modality.Text, Modality.Speech, Modality.Music, Modality.Transcribe,
-        Modality.Vision, Modality.Video, Modality.Mesh, Modality.World,
+        Modality.Vision, Modality.Video, Modality.Mesh, Modality.World, Modality.VoiceConvert, Modality.Fx,
     };
 }

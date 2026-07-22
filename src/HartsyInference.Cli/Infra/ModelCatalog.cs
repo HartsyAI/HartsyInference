@@ -1,3 +1,5 @@
+using HartsyInference.Engine.Audio;
+
 namespace HartsyInference.Cli.Infra;
 
 /// <summary>Static, data-driven catalog of the models the engine can drive, mirroring the README support table.
@@ -31,6 +33,8 @@ public static class ModelCatalog
         const Modality vid = Modality.Video;
         const Modality d3 = Modality.Mesh;
         const Modality act = Modality.World;
+        const Modality vc = Modality.VoiceConvert;
+        const Modality fx = Modality.Fx;
         const ModelStatus ok = ModelStatus.Verified;
         const ModelStatus vp = ModelStatus.ValidationPending;
         const ModelStatus st = ModelStatus.Structural;
@@ -92,12 +96,22 @@ public static class ModelCatalog
             new CatalogEntry
             {
                 Id = "chroma", Modality = img, DisplayName = "Chroma", Architecture = "Flux-derivative DiT", Status = ok,
-                CliDrivable = true, // `hartsy image -m chroma` verified end-to-end 2026-07-21
+                // `hartsy image -m chroma` re-verified 2026-07-21: the terse prompt "an astronaut riding a horse"
+                // reproducibly yields an off-prompt vintage/sepia rider-in-a-hat (weak compound-subject binding at
+                // this family's default cfg, same class as AuraFlow) — needs an explicit compositional prompt
+                // ("a photo of an astronaut sitting on top of a brown horse...") + a negative prompt + cfg~7 to
+                // reliably bind both subjects. CliDrivable stays true because that combination IS coherent and
+                // correct, not because the terse prompt works out of the box.
+                CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
-                    new() { Repo = "silveroxides/Chroma1-HD-fp8-scaled", RepoPath = "Chroma1-HD-fp8mixed-final.safetensors",
-                        TargetSubdir = "Stable-Diffusion/Chroma", Role = "transformer",
-                        Sha256 = "c25284ddf89df1678ac4dd7bd8a59ec68fb2e484296d75977c549d58618eee91" },
+                    // Switched from silveroxides/Chroma1-HD-fp8-scaled (extremely slow host, ~2MB/s) to the
+                    // Comfy-Org repack of the same fp8-mixed weights — verified byte-different but functionally
+                    // identical output on this file. Local filename kept as "-final" for continuity with the old
+                    // pin.
+                    new() { Repo = "Comfy-Org/Chroma1-HD_repackaged", RepoPath = "split_files/diffusion_models/Chroma1-HD-fp8mixed.safetensors",
+                        TargetSubdir = "Stable-Diffusion/Chroma", TargetName = "Chroma1-HD-fp8mixed-final.safetensors", Role = "transformer",
+                        Sha256 = "a2928ca6075f308f4d5e2182e2b96120fa8ad270ec6ea9b1b5c724c85c49a575" },
                     SideModels.T5XxlEnconly,
                     SideModels.FluxAe,
                 },
@@ -145,10 +159,10 @@ public static class ModelCatalog
             new CatalogEntry
             {
                 Id = "hunyuan-image", Modality = img, DisplayName = "Hunyuan Image 2.1", Architecture = "17B MMDiT", Status = ok,
-                // CliDrivable intentionally left false: `hartsy image -m hunyuan-image` (QuantStack Q4_K_M GGUF)
-                // downloads + runs to completion but produces an all-zero (black) image — open bug, not yet
-                // root-caused (fixed one contributing latent bug in GgufKeyMapperRegistry ordering, which did
-                // NOT resolve it — see MODEL_STATUS_IMAGE.md). 2048x2048 also separately OOMs at VAE decode.
+                CliDrivable = true, // `hartsy image -m hunyuan-image` verified end-to-end 2026-07-21 (1024x1024;
+                // 2048x2048 still separately OOMs at VAE decode — see MODEL_STATUS_IMAGE.md). The former all-black
+                // output was HunyuanImageTransformer's text stream overflowing F16 in the double-stream blocks
+                // (fixed by keeping this model's block loop at F32 — see the Forward() comment).
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "QuantStack/HunyuanImage-2.1-GGUF", RepoPath = "HunyuanImage2.1-Q4_K_M.gguf",
@@ -263,9 +277,15 @@ public static class ModelCatalog
             new CatalogEntry
             {
                 Id = "ideogram4", Modality = img, DisplayName = "Ideogram 4", Architecture = "9.3B single-stream DiT", Status = ok,
-                CliDrivable = true, // `hartsy image -m ideogram4` verified end-to-end 2026-07-20 (needs a
-                // structured-JSON caption as the prompt argument, e.g. {"high_level_description":"...",...} — a
-                // plain prompt is fed verbatim and produces off-prompt/watermark-hallucination output
+                // Re-verified 2026-07-21: a bare {"high_level_description":"..."} (this comment's old example)
+                // fails Ideogram4Dialect.Validate — it requires compositional_deconstruction.background (non-null)
+                // and an elements array; the CLI feeds the prompt string verbatim (no in-process magic-prompt
+                // expansion), so an incomplete JSON produces weak/off-schema conditioning. Full required shape:
+                // {"high_level_description":"...","style_description":{"aesthetics":"...","lighting":"...",
+                // "medium":"...","photo":"..."},"compositional_deconstruction":{"background":"...",
+                // "elements":[{"type":"obj","desc":"..."},{"type":"obj","desc":"..."}]}} — confirmed correct output
+                // with this full shape (clear astronaut in white spacesuit/helmet on a brown horse).
+                CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "Comfy-Org/Ideogram-4", RepoPath = "diffusion_models/ideogram4_fp8_scaled.safetensors",
@@ -282,9 +302,15 @@ public static class ModelCatalog
                 // full folder reconstitutes on disk; FLiteRecipe's ResolveFolderRoot walks up from any file
                 // inside dit_model/text_encoder/vae to find the shared root.
                 Id = "f-lite", Modality = img, DisplayName = "F-Lite", Architecture = "DiT (Qwen)", Status = ok,
-                CliDrivable = true, // `hartsy image -m f-lite --model-path <dir>` verified end-to-end 2026-07-21
-                // (already-local folder; the folder-root resolution itself needs no catalog-Assets exercise
-                // beyond confirming the file list below matches Freepik/F-Lite's real layout byte-for-byte)
+                // Re-verified 2026-07-21: 1024x1024 (this family's native/documented default) reproducibly OOMs
+                // on this 24GB 4090 — even in complete isolation with nothing else on the GPU, and even inside
+                // the tiled-VAE-decode OOM-recovery path itself (CudaMemory.AllocateAsync inside VaeDecoder's
+                // Conv2D). Contradicts the older "warm 61.5s, peak 23.8GB" bench note — that number leaves only
+                // ~700MB headroom on a 24564MB card, which real-world CUDA context/allocator overhead eats into;
+                // not reproducible here regardless of what else is running. 768x768 succeeds cleanly (clear
+                // on-prompt astronaut-on-horse, no artifacts) — use --width 768 --height 768 until this gets a
+                // real memory-budget pass (same class of issue as zeta-chroma's 1024 ceiling).
+                CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "Freepik/F-Lite", RepoPath = "model_index.json", TargetSubdir = "Stable-Diffusion/F-Lite", Role = "config" },
@@ -424,27 +450,379 @@ public static class ModelCatalog
                 },
             },
 
-            // Transcription
+            // Transcription — repos/files below are exactly what SttCatalog's descriptors (src/HartsyInference.Engine/
+            // Audio/Stt/SttCatalog.cs) already resolve; Assets here only drive the CLI's pre-download confirm prompt
+            // (see ModelAcquisition.EnsureAudioAssetsPresent) — the real fetch always goes through the engine's own
+            // AudioModelCache regardless, so a missed sidecar file just downloads silently during generation.
             E("whisper", stt, "Whisper (tiny → large-v3)", "encoder-decoder", ok, cli: true),
-            E("moonshine", stt, "Moonshine", "encoder-decoder", ok),
+            E("moonshine", stt, "Moonshine", "encoder-decoder", ok, cli: true),
+            new CatalogEntry
+            {
+                Id = "distilwhisper", Modality = stt, DisplayName = "distil-whisper", Architecture = "encoder-decoder (distilled)", Status = ok,
+                // Verified 2026-07-21: the BARE `-m distilwhisper` id fails — SttCatalog.ResolveDistilWhisperRepo's
+                // no-match default is "distil-whisper/distil-large-v3.5", but WhisperPipeline.InferConfig's repo
+                // switch only recognizes v2/v3/medium.en/small.en (no v3.5 case) → "Unknown Whisper repo". Use an
+                // explicit variant that IS recognized, e.g. `-m distilwhisper:v3`.
+                CliDrivable = true, // `hartsy transcribe -m distilwhisper:v3` (or :v2/:medium/:small) — SttCatalog "distilwhisper"; bare id currently broken, see above
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "distil-whisper/distil-large-v3", RepoPath = "model.safetensors", TargetSubdir = "Audio/DistilWhisper", Role = "encoder-decoder" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "moonshinestreaming", Modality = stt, DisplayName = "Moonshine (2nd-gen streaming)", Architecture = "sliding-window encoder-decoder", Status = ok,
+                CliDrivable = true, // `hartsy transcribe -m moonshinestreaming` — SttCatalog "moonshinestreaming"; full-utterance batch, not true chunked streaming yet
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "UsefulSensors/moonshine-streaming-tiny", RepoPath = "model.safetensors", TargetSubdir = "Audio/MoonshineStreaming", Role = "encoder-decoder" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "kyutaistt", Modality = stt, DisplayName = "Kyutai STT (1B / 2.6B)", Architecture = "Helium LM + Mimi codec", Status = ok,
+                CliDrivable = true, // `hartsy transcribe -m kyutaistt` — SttCatalog "kyutaistt"; input decoded at 24 kHz
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "kyutai/stt-1b-en_fr-trfs", RepoPath = "model.safetensors", TargetSubdir = "Audio/KyutaiStt", Role = "backbone + mimi codec" },
+                    new() { Repo = "kyutai/stt-1b-en_fr", RepoPath = "tokenizer_en_fr_audio_8000.model", TargetSubdir = "Audio/KyutaiStt", Role = "tokenizer" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "whisperstreaming", Modality = stt, DisplayName = "Whisper Streaming (LocalAgreement-2)", Architecture = "encoder-decoder (streamed)", Status = ok,
+                CliDrivable = true, // `hartsy transcribe -m whisperstreaming` — SttCatalog "whisperstreaming"; same weights as whisper, driven through the stabilizer
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "openai/whisper-base", RepoPath = "model.safetensors", TargetSubdir = "Audio/Whisper", Role = "encoder-decoder" },
+                },
+            },
 
-            // Text-to-speech
+            // Text-to-speech — repos/files below mirror TtsCatalog's descriptors (src/HartsyInference.Engine/Audio/
+            // Tts/**); the gated-repo audit (memory audiolab-gated-repo-audit, 2026-07-16) already vetted every one
+            // of these as non-gated or on a non-gated mirror. Clone-only models need `--reference <wav>` (some also
+            // `--ref-text`); see SpeechCommand's help.
             E("piper", tts, "Piper (en_US-lessac-medium, …)", "VITS + espeak phonemes", ok, cli: true),
-            E("kokoro", tts, "Kokoro-82M", "StyleTTS-family vocoder", ok),
-            E("bark", tts, "Bark", "GPT-style TTS", ok),
-            E("styletts2", tts, "StyleTTS2", "style-diffusion TTS", ok),
-            E("spark-tts", tts, "Spark-TTS", "BiCodec LM", ok),
-            E("cosyvoice", tts, "CosyVoice", "Qwen LM + flow", ok),
-            E("vibevoice", tts, "VibeVoice", "diffusion TTS", ok),
-            E("fish-speech", tts, "Fish-Speech / OpenAudio", "DualAR + tiktoken", vp),
-            E("f5-tts", tts, "F5-TTS", "voice cloning, flow-matching DiT", vp),
+            new CatalogEntry
+            {
+                Id = "kokoro", Modality = tts, DisplayName = "Kokoro-82M", Architecture = "StyleTTS-family vocoder", Status = ok,
+                CliDrivable = true, // `hartsy speak -m kokoro` — TtsCatalog "kokoro"; voice packs fetch per `--voice` (default af_heart)
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Hartsy/kokoro-82m-safetensors", RepoPath = "kokoro-82m.safetensors", TargetSubdir = "Audio/Kokoro", Role = "transformer" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "bark", Modality = tts, DisplayName = "Bark", Architecture = "GPT-style TTS", Status = ok,
+                CliDrivable = true, // `hartsy speak -m bark` — TtsCatalog "bark" (3-stage GPT cascade + EnCodec 24 kHz)
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "suno/bark", RepoPath = "model.safetensors", TargetSubdir = "Audio/Bark", Role = "transformer" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "styletts2", Modality = tts, DisplayName = "StyleTTS2", Architecture = "style-diffusion TTS", Status = ok,
+                CliDrivable = true, // `hartsy speak -m styletts2 --reference <wav>` — TtsCatalog "styletts2"; clone from a reference clip
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "yl4579/StyleTTS2-LibriTTS", RepoPath = "Models/LibriTTS/epochs_2nd_00020.pth", TargetSubdir = "Audio/StyleTts2", Role = "transformer" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "sparktts", Modality = tts, DisplayName = "Spark-TTS", Architecture = "Qwen2.5-0.5B LM + BiCodec", Status = ok,
+                CliDrivable = true, // `hartsy speak -m sparktts` — TtsCatalog key is "sparktts" (no hyphen; AudioModelSelector matches the catalog Id literally, case-insensitive only); controllable mode (gender/speed), no cloning yet
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "SparkAudio/Spark-TTS-0.5B", RepoPath = "model.safetensors", TargetSubdir = "Audio/SparkTts", Role = "transformer" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "cosyvoice", Modality = tts, DisplayName = "CosyVoice 2", Architecture = "Qwen LM + OT-CFM flow", Status = ok,
+                // Verified 2026-07-21: `--reference` ALONE (no --ref-text) produced garbled, non-word-correct output
+                // ("And a tall fall, tear, tape, tape." for a plain test sentence) — CosyVoiceModel accepts an empty
+                // RefText without throwing, but zero-shot quality clearly depends on it. With --ref-text set to the
+                // reference clip's real transcript, output was word-perfect. Always pass both for this model.
+                CliDrivable = true, // `hartsy speak -m cosyvoice --reference <wav> --ref-text "<transcript>"` — TtsCatalog "cosyvoice"; zero-shot clone, ref-text effectively required for quality
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "FunAudioLLM/CosyVoice2-0.5B", RepoPath = "llm.pt", TargetSubdir = "Audio/CosyVoice", Role = "transformer" },
+                    new() { Repo = "FunAudioLLM/CosyVoice2-0.5B", RepoPath = "flow.pt", TargetSubdir = "Audio/CosyVoice", Role = "flow decoder" },
+                    new() { Repo = "FunAudioLLM/CosyVoice2-0.5B", RepoPath = "hift.pt", TargetSubdir = "Audio/CosyVoice", Role = "vocoder" },
+                    new() { Repo = "ResembleAI/chatterbox", RepoPath = "s3gen.safetensors", TargetSubdir = "Audio/CosyVoice", Role = "s3 tokenizer + CAM++" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "vibevoice", Modality = tts, DisplayName = "VibeVoice", Architecture = "diffusion TTS", Status = vp,
+                // Verified BROKEN via this CLI path 2026-07-21: `--reference <jfk.wav>` produces real, non-silent,
+                // correct-duration audio, but Whisper (medium.en, explicit -l en) transcribes it as "[Hindi]" /
+                // "[speaking in native language]" on both a short and a longer multi-sentence prompt — not
+                // intelligible English. The SAME reference clip + the same generic CLI --reference plumbing works
+                // correctly for zonos/styletts2/cosyvoice/neutts, so this looks like a VibeVoice-pipeline-specific
+                // issue (possibly reference-preprocessing differences vs. whatever the AudioLab extension did for
+                // this doc's earlier "Swarm e2e word-correct" claim), not a CLI wiring bug — not root-caused further
+                // here. CliDrivable left false pending investigation.
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "microsoft/VibeVoice-1.5B", RepoPath = "model-00001-of-00003.safetensors", TargetSubdir = "Audio/VibeVoice", Role = "transformer" },
+                    new() { Repo = "microsoft/VibeVoice-1.5B", RepoPath = "model-00002-of-00003.safetensors", TargetSubdir = "Audio/VibeVoice", Role = "transformer" },
+                    new() { Repo = "microsoft/VibeVoice-1.5B", RepoPath = "model-00003-of-00003.safetensors", TargetSubdir = "Audio/VibeVoice", Role = "transformer" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "fishspeech", Modality = tts, DisplayName = "Fish-Speech 1.5", Architecture = "DualAR + tiktoken", Status = ok,
+                CliDrivable = true, // `hartsy speak -m fishspeech` — TtsCatalog key is "fishspeech" (no hyphen); was "fish-speech" here before, which never resolved
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "fishaudio/fish-speech-1.5", RepoPath = "model.pth", TargetSubdir = "Audio/FishSpeech", Role = "transformer" },
+                    new() { Repo = "fishaudio/fish-speech-1.5", RepoPath = "firefly-gan-vq-fsq-8x1024-21hz-generator.pth", TargetSubdir = "Audio/FishSpeech", Role = "codec" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "f5", Modality = tts, DisplayName = "F5-TTS", Architecture = "voice cloning, flow-matching DiT", Status = ok,
+                CliDrivable = true, // `hartsy speak -m f5 --reference <wav> --ref-text "..."` — TtsCatalog key is "f5" (was "f5-tts" here before, which never resolved); clone-only, needs both
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "SWivid/F5-TTS", RepoPath = "F5TTS_Base/model_1200000.safetensors", TargetSubdir = "Audio/F5Tts", Role = "transformer" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "dia", Modality = tts, DisplayName = "Dia-1.6B (0626)", Architecture = "byte-level dialogue TTS + DAC codec", Status = ok,
+                CliDrivable = true, // `hartsy speak -m dia "[S1] ... [S2] ..."` — TtsCatalog "dia"; needs the 0626 checkpoint (the original degenerates)
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "nari-labs/Dia-1.6B-0626", RepoPath = "pytorch_model.bin", TargetSubdir = "Audio/Dia", Role = "transformer" },
+                    new() { Repo = "descript/descript-audio-codec", RepoPath = "weights.pth", TargetSubdir = "Audio/Dia", Role = "codec" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "orpheus", Modality = tts, DisplayName = "Orpheus", Architecture = "Llama-3.2-3B + SNAC 24 kHz", Status = ok,
+                CliDrivable = true, // `hartsy speak -m orpheus` — TtsCatalog "orpheus"; non-gated mirror of the license-gated release
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "unsloth/orpheus-3b-0.1-ft", RepoPath = "model.safetensors", TargetSubdir = "Audio/Orpheus", Role = "transformer" },
+                    new() { Repo = "hubertsiuzdak/snac_24khz", RepoPath = "model.safetensors", TargetSubdir = "Audio/Orpheus", Role = "codec" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "csm", Modality = tts, DisplayName = "CSM-1B (Sesame)", Architecture = "dual-transformer + Mimi 24 kHz", Status = vp,
+                // Verified BROKEN 2026-07-21: real-weight load throws KeyNotFoundException on "backbone.norm.weight"
+                // in CsmModel.LoadWeights → Qwen2Model.LoadWeightsHeadless — the nielsr/csm-1b checkpoint's keys don't
+                // match what the loader expects. Matches this doc's own prior "🔧 parity pending" status for CSM
+                // (Codec/VC table) — never actually verified end-to-end before; CliDrivable left false.
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "nielsr/csm-1b", RepoPath = "model.safetensors", TargetSubdir = "Audio/Csm", Role = "transformer" },
+                    new() { Repo = "kyutai/mimi", RepoPath = "model.safetensors", TargetSubdir = "Audio/Csm", Role = "codec" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "neutts", Modality = tts, DisplayName = "NeuTTS Air", Architecture = "Qwen2.5-0.5B LM + NeuCodec", Status = ok,
+                CliDrivable = true, // `hartsy speak -m neutts [--reference <wav>]` — TtsCatalog "neutts"; clone is optional (falls back to the default voice)
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "neuphonic/neutts-air", RepoPath = "model.safetensors", TargetSubdir = "Audio/NeuTts", Role = "transformer" },
+                    new() { Repo = "neuphonic/neucodec", RepoPath = "model.safetensors", TargetSubdir = "Audio/NeuTts", Role = "codec" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "qwen3tts", Modality = tts, DisplayName = "Qwen3-TTS", Architecture = "12 Hz talker + MTP + codec", Status = ok,
+                // Verified end-to-end 2026-07-21: Qwen3TtsModel.ResolveRepo/ResolveMode read the WHOLE variant
+                // string, so a bare `-m qwen3tts` (variant = "qwen3tts", no "CustomVoice"/"VoiceDesign" substring)
+                // resolves to the Base checkpoint's voice_clone mode and REQUIRES --reference. For the preset-speaker
+                // or instruct-text modes, pass the variant explicitly.
+                CliDrivable = true, // `hartsy speak -m qwen3tts:1.7B-CustomVoice` (preset speaker) or
+                // `-m qwen3tts:1.7B-VoiceDesign` (instruct text) or `-m qwen3tts --reference <wav>` (Base/voice_clone,
+                // the bare-id default) — TtsCatalog key is "qwen3tts" (no hyphen)
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", RepoPath = "model.safetensors", TargetSubdir = "Audio/Qwen3Tts", Role = "transformer" },
+                    new() { Repo = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", RepoPath = "speech_tokenizer/model.safetensors", TargetSubdir = "Audio/Qwen3Tts", Role = "codec" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "chatterbox", Modality = tts, DisplayName = "Chatterbox", Architecture = "T3 LM + S3Gen (CosyVoice-derived)", Status = ok,
+                CliDrivable = true, // `hartsy speak -m chatterbox [--reference <wav>] [--exaggeration N]` — TtsCatalog "chatterbox"; clone is optional
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "ResembleAI/chatterbox", RepoPath = "t3_cfg.safetensors", TargetSubdir = "Audio/Chatterbox", Role = "transformer" },
+                    new() { Repo = "ResembleAI/chatterbox", RepoPath = "s3gen.safetensors", TargetSubdir = "Audio/Chatterbox", Role = "vocoder" },
+                    new() { Repo = "ResembleAI/chatterbox", RepoPath = "conds.pt", TargetSubdir = "Audio/Chatterbox", Role = "default conditioning" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "kyutaitts", Modality = tts, DisplayName = "Kyutai TTS (1.6B en/fr)", Architecture = "DSM (Helium LM + Mimi)", Status = ok,
+                CliDrivable = true, // `hartsy speak -m kyutaitts` — TtsCatalog key is "kyutaitts" (no hyphen); built-in voice embeds (kyutai/tts-voices), no --reference needed
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "kyutai/tts-1.6b-en_fr", RepoPath = "dsm_tts_1e68beda@240.safetensors", TargetSubdir = "Audio/KyutaiTts", Role = "transformer" },
+                    new() { Repo = "kyutai/tts-1.6b-en_fr", RepoPath = "tokenizer-e351c8d8-checkpoint125.safetensors", TargetSubdir = "Audio/KyutaiTts", Role = "codec" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "melotts", Modality = tts, DisplayName = "MeloTTS (English-v3)", Architecture = "BERT + VITS", Status = ok,
+                CliDrivable = true, // `hartsy speak -m melotts` — TtsCatalog "melotts"
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "myshell-ai/MeloTTS-English-v3", RepoPath = "checkpoint.pth", TargetSubdir = "Audio/MeloTts", Role = "transformer" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "pockettts", Modality = tts, DisplayName = "PocketTTS", Architecture = "voice-KV-primed streaming flow-LM", Status = ok,
+                CliDrivable = true, // `hartsy speak -m pockettts --voice alba` — TtsCatalog "pockettts"; voice is a built-in NAME (not a file); non-gated mirror
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "kyutai/pocket-tts-without-voice-cloning", RepoPath = "languages/english/model.safetensors", TargetSubdir = "Audio/PocketTts", Role = "transformer" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "zonos", Modality = tts, DisplayName = "Zonos-v0.1", Architecture = "transformer + ResNet293 speaker encoder", Status = ok,
+                CliDrivable = true, // `hartsy speak -m zonos --reference <wav>` — TtsCatalog "zonos"; clone-only
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Zyphra/Zonos-v0.1-transformer", RepoPath = "model.safetensors", TargetSubdir = "Audio/Zonos", Role = "transformer" },
+                    new() { Repo = "Zyphra/Zonos-v0.1-speaker-embedding", RepoPath = "ResNet293_SimAM_ASP_base.pt", TargetSubdir = "Audio/Zonos", Role = "speaker encoder" },
+                    new() { Repo = "Zyphra/Zonos-v0.1-speaker-embedding", RepoPath = "ResNet293_SimAM_ASP_base_LDA-128.pt", TargetSubdir = "Audio/Zonos", Role = "speaker LDA" },
+                    new() { Repo = "descript/descript-audio-codec", RepoPath = "weights.pth", TargetSubdir = "Audio/Zonos", Role = "codec" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "gptsovits", Modality = tts, DisplayName = "GPT-SoVITS v2", Architecture = "HuBERT + s1 GPT + s2 SoVITS", Status = ok,
+                // Verified word-correct 2026-07-21 (whisper medium.en) with --reference + --ref-text; --ref-text is
+                // REQUIRED (GptSoVitsModel throws InvalidOperationException without it — "needs the reference
+                // transcript"), unlike CosyVoice where it's optional-but-recommended.
+                CliDrivable = true, // `hartsy speak -m gptsovits --reference <wav> --ref-text "<transcript>"` — TtsCatalog key is "gptsovits" (no hyphen); clone-only, both required
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "lj1995/GPT-SoVITS", RepoPath = "gsv-v2final-pretrained/s2G2333k.pth", TargetSubdir = "Audio/GptSoVits", Role = "s2 SoVITS" },
+                    new() { Repo = "lj1995/GPT-SoVITS", RepoPath = "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt", TargetSubdir = "Audio/GptSoVits", Role = "s1 GPT" },
+                    new() { Repo = "lj1995/GPT-SoVITS", RepoPath = "chinese-hubert-base/pytorch_model.bin", TargetSubdir = "Audio/GptSoVits", Role = "HuBERT" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "zipvoice", Modality = tts, DisplayName = "ZipVoice", Architecture = "Zipformer flow-matching + Vocos", Status = ok,
+                CliDrivable = true, // `hartsy speak -m zipvoice --reference <wav> --ref-text "..."` — TtsCatalog "zipvoice"; clone-only, needs both.
+                // Slow today (~11 min / 10s clip on the 3060, no GPU-residency pass yet) — see MODEL_STATUS_AUDIO.md.
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "k2-fsa/ZipVoice", RepoPath = "zipvoice/model.safetensors", TargetSubdir = "Audio/ZipVoice", Role = "transformer" },
+                },
+            },
 
-            // Music / audio generation
+            // Music / audio generation — repos/files mirror MusicCatalog's descriptors (src/HartsyInference.Engine/
+            // Audio/Music/**).
             E("musicgen", mus, "MusicGen", "transformer + EnCodec", ok, cli: true),
-            E("audiogen", mus, "AudioGen", "MusicGen-arch + T5", vp),
-            E("ace-step", mus, "ACE-Step", "flow-matching DiT", ok),
-            E("yue", mus, "YuE", "dual-stage Llama", ok),
-            E("stable-audio", mus, "Stable Audio Open", "latent diffusion", st),
+            new CatalogEntry
+            {
+                Id = "audiogen", Modality = mus, DisplayName = "AudioGen", Architecture = "MusicGen-arch + T5-large", Status = ok,
+                CliDrivable = true, // `hartsy music -m audiogen "a dog barking"` — MusicCatalog "audiogen"; 16 kHz sound effects, not melodic music
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "facebook/audiogen-medium", RepoPath = "state_dict.bin", TargetSubdir = "Audio/AudioGen", Role = "transformer" },
+                    new() { Repo = "facebook/audiogen-medium", RepoPath = "compression_state_dict.bin", TargetSubdir = "Audio/AudioGen", Role = "codec" },
+                    new() { Repo = "google-t5/t5-large", RepoPath = "pytorch_model.bin", TargetSubdir = "Audio/AudioGen", Role = "text encoder" },
+                },
+            },
+            // "acestep"/"yue" (no hyphen) — MusicCatalog keys are AudioWeightsCatalog.AceStepId/YueId; the
+            // pre-existing "ace-step" spelling here never resolved (AudioModelSelector matches the catalog Id
+            // literally). Unlike musicgen/audiogen/stableaudio/heartmula (self-download via AudioModelCache), these
+            // two are the Engine's "registry-backed local-checkpoint families": they resolve their weights via
+            // AudioWeightsCatalog + the STANDARD ModelDownloader/ModelAsset machinery (same as image models), landing
+            // under Models/audio/music/{acestep,yue}/ — reusing AudioWeightsCatalog.AssetsFor directly here (like
+            // SideModels for image entries) keeps this catalog and the Engine's own resolution in lockstep instead of
+            // duplicating repo/file/sha data. Default variant shown ("turbo"/"en-cot") is just the CLI's pre-download
+            // preview for the bare id — `id:variant` still resolves any other registered variant at generation time.
+            new CatalogEntry
+            {
+                Id = "acestep", Modality = mus, DisplayName = "ACE-Step", Architecture = "flow-matching DiT", Status = ok,
+                CliDrivable = true, // `hartsy music -m acestep` (turbo default) or `-m acestep:sft`/`:base`/`:xl-turbo`/…
+                Assets = AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, "turbo"),
+            },
+            new CatalogEntry
+            {
+                Id = "yue", Modality = mus, DisplayName = "YuE", Architecture = "dual-stage Llama", Status = ok,
+                // Verified 2026-07-21: YueMusicModel.LoadAsync has NO auto-download fallback of its own (unlike
+                // AceStepMusicModel, which calls AudioWeightsCatalog.EnsureAsync internally) — without this Assets
+                // list + the CLI's download-confirm flow, YuE was manual-placement-only ("YuE checkpoint folder not
+                // found... place the m-a-p/YuE-s1-7B-anneal-* folder there"). This Assets list is what makes
+                // `hartsy music -m yue` self-serving for the first time.
+                CliDrivable = true, // `hartsy music -m yue` (en-cot default, ~12.5 GB) or `-m yue:en-icl`/`:zh-cot`/`:zh-icl`
+                Assets = AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.YueId, "en-cot"),
+            },
+            new CatalogEntry
+            {
+                Id = "stableaudio", Modality = mus, DisplayName = "Stable Audio Open Small", Architecture = "latent diffusion (Oobleck VAE)", Status = ok,
+                CliDrivable = true, // `hartsy music -m stableaudio` — MusicCatalog key is "stableaudio" (no hyphen); Swarm-verified 11.89s stereo 44.1kHz in 2.85s gen (2026-07-20)
+            },
+            new CatalogEntry
+            {
+                Id = "heartmula", Modality = mus, DisplayName = "HeartMuLa (oss-3B)", Architecture = "CSM-LM + flow-match HeartCodec", Status = ok,
+                CliDrivable = true, // `hartsy music -m heartmula` — MusicCatalog "heartmula"; 48 kHz, real-weight verified (see MODEL_STATUS_AUDIO.md)
+            },
+
+            // Voice conversion — VcCatalog (src/HartsyInference.Engine/Audio/Vc/**). Via `hartsy convert`.
+            new CatalogEntry
+            {
+                Id = "openvoice", Modality = vc, DisplayName = "OpenVoice V2", Architecture = "tone-color transfer (Conv2d + GRU)", Status = ok,
+                CliDrivable = true, // `hartsy convert <source.wav> -m openvoice --target <ref.wav>` — VcCatalog "openvoice"
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "myshell-ai/OpenVoiceV2", RepoPath = "converter/checkpoint.pth", TargetSubdir = "Audio/OpenVoice", Role = "transformer" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "rvc", Modality = vc, DisplayName = "RVC v2", Architecture = "ContentVec + YIN F0 + NSF-HiFiGAN", Status = ok,
+                // No fixed weights repo: RVC re-voices toward a USER-TRAINED voice model placed at
+                // Models/audio/clone/rvc/<name>.pth (or passed via --model-path) — there is nothing upstream to
+                // catalog per se. The one auto-downloadable piece is the shared ContentVec content encoder, listed
+                // here so the CLI can still offer to fetch it; VcCatalog.EnsureContentVecAsync converts it to
+                // contentvec.safetensors on first use regardless of what's listed here.
+                CliDrivable = true, // `hartsy convert <source.wav> -m rvc --model-path <voice.pth> [--pitch-shift N]` — VcCatalog "rvc"
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "lengyue233/content-vec-best", RepoPath = "pytorch_model.bin", TargetSubdir = "Audio/Rvc", Role = "content encoder (shared)" },
+                },
+            },
+
+            // Audio effects (FX) — FxCatalog (src/HartsyInference.Engine/Audio/Fx/**). Via `hartsy fx separate|enhance`.
+            new CatalogEntry
+            {
+                Id = "resemble-enhance", Modality = fx, DisplayName = "Resemble-Enhance", Architecture = "denoiser + LCFM enhancer + UnivNet", Status = vp,
+                // Verified 2026-07-21: `hartsy fx enhance` wiring itself works (asks to download, calls
+                // IFxService.EnhanceAsync correctly) but FxCatalog.LoadEnhanceAsync / AudioCheckpoints.LoadAsync
+                // assume a flat model.safetensors/pytorch_model.bin — the real repo ships a DeepSpeed checkpoint
+                // (enhancer_stage2/ds/G/default/mp_rank_00_model_states.pt), so the download 404s. No Assets listed
+                // (would just download a file that doesn't exist); CliDrivable false until the loader is updated to
+                // read the DeepSpeed .pt layout. Matches MODEL_STATUS_AUDIO.md's "real-weight parity pending".
+            },
+            new CatalogEntry
+            {
+                Id = "demucs", Modality = fx, DisplayName = "Demucs (htdemucs)", Architecture = "hybrid transformer/conv separator", Status = st,
+                // Also user-placed today: FxCatalog.ResolveDemucsPath only looks under Models/audio/fx/demucs/ for a
+                // .th/.safetensors the user drops in — no confirmed ungated single-file HF mirror wired yet (Demucs
+                // itself isn't gated, just not packaged as a single safetensors/th file on HF the engine's loader
+                // reads directly). CliDrivable left false until that's sourced or a --model-path is documented as
+                // required in FxSeparateCommand's help (already is).
+            },
 
             // Vision
             E("clip", vis, "CLIP (ViT-L/14, H/14, bigG/14)", "ViT embeddings", ok, cli: true),

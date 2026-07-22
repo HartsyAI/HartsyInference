@@ -29,4 +29,10 @@ public enum Modality
 
     /// <summary>Action-conditioned interactive world models.</summary>
     World,
+
+    /// <summary>Voice conversion / re-voicing (RVC, OpenVoice tone-color transfer).</summary>
+    VoiceConvert,
+
+    /// <summary>Audio effects: stem separation (Demucs), speech enhancement (Resemble-Enhance).</summary>
+    Fx,
 }

@@ -5,6 +5,104 @@ family. Build detail lives in [PHASE_5_AUDIO.md](PHASE_5_AUDIO.md); the music-sp
 [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md). Parity evidence (maxAbs, bugs found)
 lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS.md](MODEL_STATUS.md).
 
+> ## 🔌 CLI wiring pass (2026-07-21) — every local audio model given a `ModelCatalog` recipe
+> `hartsy speak/music/transcribe` only exposed 9/20 TTS, 2/6 STT, and 5/6 music models before this pass (the
+> rest were Engine-registered in `TtsCatalog`/`SttCatalog`/`MusicCatalog` but had no CLI catalog entry, so
+> `hartsy list` didn't show them and there was no download-confirm flow). Added `CatalogEntry` + `Assets` for
+> the missing 12 TTS (dia, orpheus, csm, neutts, qwen3tts, chatterbox, kyutaitts, melotts, pockettts, zonos,
+> gptsovits, zipvoice), 4 STT (distilwhisper, moonshinestreaming, kyutaistt, whisperstreaming), and heartmula
+> (music) + fixed audiogen/stableaudio's stale entries. Added two new modalities/commands: `hartsy convert`
+> (RVC/OpenVoice voice conversion) and `hartsy fx separate|enhance` (Demucs/Resemble-Enhance), backed by the
+> Engine's already-built `IVoiceConversionService`/`IFxService`. Wired `--reference`/`--ref-text`/
+> `--exaggeration`/`--nfe-step`/`--cfg-scale` through `hartsy speak` for clone-capable models (`SpeechRequest`/
+> `TtsJob` already carried these fields end-to-end; only the CLI-side plumbing was missing).
+>
+> **Discovered the audio download path is a *different mechanism* than the image catalog's**: audio
+> descriptors self-download via `AudioModelCache` (`~/.cache/hartsyinference/models/{owner}--{name}/`), not
+> `ModelDownloader`'s `Models/<subdir>/` tree — reusing the image-style `ModelAcquisition.EnsurePresent`
+> unmodified would have "confirmed" a download into a location the Engine never reads from. Added an
+> audio-aware branch (`ModelAcquisition.EnsureAudioAssetsPresent`) that resolves against the real cache path
+> before prompting.
+>
+> **Bugs found by a systematic "does every catalog id resolve against its Engine registry" sweep** (cheap,
+> no-GPU, catches typos the download-confirm flow can't): 8 of the 27 wired ids didn't match their
+> `TtsCatalog`/`MusicCatalog` registry key exactly (case-insensitive but hyphen-sensitive) — `fish-speech`≠
+> `fishspeech`, `spark-tts`≠`sparktts`, `f5-tts`≠`f5`, `ace-step`≠`acestep` (all **pre-existing**, silently
+> broken before this pass), plus `qwen3-tts`, `kyutai-tts`, `gpt-sovits`, `stable-audio` (introduced during
+> this pass, then caught by the same sweep before shipping). Fixed by renaming the catalog `Id` to match.
+> Also found `MusicCommand` hard-required `--model-path` for **every** music model, including the
+> self-downloading catalog ones (musicgen included) — removed; only VC/FX models with no fixed HF weights
+> (RVC voices, Demucs) still need it.
+>
+> **Exhaustive real-weight e2e pass via standalone CLI on the 3060** (GPU shared with a concurrent image-model
+> session, per the turn-taking directive) — every TTS (21/21), STT (6/6), and Music (6/6) catalog model
+> actually run, output inspected (Whisper `medium.en` transcript for speech, finite/non-silent/correct-rate
+> waveform check for music), not just "didn't throw":
+> - **All 21 TTS word-correct** except two genuinely broken (below): dia, zonos, qwen3tts, kokoro, bark,
+>   melotts, orpheus, styletts2, sparktts, cosyvoice, chatterbox, neutts, fishspeech, f5, gptsovits, zipvoice
+>   (degraded but intelligible — content present, some words garbled, matches its documented "no
+>   GPU-residency pass yet" perf status), pockettts, kyutaitts, piper. Whisper mis-hears several coined brand
+>   names (Kokoro→"Kakura", Bark→"Bach", Zonos→"Zono's", Kyutai→"Qtie", …) — expected, matches this doc's own
+>   prior Kyutai→"QTIE" precedent, not a defect.
+> - **`csm` is BROKEN**: real-weight load throws `KeyNotFoundException` on `backbone.norm.weight` in
+>   `CsmModel.LoadWeights`/`Qwen2Model.LoadWeightsHeadless` — the `nielsr/csm-1b` checkpoint's keys don't match
+>   the loader. Matches this doc's own pre-existing "🔧 parity pending" status for CSM — never actually
+>   verified end-to-end before this pass despite being `TtsCatalog`-registered. Downgraded to
+>   `ValidationPending`/not-CliDrivable.
+> - **`vibevoice` is BROKEN via this path**: produces real, non-silent, correct-duration audio, but Whisper
+>   transcribes it as `[Hindi]`/`[speaking in native language]` on both short and long prompts with the same
+>   JFK reference that zonos/styletts2/cosyvoice/neutts all handle correctly — a VibeVoice-pipeline-specific
+>   issue (not the shared CLI `--reference` plumbing), not root-caused further. Downgraded to
+>   `ValidationPending`/not-CliDrivable.
+> - **`cosyvoice` needs `--ref-text` for usable quality** — `--reference` alone produced garbled
+>   non-word-correct output ("And a tall fall, tear, tape, tape." for a plain sentence); `CosyVoiceModel`
+>   accepts an empty transcript without throwing, but clearly needs it. With `--ref-text` set, word-perfect.
+> - **`gptsovits` REQUIRES `--ref-text`** (throws `InvalidOperationException` without it, unlike CosyVoice's
+>   silent degradation) — word-perfect once supplied.
+> - **`qwen3tts`'s bare id defaults to Base/voice_clone** (requires `--reference`) because
+>   `Qwen3TtsModel.ResolveMode` reads the whole variant string and "qwen3tts" contains neither "CustomVoice"
+>   nor "VoiceDesign" — use `-m qwen3tts:1.7B-CustomVoice`/`:1.7B-VoiceDesign` for the preset/instruct modes.
+> - **Fixed a real, previously-100%-broken feature**: `--voice` was wired as a bare alias of `-m|--model`
+>   (`[CommandOption("-m|--model|--voice")]`), so `SpeechRequest.Voice`/`job.Voice` could never be set from the
+>   CLI at all — silently breaking Kokoro non-default voice packs, Spark-TTS gender, and PocketTTS's
+>   (REQUIRED) voice name for every prior CLI session. Split into a separate `--voice` option that populates
+>   `parameters["voice"]`; verified by requesting Kokoro's `am_michael` pack and confirming it downloads and is
+>   used (distinct from the `af_heart` default already cached).
+> - **`distilwhisper`'s bare id is broken**: `SttCatalog.ResolveDistilWhisperRepo`'s no-match default
+>   (`distil-whisper/distil-large-v3.5`) isn't in `WhisperPipeline.InferConfig`'s repo switch (only
+>   v2/v3/medium.en/small.en) → "Unknown Whisper repo". Use `-m distilwhisper:v3` (or `:v2`/`:medium`/`:small`).
+> - **musicgen/audiogen/acestep/stableaudio/heartmula** all produce finite, non-silent, correct
+>   sample-rate/duration/channel-count audio (heartmula's RMS ran noticeably quieter than the others — not
+>   re-investigated, flagged for a follow-up listen). **`yue`** needed a real fix, not just verification (next
+>   bullet).
+> - **Fixed `MusicCommand` hard-requiring `--model-path` for every music model**, including the
+>   self-downloading catalog ones (musicgen included) — removed; only VC/FX models with no fixed HF weights
+>   (RVC voices, Demucs) still need it.
+> - **Discovered and fixed a THIRD download mechanism**: unlike the `AudioModelCache`-self-downloading
+>   TTS/STT/MusicGen-family models, ACE-Step and YuE are "registry-backed local-checkpoint families" resolved
+>   via the (previously `internal`, now `public`) `AudioWeightsCatalog` + the STANDARD `ModelDownloader`/
+>   `ModelAsset` machinery — the same one image models use — landing under `Models/audio/music/{acestep,yue}/`.
+>   Worse, `YueMusicModel.LoadAsync` has **no auto-download fallback of its own** (unlike `AceStepMusicModel`,
+>   which calls `AudioWeightsCatalog.EnsureAsync` internally) — before this fix, `yue` was 100%
+>   manual-placement-only ("YuE checkpoint folder not found... place the m-a-p/YuE-s1-7B-anneal-* folder
+>   there"). Made `AudioWeightsCatalog`'s id constants/`AssetsFor`/`IsFolderCheckpoint` public, reused
+>   `AssetsFor` directly in the CLI catalog (same pattern as `SideModels` for image entries — no data
+>   duplication), and special-cased `ModelAcquisition` to route `acestep`/`yue` through the standard
+>   `ModelDownloader` branch instead of the `AudioModelCache` branch (with a folder-checkpoint guard so YuE's
+>   resolved `LocalPath` doesn't get set to a single shard file instead of the variant directory). Verified:
+>   the CLI now correctly lists YuE's 8 files + confirms + downloads into `Models/audio/music/yue/en-cot/`.
+> - **VoiceConvert**: `openvoice` verified (real, non-silent, correct-rate audio via `--target`). `rvc` only
+>   confirmed to *resolve* (registry lookup, no "not registered" error) — there is no default/test RVC voice
+>   checkpoint anywhere on this box (RVC is inherently bring-your-own-trained-voice), so a real generation
+>   pass isn't meaningfully possible without the user supplying one via `--model-path`.
+> - **Fx**: `resemble-enhance` real-weight load fails — `ResembleAI/resemble-enhance` ships a DeepSpeed
+>   checkpoint (`enhancer_stage2/ds/G/default/mp_rank_00_model_states.pt`), not the flat
+>   `model.safetensors`/`pytorch_model.bin` `FxCatalog.LoadEnhanceAsync`/`AudioCheckpoints.LoadAsync` assume —
+>   downgraded to `ValidationPending`/not-CliDrivable. `demucs` stays not-CliDrivable — searched HuggingFace for
+>   an ungated single-file htdemucs mirror; every result found is a community ONNX/GGML/MLX conversion or an
+>   unverified fine-tune, none confirmed compatible with the engine's `HtDemucsConfig`/`DemucsPipeline`
+>   key layout, so none were wired rather than guess.
+
 > ## 🏁 First e2e TTS/STT speed benchmarks (2026-07-12) — RTF on 3060 **and** 4090
 > Measured through the SwarmUI+AudioLab path: [`benchmarks/results/audio_tts_stt_2026-07-12.md`](../../benchmarks/results/audio_tts_stt_2026-07-12.md).
 > Piper 10.4×/7.7×, Moonshine 6.5×/6.5×, Whisper-base 5.1×/5.4×, MeloTTS 1.7×/1.8× (3060/4090). **These small

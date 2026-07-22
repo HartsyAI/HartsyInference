@@ -110,6 +110,11 @@ public sealed class ParamState
             case Modality.Speech:
                 _values["voice"] = "default";
                 _values["speed"] = "1.0";
+                _values["reference"] = "";
+                _values["ref-text"] = "";
+                _values["exaggeration"] = "";
+                _values["nfe-step"] = "";
+                _values["cfg-scale"] = "";
                 break;
             case Modality.Music:
                 _values["duration"] = "10";
@@ -142,6 +147,16 @@ public sealed class ParamState
             case Modality.World:
                 _values["frames"] = "16";
                 _values["steps"] = "10";
+                _values["seed"] = "-1";
+                break;
+            case Modality.VoiceConvert:
+                _values["target-path"] = "";
+                _values["pitch-shift"] = "0";
+                break;
+            case Modality.Fx:
+                _values["mode"] = "separate";
+                _values["lambda"] = "";
+                _values["tau"] = "";
                 _values["seed"] = "-1";
                 break;
         }

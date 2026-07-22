@@ -23,6 +23,8 @@ public sealed class ReplSession : IDisposable
         new("video", "switch to video generation"),
         new("3d", "switch to 3D mesh generation"),
         new("world", "switch to world-model rollout"),
+        new("convert", "switch to voice conversion"),
+        new("fx", "switch to audio effects (separate/enhance)"),
         new("model", "pick a model (or set id/path)"),
         new("params", "set generation parameters interactively"),
         new("backend", "set the compute backend"),
@@ -357,7 +359,7 @@ public sealed class ReplSession : IDisposable
         (string, string)[] rows =
         {
             ("<prompt>", "generate with the current mode/model/params"),
-            ("/text /image /speak /music /transcribe /vision /video /3d /world", "switch mode"),
+            ("/text /image /speak /music /transcribe /vision /video /3d /world /convert /fx", "switch mode"),
             ("/mode <name>", "switch mode explicitly"),
             ("/model [id|path]", "pick a model from disk, or set one explicitly"),
             ("/params", "step through and set generation parameters"),

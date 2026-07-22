@@ -178,14 +178,26 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
             txtSeqLen = combinedSeqLen;
         }
 
-        // F16 hot path (HARTSY_DIT_F16, default ON): cast both streams to the block activation dtype ONCE; the 20
-        // double + 40 single blocks then run every Linear/FFN/norm/attention in F16 (2× the 4090's F32 GEMM
-        // throughput, half the HBM traffic on the bandwidth-bound norm/gate kernels). Modulation/QK-norm/RoPE
-        // params stay F32; SDPA was already F16 via allowF16. Cast back to F32 before the final layer. No-op when
-        // the flag is off. Safe here: QK-RMSNorm bounds the attention scores, and the GELU/SwiGLU FFN intermediates
-        // stay well under F16's 65504 on this arch (verified coherent on real weights).
-        Tensor currentImg = DiTBlocks.DitDtype.CastStreamToAct(backend, imgTokens);
-        Tensor currentTxt = DiTBlocks.DitDtype.CastStreamToAct(backend, txtTokens);
+        // HunyuanImage does NOT opt into the shared 16-bit hot path (unlike the other DiTs on HARTSY_DIT_F16 — see
+        // DitDtype.CastStreamToAct). Its Qwen2.5-VL text conditioning is fed from an UN-normalized middle-layer
+        // hidden state (hidden_states[-3]), which legitimately carries residual-stream magnitudes in the thousands
+        // (measured ~3000 at context_embedder output for a real prompt, vs O(1-10) for the image stream). That
+        // text stream keeps compounding through the 20 double-stream blocks' residual adds and — for a real
+        // (non-degenerate) prompt specifically — overflows F16's 65504 ceiling by the last double block, producing
+        // an Inf that poisons the very first single-stream block's joint self-attention (every query attends to
+        // the same poisoned text key/value, so one Inf/NaN token contaminates the entire joint softmax) and
+        // cascades to an all-NaN velocity → all-NaN latent → solid-black decoded image. A short negative/empty
+        // prompt (1 text token, small magnitude) never reaches the overflow, which is why CFG's unconditional
+        // branch always looked fine while the conditional branch went black. BF16 (F32's exponent range, smaller
+        // mantissa) would dodge the overflow while keeping a 16-bit activation, but the shared LayerNormNoAffine /
+        // AffineBroadcastLastDim CUDA kernels this arch's NormModulate depends on only accept F32 or F16 today —
+        // adding BF16 support there is real follow-up work (multiple shared kernels, used by every other DiT), not
+        // a small targeted fix. Running this transformer's block loop at F32 is: (a) always numerically safe (no
+        // 16-bit ceiling to hit, matching the diffusers reference's own precision), and (b) fully local to this
+        // file. DitRuntimeFlags.cs's own doc is explicit that opting a model into 16-bit activations requires a
+        // per-arch safety audit — HunyuanImage's text-conditioning range fails that audit, so it stays F32.
+        Tensor currentImg = imgTokens;
+        Tensor currentTxt = txtTokens;
 
         for (int i = 0; i < _config.NumDoubleBlocks; i++)
         {

@@ -37,6 +37,8 @@ public static class GenerationDispatch
             Modality.Video => await VideoAsync(engine, spec, prompt, parameters, outputDir, quiet, cancel).ConfigureAwait(false),
             Modality.Mesh => await MeshAsync(engine, spec, prompt, parameters, quiet, cancel).ConfigureAwait(false),
             Modality.World => await WorldAsync(engine, spec, prompt, parameters, outputDir, quiet, cancel).ConfigureAwait(false),
+            Modality.VoiceConvert => await VoiceConvertAsync(engine, spec, prompt, parameters, cancel).ConfigureAwait(false),
+            Modality.Fx => await FxAsync(engine, spec, prompt, parameters, outputDir, cancel).ConfigureAwait(false),
             _ => throw new NotSupportedException($"The '{Modalities.ToCliName(spec.Modality)}' modality has no CLI dispatch."),
         };
     }
@@ -149,7 +151,8 @@ public static class GenerationDispatch
         return artifact;
     }
 
-    /// <summary>Text-to-speech through <see cref="ISpeechService"/>.</summary>
+    /// <summary>Text-to-speech through <see cref="ISpeechService"/>. Voice-cloning models read the optional
+    /// <c>reference</c> path (and, for F5-style models that align against a transcript, <c>ref-text</c>).</summary>
     private static async Task<GeneratedArtifact> SpeechAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, CancellationToken cancel)
     {
@@ -159,10 +162,57 @@ public static class GenerationDispatch
             Text = prompt,
             Voice = parameters.Get("voice"),
             Speed = speed > 0d ? speed : null,
+            Reference = LoadAudioClip(parameters.GetStringOrNull("reference")),
+            RefText = parameters.Get("ref-text") ?? "",
+            Exaggeration = parameters.GetDoubleOrNull("exaggeration"),
+            NfeStep = parameters.GetIntOrNull("nfe-step"),
+            CfgScale = parameters.GetDoubleOrNull("cfg-scale"),
             Seed = Math.Max(0, parameters.GetInt("seed", 0)),
         };
         AudioResult result = await engine.Speech.SynthesizeAsync(spec, request, cancel).ConfigureAwait(false);
         return AudioArtifact(result, "speech");
+    }
+
+    /// <summary>Voice conversion through <see cref="IVoiceConversionService"/>; the CLI's "prompt" is the source audio
+    /// path. An optional <c>target-path</c> tunable supplies the tone-color reference (OpenVoice); RVC ignores it.</summary>
+    private static async Task<GeneratedArtifact> VoiceConvertAsync(
+        IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, CancellationToken cancel)
+    {
+        VoiceConversionRequest request = new VoiceConversionRequest
+        {
+            Source = LoadAudioClip(prompt) ?? throw new FileNotFoundException($"Source audio not found: {prompt}"),
+            Target = LoadAudioClip(parameters.GetStringOrNull("target-path")),
+            PitchShift = parameters.GetFloat("pitch-shift", 0f),
+        };
+        AudioResult result = await engine.VoiceConversion.ConvertAsync(spec, request, cancel).ConfigureAwait(false);
+        return AudioArtifact(result, "converted");
+    }
+
+    /// <summary>Audio effects (Demucs separation / Resemble-Enhance) through <see cref="IFxService"/>; the CLI's
+    /// "prompt" is the input audio path and the <c>mode</c> tunable picks which of the two operations to run.
+    /// Separation yields multiple stems, written directly to a fresh subfolder since there is no single-file result.</summary>
+    private static async Task<GeneratedArtifact> FxAsync(
+        IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, CancellationToken cancel)
+    {
+        AudioClip audio = LoadAudioClip(prompt) ?? throw new FileNotFoundException($"Input audio not found: {prompt}");
+        string mode = (parameters.Get("mode") ?? "separate").ToLowerInvariant();
+        if (mode == "enhance")
+        {
+            FxEnhanceRequest request = new FxEnhanceRequest
+            {
+                Audio = audio,
+                Lambd = parameters.GetDoubleOrNull("lambda"),
+                Tau = parameters.GetDoubleOrNull("tau"),
+                Seed = parameters.GetInt("seed", -1),
+            };
+            AudioResult result = await engine.Fx.EnhanceAsync(spec, request, cancel).ConfigureAwait(false);
+            return AudioArtifact(result, "enhanced");
+        }
+        // Leave Model null so the service falls back to the selector's variant (parsed from "demucs:htdemucs_6s"
+        // style catalog ids) rather than the raw requested token.
+        FxSeparateRequest separateRequest = new FxSeparateRequest { Audio = audio };
+        StemsResult stems = await engine.Fx.SeparateAsync(spec, separateRequest, cancel).ConfigureAwait(false);
+        return StemsArtifact(stems, outputDir, Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"')));
     }
 
     /// <summary>Text-to-music through <see cref="IMusicService"/>.</summary>
@@ -402,6 +452,59 @@ public static class GenerationDispatch
         artifact.Meta["frames"] = frames.Count.ToString(CultureInfo.InvariantCulture);
         artifact.Meta["size"] = $"{width}x{height}";
         return artifact;
+    }
+
+    /// <summary>Reads an audio file into an <see cref="AudioClip"/>, or null when <paramref name="path"/> is null/empty
+    /// (an unset optional reference). Throws if a path was given but does not exist.</summary>
+    private static AudioClip? LoadAudioClip(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+        string trimmed = path.Trim().Trim('"');
+        if (!File.Exists(trimmed))
+        {
+            throw new FileNotFoundException($"Audio file not found: {trimmed}");
+        }
+        return new AudioClip { Data = File.ReadAllBytes(trimmed), Format = Path.GetExtension(trimmed).TrimStart('.').ToLowerInvariant() };
+    }
+
+    /// <summary>Writes each named stem as its own WAV into a fresh subdirectory (mirroring <see cref="FrameWriter"/>'s
+    /// "one call, N files" shape) since a stem set has no single-file artifact.</summary>
+    private static GeneratedArtifact StemsArtifact(StemsResult stems, string? outputDir, string slug)
+    {
+        if (stems.Stems.Count == 0)
+        {
+            throw new InvalidOperationException("The separation model produced no stems.");
+        }
+        string baseDir = outputDir ?? RepoPaths.OutputRoot();
+        Directory.CreateDirectory(baseDir);
+        string dir = NextStemsDir(baseDir, Slug.Make(slug));
+        Directory.CreateDirectory(dir);
+        foreach (KeyValuePair<string, byte[]> stem in stems.Stems)
+        {
+            File.WriteAllBytes(Path.Combine(dir, $"{stem.Key}.{stems.Format}"), stem.Value);
+        }
+        return new GeneratedArtifact
+        {
+            Kind = ArtifactKind.Audio,
+            Extension = stems.Format,
+            Text = $"{stems.Stems.Count} stem(s) ({string.Join(", ", stems.Stems.Keys)}) @ {stems.SampleRate} Hz → {dir}",
+        };
+    }
+
+    private static string NextStemsDir(string baseDir, string slug)
+    {
+        for (int i = 1; i < 100000; i++)
+        {
+            string candidate = Path.Combine(baseDir, $"{slug}-stems-{i:D3}");
+            if (!Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return Path.Combine(baseDir, $"{slug}-stems-{Guid.NewGuid():N}");
     }
 
     /// <summary>Wraps an <see cref="AudioResult"/> as a saveable artifact with its duration/rate footer.</summary>

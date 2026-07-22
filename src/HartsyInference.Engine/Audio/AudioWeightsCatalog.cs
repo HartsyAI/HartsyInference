@@ -5,13 +5,13 @@ namespace HartsyInference.Engine.Audio;
 /// <summary>The ACE-Step 1.5 and YuE weight tables, ported from the extension's audio weights registry onto the
 /// Engine's <see cref="ModelAsset"/> + <see cref="ModelDownloader"/> machinery (per-target lock, SHA-256 verify,
 /// atomic move). Every ACE-Step variant is a DISTINCT checkpoint with its own verified hash — never alias them.</summary>
-internal static class AudioWeightsCatalog
+public static class AudioWeightsCatalog
 {
     /// <summary>Catalog id of the ACE-Step music family.</summary>
-    internal const string AceStepId = "acestep";
+    public const string AceStepId = "acestep";
 
     /// <summary>Catalog id of the YuE music family.</summary>
-    internal const string YueId = "yue";
+    public const string YueId = "yue";
 
     /// <summary>Models-root-relative folder ACE-Step checkpoints land in.</summary>
     internal const string AceStepSubdir = "audio/music/acestep";
@@ -92,11 +92,11 @@ internal static class AudioWeightsCatalog
 
     /// <summary>Whether the family's checkpoint is a multi-file FOLDER (sharded weights + sidecars) rather than a
     /// single safetensors — its load path resolves to the variant directory.</summary>
-    internal static bool IsFolderCheckpoint(string familyId) =>
+    public static bool IsFolderCheckpoint(string familyId) =>
         string.Equals(familyId, YueId, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Every file a specific variant needs; empty when the Engine has no entry for it.</summary>
-    internal static IReadOnlyList<ModelAsset> AssetsFor(string familyId, string variant)
+    public static IReadOnlyList<ModelAsset> AssetsFor(string familyId, string variant)
     {
         if (familyId is null || variant is null)
         {

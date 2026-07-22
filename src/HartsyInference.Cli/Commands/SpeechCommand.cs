@@ -18,10 +18,16 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         [Description("The text to speak.")]
         public string Text { get; init; } = "";
 
-        /// <summary>Speech model id, optionally with a variant (e.g. piper:en_US-lessac-medium, kokoro:af_heart).</summary>
-        [CommandOption("-m|--model|--voice")]
-        [Description("Speech model, optionally 'id:variant' (e.g. piper:en_US-lessac-medium, kokoro:af_heart). Empty uses the default.")]
+        /// <summary>Speech model id, optionally with a variant (e.g. piper:en_US-lessac-medium, whisper:medium.en).</summary>
+        [CommandOption("-m|--model")]
+        [Description("Speech model, optionally 'id:variant' (e.g. piper:en_US-lessac-medium). Empty uses the default.")]
         public string Model { get; init; } = "";
+
+        /// <summary>Built-in voice/speaker name within the selected model (Kokoro voice pack, PocketTTS voice,
+        /// Spark-TTS gender male/female); distinct from --model. Empty uses the model's own default.</summary>
+        [CommandOption("--voice")]
+        [Description("Built-in voice/speaker name (Kokoro voice pack e.g. af_heart, PocketTTS voice e.g. alba, Spark-TTS gender male/female). Empty uses the model default.")]
+        public string? Voice { get; init; }
 
         /// <summary>Path to a local Piper .onnx voice.</summary>
         [CommandOption("--model-path")]
@@ -37,6 +43,31 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         [CommandOption("--speed")]
         [Description("Speaking rate (1.0 = normal, higher = faster).")]
         public float Speed { get; init; } = 1.0f;
+
+        /// <summary>Path to a voice-reference WAV, for cloning models (Zonos, F5-TTS, CosyVoice, Chatterbox, …).</summary>
+        [CommandOption("--reference")]
+        [Description("Voice-reference WAV for cloning models (Zonos, F5-TTS, CosyVoice, Chatterbox, VibeVoice, …).")]
+        public string? Reference { get; init; }
+
+        /// <summary>Transcript of the reference clip, for models that align against it (F5-TTS).</summary>
+        [CommandOption("--ref-text")]
+        [Description("Transcript of --reference, for models that need it (F5-TTS).")]
+        public string? RefText { get; init; }
+
+        /// <summary>Expressiveness knob (Chatterbox).</summary>
+        [CommandOption("--exaggeration")]
+        [Description("Expressiveness (Chatterbox); model default when unset.")]
+        public float? Exaggeration { get; init; }
+
+        /// <summary>Flow-matching steps (F5-TTS NFE).</summary>
+        [CommandOption("--nfe-step")]
+        [Description("Flow-matching steps (F5-TTS); model default when unset.")]
+        public int? NfeStep { get; init; }
+
+        /// <summary>Classifier-free guidance strength.</summary>
+        [CommandOption("--cfg-scale")]
+        [Description("Classifier-free guidance strength; model default when unset.")]
+        public float? CfgScale { get; init; }
 
         /// <summary>Directory to save the WAV to.</summary>
         [CommandOption("-o|--output")]
@@ -60,6 +91,18 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
 
         ParamState parameters = new ParamState(Modality.Speech) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("speed", settings.Speed.ToString(CultureInfo.InvariantCulture));
+        if (settings.Voice is { Length: > 0 })
+            parameters.Put("voice", settings.Voice);
+        if (settings.Reference is { Length: > 0 })
+            parameters.Put("reference", settings.Reference);
+        if (settings.RefText is { Length: > 0 })
+            parameters.Put("ref-text", settings.RefText);
+        if (settings.Exaggeration is { } exaggeration)
+            parameters.Put("exaggeration", exaggeration.ToString(CultureInfo.InvariantCulture));
+        if (settings.NfeStep is { } nfeStep)
+            parameters.Put("nfe-step", nfeStep.ToString(CultureInfo.InvariantCulture));
+        if (settings.CfgScale is { } cfgScale)
+            parameters.Put("cfg-scale", cfgScale.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Speech);
         string label = settings.ModelPath is { Length: > 0 } mp ? Path.GetFileName(mp) : (settings.Model.Length > 0 ? settings.Model : "en_US-lessac-medium");
