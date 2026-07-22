@@ -65,21 +65,20 @@ internal sealed unsafe class ZipformerConvModule
     {
         int dim = _dim;
         Tensor proj = WhisperOps.ProjectLinear(backend, x, _inW!, _inB, 1, t, dim, 2 * dim);
-        float* pp = (float*)proj.DataPointer;
 
-        Tensor gated = new(new TensorShape(1, t, dim), DType.F32);
-        float* gp = (float*)gated.DataPointer;
-        for (int i = 0; i < t; i++)
-        {
-            float* row = pp + (long)i * 2 * dim;
-            float* gRow = gp + (long)i * dim;
-            for (int d = 0; d < dim; d++)
-            {
-                float gate = 1f / (1f + MathF.Exp(-row[dim + d]));
-                gRow[d] = row[d] * gate;
-            }
-        }
+        // GLU gate: content·sigmoid(gate), content/gate are the two dim-wide halves of proj. GPU-resident via
+        // SliceLastDim + Sigmoid + Mul — replaces a host float* loop that forced a device→host sync.
+        Tensor content = new(new TensorShape(1, t, dim), DType.F32);
+        backend.SliceLastDim(content, proj, 0);
+        Tensor gate = new(new TensorShape(1, t, dim), DType.F32);
+        backend.SliceLastDim(gate, proj, dim);
         proj.Dispose();
+
+        backend.Sigmoid(gate, gate);
+        Tensor gated = new(new TensorShape(1, t, dim), DType.F32);
+        backend.Mul(gated, content, gate);
+        content.Dispose();
+        gate.Dispose();
 
         Tensor chFirst = new(new TensorShape(1, dim, t), DType.F32);
         backend.Transpose2D(chFirst, gated, t, dim);

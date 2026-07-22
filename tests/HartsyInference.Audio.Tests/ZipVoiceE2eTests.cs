@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Io;
+using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
@@ -26,8 +27,59 @@ public sealed class ZipVoiceE2eTests
     private readonly ITestOutputHelper _out;
     public ZipVoiceE2eTests(ITestOutputHelper output) => _out = output;
 
-    private const string RefText = "And so, my fellow Americans, ask not what your country can do for you";
+    // NOTE: must be a verbatim, complete transcript of the ACTUAL spoken content in the reference clip used
+    // below (the full 11.0s jfk.wav, not a 5s trim) — ZipVoice's "predict" duration mode phonemizes this text
+    // and average-upsamples it across the *measured* reference-audio frame count (see
+    // ZipVoiceModel.BuildFrameToTokenIndex / PredictTargetFrames). If RefText describes more speech than is
+    // actually present in the audio (e.g. a 13-word quote paired with an 8-word 5s clip), the token→frame
+    // averaging allocates real prompt-audio frames to text tokens for words that were never spoken, corrupting
+    // the shared fm_decoder self-attention sequence and bleeding that unspoken reference text into the
+    // generated region. Confirmed via Whisper STT on jfk.wav: this is the verbatim full transcript.
+    private const string RefText =
+        "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.";
     private const string TargetText = "The quick brown fox jumps over the lazy dog near the riverbank.";
+
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public async System.Threading.Tasks.Task Diag_TranscribeJfkFullAndTrimmed()
+    {
+        string jfkPath = Path.Combine(RepoRootDir(), "tests", "python-reference", "silerovad_reference", "jfk.wav");
+        if (!File.Exists(jfkPath)) { _out.WriteLine("jfk.wav missing — skipping."); return; }
+
+        string whisperRepoDir = AudioModelCache.GetRepoDirectory("distil-whisper/distil-large-v3");
+        string whisperRepoId = "distil-whisper/distil-large-v3";
+        if (!File.Exists(Path.Combine(whisperRepoDir, "model.safetensors")))
+        {
+            whisperRepoDir = AudioModelCache.GetRepoDirectory("openai/whisper-base");
+            whisperRepoId = "openai/whisper-base";
+        }
+        if (!File.Exists(Path.Combine(whisperRepoDir, "model.safetensors")))
+        {
+            _out.WriteLine("No cached Whisper model — skipping.");
+            return;
+        }
+        _out.WriteLine($"Using Whisper model: {whisperRepoId}");
+
+        string outDir = Path.Combine(Path.GetTempPath(), "hartsyinference_zipvoice_e2e");
+        Directory.CreateDirectory(outDir);
+        string trimmedRef = TrimWav(jfkPath, seconds: 5.0f, outDir);
+
+        using WhisperPipeline stt = await WhisperPipeline.LoadAsync(whisperRepoId);
+        IBackend sttBackend = CudaContext.IsAvailable() ? new CudaBackend(0, ResolvePtxDir()) : new HartsyInference.Cpu.CpuBackend();
+        try
+        {
+            WhisperOptions options = new() { Language = "en", Translate = false, WithTimestamps = true };
+
+            string fullTranscript = stt.TranscribeWav(sttBackend, jfkPath, options).Trim();
+            _out.WriteLine($"FULL jfk.wav (11.0s) transcript: \"{fullTranscript}\"");
+
+            string trimTranscript = stt.TranscribeWav(sttBackend, trimmedRef, options).Trim();
+            _out.WriteLine($"TRIMMED jfk_trim_5.0s.wav transcript: \"{trimTranscript}\"");
+
+            _out.WriteLine($"RefText constant used by main test: \"{RefText}\"");
+        }
+        finally { (sttBackend as IDisposable)?.Dispose(); }
+    }
 
     [Fact]
     [Trait("Category", "GpuIntegration")]
@@ -56,8 +108,10 @@ public sealed class ZipVoiceE2eTests
 
         string outDir = Path.Combine(Path.GetTempPath(), "hartsyinference_zipvoice_e2e");
         Directory.CreateDirectory(outDir);
-        string trimmedRef = TrimWav(jfkPath, seconds: 5.0f, outDir);
-        _out.WriteLine($"Reference clip (trimmed 5s): {trimmedRef}");
+        // Full 11.0s clip (not a 5s trim) so RefText's full transcript actually matches what's spoken —
+        // see the RefText doc comment above for why a truncated clip + full-quote text caused reference bleed.
+        string trimmedRef = TrimWav(jfkPath, seconds: 11.0f, outDir);
+        _out.WriteLine($"Reference clip (full 11.0s, time-matched to RefText): {trimmedRef}");
 
         _out.WriteLine("Loading ZipVoicePipeline (auto-downloads k2-fsa/ZipVoice + vocos-mel-24khz if not cached)...");
         using ZipVoicePipeline pipeline = await ZipVoicePipeline.LoadAsync();
@@ -124,9 +178,10 @@ public sealed class ZipVoiceE2eTests
             WavFile.WriteMono16(sttWav, sttInput, 16_000);
 
             using WhisperPipeline stt = await WhisperPipeline.LoadAsync(whisperRepoId);
-            using HartsyInference.Cpu.CpuBackend sttBackend = new();
+            // Reuse the same (already-loaded) backend for STT — CPU-path Whisper decode in this engine is
+            // extremely slow (20+ min for a few seconds of audio on distil-large-v3/medium.en); CUDA is fast.
             WhisperOptions options = new() { Language = "en", Translate = false, WithTimestamps = false };
-            string transcript = stt.TranscribeWav(sttBackend, sttWav, options).Trim();
+            string transcript = stt.TranscribeWav(backend, sttWav, options).Trim();
             string lower = transcript.ToLowerInvariant();
             _out.WriteLine($"Target text:        \"{TargetText}\"");
             _out.WriteLine($"Whisper transcript: \"{transcript}\"");

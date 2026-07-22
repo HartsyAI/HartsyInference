@@ -23,6 +23,14 @@ internal sealed unsafe class ZipformerEncoderStage
     private readonly ZipformerBypass? _outCombiner;
     private Tensor? _timeEmbW, _timeEmbB;
 
+    /// <summary>Cache for <see cref="ZipformerRelPosEncoding.Build"/> keyed by the stage's effective sequence
+    /// length. Within one <c>GenerateFromAudio</c> call, T is identical across all 16-step × 2-CFG-branch Euler
+    /// forward passes, so rebuilding this pure function of T from scratch on every single forward call (as the
+    /// original code did) was redundant CPU work repeated ~32× per stage for no reason — cache the one table
+    /// that's actually ever needed for a given generation.</summary>
+    private int _cachedPosEmbT = -1;
+    private Tensor? _cachedPosEmb;
+
     public ZipformerEncoderStage(int dim, int numLayers, int downsampleFactor, int cnnKernel,
         int numHeads, int queryHeadDim, int posHeadDim, int posDim, int valueHeadDim, int feedforwardDim,
         int timeEmbedDim, bool useTimeEmb)
@@ -81,7 +89,7 @@ internal sealed unsafe class ZipformerEncoderStage
         }
 
         Tensor? stageTimeEmb = _useTimeEmb ? ComputeStageTimeEmb(backend, sharedTimeEmb!) : null;
-        Tensor posEmb = ZipformerRelPosEncoding.Build(workT, _posDim);
+        Tensor posEmb = GetOrBuildPosEmb(workT);
 
         Tensor cur = working;
         for (int i = 0; i < _numLayers; i++)
@@ -91,7 +99,6 @@ internal sealed unsafe class ZipformerEncoderStage
             cur = next;
             ownWorking = true;
         }
-        posEmb.Dispose();
         stageTimeEmb?.Dispose();
 
         if (_downsample is null)
@@ -101,9 +108,23 @@ internal sealed unsafe class ZipformerEncoderStage
         cur.Dispose();
         Tensor trimmed = TrimToLength(upsampled, t, _dim);
         upsampled.Dispose();
-        Tensor combined = _outCombiner!.Forward(x, trimmed, t);
+        Tensor combined = _outCombiner!.Forward(backend, x, trimmed, t);
         trimmed.Dispose();
         return combined;
+    }
+
+    /// <summary>Returns the cached <see cref="ZipformerRelPosEncoding.Build"/> table for <paramref name="t"/>,
+    /// rebuilding only when <paramref name="t"/> differs from the last call (see <see cref="_cachedPosEmbT"/>
+    /// doc). Owned by this stage — callers must NOT dispose the returned tensor.</summary>
+    private Tensor GetOrBuildPosEmb(int t)
+    {
+        if (_cachedPosEmb is null || _cachedPosEmbT != t)
+        {
+            _cachedPosEmb?.Dispose();
+            _cachedPosEmb = ZipformerRelPosEncoding.Build(t, _posDim);
+            _cachedPosEmbT = t;
+        }
+        return _cachedPosEmb;
     }
 
     /// <summary>Returns the stage-projected time embedding, shape <c>[1, 1, dim]</c> (a single per-channel

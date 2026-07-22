@@ -71,11 +71,11 @@ internal sealed unsafe class ZipformerAttentionWeights
     /// <see cref="IBackend.BatchedMatMul"/> — previously a quadruple-nested host scalar loop, the single
     /// biggest cost in the whole Zipformer backbone (this module's output is shared by 3 consumers per layer:
     /// two <see cref="ZipformerSelfAttentionValue"/> instances plus <see cref="ZipformerNonlinAttention"/>).
-    /// Position score (<c>p·linear_pos(pos_emb)</c> via the Transformer-XL rel_shift gather) stays a host loop
-    /// — <paramref name="phd"/> is small (4 in the shipped config, vs qhd=32) and rel_shift has no existing
-    /// GPU primitive in this engine; combined into the content score via one <see cref="IBackend.Add"/> call.
-    /// Softmax also stays host (operates on the already-small <c>[H,T,T]</c> result) — both are documented
-    /// follow-ups, not the priority lever here.</para></summary>
+    /// The position-score dot products (<c>p·linear_pos(pos_emb)</c>) also run on-device against all
+    /// <c>2T-1</c> relative offsets at once; only the Transformer-XL rel_shift band remap (a per-row memcpy,
+    /// no arithmetic) and the softmax (operates on the already-small <c>[H,T,T]</c> result) stay host —
+    /// rel-shift-gather/softmax GPU primitives are documented follow-ups, not the priority lever here (see
+    /// docs/Checklists/PHASE_5_AUDIO.md ZipVoice perf-pass notes).</para></summary>
     public Tensor Forward(IBackend backend, Tensor x, Tensor posEmb, int t)
     {
         int h = _numHeads, qhd = _queryHeadDim, phd = _posHeadDim;
@@ -248,43 +248,40 @@ internal sealed unsafe class ZipformerNonlinAttention
     }
 
     /// <summary><paramref name="x"/> is <c>[1, T, dim]</c>; <paramref name="headZeroWeights"/> is head-0-only
-    /// attention weights, <c>[T, T]</c> (<c>attn_weights[0:1]</c> from the shared
-    /// <see cref="ZipformerAttentionWeights"/> output). Returns <c>[1, T, dim]</c>. The across-time mix
-    /// (<c>attn_weights[0] @ gated</c>, single head so a plain <see cref="IBackend.MatMul"/> rather than the
-    /// batched form self-attention uses) replaces what was a T×T×hidden host scalar loop.</summary>
+    /// attention weights, <c>[1, T, T]</c> (<c>attn_weights[0:1]</c> from the shared
+    /// <see cref="ZipformerAttentionWeights"/> output). Returns <c>[1, T, dim]</c>. Fully GPU-resident: the
+    /// <c>[s | x | y]</c> chunk split is <see cref="IBackend.SliceLastDim"/>, the content gate is
+    /// <see cref="IBackend.Tanh"/> + <see cref="IBackend.Mul"/>, the time-mixing is a batch-1
+    /// <see cref="IBackend.BatchedMatMul"/> (<c>[1,T,T] @ [1,T,hidden]</c>), and the output gate is another
+    /// <see cref="IBackend.Mul"/> — replaces three host <c>float*</c> loops (gate, O(T²·hidden) mix, y-gate).</summary>
     public Tensor Forward(IBackend backend, Tensor x, Tensor headZeroWeights, int t)
     {
         int hidden = _hidden;
         Tensor proj = WhisperOps.ProjectLinear(backend, x, _inProjW!, _inProjB, 1, t, _dim, 3 * hidden);
-        float* pp = (float*)proj.DataPointer;   // [T, 3*hidden] = [s | x | y] per row
 
-        // Precompute the gated content branch once per position: gated[j,:] = x[j,:] * tanh(s[j,:]).
-        Tensor gated = new(new TensorShape(t, hidden), DType.F32);
-        float* gp = (float*)gated.DataPointer;
-        for (int j = 0; j < t; j++)
-        {
-            float* row = pp + (long)j * 3 * hidden;
-            float* gRow = gp + (long)j * hidden;
-            for (int e = 0; e < hidden; e++) gRow[e] = row[hidden + e] * MathF.Tanh(row[e]);
-        }
-
-        Tensor mixed2D = new(new TensorShape(t, hidden), DType.F32);
-        backend.MatMul(mixed2D, headZeroWeights, gated);
-        gated.Dispose();
-
-        // Gate by y (third chunk) at position i (per-position, not mixed across time).
-        Tensor mixed = mixed2D.Reshape(new TensorShape(1, t, hidden));
-        float* mp = (float*)mixed.DataPointer;
-        for (int i = 0; i < t; i++)
-        {
-            float* yRow = pp + (long)i * 3 * hidden + 2 * hidden;
-            float* outRow = mp + (long)i * hidden;
-            for (int e = 0; e < hidden; e++) outRow[e] *= yRow[e];
-        }
+        Tensor sChunk = new(new TensorShape(1, t, hidden), DType.F32);
+        backend.SliceLastDim(sChunk, proj, 0);
+        Tensor xChunk = new(new TensorShape(1, t, hidden), DType.F32);
+        backend.SliceLastDim(xChunk, proj, hidden);
+        Tensor yChunk = new(new TensorShape(1, t, hidden), DType.F32);
+        backend.SliceLastDim(yChunk, proj, 2 * hidden);
         proj.Dispose();
 
+        backend.Tanh(sChunk, sChunk);
+        Tensor gated = new(new TensorShape(1, t, hidden), DType.F32);
+        backend.Mul(gated, xChunk, sChunk);
+        sChunk.Dispose();
+        xChunk.Dispose();
+
+        Tensor mixed = new(new TensorShape(1, t, hidden), DType.F32);
+        backend.BatchedMatMul(mixed, headZeroWeights, gated);
+        gated.Dispose();
+
+        backend.Mul(mixed, mixed, yChunk);
+        yChunk.Dispose();
+
         Tensor output = WhisperOps.ProjectLinear(backend, mixed, _outProjW!, _outProjB, 1, t, hidden, _dim);
-        mixed2D.Dispose();
+        mixed.Dispose();
         return output;
     }
 
