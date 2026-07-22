@@ -194,7 +194,7 @@ public sealed unsafe class CosmosDvTokenizer : IDiscreteVideoTokenizer, IDisposa
     }
 
     /// <summary>Wires the DV encoder from the loaded <c>network.*</c> tokenizer weights (F32; produced by
-    /// <see cref="HartsyInference.ModelHandler.CheckpointConverters.CosmosDvTokenizerConverter"/> with
+    /// <see cref="HartsyInference.ModelAssets.CheckpointConverters.CosmosDvTokenizerConverter"/> with
     /// <c>castToF32: true</c>). Keys are the prefix-stripped module names (e.g. <c>encoder.conv_in.0.conv3d.weight</c>,
     /// <c>quant_conv.conv3d.weight</c>).</summary>
     public void LoadWeights(Dictionary<string, Tensor> weightsF32)

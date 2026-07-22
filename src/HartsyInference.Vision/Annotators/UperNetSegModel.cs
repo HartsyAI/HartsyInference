@@ -287,10 +287,13 @@ public sealed unsafe class UperNetSegModel
         Tensor normed = new(rows.Shape, DType.F32);
         backend.LayerNorm(normed, rows, weight, bias, LnEps);
         rows.Dispose();
-        Tensor output = new(x.Shape, DType.F32);
-        backend.Transpose2D(output.Reshape(new TensorShape(c, hw)), normed, (int)hw, c);
+        // Allocate already in the 2-D shape Transpose2D writes (see NormalBaeModel.SqueezeExcite for why:
+        // the CUDA activation cache is keyed by the exact output Tensor object, so reshaping post-hoc as the
+        // write target orphans the object this method would otherwise return). Reshape only on the way out.
+        Tensor output2d = new(new TensorShape(c, hw), DType.F32);
+        backend.Transpose2D(output2d, normed, (int)hw, c);
         normed.Dispose();
-        return output;
+        return output2d.Reshape(x.Shape);
     }
 
     /// <summary>torch <c>AdaptiveAvgPool2d</c> to <paramref name="scale"/>²: cell (i,j) averages input rows
@@ -380,9 +383,10 @@ public sealed unsafe class UperNetSegModel
             backend.Linear(projected, act, Pw2W!, Pw2B!);
             act.Dispose();
 
-            Tensor back = new(input.Shape, DType.F32);
-            backend.Transpose2D(back.Reshape(new TensorShape(c, hw)), projected, (int)hw, c);
+            Tensor back2d = new(new TensorShape(c, hw), DType.F32);
+            backend.Transpose2D(back2d, projected, (int)hw, c);
             projected.Dispose();
+            Tensor back = back2d.Reshape(input.Shape);
             Tensor sum = new(input.Shape, DType.F32);
             backend.Add(sum, back, input);
             back.Dispose();

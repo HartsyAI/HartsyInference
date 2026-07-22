@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Schedulers;
@@ -8,7 +9,7 @@ namespace HartsyInference.Diffusion.Schedulers;
 /// builds for ACE-Step (a different, non-transferable schedule — kept as a separate class rather than
 /// parameterizing that one). Each step jumps to the clean estimate then re-noises with fresh Gaussian noise at
 /// the next sigma level; the terminal step lands exactly on the clean estimate since <c>t[steps] = 0</c>.</summary>
-public sealed unsafe class StableAudioPingPongScheduler
+public sealed class StableAudioPingPongScheduler
 {
     private float[] _sigmas = [];
 
@@ -31,20 +32,31 @@ public sealed unsafe class StableAudioPingPongScheduler
         _sigmas[numInferenceSteps] = 0f;
     }
 
-    /// <summary>One ping-pong step in place: <c>x̂₀ = x − t·v</c>, then fresh-noise re-injection at the next t
-    /// (<c>x ← (1 − t_next)·x̂₀ + t_next·ε</c>).</summary>
-    public void Step(Tensor sample, Tensor velocity, Tensor freshNoise, int stepIndex)
+    /// <summary>One ping-pong step, GPU-resident (chained <see cref="IBackend.Scale"/>/<see cref="IBackend.Add"/> —
+    /// no host readback of the loop-carried latent): <c>x̂₀ = x − t·v</c>, then fresh-noise re-injection at the
+    /// next t (<c>x ← (1 − t_next)·x̂₀ + t_next·ε</c>). Returns a new tensor; the caller disposes the old
+    /// <paramref name="sample"/> (this does not mutate it in place, unlike the old host-loop version).</summary>
+    public Tensor Step(IBackend backend, Tensor sample, Tensor velocity, Tensor freshNoise, int stepIndex)
     {
         float t = _sigmas[stepIndex];
         float tNext = _sigmas[stepIndex + 1];
-        long n = sample.Shape.ElementCount;
-        float* sp = (float*)sample.DataPointer;
-        float* vp = (float*)velocity.DataPointer;
-        float* np = (float*)freshNoise.DataPointer;
-        for (long i = 0; i < n; i++)
-        {
-            float x0 = sp[i] - t * vp[i];
-            sp[i] = (1f - tNext) * x0 + tNext * np[i];
-        }
+
+        Tensor scaledV = new Tensor(velocity.Shape, DType.F32);
+        backend.Scale(scaledV, velocity, -t);
+        Tensor x0 = new Tensor(sample.Shape, DType.F32);
+        backend.Add(x0, sample, scaledV);
+        scaledV.Dispose();
+
+        Tensor scaledX0 = new Tensor(x0.Shape, DType.F32);
+        backend.Scale(scaledX0, x0, 1f - tNext);
+        x0.Dispose();
+        Tensor scaledNoise = new Tensor(freshNoise.Shape, DType.F32);
+        backend.Scale(scaledNoise, freshNoise, tNext);
+
+        Tensor next = new Tensor(sample.Shape, DType.F32);
+        backend.Add(next, scaledX0, scaledNoise);
+        scaledX0.Dispose();
+        scaledNoise.Dispose();
+        return next;
     }
 }

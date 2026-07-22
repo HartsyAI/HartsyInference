@@ -1,0 +1,67 @@
+using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Io;
+using HartsyInference.Audio.Models.Zonos;
+using HartsyInference.Audio.Pipelines;
+using HartsyInference.Core.Logging;
+using HartsyInference.ModelAssets.PyTorch;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Audio.Phonemizer.Espeak;
+
+namespace HartsyInference.Engine.Audio;
+
+/// <summary>Zonos v0.1 (Zyphra/Zonos-v0.1-transformer) — transformer backbone over 9 DAC codebooks → 44.1 kHz
+/// voice-cloning TTS, wiring the ResNet293 speaker encoder, the espeak phoneme tokenizer, the prefix conditioner,
+/// and the delayed-AR generator. A voice-reference clip is required.</summary>
+internal static class ZonosModel
+{
+    private const string ModelRepo = "Zyphra/Zonos-v0.1-transformer";
+    private const string SpeakerRepo = "Zyphra/Zonos-v0.1-speaker-embedding";
+    private const string EspeakLanguage = "en-us";
+
+    /// <summary>The Zonos descriptor.</summary>
+    internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
+    {
+        ResolveRepo = _ => ModelRepo,
+        LoadAsync = async (_, cancel) =>
+        {
+            string modelPath = await AudioModelCache.GetAsync(ModelRepo, "model.safetensors", ct: cancel).ConfigureAwait(false);
+            // The engine DAC consumes the canonical descript .pth layout (the HF safetensors mirrors are reshaped).
+            string dacPath = await AudioModelCache.GetAsync("descript/descript-audio-codec", "weights.pth", ct: cancel).ConfigureAwait(false);
+            string speakerPath = await AudioModelCache.GetAsync(SpeakerRepo, "ResNet293_SimAM_ASP_base.pt", ct: cancel).ConfigureAwait(false);
+            string ldaPath = await AudioModelCache.GetAsync(SpeakerRepo, "ResNet293_SimAM_ASP_base_LDA-128.pt", ct: cancel).ConfigureAwait(false);
+
+            SafeTensorsLoader modelLoader = new SafeTensorsLoader();
+            modelLoader.Load(modelPath);
+            PytorchPickleLoader dacLoader = new PytorchPickleLoader();
+            dacLoader.Load(dacPath);
+            PytorchPickleLoader speakerLoader = new PytorchPickleLoader();
+            speakerLoader.Load(speakerPath);
+            PytorchPickleLoader ldaLoader = new PytorchPickleLoader();
+            ldaLoader.Load(ldaPath);
+
+            EspeakPhonemizer phonemizer = EspeakPhonemizer.FromCache(EspeakLanguage);
+            ZonosTts tts = new ZonosTts(ZonosConfig.V0_1Transformer, phonemizer, EspeakLanguage);
+            tts.LoadWeights(modelLoader.GetAllTensors(), dacLoader.GetAllTensors(),
+                speakerLoader.GetAllTensors(), ldaLoader.GetAllTensors());
+            Logs.Info("[Audio][Zonos] Loaded Zyphra/Zonos-v0.1-transformer (ResNet293 clone + DAC, 44.1 kHz).");
+
+            // The speaker encoder wants 16 kHz; the service hands us a mono 24 kHz reference.
+            Resampler to16k = Resampler.Create(24_000, tts.SpeakerSampleRate);
+
+            return new TtsRunner(tts.SampleRate, (backend, job) =>
+            {
+                if (job.ReferenceMono24k is null || job.ReferenceMono24k.Length == 0)
+                {
+                    throw new NotSupportedException("Zonos clones its speaker — supply a voice-reference clip (there is no random voice).");
+                }
+                float[] reference16k = to16k.Resample(job.ReferenceMono24k);
+                ZonosControls controls = new ZonosControls
+                {
+                    LanguageId = ZonosLanguages.Resolve(EspeakLanguage),
+                    CfgScale = job.CfgScale is > 0 ? (float)job.CfgScale.Value : 2.0f,
+                };
+                return tts.Synthesize(backend, job.Text, reference16k, controls, job.Seed);
+            }, tts, modelLoader, dacLoader, speakerLoader, ldaLoader);
+        },
+    };
+}

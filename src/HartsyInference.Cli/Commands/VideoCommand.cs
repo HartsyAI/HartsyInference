@@ -7,7 +7,8 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates a video (BMP frame sequence) from a prompt with LTX-Video. CUDA-only, validation-pending.</summary>
+/// <summary>Generates a video (frame sequence) from a prompt with any registered video family. CUDA-only,
+/// validation-pending per family — see <c>docs/Checklists/MODEL_STATUS_VIDEO.md</c>.</summary>
 public sealed class VideoCommand : Command<VideoCommand.Settings>
 {
     /// <summary>Options for <c>hartsy video</c>.</summary>
@@ -18,25 +19,15 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("The video description.")]
         public string Prompt { get; init; } = "";
 
-        /// <summary>Model id.</summary>
+        /// <summary>Model id (catalog) or path. Optional when <c>--model-path</c> is given.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id (ltx-video).")]
-        public string Model { get; init; } = "ltx-video";
+        [Description("Catalog model id (ltx-video, wan, lance-video, ...) or a local path. Optional when --model-path is given.")]
+        public string Model { get; init; } = "";
 
-        /// <summary>Path to the LTX .safetensors checkpoint.</summary>
+        /// <summary>Path to a video checkpoint in any registered family's layout.</summary>
         [CommandOption("--model-path")]
-        [Description("Path to the LTX .safetensors checkpoint.")]
+        [Description("Path to a checkpoint (file or folder) of any registered video family; pair it with -m <family> when the layout is ambiguous.")]
         public string? ModelPath { get; init; }
-
-        /// <summary>Path to a standalone T5-XXL .safetensors.</summary>
-        [CommandOption("--text-encoder-path")]
-        [Description("Path to a standalone T5-XXL .safetensors.")]
-        public string? TextEncoderPath { get; init; }
-
-        /// <summary>Path to the T5 SentencePiece model (spiece.model).</summary>
-        [CommandOption("--tokenizer-path")]
-        [Description("Path to the T5 SentencePiece model (spiece.model).")]
-        public string? TokenizerPath { get; init; }
 
         /// <summary>Compute backend (must be cuda for video).</summary>
         [CommandOption("-b|--backend")]
@@ -48,30 +39,35 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Negative prompt.")]
         public string Negative { get; init; } = "";
 
-        /// <summary>Frame width (divisible by 32).</summary>
+        /// <summary>Frame width in pixels; unset uses the family's native width.</summary>
         [CommandOption("--width")]
-        [Description("Frame width (divisible by 32).")]
-        public int Width { get; init; } = 704;
+        [Description("Frame width in pixels (default: the model family's native width).")]
+        public int? Width { get; init; }
 
-        /// <summary>Frame height (divisible by 32).</summary>
+        /// <summary>Frame height in pixels; unset uses the family's native height.</summary>
         [CommandOption("--height")]
-        [Description("Frame height (divisible by 32).")]
-        public int Height { get; init; } = 480;
+        [Description("Frame height in pixels (default: the model family's native height).")]
+        public int? Height { get; init; }
 
-        /// <summary>Number of frames ((n-1) divisible by 8).</summary>
+        /// <summary>Number of frames; unset uses the family's officially recommended count.</summary>
         [CommandOption("--frames")]
-        [Description("Number of frames ((n-1) divisible by 8).")]
-        public int Frames { get; init; } = 25;
+        [Description("Number of frames (default: the model family's recommended count).")]
+        public int? Frames { get; init; }
 
-        /// <summary>Denoising steps.</summary>
+        /// <summary>Denoising steps; unset uses the family's officially recommended count.</summary>
         [CommandOption("--steps")]
-        [Description("Denoising steps.")]
-        public int Steps { get; init; } = 30;
+        [Description("Denoising steps (default: the model family's recommended count).")]
+        public int? Steps { get; init; }
 
-        /// <summary>Frames per second for playback naming.</summary>
+        /// <summary>Guidance scale; unset uses the family's officially recommended scale.</summary>
+        [CommandOption("--cfg")]
+        [Description("Guidance scale (default: the model family's recommended scale).")]
+        public float? Cfg { get; init; }
+
+        /// <summary>Frames per second; unset uses the family's native frame rate.</summary>
         [CommandOption("--fps")]
-        [Description("Frame rate.")]
-        public int Fps { get; init; } = 25;
+        [Description("Frame rate (default: the model family's native rate).")]
+        public int? Fps { get; init; }
 
         /// <summary>RNG seed; &lt; 0 randomizes.</summary>
         [CommandOption("--seed")]
@@ -98,31 +94,37 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
             return 1;
         }
 
-        if (string.IsNullOrWhiteSpace(settings.ModelPath) || string.IsNullOrWhiteSpace(settings.TextEncoderPath) || string.IsNullOrWhiteSpace(settings.TokenizerPath))
+        if (string.IsNullOrWhiteSpace(settings.Model) && string.IsNullOrWhiteSpace(settings.ModelPath))
         {
-            AnsiConsole.MarkupLine("[red]Video needs[/] [#2ea5e0]--model-path[/][red],[/] [#2ea5e0]--text-encoder-path[/] [red]and[/] [#2ea5e0]--tokenizer-path[/][red].[/]");
+            AnsiConsole.MarkupLine("[red]Specify a model with[/] [#2ea5e0]--model[/] [red]or[/] [#2ea5e0]--model-path[/][red].[/]");
             return 1;
         }
 
+        // Only flags the user actually passed are forwarded; anything omitted stays unset so the engine applies the
+        // resolved family's official defaults instead of a generic guess.
         ParamState parameters = new ParamState(Modality.Video) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("negative", settings.Negative);
-        parameters.Put("width", settings.Width.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("height", settings.Height.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("frames", settings.Frames.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("fps", settings.Fps.ToString(CultureInfo.InvariantCulture));
+        PutIfSet(parameters, "width", settings.Width);
+        PutIfSet(parameters, "height", settings.Height);
+        PutIfSet(parameters, "frames", settings.Frames);
+        PutIfSet(parameters, "steps", settings.Steps);
+        PutIfSet(parameters, "cfg", settings.Cfg);
+        PutIfSet(parameters, "fps", settings.Fps);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
-        Dictionary<string, string> aux = new Dictionary<string, string>
-        {
-            ["text-encoder-path"] = settings.TextEncoderPath!,
-            ["tokenizer-path"] = settings.TokenizerPath!,
-        };
-        ModelSpec baseSpec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Video);
-        ModelSpec spec = baseSpec with { Aux = aux };
-        string label = spec.Catalog?.Id ?? settings.Model;
+        ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Video);
+        string label = spec.Catalog?.Id ?? (settings.ModelPath is { Length: > 0 } mp ? Path.GetFileName(mp) : settings.Model);
 
         return CommandRunner.Run(Modality.Video, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false);
+    }
+
+    /// <summary>Forwards a tunable only when the user actually passed the flag; an omitted flag leaves the key empty so it reaches the engine as null.</summary>
+    private static void PutIfSet(ParamState parameters, string key, IFormattable? value)
+    {
+        if (value is not null)
+        {
+            parameters.Put(key, value.ToString(null, CultureInfo.InvariantCulture));
+        }
     }
 }

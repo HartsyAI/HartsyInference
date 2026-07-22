@@ -1,6 +1,6 @@
 # Oasis-500m — Research Notes
 
-> Status: Complete (full inference code + all configs captured from `etched-ai/open-oasis`; safetensors key dump still required) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.Interactive (`OasisPipeline`, Phase 10 — world models)
+> Status: Complete (full inference code + all configs captured from `etched-ai/open-oasis`; safetensors key dump still required) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.World (`OasisPipeline`, Phase 10 — world models)
 > Source of truth: [etched-ai/open-oasis (GitHub)](https://github.com/etched-ai/open-oasis), [HF `Etched/oasis-500m`](https://huggingface.co/Etched/oasis-500m), [Oasis blog](https://oasis-model.github.io/), [Decart publication](https://decart.ai/publications/oasis-interactive-ai-video-game-model)
 > License: **MIT** (both code and weights)
 > Related: [`DIFFUSION_SCHEDULERS.md`](DIFFUSION_SCHEDULERS.md), [`LANCE_ARCHITECTURE.md`](LANCE_ARCHITECTURE.md) (DiT lineage), [`FLOW_MATCHING_AUDIO.md`](FLOW_MATCHING_AUDIO.md), [`CONV2D_CUDA.md`](CONV2D_CUDA.md). Net-new module-class introduced by this doc: **continuous ViT-VAE** (not VQ — see § 6).
@@ -240,7 +240,7 @@ This is good news for HartsyInference: **no new VQ codebook / nearest-neighbour-
 When the **second** world model lands in HartsyInference, **that** is where the new VQ-codebook module class belongs:
 
 ```
-src/HartsyInference.Interactive/Models/Tokenizers/
+src/HartsyInference.World/Models/Tokenizers/
     ContinuousVitVae.cs           ← shared base (Oasis lives here)
     IVideoTokenizer.cs            ← interface: Encode(RGB) → latent, Decode(latent) → RGB
     Magvit2Tokenizer.cs           ← first discrete impl (future)
@@ -642,11 +642,11 @@ These are the right precedents to study when HartsyInference's *second* world mo
 
 ### How this maps to HartsyInference packages
 
-A brand-new package, **`HartsyInference.Interactive`**, is appropriate for world models (this is Phase 10 in `BUILD_ORDER.md`). Inside:
+A brand-new package, **`HartsyInference.World`**, is appropriate for world models (this is Phase 10 in `BUILD_ORDER.md`). Inside:
 
 ```
-src/HartsyInference.Interactive/
-├── HartsyInference.Interactive.csproj
+src/HartsyInference.World/
+├── HartsyInference.World.csproj
 ├── Models/
 │   ├── Tokenizers/
 │   │   ├── IVideoTokenizer.cs                   # new abstraction (see § 6)
@@ -671,7 +671,7 @@ src/HartsyInference.Interactive/
     └── DiffusionForcingDdim.cs                  # v-param DDIM with per-frame noise levels
 ```
 
-In **`HartsyInference.ModelHandler`**:
+In **`HartsyInference.ModelAssets`**:
 
 ```
 CheckpointConverters/

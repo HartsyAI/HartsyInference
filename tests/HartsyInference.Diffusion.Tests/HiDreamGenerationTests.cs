@@ -9,12 +9,12 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
-using HartsyInference.ModelHandler.CheckpointConverters;
-using HartsyInference.ModelHandler.CheckpointConverters.Utils;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.ModelHandler.TextEncoders;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.TextEncoders;
 using HartsyInference.Tests.Common;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -159,7 +159,7 @@ public sealed class HiDreamGenerationTests
                 }
                 else
                 {
-                    _output.WriteLine("  Note: Llama-3.1 tokenizer not embedded (no llama3_vocab.json/merges.txt in HartsyInference.Tokenizers/Resources) and no vocab.json+merges.txt on disk — using PLACEHOLDER tokens. Output will be wrong on the Llama branch. Embed the assets for a real result.");
+                    _output.WriteLine("  Note: Llama-3.1 tokenizer not embedded (no llama3_vocab.json/merges.txt in HartsyInference.ModelAssets.Tokenizers/Resources) and no vocab.json+merges.txt on disk — using PLACEHOLDER tokens. Output will be wrong on the Llama branch. Embed the assets for a real result.");
                     ll = [LlamaTokenizer.BosTokenId, 1, 2, 3, 4, 5, 6, 7];
                     negLl = [LlamaTokenizer.BosTokenId, 1, 2, 3, 4, 5, 6, 7];
                 }

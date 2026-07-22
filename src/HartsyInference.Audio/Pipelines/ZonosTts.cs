@@ -3,7 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Phonemizer.Espeak;
+using HartsyInference.Audio.Phonemizer.Espeak;
 
 namespace HartsyInference.Audio.Pipelines;
 

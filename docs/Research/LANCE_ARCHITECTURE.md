@@ -600,10 +600,10 @@ There is **only one reference implementation** (the ByteDance codebase). No diff
 - **`HartsyInference.Video`** — adds:
   - `Pipelines/LanceVideoPipeline.cs` (multi-frame T>1 decode, frame streaming).
   - Shares `Wan22VaeDecoder.cs` with Diffusion (best: live in `HartsyInference.Diffusion` and import from Video).
-- **`HartsyInference.ModelHandler`** — adds:
+- **`HartsyInference.ModelAssets`** — adds:
   - `CheckpointConverters/LanceCheckpointConverter.cs` (loads `model.safetensors`, splits into `language_model.*` / `vit.*` / `connector.*` / `vae_in.*` / `vae_out.*` / `time_embedder.*` / `pos_embed_3d.*` / `task_embed` / `modality_embed` buckets and demuxes the MoT `_moe_gen` sibling weights into per-stream dicts).
   - Wan2.2 `.pth` reader path (or convert to safetensors offline; the existing safetensors loader does not parse `.pth`). Simplest: ship a one-off Python script that converts `Wan2.2_VAE.pth` → `wan22_vae.safetensors` for users.
-- **`HartsyInference.Tokenizers`** — Qwen2 BPE is already covered by the existing Qwen support (`Qwen3Tokenizer`). Lance uses Qwen2 vocab (151,936); the existing BPE tokenizer with this vocab works. Chat template needs the Qwen2.5-VL pad-insertion variant.
+- **`HartsyInference.ModelAssets.Tokenizers`** — Qwen2 BPE is already covered by the existing Qwen support (`Qwen3Tokenizer`). Lance uses Qwen2 vocab (151,936); the existing BPE tokenizer with this vocab works. Chat template needs the Qwen2.5-VL pad-insertion variant.
 
 ### Net-new backend / kernel work required
 

@@ -3,7 +3,7 @@ using HartsyInference.Audio.Models.Csm;
 using HartsyInference.Audio.Models.HeartMula;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.Gguf;
+using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.Audio.Pipelines;
 

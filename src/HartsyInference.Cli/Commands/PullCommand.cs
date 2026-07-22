@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using HartsyInference.Cli.Infra;
 using HartsyInference.Core.Logging;
-using HartsyInference.ModelHandler.Registry;
+using HartsyInference.ModelAssets.Registry;
 using Spectre.Console;
 using Spectre.Console.Cli;
 

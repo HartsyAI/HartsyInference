@@ -1,4 +1,4 @@
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;

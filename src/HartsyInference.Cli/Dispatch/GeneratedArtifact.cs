@@ -20,6 +20,13 @@ public sealed class GeneratedArtifact
     /// tokens), so the presenter should not reprint it.</summary>
     public bool Streamed { get; init; }
 
+    /// <summary>True when the handler already wrote its own file(s) to disk (e.g. per-frame PNGs, per-stem WAVs —
+    /// "one call, N files" results with no single <see cref="FileBytes"/> payload). <c>ArtifactWriter</c> must skip
+    /// these: without this flag, its "text with no bytes" fallback would still write <see cref="Text"/> (the
+    /// human-readable summary) as a bogus file stamped with <see cref="Extension"/> — e.g. a "stems-0001.wav" that
+    /// is actually a text file, not audio.</summary>
+    public bool SelfWritten { get; init; }
+
     /// <summary>Raw RGB24 pixels (row-major, top-to-bottom) for an inline terminal preview; null when there is nothing
     /// to show. For video/world results this is the first frame.</summary>
     public byte[]? PreviewRgb { get; init; }

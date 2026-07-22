@@ -103,16 +103,20 @@ public sealed unsafe class StableAudioDit : IDisposable
         globalProj.Dispose();
         tokens.Dispose();
 
-        (float[] cos, float[] sin) = StableAudioRope.BuildTables(_invFreq!, rows);
+        int headDim = _config.HeadDim;
+        Tensor cosTable = StableAudioRope.BuildCosTable(_invFreq!, rows, headDim);
+        Tensor sinTable = StableAudioRope.BuildSinTable(_invFreq!, rows, headDim);
 
         Tensor cur = hidden;
         foreach (Block b in _blocks)
         {
-            Tensor next = b.Forward(backend, cur, cond, rows, lc, cos, sin);
+            Tensor next = b.Forward(backend, cur, cond, rows, lc, cosTable, sinTable);
             cur.Dispose();
             cur = next;
         }
         cond.Dispose();
+        cosTable.Dispose();
+        sinTable.Dispose();
 
         Tensor projected = new Tensor(new TensorShape(1, rows, io), DType.F32);
         backend.Linear(projected, cur, _projOutW!, null);
@@ -236,13 +240,13 @@ public sealed unsafe class StableAudioDit : IDisposable
                 if (t is not null) yield return t;
         }
 
-        public Tensor Forward(IBackend backend, Tensor x, Tensor cond, int rows, int condLen, float[] cos, float[] sin)
+        public Tensor Forward(IBackend backend, Tensor x, Tensor cond, int rows, int condLen, Tensor cosTable, Tensor sinTable)
         {
             int dim = _c.HiddenSize, heads = _c.NumHeads, hd = _c.HeadDim, rotDim = _c.RopeDim;
 
             Tensor n1 = new Tensor(x.Shape, DType.F32);
             backend.LayerNorm(n1, x, _preNormW!, _preNormB!, _c.LayerNormEps);
-            Tensor selfOut = SelfAttention(backend, n1, rows, heads, hd, dim, rotDim, cos, sin);
+            Tensor selfOut = SelfAttention(backend, n1, rows, heads, hd, dim, rotDim, cosTable, sinTable);
             n1.Dispose();
             Tensor cur = new Tensor(x.Shape, DType.F32);
             backend.Add(cur, x, selfOut);
@@ -265,7 +269,7 @@ public sealed unsafe class StableAudioDit : IDisposable
         }
 
         private Tensor SelfAttention(IBackend backend, Tensor n, int rows, int heads, int hd, int dim, int rotDim,
-            float[] cos, float[] sin)
+            Tensor cosTable, Tensor sinTable)
         {
             Tensor qkv = new Tensor(new TensorShape(1, rows, 3 * dim), DType.F32);
             backend.Linear(qkv, n, _selfQkvW!, null);
@@ -278,11 +282,11 @@ public sealed unsafe class StableAudioDit : IDisposable
             backend.SliceLastDim(vFlat, qkv, 2 * dim);
             qkv.Dispose();
 
-            Tensor q = HeadsNormRope(backend, qFlat, rows, heads, hd, _selfQNormW!, _selfQNormB!, rotDim, cos, sin);
-            Tensor k = HeadsNormRope(backend, kFlat, rows, heads, hd, _selfKNormW!, _selfKNormB!, rotDim, cos, sin);
+            Tensor q = HeadsNormRope(backend, qFlat, rows, heads, hd, _selfQNormW!, _selfQNormB!, rotDim, cosTable, sinTable);
+            Tensor k = HeadsNormRope(backend, kFlat, rows, heads, hd, _selfKNormW!, _selfKNormB!, rotDim, cosTable, sinTable);
             qFlat.Dispose(); kFlat.Dispose();
             Tensor v = new Tensor(new TensorShape(1, heads, rows, hd), DType.F32);
-            ToMultiHead(v, vFlat, rows, heads, hd);
+            backend.Permute0213(v, vFlat, rows, heads, hd);
             vFlat.Dispose();
 
             Tensor attn = new Tensor(new TensorShape(1, heads, rows, hd), DType.F32);
@@ -290,7 +294,7 @@ public sealed unsafe class StableAudioDit : IDisposable
             q.Dispose(); k.Dispose(); v.Dispose();
 
             Tensor merged = new Tensor(new TensorShape(1, rows, dim), DType.F32);
-            FromMultiHead(merged, attn, rows, heads, hd);
+            backend.Permute0213(merged, attn, heads, rows, hd);
             attn.Dispose();
             Tensor outT = new Tensor(new TensorShape(1, rows, dim), DType.F32);
             backend.Linear(outT, merged, _selfOutW!, null);
@@ -319,7 +323,7 @@ public sealed unsafe class StableAudioDit : IDisposable
             Tensor kHeads = HeadsNormRope(backend, kFlat, condLen, kvHeads, hd, _crossKNormW!, _crossKNormB!, 0, null, null);
             kFlat.Dispose();
             Tensor vHeads = new Tensor(new TensorShape(1, kvHeads, condLen, hd), DType.F32);
-            ToMultiHead(vHeads, vFlat, condLen, kvHeads, hd);
+            backend.Permute0213(vHeads, vFlat, condLen, kvHeads, hd);
             vFlat.Dispose();
 
             Tensor kRep, vRep;
@@ -329,8 +333,8 @@ public sealed unsafe class StableAudioDit : IDisposable
             {
                 kRep = new Tensor(new TensorShape(1, heads, condLen, hd), DType.F32);
                 vRep = new Tensor(new TensorShape(1, heads, condLen, hd), DType.F32);
-                RepeatKv(kRep, kHeads, kvHeads, group, condLen, hd);
-                RepeatKv(vRep, vHeads, kvHeads, group, condLen, hd);
+                backend.RepeatKvHeads(kRep, kHeads, kvHeads, group);
+                backend.RepeatKvHeads(vRep, vHeads, kvHeads, group);
                 kHeads.Dispose(); vHeads.Dispose();
             }
 
@@ -339,7 +343,7 @@ public sealed unsafe class StableAudioDit : IDisposable
             q.Dispose(); kRep.Dispose(); vRep.Dispose();
 
             Tensor merged = new Tensor(new TensorShape(1, rows, dim), DType.F32);
-            FromMultiHead(merged, attn, rows, heads, hd);
+            backend.Permute0213(merged, attn, heads, rows, hd);
             attn.Dispose();
             Tensor outT = new Tensor(new TensorShape(1, rows, dim), DType.F32);
             backend.Linear(outT, merged, _crossOutW!, null);
@@ -347,18 +351,22 @@ public sealed unsafe class StableAudioDit : IDisposable
             return outT;
         }
 
-        /// <summary>flat [1,rows,H·D] → heads [1,H,rows,D] → per-head QK-LayerNorm → optional partial RoPE
-        /// (pass <c>rotDim=0</c>/<c>cos=null</c> to skip, e.g. cross-attention).</summary>
+        /// <summary>flat [1,rows,H·D] → per-head QK-LayerNorm (on the pre-permute [1,rows,H,D] view — LayerNorm
+        /// only reduces over the last dim, so this is identical to normalizing the post-permute layout) → optional
+        /// partial RoPE via <see cref="Core.Backends.IBackend.ApplyRopeSingle"/> (pass <c>rotDim=0</c>/<c>cosTable=null</c>
+        /// to skip, e.g. cross-attention) → <see cref="Core.Backends.IBackend.Permute0213"/> to heads-first
+        /// [1,H,rows,D]. Order matters: LayerNorm must run BEFORE RoPE (matches <c>stable_audio_tools.Attention</c>).</summary>
         private Tensor HeadsNormRope(IBackend backend, Tensor flat, int rows, int heads, int hd,
-            Tensor normW, Tensor normB, int rotDim, float[]? cos, float[]? sin)
+            Tensor normW, Tensor normB, int rotDim, Tensor? cosTable, Tensor? sinTable)
         {
+            Tensor headsFlat = flat.Reshape(new TensorShape(1, rows, heads, hd));
+            Tensor normed = new Tensor(headsFlat.Shape, DType.F32);
+            backend.LayerNorm(normed, headsFlat, normW, normB, _c.QkNormEps);
+            if (cosTable is not null) backend.ApplyRopeSingle(normed, cosTable, sinTable!, rotDim);
             Tensor headsT = new Tensor(new TensorShape(1, heads, rows, hd), DType.F32);
-            ToMultiHead(headsT, flat, rows, heads, hd);
-            Tensor normed = new Tensor(headsT.Shape, DType.F32);
-            backend.LayerNorm(normed, headsT, normW, normB, _c.QkNormEps);
-            headsT.Dispose();
-            if (cos is not null) StableAudioRope.Apply(normed, heads, rows, hd, rotDim, cos, sin!);
-            return normed;
+            backend.Permute0213(headsT, normed, rows, heads, hd);
+            normed.Dispose();
+            return headsT;
         }
 
         /// <summary>GLU-SwiGLU FFN: single packed <c>ff.0.proj</c> chunked <c>[value ‖ gate]</c> along the last
@@ -384,44 +392,6 @@ public sealed unsafe class StableAudioDit : IDisposable
             backend.Linear(outT, val, _ff2W!, _ff2B);
             val.Dispose();
             return outT;
-        }
-
-        /// <summary>[1, rows, H·D] → [1, H, rows, D].</summary>
-        private static void ToMultiHead(Tensor outT, Tensor x, int rows, int heads, int hd)
-        {
-            float* xp = (float*)x.DataPointer;
-            float* op = (float*)outT.DataPointer;
-            int dim = heads * hd;
-            for (int h = 0; h < heads; h++)
-                for (int i = 0; i < rows; i++)
-                    Buffer.MemoryCopy(xp + (long)i * dim + h * hd, op + ((long)h * rows + i) * hd, hd * 4, hd * 4);
-        }
-
-        /// <summary>[1, H, rows, D] → [1, rows, H·D].</summary>
-        private static void FromMultiHead(Tensor outT, Tensor x, int rows, int heads, int hd)
-        {
-            float* xp = (float*)x.DataPointer;
-            float* op = (float*)outT.DataPointer;
-            int dim = heads * hd;
-            for (int h = 0; h < heads; h++)
-                for (int i = 0; i < rows; i++)
-                    Buffer.MemoryCopy(xp + ((long)h * rows + i) * hd, op + (long)i * dim + h * hd, hd * 4, hd * 4);
-        }
-
-        /// <summary>[1, kvHeads, S, D] → [1, kvHeads·group, S, D] (GQA head replication for Open 1.0's 24Q:12KV
-        /// cross-attention; Open Small is symmetric 8:8 so <c>group == 1</c> and this is never called).</summary>
-        private static void RepeatKv(Tensor outT, Tensor input, int kvHeads, int group, int s, int hd)
-        {
-            float* ip = (float*)input.DataPointer;
-            float* op = (float*)outT.DataPointer;
-            long perHead = (long)s * hd;
-            for (int h = 0; h < kvHeads; h++)
-                for (int g = 0; g < group; g++)
-                {
-                    long srcOff = h * perHead;
-                    long dstOff = (long)(h * group + g) * perHead;
-                    Buffer.MemoryCopy(ip + srcOff, op + dstOff, perHead * 4, perHead * 4);
-                }
         }
 
         private static Tensor Pick(IReadOnlyDictionary<string, Tensor> w, string key) =>

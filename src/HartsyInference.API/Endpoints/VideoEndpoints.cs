@@ -1,0 +1,46 @@
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Registry;
+using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Services;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace HartsyInference.API.Endpoints;
+
+/// <summary>Native video route. <see cref="IVideoService"/> only exposes a frame stream
+/// (<see cref="IAsyncEnumerable{T}"/> of <see cref="VideoFrame"/>, no <c>Task&lt;VideoResult&gt;</c>) — there's no
+/// way to build a non-streaming variant without buffering an entire video's frames in server memory first, and no
+/// mp4/container muxer exists anywhere in this repo (the CLI only ever writes a PNG-frame sequence to disk). So
+/// this ships SSE-streamed raw frames only, matching what the Engine can actually produce today; a muxed-download
+/// variant is future work once a container writer exists. Runs through the long-running queue (video generation
+/// can take minutes), not the fast one every other route uses.</summary>
+public static class VideoEndpoints
+{
+    /// <summary>Maps <c>/v1/native/video/stream</c>.</summary>
+    public static void MapVideoEndpoints(this WebApplication app)
+    {
+        app.MapPost("/v1/native/video/stream", async (
+            NativeVideoRequest req, IInferenceEngine engine,
+            [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue queue, HttpContext ctx, CancellationToken ct) =>
+        {
+            ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Video);
+            await SseHelpers.RunAsync(ctx, queue, async (writer, jsonOptions) =>
+            {
+                // Runs inside the queue's held slot — call the service directly, not through a second EnqueueAsync.
+                Progress<StepPreview> progress = new Progress<StepPreview>(p =>
+                    writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
+                int frameCount = 0;
+                await foreach (VideoFrame frame in engine.Video.GenerateAsync(spec, req.Request, progress, ct))
+                {
+                    writer.TryWrite(SseHelpers.Event("frame", new
+                    {
+                        index = frame.Index,
+                        png = Convert.ToBase64String(PngEncoder.Encode(frame.Rgb, frame.Width, frame.Height)),
+                    }, jsonOptions));
+                    frameCount++;
+                }
+                writer.TryWrite(SseHelpers.Event("complete", new { frames = frameCount }, jsonOptions));
+            }, ct);
+        });
+    }
+}

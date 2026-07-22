@@ -2,7 +2,7 @@ using System.Globalization;
 using HartsyInference.Audio.Models.StyleTts2;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.PyTorch;
+using HartsyInference.ModelAssets.PyTorch;
 using Xunit;
 using Xunit.Abstractions;
 

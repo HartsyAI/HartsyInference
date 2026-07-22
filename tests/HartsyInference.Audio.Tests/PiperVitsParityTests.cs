@@ -1,7 +1,7 @@
 using HartsyInference.Audio.Models.Vits;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.Onnx;
+using HartsyInference.ModelAssets.Onnx;
 using Xunit;
 using Xunit.Abstractions;
 

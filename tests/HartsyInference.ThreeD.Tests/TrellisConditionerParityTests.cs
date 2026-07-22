@@ -1,5 +1,5 @@
 using HartsyInference.Cuda;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ThreeD.Models.Trellis;
 using HartsyInference.Core.Tensors;
 using Xunit;

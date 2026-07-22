@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Engine</PackageId>
+    <Description>The HartsyInference service layer: the single entry point for loading models and generating across every modality. Consumed by the CLI, the HTTP API, and the SwarmUI backend extension.</Description>
+    <RootNamespace>HartsyInference.Engine</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
+    <ProjectReference Include="..\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+    <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
+    <ProjectReference Include="..\HartsyInference.LLM\HartsyInference.LLM.csproj" />
+    <ProjectReference Include="..\HartsyInference.Audio\HartsyInference.Audio.csproj" />
+    <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
+    <ProjectReference Include="..\HartsyInference.Video\HartsyInference.Video.csproj" />
+    <ProjectReference Include="..\HartsyInference.World\HartsyInference.World.csproj" />
+    <ProjectReference Include="..\HartsyInference.ThreeD\HartsyInference.ThreeD.csproj" />
+    <ProjectReference Include="..\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
+  </ItemGroup>
+
+</Project>

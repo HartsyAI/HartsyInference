@@ -46,11 +46,11 @@ public static class PlyWriter
     /// <summary>Writes <paramref name="mesh"/> as ASCII PLY to <paramref name="path"/>.</summary>
     public static void SaveMesh(string path, Mesh mesh) => File.WriteAllText(path, WriteMesh(mesh));
 
-    /// <summary>Writes <paramref name="cloud"/> as a binary-little-endian Gaussian-splat PLY (INRIA layout:
+    /// <summary>Serializes <paramref name="cloud"/> to a binary-little-endian Gaussian-splat PLY (INRIA layout:
     /// x,y,z, nx,ny,nz, f_dc_{0..2}, f_rest_*, opacity, scale_{0..2}, rot_{0..3}). The conventional format
     /// read by splat viewers. <paramref name="cloud"/>'s SH coefficients are stored coeff-major RGB and
     /// reordered here to INRIA's channel-major DC+rest ordering.</summary>
-    public static void SaveSplats(string path, GaussianSplatCloud cloud)
+    public static byte[] WriteSplats(GaussianSplatCloud cloud)
     {
         ArgumentNullException.ThrowIfNull(cloud);
         int n = cloud.Count, k = cloud.ShCoeffsPerSplat;
@@ -83,10 +83,15 @@ public static class PlyWriter
             Put(body, ref off, cloud.Rotations[i * 4]); Put(body, ref off, cloud.Rotations[i * 4 + 1]); Put(body, ref off, cloud.Rotations[i * 4 + 2]); Put(body, ref off, cloud.Rotations[i * 4 + 3]);
         }
 
-        using FileStream fs = File.Create(path);
-        fs.Write(Encoding.ASCII.GetBytes(h.ToString()));
-        fs.Write(body);
+        byte[] header = Encoding.ASCII.GetBytes(h.ToString());
+        byte[] full = new byte[header.Length + body.Length];
+        Buffer.BlockCopy(header, 0, full, 0, header.Length);
+        Buffer.BlockCopy(body, 0, full, header.Length, body.Length);
+        return full;
     }
+
+    /// <summary>Writes <paramref name="cloud"/> as a binary-little-endian Gaussian-splat PLY to <paramref name="path"/>.</summary>
+    public static void SaveSplats(string path, GaussianSplatCloud cloud) => File.WriteAllBytes(path, WriteSplats(cloud));
 
     private static float Sh(GaussianSplatCloud c, int splat, int coeff, int channel) =>
         c.ShCoefficients[(splat * c.ShCoeffsPerSplat + coeff) * 3 + channel];

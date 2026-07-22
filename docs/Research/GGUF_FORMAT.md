@@ -480,7 +480,7 @@ ComfyUI-GGUF uses additional metadata keys not found in llama.cpp or sd.cpp:
 
 ## Implementation Notes
 
-### For HartsyInference.ModelHandler
+### For HartsyInference.ModelAssets
 
 1. **Parser structure**: Implement a streaming reader that reads the header, then lazily reads metadata and tensor info. Use `mmap` (or `MemoryMappedFile` in .NET) for the tensor data section to avoid loading all weights into memory.
 

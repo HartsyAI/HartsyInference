@@ -3,7 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
-using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -56,7 +56,7 @@ public sealed unsafe class MatrixGame2GenPerfTests
         int gtF = int.TryParse(Environment.GetEnvironmentVariable("MG2_T"), out int tv) ? tv : 3;
         int hw = int.TryParse(Environment.GetEnvironmentVariable("MG2_HW"), out int hv) ? hv : 32;
 
-        (MatrixGame3CheckpointConverter.ConvertedWeights weights, HartsyInference.ModelHandler.SafeTensors.SafeTensorsLoader loader) = MatrixGame2CheckpointConverter.LoadAndConvert(dit);
+        (MatrixGame3CheckpointConverter.ConvertedWeights weights, HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader loader) = MatrixGame2CheckpointConverter.LoadAndConvert(dit);
         using (loader)
         {
             using IBackend backend = MakeBackend();

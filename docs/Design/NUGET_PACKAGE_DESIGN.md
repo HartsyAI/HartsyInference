@@ -19,7 +19,8 @@ A single meta-package (`HartsyInference`) is published for consumers who want th
 | Package | Description | Dependencies |
 |---|---|---|
 | **Core** | Tensor types, `IBackend`, `IScheduler`, `IModel`, interfaces, enums, logs | net8.0 / net10.0 |
-| **ModelHandler** | Safetensors/GGUF/PyTorch-pickle loaders, registry, HF Hub download, caching | Core |
+| **ModelHandler** | Safetensors/GGUF/PyTorch-pickle loaders, architecture detection/layout resolution, quant/LoRA | Core |
+| **Engine** | **The service layer / single source of truth.** Model lifecycle (registry, HF Hub download, cache), the `InferenceEngine` facade + per-modality dispatch/handlers, backend factory, native request/result DTOs, inference queue. Everything "load a model + generate" lives here; the CLI, HTTP server, and SwarmUI extension are thin wrappers over it. | all modality + backend packages, ModelHandler |
 | **Tokenizers** | BPE (CLIP), SentencePiece (T5), Whisper tokenizer | Core, Microsoft.ML.Tokenizers |
 | **Phonemizer** | Pure-C# espeak-ng-style G2P / IPA phonemization for phoneme-input TTS | Core |
 | **Cpu** | SIMD kernels: Conv2D, GroupNorm, SDPA, matmul via `System.Runtime.Intrinsics` | Core |
@@ -44,7 +45,7 @@ A single meta-package (`HartsyInference`) is published for consumers who want th
 |---|---|---|
 | **HartsyInference** | Dependencies-only meta-package: one reference pulls the whole modality stack | Core, Cpu, Cuda, Vulkan, ModelHandler, Tokenizers, Phonemizer, LLM, Diffusion, Audio, Vision, Video, Interactive, ThreeD |
 
-> **Meta-package note.** `HartsyInference` explicitly references all 14 libraries above, including **LLM** and **Phonemizer**, so a single `dotnet add package HartsyInference` gives you native LLM text generation and phoneme-input TTS. Only **Server** (abandoned scaffolding) and **Cli** (a sample/validation tool, not a library) are excluded. Consumers who want just one modality reference that package directly instead of the meta.
+> **Meta-package note.** `HartsyInference` explicitly references all 14 libraries above, including **LLM** and **Phonemizer**, so a single `dotnet add package HartsyInference` gives you native LLM text generation and phoneme-input TTS. Only **API** (a runnable HTTP adapter app, not a library — see below) and **Cli** (a sample/validation tool, not a library) are excluded. Consumers who want just one modality reference that package directly instead of the meta.
 
 ### Consuming the engine
 
@@ -54,7 +55,13 @@ The engine is consumed three ways, in priority order:
 2. **NuGet libraries:** reference the meta-package or individual modality packages.
 3. **Sample CLIs:** the per-modality apps under `samples/` and `src/HartsyInference.Cli` (developer and verification tools).
 
-> **Dropped: first-party server.** `HartsyInference.Server` physically exists in `src/` as abandoned ASP.NET scaffolding. It is **not** a supported or advertised path: there is no OpenAI-compatible server product, and none is planned. Do not depend on it.
+> **The service layer (`HartsyInference.Engine`) is the single source of truth.** It owns model lifecycle + the
+> `InferenceEngine` facade + all modality dispatch. The CLI is a thin wrapper over it, and `HartsyInference.API`
+> is a thin HTTP adapter over it — native per-modality endpoint mapping (one route group per `IInferenceEngine`
+> service, request/result records passed through almost verbatim) plus a narrow secondary OpenAI-compat layer for
+> chat/images. `HartsyInference.API` references only `Core` + `Engine` directly (everything else Engine pulls in
+> transitively) — it does not reference the modality packages itself. See `docs/Agents/API.md` for the endpoint
+> catalog and `docs/Design/ENGINE_REFACTOR_PLAN.md` for the refactor history.
 
 ### Utility (not shipped)
 
@@ -81,7 +88,11 @@ The engine is consumed three ways, in priority order:
                 |
          Interactive (Phase 10 — world models)
 
-  Consumers: SwarmUI backend extension (external repo) · CLIs · apps
+                        │  (all modality + backend packages)
+                        ▼
+                     Engine  ← service layer / single source of truth
+                        │
+  Consumers (thin wrappers): CLI · API (HTTP adapter) · SwarmUI backend extension · direct library use
 ```
 
 LLM depends only on Core + ModelHandler + Tokenizers (not on the visual stack). Phonemizer depends on Core.
@@ -98,14 +109,14 @@ LLM depends only on Core + ModelHandler + Tokenizers (not on the visual stack). 
 ```xml
 <PackageReference Include="HartsyInference.Diffusion" />
 <PackageReference Include="HartsyInference.Cuda" />
-<PackageReference Include="HartsyInference.ModelHandler" />
+<PackageReference Include="HartsyInference.ModelAssets" />
 ```
 
 **AMD image gen:**
 ```xml
 <PackageReference Include="HartsyInference.Diffusion" />
 <PackageReference Include="HartsyInference.Vulkan" />
-<PackageReference Include="HartsyInference.ModelHandler" />
+<PackageReference Include="HartsyInference.ModelAssets" />
 ```
 
 **SwarmUI backend:** installed as a SwarmUI extension from [SwarmUI-HartsyInference-Backend](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend), not a NuGet reference in your own project. The extension pins the engine packages it needs.
@@ -114,8 +125,8 @@ LLM depends only on Core + ModelHandler + Tokenizers (not on the visual stack). 
 ```xml
 <PackageReference Include="HartsyInference.LLM" />
 <PackageReference Include="HartsyInference.Cuda" />
-<PackageReference Include="HartsyInference.ModelHandler" />
-<PackageReference Include="HartsyInference.Tokenizers" />
+<PackageReference Include="HartsyInference.ModelAssets" />
+<PackageReference Include="HartsyInference.ModelAssets.Tokenizers" />
 ```
 
 **Audio-only (CPU):**
@@ -129,12 +140,12 @@ LLM depends only on Core + ModelHandler + Tokenizers (not on the visual stack). 
 <PackageReference Include="HartsyInference.Diffusion" />
 <PackageReference Include="HartsyInference.Cuda" />
 <PackageReference Include="HartsyInference.Vulkan" />
-<PackageReference Include="HartsyInference.ModelHandler" />
+<PackageReference Include="HartsyInference.ModelAssets" />
 ```
 
 **Interactive world model (game-engine integration):**
 ```xml
-<PackageReference Include="HartsyInference.Interactive" />
+<PackageReference Include="HartsyInference.World" />
 <PackageReference Include="HartsyInference.Cuda" />
 <!-- Brings Video + Diffusion + ModelHandler transitively -->
 ```

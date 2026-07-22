@@ -2,7 +2,7 @@ using Xunit;
 using HartsyInference.Audio.Models.Codecs.Oobleck;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Audio.Tests;
 

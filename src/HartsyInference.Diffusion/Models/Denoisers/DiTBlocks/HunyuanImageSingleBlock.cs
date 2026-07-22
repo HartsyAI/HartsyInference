@@ -106,8 +106,9 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         int totalSeqLen = imgSeqLen + txtSeqLen;
         float scale = 1.0f / MathF.Sqrt(_headDim);
 
-        // Stream activation dtype follows the input (F16 on the HARTSY_DIT_F16 hot path). Modulation params stay F32
-        // (temb is F32); QK-norm weights + RoPE tables F32; SDPA already F16 via allowF16. See HunyuanImageBlock.
+        // Stream activation dtype follows the input (F16 on the HARTSY_DIT_F16 hot path; HunyuanImageTransformer
+        // keeps its own streams F32 — see the comment at that cast site). Modulation params stay F32 (temb is
+        // F32); QK-norm weights + RoPE tables F32; SDPA already F16 via allowF16. See HunyuanImageBlock.
         DType act = image.DType;
 
         TensorShape jointShape = new TensorShape(batch, totalSeqLen, _hiddenSize);

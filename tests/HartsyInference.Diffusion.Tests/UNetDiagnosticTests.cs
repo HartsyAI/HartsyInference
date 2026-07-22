@@ -9,7 +9,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Schedulers;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -61,7 +61,7 @@ public class UNetDiagnosticTests
         using CpuBackend backend = new();
 
         // Encode negative prompt (unconditional) for a single-pass test
-        using HartsyInference.Tokenizers.ClipTokenizer tokenizer = new(
+        using HartsyInference.ModelAssets.Tokenizers.ClipTokenizer tokenizer = new(
             Path.Combine(ModelDir, "tokenizer", "vocab.json"),
             Path.Combine(ModelDir, "tokenizer", "merges.txt"));
         int[] negativeTokens = tokenizer.Encode("blurry, bad quality");
@@ -271,7 +271,7 @@ public class UNetDiagnosticTests
         unet.LoadWeights(CastWeightsToF32(unetLoader.GetAllTensors()));
 
         // Encode both negative and positive prompts
-        using HartsyInference.Tokenizers.ClipTokenizer tokenizer = new(
+        using HartsyInference.ModelAssets.Tokenizers.ClipTokenizer tokenizer = new(
             Path.Combine(ModelDir, "tokenizer", "vocab.json"),
             Path.Combine(ModelDir, "tokenizer", "merges.txt"));
 

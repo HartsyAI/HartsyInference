@@ -6,7 +6,7 @@ using HartsyInference.Audio.Models.Zonos;
 using HartsyInference.Core.Backends;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -109,8 +109,8 @@ public sealed unsafe class ZonosConditioningParityTests
         fixed (float* sp = spk) Buffer.MemoryCopy(sp, (void*)spkGold.DataPointer, spk.Length * 4L, spk.Length * 4L);
 
         // Engine EmbedFromWav on the golden reference clip (the exact ZonosTts path).
-        using HartsyInference.ModelHandler.PyTorch.PytorchPickleLoader swl = new(); swl.Load(spkW!);
-        using HartsyInference.ModelHandler.PyTorch.PytorchPickleLoader sll = new(); sll.Load(spkL!);
+        using HartsyInference.ModelAssets.PyTorch.PytorchPickleLoader swl = new(); swl.Load(spkW!);
+        using HartsyInference.ModelAssets.PyTorch.PytorchPickleLoader sll = new(); sll.Load(spkL!);
         ZonosSpeakerEncoder enc = new(ZonosSpeakerConfig.Default);
         enc.LoadWeights(swl.GetAllTensors(), sll.GetAllTensors());
         float[] refWav = LoadBin(golden, "spk_wav16k", out _);

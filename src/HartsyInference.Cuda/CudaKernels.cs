@@ -1877,19 +1877,22 @@ public sealed class CudaKernels : IDisposable
         => LaunchRopeImpl(_ditRopeF16, x, cos, sin, numHeads, headDim, totalVecs, rotaryDim, stream);
 
     /// <summary>Launches in-place interleaved (GPT-J) rotary embedding on x [B,L,numHeads,headDim];
-    /// cos/sin [B,L,headDim]. Rotates adjacent pairs (2i,2i+1) by frequency i (not the split-half convention).</summary>
-    public unsafe void LaunchRopeInterleaved(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream)
+    /// cos/sin [B,L,headDim]. Rotates adjacent pairs (2i,2i+1) by frequency i (not the split-half convention).
+    /// <paramref name="rotaryDim"/> 0 (or &gt;=headDim) rotates every pair (full rotary); otherwise only pairs
+    /// inside [0, rotaryDim) rotate — dims [rotaryDim, headDim) pass through (GLM-4's partial rotary).</summary>
+    public unsafe void LaunchRopeInterleaved(ulong x, ulong cos, ulong sin, int numHeads, int headDim, int rotaryDim, long totalVecs, nint stream)
     {
         ulong xArg = x, cosArg = cos, sinArg = sin;
-        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim;
+        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim, rotaryDimArg = (uint)rotaryDim;
         ulong vecsArg = (ulong)totalVecs;
-        void** args = stackalloc void*[6];
+        void** args = stackalloc void*[7];
         args[0] = &xArg;
         args[1] = &cosArg;
         args[2] = &sinArg;
         args[3] = &headsArg;
         args[4] = &headDimArg;
-        args[5] = &vecsArg;
+        args[5] = &rotaryDimArg;
+        args[6] = &vecsArg;
         long threads = totalVecs * (headDim / 2);
         uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(

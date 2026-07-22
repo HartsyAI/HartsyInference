@@ -3,9 +3,9 @@ using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Vits;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.Onnx;
-using HartsyInference.Phonemizer;
-using HartsyInference.Phonemizer.Espeak;
+using HartsyInference.ModelAssets.Onnx;
+using HartsyInference.Audio.Phonemizer;
+using HartsyInference.Audio.Phonemizer.Espeak;
 
 namespace HartsyInference.Audio.Pipelines;
 

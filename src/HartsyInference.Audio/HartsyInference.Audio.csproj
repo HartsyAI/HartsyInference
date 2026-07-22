@@ -8,9 +8,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
-    <ProjectReference Include="..\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
-    <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
-    <ProjectReference Include="..\HartsyInference.Phonemizer\HartsyInference.Phonemizer.csproj" />
+    <ProjectReference Include="..\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
     <ProjectReference Include="..\HartsyInference.LLM\HartsyInference.LLM.csproj" />
   </ItemGroup>
 
@@ -18,6 +16,19 @@
     <!-- Test project needs access to internals (LstmCell, WeightNormFusion, codec sub-classes)
          so per-layer numerical correctness can be tested without lifting everything to public. -->
     <InternalsVisibleTo Include="HartsyInference.Audio.Tests" />
+    <!-- Dedicated phonemizer test project needs the internal dictionary/interpreter types to verify
+         per-layer correctness against real espeak-ng data without lifting them to public. -->
+    <InternalsVisibleTo Include="HartsyInference.Audio.Phonemizer.Tests" />
+  </ItemGroup>
+
+  <!-- Phoneme-mnemonic -> IPA map, generated offline by aligning espeak-ng's ascii and IPA phoneme output
+       over an 8k-word corpus. Lets the phonemizer emit the IPA the TTS models were trained on. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Phonemizer\Resources\ipa_phoneme_map.tsv" LogicalName="HartsyInference.Audio.Phonemizer.Resources.ipa_phoneme_map.tsv" />
+    <!-- WithCulture=false: the ".en"/".en-us" infixes look like culture codes, which MSBuild would otherwise treat as
+         satellite resources instead of embedding them in the main assembly. -->
+    <EmbeddedResource Include="Phonemizer\Resources\ipa_phoneme_map.en.tsv" WithCulture="false" LogicalName="HartsyInference.Audio.Phonemizer.Resources.ipa_phoneme_map.en.tsv" />
+    <EmbeddedResource Include="Phonemizer\Resources\ipa_phoneme_map.en-us.tsv" WithCulture="false" LogicalName="HartsyInference.Audio.Phonemizer.Resources.ipa_phoneme_map.en-us.tsv" />
   </ItemGroup>
 
   <!-- GPT-SoVITS Chinese G2P: per-character default pinyin (initial + tone-3 final) from pypinyin (~430 KB).

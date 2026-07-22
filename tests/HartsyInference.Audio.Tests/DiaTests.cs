@@ -5,7 +5,7 @@ using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;

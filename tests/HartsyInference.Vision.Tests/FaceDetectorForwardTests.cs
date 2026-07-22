@@ -3,7 +3,7 @@ using System.Text;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Vision.Codec;
 using HartsyInference.Vision.Detection;
 using HartsyInference.Vision.Face;

@@ -6,9 +6,9 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
-using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.Tests.Common;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Vulkan;
 using Xunit;
 using Xunit.Abstractions;
@@ -89,7 +89,7 @@ public sealed class FluxVulkanGenerationTest
 
         _output.WriteLine($"[1/7] Loading checkpoint: {Path.GetFileName(FluxSingleFilePath)}");
         Stopwatch sw = Stopwatch.StartNew();
-        (FluxCheckpointConverter.ConvertedWeights converted, HartsyInference.ModelHandler.SafeTensors.SafeTensorsLoader loader) =
+        (FluxCheckpointConverter.ConvertedWeights converted, HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader loader) =
             FluxCheckpointConverter.LoadAndConvert(FluxSingleFilePath);
         sw.Stop();
         _output.WriteLine($"  Loaded in {sw.ElapsedMilliseconds}ms");

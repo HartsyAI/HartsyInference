@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.ChatTemplates;
 
@@ -23,7 +23,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
     }
 
     /// <inheritdoc/>
-    public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt)
+    public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking = null)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
         ArgumentNullException.ThrowIfNull(messages);
@@ -31,23 +31,39 @@ public sealed class JinjaChatTemplate : IChatTemplate
         string rendered;
         try
         {
-            rendered = Render(tokenizer, messages, addGenerationPrompt);
+            try
+            {
+                rendered = Render(tokenizer, messages, addGenerationPrompt, enableThinking);
+            }
+            catch (ChatTemplateRaiseException)
+            {
+                // The template rejected the message structure — almost always a model (Mistral, Gemma, …)
+                // whose template has no system role and/or demands strict user/assistant alternation. Fold any
+                // system content into the first user turn and merge consecutive same-role turns, then retry once.
+                // Matches what llama.cpp/Ollama do for system-less templates. If it still fails, surface the
+                // original error (a genuine template problem, not a structure one).
+                rendered = Render(tokenizer, NormalizeForStrictTemplate(messages), addGenerationPrompt, enableThinking);
+            }
         }
-        catch (ChatTemplateRaiseException)
+        catch (Exception ex) when (ex is not ChatTemplateRaiseException)
         {
-            // The template rejected the message structure — almost always a model (Mistral, Gemma, …)
-            // whose template has no system role and/or demands strict user/assistant alternation. Fold any
-            // system content into the first user turn and merge consecutive same-role turns, then retry once.
-            // Matches what llama.cpp/Ollama do for system-less templates. If it still fails, surface the
-            // original error (a genuine template problem, not a structure one).
-            rendered = Render(tokenizer, NormalizeForStrictTemplate(messages), addGenerationPrompt);
+            // Same tolerance GgufLanguageModel.BuildTemplate applies at compile time (some templates use
+            // constructs the engine doesn't support yet) — a construct that only shows up on a real conversation
+            // shape can still fail at render time even though the template compiled fine in isolation. Degrade
+            // to ChatML rather than failing the whole generation; if the tokenizer has no ChatML control tokens
+            // either, that Encode call throws its own clear error instead of this one.
+            Console.Error.WriteLine($"[WRN] GGUF: chat template failed to render ({ex.Message}); falling back to ChatML for this request.");
+            return new ChatMlTemplate().Encode(tokenizer, messages, addGenerationPrompt, enableThinking);
         }
         // The template emits the bos_token literal itself, so don't double-add specials beyond literal matching.
         return tokenizer.Encode(rendered, addSpecial: true);
     }
 
-    /// <summary>Renders the conversation through the model's Jinja template.</summary>
-    private string Render(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt)
+    /// <summary>Renders the conversation through the model's Jinja template. <paramref name="enableThinking"/> is
+    /// only added to the context when set — an unset value leaves <c>enable_thinking</c> undefined so
+    /// <c>{% if enable_thinking is defined %}</c> branches fall through to the template's own default instead of
+    /// being forced off.</summary>
+    private string Render(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking)
     {
         List<object?> msgList = new(messages.Count);
         foreach (ChatMessage m in messages)
@@ -62,6 +78,8 @@ public sealed class JinjaChatTemplate : IChatTemplate
             ["tools"] = null,
             ["documents"] = null,
         };
+        if (enableThinking.HasValue)
+            context["enable_thinking"] = enableThinking.Value;
         return _engine.Render(context);
     }
 

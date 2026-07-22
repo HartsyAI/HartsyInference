@@ -6,7 +6,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>Anima / Cosmos-Predict2-2B-Text2Image DiT (image-only mode). Every tensor name + shape below is measured
 /// from the actual <c>anima-preview3-base.safetensors</c> ComfyUI single-file checkpoint. All weights live under a
-/// flat <c>net.</c> prefix in the file; the <see cref="HartsyInference.ModelHandler.CheckpointConverters.AnimaCheckpointConverter"/>
+/// flat <c>net.</c> prefix in the file; the <see cref="HartsyInference.ModelAssets.CheckpointConverters.AnimaCheckpointConverter"/>
 /// strips that prefix before handing us the dict, so the loader expects keys like <c>x_embedder.proj.1.weight</c>,
 /// <c>blocks.0.self_attn.q_proj.weight</c>, <c>final_layer.linear.weight</c>.
 ///

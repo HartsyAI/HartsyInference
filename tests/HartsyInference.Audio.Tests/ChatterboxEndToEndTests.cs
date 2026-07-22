@@ -9,8 +9,8 @@ using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.SafeTensors;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 using Xunit.Abstractions;
 

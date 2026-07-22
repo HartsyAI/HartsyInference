@@ -39,7 +39,7 @@ public static class Program
                 .WithDescription("Synthesize speech from text with Piper (saves a WAV).")
                 .WithExample("speak", "\"Hello world\"", "-m", "en_US-lessac-medium");
             config.AddCommand<ThreeDCommand>("3d")
-                .WithDescription("Generate a 3D mesh (GLB) from an image with TripoSR or Hunyuan3D.")
+                .WithDescription("Generate a 3D mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, or TRELLIS.")
                 .WithExample("3d", "photo.png", "-m", "triposr", "--model-path", "/models/triposr");
             config.AddCommand<VisionCommand>("vision")
                 .WithDescription("Run CLIP embedding or YOLO detection on an image.")
@@ -47,8 +47,22 @@ public static class Program
             config.AddCommand<MusicCommand>("music")
                 .WithDescription("Generate music from a prompt with MusicGen (saves a WAV).")
                 .WithExample("music", "\"lofi hip hop, mellow piano\"", "--model-path", "musicgen-small.safetensors");
+            config.AddCommand<ConvertCommand>("convert")
+                .WithDescription("Re-voice a source clip with RVC or OpenVoice (saves a WAV).")
+                .WithExample("convert", "source.wav", "-m", "openvoice", "--target", "reference.wav");
+            config.AddBranch("fx", fx =>
+            {
+                fx.SetDescription("Audio effects: stem separation (Demucs) and speech enhancement (Resemble-Enhance).");
+                fx.AddCommand<FxSeparateCommand>("separate")
+                    .WithDescription("Split a mix into stems with Demucs (saves one WAV per stem).")
+                    .WithExample("fx", "separate", "mix.wav", "-m", "demucs");
+                fx.AddCommand<FxEnhanceCommand>("enhance")
+                    .WithDescription("Denoise and enhance a recording with Resemble-Enhance (saves a WAV).")
+                    .WithExample("fx", "enhance", "noisy.wav");
+            });
             config.AddCommand<VideoCommand>("video")
-                .WithDescription("Generate a video (BMP frame sequence) from a prompt with LTX-Video (CUDA).");
+                .WithDescription("Generate a video (frame sequence) from a prompt with any registered video family (CUDA).")
+                .WithExample("video", "a cat walking through a sunlit garden", "-m", "ltx-video");
             config.AddCommand<InteractiveCommand>("world")
                 .WithDescription("Roll out an Oasis world model from a first-frame image (canned action plan).");
             config.AddCommand<PreviewCommand>("preview")

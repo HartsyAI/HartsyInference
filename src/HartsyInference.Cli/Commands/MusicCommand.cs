@@ -18,14 +18,14 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
         [Description("The music description (e.g. \"upbeat electronic dance music\").")]
         public string Prompt { get; init; } = "";
 
-        /// <summary>Model id.</summary>
+        /// <summary>Model id, optionally with a variant (e.g. acestep:turbo, yue:en-cot).</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id (musicgen).")]
+        [Description("Model: musicgen, audiogen, acestep, yue, stableaudio, heartmula (optionally 'id:variant', e.g. acestep:turbo). Empty uses musicgen.")]
         public string Model { get; init; } = "musicgen";
 
-        /// <summary>Path to the MusicGen model.safetensors.</summary>
+        /// <summary>Optional override to a local checkpoint; every catalog model otherwise self-downloads.</summary>
         [CommandOption("--model-path")]
-        [Description("Path to a musicgen-small model.safetensors.")]
+        [Description("Optional local checkpoint override; every catalog model self-downloads when omitted.")]
         public string? ModelPath { get; init; }
 
         /// <summary>Compute backend selector.</summary>
@@ -63,12 +63,9 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
             return 1;
         }
 
-        if (string.IsNullOrWhiteSpace(settings.ModelPath))
-        {
-            AnsiConsole.MarkupLine("[red]A model is required via[/] [#2ea5e0]--model-path[/][red].[/]");
-            return 1;
-        }
-
+        // --model-path is an override for a local checkpoint (or a user-placed ACE-Step/YuE folder); it is NOT
+        // required — every catalog music model (musicgen, audiogen, acestep, yue, stableaudio, heartmula)
+        // self-downloads through the engine's audio cache, same as the speech/transcribe commands.
         ParamState parameters = new ParamState(Modality.Music) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("duration", settings.Duration.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));

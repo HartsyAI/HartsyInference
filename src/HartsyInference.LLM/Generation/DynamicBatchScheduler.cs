@@ -5,7 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Transformer;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Generation;
 
@@ -518,13 +518,13 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     private int[] BuildPromptIds(GenerationRequest request)
     {
         if (request.RawTokenIds is not null) return [.. request.RawTokenIds];
-        if (request.Messages is not null) return _template.Encode(_tokenizer, request.Messages, addGenerationPrompt: true);
+        if (request.Messages is not null) return _template.Encode(_tokenizer, request.Messages, addGenerationPrompt: true, request.EnableThinking);
         if (request.Prompt is not null)
         {
             List<ChatMessage> messages = new(2);
             if (!string.IsNullOrEmpty(request.SystemPrompt)) messages.Add(ChatMessage.System(request.SystemPrompt));
             messages.Add(ChatMessage.User(request.Prompt));
-            return _template.Encode(_tokenizer, messages, addGenerationPrompt: true);
+            return _template.Encode(_tokenizer, messages, addGenerationPrompt: true, request.EnableThinking);
         }
         throw new ArgumentException("Request must set RawTokenIds, Messages, or Prompt.", nameof(request));
     }

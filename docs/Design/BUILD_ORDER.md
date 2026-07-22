@@ -11,7 +11,7 @@ Phase 3.5: Vulkan backend
 Phase 4: SDXL pipeline → Flux pipeline
 Phase 5: Audio (Whisper → TTS)
 Phase 6: Vision (CLIP → detection)
-Phase 7: Server (OpenAI-compatible API) — DROPPED (no first-party server)
+Phase 7: HTTP API — revived post-Engine-refactor as a thin adapter over IInferenceEngine (see docs/Agents/API.md)
 Phase 8: SwarmUI backend extension (external repo)
 Phase 9: Video (LTX-Video → Wan → Lance → Cosmos-Predict V2W) + shared interactive infra
 Phase 10: Interactive / World Models (Matrix-Game 2/3, Oasis, Hunyuan-GameCraft)
@@ -139,9 +139,12 @@ Phase 12: Native LLM text generation — new HartsyInference.LLM package
 | Image/text embeddings | Vision | Standalone pipelines |
 | YOLO pipeline + NMS | Vision | Object detection end-to-end |
 
-## Phase 7 — Server (DROPPED)
+## Phase 7 — HTTP API
 
-The OpenAI-compatible REST server is no longer a goal. The `HartsyInference.Server` package remains in `src/` as abandoned ASP.NET scaffolding, but no server product is built or planned. The engine is consumed via the SwarmUI backend extension, NuGet libraries, and the sample CLIs.
+`HartsyInference.API` is a thin ASP.NET Core Minimal API adapter over `HartsyInference.Engine`'s `IInferenceEngine`
+facade — health/settings/admin endpoints, native per-modality generation routes, and a narrow OpenAI-compat layer
+(chat + images). Secondary to the SwarmUI backend extension, which remains the recommended surface for end users;
+the HTTP API targets scripting/automation/non-.NET clients. See `docs/Agents/API.md` for the endpoint catalog.
 
 ## Phase 8 — SwarmUI Extension
 **Goal:** Register HartsyInference as a SwarmUI backend, an alternative to the ComfyUI backend.
@@ -165,7 +168,7 @@ The OpenAI-compatible REST server is no longer a goal. The `HartsyInference.Serv
 
 | Deliverable | Package | Description |
 |---|---|---|
-| `HartsyInference.Interactive` (new package) | Interactive | New package for action-conditioned, real-time, frame-by-frame world models. Depends on Video + Diffusion + ModelHandler. |
+| `HartsyInference.World` (new package) | Interactive | New package for action-conditioned, real-time, frame-by-frame world models. Depends on Video + Diffusion + ModelHandler. |
 | `IInteractiveSession` streaming loop | Interactive | Real-time event pump: (read action → encode → step → decode → present) at 25-40 FPS |
 | Action vocabs: keyboard, mouse, gamepad, camera-pose | Interactive | Per-model `IActionEncoder` implementations; reuse the Phase 9 abstraction |
 | Matrix-Game 2.0 pipeline (Skywork, MIT, 1.8B) | Interactive | First interactive world model. 540p @ 25 FPS, SkyReels-V2/Wan lineage. Apache/MIT-style permissive. |

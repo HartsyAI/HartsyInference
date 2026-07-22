@@ -1,0 +1,140 @@
+using HartsyInference.Audio.Cache;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Audio;
+using Spectre.Console;
+
+namespace HartsyInference.Cli.Infra;
+
+/// <summary>Ensures a selected catalog model's files are on disk before use: if any preset asset (transformer / text
+/// encoder / VAE) is missing, it lists them, asks the user to confirm, and downloads the complete set into the right
+/// folders — the SwarmUI "pick a model and it just fetches everything" flow. Returns the spec with its resolved local
+/// path once present; leaves it unchanged (so the handler surfaces the normal not-found error) if the user declines.</summary>
+public static class ModelAcquisition
+{
+    /// <summary>Modalities whose models self-download through <see cref="AudioModelCache"/> (a separate cache at
+    /// <c>~/.cache/hartsyinference/models/</c>, keyed by repo — not the SwarmUI-style <c>Models/&lt;subdir&gt;</c>
+    /// tree <see cref="ModelDownloader"/> targets). These need their own present-check against that cache instead.</summary>
+    private static readonly HashSet<Modality> AudioCacheModalities = new()
+    {
+        Modality.Speech, Modality.Music, Modality.Transcribe, Modality.VoiceConvert, Modality.Fx,
+    };
+
+    /// <summary>Music catalog ids that are the exception within <see cref="AudioCacheModalities"/>: ACE-Step and YuE
+    /// resolve their weights via <see cref="AudioWeightsCatalog"/> + the STANDARD <see cref="ModelDownloader"/>
+    /// machinery (same as image models, landing under <c>Models/audio/music/{acestep,yue}/</c>), not
+    /// <see cref="AudioModelCache"/> — so they must fall through to the code below instead of the audio-cache branch.</summary>
+    private static readonly HashSet<string> StandardDownloadMusicIds = new(StringComparer.OrdinalIgnoreCase)
+    {
+        AudioWeightsCatalog.AceStepId, AudioWeightsCatalog.YueId,
+    };
+
+    /// <summary>Downloads <paramref name="spec"/>'s catalog assets if missing (with confirmation), returning the spec
+    /// pointed at the now-present primary file. No-op for models with no preset assets.</summary>
+    public static ModelSpec EnsurePresent(ModelSpec spec)
+    {
+        if (spec.Catalog is not { } cat || cat.Assets.Count == 0)
+            return spec;
+
+        if (AudioCacheModalities.Contains(spec.Modality) && !StandardDownloadMusicIds.Contains(cat.Id))
+        {
+            EnsureAudioAssetsPresent(cat, spec.Modality);
+            return spec;
+        }
+
+        // Folder-checkpoint families (YuE) load a whole variant DIRECTORY — the primary asset is just the first
+        // shard, so setting LocalPath to it would hand the loader a file path where it expects a folder. Leave
+        // LocalPath alone for these; MusicCatalog.ResolveLocalCheckpoint finds the folder itself via the same
+        // AudioWeightsCatalog data once the files are on disk.
+        bool isFolderFamily = spec.Modality == Modality.Music && AudioWeightsCatalog.IsFolderCheckpoint(cat.Id);
+
+        IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(cat);
+        if (missing.Count == 0)
+        {
+            string? present = isFolderFamily ? null : ModelDownloader.PrimaryLocalPath(cat);
+            return spec.LocalPath is null && present is not null ? spec with { LocalPath = present } : spec;
+        }
+
+        AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s) not on disk:[/]");
+        foreach (ModelAsset a in missing)
+            AnsiConsole.MarkupLine($"  [#9aa4af]{a.Role}:[/] {Markup.Escape(a.Repo)}/{Markup.Escape(a.RepoPath)} [#9aa4af]→ Models/{Markup.Escape(a.TargetSubdir)}/[/]");
+
+        if (!InteractivePrompt.Confirm("Download these now?", defaultYes: false))
+            return spec;
+
+        try
+        {
+            AnsiConsole.Progress()
+                .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new SpinnerColumn())
+                .Start(ctx =>
+                {
+                    Dictionary<string, ProgressTask> tasks = new(StringComparer.Ordinal);
+                    foreach (ModelAsset a in missing)
+                        tasks[a.FileName] = ctx.AddTask(Markup.Escape(a.FileName), maxValue: 1.0);
+                    ModelDownloader.DownloadAsync(missing, (a, fraction) =>
+                    {
+                        if (tasks.TryGetValue(a.FileName, out ProgressTask? task))
+                            task.Value = fraction;
+                    }, CancellationToken.None).GetAwaiter().GetResult();
+                });
+        }
+        catch (Exception ex)
+        {
+            CliErrors.Report(ex, spec.Modality);
+            return spec;
+        }
+
+        string? primary = isFolderFamily ? null : ModelDownloader.PrimaryLocalPath(cat);
+        AnsiConsole.MarkupLine("[green]✓ model files ready.[/]");
+        return primary is not null ? spec with { LocalPath = primary } : spec;
+    }
+
+    /// <summary>Present-check + confirm + download for the audio-cache-backed modalities (TTS/STT/Music/
+    /// VoiceConvert/Fx): resolves each asset's real location under <see cref="AudioModelCache"/> (not
+    /// <see cref="ModelDownloader"/>'s SwarmUI-style <c>Models/&lt;subdir&gt;</c> tree, which these models never read
+    /// from) and fetches anything missing via the same <see cref="AudioModelCache.GetAsync"/> the Engine's own
+    /// descriptors call internally, so the file lands exactly where the generation call will look for it.</summary>
+    private static void EnsureAudioAssetsPresent(CatalogEntry cat, Modality modality)
+    {
+        List<ModelAsset> missing = cat.Assets.Where(a => !File.Exists(AudioAssetPath(a))).ToList();
+        if (missing.Count == 0)
+            return;
+
+        AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s) not on disk:[/]");
+        foreach (ModelAsset a in missing)
+            AnsiConsole.MarkupLine($"  [#9aa4af]{a.Role}:[/] {Markup.Escape(a.Repo)}/{Markup.Escape(a.RepoPath)}");
+
+        if (!InteractivePrompt.Confirm("Download these now?", defaultYes: false))
+            return;
+
+        try
+        {
+            AnsiConsole.Progress()
+                .Columns(new TaskDescriptionColumn(), new SpinnerColumn())
+                .Start(ctx =>
+                {
+                    foreach (ModelAsset a in missing)
+                    {
+                        ProgressTask task = ctx.AddTask(Markup.Escape(a.FileName));
+                        string baseDescription = Markup.Escape(a.FileName);
+                        IProgress<long> progress = new Progress<long>(bytes => task.Description = $"{baseDescription} ({bytes / (1024 * 1024)} MB)");
+                        AudioModelCache.GetAsync(a.Repo, a.RepoPath, progress: progress, ct: CancellationToken.None).GetAwaiter().GetResult();
+                        if (!string.IsNullOrEmpty(a.Sha256))
+                            AudioModelCache.VerifySha256(AudioAssetPath(a), a.Sha256);
+                    }
+                });
+        }
+        catch (Exception ex)
+        {
+            CliErrors.Report(ex, modality);
+            return;
+        }
+
+        AnsiConsole.MarkupLine("[green]✓ model files ready.[/]");
+    }
+
+    /// <summary>The real on-disk path an audio asset resolves to: <see cref="AudioModelCache"/>'s per-repo directory,
+    /// not <see cref="ModelDownloader.TargetPath"/> — audio descriptors call <c>AudioModelCache.GetAsync</c> directly
+    /// and never read <c>ModelSpec.LocalPath</c> for HF-backed models, so <c>TargetSubdir</c>/<c>TargetName</c> on
+    /// these catalog entries are display-only.</summary>
+    private static string AudioAssetPath(ModelAsset a) => Path.Combine(AudioModelCache.GetRepoDirectory(a.Repo), a.RepoPath);
+}

@@ -374,6 +374,24 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         videoLat.Dispose();
         Logs.Info($"[ltx2-phase] latent unpack (host): {phase.ElapsedMilliseconds} ms");
         phase.Restart();
+        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") == "1")
+        {
+            Tensor f32 = videoVaeLatent.DType == DType.F32 ? videoVaeLatent : videoVaeLatent.CastTo(DType.F32);
+            float* p = (float*)f32.DataPointer;
+            long n = f32.ElementCount;
+            float mn = float.MaxValue, mx = float.MinValue; double sum = 0; long nanCount = 0, infCount = 0;
+            for (long e = 0; e < n; e++)
+            {
+                float v = p[e];
+                if (float.IsNaN(v)) { nanCount++; continue; }
+                if (float.IsInfinity(v)) { infCount++; continue; }
+                if (v < mn) mn = v;
+                if (v > mx) mx = v;
+                sum += v;
+            }
+            Logs.Warning($"[ltx2-probe] pre-decode videoVaeLatent: min={mn:F4} max={mx:F4} mean={sum / n:F4} nan={nanCount} inf={infCount} n={n}");
+            if (!ReferenceEquals(f32, videoVaeLatent)) f32.Dispose();
+        }
         Tensor rgb = _vae.Decode(Backend, videoVaeLatent);
         videoVaeLatent.Dispose();
         Backend.Sync();

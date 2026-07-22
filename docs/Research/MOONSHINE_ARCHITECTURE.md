@@ -4,7 +4,7 @@
 
 Moonshine (Useful Sensors, 2024) is a tiny encoder-decoder ASR family explicitly designed for edge devices and live transcription. Unlike Whisper, it operates **directly on the raw 16 kHz waveform** (no mel spectrogram), uses **RoPE** instead of learned absolute positional embeddings, and processes **variable-length** audio without zero-padding to 30 s.
 
-Pure C# implementation is straightforward: a 3-layer Conv1D front-end, then a standard pre-existing pre-LN Transformer encoder/decoder pattern (we already have this for Whisper and the HartsyInference.LLM decoder), reusing the RoPE we built for Flux / Hunyuan / Z-Image and the BPE tokenizer infrastructure from HartsyInference.Tokenizers.
+Pure C# implementation is straightforward: a 3-layer Conv1D front-end, then a standard pre-existing pre-LN Transformer encoder/decoder pattern (we already have this for Whisper and the HartsyInference.LLM decoder), reusing the RoPE we built for Flux / Hunyuan / Z-Image and the BPE tokenizer infrastructure from HartsyInference.ModelAssets.Tokenizers.
 
 ---
 
@@ -261,7 +261,7 @@ return concat([x_rot_rotated, x_pass], dim=-1)
 
 - Base: **Llama 1 / 2 byte-level BPE** (same merges + base vocab).
 - Base vocab: **32 000** tokens. Plus **768** reserved special tokens → **`vocab_size = 32768`**.
-- Encoded as a HuggingFace `tokenizer.json` (~1.99 MB) — same JSON schema HartsyInference.Tokenizers already supports.
+- Encoded as a HuggingFace `tokenizer.json` (~1.99 MB) — same JSON schema HartsyInference.ModelAssets.Tokenizers already supports.
 - Special tokens:
   - `bos_token_id = 1`
   - `eos_token_id = 2`

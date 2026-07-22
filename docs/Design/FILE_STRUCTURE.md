@@ -11,9 +11,10 @@ HartsyInference/
 ├── src/
 │   ├── HartsyInference.Core / ModelHandler / Tokenizers / Phonemizer / Cpu / Cuda / Vulkan
 │   ├── HartsyInference.LLM / Diffusion / Audio / Vision / Video / Interactive / ThreeD
+│   ├── HartsyInference.Engine       (service layer — the single source of truth; see CORE_DESIGN.md)
 │   ├── HartsyInference.Meta        (dependencies-only meta-package)
 │   ├── HartsyInference.Cli         (developer / verification CLI)
-│   └── HartsyInference.Server      (abandoned ASP.NET scaffolding — not a product)
+│   └── HartsyInference.API         (thin HTTP adapter over Engine — secondary to SwarmUI, see below)
 ├── tests/ / samples/ / benchmarks/ / docs/ / native/
 ```
 
@@ -43,7 +44,7 @@ HartsyInference/
 
 ---
 
-## src/HartsyInference.ModelHandler/
+## src/HartsyInference.ModelAssets/
 
 | File | Description |
 |---|---|
@@ -64,7 +65,7 @@ HartsyInference/
 
 ---
 
-## src/HartsyInference.Tokenizers/
+## src/HartsyInference.ModelAssets.Tokenizers/
 
 | File | Description |
 |---|---|
@@ -75,7 +76,7 @@ HartsyInference/
 
 ---
 
-## src/HartsyInference.Phonemizer/
+## src/HartsyInference.Audio.Phonemizer/
 
 Pure-C# G2P / IPA phonemization (an espeak-ng-style port) for phoneme-input TTS models. Depends on Core only.
 
@@ -210,7 +211,7 @@ seq2seq. Depends on Core + ModelHandler + Tokenizers. See [LLM_LANGUAGE_PACKAGE.
 
 ---
 
-## src/HartsyInference.Interactive/  (Phase 10 — world models)
+## src/HartsyInference.World/  (Phase 10 — world models)
 
 | File | Description |
 |---|---|
@@ -252,18 +253,28 @@ Vision, Video, Interactive) plus the backends. Used for local runs and parity ch
 
 ---
 
-## src/HartsyInference.Server/  (abandoned — not a product)
+## src/HartsyInference.API/  (thin HTTP adapter over Engine — secondary to SwarmUI)
 
-ASP.NET scaffolding left in the tree from the dropped Phase 7 server. **Not supported or advertised**; there is
-no OpenAI-compatible server product and none is planned. Kept only so the code is not lost; do not depend on it.
+ASP.NET Core Minimal API process. Live and supported, not a sample: constructs one `InferenceEngine`, gates every
+call through `HartsyInference.Engine.InferenceQueue`, and maps health/admin/settings plus native + OpenAI-compat
+generation endpoints. `IsPackable=false` (it's a runnable app, not a NuGet library) — see `docs/Agents/API.md` for
+the full endpoint catalog and design rationale.
 
 | File | Description |
 |---|---|
-| `Setup/HartsyInferenceServiceExtensions.cs` / `HartsyInferenceServerOptions.cs` | DI registration, server options |
-| `Endpoints/` | ImageGeneration, AudioTranscription, Vision, ModelManagement, InteractiveSessionEndpoint (WebSocket) |
-| `Streaming/SseProgressStream.cs` / `AudioChunkStream.cs` / `InteractiveFrameStream.cs` | SSE progress, audio chunk streaming, interactive frame serialization |
-| `Queue/InferenceQueue.cs` / `InferenceQueueEntry.cs` | FIFO inference queue |
-| `Auth/ApiKeyMiddleware.cs` | Optional API key validation |
+| `Program.cs` | Entry point — `AddHartsyInference()` + `MapHartsyInferenceEndpoints()` |
+| `HartsyInferenceServiceExtensions.cs` | DI registration (`IInferenceEngine`, two `InferenceQueue` gates — fast + keyed long-running, `WorldSessionRegistry`) and top-level endpoint wiring |
+| `HartsyInferenceServerOptions.cs` | Backend selector, concurrency/queue-depth limits (fast + long-running), API key, model cache dir |
+| `WorldSessionRegistry.cs` | Tracks open interactive-world sessions by id; idle-timeout eviction |
+| `OpenAiDtos.cs` | OpenAI-shaped request/response DTOs for the compat routes |
+| `Endpoints/HealthEndpoints.cs` | `/health`, `/ready`, `/version` |
+| `Endpoints/SettingsEndpoints.cs` | `/settings` (read-only, API key redacted) |
+| `Endpoints/AdminEndpoints.cs` | `/admin/{catalog,models,cache,models/pull,memory/free,backend,queue}` |
+| `Endpoints/ImageEndpoints.cs` / `TextEndpoints.cs` / `AudioEndpoints.cs` / `VisionEndpoints.cs` / `MeshEndpoints.cs` / `VideoEndpoints.cs` / `WorldEndpoints.cs` | Native `/v1/native/*` routes, one file per modality |
+| `Endpoints/CompatEndpoints.cs` | `/v1/chat/completions`, `/v1/images/generations`(+`/stream`) — thin wrappers calling the same handlers as the native routes |
+| `Endpoints/SseHelpers.cs` | Shared SSE plumbing: queue-gated streaming + JSON-options-consistent event formatting |
+| `Endpoints/GenerationErrors.cs` | Maps Engine exceptions (`FileNotFoundException`, `NotSupportedException`, `HartsyInferenceException`, `QueueFullException`) to HTTP status codes |
+| `Endpoints/*Dtos.cs` | Envelope request DTOs (`{model, modelPath, request}`) per modality |
 
 ---
 
@@ -274,16 +285,16 @@ One test project per package plus shared fixtures and Python references.
 | Project | Scope |
 |---|---|
 | `HartsyInference.Core.Tests` | Tensor, TensorShape, NativeBuffer, finalizer cleanup |
-| `HartsyInference.ModelHandler.Tests` | Safetensors, GGUF, PyTorch-pickle loaders |
+| `HartsyInference.ModelAssets.Tests` | Safetensors, GGUF, PyTorch-pickle loaders |
 | `HartsyInference.Cpu.Tests` | MatMul, Conv2D, Norm, Attention kernels |
 | `HartsyInference.Cuda.Tests` | CUDA kernels, multi-backend isolation |
 | `HartsyInference.Vulkan.Tests` | SPIR-V kernels vs CPU/CUDA reference |
-| `HartsyInference.Tokenizers.Tests` / `HartsyInference.Phonemizer.Tests` | Tokenizer + G2P parity |
+| `HartsyInference.ModelAssets.Tokenizers.Tests` / `HartsyInference.Audio.Phonemizer.Tests` | Tokenizer + G2P parity |
 | `HartsyInference.LLM.Tests` | Generic transformer, sampler chain, chat templates, decode parity |
 | `HartsyInference.Diffusion.Tests` | Schedulers, tokenizer, pipeline integration |
 | `HartsyInference.Audio.Tests` / `HartsyInference.Vision.Tests` | STT/TTS + CLIP/YOLO/SAM |
-| `HartsyInference.Video.Tests` / `HartsyInference.Interactive.Tests` / `HartsyInference.ThreeD.Tests` | Video, world-model, and 3D pipelines |
-| `HartsyInference.Server.Tests` | Legacy scaffolding tests (server is dropped) |
+| `HartsyInference.Video.Tests` / `HartsyInference.World.Tests` / `HartsyInference.ThreeD.Tests` | Video, world-model, and 3D pipelines |
+| `HartsyInference.API.Tests` | `WebApplicationFactory`-based routing/validation/error-mapping tests for every `HartsyInference.API` route, plus direct unit tests for `WorldSessionRegistry` |
 | `HartsyInference.Tests.Common` / `python-reference/` | Shared test helpers + Python golden-reference scripts |
 
 ---

@@ -6,7 +6,7 @@ using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.Phonemizer.Espeak;
+using HartsyInference.Audio.Phonemizer.Espeak;
 using Xunit;
 using Xunit.Abstractions;
 

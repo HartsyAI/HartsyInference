@@ -10,6 +10,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Using Include="HartsyInference.Engine" />
+    <Using Include="HartsyInference.Engine.Dispatch" />
+    <Using Include="HartsyInference.Engine.Registry" />
+    <Using Include="HartsyInference.Engine.Requests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Spectre.Console" />
     <PackageReference Include="Spectre.Console.Cli" />
   </ItemGroup>
@@ -28,10 +35,10 @@
     <ProjectReference Include="..\HartsyInference.Audio\HartsyInference.Audio.csproj" />
     <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
     <ProjectReference Include="..\HartsyInference.Video\HartsyInference.Video.csproj" />
-    <ProjectReference Include="..\HartsyInference.Interactive\HartsyInference.Interactive.csproj" />
+    <ProjectReference Include="..\HartsyInference.World\HartsyInference.World.csproj" />
     <ProjectReference Include="..\HartsyInference.ThreeD\HartsyInference.ThreeD.csproj" />
-    <ProjectReference Include="..\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
-    <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
+    <ProjectReference Include="..\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
+    <ProjectReference Include="..\HartsyInference.Engine\HartsyInference.Engine.csproj" />
   </ItemGroup>
 
 </Project>

@@ -112,7 +112,7 @@ CPU cost: ~5 ms/MB on a modern CPU. For T5-XXL (9.4 GB BF16) this is ~50 seconds
 
 ### Pattern C: Q8_0 GGUF (FUTURE — needs GGUF K-quant reader)
 
-GGUF Q8_0 reader is not yet implemented in `HartsyInference.ModelHandler`. When it lands:
+GGUF Q8_0 reader is not yet implemented in `HartsyInference.ModelAssets`. When it lands:
 - Load T5 weights via `GgufLoader.Load(path)` instead of `SafeTensorsLoader`
 - Each block-32 group dequantizes to F16/F32 on-demand at GEMM time
 - Slightly better quality than FP8 (block-wise scale + tighter range), same VRAM footprint

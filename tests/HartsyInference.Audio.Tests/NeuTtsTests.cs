@@ -1,7 +1,7 @@
 using HartsyInference.Audio.Models.Codecs;
 using HartsyInference.Audio.Models.Codecs.NeuCodec;
 using HartsyInference.Audio.Models.NeuTts;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;

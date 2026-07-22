@@ -3,7 +3,7 @@ using HartsyInference.Audio.Models.Vocoders;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;

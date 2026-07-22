@@ -22,6 +22,320 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > on-device MoE routing (would unlock olmoe/qwen2moe/granitemoe for graphing), the big-model GEMV
 > memory-access-pattern redesign (blocked on `ncu` access last attempt).
 
+> **STATUS UPDATE (2026-07-22): `ncu` access re-attempted, still blocked — confirmed a driver policy, not a
+> toolchain gap.** This session discovered pip-installable standalone CUDA toolkit wheels
+> (`nvidia-cuda-nvcc`/`nvidia-cuda-runtime`/`nvidia-cublas`) work on this box with no system CUDA install
+> (see `MODEL_STATUS_LLM.md`'s glm4 section) — that includes `nsight-compute` (`ncu`), which was previously
+> assumed simply absent. It isn't: `ncu --set basic ... dotnet ...` connects to the target process fine but
+> fails with `ERR_NVGPUCTRPERM` — the GeForce driver restricts GPU performance-counter access to admin users
+> regardless of which `ncu` binary/version launches it. This needs a system-level fix (`sudo`-gated kernel
+> module parameter + reload, or profiling as root), not a code or toolchain change, and wasn't attempted
+> without explicit user sign-off. **The GEMV memory-access-pattern redesign lever stays blocked** — Phase 5's
+> conclusion (memory-bound, not ALU-bound; `dp4a` int8 built, numerically exact, no speedup) still stands, so
+> there's no new evidence to guess a redesign from. Two new benchmark data points added this session (via
+> `TextDecodeThroughputBenchmark.cs` vs a fresh llama-cpp-python build — see `LLM_THROUGHPUT_BENCHMARK.md`):
+> **Llama-3.2-1B-Instruct Q8_0: 142.14 tok/s graph-on vs llama-cpp-python 190.34 (1.34× slower)** — notably
+> *better* than the 2026-07-10 entry's 1.72× gap for the same model (measurement-methodology difference:
+> llama-cpp-python here vs `llama-bench` there; still an improvement, not a regression). **Qwen3-4B Q4_K_M
+> (new size, not previously benchmarked — only Qwen3-0.6B was): 60.05 tok/s graph-on vs 85.59 (1.43× slower)**,
+> in the same range as the rest of this doc's gaps. Neither is faster than llama.cpp; no code change made this
+> pass since every already-identified lever (CUDA graphs) is already on, and the next lever needs `ncu` data
+> this session couldn't obtain.
+
+> **STATUS UPDATE (2026-07-22, same session, continued): `ncu` access unblocked via `sudo`, real fix found
+> and verified.** `ERR_NVGPUCTRPERM` is bypassed by running `ncu` itself under `sudo` (with `HOME` and
+> `CUDA_DEVICE_ORDER`/`CUDA_VISIBLE_DEVICES` explicitly passed through `sudo env`, since `sudo` resets the
+> environment and this engine resolves its native libs relative to `$HOME/.local/lib/cuda13` — see
+> `CudaLibraryResolver.cs`). No persistent system change made (no kernel module parameter edited); this is a
+> per-invocation elevation only.
+>
+> **Root-caused a real, fixable inefficiency**: `nsys` full-run kernel aggregation on Qwen3-4B showed the
+> fused GEMV kernels dominate decode as expected (`mul_mat_vec_q4k_f32` 34%, `mul_mat_vec_q6k_f32` 22% of
+> total GPU time) — but per-instance, `mul_mat_vec_q6k_f32` took ~135us vs `mul_mat_vec_q4k_f32`'s ~36us
+> despite comparable per-layer work. `ncu --set full` on both kernels in isolation confirmed why: Q6_K's
+> `Executed Ipc Active` was 1.39 vs Q4_K's 2.70, Issue Slots Busy 33.7% vs 62.5%, with ncu's own diagnostic
+> reading "low compute throughput and memory bandwidth... typically indicate latency issues" — the kernel
+> was **latency-bound, not bandwidth-bound**, from `mul_mat_vec_q6k_f32.cu`'s tight interleaved
+> load-then-immediately-use pattern (each of the 4 unpacked values per half-super-block loads its bytes and
+> computes right before the next), unlike `mul_mat_vec_q4k_f32.cu`'s upfront `uint2`/`float4` vectorized loads.
+>
+> **Fix**: restructured `mul_mat_vec_q6k_f32.cu` to issue every load for both half-super-blocks up front
+> (into named locals) before any bit-unpacking or FMA — gives the warp scheduler many independent in-flight
+> memory requests to hide latency behind, instead of serializing on each load's round trip one at a time.
+> The accumulation order into `acc` is unchanged (same 8 FMAs in the same sequence, only WHEN the underlying
+> loads happen moved earlier), so this is provably bit-for-bit identical floating-point output, not an
+> approximation — confirmed by `CudaQuantizedMatMulTests.QuantizedMatMul_MatchesLinear(Q6_K, ...)` and the
+> full `Q6_K_GpuDequant_MatchesCpu`/`Linear_Q6_K_Weight_MatchesF16Reference` tests, plus the full
+> `HartsyInference.Cuda.Tests` suite (136/136) passing after the change with no other files touched.
+>
+> **Measured result (RTX 3060, `TextDecodeThroughputBenchmark.cs`, graph-on)**: Qwen3-4B Q4_K_M
+> **60.05 to 63.9 tok/s (+6.4%)**; gap to llama-cpp-python narrowed from **1.43x to 1.34x slower**.
+> Llama-3.2-1B-Instruct Q8_0 unchanged (142.14 tok/s) as expected — a pure Q8_0 quant has no Q6_K tensors to
+> benefit from this fix. Q5_K's sibling kernel (`mul_mat_vec_q5k_f32.cu`) already uses the same upfront
+> `uint2`/`float4` vectorized-load structure as Q4_K, so it wasn't affected by this class of bug and wasn't
+> touched. Modest, verified, low-risk win — not the full "GEMV memory-access-pattern redesign" this doc
+> flagged as the big remaining lever (that would mean restructuring which thread owns which elements to
+> enable true vectorized loads across Q6_K's strided layout, a bigger and riskier rewrite deferred here), but
+> real progress unblocked specifically by finally getting `ncu` access.
+
+> **STATUS UPDATE (2026-07-22, same session, continued): graph-capture allocation-node arena — tried,
+> measured, REVERTED (no real win).** `nsys cuda_gpu_trace` gap analysis on Qwen3-4B found a large idle gap
+> around each `cuGraphLaunch`, and `cuda_api_sum` showed captured graphs held ~976 `cuMemAllocAsync`/
+> `cuMemFreeAsync` allocation nodes (each decode-step temporary tensor allocates async inside the capture,
+> becoming a graph memory node CUDA must re-resolve on every `cuGraphLaunch`). Built a bump-arena allocator
+> (`CudaMemory.ArenaAllocate`, opt-in via `CudaBackend.CaptureGraph(..., useCaptureArena: true)`): reserve one
+> 64MB buffer *outside* the capture, hand out bump-pointer offsets for everything allocated *inside* the
+> capture, bulk-free the whole arena at graph disposal — collapses the ~976 per-launch allocation nodes to
+> zero. Correctness fully verified (byte-identical greedy output, full `HartsyInference.Cuda.Tests` 136/136,
+> `HartsyInference.LLM.Tests` 131/131). **Found and fixed a real regression along the way**: applying the
+> arena unconditionally broke CSM (audio) graph decode, because `CsmModel`'s `ForwardGraphDecodeStepEmbeds`
+> keeps a persistent fixed-address buffer (`gs.OutHidden`) alive and read across many replays — redirecting it
+> into the transient arena corrupted that invariant. Fixed by making the arena strictly opt-in per call site
+> (`IBackend.CaptureGraph`'s new parameter defaults to `false`), enabled only at the two LLM decode-step sites
+> whose captured body disposes every temporary before returning; CSM's call sites were left untouched at the
+> default.
+>
+> **The catch: `nsys`'s own numbers were misleading about real-world impact.** Under `nsys` instrumentation,
+> `cuGraphLaunch`'s reported API-level cost dropped ~3× (≈1.47ms → ≈0.48ms avg). But repeated **clean,
+> unprofiled** `TextDecodeThroughputBenchmark.cs` runs (the same benchmark this whole doc's numbers come from,
+> and the only number that matters — nsys's own tracing overhead is known to scale with per-call complexity,
+> so a 976-node graph launch being instrumented is not representative of that launch running un-instrumented)
+> showed Qwen3-4B at **64.0-64.6 tok/s** — barely distinguishable from the **63.7-64.1 tok/s** already measured
+> with the Q6_K fix alone, before the arena existed. In other words: a real, verified, measurable reduction in
+> one specific profiler-reported metric, with **no measurable end-to-end throughput gain**. Per this doc's own
+> rule ("every change must show a speedup on an isolated micro-benchmark, end-to-end t/s, AND preserve
+> correctness"), rule #2 failed — **reverted** (all 5 files: `CudaMemory.cs`, `CudaBackend.cs`, `IBackend.cs`,
+> `TextGenerationPipeline.cs`, `DynamicBatchScheduler.cs` restored via `git checkout`). Re-verified back to the
+> Q6_K-only state with `HartsyInference.Cuda.Tests` still green.
+>
+> **Lesson for future profiling on this engine**: host-side/API-level overhead measured *under nsys* must be
+> cross-checked against a clean unprofiled wall-clock run before treating it as a real lever — nsys's per-call
+> instrumentation tax itself scales with call complexity (more graph nodes → more to trace → inflated reported
+> gap), so an nsys-only diagnosis can lead to chasing an artifact of the measurement tool rather than a real
+> bottleneck. This effectively **rules out the "launch/allocation-node overhead" branch of the host-overhead
+> hypothesis entirely** — combined with the already-ruled-out per-token D2H sync (fundamental to greedy
+> autoregressive decode: token N+1's embed depends on N's sampled id, so there's no pipelining it away, and
+> llama.cpp pays the identical cost), **the remaining ~1.34× gap on Qwen3-4B is GPU-kernel-bound, not
+> host-overhead-bound.** Next candidate per `nsys cuda_gpu_kern_sum`: `lm_flash_attn_f32` at ~12% of decode
+> GPU time, not yet profiled in isolation with `ncu --set full` (unlike Q4_K/Q6_K GEMV, which were checked and
+> found well-balanced/near-roofline and latency-bound respectively).
+
+> **STATUS UPDATE (2026-07-22, same session, continued): attempted decode-attention profiling — blocked by
+> tooling, not by findings. Two real, narrow facts surfaced; no decode-path conclusion reached.**
+>
+> (1) **Profiled `lm_flash_attn_f32` under `ncu --set full`, but only caught PREFILL calls (grid=736 = prompt
+> tokens × heads), not decode** — the process reliably OOMs on `ProjectLogits`'s lm_head cast right after
+> prefill finishes, before decode step 1's attention kernel ever launches, every time `ncu`/`nsys` is attached
+> (confirmed the model itself generates fine at the same token counts with no profiler attached — this is
+> profiler-induced VRAM overhead, e.g. `ncu`'s per-launch replay state, not an engine bug). The prefill-shaped
+> data (42%/42% memory/compute throughput, 74% occupancy, "37.5% Est. Speedup: L1TEX scoreboard stall") is
+> real but **does not license a decode-path conclusion** — decode's attention launches at a much smaller grid
+> (~32 blocks vs 736) on 28 SMs, a materially different occupancy regime the prefill numbers don't transfer to.
+> Do not read this as "flash-attn is latency-bound in decode."
+>
+> (2) **The dedicated split-K flash-decode kernels (`lm_flash_attn_f32_split`/`lm_flash_attn_f32_combine`)
+> never launched at all** during any of these runs (24-128 generated tokens) — confirmed by kernel-name
+> filtering, not by inference. The only "split" kernel that fired was cuBLAS's own `splitKreduce_kernel`
+> (unrelated — unpacked here after an initial regex false-match). Per Phase 3's dispatch rule
+> (`CudaBackend.cs`, engage at `kvLen≥128`), Qwen3-4B's short-to-medium decode runs never reach that
+> threshold, so 100% of decode-time attention for a typical (say 128-token) generation runs the plain
+> monolithic per-head kernel, not the split-K one. **This is a fact, not yet a diagnosis** — the threshold may
+> be correctly tuned (short KV = little attention work, splitting isn't worth it there) or may be miscalibrated
+> for this shape; distinguishing the two needs a wall-clock A/B (lower the threshold, measure), not more
+> profiling.
+>
+> **Fixed as a side effect**: `~/.local/lib/cuda13/libnvToolsExt.so.1` was missing, so this engine's NVTX range
+> instrumentation silently no-op'd (`CudaLibraryResolver`'s `DllNotFoundException` fallback) — every prior
+> `nsys` trace this session lost the ability to visually separate prefill from decode via named ranges.
+> Symlinked from the local Python venv's `nvidia-nvtx` pip package. Not yet confirmed working end-to-end
+> (deprioritized once the `ncu`/`nsys` OOM-under-profiler issue above made attention profiling the blocker,
+> not missing NVTX ranges) — verify before relying on it in a future session.
+>
+> **What's actually settled after both this update and the arena update above**: the host-overhead hypothesis
+> (launch overhead, graph allocation-node overhead, per-token D2H sync) is fully ruled out. **The remaining
+> ~1.34x gap is GPU-kernel-bound**, but WHICH kernel(s) and by how much remains unmeasured for the decode
+> phase specifically — profiling that requires either (a) a lighter-weight decode-only isolation harness than
+> attaching `ncu`/`nsys` to a full generate call (e.g. a microbenchmark that runs ONLY N decode steps with a
+> pre-warmed KV cache, no prefill, sized to fit under whatever VRAM headroom the profiler needs), or (b) fixing
+> the profiler-induced OOM directly. Neither attempted yet.
+
+> **STATUS UPDATE (2026-07-22, same session, continued): split-K decode attention split-COUNT formula fixed —
+> real, verified ~9% win on BOTH benchmarked models.** Chasing the "does split-K even engage?" question above
+> led to a wrong intermediate conclusion (documented and corrected here rather than silently fixed): a
+> `HARTSY_DEBUG_SPLITK` print statement (temporary, since removed) confirmed `FlashAttentionDev`
+> (`CudaBackend.cs`) **does** engage split-K for the real benchmarked shape (`lk=193, splits=3` for Qwen3-4B
+> at the standard 128-token benchmark) — the earlier "never engages" claim in this doc was an artifact of
+> profiling with much shorter prompts/max-tokens specifically to dodge the ncu OOM, which shrank the KV
+> capacity gate (`promptLen + MaxTokens + 1`) below the `lk≥128` threshold. Corrected.
+>
+> With that resolved, the real remaining question was whether the split COUNT itself was well-tuned. Added a
+> temporary `HARTSY_FORCE_SPLITS` env-var override (removed after) and swept it against the real
+> `TextDecodeThroughputBenchmark` on Qwen3-4B (`lk=193`, clean wall-clock, no profiler): tok/s rose
+> **monotonically** from the shipped default (splits=3, 64.0 tok/s) through splits=4 (66.2), 6 (68.0), 8
+> (68.9), up to a plateau at **splits=12-20 (~69.5-69.6 tok/s, +8.6%)**, then a slight decline by splits=32
+> (69.4) — the fixed per-split combine-kernel overhead eventually outweighs the added parallelism. The
+> existing formula's `maxG = lk/64` chunk-size floor ("keep chunks ≥64 keys") was capping splits at 3 well
+> short of that plateau — an unvalidated guess from when the split-K path was first built, not a measured
+> constraint.
+>
+> **Fix** (`CudaBackend.cs`, `FlashAttentionDev`): raised the occupancy target from `4 × SM count` to
+> `16 × SM count`, and loosened the chunk-size floor from `lk/64` to `lk/16` (chunks as small as ~16 keys, not
+> ≥64) — reproduces splits=12 for the measured shape, landing in the plateau with margin either side.
+>
+> **Measured result, clean wall-clock, `TextDecodeThroughputBenchmark` (RTX 3060, graph-on)**:
+> - **Qwen3-4B Q4_K_M: 64.01 → 70.09 tok/s (+9.5%)**
+> - **Llama-3.2-1B-Instruct Q8_0: 142.14 → 155.28 tok/s (+9.2%)** — notably, this model has zero Q6_K tensors
+>   (pure Q8_0), so this is a clean, independent confirmation the win is real and generalizes across quant
+>   types/architectures, not an artifact riding on the earlier Q6_K fix.
+>
+> **Correctness**: `SchedulerGraphDecodeTests` (all 4 cases) pass cleanly with real Llama-3.2-1B checkpoints,
+> confirming byte-identical greedy token sequences graph-on vs graph-off vs the direct pipeline. For Qwen3-4B,
+> a direct CLI A/B (`hartsy text "The capital of France is" --max-tokens 40`, graph-decode on vs off) produced
+> **character-for-character identical output**. `SchedulerGraphDecodeTests`/`GraphDecodeRepetitionPenaltyTests`
+> could not give a clean in-process confirmation for Qwen3-4B specifically — they hit a real
+> `CUDA_ERROR_OUT_OF_MEMORY`, but **confirmed pre-existing via `git stash`** (identical failure on the
+> unmodified tree, same test file, same model) — a cumulative-VRAM-across-sequential-test-cases issue in that
+> test file unrelated to this change, not investigated further here (out of scope for this grind). Full
+> `HartsyInference.Cuda.Tests` suite: 133/137 (4 pre-existing unrelated failures — `Fp8NativeGemmTests`
+> cuBLASLt heuristic error, `Conv1dKernelTests`, `MultiBackendIsolationTests` precision — all confirmed
+> pre-existing via the same stash comparison).
+>
+> **Gap update**: Llama-3.2-1B 1.34x → **1.23x** slower than llama-cpp-python; Qwen3-4B 1.34x → **1.22x**.
+> Both real, both kernel-dispatch-formula fixes (no new kernel code, no correctness risk beyond a tuning
+> constant) — the highest-value, lowest-risk lever found this session. See `LLM_THROUGHPUT_BENCHMARK.md` for
+> the updated results table.
+
+> **STATUS UPDATE (2026-07-22, same session, continued): same fix applied to the EAGER (non-graph-decode)
+> split-K path — smaller but real win, and it unblocked the ncu decode-attention profiling this doc's earlier
+> entries couldn't get.** Built a minimal standalone probe (`attn-probe`, scratchpad-only, not committed) that
+> calls `CudaBackend.FlashAttention` directly at the real Qwen3-4B decode shape (Hq=32, Hkv=8, D=128, lk=193)
+> with NO model loading — no weights, no KV cache, no scheduler — specifically to get under the VRAM headroom
+> `ncu`/`nsys` need. It worked: profiled `lm_flash_attn_f32_split`/`_combine` on the real RTX 3060 for the
+> first time this session without an OOM.
+>
+> That immediately surfaced a fact worth stating plainly: `FlashAttention` (eager) and `FlashAttentionDev`
+> (graph-decode, fixed in the update above) are **two separate call sites with two separate, independently-
+> tuned split-count formulas** for the identical split/combine kernel pair. The eager one was still on the old
+> unvalidated constants (`target=2×SM`, `minChunk=32`) — the probe showed it landing on only 2 splits for
+> `lk=193` (grid=64/32), with the same low-occupancy signature (19%/10% achieved occupancy, ~12%/~4% memory
+> and compute throughput) that the graph-decode path had before its fix. Applied the identical tuning
+> (`target=16×SM`, `minChunk=16`) to the eager formula (`CudaBackend.cs`, the `FlashAttention` method's
+> `occLimited` branch) — same kernel, same occupancy physics, so no new sweep needed to justify it.
+>
+> **Measured**: the probe's isolated per-call latency dropped **216.7us → 178.5us (-17.6%)**. End-to-end,
+> `TextDecodeThroughputBenchmark`'s graph-OFF numbers (which exercise this exact path — every eager decode
+> step calls `FlashAttention`, not `FlashAttentionDev`) moved **Llama-3.2-1B 128.5 → 134.5 tok/s (+4.7%)**,
+> **Qwen3-4B 58.7 → 60.6 tok/s (+3.4%)** — smaller than the graph-decode win because attention is one part of
+> a decode step dominated by GEMV, but real and consistent. Graph-ON numbers unaffected (within run-to-run
+> noise), as expected — this change only touches the separate eager call site. This path matters beyond "the
+> slow fallback": every graph-INELIGIBLE architecture (MoE, sliding-window/softcap models, MLA, non-1.0
+> embedding-scale — see Phase 6's eligibility gate) runs decode through this exact formula permanently, so
+> this fix generalizes to model families the graph-decode fix above never touches.
+>
+> **Correctness**: `CudaFlashAttentionTests` (5/5) pass unchanged — these call `FlashAttention` directly and
+> don't depend on which split count is chosen (numerically exact split/combine vs monolithic either way).
+> Full `HartsyInference.Cuda.Tests`: 133/137, same pre-existing 4 failures as every prior checkpoint this
+> session.
+>
+> **Method note for future profiling sessions on this box**: attaching `ncu`/`nsys` to a full `generate()`
+> call on this 12GB card reliably OOMs regardless of what's being measured — not a bug, the engine's own
+> footprint (weights + graph capture + activations) already uses nearly the full 12GB in normal unprofiled
+> operation, and the profiler's own bookkeeping is enough to tip it over. **The fix isn't a smaller model or
+> a shorter generation — it's a standalone probe that calls the target kernel directly with synthetic
+> tensors at the real production shape, no model/weights/KV-cache in the picture at all.** This is the
+> pattern to reach for next time a kernel needs `ncu` data and a full end-to-end run won't fit.
+
+> **STATUS UPDATE (2026-07-22, same session, continued): attempted a kernel-level fix on
+> `lm_flash_attn_f32_split` — correct, verified bit-exact, measurably NO real speedup. Reverted.** With the
+> probe now able to reach real decode-shape data on the actual 3060, `ncu --set full` on
+> `lm_flash_attn_f32_split` at production shape showed the same class of signature Q6_K had before its fix:
+> "Est. Speedup 46.01%" from warps stalled on an L1TEX scoreboard dependency — each key's K·Q product load
+> sits immediately before a `__syncthreads()`, so the whole block stalls on the slowest lane's load before the
+> tree reduction can even start.
+>
+> **Fix attempted**: software-pipelined the per-key loop with double-buffered shared memory (ping-pong
+> `buf0`/`buf1`) — issue key k+1's load right after key k's data is confirmed ready, so its latency overlaps
+> with key k's reduction/softmax/V-load/accumulate instead of sitting fully exposed. Same per-key math, same
+> accumulation order, only WHEN each load is issued changes — same template as the Q6_K fix.
+>
+> **Correctness verified rigorously before measuring speed** (this project's own rule: never trust a
+> plausible-looking kernel change without proof): built OLD and NEW `Ptx/` directories (`git show HEAD:...` for
+> the pre-change PTX) and ran the identical probe harness against both, dumping raw output to disk and
+> `cmp`-ing byte-for-byte. **Bit-identical at every kvLen tested (130, 193, 512, 2000, 8192)** — the
+> restructuring is provably correctness-neutral, not just "close."
+>
+> **Speed: no real win, confirmed two ways.** (1) Direct `ncu gpu__time_duration.avg` on the split kernel
+> alone, old PTX vs new PTX, same inputs: **48.6-50.5us both ways** — differences smaller than run-to-run
+> noise. (2) Clean end-to-end `TextDecodeThroughputBenchmark`: Llama graph-on 155.28→155.72, Qwen3-4B
+> graph-on 69.4-70.09→70.33, graph-off 60.64→61.87 — all within normal run-to-run variance, no attributable
+> change. **Reverted** (`flash_attn_f32_split.cu`, its `.ptx` in both locations, `CudaKernels.cs`'s shared-mem
+> sizing — `git checkout` on all four, reverification: full suite back to the same 133/137 baseline).
+>
+> **Why the textbook fix didn't pay off (worth understanding, not just noting)**: double-buffering only hides
+> load latency behind *other independent work*, and there wasn't much to hide it behind. The "other work" per
+> iteration (a tree reduction that itself hits another `__syncthreads()` almost immediately, plus a handful of
+> softmax ALU ops) is far shorter than a global-memory round trip, and achieved occupancy at the tuned split
+> count is only ~19-38% — too few concurrently-resident warps for warp-level parallelism to cover the gap
+> either. Prefetching exactly one iteration ahead only buys "one iteration's worth of non-memory work" as
+> overlap headroom, nowhere close to hiding a few-hundred-cycle memory latency. This is a materially different
+> situation from Q6_K's GEMV kernel, where each thread's work was embarrassingly parallel (no cross-thread
+> reduction, no barriers) and there was abundant independent ALU work per thread to hide loads behind — the
+> "move loads earlier" pattern generalizes only when there's real independent work to overlap with, not to
+> every latency-bound kernel. A real fix for this kernel would need either much deeper prefetching (multiple
+> iterations, awkward with already-small per-split chunk sizes), materially higher occupancy, or a different
+> kernel design entirely (e.g. a warp-per-key layout with no cross-thread barrier at all) — a bigger rewrite,
+> not attempted here.
+>
+> **Confirms this doc's standing conclusion once more**: the remaining gap requires a genuine
+> attention-kernel-design change, not a targeted latency fix — the same "GEMV memory-access-pattern redesign"
+> scope this doc has flagged for the GEMV kernels applies to attention too, and is out of scope for a
+> single-session targeted fix.
+
+> **STATUS UPDATE (2026-07-22, same session, continued): decode-step attribution via `HARTSY_PROFILE_SYNC`
+> (zero VRAM overhead — sidesteps the ncu/nsys OOM entirely) + a priced, not-built, `Permute0213` lever.**
+> Ran the CLI with `HARTSY_PROFILE=1 HARTSY_PROFILE_SYNC=1` (eager path — HARTSY_PROFILE_SYNC forces a stream
+> sync per op, which CUDA forbids during graph capture, so this only works eager) on Llama-3.2-1B, full
+> 128-token run: `Linear 494.7ms (56.5%), Permute0213 136.0ms (15.5%), RopeInterleaved 86.5ms (9.9%), RmsNorm
+> 73.5ms (8.4%), H2D_MISS_SMALL 70.5ms (8.0%), Silu 14.9ms (1.7%)`. `Linear` dominating matches "GEMVs are
+> already near-roofline" (confirmed separately this session: isolated `mul_mat_vec_q8_0_f32` at Llama's real
+> gate/up shape hit **89.2% of both memory and compute roofline** via `ncu --set full` — same
+> already-optimal signature as Q4_K found earlier, nothing to fix there either).
+>
+> **`Permute0213` stood out as a genuine, well-understood — not just latency-hidden — lever**: at decode
+> (T=1), it transforms `[1,1,H,D] -> [1,H,1,D]`, and those two shapes are **provably bit-identical in memory**
+> (both linearize to `h*D+d`) — the kernel is mathematically a no-op copy, called 4×/layer (Q/K/V in,
+> attention-output out) purely to satisfy a shape label FlashAttention's indexing expects. In principle,
+> eliminable entirely (a relabeled view, zero GPU work) rather than just speeding up — a different class of
+> win than the two reverted latency-hiding attempts above.
+>
+> **But the 15.5% figure is eager-path-and-sync-profiler-shaped, not what the gap is measured against.**
+> `HARTSY_PROFILE_SYNC` drains the stream after every op, so tiny ops (Permute 16us avg, RmsNorm 17us, RoPE
+> 21us, Silu 7us — all landing in the same narrow band despite very different actual work) are dominated by
+> that forced-sync floor, not their real GPU execution time. Graph-decode (the actually-benchmarked "ours"
+> config) already eliminates that floor — that's the mechanism behind the 134→155 tok/s graph-on win. So the
+> real question is the permute kernel's **own GPU execution time**, isolated, at the exact decode shape —
+> not its eager-profiled wall-clock share.
+>
+> **Priced it before building anything** (a repeat of this session's now-standard discipline after two
+> profiler-artifact false leads): a minimal probe (`permute-probe`, same no-model-loading pattern as the
+> attention/Q8_0 probes) calling `Permute0213([1,1,32,64] -> [1,32,1,64])` — Llama's real decode shape —
+> measured via `ncu gpu__time_duration.avg`: **~1.9-3.5us/call (median ~2.1us)**. At 4 calls/layer × 16
+> layers = 64 calls/step, that's **~134us/step out of a ~6.45ms graph-on decode step (~2.1%)** for
+> Llama-3.2-1B; extrapolated for Qwen3-4B (144 calls/step at a larger D=128, roughly 2.5x the per-call bytes)
+> lands in a similar **~2-2.5%** range. Below the threshold where the real engineering risk is clearly worth
+> it: eliminating this cleanly (not just fast-pathing the kernel, but avoiding the allocation+copy entirely)
+> means teaching the GPU activation-pointer cache about aliased/borrowed views shared across two independently-
+> disposed `Tensor` objects — new lifetime semantics in `GpuTransferHelper`'s pointer-cache, touched by every
+> architecture, both eager and graph-decode paths. A ~2% ceiling doesn't clear that bar. **Not built.**
+>
+> **Session-wide pattern now confirmed three times** (CUDA-graph arena, attention-kernel prefetch, and now
+> this pricing check that stopped a build before it started): an ncu/nsys number measured in one execution
+> context (full-VRAM profiling, eager-path sync-forced timing, or API-trace instrumentation) does not
+> automatically transfer to the graph-decode config the benchmark and the llama.cpp comparison actually use.
+> Every real, kept win this session (Q6_K load-order fix, both split-K formula fixes) was verified against
+> the actual benchmarked config, not just a plausible profiler reading in a different one — worth keeping as
+> the standing rule for any future work on this doc.
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

@@ -45,17 +45,25 @@ public sealed unsafe class CsmPipeline : IDisposable
             Tensor condNew = step == 0 ? BuildContext(textTokenIds, noFrames, bh) : _model.EmbedAudioFrame(frames[step - 1]);
             int[] frame = _model.StepFrame(backend, session, condNew, ref rng);
             condNew.Dispose();
-            if (frame[0] == _cfg.AudioEosToken) break;
+            // Upstream's stop condition (generator.py): the frame is EOS when EVERY codebook equals
+            // CodebookEosToken (0) — the training context appends an all-zero frame at each segment's end.
+            // Discard that frame (it's a sentinel, not audio) and stop.
+            bool isEos = true;
+            for (int cb = 0; cb < frame.Length; cb++)
+                if (frame[cb] != _cfg.CodebookEosToken) { isEos = false; break; }
+            if (isEos) break;
             frames.Add(frame);
         }
         Logs.Info($"CSM: generated {frames.Count} frames ({frames.Count * _cfg.FrameSamples / (double)_cfg.SampleRate:F2}s) in {sw.ElapsedMilliseconds}ms.");
 
         if (frames.Count == 0) return [];
 
-        // Assemble [1, numCodebooks, T] codes → Mimi decode.
+        // Assemble [1, numCodebooks, T] codes → Mimi decode. Mimi.Decode/MimiSplitRvq.Decode read codes as
+        // Int32 (raw codebook indices), not F32 — an F32 tensor here reinterpreted as int bit patterns turns
+        // small code values into huge out-of-range embed-table offsets (AccessViolationException on decode).
         int t = frames.Count;
-        Tensor codes = new(new TensorShape(1, _cfg.NumCodebooks, t), DType.F32);
-        float* cp = (float*)codes.DataPointer;
+        Tensor codes = new(new TensorShape(1, _cfg.NumCodebooks, t), DType.I32);
+        int* cp = (int*)codes.DataPointer;
         for (int cb = 0; cb < _cfg.NumCodebooks; cb++)
             for (int j = 0; j < t; j++) cp[(long)cb * t + j] = frames[j][cb];
         Tensor audioT = _mimi.Decode(backend, codes, batch: 1, tFrames: t);

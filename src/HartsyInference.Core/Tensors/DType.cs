@@ -102,6 +102,9 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>Ternary 2.0625-bit. 256 values / 66 bytes.</summary>
     public static readonly DType TQ2_0 = new("TQ2_0", 0, true, 66, 256);
 
+    /// <summary>OCP MX microscaling 4-bit (E2M1 codewords + shared E8M0 block scale, ggml type id 39). 32 values / 17 bytes per block: 1-byte power-of-two scale + 16 bytes of packed 4-bit codewords.</summary>
+    public static readonly DType MXFP4 = new("MXFP4", 0, true, 17, 32);
+
     /// <summary>Signed 8-bit integer.</summary>
     public static readonly DType I8 = new("I8", 1, false);
 

@@ -167,9 +167,10 @@ public sealed unsafe class CsmModel : IDisposable
         }
     }
 
-    /// <summary>Generates one full 8-codebook frame from the running <paramref name="contextEmbeds"/>
-    /// <c>[1, T, backboneHidden]</c>. Returns the 8 codebook values; the last codebook-0 value equals
-    /// <see cref="CsmConfig.AudioEosToken"/> at end-of-utterance.
+    /// <summary>Generates one full multi-codebook frame from the running <paramref name="contextEmbeds"/>
+    /// <c>[1, T, backboneHidden]</c>. Returns the codebook values; callers check for end-of-utterance
+    /// themselves (CSM: all codebooks equal <see cref="CsmConfig.CodebookEosToken"/>; HeartMuLa: codebook-0
+    /// <c>&gt;= HeartMulaConfig.AudioEosToken</c>) since the stop convention differs per model.
     /// <para>Sampling params default to the config but are exposed per-call (<paramref name="temperature"/>,
     /// <paramref name="topK"/>, <paramref name="topP"/>). When <paramref name="uncondContext"/> is supplied and
     /// <paramref name="cfgScale"/> ≠ 1, classifier-free guidance is applied to every codebook's logits
@@ -409,7 +410,11 @@ public sealed unsafe class CsmModel : IDisposable
 
         int[] frame = new int[_cfg.NumCodebooks];
         frame[0] = c0;
-        if (c0 == _cfg.AudioEosToken) { last.Dispose(); uLast?.Dispose(); return frame; }
+        // No early-exit here: the real stop condition (see CsmPipeline.Synthesize) is ALL codebooks of the frame
+        // being CsmConfig.CodebookEosToken (0), not codebook-0 alone — upstream's generator.py appends an
+        // all-zero "eos_frame" to the training context and checks `torch.all(sample == 0)` after decoding every
+        // codebook, so codebook 0 being 0 doesn't by itself mean the rest will be; the depth decoder must always
+        // run to know.
 
         // Decoder fills codebooks 1..7 INCREMENTALLY: one persistent KV cache per frame (cond + optional uncond),
         // prefilled with [proj(anchor), proj(embed_0(c0))] then fed one projected embedding per subsequent

@@ -581,7 +581,7 @@ A second, related defect: `Encode()` zero-padded after the EOS instead of paddin
 
 **Symptoms**: image at the patch granularity (16-pixel cells for SD3 at patch_size=2 + 8× VAE), uniform purple cast (R≈82, G≈60, B≈103 per channel mean), looking like a textured surface — the model "denoised something" but never coherently propagated cross-patch attention.
 
-**Fix**: rewrote [`ClipTokenizer.cs`](../../src/HartsyInference.Tokenizers/ClipTokenizer.cs) to use the long-form `BpeTokenizer.Create(vocab, merges, preTokenizer, normalizer, specialTokens, unknownToken, continuingSubwordPrefix, endOfWordSuffix, fuseUnknownTokens)` with:
+**Fix**: rewrote [`ClipTokenizer.cs`](../../src/HartsyInference.ModelAssets.Tokenizers/ClipTokenizer.cs) to use the long-form `BpeTokenizer.Create(vocab, merges, preTokenizer, normalizer, specialTokens, unknownToken, continuingSubwordPrefix, endOfWordSuffix, fuseUnknownTokens)` with:
 - `preTokenizer = new RegexPreTokenizer(ClipPreTokenRegex, ClipSpecialTokens)` where `ClipPreTokenRegex` matches `<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+` (mirrors `huggingface/transformers` `CLIPTokenizer.pat`).
 - `normalizer = LowercaseNormalizer.Instance` — a tiny custom `Normalizer` that just calls `string.ToLowerInvariant()`.
 - `specialTokens = { "<|startoftext|>": 49406, "<|endoftext|>": 49407 }`.

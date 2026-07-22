@@ -1,5 +1,5 @@
 using HartsyInference.Core.Exceptions;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 

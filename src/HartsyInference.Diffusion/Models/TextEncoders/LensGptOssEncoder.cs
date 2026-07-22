@@ -43,7 +43,7 @@ public sealed class LensGptOssEncoder : IDisposable
     /// <summary>Loads encoder weights from a HuggingFace-format state dict (keys
     /// <c>model.embed_tokens.weight</c>, <c>model.layers.{i}.*</c>, <c>model.norm.weight</c>). MoE
     /// experts arrive either dense F32 (the diffusers MXFP4 path dequantizes at load via
-    /// <see cref="HartsyInference.ModelHandler.Mxfp4.Mxfp4Codec.DequantGptOssExpertsInPlace"/>) or
+    /// <see cref="HartsyInference.ModelAssets.Mxfp4.Mxfp4Codec.DequantGptOssExpertsInPlace"/>) or
     /// NVFP4-packed (the ComfyUI path — kept quantized and mmap-backed; <see cref="GptOssMoeFfn"/>
     /// streams one expert at a time at forward time so the 20B bank never materializes at F32). Both
     /// <c>LensCheckpointConverter</c> outputs are ready to pass here directly.</summary>
@@ -61,7 +61,7 @@ public sealed class LensGptOssEncoder : IDisposable
     /// of the hidden state). Returns four empty <c>[1, 0, 2880]</c> tensors when the input is shorter
     /// than the offset.</para></summary>
     /// <param name="backend">Compute backend.</param>
-    /// <param name="tokenIds">Chat-templated token ids (rendered by <see cref="HartsyInference.Tokenizers.GptOssTokenizer.BuildChatInputs"/>).</param>
+    /// <param name="tokenIds">Chat-templated token ids (rendered by <see cref="HartsyInference.ModelAssets.Tokenizers.GptOssTokenizer.BuildChatInputs"/>).</param>
     public List<Tensor> EncodeForLens(IBackend backend, int[] tokenIds)
     {
         ArgumentNullException.ThrowIfNull(tokenIds);

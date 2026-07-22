@@ -4,7 +4,7 @@ using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Moonshine;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Audio.Tests;

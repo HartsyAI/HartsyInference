@@ -1,6 +1,6 @@
 using System.Text;
 using HartsyInference.Audio.Frontends;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;

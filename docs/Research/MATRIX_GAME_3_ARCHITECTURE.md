@@ -1,6 +1,6 @@
 # Matrix-Game 3.0 — Research Notes
 
-> Status: Complete (model card + arXiv v2 paper + GitHub source code + Wan2.2 base config captured; only safetensors tensor-key dump remains as a local follow-up) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.Interactive (Matrix-Game 3.0 pipeline, Phase 10)
+> Status: Complete (model card + arXiv v2 paper + GitHub source code + Wan2.2 base config captured; only safetensors tensor-key dump remains as a local follow-up) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.World (Matrix-Game 3.0 pipeline, Phase 10)
 > Source of truth: [HF `Skywork/Matrix-Game-3.0`](https://huggingface.co/Skywork/Matrix-Game-3.0), [GitHub `SkyworkAI/Matrix-Game`](https://github.com/SkyworkAI/Matrix-Game/tree/main/Matrix-Game-3), [arXiv 2604.08995 v2](https://arxiv.org/abs/2604.08995v2), [project page](https://matrix-game-v3.github.io/), [base `Wan-AI/Wan2.2-TI2V-5B`](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B)
 > License: Apache-2.0 (Matrix-Game 3.0 code + weights), Apache-2.0 (Wan2.2-TI2V-5B base), Apache-2.0 (UMT5-XXL encoder). No model-card-imposed use restrictions beyond standard Apache-2.0 terms.
 > Related: [`LANCE_ARCHITECTURE.md`](LANCE_ARCHITECTURE.md) (Wan2.2 3D causal VAE — exact same `Wan2.2_VAE.pth`, same 48-channel latent, same mean/std), [`TEXT_ENCODERS.md`](TEXT_ENCODERS.md) (UMT5-XXL is also used by AuraFlow / Pile-T5-XL), [`FLOW_MATCHING_AUDIO.md`](FLOW_MATCHING_AUDIO.md) (rectified-flow background; Matrix-Game uses FlowUniPC).
@@ -11,7 +11,7 @@ Matrix-Game 3.0 (Skywork AI Matrix-Game Team, arXiv:2604.08995, 2026-03 initial 
 
 Two checkpoints ship under one HuggingFace repo: a **base model** (12.9 GB safetensors, 50-step FlowUniPC inference, sample_shift=5.0, CFG=5.0) and a **base_distilled_model** (25.9 GB safetensors — larger because it bundles student + critic / EMA — runs at **3 inference steps** via multi-segment Distribution Matching Distillation). Inference is autoregressive over **segments of latent length 15** (57 RGB frames for the first segment, 40 for every subsequent segment); the next segment conditions on the last 4 past latent frames plus 5 retrieved memory frames plus the new noisy prediction. A separate **MG-LightVAE** decoder (a pruned distillation of the Wan2.2 VAE decoder; 50 % or 75 % pruning shipping as `MG-LightVAE.pth` 2.74 GB and `MG-LightVAE_v2.pth` 841 MB) replaces the Wan2.2 decoder at inference time for a 2.6× / 5.2× decode speedup. There is also a paper-only **2×14B MoE** variant ("Coming Soon") that splits high-noise denoising between a first-person expert and a third-person expert; the 5B is what's actually downloadable today.
 
-For HartsyInference this is a Phase-10 `HartsyInference.Interactive` pipeline that reuses substantially all of the work needed for a Wan2.2 video pipeline (DiT backbone, 3D causal VAE, UMT5-XXL encoder, FlowUniPC scheduler) and adds three new pieces: (1) the **ActionModule** block (a small ~16-head dual-attention block with its own RoPE θ=256), (2) a **camera-pose + Plücker-embedding** preprocessor, and (3) a streaming **per-segment loop** that maintains the past-frame buffer, the 5-slot memory cache, and routes decoding to an async worker (or to a single in-process VAE call on a smaller install).
+For HartsyInference this is a Phase-10 `HartsyInference.World` pipeline that reuses substantially all of the work needed for a Wan2.2 video pipeline (DiT backbone, 3D causal VAE, UMT5-XXL encoder, FlowUniPC scheduler) and adds three new pieces: (1) the **ActionModule** block (a small ~16-head dual-attention block with its own RoPE θ=256), (2) a **camera-pose + Plücker-embedding** preprocessor, and (3) a streaming **per-segment loop** that maintains the past-frame buffer, the 5-slot memory cache, and routes decoding to an async worker (or to a single in-process VAE call on a smaller install).
 
 ## Detailed Findings
 
@@ -590,7 +590,7 @@ The only notable inconsistency is between the *Wan-AI base config* (`dim=3072, n
 
 ### How this maps to HartsyInference packages
 
-- **New package `HartsyInference.Interactive`** (Phase 10) — entirely new. Contains:
+- **New package `HartsyInference.World`** (Phase 10) — entirely new. Contains:
   - `MatrixGame3Pipeline.cs` (streaming session manager: rolling buffer, memory cache, per-segment denoise loop, async VAE worker).
   - `Pipelines/MatrixGame3StandardPipeline.cs` (canned-action one-shot; matches `inference_pipeline.py`).
   - `Pipelines/MatrixGame3InteractivePipeline.cs` (live actions; matches `inference_interactive_pipeline.py`).
@@ -608,10 +608,10 @@ The only notable inconsistency is between the *Wan-AI base config* (`dim=3072, n
   - `Models/TextEncoders/Umt5XxlEncoder.cs` (already needed for AuraFlow / Pile-T5; identical model here).
   - `Utilities/SinusoidalTimestepEmbedding.cs` (already exists in `DiTUtils`).
   - `Utilities/RotaryPositionEmbeddingNd.cs` (extend existing 1D RoPE helper to N-D with per-axis `rope_dim_list`).
-- **`HartsyInference.ModelHandler`** — new converter:
+- **`HartsyInference.ModelAssets`** — new converter:
   - `CheckpointConverters/MatrixGame3CheckpointConverter.cs` — splits `model.safetensors` into `dit.*` (Wan core), `action.*` (per-block ActionModule), `plucker_proj.*`. Handles the optional `base_distilled_model/` student-only extraction.
   - Existing `Wan22VaeConverter` (if it exists from Lance work) handles `Wan2.2_VAE.pth`; add an `MgLightVaeConverter` that reads pruning rate from `decoder.conv1.weight.shape[0]` per `infer_lightvae_pruning_rate_from_ckpt()`.
-- **`HartsyInference.Tokenizers`** — UMT5 SentencePiece. The Lance/AuraFlow text-encoder work should already cover this; ensure `google/umt5-xxl/spm.model` loads.
+- **`HartsyInference.ModelAssets.Tokenizers`** — UMT5 SentencePiece. The Lance/AuraFlow text-encoder work should already cover this; ensure `google/umt5-xxl/spm.model` loads.
 
 ### Net-new backend / kernel work required
 

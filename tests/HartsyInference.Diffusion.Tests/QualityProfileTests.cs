@@ -116,7 +116,7 @@ public sealed class QualityProfileTests
     [Fact]
     public void FluxQualityLoader_AppliesPerComponentDtypes()
     {
-        HartsyInference.ModelHandler.CheckpointConverters.FluxCheckpointConverter.ConvertedWeights converted = new()
+        HartsyInference.ModelAssets.CheckpointConverters.FluxCheckpointConverter.ConvertedWeights converted = new()
         {
             Transformer = new() { ["t.linear.weight"] = MakeF32Tensor(new TensorShape(64, 32)) },
             ClipL = new() { ["c.linear.weight"] = MakeF32Tensor(new TensorShape(32, 16)) },
@@ -145,7 +145,7 @@ public sealed class QualityProfileTests
     [Fact]
     public void SdxlQualityLoader_AppliesPerComponentDtypes()
     {
-        HartsyInference.ModelHandler.CheckpointConverters.SdxlCheckpointConverter.ConvertedWeights converted = new()
+        HartsyInference.ModelAssets.CheckpointConverters.SdxlCheckpointConverter.ConvertedWeights converted = new()
         {
             UNet = new() { ["u.linear.weight"] = MakeF32Tensor(new TensorShape(64, 32)) },
             ClipL = new() { ["cl.linear.weight"] = MakeF32Tensor(new TensorShape(32, 16)) },
@@ -174,7 +174,7 @@ public sealed class QualityProfileTests
     [Fact]
     public void FluxQualityLoader_RejectsInvalidVaeDtype()
     {
-        HartsyInference.ModelHandler.CheckpointConverters.FluxCheckpointConverter.ConvertedWeights converted = new()
+        HartsyInference.ModelAssets.CheckpointConverters.FluxCheckpointConverter.ConvertedWeights converted = new()
         {
             Transformer = new(),
             ClipL = new(),

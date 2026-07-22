@@ -2,7 +2,7 @@ using System.Text.Json;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.PyTorch;
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.Tests.Common;
 using HartsyInference.Vision.Codec;
 using HartsyInference.Vision.DepthAnything;

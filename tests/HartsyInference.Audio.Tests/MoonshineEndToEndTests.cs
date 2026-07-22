@@ -53,4 +53,36 @@ public sealed class MoonshineEndToEndTests
         Assert.Contains("country", lower);
         Assert.Contains("ask not", lower);
     }
+
+    /// <summary>Full autoregressive greedy decode on the 2nd-gen streaming architecture — the parity tests only
+    /// check the encoder and a single decoder step, never the multi-step KV-cached generation loop this exercises
+    /// (the same path the Engine's <c>moonshinestreaming</c> catalog entry drives).</summary>
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task Transcribe_Jfk_OnMoonshineStreamingTiny_MatchesCanonicalText()
+    {
+        string repoDir = AudioModelCache.GetRepoDirectory("UsefulSensors/moonshine-streaming-tiny");
+        bool cached = File.Exists(Path.Combine(repoDir, "model.safetensors"))
+            && File.Exists(Path.Combine(repoDir, "tokenizer.json"));
+        if (!cached && !AllowNetwork) return;
+
+        string clipPath = Path.Combine(AudioModelCache.CacheRoot, "test-clips", "jfk.wav");
+        if (!File.Exists(clipPath))
+        {
+            if (!AllowNetwork) return;
+            Directory.CreateDirectory(Path.GetDirectoryName(clipPath)!);
+            using HttpClient http = new();
+            byte[] bytes = await http.GetByteArrayAsync(JfkClipUrl);
+            await File.WriteAllBytesAsync(clipPath, bytes);
+        }
+
+        using MoonshineStreamingPipeline pipeline = await MoonshineStreamingPipeline.LoadAsync("UsefulSensors/moonshine-streaming-tiny");
+        using CpuBackend backend = new();
+        string text = pipeline.TranscribeWav(backend, clipPath);
+
+        string lower = text.ToLowerInvariant();
+        Assert.Contains("fellow americans", lower);
+        Assert.Contains("country", lower);
+        Assert.Contains("ask not", lower);
+    }
 }

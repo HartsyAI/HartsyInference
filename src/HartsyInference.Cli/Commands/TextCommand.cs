@@ -53,6 +53,51 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [Description("RNG seed; negative uses a reproducible default.")]
         public int Seed { get; init; } = -1;
 
+        /// <summary>System prompt applied ahead of the user turn; unset lets the model/template default apply.</summary>
+        [CommandOption("--system")]
+        [Description("System prompt applied ahead of the user turn.")]
+        public string? System { get; init; }
+
+        /// <summary>Image(s) to attach to the prompt, for vision-language models. Repeat the flag for more than one.</summary>
+        [CommandOption("-i|--image")]
+        [Description("Attach an image (PNG/BMP) for vision-language models. Repeat for multiple images.")]
+        public string[] Image { get; init; } = [];
+
+        /// <summary>Top-K sampling cutoff; unset uses the model default.</summary>
+        [CommandOption("--top-k")]
+        [Description("Top-K sampling cutoff; unset uses the model default.")]
+        public int? TopK { get; init; }
+
+        /// <summary>Min-P sampling cutoff; unset uses the model default.</summary>
+        [CommandOption("--min-p")]
+        [Description("Min-P sampling cutoff; unset uses the model default.")]
+        public float? MinP { get; init; }
+
+        /// <summary>Repetition penalty; unset uses the model default.</summary>
+        [CommandOption("--repetition-penalty")]
+        [Description("Repetition penalty; unset uses the model default.")]
+        public float? RepetitionPenalty { get; init; }
+
+        /// <summary>Enable the model's reasoning/"thinking" mode (Qwen3-family); unset lets the model/template default apply.</summary>
+        [CommandOption("--thinking")]
+        [Description("Enable chat-template reasoning/\"thinking\" mode (Qwen3-family). Unset lets the model/template decide.")]
+        public bool? Thinking { get; init; }
+
+        /// <summary>Disable the model's reasoning/"thinking" mode. Mutually exclusive with <see cref="Thinking"/>.</summary>
+        [CommandOption("--no-thinking")]
+        [Description("Disable chat-template reasoning/\"thinking\" mode.")]
+        public bool NoThinking { get; init; }
+
+        /// <summary>Keep weights compressed at their on-disk quant instead of dequantizing to full precision.</summary>
+        [CommandOption("--low-vram-quant")]
+        [Description("Keep weights compressed at their on-disk quant to reduce VRAM use.")]
+        public bool LowVramQuant { get; init; }
+
+        /// <summary>Free the model's device memory after this request completes.</summary>
+        [CommandOption("--always-free-memory")]
+        [Description("Free the model's device memory after this request completes.")]
+        public bool AlwaysFreeMemory { get; init; }
+
         /// <summary>Directory to save the generated text to (as a .txt file).</summary>
         [CommandOption("-o|--output")]
         [Description("Directory to save the generated text (.txt).")]
@@ -85,6 +130,21 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             return 1;
         }
 
+        if (settings.Thinking == true && settings.NoThinking)
+        {
+            AnsiConsole.MarkupLine("[red]--thinking and --no-thinking are mutually exclusive.[/]");
+            return 1;
+        }
+
+        foreach (string imagePath in settings.Image)
+        {
+            if (!File.Exists(imagePath))
+            {
+                AnsiConsole.MarkupLine($"[red]Image not found:[/] {imagePath}");
+                return 1;
+            }
+        }
+
         float temperature = settings.Temperature;
         if (settings.GraphDecode && temperature > 0f)
         {
@@ -98,6 +158,22 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         parameters.Put("top-p", settings.TopP.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
         parameters.Put("graph-decode", settings.GraphDecode ? "true" : "false");
+        if (settings.System is { Length: > 0 } system)
+            parameters.Put("system", system);
+        if (settings.Image.Length > 0)
+            parameters.Put("image", string.Join('\n', settings.Image));
+        if (settings.TopK is { } topK)
+            parameters.Put("top-k", topK.ToString(CultureInfo.InvariantCulture));
+        if (settings.MinP is { } minP)
+            parameters.Put("min-p", minP.ToString(CultureInfo.InvariantCulture));
+        if (settings.RepetitionPenalty is { } repetitionPenalty)
+            parameters.Put("repetition-penalty", repetitionPenalty.ToString(CultureInfo.InvariantCulture));
+        if (settings.Thinking is { } thinking)
+            parameters.Put("thinking", thinking ? "true" : "false");
+        else if (settings.NoThinking)
+            parameters.Put("thinking", "false");
+        parameters.Put("low-vram-quant", settings.LowVramQuant ? "true" : "false");
+        parameters.Put("always-free-memory", settings.AlwaysFreeMemory ? "true" : "false");
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Text);
         string label = spec.Catalog?.Id ?? (settings.ModelPath is { Length: > 0 } mp ? Path.GetFileName(mp) : settings.Model);

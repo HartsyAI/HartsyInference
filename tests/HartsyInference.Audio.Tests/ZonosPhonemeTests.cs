@@ -2,7 +2,7 @@ using System;
 using System.IO;
 using System.Text.Json;
 using HartsyInference.Audio.Models.Zonos;
-using HartsyInference.Phonemizer.Espeak;
+using HartsyInference.Audio.Phonemizer.Espeak;
 using Xunit;
 using Xunit.Abstractions;
 

@@ -117,11 +117,11 @@ Track progress and releases on the [GitHub repo](https://github.com/HartsyAI/Har
 
 | Package | Description |
 |---|---|
-| `HartsyInference` | Meta-package: one reference for the core, all three backends, and every modality package including `HartsyInference.LLM` and `HartsyInference.Phonemizer` (only the abandoned `Server` and the sample `Cli` are excluded) |
+| `HartsyInference` | Meta-package: one reference for the core, all three backends, and every modality package including `HartsyInference.LLM` and `HartsyInference.Audio.Phonemizer` (only the abandoned `Server` and the sample `Cli` are excluded) |
 | `HartsyInference.Core` | Tensor types, `IBackend`, schedulers, pipeline base types |
-| `HartsyInference.ModelHandler` | Safetensors/GGUF loaders, quant dequant, HuggingFace download, model registry |
-| `HartsyInference.Tokenizers` | CLIP, T5, Whisper, and LLM-style tokenizers |
-| `HartsyInference.Phonemizer` | Pure-C# grapheme-to-phoneme (espeak-ng port) for TTS front-ends |
+| `HartsyInference.ModelAssets` | Safetensors/GGUF loaders, quant dequant, HuggingFace download, model registry |
+| `HartsyInference.ModelAssets.Tokenizers` | CLIP, T5, Whisper, and LLM-style tokenizers |
+| `HartsyInference.Audio.Phonemizer` | Pure-C# grapheme-to-phoneme (espeak-ng port) for TTS front-ends |
 | `HartsyInference.Cpu` | CPU backend with AVX2 / AVX-512 / NEON SIMD kernels |
 | `HartsyInference.Cuda` | CUDA backend with PTX kernels + cuBLAS |
 | `HartsyInference.Vulkan` | Cross-vendor Vulkan backend (NVIDIA / AMD / Intel) via SPIR-V |
@@ -130,7 +130,7 @@ Track progress and releases on the [GitHub repo](https://github.com/HartsyAI/Har
 | `HartsyInference.Audio` | Whisper/Moonshine STT, TTS, voice conversion, music |
 | `HartsyInference.Vision` | CLIP/SigLIP embeddings, YOLO, SAM, face detection |
 | `HartsyInference.Video` | LTX-Video, Wan, Lance, Kandinsky 5 video |
-| `HartsyInference.Interactive` | Action-conditioned world models (Matrix-Game, Oasis) |
+| `HartsyInference.World` | Action-conditioned world models (Matrix-Game, Oasis) |
 | `HartsyInference.ThreeD` | 3D asset generation: mesh/splat foundation (marching cubes, glTF/OBJ/PLY) + Hunyuan3D-2 image to mesh |
 
 ---

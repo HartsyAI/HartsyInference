@@ -29,7 +29,7 @@ samples/ConvertSafetensorsToGguf/bin/Release/net10.0/convert-safetensors-to-gguf
 ### C# API (programmatic)
 
 ```csharp
-using HartsyInference.ModelHandler.Gguf;
+using HartsyInference.ModelAssets.Gguf;
 
 GgufQuantizationReport report = GgufQuantizer.ConvertSafetensorsToGguf(
     safetensorsPath: "flux1-schnell.safetensors",
@@ -147,7 +147,7 @@ xxd -l 8 myflux-Q4_K_M.gguf
 # Drop into your ComfyUI's models/unet/ folder and try a workflow.
 
 # 3. HartsyInference can round-trip it
-dotnet test tests/HartsyInference.ModelHandler.Tests/HartsyInference.ModelHandler.Tests.csproj \
+dotnet test tests/HartsyInference.ModelAssets.Tests/HartsyInference.ModelAssets.Tests.csproj \
     --filter "FullyQualifiedName~GgufRoundTripTests"
 ```
 

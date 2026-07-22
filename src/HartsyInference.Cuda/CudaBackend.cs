@@ -2566,12 +2566,13 @@ public sealed class CudaBackend : IBackend
     /// <c>[B, L, numHeads, headDim]</c> (adjacent pairs rotated by frequency i). cos/sin are <c>[B, L, headDim]</c>.
     /// Without this override the shared <see cref="IBackend"/> CPU fallback would drag q/k off the device every layer
     /// (Sesame CSM / HeartMuLa use interleaved RoPE) — the whole RmsNorm→RoPE→SDPA chain stays resident.</summary>
-    public unsafe void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin)
+    public unsafe void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
     {
         using NvtxRange _nvtx = NvtxRange.Push("RopeInterleaved");
         if (Environment.GetEnvironmentVariable("HM_ROPE_CPU") == "1")   // TEMP perf-repro gate: old CPU-fallback path
         {
             int b = (int)x.Shape[0], sl = (int)x.Shape[1], nh = (int)x.Shape[2], hd = (int)x.Shape[3], hf = hd / 2;
+            int rdim = rotaryDim <= 0 || rotaryDim > hd ? hd : rotaryDim;
             float* xp = (float*)x.DataPointer, cp = (float*)cos.DataPointer, sp = (float*)sin.DataPointer;
             for (int bi = 0; bi < b; bi++)
                 for (int s = 0; s < sl; s++)
@@ -2582,6 +2583,7 @@ public sealed class CudaBackend : IBackend
                         float* v = xp + (((long)bi * sl + s) * nh + h) * hd;
                         for (int i = 0; i < hf; i++)
                         {
+                            if (2 * i >= rdim) break;
                             float xe = v[2 * i], xo = v[2 * i + 1];
                             v[2 * i] = xe * cp[fb + i] - xo * sp[fb + i];
                             v[2 * i + 1] = xo * cp[fb + i] + xe * sp[fb + i];
@@ -2604,7 +2606,7 @@ public sealed class CudaBackend : IBackend
             pX = GpuTransferHelper.CopyToDevice(x);
             pCos = GpuTransferHelper.CopyToDevice(cos);
             pSin = GpuTransferHelper.CopyToDevice(sin);
-            _kernels!.LaunchRopeInterleaved(pX, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
+            _kernels!.LaunchRopeInterleaved(pX, pCos, pSin, numHeads, headDim, rotaryDim, totalVecs, _stream.Handle);
 
             // In-place: clear stale callbacks before re-caching (pitfall #17).
             x._gpuSyncCallback = null;
@@ -5042,9 +5044,13 @@ public sealed class CudaBackend : IBackend
             if (!EnvFlag("HARTSY_FLASH_SPLIT_OFF")
                 && plain && (forceSplit || occLimited) && kvLen >= (forceSplit ? 8 : 128))
             {
-                int target = forceSplit ? 4 * baseBlocks : 2 * _context.MultiprocessorCount;
+                // Target/minChunk tuned the same way as FlashAttentionDev's graph-decode split formula below
+                // (measured A/B sweep on Qwen3-4B/RTX 3060, kvLen~193: tok/s rose monotonically from the old
+                // target=2×SM through ~4× more splits before plateauing) — same kernel, same occupancy physics,
+                // this is the eager (non-graph-decode) dispatch of the identical split/combine kernel pair.
+                int target = forceSplit ? 4 * baseBlocks : 16 * _context.MultiprocessorCount;
                 int g = (target + baseBlocks - 1) / baseBlocks;
-                int minChunk = forceSplit ? 1 : (occLimited ? 32 : 256);
+                int minChunk = forceSplit ? 1 : (occLimited ? 16 : 256);
                 int maxG = Math.Max(1, kvLen / minChunk);
                 g = Math.Clamp(g, 1, Math.Min(32, maxG));
                 if (g >= 2) splits = g;
@@ -5245,7 +5251,11 @@ public sealed class CudaBackend : IBackend
         _context.EnsureCurrent();
         EnsureKernels();
 
-        // Fixed split count from CAPACITY (lk) so the grid never changes across steps. Target ~4× SM occupancy;
+        // Fixed split count from CAPACITY (lk) so the grid never changes across steps. Target ~16× SM occupancy
+        // (measured, not the original ~4×: an A/B sweep on Qwen3-4B/RTX 3060, kvLen capacity=193, showed tok/s
+        // rising monotonically from splits=2 (61.7) through splits=12 (69.6, +12.9%) before plateauing at
+        // splits=12-20 and slightly regressing beyond 24 — the fixed combine-kernel overhead per split eventually
+        // outweighs the added parallelism. splits=12 sits in that plateau with margin either side).
         // chunk = ceil(capacity / splits) is constant, so early steps leave later splits empty (they early-exit).
         // Split-K is gated to b==1: the split/combine kernels have a latent batch>1 bug (they were only exercised by
         // the b=1 LLM decode), and for CFG-batched decode b=2 already yields 2·heads blocks — enough to fill the GPU
@@ -5254,9 +5264,9 @@ public sealed class CudaBackend : IBackend
         int splits = 1;
         if (b == 1 && lk >= 128)
         {
-            int target = 4 * _context.MultiprocessorCount;
+            int target = 16 * _context.MultiprocessorCount;
             int g = (target + baseBlocks - 1) / baseBlocks;
-            int maxG = Math.Max(1, lk / 64);   // keep chunks ≥ 64 keys
+            int maxG = Math.Max(1, lk / 16);   // keep chunks ≥ 16 keys (was 64 — measured too conservative)
             splits = Math.Clamp(g, 1, Math.Min(32, maxG));
         }
         int chunk = (lk + splits - 1) / splits;         // fixed chunk over capacity

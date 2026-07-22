@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.API</PackageId>
+    <Description>Thin HTTP adapter over HartsyInference.Engine — health/settings/admin today, native + OpenAI-compat generation endpoints in a follow-up phase.</Description>
+    <RootNamespace>HartsyInference.API</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <!-- ASP.NET Core 10 packages require net10 runtime; this project does not multi-target. -->
+    <TargetFrameworks></TargetFrameworks>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- Executable web server, not a consumable library — excluded from the alpha NuGet release.
+         Can be shipped later if a hosted-server package is wanted. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Deliberately thin: only Core + Engine. Every modality package Engine pulls in transitively (Diffusion,
+         LLM, Audio, Vision, Cpu, Cuda, ...) ships in the output via Engine's own references — this project never
+         references them directly, matching docs/Design/NUGET_PACKAGE_DESIGN.md's "thin adapter over Engine". -->
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\HartsyInference.Engine\HartsyInference.Engine.csproj" />
+  </ItemGroup>
+
+</Project>

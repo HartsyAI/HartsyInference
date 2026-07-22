@@ -1,7 +1,7 @@
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
-using HartsyInference.ModelHandler.Mxfp4;
+using HartsyInference.ModelAssets.Mxfp4;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;

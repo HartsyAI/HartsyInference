@@ -453,7 +453,7 @@ This pipeline is roughly 70% reuse from existing HartsyInference components and 
 - DPM-Solver++ scheduler — already implemented (Z-Image / SD3); plug-and-play.
 
 **New:**
-- **CLAP text encoder** (RoBERTa-base + projection MLP). Tokenizer: RoBERTa BPE (need to add to `HartsyInference.Tokenizers`). Model: ~12-layer post-LN transformer; 768 → 512 projection head. **No audio tower needed for v1.**
+- **CLAP text encoder** (RoBERTa-base + projection MLP). Tokenizer: RoBERTa BPE (need to add to `HartsyInference.ModelAssets.Tokenizers`). Model: ~12-layer post-LN transformer; 768 → 512 projection head. **No audio tower needed for v1.**
 - **GPT-2 small** (~124 M). Need to implement:
   - Learned token + positional embeddings (`wte` + `wpe`).
   - 12 × decoder-only transformer blocks (pre-LN, GELU-new, causal self-attn).

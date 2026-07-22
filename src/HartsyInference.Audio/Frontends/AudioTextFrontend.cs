@@ -1,6 +1,6 @@
 using System.Linq;
 using System.Text;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Audio.Frontends;
 
@@ -23,9 +23,9 @@ public static class AudioTextFrontend
         if (!EmbeddedTokenizerResources.HasLlama3TokenizerJson)
         {
             throw new InvalidOperationException(
-                "The Llama-3 tokenizer.json is not embedded in HartsyInference.Tokenizers, so the Llama-family "
+                "The Llama-3 tokenizer.json is not embedded in HartsyInference.ModelAssets.Tokenizers, so the Llama-family "
                 + "audio front-ends (Orpheus, CSM, FishSpeech) can't tokenize text. Drop a Llama-3.x tokenizer.json "
-                + "in HartsyInference.Tokenizers/Resources/ as llama3_tokenizer.json, then rebuild.");
+                + "in HartsyInference.ModelAssets.Tokenizers/Resources/ as llama3_tokenizer.json, then rebuild.");
         }
         return _llama.Value;
     }
@@ -61,12 +61,16 @@ public static class AudioTextFrontend
         return outp;
     }
 
-    /// <summary>CSM (Sesame): plain Llama-3 BPE of the text. Multi-turn conversation history, when used,
-    /// is prepended by the caller as separate segments — this handles the single-utterance text.</summary>
-    public static int[] CsmText(string text)
+    /// <summary>CSM (Sesame) text segment: <c>f"[{speaker}]{text}"</c> — the speaker id rides through as literal
+    /// BPE characters (no reserved token), matching the original <c>generator.py</c>'s
+    /// <c>_tokenize_text_segment</c> — Llama-3 BPE, then BOS/EOS-wrapped (upstream's custom
+    /// <c>TemplateProcessing</c> post-processor: <c>&lt;|begin_of_text|&gt; $A &lt;|end_of_text|&gt;</c>).
+    /// Multi-turn conversation history, when used, is prepended by the caller as separate segments — this
+    /// handles one speaker's single-utterance text.</summary>
+    public static int[] CsmText(string text, int speaker = 0)
     {
         ArgumentNullException.ThrowIfNull(text);
-        return RequireLlama().EncodeOrdinary(text);
+        return BosEosWrap(RequireLlama().EncodeOrdinary($"[{speaker}]{text}"));
     }
 
     /// <summary>Qwen2.5/3 byte-level BPE with the exact HF split regex (from the embedded canonical
@@ -85,8 +89,8 @@ public static class AudioTextFrontend
         if (!EmbeddedTokenizerResources.HasQwen3TokenizerJson)
         {
             throw new InvalidOperationException(
-                "The Qwen tokenizer.json is not embedded in HartsyInference.Tokenizers. Drop a Qwen2.5/3 "
-                + "tokenizer.json in HartsyInference.Tokenizers/Resources/ as qwen3_tokenizer.json, then rebuild.");
+                "The Qwen tokenizer.json is not embedded in HartsyInference.ModelAssets.Tokenizers. Drop a Qwen2.5/3 "
+                + "tokenizer.json in HartsyInference.ModelAssets.Tokenizers/Resources/ as qwen3_tokenizer.json, then rebuild.");
         }
         return _qwen3.Value.EncodeOrdinary(text);
     }

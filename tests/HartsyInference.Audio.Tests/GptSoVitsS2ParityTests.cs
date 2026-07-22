@@ -2,7 +2,7 @@ using HartsyInference.Audio.Models.GptSoVits;
 using HartsyInference.Audio.Models.Vits;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.PyTorch;
+using HartsyInference.ModelAssets.PyTorch;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;

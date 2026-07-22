@@ -1,5 +1,5 @@
 using HartsyInference.LLM.ChatTemplates;
-using HartsyInference.Tokenizers;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 
 namespace HartsyInference.LLM.Tests;
@@ -57,6 +57,18 @@ public sealed class JinjaAndTokenizerTests
         JinjaEngine engine = new("{% if tools is defined and tools is not none %}T{% else %}{{ 'no' if missing is not defined else 'yes' }}{% endif %}");
         // tools/missing not in context → 'tools is defined' false → else → 'missing is not defined' true → 'no'.
         Assert.Equal("no", engine.Render(new Dictionary<string, object?>()));
+    }
+
+    [Fact]
+    public void Jinja_IsTrue_IsFalse()
+    {
+        // Regression: Qwen3's real chat template branches on `enable_thinking is false`, not just `is defined`/
+        // truthiness — IsTestExpr previously threw NotSupportedException for the "true"/"false" test names.
+        JinjaEngine engine = new("{% if flag is false %}F{% elif flag is true %}T{% else %}N{% endif %}");
+        Assert.Equal("F", engine.Render(new Dictionary<string, object?> { ["flag"] = false }));
+        Assert.Equal("T", engine.Render(new Dictionary<string, object?> { ["flag"] = true }));
+        // Strict boolean identity, not truthiness: a non-bool value is neither "is true" nor "is false".
+        Assert.Equal("N", engine.Render(new Dictionary<string, object?> { ["flag"] = 1 }));
     }
 
     [Fact]
@@ -154,5 +166,45 @@ public sealed class JinjaAndTokenizerTests
         // Already valid (user/assistant/user) — no raise, so the original render is used as-is.
         template.Encode(tok, [ChatMessage.User("A"), ChatMessage.Assistant("B"), ChatMessage.User("C")], addGenerationPrompt: false);
         Assert.Equal("<s>[INST] A [/INST] B</s>[INST] C [/INST]", tok.Last);
+    }
+
+    // ── JinjaChatTemplate: enable_thinking (Qwen3-family reasoning toggle) ─────────────────────────────
+
+    /// <summary>A minimal Qwen3-style template: branches on <c>enable_thinking</c> only when it <c>is defined</c>,
+    /// matching the real GGUF template's own convention (undefined ≠ false).</summary>
+    private const string ThinkingStyleTemplate =
+        "{%- for message in messages %}{{- message['content'] }}{%- endfor %}" +
+        "{%- if add_generation_prompt %}" +
+        "{%- if enable_thinking is defined and enable_thinking %}{{- '<think>' }}" +
+        "{%- elif enable_thinking is defined and not enable_thinking %}{{- '<no_think>' }}" +
+        "{%- else %}{{- '<default>' }}{%- endif %}" +
+        "{%- endif %}";
+
+    [Fact]
+    public void JinjaChatTemplate_EnableThinkingTrue_TakesThinkBranch()
+    {
+        JinjaChatTemplate template = new(ThinkingStyleTemplate);
+        CapturingTokenizer tok = new();
+        template.Encode(tok, [ChatMessage.User("Hi")], addGenerationPrompt: true, enableThinking: true);
+        Assert.Equal("Hi<think>", tok.Last);
+    }
+
+    [Fact]
+    public void JinjaChatTemplate_EnableThinkingFalse_TakesNoThinkBranch()
+    {
+        JinjaChatTemplate template = new(ThinkingStyleTemplate);
+        CapturingTokenizer tok = new();
+        template.Encode(tok, [ChatMessage.User("Hi")], addGenerationPrompt: true, enableThinking: false);
+        Assert.Equal("Hi<no_think>", tok.Last);
+    }
+
+    [Fact]
+    public void JinjaChatTemplate_EnableThinkingUnset_LeavesVariableUndefined()
+    {
+        JinjaChatTemplate template = new(ThinkingStyleTemplate);
+        CapturingTokenizer tok = new();
+        // No enableThinking argument at all — must render the "is defined" fallback, not silently treat as false.
+        template.Encode(tok, [ChatMessage.User("Hi")], addGenerationPrompt: true);
+        Assert.Equal("Hi<default>", tok.Last);
     }
 }

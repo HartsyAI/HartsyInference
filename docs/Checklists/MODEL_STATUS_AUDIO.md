@@ -5,6 +5,138 @@ family. Build detail lives in [PHASE_5_AUDIO.md](PHASE_5_AUDIO.md); the music-sp
 [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md). Parity evidence (maxAbs, bugs found)
 lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS.md](MODEL_STATUS.md).
 
+> ## 🔌 CLI wiring pass (2026-07-21) — every local audio model given a `ModelCatalog` recipe
+> `hartsy speak/music/transcribe` only exposed 9/20 TTS, 2/6 STT, and 5/6 music models before this pass (the
+> rest were Engine-registered in `TtsCatalog`/`SttCatalog`/`MusicCatalog` but had no CLI catalog entry, so
+> `hartsy list` didn't show them and there was no download-confirm flow). Added `CatalogEntry` + `Assets` for
+> the missing 12 TTS (dia, orpheus, csm, neutts, qwen3tts, chatterbox, kyutaitts, melotts, pockettts, zonos,
+> gptsovits, zipvoice), 4 STT (distilwhisper, moonshinestreaming, kyutaistt, whisperstreaming), and heartmula
+> (music) + fixed audiogen/stableaudio's stale entries. Added two new modalities/commands: `hartsy convert`
+> (RVC/OpenVoice voice conversion) and `hartsy fx separate|enhance` (Demucs/Resemble-Enhance), backed by the
+> Engine's already-built `IVoiceConversionService`/`IFxService`. Wired `--reference`/`--ref-text`/
+> `--exaggeration`/`--nfe-step`/`--cfg-scale` through `hartsy speak` for clone-capable models (`SpeechRequest`/
+> `TtsJob` already carried these fields end-to-end; only the CLI-side plumbing was missing).
+>
+> **Discovered the audio download path is a *different mechanism* than the image catalog's**: audio
+> descriptors self-download via `AudioModelCache` (`~/.cache/hartsyinference/models/{owner}--{name}/`), not
+> `ModelDownloader`'s `Models/<subdir>/` tree — reusing the image-style `ModelAcquisition.EnsurePresent`
+> unmodified would have "confirmed" a download into a location the Engine never reads from. Added an
+> audio-aware branch (`ModelAcquisition.EnsureAudioAssetsPresent`) that resolves against the real cache path
+> before prompting.
+>
+> **Bugs found by a systematic "does every catalog id resolve against its Engine registry" sweep** (cheap,
+> no-GPU, catches typos the download-confirm flow can't): 8 of the 27 wired ids didn't match their
+> `TtsCatalog`/`MusicCatalog` registry key exactly (case-insensitive but hyphen-sensitive) — `fish-speech`≠
+> `fishspeech`, `spark-tts`≠`sparktts`, `f5-tts`≠`f5`, `ace-step`≠`acestep` (all **pre-existing**, silently
+> broken before this pass), plus `qwen3-tts`, `kyutai-tts`, `gpt-sovits`, `stable-audio` (introduced during
+> this pass, then caught by the same sweep before shipping). Fixed by renaming the catalog `Id` to match.
+> Also found `MusicCommand` hard-required `--model-path` for **every** music model, including the
+> self-downloading catalog ones (musicgen included) — removed; only VC/FX models with no fixed HF weights
+> (RVC voices, Demucs) still need it.
+>
+> **Exhaustive real-weight e2e pass via standalone CLI on the 3060** (GPU shared with a concurrent image-model
+> session, per the turn-taking directive) — every TTS (21/21), STT (6/6), and Music (6/6) catalog model
+> actually run, output inspected (Whisper `medium.en` transcript for speech, finite/non-silent/correct-rate
+> waveform check for music), not just "didn't throw":
+> - **All 21 TTS word-correct** except two genuinely broken (below): dia, zonos, qwen3tts, kokoro, bark,
+>   melotts, orpheus, styletts2, sparktts, cosyvoice, chatterbox, neutts, fishspeech, f5, gptsovits, zipvoice
+>   (degraded but intelligible — content present, some words garbled, matches its documented "no
+>   GPU-residency pass yet" perf status), pockettts, kyutaitts, piper. Whisper mis-hears several coined brand
+>   names (Kokoro→"Kakura", Bark→"Bach", Zonos→"Zono's", Kyutai→"Qtie", …) — expected, matches this doc's own
+>   prior Kyutai→"QTIE" precedent, not a defect.
+> - **`csm` FIXED 2026-07-21** (was BROKEN: `KeyNotFoundException` on `backbone.norm.weight` — the `nielsr/csm-1b`
+>   mirror ships torchtune-style keys the loader never matched). Three real bugs fixed, not just the loader:
+>   (1) switched to the `unsloth/csm-1b` mirror (HF `transformers`-layout keys) + a new `CsmWeightRemap` that
+>   re-prefixes them and splits its two combined tensors (`audio_embeddings`, `codebooks_head`) into the
+>   per-codebook slices `CsmModel.LoadWeights` reads, transposing the head to `[vocab, hidden]`; also sources
+>   Mimi from the SAME checkpoint's bundled `codec_model.*` (32 codebooks) instead of the separately-published
+>   8-codebook `kyutai/mimi`, which the depth decoder's 32-codebook output can't feed; (2) `CsmPipeline`'s codes
+>   tensor was built `DType.F32` but `Mimi.Decode` reads codes as `Int32` — reinterpreting float bit patterns as
+>   codebook indices crashed with `AccessViolationException`; (3) generation never stopped (always exactly 1024
+>   frames / 81.9s regardless of input) because the EOS check compared codebook-0 to the wrong sentinel
+>   (`AudioEosToken=2048`, never actually produced) instead of upstream's real condition — ALL codebooks equal 0
+>   (`CodebookEosToken`) after decoding the full frame; also added the missing `[speaker]text` + BOS/EOS prompt
+>   template (`AudioTextFrontend.CsmText`), which the original plain-BPE encoding was missing entirely. Verified
+>   Whisper word-perfect on two independent sentences ("Hello there, how are you today?" and a 17-word sentence,
+>   both exact). `CliDrivable = true`.
+> - **`vibevoice` re-verified 2026-07-21 — NOT reproduced.** This same pass had flagged it BROKEN (Whisper
+>   transcribing `[Hindi]`/`[speaking in native language]` on the JFK reference). Re-testing found no code
+>   change to VibeVoice since the 07-17 perf pass (only a namespace rename), a clean tokenizer round-trip, and
+>   3 independent prompts (short pangram, long multi-sentence, unrelated paragraph) all Whisper word-perfect
+>   with the same reference clip. Root cause of the original failure unknown (unreproduced, so undiagnosable).
+>   `CliDrivable = true` restored; re-flag if it recurs.
+> - **`cosyvoice` needs `--ref-text` for usable quality** — `--reference` alone produced garbled
+>   non-word-correct output ("And a tall fall, tear, tape, tape." for a plain sentence); `CosyVoiceModel`
+>   accepts an empty transcript without throwing, but clearly needs it. With `--ref-text` set, word-perfect.
+> - **`gptsovits` REQUIRES `--ref-text`** (throws `InvalidOperationException` without it, unlike CosyVoice's
+>   silent degradation) — word-perfect once supplied.
+> - **`qwen3tts`'s bare id defaults to Base/voice_clone** (requires `--reference`) because
+>   `Qwen3TtsModel.ResolveMode` reads the whole variant string and "qwen3tts" contains neither "CustomVoice"
+>   nor "VoiceDesign" — use `-m qwen3tts:1.7B-CustomVoice`/`:1.7B-VoiceDesign` for the preset/instruct modes.
+> - **Fixed a real, previously-100%-broken feature**: `--voice` was wired as a bare alias of `-m|--model`
+>   (`[CommandOption("-m|--model|--voice")]`), so `SpeechRequest.Voice`/`job.Voice` could never be set from the
+>   CLI at all — silently breaking Kokoro non-default voice packs, Spark-TTS gender, and PocketTTS's
+>   (REQUIRED) voice name for every prior CLI session. Split into a separate `--voice` option that populates
+>   `parameters["voice"]`; verified by requesting Kokoro's `am_michael` pack and confirming it downloads and is
+>   used (distinct from the `af_heart` default already cached).
+> - **`distilwhisper`'s bare id is broken**: `SttCatalog.ResolveDistilWhisperRepo`'s no-match default
+>   (`distil-whisper/distil-large-v3.5`) isn't in `WhisperPipeline.InferConfig`'s repo switch (only
+>   v2/v3/medium.en/small.en) → "Unknown Whisper repo". Use `-m distilwhisper:v3` (or `:v2`/`:medium`/`:small`).
+> - **musicgen/audiogen/acestep/stableaudio/heartmula** all produce finite, non-silent, correct
+>   sample-rate/duration/channel-count audio (heartmula's RMS ran noticeably quieter than the others — not
+>   re-investigated, flagged for a follow-up listen). **`yue`** needed a real fix, not just verification (next
+>   bullet).
+> - **Fixed `MusicCommand` hard-requiring `--model-path` for every music model**, including the
+>   self-downloading catalog ones (musicgen included) — removed; only VC/FX models with no fixed HF weights
+>   (RVC voices, Demucs) still need it.
+> - **Discovered and fixed a THIRD download mechanism**: unlike the `AudioModelCache`-self-downloading
+>   TTS/STT/MusicGen-family models, ACE-Step and YuE are "registry-backed local-checkpoint families" resolved
+>   via the (previously `internal`, now `public`) `AudioWeightsCatalog` + the STANDARD `ModelDownloader`/
+>   `ModelAsset` machinery — the same one image models use — landing under `Models/audio/music/{acestep,yue}/`.
+>   Worse, `YueMusicModel.LoadAsync` has **no auto-download fallback of its own** (unlike `AceStepMusicModel`,
+>   which calls `AudioWeightsCatalog.EnsureAsync` internally) — before this fix, `yue` was 100%
+>   manual-placement-only ("YuE checkpoint folder not found... place the m-a-p/YuE-s1-7B-anneal-* folder
+>   there"). Made `AudioWeightsCatalog`'s id constants/`AssetsFor`/`IsFolderCheckpoint` public, reused
+>   `AssetsFor` directly in the CLI catalog (same pattern as `SideModels` for image entries — no data
+>   duplication), and special-cased `ModelAcquisition` to route `acestep`/`yue` through the standard
+>   `ModelDownloader` branch instead of the `AudioModelCache` branch (with a folder-checkpoint guard so YuE's
+>   resolved `LocalPath` doesn't get set to a single shard file instead of the variant directory). Verified:
+>   the CLI now correctly lists YuE's 8 files + confirms + downloads into `Models/audio/music/yue/en-cot/`.
+> - **VoiceConvert**: `openvoice` verified (real, non-silent, correct-rate audio via `--target`). `rvc` only
+>   confirmed to *resolve* (registry lookup, no "not registered" error) — there is no default/test RVC voice
+>   checkpoint anywhere on this box (RVC is inherently bring-your-own-trained-voice), so a real generation
+>   pass isn't meaningfully possible without the user supplying one via `--model-path`.
+> - **Fx**: **`demucs` FIXED 2026-07-21.** The real HF search for an ungated single-file htdemucs mirror was the
+>   wrong approach — the canonical weights were never on HuggingFace at all; upstream ships them from Meta's own
+>   public CDN (`dl.fbaipublicfiles.com`, no auth, resolved from `demucs/remote/htdemucs*.yaml` +`files.txt` on
+>   GitHub). `FxCatalog` now auto-downloads `htdemucs` (4-stem) and `htdemucs_6s` (6-stem) directly from there on
+>   first use. The existing `PytorchPickleLoader` parses the official `.th` with zero changes (533 tensors, keys
+>   matching `HtDemucs`/`DemucsCrossTransformer`/`DemucsDConv`'s existing expectations exactly — the engine code
+>   was already built against the real key layout, just never had a working download source). Fixed a real bug
+>   found running it: bare `-m demucs` resolves `AudioModelSelector.Variant` to the literal string `"demucs"`
+>   (not `"htdemucs"`), so `EnsureDemucsPathAsync` now treats that alias the same as unset. `htdemucs_ft` stays
+>   `--model-path`-only: upstream ships it as a 4-checkpoint weight-averaged `Bag_of_models` ensemble, not a
+>   single 4-stem checkpoint — out of scope. CPU-only (`DemucsSpec`'s STFT/ISTFT has no CUDA/Vulkan
+>   implementation — `CudaBackend.Stft` throws `NotSupportedException`); `FxSeparateCommand` now always forces
+>   the CPU backend itself so the default `hartsy fx separate <wav>` invocation just works instead of erroring
+>   on the `-b auto → cuda` default. Verified real output on a music clip: 4 stems (drums/bass/other/vocals),
+>   mutually distinct (pairwise sample corr 0.007–0.14 — not copies of each other or the mix) and non-silent.
+>   `htdemucs_6s` is wired identically but not individually run this pass.
+> - **`resemble-enhance` real-weight load fails, ROOT CAUSE NARROWED but NOT FIXED.** The DeepSpeed checkpoint
+>   angle from the earlier pass was a red herring in scope, not diagnosis: `PytorchPickleLoader` (already-existing,
+>   unmodified) parses `enhancer_stage2/ds/G/default/mp_rank_00_model_states.pt` (713 MB) cleanly — 909 real
+>   tensors, meaningful names — no DeepSpeed-specific reader is actually needed. The REAL blocker: the engine's
+>   `ResembleDenoiser`/`ResembleIrmaeDecoder` (and likely `ResembleWnEstimator`/`ResembleUnivNet`) were built
+>   against an assumed key layout (`down.{i}`/`mid.{i}`/`up.{i}`, `conv1`/`norm1`/`conv2`/`norm2`/`downsample`)
+>   that does **not** match the real checkpoint (`encoder_blocks`/`middle_blocks`/`decoder_blocks`, each a
+>   `pre_conv` + two `PreactResBlock`s of `GroupNorm→GELU→Conv2d` ×2 with residual add — confirmed by reading the
+>   real `resemble_enhance/denoiser/unet.py` and `.../enhancer/lcfm/irmae.py` from GitHub). This is a genuine
+>   forward-pass mismatch, not a naming alias — the module composition differs, so a remap dict (the CSM fix
+>   pattern) isn't enough; it needs `ResembleDenoiser`'s `UNetBlock`/`PreactResBlock` (and probably the
+>   `lcfm.ae`/`lcfm.cfm.net`/`vocoder` modules — not yet individually verified, but the denoiser's mismatch alone
+>   rules out a quick fix) rewritten to match the real architecture. Deliberately NOT attempted this pass — a
+>   half-rewritten multi-file UNet is worse than leaving this honestly `ValidationPending`/not-CliDrivable.
+
 > ## 🏁 First e2e TTS/STT speed benchmarks (2026-07-12) — RTF on 3060 **and** 4090
 > Measured through the SwarmUI+AudioLab path: [`benchmarks/results/audio_tts_stt_2026-07-12.md`](../../benchmarks/results/audio_tts_stt_2026-07-12.md).
 > Piper 10.4×/7.7×, Moonshine 6.5×/6.5×, Whisper-base 5.1×/5.4×, MeloTTS 1.7×/1.8× (3060/4090). **These small
@@ -90,6 +222,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **Piper** (VITS) | ✅ | corr 0.9998 vs onnxruntime; 7 VITS bugs fixed (affect all VITS). **Swarm e2e word-correct 2026-07-13** — fixed the espeak language default (`en` British → the voice's `en-us` American; it was mispronouncing vowels). |
 | **Kokoro** (StyleTTS2) | ✅ | ~1e-4 on the CUDA path (added `audio_leaky_relu` / `audio_adain1d` kernels). **Swarm e2e word-correct 2026-07-13** — misaki-phoneme g2p + punctuation fix (was silently dropping words); canonical-`.pth` download fallback (was install-401). |
 | **F5-TTS** (v1 Base) | ✅ | Flow-matching DiT verified bit-exact: velocity corr 1.0, full CFM sample loop (generated mel) corr 1.0, Vocos corr 0.9999. 4 bugs fixed (ConvNeXt filler-mask, ×1000 timestep scale, erf/tanh GELU split, cond-anchored CFG + end-only ref-clamp). **Swarm e2e word-correct + perf pass 2026-07-13:** with a real voice ref it transcribes word-perfect (medium.en); **174.6 s → 6.4 s (34×)** by routing the `F5ConvPosEmbed` grouped Conv1D off the host loop to `backend.Conv1d` (GPU), output bit-parity (RMS-envelope corr 1.0000). |
+| **ZipVoice** (k2-fsa) | ✅ | Zipformer backbone (`fm_decoder`+`text_encoder`) parity cosine 1.0 (2026-07-19). **Engine-wired 2026-07-20** as `zipvoice` (same gap as Stable Audio — built+parity-verified, zero Engine catalog entry). Swarm `/API/GenerateText2Image` verified: clones the JFK reference voice, produces valid non-silent 24kHz mono speech. **Slow — 11.4 min for a ~10s clip**, no GPU-residency work done yet; a real perf-pass candidate (same class of host-glue likely present as pre-perf-pass Stable Audio). |
 | **Kyutai TTS** (tts-1.6b-en_fr) | ✅ | **Fully intelligible e2e in pure C# 2026-07-16** (whisper medium.en: "So hello there, this is a test of the Cuta[=Kyutai] text-to-speech model" — matches the script, no clipping, 62 frames/4.96s vs moshi ref 71/4.4s). **ROOT-CAUSE of the earlier gibberish: the cross-attention voice source was built with only the T real voice rows.** moshi `make_condition_attributes` pads the voice to `max_speakers=5` slots → the 4 empty slots become the learned `speaker_wavs.learnt_padding` vector, and `ConditionFuser.get_cross` then adds a continuous sin pos-emb over all `5·T=625` rows (`cross_attention_pos_emb=True`). Those 500 padding rows are NOT inert — cross-attention attends over all of them — so omitting them shifted every cross-attention output (~1% error in the outlier activation dims) and, compounded over the autoregressive loop, produced non-speech + clipping + wrong length. Fix: load `speaker_wavs.learnt_padding`; `MoshiConditioner.ComputeCross` now emits `[1, 5·T, 2048]`. Also: text token must be **sampled** (temp_text 0.6/top-k 25), not argmax — the new_word/pad choice paces the words (`MoshiTtsGenerator` host-samples text). Cores verified (backbone 1.3e-4, depformer teacher-forced 27/32 argmax + ~0.99 corr = sampling-robust, conditioner ~1e-8, **Mimi decode bit-exact corr 1.0** — DSM moshi-native keys + interleaved RoPE). **Perf: 63.0 s → 9.7 s (6.5×)** for the 62-frame gen on a 3060 by making the depformer's per-weight-set QKV/out/gate projections device-resident (they were sliced fresh each Block call, so the weight cache never hit and re-uploaded every op — H2D_MISS_BIG 6469→466 calls, Linear 0.356→0.045 ms/call). moshi (bf16 + CUDA-graph) is 2.3 s on the same 3060; the remaining gap is per-op launch overhead on the 32-codebook cascade (SDPA 2.7 s + Linear 2.5 s) that a per-frame CUDA-graph capture would close. **Swarm-deployed 2026-07-16** via the AudioLab extension (`kyutaitts_tts`, `KyutaiTtsModel` orchestrates `MoshiTtsGenerator` + `Mimi` + `KyutaiSttTokenizer` directly against published engine alpha.49 — no engine change; pre-embedded `kyutai/tts-voices` speaker, default `expresso/ex03-...`): live `/API/GenerateText2Image` → whisper medium.en word-perfect ("Kyutai"→"QTIE" brand mishearing), 5.52 s, peak 0.47. |
 | **ResembleEnhance** | 🔬 | Modules synthetic-verified + converter built; real-weight mel→mel parity pending. |
 | **MeloTTS** (English-v3) | ✅ | Real-weight e2e in pure C#. **Swarm e2e word-correct 2026-07-13** — earlier "corr 0.9993 noise-0" was stale: the real e2e produced gibberish from a `PytorchPickleLoader` **stride bug** (bert-base-uncased Linear weights, saved as `.t()` views, loaded transposed → garbage BERT features), fixed with a stride-gather (`MakeRowMajor`, no-op for contiguous — helps all `.pth` models). Also added **number normalization** (`normalize_numbers`: years/currency/ordinals/decimals were dropped). `MeloTts` facade + gated parity test. |
@@ -109,6 +242,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **Whisper** (tiny → large-v3) | ✅ | JFK clip transcribes correct content words (`WhisperEndToEndTests`). **Swarm e2e word-perfect 2026-07-13** on the real JFK clip; fixed the `en-US` default-language crash (locale-code normalization). |
 | **Whisper streaming** (RealtimeSTT) | ✅ | LocalAgreement-2 + JFK streaming. |
 | **Moonshine** | ✅ | Tests pass. **Swarm e2e word-perfect 2026-07-13** on real (JFK) + synthetic clips; ~2 s for 9 s audio on the 3060. |
+| **Moonshine streaming** (tiny/small/medium) | ✅ | Real-weight parity verified 2026-07-19 (encoder/decoder cosine ~1.0); **Engine-wired 2026-07-20** as `moonshinestreaming` — JFK clip word-perfect end-to-end (CPU). Full-utterance batch only; true chunked/incremental streaming not yet implemented. |
 | **Kyutai STT** (stt-1b / 2.6b) | 🔧 | Shares the moshi backbone; parity pending (no depformer). |
 
 ## Codec / voice conversion / music / separation
@@ -128,8 +262,9 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **HeartMuLa** (oss-3B) | ✅ | LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). **Perf (RTX 3060, 3b-base):** ~91 ms/frame ≈ 11 fr/s bf16 (~0.9× realtime, memory-bandwidth-bound). CUDA-graph decode of the backbone + depth steps (`HARTSY_CSM_GRAPH`, default on) is bit-identical + ~5% (launch overhead is only ~8/91 ms). Disk-cached weight quant (`HARTSY_HEARTMULA_QUANT=q8_0`) is **1.41× faster** (64.8 ms/frame ≈ 15.4 fr/s, past real-time) + ~1/2 VRAM — the fix was pinning the quant weights GPU-resident (`PreloadWeights`, quantized-only); the Q8 fused GEMV is faster than bf16 when resident. |
 | **RVC** (voice conversion) | 🔧 | RMVPE front-end built; parity pending. |
 | **Demucs** (separation) | 🔧 | Built; parity pending. |
-| **CSM** (Sesame) | 🔧 | Uses Mimi; parity pending. |
-| **Stable Audio Open / DiffRhythm / AudioLDM 2 / ACE-Step XL** | ❌/🔧 | Music roadmap; see [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md) for the per-model build state and ROI order. |
+| **CSM** (Sesame) | ✅ | Fixed 2026-07-21 (unsloth/csm-1b key remap + bundled 32-cb Mimi + I32 codes dtype + real all-zero EOS + `[speaker]text` prompt template); Whisper word-perfect on two independent sentences. `hartsy speak -m csm`. |
+| **Stable Audio Open Small** | ✅ | DiT/VAE/timing-conditioner parity cosine 1.0 each. **Engine-wired 2026-07-20** as `stableaudio` (was built+parity-verified but had no `MusicCatalog` entry, and the AudioLab extension's own binding was also missing — both fixed). **GPU-residency perf pass 2026-07-20**: host RoPE/multi-head-reshape/ping-pong-scheduler loops ported to existing `IBackend` ops (`ApplyRopeSingle`/`Permute0213`/`RepeatKvHeads`/chained `Scale`+`Add`) — no new kernels needed, cosine 1.0 held after rewrite. Swarm `/API/GenerateText2Image` verified: 11.89s stereo 44.1kHz in 2.85s gen time. |
+| **DiffRhythm / AudioLDM 2 / ACE-Step XL** | ❌/🔧 | Music roadmap; see [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md) for the per-model build state and ROI order. |
 | **PocketTTS** (continuous-latent) | ✅ | **Swarm-deployed + parity-verified 2026-07-16.** Production voiced path built on the verified cores: `PocketTtsStreamingTransformer.ForwardPrimed` (voice-KV prefix + RoPE offset), `PocketTtsFlowLm.GenerateVoiced` (LUT conditioner + out_eos stop + noise std=√temp), `PocketTtsVoice` (KV-state loader), rewritten `PocketTtsPipeline` (SentencePiece + emb_std/mean denorm). All transformer layers + hidden + latents **corr 1.000000** vs `pocket_tts` 2.1.0. Voice REQUIRED (default `alba`). Weights = non-gated `kyutai/pocket-tts-without-voice-cloning` `languages/english/` (NOT the generic `tts_*.safetensors`). Whisper `medium.en` word-perfect via `/API/GenerateText2Image`. |
 
 ## Notes

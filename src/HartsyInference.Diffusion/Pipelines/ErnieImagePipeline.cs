@@ -87,7 +87,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         _schedulerShift = schedulerShift;
     }
 
-    /// <summary>Generates an image from pre-tokenized prompt + negative prompt token ids (use <c>ErnieTokenizer</c> from HartsyInference.Tokenizers: BOS-prefixed raw prompt, no padding). The token ids must already be padded (per-prompt) up to a single common <c>Tmax</c>; pass the corresponding real lengths in <paramref name="promptRealLen"/> and <paramref name="negativeRealLen"/>.
+    /// <summary>Generates an image from pre-tokenized prompt + negative prompt token ids (use <c>ErnieTokenizer</c> from HartsyInference.ModelAssets.Tokenizers: BOS-prefixed raw prompt, no padding). The token ids must already be padded (per-prompt) up to a single common <c>Tmax</c>; pass the corresponding real lengths in <paramref name="promptRealLen"/> and <paramref name="negativeRealLen"/>.
     /// <para>An <see cref="ImageToImageRequest"/> selects img2img: the source goes VAE-encode (32-ch latent) →
     /// 2×2 patchify (→128 ch) → BN-normalize (when BN stats were supplied, symmetric with the decode-side
     /// un-normalization) → flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c> — requires a

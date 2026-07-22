@@ -2,7 +2,7 @@ using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
-using HartsyInference.ModelHandler.Gguf;
+using HartsyInference.ModelAssets.Gguf;
 using Xunit;
 using Xunit.Abstractions;
 

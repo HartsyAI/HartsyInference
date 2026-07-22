@@ -3,7 +3,7 @@ using Xunit.Abstractions;
 using HartsyInference.Audio.Models.Codecs.Oobleck;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
-using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;
