@@ -642,4 +642,66 @@ public static unsafe class CheckpointConvertUtils
         }
         return maxError;
     }
+
+    /// <summary>Row-concatenates two rank-2 weight tensors <c>[r1, C]</c> + <c>[r2, C]</c> → <c>[r1+r2, C]</c>
+    /// (host memcpy — row-major rows are contiguous). Same dtype and column count required; for fp8 tensors the
+    /// caller must have unified the scales first (<see cref="RequantizeToCommonFp8Scale"/>) — the concat carries
+    /// <paramref name="a"/>'s <see cref="Tensor.Fp8ScaleFactor"/> and throws if <paramref name="b"/>'s differs.</summary>
+    public static unsafe Tensor ConcatRowsHost(Tensor a, Tensor b)
+    {
+        if (a.Shape.Rank != 2 || b.Shape.Rank != 2)
+            throw new ArgumentException($"ConcatRowsHost needs rank-2 tensors; got {a.Shape} and {b.Shape}.");
+        if (a.Shape[1] != b.Shape[1])
+            throw new ArgumentException($"ConcatRowsHost column mismatch: {a.Shape} vs {b.Shape}.");
+        if (a.DType != b.DType)
+            throw new ArgumentException($"ConcatRowsHost dtype mismatch: {a.DType} vs {b.DType}.");
+        if (a.DType == DType.F8E4M3 && a.Fp8ScaleFactor != b.Fp8ScaleFactor)
+            throw new ArgumentException("ConcatRowsHost: fp8 scales differ — call RequantizeToCommonFp8Scale first.");
+
+        Tensor fused = new Tensor(new TensorShape(a.Shape[0] + b.Shape[0], a.Shape[1]), a.DType);
+        long aBytes = a.ElementCount * a.DType.SizeInBytes;
+        long bBytes = b.ElementCount * b.DType.SizeInBytes;
+        Buffer.MemoryCopy((void*)a.DataPointer, (void*)fused.DataPointer, aBytes + bBytes, aBytes);
+        Buffer.MemoryCopy((void*)b.DataPointer, (byte*)fused.DataPointer + aBytes, bBytes, bBytes);
+        fused.Fp8ScaleFactor = a.Fp8ScaleFactor;
+        return fused;
+    }
+
+    /// <summary>Fuses SwiGLU FFN weight pairs (<c>…w1Suffix</c> gate + <c>…w3Suffix</c> up) into single
+    /// row-concatenated <c>…fusedSuffix</c> tensors — one GEMM instead of two (INFERENCE_ACCEL_GRIND §H3).
+    /// fp8_scaled pairs are first unified via <see cref="RequantizeToCommonFp8Scale"/>; a pair whose
+    /// introduced requant error exceeds <paramref name="maxRequantError"/> is left UNFUSED (per-block
+    /// fallback — extreme scale ratios would visibly perturb output). Mixed-dtype or mismatched-shape pairs
+    /// are skipped. Returns (fused count, worst accepted requant error).</summary>
+    public static (int Fused, float WorstError) FuseSwiGluPairs(Dictionary<string, Tensor> weights,
+        string w1Suffix, string w3Suffix, string fusedSuffix, float maxRequantError = 1f / 16f)
+    {
+        List<string> w1Keys = new();
+        foreach (string k in weights.Keys)
+            if (k.EndsWith(w1Suffix, StringComparison.Ordinal)) w1Keys.Add(k);
+
+        int fusedCount = 0;
+        float worst = 0f;
+        foreach (string w1Key in w1Keys)
+        {
+            string baseKey = w1Key.Substring(0, w1Key.Length - w1Suffix.Length);
+            string w3Key = baseKey + w3Suffix;
+            if (!weights.TryGetValue(w3Key, out Tensor? w3)) continue;
+            Tensor w1 = weights[w1Key];
+            if (w1.DType != w3.DType || w1.Shape.Rank != 2 || w3.Shape.Rank != 2 || w1.Shape[1] != w3.Shape[1]) continue;
+
+            float err = 0f;
+            if (w1.DType == DType.F8E4M3 && w1.Fp8ScaleFactor != w3.Fp8ScaleFactor)
+            {
+                err = RequantizeToCommonFp8Scale(w1, w3);
+                if (err > maxRequantError) continue;   // leave this block unfused rather than degrade it
+            }
+            weights[baseKey + fusedSuffix] = ConcatRowsHost(w1, w3);
+            weights.Remove(w1Key);
+            weights.Remove(w3Key);
+            fusedCount++;
+            worst = Math.Max(worst, err);
+        }
+        return (fusedCount, worst);
+    }
 }
