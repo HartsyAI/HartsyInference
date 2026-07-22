@@ -127,9 +127,34 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape(s, _latentChannels), seed);
+
+        // Default-off perf knob (INFERENCE_ACCEL_GRIND §H1.5; Wan is the video reference wiring +
+        // measurement — NOTE its verdict: on 50-step video the plain gate trades per-seed reproducibility
+        // for speed; treat as a "fast non-reproducible sampling" opt-in). One cache per CFG stream. An
+        // armed cache forces the eager path — variable per-step topology can't replay the CFG-pair graph,
+        // so the latent must NOT be routed into the graph's fixed buffer either.
+        float stepCacheThreshold = StepCacheEnv.ReadThreshold();
+        DeviceFeatureCache? condCache = null;
+        DeviceFeatureCache? uncondCache = null;
+        if (stepCacheThreshold > 0f)
+        {
+            if (Backend.SupportsDeviceStepCacheGate)
+            {
+                int stepCacheCap = StepCacheEnv.ReadCap();
+                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
+                uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap} (step graph bypassed)");
+            }
+            else
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    "(stepcache.ptx not compiled?) — running uncached.");
+            }
+        }
+
         // With HARTSY_DIT_GRAPH the transformer captures the CFG-pair step and replays it; the working latent must
         // live in its fixed buffer (denoised in place by device CfgEulerStep). Off (default), this returns `latents`.
-        Tensor stepLatent = _transformer.PrepareGraphLatent(Backend, latents);
+        Tensor stepLatent = condCache is null ? _transformer.PrepareGraphLatent(Backend, latents) : latents;
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
 
         string? diagFile = Environment.GetEnvironmentVariable("LTX_DIAG_FILE");
@@ -143,7 +168,8 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
             float t = tsteps[k], dt = t - tsteps[k + 1];
             float tEmb = t * 1000f;   // DiT timestep scaling (validation-gated)
             (Tensor vCond, Tensor? vUncond, bool callerOwns) = _transformer.ForwardPaired(
-                Backend, stepLatent, promptEmbeds, negativeEmbeds, tEmb, (tLat, hLat, wLat), interp, null);
+                Backend, stepLatent, promptEmbeds, negativeEmbeds, tEmb, (tLat, hLat, wLat), interp, null,
+                condCache, uncondCache);
             if (dbg && (k == 0 || k == steps - 1))
                 Diag($"[LTX-DIAG] step {k}: t={t:F4} dt={dt:F4} tEmb={tEmb:F1} | vCond {Stat(vCond)} | vUncond {Stat(vUncond!)} | diffL2={DiffL2(vCond, vUncond!):F4} | latent {Stat(stepLatent)}");
             if (callerOwns)
@@ -174,6 +200,14 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
                 });
                 previewFrame.Dispose();
             }
+        }
+
+        if (condCache is not null)
+        {
+            Logs.Info($"Step cache: cond {condCache.Computes} computes / {condCache.Reuses} reuses; " +
+                $"uncond {uncondCache!.Computes} computes / {uncondCache.Reuses} reuses");
+            condCache.Dispose();
+            uncondCache.Dispose();
         }
 
         Backend.Sync();

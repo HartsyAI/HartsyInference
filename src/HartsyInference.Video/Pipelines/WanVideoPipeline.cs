@@ -216,17 +216,63 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         scheduler.SetTimesteps(steps, shift);
         float[]? frameTs = firstFrameLatent is null ? null : new float[tLat];
 
+        // Default-off perf knobs (Qwen-Image is the reference wiring — INFERENCE_ACCEL_GRIND §H1.5/H2.3):
+        // HARTSY_STEP_CACHE = First-Block cache per CFG stream; HARTSY_CFG_INTERVAL = skip the uncond forward
+        // outside the normalized-σ band (NOTE the Qwen finding: early-step skipping changes image identity —
+        // late-only bands like "0.15,1" are the quality-safe shape). Unset ⇒ byte-identical baseline.
+        GuidanceInterval cfgInterval = GuidanceInterval.FromEnvironment();
+        float stepCacheThreshold = StepCacheEnv.ReadThreshold();
+        DeviceFeatureCache? condCache = null;
+        DeviceFeatureCache? uncondCache = null;
+        if (stepCacheThreshold > 0f)
+        {
+            if (Backend.SupportsDeviceStepCacheGate)
+            {
+                int stepCacheCap = StepCacheEnv.ReadCap();
+                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
+                uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}");
+            }
+            else
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    "(stepcache.ptx not compiled?) — running uncached.");
+            }
+        }
+        if (!cfgInterval.IsAlways)
+            Logs.Info($"CFG interval ON: guidance applies at normalized t in [{cfgInterval.Start}, {cfgInterval.End}]");
+        int cfgSkippedSteps = 0;
+        int cacheComputes = 0, cacheReuses = 0, uncondComputes = 0, uncondReuses = 0;
+        WanVideoTransformer? cacheExpert = null;   // A14B MoE: residuals are expert-specific — reset on swap
+
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
             float tEmb = scheduler.Timesteps[k];   // sigma·1000 (DiT timestep scaling, validation-gated)
             WanVideoTransformer expert = Expert(tEmb);
             if (_transformer2 is not null) SwapToExpert(expert);
-            Tensor vCond, vUncond;
+            if (condCache is not null && !ReferenceEquals(expert, cacheExpert))
+            {
+                // A residual cached from one expert is meaningless under the other (same shapes — nothing
+                // else would catch it). Accumulate stats, then hard-reset both streams at the boundary.
+                if (cacheExpert is not null)
+                {
+                    cacheComputes += condCache.Computes; cacheReuses += condCache.Reuses;
+                    uncondComputes += uncondCache!.Computes; uncondReuses += uncondCache.Reuses;
+                    Logs.Info("Step cache: expert boundary — caches reset");
+                }
+                condCache.Reset();
+                uncondCache!.Reset();
+                cacheExpert = expert;
+            }
+            bool cfgThisStep = cfgInterval.Applies(tEmb / 1000f);
+            if (!cfgThisStep) cfgSkippedSteps++;
+            Tensor vCond;
+            Tensor? vUncond = null;
             if (firstFrameLatent is null)
             {
-                vCond = expert.Forward(Backend, latents, promptEmbeds, tEmb);
-                vUncond = expert.Forward(Backend, latents, negativeEmbeds, tEmb);
+                vCond = expert.Forward(Backend, latents, promptEmbeds, tEmb, condCache);
+                if (cfgThisStep) vUncond = expert.Forward(Backend, latents, negativeEmbeds, tEmb, uncondCache);
             }
             else
             {
@@ -235,17 +281,19 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 WriteFirstFrame(modelInput, firstFrameLatent);
                 frameTs![0] = 0f;
                 for (int f = 1; f < tLat; f++) frameTs[f] = tEmb;
-                vCond = expert.Forward(Backend, modelInput, promptEmbeds, frameTs);
-                vUncond = expert.Forward(Backend, modelInput, negativeEmbeds, frameTs);
+                vCond = expert.Forward(Backend, modelInput, promptEmbeds, frameTs, condCache);
+                if (cfgThisStep) vUncond = expert.Forward(Backend, modelInput, negativeEmbeds, frameTs, uncondCache);
                 modelInput.Dispose();
             }
-            // Fold CFG into vCond, then take a UniPC predictor/corrector step in place.
-            LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
+            // Fold CFG into vCond, then take a UniPC predictor/corrector step in place. Outside the guidance
+            // band the step runs cond-only (vCond used raw).
+            if (vUncond is not null)
+                LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
             DumpStats($"step {k} tEmb={tEmb:F2} velocity(cfg)", vCond);
             scheduler.Step(latents, vCond);
             DumpStats($"step {k} latent(post-step)", latents);
             vCond.Dispose();
-            vUncond.Dispose();
+            vUncond?.Dispose();
             sw.Stop();
             // Latent is a borrowed reference for preview encoders (latent2rgb decodes the middle frame).
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
@@ -260,6 +308,19 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         }
 
         if (firstFrameLatent is not null) WriteFirstFrame(latents, firstFrameLatent);
+
+        // Perf-knob accounting for benchmark records (totals include any pre-expert-boundary segments).
+        if (condCache is not null)
+        {
+            cacheComputes += condCache.Computes; cacheReuses += condCache.Reuses;
+            uncondComputes += uncondCache!.Computes; uncondReuses += uncondCache.Reuses;
+            Logs.Info($"Step cache: cond {cacheComputes} computes / {cacheReuses} reuses; " +
+                $"uncond {uncondComputes} computes / {uncondReuses} reuses");
+            condCache.Dispose();
+            uncondCache.Dispose();
+        }
+        if (cfgSkippedSteps > 0)
+            Logs.Info($"CFG interval: uncond forward skipped on {cfgSkippedSteps}/{steps} steps");
 
         Backend.Sync();
         ReleaseOrKeepTransformer(numFrames, width, height);

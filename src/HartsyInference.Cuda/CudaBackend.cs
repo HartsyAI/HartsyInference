@@ -1747,6 +1747,16 @@ public sealed class CudaBackend : IBackend
 
     public bool SupportsF16Activations => true;
 
+    /// <summary>True once the optional stepcache.ptx module is compiled + shipped (native/cuda/dit/build.sh);
+    /// the across-step feature cache stays disabled on CUDA without it.</summary>
+    public bool SupportsDeviceStepCacheGate => _kernels is not null && _kernels.HasStepCacheKernels;
+
+    /// <summary>Marks a tensor's device activation as surviving <see cref="FreeActivations()"/> (see IBackend doc).</summary>
+    public void PinActivation(Tensor tensor) => GpuTransferHelper.PinActivation(tensor);
+
+    /// <summary>Removes a <see cref="PinActivation"/> mark.</summary>
+    public void UnpinActivation(Tensor tensor) => GpuTransferHelper.UnpinActivation(tensor);
+
     public bool FlashDecodeSupported => true;
 
     public bool StepGraphSupported => true;
@@ -3371,6 +3381,22 @@ public sealed class CudaBackend : IBackend
         // (RMS-normed Q/K), so no allowF16 gate. Same session kill-switch on any cuDNN failure.
         // An additive F32 [B,1,Sq,Skv]-broadcast mask (Chroma / padded-conditioning models) rides the fused
         // engine as a bias score-modifier; incompatible mask layouts fall through to the materialized path.
+        // SageAttention F16-ingest (opt-in): native-F16 Q/K/V/out via the f16h prologues + f16io flash
+        // kernel. Competes with the CAST-FREE cuDNN branch below, which Sage only beats at long seq —
+        // gate high (HARTSY_SAGE_F16_MIN_SKV, default 12288) until the crossover is measured per-arch.
+        if (EnvFlag("HARTSY_SAGE_ATTN") && mask is null && (D == 64 || D == 128)
+            && query.DType == DType.F16 && key.DType == DType.F16
+            && value.DType == DType.F16 && output.DType == DType.F16
+            && Skv >= SageF16MinSkv())
+        {
+            EnsureKernels();
+            if (_kernels!.HasSageAttentionKernels && _kernels.HasSageV1)
+            {
+                SageAttentionInt8(output, query, key, value, scale);
+                return;
+            }
+        }
+
         if (CudnnMaskCompatible(mask, B, Sq, Skv) && query.DType == DType.F16 && key.DType == DType.F16
             && value.DType == DType.F16 && output.DType == DType.F16
             && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(D) && CudnnSdpa.ShapeSupported(D)
@@ -3381,6 +3407,20 @@ public sealed class CudaBackend : IBackend
 
         if (query.DType == DType.F32)
         {
+            // SageAttention preference (opt-in, HARTSY_SAGE_ATTN=1): for no-mask F32 calls the INT8 flash
+            // path beats the cuDNN-F16-cast branch below at large seq (110.6 vs 130.4 ms at 16384²/D=128,
+            // 2026-07-22 BDN A/B) — and unlike it, keeps F32-fidelity accumulation. Gate on Skv ≥ 2048:
+            // below that the quant prologue outweighs the win (small-seq shapes measured 0.93× vs cuDNN).
+            if (EnvFlag("HARTSY_SAGE_ATTN") && mask is null && (D == 64 || D == 128) && Skv >= 2048)
+            {
+                EnsureKernels();
+                if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || Sq % 32 == 0))
+                {
+                    SageAttentionInt8(output, query, key, value, scale);
+                    return;
+                }
+            }
+
             // cuDNN fused flash-attention (HARTSY_SDPA_CUDNN): a single fused kernel — no materialized
             // [heads,Sq,Skv] score matrix — via cuDNN's runtime-compiled attention engine. ~34× over the
             // materialized cuBLAS path at Krea2 shape. MHA only, D∈{64,128}. Safe for RMS-normed-Q/K archs
@@ -3399,6 +3439,20 @@ public sealed class CudaBackend : IBackend
 
         if (mask is null && query.DType == DType.F32)
         {
+
+            // SageAttention-v1 INT8 flash attention (sage_attn_int8*.ptx): K-smoothed per-row INT8 QK^T on
+            // the IMMA tensor cores, online softmax + PV in registers (mma.sync v1; wmma v0 fallback needs
+            // Sq%32==0 — its WMMA Q-tile loads are unguarded). Opt-in while validating (HARTSY_SAGE_ATTN=1);
+            // no-mask MHA, D∈{64,128}. Falls through when the PTX isn't built.
+            if (EnvFlag("HARTSY_SAGE_ATTN") && (D == 64 || D == 128))
+            {
+                EnsureKernels();
+                if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || Sq % 32 == 0))
+                {
+                    SageAttentionInt8(output, query, key, value, scale);
+                    return;
+                }
+            }
 
             // Fused FlashAttention-2 (TF32 tensor cores, F32 accum, no materialized score matrix). Opt-in while
             // validating (HARTSY_SDPA_V2); MHA only (Hq==Hkv here — single B×H×S×D layout), D∈{64,128}.
@@ -3807,6 +3861,76 @@ public sealed class CudaBackend : IBackend
         }
         finally
         {
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+        }
+    }
+
+    /// <summary>SageAttention-v1 INT8 flash attention (native/cuda/attention/sage_attn_int8.cu). Four launches:
+    /// K channel-mean → Q per-row INT8 quant (attn scale folded into the row scales) → (K−mean) per-row INT8
+    /// quant (the softmax-invariant smoothing that absorbs the DiT outlier channels) → fused INT8-QK^T flash
+    /// loop with online softmax and TF32 PV. Workspace: Q8/K8 mirrors (¼ the F32 bytes), per-row scales, and
+    /// the [B,H,D] mean — all transient device allocations, freed before return. Correctness oracle:
+    /// SageAttentionReferenceTests (CPU int8 reference math) + SageAttnKernelTests (GPU vs CPU-SDPA parity).</summary>
+    private static int SageF16MinSkv()
+    {
+        string? v = Environment.GetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV");
+        return int.TryParse(v, out int n) && n > 0 ? n : 8192;   // measured: 1.11x at 8192, 1.15x at 12288, parity at 4096 (3060)
+    }
+
+    private unsafe void SageAttentionInt8(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        long B = query.Shape[0], H = query.Shape[1], Sq = query.Shape[2], D = query.Shape[3];
+        long Skv = key.Shape[2];
+        bool f16 = query.DType == DType.F16;   // native-F16 contract: f16h prologues + f16io flash kernel
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
+        ulong pQ8 = 0, pQs = 0, pK8 = 0, pKs = 0, pKmean = 0, pVt16 = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            pKmean = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * D * sizeof(float)));
+            pQ8 = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * Sq * D));
+            pQs = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * Sq * sizeof(float)));
+            pK8 = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * Skv * D));
+            pKs = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * Skv * sizeof(float)));
+
+            _kernels!.LaunchSageKMean(pKmean, pK, (int)B, (int)H, (int)Skv, (int)D, _stream.Handle, srcF16: f16);
+            // log2-domain softmax: fold log2(e) into the Q row scales so the flash kernels exponentiate via
+            // native exp2 (one fewer multiply per score element; max/corr/l all commute with the constant).
+            const float Log2E = 1.4426950408889634f;
+            _kernels!.LaunchSageQuantQ(pQ8, pQs, pQ, (int)B, (int)H, (int)Sq, (int)D, scale * Log2E, _stream.Handle, srcF16: f16);
+            _kernels!.LaunchSageQuantK(pK8, pKs, pK, pKmean, (int)B, (int)H, (int)Skv, (int)D, _stream.Handle, srcF16: f16);
+            if (_kernels!.UseSageV1)
+            {
+                // v1 prologue: one-shot [B,H,Skv,D]→[B,H,D,skvPad] F16 transpose (cp.async-able staging).
+                long skvPad = (Skv + 7L) & ~7L;
+                if (skvPad >= 2048 && (skvPad & (skvPad - 1)) == 0) skvPad += 8;   // anti-aliasing pad (see sage_skv_pad)
+                pVt16 = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * D * skvPad * 2));
+                _kernels!.LaunchSageVF16T(pVt16, pV, (int)B, (int)H, (int)Skv, (int)D, _stream.Handle, srcF16: f16);
+            }
+            _kernels!.LaunchSageAttnInt8(pOut, pQ8, pQs, pK8, pKs, pV, pVt16, (int)B, (int)H, (int)Sq, (int)Skv, (int)D, _stream.Handle, f16Io: f16);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pVt16);
+            GpuTransferHelper.FreeDevice(pKmean);
+            GpuTransferHelper.FreeDevice(pQ8);
+            GpuTransferHelper.FreeDevice(pQs);
+            GpuTransferHelper.FreeDevice(pK8);
+            GpuTransferHelper.FreeDevice(pKs);
             GpuTransferHelper.FreeDevice(pQ);
             GpuTransferHelper.FreeDevice(pK);
             GpuTransferHelper.FreeDevice(pV);
@@ -4558,6 +4682,46 @@ public sealed class CudaBackend : IBackend
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <summary>Device-side feature-cache gate metric Σ|a−b|/Σ|b| (stepcache.ptx). Never pulls the operands to the
+    /// host — cached activations stay cached. The 8-byte result readback is the only sync (once per gated forward).</summary>
+    public unsafe float RelativeL1Distance(Tensor a, Tensor b)
+    {
+        if (!a.Shape.Equals(b.Shape))
+            throw new ArgumentException($"RelativeL1Distance shape mismatch: a={a.Shape}, b={b.Shape}.");
+        if (a.DType != b.DType)
+            throw new ArgumentException($"RelativeL1Distance dtype mismatch: a={a.DType}, b={b.DType}.");
+        if (a.DType != DType.F32 && a.DType != DType.F16)
+            throw new NotSupportedException($"RelativeL1Distance supports F32/F16; got {a.DType}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        if (!_kernels!.HasStepCacheKernels)
+            throw new NotSupportedException(
+                "stepcache.ptx not present — run native/cuda/dit/build.sh and gate on SupportsDeviceStepCacheGate.");
+
+        ulong pA = 0, pB = 0, pSums = 0;
+        try
+        {
+            pA = GpuTransferHelper.CopyToDevice(a);
+            pB = GpuTransferHelper.CopyToDevice(b);
+            pSums = GpuTransferHelper.AllocateDevice(2 * sizeof(float));
+
+            // Synchronous NULL-stream memset serializes correctly against the single blocking compute stream
+            // (same ordering guarantee CudaMemory.cuMemsetD32 relies on).
+            CudaDriverApi.cuMemsetD8(pSums, 0, 2 * sizeof(float)).ThrowOnError();
+            _kernels!.LaunchStepCacheRelL1(pSums, pA, pB, a.ElementCount, a.DType == DType.F16, _stream.Handle);
+
+            float* results = stackalloc float[2];
+            CudaDriverApi.cuMemcpyDtoH((nint)results, pSums, 2 * sizeof(float)).ThrowOnError();
+            return results[1] > 0f ? results[0] / results[1] : 0f;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pSums);
+            GpuTransferHelper.FreeDevice(pA);
+            if (pB != pA) GpuTransferHelper.FreeDevice(pB);
         }
     }
 

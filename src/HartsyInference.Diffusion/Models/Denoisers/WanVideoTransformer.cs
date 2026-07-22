@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -68,23 +69,24 @@ public sealed unsafe class WanVideoTransformer : IDisposable
     }
 
     /// <summary>Velocity prediction. <paramref name="latent"/> is <c>[1, inChannels, T, H, W]</c>; <paramref name="encoder"/> is raw umT5 features <c>[L, textDim]</c>. Returns <c>[1, outChannels, T, H, W]</c>.</summary>
-    public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float timestep) =>
-        Forward(backend, latent, encoder, [timestep]);
+    public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float timestep, DeviceFeatureCache? stepCache = null) =>
+        Forward(backend, latent, encoder, [timestep], stepCache);
 
     /// <summary>I2V velocity prediction with CLIP image conditioning. <paramref name="imageEmbeds"/> is the CLIP
     /// penultimate hidden state <c>[seqImg, imageDim]</c>; it is projected by the image embedder and cross-attended in
     /// every block alongside the text context.</summary>
-    public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float[] timesteps, Tensor imageEmbeds) =>
-        ForwardCore(backend, latent, encoder, timesteps, imageEmbeds);
+    public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float[] timesteps, Tensor imageEmbeds, DeviceFeatureCache? stepCache = null) =>
+        ForwardCore(backend, latent, encoder, timesteps, imageEmbeds, stepCache);
 
     /// <summary>Velocity prediction with per-latent-frame timesteps (the diffusers <c>expand_timesteps</c> TI2V path —
     /// I2V conditions the first latent frame at timestep 0 while the rest denoise). <paramref name="timesteps"/> is
     /// either one shared value or one value per latent frame group (<c>T / patch_t</c>); each frame's tokens get that
     /// frame's AdaLN modulation in every block and in the final layer.</summary>
-    public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float[] timesteps) =>
-        ForwardCore(backend, latent, encoder, timesteps, null);
+    public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float[] timesteps, DeviceFeatureCache? stepCache = null) =>
+        ForwardCore(backend, latent, encoder, timesteps, null, stepCache);
 
-    private Tensor ForwardCore(IBackend backend, Tensor latent, Tensor encoder, float[] timesteps, Tensor? imageEmbeds)
+    private Tensor ForwardCore(IBackend backend, Tensor latent, Tensor encoder, float[] timesteps, Tensor? imageEmbeds,
+        DeviceFeatureCache? stepCache = null)
     {
         int t = (int)latent.Shape[2], hh = (int)latent.Shape[3], ww = (int)latent.Shape[4];
         (int pt, int ph, int pw) = _config.PatchSize;
@@ -164,15 +166,51 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         Tensor cur = hidden;
         _fwdCounter++;
         string? vramLog = Environment.GetEnvironmentVariable("HARTSY_WAN_VRAM");
-        for (int i = 0; i < _blocks.Length; i++)
+
+        // Across-step First-Block cache (single-stream FBC; QwenImageTransformer holds the dual-stream
+        // reference wiring): block 0 always runs and its output is the gate indicator. Hit ⇒ blocks 1..N−1
+        // are replaced by the previous full compute's residual (device Add); miss ⇒ the block-0 output
+        // survives the loop as the anchor for StoreResidual. Null stepCache ⇒ byte-identical loop.
+        Tensor? cacheAnchor = null;
+        int startBlock = 0;
+        if (stepCache is not null && _blocks.Length > 1)
+        {
+            if (vramLog is not null)
+                System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block 0: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
+            Tensor block0 = _blocks[0].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
+                imageContextLen: imageContextLen, dbg: "b0");
+            cur.Dispose();
+            cur = block0;
+            WanVideoDebugDump.Dump("blocks.0", cur);
+            startBlock = 1;
+            if (!stepCache.ShouldCompute(backend, cur))
+            {
+                Tensor reconstructed = stepCache.ApplyResidual(backend, cur);
+                cur.Dispose();
+                cur = reconstructed;
+                startBlock = _blocks.Length;
+            }
+            else
+            {
+                cacheAnchor = cur;
+            }
+        }
+
+        for (int i = startBlock; i < _blocks.Length; i++)
         {
             if (vramLog is not null)
                 System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block {i}: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
                 imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null);
-            cur.Dispose();
+            if (!ReferenceEquals(cur, cacheAnchor)) cur.Dispose();
             cur = next;
             WanVideoDebugDump.Dump($"blocks.{i}", cur);
+        }
+
+        if (cacheAnchor is not null)
+        {
+            stepCache!.StoreResidual(backend, cacheAnchor, cur);
+            cacheAnchor.Dispose();
         }
         timestepProj.Dispose();   // cos/sin/encoderProj live in the per-generation caches — not per-forward temporaries
 

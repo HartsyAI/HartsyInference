@@ -572,4 +572,136 @@ public static unsafe class CheckpointConvertUtils
         result.Fp8ScaleFactor = globalScale;
         return result;
     }
+
+    /// <summary>Requantizes a group of fp8_scaled (E4M3) tensors IN PLACE to one common per-tensor scale —
+    /// the enabler for concat-fusing separately-scaled projections (Q/K/V, FFN w1/w3) into a single GEMM,
+    /// which was previously ruled out because one cuBLAS <c>alpha</c> cannot represent N different
+    /// <see cref="Tensor.Fp8ScaleFactor"/>s. Picks <c>s* = max(sᵢ)</c>, decodes each tensor's bytes at its own
+    /// scale, and re-encodes at <c>s*</c> — values only shrink (<c>sᵢ ≤ s*</c>), so nothing saturates.
+    ///
+    /// <para><b>Precision:</b> E4M3 is floating-point, so relative error is scale-invariant for values that
+    /// stay in the NORMAL range after rescaling — those weights round-trip within half an E4M3 ulp
+    /// (rel ≤ 1/16). Only weights whose real magnitude falls below <c>s*·2⁻⁶</c> (E4M3 min normal) enter the
+    /// subnormal range and lose precision progressively, bounded by the group's scale ratio; weights below
+    /// <c>s*·2⁻¹⁰</c> (half min subnormal) flush to zero. Both populations carry negligible GEMM energy at
+    /// typical fp8_scaled ratios (≤ ~8×), but callers fusing groups with extreme ratios should A/B output
+    /// quality. Returns the largest introduced decode error across the group, normalized per tensor to its
+    /// own amax (<c>max |Δreal| / amax(real)</c> — the metric that bounds the GEMM contribution); 0 when all
+    /// scales already match (nothing rewritten).</para></summary>
+    public static float RequantizeToCommonFp8Scale(params Tensor[] tensors)
+    {
+        if (tensors is null || tensors.Length < 2)
+            throw new ArgumentException("RequantizeToCommonFp8Scale needs at least two tensors to unify.", nameof(tensors));
+        float commonScale = 0f;
+        foreach (Tensor t in tensors)
+        {
+            if (t.DType != DType.F8E4M3)
+                throw new ArgumentException($"RequantizeToCommonFp8Scale requires F8E4M3 tensors; got {t.DType}.");
+            commonScale = Math.Max(commonScale, t.Fp8ScaleFactor);
+        }
+
+        float maxError = 0f;
+        foreach (Tensor t in tensors)
+        {
+            if (t.Fp8ScaleFactor == commonScale) continue;
+
+            // CastTo(F32) folds Fp8ScaleFactor → true weight values. Dividing by s* and re-encoding puts the
+            // bytes on the common scale; the rewrite is in place so weight-dictionary references stay valid.
+            // Load-time-only cost.
+            Tensor real = t.CastTo(DType.F32);
+            long n = real.ElementCount;
+            float* rp = (float*)real.DataPointer;
+
+            Tensor scaled = new Tensor(real.Shape, DType.F32);
+            float* sp = (float*)scaled.DataPointer;
+            float inv = 1.0f / commonScale;
+            float amax = 0f;
+            for (long i = 0; i < n; i++)
+            {
+                sp[i] = rp[i] * inv;
+                amax = Math.Max(amax, Math.Abs(rp[i]));
+            }
+            Tensor requantized = scaled.CastTo(DType.F8E4M3);
+            scaled.Dispose();
+
+            Buffer.MemoryCopy((byte*)requantized.DataPointer, (byte*)t.DataPointer, n, n);
+            requantized.Dispose();
+            t.Fp8ScaleFactor = commonScale;
+
+            // Introduced error vs the original decode, normalized to this tensor's amax.
+            if (amax > 0f)
+            {
+                Tensor newReal = t.CastTo(DType.F32);
+                float* np = (float*)newReal.DataPointer;
+                float invAmax = 1.0f / amax;
+                for (long i = 0; i < n; i++)
+                    maxError = Math.Max(maxError, Math.Abs(np[i] - rp[i]) * invAmax);
+                newReal.Dispose();
+            }
+            real.Dispose();
+        }
+        return maxError;
+    }
+
+    /// <summary>Row-concatenates two rank-2 weight tensors <c>[r1, C]</c> + <c>[r2, C]</c> → <c>[r1+r2, C]</c>
+    /// (host memcpy — row-major rows are contiguous). Same dtype and column count required; for fp8 tensors the
+    /// caller must have unified the scales first (<see cref="RequantizeToCommonFp8Scale"/>) — the concat carries
+    /// <paramref name="a"/>'s <see cref="Tensor.Fp8ScaleFactor"/> and throws if <paramref name="b"/>'s differs.</summary>
+    public static unsafe Tensor ConcatRowsHost(Tensor a, Tensor b)
+    {
+        if (a.Shape.Rank != 2 || b.Shape.Rank != 2)
+            throw new ArgumentException($"ConcatRowsHost needs rank-2 tensors; got {a.Shape} and {b.Shape}.");
+        if (a.Shape[1] != b.Shape[1])
+            throw new ArgumentException($"ConcatRowsHost column mismatch: {a.Shape} vs {b.Shape}.");
+        if (a.DType != b.DType)
+            throw new ArgumentException($"ConcatRowsHost dtype mismatch: {a.DType} vs {b.DType}.");
+        if (a.DType == DType.F8E4M3 && a.Fp8ScaleFactor != b.Fp8ScaleFactor)
+            throw new ArgumentException("ConcatRowsHost: fp8 scales differ — call RequantizeToCommonFp8Scale first.");
+
+        Tensor fused = new Tensor(new TensorShape(a.Shape[0] + b.Shape[0], a.Shape[1]), a.DType);
+        long aBytes = a.ElementCount * a.DType.SizeInBytes;
+        long bBytes = b.ElementCount * b.DType.SizeInBytes;
+        Buffer.MemoryCopy((void*)a.DataPointer, (void*)fused.DataPointer, aBytes + bBytes, aBytes);
+        Buffer.MemoryCopy((void*)b.DataPointer, (byte*)fused.DataPointer + aBytes, bBytes, bBytes);
+        fused.Fp8ScaleFactor = a.Fp8ScaleFactor;
+        return fused;
+    }
+
+    /// <summary>Fuses SwiGLU FFN weight pairs (<c>…w1Suffix</c> gate + <c>…w3Suffix</c> up) into single
+    /// row-concatenated <c>…fusedSuffix</c> tensors — one GEMM instead of two (INFERENCE_ACCEL_GRIND §H3).
+    /// fp8_scaled pairs are first unified via <see cref="RequantizeToCommonFp8Scale"/>; a pair whose
+    /// introduced requant error exceeds <paramref name="maxRequantError"/> is left UNFUSED (per-block
+    /// fallback — extreme scale ratios would visibly perturb output). Mixed-dtype or mismatched-shape pairs
+    /// are skipped. Returns (fused count, worst accepted requant error).</summary>
+    public static (int Fused, float WorstError) FuseSwiGluPairs(Dictionary<string, Tensor> weights,
+        string w1Suffix, string w3Suffix, string fusedSuffix, float maxRequantError = 1f / 16f)
+    {
+        List<string> w1Keys = new();
+        foreach (string k in weights.Keys)
+            if (k.EndsWith(w1Suffix, StringComparison.Ordinal)) w1Keys.Add(k);
+
+        int fusedCount = 0;
+        float worst = 0f;
+        foreach (string w1Key in w1Keys)
+        {
+            string baseKey = w1Key.Substring(0, w1Key.Length - w1Suffix.Length);
+            string w3Key = baseKey + w3Suffix;
+            if (!weights.TryGetValue(w3Key, out Tensor? w3)) continue;
+            Tensor w1 = weights[w1Key];
+            if (w1.DType != w3.DType || w1.Shape.Rank != 2 || w3.Shape.Rank != 2 || w1.Shape[1] != w3.Shape[1]) continue;
+
+            float err = 0f;
+            if (w1.DType == DType.F8E4M3 && w1.Fp8ScaleFactor != w3.Fp8ScaleFactor)
+            {
+                err = RequantizeToCommonFp8Scale(w1, w3);
+                if (err > maxRequantError) continue;   // leave this block unfused rather than degrade it
+            }
+            weights[baseKey + fusedSuffix] = ConcatRowsHost(w1, w3);
+            weights.Remove(w1Key);
+            weights.Remove(w3Key);
+            fusedCount++;
+            worst = Math.Max(worst, err);
+        }
+        return (fusedCount, worst);
+    }
 }

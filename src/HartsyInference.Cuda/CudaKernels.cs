@@ -23,6 +23,36 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _gegluModule;
     private readonly CudaModule _broadcastAddModule;
 
+    // Optional: across-step feature-cache gate reductions (stepcache.ptx). Null when the PTX has not been
+    // compiled on this install yet — DeviceFeatureCache gates on HasStepCacheKernels and stays off without it.
+    private readonly CudaModule? _stepCacheModule;
+    private readonly nint _stepCacheRelL1F32;
+    private readonly nint _stepCacheRelL1F16;
+
+    // Optional: SageAttention-v1 INT8 flash attention (sage_attn_int8.ptx, native/cuda/attention). Null when
+    // not compiled — CudaBackend.ScaledDotProductAttention gates on HasSageAttentionKernels and falls through.
+    private readonly CudaModule? _sageAttnModule;
+    private readonly nint _sageKMeanF32;
+    private readonly nint _sageQuantQInt8F32;
+    private readonly nint _sageQuantKInt8F32;
+    private readonly nint _sageAttnInt8F32;
+    private readonly nint _sageKMeanF16H;
+    private readonly nint _sageQuantQInt8F16H;
+    private readonly nint _sageQuantKInt8F16H;
+
+    // Optional: the register-resident mma.sync rewrite of the flash stage (sage_attn_int8_v1.ptx) — no
+    // Sq%32 restriction (fully row-guarded) and the perf-viable implementation. Preferred over the wmma v0
+    // when present; HARTSY_SAGE_V0=1 forces the old kernel for debugging.
+    private readonly CudaModule? _sageAttnV1Module;
+    private readonly nint _sageAttnV1D128;
+    private readonly nint _sageAttnV1D64;
+    private readonly nint _sageAttnV1D128F16Acc;
+    private readonly nint _sageAttnV1D64F16Acc;
+    private readonly nint _sageAttnV1D128F16Io;
+    private readonly nint _sageAttnV1D64F16Io;
+    private readonly nint _sageVF16T;
+    private readonly nint _sageVF16TH;
+
     // ── F16 Modules ──────────────────────────────────────────────────────
     private readonly CudaModule _elementwiseF16Module;
     private readonly CudaModule _groupnormF16Module;
@@ -372,6 +402,45 @@ public sealed class CudaKernels : IDisposable
 
         _broadcastAddModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "broadcast_add_f32.ptx"));
         _broadcastAddF32 = _broadcastAddModule.GetFunction("broadcast_add_f32");
+
+        // Optional module: present only after native/cuda/dit/build.sh has compiled stepcache.cu on a
+        // CUDA-toolkit box. Absence is not an error — the step-cache feature reports unsupported instead.
+        string stepCachePath = Path.Combine(ptxDir, "stepcache.ptx");
+        if (File.Exists(stepCachePath))
+        {
+            _stepCacheModule = CudaModule.LoadFromFile(stepCachePath);
+            _stepCacheRelL1F32 = _stepCacheModule.GetFunction("stepcache_rel_l1_f32");
+            _stepCacheRelL1F16 = _stepCacheModule.GetFunction("stepcache_rel_l1_f16");
+        }
+
+        // Optional module: SageAttention INT8 (native/cuda/attention/build.sh). Absence is not an error.
+        string sageAttnPath = Path.Combine(ptxDir, "sage_attn_int8.ptx");
+        if (File.Exists(sageAttnPath))
+        {
+            _sageAttnModule = CudaModule.LoadFromFile(sageAttnPath);
+            _sageKMeanF32 = _sageAttnModule.GetFunction("sage_k_mean_f32");
+            _sageQuantQInt8F32 = _sageAttnModule.GetFunction("sage_quant_q_int8_f32");
+            _sageQuantKInt8F32 = _sageAttnModule.GetFunction("sage_quant_k_int8_f32");
+            _sageAttnInt8F32 = _sageAttnModule.GetFunction("sage_attn_int8_f32");
+            _sageKMeanF16H = _sageAttnModule.GetFunction("sage_k_mean_f16h");
+            _sageQuantQInt8F16H = _sageAttnModule.GetFunction("sage_quant_q_int8_f16h");
+            _sageQuantKInt8F16H = _sageAttnModule.GetFunction("sage_quant_k_int8_f16h");
+
+            // The register-resident v1 flash stage (same prologue kernels) — preferred when present.
+            string sageV1Path = Path.Combine(ptxDir, "sage_attn_int8_v1.ptx");
+            if (File.Exists(sageV1Path))
+            {
+                _sageAttnV1Module = CudaModule.LoadFromFile(sageV1Path);
+                _sageAttnV1D128 = _sageAttnV1Module.GetFunction("sage_attn_int8_v1_d128_f32");
+                _sageAttnV1D64 = _sageAttnV1Module.GetFunction("sage_attn_int8_v1_d64_f32");
+                _sageAttnV1D128F16Acc = _sageAttnV1Module.GetFunction("sage_attn_int8_v1_d128_f16acc_f32");
+                _sageAttnV1D64F16Acc = _sageAttnV1Module.GetFunction("sage_attn_int8_v1_d64_f16acc_f32");
+                _sageAttnV1D128F16Io = _sageAttnV1Module.GetFunction("sage_attn_int8_v1_d128_f16io");
+                _sageAttnV1D64F16Io = _sageAttnV1Module.GetFunction("sage_attn_int8_v1_d64_f16io");
+                _sageVF16T = _sageAttnV1Module.GetFunction("sage_v_f16t");
+                _sageVF16TH = _sageAttnV1Module.GetFunction("sage_v_f16t_h");
+            }
+        }
 
         // ── F16 modules ──────────────────────────────────────────────────
         _elementwiseF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "elementwise_f16.ptx"));
@@ -1518,6 +1587,152 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches elementwise add: output[i] = a[i] + b[i] (F32)</summary>
     public void LaunchAdd(ulong output, ulong a, ulong b, int count, nint stream)
         => LaunchBinaryImpl(_addF32, output, a, b, count, stream);
+
+    /// <summary>Whether the optional stepcache.ptx module was found and loaded (see native/cuda/dit/stepcache.cu).</summary>
+    public bool HasStepCacheKernels => _stepCacheModule is not null;
+
+    /// <summary>Launches the feature-cache gate reduction: sums[0] += Σ|a−b|, sums[1] += Σ|b| over <paramref name="count"/>
+    /// elements. Caller pre-zeroes the 2-float <paramref name="sums"/> buffer. F32 or F16 operands by <paramref name="isF16"/>.</summary>
+    public unsafe void LaunchStepCacheRelL1(ulong sums, ulong a, ulong b, long count, bool isF16, nint stream)
+    {
+        if (_stepCacheModule is null)
+            throw new InvalidOperationException("stepcache.ptx is not loaded; gate on HasStepCacheKernels first.");
+
+        ulong aArg = a, bArg = b, sumsArg = sums;
+        ulong countArg = (ulong)count;
+
+        void** args = stackalloc void*[4];
+        args[0] = &aArg;
+        args[1] = &bArg;
+        args[2] = &sumsArg;
+        args[3] = &countArg;
+
+        // Grid-stride kernel: cap blocks so the per-block atomic tail stays negligible while still
+        // saturating the SMs at DiT activation sizes (seqLen×hidden ≈ 15M elements).
+        uint gridDim = (uint)Math.Min(1024, (count + BlockSize - 1) / BlockSize);
+        nint func = isF16 ? _stepCacheRelL1F16 : _stepCacheRelL1F32;
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the optional sage_attn_int8.ptx module was found and loaded (native/cuda/attention).</summary>
+    public bool HasSageAttentionKernels => _sageAttnModule is not null;
+
+    /// <summary>SageAttention prologue 1/3 — K per-channel mean over the sequence: kmean[b,h,d]. Grid (H,B), block 128.</summary>
+    public unsafe void LaunchSageKMean(ulong kmean, ulong k, int b, int h, int skv, int d, nint stream, bool srcF16 = false)
+    {
+        ThrowIfNoSageModule();
+        ulong kmeanArg = kmean, kArg = k;
+        uint bArg = (uint)b, hArg = (uint)h, skvArg = (uint)skv, dArg = (uint)d;
+        void** args = stackalloc void*[6];
+        args[0] = &kmeanArg; args[1] = &kArg; args[2] = &bArg; args[3] = &hArg; args[4] = &skvArg; args[5] = &dArg;
+        CudaDriverApi.cuLaunchKernel(srcF16 ? _sageKMeanF16H : _sageKMeanF32, (uint)h, (uint)b, 1, 128, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>SageAttention prologue 2/3 — per-row absmax INT8 quant of Q with the attention softmax scale
+    /// folded into the stored row scale. One warp per row; grid ceil(B·H·Sq/4), block 128.</summary>
+    public unsafe void LaunchSageQuantQ(ulong q8, ulong qscale, ulong q, int b, int h, int sq, int d, float attnScale, nint stream, bool srcF16 = false)
+    {
+        ThrowIfNoSageModule();
+        ulong q8Arg = q8, qsArg = qscale, qArg = q;
+        uint bArg = (uint)b, hArg = (uint)h, sqArg = (uint)sq, dArg = (uint)d;
+        float scaleArg = attnScale;
+        void** args = stackalloc void*[8];
+        args[0] = &q8Arg; args[1] = &qsArg; args[2] = &qArg;
+        args[3] = &bArg; args[4] = &hArg; args[5] = &sqArg; args[6] = &dArg; args[7] = &scaleArg;
+        uint rows = (uint)((long)b * h * sq);
+        CudaDriverApi.cuLaunchKernel(srcF16 ? _sageQuantQInt8F16H : _sageQuantQInt8F32, (rows + 3) / 4, 1, 1, 128, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>SageAttention prologue 3/3 — per-row absmax INT8 quant of (K − kmean) (the softmax-invariant
+    /// channel smoothing that recovers outlier accuracy). One warp per row; grid ceil(B·H·Skv/4), block 128.</summary>
+    public unsafe void LaunchSageQuantK(ulong k8, ulong kscale, ulong k, ulong kmean, int b, int h, int skv, int d, nint stream, bool srcF16 = false)
+    {
+        ThrowIfNoSageModule();
+        ulong k8Arg = k8, ksArg = kscale, kArg = k, kmeanArg = kmean;
+        uint bArg = (uint)b, hArg = (uint)h, skvArg = (uint)skv, dArg = (uint)d;
+        void** args = stackalloc void*[8];
+        args[0] = &k8Arg; args[1] = &ksArg; args[2] = &kArg; args[3] = &kmeanArg;
+        args[4] = &bArg; args[5] = &hArg; args[6] = &skvArg; args[7] = &dArg;
+        uint rows = (uint)((long)b * h * skv);
+        CudaDriverApi.cuLaunchKernel(srcF16 ? _sageQuantKInt8F16H : _sageQuantKInt8F32, (rows + 3) / 4, 1, 1, 128, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the register-resident v1 flash kernel is available (no Sq%32 restriction).</summary>
+    public bool HasSageV1 => _sageAttnV1Module is not null;
+
+    /// <summary>True when the v1 path will actually be dispatched (module present, not forced off via
+    /// HARTSY_SAGE_V0=1) — the caller must then provide the pre-transposed F16 V workspace.</summary>
+    public bool UseSageV1 => _sageAttnV1Module is not null && Environment.GetEnvironmentVariable("HARTSY_SAGE_V0") != "1";
+
+    /// <summary>v1 prologue — one-shot V transpose+cast: [B,H,Skv,D] f32 → [B,H,D,skvPad] f16 with
+    /// skvPad = Skv rounded up to 8 (16-byte cp.async source alignment). Amortizes the per-query-tile
+    /// re-transposes the flash kernel would otherwise repeat Sq/64 times.</summary>
+    public unsafe void LaunchSageVF16T(ulong vt16, ulong v, int b, int h, int skv, int d, nint stream, bool srcF16 = false)
+    {
+        ThrowIfNoSageModule();
+        ulong vtArg = vt16, vArg = v;
+        uint bArg = (uint)b, hArg = (uint)h, skvArg = (uint)skv, dArg = (uint)d;
+        void** args = stackalloc void*[6];
+        args[0] = &vtArg; args[1] = &vArg; args[2] = &bArg; args[3] = &hArg; args[4] = &skvArg; args[5] = &dArg;
+        long skvPad = (skv + 7L) & ~7L;
+        if (skvPad >= 2048 && (skvPad & (skvPad - 1)) == 0) skvPad += 8;   // anti-aliasing pad (see sage_skv_pad)
+        long total = (long)b * h * d * skvPad;
+        uint grid = (uint)Math.Min(4096, (total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(srcF16 ? _sageVF16TH : _sageVF16T, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>SageAttention main kernel — fused INT8-QK^T flash attention (online softmax). Dispatches the
+    /// register-resident mma.sync v1 (grid ceil(Sq/64)×H×B, block 128, ~24.3 KB SMEM, any Sq) when compiled,
+    /// else the wmma v0 (grid Sq/32×H×B, block 64 — caller must gate Sq % 32 == 0 for v0).
+    /// HARTSY_SAGE_V0=1 forces v0 for debugging.</summary>
+    public unsafe void LaunchSageAttnInt8(ulong outPtr, ulong q8, ulong qscale, ulong k8, ulong kscale, ulong v,
+        ulong vt16, int b, int h, int sq, int skv, int d, nint stream, bool f16Io = false)
+    {
+        ThrowIfNoSageModule();
+        ulong outArg = outPtr, q8Arg = q8, qsArg = qscale, k8Arg = k8, ksArg = kscale, vArg = v;
+        uint bArg = (uint)b, hArg = (uint)h, sqArg = (uint)sq, skvArg = (uint)skv;
+        if (UseSageV1)
+        {
+            if (vt16 == 0) throw new ArgumentException("v1 path requires the pre-transposed V workspace (LaunchSageVF16T).");
+            ulong vtArg = vt16;
+            void** args = stackalloc void*[10];
+            args[0] = &outArg; args[1] = &q8Arg; args[2] = &qsArg; args[3] = &k8Arg; args[4] = &ksArg; args[5] = &vtArg;
+            args[6] = &bArg; args[7] = &hArg; args[8] = &sqArg; args[9] = &skvArg;
+            // SMEM: TWO cp.async stages of (K8 s8 [BC*D] + Vt f16 [D*BC] + kscale f32 [BC]), BR=64/BC=32
+            // in-kernel (BC=32 keeps d128 at 155 regs / 0 spills / 3 blocks-per-SM; 2 stages ≈ 24.8 KB < 48 KB).
+            const int bc = 32;
+            uint smemBytes = (uint)(2 * (bc * d + d * bc * 2 + bc * sizeof(float)));
+            // E1 experiment knob: HARTSY_SAGE_PV=f16acc selects the F16-accumulate PV variant (2× PV mma
+            // rate on GeForce Ampere; P pre-scaled 1/16 in-kernel for overflow headroom to ~349k keys).
+            bool f16Acc = Environment.GetEnvironmentVariable("HARTSY_SAGE_PV") == "f16acc";
+            if (f16Io && !UseSageV1)
+                throw new InvalidOperationException("F16-ingest Sage requires the v1 module (HARTSY_SAGE_V0=1 is F32-only).");
+            nint func = f16Io
+                ? (d == 128 ? _sageAttnV1D128F16Io : _sageAttnV1D64F16Io)   // native-F16 contract implies f16acc PV
+                : d == 128
+                    ? (f16Acc ? _sageAttnV1D128F16Acc : _sageAttnV1D128)
+                    : (f16Acc ? _sageAttnV1D64F16Acc : _sageAttnV1D64);
+            CudaDriverApi.cuLaunchKernel(func, (uint)((sq + 63) / 64), (uint)h, (uint)b, 128, 1, 1,
+                smemBytes, stream, (nint)args, 0).ThrowOnError();
+            return;
+        }
+        uint dArg = (uint)d;
+        void** args0 = stackalloc void*[11];
+        args0[0] = &outArg; args0[1] = &q8Arg; args0[2] = &qsArg; args0[3] = &k8Arg; args0[4] = &ksArg; args0[5] = &vArg;
+        args0[6] = &bArg; args0[7] = &hArg; args0[8] = &sqArg; args0[9] = &skvArg; args0[10] = &dArg;
+        // SMEM: Vsh f32 [16*D] + Ssh f32 [32*16] + Osh f32 [32*D] + K8sh s8 [16*D] (kernel-side BR=32/BC=16).
+        uint smemBytes0 = (uint)(16 * d * sizeof(float) + 32 * 16 * sizeof(float) + 32 * d * sizeof(float) + 16 * d);
+        CudaDriverApi.cuLaunchKernel(_sageAttnInt8F32, (uint)(sq / 32), (uint)h, (uint)b, 64, 1, 1,
+            smemBytes0, stream, (nint)args0, 0).ThrowOnError();
+    }
+
+    private void ThrowIfNoSageModule()
+    {
+        if (_sageAttnModule is null)
+            throw new InvalidOperationException("sage_attn_int8.ptx is not loaded; gate on HasSageAttentionKernels first.");
+    }
 
     /// <summary>Launches elementwise add: output[i] = a[i] + b[i] (F16)</summary>
     public void LaunchAddF16(ulong output, ulong a, ulong b, int count, nint stream)
@@ -2843,6 +3058,7 @@ public sealed class CudaKernels : IDisposable
         _transposeModule?.Dispose();
         _gegluModule?.Dispose();
         _broadcastAddModule?.Dispose();
+        _stepCacheModule?.Dispose();
         _elementwiseF16Module?.Dispose();
         _groupnormF16Module?.Dispose();
         _layernormF16Module?.Dispose();

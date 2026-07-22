@@ -156,6 +156,33 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         float cfgScale = request.CfgScale ?? GenerationDefaults.QwenImage.CfgScale;
         bool useCfg = cfgScale > 1.0f;
 
+        // Default-off perf knobs (reference wiring for the fleet — see docs/Checklists/INFERENCE_ACCEL_GRIND.md).
+        // HARTSY_CFG_INTERVAL=lo,hi skips the uncond forward outside the normalized-t band (limited-interval
+        // guidance); HARTSY_STEP_CACHE=<threshold|1> reuses the block-stack residual across steps when the
+        // first block's output has barely drifted (First-Block cache). Unset ⇒ byte-identical baseline path.
+        GuidanceInterval cfgInterval = GuidanceInterval.FromEnvironment();
+        float stepCacheThreshold = StepCacheEnv.ReadThreshold();
+        DeviceFeatureCache? condCache = null;
+        DeviceFeatureCache? uncondCache = null;
+        if (stepCacheThreshold > 0f)
+        {
+            if (Backend.SupportsDeviceStepCacheGate)
+            {
+                int stepCacheCap = StepCacheEnv.ReadCap();
+                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
+                if (useCfg) uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}");
+            }
+            else
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    "(stepcache.ptx not compiled?) — running uncached.");
+            }
+        }
+        if (!cfgInterval.IsAlways)
+            Logs.Info($"CFG interval ON: guidance applies at normalized t in [{cfgInterval.Start}, {cfgInterval.End}]");
+        int cfgSkippedSteps = 0;
+
         Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
         if (plan.PassThrough)
         {
@@ -460,12 +487,17 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                 transformerInput = ConcatPackedSeqDim(packedLatent, packedEditRef);
             }
 
+            // Limited-interval guidance: outside the band the uncond forward is pure waste (the paper measures
+            // a quality IMPROVEMENT from dropping it there), so the step degenerates to the cond-only path.
+            bool cfgThisStep = useCfg && cfgInterval.Applies(normalizedT);
+            if (useCfg && !cfgThisStep) cfgSkippedSteps++;
+
             if (drainFree)
             {
-                Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero);
-                if (useCfg)
+                Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, condCache);
+                if (cfgThisStep)
                 {
-                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero);
+                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, uncondCache);
                     Backend.CfgEulerStep(packedLatent, condPred, uncondPred, cfgScale, scheduler.Dt(i));
                     uncondPred.Dispose();
                 }
@@ -479,17 +511,17 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             else
             {
                 Tensor noisePred;
-                if (useCfg)
+                if (cfgThisStep)
                 {
-                    Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero);
-                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero);
+                    Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, condCache);
+                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, uncondCache);
                     noisePred = CfgHelper.ApplyCfg(uncondPred, condPred, cfgScale);
                     uncondPred.Dispose();
                     condPred.Dispose();
                 }
                 else
                 {
-                    noisePred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero);
+                    noisePred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, condCache);
                 }
                 if (transformerInput != packedLatent) transformerInput.Dispose();
 
@@ -542,6 +574,19 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // caches — not disposed here; DisposeCore / cache replacement release them.
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
+
+        // Perf-knob accounting for benchmark records: forwards actually run vs the uncached/ungated baseline.
+        if (condCache is not null)
+        {
+            string uncondStats = uncondCache is not null
+                ? $"; uncond {uncondCache.Computes} computes / {uncondCache.Reuses} reuses"
+                : string.Empty;
+            Logs.Info($"Step cache: cond {condCache.Computes} computes / {condCache.Reuses} reuses{uncondStats}");
+            condCache.Dispose();
+            uncondCache?.Dispose();
+        }
+        if (cfgSkippedSteps > 0)
+            Logs.Info($"CFG interval: uncond forward skipped on {cfgSkippedSteps}/{steps - startStep} steps");
 
         QwenImageTransformer.DumpFinalLatent(packedLatent);
 

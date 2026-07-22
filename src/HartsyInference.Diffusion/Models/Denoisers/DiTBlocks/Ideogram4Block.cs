@@ -45,6 +45,7 @@ public sealed unsafe class Ideogram4Block
     private Tensor? _w1; // gate
     private Tensor? _w2; // down
     private Tensor? _w3; // up
+    private Tensor? _w13; // fused [gate; up] (converter HARTSY_FUSED_FFN=1 — one GEMM, INFERENCE_ACCEL_GRIND §H3.2)
 
     // AdaLN modulation: Linear(adalnDim → 4*hidden), bias=True.
     private Tensor? _adalnWeight;
@@ -76,16 +77,27 @@ public sealed unsafe class Ideogram4Block
         _normQ.LoadWeights(weights[$"{prefix}.attention.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attention.norm_k.weight"]);
 
-        _w1 = weights[$"{prefix}.feed_forward.w1.weight"];
+        // Fused-FFN path (converter emits w13 = [w1; w3] under HARTSY_FUSED_FFN=1) — else the split pair.
+        if (weights.TryGetValue($"{prefix}.feed_forward.w13.weight", out Tensor? w13))
+        {
+            _w13 = w13;
+        }
+        else
+        {
+            _w1 = weights[$"{prefix}.feed_forward.w1.weight"];
+            _w3 = weights[$"{prefix}.feed_forward.w3.weight"];
+        }
         _w2 = weights[$"{prefix}.feed_forward.w2.weight"];
-        _w3 = weights[$"{prefix}.feed_forward.w3.weight"];
         // F16 mode: damp the two sandwich-normed projections so their raw outputs fit F16 range (see
         // F16SandwichDamp). attention_norm2 cancels the o damp; ffn_norm2 cancels the w3 damp (it scales
         // silu(w1)·w3 and thus the w2 output linearly). F32 path untouched — baseline stays bit-identical.
+        // Fused w13 has ONE scale, so the damp shrinks the gate half too — ForwardSwiGlu un-damps the gate
+        // before silu (silu is non-homogeneous; the up half stays damped exactly like the split path).
         if (DitDtype.Act == DType.F16)
         {
             _oWeight.Fp8ScaleFactor *= F16SandwichDamp;
-            _w3.Fp8ScaleFactor *= F16SandwichDamp;
+            if (_w3 is not null) _w3.Fp8ScaleFactor *= F16SandwichDamp;
+            if (_w13 is not null) _w13.Fp8ScaleFactor *= F16SandwichDamp;
         }
 
         _adalnWeight = weights[$"{prefix}.adaln_modulation.weight"];
@@ -106,6 +118,7 @@ public sealed unsafe class Ideogram4Block
         if (_w1 is not null) yield return _w1;
         if (_w2 is not null) yield return _w2;
         if (_w3 is not null) yield return _w3;
+        if (_w13 is not null) yield return _w13;
         if (_adalnWeight is not null) yield return _adalnWeight;
         if (_adalnBias is not null) yield return _adalnBias;
     }
@@ -247,18 +260,42 @@ public sealed unsafe class Ideogram4Block
         return projected;
     }
 
-    /// <summary>SwiGLU FFN: <c>w2(silu(w1(x)) * w3(x))</c>, all bias=False.</summary>
+    /// <summary>SwiGLU FFN: <c>w2(silu(w1(x)) * w3(x))</c>, all bias=False. With the fused <c>w13</c>
+    /// (HARTSY_FUSED_FFN) the two projections run as ONE GEMM and split via contiguous slices; in F16 mode
+    /// the shared damp on w13 is undone on the gate half before silu (see LoadWeights).</summary>
     private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen)
     {
         TensorShape ff = new TensorShape(batch, seqLen, _ffnHidden);
-        Tensor gate = new Tensor(ff, input.DType);
-        backend.Linear(gate, input, _w1!, null);
+        Tensor gate;
+        Tensor up;
+        if (_w13 is not null)
+        {
+            Tensor both = new Tensor(new TensorShape(batch, seqLen, 2 * _ffnHidden), input.DType);
+            backend.Linear(both, input, _w13, null);
+            gate = new Tensor(ff, input.DType);
+            up = new Tensor(ff, input.DType);
+            backend.SliceLastDim(gate, both, 0);
+            backend.SliceLastDim(up, both, _ffnHidden);
+            both.Dispose();
+            if (DitDtype.Act == DType.F16)
+            {
+                // Undo the shared w13 damp on the gate half (the split path damps only w3).
+                Tensor undamped = new Tensor(ff, input.DType);
+                backend.Scale(undamped, gate, 1.0f / F16SandwichDamp);
+                gate.Dispose();
+                gate = undamped;
+            }
+        }
+        else
+        {
+            gate = new Tensor(ff, input.DType);
+            backend.Linear(gate, input, _w1!, null);
+            up = new Tensor(ff, input.DType);
+            backend.Linear(up, input, _w3!, null);
+        }
         Tensor gateAct = new Tensor(ff, input.DType);
         backend.Silu(gateAct, gate);
         gate.Dispose();
-
-        Tensor up = new Tensor(ff, input.DType);
-        backend.Linear(up, input, _w3!, null);
 
         Tensor combined = new Tensor(ff, input.DType);
         backend.Mul(combined, gateAct, up);

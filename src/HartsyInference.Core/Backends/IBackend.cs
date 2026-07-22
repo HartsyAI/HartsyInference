@@ -1456,6 +1456,63 @@ public interface IBackend : IDisposable
     /// backend is F32-only, so DiT F16 fast paths must gate on this and fall back to F32 when it is false.</summary>
     bool SupportsF16Activations => false;
 
+    /// <summary>True when <see cref="RelativeL1Distance"/> runs without pulling its operands to the host. The
+    /// default implementation reads <c>DataPointer</c>, which on CUDA evicts a cached activation and forces a
+    /// pageable re-upload mid-forward — so across-step feature caching (<c>DeviceFeatureCache</c>) must gate on
+    /// this and stay disabled when false. CPU is host-native (true); CUDA is true only once the stepcache PTX
+    /// kernels are present.</summary>
+    bool SupportsDeviceStepCacheGate => false;
+
+    /// <summary>Marks a tensor's device-resident activation as surviving <see cref="FreeActivations()"/> — for
+    /// cross-step state whose only authoritative copy is on-device (the across-step feature cache's previous
+    /// indicator/residual under the video pipelines' per-step activation free). No-op on host backends, where
+    /// tensor data always lives in host memory.</summary>
+    void PinActivation(Tensor tensor) { }
+
+    /// <summary>Removes a <see cref="PinActivation"/> mark. No-op on host backends.</summary>
+    void UnpinActivation(Tensor tensor) { }
+
+    /// <summary>Relative-L1 distance <c>Σ|a−b| / Σ|b|</c> over all elements — the across-step feature-cache gate
+    /// metric (TeaCache / First-Block-Cache). Returns 0 when the reference tensor is all-zero. Default host
+    /// implementation supports F32 and F16 and reads <c>DataPointer</c> (host-resident tensors only — see
+    /// <see cref="SupportsDeviceStepCacheGate"/> before calling this on GPU activations).</summary>
+    unsafe float RelativeL1Distance(Tensor a, Tensor b)
+    {
+        if (!a.Shape.Equals(b.Shape))
+            throw new ArgumentException($"RelativeL1Distance shape mismatch: a={a.Shape}, b={b.Shape}.");
+        if (a.DType != b.DType)
+            throw new ArgumentException($"RelativeL1Distance dtype mismatch: a={a.DType}, b={b.DType}.");
+        long n = a.ElementCount;
+        double diff = 0.0, denom = 0.0;
+        if (a.DType == DType.F32)
+        {
+            float* ap = (float*)a.DataPointer;
+            float* bp = (float*)b.DataPointer;
+            for (long i = 0; i < n; i++)
+            {
+                diff += Math.Abs(ap[i] - bp[i]);
+                denom += Math.Abs(bp[i]);
+            }
+        }
+        else if (a.DType == DType.F16)
+        {
+            Half* ap = (Half*)a.DataPointer;
+            Half* bp = (Half*)b.DataPointer;
+            for (long i = 0; i < n; i++)
+            {
+                float av = (float)ap[i];
+                float bv = (float)bp[i];
+                diff += Math.Abs(av - bv);
+                denom += Math.Abs(bv);
+            }
+        }
+        else
+        {
+            throw new NotSupportedException($"RelativeL1Distance supports F32/F16; got {a.DType}.");
+        }
+        return denom > 0.0 ? (float)(diff / denom) : 0.0f;
+    }
+
     /// <summary>True when the backend has the GPU-resident decode toolkit — <see cref="ApplyRopeInterleaved"/>,
     /// <see cref="KvCacheAppend"/>, <see cref="Permute0213"/>, and <see cref="FlashAttention"/> — so autoregressive
     /// decoders (e.g. Zonos) can run the block fully on-device with a fixed-capacity KV cache instead of the host
