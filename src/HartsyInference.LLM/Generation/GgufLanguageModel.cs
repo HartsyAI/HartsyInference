@@ -106,6 +106,20 @@ public sealed class GgufLanguageModel : IDisposable
     {
         string? chatTemplate = meta.GetString("tokenizer.chat_template");
         if (string.IsNullOrWhiteSpace(chatTemplate)) return new ChatMlTemplate();
+
+        // Some llama.cpp GGUF converters (RWKV-World among them) store a bare format-name sentinel here
+        // (e.g. "rwkv-world") instead of real Jinja source — a signal meant for llama.cpp's own hardcoded
+        // prompt-format table, not a template to render. A string with no "{{"/"{%" substitution syntax can
+        // never actually incorporate the conversation, so JinjaEngine "compiles" it fine and every render
+        // silently returns that literal constant text regardless of the real messages (confirmed live: three
+        // unrelated prompts against an RWKV-6 GGUF all produced byte-identical output). Detect that up front
+        // rather than letting it "succeed" — fall back to ChatML the same as a genuine compile failure.
+        if (!chatTemplate.Contains("{{", StringComparison.Ordinal) && !chatTemplate.Contains("{%", StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine($"[WRN] GGUF: chat template \"{chatTemplate}\" has no Jinja substitution syntax (likely a format-name sentinel, not real template source); falling back to ChatML (raw completion / embeddings still work).");
+            return new ChatMlTemplate();
+        }
+
         try { return new JinjaChatTemplate(chatTemplate); }
         catch (Exception ex)
         {

@@ -129,6 +129,33 @@ SwarmUI backend extension (https://github.com/HartsyAI/SwarmUI-HartsyInference-B
 serialization (PNG / JPEG / raw RGB) and per-connection session lifecycle live in that host, not in a
 HartsyInference server package.
 
+## 8b. `hartsy` CLI wiring (batch, not live) — **DONE for Oasis + DIAMOND (2026-07-21)**
+
+`hartsy world <image> -m <oasis|diamond>` drives `IWorldService`/`WorldService` (`src/HartsyInference.Engine/Services/WorldService.cs`)
+directly — a separate, simpler surface from the `IInteractiveSession`/`BackgroundComputeSession`/`IFrameStepper`
+layer in §3 (still unused by Engine/CLI; that layer targets the SwarmUI host per §8, not necessarily the CLI).
+Per the user's choice, this is a **batch** generator: `GenerationDispatch.WorldAsync` queues an action plan
+(`--actions`, comma-separated, cycled to fill `--frames`; a per-model default demo plan when omitted) before
+draining the session's frame stream — no live keyboard loop.
+
+- **Oasis**: unchanged one-shot-rollout-per-batch-drain behavior (`OasisWorldSession`).
+- **DIAMOND**: new `DiamondWorldPipeline` (`src/HartsyInference.World/Pipelines/DiamondWorldPipeline.cs`) +
+  `DiamondWorldSession` (`src/HartsyInference.Engine/Services/DiamondWorldSession.cs`) — genuinely one real
+  EDM sample per queued action (no batching), closing the "Interactive AR game-loop wiring" gap noted in §6's
+  parity doc. Adversarially verified with a real ALE `Breakout-v5` frame; per-pixel paddle tracking found a
+  **real, reproducible one-frame lag** between a `left`/`right` action and its visible effect (not wall
+  inertia — reproduced away from any wall) — root cause not isolated (session-layer action/history roll
+  ordering vs. a genuine action-window convention mismatch). See `MODEL_STATUS_WORLD.md`'s "CLI-wired,
+  correctness open" section for the full quantitative result; catalog status is `ValidationPending`, not
+  `Verified`, until this is bisected.
+- **Matrix-Game 2.0/3.0, Hunyuan-GameCraft**: `WorldService` now fails fast with a specific "not yet loadable"
+  message for each (checkpoint-assembly gap for MG2/GameCraft; checkpoint-assembly gap **and** missing
+  `Wan22VaeEncoder` for MG3) instead of silently mis-loading them as Oasis (the pre-existing bug: any `-m`
+  other than `oasis` used to route through the Oasis loader regardless).
+- `ModelCatalog` gained a `"diamond"` entry (`Modality.World`, `CliDrivable: true`, `ValidationPending` —
+  the network is bit-exact parity-verified in isolation, but the new CLI/session wiring has an open,
+  quantified correctness question, see above).
+
 ## 9. Testing & Validation
 
 - [ ] All `*GenerationTests` skip cleanly when env vars (`MATRIX_GAME_2_BASE_PATH`, `MATRIX_GAME_3_BASE_PATH`, `OASIS_500M_PATH`, `HUNYUAN_GAMECRAFT_PATH`) are missing.

@@ -47,8 +47,22 @@ public static class ModelResolver
         string subdir = ModalitySubdir.TryGetValue(modality, out string? s) ? s : "";
         string id = catalog?.Id ?? modelArg;
         string candidate = Path.Combine(RepoPaths.ModelsRoot(), subdir, id);
-        if (Directory.Exists(candidate) || File.Exists(candidate))
+        if (File.Exists(candidate))
             return Path.GetFullPath(candidate);
+        if (Directory.Exists(candidate))
+        {
+            // TextService.LoadInto needs a direct .gguf file path — unlike the folder-checkpoint diffusion/music
+            // families, a Text catalog id's Models/LLM/<id>/ directory is never itself a valid LocalPath. Auto-
+            // discover the single .gguf inside it (same convention TextService.FindMmproj uses for its sidecar
+            // scan); ambiguous (0 or 2+) falls through to null so an Assets-based download or an explicit
+            // --model-path resolves it instead, rather than handing the loader a directory it can't open.
+            if (modality == Modality.Text)
+            {
+                string[] ggufs = Directory.GetFiles(candidate, "*.gguf");
+                return ggufs.Length == 1 ? Path.GetFullPath(ggufs[0]) : null;
+            }
+            return Path.GetFullPath(candidate);
+        }
 
         return null;
     }

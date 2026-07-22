@@ -60,6 +60,18 @@ public sealed class JinjaAndTokenizerTests
     }
 
     [Fact]
+    public void Jinja_IsTrue_IsFalse()
+    {
+        // Regression: Qwen3's real chat template branches on `enable_thinking is false`, not just `is defined`/
+        // truthiness — IsTestExpr previously threw NotSupportedException for the "true"/"false" test names.
+        JinjaEngine engine = new("{% if flag is false %}F{% elif flag is true %}T{% else %}N{% endif %}");
+        Assert.Equal("F", engine.Render(new Dictionary<string, object?> { ["flag"] = false }));
+        Assert.Equal("T", engine.Render(new Dictionary<string, object?> { ["flag"] = true }));
+        // Strict boolean identity, not truthiness: a non-bool value is neither "is true" nor "is false".
+        Assert.Equal("N", engine.Render(new Dictionary<string, object?> { ["flag"] = 1 }));
+    }
+
+    [Fact]
     public void Jinja_StringLiteralContainingBraces_NotMistakenForCloseTag()
     {
         // Regression: Qwen2/2.5/3 tool-call templates embed '{{' and '}}' inside a quoted string literal.

@@ -68,6 +68,12 @@ public sealed unsafe class ClipSegPipeline : IVisionPipeline, ITextSegmenter
             loader.Load(modelPath);
             foreach (KeyValuePair<string, Tensor> kv in loader.GetAllTensors())
             {
+                // HF's CLIPTextEmbeddings ships a `position_ids` I64 buffer (a derivable arange, not a learned
+                // weight); ClipTextEncoder/ClipVisionEncoder never read it, and it isn't float-castable.
+                if (kv.Key.EndsWith(".position_ids", StringComparison.Ordinal))
+                {
+                    continue;
+                }
                 // Copy each to an owned F32 tensor while the loader mmap is still alive (borrowed tensors dangle after Dispose).
                 if (kv.Key.StartsWith("clip.", StringComparison.Ordinal))
                 {

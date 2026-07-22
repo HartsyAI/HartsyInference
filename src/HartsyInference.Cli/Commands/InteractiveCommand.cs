@@ -7,30 +7,31 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Rolls out an Oasis world model from a first-frame image with a canned "move forward" action plan.</summary>
+/// <summary>Rolls out an interactive world model from a first-frame image with an action plan: Oasis (a
+/// one-shot batch rollout) or DIAMOND (a genuinely per-frame loop, one real denoise per action).</summary>
 public sealed class InteractiveCommand : Command<InteractiveCommand.Settings>
 {
     /// <summary>Options for <c>hartsy world</c>.</summary>
     public sealed class Settings : CommandSettings
     {
-        /// <summary>Path to the first-frame image (Oasis expects 640x360).</summary>
+        /// <summary>Path to the first-frame image (Oasis expects 640x360; DIAMOND expects 64x64).</summary>
         [CommandArgument(0, "<image>")]
-        [Description("Path to the first-frame PNG (Oasis expects 640x360).")]
+        [Description("Path to the first-frame PNG (Oasis: 640x360; DIAMOND: 64x64).")]
         public string Image { get; init; } = "";
 
         /// <summary>Model id.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id (oasis).")]
+        [Description("Model id: oasis or diamond.")]
         public string Model { get; init; } = "oasis";
 
-        /// <summary>Path to the Oasis DiT .safetensors.</summary>
+        /// <summary>Path to the model checkpoint (Oasis DiT, or the DIAMOND denoiser).</summary>
         [CommandOption("--model-path")]
-        [Description("Path to the Oasis DiT .safetensors.")]
+        [Description("Path to the model checkpoint (Oasis DiT .safetensors, or the DIAMOND denoiser .safetensors).")]
         public string? ModelPath { get; init; }
 
-        /// <summary>Path to the Oasis ViT-VAE .safetensors.</summary>
+        /// <summary>Path to the Oasis ViT-VAE .safetensors (Oasis only).</summary>
         [CommandOption("--vae-path")]
-        [Description("Path to the Oasis ViT-VAE .safetensors.")]
+        [Description("Path to the Oasis ViT-VAE .safetensors (Oasis only; DIAMOND has no VAE).")]
         public string? VaePath { get; init; }
 
         /// <summary>Compute backend selector.</summary>
@@ -43,9 +44,15 @@ public sealed class InteractiveCommand : Command<InteractiveCommand.Settings>
         [Description("Number of frames to roll out.")]
         public int Frames { get; init; } = 16;
 
-        /// <summary>DDIM steps per frame.</summary>
+        /// <summary>Comma-separated action tokens; cycles if shorter than the frame count. Model-specific
+        /// default when omitted (Oasis: "forward"; DIAMOND: a fire/left/right demo cycle).</summary>
+        [CommandOption("--actions")]
+        [Description("Comma-separated action tokens, cycled to fill --frames (default: a model-specific demo plan).")]
+        public string? Actions { get; init; }
+
+        /// <summary>DDIM/denoising steps per frame (Oasis only; DIAMOND's step count is fixed by its config).</summary>
         [CommandOption("--steps")]
-        [Description("DDIM steps per frame.")]
+        [Description("Denoising steps per frame (Oasis only).")]
         public int Steps { get; init; } = 10;
 
         /// <summary>RNG seed; &lt; 0 randomizes.</summary>
@@ -73,7 +80,14 @@ public sealed class InteractiveCommand : Command<InteractiveCommand.Settings>
             return 1;
         }
 
-        if (string.IsNullOrWhiteSpace(settings.ModelPath) || string.IsNullOrWhiteSpace(settings.VaePath))
+        if (string.IsNullOrWhiteSpace(settings.ModelPath))
+        {
+            AnsiConsole.MarkupLine("[red]A model checkpoint is required via[/] [#2ea5e0]--model-path[/][red].[/]");
+            return 1;
+        }
+
+        bool isOasis = string.Equals(settings.Model, "oasis", StringComparison.OrdinalIgnoreCase);
+        if (isOasis && string.IsNullOrWhiteSpace(settings.VaePath))
         {
             AnsiConsole.MarkupLine("[red]Oasis needs[/] [#2ea5e0]--model-path[/] [red](DiT) and[/] [#2ea5e0]--vae-path[/] [red](ViT-VAE).[/]");
             return 1;
@@ -83,8 +97,11 @@ public sealed class InteractiveCommand : Command<InteractiveCommand.Settings>
         parameters.Put("frames", settings.Frames.ToString(CultureInfo.InvariantCulture));
         parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
+        parameters.Put("actions", settings.Actions ?? "");
 
-        Dictionary<string, string> aux = new Dictionary<string, string> { ["vae-path"] = settings.VaePath! };
+        Dictionary<string, string> aux = isOasis
+            ? new Dictionary<string, string> { ["vae-path"] = settings.VaePath! }
+            : new Dictionary<string, string>();
         ModelSpec baseSpec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.World);
         ModelSpec spec = baseSpec with { Aux = aux };
         string label = spec.Catalog?.Id ?? settings.Model;

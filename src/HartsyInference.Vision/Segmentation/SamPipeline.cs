@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Vision.Segmentation.Sam2;
 
@@ -22,6 +23,7 @@ public sealed unsafe class SamPipeline : IVisionPipeline
     private readonly SamPromptEncoder _promptEncoder;
     private readonly SamMaskDecoder _maskDecoder;
     private readonly SafeTensorsLoader? _loader;
+    private readonly PytorchPickleLoader? _pickleLoader;
 
     /// <inheritdoc/>
     public string ModelName => "sam2";
@@ -45,17 +47,42 @@ public sealed unsafe class SamPipeline : IVisionPipeline
         _loader = loader;
     }
 
-    /// <summary>Loads a SAM 2 (Hiera) checkpoint and builds a ready pipeline. The returned pipeline owns the
-    /// checkpoint loader and frees it on <see cref="Dispose"/>.</summary>
-    public static SamPipeline Load(IBackend backend, Sam2Config config, string safetensorsPath)
+    private SamPipeline(IBackend backend, Sam2Config config, ISamImageEncoder encoder,
+        SamPromptEncoder promptEncoder, SamMaskDecoder maskDecoder, PytorchPickleLoader pickleLoader)
+        : this(backend, config, encoder, promptEncoder, maskDecoder)
+    {
+        _pickleLoader = pickleLoader;
+    }
+
+    /// <summary>Loads a SAM 2 (Hiera) checkpoint and builds a ready pipeline. Accepts either a converted
+    /// single-file safetensors (mmap-backed) or Meta's raw <c>.pt</c>/<c>.pth</c> release — a flat
+    /// Lightning-style state dict (<c>{"model": {...}}</c>), directly parseable by
+    /// <see cref="PytorchPickleLoader"/>'s safe-subset pickle VM with no offline conversion. Either way the
+    /// returned pipeline owns its loader and frees it on <see cref="Dispose"/> — <see cref="PytorchPickleLoader.Dispose"/>
+    /// also disposes its tensors, so (unlike a truly one-shot copy) it must stay alive for as long as the pipeline
+    /// does, same as the mmap-backed <see cref="SafeTensorsLoader"/> case.</summary>
+    public static SamPipeline Load(IBackend backend, Sam2Config config, string checkpointPath)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
         SafeTensorsLoader loader = null!;
+        PytorchPickleLoader pickleLoader = null!;
         try
         {
-            (Sam2Converter.Groups groups, SafeTensorsLoader ld) = Sam2Converter.LoadAndConvert(safetensorsPath);
-            loader = ld;
+            bool isPickle = checkpointPath.EndsWith(".pt", StringComparison.OrdinalIgnoreCase)
+                || checkpointPath.EndsWith(".pth", StringComparison.OrdinalIgnoreCase);
+            Sam2Converter.Groups groups;
+            if (isPickle)
+            {
+                pickleLoader = new PytorchPickleLoader();
+                pickleLoader.Load(checkpointPath);
+                groups = Sam2Converter.Convert(pickleLoader.GetAllTensors());
+            }
+            else
+            {
+                (groups, SafeTensorsLoader ld) = Sam2Converter.LoadAndConvert(checkpointPath);
+                loader = ld;
+            }
 
             HieraImageEncoder encoder = new HieraImageEncoder(config);
             encoder.LoadWeights(groups.ImageEncoder, string.Empty);
@@ -65,12 +92,19 @@ public sealed unsafe class SamPipeline : IVisionPipeline
             SamMaskDecoder maskDecoder = new SamMaskDecoder(config);
             maskDecoder.LoadWeights(groups.MaskDecoder, string.Empty);
 
-            return new SamPipeline(backend, config, encoder, promptEncoder, maskDecoder, loader);
+            if (pickleLoader is not null)
+            {
+                return new SamPipeline(backend, config, encoder, promptEncoder, maskDecoder, pickleLoader);
+            }
+            return loader is null
+                ? new SamPipeline(backend, config, encoder, promptEncoder, maskDecoder)
+                : new SamPipeline(backend, config, encoder, promptEncoder, maskDecoder, loader);
         }
         catch (Exception ex)
         {
-            Logs.Error($"Failed to load SAM 2 pipeline from '{safetensorsPath}'.", ex);
+            Logs.Error($"Failed to load SAM 2 pipeline from '{checkpointPath}'.", ex);
             loader?.Dispose();
+            pickleLoader?.Dispose();
             throw;
         }
     }
@@ -167,5 +201,6 @@ public sealed unsafe class SamPipeline : IVisionPipeline
     {
         _encoder.Dispose();
         _loader?.Dispose();
+        _pickleLoader?.Dispose();
     }
 }

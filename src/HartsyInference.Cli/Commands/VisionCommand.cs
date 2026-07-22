@@ -40,7 +40,7 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
 
         /// <summary>Vision operation; inferred from the model id when omitted.</summary>
         [CommandOption("--mode")]
-        [Description("Operation: embed, detect, or segment. Inferred from the model id when omitted.")]
+        [Description("Operation: embed, detect, segment, depth, edge, lineart, normal, or segmap. Inferred from the model id when omitted.")]
         public string? Mode { get; init; }
 
         /// <summary>Text query for open-vocabulary detect/segment (Grounding DINO, CLIPSeg).</summary>
@@ -68,9 +68,9 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
             return 1;
         }
 
-        if (string.IsNullOrWhiteSpace(settings.ModelPath))
+        if (string.IsNullOrWhiteSpace(settings.Model) && string.IsNullOrWhiteSpace(settings.ModelPath))
         {
-            AnsiConsole.MarkupLine("[red]A model is required via[/] [#2ea5e0]--model-path[/][red].[/]");
+            AnsiConsole.MarkupLine("[red]A model is required via[/] [#2ea5e0]-m[/] [red]or[/] [#2ea5e0]--model-path[/][red].[/]");
             return 1;
         }
 
@@ -89,17 +89,39 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
             settings.Output, label, showResponseRule: false);
     }
 
-    /// <summary>Picks the operation a model id implies: detectors detect, segmenters segment, everything else embeds.</summary>
+    /// <summary>Picks the operation a model id implies: detectors detect, segmenters segment, the single-image
+    /// annotators map to their own mode, everything else embeds.</summary>
     private static string InferMode(string model)
     {
         string id = model.ToLowerInvariant();
-        if (id.Contains("clipseg"))
+        if (id.Contains("clipseg") || id.Contains("sam"))
         {
             return "segment";
         }
-        if (id.Contains("yolo") || id.Contains("rtdetr") || id.Contains("rt-detr") || id.Contains("dino"))
+        if (id.Contains("yolo") || id.Contains("rtdetr") || id.Contains("rt-detr")
+            || (id.Contains("dino") && !id.StartsWith("dinov", StringComparison.Ordinal)))
         {
             return "detect";
+        }
+        if (id.Contains("depth"))
+        {
+            return "depth";
+        }
+        if (id == "hed")
+        {
+            return "edge";
+        }
+        if (id.Contains("lineart"))
+        {
+            return "lineart";
+        }
+        if (id.Contains("normalbae") || id.Contains("normal-bae"))
+        {
+            return "normal";
+        }
+        if (id.Contains("upernet") || id.Contains("segmap"))
+        {
+            return "segmap";
         }
         return "embed";
     }

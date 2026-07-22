@@ -43,7 +43,20 @@ public static class ModelCatalog
         {
             // Text / LLM
             E("qwen2", txt, "Qwen2.5 (0.5B → 7B)", "Qwen2 dense transformer", ok, cli: true),
-            E("qwen3", txt, "Qwen3 (0.6B → 7B)", "Qwen3 dense transformer", ok, cli: true),
+            new CatalogEntry
+            {
+                // `hartsy text -m qwen3` verified end-to-end 2026-07-22 (CLI catalog pass): coherent output on
+                // both the 3060 (--low-vram-quant) and 4090, and --thinking/--no-thinking confirmed to produce
+                // genuinely different output against this real checkpoint (see MODEL_STATUS_LLM.md).
+                Id = "qwen3", Modality = txt, DisplayName = "Qwen3 (0.6B → 7B)", Architecture = "Qwen3 dense transformer",
+                Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Qwen/Qwen3-4B-GGUF", RepoPath = "Qwen3-4B-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/qwen3", Role = "transformer",
+                        Sha256 = "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5" },
+                },
+            },
             E("llama3", txt, "Llama-3.x", "Llama dense transformer", st, cli: true),
             E("mistral", txt, "Mistral (dense)", "Mistral dense transformer", st, cli: true),
             E("gguf", txt, "Quantized GGUF (Q4/Q8)", "config-driven, any GGUF LLM", ok, cli: true),
@@ -896,13 +909,152 @@ public static class ModelCatalog
             },
 
             // Vision
-            E("clip", vis, "CLIP (ViT-L/14, H/14, bigG/14)", "ViT embeddings", ok, cli: true),
-            E("siglip", vis, "SigLIP · SigLIP2", "ViT embeddings", ok),
-            E("dinov2", vis, "DINOv2 · DINOv3", "dense features", ok),
-            E("yolo8", vis, "YOLO8 (n → xl)", "object detection", ok, cli: true),
-            E("yolo11", vis, "YOLO11 (n → xl)", "object detection", ok, cli: true),
-            E("sam", vis, "SAM · SAM 2 · SAM 2.1", "segmentation", ok),
-            E("retinaface", vis, "RetinaFace", "face detection + landmarks", ok),
+            new CatalogEntry
+            {
+                Id = "clip", Modality = vis, DisplayName = "CLIP ViT-L/14", Architecture = "ViT dual-tower embeddings", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "openai/clip-vit-large-patch14", RepoPath = "model.safetensors",
+                        TargetSubdir = "Vision/Clip", Role = "transformer",
+                        Sha256 = "a2bf730a0c7debf160f7a6b50b3aaf3703e7e88ac73de7a314903141db026dcb" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "siglip", Modality = vis, DisplayName = "SigLIP (base, patch16-224)", Architecture = "ViT dual-tower embeddings", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "google/siglip-base-patch16-224", RepoPath = "model.safetensors",
+                        TargetSubdir = "Vision/Siglip", Role = "transformer",
+                        Sha256 = "2c63cb7d1f2e95ba501893cbb8faeb4ea9a3af295498d35097126228659c2af8" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "dinov2", Modality = vis, DisplayName = "DINOv2 (small)", Architecture = "ViT dense features", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "facebook/dinov2-small", RepoPath = "model.safetensors",
+                        TargetSubdir = "Vision/Dinov2", Role = "transformer",
+                        Sha256 = "ae1e99fcefd534ed978cdeb8326f08030c96e28b7a81ffcbc98a857c84d14be1" },
+                },
+            },
+            // YOLO8/11: raw Ultralytics .pt is a full pickled nn.Module object graph (not a flat state_dict) —
+            // the engine's safe-subset pickle VM can't resolve it, and no pre-folded ungated safetensors mirror
+            // was found on HF. CliDrivable stays false until either a pickle-VM extension or a found mirror
+            // unblocks auto-download (see docs/Checklists/MODEL_STATUS_VISION.md).
+            E("yolo8", vis, "YOLO8 (n → xl)", "object detection", vp),
+            E("yolo11", vis, "YOLO11 (n → xl)", "object detection", vp),
+            new CatalogEntry
+            {
+                Id = "rtdetr", Modality = vis, DisplayName = "RT-DETR (r18vd)", Architecture = "ResNet-18vd + hybrid encoder + deformable decoder", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "PekingU/rtdetr_r18vd", RepoPath = "model.safetensors",
+                        TargetSubdir = "rtdetr", Role = "transformer", Sha256 = null },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "grounding-dino", Modality = vis, DisplayName = "Grounding DINO (tiny)", Architecture = "Swin-T + BERT + deformable cross-modal encoder/decoder", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "IDEA-Research/grounding-dino-tiny", RepoPath = "model.safetensors",
+                        TargetSubdir = "grounding-dino", Role = "transformer", Sha256 = null },
+                    new() { Repo = "IDEA-Research/grounding-dino-tiny", RepoPath = "vocab.txt",
+                        TargetSubdir = "grounding-dino", Role = "tokenizer", Sha256 = null },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "clipseg", Modality = vis, DisplayName = "ClipSeg (rd64-refined)", Architecture = "CLIP + lightweight segmentation decoder", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "CIDAS/clipseg-rd64-refined", RepoPath = "model.safetensors",
+                        TargetSubdir = "clipseg", Role = "transformer", Sha256 = null },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "sam", Modality = vis, DisplayName = "SAM 2 (hiera-tiny)", Architecture = "Hiera windowed-attn encoder + two-way mask decoder", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // Flat Lightning-style state dict ({"model": {...}}) — confirmed via a raw pickle opcode dump
+                    // (only OrderedDict + torch._utils._rebuild_tensor_v2 + FloatStorage), directly loadable by
+                    // PytorchPickleLoader with no offline conversion, unlike the Ultralytics YOLO checkpoints.
+                    new() { Repo = "facebook/sam2-hiera-tiny", RepoPath = "sam2_hiera_tiny.pt",
+                        TargetSubdir = "sam2", Role = "transformer", Sha256 = null },
+                },
+            },
+            // "RetinaFace" was never actually built — the real, real-weight-verified face detector is a
+            // YOLOv8-Face port (see MODEL_STATUS_VISION.md). Catalog id corrected to match; blocked on the same
+            // pickle-graph issue as YOLO8/11, plus its known source (akanametov/yolo-face) is GitHub-only, not HF.
+            E("yolov8-face", vis, "YOLOv8-Face + landmarks", "face detection + 5-pt landmarks", vp),
+            E("arcface", vis, "ArcFace (IR-50, w600k_r50)", "face embedding", vp),
+            new CatalogEntry
+            {
+                Id = "depth-anything", Modality = vis, DisplayName = "Depth-Anything-V2 (small)", Architecture = "DINOv2 backbone + DPT head", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "depth-anything/Depth-Anything-V2-Small", RepoPath = "depth_anything_v2_vits.pth",
+                        TargetSubdir = "Vision/DepthAnything", Role = "transformer", Sha256 = null },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "hed", Modality = vis, DisplayName = "HED (ControlNetHED soft-edge)", Architecture = "VGG16-style 5-block trunk", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "lllyasviel/Annotators", RepoPath = "ControlNetHED.pth",
+                        TargetSubdir = "Vision/Annotators", Role = "transformer",
+                        Sha256 = "5ca93762ffd68a29fee1af9d495bf6aab80ae86f08905fb35472a083a4c7a8fa" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "lineart", Modality = vis, DisplayName = "Lineart (sk_model realistic + sk_model2 coarse)", Architecture = "ResNet UNet generator", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "lllyasviel/Annotators", RepoPath = "sk_model.pth",
+                        TargetSubdir = "Vision/Annotators", Role = "transformer",
+                        Sha256 = "c686ced2a666b4850b4bb6ccf0748031c3eda9f822de73a34b8979970d90f0c6" },
+                    new() { Repo = "lllyasviel/Annotators", RepoPath = "sk_model2.pth",
+                        TargetSubdir = "Vision/Annotators", Role = "transformer-coarse",
+                        Sha256 = "30a534781061f34e83bb9406b4335da4ff2616c95d22a585c1245aa8363e74e0" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "normalbae", Modality = vis, DisplayName = "NormalBAE (scannet NNET surface normals)", Architecture = "tf_efficientnet_b5_ap encoder + NNET decoder", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "lllyasviel/Annotators", RepoPath = "scannet.pt",
+                        TargetSubdir = "Vision/Annotators", Role = "transformer",
+                        Sha256 = "03dbf1600c51ee3d45c29f77b77bf1a3b7a24c3452dba62a4ae658f37330c209" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "upernet-seg", Modality = vis, DisplayName = "UperNet-Seg (ADE20K, ConvNeXt-Small)", Architecture = "ConvNeXt-Small + PSP/FPN head", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "openmmlab/upernet-convnext-small", RepoPath = "pytorch_model.bin",
+                        TargetSubdir = "Vision/Annotators", TargetName = "upernet_convnext_small.bin", Role = "transformer",
+                        Sha256 = "76c163aa531ab7edfb3a77bbcc039e340645aa0ffe2b0ffcfc68755f550c76ea" },
+                },
+            },
 
             // Video
             new CatalogEntry
@@ -1001,6 +1153,7 @@ public static class ModelCatalog
             E("matrix-game-3", act, "Matrix-Game 3.0", "5B (+28B MoE) memory-augmented", vp),
             E("matrix-game-2", act, "Matrix-Game 2.0", "Wan2.1-lineage 1.8B", vp),
             E("oasis", act, "Oasis-500m", "axial-attention DiT", vp, cli: true),
+            E("diamond", act, "DIAMOND (Atari-100k)", "EDM diffusion U-Net", vp, cli: true),
         };
     }
 }

@@ -522,7 +522,10 @@ public sealed class TextService : ITextService, IDisposable
         TopP = (float)(request.TopP > 0 ? request.TopP : 0.9),
         TopK = 0,
         MinP = (float)Math.Max(0, request.MinP ?? 0),
-        RepetitionPenalty = (float)(request.RepetitionPenalty is > 0 ? request.RepetitionPenalty.Value : 1.0),
+        // 1.1 (not 1.0/off) matches MultimodalGenerator's own intended fallback — its doc comment says small
+        // quantized VLMs are repetition-prone, but that fallback (`sampling ?? new SamplingOptions { ... 1.1 }`)
+        // is unreachable since this method always supplies a non-null SamplingOptions, short-circuiting it.
+        RepetitionPenalty = (float)(request.RepetitionPenalty is > 0 ? request.RepetitionPenalty.Value : 1.1),
         Seed = request.Seed >= 0 ? (ulong)request.Seed : 1,
         Greedy = request.Temperature <= 0 || request.Greedy,
     };

@@ -173,17 +173,37 @@ internal sealed class UnaryNotExpr(Expr inner) : Expr
     public override object? Eval(JinjaEngine.Scope scope) => !Values.Truthy(inner.Eval(scope));
 }
 
-internal sealed class SliceExpr(Expr target, Expr? start, Expr? stop) : Expr
+/// <summary>Python-style <c>target[start:stop:step]</c>. <paramref name="step"/> is null for the common
+/// <c>[start:stop]</c> two-part form; a real chat template (Qwen3.5's, reversing history with
+/// <c>messages[::-1]</c>) uses the full three-part form with a negative step, so that case is handled
+/// explicitly rather than just falling back to a step-1 slice.</summary>
+internal sealed class SliceExpr(Expr target, Expr? start, Expr? stop, Expr? step) : Expr
 {
     public override object? Eval(JinjaEngine.Scope scope)
     {
         object? t = target.Eval(scope);
         List<object?> list = Values.AsList(t);
         int n = list.Count;
-        int lo = Norm(start?.Eval(scope), 0, n);
-        int hi = Norm(stop?.Eval(scope), n, n);
-        if (lo < 0) lo = 0; if (hi > n) hi = n; if (hi < lo) hi = lo;
-        List<object?> slice = list.GetRange(lo, hi - lo);
+        int st = step is null ? 1 : (int)Values.ToD(step.Eval(scope));
+        if (st == 0) throw new FormatException("Jinja slice step cannot be 0.");
+
+        List<object?> slice = [];
+        if (st > 0)
+        {
+            int lo = Norm(start?.Eval(scope), 0, n);
+            int hi = Norm(stop?.Eval(scope), n, n);
+            if (lo < 0) lo = 0; if (hi > n) hi = n;
+            for (int i = lo; i < hi; i += st) slice.Add(list[i]);
+        }
+        else
+        {
+            // Negative step: Python's implicit bounds flip (default start = last index, default stop =
+            // "before index 0", i.e. unbounded downward) rather than reusing the positive-step defaults.
+            int lo = Norm(start?.Eval(scope), n - 1, n);
+            int hi = Norm(stop?.Eval(scope), -1, n);
+            if (lo > n - 1) lo = n - 1; if (hi < -1) hi = -1;
+            for (int i = lo; i > hi; i += st) if (i >= 0 && i < n) slice.Add(list[i]);
+        }
         return t is string ? string.Concat(slice.Select(Values.ToStr)) : slice;
     }
     private static int Norm(object? v, int def, int n)
@@ -491,9 +511,23 @@ internal static class ExprParser
                     if (t.TrySymbol("]")) { e = new IndexExpr(e, start); continue; }
                     t.ExpectSymbol(":");
                 }
-                Expr? stop = t.TrySymbol("]") ? null : ParseTernary(t);
-                if (stop is not null) t.ExpectSymbol("]");
-                e = new SliceExpr(e, start, stop);
+                Expr? stop = null;
+                Expr? step = null;
+                if (!t.TrySymbol("]"))
+                {
+                    if (!t.TrySymbol(":"))
+                    {
+                        stop = ParseTernary(t);
+                        if (t.TrySymbol("]")) { e = new SliceExpr(e, start, stop, null); continue; }
+                        t.ExpectSymbol(":");
+                    }
+                    if (!t.TrySymbol("]"))
+                    {
+                        step = ParseTernary(t);
+                        t.ExpectSymbol("]");
+                    }
+                }
+                e = new SliceExpr(e, start, stop, step);
             }
             else if (t.TrySymbol("("))
             {
@@ -581,6 +615,11 @@ internal sealed class IsTestExpr(Expr target, string test, bool negated) : Expr
             // sequences even though they're iterable). Gemma-4's template checks content is sequence/is string.
             "sequence" => target.Eval(scope) is List<object?> or string,
             "number" => Values.IsNum(target.Eval(scope)),
+            // Jinja2 "is true"/"is false": strict boolean identity, not truthiness — a missing/non-bool value
+            // (e.g. EnableThinking left null) is neither, matching Python's `value is True`/`value is False`.
+            // Qwen3's own chat template branches on `enable_thinking is false`.
+            "true" => target.Eval(scope) is true,
+            "false" => target.Eval(scope) is false,
             _ => throw new NotSupportedException($"Jinja 'is {test}' test"),
         };
         return negated ? !result : result;

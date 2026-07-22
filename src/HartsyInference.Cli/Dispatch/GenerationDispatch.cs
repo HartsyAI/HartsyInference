@@ -33,7 +33,7 @@ public static class GenerationDispatch
             Modality.Speech => await SpeechAsync(engine, spec, prompt, parameters, cancel).ConfigureAwait(false),
             Modality.Music => await MusicAsync(engine, spec, prompt, parameters, quiet, cancel).ConfigureAwait(false),
             Modality.Transcribe => await TranscribeAsync(engine, spec, prompt, parameters, cancel).ConfigureAwait(false),
-            Modality.Vision => await VisionAsync(engine, spec, prompt, parameters, cancel).ConfigureAwait(false),
+            Modality.Vision => await VisionAsync(engine, spec, prompt, parameters, outputDir, cancel).ConfigureAwait(false),
             Modality.Video => await VideoAsync(engine, spec, prompt, parameters, outputDir, quiet, cancel).ConfigureAwait(false),
             Modality.Mesh => await MeshAsync(engine, spec, prompt, parameters, quiet, cancel).ConfigureAwait(false),
             Modality.World => await WorldAsync(engine, spec, prompt, parameters, outputDir, quiet, cancel).ConfigureAwait(false),
@@ -291,9 +291,11 @@ public static class GenerationDispatch
         return artifact;
     }
 
-    /// <summary>Embed / detect / segment through <see cref="IVisionService"/>; the CLI's "prompt" is the image path.</summary>
+    /// <summary>Embed / detect / segment through <see cref="IVisionService"/>; the CLI's "prompt" is the image path.
+    /// Segment masks have no meaningful text form, so they self-write as PNGs under <paramref name="outputDir"/>
+    /// (mirroring the video frame-sequence pattern) — otherwise the mask is invisible to inspection.</summary>
     private static async Task<GeneratedArtifact> VisionAsync(
-        IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, CancellationToken cancel)
+        IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, CancellationToken cancel)
     {
         ImageData image = LoadImage(prompt);
         string mode = parameters.Get("mode") ?? "embed";
@@ -305,12 +307,56 @@ public static class GenerationDispatch
                 "detect" => VisionMode.Detect,
                 "segment" => VisionMode.Segment,
                 "embed" => VisionMode.Embed,
-                _ => throw new ArgumentException($"Unknown vision mode '{mode}'. Use embed, detect, or segment."),
+                "depth" => VisionMode.Depth,
+                "edge" => VisionMode.Edge,
+                "lineart" => VisionMode.Lineart,
+                "normal" => VisionMode.Normal,
+                "segmap" => VisionMode.SegMap,
+                _ => throw new ArgumentException(
+                    $"Unknown vision mode '{mode}'. Use embed, detect, segment, depth, edge, lineart, normal, or segmap."),
             },
             Prompt = parameters.Get("query"),
             Threshold = parameters.GetFloat("confidence", 0.25f),
         };
         VisionResult result = await engine.Vision.RunAsync(spec, request, cancel).ConfigureAwait(false);
+
+        if (result.Masks is { Count: > 0 } masks)
+        {
+            byte[][] pixels = new byte[masks.Count][];
+            for (int i = 0; i < masks.Count; i++)
+            {
+                pixels[i] = masks[i].Rgb;
+            }
+            string dir = FrameWriter.WriteFrames(pixels, masks[0].Width, masks[0].Height, outputDir ?? RepoPaths.OutputRoot(), prompt);
+            GeneratedArtifact maskArtifact = new GeneratedArtifact
+            {
+                Kind = ArtifactKind.Data,
+                Extension = "png",
+                Text = $"{masks.Count} mask(s) at {masks[0].Width}x{masks[0].Height} → {dir}",
+                PreviewRgb = masks[0].Rgb,
+                PreviewWidth = masks[0].Width,
+                PreviewHeight = masks[0].Height,
+                SelfWritten = true,
+            };
+            maskArtifact.Meta["masks"] = masks.Count.ToString(CultureInfo.InvariantCulture);
+            return maskArtifact;
+        }
+
+        if (result.Image is { } single)
+        {
+            GeneratedArtifact imageArtifact = new GeneratedArtifact
+            {
+                Kind = ArtifactKind.Image,
+                FileBytes = PngEncoder.Encode(single.Rgb, single.Width, single.Height),
+                Extension = "png",
+                Text = $"{single.Width}x{single.Height} image",
+                PreviewRgb = single.Rgb,
+                PreviewWidth = single.Width,
+                PreviewHeight = single.Height,
+            };
+            imageArtifact.Meta["size"] = $"{single.Width}x{single.Height}";
+            return imageArtifact;
+        }
 
         GeneratedArtifact artifact = new GeneratedArtifact
         {
@@ -325,10 +371,6 @@ public static class GenerationDispatch
         if (result.Detections is not null)
         {
             artifact.Meta["detections"] = result.Detections.Count.ToString(CultureInfo.InvariantCulture);
-        }
-        if (result.Masks is not null)
-        {
-            artifact.Meta["masks"] = result.Masks.Count.ToString(CultureInfo.InvariantCulture);
         }
         return artifact;
     }
@@ -403,9 +445,10 @@ public static class GenerationDispatch
         return artifact;
     }
 
-    /// <summary>World rollout through <see cref="IWorldService"/>: queues one "forward" action per requested frame,
-    /// then drains the session's frame stream. The session batches the queued plan into a single rollout (the Oasis
-    /// pipeline is one-shot), so this reproduces the canned forward walk the CLI has always driven.</summary>
+    /// <summary>World rollout through <see cref="IWorldService"/>: queues one action per requested frame (from
+    /// <c>--actions</c>, cycled to fill the count, or a model-specific default demo plan), then drains the
+    /// session's frame stream. Oasis batches the queued plan into a single one-shot rollout; DIAMOND runs one
+    /// real denoise per queued action (see <see cref="DiamondWorldSession"/>).</summary>
     private static async Task<GeneratedArtifact> WorldAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, bool quiet, CancellationToken cancel)
     {
@@ -417,12 +460,14 @@ public static class GenerationDispatch
             Seed = parameters.GetInt("seed", -1),
         };
 
+        string[] actionPlan = ResolveActionPlan(parameters.GetStringOrNull("actions"), spec.Catalog?.Id);
+
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("rollout");
         List<VideoFrame> frames = new List<VideoFrame>();
         using IWorldSession session = engine.World.Open(spec, request);
         for (int i = 0; i < totalFrames - 1; i++)
         {
-            session.SendAction("forward");
+            session.SendAction(actionPlan[i % actionPlan.Length]);
         }
         try
         {
@@ -437,6 +482,20 @@ public static class GenerationDispatch
             progress?.Finish();
         }
         return FrameArtifact(frames, outputDir, Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"')), "world");
+    }
+
+    /// <summary>Resolves the action plan: an explicit comma-separated <paramref name="actionsOption"/> if given,
+    /// else a per-model demo plan (DIAMOND/Breakout: fire then alternate left/right to show paddle response;
+    /// everything else: Oasis's canned forward walk).</summary>
+    private static string[] ResolveActionPlan(string? actionsOption, string? catalogId)
+    {
+        if (!string.IsNullOrWhiteSpace(actionsOption))
+        {
+            return actionsOption.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        }
+        return string.Equals(catalogId, "diamond", StringComparison.OrdinalIgnoreCase)
+            ? ["fire", "right", "right", "right", "right", "left", "left", "left", "left"]
+            : ["forward"];
     }
 
     /// <summary>Writes a frame sequence to disk and describes it, previewing the first frame inline.</summary>
