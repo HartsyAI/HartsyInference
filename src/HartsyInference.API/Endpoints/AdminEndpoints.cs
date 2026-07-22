@@ -1,6 +1,7 @@
 using HartsyInference.Engine;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Services;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace HartsyInference.API.Endpoints;
 
@@ -82,10 +83,14 @@ public static class AdminEndpoints
             return Results.Ok(new { freed = true });
         });
 
-        // Routed through the queue so the switch waits for any in-flight work on the OLD backend to finish
-        // (SetBackend disposes every loaded pipeline) before it runs, and nothing new starts against a
-        // half-switched engine — holding the single concurrency slot IS the drain, no separate lock needed.
-        app.MapPost("/admin/backend", async (SetBackendRequest req, IInferenceEngine engine, InferenceQueue queue, CancellationToken ct) =>
+        // Routed through BOTH queues so the switch waits for any in-flight work on the OLD backend — fast AND
+        // long-running (a video job or an open world session also holds a pipeline SetBackend would dispose out
+        // from under it) — to finish before it runs. Holding both concurrency slots at once IS the drain, no
+        // separate lock needed. The two EnqueueAsync calls are sequential rather than parallel deliberately: if
+        // the fast queue is full, there's no point also taking the long-running slot first.
+        app.MapPost("/admin/backend", async (
+            SetBackendRequest req, IInferenceEngine engine, InferenceQueue fastQueue,
+            [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue longRunningQueue, CancellationToken ct) =>
         {
             string selector = (req.Backend ?? "").Trim().ToLowerInvariant();
             if (!BackendFactory.ValidSelectors.Contains(selector))
@@ -96,11 +101,11 @@ public static class AdminEndpoints
 
             try
             {
-                await queue.EnqueueAsync(() =>
+                await fastQueue.EnqueueAsync(() => longRunningQueue.EnqueueAsync(() =>
                 {
                     engine.SetBackend(selector);
                     return Task.FromResult(true);
-                }, ct);
+                }, ct), ct);
             }
             catch (QueueFullException ex)
             {
@@ -110,8 +115,18 @@ public static class AdminEndpoints
             return Results.Ok(new { backend = engine.BackendSelector, resolved = engine.BackendDescription });
         });
 
-        app.MapGet("/admin/queue", (InferenceQueue queue, HartsyInferenceServerOptions options) =>
-            Results.Ok(new { pending = queue.PendingCount, maxConcurrency = options.MaxConcurrency, maxQueueDepth = options.MaxQueueDepth }));
+        app.MapGet("/admin/queue", (
+            InferenceQueue fastQueue, [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue longRunningQueue, HartsyInferenceServerOptions options) =>
+            Results.Ok(new
+            {
+                fast = new { pending = fastQueue.PendingCount, maxConcurrency = options.MaxConcurrency, maxQueueDepth = options.MaxQueueDepth },
+                longRunning = new
+                {
+                    pending = longRunningQueue.PendingCount,
+                    maxConcurrency = options.MaxLongRunningConcurrency,
+                    maxQueueDepth = options.MaxLongRunningQueueDepth,
+                },
+            }));
     }
 
     private static ModelCacheStore OpenCache(HartsyInferenceServerOptions options) =>

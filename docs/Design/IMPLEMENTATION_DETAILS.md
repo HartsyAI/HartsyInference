@@ -131,6 +131,10 @@ Same P/Invoke-to-driver philosophy as CUDA. `[LibraryImport("vulkan-1")]` over t
 
 One config-driven `GenericTransformer` (Qwen2/Qwen3/Llama/Mistral) drives decode (causal + KV cache) and also backs bidirectional text encoders. GGUF quantized inference uses fused mul_mat_vec decode kernels (Q4_K/Q6_K/Q8_0) plus a quantized LM head. The per-token loop keeps activations and the KV cache device-resident so only the next token id crosses the PCIe boundary. Full design: [LLM_LANGUAGE_PACKAGE.md](LLM_LANGUAGE_PACKAGE.md).
 
-## Server — dropped
+## HTTP API
 
-The `HartsyInference.API` ASP.NET scaffolding remains in `src/` but is **abandoned**. There is no OpenAI-compatible server product and none is planned. The engine is consumed via the SwarmUI backend extension, NuGet libraries, and sample CLIs.
+`HartsyInference.API` is a thin ASP.NET Core Minimal API adapter over `IInferenceEngine` — health/settings/admin
+endpoints, native per-modality generation routes (`/v1/native/*`), and a narrow OpenAI-compat layer (chat + images).
+Every route resolves a `ModelSpec` and calls the Engine facade, gated through `InferenceQueue`. See
+`docs/Agents/API.md` for the endpoint catalog. The engine is also consumed via the SwarmUI backend extension
+(recommended for end users), NuGet libraries, and sample CLIs.

@@ -45,7 +45,7 @@ A single meta-package (`HartsyInference`) is published for consumers who want th
 |---|---|---|
 | **HartsyInference** | Dependencies-only meta-package: one reference pulls the whole modality stack | Core, Cpu, Cuda, Vulkan, ModelHandler, Tokenizers, Phonemizer, LLM, Diffusion, Audio, Vision, Video, Interactive, ThreeD |
 
-> **Meta-package note.** `HartsyInference` explicitly references all 14 libraries above, including **LLM** and **Phonemizer**, so a single `dotnet add package HartsyInference` gives you native LLM text generation and phoneme-input TTS. Only **Server** (abandoned scaffolding) and **Cli** (a sample/validation tool, not a library) are excluded. Consumers who want just one modality reference that package directly instead of the meta.
+> **Meta-package note.** `HartsyInference` explicitly references all 14 libraries above, including **LLM** and **Phonemizer**, so a single `dotnet add package HartsyInference` gives you native LLM text generation and phoneme-input TTS. Only **API** (a runnable HTTP adapter app, not a library — see below) and **Cli** (a sample/validation tool, not a library) are excluded. Consumers who want just one modality reference that package directly instead of the meta.
 
 ### Consuming the engine
 
@@ -57,8 +57,11 @@ The engine is consumed three ways, in priority order:
 
 > **The service layer (`HartsyInference.Engine`) is the single source of truth.** It owns model lifecycle + the
 > `InferenceEngine` facade + all modality dispatch. The CLI is a thin wrapper over it, and `HartsyInference.API`
-> is a thin OpenAI-compatible HTTP adapter over it (endpoint mapping + DTOs + auth) — the orchestration it used to
-> own (`ModelManager`, queue) now lives in Engine. See `docs/Design/ENGINE_REFACTOR_PLAN.md`.
+> is a thin HTTP adapter over it — native per-modality endpoint mapping (one route group per `IInferenceEngine`
+> service, request/result records passed through almost verbatim) plus a narrow secondary OpenAI-compat layer for
+> chat/images. `HartsyInference.API` references only `Core` + `Engine` directly (everything else Engine pulls in
+> transitively) — it does not reference the modality packages itself. See `docs/Agents/API.md` for the endpoint
+> catalog and `docs/Design/ENGINE_REFACTOR_PLAN.md` for the refactor history.
 
 ### Utility (not shipped)
 
@@ -89,7 +92,7 @@ The engine is consumed three ways, in priority order:
                         ▼
                      Engine  ← service layer / single source of truth
                         │
-  Consumers (thin wrappers): CLI · Server (HTTP adapter) · SwarmUI backend extension · direct library use
+  Consumers (thin wrappers): CLI · API (HTTP adapter) · SwarmUI backend extension · direct library use
 ```
 
 LLM depends only on Core + ModelHandler + Tokenizers (not on the visual stack). Phonemizer depends on Core.

@@ -22,7 +22,16 @@ public static class HartsyInferenceServiceExtensions
         // just scoped to app lifetime instead of one command. IInferenceEngine is NOT safely re-entrant per
         // backend, so every call site must go through the InferenceQueue below rather than calling it directly.
         services.AddSingleton<IInferenceEngine>(_ => new InferenceEngine(options.Backend));
+
+        // Two gates: the unkeyed "fast" queue (unchanged — every route from Phases 1-4 keeps resolving it by
+        // type) and a keyed "long-running" one for video generation and opening world sessions, which can each
+        // run for minutes. Splitting them means one slow video job can't starve every fast request queued behind
+        // it — see HartsyInferenceServerOptions.MaxLongRunningConcurrency.
         services.AddSingleton(new InferenceQueue(options.MaxConcurrency, options.MaxQueueDepth));
+        services.AddKeyedSingleton(QueueKeys.LongRunning,
+            new InferenceQueue(options.MaxLongRunningConcurrency, options.MaxLongRunningQueueDepth));
+
+        services.AddSingleton(new WorldSessionRegistry(TimeSpan.FromMinutes(options.WorldSessionIdleTimeoutMinutes)));
 
         services.ConfigureHttpJsonOptions(o =>
             o.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
@@ -87,6 +96,11 @@ public static class HartsyInferenceServiceExtensions
         app.MapAdminEndpoints();
         app.MapImageEndpoints();
         app.MapTextEndpoints();
+        app.MapAudioEndpoints();
+        app.MapVisionEndpoints();
+        app.MapMeshEndpoints();
+        app.MapVideoEndpoints();
+        app.MapWorldEndpoints();
         app.MapCompatEndpoints();
     }
 
@@ -112,4 +126,11 @@ public static class HartsyInferenceServiceExtensions
         ctx.Response.StatusCode = status;
         await ctx.Response.WriteAsJsonAsync(OpenAiError.Make(message, type));
     }
+}
+
+/// <summary>Keyed-DI keys for the two <see cref="InferenceQueue"/> instances.</summary>
+internal static class QueueKeys
+{
+    /// <summary>The video/world-session queue, injected via <c>[FromKeyedServices(QueueKeys.LongRunning)]</c>.</summary>
+    public const string LongRunning = "long-running";
 }

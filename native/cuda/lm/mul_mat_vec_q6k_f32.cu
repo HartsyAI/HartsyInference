@@ -33,6 +33,7 @@ extern "C" __global__ void mul_mat_vec_q6k_f32(
     const int nsb = K / SUPER_ELEMS;
     const unsigned char* wrow = weight + (size_t)n * nsb * SUPER_BYTES;
     const float* xrow = input + (size_t)m * K;
+    const int isOffset = lane >> 4;    // 0 for lane<16, 1 for lane>=16 -- same for both halves (hl&31 == lane)
 
     float acc = 0.0f;
     for (int sb = 0; sb < nsb; ++sb) {
@@ -43,28 +44,44 @@ extern "C" __global__ void mul_mat_vec_q6k_f32(
         const float d = __half2float(*(const __half*)(block + 208));
         const float* xb = xrow + sb * SUPER_ELEMS;
 
-        // Each lane owns work-items hl = lane and hl = lane + 32 (of the 64 per super-block).
-        #pragma unroll
-        for (int rep = 0; rep < 2; ++rep) {
-            const int hl = lane + rep * WARP_SIZE;
-            const int half = hl >> 5;          // 0 or 1
-            const int l = hl & 31;             // 0..31
-            const int isOffset = l >> 4;       // 0 for l<16, 1 for l>=16
-            const unsigned char* qlH = ql + half * 64;
-            const unsigned char* qhH = qh + half * 32;
-            const signed char* scH = scales + half * 8;
-            const int b = half * 128;          // element base within the super-block
+        // Issue every load for BOTH half-super-blocks up front, before any bit-unpacking or FMA.
+        // ncu on the original interleaved load-then-immediately-use version showed low IPC (1.39 vs
+        // 2.70 for the Q4_K kernel) and only ~34% issue-slot occupancy with "low compute throughput
+        // AND memory bandwidth -- indicates latency issues": each q-value's load was on the critical
+        // path of the very next FMA, serializing on round-trip latency instead of overlapping. Grouping
+        // the loads gives the scheduler many independent in-flight requests per warp to hide that
+        // latency behind. Every access below is still lane-contiguous (coalesced) exactly as before;
+        // only the ORDER of loads vs. arithmetic changed, so the computed value is bit-for-bit identical.
+        const unsigned char ql0a = ql[lane],      ql0b = ql[lane + 32];
+        const unsigned char qh0  = qh[lane];
+        const unsigned char ql1a = ql[64 + lane], ql1b = ql[96 + lane];
+        const unsigned char qh1  = qh[32 + lane];
+        const signed char sc0_0 = scales[isOffset + 0], sc0_2 = scales[isOffset + 2];
+        const signed char sc0_4 = scales[isOffset + 4], sc0_6 = scales[isOffset + 6];
+        const signed char sc1_0 = scales[8 + isOffset + 0], sc1_2 = scales[8 + isOffset + 2];
+        const signed char sc1_4 = scales[8 + isOffset + 4], sc1_6 = scales[8 + isOffset + 6];
+        const float x0a = xb[lane],       x0b = xb[lane + 32];
+        const float x0c = xb[lane + 64],  x0d = xb[lane + 96];
+        const float x1a = xb[128 + lane], x1b = xb[128 + lane + 32];
+        const float x1c = xb[128 + lane + 64], x1d = xb[128 + lane + 96];
 
-            const int q1 = ((qlH[l]      & 0x0F) | (((qhH[l] >> 0) & 0x03) << 4)) - 32;
-            const int q2 = ((qlH[l + 32] & 0x0F) | (((qhH[l] >> 2) & 0x03) << 4)) - 32;
-            const int q3 = ((qlH[l]      >>   4) | (((qhH[l] >> 4) & 0x03) << 4)) - 32;
-            const int q4 = ((qlH[l + 32] >>   4) | (((qhH[l] >> 6) & 0x03) << 4)) - 32;
+        const int q1_0 = ((ql0a & 0x0F) | (((qh0 >> 0) & 0x03) << 4)) - 32;
+        const int q2_0 = ((ql0b & 0x0F) | (((qh0 >> 2) & 0x03) << 4)) - 32;
+        const int q3_0 = ((ql0a >>   4) | (((qh0 >> 4) & 0x03) << 4)) - 32;
+        const int q4_0 = ((ql0b >>   4) | (((qh0 >> 6) & 0x03) << 4)) - 32;
+        const int q1_1 = ((ql1a & 0x0F) | (((qh1 >> 0) & 0x03) << 4)) - 32;
+        const int q2_1 = ((ql1b & 0x0F) | (((qh1 >> 2) & 0x03) << 4)) - 32;
+        const int q3_1 = ((ql1a >>   4) | (((qh1 >> 4) & 0x03) << 4)) - 32;
+        const int q4_1 = ((ql1b >>   4) | (((qh1 >> 6) & 0x03) << 4)) - 32;
 
-            acc += d * (float)scH[isOffset + 0] * (float)q1 * xb[b + l];
-            acc += d * (float)scH[isOffset + 2] * (float)q2 * xb[b + l + 32];
-            acc += d * (float)scH[isOffset + 4] * (float)q3 * xb[b + l + 64];
-            acc += d * (float)scH[isOffset + 6] * (float)q4 * xb[b + l + 96];
-        }
+        acc += d * (float)sc0_0 * (float)q1_0 * x0a;
+        acc += d * (float)sc0_2 * (float)q2_0 * x0b;
+        acc += d * (float)sc0_4 * (float)q3_0 * x0c;
+        acc += d * (float)sc0_6 * (float)q4_0 * x0d;
+        acc += d * (float)sc1_0 * (float)q1_1 * x1a;
+        acc += d * (float)sc1_2 * (float)q2_1 * x1b;
+        acc += d * (float)sc1_4 * (float)q3_1 * x1c;
+        acc += d * (float)sc1_6 * (float)q4_1 * x1d;
     }
 
     #pragma unroll

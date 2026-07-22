@@ -101,9 +101,11 @@ kernels Q8_0/Q4_K/Q5_K/Q6_K, quantized `Linear`). M2 added the wiring + a low-VR
 
 - [ ] `MoeLayer` (router + expert dispatch); Mixtral / Qwen-MoE presets
 - [ ] `PagedKvCache` + continuous batching
-- ~~Server `/v1/chat/completions` (+ streaming SSE), OpenAI-compatible~~ — **dropped.** No first-party
-      server is planned; text generation is consumed in-process via the `HartsyInference.LLM` library and,
-      for end users, through the SwarmUI backend extension.
+- [x] Server `/v1/chat/completions` (+ streaming SSE), OpenAI-compatible — shipped in `HartsyInference.API`
+      (`CompatEndpoints.cs`), a thin wrapper over `IInferenceEngine.Text`. Native `/v1/native/text`(+`/stream`)
+      also exists for the fuller request/result contract chat's OpenAI schema can't express. Text generation
+      remains consumable in-process via `HartsyInference.LLM` too, and end users are still pointed at the
+      SwarmUI backend extension as the recommended surface.
 
 ## M6 — VLM (optional)
 

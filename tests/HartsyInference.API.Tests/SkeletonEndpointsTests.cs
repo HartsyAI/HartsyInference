@@ -179,13 +179,7 @@ public sealed class SkeletonEndpointsTests : IClassFixture<WebApplicationFactory
         Assert.Equal("cpu", body.GetProperty("backend").GetString());
     }
 
-    [Fact]
-    public async Task AdminQueue_ReportsConfiguredCapacity()
-    {
-        using HttpClient client = _factory.CreateClient();
-        JsonElement body = await client.GetFromJsonAsync<JsonElement>("/admin/queue");
-        Assert.Equal(0, body.GetProperty("pending").GetInt32());
-        Assert.Equal(1, body.GetProperty("maxConcurrency").GetInt32());
-        Assert.Equal(16, body.GetProperty("maxQueueDepth").GetInt32());
-    }
+    // AdminQueue coverage moved to VideoWorldEndpointsTests.AdminQueue_ReportsBothFastAndLongRunning — Phase 5
+    // changed /admin/queue's response shape from a flat {pending,maxConcurrency,maxQueueDepth} to
+    // {fast:{...},longRunning:{...}} when the long-running queue was split out.
 }

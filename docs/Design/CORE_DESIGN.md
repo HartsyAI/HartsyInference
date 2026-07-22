@@ -24,7 +24,6 @@ Pure C# with PTX can reach near-native CUDA performance; HartsyInference applies
 **Non-goals**
 
 - **A first-party UI / web app.** SwarmUI is the front-end; we build the backend for it.
-- **An OpenAI-compatible REST server as a *product*.** SwarmUI is the recommended surface. `HartsyInference.API` does exist and works (OpenAI-shaped `/v1/chat/completions` with continuous batching + paged KV cache, `/v1/images/generations`, model management), but it ships as a runnable sample (`IsPackable=false`), not a supported/published product.
 - **A dependency on dotLLM.** LLM text generation is native in `HartsyInference.LLM`; [`../Research/DOTLLM_ARCHITECTURE.md`](../Research/DOTLLM_ARCHITECTURE.md) is retained only as a historical study that informed the native design.
 - **Training / fine-tuning.** Inference engine only.
 
@@ -108,6 +107,16 @@ The primary way to run the engine is the [SwarmUI HartsyInference backend extens
 | Separate process, HTTP round-trips | In-process inference |
 | 10-30s startup | Milliseconds |
 | No C# debuggability | Full C# debuggability |
+
+## HTTP API (Secondary Path)
+
+`src/HartsyInference.API` is a thin ASP.NET Core Minimal API adapter over `HartsyInference.Engine` — health/settings/
+admin endpoints plus native per-modality generation routes (`/v1/native/*`, one per `IInferenceEngine` service) and a
+narrow OpenAI-compat layer (`/v1/chat/completions`, `/v1/images/generations`) for chat/image clients that already
+speak that schema. Every route resolves a `ModelSpec` and calls the same facade the CLI and SwarmUI extension use,
+gated through an `InferenceQueue` so concurrent HTTP requests can't race the backend. It exists for scripting,
+automation, and non-.NET clients — SwarmUI remains the recommended surface for interactive/end-user use. See
+`docs/Agents/API.md` for the endpoint catalog.
 
 ## Capabilities by Modality
 

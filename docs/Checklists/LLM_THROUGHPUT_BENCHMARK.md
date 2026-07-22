@@ -113,10 +113,14 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 | Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (ours÷llama, graph-on) |
 |---|---|---|---|---|
 | Llama-3.2-1B-Instruct Q8_0 | 128.72 tok/s | 142.14 tok/s | 190.34 tok/s | **0.75× (1.34× slower)** |
-| Qwen3-4B Q4_K_M | 54.44 tok/s | 60.05 tok/s | 85.59 tok/s | **0.70× (1.43× slower)** |
+| Qwen3-4B Q4_K_M | 54.44 → 58.1 tok/s | 60.05 → 63.9 tok/s | 85.59 tok/s | **0.75× (1.34× slower)**, was 0.70× |
 
-Not faster than Python/llama.cpp on either model even with CUDA-graph decode (our best available config) —
-per the user's instruction this triggers the perf-pass requirement below.
+Qwen3-4B's numbers improved mid-session after a real Q6_K GEMV kernel fix (latency-bound interleaved loads
+restructured to prefetch-then-compute — see `LLM_DECODE_PERF_GRIND.md`'s 2026-07-22 continuation entry for
+the full root-cause and verification). Not faster than Python/llama.cpp on either model even after that fix
+— the perf pass narrowed the gap, did not close it. `ncu`/`nsys` access (previously blocked by
+`ERR_NVGPUCTRPERM`) was unblocked via `sudo` this session, which is what made the Q6_K finding possible;
+see the perf-grind doc for exactly how (per-invocation elevation, not a persistent system change).
 
 - [ ] `llama-bench` itself (vs. llama-cpp-python) not run this pass — no system CUDA toolkit; the pip-wheel
   toolchain builds llama-cpp-python fine but not the full llama.cpp CLI suite. Same underlying engine either

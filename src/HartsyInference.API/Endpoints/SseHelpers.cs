@@ -19,7 +19,7 @@ internal static class SseHelpers
     public static async Task RunAsync(
         HttpContext ctx, InferenceQueue queue, Func<ChannelWriter<string>, JsonSerializerOptions, Task> produce, CancellationToken ct)
     {
-        JsonSerializerOptions jsonOptions = ctx.RequestServices.GetRequiredService<IOptions<JsonOptions>>().Value.SerializerOptions;
+        JsonSerializerOptions jsonOptions = ResolveJsonOptions(ctx);
         Channel<string> events = Channel.CreateUnbounded<string>();
 
         Task queued = queue.EnqueueAsync(async () =>
@@ -69,5 +69,10 @@ internal static class SseHelpers
     public static string Event(string name, object data, JsonSerializerOptions options) =>
         $"event: {name}\ndata: {JsonSerializer.Serialize(data, options)}\n\n";
 
-    private static string ErrorEvent(string message, JsonSerializerOptions options) => Event("error", new { message }, options);
+    /// <summary>The app's configured JSON options (camelCase, string enums) — shared with callers that stream
+    /// SSE frames outside <see cref="RunAsync"/>'s queue-gated shape (e.g. an already-open world session).</summary>
+    public static JsonSerializerOptions ResolveJsonOptions(HttpContext ctx) =>
+        ctx.RequestServices.GetRequiredService<IOptions<JsonOptions>>().Value.SerializerOptions;
+
+    internal static string ErrorEvent(string message, JsonSerializerOptions options) => Event("error", new { message }, options);
 }
