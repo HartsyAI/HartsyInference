@@ -23,6 +23,12 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _gegluModule;
     private readonly CudaModule _broadcastAddModule;
 
+    // Optional: across-step feature-cache gate reductions (stepcache.ptx). Null when the PTX has not been
+    // compiled on this install yet — DeviceFeatureCache gates on HasStepCacheKernels and stays off without it.
+    private readonly CudaModule? _stepCacheModule;
+    private readonly nint _stepCacheRelL1F32;
+    private readonly nint _stepCacheRelL1F16;
+
     // ── F16 Modules ──────────────────────────────────────────────────────
     private readonly CudaModule _elementwiseF16Module;
     private readonly CudaModule _groupnormF16Module;
@@ -372,6 +378,16 @@ public sealed class CudaKernels : IDisposable
 
         _broadcastAddModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "broadcast_add_f32.ptx"));
         _broadcastAddF32 = _broadcastAddModule.GetFunction("broadcast_add_f32");
+
+        // Optional module: present only after native/cuda/dit/build.sh has compiled stepcache.cu on a
+        // CUDA-toolkit box. Absence is not an error — the step-cache feature reports unsupported instead.
+        string stepCachePath = Path.Combine(ptxDir, "stepcache.ptx");
+        if (File.Exists(stepCachePath))
+        {
+            _stepCacheModule = CudaModule.LoadFromFile(stepCachePath);
+            _stepCacheRelL1F32 = _stepCacheModule.GetFunction("stepcache_rel_l1_f32");
+            _stepCacheRelL1F16 = _stepCacheModule.GetFunction("stepcache_rel_l1_f16");
+        }
 
         // ── F16 modules ──────────────────────────────────────────────────
         _elementwiseF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "elementwise_f16.ptx"));
@@ -1518,6 +1534,34 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches elementwise add: output[i] = a[i] + b[i] (F32)</summary>
     public void LaunchAdd(ulong output, ulong a, ulong b, int count, nint stream)
         => LaunchBinaryImpl(_addF32, output, a, b, count, stream);
+
+    /// <summary>Whether the optional stepcache.ptx module was found and loaded (see native/cuda/dit/stepcache.cu).</summary>
+    public bool HasStepCacheKernels => _stepCacheModule is not null;
+
+    /// <summary>Launches the feature-cache gate reduction: sums[0] += Σ|a−b|, sums[1] += Σ|b| over <paramref name="count"/>
+    /// elements. Caller pre-zeroes the 2-float <paramref name="sums"/> buffer. F32 or F16 operands by <paramref name="isF16"/>.</summary>
+    public unsafe void LaunchStepCacheRelL1(ulong sums, ulong a, ulong b, long count, bool isF16, nint stream)
+    {
+        if (_stepCacheModule is null)
+            throw new InvalidOperationException("stepcache.ptx is not loaded; gate on HasStepCacheKernels first.");
+
+        ulong aArg = a, bArg = b, sumsArg = sums;
+        ulong countArg = (ulong)count;
+
+        void** args = stackalloc void*[4];
+        args[0] = &aArg;
+        args[1] = &bArg;
+        args[2] = &sumsArg;
+        args[3] = &countArg;
+
+        // Grid-stride kernel: cap blocks so the per-block atomic tail stays negligible while still
+        // saturating the SMs at DiT activation sizes (seqLen×hidden ≈ 15M elements).
+        uint gridDim = (uint)Math.Min(1024, (count + BlockSize - 1) / BlockSize);
+        nint func = isF16 ? _stepCacheRelL1F16 : _stepCacheRelL1F32;
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
 
     /// <summary>Launches elementwise add: output[i] = a[i] + b[i] (F16)</summary>
     public void LaunchAddF16(ulong output, ulong a, ulong b, int count, nint stream)
@@ -2840,6 +2884,7 @@ public sealed class CudaKernels : IDisposable
         _transposeModule?.Dispose();
         _gegluModule?.Dispose();
         _broadcastAddModule?.Dispose();
+        _stepCacheModule?.Dispose();
         _elementwiseF16Module?.Dispose();
         _groupnormF16Module?.Dispose();
         _layernormF16Module?.Dispose();

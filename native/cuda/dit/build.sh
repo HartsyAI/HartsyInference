@@ -12,6 +12,7 @@ PTX_OUT="${THIS_DIR}/../../../src/HartsyInference.Cuda/Ptx"
 
 KERNELS=(
     "dit_f32"
+    "stepcache"
 )
 
 INSTALL=true

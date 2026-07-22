@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -142,8 +143,12 @@ public sealed unsafe class QwenImageTransformer : IDisposable
     /// <param name="refTimestepZero">Qwen-Image-Edit-2511 (<c>index_timestep_zero</c>): modulate/gate the
     /// reference-latent rows with the t=0 modulation in every block (ComfyUI <c>timestep_zero_index</c>).
     /// The 2509 checkpoints use plain "index" (false). Ignored when no ref tokens are present.</param>
+    /// <param name="stepCache">Optional across-step First-Block cache (one instance PER CFG stream). Block 0
+    /// always runs; on a gate hit blocks 1..N−1 are reconstructed from the previous step's residual instead of
+    /// computed. Null (the default) is byte-identical to the uncached forward.</param>
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor encoderHidden, float timestep,
-        int hPacked, int wPacked, (int H, int W)[]? refGrids = null, bool refTimestepZero = false)
+        int hPacked, int wPacked, (int H, int W)[]? refGrids = null, bool refTimestepZero = false,
+        DeviceFeatureCache? stepCache = null)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
@@ -207,13 +212,47 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         Tensor currentImg = imgTokens;
         Tensor currentTxt = txtTokens;
 
-        for (int i = 0; i < _config.Depth; i++)
+        // Across-step First-Block cache: block 0 always runs; its img stream is the gate indicator. On a hit,
+        // blocks 1..N−1 are skipped and the final hidden state is block0 + the previous full compute's residual
+        // (device Add). On a miss the anchor (block-0 output) survives the loop so the fresh residual can be
+        // stored. Null stepCache leaves this loop byte-identical to the original.
+        Tensor? cacheAnchor = null;
+        bool cacheHit = false;
+        int startBlock = 0;
+        if (stepCache is not null && _config.Depth > 1)
+        {
+            (Tensor img0, Tensor txt0) = _blocks[0].Forward(
+                backend, currentImg, currentTxt, temb, _rope,
+                hPacked, wPacked, txtPositionStart, refGrids, tembZero, mainSeqLen);
+            currentImg.Dispose();
+            currentTxt.Dispose();
+            currentImg = img0;
+            currentTxt = txt0;
+            QwenImageDebugDump.Dump("block_0_image", currentImg);
+            QwenImageDebugDump.Dump("block_0_text", currentTxt);
+
+            startBlock = 1;
+            cacheHit = !stepCache.ShouldCompute(backend, currentImg);
+            if (cacheHit)
+            {
+                Tensor reconstructed = stepCache.ApplyResidual(backend, currentImg);
+                currentImg.Dispose();
+                currentImg = reconstructed;
+                startBlock = _config.Depth;
+            }
+            else
+            {
+                cacheAnchor = currentImg;
+            }
+        }
+
+        for (int i = startBlock; i < _config.Depth; i++)
         {
             (Tensor newImg, Tensor newTxt) = _blocks[i].Forward(
                 backend, currentImg, currentTxt, temb, _rope,
                 hPacked, wPacked, txtPositionStart, refGrids, tembZero, mainSeqLen);
 
-            currentImg.Dispose();
+            if (currentImg != cacheAnchor) currentImg.Dispose();
             currentTxt.Dispose();
 
             currentImg = newImg;
@@ -221,6 +260,12 @@ public sealed unsafe class QwenImageTransformer : IDisposable
 
             QwenImageDebugDump.Dump($"block_{i}_image", currentImg);
             QwenImageDebugDump.Dump($"block_{i}_text", currentTxt);
+        }
+
+        if (cacheAnchor is not null)
+        {
+            stepCache!.StoreResidual(backend, cacheAnchor, currentImg);
+            cacheAnchor.Dispose();
         }
 
         currentTxt.Dispose();

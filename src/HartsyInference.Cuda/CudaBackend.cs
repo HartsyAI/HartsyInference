@@ -1747,6 +1747,10 @@ public sealed class CudaBackend : IBackend
 
     public bool SupportsF16Activations => true;
 
+    /// <summary>True once the optional stepcache.ptx module is compiled + shipped (native/cuda/dit/build.sh);
+    /// the across-step feature cache stays disabled on CUDA without it.</summary>
+    public bool SupportsDeviceStepCacheGate => _kernels is not null && _kernels.HasStepCacheKernels;
+
     public bool FlashDecodeSupported => true;
 
     public bool StepGraphSupported => true;
@@ -4556,6 +4560,46 @@ public sealed class CudaBackend : IBackend
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <summary>Device-side feature-cache gate metric Σ|a−b|/Σ|b| (stepcache.ptx). Never pulls the operands to the
+    /// host — cached activations stay cached. The 8-byte result readback is the only sync (once per gated forward).</summary>
+    public unsafe float RelativeL1Distance(Tensor a, Tensor b)
+    {
+        if (!a.Shape.Equals(b.Shape))
+            throw new ArgumentException($"RelativeL1Distance shape mismatch: a={a.Shape}, b={b.Shape}.");
+        if (a.DType != b.DType)
+            throw new ArgumentException($"RelativeL1Distance dtype mismatch: a={a.DType}, b={b.DType}.");
+        if (a.DType != DType.F32 && a.DType != DType.F16)
+            throw new NotSupportedException($"RelativeL1Distance supports F32/F16; got {a.DType}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        if (!_kernels!.HasStepCacheKernels)
+            throw new NotSupportedException(
+                "stepcache.ptx not present — run native/cuda/dit/build.sh and gate on SupportsDeviceStepCacheGate.");
+
+        ulong pA = 0, pB = 0, pSums = 0;
+        try
+        {
+            pA = GpuTransferHelper.CopyToDevice(a);
+            pB = GpuTransferHelper.CopyToDevice(b);
+            pSums = GpuTransferHelper.AllocateDevice(2 * sizeof(float));
+
+            // Synchronous NULL-stream memset serializes correctly against the single blocking compute stream
+            // (same ordering guarantee CudaMemory.cuMemsetD32 relies on).
+            CudaDriverApi.cuMemsetD8(pSums, 0, 2 * sizeof(float)).ThrowOnError();
+            _kernels!.LaunchStepCacheRelL1(pSums, pA, pB, a.ElementCount, a.DType == DType.F16, _stream.Handle);
+
+            float* results = stackalloc float[2];
+            CudaDriverApi.cuMemcpyDtoH((nint)results, pSums, 2 * sizeof(float)).ThrowOnError();
+            return results[1] > 0f ? results[0] / results[1] : 0f;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pSums);
+            GpuTransferHelper.FreeDevice(pA);
+            if (pB != pA) GpuTransferHelper.FreeDevice(pB);
         }
     }
 

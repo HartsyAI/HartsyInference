@@ -118,6 +118,12 @@ public static class MatMulKernels
         int K = (int)w.Shape[1]; // inDim
         int M = (int)(input.ElementCount / K); // batch*seqLen
 
+        // Fail fast on a weight/output mismatch: the tiled loop below writes M·N floats derived from the
+        // WEIGHT's outDim, so an undersized output buffer is silent native heap corruption, not an exception.
+        if (output.ElementCount != (long)M * N)
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                $"LinearTransB shape mismatch: output has {output.ElementCount} elements but input rows {M} × weight outDim {N} = {(long)M * N} (weight {w.Shape}, input {input.Shape}).");
+
         float* pIn = (float*)input.DataPointer;
         float* pW = (float*)w.DataPointer;
         float* pOut = (float*)output.DataPointer;

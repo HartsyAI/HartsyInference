@@ -572,4 +572,74 @@ public static unsafe class CheckpointConvertUtils
         result.Fp8ScaleFactor = globalScale;
         return result;
     }
+
+    /// <summary>Requantizes a group of fp8_scaled (E4M3) tensors IN PLACE to one common per-tensor scale —
+    /// the enabler for concat-fusing separately-scaled projections (Q/K/V, FFN w1/w3) into a single GEMM,
+    /// which was previously ruled out because one cuBLAS <c>alpha</c> cannot represent N different
+    /// <see cref="Tensor.Fp8ScaleFactor"/>s. Picks <c>s* = max(sᵢ)</c>, decodes each tensor's bytes at its own
+    /// scale, and re-encodes at <c>s*</c> — values only shrink (<c>sᵢ ≤ s*</c>), so nothing saturates.
+    ///
+    /// <para><b>Precision:</b> E4M3 is floating-point, so relative error is scale-invariant for values that
+    /// stay in the NORMAL range after rescaling — those weights round-trip within half an E4M3 ulp
+    /// (rel ≤ 1/16). Only weights whose real magnitude falls below <c>s*·2⁻⁶</c> (E4M3 min normal) enter the
+    /// subnormal range and lose precision progressively, bounded by the group's scale ratio; weights below
+    /// <c>s*·2⁻¹⁰</c> (half min subnormal) flush to zero. Both populations carry negligible GEMM energy at
+    /// typical fp8_scaled ratios (≤ ~8×), but callers fusing groups with extreme ratios should A/B output
+    /// quality. Returns the largest introduced decode error across the group, normalized per tensor to its
+    /// own amax (<c>max |Δreal| / amax(real)</c> — the metric that bounds the GEMM contribution); 0 when all
+    /// scales already match (nothing rewritten).</para></summary>
+    public static float RequantizeToCommonFp8Scale(params Tensor[] tensors)
+    {
+        if (tensors is null || tensors.Length < 2)
+            throw new ArgumentException("RequantizeToCommonFp8Scale needs at least two tensors to unify.", nameof(tensors));
+        float commonScale = 0f;
+        foreach (Tensor t in tensors)
+        {
+            if (t.DType != DType.F8E4M3)
+                throw new ArgumentException($"RequantizeToCommonFp8Scale requires F8E4M3 tensors; got {t.DType}.");
+            commonScale = Math.Max(commonScale, t.Fp8ScaleFactor);
+        }
+
+        float maxError = 0f;
+        foreach (Tensor t in tensors)
+        {
+            if (t.Fp8ScaleFactor == commonScale) continue;
+
+            // CastTo(F32) folds Fp8ScaleFactor → true weight values. Dividing by s* and re-encoding puts the
+            // bytes on the common scale; the rewrite is in place so weight-dictionary references stay valid.
+            // Load-time-only cost.
+            Tensor real = t.CastTo(DType.F32);
+            long n = real.ElementCount;
+            float* rp = (float*)real.DataPointer;
+
+            Tensor scaled = new Tensor(real.Shape, DType.F32);
+            float* sp = (float*)scaled.DataPointer;
+            float inv = 1.0f / commonScale;
+            float amax = 0f;
+            for (long i = 0; i < n; i++)
+            {
+                sp[i] = rp[i] * inv;
+                amax = Math.Max(amax, Math.Abs(rp[i]));
+            }
+            Tensor requantized = scaled.CastTo(DType.F8E4M3);
+            scaled.Dispose();
+
+            Buffer.MemoryCopy((byte*)requantized.DataPointer, (byte*)t.DataPointer, n, n);
+            requantized.Dispose();
+            t.Fp8ScaleFactor = commonScale;
+
+            // Introduced error vs the original decode, normalized to this tensor's amax.
+            if (amax > 0f)
+            {
+                Tensor newReal = t.CastTo(DType.F32);
+                float* np = (float*)newReal.DataPointer;
+                float invAmax = 1.0f / amax;
+                for (long i = 0; i < n; i++)
+                    maxError = Math.Max(maxError, Math.Abs(np[i] - rp[i]) * invAmax);
+                newReal.Dispose();
+            }
+            real.Dispose();
+        }
+        return maxError;
+    }
 }

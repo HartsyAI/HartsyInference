@@ -10,6 +10,9 @@ public sealed class CpuBackend : IBackend
 {
     private int _disposed;
 
+    /// <summary>Host tensors ARE the CPU backend's storage, so the default host gate metric is native here.</summary>
+    public bool SupportsDeviceStepCacheGate => true;
+
     /// <summary>Gets the device kind for this backend, which is always <see cref="DeviceKind.Cpu"/>.</summary>
     public DeviceKind Device { get; } = DeviceKind.Cpu;
 
