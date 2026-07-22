@@ -57,47 +57,322 @@ public static class ModelCatalog
                         Sha256 = "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5" },
                 },
             },
-            E("llama3", txt, "Llama-3.x", "Llama dense transformer", st, cli: true),
-            E("mistral", txt, "Mistral (dense)", "Mistral dense transformer", st, cli: true),
+            // `hartsy text -m llama3/mistral` verified end-to-end 2026-07-22 (CLI catalog pass): both coherent
+            // and correct on the 3060 (--low-vram-quant).
+            new CatalogEntry
+            {
+                Id = "llama3", Modality = txt, DisplayName = "Llama-3.x", Architecture = "Llama dense transformer",
+                Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "hugging-quants/Llama-3.2-1B-Instruct-Q4_K_M-GGUF", RepoPath = "llama-3.2-1b-instruct-q4_k_m.gguf",
+                        TargetSubdir = "LLM/llama3", Role = "transformer",
+                        Sha256 = "1d0e9419ec4e12aef73ccf4ffd122703e94c48344a96bc7c5f0f2772c2152ce3" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "mistral", Modality = txt, DisplayName = "Mistral (dense)", Architecture = "Mistral dense transformer",
+                Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "bartowski/Mistral-7B-Instruct-v0.3-GGUF", RepoPath = "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/mistral", Role = "transformer",
+                        Sha256 = "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6" },
+                },
+            },
             E("gguf", txt, "Quantized GGUF (Q4/Q8)", "config-driven, any GGUF LLM", ok, cli: true),
 
-            // Text / LLM — dense families verified engine-internally per MODEL_STATUS_LLM.md, but not yet run
-            // through `hartsy text` itself, so Status stays Structural (same convention as llama3/mistral above)
-            // until a CLI pass confirms real output. No Assets: no HF GGUF repo for these is reliably documented
-            // in this repo's checklists — see docs/Checklists/LLM_CLI_CATALOG_HANDOFF.md for what a GPU-equipped
-            // session still needs to source and verify.
-            E("gemma", txt, "Gemma 2 / Gemma 3 (text)", "GeGLU, √d embed scale, sandwich norm, dual-RoPE, attn/final logit soft-cap", st, cli: true),
-            E("phi", txt, "Phi-3 / Phi-3.5-mini / Phi-4-mini", "fused QKV split, LongRoPE, partial rotary, gpt-4o tokenizer", st, cli: true),
-            E("stablelm2", txt, "StableLM-2 (1.6B)", "partial rotary + QKV bias", st, cli: true),
-            E("granite3", txt, "Granite-3", "embedding/attention/residual/logit scalar multipliers", st, cli: true),
-            E("command-r", txt, "Cohere Command-R", "LayerNorm, parallel residual, interleaved RoPE, NoPE global layers, logit-scale", st, cli: true),
-            E("olmoe", txt, "OLMoE (1B-7B-0924)", "MoE, whole-vector Q/K norm", st, cli: true),
-            E("granite-moe", txt, "Granite-MoE", "scalar multipliers + MoE", st, cli: true),
-            E("gemma4", txt, "Gemma-4 (E2B/E4B mobile)", "per-layer embeddings, per-layer head-dim, cross-layer KV donor sharing, weightless V-norm", st, cli: true),
+            // Text / LLM — dense families. `hartsy text -m <id>` verified end-to-end 2026-07-22 (CLI catalog
+            // pass) on the 3060 (--low-vram-quant) unless noted; see MODEL_STATUS_LLM.md for the exact
+            // prompt/output per model and PARITY_VERIFICATION.md for the full session record.
+            new CatalogEntry
+            {
+                Id = "gemma", Modality = txt, DisplayName = "Gemma 2 / Gemma 3 (text)",
+                Architecture = "GeGLU, √d embed scale, sandwich norm, dual-RoPE, attn/final logit soft-cap",
+                Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "ggml-org/gemma-3-4b-it-GGUF", RepoPath = "gemma-3-4b-it-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/gemma", Role = "transformer",
+                        Sha256 = "882e8d2db44dc554fb0ea5077cb7e4bc49e7342a1f0da57901c0802ea21a0863" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "phi", Modality = txt, DisplayName = "Phi-3 / Phi-3.5-mini / Phi-4-mini",
+                Architecture = "fused QKV split, LongRoPE, partial rotary, gpt-4o tokenizer",
+                Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "microsoft/Phi-3-mini-4k-instruct-gguf", RepoPath = "Phi-3-mini-4k-instruct-q4.gguf",
+                        TargetSubdir = "LLM/phi", Role = "transformer",
+                        Sha256 = "8a83c7fb9049a9b2e92266fa7ad04933bb53aa1e85136b7b30f1b8000ff2edef" },
+                },
+            },
+            new CatalogEntry
+            {
+                // Factual prompt ("capital of Italy" -> "Rome") correct and coherent; a separate arithmetic
+                // prompt got a rambling wrong answer — a real 1.6B-model capability limit (confirmed the
+                // template/generation pipeline itself is correct via the factual prompt), not an engine bug.
+                Id = "stablelm2", Modality = txt, DisplayName = "StableLM-2 (1.6B)", Architecture = "partial rotary + QKV bias",
+                Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // The base (non-chat) repo has no usable chat template for this CLI's single-turn prompting —
+                    // use the chat-tuned repack.
+                    new() { Repo = "brittlewis12/stablelm-2-1_6b-chat-GGUF", RepoPath = "stablelm-2-1_6b-chat.Q4_K_M.gguf",
+                        TargetSubdir = "LLM/stablelm2", Role = "transformer",
+                        Sha256 = "a465c9a5a8e0afdef7f29e6dd0066dce7d8aeea484c3a9e11cf21478df4f435d" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "granite3", Modality = txt, DisplayName = "Granite-3",
+                Architecture = "embedding/attention/residual/logit scalar multipliers", Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "bartowski/granite-3.0-2b-instruct-GGUF", RepoPath = "granite-3.0-2b-instruct-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/granite3", Role = "transformer",
+                        Sha256 = "06e5f1fdb176a2d79a2f33febfbbd521935fc0c00573326e91439b7d21e89df0" },
+                },
+            },
+            // command-r: a real, ungated Q3_K_S source was confirmed and downloads/parses fine, but generation
+            // genuinely OOM'd on this box — kernel-killed at ~48.7GB resident RAM (confirmed via dmesg), above
+            // even the loader's own 2.5x-file-size headroom estimate (~40GB) for this 15.9GB file; real peak was
+            // closer to 3.1x. This is a 35B dense model — Status stays Structural (never actually completed a
+            // generation) pending a host with >64GB RAM. Assets included since the source is real and correct.
+            new CatalogEntry
+            {
+                Id = "command-r", Modality = txt, DisplayName = "Cohere Command-R",
+                Architecture = "LayerNorm, parallel residual, interleaved RoPE, NoPE global layers, logit-scale",
+                Status = st, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "bartowski/c4ai-command-r-v01-GGUF", RepoPath = "c4ai-command-r-v01-Q3_K_S.gguf",
+                        TargetSubdir = "LLM/command-r", Role = "transformer",
+                        Sha256 = "3d039ff1205bec9294d70d4e3cfedac50c0cad5738e5429a1772a40573c21917" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "olmoe", Modality = txt, DisplayName = "OLMoE (1B-7B-0924)", Architecture = "MoE, whole-vector Q/K norm",
+                Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "allenai/OLMoE-1B-7B-0924-Instruct-GGUF", RepoPath = "olmoe-1b-7b-0924-instruct-q4_k_m.gguf",
+                        TargetSubdir = "LLM/olmoe", Role = "transformer",
+                        Sha256 = "8c310f1435a1222338fd2d3d974975be9cd908180b644bab0c2a94da1ac32f3f" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "granite-moe", Modality = txt, DisplayName = "Granite-MoE", Architecture = "scalar multipliers + MoE",
+                Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "bartowski/granite-3.0-1b-a400m-instruct-GGUF", RepoPath = "granite-3.0-1b-a400m-instruct-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/granite-moe", Role = "transformer",
+                        Sha256 = "074f09e13484e54e73c93830d34e9fa9917a6319fb8bae762a22594b9b4da0dc" },
+                },
+            },
+            new CatalogEntry
+            {
+                // Correct output but notably slow (~15s) for its size with GPU sm% near 0% throughout the run —
+                // inconclusive whether that's decode-phase host-glue in the PLE (per-layer-embedding) gather path
+                // or just one-time load/setup overhead dominating a very short (~1 token) completion; worth a
+                // longer-generation re-check if Gemma-4 perf becomes a priority. See MODEL_STATUS_LLM.md.
+                Id = "gemma4", Modality = txt, DisplayName = "Gemma-4 (E2B/E4B mobile)",
+                Architecture = "per-layer embeddings, per-layer head-dim, cross-layer KV donor sharing, weightless V-norm",
+                Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "unsloth/gemma-4-E2B-it-GGUF", RepoPath = "gemma-4-E2B-it-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/gemma4", Role = "transformer",
+                        Sha256 = "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8" },
+                },
+            },
 
-            // Text / LLM — MoE / large dense: architecture, key-mapper, and slice/unit tests are built and pass
-            // (see MODEL_STATUS_LLM.md "build-defer"), but no e2e run exists yet at any size — every one of these
-            // checkpoints exceeds 12GB, so real verification needs a bigger GPU than this project has used so far.
-            E("mixtral", txt, "Mixtral 8x7B", "llama+experts MoE, interleaved RoPE, renorm — 47B total params", st, cli: true),
-            E("qwen3-moe", txt, "Qwen3-MoE (30B-A3B / 235B)", "per-head Q/K norm, no shared expert", st, cli: true),
-            E("deepseek-v2-lite", txt, "DeepSeek-V2-Lite", "MLA + DeepSeek-MoE — OOMs a 12GB card at preload", st, cli: true),
-            E("deepseek-v3", txt, "DeepSeek-V3 (671B) / Kimi-K2 (1T)", "MLA + MoE + sigmoid group-routing + q-LoRA query — likely needs multiple GPUs", st, cli: true),
-            E("gpt-oss", txt, "GPT-OSS (20B / 120B)", "attention sinks, MoE, o200k tokenizer", st, cli: true),
-            E("gemma4-moe", txt, "Gemma-4 (31B-dense / 26B-A4B-MoE)", "parallel dense+MoE branch, per-layer FFN width", st, cli: true),
+            // Text / LLM — MoE / large dense: real ungated sources exist for all six (HF-API-confirmed
+            // 2026-07-22), but none reach a coherent CLI-verified generation on this box's hardware (24GB 4090 /
+            // 62GB RAM) — each hit a genuinely distinct blocker, not a uniform "too big". No Assets on any of
+            // these: pointing `hartsy text -m <id>` at a source that's confirmed to fail here would be worse than
+            // no default. Full detail + exact repro commands in MODEL_STATUS_LLM.md. TODO: re-verify all six once
+            // a larger-VRAM/RAM box (rented GPU) is available.
+            E("mixtral", txt, "Mixtral 8x7B", "llama+experts MoE, interleaved RoPE, renorm — 47B total params. " +
+                "TODO(rented GPU): real Q4_K_M source confirmed (TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF) but its " +
+                "~26GB VRAM footprint exceeds this 24GB 4090; not downloaded (disk budget spent on the other five).", st, cli: true),
+            E("qwen3-moe", txt, "Qwen3-MoE (30B-A3B / 235B)", "per-head Q/K norm, no shared expert. " +
+                "TODO(rented GPU): official Qwen/Qwen3-30B-A3B-GGUF Q4_K_M (18.6GB) downloaded and loaded, but " +
+                "CUDA_ERROR_OUT_OF_MEMORY during weight preload on the 24GB 4090 even with --low-vram-quant — " +
+                "confirmed doesn't fit this card at Q4.", st, cli: true),
+            E("deepseek-v2-lite", txt, "DeepSeek-V2-Lite", "MLA + DeepSeek-MoE. " +
+                "TODO(needs debugging, not just a bigger GPU): mradermacher/DeepSeek-V2-Lite-GGUF Q4_K_M (10.4GB) " +
+                "loads and generates on the 4090 without crashing, but output is incoherent garbage " +
+                "(\"\\\" ! +—————— »\\n...\\n- = 20.\\n##\") — a real MLA-attention-path bug, not root-caused.", st, cli: true),
+            E("deepseek-v3", txt, "DeepSeek-V3 (671B) / Kimi-K2 (1T)", "MLA + MoE + sigmoid group-routing + q-LoRA query. " +
+                "TODO(rented multi-GPU): real ungated GGUF sources confirmed to exist (bullerwins/DeepSeek-V3-GGUF, " +
+                "unsloth/DeepSeek-V3.1-GGUF) but 671B/1T params is not attemptable on any single-box config this " +
+                "project has access to at any quant; not downloaded.", st, cli: true),
+            E("gpt-oss", txt, "GPT-OSS (20B / 120B)", "attention sinks, MoE, o200k tokenizer. " +
+                "MXFP4 decode support ADDED 2026-07-22 (DType.MXFP4 + Codec_MXFP4, verified bit-for-bit against " +
+                "upstream ggml source; routes through the existing CPU-dequant fallback, no new CUDA kernel needed) " +
+                "— the 'Unsupported GGUF tensor type: 39' load crash is fixed. Still BLOCKED on this box: every " +
+                "available public GGUF (native ggml-org/gpt-oss-20b-GGUF MXFP4 release and unsloth's \"Q4_K_M\" " +
+                "repack alike, which keeps the MoE expert tensors in MXFP4 regardless of the label) exceeds this " +
+                "hardware's VRAM at any quant — a genuine size limit now, not an engine gap. See MODEL_STATUS_LLM.md.", st, cli: true),
+            E("gemma4-moe", txt, "Gemma-4 (31B-dense / 26B-A4B-MoE)", "parallel dense+MoE branch, per-layer FFN width. " +
+                "Root-caused + fixed 2026-07-22: unsloth/gemma-4-26B-A4B-it-GGUF Q3_K_M (12.7GB) fuses the MoE " +
+                "gate+up expert projections into one ffn_gate_up_exps tensor (llama.cpp LLM_TENSOR_FFN_GATE_UP_EXPS) " +
+                "instead of separate ffn_gate_exps/ffn_up_exps, which Gemma4KeyMapper had no case for at all — " +
+                "confirmed via a partial HTTP range-fetch of the real checkpoint's header, not guessed. Fixed: " +
+                "Gemma4KeyMapper maps the fused tensor, GgufLanguageModel.SplitStackedExperts gained a fused-split " +
+                "path (gate=first half/up=second half of each expert's row-block, matches ggml build_moe_ffn's view " +
+                "split), regression-tested. The original KeyNotFoundException is gone. Still BLOCKED: exceeds this " +
+                "box's VRAM (12.7GB > 3060, tight on the 4090 alongside everything else), AND the same checkpoint " +
+                "carries a ffn_down_exps.scale per-expert post-matmul correction (ggml's build_lora_mm_id w_s) that " +
+                "MoeFeedForward has no support for yet — deliberately left unmapped rather than half-wired; expect " +
+                "numerics to still be off by a per-expert scale factor even once VRAM allows a run. See " +
+                "MODEL_STATUS_LLM.md.", st, cli: true),
 
-            // Text / LLM — vision-language (VLM). Attach an image with `--image <path>`; all five are verified
-            // e2e per MODEL_STATUS_LLM.md, but (like the dense families above) not yet through the CLI's new
-            // --image flag specifically.
-            E("llama32-vision", txt, "Llama-3.2-Vision-11B (mllama)", "gated cross-attention VLM, own 560px ViT (no token splice)", st, cli: true),
-            E("gemma3-vision", txt, "Gemma-3-4B-vision", "SigLIP + avg-pool/RMSNorm/Linear projector", st, cli: true),
-            E("smolvlm2", txt, "SmolVLM2-2.2B", "SigLIP + idefics3 pixel-shuffle projector", st, cli: true),
-            E("llava15", txt, "LLaVA-1.5-7B", "CLIP ViT (CLS token, pre-LN, quick-GELU) + MLP projector", st, cli: true),
-            E("qwen25-vl", txt, "Qwen2.5-VL (3B / 7B)", "own ViT, Conv3D patch embed, 2D-RoPE, window attention", st, cli: true),
+            // Text / LLM — vision-language (VLM). Attach an image with `--image <path>`. `hartsy text -m <id> -i
+            // <img>` verified 2026-07-22 against tests/HartsyInference.Vision.Tests/TestData/bus.png (a real photo
+            // of a person and an electric "cero emisiones" bus at a street crossing) on the 4090. 4 of 5 produce
+            // genuinely grounded (not hallucinated) descriptions — see MODEL_STATUS_LLM.md for exact output per
+            // model and how each was judged.
+            new CatalogEntry
+            {
+                // PARTIAL: correctly identifies bus/street/people/trees (the real subjects) but gets the bus color
+                // wrong (reports white; it's blue) and does not reliably stop at content end — confirmed the
+                // model's own eos token (128009) IS registered in StopIds (not a stop-token wiring bug), the
+                // checkpoint itself sometimes just doesn't emit it within a normal token budget and free-runs into
+                // a hallucinated follow-up turn with leaked special tokens. Lower --max-tokens (~35) truncates
+                // cleanly. Status stays Structural pending a cleaner-terminating checkpoint or generation-side fix.
+                Id = "llama32-vision", Modality = txt, DisplayName = "Llama-3.2-Vision-11B (mllama)",
+                Architecture = "gated cross-attention VLM, own 560px ViT (no token splice)", Status = st, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF", RepoPath = "Llama-3.2-11B-Vision-Instruct.Q4_K_M.gguf",
+                        TargetSubdir = "LLM/llama32-vision", Role = "transformer",
+                        Sha256 = "652e85aa1e14c9087a4ccc3ab516fb794cbcf152f8b4b8d3c0b828da4ada62d9" },
+                    new() { Repo = "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF", RepoPath = "Llama-3.2-11B-Vision-Instruct-mmproj.f16.gguf",
+                        TargetSubdir = "LLM/llama32-vision", Role = "mmproj",
+                        Sha256 = "622429e8d31810962dd984bc98559e706db2fb1d40e99cb073beb7148d909d73" },
+                },
+            },
+            // gemma3-vision: FAIL, confirmed real and deeply diagnosed, NOT fixed. Consistently and confidently
+            // describes an unrelated "Barcelona street market" instead of bus.png's actual content, across
+            // repeated runs, temperatures, and repetition-penalty values. A from-scratch PyTorch reference replay
+            // of the vision tower + projector (patch-embed -> 27 ViT blocks -> post-LN -> avg-pool -> RMSNorm ->
+            // linear) against this exact checkpoint's real weights matched the C# SiglipVlmEncoder at cosine
+            // similarity 0.99996-1.0 at every stage — the vision math itself is numerically correct, ruling that
+            // out. Cross-checked against smolvlm2/llava15/qwen25-vl (different VLM families, same --image
+            // pipeline, same bus.png) which all produce genuinely grounded output — rules out a systemic --image
+            // bug. Best unconfirmed hypothesis: the Gemma3 prompt/image-token splice shape in
+            // MultimodalGenerator.BuildPrompt interacting badly with this model's embedding/RoPE handling. No
+            // Assets — don't want `hartsy text -m gemma3-vision` defaulting to a source confirmed to hallucinate.
+            E("gemma3-vision", txt, "Gemma-3-4B-vision", "SigLIP + avg-pool/RMSNorm/Linear projector — FAIL, see comment above and MODEL_STATUS_LLM.md", st, cli: true),
+            new CatalogEntry
+            {
+                Id = "smolvlm2", Modality = txt, DisplayName = "SmolVLM2-2.2B",
+                Architecture = "SigLIP + idefics3 pixel-shuffle projector", Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "ggml-org/SmolVLM2-2.2B-Instruct-GGUF", RepoPath = "SmolVLM2-2.2B-Instruct-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/smolvlm2", Role = "transformer",
+                        Sha256 = "0cf76814555b8665149075b74ab6b5c1d428ea1d3d01c1918c12012e8d7c9f58" },
+                    new() { Repo = "ggml-org/SmolVLM2-2.2B-Instruct-GGUF", RepoPath = "mmproj-SmolVLM2-2.2B-Instruct-f16.gguf",
+                        TargetSubdir = "LLM/smolvlm2", Role = "mmproj",
+                        Sha256 = "db9a3a1648cab1ebc3af4a2b0c8145dd8faebf6f7dd7b16e7dc1842229f14ac4" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "llava15", Modality = txt, DisplayName = "LLaVA-1.5-7B",
+                Architecture = "CLIP ViT (CLS token, pre-LN, quick-GELU) + MLP projector", Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "second-state/Llava-v1.5-7B-GGUF", RepoPath = "llava-v1.5-7b-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/llava15", Role = "transformer",
+                        Sha256 = "2687b20ac8b7a23f6c70296d5b1e7f908fef2ce4769ecdebd1bb9503528a75bf" },
+                    new() { Repo = "second-state/Llava-v1.5-7B-GGUF", RepoPath = "llava-v1.5-7b-mmproj-model-f16.gguf",
+                        TargetSubdir = "LLM/llava15", Role = "mmproj",
+                        Sha256 = "50da4e5b0a011615f77686f9b02613571e65d23083c225e107c08c3b1775d9b1" },
+                },
+            },
+            new CatalogEntry
+            {
+                // Best VLM result of the pass: correctly read the actual "cero emisiones" text painted on the
+                // bus in the test photo, not just the broad scene.
+                Id = "qwen25-vl", Modality = txt, DisplayName = "Qwen2.5-VL (3B / 7B)",
+                Architecture = "own ViT, Conv3D patch embed, 2D-RoPE, window attention", Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "unsloth/Qwen2.5-VL-7B-Instruct-GGUF", RepoPath = "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/qwen25-vl", Role = "transformer",
+                        Sha256 = "d16776dcd9a28d42758c2958ed3a752aabf20a305252cd64ff2be72b4a78c503" },
+                    new() { Repo = "unsloth/Qwen2.5-VL-7B-Instruct-GGUF", RepoPath = "mmproj-F16.gguf",
+                        TargetSubdir = "LLM/qwen25-vl", Role = "mmproj",
+                        Sha256 = "987dd0733033fb5dd9b124d1ca926ae865572e432384eee7618b2eec3e735e17" },
+                },
+            },
 
-            // Text / LLM — non-transformer / hybrid decoders (Ssm/*Model.cs, not GenericTransformer).
-            E("mamba", txt, "Mamba-1 / Mamba-2, Falcon-Mamba", "selective state-space scan + causal Conv1d, no attention", st, cli: true),
-            E("rwkv", txt, "RWKV-6 / RWKV-7", "WKV recurrence + data-dependent token-shift LoRA + GroupNorm", st, cli: true),
-            E("qwen35", txt, "Qwen3.5 (Gated DeltaNet hybrid)", "every 4th layer is GQA+RoPE, the rest are Gated DeltaNet delta-rule recurrence", st, cli: true),
+            // Text / LLM — non-transformer / hybrid decoders (Ssm/*Model.cs, not GenericTransformer). All three
+            // dispatch through SsmGenerationPipeline, not TextGenerationPipeline — confirmed working 2026-07-22.
+            new CatalogEntry
+            {
+                // Correct, coherent output, stops cleanly — but ~0.8 tok/s (26.6s for ~20 tokens) with GPU sm%
+                // staying at 2-14% the ENTIRE run, unlike the transformer families' periodic 30%+ decode bursts.
+                // Root cause (confirmed by direct code read, not inference): Mamba1Model/Mamba2Model run their
+                // causal Conv1d AND the actual selective-scan recurrence host-side EVERY layer, by design (own
+                // doc comment: "the recurrence is inherently sequential... run host-side") — GPU handles only the
+                // big linear projections. This is the real "host glue, not using the GPU" pattern to flag: a
+                // legitimate architectural tradeoff (a fused parallel-scan CUDA kernel is substantial dedicated
+                // engineering, same class of justified exception as diffusion's CPU-side interleaved RoPE), not
+                // an oversight bug — but a genuine, measured perf cost worth a future dedicated kernel if Mamba
+                // throughput matters. See MODEL_STATUS_LLM.md / PARITY_VERIFICATION.md for the numbers.
+                Id = "mamba", Modality = txt, DisplayName = "Mamba-1 / Mamba-2, Falcon-Mamba",
+                Architecture = "selective state-space scan + causal Conv1d, no attention", Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "dranger003/mamba-2.8b-hf-GGUF", RepoPath = "ggml-mamba-2.8b-hf-q4_k.gguf",
+                        TargetSubdir = "LLM/mamba", Role = "transformer",
+                        Sha256 = "0fb59e6e6c46503dda44e983a17fb84f7707d9b32e9f704c38a0696cc516324c" },
+                },
+            },
+            // rwkv: REAL BUG FOUND + FIXED (GgufLanguageModel.cs BuildTemplate — some llama.cpp GGUF converters,
+            // RWKV-World among them, store a bare format-name sentinel like "rwkv-world" in tokenizer.chat_template
+            // instead of real Jinja source; JinjaChatTemplate "compiled" it as literal text with nothing to
+            // substitute, so every render silently produced that same constant regardless of the actual prompt —
+            // confirmed via 3 different prompts all giving byte-identical output before the fix). Fixed by
+            // detecting templates with no {{/{% syntax and routing straight to ChatML. Prompt-sensitivity is
+            // restored and verified, but the downloadable RWKV-6-World checkpoint is a base multilingual model,
+            // not ChatML-instruction-tuned, so its answers are still often wrong against a ChatML-formatted
+            // prompt — Status stays Structural (the engine bug is fixed; a real end-to-end pass needs an
+            // instruction-tuned RWKV GGUF with its own real chat template, not this one). Same shared-recurrence
+            // host-glue tradeoff as mamba applies here too (RwkvModel/Rwkv7Model doc comments).
+            E("rwkv", txt, "RWKV-6 / RWKV-7", "WKV recurrence + data-dependent token-shift LoRA + GroupNorm — chat-template " +
+                "sentinel bug found+fixed (GgufLanguageModel.BuildTemplate); needs an instruct-tuned checkpoint for a full pass", st, cli: true),
+            new CatalogEntry
+            {
+                // PARTIAL: the Gated-DeltaNet/attention hybrid forward pass itself is verified correct (coherent,
+                // correct answer in ALL of --thinking/--no-thinking/neither, all three routed through a ChatML
+                // fallback). --thinking specifically against THIS model's real Jinja template remains unverified:
+                // fixing a real 3-part-slice parser gap (messages[::-1], see JinjaExpr.cs SliceExpr) exposed a
+                // SEPARATE, deeper "Unsupported Jinja call expression" failure in the template's tool-calling
+                // filter chain (args_value | tojson | safe if args_value is mapping ... ), not yet root-caused.
+                // A new render-time ChatML fallback (JinjaChatTemplate.cs Encode) means this degrades gracefully
+                // (logged [WRN], not a crash) rather than failing generation outright.
+                Id = "qwen35", Modality = txt, DisplayName = "Qwen3.5 (Gated DeltaNet hybrid)",
+                Architecture = "every 4th layer is GQA+RoPE, the rest are Gated DeltaNet delta-rule recurrence",
+                Status = st, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "unsloth/Qwen3.5-0.8B-GGUF", RepoPath = "Qwen3.5-0.8B-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/qwen35", Role = "transformer",
+                        Sha256 = "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517" },
+                },
+            },
 
             new CatalogEntry
             {
@@ -108,17 +383,54 @@ public static class ModelCatalog
                 // parity (cosine = 1.0 vs HF) per MODEL_STATUS_LLM.md, but that's exercised directly in the
                 // Diffusion package's text-encoder tests, not through TextService/hartsy text. Listed for
                 // discoverability; CliDrivable stays false until TextService gains a seq2seq generation path.
+                // Gap reconfirmed 2026-07-22 by direct grep of TextService.cs: zero Seq2Seq/T5Model references.
                 Id = "t5", Modality = txt, DisplayName = "T5 / FLAN-T5", Architecture = "encoder-decoder, rel-pos bias, cross-attention, GeGLU",
                 Status = st, CliDrivable = false,
             },
 
             // Text / LLM — architectures with a real IGgufKeyMapper (GgufKeyMapperRegistry) but no bring-up/e2e
-            // run documented anywhere in this repo's checklists, unlike every family above. Included because the
-            // mapping genuinely exists and a user may already have a matching GGUF; expect the first real run to
-            // surface bugs the doc-verified families already had shaken out.
-            E("glm4", txt, "GLM-4", "sandwich norm, fused gate/up projection (Glm4KeyMapper)", st, cli: true),
-            E("gpt2", txt, "GPT-2 / BLOOM / GPT-NeoX", "absolute position embeddings, non-gated GELU (Gpt2KeyMapper)", st, cli: true),
-            E("starcoder2", txt, "StarCoder2", "shares the llama-family key-mapper path (LlamaKeyMapper)", st, cli: true),
+            // run documented anywhere in this repo's checklists, unlike every family above. `gpt2`/`starcoder2`
+            // are now CLI-verified 2026-07-22; `glm4` surfaced exactly the class of bug this comment predicted.
+            new CatalogEntry
+            {
+                // TWO real, distinct bugs found. (1) FIXED 2026-07-22: legraphista/glm-4-9b-chat-GGUF declares
+                // general.architecture=chatglm — the OLDER llama.cpp lineage, genuinely different from glm4 per
+                // Glm4KeyMapper's own doc comment. No IGgufKeyMapper is registered for chatglm, so it fell back to
+                // key-heuristic detection, which produced wrong tensor byte offsets and crashed with
+                // ArgumentOutOfRangeException in GgufLoader.GetTensor. GgufModelLoader.Load now catches this class
+                // of failure (any declared-but-unregistered architecture, not chatglm-specific) and throws a clear
+                // UnsupportedModelException naming the declared arch instead — a wrong-architecture GGUF is still
+                // unusable, but no longer an opaque crash. (2) STILL OPEN: the CORRECT-architecture checkpoint
+                // (unsloth/GLM-4-9B-0414-GGUF, general.architecture=glm4, Glm4KeyMapper used, no fallback
+                // warnings) loads and generates without crashing but produces consistently incoherent output
+                // unrelated to the prompt on multiple different prompts — not root-caused (needs a reference-
+                // logit comparison against real GLM-4 to isolate; time-boxed out of the 2026-07-22 follow-up pass,
+                // see MODEL_STATUS_LLM.md). No Assets: neither source gives usable output.
+                Id = "glm4", Modality = txt, DisplayName = "GLM-4", Architecture = "sandwich norm, fused gate/up projection (Glm4KeyMapper) — FAIL, see comment above",
+                Status = st, CliDrivable = true,
+            },
+            new CatalogEntry
+            {
+                Id = "gpt2", Modality = txt, DisplayName = "GPT-2 / BLOOM / GPT-NeoX",
+                Architecture = "absolute position embeddings, non-gated GELU (Gpt2KeyMapper)", Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "RichardErkhov/openai-community_-_gpt2-medium-gguf", RepoPath = "gpt2-medium.Q4_K_M.gguf",
+                        TargetSubdir = "LLM/gpt2", Role = "transformer",
+                        Sha256 = "0dc1490576067f1683dc257b517e4a56a99816638fe8575161b00fa2753e6382" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "starcoder2", Modality = txt, DisplayName = "StarCoder2",
+                Architecture = "shares the llama-family key-mapper path (LlamaKeyMapper)", Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "second-state/StarCoder2-3B-GGUF", RepoPath = "starcoder2-3b-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/starcoder2", Role = "transformer",
+                        Sha256 = "d8fb39287a463549b80d97473b0a7595c3a5a6da3ae2604ca33906a1a43f7175" },
+                },
+            },
 
             // Image / diffusion
             new CatalogEntry
@@ -955,7 +1267,8 @@ public static class ModelCatalog
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "PekingU/rtdetr_r18vd", RepoPath = "model.safetensors",
-                        TargetSubdir = "rtdetr", Role = "transformer", Sha256 = null },
+                        TargetSubdir = "rtdetr", Role = "transformer",
+                        Sha256 = "fe87a5a30f5daf298d10794c7682a63b6107986f97d6a770ba948d89e4340093" },
                 },
             },
             new CatalogEntry
@@ -965,19 +1278,22 @@ public static class ModelCatalog
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "IDEA-Research/grounding-dino-tiny", RepoPath = "model.safetensors",
-                        TargetSubdir = "grounding-dino", Role = "transformer", Sha256 = null },
+                        TargetSubdir = "grounding-dino", Role = "transformer",
+                        Sha256 = "1a2412ef99bd74bcd3c2a246fa1e48581f8889a1300c9051974741314fc042f3" },
                     new() { Repo = "IDEA-Research/grounding-dino-tiny", RepoPath = "vocab.txt",
-                        TargetSubdir = "grounding-dino", Role = "tokenizer", Sha256 = null },
+                        TargetSubdir = "grounding-dino", Role = "tokenizer",
+                        Sha256 = "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3" },
                 },
             },
             new CatalogEntry
             {
-                Id = "clipseg", Modality = vis, DisplayName = "ClipSeg (rd64-refined)", Architecture = "CLIP + lightweight segmentation decoder", Status = vp,
+                Id = "clipseg", Modality = vis, DisplayName = "ClipSeg (rd64-refined)", Architecture = "CLIP + lightweight segmentation decoder", Status = ok,
                 CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "CIDAS/clipseg-rd64-refined", RepoPath = "model.safetensors",
-                        TargetSubdir = "clipseg", Role = "transformer", Sha256 = null },
+                        TargetSubdir = "clipseg", Role = "transformer",
+                        Sha256 = "d00ca85d6b859f9d07b7cfb8ef26fe9771cb275b34c9368f2ecf603139307f55" },
                 },
             },
             new CatalogEntry
@@ -990,13 +1306,21 @@ public static class ModelCatalog
                     // (only OrderedDict + torch._utils._rebuild_tensor_v2 + FloatStorage), directly loadable by
                     // PytorchPickleLoader with no offline conversion, unlike the Ultralytics YOLO checkpoints.
                     new() { Repo = "facebook/sam2-hiera-tiny", RepoPath = "sam2_hiera_tiny.pt",
-                        TargetSubdir = "sam2", Role = "transformer", Sha256 = null },
+                        TargetSubdir = "sam2", Role = "transformer",
+                        Sha256 = "65b50056e05bcb13694174f51bb6da89c894b57b75ccdf0ba6352c597c5d1125" },
                 },
             },
             // "RetinaFace" was never actually built — the real, real-weight-verified face detector is a
             // YOLOv8-Face port (see MODEL_STATUS_VISION.md). Catalog id corrected to match; blocked on the same
-            // pickle-graph issue as YOLO8/11, plus its known source (akanametov/yolo-face) is GitHub-only, not HF.
+            // pickle-graph issue as YOLO8/11 (every HF mirror checked 2026-07-22 — jaredthejelly/, arnabdhar/,
+            // etc. — ships only the raw Ultralytics .pt, never a folded safetensors).
             E("yolov8-face", vis, "YOLOv8-Face + landmarks", "face detection + 5-pt landmarks", vp),
+            // ArcFace: upstream (InsightFace buffalo_l) ships ONNX only — no HF mirror hosts a safetensors/flat
+            // state_dict export either (checked 2026-07-22). The engine's loaders read safetensors and flat
+            // pickle state_dicts, not ONNX graphs, so this needs an ONNX reader, not a pickle-VM extension.
+            // Architecture is already real-weight parity-verified (corr 1.0) via the project's own offline
+            // convert_arcface_onnx.py — that conversion just isn't something the Assets auto-download system
+            // can perform, only a one-time local step (see MODEL_STATUS_VISION.md).
             E("arcface", vis, "ArcFace (IR-50, w600k_r50)", "face embedding", vp),
             new CatalogEntry
             {
@@ -1053,6 +1377,20 @@ public static class ModelCatalog
                     new() { Repo = "openmmlab/upernet-convnext-small", RepoPath = "pytorch_model.bin",
                         TargetSubdir = "Vision/Annotators", TargetName = "upernet_convnext_small.bin", Role = "transformer",
                         Sha256 = "76c163aa531ab7edfb3a77bbcc039e340645aa0ffe2b0ffcfc68755f550c76ea" },
+                },
+            },
+            // Gated on HF (requires accepting terms); the user's account already has access (used real-weight
+            // parity-verified 2026-07-01, corr 1.00000000 vs upstream — see MODEL_STATUS_VISION.md), so the
+            // existing HF token downloads it directly, no ungated repack needed.
+            new CatalogEntry
+            {
+                Id = "rmbg", Modality = vis, DisplayName = "RMBG-1.4 (BriaRMBG / ISNet background removal)", Architecture = "U²-Net-style nested-U RSU encoder/decoder", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "briaai/RMBG-1.4", RepoPath = "model.safetensors",
+                        TargetSubdir = "Vision/Rmbg", Role = "transformer",
+                        Sha256 = "46ef7fe46f2ae284d8f1aaa24bfa5fca5ef25a34e2c7caa890a0029eb100e87f" },
                 },
             },
 

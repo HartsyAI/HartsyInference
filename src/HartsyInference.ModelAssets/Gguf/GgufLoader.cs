@@ -322,6 +322,7 @@ public sealed class GgufLoader : IDisposable
         30 => DType.BF16,
         31 => DType.TQ1_0,
         32 => DType.TQ2_0,
+        39 => DType.MXFP4,
         _ => throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"Unsupported GGUF tensor type: {ggufType}. See ggml.h enum ggml_type."),
     };
 

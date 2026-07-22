@@ -56,11 +56,18 @@ public sealed class Gemma4KeyMapper : IGgufKeyMapper
                 "ffn_down.weight" => "mlp.down_proj.weight",
                 // MoE (26B-A4B only): router + stacked experts (split downstream, same convention as LlamaKeyMapper),
                 // plus the two extra pre/post norm pairs and the router's per-channel input scale unique to the
-                // parallel dense+MoE-branch pattern.
+                // parallel dense+MoE-branch pattern. Real checkpoints (unsloth/gemma-4-26B-A4B-it-GGUF) fuse the
+                // gate/up expert projections into one ffn_gate_up_exps tensor (llama.cpp LLM_TENSOR_FFN_GATE_UP_EXPS,
+                // "blk.%d.ffn_gate_up_exps") instead of separate ffn_gate_exps/ffn_up_exps — split downstream in
+                // GgufLanguageModel.SplitStackedExperts, gate=first half rows / up=second half rows per expert,
+                // mirroring the ggml build_moe_ffn view split. ffn_down_exps.scale (a per-expert post-matmul scalar,
+                // ggml build_lora_mm_id's w_s) has no engine support yet and is intentionally left unmapped (dropped)
+                // — a real, separate correctness gap from the KeyNotFoundException this fixes; see MODEL_STATUS_LLM.md.
                 "ffn_gate_inp.weight" => "mlp.gate.weight",
                 "ffn_gate_inp.scale" => "mlp.gate_inp_scale.weight",
                 "ffn_gate_exps.weight" => "mlp.gate_exps.weight",
                 "ffn_up_exps.weight" => "mlp.up_exps.weight",
+                "ffn_gate_up_exps.weight" => "mlp.gate_up_exps.weight",
                 "ffn_down_exps.weight" => "mlp.down_exps.weight",
                 "pre_ffw_norm_2.weight" => "mlp.ffn_pre_norm_2.weight",
                 "post_ffw_norm_1.weight" => "mlp.ffn_post_norm_1.weight",

@@ -29,6 +29,23 @@ detail lives in [PHASE_6_VISION.md](PHASE_6_VISION.md). Vision-tower parity for 
 | **SAM 2 / MobileSAM** | ✅ | **Real-weight VERIFIED (2026-07-17, `facebook/sam2-hiera-tiny`):** Hiera windowed-attn encoder + two-way mask decoder built; best-mask **IoU 0.9972** vs HF `Sam2Model`, image-embed **corr 0.999**. Bringup fixed 7 real arch bugs (mask-decoder `mlp.layers` keys, `global_att_blocks`, bicubic pos-embed, FPN nearest top-down, high-res feature path, `obj_score_token` off-by-one, dense no-mask embed + IoU sigmoid). `Sam2RealWeightParityTests` (env-gated `SAM2_CHECKPOINT_PATH`+`SAM2_REF_DIR`) passes; seg-overlay artifact produced. |
 | **Face detection / landmarks** | ✅ | **Real-weight VERIFIED (2026-07-17, `akanametov/yolo-face` widerface-Pose):** YOLOv8-Face detector (v8 trunk + `cv4` 5-pt landmark branch) → box **IoU 0.9999**, landmark **mean 0.025 px / max 0.042 px** vs ultralytics; detector → `FaceAlignment` → `ArcFace` **512-d L2-norm 1.0**. Reuses the verified YOLO stack; guessed key layout was correct. Env-gated `YOLOV8_FACE_PATH`+`ARCFACE_WEIGHTS_PATH` integration test passes. |
 
+**CLI catalog auto-download gap (2026-07-22):** `hartsy vision` wiring covers 13/17 real-weight-verified models
+end-to-end (catalog `Assets` + auto-download + CLI-verified adversarially): CLIP, SigLIP, DINOv2, RT-DETR,
+Grounding DINO, ClipSeg, SAM 2, Depth-Anything-V2, HED, Lineart, NormalBAE, UperNet-Seg, RMBG-1.4 — the last
+two (NormalBAE, UperNet-Seg) required a real CUDA correctness bug fix along the way: `MaskRows`/`Transpose2D`
+called with a `.Reshape` view as the write target orphans the CUDA activation-cache entry from the object the
+caller reads back, producing silent all-zero output. Fixed in `NormalBaeModel.cs` (`SqueezeExcite`,
+`RefineHead`) and `UperNetSegModel.cs` (`LayerNormChannelsFirst`, `MbConvBlock.Forward`) by allocating the
+output already in the written shape and reshaping only on the way out.
+**YOLO8, YOLO11, YOLOv8-Face, and
+ArcFace stay blocked** — not gated access, a distribution-format gap: HF hosts these only as raw Ultralytics
+`.pt` (a full pickled `nn.Module` object graph the engine's safe-subset pickle VM can't resolve) or, for
+ArcFace, raw ONNX (a graph format neither loader reads). No ungated pre-folded-safetensors mirror was found
+for any of the four (checked 2026-07-22). The architectures above are already real-weight parity-verified —
+the gap is purely that the one-time offline conversion (`convert_arcface_onnx.py`, and the analogous YOLO
+`-folded.safetensors` step) isn't something the Assets auto-download system can perform; it needs a local
+Python step outside the engine. See `src/HartsyInference.Cli/Infra/ModelCatalog.cs` for the per-model detail.
+
 ## Deferred (❌)
 
 **DINOv3** (needs encoder RoPE support — preset added but dimensionally-only), **EVA-CLIP** (EVA-02 vision

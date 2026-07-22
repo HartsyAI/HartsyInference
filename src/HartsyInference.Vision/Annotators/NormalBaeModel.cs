@@ -266,9 +266,10 @@ public sealed unsafe class NormalBaeModel
             }
         }
 
-        Tensor output = new(new TensorShape(1, 4, outH, outW), DType.F32);
-        backend.Transpose2D(output.Reshape(new TensorShape(4, n)), cur, (int)n, 4);
+        Tensor output2d = new(new TensorShape(4, n), DType.F32);
+        backend.Transpose2D(output2d, cur, (int)n, 4);
         cur.Dispose();
+        Tensor output = output2d.Reshape(new TensorShape(1, 4, outH, outW));
         NormNormalize(output);
         return output;
     }
@@ -421,13 +422,16 @@ public sealed unsafe class NormalBaeModel
             backend.Sigmoid(gate, exp);
             exp.Dispose();
 
-            Tensor output = new(x.Shape, DType.F32);
-            backend.MaskRows(
-                output.Reshape(new TensorShape(c, plane)),
-                x.Reshape(new TensorShape(c, plane)),
-                gate.Reshape(new TensorShape(c)));
+            // Allocate the output already in the 2-D shape MaskRows writes: on CUDA, GpuTransferHelper's
+            // activation cache is keyed by the exact Tensor object the op writes into. Reshaping x.Shape
+            // *after* allocating and passing that reshaped view as the output arg would register the GPU
+            // write under the view's identity, orphaning the 4-D object this method returns — the caller
+            // would then read that object's untouched (zeroed) host buffer. Reshape only on the way out,
+            // which forces a DataPointer sync on the object the cache actually knows about.
+            Tensor output2d = new(new TensorShape(c, plane), DType.F32);
+            backend.MaskRows(output2d, x.Reshape(new TensorShape(c, plane)), gate.Reshape(new TensorShape(c)));
             gate.Dispose();
-            return output;
+            return output2d.Reshape(x.Shape);
         }
     }
 

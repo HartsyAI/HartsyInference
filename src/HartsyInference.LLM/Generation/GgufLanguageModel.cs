@@ -277,7 +277,9 @@ public sealed class GgufLanguageModel : IDisposable
     /// shape <c>[E, ·, ·]</c>) into the per-expert 2D <c>experts.{i}.{gate,up,down}_proj</c> weights the MoE block
     /// loads. Each expert occupies a contiguous block, so a flatten-to-2D + per-expert row-byte copy works on the
     /// quantized weights with no dequant.</summary>
-    private static void SplitStackedExperts(Dictionary<string, Tensor> w, TransformerConfig cfg)
+    /// <summary>Internal (not private) so <c>HartsyInference.LLM.Tests</c> can regression-test the fused-vs-separate
+    /// expert tensor split directly, without constructing a full synthetic GGUF file.</summary>
+    internal static void SplitStackedExperts(Dictionary<string, Tensor> w, TransformerConfig cfg)
     {
         int e = cfg.Moe!.NumExperts;
         int hidden = cfg.HiddenSize;
@@ -286,10 +288,33 @@ public sealed class GgufLanguageModel : IDisposable
         {
             if (!cfg.IsMoeLayer(i)) continue;
             string p = $"model.layers.{i}.mlp";
-            SplitExperts(w, $"{p}.gate_exps.weight", $"{p}.experts.{{0}}.gate_proj.weight", e, inter, hidden);
-            SplitExperts(w, $"{p}.up_exps.weight", $"{p}.experts.{{0}}.up_proj.weight", e, inter, hidden);
+            // Some checkpoints (e.g. Gemma-4-MoE) fuse gate+up into one ffn_gate_up_exps tensor instead of
+            // separate ffn_gate_exps/ffn_up_exps (llama.cpp LLM_TENSOR_FFN_GATE_UP_EXPS) — prefer it when present.
+            if (w.ContainsKey($"{p}.gate_up_exps.weight"))
+                SplitFusedGateUpExperts(w, $"{p}.gate_up_exps.weight", $"{p}.experts.{{0}}.gate_proj.weight", $"{p}.experts.{{0}}.up_proj.weight", e, inter, hidden);
+            else
+            {
+                SplitExperts(w, $"{p}.gate_exps.weight", $"{p}.experts.{{0}}.gate_proj.weight", e, inter, hidden);
+                SplitExperts(w, $"{p}.up_exps.weight", $"{p}.experts.{{0}}.up_proj.weight", e, inter, hidden);
+            }
             SplitExperts(w, $"{p}.down_exps.weight", $"{p}.experts.{{0}}.down_proj.weight", e, hidden, inter);
         }
+    }
+
+    /// <summary>Splits one fused gate+up stacked expert tensor (flattened to <c>[E·2·inter, inDim]</c>, gate then
+    /// up per expert — matches ggml <c>build_moe_ffn</c>'s <c>gate_up_exps</c> view split) into per-expert
+    /// <c>experts.{i}.gate_proj</c> / <c>experts.{i}.up_proj</c> 2D tensors, then removes the stacked source.</summary>
+    private static void SplitFusedGateUpExperts(Dictionary<string, Tensor> w, string stackedKey,
+        string gateFormat, string upFormat, int e, int inter, int inDim)
+    {
+        if (!w.TryGetValue(stackedKey, out Tensor? stacked)) return;
+        Tensor flat = stacked.Reshape(new TensorShape(e * 2 * inter, inDim));
+        for (int x = 0; x < e; x++)
+        {
+            w[gateFormat.Replace("{0}", x.ToString())] = SliceRows(flat, x * 2 * inter, inter);
+            w[upFormat.Replace("{0}", x.ToString())] = SliceRows(flat, x * 2 * inter + inter, inter);
+        }
+        w.Remove(stackedKey);
     }
 
     /// <summary>Splits one stacked expert tensor (flattened to <c>[E·outDim, inDim]</c>) into <paramref name="e"/>

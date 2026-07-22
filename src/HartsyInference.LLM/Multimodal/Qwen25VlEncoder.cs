@@ -175,6 +175,13 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         int[] mergeOrder = ExpandToPatches(winIdx, m);   // patch-level permutation (np)
         Tensor h = ReorderRows(embed, mergeOrder, hidden); embed.Dispose();
         float[] cosW = ReorderVec(cos, mergeOrder, hd), sinW = ReorderVec(sin, mergeOrder, hd);
+        // Upload once for the whole tower (same table every layer) instead of re-deriving on the host per Block —
+        // IBackend.ApplyRopeSingle already runs this exact rotate-half math as a GPU kernel (GenericTransformer's
+        // own RoPE uses it identically); the host loop + backend.Sync() this replaced ran twice per layer.
+        using Tensor cosT = new(new TensorShape(1, np, hd), DType.F32);
+        using Tensor sinT = new(new TensorShape(1, np, hd), DType.F32);
+        new ReadOnlySpan<float>(cosW).CopyTo(new Span<float>((float*)cosT.DataPointer, np * hd));
+        new ReadOnlySpan<float>(sinW).CopyTo(new Span<float>((float*)sinT.DataPointer, np * hd));
         Dbg(backend, "embed_win", h);
 
         // Build the two attention masks (full / windowed block-diagonal) once.
@@ -183,7 +190,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
 
         for (int i = 0; i < NumLayers; i++)
         {
-            Tensor next = Block(backend, h, i, cosW, sinW, np, _fullAtt.Contains(i) ? fullMask : winMask);
+            Tensor next = Block(backend, h, i, cosT, sinT, np, _fullAtt.Contains(i) ? fullMask : winMask);
             h.Dispose(); h = next;
             if (i == 0) Dbg(backend, "blk0", h);
         }
@@ -220,7 +227,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         else backend.LayerNorm(outp, inp, W($"{prefix}.weight"), W($"{prefix}.bias"), Eps);
     }
 
-    private Tensor Block(IBackend backend, Tensor x, int i, float[] cosW, float[] sinW, int np, Tensor mask)
+    private Tensor Block(IBackend backend, Tensor x, int i, Tensor cosT, Tensor sinT, int np, Tensor mask)
     {
         int hidden = Hidden, heads = NumHeads, hd = HeadDim;
         string p = $"v.blk.{i}";
@@ -236,8 +243,8 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         backend.Linear(k, ln1, W($"{p}.attn_k.weight"), W($"{p}.attn_k.bias"));
         backend.Linear(v, ln1, W($"{p}.attn_v.weight"), W($"{p}.attn_v.bias"));
         ln1.Dispose();
-        ApplyRope(backend, q, cosW, sinW, np, heads, hd);
-        ApplyRope(backend, k, cosW, sinW, np, heads, hd);
+        backend.ApplyRopeSingle(q, cosT, sinT);
+        backend.ApplyRopeSingle(k, cosT, sinT);
 
         Tensor qM = new(new TensorShape(1, heads, np, hd), DType.F32);
         Tensor kM = new(new TensorShape(1, heads, np, hd), DType.F32);
@@ -286,27 +293,6 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         // buffer still in flight across the next block's Reshape. A per-block sync is negligible here and serializes.
         backend.Sync();
         return result;
-    }
-
-    /// <summary>Applies 2D RoPE in place to <paramref name="t"/> = <c>[1, np, heads, headDim]</c>, host-side.
-    /// <c>out = x·cos + rotate_half(x)·sin</c> where rotate_half splits headDim in two halves.</summary>
-    private void ApplyRope(IBackend backend, Tensor t, float[] cosW, float[] sinW, int np, int heads, int hd)
-    {
-        backend.Sync();
-        float* p = (float*)t.DataPointer;
-        int half = hd / 2;
-        float[] tmp = new float[hd];
-        for (int pos = 0; pos < np; pos++)
-            for (int h = 0; h < heads; h++)
-            {
-                float* row = p + ((long)pos * heads + h) * hd;
-                for (int e = 0; e < hd; e++) tmp[e] = row[e];
-                for (int e = 0; e < hd; e++)
-                {
-                    float rot = e < half ? -tmp[e + half] : tmp[e - half];
-                    row[e] = tmp[e] * cosW[pos * hd + e] + rot * sinW[pos * hd + e];
-                }
-            }
     }
 
     /// <summary>2D rotary cos/sin tables [np, headDim] in raster (pre-window) order.</summary>

@@ -54,18 +54,34 @@ public sealed class GgufModelLoader : IDisposable
             loader.Load(path);
 
             string architecture = ResolveArchitecture(loader);
+            bool declaredArchRegistered = string.IsNullOrEmpty(architecture) || GgufKeyMapperRegistry.GetByArchitecture(architecture) is not null;
             IGgufKeyMapper mapper = ResolveMapper(loader, architecture);
 
             Dictionary<string, Tensor> remapped = new(StringComparer.Ordinal);
             int dropped = 0;
-            foreach (KeyValuePair<string, GgufTensorDescriptor> kv in loader.Descriptors)
+            try
             {
-                string? targetKey = mapper.MapKey(kv.Key);
-                if (targetKey is null) { dropped++; continue; }
-                if (remapped.ContainsKey(targetKey))
-                    throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
-                        $"GGUF key remap collision: GGUF '{kv.Key}' → '{targetKey}' (already present from a prior key).");
-                remapped[targetKey] = loader.GetTensor(kv.Key);
+                foreach (KeyValuePair<string, GgufTensorDescriptor> kv in loader.Descriptors)
+                {
+                    string? targetKey = mapper.MapKey(kv.Key);
+                    if (targetKey is null) { dropped++; continue; }
+                    if (remapped.ContainsKey(targetKey))
+                        throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                            $"GGUF key remap collision: GGUF '{kv.Key}' → '{targetKey}' (already present from a prior key).");
+                    remapped[targetKey] = loader.GetTensor(kv.Key);
+                }
+            }
+            catch (Exception ex) when (!declaredArchRegistered)
+            {
+                // A declared-but-unregistered architecture falls through to heuristic key-matching (see
+                // ResolveMapper), which can pick a structurally incompatible mapper — wrong tensor counts/shapes
+                // then surface as an opaque ArgumentOutOfRangeException/IndexOutOfRangeException deep in
+                // GgufLoader.GetTensor. Translate that into a clear "not supported" error instead of a confusing crash.
+                string msg = $"GGUF declares architecture '{architecture}' which has no registered key mapper in this " +
+                    $"engine. Heuristic key-matching selected '{mapper.Architecture}' ({mapper.GetType().Name}), but " +
+                    $"that mapping is structurally incompatible with this file: {ex.Message}";
+                Logs.Error(msg, ex);
+                throw new HartsyInference.Core.Exceptions.UnsupportedModelException(msg, architecture, "gguf");
             }
 
             string realArch = string.IsNullOrEmpty(architecture) ? mapper.Architecture : architecture;

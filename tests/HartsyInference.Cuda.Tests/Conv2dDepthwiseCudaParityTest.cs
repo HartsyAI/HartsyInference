@@ -5,9 +5,12 @@ using Xunit;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>Diagnostic: does CUDA Conv2dDepthwise match the CPU-verified hand-computed reference?
-/// NormalBAE/UperNet-Seg produce garbage on CUDA but correct output on CPU; Conv2dDepthwise is the
-/// one op both use that the working annotators (HED/Lineart/DepthAnything) never touch.</summary>
+/// <summary>Parity coverage for CUDA Conv2dDepthwise against the CPU-verified hand-computed reference,
+/// at both toy and realistic (NormalBAE MBConv, ConvNeXt-Small) scale. Written while bisecting a
+/// CUDA-only NormalBAE/UperNet-Seg bug; this op turned out correct — the actual cause was
+/// MaskRows/Transpose2D being called with a <c>.Reshape</c> view as the write target, which orphans
+/// the CUDA activation cache entry from the object the caller reads back (see
+/// NormalBaeModel.SqueezeExcite and UperNetSegModel for the fix). Kept as regression coverage.</summary>
 [Collection("CudaSerial")]
 public sealed unsafe class Conv2dDepthwiseCudaParityTest
 {

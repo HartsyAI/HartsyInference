@@ -11,10 +11,20 @@ namespace HartsyInference.LLM.Multimodal;
 /// placeholder, and runs the (already-verified) Gemma-3 text decoder via its embedding-in path
 /// (<see cref="GenericTransformer.ForwardEmbeds"/>). Greedy decode.
 ///
-/// <para>Gemma-3 multiplies the combined (text + image) input embeddings by the √hidden normalizer. We apply that
-/// scale to the text tokens via <see cref="GenericTransformer.EmbedLookup"/> and to the spliced image embeddings
-/// directly, matching HF's <c>inputs_embeds.masked_scatter(image_mask, image_features)</c> followed by
-/// <c>hidden_states = inputs_embeds * normalizer</c>.</para></summary>
+/// <para>Gemma-3's √hidden embedding normalizer is baked into the token-embedding lookup ITSELF
+/// (HF's <c>Gemma3TextScaledWordEmbedding.forward</c>: <c>super().forward(input_ids) * embed_scale</c>), not
+/// applied to the combined text+image sequence afterward — HF's <c>Gemma3Model.forward</c> calls
+/// <c>get_input_embeddings()(input_ids)</c> (scaled) THEN <c>inputs_embeds.masked_scatter(image_mask,
+/// image_features)</c>, which overwrites the image positions with the RAW (unscaled) vision-projector output.
+/// We apply the scale to text tokens via <see cref="GenericTransformer.EmbedLookup"/> and splice the image
+/// embeddings in raw, unscaled — matching that exactly. (An earlier version of this class scaled the spliced
+/// image embeddings too, based on a mistaken reading of the HF source as applying the normalizer to the
+/// combined sequence; for gemma3 specifically — hidden_size=2560, scale≈50.6× — that blew the vision signal's
+/// magnitude far outside what the decoder was trained on, well past the point of ordinary FP noise, while
+/// leaving text tokens correctly scaled: a plausible root cause for the "vision tower is numerically correct
+/// (cosine≈1.0 end to end) yet the model confidently describes an unrelated scene" hallucination — every other
+/// VLM family shares this exact splice code but has <c>EmbeddingScale == 1.0</c>, so gemma3 is the only family
+/// this bug could affect at all, consistent with it being the only family that failed.)</para></summary>
 public sealed class MultimodalGenerator
 {
     private readonly GgufLanguageModel _text;
@@ -117,12 +127,12 @@ public sealed class MultimodalGenerator
             model.EmbedLookup(preEmb, pre);   // text tokens carry the √hidden scale
             Buffer.MemoryCopy((void*)preEmb.DataPointer, dst, (long)pre.Length * hidden * 4, (long)pre.Length * hidden * 4);
         }
-        // Gemma-3 applies the √hidden embedding normalizer to the *combined* (text+image) embeds. Our
-        // EmbedLookup already scaled the text tokens, so scale the image embeds by the same factor here.
+        // Gemma-3's √hidden embedding normalizer lives INSIDE the token-embedding lookup (EmbedLookup already
+        // applied it to the text tokens above) — HF splices image features in via masked_scatter AFTER that
+        // lookup, so the image embeddings themselves are never scaled. Copy them in raw.
         long imgOff = (long)pre.Length * hidden;
-        float scale = _text.Config.EmbeddingScale;
         float* imgSrc = (float*)imageEmbeds.DataPointer;   // D2H sync on CUDA
-        for (long i = 0; i < (long)imgTokens * hidden; i++) dst[imgOff + i] = imgSrc[i] * scale;
+        Buffer.MemoryCopy(imgSrc, dst + imgOff, (long)imgTokens * hidden * 4, (long)imgTokens * hidden * 4);
         using (Tensor postEmb = new(new TensorShape(1, post.Length, hidden), DType.F32))
         {
             model.EmbedLookup(postEmb, post);

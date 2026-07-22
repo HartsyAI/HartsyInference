@@ -312,8 +312,9 @@ public static class GenerationDispatch
                 "lineart" => VisionMode.Lineart,
                 "normal" => VisionMode.Normal,
                 "segmap" => VisionMode.SegMap,
+                "removebg" => VisionMode.BackgroundRemoval,
                 _ => throw new ArgumentException(
-                    $"Unknown vision mode '{mode}'. Use embed, detect, segment, depth, edge, lineart, normal, or segmap."),
+                    $"Unknown vision mode '{mode}'. Use embed, detect, segment, depth, edge, lineart, normal, segmap, or removebg."),
             },
             Prompt = parameters.Get("query"),
             Threshold = parameters.GetFloat("confidence", 0.25f),

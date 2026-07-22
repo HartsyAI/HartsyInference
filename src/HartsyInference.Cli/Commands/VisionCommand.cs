@@ -40,7 +40,7 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
 
         /// <summary>Vision operation; inferred from the model id when omitted.</summary>
         [CommandOption("--mode")]
-        [Description("Operation: embed, detect, segment, depth, edge, lineart, normal, or segmap. Inferred from the model id when omitted.")]
+        [Description("Operation: embed, detect, segment, depth, edge, lineart, normal, segmap, or removebg. Inferred from the model id when omitted.")]
         public string? Mode { get; init; }
 
         /// <summary>Text query for open-vocabulary detect/segment (Grounding DINO, CLIPSeg).</summary>
@@ -122,6 +122,10 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         if (id.Contains("upernet") || id.Contains("segmap"))
         {
             return "segmap";
+        }
+        if (id.Contains("rmbg"))
+        {
+            return "removebg";
         }
         return "embed";
     }

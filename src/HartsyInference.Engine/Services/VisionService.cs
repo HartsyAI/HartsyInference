@@ -13,6 +13,7 @@ using HartsyInference.Vision.Codec;
 using HartsyInference.Vision.DepthAnything;
 using HartsyInference.Vision.Dinov2;
 using HartsyInference.Vision.Embeddings;
+using HartsyInference.Vision.Rmbg;
 using HartsyInference.Vision.Siglip;
 
 namespace HartsyInference.Engine.Services;
@@ -47,6 +48,7 @@ public sealed class VisionService : IVisionService, IDisposable
     private readonly Dictionary<string, LineartGenerator> _lineartCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, NormalBaeModel> _normalBaeCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, UperNetSegModel> _upernetCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, BriaRmbg> _rmbgCache = new(StringComparer.Ordinal);
     // All five load via PytorchPickleLoader (raw .pth/.pt), whose Dispose() also disposes its tensors — the
     // loader must stay open for as long as the cached model is used, same as _embedLoaders above.
     private readonly List<PytorchPickleLoader> _annotatorLoaders = new();
@@ -73,6 +75,7 @@ public sealed class VisionService : IVisionService, IDisposable
                     VisionMode.Lineart => LineartMode(spec, request),
                     VisionMode.Normal => Normal(spec, request),
                     VisionMode.SegMap => SegMap(spec, request),
+                    VisionMode.BackgroundRemoval => BackgroundRemoval(spec, request),
                     _ => throw new NotSupportedException($"Unknown vision mode '{request.Mode}'."),
                 };
             },
@@ -301,6 +304,26 @@ public sealed class VisionService : IVisionService, IDisposable
         {
             pixels.Dispose();
         }
+    }
+
+    /// <summary>RMBG-1.4: foreground cutout composited onto neutral gray-0.5, matching what the image→3D
+    /// pipelines (TripoSR / Hunyuan3D) expect from their background-removal step.</summary>
+    private VisionResult BackgroundRemoval(ModelSpec spec, VisionRequest request)
+    {
+        string path = RequirePath(spec, "rmbg");
+        BriaRmbg model = GetOrLoad(_rmbgCache, path, () =>
+        {
+            SafeTensorsLoader loader = new SafeTensorsLoader();
+            loader.Load(path);
+            _embedLoaders.Add(loader);
+            BriaRmbg m = new BriaRmbg();
+            m.LoadWeights(loader.GetAllTensors());
+            return m;
+        });
+        RmbgBackgroundRemover remover = new RmbgBackgroundRemover(model);
+        ImageData image = request.Image;
+        byte[] cutout = remover.CompositeOnGray(Backend, image.Rgb, image.Width, image.Height);
+        return new VisionResult { Image = new ImageData { Rgb = cutout, Width = image.Width, Height = image.Height } };
     }
 
     /// <summary>UperNet-Seg: ADE20K semantic-segmentation palette map. The reference pipeline stretch-resizes

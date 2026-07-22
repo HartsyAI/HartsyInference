@@ -23,6 +23,7 @@ public sealed class GgufCodecRegistryTests
         Assert.True(GgufCodecRegistry.Supports(DType.Q3_K));
         Assert.True(GgufCodecRegistry.Supports(DType.Q6_K));
         Assert.True(GgufCodecRegistry.Supports(DType.IQ4_NL));
+        Assert.True(GgufCodecRegistry.Supports(DType.MXFP4));
     }
 
     [Fact]
@@ -219,6 +220,54 @@ public sealed class GgufCodecRegistryTests
             {
                 Assert.True(MathF.Abs(d[i] - 1f) < 1e-3f, $"high nibble at i={i}: expected 1 (KValues[8]), got {d[i]}");
             }
+        }
+        finally { src.Dispose(); }
+    }
+
+    [Fact]
+    public unsafe void MXFP4_KnownBlock_DequantizesUsingE8M0ScaleAndCodewordTable()
+    {
+        // e=130 -> scale = 2^(130-128) = 4 (ggml_e8m0_to_fp32_half). Nibble pattern 0x21: low nibble=1 ->
+        // kvalues_mxfp4[1]=1 -> 1*4=4; high nibble=2 -> kvalues_mxfp4[2]=2 -> 2*4=8.
+        Tensor src = new Tensor(new TensorShape(32), DType.MXFP4);
+        try
+        {
+            byte* block = (byte*)src.DataPointer;
+            block[0] = 130;
+            byte* q = block + 1;
+            for (int i = 0; i < 16; i++) q[i] = 0x21;
+
+            using Tensor dst = GgufDequantizer.Dequantize(src, DType.F32);
+            float* d = (float*)dst.DataPointer;
+            for (int i = 0; i < 16; i++)
+            {
+                Assert.True(MathF.Abs(d[i] - 4f) < 1e-3f, $"low nibble at i={i}: expected 4, got {d[i]}");
+            }
+            for (int i = 16; i < 32; i++)
+            {
+                Assert.True(MathF.Abs(d[i] - 8f) < 1e-3f, $"high nibble at i={i}: expected 8, got {d[i]}");
+            }
+        }
+        finally { src.Dispose(); }
+    }
+
+    [Fact]
+    public unsafe void MXFP4_ZeroScale_ProducesZeroRegardlessOfCodeword()
+    {
+        // e=0 -> scale = 2^-128 (denormal path), not a NaN/zero special case per ggml (NaN e=255 is unhandled
+        // upstream too) -- just confirms the denormal branch of E8M0ToFp32Half doesn't blow up or go negative.
+        Tensor src = new Tensor(new TensorShape(32), DType.MXFP4);
+        try
+        {
+            byte* block = (byte*)src.DataPointer;
+            block[0] = 0;
+            byte* q = block + 1;
+            for (int i = 0; i < 16; i++) q[i] = 0x71;
+
+            using Tensor dst = GgufDequantizer.Dequantize(src, DType.F32);
+            float* d = (float*)dst.DataPointer;
+            for (int i = 0; i < 16; i++)
+                Assert.True(d[i] >= 0f && d[i] < 1e-30f, $"i={i}: expected ~0, got {d[i]}");
         }
         finally { src.Dispose(); }
     }

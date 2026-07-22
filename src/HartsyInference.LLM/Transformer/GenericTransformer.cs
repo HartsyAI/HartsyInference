@@ -34,6 +34,10 @@ public sealed unsafe class GenericTransformer : IDisposable
     // disposed on rebuild (not leaked) — safe by construction, see that method's doc.
     private Tensor? _graphDecodeCos, _graphDecodeSin;
     private int _graphDecodeCapacity;
+    // Granite/MiniCPM-family embedding scale, pre-applied once to a dedicated GPU copy of the embed table for the
+    // graph-decode gather kernel (see EnsureEmbedResidentForGraphDecode) — EmbedGatherDecodeStep has no scale
+    // parameter, unlike EmbedLookup's host gather which multiplies per call.
+    private Tensor? _graphDecodeEmbedScaled;
     // Gemma-4 per-layer embeddings (PLE): a top-level small embedding table + projection, shared across every
     // layer (each layer additionally has its own gate/proj/post-norm — see Layer). Null when PerLayerEmbeddingDim=0.
     private Tensor? _perLayerTokEmbd, _perLayerModelProj, _perLayerProjNorm;
@@ -400,8 +404,9 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// GQA/RoPE decoder shape (Llama/Qwen/Mistral family — most dense models). Excludes anything
     /// <see cref="Layer.ForwardGraphStep"/> doesn't implement: MLA, MoE, cross-attention, sliding-window,
     /// attention softcap/sink, ALiBi, parallel residual, absolute-position embeddings, post-norm placement
-    /// (OLMo-2), dual local/global RoPE (Gemma-3), BLOOM's embedding LayerNorm, and non-1.0 embedding scale
-    /// (Granite/MiniCPM — <see cref="EmbedLookup"/>'s scale isn't applied by the graph-decode embed kernel).</summary>
+    /// (OLMo-2), dual local/global RoPE (Gemma-3), BLOOM's embedding LayerNorm. Non-1.0 embedding scale
+    /// (Granite/MiniCPM) is NOT excluded — <see cref="EnsureEmbedResidentForGraphDecode"/> pre-applies it once to
+    /// a dedicated GPU copy of the embed table, since the graph-decode gather kernel itself has no scale param.</summary>
     public bool SupportsGraphDecode(IBackend backend) =>
         backend.GraphDecodeSupported
         && _cfg.Mla is null
@@ -417,18 +422,25 @@ public sealed unsafe class GenericTransformer : IDisposable
         && _cfg.NormPlacement == NormPlacement.PreNorm
         && _cfg.RopeLocalTheta == 0f
         && !_cfg.EmbeddingLayerNorm
-        && _cfg.EmbeddingScale == 1f
         && _cfg.PerLayerEmbeddingDim == 0;
 
     /// <summary>Ensures the embedding table is GPU-resident (permanent weight-cache, like any other weight) and
     /// returns it — <see cref="ForwardGraphDecodeStep"/>'s on-device embed gather needs this; untied models
     /// normally skip uploading <c>_embed</c> since <see cref="EmbedLookup"/>'s host gather doesn't need it there.
-    /// Call once before entering a graph-decode session.</summary>
+    /// When <see cref="TransformerConfig.EmbeddingScale"/> isn't 1.0 (Granite/MiniCPM), returns a separate,
+    /// lazily-built, pre-scaled GPU copy instead — the plain <c>_embed</c> table stays unscaled for
+    /// <see cref="EmbedLookup"/>'s own per-call host scale. Call once before entering a graph-decode session.</summary>
     public Tensor EnsureEmbedResidentForGraphDecode(IBackend backend)
     {
         ThrowIfDisposed();
         backend.PreloadWeights([_embed!]);
-        return _embed!;
+        if (_cfg.EmbeddingScale == 1f) return _embed!;
+        if (_graphDecodeEmbedScaled is null)
+        {
+            _graphDecodeEmbedScaled = new Tensor(_embed!.Shape, DType.F32);
+            backend.Scale(_graphDecodeEmbedScaled, _embed!, _cfg.EmbeddingScale);
+        }
+        return _graphDecodeEmbedScaled;
     }
 
     /// <summary>Returns the graph-decode RoPE table, building (or rebuilding, if <paramref name="minCapacity"/>
@@ -705,6 +717,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _embed = null; _posEmbed = null; _embedNorm = null; _embedNormBias = null; _finalNorm = null; _lmHead = null; _lmHeadQuant = null;
         _perLayerTokEmbd = null; _perLayerModelProj = null; _perLayerProjNorm = null;
+        _graphDecodeEmbedScaled?.Dispose(); _graphDecodeEmbedScaled = null;
     }
 
     /// <summary>One resident decoder layer: RMSNorm → GQA self-attn (optional Q/K norm, +KV cache) → residual

@@ -31,16 +31,29 @@ public sealed class JinjaChatTemplate : IChatTemplate
         string rendered;
         try
         {
-            rendered = Render(tokenizer, messages, addGenerationPrompt, enableThinking);
+            try
+            {
+                rendered = Render(tokenizer, messages, addGenerationPrompt, enableThinking);
+            }
+            catch (ChatTemplateRaiseException)
+            {
+                // The template rejected the message structure — almost always a model (Mistral, Gemma, …)
+                // whose template has no system role and/or demands strict user/assistant alternation. Fold any
+                // system content into the first user turn and merge consecutive same-role turns, then retry once.
+                // Matches what llama.cpp/Ollama do for system-less templates. If it still fails, surface the
+                // original error (a genuine template problem, not a structure one).
+                rendered = Render(tokenizer, NormalizeForStrictTemplate(messages), addGenerationPrompt, enableThinking);
+            }
         }
-        catch (ChatTemplateRaiseException)
+        catch (Exception ex) when (ex is not ChatTemplateRaiseException)
         {
-            // The template rejected the message structure — almost always a model (Mistral, Gemma, …)
-            // whose template has no system role and/or demands strict user/assistant alternation. Fold any
-            // system content into the first user turn and merge consecutive same-role turns, then retry once.
-            // Matches what llama.cpp/Ollama do for system-less templates. If it still fails, surface the
-            // original error (a genuine template problem, not a structure one).
-            rendered = Render(tokenizer, NormalizeForStrictTemplate(messages), addGenerationPrompt, enableThinking);
+            // Same tolerance GgufLanguageModel.BuildTemplate applies at compile time (some templates use
+            // constructs the engine doesn't support yet) — a construct that only shows up on a real conversation
+            // shape can still fail at render time even though the template compiled fine in isolation. Degrade
+            // to ChatML rather than failing the whole generation; if the tokenizer has no ChatML control tokens
+            // either, that Encode call throws its own clear error instead of this one.
+            Console.Error.WriteLine($"[WRN] GGUF: chat template failed to render ({ex.Message}); falling back to ChatML for this request.");
+            return new ChatMlTemplate().Encode(tokenizer, messages, addGenerationPrompt, enableThinking);
         }
         // The template emits the bos_token literal itself, so don't double-add specials beyond literal matching.
         return tokenizer.Encode(rendered, addSpecial: true);
