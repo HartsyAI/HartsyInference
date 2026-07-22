@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <PackageId>HartsyInference.API</PackageId>
-    <Description>OpenAI-compatible REST API server for HartsyInference — image generation, audio, vision endpoints with SSE streaming.</Description>
+    <Description>Thin HTTP adapter over HartsyInference.Engine — health/settings/admin today, native + OpenAI-compat generation endpoints in a follow-up phase.</Description>
     <RootNamespace>HartsyInference.API</RootNamespace>
     <OutputType>Exe</OutputType>
     <!-- ASP.NET Core 10 packages require net10 runtime; this project does not multi-target. -->
@@ -14,14 +14,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Deliberately thin: only Core + Engine. Every modality package Engine pulls in transitively (Diffusion,
+         LLM, Audio, Vision, Cpu, Cuda, ...) ships in the output via Engine's own references — this project never
+         references them directly, matching docs/Design/NUGET_PACKAGE_DESIGN.md's "thin adapter over Engine". -->
     <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
-    <ProjectReference Include="..\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
-    <ProjectReference Include="..\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
-    <ProjectReference Include="..\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
-    <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
-    <ProjectReference Include="..\HartsyInference.LLM\HartsyInference.LLM.csproj" />
-    <ProjectReference Include="..\HartsyInference.Audio\HartsyInference.Audio.csproj" />
-    <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
     <ProjectReference Include="..\HartsyInference.Engine\HartsyInference.Engine.csproj" />
   </ItemGroup>
 

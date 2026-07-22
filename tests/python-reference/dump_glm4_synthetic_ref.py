@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Synthetic GLM-4 parity reference: a tiny random-weight Glm4ForCausalLM (real HF architecture, real
-partial-rotary RoPE, real sandwich norms), run on a short sequence to expose position-dependent RoPE
-drift. Dumps every weight (renamed to the GgufLanguageModel/Glm4KeyMapper target key convention) plus
-per-layer hidden states and final logits to a single .npz, for a C# test to load into GenericTransformer
-and diff. No download needed -- this validates the ARCHITECTURE (RoPE partial-rotary + sandwich norm
-placement), not a specific checkpoint's numerics.
+partial-rotary RoPE, real sandwich norms, real 8:1 GQA ratio matching production's 32:2), run on a short
+sequence to expose position-dependent RoPE drift and GQA-broadcast bugs. Dumps every weight (renamed to the
+GgufLanguageModel/Glm4KeyMapper target key convention) plus per-layer hidden states and final logits to raw
+little-endian float32 .bin files + a text manifest, for a C# test to load into GenericTransformer and diff.
+No download needed -- this validates the ARCHITECTURE (RoPE pairing + partial-rotary + sandwich norm
+placement + GQA broadcast), not a specific checkpoint's numerics.
 """
+import os
 import numpy as np
 import torch
 from transformers.models.glm4.configuration_glm4 import Glm4Config
@@ -13,11 +15,14 @@ from transformers.models.glm4.modeling_glm4 import Glm4ForCausalLM
 
 torch.manual_seed(1234)
 
-HIDDEN = 32
-HEADS = 4
-KV_HEADS = 2
+OUT_DIR = os.path.join(os.path.dirname(__file__), "glm4_ref")
+os.makedirs(OUT_DIR, exist_ok=True)
+
+HIDDEN = 64
+HEADS = 16
+KV_HEADS = 2          # 8:1 GQA ratio -- same order of magnitude as production's 32:2 (16:1)
 HEAD_DIM = 8
-INTERMEDIATE = 64
+INTERMEDIATE = 96
 LAYERS = 2
 VOCAB = 64
 SEQ_LEN = 16  # long enough to expose position-dependent RoPE drift (position 0 hides the bug)
@@ -40,7 +45,7 @@ model = Glm4ForCausalLM(config)
 model.eval()
 
 # Re-init every parameter with small, deterministic, non-degenerate values (default init can be too close
-# to zero/identity to expose a wrong-pairing bug -- want every dim to carry real signal).
+# to zero/identity to expose a wrong-pairing or wrong-broadcast bug -- want every dim to carry real signal).
 gen = torch.Generator().manual_seed(42)
 with torch.no_grad():
     for name, p in model.named_parameters():
@@ -88,20 +93,35 @@ for i in range(LAYERS):
     w(f"model.layers.{i}.mlp.gate_up_proj.weight", p + "mlp.gate_up_proj.weight")
     w(f"model.layers.{i}.mlp.down_proj.weight", p + "mlp.down_proj.weight")
 
+manifest_lines = []
+
+
+def dump(name, arr):
+    arr = np.ascontiguousarray(arr.astype(np.float32))
+    fname = name.replace("/", "_").replace(".", "_") + ".bin"
+    arr.tofile(os.path.join(OUT_DIR, fname))
+    shape_str = ",".join(str(d) for d in arr.shape)
+    manifest_lines.append(f"{name}\t{shape_str}\t{fname}")
+
+
+dump("input_ids", input_ids.numpy().astype(np.float32))
+dump("logits", logits)
+for i, h in enumerate(hidden_states):
+    dump(f"hidden_{i}", h)
+for k, v in weights.items():
+    dump(f"w::{k}", v)
+
 meta = dict(
     hidden=HIDDEN, heads=HEADS, kv_heads=KV_HEADS, head_dim=HEAD_DIM, intermediate=INTERMEDIATE,
     layers=LAYERS, vocab=VOCAB, seq_len=SEQ_LEN, rope_theta=10000.0, rotary_dim=int(HEAD_DIM * 0.5),
     rms_eps=1e-6,
 )
+with open(os.path.join(OUT_DIR, "manifest.tsv"), "w") as f:
+    f.write("\n".join(manifest_lines) + "\n")
+with open(os.path.join(OUT_DIR, "meta.tsv"), "w") as f:
+    for k, v in meta.items():
+        f.write(f"{k}\t{v}\n")
 
-np.savez(
-    "/tmp/glm4_synthetic_ref.npz",
-    input_ids=input_ids.numpy(),
-    logits=logits,
-    **{f"hidden_{i}": h for i, h in enumerate(hidden_states)},
-    **{f"w::{k}": v for k, v in weights.items()},
-    **{f"meta::{k}": np.array(v) for k, v in meta.items()},
-)
-print("wrote /tmp/glm4_synthetic_ref.npz")
+print("wrote", OUT_DIR)
 print("logits[-1][:8] =", logits[-1][:8])
 print("hidden_states count:", len(hidden_states), "shapes:", [h.shape for h in hidden_states])

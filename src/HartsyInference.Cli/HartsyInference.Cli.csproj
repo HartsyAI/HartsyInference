@@ -12,6 +12,7 @@
   <ItemGroup>
     <Using Include="HartsyInference.Engine" />
     <Using Include="HartsyInference.Engine.Dispatch" />
+    <Using Include="HartsyInference.Engine.Registry" />
     <Using Include="HartsyInference.Engine.Requests" />
   </ItemGroup>
 

@@ -198,15 +198,56 @@ was recommitted; the other 12 shipped `.ptx` files were incidentally regenerated
 (different `nvcc` point release than whatever produced the originally-committed files) and reverted to avoid
 unrelated diff noise / an unverified toolchain-version bump for kernels this pass didn't need to touch.
 
-**`glm4` now PASSES end-to-end (2026-07-22)**: downloaded the real `unsloth/GLM-4-9B-0414-GGUF`
-`GLM-4-9B-0414-Q4_K_M.gguf` checkpoint and ran `hartsy text --model-path ... --backend cuda --low-vram-quant`
-directly against it (bypassing the catalog/HF-cache path via `--model-path`). Two prompts tested:
-a 3-sentence factual explanation (binary search) and a >250-token creative story — both produced fully
-coherent, grammatically correct, on-topic output all the way through the generation window, including well
-past the early positions where the pre-fix bug would have been masked (the bug only manifests once
-`position > 0`, since `cos/sin` at position 0 are trivial). This is the first live generation from this
-checkpoint since the fix landed; prior confirmation was kernel-level unit tests + a 3-way architectural
-cross-check only. `glm4` moves from FAIL to **PASS**.
+**`glm4` partially confirmed, a SECOND bug found (2026-07-22)**: downloaded the real
+`unsloth/GLM-4-9B-0414-GGUF` `GLM-4-9B-0414-Q4_K_M.gguf` checkpoint and ran
+`hartsy text --model-path ... --backend cuda --low-vram-quant` directly against it. The RoPE partial-rotary
+fix above is confirmed real: a factual explanation (binary search) and a >250-token creative story both
+produced fully coherent, grammatically correct, on-topic prose all the way through the generation window,
+well past the early positions where the pre-fix bug would have been masked.
+
+**However, a SEPARATE, NOT-yet-root-caused bug remains**: any prompt that requires the model to retrieve a
+specific number embedded in the user's own short prompt fails badly — `"What is 9 times 9?"` →
+`"'Times' is a mathematical operation... 'times' by itself is not a number..."` (never answers), `"I have 12
+apples in a basket. Describe them."` → `"Since you said 'I have **apples**,'"` (the "12" silently vanishes
+from what the model believes it read), `"List the numbers 1 through 5."` → `"your request got cut off...
+list from 'through'?"`. Open-ended prompts with no precise-retrieval requirement (capital of France, WW2 end
+year, spider legs) all answer correctly. **Cross-checked against llama-cpp-python running the byte-identical
+GGUF file, same GPU, same greedy/temp=0 settings — llama.cpp answers all three correctly ("81", a proper
+12-apple description, an actual 1-2-3-4-5 list)**, which rules out this being a checkpoint/quantization
+limitation and confirms a real bug specific to this engine's glm4 forward pass.
+
+Ruled out so far: tokenizer round-trip (digits tokenize/decode cleanly), chat-template rendering (byte-for-
+byte structural match against the GGUF's own `tokenizer.chat_template`), and the CUDA-kernel-vs-CPU-fallback
+RoPE split (`HM_ROPE_CPU=1` reproduces the identical wrong output, so it isn't a PTX/kernel-launch bug).
+**Localized (2026-07-22): the F32 forward-pass math is proven correct; the bug is isolated to the quantized
+(Q4_K / `--low-vram-quant`) compute path.** Built the synthetic-weights harness
+(`tests/python-reference/dump_glm4_synthetic_ref.py`) into a real C#-side parity test
+(`tests/HartsyInference.LLM.Tests/ScratchTokenizerDebug.cs` — rename before keeping permanently):
+a tiny random-weight real HF `Glm4ForCausalLM` (2 layers, 16 heads / 2 kv-heads = 8:1 GQA — same order as
+production's 32/2 = 16:1 — head_dim 8, rotary_dim 4, sandwich norm, QKV bias, untied head), dumped to raw
+F32 `.bin` + a manifest, loaded into `GenericTransformer` with a hand-built `TransformerConfig` mirroring
+`GgufConfigFactory`'s real glm4 branch exactly (`RopeStyle.Interleaved`, partial rotary, `SandwichNorm=true`,
+`AttentionBias=true`, `TieWordEmbeddings=false`), run on `CpuBackend` (all-F32, no quantization) over the
+same 16-token sequence HF ran. **Result: final logits match HF transformers to `maxAbsDiff=1.3e-6`
+(float32 rounding noise) across all 16 positions** — this rules out, definitively rather than by inspection,
+every hypothesis raised above: the Interleaved RoPE pairing convention, the partial-rotary width, the
+sandwich-norm slot mapping, the 8:1 GQA broadcast, the fused gate/up split direction and order, and QKV bias
+application are all correct in the shared F32 forward path.
+
+Since the real checkpoint can ONLY run on this 12 GB card via `--low-vram-quant` (a non-quantized load OOMs
+mid-`Linear` trying to cast/stage the 9B-param weights — confirmed by trying it directly), and the F32 path
+is now proven correct, **the remaining bug must be in the quantized (Q4_K) GEMV/decode path specifically** —
+most likely in how bias is applied on top of a fused quantized Q/K/V projection (glm4 is the first
+`AttentionBias=true` architecture combined with this small a KV bias width relative to Q, at this GQA ratio,
+routed through the quantized fast path), or another shape-specific edge in that kernel family. This was NOT
+chased further this session (would need direct inspection/instrumentation of the CUDA fused-quant-GEMV
+kernel's bias handling for K/V-sized bias vectors) — flagging as the next concrete step rather than guessing
+further.
+
+**`glm4` stays FAIL** — do not read the RoPE fix above as "glm4 works end-to-end": it fixed one real,
+confirmed bug (open-ended prose generation is now fully coherent), but a second, independent, now-localized
+bug in the quantized compute path still produces wrong output on precise-retrieval prompts, and this is the
+only way to run this checkpoint at all on a 12 GB card.
 
 **Fixed (code + unit-tested), NOT e2e-verifiable on this hardware — do not read as "gpt-oss/gemma4-moe now
 work end-to-end", only that the specific reported crash is gone:**

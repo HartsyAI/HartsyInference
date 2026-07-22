@@ -63,6 +63,10 @@ public sealed class InferenceEngine : IInferenceEngine
     public bool IsSupported(Modality modality) => Modalities.All.Contains(modality);
 
     /// <inheritdoc/>
+    public IReadOnlyCollection<string> LoadedPipelineKeys =>
+        [.. _recipePipelines.Keys, .. _videoRecipePipelines.Keys];
+
+    /// <inheritdoc/>
     public IImagesService Images => _images.Value;
 
     /// <inheritdoc/>

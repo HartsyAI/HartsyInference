@@ -22,6 +22,12 @@ public interface IInferenceEngine : IDisposable
     /// <summary>Whether a handler is wired for <paramref name="modality"/>.</summary>
     bool IsSupported(Modality modality);
 
+    /// <summary>Cache keys of every image/video recipe pipeline currently constructed and resident. Keys are the
+    /// internal cache identity (checkpoint path + composition signature), not catalog ids — good enough to answer
+    /// "what's loaded" for ops, not to look a model back up by name. Text/audio/vision loaded-state isn't tracked
+    /// centrally yet; each of those services owns its loaded-model bookkeeping internally.</summary>
+    IReadOnlyCollection<string> LoadedPipelineKeys { get; }
+
     /// <summary>Image generation (all diffusion families + composition features).</summary>
     IImagesService Images { get; }
 

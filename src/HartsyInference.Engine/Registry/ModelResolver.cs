@@ -1,6 +1,6 @@
-using HartsyInference.Cli.Dispatch;
+using HartsyInference.Engine.Dispatch;
 
-namespace HartsyInference.Cli.Infra;
+namespace HartsyInference.Engine.Registry;
 
 /// <summary>Turns a user's <c>--model</c> / <c>--model-path</c> selection into a <see cref="ModelSpec"/> by matching
 /// the catalog and locating a local checkpoint (explicit path, raw path, or under the models root).</summary>

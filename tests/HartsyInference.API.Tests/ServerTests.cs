@@ -1,5 +1,5 @@
 using HartsyInference.API;
-using HartsyInference.API.Imaging;
+using HartsyInference.Engine;
 using HartsyInference.Vision.Codec;
 using Xunit;
 
@@ -16,7 +16,7 @@ public sealed class ServerTests
         byte[] rgb = new byte[w * h * 3];
         for (int i = 0; i < rgb.Length; i++) rgb[i] = (byte)(i * 7 % 256);
 
-        byte[] png = PngImageWriter.Encode(rgb, w, h);
+        byte[] png = PngEncoder.Encode(rgb, w, h);
 
         // Valid PNG signature.
         Assert.Equal(0x89, png[0]);
@@ -60,7 +60,7 @@ public sealed class ServerTests
     public void Options_Defaults()
     {
         HartsyInferenceServerOptions o = new HartsyInferenceServerOptions();
-        Assert.Equal(BackendKind.Cpu, o.Backend);
+        Assert.Equal("auto", o.Backend);
         Assert.Equal(1, o.MaxConcurrency);
         Assert.Equal(16, o.MaxQueueDepth);
     }
