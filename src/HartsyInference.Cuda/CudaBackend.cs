@@ -1751,6 +1751,12 @@ public sealed class CudaBackend : IBackend
     /// the across-step feature cache stays disabled on CUDA without it.</summary>
     public bool SupportsDeviceStepCacheGate => _kernels is not null && _kernels.HasStepCacheKernels;
 
+    /// <summary>Marks a tensor's device activation as surviving <see cref="FreeActivations()"/> (see IBackend doc).</summary>
+    public void PinActivation(Tensor tensor) => GpuTransferHelper.PinActivation(tensor);
+
+    /// <summary>Removes a <see cref="PinActivation"/> mark.</summary>
+    public void UnpinActivation(Tensor tensor) => GpuTransferHelper.UnpinActivation(tensor);
+
     public bool FlashDecodeSupported => true;
 
     public bool StepGraphSupported => true;
@@ -3402,6 +3408,20 @@ public sealed class CudaBackend : IBackend
         if (mask is null && query.DType == DType.F32)
         {
 
+            // SageAttention-v1 INT8 flash attention (sage_attn_int8*.ptx): K-smoothed per-row INT8 QK^T on
+            // the IMMA tensor cores, online softmax + PV in registers (mma.sync v1; wmma v0 fallback needs
+            // Sq%32==0 — its WMMA Q-tile loads are unguarded). Opt-in while validating (HARTSY_SAGE_ATTN=1);
+            // no-mask MHA, D∈{64,128}. Falls through when the PTX isn't built.
+            if (EnvFlag("HARTSY_SAGE_ATTN") && (D == 64 || D == 128))
+            {
+                EnsureKernels();
+                if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || Sq % 32 == 0))
+                {
+                    SageAttentionInt8(output, query, key, value, scale);
+                    return;
+                }
+            }
+
             // Fused FlashAttention-2 (TF32 tensor cores, F32 accum, no materialized score matrix). Opt-in while
             // validating (HARTSY_SDPA_V2); MHA only (Hq==Hkv here — single B×H×S×D layout), D∈{64,128}.
             if (EnvFlag("HARTSY_SDPA_V2") && (D == 64 || D == 128))
@@ -3809,6 +3829,65 @@ public sealed class CudaBackend : IBackend
         }
         finally
         {
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+        }
+    }
+
+    /// <summary>SageAttention-v1 INT8 flash attention (native/cuda/attention/sage_attn_int8.cu). Four launches:
+    /// K channel-mean → Q per-row INT8 quant (attn scale folded into the row scales) → (K−mean) per-row INT8
+    /// quant (the softmax-invariant smoothing that absorbs the DiT outlier channels) → fused INT8-QK^T flash
+    /// loop with online softmax and TF32 PV. Workspace: Q8/K8 mirrors (¼ the F32 bytes), per-row scales, and
+    /// the [B,H,D] mean — all transient device allocations, freed before return. Correctness oracle:
+    /// SageAttentionReferenceTests (CPU int8 reference math) + SageAttnKernelTests (GPU vs CPU-SDPA parity).</summary>
+    private unsafe void SageAttentionInt8(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        long B = query.Shape[0], H = query.Shape[1], Sq = query.Shape[2], D = query.Shape[3];
+        long Skv = key.Shape[2];
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
+        ulong pQ8 = 0, pQs = 0, pK8 = 0, pKs = 0, pKmean = 0, pVt16 = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            pKmean = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * D * sizeof(float)));
+            pQ8 = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * Sq * D));
+            pQs = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * Sq * sizeof(float)));
+            pK8 = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * Skv * D));
+            pKs = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * Skv * sizeof(float)));
+
+            _kernels!.LaunchSageKMean(pKmean, pK, (int)B, (int)H, (int)Skv, (int)D, _stream.Handle);
+            _kernels!.LaunchSageQuantQ(pQ8, pQs, pQ, (int)B, (int)H, (int)Sq, (int)D, scale, _stream.Handle);
+            _kernels!.LaunchSageQuantK(pK8, pKs, pK, pKmean, (int)B, (int)H, (int)Skv, (int)D, _stream.Handle);
+            if (_kernels!.UseSageV1)
+            {
+                // v1 prologue: one-shot [B,H,Skv,D]→[B,H,D,skvPad] F16 transpose (cp.async-able staging).
+                long skvPad = (Skv + 7L) & ~7L;
+                pVt16 = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * D * skvPad * 2));
+                _kernels!.LaunchSageVF16T(pVt16, pV, (int)B, (int)H, (int)Skv, (int)D, _stream.Handle);
+            }
+            _kernels!.LaunchSageAttnInt8(pOut, pQ8, pQs, pK8, pKs, pV, pVt16, (int)B, (int)H, (int)Sq, (int)Skv, (int)D, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pVt16);
+            GpuTransferHelper.FreeDevice(pKmean);
+            GpuTransferHelper.FreeDevice(pQ8);
+            GpuTransferHelper.FreeDevice(pQs);
+            GpuTransferHelper.FreeDevice(pK8);
+            GpuTransferHelper.FreeDevice(pKs);
             GpuTransferHelper.FreeDevice(pQ);
             GpuTransferHelper.FreeDevice(pK);
             GpuTransferHelper.FreeDevice(pV);

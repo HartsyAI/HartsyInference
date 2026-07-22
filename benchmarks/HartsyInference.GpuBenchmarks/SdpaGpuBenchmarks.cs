@@ -39,6 +39,8 @@ public class SdpaGpuBenchmarks
         (1, 24, 1024, 1024, 96),
         // Cross-attn with very small KV — exercises the asymmetric case Flash Attention handles well
         (1, 16, 4096, 32, 80),
+        // Video-DiT-class self-attention (Wan/LTX territory) — the SageAttention INT8 target shape
+        (1, 24, 16384, 16384, 128),
     ];
 
     [GlobalSetup]
@@ -82,5 +84,27 @@ public class SdpaGpuBenchmarks
         float scale = 1.0f / MathF.Sqrt(D);
         _fixture!.Backend.ScaledDotProductAttention(_outF16!, _qF16!, _kF16!, _vF16!, mask: null, scale);
         _fixture.Sync();
+    }
+
+    /// <summary>SageAttention-v1 INT8 path (HARTSY_SAGE_ATTN, sage_attn_int8.ptx) — INT8 IMMA QK^T with
+    /// K-smoothing, quant prologues included in the timing (they're part of every real forward). Only
+    /// meaningful on shapes with D∈{64,128} and Sq%32==0; elsewhere the dispatch falls through and this
+    /// measures the same path as <see cref="Sdpa_F32"/>. A/B partner: Sdpa_F32 (same F32 in/out contract).
+    /// The env toggle costs ~ns against ms-scale attention — noise-level for the A/B.</summary>
+    [Benchmark]
+    public void Sdpa_SageInt8()
+    {
+        int D = _shapes[ShapeIndex].D;
+        float scale = 1.0f / MathF.Sqrt(D);
+        Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
+        try
+        {
+            _fixture!.Backend.ScaledDotProductAttention(_outF32!, _q!, _k!, _v!, mask: null, scale);
+            _fixture.Sync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
+        }
     }
 }
