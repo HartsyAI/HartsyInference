@@ -138,7 +138,9 @@ see each entry for what changed and what's still open. No regressions: full `Har
 was 129) + `HartsyInference.ModelAssets.Tests` (363, one pre-existing unrelated EnCodec failure confirmed via
 `git stash` to predate this session) + the touched `HartsyInference.Cuda.Tests` all green.
 
-**Fixed and e2e-verifiable (mechanical robustness fix):**
+**Fixed, unit-level verified (NOT re-run against a real wrong-arch GGUF — the `legraphista/glm-4-9b-chat-GGUF`
+source wasn't re-downloaded this pass, so this is a traced-correct code fix + full test-suite pass, not a live
+repro-then-fixed verification):**
 - `glm4` bug (1): `GgufModelLoader.Load` now wraps the tensor-remap loop and, when the GGUF's declared
   `general.architecture` has no registered `IGgufKeyMapper` (the `chatglm`-vs-`glm4` case here, but this is
   architecture-agnostic — any declared-but-unregistered arch gets the same treatment), translates whatever the
@@ -179,6 +181,34 @@ work end-to-end", only that the specific reported crash is gone:**
   likely still be off by a per-expert scale factor even once VRAM allows a real run. Flagged in
   `Gemma4KeyMapper.cs` and here, not silently swept under the KeyNotFoundException fix.
 
+**`gemma3-vision`: one real bug found and fixed (confirmed against HF source), hallucination NOT resolved — a
+second, deeper root cause identified but out of scope for this pass:**
+- The tower being cosine≈1.0 (per the original diagnosis) means the bug is downstream of it — checked the
+  splice next. `MultimodalGenerator.Generate` applied Gemma-3's √hidden embedding normalizer to the spliced
+  IMAGE embeddings, not just text. Fetched HF `transformers`' actual `modeling_gemma3.py` to check rather than
+  trust the class's own (wrong) doc comment: `Gemma3TextScaledWordEmbedding.forward` bakes the scale into the
+  token-embedding lookup ITSELF (`super().forward(input_ids) * embed_scale`); `Gemma3Model.forward` calls that
+  scaled lookup, THEN `inputs_embeds.masked_scatter(image_mask, image_features)` — overwriting the image
+  positions with the RAW projector output, never scaled. For hidden_size=2560 that's a ~50.6x erroneous
+  amplification of the image signal. Every other cataloged VLM family has `EmbeddingScale=1.0`, so this bug
+  could only ever manifest for gemma3 — consistent with it being the only family that failed. **Fixed**: image
+  embeddings now spliced in raw (`Buffer.MemoryCopy`, no scale). **Re-verified live** against the real
+  checkpoint (`ggml-org/gemma-3-4b-it-GGUF` Q4_K_M + mmproj-model-f16, downloaded fresh, deleted after) and the
+  same bus.png: **still hallucinates** — different fabricated content ("Madrid" vs. the original "Barcelona"),
+  proving the fix changed real behavior, but it wasn't the only problem.
+- **Found, not fixed** (real new-engine-capability work): Gemma-3's actual attention mask is not pure-causal
+  over a multimodal sequence. Confirmed via HF's `get_block_sequence_ids_for_mask` / `create_masks_for_vision_model`
+  (`modeling_gemma3.py`): image tokens get BIDIRECTIONAL attention to every other token in the same contiguous
+  image block, `OR`'d with the ordinary causal mask elsewhere — "images cannot attend to future images, but can
+  attend to all prev images and to itself bidirectionally" per HF's own comment. `GenericTransformer`'s decode
+  path only ever passes a boolean `causal: true` to `FlashAttention` — there is no mixed causal/blockwise mask
+  mechanism anywhere in the LLM decode attention path. This means every image token currently cannot attend to
+  *later* image tokens during the text decoder's own cross-sequence attention (independent of whatever
+  bidirectional attention already happens correctly inside `SiglipVlmEncoder`'s self-contained tower). Strong,
+  evidence-based lead for the remaining hallucination, but implementing a real masked-attention capability for
+  the LLM decode path is genuine new engine work, not a quick fix — correctly out of scope here. `gemma3-vision`
+  stays FAIL. See `ModelCatalog.cs`'s `gemma3-vision` entry for the same detail inline.
+
 **Perf: two cheap levers pulled, both real GPU-kernel reuse (no new kernels written), both verified live:**
 - `Qwen25VlEncoder` (Qwen2.5-VL's own ViT, used by `qwen25-vl`) ran its 2D RoPE **host-side, per-layer, twice
   per layer** (Q and K), with a `backend.Sync()` each call — ~64 syncs for a 32-layer tower on a single image.
@@ -200,7 +230,10 @@ work end-to-end", only that the specific reported crash is gone:**
   `EmbedLookup` uses stays unscaled. New `GraphDecodeEmbeddingScaleTests` (real `CudaBackend`, not a fallback)
   verifies both the eligibility flip and that the returned table's actual GPU-resident values equal
   `embed * EmbeddingScale` to 1e-4, while `EmbedLookup`'s own path is unaffected — **run on real hardware**,
-  passed.
+  passed. This verifies the piece (the scaled-table math), not the full integration (no actual granite3
+  graph-decode generation compared token-for-token against eager decode) — low blast radius either way since
+  graph decode is opt-in (`HARTSY_GRAPH_DECODE=1`), greedy-only, and backstopped by the existing capture
+  circuit-breaker, but don't read this as "granite3 graph-decode is e2e-verified."
 
 **Perf: surveyed, real findings, NOT implemented this pass (documented so they aren't re-discovered from
 scratch) — dispatched as parallel read-only investigations, not deep-verified beyond what's noted:**
@@ -277,7 +310,7 @@ Qwen-MoE shared-expert path is unit-test-verified against an HF reference (no 14
 
 | Model | Notes |
 |---|---|
-| **Gemma-3-4B-vision** | SigLIP + avg-pool/RMSNorm/Linear projector. Tower corr 1.0 vs reference; e2e coherent on simple synthetic shapes. 2 bugs fixed (swapped SigLIP MLP names; relabel-not-transpose). ⚠️ **CLI pass 2026-07-22 (real photo, not a synthetic shape) found a real, still-unresolved FAIL**: `hartsy text -m gemma3-vision -i <bus photo>` consistently hallucinates an unrelated scene despite the vision-tower math independently re-verified as numerically correct (fresh PyTorch parity replay, cosine ≈1.0 every stage) — see MODEL_STATUS_LLM.md's "CLI catalog-path verification" section above. Simple-shape tests (red circle, blue square) are apparently not sufficient to catch this; a real-photo regression test is worth adding. |
+| **Gemma-3-4B-vision** | SigLIP + avg-pool/RMSNorm/Linear projector. Tower corr 1.0 vs reference; e2e coherent on simple synthetic shapes. 2 bugs fixed (swapped SigLIP MLP names; relabel-not-transpose). ⚠️ **CLI pass 2026-07-22 (real photo, not a synthetic shape) found a real, still-unresolved FAIL**: `hartsy text -m gemma3-vision -i <bus photo>` consistently hallucinates an unrelated scene despite the vision-tower math independently re-verified as numerically correct (fresh PyTorch parity replay, cosine ≈1.0 every stage). **Follow-up same day**: found + fixed a real bug (image embeddings were erroneously scaled by the √hidden normalizer that should only apply to text tokens, confirmed against HF `transformers` source — ~50.6x overamplification) — re-verified live, hallucination persists with different fabricated content, so a SECOND real gap was identified (this engine's LLM decode attention is unconditionally causal; real Gemma-3 gives image tokens bidirectional attention within their block via a mask this engine has no mechanism for) but not fixed (genuine new engine capability, out of scope). See MODEL_STATUS_LLM.md's "Follow-up fix + perf pass" section. Simple-shape tests (red circle, blue square) are apparently not sufficient to catch this; a real-photo regression test is worth adding. |
 | **SmolVLM2-2.2B** | SigLIP + idefics3 pixel-shuffle projector. Tower corr 1.0; e2e correct. CLI-reverified 2026-07-22 against a real photo (not just a synthetic shape) — still correct. |
 | **LLaVA-1.5-7B** | CLIP ViT (CLS token, pre-LN, quick-GELU, penultimate layer) + MLP projector. Tower corr 1.0; e2e "a red circle … a Japanese flag". CLI-reverified 2026-07-22 against a real photo — still correct. |
 | **Qwen2.5-VL-3B** | Own ViT — Conv3D patch embed, 2D-RoPE, window attention (full at 7/15/23/31), SwiGLU, 2×2 merger. All stages corr 1.0; e2e correct. |

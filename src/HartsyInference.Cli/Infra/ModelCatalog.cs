@@ -260,17 +260,36 @@ public static class ModelCatalog
                         Sha256 = "622429e8d31810962dd984bc98559e706db2fb1d40e99cb073beb7148d909d73" },
                 },
             },
-            // gemma3-vision: FAIL, confirmed real and deeply diagnosed, NOT fixed. Consistently and confidently
-            // describes an unrelated "Barcelona street market" instead of bus.png's actual content, across
-            // repeated runs, temperatures, and repetition-penalty values. A from-scratch PyTorch reference replay
-            // of the vision tower + projector (patch-embed -> 27 ViT blocks -> post-LN -> avg-pool -> RMSNorm ->
-            // linear) against this exact checkpoint's real weights matched the C# SiglipVlmEncoder at cosine
-            // similarity 0.99996-1.0 at every stage — the vision math itself is numerically correct, ruling that
-            // out. Cross-checked against smolvlm2/llava15/qwen25-vl (different VLM families, same --image
-            // pipeline, same bus.png) which all produce genuinely grounded output — rules out a systemic --image
-            // bug. Best unconfirmed hypothesis: the Gemma3 prompt/image-token splice shape in
-            // MultimodalGenerator.BuildPrompt interacting badly with this model's embedding/RoPE handling. No
-            // Assets — don't want `hartsy text -m gemma3-vision` defaulting to a source confirmed to hallucinate.
+            // gemma3-vision: FAIL, confirmed real and deeply diagnosed, narrowed further 2026-07-22 but still NOT
+            // resolved. Consistently and confidently describes an unrelated street/market scene (originally
+            // "Barcelona", now "Madrid" after the fix below — a real change, not the same failure) instead of
+            // bus.png's actual content. A from-scratch PyTorch reference replay of the vision tower + projector
+            // (patch-embed -> 27 ViT blocks -> post-LN -> avg-pool -> RMSNorm -> linear) against this exact
+            // checkpoint's real weights matched the C# SiglipVlmEncoder at cosine similarity 0.99996-1.0 at every
+            // stage — the vision math itself is numerically correct, ruling that out. Cross-checked against
+            // smolvlm2/llava15/qwen25-vl (different VLM families, same --image pipeline, same bus.png) which all
+            // produce genuinely grounded output — rules out a systemic --image bug.
+            // FOUND + FIXED 2026-07-22 (real bug, confirmed against HF transformers source, not guessed):
+            // MultimodalGenerator.Generate applied the Gemma-3 √hidden embedding normalizer to the SPLICED IMAGE
+            // embeddings too. HF's Gemma3TextScaledWordEmbedding bakes that scale into the TOKEN embedding lookup
+            // only (`super().forward(input_ids) * embed_scale`); Gemma3Model.forward calls that scaled lookup
+            // THEN `inputs_embeds.masked_scatter(image_mask, image_features)`, overwriting the image positions
+            // with the RAW (unscaled) vision-projector output — so the image embeddings were being amplified by
+            // ~50.6x (sqrt(2560)) beyond what the decoder was ever trained on. Every other VLM family has
+            // EmbeddingScale=1.0 so this bug could only ever affect gemma3 — consistent with it being the only
+            // family that failed. Fixed: image embeddings now spliced in raw. Re-verified live against bus.png —
+            // STILL HALLUCINATES (different wrong content, so the fix is real, just not sufficient alone).
+            // FOUND, NOT FIXED (real new-engine-capability work, out of scope for this pass): Gemma-3's real
+            // attention mask is NOT pure-causal across a multimodal sequence — HF's
+            // get_block_sequence_ids_for_mask/create_masks_for_vision_model give image tokens BIDIRECTIONAL
+            // attention to every token in the same contiguous image block (OR'd with the ordinary causal mask
+            // for everything else); GenericTransformer's decode path only ever passes a boolean `causal: true`
+            // to FlashAttention, with no mechanism for a mixed causal/blockwise mask at all. This is a strong,
+            // evidence-based lead for the remaining hallucination (each image token currently can't attend to
+            // LATER image tokens in the LLM's own cross-sequence attention, on top of whatever's inside the
+            // vision tower's own self-contained attention), but implementing it needs a real masked-attention
+            // capability this engine's LLM decode path doesn't have yet — not a quick fix. No Assets — don't
+            // want `hartsy text -m gemma3-vision` defaulting to a source still confirmed to hallucinate.
             E("gemma3-vision", txt, "Gemma-3-4B-vision", "SigLIP + avg-pool/RMSNorm/Linear projector — FAIL, see comment above and MODEL_STATUS_LLM.md", st, cli: true),
             new CatalogEntry
             {
