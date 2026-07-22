@@ -146,12 +146,25 @@ SDPA share (27%).
 
 ### H0 — Roofline instrumentation (do first; changes what we prioritize next)
 
-- [ ] `bash benchmarks/run_benchmarks.sh` baseline on this tree (all knobs unset) — confirms zero drift
-      vs the committed baselines before any knob flips.
-- [ ] **`ncu` access check**: `ncu --version` and a smoke `ncu --set full` on any kernel. On GeForce this
+- [x] `bash benchmarks/run_benchmarks.sh` baseline on this tree (all knobs unset) — confirms zero drift
+      vs the committed baselines before any knob flips. *(🔧 2026-07-22: launched `--skip-python
+      --skip-e2e --trials 5 --tag h0_baseline_3060` on the 3060 — results land under
+      `benchmarks/results/run_*_h0_baseline_3060/`; drift check + the per-model ncu top-5 capture remain
+      open. Formal BDN SDPA table (incl. the new Sage INT8 column) recorded in
+      [2026-07-22_accel_sageattn_3060.md](../../benchmarks/results/2026-07-22_accel_sageattn_3060.md).)*
+- [x] **`ncu` access check**: `ncu --version` and a smoke `ncu --set full` on any kernel. On GeForce this
       needs driver perf-counter permission (`NVreg_RestrictProfilingToAdminUsers=0` or admin). This has
       been the LLM GEMV redesign blocker (LLM_DECODE_PERF_GRIND "needs ncu, blocked by GeForce perms") —
-      on a cloud box it works out of the box; **capture for the top-5 kernels per model**:
+      on a cloud box it works out of the box.
+      *(2026-07-22: UNBLOCKED on this box. ncu 2026.2.1 user-local (deb-extract, no system install);
+      driver has `RmProfilingAdminOnly:1` so counters need root → scoped NOPASSWD sudoers for the ncu
+      binary (`sudo -n ncu ...`), plus `/etc/modprobe.d/nvidia-profiling.conf` flips the restriction off
+      at the next reboot. Smoke capture on `stepcache_rel_l1_f32` (3060, 4096×1536 F32): **93.0% of peak
+      DRAM bandwidth**, 157 µs, tensor-pipe 0% — the gate kernel is already AT the bandwidth roofline;
+      no kernel work warranted. Profiled app runs as root: `chown` report files back after capture.
+      Recipe: `sudo -n $NCU --kernel-name regex:<pat> --set <set> -o <rep> --target-processes all
+      /usr/bin/env LD_LIBRARY_PATH=$HOME/.local/lib/cuda13 CUDA_VISIBLE_DEVICES=<n> dotnet test ...`.)*
+      **Capture for the top-5 kernels per model**:
       `dram__throughput.avg.pct_of_peak_sustained_elapsed` (bandwidth roofline %),
       `sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed` (tensor-core %),
       `sm__throughput.avg.pct_of_peak_sustained_elapsed`. These three numbers per kernel ARE the
@@ -159,37 +172,83 @@ SDPA share (27%).
 
 ### H1 — Step cache (C1) bring-up + measurement
 
-1. [ ] Compile: `cd native/cuda/dit && ./build.sh` (compiles `stepcache.cu` → installs
+1. [x] Compile: `cd native/cuda/dit && ./build.sh` (compiles `stepcache.cu` → installs
        `src/HartsyInference.Cuda/Ptx/stepcache.ptx`; csproj globs it automatically). Rebuild.
-2. [ ] Gate: run `StepCacheAccelerationTests` on the GPU box — CPU tests must stay green; then verify
+       *(2026-07-22, 3060 box. **TRAP for anyone recompiling PTX here:** the pip-wheel toolchain must be
+       version-locked — `nvidia-nvvm` (ships `cicc`, which stamps the PTX `.version`) floats to 13.3 even
+       when `nvidia-cuda-nvcc==13.0.88` is pinned, and ISA 9.3 PTX fails driver JIT (`CUDA error 222:
+       Unsupported .version 9.3; current version is '9.0'`) on this driver (580.159, CUDA 13.0). Install
+       set that works: `pip3 install --target=~/.local/cuda-tools-13.0 nvidia-cuda-nvcc==13.0.88
+       nvidia-nvvm==13.0.* nvidia-cuda-crt==13.0.* nvidia-cuda-runtime==13.0.* nvidia-cuda-cccl==13.0.*
+       nvidia-cuda-nvrtc==13.0.*` then put `.../nvidia/cu13/bin` on PATH; verify every emitted PTX starts
+       `.version 9.0` before shipping.)*
+2. [x] Gate: run `StepCacheAccelerationTests` on the GPU box — CPU tests must stay green; then verify
        `CudaBackend.SupportsDeviceStepCacheGate == true` (log line appears when `HARTSY_STEP_CACHE` set).
-3. [ ] Kernel numerics: A/B `RelativeL1Distance` CUDA vs the IBackend host default on identical random
+       *(24/24 green on this box; gate=true asserted by the new GPU test below.)*
+3. [x] Kernel numerics: A/B `RelativeL1Distance` CUDA vs the IBackend host default on identical random
        F32 + F16 tensors (~1e-6 F32 / ~1e-3 F16 agreement expected; atomic-order nondeterminism is fine
        at that tolerance). Add as a `GpuIntegration` test.
-4. [ ] **Qwen-Image A/B** (the reference wiring; warm, 1024², 20 steps, cfg 4, seed 42, ×3):
+       *(`tests/HartsyInference.Cuda.Tests/StepCacheKernelTests.cs`, 4 tests, run on the 3060: F32 rel-err
+       4.5e-7, F16 5.4e-7, identical-tensors ⇒ 0, gate=true. All pass.)*
+4. [x] **Qwen-Image A/B** (the reference wiring; warm, 1024², 20 steps, cfg 4, seed 42, ×3):
        - baseline (unset) → confirm ≈ 39.4 s and byte-stable across the 3 runs;
        - `HARTSY_STEP_CACHE=0.1`, then `0.15`, then `0.2`;
        - record: wall, per-stream compute/reuse counts (logged), and **quality**: SSIM vs baseline image
          + eyeball. Acceptance: SSIM ≥ 0.95 at the shipped default; pick the default from the knee.
        - Watch VRAM: the cache holds prevIndicator + residual per stream (~58 MB × 4 at 1024²) — confirm
          peak stays under budget beside the resident DiT.
+       *(📊 2026-07-22, 4090 — [results](../../benchmarks/results/2026-07-22_accel_stepcache_qwen_4090.md):
+       baseline 40.17 s byte-stable ✓; 0.1 → 35.14 s (1.14×) SSIM 0.9552 ✓; 0.15 → 30.25 s (1.33×)
+       SSIM 0.9189 eyeball-clean but below gate; 0.2 → 27.22 s (1.48×) SSIM 0.8744 visible
+       simplification. **Shipped default moved 0.15 → 0.10** (the SSIM≥0.95 knee). Cached runs
+       deterministic. VRAM ≈15.3 GB ✓. Harness: `StepCacheQwenAbTests`. Negative-result: 1.14× at gate
+       is below the 1.4–2× literature headline — the plain accumulated-rel-L1 gate is the limiter;
+       polynomial TeaCache gate (STEP_ACCELERATION §2.3) is the upgrade path before the video ports.)*
 5. [ ] Replicate the wiring (same pattern: optional `stepCache` param after the first block, per-stream
        instances in the pipeline) to, in order: **Chroma** (biggest open image gap, 1.7×; note its
        persistent CFG-pair step graph must be BYPASSED when the cache is armed — variable per-step
        topology can't replay a fixed graph; eager fallback exists), **HiDream** (25 st, eager),
        **Wan T2V/I2V + LTX-2.3** (the big wins — video steps are 1.8–2.0 s each; TeaCache-class results
        are 2–4.4× on video; wire into `WanVideoBlock`-level forward the same way).
+       *(📊 2026-07-22 — **Wan DONE, NEGATIVE for the pinned gate**: no plain-gate threshold passes
+       SSIM≥0.95 at the verified 50-step config (0.03→0.88 … 0.2→0.72) — video trajectories diverge
+       under ANY reuse; outputs stay eyeball-clean (different-but-coherent samples) at 1.2–1.55×.
+       Honest ship-frame: "fast non-reproducible sampling" opt-in, default OFF; polynomial gate worth
+       one try but per-seed SSIM may be the wrong acceptance metric for video (use FVD).
+       [Full write-up](../../benchmarks/results/2026-07-22_accel_stepcache_wan_4090.md) — incl. two
+       pre-existing standalone-Wan-test bugs found (FlowShift 5-vs-8; real-length embed slice vs the
+       engine's 512-row + ZeroPaddedRows). Infra added: `IBackend.PinActivation` (cache state survives
+       per-step FreeActivations). **LTX-0.9 WIRED + smoke-verified** (2026-07-22: `LtxVideoTransformer.
+       Forward/ForwardPaired` optional caches force the eager path + skip `PrepareGraphLatent` — armed
+       cache can't replay the CFG-pair graph; smoke @0.05/12st: armed, graph bypassed, clean run,
+       0 reuses — LTX gate needs per-model threshold tuning like Wan; quality A/B requires the
+       engine-anchored treatment first, same as Wan's ground-truth pass). Chroma/HiDream wiring
+       DEFERRED — no weights on disk to verify, and Chroma's default-ON graph makes blind wiring a
+       regression risk.)*
 6. [ ] Negative-result discipline: if a model's gate never fires below quality-loss thresholds, record
        that in the results doc with the drift trace (the polynomial-rescaled TeaCache gate is the
        documented upgrade path — per-model coefficient fit, STEP_ACCELERATION §2.3).
 
 ### H2 — CFG interval (C2) measurement
 
-1. [ ] Qwen-Image warm A/B: baseline vs `HARTSY_CFG_INTERVAL=0.1,0.85` vs `0.15,0.9` (20 st, cfg 4).
+1. [x] Qwen-Image warm A/B: baseline vs `HARTSY_CFG_INTERVAL=0.1,0.85` vs `0.15,0.9` (20 st, cfg 4).
        Expected: wall drops ∝ skipped uncond steps (logged); quality NEUTRAL-OR-BETTER (the paper's
        claim — verify SSIM + eyeball; if quality dips, shrink the excluded tails).
-2. [ ] Composability run: interval + step cache together (they compound: interval halves gated steps,
-       cache skips block stacks on the rest).
+       *(📊 2026-07-22, 4090 — **NEGATIVE RESULT at the paper's bands.** Both bands: 33.8 s vs 40.1 s
+       baseline (−16%, 6/20 uncond skips ✓ arithmetic) BUT SSIM 0.35/0.38 and the eyeball shows a
+       CATEGORY flip: "A photograph of…" renders as a stylized flat illustration. Skipping guidance on
+       the EARLY high-noise steps (normalized t > 0.85) abandons prompt-style adherence — the paper's
+       ImageNet class-conditional FID result does NOT transfer to text-prompt fidelity on Qwen-Image
+       @cfg 4/20 steps. Composability run (cache 0.1 + interval): 27.5 s, mechanically compounds ✓
+       (uncond 10 computes/4 reuses — the self-healing works) but inherits the same style flip.
+       Per-protocol remedy tested: late-only bands (`0.05,1` / `0.1,1` / `0.15,1` — guidance kept early,
+       uncond skipped only at low noise): quality-safe (SSIM 0.981–0.996, eyeball-identical) but
+       MARGINAL (−3…−5%) — this scheduler only puts 1–2 of 20 steps below t=0.15. C2 stays default-off;
+       `0.15,1` is the sane opt-in. Full write-up:
+       [2026-07-22_accel_cfginterval_qwen_4090.md](../../benchmarks/results/2026-07-22_accel_cfginterval_qwen_4090.md).)*
+2. [x] Composability run: interval + step cache together (they compound: interval halves gated steps,
+       cache skips block stacks on the rest). *(Done above — compounds mechanically; quality verdict
+       tracks whichever interval band is used.)*
 3. [ ] Replicate to HiDream (cfg 5 → biggest absolute saving per step) and Wan (2-forward CFG at
        1.8 s/forward — the largest per-step win in the fleet). Same self-healing note re: C1.
 
@@ -207,6 +266,58 @@ SDPA share (27%).
        returns per-group error — log it per block) and fall back per-block (fuse only clean groups).
 
 ### H4 — INT8 SageAttention kernel (B1) — the build item
+
+> **Status 2026-07-22 (v0 landed: correct, not yet fast).** Built `native/cuda/attention/sage_attn_int8.cu`
+> (4 kernels: K channel-mean, Q/K per-row INT8 quant with folded attn scale + K-smoothing, fused flash loop
+> with wmma s8 m16n16k16 QK^T + TF32 PV), optional-module plumbing (`HasSageAttentionKernels`,
+> `HARTSY_SAGE_ATTN=1` dispatch in the F32/no-mask block, shape-gated D∈{64,128} ∧ Sq%32==0), and
+> `SageAttnKernelTests` — **gate (1) PASSED on the 3060**: maxErr 3.3e-4 vs CPU F32 with channel-consistent
+> K outliers (30× under the 1e-2 budget), clean-input control passes, Skv-tail correct, bit-exact
+> run-to-run. **Gate (2) FAILED honestly**: `SageSdpaMicroBench` (3060) — v0 is **0.17×** vs the default
+> materialized-TF32-cuBLAS F32 path (250 ms vs 43 ms @ [1,24,4096,128]; 2.31 s vs 0.41 s @ [1,24,12288,128];
+> Welch |t|>47). Root cause: v0 cloned `flash_attn_v2_tf32.cu`'s structure, and wmma's UNDEFINED fragment
+> layouts force O/softmax through SMEM with serial per-thread D-loops, BC=16 micro-tiles (Skv/16 sync-heavy
+> iterations), Q8 refetched from global per step, 2-warp blocks — this is also why HARTSY_SDPA_V2 never
+> became a default. **v1 plan (the real build)**: raw `mma.sync` PTX asm (m16n8k32 s8s8s32 QK^T, m16n8k8
+> tf32 or m16n8k16 f16 PV) whose lane↔element layout is ARCHITECTURALLY DEFINED → register-resident O
+> accumulator + per-lane m/l online-softmax state with shuffle row-reductions, BR=64/BC=64, `cp.async.cg`
+> 2-stage K8/V staging, SMEM XOR swizzle. Only that shape of kernel can meet the ~2× target vs cuDNN.
+> The v0 parity tests remain the correctness oracle for v1 (identical contract).
+>
+> **v1 layout worksheet (worked out 2026-07-22, use as-is):** 4 warps, warp owns 16 query rows; BC=64 ⇒
+> QK^T = 8× `mma.sync.m16n8k32.s32.s8.s8.s32` per D/32-chunk (A=Q8 row-major, B=K8 col-major). C-frag
+> (m16n8, s32): lane holds rows {g, g+8} (g=lane/4) × cols {t·2, t·2+1} (t=lane%4) — each row spread over
+> 4 lanes ⇒ row max/sum = 2 shuffle-xor hops (offsets 1,2) within the quad. KEY ALIGNMENT: that C layout
+> is register-identical to the m16n8k16-f16 A-frag layout, so S→P after softmax is pure reg renaming +
+> `cvt.rn.f16x2.f32` packing — zero shuffles, zero SMEM round-trip. PV: P(16×BC f16, A) × V(BC×D f16, B
+> via ld.shared, k-chunks of 16) → O = D/8 = 16 accum tiles × 4 f32 = 64 regs/lane; m/l = 2+2 regs
+> (2 rows/lane); online rescale multiplies the 64 O regs by corr[row-half] — per-lane, no comms.
+> Budget ≈ 110–130 regs/thread ⇒ 128-thread blocks still 2+ blocks/SM on GA102. V must be staged as F16
+> in SMEM (cast on cp.async ingest or pre-pass) for the f16 PV mma; K8 B-frags via manual ld.shared.b32
+> (ldmatrix is b16-only). Sq%64 gate replaces Sq%32 at BR=64 (or keep a BR=32 variant for the tail).
+>
+> **v1 BUILT + measured (2026-07-22, `sage_attn_int8_v1.cu`, entries `sage_attn_int8_v1_d{128,64}_f32`,
+> preferred by `LaunchSageAttnInt8` when present; `HARTSY_SAGE_V0=1` forces the wmma v0):** fully
+> row-guarded (ANY Sq — v0's Sq%32 gate excluded Wan's 3510-token stream), parity green (maxErr 3.2e-4,
+> bit-deterministic). Iteration log (3060, `SageSdpaMicroBench` [1,24,12288,128] vs default cuBLAS path):
+> v1 BR=64/BC=64 naive → **1.26×** (t=7.7); +XOR swizzle alone → 0.92× (conflicts −80% but regs 168→221
+> lost a resident block — occupancy 24→16%); +`launch_bounds(128,3)` → 1.24× (cap-induced spills ate the
+> win); **+BC=32 → 1.36×** (t=9.9; 168 regs, 0 spills, 3 blocks/SM). `asm volatile`→`asm` on the mma
+> wrappers: no change (ptxas already scheduled maximally). Current ncu: latency-bound — 69.3% of stalls
+> are short-scoreboard on SMEM fragment loads, SM 22%, mem 18%, IPC 0.81, occupancy 24.25% (theoretical
+> 25 at 12 warps/SM, reg-capped). Note the honest frame: the paper's 2.1× was vs FA2;
+> our baseline is the materialized cuBLAS-TF32 pipeline, a different (strong) incumbent, and the F16-in
+> cuDNN fused path (Hunyuan/Kandinsky class) is not yet comparable — Sage takes F32 in/out today.
+>
+> **v1.3 LANDED (2026-07-22): 5.55× at [1,24,12288,128] (74.0 ms vs 411 ms, t=31.5), 4.57× at
+> [1,24,4096,128] — parity green incl. Skv tail, 96 regs, 0 spills.** The two changes: (1) `sage_v_f16t`
+> one-shot V transpose+cast to [B,H,D,skvPad] f16 (the per-block SMEM re-transpose was Sq/64-redundant —
+> the dominant win); (2) cp.async.cg 16B double-buffered K8/Vt staging (2 stages ≈ 24.8 KB < 48 KB
+> default). Trap fixed: cp.async src must be 16B-aligned — per-head kscale bases (head×Skv floats) are
+> NOT for odd Skv → CUDA 716 MISALIGNED_ADDRESS; ks tile now stages with scalar loads. ~60% of the
+> mixed-precision roofline (PV f16→f32 dominates the remaining floor). Full log:
+> [2026-07-22_accel_sageattn_3060.md](../../benchmarks/results/2026-07-22_accel_sageattn_3060.md).
+> Remaining H4 gates: (2-formal) BDN `SdpaGpuBenchmarks` run + 4090 numbers; (3) e2e Wan step + SSIM.
 
 Design (validated by `SageAttentionReferenceTests`, which is the diff oracle):
 
