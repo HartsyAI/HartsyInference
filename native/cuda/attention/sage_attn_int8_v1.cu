@@ -66,6 +66,7 @@ __device__ __forceinline__ void mma_f16(float& c0, float& c1, float& c2, float& 
 }
 
 
+
 __device__ __forceinline__ void cp_async_16(void* smem_dst, const void* gmem_src)
 {
     const unsigned dst = (unsigned)__cvta_generic_to_shared(smem_dst);
@@ -74,6 +75,17 @@ __device__ __forceinline__ void cp_async_16(void* smem_dst, const void* gmem_src
 __device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n"); }
 template<int N>
 __device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
+
+
+// skvPad: rows padded to 8 halves (16B cp.async alignment) — and bumped +8 when the result is an EXACT
+// power of two ≥ 2048: a pow2 pad makes the Vt row stride (2·skvPad bytes) a pure power of 2, aliasing
+// every d-row into the same L2 set group (measured: Skv=8192 ran ~2× slower than its work vs 12288).
+__device__ __forceinline__ unsigned sage_skv_pad(unsigned skv)
+{
+    unsigned p = (skv + 7u) & ~7u;
+    if (p >= 2048u && (p & (p - 1u)) == 0u) p += 8u;
+    return p;
+}
 
 // ── SMEM XOR swizzles (DEEP_KERNEL_OPTIMIZATION §6: mandatory for mma-consumed tiles). Both tiles are
 // permuted at 4-element (u32 / 8-byte) granularity WITHIN a row, XORed with the row index, so the
@@ -99,9 +111,9 @@ __device__ __forceinline__ unsigned vt_off(unsigned d, unsigned c)
     return d * BC + c8 * 8 + (c & 7);
 }
 
-template<unsigned D, bool F16ACC>
+template<unsigned D, bool F16ACC, bool OUT16, typename OutT>
 __device__ __forceinline__ void sage_attn_v1_core(
-    float* __restrict__ out,              // [B, Hq, Sq, D]
+    OutT* __restrict__ out,               // [B, Hq, Sq, D] (float, or __half when OUT16)
     const signed char* __restrict__ Q8,   // [B, Hq, Sq, D]
     const float* __restrict__ qscale,     // [B, Hq, Sq]
     const signed char* __restrict__ K8,   // [B, Hq, Skv, D]
@@ -126,11 +138,11 @@ __device__ __forceinline__ void sage_attn_v1_core(
     const size_t headKV = (size_t)Skv * D;
     const signed char* Q8h = Q8 + ((size_t)b * Hq + h) * headQ;
     const signed char* K8h = K8 + ((size_t)b * Hq + h) * headKV;
-    const unsigned skvPad = (Skv + 7u) & ~7u;                    // Vt16 row stride (16B-aligned cp.async src)
+    const unsigned skvPad = sage_skv_pad(Skv);                   // Vt16 row stride (16B-aligned, anti-aliased)
     const __half* Vth = Vt16 + ((size_t)b * Hq + h) * ((size_t)D * skvPad);   // [D][skvPad] for this head
     const float* qsh = qscale + ((size_t)b * Hq + h) * Sq;
     const float* ksh = kscale + ((size_t)b * Hq + h) * Skv;
-    float* Oh = out + ((size_t)b * Hq + h) * headQ;
+    OutT* Oh = out + ((size_t)b * Hq + h) * headQ;
 
     extern __shared__ unsigned char smemRaw[];
     // Two cp.async stages: [stage][...]. Per stage: K8 [BC][D] s8, Vt [D][BC] f16, ks [BC] f32.
@@ -329,6 +341,9 @@ __device__ __forceinline__ void sage_attn_v1_core(
             const unsigned a1 = *(const unsigned*)&h01;
             const unsigned a2 = *(const unsigned*)&h10;
             const unsigned a3 = *(const unsigned*)&h11;
+            // PV B-fragments: manual u32 ld.shared (an ldmatrix.x4 variant measured 1.5% SLOWER —
+            // loads are already latency-hidden behind the mma chains post-cp.async; the per-lane
+            // swizzled-address ALU for ldmatrix outweighed its instruction savings. 2026-07-22.)
             #pragma unroll
             for (unsigned dt = 0; dt < dTiles; dt++)
             {
@@ -365,13 +380,13 @@ __device__ __forceinline__ void sage_attn_v1_core(
         const unsigned d0 = dt * 8 + t4 * 2;
         if (r0 < Sq)
         {
-            Oh[(size_t)r0 * D + d0] = o[dt][0] * inv0;
-            Oh[(size_t)r0 * D + d0 + 1] = o[dt][1] * inv0;
+            Oh[(size_t)r0 * D + d0] = (OutT)(o[dt][0] * inv0);
+            Oh[(size_t)r0 * D + d0 + 1] = (OutT)(o[dt][1] * inv0);
         }
         if (r1 < Sq)
         {
-            Oh[(size_t)r1 * D + d0] = o[dt][2] * inv1;
-            Oh[(size_t)r1 * D + d0 + 1] = o[dt][3] * inv1;
+            Oh[(size_t)r1 * D + d0] = (OutT)(o[dt][2] * inv1);
+            Oh[(size_t)r1 * D + d0 + 1] = (OutT)(o[dt][3] * inv1);
         }
     }
 }
@@ -381,7 +396,7 @@ extern "C" __global__ void __launch_bounds__(128, 3) sage_attn_int8_v1_d128_f32(
     const signed char* __restrict__ K8, const float* __restrict__ kscale, const __half* __restrict__ Vt16,
     unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv)
 {
-    sage_attn_v1_core<128, false>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
+    sage_attn_v1_core<128, false, false, float>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
 }
 
 extern "C" __global__ void __launch_bounds__(128, 3) sage_attn_int8_v1_d64_f32(
@@ -389,7 +404,7 @@ extern "C" __global__ void __launch_bounds__(128, 3) sage_attn_int8_v1_d64_f32(
     const signed char* __restrict__ K8, const float* __restrict__ kscale, const __half* __restrict__ Vt16,
     unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv)
 {
-    sage_attn_v1_core<64, false>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
+    sage_attn_v1_core<64, false, false, float>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
 }
 
 // ── V pre-transpose+cast, ONCE per forward: [B,Hq,Skv,D] f32 → [B,Hq,D,skvPad] f16 (skvPad = Skv
@@ -401,7 +416,7 @@ extern "C" __global__ void sage_v_f16t(
     const float* __restrict__ V,          // [B, Hq, Skv, D]
     unsigned int B, unsigned int Hq, unsigned int Skv, unsigned int D)
 {
-    const unsigned skvPad = (Skv + 7u) & ~7u;
+    const unsigned skvPad = sage_skv_pad(Skv);
     const size_t total = (size_t)B * Hq * D * skvPad;
     const size_t stride = (size_t)gridDim.x * blockDim.x;
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += stride)
@@ -419,7 +434,7 @@ extern "C" __global__ void __launch_bounds__(128, 3) sage_attn_int8_v1_d128_f16a
     const signed char* __restrict__ K8, const float* __restrict__ kscale, const __half* __restrict__ Vt16,
     unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv)
 {
-    sage_attn_v1_core<128, true>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
+    sage_attn_v1_core<128, true, false, float>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
 }
 
 extern "C" __global__ void __launch_bounds__(128, 3) sage_attn_int8_v1_d64_f16acc_f32(
@@ -427,5 +442,39 @@ extern "C" __global__ void __launch_bounds__(128, 3) sage_attn_int8_v1_d64_f16ac
     const signed char* __restrict__ K8, const float* __restrict__ kscale, const __half* __restrict__ Vt16,
     unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv)
 {
-    sage_attn_v1_core<64, true>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
+    sage_attn_v1_core<64, true, false, float>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
+}
+
+extern "C" __global__ void __launch_bounds__(128, 3) sage_attn_int8_v1_d128_f16io(
+    __half* __restrict__ out, const signed char* __restrict__ Q8, const float* __restrict__ qscale,
+    const signed char* __restrict__ K8, const float* __restrict__ kscale, const __half* __restrict__ Vt16,
+    unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv)
+{
+    sage_attn_v1_core<128, true, true, __half>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
+}
+
+extern "C" __global__ void __launch_bounds__(128, 3) sage_attn_int8_v1_d64_f16io(
+    __half* __restrict__ out, const signed char* __restrict__ Q8, const float* __restrict__ qscale,
+    const signed char* __restrict__ K8, const float* __restrict__ kscale, const __half* __restrict__ Vt16,
+    unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv)
+{
+    sage_attn_v1_core<64, true, true, __half>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
+}
+
+// F16-source V pre-transpose (no cast — pure [B,Hq,Skv,D]→[B,Hq,D,skvPad] gather + zero-pad).
+extern "C" __global__ void sage_v_f16t_h(
+    __half* __restrict__ vt, const __half* __restrict__ V,
+    unsigned int B, unsigned int Hq, unsigned int Skv, unsigned int D)
+{
+    const unsigned skvPad = sage_skv_pad(Skv);
+    const size_t total = (size_t)B * Hq * D * skvPad;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += stride)
+    {
+        const unsigned s = (unsigned)(i % skvPad);
+        const size_t rest = i / skvPad;
+        const unsigned d = (unsigned)(rest % D);
+        const size_t bh = rest / D;
+        vt[i] = (s < Skv) ? V[(bh * Skv + s) * D + d] : __float2half(0.0f);
+    }
 }

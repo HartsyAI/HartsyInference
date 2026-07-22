@@ -105,3 +105,74 @@ Wan-5B 480p/33f/50st e2e with `HARTSY_SAGE_ATTN=1 HARTSY_SAGE_PV=f16acc`:
 - **Wall: neutral (68.8 vs 68.0 s)** — attention ≈6% of the 5B forward at 480p; 1.18× on 6% is
   <1% e2e. Honest e2e frame: Sage's end-to-end value on Wan-class models needs 14B/720p+ seqlens
   (attention share 25%+); its decisive wins remain the F32-materialized-path shapes (3–8×).
+
+## F16-ingest + 14B e2e (2026-07-22, session 3 block)
+
+**Wan-14B fp8 e2e (4090, 480p/33f/12-step probe): 6.55 s/step vs 6.85 baseline = 1.047× — the first
+visible e2e win** (≈15 s saved per 50-step gen; matches 1.18× on the ~25% attention share).
+
+**F16-ingest shipped** (`sage_quant_{q,k}_int8_f16h`, `sage_k_mean_f16h`, `sage_v_f16t_h`, OUT16
+epilogue → `sage_attn_int8_v1_*_f16io`; branch-1 dispatch behind `HARTSY_SAGE_F16_MIN_SKV`,
+default 8192). Parity: F16-ingest vs CPU-F32-on-identical-values 2.3–3.1e-4; full sage suite 7/7.
+Crossover vs the CAST-FREE native-F16 cuDNN incumbent (3060, trimmed steady-state): **1.15× @12288,
+1.11× @8192, ~parity @4096** — Qwen-Image-class 4k seqs need the ldmatrix floor-work to flip.
+
+**Anomaly logged**: Skv=8192 (power-of-2) is disproportionately slow for BOTH paths (12288 does 2.25×
+the work in 1.03× the time) — suspected L2 set-aliasing on strided V-transpose reads; fix candidate:
+offset `skvPad` off powers of 2. ncu the prologue next session.
+
+F32-caller crossover (vs cast-paying cuDNN branch, trimmed): 1.15–1.25× everywhere ≥2048 → the
+`Skv ≥ 2048` F32 gate stands. Image-fleet map: F32 callers = Sage wins now; F16-native (Qwen/Hunyuan/
+Kandinsky) = wins ≥8k, parity at 4k pending ldmatrix; Ideogram4 D=256 = separate instantiation;
+Chroma = masked (needs mask support).
+
+## ldmatrix experiment + anti-aliasing pad + first Ada numbers (2026-07-22, session 3)
+
+- **ldmatrix.x4 PV fragment loads: NEGATIVE (reverted).** Parity green after fixing a double-transpose
+  (Vt is pre-transposed → NON-trans distribution is the B-fragment layout), but 1.5% slower than the
+  manual u32 loads: post-cp.async the loads are latency-hidden behind the mma chains, and the per-lane
+  swizzled-address ALU outweighed the instruction savings. Documented in-kernel.
+- **skvPad anti-aliasing**: exact-power-of-2 pads ≥2048 now bump +8 (pure-pow2 Vt row stride aliases
+  every d-row into one L2 set group — the suspected Skv=8192 pathology). Parity 7/7. Ampere
+  verification PENDING (3060 was taken by another agent mid-bench — contaminated run discarded);
+  no pathology on Ada to begin with (72 MB L2).
+- **First 4090/Ada crossover (F16-native incumbent, trimmed steady-state):** 12288: Sage 10.3 ms vs
+  cuDNN 12.3 = **1.19×**; 8192: parity (5.14 vs 5.21); 4096: cuDNN ahead (1.38 vs 1.52). The
+  HARTSY_SAGE_F16_MIN_SKV=8192 default holds on Ada. Ada absolute times ≈ 6–12× the 3060's (as
+  expected of the tier gap). NOTE for all micro A/Bs: quote TRIMMED means — cuDNN's first post-init
+  call carries a plan-search outlier (2–8× the steady state).
+
+**CORRECTION (clean 3060 rerun):** the Skv=8192 "pathology" was CONTENTION — another agent's job began
+mid-bench (cuDNN recovered identically, 69→33 ms, without touching the padded buffer). The anti-aliasing
+pad stays as principled hygiene but fixed nothing measurable. Clean Ampere F16-native crossover
+(trimmed): 1.03× @4096, 1.09× @8192, 1.15× @12288 — monotonic; the 8192 gate default stands.
+
+## Kandinsky5-Lite T2V e2e (4090, F16-native path, forced dispatch MIN_SKV=1024)
+
+Dispatch ✓ (frames byte-differ), quality ✓ (mean pixel drift 0.15%, eyeball-pristine), speed
+**785 vs 795 ms/step (~1.3%)** — parity-zone outcome at its ~4k seq, exactly as the Ada crossover
+predicted. The crossover model is now e2e-validated across three models: Wan-5B neutral (6% attn
+share), **Wan-14B +4.7%/step** (25% share), K5-Lite +1.3% (parity seq). Conclusion: the shipped
+gates (F32: Skv≥2048; F16: Skv≥8192) are correctly placed; F16-native e2e wins arrive with
+Hunyuan/Wan at 720p+ seqlens.
+
+## HunyuanVideo 13B @ 720p e2e (4090) — the F16-ingest arc's capstone
+
+1280×720, 17f (~18k tokens), 10-step probe, bf16 DiT (Comfy-Org repack, freshly staged after an
+F-Lite prune — user-approved):
+- **baseline 6.64 s/step → armed 6.03 s/step = 1.10× end-to-end** (92.1 vs 98.3 s total; ≈30 s saved
+  on a 50-step 720p generation)
+- dispatch ✓ (frames differ), **quality ✓ (0.3% mean pixel drift, eyeball-pristine)**
+
+e2e validation table, final (all predictions from the micro crossover curves):
+
+| Model / config | seq / attn share | predicted | measured |
+|---|---|---|---|
+| Wan-5B 480p | 3.5k / ~6% | neutral | neutral ✓ |
+| K5-Lite T2V | ~4k (parity zone) | ~neutral | +1.3% ✓ |
+| Krea2-Turbo 1024² | 4.4k, F16 gate | no dispatch, no regress | bit-identical ✓ |
+| Wan-14B 480p | 3.5k / ~25% | +4–5% | **+4.7%/step** ✓ |
+| **HunyuanVideo 720p** | **~18k, deep win zone** | ~+10% | **+10.2%/step** ✓ |
+
+The crossover model predicted every e2e outcome. Shipped gates final for this round:
+F32 ingest Skv≥2048; F16 ingest Skv≥8192 (both arches).

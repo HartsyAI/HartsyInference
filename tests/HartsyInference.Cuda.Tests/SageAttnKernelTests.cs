@@ -180,6 +180,68 @@ public sealed unsafe class SageAttnKernelTests
         Assert.True(maxErr < 2e-2, $"maxErr {maxErr:E3} exceeds budget");
     }
 
+    /// <summary>F16-ingest parity gate: native-F16 Q/K/V/out through the f16h prologues + f16io flash
+    /// kernel vs the CPU F32 reference on the SAME real values (F16 inputs constructed by rounding the F32
+    /// randoms — both paths see identical data up to the F16 encode). Budget stays 2e-2 (input rounding
+    /// adds ~1e-3-class error on top of the INT8 path's 4e-4). Covers the branch-1 dispatch contract.</summary>
+    [Theory]
+    [InlineData(128, 256, 250)]
+    [InlineData(64, 512, 512)]
+    public void SageAttention_F16Ingest_MatchesCpuF32(int d, int sq, int skv)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        if (!File.Exists(Path.Combine(PtxDir(), "sage_attn_int8_v1.ptx"))) { _output.WriteLine("SKIPPED: no v1 ptx"); return; }
+
+        const int B = 1, H = 2;
+        float scale = 1.0f / MathF.Sqrt(d);
+        using Tensor q32 = RandomF32(new TensorShape(B, H, sq, d), 61);
+        using Tensor k32 = RandomF32(new TensorShape(B, H, skv, d), 62);
+        using Tensor v32 = RandomF32(new TensorShape(B, H, skv, d), 63);
+        InjectChannelOutliers(k32, d, magnitude: 8.0f);
+
+        // Round to F16 then back to F32 so the CPU reference sees EXACTLY what the F16 kernel ingests.
+        Tensor ToF16(Tensor f32)
+        {
+            Tensor t = new Tensor(f32.Shape, DType.F16);
+            float* src = (float*)f32.DataPointer;
+            ushort* dst = (ushort*)t.DataPointer;
+            for (long i = 0; i < f32.ElementCount; i++) dst[i] = BitConverter.HalfToUInt16Bits((Half)src[i]);
+            return t;
+        }
+        using Tensor q16 = ToF16(q32);
+        using Tensor k16 = ToF16(k32);
+        using Tensor v16 = ToF16(v32);
+        using Tensor qRef = q16.CastTo(DType.F32);
+        using Tensor kRef = k16.CastTo(DType.F32);
+        using Tensor vRef = v16.CastTo(DType.F32);
+
+        using Tensor cpuOut = new Tensor(new TensorShape(B, H, sq, d), DType.F32);
+        using (CpuBackend cpu = new CpuBackend())
+            ((IBackend)cpu).ScaledDotProductAttention(cpuOut, qRef, kRef, vRef, null, scale);
+
+        using Tensor gpuOut16 = new Tensor(new TensorShape(B, H, sq, d), DType.F16);
+        Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
+        Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", "1");   // force dispatch at test sizes
+        try
+        {
+            using CudaBackend cuda = new CudaBackend(0, PtxDir());
+            cuda.ScaledDotProductAttention(gpuOut16, q16, k16, v16, null, scale);
+            cuda.Sync();
+            _ = *(ushort*)gpuOut16.DataPointer;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", null);
+        }
+
+        using Tensor gpuOut = gpuOut16.CastTo(DType.F32);
+        (double maxErr, double meanErr) = Compare(gpuOut, cpuOut);
+        _output.WriteLine($"F16-ingest D={d} Sq={sq} Skv={skv}: maxErr={maxErr:E3} meanErr={meanErr:E3}");
+        Assert.True(maxErr < 2e-2, $"max error {maxErr:E3} exceeds budget");
+        Assert.True(meanErr < 2e-3, $"mean error {meanErr:E3} exceeds budget");
+    }
+
     /// <summary>The refutation control for the smoothing claim at kernel level: WITHOUT outliers the budget
     /// must also hold (smoothing must not hurt the clean case).</summary>
     [Fact]

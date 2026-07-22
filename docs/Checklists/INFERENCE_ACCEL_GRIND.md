@@ -318,6 +318,18 @@ SDPA share (27%).
 > mixed-precision roofline (PV f16→f32 dominates the remaining floor). Full log:
 > [2026-07-22_accel_sageattn_3060.md](../../benchmarks/results/2026-07-22_accel_sageattn_3060.md).
 > Remaining H4 gates: (2-formal) BDN `SdpaGpuBenchmarks` run + 4090 numbers; (3) e2e Wan step + SSIM.
+>
+> **NEXT KERNEL UNIT — F16-ingest/F16-out Sage (designed 2026-07-22, build next session):** the image
+> fleet survey shows nearly every DiT calls SDPA no-mask+allowF16 and the deciding variable is tensor
+> dtype at call time. F32 callers: Sage already wins 1.15–1.25× ≥2048 (crossover bench vs the cast-
+> paying cuDNN branch). F16-NATIVE callers (Qwen-Image, Hunyuan/Kandinsky class) hit branch 1
+> (cast-free cuDNN) where Sage-from-F32 can't compete below ~16k. Build: (a) prologue variants reading
+> `__half` — template `sage_quant_row` on SrcT, `sage_k_mean_f16`, `sage_v_f16t` from-f16 (pure
+> transpose/pad, no cast); (b) `OUT16` epilogue knob → `sage_attn_int8_v1_*_f16io` entries (pair only
+> with f16acc); (c) dispatch in the NATIVE-F16 branch behind the env knob with an initial Skv≥12288
+> gate, then re-measure the crossover (cheaper prologue should pull it below 16k; kernel-floor work —
+> `ldmatrix` fragment loads — is what turns 4k-seq parity into wins). Ideogram4 D=256 support is a
+> separate instantiation (32 o-tiles blows the register budget — needs BC=16 or split-D two-pass).
 
 Design (validated by `SageAttentionReferenceTests`, which is the diff oracle):
 

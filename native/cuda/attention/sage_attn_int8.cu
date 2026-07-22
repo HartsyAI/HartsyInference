@@ -58,9 +58,10 @@ extern "C" __global__ void sage_k_mean_f32(
 // smoothSub: optional [B,Hq,D] per-channel vector subtracted before quantization (K-smoothing); null for Q.
 // scaleMul: folded into the stored row scale (attn softmax scale for Q, 1.0 for K) so the flash kernel's
 // dequant is one qscale[r]*kscale[c] multiply per score.
+template<typename SrcT>
 __device__ __forceinline__ void sage_quant_row(
     signed char* __restrict__ out8, float* __restrict__ scales,
-    const float* __restrict__ src, const float* __restrict__ smoothSub,
+    const SrcT* __restrict__ src, const float* __restrict__ smoothSub,
     unsigned int rows, unsigned int Hq, unsigned int S, unsigned int D, float scaleMul,
     unsigned int warpsPerBlock)
 {
@@ -69,7 +70,7 @@ __device__ __forceinline__ void sage_quant_row(
     const unsigned int row = blockIdx.x * warpsPerBlock + warp;   // global row index over B*Hq*S
     if (row >= rows) return;
 
-    const float* srcRow = src + (size_t)row * D;
+    const SrcT* srcRow = src + (size_t)row * D;
     // (b,h) for the smoothing vector: rows are laid out [B, Hq, S].
     const float* sub = nullptr;
     if (smoothSub != nullptr)
@@ -81,7 +82,7 @@ __device__ __forceinline__ void sage_quant_row(
     float amax = 0.0f;
     for (unsigned int d = lane; d < D; d += 32)
     {
-        float v = srcRow[d];
+        float v = (float)srcRow[d];
         if (sub != nullptr) v -= sub[d];
         amax = fmaxf(amax, fabsf(v));
     }
@@ -93,7 +94,7 @@ __device__ __forceinline__ void sage_quant_row(
     signed char* outRow = out8 + (size_t)row * D;
     for (unsigned int d = lane; d < D; d += 32)
     {
-        float v = srcRow[d];
+        float v = (float)srcRow[d];
         if (sub != nullptr) v -= sub[d];
         int q = __float2int_rn(v * inv);
         q = max(-127, min(127, q));
@@ -267,4 +268,34 @@ extern "C" __global__ void sage_attn_int8_f32(
         float* Og = Oh + (size_t)(q0 + r) * D;
         for (unsigned int d = 0; d < D; d++) Og[d] = Orow[d] * inv;
     }
+}
+
+// ── F16-ingest prologues (native-F16 DiT activations — Qwen-Image/Hunyuan/Kandinsky class): identical
+// math via the templated row quant; K channel-mean accumulates in F32. ──
+extern "C" __global__ void sage_quant_q_int8_f16h(
+    signed char* __restrict__ q8, float* __restrict__ qscale, const __half* __restrict__ Q,
+    unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int D, float attnScale)
+{
+    sage_quant_row(q8, qscale, Q, nullptr, B * Hq * Sq, Hq, Sq, D, attnScale, blockDim.x >> 5);
+}
+
+extern "C" __global__ void sage_quant_k_int8_f16h(
+    signed char* __restrict__ k8, float* __restrict__ kscale, const __half* __restrict__ K,
+    const float* __restrict__ kmean, unsigned int B, unsigned int Hq, unsigned int Skv, unsigned int D)
+{
+    sage_quant_row(k8, kscale, K, kmean, B * Hq * Skv, Hq, Skv, D, 1.0f, blockDim.x >> 5);
+}
+
+extern "C" __global__ void sage_k_mean_f16h(
+    float* __restrict__ kmean, const __half* __restrict__ K,
+    unsigned int B, unsigned int Hq, unsigned int Skv, unsigned int D)
+{
+    const unsigned int h = blockIdx.x;
+    const unsigned int b = blockIdx.y;
+    const unsigned int d = threadIdx.x;
+    if (d >= D) return;
+    const __half* Kh = K + ((size_t)b * Hq + h) * ((size_t)Skv * D);
+    float acc = 0.0f;
+    for (unsigned int s = 0; s < Skv; s++) acc += (float)Kh[(size_t)s * D + d];
+    kmean[((size_t)b * Hq + h) * D + d] = acc / (float)Skv;
 }
