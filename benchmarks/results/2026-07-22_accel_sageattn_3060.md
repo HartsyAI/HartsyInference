@@ -90,3 +90,18 @@ Micro A/B trail: f32acc 74.0 ms → naive f16acc 63.9 ms (failed swamping gate) 
   F32 in/out today; an F16-ingest variant is future work.
 - 3060 (SM 8.6) only so far; 4090 (Ada) numbers pending the next GPU window.
 - e2e gate (H4 gate 3: Wan step time + SSIM with HARTSY_SAGE_ATTN=1) still pending.
+
+## Dispatch preference + Wan e2e quality gate (2026-07-22, 4090)
+
+Sage (armed) now claims no-mask F32 calls BEFORE the cuDNN-F16-cast branch, gated `Skv ≥ 2048`
+(below: prologue-bound, measured 0.93×; Wan's 512-token cross-attn correctly stays on cuDNN).
+exp2 log2-domain softmax folded into the quant scale (13/13 parity green, perf-neutral — kept as
+strictly fewer ops).
+
+Wan-5B 480p/33f/50st e2e with `HARTSY_SAGE_ATTN=1 HARTSY_SAGE_PV=f16acc`:
+- **Dispatch confirmed** (frames byte-differ from the unarmed baseline), deterministic ×3.
+- **Quality: mean pixel drift 0.5% (1.2–1.3/255), same clip identity, eyeball-identical** — the
+  INT8 path survives 50 steps × 30 blocks × 2 attentions with no visible cost.
+- **Wall: neutral (68.8 vs 68.0 s)** — attention ≈6% of the 5B forward at 480p; 1.18× on 6% is
+  <1% e2e. Honest e2e frame: Sage's end-to-end value on Wan-class models needs 14B/720p+ seqlens
+  (attention share 25%+); its decisive wins remain the F32-materialized-path shapes (3–8×).

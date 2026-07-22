@@ -223,11 +223,11 @@ extern "C" __global__ void sage_attn_int8_f32(
             }
             const float mPrev = m_state[r];
             const float mNew = fmaxf(mPrev, rowMax);
-            const float corr = __expf(mPrev - mNew);
+            const float corr = (mNew == NEG_INF) ? 1.0f : exp2f(mPrev - mNew);
             float rowSum = 0.0f;
             for (unsigned int c = 0; c < curBC; c++)
             {
-                float p = __expf(sDeq[c] - mNew);
+                float p = exp2f(sDeq[c] - mNew);   // log2-domain (see v1)
                 Srow[c] = p;
                 rowSum += p;
             }

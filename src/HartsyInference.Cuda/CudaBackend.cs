@@ -3389,6 +3389,20 @@ public sealed class CudaBackend : IBackend
 
         if (query.DType == DType.F32)
         {
+            // SageAttention preference (opt-in, HARTSY_SAGE_ATTN=1): for no-mask F32 calls the INT8 flash
+            // path beats the cuDNN-F16-cast branch below at large seq (110.6 vs 130.4 ms at 16384²/D=128,
+            // 2026-07-22 BDN A/B) — and unlike it, keeps F32-fidelity accumulation. Gate on Skv ≥ 2048:
+            // below that the quant prologue outweighs the win (small-seq shapes measured 0.93× vs cuDNN).
+            if (EnvFlag("HARTSY_SAGE_ATTN") && mask is null && (D == 64 || D == 128) && Skv >= 2048)
+            {
+                EnsureKernels();
+                if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || Sq % 32 == 0))
+                {
+                    SageAttentionInt8(output, query, key, value, scale);
+                    return;
+                }
+            }
+
             // cuDNN fused flash-attention (HARTSY_SDPA_CUDNN): a single fused kernel — no materialized
             // [heads,Sq,Skv] score matrix — via cuDNN's runtime-compiled attention engine. ~34× over the
             // materialized cuBLAS path at Krea2 shape. MHA only, D∈{64,128}. Safe for RMS-normed-Q/K archs
@@ -3866,7 +3880,10 @@ public sealed class CudaBackend : IBackend
             pKs = GpuTransferHelper.AllocateDevice((nuint)((long)B * H * Skv * sizeof(float)));
 
             _kernels!.LaunchSageKMean(pKmean, pK, (int)B, (int)H, (int)Skv, (int)D, _stream.Handle);
-            _kernels!.LaunchSageQuantQ(pQ8, pQs, pQ, (int)B, (int)H, (int)Sq, (int)D, scale, _stream.Handle);
+            // log2-domain softmax: fold log2(e) into the Q row scales so the flash kernels exponentiate via
+            // native exp2 (one fewer multiply per score element; max/corr/l all commute with the constant).
+            const float Log2E = 1.4426950408889634f;
+            _kernels!.LaunchSageQuantQ(pQ8, pQs, pQ, (int)B, (int)H, (int)Sq, (int)D, scale * Log2E, _stream.Handle);
             _kernels!.LaunchSageQuantK(pK8, pKs, pK, pKmean, (int)B, (int)H, (int)Skv, (int)D, _stream.Handle);
             if (_kernels!.UseSageV1)
             {

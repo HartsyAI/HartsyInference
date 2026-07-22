@@ -271,18 +271,20 @@ __device__ __forceinline__ void sage_attn_v1_core(
         }
 
         const float mNew0 = fmaxf(m0, rowMax0), mNew1 = fmaxf(m1, rowMax1);
-        // all-masked tile (or empty row): keep NEG_INF states from corrupting corr via exp(-inf - -inf)
-        const float corr0 = (mNew0 == NEG_INF) ? 1.0f : __expf(m0 - mNew0);
-        const float corr1 = (mNew1 == NEG_INF) ? 1.0f : __expf(m1 - mNew1);
+        // log2-domain softmax: the quant prologue folds log2(e) into qscale, so scores arrive pre-scaled
+        // and exp2f replaces expf (drops one multiply per score; MUFU.EX2 is the native SFU op).
+        // all-masked tile (or empty row): keep NEG_INF states from corrupting corr via exp2(-inf - -inf)
+        const float corr0 = (mNew0 == NEG_INF) ? 1.0f : exp2f(m0 - mNew0);
+        const float corr1 = (mNew1 == NEG_INF) ? 1.0f : exp2f(m1 - mNew1);
 
         float rowSum0 = 0.0f, rowSum1 = 0.0f;
         #pragma unroll
         for (unsigned nt = 0; nt < (BC >> 3); nt++)
         {
-            p[nt][0] = (p[nt][0] == NEG_INF) ? 0.0f : __expf(p[nt][0] - mNew0);
-            p[nt][1] = (p[nt][1] == NEG_INF) ? 0.0f : __expf(p[nt][1] - mNew0);
-            p[nt][2] = (p[nt][2] == NEG_INF) ? 0.0f : __expf(p[nt][2] - mNew1);
-            p[nt][3] = (p[nt][3] == NEG_INF) ? 0.0f : __expf(p[nt][3] - mNew1);
+            p[nt][0] = (p[nt][0] == NEG_INF) ? 0.0f : exp2f(p[nt][0] - mNew0);
+            p[nt][1] = (p[nt][1] == NEG_INF) ? 0.0f : exp2f(p[nt][1] - mNew0);
+            p[nt][2] = (p[nt][2] == NEG_INF) ? 0.0f : exp2f(p[nt][2] - mNew1);
+            p[nt][3] = (p[nt][3] == NEG_INF) ? 0.0f : exp2f(p[nt][3] - mNew1);
             rowSum0 += p[nt][0] + p[nt][1];
             rowSum1 += p[nt][2] + p[nt][3];
         }
