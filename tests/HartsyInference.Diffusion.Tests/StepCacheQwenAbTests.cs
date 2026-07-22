@@ -45,8 +45,9 @@ public class StepCacheQwenAbTests
         csvTag: "stepcache",
         configs: new (string label, string? stepCache, string? cfgInterval)[]
         {
-            ("cache@0.1", "0.1", null),
-            ("cache@0.15", "0.15", null),
+            // With HARTSY_STEP_CACHE_POLY set, thresholds are budgets in CALIBRATED residual-drift units
+            // (the fitted map is superlinear: early-step reuse costs ~2.3× its indicator drift).
+            ("cache@0.18", "0.18", null),
             ("cache@0.2", "0.2", null),
         });
 

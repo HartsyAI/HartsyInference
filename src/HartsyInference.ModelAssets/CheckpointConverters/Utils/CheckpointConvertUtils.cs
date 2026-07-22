@@ -687,6 +687,11 @@ public static unsafe class CheckpointConvertUtils
             string baseKey = w1Key.Substring(0, w1Key.Length - w1Suffix.Length);
             string w3Key = baseKey + w3Suffix;
             if (!weights.TryGetValue(w3Key, out Tensor? w3)) continue;
+            // comfy_quant checkpoints carry per-key quant descriptors the fused tensor cannot inherit —
+            // fusing them produced correct F32 output but DEGENERATE F16 output (Ideogram4, 2026-07-22).
+            // Skip until the fusion understands the blocked-quant layout end to end.
+            string w1Head = w1Key.Substring(0, w1Key.Length - ".weight".Length);
+            if (weights.ContainsKey(w1Head + ".comfy_quant") || weights.ContainsKey(w1Head + ".weight_scale")) continue;
             Tensor w1 = weights[w1Key];
             if (w1.DType != w3.DType || w1.Shape.Rank != 2 || w3.Shape.Rank != 2 || w1.Shape[1] != w3.Shape[1]) continue;
 
