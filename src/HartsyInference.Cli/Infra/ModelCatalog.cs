@@ -48,6 +48,65 @@ public static class ModelCatalog
             E("mistral", txt, "Mistral (dense)", "Mistral dense transformer", st, cli: true),
             E("gguf", txt, "Quantized GGUF (Q4/Q8)", "config-driven, any GGUF LLM", ok, cli: true),
 
+            // Text / LLM — dense families verified engine-internally per MODEL_STATUS_LLM.md, but not yet run
+            // through `hartsy text` itself, so Status stays Structural (same convention as llama3/mistral above)
+            // until a CLI pass confirms real output. No Assets: no HF GGUF repo for these is reliably documented
+            // in this repo's checklists — see docs/Checklists/LLM_CLI_CATALOG_HANDOFF.md for what a GPU-equipped
+            // session still needs to source and verify.
+            E("gemma", txt, "Gemma 2 / Gemma 3 (text)", "GeGLU, √d embed scale, sandwich norm, dual-RoPE, attn/final logit soft-cap", st, cli: true),
+            E("phi", txt, "Phi-3 / Phi-3.5-mini / Phi-4-mini", "fused QKV split, LongRoPE, partial rotary, gpt-4o tokenizer", st, cli: true),
+            E("stablelm2", txt, "StableLM-2 (1.6B)", "partial rotary + QKV bias", st, cli: true),
+            E("granite3", txt, "Granite-3", "embedding/attention/residual/logit scalar multipliers", st, cli: true),
+            E("command-r", txt, "Cohere Command-R", "LayerNorm, parallel residual, interleaved RoPE, NoPE global layers, logit-scale", st, cli: true),
+            E("olmoe", txt, "OLMoE (1B-7B-0924)", "MoE, whole-vector Q/K norm", st, cli: true),
+            E("granite-moe", txt, "Granite-MoE", "scalar multipliers + MoE", st, cli: true),
+            E("gemma4", txt, "Gemma-4 (E2B/E4B mobile)", "per-layer embeddings, per-layer head-dim, cross-layer KV donor sharing, weightless V-norm", st, cli: true),
+
+            // Text / LLM — MoE / large dense: architecture, key-mapper, and slice/unit tests are built and pass
+            // (see MODEL_STATUS_LLM.md "build-defer"), but no e2e run exists yet at any size — every one of these
+            // checkpoints exceeds 12GB, so real verification needs a bigger GPU than this project has used so far.
+            E("mixtral", txt, "Mixtral 8x7B", "llama+experts MoE, interleaved RoPE, renorm — 47B total params", st, cli: true),
+            E("qwen3-moe", txt, "Qwen3-MoE (30B-A3B / 235B)", "per-head Q/K norm, no shared expert", st, cli: true),
+            E("deepseek-v2-lite", txt, "DeepSeek-V2-Lite", "MLA + DeepSeek-MoE — OOMs a 12GB card at preload", st, cli: true),
+            E("deepseek-v3", txt, "DeepSeek-V3 (671B) / Kimi-K2 (1T)", "MLA + MoE + sigmoid group-routing + q-LoRA query — likely needs multiple GPUs", st, cli: true),
+            E("gpt-oss", txt, "GPT-OSS (20B / 120B)", "attention sinks, MoE, o200k tokenizer", st, cli: true),
+            E("gemma4-moe", txt, "Gemma-4 (31B-dense / 26B-A4B-MoE)", "parallel dense+MoE branch, per-layer FFN width", st, cli: true),
+
+            // Text / LLM — vision-language (VLM). Attach an image with `--image <path>`; all five are verified
+            // e2e per MODEL_STATUS_LLM.md, but (like the dense families above) not yet through the CLI's new
+            // --image flag specifically.
+            E("llama32-vision", txt, "Llama-3.2-Vision-11B (mllama)", "gated cross-attention VLM, own 560px ViT (no token splice)", st, cli: true),
+            E("gemma3-vision", txt, "Gemma-3-4B-vision", "SigLIP + avg-pool/RMSNorm/Linear projector", st, cli: true),
+            E("smolvlm2", txt, "SmolVLM2-2.2B", "SigLIP + idefics3 pixel-shuffle projector", st, cli: true),
+            E("llava15", txt, "LLaVA-1.5-7B", "CLIP ViT (CLS token, pre-LN, quick-GELU) + MLP projector", st, cli: true),
+            E("qwen25-vl", txt, "Qwen2.5-VL (3B / 7B)", "own ViT, Conv3D patch embed, 2D-RoPE, window attention", st, cli: true),
+
+            // Text / LLM — non-transformer / hybrid decoders (Ssm/*Model.cs, not GenericTransformer).
+            E("mamba", txt, "Mamba-1 / Mamba-2, Falcon-Mamba", "selective state-space scan + causal Conv1d, no attention", st, cli: true),
+            E("rwkv", txt, "RWKV-6 / RWKV-7", "WKV recurrence + data-dependent token-shift LoRA + GroupNorm", st, cli: true),
+            E("qwen35", txt, "Qwen3.5 (Gated DeltaNet hybrid)", "every 4th layer is GQA+RoPE, the rest are Gated DeltaNet delta-rule recurrence", st, cli: true),
+
+            new CatalogEntry
+            {
+                // NOT reachable via `hartsy text` today: TextService.LoadInto only routes a GGUF to the
+                // decoder-only GgufLanguageModel path or (for SSM architectures) SsmLanguageModel — there is no
+                // seq2seq branch that calls the standalone Seq2Seq/T5Model.cs loader, so a T5/FLAN-T5 GGUF would
+                // load as (and fail as) a decoder-only transformer. T5Model itself is verified encoder+decoder
+                // parity (cosine = 1.0 vs HF) per MODEL_STATUS_LLM.md, but that's exercised directly in the
+                // Diffusion package's text-encoder tests, not through TextService/hartsy text. Listed for
+                // discoverability; CliDrivable stays false until TextService gains a seq2seq generation path.
+                Id = "t5", Modality = txt, DisplayName = "T5 / FLAN-T5", Architecture = "encoder-decoder, rel-pos bias, cross-attention, GeGLU",
+                Status = st, CliDrivable = false,
+            },
+
+            // Text / LLM — architectures with a real IGgufKeyMapper (GgufKeyMapperRegistry) but no bring-up/e2e
+            // run documented anywhere in this repo's checklists, unlike every family above. Included because the
+            // mapping genuinely exists and a user may already have a matching GGUF; expect the first real run to
+            // surface bugs the doc-verified families already had shaken out.
+            E("glm4", txt, "GLM-4", "sandwich norm, fused gate/up projection (Glm4KeyMapper)", st, cli: true),
+            E("gpt2", txt, "GPT-2 / BLOOM / GPT-NeoX", "absolute position embeddings, non-gated GELU (Gpt2KeyMapper)", st, cli: true),
+            E("starcoder2", txt, "StarCoder2", "shares the llama-family key-mapper path (LlamaKeyMapper)", st, cli: true),
+
             // Image / diffusion
             new CatalogEntry
             {

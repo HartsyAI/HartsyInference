@@ -12,6 +12,8 @@ public interface IChatTemplate
     string Name { get; }
 
     /// <summary>Encodes <paramref name="tokenizer"/>-tokenized <paramref name="messages"/> to ids; when
-    /// <paramref name="addGenerationPrompt"/> is true, appends a trailing assistant header.</summary>
-    int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt);
+    /// <paramref name="addGenerationPrompt"/> is true, appends a trailing assistant header.
+    /// <paramref name="enableThinking"/> sets the template's <c>enable_thinking</c> variable (Qwen3-family
+    /// reasoning toggle); null leaves it undefined so the template falls back to its own default.</summary>
+    int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking = null);
 }

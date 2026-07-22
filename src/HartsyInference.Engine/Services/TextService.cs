@@ -487,6 +487,7 @@ public sealed class TextService : ITextService, IDisposable
             Sampling = sampling,
             GraphDecode = request.GraphDecode,
             SpeculativeDecode = request.SpeculativeDecode,
+            EnableThinking = request.EnableThinking,
         };
         if (rawCompletion)
         {

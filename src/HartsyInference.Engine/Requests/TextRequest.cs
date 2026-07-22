@@ -35,6 +35,11 @@ public sealed record TextRequest
     /// <summary>Force greedy decoding regardless of temperature.</summary>
     public bool Greedy { get; init; }
 
+    /// <summary>Sets the model's chat-template <c>enable_thinking</c> variable (Qwen3-family reasoning-block
+    /// toggle); null leaves it undefined so the template falls back to its own default. Ignored by templates
+    /// without a thinking slot.</summary>
+    public bool? EnableThinking { get; init; }
+
     /// <summary>Target device key (e.g. "cpu", "cuda:0"); null uses the backend's primary device.</summary>
     public string? Device { get; init; }
 

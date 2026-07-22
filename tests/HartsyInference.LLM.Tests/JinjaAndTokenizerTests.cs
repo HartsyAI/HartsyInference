@@ -155,4 +155,44 @@ public sealed class JinjaAndTokenizerTests
         template.Encode(tok, [ChatMessage.User("A"), ChatMessage.Assistant("B"), ChatMessage.User("C")], addGenerationPrompt: false);
         Assert.Equal("<s>[INST] A [/INST] B</s>[INST] C [/INST]", tok.Last);
     }
+
+    // ── JinjaChatTemplate: enable_thinking (Qwen3-family reasoning toggle) ─────────────────────────────
+
+    /// <summary>A minimal Qwen3-style template: branches on <c>enable_thinking</c> only when it <c>is defined</c>,
+    /// matching the real GGUF template's own convention (undefined ≠ false).</summary>
+    private const string ThinkingStyleTemplate =
+        "{%- for message in messages %}{{- message['content'] }}{%- endfor %}" +
+        "{%- if add_generation_prompt %}" +
+        "{%- if enable_thinking is defined and enable_thinking %}{{- '<think>' }}" +
+        "{%- elif enable_thinking is defined and not enable_thinking %}{{- '<no_think>' }}" +
+        "{%- else %}{{- '<default>' }}{%- endif %}" +
+        "{%- endif %}";
+
+    [Fact]
+    public void JinjaChatTemplate_EnableThinkingTrue_TakesThinkBranch()
+    {
+        JinjaChatTemplate template = new(ThinkingStyleTemplate);
+        CapturingTokenizer tok = new();
+        template.Encode(tok, [ChatMessage.User("Hi")], addGenerationPrompt: true, enableThinking: true);
+        Assert.Equal("Hi<think>", tok.Last);
+    }
+
+    [Fact]
+    public void JinjaChatTemplate_EnableThinkingFalse_TakesNoThinkBranch()
+    {
+        JinjaChatTemplate template = new(ThinkingStyleTemplate);
+        CapturingTokenizer tok = new();
+        template.Encode(tok, [ChatMessage.User("Hi")], addGenerationPrompt: true, enableThinking: false);
+        Assert.Equal("Hi<no_think>", tok.Last);
+    }
+
+    [Fact]
+    public void JinjaChatTemplate_EnableThinkingUnset_LeavesVariableUndefined()
+    {
+        JinjaChatTemplate template = new(ThinkingStyleTemplate);
+        CapturingTokenizer tok = new();
+        // No enableThinking argument at all — must render the "is defined" fallback, not silently treat as false.
+        template.Encode(tok, [ChatMessage.User("Hi")], addGenerationPrompt: true);
+        Assert.Equal("Hi<default>", tok.Last);
+    }
 }

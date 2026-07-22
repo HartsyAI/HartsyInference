@@ -98,15 +98,30 @@ public static class GenerationDispatch
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
         float temperature = parameters.GetFloat("temperature", 0.7f);
+        List<ImageData> images = [];
+        if (parameters.GetStringOrNull("image") is { Length: > 0 } imagePaths)
+        {
+            foreach (string path in imagePaths.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                images.Add(LoadImage(path));
+        }
         TextRequest request = new TextRequest
         {
-            Messages = [new TextMessage { Role = TextRole.User, Content = prompt }],
+            Messages = [new TextMessage { Role = TextRole.User, Content = prompt, Images = images.Count > 0 ? images : null }],
+            SystemPrompt = parameters.GetStringOrNull("system"),
             MaxTokens = parameters.GetInt("max-tokens", 256),
             Temperature = temperature,
             TopP = parameters.GetFloat("top-p", 0.95f),
+            TopK = parameters.GetIntOrNull("top-k"),
+            MinP = parameters.GetDoubleOrNull("min-p"),
+            RepetitionPenalty = parameters.GetDoubleOrNull("repetition-penalty"),
             Seed = parameters.GetInt("seed", -1),
             Greedy = temperature <= 0f,
             GraphDecode = parameters.GetBool("graph-decode", false) ? true : null,
+            EnableThinking = parameters.GetStringOrNull("thinking") is { Length: > 0 } thinking ? bool.Parse(thinking) : null,
+            // TextService.LoadInto only checks LowVramQuant for non-empty (a bool-shaped toggle, not an actual
+            // target quant selector), so any non-empty sentinel works here — see its doc comment.
+            LowVramQuant = parameters.GetBool("low-vram-quant", false) ? "on" : null,
+            AlwaysFreeMemory = parameters.GetBool("always-free-memory", false) ? true : null,
         };
 
         StringBuilder text = new StringBuilder();

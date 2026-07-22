@@ -106,6 +106,14 @@ public sealed class ParamState
                 _values["top-p"] = "0.95";
                 _values["seed"] = "-1";
                 _values["graph-decode"] = "false";
+                _values["system"] = "";
+                _values["image"] = "";
+                _values["top-k"] = "";
+                _values["min-p"] = "";
+                _values["repetition-penalty"] = "";
+                _values["thinking"] = "";
+                _values["low-vram-quant"] = "false";
+                _values["always-free-memory"] = "false";
                 break;
             case Modality.Speech:
                 _values["voice"] = "default";

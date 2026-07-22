@@ -16,7 +16,9 @@ public sealed class ChatMlTemplate : IChatTemplate
     public string Name => "chatml";
 
     /// <inheritdoc/>
-    public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt)
+    /// <remarks>ChatML has no <c>enable_thinking</c> slot; <paramref name="enableThinking"/> is accepted for
+    /// interface parity but ignored.</remarks>
+    public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking = null)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
         ArgumentNullException.ThrowIfNull(messages);

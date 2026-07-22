@@ -17,6 +17,11 @@ public sealed record GenerationRequest
     /// <summary>Multi-turn chat messages (templated). Takes precedence over <see cref="Prompt"/>.</summary>
     public IReadOnlyList<ChatMessage>? Messages { get; init; }
 
+    /// <summary>Sets the chat template's <c>enable_thinking</c> variable (Qwen3-family reasoning toggle); null
+    /// leaves it undefined so the template falls back to its own default. Ignored by templates without a
+    /// thinking slot (e.g. ChatML).</summary>
+    public bool? EnableThinking { get; init; }
+
     /// <summary>Pre-tokenized prompt ids; when set, templating and tokenization are skipped entirely.</summary>
     public IReadOnlyList<int>? RawTokenIds { get; init; }
 

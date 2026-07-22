@@ -23,7 +23,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
     }
 
     /// <inheritdoc/>
-    public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt)
+    public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking = null)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
         ArgumentNullException.ThrowIfNull(messages);
@@ -31,7 +31,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
         string rendered;
         try
         {
-            rendered = Render(tokenizer, messages, addGenerationPrompt);
+            rendered = Render(tokenizer, messages, addGenerationPrompt, enableThinking);
         }
         catch (ChatTemplateRaiseException)
         {
@@ -40,14 +40,17 @@ public sealed class JinjaChatTemplate : IChatTemplate
             // system content into the first user turn and merge consecutive same-role turns, then retry once.
             // Matches what llama.cpp/Ollama do for system-less templates. If it still fails, surface the
             // original error (a genuine template problem, not a structure one).
-            rendered = Render(tokenizer, NormalizeForStrictTemplate(messages), addGenerationPrompt);
+            rendered = Render(tokenizer, NormalizeForStrictTemplate(messages), addGenerationPrompt, enableThinking);
         }
         // The template emits the bos_token literal itself, so don't double-add specials beyond literal matching.
         return tokenizer.Encode(rendered, addSpecial: true);
     }
 
-    /// <summary>Renders the conversation through the model's Jinja template.</summary>
-    private string Render(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt)
+    /// <summary>Renders the conversation through the model's Jinja template. <paramref name="enableThinking"/> is
+    /// only added to the context when set — an unset value leaves <c>enable_thinking</c> undefined so
+    /// <c>{% if enable_thinking is defined %}</c> branches fall through to the template's own default instead of
+    /// being forced off.</summary>
+    private string Render(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking)
     {
         List<object?> msgList = new(messages.Count);
         foreach (ChatMessage m in messages)
@@ -62,6 +65,8 @@ public sealed class JinjaChatTemplate : IChatTemplate
             ["tools"] = null,
             ["documents"] = null,
         };
+        if (enableThinking.HasValue)
+            context["enable_thinking"] = enableThinking.Value;
         return _engine.Render(context);
     }
 
