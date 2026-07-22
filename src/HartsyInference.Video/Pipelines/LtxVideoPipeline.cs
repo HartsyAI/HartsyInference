@@ -141,8 +141,8 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
             if (Backend.SupportsDeviceStepCacheGate)
             {
                 int stepCacheCap = StepCacheEnv.ReadCap();
-                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
-                uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
+                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
+                uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
                 Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap} (step graph bypassed)");
             }
             else

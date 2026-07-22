@@ -20,6 +20,23 @@ public static class StepCacheEnv
         return threshold;
     }
 
+    /// <summary>Reads HARTSY_STEP_CACHE_POLY ("c0,c1,c2,..." — TeaCache-style gate calibration polynomial,
+    /// lowest power first) and HARTSY_STEP_CACHE_CALIB (a CSV path: run uncached and log indicator→residual
+    /// drift pairs for fitting). Null when unset; malformed poly THROWS.</summary>
+    public static float[]? ReadPoly()
+    {
+        string? v = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_POLY");
+        if (string.IsNullOrWhiteSpace(v)) return null;
+        string[] parts = v.Split(',');
+        float[] c = new float[parts.Length];
+        for (int i = 0; i < parts.Length; i++)
+            if (!float.TryParse(parts[i], System.Globalization.CultureInfo.InvariantCulture, out c[i]))
+                throw new ArgumentException($"HARTSY_STEP_CACHE_POLY malformed at '{parts[i]}'.");
+        return c;
+    }
+
+    public static string? ReadCalibFile() => Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_CALIB");
+
     /// <summary>Reads HARTSY_STEP_CACHE_CAP (max consecutive cached steps), default 3.</summary>
     public static int ReadCap()
     {

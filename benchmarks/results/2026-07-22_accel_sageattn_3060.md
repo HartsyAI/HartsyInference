@@ -176,3 +176,32 @@ e2e validation table, final (all predictions from the micro crossover curves):
 
 The crossover model predicted every e2e outcome. Shipped gates final for this round:
 F32 ingest Skv≥2048; F16 ingest Skv≥8192 (both arches).
+
+## Kernel-floor probes (session 4): BC=64 NEGATIVE
+
+Floor profile of the shipped f16acc kernel: tensor 46%, IPC 2.34, occupancy at its 3-block cap —
+issue-bound on per-K-step overhead. BC=64 experiment (halve K-steps; SMEM 49.7 KB → 96 KB opt-in,
+2 blocks/SM): parity 7/7 but 69.0 vs 64.7 ms @12288 and 9.6 vs 8.3 @4096 — the occupancy loss beat
+the overhead amortization (f16io variant also hit 243 regs). REVERTED; BC=32 is the validated
+sweet spot. Remaining floor levers are structural (warp specialization / deeper software pipeline) —
+diminishing returns territory at ~60% of mixed roofline; deprioritized behind coverage work.
+
+## Ideogram4 restored + w13 fusion gate (2026-07-22): NEGATIVE both ways — guarded off
+
+Full stack re-staged (2 transformers + Qwen3VL-8B TE + Flux2 VAE; F-Lite + LTX-2.3 pruned with
+user approval). Measured (4090, 1024², 20 steps, seed 42):
+- **Baseline (current shipping speed): 1.237 s/step** rock-steady, 59.7 s cold incl. ~19 GB load.
+- Fused (`HARTSY_FUSED_FFN=1`): 1.290 s/step (−4%) AND **F16 output degenerate** (repeating-texture);
+  F32 fused is **bit-identical** to baseline — math correct, defect is F16-path-specific.
+- Op-level bisect (new `FusedFfnF16BisectTests`): the exact op sequence (fp8+scale, F16 acts, damp,
+  slice, undamp) passes on BOTH GPUs at synthetic shapes → the delta is this checkpoint's
+  **comfy_quant/weight_scale companion format**, whose per-key descriptors the fused tensor drops.
+- Shipped guard: `FuseSwiGluPairs` now SKIPS pairs carrying comfy_quant/weight_scale companions —
+  fusion cannot mis-fire on this format again. Also perf verdict independent of the bug: at 4k-token
+  image workloads the GPU is already full — fusion's launch-count win doesn't apply (it was measured
+  for tiny decode GEMVs), and the slice copies cost real bandwidth. **Ideogram4 keeps the split FFN;
+  the fusion utils remain correct and valuable for the LLM decode case they were re-scoped to.**
+
+**Ideogram4 through SwarmUI (production engine, 4090):** staged into the Swarm tree via symlinks;
+gen succeeded first try. **Warm 19.2 s** (cold 51.7 s incl. load) at 1024²/20 steps — matches the
+19.5 s production record. Output eyeball-verified (on-prompt astronaut-on-horse photograph).

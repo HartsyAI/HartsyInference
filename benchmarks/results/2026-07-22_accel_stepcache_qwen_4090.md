@@ -54,3 +54,24 @@ decimals across trials per config.
 Replicate wiring: Chroma (bypass its persistent CFG-pair step graph when armed), HiDream, then
 Wan T2V/I2V + LTX-2.3 (TeaCache-class video results are 2–4.4×). Consider the polynomial gate before
 the video ports.
+
+## Polynomial (TeaCache-style) gate — calibrated, measured (2026-07-22, 4090)
+
+Recipe (now the documented per-model procedure): one observe-mode run (`HARTSY_STEP_CACHE=0.000001` +
+`HARTSY_STEP_CACHE_CALIB=<csv>` — logs indicator→residual drift pairs at zero extra wiring), degree-3
+least-squares fit, ship via `HARTSY_STEP_CACHE_POLY="c0,c1,c2,c3"`. Qwen-Image fit (54 pairs,
+R²=0.966): `-0.0481274,2.57494,-3.17407,4.38356` — superlinear: early-step reuse costs ~2.3× its
+indicator drift (the raw gate under-weighted exactly the reuses that damage identity).
+
+| Poly threshold (calibrated units) | Wall | Δ | SSIM |
+|---|---|---|---|
+| 0.15 | 36.5 s | 1.09× | 0.9744 |
+| 0.18 | 34.8 s | 1.14× | 0.9552 (= raw@0.1's point — fit consistency check ✓) |
+| **0.20** | **33.0 s** | **1.20×** | **0.9500 (at the gate)** |
+| 0.25 | 31.7 s | 1.26× | 0.9380 |
+| 0.40 | 25.3 s | 1.58× | 0.8573 |
+
+**Verdict: the calibrated gate dominates the raw gate's quality-speed curve — 1.20× vs 1.14× at the
+SSIM≥0.95 bar.** Env-shipped (coeffs are model-specific); productization step = per-model coefficient
+storage in the pipeline configs. Wan is the next calibration target (same recipe; per-seed SSIM may
+still be the wrong video metric — see the Wan verdict doc).

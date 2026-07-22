@@ -169,8 +169,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             if (Backend.SupportsDeviceStepCacheGate)
             {
                 int stepCacheCap = StepCacheEnv.ReadCap();
-                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
-                if (useCfg) uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
+                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
+                if (useCfg) uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
                 Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}");
             }
             else

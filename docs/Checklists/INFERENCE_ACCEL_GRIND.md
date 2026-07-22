@@ -330,6 +330,15 @@ SDPA share (27%).
 > gate, then re-measure the crossover (cheaper prologue should pull it below 16k; kernel-floor work —
 > `ldmatrix` fragment loads — is what turns 4k-seq parity into wins). Ideogram4 D=256 support is a
 > separate instantiation (32 o-tiles blows the register budget — needs BC=16 or split-D two-pass).
+>
+> **D=256 SCOPED OUT (2026-07-22 decision, recorded):** 32 output tiles ⇒ 128 f32 accumulator regs
+> (unbuildable without heavy spills) or a two-block D-split that RECOMPUTES the full-D QK^T (+50%
+> total flops at D=256 where QK≈PV). Against cuDNN's NATIVE D=256 fused support (Ideogram4's current
+> path, already perf-passed at 19.5 s), a +50%-flops handicap has no realistic win. Ideogram4's Sage
+> story is the w13 fusion (shipped, awaiting weights) — not attention. Revisit only if a D=256 model
+> shows up whose incumbent is the materialized path. (F16-ingest e2e note: `ldmatrix` PV variant was
+> measured SLOWER and reverted — see results doc — so "ldmatrix flips 4k parity" above is DEAD; the
+> 4k-seq flip now depends on prologue-cost reduction and deeper pipelining.)
 
 Design (validated by `SageAttentionReferenceTests`, which is the diff oracle):
 
@@ -353,11 +362,27 @@ Design (validated by `SageAttentionReferenceTests`, which is the diff oracle):
 
 ### H5 — Roofline follow-ups (prioritize by H0's measured table)
 
-- [ ] **LLM GEMV redesign** with `ncu` finally in hand (cloud box): capture the Q4_K GEMV's
-      `dram__throughput` % — the doc's standing estimate is ~22% of bandwidth vs llama.cpp's ~80% on
-      Mistral. The scoped attack: R4 row-interleaved repack (4 rows' quant blocks contiguous → coalesced
-      warp reads + input-vector reuse) — design in LLM_DECODE_PERF_GRIND "dotLLM techniques". Derive the
-      thread→byte mapping from the measured transaction sizes, don't guess.
+- [x] **LLM GEMV redesign** with `ncu` finally in hand: MEASURED 2026-07-22 (4090, real Qwen3 Q4_K
+      decode) — the standing "~22% everywhere" estimate is WRONG. `mul_mat_vec_q4k_f32` DRAM%: 1216
+      blocks → **77.7%** (already llama.cpp-class), 512 → 70.0%, 320 → 57.4%, **128 (K/V projections)
+      → 27.5%**. The deficit is small-N wave-filling, NOT access pattern — which the LLM-side QKV/gate-up
+      fusion (in progress, uses this branch's FuseSwiGluPairs/ConcatRowsHost utils) captures by moving
+      those bytes into the large-shape class. **R4 repack DEPRIORITIZED: its remaining ROI after fusion
+      is the 512-block mid-shapes' ~10-20% — revisit only if post-fusion decode profiles still show a
+      GEMV gap.** (Measure-first strikes again: this reprioritization cancels a large planned build.)
+      **Independent confirmation (LLM agent, 2026-07-22, 3060, post-QKV/gate-up-fusion shapes)**: converges
+      with the above from a different angle. Fresh `ncu --set full` at Qwen3-4B's real `ffn_gate` shape
+      (K=2560 N=9728) shows the kernel compute/memory co-limited (68.65% DRAM, 74.6% ALU) rather than
+      bandwidth-bound — a perfect coalescing fix could only reclaim a fraction of the flagged 41.5%
+      isolated-instruction "Est. Speedup". SASS-level source correlation (`ncu --page source --print-source
+      sass`) localized the flagged excess-sector load to the activation-vector reads (`float4 xa`/`xb2`), not
+      the scale-byte unpack — root cause is `WARPS_PER_BLOCK=8` warps per block redundantly re-reading the
+      same input row (L1 hit rate 94.83% already absorbs most of it). Built and measured the direct fix
+      (per-block shared-memory staging of the input row, gated on a 96 KB opt-in budget, verified bit-exact
+      against all 7 `FusedGemvGroundTruthTests`): **net 11% regression** (63.05us → ~70.2-70.7us/call,
+      reproduced 3×) — the `__syncthreads()` barrier serializing all 8 warps costs more than the redundant
+      reads it removes. Reverted. Full writeup: `docs/Checklists/LLM_DECODE_PERF_GRIND.md`, 2026-07-22 R4
+      status block. Net: two independent measurements now agree R4 isn't worth building at current shapes.
 - [ ] **W8A8 IMMA path** (ViDiT-Q recipe, QUANTIZATION_LOW_PRECISION_INFERENCE §5/§Top-recs Phase B):
       needs the COL32/COL4_4R2_8C layout plumbing + timestep-aware calibration harness — biggest
       remaining quantization build; only start after H1–H4 land (they're cheaper per unit speedup).
@@ -374,4 +399,4 @@ Design (validated by `SageAttentionReferenceTests`, which is the diff oracle):
 
 | Date | GPU | Item | Config | Baseline | New | Δ | Quality gate | Result dir |
 |---|---|---|---|---|---|---|---|---|
-| | | | | | | | | |
+| 2026-07-22 | RTX 3060 | LLM GEMV R4 shared-mem-staging (input-vector-reuse half only) | Q4_K decode GEMV, Qwen3-4B ffn_gate shape K=2560 N=9728 | 63.05us/call | ~70.2-70.7us/call | **-11% (regression, reverted)** | 7/7 `FusedGemvGroundTruthTests` bit-exact before revert | `docs/Checklists/LLM_DECODE_PERF_GRIND.md` (2026-07-22 R4 block) |

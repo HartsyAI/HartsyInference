@@ -23,6 +23,9 @@ public sealed class DeviceFeatureCache : IDisposable
 {
     private readonly float _threshold;
     private readonly int _maxConsecutiveReuse;
+    private readonly float[]? _polyCoeffs;      // TeaCache-style gate calibration: drift ← Σ cᵢ·relⁱ (c0 first)
+    private readonly string? _calibFile;        // when set (HARTSY_STEP_CACHE_CALIB), logs "indicatorRel,residualRel" pairs
+    private float _lastIndicatorRel = -1f;
     private float _accumulatedDistance;
     private int _consecutiveReuse;
     private Tensor? _prevIndicator;
@@ -42,12 +45,24 @@ public sealed class DeviceFeatureCache : IDisposable
     /// <summary>Creates a device-resident step cache.</summary>
     /// <param name="threshold">Accumulated relative-L1 drift budget before forcing a recompute.</param>
     /// <param name="maxConsecutiveReuse">Hard cap on consecutive reuses regardless of drift, bounding worst-case error.</param>
-    public DeviceFeatureCache(float threshold = 0.10f, int maxConsecutiveReuse = 3)
+    public DeviceFeatureCache(float threshold = 0.10f, int maxConsecutiveReuse = 3,
+        float[]? polyCoeffs = null, string? calibFile = null)
     {
         if (threshold <= 0.0f) throw new ArgumentOutOfRangeException(nameof(threshold), "Threshold must be positive.");
         if (maxConsecutiveReuse < 1) throw new ArgumentOutOfRangeException(nameof(maxConsecutiveReuse));
         _threshold = threshold;
         _maxConsecutiveReuse = maxConsecutiveReuse;
+        _polyCoeffs = polyCoeffs;
+        _calibFile = calibFile;
+    }
+
+    /// <summary>Maps the raw indicator drift through the calibration polynomial (identity when none).</summary>
+    private float MapDrift(float rel)
+    {
+        if (_polyCoeffs is null) return rel;
+        float acc = 0f, pow = 1f;
+        foreach (float c in _polyCoeffs) { acc += c * pow; pow *= rel; }
+        return acc < 0f ? 0f : acc;   // a fitted poly can dip negative near 0 — drift budgets are non-negative
     }
 
     /// <summary>Decides whether this step must run the full block stack, updating drift state from
@@ -68,7 +83,8 @@ public sealed class DeviceFeatureCache : IDisposable
         }
 
         float rel = backend.RelativeL1Distance(indicator, _prevIndicator);
-        _accumulatedDistance += rel;
+        _lastIndicatorRel = rel;
+        _accumulatedDistance += MapDrift(rel);
         SnapshotIndicator(backend, indicator);
 
         if (_accumulatedDistance >= _threshold || _consecutiveReuse >= _maxConsecutiveReuse)
@@ -98,6 +114,18 @@ public sealed class DeviceFeatureCache : IDisposable
 
         using Tensor negInput = new Tensor(input.Shape, input.DType);
         backend.Scale(negInput, input, -1.0f);
+
+        // Calibration mode: before replacing the residual, log (indicator drift → true residual drift) —
+        // the pair the TeaCache-style polynomial is fitted on. Costs one extra reduction per compute step,
+        // only when HARTSY_STEP_CACHE_CALIB is set.
+        if (_calibFile is not null && _cachedResidual is not null && _lastIndicatorRel >= 0f
+            && _cachedResidual.Shape.Equals(output.Shape))
+        {
+            using Tensor newResidual = new Tensor(output.Shape, output.DType);
+            backend.Add(newResidual, output, negInput);
+            float residualRel = backend.RelativeL1Distance(newResidual, _cachedResidual);
+            File.AppendAllText(_calibFile, $"{_lastIndicatorRel:G9},{residualRel:G9}\n");
+        }
 
         _cachedResidual?.Dispose();
         _cachedResidual = new Tensor(output.Shape, output.DType);
