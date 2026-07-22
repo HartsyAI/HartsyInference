@@ -77,10 +77,41 @@ public static class AdminEndpoints
                 : HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound, $"'{id}' is not in the cache.", "invalid_request_error");
         });
 
-        app.MapPost("/admin/memory/free", (IInferenceEngine engine) =>
+        // Routed through the queue(s) for thread-safety — a bare engine.FreeMemory() call racing an in-flight
+        // generation could yank memory out from under it. {hard:true} additionally drains the long-running queue
+        // and does a full backend dispose+recreate — see FreeMemoryRequest's doc for why the default soft path
+        // can't always reclaim everything (a partially-constructed pipeline that OOM'd mid-build is never
+        // registered anywhere, so a soft evict/trim has nothing to find).
+        app.MapPost("/admin/memory/free", async (
+            FreeMemoryRequest? req, IInferenceEngine engine, InferenceQueue fastQueue,
+            [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue longRunningQueue, CancellationToken ct) =>
         {
-            engine.FreeMemory();
-            return Results.Ok(new { freed = true });
+            bool hard = req?.Hard ?? false;
+            try
+            {
+                if (hard)
+                {
+                    await fastQueue.EnqueueAsync(() => longRunningQueue.EnqueueAsync(() =>
+                    {
+                        engine.SetBackend(engine.BackendSelector);
+                        return Task.FromResult(true);
+                    }, ct), ct);
+                }
+                else
+                {
+                    await fastQueue.EnqueueAsync(() =>
+                    {
+                        engine.FreeMemory();
+                        return Task.FromResult(true);
+                    }, ct);
+                }
+            }
+            catch (QueueFullException ex)
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status429TooManyRequests, ex.Message, "rate_limit_error");
+            }
+
+            return Results.Ok(new { freed = true, hard });
         });
 
         // Routed through BOTH queues so the switch waits for any in-flight work on the OLD backend — fast AND

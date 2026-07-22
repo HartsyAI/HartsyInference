@@ -5044,9 +5044,13 @@ public sealed class CudaBackend : IBackend
             if (!EnvFlag("HARTSY_FLASH_SPLIT_OFF")
                 && plain && (forceSplit || occLimited) && kvLen >= (forceSplit ? 8 : 128))
             {
-                int target = forceSplit ? 4 * baseBlocks : 2 * _context.MultiprocessorCount;
+                // Target/minChunk tuned the same way as FlashAttentionDev's graph-decode split formula below
+                // (measured A/B sweep on Qwen3-4B/RTX 3060, kvLen~193: tok/s rose monotonically from the old
+                // target=2×SM through ~4× more splits before plateauing) — same kernel, same occupancy physics,
+                // this is the eager (non-graph-decode) dispatch of the identical split/combine kernel pair.
+                int target = forceSplit ? 4 * baseBlocks : 16 * _context.MultiprocessorCount;
                 int g = (target + baseBlocks - 1) / baseBlocks;
-                int minChunk = forceSplit ? 1 : (occLimited ? 32 : 256);
+                int minChunk = forceSplit ? 1 : (occLimited ? 16 : 256);
                 int maxG = Math.Max(1, kvLen / minChunk);
                 g = Math.Clamp(g, 1, Math.Min(32, maxG));
                 if (g >= 2) splits = g;
@@ -5247,7 +5251,11 @@ public sealed class CudaBackend : IBackend
         _context.EnsureCurrent();
         EnsureKernels();
 
-        // Fixed split count from CAPACITY (lk) so the grid never changes across steps. Target ~4× SM occupancy;
+        // Fixed split count from CAPACITY (lk) so the grid never changes across steps. Target ~16× SM occupancy
+        // (measured, not the original ~4×: an A/B sweep on Qwen3-4B/RTX 3060, kvLen capacity=193, showed tok/s
+        // rising monotonically from splits=2 (61.7) through splits=12 (69.6, +12.9%) before plateauing at
+        // splits=12-20 and slightly regressing beyond 24 — the fixed combine-kernel overhead per split eventually
+        // outweighs the added parallelism. splits=12 sits in that plateau with margin either side).
         // chunk = ceil(capacity / splits) is constant, so early steps leave later splits empty (they early-exit).
         // Split-K is gated to b==1: the split/combine kernels have a latent batch>1 bug (they were only exercised by
         // the b=1 LLM decode), and for CFG-batched decode b=2 already yields 2·heads blocks — enough to fill the GPU
@@ -5256,9 +5264,9 @@ public sealed class CudaBackend : IBackend
         int splits = 1;
         if (b == 1 && lk >= 128)
         {
-            int target = 4 * _context.MultiprocessorCount;
+            int target = 16 * _context.MultiprocessorCount;
             int g = (target + baseBlocks - 1) / baseBlocks;
-            int maxG = Math.Max(1, lk / 64);   // keep chunks ≥ 64 keys
+            int maxG = Math.Max(1, lk / 16);   // keep chunks ≥ 16 keys (was 64 — measured too conservative)
             splits = Math.Clamp(g, 1, Math.Min(32, maxG));
         }
         int chunk = (lk + splits - 1) / splits;         // fixed chunk over capacity

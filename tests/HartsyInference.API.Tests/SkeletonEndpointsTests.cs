@@ -154,11 +154,41 @@ public sealed class SkeletonEndpointsTests : IClassFixture<WebApplicationFactory
     }
 
     [Fact]
-    public async Task AdminMemoryFree_Returns200()
+    public async Task AdminMemoryFree_NoBody_DefaultsToSoftFree()
     {
         using HttpClient client = _factory.CreateClient();
         HttpResponseMessage resp = await client.PostAsync("/admin/memory/free", content: null);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        JsonElement body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.GetProperty("freed").GetBoolean());
+        Assert.False(body.GetProperty("hard").GetBoolean());
+    }
+
+    [Fact]
+    public async Task AdminMemoryFree_EmptyBody_DefaultsToSoftFree()
+    {
+        using HttpClient client = _factory.CreateClient();
+        HttpResponseMessage resp = await client.PostAsJsonAsync("/admin/memory/free", new { });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        JsonElement body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(body.GetProperty("hard").GetBoolean());
+    }
+
+    [Fact]
+    public async Task AdminMemoryFree_Hard_RecreatesBackendAndStaysUsable()
+    {
+        // Real behavior, not just routing: {hard:true} calls SetBackend (dispose+recreate) rather than the soft
+        // evict/trim path -- verified here by driving it on the CPU backend (cheap, no GPU needed to construct)
+        // and confirming the engine is still healthy/usable immediately afterward.
+        using HttpClient client = _factory.CreateClient();
+        HttpResponseMessage resp = await client.PostAsJsonAsync("/admin/memory/free", new { hard = true });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        JsonElement body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.GetProperty("freed").GetBoolean());
+        Assert.True(body.GetProperty("hard").GetBoolean());
+
+        HttpResponseMessage ready = await client.GetAsync("/ready");
+        Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
     }
 
     [Fact]

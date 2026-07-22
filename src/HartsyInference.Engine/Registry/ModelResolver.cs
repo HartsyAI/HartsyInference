@@ -44,6 +44,17 @@ public static class ModelResolver
         if (File.Exists(modelArg) || Directory.Exists(modelArg))
             return Path.GetFullPath(modelArg);
 
+        // A catalog entry's Assets record where its files ACTUALLY land (TargetSubdir/FileName) — for several
+        // families (e.g. image/video's "Stable-Diffusion/<Family>") that's a different folder than the coarse
+        // per-modality guess below ("Image"/"Video"). Prefer the authoritative asset path when it's actually on
+        // disk; only fall through to the guess for catalog-less entries or ones with no defined Assets.
+        if (catalog is { Assets.Count: > 0 })
+        {
+            string? primary = ModelDownloader.PrimaryLocalPath(catalog);
+            if (primary is not null && File.Exists(primary))
+                return Path.GetFullPath(primary);
+        }
+
         string subdir = ModalitySubdir.TryGetValue(modality, out string? s) ? s : "";
         string id = catalog?.Id ?? modelArg;
         string candidate = Path.Combine(RepoPaths.ModelsRoot(), subdir, id);
