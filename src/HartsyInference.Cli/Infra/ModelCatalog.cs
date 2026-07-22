@@ -419,14 +419,26 @@ public static class ModelCatalog
                 // ArgumentOutOfRangeException in GgufLoader.GetTensor. GgufModelLoader.Load now catches this class
                 // of failure (any declared-but-unregistered architecture, not chatglm-specific) and throws a clear
                 // UnsupportedModelException naming the declared arch instead — a wrong-architecture GGUF is still
-                // unusable, but no longer an opaque crash. (2) STILL OPEN: the CORRECT-architecture checkpoint
-                // (unsloth/GLM-4-9B-0414-GGUF, general.architecture=glm4, Glm4KeyMapper used, no fallback
-                // warnings) loads and generates without crashing but produces consistently incoherent output
-                // unrelated to the prompt on multiple different prompts — not root-caused (needs a reference-
-                // logit comparison against real GLM-4 to isolate; time-boxed out of the 2026-07-22 follow-up pass,
-                // see MODEL_STATUS_LLM.md). No Assets: neither source gives usable output.
-                Id = "glm4", Modality = txt, DisplayName = "GLM-4", Architecture = "sandwich norm, fused gate/up projection (Glm4KeyMapper) — FAIL, see comment above",
-                Status = st, CliDrivable = true,
+                // unusable, but no longer an opaque crash. (2) FIXED 2026-07-22 (follow-up session): the
+                // CORRECT-architecture checkpoint's incoherent output was root-caused to a missing partial-rotary
+                // guard in the interleaved/GPT-J RoPE path (ApplyRopeInterleaved / lm_rope_interleaved_f32) —
+                // glm4 rotates only the first headDim/2 dims per HF/llama.cpp source, but the CUDA kernel and its
+                // CPU fallback rotated the FULL headDim, spuriously re-rotating the un-rotated tail with
+                // duplicated/wrong cos-sin values from BuildRope's split-half table layout. Invisible at position
+                // 0 (cos=1/sin=0 there), which is why short/greedy smoke tests missed it. Fixed across kernel +
+                // launcher + CudaBackend + IBackend default + both GenericTransformer call sites; regression test
+                // in RopeInterleavedPartialRotaryTests.cs. Confirmed end-to-end against this real checkpoint via
+                // `hartsy text --model-path ... --backend cuda --low-vram-quant`: coherent, on-topic output on
+                // both a short factual prompt and a 250+ token creative-writing prompt (well past the positions
+                // where the bug would have manifested). See MODEL_STATUS_LLM.md for full root-cause writeup.
+                Id = "glm4", Modality = txt, DisplayName = "GLM-4", Architecture = "sandwich norm, fused gate/up projection (Glm4KeyMapper)",
+                Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "unsloth/GLM-4-9B-0414-GGUF", RepoPath = "GLM-4-9B-0414-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/glm4", Role = "transformer",
+                        Sha256 = "8027e1089273e8817b2df0d91c9aa17c5ea467246dcdacac34989f8919fe6540" },
+                },
             },
             new CatalogEntry
             {

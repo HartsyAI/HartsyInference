@@ -198,9 +198,15 @@ was recommitted; the other 12 shipped `.ptx` files were incidentally regenerated
 (different `nvcc` point release than whatever produced the originally-committed files) and reverted to avoid
 unrelated diff noise / an unverified toolchain-version bump for kernels this pass didn't need to touch.
 
-`glm4` stays FAIL pending real end-to-end confirmation against a downloaded checkpoint (see below) — the fix
-itself is confirmed via kernel-level unit tests and a 3-way architectural cross-check (this engine vs
-llama.cpp vs HF transformers source), not yet a live generation.
+**`glm4` now PASSES end-to-end (2026-07-22)**: downloaded the real `unsloth/GLM-4-9B-0414-GGUF`
+`GLM-4-9B-0414-Q4_K_M.gguf` checkpoint and ran `hartsy text --model-path ... --backend cuda --low-vram-quant`
+directly against it (bypassing the catalog/HF-cache path via `--model-path`). Two prompts tested:
+a 3-sentence factual explanation (binary search) and a >250-token creative story — both produced fully
+coherent, grammatically correct, on-topic output all the way through the generation window, including well
+past the early positions where the pre-fix bug would have been masked (the bug only manifests once
+`position > 0`, since `cos/sin` at position 0 are trivial). This is the first live generation from this
+checkpoint since the fix landed; prior confirmation was kernel-level unit tests + a 3-way architectural
+cross-check only. `glm4` moves from FAIL to **PASS**.
 
 **Fixed (code + unit-tested), NOT e2e-verifiable on this hardware — do not read as "gpt-oss/gemma4-moe now
 work end-to-end", only that the specific reported crash is gone:**
