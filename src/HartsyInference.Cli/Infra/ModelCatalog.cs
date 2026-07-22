@@ -557,15 +557,15 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
-                Id = "vibevoice", Modality = tts, DisplayName = "VibeVoice", Architecture = "diffusion TTS", Status = vp,
-                // Verified BROKEN via this CLI path 2026-07-21: `--reference <jfk.wav>` produces real, non-silent,
-                // correct-duration audio, but Whisper (medium.en, explicit -l en) transcribes it as "[Hindi]" /
-                // "[speaking in native language]" on both a short and a longer multi-sentence prompt — not
-                // intelligible English. The SAME reference clip + the same generic CLI --reference plumbing works
-                // correctly for zonos/styletts2/cosyvoice/neutts, so this looks like a VibeVoice-pipeline-specific
-                // issue (possibly reference-preprocessing differences vs. whatever the AudioLab extension did for
-                // this doc's earlier "Swarm e2e word-correct" claim), not a CLI wiring bug — not root-caused further
-                // here. CliDrivable left false pending investigation.
+                Id = "vibevoice", Modality = tts, DisplayName = "VibeVoice", Architecture = "diffusion TTS", Status = ok,
+                CliDrivable = true, // `hartsy speak -m vibevoice --reference <wav>` — re-verified 2026-07-21: a
+                // 2026-07-21 pass had flagged this BROKEN ("[Hindi]"/non-English babble via Whisper on the same
+                // jfk.wav reference), but re-testing did NOT reproduce it — 3 independent prompts (short pangram,
+                // long multi-sentence, and a third unrelated paragraph) with the same reference all transcribed
+                // Whisper word-perfect (only trivial "a/the", "morning/evening"-class mishears). `git log` on the
+                // VibeVoice sources shows no change since the 07-17 perf pass except a namespace rename — no
+                // regression found. Root cause of the original failure is unknown (not reproduced, so not
+                // diagnosable); treat as a one-off unless it recurs.
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "microsoft/VibeVoice-1.5B", RepoPath = "model-00001-of-00003.safetensors", TargetSubdir = "Audio/VibeVoice", Role = "transformer" },
@@ -614,15 +614,17 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
-                Id = "csm", Modality = tts, DisplayName = "CSM-1B (Sesame)", Architecture = "dual-transformer + Mimi 24 kHz", Status = vp,
-                // Verified BROKEN 2026-07-21: real-weight load throws KeyNotFoundException on "backbone.norm.weight"
-                // in CsmModel.LoadWeights → Qwen2Model.LoadWeightsHeadless — the nielsr/csm-1b checkpoint's keys don't
-                // match what the loader expects. Matches this doc's own prior "🔧 parity pending" status for CSM
-                // (Codec/VC table) — never actually verified end-to-end before; CliDrivable left false.
+                Id = "csm", Modality = tts, DisplayName = "CSM-1B (Sesame)", Architecture = "dual-transformer + Mimi 24 kHz", Status = ok,
+                CliDrivable = true, // `hartsy speak -m csm` — TtsCatalog "csm"; fixed 2026-07-21: the prior mirror
+                // (nielsr/csm-1b) ships torchtune-style keys ("attn.q_proj", "sa_norm.scale") that never matched
+                // CsmModel.LoadWeights, throwing KeyNotFoundException on "backbone.norm.weight". Switched to the
+                // unsloth/csm-1b mirror (HF transformers-export key layout) + CsmWeightRemap to split its two
+                // combined tensors (audio_embeddings, codebooks_head) into the per-codebook slices the loader reads.
+                // Also bundles its own 32-codebook Mimi (codec_model.* keys) — used instead of a separate
+                // kyutai/mimi download, which ships only 8 codebooks (a mismatch against CSM's 32-codebook decoder).
                 Assets = new ModelAsset[]
                 {
-                    new() { Repo = "nielsr/csm-1b", RepoPath = "model.safetensors", TargetSubdir = "Audio/Csm", Role = "transformer" },
-                    new() { Repo = "kyutai/mimi", RepoPath = "model.safetensors", TargetSubdir = "Audio/Csm", Role = "codec" },
+                    new() { Repo = "unsloth/csm-1b", RepoPath = "model.safetensors", TargetSubdir = "Audio/Csm", Role = "transformer + codec" },
                 },
             },
             new CatalogEntry
@@ -807,21 +809,31 @@ public static class ModelCatalog
             new CatalogEntry
             {
                 Id = "resemble-enhance", Modality = fx, DisplayName = "Resemble-Enhance", Architecture = "denoiser + LCFM enhancer + UnivNet", Status = vp,
-                // Verified 2026-07-21: `hartsy fx enhance` wiring itself works (asks to download, calls
-                // IFxService.EnhanceAsync correctly) but FxCatalog.LoadEnhanceAsync / AudioCheckpoints.LoadAsync
-                // assume a flat model.safetensors/pytorch_model.bin — the real repo ships a DeepSpeed checkpoint
-                // (enhancer_stage2/ds/G/default/mp_rank_00_model_states.pt), so the download 404s. No Assets listed
-                // (would just download a file that doesn't exist); CliDrivable false until the loader is updated to
-                // read the DeepSpeed .pt layout. Matches MODEL_STATUS_AUDIO.md's "real-weight parity pending".
+                // Re-investigated 2026-07-21: the DeepSpeed-checkpoint angle was a scope red herring —
+                // PytorchPickleLoader already parses enhancer_stage2/ds/G/default/mp_rank_00_model_states.pt fine
+                // (909 real tensors, no reader change needed). The actual blocker: ResembleDenoiser/
+                // ResembleIrmaeDecoder's assumed key layout (down/mid/up, conv1/norm1/conv2/norm2/downsample)
+                // doesn't match the real checkpoint (encoder_blocks/middle_blocks/decoder_blocks, each pre_conv +
+                // two PreactResBlocks of GroupNorm->GELU->Conv2d x2 — confirmed against the real
+                // resemble_enhance/denoiser/unet.py + lcfm/irmae.py sources on GitHub). This is a genuine
+                // forward-pass mismatch (module composition, not just names), so it needs those modules'
+                // load/forward code rewritten to match — out of scope for this pass; deliberately left
+                // ValidationPending/not-CliDrivable rather than half-fixing it. No Assets listed (nothing to
+                // pre-fetch until the loader matches).
             },
             new CatalogEntry
             {
-                Id = "demucs", Modality = fx, DisplayName = "Demucs (htdemucs)", Architecture = "hybrid transformer/conv separator", Status = st,
-                // Also user-placed today: FxCatalog.ResolveDemucsPath only looks under Models/audio/fx/demucs/ for a
-                // .th/.safetensors the user drops in — no confirmed ungated single-file HF mirror wired yet (Demucs
-                // itself isn't gated, just not packaged as a single safetensors/th file on HF the engine's loader
-                // reads directly). CliDrivable left false until that's sourced or a --model-path is documented as
-                // required in FxSeparateCommand's help (already is).
+                Id = "demucs", Modality = fx, DisplayName = "Demucs (htdemucs)", Architecture = "hybrid transformer/conv separator", Status = ok,
+                CliDrivable = true, // `hartsy fx separate <wav>` — fixed + verified 2026-07-21: not on HuggingFace
+                // as a single-file checkpoint, so FxCatalog now auto-downloads the official Meta checkpoint
+                // directly from dl.fbaipublicfiles.com (confirmed public, no auth). Verified real output: 4 stems
+                // (drums/bass/other/vocals) on a real music clip, mutually distinct (pairwise sample corr
+                // 0.007-0.14, i.e. not copies of each other or the mix) and non-silent. FxSeparateCommand always
+                // forces the CPU backend (DemucsSpec's STFT/ISTFT has no CUDA/Vulkan implementation — CudaBackend
+                // throws NotSupportedException) so the default invocation works without needing `-b cpu`.
+                // `-m demucs:htdemucs_6s` (6 stems) is wired the same way but not individually run this pass.
+                // `htdemucs_ft` stays --model-path-only: upstream ships it as a 4-checkpoint weight-averaged
+                // ensemble, not a single 4-stem checkpoint.
             },
 
             // Vision
@@ -834,10 +846,87 @@ public static class ModelCatalog
             E("retinaface", vis, "RetinaFace", "face detection + landmarks", ok),
 
             // Video
-            E("ltx-video", vid, "LTX-Video", "DiT + video VAE", vp, cli: true),
-            E("wan", vid, "Wan 2.2 (T2V + I2V)", "DiT + Wan VAE", vp),
-            E("lance-video", vid, "Lance (Video, T2V)", "unified multimodal DiT", vp),
-            E("kandinsky5-video", vid, "Kandinsky 5 Video", "DiT", vp),
+            new CatalogEntry
+            {
+                Id = "ltx-video", Modality = vid, DisplayName = "LTX-Video", Architecture = "DiT + video VAE", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // Single file bundles DiT + VAE; T5-XXL resolves as a side model (SideModels.T5XxlEnconly).
+                    new() { Repo = "Lightricks/LTX-Video", RepoPath = "ltx-video-2b-v0.9.safetensors",
+                        TargetSubdir = "Stable-Diffusion/LtxVideo", Role = "transformer",
+                        Sha256 = "fb48c9fee3545631eeee6d039d45661a9ecc7a2eedf11cecd38ffca6eae0ae3b" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "wan", Modality = vid, DisplayName = "Wan 2.2 (T2V + I2V)", Architecture = "DiT + Wan VAE", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // TI2V-5B; umT5-XXL + the Wan2.2 VAE resolve as side models inside WanVideoRecipe.
+                    new() { Repo = "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", RepoPath = "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
+                        TargetSubdir = "Stable-Diffusion/Wan", Role = "transformer",
+                        Sha256 = "7057d12b745db48a79e449825f1ae26c75b14228148ea338fb94703452369555" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "lance-video", Modality = vid, DisplayName = "Lance (Video, T2V)", Architecture = "unified multimodal DiT", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // Diffusers-style shard folder (ByteDance Lance_3B_Video); the Wan2.2 VAE resolves as a side
+                    // model. Only the two files LanceVideoRecipe actually reads (the shard + tokenizer.json for the
+                    // embedded byte-level BPE) — llm_config.json/vocab.json/merges.txt/generation_config.json ship
+                    // in the repo but nothing in the loader path reads them.
+                    new() { Repo = "bytedance-research/Lance", RepoPath = "Lance_3B_Video/model.safetensors",
+                        TargetSubdir = "Stable-Diffusion/Lance/Lance_3B_Video", Role = "transformer",
+                        Sha256 = "7f0550e1d1511b29a4740a67c1e18e176302a4ecb3177c8a5850ff5fe6447c25" },
+                    new() { Repo = "bytedance-research/Lance", RepoPath = "Lance_3B_Video/tokenizer.json",
+                        TargetSubdir = "Stable-Diffusion/Lance/Lance_3B_Video", Role = "tokenizer",
+                        Sha256 = "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "kandinsky5-video", Modality = vid, DisplayName = "Kandinsky 5 Video", Architecture = "DiT (Qwen2.5-VL + CLIP)", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // T2V-Lite-5s diffusers folder: transformer/ + a bundled vae/ that IS the shared HunyuanVideo 3D
+                    // VAE in diffusers naming (Kandinsky5CheckpointConverter.LoadHunyuanVideoVae); Qwen2.5-VL-7B +
+                    // CLIP-L resolve as side models inside Kandinsky5VideoRecipe.
+                    new() { Repo = "kandinskylab/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers", RepoPath = "transformer/diffusion_pytorch_model.safetensors",
+                        TargetSubdir = "Stable-Diffusion/Kandinsky5/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers/transformer", Role = "transformer", Sha256 = null },
+                    new() { Repo = "kandinskylab/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers", RepoPath = "vae/diffusion_pytorch_model.safetensors",
+                        TargetSubdir = "Stable-Diffusion/Kandinsky5/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers/vae", Role = "vae", Sha256 = null },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "hunyuan-video", Modality = vid, DisplayName = "HunyuanVideo 13B (T2V)", Architecture = "MMDiT + 3D causal VAE", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // Comfy-Org repacked bf16 DiT; LLaVA-Llama-3-8B + CLIP-L + the 3D VAE resolve as side models.
+                    new() { Repo = "Comfy-Org/HunyuanVideo_repackaged", RepoPath = "split_files/diffusion_models/hunyuan_video_t2v_720p_bf16.safetensors",
+                        TargetSubdir = "Stable-Diffusion/HunyuanVideo", Role = "transformer", Sha256 = null },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "ltx-2", Modality = vid, DisplayName = "LTX-2.3 (22B, video + audio)", Architecture = "dual-stream DiT + video/audio VAE", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // Kijai's transformer-only split (not Lightricks' ~29GB bundled file) so this reuses the
+                    // video/audio VAE + text-projection + Gemma-3-12B side models the engine already resolves —
+                    // avoids re-downloading ~25GB of duplicated side-model weights.
+                    new() { Repo = "Kijai/LTX2.3_comfy", RepoPath = "diffusion_models/ltx-2.3-22b-dev_transformer_only_fp8_scaled.safetensors",
+                        TargetSubdir = "Stable-Diffusion/LtxVideo2", TargetName = "ltx-2.3-22b-dev-fp8.safetensors", Role = "transformer", Sha256 = null },
+                },
+            },
             // Cosmos-Predict1 Video2World — discrete-token autoregressive video continuation (T5-11B cross-attn +
             // DV8x16x16 tokenizer + AR backbone). Engine-only; run via the sample invocation in VideoCommand help.
             E("cosmos-predict1-5b-v2w", vid, "Cosmos-Predict1 5B Video2World", "AR discrete-token transformer", vp),

@@ -261,6 +261,16 @@ public static class SideModels
         Sha256 = "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68"
     };
 
+    /// <summary>LLaVA-Llama-3-8B (fp8 scaled) — HunyuanVideo's primary text encoder (feature extractor, layer −3 through the diffusers prompt template); distinct from HiDream's <see cref="Llama31_8B"/> despite the shared Llama-3.1-8B backbone (different fine-tune). Comfy-Org's standard HunyuanVideo repack.</summary>
+    public static readonly ModelAsset LlavaLlama3 = new ModelAsset
+    {
+        Repo = "Comfy-Org/HunyuanVideo_repackaged",
+        RepoPath = "split_files/text_encoders/llava_llama3_fp8_scaled.safetensors",
+        TargetSubdir = "text_encoders",
+        Role = "text encoder",
+        Sha256 = "2f0c3ad255c282cead3f078753af37d19099cafcfc8265bbbd511f133e7af250"
+    };
+
     /// <summary>Gemma-3-12B-it (fp8 scaled) — LTX-2's text encoder when the checkpoint doesn't bundle the text tower; loaded raw (fp8-resident, run with CacheWeightCasts=off for 24 GB cards), Gemma tokenizer is a separate file.</summary>
     public static readonly ModelAsset GemmaLtx2 = new ModelAsset
     {
@@ -406,6 +416,16 @@ public static class SideModels
         TargetName = "AceStep/ace_1.5_vae.safetensors",
         Role = "vae",
         Sha256 = "6de92e3a862acd287e08b024ac90f0783a8635451b728721a33ff03565bcb2bb"
+    };
+
+    /// <summary>HunyuanVideo 3D causal VAE (bf16) — Comfy-Org's standard HunyuanVideo repack; shared architecture with Kandinsky-5 Video's bundled diffusers VAE.</summary>
+    public static readonly ModelAsset HunyuanVideoVae3D = new ModelAsset
+    {
+        Repo = "Comfy-Org/HunyuanVideo_repackaged",
+        RepoPath = "split_files/vae/hunyuan_video_vae_bf16.safetensors",
+        TargetSubdir = "Stable-Diffusion/HunyuanVideo",
+        Role = "vae",
+        Sha256 = null
     };
 
     /// <summary>LTX-2.3 video VAE (bf16) — split out of the DiT file; path/URL/hash match SwarmUI core's ltx2-3-video-vae, auto-resolved when the DiT carries no bundled VAE.</summary>

@@ -11,6 +11,9 @@ public static class ArtifactWriter
     /// nothing was written.</summary>
     public static string? Write(GeneratedArtifact artifact, string? outputDir, string promptSlug, bool force)
     {
+        if (artifact.SelfWritten)
+            return null;   // handler already wrote its own file(s) (frames/stems) — nothing more to do.
+
         bool hasBytes = artifact.FileBytes is { Length: > 0 };
         if (!hasBytes && !force)
             return null;

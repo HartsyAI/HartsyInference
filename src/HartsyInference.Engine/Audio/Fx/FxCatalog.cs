@@ -6,8 +6,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Loads the audio-effects models: Demucs stem separation from a user-placed checkpoint, and
-/// Resemble-Enhance speech enhancement from its auto-downloading repo.</summary>
+/// <summary>Loads the audio-effects models: Demucs stem separation and Resemble-Enhance speech enhancement,
+/// both from auto-downloading sources (Demucs isn't on HuggingFace as a single-file checkpoint — its official
+/// weights are fetched directly from Meta's public CDN).</summary>
 internal static class FxCatalog
 {
     /// <summary>Resident Demucs separators, keyed by checkpoint path.</summary>
@@ -25,16 +26,35 @@ internal static class FxCatalog
     /// <summary>The Resemble-Enhance weights repo.</summary>
     internal const string EnhanceRepo = "ResembleAI/resemble-enhance";
 
-    /// <summary>Resolves the Demucs checkpoint path for a variant name (default <c>htdemucs</c>), accepting a direct
-    /// file name, a <c>.th</c>, or a <c>.safetensors</c> in the fx weights folder.</summary>
-    internal static string ResolveDemucsPath(string? modelName, string? localPath)
+    /// <summary>Official Meta CDN URLs for the two single-checkpoint HTDemucs variants (confirmed public, no HF
+    /// gating, no auth — resolved from the upstream <c>demucs/remote/*.yaml</c>/<c>files.txt</c> manifests: model
+    /// signature → hash-named <c>.th</c> under <c>https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/</c>).
+    /// <c>htdemucs_ft</c> is deliberately excluded — upstream ships it as a 4-checkpoint <c>Bag_of_models</c>
+    /// ensemble (one single-source model per stem, weight-averaged), not a single 4-stem checkpoint like the other
+    /// two; wiring it needs ensemble support this pipeline doesn't have. It stays manual-placement (<c>--model-path</c>).</summary>
+    private static readonly Dictionary<string, string> DemucsCdnUrls = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["htdemucs"] = "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th",
+        ["htdemucs_6s"] = "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/5c90dfd2-34c22ccb.th",
+    };
+
+    /// <summary>Resolves the Demucs checkpoint path for a variant name (default <c>htdemucs</c>), auto-downloading
+    /// the official Meta checkpoint on first use unless a local file (direct <paramref name="localPath"/>, or a
+    /// user-placed <c>.th</c>/<c>.safetensors</c> already in the fx weights folder) is present.</summary>
+    internal static async Task<string> EnsureDemucsPathAsync(string? modelName, string? localPath, CancellationToken cancel)
     {
         if (!string.IsNullOrEmpty(localPath) && File.Exists(localPath))
         {
             return localPath;
         }
         string directory = AudioModelRoot.WeightsDirectory("fx", "demucs");
-        string variant = string.IsNullOrWhiteSpace(modelName) ? "htdemucs" : modelName.Trim();
+        // Bare "-m demucs" (no ":variant") resolves modelName to the literal catalog id "demucs", not a real
+        // htdemucs variant name (AudioModelSelector.Parse passes the whole token through when there's no colon) —
+        // treat that the same as "unset" so it maps to the actual default variant instead of looking for a
+        // nonexistent "demucs.th".
+        string trimmed = (modelName ?? string.Empty).Trim();
+        string variant = string.IsNullOrEmpty(trimmed) || trimmed.Equals("demucs", StringComparison.OrdinalIgnoreCase)
+            ? "htdemucs" : trimmed;
         string direct = Path.Combine(directory, variant);
         if (File.Exists(direct))
         {
@@ -46,7 +66,18 @@ internal static class FxCatalog
             return torch;
         }
         string safeTensors = Path.Combine(directory, variant + ".safetensors");
-        return File.Exists(safeTensors) ? safeTensors : torch;   // 'th' is used in the not-found message
+        if (File.Exists(safeTensors))
+        {
+            return safeTensors;
+        }
+        if (DemucsCdnUrls.TryGetValue(variant, out string? url))
+        {
+            Logs.Info($"[Audio][Demucs] Downloading the official '{variant}' checkpoint from Meta's CDN (one-time)...");
+            await AudioFileFetcher.EnsureAsync(url, torch, cancel).ConfigureAwait(false);
+            Logs.Info($"[Audio][Demucs] '{variant}' checkpoint ready.");
+            return torch;
+        }
+        return torch;   // 'th' is used in the not-found message for variants with no known auto-download source (htdemucs_ft).
     }
 
     /// <summary>Loads a Demucs checkpoint, picking the architecture config from the model name.</summary>

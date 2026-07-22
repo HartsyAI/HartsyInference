@@ -44,16 +44,27 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 >   GPU-residency pass yet" perf status), pockettts, kyutaitts, piper. Whisper mis-hears several coined brand
 >   names (Kokoro→"Kakura", Bark→"Bach", Zonos→"Zono's", Kyutai→"Qtie", …) — expected, matches this doc's own
 >   prior Kyutai→"QTIE" precedent, not a defect.
-> - **`csm` is BROKEN**: real-weight load throws `KeyNotFoundException` on `backbone.norm.weight` in
->   `CsmModel.LoadWeights`/`Qwen2Model.LoadWeightsHeadless` — the `nielsr/csm-1b` checkpoint's keys don't match
->   the loader. Matches this doc's own pre-existing "🔧 parity pending" status for CSM — never actually
->   verified end-to-end before this pass despite being `TtsCatalog`-registered. Downgraded to
->   `ValidationPending`/not-CliDrivable.
-> - **`vibevoice` is BROKEN via this path**: produces real, non-silent, correct-duration audio, but Whisper
->   transcribes it as `[Hindi]`/`[speaking in native language]` on both short and long prompts with the same
->   JFK reference that zonos/styletts2/cosyvoice/neutts all handle correctly — a VibeVoice-pipeline-specific
->   issue (not the shared CLI `--reference` plumbing), not root-caused further. Downgraded to
->   `ValidationPending`/not-CliDrivable.
+> - **`csm` FIXED 2026-07-21** (was BROKEN: `KeyNotFoundException` on `backbone.norm.weight` — the `nielsr/csm-1b`
+>   mirror ships torchtune-style keys the loader never matched). Three real bugs fixed, not just the loader:
+>   (1) switched to the `unsloth/csm-1b` mirror (HF `transformers`-layout keys) + a new `CsmWeightRemap` that
+>   re-prefixes them and splits its two combined tensors (`audio_embeddings`, `codebooks_head`) into the
+>   per-codebook slices `CsmModel.LoadWeights` reads, transposing the head to `[vocab, hidden]`; also sources
+>   Mimi from the SAME checkpoint's bundled `codec_model.*` (32 codebooks) instead of the separately-published
+>   8-codebook `kyutai/mimi`, which the depth decoder's 32-codebook output can't feed; (2) `CsmPipeline`'s codes
+>   tensor was built `DType.F32` but `Mimi.Decode` reads codes as `Int32` — reinterpreting float bit patterns as
+>   codebook indices crashed with `AccessViolationException`; (3) generation never stopped (always exactly 1024
+>   frames / 81.9s regardless of input) because the EOS check compared codebook-0 to the wrong sentinel
+>   (`AudioEosToken=2048`, never actually produced) instead of upstream's real condition — ALL codebooks equal 0
+>   (`CodebookEosToken`) after decoding the full frame; also added the missing `[speaker]text` + BOS/EOS prompt
+>   template (`AudioTextFrontend.CsmText`), which the original plain-BPE encoding was missing entirely. Verified
+>   Whisper word-perfect on two independent sentences ("Hello there, how are you today?" and a 17-word sentence,
+>   both exact). `CliDrivable = true`.
+> - **`vibevoice` re-verified 2026-07-21 — NOT reproduced.** This same pass had flagged it BROKEN (Whisper
+>   transcribing `[Hindi]`/`[speaking in native language]` on the JFK reference). Re-testing found no code
+>   change to VibeVoice since the 07-17 perf pass (only a namespace rename), a clean tokenizer round-trip, and
+>   3 independent prompts (short pangram, long multi-sentence, unrelated paragraph) all Whisper word-perfect
+>   with the same reference clip. Root cause of the original failure unknown (unreproduced, so undiagnosable).
+>   `CliDrivable = true` restored; re-flag if it recurs.
 > - **`cosyvoice` needs `--ref-text` for usable quality** — `--reference` alone produced garbled
 >   non-word-correct output ("And a tall fall, tear, tape, tape." for a plain sentence); `CosyVoiceModel`
 >   accepts an empty transcript without throwing, but clearly needs it. With `--ref-text` set, word-perfect.
@@ -95,13 +106,36 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 >   confirmed to *resolve* (registry lookup, no "not registered" error) — there is no default/test RVC voice
 >   checkpoint anywhere on this box (RVC is inherently bring-your-own-trained-voice), so a real generation
 >   pass isn't meaningfully possible without the user supplying one via `--model-path`.
-> - **Fx**: `resemble-enhance` real-weight load fails — `ResembleAI/resemble-enhance` ships a DeepSpeed
->   checkpoint (`enhancer_stage2/ds/G/default/mp_rank_00_model_states.pt`), not the flat
->   `model.safetensors`/`pytorch_model.bin` `FxCatalog.LoadEnhanceAsync`/`AudioCheckpoints.LoadAsync` assume —
->   downgraded to `ValidationPending`/not-CliDrivable. `demucs` stays not-CliDrivable — searched HuggingFace for
->   an ungated single-file htdemucs mirror; every result found is a community ONNX/GGML/MLX conversion or an
->   unverified fine-tune, none confirmed compatible with the engine's `HtDemucsConfig`/`DemucsPipeline`
->   key layout, so none were wired rather than guess.
+> - **Fx**: **`demucs` FIXED 2026-07-21.** The real HF search for an ungated single-file htdemucs mirror was the
+>   wrong approach — the canonical weights were never on HuggingFace at all; upstream ships them from Meta's own
+>   public CDN (`dl.fbaipublicfiles.com`, no auth, resolved from `demucs/remote/htdemucs*.yaml` +`files.txt` on
+>   GitHub). `FxCatalog` now auto-downloads `htdemucs` (4-stem) and `htdemucs_6s` (6-stem) directly from there on
+>   first use. The existing `PytorchPickleLoader` parses the official `.th` with zero changes (533 tensors, keys
+>   matching `HtDemucs`/`DemucsCrossTransformer`/`DemucsDConv`'s existing expectations exactly — the engine code
+>   was already built against the real key layout, just never had a working download source). Fixed a real bug
+>   found running it: bare `-m demucs` resolves `AudioModelSelector.Variant` to the literal string `"demucs"`
+>   (not `"htdemucs"`), so `EnsureDemucsPathAsync` now treats that alias the same as unset. `htdemucs_ft` stays
+>   `--model-path`-only: upstream ships it as a 4-checkpoint weight-averaged `Bag_of_models` ensemble, not a
+>   single 4-stem checkpoint — out of scope. CPU-only (`DemucsSpec`'s STFT/ISTFT has no CUDA/Vulkan
+>   implementation — `CudaBackend.Stft` throws `NotSupportedException`); `FxSeparateCommand` now always forces
+>   the CPU backend itself so the default `hartsy fx separate <wav>` invocation just works instead of erroring
+>   on the `-b auto → cuda` default. Verified real output on a music clip: 4 stems (drums/bass/other/vocals),
+>   mutually distinct (pairwise sample corr 0.007–0.14 — not copies of each other or the mix) and non-silent.
+>   `htdemucs_6s` is wired identically but not individually run this pass.
+> - **`resemble-enhance` real-weight load fails, ROOT CAUSE NARROWED but NOT FIXED.** The DeepSpeed checkpoint
+>   angle from the earlier pass was a red herring in scope, not diagnosis: `PytorchPickleLoader` (already-existing,
+>   unmodified) parses `enhancer_stage2/ds/G/default/mp_rank_00_model_states.pt` (713 MB) cleanly — 909 real
+>   tensors, meaningful names — no DeepSpeed-specific reader is actually needed. The REAL blocker: the engine's
+>   `ResembleDenoiser`/`ResembleIrmaeDecoder` (and likely `ResembleWnEstimator`/`ResembleUnivNet`) were built
+>   against an assumed key layout (`down.{i}`/`mid.{i}`/`up.{i}`, `conv1`/`norm1`/`conv2`/`norm2`/`downsample`)
+>   that does **not** match the real checkpoint (`encoder_blocks`/`middle_blocks`/`decoder_blocks`, each a
+>   `pre_conv` + two `PreactResBlock`s of `GroupNorm→GELU→Conv2d` ×2 with residual add — confirmed by reading the
+>   real `resemble_enhance/denoiser/unet.py` and `.../enhancer/lcfm/irmae.py` from GitHub). This is a genuine
+>   forward-pass mismatch, not a naming alias — the module composition differs, so a remap dict (the CSM fix
+>   pattern) isn't enough; it needs `ResembleDenoiser`'s `UNetBlock`/`PreactResBlock` (and probably the
+>   `lcfm.ae`/`lcfm.cfm.net`/`vocoder` modules — not yet individually verified, but the denoiser's mismatch alone
+>   rules out a quick fix) rewritten to match the real architecture. Deliberately NOT attempted this pass — a
+>   half-rewritten multi-file UNet is worse than leaving this honestly `ValidationPending`/not-CliDrivable.
 
 > ## 🏁 First e2e TTS/STT speed benchmarks (2026-07-12) — RTF on 3060 **and** 4090
 > Measured through the SwarmUI+AudioLab path: [`benchmarks/results/audio_tts_stt_2026-07-12.md`](../../benchmarks/results/audio_tts_stt_2026-07-12.md).
@@ -228,7 +262,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **HeartMuLa** (oss-3B) | ✅ | LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). **Perf (RTX 3060, 3b-base):** ~91 ms/frame ≈ 11 fr/s bf16 (~0.9× realtime, memory-bandwidth-bound). CUDA-graph decode of the backbone + depth steps (`HARTSY_CSM_GRAPH`, default on) is bit-identical + ~5% (launch overhead is only ~8/91 ms). Disk-cached weight quant (`HARTSY_HEARTMULA_QUANT=q8_0`) is **1.41× faster** (64.8 ms/frame ≈ 15.4 fr/s, past real-time) + ~1/2 VRAM — the fix was pinning the quant weights GPU-resident (`PreloadWeights`, quantized-only); the Q8 fused GEMV is faster than bf16 when resident. |
 | **RVC** (voice conversion) | 🔧 | RMVPE front-end built; parity pending. |
 | **Demucs** (separation) | 🔧 | Built; parity pending. |
-| **CSM** (Sesame) | 🔧 | Uses Mimi; parity pending. |
+| **CSM** (Sesame) | ✅ | Fixed 2026-07-21 (unsloth/csm-1b key remap + bundled 32-cb Mimi + I32 codes dtype + real all-zero EOS + `[speaker]text` prompt template); Whisper word-perfect on two independent sentences. `hartsy speak -m csm`. |
 | **Stable Audio Open Small** | ✅ | DiT/VAE/timing-conditioner parity cosine 1.0 each. **Engine-wired 2026-07-20** as `stableaudio` (was built+parity-verified but had no `MusicCatalog` entry, and the AudioLab extension's own binding was also missing — both fixed). **GPU-residency perf pass 2026-07-20**: host RoPE/multi-head-reshape/ping-pong-scheduler loops ported to existing `IBackend` ops (`ApplyRopeSingle`/`Permute0213`/`RepeatKvHeads`/chained `Scale`+`Add`) — no new kernels needed, cosine 1.0 held after rewrite. Swarm `/API/GenerateText2Image` verified: 11.89s stereo 44.1kHz in 2.85s gen time. |
 | **DiffRhythm / AudioLDM 2 / ACE-Step XL** | ❌/🔧 | Music roadmap; see [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md) for the per-model build state and ROI order. |
 | **PocketTTS** (continuous-latent) | ✅ | **Swarm-deployed + parity-verified 2026-07-16.** Production voiced path built on the verified cores: `PocketTtsStreamingTransformer.ForwardPrimed` (voice-KV prefix + RoPE offset), `PocketTtsFlowLm.GenerateVoiced` (LUT conditioner + out_eos stop + noise std=√temp), `PocketTtsVoice` (KV-state loader), rewritten `PocketTtsPipeline` (SentencePiece + emb_std/mean denorm). All transformer layers + hidden + latents **corr 1.000000** vs `pocket_tts` 2.1.0. Voice REQUIRED (default `alba`). Weights = non-gated `kyutai/pocket-tts-without-voice-cloning` `languages/english/` (NOT the generic `tts_*.safetensors`). Whisper `medium.en` word-perfect via `/API/GenerateText2Image`. |

@@ -214,24 +214,28 @@ internal static class TtsCatalog
         },
     };
 
-    /// <summary>Sesame CSM-1B — dual-transformer conversational TTS + Mimi 24 kHz, from a non-gated mirror that keeps
-    /// the original-format key layout (not the transformers re-export, whose keys the engine loader would not match).</summary>
+    /// <summary>Sesame CSM-1B — dual-transformer conversational TTS + Mimi 24 kHz, from a non-gated mirror of the
+    /// HF <c>transformers</c> re-export (<c>unsloth/csm-1b</c>). Its keys are the engine's standard Llama layout
+    /// under <c>backbone_model.</c>/<c>depth_decoder.model.</c> prefixes, plus two combined tensors (the audio
+    /// embed table and the stacked codebook heads) that <see cref="CsmWeightRemap"/> splits per-codebook. The
+    /// checkpoint also bundles its own 32-codebook Mimi under a <c>codec_model.</c> prefix — used instead of the
+    /// separately-published <c>kyutai/mimi</c> (8 codebooks: a mismatch against CSM's 32-codebook depth decoder).
+    /// (A prior mirror choice, <c>nielsr/csm-1b</c>, ships the original torchtune-style keys — <c>attn.q_proj</c>,
+    /// <c>sa_norm.scale</c> — which don't match this loader at all; see <see cref="CsmWeightRemap"/>.)</summary>
     internal static TtsModelDescriptor Csm { get; } = new TtsModelDescriptor
     {
-        ResolveRepo = _ => "nielsr/csm-1b",
+        ResolveRepo = _ => "unsloth/csm-1b",
         LoadAsync = async (_, cancel) =>
         {
             (IReadOnlyDictionary<string, Tensor> modelDict, IDisposable[] modelLoaders) =
-                await AudioCheckpoints.LoadAsync("nielsr/csm-1b", cancel).ConfigureAwait(false);
-            (IReadOnlyDictionary<string, Tensor> mimiDict, IDisposable[] mimiLoaders) =
-                await AudioCheckpoints.LoadAsync("kyutai/mimi", cancel).ConfigureAwait(false);
+                await AudioCheckpoints.LoadAsync("unsloth/csm-1b", cancel).ConfigureAwait(false);
             CsmModel model = new CsmModel(CsmConfig.V1B);
-            model.LoadWeights(modelDict);
-            Mimi mimi = new Mimi(MimiConfig.Mimi24kHz);
-            mimi.LoadWeights(mimiDict);
+            model.LoadWeights(CsmWeightRemap.Remap(modelDict));
+            Mimi mimi = new Mimi(MimiConfig.Mimi24kHzDsm);
+            mimi.LoadWeights(CsmWeightRemap.ExtractMimiWeights(modelDict));
             CsmPipeline pipeline = new CsmPipeline(CsmConfig.V1B, model, mimi);
-            Logs.Info("[Audio][CSM] Loaded nielsr/csm-1b (dual-transformer + Mimi 24 kHz).");
-            IDisposable?[] keep = [pipeline, .. modelLoaders, .. mimiLoaders];
+            Logs.Info("[Audio][CSM] Loaded unsloth/csm-1b (dual-transformer + bundled Mimi, 32 codebooks, 24 kHz).");
+            IDisposable?[] keep = [pipeline, .. modelLoaders];
             return new TtsRunner(24_000,
                 (backend, job) => pipeline.Synthesize(backend, AudioTextFrontend.CsmText(job.Text), seed: job.Seed), keep);
         },

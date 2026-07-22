@@ -1,3 +1,4 @@
+using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -49,17 +50,20 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
         int steps = request.Steps ?? _config.NumInferenceSteps;
         (int width, int height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
         int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 97, step: _config.VaeTemporalCompression);
-        int frameRate = request.Fps > 0 ? request.Fps : 24;
+        int frameRate = request.Fps ?? 24;
         float cfgScale = request.CfgScale ?? _config.GuidanceScale;
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
-        Tensor batch = _t5.Encode(_backend, [promptTokens, negTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, LtxVideoRecipe.TokenLength, _config.CaptionChannels);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, LtxVideoRecipe.TokenLength, _config.CaptionChannels);
-        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.CaptionChannels);
-        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.CaptionChannels);
+        int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
+        int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
+        Tensor batch = _t5.Encode(_backend, [promptTokens, negTokens], [promptMask, negMask]);
+        // Drop right-padding: feed cross-attention only the real (non-pad) T5 tokens — attending the pad rows
+        // unmasked dilutes the caption (LtxVideoGenerationTests' proven fix; zeroing the pad rows in place, the
+        // Engine's earlier approach, still attends them and was NOT the fix that made LTX-Video coherent).
+        int promptLen = promptMask.Sum(), negLen = negMask.Sum();
+        Tensor promptEmbeds = CfgHelper.SliceBatchElementPrefix(batch, 0, promptTokens.Length, promptLen, _config.CaptionChannels);
+        Tensor negEmbeds = CfgHelper.SliceBatchElementPrefix(batch, 1, negTokens.Length, negLen, _config.CaptionChannels);
         batch.Dispose();
         _backend.Sync();
         _backend.FreeWeights(_t5.EnumerateWeights());

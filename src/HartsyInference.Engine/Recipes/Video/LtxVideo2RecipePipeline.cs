@@ -50,7 +50,7 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
         int steps = request.Steps ?? _config.NumInferenceSteps;
         (int width, int height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
         int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 121, step: _config.VaeTemporalCompression);
-        int frameRate = request.Fps > 0 ? request.Fps : 24;
+        int frameRate = request.Fps ?? 24;
         float cfgScale = request.CfgScale ?? _config.GuidanceScale;
 
         int[] promptTokens = _tokenizer.Encode(prompt);

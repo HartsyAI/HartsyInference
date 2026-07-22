@@ -35,8 +35,10 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         || string.Equals(familyId, "ltx-video2", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "lightricks-ltx-video-2", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>LTX-Video 2's official sampling settings: 50 steps at guidance 3.0 (<c>LtxVideo2Config.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 3.0f };
+    /// <summary>LTX-Video 2's official sampling settings: 50 steps at guidance 3.0, 512x320, 25 frames @ 24fps —
+    /// the geometry <c>LtxVideo2GenerationTests</c> verified coherent, 22B being too heavy to sample at full 704x480
+    /// in a reasonable CLI turnaround (<c>LtxVideo2Config.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
+    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 3.0f, Width = 512, Height = 320, Frames = 25, Fps = 24 };
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)

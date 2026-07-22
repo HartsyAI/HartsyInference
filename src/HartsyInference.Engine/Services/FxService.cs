@@ -22,10 +22,9 @@ public sealed class FxService : IFxService
         ArgumentNullException.ThrowIfNull(request);
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
         string modelName = string.IsNullOrWhiteSpace(request.Model) ? selector.Variant : request.Model;
-        string path = FxCatalog.ResolveDemucsPath(modelName, selector.LocalPath);
         IBackend backend = _engine.Backend;
 
-        return AudioRuntime.RunAsync(backend, $"fx:demucs:{path}", async ct =>
+        return AudioRuntime.RunAsync(backend, $"fx:demucs:{modelName}", async ct =>
         {
             (float[] left, float[] right) = AudioClipCodec.DecodeStereo(request.Audio, FxCatalog.DemucsSampleRate);
             if (left.Length == 0)
@@ -34,6 +33,7 @@ public sealed class FxService : IFxService
             }
             ct.ThrowIfCancellationRequested();
 
+            string path = await FxCatalog.EnsureDemucsPathAsync(modelName, selector.LocalPath, ct).ConfigureAwait(false);
             DemucsRunner runner = await FxCatalog.DemucsCache
                 .GetOrLoadAsync(path, _ => Task.FromResult(FxCatalog.LoadDemucs(path, modelName)), ct).ConfigureAwait(false);
             long started = Environment.TickCount64;

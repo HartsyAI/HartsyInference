@@ -37,5 +37,7 @@ public static class VideoRecipeRegistry
         new Video.LtxVideoRecipe(),
         new Video.LtxVideo2Recipe(),
         new Video.LanceVideoRecipe(),
+        new Video.Kandinsky5VideoRecipe(),
+        new Video.HunyuanVideoRecipe(),
     };
 }

@@ -77,7 +77,7 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
             clipLoader.Load(clipPath);
             loaders.Add(clipLoader);
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
-            clipL.LoadWeights(ConvertClipLFromStandalone(clipLoader.GetAllTensors()), prefix: "text_model");
+            clipL.LoadWeights(Kandinsky5TextEncoding.ConvertClipLFromStandalone(clipLoader.GetAllTensors()), prefix: "text_model");
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
             (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
@@ -101,26 +101,4 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
         }
     }
 
-    /// <summary>Strips a standalone CLIP-L safetensors file down to the <c>text_model.*</c> keys the encoder expects (Comfy or LDM wrapping), dropping the <c>position_ids</c> buffer.</summary>
-    private static Dictionary<string, Tensor> ConvertClipLFromStandalone(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            string key = kv.Key;
-            if (key.StartsWith("text_encoders.clip_l.transformer.", StringComparison.Ordinal))
-            {
-                key = key["text_encoders.clip_l.transformer.".Length..];
-            }
-            else if (key.StartsWith("conditioner.embedders.0.transformer.", StringComparison.Ordinal))
-            {
-                key = key["conditioner.embedders.0.transformer.".Length..];
-            }
-            if (!key.EndsWith("position_ids", StringComparison.Ordinal))
-            {
-                result[key] = kv.Value;
-            }
-        }
-        return result;
-    }
 }

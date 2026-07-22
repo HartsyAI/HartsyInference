@@ -130,12 +130,12 @@ public sealed class ParamState
                 _values["confidence"] = "0.25";
                 break;
             case Modality.Video:
-                _values["width"] = "704";
-                _values["height"] = "480";
+                _values["width"] = "";
+                _values["height"] = "";
                 _values["steps"] = "";
                 _values["cfg"] = "";
-                _values["frames"] = "25";
-                _values["fps"] = "25";
+                _values["frames"] = "";
+                _values["fps"] = "";
                 _values["negative"] = "";
                 _values["seed"] = "-1";
                 break;

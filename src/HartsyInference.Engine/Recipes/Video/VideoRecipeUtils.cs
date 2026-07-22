@@ -22,11 +22,13 @@ internal static class VideoRecipeUtils
     /// <summary>Snaps the request's width/height to <paramref name="multiple"/>, logging when the geometry moved.</summary>
     internal static (int Width, int Height) ResolveResolution(VideoRequest request, int multiple)
     {
-        int width = SnapToMultiple(request.Width, multiple);
-        int height = SnapToMultiple(request.Height, multiple);
-        if (width != request.Width || height != request.Height)
+        int requestedWidth = request.Width ?? 704;
+        int requestedHeight = request.Height ?? 480;
+        int width = SnapToMultiple(requestedWidth, multiple);
+        int height = SnapToMultiple(requestedHeight, multiple);
+        if (width != requestedWidth || height != requestedHeight)
         {
-            Logs.Info($"[VideoRecipe] Resolution {request.Width}x{request.Height} rounded to {width}x{height} (model requires multiples of {multiple}).");
+            Logs.Info($"[VideoRecipe] Resolution {requestedWidth}x{requestedHeight} rounded to {width}x{height} (model requires multiples of {multiple}).");
         }
         return (width, height);
     }
@@ -34,7 +36,7 @@ internal static class VideoRecipeUtils
     /// <summary>Rounds the requested frame count onto the model's <c>step·n + 1</c> grid (the VAE temporal compression constraint).</summary>
     internal static int ResolveFrames(VideoRequest request, int modelDefault, int step)
     {
-        int requested = request.Frames > 0 ? request.Frames : modelDefault;
+        int requested = request.Frames ?? modelDefault;
         int snapped = Math.Max(1, 1 + (int)Math.Round((requested - 1) / (double)step) * step);
         if (snapped != requested)
         {
@@ -49,15 +51,17 @@ internal static class VideoRecipeUtils
     internal static (int Width, int Height) ResolveI2VResolution(VideoRequest request, int imageWidth, int imageHeight, int multiple)
     {
         string mode = request.VideoResolution ?? "Image Aspect, Model Res";
+        int requestedWidth = request.Width ?? 704;
+        int requestedHeight = request.Height ?? 480;
         if (string.Equals(mode, "Image", StringComparison.OrdinalIgnoreCase))
         {
             return (SnapToMultiple(imageWidth, multiple), SnapToMultiple(imageHeight, multiple));
         }
         if (string.Equals(mode, "Model Preferred", StringComparison.OrdinalIgnoreCase))
         {
-            return (SnapToMultiple(request.Width, multiple), SnapToMultiple(request.Height, multiple));
+            return (SnapToMultiple(requestedWidth, multiple), SnapToMultiple(requestedHeight, multiple));
         }
-        long budget = (long)SnapToMultiple(request.Width, multiple) * SnapToMultiple(request.Height, multiple);
+        long budget = (long)SnapToMultiple(requestedWidth, multiple) * SnapToMultiple(requestedHeight, multiple);
         double aspect = imageHeight <= 0 ? 1.0 : imageWidth / (double)imageHeight;
         int fitH = (int)Math.Round(Math.Sqrt(budget / aspect));
         int fitW = (int)Math.Round(fitH * aspect);
@@ -180,9 +184,10 @@ internal static class VideoRecipeUtils
         return result;
     }
 
-    /// <summary>Zeroes embedding rows past the real tokens (content + EOS; pad id 0). Wan/LTX cross-attend every
-    /// context row with no text mask, and the encoders emit garbage at pad positions that otherwise drowns the
-    /// prompt — the reference pipelines zero-pad instead.</summary>
+    /// <summary>Zeroes embedding rows past the real tokens (content + EOS; pad id 0). The Wan family cross-attends
+    /// every context row with no text mask, and umT5 emits garbage at pad positions that otherwise drowns the
+    /// prompt — the reference pipeline zero-pads instead. (LTX-Video does NOT use this: its reference truncates to
+    /// the real tokens instead, via <c>CfgHelper.SliceBatchElementPrefix</c> — see <see cref="LtxVideoRecipePipeline"/>.)</summary>
     internal static unsafe void ZeroPaddedRows(Tensor embeds, int[] tokens, int dim)
     {
         int realLen = 0;

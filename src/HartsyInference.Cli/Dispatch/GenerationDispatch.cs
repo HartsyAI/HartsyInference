@@ -329,12 +329,12 @@ public static class GenerationDispatch
             NegativePrompt = parameters.Get("negative") is { Length: > 0 } negative
                 ? negative
                 : "blurry, low quality, distorted, watermark",
-            Width = parameters.GetInt("width", 704),
-            Height = parameters.GetInt("height", 480),
+            Width = parameters.GetIntOrNull("width"),
+            Height = parameters.GetIntOrNull("height"),
             Steps = parameters.GetIntOrNull("steps"),
             CfgScale = parameters.GetFloatOrNull("cfg"),
-            Frames = parameters.GetInt("frames", 25),
-            Fps = parameters.GetInt("fps", 25),
+            Frames = parameters.GetIntOrNull("frames"),
+            Fps = parameters.GetIntOrNull("fps"),
             Seed = parameters.GetInt("seed", -1),
         };
 
@@ -448,6 +448,7 @@ public static class GenerationDispatch
             PreviewRgb = frames[0].Rgb,
             PreviewWidth = width,
             PreviewHeight = height,
+            SelfWritten = true,
         };
         artifact.Meta["frames"] = frames.Count.ToString(CultureInfo.InvariantCulture);
         artifact.Meta["size"] = $"{width}x{height}";
@@ -491,6 +492,7 @@ public static class GenerationDispatch
             Kind = ArtifactKind.Audio,
             Extension = stems.Format,
             Text = $"{stems.Stems.Count} stem(s) ({string.Join(", ", stems.Stems.Keys)}) @ {stems.SampleRate} Hz → {dir}",
+            SelfWritten = true,
         };
     }
 

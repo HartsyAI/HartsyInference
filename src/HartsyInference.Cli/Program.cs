@@ -61,7 +61,8 @@ public static class Program
                     .WithExample("fx", "enhance", "noisy.wav");
             });
             config.AddCommand<VideoCommand>("video")
-                .WithDescription("Generate a video (BMP frame sequence) from a prompt with LTX-Video (CUDA).");
+                .WithDescription("Generate a video (frame sequence) from a prompt with any registered video family (CUDA).")
+                .WithExample("video", "a cat walking through a sunlit garden", "-m", "ltx-video");
             config.AddCommand<InteractiveCommand>("world")
                 .WithDescription("Roll out an Oasis world model from a first-frame image (canned action plan).");
             config.AddCommand<PreviewCommand>("preview")

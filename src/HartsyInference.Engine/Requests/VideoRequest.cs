@@ -10,11 +10,11 @@ public sealed record VideoRequest
     /// <summary>The negative prompt, or null/empty for none.</summary>
     public string? NegativePrompt { get; init; }
 
-    /// <summary>Output width in pixels.</summary>
-    public int Width { get; init; } = 704;
+    /// <summary>Output width in pixels; null uses the family's native training width.</summary>
+    public int? Width { get; init; }
 
-    /// <summary>Output height in pixels.</summary>
-    public int Height { get; init; } = 480;
+    /// <summary>Output height in pixels; null uses the family's native training height.</summary>
+    public int? Height { get; init; }
 
     /// <summary>Number of denoising steps; null uses the family's officially recommended step count.</summary>
     public int? Steps { get; init; }
@@ -43,8 +43,8 @@ public sealed record VideoRequest
     /// <summary>Target output resolution label (e.g. "720p"); null uses width/height.</summary>
     public string? VideoResolution { get; init; }
 
-    /// <summary>Output frames per second.</summary>
-    public int Fps { get; init; } = 25;
+    /// <summary>Output frames per second; null uses the family's native frame rate.</summary>
+    public int? Fps { get; init; }
 
     /// <summary>Container/codec format label for encoding (e.g. "mp4", "webp"); null uses the default.</summary>
     public string? VideoFormat { get; init; }
@@ -61,8 +61,8 @@ public sealed record VideoRequest
     /// <summary>Optional reference audio driving audio-conditioned video (e.g. speech-to-video).</summary>
     public AudioClip? VideoAudioReference { get; init; }
 
-    /// <summary>Total frames to generate for text-to-video.</summary>
-    public int Frames { get; init; } = 25;
+    /// <summary>Total frames to generate for text-to-video; null uses the family's native frame count.</summary>
+    public int? Frames { get; init; }
 
     /// <summary>Frames to trim from the start of the generated sequence.</summary>
     public int TrimVideoStartFrames { get; init; }

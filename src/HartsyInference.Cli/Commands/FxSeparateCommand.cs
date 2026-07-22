@@ -27,9 +27,10 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
         [Description("Path to a local htdemucs checkpoint (.th/.safetensors).")]
         public string? ModelPath { get; init; }
 
-        /// <summary>Compute backend selector.</summary>
+        /// <summary>Compute backend selector. Demucs always runs on CPU regardless of this setting — its STFT/ISTFT
+        /// has no CUDA/Vulkan implementation yet, so any GPU selector here would just throw.</summary>
         [CommandOption("-b|--backend")]
-        [Description("Backend: auto, cpu, cuda, or vulkan.")]
+        [Description("Backend selector (always overridden to CPU: Demucs' STFT has no GPU implementation yet).")]
         public string Backend { get; init; } = "auto";
 
         /// <summary>Directory to write the stems into.</summary>
@@ -52,14 +53,18 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
             return 1;
         }
 
-        ParamState parameters = new ParamState(Modality.Fx) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
+        // Demucs' STFT/ISTFT (DemucsSpec.Spec) only has a CPU implementation (CudaBackend.Stft throws
+        // NotSupportedException) — force CPU here so the default `hartsy fx separate <wav>` invocation works
+        // instead of erroring, regardless of what -b was passed.
+        const string backend = "cpu";
+        ParamState parameters = new ParamState(Modality.Fx) { Backend = backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("mode", "separate");
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Fx);
         string label = spec.Catalog?.Id ?? settings.Model;
         string outputDir = settings.Output ?? RepoPaths.OutputRoot();
 
-        return CommandRunner.Run(Modality.Fx, spec, settings.Audio, parameters, settings.Backend, settings.Quiet,
+        return CommandRunner.Run(Modality.Fx, spec, settings.Audio, parameters, backend, settings.Quiet,
             outputDir, label, showResponseRule: false);
     }
 }
