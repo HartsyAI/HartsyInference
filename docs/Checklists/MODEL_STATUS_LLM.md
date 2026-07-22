@@ -146,9 +146,61 @@ repro-then-fixed verification):**
   architecture-agnostic — any declared-but-unregistered arch gets the same treatment), translates whatever the
   heuristic-fallback mapper throws (`ArgumentOutOfRangeException` et al.) into a clear
   `UnsupportedModelException` naming the declared architecture and the heuristic-matched mapper, instead of an
-  opaque crash. `glm4` bug (2) — the *correct*-architecture checkpoint's incoherent output — is **not**
-  root-caused (needs a reference-logit comparison against real GLM-4, out of scope for this pass); `glm4` stays
-  FAIL.
+  opaque crash.
+
+## glm4 bug (2) root-caused + fixed (2026-07-22, follow-up session)
+
+**Root cause**: `IBackend.ApplyRopeInterleaved` (and its CUDA kernel `lm_rope_interleaved_f32`,
+`native/cuda/lm/lm_f32.cu`) always rotated all `headDim/2` adjacent pairs — it had no `rotaryDim` parameter at
+all, unlike the split-half sibling `ApplyRopeSingle` which already did. GLM-4 uses **partial rotary**
+(`partial_rotary_factor=0.5`, confirmed against HF `transformers`' `Glm4RotaryEmbedding` and llama.cpp's
+`glm4.cpp`/`llama-model.cpp` — `LLM_ARCH_GLM4` resolves to `LLAMA_ROPE_TYPE_NORM`, i.e. interleaved/GPT-J
+pairing, exactly what `GgufConfigFactory.cs` already had `RopeStyle.Interleaved` set for glm4 — that part was
+already correct). With `headDim=128`, `rotaryDim=64` (typical GLM-4-9B config): `BuildRope`'s cos/sin table
+only ever writes the first `rotaryDim=64` slots of each `headDim=128`-wide row (correct — matches
+`ApplyRopeSingle`'s own partial-rotary contract); `ApplyRopeInterleaved`, having no `rotaryDim` awareness,
+read `cos[i]`/`sin[i]` for `i` up to `headDim/2-1=63` regardless — for `i>=32` (i.e. vector dims 64-127, which
+should have passed through UNROTATED per HF's `q_rot, q_pass = q[...,:rotary_dim], q[...,rotary_dim:]` split)
+it read the SAME `cos`/`sin` values written for `i<32` a second time (`BuildRope`'s split-half duplicate
+layout: `[c0..c31, c0..c31]`) and spuriously rotated the untouched half of every Q/K vector with the wrong
+frequencies. **Invisible at position 0** (angle=0 → cos=1,sin=0 → "wrong" rotation is still the identity),
+exactly the class of bug this project's `DEBUG.md` already flags (cf. the earlier exaone/granite RoPE-pairing
+bug) — corrupts every later position instead, matching the reported "loads and generates without crashing but
+produces consistently incoherent output" symptom precisely. Verified the OTHER standing hypothesis
+(sandwich-norm placement) is NOT a bug: traced `GenericTransformer`'s `PostSublayer`/`PreSublayer` sequencing
+against both `llama.cpp`'s `glm4.cpp` (`attn_norm→attn→attn_post_norm→+residual→ffn_norm→ffn→ffn_post_norm→+residual`)
+and HF's `Glm4DecoderLayer.forward` — all three match exactly (HF's confusingly-named `post_attention_layernorm`
+is functionally the *pre*-FFN norm, i.e. llama.cpp's `ffn_norm` / our `pre_feedforward_layernorm` target key —
+a naming coincidence across the three sources, not a bug once traced through).
+
+**Fixed**: `ApplyRopeInterleaved` gained an `int rotaryDim = 0` parameter (0 = full rotary, matching
+`ApplyRopeSingle`'s existing convention — fully backward compatible) at every layer: the CUDA kernel
+(`lm_rope_interleaved_f32`, recompiled to PTX with a fresh `nvcc` — see "kernel tooling" note below), its C#
+launcher (`CudaKernels.LaunchRopeInterleaved`), the `CudaBackend` override, and the `IBackend` CPU-fallback
+default. `GenericTransformer`'s two call sites (prefill, batch-decode) now pass `_cfg.RotaryDimFor(layerIndex)`
+/ `_cfg.RotaryDim`, exactly mirroring the split-half branch beside them. Every other caller of
+`ApplyRopeInterleaved` (Kyutai Moshi, Dia — both full rotary) is unaffected: they omit the new parameter and
+get the identical prior behavior. **New regression test** `RopeInterleavedPartialRotaryTests` (hand-computed
+expected values, not tolerance-fuzzed) proves on real CUDA hardware: (a) partial rotary — dims inside
+`[0,rotaryDim)` rotate correctly, dims outside are byte-identical pass-through; (b) full-rotary default is
+unchanged from pre-fix behavior (a pair that would be "no-op" under the bug's coincidental full-rotary
+correctness is asserted to have actually moved, proving the kernel really executed). Full `HartsyInference.LLM.Tests`
+(130) and the touched `HartsyInference.Cuda.Tests` subset stay green.
+
+**Kernel tooling note**: this fix required recompiling a `.cu` → `.ptx` kernel. No system CUDA toolkit exists on
+this box (previously assessed as a hard blocker for "kernel work" — see the earlier perf-pass framing in this
+doc), but `nvidia-cuda-nvcc`/`nvidia-cuda-runtime`/`nvidia-cublas` **pip wheels** provide a working standalone
+`nvcc` (found at `~/.local/cuda-tools-13.0/nvidia/cu13/bin/nvcc`, CUDA 13.0) with no system install needed.
+**Toolchain-version gotcha**: the newer `nvidia-cuda-nvcc` package (13.3) emits PTX `.version 9.3`, which this
+box's driver (580.159.03) rejects at JIT time (`Unsupported .version 9.3; current version is '9.0'`) — the
+13.0-pinned package emits `.version 9.0` and loads cleanly. Only `lm_f32.ptx` (the file with the actual fix)
+was recommitted; the other 12 shipped `.ptx` files were incidentally regenerated by the same `build.sh` sweep
+(different `nvcc` point release than whatever produced the originally-committed files) and reverted to avoid
+unrelated diff noise / an unverified toolchain-version bump for kernels this pass didn't need to touch.
+
+`glm4` stays FAIL pending real end-to-end confirmation against a downloaded checkpoint (see below) — the fix
+itself is confirmed via kernel-level unit tests and a 3-way architectural cross-check (this engine vs
+llama.cpp vs HF transformers source), not yet a live generation.
 
 **Fixed (code + unit-tested), NOT e2e-verifiable on this hardware — do not read as "gpt-oss/gemma4-moe now
 work end-to-end", only that the specific reported crash is gone:**

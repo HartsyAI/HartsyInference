@@ -1173,8 +1173,9 @@ public sealed unsafe class GenericTransformer : IDisposable
             {
                 if (_cfg.Rope == RopeStyle.Interleaved)
                 {
-                    backend.ApplyRopeInterleaved(q, cos, sin);
-                    if (k is not null) backend.ApplyRopeInterleaved(k, cos, sin);
+                    int rotaryI = _cfg.RotaryDimFor(layerIndex);
+                    backend.ApplyRopeInterleaved(q, cos, sin, rotaryI);
+                    if (k is not null) backend.ApplyRopeInterleaved(k, cos, sin, rotaryI);
                 }
                 else
                 {
@@ -1562,8 +1563,8 @@ public sealed unsafe class GenericTransformer : IDisposable
             {
                 if (_cfg.Rope == RopeStyle.Interleaved)
                 {
-                    backend.ApplyRopeInterleaved(q, cos, sin);
-                    backend.ApplyRopeInterleaved(k, cos, sin);
+                    backend.ApplyRopeInterleaved(q, cos, sin, _cfg.RotaryDim);
+                    backend.ApplyRopeInterleaved(k, cos, sin, _cfg.RotaryDim);
                 }
                 else
                 {

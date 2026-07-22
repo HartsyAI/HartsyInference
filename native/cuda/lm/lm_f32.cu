@@ -136,14 +136,22 @@ __global__ void lm_scatter_add_weighted_rows_f32(
 // x [B, L, numHeads, headDim]; rotates adjacent pairs (2i, 2i+1) sharing frequency i (cos/sin
 // index i, NOT the split-half convention of lm/dit_rope). cos/sin are [B, L, headDim] (only the
 // first headDim/2 entries per position are read); a vector's cos/sin row is vec/numHeads. Matches
-// IBackend.ApplyRopeInterleaved — the Sesame CSM / HeartMuLa backbone+decoder RoPE. One thread per
-// (vector, pair); keeps q/k GPU-resident through RoPE (no host round-trip per layer).
+// IBackend.ApplyRopeInterleaved — the Sesame CSM / HeartMuLa backbone+decoder RoPE, and (with
+// partial rotary) GLM-4. One thread per (vector, pair); keeps q/k GPU-resident through RoPE (no
+// host round-trip per layer). rotaryDim: 0 (or >=headDim) rotates every pair (full rotary, prior
+// behavior); otherwise only pairs entirely inside [0, rotaryDim) rotate — dims [rotaryDim, headDim)
+// pass through untouched, matching HF's `q_rot, q_pass = q[...,:rotary_dim], q[...,rotary_dim:]`
+// partial-rotary split (GLM-4's `partial_rotary_factor`). This guard was missing before 2026-07-22:
+// the kernel always used headDim/2 pairs regardless of rotaryDim, so any interleaved-RoPE arch with
+// partial rotary had its un-rotated tail spuriously rotated with wrong (repeated-block) frequencies
+// instead of being left alone — a no-op at position 0 (angle=0) that corrupts every later position.
 __global__ void lm_rope_interleaved_f32(
     float* __restrict__ x,
     const float* __restrict__ cos,
     const float* __restrict__ sin,
     unsigned int numHeads,
     unsigned int headDim,
+    unsigned int rotaryDim,
     unsigned long long totalVecs)
 {
     unsigned int half = headDim >> 1;
@@ -151,6 +159,8 @@ __global__ void lm_rope_interleaved_f32(
     unsigned long long total = totalVecs * (unsigned long long)half;
     if (gid >= total) return;
     unsigned int i = (unsigned int)(gid % half);
+    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
+    if (2u * i >= rdim) return;
     unsigned long long vec = gid / half;
     unsigned long long row = vec / numHeads;
     size_t baseX = (size_t)vec * headDim + 2u * i;

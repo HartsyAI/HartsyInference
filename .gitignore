@@ -107,3 +107,4 @@ appsettings.*.json
 /.claude/
 *.log
 /Models
+/benchmarks/.bench-venv

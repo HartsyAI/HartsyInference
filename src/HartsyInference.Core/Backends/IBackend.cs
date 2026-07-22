@@ -592,9 +592,12 @@ public interface IBackend : IDisposable
     /// <summary>In-place <b>interleaved (GPT-J)</b> rotary embedding on a single tensor <paramref name="x"/> of
     /// shape <c>[B, L, numHeads, headDim]</c>: adjacent dims are rotated in pairs <c>(2i, 2i+1)</c> sharing
     /// frequency <c>i</c>. <paramref name="cos"/>/<paramref name="sin"/> are <c>[B, L, headDim]</c> (only the
-    /// first <c>headDim/2</c> entries per position are read). Used by the Qwen3-TTS audio backbone / Moonshine;
-    /// NOT interchangeable with the split-half <see cref="ApplyRopeSingle"/>.</summary>
-    unsafe void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin)
+    /// first <c>headDim/2</c> entries per position are read). Used by the Qwen3-TTS audio backbone / Moonshine
+    /// (full rotary) and GLM-4 (partial rotary); NOT interchangeable with the split-half <see cref="ApplyRopeSingle"/>.
+    /// <paramref name="rotaryDim"/> 0 (or &gt;=headDim) rotates every pair (prior/default behavior); otherwise
+    /// only pairs entirely inside <c>[0, rotaryDim)</c> rotate — dims <c>[rotaryDim, headDim)</c> pass through
+    /// unchanged, matching HF's partial-rotary <c>q_rot, q_pass = q[...,:rotary_dim], q[...,rotary_dim:]</c> split.</summary>
+    unsafe void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
     {
         if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("ApplyRopeInterleaved default fallback only supports F32.");
@@ -603,6 +606,7 @@ public interface IBackend : IDisposable
         int numHeads = (int)x.Shape[2];
         int headDim = (int)x.Shape[3];
         int half = headDim / 2;
+        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
         float* xPtr = (float*)x.DataPointer;
         float* cosPtr = (float*)cos.DataPointer;
         float* sinPtr = (float*)sin.DataPointer;
@@ -618,6 +622,7 @@ public interface IBackend : IDisposable
                     float* si = sinPtr + freqBase;
                     for (int i = 0; i < half; i++)
                     {
+                        if (2 * i >= rdim) break;
                         float xe = vec[2 * i];
                         float xo = vec[2 * i + 1];
                         vec[2 * i] = xe * c[i] - xo * si[i];
