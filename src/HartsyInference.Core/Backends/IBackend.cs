@@ -1458,6 +1458,15 @@ public interface IBackend : IDisposable
     /// kernels are present.</summary>
     bool SupportsDeviceStepCacheGate => false;
 
+    /// <summary>Marks a tensor's device-resident activation as surviving <see cref="FreeActivations()"/> — for
+    /// cross-step state whose only authoritative copy is on-device (the across-step feature cache's previous
+    /// indicator/residual under the video pipelines' per-step activation free). No-op on host backends, where
+    /// tensor data always lives in host memory.</summary>
+    void PinActivation(Tensor tensor) { }
+
+    /// <summary>Removes a <see cref="PinActivation"/> mark. No-op on host backends.</summary>
+    void UnpinActivation(Tensor tensor) { }
+
     /// <summary>Relative-L1 distance <c>Σ|a−b| / Σ|b|</c> over all elements — the across-step feature-cache gate
     /// metric (TeaCache / First-Block-Cache). Returns 0 when the reference tensor is all-zero. Default host
     /// implementation supports F32 and F16 and reads <c>DataPointer</c> (host-resident tensors only — see

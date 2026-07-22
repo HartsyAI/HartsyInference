@@ -161,14 +161,14 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // guidance); HARTSY_STEP_CACHE=<threshold|1> reuses the block-stack residual across steps when the
         // first block's output has barely drifted (First-Block cache). Unset ⇒ byte-identical baseline path.
         GuidanceInterval cfgInterval = GuidanceInterval.FromEnvironment();
-        float stepCacheThreshold = ReadStepCacheThreshold();
+        float stepCacheThreshold = StepCacheEnv.ReadThreshold();
         DeviceFeatureCache? condCache = null;
         DeviceFeatureCache? uncondCache = null;
         if (stepCacheThreshold > 0f)
         {
             if (Backend.SupportsDeviceStepCacheGate)
             {
-                int stepCacheCap = ReadStepCacheCap();
+                int stepCacheCap = StepCacheEnv.ReadCap();
                 condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
                 if (useCfg) uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap);
                 Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}");
@@ -728,30 +728,6 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             return (scaled, null);
         }
         return (packedNoise, null);
-    }
-
-    /// <summary>Reads HARTSY_STEP_CACHE: unset/0 = off; "1"/"true" = enable at the 0.15 default drift threshold;
-    /// any other float = enable at that threshold. Malformed values throw — a silently-ignored perf knob would
-    /// invalidate an A/B run.</summary>
-    private static float ReadStepCacheThreshold()
-    {
-        string? value = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE");
-        if (string.IsNullOrWhiteSpace(value)) return 0f;
-        if (value == "0") return 0f;
-        if (value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase)) return 0.15f;
-        if (!float.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out float threshold) || threshold < 0f)
-            throw new ArgumentException($"HARTSY_STEP_CACHE must be a non-negative float or 1/true; got '{value}'.");
-        return threshold;
-    }
-
-    /// <summary>Reads HARTSY_STEP_CACHE_CAP (max consecutive cached steps), default 3.</summary>
-    private static int ReadStepCacheCap()
-    {
-        string? value = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_CAP");
-        if (string.IsNullOrWhiteSpace(value)) return 3;
-        if (!int.TryParse(value, out int cap) || cap < 1)
-            throw new ArgumentException($"HARTSY_STEP_CACHE_CAP must be a positive integer; got '{value}'.");
-        return cap;
     }
 
     /// <summary>Concatenates two packed-form tensors <c>[1, Sa, D]</c> and <c>[1, Sb, D]</c> along the SEQUENCE dim

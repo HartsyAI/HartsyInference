@@ -43,6 +43,13 @@ internal static unsafe class GpuTransferHelper
         /// <summary>Set of GPU pointers that belong to either cache (skip in FreeDevice).</summary>
         public readonly HashSet<ulong> CachedPointers = new();
 
+        /// <summary>Activations pinned to SURVIVE <see cref="FreeActivations"/> — cross-step state whose only
+        /// authoritative copy lives on-device (e.g. the across-step feature cache's previous indicator and
+        /// residual, which per-step FreeActivations in the video pipelines would otherwise silently destroy:
+        /// the host buffer was never materialized, so the next CopyToDevice would re-upload garbage). Pinned
+        /// tensors are still freed by their own Dispose/sync callbacks and by <see cref="FreeAllCached"/>.</summary>
+        public readonly HashSet<Tensor> PinnedActivations = new(ReferenceEqualityComparer.Instance);
+
         /// <summary>Stream handle for deferred GPU memory frees and sync-before-D2H.</summary>
         public nint StreamHandle;
 
@@ -296,6 +303,7 @@ internal static unsafe class GpuTransferHelper
         {
             if (s.ActivationCache.Remove(tensor, out (ulong gpuPtr, nuint bytes) cached))
             {
+                s.PinnedActivations.Remove(tensor);
                 s.D2hSyncs++;
                 s.Context?.EnsureCurrent();
                 CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
@@ -312,6 +320,7 @@ internal static unsafe class GpuTransferHelper
         {
             if (s.ActivationCache.Remove(tensor, out (ulong gpuPtr, nuint bytes) cached))
             {
+                s.PinnedActivations.Remove(tensor);
                 s.Context?.EnsureCurrent();
                 s.CachedPointers.Remove(cached.gpuPtr);
                 CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
@@ -559,6 +568,7 @@ internal static unsafe class GpuTransferHelper
         s.ActivationCache.Clear();
         s.WeightCastCache.Clear();
         s.CachedPointers.Clear();
+        s.PinnedActivations.Clear();
         s.CachedBytes = 0;
         s.Hits = 0;
         s.Misses = 0;
@@ -580,12 +590,21 @@ internal static unsafe class GpuTransferHelper
     {
         State s = Resolve();
         s.Context?.EnsureCurrent();
+        List<KeyValuePair<Tensor, (ulong gpuPtr, nuint bytes)>>? survivors = null;
         foreach (KeyValuePair<Tensor, (ulong gpuPtr, nuint bytes)> kv in s.ActivationCache)
         {
+            if (s.PinnedActivations.Contains(kv.Key))
+            {
+                (survivors ??= new List<KeyValuePair<Tensor, (ulong gpuPtr, nuint bytes)>>()).Add(kv);
+                continue;
+            }
             s.CachedPointers.Remove(kv.Value.gpuPtr);
             CudaMemory.FreeAsync(kv.Value.gpuPtr, s.StreamHandle);
         }
         s.ActivationCache.Clear();
+        if (survivors is not null)
+            foreach (KeyValuePair<Tensor, (ulong gpuPtr, nuint bytes)> kv in survivors)
+                s.ActivationCache[kv.Key] = kv.Value;
 
         // Return pooled memory to the driver. cuMemFreeAsync (used by every activation/dispose free) hands memory
         // back to the stream-ordered mempool, which RESERVES it (cuMemGetInfo counts it as used) until trimmed —
@@ -596,6 +615,15 @@ internal static unsafe class GpuTransferHelper
         // OOM-retry if they ever need it).
         if (trimPool) TrimPool();
     }
+
+    /// <summary>Marks a tensor's device activation as surviving <see cref="FreeActivations"/> (cross-step state
+    /// whose only copy is on-device). Keyed by tensor object identity — safe to call before or after the entry
+    /// exists. The tensor's own Dispose/sync callbacks and <see cref="FreeAllCached"/> still reclaim it.</summary>
+    public static void PinActivation(Tensor tensor) => Resolve().PinnedActivations.Add(tensor);
+
+    /// <summary>Removes a <see cref="PinActivation"/> mark; the next <see cref="FreeActivations"/> reclaims the
+    /// tensor's device buffer like any other activation.</summary>
+    public static void UnpinActivation(Tensor tensor) => Resolve().PinnedActivations.Remove(tensor);
 
     /// <summary>Returns pool-reserved-but-free device memory to the driver WITHOUT clearing the activation cache.
     /// <c>cuMemFreeAsync</c> (every activation/dispose free) hands blocks back to the stream-ordered mempool, which

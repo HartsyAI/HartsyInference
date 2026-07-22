@@ -74,7 +74,8 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
 
     /// <summary>Velocity prediction over VAE-latent tokens. <paramref name="latentTokens"/> is <c>[S, inChannels]</c> with <c>S = numFrames·height·width</c> in <c>(f,h,w)</c> order; <paramref name="encoder"/> is raw T5 features <c>[L, captionChannels]</c>; <paramref name="encoderMask"/> is an optional additive cross-attn mask. Returns <c>[S, outChannels]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor latentTokens, Tensor encoder, float timestep,
-        (int Frames, int Height, int Width) grid, (double T, double H, double W) interpScale, Tensor? encoderMask)
+        (int Frames, int Height, int Width) grid, (double T, double H, double W) interpScale, Tensor? encoderMask,
+        Utilities.DeviceFeatureCache? stepCache = null)
     {
         int s = (int)latentTokens.Shape[0];
         int dim = _config.InnerDim;
@@ -89,12 +90,42 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         Tensor encoderProj = CaptionProject(backend, encoder);
 
         Tensor cur = hidden;
-        for (int i = 0; i < _blocks.Length; i++)
+        // Across-step First-Block cache (single-stream FBC — WanVideoTransformer holds the reference video
+        // wiring): block 0 always runs and gates; hit ⇒ blocks 1..N−1 replaced by the cached residual;
+        // miss ⇒ the block-0 output anchors StoreResidual. Null ⇒ byte-identical loop. Callers must force
+        // the eager path when a cache is armed (variable per-step topology can't replay a step graph).
+        Tensor? cacheAnchor = null;
+        int startBlock = 0;
+        if (stepCache is not null && _blocks.Length > 1)
+        {
+            Tensor block0 = _blocks[0].Forward(backend, cur, encoderProj, temb6, _rope, cos, sin, encoderMask);
+            cur.Dispose();
+            cur = block0;
+            LtxVideoDebugDump.Dump("blocks.0", cur);
+            startBlock = 1;
+            if (!stepCache.ShouldCompute(backend, cur))
+            {
+                Tensor reconstructed = stepCache.ApplyResidual(backend, cur);
+                cur.Dispose();
+                cur = reconstructed;
+                startBlock = _blocks.Length;
+            }
+            else
+            {
+                cacheAnchor = cur;
+            }
+        }
+        for (int i = startBlock; i < _blocks.Length; i++)
         {
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, temb6, _rope, cos, sin, encoderMask);
-            cur.Dispose();
+            if (!ReferenceEquals(cur, cacheAnchor)) cur.Dispose();
             cur = next;
             LtxVideoDebugDump.Dump($"blocks.{i}", cur);
+        }
+        if (cacheAnchor is not null)
+        {
+            stepCache!.StoreResidual(backend, cacheAnchor, cur);
+            cacheAnchor.Dispose();
         }
         temb6.Dispose(); encoderProj.Dispose();   // cos/sin are cached (GetCosSin) — not disposed here
 
@@ -134,16 +165,20 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     /// on the graph path (transformer-owned fixed velocity buffers, rewritten next step).</summary>
     public (Tensor condVel, Tensor? uncondVel, bool callerOwns) ForwardPaired(
         IBackend backend, Tensor latentTokens, Tensor condEncoder, Tensor? uncondEncoder, float timestep,
-        (int Frames, int Height, int Width) grid, (double T, double H, double W) interpScale, Tensor? encoderMask)
+        (int Frames, int Height, int Width) grid, (double T, double H, double W) interpScale, Tensor? encoderMask,
+        Utilities.DeviceFeatureCache? condCache = null, Utilities.DeviceFeatureCache? uncondCache = null)
     {
-        bool graphMode = DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead
+        // An armed step cache forces eager: cache hits change the per-step block topology, which a captured
+        // graph cannot replay (INFERENCE_ACCEL_GRIND §H1.5 — same rule as Chroma's CFG-pair graph).
+        bool graphMode = condCache is null && uncondCache is null
+            && DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead
             && ReferenceEquals(latentTokens, _latentFixed);
         if (!graphMode)
         {
             // Eager path — byte-identical to two calls of the validated Forward.
-            Tensor condV = Forward(backend, latentTokens, condEncoder, timestep, grid, interpScale, encoderMask);
+            Tensor condV = Forward(backend, latentTokens, condEncoder, timestep, grid, interpScale, encoderMask, condCache);
             Tensor? uncondV = uncondEncoder is not null
-                ? Forward(backend, latentTokens, uncondEncoder, timestep, grid, interpScale, encoderMask)
+                ? Forward(backend, latentTokens, uncondEncoder, timestep, grid, interpScale, encoderMask, uncondCache)
                 : null;
             return (condV, uncondV, true);
         }

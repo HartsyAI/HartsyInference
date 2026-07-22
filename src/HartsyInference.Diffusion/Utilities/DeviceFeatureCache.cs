@@ -42,7 +42,7 @@ public sealed class DeviceFeatureCache : IDisposable
     /// <summary>Creates a device-resident step cache.</summary>
     /// <param name="threshold">Accumulated relative-L1 drift budget before forcing a recompute.</param>
     /// <param name="maxConsecutiveReuse">Hard cap on consecutive reuses regardless of drift, bounding worst-case error.</param>
-    public DeviceFeatureCache(float threshold = 0.15f, int maxConsecutiveReuse = 3)
+    public DeviceFeatureCache(float threshold = 0.10f, int maxConsecutiveReuse = 3)
     {
         if (threshold <= 0.0f) throw new ArgumentOutOfRangeException(nameof(threshold), "Threshold must be positive.");
         if (maxConsecutiveReuse < 1) throw new ArgumentOutOfRangeException(nameof(maxConsecutiveReuse));
@@ -102,6 +102,9 @@ public sealed class DeviceFeatureCache : IDisposable
         _cachedResidual?.Dispose();
         _cachedResidual = new Tensor(output.Shape, output.DType);
         backend.Add(_cachedResidual, output, negInput);
+        // Cross-step state: the residual's only copy is on-device — survive the video pipelines' per-step
+        // FreeActivations (its own Dispose still reclaims it; pin is a no-op on host backends).
+        backend.PinActivation(_cachedResidual);
     }
 
     /// <summary>Reconstructs the cached-region output on a hit: returns a new tensor = <paramref name="input"/> +
@@ -150,6 +153,7 @@ public sealed class DeviceFeatureCache : IDisposable
         // exactly the in-place-op pitfall (PHASE_3_DEVIATIONS #17) — allocation churn rides the async pool.
         Tensor snapshot = new Tensor(indicator.Shape, indicator.DType);
         backend.Scale(snapshot, indicator, 1.0f);
+        backend.PinActivation(snapshot);   // cross-step gate state — survive per-step FreeActivations
         _prevIndicator?.Dispose();
         _prevIndicator = snapshot;
     }
