@@ -33,7 +33,9 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     public bool Matches(string familyId) =>
         string.Equals(familyId, "ltx-video-2", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "ltx-video2", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "lightricks-ltx-video-2", StringComparison.OrdinalIgnoreCase);
+        || string.Equals(familyId, "lightricks-ltx-video-2", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "ltx-2", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "ltx-2.3", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>LTX-Video 2's official sampling settings: 50 steps at guidance 3.0, 512x320, 25 frames @ 24fps —
     /// the geometry <c>LtxVideo2GenerationTests</c> verified coherent, 22B being too heavy to sample at full 704x480

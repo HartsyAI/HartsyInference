@@ -39,7 +39,7 @@ public static class Program
                 .WithDescription("Synthesize speech from text with Piper (saves a WAV).")
                 .WithExample("speak", "\"Hello world\"", "-m", "en_US-lessac-medium");
             config.AddCommand<ThreeDCommand>("3d")
-                .WithDescription("Generate a 3D mesh (GLB) from an image with TripoSR or Hunyuan3D.")
+                .WithDescription("Generate a 3D mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, or TRELLIS.")
                 .WithExample("3d", "photo.png", "-m", "triposr", "--model-path", "/models/triposr");
             config.AddCommand<VisionCommand>("vision")
                 .WithDescription("Run CLIP embedding or YOLO detection on an image.")

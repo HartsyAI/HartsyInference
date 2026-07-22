@@ -425,7 +425,7 @@ public static class SideModels
         RepoPath = "split_files/vae/hunyuan_video_vae_bf16.safetensors",
         TargetSubdir = "Stable-Diffusion/HunyuanVideo",
         Role = "vae",
-        Sha256 = null
+        Sha256 = "e8f8553275406d84ccf22e7a47601650d8f98bdb8aa9ccfdd6506b57a9701aed"
     };
 
     /// <summary>LTX-2.3 video VAE (bf16) — split out of the DiT file; path/URL/hash match SwarmUI core's ltx2-3-video-vae, auto-resolved when the DiT carries no bundled VAE.</summary>

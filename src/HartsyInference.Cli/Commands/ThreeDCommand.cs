@@ -7,7 +7,8 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates a 3D mesh (GLB) from an input image with TripoSR or Hunyuan3D.</summary>
+/// <summary>Generates a 3D mesh (GLB) or Gaussian-splat cloud (PLY) from an input image with TripoSR,
+/// Hunyuan3D, or TRELLIS.</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
@@ -18,9 +19,9 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("Path to the input PNG image.")]
         public string Image { get; init; } = "";
 
-        /// <summary>Model id: triposr or hunyuan3d.</summary>
+        /// <summary>Model id: triposr, hunyuan3d, or trellis.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr or hunyuan3d.")]
+        [Description("Model id: triposr, hunyuan3d, or trellis.")]
         public string Model { get; init; } = "triposr";
 
         /// <summary>Path to the model directory or checkpoint.</summary>
@@ -38,9 +39,9 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("Marching-cubes grid resolution (0 = model default).")]
         public int Grid { get; init; }
 
-        /// <summary>Denoising steps (Hunyuan3D only; 0 = default).</summary>
+        /// <summary>Denoising steps (Hunyuan3D and TRELLIS only; 0 = default).</summary>
         [CommandOption("--steps")]
-        [Description("Denoising steps (Hunyuan3D only; 0 = default).")]
+        [Description("Denoising steps (Hunyuan3D and TRELLIS only; 0 = default).")]
         public int Steps { get; init; }
 
         /// <summary>RNG seed; &lt; 0 randomizes.</summary>

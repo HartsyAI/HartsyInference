@@ -8,10 +8,11 @@ using HartsyInference.ThreeD.Pipelines.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Image-to-3D service: loads TripoSR (feed-forward) or Hunyuan3D (flow-match) from the spec's model
-/// directory, runs one image-to-mesh pass, and returns the mesh encoded as GLB. Loaded pipelines are cached per
-/// checkpoint for the life of the service; text-to-3D has no wired pipeline yet, so a request without an image is
-/// rejected by name.</summary>
+/// <summary>Image-to-3D service: loads TripoSR (feed-forward), Hunyuan3D (flow-match, mesh), or TRELLIS
+/// (two-stage flow, Gaussian splat) from the spec's model directory, runs one image-to-3D pass, and returns the
+/// geometry encoded as GLB (mesh models) or binary-PLY (splat models — TRELLIS's flexicubes mesh decoder is not
+/// yet ported, so it only ever emits splats). Loaded pipelines are cached per checkpoint for the life of the
+/// service; text-to-3D has no wired pipeline yet, so a request without an image is rejected by name.</summary>
 public sealed class MeshService : IMeshService, IDisposable
 {
     private readonly InferenceEngine _engine;
@@ -50,11 +51,15 @@ public sealed class MeshService : IMeshService, IDisposable
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
                 });
-                if (result.Mesh is not { TriangleCount: > 0 } mesh)
+                if (result.Mesh is { TriangleCount: > 0 } mesh)
                 {
-                    throw new InvalidOperationException("The pipeline produced an empty mesh (try a foreground-on-gray input).");
+                    return new MeshResult { Data = GlbWriter.Write(mesh), Format = "glb" };
                 }
-                return new MeshResult { Data = GlbWriter.Write(mesh), Format = "glb" };
+                if (result.Splats is { Count: > 0 } splats)
+                {
+                    return new MeshResult { Data = PlyWriter.WriteSplats(splats), Format = "ply" };
+                }
+                throw new InvalidOperationException("The pipeline produced no geometry (try a foreground-on-gray input).");
             },
             cancel);
     }
@@ -80,6 +85,11 @@ public sealed class MeshService : IMeshService, IDisposable
                 {
                     Hunyuan3DShapePipeline hunyuan = Hunyuan3DShapePipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
                     loaded = new LoadedMesh(hunyuan, hunyuan.Generate);
+                }
+                else if (id == "trellis")
+                {
+                    TrellisImageTo3DPipeline trellis = TrellisImageTo3DPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
+                    loaded = new LoadedMesh(trellis, trellis.Generate);
                 }
                 else
                 {

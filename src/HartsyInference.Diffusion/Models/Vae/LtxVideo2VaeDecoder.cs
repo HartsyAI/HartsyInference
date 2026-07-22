@@ -1,3 +1,4 @@
+using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -191,16 +192,23 @@ public sealed unsafe class LtxVideo2VaeDecoder
         if ((int)latent.Shape[1] != _latentChannels)
             throw new ArgumentException($"latent channels {latent.Shape[1]} != {_latentChannels}.", nameof(latent));
 
+        bool probe = Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") == "1";
         Tensor denorm = Denormalize(latent);
+        if (probe) ProbeStats("denorm", denorm);
         Tensor h = _convIn!.Forward(backend, denorm);
         denorm.Dispose();
+        if (probe) ProbeStats("conv_in", h);
         foreach (LtxVaeResnetBlock3d r in _midResnets) { Tensor n = r.Forward(backend, h, null); h.Dispose(); h = n; }
+        if (probe) ProbeStats("mid_resnets", h);
 
+        int stageIdx = 0;
         foreach (UpStage s in _upStages)
         {
             if (s.ConvIn is not null) { Tensor n = s.ConvIn.Forward(backend, h, null); h.Dispose(); h = n; }
             if (s.Upsampler is not null) { Tensor n = s.Upsampler.Forward(backend, h); h.Dispose(); h = n; }
             foreach (LtxVaeResnetBlock3d r in s.Resnets) { Tensor n = r.Forward(backend, h, null); h.Dispose(); h = n; }
+            if (probe) ProbeStats($"up_stage_{stageIdx}", h);
+            stageIdx++;
         }
 
         // norm_out + final pixel-unshuffle run on-device: the host loops here D2H-drained the full-res tensor
@@ -209,16 +217,39 @@ public sealed unsafe class LtxVideo2VaeDecoder
         Tensor normed = new Tensor(h.Shape, DType.F32);
         backend.WanRmsNormChannel(normed, h, null, 1e-8f);
         h.Dispose();
+        if (probe) ProbeStats("norm_out", normed);
         backend.Silu(normed, normed);
         Tensor patched = _convOut!.Forward(backend, normed);   // [1, outChannels·p², F, 8H, 8W]
         normed.Dispose();
+        if (probe) ProbeStats("conv_out", patched);
         int pb = (int)patched.Shape[0], pc = (int)patched.Shape[1], pf = (int)patched.Shape[2];
         int ph = (int)patched.Shape[3], pw = (int)patched.Shape[4];
         int oc = pc / (_patch * _patch);
         Tensor rgb = new Tensor(new TensorShape([(long)pb, oc, pf, (long)ph * _patch, (long)pw * _patch]), DType.F32);
         backend.UnpatchifyVae(rgb, patched, _patch);
         patched.Dispose();
+        if (probe) ProbeStats("unpatchify", rgb);
         return rgb;
+    }
+
+    private static unsafe void ProbeStats(string label, Tensor t)
+    {
+        Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+        float* p = (float*)f32.DataPointer;
+        long n = f32.ElementCount;
+        float mn = float.MaxValue, mx = float.MinValue; double sum = 0; long nanCount = 0, infCount = 0;
+        for (long e = 0; e < n; e++)
+        {
+            float v = p[e];
+            if (float.IsNaN(v)) { nanCount++; continue; }
+            if (float.IsInfinity(v)) { infCount++; continue; }
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+            sum += v;
+        }
+        HartsyInference.Core.Logging.Logs.Warning(
+            $"[ltx2-vae-probe] {label}: shape=[{string.Join(",", Enumerable.Range(0, t.Shape.Rank).Select(i => t.Shape[i]))}] min={mn:F4} max={mx:F4} mean={sum / n:F4} nan={nanCount} inf={infCount}");
+        if (!ReferenceEquals(f32, t)) f32.Dispose();
     }
 
     /// <summary>Per-channel latent un-normalization <c>z[b,c,t,h,w] = latent·std[c] + mean[c]</c> over the

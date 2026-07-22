@@ -898,9 +898,9 @@ public static class ModelCatalog
                     // VAE in diffusers naming (Kandinsky5CheckpointConverter.LoadHunyuanVideoVae); Qwen2.5-VL-7B +
                     // CLIP-L resolve as side models inside Kandinsky5VideoRecipe.
                     new() { Repo = "kandinskylab/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers", RepoPath = "transformer/diffusion_pytorch_model.safetensors",
-                        TargetSubdir = "Stable-Diffusion/Kandinsky5/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers/transformer", Role = "transformer", Sha256 = null },
+                        TargetSubdir = "Stable-Diffusion/Kandinsky5/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers/transformer", Role = "transformer", Sha256 = "9bd1cb1e67d07de19458b9ad288b906815411c68dad7910d042ceb66f61f9f44" },
                     new() { Repo = "kandinskylab/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers", RepoPath = "vae/diffusion_pytorch_model.safetensors",
-                        TargetSubdir = "Stable-Diffusion/Kandinsky5/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers/vae", Role = "vae", Sha256 = null },
+                        TargetSubdir = "Stable-Diffusion/Kandinsky5/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers/vae", Role = "vae", Sha256 = "7c68a6295f9034a88225fbafb1f3258291a08d57a1fdb938233fa57b1b8f4883" },
                 },
             },
             new CatalogEntry
@@ -911,7 +911,7 @@ public static class ModelCatalog
                 {
                     // Comfy-Org repacked bf16 DiT; LLaVA-Llama-3-8B + CLIP-L + the 3D VAE resolve as side models.
                     new() { Repo = "Comfy-Org/HunyuanVideo_repackaged", RepoPath = "split_files/diffusion_models/hunyuan_video_t2v_720p_bf16.safetensors",
-                        TargetSubdir = "Stable-Diffusion/HunyuanVideo", Role = "transformer", Sha256 = null },
+                        TargetSubdir = "Stable-Diffusion/HunyuanVideo", Role = "transformer", Sha256 = "c6ff2d107f0fec571fe276ad847468404ed01855c28c0be8859c3b311daec52a" },
                 },
             },
             new CatalogEntry
@@ -935,6 +935,7 @@ public static class ModelCatalog
             // 3D
             E("triposr", d3, "TripoSR", "triplane / NeRF", st, cli: true),
             E("hunyuan3d", d3, "Hunyuan3D-2 (Shape)", "Flux MMDiT + VecSet VAE", st, cli: true),
+            E("trellis", d3, "TRELLIS (image-large)", "2-stage rectified flow + Gaussian splat", st, cli: true),
 
             // Interactive / world models
             E("hunyuan-gamecraft", act, "Hunyuan-GameCraft 1.0", "HunyuanVideo MM-DiT", vp),
