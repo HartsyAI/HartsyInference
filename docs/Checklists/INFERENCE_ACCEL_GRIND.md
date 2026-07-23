@@ -251,6 +251,16 @@ SDPA share (27%).
        late reuse exists: **`LATE=0.5`+`0.15` → 4.43→3.91 s = 1.13× at SSIM 0.9740 ✓
        eyeball-indistinguishable**; smaller window = 0 reuses = byte-identical (null check ✓).
        Fleet H1.5 trio complete: Qwen poly 1.20× / Ideogram window 1.39× / Krea2-Turbo window 1.13×.)*
+       *(📊 2026-07-22 — **Flux.2 Dev: FLEET-BEST 2.49×**
+       ([results](../../benchmarks/results/2026-07-22_accel_stepcache_flux2dev_4090.md)): Q4_K_S GGUF
+       catalog pin re-staged (sha ✓, Wan-2.1 pair pruned w/ user approval), FBCache-shape wiring in
+       Flux2Transformer (double-block-0 img gates; hit skips doubles+concat+48 singles via img-portion
+       residual), harness drives the ENGINE RECIPE (no conditioning re-implementation). Calibration =
+       THIRD signature: V-shaped drift (0.52→0.05 mid-valley→0.34) with a TRACKING indicator → poly
+       gate. **poly@0.25 → 97.5→39.1 s = 2.49× at SSIM 0.9581 ✓ eyeball-indistinguishable**;
+       poly@0.15 → 1.86× at 0.9879. Baseline byte-wobble investigated: ±1 LSB on first post-warmup
+       gen only (probe: SSIM 0.999992, b–c byte-identical) — valid gate. Fleet standings:
+       Flux.2 2.49× / Ideogram 1.39× / Qwen 1.20× / Krea2-Turbo 1.13× / Wan honest-negative.)*
 6. [ ] Negative-result discipline: if a model's gate never fires below quality-loss thresholds, record
        that in the results doc with the drift trace (the polynomial-rescaled TeaCache gate is the
        documented upgrade path — per-model coefficient fit, STEP_ACCELERATION §2.3).

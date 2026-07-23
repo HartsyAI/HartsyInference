@@ -234,7 +234,29 @@ _transformer.InvalidateStepGraph(Backend);
         // activations on the drain-free route, and the post-decode reclaim below trims instead).
         // StepGraphEnabled is per-checkpoint: default-ON for Klein (BF16), opt-in HARTSY_DIT_GRAPH=1 for the
         // Q4-GGUF Dev whose transient per-GEMM dequants OOM the capture on 24 GB (see Flux2Transformer).
-        bool graphRoute = drainFree && packedSourceLatent is null
+        // Default-off across-step First-Block cache (HARTSY_STEP_CACHE + HARTSY_STEP_CACHE_LATE — the
+        // fleet knobs, INFERENCE_ACCEL_GRIND §H1.5). Flux.2 has no true CFG (guidance is embedded), so ONE
+        // cache serves the single stream. An armed cache is per-step-variable topology → forces eager.
+        float stepCacheThreshold = StepCacheEnv.ReadThreshold();
+        float stepCacheLate = StepCacheEnv.ReadLateWindow();
+        DeviceFeatureCache? stepCacheInst = null;
+        if (stepCacheThreshold > 0f)
+        {
+            if (Backend.SupportsDeviceStepCacheGate)
+            {
+                stepCacheInst = new DeviceFeatureCache(stepCacheThreshold, StepCacheEnv.ReadCap(),
+                    StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={StepCacheEnv.ReadCap()}"
+                    + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
+            }
+            else
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    "(stepcache.ptx not compiled?) — running uncached.");
+            }
+        }
+
+        bool graphRoute = drainFree && packedSourceLatent is null && stepCacheInst is null
             && _transformer.StepGraphEnabled && Backend.StepGraphSupported;
         if (graphRoute)
         {
@@ -266,8 +288,11 @@ _transformer.InvalidateStepGraph(Backend);
                 continue;
             }
 
+            // Late-window cache gate: reuse eligible only in the schedule tail (Ideogram 4 results doc).
+            bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
             Tensor velocityPred = _transformer.Forward(
-                Backend, packedLatent, textEmbeddings, sigma, guidanceScale, patH, patW);
+                Backend, packedLatent, textEmbeddings, sigma, guidanceScale, patH, patW,
+                cacheEligible ? stepCacheInst : null);
 
             if (drainFree)
             {
@@ -322,6 +347,12 @@ _transformer.InvalidateStepGraph(Backend);
             {
                 LatentArch = LatentArchitecture.Flux2,
             });
+        }
+
+        if (stepCacheInst is not null)
+        {
+            Logs.Info($"Step cache: {stepCacheInst.Computes} computes / {stepCacheInst.Reuses} reuses");
+            stepCacheInst.Dispose();
         }
 
         // On the graph route packedLatent IS the transformer-owned fixed buffer (alive across generations
