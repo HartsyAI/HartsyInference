@@ -245,6 +245,31 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             latentMask.Dispose();
         }
 
+        // ── 4b. Optional across-step First-Block cache (HARTSY_STEP_CACHE, default off — reference wiring
+        // is QwenImagePipeline / INFERENCE_ACCEL_GRIND §H1.4). One instance per transformer: the conditional
+        // and unconditional models are DIFFERENT 9.3B weight sets, so their hidden states never mix. Regional
+        // plans are excluded — the per-step attention bias changes the block math under the residual's feet.
+        float stepCacheThreshold = StepCacheEnv.ReadThreshold();
+        float stepCacheLate = StepCacheEnv.ReadLateWindow();
+        DeviceFeatureCache? condCache = null;
+        DeviceFeatureCache? uncondCache = null;
+        if (stepCacheThreshold > 0f && !hasRegions)
+        {
+            if (Backend.SupportsDeviceStepCacheGate)
+            {
+                int stepCacheCap = StepCacheEnv.ReadCap();
+                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
+                uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}"
+                    + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
+            }
+            else
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    "(stepcache.ptx not compiled?) — running uncached.");
+            }
+        }
+
         // ── 5. Denoise loop (both transformers resident) ──
         Backend.PreloadWeights(_conditional.EnumerateWeights());
         Backend.PreloadWeights(_unconditional.EnumerateWeights());
@@ -281,12 +306,19 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
                 regionalPlan!.ResolveStep(steps - 1 - i, regionWeights!);
                 regionBias = RegionalAttentionBias.Build(effSeqLen, effNumText, numImageTokens, regionRanges!, regionGridMasks!, regionWeights!);
             }
-            Tensor posV = _conditional.Forward(Backend, llmTextRows, z, tVal, posIds, indicator, regionBias);
+            // Late-window gate (HARTSY_STEP_CACHE_LATE): pass the caches only inside the last `late` fraction
+            // of the schedule — Ideogram's residual drift falls ~5× from early to late steps while its
+            // block-0 indicator stays flat, so early reuse is where the quality damage concentrates. Outside
+            // the window the forward is byte-identical uncached (first armed step recomputes and snapshots).
+            bool cacheEligible = stepCacheLate <= 0f || (steps - i) > steps * (1f - stepCacheLate);
+            Tensor posV = _conditional.Forward(Backend, llmTextRows, z, tVal, posIds, indicator, regionBias,
+                cacheEligible ? condCache : null);
             regionBias?.Dispose();
 
             // Negative pass: image-only sequence, unconditional transformer. Null text features — the zeroed
             // text projection is exactly zero, so the transformer skips the text path outright.
-            Tensor negV = _unconditional.Forward(Backend, null, z, tVal, posIdsImageOnly, indicatorImageOnly, null);
+            Tensor negV = _unconditional.Forward(Backend, null, z, tVal, posIdsImageOnly, indicatorImageOnly, null,
+                cacheEligible ? uncondCache : null);
 
             // Conditioning-effect probe (profile-gated): relative RMS difference between the conditional
             // and unconditional velocities. ~0 means the prompt has no effect (encoder/feature bug);
@@ -356,6 +388,14 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             {
                 Backend.FreeActivations();
             }
+        }
+
+        if (condCache is not null)
+        {
+            Logs.Info($"Step cache: cond {condCache.Computes} computes / {condCache.Reuses} reuses; " +
+                $"uncond {uncondCache!.Computes} computes / {uncondCache.Reuses} reuses");
+            condCache.Dispose();
+            uncondCache.Dispose();
         }
 
         // llmTextRows/posIds/posIdsImageOnly are cross-generation caches; only a per-gen regional concat is ours.

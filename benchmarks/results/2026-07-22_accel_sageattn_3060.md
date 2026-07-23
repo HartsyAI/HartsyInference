@@ -205,3 +205,28 @@ user approval). Measured (4090, 1024², 20 steps, seed 42):
 **Ideogram4 through SwarmUI (production engine, 4090):** staged into the Swarm tree via symlinks;
 gen succeeded first try. **Warm 19.2 s** (cold 51.7 s incl. load) at 1024²/20 steps — matches the
 19.5 s production record. Output eyeball-verified (on-prompt astronaut-on-horse photograph).
+
+### ⚠️ CORRECTION (2026-07-22, same day, later session): the F16-fused "defect" was a HARNESS bug
+
+The standalone test family (`Ideogram4GenerationTests` and every A/B built on it) fed the RAW
+`Qwen3Tokenizer.EncodeChat` output — **padded to 2048 tokens with BOS(151643) and carrying a
+`<think></think>` block** — while the engine recipe (`Ideogram4RecipePipeline`) trims the pad and
+disables the think block. Ideogram attends UNMASKED, so ~2020 pad-token TE rows drowned the ~18 real
+prompt tokens: **the standalone BASELINE was itself degenerate** (deterministic texture fields —
+face-tiles in F16, gold pebbles in F32; the two differ because an unconditioned trajectory is
+precision-chaotic, NOT because F16 is broken). Nobody had eyeballed the standalone baseline — only
+fused-vs-baseline diffs and the (always-correct) Swarm image. Consequences:
+- The "comfy_quant/weight_scale companion" causal claim for the fused-F16 degenerate output is
+  **unsubstantiated** — fused F16 was compared against an equally-degenerate baseline. The
+  `FuseSwiGluPairs` guard stays (harmless; fusion is opt-in and re-scoped to LLM decode), but the
+  mechanism story is retracted.
+- The fused **−4% perf** number was measured at the padded 6144-token sequence, not the production
+  ~4120 — treat as unmeasured (moot: Ideogram keeps the split FFN regardless).
+- The standalone step time 1.237 s/step was the PADDED shape; the fixed harness matches the
+  Swarm/production shape (~0.96 s/step). All model files sha256-verified against
+  Comfy-Org/Ideogram-4 (TE + both DiTs + VAE checked; first three match, VAE is the shared
+  `VAE/Flux/flux2-vae.safetensors` used by the verified Flux.2 pipelines).
+- Both test harnesses now mirror the engine tokenization (`includeThinkBlock: false` + right-pad
+  trim); fixed-harness probe produces an on-prompt astronaut image at warm ~20 s. Same disease as
+  the Wan standalone-test pad-row bug (2026-07-22) — **house rule: standalone harnesses must copy
+  the engine's conditioning path exactly, and baselines get eyeballed BEFORE any A/B is trusted.**

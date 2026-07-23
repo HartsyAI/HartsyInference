@@ -225,6 +225,24 @@ SDPA share (27%).
        engine-anchored treatment first, same as Wan's ground-truth pass). Chroma/HiDream wiring
        DEFERRED — no weights on disk to verify, and Chroma's default-ON graph makes blind wiring a
        regression risk.)*
+       *(📊 2026-07-22 — **Ideogram 4 WIRED** (`Ideogram4Transformer.Forward` optional `stepCache`, one
+       instance PER transformer — cond/uncond are different 9.3B models; regional plans excluded).
+       First calibration + A/B attempt exposed a STANDALONE-HARNESS BUG, not a model result: the test
+       family fed the raw 2048-padded EncodeChat array (+ `<think>` block) into Ideogram's unmasked
+       attention — baseline itself was degenerate (see the correction in
+       [the sageattn/fusion results doc](../../benchmarks/results/2026-07-22_accel_sageattn_3060.md)),
+       which also retracts the morning's "comfy_quant fused-F16 defect" mechanism story. Harnesses
+       fixed to mirror the engine recipe (trim + no-think).
+       **📊 Fixed-harness result — SHIPPED OPT-IN, gate PASSED**
+       ([results](../../benchmarks/results/2026-07-22_accel_stepcache_ideogram_4090.md)): baseline
+       19.5 s byte-stable eyeball-✓; calibration shows indicator FLAT vs residual drift falling
+       0.72→0.12 ⇒ poly gate structurally blind here ⇒ new `HARTSY_STEP_CACHE_LATE` window gate
+       (reuse only in the schedule tail; `StepCacheEnv.ReadLateWindow`, wired in Ideogram4Pipeline).
+       Full-schedule raw gates NEGATIVE (1.8–2.5× but murky darkening, SSIM 0.63–0.73);
+       **`LATE=0.5`+`0.3` → 14.1 s = 1.39× at SSIM 0.9530 ✓ eyeball-indistinguishable;
+       `LATE=0.5`+`0.15` → 15.0 s = 1.31× at 0.9653**. Fleet lesson: check indicator
+       schedule-informativeness before fitting a poly — Qwen informative/poly-wins,
+       Ideogram uninformative/window-wins.)*
 6. [ ] Negative-result discipline: if a model's gate never fires below quality-loss thresholds, record
        that in the results doc with the drift trace (the polynomial-rescaled TeaCache gate is the
        documented upgrade path — per-model coefficient fit, STEP_ACCELERATION §2.3).

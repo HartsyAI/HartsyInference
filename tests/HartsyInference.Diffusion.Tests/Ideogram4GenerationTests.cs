@@ -111,8 +111,14 @@ public class Ideogram4GenerationTests
                 return;
             }
 
+            // Mirror the ENGINE recipe (Ideogram4RecipePipeline): no <think> block + trim the BOS right-pad.
+            // The raw EncodeChat array is padded to maxLength (2048) and Ideogram attends UNMASKED — feeding
+            // it verbatim drowns the prompt in ~2020 pad rows (degenerate texture output, root-caused 2026-07-22).
             using Qwen3Tokenizer tokenizer = new(vocab, merges, maxLength: config.MaxTextTokens);
-            int[] promptTokens = tokenizer.EncodeChat("A photograph of an astronaut riding a horse on the moon");
+            int[] paddedTokens = tokenizer.EncodeChat("A photograph of an astronaut riding a horse on the moon", includeThinkBlock: false);
+            int trimEnd = paddedTokens.Length;
+            while (trimEnd > 1 && paddedTokens[trimEnd - 1] == Qwen3Tokenizer.BosTokenId) trimEnd--;
+            int[] promptTokens = paddedTokens[..trimEnd];
 
             using Ideogram4Pipeline pipeline = new(backend, textEncoder, conditional, unconditional, vae, config);
             TextToImageRequest request = new()
