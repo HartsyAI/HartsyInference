@@ -1515,7 +1515,7 @@ public sealed class CudaBackend : IBackend
         long lastDim = input.Shape[rank - 1];
         long rows = input.ElementCount / lastDim;
         // Sidecar only pays for the M=1 decode row feeding a dp4a GEMV; anything else runs the plain op.
-        if (!_quantAtProducer || rows != 1 || lastDim % 32 != 0
+        if (!_quantAtProducer || !EnableDp4aGemv || rows != 1 || lastDim % 32 != 0
             || input.DType != DType.F32 || weight.DType != DType.F32 || output.DType != DType.F32)
         {
             RmsNorm(output, input, weight, eps);
@@ -3061,7 +3061,7 @@ public sealed class CudaBackend : IBackend
     {
         int normDim = (int)weight.ElementCount;
         long rows = a.ElementCount / normDim;
-        if (!_quantAtProducer || rows != 1 || normDim % 32 != 0
+        if (!_quantAtProducer || !EnableDp4aGemv || rows != 1 || normDim % 32 != 0
             || residOut.DType != DType.F32 || a.DType != DType.F32 || b.DType != DType.F32 || weight.DType != DType.F32)
         {
             AddRmsNorm(residOut, normOut, a, b, weight, eps);
@@ -3105,7 +3105,7 @@ public sealed class CudaBackend : IBackend
     public void GluActivateEmitQ8(Tensor output, Tensor gateUp, int ff, bool gelu)
     {
         long rows = gateUp.ElementCount / (2L * ff);
-        if (!_quantAtProducer || rows != 1 || ff % 32 != 0
+        if (!_quantAtProducer || !EnableDp4aGemv || rows != 1 || ff % 32 != 0
             || output.DType != DType.F32 || gateUp.DType != DType.F32)
         {
             GluActivate(output, gateUp, ff, gelu);

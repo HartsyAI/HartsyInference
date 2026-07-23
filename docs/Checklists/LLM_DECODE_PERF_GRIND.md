@@ -891,6 +891,35 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 >    but output-changing, so it needs the tolerance argument, not the byte argument).
 > e. Graph fork/join parallel branches (structural, biggest ceiling: tiny kernels could overlap).**
 
+> **STATUS UPDATE (2026-07-23, round 10: quantize-at-producer LANDED (bit-exact, fleet-safe) —
+> and the tiny-kernel-tax model is REVISED by direct in-graph measurement.**
+> 1. **Quantize-at-producer**: `lm_rmsnorm_q8_1_f32` / `lm_add_rmsnorm_q8_1_f32` / `lm_glu_act_q8_1_f32`
+>    emit the Q8_1 activation sidecar (xq/xd/xs) in the SAME launch as their F32 output (quantize
+>    math verbatim from quantize_activation_q8_1_f32 — amax/int-sum are exact order-independent
+>    reductions, so the sidecar bytes are identical); a sidecar cache in GpuTransferHelper
+>    (invalidated on every rebind/sync/dispose/bulk-free) lets the dp4a Linear consume it and skip
+>    its own quantize launch. Wired GRAPH-STEP ONLY (pre-attn norm → qkv, add+norm → gate-up,
+>    GLU → down; eager stays the pure reference). Kill-switch `HARTSY_QUANT_AT_PRODUCER=0`.
+>    VERIFIED BYTE-IDENTICAL on gemma3 + deepseek (2 prompts × 64 tokens each); 184/184 CUDA.
+>    Removes ~4 quantize launches/layer (partial-fusion layers' v GEMV also shares the pre-norm
+>    sidecar). **gemma3 124.0 → 126.3 (+1.8%), qwen2.5 173.6 → 174.9 (+0.7%)**, rest flat.
+> 2. **In-graph tiny-kernel cost measured directly** (kill-switch ladder on gemma3, two independent
+>    derivations agree): a graph-replayed tiny kernel costs **~1.4 µs**, NOT the ~7 µs of an
+>    eager-stream launch (that 7 µs is API/stream overhead the graph already eliminates — which is
+>    also why the round-9 qknorm fusion was flat). Probe DELTAS transfer to production exactly
+>    (dp4a-off ladder: predicted +2.9-3.2 ms, measured +3.22 ms).
+> 3. **THE OPEN MYSTERY, precisely quantified**: gemma3's graph step (7.92 ms/token) exceeds the
+>    sum of ALL measured components (GEMVs 3.83 by per-shape probe + attention 0.53 resident-probed,
+>    window-checked + ~250 tiny kernels × 1.4 µs + head-on-fused-path ✓ + KV-capacity right-sized ✓
+>    + host overlapped, D2H=1 ✓) by **~3 ms**; qwen2.5-0.5b likewise ~3 ms; deepseek/qwen3/llama
+>    budgets CLOSE. The residual is switch-INVARIANT (identical under dp4a-off, fusion-off,
+>    scatter-off deltas) — some constant per-layer cost the shape probes don't reproduce.
+>    **NEXT ACTION: `ncu` on the graph replay** (per-kernel gpu__time_duration over one decode
+>    step) — needs sudo on this box:
+>    `sudo CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 ~/.local/cuda-tools/nsight-compute/opt/nvidia/nsight-compute/2026.2.1/ncu --metrics gpu__time_duration.sum --launch-skip 4000 --launch-count 700 --csv <decode-probe> <gemma3-gguf> 8 1 off`
+>    (graph-off eager is fine for attribution — the ladder proved probe deltas transfer; what's
+>    needed is the true per-kernel wall of the ~250 real kernels at production data/conditions).**
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

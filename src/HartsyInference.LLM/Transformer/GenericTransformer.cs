@@ -1485,7 +1485,12 @@ public sealed unsafe class GenericTransformer : IDisposable
             TensorShape flat = new(1, t, h);
 
             Tensor pre = new(flat, DType.F32);
-            PreSublayer(backend, pre, hidden, _inNorm, _normBias);
+            // Quantize-at-producer: the plain-RMS pre-attn norm feeds the QKV GEMV directly, so emit its
+            // Q8_1 sidecar in the same launch (identical output bytes; the GEMV skips its quantize).
+            if (_cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm && _normBias is null)
+                backend.RmsNormEmitQ8(pre, hidden, _inNorm!, _cfg.RmsNormEps);
+            else
+                PreSublayer(backend, pre, hidden, _inNorm, _normBias);
 
             // t=1 makes [1,1,heads,d] and [1,heads,1,d] byte-identical contiguous layouts, so q/k/v are
             // allocated DIRECTLY in the head-major shape attention and KV-append expect — the four per-layer
@@ -1619,7 +1624,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             // LayerNorm/biased-norm/post-norm layers keep the two-op sequence.
             if (_cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm && _postNormBias is null && _postNorm is not null)
             {
-                backend.AddRmsNorm(afterAttn, preMlp, hidden, attnOut, _postNorm, _cfg.RmsNormEps);
+                backend.AddRmsNormEmitQ8(afterAttn, preMlp, hidden, attnOut, _postNorm, _cfg.RmsNormEps);
             }
             else
             {
@@ -1627,7 +1632,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
             }
             attnOut.Dispose();
-            Tensor mlpOut = Mlp(backend, preMlp, t);
+            Tensor mlpOut = Mlp(backend, preMlp, t, emitQ: true);
 
             mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);
             Tensor result = new(flat, DType.F32);
