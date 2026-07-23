@@ -6297,6 +6297,13 @@ public sealed class CudaBackend : IBackend
         _context.EnsureCurrent();
         long f0 = (long)_context.GetMemoryInfo().freeBytes;
         StepGraphInvalidateForActivationFree();
+        // Drop the cuDNN sessions too: their execution-plan + workspace caches held ~4.5 GB after a
+        // Z-Image session (measured 2026-07-23 — enough to trip Ideogram's ≥20 GB guard after a model
+        // switch). Both instances lazily recreate on next use; the only cost is one plan re-search.
+        _cudnnSdpa?.Dispose();
+        _cudnnSdpa = null;
+        _cudnnConv?.Dispose();
+        _cudnnConv = null;
         // EvictAll clears weights + casts + activations (syncing the stream first); the trim then returns the
         // stream-ordered pool's reservations so cuMemGetInfo/persistent allocs see the memory as actually free.
         GpuTransferHelper.EvictAll();
