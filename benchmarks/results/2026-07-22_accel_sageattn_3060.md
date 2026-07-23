@@ -230,3 +230,18 @@ fused-vs-baseline diffs and the (always-correct) Swarm image. Consequences:
   trim); fixed-harness probe produces an on-prompt astronaut image at warm ~20 s. Same disease as
   the Wan standalone-test pad-row bug (2026-07-22) — **house rule: standalone harnesses must copy
   the engine's conditioning path exactly, and baselines get eyeballed BEFORE any A/B is trusted.**
+
+
+## Occupancy experiment: `__launch_bounds__(128,4)` coerced-spill A/B (2026-07-23, 3060)
+
+The independent H0 ncu capture ([2026-07-23_h0_ncu_top5_3060.md](2026-07-23_h0_ncu_top5_3060.md))
+diagnosed the v1 kernel as latency/occupancy-bound: 24.9% occupancy, register-capped (3 blocks/SM),
+DRAM 3–5%, tensor-pipe 37–47%. Cheapest test: force a 4th resident block via launch bounds and let
+the compiler spill. Raw walls looked like a 5–10% win across 2k–6k shapes — **but the in-suite cuDNN
+control moved by the SAME margin in the same direction** (run A rode boost clocks from a just-finished
+heavy job on the same card). Normalized to the control, 3-block vs 4-block is equal within 1–2%.
+**Verdict: NEUTRAL — reverted; the occupancy hypothesis is not confirmed by coerced spills.** True
+register reduction (spill-free) remains the open lever; it is structural surgery (the softmax/O state
+is the register budget) and stays deprioritized at ~60% mixed roofline. Method note for the fleet:
+never A/B kernel builds in separate runs without an in-run control or locked clocks — the paired
+cuDNN baseline is what caught this.
