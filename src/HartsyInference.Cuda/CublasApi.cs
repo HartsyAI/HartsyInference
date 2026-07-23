@@ -88,6 +88,8 @@ internal static partial class CublasApi
     internal const int CUDA_R_16BF = 14;
     internal const int CUDA_R_4F_E2M1 = 33;  // CUDA 12.8+ (Blackwell / SM 10.0+) — native FP4 GEMM operand
     internal const int CUDA_R_8F_UE8M0 = 34; // CUDA 12.8+ — UE8M0 microscaling block-scale type
+    internal const int CUDA_R_8I = 3;        // int8 GEMM operand (IMMA tensor cores on SM 7.5+)
+    internal const int CUDA_R_32I = 10;      // int32 accumulate/output for int8 GEMM
 
     // ── Compute Type Constants ──────────────────────────────────────────
 
@@ -96,6 +98,7 @@ internal static partial class CublasApi
     internal const int CUBLAS_COMPUTE_32F_FAST_16F = 74;
     internal const int CUBLAS_COMPUTE_32F_FAST_16BF = 75;
     internal const int CUBLAS_COMPUTE_32F_FAST_TF32 = 77;
+    internal const int CUBLAS_COMPUTE_32I = 72;          // int8 operands, int32 accumulate (IMMA)
 
     // ── Algorithm Constants ─────────────────────────────────────────────
 
