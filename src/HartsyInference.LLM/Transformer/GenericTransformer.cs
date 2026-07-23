@@ -795,6 +795,11 @@ public sealed unsafe class GenericTransformer : IDisposable
         // AFTER slicing the fused output back into q/k/v, exactly as it was applied after the separate
         // projections before — fusion only changes the projection dispatch, not anything downstream.
         private Tensor? _qkvW, _qkvB;
+        // Partial fused Q+K projection for layers where v's dtype differs (mixed-quant GGUF schemes put
+        // Q6_K/Q8_0 on attn_v in roughly half the layers of a Q4_K_M/Q5_0-style file, which blocks the full
+        // QKV fusion above). Q and K always share a dtype in those schemes, so [q|k] still fuses: one GEMV
+        // (and one activation-quantize) launch replaces two, and V keeps its own projection.
+        private Tensor? _qkW, _qkB;
         private Tensor? _qNorm, _kNorm, _qNormBias, _kNormBias;
         private Tensor? _sink;   // GPT-OSS: per-head attention-sink logits [Hq]
         private Tensor? _alibiSlopes;   // ALiBi: per-head slopes [Hq] (MPT/BLOOM/Falcon-classic); these models use no RoPE
@@ -926,6 +931,14 @@ public sealed unsafe class GenericTransformer : IDisposable
                 if (_qB is not null && _kB is not null && _vB is not null)
                     _qkvB = ConcatRows(_qB, _kB, _vB);
             }
+            else if (hasOwnKv && _qW.DType == _kW!.DType
+                && Environment.GetEnvironmentVariable("HARTSY_QK_FUSION") != "0")
+            {
+                // Mixed-dtype v (see _qkW's doc comment): fuse what still matches.
+                _qkW = ConcatRows(_qW, _kW);
+                if (_qB is not null && _kB is not null)
+                    _qkB = ConcatRows(_qB, _kB);
+            }
             if (_cfg.QkNorm)
             {
                 _qNorm = LoadNorm(w[$"{prefix}.self_attn.q_norm.weight"], _cfg.RmsNormAddOne);
@@ -1051,7 +1064,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         /// Gemma-4 <see cref="TransformerConfig.ParallelDenseMoeBranch"/> layer this is still the MoE block ONLY
         /// (the parallel dense branch is handled separately by <see cref="GemmaMoeFfn"/>, which calls
         /// <see cref="DenseFfn"/> directly instead of going through here).</summary>
-        private Tensor Mlp(IBackend backend, Tensor preMlp, int n)
+        private Tensor Mlp(IBackend backend, Tensor preMlp, int n, bool emitQ = false)
         {
             if (_moe is not null)
             {
@@ -1059,14 +1072,14 @@ public sealed unsafe class GenericTransformer : IDisposable
                 preMlp.Dispose();
                 return moeOut;
             }
-            return DenseFfn(backend, preMlp, n);
+            return DenseFfn(backend, preMlp, n, emitQ);
         }
 
         /// <summary>The dense gated (SwiGLU/GeGLU) or non-gated FFN only — never the MoE block. Consumes
         /// (disposes) <paramref name="preMlp"/>. Used by <see cref="Mlp"/> for every non-MoE layer, and directly
         /// by <see cref="GemmaMoeFfn"/> for Gemma-4's parallel dense/"shared" branch (which has a live
         /// <see cref="_moe"/> on the SAME layer, so it cannot go through <see cref="Mlp"/>'s dispatch).</summary>
-        private Tensor DenseFfn(IBackend backend, Tensor preMlp, int n)
+        private Tensor DenseFfn(IBackend backend, Tensor preMlp, int n, bool emitQ = false)
         {
             // Derived from the loaded weight's own shape, not _cfg.IntermediateSize — Gemma-4's KV-sharing
             // layers use a WIDER FFN than the rest (E2B: 12288 vs 6144), so a single global config value would
@@ -1090,7 +1103,8 @@ public sealed unsafe class GenericTransformer : IDisposable
                     Tensor gateUpOut = new(new TensorShape(1, n, ffDim * 2), DType.F32);
                     Project(backend, gateUpOut, preMlp, _gateUpW!, _gateUpB, _cfg.LowVramQuant);
                     comb = new(ff, DType.F32);
-                    backend.GluActivate(comb, gateUpOut, ffDim, gelu: _cfg.Activation == ActivationKind.GeluTanh);
+                    if (emitQ) backend.GluActivateEmitQ8(comb, gateUpOut, ffDim, gelu: _cfg.Activation == ActivationKind.GeluTanh);
+                    else backend.GluActivate(comb, gateUpOut, ffDim, gelu: _cfg.Activation == ActivationKind.GeluTanh);
                     gateUpOut.Dispose();
                     up.Dispose();
                 }
@@ -1210,7 +1224,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _parFfnNorm, _parFfnNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _qkvW, _qkvB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _vNormOnes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _gateB, _upW, _upB, _gateUpW, _gateUpB, _downW, _downB, _pleInpGate, _pleProj, _plePostNorm, _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale];
+            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _parFfnNorm, _parFfnNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _qkvW, _qkvB, _qkW, _qkB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _vNormOnes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _gateB, _upW, _upB, _gateUpW, _gateUpB, _downW, _downB, _pleInpGate, _pleProj, _plePostNorm, _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
             if (_crossAttn is not null) foreach (Tensor t in _crossAttn.EnumerateWeights()) yield return t;
@@ -1249,6 +1263,22 @@ public sealed unsafe class GenericTransformer : IDisposable
                 backend.SliceLastDim(k, qkvOut, nq);
                 backend.SliceLastDim(v, qkvOut, nq + nk);
                 qkvOut.Dispose();
+                return;
+            }
+            if (_qkW is not null && hasOwnKv && k is not null && v is not null && t == 1)
+            {
+                // Partial fusion (mixed-dtype v): one [q|k] GEMV, v projects separately. DECODE ONLY (t=1):
+                // the fusion's entire win is per-launch overhead, which prefill's single big GEMM already
+                // amortizes — and fusing prefill would change the cuBLAS GEMM shape (one [q|k] GEMM instead
+                // of two), shifting prefill numerics at float-rounding level. The decode GEMV is bit-exact
+                // row-for-row (row-independent kernel), so t=1 fusion preserves outputs exactly.
+                int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0];
+                Tensor qkOut = new(new TensorShape(1, t, nq + nk), DType.F32);
+                Project(backend, qkOut, pre, _qkW, _qkB, lowVram);
+                backend.SliceLastDim(q, qkOut, 0);
+                backend.SliceLastDim(k, qkOut, nq);
+                qkOut.Dispose();
+                Project(backend, v, pre, _vW!, _vB, lowVram);
                 return;
             }
             Project(backend, q, pre, _qW!, _qB, lowVram);
@@ -1465,39 +1495,109 @@ public sealed unsafe class GenericTransformer : IDisposable
             // last dim (d either way), the decode RoPE kernel derives heads from elementCount/headDim, and
             // KvCacheAppendDev reads tNew from Shape[2] (1 in both layouts).
             bool fullNorm = _cfg.QkNorm && _cfg.QkNormFullDim;
-            Tensor q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, hq, t, d), DType.F32);
-            Tensor k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, hkv, t, d), DType.F32);
-            Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
-            ProjectQkv(backend, q, k, v, pre, t, hasOwnKv: true, _cfg.LowVramQuant);
-            pre.Dispose();
-
-            if (_cfg.QkNorm)
+            bool interleaved = _cfg.Rope == RopeStyle.Interleaved;
+            Tensor kFull = cache.KeyPrefix(layerIndex);
+            Tensor vFull = cache.ValuePrefix(layerIndex);
+            Tensor q;
+            if (!_cfg.QkNorm && _qkvW is not null)
             {
-                Tensor qN = new(new TensorShape(1, hq, t, d), DType.F32);
-                Tensor kN = new(new TensorShape(1, hkv, t, d), DType.F32);
-                if (_cfg.UseLayerNorm)
+                // Fused QKV epilogue (no QK-norm between projection and rope): the concatenated [q|k|v]
+                // projection output feeds ONE kernel that ropes q, ropes k into the cache, and copies v into
+                // the cache — replacing three slices, two ropes, and two appends (bit-identical math).
+                int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0], nv = (int)_vW!.Shape[0];
+                Tensor qkvOut = new(new TensorShape(1, t, nq + nk + nv), DType.F32);
+                Project(backend, qkvOut, pre, _qkvW, _qkvB, _cfg.LowVramQuant);
+                pre.Dispose();
+                q = new(new TensorShape(1, hq, t, d), DType.F32);
+                backend.QkvRopeScatterDecodeStep(q, kFull, vFull, qkvOut, cosTable, sinTable,
+                    hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                qkvOut.Dispose();
+            }
+            else if (_cfg.QkNorm && !_cfg.QkNormFullDim && !_cfg.UseLayerNorm && !_cfg.VNorm
+                && (_qkvW is not null || _qkW is not null)
+                && Environment.GetEnvironmentVariable("HARTSY_QKNORM_SCATTER") != "0")   // kill-switch
+            {
+                // Per-head QK-norm epilogue (Qwen3/Gemma-3): ONE kernel consumes the fused projection
+                // output, per-head RMS-norms q/k, ropes, and scatters k/v into the cache — replacing
+                // three slices, two RMSNorm launches, and the rope-scatter (bit-identical reduction,
+                // see lm_qknorm_rope_scatter_f32). Full-dim norm (OLMoE), LayerNorm QK-norm (StableLM),
+                // and V-norm (Gemma-4) keep the composed path below.
+                int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0];
+                q = new(new TensorShape(1, hq, t, d), DType.F32);
+                if (_qkvW is not null)
                 {
-                    backend.LayerNorm(qN, q, _qNorm!, _qNormBias!, _cfg.RmsNormEps);
-                    backend.LayerNorm(kN, k, _kNorm!, _kNormBias!, _cfg.RmsNormEps);
+                    int nv = (int)_vW!.Shape[0];
+                    Tensor qkvOut = new(new TensorShape(1, t, nq + nk + nv), DType.F32);
+                    Project(backend, qkvOut, pre, _qkvW, _qkvB, _cfg.LowVramQuant);
+                    pre.Dispose();
+                    backend.QkvNormRopeScatterDecodeStep(q, kFull, vFull, qkvOut, _qNorm!, _kNorm!,
+                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                    qkvOut.Dispose();
                 }
                 else
                 {
-                    backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
-                    backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
+                    Tensor qkOut = new(new TensorShape(1, t, nq + nk), DType.F32);
+                    Project(backend, qkOut, pre, _qkW!, _qkB, _cfg.LowVramQuant);
+                    Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
+                    Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
+                    pre.Dispose();
+                    backend.QkNormRopeScatterVDecodeStep(q, kFull, vFull, qkOut, v, _qNorm!, _kNorm!,
+                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                    qkOut.Dispose();
+                    v.Dispose();
                 }
-                q.Dispose(); k.Dispose();
-                q = qN; k = kN;
             }
+            else if (!_cfg.QkNorm && _qkW is not null
+                && Environment.GetEnvironmentVariable("HARTSY_QK_SCATTER") != "0")   // kill-switch, mirrors HARTSY_QK_FUSION
+            {
+                // Partial fusion (mixed-dtype v, no QK-norm): one [q|k] GEMV plus v's own projection feed the
+                // same rope+scatter kernel — q/k come from the concatenated buffer, v from its own tensor.
+                int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0];
+                Tensor qkOut = new(new TensorShape(1, t, nq + nk), DType.F32);
+                Project(backend, qkOut, pre, _qkW, _qkB, _cfg.LowVramQuant);
+                Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
+                Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
+                pre.Dispose();
+                q = new(new TensorShape(1, hq, t, d), DType.F32);
+                backend.QkRopeScatterVDecodeStep(q, kFull, vFull, qkOut, v, cosTable, sinTable,
+                    hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                qkOut.Dispose();
+                v.Dispose();
+            }
+            else
+            {
+                q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, hq, t, d), DType.F32);
+                Tensor k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, hkv, t, d), DType.F32);
+                Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
+                ProjectQkv(backend, q, k, v, pre, t, hasOwnKv: true, _cfg.LowVramQuant);
+                pre.Dispose();
 
-            bool interleaved = _cfg.Rope == RopeStyle.Interleaved;
-            backend.RopeApplyDecodeStep(q, cosTable, sinTable, _cfg.RotaryDim, interleaved, devicePos);
-            backend.RopeApplyDecodeStep(k, cosTable, sinTable, _cfg.RotaryDim, interleaved, devicePos);
+                if (_cfg.QkNorm)
+                {
+                    Tensor qN = new(new TensorShape(1, hq, t, d), DType.F32);
+                    Tensor kN = new(new TensorShape(1, hkv, t, d), DType.F32);
+                    if (_cfg.UseLayerNorm)
+                    {
+                        backend.LayerNorm(qN, q, _qNorm!, _qNormBias!, _cfg.RmsNormEps);
+                        backend.LayerNorm(kN, k, _kNorm!, _kNormBias!, _cfg.RmsNormEps);
+                    }
+                    else
+                    {
+                        backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
+                        backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
+                    }
+                    q.Dispose(); k.Dispose();
+                    q = qN; k = kN;
+                }
 
-            Tensor kFull = cache.KeyPrefix(layerIndex);
-            Tensor vFull = cache.ValuePrefix(layerIndex);
-            backend.KvCacheAppendDev(kFull, k, 0, devicePos);
-            backend.KvCacheAppendDev(vFull, v, 0, devicePos);
-            k.Dispose(); v.Dispose();
+                // One fused rope+scatter launch (rope q → qRoped, rope k → cache, copy v → cache) replaces
+                // two ropes and two appends — the separate-source variant of the fused-QKV path above.
+                Tensor qRoped = new(new TensorShape(1, hq, t, d), DType.F32);
+                backend.RopeScatterKvDecodeStep(qRoped, kFull, vFull, q, k, v, cosTable, sinTable,
+                    hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                q.Dispose(); k.Dispose(); v.Dispose();
+                q = qRoped;
+            }
 
             float scale = _cfg.AttnScale;
             // Local (sliding-window) layers attend only the most recent SlidingWindow keys — same per-layer
@@ -1514,11 +1614,19 @@ public sealed unsafe class GenericTransformer : IDisposable
 
             attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);
             Tensor afterAttn = new(flat, DType.F32);
-            backend.Add(afterAttn, hidden, attnOut);
-            attnOut.Dispose();
-
             Tensor preMlp = new(flat, DType.F32);
-            PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
+            // Fused residual-add + RMSNorm (bit-identical to Add then RmsNorm) for the plain pre-norm case;
+            // LayerNorm/biased-norm/post-norm layers keep the two-op sequence.
+            if (_cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm && _postNormBias is null && _postNorm is not null)
+            {
+                backend.AddRmsNorm(afterAttn, preMlp, hidden, attnOut, _postNorm, _cfg.RmsNormEps);
+            }
+            else
+            {
+                backend.Add(afterAttn, hidden, attnOut);
+                PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
+            }
+            attnOut.Dispose();
             Tensor mlpOut = Mlp(backend, preMlp, t);
 
             mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);

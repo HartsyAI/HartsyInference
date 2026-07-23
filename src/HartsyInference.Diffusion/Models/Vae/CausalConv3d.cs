@@ -29,17 +29,19 @@ public sealed unsafe class CausalConv3d
     private readonly bool _causal;
     private readonly bool _replicateFirstPad;   // LTX/HunyuanVideo: pad with copies of the edge frame instead of zeros
     private readonly bool _spatialReplicatePad; // HunyuanVideo: F.pad(mode="replicate") spatially instead of zero-pad
+    private readonly bool _spatialReflectPad;   // LTX-2: F.pad(mode="reflect") spatially instead of zero-pad
     private readonly Tensor[] _weight2d;  // kt slices of [cOut, cIn, kh, kw]
     private readonly Tensor? _bias;
 
-    /// <summary>Builds the op from a 5-D conv weight <c>[cOut, cIn, kt, kh, kw]</c> and optional bias, pre-slicing the kt temporal taps into 2-D conv weights. <paramref name="padT"/>/<paramref name="padH"/>/<paramref name="padW"/> are the nn.Conv3d <c>padding</c> values (temporal becomes <c>2·padT</c> causal-left). <paramref name="replicateFirstPad"/> fills the leading causal frames with copies of the input's first frame (LTX-Video, HunyuanVideo) instead of zeros (Wan2.2). <paramref name="spatialReplicatePad"/> pads H/W borders by edge replication (HunyuanVideo <c>F.pad(mode="replicate")</c>) instead of zeros.</summary>
+    /// <summary>Builds the op from a 5-D conv weight <c>[cOut, cIn, kt, kh, kw]</c> and optional bias, pre-slicing the kt temporal taps into 2-D conv weights. <paramref name="padT"/>/<paramref name="padH"/>/<paramref name="padW"/> are the nn.Conv3d <c>padding</c> values (temporal becomes <c>2·padT</c> causal-left). <paramref name="replicateFirstPad"/> fills the leading causal frames with copies of the input's first frame (LTX-Video, HunyuanVideo) instead of zeros (Wan2.2). <paramref name="spatialReplicatePad"/> pads H/W borders by edge replication (HunyuanVideo <c>F.pad(mode="replicate")</c>) instead of zeros. <paramref name="spatialReflectPad"/> pads H/W borders by mirror-reflection (LTX-2 <c>F.pad(mode="reflect")</c>) instead of zeros — mutually exclusive with <paramref name="spatialReplicatePad"/>, and only supported on the batch-1 fast path with no streaming cache.</summary>
     public CausalConv3d(Tensor weight5d, Tensor? bias,
         int strideT = 1, int strideH = 1, int strideW = 1,
         int padT = 0, int padH = 0, int padW = 0, bool replicateFirstPad = false, bool causal = true,
-        bool spatialReplicatePad = false)
+        bool spatialReplicatePad = false, bool spatialReflectPad = false)
     {
         _replicateFirstPad = replicateFirstPad;
         _spatialReplicatePad = spatialReplicatePad;
+        _spatialReflectPad = spatialReflectPad;
         _causal = causal;
         if (weight5d.Shape.Rank != 5)
             throw new ArgumentException($"weight must be 5-D [cOut,cIn,kt,kh,kw], got {weight5d.Shape}.", nameof(weight5d));
@@ -124,14 +126,23 @@ public sealed unsafe class CausalConv3d
         // matching the per-frame skip; replicate-pad frames contribute exactly like F.pad(mode="replicate").
         if (batch == 1 && !DisableBatchedPath)
         {
-            bool spatialPre = _spatialReplicatePad && (_padH > 0 || _padW > 0);
-            int convPadH = spatialPre ? 0 : _padH;
-            int convPadW = spatialPre ? 0 : _padW;
-            int hp = spatialPre ? h + 2 * _padH : h;
-            int wp = spatialPre ? w + 2 * _padW : w;
+            bool reflectPre = _spatialReflectPad && (_padH > 0 || _padW > 0);
+            if (reflectPre && cacheFrames is not null)
+                throw new NotSupportedException("CausalConv3d spatialReflectPad does not support a streaming cacheFrames prepend (LTX-2 decode is one-shot, non-streaming).");
+            Tensor? reflectPadded = reflectPre ? ReflectPadSpatial5D(input, batch, tin, h, w) : null;
+            Tensor convInput = reflectPadded ?? input;
+            int hSrc = reflectPre ? h + 2 * _padH : h;
+            int wSrc = reflectPre ? w + 2 * _padW : w;
+
+            bool spatialPre = !reflectPre && _spatialReplicatePad && (_padH > 0 || _padW > 0);
+            int convPadH = spatialPre || reflectPre ? 0 : _padH;
+            int convPadW = spatialPre || reflectPre ? 0 : _padW;
+            int hp = spatialPre || reflectPre ? hSrc : h;
+            int wp = spatialPre || reflectPre ? wSrc : w;
             using Tensor padded = new Tensor(new TensorShape(paddedT, _cIn, hp, wp), DType.F32);
-            backend.BuildPaddedFrames(padded, input, cacheFrames, zeroPad, _replicateFirstPad,
+            backend.BuildPaddedFrames(padded, convInput, cacheFrames, zeroPad, _replicateFirstPad,
                 spatialPre ? _padH : 0, spatialPre ? _padW : 0);
+            reflectPadded?.Dispose();
             Tensor fastOut = new Tensor(new TensorShape([1L, _cOut, tout, hOut, wOut]), DType.F32);
             backend.FillBias(fastOut, _bias);
             for (int dt = 0; dt < _kt; dt++)
@@ -209,6 +220,48 @@ public sealed unsafe class CausalConv3d
             backend.ExtractVaeFrame(outF, input, ti);
         }
         return outF;
+    }
+
+    /// <summary>Mirror-reflect pads a <c>[B, cIn, T, H, W]</c> tensor's H/W borders to <c>[B, cIn, T, H+2·padH, W+2·padW]</c>
+    /// (PyTorch <c>F.pad(mode="reflect")</c>: the border pixel itself is NOT repeated — index <c>-1</c> maps to source
+    /// index <c>1</c>, not <c>0</c> — unlike <see cref="ReplicatePadSpatial"/>'s edge-clamp). Used by the LTX-2 VAE decoder,
+    /// whose diffusers reference (<c>LTX2VideoDecoder3d</c>) defaults every conv to <c>spatial_padding_mode="reflect"</c>.</summary>
+    private Tensor ReflectPadSpatial5D(Tensor input, int batch, int t, int h, int w)
+    {
+        int hp = h + 2 * _padH, wp = w + 2 * _padW;
+        Tensor outF = new Tensor(new TensorShape([(long)batch, _cIn, t, hp, wp]), DType.F32);
+        Tensor inF32 = input.DType == DType.F32 ? input : input.CastTo(DType.F32);
+        float* sp = (float*)inF32.DataPointer;
+        float* dp = (float*)outF.DataPointer;
+        long frame = (long)h * w;
+        long frameP = (long)hp * wp;
+        for (int b = 0; b < batch; b++)
+            for (int ci = 0; ci < _cIn; ci++)
+                for (int ti = 0; ti < t; ti++)
+                {
+                    long srcBase = (((long)b * _cIn + ci) * t + ti) * frame;
+                    long dstBase = (((long)b * _cIn + ci) * t + ti) * frameP;
+                    for (int y = 0; y < hp; y++)
+                    {
+                        int sy = ReflectIndex(y - _padH, h);
+                        for (int x = 0; x < wp; x++)
+                        {
+                            int sx = ReflectIndex(x - _padW, w);
+                            dp[dstBase + (long)y * wp + x] = sp[srcBase + (long)sy * w + sx];
+                        }
+                    }
+                }
+        if (!ReferenceEquals(inF32, input)) inF32.Dispose();
+        return outF;
+    }
+
+    /// <summary>Maps an out-of-range index to its PyTorch <c>reflect</c>-mode source index (no edge repeat):
+    /// <c>-1 → 1</c>, <c>-2 → 2</c>, <c>len → len-2</c>, etc. Only correct for pad ≤ len-1 (true here: pad is always 1).</summary>
+    private static int ReflectIndex(int i, int len)
+    {
+        if (i < 0) return -i;
+        if (i >= len) return 2 * (len - 1) - i;
+        return i;
     }
 
     /// <summary>Edge-replicate pads a <c>[B, cIn, H, W]</c> frame to <c>[B, cIn, H+2·padH, W+2·padW]</c> (HunyuanVideo <c>F.pad(mode="replicate")</c>).</summary>

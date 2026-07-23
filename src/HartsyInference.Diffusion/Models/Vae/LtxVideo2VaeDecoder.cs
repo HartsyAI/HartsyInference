@@ -88,14 +88,14 @@ public sealed unsafe class LtxVideo2VaeDecoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], Bias(w, "decoder.conv_in.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: true);
         int output = (int)w["decoder.conv_in.conv.weight"].Shape[0];   // mid / conv_in output channels
 
         int nMid = CountResnets(w, "decoder.mid_block");
         _midResnets = new LtxVaeResnetBlock3d[nMid];
         for (int j = 0; j < nMid; j++)
         {
-            _midResnets[j] = new LtxVaeResnetBlock3d(output, output, timestepCond: false, isCausal: _isCausal);
+            _midResnets[j] = new LtxVaeResnetBlock3d(output, output, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true);
             _midResnets[j].LoadWeights(w, $"decoder.mid_block.resnets.{j}");
         }
 
@@ -121,7 +121,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
                 int upscale = convIn / outNom;                 // diffusers: convIn  = outNom · upscale
                 (int T, int H, int W) stride = StrideFromProduct(strideProd);
                 stage.Upsampler = new LtxVaeUpsampler3d(convIn, stride, upscaleFactor: upscale,
-                    residual: true, isCausal: _isCausal);
+                    residual: true, isCausal: _isCausal, spatialReflectPad: true);
                 stage.Upsampler.LoadWeights(w, $"{p}.upsamplers.0");
                 temporal.Add(stride.T == 2);
             }
@@ -130,7 +130,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
                 outNom = (int)w[$"{p}.resnets.0.conv1.conv.weight"].Shape[0];
                 if (output != outNom)
                 {
-                    stage.ConvIn = new LtxVaeResnetBlock3d(output, outNom, timestepCond: false, isCausal: _isCausal);
+                    stage.ConvIn = new LtxVaeResnetBlock3d(output, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true);
                     stage.ConvIn.LoadWeights(w, $"{p}.conv_in");
                 }
                 temporal.Add(false);
@@ -139,7 +139,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
             stage.Resnets = new LtxVaeResnetBlock3d[nRes];
             for (int j = 0; j < nRes; j++)
             {
-                stage.Resnets[j] = new LtxVaeResnetBlock3d(outNom, outNom, timestepCond: false, isCausal: _isCausal);
+                stage.Resnets[j] = new LtxVaeResnetBlock3d(outNom, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true);
                 stage.Resnets[j].LoadWeights(w, $"{p}.resnets.{j}");
             }
             stages.Add(stage);
@@ -149,7 +149,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
         _temporalScaleInferred = [.. temporal];
 
         _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], Bias(w, "decoder.conv_out.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: true);
     }
 
     /// <summary>Counts the contiguous <c>{prefix}.resnets.{j}.conv1.conv.weight</c> entries present in the dict.</summary>

@@ -43,6 +43,12 @@ internal static unsafe class GpuTransferHelper
         /// <summary>Set of GPU pointers that belong to either cache (skip in FreeDevice).</summary>
         public readonly HashSet<ulong> CachedPointers = new();
 
+        /// <summary>Q8_1 activation sidecars emitted by quantize-at-producer kernels (xq int8 + per-32-block
+        /// scale xd + int-sum xs device buffers, K = the producing row width). Keyed by the F32 output tensor;
+        /// consumed by the dp4a Linear path in place of its own quantize launch. Invalidated (buffers freed)
+        /// whenever the tensor is re-bound, synced to host, or disposed — see <see cref="CacheActivation"/>.</summary>
+        public readonly Dictionary<Tensor, (ulong xq, ulong xd, ulong xs, int k)> SidecarCache = new(ReferenceEqualityComparer.Instance);
+
         /// <summary>Activations pinned to SURVIVE <see cref="FreeActivations"/> — cross-step state whose only
         /// authoritative copy lives on-device (e.g. the across-step feature cache's previous indicator and
         /// residual, which per-step FreeActivations in the video pipelines would otherwise silently destroy:
@@ -255,10 +261,46 @@ internal static unsafe class GpuTransferHelper
         }
     }
 
+    /// <summary>Registers a Q8_1 sidecar (from a quantize-at-producer kernel) for an activation tensor.
+    /// Call AFTER <see cref="CacheActivation"/> for the same tensor — CacheActivation invalidates any
+    /// previous sidecar as part of rebinding.</summary>
+    internal static void RegisterSidecar(Tensor tensor, ulong xq, ulong xd, ulong xs, int k)
+    {
+        State s = Resolve();
+        RemoveSidecar(s, tensor);
+        s.SidecarCache[tensor] = (xq, xd, xs, k);
+    }
+
+    /// <summary>Looks up a Q8_1 sidecar for a dp4a GEMV input (M=1 decode rows only — producers emit
+    /// per-row sidecars and the decode path is single-row).</summary>
+    internal static bool TryGetSidecar(Tensor tensor, int k, out ulong xq, out ulong xd, out ulong xs)
+    {
+        if (Resolve().SidecarCache.TryGetValue(tensor, out (ulong xq, ulong xd, ulong xs, int k) sc) && sc.k == k)
+        {
+            xq = sc.xq; xd = sc.xd; xs = sc.xs;
+            return true;
+        }
+        xq = xd = xs = 0;
+        return false;
+    }
+
+    private static void RemoveSidecar(State s, Tensor tensor)
+    {
+        if (s.SidecarCache.Remove(tensor, out (ulong xq, ulong xd, ulong xs, int k) sc))
+        {
+            CudaMemory.FreeAsync(sc.xq, s.StreamHandle);
+            CudaMemory.FreeAsync(sc.xd, s.StreamHandle);
+            CudaMemory.FreeAsync(sc.xs, s.StreamHandle);
+        }
+    }
+
     /// <summary>Caches an op's output GPU pointer on the tensor, avoiding D2H transfer. Sets lazy callbacks: DataPointer access triggers D2H, Dispose frees GPU memory. The callbacks capture this backend's <see cref="State"/>, so they stay correct even after another backend registers.</summary>
     public static void CacheActivation(Tensor tensor, ulong gpuPtr, nuint byteSize)
     {
         State s = Resolve();
+
+        // Any rebind of this tensor's device buffer stales a producer-emitted Q8_1 sidecar — drop it.
+        RemoveSidecar(s, tensor);
 
         // In-place op re-caching its own output (e.g. backend.Gelu(x, x) / AffineBroadcastLastDim(x, x, …)): the
         // tensor already maps to its OLD device buffer. Drop that old pointer from the cached set WITHOUT freeing it
@@ -306,6 +348,7 @@ internal static unsafe class GpuTransferHelper
                 s.PinnedActivations.Remove(tensor);
                 s.D2hSyncs++;
                 s.Context?.EnsureCurrent();
+                RemoveSidecar(s, tensor);
                 CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
                 // Allocate the host destination only now, on the first real CPU read of this activation.
                 void* cpuPtr = tensor.EnsureHostBuffer();
@@ -322,6 +365,7 @@ internal static unsafe class GpuTransferHelper
             {
                 s.PinnedActivations.Remove(tensor);
                 s.Context?.EnsureCurrent();
+                RemoveSidecar(s, tensor);
                 s.CachedPointers.Remove(cached.gpuPtr);
                 CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
             }
@@ -564,6 +608,8 @@ internal static unsafe class GpuTransferHelper
         {
             CudaMemory.Free(dptr);
         }
+        foreach (Tensor t in s.SidecarCache.Keys.ToList())
+            RemoveSidecar(s, t);
         s.WeightCache.Clear();
         s.ActivationCache.Clear();
         s.WeightCastCache.Clear();
@@ -590,6 +636,10 @@ internal static unsafe class GpuTransferHelper
     {
         State s = Resolve();
         s.Context?.EnsureCurrent();
+        // Q8_1 sidecars are per-step transients riding on activations — sweep them all here (pinned
+        // survivors included: a consumer that misses the sidecar simply re-quantizes).
+        foreach (Tensor t in s.SidecarCache.Keys.ToList())
+            RemoveSidecar(s, t);
         List<KeyValuePair<Tensor, (ulong gpuPtr, nuint bytes)>>? survivors = null;
         foreach (KeyValuePair<Tensor, (ulong gpuPtr, nuint bytes)> kv in s.ActivationCache)
         {
