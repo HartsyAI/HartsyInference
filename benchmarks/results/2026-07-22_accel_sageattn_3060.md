@@ -245,3 +245,13 @@ register reduction (spill-free) remains the open lever; it is structural surgery
 is the register budget) and stays deprioritized at ~60% mixed roofline. Method note for the fleet:
 never A/B kernel builds in separate runs without an in-run control or locked clocks — the paired
 cuDNN baseline is what caught this.
+
+
+## Production (Swarm) Wan-14B on/off spot check (2026-07-23, 4090, default-on shipped)
+
+Wan-2.2 T2V high-noise 14B via `/API/GenerateText2Image`, 704×480/25f/20st, seed 42, one arm per
+Swarm process (the dispatch switch is process-static): DiT loop **86.1 s (Sage on) vs 87.5 s (off)**
+≈ 1.6% — single trials, direction consistent with the H4 record (+4.7%/step at 832×480, where the
+attention share is larger). The 832×480 request OOMs mid-VAE-decode beside the resident 14B expert
+pair on 24 GB (decode-headroom estimate undershoots; pre-existing tightness, noted for the serving
+backlog). Images remain byte-identical under the flip; flagships hold (4.44 s / 2.74 s).
