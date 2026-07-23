@@ -733,6 +733,45 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > this needs explicit alias support in `GpuTransferHelper` with borrowed-buffer lifetime semantics —
 > and quantize-in-GEMV was examined and REJECTED: per-block re-quantization multiplies by grid size).
 
+> **STATUS UPDATE (2026-07-23, round 6): the node-fusion campaign — two structural fusions, every
+> graph-eligible model improved +2-4%, all outputs verified identical.**
+> 1. **Permute-free graph decode step.** At t=1 the [1,1,H,D] and [1,H,1,D] layouts are byte-identical,
+>    so `Layer.ForwardGraphStep` now allocates q/k/v DIRECTLY in the head-major shape attention and
+>    KV-append expect — the four per-layer `Permute0213` copies and their intermediates' alloc/free
+>    graph nodes (~12 nodes/layer) no longer exist on the graph path. Every producer/consumer between
+>    projection and attention was audited for layout-agnosticism at t=1: Linear/SliceLastDim size by
+>    element count, per-head QK-norm reduces over the last dim either way, `KvCacheAppendDev` reads
+>    tNew from Shape[2] (1 in both layouts), and the decode-RoPE launcher now derives the head count
+>    from elementCount/headDim instead of Shape[2] (which also fixes a latent batched-caller bug where
+>    only the first batch element was rotated). The EAGER path keeps its permutes — unchanged.
+> 2. **Fused gated-FFN epilogue** (`lm_glu_act_f32`, `IBackend.GluActivate` with a composed
+>    slice+act+mul default for CPU): the SwiGLU/GeGLU epilogue over the load-time-fused [gate|up]
+>    projection output — previously 2× SliceLastDim + activation + Mul, four kernels and three
+>    intermediates — is ONE elementwise pass with zero intermediates (~9 nodes/layer). Applies to
+>    eager, graph, and batched paths alike (`DenseFfn`); SiLU and GELU-tanh supported, Relu-family
+>    and unequal gate/up widths fall back to the unfused path.
+>
+> **Correctness**: 183/183 CUDA + 132/132 CPU suites; float-path graph-vs-eager CLI output
+> byte-identical on all five architectures (qwen2, gemma3, llama, qwen3, glm4) — AND byte-identical
+> to the pre-fusion build (the fused GLU's intrinsic formulas reproduce the elementwise kernels'
+> fast-math exactly on all tested models; permute removal is a pure copy elimination).
+>
+> **Measured (graph-on medians, vs round 5 → after both fusions)**: DeepSeek-R1-1.5B 167.9 →
+> **175.3** (+4.4%; fresh back-to-back llama-cpp-python 177.7 vs ours 172.2 in the same window —
+> true gap now ~1.03×); Llama-3.2-1B 202.3 → **208.9** (1.10× FASTER than llama.cpp); Qwen3-4B
+> 93.2 → **95.3** (1.11× FASTER); gemma2-2b 131.3 → **135.4** (1.12× FASTER); qwen2.5-0.5b 157.7 →
+> **163.8**; gemma3-1b ~117 → **119.4**; GLM-4-9B ~40.1-40.5 (flat — its budget is GEMV-bound, not
+> node-bound). Graph-off also gained fleet-wide from the GLU fusion (e.g. Llama 164→168.5,
+> DeepSeek 136.6→143.0).
+>
+> **Still on the table for a future pass** (diminishing but real): cross-layer fused residual-add +
+> RMSNorm (−2 nodes/layer, needs restructuring the layer-boundary handoff); QKV slice elimination
+> (needs activation-cache aliased-view lifetime support — the one remaining permute-class item);
+> GLM-4's square 4096² attention projections at 68% of DRAM peak (resistant to K-splitting — would
+> need a different thread-ownership layout); and the sub-2B models' residual gap vs llama.cpp's
+> extreme small-model efficiency (qwen2.5-0.5b 163.8 vs 322.7 — llama.cpp's per-step overhead at
+> 0.5B scale is simply lower; closing further means attacking total per-step node count again).
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

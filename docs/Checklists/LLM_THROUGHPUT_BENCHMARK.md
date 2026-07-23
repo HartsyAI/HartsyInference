@@ -176,6 +176,19 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 > DeepSeek-R1-Distill-1.5B 166.0 → **167.87** (0.93×, gap 1.07×), GLM-4-9B 39.35 → **40.37** (0.84×,
 > gap 1.18×); all other models unchanged within noise. The ffn_down GEMV class (K ≥ 8192, N ≤ 4096)
 > now splits each row across 4 warps (was 51-82% of DRAM peak at warp-per-row on those shapes).
+>
+> **UPDATE 2026-07-23 (round 6, node-fusion campaign — permute-free graph step + fused GLU epilogue;
+> grind doc round-6 block). Final fleet table (graph-on medians; llama-cpp-python baselines):**
+>
+> | Model | Ours (best) | llama-cpp-python | Ratio |
+> |---|---|---|---|
+> | Llama-3.2-1B Q8_0 | **208.85** | 190.34 | **1.10× FASTER** |
+> | Qwen3-4B Q4_K_M | **95.27** | 85.59 | **1.11× FASTER** |
+> | gemma-2-2b-it Q4_K_M | **135.35** | 121.08 | **1.12× FASTER** |
+> | DeepSeek-R1-Distill-1.5B | **175.34** (172.2 back-to-back) | 180.12 (177.7 back-to-back) | 0.97× (gap ~1.03×) |
+> | GLM-4-9B Q4_K_M | **40.14** | 47.80 (47.33 back-to-back) | 0.84× |
+> | gemma-3-1b-it Q4_K_M | **119.44** | 192.34 | 0.62× |
+> | qwen2.5-0.5b Q4_K_M | **163.82** | 322.72 | 0.51× |
 
 Superseded pre-dp4a table (2026-07-22, earlier session):
 
