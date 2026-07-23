@@ -266,8 +266,10 @@ together with a `2.0.0-alpha.2` pin bump). Verified e2e via `/API/GenerateText2I
 512×320/25f/20st: prompt-matched coherent motion across decoded frames 1/13/25; warm sampling
 ~1.6 s/step wall (Sage on, default) vs the 2.15 s/step pre-Sage record at this geometry. Ops notes:
 first attempt died disk-full (root at 100%, 7.7 GB free < 9.1 GB LLaVA download) — resolved by
-symlinking the existing engine-side LLaVA into Swarm's `Models/text_encoders/`; 720p Swarm runs
-(the deep-win zone) remain to be exercised. Post-redeploy flagship gates re-measured and holding:
+symlinking the existing engine-side LLaVA into Swarm's `Models/text_encoders/`. **720p (deep-win
+zone) exercised same day:** 1280×720/17f/10st through the same Swarm path — ~6.5 s/step (capstone
+armed figure was 6.03; box at loadavg ~5), DiT freed to 23.0 GB before decode, tiled VAE decode
+~29.5 s, no OOM, frames 1/17 crisp + prompt-matched coherent motion. Post-redeploy flagship gates re-measured and holding:
 Krea2-Turbo 4.41 s, Z-Image-Turbo 2.69–2.90 s. Method note: the flagship gate figures are
 ENGINE-INTERNAL `txt2img complete` times from the Swarm log, NOT API wall — API wall runs 1.5–2.5 s
 higher under concurrent-agent CPU load (loadavg ~5 during this check) and will false-fail the
