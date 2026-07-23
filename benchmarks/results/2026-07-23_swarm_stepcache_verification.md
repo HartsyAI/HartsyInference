@@ -37,7 +37,20 @@ extension pin bumped from stale `1.0.0-alpha.52`.
    dual-instance trap) — recovered per the established procedure; backup at
    `Users.ldb.corrupt-2026-07-23-dualinstance`.
 
-## Engine bugs found by the pass (open, this repo)
+## Engine bugs found by the pass — FIXED same day (2.0.0-alpha.2)
+
+**Cross-model eviction shipped in three measured steps** (verified by the 4-model switch sequence
+Krea2→Z-Image→Ideogram→Flux.2 through ONE Swarm process, no restarts, no manual cache clears):
+1. `InferenceEngine.EvictOtherCheckpointPipelines` — dispose other-checkpoint pipelines (image+video)
+   on recipe-cache miss. Alone: INSUFFICIENT (the backend's device weight cache holds strong tensor
+   refs — Dispose freed ~nothing).
+2. When the switch empties the recipe caches → `FreeAllDeviceMemory` (EvictAll + TrimPool). Freed the
+   weights (6.9→23.1 GB after Krea2) but ~4.5 GB of cuDNN residue still tripped Ideogram's ≥20 GB guard.
+3. `FreeAllDeviceMemory` now also drops the cuDNN SDPA/conv sessions (plan+workspace caches; they
+   lazily recreate). Final sequence: free returns to ~23 GB after EVERY switch; Ideogram passes its
+   guard and generates; all four models run back-to-back.
+
+Historical record of the original finding:
 
 - **Cross-model VRAM eviction gap (serving path):** switching models keeps the previous pipeline
   resident (KEEP_MODELS) and OOMs 24 GB (Krea2 13 GB + Z-Image build → 74 MB free; hard OOM poisons
