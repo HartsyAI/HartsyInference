@@ -261,19 +261,29 @@ public sealed class InferenceEngine : IInferenceEngine
             _videoRecipePipelines[victim].Dispose();
             _videoRecipePipelines.Remove(victim);
         }
-        // Disposal only drops host references; promoted GPU copies free on the finalizer queue — drain it and
-        // trim the async pool or the "freed" memory stays claimed and the incoming construction still OOMs
-        // (the ~5 GB post-ClearCache residue in the 2026-07-23 Swarm pass).
+        // Disposal only drops the PIPELINE's references — the backend's device weight cache still holds the
+        // promoted copies (keyed by Tensor, strong refs), so Dispose+GC+Trim alone freed ~nothing (measured
+        // 2026-07-23: Z-Image still at 0.4% free after "evicting" Krea2's 13 GB). When the switch leaves NO
+        // cached recipe pipelines (the normal one-model-at-a-time case), sweep the backend's caches outright —
+        // weights/casts/activations all belonged to the victims. When same-checkpoint variants survive, the
+        // sweep would nuke their resident weights too, so fall back to the soft release (they re-upload).
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
         try
         {
-            _backend?.TrimMemoryPool();
+            if (_recipePipelines.Count == 0 && _videoRecipePipelines.Count == 0)
+            {
+                _backend?.FreeAllDeviceMemory();
+            }
+            else
+            {
+                _backend?.TrimMemoryPool();
+            }
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[Engine] Pool trim after model-switch eviction failed: {ex.Message}");
+            Logs.Warning($"[Engine] Device release after model-switch eviction failed: {ex.Message}");
         }
         Logs.Info($"[Engine] Model switch: evicted {imageVictims.Count + videoVictims.Count} resident pipeline(s) for other checkpoints.");
     }
