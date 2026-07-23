@@ -169,6 +169,21 @@ SDPA share (27%).
       `sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed` (tensor-core %),
       `sm__throughput.avg.pct_of_peak_sustained_elapsed`. These three numbers per kernel ARE the
       %-of-ceiling table this whole grind optimizes against — put them in the results doc.
+      *(📊 2026-07-23, 3060 — [2026-07-23_h0_ncu_top5_3060.md](../../benchmarks/results/2026-07-23_h0_ncu_top5_3060.md):
+      explicit `--metrics` list (not `--set basic/full`) + CSV aggregation, no launch-count/skip needed
+      (both suites are short enough to capture whole). **StepCacheKernelTests**: confirms the earlier
+      smoke — `stepcache_rel_l1_f32`/`_f16` both memory-bound, 92.9%/85.7% DRAM, nothing to do.
+      **SageSdpaMicroBench**: `sage_attn_int8_v1_d128_{f32,f16io}` are 85.8% of all sampled GPU time,
+      both pinned at ~24.9% occupancy (register-capped, 168 regs/thread) while NEITHER roofline
+      saturates (DRAM 3-5%, tensor 37.7-46.6%) — latency/occupancy-bound, corroborating the H4 build
+      log's own ncu read from a fresh capture. This is the most actionable finding: occupancy, not
+      bandwidth or tensor-pipe work, is the ceiling on the kernel that dominates the workload's time.
+      **SDXL e2e workload SKIPPED** — no SDXL weights staged anywhere on this box (confirmed
+      filesystem-wide), and every other staged flagship diffusion checkpoint (Krea2 fp8 13GB hard-gates
+      `freeGb<16`, QwenImage GGUF is 13.06GB alone) exceeds the 3060's 12GB — none of the currently
+      staged e2e diffusion tests fit this GPU. Also found and worked around mid-session: a capture
+      window overlapped a concurrent session's `TextDecodeThroughputBenchmark` run on the same 3060 —
+      discarded unread, redid after polling `nvidia-smi` idle.)*
 
 ### H1 — Step cache (C1) bring-up + measurement
 
