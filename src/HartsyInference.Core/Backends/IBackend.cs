@@ -1309,6 +1309,89 @@ public interface IBackend : IDisposable
         CopyTo(qOut, q);
     }
 
+    /// <summary>Variant of <see cref="QkvRopeScatterDecodeStep"/> for layers whose q and k were projected into
+    /// one CONCATENATED [q|k] buffer but v into its own tensor (partial load-time fusion: v's dtype differs
+    /// from q/k in mixed-quant GGUF schemes): ropes q into <paramref name="qOut"/>, ropes k into the cache,
+    /// copies v into the cache — one launch replacing two slices, two ropes, and two appends.</summary>
+    void QkRopeScatterVDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor v,
+        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
+    {
+        int nq = hq * headDim;
+        Tensor k = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
+        try
+        {
+            SliceLastDim(qOut, qk, 0);
+            SliceLastDim(k, qk, nq);
+            RopeApplyDecodeStep(qOut, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            RopeApplyDecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            KvCacheAppendDev(kCache, k, 0, devicePos);
+            KvCacheAppendDev(vCache, v, 0, devicePos);
+        }
+        finally
+        {
+            k.Dispose();
+        }
+    }
+
+    /// <summary>QK-norm variant of <see cref="QkvRopeScatterDecodeStep"/>: from the CONCATENATED [q|k|v]
+    /// projection output, per-head RMS-norms q and k (weights <paramref name="qNorm"/>/<paramref name="kNorm"/>
+    /// over the head dim), ropes them, writes k and copies v into the caches at the device position, and
+    /// writes roped q into <paramref name="qOut"/> — one launch replacing three slices, two RMSNorms, and
+    /// the rope-scatter. Per-head RMSNorm only (no LayerNorm, no full-dim norm, no V-norm) — callers gate
+    /// on that config. Backends without a fused kernel fall back to the exact composition.</summary>
+    void QkvNormRopeScatterDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qkv,
+        Tensor qNorm, Tensor kNorm, float eps,
+        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
+    {
+        int nq = hq * headDim, nkv = hkv * headDim;
+        Tensor q = new(new TensorShape(1, hq, 1, headDim), DType.F32);
+        Tensor k = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
+        Tensor v = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
+        Tensor qN = new(new TensorShape(1, hq, 1, headDim), DType.F32);
+        Tensor kN = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
+        try
+        {
+            SliceLastDim(q, qkv, 0);
+            SliceLastDim(k, qkv, nq);
+            SliceLastDim(v, qkv, nq + nkv);
+            RmsNorm(qN, q, qNorm, eps);
+            RmsNorm(kN, k, kNorm, eps);
+            RopeScatterKvDecodeStep(qOut, kCache, vCache, qN, kN, v, cosTable, sinTable,
+                hq, hkv, headDim, rotaryDim, interleaved, devicePos);
+        }
+        finally
+        {
+            q.Dispose(); k.Dispose(); v.Dispose(); qN.Dispose(); kN.Dispose();
+        }
+    }
+
+    /// <summary>Partial-fusion variant of <see cref="QkvNormRopeScatterDecodeStep"/>: q and k come from one
+    /// CONCATENATED [q|k] buffer, v from its own tensor (mixed-dtype v — see
+    /// <see cref="QkRopeScatterVDecodeStep"/>).</summary>
+    void QkNormRopeScatterVDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor v,
+        Tensor qNorm, Tensor kNorm, float eps,
+        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
+    {
+        int nq = hq * headDim;
+        Tensor q = new(new TensorShape(1, hq, 1, headDim), DType.F32);
+        Tensor k = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
+        Tensor qN = new(new TensorShape(1, hq, 1, headDim), DType.F32);
+        Tensor kN = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
+        try
+        {
+            SliceLastDim(q, qk, 0);
+            SliceLastDim(k, qk, nq);
+            RmsNorm(qN, q, qNorm, eps);
+            RmsNorm(kN, k, kNorm, eps);
+            RopeScatterKvDecodeStep(qOut, kCache, vCache, qN, kN, v, cosTable, sinTable,
+                hq, hkv, headDim, rotaryDim, interleaved, devicePos);
+        }
+        finally
+        {
+            q.Dispose(); k.Dispose(); qN.Dispose(); kN.Dispose();
+        }
+    }
+
     /// <summary>Fused residual-add + RMSNorm: <c>residOut = a + b; normOut = rmsnorm(residOut) · weight</c> —
     /// one pass instead of Add followed by RmsNorm. Backends without a fused kernel fall back to that exact
     /// two-op composition (identical math).</summary>
@@ -1317,6 +1400,23 @@ public interface IBackend : IDisposable
         Add(residOut, a, b);
         RmsNorm(normOut, residOut, weight, eps);
     }
+
+    /// <summary>RMSNorm that may ALSO emit a Q8_1 activation sidecar for the output (quantize-at-producer:
+    /// the downstream dp4a GEMV skips its own quantize launch). Semantically identical to
+    /// <see cref="RmsNorm"/> — the sidecar is a backend-internal acceleration; backends without the
+    /// fused kernel (or when conditions don't hold) just run the plain op.</summary>
+    void RmsNormEmitQ8(Tensor output, Tensor input, Tensor weight, float eps)
+        => RmsNorm(output, input, weight, eps);
+
+    /// <summary>Fused residual-add + RMSNorm that may also emit a Q8_1 sidecar for <paramref name="normOut"/>
+    /// (see <see cref="RmsNormEmitQ8"/>). Semantically identical to <see cref="AddRmsNorm"/>.</summary>
+    void AddRmsNormEmitQ8(Tensor residOut, Tensor normOut, Tensor a, Tensor b, Tensor weight, float eps)
+        => AddRmsNorm(residOut, normOut, a, b, weight, eps);
+
+    /// <summary>Gated-FFN epilogue that may also emit a Q8_1 sidecar for the output (see
+    /// <see cref="RmsNormEmitQ8"/>). Semantically identical to <see cref="GluActivate"/>.</summary>
+    void GluActivateEmitQ8(Tensor output, Tensor gateUp, int ff, bool gelu)
+        => GluActivate(output, gateUp, ff, gelu);
 
     /// <summary>Fused gated-FFN activation epilogue: <c>output[r,i] = act(gateUp[r,i]) · gateUp[r,ff+i]</c>
     /// over the CONCATENATED [gate | up] projection output (each row = ff gate values then ff up values).

@@ -11,21 +11,23 @@ public sealed unsafe class LtxVaeUpsampler3d
     private readonly int _upscale;
     private readonly bool _residual;
     private readonly bool _isCausal;
+    private readonly bool _spatialReflectPad;
     private CausalConv3d? _conv;
 
-    public LtxVaeUpsampler3d(int inC, (int T, int H, int W) stride, int upscaleFactor, bool residual, bool isCausal = true)
+    public LtxVaeUpsampler3d(int inC, (int T, int H, int W) stride, int upscaleFactor, bool residual, bool isCausal = true, bool spatialReflectPad = false)
     {
         _inC = inC;
         _stride = stride;
         _upscale = upscaleFactor;
         _residual = residual;
         _isCausal = isCausal;
+        _spatialReflectPad = spatialReflectPad;
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         _conv = new CausalConv3d(w[$"{prefix}.conv.conv.weight"], Bias(w, $"{prefix}.conv.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

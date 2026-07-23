@@ -807,6 +807,90 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > fused kernels). Next candidates if this reopens: WARPS_PER_BLOCK sweep for square shapes,
 > partial (q+k) load-time fusion for mixed-dtype QKV layers, cross-layer add+norm fusion.**
 
+> **STATUS UPDATE (2026-07-23, round 8): launch-overhead round — partial q+k fusion + WPB=4;
+> DeepSeek now clearly FASTER than llama-cpp-python (five of seven ahead), GLM 0.86→0.90×.**
+> 1. **The "square-shape thread-layout" idea is DEAD — measured, not guessed.** Probe N-sweep at
+>    fixed K=4096 (Q4_K dp4a) fits `t = 7.0 µs + bytes / 328 GB/s` almost perfectly: the kernel's
+>    MARGINAL bandwidth is ~91% of DRAM peak at every N; the square shape's "68% of peak" is pure
+>    fixed ramp/launch amortization (7 µs on a 29 µs transfer), not a thread-ownership problem. A
+>    forced K-split on the square shape confirmed dead: W=2/4/8 = 48.2/45.9/54.2 µs vs 39.7 baseline.
+>    **The remaining GEMV lever is FEWER LAUNCHES, not new layouts.**
+> 2. **WARPS_PER_BLOCK 8→4** for every warp-per-row GEMV launcher (sweep knob `HARTSY_GEMV_WPB`):
+>    equal-or-faster at every production shape class (N=256: 11.4 vs 13.0 µs; N=4096: 37.8 vs 38.4;
+>    N=27392: 197.1 vs 198.1). Pure launch-geometry change — per-row math untouched.
+> 3. **Partial [q|k] load-time fusion** (`_qkW`, kill-switch `HARTSY_QK_FUSION=0`) for layers whose
+>    v dtype differs from q/k — the Q4_K_M recipe puts Q6_K/Q8_0 on `attn_v` in HALF of every
+>    model's layers (deepseek 14/28, gemma2 13/26, gemma3 13/26, glm4 20/40, qwen25 12/24, qwen3
+>    18/36), which blocked the all-or-nothing QKV fusion there: those layers paid 3 GEMV + 3
+>    activation-quantize launches. Now 2+2. **DECODE-ONLY (t==1)** — prefill fusion was built and
+>    REVERTED: it changes the cuBLAS GEMM shape (one [q|k] GEMM vs two), shifting prefill numerics
+>    at float-rounding level; the decode dp4a GEMV is row-independent, so t=1 fusion is bit-exact.
+>    New `IBackend.QkRopeScatterVDecodeStep` (kill-switch `HARTSY_QK_SCATTER=0`) feeds the existing
+>    3-source-pointer `lm_qkv_rope_scatter_f32` from the fused [q|k] buffer + separate v — NO new
+>    CUDA kernel; composed default for CPU/Vulkan.
+> **Correctness — the methodology matured this round.** 184/184 CUDA + 132/132 CPU. The graph-vs-
+> eager CLI A/B was extended with PER-ARM BYTE ATTRIBUTION against the kill-switched build:
+> deepseek/gemma3/qwen25/glm4 produce BYTE-IDENTICAL output to the pre-change build on BOTH arms;
+> llama/gemma2/glm4 arms are byte-identical to each other. In the process, three PRE-EXISTING facts
+> surfaced (all reproduce with every round-8 change disabled): (a) graph-vs-eager arms are NOT
+> universally bit-identical — on a new prompt ("hash table collisions"), deepseek/gemma3/qwen25
+> diverge mid-sequence pre-change (greedy tie flips; round 7's "byte-identical on all seven" was
+> prompt-specific); (b) **Qwen3-4B (low-vram) eager decode is NONDETERMINISTIC run-to-run** (3 runs,
+> 3 outputs — suspect cuDNN SDPA prefill; GLM shows the same class rarely, 1 outlier in ~8 runs);
+> (c) gemma2 CLI graph decode OOMs without `--low-vram-quant` on the 12 GB card (2250 MB F32 embed
+> alloc vs 1839 MB free after pool trim) — the benchmark harness path is unaffected.
+> **Measured (graph-on medians, same-window llama-cpp-python sandwich, quiet GPU)**:
+> Llama-3.2-1B **212.9** vs 191.6 (**1.11× faster**); Qwen3-4B **97.6** vs 88.0 (**1.11×**);
+> gemma-2-2b **138.3** vs 123.4 (**1.12×**); DeepSeek-R1-1.5B **196.0** vs 183.3 (**1.07× faster —
+> parity broken, now clearly ahead**); GLM-4-9B **43.4** vs 48.1 (0.90×, was 0.86×); gemma-3-1b
+> **124.5** vs 197.4 (0.63×); qwen2.5-0.5b **173.6** vs 326.9 (0.53×). Graph-off also up fleet-wide
+> (e.g. DeepSeek 143→154.1, llama 168.5→167.5 flat).
+> **Next candidates**: quantize-once-per-activation (q/k/v + gate/up share their input; today each
+> Linear re-quantizes — needs safe invalidation tracking); widen partial fusion to batched decode
+> b≤8 (dp4a still bit-exact; verify batch tests first); cross-layer add+norm fusion (open since
+> round 7); graph fork/join so independent q/k/v GEMVs overlap (structural; the single-capture
+> stream serializes everything today).**
+
+> **STATUS UPDATE (2026-07-23, round 9: the gemma3 deep-dive — fused QK-norm epilogue landed
+> (qwen3 +1.7%), and the sub-2B gap is now PRECISELY attributed: it is the tiny-kernel tax,
+> and the quantize launches are the biggest single class.**
+> 1. **`lm_qknorm_rope_scatter_f32`** (kill-switch `HARTSY_QKNORM_SCATTER=0`): QK-norm models
+>    (Qwen3, Gemma-3) could not use round 7's fused epilogue — a per-head RMSNorm sits between
+>    projection and rope, so every layer paid 3 slices + 2 RMSNorms + scatter. ONE block-per-head
+>    kernel now consumes the fused projection buffer, norms q/k (dit_rmsnorm_f32's reduction
+>    verbatim at its production 256-thread geometry — each thread recomputes its rope partner's
+>    normed value with the same expression, so the bits match), ropes, scatters. VERIFIED
+>    BYTE-IDENTICAL graph output vs the composed path on gemma3 (two prompts × 64 tokens).
+>    `IBackend.QkvNormRopeScatterDecodeStep` / `QkNormRopeScatterVDecodeStep` (fused / mixed-dtype
+>    partial sources), guarded on per-head-RMS-only (!QkNormFullDim, !UseLayerNorm, !VNorm).
+>    Qwen3-4B 97.6 → **99.25** (+1.7%, now 1.13× over llama.cpp); gemma3 flat at **124.0** —
+>    which is itself the round's key measurement (see below). 184/184 CUDA green.
+> 2. **The sub-2B budget now closes, and the residual is named.** Per-shape probes (GEMV probe +
+>    a new resident-buffer FlashAttentionDev probe — CAUTION: without PreloadWeights the attention
+>    probe measures H2D re-upload, 122µs vs the real 20µs): Qwen3-4B's 10.08 ms/token = 8.6 GEMV
+>    + 1.4 attention — CLOSES, it is GEMV-bound and healthy. gemma-3-1b's 8.06 ms = 3.83 GEMV
+>    (0.96 of it the 262k-vocab Q8_0 lm_head ALREADY at 93% of peak — llama.cpp pays the same)
+>    + 0.53 attention (26 × 20.5µs) + ~0.7 elementwise ⇒ **~2.9 ms UNACCOUNTED**; qwen2.5-0.5b
+>    likewise ~3.3 ms. The unaccounted time is the TINY-KERNEL TAX: every small kernel costs
+>    ~6-10 µs wall regardless of data (probe: an N=256 GEMV = 13 µs for 0.2 MB; the FLOAT path
+>    beats dp4a there — 10.5 vs 13.2 µs — purely because dp4a adds a quantize launch), and a
+>    gemma3 step still runs ~360 tiny kernels: ~130 activation-QUANTIZE launches (5/layer),
+>    ~100 norms, ~50 adds/glu/scatter. This also explains why the qknorm fusion (−5 nodes/layer)
+>    was flat on gemma3: graph-replayed SMALL nodes are cheap; it is the tiny KERNELS' fixed
+>    wall cost that adds up, and the ones removed were among the cheapest.
+> **The sub-2B roadmap, ranked by removed-launch count × ~6-10 µs each:**
+> a. **Quantize-at-producer** (the big one, ~100+ launches/step): emit the Q8_1 sidecar (xq/xd/xs)
+>    directly from the kernels that PRODUCE GEMV inputs — AddRmsNorm/RmsNorm (feeds qkv + gate-up),
+>    lm_glu_act (feeds down), the attention epilogue (feeds o) — and teach Linear to consume a
+>    cached sidecar instead of launching its own quantize. Needs an activation→sidecar handshake
+>    (GpuTransferHelper cache keyed by the producing tensor, capture-safe). Expected ≈ +0.6-1.0 ms
+>    per token on the sub-2B pair (~+12-18%).
+> b. **Sandwich norm→add fusion** (`out = resid + rmsnorm(x)·w`, gemma2/gemma3): −2/layer.
+> c. **Cross-layer add + input-norm fusion**: −1-2/layer, all models.
+> d. Float-path dispatch for N≤~512 dp4a GEMVs (v/k projections: float is FASTER and LESS lossy —
+>    but output-changing, so it needs the tolerance argument, not the byte argument).
+> e. Graph fork/join parallel branches (structural, biggest ceiling: tiny kernels could overlap).**
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

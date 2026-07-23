@@ -204,6 +204,20 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 > | gemma-3-1b-it Q4_K_M | **119.97** | 192.34 | 0.62× |
 > | qwen2.5-0.5b Q4_K_M | **167.45** | 322.72 | 0.52× |
 
+> **UPDATE 2026-07-23 (round 8, launch-overhead round — partial [q|k] fusion (decode-only) + GEMV
+> WARPS_PER_BLOCK 8→4; grind doc round-8 block). FIVE of seven now faster than llama-cpp-python
+> (fresh same-window baselines, quiet GPU, GLM solo):**
+>
+> | Model | Ours (graph-on) | llama-cpp-python | Ratio |
+> |---|---|---|---|
+> | Llama-3.2-1B Q8_0 | **212.93** | 191.59 | **1.11× FASTER** |
+> | Qwen3-4B Q4_K_M | **97.58** | 87.99 | **1.11× FASTER** |
+> | gemma-2-2b-it Q4_K_M | **138.30** | 123.44 | **1.12× FASTER** |
+> | DeepSeek-R1-Distill-1.5B | **195.96** | 183.29 | **1.07× FASTER — parity broken** |
+> | GLM-4-9B Q4_K_M | **43.42** (solo) | 48.08 | 0.90× (was 0.86×) |
+> | gemma-3-1b-it Q4_K_M | **124.49** | 197.35 | 0.63× |
+> | qwen2.5-0.5b Q4_K_M | **173.56** | 326.92 | 0.53× |
+
 Superseded pre-dp4a table (2026-07-22, earlier session):
 
 | Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (ours÷llama, graph-on) |

@@ -112,6 +112,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmArgMaxStage2F32;
     private readonly nint _lmGluActF32;
     private readonly nint _lmQkvRopeScatterF32;
+    private readonly nint _lmQkNormRopeScatterF32;
+    private readonly nint _lmRmsNormQ8_1F32;
+    private readonly nint _lmAddRmsNormQ8_1F32;
+    private readonly nint _lmGluActQ8_1F32;
     private readonly nint _lmAddRmsNormF32;
     private readonly nint _lmRopeInterleavedF32;
     private readonly nint _lmRopeDecodeSplitHalf;
@@ -644,6 +648,10 @@ public sealed class CudaKernels : IDisposable
         _lmArgMaxStage2F32 = _lmF32Module.GetFunction("lm_argmax_lastdim_stage2_f32");
         _lmGluActF32 = _lmF32Module.GetFunction("lm_glu_act_f32");
         _lmQkvRopeScatterF32 = _lmF32Module.GetFunction("lm_qkv_rope_scatter_f32");
+        _lmQkNormRopeScatterF32 = _lmF32Module.GetFunction("lm_qknorm_rope_scatter_f32");
+        _lmRmsNormQ8_1F32 = _lmF32Module.GetFunction("lm_rmsnorm_q8_1_f32");
+        _lmAddRmsNormQ8_1F32 = _lmF32Module.GetFunction("lm_add_rmsnorm_q8_1_f32");
+        _lmGluActQ8_1F32 = _lmF32Module.GetFunction("lm_glu_act_q8_1_f32");
         _lmAddRmsNormF32 = _lmF32Module.GetFunction("lm_add_rmsnorm_f32");
         _lmRopeInterleavedF32 = _lmF32Module.GetFunction("lm_rope_interleaved_f32");
         _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
@@ -2074,6 +2082,28 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_lmQkvRopeScatterF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Fused per-head QK-RMSNorm + RoPE + KV-scatter for QK-norm models' graph decode step
+    /// (bit-identical to slice + 2× RmsNorm + rope-scatter — reduction copied verbatim from
+    /// dit_rmsnorm_f32 at its production geometry, one 256-thread block per head).</summary>
+    public unsafe void LaunchQkNormRopeScatter(ulong qOut, ulong kCache, ulong vCache, ulong qIn, ulong kIn, ulong vIn,
+        ulong qNormW, ulong kNormW, ulong cos, ulong sin, int nq, int nkv, int headDim, int rotaryDim,
+        bool interleaved, float eps, int maxSeq, ulong devicePos, nint stream)
+    {
+        ulong qA = qOut, kA = kCache, vA = vCache, qiA = qIn, kiA = kIn, viA = vIn, qwA = qNormW, kwA = kNormW,
+            cA = cos, sA = sin, dpA = devicePos;
+        uint nqA = (uint)nq, nkvA = (uint)nkv, dA = (uint)headDim, rdA = (uint)rotaryDim, msA = (uint)maxSeq;
+        int ilA = interleaved ? 1 : 0;
+        float epsA = eps;
+        void** args = stackalloc void*[18];
+        args[0] = &qA; args[1] = &kA; args[2] = &vA; args[3] = &qiA; args[4] = &kiA; args[5] = &viA;
+        args[6] = &qwA; args[7] = &kwA; args[8] = &cA; args[9] = &sA;
+        args[10] = &nqA; args[11] = &nkvA; args[12] = &dA; args[13] = &rdA; args[14] = &ilA;
+        args[15] = &epsA; args[16] = &msA; args[17] = &dpA;
+        uint grid = (uint)(nq + 2 * nkv);
+        uint sharedMem = BlockSize * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(_lmQkNormRopeScatterF32, grid, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Fused residual-add + RMSNorm (bit-identical to Add followed by the RmsNorm kernel — same
     /// reduction structure and launch geometry).</summary>
     public unsafe void LaunchAddRmsNorm(ulong residOut, ulong normOut, ulong a, ulong b, ulong weight,
@@ -2101,6 +2131,53 @@ public sealed class CudaKernels : IDisposable
         long total = (long)rows * ff;
         uint grid = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_lmGluActF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>RMSNorm + Q8_1 sidecar emission in one launch (bit-identical F32 output to the plain
+    /// RmsNorm kernel — same body and geometry; sidecar math verbatim from quantize_activation_q8_1_f32).</summary>
+    public unsafe void LaunchRmsNormQ8(ulong output, ulong xq, ulong xd, ulong xs, ulong input, ulong weight,
+        int normDim, int totalRows, float eps, nint stream)
+    {
+        ulong outA = output, xqA = xq, xdA = xd, xsA = xs, inA = input, wA = weight;
+        uint dimA = (uint)normDim, rowsA = (uint)totalRows;
+        float epsA = eps;
+        void** args = stackalloc void*[9];
+        args[0] = &outA; args[1] = &xqA; args[2] = &xdA; args[3] = &xsA; args[4] = &inA; args[5] = &wA;
+        args[6] = &dimA; args[7] = &rowsA; args[8] = &epsA;
+        CudaDriverApi.cuLaunchKernel(_lmRmsNormQ8_1F32, (uint)totalRows, 1, 1, BlockSize, 1, 1,
+            BlockSize * sizeof(float), stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Residual-add + RMSNorm + Q8_1 sidecar emission in one launch (bit-identical to
+    /// LaunchAddRmsNorm's outputs; sidecar on the normOut).</summary>
+    public unsafe void LaunchAddRmsNormQ8(ulong residOut, ulong normOut, ulong xq, ulong xd, ulong xs,
+        ulong a, ulong b, ulong weight, int normDim, int totalRows, float eps, nint stream)
+    {
+        ulong rA = residOut, nA = normOut, xqA = xq, xdA = xd, xsA = xs, aA = a, bA = b, wA = weight;
+        uint dimA = (uint)normDim, rowsA = (uint)totalRows;
+        float epsA = eps;
+        void** args = stackalloc void*[11];
+        args[0] = &rA; args[1] = &nA; args[2] = &xqA; args[3] = &xdA; args[4] = &xsA;
+        args[5] = &aA; args[6] = &bA; args[7] = &wA;
+        args[8] = &dimA; args[9] = &rowsA; args[10] = &epsA;
+        CudaDriverApi.cuLaunchKernel(_lmAddRmsNormQ8_1F32, (uint)totalRows, 1, 1, BlockSize, 1, 1,
+            BlockSize * sizeof(float), stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Fused GLU epilogue + Q8_1 sidecar emission (bit-identical comb output to LaunchGluAct).
+    /// rows*ff must be a multiple of 32 (each warp quantizes its own aligned 32-block).</summary>
+    public unsafe void LaunchGluActQ8(ulong comb, ulong xq, ulong xd, ulong xs, ulong gateUp,
+        int rows, int ff, bool gelu, nint stream)
+    {
+        ulong combA = comb, xqA = xq, xdA = xd, xsA = xs, guA = gateUp;
+        uint rowsA = (uint)rows, ffA = (uint)ff;
+        int actA = gelu ? 1 : 0;
+        void** args = stackalloc void*[8];
+        args[0] = &combA; args[1] = &xqA; args[2] = &xdA; args[3] = &xsA; args[4] = &guA;
+        args[5] = &rowsA; args[6] = &ffA; args[7] = &actA;
+        long total = (long)rows * ff;
+        uint grid = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_lmGluActQ8_1F32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     public unsafe void LaunchArgMaxLastDim(ulong idxPtr, ulong inPtr, int rows, int c, nint stream, ulong scratch = 0)
@@ -3118,7 +3195,7 @@ public sealed class CudaKernels : IDisposable
             CudaDriverApi.cuLaunchKernel(_mulMatVecQ4KQ8_1Ksplit, (uint)N, (uint)M, 1, 32, ksplit, 1, 0, stream, (nint)args, 0).ThrowOnError();
             return;
         }
-        const uint WARPS_PER_BLOCK = 8;
+        uint WARPS_PER_BLOCK = (uint)_wpbOverride;
         uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
         CudaDriverApi.cuLaunchKernel(_mulMatVecQ4KQ8_1, gridX, (uint)M, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
@@ -3130,6 +3207,13 @@ public sealed class CudaKernels : IDisposable
     // better (2026-07-22 sweep). HARTSY_GEMV_KSPLIT=0 disables, =W forces W warps/row everywhere.
     private static readonly int _ksplitOverride =
         int.TryParse(Environment.GetEnvironmentVariable("HARTSY_GEMV_KSPLIT"), out int v) ? v : -1;
+
+    // Rows-per-block for the warp-per-row GEMV kernels (sweep knob HARTSY_GEMV_WPB). Default 4: the
+    // 2026-07-23 sweep measured WPB=4 equal-or-faster than the original 8 at every production shape class
+    // (Q4_K K=4096: N=256 11.4 vs 13.0 µs, N=4096 37.8 vs 38.4, N=27392 197.1 vs 198.1) — finer blocks
+    // (128 threads) smooth the launch/drain tail; resident-warp occupancy is unchanged (12 blocks/SM).
+    private static readonly int _wpbOverride =
+        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_GEMV_WPB"), out int w) ? Math.Clamp(w, 1, 16) : 4;
 
     private static uint GemvKsplitWarps(int rows, int k)
     {
@@ -3172,7 +3256,7 @@ public sealed class CudaKernels : IDisposable
         void** args = stackalloc void*[9];
         args[0] = &outA; args[1] = &xqA; args[2] = &xdA; args[3] = &xsA; args[4] = &wA; args[5] = &bA;
         args[6] = &nA; args[7] = &kA; args[8] = &mA;
-        const uint WARPS_PER_BLOCK = 8;
+        uint WARPS_PER_BLOCK = (uint)_wpbOverride;
         uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
         CudaDriverApi.cuLaunchKernel(_mulMatVecQ5KQ8_1, gridX, (uint)M, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
@@ -3190,7 +3274,7 @@ public sealed class CudaKernels : IDisposable
             CudaDriverApi.cuLaunchKernel(ksplitFunc, (uint)N, (uint)M, 1, 32, ksplit, 1, 0, stream, (nint)args, 0).ThrowOnError();
             return;
         }
-        const uint WARPS_PER_BLOCK = 8;
+        uint WARPS_PER_BLOCK = (uint)_wpbOverride;
         uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
         CudaDriverApi.cuLaunchKernel(func, gridX, (uint)M, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
@@ -3203,7 +3287,7 @@ public sealed class CudaKernels : IDisposable
         args[0] = &outA; args[1] = &inA; args[2] = &wA; args[3] = &bA;
         args[4] = &nA; args[5] = &kA; args[6] = &mA;
         // One warp per output row, WARPS_PER_BLOCK rows per block.
-        const uint WARPS_PER_BLOCK = 8;
+        uint WARPS_PER_BLOCK = (uint)_wpbOverride;
         uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
         CudaDriverApi.cuLaunchKernel(
             func,
