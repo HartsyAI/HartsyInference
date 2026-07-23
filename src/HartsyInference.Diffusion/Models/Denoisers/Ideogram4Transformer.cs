@@ -114,9 +114,13 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
     /// <param name="positionIds">MRoPE positions <c>[B, numText+numImg, 3]</c> F32 (temporal, height, width).</param>
     /// <param name="indicator">Per-token role, length <c>B*L</c> row-major: <c>LLM_TOKEN_INDICATOR(3)</c> first <c>numText</c> rows, then <c>OUTPUT_IMAGE_INDICATOR(2)</c>.</param>
     /// <param name="attentionMask">Optional additive mask <c>[B, 1, L, L]</c> or <c>[B, 1, 1, L]</c>; null = full attention (correct for unpadded single-prompt B=1).</param>
+    /// <param name="stepCache">Optional across-step First-Block cache (one instance PER transformer — the
+    /// conditional and unconditional models each need their own). Block 0 always runs; on a gate hit blocks
+    /// 1..N−1 are reconstructed from the previous step's residual. Null = byte-identical uncached forward.</param>
     /// <returns><c>[B, numImg, inChannels]</c> image-token velocity (F32); text rows are dropped before the final layer.</returns>
     public Tensor Forward(IBackend backend, Tensor? llmTextFeatures, Tensor imageTokens, float timestep,
-        Tensor positionIds, int[] indicator, Tensor? attentionMask)
+        Tensor positionIds, int[] indicator, Tensor? attentionMask,
+        Utilities.DeviceFeatureCache? stepCache = null)
     {
         int batch = (int)imageTokens.Shape[0];
         int numImg = (int)imageTokens.Shape[1];
@@ -177,10 +181,36 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         // Masked (regional) passes stay F32 — the additive-mask SDPA path is F32-only.
         bool f16Blocks = DiTBlocks.DitDtype.Act == DType.F16 && attentionMask is null;
         Tensor cur = f16Blocks ? Utilities.DtypeCastHelper.EnsureDtype(backend, h, DType.F16) : h;
-        for (int i = 0; i < _blocks.Length; i++)
+
+        // Across-step First-Block cache (QwenImageTransformer wiring): block 0 always runs and its output is
+        // the gate indicator; hit ⇒ blocks 1..N−1 replaced by block0 + previous residual; miss ⇒ the anchor
+        // (block-0 output) survives the loop so the fresh residual can be stored. Null stepCache is untouched.
+        Tensor? cacheAnchor = null;
+        int startBlock = 0;
+        if (stepCache is not null && _blocks.Length > 1)
+        {
+            Tensor block0 = _blocks[0].Forward(backend, cur, adalnInput, cos, sin, attentionMask);
+            cur.Dispose();
+            cur = block0;
+            Ideogram4DebugDump.Dump("layers.0", cur);
+            startBlock = 1;
+            if (!stepCache.ShouldCompute(backend, cur))
+            {
+                Tensor reconstructed = stepCache.ApplyResidual(backend, cur);
+                cur.Dispose();
+                cur = reconstructed;
+                startBlock = _blocks.Length;
+            }
+            else
+            {
+                cacheAnchor = cur;
+            }
+        }
+
+        for (int i = startBlock; i < _blocks.Length; i++)
         {
             Tensor next = _blocks[i].Forward(backend, cur, adalnInput, cos, sin, attentionMask);
-            cur.Dispose();
+            if (cur != cacheAnchor) cur.Dispose();
             cur = next;
             // No per-block sync: transient allocs/frees go through the stream-ordered async pool
             // (cuMemAllocAsync/FreeAsync on the compute stream), which reuses freed memory in stream
@@ -188,6 +218,12 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
             // overlap AND, with the pool's release-threshold at 0, released the working set to the OS
             // every block (re-reserved next block) — a uniform ~20-200x slowdown across all ops.
             Ideogram4DebugDump.Dump($"layers.{i}", cur);
+        }
+
+        if (cacheAnchor is not null)
+        {
+            stepCache!.StoreResidual(backend, cacheAnchor, cur);
+            cacheAnchor.Dispose();
         }
 
         // ── Final layer over the image rows only (rowwise ops, so slicing first is bit-identical) ──

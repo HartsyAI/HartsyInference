@@ -37,6 +37,21 @@ public static class StepCacheEnv
 
     public static string? ReadCalibFile() => Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_CALIB");
 
+    /// <summary>Reads HARTSY_STEP_CACHE_LATE: fraction of the schedule (measured from the END) where cache
+    /// reuse is allowed; steps before the window run uncached. 0 (default) = whole schedule. For models whose
+    /// first-block indicator is schedule-flat while true residual drift falls steeply late (Ideogram 4
+    /// calibration, 2026-07-22), this is the honest way to place reuses where they are cheap — the drift gate
+    /// alone cannot see it.</summary>
+    public static float ReadLateWindow()
+    {
+        string? value = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_LATE");
+        if (string.IsNullOrWhiteSpace(value)) return 0f;
+        if (!float.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out float late)
+            || late < 0f || late > 1f)
+            throw new ArgumentException($"HARTSY_STEP_CACHE_LATE must be a float in [0,1]; got '{value}'.");
+        return late;
+    }
+
     /// <summary>Reads HARTSY_STEP_CACHE_CAP (max consecutive cached steps), default 3.</summary>
     public static int ReadCap()
     {
