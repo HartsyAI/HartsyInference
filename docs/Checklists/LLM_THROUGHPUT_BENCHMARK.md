@@ -139,6 +139,20 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 > Llama-3.2-1B (197.29) and Qwen3-4B (92.91) re-confirmed faster than llama-cpp-python in the same
 > run. Remaining-gap roadmap (gemma graph decode, tiny-model graph node overhead) is scoped in the
 > grind doc's round-2 block.
+>
+> **UPDATE 2026-07-22 (round 3): Gemma-family CUDA-graph decode landed** (sliding-window + soft-cap +
+> dual local/global RoPE through the graph path — grind doc round-3 block; graph-vs-eager output
+> verified byte-identical on BOTH gemma checkpoints before enabling, per the GLM-4 lesson):
+>
+> | Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (best÷llama) |
+> |---|---|---|---|---|
+> | gemma-2-2b-it Q4_K_M | 111.47 | **129.51** | 121.08 | **1.07× FASTER** |
+> | gemma-3-1b-it Q4_K_M | 88.24 | **115.09** | 192.34 | 0.60× (was 0.18× at day start) |
+>
+> Fleet summary end-of-day: 3 of 7 benchmarked models FASTER than llama-cpp-python (Llama-3.2-1B
+> 196-197, Qwen3-4B 92.6-92.9, gemma-2-2b 129.5), GLM-4-9B at 0.82×, DeepSeek-distill-1.5B at 0.89×,
+> and the two sub-2B stragglers (gemma3-1b 0.60×, qwen2.5-0.5b 0.49×) both bottlenecked on the
+> tiny-model graph-node-overhead bucket, not on kernels.
 
 Superseded pre-dp4a table (2026-07-22, earlier session):
 

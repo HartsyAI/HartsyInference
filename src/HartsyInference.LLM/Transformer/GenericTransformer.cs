@@ -33,6 +33,9 @@ public sealed unsafe class GenericTransformer : IDisposable
     // caller needs; rebuilt only if a LATER call needs more positions than currently built. The old table is
     // disposed on rebuild (not leaked) — safe by construction, see that method's doc.
     private Tensor? _graphDecodeCos, _graphDecodeSin;
+    // Gemma-3 dual-RoPE: local (sliding-window) layers rotate with a different base frequency. Built alongside
+    // the global tables when RopeLocalTheta > 0; ForwardGraphDecodeStep selects per layer via IsGlobalLayer.
+    private Tensor? _graphDecodeCosLocal, _graphDecodeSinLocal;
     private int _graphDecodeCapacity;
     // Granite/MiniCPM-family embedding scale, pre-applied once to a dedicated GPU copy of the embed table for the
     // graph-decode gather kernel (see EnsureEmbedResidentForGraphDecode) — EmbedGatherDecodeStep has no scale
@@ -429,27 +432,32 @@ public sealed unsafe class GenericTransformer : IDisposable
         return result;
     }
 
-    /// <summary>True when this architecture is simple enough for CUDA-graph decode capture: the plain pre-norm
-    /// GQA/RoPE decoder shape (Llama/Qwen/Mistral family — most dense models). Excludes anything
-    /// <see cref="Layer.ForwardGraphStep"/> doesn't implement: MLA, MoE, cross-attention, sliding-window,
-    /// attention softcap/sink, ALiBi, parallel residual, absolute-position embeddings, post-norm placement
-    /// (OLMo-2), dual local/global RoPE (Gemma-3), BLOOM's embedding LayerNorm. Non-1.0 embedding scale
-    /// (Granite/MiniCPM) is NOT excluded — <see cref="EnsureEmbedResidentForGraphDecode"/> pre-applies it once to
-    /// a dedicated GPU copy of the embed table, since the graph-decode gather kernel itself has no scale param.</summary>
+    /// <summary>True when this architecture is simple enough for CUDA-graph decode capture: the pre-norm
+    /// GQA/RoPE decoder shape (Llama/Qwen/Mistral family — most dense models), INCLUDING (since 2026-07-22)
+    /// the Gemma-2/3 trio of sliding-window attention, attention-logit soft-cap, and dual local/global RoPE.
+    /// Excludes anything <see cref="Layer.ForwardGraphStep"/> doesn't implement: MLA, MoE, cross-attention,
+    /// attention sink, ALiBi, parallel residual, absolute-position embeddings, post-norm placement (OLMo-2),
+    /// BLOOM's embedding LayerNorm, Gemma-4's per-layer SWA head dim. Non-1.0 embedding scale
+    /// (Gemma/Granite/MiniCPM) is NOT excluded — <see cref="EnsureEmbedResidentForGraphDecode"/> pre-applies it
+    /// once to a dedicated GPU copy of the embed table, since the graph-decode gather kernel itself has no
+    /// scale param.</summary>
     public bool SupportsGraphDecode(IBackend backend) =>
         backend.GraphDecodeSupported
         && _cfg.Mla is null
         && _cfg.Moe is null
         && _cfg.CrossAttnLayers.Count == 0
-        && _cfg.SlidingWindow == 0
-        && _cfg.AttnLogitSoftcap == 0f
+        // Sliding-window, attention soft-cap, and dual local/global RoPE (the Gemma-2/3 trio) are supported
+        // as of 2026-07-22: the split-K decode-attention kernel handles window/softcap with a device position,
+        // FlashAttentionDev plumbs them through as per-layer capture constants, and ForwardGraphDecodeStep
+        // selects the local-theta rope table per layer. Gemma-4's per-layer SWA head-dim (HeadDimSwa) is NOT
+        // supported — the graph rope tables are built at a single head dim.
+        && _cfg.HeadDimSwa == 0
         && !_cfg.AttnSink
         && _cfg.AlibiMaxBias <= 0f
         && !_cfg.ParallelResidual
         && !_cfg.AbsolutePositionEmbeddings
         && !_cfg.NoRopeOnGlobalLayers
         && _cfg.NormPlacement == NormPlacement.PreNorm
-        && _cfg.RopeLocalTheta == 0f
         && !_cfg.EmbeddingLayerNorm
         && _cfg.PerLayerEmbeddingDim == 0;
 
@@ -486,10 +494,19 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (_graphDecodeCos is null || _graphDecodeCapacity < minCapacity)
         {
             Tensor? oldCos = _graphDecodeCos, oldSin = _graphDecodeSin;
+            Tensor? oldCosL = _graphDecodeCosLocal, oldSinL = _graphDecodeSinLocal;
             (_graphDecodeCos, _graphDecodeSin) = backend.BuildRopeTableDevice(minCapacity, _cfg.HeadDim, _cfg.RotaryDim, _cfg.RopeTheta, _cfg.RopeScaling);
+            if (_cfg.RopeLocalTheta > 0)
+            {
+                // Same rotary span and scaling as the eager dual-RoPE build (Forward's cosLocal/sinLocal).
+                (_graphDecodeCosLocal, _graphDecodeSinLocal) =
+                    backend.BuildRopeTableDevice(minCapacity, _cfg.HeadDim, _cfg.RotaryDim, _cfg.RopeLocalTheta, _cfg.RopeScaling);
+            }
             _graphDecodeCapacity = minCapacity;
             oldCos?.Dispose();
             oldSin?.Dispose();
+            oldCosL?.Dispose();
+            oldSinL?.Dispose();
         }
         return (_graphDecodeCos!, _graphDecodeSin!);
     }
@@ -521,7 +538,10 @@ public sealed unsafe class GenericTransformer : IDisposable
         Tensor hidden = embeds;
         for (int i = 0; i < _layers.Length; i++)
         {
-            Tensor next = _layers[i].ForwardGraphStep(backend, hidden, cache, i, cosTable, sinTable, devicePos);
+            // Gemma-3 dual-RoPE: local (sliding-window) layers rotate with the local-theta table.
+            bool localRope = _graphDecodeCosLocal is not null && !_cfg.IsGlobalLayer(i);
+            Tensor next = _layers[i].ForwardGraphStep(backend, hidden, cache, i,
+                localRope ? _graphDecodeCosLocal! : cosTable, localRope ? _graphDecodeSinLocal! : sinTable, devicePos);
             hidden.Dispose();
             hidden = next;
         }
@@ -1464,8 +1484,12 @@ public sealed unsafe class GenericTransformer : IDisposable
             kMh.Dispose(); vMh.Dispose();
 
             float scale = _cfg.AttnScale;
+            // Local (sliding-window) layers attend only the most recent SlidingWindow keys — same per-layer
+            // selection as the eager path; the window and soft-cap are constants baked into the captured graph.
+            int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
             Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-            backend.FlashAttentionDev(attn, qMh, kFull, vFull, 0, group, causal: true, 0, scale, devicePos);
+            backend.FlashAttentionDev(attn, qMh, kFull, vFull, 0, group, causal: true, 0, scale, devicePos,
+                _cfg.AttnLogitSoftcap, window);
             qMh.Dispose();
 
             Tensor attnFlat = new(new TensorShape(1, t, _cfg.QDim), DType.F32);

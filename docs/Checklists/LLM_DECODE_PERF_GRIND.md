@@ -624,6 +624,43 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > (e) Q2_K/Q3_K/IQ-quant fused kernels: still fall to the slow dequant path; no popular default tags
 > hit them, so deprioritized.
 
+> **STATUS UPDATE (2026-07-22, later session, round 3): Gemma-family CUDA-graph decode landed —
+> gemma2-2b now BEATS llama-cpp-python (129.5 vs 121.1 tok/s, 1.07×); gemma3-1b 88.2 → 115.1 tok/s
+> (+30%, gap 2.15× → 1.66×).** This was roadmap item (a) from round 2: the split-K attention kernel
+> already handled sliding-window/soft-cap with a device position (round 2's kernel work), so this round
+> was pure plumbing + eligibility:
+> 1. **`IBackend.FlashAttentionDev` gains `softcap`/`slidingWindow` params** (optional, appended —
+>    existing callers unchanged). CudaBackend passes them through all three paths (split, monolithic
+>    fallback, host-eager fallback); both kernels read kvLen/qOffset from the device position BEFORE
+>    computing the window clamp, so the per-layer window is a capture-constant and the clamp tracks the
+>    replayed position correctly.
+> 2. **Dual local/global RoPE tables for graph decode** (`_graphDecodeCosLocal`/`SinLocal`, built with
+>    `RopeLocalTheta` alongside the global pair in `EnsureRopeTableForGraphDecode`);
+>    `ForwardGraphDecodeStep` selects per layer via `IsGlobalLayer`, mirroring the eager dual-RoPE path.
+> 3. **`Layer.ForwardGraphStep` passes the per-layer window** (`SlidingWindow` on non-global layers,
+>    0 on global — same rule as eager) **and `AttnLogitSoftcap`** to `FlashAttentionDev`.
+> 4. **Eligibility gate**: `SlidingWindow == 0`, `AttnLogitSoftcap == 0`, and `RopeLocalTheta == 0`
+>    exclusions removed; `HeadDimSwa == 0` added (Gemma-4's per-layer SWA head dim stays excluded —
+>    the graph rope tables are built at a single head dim).
+>
+> **Correctness (the GLM-4 lesson applied: no arch enters the gate without a real-checkpoint e2e A/B):**
+> gemma-3-1b-it AND gemma-2-2b-it (downloaded for exactly this check — softcap + FinalLogitSoftcap +
+> single-theta, a different config corner than gemma3) both produce **byte-identical greedy output
+> graph-on vs graph-off** on the float path (dp4a on either side shows only the known bounded argmax
+> tie-flips, both texts coherent). Full `HartsyInference.Cuda.Tests` 179/179, `HartsyInference.LLM.Tests`
+> 132/132; the 6-model regression benchmark shows every previously-benchmarked model unchanged within
+> noise (Llama 196.0, Qwen3 92.6, DeepSeek 160.5, qwen2.5 157.8, GLM-4 39.2), and gemma graph-on runs
+> report the required ≤1 mid-decode D2H syncs (true single-launch replay).
+>
+> **Measured (RTX 3060 pinned, medians of 5, llama-cpp-python same-day):**
+> - gemma-2-2b-it Q4_K_M: eager 111.5 → graph-on **129.51 tok/s** vs llama-cpp-python 121.08 →
+>   **1.07× FASTER** (third model past the Python baseline; this arch had NO graph decode this morning).
+> - gemma-3-1b-it Q4_K_M: eager 88.2 → graph-on **115.09 tok/s** vs 192.34 → 1.67× slower (was 5.4×
+>   at the start of the day). Its residual gap is NOT gemma-specific anymore: with kernels near-roofline
+>   and graphs on, it sits in the same tiny-model per-node-overhead bucket as qwen2.5-0.5b (2.0×) and
+>   the DeepSeek distill (1.12×) — that bucket (graph replay/node overhead at small per-kernel work,
+>   incl. the dp4a per-Linear alloc/free nodes) is the next real lever, roadmap item (b) in round 2.
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

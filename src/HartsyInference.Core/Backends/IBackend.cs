@@ -1013,9 +1013,13 @@ public interface IBackend : IDisposable
 
     /// <summary>Self-attention FlashAttention whose kvLen/qOffset come from the device position buffer when
     /// <paramref name="devicePos"/> is non-zero (graph-replayable, forces the fixed-grid path); otherwise identical
-    /// to <see cref="FlashAttention"/> at the host <paramref name="kvLen"/>/<paramref name="qOffset"/>.</summary>
-    void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos)
-        => FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale);
+    /// to <see cref="FlashAttention"/> at the host <paramref name="kvLen"/>/<paramref name="qOffset"/>.
+    /// <paramref name="softcap"/>/<paramref name="slidingWindow"/> mirror <see cref="FlashAttention"/>'s
+    /// (Gemma-2 logit soft-cap; Gemma-2/3 local-layer window) — both are per-layer CONSTANTS baked into the
+    /// captured graph, only the position varies per replay.</summary>
+    void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
+        float softcap = 0f, int slidingWindow = 0)
+        => FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
 
     /// <summary>Copies a RESIDENT device tensor's data to <paramref name="dst"/> WITHOUT freeing/detaching its
     /// device buffer (unlike a normal <c>DataPointer</c> read, which syncs then frees it). Required for a captured

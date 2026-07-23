@@ -5438,14 +5438,15 @@ public sealed class CudaBackend : IBackend
     /// split-K decode path with a FIXED split count (chunk sized to the cache CAPACITY, not the current kvLen), so
     /// the grid is position-independent and graph-capturable while still filling the GPU at long context: splits
     /// whose chunk starts past the current kvLen early-exit in the kernel, so active parallelism grows with position.</summary>
-    public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos)
+    public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
+        float softcap = 0f, int slidingWindow = 0)
     {
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
         bool kernelOk = d > 0 && d <= 1024;
         if (devicePos == 0 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32 || !kernelOk)
         {
-            FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale);
+            FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
             return;
         }
         _context.EnsureCurrent();
@@ -5492,7 +5493,7 @@ public sealed class CudaBackend : IBackend
                     pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
                     pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
                     _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
-                        grp, causal, qOffset, scale, splits, chunk, _stream.Handle, devicePos);
+                        grp, causal, qOffset, scale, splits, chunk, _stream.Handle, devicePos, softcap, slidingWindow);
                     _kernels!.LaunchFlashAttentionCombine(pOut, pM, pL, pAcc, b, hq, tq, d, splits, _stream.Handle);
                 }
                 finally
@@ -5503,7 +5504,7 @@ public sealed class CudaBackend : IBackend
             else
             {
                 _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, grp,
-                    causal, qOffset, scale, 0f, 0, 0, 0, _stream.Handle, devicePos);
+                    causal, qOffset, scale, softcap, 0, slidingWindow, 0, _stream.Handle, devicePos);
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
