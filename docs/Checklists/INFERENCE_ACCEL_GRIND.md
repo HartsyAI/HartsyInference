@@ -303,18 +303,30 @@ SDPA share (27%).
 3. [ ] Replicate to HiDream (cfg 5 → biggest absolute saving per step) and Wan (2-forward CFG at
        1.8 s/forward — the largest per-step win in the fleet). Same self-healing note re: C1.
 
-### H3 — fp8 common-scale fusion (A1) wiring + measurement
+### H3 — fp8 common-scale fusion (A1) wiring + measurement — CLOSED (both halves measured ~neutral/negative)
 
-1. [ ] **Chroma QKV**: in `ChromaCheckpointConverter`, after the fp8 scale pre-pass, call
-       `RequantizeToCommonFp8Scale(to_q.weight, to_k.weight, to_v.weight)` per block (log the returned
-       error; gate < 1/16), then enable the existing fused-QKV path (ZetaChroma's split-attention fuse
-       shipped `44.53` — same transformer family) for fp8-scaled checkpoints. Gate: seed-42 A/B image
-       SSIM ≥ 0.99 vs unfused (the requant error bound predicts visually-identical output; verify).
-       Measure: step time (3 GEMM launches → 1, larger-N GEMM efficiency).
-2. [ ] **Ideogram4 w1/w3**: same recipe on the FFN pair (its qkv is already fused in the checkpoint);
-       this was its named next lever. Also try its remaining menu (BSHD strided cuDNN SDPA) same session.
-3. [ ] If the SSIM gate fails anywhere: record which blocks carried extreme scale ratios (the helper
-       returns per-group error — log it per block) and fall back per-block (fuse only clean groups).
+1. [x] **Chroma QKV**: measured NEUTRAL 2026-07-23, closed measure-first without the Swarm deploy.
+       Premise correction discovered en route: NO fused-QKV compute path existed anywhere in the image
+       fleet — ZetaChroma's `44.53` "split-attention fuse" is key-NAMING only (`ZImageBlock.LoadSplitQkv`
+       re-splits the fused checkpoint tensor and runs 3 Linears); the only real fused consumer is
+       `Hunyuan3DFluxBlocks` (fused GEMM + `QkvSplitNorm`). Built that recipe into Chroma anyway
+       (`HARTSY_CHROMA_FUSED_QKV=1`, default OFF: converter keeps the BFL `img_attn/txt_attn.qkv` and
+       single-block `linear1` whole — fp8 companions fold onto the FUSED tensor so Q/K/V share one scale
+       by construction, no requant call needed for BFL sources; blocks auto-detect fused keys and run
+       1 GEMM + `QkvSplitNorm` per stream, replacing 3–4 GEMMs + 2 separate RmsNorm passes).
+       Parity: `ChromaFusedQkvParityTests` (CPU, split-vs-fused same weights) PASS both blocks.
+       Perf (`ChromaFusedQkvMicroBench`, real shape hidden 3072/24h/S=4608, interleaved-trial in-run
+       control): **F16 on 3060: 1.009× (t=0.2); fp8+native GEMM on 4090: 1.021× (t=0.1) — NEUTRAL.**
+       At 4k-token image shapes the GEMMs saturate the GPU; launch-count + norm-fusion savings are noise
+       — converges with the Ideogram4 w13 negative and the LLM R4 reprioritization. Code kept (correct,
+       parity-gated, opt-in) as the measurement record; no deploy, no checkpoint re-stage, SSIM e2e gate
+       unnecessary at micro-neutrality.
+2. [x] **Ideogram4 w1/w3**: measured NEGATIVE 2026-07-22 (−4% AND an F16-path quality bug from
+       comfy_quant/weight_scale companions the fused tensor drops — `FuseSwiGluPairs` now guards) —
+       see "Ideogram4 restored + w13 fusion gate" in `2026-07-22_accel_sageattn_3060.md`.
+3. [x] SSIM fallback bookkeeping: moot — neither half ships fused by default.
+
+> H3 closed ⇒ the H5 "start after H1–H4 land" gate for W8A8 IMMA is now satisfied.
 
 ### H4 — INT8 SageAttention kernel (B1) — the build item
 
@@ -451,3 +463,4 @@ Design (validated by `SageAttentionReferenceTests`, which is the diff oracle):
 | Date | GPU | Item | Config | Baseline | New | Δ | Quality gate | Result dir |
 |---|---|---|---|---|---|---|---|---|
 | 2026-07-22 | RTX 3060 | LLM GEMV R4 shared-mem-staging (input-vector-reuse half only) | Q4_K decode GEMV, Qwen3-4B ffn_gate shape K=2560 N=9728 | 63.05us/call | ~70.2-70.7us/call | **-11% (regression, reverted)** | 7/7 `FusedGemvGroundTruthTests` bit-exact before revert | `docs/Checklists/LLM_DECODE_PERF_GRIND.md` (2026-07-22 R4 block) |
+| 2026-07-23 | 3060 + 4090 | H3.1 Chroma fused-QKV (`HARTSY_CHROMA_FUSED_QKV`, Hunyuan3DFluxBlocks recipe) | single block, hidden 3072/24h/S=4608, interleaved in-run control | split 58.1 ms (3060 F16) / 8.2 ms (4090 fp8) | fused 58.0 / 8.2 ms | **NEUTRAL (1.009×/1.021×, t≤0.2) — kept opt-in, not deployed** | `ChromaFusedQkvParityTests` 2/2 (CPU split-vs-fused) | `ChromaFusedQkvMicroBench` |

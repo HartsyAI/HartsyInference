@@ -26,6 +26,11 @@ public sealed unsafe class ChromaSingleStreamBlock
     private Tensor? _toVWeight, _toVBias;
     private Tensor? _projMlpWeight, _projMlpBias;
 
+    // Fused BFL linear1 [3*hidden + mlp, hidden] (HARTSY_CHROMA_FUSED_QKV: the converter kept it whole).
+    // When set, the split projections above stay null and the forward runs one GEMM + SliceLastDim×2 +
+    // QkvSplitNorm (the Hunyuan3DFluxBlocks recipe).
+    private Tensor? _lin1Weight, _lin1Bias;
+
     private Tensor? _projOutWeight, _projOutBias;
 
     /// <summary>Creates a ChromaSingleStreamBlock.</summary>
@@ -53,15 +58,23 @@ public sealed unsafe class ChromaSingleStreamBlock
         _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
 
-        _toQWeight = weights[$"{prefix}.attn.to_q.weight"];
-        _toKWeight = weights[$"{prefix}.attn.to_k.weight"];
-        _toVWeight = weights[$"{prefix}.attn.to_v.weight"];
-        _toQBias = weights[$"{prefix}.attn.to_q.bias"];
-        _toKBias = weights[$"{prefix}.attn.to_k.bias"];
-        _toVBias = weights[$"{prefix}.attn.to_v.bias"];
+        if (weights.TryGetValue($"{prefix}.linear1.weight", out Tensor? lin1W))
+        {
+            _lin1Weight = lin1W;
+            _lin1Bias = weights[$"{prefix}.linear1.bias"];
+        }
+        else
+        {
+            _toQWeight = weights[$"{prefix}.attn.to_q.weight"];
+            _toKWeight = weights[$"{prefix}.attn.to_k.weight"];
+            _toVWeight = weights[$"{prefix}.attn.to_v.weight"];
+            _toQBias = weights[$"{prefix}.attn.to_q.bias"];
+            _toKBias = weights[$"{prefix}.attn.to_k.bias"];
+            _toVBias = weights[$"{prefix}.attn.to_v.bias"];
 
-        _projMlpWeight = weights[$"{prefix}.proj_mlp.weight"];
-        _projMlpBias = weights[$"{prefix}.proj_mlp.bias"];
+            _projMlpWeight = weights[$"{prefix}.proj_mlp.weight"];
+            _projMlpBias = weights[$"{prefix}.proj_mlp.bias"];
+        }
 
         _projOutWeight = weights[$"{prefix}.proj_out.weight"];
         _projOutBias = weights[$"{prefix}.proj_out.bias"];
@@ -85,6 +98,8 @@ public sealed unsafe class ChromaSingleStreamBlock
         if (_toVBias is not null) yield return _toVBias;
         if (_projMlpWeight is not null) yield return _projMlpWeight;
         if (_projMlpBias is not null) yield return _projMlpBias;
+        if (_lin1Weight is not null) yield return _lin1Weight;
+        if (_lin1Bias is not null) yield return _lin1Bias;
         if (_projOutWeight is not null) yield return _projOutWeight;
         if (_projOutBias is not null) yield return _projOutBias;
     }
@@ -122,24 +137,47 @@ public sealed unsafe class ChromaSingleStreamBlock
         // ── 2. LayerNorm (no affine) + modulate: x*(1+scale)+shift ──
         Tensor modulated = NormModulate(backend, x, mod[0], mod[1], shape);
 
-        // ── 3. Q/K/V + MLP projection (parallel). Q/K/V declared [B, S, H, D] for per-head RMSNorm ──
-        Tensor q = new Tensor(heads, act);
-        backend.Linear(q, modulated, _toQWeight!, _toQBias);
-        Tensor k = new Tensor(heads, act);
-        backend.Linear(k, modulated, _toKWeight!, _toKBias);
-        Tensor v = new Tensor(heads, act);
-        backend.Linear(v, modulated, _toVWeight!, _toVBias);
-        Tensor mlpInput = new Tensor(mlpShape, act);
-        backend.Linear(mlpInput, modulated, _projMlpWeight!, _projMlpBias);
-        modulated.Dispose();
+        // ── 3+4. Q/K/V + MLP projection + QK-Norm. Fused path (HARTSY_CHROMA_FUSED_QKV): the BFL
+        //         linear1 [3*hidden + mlp, hidden] runs as ONE GEMM; qkv + mlp slice off the activation
+        //         and QkvSplitNorm does split + per-head RMSNorm + v copy in one kernel (4 GEMMs +
+        //         2 RmsNorm passes → 1 GEMM + 3 kernels, the Hunyuan3DFluxBlocks recipe). Split path:
+        //         4 parallel Linears + 2 separate RmsNorm passes (Q/K/V declared [B, S, H, D]). ──
+        Tensor qNormed, kNormed, v, mlpInput;
+        if (_lin1Weight is not null)
+        {
+            Tensor lin1 = new Tensor(new TensorShape(batch, seqLen, 3 * _hiddenSize + _mlpDim), act);
+            backend.Linear(lin1, modulated, _lin1Weight, _lin1Bias);
+            modulated.Dispose();
+            Tensor qkv = new Tensor(new TensorShape(batch, seqLen, 3 * _hiddenSize), act);
+            backend.SliceLastDim(qkv, lin1, 0);
+            mlpInput = new Tensor(mlpShape, act);
+            backend.SliceLastDim(mlpInput, lin1, 3 * _hiddenSize);
+            lin1.Dispose();
+            qNormed = new Tensor(heads, act);
+            kNormed = new Tensor(heads, act);
+            v = new Tensor(heads, act);
+            backend.QkvSplitNorm(qNormed, kNormed, v, qkv, _normQ.Weight, _normK.Weight, _normQ.Eps);
+            qkv.Dispose();
+        }
+        else
+        {
+            Tensor q = new Tensor(heads, act);
+            backend.Linear(q, modulated, _toQWeight!, _toQBias);
+            Tensor k = new Tensor(heads, act);
+            backend.Linear(k, modulated, _toKWeight!, _toKBias);
+            v = new Tensor(heads, act);
+            backend.Linear(v, modulated, _toVWeight!, _toVBias);
+            mlpInput = new Tensor(mlpShape, act);
+            backend.Linear(mlpInput, modulated, _projMlpWeight!, _projMlpBias);
+            modulated.Dispose();
 
-        // ── 4. QK-Norm (per-head RMSNorm over the last dim = headDim) ──
-        Tensor qNormed = new Tensor(heads, act);
-        backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
-        q.Dispose();
-        Tensor kNormed = new Tensor(heads, act);
-        backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
-        k.Dispose();
+            qNormed = new Tensor(heads, act);
+            backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
+            q.Dispose();
+            kNormed = new Tensor(heads, act);
+            backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
+            k.Dispose();
+        }
 
         // ── 5. RoPE. B=1 (pipeline case): GPU-resident on the pre-permute [B, S, H, D] layout
         //       (device WanRopeInterleaved, no D2H). B>1: host Forward post-permute. ──

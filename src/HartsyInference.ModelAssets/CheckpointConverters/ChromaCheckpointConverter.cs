@@ -96,18 +96,40 @@ public sealed class ChromaCheckpointConverter
         TryRename(bfl, "img_in.weight", "x_embedder.weight", transformer);
         TryRename(bfl, "img_in.bias", "x_embedder.bias", transformer);
 
+        // Fused-QKV mode (HARTSY_CHROMA_FUSED_QKV=1, INFERENCE_ACCEL_GRIND §H3.1): keep the BFL fused
+        // attention projections instead of splitting them, so the blocks run ONE qkv GEMM + the fused
+        // QkvSplitNorm kernel (the Hunyuan3DFluxBlocks recipe) in place of 3 GEMMs + 2 separate RMSNorm
+        // passes per stream. The fp8_scaled companion was folded onto the FUSED tensor above, so Q/K/V
+        // share one scale by construction — no requant needed for BFL sources. Only plain linear dtypes
+        // fuse (GGUF block-quant tensors keep the proven split path).
+        bool fuseQkv = Environment.GetEnvironmentVariable("HARTSY_CHROMA_FUSED_QKV") == "1";
+        static bool FusableDType(Tensor t) =>
+            t.DType == DType.F32 || t.DType == DType.F16 || t.DType == DType.BF16 || t.DType == DType.F8E4M3;
+
         // ── Double transformer blocks ───────────────────────────────────
         for (int i = 0; i < numDoubles; i++)
         {
             string srcBase = $"double_blocks.{i}";
             string dstBase = $"transformer_blocks.{i}";
 
-            // Image stream: split fused img_attn.qkv → to_q / to_k / to_v
-            SplitFusedQkv(bfl, $"{srcBase}.img_attn.qkv.weight", $"{srcBase}.img_attn.qkv.bias",
-                dstBase, "attn.to_q", "attn.to_k", "attn.to_v", InnerDim, transformer);
-            // Text stream: split fused txt_attn.qkv → add_q_proj / add_k_proj / add_v_proj
-            SplitFusedQkv(bfl, $"{srcBase}.txt_attn.qkv.weight", $"{srcBase}.txt_attn.qkv.bias",
-                dstBase, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", InnerDim, transformer);
+            if (fuseQkv && bfl.TryGetValue($"{srcBase}.img_attn.qkv.weight", out Tensor? imgQkvW) && FusableDType(imgQkvW))
+            {
+                // Image stream: keep fused img_attn.qkv → attn.qkv
+                TryRename(bfl, $"{srcBase}.img_attn.qkv.weight", $"{dstBase}.attn.qkv.weight", transformer);
+                TryRename(bfl, $"{srcBase}.img_attn.qkv.bias", $"{dstBase}.attn.qkv.bias", transformer);
+                // Text stream: keep fused txt_attn.qkv → attn.add_qkv
+                TryRename(bfl, $"{srcBase}.txt_attn.qkv.weight", $"{dstBase}.attn.add_qkv.weight", transformer);
+                TryRename(bfl, $"{srcBase}.txt_attn.qkv.bias", $"{dstBase}.attn.add_qkv.bias", transformer);
+            }
+            else
+            {
+                // Image stream: split fused img_attn.qkv → to_q / to_k / to_v
+                SplitFusedQkv(bfl, $"{srcBase}.img_attn.qkv.weight", $"{srcBase}.img_attn.qkv.bias",
+                    dstBase, "attn.to_q", "attn.to_k", "attn.to_v", InnerDim, transformer);
+                // Text stream: split fused txt_attn.qkv → add_q_proj / add_k_proj / add_v_proj
+                SplitFusedQkv(bfl, $"{srcBase}.txt_attn.qkv.weight", $"{srcBase}.txt_attn.qkv.bias",
+                    dstBase, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", InnerDim, transformer);
+            }
 
             // QK-norm scales
             TryRename(bfl, $"{srcBase}.img_attn.norm.query_norm.scale", $"{dstBase}.attn.norm_q.weight", transformer);
@@ -138,9 +160,19 @@ public sealed class ChromaCheckpointConverter
             string srcBase = $"single_blocks.{i}";
             string dstBase = $"single_transformer_blocks.{i}";
 
-            // 4-way split of fused linear1 → to_q / to_k / to_v / proj_mlp.
-            SplitFusedLinear1Weight(bfl, $"{srcBase}.linear1.weight", dstBase, transformer);
-            SplitFusedLinear1Bias(bfl, $"{srcBase}.linear1.bias", dstBase, transformer);
+            if (fuseQkv && bfl.TryGetValue($"{srcBase}.linear1.weight", out Tensor? lin1W) && FusableDType(lin1W))
+            {
+                // Keep the BFL 4-way fused linear1 [3*hidden + mlp, hidden] whole: the block runs one GEMM
+                // then slices qkv/mlp off the activation (SliceLastDim ×2 + QkvSplitNorm).
+                TryRename(bfl, $"{srcBase}.linear1.weight", $"{dstBase}.linear1.weight", transformer);
+                TryRename(bfl, $"{srcBase}.linear1.bias", $"{dstBase}.linear1.bias", transformer);
+            }
+            else
+            {
+                // 4-way split of fused linear1 → to_q / to_k / to_v / proj_mlp.
+                SplitFusedLinear1Weight(bfl, $"{srcBase}.linear1.weight", dstBase, transformer);
+                SplitFusedLinear1Bias(bfl, $"{srcBase}.linear1.bias", dstBase, transformer);
+            }
 
             // QK-norm scales
             TryRename(bfl, $"{srcBase}.norm.query_norm.scale", $"{dstBase}.attn.norm_q.weight", transformer);

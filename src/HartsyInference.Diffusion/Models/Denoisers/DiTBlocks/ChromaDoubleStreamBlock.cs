@@ -30,6 +30,12 @@ public sealed unsafe class ChromaDoubleStreamBlock
     private Tensor? _addVWeight, _addVBias;
     private Tensor? _toAddOutWeight, _toAddOutBias;
 
+    // Fused attention projections (HARTSY_CHROMA_FUSED_QKV: the converter kept the BFL qkv whole).
+    // When set, the split projections above stay null and the forward runs one qkv GEMM + QkvSplitNorm
+    // per stream (the Hunyuan3DFluxBlocks recipe).
+    private Tensor? _imgQkvWeight, _imgQkvBias;
+    private Tensor? _txtQkvWeight, _txtQkvBias;
+
     // QK-norm (per-head RMSNorm with affine scale)
     private readonly QkNorm _normQ;
     private readonly QkNorm _normK;
@@ -70,25 +76,42 @@ public sealed unsafe class ChromaDoubleStreamBlock
     /// at damp scale while all branch inputs stay baseline via the scale-invariant no-affine LayerNorm. 1.0 = off.</param>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
-        // Image Q/K/V (bias=True per FluxAttention)
-        _toQWeight = weights[$"{prefix}.attn.to_q.weight"];
-        _toKWeight = weights[$"{prefix}.attn.to_k.weight"];
-        _toVWeight = weights[$"{prefix}.attn.to_v.weight"];
+        // Image Q/K/V (bias=True per FluxAttention). Fused qkv when the converter kept it whole
+        // (HARTSY_CHROMA_FUSED_QKV), split projections otherwise.
+        if (weights.TryGetValue($"{prefix}.attn.qkv.weight", out Tensor? imgQkvW))
+        {
+            _imgQkvWeight = imgQkvW;
+            _imgQkvBias = weights[$"{prefix}.attn.qkv.bias"];
+        }
+        else
+        {
+            _toQWeight = weights[$"{prefix}.attn.to_q.weight"];
+            _toKWeight = weights[$"{prefix}.attn.to_k.weight"];
+            _toVWeight = weights[$"{prefix}.attn.to_v.weight"];
+            _toQBias = weights[$"{prefix}.attn.to_q.bias"];
+            _toKBias = weights[$"{prefix}.attn.to_k.bias"];
+            _toVBias = weights[$"{prefix}.attn.to_v.bias"];
+        }
         _toOutWeight = weights[$"{prefix}.attn.to_out.0.weight"];
         _toOutBias = weights[$"{prefix}.attn.to_out.0.bias"];
-        _toQBias = weights[$"{prefix}.attn.to_q.bias"];
-        _toKBias = weights[$"{prefix}.attn.to_k.bias"];
-        _toVBias = weights[$"{prefix}.attn.to_v.bias"];
 
         // Text Q/K/V
-        _addQWeight = weights[$"{prefix}.attn.add_q_proj.weight"];
-        _addKWeight = weights[$"{prefix}.attn.add_k_proj.weight"];
-        _addVWeight = weights[$"{prefix}.attn.add_v_proj.weight"];
+        if (weights.TryGetValue($"{prefix}.attn.add_qkv.weight", out Tensor? txtQkvW))
+        {
+            _txtQkvWeight = txtQkvW;
+            _txtQkvBias = weights[$"{prefix}.attn.add_qkv.bias"];
+        }
+        else
+        {
+            _addQWeight = weights[$"{prefix}.attn.add_q_proj.weight"];
+            _addKWeight = weights[$"{prefix}.attn.add_k_proj.weight"];
+            _addVWeight = weights[$"{prefix}.attn.add_v_proj.weight"];
+            _addQBias = weights[$"{prefix}.attn.add_q_proj.bias"];
+            _addKBias = weights[$"{prefix}.attn.add_k_proj.bias"];
+            _addVBias = weights[$"{prefix}.attn.add_v_proj.bias"];
+        }
         _toAddOutWeight = weights[$"{prefix}.attn.to_add_out.weight"];
         _toAddOutBias = weights[$"{prefix}.attn.to_add_out.bias"];
-        _addQBias = weights[$"{prefix}.attn.add_q_proj.bias"];
-        _addKBias = weights[$"{prefix}.attn.add_k_proj.bias"];
-        _addVBias = weights[$"{prefix}.attn.add_v_proj.bias"];
 
         Tensor imgFfnOutWeight = weights[$"{prefix}.ff.net.2.weight"];
         Tensor imgFfnOutBias = weights[$"{prefix}.ff.net.2.bias"];
@@ -148,6 +171,10 @@ public sealed unsafe class ChromaDoubleStreamBlock
         if (_addVBias is not null) yield return _addVBias;
         if (_toAddOutWeight is not null) yield return _toAddOutWeight;
         if (_toAddOutBias is not null) yield return _toAddOutBias;
+        if (_imgQkvWeight is not null) yield return _imgQkvWeight;
+        if (_imgQkvBias is not null) yield return _imgQkvBias;
+        if (_txtQkvWeight is not null) yield return _txtQkvWeight;
+        if (_txtQkvBias is not null) yield return _txtQkvBias;
         foreach (Tensor w in _normQ.EnumerateWeights()) yield return w;
         foreach (Tensor w in _normK.EnumerateWeights()) yield return w;
         foreach (Tensor w in _normAddedQ.EnumerateWeights()) yield return w;
@@ -211,38 +238,66 @@ public sealed unsafe class ChromaDoubleStreamBlock
         Tensor imgModulated = NormModulate(backend, image, imgMod[0], imgMod[1], imgShape);
         Tensor txtModulated = NormModulate(backend, text, txtMod[0], txtMod[1], txtShape);
 
-        // ── 3. Q/K/V projections (outputs declared [B, S, H, D] to avoid reshape views) ──
-        Tensor imgQ = new Tensor(imgHeads, act);
-        backend.Linear(imgQ, imgModulated, _toQWeight!, _toQBias);
-        Tensor imgK = new Tensor(imgHeads, act);
-        backend.Linear(imgK, imgModulated, _toKWeight!, _toKBias);
-        Tensor imgV = new Tensor(imgHeads, act);
-        backend.Linear(imgV, imgModulated, _toVWeight!, _toVBias);
-        imgModulated.Dispose();
+        // ── 3+4. Q/K/V projections + QK-Norm. Fused path (HARTSY_CHROMA_FUSED_QKV): one qkv GEMM per
+        //         stream + QkvSplitNorm (split + per-head RMSNorm + v copy in one kernel — 3 GEMMs +
+        //         2 RmsNorm passes → 1 GEMM + 1 kernel, the Hunyuan3DFluxBlocks recipe). Split path:
+        //         3 Linears per stream + 2 separate RmsNorm passes (outputs declared [B, S, H, D]). ──
+        Tensor imgQn, imgKn, imgV, txtQn, txtKn, txtV;
+        if (_imgQkvWeight is not null)
+        {
+            Tensor imgQkv = new Tensor(new TensorShape(batch, imgSeqLen, 3 * _hiddenSize), act);
+            backend.Linear(imgQkv, imgModulated, _imgQkvWeight, _imgQkvBias);
+            imgModulated.Dispose();
+            imgQn = new Tensor(imgHeads, act);
+            imgKn = new Tensor(imgHeads, act);
+            imgV = new Tensor(imgHeads, act);
+            backend.QkvSplitNorm(imgQn, imgKn, imgV, imgQkv, _normQ.Weight, _normK.Weight, _normQ.Eps);
+            imgQkv.Dispose();
 
-        Tensor txtQ = new Tensor(txtHeads, act);
-        backend.Linear(txtQ, txtModulated, _addQWeight!, _addQBias);
-        Tensor txtK = new Tensor(txtHeads, act);
-        backend.Linear(txtK, txtModulated, _addKWeight!, _addKBias);
-        Tensor txtV = new Tensor(txtHeads, act);
-        backend.Linear(txtV, txtModulated, _addVWeight!, _addVBias);
-        txtModulated.Dispose();
-        ChromaF16.Probe("dbl-imgQ", imgQ);
-        ChromaF16.Probe("dbl-imgV", imgV);
+            Tensor txtQkv = new Tensor(new TensorShape(batch, txtSeqLen, 3 * _hiddenSize), act);
+            backend.Linear(txtQkv, txtModulated, _txtQkvWeight!, _txtQkvBias);
+            txtModulated.Dispose();
+            txtQn = new Tensor(txtHeads, act);
+            txtKn = new Tensor(txtHeads, act);
+            txtV = new Tensor(txtHeads, act);
+            backend.QkvSplitNorm(txtQn, txtKn, txtV, txtQkv, _normAddedQ.Weight, _normAddedK.Weight, _normAddedQ.Eps);
+            txtQkv.Dispose();
+            ChromaF16.Probe("dbl-imgQ", imgQn);
+            ChromaF16.Probe("dbl-imgV", imgV);
+        }
+        else
+        {
+            Tensor imgQ = new Tensor(imgHeads, act);
+            backend.Linear(imgQ, imgModulated, _toQWeight!, _toQBias);
+            Tensor imgK = new Tensor(imgHeads, act);
+            backend.Linear(imgK, imgModulated, _toKWeight!, _toKBias);
+            imgV = new Tensor(imgHeads, act);
+            backend.Linear(imgV, imgModulated, _toVWeight!, _toVBias);
+            imgModulated.Dispose();
 
-        // ── 4. QK-Norm (per-head RMSNorm over the last dim = headDim) ──
-        Tensor imgQn = new Tensor(imgHeads, act);
-        backend.RmsNorm(imgQn, imgQ, _normQ.Weight, _normQ.Eps);
-        imgQ.Dispose();
-        Tensor imgKn = new Tensor(imgHeads, act);
-        backend.RmsNorm(imgKn, imgK, _normK.Weight, _normK.Eps);
-        imgK.Dispose();
-        Tensor txtQn = new Tensor(txtHeads, act);
-        backend.RmsNorm(txtQn, txtQ, _normAddedQ.Weight, _normAddedQ.Eps);
-        txtQ.Dispose();
-        Tensor txtKn = new Tensor(txtHeads, act);
-        backend.RmsNorm(txtKn, txtK, _normAddedK.Weight, _normAddedK.Eps);
-        txtK.Dispose();
+            Tensor txtQ = new Tensor(txtHeads, act);
+            backend.Linear(txtQ, txtModulated, _addQWeight!, _addQBias);
+            Tensor txtK = new Tensor(txtHeads, act);
+            backend.Linear(txtK, txtModulated, _addKWeight!, _addKBias);
+            txtV = new Tensor(txtHeads, act);
+            backend.Linear(txtV, txtModulated, _addVWeight!, _addVBias);
+            txtModulated.Dispose();
+            ChromaF16.Probe("dbl-imgQ", imgQ);
+            ChromaF16.Probe("dbl-imgV", imgV);
+
+            imgQn = new Tensor(imgHeads, act);
+            backend.RmsNorm(imgQn, imgQ, _normQ.Weight, _normQ.Eps);
+            imgQ.Dispose();
+            imgKn = new Tensor(imgHeads, act);
+            backend.RmsNorm(imgKn, imgK, _normK.Weight, _normK.Eps);
+            imgK.Dispose();
+            txtQn = new Tensor(txtHeads, act);
+            backend.RmsNorm(txtQn, txtQ, _normAddedQ.Weight, _normAddedQ.Eps);
+            txtQ.Dispose();
+            txtKn = new Tensor(txtHeads, act);
+            backend.RmsNorm(txtKn, txtK, _normAddedK.Weight, _normAddedK.Eps);
+            txtK.Dispose();
+        }
 
         // ── 5. Concat [txt, img] along the seq dim (contiguous row-concat in [B, S, hidden] layout) ──
         Tensor jointQf = new Tensor(jointFlat, act);
