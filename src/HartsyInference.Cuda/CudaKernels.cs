@@ -330,6 +330,12 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _mulMatVecQ8_0Q8_1;
     private readonly CudaModule _mulMatVecQ6KQ8_1Module;
     private readonly nint _mulMatVecQ6KQ8_1;
+    private readonly CudaModule _mulMatVecQ4_0Q8_1Module;
+    private readonly nint _mulMatVecQ4_0Q8_1;
+    private readonly CudaModule _mulMatVecQ5_0Q8_1Module;
+    private readonly nint _mulMatVecQ5_0Q8_1;
+    private readonly CudaModule _mulMatVecQ5KQ8_1Module;
+    private readonly nint _mulMatVecQ5KQ8_1;
 
     private const uint BlockSize = 256;
 
@@ -697,6 +703,12 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ8_0Q8_1 = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1");
         _mulMatVecQ6KQ8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q6k_q8_1.ptx"));
         _mulMatVecQ6KQ8_1 = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1");
+        _mulMatVecQ4_0Q8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q4_0_q8_1.ptx"));
+        _mulMatVecQ4_0Q8_1 = _mulMatVecQ4_0Q8_1Module.GetFunction("mul_mat_vec_q4_0_q8_1");
+        _mulMatVecQ5_0Q8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q5_0_q8_1.ptx"));
+        _mulMatVecQ5_0Q8_1 = _mulMatVecQ5_0Q8_1Module.GetFunction("mul_mat_vec_q5_0_q8_1");
+        _mulMatVecQ5KQ8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q5k_q8_1.ptx"));
+        _mulMatVecQ5KQ8_1 = _mulMatVecQ5KQ8_1Module.GetFunction("mul_mat_vec_q5k_q8_1");
     }
 
     // ── Private Launch Helpers ───────────────────────────────────────────
@@ -1922,21 +1934,23 @@ public sealed class CudaKernels : IDisposable
     /// its key chunk into the scratch buffers. <paramref name="chunk"/> = ceil(kvLen / splits).</summary>
     public unsafe void LaunchFlashAttentionSplit(ulong partialM, ulong partialL, ulong partialAcc,
         ulong q, ulong k, ulong v, int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen,
-        int kvGroup, bool causal, int qOffset, float scale, int splits, int chunk, nint stream, ulong dPos = 0)
+        int kvGroup, bool causal, int qOffset, float scale, int splits, int chunk, nint stream, ulong dPos = 0,
+        float softcap = 0f, int slidingWindow = 0)
     {
         ulong pmArg = partialM, plArg = partialL, paArg = partialAcc, qArg = q, kArg = k, vArg = v, dPosArg = dPos;
         uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
         uint hkvArg = (uint)hkv, lkArg = (uint)lk, kvLenArg = (uint)kvLen, grpArg = (uint)kvGroup;
         int causalArg = causal ? 1 : 0, offArg = qOffset;
-        float scaleArg = scale;
+        float scaleArg = scale, softcapArg = softcap;
+        int windowArg = slidingWindow;
         uint gArg = (uint)splits, chunkArg = (uint)chunk;
 
-        void** args = stackalloc void*[20];
+        void** args = stackalloc void*[22];
         args[0] = &pmArg; args[1] = &plArg; args[2] = &paArg; args[3] = &qArg; args[4] = &kArg; args[5] = &vArg;
         args[6] = &bArg; args[7] = &hqArg; args[8] = &tqArg; args[9] = &dArg;
         args[10] = &hkvArg; args[11] = &lkArg; args[12] = &kvLenArg; args[13] = &grpArg;
-        args[14] = &causalArg; args[15] = &offArg; args[16] = &scaleArg;
-        args[17] = &gArg; args[18] = &chunkArg; args[19] = &dPosArg;
+        args[14] = &causalArg; args[15] = &offArg; args[16] = &scaleArg; args[17] = &softcapArg; args[18] = &windowArg;
+        args[19] = &gArg; args[20] = &chunkArg; args[21] = &dPosArg;
 
         uint blockThreads = 1;
         while (blockThreads < (uint)headDim) blockThreads <<= 1;
@@ -3028,6 +3042,30 @@ public sealed class CudaKernels : IDisposable
     public unsafe void LaunchMulMatVecQ6KQ8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
         => LaunchMulMatVecQ8_1Impl(_mulMatVecQ6KQ8_1, output, xq, xd, weight, bias, N, K, M, stream);
 
+    /// <summary>Fused Q4_0 × Q8_1 dp4a matrix-vector product for decode (M small). The fixed −8 offset is
+    /// folded into the packed weights via <c>__vsub4</c>, so no int-sum term is consumed.</summary>
+    public unsafe void LaunchMulMatVecQ4_0Q8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ4_0Q8_1, output, xq, xd, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q5_0 × Q8_1 dp4a matrix-vector product for decode (M small). The fixed −16 offset is
+    /// folded into the packed weights via <c>__vsub4</c>, so no int-sum term is consumed.</summary>
+    public unsafe void LaunchMulMatVecQ5_0Q8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ5_0Q8_1, output, xq, xd, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q5_K × Q8_1 dp4a matrix-vector product for decode (M small). Like Q4_K, the per-sub-block
+    /// min term consumes the Q8_1 int-sum xs.</summary>
+    public unsafe void LaunchMulMatVecQ5KQ8_1(ulong output, ulong xq, ulong xd, ulong xs, ulong weight, ulong bias, int N, int K, int M, nint stream)
+    {
+        ulong outA = output, xqA = xq, xdA = xd, xsA = xs, wA = weight, bA = bias;
+        int nA = N, kA = K, mA = M;
+        void** args = stackalloc void*[9];
+        args[0] = &outA; args[1] = &xqA; args[2] = &xdA; args[3] = &xsA; args[4] = &wA; args[5] = &bA;
+        args[6] = &nA; args[7] = &kA; args[8] = &mA;
+        const uint WARPS_PER_BLOCK = 8;
+        uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+        CudaDriverApi.cuLaunchKernel(_mulMatVecQ5KQ8_1, gridX, (uint)M, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     private unsafe void LaunchMulMatVecQ8_1Impl(nint func, ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
     {
         ulong outA = output, xqA = xq, xdA = xd, wA = weight, bA = bias;
@@ -3132,6 +3170,9 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ4KQ8_1Module?.Dispose();
         _mulMatVecQ8_0Q8_1Module?.Dispose();
         _mulMatVecQ6KQ8_1Module?.Dispose();
+        _mulMatVecQ4_0Q8_1Module?.Dispose();
+        _mulMatVecQ5_0Q8_1Module?.Dispose();
+        _mulMatVecQ5KQ8_1Module?.Dispose();
     }
 
     public void Dispose()

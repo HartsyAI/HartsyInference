@@ -648,10 +648,17 @@ public sealed unsafe class GenericTransformer : IDisposable
         ThrowIfDisposed();
         Tensor headW = _lmHead ?? _lmHeadQuant ?? _embed ?? throw new InvalidOperationException("weights not loaded.");
         Tensor logits = new(new TensorShape(1, t, _cfg.VocabSize), DType.F32);
-        // Fused decode GEMV supports Q4_K/Q6_K/Q8_0 directly from the F32 hidden — no F16 cast, no whole-weight
-        // dequant, no F32 staging (so no large-vocab OOM). This is the fast path for the (tied or not) lm_head.
-        bool fusedHead = t <= 8 && (headW.DType == DType.Q4_K || headW.DType == DType.Q6_K || headW.DType == DType.Q8_0)
-            && _cfg.HiddenSize % 256 == 0;
+        // Fused decode GEMV supports the K-quants (K % 256) and the 32-block quants (K % 32) directly from the
+        // F32 hidden — no F16 cast, no whole-weight dequant, no F32 staging (so no large-vocab OOM). This is the
+        // fast path for the (tied or not) lm_head. The divisibility gate MUST mirror CudaBackend.LinearImpl's
+        // per-dtype dispatch: a blanket %256 here silently sent every model with hidden ≡ 128 (mod 256) — e.g.
+        // qwen2.5-0.5b (896) and gemma3-1b (1152), whose heads are Q8_0 — down the dequant-to-F16-then-cuBLAS
+        // route EVERY token; nsys measured that at 55% of qwen2.5-0.5b's total decode GPU time (2026-07-22).
+        bool fusedHead = t <= 8
+            && (((headW.DType == DType.Q4_K || headW.DType == DType.Q5_K || headW.DType == DType.Q6_K)
+                    && _cfg.HiddenSize % 256 == 0)
+                || ((headW.DType == DType.Q8_0 || headW.DType == DType.Q4_0 || headW.DType == DType.Q5_0)
+                    && _cfg.HiddenSize % 32 == 0));
         if (fusedHead)
         {
             Project(backend, logits, hidden, headW, bias: null, _cfg.LowVramQuant);

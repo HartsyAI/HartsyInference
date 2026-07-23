@@ -5,11 +5,15 @@
 // kvLen keys sequentially. Flash-decoding splits the key axis into G chunks and runs B·Hq·Tq·G blocks,
 // filling the GPU; a tiny combine kernel then merges the G partial online-softmax states per query.
 //
-// SCOPE: plain attention only — no sink / ALiBi / soft-cap / sliding-window. The host dispatches those
-// (Gemma, GPT-OSS, BLOOM, jina-bert) to the proven monolithic kernel, so this path stays simple and is
-// covered by the existing causal / non-causal / GQA tests. Splitting is numerically EXACT: each chunk
-// computes the same per-key scores as the monolithic loop, just over a sub-range, and the combine is the
-// standard online-softmax merge.
+// SCOPE: plain, soft-capped (Gemma-2), and sliding-window (Gemma-2/3) attention — no sink / ALiBi
+// (GPT-OSS sink and BLOOM/jina-bert ALiBi stay on the proven monolithic kernel). Soft-cap is a per-logit
+// transform (cap·tanh(score/cap), identical to the monolithic kernel); a sliding window only narrows the
+// per-query valid key range to [qPos−window+1, qPos] — chunks wholly below the window start simply produce
+// an empty partial (m = −INF), which the combine already weighs as zero. Both were added 2026-07-22 after
+// gemma3-1b measured 5.4× slower than llama.cpp: its 4 decode query-heads put FOUR blocks on a 28-SM GPU
+// through the monolithic path, since window>0 used to force-exclude split-K. Splitting is numerically
+// EXACT: each chunk computes the same per-key scores as the monolithic loop, just over a sub-range, and
+// the combine is the standard online-softmax merge.
 //
 // Scratch layout, idx = (b*Hq + h)*Tq + r, split g in [0,G):
 //   partialM  [N*G]      partialM[idx*G + g]              running max of chunk g
@@ -30,7 +34,7 @@ extern "C" __global__ void lm_flash_attn_f32_split(
     const float* __restrict__ V,
     unsigned int B, unsigned int Hq, unsigned int Tq, unsigned int D,
     unsigned int Hkv, unsigned int Lk, unsigned int kvLen, unsigned int kvGroup,
-    int causal, int qOffset, float scale,
+    int causal, int qOffset, float scale, float softcap, int slidingWindow,
     unsigned int G, unsigned int chunk,
     const int* __restrict__ dPos)
 {
@@ -53,13 +57,16 @@ extern "C" __global__ void lm_flash_attn_f32_split(
     size_t qBase = (((size_t)b * Hq + h) * Tq + r) * D;
     float qv = (tid < D) ? Q[qBase + tid] : 0.0f;
 
-    // Per-query valid key range [0, kMax] (causal) or [0, kvLen-1] (full), intersected with this chunk.
+    // Per-query valid key range [kMin, kMax] (causal, optionally windowed), intersected with this chunk.
     int kMax = causal ? (int)(qOffset + r) : (int)kvLen - 1;
     if (kMax > (int)kvLen - 1) kMax = (int)kvLen - 1;
+    // Same window semantics as the monolithic kernel: only the last `slidingWindow` keys are visible.
+    int kMin = (slidingWindow > 0) ? ((int)(qOffset + r) - slidingWindow + 1) : 0;
+    if (kMin < 0) kMin = 0;
     int cStart = (int)(g * chunk);
     int cEnd = (int)(g * chunk + chunk) - 1;            // inclusive
     if (cEnd > (int)kvLen - 1) cEnd = (int)kvLen - 1;
-    int kStart = cStart;                                // chunks start at 0 → kMin=0 for the plain path
+    int kStart = (cStart > kMin) ? cStart : kMin;
     int kEnd = (cEnd < kMax) ? cEnd : kMax;
 
     float m = -INF_F, l = 0.0f, acc = 0.0f;
@@ -83,6 +90,8 @@ extern "C" __global__ void lm_flash_attn_f32_split(
         }
         __syncthreads();
         float score = sdata[0] * scale;
+        // Gemma-2 attention-logit soft-cap: cap·tanh(score/cap), identical to the monolithic kernel.
+        if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
 
         float newM = fmaxf(m, score);
         float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);

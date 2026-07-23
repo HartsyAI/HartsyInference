@@ -39,6 +39,9 @@ public sealed class FusedGemvGroundTruthTests
 
         const int batch = 4; // M <= 8 so CudaBackend.Linear dispatches to the new fused GEMV branch.
         using CudaBackend backend = new(0, ptxDir);
+        // This test's subject is the exact FLOAT fused-GEMV kernels; dp4a (default ON) is lossy within a
+        // Q8_1 rounding bound and has its own bound-derived gate in Dp4aGemvGroundTruthTests.
+        backend.EnableDp4aGemv = false;
         Tensor input = new(new TensorShape(batch, inDim), DType.F32);
         Tensor weightF32 = new(new TensorShape(outDim, inDim), DType.F32);
         Tensor weightQuant = new(new TensorShape(outDim, inDim), quantDtype);

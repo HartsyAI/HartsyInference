@@ -27,6 +27,9 @@ KERNELS=(
     "mul_mat_vec_q4k_q8_1"
     "mul_mat_vec_q8_0_q8_1"
     "mul_mat_vec_q6k_q8_1"
+    "mul_mat_vec_q4_0_q8_1"
+    "mul_mat_vec_q5_0_q8_1"
+    "mul_mat_vec_q5k_q8_1"
 )
 
 INSTALL=true

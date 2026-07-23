@@ -527,9 +527,8 @@ public sealed class CudaBackend : IBackend
                 // error rather than guessing. Q8_0/Q6_K are symmetric quants, so their kernels consume only
                 // xq/xd; Q4_K's min term additionally needs the per-block int-sum xs.
                 bool dp4a = EnableDp4aGemv
-                    && ((weight.DType == DType.Q4_K && K % 256 == 0)
-                        || (weight.DType == DType.Q6_K && K % 256 == 0)
-                        || (weight.DType == DType.Q8_0 && K % 32 == 0));
+                    && (((weight.DType == DType.Q4_K || weight.DType == DType.Q5_K || weight.DType == DType.Q6_K) && K % 256 == 0)
+                        || ((weight.DType == DType.Q8_0 || weight.DType == DType.Q4_0 || weight.DType == DType.Q5_0) && K % 32 == 0));
                 if (dp4a)
                 {
                     int kblocks = M * (K / 32);
@@ -541,8 +540,14 @@ public sealed class CudaBackend : IBackend
                         _kernels!.LaunchQuantizeActivationQ8_1(pXq, pXd, pXs, pInput, M, K, _stream.Handle);
                         if (weight.DType == DType.Q4_K)
                             _kernels!.LaunchMulMatVecQ4KQ8_1(pOutput, pXq, pXd, pXs, pWeight, pBias, N, K, M, _stream.Handle);
+                        else if (weight.DType == DType.Q5_K)
+                            _kernels!.LaunchMulMatVecQ5KQ8_1(pOutput, pXq, pXd, pXs, pWeight, pBias, N, K, M, _stream.Handle);
                         else if (weight.DType == DType.Q6_K)
                             _kernels!.LaunchMulMatVecQ6KQ8_1(pOutput, pXq, pXd, pWeight, pBias, N, K, M, _stream.Handle);
+                        else if (weight.DType == DType.Q4_0)
+                            _kernels!.LaunchMulMatVecQ4_0Q8_1(pOutput, pXq, pXd, pWeight, pBias, N, K, M, _stream.Handle);
+                        else if (weight.DType == DType.Q5_0)
+                            _kernels!.LaunchMulMatVecQ5_0Q8_1(pOutput, pXq, pXd, pWeight, pBias, N, K, M, _stream.Handle);
                         else
                             _kernels!.LaunchMulMatVecQ8_0Q8_1(pOutput, pXq, pXd, pWeight, pBias, N, K, M, _stream.Handle);
                     }
@@ -5220,16 +5225,23 @@ public sealed class CudaBackend : IBackend
             // merge with a combine kernel. Numerically exact vs the monolithic kernel (same per-key scores,
             // online-softmax merge). Sink/ALiBi/soft-cap/sliding-window keep the proven monolithic path.
             int baseBlocks = b * hq * tq;
-            bool plain = pSink == 0 && pAlibi == 0 && softcap <= 0f && slidingWindow <= 0;
+            // Soft-cap and sliding-window are handled inside the split kernel (per-logit transform / key-range
+            // clamp — see flash_attn_f32_split.cu); only sink and ALiBi still require the monolithic kernel.
+            // This matters enormously for low-head-count windowed models: gemma3-1b decodes with FOUR query
+            // heads, so the monolithic path put 4 blocks on 28 SMs (measured 5.4× slower than llama.cpp e2e).
+            bool splitEligible = pSink == 0 && pAlibi == 0;
             bool forceSplit = EnvFlag("HARTSY_FLASH_SPLIT_FORCE");
             // Occupancy-limited = the LLM decode case (tq=1, few heads → e.g. 16 blocks on 28 SMs). Splitting the
             // key axis there fills the GPU and is a large decode win (attention was ~30% of decode; split-K ≈ +38%
             // end-to-end on Qwen3). The split kernel is numerically exact vs monolithic (online-softmax merge). The
             // old kvLen≥1024 floor never engaged for decode (kvLen<300); gate on occupancy instead, floor 128.
             bool occLimited = baseBlocks < 2 * _context.MultiprocessorCount;
+            // Severely under-occupied launches (fewer blocks than SMs — gemma3-1b: 4, qwen2.5-0.5b: 14) are
+            // worth splitting even at short kvLen; the 128 floor only applies to moderately-occupied shapes.
+            int engageLen = baseBlocks <= _context.MultiprocessorCount ? 32 : 128;
             int splits = 1;
             if (!EnvFlag("HARTSY_FLASH_SPLIT_OFF")
-                && plain && (forceSplit || occLimited) && kvLen >= (forceSplit ? 8 : 128))
+                && splitEligible && (forceSplit || occLimited) && kvLen >= (forceSplit ? 8 : engageLen))
             {
                 // Target/minChunk tuned the same way as FlashAttentionDev's graph-decode split formula below
                 // (measured A/B sweep on Qwen3-4B/RTX 3060, kvLen~193: tok/s rose monotonically from the old
@@ -5255,7 +5267,8 @@ public sealed class CudaBackend : IBackend
                     pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
                     pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
                     _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
-                        kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, splits, chunk, _stream.Handle);
+                        kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, splits, chunk, _stream.Handle,
+                        softcap: softcap, slidingWindow: slidingWindow);
                     _kernels!.LaunchFlashAttentionCombine(pOut, pM, pL, pAcc, b, hq, tq, d, splits, _stream.Handle);
                 }
                 finally
@@ -5559,7 +5572,8 @@ public sealed class CudaBackend : IBackend
     public unsafe (Tensor cos, Tensor sin) BuildRopeTableDevice(int maxPos, int headDim, int rotaryDim, float theta, RopeScaling scaling)
     {
         int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
-        int half = rdim / 2;
+        int rotHalf = rdim / 2;
+        int halfDim = headDim / 2;
         (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(rdim, theta, scaling, maxPos);
         Tensor cos = new(new TensorShape(maxPos, headDim), DType.F32);
         Tensor sin = new(new TensorShape(maxPos, headDim), DType.F32);
@@ -5568,13 +5582,23 @@ public sealed class CudaBackend : IBackend
         for (int pos = 0; pos < maxPos; pos++)
         {
             long baseOff = (long)pos * headDim;
-            for (int i = 0; i < half; i++)
+            // Partial rotary (GLM-4: rotaryDim < headDim): table entries past rotaryDim/2 are IDENTITY
+            // (cos=1, sin=0, unscaled) so the graph-decode rope kernels — which always walk headDim/2
+            // pairs — leave the un-rotated dims untouched, matching the eager kernels' rotaryDim clamp.
+            // (Previously those entries were left as uninitialized alloc garbage duplicated from the
+            // rotary half, silently corrupting every partial-rotary graph decode — degenerate GLM-4
+            // output, caught by the 2026-07-22 popular-model benchmark sweep.)
+            for (int i = 0; i < halfDim; i++)
             {
-                double angle = pos * invFreq[i];
-                float c = (float)(Math.Cos(angle) * mscale);
-                float s = (float)(Math.Sin(angle) * mscale);
-                pc[baseOff + i] = c; pc[baseOff + i + half] = c;
-                ps[baseOff + i] = s; ps[baseOff + i + half] = s;
+                float c = 1f, s = 0f;
+                if (i < rotHalf)
+                {
+                    double angle = pos * invFreq[i];
+                    c = (float)(Math.Cos(angle) * mscale);
+                    s = (float)(Math.Sin(angle) * mscale);
+                }
+                pc[baseOff + i] = c; pc[baseOff + i + halfDim] = c;
+                ps[baseOff + i] = s; ps[baseOff + i + halfDim] = s;
             }
         }
         PreloadWeights([cos, sin]);

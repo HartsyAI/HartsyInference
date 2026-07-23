@@ -555,6 +555,75 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > every major GEMV to 83-93% of the 3060's DRAM roofline — the ALU-side dequant cost this doc's 2026-07-22
 > handoff identified as the whole remaining gap is now paid.
 
+> **STATUS UPDATE (2026-07-22, later session, round 2): popular-model sweep — dp4a coverage completed
+> (Q4_0/Q5_0/Q5_K), a stale lm_head dispatch gate that made two top-Ollama-family models 4-5× slower
+> than llama.cpp fixed, split-K attention extended to sliding-window/softcap, and a pre-existing
+> GLM-4 partial-rotary graph-decode CORRUPTION bug found and fixed.** Motivation: mapped Ollama's
+> top-downloads list (llama3.x ~220M pulls, deepseek-r1 90M, gemma3/2/4 ~86M, qwen2.5 ~54M, qwen3,
+> mistral, phi, gpt-oss) against engine coverage, downloaded three small representative checkpoints
+> (gemma-3-1b-it, DeepSeek-R1-Distill-Qwen-1.5B, qwen2.5-0.5b-instruct, all Q4_K_M) and benchmarked
+> them plus the local GLM-4-9B against llama-cpp-python, same protocol as round 1.
+>
+> **What the sweep found and what was fixed, in impact order:**
+> 1. **`ProjectLogits`' fusedHead gate used a blanket `HiddenSize % 256 == 0`** — wrong for Q8_0/Q4_0/
+>    Q5_0 heads, which only need K % 32. Every model with hidden ≡ 128 (mod 256) — qwen2.5-0.5b (896),
+>    gemma3-1b (1152) — silently dequantized its ENTIRE lm_head to F16 and ran cuBLAS on it EVERY
+>    token; `nsys` measured `dequant_q8_0_to_f16` at **55% (qwen2.5) / 62% (gemma3) of total decode
+>    GPU time**. One-line gate fix (mirror LinearImpl's per-dtype divisibility):
+>    **gemma3-1b 36.9 → 88.9 tok/s, qwen2.5-0.5b 74.1 → 158.9 tok/s (both ~2.2×)**.
+> 2. **New dp4a kernels `mul_mat_vec_q4_0_q8_1` / `mul_mat_vec_q5_0_q8_1`** (offset quants: fixed −8/−16
+>    folded into the packed weights via `__vsub4`, no min/int-sum term; Q5_0's high-bit word byte-
+>    assembled — its 22-byte stride alternates 4-alignment) **and `mul_mat_vec_q5k_q8_1`** (Q4_K-style
+>    min term + high-bit plane injected whole-word). Q5_0 matters far more than its name suggests:
+>    llama.cpp's Q4_K_M scheme substitutes it on every tensor whose K isn't a multiple of 256, which is
+>    MOST tensors on odd-hidden-size models — **46% of gemma3-1b, 62% of qwen2.5-0.5b, 12% of
+>    GLM-4-9B by element count**. Q4_0 covers legacy Ollama default tags (llama3 era).
+>    `Dp4aGemvGroundTruthTests` extended to 18 cases (exact quantizer simulation + analytic bound +
+>    engagement gates, all dtypes) — all pass; raw-block synthesis for the read-only Q4_0/Q5_0 codecs.
+> 3. **Split-K decode attention no longer excludes sliding-window/softcap** (`flash_attn_f32_split.cu`
+>    gains the monolithic kernel's window clamp + `cap·tanh` transform; sink/ALiBi stay monolithic).
+>    gemma3-1b decodes with FOUR query heads — the monolithic path put 4 blocks on 28 SMs. Also
+>    engage split at kvLen ≥ 32 (was 128) when baseBlocks ≤ SM count. New
+>    `FlashSplit_WindowSoftcap_MatchesMonolithic` test (4 gemma2/3-shaped cases, split vs monolithic
+>    ≤ 5e-8). Measured alone: gemma3 35.1 → 36.9 (+5%) — real but small; the lm_head gate above was
+>    the actual elephant. Kept (correct, tested, and required for any future windowed graph decode).
+> 4. **GLM-4 graph decode was producing DEGENERATE output** (repetitive loops — caught only because
+>    this sweep ran output A/B across dp4a×graph configs on every model): `BuildRopeTableDevice` filled
+>    only the first rotaryDim table entries per row, leaving the rest as uninitialized alloc garbage —
+>    and the graph-decode rope kernels always walk headDim/2 pairs, so partial-rotary models (GLM-4:
+>    rotaryDim 64 < headDim 128; the first such model to pass the graph-eligibility gate) rotated their
+>    untouched dims by garbage angles. Fixed: identity (cos=1, sin=0) entries past rotaryDim/2.
+>    **GLM-4-9B graph-on output is now byte-identical to eager** (was garbage; throughput 39.2 tok/s
+>    unchanged — this was a correctness fix, and it makes GLM's graph-on number legitimate for the
+>    first time).
+>
+> **Where the fleet stands vs llama-cpp-python (same box, 3060 pinned, same-day baselines):**
+> | Model | ours graph-off | ours graph-on (best) | llama-cpp-python | ratio |
+> |---|---|---|---|---|
+> | Llama-3.2-1B Q8_0 | 164.5 | **197.3** | 190.3 | **1.04× FASTER** |
+> | Qwen3-4B Q4_K_M | 76.0 | **92.9** | 85.6-86.8 | **1.07× FASTER** |
+> | DeepSeek-R1-Distill-Qwen-1.5B | 137.6 | **161.1** | 180.1 | 1.12× slower |
+> | qwen2.5-0.5b-instruct | 113.8 | **158.9** | 322.7 | 2.03× slower (was 4.3×) |
+> | gemma-3-1b-it | **88.9** | ineligible | 190.9 | 2.15× slower (was 5.4×) |
+> | GLM-4-9B-0414 | 35.6 | **39.2** | 47.8 | 1.22× slower |
+>
+> **Remaining known gaps, scoped for a next session (in expected-value order):**
+> (a) **gemma-family graph decode** (~86M Ollama pulls): eligibility needs device-side sliding-window
+> in `FlashAttentionDev` (the split KERNEL already supports window/softcap after this round — only the
+> Dev dispatch + eligibility gate + per-layer window plumbing remain), dual local/global RoPE tables
+> (`RopeLocalTheta`), and per-layer global-vs-local selection. qwen2.5-0.5b's +40% graph-on delta
+> suggests gemma3-1b ~89 → ~120+.
+> (b) **Tiny-model graph overhead**: qwen2.5-0.5b's kernels sum ~3ms/token but graph-on decode takes
+> 6.4ms — per-node replay overhead dominates at this scale (dp4a's 3 alloc + 3 free nodes per Linear
+> are part of it; the round-1 capture-arena revert was measured on a 4B model where this didn't bind —
+> worth re-testing at 0.5B before assuming it still doesn't). llama.cpp's 322 tok/s shows ~2× headroom.
+> (c) **DeepSeek-distill residual 1.12×**: same architecture as the beaten Qwen3 — likely the same
+> tiny-model overhead scaled down; no dedicated lever identified yet.
+> (d) **gpt-oss (MXFP4+MoE+sink)**: untestable on this 12 GB box (20B ≈ 13 GB); MXFP4 has no fused
+> GEMV of any kind — first step there is a float fused kernel, then dp4a, then sink support in split-K.
+> (e) Q2_K/Q3_K/IQ-quant fused kernels: still fall to the slow dequant path; no popular default tags
+> hit them, so deprioritized.
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

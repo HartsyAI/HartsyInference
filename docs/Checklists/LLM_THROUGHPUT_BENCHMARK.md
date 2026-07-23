@@ -122,6 +122,23 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 >
 > Measurement note: desktop/rustdesk GPU contention on this box can swing either engine ±20%+ —
 > compare only back-to-back runs from a quiet GPU (`nvidia-smi` util ≲15% on GPU 0 first).
+>
+> **UPDATE 2026-07-22 (round 2, popular-model sweep):** benchmarked four more models chosen from
+> Ollama's top-downloads list (checkpoints under `Models/LLM/`), fixed what the sweep found (Q4_0/Q5_0/
+> Q5_K dp4a kernels, the `ProjectLogits` fusedHead divisibility gate, windowed/softcap split-K
+> attention, GLM-4 partial-rotary graph-decode corruption — see `LLM_DECODE_PERF_GRIND.md`'s round-2
+> block). Final medians, default config, llama-cpp-python same-day/same-pin:
+>
+> | Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (best÷llama) |
+> |---|---|---|---|---|
+> | DeepSeek-R1-Distill-Qwen-1.5B Q4_K_M | 137.56 | **161.06** | 180.12 | 0.89× (1.12× slower) |
+> | qwen2.5-0.5b-instruct Q4_K_M | 113.82 | **158.94** | 322.72 | 0.49× — was 0.23× pre-sweep |
+> | gemma-3-1b-it Q4_K_M | **88.90** | not eligible (SWA) | 190.89 | 0.47× — was 0.18× pre-sweep |
+> | GLM-4-9B-0414 Q4_K_M | 35.62 | **39.21** | 47.80 | 0.82× (graph output now CORRECT — was degenerate before the rope-table fix) |
+>
+> Llama-3.2-1B (197.29) and Qwen3-4B (92.91) re-confirmed faster than llama-cpp-python in the same
+> run. Remaining-gap roadmap (gemma graph decode, tiny-model graph node overhead) is scoped in the
+> grind doc's round-2 block.
 
 Superseded pre-dp4a table (2026-07-22, earlier session):
 

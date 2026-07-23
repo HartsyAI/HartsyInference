@@ -155,4 +155,58 @@ public sealed unsafe class CudaFlashAttentionTests
         _output.WriteLine($"strided Llama-GQA: max |ref - flash| = {max:E3}");
         Assert.True(max <= 2e-3f, $"CUDA strided FlashAttention diverges from reference by {max:E3}");
     }
+
+    /// <summary>Split-K decode attention for soft-capped / sliding-window shapes (Gemma-2/3), added
+    /// 2026-07-22 when the split gate stopped excluding them: forces the split path (HARTSY_FLASH_SPLIT_FORCE)
+    /// and compares against the proven monolithic kernel (HARTSY_FLASH_SPLIT_OFF) on the same inputs. Shapes
+    /// mirror the models that motivated the change: gemma3-1b decode (4 query heads, head_dim 256, window
+    /// smaller AND larger than kvLen) and a soft-capped gemma2-style case. The window/softcap math is
+    /// identical per key, so only float accumulation order differs.</summary>
+    [Theory]
+    [InlineData(4, 1, 256, 200, 64, 0f)]     // gemma3-ish decode, window well inside kvLen
+    [InlineData(4, 1, 256, 200, 512, 0f)]    // window larger than kvLen (degenerates to full causal)
+    [InlineData(8, 4, 128, 160, 96, 50f)]    // gemma2-style: window + attn-logit softcap
+    [InlineData(14, 2, 64, 150, 0, 30f)]     // softcap only, qwen-ish head count
+    public void FlashSplit_WindowSoftcap_MatchesMonolithic(int hq, int hkv, int d, int lk, int window, float softcap)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+
+        int group = hq / hkv;
+        float scale = 1f / MathF.Sqrt(d);
+        using CudaBackend backend = new(0, ptxDir);
+        IBackend b = backend;
+        using Tensor q = Rnd(1, hq, 1, d);
+        using Tensor k = Rnd(1, hkv, lk, d);
+        using Tensor v = Rnd(1, hkv, lk, d);
+        using Tensor outMono = new(new TensorShape(1, hq, 1, d), DType.F32);
+        using Tensor outSplit = new(new TensorShape(1, hq, 1, d), DType.F32);
+        string? prevOff = Environment.GetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF");
+        string? prevForce = Environment.GetEnvironmentVariable("HARTSY_FLASH_SPLIT_FORCE");
+        try
+        {
+            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", "1");
+            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_FORCE", null);
+            b.FlashAttention(outMono, q, k, v, lk, group, causal: true, qOffset: lk - 1, scale, softcap, sink: null, window, alibiSlopes: null);
+            backend.Sync();
+            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", null);
+            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_FORCE", "1");
+            b.FlashAttention(outSplit, q, k, v, lk, group, causal: true, qOffset: lk - 1, scale, softcap, sink: null, window, alibiSlopes: null);
+            backend.Sync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", prevOff);
+            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_FORCE", prevForce);
+        }
+
+        float* mo = (float*)outMono.DataPointer;
+        float* sp = (float*)outSplit.DataPointer;
+        float maxDiff = 0f;
+        for (long i = 0; i < outMono.ElementCount; i++) maxDiff = MathF.Max(maxDiff, MathF.Abs(mo[i] - sp[i]));
+        _output.WriteLine($"hq={hq} d={d} lk={lk} window={window} softcap={softcap}: max |mono - split| = {maxDiff:E3}");
+        Assert.True(maxDiff <= 2e-3f, $"split-K windowed/softcap attention diverges from monolithic by {maxDiff:E3}");
+    }
 }
