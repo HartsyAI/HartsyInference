@@ -45,6 +45,13 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
 
+    /// <summary>Calibrated step-cache ship point (HARTSY_STEP_CACHE=1): raw budget 0.3 confined to the LATE
+    /// half of the schedule — 1.39× at SSIM 0.9530 on the 4090 A/B. No poly: Ideogram's block-0 indicator is
+    /// schedule-flat while true residual drift falls 0.72→0.15, so a fitted map inverts the relationship
+    /// (results doc 2026-07-22_accel_stepcache_ideogram_4090.md).</summary>
+    private static readonly StepCacheProfile CalibratedStepCache =
+        new(Threshold: 0.3f, Cap: 3, Poly: null, LateWindow: 0.5f);
+
     // Prompt-embedding cache (last prompt): the Qwen3-VL 13-layer tap keyed on the token ids. A hit skips the
     // whole TE phase (preload + encode + free ≈ 1.7 s). Reusing the SAME tensor reference also keeps the
     // conditional transformer's step-invariant llmProj cache warm across generations (keyed on this reference).
@@ -249,17 +256,16 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         // is QwenImagePipeline / INFERENCE_ACCEL_GRIND §H1.4). One instance per transformer: the conditional
         // and unconditional models are DIFFERENT 9.3B weight sets, so their hidden states never mix. Regional
         // plans are excluded — the per-step attention bias changes the block math under the residual's feet.
-        float stepCacheThreshold = StepCacheEnv.ReadThreshold();
-        float stepCacheLate = StepCacheEnv.ReadLateWindow();
+        (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
+            StepCacheEnv.Resolve(CalibratedStepCache);
         DeviceFeatureCache? condCache = null;
         DeviceFeatureCache? uncondCache = null;
         if (stepCacheThreshold > 0f && !hasRegions)
         {
             if (Backend.SupportsDeviceStepCacheGate)
             {
-                int stepCacheCap = StepCacheEnv.ReadCap();
-                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
-                uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
+                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
+                uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
                 Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}"
                     + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
             }

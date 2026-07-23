@@ -34,6 +34,12 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
 
+    /// <summary>Calibrated step-cache ship point (HARTSY_STEP_CACHE=1): the TeaCache-style polynomial gate at
+    /// budget 0.20 — 1.20× at SSIM 0.9500 on the 4090 A/B. Fit: 54 pairs, R²=0.966 (results doc
+    /// 2026-07-22_accel_stepcache_qwen_4090.md §polynomial).</summary>
+    private static readonly StepCacheProfile CalibratedStepCache =
+        new(Threshold: 0.20f, Cap: 3, Poly: [-0.0481274f, 2.57494f, -3.17407f, 4.38356f], LateWindow: 0f);
+
     // Prompt-embedding cache (one cond + one uncond, last-used), keyed on (token ids, drop index) — the
     // Krea2Pipeline pattern. A hit skips the whole TE phase (preload + encode + free).
     private int[]? _cachedCondKey;
@@ -161,18 +167,19 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // guidance); HARTSY_STEP_CACHE=<threshold|1> reuses the block-stack residual across steps when the
         // first block's output has barely drifted (First-Block cache). Unset ⇒ byte-identical baseline path.
         GuidanceInterval cfgInterval = GuidanceInterval.FromEnvironment();
-        float stepCacheThreshold = StepCacheEnv.ReadThreshold();
-        float stepCacheLate = StepCacheEnv.ReadLateWindow();
+        (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
+            StepCacheEnv.Resolve(CalibratedStepCache);
         DeviceFeatureCache? condCache = null;
         DeviceFeatureCache? uncondCache = null;
         if (stepCacheThreshold > 0f)
         {
             if (Backend.SupportsDeviceStepCacheGate)
             {
-                int stepCacheCap = StepCacheEnv.ReadCap();
-                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
-                if (useCfg) uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
-                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}");
+                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
+                if (useCfg) uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}"
+                    + (stepCachePoly is not null ? ", poly gate" : "")
+                    + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
             }
             else
             {
