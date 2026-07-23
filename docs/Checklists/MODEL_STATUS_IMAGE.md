@@ -30,6 +30,34 @@ Authoritative living copies: [`docs/PERFORMANCE.md`](../PERFORMANCE.md) §5 and
 | Lumina-Image 2.0 (25 st, cfg 4) | **17.7 s** | — | **37× in one round** (`44.44-local`: 650→17.7): GPU-resident Lumina2Block rewrite (device AdaLN split/tanh, GQA RepeatKvHeads, ApplyGpuGqa rope, gated residuals, cuDNN F16 SDPA), context-refiner output cached per prompt (was re-run every forward), 3 rope sig-caches, device concat/slice/norm-out/UnpatchifyTokens. **ComfyUI baseline 10.05 s (07-18, native `lumina2` @25 st/cfg4) → 1.76× slower, perf pass queued** (`image_python_baselines_2026-07-18.md`) |
 | OmniGen 2 (20 st, cfg 4) | **19.21 s** | 13.0 s | 1.48× — perf pass 07-18 (`alpha.54→60`): re-benched baseline 132.6s → 19.21s (**6.90×**). Device RoPE (host Q/K-drain → cached device tables = 4×) + drain-free loop (`ForwardPacked`+`CfgEulerStep`, also killed the cpu-glue-async-race crash) + F16 + device Concat/Split. Fixed a cross-model `DiTUtils.Concat/Split` F16-OOB bug. <13s needs op fusion + text-padding/mask to unblock CUDA-graph (cond/uncond differ in length). See `benchmarks/results/omnigen2_perf_2026-07-18.md` |
 
+## Step-cache opt-in (2026-07-23, H1.5 — RTX 4090)
+
+Additive to the baselines above — **not** a replacement, and the ComfyUI comparison table is
+unaffected (default is OFF; this is an internal accelerator, opt-in only). Per-model calibrated
+First-Block-Cache profile behind `HARTSY_STEP_CACHE=1` — the knob resolves each model's own
+calibrated threshold/gate (raw / polynomial-rescaled / late-window, picked per model from its
+drift-signature calibration; mechanics in
+[INFERENCE_ACCEL_GRIND.md §H1](INFERENCE_ACCEL_GRIND.md)). SSIM is vs the uncached baseline image at
+the shipped gate point; acceptance bar is SSIM ≥ 0.95 + eyeball. Swarm/production end-to-end
+verification (via `/API/GenerateText2Image`, engine `2.0.0-alpha.2` (packed as alpha.64 during the pass, renumbered same-day)) for Krea2-Turbo, Ideogram 4,
+Flux.2 Dev, and Z-Image-Turbo is in
+[2026-07-23_swarm_stepcache_verification.md](../../benchmarks/results/2026-07-23_swarm_stepcache_verification.md)
+(Qwen-Image was NOT included in that pass — its numbers below are standalone-harness only); standalone
+warm A/B measurements (cited per row) are the primary numbers below.
+
+| Model | Baseline warm | Cached warm | Speedup | SSIM @ gate | Results doc |
+|---|---:|---:|---:|---:|---|
+| Flux.2 Dev (50 st) | 97.5 s | **39.1 s** | **2.49×** | 0.958 | [flux2dev_4090](../../benchmarks/results/2026-07-22_accel_stepcache_flux2dev_4090.md) |
+| Ideogram 4 (20 st) | 19.5 s | **14.1 s** | **1.39×** | 0.953 | [ideogram_4090](../../benchmarks/results/2026-07-22_accel_stepcache_ideogram_4090.md) |
+| Qwen-Image (20 st) | 40.2 s | **33.0 s** | **1.20×** | 0.950 | [qwen_4090](../../benchmarks/results/2026-07-22_accel_stepcache_qwen_4090.md) |
+| Krea2-Turbo (8 st) | 4.43 s | **3.91 s** | 1.13× | 0.974 | [krea2turbo_4090](../../benchmarks/results/2026-07-22_accel_stepcache_krea2turbo_4090.md) |
+| Z-Image-Turbo (8 st) | 2.74 s | — **NEGATIVE** | — | — | no calibrated profile ships: residual-drift floor (0.44–0.51) is too high for any quality-safe reuse at this model's 8-step schedule — `HARTSY_STEP_CACHE=1` resolves to a harmless 0-reuse no-op. Standalone harness measured 4.15–4.30 s baseline (different process/warm-in point); see [zimage_4090](../../benchmarks/results/2026-07-23_accel_stepcache_zimage_4090.md) |
+
+Fleet standings at each model's shipped gate (all opt-in, all SSIM≥0.95 + eyeball-verified): **Flux.2
+Dev 2.49× / Ideogram 4 1.39× / Qwen-Image 1.20× / Krea2-Turbo 1.13× / Z-Image-Turbo negative** — wins
+scale with schedule length and drift-valley depth; short distilled schedules have little left to skip
+(Wan is separately negative for per-seed identity — see `INFERENCE_ACCEL_GRIND.md` §H1.5).
+
 ## Verified end-to-end (✅)
 
 These produce clean visual output on real weights, confirmed end-to-end.

@@ -227,6 +227,14 @@ public sealed class CudaBackend : IBackend
     /// <summary>Reads a <c>HARTSY_*</c> boolean env var (set "1" to enable), mirroring <see cref="Profiling.NvtxRange.ProfileEnabled"/>. Unset or any non-"1" value is treated as off.</summary>
     private static bool EnvFlag(string name) => Environment.GetEnvironmentVariable(name) == "1";
 
+    /// <summary>SageAttention INT8 dispatch preference — DEFAULT ON since 2026-07-23 (kill switch
+    /// <c>HARTSY_SAGE_ATTN=0</c>). E2E gates behind the flip: Wan-14B +4.7%/step, Hunyuan-720p +10.2%/step at
+    /// 0.15–0.5% pixel drift (eyeball-clean, deterministic); micro 1.18× vs cuDNN-F16-fused at 16k²/D=128 and
+    /// 3–8× vs the F32 paths; crossover predictions validated on 5 models (2026-07-22 records). The per-site
+    /// shape gates keep every measured-loss shape (small seq, masked, D∉{64,128}) on its previous-best path —
+    /// image models are untouched by construction (F16-native ≥8192-Skv gate; D=256 excluded).</summary>
+    private static readonly bool UseSageAttn = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN") != "0";
+
     /// <summary>TF32 tensor-core math for F32-operand GEMMs on Ampere+ (SM ≥ 8.0) — the same default PyTorch
     /// uses for inference. Plain-F32 GEMMs have no tensor-core path on consumer Ampere (a 3060 runs them at a
     /// fraction of tensor-core throughput), leaving F32 pipelines compute-bound far below the hardware. TF32
@@ -3487,7 +3495,7 @@ public sealed class CudaBackend : IBackend
         // SageAttention F16-ingest (opt-in): native-F16 Q/K/V/out via the f16h prologues + f16io flash
         // kernel. Competes with the CAST-FREE cuDNN branch below, which Sage only beats at long seq —
         // gate high (HARTSY_SAGE_F16_MIN_SKV, default 12288) until the crossover is measured per-arch.
-        if (EnvFlag("HARTSY_SAGE_ATTN") && mask is null && (D == 64 || D == 128)
+        if (UseSageAttn && mask is null && (D == 64 || D == 128)
             && query.DType == DType.F16 && key.DType == DType.F16
             && value.DType == DType.F16 && output.DType == DType.F16
             && Skv >= SageF16MinSkv())
@@ -3514,7 +3522,7 @@ public sealed class CudaBackend : IBackend
             // path beats the cuDNN-F16-cast branch below at large seq (110.6 vs 130.4 ms at 16384²/D=128,
             // 2026-07-22 BDN A/B) — and unlike it, keeps F32-fidelity accumulation. Gate on Skv ≥ 2048:
             // below that the quant prologue outweighs the win (small-seq shapes measured 0.93× vs cuDNN).
-            if (EnvFlag("HARTSY_SAGE_ATTN") && mask is null && (D == 64 || D == 128) && Skv >= 2048)
+            if (UseSageAttn && mask is null && (D == 64 || D == 128) && Skv >= 2048)
             {
                 EnsureKernels();
                 if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || Sq % 32 == 0))
@@ -3545,9 +3553,10 @@ public sealed class CudaBackend : IBackend
 
             // SageAttention-v1 INT8 flash attention (sage_attn_int8*.ptx): K-smoothed per-row INT8 QK^T on
             // the IMMA tensor cores, online softmax + PV in registers (mma.sync v1; wmma v0 fallback needs
-            // Sq%32==0 — its WMMA Q-tile loads are unguarded). Opt-in while validating (HARTSY_SAGE_ATTN=1);
-            // no-mask MHA, D∈{64,128}. Falls through when the PTX isn't built.
-            if (EnvFlag("HARTSY_SAGE_ATTN") && (D == 64 || D == 128))
+            // Sq%32==0 — its WMMA Q-tile loads are unguarded). Default ON (HARTSY_SAGE_ATTN=0 kills);
+            // no-mask MHA, D∈{64,128}, Skv≥1024 (tiny-seq shapes keep the F32 fallback — prologue-bound).
+            // Falls through when the PTX isn't built.
+            if (UseSageAttn && (D == 64 || D == 128) && Skv >= 1024)
             {
                 EnsureKernels();
                 if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || Sq % 32 == 0))
