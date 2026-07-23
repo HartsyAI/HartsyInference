@@ -111,6 +111,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmArgMaxStage1F32;
     private readonly nint _lmArgMaxStage2F32;
     private readonly nint _lmGluActF32;
+    private readonly nint _lmQkvRopeScatterF32;
+    private readonly nint _lmAddRmsNormF32;
     private readonly nint _lmRopeInterleavedF32;
     private readonly nint _lmRopeDecodeSplitHalf;
     private readonly nint _lmRopeDecodeInterleaved;
@@ -641,6 +643,8 @@ public sealed class CudaKernels : IDisposable
         _lmArgMaxStage1F32 = _lmF32Module.GetFunction("lm_argmax_lastdim_stage1_f32");
         _lmArgMaxStage2F32 = _lmF32Module.GetFunction("lm_argmax_lastdim_stage2_f32");
         _lmGluActF32 = _lmF32Module.GetFunction("lm_glu_act_f32");
+        _lmQkvRopeScatterF32 = _lmF32Module.GetFunction("lm_qkv_rope_scatter_f32");
+        _lmAddRmsNormF32 = _lmF32Module.GetFunction("lm_add_rmsnorm_f32");
         _lmRopeInterleavedF32 = _lmF32Module.GetFunction("lm_rope_interleaved_f32");
         _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
         _lmRopeDecodeInterleaved = _lmF32Module.GetFunction("lm_rope_decode_interleaved");
@@ -2053,6 +2057,38 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>Launches per-row argmax over the last dim: indices[r] = argmax_c input[r,c]. One block per row,
     /// <paramref name="blockThreads"/> threads (power-of-two), shared mem for the (value,index) reduction.</summary>
+    /// <summary>Fused graph-decode QKV epilogue: rope q → qOut, rope k → kCache@pos, copy v → vCache@pos,
+    /// all from the concatenated [q|k|v] projection output in one launch (see lm_qkv_rope_scatter_f32).</summary>
+    public unsafe void LaunchQkvRopeScatter(ulong qOut, ulong kCache, ulong vCache, ulong qIn, ulong kIn, ulong vIn,
+        ulong cos, ulong sin, int nq, int nkv, int headDim, int rotaryDim, bool interleaved, int maxSeq, ulong devicePos, nint stream)
+    {
+        ulong qA = qOut, kA = kCache, vA = vCache, qiA = qIn, kiA = kIn, viA = vIn, cA = cos, sA = sin, dpA = devicePos;
+        uint nqA = (uint)nq, nkvA = (uint)nkv, dA = (uint)headDim, rdA = (uint)rotaryDim, msA = (uint)maxSeq;
+        int ilA = interleaved ? 1 : 0;
+        void** args = stackalloc void*[15];
+        args[0] = &qA; args[1] = &kA; args[2] = &vA; args[3] = &qiA; args[4] = &kiA; args[5] = &viA;
+        args[6] = &cA; args[7] = &sA;
+        args[8] = &nqA; args[9] = &nkvA; args[10] = &dA; args[11] = &rdA; args[12] = &ilA; args[13] = &msA; args[14] = &dpA;
+        long total = ((long)nq + 2L * nkv) * headDim;
+        uint grid = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_lmQkvRopeScatterF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Fused residual-add + RMSNorm (bit-identical to Add followed by the RmsNorm kernel — same
+    /// reduction structure and launch geometry).</summary>
+    public unsafe void LaunchAddRmsNorm(ulong residOut, ulong normOut, ulong a, ulong b, ulong weight,
+        int normDim, int totalRows, float eps, nint stream)
+    {
+        ulong rA = residOut, nA = normOut, aA = a, bA = b, wA = weight;
+        uint dimA = (uint)normDim, rowsA = (uint)totalRows;
+        float epsA = eps;
+        void** args = stackalloc void*[8];
+        args[0] = &rA; args[1] = &nA; args[2] = &aA; args[3] = &bA; args[4] = &wA;
+        args[5] = &dimA; args[6] = &rowsA; args[7] = &epsA;
+        uint sharedMem = BlockSize * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(_lmAddRmsNormF32, (uint)totalRows, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Fused gated-FFN activation epilogue over the concatenated [gate | up] projection output
     /// (act 0 = SiLU, 1 = GELU-tanh): one elementwise pass, no slice/activation/multiply intermediates.</summary>
     public unsafe void LaunchGluAct(ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)

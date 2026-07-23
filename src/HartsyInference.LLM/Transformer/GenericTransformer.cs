@@ -1465,39 +1465,58 @@ public sealed unsafe class GenericTransformer : IDisposable
             // last dim (d either way), the decode RoPE kernel derives heads from elementCount/headDim, and
             // KvCacheAppendDev reads tNew from Shape[2] (1 in both layouts).
             bool fullNorm = _cfg.QkNorm && _cfg.QkNormFullDim;
-            Tensor q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, hq, t, d), DType.F32);
-            Tensor k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, hkv, t, d), DType.F32);
-            Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
-            ProjectQkv(backend, q, k, v, pre, t, hasOwnKv: true, _cfg.LowVramQuant);
-            pre.Dispose();
-
-            if (_cfg.QkNorm)
-            {
-                Tensor qN = new(new TensorShape(1, hq, t, d), DType.F32);
-                Tensor kN = new(new TensorShape(1, hkv, t, d), DType.F32);
-                if (_cfg.UseLayerNorm)
-                {
-                    backend.LayerNorm(qN, q, _qNorm!, _qNormBias!, _cfg.RmsNormEps);
-                    backend.LayerNorm(kN, k, _kNorm!, _kNormBias!, _cfg.RmsNormEps);
-                }
-                else
-                {
-                    backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
-                    backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
-                }
-                q.Dispose(); k.Dispose();
-                q = qN; k = kN;
-            }
-
             bool interleaved = _cfg.Rope == RopeStyle.Interleaved;
-            backend.RopeApplyDecodeStep(q, cosTable, sinTable, _cfg.RotaryDim, interleaved, devicePos);
-            backend.RopeApplyDecodeStep(k, cosTable, sinTable, _cfg.RotaryDim, interleaved, devicePos);
-
             Tensor kFull = cache.KeyPrefix(layerIndex);
             Tensor vFull = cache.ValuePrefix(layerIndex);
-            backend.KvCacheAppendDev(kFull, k, 0, devicePos);
-            backend.KvCacheAppendDev(vFull, v, 0, devicePos);
-            k.Dispose(); v.Dispose();
+            Tensor q;
+            if (!_cfg.QkNorm && _qkvW is not null)
+            {
+                // Fused QKV epilogue (no QK-norm between projection and rope): the concatenated [q|k|v]
+                // projection output feeds ONE kernel that ropes q, ropes k into the cache, and copies v into
+                // the cache — replacing three slices, two ropes, and two appends (bit-identical math).
+                int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0], nv = (int)_vW!.Shape[0];
+                Tensor qkvOut = new(new TensorShape(1, t, nq + nk + nv), DType.F32);
+                Project(backend, qkvOut, pre, _qkvW, _qkvB, _cfg.LowVramQuant);
+                pre.Dispose();
+                q = new(new TensorShape(1, hq, t, d), DType.F32);
+                backend.QkvRopeScatterDecodeStep(q, kFull, vFull, qkvOut, cosTable, sinTable,
+                    hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                qkvOut.Dispose();
+            }
+            else
+            {
+                q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, hq, t, d), DType.F32);
+                Tensor k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, hkv, t, d), DType.F32);
+                Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
+                ProjectQkv(backend, q, k, v, pre, t, hasOwnKv: true, _cfg.LowVramQuant);
+                pre.Dispose();
+
+                if (_cfg.QkNorm)
+                {
+                    Tensor qN = new(new TensorShape(1, hq, t, d), DType.F32);
+                    Tensor kN = new(new TensorShape(1, hkv, t, d), DType.F32);
+                    if (_cfg.UseLayerNorm)
+                    {
+                        backend.LayerNorm(qN, q, _qNorm!, _qNormBias!, _cfg.RmsNormEps);
+                        backend.LayerNorm(kN, k, _kNorm!, _kNormBias!, _cfg.RmsNormEps);
+                    }
+                    else
+                    {
+                        backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
+                        backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
+                    }
+                    q.Dispose(); k.Dispose();
+                    q = qN; k = kN;
+                }
+
+                // One fused rope+scatter launch (rope q → qRoped, rope k → cache, copy v → cache) replaces
+                // two ropes and two appends — the separate-source variant of the fused-QKV path above.
+                Tensor qRoped = new(new TensorShape(1, hq, t, d), DType.F32);
+                backend.RopeScatterKvDecodeStep(qRoped, kFull, vFull, q, k, v, cosTable, sinTable,
+                    hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                q.Dispose(); k.Dispose(); v.Dispose();
+                q = qRoped;
+            }
 
             float scale = _cfg.AttnScale;
             // Local (sliding-window) layers attend only the most recent SlidingWindow keys — same per-layer
@@ -1514,11 +1533,19 @@ public sealed unsafe class GenericTransformer : IDisposable
 
             attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);
             Tensor afterAttn = new(flat, DType.F32);
-            backend.Add(afterAttn, hidden, attnOut);
-            attnOut.Dispose();
-
             Tensor preMlp = new(flat, DType.F32);
-            PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
+            // Fused residual-add + RMSNorm (bit-identical to Add then RmsNorm) for the plain pre-norm case;
+            // LayerNorm/biased-norm/post-norm layers keep the two-op sequence.
+            if (_cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm && _postNormBias is null && _postNorm is not null)
+            {
+                backend.AddRmsNorm(afterAttn, preMlp, hidden, attnOut, _postNorm, _cfg.RmsNormEps);
+            }
+            else
+            {
+                backend.Add(afterAttn, hidden, attnOut);
+                PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
+            }
+            attnOut.Dispose();
             Tensor mlpOut = Mlp(backend, preMlp, t);
 
             mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);

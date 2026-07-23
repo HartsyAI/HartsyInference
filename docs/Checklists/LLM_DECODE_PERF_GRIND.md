@@ -772,6 +772,41 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > extreme small-model efficiency (qwen2.5-0.5b 163.8 vs 322.7 — llama.cpp's per-step overhead at
 > 0.5B scale is simply lower; closing further means attacking total per-step node count again).
 
+> **STATUS UPDATE (2026-07-23, round 7): the deep-fusion pass — QKV rope-scatter and fused
+> residual-add+RMSNorm, all bit-exact, every graph model up again; DeepSeek is now within 1.2% of
+> llama-cpp-python.** On top of round 6's permute-free step and GLU fusion:
+> 1. **`lm_qkv_rope_scatter_f32`**: ONE launch consumes the QKV projection output (fused [q|k|v]
+>    buffer OR three separate tensors — the kernel takes three source pointers, so mixed-dtype-QKV
+>    layers that can't load-fuse still benefit) and ropes q into the attention input, ropes k into
+>    the KV cache at the device position, and copies v into the cache. Replaces 3× SliceLastDim +
+>    2× rope + 2× KV-append on fused layers (and 2 ropes + 2 appends on unfused/QK-norm layers) —
+>    BIT-EXACT: rope is elementwise (formulas copied verbatim from lm_rope_decode_splithalf/
+>    _interleaved; each thread derives its own element from the same inputs and table entries), and
+>    the scatter moves the identical bytes lm_kv_append_f32 would. Exposed as
+>    `IBackend.QkvRopeScatterDecodeStep` / `RopeScatterKvDecodeStep` with composed defaults.
+> 2. **`lm_add_rmsnorm_f32`** (`IBackend.AddRmsNorm`): residual add + RMSNorm in one pass, reduction
+>    body copied VERBATIM from dit_rmsnorm_f32 (same strided partial, shared-memory tree, launch
+>    geometry) so the result is bit-identical to the two-kernel sequence. Wired at the intra-layer
+>    attn-residual → pre-MLP-norm site for plain pre-norm RMS layers.
+> **Ops incident during measurement**: a stuck test-host from the parallel performance-grind agent's
+> worktree (2.4 h old) was holding 6.9 GB of the 3060 — killed; the first post-fusion benchmark
+> round was contaminated by it (numbers understated), so the finals below are from a clean GPU.
+> **Correctness**: 183/183 CUDA + 132/132 CPU; graph-vs-eager CLI output byte-identical on ALL SEVEN
+> models after every change in this round.
+> **Final fleet (graph-on medians, clean GPU, 2026-07-23)**: Llama-3.2-1B **211.5** (1.11× FASTER
+> than llama-cpp-python's 190.3); Qwen3-4B **96.3** (1.13× FASTER); gemma-2-2b **136.6** (1.13×
+> FASTER); **DeepSeek-R1-1.5B 178.7 vs a same-window Python sandwich of 180.8/180.7 — gap 1.2%,
+> effectively parity**; qwen2.5-0.5b **167.5**; gemma-3-1b **120.0**; GLM-4-9B **40.8** (solo,
+> clean GPU). Note: in-process 7-model benchmark runs can drop/underfeed the LAST (largest) model
+> via cumulative VRAM — measure GLM solo.
+> **Remaining, honestly**: GLM (1.16×) is bounded by its square 4096² Q4_K projections at ~68% of
+> DRAM peak (needs a different thread-ownership layout — the one big unexplored kernel idea) plus
+> 40-layer bulk; the sub-2B pair (qwen2.5 ~1.9×, gemma3 ~1.6×) are at llama.cpp's extreme
+> small-model efficiency frontier — kernels near-roofline, node count now cut three times; what's
+> left is llama.cpp-class per-step scheduling economics (their whole step is a handful of larger
+> fused kernels). Next candidates if this reopens: WARPS_PER_BLOCK sweep for square shapes,
+> partial (q+k) load-time fusion for mixed-dtype QKV layers, cross-layer add+norm fusion.**
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

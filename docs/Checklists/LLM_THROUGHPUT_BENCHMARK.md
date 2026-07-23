@@ -189,6 +189,20 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 > | GLM-4-9B Q4_K_M | **40.14** | 47.80 (47.33 back-to-back) | 0.84× |
 > | gemma-3-1b-it Q4_K_M | **119.44** | 192.34 | 0.62× |
 > | qwen2.5-0.5b Q4_K_M | **163.82** | 322.72 | 0.51× |
+>
+> **UPDATE 2026-07-23 (round 7, deep-fusion pass — QKV rope-scatter + fused add-RMSNorm; grind doc
+> round-7 block). FINAL table (clean GPU — a stuck 6.9 GB test-host process was found and killed
+> mid-round; measure with `nvidia-smi --query-compute-apps` clean, and measure GLM solo):**
+>
+> | Model | Ours (graph-on) | llama-cpp-python | Ratio |
+> |---|---|---|---|
+> | Llama-3.2-1B Q8_0 | **211.49** | 190.34 | **1.11× FASTER** |
+> | Qwen3-4B Q4_K_M | **96.29** | 85.59 | **1.13× FASTER** |
+> | gemma-2-2b-it Q4_K_M | **136.56** | 121.08 | **1.13× FASTER** |
+> | DeepSeek-R1-Distill-1.5B | **178.66** | 180.8/180.7 same-window sandwich | **0.988× — parity within 1.2%** |
+> | GLM-4-9B Q4_K_M | **40.80** (solo) | 47.33 | 0.86× |
+> | gemma-3-1b-it Q4_K_M | **119.97** | 192.34 | 0.62× |
+> | qwen2.5-0.5b Q4_K_M | **167.45** | 322.72 | 0.52× |
 
 Superseded pre-dp4a table (2026-07-22, earlier session):
 

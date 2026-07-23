@@ -348,6 +348,134 @@ __global__ void lm_glu_act_f32(
     comb[gid] = a * u;
 }
 
+// Fused QKV epilogue for the graph decode step (t=1, B=1, no QK-norm): consumes the CONCATENATED
+// [q | k | v] projection output and, in ONE launch, ropes q into qOut, ropes k and writes it into
+// the KV cache at the device position, and copies v into the cache — replacing 3× SliceLastDim +
+// 2× rope + 2× KV-append (seven kernels and the k/v intermediates). BIT-EXACT with the separate
+// path: rope is elementwise (formulas copied verbatim from lm_rope_decode_splithalf/_interleaved —
+// each thread computes ITS element from the same two inputs and the same table entries), and the
+// scatter/copy parts move the identical bytes lm_kv_append_f32 would.
+// Layout: qkvIn = [nq*d floats][nkv*d floats][nkv*d floats]. One thread per element of the whole
+// buffer. rotaryDim: 0 = full (splithalf only; interleaved handles partial via identity table rows).
+// Launch: grid = ceil((nq+2*nkv)*d / 256), block = 256.
+__global__ void lm_qkv_rope_scatter_f32(
+    float* __restrict__ qOut,
+    float* __restrict__ kCache,
+    float* __restrict__ vCache,
+    const float* __restrict__ qIn,
+    const float* __restrict__ kIn,
+    const float* __restrict__ vIn,
+    const float* __restrict__ cosTable,
+    const float* __restrict__ sinTable,
+    unsigned int nq,
+    unsigned int nkv,
+    unsigned int headDim,
+    unsigned int rotaryDim,
+    int interleaved,
+    unsigned int maxSeq,
+    const int* __restrict__ devicePos)
+{
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long qElems = (unsigned long long)nq * headDim;
+    unsigned long long kvElems = (unsigned long long)nkv * headDim;
+    unsigned long long total = qElems + 2ull * kvElems;
+    if (gid >= total) return;
+    int pos = devicePos[1];
+
+    if (gid >= qElems + kvElems) {
+        // v: plain copy into the cache slot (same addressing as lm_kv_append_f32 at tNew=1).
+        unsigned long long vi = gid - qElems - kvElems;
+        unsigned int h = (unsigned int)(vi / headDim);
+        unsigned int i = (unsigned int)(vi % headDim);
+        vCache[(((unsigned long long)h * maxSeq) + (unsigned int)pos) * headDim + i] = vIn[vi];
+        return;
+    }
+
+    bool isQ = gid < qElems;
+    unsigned long long si = isQ ? gid : gid - qElems;       // element within the q or k section
+    unsigned int i = (unsigned int)(si % headDim);          // dim within the head
+    unsigned long long headBase = si - i;                   // this head's first element (section-relative)
+    const float* src = isQ ? qIn : kIn;
+    size_t baseCs = (size_t)pos * headDim;
+
+    float outv;
+    if (interleaved) {
+        // lm_rope_decode_interleaved: pair p = i>>1 uses table entry p; partial rotary rides on
+        // identity (cos=1, sin=0) table rows past rotaryDim/2.
+        unsigned int p = i >> 1;
+        float c = cosTable[baseCs + p];
+        float s = sinTable[baseCs + p];
+        float self = src[headBase + i];
+        float other = src[headBase + (i ^ 1u)];
+        outv = (i & 1u) == 0u ? self * c - other * s : self * c + other * s;
+    } else {
+        // lm_rope_decode_splithalf: rotate [0, rdim) as lower/upper halves; pass through the rest.
+        unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
+        unsigned int half = rdim >> 1;
+        float self = src[headBase + i];
+        if (i < half) {
+            outv = self * cosTable[baseCs + i] - src[headBase + i + half] * sinTable[baseCs + i];
+        } else if (i < rdim) {
+            outv = self * cosTable[baseCs + i] + src[headBase + i - half] * sinTable[baseCs + i];
+        } else {
+            outv = self;
+        }
+    }
+
+    if (isQ) {
+        qOut[si] = outv;
+    } else {
+        unsigned int h = (unsigned int)(si / headDim);
+        kCache[(((unsigned long long)h * maxSeq) + (unsigned int)pos) * headDim + i] = outv;
+    }
+}
+
+// Fused residual-add + RMSNorm: residOut = a + b; normOut = rmsnorm(residOut) · weight — one pass
+// instead of the Add kernel followed by dit_rmsnorm_f32. The reduction body is copied VERBATIM from
+// dit_rmsnorm_f32 (same strided partial, same shared-memory tree, same rsqrtf and multiply order),
+// with the input load replaced by the sum — so the result is bit-identical to the two-kernel
+// sequence. Launch: grid = rows, block = 256, shared = 256 * sizeof(float).
+__global__ void lm_add_rmsnorm_f32(
+    float* __restrict__ residOut,
+    float* __restrict__ normOut,
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    const float* __restrict__ weight,
+    unsigned int normDim,
+    unsigned int totalRows,
+    float eps)
+{
+    extern __shared__ float sdata_arn[];
+    unsigned int row = blockIdx.x;
+    if (row >= totalRows) return;
+
+    const float* aRow = a + (size_t)row * normDim;
+    const float* bRow = b + (size_t)row * normDim;
+    float* residRow = residOut + (size_t)row * normDim;
+    float* normRow = normOut + (size_t)row * normDim;
+
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < normDim; i += blockDim.x)
+    {
+        float v = aRow[i] + bRow[i];
+        residRow[i] = v;
+        partial += v * v;
+    }
+    sdata_arn[threadIdx.x] = partial;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s)
+            sdata_arn[threadIdx.x] += sdata_arn[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    float invRms = rsqrtf(sdata_arn[0] / (float)normDim + eps);
+    for (unsigned int i = threadIdx.x; i < normDim; i += blockDim.x)
+        normRow[i] = residRow[i] * invRms * weight[i];
+}
+
 // ── Graph-capture decode: device-indexed RoPE ───────────────────────────────
 // Applies rotary embedding to a single decode-step Q or K tensor [1, numHeads, 1, headDim] by
 // reading the rotation ROW from a precomputed FULL table [maxPos, headDim] (duplicated-half

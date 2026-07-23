@@ -2704,6 +2704,131 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    public void QkvRopeScatterDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qkv,
+        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("QkvRopeScatter");
+        if (devicePos == 0 || qkv.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        {
+            ((IBackend)this).QkvRopeScatterDecodeStep(qOut, kCache, vCache, qkv, cosTable, sinTable, hq, hkv, headDim, rotaryDim, interleaved, devicePos);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int maxSeq = (int)kCache.Shape[2];
+        ulong pQkv = 0, pCos = 0, pSin = 0, pK = 0, pV = 0, pQ = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pQkv = GpuTransferHelper.CopyToDevice(qkv);
+            pCos = GpuTransferHelper.CopyToDevice(cosTable);
+            pSin = GpuTransferHelper.CopyToDevice(sinTable);
+            pK = GpuTransferHelper.CopyToDevice(kCache);
+            pV = GpuTransferHelper.CopyToDevice(vCache);
+            nuint qBytes = GpuTransferHelper.ByteSize(qOut);
+            pQ = GpuTransferHelper.AllocateDevice(qBytes);
+            ulong kOff = pQkv + (ulong)((long)hq * headDim * sizeof(float));
+            ulong vOff = kOff + (ulong)((long)hkv * headDim * sizeof(float));
+            _kernels!.LaunchQkvRopeScatter(pQ, pK, pV, pQkv, kOff, vOff, pCos, pSin,
+                hq, hkv, headDim, rotaryDim, interleaved, maxSeq, devicePos, _stream.Handle);
+            // The caches were written in place — keep them resident without a host sync (same contract as
+            // KvCacheAppendDev).
+            kCache._gpuSyncCallback = null;
+            kCache._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(kCache, pK, GpuTransferHelper.ByteSize(kCache));
+            vCache._gpuSyncCallback = null;
+            vCache._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(vCache, pV, GpuTransferHelper.ByteSize(vCache));
+            GpuTransferHelper.CacheActivation(qOut, pQ, qBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pQkv);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pQ);
+        }
+    }
+
+    public void RopeScatterKvDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor q, Tensor k, Tensor v,
+        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("RopeScatterKv");
+        if (devicePos == 0 || q.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        {
+            ((IBackend)this).RopeScatterKvDecodeStep(qOut, kCache, vCache, q, k, v, cosTable, sinTable, hq, hkv, headDim, rotaryDim, interleaved, devicePos);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int maxSeq = (int)kCache.Shape[2];
+        ulong pQi = 0, pKi = 0, pVi = 0, pCos = 0, pSin = 0, pK = 0, pV = 0, pQ = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pQi = GpuTransferHelper.CopyToDevice(q);
+            pKi = GpuTransferHelper.CopyToDevice(k);
+            pVi = GpuTransferHelper.CopyToDevice(v);
+            pCos = GpuTransferHelper.CopyToDevice(cosTable);
+            pSin = GpuTransferHelper.CopyToDevice(sinTable);
+            pK = GpuTransferHelper.CopyToDevice(kCache);
+            pV = GpuTransferHelper.CopyToDevice(vCache);
+            nuint qBytes = GpuTransferHelper.ByteSize(qOut);
+            pQ = GpuTransferHelper.AllocateDevice(qBytes);
+            _kernels!.LaunchQkvRopeScatter(pQ, pK, pV, pQi, pKi, pVi, pCos, pSin,
+                hq, hkv, headDim, rotaryDim, interleaved, maxSeq, devicePos, _stream.Handle);
+            kCache._gpuSyncCallback = null;
+            kCache._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(kCache, pK, GpuTransferHelper.ByteSize(kCache));
+            vCache._gpuSyncCallback = null;
+            vCache._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(vCache, pV, GpuTransferHelper.ByteSize(vCache));
+            GpuTransferHelper.CacheActivation(qOut, pQ, qBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pQi);
+            GpuTransferHelper.FreeDevice(pKi);
+            GpuTransferHelper.FreeDevice(pVi);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pQ);
+        }
+    }
+
+    public void AddRmsNorm(Tensor residOut, Tensor normOut, Tensor a, Tensor b, Tensor weight, float eps)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("AddRmsNorm");
+        if (residOut.DType != DType.F32 || a.DType != DType.F32 || b.DType != DType.F32 || weight.DType != DType.F32)
+        {
+            ((IBackend)this).AddRmsNorm(residOut, normOut, a, b, weight, eps);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int normDim = (int)weight.ElementCount;
+        int rows = (int)(a.ElementCount / normDim);
+        ulong pA = 0, pB = 0, pW = 0, pResid = 0, pNorm = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pA = GpuTransferHelper.CopyToDevice(a);
+            pB = GpuTransferHelper.CopyToDevice(b);
+            pW = GpuTransferHelper.CopyToDevice(weight);
+            nuint outBytes = GpuTransferHelper.ByteSize(residOut);
+            pResid = GpuTransferHelper.AllocateDevice(outBytes);
+            pNorm = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchAddRmsNorm(pResid, pNorm, pA, pB, pW, normDim, rows, eps, _stream.Handle);
+            GpuTransferHelper.CacheActivation(residOut, pResid, outBytes);
+            GpuTransferHelper.CacheActivation(normOut, pNorm, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pA);
+            GpuTransferHelper.FreeDevice(pB);
+            if (!cachedOutput) { GpuTransferHelper.FreeDevice(pResid); GpuTransferHelper.FreeDevice(pNorm); }
+        }
+    }
+
     public void GluActivate(Tensor output, Tensor gateUp, int ff, bool gelu)
     {
         using NvtxRange _nvtx = NvtxRange.Push("GluActivate");

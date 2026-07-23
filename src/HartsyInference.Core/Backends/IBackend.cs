@@ -1268,6 +1268,56 @@ public interface IBackend : IDisposable
     /// <summary>Copies a contiguous last-dim slice: <c>out[row, d] = in[row, offset + d]</c> for
     /// <c>d in [0, outDim)</c>, where <c>outDim</c> is the output's last dim and the input's last dim
     /// is the row stride. Splits a fused tensor (e.g. QKV <c>[B,L,3H]</c>) into a contiguous chunk.</summary>
+    /// <summary>Fused graph-decode QKV epilogue (t=1, no QK-norm): from the CONCATENATED [q|k|v] projection
+    /// output, ropes q into <paramref name="qOut"/>, ropes k and appends it into <paramref name="kCache"/> at
+    /// the device position, and copies v into <paramref name="vCache"/> — one launch replacing three slices,
+    /// two ropes, and two KV appends, moving/computing the identical bytes. Backends without a fused kernel
+    /// fall back to that exact composition.</summary>
+    void QkvRopeScatterDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qkv,
+        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
+    {
+        int nq = hq * headDim, nkv = hkv * headDim;
+        Tensor k = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
+        Tensor v = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
+        try
+        {
+            SliceLastDim(qOut, qkv, 0);
+            SliceLastDim(k, qkv, nq);
+            SliceLastDim(v, qkv, nq + nkv);
+            RopeApplyDecodeStep(qOut, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            RopeApplyDecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            KvCacheAppendDev(kCache, k, 0, devicePos);
+            KvCacheAppendDev(vCache, v, 0, devicePos);
+        }
+        finally
+        {
+            k.Dispose();
+            v.Dispose();
+        }
+    }
+
+    /// <summary>Variant of <see cref="QkvRopeScatterDecodeStep"/> for layers whose q/k/v were projected into
+    /// SEPARATE tensors (mixed-dtype QKV, no load-time fusion): ropes q into <paramref name="qOut"/>, ropes k
+    /// into the cache, copies v into the cache — one launch replacing two ropes and two appends.</summary>
+    void RopeScatterKvDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor q, Tensor k, Tensor v,
+        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
+    {
+        RopeApplyDecodeStep(q, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+        RopeApplyDecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+        KvCacheAppendDev(kCache, k, 0, devicePos);
+        KvCacheAppendDev(vCache, v, 0, devicePos);
+        CopyTo(qOut, q);
+    }
+
+    /// <summary>Fused residual-add + RMSNorm: <c>residOut = a + b; normOut = rmsnorm(residOut) · weight</c> —
+    /// one pass instead of Add followed by RmsNorm. Backends without a fused kernel fall back to that exact
+    /// two-op composition (identical math).</summary>
+    void AddRmsNorm(Tensor residOut, Tensor normOut, Tensor a, Tensor b, Tensor weight, float eps)
+    {
+        Add(residOut, a, b);
+        RmsNorm(normOut, residOut, weight, eps);
+    }
+
     /// <summary>Fused gated-FFN activation epilogue: <c>output[r,i] = act(gateUp[r,i]) · gateUp[r,ff+i]</c>
     /// over the CONCATENATED [gate | up] projection output (each row = ff gate values then ff up values).
     /// <paramref name="gelu"/> false = SiLU (SwiGLU), true = GELU-tanh (GeGLU). Backends without a fused
