@@ -189,10 +189,34 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // DataPointer, so the host queues all steps without the per-step D2H pipeline drain that serialized host
         // dispatch against GPU execution (the dominant host-bound cost). Img2img / inpaint keep the pixel-space path.
         bool fastPath = !isImg2Img && !isMaskedInpaint;
+        // Default-off across-step First-Block cache (HARTSY_STEP_CACHE + optional HARTSY_STEP_CACHE_LATE —
+        // reference wiring QwenImagePipeline / Ideogram4Pipeline; INFERENCE_ACCEL_GRIND §H1.5). An armed cache
+        // is per-step-variable topology, so it forces the eager path (no step-graph capture).
+        float stepCacheThreshold = StepCacheEnv.ReadThreshold();
+        float stepCacheLate = StepCacheEnv.ReadLateWindow();
+        DeviceFeatureCache? condCache = null;
+        DeviceFeatureCache? uncondCache = null;
+        if (stepCacheThreshold > 0f)
+        {
+            if (Backend.SupportsDeviceStepCacheGate)
+            {
+                int stepCacheCap = StepCacheEnv.ReadCap();
+                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
+                if (useCfg) uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}"
+                    + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
+            }
+            else
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    "(stepcache.ptx not compiled?) — running uncached.");
+            }
+        }
         // Step-graph mode (HARTSY_DIT_GRAPH, fast path only, no CFG): route the latent through the
         // transformer's FIXED buffer so the captured graph's baked address stays valid across steps and gens.
         // The fixed tensor is transformer-owned: never disposed here, never DataPointer-read (snapshot instead).
-        bool graphMode = fastPath && !useCfg && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
+        bool graphMode = fastPath && !useCfg && condCache is null
+            && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
         Tensor? patchLatent = null;
         if (fastPath)
         {
@@ -213,20 +237,26 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i] / 1000.0f; // scheduler stores sigma·1000; transformer takes t∈[0,1]
 
+            // Late-window cache gate (HARTSY_STEP_CACHE_LATE): reuse eligible only in the schedule tail —
+            // early-schedule reuse is where quality damage concentrates (Ideogram 4 results doc).
+            bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
+            DeviceFeatureCache? stepCondCache = cacheEligible ? condCache : null;
+            DeviceFeatureCache? stepUncondCache = cacheEligible ? uncondCache : null;
+
             if (fastPath)
             {
                 Tensor v;
                 if (useCfg)
                 {
-                    Tensor condV = _transformer.ForwardPatched(Backend, patchLatent!, t, condHidden, hPacked, wPacked);
-                    Tensor uncondV = _transformer.ForwardPatched(Backend, patchLatent!, t, uncondHidden!, hPacked, wPacked);
+                    Tensor condV = _transformer.ForwardPatched(Backend, patchLatent!, t, condHidden, hPacked, wPacked, stepCondCache);
+                    Tensor uncondV = _transformer.ForwardPatched(Backend, patchLatent!, t, uncondHidden!, hPacked, wPacked, stepUncondCache);
                     v = CfgHelper.ApplyCfgCondAnchored(condV, uncondV, cfgScale);
                     uncondV.Dispose();
                     condV.Dispose();
                 }
                 else
                 {
-                    v = _transformer.ForwardPatched(Backend, patchLatent!, t, condHidden, hPacked, wPacked);
+                    v = _transformer.ForwardPatched(Backend, patchLatent!, t, condHidden, hPacked, wPacked, stepCondCache);
                 }
 
                 // On-device IN-PLACE Euler step: patchLatent += v·dt via CfgEulerStep with pos=neg=v (the CFG
@@ -298,6 +328,16 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             Tensor tokens = graphMode ? _transformer.SnapshotGraphLatent(Backend) : patchLatent!;
             latent = _transformer.UnpatchifyLatent(tokens, hPacked, wPacked);
             tokens.Dispose();   // graph mode: the snapshot; eager: patchLatent itself (as before)
+        }
+
+        if (condCache is not null)
+        {
+            string uncondStats = uncondCache is not null
+                ? $"; uncond {uncondCache.Computes} computes / {uncondCache.Reuses} reuses"
+                : "";
+            Logs.Info($"Step cache: cond {condCache.Computes} computes / {condCache.Reuses} reuses{uncondStats}");
+            condCache.Dispose();
+            uncondCache?.Dispose();
         }
 
         // condHidden/uncondHidden are owned by the prompt-embedding cache (host-materialized; survive across

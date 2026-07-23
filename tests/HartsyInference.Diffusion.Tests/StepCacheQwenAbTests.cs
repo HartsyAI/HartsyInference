@@ -43,13 +43,38 @@ public class StepCacheQwenAbTests
     [Fact]
     public void QwenImage_StepCache_WarmAb_Gguf() => RunWarmAb(
         csvTag: "stepcache",
-        configs: new (string label, string? stepCache, string? cfgInterval)[]
+        configs: new (string label, string? stepCache, string? cfgInterval, string? late)[]
         {
             // With HARTSY_STEP_CACHE_POLY set, thresholds are budgets in CALIBRATED residual-drift units
             // (the fitted map is superlinear: early-step reuse costs ~2.3× its indicator drift).
-            ("cache@0.18", "0.18", null),
-            ("cache@0.2", "0.2", null),
+            ("cache@0.18", "0.18", null, null),
+            ("cache@0.2", "0.2", null, null),
         });
+
+    /// <summary>Poly gate + late-window composition (H1.5 follow-up): the Ideogram round showed reuse damage
+    /// concentrates early; Qwen's poly@0.20 ships 1.20× AT the 0.95 gate — confining reuse to the schedule
+    /// tail should let a BIGGER budget pass the same gate. Poly coefficients = the 2026-07-22 Qwen fit
+    /// (54 pairs, R²=0.966; results doc §polynomial).</summary>
+    [Fact]
+    public void QwenImage_StepCachePolyLate_WarmAb_Gguf()
+    {
+        Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE_POLY", "-0.0481274,2.57494,-3.17407,4.38356");
+        try
+        {
+            RunWarmAb(
+                csvTag: "stepcachelate",
+                configs: new (string label, string? stepCache, string? cfgInterval, string? late)[]
+                {
+                    ("poly0.2", "0.2", null, null),                 // anchor: the shipped 1.20×/0.9500 point
+                    ("poly0.25+late0.6", "0.25", null, "0.6"),
+                    ("poly0.3+late0.6", "0.3", null, "0.6"),
+                });
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE_POLY", null);
+        }
+    }
 
     /// <summary>H2: limited-interval CFG A/B (arXiv:2404.07724) + the H2.2 composability run — interval and
     /// step cache together (interval halves the gated steps, the cache skips block stacks on the rest; the
@@ -57,11 +82,11 @@ public class StepCacheQwenAbTests
     [Fact]
     public void QwenImage_CfgInterval_WarmAb_Gguf() => RunWarmAb(
         csvTag: "cfginterval",
-        configs: new (string label, string? stepCache, string? cfgInterval)[]
+        configs: new (string label, string? stepCache, string? cfgInterval, string? late)[]
         {
-            ("interval@0.1,0.85", null, "0.1,0.85"),
-            ("interval@0.15,0.9", null, "0.15,0.9"),
-            ("compose@cache0.1+int0.1,0.85", "0.1", "0.1,0.85"),
+            ("interval@0.1,0.85", null, "0.1,0.85", null),
+            ("interval@0.15,0.9", null, "0.15,0.9", null),
+            ("compose@cache0.1+int0.1,0.85", "0.1", "0.1,0.85", null),
         });
 
     /// <summary>H2 follow-up after the full-band negative result (early-skip flips Qwen-Image from photo to
@@ -71,14 +96,14 @@ public class StepCacheQwenAbTests
     [Fact]
     public void QwenImage_CfgIntervalLateOnly_WarmAb_Gguf() => RunWarmAb(
         csvTag: "cfglate",
-        configs: new (string label, string? stepCache, string? cfgInterval)[]
+        configs: new (string label, string? stepCache, string? cfgInterval, string? late)[]
         {
-            ("late@0.05,1", null, "0.05,1"),
-            ("late@0.1,1", null, "0.1,1"),
-            ("late@0.15,1", null, "0.15,1"),
+            ("late@0.05,1", null, "0.05,1", null),
+            ("late@0.1,1", null, "0.1,1", null),
+            ("late@0.15,1", null, "0.15,1", null),
         });
 
-    private void RunWarmAb(string csvTag, (string label, string? stepCache, string? cfgInterval)[] configs)
+    private void RunWarmAb(string csvTag, (string label, string? stepCache, string? cfgInterval, string? late)[] configs)
     {
         string transformerPath = TestPaths.QwenImage.V1Gguf;
         string textEncoderPath = TestPaths.QwenImage.TextEncoder;
@@ -98,6 +123,7 @@ public class StepCacheQwenAbTests
         Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE", null);
         Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE_CAP", null);
         Environment.SetEnvironmentVariable("HARTSY_CFG_INTERVAL", null);
+        Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE_LATE", null);
 
         _output.WriteLine("[load] transformer (GGUF Q4_K, lazy)...");
         GgufModelLoader.LoadedGgufModel ggufHandle = GgufModelLoader.Load(transformerPath);
@@ -195,10 +221,11 @@ public class StepCacheQwenAbTests
             SaveBmp(outputDir, $"{csvTag}_ab_baseline_{stamp}", baselineRgb!);
 
             // Knob configs ×3 each, same process, env read per-Generate.
-            foreach ((string label, string? stepCache, string? cfgInterval) in configs)
+            foreach ((string label, string? stepCache, string? cfgInterval, string? late) in configs)
             {
                 Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE", stepCache);
                 Environment.SetEnvironmentVariable("HARTSY_CFG_INTERVAL", cfgInterval);
+                Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE_LATE", late);
                 byte[]? firstRgb = null;
                 for (int t = 0; t < Trials; t++)
                 {
@@ -215,6 +242,7 @@ public class StepCacheQwenAbTests
             }
             Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE", null);
             Environment.SetEnvironmentVariable("HARTSY_CFG_INTERVAL", null);
+            Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE_LATE", null);
 
             string csvPath = Path.Combine(outputDir, $"{csvTag}_ab_qwen_{stamp}.csv");
             File.WriteAllLines(csvPath, csv);

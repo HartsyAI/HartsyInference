@@ -75,3 +75,14 @@ indicator drift (the raw gate under-weighted exactly the reuses that damage iden
 SSIM≥0.95 bar.** Env-shipped (coeffs are model-specific); productization step = per-model coefficient
 storage in the pipeline configs. Wan is the next calibration target (same recipe; per-seed SSIM may
 still be the wrong video metric — see the Wan verdict doc).
+
+## Poly + late-window composition (2026-07-22, same-day follow-up) — NO GAIN on Qwen
+
+After the Ideogram round introduced `HARTSY_STEP_CACHE_LATE` (reuse only in the schedule tail), the
+composition was A/B'd here (`QwenImage_StepCachePolyLate_WarmAb_Gguf`): `poly0.2` anchor reproduced
+exactly (33.4 s, SSIM 0.9500, 4 reuses/stream); `poly0.25+late0.6` selected the SAME 4 reuses
+(SSIM literally identical 0.9500) — the informative poly was already placing reuses late;
+`poly0.3+late0.6` takes a 5th reuse and drops below the gate (0.9381) regardless of placement.
+**Conclusion: the two gates are substitutes, not complements.** Pick per model from the calibration:
+indicator schedule-informative → poly (Qwen); indicator flat → late window (Ideogram). Qwen ships
+unchanged at poly@0.20 = 1.20×.
