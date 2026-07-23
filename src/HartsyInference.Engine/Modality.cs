@@ -35,4 +35,8 @@ public enum Modality
 
     /// <summary>Audio effects: stem separation (Demucs), speech enhancement (Resemble-Enhance).</summary>
     Fx,
+
+    /// <summary>Text-to-vector embeddings (RAG/semantic-search style dense sentence vectors) — not yet
+    /// CLI-drivable, only reachable via the HTTP API's native/OpenAI-compat routes.</summary>
+    Embedding,
 }

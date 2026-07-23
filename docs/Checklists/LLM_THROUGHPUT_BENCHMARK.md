@@ -110,6 +110,21 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 
 **Results (RTX 3060, `--low-vram-quant`, greedy, 128 tok, graph-on = our best config):**
 
+> **UPDATE 2026-07-22 (later session): FASTER THAN llama-cpp-python on both models.** The dp4a
+> int8-activation GEMV kernel set from `LLM_GEMV_KERNEL_HANDOFF.md` landed and is default-on
+> (kill-switch `HARTSY_DP4A_ON=0`); full kernel/verification detail in `LLM_DECODE_PERF_GRIND.md`'s
+> "FASTER THAN llama.cpp" status block. Final medians (default config, 5 reps, ±0.1-0.9 tok/s spread):
+>
+> | Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (ours÷llama, graph-on) |
+> |---|---|---|---|---|
+> | Llama-3.2-1B-Instruct Q8_0 | 162.61 tok/s | **197.28 tok/s** | 190.34 (best documented); 173.58 same-hour back-to-back | **1.04× (vs best) - 1.14× FASTER** |
+> | Qwen3-4B Q4_K_M | 75.58 tok/s | **92.21 tok/s** | 85.59 (documented); 86.83 same-hour back-to-back | **1.06-1.08× FASTER** |
+>
+> Measurement note: desktop/rustdesk GPU contention on this box can swing either engine ±20%+ —
+> compare only back-to-back runs from a quiet GPU (`nvidia-smi` util ≲15% on GPU 0 first).
+
+Superseded pre-dp4a table (2026-07-22, earlier session):
+
 | Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (ours÷llama, graph-on) |
 |---|---|---|---|---|
 | Llama-3.2-1B-Instruct Q8_0 | 128.49 → 134.49 → **~139 tok/s** | 155.28 → **~157 tok/s** | 190.34 tok/s | **~0.82× (~1.21× slower)**, was 1.34× |

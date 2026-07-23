@@ -7,7 +7,8 @@
 //   xd  : [M, K/32] F32          per-32-block scale = amax/127
 //   xs  : [M, K/32] F32          sum of the block's int8 values (for the Q4_K min term)
 //
-// Launch: one warp (32 lanes) per 32-block; grid = M*K/32 blocks, blockDim = 32.
+// Launch: one warp (32 lanes) per 32-block, 8 warps per CUDA block;
+// grid = ceil(M*K/32 / 8), blockDim = (32, 8). Warps are independent (no barriers).
 
 extern "C" __global__ void quantize_activation_q8_1_f32(
     signed char* __restrict__ xq,
@@ -16,7 +17,7 @@ extern "C" __global__ void quantize_activation_q8_1_f32(
     const float* __restrict__ x,
     int nblocks)
 {
-    const int blk = blockIdx.x;
+    const int blk = blockIdx.x * blockDim.y + threadIdx.y;
     if (blk >= nblocks) return;
     const int lane = threadIdx.x;               // 0..31
 

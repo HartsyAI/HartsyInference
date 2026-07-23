@@ -485,6 +485,76 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > investigation and the dp4a result above), is the whole gap. Not a language issue, not a host-dispatch issue,
 > not a system/PCIe issue — confirmed by direct measurement, not assumption, on all three counts this session.
 
+> **STATUS UPDATE (2026-07-22, later session): FASTER THAN llama.cpp — the dp4a kernel grind from
+> `LLM_GEMV_KERNEL_HANDOFF.md` executed to completion. Llama-3.2-1B Q8_0 158.9 → ~195 tok/s, Qwen3-4B
+> Q4_K_M 70.8 → ~90-92 tok/s (RTX 3060, graph-on); llama-cpp-python measured 190.3 / 85.6 on the same
+> box — both models now BEAT the Python/llama.cpp baseline.** What landed, in handoff-task order:
+>
+> 1. **Ground-truth correctness test for the int8-activation path** (`Dp4aGemvGroundTruthTests`, 9 cases
+>    covering Q4_K/Q6_K/Q8_0 × shapes incl. real production K × batch × bias): three gates per case —
+>    (a) exact CPU bit-replica of the Q8_1 activation quantizer (amax/127 scale, round-nearest-even,
+>    clamp) dotted against the CPU-dequantized weight, agreeing to float-accumulation noise (~1e-7 avg,
+>    tolerance 5e-4); (b) an ANALYTIC error bound vs the unquantized reference — per-element Q8_1
+>    rounding error ≤ scale/2, so |gpu − f32ref| ≤ Σ|w_i|·(scale_blk(i)/2) computed from the actual
+>    data (derived, not guessed; zero violations); (c) an engagement check (dp4a output must differ
+>    from the float kernel's — catches silent dispatch fall-through).
+> 2. **New `mul_mat_vec_q8_0_q8_1.cu`** — Q8_0×Q8_1 dp4a GEMV (Q8_0 is symmetric: no min/int-sum term).
+>    34-byte blocks are only 2-byte aligned → operands assembled from u16 loads (llama.cpp get_int_b2
+>    pattern). Layout that measured best: warp-per-row, 8 blocks/warp-iteration, each lane owning an
+>    8-elem chunk (2 dp4a) — the first cut (1 dp4a/lane, 4 blocks/iter) left ~10-20% on the table.
+>    Isolated (probe, weight resident): gate/up 145→113 µs, down 84→63.5 µs, lm_head 1084→837 µs
+>    (93% of peak DRAM bandwidth) vs the float kernel.
+> 3. **New `mul_mat_vec_q6k_q8_1.cu`** — Q6_K×Q8_1 dp4a GEMV (6-bit unpack via whole-word nibble+qh
+>    merge, per-byte −32 via `__vsub4`, signed per-16 scales, no min term). Final layout: 32 lanes =
+>    2 halves × 2 ql-pairs × 8 u16-positions, each lane loading its ql bytes ONCE and processing both
+>    nibble planes. Isolated: down 116→75 µs (1.57×), lm_head 1573→953 µs (1.63×, 93% of peak) —
+>    the single biggest win; Q6_K is 22% of Qwen3-4B's weights (lm_head + half the ffn_down/attn_v).
+> 4. **Q4_K dp4a kernel rewrite** (the pre-existing `mul_mat_vec_q4k_q8_1.cu`): whole-word nibble
+>    extraction (`(word >> shift) & 0x0F0F0F0F` — one op pair for all four byte-lanes, replacing
+>    per-byte shift/or chains) + word-based scale/min extraction (3 aligned u32s + shifts replacing
+>    ggml's per-byte `get_scale_min_k4` loads) + fused d/dmin u32 load. Isolated: gate/up 119→92 µs
+>    (1.33× vs float, 65→83% of peak), QKV 44→35 µs, down 67→59 µs — the fix that turned Q4_K dp4a
+>    from ~neutral (the +2% of the earlier session) into a clear win.
+> 5. **Activation-quantize kernel occupancy** (`quantize_activation_q8_1_f32.cu`): 8 warps/block
+>    instead of one-warp blocks. Measured ~neutral e2e (launch-geometry change, no added complexity).
+> 6. **Default flipped**: dp4a is now the standard profile (`CudaBackend.EnableDp4aGemv`,
+>    `EnvSwitch`-gated `HARTSY_DP4A_ON=0` kill-switch, resolved once at construction — the old code
+>    read the env var on every Linear call). Dispatch covers Q4_K/Q6_K (K%256) and Q8_0 (K%32) at
+>    M≤8; everything else unchanged.
+>
+> **Tried and REVERTED (so the next reader doesn't re-try them)**: (a) block-per-row K-split variants
+> (llama.cpp mmvq's occupancy shape, warps splitting one row's super-blocks + shared-mem combine) —
+> built for Q4_K, swept W∈{2,4,8} at all three production shapes: net LOSS everywhere (up to −35% at
+> W=8; ~equal-at-best on the long-K ffn_down it targeted) once the whole-word unpack landed, and −1.3%
+> e2e on Qwen3 under the auto heuristic; (b) a byte-shared Q4_K layout (each lane processing both
+> nibble planes of its uint2, 2 super-blocks/warp-iter) — ~10% slower on ffn_down, flat elsewhere.
+> Both removed; the plane-per-lane + whole-word-unpack form is the keeper.
+>
+> **Correctness gates (all green)**: full `HartsyInference.Cuda.Tests` 166/166 (dp4a default-ON — the
+> pre-existing fused-GEMV/quantized-matmul ground-truth suites now exercise the dp4a path at decode
+> shapes and pass unchanged; note the 4 "pre-existing failures" of the earlier session do NOT reproduce
+> under the documented `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0` pin — clean 157/157 was
+> re-established BEFORE any change); CPU `HartsyInference.LLM.Tests` 131/131; real-checkpoint CLI A/B
+> (`hartsy text`, greedy, 60 tokens): **byte-identical output across dp4a on/off × graph on/off** on
+> BOTH Llama-3.2-1B Q8_0 and Qwen3-4B Q4_K_M (the Q8_1 rounding perturbation flipped no greedy argmax
+> on either model — llama.cpp ships this exact numerics tradeoff as its only decode path). One
+> pre-existing footnote: `hartsy text` WITHOUT `--low-vram-quant` OOMs loading Qwen3-4B on the shared
+> 12GB card (lm_head F16-cast blowup in `ProjectLogits`) — reproduced identically with dp4a and graphs
+> OFF, i.e. unrelated to this work; use `--low-vram-quant` (the benchmark harness already does).
+>
+> **Measured (`TextDecodeThroughputBenchmark`, 3060 pinned, medians of 5, final default-config run)**:
+> Llama-3.2-1B Q8_0 graph-on 158.91 → **197.28** tok/s (+24%), graph-off 140.68 → 162.61 (+16%);
+> Qwen3-4B Q4_K_M graph-on 70.82 → **92.21** (+30%), graph-off 62.47 → 75.58 (+21%). llama-cpp-python
+> on the same box/pin/prompt: 190.34 (best documented quiet run; a same-hour back-to-back run measured
+> 173.6 under desktop contention) / 86.83 (fresh, stable) → **we are now 1.04-1.14× FASTER on Llama
+> and 1.06-1.08× FASTER on Qwen3** — faster than the Python baseline's best number on both models.
+> (Desktop/rustdesk GPU contention can swing either engine ±20%+ — always compare back-to-back runs
+> from a quiet GPU; see `LLM_THROUGHPUT_BENCHMARK.md` for the final side-by-side table.)
+> Mechanism, for the record: the fused float GEMVs were compute/memory CO-limited (74.6% ALU on Q4_K);
+> dp4a packs 4 int8 MACs/instruction and the int8 activation quarters activation-read bytes, pushing
+> every major GEMV to 83-93% of the 3060's DRAM roofline — the ALU-side dequant cost this doc's 2026-07-22
+> handoff identified as the whole remaining gap is now paid.
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

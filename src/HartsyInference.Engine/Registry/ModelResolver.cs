@@ -19,6 +19,7 @@ public static class ModelResolver
         [Modality.World] = "Interactive",
         [Modality.VoiceConvert] = "Audio",
         [Modality.Fx] = "Audio",
+        [Modality.Embedding] = "Embedding",
     };
 
     /// <summary>Resolves a model selection for <paramref name="modality"/>. <paramref name="modelArg"/> may be a catalog

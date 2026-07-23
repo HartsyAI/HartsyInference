@@ -60,4 +60,7 @@ public interface IInferenceEngine : IDisposable
 
     /// <summary>Interactive world sessions.</summary>
     IWorldService World { get; }
+
+    /// <summary>Text-to-vector embeddings (RAG/semantic-search style dense sentence vectors).</summary>
+    IEmbeddingService Embeddings { get; }
 }

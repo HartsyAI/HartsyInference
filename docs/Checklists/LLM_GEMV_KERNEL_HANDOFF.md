@@ -1,5 +1,16 @@
 # LLM Decode GEMV — Kernel Handoff (2026-07-22)
 
+> **✅ EXECUTED TO COMPLETION (2026-07-22, later session) — decode now BEATS llama-cpp-python on both
+> benchmark models** (Llama-3.2-1B Q8_0 ~195 vs 190.3 tok/s; Qwen3-4B Q4_K_M ~90-92 vs 85.6-86.8;
+> RTX 3060, graph-on). Tasks 1-4 done (ground-truth test `Dp4aGemvGroundTruthTests`; new
+> `mul_mat_vec_q8_0_q8_1.cu` + `mul_mat_vec_q6k_q8_1.cu`; Q4_K dp4a kernel rewritten with whole-word
+> nibble/scale extraction; default flipped to ON via `CudaBackend.EnableDp4aGemv`, kill-switch
+> `HARTSY_DP4A_ON=0`). Task 5 (float-path dequant cheapening) obsolete — the float kernels are now the
+> fallback, not the hot path. Task 6 (occupancy): swept as block-per-row K-split, net loss, reverted.
+> Q5_K×Q8_1 not built (no Q5_K tensors in the local model fleet). Full results, kept/reverted record,
+> and gates: the 2026-07-22 "FASTER THAN llama.cpp" status block in `LLM_DECODE_PERF_GRIND.md` and the
+> updated table in `LLM_THROUGHPUT_BENCHMARK.md`. This doc is retained for the method record only.
+
 ## For the kernel agent picking this up
 
 This is a scoped, evidence-backed handoff for the remaining lever on LLM decode throughput. It is **not**

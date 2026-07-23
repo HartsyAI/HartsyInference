@@ -20,4 +20,12 @@
     <ProjectReference Include="..\..\src\HartsyInference.Audio\HartsyInference.Audio.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Full 1024-dim reference embedding for DecoderEmbeddingRealCheckpointTests, captured from
+         transformers.AutoModel on CPU; see that test's class doc for exact provenance. -->
+    <None Include="Qwen3EmbeddingReference.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

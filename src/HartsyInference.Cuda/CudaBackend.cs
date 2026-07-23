@@ -145,6 +145,11 @@ public sealed class CudaBackend : IBackend
     /// <summary>Opt-in flag for fusing the Linear bias add into the cuBLASLt GEMM epilogue (works on every targeted SM, including the RTX 3060). Defaults to <c>false</c> until benchmarked on hardware; when on, a Linear with bias runs as a single <c>cublasLtMatmul</c> instead of <c>cublasGemmEx</c> + a separate <c>BiasAdd</c> launch. The result is numerically equivalent to the unfused path.</summary>
     public bool EnableEpilogueFusion { get; set; }
 
+    /// <summary>int8-activation dp4a decode GEMV for Q4_K/Q6_K/Q8_0 weights (default ON, kill-switch
+    /// <c>HARTSY_DP4A_ON=0</c>). Lossy within the Q8_1 rounding bound (see Dp4aGemvGroundTruthTests);
+    /// measured 2026-07-22: Llama-3.2-1B 159→195 tok/s, Qwen3-4B 71→90 tok/s (RTX 3060, graph-on).</summary>
+    public bool EnableDp4aGemv { get; set; }
+
     /// <summary>Opt-in: run mixed bf16/f32 GEMMs at F32 compute precision (cast the bf16 weight UP to F32 rather
     /// than truncating the F32 activation DOWN to bf16). Default <c>false</c> preserves the bf16 Tensor-Core fast
     /// path. Turn ON for precision-sensitive models whose bf16 weights stay resident to fit VRAM but whose
@@ -290,6 +295,10 @@ public sealed class CudaBackend : IBackend
         // UNet, measured −0.16 s/gen). Falls back to GemmEx+BiasAdd when Lt is unavailable or shapes
         // don't qualify; HARTSY_EPILOGUE_FUSION=0 is the kill-switch.
         EnableEpilogueFusion = EnvSwitch.IsEnabled("HARTSY_EPILOGUE_FUSION", defaultOn: true);
+        // dp4a int8-activation decode GEMV: promoted to the standard profile 2026-07-22 after the
+        // full Q4_K/Q6_K/Q8_0 kernel set measured +13-27% end-to-end decode on both benchmark models
+        // with ground-truth-bounded numerics (Dp4aGemvGroundTruthTests, LLM_DECODE_PERF_GRIND.md).
+        EnableDp4aGemv = EnvSwitch.IsEnabled("HARTSY_DP4A_ON", defaultOn: true);
         EnableTensorCoreGemm = EnvFlag("HARTSY_TENSORCORE_GEMM");
         // fp8 tensor-core GEMM (activation-quant e4m3) requires SM 8.9+ (Ada); older parts default to the
         // F16-cast path. Verified quality-clean fleet-wide in the standard Swarm config.
@@ -326,7 +335,7 @@ public sealed class CudaBackend : IBackend
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
             $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} ConvCudnn={_convCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} MempoolKeep={mempoolKeep} " +
-            $"EpilogueFusion={EnableEpilogueFusion} TensorCoreGemm={EnableTensorCoreGemm} " +
+            $"EpilogueFusion={EnableEpilogueFusion} Dp4aGemv={EnableDp4aGemv} TensorCoreGemm={EnableTensorCoreGemm} " +
             $"HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts} " +
             $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights} Tf32Gemm={_allowTf32}.");
 
@@ -508,16 +517,21 @@ public sealed class CudaBackend : IBackend
             // falls through to the cuBLAS GEMM, which is efficient at M≥ a few hundred.
             if (M <= 8 && input.DType == DType.F32 && output.DType == DType.F32)
             {
-                if (weight.DType == DType.Q4_K && K % 256 == 0 && EnvFlag("HARTSY_DP4A_ON"))
+                // dp4a int8-activation paths (standard profile, kill-switch HARTSY_DP4A_ON=0): quantize the
+                // activation to int8
+                // (Q8_1, per-32-block scale + int-sum) once per call, then run the GEMV as int8×int8 dot
+                // products via __dp4a (4 MACs/instruction) instead of per-element float dequant — the fused
+                // GEMV kernels are compute/memory CO-limited (74.6% ALU on Q4_K, ncu 2026-07-22), so cutting
+                // per-element ALU cost is the remaining lever. Lossy (int8 activation rounding) but bounded —
+                // ground-truth gates in Dp4aGemvGroundTruthTests derive the tolerance from the Q8_1 rounding
+                // error rather than guessing. Q8_0/Q6_K are symmetric quants, so their kernels consume only
+                // xq/xd; Q4_K's min term additionally needs the per-block int-sum xs.
+                bool dp4a = EnableDp4aGemv
+                    && ((weight.DType == DType.Q4_K && K % 256 == 0)
+                        || (weight.DType == DType.Q6_K && K % 256 == 0)
+                        || (weight.DType == DType.Q8_0 && K % 32 == 0));
+                if (dp4a)
                 {
-                    // dp4a path (opt-in): quantize the activation to int8 (Q8_1) once, then int8 GEMV via __dp4a.
-                    // Numerically exact vs the float kernel. Re-measured 2026-07-22 (post split-K + QKV/gate-up
-                    // fusion, RTX 3060, real Qwen3-4B decode): +2% end-to-end (71.35 -> 72.77 tok/s, reproduced
-                    // 3x each way) — small but real, not the "not faster here" this comment used to claim (that
-                    // finding predates this session's kernel/dispatch changes and no longer holds). Still opt-in:
-                    // no dedicated correctness test for this path yet and the win hasn't been swept across
-                    // shapes/quant types — see docs/Checklists/LLM_GEMV_KERNEL_HANDOFF.md before flipping the
-                    // default or extending it to Q5_K/Q6_K/Q8_0.
                     int kblocks = M * (K / 32);
                     ulong pXq = GpuTransferHelper.AllocateDevice((nuint)((long)M * K));
                     ulong pXd = GpuTransferHelper.AllocateDevice((nuint)((long)kblocks * sizeof(float)));
@@ -525,7 +539,12 @@ public sealed class CudaBackend : IBackend
                     try
                     {
                         _kernels!.LaunchQuantizeActivationQ8_1(pXq, pXd, pXs, pInput, M, K, _stream.Handle);
-                        _kernels!.LaunchMulMatVecQ4KQ8_1(pOutput, pXq, pXd, pXs, pWeight, pBias, N, K, M, _stream.Handle);
+                        if (weight.DType == DType.Q4_K)
+                            _kernels!.LaunchMulMatVecQ4KQ8_1(pOutput, pXq, pXd, pXs, pWeight, pBias, N, K, M, _stream.Handle);
+                        else if (weight.DType == DType.Q6_K)
+                            _kernels!.LaunchMulMatVecQ6KQ8_1(pOutput, pXq, pXd, pWeight, pBias, N, K, M, _stream.Handle);
+                        else
+                            _kernels!.LaunchMulMatVecQ8_0Q8_1(pOutput, pXq, pXd, pWeight, pBias, N, K, M, _stream.Handle);
                     }
                     finally
                     {

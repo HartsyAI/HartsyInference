@@ -36,6 +36,7 @@ public static class ModelCatalog
         const Modality act = Modality.World;
         const Modality vc = Modality.VoiceConvert;
         const Modality fx = Modality.Fx;
+        const Modality emb = Modality.Embedding;
         const ModelStatus ok = ModelStatus.Verified;
         const ModelStatus vp = ModelStatus.ValidationPending;
         const ModelStatus st = ModelStatus.Structural;
@@ -1520,6 +1521,29 @@ public static class ModelCatalog
             E("matrix-game-2", act, "Matrix-Game 2.0", "Wan2.1-lineage 1.8B", vp),
             E("oasis", act, "Oasis-500m", "axial-attention DiT", vp, cli: true),
             E("diamond", act, "DIAMOND (Atari-100k)", "EDM diffusion U-Net", vp, cli: true),
+
+            // Text embeddings — decoder-LLM-backed only (DecoderEmbeddingModel wraps the same verified
+            // GgufLanguageModel/GenericTransformer GGUF pipeline chat models use). Not CLI-drivable yet: reachable
+            // only via POST /v1/native/embeddings and the OpenAI-compat /v1/embeddings. BERT-family encoders
+            // (bge/gte/nomic) are a separate, later scope — see EmbeddingService's class doc.
+            new CatalogEntry
+            {
+                // Verified 2026-07-22 against a real transformers.AutoModel reference on the exact same token
+                // ids: full 1024-dim cosine similarity = 1.000000 (see DecoderEmbeddingRealCheckpointTests).
+                // f16, NOT the Q8_0 quant this repo also ships: Q8_0 hits a real, pre-existing gap where the CPU
+                // backend's generic Linear/CastTo path can't dequantize block-quantized weights on its own
+                // (throws "requires a dedicated dequantizer. Use GgufDequantizer instead.") — a broader Engine
+                // limitation affecting quantized-GGUF inference on the CPU backend generally, not something
+                // introduced by or specific to embeddings. Out of scope to fix here; f16 sidesteps it entirely.
+                Id = "qwen3-embedding", Modality = emb, DisplayName = "Qwen3-Embedding-0.6B", Architecture = "Qwen3 decoder + last-token pooling",
+                Status = ok, CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Qwen/Qwen3-Embedding-0.6B-GGUF", RepoPath = "Qwen3-Embedding-0.6B-f16.gguf",
+                        TargetSubdir = "Embedding/qwen3-embedding", Role = "transformer",
+                        Sha256 = "421a27e58d165478cc7acb984a688c2aa41404968b0203e7cd743ece44c54340" },
+                },
+            },
         };
     }
 }

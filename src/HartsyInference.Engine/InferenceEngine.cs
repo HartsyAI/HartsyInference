@@ -34,6 +34,7 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly Lazy<VisionService> _vision;
     private readonly Lazy<MeshService> _mesh;
     private readonly Lazy<WorldService> _world;
+    private readonly Lazy<EmbeddingService> _embeddings;
 
     /// <summary>Creates an engine that lazily constructs the backend named by <paramref name="backendSelector"/>
     /// (<c>auto</c>/<c>cpu</c>/<c>cuda</c>/<c>vulkan</c>) on first use.</summary>
@@ -51,6 +52,7 @@ public sealed class InferenceEngine : IInferenceEngine
         _vision = new Lazy<VisionService>(() => new VisionService(this));
         _mesh = new Lazy<MeshService>(() => new MeshService(this));
         _world = new Lazy<WorldService>(() => new WorldService(this));
+        _embeddings = new Lazy<EmbeddingService>(() => new EmbeddingService(this));
     }
 
     /// <inheritdoc/>
@@ -98,6 +100,9 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <inheritdoc/>
     public IWorldService World => _world.Value;
+
+    /// <inheritdoc/>
+    public IEmbeddingService Embeddings => _embeddings.Value;
 
     /// <inheritdoc/>
     public void SetBackend(string selector)
@@ -252,6 +257,12 @@ public sealed class InferenceEngine : IInferenceEngine
         if (_text.IsValueCreated)
         {
             _text.Value.Dispose();
+        }
+        // EmbeddingService's cached DecoderEmbeddingModels hold device-resident weights bound to the backend
+        // being torn down/switched — same reasoning as TextService above.
+        if (_embeddings.IsValueCreated)
+        {
+            _embeddings.Value.Dispose();
         }
         // Audio pipelines are cached process-wide by the audio catalogs; drop them here so none outlives the backend
         // it was constructed against.
