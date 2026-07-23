@@ -151,7 +151,7 @@ public sealed unsafe class Krea2Transformer : IDisposable
     /// tensor's <c>DataPointer</c> and the host can queue all steps without the per-step D2H pipeline drain that
     /// otherwise serialized host dispatch against GPU execution.</summary>
     public Tensor ForwardPatched(IBackend backend, Tensor patchLatent, float timestep, Tensor encoderHidden,
-        int hPacked, int wPacked)
+        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null)
     {
         ThrowIfDisposed();
         const int batch = 1;
@@ -205,11 +205,12 @@ public sealed unsafe class Krea2Transformer : IDisposable
         // routes the latent through PrepareGraphLatent → patchLatent IS _latentFixed); everything per-step-varying
         // is refreshed into fixed device buffers before the launch. Self-disables on capture failure or a
         // CFG-style signature flip storm.
-        bool graphMode = DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead
-            && ReferenceEquals(patchLatent, _latentFixed);
+        // An armed step cache is per-step-variable topology (hit vs miss) — a captured graph cannot replay it.
+        bool graphMode = stepCache is null && DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported
+            && !_graphDead && ReferenceEquals(patchLatent, _latentFixed);
         if (!graphMode)
         {
-            Tensor eager = ForwardCore(backend, patchLatent, txt, temb, tembMod, batch, imgSeq, txtSeq, hidden);
+            Tensor eager = ForwardCore(backend, patchLatent, txt, temb, tembMod, batch, imgSeq, txtSeq, hidden, stepCache);
             tembMod.Dispose();
             temb.Dispose();
             return eager;
@@ -350,7 +351,7 @@ public sealed unsafe class Krea2Transformer : IDisposable
     /// (F32 cast) → final layer. Identical op sequence every step for a given (txt, resolution) — the property
     /// that makes it CUDA-graph-capturable. Caller owns temb/tembMod.</summary>
     private Tensor ForwardCore(IBackend backend, Tensor patchLatent, Tensor txt, Tensor temb, Tensor tembMod,
-        int batch, int imgSeq, int txtSeq, int hidden)
+        int batch, int imgSeq, int txtSeq, int hidden, Utilities.DeviceFeatureCache? stepCache = null)
     {
         // ── image: img_in (patchLatent is already the [1, imgSeq, C·p²] token grid) ──
         Tensor img = new Tensor(new TensorShape(batch, imgSeq, hidden), DType.F32);
@@ -373,11 +374,41 @@ public sealed unsafe class Krea2Transformer : IDisposable
             joint = jointF16;
         }
 
-        for (int i = 0; i < _blocks.Length; i++)
+        // Across-step First-Block cache (QwenImageTransformer wiring; see DeviceFeatureCache): block 0 always
+        // runs as the gate indicator; hit ⇒ blocks 1..N−1 replaced by block0 + previous residual; miss ⇒ the
+        // anchor survives the loop for the fresh residual. Null stepCache = byte-identical original loop.
+        Tensor? cacheAnchor = null;
+        int startBlock = 0;
+        if (stepCache is not null && _blocks.Length > 1)
+        {
+            Tensor block0 = _blocks[0].Forward(backend, joint, tembMod, _rope, batch, jointSeq);
+            joint.Dispose();
+            joint = block0;
+            startBlock = 1;
+            if (!stepCache.ShouldCompute(backend, joint))
+            {
+                Tensor reconstructed = stepCache.ApplyResidual(backend, joint);
+                joint.Dispose();
+                joint = reconstructed;
+                startBlock = _blocks.Length;
+            }
+            else
+            {
+                cacheAnchor = joint;
+            }
+        }
+
+        for (int i = startBlock; i < _blocks.Length; i++)
         {
             Tensor next = _blocks[i].Forward(backend, joint, tembMod, _rope, batch, jointSeq);
-            joint.Dispose();
+            if (joint != cacheAnchor) joint.Dispose();
             joint = next;
+        }
+
+        if (cacheAnchor is not null)
+        {
+            stepCache!.StoreResidual(backend, cacheAnchor, joint);
+            cacheAnchor.Dispose();
         }
 
         // ── strip text prefix, final layer (device-resident; returns the patchified velocity) ──

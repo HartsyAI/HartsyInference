@@ -242,7 +242,15 @@ SDPA share (27%).
        **`LATE=0.5`+`0.3` → 14.1 s = 1.39× at SSIM 0.9530 ✓ eyeball-indistinguishable;
        `LATE=0.5`+`0.15` → 15.0 s = 1.31× at 0.9653**. Fleet lesson: check indicator
        schedule-informativeness before fitting a poly — Qwen informative/poly-wins,
-       Ideogram uninformative/window-wins.)*
+       Ideogram uninformative/window-wins. Composition A/B'd on Qwen: poly+late = NO GAIN
+       (poly already places reuses late; gates are SUBSTITUTES — Qwen results doc §composition).
+       Krea2 Turbo wired the same way (eager-forced when armed — captured step graph can't vary
+       topology); 8-step distilled measured
+       ([results](../../benchmarks/results/2026-07-22_accel_stepcache_krea2turbo_4090.md)):
+       calibration U-shaped (0.61→0.28→0.38, indicator spikes on the final step) — ONE quality-free
+       late reuse exists: **`LATE=0.5`+`0.15` → 4.43→3.91 s = 1.13× at SSIM 0.9740 ✓
+       eyeball-indistinguishable**; smaller window = 0 reuses = byte-identical (null check ✓).
+       Fleet H1.5 trio complete: Qwen poly 1.20× / Ideogram window 1.39× / Krea2-Turbo window 1.13×.)*
 6. [ ] Negative-result discipline: if a model's gate never fires below quality-loss thresholds, record
        that in the results doc with the drift trace (the polynomial-rescaled TeaCache gate is the
        documented upgrade path — per-model coefficient fit, STEP_ACCELERATION §2.3).
