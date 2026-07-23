@@ -20,6 +20,31 @@ public static class StepCacheEnv
         return threshold;
     }
 
+    /// <summary>Resolves the effective step-cache configuration against a model's calibrated
+    /// <see cref="StepCacheProfile"/>. Off (unset/0) → threshold 0. "1"/"true" → the profile verbatim
+    /// (or the generic raw-0.10 default when the pipeline has none). An explicit numeric threshold keeps
+    /// the profile's poly/late/cap — the number is a budget in the profile's calibrated units. The
+    /// individual env knobs (HARTSY_STEP_CACHE_POLY / _LATE / _CAP) always override their component,
+    /// so A/B harnesses and users can probe alternatives without code changes.</summary>
+    public static (float Threshold, int Cap, float[]? Poly, float LateWindow) Resolve(StepCacheProfile? profile)
+    {
+        string? value = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE");
+        bool isDefaultOn = value == "1" || (value?.Equals("true", StringComparison.OrdinalIgnoreCase) ?? false);
+        float threshold = isDefaultOn && profile is not null ? profile.Threshold : ReadThreshold();
+        if (threshold <= 0f) return (0f, 0, null, 0f);
+
+        int cap = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_CAP") is { Length: > 0 }
+            ? ReadCap()
+            : profile?.Cap ?? ReadCap();
+        float[]? poly = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_POLY") is { Length: > 0 }
+            ? ReadPoly()
+            : profile?.Poly;
+        float late = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_LATE") is { Length: > 0 }
+            ? ReadLateWindow()
+            : profile?.LateWindow ?? 0f;
+        return (threshold, cap, poly, late);
+    }
+
     /// <summary>Reads HARTSY_STEP_CACHE_POLY ("c0,c1,c2,..." — TeaCache-style gate calibration polynomial,
     /// lowest power first) and HARTSY_STEP_CACHE_CALIB (a CSV path: run uncached and log indicator→residual
     /// drift pairs for fitting). Null when unset; malformed poly THROWS.</summary>

@@ -192,17 +192,22 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // Default-off across-step First-Block cache (HARTSY_STEP_CACHE + optional HARTSY_STEP_CACHE_LATE —
         // reference wiring QwenImagePipeline / Ideogram4Pipeline; INFERENCE_ACCEL_GRIND §H1.5). An armed cache
         // is per-step-variable topology, so it forces the eager path (no step-graph capture).
-        float stepCacheThreshold = StepCacheEnv.ReadThreshold();
-        float stepCacheLate = StepCacheEnv.ReadLateWindow();
+        // Calibrated ship point (Turbo only — Base is unmeasured, so it gets no profile and =1 stays the
+        // generic raw 0.10): raw 0.15 in the LATE half — 1.13× at SSIM 0.9740 (U-shaped drift, ONE safe
+        // late reuse at 8 distilled steps; results doc 2026-07-22_accel_stepcache_krea2turbo_4090.md).
+        StepCacheProfile? profile = _config.IsDistilled
+            ? new StepCacheProfile(Threshold: 0.15f, Cap: 3, Poly: null, LateWindow: 0.5f)
+            : null;
+        (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
+            StepCacheEnv.Resolve(profile);
         DeviceFeatureCache? condCache = null;
         DeviceFeatureCache? uncondCache = null;
         if (stepCacheThreshold > 0f)
         {
             if (Backend.SupportsDeviceStepCacheGate)
             {
-                int stepCacheCap = StepCacheEnv.ReadCap();
-                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
-                if (useCfg) uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
+                condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
+                if (useCfg) uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
                 Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}"
                     + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
             }

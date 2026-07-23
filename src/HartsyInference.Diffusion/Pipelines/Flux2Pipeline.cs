@@ -237,16 +237,24 @@ _transformer.InvalidateStepGraph(Backend);
         // Default-off across-step First-Block cache (HARTSY_STEP_CACHE + HARTSY_STEP_CACHE_LATE — the
         // fleet knobs, INFERENCE_ACCEL_GRIND §H1.5). Flux.2 has no true CFG (guidance is embedded), so ONE
         // cache serves the single stream. An armed cache is per-step-variable topology → forces eager.
-        float stepCacheThreshold = StepCacheEnv.ReadThreshold();
-        float stepCacheLate = StepCacheEnv.ReadLateWindow();
+        // Calibrated ship point (Dev only — Klein is unmeasured, no profile): poly gate at budget 0.25 —
+        // 2.49× at SSIM 0.9581, the fleet-best (V-shaped drift with a mid-schedule valley the indicator
+        // tracks; results doc 2026-07-22_accel_stepcache_flux2dev_4090.md).
+        StepCacheProfile? profile = _config.GuidanceEmbed
+            ? new StepCacheProfile(Threshold: 0.25f, Cap: 3,
+                Poly: [0.616388f, -29.5305f, 456.02f, -1890.27f], LateWindow: 0f)
+            : null;
+        (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
+            StepCacheEnv.Resolve(profile);
         DeviceFeatureCache? stepCacheInst = null;
         if (stepCacheThreshold > 0f)
         {
             if (Backend.SupportsDeviceStepCacheGate)
             {
-                stepCacheInst = new DeviceFeatureCache(stepCacheThreshold, StepCacheEnv.ReadCap(),
-                    StepCacheEnv.ReadPoly(), StepCacheEnv.ReadCalibFile());
-                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={StepCacheEnv.ReadCap()}"
+                stepCacheInst = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap,
+                    stepCachePoly, StepCacheEnv.ReadCalibFile());
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}"
+                    + (stepCachePoly is not null ? ", poly gate" : "")
                     + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
             }
             else
