@@ -42,6 +42,10 @@ public sealed class Dp4aGemvGroundTruthTests
     [InlineData("Q5_K", 256, 64, 1, false)]     // single-super-block minimal
     [InlineData("Q5_K", 2560, 320, 1, false)]   // production-scale K
     [InlineData("Q5_K", 512, 96, 4, true)]      // batched decode + bias
+    [InlineData("Q4_K", 8960, 256, 2, true)]    // long-K/small-N: exercises the block-per-row K-SPLIT path
+    [InlineData("Q6_K", 8960, 256, 1, false)]   // ksplit path
+    [InlineData("Q8_0", 13696, 256, 1, false)]  // ksplit path
+    [InlineData("Q5_0", 13696, 256, 2, true)]   // ksplit path
     public unsafe void Dp4aGemv_MatchesExactSimulationAndErrorBound(
         string dtypeName, int inDim, int outDim, int batch, bool withBias)
     {

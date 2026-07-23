@@ -153,6 +153,29 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 > 196-197, Qwen3-4B 92.6-92.9, gemma-2-2b 129.5), GLM-4-9B at 0.82×, DeepSeek-distill-1.5B at 0.89×,
 > and the two sub-2B stragglers (gemma3-1b 0.60×, qwen2.5-0.5b 0.49×) both bottlenecked on the
 > tiny-model graph-node-overhead bucket, not on kernels.
+>
+> **UPDATE 2026-07-22 (round 4, decode-overhead fixes — Dev-path split-attention gate, two-stage
+> argmax, persistent dp4a/argmax scratch; grind doc round-4 block): every model improved.** Final
+> fleet table (graph-on medians, llama-cpp-python baselines as above):
+>
+> | Model | Ours (best) | llama-cpp-python | Ratio |
+> |---|---|---|---|
+> | Llama-3.2-1B Q8_0 | **202.74** | 190.34 | **1.07× FASTER** |
+> | Qwen3-4B Q4_K_M | **93.67** | 85.59 | **1.09× FASTER** |
+> | gemma-2-2b-it Q4_K_M | **131.59** | 121.08 | **1.09× FASTER** |
+> | DeepSeek-R1-Distill-1.5B Q4_K_M | **166.01** | 180.12 | 0.92× |
+> | GLM-4-9B Q4_K_M | **39.35** | 47.80 | 0.82× |
+> | gemma-3-1b-it Q4_K_M | **118.48** | 192.34 | 0.62× |
+> | qwen2.5-0.5b Q4_K_M | **162.16** | 322.72 | 0.50× |
+>
+> The two sub-2B stragglers' remaining gap is graph-replay per-node overhead (~340 kernel nodes/step;
+> per-token GPU-busy is only ~40% of wall on qwen2.5-0.5b) — next lever is the Phase-4-style fusion
+> campaign (norm+rope fusion, t=1 permute elimination, quantize-in-GEMV), scoped in the grind doc.
+>
+> **UPDATE 2026-07-23 (round 5, long-K/small-N GEMV K-split — grind doc round-5 block):**
+> DeepSeek-R1-Distill-1.5B 166.0 → **167.87** (0.93×, gap 1.07×), GLM-4-9B 39.35 → **40.37** (0.84×,
+> gap 1.18×); all other models unchanged within noise. The ffn_down GEMV class (K ≥ 8192, N ≤ 4096)
+> now splits each row across 4 warps (was 51-82% of DRAM peak at warp-per-row on those shapes).
 
 Superseded pre-dp4a table (2026-07-22, earlier session):
 

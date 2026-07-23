@@ -1077,15 +1077,34 @@ public sealed unsafe class GenericTransformer : IDisposable
             Tensor comb;
             if (_cfg.GatedFfn)
             {
-                // Gated SwiGLU/GeGLU: down(act(gate(x)) · up(x)).
-                Tensor gate = new(ff, DType.F32);
-                ProjectGateUp(backend, gate, up, preMlp, n, _cfg.LowVramQuant);
-                Tensor gateAct = new(ff, DType.F32);
-                Activate(backend, gateAct, gate);
-                gate.Dispose();
-                comb = new(ff, DType.F32);
-                backend.Mul(comb, gateAct, up);
-                gateAct.Dispose(); up.Dispose();
+                // Gated SwiGLU/GeGLU: down(act(gate(x)) · up(x)). When the load-time fused gate|up weight
+                // exists and the activation is SiLU or GELU-tanh, the whole epilogue (2× SliceLastDim +
+                // activation + Mul, four kernels and three intermediates) collapses into ONE fused
+                // GluActivate pass over the concatenated projection output.
+                bool gluFusable = _gateUpW is not null
+                    && _gateW!.Shape[0] == _upW!.Shape[0]
+                    && _cfg.Activation is not (ActivationKind.Relu or ActivationKind.ReluSquared);
+                if (gluFusable)
+                {
+                    int ffDim = (int)_gateW!.Shape[0];
+                    Tensor gateUpOut = new(new TensorShape(1, n, ffDim * 2), DType.F32);
+                    Project(backend, gateUpOut, preMlp, _gateUpW!, _gateUpB, _cfg.LowVramQuant);
+                    comb = new(ff, DType.F32);
+                    backend.GluActivate(comb, gateUpOut, ffDim, gelu: _cfg.Activation == ActivationKind.GeluTanh);
+                    gateUpOut.Dispose();
+                    up.Dispose();
+                }
+                else
+                {
+                    Tensor gate = new(ff, DType.F32);
+                    ProjectGateUp(backend, gate, up, preMlp, n, _cfg.LowVramQuant);
+                    Tensor gateAct = new(ff, DType.F32);
+                    Activate(backend, gateAct, gate);
+                    gate.Dispose();
+                    comb = new(ff, DType.F32);
+                    backend.Mul(comb, gateAct, up);
+                    gateAct.Dispose(); up.Dispose();
+                }
             }
             else
             {
@@ -1438,17 +1457,24 @@ public sealed unsafe class GenericTransformer : IDisposable
             Tensor pre = new(flat, DType.F32);
             PreSublayer(backend, pre, hidden, _inNorm, _normBias);
 
+            // t=1 makes [1,1,heads,d] and [1,heads,1,d] byte-identical contiguous layouts, so q/k/v are
+            // allocated DIRECTLY in the head-major shape attention and KV-append expect — the four per-layer
+            // Permute0213 copies the eager path needs (and their intermediates' alloc/free graph nodes) do
+            // not exist on this path. Every producer/consumer between projection and attention is layout-
+            // agnostic at t=1: Linear/SliceLastDim size by element count, per-head Q/K-norm reduces over the
+            // last dim (d either way), the decode RoPE kernel derives heads from elementCount/headDim, and
+            // KvCacheAppendDev reads tNew from Shape[2] (1 in both layouts).
             bool fullNorm = _cfg.QkNorm && _cfg.QkNormFullDim;
-            Tensor q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, t, hq, d), DType.F32);
-            Tensor k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, t, hkv, d), DType.F32);
-            Tensor v = new(new TensorShape(1, t, hkv, d), DType.F32);
+            Tensor q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, hq, t, d), DType.F32);
+            Tensor k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, hkv, t, d), DType.F32);
+            Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
             ProjectQkv(backend, q, k, v, pre, t, hasOwnKv: true, _cfg.LowVramQuant);
             pre.Dispose();
 
             if (_cfg.QkNorm)
             {
-                Tensor qN = new(new TensorShape(1, t, hq, d), DType.F32);
-                Tensor kN = new(new TensorShape(1, t, hkv, d), DType.F32);
+                Tensor qN = new(new TensorShape(1, hq, t, d), DType.F32);
+                Tensor kN = new(new TensorShape(1, hkv, t, d), DType.F32);
                 if (_cfg.UseLayerNorm)
                 {
                     backend.LayerNorm(qN, q, _qNorm!, _qNormBias!, _cfg.RmsNormEps);
@@ -1463,41 +1489,28 @@ public sealed unsafe class GenericTransformer : IDisposable
                 q = qN; k = kN;
             }
 
-            // q/k are [1,1,heads,d] here (pre-Permute0213) — identical contiguous layout to the [1,heads,1,d]
-            // the graph-decode RoPE kernel assumes (both collapse to heads*d contiguous when t=1), so no reshape.
             bool interleaved = _cfg.Rope == RopeStyle.Interleaved;
             backend.RopeApplyDecodeStep(q, cosTable, sinTable, _cfg.RotaryDim, interleaved, devicePos);
             backend.RopeApplyDecodeStep(k, cosTable, sinTable, _cfg.RotaryDim, interleaved, devicePos);
 
-            Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32);
-            Tensor kMh = new(new TensorShape(1, hkv, t, d), DType.F32);
-            Tensor vMh = new(new TensorShape(1, hkv, t, d), DType.F32);
-            backend.Permute0213(qMh, q, t, hq, d);
-            backend.Permute0213(kMh, k, t, hkv, d);
-            backend.Permute0213(vMh, v, t, hkv, d);
-            q.Dispose(); k.Dispose(); v.Dispose();
-
             Tensor kFull = cache.KeyPrefix(layerIndex);
             Tensor vFull = cache.ValuePrefix(layerIndex);
-            backend.KvCacheAppendDev(kFull, kMh, 0, devicePos);
-            backend.KvCacheAppendDev(vFull, vMh, 0, devicePos);
-            kMh.Dispose(); vMh.Dispose();
+            backend.KvCacheAppendDev(kFull, k, 0, devicePos);
+            backend.KvCacheAppendDev(vFull, v, 0, devicePos);
+            k.Dispose(); v.Dispose();
 
             float scale = _cfg.AttnScale;
             // Local (sliding-window) layers attend only the most recent SlidingWindow keys — same per-layer
             // selection as the eager path; the window and soft-cap are constants baked into the captured graph.
             int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
             Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-            backend.FlashAttentionDev(attn, qMh, kFull, vFull, 0, group, causal: true, 0, scale, devicePos,
+            backend.FlashAttentionDev(attn, q, kFull, vFull, 0, group, causal: true, 0, scale, devicePos,
                 _cfg.AttnLogitSoftcap, window);
-            qMh.Dispose();
+            q.Dispose();
 
-            Tensor attnFlat = new(new TensorShape(1, t, _cfg.QDim), DType.F32);
-            backend.Permute0213(attnFlat, attn, hq, t, d);
-            attn.Dispose();
             Tensor attnOut = new(flat, DType.F32);
-            Project(backend, attnOut, attnFlat, _oW!, _oB, _cfg.LowVramQuant);
-            attnFlat.Dispose();
+            Project(backend, attnOut, attn, _oW!, _oB, _cfg.LowVramQuant);
+            attn.Dispose();
 
             attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);
             Tensor afterAttn = new(flat, DType.F32);

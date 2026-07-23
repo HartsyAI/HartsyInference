@@ -108,6 +108,9 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmGatherRowsF32;
     private readonly nint _lmScatterAddWeightedRowsF32;
     private readonly nint _lmArgMaxLastDimF32;
+    private readonly nint _lmArgMaxStage1F32;
+    private readonly nint _lmArgMaxStage2F32;
+    private readonly nint _lmGluActF32;
     private readonly nint _lmRopeInterleavedF32;
     private readonly nint _lmRopeDecodeSplitHalf;
     private readonly nint _lmRopeDecodeInterleaved;
@@ -326,14 +329,18 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _quantActQ8_1F32;
     private readonly CudaModule _mulMatVecQ4KQ8_1Module;
     private readonly nint _mulMatVecQ4KQ8_1;
+    private readonly nint _mulMatVecQ4KQ8_1Ksplit;
     private readonly CudaModule _mulMatVecQ8_0Q8_1Module;
     private readonly nint _mulMatVecQ8_0Q8_1;
+    private readonly nint _mulMatVecQ8_0Q8_1Ksplit;
     private readonly CudaModule _mulMatVecQ6KQ8_1Module;
     private readonly nint _mulMatVecQ6KQ8_1;
+    private readonly nint _mulMatVecQ6KQ8_1Ksplit;
     private readonly CudaModule _mulMatVecQ4_0Q8_1Module;
     private readonly nint _mulMatVecQ4_0Q8_1;
     private readonly CudaModule _mulMatVecQ5_0Q8_1Module;
     private readonly nint _mulMatVecQ5_0Q8_1;
+    private readonly nint _mulMatVecQ5_0Q8_1Ksplit;
     private readonly CudaModule _mulMatVecQ5KQ8_1Module;
     private readonly nint _mulMatVecQ5KQ8_1;
 
@@ -631,6 +638,9 @@ public sealed class CudaKernels : IDisposable
         _lmGatherRowsF32 = _lmF32Module.GetFunction("lm_gather_rows_f32");
         _lmScatterAddWeightedRowsF32 = _lmF32Module.GetFunction("lm_scatter_add_weighted_rows_f32");
         _lmArgMaxLastDimF32 = _lmF32Module.GetFunction("lm_argmax_lastdim_f32");
+        _lmArgMaxStage1F32 = _lmF32Module.GetFunction("lm_argmax_lastdim_stage1_f32");
+        _lmArgMaxStage2F32 = _lmF32Module.GetFunction("lm_argmax_lastdim_stage2_f32");
+        _lmGluActF32 = _lmF32Module.GetFunction("lm_glu_act_f32");
         _lmRopeInterleavedF32 = _lmF32Module.GetFunction("lm_rope_interleaved_f32");
         _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
         _lmRopeDecodeInterleaved = _lmF32Module.GetFunction("lm_rope_decode_interleaved");
@@ -699,14 +709,18 @@ public sealed class CudaKernels : IDisposable
         _quantActQ8_1F32 = _quantActQ8_1Module.GetFunction("quantize_activation_q8_1_f32");
         _mulMatVecQ4KQ8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q4k_q8_1.ptx"));
         _mulMatVecQ4KQ8_1 = _mulMatVecQ4KQ8_1Module.GetFunction("mul_mat_vec_q4k_q8_1");
+        _mulMatVecQ4KQ8_1Ksplit = _mulMatVecQ4KQ8_1Module.GetFunction("mul_mat_vec_q4k_q8_1_ksplit");
         _mulMatVecQ8_0Q8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q8_0_q8_1.ptx"));
         _mulMatVecQ8_0Q8_1 = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1");
+        _mulMatVecQ8_0Q8_1Ksplit = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1_ksplit");
         _mulMatVecQ6KQ8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q6k_q8_1.ptx"));
         _mulMatVecQ6KQ8_1 = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1");
+        _mulMatVecQ6KQ8_1Ksplit = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1_ksplit");
         _mulMatVecQ4_0Q8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q4_0_q8_1.ptx"));
         _mulMatVecQ4_0Q8_1 = _mulMatVecQ4_0Q8_1Module.GetFunction("mul_mat_vec_q4_0_q8_1");
         _mulMatVecQ5_0Q8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q5_0_q8_1.ptx"));
         _mulMatVecQ5_0Q8_1 = _mulMatVecQ5_0Q8_1Module.GetFunction("mul_mat_vec_q5_0_q8_1");
+        _mulMatVecQ5_0Q8_1Ksplit = _mulMatVecQ5_0Q8_1Module.GetFunction("mul_mat_vec_q5_0_q8_1_ksplit");
         _mulMatVecQ5KQ8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q5k_q8_1.ptx"));
         _mulMatVecQ5KQ8_1 = _mulMatVecQ5KQ8_1Module.GetFunction("mul_mat_vec_q5k_q8_1");
     }
@@ -2039,14 +2053,49 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>Launches per-row argmax over the last dim: indices[r] = argmax_c input[r,c]. One block per row,
     /// <paramref name="blockThreads"/> threads (power-of-two), shared mem for the (value,index) reduction.</summary>
-    public unsafe void LaunchArgMaxLastDim(ulong idxPtr, ulong inPtr, int rows, int c, nint stream)
+    /// <summary>Fused gated-FFN activation epilogue over the concatenated [gate | up] projection output
+    /// (act 0 = SiLU, 1 = GELU-tanh): one elementwise pass, no slice/activation/multiply intermediates.</summary>
+    public unsafe void LaunchGluAct(ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)
     {
+        ulong combA = comb, guA = gateUp;
+        uint rowsA = (uint)rows, ffA = (uint)ff;
+        int actA = gelu ? 1 : 0;
+        void** args = stackalloc void*[5];
+        args[0] = &combA; args[1] = &guA; args[2] = &rowsA; args[3] = &ffA; args[4] = &actA;
+        long total = (long)rows * ff;
+        uint grid = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_lmGluActF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    public unsafe void LaunchArgMaxLastDim(ulong idxPtr, ulong inPtr, int rows, int c, nint stream, ulong scratch = 0)
+    {
+        uint blockThreads = BlockSize;   // 256, power of two; threads beyond C just hold -FLT_MAX sentinels
+        uint sharedBytes = blockThreads * (uint)(sizeof(float) + sizeof(int));
+        // Large-C decode argmax (LLM vocab): the single-block kernel reads the whole row through one SM
+        // (~180us at C=152k). Two-stage — G chunk blocks then a combine block — is bit-identical (same
+        // first-max tie-break at every level) and saturates the GPU. Needs an 8*64-byte scratch for the
+        // G partial (value, index) pairs; single-block fallback when the caller has none.
+        if (rows == 1 && c >= 32768 && scratch != 0)
+        {
+            const uint maxG = 64;   // scratch = 64 floats @ 0 + 64 ints @ 256
+            uint g = Math.Min(maxG, ((uint)c + 2047) / 2048);
+            uint chunk = ((uint)c + g - 1) / g;
+            g = ((uint)c + chunk - 1) / chunk;
+            ulong pVal = scratch, pIdx = scratch + maxG * sizeof(float);
+            ulong inArg1 = inPtr; uint cArg1 = (uint)c, chunkArg = chunk;
+            void** args1 = stackalloc void*[5];
+            args1[0] = &pVal; args1[1] = &pIdx; args1[2] = &inArg1; args1[3] = &cArg1; args1[4] = &chunkArg;
+            CudaDriverApi.cuLaunchKernel(_lmArgMaxStage1F32, g, 1, 1, blockThreads, 1, 1, sharedBytes, stream, (nint)args1, 0).ThrowOnError();
+            ulong outArg2 = idxPtr; uint gArg = g;
+            void** args2 = stackalloc void*[4];
+            args2[0] = &outArg2; args2[1] = &pVal; args2[2] = &pIdx; args2[3] = &gArg;
+            CudaDriverApi.cuLaunchKernel(_lmArgMaxStage2F32, 1, 1, 1, blockThreads, 1, 1, sharedBytes, stream, (nint)args2, 0).ThrowOnError();
+            return;
+        }
         ulong outArg = idxPtr, inArg = inPtr;
         uint cArg = (uint)c;
         void** args = stackalloc void*[3];
         args[0] = &outArg; args[1] = &inArg; args[2] = &cArg;
-        uint blockThreads = BlockSize;   // 256, power of two; threads beyond C just hold -FLT_MAX sentinels
-        uint sharedBytes = blockThreads * (uint)(sizeof(float) + sizeof(int));
         CudaDriverApi.cuLaunchKernel(_lmArgMaxLastDimF32, (uint)rows, 1, 1, blockThreads, 1, 1, sharedBytes, stream, (nint)args, 0).ThrowOnError();
     }
 
@@ -3027,30 +3076,56 @@ public sealed class CudaKernels : IDisposable
         void** args = stackalloc void*[9];
         args[0] = &outA; args[1] = &xqA; args[2] = &xdA; args[3] = &xsA; args[4] = &wA; args[5] = &bA;
         args[6] = &nA; args[7] = &kA; args[8] = &mA;
+        uint ksplit = GemvKsplitWarps(N, K);
+        if (ksplit > 1)
+        {
+            CudaDriverApi.cuLaunchKernel(_mulMatVecQ4KQ8_1Ksplit, (uint)N, (uint)M, 1, 32, ksplit, 1, 0, stream, (nint)args, 0).ThrowOnError();
+            return;
+        }
         const uint WARPS_PER_BLOCK = 8;
         uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
         CudaDriverApi.cuLaunchKernel(_mulMatVecQ4KQ8_1, gridX, (uint)M, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    // Block-per-row K-split policy for the dp4a GEMV kernels: warp-per-row leaves long-K/small-N shapes
+    // (the ffn_down class — DeepSeek-1.5B's 8960×1536 measured 51% of DRAM peak, ~1.1 waves of warps)
+    // under-occupied; splitting each row across 4 warps multiplies resident parallelism with a
+    // deterministic shared-memory combine. Gated tightly: at N ≥ ~2560 warp-per-row measured equal or
+    // better (2026-07-22 sweep). HARTSY_GEMV_KSPLIT=0 disables, =W forces W warps/row everywhere.
+    private static readonly int _ksplitOverride =
+        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_GEMV_KSPLIT"), out int v) ? v : -1;
+
+    private static uint GemvKsplitWarps(int rows, int k)
+    {
+        if (_ksplitOverride == 0) return 1;
+        if (_ksplitOverride > 1) return (uint)Math.Min(_ksplitOverride, 16);
+        // Measured sweet spots (RTX 3060, 2026-07-23): DeepSeek-1.5B ffn_down 8960×1536 42.2→38.3 µs,
+        // GLM-4-9B ffn_down 13696×4096 Q5_0 168.8→134.3 / Q8_0 205→191.9 µs at W=4. Shorter-K downs
+        // (qwen2.5-0.5b 4864, gemma3-1b 6912) measured ambiguous-to-worse under a split (too little
+        // work per warp), and the square 4096×4096 attention shape clearly regresses — hence the high
+        // K floor.
+        return k >= 8192 && rows <= 4096 ? 4u : 1u;
+    }
+
     /// <summary>Fused Q8_0 × Q8_1 dp4a matrix-vector product for decode (M small). Q8_0 is symmetric, so only
     /// the int8 activation and per-block scale are consumed (no int-sum term).</summary>
     public unsafe void LaunchMulMatVecQ8_0Q8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
-        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ8_0Q8_1, output, xq, xd, weight, bias, N, K, M, stream);
+        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ8_0Q8_1, _mulMatVecQ8_0Q8_1Ksplit, output, xq, xd, weight, bias, N, K, M, stream);
 
     /// <summary>Fused Q6_K × Q8_1 dp4a matrix-vector product for decode (M small). Q6_K scales are signed
     /// (symmetric), so only the int8 activation and per-block scale are consumed (no int-sum term).</summary>
     public unsafe void LaunchMulMatVecQ6KQ8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
-        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ6KQ8_1, output, xq, xd, weight, bias, N, K, M, stream);
+        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ6KQ8_1, _mulMatVecQ6KQ8_1Ksplit, output, xq, xd, weight, bias, N, K, M, stream);
 
     /// <summary>Fused Q4_0 × Q8_1 dp4a matrix-vector product for decode (M small). The fixed −8 offset is
     /// folded into the packed weights via <c>__vsub4</c>, so no int-sum term is consumed.</summary>
     public unsafe void LaunchMulMatVecQ4_0Q8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
-        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ4_0Q8_1, output, xq, xd, weight, bias, N, K, M, stream);
+        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ4_0Q8_1, 0, output, xq, xd, weight, bias, N, K, M, stream);
 
     /// <summary>Fused Q5_0 × Q8_1 dp4a matrix-vector product for decode (M small). The fixed −16 offset is
     /// folded into the packed weights via <c>__vsub4</c>, so no int-sum term is consumed.</summary>
     public unsafe void LaunchMulMatVecQ5_0Q8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
-        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ5_0Q8_1, output, xq, xd, weight, bias, N, K, M, stream);
+        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ5_0Q8_1, _mulMatVecQ5_0Q8_1Ksplit, output, xq, xd, weight, bias, N, K, M, stream);
 
     /// <summary>Fused Q5_K × Q8_1 dp4a matrix-vector product for decode (M small). Like Q4_K, the per-sub-block
     /// min term consumes the Q8_1 int-sum xs.</summary>
@@ -3066,13 +3141,19 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_mulMatVecQ5KQ8_1, gridX, (uint)M, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    private unsafe void LaunchMulMatVecQ8_1Impl(nint func, ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
+    private unsafe void LaunchMulMatVecQ8_1Impl(nint func, nint ksplitFunc, ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
     {
         ulong outA = output, xqA = xq, xdA = xd, wA = weight, bA = bias;
         int nA = N, kA = K, mA = M;
         void** args = stackalloc void*[8];
         args[0] = &outA; args[1] = &xqA; args[2] = &xdA; args[3] = &wA; args[4] = &bA;
         args[5] = &nA; args[6] = &kA; args[7] = &mA;
+        uint ksplit = ksplitFunc != 0 ? GemvKsplitWarps(N, K) : 1;
+        if (ksplit > 1)
+        {
+            CudaDriverApi.cuLaunchKernel(ksplitFunc, (uint)N, (uint)M, 1, 32, ksplit, 1, 0, stream, (nint)args, 0).ThrowOnError();
+            return;
+        }
         const uint WARPS_PER_BLOCK = 8;
         uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
         CudaDriverApi.cuLaunchKernel(func, gridX, (uint)M, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();

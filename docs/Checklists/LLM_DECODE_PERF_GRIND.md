@@ -661,6 +661,78 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 >   the DeepSeek distill (1.12×) — that bucket (graph replay/node overhead at small per-kernel work,
 >   incl. the dp4a per-Linear alloc/free nodes) is the next real lever, roadmap item (b) in round 2.
 
+> **STATUS UPDATE (2026-07-22, later session, round 4): tiny-model decode overhead — three targeted
+> fixes, every model in the 7-model fleet improved, nothing regressed.** A `--cuda-graph-trace=node`
+> nsys pass on qwen2.5-0.5b graph decode (the mode that actually decomposes graph replays — the default
+> trace undercounts them, a known pitfall here) surfaced three concrete overheads:
+> 1. **Decode attention ran the MONOLITHIC kernel inside graph decode at short context** (25% of GPU
+>    time, 44.6 µs/call): `FlashAttentionDev`'s split gate required capacity ≥ 128, so short
+>    prompt+generation runs never split — on few-head models that's 4-14 blocks on 28 SMs. Round 3's
+>    "engage at ≥32 when baseBlocks ≤ SM count" rule was only in the EAGER dispatch; now mirrored in
+>    the Dev formula. Measured: attention now `lm_flash_attn_f32_split` at 15.9 µs/call (−64%).
+> 2. **`lm_argmax_lastdim_f32` took ~179 µs/token** — ONE block scanning the whole vocab row (600 KB
+>    at C=152k through a single SM). New two-stage argmax (`lm_argmax_lastdim_stage1/2_f32`): G≤64
+>    chunk blocks then a combine block, bit-identical first-max tie-break at every level, engaged at
+>    rows==1 && C≥32k. Benefits EVERY model (vocabs are 128k-262k); argmax dropped out of the top-kernel
+>    list entirely.
+> 3. **~6 allocation/free graph nodes per Linear** from the dp4a scratch (xq/xd/xs per call — ~750
+>    nodes on a 24-layer model's captured graph): replaced with a persistent, stream-serialized,
+>    256-aligned combined buffer on the backend (`EnsureDp4aScratch`). NEVER grown during stream
+>    capture (`cuStreamIsCapturing` check — a capture-time cuMemAllocAsync becomes a graph-OWNED
+>    allocation that must not back a cached pointer); the pre-capture warm-up forward sizes it to max
+>    first, so the transient fallback never fires on the graph path. The argmax partials scratch
+>    (512 B) is allocated eagerly at construction for the same reason (the warm-up doesn't call
+>    ArgMaxInto, so lazy allocation would bake the slow single-block path into the first graph).
+>
+> **Correctness**: two-stage argmax is bit-identical by construction (verified: float-path graph-vs-
+> eager CLI output byte-identical on qwen2.5-0.5b, gemma3-1b, Llama-3.2-1B, GLM-4-9B after the change);
+> full `HartsyInference.Cuda.Tests` 179/179 + `HartsyInference.LLM.Tests` 132/132.
+>
+> **Measured (graph-on medians, vs round 3)**: Llama-3.2-1B 197.3 → **202.74** (+2.8%, now 1.07×
+> FASTER than llama-cpp-python's 190.3); DeepSeek-R1-1.5B 160.5 → **166.01** (+3.4%, gap 1.12→1.09×);
+> gemma3-1b 115.1 → **118.48** (+3.0%); qwen2.5-0.5b 157.8 → **162.16** (+2.8%); gemma2-2b 129.5 →
+> **131.59** (+1.6%, 1.09× faster than llama.cpp); Qwen3-4B 92.9 → **93.67**; GLM-4-9B 39.2 → 39.35.
+>
+> **Where the tiny-model gap stands after this round**: qwen2.5-0.5b per-token GPU-busy is ~2.5 ms of
+> a 6.2 ms wall — the rest is graph-replay per-node overhead across ~340 kernel nodes/step (norms,
+> ropes, permutes, slices, appends, quantizes at ~1-3 µs each plus replay scheduling). The next real
+> lever is NODE-COUNT REDUCTION — the original Phase 4 fusion list (RMSNorm+RoPE fusion, eliminating
+> the provably-no-op t=1 Permute0213s, quantize folded into the dp4a GEMV launch) — a distinct,
+> larger campaign; everything cheap-and-targeted in this bucket is now done.
+
+> **STATUS UPDATE (2026-07-23, round 5): long-K/small-N GEMV K-split — the block-per-row split
+> RE-INTRODUCED with a much tighter, probe-derived gate; GLM-4-9B and the DeepSeek distill both
+> improved, nothing regressed.** Probing every production GEMV shape of the two closest-to-parity
+> laggards showed the recurring weakness is the ffn_down class (long K, few rows → ~1-3 waves of
+> warps at warp-per-row): DeepSeek-1.5B's 8960×1536 Q4_K ran at **51% of DRAM peak**, GLM-4-9B's
+> 13696×4096 Q5_0/Q8_0 downs at 71%/82%, while every wide shape and both lm_heads sit at 89-93%.
+> The round-1 K-split rejection was measured at N≥2560 — a different regime.
+> **What landed**: `_ksplit` entries (one BLOCK per row, warps split the row's blocks, deterministic
+> shared-memory combine) for Q4_K/Q6_K/Q8_0/Q5_0, dispatched at **K ≥ 8192 && N ≤ 4096, W=4** —
+> swept: DS down 42.2→38.3 µs, GLM Q5_0 down 168.8→134.3 (−21%), GLM Q8_0 down 205→191.9; the square
+> 4096×4096 attention shape and the shorter-K downs (qwen2.5's 4864, gemma3's 6912) measured
+> ambiguous-to-worse under a split and are excluded by the K floor (a first, looser gate measurably
+> dipped qwen2.5-0.5b e2e; tightened and re-verified back to level). A Q5_0 qh-u16-assembly tweak was
+> tried and REVERTED (no measurable gain). The probe harness was also fixed to toggle
+> `CudaBackend.EnableDp4aGemv` directly — its env-var toggle had been dead since the default flip, so
+> post-flip float-vs-dp4a probe RATIOS were bogus (both columns ran dp4a; absolute times, which drove
+> all decisions, were valid).
+> **Gates**: `Dp4aGemvGroundTruthTests` extended to 22 cases (4 new long-K/small-N rows that exercise
+> the ksplit path against the analytic bound); full CUDA suite 183/183, CPU 132/132; float-path
+> graph-vs-eager CLI output byte-identical on DeepSeek and GLM-4.
+> **Measured (graph-on medians)**: DeepSeek-R1-1.5B 166.0 → **167.87** (gap to llama-cpp-python's
+> 180.1 now 1.07×); GLM-4-9B 39.35 → **40.37** (gap to 47.8 now 1.18×); qwen2.5-0.5b 157.7 and
+> gemma3-1b ~115-118 unchanged within the ±3% desktop-contention noise band; Llama 202.3 / Qwen3 93.2
+> / gemma2 131.3 unchanged.
+> **Residual analysis**: GLM's remaining ~4.5 ms/token gap is now spread thin — gate/up Q4_K at 89%,
+> the square 4096² attention projections at 68% (resistant to splitting; would need a genuinely
+> different layout), and ~3 ms of 40-layer graph-node/glue overhead. DeepSeek's remaining ~0.4 ms is
+> the same tiny-model node-overhead bucket as gemma3/qwen2.5. Both point at the SAME next campaign:
+> per-layer node-count reduction (norm+rope fusion, t=1 permute elimination via activation-cache
+> aliased views — `Tensor.Reshape` exists but is host-pointer-based and would sync/miss the cache, so
+> this needs explicit alias support in `GpuTransferHelper` with borrowed-buffer lifetime semantics —
+> and quantize-in-GEMV was examined and REJECTED: per-block re-quantization multiplies by grid size).
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

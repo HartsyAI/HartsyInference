@@ -10,14 +10,18 @@
 //   dot_j = xscale_j * ( d*sc * Σ q[i]·xq[i]  -  dmin*m * Σ xq[i] )
 //         = xscale_j * ( subScale * dp4a(q,xq) - subMin * xsum_j )
 //
-// Layout: one WARP per output row (8 rows/block). Each lane owns 8 elements of a sub-block
-// (4 lanes cover one 32-elem sub-block); a warp-shuffle reduction sums the row.
-// (A block-per-row K-split variant — llama.cpp mmvq's occupancy shape — was built and measured
-// 2026-07-22: net loss at every real production shape once the whole-word nibble unpack landed,
-// including the long-K/small-N ffn_down it targeted. Removed per revert-on-no-gain.)
+// Two entry points share the per-lane body:
+//  - mul_mat_vec_q4k_q8_1: one WARP per output row (8 rows/block). Each lane owns 8 elements of a
+//    sub-block (4 lanes cover one 32-elem sub-block); a warp-shuffle reduction sums the row.
+//  - mul_mat_vec_q4k_q8_1_ksplit: one BLOCK per output row; the warps split the row's super-blocks
+//    (stride blockDim.y) and combine through shared memory (deterministic order). Dispatched ONLY for
+//    long-K/small-N shapes (ffn_down class, e.g. N=1536 → 1.1 waves of warps at warp-per-row, measured
+//    51% of DRAM peak on DeepSeek-1.5B's 8960×1536) — at N ≥ ~2560 warp-per-row measured equal-or-
+//    better (the 2026-07-22 round-1 sweep), so the host gates the split tightly.
 //
 // weight [N,K] Q4_K row-major; xq [M,K] int8; xd/xs [M,K/32] F32.
-// Launch: blockDim = (32, WARPS_PER_BLOCK); grid = (ceil(N/WARPS_PER_BLOCK), M).
+// Launch (standard): blockDim = (32, WARPS_PER_BLOCK); grid = (ceil(N/WARPS_PER_BLOCK), M).
+// Launch (ksplit):   blockDim = (32, KSPLIT_WARPS);    grid = (N, M).
 
 #include <cuda_fp16.h>
 
@@ -52,7 +56,7 @@ __device__ __forceinline__ float q4k_q8_1_row_partial(
     const signed char* __restrict__ xqrow,
     const float* __restrict__ xdrow,
     const float* __restrict__ xsrow,
-    int nsb, int lane)
+    int nsb, int sbStart, int sbStride, int lane)
 {
     const int j = lane >> 2;               // sub-block 0..7
     const int base_i = (lane & 3) << 3;    // 0,8,16,24
@@ -62,7 +66,7 @@ __device__ __forceinline__ float q4k_q8_1_row_partial(
     const bool minLane = (lane & 3) == 0;  // one lane per sub-block adds the min term
 
     float acc = 0.0f;
-    for (int sb = 0; sb < nsb; ++sb) {
+    for (int sb = sbStart; sb < nsb; sb += sbStride) {
         const unsigned char* block = wrow + (size_t)sb * SUPER_BYTES;
         const unsigned int ddmin = *(const unsigned int*)block;    // fp16 d | fp16 dmin, one load
         const float d = __half2float(__ushort_as_half((unsigned short)(ddmin & 0xFFFFu)));
@@ -114,12 +118,48 @@ extern "C" __global__ void mul_mat_vec_q4k_q8_1(
     float acc = q4k_q8_1_row_partial(
         weight + (size_t)n * nsb * SUPER_BYTES,
         xq + (size_t)m * K, xd + (size_t)m * kblocks, xs + (size_t)m * kblocks,
-        nsb, lane);
+        nsb, 0, 1, lane);
 
     #pragma unroll
     for (int o = WARP_SIZE / 2; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
     if (lane == 0) {
         if (bias != nullptr) acc += bias[n];
         output[(size_t)m * N + n] = acc;
+    }
+}
+
+extern "C" __global__ void mul_mat_vec_q4k_q8_1_ksplit(
+    float* __restrict__ output,
+    const signed char* __restrict__ xq,
+    const float* __restrict__ xd,
+    const float* __restrict__ xs,
+    const unsigned char* __restrict__ weight,
+    const float* __restrict__ bias,     // may be nullptr
+    int N, int K, int M)
+{
+    const int lane = threadIdx.x;      // 0..31
+    const int warp = threadIdx.y;      // all warps on the SAME row
+    const int n = blockIdx.x;          // output row
+    const int m = blockIdx.y;          // batch row
+    if (n >= N || m >= M) return;
+
+    const int nsb = K / SUPER_ELEMS;
+    const int kblocks = K / SUB_ELEMS;
+    float acc = q4k_q8_1_row_partial(
+        weight + (size_t)n * nsb * SUPER_BYTES,
+        xq + (size_t)m * K, xd + (size_t)m * kblocks, xs + (size_t)m * kblocks,
+        nsb, warp, blockDim.y, lane);
+
+    #pragma unroll
+    for (int o = WARP_SIZE / 2; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
+
+    __shared__ float partial[16];
+    if (lane == 0) partial[warp] = acc;
+    __syncthreads();
+    if (warp == 0 && lane == 0) {
+        float sum = 0.0f;
+        for (int w = 0; w < (int)blockDim.y; ++w) sum += partial[w];
+        if (bias != nullptr) sum += bias[n];
+        output[(size_t)m * N + n] = sum;
     }
 }

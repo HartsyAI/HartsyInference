@@ -223,6 +223,131 @@ __global__ void lm_argmax_lastdim_f32(
     if (threadIdx.x == 0) indices[row] = sIdx[0];
 }
 
+// Two-stage argmax for LARGE C at rows==1 (the LLM greedy-decode lm_head: C = vocab, 32k-262k).
+// The single-block kernel above reads the whole C-wide row through ONE SM (~180us at C=152k) —
+// stage 1 argmaxes G contiguous chunks (one block each, saturating the GPU), stage 2 (one block)
+// reduces the G partials. Tie-break is "first max" (lowest index) at every level, identical to the
+// single-block kernel: per-thread scans keep the earliest max (strict >), reductions compare the
+// index on value ties — so the result is bit-identical to the single-stage kernel, just faster.
+// Launch: stage1 grid = G, block = 256, shared = 256*(sizeof(float)+sizeof(int)); stage2 grid = 1.
+__global__ void lm_argmax_lastdim_stage1_f32(
+    float* __restrict__ partVal,
+    int* __restrict__ partIdx,
+    const float* __restrict__ input,
+    unsigned int C,
+    unsigned int chunk)
+{
+    extern __shared__ unsigned char smem1[];
+    float* sVal = (float*)smem1;
+    int* sIdx = (int*)(sVal + blockDim.x);
+
+    unsigned int start = blockIdx.x * chunk;
+    unsigned int end = start + chunk;
+    if (end > C) end = C;
+
+    float bestVal = -3.402823466e38f;   // -FLT_MAX
+    int bestIdx = (int)start;
+    for (unsigned int c = start + threadIdx.x; c < end; c += blockDim.x)
+    {
+        float v = input[c];
+        if (v > bestVal) { bestVal = v; bestIdx = (int)c; }
+    }
+    sVal[threadIdx.x] = bestVal;
+    sIdx[threadIdx.x] = bestIdx;
+    __syncthreads();
+
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1)
+    {
+        if (threadIdx.x < stride)
+        {
+            float ov = sVal[threadIdx.x + stride];
+            int oi = sIdx[threadIdx.x + stride];
+            float cv = sVal[threadIdx.x];
+            int ci = sIdx[threadIdx.x];
+            if (ov > cv || (ov == cv && oi < ci))
+            {
+                sVal[threadIdx.x] = ov;
+                sIdx[threadIdx.x] = oi;
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) { partVal[blockIdx.x] = sVal[0]; partIdx[blockIdx.x] = sIdx[0]; }
+}
+
+__global__ void lm_argmax_lastdim_stage2_f32(
+    int* __restrict__ indices,
+    const float* __restrict__ partVal,
+    const int* __restrict__ partIdx,
+    unsigned int G)
+{
+    extern __shared__ unsigned char smem2[];
+    float* sVal = (float*)smem2;
+    int* sIdx = (int*)(sVal + blockDim.x);
+
+    float bestVal = -3.402823466e38f;
+    int bestIdx = 0x7FFFFFFF;
+    for (unsigned int g = threadIdx.x; g < G; g += blockDim.x)
+    {
+        float v = partVal[g];
+        int i = partIdx[g];
+        if (v > bestVal || (v == bestVal && i < bestIdx)) { bestVal = v; bestIdx = i; }
+    }
+    sVal[threadIdx.x] = bestVal;
+    sIdx[threadIdx.x] = bestIdx;
+    __syncthreads();
+
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1)
+    {
+        if (threadIdx.x < stride)
+        {
+            float ov = sVal[threadIdx.x + stride];
+            int oi = sIdx[threadIdx.x + stride];
+            float cv = sVal[threadIdx.x];
+            int ci = sIdx[threadIdx.x];
+            if (ov > cv || (ov == cv && oi < ci))
+            {
+                sVal[threadIdx.x] = ov;
+                sIdx[threadIdx.x] = oi;
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) indices[0] = sIdx[0];
+}
+
+// Fused gated-FFN activation epilogue: comb[r*ff+i] = act(gate) * up over the CONCATENATED
+// [gate | up] projection output (gateUp row r = [ff gate values][ff up values]) — replaces the
+// two SliceLastDim copies + the activation + the Mul (four kernels, three intermediate buffers)
+// with ONE elementwise pass and zero intermediates. act 0 = SiLU (x·sigmoid(x)), 1 = GELU-tanh;
+// the formulas mirror elementwise_silu_f32 / elementwise_gelu_f32 (fast-math sigmoid/exp).
+// Launch: grid = ceil(rows*ff / 256), block = 256.
+__global__ void lm_glu_act_f32(
+    float* __restrict__ comb,
+    const float* __restrict__ gateUp,
+    unsigned int rows,
+    unsigned int ff,
+    int act)
+{
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long total = (unsigned long long)rows * ff;
+    if (gid >= total) return;
+    unsigned int r = (unsigned int)(gid / ff);
+    unsigned int i = (unsigned int)(gid % ff);
+    unsigned long long rowBase = (unsigned long long)r * 2u * ff;
+    const float g = gateUp[rowBase + i];
+    const float u = gateUp[rowBase + ff + i];
+    float a;
+    if (act == 0) {
+        a = g * __fdividef(1.0f, 1.0f + __expf(-g));                    // SiLU
+    } else {
+        const float inner = 0.7978845608028654f * (g + 0.044715f * g * g * g);
+        const float s = __fdividef(1.0f, 1.0f + __expf(-2.0f * inner)); // tanh(x) = 2·sigmoid(2x) − 1
+        a = 0.5f * g * (1.0f + (2.0f * s - 1.0f));                      // GELU-tanh
+    }
+    comb[gid] = a * u;
+}
+
 // ── Graph-capture decode: device-indexed RoPE ───────────────────────────────
 // Applies rotary embedding to a single decode-step Q or K tensor [1, numHeads, 1, headDim] by
 // reading the rotation ROW from a precomputed FULL table [maxPos, headDim] (duplicated-half

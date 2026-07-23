@@ -1268,6 +1268,31 @@ public interface IBackend : IDisposable
     /// <summary>Copies a contiguous last-dim slice: <c>out[row, d] = in[row, offset + d]</c> for
     /// <c>d in [0, outDim)</c>, where <c>outDim</c> is the output's last dim and the input's last dim
     /// is the row stride. Splits a fused tensor (e.g. QKV <c>[B,L,3H]</c>) into a contiguous chunk.</summary>
+    /// <summary>Fused gated-FFN activation epilogue: <c>output[r,i] = act(gateUp[r,i]) · gateUp[r,ff+i]</c>
+    /// over the CONCATENATED [gate | up] projection output (each row = ff gate values then ff up values).
+    /// <paramref name="gelu"/> false = SiLU (SwiGLU), true = GELU-tanh (GeGLU). Backends without a fused
+    /// kernel fall back to slice + activate + multiply — identical math, more launches.</summary>
+    void GluActivate(Tensor output, Tensor gateUp, int ff, bool gelu)
+    {
+        long rows = gateUp.ElementCount / (2L * ff);
+        TensorShape half = new(1, (int)rows, ff);
+        Tensor gate = new(half, DType.F32);
+        Tensor up = new(half, DType.F32);
+        try
+        {
+            SliceLastDim(gate, gateUp, 0);
+            SliceLastDim(up, gateUp, ff);
+            if (gelu) Gelu(gate, gate);
+            else Silu(gate, gate);
+            Mul(output, gate, up);
+        }
+        finally
+        {
+            gate.Dispose();
+            up.Dispose();
+        }
+    }
+
     unsafe void SliceLastDim(Tensor output, Tensor input, int offset)
     {
         if (output.DType != DType.F32 || input.DType != DType.F32)

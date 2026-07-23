@@ -35,24 +35,13 @@ __device__ __forceinline__ int load_int_2aligned(const unsigned char* p)
     return (int)((unsigned int)p16[0] | ((unsigned int)p16[1] << 16));
 }
 
-extern "C" __global__ void mul_mat_vec_q6k_q8_1(
-    float* __restrict__ output,
-    const signed char* __restrict__ xq,
-    const float* __restrict__ xd,
-    const unsigned char* __restrict__ weight,
-    const float* __restrict__ bias,     // may be nullptr
-    int N, int K, int M)
+// Per-lane partial dot over super-blocks sbStart, sbStart+sbStride, … of one output row.
+__device__ __forceinline__ float q6k_q8_1_row_partial(
+    const unsigned char* __restrict__ wrow,
+    const signed char* __restrict__ xqrow,
+    const float* __restrict__ xdrow,
+    int nsb, int sbStart, int sbStride, int lane)
 {
-    const int lane = threadIdx.x;                          // 0..31
-    const int n = blockIdx.x * blockDim.y + threadIdx.y;   // output row
-    const int m = blockIdx.y;                              // batch row
-    if (n >= N || m >= M) return;
-
-    const int nsb = K / SUPER_ELEMS;
-    const unsigned char* wrow = weight + (size_t)n * nsb * SUPER_BYTES;
-    const signed char* xqrow = xq + (size_t)m * K;
-    const float* xdrow = xd + (size_t)m * (K / 32);
-
     const int li = lane & 7;               // u16-pair position (4 consecutive bytes)
     const int p = (lane >> 3) & 1;         // ql pair: quadrants p (lo nibble) and p+2 (hi nibble)
     const int h = lane >> 4;               // half-super-block 0..1
@@ -64,7 +53,7 @@ extern "C" __global__ void mul_mat_vec_q6k_q8_1(
     const int scOff1 = scOff0 + 4;         // (p+2)*2 − p*2
 
     float acc = 0.0f;
-    for (int sb = 0; sb < nsb; ++sb) {
+    for (int sb = sbStart; sb < nsb; sb += sbStride) {
         const unsigned char* block = wrow + (size_t)sb * SUPER_BYTES;
         const unsigned char* qh = block + 128;
         const signed char* scales = (const signed char*)(block + 192);
@@ -95,11 +84,67 @@ extern "C" __global__ void mul_mat_vec_q6k_q8_1(
         acc += d * (float)sc0 * xs0 * (float)idot0;
         acc += d * (float)sc1 * xs1 * (float)idot1;
     }
+    return acc;
+}
+
+extern "C" __global__ void mul_mat_vec_q6k_q8_1(
+    float* __restrict__ output,
+    const signed char* __restrict__ xq,
+    const float* __restrict__ xd,
+    const unsigned char* __restrict__ weight,
+    const float* __restrict__ bias,     // may be nullptr
+    int N, int K, int M)
+{
+    const int lane = threadIdx.x;                          // 0..31
+    const int n = blockIdx.x * blockDim.y + threadIdx.y;   // output row
+    const int m = blockIdx.y;                              // batch row
+    if (n >= N || m >= M) return;
+
+    const int nsb = K / SUPER_ELEMS;
+    float acc = q6k_q8_1_row_partial(
+        weight + (size_t)n * nsb * SUPER_BYTES,
+        xq + (size_t)m * K, xd + (size_t)m * (K / 32),
+        nsb, 0, 1, lane);
 
     #pragma unroll
     for (int o = WARP_SIZE / 2; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
     if (lane == 0) {
         if (bias != nullptr) acc += bias[n];
         output[(size_t)m * N + n] = acc;
+    }
+}
+
+// Block-per-row K-split (long-K/small-N shapes; see mul_mat_vec_q4k_q8_1.cu's ksplit notes).
+extern "C" __global__ void mul_mat_vec_q6k_q8_1_ksplit(
+    float* __restrict__ output,
+    const signed char* __restrict__ xq,
+    const float* __restrict__ xd,
+    const unsigned char* __restrict__ weight,
+    const float* __restrict__ bias,     // may be nullptr
+    int N, int K, int M)
+{
+    const int lane = threadIdx.x;
+    const int warp = threadIdx.y;
+    const int n = blockIdx.x;
+    const int m = blockIdx.y;
+    if (n >= N || m >= M) return;
+
+    const int nsb = K / SUPER_ELEMS;
+    float acc = q6k_q8_1_row_partial(
+        weight + (size_t)n * nsb * SUPER_BYTES,
+        xq + (size_t)m * K, xd + (size_t)m * (K / 32),
+        nsb, warp, blockDim.y, lane);
+
+    #pragma unroll
+    for (int o = WARP_SIZE / 2; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
+
+    __shared__ float partial[16];
+    if (lane == 0) partial[warp] = acc;
+    __syncthreads();
+    if (warp == 0 && lane == 0) {
+        float sum = 0.0f;
+        for (int w = 0; w < (int)blockDim.y; ++w) sum += partial[w];
+        if (bias != nullptr) sum += bias[n];
+        output[(size_t)m * N + n] = sum;
     }
 }

@@ -150,6 +150,37 @@ public sealed class CudaBackend : IBackend
     /// measured 2026-07-22: Llama-3.2-1B 159→195 tok/s, Qwen3-4B 71→90 tok/s (RTX 3060, graph-on).</summary>
     public bool EnableDp4aGemv { get; set; }
 
+    // Persistent, stream-serialized scratch buffers (dp4a activation quantization; two-stage argmax
+    // partials). Reusing one resident buffer instead of per-call AllocateDevice/FreeDevice removes ~6
+    // allocation/free NODES per Linear from every captured decode graph (~750 nodes on a 24-layer model)
+    // and the matching pool churn from eager decode. Reuse is safe on the single compute stream: the next
+    // op's writes are stream-ordered behind the previous op's reads. NEVER grown inside stream capture —
+    // a capture-time cuMemAllocAsync becomes a GRAPH-OWNED allocation whose lifetime dies with the graph,
+    // which must not back a pointer this class caches (callers fall back to transient per-call buffers in
+    // that case; in practice the pre-capture warm-up forward pass sizes both buffers to their maximum
+    // before any capture begins, so the fallback never fires on the graph path).
+    private ulong _dp4aScratch;
+    private nuint _dp4aScratchBytes;
+    private ulong _argmaxScratch;
+
+    private bool StreamIsCapturing()
+    {
+        CudaDriverApi.cuStreamIsCapturing(_stream.Handle, out int status).ThrowOnError();
+        return status != 0;   // CU_STREAM_CAPTURE_STATUS_NONE = 0
+    }
+
+    /// <summary>Returns the persistent dp4a scratch grown to at least <paramref name="bytes"/>, or 0 when the
+    /// buffer would need to grow while the stream is capturing (caller must use transient buffers).</summary>
+    private ulong EnsureDp4aScratch(nuint bytes)
+    {
+        if (bytes <= _dp4aScratchBytes) return _dp4aScratch;
+        if (StreamIsCapturing()) return 0;
+        if (_dp4aScratch != 0) GpuTransferHelper.FreeDevice(_dp4aScratch);
+        _dp4aScratch = GpuTransferHelper.AllocateDevice(bytes);
+        _dp4aScratchBytes = bytes;
+        return _dp4aScratch;
+    }
+
     /// <summary>Opt-in: run mixed bf16/f32 GEMMs at F32 compute precision (cast the bf16 weight UP to F32 rather
     /// than truncating the F32 activation DOWN to bf16). Default <c>false</c> preserves the bf16 Tensor-Core fast
     /// path. Turn ON for precision-sensitive models whose bf16 weights stay resident to fit VRAM but whose
@@ -384,6 +415,11 @@ public sealed class CudaBackend : IBackend
         GpuTransferHelper.Register(_context, _stream.Handle, _streamingCache);
         CudaMemory.SetComputeStream(_context, _stream.Handle);
 
+        // Two-stage argmax partials (64 float + 64 int slots). Allocated EAGERLY: ArgMaxInto is captured
+        // into decode graphs, and the pre-capture warm-up forward doesn't call it — a lazy allocation
+        // would bake the slow single-block fallback into the first captured graph permanently.
+        _argmaxScratch = GpuTransferHelper.AllocateDevice(512);
+
         // Load PTX kernels if directory provided
         if (ptxDir != null && Directory.Exists(ptxDir))
         {
@@ -532,9 +568,16 @@ public sealed class CudaBackend : IBackend
                 if (dp4a)
                 {
                     int kblocks = M * (K / 32);
-                    ulong pXq = GpuTransferHelper.AllocateDevice((nuint)((long)M * K));
-                    ulong pXd = GpuTransferHelper.AllocateDevice((nuint)((long)kblocks * sizeof(float)));
-                    ulong pXs = GpuTransferHelper.AllocateDevice((nuint)((long)kblocks * sizeof(float)));
+                    // One combined [xq | xd | xs] buffer (256-aligned sections) from the persistent scratch —
+                    // zero allocation/free nodes per call. Transient per-call buffers only if the scratch would
+                    // have to grow mid-capture (see EnsureDp4aScratch).
+                    nuint xqBytes = (nuint)(((long)M * K + 255) & ~255L);
+                    nuint xdBytes = (nuint)(((long)kblocks * sizeof(float) + 255) & ~255L);
+                    ulong scratch = EnsureDp4aScratch(xqBytes + 2 * xdBytes);
+                    bool transient = scratch == 0;
+                    ulong pXq = transient ? GpuTransferHelper.AllocateDevice((nuint)((long)M * K)) : scratch;
+                    ulong pXd = transient ? GpuTransferHelper.AllocateDevice((nuint)((long)kblocks * sizeof(float))) : scratch + xqBytes;
+                    ulong pXs = transient ? GpuTransferHelper.AllocateDevice((nuint)((long)kblocks * sizeof(float))) : scratch + xqBytes + xdBytes;
                     try
                     {
                         _kernels!.LaunchQuantizeActivationQ8_1(pXq, pXd, pXs, pInput, M, K, _stream.Handle);
@@ -553,9 +596,12 @@ public sealed class CudaBackend : IBackend
                     }
                     finally
                     {
-                        GpuTransferHelper.FreeDevice(pXq);
-                        GpuTransferHelper.FreeDevice(pXd);
-                        GpuTransferHelper.FreeDevice(pXs);
+                        if (transient)
+                        {
+                            GpuTransferHelper.FreeDevice(pXq);
+                            GpuTransferHelper.FreeDevice(pXd);
+                            GpuTransferHelper.FreeDevice(pXs);
+                        }
                     }
                     GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                     cachedOutput = true;
@@ -2655,6 +2701,35 @@ public sealed class CudaBackend : IBackend
         {
             GpuTransferHelper.FreeDevice(pCos);
             GpuTransferHelper.FreeDevice(pSin);
+        }
+    }
+
+    public void GluActivate(Tensor output, Tensor gateUp, int ff, bool gelu)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("GluActivate");
+        if (output.DType != DType.F32 || gateUp.DType != DType.F32)
+        {
+            ((IBackend)this).GluActivate(output, gateUp, ff, gelu);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int rows = (int)(gateUp.ElementCount / (2L * ff));
+        ulong pIn = 0, pOut = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(gateUp);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchGluAct(pOut, pIn, rows, ff, gelu, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pIn);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
         }
     }
 
@@ -5463,7 +5538,11 @@ public sealed class CudaBackend : IBackend
         // with the monolithic kernel — so batching keeps the (correct) monolithic path with no occupancy loss.
         int baseBlocks = b * hq * tq;
         int splits = 1;
-        if (b == 1 && lk >= 128)
+        // Same engage rule as the eager dispatch: severely under-occupied launches (fewer blocks than SMs —
+        // gemma3-1b decodes with 4 query heads, qwen2.5-0.5b with 14) are worth splitting even at short
+        // capacity; the 128 floor only applies to moderately-occupied shapes.
+        int devEngageLen = baseBlocks <= _context.MultiprocessorCount ? 32 : 128;
+        if (b == 1 && lk >= devEngageLen)
         {
             int target = 16 * _context.MultiprocessorCount;
             int g = (target + baseBlocks - 1) / baseBlocks;
@@ -5615,8 +5694,11 @@ public sealed class CudaBackend : IBackend
         }
         _context.EnsureCurrent();
         EnsureKernels();
-        int numHeads = (int)x.Shape[2];
-        int headDim = (int)x.Shape[3];
+        // Head count from the element count, not Shape[2]: at t=1 the [1,1,H,D] and [1,H,1,D] layouts are
+        // byte-identical and graph decode passes the head-major form (permute-free path); this also covers
+        // any batched [B,1,H,D] caller correctly (rotate all B·H heads, not just the first batch element).
+        int headDim = (int)x.Shape[x.Shape.Rank - 1];
+        int numHeads = (int)(x.ElementCount / headDim);
         ulong pX = GpuTransferHelper.CopyToDevice(x);
         ulong pCos = GpuTransferHelper.CopyToDevice(cosTable);
         ulong pSin = GpuTransferHelper.CopyToDevice(sinTable);
@@ -5656,7 +5738,7 @@ public sealed class CudaBackend : IBackend
         int c = (int)input.Shape[input.Shape.Rank - 1];
         int rows = (int)(input.ElementCount / c);
         ulong pIn = GpuTransferHelper.CopyToDevice(input);
-        _kernels!.LaunchArgMaxLastDim(outputTokenId, pIn, rows, c, _stream.Handle);
+        _kernels!.LaunchArgMaxLastDim(outputTokenId, pIn, rows, c, _stream.Handle, _argmaxScratch);
     }
 
     // ── Graph-capture decode: repetition penalty ────────────────────────────────────────────────────────────
@@ -5797,7 +5879,7 @@ public sealed class CudaBackend : IBackend
             pIn = GpuTransferHelper.CopyToDevice(input);
             nuint outBytes = (nuint)((long)rows * sizeof(int));
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchArgMaxLastDim(pOut, pIn, rows, c, _stream.Handle);
+            _kernels!.LaunchArgMaxLastDim(pOut, pIn, rows, c, _stream.Handle, _argmaxScratch);
             GpuTransferHelper.CacheActivation(indices, pOut, outBytes);
             cachedOutput = true;
         }
@@ -6319,6 +6401,8 @@ public sealed class CudaBackend : IBackend
             // on the finalizer thread or a different worker than constructed us.
             _context.EnsureCurrent();
 
+            if (_dp4aScratch != 0) { GpuTransferHelper.FreeDevice(_dp4aScratch); _dp4aScratch = 0; _dp4aScratchBytes = 0; }
+            if (_argmaxScratch != 0) { GpuTransferHelper.FreeDevice(_argmaxScratch); _argmaxScratch = 0; }
             GpuTransferHelper.EvictAll();
             _streamingCache.UnregisterPinnedSources();
             _kernels?.Dispose();
