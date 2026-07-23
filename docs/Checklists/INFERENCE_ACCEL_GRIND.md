@@ -446,9 +446,26 @@ Design (validated by `SageAttentionReferenceTests`, which is the diff oracle):
       reproduced 3×) — the `__syncthreads()` barrier serializing all 8 warps costs more than the redundant
       reads it removes. Reverted. Full writeup: `docs/Checklists/LLM_DECODE_PERF_GRIND.md`, 2026-07-22 R4
       status block. Net: two independent measurements now agree R4 isn't worth building at current shapes.
-- [ ] **W8A8 IMMA path** (ViDiT-Q recipe, QUANTIZATION_LOW_PRECISION_INFERENCE §5/§Top-recs Phase B):
-      needs the COL32/COL4_4R2_8C layout plumbing + timestep-aware calibration harness — biggest
-      remaining quantization build; only start after H1–H4 land (they're cheaper per unit speedup).
+- [~] **W8A8 IMMA path** (ViDiT-Q recipe, QUANTIZATION_LOW_PRECISION_INFERENCE §5/§Top-recs Phase B) —
+      **STAGES 1–2 LANDED 2026-07-23 (3060), GEMM-level verdict: STRONGLY GO.**
+      - Stage 1 (`Int8GemmExecutor` + `W8A8ImmaGemmTests`): cuBLASLt int8 TN with PLAIN column-major
+        layouts routes to IMMA on cuBLAS 13.1 — **the COL32/COL4_4R2_8C interleave plumbing is NOT
+        needed** (the doc's Turing-era caveat is obsolete here); exact vs CPU int32 reference.
+        Raw GEMM vs the shipping F16 path at DiT shapes (hidden 3072, S=4608, interleaved trials):
+        **3.53× / 3.32× / 3.23× / 3.70×** (t=114–260), int8 at 80–96 TOPS ≈ 78–94% of the 3060's
+        ~102 INT8 TOPS peak while the F16 arm already sits at its own ~24 TFLOPS peak.
+      - Stage 2 (`w8a8.cu`: per-row dynamic activation quant + int32→F16/F32 dequant+bias epilogue,
+        optional module `HasW8A8Kernels`): full chain (quant → IMMA → dequant+bias) vs F16+fused-bias:
+        **2.57× / 2.57×** at 3072/12288-N (t=130/48), accuracy **relL2 5.5e-3** vs the F16 GEMM on
+        varied-magnitude token rows with per-channel host-quantized weights — inside the ViDiT-Q W8A8
+        near-lossless regime BEFORE any SmoothQuant smoothing. TRAP hit en route: cuBLASLt's bias
+        epilogue reads the bias in the OUTPUT dtype (F16 out ⇒ F16 bias) — an F32 bias buffer silently
+        produces NaN garbage.
+      - Remaining (the real build): `CudaBackend.Linear` integration behind `HARTSY_W8A8=1` (load-time
+        per-channel weight quant + resident int8 weights, shape gates K%4/N%4, fallbacks), SmoothQuant
+        α≈0.5 channel smoothing for real checkpoints, timestep-aware (NDTC) calibration, per-model
+        SSIM/eyeball gates, Swarm e2e A/B. Wan/Chroma-class 3060 workloads are the payoff target
+        (their GEMMs ≈ 58–68% of step time ⇒ ~1.5–1.9× e2e ceiling at chain 2.57×).
 - [ ] **Sparse video attention** (Wan/LTX): first MEASURE per-layer attention-score concentration on
       real generations (dump per-layer attention entropy / top-k mass on a few steps — cheap
       instrumentation pass) — the content-adaptive budget is the novel claim vs fixed Radial/STA
@@ -464,3 +481,5 @@ Design (validated by `SageAttentionReferenceTests`, which is the diff oracle):
 |---|---|---|---|---|---|---|---|---|
 | 2026-07-22 | RTX 3060 | LLM GEMV R4 shared-mem-staging (input-vector-reuse half only) | Q4_K decode GEMV, Qwen3-4B ffn_gate shape K=2560 N=9728 | 63.05us/call | ~70.2-70.7us/call | **-11% (regression, reverted)** | 7/7 `FusedGemvGroundTruthTests` bit-exact before revert | `docs/Checklists/LLM_DECODE_PERF_GRIND.md` (2026-07-22 R4 block) |
 | 2026-07-23 | 3060 + 4090 | H3.1 Chroma fused-QKV (`HARTSY_CHROMA_FUSED_QKV`, Hunyuan3DFluxBlocks recipe) | single block, hidden 3072/24h/S=4608, interleaved in-run control | split 58.1 ms (3060 F16) / 8.2 ms (4090 fp8) | fused 58.0 / 8.2 ms | **NEUTRAL (1.009×/1.021×, t≤0.2) — kept opt-in, not deployed** | `ChromaFusedQkvParityTests` 2/2 (CPU split-vs-fused) | `ChromaFusedQkvMicroBench` |
+| 2026-07-23 | RTX 3060 | W8A8 stage 1: raw int8 IMMA GEMM (plain TN, no COL32) | 4608×{3072,9216,12288}×3072 + 4608×3072×15360 | F16 3.69/10.88/13.99/16.78 ms | int8 1.05/3.28/4.33/4.53 ms | **3.53×/3.32×/3.23×/3.70× (t=114–260)** | exact vs CPU int32 ref | `W8A8ImmaGemmTests` |
+| 2026-07-23 | RTX 3060 | W8A8 stage 2: full chain (per-row quant → IMMA → dequant+bias) | 4608×{3072,12288}×3072 | F16+bias 3.73/14.51 ms | chain 1.46/5.65 ms | **2.56×/2.57× (t=130/48)** | relL2 5.5e-3 vs F16 GEMM (pre-smoothing) | `W8A8ImmaGemmTests` |

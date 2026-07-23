@@ -85,6 +85,127 @@ public sealed unsafe class W8A8ImmaGemmTests
         }
     }
 
+    /// <summary>Full W8A8 chain (per-row activation quant → IMMA GEMM → dequant+bias epilogue) vs the F16
+    /// GEMM with fused bias: accuracy on Gaussian-ish activations and per-channel-quantized weights, plus
+    /// interleaved wall-time A/B. Accuracy expectation: per-row+per-channel INT8 keeps relL2 in the ~1e-2
+    /// class (the ViDiT-Q W8A8 regime); the perf number is the HONEST chain speedup, prologue+epilogue paid.</summary>
+    [Theory]
+    [InlineData(4608, 3072, 3072)]
+    [InlineData(4608, 12288, 3072)]
+    public void W8A8Chain_Accuracy_And_Perf_Vs_F16(int m, int n, int k)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        using Int8GemmExecutor int8 = new Int8GemmExecutor();
+        if (!cuda.Kernels!.HasW8A8Kernels) { _output.WriteLine("SKIPPED: w8a8.ptx missing"); return; }
+
+        Random rng = new Random(11);
+        // Activations: token rows with varied magnitude (×0.02..×1.0 per row) so per-row scales matter.
+        Half[] act = new Half[(long)m * k];
+        for (int r = 0; r < m; r++)
+        {
+            double rowMag = 0.02 + 0.98 * rng.NextDouble();
+            for (int c = 0; c < k; c++)
+                act[(long)r * k + c] = (Half)((rng.NextDouble() * 2 - 1) * rowMag);
+        }
+        // Weights: per-output-channel host quant (the load-time path) from an F16 master.
+        Half[] w16 = new Half[(long)n * k];
+        for (long i = 0; i < w16.LongLength; i++) w16[i] = (Half)((rng.NextDouble() * 2 - 1) * 0.04);
+        sbyte[] w8 = new sbyte[(long)n * k];
+        float[] wScale = new float[n];
+        for (int ni = 0; ni < n; ni++)
+        {
+            float amax = 0;
+            for (int ki = 0; ki < k; ki++) amax = MathF.Max(amax, MathF.Abs((float)w16[(long)ni * k + ki]));
+            float s = amax > 0 ? amax / 127f : 1f;
+            wScale[ni] = s;
+            float inv = amax > 0 ? 127f / amax : 0f;
+            for (int ki = 0; ki < k; ki++)
+                w8[(long)ni * k + ki] = (sbyte)Math.Clamp((int)MathF.Round((float)w16[(long)ni * k + ki] * inv), -127, 127);
+        }
+        float[] bias = new float[n];
+        for (int i = 0; i < n; i++) bias[i] = (float)(rng.NextDouble() * 0.2 - 0.1);
+        Half[] bias16 = new Half[n];
+        for (int i = 0; i < n; i++) bias16[i] = (Half)bias[i];
+
+        ulong dBias16 = 0;
+        ulong dAct16 = 0, dW16d = 0, dBias = 0, dOutF16Ref = 0;
+        ulong dAct8 = 0, dRowScale = 0, dW8d = 0, dWScale = 0, dOut32 = 0, dOutF16 = 0;
+        try
+        {
+            fixed (Half* p = act) dAct16 = Upload(p, (long)m * k * 2);
+            fixed (Half* p = w16) dW16d = Upload(p, (long)n * k * 2);
+            fixed (float* p = bias) dBias = Upload(p, (long)n * 4);
+            fixed (Half* p = bias16) dBias16 = Upload(p, (long)n * 2);   // cuBLASLt bias epilogue wants output-dtype bias
+            fixed (sbyte* p = w8) dW8d = Upload(p, (long)n * k);
+            fixed (float* p = wScale) dWScale = Upload(p, (long)n * 4);
+            dAct8 = GpuTransferHelper.AllocateDevice((nuint)((long)m * k));
+            dRowScale = GpuTransferHelper.AllocateDevice((nuint)((long)m * 4));
+            dOut32 = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * 4));
+            dOutF16 = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * 2));
+            dOutF16Ref = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * 2));
+
+            nint stream = cuda.Stream.Handle;
+
+            void RunChain()
+            {
+                cuda.Kernels!.LaunchW8A8QuantRowwise(dAct8, dRowScale, dAct16, m, k, stream, srcF16: true);
+                int8.Run(dW8d, dAct8, dOut32, m, n, k, stream);
+                cuda.Kernels!.LaunchW8A8DequantBias(dOutF16, dOut32, dRowScale, dWScale, dBias, m, n, stream, outF16: true);
+            }
+            void RunF16()
+            {
+                cuda.LtGemm.Run(dW16d, dAct16, dOutF16Ref, m, n, k, 1.0f,
+                    CublasApi.CUDA_R_16F, CublasApi.CUDA_R_16F, dBias16, CublasLtApi.CUBLASLT_EPILOGUE_BIAS, stream);
+            }
+
+            // ── Accuracy ──
+            RunChain();
+            RunF16();
+            cuda.Sync();
+            Half[] got = new Half[(long)m * n];
+            Half[] reference = new Half[(long)m * n];
+            fixed (Half* p = got) CudaDriverApi.cuMemcpyDtoH((nint)p, dOutF16, (nuint)((long)m * n * 2)).ThrowOnError();
+            fixed (Half* p = reference) CudaDriverApi.cuMemcpyDtoH((nint)p, dOutF16Ref, (nuint)((long)m * n * 2)).ThrowOnError();
+            double num = 0, den = 0;
+            for (long i = 0; i < got.LongLength; i++)
+            {
+                double d = (float)got[i] - (float)reference[i];
+                num += d * d;
+                den += (double)(float)reference[i] * (float)reference[i];
+            }
+            double relL2 = Math.Sqrt(num / Math.Max(den, 1e-30));
+            _output.WriteLine($"[{m}x{n}x{k}] chain relL2 vs F16 = {relL2:e2}");
+            Assert.True(relL2 < 3e-2, $"W8A8 chain error too high: relL2={relL2}");
+
+            // ── Perf (interleaved) ──
+            const int Trials = 10;
+            double[] chainMs = new double[Trials];
+            double[] f16Ms = new double[Trials];
+            Stopwatch sw = new Stopwatch();
+            for (int t = 0; t < Trials; t++)
+            {
+                sw.Restart(); RunChain(); cuda.Sync(); sw.Stop();
+                chainMs[t] = sw.Elapsed.TotalMilliseconds;
+                sw.Restart(); RunF16(); cuda.Sync(); sw.Stop();
+                f16Ms[t] = sw.Elapsed.TotalMilliseconds;
+            }
+            double MeanOf(double[] xs) { double s = 0; foreach (double v in xs) s += v; return s / xs.Length; }
+            double StdOf(double[] xs, double mean) { double s = 0; foreach (double v in xs) s += (v - mean) * (v - mean); return Math.Sqrt(s / (xs.Length - 1)); }
+            double mC = MeanOf(chainMs), mF = MeanOf(f16Ms);
+            double sC = StdOf(chainMs, mC), sF = StdOf(f16Ms, mF);
+            double welch = (mF - mC) / Math.Sqrt(sC * sC / Trials + sF * sF / Trials);
+            _output.WriteLine($"[{m}x{n}x{k}] chain: {mC:F3} ± {sC:F3} ms | f16+bias: {mF:F3} ± {sF:F3} ms | " +
+                $"chain speedup {mF / mC:F3}x | Welch t={welch:F1}");
+        }
+        finally
+        {
+            foreach (ulong ptr in new[] { dAct16, dW16d, dBias, dBias16, dOutF16Ref, dAct8, dRowScale, dW8d, dWScale, dOut32, dOutF16 })
+                if (ptr != 0) GpuTransferHelper.FreeDevice(ptr);
+        }
+    }
+
     /// <summary>Raw IMMA-vs-F16 GEMM upper-bound A/B at DiT shapes (Chroma/Flux class: hidden 3072,
     /// S=4608 joint 1024² sequence).</summary>
     [Theory]

@@ -29,6 +29,14 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _stepCacheRelL1F32;
     private readonly nint _stepCacheRelL1F16;
 
+    // Optional: W8A8 IMMA chain kernels (w8a8.ptx, native/cuda/dequant) — per-row INT8 activation quant +
+    // int32→F16/F32 dequant epilogue around Int8GemmExecutor. Null when not compiled.
+    private readonly CudaModule? _w8a8Module;
+    private readonly nint _w8a8QuantRowwiseF16;
+    private readonly nint _w8a8QuantRowwiseF32;
+    private readonly nint _w8a8DequantBiasF16;
+    private readonly nint _w8a8DequantBiasF32;
+
     // Optional: SageAttention-v1 INT8 flash attention (sage_attn_int8.ptx, native/cuda/attention). Null when
     // not compiled — CudaBackend.ScaledDotProductAttention gates on HasSageAttentionKernels and falls through.
     private readonly CudaModule? _sageAttnModule;
@@ -428,6 +436,17 @@ public sealed class CudaKernels : IDisposable
             _stepCacheModule = CudaModule.LoadFromFile(stepCachePath);
             _stepCacheRelL1F32 = _stepCacheModule.GetFunction("stepcache_rel_l1_f32");
             _stepCacheRelL1F16 = _stepCacheModule.GetFunction("stepcache_rel_l1_f16");
+        }
+
+        // Optional module: W8A8 IMMA chain (native/cuda/dequant/w8a8.cu). Absence is not an error.
+        string w8a8Path = Path.Combine(ptxDir, "w8a8.ptx");
+        if (File.Exists(w8a8Path))
+        {
+            _w8a8Module = CudaModule.LoadFromFile(w8a8Path);
+            _w8a8QuantRowwiseF16 = _w8a8Module.GetFunction("w8a8_quant_rowwise_f16");
+            _w8a8QuantRowwiseF32 = _w8a8Module.GetFunction("w8a8_quant_rowwise_f32");
+            _w8a8DequantBiasF16 = _w8a8Module.GetFunction("w8a8_dequant_bias_f16");
+            _w8a8DequantBiasF32 = _w8a8Module.GetFunction("w8a8_dequant_bias_f32");
         }
 
         // Optional module: SageAttention INT8 (native/cuda/attention/build.sh). Absence is not an error.
@@ -1651,6 +1670,38 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Whether the optional sage_attn_int8.ptx module was found and loaded (native/cuda/attention).</summary>
+    public bool HasW8A8Kernels => _w8a8Module is not null;
+
+    /// <summary>W8A8 prologue — per-row (per-token) dynamic INT8 quant: x[rows, cols] → q8 + rowScale[rows]
+    /// (dequant scale absmax/127). One block (256 threads) per row.</summary>
+    public unsafe void LaunchW8A8QuantRowwise(ulong q8, ulong rowScale, ulong x, int rows, int cols, nint stream, bool srcF16)
+    {
+        if (_w8a8Module is null) throw new InvalidOperationException("w8a8.ptx not present in the Ptx folder.");
+        ulong xArg = x, qArg = q8, sArg = rowScale;
+        uint colsArg = (uint)cols;
+        void** args = stackalloc void*[4];
+        args[0] = &xArg; args[1] = &qArg; args[2] = &sArg; args[3] = &colsArg;
+        CudaDriverApi.cuLaunchKernel(srcF16 ? _w8a8QuantRowwiseF16 : _w8a8QuantRowwiseF32,
+            (uint)rows, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>W8A8 epilogue — dequant the int32 GEMM result with rowScale[r]·wScale[c] (+ optional bias[c],
+    /// pass 0 for none) into F16 (<paramref name="outF16"/>=true) or F32.</summary>
+    public unsafe void LaunchW8A8DequantBias(ulong output, ulong d32, ulong rowScale, ulong wScale, ulong bias,
+        int rows, int cols, nint stream, bool outF16)
+    {
+        if (_w8a8Module is null) throw new InvalidOperationException("w8a8.ptx not present in the Ptx folder.");
+        ulong dArg = d32, rsArg = rowScale, wsArg = wScale, bArg = bias, oArg = output;
+        uint rowsArg = (uint)rows, colsArg = (uint)cols;
+        void** args = stackalloc void*[7];
+        args[0] = &dArg; args[1] = &rsArg; args[2] = &wsArg; args[3] = &bArg; args[4] = &oArg;
+        args[5] = &rowsArg; args[6] = &colsArg;
+        long n = (long)rows * cols;
+        uint grid = (uint)Math.Min((n + 255) / 256, 65535);
+        CudaDriverApi.cuLaunchKernel(outF16 ? _w8a8DequantBiasF16 : _w8a8DequantBiasF32,
+            grid, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     public bool HasSageAttentionKernels => _sageAttnModule is not null;
 
     /// <summary>SageAttention prologue 1/3 — K per-channel mean over the sequence: kmean[b,h,d]. Grid (H,B), block 128.</summary>

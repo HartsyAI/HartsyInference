@@ -105,6 +105,10 @@ public sealed class CudaBackend : IBackend
     /// <summary>The default compute stream.</summary>
     public CudaStream Stream => _stream;
 
+    /// <summary>The loaded kernel table (null when PTX kernels are unavailable). Internal for tests and
+    /// executor glue that launches optional-module kernels directly.</summary>
+    internal CudaKernels? Kernels => _kernels;
+
     /// <summary>The upload stream for asynchronous weight transfers. Exposed for
     /// diagnostics and tests; production callers should use <see cref="StreamingCache"/>.</summary>
     public CudaStream UploadStream => _uploadStream;
