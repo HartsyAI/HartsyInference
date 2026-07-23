@@ -130,6 +130,12 @@ public sealed class InferenceEngine : IInferenceEngine
         if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
             return cached;
 
+        // Switch-pressure eviction: pipelines for OTHER checkpoints keep their multi-GB weights resident
+        // (HARTSY_KEEP_MODELS) and cannot share the card with the incoming model at fleet sizes — a
+        // Krea2(13 GB)→Z-Image switch measured 74 MB free on 24 GB before this existed
+        // (benchmarks/results/2026-07-23_swarm_stepcache_verification.md §engine bugs).
+        EvictOtherCheckpointPipelines(spec.LocalPath);
+
         IArchitectureRecipe recipe = ResolveRecipe(spec);
         IRecipePipeline pipeline = recipe.Construct(new RecipeContext
         {
@@ -189,6 +195,9 @@ public sealed class InferenceEngine : IInferenceEngine
         if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))
             return cached;
 
+        // Same switch-pressure eviction as the image path — video DiTs are the largest residents of all.
+        EvictOtherCheckpointPipelines(spec.LocalPath);
+
         string familyId = ResolveFamilyId(spec);
         IVideoRecipe recipe = VideoRecipeRegistry.Resolve(familyId)
             ?? throw new NotSupportedException(
@@ -222,6 +231,52 @@ public sealed class InferenceEngine : IInferenceEngine
     }
 
     private IBackend EnsureBackend() => _backend ??= BackendFactory.Create(_backendSelector);
+
+    /// <summary>Disposes every cached image/video pipeline bound to a checkpoint OTHER than
+    /// <paramref name="keepPath"/> and returns their device memory to the driver. Called on a cache miss
+    /// before constructing the incoming model, so a model SWITCH can never stack resident weight sets until
+    /// the card OOMs (and poisons the session with cuDNN/VAE fallbacks). Pipelines for the SAME checkpoint
+    /// (LoRA/component variants) are kept. Deliberately does NOT touch the other services (Text/Audio/…)
+    /// — their memory is managed by their own slots, and <see cref="FreeMemory"/> remains the full sweep.</summary>
+    private void EvictOtherCheckpointPipelines(string keepPath)
+    {
+        string keepImagePrefix = $"recipe:{keepPath}|";
+        string keepVideoKey = $"video-recipe:{keepPath}";
+        List<string> imageVictims = _recipePipelines.Keys
+            .Where(k => !k.StartsWith(keepImagePrefix, StringComparison.OrdinalIgnoreCase)).ToList();
+        List<string> videoVictims = _videoRecipePipelines.Keys
+            .Where(k => !k.Equals(keepVideoKey, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (imageVictims.Count == 0 && videoVictims.Count == 0)
+        {
+            return;
+        }
+
+        foreach (string victim in imageVictims)
+        {
+            _recipePipelines[victim].Dispose();
+            _recipePipelines.Remove(victim);
+        }
+        foreach (string victim in videoVictims)
+        {
+            _videoRecipePipelines[victim].Dispose();
+            _videoRecipePipelines.Remove(victim);
+        }
+        // Disposal only drops host references; promoted GPU copies free on the finalizer queue — drain it and
+        // trim the async pool or the "freed" memory stays claimed and the incoming construction still OOMs
+        // (the ~5 GB post-ClearCache residue in the 2026-07-23 Swarm pass).
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        try
+        {
+            _backend?.TrimMemoryPool();
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[Engine] Pool trim after model-switch eviction failed: {ex.Message}");
+        }
+        Logs.Info($"[Engine] Model switch: evicted {imageVictims.Count + videoVictims.Count} resident pipeline(s) for other checkpoints.");
+    }
 
     /// <inheritdoc/>
     public void FreeMemory() => ReleaseLoaded(disposeBackend: false);

@@ -127,10 +127,32 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         // scheduler.Step, no per-step latent D2H, no per-step FreeActivations (the Krea2 ForwardPatched pattern).
         bool fastPath = !isImg2Img && !isMaskedInpaint && cfgScale <= 1.0f
             && (regionalPlan is null || regionalPlan.Regions.Count == 0);
+        // Default-off across-step First-Block cache (HARTSY_STEP_CACHE / _LATE — fleet knobs, wired on the
+        // fast path only; INFERENCE_ACCEL_GRIND §H1.5). No calibrated profile yet: "=1" resolves to the
+        // generic raw 0.10 until the Z-Image A/B lands. Armed cache forces the eager path (no graph).
+        (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
+            StepCacheEnv.Resolve(null);
+        DeviceFeatureCache? stepCacheInst = null;
+        if (stepCacheThreshold > 0f && fastPath)
+        {
+            if (Backend.SupportsDeviceStepCacheGate)
+            {
+                stepCacheInst = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}"
+                    + (stepCachePoly is not null ? ", poly gate" : "")
+                    + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
+            }
+            else
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    "(stepcache.ptx not compiled?) — running uncached.");
+            }
+        }
         // Step-graph mode (HARTSY_DIT_GRAPH, fast path only): route the latent through the transformer's FIXED
         // buffer so the captured graph's baked address stays valid across steps and gens. The fixed tensor is
         // transformer-owned: never disposed here, never DataPointer-read (snapshot instead).
-        bool graphMode = fastPath && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
+        bool graphMode = fastPath && stepCacheInst is null
+            && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
         int fpH = latentH / _config.PatchSize;
         int fpW = latentW / _config.PatchSize;
         Tensor? packed = null;
@@ -165,7 +187,10 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
 
             if (fastPath)
             {
-                Tensor v = _transformer.ForwardPacked(Backend, packed!, captionEmbeddings, invertedSigma, fpH, fpW);
+                // Late-window gate: reuse eligible only in the schedule tail (Ideogram 4 results doc).
+                bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
+                Tensor v = _transformer.ForwardPacked(Backend, packed!, captionEmbeddings, invertedSigma, fpH, fpW,
+                    cacheEligible ? stepCacheInst : null);
                 // packed += (−v)·dt — one in-place device op = diffusers' negate + Euler step combined.
                 Backend.CfgEulerStep(packed!, v, v, 1.0f, -scheduler.Dt(i));
                 if (!graphMode)
@@ -253,6 +278,12 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 innerChannelFastest: true);
             tokens.Dispose();   // graph mode: the snapshot; eager: packed itself (as before)
             Logs.Verbose($"[zimage-phase] unpatchify={sw.ElapsedMilliseconds - phU}ms");
+        }
+
+        if (stepCacheInst is not null)
+        {
+            Logs.Info($"Step cache: {stepCacheInst.Computes} computes / {stepCacheInst.Reuses} reuses");
+            stepCacheInst.Dispose();
         }
 
         // ── 4. VAE decode ──

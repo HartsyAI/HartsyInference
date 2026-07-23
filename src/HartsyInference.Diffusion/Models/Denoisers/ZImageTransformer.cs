@@ -230,7 +230,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
     /// inside capture is illegal), and the velocity lands in a fixed pre-capture buffer the caller must NOT
     /// dispose. Self-disables on capture failure; see the Krea2Transformer reference recipe.</para></summary>
     public Tensor ForwardPacked(IBackend backend, Tensor packedLatent, Tensor captionEmbeddings, float sigma,
-        int hPacked, int wPacked)
+        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null)
     {
         if (packedLatent.Shape.Rank != 3 || packedLatent.Shape[0] != 1)
             throw new ArgumentException($"packedLatent must be [1, imgSeq, C·p²], got {packedLatent.Shape}.", nameof(packedLatent));
@@ -250,12 +250,13 @@ public sealed unsafe class ZImageTransformer : IDisposable
 
         // Graph mode requires the pipeline-routed fixed latent AND a pad-free image sequence (PadImage is a
         // host op — capture-illegal). Everything else falls back to the eager drain-free path.
-        bool graphMode = DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead
+        // An armed step cache is per-step-variable topology — a captured graph cannot replay it.
+        bool graphMode = stepCache is null && DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead
             && ReferenceEquals(packedLatent, _latentFixed) && imgPaddedLen == imgRealLen;
         if (!graphMode)
         {
             Tensor eager = PackedCore(backend, packedLatent, refinedCaption, tEmb, hPacked, wPacked,
-                imgRealLen, imgPaddedLen, capPaddedLen, act);
+                imgRealLen, imgPaddedLen, capPaddedLen, act, stepCache);
             tEmb.Dispose();
             return eager;
         }
@@ -351,7 +352,8 @@ public sealed unsafe class ZImageTransformer : IDisposable
     /// every step for a given (caption, resolution) — the property that makes it CUDA-graph-capturable.
     /// Caller owns <paramref name="tEmb"/>; the caption is cache-owned.</summary>
     private Tensor PackedCore(IBackend backend, Tensor packedLatent, Tensor refinedCaption, Tensor tEmb,
-        int hPacked, int wPacked, int imgRealLen, int imgPaddedLen, int capPaddedLen, DType act)
+        int hPacked, int wPacked, int imgRealLen, int imgPaddedLen, int capPaddedLen, DType act,
+        Utilities.DeviceFeatureCache? stepCache = null)
     {
         int hidden = _config.HiddenSize;
 
@@ -385,12 +387,39 @@ public sealed unsafe class ZImageTransformer : IDisposable
         backend.Concat(concat, new[] { refinedImage, refinedCaption }, dim: 1);
         refinedImage.Dispose();
 
+        // Across-step First-Block cache (QwenImageTransformer wiring): main layer 0 always runs and its
+        // output gates; hit = layers 1..N-1 replaced by layer0 + previous residual. Refiners always run.
         Tensor x = concat;
-        for (int i = 0; i < _layers.Length; i++)
+        Tensor? cacheAnchor = null;
+        int startLayer = 0;
+        if (stepCache is not null && _layers.Length > 1)
+        {
+            Tensor layer0 = _layers[0].Forward(backend, x, tEmb, _rope);
+            x.Dispose();
+            x = layer0;
+            startLayer = 1;
+            if (!stepCache.ShouldCompute(backend, x))
+            {
+                Tensor reconstructed = stepCache.ApplyResidual(backend, x);
+                x.Dispose();
+                x = reconstructed;
+                startLayer = _layers.Length;
+            }
+            else
+            {
+                cacheAnchor = x;
+            }
+        }
+        for (int i = startLayer; i < _layers.Length; i++)
         {
             Tensor next = _layers[i].Forward(backend, x, tEmb, _rope);
-            x.Dispose();
+            if (x != cacheAnchor) x.Dispose();
             x = next;
+        }
+        if (cacheAnchor is not null)
+        {
+            stepCache!.StoreResidual(backend, cacheAnchor, x);
+            cacheAnchor.Dispose();
         }
 
         Tensor realImage = new Tensor(new TensorShape(1, imgRealLen, hidden), act);
