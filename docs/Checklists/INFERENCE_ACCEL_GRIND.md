@@ -461,11 +461,23 @@ Design (validated by `SageAttentionReferenceTests`, which is the diff oracle):
         near-lossless regime BEFORE any SmoothQuant smoothing. TRAP hit en route: cuBLASLt's bias
         epilogue reads the bias in the OUTPUT dtype (F16 out ⇒ F16 bias) — an F32 bias buffer silently
         produces NaN garbage.
-      - Remaining (the real build): `CudaBackend.Linear` integration behind `HARTSY_W8A8=1` (load-time
-        per-channel weight quant + resident int8 weights, shape gates K%4/N%4, fallbacks), SmoothQuant
-        α≈0.5 channel smoothing for real checkpoints, timestep-aware (NDTC) calibration, per-model
-        SSIM/eyeball gates, Swarm e2e A/B. Wan/Chroma-class 3060 workloads are the payoff target
-        (their GEMMs ≈ 58–68% of step time ⇒ ~1.5–1.9× e2e ceiling at chain 2.57×).
+      - Stage 3 LANDED same day (`W8A8LinearTests`, main `1dbcbf93`): `CudaBackend.Linear` dispatch
+        behind `HARTSY_W8A8=1` (opt-in; property `EnableW8A8`) — per-output-channel host weight quant
+        (Parallel.For, once per weight, ~0.4 s for 37M params) cached POOL-resident as
+        [int8 N·K | pad | F32 wScale[N]], gates M≥32 ∧ K%4 ∧ N%4 ∧ F16/BF16/F32 weight ∧ F16/F32
+        act/out; weight `Fp8ScaleFactor` (the branch-damp alpha carrier) folds into wScale.
+        **Integrated Linear 2.46× vs the F16 path at 4608×12288×3072; parity relL2 3.0e-3 (both F16
+        and F32 activations); cache-hit call 9.25 ms.** Cache freed in FreeAllDeviceMemory /
+        FreePreloadedWeights / Dispose (the eviction-fix lifecycle). TWO traps found & fixed:
+        (1) synchronous `cuMemAlloc` can reclaim a VA whose deferred `cuMemFreeAsync` (earlier
+        transient weight cast) hasn't executed — the late free silently kills the new buffer; W8A8
+        cache uses the stream-ordered pool exclusively. (2) mid-forward `weight.DataPointer` reads
+        (host quant on cache miss) trip the lazy-sync consume on a device-cached tensor → outer-finally
+        pWeight double-free; fixed by hoisting the W8A8 gate above the uploads and SKIPPING the F16
+        weight upload entirely on this path (also faster).
+      - Remaining: SmoothQuant α≈0.5 channel smoothing for real checkpoints, timestep-aware (NDTC)
+        calibration, per-model SSIM/eyeball gates, Swarm e2e A/B. Wan/Chroma-class 3060 workloads are
+        the payoff target (their GEMMs ≈ 58–68% of step time ⇒ ~1.5–1.9× e2e ceiling at chain 2.5×).
 - [ ] **Sparse video attention** (Wan/LTX): first MEASURE per-layer attention-score concentration on
       real generations (dump per-layer attention entropy / top-k mass on a few steps — cheap
       instrumentation pass) — the content-adaptive budget is the novel claim vs fixed Radial/STA
@@ -483,3 +495,4 @@ Design (validated by `SageAttentionReferenceTests`, which is the diff oracle):
 | 2026-07-23 | 3060 + 4090 | H3.1 Chroma fused-QKV (`HARTSY_CHROMA_FUSED_QKV`, Hunyuan3DFluxBlocks recipe) | single block, hidden 3072/24h/S=4608, interleaved in-run control | split 58.1 ms (3060 F16) / 8.2 ms (4090 fp8) | fused 58.0 / 8.2 ms | **NEUTRAL (1.009×/1.021×, t≤0.2) — kept opt-in, not deployed** | `ChromaFusedQkvParityTests` 2/2 (CPU split-vs-fused) | `ChromaFusedQkvMicroBench` |
 | 2026-07-23 | RTX 3060 | W8A8 stage 1: raw int8 IMMA GEMM (plain TN, no COL32) | 4608×{3072,9216,12288}×3072 + 4608×3072×15360 | F16 3.69/10.88/13.99/16.78 ms | int8 1.05/3.28/4.33/4.53 ms | **3.53×/3.32×/3.23×/3.70× (t=114–260)** | exact vs CPU int32 ref | `W8A8ImmaGemmTests` |
 | 2026-07-23 | RTX 3060 | W8A8 stage 2: full chain (per-row quant → IMMA → dequant+bias) | 4608×{3072,12288}×3072 | F16+bias 3.73/14.51 ms | chain 1.46/5.65 ms | **2.56×/2.57× (t=130/48)** | relL2 5.5e-3 vs F16 GEMM (pre-smoothing) | `W8A8ImmaGemmTests` |
+| 2026-07-23 | RTX 3060 | W8A8 stage 3: `Linear` integration (`HARTSY_W8A8=1`, pool-resident int8 weight cache) | 4608×12288×3072, warm cache | F16 Linear 14.9 ms | W8A8 Linear 6.05 ms | **2.46× (t=8.0)** | relL2 3.0e-3 vs baseline Linear (F16+F32 acts); 35 adjacent GEMV/fp8 ground-truth tests green | `W8A8LinearTests` |
