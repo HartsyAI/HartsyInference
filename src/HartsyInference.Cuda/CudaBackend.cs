@@ -154,6 +154,31 @@ public sealed class CudaBackend : IBackend
     /// measured 2026-07-22: Llama-3.2-1B 159→195 tok/s, Qwen3-4B 71→90 tok/s (RTX 3060, graph-on).</summary>
     public bool EnableDp4aGemv { get; set; }
 
+    /// <summary>Opt-in W8A8 INT8 tensor-core (IMMA) GEMM path (<c>HARTSY_W8A8=1</c>, INFERENCE_ACCEL_GRIND
+    /// §H5): large-M Linears with 16-bit-float weights run as per-channel-int8 weight (host-quantized once,
+    /// cached) × per-row dynamic-int8 activation on <see cref="Int8Gemm"/>, dequantized by the w8a8.ptx
+    /// epilogue. The Ampere lever — SM 8.6 has no fp8 MMA, and IMMA measured 3.2–3.7× over the F16 GEMM
+    /// (chain 2.57× at relL2 5.5e-3, `W8A8ImmaGemmTests`, 3060). Lossy (int8 rounding); ships opt-in until
+    /// per-model quality gates land.</summary>
+    public bool EnableW8A8 { get; set; }
+
+    /// <summary>Lazily-initialized INT8 IMMA GEMM executor (see <see cref="EnableW8A8"/>).</summary>
+    public Int8GemmExecutor Int8Gemm
+    {
+        get
+        {
+            _int8Executor ??= new Int8GemmExecutor();
+            return _int8Executor;
+        }
+    }
+
+    private Int8GemmExecutor? _int8Executor;
+
+    // Per-weight W8A8 device cache: one persistent buffer holding [int8 N·K | pad to 256 | F32 wScale[N]].
+    // Keyed by the weight Tensor object (same convention as the GpuTransferHelper weight cache); freed by
+    // FreeW8A8Cache from FreeAllDeviceMemory / FreePreloadedWeights / Dispose.
+    private readonly Dictionary<Core.Tensors.Tensor, ulong> _w8a8WeightCache = new();
+
     // Persistent, stream-serialized scratch buffers (dp4a activation quantization; two-stage argmax
     // partials). Reusing one resident buffer instead of per-call AllocateDevice/FreeDevice removes ~6
     // allocation/free NODES per Linear from every captured decode graph (~750 nodes on a 24-layer model)
@@ -348,6 +373,7 @@ public sealed class CudaBackend : IBackend
         bool fp8TensorCores = _context.ComputeCapabilityMajor > 8
             || (_context.ComputeCapabilityMajor == 8 && _context.ComputeCapabilityMinor >= 9);
         EnableNativeFp8Gemm = EnvSwitch.IsEnabled("HARTSY_FP8_NATIVE", defaultOn: fp8TensorCores);
+        EnableW8A8 = EnvSwitch.IsEnabled("HARTSY_W8A8", defaultOn: false);
         HighPrecisionGemm = EnvFlag("HARTSY_HIGH_PRECISION_GEMM");
         EnableFp8F16Gemm = EnvFlag("HARTSY_FP8_F16");
         EnableFp8F32Gemm = EnvFlag("HARTSY_FP8_F32");
@@ -520,6 +546,79 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Byte offset of the F32 wScale[N] section inside a W8A8 combined weight buffer
+    /// ([int8 N·K | pad-to-256 | F32 wScale[N]]).</summary>
+    private static long W8A8ScaleOffset(int n, int k) => ((long)n * k + 255) & ~255L;
+
+    /// <summary>Host-quantizes a 16-bit-float/F32 weight [N, K] to per-output-channel int8 (symmetric,
+    /// absmax/127) and uploads one persistent combined buffer [int8 | pad | wScale]. The weight's
+    /// <see cref="Tensor.Fp8ScaleFactor"/> (the alpha carrier — branch damp on 16-bit weights) is folded
+    /// into wScale so the dequant epilogue needs no extra factor. Runs once per weight (cached).</summary>
+    private unsafe ulong QuantizeWeightForW8A8(Tensor weight, int n, int k)
+    {
+        long scaleOff = W8A8ScaleOffset(n, k);
+        nuint totalBytes = (nuint)(scaleOff + (long)n * sizeof(float));
+        byte[] host = new byte[totalBytes];
+        float alpha = weight.Fp8ScaleFactor;
+        void* src = (void*)weight.DataPointer;
+        DType dt = weight.DType;
+        fixed (byte* dst = host)
+        {
+            sbyte* q = (sbyte*)dst;
+            float* scales = (float*)(dst + scaleOff);
+            byte* dstCopy = dst; // avoid capturing the fixed pointer in the lambda closure directly
+            Parallel.For(0, n, ni =>
+            {
+                float amax = 0f;
+                for (int ki = 0; ki < k; ki++)
+                {
+                    float v = W8A8Read(src, dt, (long)ni * k + ki);
+                    float a = MathF.Abs(v);
+                    if (a > amax) amax = a;
+                }
+                float scale = amax > 0f ? amax / 127f : 1f;
+                float inv = amax > 0f ? 127f / amax : 0f;
+                ((float*)(dstCopy + scaleOff))[ni] = scale * alpha;
+                sbyte* qr = (sbyte*)dstCopy + (long)ni * k;
+                for (int ki = 0; ki < k; ki++)
+                {
+                    int iv = (int)MathF.Round(W8A8Read(src, dt, (long)ni * k + ki) * inv);
+                    if (iv > 127) iv = 127;
+                    if (iv < -127) iv = -127;
+                    qr[ki] = (sbyte)iv;
+                }
+            });
+            // Stream-ordered pool allocation, NOT CudaMemory.AllocatePersistent: a synchronous cuMemAlloc can
+            // reuse a VA whose deferred cuMemFreeAsync (from an earlier transient weight cast) hasn't executed
+            // yet — that late free then silently destroys this buffer and the eventual cuMemFree double-free
+            // fails INVALID_VALUE (bisected 2026-07-23, W8A8ReproTemp). Pool pointers ride the same
+            // stream-ordered allocator as every other cache, so ordering is correct by construction.
+            ulong dev = GpuTransferHelper.AllocateDevice(totalBytes);
+            CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)dst, totalBytes, _stream.Handle).ThrowOnError();
+            // Host buffer is stack-scoped (fixed byte[]) — drain the async copy before it goes out of scope.
+            _stream.Synchronize();
+            return dev;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe float W8A8Read(void* src, DType dt, long i)
+    {
+        if (dt == DType.F32) return ((float*)src)[i];
+        if (dt == DType.F16) return (float)((Half*)src)[i];
+        // BF16: high 16 bits of an F32.
+        uint bits = (uint)((ushort*)src)[i] << 16;
+        return BitConverter.UInt32BitsToSingle(bits);
+    }
+
+    /// <summary>Frees every cached W8A8 int8 weight buffer (model switch / full eviction / dispose).</summary>
+    private void FreeW8A8Cache()
+    {
+        foreach (ulong ptr in _w8a8WeightCache.Values)
+            GpuTransferHelper.FreeDevice(ptr);
+        _w8a8WeightCache.Clear();
+    }
+
     /// <summary>Linear layer via cuBLAS GemmEx with transpose: output = input × weight^T + bias. Supports mixed F32/F16/F8 dtypes.
     /// For a quantized weight the dequantized F16 cast is cached per preloaded weight (fast, but the cast occupies
     /// F16-sized VRAM).</summary>
@@ -543,13 +642,31 @@ public sealed class CudaBackend : IBackend
         int K = (int)weight.Shape[1]; // inDim
         int M = (int)(input.ElementCount / K); // batch*seqLen
 
+        // W8A8 eligibility decided BEFORE any device work: the int8 weight cache replaces the F16 weight on
+        // device entirely, so the F16 upload is skipped — and the cache-miss host quant must read
+        // weight.DataPointer BEFORE this call touches the transfer caches (a mid-forward DataPointer read on a
+        // device-cached tensor trips the lazy-sync consume and the outer finally would double-free pWeight —
+        // bisected 2026-07-23, W8A8ReproTemp).
+        bool w8a8 = EnableW8A8 && _kernels!.HasW8A8Kernels && Int8Gemm.IsSupported && M >= 32
+            && weight.Shape.Rank == 2 && K % 4 == 0 && N % 4 == 0
+            && (weight.DType == DType.F16 || weight.DType == DType.BF16 || weight.DType == DType.F32)
+            && (input.DType == DType.F16 || input.DType == DType.F32)
+            && (output.DType == DType.F16 || output.DType == DType.F32);
+        if (w8a8 && !_w8a8WeightCache.ContainsKey(weight))
+        {
+            _w8a8WeightCache[weight] = QuantizeWeightForW8A8(weight, N, K);
+        }
+
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pInputCast = 0, pWeightCast = 0, pBiasCast = 0;
         ulong pInputFp8 = 0, pFp8Scratch = 0;
         bool cachedOutput = false;
         try
         {
             pInput = GpuTransferHelper.CopyToDevice(input);
-            pWeight = GpuTransferHelper.CopyToDevice(weight);
+            if (!w8a8)
+            {
+                pWeight = GpuTransferHelper.CopyToDevice(weight);
+            }
             if (bias is not null)
             {
                 pBias = GpuTransferHelper.CopyToDevice(bias);
@@ -780,6 +897,46 @@ public sealed class CudaBackend : IBackend
                         _kernels!.LaunchBiasAdd(pOutput, biasPtr, N, 1, totalElementsFp8, _stream.Handle);
                     else
                         _kernels!.LaunchBiasAddF16(pOutput, biasPtr, N, 1, totalElementsFp8, _stream.Handle);
+                }
+                GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                cachedOutput = true;
+                return;
+            }
+
+            // W8A8 IMMA path (HARTSY_W8A8=1, INFERENCE_ACCEL_GRIND §H5): large-M Linear with a 16-bit-float
+            // (or F32) weight → per-channel int8 weight (host-quantized ONCE, persistent-cached with its
+            // F32 wScale[N]) × per-row dynamic-int8 activation on the INT8 tensor cores, then the w8a8.ptx
+            // dequant+bias epilogue. The Ampere lever: SM 8.6 has no fp8 MMA; measured chain 2.57× over the
+            // F16 GEMM at relL2 5.5e-3 (W8A8ImmaGemmTests, 3060). M≥32 keeps the decode GEMV paths above
+            // untouched; K%4/N%4 are the cuBLASLt int8 TN lda/ldc requirements. The weight's Fp8ScaleFactor
+            // (the branch-damp/alpha carrier on 16-bit weights) folds into the cached wScale at quant time.
+            if (w8a8)
+            {
+                ulong w8Combined = _w8a8WeightCache[weight];
+                ulong wScaleDev = w8Combined + (ulong)W8A8ScaleOffset(N, K);
+
+                ulong pAct8 = 0, pRowScale = 0, pOut32 = 0;
+                try
+                {
+                    pAct8 = GpuTransferHelper.AllocateDevice((nuint)((long)M * K));
+                    pRowScale = GpuTransferHelper.AllocateDevice((nuint)((long)M * sizeof(float)));
+                    pOut32 = GpuTransferHelper.AllocateDevice((nuint)((long)M * N * sizeof(int)));
+
+                    _kernels!.LaunchW8A8QuantRowwise(pAct8, pRowScale, pInput, M, K, _stream.Handle,
+                        srcF16: input.DType == DType.F16);
+                    Int8Gemm.Run(w8Combined, pAct8, pOut32, M, N, K, _stream.Handle);
+                    // Bias rides the dequant epilogue as F32 (transient cast for 16-bit checkpoint biases).
+                    ulong biasF32 = 0;
+                    if (bias is not null)
+                        biasF32 = CastIfNeeded(pBias, bias.DType, DType.F32, (int)bias.ElementCount, out pBiasCast);
+                    _kernels!.LaunchW8A8DequantBias(pOutput, pOut32, pRowScale, wScaleDev, biasF32,
+                        M, N, _stream.Handle, outF16: output.DType == DType.F16);
+                }
+                finally
+                {
+                    if (pAct8 != 0) GpuTransferHelper.FreeDevice(pAct8);
+                    if (pRowScale != 0) GpuTransferHelper.FreeDevice(pRowScale);
+                    if (pOut32 != 0) GpuTransferHelper.FreeDevice(pOut32);
                 }
                 GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                 cachedOutput = true;
@@ -6743,6 +6900,7 @@ public sealed class CudaBackend : IBackend
         _cudnnConv = null;
         // EvictAll clears weights + casts + activations (syncing the stream first); the trim then returns the
         // stream-ordered pool's reservations so cuMemGetInfo/persistent allocs see the memory as actually free.
+        FreeW8A8Cache();
         GpuTransferHelper.EvictAll();
         GpuTransferHelper.TrimPool();
         long f1 = (long)_context.GetMemoryInfo().freeBytes;
@@ -6760,6 +6918,7 @@ public sealed class CudaBackend : IBackend
     public void FreePreloadedWeights()
     {
         _context.EnsureCurrent();
+        FreeW8A8Cache();
         GpuTransferHelper.FreeAllCached();
     }
 
@@ -6847,6 +7006,7 @@ public sealed class CudaBackend : IBackend
 
             if (_dp4aScratch != 0) { GpuTransferHelper.FreeDevice(_dp4aScratch); _dp4aScratch = 0; _dp4aScratchBytes = 0; }
             if (_argmaxScratch != 0) { GpuTransferHelper.FreeDevice(_argmaxScratch); _argmaxScratch = 0; }
+            FreeW8A8Cache();
             GpuTransferHelper.EvictAll();
             _streamingCache.UnregisterPinnedSources();
             _kernels?.Dispose();
@@ -6855,6 +7015,12 @@ public sealed class CudaBackend : IBackend
             {
                 _fp8Executor.Dispose();
                 _fp8Executor = null;
+            }
+
+            if (_int8Executor is not null)
+            {
+                _int8Executor.Dispose();
+                _int8Executor = null;
             }
 
             if (_ltGemmExecutor is not null)
