@@ -158,18 +158,23 @@ public sealed unsafe class Flux2Transformer : IDisposable
     /// <param name="wPacked">Patchified latent width (= image_width / 16).</param>
     /// <returns>Predicted velocity <c>[B, imgSeqLen, out_channels=128]</c>.</returns>
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor textEmbeddings,
-        float sigma, float guidanceScale, int hPacked, int wPacked)
+        float sigma, float guidanceScale, int hPacked, int wPacked,
+        Utilities.DeviceFeatureCache? stepCache = null)
     {
         Tensor tembOuter = ComputeTimestepEmbedding(backend, sigma, guidanceScale, (int)packedLatent.Shape[0]);
-        Tensor velocity = ForwardWithTemb(backend, packedLatent, textEmbeddings, tembOuter, hPacked, wPacked);
+        Tensor velocity = ForwardWithTemb(backend, packedLatent, textEmbeddings, tembOuter, hPacked, wPacked, stepCache);
         tembOuter.Dispose();
         return velocity;
     }
 
     /// <summary>Forward body with a caller-owned temb (shared by the eager and step-graph paths — the graph
-    /// path computes temb inside the capture from a fixed device sin buffer). Does NOT dispose temb.</summary>
+    /// path computes temb inside the capture from a fixed device sin buffer). Does NOT dispose temb.
+    /// <para><paramref name="stepCache"/> = the original FBCache target shape: double block 0 always runs and
+    /// its IMG stream gates; on a hit the remaining doubles + concat + all single blocks are replaced by
+    /// block0Img + the previous step's img-portion residual (stored against the pre-final-layer img hidden,
+    /// which has block0Img's exact shape/dtype). Null = byte-identical uncached forward.</para></summary>
     private Tensor ForwardWithTemb(IBackend backend, Tensor packedLatent, Tensor textEmbeddings, Tensor temb,
-        int hPacked, int wPacked)
+        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
@@ -213,45 +218,82 @@ public sealed unsafe class Flux2Transformer : IDisposable
         EnsureRope(txtSeqLen, hPacked, wPacked);
 
         // ── 5. Double-stream blocks (text + image as two parallel streams sharing joint attn) ──
+        // Across-step First-Block cache: double block 0 always runs; its img stream is the gate indicator.
+        // On a hit the rest of the stack (doubles 1..N + concat + singles + strip) is replaced by
+        // block0Img + the cached img-portion residual. On a miss the anchor survives to StoreResidual below.
         Tensor currentImg = imgTokens;
         Tensor currentTxt = txtTokens;
-        for (int i = 0; i < _config.Depth; i++)
+        Tensor? cacheAnchor = null;
+        bool cacheHit = false;
+        int startDouble = 0;
+        TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, hidden);
+        Tensor imgOut;
+        if (stepCache is not null && _config.Depth > 0)
         {
-            (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(
+            (Tensor img0, Tensor txt0) = _doubleBlocks[0].Forward(
                 backend, currentImg, currentTxt, imgMod, txtMod, _rope);
             if (!ReferenceEquals(currentImg, imgTokens)) currentImg.Dispose();
             if (!ReferenceEquals(currentTxt, txtTokens)) currentTxt.Dispose();
-            currentImg = newImg;
-            currentTxt = newTxt;
+            currentImg = img0;
+            currentTxt = txt0;
+            startDouble = 1;
+            cacheHit = !stepCache.ShouldCompute(backend, currentImg);
+            if (!cacheHit) cacheAnchor = currentImg;
         }
 
-        // ── 6. Concatenate [text, image] for single-stream processing (device op — the old host copy was a
-        // full D2H sync of both block-loop outputs every forward) ──
-        TensorShape concatShape = new TensorShape(batch, totalSeqLen, hidden);
-        Tensor x = new Tensor(concatShape, act);
-        backend.Concat(x, new Tensor[] { currentTxt, currentImg }, 1);
-        if (!ReferenceEquals(currentImg, imgTokens)) currentImg.Dispose();
-        if (!ReferenceEquals(currentTxt, txtTokens)) currentTxt.Dispose();
-        imgTokens.Dispose();
-        txtTokens.Dispose();
-
-        // ── 7. Single-stream blocks (parallel attn+MLP on full concat sequence) ──
-        for (int i = 0; i < _config.DepthSingleBlocks; i++)
+        if (cacheHit)
         {
-            Tensor newX = _singleBlocks[i].Forward(backend, x, sgMod, _rope);
-            x.Dispose();
-            x = newX;
+            imgOut = stepCache!.ApplyResidual(backend, currentImg);
+            currentImg.Dispose();
+            currentTxt.Dispose();
+            imgTokens.Dispose();
+            txtTokens.Dispose();
         }
-
-        // ── 8. Strip text prefix → image-only tokens (B=1: contiguous row-block → device SliceRows;
-        // batched keeps the host copy) ──
-        TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, hidden);
-        Tensor imgOut = new Tensor(imgOutShape, act);
-        if (batch == 1)
-            backend.SliceRows(imgOut, x, txtSeqLen);
         else
-            ExtractImageTokens(imgOut, x, batch, txtSeqLen, imgSeqLen, hidden);
-        x.Dispose();
+        {
+            for (int i = startDouble; i < _config.Depth; i++)
+            {
+                (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(
+                    backend, currentImg, currentTxt, imgMod, txtMod, _rope);
+                if (!ReferenceEquals(currentImg, imgTokens) && !ReferenceEquals(currentImg, cacheAnchor)) currentImg.Dispose();
+                if (!ReferenceEquals(currentTxt, txtTokens)) currentTxt.Dispose();
+                currentImg = newImg;
+                currentTxt = newTxt;
+            }
+
+            // ── 6. Concatenate [text, image] for single-stream processing (device op — the old host copy was a
+            // full D2H sync of both block-loop outputs every forward) ──
+            TensorShape concatShape = new TensorShape(batch, totalSeqLen, hidden);
+            Tensor x = new Tensor(concatShape, act);
+            backend.Concat(x, new Tensor[] { currentTxt, currentImg }, 1);
+            if (!ReferenceEquals(currentImg, imgTokens) && !ReferenceEquals(currentImg, cacheAnchor)) currentImg.Dispose();
+            if (!ReferenceEquals(currentTxt, txtTokens)) currentTxt.Dispose();
+            imgTokens.Dispose();
+            txtTokens.Dispose();
+
+            // ── 7. Single-stream blocks (parallel attn+MLP on full concat sequence) ──
+            for (int i = 0; i < _config.DepthSingleBlocks; i++)
+            {
+                Tensor newX = _singleBlocks[i].Forward(backend, x, sgMod, _rope);
+                x.Dispose();
+                x = newX;
+            }
+
+            // ── 8. Strip text prefix → image-only tokens (B=1: contiguous row-block → device SliceRows;
+            // batched keeps the host copy) ──
+            imgOut = new Tensor(imgOutShape, act);
+            if (batch == 1)
+                backend.SliceRows(imgOut, x, txtSeqLen);
+            else
+                ExtractImageTokens(imgOut, x, batch, txtSeqLen, imgSeqLen, hidden);
+            x.Dispose();
+
+            if (cacheAnchor is not null)
+            {
+                stepCache!.StoreResidual(backend, cacheAnchor, imgOut);
+                cacheAnchor.Dispose();
+            }
+        }
 
         if (imgOut.DType == DType.F16)
         {
