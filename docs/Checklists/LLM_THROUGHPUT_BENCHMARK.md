@@ -218,6 +218,22 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 > | gemma-3-1b-it Q4_K_M | **124.49** | 197.35 | 0.63× |
 > | qwen2.5-0.5b Q4_K_M | **173.56** | 326.92 | 0.53× |
 
+> **UPDATE 2026-07-23 (rounds 9-10, gemma3 deep-dive: fused QK-norm epilogue + quantize-at-producer;
+> grind doc rounds 9-10). Final same-window sandwich, quiet GPU, GLM solo:**
+>
+> | Model | Ours (graph-on) | llama-cpp-python | Ratio |
+> |---|---|---|---|
+> | Llama-3.2-1B Q8_0 | **212.15** | 192.96 | **1.10× FASTER** |
+> | Qwen3-4B Q4_K_M | **98.76** | 88.73 | **1.11× FASTER** |
+> | gemma-2-2b-it Q4_K_M | **137.05** | 123.07 | **1.11× FASTER** |
+> | DeepSeek-R1-Distill-1.5B | **195.72** | 181.55 | **1.08× FASTER** |
+> | GLM-4-9B Q4_K_M | **42.78** (solo) | 47.93 | 0.89× |
+> | gemma-3-1b-it Q4_K_M | **127.13** | 193.96 | 0.66× (was 0.62 at day start) |
+> | qwen2.5-0.5b Q4_K_M | **173.69** | 324.70 | 0.53× |
+>
+> gemma3/qwen2.5's remaining gap has ~3 ms/token of switch-invariant unattributed graph time —
+> see the grind doc round-10 block for the quantified budget and the pending `ncu` action.
+
 Superseded pre-dp4a table (2026-07-22, earlier session):
 
 | Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (ours÷llama, graph-on) |
