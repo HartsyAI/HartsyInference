@@ -255,3 +255,20 @@ Swarm process (the dispatch switch is process-static): DiT loop **86.1 s (Sage o
 attention share is larger). The 832×480 request OOMs mid-VAE-decode beside the resident 14B expert
 pair on 24 GB (decode-headroom estimate undershoots; pre-existing tightness, noted for the serving
 backlog). Images remain byte-identical under the flip; flagships hold (4.44 s / 2.74 s).
+
+## HunyuanVideo production path opened (2026-07-23, 4090) — the +10.2% arch now Swarm-drivable
+
+The biggest recorded Sage win (HunyuanVideo, ~18k-token seqlens, +10.2%/step at 720p) had no
+production path: SwarmUI refused the architecture because the extension's `ModelSupport` table had
+no `hunyuan-video` compat-class entry — the engine recipe and `VideoRecipeRegistry` registration
+were already live, so the fix was one mapping line (committed by the user in extension `f90a512`
+together with a `2.0.0-alpha.2` pin bump). Verified e2e via `/API/GenerateText2Image` at
+512×320/25f/20st: prompt-matched coherent motion across decoded frames 1/13/25; warm sampling
+~1.6 s/step wall (Sage on, default) vs the 2.15 s/step pre-Sage record at this geometry. Ops notes:
+first attempt died disk-full (root at 100%, 7.7 GB free < 9.1 GB LLaVA download) — resolved by
+symlinking the existing engine-side LLaVA into Swarm's `Models/text_encoders/`; 720p Swarm runs
+(the deep-win zone) remain to be exercised. Post-redeploy flagship gates re-measured and holding:
+Krea2-Turbo 4.41 s, Z-Image-Turbo 2.69–2.90 s. Method note: the flagship gate figures are
+ENGINE-INTERNAL `txt2img complete` times from the Swarm log, NOT API wall — API wall runs 1.5–2.5 s
+higher under concurrent-agent CPU load (loadavg ~5 during this check) and will false-fail the
+Z-Image ≤3.2 s gate if misread that way.
