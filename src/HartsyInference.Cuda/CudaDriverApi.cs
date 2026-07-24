@@ -238,6 +238,18 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuGraphLaunch(nint graphExec, nint stream);
 
+    /// <summary>Enumerates a graph's nodes. Call with nodes = null (nint.Zero array semantics) via the
+    /// count-query overload first: pass numNodes by ref; when <paramref name="nodes"/> is null the count is
+    /// returned. Diagnostic use only (HARTSY_GRAPH_DUMP).</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuGraphGetNodes(nint graph, [In, Out] nint[]? nodes, ref nuint numNodes);
+
+    /// <summary>Returns a node's CUgraphNodeType (0=kernel, 1=memcpy, 2=memset, 3=host, 4=child graph,
+    /// 5=empty, 6=wait event, 7=event record, 8=ext-sem signal, 9=ext-sem wait, 10=mem alloc, 11=mem free,
+    /// 12=batch memop, 13=conditional). Diagnostic use only.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuGraphNodeGetType(nint node, out int nodeType);
+
     /// <summary>Updates an instantiated graph in place from a re-captured graph of identical topology. Returns CUDA_SUCCESS on success; a non-zero result means the topology changed and the caller must re-instantiate.</summary>
     [LibraryImport(LibName, EntryPoint = "cuGraphExecUpdate_v2")]
     internal static partial int cuGraphExecUpdate(nint graphExec, nint graph, nint resultInfo);

@@ -11,6 +11,10 @@ namespace HartsyInference.Cuda;
 /// <para><b>Untested locally.</b> Written from the CUDA Driver API graph docs; not exercised on GPU in this environment. Validate on hardware before relying on it in a pipeline.</para></summary>
 public sealed class CudaGraph : IDisposable
 {
+    /// <summary>Base pointer of this graph's capture arena (0 = none) — set by CudaBackend.CaptureGraph,
+    /// released via GpuTransferHelper.FreeGraphArena in DisposeGraph.</summary>
+    internal ulong ArenaBase;
+
     /// <summary><c>CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH</c>: the executable graph automatically frees any
     /// memory its allocation nodes produced in the previous launch before relaunching. Required to replay a graph that
     /// captured stream-ordered activation allocations (the backend's per-op <c>cuMemAllocAsync</c>) more than once —
@@ -61,6 +65,7 @@ public sealed class CudaGraph : IDisposable
         CudaDriverApi.cuStreamEndCapture(_stream, out graph).ThrowOnError();
         try
         {
+            DumpNodeHistogram(graph);
             DestroyExec();
             CudaDriverApi.cuGraphInstantiate(out _graphExec, graph, _instantiateFlags).ThrowOnError();
         }
@@ -68,6 +73,29 @@ public sealed class CudaGraph : IDisposable
         {
             CudaDriverApi.cuGraphDestroy(graph);
         }
+    }
+
+    /// <summary>HARTSY_GRAPH_DUMP=1: logs the captured graph's node count and per-type histogram — the
+    /// direct measurement of how many kernel vs mem-alloc/free vs other nodes a decode step replays
+    /// (alloc/free nodes come from per-intermediate AllocateDevice/Dispose during capture).</summary>
+    private static void DumpNodeHistogram(nint graph)
+    {
+        if (Environment.GetEnvironmentVariable("HARTSY_GRAPH_DUMP") != "1") return;
+        nuint count = 0;
+        if (CudaDriverApi.cuGraphGetNodes(graph, null, ref count) != 0 || count == 0) return;
+        nint[] nodes = new nint[count];
+        if (CudaDriverApi.cuGraphGetNodes(graph, nodes, ref count) != 0) return;
+        Dictionary<int, int> hist = new();
+        for (int i = 0; i < (int)count; i++)
+        {
+            if (CudaDriverApi.cuGraphNodeGetType(nodes[i], out int t) != 0) t = -1;
+            hist[t] = hist.GetValueOrDefault(t) + 1;
+        }
+        string[] names = ["kernel", "memcpy", "memset", "host", "child", "empty", "waitEvent", "recordEvent",
+            "semSignal", "semWait", "memAlloc", "memFree", "batchMemOp", "conditional"];
+        string parts = string.Join(", ", hist.OrderByDescending(kv => kv.Value)
+            .Select(kv => $"{(kv.Key >= 0 && kv.Key < names.Length ? names[kv.Key] : $"type{kv.Key}")}={kv.Value}"));
+        Logs.Info($"[CudaGraph] captured {count} nodes: {parts}");
     }
 
     /// <summary>Re-captures <paramref name="recordWork"/> and updates the existing executable graph in place when the topology is unchanged (cheaper than re-instantiating). Falls back to a full re-instantiate when the topology differs. No-op-safe to call before the first <see cref="Capture"/> (it just captures).</summary>

@@ -209,6 +209,19 @@ public static class CudaMemory
                     retryResult = CudaDriverApi.cuMemAllocAsync(out dptr, byteSize, stream);
                 }
             }
+            if (retryResult == 2)
+            {
+                // Last resort before failing: surrender the weight-cast cache (pure, rebuildable) — its
+                // opportunistic use of free VRAM must never make an allocation fail that would otherwise
+                // succeed (gemma-2's 2.25 GB scaled-embed alloc vs prefill cast caching, 2026-07-23).
+                long released = GpuTransferHelper.EvictAllWeightCasts();
+                if (released > 0)
+                {
+                    GpuTransferHelper.SyncStreamsAndReleasePool();
+                    LogOomDiagnostic($"async retry after cast-cache eviction ({released >> 20} MB released)", byteSize);
+                    retryResult = CudaDriverApi.cuMemAllocAsync(out dptr, byteSize, stream);
+                }
+            }
             if (retryResult != 0)
             {
                 LogOomDiagnostic("OOM after async sync+pool-trim retry", byteSize);

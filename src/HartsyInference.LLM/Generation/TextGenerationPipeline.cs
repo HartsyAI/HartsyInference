@@ -28,6 +28,35 @@ public sealed class TextGenerationPipeline
         _backend = backend;
         _template = template ?? new ChatMlTemplate();
         _stopIds = [.. tokenizer.StopIds];
+        // Make decode weights device-resident up front (headroom-guarded — see PreloadDecodeWeights).
+        // Auto-promotion's size floor means SMALL weights (all the norms, tiny k/v projections) otherwise
+        // NEVER become resident on the eager/prefill path — every prefill re-uploads and re-dequantizes
+        // them (measured: 5271 small H2D misses in a 7-generation qwen2.5 run, ~26 ms/generation).
+        PreloadDecodeWeights();
+    }
+
+    /// <summary>Headroom-guarded weight preload: uploads every transformer weight that fits while leaving
+    /// 2 GB of VRAM free (large stragglers stay lazy). Idempotent — already-cached tensors are skipped.</summary>
+    private void PreloadDecodeWeights()
+    {
+        try
+        {
+            long headroom = 2L << 30;
+            if (_backend.FreeMemoryBytes() is long free && free > headroom)
+            {
+                List<Tensor> toPreload = [];
+                long budget = free - headroom;
+                foreach (Tensor t in _model.EnumerateWeights())
+                {
+                    long bytes = Tensor.ComputeByteSize(t.Shape, t.DType);
+                    if (budget - bytes < 0) continue;
+                    budget -= bytes;
+                    toPreload.Add(t);
+                }
+                _backend.PreloadWeights(toPreload);
+            }
+        }
+        catch (Exception ex) { HartsyInference.Core.Logging.Logs.Warning($"weight preload failed (continuing with lazy residency): {ex.Message}"); }
     }
 
     /// <summary>Generates text for <paramref name="request"/>. <paramref name="onToken"/> is invoked with each
@@ -59,10 +88,28 @@ public sealed class TextGenerationPipeline
         bool stopped = false;
         int next;
         using (Tensor hidden = _model.Forward(_backend, promptIds, 0, cache))
-        using (Tensor logits = _model.ProjectLogits(_backend, hidden, promptIds.Length))
         {
-            Span<float> lastRow = LastRow(logits, promptIds.Length, cfg.VocabSize);
-            next = sampler.Next(lastRow, generated);
+            // Project logits for the LAST prompt position only: sampling reads a single row, and slicing
+            // BEFORE the head projection (a) skips (promptLen−1)/promptLen of the vocab GEMM — the single
+            // biggest prefill matmul — and (b) makes the projection t=1, which takes the fused quantized
+            // GEMV path instead of dequant-to-16-bit + cuBLAS (whose full-size staging temp OOMed
+            // gemma-2's 256k-vocab F32 head cast on the 12 GB card).
+            Tensor lastHidden;
+            if (promptIds.Length > 1)
+            {
+                lastHidden = new(new TensorShape(1, 1, cfg.HiddenSize), DType.F32);
+                _backend.GatherRows(lastHidden, hidden, [promptIds.Length - 1]);
+            }
+            else
+            {
+                lastHidden = hidden;
+            }
+            using (Tensor logits = _model.ProjectLogits(_backend, lastHidden, 1))
+            {
+                Span<float> lastRow = LastRow(logits, 1, cfg.VocabSize);
+                next = sampler.Next(lastRow, generated);
+            }
+            if (!ReferenceEquals(lastHidden, hidden)) lastHidden.Dispose();
         }
 
         // CUDA-graph decode: collapses the ~600-700 kernel launches/token the plain loop below issues into one
@@ -154,6 +201,16 @@ public sealed class TextGenerationPipeline
             using Tensor warmupHidden = _model.Forward(_backend, [firstToken], 0, warmup);
             _model.ProjectLogits(_backend, warmupHidden, 1).Dispose();
         }
+
+        // Force EVERY decode weight device-resident before capture. Lazy auto-promotion leaves stragglers
+        // (tensors under its size floor — all the norm weights — and any that hit its VRAM-headroom backoff),
+        // and each straggler's upload inside the capture region bakes a memAlloc + H2D memcpy node that
+        // re-executes on EVERY replayed token (measured on gemma-3-1b: 209 of them, incl. gate-up weights and
+        // the 321 MB lm_head — eliminating them took gemma-3-1b from 127 to 247 tok/s). HEADROOM-GUARDED:
+        // preloading must leave room for the biggest transient (the low-vram head's F16 dequant during
+        // prefill — 1.2 GB on GLM-4-9B, which OOMed with an unguarded preload on the 12 GB card); when the
+        // guard trips, the remaining weights keep the old lazy behavior — slower, never broken.
+        PreloadDecodeWeights();   // idempotent — re-checks in case load-time budget has changed
 
         Tensor embedTable = _model.EnsureEmbedResidentForGraphDecode(_backend);
         (Tensor cosTable, Tensor sinTable) = _model.EnsureRopeTableForGraphDecode(_backend, cache.MaxSequenceLength);

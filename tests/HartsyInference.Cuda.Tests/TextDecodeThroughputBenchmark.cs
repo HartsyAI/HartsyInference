@@ -77,7 +77,11 @@ public sealed class TextDecodeThroughputBenchmark
         foreach (string path in models)
         {
             using CudaBackend backend = new(0, Path.Combine(AppContext.BaseDirectory, "Ptx"));
-            using GgufLanguageModel model = GgufLanguageModel.Load(path, lowVramQuant: true);
+            // Low-VRAM only where it's actually required on the 12 GB card (>2 GB GGUFs: Qwen3-4B, GLM-9B).
+            // Blanket lowVramQuant:true routed EVERY model's prefill through the QuantizedMatMul path and made
+            // the fleet's TTFT numbers measure a configuration real users of small models never run.
+            bool lowVram = new FileInfo(path).Length > 2L << 30;
+            using GgufLanguageModel model = GgufLanguageModel.Load(path, lowVramQuant: lowVram);
             TextGenerationPipeline pipeline = new(model.Transformer, model.Tokenizer, backend, model.Template);
             bool graphEligible = model.Transformer.SupportsGraphDecode(backend);
 
@@ -85,15 +89,18 @@ public sealed class TextDecodeThroughputBenchmark
             RunOnce(pipeline, backend, graphDecode: false);
 
             List<double> tgOff = [];
+            List<double> ttftOff = [];
             List<long> syncOff = [];
             for (int i = 0; i < Reps; i++)
             {
                 RunResult r = RunOnce(pipeline, backend, graphDecode: false);
                 tgOff.Add(r.TgTps);
+                ttftOff.Add(r.TtftMs);
                 syncOff.Add(r.D2hSyncCount);
             }
 
             List<double> tgOn = [];
+            List<double> ttftOn = [];
             List<long> syncOn = [];
             if (graphEligible)
             {
@@ -102,14 +109,15 @@ public sealed class TextDecodeThroughputBenchmark
                 {
                     RunResult r = RunOnce(pipeline, backend, graphDecode: true);
                     tgOn.Add(r.TgTps);
+                    ttftOn.Add(r.TtftMs);
                     syncOn.Add(r.D2hSyncCount);
                 }
             }
 
             string name = $"{Path.GetFileName(path)} (arch={model.Architecture})";
-            _output.WriteLine($"{name}: graph-off tg median = {Median(tgOff):F2} tok/s (reps: {string.Join(", ", tgOff.Select(x => x.ToString("F1")))}) [D2H syncs: {string.Join(",", syncOff)}]");
+            _output.WriteLine($"{name}: graph-off tg median = {Median(tgOff):F2} tok/s (reps: {string.Join(", ", tgOff.Select(x => x.ToString("F1")))}) [D2H syncs: {string.Join(",", syncOff)}] ttft median = {Median(ttftOff):F1} ms");
             if (graphEligible)
-                _output.WriteLine($"{name}: graph-on  tg median = {Median(tgOn):F2} tok/s (reps: {string.Join(", ", tgOn.Select(x => x.ToString("F1")))}) [D2H syncs: {string.Join(",", syncOn)}]");
+                _output.WriteLine($"{name}: graph-on  tg median = {Median(tgOn):F2} tok/s (reps: {string.Join(", ", tgOn.Select(x => x.ToString("F1")))}) [D2H syncs: {string.Join(",", syncOn)}] ttft median = {Median(ttftOn):F1} ms");
             else
                 _output.WriteLine($"{name}: graph decode NOT eligible for this architecture (structural check failed)");
 

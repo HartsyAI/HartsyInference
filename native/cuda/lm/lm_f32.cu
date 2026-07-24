@@ -663,6 +663,131 @@ extern "C" __global__ void lm_glu_act_q8_1_f32(
     if (lane == 0) { xd[gid / 32] = scale; xs[gid / 32] = (float)s2; }
 }
 
+// ── Sandwich-norm fusions (Gemma-2/3, GLM-4: post_attention_norm / post_ffw_norm) ──────────────
+// Sandwich layers run norm(x)·w BEFORE each residual add, so the graph step paid two extra kernels
+// per layer over plain pre-norm models. Both fusions below copy dit_rmsnorm_f32's reduction and
+// lm_add_rmsnorm_f32's add/normalize expressions VERBATIM at the same 256-thread block-per-row
+// geometry, so their outputs are bit-identical to the kernel chains they replace.
+
+// residOut = a + rmsnorm(b)·w1 ; normOut = rmsnorm(residOut)·w2 [+ optional Q8_1 sidecar on normOut]
+// — replaces PostSublayer(post_attention_norm) + lm_add_rmsnorm(_q8_1): 2 launches → 1.
+extern "C" __global__ void lm_norm_add_rmsnorm_q8_1_f32(
+    float* __restrict__ residOut,
+    float* __restrict__ normOut,
+    signed char* __restrict__ xq,     // nullptr → skip the sidecar epilogue
+    float* __restrict__ xd,
+    float* __restrict__ xs,
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    const float* __restrict__ w1,
+    const float* __restrict__ w2,
+    unsigned int normDim,
+    unsigned int totalRows,
+    float eps)
+{
+    extern __shared__ float sdata_nan[];
+    unsigned int row = blockIdx.x;
+    if (row >= totalRows) return;
+
+    const float* aRow = a + (size_t)row * normDim;
+    const float* bRow = b + (size_t)row * normDim;
+    float* residRow = residOut + (size_t)row * normDim;
+    float* normRow = normOut + (size_t)row * normDim;
+
+    // Reduction 1: rmsnorm(b) — dit_rmsnorm_f32 verbatim.
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < normDim; i += blockDim.x)
+    {
+        float v = bRow[i];
+        partial += v * v;
+    }
+    sdata_nan[threadIdx.x] = partial;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s)
+            sdata_nan[threadIdx.x] += sdata_nan[threadIdx.x + s];
+        __syncthreads();
+    }
+    float invRms1 = rsqrtf(sdata_nan[0] / (float)normDim + eps);
+    __syncthreads();   // sdata is reused below — drain reduction 1 first
+
+    // Add (lm_add_rmsnorm_f32's v = aRow[i] + bRow[i], with b = the normed value) + reduction 2.
+    partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < normDim; i += blockDim.x)
+    {
+        // __fmul_rn: force the normed value to round to f32 BEFORE the residual add — nvcc's default
+        // FMA contraction would otherwise fuse this multiply into the add and break bit-identity with
+        // the separate dit_rmsnorm-then-add chain (which rounds the normed value through memory).
+        float n1 = __fmul_rn(bRow[i] * invRms1, w1[i]);
+        float v = aRow[i] + n1;
+        residRow[i] = v;
+        partial += v * v;
+    }
+    sdata_nan[threadIdx.x] = partial;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s)
+            sdata_nan[threadIdx.x] += sdata_nan[threadIdx.x + s];
+        __syncthreads();
+    }
+    float invRms2 = rsqrtf(sdata_nan[0] / (float)normDim + eps);
+    for (unsigned int i = threadIdx.x; i < normDim; i += blockDim.x)
+        normRow[i] = residRow[i] * invRms2 * w2[i];
+
+    if (xq != nullptr)
+    {
+        __syncthreads();
+        unsigned int nblk = normDim / 32u;
+        unsigned int warpId = threadIdx.x >> 5;
+        unsigned int lane = threadIdx.x & 31u;
+        unsigned int warps = blockDim.x >> 5;
+        signed char* xqRow = xq + (size_t)row * normDim;
+        float* xdRow = xd + (size_t)row * nblk;
+        float* xsRow = xs + (size_t)row * nblk;
+        for (unsigned int blk = warpId; blk < nblk; blk += warps)
+            q8_1_quantize_block(xqRow + (size_t)blk * 32, xdRow + blk, xsRow + blk, normRow + (size_t)blk * 32, lane);
+    }
+}
+
+// out = a + rmsnorm(b)·w — replaces PostSublayer(post_ffw_norm) + Add: 2 launches → 1.
+extern "C" __global__ void lm_rmsnorm_add_f32(
+    float* __restrict__ output,
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    const float* __restrict__ weight,
+    unsigned int normDim,
+    unsigned int totalRows,
+    float eps)
+{
+    extern __shared__ float sdata_rna[];
+    unsigned int row = blockIdx.x;
+    if (row >= totalRows) return;
+
+    const float* aRow = a + (size_t)row * normDim;
+    const float* bRow = b + (size_t)row * normDim;
+    float* outRow = output + (size_t)row * normDim;
+
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < normDim; i += blockDim.x)
+    {
+        float v = bRow[i];
+        partial += v * v;
+    }
+    sdata_rna[threadIdx.x] = partial;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s)
+            sdata_rna[threadIdx.x] += sdata_rna[threadIdx.x + s];
+        __syncthreads();
+    }
+    float invRms = rsqrtf(sdata_rna[0] / (float)normDim + eps);
+    for (unsigned int i = threadIdx.x; i < normDim; i += blockDim.x)
+        outRow[i] = aRow[i] + __fmul_rn(bRow[i] * invRms, weight[i]);   // __fmul_rn: see lm_norm_add_rmsnorm
+}
+
 // Fused per-head QK-RMSNorm + RoPE + KV-scatter for the graph decode step (t=1, B=1) — the QK-norm
 // counterpart of lm_qkv_rope_scatter_f32. QK-norm models (Qwen3, Gemma-3) could not use that fused
 // epilogue because a per-head RMSNorm sits between the projection and the rope, so every layer paid

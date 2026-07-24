@@ -124,6 +124,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmRmsNormQ8_1F32;
     private readonly nint _lmAddRmsNormQ8_1F32;
     private readonly nint _lmGluActQ8_1F32;
+    private readonly nint _lmNormAddRmsNormQ8_1F32;
+    private readonly nint _lmRmsNormAddF32;
     private readonly nint _lmAddRmsNormF32;
     private readonly nint _lmRopeInterleavedF32;
     private readonly nint _lmRopeDecodeSplitHalf;
@@ -671,6 +673,8 @@ public sealed class CudaKernels : IDisposable
         _lmRmsNormQ8_1F32 = _lmF32Module.GetFunction("lm_rmsnorm_q8_1_f32");
         _lmAddRmsNormQ8_1F32 = _lmF32Module.GetFunction("lm_add_rmsnorm_q8_1_f32");
         _lmGluActQ8_1F32 = _lmF32Module.GetFunction("lm_glu_act_q8_1_f32");
+        _lmNormAddRmsNormQ8_1F32 = _lmF32Module.GetFunction("lm_norm_add_rmsnorm_q8_1_f32");
+        _lmRmsNormAddF32 = _lmF32Module.GetFunction("lm_rmsnorm_add_f32");
         _lmAddRmsNormF32 = _lmF32Module.GetFunction("lm_add_rmsnorm_f32");
         _lmRopeInterleavedF32 = _lmF32Module.GetFunction("lm_rope_interleaved_f32");
         _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
@@ -2229,6 +2233,36 @@ public sealed class CudaKernels : IDisposable
         long total = (long)rows * ff;
         uint grid = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_lmGluActQ8_1F32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Sandwich fusion: residOut = a + rmsnorm(b)*w1; normOut = rmsnorm(residOut)*w2 (+ optional
+    /// Q8_1 sidecar when xq != 0). Bit-identical to PostSublayer-RmsNorm followed by AddRmsNorm(+Q8).</summary>
+    public unsafe void LaunchNormAddRmsNormQ8(ulong residOut, ulong normOut, ulong xq, ulong xd, ulong xs,
+        ulong a, ulong b, ulong w1, ulong w2, int normDim, int totalRows, float eps, nint stream)
+    {
+        ulong rA = residOut, nA = normOut, xqA = xq, xdA = xd, xsA = xs, aA = a, bA = b, w1A = w1, w2A = w2;
+        uint dimA = (uint)normDim, rowsA = (uint)totalRows;
+        float epsA = eps;
+        void** args = stackalloc void*[12];
+        args[0] = &rA; args[1] = &nA; args[2] = &xqA; args[3] = &xdA; args[4] = &xsA;
+        args[5] = &aA; args[6] = &bA; args[7] = &w1A; args[8] = &w2A;
+        args[9] = &dimA; args[10] = &rowsA; args[11] = &epsA;
+        CudaDriverApi.cuLaunchKernel(_lmNormAddRmsNormQ8_1F32, (uint)totalRows, 1, 1, BlockSize, 1, 1,
+            BlockSize * sizeof(float), stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Sandwich fusion: output = a + rmsnorm(b)*w. Bit-identical to RmsNorm followed by Add.</summary>
+    public unsafe void LaunchRmsNormAdd(ulong output, ulong a, ulong b, ulong weight,
+        int normDim, int totalRows, float eps, nint stream)
+    {
+        ulong oA = output, aA = a, bA = b, wA = weight;
+        uint dimA = (uint)normDim, rowsA = (uint)totalRows;
+        float epsA = eps;
+        void** args = stackalloc void*[7];
+        args[0] = &oA; args[1] = &aA; args[2] = &bA; args[3] = &wA;
+        args[4] = &dimA; args[5] = &rowsA; args[6] = &epsA;
+        CudaDriverApi.cuLaunchKernel(_lmRmsNormAddF32, (uint)totalRows, 1, 1, BlockSize, 1, 1,
+            BlockSize * sizeof(float), stream, (nint)args, 0).ThrowOnError();
     }
 
     public unsafe void LaunchArgMaxLastDim(ulong idxPtr, ulong inPtr, int rows, int c, nint stream, ulong scratch = 0)

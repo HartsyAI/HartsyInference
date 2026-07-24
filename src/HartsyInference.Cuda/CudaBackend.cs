@@ -630,7 +630,12 @@ public sealed class CudaBackend : IBackend
     /// (preloaded), so a Q4/Q5/Q6/Q8 model keeps its on-device footprint at the quant size instead of expanding to
     /// F16. Trades a per-call dequant (memory-bound, cheap) for the VRAM saving.</summary>
     public void QuantizedMatMul(Tensor output, Tensor input, Tensor quantWeight, Tensor? bias)
-        => LinearImpl(output, input, quantWeight, bias, cacheWeightCast: false);
+        // cacheWeightCast was hard-false here ("low-VRAM = never keep dequantized copies"), which made EVERY
+        // prefill re-dequantize the whole weight set (llama-1B TTFT 144 ms vs llama.cpp's 6 — the entire gap).
+        // The budget gate inside LinearImpl already provides the actual low-VRAM protection: casts cache only
+        // for preloaded weights AND only while free VRAM stays above a 2 GB floor (a 1.2 GB GLM head cast is
+        // refused and stays transient). Master kill-switch: CacheWeightCasts=false.
+        => LinearImpl(output, input, quantWeight, bias, cacheWeightCast: true);
 
     private unsafe void LinearImpl(Tensor output, Tensor input, Tensor weight, Tensor? bias, bool cacheWeightCast)
     {
@@ -975,13 +980,21 @@ public sealed class CudaBackend : IBackend
                     // per-call dequant cost, bounded memory. freeBytes counts pool reservations as used, so the gate
                     // errs conservative under transient churn — the safe direction.
                     (long freeBytes, long totalBytes) = CudaMemory.GetMemInfo();
-                    long headroom = Math.Max(2L << 30, totalBytes / 8);
+                    // Quantized (GGUF) weights get a STRICTER floor: their cast sets can dwarf free VRAM
+                    // (a 4B model's BF16 casts are ~8 GB), and prefill still needs large transients (head
+                    // cast, activations, cuBLAS workspace) AFTER the cache stops growing — a 2 GB floor
+                    // OOMed Qwen3-4B. 4 GB caches the hottest few GB of casts and never starves transients.
+                    long headroom = weight.DType.IsQuantized
+                        ? Math.Max(4L << 30, totalBytes / 3)
+                        : Math.Max(2L << 30, totalBytes / 8);
                     if (freeBytes > 0 && freeBytes - (long)castBytes < headroom)
                     {
+                        System.Threading.Interlocked.Increment(ref _castTransientGated);
                         weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
                     }
                     else
                     {
+                        System.Threading.Interlocked.Increment(ref _castCachedNew);
                         weightPtr = GpuTransferHelper.AllocateDevice(castBytes);
                         CastOnGpu(weightPtr, pWeight, weight.DType, gemmDtype, (int)weight.ElementCount);
                         GpuTransferHelper.CacheWeightCast(weight, weightPtr, castBytes);
@@ -990,6 +1003,13 @@ public sealed class CudaBackend : IBackend
             }
             else
             {
+                if (weight.DType.IsQuantized || weight.DType == DType.F8E4M3 || weight.DType == DType.BF16)
+                {
+                    System.Threading.Interlocked.Increment(ref _castTransientUncachedPath);
+                    if (System.Threading.Interlocked.Increment(ref _castWhyLogged) % 200 == 1)
+                        HartsyInference.Core.Logging.Logs.Info(
+                            $"[Cuda] cast-transient-why: cacheParam={cacheWeightCast} propCache={CacheWeightCasts} hip={hipUpcast} weightCached={GpuTransferHelper.IsWeightCached(weight)} dtype={weight.DType} gemmDtype={gemmDtype} M={M} N={N} K={K}");
+                }
                 weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
             }
 
@@ -1652,6 +1672,20 @@ public sealed class CudaBackend : IBackend
             if (pWCast != 0) CudaMemory.FreeAsync(pWCast, _stream.Handle);
             if (pBCast != 0) CudaMemory.FreeAsync(pBCast, _stream.Handle);
         }
+    }
+
+    /// <summary>Diagnostic counters for the prefill weight-cast paths (HARTSY_CAST_STATS=1 logs on read via
+    /// <see cref="DumpCastStats"/>): transient-because-budget-gate, transient-because-uncached-path
+    /// (QuantizedMatMul / non-preloaded), and newly-cached casts.</summary>
+    private static long _castTransientGated, _castTransientUncachedPath, _castCachedNew, _castWhyLogged;
+
+    /// <summary>Logs and resets the cast-path counters (called opportunistically; cheap).</summary>
+    public static void DumpCastStats(string tag)
+    {
+        HartsyInference.Core.Logging.Logs.Info(
+            $"[Cuda] cast-stats {tag}: transient-gated={System.Threading.Interlocked.Exchange(ref _castTransientGated, 0)} " +
+            $"transient-uncachedPath={System.Threading.Interlocked.Exchange(ref _castTransientUncachedPath, 0)} " +
+            $"cached-new={System.Threading.Interlocked.Exchange(ref _castCachedNew, 0)}");
     }
 
     private static readonly bool _quantAtProducer =
@@ -3256,6 +3290,89 @@ public sealed class CudaBackend : IBackend
                 GpuTransferHelper.FreeDevice(xd);
                 GpuTransferHelper.FreeDevice(xs);
             }
+        }
+    }
+
+    public void NormAddRmsNormEmitQ8(Tensor residOut, Tensor normOut, Tensor a, Tensor b, Tensor w1, Tensor w2, float eps)
+    {
+        int normDim = (int)w2.ElementCount;
+        long rows = a.ElementCount / normDim;
+        if (residOut.DType != DType.F32 || a.DType != DType.F32 || b.DType != DType.F32
+            || w1.DType != DType.F32 || w2.DType != DType.F32 || (int)w1.ElementCount != normDim)
+        {
+            ((IBackend)this).NormAddRmsNormEmitQ8(residOut, normOut, a, b, w1, w2, eps);
+            return;
+        }
+        bool sidecar = _quantAtProducer && EnableDp4aGemv && rows == 1 && normDim % 32 == 0;
+        using NvtxRange _nvtx = NvtxRange.Push("NormAddRmsNorm");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        ulong pA = 0, pB = 0, pW1 = 0, pW2 = 0, pResid = 0, pNorm = 0, xq = 0, xd = 0, xs = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pA = GpuTransferHelper.CopyToDevice(a);
+            pB = GpuTransferHelper.CopyToDevice(b);
+            pW1 = GpuTransferHelper.CopyToDevice(w1);
+            pW2 = GpuTransferHelper.CopyToDevice(w2);
+            nuint outBytes = GpuTransferHelper.ByteSize(residOut);
+            pResid = GpuTransferHelper.AllocateDevice(outBytes);
+            pNorm = GpuTransferHelper.AllocateDevice(outBytes);
+            if (sidecar) (xq, xd, xs) = AllocSidecar(normDim);
+            _kernels!.LaunchNormAddRmsNormQ8(pResid, pNorm, xq, xd, xs, pA, pB, pW1, pW2, normDim, (int)rows, eps, _stream.Handle);
+            GpuTransferHelper.CacheActivation(residOut, pResid, outBytes);
+            GpuTransferHelper.CacheActivation(normOut, pNorm, outBytes);
+            if (sidecar) GpuTransferHelper.RegisterSidecar(normOut, xq, xd, xs, normDim);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pA);
+            GpuTransferHelper.FreeDevice(pB);
+            GpuTransferHelper.FreeDevice(pW1);
+            GpuTransferHelper.FreeDevice(pW2);
+            if (!cachedOutput)
+            {
+                GpuTransferHelper.FreeDevice(pResid);
+                GpuTransferHelper.FreeDevice(pNorm);
+                GpuTransferHelper.FreeDevice(xq);
+                GpuTransferHelper.FreeDevice(xd);
+                GpuTransferHelper.FreeDevice(xs);
+            }
+        }
+    }
+
+    public void RmsNormAdd(Tensor output, Tensor a, Tensor b, Tensor weight, float eps)
+    {
+        int normDim = (int)weight.ElementCount;
+        long rows = a.ElementCount / normDim;
+        if (output.DType != DType.F32 || a.DType != DType.F32 || b.DType != DType.F32 || weight.DType != DType.F32)
+        {
+            ((IBackend)this).RmsNormAdd(output, a, b, weight, eps);
+            return;
+        }
+        using NvtxRange _nvtx = NvtxRange.Push("RmsNormAdd");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        ulong pA = 0, pB = 0, pW = 0, pOut = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pA = GpuTransferHelper.CopyToDevice(a);
+            pB = GpuTransferHelper.CopyToDevice(b);
+            pW = GpuTransferHelper.CopyToDevice(weight);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchRmsNormAdd(pOut, pA, pB, pW, normDim, (int)rows, eps, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pA);
+            GpuTransferHelper.FreeDevice(pB);
+            GpuTransferHelper.FreeDevice(pW);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
         }
     }
 
@@ -6402,7 +6519,21 @@ public sealed class CudaBackend : IBackend
     {
         _context.EnsureCurrent();
         CudaGraph graph = new(_stream.Handle, autoFreeAllocationsOnRelaunch: true);
-        graph.Capture(recordWork);
+        // Route capture-time intermediate allocations through the persistent bump arena: without it,
+        // every per-op AllocateDevice/free during capture becomes a memAlloc/memFree node that re-executes
+        // on EVERY replay (measured on gemma3: 1672 of the graph's 2264 nodes — ~2-3 ms/token of pure
+        // memory-node overhead on sub-2B models). Arena buffers persist for the backend's lifetime, so
+        // captured pointers stay valid across replays; overflow falls back to pool nodes (correct, slower).
+        if (Environment.GetEnvironmentVariable("HARTSY_GRAPH_ARENA") != "0")
+        {
+            graph.ArenaBase = GpuTransferHelper.BeginGraphArena();
+            try { graph.Capture(recordWork); }
+            finally { GpuTransferHelper.EndGraphArena(); }
+        }
+        else
+        {
+            graph.Capture(recordWork);
+        }
         return graph;
     }
 
@@ -6412,7 +6543,13 @@ public sealed class CudaBackend : IBackend
         ((CudaGraph)graphHandle).Launch();
     }
 
-    public void DisposeGraph(object graphHandle) => ((CudaGraph)graphHandle).Dispose();
+    public void DisposeGraph(object graphHandle)
+    {
+        CudaGraph graph = (CudaGraph)graphHandle;
+        _context.EnsureCurrent();
+        graph.Dispose();
+        GpuTransferHelper.FreeGraphArena(graph.ArenaBase);
+    }
 
     private static unsafe ulong UploadFloats(ReadOnlySpan<float> values)
     {

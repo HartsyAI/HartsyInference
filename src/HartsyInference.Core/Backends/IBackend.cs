@@ -1413,6 +1413,34 @@ public interface IBackend : IDisposable
     void AddRmsNormEmitQ8(Tensor residOut, Tensor normOut, Tensor a, Tensor b, Tensor weight, float eps)
         => AddRmsNorm(residOut, normOut, a, b, weight, eps);
 
+    /// <summary>Sandwich-norm fusion: <c>residOut = a + rmsnorm(b)·w1; normOut = rmsnorm(residOut)·w2</c>
+    /// — one launch replacing the post-attention norm, the residual add, and the pre-FFN norm (and may emit
+    /// a Q8_1 sidecar for <paramref name="normOut"/>, see <see cref="RmsNormEmitQ8"/>). Backends without a
+    /// fused kernel fall back to the exact composition.</summary>
+    void NormAddRmsNormEmitQ8(Tensor residOut, Tensor normOut, Tensor a, Tensor b, Tensor w1, Tensor w2, float eps)
+    {
+        Tensor n1 = new(b.Shape, DType.F32);
+        try
+        {
+            RmsNorm(n1, b, w1, eps);
+            AddRmsNormEmitQ8(residOut, normOut, a, n1, w2, eps);
+        }
+        finally { n1.Dispose(); }
+    }
+
+    /// <summary>Sandwich-norm fusion: <c>output = a + rmsnorm(b)·w</c> — one launch replacing the
+    /// post-FFN norm and the residual add. Backends without a fused kernel fall back to the composition.</summary>
+    void RmsNormAdd(Tensor output, Tensor a, Tensor b, Tensor weight, float eps)
+    {
+        Tensor n = new(b.Shape, DType.F32);
+        try
+        {
+            RmsNorm(n, b, weight, eps);
+            Add(output, a, n);
+        }
+        finally { n.Dispose(); }
+    }
+
     /// <summary>Gated-FFN epilogue that may also emit a Q8_1 sidecar for the output (see
     /// <see cref="RmsNormEmitQ8"/>). Semantically identical to <see cref="GluActivate"/>.</summary>
     void GluActivateEmitQ8(Tensor output, Tensor gateUp, int ff, bool gelu)

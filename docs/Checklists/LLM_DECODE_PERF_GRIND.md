@@ -920,6 +920,73 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 >    (graph-off eager is fine for attribution — the ladder proved probe deltas transfer; what's
 >    needed is the true per-kernel wall of the ~250 real kernels at production data/conditions).**
 
+> **STATUS UPDATE (2026-07-23, round 11: THE MYSTERY SOLVED AND KILLED — graph node-histogram
+> introspection found it without ncu; the fleet is transformed. gemma-3-1b 127→247 tok/s (1.27×
+> FASTER than llama.cpp), qwen2.5-0.5b 174→434 (1.46× FASTER), DeepSeek 196→225 (1.23×). SIX of
+> seven now beat llama-cpp-python; GLM at 0.91×.**
+> **The diagnosis** (new `HARTSY_GRAPH_DUMP=1` — cuGraphGetNodes type histogram after capture):
+> gemma3's captured decode graph had **2264 nodes: only 383 kernels — 875 memAlloc + 797 memFree +
+> 209 memcpy**. The switch-invariant ~3 ms was never kernel time: (a) every per-op intermediate
+> AllocateDevice/dispose during capture became an alloc/free node pair re-executing every replay, and
+> (b) 209 weights were NOT device-resident at capture time — auto-promotion's size floor blocks all
+> the tiny norm weights forever, and its VRAM-headroom backoff had stranded big ones (17 gate-up
+> matrices and the 321 MB lm_head!) — so their H2D uploads were baked into the graph as memcpy
+> nodes RE-UPLOADING OVER PCIe ON EVERY TOKEN.
+> **The fixes** (both bit-exact — arena-on vs arena-off outputs byte-identical):
+> 1. **Per-capture bump arena** (`GpuTransferHelper.BeginGraphArena`, default 32 MB, knob
+>    `HARTSY_GRAPH_ARENA_MB`, kill-switch `HARTSY_GRAPH_ARENA=0`): capture-time intermediates come
+>    from a pre-reserved buffer → ZERO alloc/free nodes. One arena per live graph (the batch
+>    scheduler can hold several), owned by the CudaGraph, freed on DisposeGraph; overflow falls
+>    back to pool nodes; all free paths check IsArenaPtr.
+> 2. **Headroom-guarded weight preload before capture** (TextGenerationPipeline.GenerateGraphDecode):
+>    preloads EnumerateWeights largest-that-fit under a 2 GB VRAM floor — the floor matters: an
+>    unguarded preload OOMed GLM-4-9B (the low-vram head's 1.2 GB transient F16 dequant needs the
+>    room the lazy backoff used to leave). Guard trips → stragglers stay lazy (old behavior).
+> **Result: gemma3's graph is 383 nodes, ALL kernels.** Final fleet (same-window sandwich):
+> Llama **213.2** vs 190.7 (1.12×); Qwen3-4B **100.7** vs 88.7 (1.13×); gemma2 **139.6** vs 122.5
+> (1.14×); DeepSeek **224.8** vs 182.4 (1.23×); gemma3 **247.0** vs 193.8 (**1.27×**); qwen2.5
+> **434.3** vs 296.8 (**1.46×**); GLM solo **43.8** vs 47.7 (0.92×, best yet, headroom-guarded).
+> 194/194 CUDA + 132/132 CPU green.
+> **Still open**: GLM (DRAM-bound, 40 layers — its remaining gap is the Q5_0/Q8_0 downs' bandwidth
+> and bulk, not nodes); the round-10 quantize-at-producer/qknorm-scatter fusions are now RELATIVELY
+> more valuable (kernel count is the whole graph); prefill (graph-off) untouched by all of this.
+> **Lesson for the doc's top block: introspect the GRAPH (node histogram), not just kernels — the
+> two prior rounds optimized kernels while 80% of the graph's nodes weren't kernels at all.**
+
+> **STATUS UPDATE (2026-07-23, round 12: GLM-focused round — sandwich-norm fusion landed
+> (bit-exact, −2 launches/layer on GLM/gemma2/gemma3); the cheap kernel levers for GLM's last
+> ~8% are now measured EXHAUSTED.**
+> 1. **Sandwich-norm fusion** (`lm_norm_add_rmsnorm_q8_1_f32`: post-attn norm + residual add +
+>    pre-FFN norm + Q8_1 sidecar in ONE launch; `lm_rmsnorm_add_f32`: post-FFN norm + add in one)
+>    — reductions/expressions copied verbatim, plus `__fmul_rn` on the normed value before each
+>    residual add to BLOCK FMA CONTRACTION (nvcc's default fmad would otherwise fuse the last
+>    multiply into the add and break bit-identity with the separate-kernel chain — a trap for every
+>    future "fuse X then add" kernel). Kill-switch `HARTSY_SANDWICH_FUSION=0`. BIT-EXACT verified
+>    on glm4/gemma2/gemma3 × 2 prompts; 194/194. Gain is real but small (~0.1-0.3 ms, inside
+>    window noise — in-graph tiny kernels are ~1.4 µs, round-10's lesson).
+> 2. **Measured dead ends this round** (do not re-try without new evidence): KSPLIT×WPB full sweep
+>    at GLM's down shapes — the shipped gates (W=4, WPB=4) are already optimal (Q5_0 132-134 µs
+>    across all 9 combos; Q8_0's W=8 gain is <1% = noise); `#pragma unroll 4` on the Q4_K/Q5_0
+>    dp4a K-loops — flat on Q4_K, **~3% WORSE on Q5_0** (137.0 vs 132.6 µs), reverted.
+> 3. **Where GLM's remaining ~8% actually lives** (22.8 ms/token vs llama.cpp's 21.0): gate-up
+>    7.9 ms at 89% of DRAM peak, downs 6.4 ms (Q5_0 80% / Q8_0 88%), the 4-4.6k-row projection
+>    class ~3.2 ms at 67-71% (per-launch ramp amortization — round 8's t = 7µs + bytes/328GB/s
+>    law), head 1.5 ms at 93%, attention ~1.6 ms. Graph confirmed kernel-pure (546 nodes).
+>    Remaining candidates are all EXPENSIVE: Q5_0's high-bit-scatter ALU restructure (its 80%
+>    vs Q8_0's 88% despite a nastier stride suggests ALU-bound, and the round-5 qh-load tweak
+>    already failed); graph fork/join to overlap independent kernels (structural); accepting
+>    0.92× as the DRAM-bound frontier for a 9B on this card.**
+>
+> **Round-12 addendum — the Q5_0 ALU question is now MEASURED CLOSED**: a diagnostic build with
+> the ENTIRE high-bit scatter stripped (8 shift-masks + the qh loads dead-coded away; wrong math,
+> timing only, reverted immediately) ran the 13696×4096 down at 129.7 µs vs the real kernel's
+> 132.6-133.2 — the whole scatter is worth **~3%**. Q5_0's 80%-of-peak is the DRAM efficiency of
+> the 22-byte-block stream itself, not ALU. The only remaining kernel-side idea is a load-time
+> structure-of-arrays repack (contiguous d[]/qh[]/qs[] planes → perfectly coalesced loads),
+> ceiling ~0.3 ms/token on GLM (~1.3%) — parked. **GLM verdict: 0.92× is the practical frontier
+> without structural work (SoA repack and/or graph fork/join); the grind's next high-value
+> territory is the untouched prefill/TTFT path.**
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

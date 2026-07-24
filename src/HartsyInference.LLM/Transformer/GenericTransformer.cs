@@ -1617,26 +1617,43 @@ public sealed unsafe class GenericTransformer : IDisposable
             Project(backend, attnOut, attn, _oW!, _oB, _cfg.LowVramQuant);
             attn.Dispose();
 
-            attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);
+            bool plainPreNorm = _cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm
+                && _postNormBias is null && _postNorm is not null && _cfg.ResidualMultiplier == 1f;
+            bool sandwichFusion = Environment.GetEnvironmentVariable("HARTSY_SANDWICH_FUSION") != "0";   // kill-switch
             Tensor afterAttn = new(flat, DType.F32);
             Tensor preMlp = new(flat, DType.F32);
-            // Fused residual-add + RMSNorm (bit-identical to Add then RmsNorm) for the plain pre-norm case;
-            // LayerNorm/biased-norm/post-norm layers keep the two-op sequence.
-            if (_cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm && _postNormBias is null && _postNorm is not null)
+            // Sandwich layers (Gemma-2/3, GLM-4): post-attn norm + residual add + pre-FFN norm collapse
+            // into ONE launch (bit-identical reductions/expressions — see lm_norm_add_rmsnorm_q8_1_f32);
+            // plain pre-norm layers keep the fused add+RMSNorm; LayerNorm/biased/post-norm keep the
+            // composed sequence.
+            if (plainPreNorm && _postAttnNorm is not null && sandwichFusion)
             {
-                backend.AddRmsNormEmitQ8(afterAttn, preMlp, hidden, attnOut, _postNorm, _cfg.RmsNormEps);
+                backend.NormAddRmsNormEmitQ8(afterAttn, preMlp, hidden, attnOut, _postAttnNorm, _postNorm!, _cfg.RmsNormEps);
+            }
+            else if (plainPreNorm && _postAttnNorm is null)
+            {
+                backend.AddRmsNormEmitQ8(afterAttn, preMlp, hidden, attnOut, _postNorm!, _cfg.RmsNormEps);
             }
             else
             {
+                attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);
                 backend.Add(afterAttn, hidden, attnOut);
                 PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
             }
             attnOut.Dispose();
             Tensor mlpOut = Mlp(backend, preMlp, t, emitQ: true);
 
-            mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);
             Tensor result = new(flat, DType.F32);
-            backend.Add(result, afterAttn, mlpOut);
+            // Same collapse for the post-FFN norm + final residual add (2 launches -> 1).
+            if (_postFfnNorm is not null && _cfg.ResidualMultiplier == 1f && sandwichFusion)
+            {
+                backend.RmsNormAdd(result, afterAttn, mlpOut, _postFfnNorm, _cfg.RmsNormEps);
+            }
+            else
+            {
+                mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);
+                backend.Add(result, afterAttn, mlpOut);
+            }
             afterAttn.Dispose(); mlpOut.Dispose();
             return result;
         }

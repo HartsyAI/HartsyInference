@@ -43,6 +43,22 @@ internal static unsafe class GpuTransferHelper
         /// <summary>Set of GPU pointers that belong to either cache (skip in FreeDevice).</summary>
         public readonly HashSet<ulong> CachedPointers = new();
 
+        /// <summary>Graph-capture arenas: while a decode-step graph is being captured
+        /// (<see cref="BeginGraphArena"/>), <see cref="AllocateDevice"/> bump-allocates from a per-capture
+        /// pre-reserved buffer instead of the stream-ordered pool — so the captured graph contains ZERO
+        /// memAlloc/memFree nodes for step intermediates (measured on gemma3: 875 alloc + 797 free nodes of
+        /// 2264 total, each replaying every token). One arena per LIVE graph (the batch scheduler can hold
+        /// several captured graphs at once — sharing one bump buffer would alias them); pointers inside any
+        /// live arena are never freed individually (every free path checks <see cref="IsArenaPtr"/>); an
+        /// arena is released as a whole when its graph is disposed (<see cref="FreeGraphArena"/>). Overflow
+        /// falls back to normal pool allocation (correct, just adds nodes) and logs once.</summary>
+        public readonly List<(ulong basePtr, nuint capacity)> LiveArenas = new();
+        public ulong ArenaBase;      // the arena of the capture in progress (also in LiveArenas)
+        public nuint ArenaCapacity;
+        public nuint ArenaOffset;
+        public bool ArenaActive;
+        public bool ArenaOverflowLogged;
+
         /// <summary>Q8_1 activation sidecars emitted by quantize-at-producer kernels (xq int8 + per-32-block
         /// scale xd + int-sum xs device buffers, K = the producing row width). Keyed by the F32 output tensor;
         /// consumed by the dp4a Linear path in place of its own quantize launch. Invalidated (buffers freed)
@@ -231,6 +247,11 @@ internal static unsafe class GpuTransferHelper
         // reuse); pinned src stays alive until the stream-ordered FreeDevice. No CPU read happens here, so no
         // correctness dependency on the copy completing before this returns — only stream order, which holds.
         using Profiling.NvtxRange _miss = Profiling.NvtxRange.Push(byteSize > (1u << 20) ? "H2D_MISS_BIG" : "H2D_MISS_SMALL");   // HARTSY_PROFILE visibility into miss H2D volume
+        // A miss during graph capture bakes a per-replay H2D memcpy node into the graph — always worth
+        // knowing about (HARTSY_GRAPH_DUMP=1 logs the offender so it can be made resident pre-capture).
+        if (s.ArenaActive && Environment.GetEnvironmentVariable("HARTSY_GRAPH_DUMP") == "1")
+            HartsyInference.Core.Logging.Logs.Info(
+                $"[Cuda] H2D MISS inside graph capture: shape=[{string.Join(",", Enumerable.Range(0, cpuTensor.Shape.Rank).Select(i => cpuTensor.Shape[i]))}] dtype={cpuTensor.DType} bytes={byteSize}");
         ulong dptr = CudaMemory.Allocate(byteSize);
         if (s.StreamHandle != 0)
             CudaMemory.CopyHostToDeviceAsync(dptr, cpuTensor.DataPointer, byteSize, s.StreamHandle);
@@ -248,14 +269,88 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Allocates a GPU buffer.</summary>
     public static ulong AllocateDevice(nuint byteSize)
     {
+        State s = Resolve();
+        if (s.ArenaActive)
+        {
+            nuint aligned = (byteSize + 255) & ~(nuint)255;
+            if (s.ArenaOffset + aligned <= s.ArenaCapacity)
+            {
+                ulong p = s.ArenaBase + s.ArenaOffset;
+                s.ArenaOffset += aligned;
+                return p;
+            }
+            if (!s.ArenaOverflowLogged)
+            {
+                s.ArenaOverflowLogged = true;
+                HartsyInference.Core.Logging.Logs.Warning(
+                    $"[Cuda] graph-capture arena exhausted ({(long)s.ArenaCapacity >> 20} MB) — remaining capture allocations fall back to pool nodes (set HARTSY_GRAPH_ARENA_MB higher).");
+            }
+        }
         return CudaMemory.Allocate(byteSize);
     }
 
-    /// <summary>Frees a GPU buffer asynchronously on the compute stream. Skips cached pointers (weight + activation).</summary>
+    /// <summary>True when the pointer lies inside ANY live graph-capture arena (never individually freed).</summary>
+    internal static bool IsArenaPtr(State s, ulong p)
+    {
+        for (int i = 0; i < s.LiveArenas.Count; i++)
+            if (p >= s.LiveArenas[i].basePtr && p < s.LiveArenas[i].basePtr + s.LiveArenas[i].capacity)
+                return true;
+        return false;
+    }
+
+    /// <summary>Allocates a fresh per-capture arena and activates it. Call immediately before a decode-step
+    /// graph capture; pair with <see cref="EndGraphArena"/>, and release via <see cref="FreeGraphArena"/>
+    /// when the captured graph is disposed. Returns the arena base (0 = allocation failed, arena disabled
+    /// for this capture).</summary>
+    public static ulong BeginGraphArena()
+    {
+        State s = Resolve();
+        long mb = long.TryParse(Environment.GetEnvironmentVariable("HARTSY_GRAPH_ARENA_MB"), out long v) ? Math.Clamp(v, 8, 2048) : 32;
+        nuint cap = (nuint)(mb << 20);
+        ulong basePtr;
+        try { basePtr = CudaMemory.Allocate(cap); }
+        catch (CudaException) { return 0; }   // VRAM-tight (e.g. gemma2 non-low-vram edge): run without arena
+        s.LiveArenas.Add((basePtr, cap));
+        s.ArenaBase = basePtr;
+        s.ArenaCapacity = cap;
+        s.ArenaOffset = 0;
+        s.ArenaOverflowLogged = false;
+        s.ArenaActive = true;
+        return basePtr;
+    }
+
+    /// <summary>Deactivates the in-progress capture arena (buffers handed out stay valid for the graph's
+    /// lifetime) and logs the actual bytes used, for capacity tuning.</summary>
+    public static void EndGraphArena()
+    {
+        State s = Resolve();
+        if (!s.ArenaActive) return;
+        s.ArenaActive = false;
+        HartsyInference.Core.Logging.Logs.Debug(
+            $"[Cuda] graph-capture arena used {(long)s.ArenaOffset >> 10} KB of {(long)s.ArenaCapacity >> 20} MB.");
+    }
+
+    /// <summary>Releases a per-capture arena when its graph is disposed (stream-ordered free).</summary>
+    public static void FreeGraphArena(ulong basePtr)
+    {
+        if (basePtr == 0) return;
+        State s = Resolve();
+        for (int i = 0; i < s.LiveArenas.Count; i++)
+        {
+            if (s.LiveArenas[i].basePtr == basePtr)
+            {
+                s.LiveArenas.RemoveAt(i);
+                CudaMemory.FreeAsync(basePtr, s.StreamHandle);
+                return;
+            }
+        }
+    }
+
+    /// <summary>Frees a GPU buffer asynchronously on the compute stream. Skips cached pointers (weight + activation) and arena pointers.</summary>
     public static void FreeDevice(ulong gpuPtr)
     {
         State s = Resolve();
-        if (gpuPtr != 0 && !s.CachedPointers.Contains(gpuPtr))
+        if (gpuPtr != 0 && !s.CachedPointers.Contains(gpuPtr) && !IsArenaPtr(s, gpuPtr))
         {
             CudaMemory.FreeAsync(gpuPtr, s.StreamHandle);
         }
@@ -288,9 +383,9 @@ internal static unsafe class GpuTransferHelper
     {
         if (s.SidecarCache.Remove(tensor, out (ulong xq, ulong xd, ulong xs, int k) sc))
         {
-            CudaMemory.FreeAsync(sc.xq, s.StreamHandle);
-            CudaMemory.FreeAsync(sc.xd, s.StreamHandle);
-            CudaMemory.FreeAsync(sc.xs, s.StreamHandle);
+            if (!IsArenaPtr(s, sc.xq)) CudaMemory.FreeAsync(sc.xq, s.StreamHandle);
+            if (!IsArenaPtr(s, sc.xd)) CudaMemory.FreeAsync(sc.xd, s.StreamHandle);
+            if (!IsArenaPtr(s, sc.xs)) CudaMemory.FreeAsync(sc.xs, s.StreamHandle);
         }
     }
 
@@ -354,7 +449,7 @@ internal static unsafe class GpuTransferHelper
                 void* cpuPtr = tensor.EnsureHostBuffer();
                 CudaMemory.CopyDeviceToHost(cpuPtr, cached.gpuPtr, cached.bytes);
                 s.CachedPointers.Remove(cached.gpuPtr);
-                CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
+                if (!IsArenaPtr(s, cached.gpuPtr)) CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
             }
         };
 
@@ -367,12 +462,30 @@ internal static unsafe class GpuTransferHelper
                 s.Context?.EnsureCurrent();
                 RemoveSidecar(s, tensor);
                 s.CachedPointers.Remove(cached.gpuPtr);
-                CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
+                if (!IsArenaPtr(s, cached.gpuPtr)) CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
             }
         };
         // Route this tensor's finalizer cleanup into THIS backend's context bucket so a concurrent backend's
         // drain thread never runs it against the wrong (and unsynchronized) State.
         tensor._gpuCleanupContext = s.Context?.Handle ?? 0;
+    }
+
+    /// <summary>Frees EVERY cached weight cast (they are pure caches — always rebuildable from the source
+    /// weight) and returns the bytes released. Called from CudaMemory's OOM retry so opportunistic cast
+    /// caching can never make an allocation fail that would have succeeded without it.</summary>
+    internal static long EvictAllWeightCasts()
+    {
+        State s = Resolve();
+        long released = 0;
+        foreach (KeyValuePair<Tensor, (ulong castPtr, nuint bytes)> kv in s.WeightCastCache)
+        {
+            s.CachedPointers.Remove(kv.Value.castPtr);
+            CudaMemory.FreeAsync(kv.Value.castPtr, s.StreamHandle);
+            s.CachedBytes -= (long)kv.Value.bytes;
+            released += (long)kv.Value.bytes;
+        }
+        s.WeightCastCache.Clear();
+        return released;
     }
 
     /// <summary>Returns a cached dtype-upcast of a weight (e.g. fp8→BF16), if one was already computed.</summary>
@@ -606,8 +719,11 @@ internal static unsafe class GpuTransferHelper
         }
         foreach (ulong dptr in s.CachedPointers)
         {
-            CudaMemory.Free(dptr);
+            if (!IsArenaPtr(s, dptr)) CudaMemory.Free(dptr);
         }
+        foreach ((ulong basePtr, nuint _) in s.LiveArenas) CudaMemory.Free(basePtr);
+        s.LiveArenas.Clear();
+        s.ArenaBase = 0; s.ArenaCapacity = 0; s.ArenaOffset = 0; s.ArenaActive = false;
         foreach (Tensor t in s.SidecarCache.Keys.ToList())
             RemoveSidecar(s, t);
         s.WeightCache.Clear();
@@ -649,7 +765,7 @@ internal static unsafe class GpuTransferHelper
                 continue;
             }
             s.CachedPointers.Remove(kv.Value.gpuPtr);
-            CudaMemory.FreeAsync(kv.Value.gpuPtr, s.StreamHandle);
+            if (!IsArenaPtr(s, kv.Value.gpuPtr)) CudaMemory.FreeAsync(kv.Value.gpuPtr, s.StreamHandle);
         }
         s.ActivationCache.Clear();
         if (survivors is not null)

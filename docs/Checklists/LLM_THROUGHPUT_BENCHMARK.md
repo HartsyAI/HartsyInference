@@ -234,6 +234,72 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 > gemma3/qwen2.5's remaining gap has ~3 ms/token of switch-invariant unattributed graph time —
 > see the grind doc round-10 block for the quantified budget and the pending `ncu` action.
 
+> **UPDATE 2026-07-23 (round 11 — the graph node purge: per-capture arena + headroom-guarded weight
+> preload; grind doc round-11 block. The "unattributed 3 ms" was 1881 non-kernel graph nodes —
+> alloc/free pairs and per-token PCIe re-uploads of never-promoted weights. SIX of seven now
+> FASTER than llama-cpp-python:**
+>
+> Column convention (all tables from here on): "ours ÷ llama.cpp" is the plain speed ratio —
+> 1.46 means we generate 46% more tokens per second than llama-cpp-python, NOT 2.46×; below 1.00
+> means we are slower by that percentage.
+>
+> | Model | Ours tok/s | llama.cpp tok/s | ours ÷ llama.cpp | Plain English |
+> |---|---|---|---|---|
+> | Llama-3.2-1B Q8_0 | **213.20** | 190.74 | 1.12 | **12% faster than llama.cpp** |
+> | Qwen3-4B Q4_K_M | **100.68** | 88.70 | 1.13 | **13% faster** |
+> | gemma-2-2b-it Q4_K_M | **139.61** | 122.52 | 1.14 | **14% faster** |
+> | DeepSeek-R1-Distill-1.5B | **224.78** | 182.42 | 1.23 | **23% faster** |
+> | gemma-3-1b-it Q4_K_M | **246.99** | 193.81 | 1.27 | **27% faster** (was 38% slower at day start) |
+> | qwen2.5-0.5b Q4_K_M | **434.25** | 296.80 | 1.46 | **46% faster** (was 48% slower at day start) |
+> | GLM-4-9B Q4_K_M | **43.80** (solo) | 47.72 | 0.92 | 8% slower (best yet) |
+
+> **UPDATE 2026-07-23 (prefill/TTFT campaign opened — decode is won, first-token latency is NOT).**
+> TTFT medians, same ~50-token prompt, same-window llama-cpp-python (ms, lower is better):
+>
+> | Model | Ours TTFT | llama.cpp TTFT | Plain English |
+> |---|---|---|---|
+> | qwen2.5-0.5b | 77 | 4 | 19× slower to first token |
+> | DeepSeek-1.5B | 113 | 7 | 16× slower |
+> | gemma-3-1b | 130 | 7 | 19× slower |
+> | Llama-3.2-1B | 144 | 6 | 24× slower |
+> | gemma-2-2b | 198 | 10 | 20× slower |
+> | Qwen3-4B | 270 | 13 | 21× slower |
+> | GLM-4-9B | 639 | 22 | 29× slower |
+>
+> Attribution (profile + code): prefill Linear averages ~1.8 ms/call. (1) low-vram models route
+> prefill through QuantizedMatMul → cacheWeightCast:false → the ENTIRE weight set is transiently
+> dequantized to F16 (with an F32 staging pass at the F32-activation BF16 resolve) EVERY prefill;
+> (2) non-low-vram models' cast cache sits behind a free-VRAM budget gate (2 GB floor) that the
+> now-fully-resident decode state likely trips, silently forcing the same per-call dequant.
+> llama.cpp prefills straight from quant weights (MMQ kernels) and has neither cost. NEXT:
+> instrument which branch fires in a warm benchmark prefill; tune/bypass the gate for prefill;
+> long-term the real fix is quantized-GEMM prefill kernels (MMQ-class).
+> The benchmark harness now prints `ttft median` alongside tg for every model/mode.
+
+> **UPDATE 2026-07-23 (TTFT round 1: prefill cast-cache fix — llama 3.2× and Qwen3 1.9× faster to
+> first token; the small-model prefill floor is NOT dequant and needs its own attribution).**
+> Root causes fixed: (1) the benchmark loaded EVERY model `lowVramQuant:true`, routing all prefill
+> through QuantizedMatMul which hard-disabled weight-cast caching → the entire weight set was
+> re-dequantized every prefill (now: low-vram only for >2 GB GGUFs); (2) QuantizedMatMul now
+> participates in the budget-gated cast cache (quantized weights use a stricter 4 GB free-VRAM
+> floor); (3) the cast cache is now SAFE-BY-CONSTRUCTION: CudaMemory's OOM retry evicts all cached
+> casts (pure, rebuildable) before failing — this un-broke gemma2's 2.25 GB scaled-embed alloc.
+>
+> | Model | TTFT before | TTFT now | llama.cpp | Verdict |
+> |---|---|---|---|---|
+> | Llama-3.2-1B | 144 ms | **45 ms** | 6 ms | 3.2× better; dequant WAS the cost (Q8_0) |
+> | Qwen3-4B | 270 ms | **144 ms** | 13 ms | 1.9× better (partial cache within budget) |
+> | gemma-2-2b | 198 ms | 110 (graph-off) / 229 (graph-on!) | 10 ms | OOM fixed; graph-on REGRESSION = suspected cast-eviction thrash (scaled-embed alloc evicts the casts prefill just built, every generation) — investigate |
+> | DeepSeek-1.5B | 113 ms | 121-125 ms | 7 ms | flat — prefill NOT dequant-dominated |
+> | gemma-3-1b | 130 ms | 145-149 ms | 7 ms | flat-to-worse — same |
+> | qwen2.5-0.5b | 77 ms | 85-87 ms | 4 ms | flat-to-worse — same |
+> | GLM-4-9B | 639 ms | 597-624 ms | 22 ms | marginal (casts don't fit its budget) |
+>
+> NEXT: profile a WARM cached prefill on a small Q4_K model to name its ~85-150 ms floor (it is
+> not weight dequant); fix the gemma2 graph-on eviction thrash (order the scaled-embed alloc
+> before prefill, or exempt in-use casts from eviction); GLM's real fix remains MMQ-class
+> quantized-GEMM prefill kernels. Decode is UNAFFECTED by all of this (verified same tg medians).
+
 Superseded pre-dp4a table (2026-07-22, earlier session):
 
 | Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (ours÷llama, graph-on) |
