@@ -44,6 +44,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     // Gemma-4 per-layer embeddings (PLE): a top-level small embedding table + projection, shared across every
     // layer (each layer additionally has its own gate/proj/post-norm — see Layer). Null when PerLayerEmbeddingDim=0.
     private Tensor? _perLayerTokEmbd, _perLayerModelProj, _perLayerProjNorm;
+    private Tensor? _perLayerTokEmbdRaw;   // quantized original — device-resident PLE gather for graph decode
 
     /// <summary>The architecture this transformer was built for.</summary>
     public TransformerConfig Config => _cfg;
@@ -186,7 +187,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (_cfg.UseLayerNorm) _finalNormBias = LoadBiasOrZero(w, $"{prefix}.norm.bias", _cfg.HiddenSize);
         if (_cfg.PerLayerEmbeddingDim > 0)
         {
-            _perLayerTokEmbd = EnsureF32(w[$"{prefix}.per_layer_token_embd.weight"]);
+            _perLayerTokEmbdRaw = w[$"{prefix}.per_layer_token_embd.weight"];
+            _perLayerTokEmbd = EnsureF32(_perLayerTokEmbdRaw);
             _perLayerModelProj = w[$"{prefix}.per_layer_model_proj.weight"];
             _perLayerProjNorm = LoadNorm(w[$"{prefix}.per_layer_proj_norm.weight"], addOne: false);
         }
@@ -210,7 +212,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>All weight tensors (stable references) for <see cref="IBackend.PreloadWeights"/> /
     /// <see cref="IBackend.FreeWeights"/>.</summary>
-    public IEnumerable<Tensor> EnumerateWeights()
+    public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits = true)
     {
         // The embedding table is gathered host-side. Upload it to the GPU only when it doubles as the (tied)
         // lm_head; when the model has a separate lm_head, _embed is host-only — skip it (saves real VRAM, e.g.
@@ -231,7 +233,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (_perLayerModelProj is not null) { yield return _perLayerModelProj; yield return _perLayerProjNorm!; }
         if (_lmHead is not null) yield return _lmHead;
         foreach (Layer l in _layers)
-            foreach (Tensor t in l.EnumerateWeights()) yield return t;
+            foreach (Tensor t in l.EnumerateWeights(includeRedundantSplits)) yield return t;
     }
 
     /// <summary>Token-IDs-in path: host embedding gather (one tiny H2D), then the resident transformer.
@@ -441,7 +443,22 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// (Gemma/Granite/MiniCPM) is NOT excluded — <see cref="EnsureEmbedResidentForGraphDecode"/> pre-applies it
     /// once to a dedicated GPU copy of the embed table, since the graph-decode gather kernel itself has no
     /// scale param.</summary>
-    public bool SupportsGraphDecode(IBackend backend) =>
+    public bool SupportsGraphDecode(IBackend backend)
+    {
+        bool ok = SupportsGraphDecodeCore(backend);
+        if (!ok && Environment.GetEnvironmentVariable("HARTSY_GRAPH_GATE_LOG") == "1")
+            HartsyInference.Core.Logging.Logs.Info(
+                $"[GraphGate] backend={backend.GraphDecodeSupported} mla={_cfg.Mla is null} moe={_cfg.Moe is null} " +
+                $"cross={_cfg.CrossAttnLayers.Count == 0} sink={!_cfg.AttnSink} alibi={_cfg.AlibiMaxBias <= 0f} " +
+                $"parRes={!_cfg.ParallelResidual} absPos={!_cfg.AbsolutePositionEmbeddings} " +
+                $"noRopeGlobal={!_cfg.NoRopeOnGlobalLayers} preNorm={_cfg.NormPlacement == NormPlacement.PreNorm} " +
+                $"embedLn={!_cfg.EmbeddingLayerNorm} kvShared={_cfg.KvSharedFromLayer == 0} " +
+                $"ple={_cfg.PerLayerEmbeddingDim == 0 || _perLayerTokEmbdRaw?.DType == DType.Q5_K} " +
+                $"(pleDim={_cfg.PerLayerEmbeddingDim} pleRaw={_perLayerTokEmbdRaw?.DType.ToString() ?? "null"})");
+        return ok;
+    }
+
+    private bool SupportsGraphDecodeCore(IBackend backend) =>
         backend.GraphDecodeSupported
         && _cfg.Mla is null
         && _cfg.Moe is null
@@ -451,7 +468,6 @@ public sealed unsafe class GenericTransformer : IDisposable
         // FlashAttentionDev plumbs them through as per-layer capture constants, and ForwardGraphDecodeStep
         // selects the local-theta rope table per layer. Gemma-4's per-layer SWA head-dim (HeadDimSwa) is NOT
         // supported — the graph rope tables are built at a single head dim.
-        && _cfg.HeadDimSwa == 0
         && !_cfg.AttnSink
         && _cfg.AlibiMaxBias <= 0f
         && !_cfg.ParallelResidual
@@ -459,7 +475,10 @@ public sealed unsafe class GenericTransformer : IDisposable
         && !_cfg.NoRopeOnGlobalLayers
         && _cfg.NormPlacement == NormPlacement.PreNorm
         && !_cfg.EmbeddingLayerNorm
-        && _cfg.PerLayerEmbeddingDim == 0;
+        // Gemma-4 (2026-07-23 bring-up): per-layer SWA head dim (dual-DIM rope tables), the weightless
+        // V-norm, PLE (device-side Q5_K row gather by the device token id), and KV-SHARING (shared layers
+        // run a q-only path against the donor layer's cache) are all graph-supported now.
+        && (_cfg.PerLayerEmbeddingDim == 0 || _perLayerTokEmbdRaw?.DType == DType.Q5_K);
 
     /// <summary>Ensures the embedding table is GPU-resident (permanent weight-cache, like any other weight) and
     /// returns it — <see cref="ForwardGraphDecodeStep"/>'s on-device embed gather needs this; untied models
@@ -480,6 +499,14 @@ public sealed unsafe class GenericTransformer : IDisposable
         return _graphDecodeEmbedScaled;
     }
 
+    /// <summary>Uploads the QUANTIZED per-layer token embedding table for graph decode's device-side PLE
+    /// gather (Q5_K: 1.6 GB for E2B vs 9.4 GB F32 — the F32 host copy stays host-only for the eager path).</summary>
+    public void EnsurePleResidentForGraphDecode(IBackend backend)
+    {
+        ThrowIfDisposed();
+        if (_perLayerTokEmbdRaw is not null) backend.PreloadWeights([_perLayerTokEmbdRaw, _perLayerModelProj!, _perLayerProjNorm!]);
+    }
+
     /// <summary>Returns the graph-decode RoPE table, building (or rebuilding, if <paramref name="minCapacity"/>
     /// exceeds what's already built) it via <see cref="IBackend.BuildRopeTableDevice"/>. Cached on this
     /// instance. A rebuild disposes the orphaned old tensors instead of leaking them — safe because a rebuild
@@ -498,9 +525,13 @@ public sealed unsafe class GenericTransformer : IDisposable
             (_graphDecodeCos, _graphDecodeSin) = backend.BuildRopeTableDevice(minCapacity, _cfg.HeadDim, _cfg.RotaryDim, _cfg.RopeTheta, _cfg.RopeScaling);
             if (_cfg.RopeLocalTheta > 0)
             {
-                // Same rotary span and scaling as the eager dual-RoPE build (Forward's cosLocal/sinLocal).
+                // Same dims/rotary span/scaling as the eager dual-RoPE build (Forward's cosLocal/sinLocal):
+                // Gemma-4's local layers use a NARROWER head dim (HeadDimSwa) — their table must be built at
+                // that width, not the global HeadDim (rows are [pos, headDim]-indexed by the rope kernels).
+                int dLocal = _cfg.HeadDimSwa > 0 ? _cfg.HeadDimSwa : _cfg.HeadDim;
+                int rotaryLocal = _cfg.HeadDimSwa > 0 ? _cfg.RotaryDimSwa : _cfg.RotaryDim;
                 (_graphDecodeCosLocal, _graphDecodeSinLocal) =
-                    backend.BuildRopeTableDevice(minCapacity, _cfg.HeadDim, _cfg.RotaryDim, _cfg.RopeLocalTheta, _cfg.RopeScaling);
+                    backend.BuildRopeTableDevice(minCapacity, dLocal, rotaryLocal, _cfg.RopeLocalTheta, _cfg.RopeScaling);
             }
             _graphDecodeCapacity = minCapacity;
             oldCos?.Dispose();
@@ -535,13 +566,49 @@ public sealed unsafe class GenericTransformer : IDisposable
         Tensor embeds = new(new TensorShape(1, 1, _cfg.HiddenSize), DType.F32);
         backend.EmbedGatherDecodeStep(embeds, embedTable, deviceTokenId);
 
+        // Gemma-4 PLE (graph flavor of ComputePerLayerInputs): device Q5_K row gather by the device token
+        // id replaces the host gather; the projected path and per-layer mixing use the same ops in the same
+        // order as eager, so the math matches the eager reference exactly.
+        Tensor[]? perLayerInputs = null;
+        if (_cfg.PerLayerEmbeddingDim > 0)
+        {
+            int ple = _cfg.PerLayerEmbeddingDim;
+            int layers = _layers.Length;
+            Tensor tokDirect = new(new TensorShape(1, 1, ple * layers), DType.F32);
+            backend.PleGatherDecodeStep(tokDirect, _perLayerTokEmbdRaw!, MathF.Sqrt(ple), deviceTokenId);
+            Tensor projFlat = new(new TensorShape(1, 1, ple * layers), DType.F32);
+            Project(backend, projFlat, embeds, _perLayerModelProj!, null, _cfg.LowVramQuant);
+            backend.Scale(projFlat, projFlat, 1f / MathF.Sqrt(_cfg.HiddenSize));
+            perLayerInputs = new Tensor[layers];
+            float invSqrt2 = 1f / MathF.Sqrt(2f);
+            TensorShape chunkShape = new(1, 1, ple);
+            for (int il = 0; il < layers; il++)
+            {
+                Tensor projChunk = new(chunkShape, DType.F32);
+                backend.SliceLastDim(projChunk, projFlat, il * ple);
+                Tensor projNormed = new(chunkShape, DType.F32);
+                backend.RmsNorm(projNormed, projChunk, _perLayerProjNorm!, _cfg.RmsNormEps);
+                projChunk.Dispose();
+                Tensor tokChunk = new(chunkShape, DType.F32);
+                backend.SliceLastDim(tokChunk, tokDirect, il * ple);
+                Tensor summed = new(chunkShape, DType.F32);
+                backend.Add(summed, projNormed, tokChunk);
+                projNormed.Dispose(); tokChunk.Dispose();
+                backend.Scale(summed, summed, invSqrt2);
+                perLayerInputs[il] = summed;
+            }
+            projFlat.Dispose();
+            tokDirect.Dispose();
+        }
+
         Tensor hidden = embeds;
         for (int i = 0; i < _layers.Length; i++)
         {
             // Gemma-3 dual-RoPE: local (sliding-window) layers rotate with the local-theta table.
             bool localRope = _graphDecodeCosLocal is not null && !_cfg.IsGlobalLayer(i);
             Tensor next = _layers[i].ForwardGraphStep(backend, hidden, cache, i,
-                localRope ? _graphDecodeCosLocal! : cosTable, localRope ? _graphDecodeSinLocal! : sinTable, devicePos);
+                localRope ? _graphDecodeCosLocal! : cosTable, localRope ? _graphDecodeSinLocal! : sinTable, devicePos,
+                perLayerInputs?[i]);
             hidden.Dispose();
             hidden = next;
         }
@@ -1222,12 +1289,30 @@ public sealed unsafe class GenericTransformer : IDisposable
             return result;
         }
 
-        public IEnumerable<Tensor> EnumerateWeights()
+        public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits = true)
         {
-            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _parFfnNorm, _parFfnNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _qkvW, _qkvB, _qkW, _qkB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _vNormOnes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _gateB, _upW, _upB, _gateUpW, _gateUpB, _downW, _downB, _pleInpGate, _pleProj, _plePostNorm, _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale];
-            foreach (Tensor? t in all) if (t is not null) yield return t;
+            // REDUNDANT SPLIT ORIGINALS (whose load-time fused copies serve every single-sequence decode
+            // and prefill path) are enumerated LAST, and the device-residency preloader excludes them
+            // outright (includeRedundantSplits: false) — on GLM-4 the duplicated gate/up + q/k splits are
+            // ~2.9 GB that crowded real weights out of residency (43.8 → 27.9 tok/s via per-token graph
+            // memcpy nodes). Their one consumer (the batch scheduler's split-projection path on
+            // mixed-dtype layers) lazily auto-promotes them on first use instead.
+            bool qkvFused = _qkvW is not null;
+            bool qkFused = _qkW is not null;
+            bool gluFused = _gateUpW is not null;
+            Tensor?[] primary = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _parFfnNorm, _parFfnNormBias,
+                qkvFused || qkFused ? null : _qW, _qB, qkvFused || qkFused ? null : _kW, _kB, qkvFused ? null : _vW, _vB, _oW, _oB,
+                _qkvW, _qkvB, _qkW, _qkB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _vNormOnes,
+                _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj,
+                gluFused ? null : _gateW, _gateB, gluFused ? null : _upW, _upB, _gateUpW, _gateUpB, _downW, _downB,
+                _pleInpGate, _pleProj, _plePostNorm, _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale];
+            Tensor?[] redundant = [qkvFused || qkFused ? _qW : null, qkvFused || qkFused ? _kW : null,
+                qkvFused ? _vW : null, gluFused ? _gateW : null, gluFused ? _upW : null];
+            foreach (Tensor? t in primary) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
             if (_crossAttn is not null) foreach (Tensor t in _crossAttn.EnumerateWeights()) yield return t;
+            if (includeRedundantSplits)
+                foreach (Tensor? t in redundant) if (t is not null) yield return t;
         }
 
         /// <summary>mllama gated cross-attention forward: reads the encoded <paramref name="vision"/> features
@@ -1474,13 +1559,14 @@ public sealed unsafe class GenericTransformer : IDisposable
         /// (MLA, MoE, cross-attention, sliding window, softcap, sink, ALiBi, parallel residual, sandwich norm) —
         /// this method does not re-check, it assumes the plain GQA/RoPE decoder shape.</summary>
         public Tensor ForwardGraphStep(IBackend backend, Tensor hidden, IKvCache cache, int layerIndex,
-            Tensor cosTable, Tensor sinTable, ulong devicePos)
+            Tensor cosTable, Tensor sinTable, ulong devicePos, Tensor? perLayerInput = null)
         {
             const int t = 1;
             int h = _cfg.HiddenSize;
             int hq = _cfg.NumHeads;
             int hkv = _cfg.NumKvHeads;
-            int d = _cfg.HeadDim;
+            int d = _cfg.HeadDimFor(layerIndex);        // Gemma-4: local/SWA layers are narrower than global
+            int rotaryDim = _cfg.RotaryDimFor(layerIndex);
             int group = _cfg.KvGroup;
             TensorShape flat = new(1, t, h);
 
@@ -1501,10 +1587,31 @@ public sealed unsafe class GenericTransformer : IDisposable
             // KvCacheAppendDev reads tNew from Shape[2] (1 in both layouts).
             bool fullNorm = _cfg.QkNorm && _cfg.QkNormFullDim;
             bool interleaved = _cfg.Rope == RopeStyle.Interleaved;
-            Tensor kFull = cache.KeyPrefix(layerIndex);
-            Tensor vFull = cache.ValuePrefix(layerIndex);
+            // Gemma-4 KV-sharing: shared layers (no k/v of their own) attend an earlier donor layer's
+            // cache — the donor ran earlier in this same captured step, so its cache tensors are the same
+            // device buffers the capture already references. Donor pairing preserves the head dim.
+            bool hasOwnKv = _cfg.HasOwnKv(layerIndex);
+            int kvLayer = hasOwnKv ? layerIndex : _cfg.KvDonorLayer(layerIndex);
+            Tensor kFull = cache.KeyPrefix(kvLayer);
+            Tensor vFull = cache.ValuePrefix(kvLayer);
             Tensor q;
-            if (!_cfg.QkNorm && _qkvW is not null)
+            if (!hasOwnKv)
+            {
+                // Q-only path (mirrors eager): project q, per-head q-norm, rope in place — no scatter.
+                q = new(new TensorShape(1, hq, t, d), DType.F32);
+                Project(backend, q, pre, _qW!, _qB, _cfg.LowVramQuant);
+                pre.Dispose();
+                if (_cfg.QkNorm)
+                {
+                    Tensor qN = new(new TensorShape(1, hq, t, d), DType.F32);
+                    if (_cfg.UseLayerNorm) backend.LayerNorm(qN, q, _qNorm!, _qNormBias!, _cfg.RmsNormEps);
+                    else backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
+                    q.Dispose();
+                    q = qN;
+                }
+                backend.RopeApplyDecodeStep(q, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            }
+            else if (!_cfg.QkNorm && !_cfg.VNorm && _qkvW is not null)
             {
                 // Fused QKV epilogue (no QK-norm between projection and rope): the concatenated [q|k|v]
                 // projection output feeds ONE kernel that ropes q, ropes k into the cache, and copies v into
@@ -1515,7 +1622,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 pre.Dispose();
                 q = new(new TensorShape(1, hq, t, d), DType.F32);
                 backend.QkvRopeScatterDecodeStep(q, kFull, vFull, qkvOut, cosTable, sinTable,
-                    hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                    hq, hkv, d, rotaryDim, interleaved, devicePos);
                 qkvOut.Dispose();
             }
             else if (_cfg.QkNorm && !_cfg.QkNormFullDim && !_cfg.UseLayerNorm && !_cfg.VNorm
@@ -1536,7 +1643,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                     Project(backend, qkvOut, pre, _qkvW, _qkvB, _cfg.LowVramQuant);
                     pre.Dispose();
                     backend.QkvNormRopeScatterDecodeStep(q, kFull, vFull, qkvOut, _qNorm!, _kNorm!,
-                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
                     qkvOut.Dispose();
                 }
                 else
@@ -1547,12 +1654,12 @@ public sealed unsafe class GenericTransformer : IDisposable
                     Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
                     pre.Dispose();
                     backend.QkNormRopeScatterVDecodeStep(q, kFull, vFull, qkOut, v, _qNorm!, _kNorm!,
-                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
                     qkOut.Dispose();
                     v.Dispose();
                 }
             }
-            else if (!_cfg.QkNorm && _qkW is not null
+            else if (!_cfg.QkNorm && !_cfg.VNorm && _qkW is not null
                 && Environment.GetEnvironmentVariable("HARTSY_QK_SCATTER") != "0")   // kill-switch, mirrors HARTSY_QK_FUSION
             {
                 // Partial fusion (mixed-dtype v, no QK-norm): one [q|k] GEMV plus v's own projection feed the
@@ -1565,7 +1672,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 pre.Dispose();
                 q = new(new TensorShape(1, hq, t, d), DType.F32);
                 backend.QkRopeScatterVDecodeStep(q, kFull, vFull, qkOut, v, cosTable, sinTable,
-                    hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                    hq, hkv, d, rotaryDim, interleaved, devicePos);
                 qkOut.Dispose();
                 v.Dispose();
             }
@@ -1576,6 +1683,15 @@ public sealed unsafe class GenericTransformer : IDisposable
                 Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
                 ProjectQkv(backend, q, k, v, pre, t, hasOwnKv: true, _cfg.LowVramQuant);
                 pre.Dispose();
+
+                // Gemma-4 weightless V RMSNorm (v / rms(v), constant-ones weight) — mirrors eager Forward.
+                if (_cfg.VNorm)
+                {
+                    Tensor vN = new(v.Shape, DType.F32);
+                    backend.RmsNorm(vN, v, _vNormOnes!, _cfg.RmsNormEps);
+                    v.Dispose();
+                    v = vN;
+                }
 
                 if (_cfg.QkNorm)
                 {
@@ -1599,7 +1715,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 // two ropes and two appends — the separate-source variant of the fused-QKV path above.
                 Tensor qRoped = new(new TensorShape(1, hq, t, d), DType.F32);
                 backend.RopeScatterKvDecodeStep(qRoped, kFull, vFull, q, k, v, cosTable, sinTable,
-                    hq, hkv, d, _cfg.RotaryDim, interleaved, devicePos);
+                    hq, hkv, d, rotaryDim, interleaved, devicePos);
                 q.Dispose(); k.Dispose(); v.Dispose();
                 q = qRoped;
             }
@@ -1655,6 +1771,10 @@ public sealed unsafe class GenericTransformer : IDisposable
                 backend.Add(result, afterAttn, mlpOut);
             }
             afterAttn.Dispose(); mlpOut.Dispose();
+            // Gemma-4: mix in this layer's per-layer embedding and apply the learned output scale —
+            // identical ops and order to the eager Forward's tail.
+            if (perLayerInput is not null) result = ApplyPerLayerEmbedding(backend, result, perLayerInput, t);
+            if (_outScale is float os) backend.Scale(result, result, os);
             return result;
         }
 

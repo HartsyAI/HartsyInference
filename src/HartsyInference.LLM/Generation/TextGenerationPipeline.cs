@@ -41,18 +41,38 @@ public sealed class TextGenerationPipeline
     {
         try
         {
+            // 2 GB base; PLUS the F32 embed table graph decode will materialize later (2.5 GB on GLM-4's
+            // 151k×4096 — packing the preload without reserving it OOMed GLM's graph setup) — but ONLY for
+            // graph-eligible models: reserving it for graph-EXCLUDED ones (gemma-4 pre-bring-up) starved
+            // their eager preload budget and halved eager decode (91.7 → 48.8 tok/s, 2026-07-23).
+            TransformerConfig cfg = _model.Config;
             long headroom = 2L << 30;
+            if (_model.SupportsGraphDecode(_backend))
+                headroom += (long)cfg.VocabSize * cfg.HiddenSize * sizeof(float);
+            // NOTE: an extra +2 GB low-VRAM slack lived here briefly (prefill-transient protection) and
+            // was REMOVED: it pushed ~0.8 GB of GLM's weights out of the preload budget, and unresident
+            // weights are catastrophic under graph decode — they bake per-token PCIe memcpy nodes into the
+            // captured graph (GLM 43.8 → 27.9 tok/s). Decode residency outranks prefill slack; prefill
+            // transients are protected by the cast cache's budget floor and the OOM cast-eviction retry.
             if (_backend.FreeMemoryBytes() is long free && free > headroom)
             {
                 List<Tensor> toPreload = [];
                 long budget = free - headroom;
-                foreach (Tensor t in _model.EnumerateWeights())
+                foreach (Tensor t in _model.EnumerateWeights(includeRedundantSplits: false))
                 {
                     long bytes = Tensor.ComputeByteSize(t.Shape, t.DType);
                     if (budget - bytes < 0) continue;
                     budget -= bytes;
                     toPreload.Add(t);
                 }
+                long skipped = 0; int skippedCount = 0;
+                foreach (Tensor t in _model.EnumerateWeights(includeRedundantSplits: false))
+                {
+                    long b = Tensor.ComputeByteSize(t.Shape, t.DType);
+                    if (!toPreload.Contains(t)) { skipped += b; skippedCount++; }
+                }
+                HartsyInference.Core.Logging.Logs.Info(
+                    $"[preload] free={_backend.FreeMemoryBytes() >> 20}MB headroom={headroom >> 20}MB kept={toPreload.Count} skipped={skippedCount} ({skipped >> 20}MB left lazy)");
                 _backend.PreloadWeights(toPreload);
             }
         }
@@ -213,6 +233,7 @@ public sealed class TextGenerationPipeline
         PreloadDecodeWeights();   // idempotent — re-checks in case load-time budget has changed
 
         Tensor embedTable = _model.EnsureEmbedResidentForGraphDecode(_backend);
+        _model.EnsurePleResidentForGraphDecode(_backend);   // no-op for non-PLE models
         (Tensor cosTable, Tensor sinTable) = _model.EnsureRopeTableForGraphDecode(_backend, cache.MaxSequenceLength);
         ulong devicePos = _backend.AllocDevicePos();
         ulong deviceTokenId = _backend.AllocDeviceTokenId();

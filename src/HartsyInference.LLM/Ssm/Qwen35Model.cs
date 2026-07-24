@@ -21,6 +21,9 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
     private readonly IReadOnlyDictionary<string, Tensor> _w;
+
+    public IEnumerable<Tensor> EnumerateWeights()
+        => _w.Where(kv => kv.Key != "__embed_f32").Select(kv => kv.Value);   // F32 embed copy is host-only
     private readonly bool[] _isLinear;   // per-layer: true = Gated DeltaNet, false = regular attention
 
     // Gated DeltaNet per-layer recurrent state (null for regular-attention layers). Carried across calls so
@@ -29,6 +32,11 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
     // _deltaState[i]: the [S_v, S_v] per-head state matrix, flattened [NumVHeads * S_v * S_v].
     private readonly float[]?[] _convHistory;
     private readonly float[]?[] _deltaState;
+    // Device-resident mirrors for the seq=1 decode fast path (lazily created; ping-ponged with the
+    // host arrays at the prefill↔decode boundary — see EnsureStateOnDevice / EnsureStateOnHost).
+    private readonly Tensor?[] _convHistT;
+    private readonly Tensor?[] _deltaStateT;
+    private readonly bool[] _stateOnDevice;
     // Regular-attention layers' KV cache (unused slots for linear-attn layers are simply never touched).
     // ISsmModel has no "expected max length" input, so this is a practical fixed cap, not a general solution.
     private const int MaxAttnSeqLen = 8192;
@@ -79,6 +87,9 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
 
         _convHistory = new float[layers][];
         _deltaState = new float[layers][];
+        _convHistT = new Tensor?[layers];
+        _deltaStateT = new Tensor?[layers];
+        _stateOnDevice = new bool[layers];
         for (int i = 0; i < layers; i++)
         {
             if (!_isLinear[i]) continue;
@@ -108,17 +119,42 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
 
     public static Qwen35Model Load(string ggufPath)
     {
-        (Dictionary<string, Tensor> w, GgufModelLoader.LoadedGgufModel handle) = GgufModelLoader.LoadDequantized(ggufPath, DType.F32);
+        // QUANT-RESIDENT load (2026-07-24): weights stay in their GGUF quantization so every
+        // backend.Linear dispatches the fused quant GEMV / dp4a decode paths — the previous
+        // LoadDequantized(F32) build ran all Linears on F32 weights (6× the bytes; no dp4a).
+        // RelabelRank2ToPyTorchOrder is a pure metadata swap (GGUF rank-2 bytes are already
+        // [out, in]), so it is quant-safe — unlike the old memcpy Relabel, which was F32-only.
+        GgufModelLoader.LoadedGgufModel handle = GgufModelLoader.Load(ggufPath);
         try
         {
-            // Relabel every 2D nn.Linear weight to [out, in]; ssm_conv1d/ssm_a/ssm_dt.bias/ssm_norm/norms are
-            // read directly with explicit indexing (same split as Mamba2Model.Load) and left alone.
+            Dictionary<string, Tensor> w = GgufModelLoader.RelabelRank2ToPyTorchOrder(handle.Weights);
+            // Host-consumed / non-Linear tensors must be F32:
+            //  - every rank-1 tensor (norm weights, ssm_a, ssm_dt.bias — RmsNorm and the host SSM
+            //    math read them as float*),
+            //  - ssm_conv1d.weight (host conv loop; ALSO restored to its original GGUF labeling,
+            //    which the conv indexing comments assume — taken from the pre-relabel dict).
             foreach (string key in w.Keys.ToList())
             {
-                if (!key.EndsWith(".weight", StringComparison.Ordinal) || w[key].Shape.Rank != 2) continue;
-                if (key.Contains("ssm_conv1d")) continue;
-                w[key] = Relabel(w[key]);
+                if (key.Contains("ssm_conv1d"))
+                {
+                    Tensor conv = handle.Weights[key];
+                    w[key] = conv.DType == DType.F32 ? conv
+                        : conv.DType.IsQuantized ? GgufDequantizer.Dequantize(conv, DType.F32)
+                        : conv.CastTo(DType.F32);
+                }
+                else if (w[key].Shape.Rank != 2 && w[key].DType != DType.F32)
+                {
+                    Tensor t = w[key];
+                    w[key] = t.DType.IsQuantized ? GgufDequantizer.Dequantize(t, DType.F32) : t.CastTo(DType.F32);
+                }
             }
+            // Embedding gather runs host-side over F32 rows: keep a dedicated F32 copy; the dict
+            // entry stays QUANT so the (tied) lm-head Linear uses the fused quant GEMV.
+            Tensor embQ = w["token_embd.weight"];
+            Tensor embF32 = embQ.DType == DType.F32 ? embQ
+                : embQ.DType.IsQuantized ? GgufDequantizer.Dequantize(embQ, DType.F32)
+                : embQ.CastTo(DType.F32);
+            w["__embed_f32"] = embF32;
             GgufMetadata m = handle.Metadata;
             const string arch = "qwen35";
             int dModel = (int)m.GetUInt32($"{arch}.embedding_length");
@@ -160,15 +196,25 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
         int seq = ids.Count, d = DModel;
         Tensor h = new(new TensorShape(1, seq, d), DType.F32);
         float* hp = (float*)h.DataPointer;
-        float* emb = (float*)W("token_embd.weight").DataPointer;
+        float* emb = (float*)W("__embed_f32").DataPointer;
         for (int s = 0; s < seq; s++)
             Buffer.MemoryCopy(emb + (long)ids[s] * d, hp + (long)s * d, (long)d * 4, (long)d * 4);
 
+        // seq==1 decode: one rope table for the token position, shared by every attention layer
+        // (previously rebuilt host-side per layer per token).
+        Tensor? stepCos = null, stepSin = null;
+        if (seq == 1)
+        {
+            stepCos = new Tensor(new TensorShape(1, 1, AttnHeadDim), DType.F32);
+            stepSin = new Tensor(new TensorShape(1, 1, AttnHeadDim), DType.F32);
+            BuildRope(stepCos, stepSin, 1, _pos, AttnHeadDim, RotaryDim, RopeTheta);
+        }
         for (int i = 0; i < NumLayers; i++)
         {
-            Tensor next = _isLinear[i] ? BlockLinear(backend, h, i, seq) : BlockAttn(backend, h, i, seq);
+            Tensor next = _isLinear[i] ? BlockLinear(backend, h, i, seq) : BlockAttn(backend, h, i, seq, stepCos, stepSin);
             h.Dispose(); h = next;
         }
+        stepCos?.Dispose(); stepSin?.Dispose();
         _pos += seq;
 
         Tensor normed = new(new TensorShape(1, seq, d), DType.F32);
@@ -190,8 +236,93 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
     /// <summary>Regular causal self-attention layer: GQA + partial RoPE + KV cache, Qwen3-style per-head QK-norm,
     /// and a fused query+gate projection (wq outputs <c>[query | gate]</c>, double width — the gate sigmoid-gates
     /// the attention output before <c>wo</c>, unique to this arch's full-attention layers).</summary>
-    private Tensor BlockAttn(IBackend backend, Tensor hIn, int i, int seq)
+    /// <summary>Device-side seq=1 attention step: replaces the host q|gate de-interleave (a per-layer
+    /// D2H/H2D round-trip) with a SliceTimeRange over the [1,hq,2,hd]-shaped fused projection, and the
+    /// per-layer host rope-table rebuild with the shared per-token table. Rope runs on [1,1,H,hd]-labeled
+    /// copies (ApplyRopeSingle's contract); the tiny relabel copies stay on-device.</summary>
+    private Tensor BlockAttnDeviceStep(IBackend backend, Tensor hIn, int i, Tensor stepCos, Tensor stepSin)
     {
+        int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim, group = hq / hkv;
+        string p = $"blk.{i}";
+        TensorShape flat = new(1, 1, d);
+
+        Tensor xn = new(flat, DType.F32);
+        backend.RmsNorm(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
+
+        // Fused [query | gate] projection, shaped [1, hq, 2, hd] so the per-head de-interleave is a
+        // device SliceTimeRange (each head's row is [q(hd) | g(hd)] = two time-steps of width hd).
+        Tensor qgFull = new(new TensorShape(1, hq, 2, hd), DType.F32);
+        backend.Linear(qgFull, xn, W($"{p}.attn_q.weight"), null);
+        Tensor qHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
+        Tensor gateHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
+        backend.SliceTimeRange(qHm, qgFull, 0, 1);
+        backend.SliceTimeRange(gateHm, qgFull, 1, 1);
+        qgFull.Dispose();
+
+        Tensor k = new(new TensorShape(1, hkv, 1, hd), DType.F32);
+        backend.Linear(k, xn, W($"{p}.attn_k.weight"), null);
+        Tensor vMh = new(new TensorShape(1, hkv, 1, hd), DType.F32);
+        backend.Linear(vMh, xn, W($"{p}.attn_v.weight"), null);
+        xn.Dispose();
+
+        // Per-head QK-norm (reduces over the last dim — shape-agnostic), then rope on [1,1,H,hd] labels.
+        Tensor qN = new(new TensorShape(1, hq, 1, hd), DType.F32);
+        backend.RmsNorm(qN, qHm, W($"{p}.attn_q_norm.weight"), Eps);
+        qHm.Dispose();
+        Tensor kN = new(new TensorShape(1, hkv, 1, hd), DType.F32);
+        backend.RmsNorm(kN, k, W($"{p}.attn_k_norm.weight"), Eps);
+        k.Dispose();
+
+        Tensor qRope = new(new TensorShape(1, 1, hq, hd), DType.F32);
+        backend.CopyTo(qRope, qN);
+        backend.ApplyRopeSingle(qRope, stepCos, stepSin, RotaryDim);
+        Tensor qMh = qN;                      // reuse the head-major tensor as the rope destination
+        backend.CopyTo(qMh, qRope);
+        qRope.Dispose();
+        Tensor kRope = new(new TensorShape(1, 1, hkv, hd), DType.F32);
+        backend.CopyTo(kRope, kN);
+        backend.ApplyRopeSingle(kRope, stepCos, stepSin, RotaryDim);
+        Tensor kMh = kN;
+        backend.CopyTo(kMh, kRope);
+        kRope.Dispose();
+
+        _kvCache.AppendStep(backend, i, kMh, vMh);
+        kMh.Dispose(); vMh.Dispose();
+        int kvLen = _pos + 1;
+        Tensor attn = new(new TensorShape(1, hq, 1, hd), DType.F32);
+        backend.FlashAttention(attn, qMh, _kvCache.KeyPrefix(i), _kvCache.ValuePrefix(i), kvLen, group, causal: true, qOffset: _pos, 1f / MathF.Sqrt(hd));
+        qMh.Dispose();
+
+        // [1,hq,1,hd] ≡ [1,1,hq*hd] bytes at seq=1 — gate, then the output projection, no permutes.
+        Tensor gateSig = new(new TensorShape(1, hq, 1, hd), DType.F32);
+        backend.Sigmoid(gateSig, gateHm);
+        gateHm.Dispose();
+        Tensor gated = new(new TensorShape(1, 1, hq * hd), DType.F32);
+        backend.Mul(gated, attn, gateSig);
+        attn.Dispose(); gateSig.Dispose();
+
+        Tensor attnOut = new(flat, DType.F32);
+        backend.Linear(attnOut, gated, W($"{p}.attn_output.weight"), null);
+        gated.Dispose();
+        Tensor afterAttn = new(flat, DType.F32);
+        backend.Add(afterAttn, hIn, attnOut);
+        attnOut.Dispose();
+
+        Tensor preFfn = new(flat, DType.F32);
+        backend.RmsNorm(preFfn, afterAttn, W($"{p}.post_attention_norm.weight"), Eps);
+        Tensor ffnOut = DenseSwiGlu(backend, preFfn, p, 1);
+        preFfn.Dispose();
+        Tensor result = new(flat, DType.F32);
+        backend.Add(result, afterAttn, ffnOut);
+        afterAttn.Dispose(); ffnOut.Dispose();
+        return result;
+    }
+
+    private Tensor BlockAttn(IBackend backend, Tensor hIn, int i, int seq, Tensor? stepCos = null, Tensor? stepSin = null)
+    {
+        if (seq == 1 && stepCos is not null && backend.GraphDecodeSupported
+            && Environment.GetEnvironmentVariable("HARTSY_SSM_DEVICE_STEP") != "0")
+            return BlockAttnDeviceStep(backend, hIn, i, stepCos, stepSin!);
         int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim, group = hq / hkv;
         string p = $"blk.{i}";
         TensorShape flat = new(1, seq, d);
@@ -323,8 +454,90 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
     /// <c>o_t = S_t·q_t</c>) → gated RMSNorm(o, silu(z)) → output projection + residual. Linear projections and
     /// norms run through <see cref="IBackend"/>; the conv/recurrence/gated-norm run host-side (same split as
     /// <see cref="Mamba2Model"/>'s SSD scan).</summary>
+    private unsafe void EnsureStateOnDevice(int i)
+    {
+        if (_stateOnDevice[i]) return;
+        int histLen = (ConvKernel - 1) * ConvDim, stLen = NumVHeads * HeadVDim * HeadVDim;
+        _convHistT[i] ??= new Tensor(new TensorShape(histLen), DType.F32);
+        _deltaStateT[i] ??= new Tensor(new TensorShape(stLen), DType.F32);
+        fixed (float* src = _convHistory[i])
+            Buffer.MemoryCopy(src, (void*)_convHistT[i]!.DataPointer, (long)histLen * 4, (long)histLen * 4);
+        fixed (float* src = _deltaState[i])
+            Buffer.MemoryCopy(src, (void*)_deltaStateT[i]!.DataPointer, (long)stLen * 4, (long)stLen * 4);
+        _stateOnDevice[i] = true;
+    }
+
+    private unsafe void EnsureStateOnHost(int i)
+    {
+        if (!_stateOnDevice[i]) return;
+        int histLen = (ConvKernel - 1) * ConvDim, stLen = NumVHeads * HeadVDim * HeadVDim;
+        // Reading DataPointer triggers the lazy D2H sync-callback, pulling the device copy down.
+        fixed (float* dst = _convHistory[i])
+            Buffer.MemoryCopy((void*)_convHistT[i]!.DataPointer, dst, (long)histLen * 4, (long)histLen * 4);
+        fixed (float* dst = _deltaState[i])
+            Buffer.MemoryCopy((void*)_deltaStateT[i]!.DataPointer, dst, (long)stLen * 4, (long)stLen * 4);
+        _stateOnDevice[i] = false;
+    }
+
+    /// <summary>Device-side seq=1 decode step for a gated-DeltaNet layer — replaces the per-layer host
+    /// conv/recurrence/gated-norm round-trip (a per-layer Sync + PCIe ping-pong that capped decode at
+    /// ~26 tok/s). Reductions reorder float sums vs the host loops, so outputs are tolerance-equivalent
+    /// (dp4a numerics class), not byte-identical.</summary>
+    private Tensor BlockLinearDeviceStep(IBackend backend, Tensor hIn, int i)
+    {
+        int d = DModel;
+        string p = $"blk.{i}";
+        TensorShape flat = new(1, 1, d);
+        EnsureStateOnDevice(i);
+
+        Tensor xn = new(flat, DType.F32);
+        backend.RmsNorm(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
+        Tensor qkvMixed = new(new TensorShape(1, 1, ConvDim), DType.F32);
+        backend.Linear(qkvMixed, xn, W($"{p}.attn_qkv.weight"), null);
+        Tensor z = new(new TensorShape(1, 1, ValueDim), DType.F32);
+        backend.Linear(z, xn, W($"{p}.attn_gate.weight"), null);
+        Tensor betaRaw = new(new TensorShape(1, 1, NumVHeads), DType.F32);
+        backend.Linear(betaRaw, xn, W($"{p}.ssm_beta.weight"), null);
+        Tensor alphaRaw = new(new TensorShape(1, 1, NumVHeads), DType.F32);
+        backend.Linear(alphaRaw, xn, W($"{p}.ssm_alpha.weight"), null);
+        xn.Dispose();
+
+        Tensor q = new(new TensorShape(KeyDim), DType.F32);
+        Tensor k = new(new TensorShape(KeyDim), DType.F32);
+        Tensor v = new(new TensorShape(ValueDim), DType.F32);
+        backend.SsmConvSplitStep(q, k, v, qkvMixed, _convHistT[i]!, W($"{p}.ssm_conv1d.weight"),
+            ConvKernel, NumKHeads, HeadKDim, NumVHeads, HeadVDim, Eps, 1f / MathF.Sqrt(HeadKDim));
+        qkvMixed.Dispose();
+
+        Tensor oT = new(new TensorShape(1, 1, ValueDim), DType.F32);
+        backend.SsmDeltaStep(oT, _deltaStateT[i]!, q, k, v, z,
+            alphaRaw, betaRaw, W($"{p}.ssm_dt.bias"), W($"{p}.ssm_a"), W($"{p}.ssm_norm.weight"),
+            NumVHeads, HeadVDim, HeadKDim, KHeadsPerVHead, Eps);
+        q.Dispose(); k.Dispose(); v.Dispose(); z.Dispose(); alphaRaw.Dispose(); betaRaw.Dispose();
+
+        Tensor attnOut = new(flat, DType.F32);
+        backend.Linear(attnOut, oT, W($"{p}.ssm_out.weight"), null);
+        oT.Dispose();
+        Tensor afterAttn = new(flat, DType.F32);
+        backend.Add(afterAttn, hIn, attnOut);
+        attnOut.Dispose();
+
+        Tensor preFfn = new(flat, DType.F32);
+        backend.RmsNorm(preFfn, afterAttn, W($"{p}.post_attention_norm.weight"), Eps);
+        Tensor mlpOut = DenseSwiGlu(backend, preFfn, p, 1);
+        preFfn.Dispose();
+        Tensor result = new(flat, DType.F32);
+        backend.Add(result, afterAttn, mlpOut);
+        afterAttn.Dispose(); mlpOut.Dispose();
+        return result;
+    }
+
     private Tensor BlockLinear(IBackend backend, Tensor hIn, int i, int seq)
     {
+        if (seq == 1 && backend.GraphDecodeSupported
+            && Environment.GetEnvironmentVariable("HARTSY_SSM_DEVICE_STEP") != "0")   // kill-switch
+            return BlockLinearDeviceStep(backend, hIn, i);
+        EnsureStateOnHost(i);
         int d = DModel;
         string p = $"blk.{i}";
         TensorShape flat = new(1, seq, d);

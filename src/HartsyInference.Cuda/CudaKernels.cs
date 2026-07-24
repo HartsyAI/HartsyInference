@@ -126,6 +126,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmGluActQ8_1F32;
     private readonly nint _lmNormAddRmsNormQ8_1F32;
     private readonly nint _lmRmsNormAddF32;
+    private readonly nint _lmPleGatherQ5KF32;
+    private readonly nint _lmSsmConvSplitStepF32;
+    private readonly nint _lmSsmL2NormHeadsF32;
+    private readonly nint _lmSsmDeltaStepF32;
     private readonly nint _lmAddRmsNormF32;
     private readonly nint _lmRopeInterleavedF32;
     private readonly nint _lmRopeDecodeSplitHalf;
@@ -675,6 +679,10 @@ public sealed class CudaKernels : IDisposable
         _lmGluActQ8_1F32 = _lmF32Module.GetFunction("lm_glu_act_q8_1_f32");
         _lmNormAddRmsNormQ8_1F32 = _lmF32Module.GetFunction("lm_norm_add_rmsnorm_q8_1_f32");
         _lmRmsNormAddF32 = _lmF32Module.GetFunction("lm_rmsnorm_add_f32");
+        _lmPleGatherQ5KF32 = _lmF32Module.GetFunction("lm_ple_gather_q5k_f32");
+        _lmSsmConvSplitStepF32 = _lmF32Module.GetFunction("lm_ssm_conv_split_step_f32");
+        _lmSsmL2NormHeadsF32 = _lmF32Module.GetFunction("lm_ssm_l2norm_heads_f32");
+        _lmSsmDeltaStepF32 = _lmF32Module.GetFunction("lm_ssm_delta_step_f32");
         _lmAddRmsNormF32 = _lmF32Module.GetFunction("lm_add_rmsnorm_f32");
         _lmRopeInterleavedF32 = _lmF32Module.GetFunction("lm_rope_interleaved_f32");
         _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
@@ -1689,14 +1697,18 @@ public sealed class CudaKernels : IDisposable
     public bool HasW8A8Kernels => _w8a8Module is not null;
 
     /// <summary>W8A8 prologue — per-row (per-token) dynamic INT8 quant: x[rows, cols] → q8 + rowScale[rows]
-    /// (dequant scale absmax/127). One block (256 threads) per row.</summary>
-    public unsafe void LaunchW8A8QuantRowwise(ulong q8, ulong rowScale, ulong x, int rows, int cols, nint stream, bool srcF16)
+    /// (dequant scale absmax/127). One block (256 threads) per row. <paramref name="invScale"/> is an
+    /// optional per-input-channel SmoothQuant 1/s_j vector [cols] (pass 0 for none — same "0 = null"
+    /// convention as LaunchW8A8DequantBias's bias arg): when set, x[*, j] is multiplied by invScale[j]
+    /// before the absmax/quantize math, i.e. X_hat = X / s.</summary>
+    public unsafe void LaunchW8A8QuantRowwise(ulong q8, ulong rowScale, ulong x, int rows, int cols, nint stream,
+        bool srcF16, ulong invScale = 0)
     {
         if (_w8a8Module is null) throw new InvalidOperationException("w8a8.ptx not present in the Ptx folder.");
-        ulong xArg = x, qArg = q8, sArg = rowScale;
+        ulong xArg = x, qArg = q8, sArg = rowScale, isArg = invScale;
         uint colsArg = (uint)cols;
-        void** args = stackalloc void*[4];
-        args[0] = &xArg; args[1] = &qArg; args[2] = &sArg; args[3] = &colsArg;
+        void** args = stackalloc void*[5];
+        args[0] = &xArg; args[1] = &qArg; args[2] = &sArg; args[3] = &colsArg; args[4] = &isArg;
         CudaDriverApi.cuLaunchKernel(srcF16 ? _w8a8QuantRowwiseF16 : _w8a8QuantRowwiseF32,
             (uint)rows, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
@@ -2263,6 +2275,62 @@ public sealed class CudaKernels : IDisposable
         args[4] = &dimA; args[5] = &rowsA; args[6] = &epsA;
         CudaDriverApi.cuLaunchKernel(_lmRmsNormAddF32, (uint)totalRows, 1, 1, BlockSize, 1, 1,
             BlockSize * sizeof(float), stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Gemma-4 PLE: dequantizes ONE row of the device-resident Q5_K per-layer token table by the
+    /// DEVICE token id and scales by sqrt(ple) — values bit-identical to the CPU codec (same expression order).</summary>
+    public unsafe void LaunchPleGatherQ5K(ulong output, ulong table, int width, float scale, ulong deviceTokenId, nint stream)
+    {
+        ulong oA = output, tA = table, dA = deviceTokenId;
+        uint wA = (uint)width;
+        float sA = scale;
+        void** args = stackalloc void*[5];
+        args[0] = &oA; args[1] = &tA; args[2] = &wA; args[3] = &sA; args[4] = &dA;
+        uint grid = (uint)((width + 255) / 256);
+        CudaDriverApi.cuLaunchKernel(_lmPleGatherQ5KF32, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Qwen3.5 SSM decode: causal depthwise conv step + SiLU + q/k/v split; shifts the
+    /// device-persistent history ring in place.</summary>
+    public unsafe void LaunchSsmConvSplitStep(ulong q, ulong k, ulong v, ulong qkvMixed, ulong history, ulong convW,
+        int convDim, int keyDim, int valueDim, int kernel, nint stream)
+    {
+        ulong qA = q, kA = k, vA = v, mA = qkvMixed, hA = history, wA = convW;
+        uint cdA = (uint)convDim, kdA = (uint)keyDim, vdA = (uint)valueDim, knA = (uint)kernel;
+        void** args = stackalloc void*[10];
+        args[0] = &qA; args[1] = &kA; args[2] = &vA; args[3] = &mA; args[4] = &hA; args[5] = &wA;
+        args[6] = &cdA; args[7] = &kdA; args[8] = &vdA; args[9] = &knA;
+        uint grid = (uint)((convDim + 255) / 256);
+        CudaDriverApi.cuLaunchKernel(_lmSsmConvSplitStepF32, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Per-head L2 normalize in place (block per head) with a post-scale.</summary>
+    public unsafe void LaunchSsmL2NormHeads(ulong x, int heads, int dim, float eps, float postScale, nint stream)
+    {
+        ulong xA = x;
+        uint dimA = (uint)dim;
+        float epsA = eps, scA = postScale;
+        void** args = stackalloc void*[4];
+        args[0] = &xA; args[1] = &dimA; args[2] = &epsA; args[3] = &scA;
+        CudaDriverApi.cuLaunchKernel(_lmSsmL2NormHeadsF32, (uint)heads, 1, 1, 256, 1, 1, 256 * sizeof(float), stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Qwen3.5 delta-rule recurrence + gated RMSNorm, one block per value head; state is
+    /// device-persistent across tokens.</summary>
+    public unsafe void LaunchSsmDeltaStep(ulong output, ulong state, ulong q, ulong k, ulong v, ulong z,
+        ulong alphaRaw, ulong betaRaw, ulong dtBias, ulong ssmA, ulong normW,
+        int hv, int sv, int sk, int repeat, float eps, nint stream)
+    {
+        ulong oA = output, stA = state, qA = q, kA = k, vA = v, zA = z, alA = alphaRaw, beA = betaRaw,
+            dtA = dtBias, saA = ssmA, nwA = normW;
+        uint svA = (uint)sv, skA = (uint)sk, rpA = (uint)repeat;
+        float epsA = eps;
+        void** args = stackalloc void*[15];
+        args[0] = &oA; args[1] = &stA; args[2] = &qA; args[3] = &kA; args[4] = &vA; args[5] = &zA;
+        args[6] = &alA; args[7] = &beA; args[8] = &dtA; args[9] = &saA; args[10] = &nwA;
+        args[11] = &svA; args[12] = &skA; args[13] = &rpA; args[14] = &epsA;
+        uint sharedMem = (uint)((sv + 256) * sizeof(float));
+        CudaDriverApi.cuLaunchKernel(_lmSsmDeltaStepF32, (uint)hv, 1, 1, 256, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
     public unsafe void LaunchArgMaxLastDim(ulong idxPtr, ulong inPtr, int rows, int c, nint stream, ulong scratch = 0)

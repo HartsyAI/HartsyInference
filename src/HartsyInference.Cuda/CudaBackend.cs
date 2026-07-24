@@ -179,6 +179,93 @@ public sealed class CudaBackend : IBackend
     // FreeW8A8Cache from FreeAllDeviceMemory / FreePreloadedWeights / Dispose.
     private readonly Dictionary<Core.Tensors.Tensor, ulong> _w8a8WeightCache = new();
 
+    // SmoothQuant per-input-channel smoothing scale s[K] (W8A8_HANDOFF.md item 1, offline-gate-confirmed
+    // 2026-07-24: relL2 drops ~40% on real Kandinsky5 layers at alpha~0.7-0.8). Two views of the same s,
+    // set together by SetW8A8SmoothingScale: a device 1/s[K] buffer consumed every activation-quant call
+    // (LaunchW8A8QuantRowwise's invScale arg), and a host s[K] copy folded into QuantizeWeightForW8A8's
+    // per-output-channel weight quant (runs once, at weight-quant time, host-side). Calibration — deciding
+    // WHAT s should be — is deliberately NOT here; this is storage + application only (advisor-directed:
+    // don't build a production calibration API before SSIM proves the mechanism earns a permanent place).
+    private readonly Dictionary<Core.Tensors.Tensor, ulong> _w8a8SmoothInvScaleDevice = new();
+    private readonly Dictionary<Core.Tensors.Tensor, float[]> _w8a8SmoothScaleHost = new();
+
+    /// <summary>Sets (or replaces) the SmoothQuant per-input-channel scale s[K] for <paramref name="weight"/>:
+    /// X_hat = X/s, W_hat = W*s (product-preserving pre-quantization — migrates activation outlier
+    /// difficulty into the weight, see native/cuda/dequant/w8a8.cu's invScale param). Must be called BEFORE
+    /// the weight's first W8A8 use to take effect on the initial quantization; calling it after evicts the
+    /// already-cached quantized weight so the NEXT use re-quantizes smoothed (safe, just a re-pay of the
+    /// one-time quant cost). <paramref name="s"/> length must equal the weight's K (in-dim).</summary>
+    public unsafe void SetW8A8SmoothingScale(Core.Tensors.Tensor weight, ReadOnlySpan<float> s)
+    {
+        int k = (int)weight.Shape[1];
+        if (s.Length != k)
+            throw new ArgumentException($"SmoothQuant scale length {s.Length} != weight K={k}.", nameof(s));
+        float[] invScale = new float[k];
+        for (int i = 0; i < k; i++) invScale[i] = s[i] != 0f ? 1f / s[i] : 0f;
+
+        ulong dev = GpuTransferHelper.AllocateDevice((nuint)(k * sizeof(float)));
+        fixed (float* p = invScale)
+            CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)p, (nuint)(k * sizeof(float)), _stream.Handle).ThrowOnError();
+        _stream.Synchronize();
+
+        if (_w8a8SmoothInvScaleDevice.TryGetValue(weight, out ulong old)) GpuTransferHelper.FreeDevice(old);
+        _w8a8SmoothInvScaleDevice[weight] = dev;
+        _w8a8SmoothScaleHost[weight] = s.ToArray();
+
+        if (_w8a8WeightCache.TryGetValue(weight, out ulong cachedQuant))
+        {
+            GpuTransferHelper.FreeDevice(cachedQuant);
+            _w8a8WeightCache.Remove(weight);
+        }
+    }
+
+    /// <summary>Frees every SmoothQuant device scale buffer (mirrors FreeW8A8Cache's scope/callers).</summary>
+    private void FreeW8A8SmoothScaleCache()
+    {
+        foreach (ulong ptr in _w8a8SmoothInvScaleDevice.Values)
+            GpuTransferHelper.FreeDevice(ptr);
+        _w8a8SmoothInvScaleDevice.Clear();
+        _w8a8SmoothScaleHost.Clear();
+    }
+
+    /// <summary>Test-only hook (parallel to <c>CausalConv3d.DisableBatchedPath</c>): when set, LinearImpl
+    /// invokes it with F32 host snapshots of the pre-quantization (input [M,K], weight [N,K]) operands of
+    /// the first W8A8-eligible call seen, then clears itself. Lets an offline test capture a real Linear's
+    /// real operands off a live forward pass (e.g. an activation-vs-weight quantization-error ablation)
+    /// without adding a permanent capture path. Snapshots go through <see cref="SnapshotToF32ForTest"/> —
+    /// a cache-hit peek + cache-aware free, NEVER <c>Tensor.DataPointer</c> — because a mid-forward
+    /// DataPointer read on a device-cached tensor trips the lazy-sync consume and races the transfer
+    /// caches (see the w8a8 eligibility comment above in LinearImpl). No effect on the hot path unless a
+    /// test sets it; never touched otherwise.</summary>
+    /// <summary>Args: input[M*K], M, K, weight[N*K], N, weight (the Tensor identity — safe to hold/pass
+    /// around since only its float[] snapshot is read here, never its DataPointer; needed so a calibration
+    /// harness can later correlate accumulated stats back to a specific weight via
+    /// <see cref="SetW8A8SmoothingScale"/>).</summary>
+    public static Action<float[], int, int, float[], int, Tensor>? CaptureW8A8Operands;
+
+    /// <summary>Test-only: D2H-snapshots a tensor to a host F32 array via a cache-hit peek
+    /// (<see cref="GpuTransferHelper.CopyToDevice"/>, non-destructive on a hit) + blocking
+    /// <c>cuMemcpyDtoH</c> + cache-aware <see cref="GpuTransferHelper.FreeDevice"/> — never touches
+    /// <c>Tensor.DataPointer</c>, so it can't trip the lazy-sync eviction race. Backs
+    /// <see cref="CaptureW8A8Operands"/> only.</summary>
+    private unsafe float[] SnapshotToF32ForTest(Tensor t, long count)
+    {
+        ulong pDev = GpuTransferHelper.CopyToDevice(t);
+        try
+        {
+            nuint byteSize = GpuTransferHelper.ByteSize(t);
+            byte[] host = new byte[byteSize];
+            fixed (byte* dst = host)
+                CudaDriverApi.cuMemcpyDtoH((nint)dst, pDev, byteSize).ThrowOnError();
+            float[] result = new float[count];
+            DType dt = t.DType;
+            fixed (byte* src = host)
+                for (long i = 0; i < count; i++) result[i] = W8A8Read(src, dt, i);
+            return result;
+        }
+        finally { GpuTransferHelper.FreeDevice(pDev); }
+    }
+
     // Persistent, stream-serialized scratch buffers (dp4a activation quantization; two-stage argmax
     // partials). Reusing one resident buffer instead of per-call AllocateDevice/FreeDevice removes ~6
     // allocation/free NODES per Linear from every captured decode graph (~750 nodes on a 24-layer model)
@@ -562,6 +649,9 @@ public sealed class CudaBackend : IBackend
         float alpha = weight.Fp8ScaleFactor;
         void* src = (void*)weight.DataPointer;
         DType dt = weight.DType;
+        // SmoothQuant W_hat = W*s (per input channel k) — set via SetW8A8SmoothingScale, folded in here so
+        // the int8 quant itself absorbs the migrated activation-outlier difficulty; null = no smoothing.
+        float[]? smooth = _w8a8SmoothScaleHost.TryGetValue(weight, out float[]? sv) ? sv : null;
         fixed (byte* dst = host)
         {
             sbyte* q = (sbyte*)dst;
@@ -573,6 +663,7 @@ public sealed class CudaBackend : IBackend
                 for (int ki = 0; ki < k; ki++)
                 {
                     float v = W8A8Read(src, dt, (long)ni * k + ki);
+                    if (smooth is not null) v *= smooth[ki];
                     float a = MathF.Abs(v);
                     if (a > amax) amax = a;
                 }
@@ -582,7 +673,9 @@ public sealed class CudaBackend : IBackend
                 sbyte* qr = (sbyte*)dstCopy + (long)ni * k;
                 for (int ki = 0; ki < k; ki++)
                 {
-                    int iv = (int)MathF.Round(W8A8Read(src, dt, (long)ni * k + ki) * inv);
+                    float v = W8A8Read(src, dt, (long)ni * k + ki);
+                    if (smooth is not null) v *= smooth[ki];
+                    int iv = (int)MathF.Round(v * inv);
                     if (iv > 127) iv = 127;
                     if (iv < -127) iv = -127;
                     qr[ki] = (sbyte)iv;
@@ -617,6 +710,7 @@ public sealed class CudaBackend : IBackend
         foreach (ulong ptr in _w8a8WeightCache.Values)
             GpuTransferHelper.FreeDevice(ptr);
         _w8a8WeightCache.Clear();
+        FreeW8A8SmoothScaleCache();
     }
 
     /// <summary>Linear layer via cuBLAS GemmEx with transpose: output = input × weight^T + bias. Supports mixed F32/F16/F8 dtypes.
@@ -657,6 +751,11 @@ public sealed class CudaBackend : IBackend
             && (weight.DType == DType.F16 || weight.DType == DType.BF16 || weight.DType == DType.F32)
             && (input.DType == DType.F16 || input.DType == DType.F32)
             && (output.DType == DType.F16 || output.DType == DType.F32);
+        if (w8a8 && CaptureW8A8Operands is { } capture)
+        {
+            CaptureW8A8Operands = null;
+            capture(SnapshotToF32ForTest(input, (long)M * K), M, K, SnapshotToF32ForTest(weight, (long)N * K), N, weight);
+        }
         if (w8a8 && !_w8a8WeightCache.ContainsKey(weight))
         {
             _w8a8WeightCache[weight] = QuantizeWeightForW8A8(weight, N, K);
@@ -927,8 +1026,9 @@ public sealed class CudaBackend : IBackend
                     pRowScale = GpuTransferHelper.AllocateDevice((nuint)((long)M * sizeof(float)));
                     pOut32 = GpuTransferHelper.AllocateDevice((nuint)((long)M * N * sizeof(int)));
 
+                    ulong invScale = _w8a8SmoothInvScaleDevice.TryGetValue(weight, out ulong isv) ? isv : 0;
                     _kernels!.LaunchW8A8QuantRowwise(pAct8, pRowScale, pInput, M, K, _stream.Handle,
-                        srcF16: input.DType == DType.F16);
+                        srcF16: input.DType == DType.F16, invScale: invScale);
                     Int8Gemm.Run(w8Combined, pAct8, pOut32, M, N, K, _stream.Handle);
                     // Bias rides the dequant epilogue as F32 (transient cast for 16-bit checkpoint biases).
                     ulong biasF32 = 0;
@@ -3210,6 +3310,107 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pQk);
             GpuTransferHelper.FreeDevice(pVi);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pQ);
+        }
+    }
+
+    public void PleGatherDecodeStep(Tensor output, Tensor quantTable, float scale, ulong deviceTokenId)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("PleGather");
+        if (quantTable.DType != DType.Q5_K || output.DType != DType.F32 || deviceTokenId == 0)
+            throw new NotSupportedException("PleGatherDecodeStep requires a Q5_K table, F32 output, and a device token id.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int width = (int)output.ElementCount;
+        ulong pTable = 0, pOut = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pTable = GpuTransferHelper.CopyToDevice(quantTable);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchPleGatherQ5K(pOut, pTable, width, scale, deviceTokenId, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pTable);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+        }
+    }
+
+    public void SsmConvSplitStep(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,
+        int kernel, int kHeads, int skDim, int vHeads, int svDim, float eps, float qScale)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("SsmConvSplit");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int convDim = (int)qkvMixed.ElementCount;
+        int keyDim = kHeads * skDim, valueDim = vHeads * svDim;
+        ulong pQ = 0, pK = 0, pV = 0, pM = 0, pH = 0, pW = 0;
+        bool cached = false;
+        try
+        {
+            pM = GpuTransferHelper.CopyToDevice(qkvMixed);
+            pH = GpuTransferHelper.CopyToDevice(history);
+            pW = GpuTransferHelper.CopyToDevice(convW);
+            pQ = GpuTransferHelper.AllocateDevice((nuint)(keyDim * sizeof(float)));
+            pK = GpuTransferHelper.AllocateDevice((nuint)(keyDim * sizeof(float)));
+            pV = GpuTransferHelper.AllocateDevice((nuint)(valueDim * sizeof(float)));
+            _kernels!.LaunchSsmConvSplitStep(pQ, pK, pV, pM, pH, pW, convDim, keyDim, valueDim, kernel, _stream.Handle);
+            _kernels!.LaunchSsmL2NormHeads(pQ, kHeads, skDim, eps, qScale, _stream.Handle);
+            _kernels!.LaunchSsmL2NormHeads(pK, kHeads, skDim, eps, 1.0f, _stream.Handle);
+            GpuTransferHelper.CacheActivation(q, pQ, (nuint)(keyDim * sizeof(float)));
+            GpuTransferHelper.CacheActivation(k, pK, (nuint)(keyDim * sizeof(float)));
+            GpuTransferHelper.CacheActivation(v, pV, (nuint)(valueDim * sizeof(float)));
+            // history was mutated in place — keep it resident (KV-cache pattern, but retain the sync
+            // callback so a host prefill can pull it back down).
+            GpuTransferHelper.CacheActivation(history, pH, GpuTransferHelper.ByteSize(history));
+            cached = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pM);
+            GpuTransferHelper.FreeDevice(pW);
+            if (!cached) { GpuTransferHelper.FreeDevice(pQ); GpuTransferHelper.FreeDevice(pK); GpuTransferHelper.FreeDevice(pV); }
+        }
+    }
+
+    public void SsmDeltaStep(Tensor output, Tensor state, Tensor q, Tensor k, Tensor v, Tensor z,
+        Tensor alphaRaw, Tensor betaRaw, Tensor dtBias, Tensor ssmA, Tensor normW,
+        int hv, int sv, int sk, int repeat, float eps)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("SsmDeltaStep");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        ulong pO = 0, pSt = 0, pQ = 0, pK = 0, pV = 0, pZ = 0, pAl = 0, pBe = 0, pDt = 0, pSa = 0, pNw = 0;
+        bool cached = false;
+        try
+        {
+            pSt = GpuTransferHelper.CopyToDevice(state);
+            pQ = GpuTransferHelper.CopyToDevice(q);
+            pK = GpuTransferHelper.CopyToDevice(k);
+            pV = GpuTransferHelper.CopyToDevice(v);
+            pZ = GpuTransferHelper.CopyToDevice(z);
+            pAl = GpuTransferHelper.CopyToDevice(alphaRaw);
+            pBe = GpuTransferHelper.CopyToDevice(betaRaw);
+            pDt = GpuTransferHelper.CopyToDevice(dtBias);
+            pSa = GpuTransferHelper.CopyToDevice(ssmA);
+            pNw = GpuTransferHelper.CopyToDevice(normW);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pO = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchSsmDeltaStep(pO, pSt, pQ, pK, pV, pZ, pAl, pBe, pDt, pSa, pNw,
+                hv, sv, sk, repeat, eps, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pO, outBytes);
+            GpuTransferHelper.CacheActivation(state, pSt, GpuTransferHelper.ByteSize(state));   // mutated in place, keep resident
+            cached = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pQ); GpuTransferHelper.FreeDevice(pK); GpuTransferHelper.FreeDevice(pV);
+            GpuTransferHelper.FreeDevice(pZ); GpuTransferHelper.FreeDevice(pAl); GpuTransferHelper.FreeDevice(pBe);
+            GpuTransferHelper.FreeDevice(pDt); GpuTransferHelper.FreeDevice(pSa); GpuTransferHelper.FreeDevice(pNw);
+            if (!cached) GpuTransferHelper.FreeDevice(pO);
         }
     }
 

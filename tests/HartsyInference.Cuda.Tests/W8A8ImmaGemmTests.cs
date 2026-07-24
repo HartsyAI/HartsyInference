@@ -85,6 +85,87 @@ public sealed unsafe class W8A8ImmaGemmTests
         }
     }
 
+    /// <summary>Correctness gate for the SmoothQuant <c>invScale</c> param added to
+    /// <c>w8a8_quant_rowwise_{f16,f32}</c> (W8A8_HANDOFF.md item 1, offline-gate-confirmed 2026-07-24):
+    /// X_hat = X * invScale must be computed BEFORE the per-row absmax/quantize, i.e. the row's dequant
+    /// scale itself must reflect the smoothed magnitudes, not just the final int8 values. Runs the kernel
+    /// with a per-channel invScale vector and compares (rowScale, int8 q) against a CPU reference that
+    /// applies the exact same scale-then-quantize formula host-side. Also runs with invScale=0 (the
+    /// existing no-smoothing path) to confirm the null-pointer branch is unaffected — this is the
+    /// regression half of the gate.</summary>
+    [Theory]
+    [InlineData(false, 8, 64)]  // no smoothing (invScale=0): must exactly match the pre-existing behavior
+    [InlineData(true, 8, 64)]   // smoothing applied
+    [InlineData(true, 17, 130)] // non-multiple-of-4 cols/rows, srcF16
+    public void W8A8QuantRowwise_InvScale_MatchesCpuReference(bool useInvScale, int rows, int cols)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        if (!cuda.Kernels!.HasW8A8Kernels) { _output.WriteLine("SKIPPED: w8a8.ptx missing"); return; }
+
+        Random rng = new Random(7);
+        Half[] act = new Half[(long)rows * cols];
+        for (int i = 0; i < act.Length; i++) act[i] = (Half)((rng.NextDouble() * 2 - 1) * (0.05 + 5 * rng.NextDouble()));
+        float[] invScale = new float[cols];
+        for (int i = 0; i < cols; i++) invScale[i] = useInvScale ? (float)(0.2 + 2.0 * rng.NextDouble()) : 1f;
+
+        // CPU reference: exact port of the kernel's math (per-row absmax over the SMOOTHED values, then
+        // round-to-nearest, clamp[-127,127]).
+        sbyte[] expectedQ = new sbyte[(long)rows * cols];
+        float[] expectedRowScale = new float[rows];
+        for (int r = 0; r < rows; r++)
+        {
+            float amax = 0f;
+            for (int c = 0; c < cols; c++)
+            {
+                float v = (float)act[r * cols + c] * invScale[c];
+                amax = MathF.Max(amax, MathF.Abs(v));
+            }
+            float scale = amax > 0f ? amax / 127f : 1f;
+            float inv = amax > 0f ? 127f / amax : 0f;
+            expectedRowScale[r] = scale;
+            for (int c = 0; c < cols; c++)
+            {
+                float v = (float)act[r * cols + c] * invScale[c] * inv;
+                int iv = (int)MathF.Round(v);
+                if (iv > 127) iv = 127;
+                if (iv < -127) iv = -127;
+                expectedQ[r * cols + c] = (sbyte)iv;
+            }
+        }
+
+        ulong dAct = 0, dQ = 0, dRowScale = 0, dInvScale = 0;
+        try
+        {
+            fixed (Half* p = act) dAct = Upload(p, (long)rows * cols * 2);
+            dQ = GpuTransferHelper.AllocateDevice((nuint)((long)rows * cols));
+            dRowScale = GpuTransferHelper.AllocateDevice((nuint)(rows * sizeof(float)));
+            if (useInvScale) fixed (float* p = invScale) dInvScale = Upload(p, cols * sizeof(float));
+
+            cuda.Kernels!.LaunchW8A8QuantRowwise(dQ, dRowScale, dAct, rows, cols, cuda.Stream.Handle,
+                srcF16: true, invScale: dInvScale);
+            cuda.Sync();
+
+            sbyte[] actualQ = new sbyte[(long)rows * cols];
+            float[] actualRowScale = new float[rows];
+            fixed (sbyte* p = actualQ) CudaDriverApi.cuMemcpyDtoH((nint)p, dQ, (nuint)actualQ.Length).ThrowOnError();
+            fixed (float* p = actualRowScale) CudaDriverApi.cuMemcpyDtoH((nint)p, dRowScale, (nuint)(rows * sizeof(float))).ThrowOnError();
+
+            for (int r = 0; r < rows; r++)
+                Assert.True(MathF.Abs(actualRowScale[r] - expectedRowScale[r]) <= 1e-6f * MathF.Max(1f, MathF.Abs(expectedRowScale[r])),
+                    $"row {r} scale mismatch: expected {expectedRowScale[r]:e6}, got {actualRowScale[r]:e6}");
+            for (int i = 0; i < expectedQ.Length; i++)
+                Assert.Equal(expectedQ[i], actualQ[i]);
+            _output.WriteLine($"invScale={useInvScale} [{rows}x{cols}]: exact match vs CPU reference " +
+                $"({rows} row scales, {expectedQ.Length} int8 values).");
+        }
+        finally
+        {
+            foreach (ulong ptr in new[] { dAct, dQ, dRowScale, dInvScale })
+                if (ptr != 0) GpuTransferHelper.FreeDevice(ptr);
+        }
+    }
+
     /// <summary>Full W8A8 chain (per-row activation quant → IMMA GEMM → dequant+bias epilogue) vs the F16
     /// GEMM with fused bias: accuracy on Gaussian-ish activations and per-channel-quantized weights, plus
     /// interleaved wall-time A/B. Accuracy expectation: per-row+per-channel INT8 keeps relL2 in the ~1e-2

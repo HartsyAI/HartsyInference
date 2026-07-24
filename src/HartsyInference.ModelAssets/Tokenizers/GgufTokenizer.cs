@@ -72,6 +72,12 @@ public sealed class GgufTokenizer : ILlmTokenizer
             bool isSpecial = tokenType is not null && i < tokenType.Length
                 ? tokenType[i] == TypeControl || tokenType[i] == TypeUserDefined
                 : LooksSpecial(tokens[i]);
+            // Conversion fixup: some GGUFs (leafspark mllama) mis-type template tokens as NORMAL, so
+            // Decode's special-skip missed them and `<|eot_id|>`-family markers leaked into generated
+            // text. Tokens shaped EXACTLY like `<|...|>` are template machinery in every supported vocab
+            // (llama-3, ChatML, qwen, deepseek) — register them regardless of the declared type. Strictly
+            // narrower than LooksSpecial (`<div>`/`[INST]`-shaped content tokens are NOT affected).
+            if (!isSpecial) isSpecial = LooksTemplateSpecial(tokens[i]);
             if (isSpecial && tokens[i].Length > 0)
             {
                 _specialByLiteral[tokens[i]] = i;
@@ -183,4 +189,13 @@ public sealed class GgufTokenizer : ILlmTokenizer
 
     private static bool LooksSpecial(string token)
         => token.Length >= 2 && ((token[0] == '<' && token[^1] == '>') || (token[0] == '[' && token[^1] == ']'));
+
+    /// <summary>Strict template-token shape: <c>&lt;|...|&gt;</c> with no nested angle brackets or pipes.</summary>
+    private static bool LooksTemplateSpecial(string token)
+    {
+        if (token.Length < 4 || token[0] != '<' || token[1] != '|' || token[^2] != '|' || token[^1] != '>') return false;
+        for (int i = 2; i < token.Length - 2; i++)
+            if (token[i] == '<' || token[i] == '>' || token[i] == '|') return false;
+        return true;
+    }
 }

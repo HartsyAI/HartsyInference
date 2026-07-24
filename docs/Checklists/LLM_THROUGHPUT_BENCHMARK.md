@@ -300,6 +300,111 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 > before prefill, or exempt in-use casts from eviction); GLM's real fix remains MMQ-class
 > quantized-GEMM prefill kernels. Decode is UNAFFECTED by all of this (verified same tg medians).
 
+> **UPDATE 2026-07-23 (TTFT rounds 2-3: constructor weight-preload + last-row-only prefill logits —
+> first-token latency down 4-12× across the fleet; GLM parked pending MMQ kernels).**
+> Fixes: (a) headroom-guarded weight preload moved from graph setup to PIPELINE CONSTRUCTION —
+> auto-promotion's size floor had left all small weights host-side FOREVER on eager paths (5271
+> H2D misses per 7 generations on qwen2.5; this also lifted qwen2.5 GRAPH-OFF decode 126→257
+> tok/s); (b) prefill now projects logits for the LAST prompt position only (GatherRows before
+> ProjectLogits): skips (n−1)/n of the vocab GEMM AND takes the fused dp4a head at t=1 — no more
+> 16-bit head cast, whose F32 staging OOMed gemma2 (first-token numerics now match the decode
+> path's dp4a math — a numerics-class change, sanity-verified); (c) preload headroom reserves the
+> graph embed table (+2 GB extra for low-VRAM giants); (d) the graph arena's release is now a
+> SYNCHRONOUS free on a drained stream — its async free raced the pool across backends
+> (intermittent CudaGraph_RepeatedReplay failure, 0 recurrences in 10 suite runs since).
+>
+> | Model | TTFT campaign start | TTFT now (solo, graph-on) | llama.cpp | Plain English |
+> |---|---|---|---|---|
+> | qwen2.5-0.5b | 77 ms | **19 ms** | 4 ms | 4.1× better, 4.7× behind llama.cpp |
+> | Llama-3.2-1B | 144 ms | **22 ms** | 6 ms | 6.5× better, 3.7× behind |
+> | DeepSeek-1.5B | 113 ms | **22 ms** | 7 ms | 5.1× better, 3.1× behind |
+> | gemma-3-1b | 130 ms | **25 ms** | 7 ms | 5.2× better, 3.6× behind |
+> | gemma-2-2b | 198 ms (+OOM) | **48 ms** | 10 ms | 4.1× better, OOM fixed |
+> | Qwen3-4B | 270 ms | **146 ms** | 13 ms | 1.8× better (layer dequants dominate) |
+> | GLM-4-9B | 639 ms | **595 ms** | 22 ms | parked — needs MMQ-class quant-GEMM prefill (F16 cast set can never fit 12 GB) |
+>
+> Decode throughput unaffected throughout (re-verified per model). SUITE CAVEAT: the W8A8/Sage
+> PERF-ASSERTION tests (the other workstream's) fail intermittently whenever another process
+> shares the 3060 — check `nvidia-smi` compute-apps before trusting a red suite.
+
+> **UPDATE 2026-07-23 (round 12 — model-family expansion: 14 new catalog models downloaded + benchmarked,
+> +2 more structural-status models (llama32-vision, qwen35) grabbed for completeness. Same harness/params
+> as round 11 (5 reps, 128-token greedy, warmup discarded). Ran on 3060 (Tier-1 + python baseline) while
+> Swarm's own hartsy-local backend ran concurrently on the 4090 with zero contention — confirmed via
+> per-GPU `nvidia-smi -i <n> --query-compute-apps` that Swarm's process lives entirely on GPU 1 (4090);
+> our `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0` pin targets GPU 0 (3060) exclusively, so the
+> two workloads never shared VRAM. This means Tier-1 dotnet-test work and Tier-2 Swarm-path work can run
+> in parallel on this box going forward — no need to serialize them.**
+>
+> | Model | Ours (best) | llama-cpp-python | Ratio | Plain English |
+> |---|---|---|---|---|
+> | Mistral-7B-Instruct-v0.3 Q4_K_M | **57.61** | 53.15 | 1.08 | 8% faster |
+> | gemma-3-4b-it Q4_K_M | **96.16** | 87.54 | 1.10 | 10% faster |
+> | stablelm-2-1.6b-chat Q4_K_M | **232.27** | 202.26 | 1.15 | 15% faster |
+> | granite-3.0-2b-instruct Q4_K_M | **131.54** | 117.36 | 1.12 | 12% faster |
+> | SmolVLM2-2.2B-Instruct Q4_K_M | **216.21** | 197.19 | 1.10 | 10% faster |
+> | Qwen2.5-VL-7B-Instruct Q4_K_M | **63.33** | N/A — llama-cpp-python 0.3.34 fails `Failed to create llama_context` on this GGUF | — | ours WORKS, no valid python baseline exists on this build |
+> | Phi-3-mini-4k-instruct Q4 | **76.80** (graph-off; not graph-eligible at its best) | 93.93 | 0.82 | 18% slower |
+> | olmoe-1b-7b-0924 Q4_K_M (MoE) | **21.97**⚠ | 255.68⚠ (noisy, stdev 62.98) | 0.086 | ~11.6× slower — ⚠ D2H syncs=2193/rep, fails the doc's own health-assert; number likely NOT representative of best-case, see Issue #5 below |
+> | granite-3.0-1b-a400m Q4_K_M (MoE) | **51.54**⚠ | 276.32⚠ (noisy, stdev 45.61) | 0.187 | ~5.4× slower — same D2H-sync caveat (3225/rep) |
+> | gemma-4-E2B-it Q4_K_M | **68.84** (not graph-eligible) | 100.07 (noisy, stdev 10.02) | 0.688 | 31% slower |
+> | llava-v1.5-7b Q4_K_M | CRASH — see Issue #2 | 52.88 | — | Tier-1 harness can't measure it; Swarm's own chat endpoint generates fine (2.8 tok/s incl. reload) |
+> | gpt2-medium Q4_K_M | CRASH — see Issue #2 | 402.12 | — | same as above; Swarm generates fine (11.1 tok/s incl. reload) |
+> | starcoder2-3b Q4_K_M | CRASH — see Issue #2 | 117.60 | — | same as above; Swarm generates fine (10.1 tok/s incl. reload) |
+> | mamba-2.8b-hf Q4_K (SSM) | N/A — wrong harness, needs `SsmLanguageModel` (by design, see Issue #6) | 108.72 | — | Swarm generates fine (2.0 tok/s incl. reload; consistent order-of-magnitude with the catalog's documented ~0.8 tok/s host-bound decode once reload is subtracted) |
+> | Qwen3.5-0.8B Q4_K_M (Gated DeltaNet, SSM-routed) | N/A — same SSM-path exclusion | not attempted | — | Swarm generates fine (1.0 tok/s incl. reload) |
+> | Llama-3.2-11B-Vision Q4_K_M | not run (size/time budget) | not run | — | Swarm OOM'd twice — VRAM-leak accumulation, see Issue #4 |
+>
+> Five of six architecturally-eligible dense/VLM models beat llama-cpp-python (8-15% faster), consistent
+> with the round-11 fleet pattern. Phi-3-mini is the one dense-model exception (18% slower) — not
+> root-caused this session, candidate for a future grind round. The two MoE models and gemma4 (mobile,
+> per-layer-embedding architecture) remain the known weak spots, consistent with pre-existing catalog
+> comments about MoE's host-side routing and gemma4's PLE-gather path.
+
+> **UPDATE 2026-07-23 (gemma-4 E2B added to the fleet — BASELINE, graph bring-up pending).**
+> `Models/LLM/gemma4/gemma-4-E2B-it-Q4_K_M.gguf`. Ours (eager-only): tg **91.7** tok/s, TTFT
+> **36 ms**; llama-cpp-python: tg 117.2, TTFT 10 — 22% behind on decode, 3.6× on TTFT. Decode gap
+> = the graph-decode exclusion (structural gate: HeadDimSwa per-layer head dim, PLE, KV-sharing/
+> V-norm); the eager path already carries the day's fleet work (dp4a, ctor preload, last-row
+> prefill logits). Bring-up plan (round-3 playbook, byte-A/B before widening the gate): dual-DIM
+> rope tables per layer → PLE per-token pinned-buffer feed → donor-cache reads + V-norm in the
+> graph step. Expected landing ~125-135 tok/s (ahead of llama.cpp).
+
+> **UPDATE 2026-07-24 (rounds 12-13 close-out: gemma-4 graph bring-up + fleet-wide residency fixes.
+> EIGHT of nine text models now at-or-ahead of llama-cpp-python; GLM reached effective parity.)**
+> New this round: (1) **gemma-4 E2B graph decode** — dual-head-dim rope tables, per-layer dims,
+> weightless V-norm, device-side Q5_K PLE row gather by device token id (`lm_ple_gather_q5k_f32`),
+> and KV-sharing via a q-only donor-cache path; byte-identical graph-vs-eager, gate verifiably
+> engaged. (2) **Redundant-split preload exclusion** — EnumerateWeights was double-loading fused
+> weights AND their split originals (~2.9 GB dead VRAM on GLM), crowding real weights out of
+> residency; the preloader now excludes splits (their one consumer, the batch scheduler's split
+> path, lazily promotes). This took GLM to its best-ever decode. (3) mllama: ctor preload,
+> template-token decode-skip fixup, decode-rate logging (template-encoding root cause scoped).
+> (4) Qwen3.5 SSM: weight residency wired — 40.3 s → 18.4 s for an identical run; full SSM
+> bring-up scoped. Suites 194/194 + 132/132.
+>
+> | Model | Ours tok/s (graph-on) | llama.cpp tok/s | Plain English |
+> |---|---|---|---|
+> | qwen2.5-0.5b | **435.6** | 328.9 | 32% faster than llama.cpp |
+> | gemma-3-1b | **251.3** | 196.8 | 28% faster |
+> | DeepSeek-1.5B | **224.5** | 183.4 | 22% faster |
+> | Llama-3.2-1B | **213.7** | 192.0 | 11% faster |
+> | gemma-2-2b | **141.8** | 123.8 | 15% faster |
+> | gemma-4-E2B | **137.8** | 124.7 | **11% faster (new bring-up; was 22% slower)** |
+> | Qwen3-4B | **100.7** | 89.0 | 13% faster |
+> | GLM-4-9B | **47.07** (solo) | 48.13 | **2% slower — effective parity (was 18% slower at day start)** |
+> | Llama-3.2-11B-Vision | works e2e, eager-only | n/a | cross-attn graph bring-up scoped |
+>
+> TTFT highlights this pass: DeepSeek 21.6 ms, llama 20.5, gemma3 27.6, qwen2.5 16.7, qwen3 112.7
+> (improved by the residency fix), gemma-4 50.4, GLM 563 (MMQ prefill kernels remain its fix).
+
+> **UPDATE 2026-07-24 (Qwen3.5-0.8B SSM first head-to-head).** After phases A/B/B2 (quant-resident
+> weights, device recurrence, device attention step — grind doc): ours **54.6 tok/s** decode vs
+> llama-cpp-python's **234.6** (4.3× behind; was ~25× behind at the 40 s baseline). Outputs
+> identical to the host reference throughout. The remaining gap is the phase-C orchestration
+> (per-token host sampling round-trip + eager launches): the transformer pipeline's device-argmax
+> + graph-capture design applies directly and is the scoped finish line.
+
 Superseded pre-dp4a table (2026-07-22, earlier session):
 
 | Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (ours÷llama, graph-on) |
@@ -326,12 +431,129 @@ genuine kernel-memory-access-pattern redesign (not a dispatch/fusion change) to 
   toolchain builds llama-cpp-python fine but not the full llama.cpp CLI suite. Same underlying engine either
   way, so the comparison is still apples-to-apples for the CUDA compute path.
 
-## Phase 2 — Tier 2: Swarm API integration benchmark (the real test) ⬜
+## Phase 2 — Tier 2: Swarm API integration benchmark (the real test) 🔧
 
-- [ ] Client (C# preferred, reuses tokenizer for token counts) that drives `ws://<host>/API/LLMAssistantSendMessageWS` with the **hartsy-local** provider selected, per model, greedy, 128 gen.
-- [ ] Measure TTFT = first `{"chunk"}` arrival; tg = decoded tokens between first chunk and `{"done":true}`, timestamped client-side. Cross-check token counts via `LLMAssistantCountTokens`.
-- [ ] Compare Tier-2 tg vs Tier-1 tg (overhead delta) and vs the llama-bench bar.
-- [ ] Note: `SwarmUI-LLMAssistant` provides the LLM path; `SwarmUI-HartsyInference` is T2I-only and not involved. Engine consumed via forced-local DLLs (`UseLocalHartsy=true`), so no NuGet republish needed.
+### Tier 2 (2026-07-23, real Swarm API benchmark via HTTP LLMAssistantSendMessage)
+
+**Test Setup**: Real-world prompt ("Explain machine learning in one sentence"), generated via Swarm HTTP API, `noCache=true` to bypass response caching, empty instructionId for neutral system prompt. 7 unique models × 2 invocations each = 14 total requests.
+
+**Results Summary** (RTX 4090):
+
+| Model | Type | Tokens | Time (s) | Throughput | Quality |
+|---|---|---|---|---|---|
+| **Llama-3.2-1B-Instruct** | Q8_0 | 26 | 2.44–2.68 | 9.7–10.6 tok/s | ✅ Answers correctly |
+| **Qwen2.5-0.5B** | Q4_K_M | 22 | 2.27–2.30 | 9.6–9.7 tok/s | ✅ Answers correctly |
+| **DeepSeek-R1-Distill-1.5B** | Q4_K_M | 84 | 4.57–5.17 | 16.3–18.4 tok/s | ✅ Reasoning + correct |
+| **Qwen3-4B** | Q4_K_M | 81 | 5.98–6.29 | 12.9–13.5 tok/s | ✅ Answers correctly |
+| **Gemma-3-1B-IT** | Q4_K_M | 18 | 3.15–3.72 | 4.8–5.7 tok/s | ⚠️ System prompt override |
+| **Gemma-2-2B-IT** | Q4_K_M | 12 | 4.90–5.14 | 2.3–2.5 tok/s | ⚠️ System prompt override |
+| **GLM-4-9B** | Q4_K_M | — | — | — | ❌ API response parsing error |
+
+**Key Findings**:
+- ✅ 12/14 requests successful (85.7%)
+- ✅ Real generations from 6 models with diverse outputs
+- ⚠️ Gemma models hit system-prompt override (small models unable to override default SwarmUI persona)
+- ❌ GLM-4-9B returns HTTP 200 but JSON parsing fails (format/encoding issue)
+- ✅ Throughput 2.3–18.4 tok/s; DeepSeek fastest due to reasoning/Q4 quantization
+- ⚠️ Gemma-3/2 slower due to persona-generation (not model speed)
+
+**Known Issues Fixed This Session**:
+1. ✅ **Response Caching Bug**: API cached by `(message, instructionId)`, not by model. Fix: pass `noCache=true`.
+2. ⚠️ **System Prompt Override**: Small models (Gemma-3, Gemma-2) respond with assistant persona instead of answering. Workaround: use empty or model-specific system prompts.
+3. ❌ **GLM-4-9B**: Needs debugging (response format / encoding).
+
+### Tier 2 round 2 (2026-07-23, 14 new catalog models + 2 extra, same noCache=true/empty-instructionId setup)
+
+Ran on the 4090 (Swarm's actual GPU — see round 12 note above) while Tier-1 ran concurrently on the 3060.
+
+| Model | Time (incl. reload) | Tokens | Status |
+|---|---|---|---|
+| Mistral-7B-Instruct-v0.3 | 9.62s | 23 | ✅ |
+| gemma-3-4b-it | 9.63s | **0** | ⚠️ empty response — see Issue #7 |
+| Phi-3-mini-4k-instruct | 11.85s | 80 | ✅ |
+| stablelm-2-1.6b-chat | 9.28s | 78 | ✅ |
+| granite-3.0-2b-instruct | 8.64s | 23 | ✅ |
+| olmoe-1b-7b-0924 | 14.33s | 33 | ✅ |
+| granite-3.0-1b-a400m | 6.50s | 25 | ✅ |
+| gemma-4-E2B-it | 18.24s | 21 | ✅ |
+| SmolVLM2-2.2B-Instruct | — | — | ❌ `Jinja filter 'capitalize'` — see Issue #3 |
+| llava-v1.5-7b | 7.46s | 21 | ✅ (works via Swarm despite Tier-1 crash — see Issue #2) |
+| Qwen2.5-VL-7B-Instruct | — | — | ❌ `CUDA_ERROR_OUT_OF_MEMORY` — VRAM leak, see Issue #4 |
+| mamba-2.8b-hf | 38.38s | 78 | ✅ |
+| gpt2-medium | 7.93s | 88 | ✅ (works via Swarm despite Tier-1 crash) |
+| starcoder2-3b | 7.64s | 77 | ✅ (works via Swarm despite Tier-1 crash) |
+| Llama-3.2-11B-Vision | — | — | ❌ `CUDA_ERROR_OUT_OF_MEMORY` — VRAM leak, see Issue #4 |
+| Qwen3.5-0.8B | 25.91s | 25 | ✅ |
+
+**13/16 succeeded.** The 3 failures are 2 recurrences of the VRAM-leak (Issue #4, previously "fixed" in
+FINDING #2 below but reproduced this session) and 1 new Jinja-renderer gap (Issue #3). Calling
+`POST /API/LLMAssistantUnloadModels` between models works around the leak (used mid-run to unblock the
+sweep) but the underlying leak itself is not re-fixed.
+
+### Next Steps for Tier 2
+- [ ] Investigate GLM-4-9B JSON parsing error (log raw bytes)
+- [ ] Test WebSocket streaming endpoint (`LLMAssistantSendMessageWS`) for comparison
+- [ ] Measure TTFT (first-token latency) separately from total generation time
+- [ ] Tune system prompts to prevent Gemma override on small models
+- [ ] Compare vs llama-bench synthetic 128-token greedy to understand Swarm overhead
+- [ ] Re-fix the VRAM-leak-on-swap regression (Issue #4) — FINDING #2's fix has regressed or was incomplete
+
+**Note**: `SwarmUI-LLMAssistant` v2.0.0-alpha.2 provides the LLM path; `SwarmUI-HartsyInference` is T2I-only and not involved. Engine consumed via `HartsyInference.LLM.dll` (in-process).
+
+## Issues & bugs found during the round-12 model-family expansion (2026-07-23) — debug guide for the next agent
+
+Numbered so other sections can cross-reference. Each entry: what broke, exact repro, where to start looking, and severity.
+
+### Issue #1 — Response cache keyed by `(message, instructionId)`, not by model [FIXED — workaround, not a code fix]
+- **Symptom:** Calling `LLMAssistantSendMessage` for 7 different models with the same prompt text returned byte-identical output for all of them after the first call.
+- **Root cause:** `ChatEndpoints.cs` `LLMAssistantSendMessage` — `Cache.GetOrCreate(message, instructionId, ...)` — the cache key omits `model`/`assistantId` entirely.
+- **Where to fix for real:** `SwarmUI-LLMAssistant/WebAPI/ChatEndpoints.cs` and whatever `Cache` class backs `GetOrCreate` (find via `grep -rn "class Cache" src/Extensions/SwarmUI-LLMAssistant`). Add `model` (and probably `assistantId`) to the cache key tuple.
+- **Workaround used this session:** pass `"noCache": true` on every benchmark request. Fine for benchmarking; a real product-code fix is still needed so the chat UI doesn't silently serve another model's cached answer when a user switches models mid-conversation with an identical follow-up message.
+- **Severity:** Medium — silent wrong output in the actual product, not just benchmarking.
+
+### Issue #2 — `ChatMlTemplate.Encode` throws instead of falling back for tokenizers with no `<|im_start|>` token
+- **Symptom:** `System.InvalidOperationException: Tokenizer has no <|im_start|> token; ChatML template not applicable.` Hit on llava-v1.5-7b, gpt2-medium, and starcoder2-3b when driven through the Tier-1 harness (`TextDecodeThroughputBenchmark.cs`, which builds a `GenerationRequest` with a bare `Prompt` string via `ExtendedLLMInput`-style construction).
+- **Important nuance:** these same three checkpoints generate correctly through Swarm's actual `LLMAssistantSendMessage` endpoint (confirmed: gpt2-medium 88 tokens, starcoder2-3b 77 tokens, llava-v1.5-7b 21 tokens, all coherent). So Swarm's real request path already has *some* working fallback or different template-resolution logic that the raw Tier-1 pipeline invocation doesn't use.
+- **Where to look:** `src/HartsyInference.LLM/ChatTemplates/ChatMlTemplate.cs` (`Encode`, the throw site) vs `src/HartsyInference.LLM/Generation/PromptBuilder.cs` (`BuildPromptIds`, which picks `ChatMlTemplate` as a fallback) vs whatever `SwarmUI-LLMAssistant`'s `ChatEndpoints.cs` does differently before calling `LLMDispatcher.Generate` (it may resolve a template per-model up front and skip straight to a raw-string path when none exists, or it may catch this exact exception — grep for `catch` near the `LLMDispatcher.Generate` call sites).
+- **Fix direction:** `PromptBuilder.BuildPromptIds` should detect "no ChatML tokens" *before* calling `ChatMlTemplate.Encode` and fall back to a plain-text/raw-completion prompt format (what base models like GPT-2/StarCoder2 actually expect) instead of throwing. This would let `TextDecodeThroughputBenchmark.cs` (and any other direct-pipeline caller) measure these models' real decode throughput, which is currently impossible.
+- **Severity:** Medium — doesn't block the product (Swarm path works), but blocks direct-engine testing/benchmarking of any non-instruction-tuned checkpoint, and is a landmine for any future caller that uses `GenerationRequest.Prompt` directly instead of going through Swarm.
+
+### Issue #3 — Swarm's Jinja template engine is missing the `capitalize` filter
+- **Symptom:** SmolVLM2-2.2B-Instruct fails via `LLMAssistantSendMessage` with `Jinja filter 'capitalize'` (not found/implemented).
+- **Where to look:** the Jinja template interpreter used by `SwarmUI-LLMAssistant` (per other catalog comments this repo has its own Jinja subset implementation — search for `JinjaChatTemplate.cs` / `JinjaExpr.cs`, mentioned elsewhere in this doc's catalog re: qwen35's tool-calling filter chain gap). Find the filter dispatch table (likely a `switch`/dictionary mapping filter names to implementations) and confirm `capitalize` is simply unimplemented.
+- **Fix direction:** add a `capitalize` filter (first-letter-uppercase, matching Jinja2's built-in semantics) to the filter table. Low-risk, mechanical fix — this is the class of gap the doc already predicted ("SEPARATE, deeper 'Unsupported Jinja call expression' failure" was noted for qwen35's template; this is the same class of issue, different filter, different model).
+- **Severity:** Low-effort fix, but currently a hard blocker for SmolVLM2 (and any other model whose real chat template uses `capitalize`) via the actual product surface.
+
+### Issue #4 — VRAM leak on Swarm model swap (REGRESSION of previously-"fixed" FINDING #2 below)
+- **Symptom:** Swarm's `hartsy-local` backend process (4090) grew from ~2.9 GB baseline to **14.6 GB** after just ~10 sequential model loads in this session's Tier-2 sweep, then OOM'd on Qwen2.5-VL-7B and again on Llama-3.2-11B-Vision — both of which fit comfortably in 24 GB on their own.
+- **This is the same failure mode as FINDING #2 (below in this doc)**, which claims a fix was applied 2026-07-03 (`HartsyLocalLLMProvider.UnloadSlot` calling `CudaBackend.FreeAllDeviceMemory()`). That fix has either regressed, was incomplete, or doesn't cover every code path that swaps models (e.g. maybe only covers the explicit unload API, not the implicit swap-on-next-generate path).
+- **Where to look:** `SwarmUI-LLMAssistant/Backends/HartsyLocalLLMProvider.cs` — confirm `UnloadSlot`/`LoadInto` are still calling `CudaBackend.FreeAllDeviceMemory()` on every swap (not just explicit `/API/LLMAssistantUnloadModels` calls). Check whether backend id 5 (added via `AddNewBackend` API this session) and backend id 4 (from `Backends.fds`) are BOTH holding independent resident models simultaneously — this session added a *second* backend instance pointed at the same model folder, which could mean two provider instances each keep their own slot resident, doubling the effective leak. Verify via `nvidia-smi -i 1 --query-compute-apps` growth after each single model swap, isolating whether it's a per-swap leak or a per-extra-backend-instance issue.
+- **Workaround used this session:** `POST /API/LLMAssistantUnloadModels` between models. Confirmed working (`{"success":true,...}`, memory dropped from 14.6 GB → 4.3 GB after one call).
+- **Severity:** High — this blocks real usage of large models (7B+) after a chat session has touched several other models, which will be a common real-world pattern (a user comparing models in the UI).
+
+### Issue #5 — MoE models (olmoe, granite-moe) show pathological D2H sync counts, invalidating their Tier-1 numbers
+- **Symptom:** `olmoe-1b-7b-0924-instruct` measured 2193 D2H syncs per 128-token rep (vs ~129/rep — 1 per token — for every dense model); `granite-3.0-1b-a400m` measured 3225. Both are ~17-25× the expected sync count. Per this doc's own "Controlled variables" section, "~0 mid-decode D2H syncs... any per-token sync is a residency bug... invalidates the tg number."
+- **Measured throughput:** olmoe 21.97 tok/s (llama-cpp-python: 255.68, though noisy at stdev 62.98), granite-moe 51.54 tok/s (llama-cpp-python: 276.32, noisy at stdev 45.61). Neither is graph-decode-eligible.
+- **Where to look:** the MoE expert-routing/dispatch code path — likely `src/HartsyInference.LLM/**/MoeFeedForward.cs` or similar (grep `MoeFeedForward`). Each expert selection per-token is probably reading a routing decision back to host (`D2H`) to decide which expert weights to gather/launch, which is exactly the kind of per-token host-round-trip the doc flags as a residency bug elsewhere (cf. "Sync-H2D stream drain" and "CPU-glue async race" prior-session memory entries in this repo's broader history).
+- **Fix direction:** keep the top-k expert selection and gather entirely on-device (no D2H readback of routing indices before launching the expert GEMVs) — likely needs a device-side argmax/top-k + indirect/gather-dispatch kernel instead of reading indices back to the CPU to decide which kernel to launch next.
+- **Severity:** High for these two specific architectures — the current numbers likely understate the model's real achievable throughput AND llama-cpp-python's own numbers for these are also noisy/unreliable (high stdev), so this needs its own dedicated, cleaner remeasurement once the sync count is fixed, not just a perf optimization.
+
+### Issue #6 — SSM / hybrid architectures can't be measured via `TextDecodeThroughputBenchmark.cs` [BY DESIGN, not a bug]
+- **Symptom:** `GgufLanguageModel.Load` throws `NotSupportedException: 'mamba' is a state-space (non-transformer) architecture — load it via HartsyInference.LLM.Ssm.SsmLanguageModel, not GgufLanguageModel.` Same for `qwen35` (Gated DeltaNet hybrid, routed as SSM).
+- **This is intentional** — the catalog already documents that mamba/rwkv/qwen3.5 route through `SsmGenerationPipeline`, not `TextGenerationPipeline`. It is NOT a bug, but it does mean **no Tier-1 throughput number exists for these architectures from this session** (mamba's ~0.8 tok/s host-bound figure cited elsewhere in the catalog predates this session and wasn't re-verified here).
+- **Fix direction (feature work, not a bug fix):** extend `TextDecodeThroughputBenchmark.cs` (or write a sibling `SsmDecodeThroughputBenchmark.cs`) to detect the architecture up front and dispatch to `SsmLanguageModel`/`SsmGenerationPipeline` instead of hardcoding `GgufLanguageModel.Load` + `TextGenerationPipeline`, so SSM models get measured with the same rigor as transformers.
+- **Severity:** Low (no incorrect behavior, just a measurement gap).
+
+### Issue #7 — gemma-3-4b-it returns an empty (0-token) response via Swarm
+- **Symptom:** `LLMAssistantSendMessage` for `gemma-3-4b-it-Q4_K_M.gguf` returned `success: true` with an empty `response` string (0 tokens) in 9.63s. The exact same checkpoint architecture (gemma3) at the 1B size worked fine via Swarm in the round-1 sweep, and the 4B size worked fine at 69-96 tok/s in the direct Tier-1 test — so the underlying decode is provably fine; this is specific to the Swarm request path for this particular model size/variant.
+- **Where to look:** could be a stop-token/EOS-on-first-token issue specific to gemma-3-4b's larger vocab or a different `<end_of_turn>`-handling path than the 1B checkpoint, or a response-parsing truncation bug in `ChatEndpoints.cs` for longer prefill times (9.63s prefill+generate for a 4B model is plausible if most of that time is prefill and the decode loop then immediately hits an early stop condition). Add logging around the raw token stream before it's assembled into the `response` string for this specific model to see whether tokens were generated and dropped, or never generated at all.
+- **Severity:** Medium — a real model silently produces nothing via the product's main entry point, which would look like the model is broken to an end user, when the model itself works fine directly.
+
+### Issue #8 — Qwen2.5-VL-7B's GGUF fails to even construct a `llama_context` in llama-cpp-python 0.3.34 [not our bug, informational]
+- **Symptom:** `internals.LlamaContext(...)` → `ValueError: Failed to create llama_context` when loading `Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf` via `llama_cpp.Llama(...)` (pip package `llama-cpp-python==0.3.34`), confirmed reproducible with a clean/idle GPU (2.2 GB used, not an OOM).
+- **This is llama.cpp's limitation, not ours** — our engine loads and decodes this exact file successfully at 56-63 tok/s via a heuristic key-mapper fallback (`declared architecture 'qwen2vl' has no registered mapper; falling back to key-heuristic detection` → routes to `LlamaKeyMapper`). No fair Python-baseline comparison is possible for this model on this box with this llama-cpp-python build; a newer llama-cpp-python build or a different quant/repack might succeed where this one doesn't.
+- **Action for future sessions:** if a Python baseline for this specific model becomes important, try upgrading `benchmarks/.bench-venv`'s `llama-cpp-python` to a newer release, or try `unsloth`'s non-VL text-only variant if one exists.
+- **Severity:** None (not an engine bug) — recorded for context so a future session doesn't waste time assuming our engine is broken here.
 
 ## ⚠ HEADLINE FINDING (2026-07-03, preliminary) — engine decode is far below llama.cpp
 

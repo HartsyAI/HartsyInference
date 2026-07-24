@@ -35,6 +35,24 @@ Autoregressive music LM (Sesame-CSM dual-transformer). Metric is **ms/frame** (1
 | bf16 + CUDA-graph decode (default) | ~85–90 | ~11.2–11.7 | ~1.05× (bit-identical) |
 | **Q8_0 disk-quant** (`HARTSY_HEARTMULA_QUANT=q8_0`) | **64.8** | **15.4** | **1.41×** (~1/2 VRAM) |
 
+## Full audio fleet sweep — TTS/STT/Music/VC/Fx vs Swarm, 37 models (2026-07-24)
+
+Every local (non-cloud) AudioLab provider driven fresh through the real Swarm API (`ProcessTTS`/`ProcessSTT`/
+`ProcessAudio`) on the **RTX 4090** — same spirit as the LLM Swarm-path sweep, extended to a fleet with no
+single shared Python reference (each TTS/STT/music architecture is bespoke, unlike LLMs' universal
+llama-cpp-python). Docs: [`AUDIO_THROUGHPUT_BENCHMARK.md`](../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md)
+(full per-model table + methodology). Harness:
+[`swarm_audio_bench/swarm_audio_bench.py`](swarm_audio_bench/swarm_audio_bench.py); raw results:
+[`swarm_audio_bench/swarm_audio_results.json`](swarm_audio_bench/swarm_audio_results.json).
+
+**27/37 generated successfully today.** Best RTF: Moonshine-streaming STT at 0.077× (13× faster than
+real-time). 7 real bugs found, ranked by severity in the doc — most notably **HeartMuLa's music generation
+OOM-killed the entire Swarm process** (confirmed via kernel log: 49 GB resident RAM on a 62 GB box), plus
+missing weights (Zonos, YuE), a wiring gap (Chatterbox cloning), and a CPU-backend-forcing gap that the CLI
+has but the Swarm path doesn't (Demucs). Python-vs-engine comparisons are included only where a real timed
+number already exists from a prior session (F5-TTS, Kyutai TTS vs `moshi`) — see the doc for why a uniform
+Python column isn't honest for this fleet the way it was for LLMs.
+
 ## Diffusion / video e2e vs ComfyUI (2026-07-03)
 
 End-to-end wall-clock through the **SwarmUI API** (the identical request routed to the ComfyUI backend, then the HartsyInference backend, on the same RTX 4090). This is the user-perceived-latency comparison; it complements the in-engine microbench harness. Full write-up + host-vs-compute diagnosis: [`results/video_comfy-vs-hartsy_2026-07-03.md`](results/video_comfy-vs-hartsy_2026-07-03.md).

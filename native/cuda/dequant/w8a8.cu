@@ -17,7 +17,8 @@
 // quantizes with round-to-nearest. absmax==0 writes scale 1.0 (all-zero row stays a well-defined 0).
 extern "C" __global__ void w8a8_quant_rowwise_f16(
     const __half* __restrict__ x, signed char* __restrict__ q,
-    float* __restrict__ rowScale, unsigned int cols)
+    float* __restrict__ rowScale, unsigned int cols,
+    const float* __restrict__ invScale)  // per-input-channel SmoothQuant 1/s_j, or nullptr (same "0 = none" convention as w8a8_dequant_bias's bias arg)
 {
     __shared__ float sm[ROW_THREADS];
     __shared__ float sInv;
@@ -29,8 +30,10 @@ extern "C" __global__ void w8a8_quant_rowwise_f16(
     float m = 0.0f;
     for (unsigned int i = tid; i < cols; i += ROW_THREADS)
     {
-        float v = fabsf(__half2float(xr[i]));
-        if (v > m) m = v;
+        float v = __half2float(xr[i]);
+        if (invScale) v *= invScale[i];
+        float a = fabsf(v);
+        if (a > m) m = a;
     }
     sm[tid] = m;
     __syncthreads();
@@ -49,7 +52,9 @@ extern "C" __global__ void w8a8_quant_rowwise_f16(
     float inv = sInv;
     for (unsigned int i = tid; i < cols; i += ROW_THREADS)
     {
-        float v = __half2float(xr[i]) * inv;
+        float v = __half2float(xr[i]);
+        if (invScale) v *= invScale[i];
+        v *= inv;
         int iv = __float2int_rn(v);
         if (iv > 127) iv = 127;
         if (iv < -127) iv = -127;
@@ -60,7 +65,8 @@ extern "C" __global__ void w8a8_quant_rowwise_f16(
 // ── 1b. F32-input twin ──────────────────────────────────────────────────────────────────────
 extern "C" __global__ void w8a8_quant_rowwise_f32(
     const float* __restrict__ x, signed char* __restrict__ q,
-    float* __restrict__ rowScale, unsigned int cols)
+    float* __restrict__ rowScale, unsigned int cols,
+    const float* __restrict__ invScale)  // see w8a8_quant_rowwise_f16
 {
     __shared__ float sm[ROW_THREADS];
     __shared__ float sInv;
@@ -72,8 +78,10 @@ extern "C" __global__ void w8a8_quant_rowwise_f32(
     float m = 0.0f;
     for (unsigned int i = tid; i < cols; i += ROW_THREADS)
     {
-        float v = fabsf(xr[i]);
-        if (v > m) m = v;
+        float v = xr[i];
+        if (invScale) v *= invScale[i];
+        float a = fabsf(v);
+        if (a > m) m = a;
     }
     sm[tid] = m;
     __syncthreads();
@@ -92,7 +100,9 @@ extern "C" __global__ void w8a8_quant_rowwise_f32(
     float inv = sInv;
     for (unsigned int i = tid; i < cols; i += ROW_THREADS)
     {
-        float v = xr[i] * inv;
+        float v = xr[i];
+        if (invScale) v *= invScale[i];
+        v *= inv;
         int iv = __float2int_rn(v);
         if (iv > 127) iv = 127;
         if (iv < -127) iv = -127;

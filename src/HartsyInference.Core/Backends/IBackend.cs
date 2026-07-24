@@ -1392,6 +1392,27 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>Gemma-4 PLE graph-decode gather: dequantizes one row of the QUANTIZED per-layer token
+    /// embedding table (device-resident) selected by the DEVICE token id, scaled by sqrt(ple), into
+    /// <paramref name="output"/> <c>[1, 1, ple·layers]</c>. Only the CUDA backend implements this (graph
+    /// decode is backend-gated); the default throws.</summary>
+    void PleGatherDecodeStep(Tensor output, Tensor quantTable, float scale, ulong deviceTokenId)
+        => throw new NotSupportedException("PleGatherDecodeStep requires a graph-decode-capable backend.");
+
+    /// <summary>Qwen3.5 SSM decode step (seq=1), part 1: causal depthwise conv step + SiLU + q/k/v split
+    /// + per-head L2 norms (q additionally scaled by 1/sqrt(sk)). <paramref name="history"/> is the
+    /// device-persistent conv ring, shifted in place. CUDA-only (graph-capable backends).</summary>
+    void SsmConvSplitStep(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,
+        int kernel, int kHeads, int skDim, int vHeads, int svDim, float eps, float qScale)
+        => throw new NotSupportedException("SsmConvSplitStep requires a CUDA backend.");
+
+    /// <summary>Qwen3.5 SSM decode step (seq=1), part 2: delta-rule recurrence + gated RMSNorm.
+    /// <paramref name="state"/> is the device-persistent [hv, sv, sk] recurrent state. CUDA-only.</summary>
+    void SsmDeltaStep(Tensor output, Tensor state, Tensor q, Tensor k, Tensor v, Tensor z,
+        Tensor alphaRaw, Tensor betaRaw, Tensor dtBias, Tensor ssmA, Tensor normW,
+        int hv, int sv, int sk, int repeat, float eps)
+        => throw new NotSupportedException("SsmDeltaStep requires a CUDA backend.");
+
     /// <summary>Fused residual-add + RMSNorm: <c>residOut = a + b; normOut = rmsnorm(residOut) · weight</c> —
     /// one pass instead of Add followed by RmsNorm. Backends without a fused kernel fall back to that exact
     /// two-op composition (identical math).</summary>

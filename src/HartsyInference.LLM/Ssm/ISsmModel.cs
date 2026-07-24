@@ -13,6 +13,11 @@ public interface ISsmModel : IDisposable
     /// <summary>The GGUF metadata (for building the tokenizer + chat template the same way a transformer model does).</summary>
     GgufMetadata Metadata { get; }
 
+    /// <summary>All weight tensors, for <see cref="HartsyInference.Core.Backends.IBackend.PreloadWeights"/> —
+    /// without residency every SSM step re-uploads its weights over PCIe (measured: 10.4 s of H2D in a
+    /// 32-token qwen3.5 run). Default: empty (models that haven't wired it keep lazy behavior).</summary>
+    IEnumerable<HartsyInference.Core.Tensors.Tensor> EnumerateWeights() => [];
+
     /// <summary>Zeroes every layer's carried recurrent state. Call before the first <see cref="ForwardLastLogits"/>
     /// of a new generation — the model instance is reused across unrelated chat turns via the provider's device
     /// slot, so without this a fresh prompt would continue from the previous conversation's state.</summary>

@@ -1,0 +1,292 @@
+{
+  "results": [
+    {
+      "provider_id": "piper_tts",
+      "category": "TTS",
+      "wall_time_s": 1.02,
+      "status": "OK",
+      "audio_duration_s": 2.88,
+      "rtf": 0.354
+    },
+    {
+      "provider_id": "kokoro_tts",
+      "category": "TTS",
+      "wall_time_s": 2.41,
+      "status": "OK",
+      "audio_duration_s": 3.7,
+      "rtf": 0.651
+    },
+    {
+      "provider_id": "bark_tts",
+      "category": "TTS",
+      "wall_time_s": 13.09,
+      "status": "OK",
+      "audio_duration_s": 4.48,
+      "rtf": 2.922
+    },
+    {
+      "provider_id": "styletts2_tts",
+      "category": "TTS",
+      "wall_time_s": 2.77,
+      "status": "OK",
+      "audio_duration_s": 5.38,
+      "rtf": 0.515
+    },
+    {
+      "provider_id": "sparktts_tts",
+      "category": "TTS",
+      "wall_time_s": 19.79,
+      "status": "OK",
+      "audio_duration_s": 3.38,
+      "rtf": 5.856
+    },
+    {
+      "provider_id": "cosyvoice_tts",
+      "category": "TTS",
+      "wall_time_s": 15.23,
+      "status": "OK",
+      "audio_duration_s": 4.24,
+      "rtf": 3.591
+    },
+    {
+      "provider_id": "vibevoice_tts",
+      "category": "TTS",
+      "wall_time_s": 16.46,
+      "status": "OK",
+      "audio_duration_s": 10.27,
+      "rtf": 1.603
+    },
+    {
+      "provider_id": "fishspeech_tts",
+      "category": "TTS",
+      "wall_time_s": 13.89,
+      "status": "OK",
+      "audio_duration_s": 3.72,
+      "rtf": 3.739
+    },
+    {
+      "provider_id": "f5_tts",
+      "category": "TTS",
+      "wall_time_s": 14.27,
+      "status": "OK",
+      "audio_duration_s": 5.01,
+      "rtf": 2.846
+    },
+    {
+      "provider_id": "dia_tts",
+      "category": "TTS",
+      "status": "TIMEOUT",
+      "error": "exceeded 180.0s"
+    },
+    {
+      "provider_id": "orpheus_tts",
+      "category": "TTS",
+      "status": "TIMEOUT",
+      "error": "exceeded 180.0s"
+    },
+    {
+      "provider_id": "csm_tts",
+      "category": "TTS",
+      "wall_time_s": 173.72,
+      "status": "OK",
+      "audio_duration_s": 4.24,
+      "rtf": 40.971
+    },
+    {
+      "provider_id": "neutts_tts",
+      "category": "TTS",
+      "wall_time_s": 47.07,
+      "status": "OK",
+      "audio_duration_s": 10.32,
+      "rtf": 4.561
+    },
+    {
+      "provider_id": "qwen3_tts",
+      "category": "TTS",
+      "wall_time_s": 11.29,
+      "status": "OK",
+      "audio_duration_s": 4.56,
+      "rtf": 2.476
+    },
+    {
+      "provider_id": "chatterbox_tts",
+      "category": "TTS",
+      "wall_time_s": 3.13,
+      "status": "FAIL",
+      "error": "Chatterbox reference-voice cloning is not wired yet \u2014 it needs a PCM\u219240-bin-mel front-end for the voice encoder. Clear the voice reference to use the built-in default voice."
+    },
+    {
+      "provider_id": "kyutaitts_tts",
+      "category": "TTS",
+      "wall_time_s": 29.3,
+      "status": "OK",
+      "audio_duration_s": 3.44,
+      "rtf": 8.516
+    },
+    {
+      "provider_id": "melotts_tts",
+      "category": "TTS",
+      "wall_time_s": 4.5,
+      "status": "OK",
+      "audio_duration_s": 3.04,
+      "rtf": 1.481
+    },
+    {
+      "provider_id": "pockettts_tts",
+      "category": "TTS",
+      "wall_time_s": 2.92,
+      "status": "OK",
+      "audio_duration_s": 2.96,
+      "rtf": 0.986
+    },
+    {
+      "provider_id": "zonos_tts",
+      "category": "TTS",
+      "wall_time_s": 0.18,
+      "status": "FAIL",
+      "error": "Could not find file '/home/hartsy/.cache/hartsyinference/models/Zyphra--Zonos-v0.1-transformer/model.safetensors'."
+    },
+    {
+      "provider_id": "gptsovits_clone",
+      "category": "TTS",
+      "wall_time_s": 39.54,
+      "status": "OK",
+      "audio_duration_s": 5.76,
+      "rtf": 6.865
+    },
+    {
+      "provider_id": "zipvoice_tts",
+      "category": "TTS",
+      "wall_time_s": 113.68,
+      "status": "OK",
+      "audio_duration_s": 5.41,
+      "rtf": 21.022
+    },
+    {
+      "provider_id": "whisper_stt",
+      "category": "STT",
+      "wall_time_s": 1.65,
+      "status": "OK",
+      "transcription": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "rtf": 0.15,
+      "audio_duration_s": 11.0
+    },
+    {
+      "provider_id": "moonshine_stt",
+      "category": "STT",
+      "wall_time_s": 1.2,
+      "status": "OK",
+      "transcription": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country",
+      "rtf": 0.109,
+      "audio_duration_s": 11.0
+    },
+    {
+      "provider_id": "distilwhisper_stt",
+      "category": "STT",
+      "wall_time_s": 0.04,
+      "status": "FAIL",
+      "error": "Unknown Whisper repo 'distil-whisper/distil-large-v3.5'. Pass an explicit WhisperConfig to LoadAsync. (Parameter 'hfRepoId')"
+    },
+    {
+      "provider_id": "moonshinestreaming_stt",
+      "category": "STT",
+      "wall_time_s": 0.85,
+      "status": "OK",
+      "transcription": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "rtf": 0.077,
+      "audio_duration_s": 11.0
+    },
+    {
+      "provider_id": "kyutaistt_stt",
+      "category": "STT",
+      "wall_time_s": 13.33,
+      "status": "OK",
+      "transcription": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "rtf": 1.212,
+      "audio_duration_s": 11.0
+    },
+    {
+      "provider_id": "whisperstreaming_stt",
+      "category": "STT",
+      "wall_time_s": 1.63,
+      "status": "OK",
+      "transcription": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "rtf": 0.148,
+      "audio_duration_s": 11.0
+    },
+    {
+      "provider_id": "musicgen_music",
+      "category": "Music",
+      "wall_time_s": 7.26,
+      "status": "OK",
+      "audio_duration_s": 10.0,
+      "rtf": 0.726
+    },
+    {
+      "provider_id": "audiogen_sfx",
+      "category": "Music",
+      "wall_time_s": 34.3,
+      "status": "OK",
+      "audio_duration_s": 10.0,
+      "rtf": 3.43
+    },
+    {
+      "provider_id": "acestep_music",
+      "category": "Music",
+      "wall_time_s": 9.42,
+      "status": "OK",
+      "audio_duration_s": 10.0,
+      "rtf": 0.942
+    },
+    {
+      "provider_id": "yue_music",
+      "category": "Music",
+      "wall_time_s": 0.35,
+      "status": "FAIL",
+      "error": "YuE checkpoint folder not found: '/home/hartsy/Desktop/Swarm/SwarmUI.not too old/Models/audio/music/yue/yue'. Place the m-a-p/YuE-s1-7B-anneal-* folder there; its 'tokenizer.model' ships inside it, and 'xcodec.safetensors' (converted from m-a-p/xcodec_mini_infer) belongs in or beside it."
+    },
+    {
+      "provider_id": "stableaudio_music",
+      "category": "Music",
+      "wall_time_s": 4.1,
+      "status": "OK",
+      "audio_duration_s": 10.0,
+      "rtf": 0.41
+    },
+    {
+      "provider_id": "heartlib_music",
+      "category": "Music",
+      "status": "TIMEOUT",
+      "error": "exceeded 180.0s"
+    },
+    {
+      "provider_id": "openvoice_clone",
+      "category": "VoiceConversion",
+      "wall_time_s": 10.52,
+      "status": "OK",
+      "audio_duration_s": 11.01,
+      "rtf": 0.955
+    },
+    {
+      "provider_id": "rvc_clone",
+      "category": "VoiceConversion",
+      "wall_time_s": 0.05,
+      "status": "FAIL",
+      "error": "RVC voice model not found: '/home/hartsy/Desktop/Swarm/SwarmUI.not too old/Models/audio/clone/rvc/rvc'. Place the RVC voice model (.pth or .safetensors) there."
+    },
+    {
+      "provider_id": "demucs_fx",
+      "category": "Fx",
+      "wall_time_s": 2.09,
+      "status": "FAIL",
+      "error": "CUDA STFT not supported - use CPU backend for audio"
+    },
+    {
+      "provider_id": "resemble_enhance_fx",
+      "category": "Fx",
+      "wall_time_s": 0.32,
+      "status": "FAIL",
+      "error": "HuggingFace file not found: ResembleAI/resemble-enhance/pytorch_model.bin @ main. Check the repo id and filename, or set HF_TOKEN if the repo is gated."
+    }
+  ]
+}

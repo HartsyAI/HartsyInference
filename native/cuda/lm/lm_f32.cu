@@ -8,6 +8,8 @@
 //
 // Build:  ./build.sh   (nvcc --ptx -arch=sm_80 lm_f32.cu -o lm_f32.ptx, installed into Ptx/)
 
+#include <cuda_fp16.h>
+
 extern "C" {
 
 // ── GQA K/V head repeat (block pattern) ────────────────────────────────────
@@ -661,6 +663,249 @@ extern "C" __global__ void lm_glu_act_q8_1_f32(
     #pragma unroll
     for (int o = 16; o > 0; o >>= 1) s2 += __shfl_xor_sync(0xffffffffu, s2, o);
     if (lane == 0) { xd[gid / 32] = scale; xs[gid / 32] = (float)s2; }
+}
+
+// ── Qwen3.5 SSM decode step (seq=1): device-side conv + delta-rule recurrence ──────────────────
+// The recurrent layers previously synced and ran conv/recurrence/gated-norm on the HOST every
+// layer every token (~26 tok/s ceiling). These kernels port the seq=1 decode step; prefill keeps
+// the host path (states upload once at the prefill→decode transition). Formulas mirror
+// Qwen35Model.BlockLinear expression-for-expression; parallel reductions reorder float sums, so
+// outputs are tolerance-equivalent (dp4a class), not byte-identical — gated by output-similarity.
+
+// Causal depthwise conv step + SiLU + q/k/v split + per-head L2 norm + qScale, one launch.
+// history [k-1, convDim] is device-persistent and shifted in place (each thread owns channel c).
+// Launch: grid = ceil(convDim/256) for phase 1... — single kernel, TWO block roles:
+//   blocks [0, convBlocks): conv+shift+split for their channels (elementwise per channel)
+//   (L2 norm needs the split q/k complete first → separate kernel below.)
+__global__ void lm_ssm_conv_split_step_f32(
+    float* __restrict__ qOut,           // [keyDim]
+    float* __restrict__ kOut,           // [keyDim]
+    float* __restrict__ vOut,           // [valueDim]
+    const float* __restrict__ qkvMixed, // [convDim] (this step's projection)
+    float* __restrict__ history,        // [k-1, convDim] persistent ring (shifted here)
+    const float* __restrict__ convW,    // [convDim, k] as stored (c*k + j indexing, matches host)
+    unsigned int convDim,
+    unsigned int keyDim,
+    unsigned int valueDim,
+    unsigned int kernel)                // conv kernel size k
+{
+    unsigned int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= convDim) return;
+
+    // acc = sum_j w[c,j] * (j < k-1 ? history[j][c] : current[c])   (seq=1: combined == j)
+    float acc = 0.0f;
+    for (unsigned int j = 0; j < kernel; j++)
+    {
+        float src = j < kernel - 1 ? history[(size_t)j * convDim + c] : qkvMixed[c];
+        acc += convW[(size_t)c * kernel + j] * src;
+    }
+    float xc = acc / (1.0f + __expf(-acc));   // SiLU — same expression as the host loop
+
+    // Shift this channel's history left by one and append the current input (thread owns channel c).
+    for (unsigned int j = 0; j + 1 < kernel - 1; j++)
+        history[(size_t)j * convDim + c] = history[(size_t)(j + 1) * convDim + c];
+    if (kernel > 1)
+        history[(size_t)(kernel - 2) * convDim + c] = qkvMixed[c];
+
+    // Split: [q keyDim | k keyDim | v valueDim].
+    if (c < keyDim) qOut[c] = xc;
+    else if (c < 2u * keyDim) kOut[c - keyDim] = xc;
+    else vOut[c - 2u * keyDim] = xc;
+}
+
+// Per-head L2 normalize (v / sqrt(sum(v^2) + eps)) with optional post-scale — block per head,
+// same reduction shape as the QK-norm kernels. Used for the SSM q (scale = 1/sqrt(sk)) and k (scale = 1).
+__global__ void lm_ssm_l2norm_heads_f32(
+    float* __restrict__ x,              // [heads * dim], normalized in place
+    unsigned int dim,
+    float eps,
+    float postScale)
+{
+    extern __shared__ float sdata_l2[];
+    unsigned int h = blockIdx.x;
+    float* row = x + (size_t)h * dim;
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+    {
+        float v = row[i];
+        partial += v * v;
+    }
+    sdata_l2[threadIdx.x] = partial;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) sdata_l2[threadIdx.x] += sdata_l2[threadIdx.x + s];
+        __syncthreads();
+    }
+    float inv = (1.0f / sqrtf(sdata_l2[0] + eps)) * postScale;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+        row[i] *= inv;
+}
+
+// Delta-rule recurrence + gated RMSNorm, one block per value head:
+//   gExp = exp(softplus(alpha + dtBias) * ssmA); beta = sigmoid(betaRaw)
+//   S *= gExp; skRow = S·k; S += k ⊗ ((v − skRow)·beta); o = S·q
+//   out = rmsnorm(o)·normW · silu(z)          (norm FIRST, then gate — Qwen3.5 order)
+// state [hv, sv, sk] is device-persistent across tokens. Launch: grid = hv, block = 256,
+// shared = (sv + 256) floats.
+__global__ void lm_ssm_delta_step_f32(
+    float* __restrict__ output,         // [hv * sv]
+    float* __restrict__ state,          // [hv, sv, sk] persistent
+    const float* __restrict__ q,        // [keyDim] (L2-normed + qScale applied)
+    const float* __restrict__ kIn,      // [keyDim] (L2-normed)
+    const float* __restrict__ v,        // [valueDim]
+    const float* __restrict__ z,        // [valueDim] (gate projection, pre-silu)
+    const float* __restrict__ alphaRaw, // [hv]
+    const float* __restrict__ betaRaw,  // [hv]
+    const float* __restrict__ dtBias,   // [hv]
+    const float* __restrict__ ssmA,     // [hv]
+    const float* __restrict__ normW,    // [sv]
+    unsigned int sv,
+    unsigned int sk,
+    unsigned int repeat,                // k-heads shared per v-head (kh = h / repeat)
+    float eps)
+{
+    extern __shared__ float sh_ssm[];   // [0, sv) = skRow / o scratch; [sv, sv+blockDim) = reduce
+    float* rowScratch = sh_ssm;
+    float* red = sh_ssm + sv;
+
+    unsigned int h = blockIdx.x;
+    unsigned int kh = h / repeat;
+    const float* qh = q + (size_t)kh * sk;
+    const float* kh_ = kIn + (size_t)kh * sk;
+    const float* vh = v + (size_t)h * sv;
+    const float* zh = z + (size_t)h * sv;
+    float* st = state + (size_t)h * sv * sk;
+    float* outH = output + (size_t)h * sv;
+
+    float av = alphaRaw[h] + dtBias[h];
+    float softplus = av > 20.0f ? av : logf(1.0f + expf(av));
+    float gExp = expf(softplus * ssmA[h]);
+    float beta = 1.0f / (1.0f + expf(-betaRaw[h]));
+
+    unsigned int total = sv * sk;
+    // Phase 1: decay + per-row dot S·k. Row-per-iteration: each thread strides rows; within a
+    // row, threads... simpler: thread t handles elements t, t+B, ... for decay; for the row dots
+    // each ROW is reduced by the whole block sequentially over rows (sv rows, dim sk).
+    for (unsigned int i = threadIdx.x; i < total; i += blockDim.x)
+        st[i] *= gExp;
+    __syncthreads();
+    for (unsigned int row = 0; row < sv; row++)
+    {
+        float partial = 0.0f;
+        const float* rb = st + (size_t)row * sk;
+        for (unsigned int col = threadIdx.x; col < sk; col += blockDim.x)
+            partial += rb[col] * kh_[col];
+        red[threadIdx.x] = partial;
+        __syncthreads();
+        for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+        {
+            if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) rowScratch[row] = red[0];
+        __syncthreads();
+    }
+    // Phase 2: rank-1 update.
+    for (unsigned int i = threadIdx.x; i < total; i += blockDim.x)
+    {
+        unsigned int row = i / sk, col = i % sk;
+        float delta = (vh[row] - rowScratch[row]) * beta;
+        st[i] += kh_[col] * delta;
+    }
+    __syncthreads();
+    // Phase 3: readout o = S·q into rowScratch.
+    for (unsigned int row = 0; row < sv; row++)
+    {
+        float partial = 0.0f;
+        const float* rb = st + (size_t)row * sk;
+        for (unsigned int col = threadIdx.x; col < sk; col += blockDim.x)
+            partial += rb[col] * qh[col];
+        red[threadIdx.x] = partial;
+        __syncthreads();
+        for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+        {
+            if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) rowScratch[row] = red[0];
+        __syncthreads();
+    }
+    // Phase 4: gated RMSNorm over this head's o (dim sv), then · silu(z).
+    float partial2 = 0.0f;
+    for (unsigned int i = threadIdx.x; i < sv; i += blockDim.x)
+    {
+        float ov = rowScratch[i];
+        partial2 += ov * ov;
+    }
+    red[threadIdx.x] = partial2;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+        __syncthreads();
+    }
+    float inv = 1.0f / sqrtf(red[0] / (float)sv + eps);
+    for (unsigned int i = threadIdx.x; i < sv; i += blockDim.x)
+    {
+        float normed = rowScratch[i] * inv * normW[i];
+        float zv = zh[i];
+        outH[i] = normed * (zv / (1.0f + expf(-zv)));
+    }
+}
+
+// ── Gemma-4 PLE: device-side per-layer-embedding row gather ─────────────────────────────────────
+// Graph decode is self-feeding (the token id lives in a device buffer), so the per-layer token
+// embedding row must be gathered ON DEVICE — the host never sees the id without a per-token sync.
+// The Q5_K table stays quantized on device (1.6 GB for E2B vs 9.4 GB F32); this kernel dequantizes
+// ONE row (width elems) by the device token id and scales by sqrt(ple) — the expression order
+// matches Codec_Q5_K.DequantizeToF32 exactly (subScale = d*sc; v = subScale*q − subMin; out =
+// v*scale), so the values are bit-identical to the eager path's CPU-dequantized host gather.
+// Launch: grid = width/256, block = 256 (one thread per element of one super-block).
+__global__ void lm_ple_gather_q5k_f32(
+    float* __restrict__ output,
+    const unsigned char* __restrict__ table,
+    unsigned int width,               // row width in elements (ple * layers); multiple of 256
+    float scale,                      // sqrt(perLayerEmbeddingDim)
+    const int* __restrict__ deviceTokenId)
+{
+    const unsigned int sb = blockIdx.x;           // super-block within the row
+    const unsigned int i = threadIdx.x;           // element within the super-block (0..255)
+    const unsigned int elem = sb * 256u + i;
+    if (elem >= width) return;
+
+    const unsigned int rowBlocks = width / 256u;
+    const unsigned long long rowBytes = (unsigned long long)rowBlocks * 176u;
+    const unsigned char* block = table + (unsigned long long)deviceTokenId[0] * rowBytes + (unsigned long long)sb * 176u;
+
+    const float d = __half2float(*(const __half*)block);
+    const float dmin = __half2float(*(const __half*)(block + 2));
+    const unsigned char* scales = block + 4;
+    const unsigned char* highBits = block + 16;
+    const unsigned char* lowBits = block + 48;
+
+    const int j = i >> 5;                          // sub-block 0..7
+    const int ii = i & 31;                         // element within sub-block
+
+    // GetScaleMinK4 (byte semantics, same as the CPU helper / get_scale_min_k4_words).
+    unsigned int sc, mm;
+    if (j < 4) {
+        sc = scales[j] & 63u;
+        mm = scales[j + 4] & 63u;
+    } else {
+        sc = (scales[j + 4] & 0x0Fu) | ((scales[j - 4] >> 6) << 4);
+        mm = (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4);
+    }
+    const float subScale = d * (float)sc;
+    const float subMin = dmin * (float)mm;
+
+    const unsigned char* subLowBits = lowBits + (j >> 1) * 32;
+    const int lowNibbleShift = (j & 1) ? 4 : 0;
+    const int low = (subLowBits[ii] >> lowNibbleShift) & 0x0F;
+    const int high = ((highBits[ii] >> j) & 0x01) << 4;
+    const int q = low | high;
+
+    output[elem] = (subScale * (float)q - subMin) * scale;
 }
 
 // ── Sandwich-norm fusions (Gemma-2/3, GLM-4: post_attention_norm / post_ffw_norm) ──────────────

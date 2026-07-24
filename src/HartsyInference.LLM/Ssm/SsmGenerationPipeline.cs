@@ -28,6 +28,26 @@ public sealed class SsmGenerationPipeline
         _backend = backend;
         _template = template ?? new ChatMlTemplate();
         _stopIds = [.. tokenizer.StopIds];
+        // Headroom-guarded weight preload (same as TextGenerationPipeline): the SSM decode loop otherwise
+        // re-uploads weights every step — 10.4 s of PCIe churn in a 32-token qwen3.5 run.
+        try
+        {
+            long headroom = 2L << 30;
+            if (backend.FreeMemoryBytes() is long free && free > headroom)
+            {
+                List<HartsyInference.Core.Tensors.Tensor> toPreload = [];
+                long budget = free - headroom;
+                foreach (HartsyInference.Core.Tensors.Tensor t in model.EnumerateWeights())
+                {
+                    long bytes = HartsyInference.Core.Tensors.Tensor.ComputeByteSize(t.Shape, t.DType);
+                    if (budget - bytes < 0) continue;
+                    budget -= bytes;
+                    toPreload.Add(t);
+                }
+                backend.PreloadWeights(toPreload);
+            }
+        }
+        catch (Exception ex) { HartsyInference.Core.Logging.Logs.Warning($"ssm weight preload failed (continuing lazy): {ex.Message}"); }
     }
 
     /// <summary><paramref name="ct"/> is checked once per generated token, mirroring

@@ -340,7 +340,12 @@ internal static unsafe class GpuTransferHelper
             if (s.LiveArenas[i].basePtr == basePtr)
             {
                 s.LiveArenas.RemoveAt(i);
-                CudaMemory.FreeAsync(basePtr, s.StreamHandle);
+                // SYNCHRONOUS free on a drained stream: arena release is a cold path (end of a
+                // generation), and an async free here races the pool — the freed block can be handed to
+                // another backend's allocations while replay work is still in flight on the original
+                // stream (intermittent CudaGraph_RepeatedReplay flake when suites interleave backends).
+                if (s.StreamHandle != 0) CudaDriverApi.cuStreamSynchronize(s.StreamHandle);
+                CudaMemory.Free(basePtr);
                 return;
             }
         }

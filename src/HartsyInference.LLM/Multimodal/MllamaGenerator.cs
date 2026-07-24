@@ -21,6 +21,28 @@ public sealed class MllamaGenerator
     public MllamaGenerator(GgufLanguageModel text, MllamaVisionEncoder vision, IBackend backend)
     {
         _text = text; _vision = vision; _backend = backend;
+        // Same headroom-guarded weight preload TextGenerationPipeline does at construction: without it,
+        // auto-promotion's size floor leaves every small weight (norms, gates) host-side FOREVER, and each
+        // eager decode step re-uploads them (measured ~26 ms/generation of pure H2D churn on small models —
+        // proportionally worse on mllama's 40-layer decode loop, which has no graph path to hide it).
+        try
+        {
+            long headroom = 2L << 30;
+            if (backend.FreeMemoryBytes() is long free && free > headroom)
+            {
+                List<HartsyInference.Core.Tensors.Tensor> toPreload = [];
+                long budget = free - headroom;
+                foreach (HartsyInference.Core.Tensors.Tensor t in text.Transformer.EnumerateWeights())
+                {
+                    long bytes = HartsyInference.Core.Tensors.Tensor.ComputeByteSize(t.Shape, t.DType);
+                    if (budget - bytes < 0) continue;
+                    budget -= bytes;
+                    toPreload.Add(t);
+                }
+                backend.PreloadWeights(toPreload);
+            }
+        }
+        catch (Exception ex) { HartsyInference.Core.Logging.Logs.Warning($"mllama weight preload failed (continuing lazy): {ex.Message}"); }
     }
 
     /// <summary>Generates a reply to <paramref name="question"/> about the image (<paramref name="pixelValues"/> =
@@ -40,6 +62,13 @@ public sealed class MllamaGenerator
         int visLen = (int)crossStates.Shape[1];
 
         // 2. Llama-3 chat prompt with a single <|image|> placeholder before the question.
+        // NOTE (2026-07-23): encoding this template with addSpecial:true (proper single-token template ids)
+        // made the model STOP after ~2 tokens — the single-id <|image|> interacts badly with the splice-free
+        // embed path (this generator feeds vision via cross-attention only; the literal "<|image|>" text being
+        // ordinary-BPE'd is apparently what the verified-working configuration relies on). Kept at false;
+        // template markers therefore BPE as text, which costs some answer discipline (occasional free-running /
+        // template echoes — the echoes are now suppressed by the tokenizer's template-token decode skip). A
+        // proper fix needs the image token handled explicitly alongside true special encoding — scoped follow-up.
         int[] ids = _text.Tokenizer.Encode(
             "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n<|image|>" + question +
             "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", addSpecial: false);
@@ -61,8 +90,11 @@ public sealed class MllamaGenerator
         }
 
         int pos = seqLen;
+        System.Diagnostics.Stopwatch decodeSw = System.Diagnostics.Stopwatch.StartNew();
+        int decoded = 0;
         for (int step = 0; step < maxTokens && !stops.Contains(token); step++)
         {
+            decoded++;
             sb.Append(_text.Tokenizer.Decode([token]));
             history.Add(token);
             using Tensor stepEmb = new(new TensorShape(1, 1, hidden), DType.F32);
@@ -72,6 +104,9 @@ public sealed class MllamaGenerator
             pos++;
             token = SampleLast(model, h, 1, sampler, history);
         }
+        if (decoded > 1)
+            HartsyInference.Core.Logging.Logs.Info(
+                $"[mllama] decode: {decoded} tokens in {decodeSw.Elapsed.TotalSeconds:F2}s = {decoded / decodeSw.Elapsed.TotalSeconds:F1} tok/s");
         return sb.ToString();
     }
 

@@ -5,6 +5,8 @@ using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Schedulers;
+using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
@@ -117,6 +119,21 @@ public sealed unsafe class Kandinsky5W8A8SsimAbTests
                 using Tensor negQwen = LoadF32Tensor(TestPaths.Kandinsky5.NegPromptQwenEmbeds, config.InTextDim);
                 using Tensor negClip = LoadPooled(TestPaths.Kandinsky5.NegPromptClipPooled, config.InTextDim2);
 
+                // K5V_SKIP_CALIBRATION=1: same-build w8a8 arm WITHOUT SmoothQuant, isolating the build
+                // change (w8a8.ptx recompiled 11.5->13.0.88 this session) from the smoothing effect itself
+                // in the SSIM comparison — the prior 0.9211 baseline was measured on the old PTX build.
+                if (w8a8 && Environment.GetEnvironmentVariable("K5V_SKIP_CALIBRATION") != "1")
+                {
+                    System.Diagnostics.Stopwatch calSw = System.Diagnostics.Stopwatch.StartNew();
+                    int applied = CalibrateSmoothQuant(backend, transformer, config, qwen, clip, width, height, numFrames, steps, _output);
+                    calSw.Stop();
+                    _output.WriteLine($"SmoothQuant calibration: {applied} weights smoothed in {calSw.Elapsed.TotalSeconds:F1}s");
+                }
+                else if (w8a8)
+                {
+                    _output.WriteLine("K5V_SKIP_CALIBRATION=1: running w8a8 WITHOUT SmoothQuant (build-drift control).");
+                }
+
                 Kandinsky5VideoPipeline pipeline = new(backend, transformer, vae, config);
                 TextToImageRequest req = new()
                 { Prompt = "(embeddings)", Width = width, Height = height, Steps = steps, CfgScale = cfg, Seed = 42 };
@@ -127,7 +144,8 @@ public sealed unsafe class Kandinsky5W8A8SsimAbTests
                 sw.Stop();
                 _output.WriteLine($"[{arm}] {frames.Length} frames in {sw.Elapsed.TotalSeconds:F1}s (W8A8={w8a8})");
 
-                string dumpDir = Path.Combine(DumpRoot, arm);
+                string dumpArm = w8a8 && Environment.GetEnvironmentVariable("K5V_SKIP_CALIBRATION") == "1" ? "w8a8nosmooth" : arm;
+                string dumpDir = Path.Combine(DumpRoot, dumpArm);
                 Directory.CreateDirectory(dumpDir);
                 foreach (string f in Directory.GetFiles(dumpDir, "*.rgb")) File.Delete(f);
                 for (int i = 0; i < frames.Length; i++)
@@ -161,6 +179,141 @@ public sealed unsafe class Kandinsky5W8A8SsimAbTests
         finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
     }
 
+    /// <summary>SmoothQuant calibration (W8A8_HANDOFF.md item 1, offline-gate-confirmed 2026-07-24 on real
+    /// Kandinsky5 layers: relL2 drops ~40%, alpha~0.7-0.8 optimal, not layer-idiosyncratic; Pearson r of
+    /// per-channel absmax profiles drops to 0.43 between schedule extremes, so calibration MUST
+    /// max-aggregate across the schedule, not a single sample). Runs a few representative timesteps
+    /// (early/mid/late) through the real transformer with the capture hook always re-arming (so every
+    /// W8A8-eligible Linear in the model gets captured, not just one), accumulates per-input-channel
+    /// activation absmax (max across BOTH rows-within-a-capture and timesteps) and per-weight
+    /// per-input-channel weight absmax (t-invariant, computed once), then calls
+    /// <see cref="CudaBackend.SetW8A8SmoothingScale"/> per weight with s_j = (actMax_j/wMax_j)^alpha.
+    /// Calibration necessarily runs with EnableW8A8=true (the capture hook piggybacks on the same
+    /// eligibility gate as the real W8A8 dispatch — there is no separate calibration-mode bypass), so the
+    /// captured activations reflect layers AFTER unsmoothed-int8 noise from earlier blocks in the same
+    /// forward pass, not pure F16 — a minor, accepted approximation (the noise doesn't change WHICH
+    /// channels are outliers, just adds jitter to the magnitude estimate). Any already-quantized weight
+    /// cache entries this pre-generation pass creates get evicted by SetW8A8SmoothingScale and
+    /// re-quantized smoothed on the real generation's first use.</summary>
+    private static unsafe int CalibrateSmoothQuant(CudaBackend backend, Kandinsky5Transformer transformer,
+        Kandinsky5Config config, Tensor qwen, Tensor clip, int width, int height, int numFrames, int steps,
+        ITestOutputHelper output)
+    {
+        int tLat = (numFrames - 1) / 4 + 1, hLat = height / 8, wLat = width / 8;
+        int latCh = config.InVisualDim;
+        TensorShape latentShape = new TensorShape([1L, latCh, tLat, hLat, wLat]);
+        TensorShape maskShape = new TensorShape([1L, 1, tLat, hLat, wLat]);
+        (float scaleT, float scaleH, float scaleW) = Kandinsky5VideoPipeline.GetRopeScaleFactor(height, width);
+
+        FlowMatchEulerDiscreteScheduler scheduler = new(5.0f);
+        scheduler.SetTimesteps(steps);
+        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+        int[] probeSteps = steps >= 3 ? [0, steps / 2, steps - 1] : [0];
+
+        using Tensor noisy = SeedGenerator.CreateNoise(latentShape, seed: 42);
+        using Tensor condLatent = ZerosF32(latentShape);
+        using Tensor condMask = ZerosF32(maskShape);
+        using Tensor packed = PackVisualCondCalib(noisy, condLatent, condMask, latCh);
+
+        Dictionary<Tensor, float[]> actMax = new();
+        Dictionary<Tensor, float[]> wMax = new();
+        Dictionary<Tensor, int> kOf = new();
+
+        backend.PreloadWeights(transformer.EnumerateWeights());
+        backend.EnableW8A8 = true;
+        foreach (int stepIdx in probeSteps)
+        {
+            float t = timesteps[stepIdx];
+            Action<float[], int, int, float[], int, Tensor> hook = null!;
+            hook = (inArr, m, k, wArr, n, wT) =>
+            {
+                if (!actMax.TryGetValue(wT, out float[]? am))
+                {
+                    am = new float[k];
+                    actMax[wT] = am;
+                    kOf[wT] = k;
+                }
+                for (int r = 0; r < m; r++)
+                {
+                    int baseIdx = r * k;
+                    for (int c = 0; c < k; c++)
+                    {
+                        float a = MathF.Abs(inArr[baseIdx + c]);
+                        if (a > am[c]) am[c] = a;
+                    }
+                }
+                if (!wMax.ContainsKey(wT))
+                {
+                    float[] wm = new float[k];
+                    for (int ni = 0; ni < n; ni++)
+                    {
+                        int baseIdx = ni * k;
+                        for (int c = 0; c < k; c++)
+                        {
+                            float a = MathF.Abs(wArr[baseIdx + c]);
+                            if (a > wm[c]) wm[c] = a;
+                        }
+                    }
+                    wMax[wT] = wm;
+                }
+                CudaBackend.CaptureW8A8Operands = hook; // keep watching — capture EVERY eligible Linear this pass
+            };
+            CudaBackend.CaptureW8A8Operands = hook;
+            Tensor outp = transformer.ForwardVideo(backend, packed, t, qwen, clip, scaleT, scaleH, scaleW);
+            backend.Sync();
+            outp.Dispose();
+            backend.FreeActivations(trimPool: false);
+            CudaBackend.CaptureW8A8Operands = null;
+            output.WriteLine($"  calibration pass step {stepIdx} (t={t:F1}): {actMax.Count} distinct weights seen so far");
+        }
+        backend.FreeWeights(transformer.EnumerateWeights());
+
+        const double alpha = 0.7; // offline gate: relL2 optimum for real Kandinsky5 layers at alpha~0.7-0.8
+        int applied = 0;
+        foreach ((Tensor w, float[] am) in actMax)
+        {
+            float[] wm = wMax[w];
+            int k = kOf[w];
+            float[] s = new float[k];
+            for (int c = 0; c < k; c++)
+            {
+                double sv = am[c] > 0 && wm[c] > 0 ? Math.Pow(am[c], alpha) / Math.Pow(wm[c], 1.0 - alpha) : 1.0;
+                s[c] = (float)Math.Clamp(sv, 1e-3, 1e3);
+            }
+            backend.SetW8A8SmoothingScale(w, s);
+            applied++;
+        }
+        return applied;
+    }
+
+    private static Tensor ZerosF32(TensorShape shape)
+    {
+        Tensor t = new Tensor(shape, DType.F32);
+        new Span<float>((float*)t.DataPointer, checked((int)shape.ElementCount)).Clear();
+        return t;
+    }
+
+    /// <summary>Ports <c>Kandinsky5VideoPipeline.PackVisualCond</c> (private): concat <c>[noisy(16), cond(16), mask(1)]</c> along the channel axis.</summary>
+    private static Tensor PackVisualCondCalib(Tensor noisy, Tensor condLatent, Tensor condMask, int latCh)
+    {
+        long b = noisy.Shape[0], t = noisy.Shape[2], h = noisy.Shape[3], w = noisy.Shape[4];
+        Tensor packed = new Tensor(new TensorShape([b, 2L * latCh + 1, t, h, w]), DType.F32);
+        long per = t * h * w;
+        float* dst = (float*)packed.DataPointer;
+        float* pn = (float*)noisy.DataPointer;
+        float* pc = (float*)condLatent.DataPointer;
+        float* pm = (float*)condMask.DataPointer;
+        long chOut = 2L * latCh + 1;
+        for (long bi = 0; bi < b; bi++)
+        {
+            long dstBase = bi * chOut * per;
+            Buffer.MemoryCopy(pn + bi * latCh * per, dst + dstBase, latCh * per * 4, latCh * per * 4);
+            Buffer.MemoryCopy(pc + bi * latCh * per, dst + dstBase + latCh * per, latCh * per * 4, latCh * per * 4);
+            Buffer.MemoryCopy(pm + bi * per, dst + dstBase + 2L * latCh * per, per * 4, per * 4);
+        }
+        return packed;
+    }
+
     private static async IAsyncEnumerable<VideoFrame> ToAsync(VideoFrame[] frames)
     { foreach (VideoFrame f in frames) { yield return f; await Task.Yield(); } }
 
@@ -186,6 +339,24 @@ public sealed unsafe class Kandinsky5W8A8SsimAbTests
         _output.WriteLine($"W8A8 vs floorA SSIM: {w8a8Ssim:F4}");
 
         Assert.True(w8a8Ssim >= 0.95, $"W8A8 e2e SSIM {w8a8Ssim:F4} below the fleet 0.95 gate (floor {floorSsim:F4}).");
+    }
+
+    /// <summary>Build-drift control (advisor-directed 2026-07-24): disambiguates "SmoothQuant regressed
+    /// e2e SSIM" from "the w8a8.ptx recompile (11.5->13.0.88, this session) shifted the baseline" by
+    /// comparing floorA against a w8a8 run with calibration SKIPPED (K5V_SKIP_CALIBRATION=1) — same build,
+    /// no smoothing. Not a pass/fail gate, just reports the number for comparison against the
+    /// smoothed 0.9144 and the prior-session pre-recompile 0.9211.</summary>
+    [Fact]
+    public void Ssim_Compare_NoSmoothControl()
+    {
+        (byte[][] frames, int w, int h)? floorA = LoadDump("floorA");
+        (byte[][] frames, int w, int h)? noSmooth = LoadDump("w8a8nosmooth");
+        if (floorA is null || noSmooth is null)
+        { _output.WriteLine($"SKIPPED: run floorA and (K5V_ARM=w8a8 K5V_SKIP_CALIBRATION=1) first (dumps expected under {DumpRoot})."); return; }
+
+        Assert.Equal(floorA.Value.frames.Length, noSmooth.Value.frames.Length);
+        double ssim = MeanSsim(floorA.Value.frames, noSmooth.Value.frames, floorA.Value.w, floorA.Value.h);
+        _output.WriteLine($"W8A8 (no SmoothQuant, this session's PTX build) vs floorA SSIM: {ssim:F4}");
     }
 
     private static (byte[][] frames, int w, int h)? LoadDump(string arm)

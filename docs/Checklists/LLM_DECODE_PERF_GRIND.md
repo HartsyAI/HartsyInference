@@ -987,6 +987,85 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > without structural work (SoA repack and/or graph fork/join); the grind's next high-value
 > territory is the untouched prefill/TTFT path.**
 
+> **STATUS UPDATE (2026-07-24, rounds 12-13: gemma-4 graph bring-up + the redundant-split residency
+> fix — 8 of 9 text models at-or-ahead, GLM at effective parity (0.98×).**
+> 1. **gemma-4 E2B graph decode** (was excluded on four structural counts, all now implemented):
+>    dual-HEAD-DIM rope tables (local 256 vs global 512 — EnsureRopeTableForGraphDecode builds the
+>    local table at HeadDimSwa/RotaryDimSwa); per-layer d/rotaryDim throughout ForwardGraphStep;
+>    weightless V-norm in the composed branch (fused epilogues guard !VNorm); PLE via
+>    `lm_ple_gather_q5k_f32` — the QUANT per-layer token table stays device-resident (1.6 GB vs
+>    9.4 GB F32) and ONE kernel dequants the row selected by the DEVICE token id (codec expression
+>    order copied verbatim → bit-identical to the eager host gather); KV-sharing via a q-only path
+>    against the donor layer's cache (donor pairing preserves head dim). Byte-identical
+>    graph-vs-eager ×2 prompts, gate verifiably engaged: **91.7 eager → 135.9-137.8 graph tok/s vs
+>    llama.cpp 117.2-124.7 — from 22% slower to 11% faster.** Gate-diagnostics added
+>    (HARTSY_GRAPH_GATE_LOG=1 logs every failing condition).
+> 2. **Redundant-split preload exclusion**: EnumerateWeights yielded fused weights AND their split
+>    originals — ~2.9 GB of dead device copies on GLM that crowded real weights out of the preload
+>    budget; unresident weights bake per-token PCIe memcpy nodes into captured graphs (GLM briefly
+>    collapsed 43.8 → 27.9 before diagnosis — the graph node histogram again named it: 67 memcpy
+>    nodes, the _qkW/_qkB/v tensors). Splits are now excluded from residency preload (the batch
+>    scheduler's split path lazily promotes on use). **GLM: 47.07 tok/s, its best ever — 0.98× of
+>    llama.cpp's 48.13, effective parity** (was 0.82× at the start of the campaign); zero preload
+>    skips, prefill OOM gone. Fleet re-verified: no regressions, qwen3 TTFT 146 → 113 ms.
+> 3. **Fleet-wide preload hardening**: pipeline-construction preload is graph-aware (reserves the
+>    F32 embed table only for graph-eligible models — reserving it for excluded ones halved
+>    gemma-4's eager decode), and the arena releases synchronously on a drained stream (its async
+>    free raced the pool cross-backend — intermittent CudaGraph replay flake, gone in 10+ runs).
+> 4. **mllama**: ctor weight preload; GgufTokenizer strict-`<|...|>` template-token registration
+>    fixup (mis-typed specials leaked template markup into output text); decode-rate logging.
+>    addSpecial:true template encoding REGRESSES it (single-id <|image|> vs the splice-free vision
+>    design) — reverted with notes; proper template+image-token fix and cross-attn graph bring-up
+>    scoped. 5. **Qwen3.5 SSM**: ISsmModel.EnumerateWeights + pipeline preload — the SSM loop was
+>    re-uploading every weight every step (10.4 s of H2D in a 32-token run); identical output,
+>    2.2× faster end-to-end. Full SSM bring-up (quant-resident weights instead of F32-dequantized
+>    load, kernels, graph) scoped as its own campaign.
+> **BUILD/TOOLING NOTES**: nvcc 13.0 is gone from the box — compile with 13.3
+> (~/.local/cuda-tools/nvidia/cu13/bin/nvcc) then patch the PTX header `.version 9.3` → `9.0`
+> (driver JIT accepts; kernels are plain sm_80). Style analyzers are WARNINGS-AS-ERRORS: check
+> builds with `grep -E "Build succeeded|error"`, never `error CS` alone — a silent analyzer
+> failure ran stale dlls for an hour. W8A8/Sage perf-assertion tests fail under ANY GPU sharing.**
+
+> **STATUS UPDATE (2026-07-24, Qwen3.5 SSM phase A: quant-resident weights — 40.3 s → 6.8 s
+> (~6× with the residency fix) for the same generation.** Qwen35Model.Load now keeps GGUF
+> quantization (GgufModelLoader.Load + RelabelRank2ToPyTorchOrder — a metadata-only swap, so it is
+> quant-safe, unlike the old F32 memcpy relabel) and every backend.Linear dispatches the fused
+> quant GEMV / dp4a paths. F32 is kept only where host/non-Linear consumers need it: rank-1
+> tensors (norms, ssm_a, ssm_dt.bias), ssm_conv1d (host conv loop, original labeling), and a
+> dedicated host-only F32 embed copy (`__embed_f32`, excluded from preload) — the dict's
+> token_embd stays quant so the tied head runs dp4a. Output coherent (quant-GEMV tolerance class);
+> 132/132 LLM suite; translate-sanity passes. REMAINING (phases B/C): the per-layer HOST
+> round-trips (qgFull split, host rope, host SSM state math, per-token backend.Sync + full-vocab
+> logits D2H in ForwardLastLogits) and eventually a graph-captured recurrent step — the SSM shape
+> is fixed per token, ideal for capture.
+
+> **STATUS UPDATE (2026-07-24, Qwen3.5 SSM phase B core: device-side decode step for the
+> gated-DeltaNet layers — output byte-identical to the host path, kill-switch
+> HARTSY_SSM_DEVICE_STEP=0.** Three kernels (`lm_ssm_conv_split_step_f32`: causal depthwise conv
+> step + SiLU + q/k/v split with the conv history ring shifted in place on device;
+> `lm_ssm_l2norm_heads_f32`; `lm_ssm_delta_step_f32`: softplus/sigmoid gates + decay + S·k +
+> rank-1 update + S·q readout + gated RMSNorm in ONE block-per-head launch) replace the per-layer
+> host conv/recurrence/gated-norm round-trip. Recurrent state ping-pongs host↔device at the
+> prefill↔decode boundary (EnsureStateOnDevice/Host); prefill keeps the proven host path.
+> End-to-end gain so far is modest (6.7 → 6.1 s; ~26 → ~30 tok/s) because per-token ORCHESTRATION
+> now dominates: ForwardLastLogits syncs + ships the full 151k-vocab logits to host EVERY token,
+> and the 6 full-attention layers still run host rope/splits. PHASES B2/C (scoped): port the
+> attention layers' host math to backend ops, device argmax + single-token readback (the
+> transformer pipeline's design), then graph-capture the fixed-shape step. Suites 194/194 +
+> 132/132; greedy outputs identical device-vs-host.
+
+> **STATUS UPDATE (2026-07-24, Qwen3.5 SSM phase B2: the attention layers' seq=1 step is now
+> fully device-side too — 40.3 s → 5.6 s cumulative (7.2×), output identical to the host
+> reference at every stage.** The host q|gate de-interleave (a per-layer D2H/H2D round-trip) is a
+> device SliceTimeRange over the [1,hq,2,hd]-shaped fused projection; the per-layer host
+> rope-table rebuild is hoisted to one per-token table shared by all attention layers; rope runs
+> on [1,1,H,hd]-labeled on-device relabel copies (ApplyRopeSingle's shape contract); permutes
+> vanish at seq=1 (byte-equivalent layouts). Same kill-switch (HARTSY_SSM_DEVICE_STEP=0). Suites
+> 198/198 CUDA (other workstream added 4) + 132/132. REMAINING (phase C, scoped): the per-token
+> Sync + full-vocab logits D2H for host sampling — the transformer pipeline's answer (device
+> argmax + single-token readback, then graph capture of the fixed-shape step) applies directly;
+> llama.cpp-class SSM speed lands there.
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

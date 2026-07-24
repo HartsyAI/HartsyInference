@@ -137,8 +137,16 @@ public sealed unsafe class CausalConv3d
             bool spatialPre = !reflectPre && _spatialReplicatePad && (_padH > 0 || _padW > 0);
             int convPadH = spatialPre || reflectPre ? 0 : _padH;
             int convPadW = spatialPre || reflectPre ? 0 : _padW;
-            int hp = spatialPre || reflectPre ? hSrc : h;
-            int wp = spatialPre || reflectPre ? wSrc : w;
+            // `padded`'s allocated size must match what BuildPaddedFrames' kernel actually writes: reflectPre
+            // pre-pads BEFORE this point (hSrc already includes it, BuildPaddedFrames gets padH=0), but spatialPre
+            // asks BuildPaddedFrames to pad INTERNALLY (padH=_padH passed below) — hp/wp must include that
+            // padding too, or the kernel's Hp/Wp (H+2*padH) exceeds the buffer it writes into. Using hSrc here
+            // for the spatialPre case under-sized the buffer (hSrc==h when reflectPre is false) — confirmed via
+            // compute-sanitizer memcheck as an out-of-bounds write in wan_vae_build_padded (2026-07-23), the root
+            // cause of the CausalConv3d batched-path e2e crash on HunyuanVideo/Kandinsky5's replicate-pad VAE
+            // convs (LTX's reflectPre path and Wan's zero-pad path were never affected).
+            int hp = reflectPre ? hSrc : spatialPre ? h + 2 * _padH : h;
+            int wp = reflectPre ? wSrc : spatialPre ? w + 2 * _padW : w;
             using Tensor padded = new Tensor(new TensorShape(paddedT, _cIn, hp, wp), DType.F32);
             backend.BuildPaddedFrames(padded, convInput, cacheFrames, zeroPad, _replicateFirstPad,
                 spatialPre ? _padH : 0, spatialPre ? _padW : 0);
