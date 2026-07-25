@@ -223,8 +223,12 @@ public sealed class TextService : ITextService, IDisposable
         else
         {
             IVlmImageEncoder vision = slot.SpliceVision!;
-            using Tensor px = VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height,
-                vision.ImageSize, vision.ImageMean, vision.ImageStd);
+            // LLaVA-NeXT's unpad merge step needs the ORIGINAL image aspect ratio, which the shared fixed-square
+            // VlmImagePreprocessor would destroy — it gets the raw native-resolution tensor instead and does its
+            // own resize/pad/tile internally (see LlavaNextEncoder.Encode).
+            using Tensor px = vision is LlavaNextEncoder
+                ? LlavaNextImagePreprocessor.RawToNativeTensor(image.Rgb, image.Width, image.Height)
+                : VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height, vision.ImageSize, vision.ImageMean, vision.ImageStd);
             answer = new MultimodalGenerator(slot.Model!, vision, slot.Backend!).Generate(px, question, maxTokens, sampling);
         }
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
@@ -280,6 +284,8 @@ public sealed class TextService : ITextService, IDisposable
             bool isMllama = slot.Model!.Architecture == "mllama" || slot.Model.Config.CrossAttnLayers.Count > 0;
             if (isMllama)
                 slot.MllamaVision = MllamaVisionEncoder.Load(mmproj);
+            else if (IsLlavaNext(mmproj))
+                slot.SpliceVision = LlavaNextEncoder.Load(mmproj);
             else
                 slot.SpliceVision = IsQwen25Vl(mmproj) ? Qwen25VlEncoder.Load(mmproj) : SiglipVlmEncoder.Load(mmproj);
             slot.VisionPath = mmproj;
@@ -445,6 +451,24 @@ public sealed class TextService : ITextService, IDisposable
                 best = f;
         }
         return best;
+    }
+
+    /// <summary>True if the mmproj is a LLaVA-NeXT/1.6 anyres checkpoint — distinguished from plain LLaVA-1.5
+    /// (same CLIP tower + <c>mm.0</c>/<c>mm.2</c> projector tensors) by the presence of the
+    /// <c>clip.vision.image_grid_pinpoints</c> metadata key, which only anyres checkpoints carry.</summary>
+    private static bool IsLlavaNext(string mmprojPath)
+    {
+        try
+        {
+            using GgufLoader probe = new GgufLoader();
+            probe.Load(mmprojPath);
+            return probe.Metadata.ContainsKey("clip.vision.image_grid_pinpoints");
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"[TextService] mmproj image_grid_pinpoints probe failed: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>True if the mmproj is a Qwen2/Qwen2.5-VL merger — via <c>clip.projector_type</c> metadata (robust

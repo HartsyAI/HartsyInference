@@ -361,9 +361,31 @@ working per `docs/Checklists/MODEL_STATUS_VIDEO.md`. Two new test files, both `[
    useful for a smarter per-layer policy (e.g. gate to only the 281 layers the offline gate says helps,
    or a properly-clean F16-only calibration pass) if revisited.
 
-   **Recommended next lever**: per-group (not per-output-channel) weight quantization — attacks the
-   W-only floor directly, which is the thing actually keeping unsmoothed e2e under the gate. Not started
-   this session; fresh multi-hour effort, needs its own measure-first pass before building.
+   **Per-group weight quant — MEASURED, NOT WORTH BUILDING as a standalone lever (2026-07-24, same
+   session, measure-first BEFORE any kernel code per user instruction).** The naive read of the
+   SmoothQuant result ("weight floor is the binding constraint, attack it with finer weight quant") turns
+   out to be imprecise. `W8A8_GroupWeightQuant_QuadratureCheck` (reuses the Layer A/B capture, zero new
+   GPU passes beyond one forward) checked whether A-only/W-only combine as
+   `Both ≈ sqrt(A-only²+W-only²)` — **confirmed almost exactly** (actual/predicted = 0.999 and 1.000 on
+   the two captured layers). That has a hard consequence: activation error dominates ~2:1 over weight
+   error (A-only 1.10e-2/1.07e-2 vs W-only 5.41e-3/5.45e-3 on the two layers), and because independent
+   errors add in QUADRATURE, driving W-only all the way to **zero** only pulls Both down to the A-only
+   floor — a **10.2%/11.0% ceiling** on local relL2 reduction, no matter how fine the weight grouping.
+   Realistic group sizes (down to 32, already fine-grained) only deliver 6.5%/7.2% of that. **And per the
+   SmoothQuant finding above, local relL2 has already shown it can point the WRONG WAY on e2e SSIM on
+   this model** (-29% aggregate local relL2 → -0.007 e2e SSIM) — so even the capped, real local win here
+   is not a trustworthy predictor of an e2e outcome without actually building the grouped-dequant kernel
+   and measuring SSIM, which is a multi-hour build for, at best, a ~10%-capped local signal that isn't
+   proven to translate to SSIM at all on this model.
+
+   **Options surfaced to the user, not auto-picked** (activation, not weight, is the dominant error term
+   — the lever needs to touch activations without repeating SmoothQuant's redistribution failure mode):
+   (a) grouped-K quantization on BOTH operands (attacks the dominant activation term directly, but breaks
+   the single-INT8-matmul structure into G partial matmuls + FP accumulate — a large build); (b) mixed
+   precision — keep the most e2e-sensitive layers in F16 and skip W8A8 for just those (cheaper; would
+   reuse/repurpose the per-layer diagnostic harness, but ranking by e2e sensitivity rather than local
+   relL2 requires actual per-layer SSIM deltas, not the local-relL2 proxy that misled on both prior
+   levers); (c) accept the current ~0.92 e2e SSIM for the perf win and stop here.
 2. **Timestep-aware calibration check (NDTC-style)**: per-row dynamic act quant already adapts per
    step, so full calibration may be unnecessary for W8A8 — MEASURE first: run a real DiT block/model
    with W8A8 on/off across the timestep schedule and track per-step relL2 drift before building any

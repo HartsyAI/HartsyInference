@@ -854,6 +854,225 @@ __global__ void lm_ssm_delta_step_f32(
     }
 }
 
+// Per-head gate scalars for the row-parallel delta kernels: gExp (state decay) and beta, one
+// thread per v-head. Hoisted out of the row kernels because there every (row-parallel) THREAD
+// recomputed them — 4 PRECISE logf/expf per thread × 524k threads made transcendentals, not the
+// 1 MB state stream, the kernel's ~42 µs floor (shape-invariant: warp-per-row measured the same).
+// Expression order copied verbatim from lm_ssm_delta_step_f32, so the stored f32 values are
+// bit-identical to what the legacy kernel computes inline. Launch: grid = 1, block = 256.
+__global__ void lm_ssm_delta_scalars_f32(
+    float* __restrict__ scalars,        // [2 * hv]: [2h] = gExp, [2h+1] = beta
+    const float* __restrict__ alphaRaw, // [hv]
+    const float* __restrict__ betaRaw,  // [hv]
+    const float* __restrict__ dtBias,   // [hv]
+    const float* __restrict__ ssmA,     // [hv]
+    unsigned int hv)
+{
+    unsigned int h = threadIdx.x;
+    if (h >= hv) return;
+    float av = alphaRaw[h] + dtBias[h];
+    float softplus = av > 20.0f ? av : logf(1.0f + expf(av));
+    scalars[2u * h] = expf(softplus * ssmA[h]);
+    scalars[2u * h + 1u] = 1.0f / (1.0f + expf(-betaRaw[h]));
+}
+
+// Row-parallel delta-rule recurrence — phases 1-3 of lm_ssm_delta_step_f32 with one block per
+// (row, head) instead of one block per head. The state rows are INDEPENDENT through the rank-1
+// update (each row's decay, S·k dot, update, and S·q dot touch only that row and the shared
+// k/q/v scalars), so the legacy kernel's per-row block-wide tree reductions — sv rows × ~2·log2(B)
+// __syncthreads each, on a grid of only hv blocks — serialized ~97% of the launch (192 µs/layer
+// measured on Qwen3.5-0.8B). Same strided-partial pattern, same tree-reduction order, same
+// expression order per row → bit-identical values to the legacy kernel; only the schedule changes.
+// The head-wide gated RMSNorm (legacy phase 4) moves to lm_ssm_delta_gated_norm_f32, reading the
+// pre-norm readout from oScratch. Launch: grid = (sv, hv), block = 256, shared = 256 floats.
+__global__ void lm_ssm_delta_step_rows_f32(
+    float* __restrict__ oScratch,       // [hv * sv] pre-norm readout o = S·q
+    float* __restrict__ state,          // [hv, sv, sk] persistent
+    const float* __restrict__ q,        // [keyDim] (L2-normed + qScale applied)
+    const float* __restrict__ kIn,      // [keyDim] (L2-normed)
+    const float* __restrict__ v,        // [valueDim]
+    const float* __restrict__ scalars,  // [2 * hv] from lm_ssm_delta_scalars_f32
+    unsigned int sv,
+    unsigned int sk,
+    unsigned int repeat)                // k-heads shared per v-head (kh = h / repeat)
+{
+    extern __shared__ float red_rows[];   // [blockDim] reduction scratch
+    unsigned int row = blockIdx.x;
+    unsigned int h = blockIdx.y;
+    unsigned int kh = h / repeat;
+    const float* qh = q + (size_t)kh * sk;
+    const float* kh_ = kIn + (size_t)kh * sk;
+    float* rb = state + ((size_t)h * sv + row) * sk;
+
+    float gExp = scalars[2u * h];
+    float beta = scalars[2u * h + 1u];
+
+    // Decay + S·k dot for this row, with each thread's decayed columns held in registers so the
+    // state row is read from DRAM once and written once (the decayed intermediate is only ever
+    // consumed by this thread's own rank-1 update — an f32 kept in a register is the identical
+    // rounded value a store/reload would produce, so this stays bit-exact). CACHE_COLS bounds
+    // sk at 4·blockDim (1024 here) — far above any DeltaNet key dim in use.
+    const unsigned int CACHE_COLS = 4;
+    float cached[CACHE_COLS];
+    float partial = 0.0f;
+    unsigned int n = 0;
+    for (unsigned int col = threadIdx.x; col < sk; col += blockDim.x, n++)
+    {
+        float decayed = rb[col] * gExp;
+        cached[n] = decayed;
+        partial += decayed * kh_[col];
+    }
+    red_rows[threadIdx.x] = partial;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) red_rows[threadIdx.x] += red_rows[threadIdx.x + s];
+        __syncthreads();
+    }
+    float delta = (v[(size_t)h * sv + row] - red_rows[0]) * beta;
+
+    // Rank-1 row update from the cached decayed values, then S·q dot; one store per column.
+    float partial2 = 0.0f;
+    n = 0;
+    for (unsigned int col = threadIdx.x; col < sk; col += blockDim.x, n++)
+    {
+        float updated = cached[n] + kh_[col] * delta;
+        rb[col] = updated;
+        partial2 += updated * qh[col];
+    }
+    __syncthreads();   // every thread has read red_rows[0] into delta before the reuse below
+    red_rows[threadIdx.x] = partial2;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) red_rows[threadIdx.x] += red_rows[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) oScratch[(size_t)h * sv + row] = red_rows[0];
+}
+
+// Warp-per-row delta-rule recurrence — same math as lm_ssm_delta_step_rows_f32 but 8 rows per
+// 256-thread block with NO block-wide barriers: each warp simulates the legacy kernel's 256-slot
+// shared-memory tree bit-exactly. Lane l stands in for logical threads t = l+32i (i<8); with
+// sk ≤ 256 each logical thread's partial is the single product decayed·k[t] (fma(a,b,0) rounds
+// identically to a·b). Tree levels s=128/64/32 fold registers (t = l+32i < s ⟺ i < s/32, for
+// every lane), levels s=16..1 are __shfl_down_sync — lane l adding lane l+s IS red[t] += red[t+s].
+// The rows-kernel shape spent ~42 µs/layer on block-sync latency across 2048 tiny blocks; this
+// shape is sync-free. Launch: grid = (ceil(sv/8), hv), block = 256, shared = 0.
+__global__ void lm_ssm_delta_step_warprow_f32(
+    float* __restrict__ oScratch,       // [hv * sv] pre-norm readout o = S·q
+    float* __restrict__ state,          // [hv, sv, sk] persistent
+    const float* __restrict__ q,        // [keyDim] (L2-normed + qScale applied)
+    const float* __restrict__ kIn,      // [keyDim] (L2-normed)
+    const float* __restrict__ v,        // [valueDim]
+    const float* __restrict__ scalars,  // [2 * hv] from lm_ssm_delta_scalars_f32
+    unsigned int sv,
+    unsigned int sk,
+    unsigned int repeat)                // k-heads shared per v-head (kh = h / repeat)
+{
+    unsigned int lane = threadIdx.x & 31u;
+    unsigned int row = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+    if (row >= sv) return;
+    unsigned int h = blockIdx.y;
+    unsigned int kh = h / repeat;
+    const float* qh = q + (size_t)kh * sk;
+    const float* kh_ = kIn + (size_t)kh * sk;
+    float* rb = state + ((size_t)h * sv + row) * sk;
+
+    float gExp = scalars[2u * h];
+    float beta = scalars[2u * h + 1u];
+
+    float preg[8];
+    float cached[8];
+    #pragma unroll
+    for (unsigned int i = 0; i < 8; i++)
+    {
+        unsigned int t = lane + 32u * i;
+        preg[i] = 0.0f;
+        if (t < sk)
+        {
+            float decayed = rb[t] * gExp;
+            cached[i] = decayed;
+            preg[i] = decayed * kh_[t];
+        }
+    }
+    // 256-slot tree, register half: s = 128, 64, 32.
+    preg[0] += preg[4]; preg[1] += preg[5]; preg[2] += preg[6]; preg[3] += preg[7];
+    preg[0] += preg[2]; preg[1] += preg[3];
+    preg[0] += preg[1];
+    // Cross-lane half: s = 16..1 (red[t] += red[t+s] for t < s).
+    #pragma unroll
+    for (unsigned int s = 16; s > 0; s >>= 1)
+    {
+        float other = __shfl_down_sync(0xffffffffu, preg[0], s);
+        if (lane < s) preg[0] += other;
+    }
+    float skRow = __shfl_sync(0xffffffffu, preg[0], 0);
+    float delta = (v[(size_t)h * sv + row] - skRow) * beta;
+
+    #pragma unroll
+    for (unsigned int i = 0; i < 8; i++)
+    {
+        unsigned int t = lane + 32u * i;
+        preg[i] = 0.0f;
+        if (t < sk)
+        {
+            float updated = cached[i] + kh_[t] * delta;
+            rb[t] = updated;
+            preg[i] = updated * qh[t];
+        }
+    }
+    preg[0] += preg[4]; preg[1] += preg[5]; preg[2] += preg[6]; preg[3] += preg[7];
+    preg[0] += preg[2]; preg[1] += preg[3];
+    preg[0] += preg[1];
+    #pragma unroll
+    for (unsigned int s = 16; s > 0; s >>= 1)
+    {
+        float other = __shfl_down_sync(0xffffffffu, preg[0], s);
+        if (lane < s) preg[0] += other;
+    }
+    if (lane == 0) oScratch[(size_t)h * sv + row] = preg[0];
+}
+
+// Gated RMSNorm tail of the delta step (legacy phase 4 verbatim, o read from oScratch instead of
+// shared memory): out = rmsnorm(o)·normW · silu(z). Launch: grid = hv, block = 256,
+// shared = 256 floats.
+__global__ void lm_ssm_delta_gated_norm_f32(
+    float* __restrict__ output,         // [hv * sv]
+    const float* __restrict__ oScratch, // [hv * sv] pre-norm readout
+    const float* __restrict__ z,        // [valueDim] (gate projection, pre-silu)
+    const float* __restrict__ normW,    // [sv]
+    unsigned int sv,
+    float eps)
+{
+    extern __shared__ float red_gn[];   // [blockDim]
+    unsigned int h = blockIdx.x;
+    const float* oh = oScratch + (size_t)h * sv;
+    const float* zh = z + (size_t)h * sv;
+    float* outH = output + (size_t)h * sv;
+
+    float partial2 = 0.0f;
+    for (unsigned int i = threadIdx.x; i < sv; i += blockDim.x)
+    {
+        float ov = oh[i];
+        partial2 += ov * ov;
+    }
+    red_gn[threadIdx.x] = partial2;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) red_gn[threadIdx.x] += red_gn[threadIdx.x + s];
+        __syncthreads();
+    }
+    float inv = 1.0f / sqrtf(red_gn[0] / (float)sv + eps);
+    for (unsigned int i = threadIdx.x; i < sv; i += blockDim.x)
+    {
+        float normed = oh[i] * inv * normW[i];
+        float zv = zh[i];
+        outH[i] = normed * (zv / (1.0f + expf(-zv)));
+    }
+}
+
 // ── Gemma-4 PLE: device-side per-layer-embedding row gather ─────────────────────────────────────
 // Graph decode is self-feeding (the token id lives in a device buffer), so the per-layer token
 // embedding row must be gathered ON DEVICE — the host never sees the id without a per-token sync.

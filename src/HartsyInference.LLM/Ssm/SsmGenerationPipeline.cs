@@ -68,13 +68,75 @@ public sealed class SsmGenerationPipeline
         _model.ResetState();
         int next = sampler.Next(_model.ForwardLastLogits(_backend, promptIds), generated);
         bool stopped = false;
-        for (int step = 0; step < request.MaxTokens; step++)
+
+        // Graph decode (Qwen3.5 class): greedy-only, penalty-free, capture-once + replay-per-token —
+        // the transformer pipeline's design. The pre-capture warmup step is a REAL eager device step
+        // (capture only records; execution happens at LaunchGraph), so it both primes every buffer
+        // into the device caches (no memcpy nodes) and produces the second token.
+        bool useGraph = request.Sampling.Greedy
+            && !request.Sampling.HasJsonConstraint
+            && request.Sampling.RepetitionPenalty == 1.0f
+            && _model is ISsmGraphDecodable
+            && _backend.GraphDecodeSupported
+            && Environment.GetEnvironmentVariable("HARTSY_SSM_GRAPH") != "0";
+        if (useGraph && !stops.Contains(next) && request.MaxTokens > 0)
         {
-            ct.ThrowIfCancellationRequested();
-            if (stops.Contains(next)) { stopped = true; break; }
-            generated.Add(next);
-            onToken?.Invoke(next);
-            next = sampler.Next(_model.ForwardLastLogits(_backend, [next]), generated);
+            ISsmGraphDecodable g = (ISsmGraphDecodable)_model;
+            int maxSeq = Math.Min(promptIds.Length + request.MaxTokens + 8, 8192);
+            (HartsyInference.Core.Tensors.Tensor cos, HartsyInference.Core.Tensors.Tensor sin,
+                HartsyInference.Core.Tensors.Tensor embed) = g.EnsureGraphDecodeResident(_backend, maxSeq);
+            ulong devicePos = _backend.AllocDevicePos();
+            ulong deviceTokenId = _backend.AllocDeviceTokenId();
+            object? graph = null;
+            int consumed = 0;
+            try
+            {
+                int pos = g.CurrentPosition;
+                _backend.WriteDeviceTokenId(deviceTokenId, next);
+                _backend.WriteDevicePos(devicePos, pos + 1, pos);
+
+                // Warmup = the first decode step, executed eagerly (also promotes states/caches).
+                generated.Add(next); onToken?.Invoke(next); consumed++;
+                g.ForwardGraphDecodeStep(_backend, embed, cos, sin, devicePos, deviceTokenId);
+                next = _backend.ReadDeviceTokenId(deviceTokenId);
+                pos++;
+                _backend.WriteDevicePos(devicePos, pos + 1, pos);
+
+                graph = _backend.CaptureGraph(() =>
+                    g.ForwardGraphDecodeStep(_backend, embed, cos, sin, devicePos, deviceTokenId));
+
+                for (int step = consumed; step < request.MaxTokens; step++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (stops.Contains(next)) { stopped = true; break; }
+                    generated.Add(next);
+                    onToken?.Invoke(next);
+                    consumed++;
+                    _backend.LaunchGraph(graph!);
+                    next = _backend.ReadDeviceTokenId(deviceTokenId);
+                    pos++;
+                    _backend.WriteDevicePos(devicePos, pos + 1, pos);
+                }
+                if (!stopped && stops.Contains(next)) stopped = true;
+            }
+            finally
+            {
+                if (graph is not null) _backend.DisposeGraph(graph);
+                _backend.FreeDevicePos(devicePos);
+                _backend.FreeDeviceTokenId(deviceTokenId);
+                g.AdvancePosition(consumed);
+            }
+        }
+        else
+        {
+            for (int step = 0; step < request.MaxTokens; step++)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (stops.Contains(next)) { stopped = true; break; }
+                generated.Add(next);
+                onToken?.Invoke(next);
+                next = sampler.Next(_model.ForwardLastLogits(_backend, [next]), generated);
+            }
         }
 
         return new GenerationResult

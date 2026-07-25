@@ -1056,8 +1056,13 @@ public interface IBackend : IDisposable
     /// <summary>Precomputes the full RoPE cos/sin table <c>[maxPos, headDim]</c> (duplicated-half layout,
     /// identical math to the per-step table a transformer builds each call) as two device-resident tensors, so
     /// a decode-step RoPE apply only needs to index a row, not rebuild it. Returns (cos, sin); dispose both
-    /// when the graphed session ends.</summary>
-    (Tensor cos, Tensor sin) BuildRopeTableDevice(int maxPos, int headDim, int rotaryDim, float theta, HartsyInference.Core.Rope.RopeScaling scaling)
+    /// when the graphed session ends. <paramref name="splitHalfPartial"/> selects the partial-rotary layout:
+    /// the split-half rope kernels pair <c>(i, i+rotaryDim/2)</c> and read cos/sin duplicated at stride
+    /// rotaryDim/2 within the first rotaryDim entries (identity beyond — never read), while the interleaved
+    /// kernels read one value per pair from the first headDim/2 entries and need identity rows in
+    /// [rotaryDim/2, headDim/2). The two layouts conflict when rotaryDim &lt; headDim, so the caller must say
+    /// which kernel family will consume the table; for full rotary they coincide and the flag is ignored.</summary>
+    (Tensor cos, Tensor sin) BuildRopeTableDevice(int maxPos, int headDim, int rotaryDim, float theta, HartsyInference.Core.Rope.RopeScaling scaling, bool splitHalfPartial = false)
         => throw new NotSupportedException("BuildRopeTableDevice requires GraphDecodeSupported.");
 
     /// <summary>RoPE on a single decode-step Q/K tensor <c>[1,numHeads,1,headDim]</c>, reading the rotation row

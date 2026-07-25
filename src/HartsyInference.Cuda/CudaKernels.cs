@@ -130,6 +130,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmSsmConvSplitStepF32;
     private readonly nint _lmSsmL2NormHeadsF32;
     private readonly nint _lmSsmDeltaStepF32;
+    private readonly nint _lmSsmDeltaScalarsF32;
+    private readonly nint _lmSsmDeltaStepRowsF32;
+    private readonly nint _lmSsmDeltaStepWarpRowF32;
+    private readonly nint _lmSsmDeltaGatedNormF32;
     private readonly nint _lmAddRmsNormF32;
     private readonly nint _lmRopeInterleavedF32;
     private readonly nint _lmRopeDecodeSplitHalf;
@@ -683,6 +687,10 @@ public sealed class CudaKernels : IDisposable
         _lmSsmConvSplitStepF32 = _lmF32Module.GetFunction("lm_ssm_conv_split_step_f32");
         _lmSsmL2NormHeadsF32 = _lmF32Module.GetFunction("lm_ssm_l2norm_heads_f32");
         _lmSsmDeltaStepF32 = _lmF32Module.GetFunction("lm_ssm_delta_step_f32");
+        _lmSsmDeltaScalarsF32 = _lmF32Module.GetFunction("lm_ssm_delta_scalars_f32");
+        _lmSsmDeltaStepRowsF32 = _lmF32Module.GetFunction("lm_ssm_delta_step_rows_f32");
+        _lmSsmDeltaStepWarpRowF32 = _lmF32Module.GetFunction("lm_ssm_delta_step_warprow_f32");
+        _lmSsmDeltaGatedNormF32 = _lmF32Module.GetFunction("lm_ssm_delta_gated_norm_f32");
         _lmAddRmsNormF32 = _lmF32Module.GetFunction("lm_add_rmsnorm_f32");
         _lmRopeInterleavedF32 = _lmF32Module.GetFunction("lm_rope_interleaved_f32");
         _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
@@ -2317,10 +2325,66 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>Qwen3.5 delta-rule recurrence + gated RMSNorm, one block per value head; state is
     /// device-persistent across tokens.</summary>
+    private static readonly bool SsmDeltaRowParallel = Environment.GetEnvironmentVariable("HARTSY_SSM_DELTA_V2") != "0";
+    // Byte-verified 4/4 prompts vs the legacy kernel and 2.7× faster in the isolated-graph
+    // microbenchmark (20.5 vs 55 µs/call — the block-per-row shape's 512-byte blocks can't hide
+    // DRAM latency; a plain Add over the same tensors streams at 7.4 µs). An earlier e2e A/B
+    // wrongly concluded "no gain": it predated the per-head scalar hoist, whose per-thread
+    // transcendentals were masking the schedule win. Kill-switch HARTSY_SSM_DELTA_WARPROW=0.
+    private static readonly bool SsmDeltaWarpRow = Environment.GetEnvironmentVariable("HARTSY_SSM_DELTA_WARPROW") != "0";
+
     public unsafe void LaunchSsmDeltaStep(ulong output, ulong state, ulong q, ulong k, ulong v, ulong z,
         ulong alphaRaw, ulong betaRaw, ulong dtBias, ulong ssmA, ulong normW,
-        int hv, int sv, int sk, int repeat, float eps, nint stream)
+        int hv, int sv, int sk, int repeat, float eps, nint stream, ulong oScratch = 0)
     {
+        // Row-parallel split (grid = sv×hv recurrence + head-wide gated-norm tail): the legacy
+        // block-per-head kernel serializes sv tree-reductions behind block syncs (192 µs/layer on
+        // Qwen3.5-0.8B, ~50% of the whole decode step). Bit-identical values; needs the caller's
+        // [hv*sv]-float scratch for the pre-norm readout. sk ≤ 1024 = the rows kernel's per-thread
+        // register cache bound (CACHE_COLS·blockDim). Kill-switch HARTSY_SSM_DELTA_V2=0.
+        if (SsmDeltaRowParallel && oScratch != 0 && sk <= 1024 && hv <= 256)
+        {
+            // Per-head gate scalars first (one tiny launch): the row kernels then load 2 floats
+            // per head instead of every thread evaluating 4 precise transcendentals — which, at
+            // row-parallel thread counts, dominated the kernel (~42 µs shape-invariant floor).
+            // Scalars live in the caller's scratch after the [hv*sv] readout floats.
+            ulong scalars = oScratch + (ulong)(hv * sv) * sizeof(float);
+            ulong scA = scalars, alA2 = alphaRaw, beA2 = betaRaw, dtA2 = dtBias, saA2 = ssmA;
+            uint hvA = (uint)hv;
+            void** scalarArgs = stackalloc void*[6];
+            scalarArgs[0] = &scA; scalarArgs[1] = &alA2; scalarArgs[2] = &beA2;
+            scalarArgs[3] = &dtA2; scalarArgs[4] = &saA2; scalarArgs[5] = &hvA;
+            CudaDriverApi.cuLaunchKernel(_lmSsmDeltaScalarsF32, 1, 1, 1, 256, 1, 1, 0, stream, (nint)scalarArgs, 0).ThrowOnError();
+
+            ulong osA = oScratch, stA2 = state, qA2 = q, kA2 = k, vA2 = v, scA2 = scalars;
+            uint svA2 = (uint)sv, skA2 = (uint)sk, rpA2 = (uint)repeat;
+            void** rowsArgs = stackalloc void*[9];
+            rowsArgs[0] = &osA; rowsArgs[1] = &stA2; rowsArgs[2] = &qA2; rowsArgs[3] = &kA2;
+            rowsArgs[4] = &vA2; rowsArgs[5] = &scA2;
+            rowsArgs[6] = &svA2; rowsArgs[7] = &skA2; rowsArgs[8] = &rpA2;
+            uint redBytes = 256 * sizeof(float);
+            // sk ≤ 256: warp-per-row shape (8 rows/block, sync-free warp-simulated tree — same
+            // values, fewer blocks than the block-per-row shape on Qwen3.5's 128-wide rows).
+            if (sk <= 256 && SsmDeltaWarpRow)
+            {
+                uint rowBlocks = ((uint)sv + 7u) / 8u;
+                CudaDriverApi.cuLaunchKernel(_lmSsmDeltaStepWarpRowF32, rowBlocks, (uint)hv, 1, 256, 1, 1, 0, stream, (nint)rowsArgs, 0).ThrowOnError();
+            }
+            else
+            {
+                CudaDriverApi.cuLaunchKernel(_lmSsmDeltaStepRowsF32, (uint)sv, (uint)hv, 1, 256, 1, 1, redBytes, stream, (nint)rowsArgs, 0).ThrowOnError();
+            }
+
+            ulong outA = output, osA2 = oScratch, zA2 = z, nwA2 = normW;
+            uint svA3 = (uint)sv;
+            float epsA2 = eps;
+            void** normArgs = stackalloc void*[6];
+            normArgs[0] = &outA; normArgs[1] = &osA2; normArgs[2] = &zA2; normArgs[3] = &nwA2;
+            normArgs[4] = &svA3; normArgs[5] = &epsA2;
+            CudaDriverApi.cuLaunchKernel(_lmSsmDeltaGatedNormF32, (uint)hv, 1, 1, 256, 1, 1, redBytes, stream, (nint)normArgs, 0).ThrowOnError();
+            return;
+        }
+
         ulong oA = output, stA = state, qA = q, kA = k, vA = v, zA = z, alA = alphaRaw, beA = betaRaw,
             dtA = dtBias, saA = ssmA, nwA = normW;
         uint svA = (uint)sv, skA = (uint)sk, rpA = (uint)repeat;

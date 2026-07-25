@@ -626,6 +626,156 @@ public sealed unsafe class Kandinsky5W8A8OperandAblationTests
         finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
     }
 
+    /// <summary>Measure-first gate for the NEXT lever (per-group weight quant), before writing a single
+    /// line of grouped-dequant kernel code — advisor-directed, 2026-07-24, following the SmoothQuant e2e
+    /// regression finding. Checks the quadrature hypothesis (do A-only/W-only errors combine as
+    /// Both ≈ sqrt(A²+W²)?) on real captured Kandinsky5 layers, which — if it holds — puts a hard CEILING
+    /// on what per-group weight quant can achieve: driving W-only to zero only pulls Both down to the
+    /// A-only floor, so if activation dominates (A-only >> W-only, as the prior deep-layer ablation found:
+    /// A=1.098e-2 vs W=5.413e-3, ratio 2.03), grouped weight quant's local-relL2 ceiling is small — and per
+    /// the SmoothQuant finding, local relL2 has already shown it can ANTI-CORRELATE with e2e SSIM on this
+    /// model (-29% aggregate local relL2 produced -0.007 e2e SSIM), so even a "capped but real" local win
+    /// is not a trustworthy predictor here. This test reports the numbers; it does NOT build the kernel —
+    /// that decision is the user's per the same discipline that stopped the SmoothQuant alpha-tuning loop.
+    /// Reuses the SAME Layer A(attn 1792×1792)/B(FFN 7168×1792) capture as W8A8_SmoothQuant_OfflineGate.</summary>
+    [Fact]
+    public void W8A8_GroupWeightQuant_QuadratureCheck()
+    {
+        string transformerDir = Path.Combine(T2VDir, "transformer");
+        if (!Directory.Exists(transformerDir)) { _output.WriteLine($"SKIPPED: T2V transformer dir not found: {transformerDir} (set KANDINSKY5_T2V_DIR)."); return; }
+        if (!File.Exists(TestPaths.Kandinsky5.PromptQwenEmbeds) || !File.Exists(TestPaths.Kandinsky5.PromptClipPooled))
+        { _output.WriteLine("SKIPPED: pre-computed Qwen/CLIP embeddings missing (see dump_kandinsky5_embeddings.py)."); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(Kandinsky5W8A8OperandAblationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
+        if (!File.Exists(Path.Combine(ptxDir, "w8a8.ptx"))) { _output.WriteLine("SKIPPED: w8a8.ptx missing"); return; }
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        (Kandinsky5CheckpointConverter.ConvertedWeights converted, List<SafeTensorsLoader> loaders) =
+            Kandinsky5CheckpointConverter.LoadDiffusersFolder(transformerDir);
+        try
+        {
+            Dictionary<string, Tensor> tw = new(converted.Transformer.Count);
+            foreach ((string k, Tensor v) in converted.Transformer)
+                tw[k] = v.DType == DType.BF16 ? v.CastTo(DType.F16) : v;
+            Kandinsky5Config config = Kandinsky5Config.VideoLite2B;
+            using Kandinsky5Transformer transformer = new(config);
+            transformer.LoadWeights(tw);
+
+            CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            try
+            {
+                _output.WriteLine($"Device: {backend.Capabilities.Name} (CUDA_VISIBLE_DEVICES=" +
+                    $"{Environment.GetEnvironmentVariable("CUDA_VISIBLE_DEVICES") ?? "unset"})");
+
+                using Tensor qwen = LoadF32Tensor(TestPaths.Kandinsky5.PromptQwenEmbeds, config.InTextDim);
+                using Tensor clip = LoadPooled(TestPaths.Kandinsky5.PromptClipPooled, config.InTextDim2);
+
+                const int width = 512, height = 512, numFrames = 25;
+                int tLat = (numFrames - 1) / 4 + 1, hLat = height / 8, wLat = width / 8;
+                int latCh = config.InVisualDim;
+                TensorShape latentShape = new TensorShape([1L, latCh, tLat, hLat, wLat]);
+                TensorShape maskShape = new TensorShape([1L, 1, tLat, hLat, wLat]);
+
+                FlowMatchEulerDiscreteScheduler scheduler = new(5.0f);
+                scheduler.SetTimesteps(30);
+                float midT = scheduler.Timesteps[15];
+                (float scaleT, float scaleH, float scaleW) = Kandinsky5VideoPipeline.GetRopeScaleFactor(height, width);
+
+                using Tensor noisy = SeedGenerator.CreateNoise(latentShape, seed: 42);
+                using Tensor condLatent = Zeros(latentShape);
+                using Tensor condMask = Zeros(maskShape);
+                using Tensor packed = PackVisualCond(noisy, condLatent, condMask, latCh);
+
+                backend.PreloadWeights(transformer.EnumerateWeights());
+
+                // Single-timestep capture of shape-A and shape-B (mirrors W8A8_SmoothQuant_OfflineGate's
+                // two-target hook, but only ONE pass needed here — the quadrature check doesn't need
+                // multi-timestep activation stats, unlike SmoothQuant calibration).
+                (int n, int k)? shapeA = null;
+                float[]? aIn = null, aW = null, bIn = null, bW = null;
+                int aM = 0, aK = 0, aN = 0, bK = 0, bN = 0;
+                Action<float[], int, int, float[], int, Tensor> hook = null!;
+                hook = (inArr, mm, kk, wArr, nn, wT) =>
+                {
+                    if (mm < 500 || kk < 1792) { CudaBackend.CaptureW8A8Operands = hook; return; }
+                    bool matchesA = shapeA is { } sa ? (kk == sa.k && nn == sa.n) : aIn is null;
+                    if (aIn is null && matchesA) { aIn = inArr; aW = wArr; aM = mm; aK = kk; aN = nn; }
+                    else if (bIn is null && !matchesA) { bIn = inArr; bW = wArr; bK = kk; bN = nn; }
+                    shapeA ??= aIn is not null ? (aN, aK) : null;
+                    if (aIn is null || bIn is null) CudaBackend.CaptureW8A8Operands = hook;
+                };
+                CudaBackend.CaptureW8A8Operands = hook;
+                backend.EnableW8A8 = true;
+                Tensor outp = transformer.ForwardVideo(backend, packed, midT, qwen, clip, scaleT, scaleH, scaleW);
+                backend.Sync();
+                outp.Dispose();
+                backend.FreeActivations(trimPool: false);
+                backend.FreeWeights(transformer.EnumerateWeights());
+                CudaBackend.CaptureW8A8Operands = null;
+
+                Assert.True(aIn is not null, "No layer A captured.");
+                _output.WriteLine($"Layer A: input[{aM},{aK}] weight[{aN},{aK}]");
+                RunQuadratureCheck("A", aIn!, aM, aK, aW!, aN);
+                if (bIn is not null)
+                {
+                    int bM = bIn.Length / bK;
+                    _output.WriteLine($"Layer B: input[{bM},{bK}] weight[{bN},{bK}]");
+                    RunQuadratureCheck("B", bIn, bM, bK, bW!, bN);
+                }
+                else
+                {
+                    _output.WriteLine("Layer B: not found (only one distinct deep-Linear shape encountered).");
+                }
+            }
+            catch (Exception realEx)
+            {
+                _output.WriteLine($"REAL EXCEPTION (pre-Dispose): {realEx}");
+                throw;
+            }
+            finally
+            {
+                CudaBackend.CaptureW8A8Operands = null;
+                try { backend.Dispose(); }
+                catch (Exception disposeEx) { _output.WriteLine($"DISPOSE-TIME EXCEPTION: {disposeEx}"); }
+            }
+        }
+        finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+    }
+
+    private void RunQuadratureCheck(string label, float[] act, int m, int k, float[] w, int n)
+    {
+        float[] refOut = MatMulTransposeB(act, m, k, w, n);
+
+        float[] aOnlyOut = MatMulTransposeB(FakeQuantRowwise(act, m, k), m, k, w, n);
+        double aOnly = RelL2(aOnlyOut, refOut);
+        float[] wOnlyOut = MatMulTransposeB(act, m, k, FakeQuantPerChannel(w, n, k), n);
+        double wOnlyBaseline = RelL2(wOnlyOut, refOut);
+        float[] bothOut = MatMulTransposeB(FakeQuantRowwise(act, m, k), m, k, FakeQuantPerChannel(w, n, k), n);
+        double bothBaseline = RelL2(bothOut, refOut);
+
+        double quadraturePredicted = Math.Sqrt(aOnly * aOnly + wOnlyBaseline * wOnlyBaseline);
+        _output.WriteLine($"[{label}] A-only={aOnly:e3}  W-only(per-row)={wOnlyBaseline:e3}  Both(per-row)={bothBaseline:e3}");
+        _output.WriteLine($"[{label}] quadrature-predicted Both = sqrt(A²+W²) = {quadraturePredicted:e3} " +
+            $"(actual/predicted = {bothBaseline / quadraturePredicted:F3})");
+
+        double ceilingBoth = Math.Sqrt(aOnly * aOnly); // W-only -> 0 limit
+        _output.WriteLine($"[{label}] perfect-weight-quant ceiling: Both -> {ceilingBoth:e3} " +
+            $"({(1.0 - ceilingBoth / bothBaseline) * 100:F1}% max possible local relL2 reduction)");
+
+        foreach (int groupSize in new[] { 128, 64, 32 })
+        {
+            if (k % groupSize != 0) continue;
+            float[] wGroupOut = MatMulTransposeB(act, m, k, FakeQuantPerGroup(w, n, k, groupSize), n);
+            double wGroupOnly = RelL2(wGroupOut, refOut);
+            float[] bothGroupOut = MatMulTransposeB(FakeQuantRowwise(act, m, k), m, k, FakeQuantPerGroup(w, n, k, groupSize), n);
+            double bothGroup = RelL2(bothGroupOut, refOut);
+            _output.WriteLine($"[{label}] group={groupSize,4}: W-only={wGroupOnly:e3} " +
+                $"({(wOnlyBaseline > 0 ? wGroupOnly / wOnlyBaseline : 1.0):F2}x per-row W-only)  " +
+                $"Both={bothGroup:e3} ({(bothBaseline > 0 ? bothGroup / bothBaseline : 1.0):F2}x per-row Both, " +
+                $"{(1.0 - bothGroup / bothBaseline) * 100:F1}% local relL2 reduction vs current production)");
+        }
+    }
+
     private void RunOfflineSmoothQuantSweep(string label, List<float[]> actPerStep, float[] w, int n, int k)
     {
         // Use the LAST probe (latest, most-drifted timestep — the one least like the others per the
@@ -765,6 +915,42 @@ public sealed unsafe class Kandinsky5W8A8OperandAblationTests
                 if (iv > 127) iv = 127;
                 if (iv < -127) iv = -127;
                 result[baseIdx + ki] = iv * scale;
+            }
+        }
+        return result;
+    }
+
+    /// <summary>Per-group variant of <see cref="FakeQuantPerChannel"/>: instead of one absmax/127 scale
+    /// per output row (over the full K), each row is split into contiguous groups of <paramref name="groupSize"/>
+    /// input channels, each with its own scale — the standard group-quant scheme (GPTQ/AWQ-style), a
+    /// candidate lever for the weight-quantization floor SmoothQuant can't touch. <paramref name="groupSize"/>
+    /// must evenly divide k.</summary>
+    private static float[] FakeQuantPerGroup(float[] w, int n, int k, int groupSize)
+    {
+        if (k % groupSize != 0) throw new ArgumentException($"groupSize {groupSize} does not evenly divide k={k}");
+        int groupsPerRow = k / groupSize;
+        float[] result = new float[w.Length];
+        for (int ni = 0; ni < n; ni++)
+        {
+            int rowBase = ni * k;
+            for (int g = 0; g < groupsPerRow; g++)
+            {
+                int gBase = rowBase + g * groupSize;
+                float amax = 0f;
+                for (int ki = 0; ki < groupSize; ki++)
+                {
+                    float a = MathF.Abs(w[gBase + ki]);
+                    if (a > amax) amax = a;
+                }
+                float scale = amax > 0f ? amax / 127f : 1f;
+                float inv = amax > 0f ? 127f / amax : 0f;
+                for (int ki = 0; ki < groupSize; ki++)
+                {
+                    int iv = (int)MathF.Round(w[gBase + ki] * inv);
+                    if (iv > 127) iv = 127;
+                    if (iv < -127) iv = -127;
+                    result[gBase + ki] = iv * scale;
+                }
             }
         }
         return result;

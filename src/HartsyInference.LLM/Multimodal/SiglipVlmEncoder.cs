@@ -198,6 +198,12 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
     private Tensor W(string key) => _w[key];
     private Tensor? Wopt(string key) => _w.TryGetValue(key, out Tensor? t) ? t : null;
 
+    /// <summary>Raw mmproj weights and GGUF metadata, for <see cref="LlavaNextEncoder"/> to read
+    /// <c>clip.vision.image_grid_pinpoints</c> / <c>model.image_newline</c> off the SAME loaded instance instead
+    /// of re-loading (and re-dequantizing) the mmproj file a second time.</summary>
+    internal IReadOnlyDictionary<string, Tensor> Weights => _w;
+    internal GgufMetadata Metadata => _handle.Metadata;
+
     private static void Dbg(IBackend backend, string tag, Tensor t, int hidden)
     {
         if (Environment.GetEnvironmentVariable("HARTSY_VLM_DEBUG") != "1" && Environment.GetEnvironmentVariable("HARTSY_VLM_DUMP") is null) return;

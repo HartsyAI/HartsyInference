@@ -278,6 +278,8 @@ public sealed class CudaBackend : IBackend
     private ulong _dp4aScratch;
     private nuint _dp4aScratchBytes;
     private ulong _argmaxScratch;
+    private ulong _ssmDeltaScratch;
+    private nuint _ssmDeltaScratchBytes;
 
     private bool StreamIsCapturing()
     {
@@ -3399,8 +3401,20 @@ public sealed class CudaBackend : IBackend
             pNw = GpuTransferHelper.CopyToDevice(normW);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pO = GpuTransferHelper.AllocateDevice(outBytes);
+            // Persistent scratch for the row-parallel delta kernel's pre-norm readout. Sized on
+            // first use (the pre-capture warmup step), NEVER grown during capture — a graph would
+            // bake a dead pointer. hv*sv is model-constant, so a capture-time miss means the
+            // warmup was skipped; the launcher then falls back to the legacy single kernel.
+            nuint scratchBytes = (nuint)((hv * sv + 2 * hv) * sizeof(float));   // readout + per-head gate scalars
+            if (_ssmDeltaScratchBytes < scratchBytes && !StreamIsCapturing())
+            {
+                if (_ssmDeltaScratch != 0) GpuTransferHelper.FreeDevice(_ssmDeltaScratch);
+                _ssmDeltaScratch = GpuTransferHelper.AllocateDevice(scratchBytes);
+                _ssmDeltaScratchBytes = scratchBytes;
+            }
+            ulong oScratch = _ssmDeltaScratchBytes >= scratchBytes ? _ssmDeltaScratch : 0;
             _kernels!.LaunchSsmDeltaStep(pO, pSt, pQ, pK, pV, pZ, pAl, pBe, pDt, pSa, pNw,
-                hv, sv, sk, repeat, eps, _stream.Handle);
+                hv, sv, sk, repeat, eps, _stream.Handle, oScratch);
             GpuTransferHelper.CacheActivation(output, pO, outBytes);
             GpuTransferHelper.CacheActivation(state, pSt, GpuTransferHelper.ByteSize(state));   // mutated in place, keep resident
             cached = true;
@@ -6561,7 +6575,7 @@ public sealed class CudaBackend : IBackend
     /// stable across graph capture/replay and never evicted, exactly like a model weight. Same math as
     /// GenericTransformer.BuildRope, just for every position 0..maxPos-1 up front instead of one small
     /// per-step tensor.</summary>
-    public unsafe (Tensor cos, Tensor sin) BuildRopeTableDevice(int maxPos, int headDim, int rotaryDim, float theta, RopeScaling scaling)
+    public unsafe (Tensor cos, Tensor sin) BuildRopeTableDevice(int maxPos, int headDim, int rotaryDim, float theta, RopeScaling scaling, bool splitHalfPartial = false)
     {
         int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
         int rotHalf = rdim / 2;
@@ -6571,26 +6585,24 @@ public sealed class CudaBackend : IBackend
         Tensor sin = new(new TensorShape(maxPos, headDim), DType.F32);
         float* pc = (float*)cos.DataPointer;
         float* ps = (float*)sin.DataPointer;
+        // Partial rotary (rotaryDim < headDim) needs two incompatible layouts (see IBackend doc):
+        // duplicate stride = rotaryDim/2 for the split-half kernels (they pair (i, i+rotaryDim/2) and
+        // read raw index i across [0, rotaryDim)), headDim/2 for the interleaved kernels (one value per
+        // pair from [0, headDim/2), identity in [rotaryDim/2, headDim/2) so un-rotated pairs pass
+        // through — the GLM-4 fix caught by the 2026-07-22 popular-model benchmark sweep; entries left
+        // as alloc garbage silently corrupt output). Full rotary: strides coincide, flag irrelevant.
+        int dupStride = splitHalfPartial ? rotHalf : halfDim;
         for (int pos = 0; pos < maxPos; pos++)
         {
             long baseOff = (long)pos * headDim;
-            // Partial rotary (GLM-4: rotaryDim < headDim): table entries past rotaryDim/2 are IDENTITY
-            // (cos=1, sin=0, unscaled) so the graph-decode rope kernels — which always walk headDim/2
-            // pairs — leave the un-rotated dims untouched, matching the eager kernels' rotaryDim clamp.
-            // (Previously those entries were left as uninitialized alloc garbage duplicated from the
-            // rotary half, silently corrupting every partial-rotary graph decode — degenerate GLM-4
-            // output, caught by the 2026-07-22 popular-model benchmark sweep.)
-            for (int i = 0; i < halfDim; i++)
+            for (int i = 0; i < headDim; i++) { pc[baseOff + i] = 1f; ps[baseOff + i] = 0f; }
+            for (int i = 0; i < rotHalf; i++)
             {
-                float c = 1f, s = 0f;
-                if (i < rotHalf)
-                {
-                    double angle = pos * invFreq[i];
-                    c = (float)(Math.Cos(angle) * mscale);
-                    s = (float)(Math.Sin(angle) * mscale);
-                }
-                pc[baseOff + i] = c; pc[baseOff + i + halfDim] = c;
-                ps[baseOff + i] = s; ps[baseOff + i + halfDim] = s;
+                double angle = pos * invFreq[i];
+                float c = (float)(Math.Cos(angle) * mscale);
+                float s = (float)(Math.Sin(angle) * mscale);
+                pc[baseOff + i] = c; pc[baseOff + i + dupStride] = c;
+                ps[baseOff + i] = s; ps[baseOff + i + dupStride] = s;
             }
         }
         PreloadWeights([cos, sin]);
@@ -7344,6 +7356,7 @@ public sealed class CudaBackend : IBackend
 
             if (_dp4aScratch != 0) { GpuTransferHelper.FreeDevice(_dp4aScratch); _dp4aScratch = 0; _dp4aScratchBytes = 0; }
             if (_argmaxScratch != 0) { GpuTransferHelper.FreeDevice(_argmaxScratch); _argmaxScratch = 0; }
+            if (_ssmDeltaScratch != 0) { GpuTransferHelper.FreeDevice(_ssmDeltaScratch); _ssmDeltaScratch = 0; _ssmDeltaScratchBytes = 0; }
             FreeW8A8Cache();
             GpuTransferHelper.EvictAll();
             _streamingCache.UnregisterPinnedSources();

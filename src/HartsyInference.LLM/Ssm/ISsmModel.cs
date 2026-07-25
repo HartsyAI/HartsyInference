@@ -6,6 +6,19 @@ namespace HartsyInference.LLM.Ssm;
 /// <summary>Common shape of the recurrent (non-transformer) decoder models — <see cref="MambaModel"/>,
 /// <see cref="Mamba2Model"/>, <see cref="RwkvModel"/>, <see cref="Rwkv7Model"/> — so <see cref="SsmLanguageModel"/>
 /// and <see cref="SsmGenerationPipeline"/> can drive any of them uniformly.</summary>
+/// <summary>Optional capability: SSM models whose seq=1 decode step is fully device-side and
+/// graph-capturable (currently Qwen3.5). The pipeline runs greedy decode as capture + replay.</summary>
+public interface ISsmGraphDecodable
+{
+    (HartsyInference.Core.Tensors.Tensor cos, HartsyInference.Core.Tensors.Tensor sin, HartsyInference.Core.Tensors.Tensor embed)
+        EnsureGraphDecodeResident(HartsyInference.Core.Backends.IBackend backend, int minCapacity);
+    void ForwardGraphDecodeStep(HartsyInference.Core.Backends.IBackend backend,
+        HartsyInference.Core.Tensors.Tensor embedTable, HartsyInference.Core.Tensors.Tensor cosTable,
+        HartsyInference.Core.Tensors.Tensor sinTable, ulong devicePos, ulong deviceTokenId);
+    void AdvancePosition(int tokens);
+    int CurrentPosition { get; }
+}
+
 public interface ISsmModel : IDisposable
 {
     int VocabSize { get; }

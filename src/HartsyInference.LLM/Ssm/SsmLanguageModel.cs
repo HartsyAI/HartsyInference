@@ -44,7 +44,7 @@ public sealed class SsmLanguageModel : IDisposable
         try
         {
             ILlmTokenizer tokenizer = GgufLanguageModel.BuildTokenizer(model.Metadata);
-            IChatTemplate template = GgufLanguageModel.BuildTemplate(model.Metadata);
+            IChatTemplate template = GgufLanguageModel.BuildTemplate(model.Metadata, tokenizer);
             return new SsmLanguageModel(model, architecture, tokenizer, template);
         }
         catch

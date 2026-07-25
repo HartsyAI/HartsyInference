@@ -17,7 +17,15 @@
     <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.LLM\HartsyInference.LLM.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Vision\HartsyInference.Vision.csproj" />
     <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
+  </ItemGroup>
+
+  <!-- Test fixture for VlmDecodeThroughputBenchmark: same bus.png used by Vision.Tests. -->
+  <ItemGroup>
+    <Content Include="TestData\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

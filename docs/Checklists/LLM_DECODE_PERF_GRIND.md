@@ -1066,6 +1066,96 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > argmax + single-token readback, then graph capture of the fixed-shape step) applies directly;
 > llama.cpp-class SSM speed lands there.
 
+> **STATUS UPDATE (2026-07-24, Qwen3.5 SSM phase C: graph-captured decode — ~54.6 → ~145 tok/s
+> (2.7×); llama.cpp gap closed from 4.3× behind to 1.6× behind.** `ISsmGraphDecodable`
+> (ISsmModel.cs) + Qwen35Model implementation: `EnsureGraphDecodeResident` (device rope tables +
+> F32 embed table), `ForwardGraphDecodeStep` (EmbedGatherDecodeStep → per-layer
+> BlockLinearDeviceStep / BlockAttnGraphStep → output-norm → head Linear → ArgMaxInto, token id
+> self-feeding on device), and a graph branch in SsmGenerationPipeline.Generate (same gate as the
+> transformer pipeline: greedy, no JSON constraint, repetition penalty 1.0; kill-switch
+> HARTSY_SSM_GRAPH=0; warmup step is the first REAL decode step since capture only records).
+> Timing (512-token generation, delta vs 16-token run to exclude load+prefill): 496 tokens in
+> 3.35–3.56 s → ~145 tok/s; eager device-step path measures ~24 tok/s on the same 512-token run
+> (its per-token Sync + 151k-logit D2H gets WORSE with sequence length, so its earlier ~30 tok/s
+> shorter-run figure was flattering). llama.cpp same GGUF: 234.6 tok/s.
+> **Bug found & fixed during bring-up: BuildRopeTableDevice partial-rotary layout was
+> interleaved-only.** The split-half decode-rope kernels pair (i, i+rotaryDim/2) and read cos/sin
+> duplicated at stride rotaryDim/2, but the table duplicated at stride headDim/2 with identity
+> rows in between — so for partial rotary (Qwen3.5: 64 of 128 dims) every upper-half pair element
+> read identity and came out UNROTATED. Never hit before: all transformer graph models are either
+> full-rotary (strides coincide) or interleaved (GLM-4, which the identity rows were built for).
+> `BuildRopeTableDevice` now takes `splitHalfPartial` and lays the table out for whichever kernel
+> family will consume it. Graph-vs-eager A/B after the fix: 2 of 4 prompts byte-identical, the
+> other 2 tolerance-class greedy tie-flips (both arms coherent; the fleet-documented
+> prompt-specific divergence signature — pre-fix, EVERY prompt diverged). REMAINING (scoped, not
+> started): profile the ~6.9 ms/token graph replay (small-model launch overhead + SSM kernel
+> efficiency + 151k-vocab head) to close the last 1.6× to llama.cpp.
+
+> **STATUS UPDATE (2026-07-24, Qwen3.5 SSM delta-kernel round: ~145 → 217 tok/s; llama.cpp gap now
+> 8% (234.6).** nsys (the nsight-compute bundle's `host/target-linux-x64/nsys` works unprivileged
+> with `TMPDIR` set writable and `--cuda-graph-trace=node` to see replayed kernels; kernel-summary
+> per-token totals reconcile with wall time) showed `lm_ssm_delta_step_f32` at 192 µs/layer —
+> ~3.5 ms of the 7.0 ms token: its block-per-head grid runs sv sequential block-wide tree
+> reductions (~10 __syncthreads each) per phase. Fix: `lm_ssm_delta_step_rows_f32` — one block per
+> (row, head); rows are independent through the rank-1 update, and keeping the legacy kernel's
+> 256-thread strided-partial + tree-reduction pattern per row makes the schedule change BIT-EXACT
+> (verified: 4/4 prompts byte-identical vs kill-switched build, suites 198/198 + 132/132). The
+> head-wide gated-RMSNorm tail became `lm_ssm_delta_gated_norm_f32` (phase-4 body verbatim), fed
+> by a persistent [hv·sv]-float scratch on CudaBackend (sized during pre-capture warmup, never
+> grown during capture; launcher falls back to the legacy kernel without scratch). Kill-switch
+> HARTSY_SSM_DELTA_V2=0. A register-cache pass (decayed row held in registers between phases) was
+> flat — the remaining 42 µs/layer is block-sync/occupancy latency, not DRAM traffic. BUILT BUT
+> UNVERIFIED (opt-in HARTSY_SSM_DELTA_WARPROW=1): `lm_ssm_delta_step_warprow_f32`, 8 rows/block
+> with each warp simulating the 256-slot tree bit-exactly (register folds for levels 128/64/32,
+> __shfl_down_sync for 16..1) — its verifying benchmark+byte-A/B was externally stopped mid-run,
+> so it stays off by default until that A/B runs. Remaining per-token budget (nsys, 96 replays):
+> delta 0.77 ms, 151k-vocab Q6_K head ~0.62 ms (63% of DRAM peak), q4k layer GEMVs 0.75 ms
+> (near-roofline), attention 0.41 ms (grows with KV), ~187 activation-quantize launches 0.23 ms
+> (quantize-at-producer sidecars NOT wired into the SSM step — next lever), rmsnorm 0.18 ms
+> (sandwich fusions also not wired).
+
+> **STATUS UPDATE (2026-07-24, SSM fusion + delta-scalar round: 217 → 222 tok/s; llama.cpp
+> (234.6) now 5.6% ahead.** Landed, each byte-verified 4/4 vs the kill-switched build with both
+> suites green: (1) quantize-at-producer + fused add-norm wired into the SSM step —
+> RmsNormEmitQ8 for the attn-norm (one sidecar feeds all 4 projections), AddRmsNormEmitQ8
+> replacing the Add + post-attention-norm pair (both block types + the graph head norm); +1.4%.
+> (2) `lm_ssm_delta_scalars_f32` — per-head gExp/beta hoisted out of the row-parallel delta
+> kernels into one tiny precompute launch (expression order verbatim → bit-identical); +0.8%.
+> **Delta-kernel floor characterized:** the row kernel holds a ~42 µs/layer (in-graph; 54 µs
+> isolated in a minimal captured graph — clocks lower without neighboring heavy kernels) cost
+> that is INVARIANT to schedule shape (block-per-row vs warp-per-row), register-caching the state
+> row, and transcendental hoisting — ptxas shows no spills, occupancy is clean. The remaining
+> model that fits: ~12 latency-bound waves × ~3.5 µs block critical path at 2048 tiny blocks.
+> Root-causing needs hardware counters → **sudo ncu** (non-root counters blocked,
+> ERR_NVGPUCTRPERM):
+> `sudo ~/.local/cuda-tools/nsight-compute/opt/nvidia/nsight-compute/2026.2.1/ncu --set full -k lm_ssm_delta_step_rows_f32 -c 3 <ssm-profile-binary> 64`
+> Given the whole remaining gap is 0.24 ms/token and llama.cpp pays its own recurrence cost,
+> parity may also come from the Q6_K head (63% of peak) or attention-split tuning instead.
+> DEAD ENDS this round (both reverted, don't re-try without ncu evidence): (a) constant-trip-count
+> unroll of the q6k dp4a super-block loop for short-K rows (nsb=4 lm_head) — e2e −1%, the loop
+> bound wasn't the latency limiter; (b) HARTSY_GEMV_WPB sweep 2/4/8 — 4 (shipped default) already
+> optimal for this model. The Q6_K head, like the delta kernel, needs hardware counters (sudo ncu)
+> before further restructuring.
+
+> **STATUS UPDATE (2026-07-24, GOAL REACHED: Qwen3.5 decode 254.5 tok/s vs llama-cpp-python
+> 232.8 same-window sandwich — 9.3% FASTER (was 25× slower at the original baseline).** The
+> delta-kernel floor fell to a controlled experiment chain: (1) a trivial Add streaming the same
+> 1 MB state tensors in the same captured-graph context runs 7.4 µs vs the rows kernel's 55 µs at
+> full boost clocks — so the memory path was fine and the BLOCK SHAPE was the problem (2048
+> blocks × 512 B each can't hide DRAM latency); (2) micro-benchmarking all three variants in
+> isolation: legacy 191.7 µs, rows 55.1 µs, warprow 20.5 µs/call. **The earlier e2e conclusion
+> that warp-per-row "wasn't faster" was WRONG** — it was measured before the per-head scalar
+> hoist, when every thread's 4 precise transcendentals masked the schedule win; the lesson is to
+> micro-benchmark kernel variants in isolation BEFORE judging them by e2e deltas. Warprow is now
+> default-on (kill-switch HARTSY_SSM_DELTA_WARPROW=0), byte-identical 4/4 vs the legacy kernel,
+> suites 201/201 + 132/132 on a quiet GPU (an intervening 133-failure suite run was pure
+> contention — the other workstream's 11.7 GB test host at 99% GPU; check compute-apps first).
+> Steady decode 254.9/254.4/254.2 tok/s across reps (3.93 ms/token). REMAINING (scoped, optional):
+> warprow still ~2.7× above the 7.4 µs streaming floor (~0.23 ms/token upside — needs ncu);
+> Q6_K head at 63% of peak (~0.2 ms — needs ncu); TTFT ~780 ms first-token in the probe (includes
+> per-generation graph capture; llama.cpp 15 ms) — the SSM graph-capture cost has had NO
+> optimization pass and is the next user-visible win.
+
 > **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
 > graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
 > doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a

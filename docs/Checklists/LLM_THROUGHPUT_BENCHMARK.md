@@ -405,6 +405,34 @@ misattribution. **All results below use `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIB
 > (per-token host sampling round-trip + eager launches): the transformer pipeline's device-argmax
 > + graph-capture design applies directly and is the scoped finish line.
 
+> **UPDATE 2026-07-24 (Qwen3.5-0.8B SSM phase C landed: graph-captured decode).** Ours is now
+> **~145 tok/s** decode (496 tokens in 3.35–3.56 s, delta-timed 512- vs 16-token greedy runs to
+> exclude load+prefill) vs llama-cpp-python's **234.6 tok/s** — llama.cpp is now 62% faster (was
+> 330% faster before phase C, 25× faster at the original baseline). Overall campaign: the original
+> 40.3 s reference generation now takes ~3.3 s wall including model load. Bring-up surfaced and
+> fixed a shared-infrastructure bug: `BuildRopeTableDevice`'s partial-rotary table layout only
+> matched the interleaved rope kernels; split-half partial rotary (Qwen3.5's 64-of-128 dims) read
+> identity entries and left upper-half pair elements unrotated. Fixed with an explicit
+> `splitHalfPartial` layout switch — full-rotary and interleaved (GLM-4) tables are byte-identical
+> to before. Details + A/B methodology in `LLM_DECODE_PERF_GRIND.md` (phase C entry).
+> **Same day, delta-kernel round:** row-parallel `lm_ssm_delta_step_rows_f32` (bit-exact schedule
+> change, byte-verified, suites green) lifts Qwen3.5-0.8B to **217 tok/s** steady decode
+> (4.61 ms/token, per-token onToken timing over 512 greedy tokens) vs llama-cpp-python's 234.6 —
+> llama.cpp now 8% faster (was 62% faster this morning, 330% before phase C). Remaining levers
+> scoped in the grind doc (warp-per-row delta kernel built but unverified/opt-in; SSM
+> quantize-at-producer + sandwich fusions unwired; Q6_K head at 63% of peak).
+
+> **FINAL 2026-07-24: Qwen3.5-0.8B BEATS llama-cpp-python — ours 254.5 tok/s (254.9/254.4/254.2
+> reps, 3.93 ms/token) vs llama.cpp 232.8 same-window sandwich (232.3 mean, σ=1.0): 9.3% faster.**
+> Landed after the 217 entry: SSM sidecar/fused-add-norm wiring (+1.4%), per-head delta gate
+> scalar hoisting (+0.8%), and the decisive one — the warp-per-row delta kernel default-on (its
+> earlier "no gain" e2e verdict was an artifact of pre-hoist transcendental masking; isolated
+> micro: 20.5 vs 55 µs/call). All byte-identical vs kill-switched builds; suites 201/201 CUDA +
+> 132/132 LLM on a quiet GPU. Every SSM-path change is kill-switched: HARTSY_SSM_GRAPH,
+> HARTSY_SSM_DEVICE_STEP, HARTSY_SSM_DELTA_V2, HARTSY_SSM_DELTA_WARPROW, HARTSY_QUANT_AT_PRODUCER,
+> HARTSY_SANDWICH_FUSION. Known remaining weakness: first-token latency (~0.8 s incl.
+> per-generation graph capture vs llama.cpp's 15 ms) — unoptimized, scoped in the grind doc.
+
 Superseded pre-dp4a table (2026-07-22, earlier session):
 
 | Model | Ours (graph-off) | Ours (graph-on) | llama-cpp-python | Ratio (ours÷llama, graph-on) |

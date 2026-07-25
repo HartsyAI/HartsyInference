@@ -100,12 +100,22 @@ public sealed class GgufLanguageModel : IDisposable
 
     /// <summary>Compiles the model's own Jinja <c>chat_template</c> when present, but stays tolerant: some models
     /// (e.g. embedding models) ship templates using constructs the engine doesn't support (Python slicing). Those
-    /// models are still usable for raw completion / embeddings, so fall back to ChatML rather than failing the
-    /// whole load.</summary>
-    internal static IChatTemplate BuildTemplate(GgufMetadata meta)
+    /// models are still usable for raw completion / embeddings, so fall back to a template the tokenizer can
+    /// actually render — ChatML when the tokenizer has the <c>&lt;|im_start|&gt;</c>/<c>&lt;|im_end|&gt;</c>
+    /// control tokens, else <see cref="RawCompletionTemplate"/> — rather than failing the whole load. Falling
+    /// back to ChatML unconditionally used to throw at Encode time for any tokenizer without those tokens (base
+    /// models like GPT-2/StarCoder2, and Vicuna-family VLM backbones like LLaVA) — a bare
+    /// <see cref="GenerationRequest.Prompt"/> should never crash regardless of what turn format the model
+    /// natively wants.</summary>
+    internal static IChatTemplate BuildTemplate(GgufMetadata meta, ILlmTokenizer tokenizer)
     {
+        IChatTemplate ChatMlOrRaw() =>
+            tokenizer.SpecialId("<|im_start|>") is not null && tokenizer.SpecialId("<|im_end|>") is not null
+                ? new ChatMlTemplate()
+                : new RawCompletionTemplate();
+
         string? chatTemplate = meta.GetString("tokenizer.chat_template");
-        if (string.IsNullOrWhiteSpace(chatTemplate)) return new ChatMlTemplate();
+        if (string.IsNullOrWhiteSpace(chatTemplate)) return ChatMlOrRaw();
 
         // Some llama.cpp GGUF converters (RWKV-World among them) store a bare format-name sentinel here
         // (e.g. "rwkv-world") instead of real Jinja source — a signal meant for llama.cpp's own hardcoded
@@ -113,18 +123,18 @@ public sealed class GgufLanguageModel : IDisposable
         // never actually incorporate the conversation, so JinjaEngine "compiles" it fine and every render
         // silently returns that literal constant text regardless of the real messages (confirmed live: three
         // unrelated prompts against an RWKV-6 GGUF all produced byte-identical output). Detect that up front
-        // rather than letting it "succeed" — fall back to ChatML the same as a genuine compile failure.
+        // rather than letting it "succeed" — fall back the same as a genuine compile failure.
         if (!chatTemplate.Contains("{{", StringComparison.Ordinal) && !chatTemplate.Contains("{%", StringComparison.Ordinal))
         {
-            Console.Error.WriteLine($"[WRN] GGUF: chat template \"{chatTemplate}\" has no Jinja substitution syntax (likely a format-name sentinel, not real template source); falling back to ChatML (raw completion / embeddings still work).");
-            return new ChatMlTemplate();
+            Console.Error.WriteLine($"[WRN] GGUF: chat template \"{chatTemplate}\" has no Jinja substitution syntax (likely a format-name sentinel, not real template source); falling back (raw completion / embeddings still work).");
+            return ChatMlOrRaw();
         }
 
         try { return new JinjaChatTemplate(chatTemplate); }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[WRN] GGUF: chat template did not compile ({ex.Message}); falling back to ChatML (raw completion / embeddings still work).");
-            return new ChatMlTemplate();
+            Console.Error.WriteLine($"[WRN] GGUF: chat template did not compile ({ex.Message}); falling back (raw completion / embeddings still work).");
+            return ChatMlOrRaw();
         }
     }
 
@@ -186,7 +196,7 @@ public sealed class GgufLanguageModel : IDisposable
             transformer.LoadWeights(weights, "model");
 
             ILlmTokenizer tokenizer = BuildTokenizer(handle.Metadata);
-            IChatTemplate template = BuildTemplate(handle.Metadata);
+            IChatTemplate template = BuildTemplate(handle.Metadata, tokenizer);
 
             return new GgufLanguageModel(handle, config, transformer, tokenizer, template);
         }

@@ -17,7 +17,7 @@ namespace HartsyInference.LLM.Ssm;
 /// <c>src/models/{qwen35.cpp, delta-net-base.cpp}</c> (no local reference model existed at implementation
 /// time). Linear projections run through <see cref="IBackend"/>; the conv/delta-rule/gated-norm run host-side,
 /// matching every other recurrent model in this namespace (<see cref="Mamba2Model"/> et al.).</summary>
-public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
+public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecodable
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
     private readonly IReadOnlyDictionary<string, Tensor> _w;
@@ -247,7 +247,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
         TensorShape flat = new(1, 1, d);
 
         Tensor xn = new(flat, DType.F32);
-        backend.RmsNorm(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
+        backend.RmsNormEmitQ8(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
 
         // Fused [query | gate] projection, shaped [1, hq, 2, hd] so the per-head de-interleave is a
         // device SliceTimeRange (each head's row is [q(hd) | g(hd)] = two time-steps of width hd).
@@ -305,11 +305,9 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
         backend.Linear(attnOut, gated, W($"{p}.attn_output.weight"), null);
         gated.Dispose();
         Tensor afterAttn = new(flat, DType.F32);
-        backend.Add(afterAttn, hIn, attnOut);
-        attnOut.Dispose();
-
         Tensor preFfn = new(flat, DType.F32);
-        backend.RmsNorm(preFfn, afterAttn, W($"{p}.post_attention_norm.weight"), Eps);
+        backend.AddRmsNormEmitQ8(afterAttn, preFfn, hIn, attnOut, W($"{p}.post_attention_norm.weight"), Eps);
+        attnOut.Dispose();
         Tensor ffnOut = DenseSwiGlu(backend, preFfn, p, 1);
         preFfn.Dispose();
         Tensor result = new(flat, DType.F32);
@@ -454,6 +452,131 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
     /// <c>o_t = S_t·q_t</c>) → gated RMSNorm(o, silu(z)) → output projection + residual. Linear projections and
     /// norms run through <see cref="IBackend"/>; the conv/recurrence/gated-norm run host-side (same split as
     /// <see cref="Mamba2Model"/>'s SSD scan).</summary>
+    // Graph-decode session state (transformer playbook): full-position rope tables + the F32 embed
+    // table device-resident, built once per model lifetime.
+    private Tensor? _graphCos, _graphSin;
+    private int _graphRopeCapacity;
+
+    /// <summary>Uploads the F32 embed table and builds device rope tables for graph decode.</summary>
+    public (Tensor cos, Tensor sin, Tensor embed) EnsureGraphDecodeResident(IBackend backend, int minCapacity)
+    {
+        Tensor embed = W("__embed_f32");
+        backend.PreloadWeights([embed]);
+        if (_graphCos is null || _graphRopeCapacity < minCapacity)
+        {
+            _graphCos?.Dispose(); _graphSin?.Dispose();
+            (_graphCos, _graphSin) = backend.BuildRopeTableDevice(minCapacity, AttnHeadDim, RotaryDim, RopeTheta, RopeScaling.None, splitHalfPartial: true);
+            _graphRopeCapacity = minCapacity;
+        }
+        return (_graphCos!, _graphSin!, embed);
+    }
+
+    /// <summary>One full graph-capturable decode step: device embed gather → every layer (recurrent
+    /// layers are position-free; attention layers rope/append/attend via <paramref name="devicePos"/>)
+    /// → final norm → head → greedy argmax written back into <paramref name="deviceTokenId"/>. The
+    /// recurrent conv/delta states and the KV cache mutate in place on their captured device buffers,
+    /// so replaying the captured graph chains decode entirely on-device.</summary>
+    public void ForwardGraphDecodeStep(IBackend backend, Tensor embedTable, Tensor cosTable, Tensor sinTable,
+        ulong devicePos, ulong deviceTokenId)
+    {
+        int d = DModel;
+        Tensor h = new(new TensorShape(1, 1, d), DType.F32);
+        backend.EmbedGatherDecodeStep(h, embedTable, deviceTokenId);
+
+        for (int i = 0; i < NumLayers; i++)
+        {
+            Tensor next = _isLinear[i]
+                ? BlockLinearDeviceStep(backend, h, i)
+                : BlockAttnGraphStep(backend, h, i, cosTable, sinTable, devicePos);
+            h.Dispose(); h = next;
+        }
+
+        Tensor normed = new(new TensorShape(1, 1, d), DType.F32);
+        backend.RmsNormEmitQ8(normed, h, W("output_norm.weight"), Eps);
+        h.Dispose();
+        Tensor logits = new(new TensorShape(1, 1, VocabSize), DType.F32);
+        Tensor headW = Has("output.weight") ? W("output.weight") : W("token_embd.weight");
+        backend.Linear(logits, normed, headW, null);
+        normed.Dispose();
+        backend.ArgMaxInto(deviceTokenId, logits);
+        logits.Dispose();
+    }
+
+    /// <summary>Attention layer for the captured step: identical to <see cref="BlockAttnDeviceStep"/>
+    /// except rope/append/attention read the position from the device buffer (the decode rope kernel is
+    /// head-major, so the relabel copies disappear too).</summary>
+    private Tensor BlockAttnGraphStep(IBackend backend, Tensor hIn, int i, Tensor cosTable, Tensor sinTable, ulong devicePos)
+    {
+        int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim, group = hq / hkv;
+        string p = $"blk.{i}";
+        TensorShape flat = new(1, 1, d);
+
+        // EmitQ8/fused-add-norm mirror BlockLinearDeviceStep (self-gated, plain semantics when off).
+        Tensor xn = new(flat, DType.F32);
+        backend.RmsNormEmitQ8(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
+
+        Tensor qgFull = new(new TensorShape(1, hq, 2, hd), DType.F32);
+        backend.Linear(qgFull, xn, W($"{p}.attn_q.weight"), null);
+        Tensor qHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
+        Tensor gateHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
+        backend.SliceTimeRange(qHm, qgFull, 0, 1);
+        backend.SliceTimeRange(gateHm, qgFull, 1, 1);
+        qgFull.Dispose();
+
+        Tensor k = new(new TensorShape(1, hkv, 1, hd), DType.F32);
+        backend.Linear(k, xn, W($"{p}.attn_k.weight"), null);
+        Tensor vMh = new(new TensorShape(1, hkv, 1, hd), DType.F32);
+        backend.Linear(vMh, xn, W($"{p}.attn_v.weight"), null);
+        xn.Dispose();
+
+        Tensor qMh = new(new TensorShape(1, hq, 1, hd), DType.F32);
+        backend.RmsNorm(qMh, qHm, W($"{p}.attn_q_norm.weight"), Eps);
+        qHm.Dispose();
+        Tensor kMh = new(new TensorShape(1, hkv, 1, hd), DType.F32);
+        backend.RmsNorm(kMh, k, W($"{p}.attn_k_norm.weight"), Eps);
+        k.Dispose();
+
+        backend.RopeApplyDecodeStep(qMh, cosTable, sinTable, RotaryDim, interleaved: false, devicePos);
+        backend.RopeApplyDecodeStep(kMh, cosTable, sinTable, RotaryDim, interleaved: false, devicePos);
+
+        Tensor kFull = _kvCache.KeyPrefix(i);
+        Tensor vFull = _kvCache.ValuePrefix(i);
+        backend.KvCacheAppendDev(kFull, kMh, 0, devicePos);
+        backend.KvCacheAppendDev(vFull, vMh, 0, devicePos);
+        kMh.Dispose(); vMh.Dispose();
+
+        Tensor attn = new(new TensorShape(1, hq, 1, hd), DType.F32);
+        backend.FlashAttentionDev(attn, qMh, kFull, vFull, 0, group, causal: true, 0, 1f / MathF.Sqrt(hd), devicePos, 0f, 0);
+        qMh.Dispose();
+
+        Tensor gateSig = new(new TensorShape(1, hq, 1, hd), DType.F32);
+        backend.Sigmoid(gateSig, gateHm);
+        gateHm.Dispose();
+        Tensor gated = new(new TensorShape(1, 1, hq * hd), DType.F32);
+        backend.Mul(gated, attn, gateSig);
+        attn.Dispose(); gateSig.Dispose();
+
+        Tensor attnOut = new(flat, DType.F32);
+        backend.Linear(attnOut, gated, W($"{p}.attn_output.weight"), null);
+        gated.Dispose();
+        Tensor afterAttn = new(flat, DType.F32);
+        Tensor preFfn = new(flat, DType.F32);
+        backend.AddRmsNormEmitQ8(afterAttn, preFfn, hIn, attnOut, W($"{p}.post_attention_norm.weight"), Eps);
+        attnOut.Dispose();
+        Tensor ffnOut = DenseSwiGlu(backend, preFfn, p, 1);
+        preFfn.Dispose();
+        Tensor result = new(flat, DType.F32);
+        backend.Add(result, afterAttn, ffnOut);
+        afterAttn.Dispose(); ffnOut.Dispose();
+        return result;
+    }
+
+    /// <summary>Advances the host position counter after a graph-decode session (the replay loop moved
+    /// the device position; host bookkeeping must follow for any subsequent prefill).</summary>
+    public void AdvancePosition(int tokens) => _pos += tokens;
+
+    public int CurrentPosition => _pos;
+
     private unsafe void EnsureStateOnDevice(int i)
     {
         if (_stateOnDevice[i]) return;
@@ -490,8 +613,10 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
         TensorShape flat = new(1, 1, d);
         EnsureStateOnDevice(i);
 
+        // EmitQ8: one Q8_1 sidecar from the norm feeds all four projections' dp4a GEMVs
+        // (self-gated — plain RmsNorm semantics when quantize-at-producer is off).
         Tensor xn = new(flat, DType.F32);
-        backend.RmsNorm(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
+        backend.RmsNormEmitQ8(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
         Tensor qkvMixed = new(new TensorShape(1, 1, ConvDim), DType.F32);
         backend.Linear(qkvMixed, xn, W($"{p}.attn_qkv.weight"), null);
         Tensor z = new(new TensorShape(1, 1, ValueDim), DType.F32);
@@ -518,12 +643,11 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel
         Tensor attnOut = new(flat, DType.F32);
         backend.Linear(attnOut, oT, W($"{p}.ssm_out.weight"), null);
         oT.Dispose();
+        // Fused residual add + pre-FFN norm, sidecar shared by the gate/up projections.
         Tensor afterAttn = new(flat, DType.F32);
-        backend.Add(afterAttn, hIn, attnOut);
-        attnOut.Dispose();
-
         Tensor preFfn = new(flat, DType.F32);
-        backend.RmsNorm(preFfn, afterAttn, W($"{p}.post_attention_norm.weight"), Eps);
+        backend.AddRmsNormEmitQ8(afterAttn, preFfn, hIn, attnOut, W($"{p}.post_attention_norm.weight"), Eps);
+        attnOut.Dispose();
         Tensor mlpOut = DenseSwiGlu(backend, preFfn, p, 1);
         preFfn.Dispose();
         Tensor result = new(flat, DType.F32);

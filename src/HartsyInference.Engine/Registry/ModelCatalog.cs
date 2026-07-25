@@ -323,6 +323,22 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                Id = "llava16", Modality = txt, DisplayName = "LLaVA-NeXT (1.6) Vicuna-7B",
+                Architecture = "CLIP ViT (same tower as LLaVA-1.5) + MLP projector, anyres dynamic tiling " +
+                    "(select_best_resolution -> resize+pad -> tile) with pack_image_features merge " +
+                    "(reshape/unpad/image_newline, base tile first)", Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "cjpais/llava-v1.6-vicuna-7b-gguf", RepoPath = "llava-v1.6-vicuna-7b.Q4_K_M.gguf",
+                        TargetSubdir = "LLM/llava16", Role = "transformer",
+                        Sha256 = "bc3360111db647026db732a528aa5c4dbcb1525e12a58f08acf7edbc46cd488c" },
+                    new() { Repo = "cjpais/llava-v1.6-vicuna-7b-gguf", RepoPath = "mmproj-model-f16.gguf",
+                        TargetSubdir = "LLM/llava16", Role = "mmproj",
+                        Sha256 = "d1b9981bda94fb0bdddad5ff60f84bb226ec29ade04a6474e0168185d659357d" },
+                },
+            },
+            new CatalogEntry
+            {
                 // Best VLM result of the pass: correctly read the actual "cero emisiones" text painted on the
                 // bus in the test photo, not just the broad scene.
                 Id = "qwen25-vl", Modality = txt, DisplayName = "Qwen2.5-VL (3B / 7B)",
