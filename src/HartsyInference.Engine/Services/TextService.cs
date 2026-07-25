@@ -434,23 +434,81 @@ public sealed class TextService : ITextService, IDisposable
         return probe.Metadata.GetString("general.architecture") ?? "";
     }
 
-    /// <summary>Finds a sidecar mmproj GGUF next to a text model (any *.gguf whose name contains "mmproj"),
-    /// preferring an f16 projector. Null if none.</summary>
-    private static string? FindMmproj(string textPath)
+    /// <summary>Finds a sidecar mmproj GGUF paired with a text model: prefers a candidate whose real
+    /// (symlink-resolved) source directory matches the text model's own — this is the authoritative signal and
+    /// survives a flat model directory where every file is a symlink back into its own real per-model subfolder.
+    /// Once that check has a real directory to compare against, its answer is final (match or no match) — it is
+    /// never overridden by the flat-folder guess below, because <see cref="ResolveRealDirectory"/> succeeds for
+    /// any existing file (symlink or not), so "no match" here already means "no companion mmproj exists", not
+    /// "inconclusive". Falling through anyway (the pre-2026-07-25-fix-round-two behavior) mislabeled every plain
+    /// text model in a symlinked model layout as vision-capable, since the flat-folder guess matches ANY mmproj
+    /// symlink sharing the directory, regardless of which family it actually belongs to — confirmed live testing
+    /// 2026-07-25 second pass (every model in <c>Models/llm/</c> reported <c>vision: true</c>). The flat-folder
+    /// fallback is now reached only when real-path resolution itself fails outright (I/O error, permission
+    /// denial) — a true "no signal at all" case, unlike a clean negative from the primary check.</summary>
+    public static string? FindMmproj(string textPath)
     {
         string? dir = Path.GetDirectoryName(textPath);
         if (string.IsNullOrEmpty(dir))
             return null;
+        string? realTextDir = ResolveRealDirectory(textPath);
+        if (realTextDir is not null)
+        {
+            foreach (string f in Directory.EnumerateFiles(dir, "*.gguf"))
+            {
+                string name = Path.GetFileName(f);
+                if (!name.Contains("mmproj", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (string.Equals(ResolveRealDirectory(f), realTextDir, StringComparison.Ordinal))
+                    return f;
+            }
+            return null;
+        }
+        // Last resort — resolution itself failed, so there's no directory signal to trust at all. Prefer a
+        // candidate whose filename stem shares a prefix with the text model's own (cheap disambiguation when
+        // several VLM families' mmprojs sit loose in the same folder), falling back to "any f16" only when
+        // nothing shares a name.
+        string stem = Path.GetFileNameWithoutExtension(textPath);
         string? best = null;
+        string? bestNamed = null;
         foreach (string f in Directory.EnumerateFiles(dir, "*.gguf"))
         {
             string name = Path.GetFileName(f);
             if (!name.Contains("mmproj", StringComparison.OrdinalIgnoreCase))
                 continue;
+            if (bestNamed is null && SharesNamePrefix(stem, Path.GetFileNameWithoutExtension(f)))
+                bestNamed = f;
             if (best is null || name.Contains("f16", StringComparison.OrdinalIgnoreCase))
                 best = f;
         }
-        return best;
+        return bestNamed ?? best;
+    }
+
+    /// <summary>True if the shorter of the two stems is a prefix of the longer, case-insensitively, at least 4
+    /// characters — a cheap same-family signal (e.g. "llava-v1.5-7b" / "llava-v1.5-7b-mmproj-model-f16").</summary>
+    private static bool SharesNamePrefix(string a, string b)
+    {
+        string shorter = a.Length <= b.Length ? a : b;
+        string longer = a.Length <= b.Length ? b : a;
+        return shorter.Length >= 4 && longer.StartsWith(shorter, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Resolves <paramref name="path"/> through any symlink chain to its final target's containing
+    /// directory. Null on failure (not a symlink and doesn't exist, permission error, etc) — callers must treat
+    /// null as "no signal", not "no match".</summary>
+    private static string? ResolveRealDirectory(string path)
+    {
+        try
+        {
+            FileSystemInfo? target = File.ResolveLinkTarget(path, returnFinalTarget: true);
+            string real = target?.FullName ?? Path.GetFullPath(path);
+            return Path.GetDirectoryName(real);
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"[TextService] Symlink resolution failed for '{path}': {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>True if the mmproj is a LLaVA-NeXT/1.6 anyres checkpoint — distinguished from plain LLaVA-1.5

@@ -35,23 +35,30 @@ Autoregressive music LM (Sesame-CSM dual-transformer). Metric is **ms/frame** (1
 | bf16 + CUDA-graph decode (default) | ~85–90 | ~11.2–11.7 | ~1.05× (bit-identical) |
 | **Q8_0 disk-quant** (`HARTSY_HEARTMULA_QUANT=q8_0`) | **64.8** | **15.4** | **1.41×** (~1/2 VRAM) |
 
-## Full audio fleet sweep — TTS/STT/Music/VC/Fx vs Swarm, 37 models (2026-07-24)
+## Full audio fleet sweep — TTS/STT/Music/VC/Fx vs Swarm, 37 models (2026-07-25, canonical path)
 
-Every local (non-cloud) AudioLab provider driven fresh through the real Swarm API (`ProcessTTS`/`ProcessSTT`/
-`ProcessAudio`) on the **RTX 4090** — same spirit as the LLM Swarm-path sweep, extended to a fleet with no
-single shared Python reference (each TTS/STT/music architecture is bespoke, unlike LLMs' universal
-llama-cpp-python). Docs: [`AUDIO_THROUGHPUT_BENCHMARK.md`](../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md)
-(full per-model table + methodology). Harness:
-[`swarm_audio_bench/swarm_audio_bench.py`](swarm_audio_bench/swarm_audio_bench.py); raw results:
-[`swarm_audio_bench/swarm_audio_results.json`](swarm_audio_bench/swarm_audio_results.json).
+Every local (non-cloud) AudioLab provider driven through `POST /API/GenerateText2Image` (TTS/Music/VC/Fx —
+the same auto-saving path any image/video gen uses) and `POST /API/ProcessSTT` (STT), on the **RTX 4090**.
+Supersedes the 2026-07-24 pass below, which used the raw `ProcessTTS`/`ProcessAudio` args dict — that path
+was found to **bypass the real per-model param logic** (`BuildEngineArgs` in `DynamicAudioBackend.cs`),
+root-causing ACE-Step's "mostly silence, no vocals" bug: a style description sent as `prompt` landed in the
+engine's *lyrics* slot with `genre` empty. Docs:
+[`AUDIO_THROUGHPUT_BENCHMARK.md`](../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) (full per-model tables +
+methodology + 10 numbered bugs). Harness:
+[`swarm_audio_bench/swarm_audio_bench_v2.py`](swarm_audio_bench/swarm_audio_bench_v2.py); raw results:
+[`swarm_audio_bench/swarm_audio_results_final.json`](swarm_audio_bench/swarm_audio_results_final.json).
 
-**27/37 generated successfully today.** Best RTF: Moonshine-streaming STT at 0.077× (13× faster than
-real-time). 7 real bugs found, ranked by severity in the doc — most notably **HeartMuLa's music generation
-OOM-killed the entire Swarm process** (confirmed via kernel log: 49 GB resident RAM on a 62 GB box), plus
-missing weights (Zonos, YuE), a wiring gap (Chatterbox cloning), and a CPU-backend-forcing gap that the CLI
-has but the Swarm path doesn't (Demucs). Python-vs-engine comparisons are included only where a real timed
-number already exists from a prior session (F5-TTS, Kyutai TTS vs `moshi`) — see the doc for why a uniform
-Python column isn't honest for this fleet the way it was for LLMs.
+**31/37 generated successfully** (up from 27/37 on 07-24 — 6 of that day's bugs are now fixed, confirmed by
+this pass: Chatterbox, Zonos, Distil-Whisper, HeartMuLa, YuE, Demucs). Every output is content-quality-gated,
+not just HTTP-200-gated: RMS/peak checked for near-silence or noise-clipping, and TTS/music outputs are
+round-tripped through `whisper_stt` to confirm real transcribable content, not just non-zero bytes — the
+07-24 pass only checked the latter, which is how the ACE-Step/AudioGen quality bugs shipped unnoticed. Best
+RTF: Moonshine-streaming STT at 0.073× (13.7× faster than real-time). New bugs found this pass: **7 models
+(HeartMuLa, NeuTTS, GPT-SoVITS, OpenVoice, RVC, Demucs, Resemble-Enhance) have real weights and functional
+providers but are unselectable via `GenerateText2Image`** — root-caused to an engine-level vs. model-level
+`installed`-flag mismatch, not yet fixed (needs its own pass); **Dia-1.6B hangs regardless of path** (3
+independent timeouts); **AudioGen hard-hangs the whole Swarm process at 45s duration** (fine at 10s/20s,
+required `SIGKILL` at 45s, reproduced twice). Full write-ups in the doc.
 
 ## Diffusion / video e2e vs ComfyUI (2026-07-03)
 

@@ -103,19 +103,34 @@ same box as the LLM campaign) + RTX 3060 for prior perf-grind sessions (mixed, n
 
 ## Methodology
 
-**Tier 2 (Swarm-path, this pass) — the spine of this document.** A new harness,
-[`benchmarks/swarm_audio_bench/swarm_audio_bench.py`](../../benchmarks/swarm_audio_bench/swarm_audio_bench.py),
-drives every local (non-cloud) AudioLab provider through the real product API:
-- **TTS** (21 models) → `POST /API/ProcessTTS` — `text="Hello, this is a test of the text to speech system."`,
-  plus a reference clip (`reference_audio`/`ref_text`, an 11s JFK excerpt) on every call so clone-capable
-  models exercise their real path; non-clone models ignore the extra fields harmlessly.
-- **STT** (6 models) → `POST /API/ProcessSTT` — same JFK clip, `language=en`.
-- **Music/SFX** (6 models) → `POST /API/ProcessAudio` — `prompt="An upbeat electronic dance track with synths
-  and a steady beat"`, `duration=10`, `task_type=text2music`.
-- **Voice Conversion** (2 models) → `POST /API/ProcessAudio` — JFK clip as both `source_audio` and
-  `target_voice` (identity-ish smoke test; RVC has no bundled trained voice to convert to, expected N/A).
-- **Fx** (2 models) → `POST /API/ProcessAudio` — JFK clip as `audio_data` (functional smoke test, not a
-  quality eval — Demucs/Resemble-Enhance are evaluated for separation/enhancement quality elsewhere, not RTF).
+**Tier 3 (canonical-path, 2026-07-25) — supersedes Tier 2 below.** The 2026-07-24 Tier 2 pass used
+`ProcessTTS`/`ProcessSTT`/`ProcessAudio` with a raw args dict. That path **bypasses `BuildEngineArgs`**
+(`DynamicAudioBackend.cs`) — the layer that maps a model's real params (e.g. ACE-Step/YuE/HeartMuLa's
+`genre` = style vs. a *separate* `lyrics` field) onto engine kwargs. Root-caused this pass: ACE-Step's
+"mostly silence, no vocals" complaint was exactly this — a style sentence sent as `prompt` landed in the
+engine's *lyrics* slot with `genre` empty, defaulting toward an instrumental/near-silent result.
+
+New harness, [`swarm_audio_bench_v2.py`](../../benchmarks/swarm_audio_bench/swarm_audio_bench_v2.py), drives
+every local (non-cloud) provider through the same path a real generation hits — `POST
+/API/GenerateText2Image` with `model="Audio Models/<Engine>/<variant>"` — so Swarm resolves params through
+the real per-model logic and **auto-saves the output to `/Output`** itself (no manual base64-decode-and-write
+on our side, matching the image/video gen convention):
+- **TTS** (21 models) → `GenerateText2Image`, `prompt` = test sentence, `referenceaudio`/`referencetext` (JFK
+  clip) on every call so clone-capable models exercise their real path.
+- **STT** (6 models) → stays on `POST /API/ProcessSTT` (no output *file* to auto-save — text out, not audio).
+- **Music/SFX** (6 models) → `GenerateText2Image`, `textaudioduration=10`. ACE-Step/YuE/HeartMuLa get `prompt`
+  = style/genre tags **and** a separate `lyrics`/`yuelyrics`/`heartliblyrics` field with real lyric text —
+  the fix for the silence/no-vocals bug. AudioGen gets an SFX-appropriate prompt, not a music-style one (an
+  AudioCraft SFX model, not a vocal/music model — an earlier ad-hoc sample-generation pass wrongly reused the
+  same music prompt for it).
+- **Voice Conversion** (2) / **Fx** (2) → `GenerateText2Image` with `sourceaudio`/`targetvoice`/`fxinput` as
+  `data:audio/wav;base64,...` — **found broken for all 4** (see Issue #H); fell back to legacy `ProcessAudio`
+  for these specifically, documented as an exception, not silent.
+
+Every returned WAV is fetched and content-quality-gated, not just HTTP-200-gated: RMS/peak checked for
+near-silence or full-scale noise-clipping, and TTS/music outputs are round-tripped through `whisper_stt` to
+confirm actual transcribable content came out (the 2026-07-24 pass only checked "non-zero bytes," which is
+exactly how the ACE-Step/AudioGen quality bugs shipped unnoticed).
 
 Each model call is independently try/excepted (a crash on one must never abort the rest — the LLM campaign's
 first Tier-1 pass aborted the whole batch on one bad model and had to be re-run four times; this harness
@@ -147,6 +162,18 @@ this is an honest gap, not a claimed win or loss.
   known issue recurring, not a new bug.
 - **Per-model isolation.** Every provider call is wrapped individually (see harness code) — one bad model
   can't take down the batch.
+- **Concurrent dev-mode rebuilds restart the shared Swarm instance out from under a running sweep.** This
+  pass hit two mid-sweep restarts (another agent's `--environment dev` session hot-reloading on file edits)
+  and one accidental **second SwarmUI process** from a naive restart attempt (`launch-linux.sh` binds the
+  next free port instead of replacing an existing instance — it does **not** kill-then-relaunch). A second
+  process against the same `Data/` LiteDB is a real corruption risk (`dual-swarm-litedb-corruption` in prior
+  memory); the duplicate was killed within seconds with no observed corruption, but the correct restart
+  procedure is: explicitly `kill <pid>` the existing process **first**, confirm it's gone, *then* relaunch.
+- **AudioGen hangs, not just slows, well before its full generation range.** 10s generates fine (37.6s wall);
+  20s generates but scales worse than linearly (51.8s wall, vs. a ~75s linear extrapolation from 10s — so
+  still within range, if degrading); **45s hard-hung the entire Swarm process** (pegged at 100% CPU / ~5%
+  GPU util indefinitely, unresponsive to `SIGTERM`, required `SIGKILL` — twice, across two separate attempts).
+  This is a genuine, reproducible defect, independent of the params fix below — flagged as **Issue #J**.
 - **"Installed" ≠ "unusable."** `AudioLabListEngines` reports several providers as `installed: false` despite
   their weights already being present in `~/.cache/hartsyinference/` (e.g. `csm_tts`, `neutts_tts`, several
   STT ids) — this flag tracks the extension's own registry step, not weight presence; generation was
@@ -154,7 +181,105 @@ this is an honest gap, not a claimed win or loss.
 
 ---
 
-## Results — Tier 2 Swarm-path sweep (2026-07-24)
+## Results — Tier 3 canonical-path sweep (2026-07-25)
+
+**31/37 generated successfully today**, up from 27/37 on 2026-07-24 (several 07-24 failures were the user's
+own perf-pass fixes landing: Chatterbox, Zonos, YuE, Distil-Whisper, and HeartMuLa/Demucs — see below — all
+now generate real audio). Raw data: `benchmarks/swarm_audio_bench/swarm_audio_results_final.json`. Ran on the
+RTX 4090 (confirmed via `nvidia-smi -i 1 --query-compute-apps`), on a SwarmUI dev instance shared with another
+agent's concurrent work (their CSS hot-reloads triggered two mid-sweep restarts — see hazards above).
+
+TTS transcripts below are near word-perfect via the `whisper_stt` round-trip built into the new harness (not
+a separate manual check) — a real, automated confirmation each model said the right words, not just that it
+returned bytes.
+
+### Text-to-Speech (21 models) — `POST /API/GenerateText2Image`
+
+`prompt="Hello, this is a test of the text to speech system."`, `referenceaudio`/`referencetext` = an 11s
+JFK clip on every call.
+
+| Model | Wall time | RTF | STT round-trip | Result |
+|---|---:|---:|---|---|
+| Piper | 1.44s | **0.5×** | "Hello this is a Test of the Text to Speech System." | ✅ |
+| Qwen3-TTS (1.7B-Base) | 1.44s | **0.367×** | — | ✅ |
+| Kokoro-82M | 3.07s | **0.83×** | "Hello, this is a test of the Text2 Speech System." | ✅ |
+| PocketTTS | 3.51s | **1.22×** | "Hello, this is a test of the text to speech system." | ✅ |
+| StyleTTS2 | 4.34s | **0.808×** | "Hello, this is a test of the Tag Hut and Speech system." | ✅ |
+| MeloTTS | 5.34s | **1.784×** | "Hello, this is a test of the text to speech system." | ✅ |
+| Chatterbox | 16.22s | 2.55× | "Hello, this is a test of the text to speech system." | ✅ — **Issue #A fixed** |
+| Kyutai TTS 1.6B | 15.42s | 4.943× | "Hello, this is a test of the text to speech system." | ✅ |
+| VibeVoice-1.5B | 18.71s | 0.872× | — | ✅ |
+| CosyVoice 2 | 19.1s | 3.161× | "Hello! This is a test of the text to speech system." | ✅ |
+| Spark-TTS-0.5B | 22.3s | 5.994× | "Hello, this is a test of the text to speech system." | ✅ |
+| Fish-Speech 1.5 | 22.87s | 3.468× | "Hello! This is a test of the text to speech system." | ✅ |
+| Zonos-v0.1 (transformer) | 24.29s | 7.314× | "Hello, this is a test of the text to speech system." | ✅ — **Issue #B fixed** |
+| F5-TTS | 16.42s | 3.275× | "Hello, this is a test of the text to speech system." | ✅ |
+| Orpheus | 11.4s | 3.18× | — | ✅ |
+| Bark | 21.01s | 1.693× | "Hello, this is a test of the text-to-speech system." | ✅ |
+| ZipVoice | 99.1s | 18.324× | "Hello, this is a test of the text to speech system." | ✅ |
+| Dia-1.6B | — | n/a | — | ❌ **Issue #I** — hangs regardless of path |
+| CSM-1B (Sesame) | — | n/a | — | ⬜ weights not installed, expected |
+| NeuTTS Air | 0.03s | n/a | — | ❌ **Issue #H** — installed but unregistered |
+| GPT-SoVITS v2 | 0.01s | n/a | — | ❌ **Issue #H** — installed but unregistered |
+
+### Speech-to-Text (6 models) — `POST /API/ProcessSTT`
+
+11s JFK clip, `language=en`. No change of path from Tier 2 (no output *file* to auto-save). All 6 now work —
+Distil-Whisper's Issue #C is fixed.
+
+| Model | Wall time | RTF | Result |
+|---|---:|---:|---|
+| Moonshine-streaming | 0.81s | **0.073×** | ✅ |
+| Whisper | 1.07s | **0.097×** | ✅ |
+| Whisper Streaming | 1.08s | **0.098×** | ✅ |
+| Moonshine | 1.23s | **0.112×** | ✅ |
+| Distil-Whisper | 6.21s | 0.564× | ✅ — **Issue #C fixed** |
+| Kyutai STT | 13.35s | 1.213× | ✅ |
+
+### Music & SFX (6 models) — `POST /API/GenerateText2Image`
+
+`textaudioduration=10`. ACE-Step/YuE/HeartMuLa: `prompt` = genre/style tags, separate lyrics field = real
+lyric text (the actual fix for "mostly silence, no vocals"). AudioGen: SFX-appropriate prompt, not a music
+style. STT round-trip is the closest automatable check for "has real vocals," not a certainty — see notes.
+
+| Model | Wall time | RTF | STT round-trip | Result |
+|---|---:|---:|---|---|
+| Stable Audio Open Small | 4.58s | **0.458×** | "(dramatic music)" — instrumental, expected | ✅ |
+| MusicGen | 8.62s | **0.862×** | "(upbeat music)" — instrumental, expected | ✅ |
+| ACE-Step (turbo) | 10.48s | 1.048× | "(upbeat music)" | ✅ silence FIXED; vocal intelligibility unconfirmed (see below) |
+| AudioGen | 37.56s | 3.756× | "(upbeat music)" | ✅ static FIXED with correct SFX prompt; **Issue #J** duration scaling |
+| YuE | 92.38s | 9.238× | "Hello, this is the test of the haze of hula kula..." | ✅ **Issue #E fixed** — real words transcribed, confirms actual sung vocals |
+| HeartMuLa (3b-base) | 169.98s | 16.998× | "♪ ♪ ♪ ♪ ♪ ..." (legacy path) | ✅ **Issue #D fixed**; ❌ **Issue #H** — installed but unregistered |
+
+**ACE-Step/HeartMuLa vocal honesty note:** the silence bug (empty `genre`, style text misrouted into the
+lyrics slot) is conclusively fixed — peak amplitude went from near-zero to full-scale (29204/32767) once
+`genre`/`lyrics` were split correctly. Whether the *singing itself* is intelligible is a separate, harder
+question this pass can only partially answer: ACE-Step-turbo's STT round-trip returns a generic non-verbal
+tag both before and after the fix (Whisper's usual response to buried/unclear vocals in a fast mix), while
+YuE and HeartMuLa's round-trips returned actual attempted transcriptions (YuE: real, if garbled, words; 
+HeartMuLa: Whisper's "♪" pattern, its typical response to sung-but-untranscribable melodic content) — both
+positive signals of real vocal content that ACE-Step-turbo didn't produce. **Also tested `Audio
+Models/AceStep/xl-sft`** (the "ACE-Step large" the user asked about — 9 variants total: turbo/turbo-shift1/
+turbo-shift3/turbo-continuous/sft/base/xl-turbo/xl-sft/xl-base, all shown installed via `AudioLabListEngines`)
+— generated successfully (20.4s wall for 10s audio); `xl-turbo` failed and `xl-base` timed out at 200s in a
+single quick check, not yet root-caused. If un-tagged vocal clarity matters, the non-turbo/`sft`/`base`/`xl-*`
+variants (more inference steps, presumably less distilled) are the next thing to try, not a params change.
+
+### Voice Conversion & Fx (4 models)
+
+All 4 were found **not registered as a selectable `Model` for `GenerateText2Image`** this pass (Issue #H) —
+routed through the legacy `ProcessAudio` dispatch instead, documented as an exception, not a silent fallback.
+
+| Model | Wall time | RTF | Result |
+|---|---:|---:|---|
+| OpenVoice V2 | 3.99s (legacy) | 0.363× | ✅ **Issue #H** — installed but unregistered |
+| Demucs | 225.3s (legacy) | n/a | ✅ **Issue #F fixed** — real distinct stems returned; **Issue #H** |
+| RVC v2 | 0.01s | n/a | ❌ weights genuinely missing (confirmed via legacy path too) — not Issue #H |
+| Resemble-Enhance | timeout (legacy, 280s) | n/a | ❌ **Issue #G** persists, unconfirmed either way this pass |
+
+---
+
+## Results — Tier 2 Swarm-path sweep (2026-07-24) — superseded, kept for history
 
 **27/37 generated successfully today.** Raw data: `benchmarks/swarm_audio_bench/swarm_audio_results.json`.
 Ran on the RTX 4090 (Swarm's AudioLab backend, confirmed via `nvidia-smi -i 1 --query-compute-apps`) — this
@@ -228,27 +353,31 @@ JFK clip as source/target — functional smoke test only, not a separation/enhan
 
 ## Bugs found this session (numbered for cross-reference)
 
-### Issue #A — Chatterbox's reference-voice cloning isn't wired
+**Status update (2026-07-25): Issues #A, #B, #C, #D, #E, #F are FIXED** (confirmed generating real audio via
+this pass's canonical-path sweep — see the Tier 3 tables above), consistent with the user's own 2026-07-25
+perf-pass work. Left in place below for history/context. **New issues this pass: #H, #I, #J.**
+
+### Issue #A — Chatterbox's reference-voice cloning isn't wired [FIXED 2026-07-25]
 Clean, well-worded error (not a crash): "Chatterbox reference-voice cloning is not wired yet — it needs a
 PCM→40-bin-mel front-end for the voice encoder." Falls back cleanly when no reference is supplied. A real
 feature gap, not a defect — every other clone-capable TTS model in this sweep accepted the same reference
 args without complaint.
 
-### Issue #B — Zonos-v0.1's actual weights file is missing
+### Issue #B — Zonos-v0.1's actual weights file is missing [FIXED 2026-07-25]
 `Could not find file '.../Zyphra--Zonos-v0.1-transformer/model.safetensors'`. The cache directory exists (from
 the 2026-07-17 verification session) but the real weights file inside it doesn't — `MODEL_STATUS_AUDIO.md`
 documents Zonos as fully verified with real perf numbers from that date, so the file has since been deleted
 or the download never fully completed. **Fix: re-download** (`AudioLabInstallEngine` for `zonos_tts`, or
 delete the stale directory and let it re-fetch).
 
-### Issue #C — Distil-Whisper's bare provider id resolves to an unsupported repo
+### Issue #C — Distil-Whisper's bare provider id resolves to an unsupported repo [FIXED 2026-07-25]
 Matches a pre-existing, already-documented gap (`MODEL_STATUS_AUDIO.md`): the bare id defaults to
 `distil-whisper/distil-large-v3.5`, which `WhisperPipeline.InferConfig`'s repo switch doesn't recognize (only
 v2/v3/medium.en/small.en). A variant suffix (`distilwhisper:v3`) works around it. **Fix direction:**
 `SttCatalog.ResolveDistilWhisperRepo`'s no-match default should point at a repo `WhisperPipeline.InferConfig`
 actually supports.
 
-### Issue #D — HeartMuLa generation OOM-killed the entire Swarm process [CRITICAL]
+### Issue #D — HeartMuLa generation OOM-killed the entire Swarm process [CRITICAL, FIXED 2026-07-25]
 Confirmed via kernel log (`journalctl -k`):
 ```
 .NET Tiered Com invoked oom-killer: ... oom_score_adj=200
@@ -265,12 +394,12 @@ free RAM is confirmed >55 GB immediately beforehand, or test it in isolation (no
 RAM-watchdog script (the same pattern already used for Dia per `MODEL_STATUS_AUDIO.md`'s STT reality-check
 section: "Heavy runs go through a RAM-watchdog script that hard-kills below 1.5 GB free").
 
-### Issue #E — YuE's real checkpoint was never actually downloaded
+### Issue #E — YuE's real checkpoint was never actually downloaded [FIXED 2026-07-25]
 `YuE checkpoint folder not found: '.../Models/audio/music/yue/yue'`. Only an empty stub directory exists
 despite a catalog `Assets` entry declaring the ~12.5 GB checkpoint. Low-risk fix: just run the download
 (`hartsy music -m yue` with confirm, or `AudioLabInstallEngine` for `yue_music`).
 
-### Issue #F — Demucs fails through Swarm's generic audio path
+### Issue #F — Demucs fails through Swarm's generic audio path [FIXED 2026-07-25]
 `CUDA STFT not supported - use CPU backend for audio`. The CLI (`hartsy fx separate`) already knows to force
 the CPU backend for Demucs — documented in `MODEL_STATUS_AUDIO.md`: "`FxSeparateCommand` now always forces
 the CPU backend itself so the default invocation just works." The Swarm/AudioLab `ProcessAudio` path doesn't
@@ -283,6 +412,53 @@ failure than the previously-documented one — `MODEL_STATUS_AUDIO.md` describes
 module-composition architecture mismatch once weights load; this run couldn't even fetch the file. Doesn't
 change the model's `ValidationPending` status (it was never going to work end-to-end regardless), but is
 worth noting as a second, independent blocker — the exact repo/filename may have moved upstream.
+
+### Issue #H — 7 models with weights on disk and functional providers are unselectable via `GenerateText2Image` [NEW, 2026-07-25]
+`neutts_tts`, `gptsovits_clone`, `heartlib_music` (`3b-base`), `openvoice_clone`, `rvc_clone`, `demucs_fx`,
+`resemble_enhance_fx` all return `Invalid value for parameter Model: ... are you sure that model name is
+correct?` from `/API/GenerateText2Image`, even though `AudioLabListEngines` reports their specific model
+variant as `installed: true`, and — for at least `heartlib_music`, `openvoice_clone`, `demucs_fx` — the
+provider is confirmed genuinely functional (produced real, correct audio) via the legacy `ProcessTTS`/
+`ProcessAudio` dispatch. **Root cause, isolated this pass:** `DynamicAudioBackend.Init` only calls
+`RegisterModelsForProvider` (which populates `Program.MainSDModels`, the list `GenerateText2Image`'s `Model`
+param validates against) for provider IDs in the **engine-level** `InstalledEngines` list. Re-querying
+`AudioLabListEngines` live confirmed all 7 of these providers report **`installed: false` at the engine
+level**, while their individual `models[].installed` field says `true` — the two flags are computed/tracked
+independently and can disagree. So the model's weights and provider logic are real and working, but the
+provider is never registered at startup, and `GenerateText2Image` can't select it.
+Three of the seven (`rvc_clone`, `gptsovits_clone`, `resemble_enhance_fx`) are additionally flagged
+`requires_docker: true` in the catalog — `DynamicAudioBackend.Init` explicitly skips docker-flagged providers
+("Legacy Docker/Python engines aren't ported to the in-process C# engine ... skipping"). This may be correct
+for `rvc_clone` (its weights are genuinely missing — `RVC voice model not found` — even via the legacy path),
+but is suspect for `gptsovits_clone`, which responded to the legacy path with a real param-validation error
+("Invalid TTS request parameters"), not an "unsupported" error, suggesting it may already run in-process
+despite the stale-looking flag.
+**Not yet found:** the actual *producer* of the engine-level `installed` boolean (i.e. what sets
+`InstalledEngines`, and whether/how it checks on-disk weight presence vs. just recording "install flow
+completed"). This is the next thing to locate before planning a fix — needed to tell apart "a state-tracking
+bug to reconcile against on-disk reality" from "the install/download flow itself never records completion for
+these 7." **User-confirmed real-world context:** the user has generated real HeartMuLa songs through Swarm
+before, so the engine/weights are known-good — this is specifically about the `Model`-dropdown/
+`GenerateText2Image` selection path, not the model's functionality. **Not fixed this pass** — flagged for a
+dedicated, separately-planned pass per explicit user instruction (extension source, shared dev tree, hot-reload
+risk to a concurrently-running second agent's session — plan the edit/verify loop deliberately).
+
+### Issue #I — Dia-1.6B hangs regardless of path [confirmed pre-existing, not a regression]
+Timed out at 180s via the 2026-07-24 legacy path, then again at 90s and 240s via this pass's canonical path —
+three independent hangs across two different code paths and three different timeout ceilings. Not a
+params/path issue; a genuine model-level hang or pathological slowness. Not root-caused this pass.
+
+### Issue #J — AudioGen hard-hangs the entire Swarm process at 45s duration [NEW, 2026-07-25]
+10s generates in 37.6s (RTF 3.76×); 20s generates in 51.8s (RTF 2.59× — worse than linear, but completes);
+45s pegs the whole SwarmUI process at 100% CPU / ~5% GPU utilization **indefinitely** — unresponsive to
+`SIGTERM`, required `SIGKILL`. Reproduced twice, independently, both times only at 45s (not at 20s). Given
+AudioGen is an autoregressive transformer over audio-codec tokens (MusicGen-arch + T5-large text encoder),
+this shape — fine at short durations, disproportionately slow as duration grows, then a hard wall — is
+consistent with a host-side loop or an attention/KV-cache path that scales worse than the codec's own
+frame count would predict (same class of issue as several other host-glue-bound audio models — see
+`cpu-rope-bottleneck`/`dit-blocks-must-be-gpu-resident`-type findings elsewhere in this codebase). Not
+root-caused this pass; profile with `HARTSY_PROFILE=1` at a duration between 20s and 45s to find the actual
+cliff, same method as the DiT host-overhead investigations.
 
 ---
 
@@ -297,3 +473,14 @@ worth noting as a second, independent blocker — the exact repo/filename may ha
   optimization target, same class of host-glue issue already fixed for VibeVoice/Bark/F5/Kyutai.
 - [ ] `resemble_enhance_fx` remains a genuine forward-pass architecture mismatch (not a quick fix, see
   `MODEL_STATUS_AUDIO.md`) — expect it to fail in this sweep; that's the known, tracked state, not new.
+- [ ] **Issue #H (planned as its own pass, not started):** find where `InstalledEngines`' engine-level
+  `installed` flag is actually set/persisted (not yet located — this is the blocking unknown), confirm
+  whether it checks on-disk weight presence, then reconcile it against the per-model `installed` truth so
+  `neutts_tts`/`gptsovits_clone`/`heartlib_music`/`openvoice_clone`/`demucs_fx` register into `MainSDModels`
+  and become downloadable/selectable in the backend UI. Triage `rvc_clone` (weights genuinely missing — the
+  docker-skip is doing its job, don't force-register) and `resemble_enhance_fx` (docker flag unconfirmed
+  either way) separately — don't fix all 7 as one uniform change.
+- [ ] Issue #I (`dia_tts` hang) and Issue #J (AudioGen 45s hard-hang) both need `HARTSY_PROFILE=1` /
+  `CUDA_LAUNCH_BLOCKING=1` profiling sessions to find the actual stuck point — neither is root-caused yet.
+- [ ] ACE-Step-turbo's sung-vocal intelligibility is unconfirmed (silence bug fixed, clarity unknown) — try
+  the non-turbo `sft`/`base` or `xl-*` variants and a real human listen, not just the STT-roundtrip proxy.

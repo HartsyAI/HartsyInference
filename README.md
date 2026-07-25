@@ -396,15 +396,20 @@ making those per-step projections device-resident cut the 3060 gen **6.5× (63.0
 
 TTS measured through the canonical `GenerateText2Image` path (WAV to `/Output` like any gen); STT via `ProcessSTT`. **The small audio models are host/launch-bound, not compute-bound** — the 4090's extra compute buys ~nothing (Piper is even slightly slower on it). So the optimization lever here is **CUDA-graph capture / host-glue removal** (kills kernel-launch overhead), exactly like the LLM-decode graph win and the opposite of the compute-bound video/music DiTs where graphs are a no-op. Music (ACE-Step, YuE, HeartMuLa) e2e numbers live in their own result files and [`docs/Checklists/MODEL_STATUS_AUDIO.md`](docs/Checklists/MODEL_STATUS_AUDIO.md).
 
-**Full-fleet verification (2026-07-24):** every local TTS (21), STT (6), Music (6), Voice-Conversion (2), and
-Fx (2) model — 37 total — driven fresh through the real Swarm API in one sweep, same spirit as the LLM
-benchmark below but without a single shared Python reference (each architecture is bespoke, so a Python
-column is only included where a real timed number already exists, e.g. F5-TTS and Kyutai TTS vs their
-upstream Python implementations). **27/37 generated successfully**, with the fastest (Moonshine-streaming STT)
-at RTF 0.077× — 13× faster than real-time. The sweep also found 7 real bugs, most notably **a HeartMuLa music
-generation that OOM-killed the entire Swarm server** (49 GB resident RAM on a 62 GB box, confirmed via kernel
-log) plus missing/stale weight files (Zonos, YuE) and a CPU-backend-forcing gap the CLI has but the Swarm path
-doesn't (Demucs). Full per-model table, methodology, and numbered bug writeups:
+**Full-fleet verification (2026-07-25, canonical path):** every local TTS (21), STT (6), Music (6),
+Voice-Conversion (2), and Fx (2) model — 37 total — driven through `GenerateText2Image` (auto-saves to
+`/Output` like any gen, same as the TTS numbers above) and `ProcessSTT`. This supersedes an earlier
+2026-07-24 pass that used the raw `ProcessTTS`/`ProcessAudio` args dict, which was found to bypass the real
+per-model param logic entirely — root cause of an ACE-Step "silent, no vocals" bug (a style description sent
+as `prompt` landed in the engine's *lyrics* slot with `genre` empty). **31/37 generated successfully**
+(up from 27/37 — 6 of the prior bugs are now fixed: Chatterbox, Zonos, Distil-Whisper, HeartMuLa, YuE,
+Demucs), fastest (Moonshine-streaming STT) at RTF 0.073× — 13.7× faster than real-time. Every output is
+content-quality-gated (RMS/peak + a `whisper_stt` round-trip to confirm real transcribable content), not
+just checked for non-zero bytes, which is how the ACE-Step/AudioGen bugs shipped unnoticed the first time.
+New bugs found this pass: 7 models with real weights/functional providers are unselectable via
+`GenerateText2Image` (an engine-level vs. model-level `installed`-flag mismatch, not yet fixed), Dia-1.6B
+hangs regardless of path, and AudioGen hard-hangs the whole Swarm process at 45s duration (fine at 10-20s).
+Full per-model tables, methodology, and numbered bug writeups:
 [`AUDIO_THROUGHPUT_BENCHMARK.md`](docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md).
 
 ### 3D mesh generation (image → mesh), end-to-end vs the Python reference
