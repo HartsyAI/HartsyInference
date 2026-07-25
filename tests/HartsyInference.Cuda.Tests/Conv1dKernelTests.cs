@@ -37,11 +37,24 @@ public sealed unsafe class Conv1dKernelTests
 
     private static void RunCuda(Action<CudaBackend> op, params Tensor[] outputs)
     {
-        using CudaBackend cuda = new CudaBackend(0, PtxDir());
-        op(cuda);
-        cuda.Sync();
-        foreach (Tensor t in outputs)
-            _ = *(float*)t.DataPointer;
+        // These tests validate the direct PTX conv kernels bit-tight against the CPU reference. The cuDNN
+        // route (default ON) now serves these shapes too — including causal pads and transposed convs — but
+        // it runs TF32 tensor cores (tolerance-class, ~1e-3), so pin the backend to the PTX kernels here.
+        // The cuDNN route's numerics are covered by the codec end-to-end A/B instead.
+        string? prev = Environment.GetEnvironmentVariable("HARTSY_AUDIO_CONV_CUDNN");
+        Environment.SetEnvironmentVariable("HARTSY_AUDIO_CONV_CUDNN", "0");
+        try
+        {
+            using CudaBackend cuda = new CudaBackend(0, PtxDir());
+            op(cuda);
+            cuda.Sync();
+            foreach (Tensor t in outputs)
+                _ = *(float*)t.DataPointer;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HARTSY_AUDIO_CONV_CUDNN", prev);
+        }
     }
 
     private void AssertClose(Tensor cpu, Tensor cuda, float tol, string name)

@@ -3362,11 +3362,11 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>Dense BF16-weight × F32-activation GEMV (F32 accumulate) for small-M decode.</summary>
     public void LaunchMulMatVecBf16F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
-        => LaunchMulMatVecImpl(_mulMatVecBf16F32, output, input, weight, bias, N, K, M, stream);
+        => LaunchMulMatVecFloatImpl(_mulMatVecBf16F32, output, input, weight, bias, N, K, M, stream);
 
     /// <summary>Dense F16-weight × F32-activation GEMV (F32 accumulate) for small-M decode.</summary>
     public void LaunchMulMatVecF16F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
-        => LaunchMulMatVecImpl(_mulMatVecF16F32, output, input, weight, bias, N, K, M, stream);
+        => LaunchMulMatVecFloatImpl(_mulMatVecF16F32, output, input, weight, bias, N, K, M, stream);
 
     /// <summary>Fused Q5_0 × F32 matrix-vector product for decode (M small). Same geometry as the Q4_K GEMV.
     /// Q5_0 is llama.cpp's fallback quant (in Q4_K_M-style mixed schemes) for any tensor whose K isn't a
@@ -3503,12 +3503,35 @@ public sealed class CudaKernels : IDisposable
         void** args = stackalloc void*[7];
         args[0] = &outA; args[1] = &inA; args[2] = &wA; args[3] = &bA;
         args[4] = &nA; args[5] = &kA; args[6] = &mA;
-        // One warp per output row, WARPS_PER_BLOCK rows per block.
+        // One warp per output row, WARPS_PER_BLOCK rows per block, one grid.y slice per batch row.
+        // NOTE: this impl is shared by ALL the dequant/float GEMV kernels — only the bf16/f16 kernels
+        // have the in-block multi-M path, so the small-M gridY collapse lives in
+        // LaunchMulMatVecFloatImpl, NOT here (an earlier version collapsed gridY for every caller and
+        // silently dropped batch rows 1..M-1 from the quant kernels — caught by FusedGemvGroundTruthTests).
         uint WARPS_PER_BLOCK = (uint)_wpbOverride;
         uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
         CudaDriverApi.cuLaunchKernel(
             func,
             gridX, (uint)M, 1,
+            32, WARPS_PER_BLOCK, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launch impl for the bf16/f16 float GEMV kernels only: for M ≤ 4 they run their in-block
+    /// multi-M row-reuse path under a single grid.y slice (each weight element read once for all M rows).</summary>
+    private unsafe void LaunchMulMatVecFloatImpl(nint func, ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+    {
+        ulong outA = output, inA = input, wA = weight, bA = bias;
+        int nA = N, kA = K, mA = M;
+        void** args = stackalloc void*[7];
+        args[0] = &outA; args[1] = &inA; args[2] = &wA; args[3] = &bA;
+        args[4] = &nA; args[5] = &kA; args[6] = &mA;
+        uint WARPS_PER_BLOCK = (uint)_wpbOverride;
+        uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+        uint gridY = M >= 2 && M <= 4 ? 1u : (uint)M;
+        CudaDriverApi.cuLaunchKernel(
+            func,
+            gridX, gridY, 1,
             32, WARPS_PER_BLOCK, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }

@@ -25,6 +25,20 @@ public sealed unsafe class HeartCodecScalarModel
     private const int NumSamples = 2;       // PostProcessor repeat factor
     private const int LatentDim = 128;      // out_channels / 2
 
+    // Chunked decode: the conv stack is causal except decoder[0] (k5, symmetric pad 2), so a waveform sample
+    // depends on at most ~44 latent frames of left context (per block the 5 dilated k7 ResidualUnits reach back
+    // 6·(1+3+5+7+9)=150 samples at that block's rate — 150/5=30 latent frames at block 1, 150/20=7.5 at block 2,
+    // … — plus ≤2 frames per ConvTranspose and 2 for decoder[0]) and exactly 2 frames of right context
+    // (decoder[0]'s look-ahead). Decoding in ChunkFrames-sized chunks re-fed with ChunkCtxLeft/Right frames of
+    // real context and keeping only the interior therefore reproduces the monolithic decode exactly while
+    // bounding peak activation memory to O(chunk) instead of O(L) — the old whole-window decode peaked at
+    // ~1.9 GB of host+device activations per 29.76 s window (the Swarm OOM driver).
+    private const int ChunkFrames = 256;
+    private const int ChunkCtxLeft = 64;
+    private const int ChunkCtxRight = 2;
+    private static readonly int SamplesPerFrame = ComputeSamplesPerFrame();
+    private static readonly int ChunkOverride = ReadChunkOverride();
+
     // decoder[0] look-ahead conv.
     private Tensor? _d0W, _d0B;
     // 5 ResDecoderBlocks.
@@ -51,8 +65,44 @@ public sealed unsafe class HeartCodecScalarModel
         _outB = WhisperOps.EnsureF32(w[$"{prefix}.decoder.7.bias"]);
     }
 
-    /// <summary>Decodes a latent <c>[B, 128, L]</c> into a waveform <c>[B, L·1920]</c>.</summary>
+    /// <summary>Decodes a latent <c>[B, 128, L]</c> into a waveform <c>[B, 1, L·1920]</c>. Long latents decode
+    /// in bounded overlapping chunks (see the chunk constants above); the kept interior samples are outside the
+    /// zero-pad's receptive field, so the result matches the monolithic decode.</summary>
     public Tensor Decode(IBackend backend, Tensor latent)
+    {
+        int b = (int)latent.Shape[0];
+        int t = (int)latent.Shape[2];
+        int chunk = ChunkOverride;
+        if (chunk <= 0 || t <= chunk + ChunkCtxLeft + ChunkCtxRight) return DecodeCore(backend, latent);
+
+        Tensor wav = new(new TensorShape(b, 1, t * SamplesPerFrame), DType.F32);
+        float* wp = (float*)wav.DataPointer;
+        // Every chunk feeds the same fixed-length window (edge chunks just carry extra context), so all chunks
+        // share one set of conv shapes — one cuDNN plan build instead of one per distinct edge length.
+        int fedLen = chunk + ChunkCtxLeft + ChunkCtxRight;
+        for (int start = 0; start < t; start += chunk)
+        {
+            int end = Math.Min(start + chunk, t);
+            int ctxStart = Math.Clamp(start - ChunkCtxLeft, 0, t - fedLen);
+            int ctxEnd = ctxStart + fedLen;
+            Tensor part = SliceTime(latent, b, t, ctxStart, ctxEnd - ctxStart);
+            Tensor partWav = DecodeCore(backend, part);
+            part.Dispose();
+            float* pp = (float*)partWav.DataPointer;   // syncs only this chunk's waveform to host
+            long chunkLen = partWav.Shape[2];
+            long keepOff = (long)(start - ctxStart) * SamplesPerFrame;
+            long keepLen = (long)(end - start) * SamplesPerFrame;
+            for (int bi = 0; bi < b; bi++)
+            {
+                Buffer.MemoryCopy(pp + bi * chunkLen + keepOff,
+                    wp + ((long)bi * t + start) * SamplesPerFrame, keepLen * 4, keepLen * 4);
+            }
+            partWav.Dispose();
+        }
+        return wav;   // [B, 1, L·1920]
+    }
+
+    private Tensor DecodeCore(IBackend backend, Tensor latent)
     {
         int b = (int)latent.Shape[0];
         int t = (int)latent.Shape[2];
@@ -100,6 +150,35 @@ public sealed unsafe class HeartCodecScalarModel
         backend.Conv1d(wav, pp, _outW!, _outB, 1, outK - 1, 0, 1, 1);
         pp.Dispose();
         return wav;   // [B, 1, curLen]
+    }
+
+    // Host copy of latent[:, :, t0 .. t0+len) → [B, C, len]; source rows are B·C with row stride t.
+    private static Tensor SliceTime(Tensor latent, int b, int t, int t0, int len)
+    {
+        int c = (int)latent.Shape[1];
+        Tensor outp = new(new TensorShape(b, c, len), DType.F32);
+        float* src = (float*)latent.DataPointer;
+        float* dst = (float*)outp.DataPointer;
+        long rows = (long)b * c;
+        for (long r = 0; r < rows; r++)
+            Buffer.MemoryCopy(src + r * t + t0, dst + r * len, (long)len * 4, (long)len * 4);
+        return outp;
+    }
+
+    private static int ComputeSamplesPerFrame()
+    {
+        int perFrame = NumSamples;
+        foreach (int factor in UpFactors) perFrame *= factor;
+        return perFrame;
+    }
+
+    // HARTSY_HEARTCODEC_SCALAR_CHUNK overrides the decode chunk length in latent frames; 0 (or negative)
+    // restores the monolithic whole-latent decode.
+    private static int ReadChunkOverride()
+    {
+        string? env = Environment.GetEnvironmentVariable("HARTSY_HEARTCODEC_SCALAR_CHUNK");
+        if (env is not null && int.TryParse(env, out int value)) return value;
+        return ChunkFrames;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

@@ -147,6 +147,17 @@ public sealed class Qwen2Model : IDisposable
         Tensor cosTable, Tensor sinTable, ulong devicePos, Tensor outHidden)
         => _transformer.ForwardGraphDecodeStepEmbeds(backend, inEmbed, cache, cosTable, sinTable, devicePos, outHidden);
 
+    /// <summary>True when the body can run the two-stream (B=2, shared-position) CFG graph decode step.
+    /// See <see cref="GenericTransformer.SupportsDualGraphDecode"/>.</summary>
+    public bool SupportsDualGraphDecode(IBackend backend) => _transformer.SupportsDualGraphDecode(backend);
+
+    /// <summary>Graph-capturable two-stream (cond+uncond, position-aligned) body step from a fixed <c>[1,2,H]</c>
+    /// input buffer to a fixed <c>[1,2,H]</c> output buffer, one KV cache per stream.
+    /// See <see cref="GenericTransformer.ForwardGraphDecodeStepDualEmbeds"/>.</summary>
+    public void ForwardGraphDecodeStepDualEmbeds(IBackend backend, Tensor inEmbed, IKvCache cacheA, IKvCache cacheB,
+        Tensor cosTable, Tensor sinTable, ulong devicePos, Tensor outHidden)
+        => _transformer.ForwardGraphDecodeStepDualEmbeds(backend, inEmbed, cacheA, cacheB, cosTable, sinTable, devicePos, outHidden);
+
     private static void RequireBatchOne(int batch)
     {
         if (batch != 1) throw new NotSupportedException($"Qwen2Model supports batch=1, got {batch}.");

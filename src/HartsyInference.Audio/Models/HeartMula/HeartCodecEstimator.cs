@@ -386,9 +386,13 @@ public sealed unsafe class HeartCodecEstimator
             backend.Permute0213(kMh, k, t, h, hd);
             backend.Permute0213(vMh, v, t, h, hd);
             q.Dispose(); k.Dispose(); v.Dispose();
-            // Bidirectional (no mask), scale 1/sqrt(head_dim).
+            // Bidirectional (no mask), scale 1/sqrt(head_dim). ScaledDotProductAttention instead of the LM
+            // FlashAttention API: same [b,h,t,hd] contract, but it dispatches to the Sage-INT8/cuDNN fused
+            // engines for D∈{64,128} — this full-sequence attention was the codec's single largest GPU cost
+            // (300 monolithic lm_flash_attn_f32 calls × ~5.7 ms on a 10 s song, 2026-07-25 nsys). allowF16
+            // is safe here: Q/K are RMS-normed (bounded scores), the same gate the LM prefill path uses.
             Tensor attn = new(mh, DType.F32);
-            backend.FlashAttention(attn, qMh, kMh, vMh, kvLen: t, kvGroup: 1, causal: false, qOffset: 0, 1f / MathF.Sqrt(hd));
+            backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, 1f / MathF.Sqrt(hd), allowF16: true);
             qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
             Tensor merged = new(new TensorShape(b, t, d), DType.F32);
             backend.Permute0213(merged, attn, h, t, hd);

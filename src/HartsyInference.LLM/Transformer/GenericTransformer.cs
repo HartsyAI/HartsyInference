@@ -649,6 +649,45 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (!ReferenceEquals(hidden, inEmbed)) hidden.Dispose();
     }
 
+    /// <summary>True when this architecture can run the two-stream shared-position graph decode step
+    /// (<see cref="ForwardGraphDecodeStepDualEmbeds"/>): everything <see cref="SupportsGraphDecode"/> requires,
+    /// minus the features <see cref="Layer.ForwardGraphStepDual"/> doesn't implement (per-layer SWA head dims,
+    /// dual local/global RoPE tables, KV-sharing, per-layer embeddings, V-norm, LayerNorm/full-dim QK-norm).
+    /// CSM/HeartMuLa's Llama backbone satisfies all of these.</summary>
+    public bool SupportsDualGraphDecode(IBackend backend) =>
+        SupportsGraphDecodeCore(backend)
+        && _cfg.KvSharedFromLayer == 0
+        && _cfg.PerLayerEmbeddingDim == 0
+        && _cfg.HeadDimSwa == 0
+        && _cfg.RopeLocalTheta <= 0
+        && !_cfg.VNorm
+        && !(_cfg.QkNorm && (_cfg.QkNormFullDim || _cfg.UseLayerNorm));
+
+    /// <summary>Two-stream variant of <see cref="ForwardGraphDecodeStepEmbeds"/> for CSM/HeartMuLa's CFG decode:
+    /// <paramref name="inEmbed"/> is <c>[1,2,H]</c> (row 0 = conditional, row 1 = unconditional), the rows are
+    /// POSITION-ALIGNED (both streams append at the same absolute position, so ONE shared <paramref name="devicePos"/>
+    /// serves RoPE, both KV scatters, and both attention calls), and each row writes into its OWN cache
+    /// (<paramref name="cacheA"/>/<paramref name="cacheB"/>). Deliberately a separate method — NOT a batch parameter
+    /// on <see cref="ForwardGraphDecodeStepEmbeds"/> — because the text-LLM fleet replays that path's captured
+    /// graphs and it is verified byte-stable; it must not gain new dispatch branches. Same fixed-buffer contract:
+    /// refresh <paramref name="inEmbed"/> and <paramref name="devicePos"/> outside any capture, read both rows'
+    /// post-final-norm hiddens from <paramref name="outHidden"/> <c>[1,2,H]</c> after the launch. Caller guarantees
+    /// <see cref="SupportsDualGraphDecode"/>.</summary>
+    public void ForwardGraphDecodeStepDualEmbeds(IBackend backend, Tensor inEmbed, IKvCache cacheA, IKvCache cacheB,
+        Tensor cosTable, Tensor sinTable, ulong devicePos, Tensor outHidden)
+    {
+        ThrowIfDisposed();
+        Tensor hidden = inEmbed;
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            Tensor next = _layers[i].ForwardGraphStepDual(backend, hidden, cacheA, cacheB, i, cosTable, sinTable, devicePos);
+            if (!ReferenceEquals(hidden, inEmbed)) hidden.Dispose();   // never dispose the caller's fixed input buffer
+            hidden = next;
+        }
+        Normalize(backend, outHidden, hidden, _finalNorm!, _finalNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+        if (!ReferenceEquals(hidden, inEmbed)) hidden.Dispose();
+    }
+
     /// <summary>Batched decode step for continuous batching: <paramref name="embeds"/> is <c>[1, B, hidden]</c>
     /// (one decode token per active sequence), <paramref name="positions"/>[b] is sequence b's absolute position
     /// (== its KV length), and <paramref name="caches"/>[b] is sequence b's own KV cache. Returns the post-norm
@@ -1774,6 +1813,155 @@ public sealed unsafe class GenericTransformer : IDisposable
             // Gemma-4: mix in this layer's per-layer embedding and apply the learned output scale —
             // identical ops and order to the eager Forward's tail.
             if (perLayerInput is not null) result = ApplyPerLayerEmbedding(backend, result, perLayerInput, t);
+            if (_outScale is float os) backend.Scale(result, result, os);
+            return result;
+        }
+
+        /// <summary>Two-stream (B=2, shared-position) variant of <see cref="ForwardGraphStep"/> for CSM/HeartMuLa's
+        /// CFG decode: the two rows of <paramref name="hidden"/> <c>[1,2,H]</c> are one decode token per stream at
+        /// the SAME absolute position (one shared <paramref name="devicePos"/>), each stream appending into its own
+        /// KV cache. The heavy batched parts (norms, QKV/o-proj/FFN projections) run ONCE over both rows — each
+        /// weight matrix streams from HBM once per frame instead of twice, which is the entire win of the CFG-batched
+        /// path — while RoPE+KV-scatter and attention run per row against that row's cache. Copy-adapted from
+        /// <see cref="ForwardGraphStep"/> rather than parameterizing it: the text-LLM fleet replays that method's
+        /// captured graphs and it must stay bit-identical. Caller guarantees
+        /// <see cref="GenericTransformer.SupportsDualGraphDecode"/> (plain pre-norm GQA/RoPE, every layer owns its
+        /// KV, single RoPE table, no PLE / V-norm / LayerNorm- or full-dim QK-norm).</summary>
+        public Tensor ForwardGraphStepDual(IBackend backend, Tensor hidden, IKvCache cacheA, IKvCache cacheB,
+            int layerIndex, Tensor cosTable, Tensor sinTable, ulong devicePos)
+        {
+            const int b = 2;
+            int h = _cfg.HiddenSize;
+            int hq = _cfg.NumHeads;
+            int hkv = _cfg.NumKvHeads;
+            int d = _cfg.HeadDim;
+            int rotaryDim = _cfg.RotaryDim;
+            int group = _cfg.KvGroup;
+            bool interleaved = _cfg.Rope == RopeStyle.Interleaved;
+            TensorShape flat = new(1, b, h);
+
+            // Rows=2 → the Q8-sidecar emit self-disables inside RmsNormEmitQ8/AddRmsNormEmitQ8/GluActivateEmitQ8
+            // (falls back to the plain fused kernels); the M=2 GEMVs quantize their own activations instead.
+            Tensor pre = new(flat, DType.F32);
+            PreSublayer(backend, pre, hidden, _inNorm, _normBias);
+
+            // Row s's [heads, d] block of a token-major [1, b, heads, d] projection is contiguous — byte-identical
+            // to the head-major [1, heads, 1, d] single-token layout the scatter/attention kernels expect — so a
+            // row slice feeds them directly. The row offsets are capture CONSTANTS (row 0 = stream A, row 1 =
+            // stream B on every frame); only the shared devicePos varies per replay.
+            IKvCache[] caches = [cacheA, cacheB];
+            Tensor[] qRows = new Tensor[b];
+            if (!_cfg.QkNorm && _qkvW is not null)
+            {
+                // Fused-QKV path: one M=2 GEMV over the concatenated [q|k|v] weight, then per row the same
+                // rope-q + rope-k-into-cache + copy-v-into-cache kernel the B=1 graph step uses.
+                int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0], nv = (int)_vW!.Shape[0];
+                Tensor qkvOut = new(new TensorShape(1, b, nq + nk + nv), DType.F32);
+                Project(backend, qkvOut, pre, _qkvW, _qkvB, _cfg.LowVramQuant);
+                pre.Dispose();
+                for (int s = 0; s < b; s++)
+                {
+                    Tensor qkvRow = new(new TensorShape(1, 1, nq + nk + nv), DType.F32);
+                    backend.SliceRows(qkvRow, qkvOut, s);
+                    Tensor qRow = new(new TensorShape(1, hq, 1, d), DType.F32);
+                    backend.QkvRopeScatterDecodeStep(qRow, caches[s].KeyPrefix(layerIndex), caches[s].ValuePrefix(layerIndex),
+                        qkvRow, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
+                    qkvRow.Dispose();
+                    qRows[s] = qRow;
+                }
+                qkvOut.Dispose();
+            }
+            else
+            {
+                // Composed path (separate/mixed-dtype projections, optional per-head RMS QK-norm): batched
+                // projections + norms, then the separate-source rope+scatter kernel per row.
+                Tensor q = new(new TensorShape(1, b, hq, d), DType.F32);
+                Tensor k = new(new TensorShape(1, b, hkv, d), DType.F32);
+                Tensor v = new(new TensorShape(1, b, hkv, d), DType.F32);
+                ProjectQkv(backend, q, k, v, pre, b, hasOwnKv: true, _cfg.LowVramQuant);
+                pre.Dispose();
+                if (_cfg.QkNorm)
+                {
+                    Tensor qN = new(new TensorShape(1, b, hq, d), DType.F32);
+                    Tensor kN = new(new TensorShape(1, b, hkv, d), DType.F32);
+                    backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
+                    backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
+                    q.Dispose(); k.Dispose();
+                    q = qN; k = kN;
+                }
+                for (int s = 0; s < b; s++)
+                {
+                    Tensor qIn = new(new TensorShape(1, hq, 1, d), DType.F32);
+                    Tensor kRow = new(new TensorShape(1, hkv, 1, d), DType.F32);
+                    Tensor vRow = new(new TensorShape(1, hkv, 1, d), DType.F32);
+                    backend.SliceRows(qIn, q, s * hq);
+                    backend.SliceRows(kRow, k, s * hkv);
+                    backend.SliceRows(vRow, v, s * hkv);
+                    Tensor qRow = new(new TensorShape(1, hq, 1, d), DType.F32);
+                    backend.RopeScatterKvDecodeStep(qRow, caches[s].KeyPrefix(layerIndex), caches[s].ValuePrefix(layerIndex),
+                        qIn, kRow, vRow, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
+                    qIn.Dispose(); kRow.Dispose(); vRow.Dispose();
+                    qRows[s] = qRow;
+                }
+                q.Dispose(); k.Dispose(); v.Dispose();
+            }
+
+            // Attention per row (each token attends only its own stream's prefix; ~1.4 ms/frame — the GEMV
+            // batching above is where the win lives). [1,1,hq,d] and [1,hq,1,d] are byte-identical at t=1, so
+            // the segments concat along dim 1 straight back into the token-major [1,2,hq,d] o_proj input.
+            float scale = _cfg.AttnScale;
+            int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
+            Tensor[] segs = new Tensor[b];
+            for (int s = 0; s < b; s++)
+            {
+                Tensor attnSeg = new(new TensorShape(1, 1, hq, d), DType.F32);
+                backend.FlashAttentionDev(attnSeg, qRows[s], caches[s].KeyPrefix(layerIndex), caches[s].ValuePrefix(layerIndex),
+                    0, group, causal: true, 0, scale, devicePos, _cfg.AttnLogitSoftcap, window);
+                qRows[s].Dispose();
+                segs[s] = attnSeg;
+            }
+            Tensor attnConcat = new(new TensorShape(1, b, hq, d), DType.F32);
+            backend.Concat(attnConcat, segs, dim: 1);
+            foreach (Tensor seg in segs) seg.Dispose();
+
+            Tensor attnOut = new(flat, DType.F32);
+            Project(backend, attnOut, attnConcat, _oW!, _oB, _cfg.LowVramQuant);
+            attnConcat.Dispose();
+
+            // Residual/norm tail: identical op sequence to ForwardGraphStep, just over 2 rows.
+            bool plainPreNorm = _cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm
+                && _postNormBias is null && _postNorm is not null && _cfg.ResidualMultiplier == 1f;
+            bool sandwichFusion = Environment.GetEnvironmentVariable("HARTSY_SANDWICH_FUSION") != "0";   // kill-switch
+            Tensor afterAttn = new(flat, DType.F32);
+            Tensor preMlp = new(flat, DType.F32);
+            if (plainPreNorm && _postAttnNorm is not null && sandwichFusion)
+            {
+                backend.NormAddRmsNormEmitQ8(afterAttn, preMlp, hidden, attnOut, _postAttnNorm, _postNorm!, _cfg.RmsNormEps);
+            }
+            else if (plainPreNorm && _postAttnNorm is null)
+            {
+                backend.AddRmsNormEmitQ8(afterAttn, preMlp, hidden, attnOut, _postNorm!, _cfg.RmsNormEps);
+            }
+            else
+            {
+                attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);
+                backend.Add(afterAttn, hidden, attnOut);
+                PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
+            }
+            attnOut.Dispose();
+            Tensor mlpOut = Mlp(backend, preMlp, b, emitQ: true);
+
+            Tensor result = new(flat, DType.F32);
+            if (_postFfnNorm is not null && _cfg.ResidualMultiplier == 1f && sandwichFusion)
+            {
+                backend.RmsNormAdd(result, afterAttn, mlpOut, _postFfnNorm, _cfg.RmsNormEps);
+            }
+            else
+            {
+                mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);
+                backend.Add(result, afterAttn, mlpOut);
+            }
+            afterAttn.Dispose(); mlpOut.Dispose();
             if (_outScale is float os) backend.Scale(result, result, os);
             return result;
         }

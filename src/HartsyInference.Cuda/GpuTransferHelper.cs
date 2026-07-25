@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
@@ -437,6 +438,14 @@ internal static unsafe class GpuTransferHelper
         s.ActivationCache[tensor] = (gpuPtr, byteSize);
         s.CachedPointers.Add(gpuPtr);
 
+        // Arena ownership is decided AT BINDING TIME and captured: the callbacks below may fire after the
+        // owning graph arena has been destroyed (e.g. GraphStream teardown disposes the graph, THEN its
+        // fixed buffers) — at that point IsArenaPtr's live-arena check returns false and the callback
+        // would double-free memory the arena already returned (the CUDA_ERROR_INVALID_VALUE "dispose
+        // failed during cleanup" warnings in HeartMuLa's session teardown, 2026-07-25). An arena-born
+        // pointer is NEVER individually freed, live arena or not.
+        bool arenaBacked = IsArenaPtr(s, gpuPtr);
+
         // Lazy sync: when CPU code accesses DataPointer, wait for stream, copy GPU→CPU, then free.
         // Stream sync is needed because per-op Sync() has been removed — the producing kernel may still be in flight.
         // EnsureCurrent in both callbacks: they fire from whatever thread later reads/disposes
@@ -449,12 +458,21 @@ internal static unsafe class GpuTransferHelper
                 s.D2hSyncs++;
                 s.Context?.EnsureCurrent();
                 RemoveSidecar(s, tensor);
+                if (arenaBacked && !IsArenaPtr(s, cached.gpuPtr))
+                {
+                    // The owning arena is gone — the device data went with it; reading it would touch freed
+                    // memory. Surface loudly instead of copying garbage.
+                    Logs.Warning("[Cuda] Activation read after its graph arena was freed — returning zeros (read the tensor before DisposeGraph).");
+                    tensor.EnsureHostBuffer();
+                    s.CachedPointers.Remove(cached.gpuPtr);
+                    return;
+                }
                 CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
                 // Allocate the host destination only now, on the first real CPU read of this activation.
                 void* cpuPtr = tensor.EnsureHostBuffer();
                 CudaMemory.CopyDeviceToHost(cpuPtr, cached.gpuPtr, cached.bytes);
                 s.CachedPointers.Remove(cached.gpuPtr);
-                if (!IsArenaPtr(s, cached.gpuPtr)) CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
+                if (!arenaBacked && !IsArenaPtr(s, cached.gpuPtr)) CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
             }
         };
 
@@ -467,7 +485,7 @@ internal static unsafe class GpuTransferHelper
                 s.Context?.EnsureCurrent();
                 RemoveSidecar(s, tensor);
                 s.CachedPointers.Remove(cached.gpuPtr);
-                if (!IsArenaPtr(s, cached.gpuPtr)) CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
+                if (!arenaBacked && !IsArenaPtr(s, cached.gpuPtr)) CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
             }
         };
         // Route this tensor's finalizer cleanup into THIS backend's context bucket so a concurrent backend's

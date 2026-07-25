@@ -218,11 +218,11 @@ public sealed unsafe class CsmModel : IDisposable
         public object? Graph;
         public int Warmed;                 // frames run eagerly-through-the-fixed-buffers before capture
 
-        public GraphStream(IBackend backend, int bh)
+        public GraphStream(IBackend backend, int bh, int rows = 1)
         {
             _backend = backend;
-            InEmbed = new Tensor(new TensorShape(1, 1, bh), DType.F32);
-            OutHidden = new Tensor(new TensorShape(1, 1, bh), DType.F32);
+            InEmbed = new Tensor(new TensorShape(1, rows, bh), DType.F32);
+            OutHidden = new Tensor(new TensorShape(1, rows, bh), DType.F32);
             DevicePos = backend.AllocDevicePos();
         }
 
@@ -252,6 +252,9 @@ public sealed unsafe class CsmModel : IDisposable
         internal FixedKvCache? Uncond { get; }
         internal GraphStream? CondGraph;     // lazily created on the first graph-eligible (single-row) frame
         internal GraphStream? UncondGraph;
+        // CFG dual-stream backbone graph (see BackboneLastDual): ONE [1,2,bh] fixed in/out buffer pair + one
+        // shared devicePos serves both position-aligned streams — the whole batched B=2 step captures as one graph.
+        internal GraphStream? DualGraph;
         // Persistent depth-decoder caches + graphs (graph mode): the depth KV cache must survive across frames so a
         // captured depth step keeps valid baked addresses; it is RESET (length→0) at the start of each frame's depth
         // decode. Lazily created on the first graph-eligible frame; null in the eager path (per-frame caches instead).
@@ -274,6 +277,7 @@ public sealed unsafe class CsmModel : IDisposable
             // frees throw during unwind, masking the generation's original exception.
             CondGraph?.Dispose();
             UncondGraph?.Dispose();
+            DualGraph?.Dispose();
             DepthCondGraph?.Dispose();
             DepthUncondGraph?.Dispose();
             try { DepthCond?.Dispose(); }
@@ -322,6 +326,45 @@ public sealed unsafe class CsmModel : IDisposable
         // frame-0 prefill (many rows) and the standalone uncond dummy stay eager. Env-gated with an eager fallback.
         bool graphEnabled = EnvSwitch.IsEnabled("HARTSY_CSM_GRAPH", defaultOn: true)
             && backend.GraphDecodeSupported && _backbone.SupportsGraphDecode(backend);
+
+        // CFG steady state runs cond+uncond as ONE B=2 batched backbone step: the two streams are
+        // position-aligned by construction (the pipeline mirrors upstream CFG — same prompt length, frames
+        // appended to both), and the batched layers read each 3B weight matrix ONCE for both rows instead of
+        // streaming the whole model twice per frame. The LM's per-frame GEMV traffic is at the bandwidth
+        // roofline (nsys 2026-07-25: ~11.4 ms per stream-frame on the 4090), so this halves the dominant
+        // per-frame cost in CFG runs. The batched step itself is graph-captured when eligible (see below);
+        // otherwise it runs eager. Kill-switch HARTSY_CSM_CFG_BATCH=0 restores two-stream.
+        if (useCfg && !uncondStandalone && (int)condNewEmbeds.Shape[1] == 1
+            && (int)uncondNewEmbeds!.Shape[1] == 1
+            && EnvSwitch.IsEnabled("HARTSY_CSM_CFG_BATCH", defaultOn: true))
+        {
+            FixedKvCache ucB = session.Uncond ?? throw new InvalidOperationException("CFG StepFrame needs a CFG session (useCfg:true).");
+            // Graph-captured batched step: the whole B=2 backbone step replays as ONE cuGraphLaunch, killing the
+            // ~17 ms/frame of eager per-op host overhead the batched path reintroduced. Requires the two streams
+            // to be position-aligned (they are by construction — the pipeline mirrors upstream CFG, same prefix
+            // length, frames appended to both — so one devicePos serves both rows' rope AND kvLen; the equality
+            // check is a safety net that falls back to the eager batched path, never wrong math). Kill-switch
+            // HARTSY_CSM_CFG_GRAPH=0 restores the eager batched step below.
+            if (graphEnabled && EnvSwitch.IsEnabled("HARTSY_CSM_CFG_GRAPH", defaultOn: true)
+                && _backbone.SupportsDualGraphDecode(backend)
+                && session.Backbone.CurrentLength == ucB.CurrentLength)
+            {
+                (Tensor lastG, Tensor uLastG) = BackboneLastDual(backend, session, ucB, condNewEmbeds, uncondNewEmbeds!, bh);
+                return DecodeFrameTail(backend, lastG, uLastG, ref rng, temperature, topK, topP, cfgScale, session, graphEnabled);
+            }
+            Tensor stacked = new(new TensorShape(1, 2, bh), DType.F32);
+            Buffer.MemoryCopy((void*)condNewEmbeds.DataPointer, (void*)stacked.DataPointer, (long)bh * 4, (long)bh * 4);
+            Buffer.MemoryCopy((void*)uncondNewEmbeds.DataPointer, (float*)stacked.DataPointer + bh, (long)bh * 4, (long)bh * 4);
+            Span<int> positions = [session.Backbone.CurrentLength, ucB.CurrentLength];
+            Tensor both = _backbone.ForwardBatchDecode(backend, stacked, positions, [session.Backbone, ucB]);
+            stacked.Dispose();
+            Tensor lastB = new(new TensorShape(1, 1, bh), DType.F32);
+            Tensor uLastB = new(new TensorShape(1, 1, bh), DType.F32);
+            Buffer.MemoryCopy((void*)both.DataPointer, (void*)lastB.DataPointer, (long)bh * 4, (long)bh * 4);
+            Buffer.MemoryCopy((float*)both.DataPointer + bh, (void*)uLastB.DataPointer, (long)bh * 4, (long)bh * 4);
+            both.Dispose();
+            return DecodeFrameTail(backend, lastB, uLastB, ref rng, temperature, topK, topP, cfgScale, session, graphEnabled);
+        }
 
         Tensor last = BackboneLast(backend, session.Backbone, ref session.CondGraph, condNewEmbeds, graphEnabled, bh);
 
@@ -403,6 +446,65 @@ public sealed unsafe class CsmModel : IDisposable
         Tensor last = new(new TensorShape(1, 1, bh), DType.F32);
         backend.CopyInto(last, gs.OutHidden);   // fresh owned copy; the fixed buffer is reused next frame
         return last;
+    }
+
+    /// <summary>CFG dual-stream flavor of <see cref="BackboneLast"/>: runs cond+uncond as ONE position-aligned
+    /// B=2 backbone step (stacked <c>[1,2,bh]</c> through the session's <see cref="DecodeSession.DualGraph"/> fixed
+    /// buffers), captured once and replayed per frame. Combines both wins: the batched layers read each weight
+    /// matrix ONCE for both rows (the CFG-batch win) AND the ~layers×kernels eager launches collapse into one
+    /// graph replay (the graph win). Warmup frames run the same dual step eagerly through the SAME fixed buffers
+    /// so every weight/cache is device-resident and the buffers are pool-bound before capture. Advances BOTH
+    /// caches by one and returns fresh caller-owned cond/uncond last hiddens (each <c>[1,1,bh]</c>).</summary>
+    private (Tensor last, Tensor uLast) BackboneLastDual(IBackend backend, DecodeSession session, FixedKvCache uncond,
+        Tensor condNew, Tensor uncondNew, int bh)
+    {
+        FixedKvCache cond = session.Backbone;
+        GraphStream gs = session.DualGraph ??= new GraphStream(backend, bh, rows: 2);
+        int pos = cond.CurrentLength;
+        Tensor stacked = new(new TensorShape(1, 2, bh), DType.F32);
+        Buffer.MemoryCopy((void*)condNew.DataPointer, (void*)stacked.DataPointer, (long)bh * 4, (long)bh * 4);
+        Buffer.MemoryCopy((void*)uncondNew.DataPointer, (float*)stacked.DataPointer + bh, (long)bh * 4, (long)bh * 4);
+        backend.CopyInto(gs.InEmbed, stacked);                  // refresh fixed input OUTSIDE capture
+        stacked.Dispose();
+        backend.WriteDevicePos(gs.DevicePos, pos + 1, pos);     // shared {kvLen, qOffset} — both streams are aligned
+        (Tensor cos, Tensor sin) = _backbone.EnsureRopeTableForGraphDecode(backend,
+            Math.Max(cond.MaxSequenceLength, uncond.MaxSequenceLength));
+
+        const int warmup = 2;   // run a few frames eagerly first so nothing allocates during capture
+        if (gs.Graph is not null)
+        {
+            backend.LaunchGraph(gs.Graph);
+        }
+        else if (gs.Warmed >= warmup)
+        {
+            GraphStream s = gs;
+            gs.Graph = backend.CaptureGraph(() =>
+                _backbone.ForwardGraphDecodeStepDualEmbeds(backend, s.InEmbed, cond, uncond, cos, sin, s.DevicePos, s.OutHidden));
+            if (gs.Graph is not null)
+            {
+                backend.LaunchGraph(gs.Graph);   // captured — run this frame via replay
+            }
+            else
+            {
+                // Backend declined to capture: run eagerly and keep warming (never retry-capture in a tight loop).
+                _backbone.ForwardGraphDecodeStepDualEmbeds(backend, gs.InEmbed, cond, uncond, cos, sin, gs.DevicePos, gs.OutHidden);
+            }
+        }
+        else
+        {
+            _backbone.ForwardGraphDecodeStepDualEmbeds(backend, gs.InEmbed, cond, uncond, cos, sin, gs.DevicePos, gs.OutHidden);
+            gs.Warmed++;
+        }
+        cond.AdvanceLength(1);      // the dual step appended one row to each stream
+        uncond.AdvanceLength(1);
+
+        // Row split stays on-device (SliceRows, no stream sync); the frame tail's head projections consume the
+        // resident copies and the one host sync per frame stays at the logits read, exactly like BackboneLast.
+        Tensor last = new(new TensorShape(1, 1, bh), DType.F32);
+        Tensor uLast = new(new TensorShape(1, 1, bh), DType.F32);
+        backend.SliceRows(last, gs.OutHidden, 0);
+        backend.SliceRows(uLast, gs.OutHidden, 1);
+        return (last, uLast);
     }
 
     /// <summary>Shared frame tail: codebook-0 from the backbone <paramref name="last"/> hidden, then the depth
