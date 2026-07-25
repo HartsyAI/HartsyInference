@@ -3,13 +3,11 @@ using Spectre.Console;
 
 namespace HartsyInference.Cli.Dispatch;
 
-/// <summary>Renders a <see cref="GeneratedArtifact"/> to the console uniformly for both the one-shot commands and the
-/// REPL: streamed text is finalized, non-streamed text is printed, file artifacts get a summary, and metadata is a
-/// grey footer.</summary>
+/// <summary>Renders a <see cref="GeneratedArtifact"/> to the console uniformly for both the one-shot commands and the REPL.</summary>
+/// <remarks>Streamed text is finalized, non-streamed text is printed, file artifacts get a summary, and metadata is a grey footer.</remarks>
 public static class ResultPresenter
 {
-    /// <summary>Prints <paramref name="artifact"/>. In <paramref name="quiet"/> mode only the essential text is emitted
-    /// (no rules, headers, or metadata).</summary>
+    /// <summary>Prints <paramref name="artifact"/>. In <paramref name="quiet"/> mode only essential text is emitted.</summary>
     public static void Present(GeneratedArtifact artifact, bool quiet)
     {
         bool isText = artifact.Kind is ArtifactKind.Text or ArtifactKind.Data;

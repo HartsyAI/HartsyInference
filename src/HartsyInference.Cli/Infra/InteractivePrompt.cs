@@ -2,9 +2,9 @@ using Spectre.Console;
 
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>Small interactive-prompt helpers for the REPL: an arrow-key selection list (with type-to-filter) plus
-/// text/confirm prompts. Each falls back to a plain numbered / line-read flow when input is redirected (piped, tests),
-/// so the same call works interactively and non-interactively.</summary>
+/// <summary>Small interactive-prompt helpers for the REPL: an arrow-key selection list (with type-to-filter) plus text/confirm prompts.</summary>
+/// <remarks>Each falls back to a plain numbered / line-read flow when input is redirected (piped, tests), so the same call works
+/// interactively and non-interactively.</remarks>
 public static class InteractivePrompt
 {
     // Fall back to a plain numbered/line-read flow whenever the console can't drive Spectre's interactive prompts —
@@ -43,8 +43,7 @@ public static class InteractivePrompt
         return -1;
     }
 
-    /// <summary>Prompts for a line of text, returning <paramref name="def"/> when the user just presses Enter, or null
-    /// when they enter nothing and there is no default.</summary>
+    /// <summary>Prompts for a line of text, returning <paramref name="def"/> on empty Enter, or null when there is no default.</summary>
     public static string? Ask(string label, string? def = null)
     {
         if (!Plain)

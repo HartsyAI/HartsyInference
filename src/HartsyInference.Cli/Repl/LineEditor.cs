@@ -1,17 +1,18 @@
 using System.Text;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cli.Repl;
 
-/// <summary>An interactive prompt reader with live <c>/</c>-command autocomplete: as the user types a slash command,
-/// a filtered dropdown of matching commands (with descriptions) is drawn below the input and navigated with the arrow
-/// keys, Tab completes, Enter runs. Falls back to a plain read when input/output is not an interactive terminal.</summary>
+/// <summary>An interactive prompt reader with live <c>/</c>-command autocomplete, navigated with the arrow keys, Tab completes, Enter runs.</summary>
+/// <remarks>As the user types a slash command, a filtered dropdown of matching commands (with descriptions) is drawn
+/// below the input. Falls back to a plain read when input/output is not an interactive terminal.</remarks>
 public static class LineEditor
 {
     private const int MaxSuggestions = 8;
 
-    /// <summary>Reads one line for the given <paramref name="mode"/> prompt, offering <paramref name="commands"/> as
-    /// autocomplete. Returns null on EOF or Ctrl+C (caller should exit).</summary>
+    /// <summary>Reads one line for the given <paramref name="mode"/> prompt, offering <paramref name="commands"/> as autocomplete.</summary>
+    /// <returns>Null on EOF or Ctrl+C (caller should exit).</returns>
     public static string? ReadLine(string mode, IReadOnlyList<SlashCommand> commands)
     {
         if (Console.IsInputRedirected || Console.IsOutputRedirected)
@@ -26,8 +27,9 @@ public static class LineEditor
         {
             return Interactive(mode, commands);
         }
-        catch (IOException)
+        catch (IOException ex)
         {
+            Logs.Warning($"Interactive line editor unavailable, falling back to plain read: {ex.Message}");
             return Console.ReadLine();
         }
         finally

@@ -5,8 +5,8 @@ namespace HartsyInference.Cli.Infra;
 /// <summary>Renders the model catalog as a Spectre table, shared by <c>hartsy list</c> and the REPL's <c>/list</c>.</summary>
 public static class CatalogView
 {
-    /// <summary>Prints the catalog filtered by <paramref name="filter"/> (null = all) and optionally to verified-only.
-    /// Returns the number of rows shown.</summary>
+    /// <summary>Prints the catalog filtered by <paramref name="filter"/> (null = all) and optionally to verified-only.</summary>
+    /// <returns>The number of rows shown.</returns>
     public static int Render(Modality? filter, bool verifiedOnly)
     {
         IEnumerable<CatalogEntry> rows = ModelCatalog.All;

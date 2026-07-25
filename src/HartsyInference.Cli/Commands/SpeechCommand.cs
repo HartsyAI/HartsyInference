@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Globalization;
-using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -23,8 +22,8 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         [Description("Speech model, optionally 'id:variant' (e.g. piper:en_US-lessac-medium). Empty uses the default.")]
         public string Model { get; init; } = "";
 
-        /// <summary>Built-in voice/speaker name within the selected model (Kokoro voice pack, PocketTTS voice,
-        /// Spark-TTS gender male/female); distinct from --model. Empty uses the model's own default.</summary>
+        /// <summary>Built-in voice/speaker name within the selected model; distinct from --model.</summary>
+        /// <remarks>E.g. a Kokoro voice pack, a PocketTTS voice, or Spark-TTS gender male/female. Empty uses the model's own default.</remarks>
         [CommandOption("--voice")]
         [Description("Built-in voice/speaker name (Kokoro voice pack e.g. af_heart, PocketTTS voice e.g. alba, Spark-TTS gender male/female). Empty uses the model default.")]
         public string? Voice { get; init; }
@@ -83,11 +82,8 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Text))
-        {
-            AnsiConsole.MarkupLine("[red]Text to speak is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Text, "Text to speak is required.", out int exitCode))
+            return exitCode;
 
         ParamState parameters = new ParamState(Modality.Speech) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("speed", settings.Speed.ToString(CultureInfo.InvariantCulture));
@@ -105,10 +101,9 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
             parameters.Put("cfg-scale", cfgScale.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Speech);
-        string label = settings.ModelPath is { Length: > 0 } mp ? Path.GetFileName(mp) : (settings.Model.Length > 0 ? settings.Model : "en_US-lessac-medium");
-        string outputDir = settings.Output ?? RepoPaths.OutputRoot();
+        string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath, "en_US-lessac-medium");
 
         return CommandRunner.Run(Modality.Speech, spec, settings.Text, parameters, settings.Backend, settings.Quiet,
-            outputDir, label, showResponseRule: false);
+            settings.Output, label, showResponseRule: false);
     }
 }

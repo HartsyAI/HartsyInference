@@ -6,14 +6,15 @@ using HartsyInference.Vision.Codec;
 
 namespace HartsyInference.Cli.Dispatch;
 
-/// <summary>Maps the CLI's flag bag onto the engine's typed per-modality services and adapts each typed result back
-/// into a <see cref="GeneratedArtifact"/> for presentation and persistence. This is the CLI's only generation entry
-/// point: one <c>switch</c> over <see cref="Modality"/>, one typed request built per branch.</summary>
+/// <summary>Maps the CLI's flag bag onto typed per-modality services and adapts each result into a <see cref="GeneratedArtifact"/>.</summary>
+/// <remarks>This is the CLI's only generation entry point: one <c>switch</c> over <see cref="Modality"/>, one typed request built
+/// per branch.</remarks>
 public static class GenerationDispatch
 {
-    /// <summary>Runs one generation for <paramref name="spec"/>. <paramref name="prompt"/> is the text prompt for the
-    /// generative modalities and an input file path for transcribe / vision / 3d / world. Frame sequences (video,
-    /// world) are written under <paramref name="outputDir"/> as they have no single-file artifact.</summary>
+    /// <summary>Runs one generation for <paramref name="spec"/>.</summary>
+    /// <remarks><paramref name="prompt"/> is the text prompt for the generative modalities and an input file path for
+    /// transcribe / vision / 3d / world. Frame sequences (video, world) are written under <paramref name="outputDir"/>
+    /// as they have no single-file artifact.</remarks>
     public static async Task<GeneratedArtifact> RunAsync(
         IInferenceEngine engine,
         ModelSpec spec,
@@ -43,8 +44,7 @@ public static class GenerationDispatch
         };
     }
 
-    /// <summary>Text-to-image through <see cref="IImagesService"/>; the RGB result is encoded to PNG for saving and
-    /// kept raw for the inline terminal preview.</summary>
+    /// <summary>Text-to-image through <see cref="IImagesService"/>; the RGB result is PNG-encoded for saving and kept raw for preview.</summary>
     private static async Task<GeneratedArtifact> ImageAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
@@ -92,8 +92,7 @@ public static class GenerationDispatch
         return artifact;
     }
 
-    /// <summary>Chat completion through <see cref="ITextService"/>. Interactive runs consume the token stream so text
-    /// still prints live; <c>--quiet</c> takes the one-shot path and lets the presenter print the final text.</summary>
+    /// <summary>Chat completion through <see cref="ITextService"/>; streams live unless <c>--quiet</c> takes the one-shot path.</summary>
     private static async Task<GeneratedArtifact> TextAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
@@ -166,8 +165,8 @@ public static class GenerationDispatch
         return artifact;
     }
 
-    /// <summary>Text-to-speech through <see cref="ISpeechService"/>. Voice-cloning models read the optional
-    /// <c>reference</c> path (and, for F5-style models that align against a transcript, <c>ref-text</c>).</summary>
+    /// <summary>Text-to-speech through <see cref="ISpeechService"/>; cloning models read an optional <c>reference</c> path.</summary>
+    /// <remarks>F5-style models also read <c>ref-text</c> alongside <c>reference</c>.</remarks>
     private static async Task<GeneratedArtifact> SpeechAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, CancellationToken cancel)
     {
@@ -188,8 +187,8 @@ public static class GenerationDispatch
         return AudioArtifact(result, "speech");
     }
 
-    /// <summary>Voice conversion through <see cref="IVoiceConversionService"/>; the CLI's "prompt" is the source audio
-    /// path. An optional <c>target-path</c> tunable supplies the tone-color reference (OpenVoice); RVC ignores it.</summary>
+    /// <summary>Voice conversion through <see cref="IVoiceConversionService"/>; the CLI's "prompt" is the source audio path.</summary>
+    /// <remarks>An optional <c>target-path</c> tunable supplies the tone-color reference (OpenVoice); RVC ignores it.</remarks>
     private static async Task<GeneratedArtifact> VoiceConvertAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, CancellationToken cancel)
     {
@@ -203,9 +202,9 @@ public static class GenerationDispatch
         return AudioArtifact(result, "converted");
     }
 
-    /// <summary>Audio effects (Demucs separation / Resemble-Enhance) through <see cref="IFxService"/>; the CLI's
-    /// "prompt" is the input audio path and the <c>mode</c> tunable picks which of the two operations to run.
-    /// Separation yields multiple stems, written directly to a fresh subfolder since there is no single-file result.</summary>
+    /// <summary>Audio effects (Demucs / Resemble-Enhance) through <see cref="IFxService"/>; the CLI's "prompt" is the input audio path.</summary>
+    /// <remarks>The <c>mode</c> tunable picks the operation. Separation yields multiple stems, written directly to a fresh
+    /// subfolder since there is no single-file result.</remarks>
     private static async Task<GeneratedArtifact> FxAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, CancellationToken cancel)
     {
@@ -253,8 +252,7 @@ public static class GenerationDispatch
         return AudioArtifact(result, "music");
     }
 
-    /// <summary>Speech-to-text through <see cref="ITranscribeService"/>; the CLI's "prompt" is the audio file path,
-    /// read here into an <see cref="AudioClip"/> because the typed request takes bytes, not a path.</summary>
+    /// <summary>Speech-to-text through <see cref="ITranscribeService"/>; "prompt" is the audio path, loaded into <see cref="AudioClip"/>.</summary>
     private static async Task<GeneratedArtifact> TranscribeAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, CancellationToken cancel)
     {
@@ -291,9 +289,9 @@ public static class GenerationDispatch
         return artifact;
     }
 
-    /// <summary>Embed / detect / segment through <see cref="IVisionService"/>; the CLI's "prompt" is the image path.
-    /// Segment masks have no meaningful text form, so they self-write as PNGs under <paramref name="outputDir"/>
-    /// (mirroring the video frame-sequence pattern) — otherwise the mask is invisible to inspection.</summary>
+    /// <summary>Embed / detect / segment through <see cref="IVisionService"/>; the CLI's "prompt" is the image path.</summary>
+    /// <remarks>Segment masks have no meaningful text form, so they self-write as PNGs under <paramref name="outputDir"/>
+    /// (mirroring the video frame-sequence pattern) — otherwise the mask is invisible to inspection.</remarks>
     private static async Task<GeneratedArtifact> VisionAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, CancellationToken cancel)
     {
@@ -376,8 +374,7 @@ public static class GenerationDispatch
         return artifact;
     }
 
-    /// <summary>Text-to-video through <see cref="IVideoService"/>; frames are collected from the stream and written as
-    /// a numbered PNG sequence, since there is no single-file video artifact yet.</summary>
+    /// <summary>Text-to-video through <see cref="IVideoService"/>; frames stream out and are written as a numbered PNG sequence.</summary>
     private static async Task<GeneratedArtifact> VideoAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, bool quiet, CancellationToken cancel)
     {
@@ -446,10 +443,10 @@ public static class GenerationDispatch
         return artifact;
     }
 
-    /// <summary>World rollout through <see cref="IWorldService"/>: queues one action per requested frame (from
-    /// <c>--actions</c>, cycled to fill the count, or a model-specific default demo plan), then drains the
-    /// session's frame stream. Oasis batches the queued plan into a single one-shot rollout; DIAMOND runs one
-    /// real denoise per queued action (see <see cref="DiamondWorldSession"/>).</summary>
+    /// <summary>World rollout through <see cref="IWorldService"/>: queues one action per frame, then drains the session's frame stream.</summary>
+    /// <remarks>Actions come from <c>--actions</c> (cycled to fill the count) or a model-specific default demo plan.
+    /// Oasis batches the queued plan into a single one-shot rollout; DIAMOND runs one real denoise per queued action
+    /// (see <see cref="DiamondWorldSession"/>).</remarks>
     private static async Task<GeneratedArtifact> WorldAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, bool quiet, CancellationToken cancel)
     {
@@ -485,9 +482,9 @@ public static class GenerationDispatch
         return FrameArtifact(frames, outputDir, Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"')), "world");
     }
 
-    /// <summary>Resolves the action plan: an explicit comma-separated <paramref name="actionsOption"/> if given,
-    /// else a per-model demo plan (DIAMOND/Breakout: fire then alternate left/right to show paddle response;
-    /// everything else: Oasis's canned forward walk).</summary>
+    /// <summary>Resolves the action plan: an explicit comma-separated <paramref name="actionsOption"/>, else a per-model demo plan.</summary>
+    /// <remarks>DIAMOND/Breakout fires then alternates left/right to show paddle response; everything else uses Oasis's canned
+    /// forward walk.</remarks>
     private static string[] ResolveActionPlan(string? actionsOption, string? catalogId)
     {
         if (!string.IsNullOrWhiteSpace(actionsOption))
@@ -530,8 +527,8 @@ public static class GenerationDispatch
         return artifact;
     }
 
-    /// <summary>Reads an audio file into an <see cref="AudioClip"/>, or null when <paramref name="path"/> is null/empty
-    /// (an unset optional reference). Throws if a path was given but does not exist.</summary>
+    /// <summary>Reads an audio file into an <see cref="AudioClip"/>, or null when <paramref name="path"/> is null/empty.</summary>
+    /// <remarks>Throws if a path was given but does not exist.</remarks>
     private static AudioClip? LoadAudioClip(string? path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -546,8 +543,8 @@ public static class GenerationDispatch
         return new AudioClip { Data = File.ReadAllBytes(trimmed), Format = Path.GetExtension(trimmed).TrimStart('.').ToLowerInvariant() };
     }
 
-    /// <summary>Writes each named stem as its own WAV into a fresh subdirectory (mirroring <see cref="FrameWriter"/>'s
-    /// "one call, N files" shape) since a stem set has no single-file artifact.</summary>
+    /// <summary>Writes each named stem as its own WAV into a fresh subdirectory since a stem set has no single-file artifact.</summary>
+    /// <remarks>Mirrors <see cref="FrameWriter"/>'s "one call, N files" shape.</remarks>
     private static GeneratedArtifact StemsArtifact(StemsResult stems, string? outputDir, string slug)
     {
         if (stems.Stems.Count == 0)
@@ -556,7 +553,8 @@ public static class GenerationDispatch
         }
         string baseDir = outputDir ?? RepoPaths.OutputRoot();
         Directory.CreateDirectory(baseDir);
-        string dir = NextStemsDir(baseDir, Slug.Make(slug));
+        string stemSlug = Slug.Make(slug);
+        string dir = ArtifactWriter.NextAvailablePath(baseDir, i => $"{stemSlug}-stems-{i:D3}", Directory.Exists, () => $"{stemSlug}-stems-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
         foreach (KeyValuePair<string, byte[]> stem in stems.Stems)
         {
@@ -569,19 +567,6 @@ public static class GenerationDispatch
             Text = $"{stems.Stems.Count} stem(s) ({string.Join(", ", stems.Stems.Keys)}) @ {stems.SampleRate} Hz → {dir}",
             SelfWritten = true,
         };
-    }
-
-    private static string NextStemsDir(string baseDir, string slug)
-    {
-        for (int i = 1; i < 100000; i++)
-        {
-            string candidate = Path.Combine(baseDir, $"{slug}-stems-{i:D3}");
-            if (!Directory.Exists(candidate))
-            {
-                return candidate;
-            }
-        }
-        return Path.Combine(baseDir, $"{slug}-stems-{Guid.NewGuid():N}");
     }
 
     /// <summary>Wraps an <see cref="AudioResult"/> as a saveable artifact with its duration/rate footer.</summary>
@@ -641,8 +626,8 @@ public static class GenerationDispatch
         }
     }
 
-    /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract, since the
-    /// typed requests take pixels rather than the file path the CLI accepts.</summary>
+    /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
+    /// <remarks>Typed requests take pixels, not the file path the CLI accepts.</remarks>
     private static ImageData LoadImage(string promptPath)
     {
         string path = promptPath.Trim().Trim('"');

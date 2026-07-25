@@ -1,25 +1,27 @@
 using System.Text;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>Renders RGB pixel data inline in the terminal using Unicode half-block glyphs with 24-bit truecolor: each
-/// character cell packs two vertical pixels (foreground = top, background = bottom), so a cell grid of W×H shows a
-/// W×2H pixel image. Downsampling is area-averaged (box filter) with an optional unsharp pass, which is far cleaner
-/// than nearest-neighbor when shrinking a photo or logo. Pure C#, no image library and no graphics protocol.</summary>
+/// <summary>Renders RGB pixel data inline in the terminal using Unicode half-block glyphs with 24-bit truecolor.</summary>
+/// <remarks>Each character cell packs two vertical pixels (foreground = top, background = bottom), so a cell grid of W×H
+/// shows a W×2H pixel image. Downsampling is area-averaged (box filter) with an optional unsharp pass, which is far
+/// cleaner than nearest-neighbor when shrinking a photo or logo. Pure C#, no image library and no graphics protocol.</remarks>
 public static class TerminalImage
 {
     private const char UpperHalfBlock = '▀';
     private const char LowerHalfBlock = '▄';
 
-    /// <summary>Whether inline previews should be emitted: a real (non-redirected) stdout, truecolor not opted out via
-    /// <c>NO_COLOR</c>, and not disabled via <c>HARTSY_NO_IMAGE=1</c>.</summary>
+    /// <summary>Whether inline previews should be emitted.</summary>
+    /// <remarks>Requires a real (non-redirected) stdout, truecolor not opted out via <c>NO_COLOR</c>, and not disabled via
+    /// <c>HARTSY_NO_IMAGE=1</c>.</remarks>
     public static bool IsSupported =>
         !Console.IsOutputRedirected
         && Environment.GetEnvironmentVariable("NO_COLOR") is null
         && Environment.GetEnvironmentVariable("HARTSY_NO_IMAGE") != "1";
 
-    /// <summary>Prints <paramref name="rgb"/> scaled to fit <paramref name="maxCellWidth"/> columns. See
-    /// <see cref="RenderToLines"/> for the parameters. No-op when <see cref="IsSupported"/> is false.</summary>
+    /// <summary>Prints <paramref name="rgb"/> scaled to fit <paramref name="maxCellWidth"/> columns; no-op when unsupported.</summary>
+    /// <remarks>See <see cref="RenderToLines"/> for the parameter meanings.</remarks>
     public static void Render(byte[] rgb, int width, int height, int maxCellWidth = 56, int indent = 2,
         (byte R, byte G, byte B)? transparentKey = null, float sharpen = 0f)
     {
@@ -30,12 +32,11 @@ public static class TerminalImage
         Console.Out.Write('\n');
     }
 
-    /// <summary>Renders <paramref name="rgb"/> (row-major, top-to-bottom, 3 bytes/pixel R,G,B) to one ANSI string per
-    /// terminal row (each already indented and color-reset, no trailing newline), so a caller can lay text out beside
-    /// it. Scaled to <paramref name="maxCellWidth"/> columns preserving aspect, area-averaged. When
-    /// <paramref name="transparentKey"/> is set, source pixels matching that exact color render as the terminal's own
-    /// background. <paramref name="sharpen"/> (0..1) applies a light unsharp pass to crisp edges. Null when
-    /// <see cref="IsSupported"/> is false or the input is invalid.</summary>
+    /// <summary>Renders <paramref name="rgb"/> (RGB24) to one ANSI string per row, scaled to <paramref name="maxCellWidth"/> columns.</summary>
+    /// <remarks>Each row is already indented and color-reset with no trailing newline, so a caller can lay text out beside
+    /// it. When <paramref name="transparentKey"/> is set, source pixels matching that exact color render as the terminal's
+    /// own background. <paramref name="sharpen"/> (0..1) applies a light unsharp pass to crisp edges. Null when
+    /// <see cref="IsSupported"/> is false or the input is invalid.</remarks>
     public static List<string>? RenderToLines(byte[] rgb, int width, int height, int maxCellWidth = 56, int indent = 2,
         (byte R, byte G, byte B)? transparentKey = null, float sharpen = 0f)
     {
@@ -171,8 +172,9 @@ public static class TerminalImage
             int w = Console.WindowWidth;
             return w > 0 ? w : 80;
         }
-        catch
+        catch (Exception ex)
         {
+            Logs.Warning($"Could not read terminal width: {ex.Message}");
             return 80;
         }
     }

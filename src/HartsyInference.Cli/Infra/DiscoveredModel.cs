@@ -1,7 +1,6 @@
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>A model found on disk under the models root for a given modality: what to show the user, the path to load,
-/// and whether it is a directory (multi-file) or a single checkpoint file.</summary>
+/// <summary>A model found on disk under the models root: display label, load path, and whether it's a directory or single file.</summary>
 public sealed record DiscoveredModel
 {
     /// <summary>Display label — the path relative to the models root (e.g. "Stable-Diffusion/SDXL/sd_xl_base_1.0.safetensors").</summary>

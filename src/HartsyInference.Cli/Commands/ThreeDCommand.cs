@@ -1,14 +1,12 @@
 using System.ComponentModel;
 using System.Globalization;
-using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates a 3D mesh (GLB) or Gaussian-splat cloud (PLY) from an input image with TripoSR,
-/// Hunyuan3D, or TRELLIS.</summary>
+/// <summary>Generates a 3D mesh (GLB) or Gaussian-splat cloud (PLY) from an input image with TripoSR, Hunyuan3D, or TRELLIS.</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
@@ -63,11 +61,8 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Image))
-        {
-            AnsiConsole.MarkupLine("[red]An input image path is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Image, "An input image path is required.", out int exitCode))
+            return exitCode;
 
         if (string.IsNullOrWhiteSpace(settings.ModelPath))
         {
@@ -81,10 +76,9 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Mesh);
-        string label = spec.Catalog?.Id ?? settings.Model;
-        string outputDir = settings.Output ?? RepoPaths.OutputRoot();
+        string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.Mesh, spec, settings.Image, parameters, settings.Backend, settings.Quiet,
-            outputDir, label, showResponseRule: false);
+            settings.Output, label, showResponseRule: false);
     }
 }

@@ -2,7 +2,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Models;
 
-/// <summary>Architecture parameters read from model metadata (safetensors config.json or GGUF metadata). Used by <see cref="IModel"/> implementations and pipeline factory to configure the correct pipeline.</summary>
+/// <summary>Architecture parameters read from model metadata (safetensors config.json or GGUF metadata).</summary>
+/// <remarks>Used by <see cref="IModel"/> implementations and the pipeline factory.</remarks>
 public sealed record ModelConfig
 {
     /// <summary>Architecture identifier (e.g., "stable-diffusion-v1-5", "sdxl", "flux-dev").</summary>

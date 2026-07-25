@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Globalization;
-using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -57,11 +56,8 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Prompt))
-        {
-            AnsiConsole.MarkupLine("[red]A prompt is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Prompt, "A prompt is required.", out int exitCode))
+            return exitCode;
 
         // --model-path is an override for a local checkpoint (or a user-placed ACE-Step/YuE folder); it is NOT
         // required — every catalog music model (musicgen, audiogen, acestep, yue, stableaudio, heartmula)
@@ -71,10 +67,9 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Music);
-        string label = spec.Catalog?.Id ?? settings.Model;
-        string outputDir = settings.Output ?? RepoPaths.OutputRoot();
+        string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.Music, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
-            outputDir, label, showResponseRule: false);
+            settings.Output, label, showResponseRule: false);
     }
 }

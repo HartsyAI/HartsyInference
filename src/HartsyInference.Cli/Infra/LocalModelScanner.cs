@@ -1,8 +1,10 @@
+using HartsyInference.Core.Logging;
+
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>Discovers models already sitting on disk under the models root, so the CLI can offer a pick-list instead of
-/// making the user type a path. Aware of the SwarmUI/ComfyUI-style folder layout (Stable-Diffusion/, llm/, Music/,
-/// clip/, yolo/, …) that installs actually use, not a single flat per-modality folder.</summary>
+/// <summary>Discovers models already on disk under the models root, so the CLI can offer a pick-list instead of a typed path.</summary>
+/// <remarks>Aware of the SwarmUI/ComfyUI-style folder layout (Stable-Diffusion/, llm/, Music/, clip/, yolo/, …) that installs
+/// actually use, not a single flat per-modality folder.</remarks>
 public static class LocalModelScanner
 {
     // Per modality: which subfolders of the models root to look in, which file extensions count as a single-file model,
@@ -22,8 +24,8 @@ public static class LocalModelScanner
         _ => new(Array.Empty<string>(), Array.Empty<string>(), Recurse: false, IncludeDirs: false),
     };
 
-    /// <summary>Lists the models found under the models root for <paramref name="modality"/>, sorted by label and
-    /// de-duplicated by path. Empty when nothing local matches.</summary>
+    /// <summary>Lists the models found under the models root for <paramref name="modality"/>, sorted by label and de-duplicated by path.</summary>
+    /// <remarks>Empty when nothing local matches.</remarks>
     public static IReadOnlyList<DiscoveredModel> Scan(Modality modality)
     {
         string modelsRoot = RepoPaths.ModelsRoot();
@@ -114,7 +116,7 @@ public static class LocalModelScanner
         }
         catch (Exception ex)
         {
-            Core.Logging.Logs.Warning($"Model scan skipped '{dir}': {ex.Message}");
+            Logs.Warning($"Model scan skipped '{dir}': {ex.Message}");
             return Array.Empty<string>();
         }
     }
@@ -127,7 +129,7 @@ public static class LocalModelScanner
         }
         catch (Exception ex)
         {
-            Core.Logging.Logs.Warning($"Model scan skipped '{dir}': {ex.Message}");
+            Logs.Warning($"Model scan skipped '{dir}': {ex.Message}");
             return Array.Empty<string>();
         }
     }
@@ -138,8 +140,9 @@ public static class LocalModelScanner
         {
             return new FileInfo(file).Length;
         }
-        catch
+        catch (Exception ex)
         {
+            Logs.Warning($"Model scan skipped size lookup for '{file}': {ex.Message}");
             return 0;
         }
     }

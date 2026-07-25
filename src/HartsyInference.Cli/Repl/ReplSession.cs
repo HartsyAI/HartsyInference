@@ -2,13 +2,14 @@ using HartsyInference.Cli.Commands;
 using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Vision.Codec;
 using Spectre.Console;
 
 namespace HartsyInference.Cli.Repl;
 
-/// <summary>The interactive <c>hartsy</c> session: a persistent, editable parameter state, slash commands, and a
-/// per-session cache of loaded models so successive generations reuse the same backend and weights.</summary>
+/// <summary>The interactive <c>hartsy</c> session: persistent parameter state, slash commands, and a per-session cache of loaded models.</summary>
+/// <remarks>The cache lets successive generations reuse the same backend and weights.</remarks>
 public sealed class ReplSession : IDisposable
 {
     private static readonly IReadOnlyList<SlashCommand> SlashCommands = new SlashCommand[]
@@ -216,6 +217,7 @@ public sealed class ReplSession : IDisposable
         }
         catch (Exception ex)
         {
+            Logs.Warning($"Could not preview '{path}': {ex.Message}");
             AnsiConsole.MarkupLine($"[red]Could not preview:[/] {Markup.Escape(ex.Message)}");
         }
     }
@@ -224,8 +226,8 @@ public sealed class ReplSession : IDisposable
     private static bool NeedsModelSelection(Modality modality) =>
         modality is not (Modality.Transcribe or Modality.Speech);
 
-    /// <summary>Scans the models folder for the current modality and lets the user pick one (or enter a path/id), then
-    /// optionally walk its parameters. Returns false when nothing is chosen (empty folder or cancelled).</summary>
+    /// <summary>Scans the models folder for the current modality and lets the user pick one (or enter a path/id), then walk its parameters.</summary>
+    /// <remarks>Returns false when nothing is chosen (empty folder or cancelled).</remarks>
     private bool PickModel()
     {
         IReadOnlyList<DiscoveredModel> models = LocalModelScanner.Scan(_modality);
@@ -239,7 +241,7 @@ public sealed class ReplSession : IDisposable
             return false;
         }
 
-        List<string> choices = models.Select(m => m.IsDirectory ? $"{m.Label}/" : $"{m.Label}   {FormatBytes(m.SizeBytes)}").ToList();
+        List<string> choices = models.Select(m => m.IsDirectory ? $"{m.Label}/" : $"{m.Label}   {CliTheme.FormatBytes(m.SizeBytes)}").ToList();
         choices.Add("✎ enter a path or model id manually…");
 
         string name = Modalities.ToCliName(_modality);
@@ -289,21 +291,6 @@ public sealed class ReplSession : IDisposable
         ShowState();
     }
 
-    private static string FormatBytes(long bytes)
-    {
-        if (bytes <= 0)
-            return "";
-        string[] units = { "B", "KB", "MB", "GB", "TB" };
-        double value = bytes;
-        int unit = 0;
-        while (value >= 1024 && unit < units.Length - 1)
-        {
-            value /= 1024;
-            unit++;
-        }
-        return $"{value:0.#} {units[unit]}";
-    }
-
     private void ShowState()
     {
         Table table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
@@ -351,7 +338,6 @@ public sealed class ReplSession : IDisposable
         }
         AnsiConsole.WriteLine();
     }
-
 
     private static void PrintHelp()
     {

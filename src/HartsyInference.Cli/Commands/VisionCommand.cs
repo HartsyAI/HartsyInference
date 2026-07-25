@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Globalization;
-using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -62,17 +61,11 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Image))
-        {
-            AnsiConsole.MarkupLine("[red]An input image path is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Image, "An input image path is required.", out int exitCode))
+            return exitCode;
 
-        if (string.IsNullOrWhiteSpace(settings.Model) && string.IsNullOrWhiteSpace(settings.ModelPath))
-        {
-            AnsiConsole.MarkupLine("[red]A model is required via[/] [#2ea5e0]-m[/] [red]or[/] [#2ea5e0]--model-path[/][red].[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireModelOrPath(settings.Model, settings.ModelPath, "-m", "--model-path", out exitCode))
+            return exitCode;
 
         ParamState parameters = new ParamState(Modality.Vision) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("confidence", settings.Confidence.ToString(CultureInfo.InvariantCulture));
@@ -83,14 +76,13 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         }
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Vision);
-        string label = spec.Catalog?.Id ?? settings.Model;
+        string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.Vision, spec, settings.Image, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false);
     }
 
-    /// <summary>Picks the operation a model id implies: detectors detect, segmenters segment, the single-image
-    /// annotators map to their own mode, everything else embeds.</summary>
+    /// <summary>Picks the operation a model id implies: detect, segment, embed, or one of the single-image annotator modes.</summary>
     private static string InferMode(string model)
     {
         string id = model.ToLowerInvariant();

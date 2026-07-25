@@ -1,15 +1,14 @@
 using System.ComponentModel;
 using System.Globalization;
-using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Rolls out an interactive world model from a first-frame image with an action plan: Oasis (a
-/// one-shot batch rollout) or DIAMOND (a genuinely per-frame loop, one real denoise per action).</summary>
-public sealed class InteractiveCommand : Command<InteractiveCommand.Settings>
+/// <summary>Rolls out an interactive world model from a first-frame image with an action plan.</summary>
+/// <remarks>Oasis does a one-shot batch rollout; DIAMOND runs a genuinely per-frame loop, one real denoise per action.</remarks>
+public sealed class WorldCommand : Command<WorldCommand.Settings>
 {
     /// <summary>Options for <c>hartsy world</c>.</summary>
     public sealed class Settings : CommandSettings
@@ -44,8 +43,8 @@ public sealed class InteractiveCommand : Command<InteractiveCommand.Settings>
         [Description("Number of frames to roll out.")]
         public int Frames { get; init; } = 16;
 
-        /// <summary>Comma-separated action tokens; cycles if shorter than the frame count. Model-specific
-        /// default when omitted (Oasis: "forward"; DIAMOND: a fire/left/right demo cycle).</summary>
+        /// <summary>Comma-separated action tokens, cycled to fill the frame count; model-specific default when omitted.</summary>
+        /// <remarks>Oasis defaults to "forward"; DIAMOND defaults to a fire/left/right demo cycle.</remarks>
         [CommandOption("--actions")]
         [Description("Comma-separated action tokens, cycled to fill --frames (default: a model-specific demo plan).")]
         public string? Actions { get; init; }
@@ -74,11 +73,8 @@ public sealed class InteractiveCommand : Command<InteractiveCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Image))
-        {
-            AnsiConsole.MarkupLine("[red]A first-frame image path is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Image, "A first-frame image path is required.", out int exitCode))
+            return exitCode;
 
         if (string.IsNullOrWhiteSpace(settings.ModelPath))
         {
@@ -104,7 +100,7 @@ public sealed class InteractiveCommand : Command<InteractiveCommand.Settings>
             : new Dictionary<string, string>();
         ModelSpec baseSpec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.World);
         ModelSpec spec = baseSpec with { Aux = aux };
-        string label = spec.Catalog?.Id ?? settings.Model;
+        string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.World, spec, settings.Image, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false);

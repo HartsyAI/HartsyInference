@@ -2,22 +2,14 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
-/// <summary>Pure-F32 CPU reference for FlashAttention, shared by the <see cref="IBackend"/> default implementation
-/// and by GPU backends as the fallback when the device kernel can't handle a case (non-F32, or a head dim past
-/// the kernel's limit). Kept as a free static so the GPU fallback never re-dispatches into its own override.</summary>
+/// <summary>Pure-F32 CPU reference for FlashAttention, shared by <see cref="IBackend"/>'s default and GPU backends as a fallback.</summary>
 public static class AttentionReference
 {
-    /// <summary>Online-softmax attention. <paramref name="query"/> is <c>[B, Hq, Tq, D]</c>;
-    /// <paramref name="key"/>/<paramref name="value"/> are <c>[B, Hkv, Lk, D]</c>; <paramref name="output"/> is
-    /// <c>[B, Hq, Tq, D]</c>. Query head <c>h</c> reads kv head <c>h / kvGroup</c>. When <paramref name="causal"/>,
-    /// query row <c>r</c> (absolute position <c>qOffset + r</c>) attends keys <c>0 .. qOffset+r</c>. When
-    /// <paramref name="softcap"/> &gt; 0 each logit is soft-capped via <c>softcap·tanh(score/softcap)</c>.
-    /// When <paramref name="sink"/> is non-null (a <c>[Hq]</c> F32 tensor of per-head sink logits, GPT-OSS),
-    /// each head's sink joins the softmax denominator but contributes no value
-    /// (<c>softmax([scores, sink])</c> with the sink column dropped from the weighted sum).
-    /// When <paramref name="slidingWindow"/> &gt; 0, query row <c>r</c> additionally only attends the most recent
-    /// <c>slidingWindow</c> keys (absolute positions <c>qAbs-slidingWindow+1 .. qAbs</c>) — local-attention layers
-    /// of Gemma-2/3, Cohere2, GPT-OSS. 0 = no window (attend the whole causal prefix).</summary>
+    /// <summary>Online-softmax attention: query <c>[B,Hq,Tq,D]</c>, key/value <c>[B,Hkv,Lk,D]</c>; query head h reads kv head h/kvGroup.</summary>
+    /// <param name="causal">When true, query row r (position qOffset+r) attends keys 0..qOffset+r.</param>
+    /// <param name="softcap">&gt; 0 soft-caps each logit via <c>softcap·tanh(score/softcap)</c> before the softmax.</param>
+    /// <param name="sink">Non-null <c>[Hq]</c> per-head sink logits (GPT-OSS): joins the softmax denominator, contributes no value.</param>
+    /// <param name="slidingWindow">&gt; 0 restricts each query to the most recent N keys (Gemma/Cohere2/GPT-OSS locals); 0 = full prefix.</param>
     public static unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value,
         int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null,
         int slidingWindow = 0, Tensor? alibiSlopes = null)

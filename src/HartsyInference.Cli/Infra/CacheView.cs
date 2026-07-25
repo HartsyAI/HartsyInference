@@ -1,4 +1,3 @@
-using HartsyInference.Engine.Registry;
 using HartsyInference.ModelAssets.Registry;
 using Spectre.Console;
 
@@ -30,27 +29,12 @@ public static class CacheView
         {
             ModelInfo? info = cache.Get(id);
             string arch = info?.Architecture is { Length: > 0 } a ? Markup.Escape(a) : "[#9aa4af]?[/]";
-            string size = info is not null ? FormatBytes(info.FileSize) : "[#9aa4af]?[/]";
+            string size = info is not null ? CliTheme.FormatBytes(info.FileSize, "[#9aa4af]?[/]") : "[#9aa4af]?[/]";
             string path = info?.LocalPath is { Length: > 0 } p ? Markup.Escape(p) : "[#9aa4af]?[/]";
             table.AddRow($"[{CliTheme.Accent}]{Markup.Escape(id)}[/]", arch, size, $"[#9aa4af]{path}[/]");
         }
 
         AnsiConsole.Write(table);
         return ids.Count;
-    }
-
-    private static string FormatBytes(long bytes)
-    {
-        if (bytes <= 0)
-            return "[#9aa4af]?[/]";
-        string[] units = { "B", "KB", "MB", "GB", "TB" };
-        double value = bytes;
-        int unit = 0;
-        while (value >= 1024 && unit < units.Length - 1)
-        {
-            value /= 1024;
-            unit++;
-        }
-        return $"{value:0.#} {units[unit]}";
     }
 }

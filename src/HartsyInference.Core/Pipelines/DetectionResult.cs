@@ -1,7 +1,7 @@
 namespace HartsyInference.Core.Pipelines;
 
 /// <summary>A single detected object with bounding box and classification.</summary>
-public sealed class DetectionResult
+public sealed record DetectionResult
 {
     /// <summary>Bounding box: X coordinate of top-left corner (normalized 0-1).</summary>
     public float X { get; init; }

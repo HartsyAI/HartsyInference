@@ -3,9 +3,9 @@ using Spectre.Console;
 
 namespace HartsyInference.Cli.Dispatch;
 
-/// <summary>Renders a service's <see cref="StepPreview"/> ticks as an in-place step counter on the current line. Safe
-/// to interleave with plain console writes because it holds no Spectre live display; call <see cref="Finish"/> once
-/// the run ends to close the line.</summary>
+/// <summary>Renders a service's <see cref="StepPreview"/> ticks as an in-place step counter on the current line.</summary>
+/// <remarks>Safe to interleave with plain console writes because it holds no Spectre live display; call <see cref="Finish"/>
+/// once the run ends to close the line.</remarks>
 public sealed class ConsoleStepProgress : IProgress<StepPreview>
 {
     private readonly string _label;

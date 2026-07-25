@@ -1,13 +1,11 @@
 namespace HartsyInference.Core.Rope;
 
-/// <summary>Shared RoPE inverse-frequency builder. Computes the base <c>inv_freq[k] = 1/theta^(2k/D)</c> and
-/// applies a <see cref="RopeScaling"/> transform, returning the scaled frequencies plus the attention mscale
-/// to bake into cos/sin. Each caller (LLM decoder, diffusion text encoders, Cosmos/Anima) keeps its own cos/sin
-/// <i>layout</i> but obtains frequencies + mscale here, so the scaling math lives once.
-///
-/// <para>YaRN matches HuggingFace <c>_compute_yarn_parameters</c> exactly (ported from the GPT-OSS encoder,
-/// validated &lt;1e-8); Llama3 matches <c>_compute_llama3_parameters</c>. Computation is in double precision;
-/// callers cast to float.</para></summary>
+/// <summary>Shared RoPE inverse-frequency builder: computes base frequencies and applies a <see cref="RopeScaling"/> transform.</summary>
+/// <remarks>So the scaling math lives once for every caller. Each caller (LLM decoder, diffusion text encoders,
+/// Cosmos/Anima) keeps its own cos/sin <i>layout</i> but obtains frequencies + attention mscale here. YaRN
+/// matches HuggingFace <c>_compute_yarn_parameters</c> exactly (ported from the GPT-OSS encoder, validated
+/// &lt;1e-8); Llama3 matches <c>_compute_llama3_parameters</c>. Computation is in double precision; callers
+/// cast to float.</remarks>
 public static class RopeFrequencyBuilder
 {
     /// <summary>Base inverse frequencies <c>inv_freq[k] = 1 / theta^(2k/dim)</c>, length <c>dim/2</c>.</summary>
@@ -19,8 +17,8 @@ public static class RopeFrequencyBuilder
         return invFreq;
     }
 
-    /// <summary>Builds scaled inverse frequencies + the attention mscale (1.0 unless YaRN/LongRope).
-    /// <paramref name="currentSeqLen"/> drives DynamicNtk / LongRope short-vs-long selection.</summary>
+    /// <summary>Builds scaled inverse frequencies + the attention mscale (1.0 unless YaRN/LongRope).</summary>
+    /// <param name="currentSeqLen">Drives DynamicNtk / LongRope short-vs-long selection.</param>
     public static (double[] InvFreq, double AttentionScaling) Build(int dim, double theta, RopeScaling? scaling, int currentSeqLen)
     {
         RopeScaling s = scaling ?? RopeScaling.None;

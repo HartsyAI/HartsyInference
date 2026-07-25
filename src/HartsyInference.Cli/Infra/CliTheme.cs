@@ -1,12 +1,12 @@
 using System.Reflection;
 using System.Text;
+using HartsyInference.Core.Logging;
 using HartsyInference.Vision.Codec;
 using Spectre.Console;
 
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>Shared Spectre styling: the Hartsy-blue palette, the H-logo header panel, and the status markup used by
-/// every command.</summary>
+/// <summary>Shared Spectre styling: the Hartsy-blue palette, the H-logo header panel, and the status markup used by every command.</summary>
 public static class CliTheme
 {
     /// <summary>Primary brand accent (Hartsy blue) as a Spectre markup color token.</summary>
@@ -18,17 +18,36 @@ public static class CliTheme
     /// <summary>The truecolor RGB of the accent, for raw-ANSI rendering in the line editor.</summary>
     public static readonly (byte R, byte G, byte B) AccentRgb = (46, 165, 224);
 
-    /// <summary>Whether the terminal appears to use a light background, so muted text can pick a contrasting grey.
-    /// Determined once from <c>HARTSY_THEME</c> (dark/light) then <c>COLORFGBG</c>, defaulting to dark — the common
-    /// developer setting and what any terminal that doesn't advertise its theme is assumed to be.</summary>
+    // Top-lit vertical gradient echoing the blue-to-white swoosh in the Hartsy H mark.
+    private static readonly string[] LogoShades = { "#bfe8fb", "#8cd2f5", "#5bbeef", "#2ea5e0", "#3f9fd6", "#2b8cc4", "#1c78b4" };
+
+    private static readonly string[] LogoRows =
+    {
+        "██          ██",
+        "██          ██",
+        "██          ██",
+        "██████████████",
+        "██          ██",
+        "██          ██",
+        "██          ██",
+    };
+
+    // The exact background color baked into the embedded logo (see Assets/hartsy-h.png); rendered as terminal-default
+    // so the logo's swoosh drops cleanly onto any terminal theme.
+    private static readonly (byte R, byte G, byte B) LogoKey = (13, 17, 23);
+
+    /// <summary>Whether the terminal appears to use a light background, so muted text can pick a contrasting grey.</summary>
+    /// <remarks>Determined once from <c>HARTSY_THEME</c> (dark/light) then <c>COLORFGBG</c>, defaulting to dark — the
+    /// common developer setting and what any terminal that doesn't advertise its theme is assumed to be.</remarks>
     public static bool IsLightBackground { get; } = DetectLightBackground();
 
-    /// <summary>Secondary/label text color that keeps contrast on the detected background. Prefer this over a hardcoded
-    /// <c>grey</c> (which is mid-tone and washes out on dark themes) for captions, footers, and hints.</summary>
+    /// <summary>Secondary/label text color that keeps contrast on the detected background.</summary>
+    /// <remarks>Prefer this over a hardcoded <c>grey</c> (which is mid-tone and washes out on dark themes) for captions, footers,
+    /// and hints.</remarks>
     public static string Muted => IsLightBackground ? "#5b636b" : "#9aa4af";
 
-    /// <summary>The truecolor RGB of <see cref="Muted"/>, for raw-ANSI rendering (e.g. the line editor prompt), where
-    /// palette greys like <c>\e[90m</c> are unreadable because dark themes render them near the background.</summary>
+    /// <summary>The truecolor RGB of <see cref="Muted"/>, for raw-ANSI rendering (e.g. the line editor prompt).</summary>
+    /// <remarks>Palette greys like <c>\e[90m</c> are unreadable because dark themes render them near the background.</remarks>
     public static (byte R, byte G, byte B) MutedRgb => IsLightBackground ? ((byte)0x5b, (byte)0x63, (byte)0x6b) : ((byte)0x9a, (byte)0xa4, (byte)0xaf);
 
     private static bool DetectLightBackground()
@@ -51,27 +70,9 @@ public static class CliTheme
         return false;
     }
 
-    // Top-lit vertical gradient echoing the blue-to-white swoosh in the Hartsy H mark.
-    private static readonly string[] LogoShades = { "#bfe8fb", "#8cd2f5", "#5bbeef", "#2ea5e0", "#3f9fd6", "#2b8cc4", "#1c78b4" };
-
-    private static readonly string[] LogoRows =
-    {
-        "██          ██",
-        "██          ██",
-        "██          ██",
-        "██████████████",
-        "██          ██",
-        "██          ██",
-        "██          ██",
-    };
-
-    // The exact background color baked into the embedded logo (see Assets/hartsy-h.png); rendered as terminal-default
-    // so the logo's swoosh drops cleanly onto any terminal theme.
-    private static readonly (byte R, byte G, byte B) LogoKey = (13, 17, 23);
-
-    /// <summary>Renders the app header. On a real terminal this is the actual Hartsy H mark (the embedded logo drawn
-    /// with truecolor half-blocks); when output can't show it (piped, NO_COLOR), it falls back to the framed
-    /// block-glyph H. Both carry the wordmark and version / backend / working directory.</summary>
+    /// <summary>Renders the app header: the Hartsy H mark on a real terminal, or a framed block-glyph fallback otherwise.</summary>
+    /// <remarks>On a real terminal this is the embedded logo drawn with truecolor half-blocks; piped output or <c>NO_COLOR</c>
+    /// falls back to the block-glyph H. Both carry the wordmark and version / backend / working directory.</remarks>
     public static void RenderBanner(string backendSelector)
     {
         string version = typeof(CliTheme).Assembly.GetName().Version?.ToString(3) ?? "dev";
@@ -153,7 +154,7 @@ public static class CliTheme
         }
         catch (Exception ex)
         {
-            Core.Logging.Logs.Warning($"CLI banner logo failed to load: {ex.Message}");
+            Logs.Warning($"CLI banner logo failed to load: {ex.Message}");
             _logo = null;
         }
         return _logo;
@@ -168,12 +169,19 @@ public static class CliTheme
         _ => "[#9aa4af]?[/]",
     };
 
-    /// <summary>Short status word without color, for plain/JSON output.</summary>
-    public static string StatusWord(ModelStatus status) => status switch
+    /// <summary>Formats a byte count as a human-readable size (e.g. "4.2 GB"), or <paramref name="emptyMarkup"/> when ≤ 0.</summary>
+    internal static string FormatBytes(long bytes, string emptyMarkup = "")
     {
-        ModelStatus.Verified => "verified",
-        ModelStatus.ValidationPending => "validating",
-        ModelStatus.Structural => "structural",
-        _ => "unknown",
-    };
+        if (bytes <= 0)
+            return emptyMarkup;
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double value = bytes;
+        int unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+        return $"{value:0.#} {units[unit]}";
+    }
 }

@@ -1,14 +1,12 @@
 using System.ComponentModel;
 using System.Globalization;
-using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Re-voices a source clip with RVC (a user-placed trained voice) or OpenVoice (tone-color transfer from a
-/// target reference), saving a WAV.</summary>
+/// <summary>Re-voices a source clip with RVC (a trained voice) or OpenVoice (tone-color transfer), saving a WAV.</summary>
 public sealed class ConvertCommand : Command<ConvertCommand.Settings>
 {
     /// <summary>Options for <c>hartsy convert</c>.</summary>
@@ -58,11 +56,8 @@ public sealed class ConvertCommand : Command<ConvertCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Audio))
-        {
-            AnsiConsole.MarkupLine("[red]A source audio file path is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Audio, "A source audio file path is required.", out int exitCode))
+            return exitCode;
 
         ParamState parameters = new ParamState(Modality.VoiceConvert) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         if (settings.Target is { Length: > 0 })
@@ -70,10 +65,9 @@ public sealed class ConvertCommand : Command<ConvertCommand.Settings>
         parameters.Put("pitch-shift", settings.PitchShift.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.VoiceConvert);
-        string label = spec.Catalog?.Id ?? settings.Model;
-        string outputDir = settings.Output ?? RepoPaths.OutputRoot();
+        string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.VoiceConvert, spec, settings.Audio, parameters, settings.Backend, settings.Quiet,
-            outputDir, label, showResponseRule: false);
+            settings.Output, label, showResponseRule: false);
     }
 }

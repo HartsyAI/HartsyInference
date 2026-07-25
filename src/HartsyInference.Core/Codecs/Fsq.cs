@@ -2,21 +2,22 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Codecs;
 
-/// <summary>Finite Scalar Quantization primitives (Mentzer et al. 2023, "Finite Scalar Quantization: VQ-VAE Made
-/// Simple"), following <c>lucidrains/vector-quantize-pytorch::FSQ</c> exactly — the same scheme NVIDIA's Cosmos
-/// <c>FSQuantizer</c> uses. Each axis of a continuous latent is bounded by a parity-aware tanh and rounded to one
-/// of <c>L_d</c> discrete levels; the per-axis digits pack into a single integer via mixed-radix (base-<c>L</c>)
-/// place values. Vocabulary size = <c>product(levels)</c>.
+/// <summary>Finite Scalar Quantization primitives (Mentzer et al. 2023), matching <c>lucidrains/vector-quantize-pytorch::FSQ</c> exactly.</summary>
+/// <remarks>
+/// Each axis of a continuous latent is bounded by a parity-aware tanh and rounded to one of <c>L_d</c> discrete
+/// levels; the per-axis digits pack into a single integer via mixed-radix (base-<c>L</c>) place values. Vocabulary
+/// size = <c>product(levels)</c>.
 ///
-/// <para>This is the canonical shared implementation. Cosmos-Tokenize1-DV8x16x16 uses <c>levels = [8,8,8,5,5,5]</c>
+/// This is the canonical shared implementation. Cosmos-Tokenize1-DV8x16x16 uses <c>levels = [8,8,8,5,5,5]</c>
 /// → 64,000 tokens (mixed-radix basis <c>[1,8,64,512,2560,12800]</c>). Spark-TTS / CosyVoice / other FSQ codecs
 /// use their own level configs. Inference-only: no straight-through estimator; <c>round</c> uses banker's rounding
-/// (<see cref="MidpointRounding.ToEven"/>), matching PyTorch.</para>
+/// (<see cref="MidpointRounding.ToEven"/>), matching PyTorch.
 ///
-/// <para><b>Dequantize normalization.</b> <see cref="Dequantize"/> maps digit <c>k ∈ [0, L)</c> back to
+/// <b>Dequantize normalization.</b> <see cref="Dequantize"/> maps digit <c>k ∈ [0, L)</c> back to
 /// <c>(k − L/2) / (L/2)</c> (integer <c>L/2</c>), the lucidrains / Cosmos <c>indices_to_codes</c> convention. Note
 /// this differs from <c>HartsyInference.Audio.Models.Codecs.Fsq</c>'s legacy dequant divisor <c>(L−1)/2</c> for even
-/// levels — the two agree only on the (load-bearing) <see cref="Quantize"/> index path, which both share.</para></summary>
+/// levels — the two agree only on the (load-bearing) <see cref="Quantize"/> index path, which both share.
+/// </remarks>
 public static unsafe class Fsq
 {
     /// <summary>Vocabulary size for the given per-axis level configuration (= product of levels).</summary>
@@ -32,8 +33,7 @@ public static unsafe class Fsq
         return (int)product;
     }
 
-    /// <summary>Mixed-radix place values for packing per-axis digits into one integer: <c>basis[0]=1</c>,
-    /// <c>basis[d]=basis[d-1]·levels[d-1]</c>. For <c>[8,8,8,5,5,5]</c> → <c>[1,8,64,512,2560,12800]</c>.</summary>
+    /// <summary>Mixed-radix place values for packing digits into one integer: <c>basis[d]=basis[d-1]·levels[d-1]</c>, basis[0]=1.</summary>
     public static void Basis(ReadOnlySpan<int> levels, Span<int> basis)
     {
         if (basis.Length != levels.Length) throw new ArgumentException("basis length must match levels length.");
@@ -41,9 +41,7 @@ public static unsafe class Fsq
         for (int d = 1; d < levels.Length; d++) basis[d] = basis[d - 1] * levels[d - 1];
     }
 
-    /// <summary>Quantizes a continuous latent into integer codes. Input <paramref name="z"/> is channels-last
-    /// <c>[B, T, D]</c>; output <paramref name="codes"/> is <c>[B, T]</c> Int32. <paramref name="levels"/> length
-    /// must equal <c>D</c>. Identical to lucidrains <c>codes = round_ste(bound(z)) + L//2</c> then mixed-radix pack.</summary>
+    /// <summary>Quantizes a continuous latent <c>z [B,T,D]</c> into integer codes <c>[B,T]</c> (lucidrains's <c>round_ste(bound(z))</c>).</summary>
     public static void Quantize(Tensor codes, Tensor z, ReadOnlySpan<int> levels)
     {
         if (z.Shape.Rank != 3) throw new ArgumentException($"z must be rank-3 [B, T, D], got {z.Shape}.");
@@ -99,11 +97,7 @@ public static unsafe class Fsq
         }
     }
 
-    /// <summary>Converts already-grid-quantized codes <paramref name="zHat"/> <c>[B, T, D]</c> (values on the FSQ
-    /// grid, e.g. from <see cref="Dequantize"/>) into integer indices <paramref name="codes"/> <c>[B, T]</c> — the
-    /// exact inverse of <see cref="Dequantize"/> (lucidrains <c>codes_to_indices</c>): <c>digit = round(z·(L/2) +
-    /// L/2)</c>, mixed-radix packed. Unlike <see cref="Quantize"/> it does NOT re-apply the tanh bound, so
-    /// <c>CodesToIndices(Dequantize(codes)) == codes</c> bit-for-bit.</summary>
+    /// <summary>Converts grid-quantized codes to indices; inverse of <see cref="Dequantize"/> (skips <see cref="Quantize"/>'s tanh bound).</summary>
     public static void CodesToIndices(Tensor codes, Tensor zHat, ReadOnlySpan<int> levels)
     {
         if (zHat.Shape.Rank != 3) throw new ArgumentException($"zHat must be rank-3 [B, T, D], got {zHat.Shape}.");
@@ -140,9 +134,7 @@ public static unsafe class Fsq
             }
     }
 
-    /// <summary>Inverse of <see cref="Quantize"/>: integer codes <paramref name="codes"/> <c>[B, T]</c> →
-    /// continuous quantized vectors <paramref name="zHat"/> <c>[B, T, D]</c>, each axis normalized to (roughly)
-    /// <c>[-1, 1]</c> as <c>(k − L/2) / (L/2)</c> (lucidrains / Cosmos convention).</summary>
+    /// <summary>Inverse of <see cref="Quantize"/>: codes <c>[B,T]</c> → vectors <c>[B,T,D]</c>, each axis as <c>(k−L/2)/(L/2)</c>.</summary>
     public static void Dequantize(Tensor zHat, Tensor codes, ReadOnlySpan<int> levels)
     {
         if (zHat.Shape.Rank != 3) throw new ArgumentException($"zHat must be rank-3 [B, T, D], got {zHat.Shape}.");

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Memory;
@@ -10,19 +11,19 @@ public sealed unsafe class Tensor : IDisposable
     private NativeBuffer? _ownedBuffer;
     private nint _dataPointer;
 
-    /// <summary>Optional owner object kept alive for the lifetime of this tensor. For tensors that borrow an
-    /// external pointer (e.g. an mmap'd weight file), this roots the owner (e.g. the <c>MmapHandle</c>) so its
-    /// finalizer can't run — and unmap the memory out from under the borrowed pointer — while the tensor is still
-    /// reachable. Without this, a loader whose tensors outlive the loader reference itself (a common pattern when a
-    /// helper returns only the tensor dictionary) would dangle the moment a GC collects the loader.</summary>
+    /// <summary>Optional owner object kept alive for the lifetime of this tensor.</summary>
+    /// <remarks>For tensors that borrow an external pointer (e.g. an mmap'd weight file), this roots the owner
+    /// (e.g. the <c>MmapHandle</c>) so its finalizer can't run — and unmap the memory out from under the borrowed
+    /// pointer — while the tensor is still reachable. Without this, a loader whose tensors outlive the loader
+    /// reference itself (a common pattern when a helper returns only the tensor dictionary) would dangle the
+    /// moment a GC collects the loader.</remarks>
     private object? _keepAlive;
 
-    /// <summary>For owned tensors: the host buffer is allocated lazily on first CPU access (see <see cref="EnsureHostBuffer"/>).
-    /// This byte size is kept so the allocation can happen later. Zero for borrowed tensors.</summary>
+    /// <summary>Byte size to lazily allocate on first CPU access (see <see cref="EnsureHostBuffer"/>); zero for borrowed tensors.</summary>
     private readonly long _byteSize;
 
-    /// <summary>True when this tensor owns its (lazily allocated) host buffer; false when it borrows an external pointer
-    /// (mmap'd weights, pooled buffers, reshapes/views). Drives <see cref="OwnsMemory"/> and the lazy-alloc path.</summary>
+    /// <summary>True when this tensor owns a lazily allocated host buffer (see <see cref="OwnsMemory"/>); false for borrowed pointers.</summary>
+    /// <remarks>Drives <see cref="OwnsMemory"/> and the lazy-allocation path.</remarks>
     private readonly bool _ownsLazy;
 
     /// <summary>Set once on Dispose so the lazy host-buffer path can't resurrect freed memory.</summary>
@@ -34,38 +35,39 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Backend-set callback: frees GPU pointer without D2H copy. Invoked on Dispose when GPU data was never synced to CPU.</summary>
     internal Action? _gpuDisposeCallback;
 
-    /// <summary>Key identifying which backend context owns <see cref="_gpuDisposeCallback"/> — the CUDA primary-context
-    /// handle (one per device) the callback frees against. Set by the backend when it plants the callback; 0 for
-    /// non-CUDA/context-less callbacks. Used to route this tensor's finalizer cleanup into the owning context's queue
-    /// so the draining thread only ever touches its own backend's state (see <see cref="PendingFinalizerGpuCleanup"/>).</summary>
+    /// <summary>Key identifying which backend context owns <see cref="_gpuDisposeCallback"/>.</summary>
+    /// <remarks>The CUDA primary-context handle (one per device) the callback frees against. Set by the backend
+    /// when it plants the callback; 0 for non-CUDA/context-less callbacks. Used to route this tensor's finalizer
+    /// cleanup into the owning context's queue so the draining thread only ever touches its own backend's state
+    /// (see <see cref="PendingFinalizerGpuCleanup"/>).</remarks>
     internal nint _gpuCleanupContext;
 
-    /// <summary>GPU cleanup callbacks from tensors reclaimed by the finalizer (never explicitly Disposed) — queued
-    /// here instead of invoked inline. The finalizer thread has no business making CUDA driver calls (stream
-    /// enqueue order across threads is a race even though individual driver calls are thread-safe): a free enqueued
-    /// from the finalizer thread can land between two dependent ops the inference thread assumed were adjacent in
-    /// the stream, corrupting an in-flight buffer. Drained by the backend on the thread that actually owns the
-    /// stream (see <c>CudaContext.EnsureCurrent</c>) so every GPU driver call still comes from one thread.
+    /// <summary>GPU cleanup callbacks from finalizer-reclaimed tensors (never explicitly Disposed), queued rather than invoked inline.</summary>
+    /// <remarks>The finalizer thread has no business making CUDA driver calls (stream enqueue order across threads
+    /// is a race even though individual driver calls are thread-safe): a free enqueued from the finalizer thread
+    /// can land between two dependent ops the inference thread assumed were adjacent in the stream, corrupting an
+    /// in-flight buffer. Drained by the backend on the thread that actually owns the stream (see
+    /// <c>CudaContext.EnsureCurrent</c>) so every GPU driver call still comes from one thread.
     ///
     /// <para>Partitioned by owning-context key (not one global queue): a callback frees against, and mutates the
     /// unsynchronized per-context state of, exactly one backend. With multiple GPU backends live in one process,
     /// draining every backend's callbacks from any thread let backend B's inference thread mutate backend A's
     /// non-thread-safe state while A's own thread did the same — a data race that leaked VRAM / threw / corrupted
     /// under concurrent multi-GPU load. Keying by context (bucket per device) means each thread drains only its own
-    /// backend's bucket. Bucket 0 holds context-less callbacks (e.g. Vulkan) and is drained only by the drain-all overload.</para></summary>
-    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<nint, System.Collections.Concurrent.ConcurrentQueue<Action>> PendingFinalizerGpuCleanup = new();
+    /// backend's bucket. Bucket 0 holds context-less callbacks (e.g. Vulkan) and is drained only by the drain-all overload.</para></remarks>
+    internal static readonly ConcurrentDictionary<nint, ConcurrentQueue<Action>> PendingFinalizerGpuCleanup = new();
 
     /// <summary>Queues a finalizer GPU-cleanup callback under its owning context's bucket.</summary>
     internal static void EnqueueFinalizerGpuCleanup(nint contextKey, Action cleanup)
     {
-        PendingFinalizerGpuCleanup.GetOrAdd(contextKey, static _ => new System.Collections.Concurrent.ConcurrentQueue<Action>()).Enqueue(cleanup);
+        PendingFinalizerGpuCleanup.GetOrAdd(contextKey, static _ => new ConcurrentQueue<Action>()).Enqueue(cleanup);
     }
 
-    /// <summary>Drains and invokes the finalizer GPU-cleanup callbacks owned by <paramref name="contextKey"/> only.
-    /// Call from the thread that owns that backend's CUDA context/stream — it touches no other backend's state.</summary>
+    /// <summary>Drains and invokes the finalizer GPU-cleanup callbacks owned by <paramref name="contextKey"/> only.</summary>
+    /// <remarks>Call from the thread that owns that backend's CUDA context/stream — it touches no other backend's state.</remarks>
     public static void DrainPendingFinalizerGpuCleanup(nint contextKey)
     {
-        if (PendingFinalizerGpuCleanup.TryGetValue(contextKey, out System.Collections.Concurrent.ConcurrentQueue<Action>? queue))
+        if (PendingFinalizerGpuCleanup.TryGetValue(contextKey, out ConcurrentQueue<Action>? queue))
         {
             while (queue.TryDequeue(out Action? cleanup))
             {
@@ -74,12 +76,12 @@ public sealed unsafe class Tensor : IDisposable
         }
     }
 
-    /// <summary>Drains every context's finalizer GPU-cleanup callbacks, regardless of owner. Only safe when the caller
-    /// can service all live contexts (single-backend / shutdown paths). Concurrent multi-GPU inference must use the
-    /// keyed overload so a thread never runs another backend's cleanup.</summary>
+    /// <summary>Drains every context's finalizer GPU-cleanup callbacks, regardless of owner.</summary>
+    /// <remarks>Only safe when the caller can service all live contexts (single-backend / shutdown paths).
+    /// Concurrent multi-GPU inference must use the keyed overload so a thread never runs another backend's cleanup.</remarks>
     public static void DrainPendingFinalizerGpuCleanup()
     {
-        foreach (System.Collections.Concurrent.ConcurrentQueue<Action> queue in PendingFinalizerGpuCleanup.Values)
+        foreach (ConcurrentQueue<Action> queue in PendingFinalizerGpuCleanup.Values)
         {
             while (queue.TryDequeue(out Action? cleanup))
             {
@@ -88,20 +90,21 @@ public sealed unsafe class Tensor : IDisposable
         }
     }
 
-    /// <summary>Drops (without invoking) all queued finalizer GPU-cleanup callbacks for <paramref name="contextKey"/>.
-    /// Call at backend teardown AFTER the backend has freed all its cached device memory: the queued callbacks can
-    /// only reference caches that were just emptied, so running them is a no-op at best — and the CUDA driver reuses
-    /// primary-context handles, so leaving them queued makes the NEXT backend on the same device drain and execute
-    /// another backend's stale callbacks during its own construction (the GGUF model-switch NRE).</summary>
+    /// <summary>Drops (without invoking) all queued finalizer GPU-cleanup callbacks for <paramref name="contextKey"/>.</summary>
+    /// <remarks>Call at backend teardown AFTER the backend has freed all its cached device memory: the queued
+    /// callbacks can only reference caches that were just emptied, so running them is a no-op at best — and the
+    /// CUDA driver reuses primary-context handles, so leaving them queued makes the NEXT backend on the same
+    /// device drain and execute another backend's stale callbacks during its own construction (the GGUF
+    /// model-switch NRE).</remarks>
     public static void DiscardPendingFinalizerGpuCleanup(nint contextKey)
     {
         PendingFinalizerGpuCleanup.TryRemove(contextKey, out _);
     }
 
-    /// <summary>Runs one queued cleanup, containing any failure. A queued callback can be arbitrarily stale (its
-    /// backend torn down, its object graph resurrected post-finalization), and the drain runs inside whatever
-    /// innocent op happened to bind the context next — one throwing callback must not take that op (or a whole
-    /// backend construction) down with it.</summary>
+    /// <summary>Runs one queued cleanup, containing any failure so it can't take down an unrelated op.</summary>
+    /// <remarks>A queued callback can be arbitrarily stale (its backend torn down, its object graph resurrected
+    /// post-finalization), and the drain runs inside whatever innocent op happened to bind the context next — one
+    /// throwing callback must not take that op (or a whole backend construction) down with it.</remarks>
     private static void InvokeFinalizerGpuCleanup(Action cleanup)
     {
         try
@@ -114,9 +117,10 @@ public sealed unsafe class Tensor : IDisposable
         }
     }
 
-    /// <summary>Creates a new owned tensor. The host buffer is NOT allocated here; it is allocated (zeroed) lazily on the
-    /// first CPU access via <see cref="DataPointer"/>/<see cref="AsSpan{T}"/>/etc. GPU-resident activations (whose data
-    /// lives on the device and is freed without ever being read on the host) therefore never pay for a host malloc+memset.</summary>
+    /// <summary>Creates a new owned tensor; the host buffer is NOT allocated here, only lazily on first CPU access.</summary>
+    /// <remarks>Allocated (zeroed) lazily via <see cref="DataPointer"/>/<see cref="AsSpan{T}"/>/etc. GPU-resident
+    /// activations (whose data lives on the device and is freed without ever being read on the host) therefore
+    /// never pay for a host malloc+memset.</remarks>
     public Tensor(TensorShape shape, DType dtype, DeviceKind device = default)
     {
         Shape = shape;
@@ -157,14 +161,14 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Total number of elements across all dimensions.</summary>
     public long ElementCount => Shape.ElementCount;
 
-    /// <summary>Whether this tensor owns its memory or borrows it from a mmap/view. True even before the lazy host
-    /// buffer has been allocated, since ownership is a property of how the tensor was constructed, not of allocation timing.</summary>
+    /// <summary>Whether this tensor owns its memory or borrows it from a mmap/view.</summary>
+    /// <remarks>True even before the lazy host buffer is allocated, since it reflects how the tensor was constructed.</remarks>
     public bool OwnsMemory => _ownsLazy;
 
-    /// <summary>Ensures the owned host buffer exists (allocating it zeroed on first call) and returns its pointer. For
-    /// borrowed tensors the external pointer is returned as-is. This is the single lazy-allocation chokepoint: GPU
-    /// activations that are never read on the host skip it entirely and so never allocate host memory. The CUDA D2H
-    /// sync callback also calls this to obtain a destination buffer at sync time.</summary>
+    /// <summary>Ensures the owned host buffer exists (zeroed on first call) and returns its pointer; borrowed tensors return as-is.</summary>
+    /// <remarks>This is the single lazy-allocation chokepoint: GPU activations that are never read on the host
+    /// skip it entirely and so never allocate host memory. The CUDA D2H sync callback also calls this to obtain a
+    /// destination buffer at sync time.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void* EnsureHostBuffer()
     {
@@ -180,7 +184,9 @@ public sealed unsafe class Tensor : IDisposable
         return (void*)ptr;
     }
 
-    /// <summary>Per-tensor scale for ComfyUI-style <c>fp8_scaled</c> quantization, where the real value of each weight is <c>fp8_byte_decoded * Fp8ScaleFactor</c>. Default 1.0 means no extra scaling. Non-1 values are folded into cuBLAS' <c>alpha</c> at GEMM call sites so scaling happens for free during matmul.</summary>
+    /// <summary>Per-tensor scale for ComfyUI-style <c>fp8_scaled</c> quantization: real value = <c>fp8_byte_decoded * Fp8ScaleFactor</c>.</summary>
+    /// <remarks>Default 1.0 means no extra scaling. Non-1 values are folded into cuBLAS' <c>alpha</c> at GEMM
+    /// call sites so scaling happens for free during matmul.</remarks>
     public float Fp8ScaleFactor { get; set; } = 1.0f;
 
     /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first; otherwise
@@ -224,10 +230,11 @@ public sealed unsafe class Tensor : IDisposable
         return new TensorRef(ptr, Shape, DType, Device);
     }
 
-    /// <summary>Creates a view with a different shape but same underlying data. No copy. The view roots this
-    /// tensor (see <see cref="_keepAlive"/>): without that, reshaping a temporary (e.g. an <c>EnsureF32</c> cast
-    /// held by nothing else) left the view dangling once GC finalized the parent and freed its buffer — a
-    /// GC-timing-dependent AccessViolation observed in the Qwen3-TTS vocoder after ~9 min of generation.</summary>
+    /// <summary>Creates a view with a different shape but the same underlying data — no copy.</summary>
+    /// <remarks>The view roots this tensor (see <see cref="_keepAlive"/>): without that, reshaping a temporary
+    /// (e.g. an <c>EnsureF32</c> cast held by nothing else) left the view dangling once GC finalized the parent
+    /// and freed its buffer — a GC-timing-dependent AccessViolation observed in the Qwen3-TTS vocoder after ~9 min
+    /// of generation.</remarks>
     public Tensor Reshape(TensorShape newShape)
     {
         void* ptr = DataPointer;
@@ -416,7 +423,10 @@ public sealed unsafe class Tensor : IDisposable
         }
     }
 
-    /// <summary>Fused dequant: FP8-E4M3 → F16, multiplying each value by a per-tensor F32 scalar. Used for ComfyUI-style fp8_scaled checkpoints (e.g. flux1-krea-dev_fp8_scaled) where real_weight = fp8_value * scale_weight. Single-pass to avoid an F32 intermediate, halving peak memory during checkpoint load.</summary>
+    /// <summary>Fused dequant: FP8-E4M3 → F16, multiplying each value by a per-tensor F32 scalar.</summary>
+    /// <remarks>Used for ComfyUI-style fp8_scaled checkpoints (e.g. flux1-krea-dev_fp8_scaled) where
+    /// real_weight = fp8_value * scale_weight. Single-pass to avoid an F32 intermediate, halving peak memory
+    /// during checkpoint load.</remarks>
     public unsafe Tensor DequantFp8E4M3ScaledToF16(float scale)
     {
         if (DType != DType.F8E4M3)
@@ -547,7 +557,7 @@ public sealed unsafe class Tensor : IDisposable
         return upper;
     }
 
-    /// <summary>Frees owned memory via atomic pointer exchange. If GPU data is cached, frees it without D2H copy. Borrowed tensors are no-ops.</summary>
+    /// <summary>Frees owned memory via atomic pointer exchange; frees cached GPU data without D2H copy. Borrowed tensors are no-ops.</summary>
     public void Dispose()
     {
         _disposed = true;

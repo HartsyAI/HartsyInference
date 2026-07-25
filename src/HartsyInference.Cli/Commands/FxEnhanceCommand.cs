@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Globalization;
-using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -57,11 +56,8 @@ public sealed class FxEnhanceCommand : Command<FxEnhanceCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Audio))
-        {
-            AnsiConsole.MarkupLine("[red]An audio file path is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Audio, "An audio file path is required.", out int exitCode))
+            return exitCode;
 
         ParamState parameters = new ParamState(Modality.Fx) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("mode", "enhance");
@@ -72,10 +68,9 @@ public sealed class FxEnhanceCommand : Command<FxEnhanceCommand.Settings>
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, null, Modality.Fx);
-        string label = spec.Catalog?.Id ?? settings.Model;
-        string outputDir = settings.Output ?? RepoPaths.OutputRoot();
+        string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.Fx, spec, settings.Audio, parameters, settings.Backend, settings.Quiet,
-            outputDir, label, showResponseRule: false);
+            settings.Output, label, showResponseRule: false);
     }
 }

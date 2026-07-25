@@ -1,6 +1,6 @@
 namespace HartsyInference.Core.Logging;
 
-/// <summary>Static logging class for HartsyInference. Provides simple, low-overhead logging that can be redirected to any logging framework via <see cref="SetLogger"/>.</summary>
+/// <summary>Static, low-overhead logging for HartsyInference; redirectable to any framework via <see cref="SetLogger"/>.</summary>
 public static class Logs
 {
     private static Action<LogLevel, string>? _logger;
@@ -14,36 +14,42 @@ public static class Logs
         _logger = logger;
     }
 
+    /// <summary>Logs at <see cref="LogLevel.Verbose"/> when permitted by <see cref="MinLevel"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Verbose(string message)
     {
         if (MinLevel <= LogLevel.Verbose) Write(LogLevel.Verbose, message);
     }
 
+    /// <summary>Logs at <see cref="LogLevel.Debug"/> when permitted by <see cref="MinLevel"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Debug(string message)
     {
         if (MinLevel <= LogLevel.Debug) Write(LogLevel.Debug, message);
     }
 
+    /// <summary>Logs at <see cref="LogLevel.Info"/> when permitted by <see cref="MinLevel"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Info(string message)
     {
         if (MinLevel <= LogLevel.Info) Write(LogLevel.Info, message);
     }
 
+    /// <summary>Logs at <see cref="LogLevel.Warning"/> when permitted by <see cref="MinLevel"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Warning(string message)
     {
         if (MinLevel <= LogLevel.Warning) Write(LogLevel.Warning, message);
     }
 
+    /// <summary>Logs at <see cref="LogLevel.Error"/> when permitted by <see cref="MinLevel"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Error(string message)
     {
         if (MinLevel <= LogLevel.Error) Write(LogLevel.Error, message);
     }
 
+    /// <summary>Logs at <see cref="LogLevel.Error"/> with the exception appended, when permitted by <see cref="MinLevel"/>.</summary>
     public static void Error(string message, Exception ex)
     {
         if (MinLevel <= LogLevel.Error) Write(LogLevel.Error, $"{message}: {ex}");

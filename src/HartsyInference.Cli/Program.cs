@@ -5,9 +5,8 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli;
 
-/// <summary>Entry point for the unified <c>hartsy</c> CLI: a Spectre.Console command app over every engine modality.
-/// Phase 1 wires the shared infrastructure and the catalog/cache commands (list, models, pull); the interactive
-/// REPL and per-modality generate commands land in later phases.</summary>
+/// <summary>Entry point for the unified <c>hartsy</c> CLI: registers every per-modality generate command plus the catalog/cache commands.</summary>
+/// <remarks>Launches the interactive REPL when run with no arguments.</remarks>
 public static class Program
 {
     /// <summary>Parses <paramref name="args"/> and dispatches to a command; with no args, shows the banner and usage.</summary>
@@ -63,7 +62,7 @@ public static class Program
             config.AddCommand<VideoCommand>("video")
                 .WithDescription("Generate a video (frame sequence) from a prompt with any registered video family (CUDA).")
                 .WithExample("video", "a cat walking through a sunlit garden", "-m", "ltx-video");
-            config.AddCommand<InteractiveCommand>("world")
+            config.AddCommand<WorldCommand>("world")
                 .WithDescription("Roll out an Oasis world model from a first-frame image (canned action plan).");
             config.AddCommand<PreviewCommand>("preview")
                 .WithDescription("Display an image (PNG/BMP) inline in the terminal.")

@@ -2,9 +2,9 @@ using System.Globalization;
 
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>Mutable, printable bag of generation parameters shared by the subcommands and the interactive REPL.
-/// Holds the global selectors (backend, model, output) plus the per-modality tunable keys. A key seeded empty means
-/// "not chosen" — it is sent to the engine as null so the model family's own official default applies.</summary>
+/// <summary>Mutable, printable bag of generation parameters shared by the subcommands and the interactive REPL.</summary>
+/// <remarks>Holds the global selectors (backend, model, output) plus the per-modality tunable keys. A key seeded empty
+/// means "not chosen" — it is sent to the engine as null so the model family's own official default applies.</remarks>
 public sealed class ParamState
 {
     private readonly Dictionary<string, string> _values = new(StringComparer.OrdinalIgnoreCase);

@@ -3,7 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Models;
 
-/// <summary>Interface for a loaded model. Provides access to model weights, configuration, and a forward pass method. Model implementations are responsible for mapping loaded tensor weights to their internal architecture.</summary>
+/// <summary>A loaded model that maps its weight tensors to an internal architecture and exposes config, device, and a forward pass.</summary>
 public interface IModel : IDisposable
 {
     /// <summary>Configuration describing the model architecture and parameters.</summary>

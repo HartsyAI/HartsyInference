@@ -1,7 +1,6 @@
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>Encodes tightly-packed 24-bit RGB pixel data into an in-memory BMP file, so image artifacts can be
-/// returned as bytes without pulling in an external image library (the engine only exposes a file-writing helper).</summary>
+/// <summary>Encodes tightly-packed 24-bit RGB pixel data into an in-memory BMP file, avoiding a dependency on an external image library.</summary>
 public static class BmpEncoder
 {
     /// <summary>Encodes <paramref name="rgb"/> (row-major, top-to-bottom, 3 bytes/pixel R,G,B) as a 24-bit BMP.</summary>
@@ -52,8 +51,8 @@ public static class BmpEncoder
         return bmp;
     }
 
-    /// <summary>Decodes a bottom-up 24-bit BMP (the format <see cref="Encode"/> produces) back into row-major,
-    /// top-to-bottom RGB24. Used to preview BMP artifacts (image/video frames) inline.</summary>
+    /// <summary>Decodes a bottom-up 24-bit BMP (the format <see cref="Encode"/> produces) back into row-major, top-to-bottom RGB24.</summary>
+    /// <remarks>Used to preview BMP artifacts (image/video frames) inline.</remarks>
     public static (byte[] rgb, int width, int height) Decode(byte[] bmp)
     {
         if (bmp.Length < 54 || bmp[0] != 'B' || bmp[1] != 'M')

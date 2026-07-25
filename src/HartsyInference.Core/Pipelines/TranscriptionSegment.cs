@@ -1,7 +1,7 @@
 namespace HartsyInference.Core.Pipelines;
 
 /// <summary>A segment of transcribed audio with timing information.</summary>
-public sealed class TranscriptionSegment
+public sealed record TranscriptionSegment
 {
     /// <summary>Transcribed text for this segment.</summary>
     public required string Text { get; init; }

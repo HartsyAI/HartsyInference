@@ -1,7 +1,7 @@
 namespace HartsyInference.Cli.Dispatch;
 
-/// <summary>The in-memory result of one generation, produced by a handler and consumed by the CLI for display and
-/// by <c>ArtifactWriter</c> for persistence. Handlers encode file bytes themselves so the writer stays generic.</summary>
+/// <summary>The in-memory result of one generation, consumed by the CLI for display and by <c>ArtifactWriter</c> for persistence.</summary>
+/// <remarks>Handlers encode file bytes themselves so the writer stays generic.</remarks>
 public sealed class GeneratedArtifact
 {
     /// <summary>The output form (drives writing and preview).</summary>
@@ -16,19 +16,17 @@ public sealed class GeneratedArtifact
     /// <summary>Suggested file extension without the dot (e.g. "png", "wav", "glb", "txt").</summary>
     public string Extension { get; init; } = "txt";
 
-    /// <summary>True when <see cref="Text"/> was already emitted live via the progress sink (e.g. streamed LLM
-    /// tokens), so the presenter should not reprint it.</summary>
+    /// <summary>True when <see cref="Text"/> was already streamed live, so the presenter should not reprint it.</summary>
     public bool Streamed { get; init; }
 
-    /// <summary>True when the handler already wrote its own file(s) to disk (e.g. per-frame PNGs, per-stem WAVs —
-    /// "one call, N files" results with no single <see cref="FileBytes"/> payload). <c>ArtifactWriter</c> must skip
-    /// these: without this flag, its "text with no bytes" fallback would still write <see cref="Text"/> (the
-    /// human-readable summary) as a bogus file stamped with <see cref="Extension"/> — e.g. a "stems-0001.wav" that
-    /// is actually a text file, not audio.</summary>
+    /// <summary>True when the handler already wrote its own file(s) to disk (no single <see cref="FileBytes"/> payload).</summary>
+    /// <remarks><c>ArtifactWriter</c> must skip these: without this flag, its "text with no bytes" fallback would still
+    /// write <see cref="Text"/> (the human-readable summary) as a bogus file stamped with <see cref="Extension"/> —
+    /// e.g. a "stems-0001.wav" that is actually a text file, not audio.</remarks>
     public bool SelfWritten { get; init; }
 
-    /// <summary>Raw RGB24 pixels (row-major, top-to-bottom) for an inline terminal preview; null when there is nothing
-    /// to show. For video/world results this is the first frame.</summary>
+    /// <summary>Raw RGB24 pixels (row-major, top-to-bottom) for an inline terminal preview; null when there is nothing to show.</summary>
+    /// <remarks>For video/world results, this is the first frame.</remarks>
     public byte[]? PreviewRgb { get; init; }
 
     /// <summary>Pixel width of <see cref="PreviewRgb"/>.</summary>

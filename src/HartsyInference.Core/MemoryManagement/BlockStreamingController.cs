@@ -3,24 +3,11 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Core.MemoryManagement;
 
-/// <summary>Drives a sliding window of resident blocks across a sequential model's forward pass: prefetches blocks ahead of compute, awaits them just-in-time, and evicts blocks that have fallen behind the retain window. HartsyInference equivalent of ComfyUI's "lowvram" model-streaming. Single-threaded; call from the inference thread that owns the backend's CUDA context.</summary>
+/// <summary>Drives a sliding window of resident blocks: prefetches ahead, awaits just-in-time, evicts past the retain window.</summary>
+/// <remarks>HartsyInference equivalent of ComfyUI's "lowvram" model-streaming. Single-threaded; call from the inference
+/// thread that owns the backend's CUDA context.</remarks>
 public sealed class BlockStreamingController : IDisposable
 {
-    private enum BlockState
-    {
-        /// <summary>No upload has been issued for this block; weights live only on host.</summary>
-        NotUploaded = 0,
-
-        /// <summary>Upload is in flight; <see cref="_tokens"/> holds the await token.</summary>
-        Uploading = 1,
-
-        /// <summary>Upload has been awaited; weights are usable on the compute stream.</summary>
-        Resident = 2,
-
-        /// <summary>Memory has been freed via <see cref="IStreamingWeightCache.EvictAsync"/>. Re-uploading goes back through <see cref="BlockState.NotUploaded"/>.</summary>
-        Evicted = 3,
-    }
-
     private readonly IStreamingWeightCache _cache;
     private readonly IReadOnlyList<IStreamingBlock> _blocks;
     private readonly int _prefetchAhead;
@@ -31,7 +18,9 @@ public sealed class BlockStreamingController : IDisposable
 
     private bool _disposed;
 
-    /// <summary>Constructs a streaming controller. <paramref name="prefetchAhead"/> is the in-flight depth (0 = synchronous, 1 = typical overlap). <paramref name="retainBehind"/> keeps already-used blocks cached for reuse (0 = evict immediately).</summary>
+    /// <summary>Constructs a streaming controller with the given prefetch depth and retain window.</summary>
+    /// <remarks><paramref name="prefetchAhead"/> is the in-flight depth (0 = synchronous, 1 = typical overlap); <paramref name="retainBehind"/> keeps
+    /// already-used blocks cached for reuse (0 = evict immediately).</remarks>
     public BlockStreamingController(
         IStreamingWeightCache cache,
         IReadOnlyList<IStreamingBlock> blocks,
@@ -74,7 +63,7 @@ public sealed class BlockStreamingController : IDisposable
         }
     }
 
-    /// <summary>Begins async uploads for blocks <c>[0, prefetchAhead]</c> so the first <see cref="BeforeBlockForward"/> call doesn't pay a cold-start synchronous load. Idempotent.</summary>
+    /// <summary>Begins async uploads for <c>[0, prefetchAhead]</c> so <see cref="BeforeBlockForward"/> skips a cold-start load; idempotent.</summary>
     public void Prime()
     {
         ThrowIfDisposed();
@@ -84,7 +73,9 @@ public sealed class BlockStreamingController : IDisposable
         }
     }
 
-    /// <summary>Call IMMEDIATELY before block <paramref name="blockIdx"/>'s forward pass. Awaits block <paramref name="blockIdx"/>, kicks off prefetch for <c>blockIdx + prefetchAhead</c>, and evicts <c>blockIdx - retainBehind - 1</c> if outside the retain window. Indexes outside <c>[0, BlockCount)</c> are no-ops.</summary>
+    /// <summary>Call before block <paramref name="blockIdx"/>'s forward pass: awaits it, prefetches ahead, evicts past retain window.</summary>
+    /// <remarks>Kicks off prefetch for <c>blockIdx + prefetchAhead</c> and evicts <c>blockIdx - retainBehind - 1</c> if outside the retain
+    /// window. Indexes outside <c>[0, BlockCount)</c> are no-ops.</remarks>
     public void BeforeBlockForward(int blockIdx)
     {
         ThrowIfDisposed();
@@ -109,7 +100,9 @@ public sealed class BlockStreamingController : IDisposable
         }
     }
 
-    /// <summary>Frees every block that's still resident, then drains in-flight async ops and releases backend pool reservations to the driver. Call between streaming and eager-allocation phases — CUDA's stream-ordered allocator pool is invisible to subsequent sync allocations unless explicitly trimmed. Safe to call multiple times.</summary>
+    /// <summary>Frees every resident block, drains in-flight async ops, and releases backend pool reservations to the driver.</summary>
+    /// <remarks>Call between streaming and eager-allocation phases — CUDA's stream-ordered allocator pool is invisible to subsequent sync
+    /// allocations unless explicitly trimmed. Safe to call multiple times.</remarks>
     public void EvictAll()
     {
         ThrowIfDisposed();
@@ -120,7 +113,8 @@ public sealed class BlockStreamingController : IDisposable
         _cache.DrainAndReleasePool();
     }
 
-    /// <summary>Drives block to <see cref="BlockState.Uploading"/> if it's currently <see cref="BlockState.NotUploaded"/> or <see cref="BlockState.Evicted"/>. No-op for blocks already <see cref="BlockState.Uploading"/> or <see cref="BlockState.Resident"/>.</summary>
+    /// <summary>Drives NotUploaded/Evicted block to <see cref="BlockState.Uploading"/>.</summary>
+    /// <remarks>No-op if already Uploading or Resident.</remarks>
     private void EnsureUploading(int idx)
     {
         BlockState state = _state[idx];
@@ -136,7 +130,8 @@ public sealed class BlockStreamingController : IDisposable
         _state[idx] = BlockState.Uploading;
     }
 
-    /// <summary>Drives block to <see cref="BlockState.Resident"/>. Cold-start path (NotUploaded/Evicted) issues BeginUpload + immediate Await — slow path that means prefetch wasn't deep enough.</summary>
+    /// <summary>Drives block to <see cref="BlockState.Resident"/>.</summary>
+    /// <remarks>Cold-start path (NotUploaded/Evicted) issues BeginUpload + immediate Await — means prefetch wasn't deep enough.</remarks>
     private void EnsureResident(int idx)
     {
         switch (_state[idx])
@@ -163,7 +158,9 @@ public sealed class BlockStreamingController : IDisposable
         }
     }
 
-    /// <summary>Drives block to <see cref="BlockState.Evicted"/>. No-op for already-Evicted/NotUploaded. Mid-upload blocks are awaited first — eviction implies the dptr exists, which only holds after the upload completes from the cache's perspective.</summary>
+    /// <summary>Drives block to <see cref="BlockState.Evicted"/>; no-op for already-Evicted/NotUploaded.</summary>
+    /// <remarks>Mid-upload blocks are awaited first — eviction implies the dptr exists, which only holds after the upload completes from
+    /// the cache's perspective.</remarks>
     private void EvictBlock(int idx)
     {
         switch (_state[idx])
@@ -208,5 +205,20 @@ public sealed class BlockStreamingController : IDisposable
                 Logs.Warning($"BlockStreamingController.Dispose: eviction of block {i} failed: {ex}");
             }
         }
+    }
+
+    private enum BlockState
+    {
+        /// <summary>No upload has been issued for this block; weights live only on host.</summary>
+        NotUploaded = 0,
+
+        /// <summary>Upload is in flight; <see cref="_tokens"/> holds the await token.</summary>
+        Uploading = 1,
+
+        /// <summary>Upload has been awaited; weights are usable on the compute stream.</summary>
+        Resident = 2,
+
+        /// <summary>Freed via <see cref="IStreamingWeightCache.EvictAsync"/>; re-upload goes back to <see cref="BlockState.NotUploaded"/>.</summary>
+        Evicted = 3,
     }
 }

@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -27,8 +26,8 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
         [Description("Path to a local htdemucs checkpoint (.th/.safetensors).")]
         public string? ModelPath { get; init; }
 
-        /// <summary>Compute backend selector. Demucs always runs on CPU regardless of this setting — its STFT/ISTFT
-        /// has no CUDA/Vulkan implementation yet, so any GPU selector here would just throw.</summary>
+        /// <summary>Compute backend selector; Demucs always runs on CPU regardless of this setting.</summary>
+        /// <remarks>Its STFT/ISTFT has no CUDA/Vulkan implementation yet, so any GPU selector here would just throw.</remarks>
         [CommandOption("-b|--backend")]
         [Description("Backend selector (always overridden to CPU: Demucs' STFT has no GPU implementation yet).")]
         public string Backend { get; init; } = "auto";
@@ -47,11 +46,8 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Audio))
-        {
-            AnsiConsole.MarkupLine("[red]An audio file path is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Audio, "An audio file path is required.", out int exitCode))
+            return exitCode;
 
         // Demucs' STFT/ISTFT (DemucsSpec.Spec) only has a CPU implementation (CudaBackend.Stft throws
         // NotSupportedException) — force CPU here so the default `hartsy fx separate <wav>` invocation works
@@ -61,10 +57,9 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
         parameters.Put("mode", "separate");
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Fx);
-        string label = spec.Catalog?.Id ?? settings.Model;
-        string outputDir = settings.Output ?? RepoPaths.OutputRoot();
+        string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.Fx, spec, settings.Audio, parameters, backend, settings.Quiet,
-            outputDir, label, showResponseRule: false);
+            settings.Output, label, showResponseRule: false);
     }
 }

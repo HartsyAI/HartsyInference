@@ -1,7 +1,7 @@
 namespace HartsyInference.Core.Pipelines;
 
 /// <summary>Result of a speech-to-text transcription.</summary>
-public sealed class TranscriptionResult
+public sealed record TranscriptionResult
 {
     /// <summary>The transcribed text.</summary>
     public required string Text { get; init; }

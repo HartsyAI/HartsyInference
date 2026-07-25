@@ -1,14 +1,13 @@
 using System.ComponentModel;
 using System.Globalization;
-using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates a video (frame sequence) from a prompt with any registered video family. CUDA-only,
-/// validation-pending per family — see <c>docs/Checklists/MODEL_STATUS_VIDEO.md</c>.</summary>
+/// <summary>Generates a video (frame sequence) from a prompt with any registered video family. CUDA-only.</summary>
+/// <remarks>Validation-pending per family — see <c>docs/Checklists/MODEL_STATUS_VIDEO.md</c>.</remarks>
 public sealed class VideoCommand : Command<VideoCommand.Settings>
 {
     /// <summary>Options for <c>hartsy video</c>.</summary>
@@ -88,43 +87,28 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Prompt))
-        {
-            AnsiConsole.MarkupLine("[red]A prompt is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Prompt, "A prompt is required.", out int exitCode))
+            return exitCode;
 
-        if (string.IsNullOrWhiteSpace(settings.Model) && string.IsNullOrWhiteSpace(settings.ModelPath))
-        {
-            AnsiConsole.MarkupLine("[red]Specify a model with[/] [#2ea5e0]--model[/] [red]or[/] [#2ea5e0]--model-path[/][red].[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireModelOrPath(settings.Model, settings.ModelPath, "--model", "--model-path", out exitCode))
+            return exitCode;
 
         // Only flags the user actually passed are forwarded; anything omitted stays unset so the engine applies the
         // resolved family's official defaults instead of a generic guess.
         ParamState parameters = new ParamState(Modality.Video) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("negative", settings.Negative);
-        PutIfSet(parameters, "width", settings.Width);
-        PutIfSet(parameters, "height", settings.Height);
-        PutIfSet(parameters, "frames", settings.Frames);
-        PutIfSet(parameters, "steps", settings.Steps);
-        PutIfSet(parameters, "cfg", settings.Cfg);
-        PutIfSet(parameters, "fps", settings.Fps);
+        parameters.PutIfSet("width", settings.Width);
+        parameters.PutIfSet("height", settings.Height);
+        parameters.PutIfSet("frames", settings.Frames);
+        parameters.PutIfSet("steps", settings.Steps);
+        parameters.PutIfSet("cfg", settings.Cfg);
+        parameters.PutIfSet("fps", settings.Fps);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Video);
-        string label = spec.Catalog?.Id ?? (settings.ModelPath is { Length: > 0 } mp ? Path.GetFileName(mp) : settings.Model);
+        string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath);
 
         return CommandRunner.Run(Modality.Video, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false);
-    }
-
-    /// <summary>Forwards a tunable only when the user actually passed the flag; an omitted flag leaves the key empty so it reaches the engine as null.</summary>
-    private static void PutIfSet(ParamState parameters, string key, IFormattable? value)
-    {
-        if (value is not null)
-        {
-            parameters.Put(key, value.ToString(null, CultureInfo.InvariantCulture));
-        }
     }
 }

@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Globalization;
-using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -108,8 +107,8 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [Description("Suppress staging/streaming; print only the final text.")]
         public bool Quiet { get; init; }
 
-        /// <summary>Force CUDA-graph decode on (requires greedy sampling and an eligible dense GQA/RoPE model;
-        /// forces --temperature to 0 if a positive temperature was also given).</summary>
+        /// <summary>Force CUDA-graph decode on; requires greedy sampling and an eligible dense GQA/RoPE model.</summary>
+        /// <remarks>Forces --temperature to 0 if a positive temperature was also given.</remarks>
         [CommandOption("--graph-decode")]
         [Description("Force CUDA-graph decode (forces greedy sampling). Falls back silently if the model/backend isn't eligible.")]
         public bool GraphDecode { get; init; }
@@ -118,17 +117,11 @@ public sealed class TextCommand : Command<TextCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Prompt))
-        {
-            AnsiConsole.MarkupLine("[red]A prompt is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Prompt, "A prompt is required.", out int exitCode))
+            return exitCode;
 
-        if (string.IsNullOrWhiteSpace(settings.Model) && string.IsNullOrWhiteSpace(settings.ModelPath))
-        {
-            AnsiConsole.MarkupLine("[red]Specify a model with[/] [#2ea5e0]--model[/] [red]or[/] [#2ea5e0]--model-path[/][red].[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireModelOrPath(settings.Model, settings.ModelPath, "--model", "--model-path", out exitCode))
+            return exitCode;
 
         if (settings.Thinking == true && settings.NoThinking)
         {
@@ -176,7 +169,7 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         parameters.Put("always-free-memory", settings.AlwaysFreeMemory ? "true" : "false");
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Text);
-        string label = spec.Catalog?.Id ?? (settings.ModelPath is { Length: > 0 } mp ? Path.GetFileName(mp) : settings.Model);
+        string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath);
 
         return CommandRunner.Run(Modality.Text, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: true);

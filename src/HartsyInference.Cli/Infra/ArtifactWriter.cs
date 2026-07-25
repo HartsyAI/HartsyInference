@@ -6,9 +6,9 @@ namespace HartsyInference.Cli.Infra;
 /// <summary>Persists a <see cref="GeneratedArtifact"/> to disk with an auto-numbered, prompt-derived filename.</summary>
 public static class ArtifactWriter
 {
-    /// <summary>Writes <paramref name="artifact"/> under <paramref name="outputDir"/> (or the default output root).
-    /// Text with no file bytes is only written when <paramref name="force"/> is set. Returns the path, or null when
-    /// nothing was written.</summary>
+    /// <summary>Writes <paramref name="artifact"/> under <paramref name="outputDir"/> (or the default output root).</summary>
+    /// <remarks>Text with no file bytes is only written when <paramref name="force"/> is set.</remarks>
+    /// <returns>The written path, or null when nothing was written.</returns>
     public static string? Write(GeneratedArtifact artifact, string? outputDir, string promptSlug, bool force)
     {
         if (artifact.SelfWritten)
@@ -20,8 +20,9 @@ public static class ArtifactWriter
 
         string dir = string.IsNullOrWhiteSpace(outputDir) ? RepoPaths.OutputRoot() : Path.GetFullPath(outputDir);
         Directory.CreateDirectory(dir);
-        string name = NextName(dir, Slug.Make(promptSlug), artifact.Extension);
-        string path = Path.Combine(dir, name);
+        string slug = Slug.Make(promptSlug);
+        string ext = artifact.Extension.TrimStart('.');
+        string path = NextAvailablePath(dir, i => $"{slug}-{i:D4}.{ext}", File.Exists, () => $"{slug}-{Guid.NewGuid():N}.{ext}");
 
         if (hasBytes)
             File.WriteAllBytes(path, artifact.FileBytes!);
@@ -31,15 +32,16 @@ public static class ArtifactWriter
         return path;
     }
 
-    private static string NextName(string dir, string slug, string extension)
+    /// <summary>Finds the next non-colliding path under <paramref name="dir"/> by trying <paramref name="nameFor"/>(1), (2), … .</summary>
+    /// <remarks>Falls back to a GUID-suffixed name after 100000 tries.</remarks>
+    internal static string NextAvailablePath(string dir, Func<int, string> nameFor, Func<string, bool> exists, Func<string> fallbackName)
     {
-        string ext = extension.TrimStart('.');
         for (int i = 1; i < 100000; i++)
         {
-            string candidate = $"{slug}-{i:D4}.{ext}";
-            if (!File.Exists(Path.Combine(dir, candidate)))
+            string candidate = Path.Combine(dir, nameFor(i));
+            if (!exists(candidate))
                 return candidate;
         }
-        return $"{slug}-{Guid.NewGuid():N}.{ext}";
+        return Path.Combine(dir, fallbackName());
     }
 }

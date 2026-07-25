@@ -22,19 +22,11 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
     /// <inheritdoc/>
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Model))
-        {
-            AnsiConsole.MarkupLine("[red]A model repo id or local path is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Model, "A model repo id or local path is required.", out int exitCode))
+            return exitCode;
 
         using CancellationTokenSource cts = new CancellationTokenSource();
-        ConsoleCancelEventHandler onCancel = (_, e) =>
-        {
-            e.Cancel = true;
-            cts.Cancel();
-        };
-        Console.CancelKeyPress += onCancel;
+        using IDisposable cancelBinding = CommandRunner.BindCancelKey(cts);
 
         using ModelRegistry registry = new ModelRegistry();
         ModelCacheStore cache = new ModelCacheStore();
@@ -81,10 +73,6 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
             Logs.Error($"Pull failed for '{settings.Model}'", ex);
             AnsiConsole.MarkupLine($"[red]Pull failed:[/] {Markup.Escape(ex.Message)}");
             return 1;
-        }
-        finally
-        {
-            Console.CancelKeyPress -= onCancel;
         }
     }
 }

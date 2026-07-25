@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -56,11 +55,8 @@ public sealed class TranscribeCommand : Command<TranscribeCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.Audio))
-        {
-            AnsiConsole.MarkupLine("[red]An audio file path is required.[/]");
-            return 1;
-        }
+        if (!CommandRunner.RequireNonEmpty(settings.Audio, "An audio file path is required.", out int exitCode))
+            return exitCode;
 
         ParamState parameters = new ParamState(Modality.Transcribe) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("language", settings.Language);

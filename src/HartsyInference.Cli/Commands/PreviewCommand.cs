@@ -7,8 +7,8 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Renders an existing image file (PNG or the CLI's own BMP artifacts) inline in the terminal using truecolor
-/// half-blocks — a quick way to eyeball a generated image without leaving the shell.</summary>
+/// <summary>Renders an existing image file (PNG or the CLI's own BMP artifacts) inline in the terminal using truecolor half-blocks.</summary>
+/// <remarks>A quick way to eyeball a generated image without leaving the shell.</remarks>
 public sealed class PreviewCommand : Command<PreviewCommand.Settings>
 {
     /// <summary>Options for <c>hartsy preview</c>.</summary>
