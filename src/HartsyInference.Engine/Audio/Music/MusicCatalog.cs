@@ -69,10 +69,15 @@ internal static class MusicCatalog
     {
         if (!string.IsNullOrEmpty(selector.LocalPath))
         {
-            return selector.LocalPath;
+            // Folder-checkpoint families: the generic resolver matches the first weights FILE it finds under
+            // the models tree, but these loaders take the variant DIRECTORY (sharded set + sidecars) — hand
+            // them the containing folder or the load dies with "checkpoint folder not found: …/model-00001….safetensors".
+            return AudioWeightsCatalog.IsFolderCheckpoint(familyId) && File.Exists(selector.LocalPath)
+                ? Path.GetDirectoryName(selector.LocalPath)!
+                : selector.LocalPath;
         }
         string baseDirectory = AudioModelRoot.WeightsDirectory("music", familyId);
-        string variant = (selector.Variant ?? string.Empty).Trim();
+        string variant = AudioWeightsCatalog.NormalizeVariant(familyId, selector.Variant);
         // Folder-checkpoint families (YuE) load a whole variant DIRECTORY; the download set lands in "{variant}/…".
         if (AudioWeightsCatalog.IsFolderCheckpoint(familyId))
         {

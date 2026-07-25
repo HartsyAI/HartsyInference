@@ -4,6 +4,7 @@ using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
@@ -227,10 +228,18 @@ public sealed unsafe class CsmModel : IDisposable
 
         public void Dispose()
         {
-            if (Graph is not null) { _backend.DisposeGraph(Graph); Graph = null; }
-            if (DevicePos != 0) _backend.FreeDevicePos(DevicePos);
-            InEmbed.Dispose();
-            OutHidden.Dispose();
+            // Cleanup is best-effort: these run inside finally/using during exception unwind, and a CUDA
+            // failure mid-generation leaves the context poisoned so the frees themselves throw
+            // CUDA_ERROR_INVALID_VALUE — which then REPLACES the original exception (this masked the real
+            // 12 GB-card failure in the 2026-07-24 HeartMuLa investigation). Log and continue instead.
+            try { if (Graph is not null) { _backend.DisposeGraph(Graph); Graph = null; } }
+            catch (Exception ex) { Logs.Warning($"[CSM] Graph dispose failed during cleanup (continuing): {ex.Message}"); }
+            try { if (DevicePos != 0) _backend.FreeDevicePos(DevicePos); }
+            catch (Exception ex) { Logs.Warning($"[CSM] DevicePos free failed during cleanup (continuing): {ex.Message}"); }
+            try { InEmbed.Dispose(); }
+            catch (Exception ex) { Logs.Warning($"[CSM] InEmbed dispose failed during cleanup (continuing): {ex.Message}"); }
+            try { OutHidden.Dispose(); }
+            catch (Exception ex) { Logs.Warning($"[CSM] OutHidden dispose failed during cleanup (continuing): {ex.Message}"); }
         }
     }
 
@@ -261,14 +270,20 @@ public sealed unsafe class CsmModel : IDisposable
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            // Best-effort like GraphStream.Dispose (see its comment): a poisoned CUDA context makes cache
+            // frees throw during unwind, masking the generation's original exception.
             CondGraph?.Dispose();
             UncondGraph?.Dispose();
             DepthCondGraph?.Dispose();
             DepthUncondGraph?.Dispose();
-            DepthCond?.Dispose();
-            DepthUncond?.Dispose();
-            Backbone.Dispose();
-            Uncond?.Dispose();
+            try { DepthCond?.Dispose(); }
+            catch (Exception ex) { Logs.Warning($"[CSM] Depth KV dispose failed during cleanup (continuing): {ex.Message}"); }
+            try { DepthUncond?.Dispose(); }
+            catch (Exception ex) { Logs.Warning($"[CSM] Depth uncond KV dispose failed during cleanup (continuing): {ex.Message}"); }
+            try { Backbone.Dispose(); }
+            catch (Exception ex) { Logs.Warning($"[CSM] Backbone KV dispose failed during cleanup (continuing): {ex.Message}"); }
+            try { Uncond?.Dispose(); }
+            catch (Exception ex) { Logs.Warning($"[CSM] Uncond KV dispose failed during cleanup (continuing): {ex.Message}"); }
         }
     }
 

@@ -13,6 +13,12 @@ public sealed class FxService : IFxService
 {
     private readonly InferenceEngine _engine;
 
+    // Both FX pipelines are STFT/ISTFT-centric and the GPU backends do not implement Stft (CudaBackend
+    // throws "CUDA STFT not supported - use CPU backend for audio"). The CLI's fx commands hard-force
+    // CPU for exactly this reason; server/SwarmUI requests come through here instead, so the override
+    // must live in the service or every non-CLI Demucs/Enhance run on a CUDA host fails at first STFT.
+    private static readonly Lazy<IBackend> _cpuBackend = new(() => BackendFactory.Create("cpu"));
+
     /// <summary>Creates the service bound to its owning engine.</summary>
     internal FxService(InferenceEngine engine) => _engine = engine;
 
@@ -22,7 +28,7 @@ public sealed class FxService : IFxService
         ArgumentNullException.ThrowIfNull(request);
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
         string modelName = string.IsNullOrWhiteSpace(request.Model) ? selector.Variant : request.Model;
-        IBackend backend = _engine.Backend;
+        IBackend backend = _cpuBackend.Value;
 
         return AudioRuntime.RunAsync(backend, $"fx:demucs:{modelName}", async ct =>
         {
@@ -60,7 +66,7 @@ public sealed class FxService : IFxService
     public Task<AudioResult> EnhanceAsync(ModelSpec spec, FxEnhanceRequest request, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        IBackend backend = _engine.Backend;
+        IBackend backend = _cpuBackend.Value;
 
         return AudioRuntime.RunAsync(backend, $"fx:enhance:{FxCatalog.EnhanceRepo}", async ct =>
         {

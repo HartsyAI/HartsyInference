@@ -888,11 +888,9 @@ public static class ModelCatalog
             new CatalogEntry
             {
                 Id = "distilwhisper", Modality = stt, DisplayName = "distil-whisper", Architecture = "encoder-decoder (distilled)", Status = ok,
-                // Verified 2026-07-21: the BARE `-m distilwhisper` id fails — SttCatalog.ResolveDistilWhisperRepo's
-                // no-match default is "distil-whisper/distil-large-v3.5", but WhisperPipeline.InferConfig's repo
-                // switch only recognizes v2/v3/medium.en/small.en (no v3.5 case) → "Unknown Whisper repo". Use an
-                // explicit variant that IS recognized, e.g. `-m distilwhisper:v3`.
-                CliDrivable = true, // `hartsy transcribe -m distilwhisper:v3` (or :v2/:medium/:small) — SttCatalog "distilwhisper"; bare id currently broken, see above
+                // Bare `-m distilwhisper` resolves to distil-large-v3.5 (same shape as v3 — the .5 is a
+                // longer-trained release), recognized by WhisperPipeline.InferConfig since 2026-07-24.
+                CliDrivable = true, // `hartsy transcribe -m distilwhisper` (or :v3/:v2/:medium/:small) — SttCatalog "distilwhisper"
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "distil-whisper/distil-large-v3", RepoPath = "model.safetensors", TargetSubdir = "Audio/DistilWhisper", Role = "encoder-decoder" },

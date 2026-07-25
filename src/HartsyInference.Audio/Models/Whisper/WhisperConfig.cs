@@ -145,6 +145,10 @@ public sealed record WhisperConfig
     /// <summary>distil-large-v3 — 32-layer encoder, 2-layer decoder, 128 mel bins.</summary>
     public static WhisperConfig DistilLargeV3 => LargeV3 with { DecoderLayers = 2 };
 
+    /// <summary>distil-large-v3.5 — identical architecture to <see cref="DistilLargeV3"/> (1280/32enc/2dec,
+    /// 128 mel, 51866 vocab per its config.json); the .5 is a longer-trained release, not a shape change.</summary>
+    public static WhisperConfig DistilLargeV3_5 => DistilLargeV3;
+
     /// <summary>distil-medium.en — 24/2, 80 mel, English-only.</summary>
     public static WhisperConfig DistilMediumEn => Medium with { DecoderLayers = 2 };
 

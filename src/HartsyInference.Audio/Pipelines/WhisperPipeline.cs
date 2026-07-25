@@ -318,6 +318,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             "openai/whisper-large-v3-turbo" => WhisperConfig.LargeV3Turbo,
             "distil-whisper/distil-large-v2" => WhisperConfig.DistilLargeV2,
             "distil-whisper/distil-large-v3" => WhisperConfig.DistilLargeV3,
+            "distil-whisper/distil-large-v3.5" => WhisperConfig.DistilLargeV3_5,
             "distil-whisper/distil-medium.en" => WhisperConfig.DistilMediumEn,
             "distil-whisper/distil-small.en" => WhisperConfig.DistilSmallEn,
             _ => throw new ArgumentException(

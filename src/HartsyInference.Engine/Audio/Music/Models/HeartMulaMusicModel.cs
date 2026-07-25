@@ -89,12 +89,23 @@ internal static class HeartMulaMusicModel
         else
         {
             // Upstream inference dtypes: LM bf16 (halves the per-frame weight streaming too), codec f32.
+            // Every entry is materialized into OWNED memory (CastTo deep-copies even at same dtype), so the
+            // F32 source mmaps can be dropped below — passing non-F32 tensors through by reference forced
+            // the loaders into `keep`, pinning the full ~15 GB checkpoint resident NEXT TO the ~6 GB BF16
+            // working set for the model's whole lifetime. That duplication was the bulk of the ~29 GB
+            // load-time host RSS behind the 2026-07-24 sweep's OOM-kill of the Swarm process; the quant
+            // path already disposes its sources once its GGUF cache owns the weights.
             Dictionary<string, Tensor> bf16 = new Dictionary<string, Tensor>(lmWeights.Count, StringComparer.Ordinal);
             foreach ((string key, Tensor tensor) in lmWeights)
             {
-                bf16[key] = tensor.DType == DType.F32 ? tensor.CastTo(DType.BF16) : tensor;
+                bf16[key] = tensor.CastTo(tensor.DType == DType.F32 ? DType.BF16 : tensor.DType);
             }
             pipeline.LoadWeights(bf16);
+            foreach (IDisposable loader in lmLoaders)
+            {
+                loader.Dispose();
+            }
+            lmLoaders = [];
         }
         pipeline.LoadCodecWeights(codecWeights);
 

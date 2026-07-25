@@ -95,6 +95,23 @@ public static class AudioWeightsCatalog
     public static bool IsFolderCheckpoint(string familyId) =>
         string.Equals(familyId, YueId, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Resolves the effective variant for a family: a bare model spec ("-m yue", no colon) makes
+    /// <see cref="AudioModelSelector.Parse"/> hand the whole token through as the variant, so the literal
+    /// family id (and the empty string) must map to the family's default registered variant — otherwise a
+    /// bare id resolves to a nonexistent "{family}/{family}" checkpoint path (the 2026-07-24 audio sweep's
+    /// YuE failure; same trap FxCatalog documents for bare "demucs").</summary>
+    public static string NormalizeVariant(string familyId, string? variant)
+    {
+        string value = (variant ?? string.Empty).Trim();
+        if (value.Length > 0 && !value.Equals(familyId, StringComparison.OrdinalIgnoreCase))
+        {
+            return value;
+        }
+        return string.Equals(familyId, YueId, StringComparison.OrdinalIgnoreCase) ? "en-cot"
+            : string.Equals(familyId, AceStepId, StringComparison.OrdinalIgnoreCase) ? "turbo"
+            : value;
+    }
+
     /// <summary>Every file a specific variant needs; empty when the Engine has no entry for it.</summary>
     public static IReadOnlyList<ModelAsset> AssetsFor(string familyId, string variant)
     {
@@ -119,6 +136,7 @@ public static class AudioWeightsCatalog
     /// files are skipped by the downloader's own presence check.</summary>
     internal static async Task EnsureAsync(string familyId, string variant, CancellationToken cancel)
     {
+        variant = NormalizeVariant(familyId, variant);
         foreach (ModelAsset asset in AssetsFor(familyId, variant))
         {
             cancel.ThrowIfCancellationRequested();

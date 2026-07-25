@@ -1,8 +1,10 @@
+using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Demucs;
 using HartsyInference.Audio.Models.ResembleEnhance;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.CheckpointConverters;
 
 namespace HartsyInference.Engine.Audio;
 
@@ -96,14 +98,21 @@ internal static class FxCatalog
         return new DemucsRunner(pipeline, loader);
     }
 
-    /// <summary>Loads the Resemble-Enhance denoiser + LCFM enhancer + UnivNet vocoder.</summary>
+    /// <summary>Path of the DeepSpeed generator checkpoint inside the HF repo — the repo ships no
+    /// model.safetensors / pytorch_model.bin, only the raw <c>enhancer_stage2</c> run directory.</summary>
+    private const string EnhanceCheckpointFile = "enhancer_stage2/ds/G/default/mp_rank_00_model_states.pt";
+
+    /// <summary>Loads the Resemble-Enhance denoiser + LCFM enhancer + UnivNet vocoder from the repo's DeepSpeed
+    /// <c>mp_rank_00_model_states.pt</c> (~700 MB, downloaded on first use), with a strict zero-missing/
+    /// zero-unexpected key check inside <c>LoadWeights</c>.</summary>
     internal static async Task<EnhanceRunner> LoadEnhanceAsync(CancellationToken cancel)
     {
-        (IReadOnlyDictionary<string, Tensor> weights, IDisposable[] loaders) = await AudioCheckpoints.LoadAsync(EnhanceRepo, cancel).ConfigureAwait(false);
+        string path = await AudioModelCache.GetAsync(EnhanceRepo, EnhanceCheckpointFile, ct: cancel).ConfigureAwait(false);
+        (IReadOnlyDictionary<string, Tensor> weights, IDisposable loader) = DeepSpeedCheckpointConverter.Load(path);
         ResembleEnhancePipeline pipeline = new ResembleEnhancePipeline(ResembleEnhanceConfig.Default, withDenoiserAndVocoder: true);
         pipeline.LoadWeights(weights);
-        Logs.Info("[Audio][Resemble-Enhance] Loaded ResembleAI/resemble-enhance (denoiser + LCFM + UnivNet, 44.1 kHz).");
-        return new EnhanceRunner(pipeline, loaders);
+        Logs.Info($"[Audio][Resemble-Enhance] Loaded {EnhanceRepo} (denoiser + LCFM + UnivNet, {weights.Count} tensors, 44.1 kHz).");
+        return new EnhanceRunner(pipeline, [loader]);
     }
 
     /// <summary>Selects the architecture config from the model name: the 6-stem variant adds guitar+piano and MUST

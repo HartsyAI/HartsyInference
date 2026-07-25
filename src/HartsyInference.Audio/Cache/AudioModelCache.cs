@@ -64,7 +64,7 @@ public static class AudioModelCache
     {
         string repoDir = GetRepoDirectory(hfRepoId);
         string localPath = Path.Combine(repoDir, filename);
-        if (File.Exists(localPath)) return localPath;
+        if (IsUsableFile(localPath)) return localPath;
 
         // Coalesce concurrent requests for the same file so we don't double-download.
         Task<string> downloadTask;
@@ -112,6 +112,21 @@ public static class AudioModelCache
         }
     }
 
+    /// <summary>True when the cached entry is a real, openable file. Cache entries are often SYMLINKS into
+    /// <c>~/.cache/huggingface/hub</c> (so an existing hub download isn't duplicated), and on .NET
+    /// <see cref="File.Exists"/> reports the LINK's existence, not the target's — after a hub cache cleanup a
+    /// dangling link would be returned as "cached" and the loader dies with FileNotFound (hit by the 2026-07-24
+    /// audio sweep: every Zonos weight was a dangling link). A dangling link is treated as missing so the
+    /// download self-heals over it.</summary>
+    private static bool IsUsableFile(string path)
+    {
+        FileInfo info = new(path);
+        if (!info.Exists) return false;
+        if (info.LinkTarget is null) return true;
+        FileSystemInfo? target = info.ResolveLinkTarget(returnFinalTarget: true);
+        return target is not null && target.Exists;
+    }
+
     private static async Task<string> DownloadAsync(
         string hfRepoId,
         string filename,
@@ -124,6 +139,9 @@ public static class AudioModelCache
         string url = $"{endpoint}/{hfRepoId}/resolve/{revision}/{filename}";
 
         Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
+        // A dangling symlink at the destination must go before the atomic move-over (File.Move would
+        // replace the link file itself, but deleting up front also covers the .partial rename path).
+        if (File.Exists(localPath) && !IsUsableFile(localPath)) File.Delete(localPath);
 
         // Stream into a temp file in the same directory so the final rename is atomic
         // even on a system that crashes mid-download. Half-finished `.partial` files

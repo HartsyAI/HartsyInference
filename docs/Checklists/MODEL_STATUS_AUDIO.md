@@ -5,6 +5,53 @@ family. Build detail lives in [PHASE_5_AUDIO.md](PHASE_5_AUDIO.md); the music-sp
 [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md). Parity evidence (maxAbs, bugs found)
 lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS.md](MODEL_STATUS.md).
 
+> ## 🔧 Sweep-failure fix pass (2026-07-24) — the 37-model Swarm-API benchmark's failures root-caused
+> The full-fleet Swarm-API sweep (27/37 generated; results in `benchmarks/swarm_audio_bench/
+> swarm_audio_results.json`) surfaced 7 real failures. Fixed + verified this pass:
+> - **Zonos "missing model.safetensors"** — NOT a registry bug: every Zonos weight was a symlink into
+>   `~/.cache/huggingface/hub`, and a hub cache cleanup deleted the blobs. On .NET, `File.Exists` reports a
+>   dangling symlink as PRESENT (link, not target), so `AudioModelCache.GetAsync` returned the dead path
+>   instead of re-downloading. Fixed with a link-aware `IsUsableFile` (resolves the final target) + dangling-
+>   link deletion before the atomic move; verified: Zonos self-healed (re-downloaded) and its clone output
+>   transcribes word-perfect. **This protected every symlinked model in the audio cache**, not just Zonos.
+> - **`distilwhisper` bare id** — v3.5 config case added (see the 2026-07-21 bullet below, now FIXED).
+> - **Demucs "CUDA STFT not supported" via Swarm** — the CLI's per-command CPU forcing never applied to the
+>   Engine path; `FxService` now forces a cached CPU backend for BOTH Separate and Enhance (the FX pipelines
+>   are STFT-centric and GPU backends don't implement Stft). Verified through the real service path with an
+>   auto→CUDA engine: 4 distinct stems.
+> - **YuE "checkpoint folder not found"** — two stacked causes: (1) the checkpoint set was never downloaded —
+>   completed via `AudioWeightsCatalog.EnsureAsync` into the Swarm models root (`HARTSYINFERENCE_MODELS`);
+>   note the primary `HartsyAI/YuE-xcodec-mini-safetensors` repack 401s anonymously (repo private + the
+>   stored `~/.cache/huggingface/token` is REVOKED — refresh it), so the public `m-a-p/xcodec_mini_infer`
+>   fallback was used (loader auto-converts on first load). (2) a bare `-m yue` resolves the literal token as
+>   the variant → `yue/yue` path; `AudioWeightsCatalog.NormalizeVariant` now maps bare/family-literal specs to
+>   the registered default (`en-cot`; ACE-Step `turbo` same class). E2E generation still pending a free GPU
+>   (7B doesn't fit the 3060; the 4090 is held by the long-running SwarmUI process).
+> - **HeartMuLa OOM-killing Swarm (49 GB host RSS)** — the bf16 load path kept the full ~15 GB F32 source
+>   mmaps resident alongside the ~6 GB BF16 working copy for the model's whole lifetime (the quant path
+>   already disposed its sources). All tensors are now materialized into owned memory and the F32 loaders
+>   disposed: measured load-time RSS **29.4 GB → 14.4 GB**. Generation-phase growth still to be profiled on a
+>   free GPU. Two follow-ups noted: on the 12 GB 3060 generation fails with a CUDA error whose original
+>   exception is MASKED by a throwing `GraphStream.Dispose` during unwind (CsmModel) — fix the masking; and
+>   quant variants (`heartmula:*-q8`) further halve the working set.
+> - **Chatterbox voice cloning wired (FULL clone)** — see the Chatterbox row; upstream `prepare_conditionals`
+>   replicated end-to-end (ve.safetensors LSTM voice encoder + partials protocol + CAM++/S3-tokenizer/24k-mel
+>   S3Gen reference dict, reusing the verified CosyVoice2 zero-shot components). 8/8 Chatterbox tests; cloned
+>   output word-perfect via Whisper; audibly/measurably distinct from the default voice. A GPU e2e re-run
+>   awaits free VRAM (CPU path fully verified).
+> - **Resemble-Enhance FIXED (real weights, end-to-end)** — the "404" was the generic loader trying
+>   model.safetensors/pytorch_model.bin (never existed); the deeper blocker was the module-composition
+>   mismatch the 2026-07-21 note documented. The denoiser/IRMAE/UnivNet modules were rewritten to the real
+>   checkpoint structure (encoder/middle/decoder blocks of pre_conv + PreactResBlocks), and
+>   `FxCatalog.LoadEnhanceAsync` now fetches the DeepSpeed `enhancer_stage2/ds/G/default/
+>   mp_rank_00_model_states.pt` via AudioModelCache + DeepSpeedCheckpointConverter. Verified: strict key-set
+>   load on the real ~700 MB checkpoint, 4/4 ResembleEnhance tests, and e2e `fx enhance` on the 11 s JFK clip
+>   → 11.0 s 44.1 kHz output, RMS 0.138 (input 0.142), Whisper transcribes the enhanced audio word-perfect.
+>   **PERF CAVEAT: ~94 min wall for 11 s of audio on the single-threaded CPU path (RTF ~510×)** — usable for
+>   correctness only; a perf pass (parallelize the CPU conv/CFM path or implement backend Stft on CUDA) is
+>   required before this is practical. RVC's "voice model not found" is BY DESIGN (user-supplied voice
+>   model; manual placement documented).
+
 > ## 🔌 CLI wiring pass (2026-07-21) — every local audio model given a `ModelCatalog` recipe
 > `hartsy speak/music/transcribe` only exposed 9/20 TTS, 2/6 STT, and 5/6 music models before this pass (the
 > rest were Engine-registered in `TtsCatalog`/`SttCatalog`/`MusicCatalog` but had no CLI catalog entry, so
@@ -82,6 +129,10 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 > - **`distilwhisper`'s bare id is broken**: `SttCatalog.ResolveDistilWhisperRepo`'s no-match default
 >   (`distil-whisper/distil-large-v3.5`) isn't in `WhisperPipeline.InferConfig`'s repo switch (only
 >   v2/v3/medium.en/small.en) → "Unknown Whisper repo". Use `-m distilwhisper:v3` (or `:v2`/`:medium`/`:small`).
+>   **FIXED 2026-07-24**: v3.5 is architecturally identical to v3 (confirmed against its config.json:
+>   1280/32enc/2dec/128mel/51866vocab — the .5 is a longer-trained release); `WhisperConfig.DistilLargeV3_5`
+>   + the InferConfig case added, bare `-m distilwhisper` verified word-perfect on the JFK clip (auto-downloads
+>   v3.5 on first use).
 > - **musicgen/audiogen/acestep/stableaudio/heartmula** all produce finite, non-silent, correct
 >   sample-rate/duration/channel-count audio (heartmula's RMS ran noticeably quieter than the others — not
 >   re-investigated, flagged for a follow-up listen). **`yue`** needed a real fix, not just verification (next

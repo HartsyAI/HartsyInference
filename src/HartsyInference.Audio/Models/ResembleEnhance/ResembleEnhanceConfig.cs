@@ -4,8 +4,8 @@ namespace HartsyInference.Audio.Models.ResembleEnhance;
 /// CFM (a WaveNet velocity net solved by OT-CFM) + an IRMAE latent autoencoder, conditioned on a (lambda-
 /// blended, optionally denoised) mel, then a UnivNet vocoder. See <c>docs/Research/RESEMBLE_ENHANCE_ARCHITECTURE.md</c>.
 ///
-/// <para><b>Reuse:</b> the CFM solver reuses the CosyVoice <c>ConditionalCfm</c> (OT-CFM Euler, CFG off); the
-/// velocity net is a new <c>ICfmEstimator</c> (WN WaveNet). Mel via <c>MelSpectrogramExtractor</c>.</para></summary>
+/// <para><b>Solver:</b> a self-contained OT-CFM midpoint/rk4/euler solver with upstream's exponential-decay
+/// time mapping lives in <c>ResembleEnhancePipeline</c>; the velocity net is the DiffWave-style WN.</para></summary>
 public sealed record ResembleEnhanceConfig
 {
     public int SampleRate { get; init; } = 44_100;
@@ -15,7 +15,7 @@ public sealed record ResembleEnhanceConfig
 
     // ── Latent CFM ──
     public int LatentDim { get; init; } = 64;
-    public float LatentScale { get; init; } = 5f;        // lcfm_z_scale
+    public float LatentScale { get; init; } = 6f;        // lcfm_z_scale (enhancer_stage2/hparams.yaml pins 6, not the code default 5)
     public int WnLayers { get; init; } = 30;
     public int WnHidden { get; init; } = 512;
     public int WnKernel { get; init; } = 3;
@@ -29,7 +29,7 @@ public sealed record ResembleEnhanceConfig
     public float NormEps { get; init; } = 1e-5f;
 
     // ── Solver / inference ──
-    public int Nfe { get; init; } = 64;                  // function evals
+    public int Nfe { get; init; } = 32;                  // function evals (upstream inference-API default; hparams' 64 is the training-time solver)
     public string Solver { get; init; } = "midpoint";    // euler / midpoint / rk4
     public float Lambd { get; init; } = 1.0f;            // denoiser blend (CLI default value)
     public float Tau { get; init; } = 0.5f;              // prior temperature

@@ -57,6 +57,14 @@ public sealed record ChatterboxConfig
     public int S3CodebookSize { get; init; } = 6_561;
     public int SampleRate { get; init; } = 24_000;
 
+    // ── Reference-clip conditioning caps (tts.py) ──
+    /// <summary>Max cond-prompt speech tokens the T3 perceiver cross-attends (t3 <c>speech_cond_prompt_len</c>).</summary>
+    public int SpeechCondPromptLen { get; init; } = 150;
+    /// <summary>T3's prompt tokenization sees only the first 6 s of the 16 kHz reference (<c>ENC_COND_LEN</c>).</summary>
+    public int T3CondSeconds { get; init; } = 6;
+    /// <summary>S3Gen's <c>embed_ref</c> sees only the first 10 s of the reference (<c>DEC_COND_LEN</c>).</summary>
+    public int S3GenCondSeconds { get; init; } = 10;
+
     // ── Generation defaults (tts.py) ──
     public float Temperature { get; init; } = 0.8f;
     public float TopP { get; init; } = 1.0f;

@@ -1,21 +1,24 @@
 using HartsyInference.Audio.Models.ResembleEnhance;
 using HartsyInference.Audio.Pipelines;
-using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cpu;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;
 
 /// <summary>Tests for resemble-enhance's LCFM enhancer: config, and a synthetic-weights forward of the WN CFM
-/// velocity net + IRMAE decoder driven by the reused OT-CFM solver (conditioning mel → enhanced mel, finite).</summary>
+/// velocity net + IRMAE (encoder loaded, decoder exercised) using the real checkpoint key layout
+/// (<c>lcfm.cfm.net.layers.i.{gconv,dconv,lconv,out}</c>, Sequential-indexed <c>lcfm.ae.*</c> with legacy
+/// <c>weight_g</c>/<c>weight_v</c> pairs) — the structure verified against upstream <c>wn.py</c>/<c>irmae.py</c>
+/// and the enhancer_stage2 DeepSpeed checkpoint.</summary>
 public sealed unsafe class ResembleEnhanceTests
 {
     private static uint _rng = 0xEA0Cu;
     private static float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return ((_rng & 0xFFFF) / 65535f - 0.5f) * 0.2f; }
     private static Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
     private static Tensor F1(int a) => Fill(new Tensor(new TensorShape(a), DType.F32));
-    private static Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
     private static Tensor F3(int a, int b, int c) => Fill(new Tensor(new TensorShape(a, b, c), DType.F32));
+    private static Tensor Ones3(int a) { Tensor t = new(new TensorShape(a, 1, 1), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < a; i++) p[i] = 1f; return t; }
     private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
 
     [Fact]
@@ -28,15 +31,18 @@ public sealed unsafe class ResembleEnhanceTests
         Assert.Equal(30, c.WnLayers);
         Assert.Equal(512, c.WnHidden);
         Assert.Equal("midpoint", c.Solver);
+        // enhancer_stage2/hparams.yaml pins lcfm_z_scale to 6 (the upstream code default of 5 is stale).
+        Assert.Equal(6f, c.LatentScale);
     }
 
     [Fact]
-    public void Lcfm_SyntheticForward_CondMelToEnhancedMel()
+    public void Lcfm_SyntheticForward_CondMelToDecodedFeatures()
     {
         ResembleEnhanceConfig c = new()
         {
             NMels = 8, LatentDim = 4, WnLayers = 2, WnHidden = 8, WnKernel = 3, WnDilationCycle = 2, TimeEmbDim = 8,
-            AeHidden = 16, AeResBlocks = 2, AeDilations = [1, 2], Nfe = 4, Solver = "euler",
+            AeHidden = 16, AeResBlocks = 2, AeDilations = [1, 2], IrmaeGroupNorm = 4, NumIrms = 2,
+            VocoderExtraDim = 4, Nfe = 4, Solver = "euler",
         };
         using CpuBackend backend = new();
         using ResembleEnhancePipeline pipe = new(c);
@@ -44,41 +50,57 @@ public sealed unsafe class ResembleEnhanceTests
 
         int t = 5;
         using Tensor condMel = F3(1, c.NMels, t);
-        using Tensor mel = pipe.EnhanceMel(backend, condMel, t, seed: 2);
-        Assert.Equal(new TensorShape(1, c.NMels, t), mel.Shape);
-        float* p = (float*)mel.DataPointer;
-        for (long i = 0; i < mel.ElementCount; i++) Assert.True(float.IsFinite(p[i]));
+        using Tensor decoded = pipe.EnhanceMel(backend, condMel, seed: 2);
+        Assert.Equal(new TensorShape(1, c.NMels + c.VocoderExtraDim, t), decoded.Shape);
+        float* p = (float*)decoded.DataPointer;
+        for (long i = 0; i < decoded.ElementCount; i++) Assert.True(float.IsFinite(p[i]));
     }
 
     private static Dictionary<string, Tensor> Weights(ResembleEnhanceConfig c)
     {
         int h = c.WnHidden, lat = c.LatentDim, mels = c.NMels, ae = c.AeHidden;
+        int aeOut = mels + c.VocoderExtraDim;
         Dictionary<string, Tensor> w = new()
         {
-            // WN estimator.
+            // WN velocity net: start/end 1×1 convs + per-layer gconv/dconv/lconv/out.
             ["lcfm.cfm.net.start.weight"] = F3(h, lat, 1), ["lcfm.cfm.net.start.bias"] = F1(h),
-            ["lcfm.cfm.net.global_cond.weight"] = F2(h, c.TimeEmbDim), ["lcfm.cfm.net.global_cond.bias"] = F1(h),
-            ["lcfm.cfm.net.local_cond.weight"] = F3(2 * h, mels, 1), ["lcfm.cfm.net.local_cond.bias"] = F1(2 * h),
-            ["lcfm.cfm.net.out.weight"] = F3(lat, h, 1), ["lcfm.cfm.net.out.bias"] = F1(lat),
-            // IRMAE decoder.
-            ["lcfm.ae.decoder.in_conv.weight"] = F3(ae, lat, 3), ["lcfm.ae.decoder.in_conv.bias"] = F1(ae),
-            ["lcfm.ae.decoder.out_conv.weight"] = F3(mels, ae, 1), ["lcfm.ae.decoder.out_conv.bias"] = F1(mels),
-            ["lcfm.ae.decoder.head.0.weight"] = F3(ae, mels, 3), ["lcfm.ae.decoder.head.0.bias"] = F1(ae),
-            ["lcfm.ae.decoder.head.2.weight"] = F3(mels, ae, 1), ["lcfm.ae.decoder.head.2.bias"] = F1(mels),
+            ["lcfm.cfm.net.end.weight"] = F3(lat, h, 1), ["lcfm.cfm.net.end.bias"] = F1(lat),
+            // IRMAE encoder/decoder input convs (Sequential index 0).
+            ["lcfm.ae.encoder.0.weight"] = F3(ae, mels, 3), ["lcfm.ae.encoder.0.bias"] = F1(ae),
+            ["lcfm.ae.decoder.0.weight"] = F3(ae, lat, 3), ["lcfm.ae.decoder.0.bias"] = F1(ae),
         };
         for (int i = 0; i < c.WnLayers; i++)
         {
-            w[$"lcfm.cfm.net.layers.{i}.dilated.weight"] = F3(2 * h, h, c.WnKernel); w[$"lcfm.cfm.net.layers.{i}.dilated.bias"] = F1(2 * h);
-            w[$"lcfm.cfm.net.layers.{i}.res_skip.weight"] = F3(2 * h, h, 1); w[$"lcfm.cfm.net.layers.{i}.res_skip.bias"] = F1(2 * h);
+            string p = $"lcfm.cfm.net.layers.{i}";
+            w[$"{p}.gconv.weight"] = F3(h, c.TimeEmbDim, 1); w[$"{p}.gconv.bias"] = F1(h);
+            w[$"{p}.dconv.weight"] = F3(2 * h, h, c.WnKernel); w[$"{p}.dconv.bias"] = F1(2 * h);
+            w[$"{p}.lconv.weight"] = F3(2 * h, mels, 1); w[$"{p}.lconv.bias"] = F1(2 * h);
+            w[$"{p}.out.weight"] = F3(2 * h, h, 1); w[$"{p}.out.bias"] = F1(2 * h);
         }
-        for (int i = 0; i < c.AeResBlocks; i++)
+        for (int b = 0; b < c.AeResBlocks; b++)
         {
-            string p = $"lcfm.ae.decoder.res.{i}";
-            w[$"{p}.norm1.weight"] = Ones(ae); w[$"{p}.norm1.bias"] = F1(ae);
-            w[$"{p}.conv1.weight"] = F3(ae, ae, 3); w[$"{p}.conv1.bias"] = F1(ae);
-            w[$"{p}.norm2.weight"] = Ones(ae); w[$"{p}.norm2.bias"] = F1(ae);
-            w[$"{p}.conv2.weight"] = F3(ae, ae, 3); w[$"{p}.conv2.bias"] = F1(ae);
+            AddResBlock(w, $"lcfm.ae.encoder.{b + 1}", ae, c.AeDilations.Count);
+            AddResBlock(w, $"lcfm.ae.decoder.{b + 1}", ae, c.AeDilations.Count);
         }
+        // Bias-free IRM 1×1 chain after the encoder ResBlocks, then the decoder output conv to mels+extra.
+        for (int i = 0; i < c.NumIrms; i++)
+        {
+            w[$"lcfm.ae.encoder.{c.AeResBlocks + 1 + i}.weight"] = i == 0 ? F3(lat, ae, 1) : F3(lat, lat, 1);
+        }
+        w[$"lcfm.ae.decoder.{c.AeResBlocks + 1}.weight"] = F3(aeOut, ae, 1);
+        w[$"lcfm.ae.decoder.{c.AeResBlocks + 1}.bias"] = F1(aeOut);
         return w;
+    }
+
+    /// <summary>One upstream irmae.ResBlock: per stage i, Sequential index 3i is a GroupNorm and 3i+2 a
+    /// weight-normed dilated conv.</summary>
+    private static void AddResBlock(Dictionary<string, Tensor> w, string p, int ch, int stages)
+    {
+        for (int i = 0; i < stages; i++)
+        {
+            w[$"{p}.{3 * i}.weight"] = Ones(ch); w[$"{p}.{3 * i}.bias"] = F1(ch);
+            w[$"{p}.{3 * i + 2}.weight_g"] = Ones3(ch); w[$"{p}.{3 * i + 2}.weight_v"] = F3(ch, ch, 3);
+            w[$"{p}.{3 * i + 2}.bias"] = F1(ch);
+        }
     }
 }

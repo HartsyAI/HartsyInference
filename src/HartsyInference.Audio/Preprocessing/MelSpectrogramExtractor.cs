@@ -186,7 +186,9 @@ public sealed class MelSpectrogramExtractor
         WhisperDynamicRange,
     }
 
-    public enum LogBase { Log10, Natural }
+    /// <summary><see cref="None"/> skips log compression entirely (raw amp/power mel, e.g. the Chatterbox
+    /// voice-encoder front-end's <c>mel_type="amp"</c>).</summary>
+    public enum LogBase { Log10, Natural, None }
 
     private readonly Config _cfg;
     private readonly float[] _window;
@@ -283,12 +285,20 @@ public sealed class MelSpectrogramExtractor
                 _melCol[m] = acc;
             }
 
-            // Log compression.
+            // Log compression (skipped entirely for LogBase.None — raw mel values pass through).
             float floor = _cfg.LogFloor ?? 1e-10f;
             for (int m = 0; m < _cfg.NMels; m++)
             {
-                float v = _cfg.AdditiveLogFloor ? _melCol[m] + floor : MathF.Max(_melCol[m], floor);
-                float l = _cfg.LogBase == LogBase.Log10 ? MathF.Log10(v) : MathF.Log(v);
+                float l;
+                if (_cfg.LogBase == LogBase.None)
+                {
+                    l = _melCol[m];
+                }
+                else
+                {
+                    float v = _cfg.AdditiveLogFloor ? _melCol[m] + floor : MathF.Max(_melCol[m], floor);
+                    l = _cfg.LogBase == LogBase.Log10 ? MathF.Log10(v) : MathF.Log(v);
+                }
                 output[m, t] = l;
                 if (l > globalMax) globalMax = l;
             }
@@ -346,6 +356,11 @@ public sealed class MelSpectrogramExtractor
         float floor = _cfg.LogFloor ?? 1e-10f;
         for (int m = 0; m < _cfg.NMels; m++)
         {
+            if (_cfg.LogBase == LogBase.None)
+            {
+                melColumn[m] = _melCol[m];
+                continue;
+            }
             float v = _cfg.AdditiveLogFloor ? _melCol[m] + floor : MathF.Max(_melCol[m], floor);
             float l = _cfg.LogBase == LogBase.Log10 ? MathF.Log10(v) : MathF.Log(v);
             melColumn[m] = l;
