@@ -2,6 +2,77 @@
 
 Status legend: ⬜ not started · 🔧 in progress · ✅ done · ⚠ blocked
 
+> ## 🏁 2026-07-26 perf pass: Issue #I root cause + fix, shared-SDPA batching, ACE-Step follow-up
+> **Issue #I was never a hang.** Direct instrumentation (a log line immediately before/after every
+> `cublasGemmEx` call inside `CudaBackend.ScaledDotProductAttention`) proved every individual GEMM call
+> returned in 0.0ms — the AR decode loop was making continuous forward progress the whole time. The real
+> cost: Dia's cross+self attention issues one `cublasGemmEx` launch **per head, per CFG stream, per decoder
+> layer** — `16 heads × 2 CFG × 18 layers × 2 (QK^T + attn·V) = 1152` individual driver calls **per decode
+> step**, and at `Sq=1` (single-token decode) each is a GEMV dressed as a GEMM — launch-overhead-bound, not
+> compute-bound. A request that used to read as "hung" (client timeouts at 130s/480s with zero progress
+> visible) was actually ~900-1200+ decode steps of accumulated per-call launch overhead.
+>
+> **Fix (landed, shared code path — affects every model that calls `ScaledDotProductAttention`'s materialized
+> path, not just Dia):** `CudaBackend.cs`'s QK^T and attn·V loops now issue ONE `cublasGemmStridedBatchedEx`
+> call (`batchCount = totalHeads`) instead of `totalHeads` sequential `cublasGemmEx` calls — mathematically
+> identical (each batch element is independent, offset by the existing per-head stride), ~32× fewer launches
+> per attention call. Verified against the CPU-vs-GPU SDPA parity suite (`SdxlGenerationTests`, 12/12 pass)
+> and the broader CUDA suite (198/201 pass; the 3 failures are pre-existing/unrelated — 2 are FP8 cuBLASLt
+> heuristic gaps on Ampere hardware the test class's own doc comment says to expect, 1 is a 0.001-tolerance
+> rounding difference in an unrelated multi-GPU isolation test, plausible from cuBLAS choosing a different
+> internal algorithm for batched vs. sequential calls).
+>
+> **Result — Dia (fixed seed=42, same prompt, cold-then-warm):** 66.2s → 44.3s wall for a 6.3s clip (RTF
+> 10.5× → 7.0×). A major reduction from the pre-fix state (350-800+ seconds, or simply never finishing
+> within an 8-minute test window) but **still far from realtime** — Dia has no CUDA-graph decode path
+> (unlike MusicGen/HeartMuLa) and the per-step compute itself (not just launch overhead) is substantial at
+> 18 layers × 2 CFG streams. A full fix to realtime-class speed needs the same scale of dedicated perf work
+> as the HeartMuLa rounds (graph-captured decode, CFG batching) — out of scope for this pass. Also
+> confirmed and NOT fixed: `DiaPipeline.Generate` takes no `CancellationToken` anywhere in its call chain, so
+> a client-side timeout does not stop server-side generation — the request keeps running (and holding
+> `AudioRuntime`'s shared single-slot `_genLock`) until it naturally completes.
+>
+> **Result — MusicGen/AudioGen (same batched-SDPA path, fixed seed=42):** MusicGen's cold call (273s for
+> 10s audio, RTF 27×) vs warm (28.4s for 20s audio, RTF 1.42×) shows the huge first-call cost is model
+> load/compile, not steady-state generation — steady-state MusicGen is a bit above realtime. AudioGen warm:
+> 46.7s wall but only **30.0s of audio produced for a 45s request** — a real, reproducible duration cap
+> (RTF 1.56× against what it actually produced), not a hang; this reproduces the discrepancy first noticed
+> 2026-07-25 and is a separate, not-yet-root-caused bug (not Issue #J — see below).
+>
+> **Issue #J reclassified: it was never an independent AudioGen bug.** Re-tested AudioGen 45s in complete
+> process isolation (fresh restart, first and only request) — completed cleanly in 95.6s, HTTP 200, real
+> audio, no hang. The original "hard hang, needed SIGKILL twice" reports are fully explained by Issue #I:
+> `AudioRuntime._genLock` is a global `SemaphoreSlim(1,1)` serializing ALL audio generation process-wide: a
+> stuck-looking (in fact just very slow) Dia request from earlier in the same session held that lock for its
+> entire multi-minute run, and any request issued afterward — AudioGen included — simply queued behind it
+> and eventually looked identically "hung" from the outside. One root cause, not two.
+>
+> **ACE-Step: both open items closed.** `xl-base`'s "timeout" was the same case-sensitivity directory bug
+> that hit Demucs (`AudioWeights.WeightsDirectory()` built paths from `ModelPrefix` — e.g. `AceStep` — but
+> the real weight file sat in a lowercase `acestep/` dir; fixed with a case-insensitive fallback lookup,
+> see Issue #H) — now completes in 13.6-16.4s. Turbo vocal intelligibility: **confirmed real via a
+> controlled, same-seed/same-lyrics A/B**, not a fluke — `sft`'s Whisper round-trip recovers clearly
+> recognizable lyrics ("Walking down the city street... tonight... burnin'... so bright... music playing
+> all the time"); `turbo`'s returns only `"(upbeat music)"`, no words, at the same seed/prompt/duration.
+> This tracks with turbo's own documented design (8 steps, no CFG) vs. sft's (50 steps, CFG≈7) — an
+> inherent speed/quality tradeoff of the distilled checkpoint, not a code bug. Nothing to fix; if
+> vocal clarity matters more than speed, use `sft`/`base`/`xl-sft`/`xl-base` instead of a turbo variant, or
+> try `turbo-shift1`/`turbo-shift3` as an untested middle ground.
+>
+> | Model | Wall (cold) | Wall (warm) | Produced | RTF (warm) | Notes |
+> |---|---:|---:|---:|---:|---|
+> | Dia 1.6B | 66.2s | 44.3s | 6.3s | 7.0× | seed=42; was 350-800s+/non-terminating pre-fix |
+> | MusicGen medium | 273.4s | 28.4s (d=20) | 20.0s | 1.42× | cold cost = load/compile, not steady-state |
+> | AudioGen medium | 30.6s (d=10) | 46.7s (d=45 req) | 30.0s | 1.56× | duration cap bug, separate from Issue #J |
+> | ACE-Step turbo | — | 3.1s | 20.0s | 0.15× | vocals confirmed unintelligible (by design) |
+> | ACE-Step sft | — | 4.5s | 20.0s | 0.23× | vocals confirmed intelligible |
+> | ACE-Step xl-turbo | — | 13.4s | 20.0s | 0.67× | |
+> | ACE-Step xl-sft | — | 16.6s | 20.0s | 0.83× | |
+> | ACE-Step xl-base | — | 13.6s | 20.0s | 0.68× | was: timeout/never completed, pre-fix |
+>
+> Full raw output: [`benchmarks/swarm_audio_bench/sdpa_batch_perf_results.json`](../../benchmarks/swarm_audio_bench/sdpa_batch_perf_results.json);
+> harness: [`sdpa_batch_perf_pass.py`](../../benchmarks/swarm_audio_bench/sdpa_batch_perf_pass.py).
+
 > ## 🏁 HeartMuLa vs Python head-to-head (2026-07-25, RTX 4090, solo, duration-verified outputs)
 > **Ours is 3.6× faster than upstream `heartlib` per audio-second** (marginal: 0.31 vs 1.14 s per
 > audio-second; d=60 end-to-end: 43.7 s vs 82.2 s = 1.9× incl. load). Same weights (HeartMuLa-oss-3B bf16 +
@@ -413,7 +484,25 @@ module-composition architecture mismatch once weights load; this run couldn't ev
 change the model's `ValidationPending` status (it was never going to work end-to-end regardless), but is
 worth noting as a second, independent blocker — the exact repo/filename may have moved upstream.
 
-### Issue #H — 7 models with weights on disk and functional providers are unselectable via `GenerateText2Image` [NEW, 2026-07-25]
+### Issue #H — 7 models with weights on disk and functional providers are unselectable via `GenerateText2Image` [FIXED 2026-07-25/26]
+**Resolution:** three distinct bugs, not one. (1) 5 of the 7 (`neutts_tts`/`gptsovits_clone`/
+`heartlib_music`/`openvoice_clone`/`resemble_enhance_fx`, plus `demucs_fx` below) were simply never run
+through `InstallAndRegisterEngine` — added to `Data/AudioLabInstalledEngines.json` directly. (2) The
+`requires_docker` flag on `gptsovits_clone`/`resemble_enhance_fx`/`rvc_clone` was stale — all three are
+confirmed present in `AudioEngineBridge`'s in-process-engine binding table (engine-backed, not
+Docker-only); removed `.WithRequiresDocker()` from their provider definitions. (`realtimestt_stt` also
+carries this flag and was deliberately left alone — it genuinely has no `AudioEngineBridge` binding, so
+removing the flag would surface a model that fails on generation.) (3) `demucs_fx` had real weights on disk
+but `AudioWeights.WeightsDirectory()` built its path from `ModelPrefix` (`"Demucs"`, capitalized) while the
+actual directory was lowercase (`demucs/`) — case-sensitive Linux mismatch. Fixed with a case-insensitive
+directory-lookup fallback in `WeightsDirectory()`, which also turned out to fix ACE-Step's `xl-base` (see
+the 2026-07-26 perf-pass entry above). `rvc_clone` was deliberately left uninstalled — no checkpoint exists
+anywhere on this box, and per the repo's own status docs RVC is inherently bring-your-own-trained-voice
+(there is no single canonical "RVC v2 weights" to install, unlike Demucs/ACE-Step). All 6 confirmed live via
+`AudioLabListEngines` (`installed: true`) and the actual `Model` dropdown after rebuild+restart.
+
+<details><summary>Original 2026-07-25 investigation (root cause found, not yet fixed)</summary>
+
 `neutts_tts`, `gptsovits_clone`, `heartlib_music` (`3b-base`), `openvoice_clone`, `rvc_clone`, `demucs_fx`,
 `resemble_enhance_fx` all return `Invalid value for parameter Model: ... are you sure that model name is
 correct?` from `/API/GenerateText2Image`, even though `AudioLabListEngines` reports their specific model
@@ -442,13 +531,39 @@ before, so the engine/weights are known-good — this is specifically about the 
 `GenerateText2Image` selection path, not the model's functionality. **Not fixed this pass** — flagged for a
 dedicated, separately-planned pass per explicit user instruction (extension source, shared dev tree, hot-reload
 risk to a concurrently-running second agent's session — plan the edit/verify loop deliberately).
+</details>
 
-### Issue #I — Dia-1.6B hangs regardless of path [confirmed pre-existing, not a regression]
+### Issue #I — Dia-1.6B hangs regardless of path [ROOT-CAUSED + partially fixed 2026-07-26 — see perf-pass entry above]
+**Was never a hang** — a genuine, severe, launch-overhead-bound slowness (~1152 individual `cublasGemmEx`
+calls per decode step). Batched via `cublasGemmStridedBatchedEx`; wall time dropped from 350-800s+/never-
+finishing to 44-66s for a short clip. Still far from realtime — full remediation needs CUDA-graph decode +
+CFG batching, same scale of work as the HeartMuLa perf rounds, not attempted this pass. Also confirmed:
+`DiaPipeline.Generate` has no `CancellationToken`, so a client-side timeout never stops server-side
+generation, and the request holds `AudioRuntime._genLock` (global, single-slot) for its full duration — see
+Issue #J's reclassification below, which was this issue's downstream symptom, not a separate bug.
+
+<details><summary>Original 2026-07-24/25 investigation (confirmed hang, not root-caused)</summary>
+
 Timed out at 180s via the 2026-07-24 legacy path, then again at 90s and 240s via this pass's canonical path —
 three independent hangs across two different code paths and three different timeout ceilings. Not a
 params/path issue; a genuine model-level hang or pathological slowness. Not root-caused this pass.
 
-### Issue #J — AudioGen hard-hangs the entire Swarm process at 45s duration [NEW, 2026-07-25]
+</details>
+
+### Issue #J — AudioGen hard-hangs the entire Swarm process at 45s duration [RECLASSIFIED 2026-07-26: not an independent bug]
+**Resolution:** re-tested AudioGen 45s in complete process isolation (fresh restart, first and only
+request) — completed cleanly in 95.6s, HTTP 200, real audio, no hang, no elevated CPU. The original
+hard-hangs were Issue #I's downstream symptom: `AudioRuntime._genLock` is a global single-slot
+`SemaphoreSlim` serializing all audio generation process-wide, and a prior Dia request (genuinely just very
+slow, not hung — see Issue #I) held that lock for its entire multi-minute run; any request issued while it
+was still running — AudioGen included — queued behind it and looked identically "hung" from the outside,
+including surviving `SIGTERM` (the lock-holder, not the queued request, was what needed killing). One root
+cause, not two. **Separately confirmed, still open:** AudioGen genuinely does not honor the requested
+duration past some point — a 45s request reproducibly produces only 30.0s of audio (see the 2026-07-26
+perf-pass entry above) — a real, minor, not-yet-root-caused bug, distinct from the hang.
+
+<details><summary>Original 2026-07-25 investigation (misattributed to AudioGen itself)</summary>
+
 10s generates in 37.6s (RTF 3.76×); 20s generates in 51.8s (RTF 2.59× — worse than linear, but completes);
 45s pegs the whole SwarmUI process at 100% CPU / ~5% GPU utilization **indefinitely** — unresponsive to
 `SIGTERM`, required `SIGKILL`. Reproduced twice, independently, both times only at 45s (not at 20s). Given
@@ -459,6 +574,11 @@ frame count would predict (same class of issue as several other host-glue-bound 
 `cpu-rope-bottleneck`/`dit-blocks-must-be-gpu-resident`-type findings elsewhere in this codebase). Not
 root-caused this pass; profile with `HARTSY_PROFILE=1` at a duration between 20s and 45s to find the actual
 cliff, same method as the DiT host-overhead investigations.
+
+*(In hindsight: both "45s only" reproductions likely coincided with a slow Dia/other request from earlier
+in the same test session still holding the generation lock — see the reclassification above.)*
+
+</details>
 
 ---
 
@@ -473,14 +593,23 @@ cliff, same method as the DiT host-overhead investigations.
   optimization target, same class of host-glue issue already fixed for VibeVoice/Bark/F5/Kyutai.
 - [ ] `resemble_enhance_fx` remains a genuine forward-pass architecture mismatch (not a quick fix, see
   `MODEL_STATUS_AUDIO.md`) — expect it to fail in this sweep; that's the known, tracked state, not new.
-- [ ] **Issue #H (planned as its own pass, not started):** find where `InstalledEngines`' engine-level
-  `installed` flag is actually set/persisted (not yet located — this is the blocking unknown), confirm
-  whether it checks on-disk weight presence, then reconcile it against the per-model `installed` truth so
-  `neutts_tts`/`gptsovits_clone`/`heartlib_music`/`openvoice_clone`/`demucs_fx` register into `MainSDModels`
-  and become downloadable/selectable in the backend UI. Triage `rvc_clone` (weights genuinely missing — the
-  docker-skip is doing its job, don't force-register) and `resemble_enhance_fx` (docker flag unconfirmed
-  either way) separately — don't fix all 7 as one uniform change.
-- [ ] Issue #I (`dia_tts` hang) and Issue #J (AudioGen 45s hard-hang) both need `HARTSY_PROFILE=1` /
-  `CUDA_LAUNCH_BLOCKING=1` profiling sessions to find the actual stuck point — neither is root-caused yet.
-- [ ] ACE-Step-turbo's sung-vocal intelligibility is unconfirmed (silence bug fixed, clarity unknown) — try
-  the non-turbo `sft`/`base` or `xl-*` variants and a real human listen, not just the STT-roundtrip proxy.
+- [x] **Issue #H** — fixed 2026-07-25/26: install-state gap + stale `requires_docker` flags + a
+  case-sensitive directory bug, three separate causes. `rvc_clone` deliberately left uninstalled (no
+  checkpoint exists, no single canonical one to fetch).
+- [x] **Issue #I** — root-caused 2026-07-26: never a hang, ~1152 unbatched GEMM launches/decode-step.
+  Fixed via `cublasGemmStridedBatchedEx` (350-800s+ → 44-66s for a short clip). Still not realtime; a
+  full fix needs CUDA-graph decode + CFG batching (HeartMuLa-perf-round scale of work) — not attempted.
+  `DiaPipeline.Generate` still has no `CancellationToken` — a client timeout still doesn't stop
+  server-side generation or release `AudioRuntime._genLock` early.
+- [x] **Issue #J** — reclassified 2026-07-26: was Issue #I's zombie-thread-on-the-shared-lock symptom,
+  not an independent AudioGen bug. AudioGen alone, in isolation, completes cleanly.
+- [ ] AudioGen's duration cap (45s requested → 30.0s produced, confirmed reproducible 2026-07-26) — real,
+  minor, not yet root-caused. Check whatever computes `cap`/`tTotal` in `MusicGenPipeline.Synthesize` for
+  AudioGen's specific catalog entry.
+- [x] ACE-Step-turbo's sung-vocal intelligibility — confirmed 2026-07-26 via controlled same-seed A/B
+  (Whisper round-trip): genuinely unintelligible vs. `sft`'s clearly recognizable lyrics. Traced to
+  turbo's own documented design (8 steps, no CFG) — an inherent tradeoff, not a bug. Untested: whether
+  `turbo-shift1`/`turbo-shift3` do meaningfully better at turbo speed.
+- [ ] A fixed-seed, controlled Dia before/after A/B (this pass used a fixed seed for the *after* number
+  only — the *before* baseline, 350-800s+, came from earlier unseeded/inconsistent-seed runs) would give a
+  cleaner speedup figure than "44-66s vs. 350-800s+."

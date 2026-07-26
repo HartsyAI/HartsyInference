@@ -4546,40 +4546,41 @@ public sealed class CudaBackend : IBackend
             long strideK = skv * d;
             long strideScores = sq * skv;
 
-            for (long bh = 0; bh < totalHeads; bh++)
+            // QK^T, all heads in one strided-batched launch (was totalHeads sequential cublasGemmEx calls —
+            // at sq=1 decode shapes each call is a near-instant GEMV dressed as a GEMM, so per-call LAUNCH
+            // overhead dominated: a step-decoding model issues this hundreds of times per step, thousands of
+            // times per generation, and the accumulated launch overhead — not compute — was the wall-clock
+            // cost. Same math as the per-head loop (each batch element is independent, offset by the stride),
+            // just one driver call instead of totalHeads of them.
+            if (isF16)
             {
-                ulong qPtr = opQ + (ulong)(bh * strideQ * elemSize);
-                ulong kPtr = opK + (ulong)(bh * strideK * elemSize);
-                ulong sPtr = scoresBuf + (ulong)(bh * strideScores * elemSize);
-
-                if (isF16)
-                {
-                    CublasApi.cublasGemmEx(
-                        _cublasHandle,
-                        CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                        (int)skv, (int)sq, (int)d,
-                        &alpha,
-                        kPtr, CublasApi.CUDA_R_16F, (int)d,
-                        qPtr, CublasApi.CUDA_R_16F, (int)d,
-                        &beta,
-                        sPtr, CublasApi.CUDA_R_16F, (int)skv,
-                        CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
-                }
-                else
-                {
-                    // F32 QK^T via TF32 tensor cores (~8x over FP32 CUDA cores). TF32 keeps the F32
-                    // exponent range, so raw pre-softmax scores can't overflow the way F16 would.
-                    CublasApi.cublasGemmEx(
-                        _cublasHandle,
-                        CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                        (int)skv, (int)sq, (int)d,
-                        &alpha,
-                        kPtr, CublasApi.CUDA_R_32F, (int)d,
-                        qPtr, CublasApi.CUDA_R_32F, (int)d,
-                        &beta,
-                        sPtr, CublasApi.CUDA_R_32F, (int)skv,
-                        CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
-                }
+                CublasApi.cublasGemmStridedBatchedEx(
+                    _cublasHandle,
+                    CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                    (int)skv, (int)sq, (int)d,
+                    &alpha,
+                    opK, CublasApi.CUDA_R_16F, (int)d, strideK,
+                    opQ, CublasApi.CUDA_R_16F, (int)d, strideQ,
+                    &beta,
+                    scoresBuf, CublasApi.CUDA_R_16F, (int)skv, strideScores,
+                    (int)totalHeads,
+                    CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+            }
+            else
+            {
+                // F32 QK^T via TF32 tensor cores (~8x over FP32 CUDA cores). TF32 keeps the F32
+                // exponent range, so raw pre-softmax scores can't overflow the way F16 would.
+                CublasApi.cublasGemmStridedBatchedEx(
+                    _cublasHandle,
+                    CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                    (int)skv, (int)sq, (int)d,
+                    &alpha,
+                    opK, CublasApi.CUDA_R_32F, (int)d, strideK,
+                    opQ, CublasApi.CUDA_R_32F, (int)d, strideQ,
+                    &beta,
+                    scoresBuf, CublasApi.CUDA_R_32F, (int)skv, strideScores,
+                    (int)totalHeads,
+                    CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
             }
 
             if (mask is not null)
@@ -4627,44 +4628,41 @@ public sealed class CudaBackend : IBackend
             else
                 _kernels!.LaunchSoftmax(scoresBuf, (int)skv, (int)(totalHeads * sq), _stream.Handle);
 
+            // attn_weights @ V, all heads in one strided-batched launch (see the QK^T comment above — same
+            // per-call-launch-overhead problem, same fix).
             long strideV = skv * d;
             long strideOut = sq * d;
             float one = 1.0f;
             float zero = 0.0f;
 
-            for (long bh = 0; bh < totalHeads; bh++)
+            if (isF16)
             {
-                ulong sPtr = scoresBuf + (ulong)(bh * strideScores * elemSize);
-                ulong vPtr = opV + (ulong)(bh * strideV * elemSize);
-                ulong oPtr = opOut + (ulong)(bh * strideOut * elemSize);
-
-                if (isF16)
-                {
-                    CublasApi.cublasGemmEx(
-                        _cublasHandle,
-                        CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
-                        (int)d, (int)sq, (int)skv,
-                        &one,
-                        vPtr, CublasApi.CUDA_R_16F, (int)d,
-                        sPtr, CublasApi.CUDA_R_16F, (int)skv,
-                        &zero,
-                        oPtr, CublasApi.CUDA_R_16F, (int)d,
-                        CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
-                }
-                else
-                {
-                    // attn_weights @ V via TF32 tensor cores (~8x over FP32 CUDA cores).
-                    CublasApi.cublasGemmEx(
-                        _cublasHandle,
-                        CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
-                        (int)d, (int)sq, (int)skv,
-                        &one,
-                        vPtr, CublasApi.CUDA_R_32F, (int)d,
-                        sPtr, CublasApi.CUDA_R_32F, (int)skv,
-                        &zero,
-                        oPtr, CublasApi.CUDA_R_32F, (int)d,
-                        CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
-                }
+                CublasApi.cublasGemmStridedBatchedEx(
+                    _cublasHandle,
+                    CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                    (int)d, (int)sq, (int)skv,
+                    &one,
+                    opV, CublasApi.CUDA_R_16F, (int)d, strideV,
+                    scoresBuf, CublasApi.CUDA_R_16F, (int)skv, strideScores,
+                    &zero,
+                    opOut, CublasApi.CUDA_R_16F, (int)d, strideOut,
+                    (int)totalHeads,
+                    CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+            }
+            else
+            {
+                // attn_weights @ V via TF32 tensor cores (~8x over FP32 CUDA cores).
+                CublasApi.cublasGemmStridedBatchedEx(
+                    _cublasHandle,
+                    CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                    (int)d, (int)sq, (int)skv,
+                    &one,
+                    opV, CublasApi.CUDA_R_32F, (int)d, strideV,
+                    scoresBuf, CublasApi.CUDA_R_32F, (int)skv, strideScores,
+                    &zero,
+                    opOut, CublasApi.CUDA_R_32F, (int)d, strideOut,
+                    (int)totalHeads,
+                    CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
             }
 
             // If we did the BF16 internal-cast detour, the output is F32 in pOutCast — cast
