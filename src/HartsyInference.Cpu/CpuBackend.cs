@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu.Kernels;
@@ -155,7 +154,6 @@ public sealed class CpuBackend : IBackend
         ActivationKernels.Silu(output, input);
     }
 
-
     /// <inheritdoc />
     public void Add(Tensor output, Tensor a, Tensor b)
     {
@@ -247,7 +245,8 @@ public sealed class CpuBackend : IBackend
             int inputIdx = outerIdx * (innerDim * 2) + d;
             float x = inPtr[inputIdx];
             float gate = inPtr[inputIdx + innerDim];
-            float geluGate = gate * 0.5f * (1.0f + MathF.Tanh(0.7978845608f * (gate + 0.044715f * gate * gate * gate)));
+            float geluGate = gate * 0.5f * (1.0f + MathF.Tanh(
+                ActivationKernels.Sqrt2OverPi * (gate + ActivationKernels.GeluCoeff * gate * gate * gate)));
             outPtr[i] = x * geluGate;
         }
     }
@@ -340,14 +339,14 @@ public sealed class CpuBackend : IBackend
         AudioKernels.MelFilterbank(output, input, filters);
     }
 
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+    }
+
     /// <summary>Releases all resources used by this backend.</summary>
     public void Dispose()
     {
         Volatile.Write(ref _disposed, 1);
-    }
-
-    private void ThrowIfDisposed()
-    {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 }

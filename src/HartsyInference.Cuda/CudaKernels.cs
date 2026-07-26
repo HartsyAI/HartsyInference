@@ -2,7 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Loads PTX modules from disk and provides typed kernel launch methods. Function handles stored as nint fields for zero-alloc dispatch.</summary>
+/// <summary>Loads PTX modules from disk; exposes typed kernel launches via nint function handles for zero-alloc dispatch.</summary>
 public sealed class CudaKernels : IDisposable
 {
     // ── F32 Modules ──────────────────────────────────────────────────────
@@ -338,9 +338,9 @@ public sealed class CudaKernels : IDisposable
     // Dense 16-bit-float GEMV (the BF16/F16 counterpart of the quant GEMVs, for checkpoints that ship
     // float16 weights — Orpheus/most audio LMs. cuBLAS GemmEx is inefficient at M=1). Loaded best-effort: a
     // load failure disables this fused path (callers fall back to cuBLAS) rather than breaking the backend.
-    private CudaModule? _mulMatVecF16Bf16Module;
-    private nint _mulMatVecBf16F32;
-    private nint _mulMatVecF16F32;
+    private readonly CudaModule? _mulMatVecF16Bf16Module;
+    private readonly nint _mulMatVecBf16F32;
+    private readonly nint _mulMatVecF16F32;
     /// <summary>True when the dense BF16/F16 decode-GEMV kernels loaded successfully.</summary>
     public bool HasFloatGemv { get; private set; }
     private readonly CudaModule _mulMatVecQ5_0Module;
@@ -848,8 +848,7 @@ public sealed class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches Conv1d (F32, channels-first [B,C,T]). One thread per output element.
-    /// Pass <paramref name="bias"/>=0 / <paramref name="hasBias"/>=0 when there is no bias.</summary>
+    /// <summary>Launches Conv1d (F32, channels-first [B,C,T]), one thread per output element; pass bias=0/hasBias=0 for no bias.</summary>
     public unsafe void LaunchConv1d(ulong output, ulong input, ulong weight, ulong bias,
         int batch, int cIn, int cOut, int tIn, int tOut, int kernel, int stride, int padLeft,
         int dilation, int groups, int hasBias, nint stream)
@@ -870,8 +869,7 @@ public sealed class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches ConvTranspose1d (F32, channels-first [B,C,T], weight [C_in,C_out/groups,K]).
-    /// Grouped like <see cref="LaunchConv1d"/> — groups==channels is depthwise (BigVGAN anti-aliased upsampling).</summary>
+    /// <summary>Launches ConvTranspose1d (F32, [B,C,T]); grouped like LaunchConv1d — groups==channels is depthwise (BigVGAN).</summary>
     public unsafe void LaunchConvTranspose1d(ulong output, ulong input, ulong weight, ulong bias,
         int batch, int cIn, int cOut, int tIn, int tOut, int kernel, int stride, int padLeft,
         int dilation, int groups, int hasBias, nint stream)
@@ -894,52 +892,20 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>Launches an elementwise audio activation (Sigmoid) over <paramref name="count"/> F32 elements.</summary>
     public unsafe void LaunchAudioSigmoid(ulong output, ulong input, int count, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        int countArg = count;
-        void** args = stackalloc void*[3];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &countArg;
-        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
-        CudaDriverApi.cuLaunchKernel(_audioSigmoidF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
+        => LaunchUnaryImpl(_audioSigmoidF32, output, input, count, stream);
 
     public unsafe void LaunchAudioMish(ulong output, ulong input, int count, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        int countArg = count;
-        void** args = stackalloc void*[3];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &countArg;
-        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
-        CudaDriverApi.cuLaunchKernel(_audioMishF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
+        => LaunchUnaryImpl(_audioMishF32, output, input, count, stream);
 
     /// <summary>Launches the audio Elu activation over <paramref name="count"/> F32 elements.</summary>
     public unsafe void LaunchAudioElu(ulong output, ulong input, float alpha, int count, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        float alphaArg = alpha;
-        int countArg = count;
-        void** args = stackalloc void*[4];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &alphaArg; args[3] = &countArg;
-        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
-        CudaDriverApi.cuLaunchKernel(_audioEluF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
+        => LaunchScaleImpl(_audioEluF32, output, input, alpha, count, stream);
 
-    /// <summary>Launches Leaky ReLU (x if x&gt;=0 else slope*x) over <paramref name="count"/> F32 elements.
-    /// StyleTTS 2 / Kokoro / HiFi-GAN / VITS use slope=0.2.</summary>
+    /// <summary>Launches Leaky ReLU over count F32 elements (StyleTTS 2/Kokoro/HiFi-GAN/VITS use slope=0.2).</summary>
     public unsafe void LaunchAudioLeakyRelu(ulong output, ulong input, float slope, int count, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        float slopeArg = slope;
-        int countArg = count;
-        void** args = stackalloc void*[4];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &slopeArg; args[3] = &countArg;
-        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
-        CudaDriverApi.cuLaunchKernel(_audioLeakyReluF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
+        => LaunchScaleImpl(_audioLeakyReluF32, output, input, slope, count, stream);
 
-    /// <summary>Launches the Snake activation x + sin²(αx)/α over [B,C,T] F32, α per-channel.
-    /// When <paramref name="beta"/>≠0, uses the β-divisor variant x + sin²(αx)/(β+ε).</summary>
+    /// <summary>Launches Snake activation x + sin²(αx)/α over [B,C,T] F32, α per-channel (β≠0 uses the β-divisor variant).</summary>
     public unsafe void LaunchAudioSnake(ulong output, ulong input, ulong alpha, ulong beta,
         int batch, int channels, int timeDim, nint stream)
     {
@@ -963,8 +929,7 @@ public sealed class CudaKernels : IDisposable
         }
     }
 
-    /// <summary>Launches parametric ReLU over [B,C,T] F32: x if x&gt;=0 else α·x, α per-channel
-    /// (<paramref name="alphaPerChannel"/>=1) or a single shared α (0).</summary>
+    /// <summary>Launches parametric ReLU over [B,C,T] F32: x if x&gt;=0 else α·x, per-channel or shared α.</summary>
     public unsafe void LaunchAudioPrelu(ulong output, ulong input, ulong alpha,
         int batch, int channels, int timeDim, int alphaPerChannel, nint stream)
     {
@@ -978,8 +943,7 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_audioPreluF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches the frame-repeat over [B,C,inT] F32: each time-step duplicated
-    /// <paramref name="numSamples"/> times → [B,C,inT*numSamples].</summary>
+    /// <summary>Launches the frame-repeat over [B,C,inT] F32: each time-step duplicated numSamples times.</summary>
     public unsafe void LaunchAudioRepeatTime(ulong output, ulong input,
         int batch, int channels, int inT, int numSamples, nint stream)
     {
@@ -993,9 +957,7 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_audioRepeatTimeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches Adaptive InstanceNorm 1D over [B,C,T] F32: per-(batch,channel) row,
-    /// normalize across T then affine by (1+gamma)/beta. <paramref name="perBatch"/>=1 when
-    /// gamma/beta are [B,C], else 0 ([C], broadcast over batch). One block per row.</summary>
+    /// <summary>Launches Adaptive InstanceNorm 1D over [B,C,T] F32: normalizes each row across T, then affines by (1+gamma)/beta.</summary>
     public unsafe void LaunchAudioAdaInstanceNorm1d(ulong output, ulong input, ulong gamma, ulong beta,
         int dim, int totalRows, int channels, bool perBatch, float eps, nint stream)
     {
@@ -1385,8 +1347,7 @@ public sealed class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches banded Im2Col for one batch element: fills the col buffer for output rows
-    /// [ohBase, ohBase + bandRows) only. Dtype dispatch mirrors the full-image kernel.</summary>
+    /// <summary>Launches banded Im2Col for one batch element: fills the col buffer for output rows [ohBase, ohBase+bandRows).</summary>
     public unsafe void LaunchIm2ColBanded(DType dtype, ulong col, ulong input,
         int channels, int inH, int inW, int kH, int kW,
         int padH, int padW, int strideH, int strideW,
@@ -1463,9 +1424,9 @@ public sealed class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Multi-scale deformable attention forward. One thread per (query, head, channel); softmax over
-    /// <c>levels·points</c> is folded in. Pointer args are all F32 device buffers except <paramref name="shapes"/>
-    /// (<c>int[levels*2]</c> h,w) and <paramref name="levelStart"/> (<c>int[levels]</c>).</summary>
+    /// <summary>Multi-scale deformable attention forward. One thread per (query, head, channel); softmax over levels·points is folded in.</summary>
+    /// <param name="shapes">Per-level (h,w), int[levels*2].</param>
+    /// <param name="levelStart">Per-level flattened offset, int[levels].</param>
     public unsafe void LaunchMsdaForward(ulong output, ulong value, ulong sampOff, ulong attn, ulong refPoints,
         ulong shapes, ulong levelStart, int nq, int heads, int hd, int levels, int points, int coords,
         int refQueryStride, int refLevelStride, nint stream)
@@ -1499,8 +1460,7 @@ public sealed class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Depthwise 2D conv (groups==channels) over an NCHW tensor; weight is <c>[C,1,kH,kW]</c>, bias
-    /// optional. One thread per output element. Dtype selects the F32 or F16 kernel.</summary>
+    /// <summary>Depthwise 2D conv (groups==channels) over NCHW; weight [C,1,kH,kW], bias optional, one thread per output element.</summary>
     public unsafe void LaunchDepthwiseConv2D(DType dtype, ulong output, ulong input, ulong weight, ulong bias,
         int hasBias, int n, int channels, int inH, int inW, int outH, int outW,
         int kH, int kW, int strideH, int strideW, int padH, int padW, nint stream)
@@ -1676,8 +1636,9 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Whether the optional stepcache.ptx module was found and loaded (see native/cuda/dit/stepcache.cu).</summary>
     public bool HasStepCacheKernels => _stepCacheModule is not null;
 
-    /// <summary>Launches the feature-cache gate reduction: sums[0] += Σ|a−b|, sums[1] += Σ|b| over <paramref name="count"/>
-    /// elements. Caller pre-zeroes the 2-float <paramref name="sums"/> buffer. F32 or F16 operands by <paramref name="isF16"/>.</summary>
+    /// <summary>Launches the feature-cache gate reduction: sums[0] += Σ|a−b|, sums[1] += Σ|b| over count elements.</summary>
+    /// <param name="sums">Caller-pre-zeroed 2-float output buffer.</param>
+    /// <param name="isF16">Selects the F32 or F16 operand kernel.</param>
     public unsafe void LaunchStepCacheRelL1(ulong sums, ulong a, ulong b, long count, bool isF16, nint stream)
     {
         if (_stepCacheModule is null)
@@ -1701,14 +1662,11 @@ public sealed class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Whether the optional sage_attn_int8.ptx module was found and loaded (native/cuda/attention).</summary>
+    /// <summary>Whether the optional w8a8.ptx module was found and loaded (native/cuda/dequant/w8a8.cu).</summary>
     public bool HasW8A8Kernels => _w8a8Module is not null;
 
-    /// <summary>W8A8 prologue — per-row (per-token) dynamic INT8 quant: x[rows, cols] → q8 + rowScale[rows]
-    /// (dequant scale absmax/127). One block (256 threads) per row. <paramref name="invScale"/> is an
-    /// optional per-input-channel SmoothQuant 1/s_j vector [cols] (pass 0 for none — same "0 = null"
-    /// convention as LaunchW8A8DequantBias's bias arg): when set, x[*, j] is multiplied by invScale[j]
-    /// before the absmax/quantize math, i.e. X_hat = X / s.</summary>
+    /// <summary>W8A8 prologue — per-row dynamic INT8 quant: x[rows,cols] → q8 + rowScale[rows] (256-thread block per row).</summary>
+    /// <param name="invScale">Optional SmoothQuant 1/s_j per-channel vector [cols] (X_hat = X/s); pass 0 for none.</param>
     public unsafe void LaunchW8A8QuantRowwise(ulong q8, ulong rowScale, ulong x, int rows, int cols, nint stream,
         bool srcF16, ulong invScale = 0)
     {
@@ -1721,8 +1679,7 @@ public sealed class CudaKernels : IDisposable
             (uint)rows, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>W8A8 epilogue — dequant the int32 GEMM result with rowScale[r]·wScale[c] (+ optional bias[c],
-    /// pass 0 for none) into F16 (<paramref name="outF16"/>=true) or F32.</summary>
+    /// <summary>W8A8 epilogue — dequants the int32 GEMM result with rowScale·wScale (+ optional bias) into F16 or F32.</summary>
     public unsafe void LaunchW8A8DequantBias(ulong output, ulong d32, ulong rowScale, ulong wScale, ulong bias,
         int rows, int cols, nint stream, bool outF16)
     {
@@ -1738,6 +1695,7 @@ public sealed class CudaKernels : IDisposable
             grid, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Whether the optional sage_attn_int8.ptx module was found and loaded (native/cuda/attention).</summary>
     public bool HasSageAttentionKernels => _sageAttnModule is not null;
 
     /// <summary>SageAttention prologue 1/3 — K per-channel mean over the sequence: kmean[b,h,d]. Grid (H,B), block 128.</summary>
@@ -1751,8 +1709,7 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(srcF16 ? _sageKMeanF16H : _sageKMeanF32, (uint)h, (uint)b, 1, 128, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>SageAttention prologue 2/3 — per-row absmax INT8 quant of Q with the attention softmax scale
-    /// folded into the stored row scale. One warp per row; grid ceil(B·H·Sq/4), block 128.</summary>
+    /// <summary>SageAttention prologue 2/3 — per-row absmax INT8 quant of Q with the softmax scale folded into the row scale.</summary>
     public unsafe void LaunchSageQuantQ(ulong q8, ulong qscale, ulong q, int b, int h, int sq, int d, float attnScale, nint stream, bool srcF16 = false)
     {
         ThrowIfNoSageModule();
@@ -1766,8 +1723,7 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(srcF16 ? _sageQuantQInt8F16H : _sageQuantQInt8F32, (rows + 3) / 4, 1, 1, 128, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>SageAttention prologue 3/3 — per-row absmax INT8 quant of (K − kmean) (the softmax-invariant
-    /// channel smoothing that recovers outlier accuracy). One warp per row; grid ceil(B·H·Skv/4), block 128.</summary>
+    /// <summary>SageAttention prologue 3/3 — per-row absmax INT8 quant of (K − kmean) for outlier-recovering channel smoothing.</summary>
     public unsafe void LaunchSageQuantK(ulong k8, ulong kscale, ulong k, ulong kmean, int b, int h, int skv, int d, nint stream, bool srcF16 = false)
     {
         ThrowIfNoSageModule();
@@ -1787,9 +1743,7 @@ public sealed class CudaKernels : IDisposable
     /// HARTSY_SAGE_V0=1) — the caller must then provide the pre-transposed F16 V workspace.</summary>
     public bool UseSageV1 => _sageAttnV1Module is not null && Environment.GetEnvironmentVariable("HARTSY_SAGE_V0") != "1";
 
-    /// <summary>v1 prologue — one-shot V transpose+cast: [B,H,Skv,D] f32 → [B,H,D,skvPad] f16 with
-    /// skvPad = Skv rounded up to 8 (16-byte cp.async source alignment). Amortizes the per-query-tile
-    /// re-transposes the flash kernel would otherwise repeat Sq/64 times.</summary>
+    /// <summary>v1 prologue — one-shot V transpose+cast: [B,H,Skv,D] f32 → [B,H,D,skvPad] f16, amortizing per-tile re-transpose.</summary>
     public unsafe void LaunchSageVF16T(ulong vt16, ulong v, int b, int h, int skv, int d, nint stream, bool srcF16 = false)
     {
         ThrowIfNoSageModule();
@@ -1797,6 +1751,8 @@ public sealed class CudaKernels : IDisposable
         uint bArg = (uint)b, hArg = (uint)h, skvArg = (uint)skv, dArg = (uint)d;
         void** args = stackalloc void*[6];
         args[0] = &vtArg; args[1] = &vArg; args[2] = &bArg; args[3] = &hArg; args[4] = &skvArg; args[5] = &dArg;
+        // skvPad = Skv rounded up to 8 (16-byte cp.async source alignment), amortizing the flash kernel's
+        // otherwise-repeated per-query-tile re-transpose (Sq/64 times).
         long skvPad = (skv + 7L) & ~7L;
         if (skvPad >= 2048 && (skvPad & (skvPad - 1)) == 0) skvPad += 8;   // anti-aliasing pad (see sage_skv_pad)
         long total = (long)b * h * d * skvPad;
@@ -1804,16 +1760,16 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(srcF16 ? _sageVF16TH : _sageVF16T, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>SageAttention main kernel — fused INT8-QK^T flash attention (online softmax). Dispatches the
-    /// register-resident mma.sync v1 (grid ceil(Sq/64)×H×B, block 128, ~24.3 KB SMEM, any Sq) when compiled,
-    /// else the wmma v0 (grid Sq/32×H×B, block 64 — caller must gate Sq % 32 == 0 for v0).
-    /// HARTSY_SAGE_V0=1 forces v0 for debugging.</summary>
+    /// <summary>SageAttention main kernel — fused INT8-QK^T flash attention (online softmax); dispatches v1 when compiled, else v0.</summary>
     public unsafe void LaunchSageAttnInt8(ulong outPtr, ulong q8, ulong qscale, ulong k8, ulong kscale, ulong v,
         ulong vt16, int b, int h, int sq, int skv, int d, nint stream, bool f16Io = false)
     {
         ThrowIfNoSageModule();
         ulong outArg = outPtr, q8Arg = q8, qsArg = qscale, k8Arg = k8, ksArg = kscale, vArg = v;
         uint bArg = (uint)b, hArg = (uint)h, sqArg = (uint)sq, skvArg = (uint)skv;
+        // Register-resident mma.sync v1 (grid ceil(Sq/64)×H×B, block 128, ~24.3 KB SMEM, any Sq) when compiled,
+        // else the wmma v0 (grid Sq/32×H×B, block 64 — caller must gate Sq % 32 == 0 for v0).
+        // HARTSY_SAGE_V0=1 forces v0 for debugging.
         if (UseSageV1)
         {
             if (vt16 == 0) throw new ArgumentException("v1 path requires the pre-transposed V workspace (LaunchSageVF16T).");
@@ -1935,8 +1891,7 @@ public sealed class CudaKernels : IDisposable
         int batch, int channels, int spatial, int groups, float eps, nint stream)
         => LaunchGroupNormImpl(_groupnormF16, output, input, weight, bias, batch, channels, spatial, groups, eps, stream);
 
-    /// <summary>Launches GroupNorm with BF16 I/O, FP32 accumulation. Used for SDXL VAE
-    /// where F16 activations overflow (resnet activations exceed Â±65504).</summary>
+    /// <summary>Launches GroupNorm with BF16 I/O, FP32 accumulation, for SDXL VAE where F16 activations overflow (±65504).</summary>
     public void LaunchGroupNormBf16(ulong output, ulong input, ulong weight, ulong bias,
         int batch, int channels, int spatial, int groups, float eps, nint stream)
         => LaunchGroupNormImpl(_groupnormBf16, output, input, weight, bias, batch, channels, spatial, groups, eps, stream);
@@ -1958,7 +1913,7 @@ public sealed class CudaKernels : IDisposable
 
     // ── DiT glue Launches (F32) ─────────────────────────────────────────
 
-    /// <summary>Launches RMSNorm: one block per row, reduces over <paramref name="normDim"/>, applies weight. Also serves per-head QK-RMSNorm (rows = B*L*heads, normDim = headDim).</summary>
+    /// <summary>Launches RMSNorm: one block per row, reduces over normDim, applies weight (also serves per-head QK-RMSNorm).</summary>
     public void LaunchRmsNorm(ulong output, ulong input, ulong weight, int normDim, int totalRows, float eps, nint stream)
         => LaunchRmsNormImpl(_ditRmsNormF32, output, input, weight, normDim, totalRows, eps, stream);
 
@@ -1966,7 +1921,7 @@ public sealed class CudaKernels : IDisposable
     public void LaunchRmsNormF16(ulong output, ulong input, ulong weight, int normDim, int totalRows, float eps, nint stream)
         => LaunchRmsNormImpl(_ditRmsNormF16, output, input, weight, normDim, totalRows, eps, stream);
 
-    /// <summary>Launches broadcast affine over the last dim: out[b,s,d] = in[b,s,d]*scale[b,d] + shift[b,d] (shift optional, pass 0 to skip).</summary>
+    /// <summary>Launches broadcast affine over the last dim: out = in*scale + shift (shift optional, pass 0 to skip).</summary>
     public void LaunchAffineBroadcastLastDim(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
         => LaunchAffineBroadcastImpl(_ditAffineBroadcastF32, output, input, scale, shift, seqLen, dim, total, stream);
 
@@ -1985,8 +1940,11 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches FlashAttention (one block per (b, q-head, q-row); blockDim = headDim; shared mem =
     /// headDim floats). <paramref name="lk"/> is the K/V buffer seq stride; <paramref name="kvLen"/> the valid
     /// key count.</summary>
-    public unsafe void LaunchFlashAttention(ulong outPtr, ulong q, ulong k, ulong v,
-        int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap, ulong sink, int slidingWindow, ulong alibiSlopes, nint stream, ulong dPos = 0)
+    public unsafe void LaunchFlashAttention(
+        ulong outPtr, ulong q, ulong k, ulong v,
+        int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen, int kvGroup,
+        bool causal, int qOffset, float scale, float softcap, ulong sink, int slidingWindow,
+        ulong alibiSlopes, nint stream, ulong dPos = 0)
     {
         ulong outArg = outPtr, qArg = q, kArg = k, vArg = v, sinkArg = sink, alibiArg = alibiSlopes, dPosArg = dPos;
         uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
@@ -2083,7 +2041,9 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Launches in-place KV-cache append: copies newKv [1,H,tNew,D] into buffer [1,H,maxSeq,D] at offset.</summary>
-    public unsafe void LaunchKvAppend(ulong buffer, ulong newKv, int heads, int maxSeq, int tNew, int headDim, int offset, nint stream, ulong dPos = 0)
+    public unsafe void LaunchKvAppend(
+        ulong buffer, ulong newKv, int heads, int maxSeq, int tNew, int headDim, int offset,
+        nint stream, ulong dPos = 0)
     {
         ulong bufArg = buffer, newArg = newKv, dPosArg = dPos;
         uint hArg = (uint)heads, maxArg = (uint)maxSeq, tArg = (uint)tNew, dArg = (uint)headDim, offArg = (uint)offset;
@@ -2138,10 +2098,7 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_lmScatterAddWeightedRowsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches per-row argmax over the last dim: indices[r] = argmax_c input[r,c]. One block per row,
-    /// <paramref name="blockThreads"/> threads (power-of-two), shared mem for the (value,index) reduction.</summary>
-    /// <summary>Fused graph-decode QKV epilogue: rope q → qOut, rope k → kCache@pos, copy v → vCache@pos,
-    /// all from the concatenated [q|k|v] projection output in one launch (see lm_qkv_rope_scatter_f32).</summary>
+    /// <summary>Fused graph-decode QKV epilogue: ropes q/k and scatters q,k,v into their caches at pos.</summary>
     public unsafe void LaunchQkvRopeScatter(ulong qOut, ulong kCache, ulong vCache, ulong qIn, ulong kIn, ulong vIn,
         ulong cos, ulong sin, int nq, int nkv, int headDim, int rotaryDim, bool interleaved, int maxSeq, ulong devicePos, nint stream)
     {
@@ -2325,13 +2282,13 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>Qwen3.5 delta-rule recurrence + gated RMSNorm, one block per value head; state is
     /// device-persistent across tokens.</summary>
-    private static readonly bool SsmDeltaRowParallel = Environment.GetEnvironmentVariable("HARTSY_SSM_DELTA_V2") != "0";
+    private static readonly bool _ssmDeltaRowParallel = Environment.GetEnvironmentVariable("HARTSY_SSM_DELTA_V2") != "0";
     // Byte-verified 4/4 prompts vs the legacy kernel and 2.7× faster in the isolated-graph
     // microbenchmark (20.5 vs 55 µs/call — the block-per-row shape's 512-byte blocks can't hide
     // DRAM latency; a plain Add over the same tensors streams at 7.4 µs). An earlier e2e A/B
     // wrongly concluded "no gain": it predated the per-head scalar hoist, whose per-thread
     // transcendentals were masking the schedule win. Kill-switch HARTSY_SSM_DELTA_WARPROW=0.
-    private static readonly bool SsmDeltaWarpRow = Environment.GetEnvironmentVariable("HARTSY_SSM_DELTA_WARPROW") != "0";
+    private static readonly bool _ssmDeltaWarpRow = Environment.GetEnvironmentVariable("HARTSY_SSM_DELTA_WARPROW") != "0";
 
     public unsafe void LaunchSsmDeltaStep(ulong output, ulong state, ulong q, ulong k, ulong v, ulong z,
         ulong alphaRaw, ulong betaRaw, ulong dtBias, ulong ssmA, ulong normW,
@@ -2342,7 +2299,7 @@ public sealed class CudaKernels : IDisposable
         // Qwen3.5-0.8B, ~50% of the whole decode step). Bit-identical values; needs the caller's
         // [hv*sv]-float scratch for the pre-norm readout. sk ≤ 1024 = the rows kernel's per-thread
         // register cache bound (CACHE_COLS·blockDim). Kill-switch HARTSY_SSM_DELTA_V2=0.
-        if (SsmDeltaRowParallel && oScratch != 0 && sk <= 1024 && hv <= 256)
+        if (_ssmDeltaRowParallel && oScratch != 0 && sk <= 1024 && hv <= 256)
         {
             // Per-head gate scalars first (one tiny launch): the row kernels then load 2 floats
             // per head instead of every thread evaluating 4 precise transcendentals — which, at
@@ -2365,14 +2322,18 @@ public sealed class CudaKernels : IDisposable
             uint redBytes = 256 * sizeof(float);
             // sk ≤ 256: warp-per-row shape (8 rows/block, sync-free warp-simulated tree — same
             // values, fewer blocks than the block-per-row shape on Qwen3.5's 128-wide rows).
-            if (sk <= 256 && SsmDeltaWarpRow)
+            if (sk <= 256 && _ssmDeltaWarpRow)
             {
                 uint rowBlocks = ((uint)sv + 7u) / 8u;
-                CudaDriverApi.cuLaunchKernel(_lmSsmDeltaStepWarpRowF32, rowBlocks, (uint)hv, 1, 256, 1, 1, 0, stream, (nint)rowsArgs, 0).ThrowOnError();
+                CudaDriverApi.cuLaunchKernel(
+                    _lmSsmDeltaStepWarpRowF32, rowBlocks, (uint)hv, 1, 256, 1, 1,
+                    0, stream, (nint)rowsArgs, 0).ThrowOnError();
             }
             else
             {
-                CudaDriverApi.cuLaunchKernel(_lmSsmDeltaStepRowsF32, (uint)sv, (uint)hv, 1, 256, 1, 1, redBytes, stream, (nint)rowsArgs, 0).ThrowOnError();
+                CudaDriverApi.cuLaunchKernel(
+                    _lmSsmDeltaStepRowsF32, (uint)sv, (uint)hv, 1, 256, 1, 1,
+                    redBytes, stream, (nint)rowsArgs, 0).ThrowOnError();
             }
 
             ulong outA = output, osA2 = oScratch, zA2 = z, nwA2 = normW;
@@ -2397,6 +2358,7 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_lmSsmDeltaStepF32, (uint)hv, 1, 1, 256, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Per-row argmax over the last dim: idxPtr[r] = argmax_c inPtr[r,c]; two-stage reduction for large C when scratch given.</summary>
     public unsafe void LaunchArgMaxLastDim(ulong idxPtr, ulong inPtr, int rows, int c, nint stream, ulong scratch = 0)
     {
         uint blockThreads = BlockSize;   // 256, power of two; threads beyond C just hold -FLT_MAX sentinels
@@ -2519,7 +2481,9 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Graph-capture decode: split-half RoPE on a single decode-step Q/K tensor [1,numHeads,1,headDim],
     /// reading the rotation row from a precomputed full table via devicePos[1] (qOffset). Grid is fixed
     /// (position-independent) — same devicePos convention as LaunchKvAppend/LaunchFlashAttention.</summary>
-    public unsafe void LaunchRopeDecodeSplitHalf(ulong x, ulong cosTable, ulong sinTable, int numHeads, int headDim, int rotaryDim, ulong devicePos, nint stream)
+    public unsafe void LaunchRopeDecodeSplitHalf(
+        ulong x, ulong cosTable, ulong sinTable, int numHeads, int headDim, int rotaryDim,
+        ulong devicePos, nint stream)
     {
         ulong xArg = x, cosArg = cosTable, sinArg = sinTable, posArg = devicePos;
         uint headsArg = (uint)numHeads, headDimArg = (uint)headDim, rotArg = (uint)rotaryDim;
@@ -2603,7 +2567,9 @@ public sealed class CudaKernels : IDisposable
         => LaunchScaleImpl(_ditPixelQuantizeF32, output, input, 0f, count, stream);
 
     /// <summary>Oasis head split: frame-major qkv[token,3·dim] → out[b,heads,seq,headDim] (part q/k/v, spatial/temporal).</summary>
-    public unsafe void LaunchOasisSplitHeads(ulong output, ulong qkv, int frames, int sp, int heads, int headDim, int part, bool temporal, nint stream)
+    public unsafe void LaunchOasisSplitHeads(
+        ulong output, ulong qkv, int frames, int sp, int heads, int headDim, int part,
+        bool temporal, nint stream)
     {
         ulong outArg = output, qkvArg = qkv;
         uint fArg = (uint)frames, spArg = (uint)sp, hArg = (uint)heads, hdArg = (uint)headDim, pArg = (uint)part, tArg = temporal ? 1u : 0u;
@@ -2642,7 +2608,9 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Fused Oasis adaLN: LayerNorm(x)·(1+scale)+shift, scale/shift sliced from mod per frame (5 kernels → 1).</summary>
-    public unsafe void LaunchOasisAdaLn(ulong output, ulong input, ulong mod, int dim, int sp, int totalRows, int modStride, int shiftOff, int scaleOff, float eps, nint stream)
+    public unsafe void LaunchOasisAdaLn(
+        ulong output, ulong input, ulong mod, int dim, int sp, int totalRows, int modStride,
+        int shiftOff, int scaleOff, float eps, nint stream)
     {
         ulong outArg = output, inArg = input, modArg = mod;
         uint dimArg = (uint)dim, spArg = (uint)sp, rowsArg = (uint)totalRows, msArg = (uint)modStride, shArg = (uint)shiftOff, scArg = (uint)scaleOff;
@@ -3011,9 +2979,11 @@ public sealed class CudaKernels : IDisposable
     /// <summary>MG3 ActionModule: gather QKV slot into the batched temporal layout [sp, heads, tt, headDim].</summary>
     public unsafe void LaunchMg3SplitQkvTemporal(ulong qkv, ulong outp, int tt, int sp, int heads, int headDim, int part, int stride, nint stream)
     {
-        ulong a0 = qkv, a1 = outp; uint u2 = (uint)tt, u3 = (uint)sp, u4 = (uint)heads, u5 = (uint)headDim, u6 = (uint)part, u7 = (uint)stride;
+        ulong qkvArg = qkv, outpArg = outp;
+        uint ttArg = (uint)tt, spArg = (uint)sp, headsArg = (uint)heads, headDimArg = (uint)headDim, partArg = (uint)part, strideArg = (uint)stride;
         void** args = stackalloc void*[8];
-        args[0] = &a0; args[1] = &a1; args[2] = &u2; args[3] = &u3; args[4] = &u4; args[5] = &u5; args[6] = &u6; args[7] = &u7;
+        args[0] = &qkvArg; args[1] = &outpArg; args[2] = &ttArg; args[3] = &spArg;
+        args[4] = &headsArg; args[5] = &headDimArg; args[6] = &partArg; args[7] = &strideArg;
         long total = (long)sp * heads * tt * headDim; uint grid = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_mg3SplitQkvTemporalF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
@@ -3021,29 +2991,38 @@ public sealed class CudaKernels : IDisposable
     /// <summary>MG3 ActionModule: [sp, heads, tt, headDim] back to token rows [tt·sp, streamDim].</summary>
     public unsafe void LaunchMg3MergeTemporal(ulong attn, ulong outp, int tt, int sp, int heads, int headDim, nint stream)
     {
-        ulong a0 = attn, a1 = outp; uint u2 = (uint)tt, u3 = (uint)sp, u4 = (uint)heads, u5 = (uint)headDim;
+        ulong attnArg = attn, outpArg = outp;
+        uint ttArg = (uint)tt, spArg = (uint)sp, headsArg = (uint)heads, headDimArg = (uint)headDim;
         void** args = stackalloc void*[6];
-        args[0] = &a0; args[1] = &a1; args[2] = &u2; args[3] = &u3; args[4] = &u4; args[5] = &u5;
+        args[0] = &attnArg; args[1] = &outpArg; args[2] = &ttArg; args[3] = &spArg; args[4] = &headsArg; args[5] = &headDimArg;
         long total = (long)tt * sp * heads * headDim; uint grid = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_mg3MergeTemporalF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>MG3 ActionModule: interleaved rope on [sp, heads, tt, headDim]; cos/sin [gridRows, headDim].</summary>
-    public unsafe void LaunchMg3RopeBatched(ulong x, ulong cos, ulong sin, int sp, int heads, int tt, int headDim, int gh, int gw, int broadcast, nint stream)
+    public unsafe void LaunchMg3RopeBatched(
+        ulong x, ulong cos, ulong sin, int sp, int heads, int tt, int headDim, int gh, int gw,
+        int broadcast, nint stream)
     {
-        ulong a0 = x, a1 = cos, a2 = sin; uint u3 = (uint)sp, u4 = (uint)heads, u5 = (uint)tt, u6 = (uint)headDim, u7 = (uint)gh, u8 = (uint)gw, u9 = (uint)broadcast;
+        ulong xArg = x, cosArg = cos, sinArg = sin;
+        uint spArg = (uint)sp, headsArg = (uint)heads, ttArg = (uint)tt, headDimArg = (uint)headDim;
+        uint ghArg = (uint)gh, gwArg = (uint)gw, broadcastArg = (uint)broadcast;
         void** args = stackalloc void*[10];
-        args[0] = &a0; args[1] = &a1; args[2] = &a2; args[3] = &u3; args[4] = &u4; args[5] = &u5; args[6] = &u6; args[7] = &u7; args[8] = &u8; args[9] = &u9;
-        long total = (long)sp * heads * tt * (headDim / 2); uint grid = (uint)((total + BlockSize - 1) / BlockSize);
+        args[0] = &xArg; args[1] = &cosArg; args[2] = &sinArg; args[3] = &spArg; args[4] = &headsArg;
+        args[5] = &ttArg; args[6] = &headDimArg; args[7] = &ghArg; args[8] = &gwArg; args[9] = &broadcastArg;
+        long total = (long)sp * heads * tt * (headDim / 2);
+        uint grid = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_mg3RopeBatchedF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>MG3 ActionModule keyboard: expand K/V [tt, 2·streamDim] → k,v [sp, heads, tt, headDim].</summary>
     public unsafe void LaunchMg3KvExpand(ulong kv, ulong kOut, ulong vOut, int sp, int heads, int tt, int headDim, nint stream)
     {
-        ulong a0 = kv, a1 = kOut, a2 = vOut; uint u3 = (uint)sp, u4 = (uint)heads, u5 = (uint)tt, u6 = (uint)headDim;
+        ulong kvArg = kv, kOutArg = kOut, vOutArg = vOut;
+        uint spArg = (uint)sp, headsArg = (uint)heads, ttArg = (uint)tt, headDimArg = (uint)headDim;
         void** args = stackalloc void*[7];
-        args[0] = &a0; args[1] = &a1; args[2] = &a2; args[3] = &u3; args[4] = &u4; args[5] = &u5; args[6] = &u6;
+        args[0] = &kvArg; args[1] = &kOutArg; args[2] = &vOutArg;
+        args[3] = &spArg; args[4] = &headsArg; args[5] = &ttArg; args[6] = &headDimArg;
         long total = (long)sp * heads * tt * headDim; uint grid = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_mg3KvExpandF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
@@ -3051,9 +3030,11 @@ public sealed class CudaKernels : IDisposable
     /// <summary>MG3 mouse stream: build MLP input [tt·sp, imgDim+winFloats] = [hidden | broadcast mouse window].</summary>
     public unsafe void LaunchMg3MouseMlpConcat(ulong hidden, ulong mouseWin, ulong outp, int tt, int sp, int imgDim, int winFloats, nint stream)
     {
-        ulong a0 = hidden, a1 = mouseWin, a2 = outp; uint u3 = (uint)tt, u4 = (uint)sp, u5 = (uint)imgDim, u6 = (uint)winFloats;
+        ulong hiddenArg = hidden, mouseWinArg = mouseWin, outpArg = outp;
+        uint ttArg = (uint)tt, spArg = (uint)sp, imgDimArg = (uint)imgDim, winFloatsArg = (uint)winFloats;
         void** args = stackalloc void*[7];
-        args[0] = &a0; args[1] = &a1; args[2] = &a2; args[3] = &u3; args[4] = &u4; args[5] = &u5; args[6] = &u6;
+        args[0] = &hiddenArg; args[1] = &mouseWinArg; args[2] = &outpArg;
+        args[3] = &ttArg; args[4] = &spArg; args[5] = &imgDimArg; args[6] = &winFloatsArg;
         long total = (long)tt * sp * (imgDim + winFloats); uint grid = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_mg3MouseMlpConcatF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
@@ -3123,8 +3104,10 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_wanVaeBuildPadded, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Fills output [cOut, tout, HW] with per-channel bias (or 0 when <paramref name="bias"/>=0).</summary>
-    public unsafe void LaunchWanVaeRmsNormChannel(ulong outp, ulong x, ulong gamma, int c, long spatial, float eps, float sqrtC, long numPos, nint stream)
+    /// <summary>Per-channel RMS norm: out[c] = x[c] * (sqrtC / max(||x||_2, eps)) * gamma[c], over the C axis at each spatial position.</summary>
+    public unsafe void LaunchWanVaeRmsNormChannel(
+        ulong outp, ulong x, ulong gamma, int c, long spatial, float eps, float sqrtC,
+        long numPos, nint stream)
     {
         ulong oA = outp, xA = x, gA = gamma; int cA = c; long spA = spatial, npA = numPos; float eA = eps, scA = sqrtC;
         void** args = stackalloc void*[8];
@@ -3133,6 +3116,7 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_wanVaeRmsNormChannel, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Unpatchifies [b, c*p*p, t, h, w] into [b, c, t, h*p, w*p] via pixel-shuffle.</summary>
     public unsafe void LaunchWanVaeUnpatchify(ulong outp, ulong x, int b, int c, int t, int h, int w, int p, long numOut, nint stream)
     {
         ulong oA = outp, xA = x; int bA = b, cA = c, tA = t, hA = h, wA = w, pA = p; long nA = numOut;
@@ -3142,6 +3126,7 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_wanVaeUnpatchify, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Splits fused attention input [bt, 3c, h, w] into q, k, v, each [bt, 1, hw, c].</summary>
     public unsafe void LaunchWanVaeSplitQkv(ulong q, ulong k, ulong v, ulong src, int bt, int c, int hw, long numEl, nint stream)
     {
         ulong qA = q, kA = k, vA = v, sA = src; int btA = bt, cA = c, hwA = hw; long nA = numEl;
@@ -3151,6 +3136,7 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_wanVaeSplitQkv, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Inverse of the qkv split: reshapes attention output [bt, 1, hw, c] back into a frame [bt, c, h, w].</summary>
     public unsafe void LaunchWanVaeTokensToFrame(ulong outp, ulong a, int bt, int c, int hw, long numEl, nint stream)
     {
         ulong oA = outp, aA = a; int btA = bt, cA = c, hwA = hw; long nA = numEl;
@@ -3160,6 +3146,7 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_wanVaeTokensToFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Fills output [cOut, tout, HW] with per-channel bias (or 0 when <paramref name="bias"/>=0).</summary>
     public unsafe void LaunchWanVaeFillBias(ulong outp, ulong bias, int cOut, int tout, int HW, nint stream)
     {
         ulong oA = outp, bA = bias; uint coA = (uint)cOut, toA = (uint)tout, hwA = (uint)HW;
@@ -3280,7 +3267,7 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_fp8QuantF16ToE4M3, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches BF16 to F32 cast (lossless — BF16 is the upper 16 bits of F32). Input is 2 bytes/element, output is 4 bytes/element.</summary>
+    /// <summary>Launches BF16 to F32 cast (lossless — BF16 is the upper 16 bits of F32). 2 bytes/element in, 4 out.</summary>
     public void LaunchCastBf16ToF32(ulong output, ulong input, int count, nint stream)
         => LaunchUnaryImpl(_castBf16ToF32, output, input, count, stream);
 
@@ -3290,7 +3277,8 @@ public sealed class CudaKernels : IDisposable
 
     // ── GGUF Dequant Launches ────────────────────────────────────────────
 
-    /// <summary>Launches Q8_0 → F16 dequant. <paramref name="elementCount"/> is the total element count (must be a multiple of 32). Internally launches one CUDA block per Q8_0 quant block (32 elements), 32 threads per CUDA block.</summary>
+    /// <summary>Launches Q8_0 → F16 dequant, one CUDA block (32 threads) per 32-element Q8_0 quant block.</summary>
+    /// <param name="elementCount">Total element count; must be a multiple of 32.</param>
     public unsafe void LaunchDequantQ8_0ToF16(ulong output, ulong input, int elementCount, nint stream)
     {
         if (elementCount % 32 != 0)
@@ -3335,12 +3323,14 @@ public sealed class CudaKernels : IDisposable
         LaunchDequantImpl(_dequantQ5_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
     }
 
-    /// <summary>Launches Q6_K → F16 dequant. Element count must be a multiple of 256. The Q6_K kernel uses 64 threads per CUDA block — each thread emits 4 elements at strides {0, +32, +64, +96} (2 halves × 32 l-values = 64 threads cover all 256 elements).</summary>
+    /// <summary>Launches Q6_K → F16 dequant. Element count must be a multiple of 256.</summary>
     public unsafe void LaunchDequantQ6_KToF16(ulong output, ulong input, int elementCount, nint stream)
     {
         if (elementCount % 256 != 0)
             throw new ArgumentException($"Q6_K element count must be a multiple of 256, got {elementCount}.");
         int superBlockCount = elementCount / 256;
+        // 64 threads per CUDA block, each emitting 4 elements at strides {0, +32, +64, +96}
+        // (2 halves × 32 l-values = 64 threads cover all 256 elements of the super-block).
         LaunchDequantImpl(_dequantQ6_KToF16, output, input, superBlockCount, threadsPerBlock: 64, stream);
     }
 
@@ -3478,7 +3468,9 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_mulMatVecQ5KQ8_1, gridX, (uint)M, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    private unsafe void LaunchMulMatVecQ8_1Impl(nint func, nint ksplitFunc, ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
+    private unsafe void LaunchMulMatVecQ8_1Impl(
+        nint func, nint ksplitFunc, ulong output, ulong xq, ulong xd, ulong weight, ulong bias,
+        int N, int K, int M, nint stream)
     {
         ulong outA = output, xqA = xq, xdA = xd, wA = weight, bA = bias;
         int nA = N, kA = K, mA = M;
@@ -3556,7 +3548,7 @@ public sealed class CudaKernels : IDisposable
     private void DisposeModules()
     {
         // Null-safe: if the constructor threw partway through, some modules will not
-        // have been assigned. Finalizers must not raise â a null-ref here would crash
+        // have been assigned. Finalizers must not raise — a null-ref here would crash
         // the process during GC after a CUDA backend init failure / Vulkan fallback.
         _elementwiseModule?.Dispose();
         _groupnormModule?.Dispose();
@@ -3614,6 +3606,8 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ4_0Q8_1Module?.Dispose();
         _mulMatVecQ5_0Q8_1Module?.Dispose();
         _mulMatVecQ5KQ8_1Module?.Dispose();
+        _sageAttnModule?.Dispose();
+        _sageAttnV1Module?.Dispose();
     }
 
     public void Dispose()

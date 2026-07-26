@@ -1,11 +1,13 @@
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>Vulkan compute backend implementing <see cref="IBackend"/>. Routes operations to SPIR-V compute shaders loaded from disk and dispatched via vkCmdDispatch on a single timeline-semaphore stream. Mirrors the CUDA backend's GPU weight cache + lazy-sync activation cache so model code that works on CUDA works unchanged here.</summary>
+/// <summary>Vulkan compute backend implementing <see cref="IBackend"/> via SPIR-V compute shaders.</summary>
+// Mirrors the CUDA backend's GPU weight cache + lazy-sync activation cache so model code that works
+// on CUDA works unchanged here.
 public sealed class VulkanBackend : IBackend
 {
     private readonly VulkanInstance _instance;
@@ -24,14 +26,12 @@ public sealed class VulkanBackend : IBackend
     public BackendCapabilities Capabilities { get; }
     public VulkanCapabilities Vk => _vkDevice.Capabilities;
 
-    /// <summary>Filesystem path of the on-disk SPIR-V pipeline cache. Exposed for tests that
-    /// verify persist + reload across backend lifetimes.</summary>
+    /// <summary>Filesystem path of the on-disk SPIR-V pipeline cache; exposed for persist/reload tests.</summary>
     public string PipelineCachePath => _pipelineCache.CachePath;
 
-    /// <summary>Diagnostic snapshot of device-memory usage. Used by the leak-validation tests
-    /// to assert that VRAM returns to baseline after a generation loop. Aggregated across all
-    /// DEVICE_LOCAL heaps; values are stable across slab boundaries (slab-internal free regions
-    /// are subtracted from <c>UsedDeviceBytes</c>).</summary>
+    /// <summary>Diagnostic snapshot of device-memory usage, aggregated across all DEVICE_LOCAL heaps.</summary>
+    // Used by the leak-validation tests to assert that VRAM returns to baseline after a generation loop.
+    // Values are stable across slab boundaries (slab-internal free regions are subtracted from UsedDeviceBytes).
     public (long usedDeviceBytes, long reservedDeviceBytes, int slabBlocks, long cachedTensorBytes) MemoryStats
     {
         get
@@ -86,7 +86,10 @@ public sealed class VulkanBackend : IBackend
                 _stream.WaitIdleHost();
                 _allocator.ReleaseEmptySlabs();
             }
-            catch { /* swallow inside callback */ }
+            catch (Exception ex)
+            {
+                Logs.Error("Vulkan OOM-retry callback failed while releasing empty slabs", ex);
+            }
         };
 
         Device = DeviceKind.Vulkan(deviceOrdinal);
@@ -116,9 +119,15 @@ public sealed class VulkanBackend : IBackend
 
     public void FreeWeights(IEnumerable<Tensor> weights) => _xfer.FreeWeights(weights);
 
-    // ── Helpers ─────────────────────────────────────────────────────────
+    #region Helpers
 
-    private const uint LOCAL_X_1D = 256;
+    private const uint LocalX1D = 256;
+
+    /// <summary>Default spec-constant set for 1D-dispatch kernels (local_x = <see cref="LocalX1D"/>, local_y = local_z = 1).</summary>
+    private static readonly SpecConstant[] _default1DSpec =
+    {
+        SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
+    };
 
     private static uint GroupCount(long total, uint localX)
         => (uint)((total + localX - 1) / localX);
@@ -130,19 +139,17 @@ public sealed class VulkanBackend : IBackend
     private VulkanKernel GetKernel(string shaderName, int storageBufferCount, ReadOnlySpan<SpecConstant> spec)
         => _kernels.Get(shaderName, storageBufferCount, spec);
 
-    /// <summary>Counter of recorded dispatches since last submit. Flushed periodically so the
-    /// timeline-semaphore advances and deferred-free buffers can be reclaimed; otherwise large
-    /// models accumulate hundreds of allocations between submits and exhaust the heap.</summary>
+    /// <summary>Recorded dispatches since last submit — flushed periodically so deferred-free buffers can be reclaimed.</summary>
+    // Otherwise large models accumulate hundreds of allocations between submits and exhaust the heap.
     private int _dispatchesSinceSubmit;
-    /// <summary>Dispatches recorded by the current outermost op — reset at op entry, read by the profiler.
-    /// Kept separate from <see cref="_dispatchesSinceSubmit"/> (which resets only on an actual submit) so
-    /// batching submits across ops doesn't corrupt the per-op dispatch count the profiler reports.</summary>
+    /// <summary>Dispatches recorded by the current outermost op — reset at op entry, read by the profiler.</summary>
+    // Kept separate from _dispatchesSinceSubmit (which resets only on an actual submit) so batching
+    // submits across ops doesn't corrupt the per-op dispatch count the profiler reports.
     private int _dispatchesThisOp;
-    private const int FLUSH_THRESHOLD = 8;
+    private const int FlushThreshold = 8;
 
-    /// <summary>When set, submit a command buffer at the end of every op (the old behavior). Default off:
-    /// submits are batched until <see cref="FLUSH_THRESHOLD"/> dispatches accumulate, cutting one
-    /// <c>vkQueueSubmit2</c> per tiny op — the dominant per-dispatch host cost for small-op-heavy workloads.</summary>
+    /// <summary>When set, submits a command buffer per op instead of batching until <see cref="FlushThreshold"/> dispatches accumulate.</summary>
+    // Batching cuts one vkQueueSubmit2 per tiny op — the dominant per-dispatch host cost for small-op-heavy workloads.
     private static readonly bool _submitPerOp =
         Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_SUBMIT_PER_OP") == "1";
 
@@ -190,18 +197,18 @@ public sealed class VulkanBackend : IBackend
         // and the buffers get vkDestroy'd while later heads' descriptor sets still reference
         // them — silent garbage output for heads beyond the first ~2.
         // Transient drain is now done explicitly at op boundaries via DrainAndFlush.
-        if (_dispatchesSinceSubmit >= FLUSH_THRESHOLD && _opNestingDepth == 0)
+        if (_dispatchesSinceSubmit >= FlushThreshold && _opNestingDepth == 0)
         {
             DrainAndFlush();
         }
     }
 
-    /// <summary>Tracks whether we're currently inside a backend op. While >0, auto-flush is suppressed
-    /// because draining transients mid-op would free buffers still referenced by later dispatches in
-    /// the same op (e.g. SDPA's per-head loop sharing Q/K/V uploads).</summary>
+    /// <summary>Tracks whether we're currently inside a backend op; while >0, auto-flush is suppressed.</summary>
+    // Draining transients mid-op would free buffers still referenced by later dispatches in the same
+    // op (e.g. SDPA's per-head loop sharing Q/K/V uploads).
     private int _opNestingDepth;
 
-    private OpScope EnterOp([System.Runtime.CompilerServices.CallerMemberName] string opName = "")
+    private OpScope EnterOp([CallerMemberName] string opName = "")
         => new(this, opName);
     private readonly struct OpScope : IDisposable
     {
@@ -229,7 +236,7 @@ public sealed class VulkanBackend : IBackend
                 // only flush the command buffer once enough dispatches accumulate, so a stream of tiny
                 // ops costs one vkQueueSubmit2 instead of one each. Sync()/lazy-sync still force a flush.
                 _b._xfer.DrainTransients();
-                if (_submitPerOp || _b._dispatchesSinceSubmit >= FLUSH_THRESHOLD)
+                if (_submitPerOp || _b._dispatchesSinceSubmit >= FlushThreshold)
                 {
                     _b._stream.SubmitAndAdvance();
                     _b._dispatchesSinceSubmit = 0;
@@ -255,18 +262,17 @@ public sealed class VulkanBackend : IBackend
         _dispatchesSinceSubmit = 0;
     }
 
-    /// <summary>Promotes a freshly-allocated GPU buffer to the activation cache (so the next op finds it via reference equality on the Tensor).</summary>
+    /// <summary>Promotes a freshly-allocated GPU buffer to the activation cache, keyed by Tensor reference equality.</summary>
     private void CacheOutput(Tensor output, VulkanBuffer buffer) => _xfer.CacheActivation(output, buffer);
 
     private VulkanBuffer GetBuffer(Tensor t) => _xfer.CopyToDevice(t);
 
-    /// <summary>Selects the (BM, BN, BK, TM, TN) tile size for the tiled matmul kernel based on
-    /// the GEMM shape. Profile-driven choice (Flux Schnell, RTX 3060): big tiles 128×128/32 for
-    /// Flux/SDXL Linear shapes (M, N ≥ 128) cut workgroup count by ~16× vs the old 32×32 default,
-    /// which is the primary perf win from Phase C2 step 1. Smaller tiles are picked for shapes
-    /// where big tiles would leave most threads idle (e.g. SDPA per-head 64×64 matmuls).
-    /// MAX_BM/BN/BK/TM/TN in the shader (matmul_tiled.comp.glsl) cap what's selectable here —
-    /// keep them in sync if you bump these values.</summary>
+    /// <summary>Selects the (BM, BN, BK, TM, TN) tile size for the tiled matmul kernel based on the GEMM shape.</summary>
+    // Profile-driven choice (Flux Schnell, RTX 3060): big tiles 128x128/32 for Flux/SDXL Linear shapes
+    // (M, N >= 128) cut workgroup count by ~16x vs the old 32x32 default — the primary perf win from
+    // Phase C2 step 1. Smaller tiles are picked for shapes where big tiles would leave most threads idle
+    // (e.g. SDPA per-head 64x64 matmuls). MAX_BM/BN/BK/TM/TN in the shader (matmul_tiled.comp.glsl) cap
+    // what's selectable here — keep them in sync if you bump these values.
     private (uint BM, uint BN, uint BK, uint TM, uint TN) PickMatmulTile(long M, long N, long K)
     {
         // matmul_tiled's shared arrays are FP32 and sized BM*(BK+1) + BK*BN (see the shader). The 128
@@ -281,15 +287,14 @@ public sealed class VulkanBackend : IBackend
     /// <summary>Shared-memory bytes matmul_tiled's FP32 Asub+Bsub consume for a tile (must stay ≤ device limit).</summary>
     private static uint TileSharedBytes(uint BM, uint BN, uint BK) => (BM * (BK + 1) + BK * BN) * sizeof(float);
 
-    /// <summary>Attempts the cooperative-matrix matmul fast path. Returns true when the kernel
-    /// was dispatched (op is fully handled). Returns false when the path doesn't apply and the
-    /// caller should fall through to <c>matmul_tiled</c>. Constraints for v1:
-    /// (a) <c>HasCooperativeMatrix</c> capability, (b) GEMM dtype is FP16, (c) M, N, K all
-    /// multiples of <c>FRAG=16</c>, (d) no fused activation. Bias is handled via a follow-up
-    /// <c>BroadcastAdd(N, 1)</c> dispatch — see comments below.</summary>
+    /// <summary>Env override to force-disable the cooperative-matrix fast path (perf comparison / debugging).</summary>
     private static readonly bool _disableCoopmat =
         Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_DISABLE_COOPMAT") == "1";
 
+    /// <summary>Attempts the cooperative-matrix matmul fast path; returns true when the kernel was dispatched (op fully handled).</summary>
+    // Returns false when the path doesn't apply and the caller should fall through to matmul_tiled. Constraints
+    // for v1: (a) HasCooperativeMatrix capability, (b) GEMM dtype is FP16, (c) M, N, K all multiples of FRAG=16,
+    // (d) no fused activation. Bias is handled via a follow-up BroadcastAdd(N, 1) dispatch — see comments below.
     private bool TryDispatchCoopmat(
         Tensor output, VulkanBuffer aRes, VulkanBuffer bRes,
         int M, int N, int K, bool transposeA, bool transposeB, DType gemmDtype,
@@ -384,8 +389,9 @@ public sealed class VulkanBackend : IBackend
 
             if (biasF32Owned is not null) _xfer.FreeDevice(biasF32Owned);
         }
-        catch
+        catch (Exception ex)
         {
+            Logs.Error("Vulkan TryDispatchCoopmat dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }
@@ -393,7 +399,7 @@ public sealed class VulkanBackend : IBackend
         return true;
     }
 
-    /// <summary>If <paramref name="src"/> is on a different dtype than <paramref name="want"/>, allocate a temp buffer in <paramref name="want"/> and dispatch the cast kernel; otherwise return <paramref name="srcBuf"/>. Returns (buffer, ownedTemp) — caller frees ownedTemp.</summary>
+    /// <summary>Casts <paramref name="srcBuf"/> to <paramref name="want"/> if needed; caller must free the returned ownedTemp.</summary>
     private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want)
     {
         if (src.DType == want) return (srcBuf, null);
@@ -408,15 +414,12 @@ public sealed class VulkanBackend : IBackend
 
         if (src.DType == DType.F8E4M3 && want == DType.F16)
         {
-            VulkanKernel k = GetKernel("cast_f8e4m3_f16", storageBufferCount: 2,
-                stackalloc SpecConstant[] {
-                    SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-                });
+            VulkanKernel k = GetKernel("cast_f8e4m3_f16", storageBufferCount: 2, _default1DSpec);
             Span<byte> pc = stackalloc byte[8];
             BinaryWriteUInt(pc, 0, (uint)elements);
             BinaryWriteFloat(pc, 4, src.Fp8ScaleFactor);
             Span<ulong> bufs = stackalloc ulong[] { srcBuf.Handle, dst.Handle };
-            Dispatch(k, bufs, pc, GroupCount(elements, LOCAL_X_1D));
+            Dispatch(k, bufs, pc, GroupCount(elements, LocalX1D));
             return FinishCast(src, want, dst, cacheThis);
         }
 
@@ -428,13 +431,10 @@ public sealed class VulkanBackend : IBackend
             // FP8 -> F32 = FP8 -> F16 -> F32 (two-stage)
             (VulkanBuffer mid, _) = CastIfNeeded(src, srcBuf, DType.F16);
             // Now cast mid (F16) to F32
-            VulkanKernel kk = GetKernel("cast_f16_f32", storageBufferCount: 2,
-                stackalloc SpecConstant[] {
-                    SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-                });
+            VulkanKernel kk = GetKernel("cast_f16_f32", storageBufferCount: 2, _default1DSpec);
             Span<byte> pc2 = stackalloc byte[4]; BinaryWriteUInt(pc2, 0, (uint)elements);
             Span<ulong> bufs2 = stackalloc ulong[] { mid.Handle, dst.Handle };
-            Dispatch(kk, bufs2, pc2, GroupCount(elements, LOCAL_X_1D));
+            Dispatch(kk, bufs2, pc2, GroupCount(elements, LocalX1D));
             _xfer.FreeDevice(mid);
             return FinishCast(src, want, dst, cacheThis);
         }
@@ -444,21 +444,16 @@ public sealed class VulkanBackend : IBackend
             throw new NotSupportedException($"Vulkan cast {src.DType.Name} -> {want.Name} not implemented.");
         }
 
-        VulkanKernel kernel = GetKernel(shader, storageBufferCount: 2,
-            stackalloc SpecConstant[] {
-                SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-            });
+        VulkanKernel kernel = GetKernel(shader, storageBufferCount: 2, _default1DSpec);
 
         Span<byte> push = stackalloc byte[4];
         BinaryWriteUInt(push, 0, (uint)elements);
         Span<ulong> b = stackalloc ulong[] { srcBuf.Handle, dst.Handle };
-        Dispatch(kernel, b, push, GroupCount(elements, LOCAL_X_1D));
+        Dispatch(kernel, b, push, GroupCount(elements, LocalX1D));
         return FinishCast(src, want, dst, cacheThis);
     }
 
-    /// <summary>Tail of <see cref="CastIfNeeded"/>: when <paramref name="dst"/> is a preloaded weight's cast,
-    /// promote it to the weight-cast cache and return it as non-owned (the caller must not free it); otherwise
-    /// return it as a caller-owned temporary.</summary>
+    /// <summary>Tail of <see cref="CastIfNeeded"/>: promotes <paramref name="dst"/> to the cache, else returns it as an owned temporary.</summary>
     private (VulkanBuffer buf, VulkanBuffer? owned) FinishCast(Tensor src, DType want, VulkanBuffer dst, bool cacheThis)
     {
         if (cacheThis)
@@ -485,7 +480,9 @@ public sealed class VulkanBackend : IBackend
         BinaryWriteUInt(buf, offset, u);
     }
 
-    // ── Linear algebra ──────────────────────────────────────────────────
+    #endregion
+
+    #region Linear algebra
 
     /// <summary>Matrix multiply: output[M,N] = a[M,K] @ b[K,N]. Falls back to FP32 kernel if either input is FP32.</summary>
     public void MatMul(Tensor output, Tensor a, Tensor b)
@@ -535,6 +532,15 @@ public sealed class VulkanBackend : IBackend
         DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null);
     }
 
+    /// <summary>Resolves the GEMM compute dtype: FP8 outputs compute in F16; F16 falls back to F32 without device support.</summary>
+    private DType ResolveGemmDtype(DType outputDType)
+    {
+        DType gemmDtype = outputDType;
+        if (gemmDtype.IsFp8) gemmDtype = DType.F16;
+        if (gemmDtype == DType.F16 && !Capabilities.SupportsF16) gemmDtype = DType.F32;
+        return gemmDtype;
+    }
+
     private void DispatchMatmul(Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias)
     {
         // Resolve M, N, K from logical shapes
@@ -559,9 +565,7 @@ public sealed class VulkanBackend : IBackend
         // when it interprets the bytes as F32. The model's choice of output dtype dictates the
         // pipeline. F8 inputs always need to be cast (no F8 matmul kernel); cast all the way to
         // the output dtype, not just to F16.
-        DType gemmDtype = output.DType;
-        if (gemmDtype.IsFp8) gemmDtype = DType.F16;
-        if (gemmDtype == DType.F16 && !Capabilities.SupportsF16) gemmDtype = DType.F32;
+        DType gemmDtype = ResolveGemmDtype(output.DType);
 
         VulkanBuffer aBuf = GetBuffer(a);
         VulkanBuffer bBuf = GetBuffer(b);
@@ -648,8 +652,9 @@ public sealed class VulkanBackend : IBackend
 
             CacheOutput(output, outBuf);
         }
-        catch
+        catch (Exception ex)
         {
+            Logs.Error("Vulkan DispatchMatmul tiled-path dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }
@@ -663,13 +668,12 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
-    /// <summary>INT8 quantized matmul via the integer dot-product extension (the cross-vendor DP4a /
-    /// IMMA equivalent): <c>output[m,n] = (a[M,K] @ b[N,K]^T) * scaleA[m] * scaleB[n]</c>, with <paramref name="a"/>
-    /// and <paramref name="b"/> INT8 and <paramref name="output"/> F32. <paramref name="b"/> follows the
-    /// Linear weight convention ([N,K], row n contiguous along K). Scales are <b>per row</b>: <paramref name="scaleA"/>
-    /// is F32 length M (per token/activation row), <paramref name="scaleB"/> is F32 length N (per output channel) —
-    /// the standard scheme for accurate INT8 inference. The int32 accumulation is exact; only the dequant rounds.
-    /// Requires <see cref="VulkanCapabilities.HasInt8DotProduct"/> and K a multiple of 4. Shared-memory tiled.</summary>
+    /// <summary>INT8 quantized matmul via the cross-vendor integer dot-product extension.</summary>
+    /// <remarks><c>output[m,n] = (a[M,K] @ b[N,K]^T) * scaleA[m] * scaleB[n]</c>.</remarks>
+    // b follows the Linear weight convention ([N,K], row n contiguous along K). Scales are per row:
+    // scaleA is F32 length M (per token/activation row), scaleB is F32 length N (per output channel) — the
+    // standard scheme for accurate INT8 inference. The int32 accumulation is exact; only the dequant rounds.
+    // Requires VulkanCapabilities.HasInt8DotProduct and K a multiple of 4. Shared-memory tiled.
     public void MatMulInt8(Tensor output, Tensor a, Tensor b, Tensor scaleA, Tensor scaleB)
     {
         using OpScope _ = EnterOp();
@@ -725,14 +729,17 @@ public sealed class VulkanBackend : IBackend
 
             CacheOutput(output, outBuf);
         }
-        catch
+        catch (Exception ex)
         {
+            Logs.Error("Vulkan MatMulInt8 dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }
     }
 
-    // ── Convolution ─────────────────────────────────────────────────────
+    #endregion
+
+    #region Convolution
 
     public void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW)
     {
@@ -748,9 +755,7 @@ public sealed class VulkanBackend : IBackend
         int outW = (inW + 2 * padW - kW) / strideW + 1;
 
         // GEMM dtype must match output's storage dtype (see DispatchMatmul note).
-        DType gemmDtype = output.DType;
-        if (gemmDtype.IsFp8) gemmDtype = DType.F16;
-        if (gemmDtype == DType.F16 && !Capabilities.SupportsF16) gemmDtype = DType.F32;
+        DType gemmDtype = ResolveGemmDtype(output.DType);
 
         VulkanBuffer inBuf = GetBuffer(input);
         VulkanBuffer wBuf = GetBuffer(weight);
@@ -779,10 +784,7 @@ public sealed class VulkanBackend : IBackend
             // Step 1: im2col
             {
                 string shader = "im2col" + DtypeSuffix(gemmDtype);
-                VulkanKernel k = GetKernel(shader, 2, stackalloc SpecConstant[]
-                {
-                    SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-                });
+                VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
                 Span<byte> pc = stackalloc byte[12 * 4];
                 BinaryWriteUInt(pc, 0, (uint)batch);
                 BinaryWriteUInt(pc, 4, (uint)inCh);
@@ -797,7 +799,7 @@ public sealed class VulkanBackend : IBackend
                 BinaryWriteUInt(pc, 40, (uint)outH);
                 BinaryWriteUInt(pc, 44, (uint)outW);
                 Span<ulong> bufs = stackalloc ulong[] { inRes.Handle, colBuf.Handle };
-                Dispatch(k, bufs, pc, GroupCount(colElements, LOCAL_X_1D));
+                Dispatch(k, bufs, pc, GroupCount(colElements, LocalX1D));
             }
 
             // Step 2: matmul — weight[Cout, Cin*kH*kW] @ col[Cin*kH*kW, outH*outW] = out[Cout, outH*outW]
@@ -861,16 +863,13 @@ public sealed class VulkanBackend : IBackend
                 try
                 {
                     string shader = "col2bias_add" + DtypeSuffix(output.DType);
-                    VulkanKernel k = GetKernel(shader, 2, stackalloc SpecConstant[]
-                    {
-                        SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-                    });
+                    VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
                     Span<byte> pc = stackalloc byte[3 * 4];
                     BinaryWriteUInt(pc, 0, (uint)outCh);
                     BinaryWriteUInt(pc, 4, (uint)(outH * outW));
                     BinaryWriteUInt(pc, 8, (uint)(batch * outCh * outH * outW));
                     Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, biasRes.Handle };
-                    Dispatch(k, bufs, pc, GroupCount(batch * outCh * outH * outW, LOCAL_X_1D));
+                    Dispatch(k, bufs, pc, GroupCount(batch * outCh * outH * outW, LocalX1D));
                 }
                 finally
                 {
@@ -880,8 +879,9 @@ public sealed class VulkanBackend : IBackend
 
             CacheOutput(output, outBuf);
         }
-        catch
+        catch (Exception ex)
         {
+            Logs.Error("Vulkan Conv2D dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }
@@ -893,9 +893,20 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
-    // ── Normalization ───────────────────────────────────────────────────
+    #endregion
 
-    private void DispatchPerRowNorm(string shader, int storageBufs, Tensor output, Tensor input, Tensor? weight, Tensor? bias, float eps, int normDim, int totalRows)
+    #region Normalization
+
+    private void DispatchPerRowNorm(
+        string shader,
+        int storageBufs,
+        Tensor output,
+        Tensor input,
+        Tensor? weight,
+        Tensor? bias,
+        float eps,
+        int normDim,
+        int totalRows)
     {
         VulkanBuffer inBuf = GetBuffer(input);
         VulkanBuffer? wBuf = weight is null ? null : GetBuffer(weight);
@@ -940,8 +951,9 @@ public sealed class VulkanBackend : IBackend
 
             CacheOutput(output, outBuf);
         }
-        catch
+        catch (Exception ex)
         {
+            Logs.Error("Vulkan DispatchPerRowNorm dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }
@@ -1004,8 +1016,9 @@ public sealed class VulkanBackend : IBackend
 
             CacheOutput(output, outBuf);
         }
-        catch
+        catch (Exception ex)
         {
+            Logs.Error("Vulkan DispatchGroupNorm dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }
@@ -1042,9 +1055,12 @@ public sealed class VulkanBackend : IBackend
         throw new NotImplementedException("VulkanBackend.LeakyRelu not yet implemented. Use the CPU backend for Kokoro / StyleTTS 2.");
     }
 
-    // ── Attention ───────────────────────────────────────────────────────
+    #endregion
 
-    /// <summary>Naive 3-pass SDPA. Q*K^T -> mask add -> softmax -> *V dispatched once per (B*H) head with base offsets. FlashAttention-style is a Phase-4 optimization.</summary>
+    #region Attention
+
+    /// <summary>Naive 3-pass SDPA: Q*K^T, mask add, softmax, *V — dispatched once per (B*H) head.</summary>
+    // FlashAttention-style fusion is a Phase-4 optimization.
     public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
     {
         using OpScope _ = EnterOp();
@@ -1060,9 +1076,7 @@ public sealed class VulkanBackend : IBackend
 
         // Resolve dtype: must match output's storage dtype so the SDPA matmul writes match the
         // model's expected element size. FP8 inputs cast to F16 first.
-        DType dtype = output.DType;
-        if (dtype.IsFp8) dtype = DType.F16;
-        if (dtype == DType.F16 && !Capabilities.SupportsF16) dtype = DType.F32;
+        DType dtype = ResolveGemmDtype(output.DType);
 
         VulkanBuffer qBuf = GetBuffer(query);
         VulkanBuffer kBuf = GetBuffer(key);
@@ -1182,21 +1196,24 @@ public sealed class VulkanBackend : IBackend
                     else if (dtype == DType.F32 && output.DType == DType.F16) shader = "cast_f32_f16";
                     else throw new NotSupportedException($"SDPA dtype mismatch {dtype.Name}->{output.DType.Name}");
 
-                    VulkanKernel k = GetKernel(shader, 2, stackalloc SpecConstant[]
-                    {
-                        SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-                    });
+                    VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
                     Span<byte> pc = stackalloc byte[4]; BinaryWriteUInt(pc, 0, (uint)output.ElementCount);
                     Span<ulong> bufs = stackalloc ulong[] { outBufLocal.Handle, finalBuf.Handle };
-                    Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LOCAL_X_1D));
+                    Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
                     CacheOutput(output, finalBuf);
                 }
-                catch { finalBuf.Dispose(); throw; }
+                catch (Exception ex)
+                {
+                    Logs.Error("Vulkan SDPA output-dtype cast dispatch failed", ex);
+                    finalBuf.Dispose();
+                    throw;
+                }
                 _xfer.FreeDevice(outBufLocal);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Logs.Error("Vulkan ScaledDotProductAttention dispatch failed", ex);
             outBufLocal.Dispose();
             throw;
         }
@@ -1215,17 +1232,13 @@ public sealed class VulkanBackend : IBackend
         uint count, uint scoreOffset, uint maskOffset)
     {
         string shader = "mask_add" + DtypeSuffix(dtype);
-        ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-        {
-            SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-        };
-        VulkanKernel k = GetKernel(shader, 2, spec);
+        VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
         Span<byte> pc = stackalloc byte[3 * 4];
         BinaryWriteUInt(pc, 0, count);
         BinaryWriteUInt(pc, 4, scoreOffset);
         BinaryWriteUInt(pc, 8, maskOffset);
         Span<ulong> bufs = stackalloc ulong[] { scoresHandle, maskHandle };
-        Dispatch(k, bufs, pc, GroupCount(count, LOCAL_X_1D));
+        Dispatch(k, bufs, pc, GroupCount(count, LocalX1D));
     }
 
     /// <summary>Dispatch a tiled matmul on raw buffer handles with explicit element offsets. Used by SDPA's per-head loop.</summary>
@@ -1279,22 +1292,6 @@ public sealed class VulkanBackend : IBackend
         Dispatch(k, bufs, pc, groupsX, groupsY, 1);
     }
 
-    private void SoftmaxLastDim(Tensor output, Tensor input)
-    {
-        int N = (int)input.Shape[input.Shape.Rank - 1];
-        int rows = (int)(input.ElementCount / N);
-
-        VulkanBuffer inBuf = GetBuffer(input);
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            DispatchSoftmaxRows(inBuf.Handle, outBuf.Handle, input.DType, N, rows, srcOffset: 0, dstOffset: 0);
-            CacheOutput(output, outBuf);
-        }
-        catch { outBuf.Dispose(); throw; }
-    }
-
     /// <summary>Dispatch softmax over a contiguous block of rows starting at the given element offsets in src/dst buffers.</summary>
     private void DispatchSoftmaxRows(ulong srcHandle, ulong dstHandle, DType dtype, int N, int rows, uint srcOffset, uint dstOffset)
     {
@@ -1317,7 +1314,9 @@ public sealed class VulkanBackend : IBackend
         Dispatch(k, bufs, pc, (uint)rows, 1, 1);
     }
 
-    // ── Activations ─────────────────────────────────────────────────────
+    #endregion
+
+    #region Activations
 
     public void Gelu(Tensor output, Tensor input) => DispatchElementwise(5u /* gelu_tanh */, output, input, null, scalar: 0, minVal: 0, maxVal: 0);
     public void Silu(Tensor output, Tensor input) => DispatchElementwise(3u, output, input, null, scalar: 0, minVal: 0, maxVal: 0);
@@ -1360,12 +1359,15 @@ public sealed class VulkanBackend : IBackend
         throw new NotSupportedException("Vulkan ConvTranspose1d not yet implemented — use CpuBackend for codec models.");
     }
 
-    // ── Element-wise ────────────────────────────────────────────────────
+    #endregion
+
+    #region Element-wise
 
     public void Add(Tensor output, Tensor a, Tensor b) => DispatchElementwise(0u, output, a, b, scalar: 0, minVal: 0, maxVal: 0);
     public void Mul(Tensor output, Tensor a, Tensor b) => DispatchElementwise(1u, output, a, b, scalar: 0, minVal: 0, maxVal: 0);
     public void Scale(Tensor output, Tensor input, float scalar) => DispatchElementwise(2u, output, input, null, scalar, minVal: 0, maxVal: 0);
-    public void Clamp(Tensor output, Tensor input, float min, float max) => DispatchElementwise(7u, output, input, null, scalar: 0, minVal: min, maxVal: max);
+    public void Clamp(Tensor output, Tensor input, float min, float max)
+        => DispatchElementwise(7u, output, input, null, scalar: 0, minVal: min, maxVal: max);
 
     private void DispatchElementwise(uint op, Tensor output, Tensor a, Tensor? b, float scalar, float minVal, float maxVal)
     {
@@ -1379,7 +1381,7 @@ public sealed class VulkanBackend : IBackend
             string shader = "elementwise" + DtypeSuffix(output.DType);
             ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
             {
-                SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+                SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
                 SpecConstant.UInt(10, op),
             };
             VulkanKernel k = GetKernel(shader, 3, spec);
@@ -1391,13 +1393,20 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteFloat(pc, 12, maxVal);
 
             Span<ulong> bufs = stackalloc ulong[] { aBuf.Handle, bBuf?.Handle ?? aBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LOCAL_X_1D));
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
             CacheOutput(output, outBuf);
         }
-        catch { outBuf.Dispose(); throw; }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan DispatchElementwise dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
-    // ── Transpose / Permute / GeGlu / BroadcastAdd ─────────────────────
+    #endregion
+
+    #region Transpose / Permute / GeGlu / BroadcastAdd
 
     public void Transpose2D(Tensor output, Tensor input, int d1, int d2)
     {
@@ -1409,20 +1418,21 @@ public sealed class VulkanBackend : IBackend
         try
         {
             string shader = "transpose" + DtypeSuffix(input.DType);
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-            };
-            VulkanKernel k = GetKernel(shader, 2, spec);
+            VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
             Span<byte> pc = stackalloc byte[3 * 4];
             BinaryWriteUInt(pc, 0, (uint)B);
             BinaryWriteUInt(pc, 4, (uint)d1);
             BinaryWriteUInt(pc, 8, (uint)d2);
             Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LOCAL_X_1D));
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
             CacheOutput(output, outBuf);
         }
-        catch { outBuf.Dispose(); throw; }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan Transpose2D dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
     public void Permute0213(Tensor output, Tensor input, int s, int h, int d)
@@ -1434,21 +1444,22 @@ public sealed class VulkanBackend : IBackend
         try
         {
             string shader = "permute_0213" + DtypeSuffix(input.DType);
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-            };
-            VulkanKernel k = GetKernel(shader, 2, spec);
+            VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
             Span<byte> pc = stackalloc byte[4 * 4];
             BinaryWriteUInt(pc, 0, (uint)B);
             BinaryWriteUInt(pc, 4, (uint)s);
             BinaryWriteUInt(pc, 8, (uint)h);
             BinaryWriteUInt(pc, 12, (uint)d);
             Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LOCAL_X_1D));
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
             CacheOutput(output, outBuf);
         }
-        catch { outBuf.Dispose(); throw; }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan Permute0213 dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
     public void GeGlu(Tensor output, Tensor input)
@@ -1463,19 +1474,20 @@ public sealed class VulkanBackend : IBackend
         try
         {
             string shader = "geglu" + DtypeSuffix(input.DType);
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-            };
-            VulkanKernel k = GetKernel(shader, 2, spec);
+            VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
             Span<byte> pc = stackalloc byte[2 * 4];
             BinaryWriteUInt(pc, 0, (uint)outerCount);
             BinaryWriteUInt(pc, 4, (uint)D);
             Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc, GroupCount(outerCount * D, LOCAL_X_1D));
+            Dispatch(k, bufs, pc, GroupCount(outerCount * D, LocalX1D));
             CacheOutput(output, outBuf);
         }
-        catch { outBuf.Dispose(); throw; }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan GeGlu dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
     public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial)
@@ -1491,17 +1503,13 @@ public sealed class VulkanBackend : IBackend
         try
         {
             string shader = "broadcast_add" + DtypeSuffix(hidden.DType);
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-            };
-            VulkanKernel k = GetKernel(shader, 2, spec);
+            VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
             Span<byte> pc = stackalloc byte[3 * 4];
             BinaryWriteUInt(pc, 0, (uint)channels);
             BinaryWriteUInt(pc, 4, (uint)spatial);
             BinaryWriteUInt(pc, 8, (uint)hidden.ElementCount);
             Span<ulong> bufs = stackalloc ulong[] { hBuf.Handle, bEff.Handle };
-            Dispatch(k, bufs, pc, GroupCount(hidden.ElementCount, LOCAL_X_1D));
+            Dispatch(k, bufs, pc, GroupCount(hidden.ElementCount, LocalX1D));
             // hidden's GPU contents just changed — re-cache so CPU readback (lazy-sync callback)
             // and subsequent GetBuffer hits return the post-add values, not the pre-upload CPU bytes.
             // CacheActivation handles idempotent re-cache for in-place ops; see PHASE_3_DEVIATIONS #17.
@@ -1513,7 +1521,9 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
-    // ── Shape ops ───────────────────────────────────────────────────────
+    #endregion
+
+    #region Shape ops
 
     /// <summary>CPU fallback for concat — dtypes/strides handling is non-trivial, and concat is rare on hot paths.</summary>
     public unsafe void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim)
@@ -1568,7 +1578,9 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
-    // ── Sampling ────────────────────────────────────────────────────────
+    #endregion
+
+    #region Sampling
 
     public void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW)
         => DispatchUpsample("upsample_nearest2d", output, input, scaleH, scaleW);
@@ -1585,11 +1597,7 @@ public sealed class VulkanBackend : IBackend
         try
         {
             string shader = baseName + DtypeSuffix(input.DType);
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-            };
-            VulkanKernel k = GetKernel(shader, 2, spec);
+            VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
             Span<byte> pc = stackalloc byte[6 * 4];
             BinaryWriteUInt(pc, 0, (uint)N);
             BinaryWriteUInt(pc, 4, (uint)C);
@@ -1598,10 +1606,15 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteUInt(pc, 16, (uint)scaleH);
             BinaryWriteUInt(pc, 20, (uint)scaleW);
             Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LOCAL_X_1D));
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
             CacheOutput(output, outBuf);
         }
-        catch { outBuf.Dispose(); throw; }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan DispatchUpsample dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
     public void MaxPool2D(Tensor output, Tensor input, int kernelH, int kernelW,
@@ -1618,11 +1631,7 @@ public sealed class VulkanBackend : IBackend
         try
         {
             string shader = "maxpool2d" + DtypeSuffix(output.DType);
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-            };
-            VulkanKernel k = GetKernel(shader, 2, spec);
+            VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
             Span<byte> pc = stackalloc byte[12 * 4];
             BinaryWriteUInt(pc, 0, (uint)N);
             BinaryWriteUInt(pc, 4, (uint)C);
@@ -1637,10 +1646,15 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteUInt(pc, 40, (uint)padH);
             BinaryWriteUInt(pc, 44, (uint)padW);
             Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LOCAL_X_1D));
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
             CacheOutput(output, outBuf);
         }
-        catch { outBuf.Dispose(); throw; }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan MaxPool2D dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
     public void Conv2dDepthwise(Tensor output, Tensor input, Tensor weight, Tensor? bias,
@@ -1664,11 +1678,7 @@ public sealed class VulkanBackend : IBackend
         try
         {
             string shader = "depthwise_conv2d" + DtypeSuffix(output.DType);
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-            };
-            VulkanKernel k = GetKernel(shader, 4, spec);
+            VulkanKernel k = GetKernel(shader, 4, _default1DSpec);
             Span<byte> pc = stackalloc byte[13 * 4];
             BinaryWriteUInt(pc, 0, bias is null ? 0u : 1u);
             BinaryWriteUInt(pc, 4, (uint)N);
@@ -1684,13 +1694,20 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteUInt(pc, 44, (uint)padH);
             BinaryWriteUInt(pc, 48, (uint)padW);
             Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, wBuf.Handle, biasBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LOCAL_X_1D));
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
             CacheOutput(output, outBuf);
         }
-        catch { outBuf.Dispose(); throw; }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan Conv2dDepthwise dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
-    // ── Data movement ───────────────────────────────────────────────────
+    #endregion
+
+    #region Data movement
 
     public unsafe void CopyTo(Tensor destination, Tensor source)
     {
@@ -1718,7 +1735,9 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
-    // ── Audio (not supported on this backend) ───────────────────────────
+    #endregion
+
+    #region Audio (not supported on this backend)
 
     public void Fft(Tensor output, Tensor input)
         => throw new NotSupportedException("VulkanBackend does not support FFT — use the CPU backend for audio preprocessing.");
@@ -1729,7 +1748,9 @@ public sealed class VulkanBackend : IBackend
     public void MelFilterbank(Tensor output, Tensor input, Tensor filters)
         => throw new NotSupportedException("VulkanBackend does not support MelFilterbank — use the CPU backend.");
 
-    // ── Casts ──────────────────────────────────────────────────────────
+    #endregion
+
+    #region Casts
 
     public unsafe void CastToF16(Tensor output, Tensor input)
     {
@@ -1762,16 +1783,18 @@ public sealed class VulkanBackend : IBackend
             VulkanBuffer dst = _xfer.AllocateDevice(outBytes);
             try
             {
-                VulkanKernel k = GetKernel("cast_f16_f32", 2,
-                    stackalloc SpecConstant[] {
-                        SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-                    });
+                VulkanKernel k = GetKernel("cast_f16_f32", 2, _default1DSpec);
                 Span<byte> pc = stackalloc byte[4]; BinaryWriteUInt(pc, 0, (uint)input.ElementCount);
                 Span<ulong> bufs = stackalloc ulong[] { src.Handle, dst.Handle };
-                Dispatch(k, bufs, pc, GroupCount(input.ElementCount, LOCAL_X_1D));
+                Dispatch(k, bufs, pc, GroupCount(input.ElementCount, LocalX1D));
                 CacheOutput(output, dst);
             }
-            catch { dst.Dispose(); throw; }
+            catch (Exception ex)
+            {
+                Logs.Error("Vulkan CastToF32 dispatch failed", ex);
+                dst.Dispose();
+                throw;
+            }
         }
         else
         {
@@ -1781,17 +1804,21 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
-    // ── Disposal ────────────────────────────────────────────────────────
+    #endregion
+
+    #region Disposal
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
-        try { _stream.WaitIdleHost(); } catch { /* swallow */ }
+        try { _stream.WaitIdleHost(); }
+        catch (Exception ex) { Logs.Warning($"Vulkan Dispose: WaitIdleHost failed, continuing teardown: {ex}"); }
         // Dump profiling data (no-op when HARTSYINFERENCE_VK_PROFILE is unset) before tearing down
         // anything that the per-op records reference (op names are strings only, but flush before
         // we lose the device just to be tidy).
-        try { _profiler.Dump(); } catch { /* swallow */ }
+        try { _profiler.Dump(); }
+        catch (Exception ex) { Logs.Warning($"Vulkan Dispose: profiler dump failed: {ex}"); }
         _xfer.Dispose();
         _kernels.Dispose();
         _pipelineCache.Dispose();
@@ -1802,4 +1829,6 @@ public sealed class VulkanBackend : IBackend
         _instance.Dispose();
         GC.SuppressFinalize(this);
     }
+
+    #endregion
 }

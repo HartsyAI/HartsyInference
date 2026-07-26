@@ -166,7 +166,8 @@ public static class CudnnRuntime
             Directory.CreateDirectory(work);
             string archive = Path.Combine(work, Path.GetFileName(new Uri(url).LocalPath));
 
-            Logs.Info($"[cuDNN] not found for CUDA {cudaMajor}; auto-fetching {url} (one-time, ~1 GB → {libDir}; set HARTSY_CUDNN_AUTOFETCH=0 to disable)...");
+            Logs.Info($"[cuDNN] not found for CUDA {cudaMajor}; auto-fetching {url} " +
+                $"(one-time, ~1 GB → {libDir}; set HARTSY_CUDNN_AUTOFETCH=0 to disable)...");
             using (System.Net.Http.HttpClient http = new() { Timeout = TimeSpan.FromMinutes(30) })
             using (Stream s = http.GetStreamAsync(url).GetAwaiter().GetResult())
             using (FileStream f = File.Create(archive))

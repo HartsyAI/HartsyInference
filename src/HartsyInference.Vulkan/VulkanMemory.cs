@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+using System.Numerics;
 
 namespace HartsyInference.Vulkan;
 
@@ -20,10 +20,10 @@ public static class VulkanMemoryHelpers
             VkMemoryType t = memProps.GetMemoryType((int)i);
             if ((t.propertyFlags & required) != required) continue;
 
-            int score = BitsSet((uint)(t.propertyFlags & preferred)) * 4;
+            int score = BitOperations.PopCount((uint)(t.propertyFlags & preferred)) * 4;
             // Penalize extras (e.g. don't pick HOST_CACHED when only HOST_VISIBLE was wanted)
             VkMemoryPropertyFlags extras = t.propertyFlags & ~required & ~preferred;
-            score -= BitsSet((uint)extras);
+            score -= BitOperations.PopCount((uint)extras);
 
             if ((required & VkMemoryPropertyFlags.DeviceLocal) != 0)
             {
@@ -36,13 +36,6 @@ public static class VulkanMemoryHelpers
         if (best == uint.MaxValue)
             throw new VulkanException(-8, $"No memory type satisfies typeBits=0x{memoryTypeBitsMask:X8} required={required}");
         return best;
-    }
-
-    private static int BitsSet(uint x)
-    {
-        int n = 0;
-        while (x != 0) { n += (int)(x & 1u); x >>= 1; }
-        return n;
     }
 }
 
@@ -111,6 +104,7 @@ internal sealed class VulkanMemoryBlock : IDisposable
         return ulong.MaxValue;
     }
 
+    /// <summary>Returns a previously allocated region to the free-list, coalescing with adjacent free spans.</summary>
     public void Free(ulong offset, ulong size)
     {
         // Insert sorted, then merge adjacent
@@ -145,15 +139,28 @@ internal sealed class VulkanMemoryBlock : IDisposable
             VulkanApi.vkFreeMemory(_device, DeviceMemory, 0);
             DeviceMemory = 0;
         }
+        GC.SuppressFinalize(this);
+    }
+
+    ~VulkanMemoryBlock()
+    {
+        if (DeviceMemory != 0)
+        {
+            if (MappedPointer != 0) VulkanApi.vkUnmapMemory(_device, DeviceMemory);
+            VulkanApi.vkFreeMemory(_device, DeviceMemory, 0);
+        }
     }
 }
 
-/// <summary>Two-tier slab allocator. Sub-allocates <see cref="VkBuffer"/> regions from large pre-allocated <see cref="VkDeviceMemory"/> blocks (256 MB for big tensors/weights, 16 MB for small temporaries); allocations larger than the slab fall back to dedicated blocks. Not thread-safe — the engine uses one allocator per <see cref="VulkanBackend"/>. See <c>docs/Research/VULKAN_MEMORY_MANAGEMENT.md</c>.</summary>
+/// <summary>Two-tier slab allocator. Sub-allocates buffer regions from large pre-allocated device-memory blocks.</summary>
+/// <remarks>Blocks are 64 MB for big tensors/weights, 8 MB for small temporaries; allocations larger than
+/// <see cref="DedicatedThreshold"/> fall back to dedicated blocks. Not thread-safe — the engine uses one
+/// allocator per <see cref="VulkanBackend"/>. See <c>docs/Research/VULKAN_MEMORY_MANAGEMENT.md</c>.</remarks>
 public sealed class VulkanMemoryAllocator : IDisposable
 {
-    public const ulong SLAB_LARGE = 64UL * 1024 * 1024;
-    public const ulong SLAB_SMALL = 8UL * 1024 * 1024;
-    public const ulong DEDICATED_THRESHOLD = 16UL * 1024 * 1024;
+    public const ulong SlabLarge = 64UL * 1024 * 1024;
+    public const ulong SlabSmall = 8UL * 1024 * 1024;
+    public const ulong DedicatedThreshold = 16UL * 1024 * 1024;
 
     private readonly nint _device;
     private readonly VkPhysicalDeviceMemoryProperties _memProps;
@@ -184,7 +191,7 @@ public sealed class VulkanMemoryAllocator : IDisposable
 
         uint typeIdx = VulkanMemoryHelpers.FindMemoryType(in _memProps, memoryTypeBitsMask, required, preferred);
 
-        if (size >= DEDICATED_THRESHOLD) return AllocateDedicated(size, typeIdx, required);
+        if (size >= DedicatedThreshold) return AllocateDedicated(size, typeIdx, required);
 
         // Try existing blocks of same type
         for (int i = 0; i < _blocks.Count; i++)
@@ -201,7 +208,7 @@ public sealed class VulkanMemoryAllocator : IDisposable
         }
 
         // Need a new block
-        ulong blockSize = size > SLAB_SMALL ? SLAB_LARGE : SLAB_SMALL;
+        ulong blockSize = size > SlabSmall ? SlabLarge : SlabSmall;
         VulkanMemoryBlock newBlock = AllocateBlock(blockSize, typeIdx, required, dedicated: false);
         _blocks.Add(newBlock);
         ulong newOff = newBlock.TryAllocate(size, alignment);
@@ -251,6 +258,7 @@ public sealed class VulkanMemoryAllocator : IDisposable
         return new VulkanMemoryBlock(_device, mem, size, typeIdx, mt.heapIndex, mt.propertyFlags, mapped, _nextBlockId++, dedicated);
     }
 
+    /// <summary>Returns a sub-allocated region to its owning block's free-list; disposes the block too if it was dedicated and now empty.</summary>
     public void Free(VulkanAllocation a)
     {
         if (a.IsEmpty) return;
@@ -345,6 +353,8 @@ public sealed class VulkanBuffer : IDisposable
         Usage = usage;
     }
 
+    /// <summary>Views the buffer's mapped memory as a typed span.</summary>
+    /// <remarks>Throws if the buffer is not on a host-visible memory type — use staging upload/download instead.</remarks>
     public unsafe Span<T> AsSpan<T>() where T : unmanaged
     {
         if (Allocation.MappedPointer == 0)
@@ -381,6 +391,7 @@ public sealed class VulkanBuffer : IDisposable
 /// <summary>Static buffer-creation helper: creates a VkBuffer + binds it to allocator-provided memory.</summary>
 public static class VulkanBufferFactory
 {
+    /// <summary>Creates a <c>VkBuffer</c> of the given size/usage and binds allocator-sub-allocated memory to it.</summary>
     public static VulkanBuffer Create(
         nint device,
         VulkanMemoryAllocator allocator,

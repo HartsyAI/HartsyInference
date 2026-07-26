@@ -3,23 +3,21 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>Vulkan analogue of <c>HartsyInference.Cuda.GpuTransferHelper</c>. Holds a weight cache (permanent until <see cref="FreeWeights"/> / <see cref="FreeAllCached"/>) and an activation cache (set by <see cref="CacheActivation"/> after each op, consumed by the next op's <see cref="CopyToDevice"/>), both keyed by Tensor reference. Lazy-sync callbacks on the Tensor mirror CUDA so model code may freely access <c>DataPointer</c>.</summary>
+/// <summary>Vulkan analogue of <c>HartsyInference.Cuda.GpuTransferHelper</c>.</summary>
+/// <remarks>Holds a weight cache (permanent until <see cref="FreeWeights"/> / <see cref="FreeAllCached"/>) and
+/// an activation cache (set by <see cref="CacheActivation"/> after each op, consumed by the next op's
+/// <see cref="CopyToDevice"/>), both keyed by Tensor reference. Lazy-sync callbacks on the Tensor mirror
+/// CUDA so model code may freely access <c>DataPointer</c>.</remarks>
 public sealed class VulkanGpuTransferHelper : IDisposable
 {
     private readonly Dictionary<Tensor, VulkanBuffer> _weightCache = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<Tensor, VulkanBuffer> _activationCache = new(ReferenceEqualityComparer.Instance);
-    /// <summary>Per-weight dtype-cast cache: keyed by the original weight Tensor (reference equality),
-    /// inner key is the target dtype name. Lets a preloaded FP8 (or F32) weight be dequantized/cast to
-    /// the GEMM dtype <b>once</b> instead of on every Linear — mirrors CUDA's <c>CacheWeightCasts</c>.
-    /// Removes the per-call cast dispatch AND a full weight-sized memory pass. Costs extra VRAM (the cast
-    /// copy alongside the original); opt out with HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1 on low VRAM.</summary>
+    /// <summary>Per-weight, per-target-dtype cast cache — casts a preloaded weight to the GEMM dtype once instead of on every Linear.</summary>
     private readonly Dictionary<Tensor, Dictionary<string, VulkanBuffer>> _weightCastCache = new(ReferenceEqualityComparer.Instance);
     private static readonly bool _cacheWeightCasts =
         Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE") != "1";
     private readonly HashSet<VulkanBuffer> _cachedBuffers = new();
-    /// <summary>Uncached upload buffers from CopyToDevice cache-misses (typically streamed weights).
-    /// Drained when the engine flushes the command stream — they must outlive every recorded
-    /// command that used them, but no individual op needs to free them explicitly.</summary>
+    /// <summary>Uncached upload buffers from CopyToDevice cache-misses, drained when the command stream flushes.</summary>
     private readonly List<VulkanBuffer> _transientBuffers = new();
 
     private readonly nint _device;

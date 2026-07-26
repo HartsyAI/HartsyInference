@@ -1,5 +1,5 @@
-using System.Runtime.InteropServices;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cpu;
 
 namespace HartsyInference.Cpu.Kernels;
 
@@ -174,8 +174,7 @@ public static class AudioKernels
         int freqBins = (int)input.Shape[1];
         int numMels = (int)filters.Shape[0];
 
-        // Pre-allocate reduction buffers outside the loop to avoid CA2014
-        float* avxTmp = stackalloc float[Vector256<float>.Count];
+        // Pre-allocate the NEON reduction buffer outside the loop to avoid CA2014
         float* neonTmp = stackalloc float[Vector128<float>.Count];
 
         for (int f = 0; f < numFrames; f++)
@@ -200,9 +199,7 @@ public static class AudioKernels
                             ? Fma.MultiplyAdd(vIn, vFilter, vSum)
                             : Avx.Add(vSum, Avx.Multiply(vIn, vFilter));
                     }
-                    Avx.Store(avxTmp, vSum);
-                    for (int j = 0; j < Vector256<float>.Count; j++)
-                        sum += avxTmp[j];
+                    sum += SimdDispatch.HorizontalSum(vSum);
                 }
                 else if (AdvSimd.IsSupported)
                 {

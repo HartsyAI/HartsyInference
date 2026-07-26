@@ -2,7 +2,9 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>P/Invoke bindings for cuBLASLt — the lightweight cuBLAS API that supports FP8 GEMM with per-tensor scale factors. Only usable on Ada (SM 8.9+) and Hopper (SM 9.0+) GPUs. On Ampere and below, the matrix-mul path falls back to FP16 cublasGemmEx via <see cref="CudaBackend"/>'s cast-then-GEMM logic.</summary>
+/// <summary>P/Invoke bindings for cuBLASLt — the lightweight cuBLAS API that supports FP8 GEMM with per-tensor scale
+/// factors. Only usable on Ada (SM 8.9+) and Hopper (SM 9.0+) GPUs. On Ampere and below, the matrix-mul path falls
+/// back to FP16 cublasGemmEx via <see cref="CudaBackend"/>'s cast-then-GEMM logic.</summary>
 internal static partial class CublasLtApi
 {
     private const string LibName = "cublasLt";

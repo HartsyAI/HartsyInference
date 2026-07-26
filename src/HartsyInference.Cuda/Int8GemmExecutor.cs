@@ -50,30 +50,28 @@ public sealed unsafe class Int8GemmExecutor : IDisposable
         if (k % 4 != 0 || n % 4 != 0)
             throw new ArgumentException($"int8 TN GEMM requires K and N to be multiples of 4; got K={k}, N={n}.");
 
-        static void Chk(int rc, string label)
-        {
-            if (rc != 0) throw new InvalidOperationException($"cuBLASLt int8 {label} rc={rc}.");
-        }
-
         nint matmulDesc = 0, layoutA = 0, layoutB = 0, layoutD = 0, pref = 0;
         try
         {
-            Chk(CublasLtApi.cublasLtMatmulDescCreate(out matmulDesc, CublasApi.CUBLAS_COMPUTE_32I, CublasApi.CUDA_R_32I), "DescCreate");
+            CublasLtApi.cublasLtMatmulDescCreate(out matmulDesc, CublasApi.CUBLAS_COMPUTE_32I, CublasApi.CUDA_R_32I).ThrowOnCublasError();
 
             int transA = CublasApi.CUBLAS_OP_T;
             int transB = CublasApi.CUBLAS_OP_N;
-            Chk(CublasLtApi.cublasLtMatmulDescSetAttribute(matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(int)), "TRANSA");
-            Chk(CublasLtApi.cublasLtMatmulDescSetAttribute(matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(int)), "TRANSB");
+            CublasLtApi.cublasLtMatmulDescSetAttribute(
+                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(int)).ThrowOnCublasError();
+            CublasLtApi.cublasLtMatmulDescSetAttribute(
+                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(int)).ThrowOnCublasError();
 
             // weight [N, K] row-major -> operand A as KxN col-major (OP_T). input [M, K] row-major
             // -> operand B as KxM col-major (OP_N). output D [M, N] row-major == NxM col-major, int32.
-            Chk(CublasLtApi.cublasLtMatrixLayoutCreate(out layoutA, CublasApi.CUDA_R_8I, (ulong)k, (ulong)n, k), "LayoutA");
-            Chk(CublasLtApi.cublasLtMatrixLayoutCreate(out layoutB, CublasApi.CUDA_R_8I, (ulong)k, (ulong)m, k), "LayoutB");
-            Chk(CublasLtApi.cublasLtMatrixLayoutCreate(out layoutD, CublasApi.CUDA_R_32I, (ulong)n, (ulong)m, n), "LayoutD");
+            CublasLtApi.cublasLtMatrixLayoutCreate(out layoutA, CublasApi.CUDA_R_8I, (ulong)k, (ulong)n, k).ThrowOnCublasError();
+            CublasLtApi.cublasLtMatrixLayoutCreate(out layoutB, CublasApi.CUDA_R_8I, (ulong)k, (ulong)m, k).ThrowOnCublasError();
+            CublasLtApi.cublasLtMatrixLayoutCreate(out layoutD, CublasApi.CUDA_R_32I, (ulong)n, (ulong)m, n).ThrowOnCublasError();
 
-            Chk(CublasLtApi.cublasLtMatmulPreferenceCreate(out pref), "PrefCreate");
+            CublasLtApi.cublasLtMatmulPreferenceCreate(out pref).ThrowOnCublasError();
             ulong wsBytes = _workspaceBytes;
-            Chk(CublasLtApi.cublasLtMatmulPreferenceSetAttribute(pref, CublasLtApi.CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &wsBytes, (nuint)sizeof(ulong)), "PrefWorkspace");
+            CublasLtApi.cublasLtMatmulPreferenceSetAttribute(
+                pref, CublasLtApi.CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &wsBytes, (nuint)sizeof(ulong)).ThrowOnCublasError();
 
             byte* heuristic = stackalloc byte[128];
             int hRc = CublasLtApi.cublasLtMatmulAlgoGetHeuristic(_ltHandle, matmulDesc, layoutA, layoutB, layoutD, layoutD,
@@ -126,5 +124,20 @@ public sealed unsafe class Int8GemmExecutor : IDisposable
             _ltHandle = 0;
         }
         GC.SuppressFinalize(this);
+    }
+
+    ~Int8GemmExecutor()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        if (_workspace != 0)
+        {
+            CudaMemory.Free(_workspace);
+            _workspace = 0;
+        }
+        if (_ltHandle != 0)
+        {
+            CublasLtApi.cublasLtDestroy(_ltHandle);
+            _ltHandle = 0;
+        }
     }
 }

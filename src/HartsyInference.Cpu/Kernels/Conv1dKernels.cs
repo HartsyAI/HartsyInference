@@ -2,28 +2,22 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cpu.Kernels;
 
-/// <summary>CPU compute kernels for 1D convolution and transposed convolution. F32
-/// scalar implementations — SIMD vectorization can wait until profiling shows the
-/// codec hot path is here. At the sizes these run for typical audio codecs
-/// (channels &lt;= 2048, T &lt;= a few thousand frames per chunk) scalar is in the
+/// <summary>CPU compute kernels for 1D convolution and transposed convolution over channels-first <c>[B, C, T]</c> tensors.</summary>
+/// <remarks>SIMD vectorization can wait until profiling shows the codec hot path is here — at the sizes these run
+/// for typical audio codecs (channels &lt;= 2048, T &lt;= a few thousand frames per chunk) scalar is in the
 /// low-milliseconds range.
 ///
-/// <para>Layout assumptions:</para>
-/// <list type="bullet">
-///   <item>input / output: channels-first <c>[B, C, T]</c></item>
-///   <item>Conv1d weight: <c>[C_out, C_in / groups, K]</c> (PyTorch nn.Conv1d)</item>
-///   <item>ConvTranspose1d weight: <c>[C_in, C_out, K]</c> (PyTorch nn.ConvTranspose1d)</item>
-///   <item>bias: <c>[C_out]</c> (optional)</item>
-/// </list>
+/// <para>Layout assumptions: Conv1d weight is <c>[C_out, C_in / groups, K]</c> (PyTorch nn.Conv1d),
+/// ConvTranspose1d weight is <c>[C_in, C_out, K]</c> (PyTorch nn.ConvTranspose1d), and bias is <c>[C_out]</c>
+/// (optional).</para>
 ///
-/// <para>Padding is exposed as separate <c>padLeft</c> / <c>padRight</c> values rather
-/// than a single symmetric value — most audio codecs need asymmetric (causal) padding,
-/// and giving the caller control here saves a kludge layer in every codec.</para></summary>
+/// <para>Padding is exposed as separate <c>padLeft</c> / <c>padRight</c> values rather than a single symmetric
+/// value — most audio codecs need asymmetric (causal) padding, and giving the caller control here saves a kludge
+/// layer in every codec.</para></remarks>
 public static class Conv1dKernels
 {
-    /// <summary>1D convolution. Output shape must be
-    /// <c>[B, C_out, (T_in + padLeft + padRight - dilation*(K-1) - 1) / stride + 1]</c>.
-    /// Caller pre-allocates the output tensor.</summary>
+    /// <summary>1D convolution. Caller pre-allocates the output tensor.</summary>
+    /// <remarks>Output shape must be <c>[B, C_out, (T_in + padLeft + padRight - dilation*(K-1) - 1) / stride + 1]</c>.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void Conv1d(
         Tensor output, Tensor input, Tensor weight, Tensor? bias,
@@ -89,14 +83,12 @@ public static class Conv1dKernels
         }
     }
 
-    /// <summary>1D transposed convolution. PyTorch weight layout <c>[C_in, C_out, K]</c>.
-    /// Output length is <c>(T_in - 1) * stride + dilation * (K - 1) + 1 - padLeft - padRight</c>.
-    ///
-    /// <para>Implemented as input-driven scatter: each <c>x[b, ic, i]</c> contributes
-    /// <c>x[..] * w[ic, oc, k]</c> to <c>out[b, oc, i * stride + k * dilation - padLeft]</c>
-    /// for every <c>k</c> in <c>[0, K)</c> whose target position lies inside
-    /// <c>[0, T_out)</c>. Output is initialised with broadcast bias up front so the inner
-    /// scatter is a pure accumulate.</para></summary>
+    /// <summary>1D transposed convolution. PyTorch weight layout <c>[C_in, C_out, K]</c>.</summary>
+    /// <remarks>Output length is <c>(T_in - 1) * stride + dilation * (K - 1) + 1 - padLeft - padRight</c>.</remarks>
+    /// <remarks>Implemented as input-driven scatter: each <c>x[b, ic, i]</c> contributes <c>x[..] * w[ic, oc, k]</c>
+    /// to <c>out[b, oc, i * stride + k * dilation - padLeft]</c> for every <c>k</c> in <c>[0, K)</c> whose target
+    /// position lies inside <c>[0, T_out)</c>. Output is initialised with broadcast bias up front so the inner
+    /// scatter is a pure accumulate.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void ConvTranspose1d(
         Tensor output, Tensor input, Tensor weight, Tensor? bias,

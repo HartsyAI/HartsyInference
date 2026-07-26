@@ -189,7 +189,6 @@ public static class MatMulKernels
             }
         }
 
-        // Add bias if present
         if (bias is not null)
         {
             float* bPtr = (float*)bias.DataPointer;

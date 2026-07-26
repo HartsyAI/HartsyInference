@@ -3,7 +3,9 @@ using static HartsyInference.Vulkan.VulkanUtilities;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>Wraps a VkInstance with deterministic disposal. Headless compute — no surface/swapchain extensions. Validation layer is opt-in via HARTSYINFERENCE_VK_VALIDATION env var.</summary>
+/// <summary>Wraps a VkInstance with deterministic disposal.</summary>
+/// <remarks>Headless compute — no surface/swapchain extensions. Validation layer is opt-in via the
+/// HARTSYINFERENCE_VK_VALIDATION env var.</remarks>
 public sealed class VulkanInstance : IDisposable
 {
     private nint _instance;
@@ -22,8 +24,6 @@ public sealed class VulkanInstance : IDisposable
         }
     }
 
-    public bool ValidationEnabled { get; }
-
     /// <summary>Creates a Vulkan 1.3 instance. Validation layer enabled if HARTSYINFERENCE_VK_VALIDATION=1.</summary>
     public VulkanInstance(bool? enableValidation = null)
     {
@@ -37,7 +37,6 @@ public sealed class VulkanInstance : IDisposable
         {
             layers.Add("VK_LAYER_KHRONOS_validation");
         }
-        ValidationEnabled = layers.Count > 0;
 
         // Headless compute needs no instance extensions in Vulkan 1.3.
         List<string> extensions = new();
@@ -57,7 +56,7 @@ public sealed class VulkanInstance : IDisposable
                 applicationVersion = MakeVersion(1, 0, 0),
                 pEngineName = _engineName.Pointer,
                 engineVersion = MakeVersion(1, 0, 0),
-                apiVersion = VK_API_VERSION_1_3,
+                apiVersion = VkApiVersion13,
             };
 
             VkInstanceCreateInfo ci = new()

@@ -3,8 +3,7 @@ using static HartsyInference.Cuda.CudnnApi;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>
-/// Convolution forward via cuDNN's backend graph API. Replaces the im2col→cuBLAS GEMM path for
+/// <summary>Convolution forward via cuDNN's backend graph API. Replaces the im2col→cuBLAS GEMM path for
 /// F16/BF16 NCHW convolutions: cuDNN's heuristics pick tensor-core implicit-GEMM/Winograd engines that
 /// never materialize the im2col matrix (an extra kH·kW-times-input-sized HBM write+read per conv —
 /// the dominant conv cost in the SDXL UNet, which runs ~50 convolutions per step).
@@ -15,8 +14,7 @@ namespace HartsyInference.Cuda;
 /// GEMM path's bias add. Execution plans (heuristics + JIT) are cached by shape+dtype; workspace comes from
 /// the stream-ordered pool per execution (capped per plan). Instances are per <see cref="CudaBackend"/> (one cuDNN handle
 /// bound to the compute stream). Any failure is caught by the caller, which self-disables the route for
-/// the session and falls back to im2col — a wrong shape costs one warning, never a session kill.
-/// </summary>
+/// the session and falls back to im2col — a wrong shape costs one warning, never a session kill.</summary>
 internal sealed class CudnnConv : IDisposable
 {
     // Engine configs demanding more scratch than this are skipped in favor of the next candidate — the audio
@@ -40,7 +38,7 @@ internal sealed class CudnnConv : IDisposable
         int st = cudnnCreate(out _handle);
         if (st != CUDNN_STATUS_SUCCESS)
             throw new InvalidOperationException($"cudnnCreate failed: {ErrorString(st)}");
-        cudnnSetStream(_handle, stream);
+        Check(cudnnSetStream(_handle, stream), "cudnnSetStream");
         _stream = stream;
     }
 
@@ -274,7 +272,7 @@ internal sealed class CudnnConv : IDisposable
             return (0, 0, false);
         }
         long ws = 0;
-        cudnnBackendGetAttribute(p, CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, CUDNN_TYPE_INT64, 1, out _, &ws);
+        Check(cudnnBackendGetAttribute(p, CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, CUDNN_TYPE_INT64, 1, out _, &ws), "workspace size get");
         return (p, ws, true);
     }
 

@@ -1,4 +1,8 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda.Profiling;
 
@@ -34,22 +38,22 @@ public readonly ref struct NvtxRange
 
     /// <summary>Compute-stream handle set by CudaBackend at init, so the sync-profiler can drain it. 0 = unset.</summary>
     internal static nint ProfileSyncStream;
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long[]> _profStats = new();
+    private static readonly ConcurrentDictionary<string, long[]> _profStats = new();
 
     /// <summary>Writes the accumulated per-op wall-time table (sorted by total) to <paramref name="path"/>.</summary>
     public static void DumpProfile(string path)
     {
         if (_profStats.IsEmpty) return;
-        double freq = System.Diagnostics.Stopwatch.Frequency;
-        System.Text.StringBuilder sb = new();
+        double freq = Stopwatch.Frequency;
+        StringBuilder sb = new();
         sb.AppendLine($"{"op",-26} {"calls",10} {"total_ms",12} {"avg_ms",10}");
-        foreach (System.Collections.Generic.KeyValuePair<string, long[]> kv in _profStats.OrderByDescending(e => e.Value[1]))
+        foreach (KeyValuePair<string, long[]> kv in _profStats.OrderByDescending(e => e.Value[1]))
         {
             double totalMs = kv.Value[1] / freq * 1000.0;
             double avgMs = totalMs / Math.Max(1, kv.Value[0]);
             sb.AppendLine($"{kv.Key,-26} {kv.Value[0],10} {totalMs,12:F1} {avgMs,10:F3}");
         }
-        System.IO.File.WriteAllText(path, sb.ToString());
+        File.WriteAllText(path, sb.ToString());
     }
 
     private NvtxRange(bool active)
@@ -75,7 +79,7 @@ public readonly ref struct NvtxRange
     public static NvtxRange Push(string message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        long profTicks = ProfileEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        long profTicks = ProfileEnabled ? Stopwatch.GetTimestamp() : 0;
         string? profName = ProfileEnabled ? message : null;
         if (Volatile.Read(ref _disabled) != 0)
         {
@@ -115,9 +119,10 @@ public readonly ref struct NvtxRange
             // it's the only way, without Nsight, to attribute where GPU time actually goes across async ops.
             if (ProfileSync && ProfileSyncStream != 0)
             {
-                try { CudaDriverApi.cuStreamSynchronize(ProfileSyncStream); } catch { }
+                try { CudaDriverApi.cuStreamSynchronize(ProfileSyncStream); }
+                catch (Exception ex) { Logs.Error("[NvtxRange] profile-sync cuStreamSynchronize failed.", ex); }
             }
-            long elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - _startTicks;
+            long elapsed = Stopwatch.GetTimestamp() - _startTicks;
             long[] slot = _profStats.GetOrAdd(_profName, static _ => new long[2]);
             Interlocked.Increment(ref slot[0]);
             Interlocked.Add(ref slot[1], elapsed);
@@ -130,9 +135,10 @@ public readonly ref struct NvtxRange
                 : NvtxApi.RangePop_Linux();
             _ = rc;
         }
-        catch
+        catch (Exception ex)
         {
-            // Already disabled-or-failing; swallow so a Dispose path never throws.
+            // Already disabled-or-failing; log and swallow so a Dispose path never throws.
+            Logs.Error("[NvtxRange] nvtxRangePop failed.", ex);
         }
     }
 }

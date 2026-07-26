@@ -4,13 +4,16 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>CUDA implementation of <see cref="IStreamingWeightCache"/>. Uploads weights on a dedicated upload stream so the copy engine runs in parallel with compute SMs, gates the compute stream on completion via CUDA events, and frees on the compute stream so reclamation is naturally ordered after any prior reads. Uploaded weights register in <see cref="GpuTransferHelper"/>'s shared cache so the existing <see cref="CudaBackend"/> fast path reuses the cached dptr; <see cref="EvictAsync"/> removes them.</summary>
+/// <summary>CUDA implementation of <see cref="IStreamingWeightCache"/>. Uploads weights on a dedicated upload stream
+/// so the copy engine runs in parallel with compute SMs, gates the compute stream on completion via CUDA events,
+/// and frees on the compute stream so reclamation is naturally ordered after any prior reads.</summary>
+/// <remarks>Uploaded weights register in <see cref="GpuTransferHelper"/>'s shared cache so the existing
+/// <see cref="CudaBackend"/> fast path reuses the cached dptr; <see cref="EvictAsync"/> removes them.</remarks>
 public sealed class CudaStreamingWeightCache : IStreamingWeightCache
 {
     private readonly CudaContext _context;
     private readonly nint _computeStream;
     private readonly nint _uploadStream;
-    private readonly HashSet<nint> _pinnedHostPtrs = new();
 
     // Pinned staging ring for PinUploadSource: weights are memcpy'd into a page-locked staging buffer and uploaded
     // async from there. Registering the mmap'd weight pages directly (cuMemHostRegister) is a trap: it needs
@@ -26,7 +29,12 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
     private int _stagingIdx;
     private bool _stagingDead;   // allocation failed once — fall back to pageable direct uploads for the session
 
-    /// <summary>Opt-in: page-lock each weight's host source before uploading so <c>cuMemcpyHtoDAsync</c> is genuinely asynchronous and overlaps with compute (pageable sources silently force a synchronous staging copy that overlaps with nothing). Defaults to <c>false</c>. Only beneficial when weights are re-uploaded across steps (block-swap); for a one-shot preload the registration cost is not amortized. Requires the CPU weight tensors to stay resident (do not dispose them) for the lifetime of the stream.</summary>
+    /// <summary>Opt-in: page-lock each weight's host source before uploading so <c>cuMemcpyHtoDAsync</c> is genuinely
+    /// asynchronous and overlaps with compute (pageable sources silently force a synchronous staging copy that
+    /// overlaps with nothing). Defaults to <c>false</c>.</summary>
+    /// <remarks>Only beneficial when weights are re-uploaded across steps (block-swap); for a one-shot preload the
+    /// registration cost is not amortized. Requires the CPU weight tensors to stay resident (do not dispose them)
+    /// for the lifetime of the stream.</remarks>
     public bool PinUploadSource { get; set; }
 
     /// <summary>Constructs a streaming cache bound to a compute stream and upload
@@ -234,21 +242,12 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         }
     }
 
-    /// <summary>Releases pinned host resources (the staging ring, plus any legacy registrations). Call before
-    /// tearing down the backend so page-locked memory is returned to the OS.</summary>
+    /// <summary>Releases pinned host resources (the staging ring). Call before tearing down the backend so
+    /// page-locked memory is returned to the OS.</summary>
     public void UnregisterPinnedSources()
     {
         _context.EnsureCurrent();
         ReleaseStaging();
-        if (_pinnedHostPtrs.Count == 0)
-        {
-            return;
-        }
-        foreach (nint ptr in _pinnedHostPtrs)
-        {
-            CudaDriverApi.cuMemHostUnregister(ptr);
-        }
-        _pinnedHostPtrs.Clear();
     }
 
     /// <inheritdoc/>

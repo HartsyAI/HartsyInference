@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cpu;
 
 namespace HartsyInference.Cpu.Kernels;
 
@@ -129,21 +130,13 @@ public static class NormKernels
         }
     }
 
-    /// <summary>Adaptive Instance Norm 1D over a channels-first tensor <c>[B, C, T]</c>.
-    /// For each <c>(b, c)</c> slice, normalizes across the <c>T</c> axis to zero-mean
-    /// unit-variance, then applies a per-channel affine: <c>(1 + gamma[c]) * x_hat +
-    /// beta[c]</c>. <paramref name="gamma"/> and <paramref name="beta"/> are <c>[B, C]</c>
-    /// (or <c>[C]</c>; the kernel broadcasts a 1-D affine across the batch).
-    ///
-    /// <para>This is the AdaIN1d block used by Kokoro / StyleTTS 2 throughout the prosody
-    /// predictor and the iSTFTNet decoder: a Linear projection from the style vector
-    /// produces a <c>[B, 2*C]</c> tensor that is split into <c>gamma</c> and <c>beta</c>,
-    /// then fed here.</para>
-    ///
-    /// <para>The <c>(1 + gamma)</c> term (not just <c>gamma</c>) matches the official
-    /// AdaIN1d implementation — at init gamma=beta=0 the AdaIN block is the identity on
-    /// top of instance-normalized input, which is the expected starting point for
-    /// fine-tuning.</para></summary>
+    /// <summary>Adaptive Instance Norm 1D over <c>[B, C, T]</c>: normalizes <c>(b, c)</c>, applies <c>(1 + gamma[c]) * x_hat + beta[c]</c>.</summary>
+    /// <remarks>This is the AdaIN1d block used by Kokoro / StyleTTS 2 throughout the prosody predictor and the
+    /// iSTFTNet decoder: a Linear projection from the style vector produces a <c>[B, 2*C]</c> tensor that is split
+    /// into <paramref name="gamma"/> and <paramref name="beta"/> (each <c>[B, C]</c>, or <c>[C]</c> to broadcast
+    /// across the batch), then fed here. The <c>(1 + gamma)</c> term (not just <c>gamma</c>) matches the official
+    /// AdaIN1d implementation — at init gamma=beta=0 the AdaIN block is the identity on top of
+    /// instance-normalized input, which is the expected starting point for fine-tuning.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
     {
@@ -274,17 +267,8 @@ public static class NormKernels
                     : Avx.Add(vSumSq, Avx.Multiply(v, v));
             }
 
-            // Horizontal reduction
-            float* tmpSum = stackalloc float[Vector256<float>.Count];
-            float* tmpSumSq = stackalloc float[Vector256<float>.Count];
-            Avx.Store(tmpSum, vSum);
-            Avx.Store(tmpSumSq, vSumSq);
-
-            for (int j = 0; j < Vector256<float>.Count; j++)
-            {
-                sum += tmpSum[j];
-                sumSq += tmpSumSq[j];
-            }
+            sum += SimdDispatch.HorizontalSum(vSum);
+            sumSq += SimdDispatch.HorizontalSum(vSumSq);
         }
         else if (AdvSimd.IsSupported)
         {
@@ -319,57 +303,11 @@ public static class NormKernels
         }
     }
 
-    /// <summary>Computes vectorized sum of squares of a float buffer.</summary>
+    /// <summary>Vectorized sum of squares, reusing <see cref="VectorizedSumAndSumSq"/>'s reduction and discarding the unneeded plain sum.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static unsafe float VectorizedSumOfSquares(float* ptr, int count)
     {
-        float sumSq = 0.0f;
-        int i = 0;
-
-        if (Avx2.IsSupported)
-        {
-            Vector256<float> vSumSq = Vector256<float>.Zero;
-            int vectorEnd = count - Vector256<float>.Count + 1;
-
-            for (; i < vectorEnd; i += Vector256<float>.Count)
-            {
-                Vector256<float> v = Avx.LoadVector256(ptr + i);
-                vSumSq = Fma.IsSupported
-                    ? Fma.MultiplyAdd(v, v, vSumSq)
-                    : Avx.Add(vSumSq, Avx.Multiply(v, v));
-            }
-
-            float* tmp = stackalloc float[Vector256<float>.Count];
-            Avx.Store(tmp, vSumSq);
-            for (int j = 0; j < Vector256<float>.Count; j++)
-            {
-                sumSq += tmp[j];
-            }
-        }
-        else if (AdvSimd.IsSupported)
-        {
-            Vector128<float> vSumSq = Vector128<float>.Zero;
-            int vectorEnd = count - Vector128<float>.Count + 1;
-
-            for (; i < vectorEnd; i += Vector128<float>.Count)
-            {
-                Vector128<float> v = AdvSimd.LoadVector128(ptr + i);
-                vSumSq = AdvSimd.Add(vSumSq, AdvSimd.Multiply(v, v));
-            }
-
-            float* tmp = stackalloc float[Vector128<float>.Count];
-            AdvSimd.Store(tmp, vSumSq);
-            for (int j = 0; j < Vector128<float>.Count; j++)
-            {
-                sumSq += tmp[j];
-            }
-        }
-
-        for (; i < count; i++)
-        {
-            sumSq += ptr[i] * ptr[i];
-        }
-
+        VectorizedSumAndSumSq(ptr, count, out float _, out float sumSq);
         return sumSq;
     }
 }

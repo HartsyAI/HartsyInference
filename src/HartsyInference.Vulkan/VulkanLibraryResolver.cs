@@ -3,7 +3,8 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>Resolves the "vulkan-1" library name to the platform-specific Vulkan loader at runtime: libvulkan.so.1 (Linux), vulkan-1.dll (Windows), libvulkan.1.dylib / libMoltenVK.dylib (macOS).</summary>
+/// <summary>Resolves the "vulkan-1" library name to the platform-specific Vulkan loader at runtime.</summary>
+/// <remarks>libvulkan.so.1 (Linux), vulkan-1.dll (Windows), libvulkan.1.dylib / libMoltenVK.dylib (macOS).</remarks>
 public static class VulkanLibraryResolver
 {
     private static int _registered;

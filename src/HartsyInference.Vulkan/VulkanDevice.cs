@@ -1,9 +1,12 @@
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Logging;
 using static HartsyInference.Vulkan.VulkanUtilities;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>Picks a physical device, queries its features/limits/queue families, builds the Vulkan 1.3 feature pNext chain (FP16, subgroupSizeControl, synchronization2, timelineSemaphore, bufferDeviceAddress), and creates the logical device + compute queue. Captures full <see cref="VulkanCapabilities"/>.</summary>
+/// <summary>Picks a physical device, queries its features/limits/queue families, and creates the logical device + compute queue.</summary>
+/// <remarks>Builds the Vulkan 1.3 feature pNext chain (FP16, subgroupSizeControl, synchronization2,
+/// timelineSemaphore, bufferDeviceAddress) and captures full <see cref="VulkanCapabilities"/>.</remarks>
 public sealed class VulkanDevice : IDisposable
 {
     private readonly VulkanInstance _instance;
@@ -404,7 +407,8 @@ public sealed class VulkanDevice : IDisposable
     {
         if (_device != 0)
         {
-            try { VulkanApi.vkDeviceWaitIdle(_device); } catch { /* swallow during dispose */ }
+            try { VulkanApi.vkDeviceWaitIdle(_device); }
+            catch (Exception ex) { Logs.Warning($"VulkanDevice.Dispose: vkDeviceWaitIdle failed on best-effort teardown: {ex.Message}"); }
             VulkanApi.vkDestroyDevice(_device, 0);
             _device = 0;
         }

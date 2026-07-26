@@ -17,6 +17,7 @@ public static class SpirVShaderLoader
         return LoadModuleFromBytes(device, bytes);
     }
 
+    /// <summary>Creates a <c>VkShaderModule</c> from an in-memory SPIR-V binary. Caller owns the returned handle.</summary>
     public static unsafe ulong LoadModuleFromBytes(nint device, byte[] bytes)
     {
         nint pin = Marshal.AllocHGlobal(bytes.Length);

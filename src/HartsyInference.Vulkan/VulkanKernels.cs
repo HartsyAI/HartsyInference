@@ -9,14 +9,25 @@ public readonly record struct KernelKey(string Name, ulong SpecHash);
 /// <summary>One built compute pipeline. Owns its <see cref="Pipeline"/> handle (destroyed by registry on Dispose).</summary>
 public sealed class VulkanKernel
 {
+    /// <summary>The shader file name this pipeline was built from.</summary>
     public string Name { get; init; } = "";
+
+    /// <summary>The compute pipeline handle.</summary>
     public ulong Pipeline { get; init; }
+
+    /// <summary>The pipeline layout shared with other kernels of the same storage-buffer count.</summary>
     public ulong PipelineLayout { get; init; }
+
+    /// <summary>The descriptor-set layout shared with other kernels of the same storage-buffer count.</summary>
     public ulong DescriptorSetLayout { get; init; }
+
+    /// <summary>Number of storage-buffer bindings this kernel's descriptor set expects.</summary>
     public int StorageBufferCount { get; init; }
 }
 
-/// <summary>Loads SPIR-V kernels from disk, builds compute pipelines on first use, and caches them by (name, spec-hash). Pipelines are destroyed together on dispose; one registry per <see cref="VulkanBackend"/> for the device's lifetime, kernels are not unloaded individually.</summary>
+/// <summary>Loads SPIR-V kernels from disk, builds compute pipelines on first use, and caches them by (name, spec-hash).</summary>
+/// <remarks>Pipelines are destroyed together on dispose; one registry per <see cref="VulkanBackend"/> for the
+/// device's lifetime, kernels are not unloaded individually.</remarks>
 public sealed class VulkanKernelRegistry : IDisposable
 {
     private readonly nint _device;
@@ -185,23 +196,24 @@ public sealed class VulkanKernelRegistry : IDisposable
     }
 }
 
-/// <summary>One specialization constant entry. Use the static factories: <see cref="UInt"/>, <see cref="Int"/>, <see cref="Float"/>, <see cref="Bool"/>.</summary>
+/// <summary>One specialization constant entry. Use the static factories: <see cref="UInt"/>, <see cref="Bool"/>.</summary>
 public readonly struct SpecConstant
 {
+    /// <summary>The <c>constantID</c> referenced by the shader's <c>layout(constant_id = ...)</c> declaration.</summary>
     public uint ConstantId { get; }
+
+    /// <summary>Size in bytes of the packed value (always 4 for the supported constant kinds).</summary>
     public int SizeBytes { get; }
+
+    /// <summary>The constant's bit pattern, reinterpreted as an unsigned 32-bit integer.</summary>
     public uint AsUInt32 { get; }
 
     private SpecConstant(uint id, uint value, int size) { ConstantId = id; AsUInt32 = value; SizeBytes = size; }
 
     public static SpecConstant UInt(uint id, uint v) => new(id, v, 4);
-    public static SpecConstant Int(uint id, int v) => new(id, unchecked((uint)v), 4);
     public static SpecConstant Bool(uint id, bool v) => new(id, v ? 1u : 0u, 4);
-    public static SpecConstant Float(uint id, float v)
-    {
-        unsafe { return new SpecConstant(id, *(uint*)&v, 4); }
-    }
 
+    /// <summary>Writes the little-endian bytes of <see cref="AsUInt32"/> into <paramref name="dst"/>.</summary>
     public void WriteTo(Span<byte> dst)
     {
         dst[0] = (byte)(AsUInt32 & 0xFF);

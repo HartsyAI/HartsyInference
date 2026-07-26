@@ -1,8 +1,12 @@
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>One logical compute "stream" backed by a single timeline semaphore + a recycled command-buffer chain on the device's compute queue. Replaces CudaStream + per-op cuStreamSynchronize. Batches recorded ops into one command buffer, submitting once per <see cref="Sync"/> / <see cref="SubmitAndAdvance"/>. Buffers freed during recording stay live until the timeline counter passes the recording's tick — analogous to CUDA's <c>cuMemFreeAsync</c>.</summary>
+/// <summary>One logical compute "stream": a timeline semaphore + a recycled command-buffer chain on the compute queue.</summary>
+/// <remarks>Replaces CudaStream + per-op cuStreamSynchronize. Batches recorded ops into one command buffer,
+/// submitting once per <see cref="SubmitAndAdvance"/>. Buffers freed during recording stay live until the
+/// timeline counter passes the recording's tick — analogous to CUDA's <c>cuMemFreeAsync</c>.</remarks>
 public sealed class VulkanCommandStream : IDisposable
 {
     private readonly nint _device;
@@ -22,6 +26,8 @@ public sealed class VulkanCommandStream : IDisposable
     // command buffers recycled at next reset
     private readonly Stack<nint> _freeCmds = new();
     private readonly List<nint> _allocatedCmds = new();
+    // command buffers scheduled for recycling, keyed by the tick at which they become safe to reuse
+    private readonly Dictionary<ulong, List<nint>> _cmdRecycle = new();
 
     public ulong CurrentTick => _value;
     public ulong LastSubmittedTick => _lastSubmitted;
@@ -96,31 +102,6 @@ public sealed class VulkanCommandStream : IDisposable
         _activeCmd = cb;
         _activeCmdRecording = true;
         return cb;
-    }
-
-    /// <summary>Records a buffer-scoped sync2 barrier on the active command buffer.</summary>
-    public unsafe void RecordBufferBarrier(
-        ulong buffer, ulong offset, ulong size,
-        ulong srcStage, ulong srcAccess,
-        ulong dstStage, ulong dstAccess)
-    {
-        nint cb = AcquireRecording();
-        VkBufferMemoryBarrier2 b = new()
-        {
-            sType = VkStructureType.BufferMemoryBarrier2,
-            srcStageMask = srcStage, srcAccessMask = srcAccess,
-            dstStageMask = dstStage, dstAccessMask = dstAccess,
-            srcQueueFamilyIndex = VkConstants.QueueFamilyIgnored,
-            dstQueueFamilyIndex = VkConstants.QueueFamilyIgnored,
-            buffer = buffer, offset = offset, size = size,
-        };
-        VkDependencyInfo dep = new()
-        {
-            sType = VkStructureType.DependencyInfo,
-            bufferMemoryBarrierCount = 1,
-            pBufferMemoryBarriers = (nint)(&b),
-        };
-        VulkanApi.vkCmdPipelineBarrier2(cb, in dep);
     }
 
     /// <summary>Records a global compute->compute memory barrier (covers all buffers). Cheap fallback when per-buffer scope is unwieldy.</summary>
@@ -222,7 +203,6 @@ public sealed class VulkanCommandStream : IDisposable
         return target;
     }
 
-    private readonly Dictionary<ulong, List<nint>> _cmdRecycle = new();
     private void ScheduleCmdRecycle(nint cb, ulong tick)
     {
         if (!_cmdRecycle.TryGetValue(tick, out List<nint>? list))
@@ -316,8 +296,13 @@ public sealed class VulkanCommandStream : IDisposable
 
     public void Dispose()
     {
-        if (_activeCmdRecording) try { VulkanApi.vkEndCommandBuffer(_activeCmd); } catch { /* ignore */ }
-        try { VulkanApi.vkQueueWaitIdle(_queue); } catch { /* ignore */ }
+        if (_activeCmdRecording)
+        {
+            try { VulkanApi.vkEndCommandBuffer(_activeCmd); }
+            catch (Exception ex) { Logs.Warning($"VulkanCommandStream.Dispose: vkEndCommandBuffer failed on best-effort teardown: {ex.Message}"); }
+        }
+        try { VulkanApi.vkQueueWaitIdle(_queue); }
+        catch (Exception ex) { Logs.Warning($"VulkanCommandStream.Dispose: vkQueueWaitIdle failed on best-effort teardown: {ex.Message}"); }
 
         // Drain deferred frees
         foreach ((_, List<VulkanBuffer> bufs) in _deferredFrees)

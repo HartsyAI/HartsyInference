@@ -4,17 +4,17 @@ using System.Text;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>Small helpers shared across the Vulkan backend: fixed-byte string conversion, version encoding, pinned UTF-8 string arrays for ppEnabledLayerNames / ppEnabledExtensionNames.</summary>
+/// <summary>Small helpers shared across the Vulkan backend: string conversion, version encoding, pinned strings.</summary>
 internal static class VulkanUtilities
 {
     /// <summary>Encodes a Vulkan API version: VK_MAKE_VERSION(major, minor, patch).</summary>
     public static uint MakeVersion(uint major, uint minor, uint patch)
         => (major << 22) | (minor << 12) | patch;
 
-    public const uint VK_API_VERSION_1_0 = (1u << 22) | (0u << 12) | 0u;
-    public const uint VK_API_VERSION_1_1 = (1u << 22) | (1u << 12) | 0u;
-    public const uint VK_API_VERSION_1_2 = (1u << 22) | (2u << 12) | 0u;
-    public const uint VK_API_VERSION_1_3 = (1u << 22) | (3u << 12) | 0u;
+    public const uint VkApiVersion10 = (1u << 22) | (0u << 12) | 0u;
+    public const uint VkApiVersion11 = (1u << 22) | (1u << 12) | 0u;
+    public const uint VkApiVersion12 = (1u << 22) | (2u << 12) | 0u;
+    public const uint VkApiVersion13 = (1u << 22) | (3u << 12) | 0u;
 
     /// <summary>Reads a NUL-terminated UTF-8 string from a fixed-size byte buffer, e.g. VkPhysicalDeviceProperties.deviceName[256].</summary>
     public static unsafe string ReadFixedString(byte* buffer, int max)
@@ -25,7 +25,8 @@ internal static class VulkanUtilities
     }
 }
 
-/// <summary>Holds an array of UTF-8 NUL-terminated strings as a contiguous block of unmanaged memory, with a parallel array of <c>const char**</c> pointers suitable for Vulkan's <c>ppEnabledLayerNames</c> / <c>ppEnabledExtensionNames</c>. Disposable — frees both blocks.</summary>
+/// <summary>Holds UTF-8 NUL-terminated strings as one unmanaged block, with a parallel pointer array.</summary>
+/// <remarks>Suitable for Vulkan's <c>ppEnabledLayerNames</c> / <c>ppEnabledExtensionNames</c>.</remarks>
 internal sealed unsafe class PinnedStringArray : IDisposable
 {
     private nint _stringsBlock;
@@ -69,6 +70,13 @@ internal sealed unsafe class PinnedStringArray : IDisposable
     {
         if (_stringsBlock != 0) { Marshal.FreeHGlobal(_stringsBlock); _stringsBlock = 0; }
         if (_pointersBlock != 0) { Marshal.FreeHGlobal(_pointersBlock); _pointersBlock = 0; }
+        GC.SuppressFinalize(this);
+    }
+
+    ~PinnedStringArray()
+    {
+        if (_stringsBlock != 0) Marshal.FreeHGlobal(_stringsBlock);
+        if (_pointersBlock != 0) Marshal.FreeHGlobal(_pointersBlock);
     }
 }
 
@@ -93,5 +101,11 @@ internal sealed class PinnedUtf8String : IDisposable
     public void Dispose()
     {
         if (_block != 0) { Marshal.FreeHGlobal(_block); _block = 0; }
+        GC.SuppressFinalize(this);
+    }
+
+    ~PinnedUtf8String()
+    {
+        if (_block != 0) Marshal.FreeHGlobal(_block);
     }
 }

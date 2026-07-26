@@ -1,9 +1,9 @@
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
-
 namespace HartsyInference.Vulkan;
 
-/// <summary>Manages a small set of canonical descriptor-set layouts, pipeline layouts, and a descriptor-pool ring. Sharing layouts across kernels with the same binding shape keeps total layout count to ~12. Pool ring: two pools alternated per phase boundary via <c>FlipPool()</c>; active pool can hold up to <see cref="MaxSetsPerPool"/> allocations before forcing a flip.</summary>
+/// <summary>Manages a small set of canonical descriptor-set layouts, pipeline layouts, and a descriptor-pool ring.</summary>
+/// <remarks>Sharing layouts across kernels with the same binding shape keeps total layout count to ~12.
+/// Pool ring: two pools alternated per phase boundary via <c>FlipPool()</c>; active pool can hold up to
+/// <see cref="MaxSetsPerPool"/> allocations before forcing a flip.</remarks>
 public sealed class VulkanDescriptorManager : IDisposable
 {
     private const int MaxSetsPerPool = 4096;
@@ -138,7 +138,7 @@ public sealed class VulkanDescriptorManager : IDisposable
         };
         ulong outSet;
         VkResult r = VulkanApi.vkAllocateDescriptorSets(_device, in ai, (nint)(&outSet));
-        if (r == (VkResult)(-1000257000) /* OUT_OF_POOL_MEMORY */ || r == VkResult.ErrorOutOfPoolMemory)
+        if (r == VkResult.ErrorOutOfPoolMemory)
         {
             FlipPool();
             ai.descriptorPool = _pools[_activePool];

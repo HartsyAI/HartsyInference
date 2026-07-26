@@ -3,8 +3,7 @@ using static HartsyInference.Cuda.CudnnApi;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>
-/// Fused scaled-dot-product attention via cuDNN's flash-attention engine (backend graph API).
+/// <summary>Fused scaled-dot-product attention via cuDNN's flash-attention engine (backend graph API).
 /// Replaces the materialized cuBLAS QKᵀ→softmax→PV path (which allocates a [B·H, Sq, Skv] score matrix)
 /// with a single fused kernel that never materializes the scores — ~34× faster at Krea2 self-attention
 /// shape (B=1,H=24,S=4608,D=128: 62.7ms → 1.8ms/call, workspace 0), measured on RTX 4090.
@@ -17,8 +16,7 @@ namespace HartsyInference.Cuda;
 /// S/Ss/P are virtual so the engine keeps them in registers/shared memory.
 ///
 /// Execution plans are expensive to build (heuristics + JIT) and cheap to run, so they are cached by
-/// shape. Instances are created per <see cref="CudaBackend"/> (one cuDNN handle bound to the compute stream).
-/// </summary>
+/// shape. Instances are created per <see cref="CudaBackend"/> (one cuDNN handle bound to the compute stream).</summary>
 internal sealed class CudnnSdpa : IDisposable
 {
     private readonly nint _handle;
@@ -38,7 +36,7 @@ internal sealed class CudnnSdpa : IDisposable
         int st = cudnnCreate(out _handle);
         if (st != CUDNN_STATUS_SUCCESS)
             throw new InvalidOperationException($"cudnnCreate failed: {ErrorString(st)}");
-        cudnnSetStream(_handle, stream);
+        Check(cudnnSetStream(_handle, stream), "cudnnSetStream");
     }
 
     /// <summary>D values the fused engine may support (head dim): multiples of 8 in [64, 128] (the documented
@@ -260,7 +258,7 @@ internal sealed class CudnnSdpa : IDisposable
             return (0, 0, false);
         }
         long ws = 0;
-        cudnnBackendGetAttribute(p, CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, CUDNN_TYPE_INT64, 1, out _, &ws);
+        Check(cudnnBackendGetAttribute(p, CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, CUDNN_TYPE_INT64, 1, out _, &ws), "workspace size get");
         return (p, ws, true);
     }
 

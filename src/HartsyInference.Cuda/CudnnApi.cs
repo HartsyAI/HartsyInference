@@ -2,12 +2,10 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>
-/// P/Invoke bindings for the cuDNN backend graph API (cuDNN 9). Library name "cudnn" is resolved at
-/// runtime by <see cref="CudaLibraryResolver"/> to libcudnn.so.9 (Linux) / cudnn64_9.dll (Windows).
-/// Only the handle + generic backend-descriptor entry points are needed — the fused scaled-dot-product
-/// attention graph is assembled from these primitives in <see cref="CudnnSdpa"/>.
-/// </summary>
+/// <summary>P/Invoke bindings for the cuDNN backend graph API (cuDNN 9). Library name "cudnn" is resolved at
+/// runtime by <see cref="CudaLibraryResolver"/> to libcudnn.so.9 (Linux) / cudnn64_9.dll (Windows). Only the
+/// handle + generic backend-descriptor entry points are needed — the fused scaled-dot-product attention graph
+/// is assembled from these primitives in <see cref="CudnnSdpa"/>.</summary>
 internal static partial class CudnnApi
 {
     private const string LibName = "cudnn";
@@ -28,10 +26,13 @@ internal static partial class CudnnApi
     [LibraryImport(LibName)] internal static partial int cudnnBackendFinalize(nint descriptor);
 
     [LibraryImport(LibName)]
-    internal static unsafe partial int cudnnBackendSetAttribute(nint descriptor, int attributeName, int attributeType, long elementCount, void* arrayOfElements);
+    internal static unsafe partial int cudnnBackendSetAttribute(
+        nint descriptor, int attributeName, int attributeType, long elementCount, void* arrayOfElements);
 
     [LibraryImport(LibName)]
-    internal static unsafe partial int cudnnBackendGetAttribute(nint descriptor, int attributeName, int attributeType, long requestedElementCount, out long elementCount, void* arrayOfElements);
+    internal static unsafe partial int cudnnBackendGetAttribute(
+        nint descriptor, int attributeName, int attributeType, long requestedElementCount,
+        out long elementCount, void* arrayOfElements);
 
     [LibraryImport(LibName)]
     internal static partial int cudnnBackendExecute(nint handle, nint executionPlan, nint variantPack);

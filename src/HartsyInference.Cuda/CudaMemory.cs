@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
@@ -9,7 +10,7 @@ public static class CudaMemory
     /// allocations land in ITS OWN stream-ordered pool. A single static stream here was half of the
     /// multi-backend poison: backend A's transients allocated/freed on backend B's stream → cross-device
     /// stream ops → CUDA 700 on both GPUs.</summary>
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<nint, nint> _computeStreams = new();
+    private static readonly ConcurrentDictionary<nint, nint> _computeStreams = new();
 
     /// <summary>Fast path for the single-backend case (no cuCtxGetCurrent per alloc). 0 when zero or 2+ registered.</summary>
     private static volatile nint _singleStream;
@@ -26,7 +27,7 @@ public static class CudaMemory
     public static void RemoveComputeStream(CudaContext context)
     {
         _computeStreams.TryRemove(context.Handle, out _);
-        _singleStream = _computeStreams.Count == 1 ? System.Linq.Enumerable.First(_computeStreams.Values) : 0;
+        _singleStream = _computeStreams.Count == 1 ? Enumerable.First(_computeStreams.Values) : 0;
     }
 
     /// <summary>Resolves the calling thread's current context to its registered compute stream (0 = none;
@@ -99,7 +100,8 @@ public static class CudaMemory
                 double reqMb = requested / (1024.0 * 1024.0);
                 double freeMb = freeBytes / (1024.0 * 1024.0);
                 double totalMb = totalBytes / (1024.0 * 1024.0);
-                Logs.Warning($"[CudaMemory] {stage}: requested={reqMb:F1} MB, free={freeMb:F1} MB, total={totalMb:F1} MB ({(double)freeBytes / totalBytes * 100:F1}% free)");
+                double freePct = (double)freeBytes / totalBytes * 100;
+                Logs.Warning($"[CudaMemory] {stage}: requested={reqMb:F1} MB, free={freeMb:F1} MB, total={totalMb:F1} MB ({freePct:F1}% free)");
             }
             else
             {
@@ -174,7 +176,7 @@ public static class CudaMemory
     // leaks one launch's worth of memory permanently when the graph is destroyed. Enabled by
     // CudaBackend.StepGraphBegin, reported at EndAndLaunch.
     internal static bool TrackCaptureWindow;
-    internal static readonly System.Collections.Generic.Dictionary<ulong, nuint> CaptureAllocs = new();
+    internal static readonly Dictionary<ulong, nuint> CaptureAllocs = new();
     internal static long CaptureAllocBytes, CaptureFreeBytes;
     internal static int CaptureAllocCount, CaptureFreeCount;
 
@@ -253,7 +255,8 @@ public static class CudaMemory
                     {
                         // A free node for memory the graph does NOT own replays on EVERY launch — the
                         // buffer's real owner is left pointing at freed, reusable memory. Surface it.
-                        Logs.Warning($"[Cuda] step-graph capture recorded a FREE of external device ptr 0x{dptr:X} — the captured graph will re-free it on every replay.");
+                        Logs.Warning($"[Cuda] step-graph capture recorded a FREE of external device ptr 0x{dptr:X} — " +
+                            "the captured graph will re-free it on every replay.");
                     }
                 }
             }

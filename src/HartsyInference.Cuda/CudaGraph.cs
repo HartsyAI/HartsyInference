@@ -2,13 +2,27 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Captures a fixed sequence of CUDA stream work into a graph and replays it with a single <c>cuGraphLaunch</c>, collapsing thousands of per-kernel CPU launch calls into one. The launch-overhead win is largest on workloads that issue the same kernel topology every iteration (e.g. a diffusion denoise step).
+/// <summary>Captures a fixed sequence of CUDA stream work into a graph and replays it with a single
+/// <c>cuGraphLaunch</c>, collapsing thousands of per-kernel CPU launch calls into one.</summary>
+/// <remarks>
+/// <para>The launch-overhead win is largest on workloads that issue the same kernel topology every iteration
+/// (e.g. a diffusion denoise step).</para>
 ///
-/// <para><b>Capture constraints.</b> Stream capture records device work only — it forbids synchronous operations for the capture's whole duration: no CPU readback (no <c>DataPointer</c>/lazy device-to-host sync), no blocking stream sync, and no synchronous <c>cuMemAlloc</c> (use the stream-ordered allocator, which is capturable as graph-memory nodes, or pre-allocate all buffers before capture). Only a graphable fixed kernel chain qualifies; a pipeline step that interleaves CPU-side scheduler/CFG math cannot be captured wholesale without first hoisting that math out of the captured region.</para>
+/// <para><b>Capture constraints.</b> Stream capture records device work only — it forbids synchronous operations
+/// for the capture's whole duration: no CPU readback (no <c>DataPointer</c>/lazy device-to-host sync), no
+/// blocking stream sync, and no synchronous <c>cuMemAlloc</c> (use the stream-ordered allocator, which is
+/// capturable as graph-memory nodes, or pre-allocate all buffers before capture). Only a graphable fixed kernel
+/// chain qualifies; a pipeline step that interleaves CPU-side scheduler/CFG math cannot be captured wholesale
+/// without first hoisting that math out of the captured region.</para>
 ///
-/// <para><b>Re-capture vs update.</b> Buffer pointers and shapes are frozen at instantiation. When only scalar kernel parameters change between iterations (timestep, sigma, CFG scale), prefer re-capturing into a fresh graph and calling <see cref="TryUpdate"/> rather than re-instantiating, which is cheaper when the topology is identical.</para>
+/// <para><b>Re-capture vs update.</b> Buffer pointers and shapes are frozen at instantiation. When only scalar
+/// kernel parameters change between iterations (timestep, sigma, CFG scale), prefer re-capturing into a fresh
+/// graph and calling <see cref="TryUpdate"/> rather than re-instantiating, which is cheaper when the topology
+/// is identical.</para>
 ///
-/// <para><b>Untested locally.</b> Written from the CUDA Driver API graph docs; not exercised on GPU in this environment. Validate on hardware before relying on it in a pipeline.</para></summary>
+/// <para><b>Untested locally.</b> Written from the CUDA Driver API graph docs; not exercised on GPU in this
+/// environment. Validate on hardware before relying on it in a pipeline.</para>
+/// </remarks>
 public sealed class CudaGraph : IDisposable
 {
     /// <summary>Base pointer of this graph's capture arena (0 = none) — set by CudaBackend.CaptureGraph,
@@ -40,7 +54,9 @@ public sealed class CudaGraph : IDisposable
         _instantiateFlags = autoFreeAllocationsOnRelaunch ? FlagAutoFreeOnLaunch : 0;
     }
 
-    /// <summary>Captures the device work issued by <paramref name="recordWork"/> on this graph's stream and instantiates it. The delegate must issue only capturable (asynchronous) work — see the type remarks. Replaces any previously captured graph.</summary>
+    /// <summary>Captures the device work issued by <paramref name="recordWork"/> on this graph's stream and
+    /// instantiates it. The delegate must issue only capturable (asynchronous) work — see the type remarks.
+    /// Replaces any previously captured graph.</summary>
     public void Capture(Action recordWork)
     {
         if (recordWork is null) throw new ArgumentNullException(nameof(recordWork));
@@ -98,7 +114,10 @@ public sealed class CudaGraph : IDisposable
         Logs.Info($"[CudaGraph] captured {count} nodes: {parts}");
     }
 
-    /// <summary>Re-captures <paramref name="recordWork"/> and updates the existing executable graph in place when the topology is unchanged (cheaper than re-instantiating). Falls back to a full re-instantiate when the topology differs. No-op-safe to call before the first <see cref="Capture"/> (it just captures).</summary>
+    /// <summary>Re-captures <paramref name="recordWork"/> and updates the existing executable graph in place when
+    /// the topology is unchanged (cheaper than re-instantiating).</summary>
+    /// <remarks>Falls back to a full re-instantiate when the topology differs. No-op-safe to call before the
+    /// first <see cref="Capture"/> (it just captures).</remarks>
     public void TryUpdate(Action recordWork)
     {
         if (recordWork is null) throw new ArgumentNullException(nameof(recordWork));
@@ -202,5 +221,11 @@ public sealed class CudaGraph : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         DestroyExec();
         GC.SuppressFinalize(this);
+    }
+
+    ~CudaGraph()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        DestroyExec();
     }
 }

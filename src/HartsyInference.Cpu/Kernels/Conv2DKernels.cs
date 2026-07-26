@@ -95,7 +95,6 @@ public static class Conv2DKernels
                 }
             }
 
-            // Add bias if present
             if (pBias != null)
             {
                 long spatialSize = outH * outW;

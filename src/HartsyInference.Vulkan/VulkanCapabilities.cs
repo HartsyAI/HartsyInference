@@ -1,6 +1,8 @@
 namespace HartsyInference.Vulkan;
 
-/// <summary>Captured at startup from the chosen physical device. Drives kernel selection (FP16 / cooperative-matrix path) and validation (push-constant size budget, tile-size limits).</summary>
+/// <summary>Captured at startup from the chosen physical device; drives kernel selection and validation.</summary>
+/// <remarks>Used for FP16 / cooperative-matrix path selection and validation (push-constant size budget,
+/// tile-size limits).</remarks>
 public sealed class VulkanCapabilities
 {
     /// <summary>Human-readable device name from VkPhysicalDeviceProperties.deviceName.</summary>
@@ -25,47 +27,94 @@ public sealed class VulkanCapabilities
 
     /// <summary>Default subgroup size on the device (32 NV/Intel-Arc, 32 or 64 AMD RDNA, 64 GCN, 8–32 Intel iGPU).</summary>
     public required uint SubgroupSize { get; init; }
+
+    /// <summary>Smallest subgroup size the device can be configured for via subgroup-size control.</summary>
     public required uint MinSubgroupSize { get; init; }
+
+    /// <summary>Largest subgroup size the device can be configured for via subgroup-size control.</summary>
     public required uint MaxSubgroupSize { get; init; }
+
+    /// <summary>Subgroup operation categories the device's shaders can use (arithmetic, shuffle, ballot, etc.).</summary>
     public required VkSubgroupFeatureFlags SubgroupOps { get; init; }
 
     // ── Compute limits ──────────────────────────────────────────────────
 
+    /// <summary>Maximum shared-memory (workgroup-local) allocation a compute shader may declare, in bytes.</summary>
     public required uint MaxComputeSharedMemoryBytes { get; init; }
+
+    /// <summary>Maximum total invocations (threads) per workgroup.</summary>
     public required uint MaxComputeWorkGroupInvocations { get; init; }
+
+    /// <summary>Maximum local workgroup size along X.</summary>
     public required uint MaxComputeWorkGroupSizeX { get; init; }
+
+    /// <summary>Maximum local workgroup size along Y.</summary>
     public required uint MaxComputeWorkGroupSizeY { get; init; }
+
+    /// <summary>Maximum local workgroup size along Z.</summary>
     public required uint MaxComputeWorkGroupSizeZ { get; init; }
+
+    /// <summary>Maximum dispatch group count along X.</summary>
     public required uint MaxComputeWorkGroupCountX { get; init; }
+
+    /// <summary>Maximum dispatch group count along Y.</summary>
     public required uint MaxComputeWorkGroupCountY { get; init; }
+
+    /// <summary>Maximum dispatch group count along Z.</summary>
     public required uint MaxComputeWorkGroupCountZ { get; init; }
+
+    /// <summary>Maximum total size of a pipeline's push-constant range, in bytes.</summary>
     public required uint MaxPushConstantsSize { get; init; }
+
+    /// <summary>Maximum storage-buffer descriptors bindable to a single shader stage.</summary>
     public required uint MaxPerStageDescriptorStorageBuffers { get; init; }
 
     // ── Memory alignment ────────────────────────────────────────────────
 
+    /// <summary>Required alignment, in bytes, for storage-buffer descriptor offsets.</summary>
     public required ulong MinStorageBufferOffsetAlignment { get; init; }
+
+    /// <summary>Granularity, in bytes, at which non-coherent mapped-memory flush/invalidate ranges must be aligned.</summary>
     public required ulong NonCoherentAtomSize { get; init; }
+
+    /// <summary>Minimum alignment the driver guarantees for a mapped-memory pointer.</summary>
     public required nuint MinMemoryMapAlignment { get; init; }
 
     // ── Features ────────────────────────────────────────────────────────
 
+    /// <summary>Whether the device supports FP16 shader arithmetic (<c>shaderFloat16</c>).</summary>
     public required bool SupportsFp16 { get; init; }
+
+    /// <summary>Whether storage buffers may use 16-bit types (<c>storageBuffer16BitAccess</c>).</summary>
     public required bool Storage16Bit { get; init; }
 
-    /// <summary>True if the device supports the integer dot-product feature (<c>shaderIntegerDotProduct</c>, core 1.3), enabling the INT8 GEMM path via <c>dotPacked4x8</c> — the cross-vendor DP4a/IMMA equivalent.</summary>
+    /// <summary>True if the device supports <c>shaderIntegerDotProduct</c> (core 1.3), enabling the INT8 GEMM path via <c>dotPacked4x8</c>.</summary>
     public required bool HasInt8DotProduct { get; init; }
 
+    /// <summary>Whether the device supports configuring a required subgroup size per shader stage.</summary>
     public required bool SubgroupSizeControl { get; init; }
+
+    /// <summary>Whether the device supports the "full subgroups" compute shader execution mode.</summary>
     public required bool ComputeFullSubgroups { get; init; }
+
+    /// <summary>Whether the device supports Vulkan 1.3 core synchronization2 (barrier2/submit2).</summary>
     public required bool Synchronization2 { get; init; }
+
+    /// <summary>Whether the device supports timeline semaphores.</summary>
     public required bool TimelineSemaphore { get; init; }
+
+    /// <summary>Whether the device supports buffer device address (GPU-visible buffer pointers).</summary>
     public required bool BufferDeviceAddress { get; init; }
 
     // ── Optional extensions ─────────────────────────────────────────────
 
+    /// <summary>Whether <c>VK_EXT_memory_budget</c> is available for live heap-usage/budget queries.</summary>
     public required bool HasMemoryBudget { get; init; }
+
+    /// <summary>Whether <c>VK_KHR_push_descriptor</c> (or Vulkan 1.4 core push descriptors) is available.</summary>
     public required bool HasPushDescriptor { get; init; }
+
+    /// <summary>Whether <c>VK_KHR_cooperative_matrix</c> is available and exposes the shape this backend needs.</summary>
     public required bool HasCooperativeMatrix { get; init; }
 
     /// <summary>True if any memory type advertises both DEVICE_LOCAL and HOST_VISIBLE — the ReBAR / Smart Access Memory fast path that skips staging copies.</summary>

@@ -2,7 +2,10 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>P/Invoke surface for Vulkan 1.3 compute. Library name "vulkan-1" is resolved at runtime by VulkanLibraryResolver to libvulkan.so.1 (Linux), vulkan-1.dll (Windows), libvulkan.1.dylib / libMoltenVK.dylib (macOS). All structs are blittable and passed by ref/out — no marshalling.</summary>
+/// <summary>P/Invoke surface for Vulkan 1.3 compute.</summary>
+/// <remarks>Library name "vulkan-1" is resolved at runtime by VulkanLibraryResolver to libvulkan.so.1 (Linux),
+/// vulkan-1.dll (Windows), libvulkan.1.dylib / libMoltenVK.dylib (macOS). All structs are blittable and
+/// passed by ref/out — no marshalling.</remarks>
 internal static partial class VulkanApi
 {
     private const string Lib = "vulkan-1";
@@ -188,7 +191,10 @@ internal static partial class VulkanApi
     [LibraryImport(Lib)]
     internal static partial void vkCmdBindDescriptorSets(nint commandBuffer, VkPipelineBindPoint pipelineBindPoint, ulong layout, uint firstSet, uint descriptorSetCount, nint pDescriptorSets, uint dynamicOffsetCount, nint pDynamicOffsets);
 
-    /// <summary>Records descriptor-set bindings directly into the command buffer without a descriptor pool. Requires Vulkan 1.4 core or the <c>VK_KHR_push_descriptor</c> extension (loader exposes both via the same unsuffixed entry point on modern builds). Saves the vkAllocateDescriptorSets + vkUpdateDescriptorSets round-trip per dispatch.</summary>
+    /// <summary>Records descriptor-set bindings directly into the command buffer without a descriptor pool.</summary>
+    /// <remarks>Requires Vulkan 1.4 core or the <c>VK_KHR_push_descriptor</c> extension (loader exposes both
+    /// via the same unsuffixed entry point on modern builds). Saves the vkAllocateDescriptorSets +
+    /// vkUpdateDescriptorSets round-trip per dispatch.</remarks>
     [LibraryImport(Lib)]
     internal static partial void vkCmdPushDescriptorSet(nint commandBuffer, VkPipelineBindPoint pipelineBindPoint, ulong layout, uint set, uint descriptorWriteCount, nint pDescriptorWrites);
 

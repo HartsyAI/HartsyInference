@@ -2,15 +2,14 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>Per-row symmetric INT8 quantization, the standard scheme for feeding <see cref="VulkanBackend.MatMulInt8"/>.
-/// For a [rows, K] F32 tensor it computes one scale per row (<c>scale[r] = max_k|x[r][k]| / 127</c>) and stores
-/// <c>q[r][k] = round(x[r][k] / scale[r])</c> clamped to [-127, 127] as INT8. Works for both weights ([N, K], one
-/// scale per output channel) and activations ([M, K], one scale per token). Dequantization is <c>q * scale</c>,
-/// which the GEMM folds in after the exact int32 accumulation.</summary>
+/// <summary>Per-row symmetric INT8 quantization, the standard scheme for feeding <see cref="VulkanBackend.MatMulInt8"/>.</summary>
+/// <remarks>For a [rows, K] F32 tensor it computes one scale per row (<c>scale[r] = max_k|x[r][k]| / 127</c>) and
+/// stores <c>q[r][k] = round(x[r][k] / scale[r])</c> clamped to [-127, 127] as INT8. Works for both weights
+/// ([N, K], one scale per output channel) and activations ([M, K], one scale per token). Dequantization is
+/// <c>q * scale</c>, which the GEMM folds in after the exact int32 accumulation.</remarks>
 public static class Int8Quantizer
 {
-    /// <summary>Quantizes a 2-D F32 tensor to per-row symmetric INT8. Returns the INT8 tensor (same shape, I8) and
-    /// the F32 per-row scale tensor (length = rows). The caller owns and disposes both.</summary>
+    /// <summary>Quantizes a 2-D F32 tensor to per-row INT8. Returns (quantized, per-row scale); caller owns and disposes both.</summary>
     public static unsafe (Tensor quantized, Tensor scale) RowwiseSymmetric(Tensor src)
     {
         if (src is null) throw new ArgumentNullException(nameof(src));

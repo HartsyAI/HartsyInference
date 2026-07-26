@@ -1,8 +1,13 @@
 using System.Diagnostics;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>Per-op host-side timing for the Vulkan backend, enabled via <c>HARTSYINFERENCE_VK_PROFILE=1</c>. Captures wall-clock from <c>EnterOp</c> to <c>OpScope.Dispose</c> for each public IBackend op plus the dispatch count. Wall-clock includes GPU shader time and any host wait (the per-op <c>WaitIdleHost</c>) — Phase C1's question is whether host-wait dominates. On backend disposal dumps a top-N table to stderr (or to <c>HARTSYINFERENCE_VK_PROFILE_FILE</c>). Cheap when disabled.</summary>
+/// <summary>Per-op host-side timing for the Vulkan backend, enabled via <c>HARTSYINFERENCE_VK_PROFILE=1</c>.</summary>
+/// <remarks>Captures wall-clock from <c>EnterOp</c> to <c>OpScope.Dispose</c> for each public IBackend op plus
+/// the dispatch count. Wall-clock includes GPU shader time and any host wait (the per-op
+/// <c>WaitIdleHost</c>) — Phase C1's question is whether host-wait dominates. On backend disposal dumps a
+/// top-N table to stderr (or to <c>HARTSYINFERENCE_VK_PROFILE_FILE</c>). Cheap when disabled.</remarks>
 internal sealed class VulkanProfiler
 {
     private readonly bool _enabled;
@@ -45,7 +50,7 @@ internal sealed class VulkanProfiler
         if (!string.IsNullOrEmpty(path))
         {
             try { fileWriter = new StreamWriter(path); writer = fileWriter; }
-            catch { /* fall back to stderr */ }
+            catch (Exception ex) { Logs.Warning($"VulkanProfiler: failed to open profile output file {path}, falling back to stderr: {ex.Message}"); }
         }
 
         try

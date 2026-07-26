@@ -109,7 +109,10 @@ public sealed class CudaContext : IDisposable
         DeviceName = QueryDeviceName(_deviceHandle);
     }
 
-    /// <summary>Ensures this context is current on the calling thread. Cheap fast path on already-bound threads (one TLS read + branch). Call from the entry of any code that issues CUDA Driver API calls — the single guarantee that makes the backend safe to use from <c>Task.Run</c> worker threads, finalizers, and async continuations.</summary>
+    /// <summary>Ensures this context is current on the calling thread.</summary>
+    /// <remarks>Cheap fast path on already-bound threads (one TLS read + branch). Call from the entry of any code
+    /// that issues CUDA Driver API calls — the single guarantee that makes the backend safe to use from
+    /// <c>Task.Run</c> worker threads, finalizers, and async continuations.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void EnsureCurrent()
     {
@@ -179,7 +182,12 @@ public sealed class CudaContext : IDisposable
         return count;
     }
 
-    /// <summary>Probes whether a <see cref="CudaBackend"/> can be constructed in this environment. Returns <c>false</c> if any of: the driver library is missing (<c>libcuda.so.1</c> / <c>nvcuda.dll</c>), cuBLAS is missing (<c>libcublas.so.13</c>/<c>.12</c>/<c>.11</c> on Linux or <c>cublas64_13/12/11.dll</c> on Windows — typically requires the CUDA Toolkit, not just the driver), <c>cuInit</c> fails, or no CUDA-capable devices are present. Used by tests to skip cleanly when CUDA isn't fully usable, mirroring the <c>VulkanAvailable</c> pattern.</summary>
+    /// <summary>Probes whether a <see cref="CudaBackend"/> can be constructed in this environment.</summary>
+    /// <remarks>Returns <c>false</c> if any of: the driver library is missing (<c>libcuda.so.1</c> / <c>nvcuda.dll</c>),
+    /// cuBLAS is missing (<c>libcublas.so.13</c>/<c>.12</c>/<c>.11</c> on Linux or <c>cublas64_13/12/11.dll</c> on
+    /// Windows — typically requires the CUDA Toolkit, not just the driver), <c>cuInit</c> fails, or no CUDA-capable
+    /// devices are present. Used by tests to skip cleanly when CUDA isn't fully usable, mirroring the
+    /// <c>VulkanAvailable</c> pattern.</remarks>
     public static bool IsAvailable()
     {
         try

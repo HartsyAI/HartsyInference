@@ -1,7 +1,3 @@
-using System.Runtime.CompilerServices;
-using System.Runtime.Intrinsics.Arm;
-using System.Runtime.Intrinsics.X86;
-
 namespace HartsyInference.Cpu;
 
 /// <summary>Provides runtime detection of SIMD instruction set support (AVX2, AVX-512, ARM NEON) and reports the best available vector width for dispatching kernel implementations.</summary>
@@ -46,5 +42,20 @@ public static class SimdDispatch
 
             return 4;
         }
+    }
+
+    /// <summary>Sums the 8 lanes of an AVX2 vector in ascending index order, matching the manual stackalloc+store reduction it replaces.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static unsafe float HorizontalSum(Vector256<float> v)
+    {
+        float* tmp = stackalloc float[Vector256<float>.Count];
+        Avx.Store(tmp, v);
+        float sum = 0f;
+        for (int j = 0; j < Vector256<float>.Count; j++)
+        {
+            sum += tmp[j];
+        }
+
+        return sum;
     }
 }

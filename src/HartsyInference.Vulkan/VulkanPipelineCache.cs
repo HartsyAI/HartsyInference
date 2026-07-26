@@ -1,8 +1,11 @@
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>Wraps a VkPipelineCache and persists it between runs at ~/.cache/hartsyinference/vulkan/&lt;deviceUUID&gt;.pipeline_cache (or %LOCALAPPDATA%\hartsyinference\vulkan\... on Windows). The driver gracefully ignores cache contents that don't match the current device, so the file survives driver/GPU upgrades.</summary>
+/// <summary>Wraps a VkPipelineCache and persists it between runs at a per-device cache file.</summary>
+/// <remarks>The driver gracefully ignores cache contents that don't match the current device, so the file
+/// survives driver/GPU upgrades.</remarks>
 public sealed class VulkanPipelineCache : IDisposable
 {
     private readonly nint _device;
@@ -46,6 +49,8 @@ public sealed class VulkanPipelineCache : IDisposable
             if (r != VkResult.Success && cacheData != null)
             {
                 // Cache contents may be incompatible — try without
+                Logs.Warning($"VulkanPipelineCache: cached data at {_cachePath} was rejected by the driver " +
+                    $"(result={r}); falling back to an empty cache.");
                 ci = new VkPipelineCacheCreateInfo { sType = VkStructureType.PipelineCacheCreateInfo };
                 VulkanApi.vkCreatePipelineCache(_device, in ci, 0, out _handle).ThrowOnError("vkCreatePipelineCache");
             }
@@ -66,8 +71,9 @@ public sealed class VulkanPipelineCache : IDisposable
         {
             return File.Exists(_cachePath) ? File.ReadAllBytes(_cachePath) : null;
         }
-        catch
+        catch (Exception ex)
         {
+            Logs.Warning($"VulkanPipelineCache: failed to read cache file {_cachePath}, starting with an empty cache: {ex.Message}");
             return null;
         }
     }
@@ -100,7 +106,8 @@ public sealed class VulkanPipelineCache : IDisposable
         }
         finally { Marshal.FreeHGlobal(p); }
 
-        try { File.WriteAllBytes(_cachePath, data); } catch { /* best effort */ }
+        try { File.WriteAllBytes(_cachePath, data); }
+        catch (Exception ex) { Logs.Warning($"VulkanPipelineCache: failed to persist cache to {_cachePath}: {ex.Message}"); }
     }
 
     public void Dispose()

@@ -51,7 +51,7 @@ public sealed unsafe class Fp4GemmExecutor : IDisposable
             return;
         }
 
-        CublasLtApi.cublasLtCreate(out _ltHandle).ThrowOnError();
+        CublasLtApi.cublasLtCreate(out _ltHandle).ThrowOnCublasError();
         _workspaceBytes = (nuint)CublasLtApi.DefaultWorkspaceBytes;
         _workspace = CudaMemory.AllocatePersistent(_workspaceBytes);
     }
@@ -70,7 +70,8 @@ public sealed unsafe class Fp4GemmExecutor : IDisposable
         if (!IsSupported)
         {
             throw new InvalidOperationException(
-                $"Fp4GemmExecutor.Run called on unsupported hardware (SM {SmMajor}.{SmMinor}). Native FP4 GEMM needs Blackwell (SM 10.0+). Caller must check IsSupported and fall back to dequant→F16.");
+                $"Fp4GemmExecutor.Run called on unsupported hardware (SM {SmMajor}.{SmMinor}). Native FP4 GEMM " +
+                "needs Blackwell (SM 10.0+). Caller must check IsSupported and fall back to dequant→F16.");
         }
         ThrowIfDisposed();
 
@@ -80,27 +81,27 @@ public sealed unsafe class Fp4GemmExecutor : IDisposable
             CublasLtApi.cublasLtMatmulDescCreate(
                 out matmulDesc,
                 CublasApi.CUBLAS_COMPUTE_32F,
-                CublasApi.CUDA_R_32F).ThrowOnError();
+                CublasApi.CUDA_R_32F).ThrowOnCublasError();
 
             int transA = CublasApi.CUBLAS_OP_T;
             int transB = CublasApi.CUBLAS_OP_N;
             CublasLtApi.cublasLtMatmulDescSetAttribute(
-                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(int)).ThrowOnError();
+                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(int)).ThrowOnCublasError();
             CublasLtApi.cublasLtMatmulDescSetAttribute(
-                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(int)).ThrowOnError();
+                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(int)).ThrowOnCublasError();
 
             // Microscaling block-scale pointers (one positive scale per FP4 block).
             ulong wScale = weightBlockScale;
             ulong iScale = inputBlockScale;
             CublasLtApi.cublasLtMatmulDescSetAttribute(
-                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &wScale, (nuint)sizeof(ulong)).ThrowOnError();
+                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &wScale, (nuint)sizeof(ulong)).ThrowOnCublasError();
             CublasLtApi.cublasLtMatmulDescSetAttribute(
-                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &iScale, (nuint)sizeof(ulong)).ThrowOnError();
+                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &iScale, (nuint)sizeof(ulong)).ThrowOnCublasError();
 
             // weight: [N, K] fp4 transposed → operand A. input: [M, K] fp4 → operand B. Output C: [M, N] f16.
-            CublasLtApi.cublasLtMatrixLayoutCreate(out layoutA, CublasApi.CUDA_R_4F_E2M1, (ulong)k, (ulong)n, k).ThrowOnError();
-            CublasLtApi.cublasLtMatrixLayoutCreate(out layoutB, CublasApi.CUDA_R_4F_E2M1, (ulong)k, (ulong)m, k).ThrowOnError();
-            CublasLtApi.cublasLtMatrixLayoutCreate(out layoutC, CublasApi.CUDA_R_16F, (ulong)n, (ulong)m, n).ThrowOnError();
+            CublasLtApi.cublasLtMatrixLayoutCreate(out layoutA, CublasApi.CUDA_R_4F_E2M1, (ulong)k, (ulong)n, k).ThrowOnCublasError();
+            CublasLtApi.cublasLtMatrixLayoutCreate(out layoutB, CublasApi.CUDA_R_4F_E2M1, (ulong)k, (ulong)m, k).ThrowOnCublasError();
+            CublasLtApi.cublasLtMatrixLayoutCreate(out layoutC, CublasApi.CUDA_R_16F, (ulong)n, (ulong)m, n).ThrowOnCublasError();
 
             float alpha = 1.0f, beta = 0.0f;
             CublasLtApi.cublasLtMatmul(
@@ -111,7 +112,7 @@ public sealed unsafe class Fp4GemmExecutor : IDisposable
                 &beta,
                 outPtr, layoutC,
                 outPtr, layoutC,
-                0, (nint)_workspace, _workspaceBytes, stream).ThrowOnError();
+                0, (nint)_workspace, _workspaceBytes, stream).ThrowOnCublasError();
         }
         finally
         {
@@ -143,5 +144,20 @@ public sealed unsafe class Fp4GemmExecutor : IDisposable
             _ltHandle = 0;
         }
         GC.SuppressFinalize(this);
+    }
+
+    ~Fp4GemmExecutor()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        if (_workspace != 0)
+        {
+            CudaMemory.Free(_workspace);
+            _workspace = 0;
+        }
+        if (_ltHandle != 0)
+        {
+            CublasLtApi.cublasLtDestroy(_ltHandle);
+            _ltHandle = 0;
+        }
     }
 }

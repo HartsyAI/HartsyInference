@@ -2,7 +2,8 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>P/Invoke bindings for the CUDA Driver API. Library name "cuda" is resolved at runtime by CudaLibraryResolver to nvcuda.dll (Windows) or libcuda.so.1 (Linux).</summary>
+/// <summary>P/Invoke bindings for the CUDA Driver API. Library name "cuda" is resolved at runtime by
+/// CudaLibraryResolver to nvcuda.dll (Windows) or libcuda.so.1 (Linux).</summary>
 internal static partial class CudaDriverApi
 {
     private const string LibName = "cuda";
@@ -35,12 +36,9 @@ internal static partial class CudaDriverApi
     internal static partial int cuDeviceTotalMem(out nuint bytes, int dev);
 
     // ── Context Management ──────────────────────────────────────────────
-
-    [LibraryImport(LibName, EntryPoint = "cuCtxCreate_v2")]
-    internal static partial int cuCtxCreate(out nint pctx, uint flags, int dev);
-
-    [LibraryImport(LibName, EntryPoint = "cuCtxDestroy_v2")]
-    internal static partial int cuCtxDestroy(nint ctx);
+    //
+    // No cuCtxCreate/cuCtxDestroy bindings: this codebase deliberately uses
+    // cuDevicePrimaryCtxRetain/Release instead — see CudaContext's type doc for why.
 
     [LibraryImport(LibName)]
     internal static partial int cuCtxSetCurrent(nint ctx);
@@ -143,8 +141,7 @@ internal static partial class CudaDriverApi
     // The GPU copy engine cannot DMA out of pageable host memory; the driver
     // stages it through a temporary pinned buffer and the "async" copy silently
     // becomes synchronous, overlapping with nothing. Pinning the source makes
-    // cuMemcpyHtoDAsync truly async (and ~2x faster on PCIe). cuMemHostRegister
-    // page-locks an existing allocation in place (no extra copy, no extra memory).
+    // cuMemcpyHtoDAsync truly async (and ~2x faster on PCIe).
 
     /// <summary>Allocates a fresh page-locked host buffer. Flags: PORTABLE=1, DEVICEMAP=2, WRITECOMBINED=4.</summary>
     [LibraryImport(LibName, EntryPoint = "cuMemHostAlloc")]
@@ -153,19 +150,7 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName, EntryPoint = "cuMemFreeHost")]
     internal static partial int cuMemFreeHost(nint p);
 
-    /// <summary>Page-locks an existing host range in place. Flags: PORTABLE=1, DEVICEMAP=2, READONLY=8.</summary>
-    [LibraryImport(LibName, EntryPoint = "cuMemHostRegister_v2")]
-    internal static partial int cuMemHostRegister(nint p, nuint bytes, uint flags);
-
-    [LibraryImport(LibName, EntryPoint = "cuMemHostUnregister")]
-    internal static partial int cuMemHostUnregister(nint p);
-
-    internal const uint CU_MEMHOSTREGISTER_PORTABLE = 1;
-
     internal const uint CU_MEMHOSTALLOC_PORTABLE = 1;
-
-    /// <summary>cuMemHostRegister returns this when the range (rounded to host pages) overlaps an already-registered region. Safe to treat as "already pinned" and continue.</summary>
-    internal const int CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED = 712;
 
     // ── Stream Management ───────────────────────────────────────────────
 
@@ -250,7 +235,8 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuGraphNodeGetType(nint node, out int nodeType);
 
-    /// <summary>Updates an instantiated graph in place from a re-captured graph of identical topology. Returns CUDA_SUCCESS on success; a non-zero result means the topology changed and the caller must re-instantiate.</summary>
+    /// <summary>Updates an instantiated graph in place from a re-captured graph of identical topology. Returns
+    /// CUDA_SUCCESS on success; a non-zero result means the topology changed and the caller must re-instantiate.</summary>
     [LibraryImport(LibName, EntryPoint = "cuGraphExecUpdate_v2")]
     internal static partial int cuGraphExecUpdate(nint graphExec, nint graph, nint resultInfo);
 

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cpu;
 
 namespace HartsyInference.Cpu.Kernels;
 
@@ -182,13 +183,7 @@ public static class AttentionKernels
                     : Avx.Add(vSum, Avx.Multiply(va, vb));
             }
 
-            // Horizontal sum
-            float* tmp = stackalloc float[Vector256<float>.Count];
-            Avx.Store(tmp, vSum);
-            for (int j = 0; j < Vector256<float>.Count; j++)
-            {
-                result += tmp[j];
-            }
+            result += SimdDispatch.HorizontalSum(vSum);
         }
         else if (AdvSimd.IsSupported)
         {

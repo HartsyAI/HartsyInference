@@ -2,7 +2,8 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>P/Invoke bindings for cuBLAS. Library name "cublas" is resolved at runtime by CudaLibraryResolver to cublas64_12.dll (Windows) or libcublas.so.12 (Linux).</summary>
+/// <summary>P/Invoke bindings for cuBLAS. Library name "cublas" is resolved at runtime by CudaLibraryResolver
+/// to cublas64_12.dll (Windows) or libcublas.so.12 (Linux).</summary>
 internal static partial class CublasApi
 {
     private const string LibName = "cublas";
@@ -18,30 +19,8 @@ internal static partial class CublasApi
     [LibraryImport(LibName, EntryPoint = "cublasSetStream_v2")]
     internal static partial int cublasSetStream(nint handle, nint stream);
 
-    [LibraryImport(LibName, EntryPoint = "cublasGetStream_v2")]
-    internal static partial int cublasGetStream(nint handle, out nint stream);
-
     [LibraryImport(LibName, EntryPoint = "cublasGetVersion_v2")]
     internal static partial int cublasGetVersion(nint handle, out int version);
-
-    // ── FP32 GEMM ───────────────────────────────────────────────────────
-
-    [LibraryImport(LibName, EntryPoint = "cublasSgemm_v2")]
-    internal static unsafe partial int cublasSgemm(nint handle, int transa, int transb, int m, int n, int k, float* alpha, ulong A, int lda,
-        ulong B, int ldb, float* beta, ulong C, int ldc);
-
-    // ── FP16 GEMM ───────────────────────────────────────────────────────
-
-    [LibraryImport(LibName)]
-    internal static unsafe partial int cublasHgemm(
-        nint handle,
-        int transa, int transb,
-        int m, int n, int k,
-        ushort* alpha,
-        ulong A, int lda,
-        ulong B, int ldb,
-        ushort* beta,
-        ulong C, int ldc);
 
     // ── Mixed-Precision GEMM ────────────────────────────────────────────
 

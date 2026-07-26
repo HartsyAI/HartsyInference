@@ -6,7 +6,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>GPU memory transfer helper with weight and activation caching. Weights preload via PreloadWeight() and stay until FreeAllCached(); activations set by CacheActivation() after each op and are consumed by the next op's CopyToDevice(). Lazy sync: CPU access to DataPointer triggers a GPU→CPU sync on demand.
+/// <summary>GPU memory transfer helper with weight and activation caching. Weights preload via PreloadWeight() and stay
+/// until FreeAllCached(); activations set by CacheActivation() after each op and are consumed by the next op's
+/// CopyToDevice(). Lazy sync: CPU access to DataPointer triggers a GPU→CPU sync on demand.
 /// <para><b>Multi-backend safety:</b> all mutable state lives in a per-CUDA-context <see cref="State"/> object,
 /// registered by each <see cref="CudaBackend"/> at construction and resolved at every call via the calling
 /// thread's CURRENT context (every CudaBackend op binds its context before calling in here — the long-standing
@@ -161,7 +163,7 @@ internal static unsafe class GpuTransferHelper
             state.Unregistered = true;
             removed = _states.TryRemove(context.Handle, out _);
         }
-        _single = _states.Count == 1 ? System.Linq.Enumerable.First(_states.Values) : null;
+        _single = _states.Count == 1 ? Enumerable.First(_states.Values) : null;
         return removed;
     }
 
@@ -211,7 +213,8 @@ internal static unsafe class GpuTransferHelper
         TrimPool();
     }
 
-    /// <summary>Returns the GPU device pointer for a tensor, using caches to avoid transfers. Priority: weight cache → activation cache → fresh H2D transfer.</summary>
+    /// <summary>Returns the GPU device pointer for a tensor, using caches to avoid transfers. Priority: weight cache
+    /// → activation cache → fresh H2D transfer.</summary>
     public static ulong CopyToDevice(Tensor cpuTensor)
     {
         State s = Resolve();
@@ -247,12 +250,15 @@ internal static unsafe class GpuTransferHelper
         // ~63 s×... gen (dominant cost). Pageable src stages synchronously before returning (host buffer safe to
         // reuse); pinned src stays alive until the stream-ordered FreeDevice. No CPU read happens here, so no
         // correctness dependency on the copy completing before this returns — only stream order, which holds.
-        using Profiling.NvtxRange _miss = Profiling.NvtxRange.Push(byteSize > (1u << 20) ? "H2D_MISS_BIG" : "H2D_MISS_SMALL");   // HARTSY_PROFILE visibility into miss H2D volume
+        // HARTSY_PROFILE visibility into miss H2D volume.
+        using Profiling.NvtxRange _miss = Profiling.NvtxRange.Push(byteSize > (1u << 20) ? "H2D_MISS_BIG" : "H2D_MISS_SMALL");
         // A miss during graph capture bakes a per-replay H2D memcpy node into the graph — always worth
         // knowing about (HARTSY_GRAPH_DUMP=1 logs the offender so it can be made resident pre-capture).
         if (s.ArenaActive && Environment.GetEnvironmentVariable("HARTSY_GRAPH_DUMP") == "1")
-            HartsyInference.Core.Logging.Logs.Info(
-                $"[Cuda] H2D MISS inside graph capture: shape=[{string.Join(",", Enumerable.Range(0, cpuTensor.Shape.Rank).Select(i => cpuTensor.Shape[i]))}] dtype={cpuTensor.DType} bytes={byteSize}");
+        {
+            string shape = string.Join(",", Enumerable.Range(0, cpuTensor.Shape.Rank).Select(i => cpuTensor.Shape[i]));
+            Logs.Info($"[Cuda] H2D MISS inside graph capture: shape=[{shape}] dtype={cpuTensor.DType} bytes={byteSize}");
+        }
         ulong dptr = CudaMemory.Allocate(byteSize);
         if (s.StreamHandle != 0)
             CudaMemory.CopyHostToDeviceAsync(dptr, cpuTensor.DataPointer, byteSize, s.StreamHandle);
@@ -283,8 +289,8 @@ internal static unsafe class GpuTransferHelper
             if (!s.ArenaOverflowLogged)
             {
                 s.ArenaOverflowLogged = true;
-                HartsyInference.Core.Logging.Logs.Warning(
-                    $"[Cuda] graph-capture arena exhausted ({(long)s.ArenaCapacity >> 20} MB) — remaining capture allocations fall back to pool nodes (set HARTSY_GRAPH_ARENA_MB higher).");
+                Logs.Warning($"[Cuda] graph-capture arena exhausted ({(long)s.ArenaCapacity >> 20} MB) — " +
+                    "remaining capture allocations fall back to pool nodes (set HARTSY_GRAPH_ARENA_MB higher).");
             }
         }
         return CudaMemory.Allocate(byteSize);
@@ -327,8 +333,7 @@ internal static unsafe class GpuTransferHelper
         State s = Resolve();
         if (!s.ArenaActive) return;
         s.ArenaActive = false;
-        HartsyInference.Core.Logging.Logs.Debug(
-            $"[Cuda] graph-capture arena used {(long)s.ArenaOffset >> 10} KB of {(long)s.ArenaCapacity >> 20} MB.");
+        Logs.Debug($"[Cuda] graph-capture arena used {(long)s.ArenaOffset >> 10} KB of {(long)s.ArenaCapacity >> 20} MB.");
     }
 
     /// <summary>Releases a per-capture arena when its graph is disposed (stream-ordered free).</summary>
@@ -395,7 +400,9 @@ internal static unsafe class GpuTransferHelper
         }
     }
 
-    /// <summary>Caches an op's output GPU pointer on the tensor, avoiding D2H transfer. Sets lazy callbacks: DataPointer access triggers D2H, Dispose frees GPU memory. The callbacks capture this backend's <see cref="State"/>, so they stay correct even after another backend registers.</summary>
+    /// <summary>Caches an op's output GPU pointer on the tensor, avoiding D2H transfer. Sets lazy callbacks: DataPointer
+    /// access triggers D2H, Dispose frees GPU memory. The callbacks capture this backend's <see cref="State"/>, so
+    /// they stay correct even after another backend registers.</summary>
     public static void CacheActivation(Tensor tensor, ulong gpuPtr, nuint byteSize)
     {
         State s = Resolve();
@@ -832,7 +839,8 @@ internal static unsafe class GpuTransferHelper
         }
     }
 
-    /// <summary>Computes the byte size of a tensor's data. Uses <see cref="DType.ComputeByteCount"/> so quantized tensors (Q4_K, Q5_K, Q8_0, etc.) report their true on-disk byte count rather than <c>elementCount * 0</c>.</summary>
+    /// <summary>Computes the byte size of a tensor's data. Uses <see cref="DType.ComputeByteCount"/> so quantized
+    /// tensors (Q4_K, Q5_K, Q8_0, etc.) report their true on-disk byte count rather than <c>elementCount * 0</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static nuint ByteSize(Tensor tensor)
     {

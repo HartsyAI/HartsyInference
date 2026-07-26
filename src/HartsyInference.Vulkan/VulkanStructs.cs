@@ -579,9 +579,7 @@ public struct VkPipelineShaderStageRequiredSubgroupSizeCreateInfo
     public uint requiredSubgroupSize;
 }
 
-/// <summary><c>VkPhysicalDeviceCooperativeMatrixFeaturesKHR</c> — chained into
-/// <see cref="VkPhysicalDeviceFeatures2"/> at device-create when
-/// <c>VK_KHR_cooperative_matrix</c> is enabled.</summary>
+/// <summary>Chained into <see cref="VkPhysicalDeviceFeatures2"/> at device-create when <c>VK_KHR_cooperative_matrix</c> is enabled.</summary>
 [StructLayout(LayoutKind.Sequential)]
 public struct VkPhysicalDeviceCooperativeMatrixFeaturesKHR
 {
@@ -591,12 +589,10 @@ public struct VkPhysicalDeviceCooperativeMatrixFeaturesKHR
     public uint cooperativeMatrixRobustBufferAccess;
 }
 
-/// <summary><c>VkCooperativeMatrixPropertiesKHR</c> — one supported cooperative-matrix
-/// configuration (shape + component types + scope), enumerated via
-/// <c>vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR</c>. The backend must confirm the
-/// shader's exact shape (16x16x16, F16 A/B, F32 accumulate, subgroup scope) is in this list
-/// before using coopmat — NVIDIA always reports it, but AMD RDNA3 / Intel Arc report
-/// different sets, so blindly assuming it miscomputes or fails to create the pipeline.</summary>
+/// <summary>One supported cooperative-matrix configuration, enumerated via <c>vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR</c>.</summary>
+// The backend must confirm the shader's exact shape (16x16x16, F16 A/B, F32 accumulate, subgroup scope) is in
+// this list before using coopmat — NVIDIA always reports it, but AMD RDNA3 / Intel Arc report different sets,
+// so blindly assuming it miscomputes or fails to create the pipeline.
 [StructLayout(LayoutKind.Sequential)]
 public struct VkCooperativeMatrixPropertiesKHR
 {
@@ -862,21 +858,6 @@ public struct VkSubmitInfo2
     public nint pCommandBufferInfos;
     public uint signalSemaphoreInfoCount;
     public nint pSignalSemaphoreInfos;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-public unsafe struct VkPhysicalDeviceMemoryBudgetProperties
-{
-    public VkStructureType sType;
-    public nint pNext;
-    public ulong heapBudget_0; public ulong heapBudget_1; public ulong heapBudget_2; public ulong heapBudget_3;
-    public ulong heapBudget_4; public ulong heapBudget_5; public ulong heapBudget_6; public ulong heapBudget_7;
-    public ulong heapBudget_8; public ulong heapBudget_9; public ulong heapBudget_10; public ulong heapBudget_11;
-    public ulong heapBudget_12; public ulong heapBudget_13; public ulong heapBudget_14; public ulong heapBudget_15;
-    public ulong heapUsage_0; public ulong heapUsage_1; public ulong heapUsage_2; public ulong heapUsage_3;
-    public ulong heapUsage_4; public ulong heapUsage_5; public ulong heapUsage_6; public ulong heapUsage_7;
-    public ulong heapUsage_8; public ulong heapUsage_9; public ulong heapUsage_10; public ulong heapUsage_11;
-    public ulong heapUsage_12; public ulong heapUsage_13; public ulong heapUsage_14; public ulong heapUsage_15;
 }
 
 [StructLayout(LayoutKind.Sequential)]
