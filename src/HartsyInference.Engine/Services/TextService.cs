@@ -229,10 +229,14 @@ public sealed class TextService : ITextService, IDisposable
             using Tensor px = vision is LlavaNextEncoder
                 ? LlavaNextImagePreprocessor.RawToNativeTensor(image.Rgb, image.Width, image.Height)
                 : VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height, vision.ImageSize, vision.ImageMean, vision.ImageStd);
-            answer = new MultimodalGenerator(slot.Model!, vision, slot.Backend!).Generate(px, question, maxTokens, sampling);
+            // Qwen3.5-VL rides the SSM Qwen35Model backbone (slot.SsmModel), which MultimodalGenerator (typed to
+            // GenericTransformer) can't drive — use the dedicated SSM VLM generator.
+            answer = slot.SsmModel is not null
+                ? new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!).Generate(px, question, maxTokens, sampling)
+                : new MultimodalGenerator(slot.Model!, vision, slot.Backend!).Generate(px, question, maxTokens, sampling);
         }
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
-        int completion = slot.Model!.Tokenizer.EncodeOrdinary(answer).Length;
+        int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(answer).Length;
         return new GenOutcome(answer, StopReason.Stop, 0, completion);
     }
 
@@ -255,7 +259,9 @@ public sealed class TextService : ITextService, IDisposable
             slot.SsmModel = SsmLanguageModel.Load(path, architecture);
             slot.SsmPipeline = new SsmGenerationPipeline(slot.SsmModel.Model, slot.SsmModel.Tokenizer, backend, slot.SsmModel.Template);
             slot.LoadedPath = path;
-            Logs.Info($"[TextService] Loaded GGUF SSM model '{Path.GetFileName(path)}' ({architecture}) on {deviceKey}.");
+            LoadVisionInto(slot, path);   // qwen35 ships a Qwen3.5-VL mmproj sidecar; other SSM archs have none.
+            Logs.Info($"[TextService] Loaded GGUF SSM model '{Path.GetFileName(path)}' ({architecture}) on {deviceKey}."
+                + (slot.VisionPath is not null ? $" + vision '{Path.GetFileName(slot.VisionPath)}'." : "."));
             return;
         }
         // The engine's on-disk quant is honored as-is; LowVramQuant here is the "keep quant compressed on-device"
@@ -281,9 +287,12 @@ public sealed class TextService : ITextService, IDisposable
             return;
         try
         {
-            bool isMllama = slot.Model!.Architecture == "mllama" || slot.Model.Config.CrossAttnLayers.Count > 0;
+            // slot.Model is null for the SSM backbone (Qwen3.5-VL) — guard the mllama probe accordingly.
+            bool isMllama = slot.Model?.Architecture == "mllama" || (slot.Model?.Config.CrossAttnLayers.Count ?? 0) > 0;
             if (isMllama)
                 slot.MllamaVision = MllamaVisionEncoder.Load(mmproj);
+            else if (IsQwen3Vl(mmproj))   // must precede IsQwen25Vl (which greedily matches any "qwen" projector).
+                slot.SpliceVision = Qwen3VlEncoder.Load(mmproj);
             else if (IsLlavaNext(mmproj))
                 slot.SpliceVision = LlavaNextEncoder.Load(mmproj);
             else
@@ -527,6 +536,25 @@ public sealed class TextService : ITextService, IDisposable
             Logs.Debug($"[TextService] mmproj image_grid_pinpoints probe failed: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>True if the mmproj is a Qwen3-VL / Qwen3.5-VL merger — <c>clip.projector_type = qwen3vl_merger</c>.
+    /// Probed BEFORE <see cref="IsQwen25Vl"/> (whose "qwen" substring test would otherwise claim it).</summary>
+    private static bool IsQwen3Vl(string mmprojPath)
+    {
+        try
+        {
+            using GgufLoader probe = new GgufLoader();
+            probe.Load(mmprojPath);
+            string proj = (probe.Metadata.GetString("clip.projector_type") ?? "").ToLowerInvariant();
+            if (proj.Contains("qwen3vl") || proj.Contains("qwen3_vl")) return true;
+            if (proj.Length > 0) return false;
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"[TextService] mmproj qwen3vl probe failed: {ex.Message}");
+        }
+        return Path.GetFileName(mmprojPath).Replace(".", "").Replace("-", "").Contains("qwen3vl", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>True if the mmproj is a Qwen2/Qwen2.5-VL merger — via <c>clip.projector_type</c> metadata (robust

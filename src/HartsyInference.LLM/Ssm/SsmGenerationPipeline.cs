@@ -76,7 +76,7 @@ public sealed class SsmGenerationPipeline
         bool useGraph = request.Sampling.Greedy
             && !request.Sampling.HasJsonConstraint
             && request.Sampling.RepetitionPenalty == 1.0f
-            && _model is ISsmGraphDecodable
+            && _model is ISsmGraphDecodable { GraphDecodeReady: true }
             && _backend.GraphDecodeSupported
             && Environment.GetEnvironmentVariable("HARTSY_SSM_GRAPH") != "0";
         if (useGraph && !stops.Contains(next) && request.MaxTokens > 0)

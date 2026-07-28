@@ -109,3 +109,4 @@ appsettings.*.json
 /Models
 /benchmarks/.bench-venv
 /benchmarks/swarm_audio_bench/samples
+/scripts

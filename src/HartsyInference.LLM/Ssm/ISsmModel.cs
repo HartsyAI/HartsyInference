@@ -17,6 +17,11 @@ public interface ISsmGraphDecodable
         HartsyInference.Core.Tensors.Tensor sinTable, ulong devicePos, ulong deviceTokenId);
     void AdvancePosition(int tokens);
     int CurrentPosition { get; }
+
+    /// <summary>Whether the fully-device graph-capture decode path is currently usable. Default true; a model
+    /// returns false when a configuration can't be captured (e.g. Qwen3.5-MoE's host-side top-k expert routing,
+    /// which can't run inside a replayed CUDA graph) so the pipeline falls back to eager decode.</summary>
+    bool GraphDecodeReady => true;
 }
 
 public interface ISsmModel : IDisposable

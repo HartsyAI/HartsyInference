@@ -11,7 +11,11 @@ public sealed class PassthroughKeyMapper : IGgufKeyMapper
     // qwen35/qwen35moe (Gated DeltaNet hybrid): also has blk.N.* + token_embd.weight, which would satisfy
     // LlamaKeyMapper's heuristic (hasBlk && hasTokenEmbd) if this arch weren't registered explicitly here —
     // Qwen35Model reads raw GGUF names directly (blk.N.attn_qkv.weight etc), same as the SSM models above.
-    public IReadOnlyCollection<string> Architectures => ["passthrough", "bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "neo-bert", "mamba", "mamba2", "rwkv6", "rwkv7", "t5", "t5encoder", "qwen35", "qwen35moe"];
+    // clip: llama.cpp vision sidecars (mmproj-*.gguf) declare general.architecture="clip" and keep verbatim
+    // v.blk.N.*/v.patch_embd/mm.* names that every IVlmImageEncoder (Siglip/Qwen2.5-VL/Qwen3-VL/…) reads directly.
+    // Without this, the heuristic misfires — e.g. Qwen3-VL's fused v.blk.N.attn_qkv makes PhiKeyMapper claim the file
+    // and drop the vision tensors (mmproj then fails to load, model silently degrades to text-only).
+    public IReadOnlyCollection<string> Architectures => ["passthrough", "bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "neo-bert", "mamba", "mamba2", "rwkv6", "rwkv7", "t5", "t5encoder", "qwen35", "qwen35moe", "clip"];
 
     public bool MatchesByKeys(IEnumerable<string> tensorNames) => true;
     public string? MapKey(string ggufKey) => ggufKey;

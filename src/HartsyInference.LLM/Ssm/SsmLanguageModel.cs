@@ -38,7 +38,7 @@ public sealed class SsmLanguageModel : IDisposable
             "mamba" => MambaModel.Load(path),
             "rwkv7" => Rwkv7Model.Load(path),
             "rwkv6" or "rwkv" => RwkvModel.Load(path),
-            "qwen35" => Qwen35Model.Load(path),
+            "qwen35" or "qwen35moe" => Qwen35Model.Load(path),
             _ => throw new NotSupportedException($"'{architecture}' is not a supported SSM architecture."),
         };
         try

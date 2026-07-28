@@ -84,6 +84,37 @@ public static class ModelCatalog
                 },
             },
             E("gguf", txt, "Quantized GGUF (Q4/Q8)", "config-driven, any GGUF LLM", ok, cli: true),
+            // Qwen3.5/3.6 Gated-DeltaNet hybrid (SSM path, Qwen35Model). `qwen35` = dense 0.8B, verified 2026-07-27
+            // for BOTH text and vision (its mmproj sidecar downloads alongside → `hartsy text -m qwen35 -i img.png`
+            // captions/OCRs correctly). See MODEL_STATUS_LLM.md + docs/Design/TRENDING_MODELS_PHASED_PLAN.md.
+            new CatalogEntry
+            {
+                Id = "qwen35", Modality = txt, DisplayName = "Qwen3.5-VL (0.8B, dense hybrid)",
+                Architecture = "Gated-DeltaNet + full-attn hybrid (+Qwen3-VL vision)", Status = ok, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "unsloth/Qwen3.5-0.8B-GGUF", RepoPath = "Qwen3.5-0.8B-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/qwen35", Role = "transformer",
+                        Sha256 = "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517" },
+                    new() { Repo = "unsloth/Qwen3.5-0.8B-GGUF", RepoPath = "mmproj-F16.gguf",
+                        TargetSubdir = "LLM/qwen35", Role = "mmproj" },
+                },
+            },
+            // `qwen35moe` = the 35B-A3B MoE tier (256 experts, top-8 softmax + shared expert; same hybrid attention).
+            // Implemented 2026-07-27; code + dense/VL regressions pass, but the smallest quant (~10.7GB IQ2_XXS) OOMs
+            // the dev box — Status ValidationPending until a real-weight run on a larger GPU (see the GPU harness).
+            new CatalogEntry
+            {
+                Id = "qwen35moe", Modality = txt, DisplayName = "Qwen3.5-VL-MoE (35B-A3B)",
+                Architecture = "hybrid attn + 256-expert MoE FFN + shared expert (+vision)", Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "unsloth/Qwen3.5-35B-A3B-GGUF", RepoPath = "Qwen3.5-35B-A3B-UD-IQ2_XXS.gguf",
+                        TargetSubdir = "LLM/qwen35moe", Role = "transformer" },
+                    new() { Repo = "unsloth/Qwen3.5-35B-A3B-GGUF", RepoPath = "mmproj-F16.gguf",
+                        TargetSubdir = "LLM/qwen35moe", Role = "mmproj" },
+                },
+            },
 
             // Text / LLM — dense families. `hartsy text -m <id>` verified end-to-end 2026-07-22 (CLI catalog
             // pass) on the 3060 (--low-vram-quant) unless noted; see MODEL_STATUS_LLM.md for the exact
@@ -139,6 +170,12 @@ public static class ModelCatalog
                         Sha256 = "06e5f1fdb176a2d79a2f33febfbbd521935fc0c00573326e91439b7d21e89df0" },
                 },
             },
+            // NOTE: antares-1b (fine-tune of IBM Granite-4.0-1B) was trialed here and REVERTED. Its GGUF reports
+            // general.architecture="granite" with purely dense tensors (attn_q/k/v/output + ffn_gate/up/down, no
+            // ssm_*/expert tensors), so it loads through the granite path — but generation is GARBAGE on both the
+            // quant-resident and full-precision paths. Granite-4.0 diverges from the Granite-3-validated path in
+            // something subtler (most likely tokenizer.ggml.pre pre-tokenizer and/or rope config). Needs real parity
+            // work before it can be catalogued. See docs/Design/TRENDING_MODELS_PHASED_PLAN.md (Phase 0).
             // command-r: a real, ungated Q3_K_S source was confirmed and downloads/parses fine, but generation
             // genuinely OOM'd on this box — kernel-killed at ~48.7GB resident RAM (confirmed via dmesg), above
             // even the loader's own 2.5x-file-size headroom estimate (~40GB) for this 15.9GB file; real peak was
