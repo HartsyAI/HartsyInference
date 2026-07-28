@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -316,7 +317,10 @@ internal static unsafe class GpuTransferHelper
         nuint cap = (nuint)(mb << 20);
         ulong basePtr;
         try { basePtr = CudaMemory.Allocate(cap); }
-        catch (CudaException) { return 0; }   // VRAM-tight (e.g. gemma2 non-low-vram edge): run without arena
+        // VRAM-tight (e.g. gemma2 non-low-vram edge): run without arena. OutOfVramException is the typed
+        // exhaustion CudaMemory now raises; CudaException still covers the non-capacity driver failures.
+        catch (OutOfVramException) { return 0; }
+        catch (CudaException) { return 0; }
         s.LiveArenas.Add((basePtr, cap));
         s.ArenaBase = basePtr;
         s.ArenaCapacity = cap;
@@ -536,12 +540,18 @@ internal static unsafe class GpuTransferHelper
         s.CachedBytes += (long)byteSize;
     }
 
-    /// <summary>Uploads a weight tensor to GPU and caches it for future CopyToDevice calls.</summary>
-    public static void PreloadWeight(Tensor weight)
+    /// <summary>Uploads a weight tensor to GPU and caches it for future CopyToDevice calls. Returns false when the
+    /// weight was already resident and no upload happened.</summary>
+    /// <remarks>The return value is what makes a failed bulk preload rollback-able: only weights this call actually
+    /// uploaded may be freed, since one already resident from an earlier phase (or from HARTSY_KEEP_MODELS) belongs to
+    /// someone else. Reporting it from here rather than having the caller pre-check with <see cref="IsWeightCached"/>
+    /// keeps the answer tied to the same <see cref="Resolve"/> result that performs the registration — a separate
+    /// lookup could in principle resolve a different backend's <see cref="State"/> and mis-attribute ownership.</remarks>
+    public static bool PreloadWeight(Tensor weight)
     {
         State s = Resolve();
         if (s.WeightCache.ContainsKey(weight))
-            return; // Already cached
+            return false;
 
         nuint byteSize = ByteSize(weight);
         // Resident weights are freed with the synchronous Free (FreeWeights/FreeAllCached), so they must be
@@ -550,6 +560,7 @@ internal static unsafe class GpuTransferHelper
         CudaMemory.CopyHostToDevice(dptr, weight.DataPointer, byteSize);
 
         RegisterCachedWeight(weight, dptr, byteSize);
+        return true;
     }
 
     /// <summary>Promotes a repeatedly-uploaded host tensor into the resident weight cache. Fires on the second

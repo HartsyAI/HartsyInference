@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -80,8 +81,28 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
             _blocks[i].LoadWeights(weights, $"layers.{i}");
     }
 
-    /// <summary>Enumerates every weight tensor for GPU preloading.</summary>
-    public IEnumerable<Tensor> EnumerateWeights()
+    /// <summary>The number of streamable transformer blocks.</summary>
+    public int BlockCount => _blocks.Length;
+
+    /// <summary>The streamable block at <paramref name="idx"/>.</summary>
+    /// <remarks>Returns the live block instance, so <see cref="IStreamingBlock.EnumerateWeights"/> hands back the same
+    /// tensor references every call — the residency tracking in <c>BlockStreamingController</c> is reference-based.</remarks>
+    public IStreamingBlock GetBlock(int idx) => _blocks[idx];
+
+    /// <summary>Hook invoked with each block index immediately before that block's forward pass; null = no streaming.</summary>
+    /// <remarks>Pipelines plug a <c>BlockStreamingController</c> here so resident VRAM peaks at roughly
+    /// (activations + the prefetch window) instead of the whole DiT — which is what lets Ideogram 4's *pair* of 9.3 GB
+    /// transformers run on a card that cannot hold them both.
+    /// <para><b>If a captured-graph fast path is ever added to this transformer it MUST be disabled whenever this is
+    /// non-null</b> — a graph bakes weight device pointers, and streaming re-points them every forward, so replaying a
+    /// captured graph over streamed weights reads freed memory (a context-poisoning CUDA 700). See
+    /// <c>HunyuanVideoDit</c> / <c>LtxVideo2Transformer</c> for the guard. There is no graph path here today.</para></remarks>
+    public Action<int>? BeforeBlockForward { get; set; }
+
+    /// <summary>The non-block weights: embedders, timestep/AdaLN MLPs and the output head.</summary>
+    /// <remarks>Touched on every forward regardless of which block is executing, so these stay eagerly resident even on
+    /// the streamed path — streaming them would re-upload the same tensors N times per step for no VRAM saving.</remarks>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
     {
         if (_inputProjW is not null) yield return _inputProjW;
         if (_inputProjB is not null) yield return _inputProjB;
@@ -99,6 +120,12 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         if (_finalLinearB is not null) yield return _finalLinearB;
         if (_finalAdalnW is not null) yield return _finalAdalnW;
         if (_finalAdalnB is not null) yield return _finalAdalnB;
+    }
+
+    /// <summary>Enumerates every weight tensor for GPU preloading: the shared set plus every block.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor w in EnumerateSharedWeights()) yield return w;
         for (int i = 0; i < _blocks.Length; i++)
             foreach (Tensor w in _blocks[i].EnumerateWeights()) yield return w;
     }
@@ -189,6 +216,7 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         int startBlock = 0;
         if (stepCache is not null && _blocks.Length > 1)
         {
+            BeforeBlockForward?.Invoke(0);
             Tensor block0 = _blocks[0].Forward(backend, cur, adalnInput, cos, sin, attentionMask);
             cur.Dispose();
             cur = block0;
@@ -209,6 +237,11 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
 
         for (int i = startBlock; i < _blocks.Length; i++)
         {
+            // A step-cache HIT sets startBlock = _blocks.Length, so this loop (and its streaming hook) is skipped
+            // entirely — the controller simply keeps whatever it had prefetched, bounded by the prefetch window,
+            // and the next miss re-primes from wherever it left off. Correct, because residency is per-block state,
+            // not a position in a sequence.
+            BeforeBlockForward?.Invoke(i);
             Tensor next = _blocks[i].Forward(backend, cur, adalnInput, cos, sin, attentionMask);
             if (cur != cacheAnchor) cur.Dispose();
             cur = next;

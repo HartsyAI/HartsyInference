@@ -1,4 +1,5 @@
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -33,15 +34,33 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
     public IRecipePipeline Construct(RecipeContext context)
     {
         // Gate BEFORE the multi-minute weight load, not after.
+        //
+        // This used to be an unconditional ">= 20 GB free or refuse" check, because both 9.3B transformers were held
+        // resident for the whole denoise loop. Ideogram4Pipeline now block-streams them (two independent sliding
+        // windows), so the resident set is the shared weights plus a couple of blocks — the 20 GB figure only
+        // describes the FULLY-RESIDENT layout. Refusing on it made a 12 GB card report an out-of-memory failure that
+        // never attempted an allocation (measured: 1 s, 82 MiB peak), which read as a capacity limit in benchmark
+        // results when it was a policy.
+        //
+        // The threshold is therefore now only enforced when streaming is unavailable — HARTSY_LOWVRAM=off, or a
+        // backend with no streaming cache. Otherwise the planner decides per generation against real free VRAM.
         if (context.Backend is CudaBackend cuda)
         {
             (nuint freeBytes, nuint totalBytes) = cuda.Context.GetMemoryInfo();
             double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
-            if (freeGb < MinRequiredVramGb)
+            bool canStream = cuda.StreamingCache is not null && LowVramPolicy.Resolve() != LowVramMode.ForceOff;
+            if (freeGb < MinRequiredVramGb && !canStream)
             {
                 throw new InvalidOperationException(
-                    $"Ideogram 4 needs >= {MinRequiredVramGb:F0} GB free VRAM (both 9.3B transformers stay resident for asymmetric CFG); " +
-                    $"this GPU has {freeGb:F1} GB free of {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB total. Use a higher-VRAM GPU.");
+                    $"Ideogram 4 needs >= {MinRequiredVramGb:F0} GB free VRAM to hold both 9.3B transformers resident for asymmetric CFG; " +
+                    $"this GPU has {freeGb:F1} GB free of {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB total, and weight streaming is " +
+                    $"disabled ({LowVramPolicy.EnvironmentVariable}=off). Unset {LowVramPolicy.EnvironmentVariable} to let the engine " +
+                    "stream the transformers, or use a higher-VRAM GPU.");
+            }
+            if (freeGb < MinRequiredVramGb)
+            {
+                Logs.Info($"[Ideogram4Recipe] {freeGb:F1} GB free — under the {MinRequiredVramGb:F0} GB fully-resident " +
+                    "requirement, so the denoise loop will stream both transformers' blocks (slower, but it fits).");
             }
         }
         else

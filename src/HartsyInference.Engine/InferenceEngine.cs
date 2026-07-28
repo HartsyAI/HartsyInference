@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Dispatch;
@@ -137,15 +138,86 @@ public sealed class InferenceEngine : IInferenceEngine
         EvictOtherCheckpointPipelines(spec.LocalPath);
 
         IArchitectureRecipe recipe = ResolveRecipe(spec);
-        IRecipePipeline pipeline = recipe.Construct(new RecipeContext
+        IBackend backend = EnsureBackend();
+        IRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () => recipe.Construct(new RecipeContext
         {
             CheckpointPath = spec.LocalPath,
-            Backend = EnsureBackend(),
+            Backend = backend,
             Components = request?.Components,
             Loras = request?.Loras,
-        });
+        }));
         _recipePipelines[key] = pipeline;
         return pipeline;
+    }
+
+    /// <summary>Runs a generation and, when it fails for lack of VRAM, releases every device buffer the engine holds
+    /// before rethrowing — so the failure costs one request, not the process.</summary>
+    /// <remarks>A pipeline uploads its components phase by phase (text encoder, then DiT, then VAE) and only frees them
+    /// on the success path. An <see cref="OutOfVramException"/> partway through therefore leaves every earlier phase
+    /// resident with nothing running — the measured symptom was ~11.5 GB held after a failed request, which then made a
+    /// *separate* ComfyUI process on the same card fail too. Scoped deliberately to capacity failures: a cancellation or
+    /// a validation error must not evict a healthy resident model (HARTSY_KEEP_MODELS) and pay a re-upload for nothing.
+    /// The reclaim is best-effort — an exception inside it must never replace the real one the caller needs to see.</remarks>
+    internal T GenerateWithVramCleanup<T>(Func<T> generate)
+    {
+        try
+        {
+            return generate();
+        }
+        catch (OutOfVramException ex)
+        {
+            Logs.Error("[Engine] Generation ran out of VRAM — releasing device memory held by the partially-loaded pipeline.", ex);
+            try
+            {
+                // Unlike EvictOtherCheckpointPipelines (which falls back to a pool trim while any recipe pipeline is
+                // still cached, to avoid nuking a healthy resident model), the full sweep is the right call here: the
+                // failing pipeline IS cached, so the guarded branch would never fire, and leaving a half-loaded
+                // pipeline's phases resident is the whole defect. Eviction is recoverable — weights re-upload from
+                // their host tensors on next use, the same cycle QwenImagePipeline.EvictResidentTransformer relies on.
+                _backend?.FreeAllDeviceMemory();
+            }
+            catch (Exception cleanupEx)
+            {
+                Logs.Error("[Engine] Post-OOM device cleanup itself failed — the process may still be holding VRAM.", cleanupEx);
+            }
+            throw;
+        }
+    }
+
+    /// <summary>Runs a recipe's <c>Construct</c> and, on <b>any</b> failure, releases every device buffer it allocated
+    /// before rethrowing.</summary>
+    /// <remarks>Recipes upload multi-GB weight sets across several components (text encoder, DiT, VAE) before returning
+    /// a pipeline the caller can dispose. When construction throws partway, the half-built pipeline is never stored, so
+    /// its weights become permanently unreachable — the <see cref="Tensor"/> keys they are cached under have no
+    /// surviving owner, so no <c>FreeWeights</c> call can ever name them again. Measured impact: after one oversized
+    /// request the process held ~11.5 GB with nothing running, which starved a *separate* ComfyUI process on the same
+    /// card until SwarmUI was killed (benchmarks/results/2026-07-26_image_comfy-vs-hartsy.md, Bug 2).
+    /// <para>Deliberately broader than <see cref="GenerateWithVramCleanup"/>, which narrows to
+    /// <see cref="OutOfVramException"/>: the reachability argument does not depend on <i>why</i> construction failed. A
+    /// missing side-model download, a tokenizer error or a bad checkpoint key thrown after the DiT upload leaks exactly
+    /// as much as an OOM does, so every escape from <c>Construct</c> must reclaim. The generate path can afford to be
+    /// narrow precisely because its pipeline stays cached and reachable, making a non-capacity failure cost nothing.
+    /// Only 16 of 47 image recipes have any exception handling of their own, so this belongs at the single shared
+    /// boundary rather than per recipe.</para></remarks>
+    private static T ConstructWithVramCleanup<T>(IBackend backend, ModelSpec spec, Func<T> construct)
+    {
+        try
+        {
+            return construct();
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[Engine] Recipe construction failed for '{spec.LocalPath}' — releasing device memory it had already allocated.", ex);
+            try
+            {
+                backend.FreeAllDeviceMemory();
+            }
+            catch (Exception cleanupEx)
+            {
+                Logs.Error("[Engine] Post-failure device cleanup itself failed — the process may still be holding VRAM.", cleanupEx);
+            }
+            throw;
+        }
     }
 
     /// <summary>The composition features the recipe for <paramref name="spec"/> declares it can apply. Resolved through
@@ -204,7 +276,9 @@ public sealed class InferenceEngine : IInferenceEngine
                 $"Video family '{familyId}' has no recipe lifted into the Engine yet (E-IMG-3). " +
                 $"Currently drivable: {string.Join(", ", VideoRecipeRegistry.RegisteredNames)}.");
 
-        IVideoRecipePipeline pipeline = recipe.Construct(new RecipeContext { CheckpointPath = spec.LocalPath, Backend = EnsureBackend() });
+        IBackend backend = EnsureBackend();
+        IVideoRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec,
+            () => recipe.Construct(new RecipeContext { CheckpointPath = spec.LocalPath, Backend = backend }));
         _videoRecipePipelines[key] = pipeline;
         return pipeline;
     }

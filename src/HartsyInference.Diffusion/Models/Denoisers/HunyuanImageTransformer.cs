@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -104,8 +105,16 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
         _projOutBias = weights["proj_out.bias"];
     }
 
-    /// <summary>Yields every weight tensor for GPU preloading via <see cref="IBackend.PreloadWeights"/>.</summary>
+    /// <summary>Yields every weight tensor for GPU preloading via <see cref="IBackend.PreloadWeights"/>. Equivalent to <see cref="EnumerateSharedWeights"/> followed by every streamable block's weights — the eager all-at-once preload used when the whole DiT fits resident.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor w in EnumerateSharedWeights()) yield return w;
+        for (int i = 0; i < BlockCount; i++)
+            foreach (Tensor w in GetBlock(i).EnumerateWeights()) yield return w;
+    }
+
+    /// <summary>Yields the always-resident weights — <c>x_embedder</c>, the timestep/guidance MLPs, the context embedder(s), and the final AdaLN + <c>proj_out</c>. These are touched on every forward regardless of which block is executing, so the streaming controller never manages them; callers on the streaming path preload these eagerly. Sizeable here (the Hunyuan token refiner is 2 full transformer layers at <see cref="HunyuanImageConfig.HiddenSize"/>), so a streaming budget must count them explicitly rather than folding them into a fudge factor.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
     {
         if (_xEmbedWeight is not null) yield return _xEmbedWeight;
         if (_xEmbedBias is not null) yield return _xEmbedBias;
@@ -122,17 +131,24 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
         if (_contextEmbedder2 is not null)
             foreach (Tensor w in _contextEmbedder2.EnumerateWeights()) yield return w;
 
-        for (int i = 0; i < _doubleBlocks.Length; i++)
-            foreach (Tensor w in _doubleBlocks[i].EnumerateWeights()) yield return w;
-
-        for (int i = 0; i < _singleBlocks.Length; i++)
-            foreach (Tensor w in _singleBlocks[i].EnumerateWeights()) yield return w;
-
         if (_normOutLinearWeight is not null) yield return _normOutLinearWeight;
         if (_normOutLinearBias is not null) yield return _normOutLinearBias;
         if (_projOutWeight is not null) yield return _projOutWeight;
         if (_projOutBias is not null) yield return _projOutBias;
     }
+
+    /// <summary>Number of streamable blocks: the 20 double-stream blocks occupy <c>[0, NumDoubleBlocks)</c>, the 40 single-stream blocks <c>[NumDoubleBlocks, BlockCount)</c>.</summary>
+    public int BlockCount => _doubleBlocks.Length + _singleBlocks.Length;
+
+    /// <summary>Streamable block at global index <paramref name="idx"/> (double blocks first, then single). Both block types implement <see cref="IStreamingBlock"/> directly, so this returns the live instance — its <c>EnumerateWeights</c> hands back the same tensor references every call, which the controller's residency tracking requires.</summary>
+    public IStreamingBlock GetBlock(int idx)
+    {
+        if (idx < 0 || idx >= BlockCount) throw new ArgumentOutOfRangeException(nameof(idx));
+        return idx < _doubleBlocks.Length ? _doubleBlocks[idx] : _singleBlocks[idx - _doubleBlocks.Length];
+    }
+
+    /// <summary>Optional hook invoked immediately before each block's forward pass, with the same global index <see cref="GetBlock"/> uses. Pipelines plug a <see cref="BlockStreamingController"/> here to drive prefetch/eviction so the 17B DiT fits a 12 GB card. Null (the default) leaves the transformer behaving exactly as before — the caller must have every weight resident. This transformer has no captured-CUDA-graph fast path, so there is nothing to guard against here; if one is ever added it must be disabled whenever this hook is non-null (a graph bakes weight device pointers and streaming re-points them every forward).</summary>
+    public Action<int>? BeforeBlockForward { get; set; }
 
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
     /// <param name="backend">Compute backend.</param>
@@ -201,6 +217,7 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
 
         for (int i = 0; i < _config.NumDoubleBlocks; i++)
         {
+            BeforeBlockForward?.Invoke(i);
             (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(
                 backend, currentImg, currentTxt, temb, _rope, postPatchH, postPatchW);
             currentImg.Dispose();
@@ -213,6 +230,7 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
 
         for (int i = 0; i < _config.NumSingleBlocks; i++)
         {
+            BeforeBlockForward?.Invoke(_config.NumDoubleBlocks + i);
             (Tensor newImg, Tensor newTxt) = _singleBlocks[i].Forward(
                 backend, currentImg, currentTxt, temb, _rope, postPatchH, postPatchW);
             currentImg.Dispose();

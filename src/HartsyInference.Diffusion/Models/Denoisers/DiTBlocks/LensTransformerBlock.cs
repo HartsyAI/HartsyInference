@@ -6,6 +6,22 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>Microsoft Lens dual-stream MMDiT block (<c>LensTransformerBlock</c>). Mirrors upstream's per-stream modulation: <c>mod1, mod2 = Linear(SiLU(temb)).chunk(2)</c>, then <c>_modulate(x, mod) = (x*(1+scale)+shift, gate)</c> with <c>mod.chunk(3) = (shift, scale, gate)</c> — net effect is the standard <c>(shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp)</c> 6-output order produced by <see cref="AdaLNModulation"/> with <c>numParams=6</c>. Joint attention concats <c>[img, txt]</c> per stream, applies complex-polar RoPE separately before concat, runs joint SDPA, splits back. <b>Returns <c>(text, image)</c></b> (encoder first, image second — matches upstream's <c>return encoder_hidden_states, hidden_states</c> in <c>LensTransformerBlock.forward</c>). Stream norms are RMSNorm with learned scale (vs QwenImageBlock's LayerNormNoAffine); FFN is SwiGLU with <c>w1/w2/w3</c> naming (vs QwenImageBlock's GELU); QKV is bias=True (upstream <c>img_qkv</c>/<c>txt_qkv</c> is split into <c>to_q/k/v</c> at checkpoint conversion).</summary>
 public sealed unsafe class LensTransformerBlock
 {
+    /// <summary>F16-range damping for the attention value stream. Lens RMS-norms Q and K but NOT V, and its
+    /// undamped residual stream drives raw <c>|V|</c> past F16's 65504 from the third denoise step on — every
+    /// F16-ingesting attention backend then produces INF for that one <c>(head, dim)</c> column, which softmax·V
+    /// smears across every token, and the whole joint sequence goes NaN for the rest of the forward (the
+    /// symptom was a solid-black image, since <see cref="HartsyInference.Diffusion.Utilities.ImagePostProcessor.TensorToRgbBytes"/>
+    /// maps NaN to byte 0). The backend picks such a path on its own — SageAttention's INT8 flash kernel casts V
+    /// to F16 in its transpose prologue, and it is default-on for no-mask MHA at <c>head_dim ∈ {64,128}</c> — so
+    /// <c>allowF16: false</c> at the call site is not enough. Attention is exactly linear in V, so scaling V down
+    /// and the attention output back up is an algebraic identity, and a power-of-two factor costs nothing to carry
+    /// through it — the scaling shifts exponents only, with no mantissa drift of its own. 1/256 sizes off the
+    /// measured worst case (1024², 34-token prompt): peak
+    /// <c>|V| = 139264</c> in blocks 44-46, sampled against the diffusers reference over the whole 4-, 20- and
+    /// 50-step Lens schedules, which the damp brings to 544 — two orders of magnitude of headroom, while the
+    /// F16 subnormal floor stays ~7 decades below the values that carry any weight in a convex combination.</summary>
+    private const float ValueF16Damp = 1.0f / 256.0f;
+
     private readonly int _hiddenSize;
     private readonly int _numHeads;
     private readonly int _headDim;
@@ -221,11 +237,16 @@ public sealed unsafe class LensTransformerBlock
         backend.Concat(jointQf, new Tensor[] { imgQn, txtQn }, 1);
         Tensor jointKf = new Tensor(jointFlat, DType.F32);
         backend.Concat(jointKf, new Tensor[] { imgKn, txtKn }, 1);
-        Tensor jointVf = new Tensor(jointFlat, DType.F32);
-        backend.Concat(jointVf, new Tensor[] { imgV, txtV }, 1);
+        Tensor jointVraw = new Tensor(jointFlat, DType.F32);
+        backend.Concat(jointVraw, new Tensor[] { imgV, txtV }, 1);
         imgQn.Dispose(); txtQn.Dispose();
         imgKn.Dispose(); txtKn.Dispose();
         imgV.Dispose(); txtV.Dispose();
+
+        // Damp V into F16 range before it reaches the backend's attention kernels — see ValueF16Damp.
+        Tensor jointVf = new Tensor(jointFlat, DType.F32);
+        backend.Scale(jointVf, jointVraw, ValueF16Damp);
+        jointVraw.Dispose();
 
         // ── 5. RoPE on the joint [img, txt] Q,K — device kernel on the pre-permute [B, S, H, D] layout. ──
         if (batch == 1)
@@ -250,14 +271,18 @@ public sealed unsafe class LensTransformerBlock
         if (batch != 1)
             rope.ApplyJoint(jointQ, jointK, batch, _numHeads, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart);
 
-        // ── 7. Joint SDPA (no mask). allowF16 must stay OFF: Q/K are RMS-normed (bounded scores) but V is
-        // NOT, and Lens's undamped residual stream runs hot enough that an F16-cast V overflows 65504 → NaN
-        // from the mid-blocks on (probe-verified: block_36+ went full-NaN with the fused F16 path). ──
-        Tensor jointAttnOut = new Tensor(jointMh, DType.F32);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale);
+        // ── 7. Joint SDPA (no mask) on the damped V; the output is un-damped below. allowF16 must stay OFF:
+        // Q/K are RMS-normed (bounded scores) but V is NOT (probe-verified: block_36+ went full-NaN with the
+        // fused F16 path even before the residual stream reached its late-step magnitudes). ──
+        Tensor jointAttnDamped = new Tensor(jointMh, DType.F32);
+        backend.ScaledDotProductAttention(jointAttnDamped, jointQ, jointK, jointV, null, scale);
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();
+
+        Tensor jointAttnOut = new Tensor(jointMh, DType.F32);
+        backend.Scale(jointAttnOut, jointAttnDamped, 1.0f / ValueF16Damp);
+        jointAttnDamped.Dispose();
 
         // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [img, txt] (B=1: contiguous rows) ──
         Tensor jointAttnFlat = new Tensor(jointFlat, DType.F32);

@@ -104,12 +104,16 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
     }
 
     /// <summary>Sum of this block's weight bytes — the streaming controller's budget heuristic. Computed on demand.</summary>
+    /// <remarks>Goes through <see cref="DType.ComputeByteCount"/> because block-quantized dtypes carry
+    /// <c>SizeInBytes == 0</c> (e.g. <c>Q4_K</c> is <c>("Q4_K", 0, true, 144, 256)</c>) — the naive
+    /// <c>ElementCount * SizeInBytes</c> reports 0 for them, which would make the streaming budget see a
+    /// weightless model and never engage on exactly the quantized checkpoints that need it.</remarks>
     public long EstimatedWeightBytes
     {
         get
         {
             long total = 0;
-            foreach (Tensor t in EnumerateWeights()) total += t.ElementCount * t.DType.SizeInBytes;
+            foreach (Tensor t in EnumerateWeights()) total += t.DType.ComputeByteCount(t.ElementCount);
             return total;
         }
     }

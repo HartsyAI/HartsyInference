@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -101,6 +102,44 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         _normOutLinearBias = weights["norm_out.linear.bias"];
         _projOutWeight = weights["proj_out.weight"];
         _projOutBias = weights["proj_out.bias"];
+    }
+
+    /// <summary>The number of streamable transformer blocks.</summary>
+    public int BlockCount => _blocks.Length;
+
+    /// <summary>The streamable block at <paramref name="idx"/>.</summary>
+    /// <remarks>Returns the live block instance so <see cref="IStreamingBlock.EnumerateWeights"/> hands back the same
+    /// tensor references every call — <c>BlockStreamingController</c> tracks residency by reference.</remarks>
+    public IStreamingBlock GetBlock(int idx) => _blocks[idx];
+
+    /// <summary>Hook invoked with each block index immediately before that block's forward pass; null = no streaming.</summary>
+    /// <remarks>Pipelines plug a <c>BlockStreamingController</c> here so resident VRAM peaks at roughly
+    /// (activations + the prefetch window) instead of the whole 20B DiT.
+    /// <para><b>Any captured-graph fast path added later MUST be disabled while this is non-null</b> — a graph bakes
+    /// weight device pointers and streaming re-points them every forward, so replay would read freed memory
+    /// (context-poisoning CUDA 700). See <c>HunyuanVideoDit</c> / <c>LtxVideo2Transformer</c>. No graph path exists
+    /// here today.</para></remarks>
+    public Action<int>? BeforeBlockForward { get; set; }
+
+    /// <summary>The non-block weights: the image/text input projections, the timestep MLP, and the output head.</summary>
+    /// <remarks>Touched on every forward regardless of which block runs, so they stay eagerly resident even when
+    /// streaming. Note these bracket the blocks in <see cref="EnumerateWeights"/> — the input projections come before
+    /// and the output head after — so this is a genuine partition, not a prefix.</remarks>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
+        if (_imgInWeight is not null) yield return _imgInWeight;
+        if (_imgInBias is not null) yield return _imgInBias;
+        if (_txtNormWeight is not null) yield return _txtNormWeight;
+        if (_txtInWeight is not null) yield return _txtInWeight;
+        if (_txtInBias is not null) yield return _txtInBias;
+        if (_timestepLinear1Weight is not null) yield return _timestepLinear1Weight;
+        if (_timestepLinear1Bias is not null) yield return _timestepLinear1Bias;
+        if (_timestepLinear2Weight is not null) yield return _timestepLinear2Weight;
+        if (_timestepLinear2Bias is not null) yield return _timestepLinear2Bias;
+        if (_normOutLinearWeight is not null) yield return _normOutLinearWeight;
+        if (_normOutLinearBias is not null) yield return _normOutLinearBias;
+        if (_projOutWeight is not null) yield return _projOutWeight;
+        if (_projOutBias is not null) yield return _projOutBias;
     }
 
     /// <summary>Yields every weight tensor for GPU preloading via <see cref="IBackend.PreloadWeights"/>.</summary>
@@ -221,6 +260,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         int startBlock = 0;
         if (stepCache is not null && _config.Depth > 1)
         {
+            BeforeBlockForward?.Invoke(0);
             (Tensor img0, Tensor txt0) = _blocks[0].Forward(
                 backend, currentImg, currentTxt, temb, _rope,
                 hPacked, wPacked, txtPositionStart, refGrids, tembZero, mainSeqLen);
@@ -248,6 +288,10 @@ public sealed unsafe class QwenImageTransformer : IDisposable
 
         for (int i = startBlock; i < _config.Depth; i++)
         {
+            // A step-cache HIT sets startBlock = Depth, skipping this loop and its streaming hook entirely. The
+            // controller simply keeps whatever it had prefetched (bounded by the prefetch window) and the next miss
+            // resumes from there — residency is per-block state, not a position in a sequence.
+            BeforeBlockForward?.Invoke(i);
             (Tensor newImg, Tensor newTxt) = _blocks[i].Forward(
                 backend, currentImg, currentTxt, temb, _rope,
                 hPacked, wPacked, txtPositionStart, refGrids, tembZero, mainSeqLen);

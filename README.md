@@ -37,6 +37,7 @@ HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpo
 | **Modular NuGet** | Pull in only the modality you need — `HartsyInference.Diffusion` for images, `HartsyInference.Audio` for speech, etc. |
 | **Validated** | Every component matches a Python/C++ reference within documented tolerances. |
 | **World models** | Real-time, action-conditioned interactive generation (keyboard / mouse / camera-pose → streamed frames). |
+| **Runs models bigger than your GPU** | VRAM-aware weight streaming: the engine measures free VRAM per generation phase and streams a denoiser's blocks from host RAM only when the model would not otherwise fit. A 12 GB card runs models needing ~20 GB resident. Automatic by default, and switchable off for operators who prefer a hard failure — see [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). |
 | **Production-grade** | Streaming progress, memory budgeting, VRAM monitoring, model hot-swap. |
 | **SwarmUI-native** | Ships as a first-class [SwarmUI backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend), a pure-C# alternative to the ComfyUI backend. |
 

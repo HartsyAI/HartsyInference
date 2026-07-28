@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -449,8 +450,52 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (packedEditRef is not null) _ = packedEditRef.DataPointer;
         Backend.FreeActivations();
 
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
-        _ditResident = true;
+        // Qwen-Image is a 20B MMDiT (Q4_K GGUF, ~12 GB of blocks). Until now this pipeline used the streaming cache
+        // ONLY as a VAE-decode eviction gate — the denoise loop itself was all-or-nothing, which is why a 12 GB card
+        // OOM'd here after uploading 1,675 weights (measured 2026-07-27, card at 0.5% free). Block streaming gives it
+        // the same graceful degradation Flux has had.
+        BlockStreamingController? streamer = null;
+        if (Backend.StreamingCache is not null)
+        {
+            IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
+            for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
+            long totalBlockBytes = 0;
+            foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
+            long sharedBytes = SumBytes(_transformer.EnumerateSharedWeights());
+            // Edit variants append packed reference tokens after the noise tokens, so the forward's real image-side
+            // length is the latent's own — not imgSeqLen, which counts only the noise grid.
+            int forwardImgSeqLen = (int)packedLatent.Shape[1] + (int)(packedEditRef?.Shape[1] ?? 0);
+            int txtSeqLen = (int)condHidden.Shape[1];
+            long reserve = EstimateActivationReserveBytes(txtSeqLen, forwardImgSeqLen, _config.HiddenSize) + sharedBytes;
+
+            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "QwenImage");
+            PhasePlacement placement = planner.PlanPhase(
+                "denoise", totalBlockBytes, reserve, alreadyResident: _ditResident, canStream: true);
+            if (placement == PhasePlacement.Resident)
+            {
+                if (!_ditResident) Backend.PreloadWeights(_transformer.EnumerateWeights());
+                _ditResident = true;
+            }
+            else
+            {
+                Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+                long avail = Backend.StreamingCache.QueryAvailableWeightCacheBytes(reserve);
+                long perBlock = blocks.Length > 0 ? blocks[0].EstimatedWeightBytes : 0;
+                int prefetchAhead = perBlock > 0 ? Math.Clamp((int)(avail / perBlock) - 2, 0, 2) : 0;
+                streamer = new BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
+                _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
+                streamer.Prime();
+                _ditResident = false;
+                Logs.Info($"QwenImage streaming: {blocks.Length} blocks, prefetchAhead={prefetchAhead}, " +
+                    $"total ~{totalBlockBytes / (1024 * 1024)} MB, shared ~{sharedBytes / (1024 * 1024)} MB resident, " +
+                    $"reserve ~{reserve / (1024 * 1024)} MB");
+            }
+        }
+        else
+        {
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+            _ditResident = true;
+        }
 
         // Pin the step-invariant ref tokens as a device-resident weight: they re-enter the per-step device
         // concat below, and a pageable host re-upload every step is an internally-syncing copy. No-op on a
@@ -583,6 +628,17 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             {
                 Backend.FreeActivations();
             }
+
+            // Streamed path only: return the stream-ordered pool's reservations to the driver once per step.
+            // retainBehind:0 frees every block via cuMemFreeAsync, and HARTSY_MEMPOOL_KEEP (on by default) raises the
+            // pool's release threshold so those bytes stay reserved. That is a pure win when the DiT is resident (the
+            // same buffers get reused), but on the streamed path the pool grows by roughly a block per step. Measured
+            // on Ideogram 4 (the same shape of workload): 4.1 → 11.6 GiB — the entire card — by step 17, versus a flat
+            // 5.1 GiB with this trim, for +1.4% wall-clock. See benchmarks/results/2026-07-27_lowvram_leak_fix.md §5f.
+            if (streamer is not null)
+            {
+                Backend.TrimMemoryPool();
+            }
         }
 
         // condHidden/uncondHidden and packedEditRef (the pinned ref-latent cache slot) are cross-generation
@@ -606,7 +662,18 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         QwenImageTransformer.DumpFinalLatent(packedLatent);
 
         Backend.Sync();
-        if (!KeepModelsResident)
+        if (streamer is not null)
+        {
+            // Streamed path always tears down regardless of KEEP_MODELS: nothing was fully resident to keep, and the
+            // VAE decode needs the window's VRAM. Detach the hook first so a later eager generation on this same
+            // transformer instance cannot call into a disposed controller.
+            _transformer.BeforeBlockForward = null;
+            streamer.EvictAll();
+            streamer.Dispose();
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            _ditResident = false;
+        }
+        else if (!KeepModelsResident)
         {
             Backend.FreeWeights(_transformer.EnumerateWeights());
             _ditResident = false;
@@ -630,7 +697,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (_ditResident && Backend.StreamingCache is not null)
         {
             long decodeReserveBytes = (long)width * height * 5120L;
-            if (Backend.StreamingCache.QueryAvailableWeightCacheBytes(decodeReserveBytes) == 0)
+            VramPlanner decodePlanner = new VramPlanner(Backend.StreamingCache, "QwenImage");
+            if (decodePlanner.ShouldEvictForHeadroom("vae-decode", decodeReserveBytes))
                 EvictResidentTransformer($"VAE decode ({width}x{height} needs ~{decodeReserveBytes / (1024 * 1024)} MB free)");
         }
 
@@ -839,6 +907,36 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     }
 
     /// <summary>Inverse of <see cref="PackLatent"/>.</summary>
+    /// <summary>Sums a tensor set's true on-device footprint.</summary>
+    /// <remarks>Via <see cref="DType.ComputeByteCount"/> — block-quantized dtypes report <c>SizeInBytes == 0</c>, and
+    /// Qwen-Image's production checkpoint is a Q4_K GGUF, so the naive product would total to zero.</remarks>
+    private static long SumBytes(IEnumerable<Tensor> tensors)
+    {
+        long total = 0;
+        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
+        return total;
+    }
+
+    /// <summary>Per-forward activation/workspace estimate for one Qwen-Image pass over the joint [txt, img] sequence.</summary>
+    /// <remarks>Same shape as <c>FluxPipeline.EstimateFluxActivationReserveBytes</c>. Dual-stream: image and text each
+    /// carry their own QKV, modulation and FFN scratch, and joint attention concatenates them — so the per-block live
+    /// set is counted over the combined length. The flat 1 GB tail covers cuBLAS workspace, GGUF dequant-cast buffers
+    /// and the RoPE tables. Deliberately generous: over-estimating costs a smaller prefetch window, under-estimating
+    /// costs an OOM.</remarks>
+    private static long EstimateActivationReserveBytes(int txtSeqLen, int imgSeqLen, int hiddenSize)
+    {
+        long totalSeqLen = txtSeqLen + imgSeqLen;
+        long mlpDim = hiddenSize * 4L;                            // GELU FFN intermediate
+        long ffnBytes = 2L * totalSeqLen * mlpDim * 2;            // F16 in + activated, both streams
+        long qkvBytes = 3L * totalSeqLen * hiddenSize * 4;        // F32 fused QKV
+        long multiHeadBytes = 3L * totalSeqLen * hiddenSize * 4;  // F32 per-head views
+        long jointAttnBytes = 2L * totalSeqLen * hiddenSize * 4;  // F32 concat + attention output
+        long modulatedBytes = 2L * totalSeqLen * hiddenSize * 4;  // F32 AdaLN-Zero modulated streams
+        long residualBytes = 2L * totalSeqLen * hiddenSize * 4;   // F32 img + txt block inputs
+        long scratch = ffnBytes + qkvBytes + multiHeadBytes + jointAttnBytes + modulatedBytes + residualBytes;
+        return scratch + 1024L * 1024 * 1024;
+    }
+
     private static Tensor UnpackLatent(Tensor packed, int h, int w, int channels, int patchSize)
     {
         int batch = (int)packed.Shape[0];

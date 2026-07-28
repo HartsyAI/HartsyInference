@@ -1,3 +1,4 @@
+using HartsyInference.Core.MemoryManagement;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Runtime;
@@ -276,10 +277,56 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             }
         }
 
-        // ── 5. Denoise loop (both transformers resident) ──
-        Backend.PreloadWeights(_conditional.EnumerateWeights());
-        Backend.PreloadWeights(_unconditional.EnumerateWeights());
-        _ditResident = true;
+        // ── 5. Denoise loop ──
+        // Ideogram 4 is the worst case for a small card: asymmetric CFG runs a SEPARATE 9.3 GB transformer for the
+        // conditional and unconditional passes, and both were held resident for the whole loop (~18.6 GB) — which is
+        // what the recipe's old hardcoded ">= 20 GB free VRAM" refusal was compensating for.
+        //
+        // Streaming both is the fix, and it is a better one than alternating whole transformers: the two are used
+        // back-to-back within EVERY step, so a whole-DiT swap would move 18.6 GB per step, whereas two independent
+        // sliding windows move one block at a time and keep only (prefetch+1) blocks of each resident.
+        // Each transformer gets its OWN controller — they have distinct weights and interleave within a step, so a
+        // shared window would thrash.
+        BlockStreamingController? condStreamer = null;
+        BlockStreamingController? uncondStreamer = null;
+        if (Backend.StreamingCache is not null)
+        {
+            long condBytes = SumBlockBytes(_conditional);
+            long uncondBytes = SumBlockBytes(_unconditional);
+            long sharedBytes = SumBytes(_conditional.EnumerateSharedWeights()) + SumBytes(_unconditional.EnumerateSharedWeights());
+            // The shared sets stay resident on both paths, so they are part of what the block budget must fit beside.
+            long reserve = EstimateActivationReserveBytes(seqLen, _config.EmbDim, _config.IntermediateSize) + sharedBytes;
+
+            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "Ideogram4");
+            PhasePlacement placement = planner.PlanPhase(
+                "denoise", condBytes + uncondBytes, reserve, alreadyResident: _ditResident, canStream: true);
+            if (placement == PhasePlacement.Resident)
+            {
+                if (!_ditResident)
+                {
+                    Backend.PreloadWeights(_conditional.EnumerateWeights());
+                    Backend.PreloadWeights(_unconditional.EnumerateWeights());
+                }
+                _ditResident = true;
+            }
+            else
+            {
+                Backend.PreloadWeights(_conditional.EnumerateSharedWeights());
+                Backend.PreloadWeights(_unconditional.EnumerateSharedWeights());
+                condStreamer = AttachStreamer(_conditional, reserve);
+                uncondStreamer = AttachStreamer(_unconditional, reserve);
+                _ditResident = false;
+                Logs.Info($"Ideogram4 streaming: 2 x {_conditional.BlockCount} blocks, " +
+                    $"cond ~{condBytes / (1024 * 1024)} MB + uncond ~{uncondBytes / (1024 * 1024)} MB, " +
+                    $"shared ~{sharedBytes / (1024 * 1024)} MB resident, reserve ~{reserve / (1024 * 1024)} MB");
+            }
+        }
+        else
+        {
+            Backend.PreloadWeights(_conditional.EnumerateWeights());
+            Backend.PreloadWeights(_unconditional.EnumerateWeights());
+            _ditResident = true;
+        }
         LogVram("after DiT weight preload");
 
         // Materialize everything that must survive across steps, then reclaim conditioning-build leftovers.
@@ -394,6 +441,19 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             {
                 Backend.FreeActivations();
             }
+
+            // Streamed path only: return the stream-ordered pool's reservations to the driver once per step.
+            // retainBehind:0 frees every block via cuMemFreeAsync, and HARTSY_MEMPOOL_KEEP (on by default) raises
+            // the pool's release threshold so those bytes stay reserved. On a resident pipeline that is a pure win
+            // — the same buffers get reused. On the streamed path the pool instead grows by roughly a block per
+            // step: measured on the 3060 at 1024²/20st, VRAM climbed 4.1 → 11.6 GiB (the entire card) by step 17,
+            // versus a flat 5.5 GiB plateau with HARTSY_MEMPOOL_KEEP=0 — for a wall-clock difference of 202.4 s vs
+            // 203.7 s, i.e. nothing. The retention buys no speed here and costs ~6 GiB of headroom, which is what
+            // decides whether a higher resolution or a longer preset fits at all.
+            if (condStreamer is not null || uncondStreamer is not null)
+            {
+                Backend.TrimMemoryPool();
+            }
         }
 
         if (condCache is not null)
@@ -412,7 +472,22 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         // ── 6. Free DiT weights before VAE decode (skipped under HARTSY_KEEP_MODELS — the Flux.2 VAE decode
         // falls back to tiled if the resident DiTs leave too little room for the full-res im2col) ──
         Backend.Sync();
-        if (!KeepModelsResident)
+        if (condStreamer is not null || uncondStreamer is not null)
+        {
+            // Streamed path always tears down, regardless of KEEP_MODELS: nothing was fully resident to keep, and the
+            // VAE decode needs the block window's VRAM back. Detach the hooks first so a later eager generation on
+            // these same transformer instances does not call into a disposed controller.
+            _conditional.BeforeBlockForward = null;
+            _unconditional.BeforeBlockForward = null;
+            condStreamer?.EvictAll();
+            condStreamer?.Dispose();
+            uncondStreamer?.EvictAll();
+            uncondStreamer?.Dispose();
+            Backend.FreeWeights(_conditional.EnumerateSharedWeights());
+            Backend.FreeWeights(_unconditional.EnumerateSharedWeights());
+            _ditResident = false;
+        }
+        else if (!KeepModelsResident)
         {
             Backend.FreeWeights(_conditional.EnumerateWeights());
             Backend.FreeWeights(_unconditional.EnumerateWeights());
@@ -731,6 +806,62 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Unpatchifies the packed token latent <c>[1, nImg, patch²·aeC]</c> → <c>[1, aeC, gridH·patch, gridW·patch]</c> (upstream <c>view(B,gh,gw,p,p,ae).permute(0,5,1,3,2,4)</c>). For packed feature <c>f</c>: <c>ae = f % aeC, p2 = (f/aeC) % patch, p1 = f / (aeC·patch)</c>.</summary>
+    /// <summary>Sums a tensor set's true on-device footprint.</summary>
+    /// <remarks>Via <see cref="DType.ComputeByteCount"/>, not <c>ElementCount * SizeInBytes</c> — block-quantized
+    /// dtypes report <c>SizeInBytes == 0</c> and would total to zero, silently disabling the streamed path.</remarks>
+    private static long SumBytes(IEnumerable<Tensor> tensors)
+    {
+        long total = 0;
+        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
+        return total;
+    }
+
+    /// <summary>Total streamable (per-block) bytes for one transformer.</summary>
+    private static long SumBlockBytes(Ideogram4Transformer transformer)
+    {
+        long total = 0;
+        for (int i = 0; i < transformer.BlockCount; i++) total += transformer.GetBlock(i).EstimatedWeightBytes;
+        return total;
+    }
+
+    /// <summary>Builds a block-streaming controller for one transformer, primes it, and hooks its forward pass.</summary>
+    /// <remarks>Prefetch depth is halved relative to the single-DiT pipelines: two controllers are live at once and
+    /// each briefly holds (prefetch + 2) blocks, so the combined peak is what has to fit.</remarks>
+    private BlockStreamingController AttachStreamer(Ideogram4Transformer transformer, long activationReserve)
+    {
+        IStreamingBlock[] blocks = new IStreamingBlock[transformer.BlockCount];
+        for (int i = 0; i < blocks.Length; i++) blocks[i] = transformer.GetBlock(i);
+
+        long avail = Backend.StreamingCache!.QueryAvailableWeightCacheBytes(activationReserve);
+        long perBlock = blocks.Length > 0 ? blocks[0].EstimatedWeightBytes : 0;
+        // Budget is split across the two live windows, hence the /2; -2 covers the transient overlap where block
+        // N+1 becomes resident before N-1 is evicted. Cap at 1 rather than Flux's 2 for the same reason.
+        int prefetchAhead = perBlock > 0 ? Math.Clamp((int)(avail / 2 / perBlock) - 2, 0, 1) : 0;
+
+        BlockStreamingController streamer = new BlockStreamingController(
+            Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
+        transformer.BeforeBlockForward = streamer.BeforeBlockForward;
+        streamer.Prime();
+        return streamer;
+    }
+
+    /// <summary>Per-forward activation/workspace estimate for one Ideogram 4 pass over the unified text+image sequence.</summary>
+    /// <remarks>Same shape as <c>FluxPipeline.EstimateFluxActivationReserveBytes</c>: sum the live per-block scratch
+    /// (SwiGLU pair, fused QKV, multi-head views, sandwich norms) plus a flat allowance for cuBLAS workspace, fp8→F16
+    /// weight-cast buffers and the MRoPE tables. Deliberately generous — an over-estimate costs a slightly smaller
+    /// prefetch window, an under-estimate costs an OOM.</remarks>
+    private static long EstimateActivationReserveBytes(int seqLen, int embDim, int intermediateSize)
+    {
+        long swiGluBytes = 2L * seqLen * intermediateSize * 2;   // F16 w1/w3 activations
+        long swiGluOutBytes = (long)seqLen * intermediateSize * 2;
+        long qkvBytes = 3L * seqLen * embDim * 4;                // F32 fused QKV
+        long multiHeadBytes = 3L * seqLen * embDim * 4;          // F32 per-head views
+        long normedBytes = 2L * seqLen * embDim * 4;             // F32 sandwich norms
+        long residualBytes = (long)seqLen * embDim * 4;          // F32 block input
+        long scratch = swiGluBytes + swiGluOutBytes + qkvBytes + multiHeadBytes + normedBytes + residualBytes;
+        return scratch + 1024L * 1024 * 1024;
+    }
+
     private static Tensor Unpatchify(Tensor z, int gridH, int gridW, int patch)
     {
         int packedC = (int)z.Shape[2];

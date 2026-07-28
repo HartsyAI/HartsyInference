@@ -62,10 +62,10 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         weights.TryGetValue($"{prefix}.proj_out.bias", out _projOutBias);
     }
 
-    /// <summary>Sum of weight bytes in this streamable block (for the block-streaming budget heuristic).</summary>
+    /// <summary>Sum of weight bytes in this streamable block (for the block-streaming budget heuristic). Routed through <see cref="DType.ComputeByteCount"/> rather than <c>ElementCount * SizeInBytes</c>: K-quant dtypes report <c>SizeInBytes = 0</c> and carry their real footprint in <c>BlockByteSize</c>/<c>BlockElementCount</c>, so the naive product silently reported 0 for the GGUF checkpoints this arch ships as.</summary>
     public long EstimatedWeightBytes
     {
-        get { long t = 0; foreach (Tensor w in EnumerateWeights()) t += w.ElementCount * w.DType.SizeInBytes; return t; }
+        get { long t = 0; foreach (Tensor w in EnumerateWeights()) t += w.DType.ComputeByteCount(w.ElementCount); return t; }
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>

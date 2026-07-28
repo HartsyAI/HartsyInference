@@ -32,7 +32,25 @@ correctness** — the engine falls back to the reference implementation and logs
 | fp8 tensor-core GEMM | `HARTSY_FP8_NATIVE` | **On** when SM ≥ 8.9 (Ada/RTX 40xx+), **Off** otherwise | Ada-generation GPU | fp8-weight models run activation-quant (F16→e4m3) GEMMs on fp8 tensor cores; weights stay packed (no VRAM increase) | F16-cast GEMM |
 | F16 DiT activations | `HARTSY_DIT_F16` | **On** | Per-architecture code opt-in | Audited DiT block loops run F16 activations (half the HBM traffic of the bandwidth-bound norm/modulate/gate/attention kernels). The switch alone never flips an un-audited model — F16 safety is verified per architecture (QK-normed attention, bounded FFN intermediates) before a model opts in | F32 activations |
 | Resident DiT weights | `HARTSY_KEEP_MODELS` | **On** | — | DiT weights stay GPU-resident across generations (skips the per-generation free + ~2 s re-upload). VRAM-aware by construction: on a prompt-cache miss the pipeline evicts the DiT before loading the text encoder, so smaller cards remain viable | Free after each generation, re-upload on the next |
+| Low-VRAM weight streaming | `HARTSY_LOWVRAM` | **`auto`** | CUDA (needs the streaming weight cache) | **Three-state, not a boolean** — see below. On `auto`, `VramPlanner` measures free VRAM per generation phase and streams a denoiser's blocks from host RAM only when the fully-resident layout would not fit; cards with headroom keep the resident fast path unchanged. This is what lets models larger than the card run at all — HunyuanImage-2.1 (11.5 GB needed vs 9.4 GB free), Ideogram 4 (19.7 GB needed vs 9.2 GB free — two 9.3 GB DiTs) and Qwen-Image (a 20B MMDiT, 14.3 GB needed vs 9.7 GB free) all complete on a 12 GB RTX 3060 | Fully-resident preload; an oversized model raises `OutOfVramException` |
 | Warm activation pool | `HARTSY_MEMPOOL_KEEP` | **On** | — | Freed activation buffers stay in the CUDA stream-ordered pool (release threshold raised), so per-op buffer reuse is instant instead of a driver round-trip (~13 s/gen on large-activation models). OOM-retry and explicit trim paths still return memory on demand | Threshold-0 pool (every free returns memory to the driver) |
+
+### `HARTSY_LOWVRAM` — the one three-state switch
+
+Every other switch above is a boolean. This one is not, because "measure and decide" is genuinely different from
+"always stream", and conflating them would leave no way to exercise the streamed path on a card with headroom.
+
+| Value | Behavior |
+|---|---|
+| unset / `auto` | **Default.** Measure free VRAM per phase; stream only when the resident layout will not fit. No cost on a card with room. |
+| `1` / `on` / `true` | Always stream, even when it would fit. For testing the streamed path, and for sharing a GPU with another process. |
+| `0` / `off` / `false` | Never stream and never auto-evict. An oversized model raises `OutOfVramException` instead of running slowly. |
+
+`off` is a deliberate escape hatch for operators who size their own workloads and want a hard failure over a silent
+5-8× slowdown. Verified as such: the same Ideogram 4 / HunyuanImage request succeeds under `on` and OOMs under `0`.
+
+Streaming trades speed for capacity — expect roughly the 5-8× penalty any weight-offload path carries. It is
+**bit-exact**: it changes *when* weights are resident, never the arithmetic.
 
 **Compatibility note.** Versions before `1.0.0-alpha.45` shipped these features opt-in (`=1` required).
 The SwarmUI extension pins the exact engine version, so extension users are always consistent; direct NuGet

@@ -27,7 +27,7 @@ public sealed class ImagesService : IImagesService
             {
                 IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request);
                 ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);
-                return pipeline.Generate(resolved, progress, cancel);
+                return _engine.GenerateWithVramCleanup(() => pipeline.Generate(resolved, progress, cancel));
             },
             cancel);
     }

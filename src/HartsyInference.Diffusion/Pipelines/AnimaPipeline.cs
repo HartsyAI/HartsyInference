@@ -20,11 +20,22 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// — see roadmap).</summary>
 public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
 {
+    /// <summary>Strict opt-in (<c>ANIMA_DEBUG_STATS=1</c>) for the per-boundary min/max/mean prints. Each one reads a
+    /// tensor's <c>DataPointer</c>, which D2H-syncs and evicts the GPU activation — off by default so real runs stay
+    /// device-resident (same opt-in form as <c>ANIMA_BYPASS_LLM_ADAPTER</c> below).</summary>
+    private static readonly bool DiagnosticStats = Environment.GetEnvironmentVariable("ANIMA_DEBUG_STATS") == "1";
+
     private readonly AnimaTransformer _transformer;
     private readonly AnimaLlmAdapter _llmAdapter;
     private readonly QwenImageVaeDecoder _vaeDecoder;
     private readonly QwenImageVaeEncoder? _vaeEncoder;
     private readonly AnimaConfig _config;
+
+    // Negative/uncond conditioning cache (last-used). The LlmAdapter forward on the negative prompt is
+    // timestep-independent and the negative prompt rarely changes between generations, so it is keyed on the
+    // (T5 token ids, embedding identity) pair and reused. Host-materialized so it survives activation frees.
+    private int[]? _cachedUncondKey;
+    private Tensor? _cachedUncond;
 
     /// <summary>Creates an Anima t2i pipeline. Caller owns the components. The VAE is the
     /// <see cref="QwenImageVaeDecoder"/> (3D causal autoencoder collapsed to 2D for image mode);
@@ -94,7 +105,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         Logs.Info($"Anima {(isMaskedInpaint ? "inpaint" : isImg2Img ? "img2img" : "t2i")}: {width}x{height}, {steps} steps, start={img2imgPlan.StartStep}, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        LogStats("textEmbeddings (Qwen3 0.6B output)", textEmbeddings);
+        if (DiagnosticStats) LogStats("textEmbeddings (Qwen3 0.6B output)", textEmbeddings);
 
         // Bulk-upload the LlmAdapter + transformer weights to the backend's weight cache so the
         // hundreds of per-op kernel launches inside Forward() don't each pay a cache-miss H2D
@@ -122,10 +133,16 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
             // embed[t5_ids], cross-attn K/V = Qwen-3 hidden states. Output seq_len = t5_ids.Length.
             refinedText = _llmAdapter.Forward(Backend, textEmbeddings, t5TokenIds);
         }
-        LogStats("refinedText (LlmAdapter output)", refinedText);
+        if (DiagnosticStats) LogStats("refinedText (LlmAdapter output)", refinedText);
 
+        // Negative conditioning is timestep-independent AND usually identical across generations (seed-only
+        // changes, benchmark sweeps, a fixed style negative). Reuse the padded result when the T5 token ids match;
+        // a miss evicts and disposes the previous entry. The cached tensor is owned by the cache, never disposed
+        // by the loop.
+        bool uncondHit = negativeTextEmbeddings is not null && _cachedUncond is not null
+            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativeT5TokenIds!);
         Tensor? refinedNegText = null;
-        if (negativeTextEmbeddings is not null)
+        if (negativeTextEmbeddings is not null && !uncondHit)
         {
             refinedNegText = bypassAdapter
                 ? (negativeTextEmbeddings.DType == DType.F32 ? CloneF32(negativeTextEmbeddings) : negativeTextEmbeddings.CastTo(DType.F32))
@@ -150,8 +167,17 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
             Tensor pn = PadSeq(refinedNegText, CrossAttnPaddedLen);
             refinedNegText.Dispose();
             refinedNegText = pn;
+            unsafe { _ = pn.DataPointer; }   // materialize to host so the entry survives activation frees across gens
+            _cachedUncond?.Dispose();
+            _cachedUncond = pn;
+            _cachedUncondKey = (int[])negativeT5TokenIds!.Clone();
         }
-        LogStats("refinedText (padded to 512)", refinedText);
+        else if (uncondHit)
+        {
+            refinedNegText = _cachedUncond;
+            Logs.Verbose("[Anima] negative conditioning cache hit — LlmAdapter negative forward skipped.");
+        }
+        if (DiagnosticStats) LogStats("refinedText (padded to 512)", refinedText);
 
         // Anima uses the Z-Image flow-matching schedule (per
         // `modelscope/DiffSynth-Studio/diffsynth/diffusion/flow_match.py`):
@@ -198,36 +224,39 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         {
             latent = SeedGenerator.CreateNoise(latentShape, seed);
         }
-        LogStats("initial latent", latent);
+        if (DiagnosticStats) LogStats("initial latent", latent);
 
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
+            Backend.ResetD2hSyncCount();
             float sigma = sigmas[i];
             float sigmaNext = sigmas[i + 1];
             // Anima feeds `t = sigma` directly to the transformer (per anima-preview.py + anima_dit.py:
             // `timestep = timestep / 1000` then model receives the normalized t = sigma).
             float t = sigma;
 
+            // CFG combine + flow-match Euler as ONE in-place device op: CfgEulerStep computes
+            // v = g·pos + (1−g)·neg (identical to CfgHelper.ApplyCfg's uncond + g·(cond − uncond)) then
+            // latent += v·dt, keeping the latent device-resident across the whole loop. g = 1 with pos = neg
+            // degenerates to the plain conditional Euler step.
+            float dt = sigmaNext - sigma;
             Tensor velocity = _transformer.Forward(Backend, latent, t, refinedText);
             if (cfgScale > 1.0f)
             {
                 Tensor velUncond = _transformer.Forward(Backend, latent, t, refinedNegText!);
-                // Standard SD3-form CFG: combined = uncond + scale * (cond - uncond).
-                Tensor combined = CfgHelper.ApplyCfg(velUncond, velocity, cfgScale);
+                if (DiagnosticStats && (i == 0 || i == steps / 2 || i == steps - 1))
+                    LogStats($"velocity step={i} (t={t:F4}, sigma={sigma:F4}→{sigmaNext:F4})", velocity);
+                Backend.CfgEulerStep(latent, velocity, velUncond, cfgScale, dt);
                 velUncond.Dispose();
-                velocity.Dispose();
-                velocity = combined;
             }
-
-            if (i == 0 || i == steps / 2 || i == steps - 1)
-                LogStats($"velocity step={i} (t={t:F4}, sigma={sigma:F4}→{sigmaNext:F4})", velocity);
-
-            Tensor newLatent = new(latentShape, DType.F32);
-            FlowMatchStep(newLatent, latent, velocity, sigmaNext - sigma);
+            else
+            {
+                if (DiagnosticStats && (i == 0 || i == steps / 2 || i == steps - 1))
+                    LogStats($"velocity step={i} (t={t:F4}, sigma={sigma:F4}→{sigmaNext:F4})", velocity);
+                Backend.CfgEulerStep(latent, velocity, velocity, 1.0f, dt);
+            }
             velocity.Dispose();
-            latent.Dispose();
-            latent = newLatent;
 
             // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory by
             // re-noising the source at the next step's sigma. Final step blends with the clean source
@@ -249,9 +278,14 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
                 }
                 MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
                 if (noisedSource != sourceLatent) noisedSource.Dispose();
+                // The blend above wrote the latent on the HOST after CfgEulerStep left it device-resident; without
+                // this the activation cache still holds the pre-blend device buffer and the next forward would run
+                // against stale data. Masked inpaint only — the plain loop stays drain-free.
+                Backend.FreeActivations();
             }
 
             stepSw.Stop();
+            Logs.Info($"[Anima] step {i + 1}/{steps} sigma={sigma:F4}→{sigmaNext:F4} {stepSw.ElapsedMilliseconds}ms | D2H syncs {Backend.GetD2hSyncCount()}");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
             {
                 // Attach the current latent so the backend's PreviewEncoder can render per-step previews
@@ -263,7 +297,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         }
 
         refinedText.Dispose();
-        refinedNegText?.Dispose();
+        // refinedNegText is owned by the negative-conditioning cache — released on eviction / pipeline Dispose.
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
@@ -271,14 +305,20 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         Backend.FreeWeights(_transformer.EnumerateWeights());
         Backend.FreeWeights(_llmAdapter.EnumerateWeights());
 
-        LogStats("final latent (pre-VAE)", latent);
-        LogPerChannelStats("final latent (pre-VAE) per-channel", latent);
+        if (DiagnosticStats)
+        {
+            LogStats("final latent (pre-VAE)", latent);
+            LogPerChannelStats("final latent (pre-VAE) per-channel", latent);
+        }
 
         Tensor decoded = _vaeDecoder.Decode(Backend, latent);
         latent.Dispose();
 
-        LogStats("VAE decoded (raw)", decoded);
-        LogPerChannelStats("VAE decoded per-channel", decoded);
+        if (DiagnosticStats)
+        {
+            LogStats("VAE decoded (raw)", decoded);
+            LogPerChannelStats("VAE decoded per-channel", decoded);
+        }
 
         // Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
         // Suppresses VAE encode/decode drift in unmasked regions (same as SDXL / Flux).
@@ -294,6 +334,14 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         Logs.Info($"Anima t2i complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgb, width, height, seed);
+    }
+
+    /// <summary>Releases the negative-conditioning cache (pipeline-internal state; see DiffusionPipelineBase).</summary>
+    protected override void DisposeCore()
+    {
+        _cachedUncond?.Dispose();
+        _cachedUncond = null;
+        _cachedUncondKey = null;
     }
 
     /// <summary>Print min/max/mean/abs_mean/std/has_nan/has_inf for a tensor, F32 or convertible. Used to
@@ -482,17 +530,6 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         float invSigma = 1.0f / sigma;
         for (long i = 0; i < n; i++) ep[i] = (lp[i] - xp[i]) * invSigma;
         return eps;
-    }
-
-    /// <summary>FlowMatchEuler discrete step: <c>new_latent[i] = latent[i] + dt * eps[i]</c>.
-    /// <paramref name="dt"/> is <c>sigma_next - sigma</c> (negative as sigmas decrease).</summary>
-    private static unsafe void FlowMatchStep(Tensor newLatent, Tensor latent, Tensor eps, float dt)
-    {
-        float* np = (float*)newLatent.DataPointer;
-        float* lp = (float*)latent.DataPointer;
-        float* ep = (float*)eps.DataPointer;
-        long n = latent.Shape.ElementCount;
-        for (long i = 0; i < n; i++) np[i] = lp[i] + dt * ep[i];
     }
 
     /// <summary>Flow-matching forward noising for img2img: <c>out = (1 − sigma)·source + sigma·noise</c>.

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -246,9 +247,56 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         scheduler.SetTimesteps(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
-        // Bulk-upload transformer weights before the denoise loop. Kept resident across generations under
-        // HARTSY_KEEP_MODELS (the prompt-cache miss path evicts them before the TE phase).
-        if (!_ditResident)
+        // Weight residency for the denoise loop. Two paths, mirroring FluxPipeline:
+        //   - StreamingCache != null (CUDA): pick eager-vs-streaming by measured free VRAM. When the whole
+        //     60-block set fits beside the activation reserve we preload everything (unchanged behavior —
+        //     the sliding window re-uploads every block on every forward, which is pure loss on a card that
+        //     never needed it). Otherwise a BlockStreamingController caps resident weights at ~(prefetch+2)
+        //     blocks, which is what lets the 17B DiT run on 12 GB instead of OOMing.
+        //   - StreamingCache == null (CPU/Vulkan): eager preload, exactly as before.
+        BlockStreamingController? streamer = null;
+        if (Backend.StreamingCache is not null)
+        {
+            IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
+            for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
+
+            int txtSeqLen = (int)Math.Max(condText.Shape[1], uncondText?.Shape[1] ?? 0);
+            int imgSeqLen = hPacked * wPacked;
+            long activationReserve = EstimateActivationReserveBytes(
+                txtSeqLen, imgSeqLen, _config.HiddenSize, (int)(_config.HiddenSize * _config.MlpRatio))
+                + SumBytes(_transformer.EnumerateSharedWeights());
+
+            long totalBlockBytes = 0;
+            foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
+            // The resident-vs-streamed decision — including the already-resident short-circuit that stops warm
+            // generations oscillating resident→streaming→resident — belongs to VramPlanner, so every pipeline
+            // decides identically and HARTSY_LOWVRAM can override it. The reserve estimate above stays here:
+            // it is genuinely per-architecture, unlike the decision.
+            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "HunyuanImage");
+            PhasePlacement placement = planner.PlanPhase(
+                "denoise", totalBlockBytes, activationReserve, alreadyResident: _ditResident, canStream: true);
+            if (placement == PhasePlacement.Resident)
+            {
+                if (!_ditResident) Backend.PreloadWeights(_transformer.EnumerateWeights());
+                _ditResident = true;
+            }
+            else
+            {
+                Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+                // Re-queries free VRAM after the shared preload while activationReserve still includes the
+                // shared bytes, so those are counted twice. Strictly conservative, and inert against the
+                // clamp-at-2 cap — not worth threading a second reserve value through.
+                int prefetchAhead = ChoosePrefetchAhead(Backend.StreamingCache, blocks, activationReserve);
+                streamer = new BlockStreamingController(Backend.StreamingCache, blocks,
+                    prefetchAhead: prefetchAhead, retainBehind: 0);
+                _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
+                streamer.Prime();
+                long totalMb = streamer.EstimatedTotalWeightBytes / (1024 * 1024);
+                Logs.Info($"Hunyuan Image streaming: {blocks.Length} blocks, prefetchAhead={prefetchAhead}, " +
+                    $"total ~{totalMb} MB, activation reserve ~{activationReserve / (1024 * 1024)} MB");
+            }
+        }
+        else if (!_ditResident)
         {
             Backend.PreloadWeights(_transformer.EnumerateWeights());
             _ditResident = true;
@@ -290,7 +338,19 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         }
 
         Backend.Sync();
-        if (!KeepModelsResident)
+        // Tear down before the unpatchify + 32-channel VAE decode — that decode is what needs the room back.
+        _transformer.BeforeBlockForward = null;
+        if (streamer is not null)
+        {
+            streamer.EvictAll();
+            streamer.Dispose();
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            // Also purge the block weights: the streaming cache registers each uploaded block in the backend
+            // weight cache, so any block still cached at the end would stay resident and starve the decode.
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
+        else if (!KeepModelsResident)
         {
             Backend.FreeWeights(_transformer.EnumerateWeights());
             _ditResident = false;
@@ -322,6 +382,59 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         Logs.Info($"Hunyuan Image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgb, width, height, seed);
+    }
+
+    /// <summary>Estimates the peak per-forward activation footprint (bytes) that must stay free beside the DiT
+    /// weights, so the resident-vs-stream decision and the prefetch depth can never disagree. The deepest valley
+    /// is a single-stream block holding the joint <c>[img,txt]</c> stream, the modulated copy, Q/K/V both pre- and
+    /// post-permute, and the parallel MLP branch (proj + activated + the feature-dim concat) at once. Everything
+    /// is F32: this transformer deliberately does not opt into the shared 16-bit hot path (its Qwen2.5-VL text
+    /// stream overflows F16 — see the comment in <see cref="HunyuanImageTransformer.Forward"/>). Sized for B=1.
+    /// <para>Kept private rather than shared with <c>FluxPipeline</c>'s equivalent: the tensor inventory and the
+    /// activation dtype are both per-architecture, and the two would only diverge if merged.</para></summary>
+    private static long EstimateActivationReserveBytes(int txtSeqLen, int imgSeqLen, int hiddenSize, int mlpDim)
+    {
+        long totalSeqLen = txtSeqLen + imgSeqLen;
+        long mlpProjBytes = totalSeqLen * mlpDim * 4;
+        long mlpActivatedBytes = totalSeqLen * mlpDim * 4;
+        long concattedBytes = totalSeqLen * (hiddenSize + mlpDim) * 4;
+        long jointBytes = totalSeqLen * hiddenSize * 4;
+        long modulatedBytes = totalSeqLen * hiddenSize * 4;
+        long attnFlatBytes = totalSeqLen * hiddenSize * 4;
+        long qkvBytes = 3L * totalSeqLen * hiddenSize * 4;
+        long mhBytes = 3L * totalSeqLen * hiddenSize * 4;
+        long scratchBytes = mlpProjBytes + mlpActivatedBytes + concattedBytes + jointBytes
+            + modulatedBytes + attnFlatBytes + qkvBytes + mhBytes;
+        // Fudge for cuBLAS workspace, GGUF dequant buffers, and the cached RoPE tables. The shared (non-block)
+        // weights are NOT folded in here — the caller adds their measured size, because the Hunyuan token
+        // refiner makes that set far too large to hide inside a constant.
+        return scratchBytes + 1024L * 1024 * 1024;
+    }
+
+    /// <summary>Picks the in-flight prefetch depth that keeps the streaming peak inside the free-VRAM budget.</summary>
+    private static int ChoosePrefetchAhead(IStreamingWeightCache cache, IStreamingBlock[] blocks, long activationReserve)
+    {
+        long avail = cache.QueryAvailableWeightCacheBytes(activationReserve);
+        if (avail <= 0) return 0;
+
+        // Size against the LARGEST block, not block 0: the 20 double-stream blocks carry two full
+        // attention+FFN streams and are roughly twice a single-stream block.
+        long perBlockBytes = 0;
+        foreach (IStreamingBlock block in blocks) perBlockBytes = Math.Max(perBlockBytes, block.EstimatedWeightBytes);
+        if (perBlockBytes <= 0) return 1;
+
+        // The working set briefly hits (prefetchAhead + 2) blocks when block N+1 is made resident before
+        // block N-1 is evicted. Cap at 2 — deeper burns VRAM without hiding more latency.
+        int maxByBudget = (int)(avail / perBlockBytes) - 2;
+        return Math.Clamp(maxByBudget, 0, 2);
+    }
+
+    /// <summary>Sums real device footprint. Uses <see cref="DType.ComputeByteCount"/> because K-quant dtypes report <c>SizeInBytes = 0</c> — the naive <c>ElementCount * SizeInBytes</c> product reports 0 for the GGUF checkpoints this arch ships as.</summary>
+    private static long SumBytes(IEnumerable<Tensor> tensors)
+    {
+        long total = 0;
+        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
+        return total;
     }
 
     /// <summary>Patchifies <c>[B, C, H, W]</c> -&gt; <c>[B, S, p²·C]</c> with channel-outer ordering inside each patch

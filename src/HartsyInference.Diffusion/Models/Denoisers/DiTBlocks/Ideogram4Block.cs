@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -14,8 +15,23 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// x    = x + gate_mlp * ffn_norm2(feed_forward(ffn_norm1(x) * scale_mlp))
 /// </code>
 /// Attention is fused-QKV (<c>Linear(hidden → 3*hidden, bias=False)</c>), per-head QK-RMSNorm, 3D MRoPE, then <c>o</c> (bias=False). FFN is SwiGLU <c>w2(silu(w1)·w3)</c>, all bias=False.</summary>
-public sealed unsafe class Ideogram4Block
+public sealed unsafe class Ideogram4Block : IStreamingBlock
 {
+    /// <inheritdoc/>
+    /// <remarks>Computed on demand through <see cref="DType.ComputeByteCount"/> rather than
+    /// <c>ElementCount * SizeInBytes</c>: block-quantized dtypes report <c>SizeInBytes == 0</c>, which would make the
+    /// streaming budget see a weightless model. Ideogram 4's DiTs load as fp8 (nvfp4 folded into
+    /// <see cref="Tensor.Fp8ScaleFactor"/>), so this is the true resident footprint.</remarks>
+    public long EstimatedWeightBytes
+    {
+        get
+        {
+            long total = 0;
+            foreach (Tensor w in EnumerateWeights()) total += w.DType.ComputeByteCount(w.ElementCount);
+            return total;
+        }
+    }
+
     /// <summary>F16-mode damping for the two RmsNorm-sandwiched projections (the Z-Image recipe): the raw
     /// <c>attention.o</c> and SwiGLU outputs can exceed F16's 65504, but both feed straight into a sandwich
     /// RMSNorm and <c>RMSNorm(c·x) ≡ RMSNorm(x)</c> — so scaling the weights via <see cref="Tensor.Fp8ScaleFactor"/>
