@@ -1,10 +1,67 @@
 # Changelog
 
-All notable changes to HartsyInference are recorded here. Versions follow `1.0.0-alpha.N` during the
-pre-1.0 phase (see [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md)
-for what "1.0.0" itself will require). Dates are UTC.
+All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N` (the scheme moved
+up from `1.0.0-alpha.N`; entries below that pre-date the change and keep their original numbers). The single
+source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props` — see
+[`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what a
+stable release will require. Dates are UTC.
 
-## [Unreleased] — 1.0.0-alpha.48
+## [2.0.0-alpha.5] — 2026-07-27
+
+Low-VRAM generation, a GPU-memory leak fix, and selectable devices. Full technical detail, with all
+measurements and the things that turned out **not** to be true, in
+[`benchmarks/results/2026-07-27_lowvram_leak_fix.md`](benchmarks/results/2026-07-27_lowvram_leak_fix.md).
+
+### Added
+- **Low-VRAM weight streaming across the image fleet** (`HARTSY_LOWVRAM`, three-state: `auto` default /
+  `on` / `off`). The sliding-window machinery (`BlockStreamingController`) already existed but only one of
+  ~25 image pipelines used it. **Four models that could not run on a 12 GB card now do**, all 1024²,
+  quality-gate clean: **HunyuanImage-2.1** (19.7 s), **Ideogram 4** (205 s — a *pair* of 9.3 GB DiTs
+  needing 19.7 GB against 9.2 GB available), **Qwen-Image** (231 s, 20B MMDiT), **Krea2** (71 s).
+  `off` is a real escape hatch: the same request succeeds under `on` and raises `OutOfVramException`
+  under `off`.
+- **`VramPlanner`** — one place that decides resident-vs-streamed per generation phase, carries the
+  `HARTSY_KEEP_MODELS` residency short-circuit, and logs the **weights-vs-activations split** (streaming
+  can only move the weight term, so a phase dominated by activations needs a smaller working set, not a
+  sliding window).
+- **Selectable CUDA device**: `cuda:1`-style backend selectors, `InferenceEngine(selector, ordinal)`, and
+  a real `GPU_ID` in the SwarmUI backend — previously logged and ignored. Verified by memory delta.
+  Note the ordinal is CUDA's (fastest-first), which need not match `nvidia-smi`'s PCI order.
+- **SD3.5 modular component loading** — CLIP-L / CLIP-G / T5-XXL / VAE each resolve independently when the
+  checkpoint does not bundle them, which is the standard SD3.x distribution format. SD3.5-Medium now
+  generates end-to-end; it previously threw before any sampling.
+
+### Fixed
+- **GPU memory leak on OOM.** `CudaBackend.PreloadWeights` had no exception path, so a mid-load OOM left
+  already-uploaded weights registered against a model that would never finish — unreachable, therefore
+  unfreeable. The process held ~11.5 GB with nothing running and **starved other processes on the same
+  card**, including a separate ComfyUI. Now: typed `OutOfVramException`, per-batch rollback, and reclaim at
+  both the generate and construct boundaries. An OOM'd process now holds **152 MiB instead of ~11.5 GB**,
+  and a sequential multi-model sweep survives an OOM (3/3 models succeeded after one).
+- **Streaming was inert for every GGUF model.** `DType.Q4_K.SizeInBytes` is 0 (a K-quant has no
+  per-element size), so `ElementCount * SizeInBytes` totalled block weights to **zero bytes** and the
+  "fits resident?" test was always trivially true. Fixed in four block implementations.
+- **Lens rendered solid black** (16/16). SageAttention's INT8 path materializes V as F16; Lens does not
+  RMS-norm V, and `max|V|` crossed F16's 65504 mid-generation. Verified against ComfyUI's own reference
+  implementation on the same checkpoint — an engine bug, not a port bug.
+- **Anima was 19-63× slower than ComfyUI**: 792 host round-trips per denoise step (14 per block × 28
+  blocks × 2 CFG passes). Now **3**. Warm step 15,279 ms → 519 ms. Its documented "1024² hangs" was never
+  a hang.
+- **The VRAM planner under-reported free memory by ~4.6 GB**, because `cuMemGetInfo` counts the
+  stream-ordered pool's reservations as used. The error is asymmetric — it biases toward streaming, which
+  costs 5-8× — so a large card could silently take the slow path for a model that fits.
+- `TextService.PrimaryDeviceKey()` hardcoded `"cuda:0"`, so a `cuda:1` engine would have rendered images on
+  one GPU while its LLM landed on another.
+- Lumina2's on-disk checkpoint was the wrong variant (`cap_embedder.*` naming vs the diffusers
+  `time_caption_embed.*` the converter expects). Correct weights now load and generate — though this
+  revealed a **separate, previously unreachable conditioning bug**: output is coherent but off-prompt.
+
+### Changed
+- `Chroma` checkpoint conversion is now streaming per tensor (removes a GC-timing dependence from the
+  peak). **The documented "host RAM OOM" does not reproduce** — it peaks at 9.1 GB anon and completes;
+  the reported 25 GB was total RSS including reclaimable file-backed page cache.
+
+## [1.0.0-alpha.48]
 
 Production-readiness push: closes the throughput gap toward python inference stacks (vLLM/TGI-class) and
 adds the serving infrastructure a real deployment needs. Full technical detail in

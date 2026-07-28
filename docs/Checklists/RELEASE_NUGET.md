@@ -12,7 +12,7 @@
 
 **Branding:** Package icon, descriptions, README, project URL, license expression, tags. Verify/reserve IDs on NuGet.org.
 
-**Versioning:** SemVer pre-release convention `1.0.0-alpha.NN` (current: **1.0.0-alpha.43**), single source of truth is `Directory.Build.props` `<VersionSuffix>`, CI auto-increment. Keep the SwarmUI extension csproj pinned to the same version.
+**Versioning:** SemVer pre-release convention `2.0.0-alpha.NN` (current: **2.0.0-alpha.5**), single source of truth is `Directory.Build.props` `<VersionPrefix>` + `<VersionSuffix>`. Keep the SwarmUI extension csproj pinned to the same version — and merge the engine bump *first*, since the extension's default (NuGet) build cannot restore a version that has not been published yet.
 
 **Documentation:** Main README with quickstart, CONTRIBUTING.md, API docs (XML comments), samples project, getting-started guide, docs site.
 
@@ -35,7 +35,7 @@
 
 ## 4. Pre-Release
 
-- [ ] Push 1.0.0-alpha.43 to NuGet.org
+- [ ] Push the current `Directory.Build.props` version (today: 2.0.0-alpha.5) to NuGet.org
 - [ ] Fresh project install test from NuGet.org
 - [ ] Gallery pages look correct
 - [ ] Community feedback, fix issues
