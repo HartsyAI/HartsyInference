@@ -1,5 +1,6 @@
 using System.Globalization;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -128,6 +129,10 @@ public sealed class Lumina2RecipePipeline : IRecipePipeline
     private unsafe Tensor EncodeTemplated(string prompt)
     {
         int[] tokens = _tokenizer.Encode(_systemPrompt + " <Prompt Start> " + prompt);
+        // Round-trip decode is the cheapest way to catch a wrong-vocab tokenizer: mismatched ids stay in range
+        // and produce coherent-but-unrelated conditioning instead of throwing.
+        Logs.Debug($"[Lumina2] caption tokens={tokens.Length} ids[0..8]=[{string.Join(",", tokens[..Math.Min(8, tokens.Length)])}] " +
+            $"roundtrip=\"{_tokenizer.Decode(tokens)}\"");
         int tapIndex = _textEncoder.NumLayers - 1;
         Tensor embeds = _textEncoder.EncodeMultiLayer(_backend, new[] { tokens }, new[] { tapIndex });
         _ = embeds.DataPointer;

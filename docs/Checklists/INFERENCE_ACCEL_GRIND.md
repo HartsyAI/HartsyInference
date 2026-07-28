@@ -151,7 +151,7 @@ SDPA share (27%).
       --skip-e2e --trials 5 --tag h0_baseline_3060` on the 3060 — results land under
       `benchmarks/results/run_*_h0_baseline_3060/`; drift check + the per-model ncu top-5 capture remain
       open. Formal BDN SDPA table (incl. the new Sage INT8 column) recorded in
-      [2026-07-22_accel_sageattn_3060.md](../../benchmarks/results/2026-07-22_accel_sageattn_3060.md).)*
+      2026-07-22_accel_sageattn_3060.md.)*
 - [x] **`ncu` access check**: `ncu --version` and a smoke `ncu --set full` on any kernel. On GeForce this
       needs driver perf-counter permission (`NVreg_RestrictProfilingToAdminUsers=0` or admin). This has
       been the LLM GEMV redesign blocker (LLM_DECODE_PERF_GRIND "needs ncu, blocked by GeForce perms") —
@@ -169,7 +169,7 @@ SDPA share (27%).
       `sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed` (tensor-core %),
       `sm__throughput.avg.pct_of_peak_sustained_elapsed`. These three numbers per kernel ARE the
       %-of-ceiling table this whole grind optimizes against — put them in the results doc.
-      *(📊 2026-07-23, 3060 — [2026-07-23_h0_ncu_top5_3060.md](../../benchmarks/results/2026-07-23_h0_ncu_top5_3060.md):
+      *(📊 2026-07-23, 3060 — 2026-07-23_h0_ncu_top5_3060.md:
       explicit `--metrics` list (not `--set basic/full`) + CSV aggregation, no launch-count/skip needed
       (both suites are short enough to capture whole). **StepCacheKernelTests**: confirms the earlier
       smoke — `stepcache_rel_l1_f32`/`_f16` both memory-bound, 92.9%/85.7% DRAM, nothing to do.
@@ -212,7 +212,7 @@ SDPA share (27%).
          + eyeball. Acceptance: SSIM ≥ 0.95 at the shipped default; pick the default from the knee.
        - Watch VRAM: the cache holds prevIndicator + residual per stream (~58 MB × 4 at 1024²) — confirm
          peak stays under budget beside the resident DiT.
-       *(📊 2026-07-22, 4090 — [results](../../benchmarks/results/2026-07-22_accel_stepcache_qwen_4090.md):
+       *(📊 2026-07-22, 4090 — results:
        baseline 40.17 s byte-stable ✓; 0.1 → 35.14 s (1.14×) SSIM 0.9552 ✓; 0.15 → 30.25 s (1.33×)
        SSIM 0.9189 eyeball-clean but below gate; 0.2 → 27.22 s (1.48×) SSIM 0.8744 visible
        simplification. **Shipped default moved 0.15 → 0.10** (the SSIM≥0.95 knee). Cached runs
@@ -230,7 +230,7 @@ SDPA share (27%).
        under ANY reuse; outputs stay eyeball-clean (different-but-coherent samples) at 1.2–1.55×.
        Honest ship-frame: "fast non-reproducible sampling" opt-in, default OFF; polynomial gate worth
        one try but per-seed SSIM may be the wrong acceptance metric for video (use FVD).
-       [Full write-up](../../benchmarks/results/2026-07-22_accel_stepcache_wan_4090.md) — incl. two
+       Full write-up — incl. two
        pre-existing standalone-Wan-test bugs found (FlowShift 5-vs-8; real-length embed slice vs the
        engine's 512-row + ZeroPaddedRows). Infra added: `IBackend.PinActivation` (cache state survives
        per-step FreeActivations). **LTX-0.9 WIRED + smoke-verified** (2026-07-22: `LtxVideoTransformer.
@@ -245,11 +245,11 @@ SDPA share (27%).
        First calibration + A/B attempt exposed a STANDALONE-HARNESS BUG, not a model result: the test
        family fed the raw 2048-padded EncodeChat array (+ `<think>` block) into Ideogram's unmasked
        attention — baseline itself was degenerate (see the correction in
-       [the sageattn/fusion results doc](../../benchmarks/results/2026-07-22_accel_sageattn_3060.md)),
+       the sageattn/fusion results doc),
        which also retracts the morning's "comfy_quant fused-F16 defect" mechanism story. Harnesses
        fixed to mirror the engine recipe (trim + no-think).
        **📊 Fixed-harness result — SHIPPED OPT-IN, gate PASSED**
-       ([results](../../benchmarks/results/2026-07-22_accel_stepcache_ideogram_4090.md)): baseline
+       (results): baseline
        19.5 s byte-stable eyeball-✓; calibration shows indicator FLAT vs residual drift falling
        0.72→0.12 ⇒ poly gate structurally blind here ⇒ new `HARTSY_STEP_CACHE_LATE` window gate
        (reuse only in the schedule tail; `StepCacheEnv.ReadLateWindow`, wired in Ideogram4Pipeline).
@@ -261,13 +261,13 @@ SDPA share (27%).
        (poly already places reuses late; gates are SUBSTITUTES — Qwen results doc §composition).
        Krea2 Turbo wired the same way (eager-forced when armed — captured step graph can't vary
        topology); 8-step distilled measured
-       ([results](../../benchmarks/results/2026-07-22_accel_stepcache_krea2turbo_4090.md)):
+       (results):
        calibration U-shaped (0.61→0.28→0.38, indicator spikes on the final step) — ONE quality-free
        late reuse exists: **`LATE=0.5`+`0.15` → 4.43→3.91 s = 1.13× at SSIM 0.9740 ✓
        eyeball-indistinguishable**; smaller window = 0 reuses = byte-identical (null check ✓).
        Fleet H1.5 trio complete: Qwen poly 1.20× / Ideogram window 1.39× / Krea2-Turbo window 1.13×.)*
        *(📊 2026-07-22 — **Flux.2 Dev: FLEET-BEST 2.49×**
-       ([results](../../benchmarks/results/2026-07-22_accel_stepcache_flux2dev_4090.md)): Q4_K_S GGUF
+       (results): Q4_K_S GGUF
        catalog pin re-staged (sha ✓, Wan-2.1 pair pruned w/ user approval), FBCache-shape wiring in
        Flux2Transformer (double-block-0 img gates; hit skips doubles+concat+48 singles via img-portion
        residual), harness drives the ENGINE RECIPE (no conditioning re-implementation). Calibration =
@@ -296,7 +296,7 @@ SDPA share (27%).
        uncond skipped only at low noise): quality-safe (SSIM 0.981–0.996, eyeball-identical) but
        MARGINAL (−3…−5%) — this scheduler only puts 1–2 of 20 steps below t=0.15. C2 stays default-off;
        `0.15,1` is the sane opt-in. Full write-up:
-       [2026-07-22_accel_cfginterval_qwen_4090.md](../../benchmarks/results/2026-07-22_accel_cfginterval_qwen_4090.md).)*
+       2026-07-22_accel_cfginterval_qwen_4090.md.)*
 2. [x] Composability run: interval + step cache together (they compound: interval halves gated steps,
        cache skips block stacks on the rest). *(Done above — compounds mechanically; quality verdict
        tracks whichever interval band is used.)*
@@ -379,7 +379,7 @@ SDPA share (27%).
 > default). Trap fixed: cp.async src must be 16B-aligned — per-head kscale bases (head×Skv floats) are
 > NOT for odd Skv → CUDA 716 MISALIGNED_ADDRESS; ks tile now stages with scalar loads. ~60% of the
 > mixed-precision roofline (PV f16→f32 dominates the remaining floor). Full log:
-> [2026-07-22_accel_sageattn_3060.md](../../benchmarks/results/2026-07-22_accel_sageattn_3060.md).
+> 2026-07-22_accel_sageattn_3060.md.
 > Remaining H4 gates: (2-formal) BDN `SdpaGpuBenchmarks` run + 4090 numbers; (3) e2e Wan step + SSIM.
 >
 > **NEXT KERNEL UNIT — F16-ingest/F16-out Sage (designed 2026-07-22, build next session):** the image

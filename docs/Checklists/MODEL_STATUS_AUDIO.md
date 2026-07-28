@@ -189,7 +189,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 >   half-rewritten multi-file UNet is worse than leaving this honestly `ValidationPending`/not-CliDrivable.
 
 > ## 🏁 First e2e TTS/STT speed benchmarks (2026-07-12) — RTF on 3060 **and** 4090
-> Measured through the SwarmUI+AudioLab path: [`benchmarks/results/audio_tts_stt_2026-07-12.md`](../../benchmarks/results/audio_tts_stt_2026-07-12.md).
+> Measured through the SwarmUI+AudioLab path: `benchmarks/results/audio_tts_stt_2026-07-12.md`.
 > Piper 10.4×/7.7×, Moonshine 6.5×/6.5×, Whisper-base 5.1×/5.4×, MeloTTS 1.7×/1.8× (3060/4090). **These small
 > models are host/launch-bound — the 4090 barely helps; the lever is CUDA-graph capture, not a bigger GPU.**
 > **Runtime outliers found (parity ✅ ≠ runnable):** ~~Kokoro install 401~~ **FIXED 07-13** (canonical-`.pth`

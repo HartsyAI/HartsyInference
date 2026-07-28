@@ -2,7 +2,7 @@
 
 > **Goal:** HartsyInference within 2× of ComfyUI on the same hardware running the same model + same noise + same scheduler config.
 > **Status:** first paired video dual-run collected 2026-07-03 on RTX 4090 via SwarmUI — see
-> [`../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md`](../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md).
+> `../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md`.
 > **Initial result: FAILED the 2× bar — 5.9× (14B fp8) to 10.8× (1.3B fp16) slower than ComfyUI.**
 > Root cause was NOT F16/compute: the shared `GpuTransferHelper.CopyToDevice` miss path did a full
 > `cuStreamSynchronize` before every host-tensor H2D, draining the async pipeline ~30k times/gen (Wan DiT misses

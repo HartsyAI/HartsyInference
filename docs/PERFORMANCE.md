@@ -164,35 +164,14 @@ python3 bench_t2i.py --backend hartsy --config models.json --out results.json --
 | AuraFlow-0.3 | 20 | 3.5 |
 | OmniGen 2 | 20 | 4.0 |
 
-**Current scoreboard** — RTX 4090, warm median, engine `1.0.0-alpha.46` + in-flight `44.x-local` optimization rounds, 2026-07-11. ComfyUI
-column is the same request on the same GPU through the ComfyUI backend. The optimization grind is ongoing
-and tracked in [`benchmarks/results/`](../benchmarks/results/); this table is a snapshot, updated as
-rounds land:
-
-| Model | HartsyInference | ComfyUI | Status |
-|---|---:|---:|---|
-| Z-Image-Turbo | **2.76 s** | 3.1 s | Faster than ComfyUI |
-| Krea2-Turbo | **4.52 s** | 6.5 s | Faster than ComfyUI |
-| Krea2-Base | **30.3 s** | 42.13 s | Faster than ComfyUI (0.72×) — Comfy baseline added 07-18 (`image_python_baselines_2026-07-18.md`) |
-| Qwen-Image | **39.4 s** | 54.8 s | Faster than ComfyUI |
-| Qwen-Image-Edit 2511 | 93 s | 87.8 s | 1.05× — image editing w/ up to 3 reference images (vision-conditioned); GPU-compute-bound, BF16 activations queued |
-| ERNIE-Image | **20.0 s** | 23.9 s | Faster than ComfyUI (was 49.6 s / 2.1× slower) |
-| Ideogram4 | 19.5 s | 17.0 s | 1.15× — optimization queued |
-| Boogu-Turbo | 3.26 s | 2.54 s | 1.28× — was 48.9 s (15× in two rounds); optimization in progress |
-| Boogu-Base | 26.5 s | 17.8 s | 1.49× — was ~6 min (~13×); optimization in progress |
-| Chroma1-HD | 28.5 s | 16.6 s | 1.7× — was 3.7× (round 3: F16 blocks, persistent CFG-pair CUDA graph, context trim); batched CFG queued |
-| AuraFlow-0.3 | **13.93 s** | 14.0 s | Tied with ComfyUI (was 31.4 s) |
-| Flux-Dev | **16.05 s** | 12.5 s | 1.28× — Flux-family kit transplant done (`44.38-local`: F16 residual damp + persistent cross-generation step graph + rope/prompt caches); remaining gap is per-step GPU compute |
-| Flux-Schnell | **3.6 s** | 3.04 s | 1.18× — Flux-family kit transplant done (`44.38-local`) |
-| Flux.2 Klein 4B | **2.36 s** | 1.85 s | 1.28× — Flux-family kit transplant done (`44.38-local`). Distilled variant: 4 steps/CFG 1 official |
-| SDXL | **2.93 s** | 3.7 s | Faster than ComfyUI (was 33.9 s / 9.2× slower two rounds ago) |
-| Lumina-Image 2.0 | 17.7 s | **10.05 s** | 1.76× — Comfy baseline added 07-18 (native `lumina2` @25 st/cfg4); perf pass queued. Was 650 s (37× in one round) |
-| OmniGen 2 | **19.21 s** | 13.0 s | 1.48× — perf pass 07-18 (`alpha.54→60`): re-benched baseline 132.6 s (a regression had crept in) → 19.21 s (**6.90×**). Device RoPE (host Q/K-drain → cached device tables; the 4× win) + drain-free loop (`ForwardPacked` + `CfgEulerStep` + device patchify/unpatchify — also fixed the cpu-glue-async-race crash) + F16 activations + fully-device Concat/Split. Also fixed a **cross-model** bug: `DiTUtils.ConcatAlongSeqDim`/`SplitAlongSeqDim` were F32-hardcoded → 2× OOB read on F16 buffers. Remaining <13 s path is a project (op fusion + a text-padding/mask rewrite to unblock CUDA-graph/batched-CFG — cond/uncond have different lengths, single-slot StepGraph API). Full log: `benchmarks/results/omnigen2_perf_2026-07-18.md` |
-| Flux.2 Dev 32B (Q4_K_S GGUF, 20 st) | **52.6 s** | 54.37 s | ~Tied/faster than ComfyUI (0.97×) — Comfy baseline added 07-18 (via city96 GGUF node). First e2e 07-10 (native GGUF + live Mistral-Small-3 TE); eager loop 2.6 s/step (28-st warm 73.9 s on `44.71-local` = same per-step rate; step graph opt-in). Model-switch NRE **fixed + validated 07-11** (Dev→Krea2→Dev in one process, no restart) |
-| HunyuanImage 2.1 17B (Q4_K_M GGUF, 2048², 20 st) | **~50.0 s** | 48.08 s | **1.04× — matched** (07-18 A/B on `alpha.61`: F16 49.8–50.1 s, F32 49.9 s — statistically identical). The handoff's 74.1 s was **stale** (alpha `44.71`, 07-11); prior TE-cache + drain-free-loop work had already ground it to ~50 s. **F16-activation opt-in (`DitDtype.Act`) is perf-NEUTRAL here** — the Q4_K weights dequant to F32 in the GEMM regardless of activation dtype (unlike fp8's F16-act-quant path), so the DiT GEMM is the F32 floor. To go below Comfy needs a **Q4→F16 dequant-GEMM** path (matches Comfy's fp16 GGUF GEMM). Was 77.0 s |
-| HiDream-i1 17B (fp8, 25 st, cfg 5) | 44.0 s | 35.2 s | 1.25× — first official row 07-11 (`44.71-local`): activation-memory pass unblocked 1024²-CFG (was FAILED/OOM in the 07-05 run); warm ×3 44.0 s flat, peak 20.6 GB, coherent |
-| F-Lite 10B (30 st, cfg 6) | **61.5 s** | 122.98 s | Faster than Python (0.50×, **memory-bound caveat**) — no ComfyUI arch; Python ref = diffusers `f_lite` with **sequential CPU offload** (10B+T5-XXL ≈ 29 GB > 24 GB, so resident/model-offload both OOM). On a ≥40 GB GPU diffusers would run resident and likely be faster; read as "beats diffusers-on-24 GB". First correct run 07-11 (4 reference bugs; 47× block-port) |
-| Chroma1-Radiance (pixel-space, 20 st, cfg 3.5) | **21.46 s** (fp8) | 21.07 s (fp8) / 24.68 s (BF16) | **1.02× — MATCHED, honest fp8-vs-fp8 (07-18)**. Path: F32 31.18 → F16 backbone 30.27 → fp8 weights 22.53 → CopyInto→re-patchify 22.37 → **F16 NeRF head 21.46** (the ~1.6 s F32 `BatchedMatMul` hypernetwork + GLU stream → F16 tensor cores; the un-damp `param_generator` GEMM + L2-normalize stay F32 since the un-damped values can exceed F16's 65504 — coherent, verified on real weights). 4090 is GPU-compute-bound (~100 % util) so a step-graph is wall-neutral; the residual ~0.4 s (within run-noise) is raw GEMM/SDPA vs torch's kernels. From 31.18→21.46 = **1.45×**; peak VRAM 22→14 GB. Progression: F32 31.18 (the 54.4 s handoff was stale) → **F16 backbone** 30.27 (the deferred "Radiance head audit": img damped at the ForwardCore F16 cast, un-damped at the NeRF `param_generator` GEMM alpha — coherent+exact; only −1 s because a SYNC profile showed **Linear = 58 %, BF16-weight-HBM-bound**) → **fp8 weight requant** **22.53** (`HARTSY_RADIANCE_FP8`: `QuantizeDitBlocksToFp8` on block Linears; native fp8 tensor-core GEMM). **Honest fp8-vs-fp8** (`--fp8_e4m3fn-unet --fast fp8_matrix_mult` on Comfy): Comfy **21.07** vs ours **22.53** → we closed the gap 1.23×→**1.07×** but Comfy's fp8 tensor-core path is still ~1.5 s ahead. (Comfy fp8 *without* fp8_matrix_mult = 26.37 s — slower than its own BF16.) Follow-ups to actually beat it: fp8-quant load = ~76 s host absmax loops (persist fp8 repack to disk), + the profiled H2D_MISS_BIG (1.3 s) / CopyInto (0.67 s) / fp8 the NeRF head. (Changes are working-tree on `1.0.0-alpha.51`, not yet released.) |
+**Current scoreboard.** The full per-model HartsyInference-vs-ComfyUI table (RTX 4090 and RTX 3060,
+every image model, with dates and source runs) now lives in
+**[`benchmarks/scoreboards/IMAGE.md`](../benchmarks/scoreboards/IMAGE.md)** — that file is the canonical
+copy; this page only covers methodology and configuration. Headline results as of the latest sweep:
+most turbo/distilled models (Z-Image-Turbo, Krea2, Flux-Schnell, SDXL) beat or match ComfyUI outright;
+larger 20-30-step models (Chroma1-HD, Boogu, Ideogram4) trail by 1.2-1.7× with optimization ongoing; a
+few (F-Lite, Chroma1-Radiance) have no ComfyUI graph and are compared against a Python reference instead.
+See the scoreboard for exact numbers, per-model status, and the optimization history behind each one.
 
 ---
 
@@ -201,12 +180,9 @@ rounds land:
 Different metric from the image models above. The LM decodes codec frames **autoregressively at 12.5 Hz**, so
 the headline is **milliseconds per frame** (lower is better), measured on an **RTX 3060** (not the 4090 above),
 HeartMuLa-oss-3B `3b-base`, 4 s clip, warm, steady-state (frames 10–50), cond+uncond CFG. No ComfyUI baseline.
-
-| Config | ms/frame | frames/s | ≈ realtime (AR decode) | vs bf16 |
-|---|---:|---:|---:|---:|
-| bf16 (baseline) | 91.5 | 10.9 | ~0.87× | 1.0× |
-| + CUDA-graph decode (`HARTSY_CSM_GRAPH`, **default on**) | ~86–90 | ~11.2–11.7 | ~0.9× | ~1.05× |
-| **Q8_0 disk-quant** (`HARTSY_HEARTMULA_QUANT=q8_0`) | **64.8** | **15.4** | **~1.23×** | **1.41×** |
+Full numbers (bf16 baseline → CUDA-graph → Q8_0 disk-quant progression) are in
+[`benchmarks/scoreboards/AUDIO.md`](../benchmarks/scoreboards/AUDIO.md)'s AR-decode table; the headline is
+**Q8_0 quantization at 64.8 ms/frame, 1.41× faster than bf16**, pushing HeartMuLa past real-time.
 
 The per-frame cost is **almost entirely per-token weight streaming** (cond+uncond, ~360 GB/s on the 3060):
 backbone 3B ≈ 33 ms + depth decoder ≈ 23 ms + heads/embeds — i.e. HeartMuLa is **memory-bandwidth-bound, not
@@ -225,12 +201,9 @@ Verify audio coherence on every run; a fast broken decode is not a result.
 
 Same **ms/frame** metric, different model. Zonos decodes 9 delayed codebooks autoregressively; a frame = 512
 samples @ 44.1 kHz ≈ **11.6 ms** of audio (real-time = 11.6 ms/frame). Measured on an **RTX 4090**, **F32** (TF32
-degenerates over the AR loop — F32 is deliberate), warm. Full write-up: [`benchmarks/results/zonos_tts_2026-07-17.md`](../benchmarks/results/zonos_tts_2026-07-17.md).
-
-| Config | ms/frame | ≈ realtime (AR decode) | vs baseline |
-|---|---:|---:|---:|
-| host-glue decode (baseline) | ~203 | ~0.057× (17.5× slower) | 1.0× |
-| **GPU-resident decode** (`DiaAttention.SelfForwardFlash` + `FixedKvCache` + GQA `FlashAttention`) | **~32** | **~0.34× (2.9× slower)** | **~6.3×** |
+degenerates over the AR loop — F32 is deliberate), warm. Full numbers in
+[`benchmarks/scoreboards/AUDIO.md`](../benchmarks/scoreboards/AUDIO.md)'s AR-decode table — headline is
+**GPU-resident decode at ~32 ms/frame, ~6.3× faster** than the original host-glue path (~203 ms/frame).
 
 The whole attention block ran host `Buffer.MemoryCopy`/loops on GPU tensors (host RoPE + `DiaHeads` reshapes +
 `RepeatKv` + host KV append), breaking the CUDA activation-residency cache and re-uploading the O(n²) growing K/V

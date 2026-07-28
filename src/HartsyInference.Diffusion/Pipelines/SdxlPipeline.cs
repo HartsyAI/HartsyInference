@@ -153,6 +153,11 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         else
         {
             Logs.Info("Encoding text with dual CLIP encoders...");
+            // Bulk-upload both encoders for the duration of the encode, then release them below (the
+            // PreloadWeights/FreeWeights symmetry AGENTS.md requires). Only reached on a prompt-cache MISS —
+            // a hit skips the whole phase, so repeat prompts pay nothing.
+            Backend.PreloadWeights(_clipL.EnumerateWeights());
+            Backend.PreloadWeights(_clipG.EnumerateWeights());
             int[][] batchTokenIdsL = [negativePromptTokenIdsL, promptTokenIdsL];
             (Tensor clipLHidden, _) = _clipL.EncodePenultimate(Backend, batchTokenIdsL, [0, 0], clipSkip);
 
@@ -168,6 +173,15 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             // is disposed here unless it IS the chosen refiner conditioning (kept alive to the end of the pipeline).
             clipGForRefiner = useStepSwap ? (refiner!.RefinerConditioning ?? clipGHidden) : null;
             if (!ReferenceEquals(clipGForRefiner, clipGHidden)) clipGHidden.Dispose();
+
+            // Release both encoders now the hidden states are extracted — they are not touched again in this
+            // pipeline. CLIP-G alone is ~1.4 GB, so on a 12 GB card this is ~13% of the budget, and it is
+            // budget the VAE decode actively bids for: VaeDecoder picks full-res vs tiled on measured free VRAM
+            // (needs workspace + 1.5 GB headroom), so holding dead weights here can push a decode to the slower
+            // tiled path for no reason. Sync first so the encode's in-flight reads finish before the free.
+            Backend.Sync();
+            Backend.FreeWeights(_clipL.EnumerateWeights());
+            Backend.FreeWeights(_clipG.EnumerateWeights());
             Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
             if (teCacheEligible && pooledOutput is not null)
@@ -254,8 +268,8 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
 
         // 6. VAE decode. Under HARTSY_KEEP_MODELS the UNet stays resident (2.5 GB F16 beside the
         // VAE's banded-conv workspace fits 24 GB with ~14 GB headroom — measured peak 10.2 GB);
-        // otherwise free it to reclaim VRAM for the high-res VAE conv2d buffers. CLIP-L/CLIP-G
-        // stay resident (they don't expose EnumerateWeights yet).
+        // otherwise free it to reclaim VRAM for the high-res VAE conv2d buffers. CLIP-L/CLIP-G were
+        // already released at the end of the text-encode phase above.
         Backend.Sync();
         if (KeepModelsResident)
         {

@@ -181,7 +181,7 @@ Each subphase is its own deliverable with a benchmarks/results/run_post_{tag}_{g
 ## B5 — Final Validation + Tech Paper
 
 - [ ] Re-run full harness across all target devices → `benchmarks/results/run_final_{date}_{gpu}/`
-- [ ] [`benchmarks/results/final_report.md`](../../benchmarks/results/final_report.md) — cross-device summary, before/after table per kernel, end-to-end SDXL/Flux/SD3.5/Z-Image numbers
+- [ ] `benchmarks/results/final_report.md` — cross-device summary, before/after table per kernel, end-to-end SDXL/Flux/SD3.5/Z-Image numbers
 - [ ] [`docs/Research/TECH_PAPER_OUTLINE.md`](../Research/TECH_PAPER_OUTLINE.md) — every section populated with real figures
 - [ ] [`paper/`](../../paper/) — generated LaTeX from the outline + figure CSVs
 - [ ] Tag commit `phase-b-complete`

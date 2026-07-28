@@ -12,11 +12,11 @@ It is a complete pure-.NET AI stack, including **native LLM text generation** (Q
 
 ## ⚠️ Alpha software
 
-**This is `1.0.0-alpha`, an early, fast-moving preview.** Use it to experiment, not in production.
+**This is `2.0.0-alpha`, an early, fast-moving preview.** Use it to experiment, not in production.
 
 - **APIs will change without notice** between alpha releases. Pin an exact version.
 - **Model coverage is broad but maturity varies.** Many architectures are implemented and load/run end-to-end but are still being validated numerically against their reference implementations. Treat output quality per-model as "verify before you rely on it."
-- **No support guarantees, no semver stability** until `1.0.0`.
+- **No support guarantees, no semver stability** until `2.0.0`.
 - The **sample CLIs are not published as packages** in this alpha; they live in the source repository as developer/validation tools.
 
 Found a bug or a mismatch against a reference? Please [open an issue](https://github.com/HartsyAI/HartsyInference/issues).
@@ -69,16 +69,16 @@ Swap `new CpuBackend()` for `new CudaBackend()` or `new VulkanBackend()`; the pi
 | Modality | Highlights |
 |---|---|
 | **LLM text generation** | Qwen2/Qwen3, Llama-3.x, Mistral, and quantized GGUF (Q4/Q8) inference, with a config-driven generic transformer, device-resident KV cache, samplers, and chat templates |
-| **Image generation** | SD 1.5, SDXL, SD3, Flux.1 / Flux.2, AuraFlow, Chroma, HiDream, Qwen-Image, Lumina 2, OmniGen2, HunyuanImage, Ideogram, Kandinsky 5, and more, with LoRA, img2img, and tiling |
-| **Video generation** | LTX-Video, Wan 2.x, Lance, Kandinsky 5 video |
-| **Interactive / world models** | Matrix-Game 2 & 3, Oasis: action-conditioned, frame-by-frame generation |
+| **Image generation** | SD 1.5, SDXL, SD3 / SD3.5, Flux.1 / Flux.2, AuraFlow, Chroma, HiDream, Qwen-Image, Lumina 2, OmniGen2, HunyuanImage, Ideogram, Kandinsky 5, and more, with LoRA, img2img, tiling, ControlNet, and IP-Adapter |
+| **Video generation** | LTX-Video, Wan 2.x, Lance, Kandinsky 5 video, HunyuanVideo |
+| **Interactive / world models** | Oasis, DIAMOND: action-conditioned, frame-by-frame generation |
 | **Speech-to-text** | Whisper (tiny → large-v3), Moonshine, with streaming and timestamps |
 | **Text-to-speech & voice** | Kokoro, F5-TTS, StyleTTS2, Bark, CosyVoice, Spark-TTS, VibeVoice, CSM |
 | **Music** | ACE-Step, MusicGen, YuE |
-| **Vision** | CLIP & SigLIP embeddings, YOLO detection, SAM segmentation, face detection |
+| **Vision** | CLIP & SigLIP embeddings, YOLO detection, SAM segmentation, face detection, Grounding DINO, RT-DETR, depth estimation (Depth-Anything-V2) |
 | **3D generation** | Hunyuan3D-2 (flow-match DiT + ShapeVAE) & TripoSR (feed-forward triplane/NeRF) image to mesh, via marching cubes to glTF/OBJ/PLY |
 
-Checkpoints load directly from `.safetensors` / `.gguf`, including quantized weights (GGUF, MXFP4/8, NVFP4, block-scaled).
+Checkpoints load directly from `.safetensors` / `.gguf`, including quantized weights (GGUF, MXFP4/8, NVFP4, block-scaled). Low-VRAM weight streaming (`HARTSY_LOWVRAM`) lets large image models fit on smaller cards by sliding weights through a bounded window instead of holding them fully resident.
 
 > Coverage is wide because the engine shares a common core (tensors, schedulers, VAEs, text encoders, DSP) across architectures. Per-model numerical validation is ongoing; see the alpha note above.
 
@@ -90,13 +90,13 @@ HartsyInference is moving fast, and the roadmap is broad. On deck:
 
 | Area | Planned |
 |---|---|
-| **Image** | ControlNet, IP-Adapter, LCM/Turbo distillation across more architectures, regional prompting |
-| **Vision** | Grounding DINO, YOLO-World, OWLv2, Florence-2, RT-DETR, depth & pose estimation, OCR, tracking |
-| **Video** | HunyuanVideo, CogVideoX, longer-context temporal generation |
+| **Image** | ControlNet tile / inpaint modes, LCM/Turbo distillation across more architectures, regional prompting |
+| **Vision** | YOLO-World, OWLv2, Florence-2, pose estimation, OCR, tracking |
+| **Video** | CogVideoX, longer-context temporal generation |
 | **3D** | Gaussian-splat output, texture synthesis, multi-view to mesh |
-| **World models** | Broader action spaces, longer memory horizons, multiplayer state |
-| **Performance** | Full flash-attention kernel, CUDA graphs, and F16 activation paths to close the remaining speed gap vs native runners |
-| **Tooling** | Wider quantized inference (MXFP4 / MXFP8 / NVFP4), model hot-swap, broader SwarmUI-extension model coverage |
+| **World models** | Matrix-Game 2.0 / 3.0 and Hunyuan-GameCraft (catalogued, checkpoint loaders still landing), broader action spaces, longer memory horizons, multiplayer state |
+| **Performance** | SPIR-V/Vulkan flash-attention parity with the CUDA path, further closing the speed gap vs native runners on non-NVIDIA GPUs |
+| **Tooling** | Wider quantized inference (MXFP4 / MXFP8 / NVFP4), broader SwarmUI-extension model coverage |
 
 Track progress and releases on the [GitHub repo](https://github.com/HartsyAI/HartsyInference).
 
@@ -117,20 +117,19 @@ Track progress and releases on the [GitHub repo](https://github.com/HartsyAI/Har
 
 | Package | Description |
 |---|---|
-| `HartsyInference` | Meta-package: one reference for the core, all three backends, and every modality package including `HartsyInference.LLM` and `HartsyInference.Audio.Phonemizer` (only the abandoned `Server` and the sample `Cli` are excluded) |
+| `HartsyInference` | Meta-package: one reference for the core, all three backends, and every modality package including `HartsyInference.LLM` and `HartsyInference.Engine` (only the sample `Cli`, the unpublished `HartsyInference.API` HTTP server, and the abandoned `Server` project are excluded) |
 | `HartsyInference.Core` | Tensor types, `IBackend`, schedulers, pipeline base types |
-| `HartsyInference.ModelAssets` | Safetensors/GGUF loaders, quant dequant, HuggingFace download, model registry |
-| `HartsyInference.ModelAssets.Tokenizers` | CLIP, T5, Whisper, and LLM-style tokenizers |
-| `HartsyInference.Audio.Phonemizer` | Pure-C# grapheme-to-phoneme (espeak-ng port) for TTS front-ends |
+| `HartsyInference.ModelAssets` | Safetensors/GGUF/PyTorch-pickle loaders, quant dequant, HuggingFace download, model registry, plus CLIP/T5/Whisper/LLM-style tokenizers |
+| `HartsyInference.Engine` | Service layer: model lifecycle (registry, download, cache), the `InferenceEngine` facade + per-modality dispatch, backend factory — the CLI, HTTP server, and SwarmUI extension are thin wrappers around it |
 | `HartsyInference.Cpu` | CPU backend with AVX2 / AVX-512 / NEON SIMD kernels |
 | `HartsyInference.Cuda` | CUDA backend with PTX kernels + cuBLAS |
 | `HartsyInference.Vulkan` | Cross-vendor Vulkan backend (NVIDIA / AMD / Intel) via SPIR-V |
 | `HartsyInference.LLM` | Native LLM text generation: config-driven transformer (Qwen2/Qwen3/Llama/Mistral), GGUF inference, KV cache, samplers, chat templates |
 | `HartsyInference.Diffusion` | Image + music diffusion pipelines, VAEs, text encoders, LoRA |
-| `HartsyInference.Audio` | Whisper/Moonshine STT, TTS, voice conversion, music |
+| `HartsyInference.Audio` | Whisper/Moonshine STT, TTS, voice conversion, music, plus a built-in pure-C# grapheme-to-phoneme (espeak-ng port) for TTS front-ends |
 | `HartsyInference.Vision` | CLIP/SigLIP embeddings, YOLO, SAM, face detection |
-| `HartsyInference.Video` | LTX-Video, Wan, Lance, Kandinsky 5 video |
-| `HartsyInference.World` | Action-conditioned world models (Matrix-Game, Oasis) |
+| `HartsyInference.Video` | LTX-Video, Wan, Lance, Kandinsky 5 video, HunyuanVideo |
+| `HartsyInference.World` | Action-conditioned world models (Oasis, DIAMOND) |
 | `HartsyInference.ThreeD` | 3D asset generation: mesh/splat foundation (marching cubes, glTF/OBJ/PLY) + Hunyuan3D-2 image to mesh |
 
 ---

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -11,7 +12,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 ///
 /// Reference: <c>diffusers/models/transformers/transformer_chroma.py:276-369</c>.
 /// Also supports an optional attention mask <c>[B, totalSeqLen]</c> that gets expanded into the SDPA mask.</summary>
-public sealed unsafe class ChromaDoubleStreamBlock
+public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
 {
     private readonly int _hiddenSize;
     private readonly int _numHeads;
@@ -150,6 +151,19 @@ public sealed unsafe class ChromaDoubleStreamBlock
             weights[$"{prefix}.ff_context.net.0.proj.bias"],
             txtFfnOutWeight,
             txtFfnOutBias);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>Via <see cref="DType.ComputeByteCount"/>, not <c>ElementCount * SizeInBytes</c>: block-quantized
+    /// dtypes report <c>SizeInBytes == 0</c>, so the naive product totals to zero and silently disables streaming.</remarks>
+    public long EstimatedWeightBytes
+    {
+        get
+        {
+            long total = 0;
+            foreach (Tensor w in EnumerateWeights()) total += w.DType.ComputeByteCount(w.ElementCount);
+            return total;
+        }
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>

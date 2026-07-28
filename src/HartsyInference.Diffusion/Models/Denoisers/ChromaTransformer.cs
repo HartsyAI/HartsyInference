@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -147,6 +148,39 @@ public sealed unsafe class ChromaTransformer : IDisposable
             _singleBlocks[i].LoadWeights(weights, $"single_transformer_blocks.{i}", branchDamp);
     }
 
+    /// <summary>Streamable blocks: the <c>Depth</c> double-stream blocks occupy <c>[0, Depth)</c>, the
+    /// <c>DepthSingleBlocks</c> single-stream blocks <c>[Depth, BlockCount)</c> — the order
+    /// <see cref="ForwardCore"/> runs them in.</summary>
+    public int BlockCount => _doubleBlocks.Length + _singleBlocks.Length;
+
+    /// <summary>Block at the flat index described by <see cref="BlockCount"/>.</summary>
+    public IStreamingBlock GetBlock(int idx)
+    {
+        if (idx < 0 || idx >= BlockCount) throw new ArgumentOutOfRangeException(nameof(idx));
+        return idx < _doubleBlocks.Length ? _doubleBlocks[idx] : _singleBlocks[idx - _doubleBlocks.Length];
+    }
+
+    /// <summary>Set by a pipeline driving a <see cref="BlockStreamingController"/>; called with each block's flat
+    /// index immediately before that block's forward so the controller can page its weights in.</summary>
+    /// <remarks>Non-null also DISABLES the captured step graph (see <see cref="ForwardPaired"/>): a graph bakes the
+    /// weight device pointers it was recorded with, and streaming re-points them every forward (CUDA 700).</remarks>
+    public Action<int>? BeforeBlockForward { get; set; }
+
+    /// <summary>Weights touched on every forward regardless of which block runs — everything outside the 19+38
+    /// block stack. These stay eagerly resident when the blocks are streamed.</summary>
+    /// <remarks>A genuine partition of <see cref="EnumerateWeights"/> together with the per-block sets: the
+    /// approximator's modulation table is rebuilt every step and the embedders bracket the loop.</remarks>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
+        if (_xEmbedWeight is not null) yield return _xEmbedWeight;
+        if (_xEmbedBias is not null) yield return _xEmbedBias;
+        if (_contextEmbedWeight is not null) yield return _contextEmbedWeight;
+        if (_contextEmbedBias is not null) yield return _contextEmbedBias;
+        foreach (Tensor w in _approximator.EnumerateWeights()) yield return w;
+        if (_projOutWeight is not null) yield return _projOutWeight;
+        if (_projOutBias is not null) yield return _projOutBias;
+    }
+
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
@@ -215,7 +249,11 @@ public sealed unsafe class ChromaTransformer : IDisposable
         int condTxtLen = (int)condContext.Shape[1];
         int uncondTxtLen = uncondContext is not null ? (int)uncondContext.Shape[1] : 0;
 
+        // FULLY RESIDENT only (BeforeBlockForward null): a captured graph bakes the weight device pointers it was
+        // recorded with, and block streaming re-points every block's weights each forward — replaying the graph
+        // would dereference freed addresses (CUDA 700).
         bool graphMode = DitStepGraph.EnabledDefaultOn && backend.StepGraphSupported && !_graphDead
+            && BeforeBlockForward is null
             && batch == 1 && ReferenceEquals(packedLatent, _latentFixed);
         if (!graphMode)
         {
@@ -503,6 +541,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
                 : BuildDoubleBlockTemb(modTable, batch, imgRow, txtRow, hidden);
             ChromaDebugDump.Dump($"double_{i}_temb", doubleTemb);
 
+            BeforeBlockForward?.Invoke(i);
             (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, img, txt, doubleTemb, rope, sdpaMask);
             doubleTemb.Dispose();
 
@@ -539,6 +578,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
                 : SliceModSlab(modTable, batch, singleRow, rowCount: 3, hidden);
             ChromaDebugDump.Dump($"single_{i}_temb", singleTemb);
 
+            BeforeBlockForward?.Invoke(numDoubles + i);
             Tensor newCombined = _singleBlocks[i].Forward(backend, combined, singleTemb, rope, sdpaMask);
             singleTemb.Dispose();
             combined.Dispose();

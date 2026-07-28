@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -51,6 +52,31 @@ public sealed class ChromaRadianceTransformer : IDisposable
     public IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (Tensor w in _backbone.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _patchifier.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _nerfHead.EnumerateWeights()) yield return w;
+    }
+
+    /// <summary>Streamable blocks — the backbone's 19 double + 38 single stack. The pixel patchifier and the NeRF
+    /// head are pixel-space IO, not blocks, so they belong to <see cref="EnumerateSharedWeights"/>.</summary>
+    public int BlockCount => _backbone.BlockCount;
+
+    /// <summary>Block at the flat index described by <see cref="BlockCount"/>.</summary>
+    public IStreamingBlock GetBlock(int idx) => _backbone.GetBlock(idx);
+
+    /// <summary>Set by <see cref="Pipelines.ChromaRadiancePipeline"/> when it drives a
+    /// <see cref="BlockStreamingController"/>; forwarded to the backbone, which calls it before every block.</summary>
+    public Action<int>? BeforeBlockForward
+    {
+        get => _backbone.BeforeBlockForward;
+        set => _backbone.BeforeBlockForward = value;
+    }
+
+    /// <summary>Weights that must stay resident for the whole denoise phase when the blocks are streamed: the
+    /// backbone's shared set plus the conv patchifier and the NeRF pixel decoder (both run once per forward,
+    /// outside the block loop, and the head's positional/hypernetwork tables are re-read per patch tile).</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
+        foreach (Tensor w in _backbone.EnumerateSharedWeights()) yield return w;
         foreach (Tensor w in _patchifier.EnumerateWeights()) yield return w;
         foreach (Tensor w in _nerfHead.EnumerateWeights()) yield return w;
     }

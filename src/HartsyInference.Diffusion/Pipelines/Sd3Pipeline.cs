@@ -94,9 +94,11 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
 
         // Bulk-upload T5 weights once (~5 GB on T5-XXL) so the encoder's many kernels don't
         // each pay a per-op cache-miss H2D transfer. Backends without a weight cache no-op.
-        // Pairs with the FreeWeights below the VAE handoff. CLIP-L/G are tiny and we let them
-        // lazy-cache (no matching free either — they stay resident across generations).
+        // Pairs with the FreeWeights at the END of this phase (not after the denoise loop). CLIP-L/G are
+        // preloaded here too: "tiny" was wrong for CLIP-G, which is ~1.4 GB.
         if (_t5 is not null) Backend.PreloadWeights(_t5.EnumerateWeights());
+        Backend.PreloadWeights(_clipL.EnumerateWeights());
+        Backend.PreloadWeights(_clipG.EnumerateWeights());
 
         bool useCfg = cfgScale > 1.0f;
 
@@ -138,6 +140,17 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         if (uncondProjected is not null) _ = uncondProjected.DataPointer;
         if (uncondPooled is not null) _ = uncondPooled.DataPointer;
         Backend.FreeActivations();
+
+        // Release all three text encoders here, not after the denoise loop. They are not touched again this
+        // generation (the conditioning above is already host-materialized), and holding them costs roughly
+        // T5-XXL ~5 GB + CLIP-G ~1.4 GB + CLIP-L ~0.25 GB ≈ 6.6 GB of dead weight for the *entire* loop —
+        // beside a ~5 GB transformer that is about to be preloaded. That is what made SD3.5-Medium OOM during
+        // this very phase on a 12 GB card. Same staging every other pipeline uses (Lens frees its encoder at
+        // the same boundary; Qwen evicts the DiT for the TE phase and re-preloads after).
+        Backend.Sync();
+        if (_t5 is not null) Backend.FreeWeights(_t5.EnumerateWeights());
+        Backend.FreeWeights(_clipL.EnumerateWeights());
+        Backend.FreeWeights(_clipG.EnumerateWeights());
 
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
@@ -282,7 +295,8 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         // Backends without a weight cache (CPU/Vulkan) treat this as a no-op.
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
-        if (_t5 is not null) Backend.FreeWeights(_t5.EnumerateWeights());
+        // T5/CLIP are already gone — released at the end of the text-encode phase rather than held across
+        // the whole denoise loop.
 
         // ── 5. VAE decode ───────────────────────────────────────────────
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile. Internal fast-path

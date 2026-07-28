@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -11,7 +12,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// sequence — the parent transformer does the concat once before the loop and slices the image tail off after.
 ///
 /// Reference: <c>diffusers/models/transformers/transformer_chroma.py:204-273</c>.</summary>
-public sealed unsafe class ChromaSingleStreamBlock
+public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
 {
     private readonly int _hiddenSize;
     private readonly int _numHeads;
@@ -82,6 +83,19 @@ public sealed unsafe class ChromaSingleStreamBlock
         {
             _projOutWeight.Fp8ScaleFactor *= branchDamp;
             _projOutBias = ChromaF16.DampBias(_projOutBias, branchDamp);
+        }
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>Via <see cref="DType.ComputeByteCount"/>, not <c>ElementCount * SizeInBytes</c>: block-quantized
+    /// dtypes report <c>SizeInBytes == 0</c>, so the naive product totals to zero and silently disables streaming.</remarks>
+    public long EstimatedWeightBytes
+    {
+        get
+        {
+            long total = 0;
+            foreach (Tensor w in EnumerateWeights()) total += w.DType.ComputeByteCount(w.ElementCount);
+            return total;
         }
     }
 

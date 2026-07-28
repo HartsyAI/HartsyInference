@@ -8,9 +8,7 @@ stable release will require. Dates are UTC.
 
 ## [2.0.0-alpha.5] — 2026-07-27
 
-Low-VRAM generation, a GPU-memory leak fix, and selectable devices. Full technical detail, with all
-measurements and the things that turned out **not** to be true, in
-[`benchmarks/results/2026-07-27_lowvram_leak_fix.md`](benchmarks/results/2026-07-27_lowvram_leak_fix.md).
+Low-VRAM generation, a GPU-memory leak fix, and selectable devices.
 
 ### Added
 - **Low-VRAM weight streaming across the image fleet** (`HARTSY_LOWVRAM`, three-state: `auto` default /

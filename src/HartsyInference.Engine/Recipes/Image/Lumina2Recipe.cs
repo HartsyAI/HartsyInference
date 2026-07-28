@@ -98,31 +98,44 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
         return f32;
     }
 
-    /// <summary>Locates the Gemma-2 SentencePiece model: next to the encoder checkpoint, then the canonical models path, else downloads it (hash-verified) under the models root.</summary>
+    /// <summary>Locates the Gemma-2 SentencePiece model, accepting only a file whose SHA-256 matches <see cref="TokenizerSha256"/>: the canonical models path first, then siblings of the encoder checkpoint, else downloads it (hash-verified) under the models root.</summary>
+    /// <remarks>The hash check is load-bearing, not belt-and-braces. <c>Models/text_encoders/</c> is a shared folder that also holds LTX-2's Gemma-<b>3</b> <c>tokenizer.model</c> (262144 pieces); its ids for ordinary English words differ from Gemma-2's (256000 pieces) but stay inside Gemma-2's vocab, so picking it up produces valid-looking embeddings of a different sentence — a coherent image with no relation to the prompt, and no exception anywhere.</remarks>
     private static string EnsureTokenizer(string encoderPath)
     {
         string encoderDir = Path.GetDirectoryName(encoderPath) ?? "";
+        string canonicalDir = Path.Combine(RepoPaths.ModelsRoot(), "text_encoders", "Gemma2");
+        string canonical = Path.Combine(canonicalDir, "tokenizer.model");
         foreach (string candidate in new[]
         {
+            canonical,
             Path.Combine(encoderDir, "gemma2_tokenizer.model"),
             Path.Combine(encoderDir, "tokenizer.model"),
         })
         {
-            if (File.Exists(candidate))
+            if (!File.Exists(candidate))
             {
+                continue;
+            }
+            string actual = HashFile(candidate);
+            if (string.Equals(actual, TokenizerSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                Logs.Info($"[Lumina2Recipe] Gemma-2 tokenizer: {candidate}");
                 return candidate;
             }
+            Logs.Warning($"[Lumina2Recipe] Skipping \"{candidate}\": sha256 {actual} is not the Gemma-2 tokenizer (expected {TokenizerSha256}).");
         }
-        string dir = Path.Combine(RepoPaths.ModelsRoot(), "text_encoders", "Gemma2");
-        Directory.CreateDirectory(dir);
-        string path = Path.Combine(dir, "tokenizer.model");
-        if (!File.Exists(path))
-        {
-            Logs.Info($"[Lumina2Recipe] Downloading Gemma-2 tokenizer.model ({TokenizerRepo})...");
-            using HuggingFaceClient client = new HuggingFaceClient();
-            client.DownloadFileAsync(TokenizerRepo, TokenizerRepoPath, path, progress: null, sha256: TokenizerSha256, CancellationToken.None)
-                .GetAwaiter().GetResult();
-        }
-        return path;
+        Directory.CreateDirectory(canonicalDir);
+        Logs.Info($"[Lumina2Recipe] Downloading Gemma-2 tokenizer.model ({TokenizerRepo})...");
+        using HuggingFaceClient client = new HuggingFaceClient();
+        client.DownloadFileAsync(TokenizerRepo, TokenizerRepoPath, canonical, progress: null, sha256: TokenizerSha256, CancellationToken.None)
+            .GetAwaiter().GetResult();
+        return canonical;
+    }
+
+    /// <summary>Lowercase-hex SHA-256 of a file.</summary>
+    private static string HashFile(string path)
+    {
+        using FileStream stream = File.OpenRead(path);
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)).ToLowerInvariant();
     }
 }

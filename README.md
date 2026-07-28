@@ -85,7 +85,7 @@ dotnet run -c Release --project src/HartsyInference.Cli -- \
 dotnet run -c Release --project src/HartsyInference.Cli -- transcribe speech.wav -m whisper-base
 ```
 
-Commands span every modality — `text`, `image`, `transcribe`, `speak`, `3d`, `vision`, `music`, `video`, `world` — plus catalog helpers `list`, `models`, and `pull`. Common flags: `-b|--backend cpu|cuda|vulkan`, `-m|--model <name>`, `--model-path <path>`. Run `hartsy <command> --help` for a command's full option set.
+Commands span every modality — `text`, `image`, `transcribe`, `speak`, `3d`, `vision`, `music`, `video`, `world`, `convert` (voice conversion), `fx separate` / `fx enhance` (stem separation / speech enhancement) — plus catalog helpers `list`, `models`, `pull`, and `preview` (inline terminal image display). Common flags: `-b|--backend cpu|cuda|vulkan`, `-m|--model <name>`, `--model-path <path>`. Run `hartsy <command> --help` for a command's full option set.
 
 > [!TIP]
 > `pull` downloads a model from HuggingFace (or registers a local path) into the cache; `list` and `models` show the catalog and what's already cached. Image checkpoints also resolve from a ComfyUI-style layout under `<repo>/Models`.
@@ -308,128 +308,23 @@ await foreach (VideoFrame frame in session.ReadFramesAsync())
 
 ## Benchmarks
 
-We publish real numbers and we are honest about where we stand. HartsyInference is a young pure-C# engine: it is correct across a very wide model set, and on several flagship image models it is now **faster than ComfyUI on the same GPU** — while other models are still mid-optimization. We are closing the remaining gaps in the open. Every number below is reproducible from `benchmarks/` and the committed result files under [`benchmarks/results/`](benchmarks/results/); the exact methodology, required libraries, and the engine's default performance profile are specified in the **[Performance Guide](docs/PERFORMANCE.md)**.
+We publish real numbers and we are honest about where we stand. HartsyInference is a young pure-C# engine: it is correct across a very wide model set, and on several flagship image models it is now **faster than ComfyUI on the same GPU** — while other models are still mid-optimization. We are closing the remaining gaps in the open. Each modality has one canonical scoreboard table under [`benchmarks/scoreboards/`](benchmarks/scoreboards/) — that's where the numbers live now; the exact methodology, required libraries, and the engine's default performance profile are specified in the **[Performance Guide](docs/PERFORMANCE.md)**.
 
-### Image generation end-to-end vs ComfyUI
+**Headlines** (see each scoreboard for the full per-model table, GPU, date, and source):
 
-RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identical 1024×1024 request routed to the ComfyUI backend, then the HartsyInference backend, on the same GPU. Warm median of 3 runs, randomized seeds, outputs visually verified coherent. Engine `1.0.0-alpha.46` + in-flight local optimization rounds, 2026-07-11, spot-revalidated 2026-07-16 on `49.x-local` (Krea2-Turbo 4.6 s, Z-Image-Turbo 2.8 s, Flux warm gens bit-identical with the step graph on). Living snapshot — updated as optimization rounds land:
-
-| Model | HartsyInference | ComfyUI | Status |
-|---|---:|---:|---|
-| Flux.2 Klein 4B (4 steps) | 2.36 s | 1.85 s | 1.28× — Flux-family kit transplant done (was 3.45 s) |
-| Z-Image-Turbo (8 steps) | **2.76 s** | 3.1 s | **Faster than ComfyUI** |
-| SDXL (20 steps) | **2.93 s** | 3.7 s | **Faster than ComfyUI** (was 33.9 s) |
-| Boogu-Turbo (4 steps) | 3.26 s | 2.54 s | 1.28× — optimization in progress |
-| Flux-Schnell (4 steps) | 3.6 s | 3.04 s | 1.18× — Flux-family kit transplant done (was 10.5 s) |
-| Krea2-Turbo (8 steps) | **4.52 s** | 6.5 s | **Faster than ComfyUI** |
-| AuraFlow-0.3 (20 steps) | **13.93 s** | 14.0 s | **Tied with ComfyUI** (was 31.4 s) |
-| Flux-Dev (20 steps) | 16.05 s | 12.5 s | 1.28× — Flux-family kit transplant done (was 72.4 s) |
-| Ideogram4 (20 steps) | 19.5 s | 17.0 s | 1.15× — optimization queued |
-| ERNIE-Image (20 steps) | **20.0 s** | 23.9 s | **Faster than ComfyUI** |
-| Boogu-Base (20 steps) | 26.5 s | 17.8 s | 1.49× — optimization in progress |
-| Chroma1-HD (20 steps) | 28.5 s | 16.6 s | Optimization in progress (1.7×, was 33×) |
-| Qwen-Image (20 steps) | **39.4 s** | 54.8 s | **Faster than ComfyUI** |
-| OmniGen 2 (20 steps) | 90.5 s | 13.0 s | 7.0× — first bench, pre-optimization |
-| Qwen-Image-Edit 2511 (20 steps + reference) | 93 s | 87.8 s | 1.05× — full image editing with up to 3 vision-conditioned reference images |
-| HiDream-i1 17B (25 steps, cfg 5) | 44.0 s | 35.2 s | 1.25× — first official row 2026-07-11 (was FAILED/OOM in the 07-05 run, then 24 min cold) |
-| Flux.2 Dev 32B (20 steps, Q4 GGUF) | 52.6 s | — | First e2e 2026-07-10 — native GGUF quant + live Mistral-Small-3 encoder; multi-model switching validated 2026-07-11; no ComfyUI baseline |
-| HunyuanImage 2.1 17B (2048², 20 steps, Q4 GGUF) | 74.1 s | — | Native-resolution 2048², new pixel-shuffle VAE decoder + prompt-embedding cache (was 77.0 s); no ComfyUI baseline |
-| F-Lite 10B (30 steps) | 61.5 s | — | First correct run 2026-07-11 — validated block-by-block against the fal-ai reference; no ComfyUI baseline |
-| Lumina-Image 2.0 (25 steps, cfg 4) | 17.7 s | — | 37× in one optimization round (was 650 s); no ComfyUI baseline |
-| Chroma1-Radiance (pixel-space VAE-free, 20 steps) | 54.4 s | — | 14× in one optimization round (was 12.3 min); NeRF-head GPU port + prompt cache + resident DiT; no ComfyUI baseline |
+| Modality | Baseline | Standout results | Scoreboard |
+|---|---|---|---|
+| Image (T2I / edit) | ComfyUI (same GPU), Python for a couple of no-Comfy-graph models | Several flagship turbo/distilled models faster than ComfyUI (Z-Image-Turbo, Krea2, SDXL, Flux-Schnell); larger 20-30 step models trail by 1.2-1.7× | [`IMAGE.md`](benchmarks/scoreboards/IMAGE.md) |
+| LLM decode | llama.cpp, same GGUF/quant | 8 of 9 core text models at-or-ahead of llama.cpp; GLM-4-9B at 0.98× (effective parity) | [`LLM.md`](benchmarks/scoreboards/LLM.md) |
+| Video (T2V) | ComfyUI (same GPU) | Still behind ComfyUI on most video DiTs (1.1×-8×, architecture-dependent); the current optimization frontier | [`VIDEO.md`](benchmarks/scoreboards/VIDEO.md) |
+| Audio (TTS / STT / Music / VC / Fx) | Model-specific Python reference or self-comparison — no shared engine exists for audio | RTF up to ~15× real-time on the fastest STT models; several TTS models still sub-real-time | [`AUDIO.md`](benchmarks/scoreboards/AUDIO.md) |
+| 3D mesh (image → mesh) | Python reference (`tsr`, `hy3dgen`) | Within 1.2-1.6× of the Python reference after a multi-round optimization campaign | [`THREED.md`](benchmarks/scoreboards/THREED.md) |
 
 These times require **zero configuration**: the engine's standard performance profile (cuDNN fused flash attention, fp8 tensor-core GEMM, F16 DiT activations, resident weights, warm activation pool) is default-on with per-feature kill-switches and graceful fallbacks — see the [Performance Guide](docs/PERFORMANCE.md).
 
-**Image conditioning features (all verified end-to-end through SwarmUI, 2026-07-16/17):** FLUX.1 Kontext instruction editing, FLUX.1 Fill inpaint/outpaint, FLUX.1 Canny / Depth (with an in-engine Depth-Anything-V2 annotator, parity 2.9e-7 vs the official implementation; the FLUX-Depth conditioning map is numerically exact to BFL's own `DepthImageEncoder`, corr 1.000000), FLUX.1 Redux image variation (SigLIP + projection numerically A/B'd vs `FluxPriorReduxPipeline`, tokens corr 1.000000), and FLUX DiT ControlNet (union + single-mode, parity 3.7e-9 vs diffusers). SDXL + SD1.5 ControlNet with a full in-engine preprocessor set (canny / depth / openpose / lineart / softedge / scribble / normal / **segmentation** — UperNet-ConvNeXt ADE20K, 100% class parity), multi-net stacking, start/end step windows, both diffusers and original LDM checkpoint layouts, plus **union-type SDXL ControlNet** (xinsir controlnet-union ProMax, all residuals corr ≥0.9999998). IP-Adapter across SDXL standard / Plus / Plus-Face, SD1.5, **FaceID** (ArcFace IR-50, cosine 1.000000) and **FaceID-Plus / FaceID-PlusV2** (SD1.5 + SDXL, projection corr 1.000000). Instruction-edit models: OmniGen2, Boogu-Edit, Qwen-Image-Edit 2511. See [`docs/Checklists/MODEL_STATUS_IMAGE.md`](docs/Checklists/MODEL_STATUS_IMAGE.md) and [`benchmarks/results/image_deferred_wave_2026-07-17.md`](benchmarks/results/image_deferred_wave_2026-07-17.md).
+**Image conditioning features (all verified end-to-end through SwarmUI, 2026-07-16/17):** FLUX.1 Kontext instruction editing, FLUX.1 Fill inpaint/outpaint, FLUX.1 Canny / Depth (with an in-engine Depth-Anything-V2 annotator, parity 2.9e-7 vs the official implementation; the FLUX-Depth conditioning map is numerically exact to BFL's own `DepthImageEncoder`, corr 1.000000), FLUX.1 Redux image variation (SigLIP + projection numerically A/B'd vs `FluxPriorReduxPipeline`, tokens corr 1.000000), and FLUX DiT ControlNet (union + single-mode, parity 3.7e-9 vs diffusers). SDXL + SD1.5 ControlNet with a full in-engine preprocessor set (canny / depth / openpose / lineart / softedge / scribble / normal / **segmentation** — UperNet-ConvNeXt ADE20K, 100% class parity), multi-net stacking, start/end step windows, both diffusers and original LDM checkpoint layouts, plus **union-type SDXL ControlNet** (xinsir controlnet-union ProMax, all residuals corr ≥0.9999998). IP-Adapter across SDXL standard / Plus / Plus-Face, SD1.5, **FaceID** (ArcFace IR-50, cosine 1.000000) and **FaceID-Plus / FaceID-PlusV2** (SD1.5 + SDXL, projection corr 1.000000). Instruction-edit models: OmniGen2, Boogu-Edit, Qwen-Image-Edit 2511. See [`docs/Checklists/MODEL_STATUS_IMAGE.md`](docs/Checklists/MODEL_STATUS_IMAGE.md).
 
-### LLM decode vs llama.cpp
-
-RTX 3060 12GB, CUDA, batch=1, 128-token greedy decode, warm, tokens/sec. Same GGUF file and quant on both sides. After a focused kernel optimization pass (fused quantized GEMV, quantized `lm_head`, split-K flash-decode attention, vectorized loads), engine decode went from **20-54× slower to 1.94-2.88× off llama.cpp**; **CUDA-graph decode** (2026-07-10, opt-in via `HARTSY_GRAPH_DECODE=1`) then collapsed the ~600-700 per-token kernel launches into one `cuGraphLaunch`/token for the plain dense GQA/RoPE decoder shape (Llama/Qwen2/Qwen3/Mistral), closing most of the remaining gap on launch-bound small models — **verified byte-identical greedy token output** with the graph on vs off:
-
-| Model | Quant | llama.cpp t/s | Kernel-optimized t/s | + CUDA graph t/s | Gap (graph) |
-|---|---|---:|---:|---:|---:|
-| Qwen3-0.6B | Q4_K_M | 337.6 | ~157 | **190.8** (2.57× faster than no-graph) | **1.77×** |
-| Llama-3.2-1B | Q8_0 | 206.8 | ~111.5 | **120.2** (1.07×) | **1.72×** |
-| Mistral-7B-v0.3 | Q4_K_M | 66.5 | ~30.7 | **32.0** (1.02×) | **2.08×** |
-| Gemma-3-1B | Q4_K_M | 229.8 | ~79.7 | not eligible (sliding-window + softcap) | 2.88× |
-
-CUDA graphs remove kernel-*launch* overhead, so the win scales inversely with model size: dramatic on small models (Qwen3), marginal on large ones already bound by GEMV memory bandwidth (Mistral — the engine reads ~22% of the bandwidth llama.cpp does there, a separate un-fixed bottleneck). Graph decode requires greedy sampling and the plain decoder shape — MoE, MLA, cross-attention, sliding-window, and SSM models fall through to the eager path unchanged — but it now correctly applies repetition penalty on-device rather than silently ignoring it (the only sampler stage that can change greedy's picked token; temperature/top-k/top-p/min-p are all argmax-preserving so they don't need a device kernel). Fused quantized GEMV now covers Q4_K/Q5_K/Q6_K/Q8_0/Q5_0/Q4_0 — every quant format in the default coverage matrix except the rarer K-quants (Q2_K/Q3_K) and IQ-formats, which still fall to a CPU dequant path. Prefill (prompt processing) is much faster and not the bottleneck. The server (`HartsyInference.API`) additionally supports **continuous batching** — concurrently-submitted requests against the same model share decode rounds instead of running one at a time — and a **paged KV cache**, both independent of graph decode. Details: [`LLM_THROUGHPUT_BENCHMARK.md`](docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) + [`LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md).
-
-### Diffusion / video end-to-end vs ComfyUI
-
-RTX 4090 24GB, full end-to-end wall-clock through the **SwarmUI API**, the identical request routed to the ComfyUI backend then the HartsyInference backend on the same GPU. Warm (model resident), 512×320, 20-25 steps. All outputs are coherent; this is a **speed** gap, not a correctness gap:
-
-| Model | HartsyInference warm | ComfyUI warm | Gap |
-|---|---:|---:|---:|
-| Wan 2.1 T2V 1.3B (fp16) | ~23.7 s | 6.28 s | ~3.8× |
-| LTX-0.9 2B (fp16) | ~15 s | 2.84 s | ~5.3× |
-| Wan 2.2 TI2V-5B (fp16) | ~37.9 s | 4.52 s | ~8.4× |
-| Wan 2.1 T2V 14B (fp8) | ~180 s | 30.6 s | ~5.9× |
-
-Image architectures (Flux, SD3, Ideogram) were device-ported and run much closer to ComfyUI; the video DiT blocks are the current optimization frontier. The remaining gap is well understood and documented: no full flash-attention kernel yet, some F32-only elementwise ops, and kernel-launch overhead at small token counts (needs CUDA graphs / op fusion). Full write-up: [`benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md`](benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md).
-
-### GPU op microbenchmarks
-
-Per-op MatMul / Conv2D / norm / SDPA / elementwise timings against PyTorch, with full statistical method (5 trials, 95% CI, Welch's t-test), are committed under [`benchmarks/results/run_baseline_*`](benchmarks/results/) for both RTX 3060 and RTX 4090. See [`benchmarks/README.md`](benchmarks/README.md) to reproduce.
-
-### Audio (TTS / STT), end-to-end
-
-Real-time factor (RTF = generated-audio-seconds ÷ warm-gen-seconds; higher is faster) through the SwarmUI + AudioLab
-generation path, on both GPUs. Full table + methodology + the outlier list: [`benchmarks/results/audio_tts_stt_2026-07-12.md`](benchmarks/results/audio_tts_stt_2026-07-12.md).
-
-| Model | Type | RTX 3060 | RTX 4090 |
-|---|---|---|---|
-| Piper (VITS) | TTS | 8.6× | 8.3× |
-| Moonshine | STT | 6.5× | 6.5× |
-| Whisper (base) | STT | 5.1× | 5.4× |
-| Kokoro (StyleTTS2) | TTS | 4.5× | 5.2× |
-| MeloTTS (en-v3) | TTS | 1.4× | 1.4× |
-| Kyutai TTS (DSM, tts-1.6b) | TTS | ~0.5× | — |
-| F5-TTS (v1 base, voice clone) | TTS | ~0.4× | — |
-
-Piper / Kokoro / MeloTTS / F5-TTS are verified word-correct via a proven STT oracle (whisper `medium.en`). F5-TTS
-is zero-shot voice cloning (needs a reference clip + transcript); its RTF is below real-time by design (32
-flow-matching DiT forwards), but a host grouped-conv bottleneck was removed for a **34× speedup (174.6 s → 6.4 s)**
-at bit-parity. **Kyutai TTS** (Delayed-Streams Modeling, in-engine e2e word-correct 2026-07-16; measured through the
-test path, not yet Swarm-deployed) generates 32 Mimi codebooks per frame through a weights-per-step depformer;
-making those per-step projections device-resident cut the 3060 gen **6.5× (63.0 → 9.7 s)** — see
-[`benchmarks/results/kyutai_tts_2026-07-16.md`](benchmarks/results/kyutai_tts_2026-07-16.md).
-
-TTS measured through the canonical `GenerateText2Image` path (WAV to `/Output` like any gen); STT via `ProcessSTT`. **The small audio models are host/launch-bound, not compute-bound** — the 4090's extra compute buys ~nothing (Piper is even slightly slower on it). So the optimization lever here is **CUDA-graph capture / host-glue removal** (kills kernel-launch overhead), exactly like the LLM-decode graph win and the opposite of the compute-bound video/music DiTs where graphs are a no-op. Music (ACE-Step, YuE, HeartMuLa) e2e numbers live in their own result files and [`docs/Checklists/MODEL_STATUS_AUDIO.md`](docs/Checklists/MODEL_STATUS_AUDIO.md).
-
-**Full-fleet verification (2026-07-25, canonical path):** every local TTS (21), STT (6), Music (6),
-Voice-Conversion (2), and Fx (2) model — 37 total — driven through `GenerateText2Image` (auto-saves to
-`/Output` like any gen, same as the TTS numbers above) and `ProcessSTT`. This supersedes an earlier
-2026-07-24 pass that used the raw `ProcessTTS`/`ProcessAudio` args dict, which was found to bypass the real
-per-model param logic entirely — root cause of an ACE-Step "silent, no vocals" bug (a style description sent
-as `prompt` landed in the engine's *lyrics* slot with `genre` empty). **31/37 generated successfully**
-(up from 27/37 — 6 of the prior bugs are now fixed: Chatterbox, Zonos, Distil-Whisper, HeartMuLa, YuE,
-Demucs), fastest (Moonshine-streaming STT) at RTF 0.073× — 13.7× faster than real-time. Every output is
-content-quality-gated (RMS/peak + a `whisper_stt` round-trip to confirm real transcribable content), not
-just checked for non-zero bytes, which is how the ACE-Step/AudioGen bugs shipped unnoticed the first time.
-New bugs found this pass: 7 models with real weights/functional providers are unselectable via
-`GenerateText2Image` (an engine-level vs. model-level `installed`-flag mismatch, not yet fixed), Dia-1.6B
-hangs regardless of path, and AudioGen hard-hangs the whole Swarm process at 45s duration (fine at 10-20s).
-Full per-model tables, methodology, and numbered bug writeups:
-[`AUDIO_THROUGHPUT_BENCHMARK.md`](docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md).
-
-### 3D mesh generation (image → mesh), end-to-end vs the Python reference
-
-Warm end-to-end seconds on the RTX 4090 (`examples/chair.png` → coherent `.glb`), against the upstream Python
-reference on the same GPU. Full campaign write-up (Rounds 1–6, per-round diagnosis + parity gates):
-[`docs/Checklists/THREED_GENPERF_PLAN.md`](docs/Checklists/THREED_GENPERF_PLAN.md).
-
-| Model | HartsyInference | Python ref | Status |
-|---|---|---|---|
-| TripoSR (256³ density grid) | **2.1 s** | 0.58 s (neural) | 12.5× vs our own start (was 26.2 s); our GPU density decode now **beats** the reference — the gap is host marching-cubes + small-GEMM occupancy |
-| Hunyuan3D-2 Shape (30 steps, grid 128, fp16) | **9.2 s** | 5.76 s | 1.6× — was 71.3 s (**7.75×** in-campaign); DiT per-forward (113 ms) now within 1.18× of the reference's 96 ms |
-
-The Hunyuan3D wins were **bit-exact / coherence-gated**, not accuracy trades: a fused `Concat` kernel (a per-slice
-`cuMemcpyDtoDAsync` loop was issuing ~280k memcpy nodes/forward → dit-loop 27.7 → 7.5 s, bit-identical mesh), the
-DINOv2-giant conditioner's per-block host loops moved to device (cond 4.1 → 0.87 s), fused DiT adaLN + QKV-split-norm
-kernels, a device FourierEmbed for the VAE, plus cuDNN fused SDPA, a DiT CUDA-graph, and F16 activations. Batched
-CFG was measured and **ruled out** — the Concat fix already removed the per-forward overhead it would amortize
-(graph-off ≈ graph-on), so the forward is now compute-bound. Both models produce coherent meshes verified end-to-end.
+The server (`HartsyInference.API`) additionally supports **continuous batching** for LLMs — concurrently-submitted requests against the same model share decode rounds instead of running one at a time — and a **paged KV cache**, both independent of graph decode. LLM details: [`LLM_THROUGHPUT_BENCHMARK.md`](docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) + [`LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md). Audio full-fleet verification methodology and per-model bug writeups: [`AUDIO_THROUGHPUT_BENCHMARK.md`](docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md). GPU op microbenchmarks (MatMul / Conv2D / norm / SDPA / elementwise vs PyTorch) reproduce via [`benchmarks/README.md`](benchmarks/README.md).
 
 ---
 
@@ -442,10 +337,10 @@ The engine covers a very wide model set across every modality. The **[benchmark 
 | **Language / LLM** | Llama, Qwen2/Qwen3, Gemma 2/3/4, Phi, Mistral (dense); Qwen3.5 gated-DeltaNet hybrid; MoE/MLA giants (Mixtral, Qwen3-MoE, DeepSeek-V3, Kimi-K2, GPT-OSS); VLMs; embeddings/rerankers; Mamba/RWKV/T5 — quantized GGUF throughout | [MODEL_STATUS_LLM](docs/Checklists/MODEL_STATUS_LLM.md) · [coverage](docs/Checklists/LLM_MODEL_COVERAGE.md) |
 | **Image** | SD1.5 / SDXL (UNet); Flux.1/.2, SD3, Chroma / Radiance, Qwen-Image (+ Edit), HunyuanImage, HiDream, AuraFlow, Lumina 2, ERNIE-Image, Kandinsky 5, OmniGen 2, Ideogram 4 (DiT / MMDiT / NextDiT) | [MODEL_STATUS_IMAGE](docs/Checklists/MODEL_STATUS_IMAGE.md) |
 | **Audio & Music** | Whisper / Moonshine (STT); Kokoro, Piper, StyleTTS2, Bark, Spark-TTS, CosyVoice, VibeVoice, MeloTTS, F5-TTS clone (TTS); ACE-Step, MusicGen, YuE, HeartMuLa (music); 9 neural codecs | [MODEL_STATUS_AUDIO](docs/Checklists/MODEL_STATUS_AUDIO.md) |
-| **Vision** | CLIP / SigLIP / DINOv2-3 embeddings; YOLO8 / YOLO11 detection; SAM / SAM 2 / 2.1 segmentation; face detection | [MODEL_STATUS_VISION](docs/Checklists/MODEL_STATUS_VISION.md) |
-| **Video** | LTX-Video, Wan 2.x (T2V + I2V), Lance, Kandinsky 5 Video | [MODEL_STATUS_VIDEO](docs/Checklists/MODEL_STATUS_VIDEO.md) |
+| **Vision** | CLIP / SigLIP / DINOv2-3 embeddings; YOLO8 / YOLO11 / RT-DETR / Grounding DINO detection; SAM / SAM 2 / 2.1 segmentation; Depth-Anything-V2 depth estimation; face detection | [MODEL_STATUS_VISION](docs/Checklists/MODEL_STATUS_VISION.md) |
+| **Video** | LTX-Video, Wan 2.x (T2V + I2V), HunyuanVideo, Lance, Kandinsky 5 Video | [MODEL_STATUS_VIDEO](docs/Checklists/MODEL_STATUS_VIDEO.md) |
 | **3D** | TripoSR, Hunyuan3D-2 (image → mesh; glTF / OBJ / PLY export) | [MODEL_STATUS_3D](docs/Checklists/MODEL_STATUS_3D.md) |
-| **World / interactive** | Hunyuan-GameCraft, Matrix-Game 2.0 / 3.0, Oasis (action-conditioned, real-time) | [MODEL_STATUS_WORLD](docs/Checklists/MODEL_STATUS_WORLD.md) |
+| **World / interactive** | Oasis, DIAMOND (action-conditioned, real-time, loadable today); Matrix-Game 2.0 / 3.0 and Hunyuan-GameCraft are parity-verified but catalogued only — no `WorldService` loader yet, multi-checkpoint sets 9-51GB | [MODEL_STATUS_WORLD](docs/Checklists/MODEL_STATUS_WORLD.md) |
 
 Index of all status docs: [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md). Cross-modality real-weight parity authority: [`PARITY_VERIFICATION.md`](docs/Checklists/PARITY_VERIFICATION.md). Planned additions: [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md).
 
@@ -457,11 +352,11 @@ Index of all status docs: [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md). 
 > These are planned and **not yet implemented**. Tracking lives in the [roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md).
 
 - **Image:** LCM/Turbo distillation across more architectures; ControlNet tile / inpaint modes; union-type segment / tile / repaint control types (raw-map pass-through wired, dedicated preprocessing pending). *(Shipped 2026-07: IP-Adapter FaceID + FaceID-Plus/PlusV2, Flux-DiT ControlNet, union-type SDXL ControlNet, and the lineart / softedge / normal / segmentation preprocessors — see the image conditioning list above.)*
-- **Vision:** Grounding DINO, YOLO-World, OWLv2, Florence-2, RT-DETR, depth & pose estimation, OCR, tracking
-- **Video:** HunyuanVideo, CogVideoX, longer-context temporal generation
-- **3D:** Gaussian-splat output, texture synthesis, multi-view to mesh
+- **Vision:** YOLO-World, OWLv2, Florence-2, pose estimation, OCR, tracking. *(Shipped 2026-07: Grounding DINO open-vocab detection, RT-DETR, and Depth-Anything-V2 depth estimation, all real-weight verified end-to-end — see [MODEL_STATUS_VISION](docs/Checklists/MODEL_STATUS_VISION.md).)*
+- **Video:** CogVideoX, longer-context temporal generation. *(Shipped 2026-07: HunyuanVideo 13B T2V, verified end-to-end through SwarmUI — see [Models](#models) above and [`VIDEO.md`](benchmarks/scoreboards/VIDEO.md).)*
+- **3D:** texture synthesis, multi-view to mesh. *(Gaussian-splat output has an initial pipeline CLI-wired for TRELLIS, but is not yet parity-verified against the reference rasterizer — see [MODEL_STATUS_3D](docs/Checklists/MODEL_STATUS_3D.md).)*
 - **World models:** broader action spaces, longer memory horizons, multiplayer state
-- **Tooling:** quantized inference (MXFP4 / MXFP8 / NVFP4), model hot-swap, expanded CLI subcommands per modality
+- **Tooling:** quantized inference (MXFP4 / MXFP8 / NVFP4), expanded CLI subcommands per modality
 
 ---
 
@@ -528,6 +423,7 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
 | Document | Description |
 |---|---|
 | [Performance Guide](docs/PERFORMANCE.md) | The default performance profile, native library requirements, benchmark methodology |
+| [Benchmark Scoreboards](benchmarks/scoreboards/) | Per-modality HartsyInference-vs-baseline results tables (Image / Video / Audio / LLM / 3D) |
 | [Core Design](docs/Design/CORE_DESIGN.md) | Architecture, design pillars, key decisions, goals/non-goals, per-modality capabilities |
 | [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md) | Full model support plan |
 | [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) | Package breakdown, dependencies, install examples |

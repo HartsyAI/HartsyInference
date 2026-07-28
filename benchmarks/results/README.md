@@ -1,6 +1,14 @@
 # Benchmark Results
 
-This directory holds the raw output of every benchmark run. Each subdirectory is named:
+This directory holds the raw output of every benchmark run — it's a working scratch area, not the place
+to read benchmark numbers from. For the curated, human-readable scoreboards (HartsyInference vs
+ComfyUI/llama.cpp/Python per model), see **[`../scoreboards/`](../scoreboards/)**. As of 2026-07-28 this
+directory has been purged of historical run output and one-off write-ups now superseded by those
+scoreboards; it starts empty (`run_*` dirs and dated `.md` write-ups are recreated here as new benchmarks
+are run, per the convention below, and their headline numbers should be folded into `../scoreboards/`
+rather than left to accumulate here again).
+
+Each subdirectory is named:
 
 ```
 run_<utc-iso8601>_<gpu-slug>/

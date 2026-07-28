@@ -82,7 +82,7 @@ SDPA share dropping.
 
 Net: M1 ≈ halves total GPU time; M1+M2+M3 lands the video DiT in the low-teens of seconds with a safe TF32 default and
 Wan-gated F16 opt-in. Related: [`BENCHMARKING.md`](BENCHMARKING.md),
-[`../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md`](../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md).
+`../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md`.
 
 ## Status 2026-07-03: M1 kernel CORRECT, needs M2 tuning
 `native/cuda/lm/flash_attn_v2_tf32.cu` written, compiles (WMMA tf32 for both GEMMs), fully wired

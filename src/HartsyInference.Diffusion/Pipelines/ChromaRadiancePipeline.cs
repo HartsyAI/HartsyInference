@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -228,8 +229,54 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
 
         // ── 4. Denoising loop ──
         // The transformer stays device-resident across generations; only a new-prompt T5 phase evicts it
-        // (see the encode section above).
-        if (!_ditResident)
+        // (see the encode section above). On a card that cannot hold it, the 19+38 backbone blocks ride a
+        // BlockStreamingController instead and only the shared set (approximator, context_embedder, conv
+        // patchifier, NeRF head) stays resident — Radiance's ~9.3 GB fp8 DiT plus a pixel-space NeRF head whose
+        // final conv alone asks for ~1 GB of workspace at 1024² does not fit a 12 GB card (measured 2026-07-28:
+        // OOM at the head's Conv2D with 49 MB free after the blocks filled the card).
+        BlockStreamingController? streamer = null;
+        if (Backend.StreamingCache is not null)
+        {
+            IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
+            for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
+            long totalBlockBytes = 0;
+            foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
+            long sharedBytes = SumBytes(_transformer.EnumerateSharedWeights());
+            long reserve = EstimateActivationReserveBytes(
+                padHeight, padWidth, _config.NerfHidden, patch, (int)condContext.Shape[1]) + sharedBytes;
+
+            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "ChromaRadiance", Backend);
+            PhasePlacement placement = planner.PlanPhase(
+                "denoise", totalBlockBytes, reserve, alreadyResident: _ditResident, canStream: true);
+            // Assigned unconditionally below (null on the resident branch): the transformer outlives this call,
+            // so a hook left over from a previous streamed generation would keep calling a disposed controller.
+            _transformer.BeforeBlockForward = null;
+            if (placement == PhasePlacement.Resident)
+            {
+                Backend.PreloadWeights(_transformer.EnumerateWeights());
+                _ditResident = true;
+            }
+            else
+            {
+                Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+                long avail = Backend.StreamingCache.QueryAvailableWeightCacheBytes(reserve);
+                // The widest block sizes the window: block 0 is a double-stream block (~2x a single-stream one),
+                // so budgeting on it keeps the deepest prefetch safe for every block.
+                long perBlock = blocks.Length > 0 ? blocks[0].EstimatedWeightBytes : 0;
+                int prefetchAhead = perBlock > 0 ? Math.Clamp((int)(avail / perBlock) - 2, 0, 2) : 0;
+                streamer = new BlockStreamingController(
+                    Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0, backend: Backend);
+                _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
+                streamer.Prime();
+                _ditResident = false;
+                // Radiance runs the full stack TWICE per step (cond + uncond can't batch — different text
+                // lengths), so the per-step H2D bill is 2x totalBlockBytes.
+                Logs.Info($"Chroma Radiance streaming: {blocks.Length} blocks, prefetchAhead={prefetchAhead}, " +
+                    $"total ~{totalBlockBytes / (1024 * 1024)} MB{(useCfg ? " x2 passes/step" : "")}, " +
+                    $"shared ~{sharedBytes / (1024 * 1024)} MB resident, reserve ~{reserve / (1024 * 1024)} MB");
+            }
+        }
+        else
         {
             Backend.PreloadWeights(_transformer.EnumerateWeights());
             _ditResident = true;
@@ -320,6 +367,10 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
                 if (noisedSource != sourcePadded) noisedSource.Dispose();
             }
 
+            // retainBehind:0 frees every block through cuMemFreeAsync, and HARTSY_MEMPOOL_KEEP holds those bytes
+            // reserved — without a per-step trim the pool grows by roughly a block per step until it owns the card.
+            streamer?.TrimAfterStep();
+
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             // Pixel-space preview: the in-flight sample is already an RGB image — no unpack needed. On the
@@ -343,6 +394,17 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
 
         // condContext/uncondContext are cross-generation caches — not disposed here. The transformer stays
         // resident (freed only by a new-prompt T5 phase or pipeline disposal).
+        if (streamer is not null)
+        {
+            // Nothing of the DiT survives a streamed generation: the sliding window's blocks go back, and the
+            // shared set goes with them so the next generation re-plans against a clean card (its T5 phase needs
+            // ~5 GB). _ditResident is already false, so nothing claims these are still up.
+            _transformer.BeforeBlockForward = null;
+            streamer.EvictAll();
+            streamer.Dispose();
+            streamer = null;
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+        }
         sourcePadded?.Dispose();
         maskPadded?.Dispose();
         Backend.Sync();
@@ -377,6 +439,34 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         int rem = n % multiple;
         return rem == 0 ? n : n + (multiple - rem);
     }
+
+    /// <summary>Device bytes a weight set occupies, via <see cref="DType.ComputeByteCount"/> so block-quantized
+    /// dtypes (which report <c>SizeInBytes == 0</c>) don't total to zero.</summary>
+    private static long SumBytes(IEnumerable<Tensor> weights)
+    {
+        long total = 0;
+        foreach (Tensor w in weights) total += w.DType.ComputeByteCount(w.ElementCount);
+        return total;
+    }
+
+    /// <summary>Activations + workspace the denoise phase needs alongside the weights, for
+    /// <see cref="VramPlanner.PlanPhase"/>.</summary>
+    /// <remarks>Radiance is unusual in that the NeRF pixel head, not the backbone, dominates: at 1024² its
+    /// per-pixel embedding, F16 GLU stream and <c>[1, nerfHidden, H, W]</c> feature map are each ~268 MB of F32,
+    /// and the final pixel conv's workspace was the allocation that OOM'd a 12 GB card (1024 MB requested with
+    /// 49 MB free). Eight such planes plus the conv workspace cover the head; the block loop's own joint-sequence
+    /// F16 buffers are comparatively small (~25 MB each at 1024²) but there are many live at once.</remarks>
+    private static long EstimateActivationReserveBytes(int padHeight, int padWidth, int nerfHidden, int patch, int txtSeqLen)
+    {
+        long pixels = (long)padHeight * padWidth;
+        long nerfBytes = (pixels * nerfHidden * sizeof(float) * 8) + (pixels * 9 * sizeof(float));
+        long jointSeqLen = (pixels / ((long)patch * patch)) + txtSeqLen;
+        long blockBytes = jointSeqLen * ChromaBlockStreamHiddenSize * sizeof(ushort) * 16;
+        return nerfBytes + blockBytes;
+    }
+
+    /// <summary>Chroma's hidden size (3072) — used only to size the streaming planner's activation reserve.</summary>
+    private const int ChromaBlockStreamHiddenSize = 3072;
 
     /// <summary>Pads a <c>[1, C, H, W]</c> pixel tensor to <c>[1, C, padH, padW]</c> (top-left anchored, matching <see cref="CropPixels"/>) with <paramref name="fill"/> in the new bottom/right border. Source images pad with 0 (mid-gray in [-1, 1]); masks pad with 1 so the cropped-away border denoises freely.</summary>
     private static Tensor PadPixels(Tensor src, int padH, int padW, float fill)
