@@ -403,25 +403,36 @@ public static unsafe class CheckpointConvertUtils
     /// (2 → 1 byte/param; the LTX-2.3 22B goes ~35 → ~18 GB, fitting a 24 GB card fully resident and killing the
     /// per-step streaming). Only weights with ≥ <paramref name="minElements"/> elements are touched (norms,
     /// scale-shift tables, timestep-MLP and projections stay BF16); the VAE/TE and already-fp8 tensors are skipped.</summary>
-    public static unsafe void QuantizeDitBlocksToFp8(Dictionary<string, Tensor> weights, string blockKeyMarker,
+    public static void QuantizeDitBlocksToFp8(Dictionary<string, Tensor> weights, string blockKeyMarker,
         long minElements = 1L << 20)
     {
-        List<(string Key, Tensor Scale)> companions = new();
         foreach (string key in weights.Keys.ToList())
         {
-            Tensor t = weights[key];
-            bool quantize = key.Contains(blockKeyMarker, StringComparison.Ordinal)
-                && key.EndsWith(".weight", StringComparison.Ordinal)
-                && t.Shape.Rank == 2 && t.ElementCount >= minElements
-                && (t.DType == DType.BF16 || t.DType == DType.F16);
-            if (!quantize) continue;
-            Tensor fp8 = QuantizeToFp8Scaled(t);
-            Tensor scale = new Tensor(new TensorShape(1), DType.F32);
-            ((float*)scale.DataPointer)[0] = fp8.Fp8ScaleFactor;
-            weights[key] = fp8;
-            companions.Add((key[..^".weight".Length] + ".scale_weight", scale));
+            if (!key.Contains(blockKeyMarker, StringComparison.Ordinal)) continue;
+            TryQuantizeWeightToFp8(weights, key, weights[key], minElements);
         }
-        foreach ((string k, Tensor s) in companions) weights[k] = s;
+    }
+
+    /// <summary>The per-tensor half of <see cref="QuantizeDitBlocksToFp8"/>: same eligibility gate (rank-2 BF16/F16
+    /// with at least <paramref name="minElements"/> elements, key ending in <c>.weight</c>) and same emitted bytes,
+    /// but for ONE tensor, so a converter can requantize each weight the moment it is produced and free the wide
+    /// intermediate before taking the next. Writes the fp8 tensor plus its <c>.scale_weight</c> [1] F32 companion into
+    /// <paramref name="output"/> and returns true; returns false (writing nothing) when the tensor is not eligible.
+    /// Does NOT dispose <paramref name="tensor"/> — the caller owns it and knows whether it is a borrowed mmap view.</summary>
+    public static unsafe bool TryQuantizeWeightToFp8(Dictionary<string, Tensor> output, string key, Tensor tensor,
+        long minElements = 1L << 20)
+    {
+        if (!key.EndsWith(".weight", StringComparison.Ordinal) || tensor.Shape.Rank != 2
+            || tensor.ElementCount < minElements || (tensor.DType != DType.BF16 && tensor.DType != DType.F16))
+        {
+            return false;
+        }
+        Tensor fp8 = QuantizeToFp8Scaled(tensor);
+        Tensor scale = new Tensor(new TensorShape(1), DType.F32);
+        ((float*)scale.DataPointer)[0] = fp8.Fp8ScaleFactor;
+        output[key] = fp8;
+        output[key[..^".weight".Length] + ".scale_weight"] = scale;
+        return true;
     }
 
     /// <summary>BF16/F16 weight → fp8 e4m3 with a per-tensor scale = absmax/448 (E4M3's max magnitude), folded onto

@@ -81,14 +81,72 @@ public sealed class BlockStreamingControllerTests
         public static string IdFor(Tensor t) => _tags.TryGetValue(t, out string? id) ? id : "?";
     }
 
+    /// <summary>Backend stub that counts <see cref="IBackend.TrimMemoryPool"/> calls; every compute member is unreachable
+    /// from the controller and throws if that ever stops being true.</summary>
+    private sealed class TrimCountingBackend : IBackend
+    {
+        public int TrimCalls { get; private set; }
+
+        public void TrimMemoryPool() => TrimCalls++;
+
+        public DeviceKind Device => DeviceKind.Cpu;
+
+        public BackendCapabilities Capabilities { get; } = new BackendCapabilities { Name = "trim-counting-stub" };
+
+        public void Dispose() { }
+
+        #region Unused compute surface
+
+        private static Exception Unused([CallerMemberName] string member = "") =>
+            new NotSupportedException($"{member} is not reachable from BlockStreamingController.");
+
+        public void MatMul(Tensor output, Tensor a, Tensor b) => throw Unused();
+        public void BatchedMatMul(Tensor output, Tensor a, Tensor b) => throw Unused();
+        public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias) => throw Unused();
+        public void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW) => throw Unused();
+        public void Conv1d(Tensor output, Tensor input, Tensor weight, Tensor? bias, int stride, int padding, int dilation, int groups, int outputPadding) => throw Unused();
+        public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias, int stride, int padding, int dilation, int groups, int outputPadding) => throw Unused();
+        public void GroupNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps) => throw Unused();
+        public void LayerNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, float eps) => throw Unused();
+        public void RmsNorm(Tensor output, Tensor input, Tensor weight, float eps) => throw Unused();
+        public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps) => throw Unused();
+        public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false) => throw Unused();
+        public void Gelu(Tensor output, Tensor input) => throw Unused();
+        public void Silu(Tensor output, Tensor input) => throw Unused();
+        public void Sigmoid(Tensor output, Tensor input) => throw Unused();
+        public void Tanh(Tensor output, Tensor input) => throw Unused();
+        public void Elu(Tensor output, Tensor input, float alpha) => throw Unused();
+        public void LeakyRelu(Tensor output, Tensor input, float slope) => throw Unused();
+        public void Snake(Tensor output, Tensor input, Tensor alpha, Tensor? beta) => throw Unused();
+        public void Add(Tensor output, Tensor a, Tensor b) => throw Unused();
+        public void Mul(Tensor output, Tensor a, Tensor b) => throw Unused();
+        public void Scale(Tensor output, Tensor input, float scalar) => throw Unused();
+        public void Clamp(Tensor output, Tensor input, float min, float max) => throw Unused();
+        public void Transpose2D(Tensor output, Tensor input, int d1, int d2) => throw Unused();
+        public void Permute0213(Tensor output, Tensor input, int s, int h, int d) => throw Unused();
+        public void GeGlu(Tensor output, Tensor input) => throw Unused();
+        public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial) => throw Unused();
+        public void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim) => throw Unused();
+        public void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim) => throw Unused();
+        public void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW) => throw Unused();
+        public void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW) => throw Unused();
+        public void CopyTo(Tensor destination, Tensor source) => throw Unused();
+        public void Fill(Tensor tensor, float value) => throw Unused();
+        public void Fft(Tensor output, Tensor input) => throw Unused();
+        public void Stft(Tensor output, Tensor input, int fftSize, int hopLength, Tensor window) => throw Unused();
+        public void MelFilterbank(Tensor output, Tensor input, Tensor filters) => throw Unused();
+
+        #endregion
+    }
+
     private static (BlockStreamingController controller, RecordingCache cache, IReadOnlyList<TaggedBlock> blocks)
-        Setup(int blockCount, int prefetchAhead, int retainBehind = 0)
+        Setup(int blockCount, int prefetchAhead, int retainBehind = 0, IBackend? backend = null)
     {
         TaggedBlock[] blocks = Enumerable.Range(0, blockCount)
             .Select(i => new TaggedBlock($"b{i}", bytes: 1024))
             .ToArray();
         RecordingCache cache = new RecordingCache();
-        BlockStreamingController controller = new BlockStreamingController(cache, blocks, prefetchAhead, retainBehind);
+        BlockStreamingController controller = new BlockStreamingController(cache, blocks, prefetchAhead, retainBehind, backend);
         return (controller, cache, blocks);
     }
 
@@ -252,6 +310,52 @@ public sealed class BlockStreamingControllerTests
         // Per-block evictions are no-ops on the second call (everything's Evicted),
         // but the drain still runs — it's a transition signal, not bound to per-block state.
         Assert.Equal(new[] { "drain" }, cache.Calls);
+    }
+
+    // ── TrimAfterStep ────────────────────────────────────────────────────
+
+    [Fact]
+    public void TrimAfterStep_Issues_One_Backend_Trim_Per_Call()
+    {
+        TrimCountingBackend backend = new TrimCountingBackend();
+        (BlockStreamingController ctrl, _, _) = Setup(blockCount: 3, prefetchAhead: 1, backend: backend);
+        ctrl.Prime();
+        ctrl.TrimAfterStep();
+        ctrl.TrimAfterStep();
+        Assert.Equal(2, backend.TrimCalls);
+    }
+
+    /// <summary>The per-step trim must NOT go through the cache's drain: that syncs the upload stream and would stall on
+    /// the prefetch the step just primed.</summary>
+    [Fact]
+    public void TrimAfterStep_Does_Not_Drain_The_Cache()
+    {
+        TrimCountingBackend backend = new TrimCountingBackend();
+        (BlockStreamingController ctrl, RecordingCache cache, _) = Setup(blockCount: 3, prefetchAhead: 1, backend: backend);
+        ctrl.Prime();
+        cache.Calls.Clear();
+        ctrl.TrimAfterStep();
+        Assert.Empty(cache.Calls);
+    }
+
+    [Fact]
+    public void TrimAfterStep_Without_Backend_Is_Inert()
+    {
+        (BlockStreamingController ctrl, RecordingCache cache, _) = Setup(blockCount: 2, prefetchAhead: 1);
+        ctrl.Prime();
+        cache.Calls.Clear();
+        ctrl.TrimAfterStep();
+        Assert.Empty(cache.Calls);
+    }
+
+    [Fact]
+    public void TrimAfterStep_After_Dispose_Throws()
+    {
+        TrimCountingBackend backend = new TrimCountingBackend();
+        (BlockStreamingController ctrl, _, _) = Setup(blockCount: 2, prefetchAhead: 1, backend: backend);
+        ctrl.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => ctrl.TrimAfterStep());
+        Assert.Equal(0, backend.TrimCalls);
     }
 
     // ── Edge cases ───────────────────────────────────────────────────────

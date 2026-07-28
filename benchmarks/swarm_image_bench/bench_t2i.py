@@ -11,11 +11,12 @@ NOT toggle backends; it just tags output with --backend. Run it once per backend
 Protocol per model: 1 warmup (forces model load) + REPS real gens, RANDOM SEED each
 (defeats SwarmUI's identical-params result cache), same params across both backends.
 """
-import argparse, json, subprocess, sys, threading, time, urllib.request
+import argparse, hashlib, json, os, subprocess, sys, threading, time, urllib.request
 
-BASE = "http://192.168.10.188:7801"
+BASE = os.environ.get("BENCH_BASE_URL", "http://192.168.10.188:7801")
 REPS = 3
-GPU_SMI_INDEX = 1  # nvidia-smi index 1 = RTX 4090
+GPU_SMI_INDEX = int(os.environ.get("BENCH_GPU_SMI_INDEX", "1"))  # nvidia-smi index: 1=RTX 4090, 0=RTX 3060
+GEN_TIMEOUT_S = int(os.environ.get("BENCH_GEN_TIMEOUT_S", "600"))
 PROMPT = ("a highly detailed photograph of an astronaut riding a horse across a "
           "martian desert at golden hour, dramatic lighting, sharp focus")
 
@@ -59,7 +60,11 @@ def one_gen(sid, model, params, seed, prompt=PROMPT):
     if EXACT_BACKEND_ID is not None:
         payload["exactbackendid"] = EXACT_BACKEND_ID
     t0 = time.perf_counter()
-    r = http_post("/API/GenerateText2Image", payload)
+    try:
+        r = http_post("/API/GenerateText2Image", payload, timeout=GEN_TIMEOUT_S)
+    except Exception as e:
+        return {"error": f"timeout/exception after {GEN_TIMEOUT_S}s: {e!r}",
+                "wall": time.perf_counter() - t0}
     dt = time.perf_counter() - t0
     if "error" in r or "error_id" in r:
         return {"error": r.get("error") or r.get("error_id"), "wall": dt}
@@ -68,9 +73,15 @@ def one_gen(sid, model, params, seed, prompt=PROMPT):
         return {"error": f"no image returned: {str(r)[:200]}", "wall": dt}
     return {"wall": dt, "image": imgs[0]}
 
-def bench_model(sid, name, model, params, prompt=PROMPT):
+def bench_model(sid, name, model, params, prompt=PROMPT, seed=None):
     print(f">>> {name}  ({model})", file=sys.stderr)
-    base_seed = (abs(hash(name)) % 100000) + int(time.time()) % 1000
+    # Deterministic across processes/backends (Python's hash() is per-process
+    # randomized for strings) so Hartsy-vs-Comfy runs share seeds for quality
+    # comparison. Config may pin an explicit seed; otherwise derive one from
+    # the model name via a stable hash (not Python's randomized hash()).
+    if seed is None:
+        seed = int(hashlib.md5(name.encode()).hexdigest(), 16) % 100000
+    base_seed = seed
     # warmup / cold (also the model-load number)
     w = one_gen(sid, model, params, base_seed, prompt)
     if "error" in w:
@@ -120,7 +131,7 @@ def main():
     for m in models:
         try:
             results.append(bench_model(sid, m["name"], m["model"], m.get("params", {}),
-                                       m.get("prompt", PROMPT)))
+                                       m.get("prompt", PROMPT), m.get("seed")))
         except Exception as e:
             results.append({"name": m["name"], "model": m["model"], "error": repr(e)})
             print(f"    EXC: {e!r}", file=sys.stderr)

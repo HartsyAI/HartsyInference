@@ -125,10 +125,11 @@ public static class AdminEndpoints
             [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue longRunningQueue, CancellationToken ct) =>
         {
             string selector = (req.Backend ?? "").Trim().ToLowerInvariant();
-            if (!BackendFactory.ValidSelectors.Contains(selector))
+            if (!BackendFactory.IsValidSelector(selector))
             {
                 return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest,
-                    $"Unknown backend '{req.Backend}'. Valid: {string.Join(", ", BackendFactory.ValidSelectors)}.", "invalid_request_error");
+                    $"Unknown backend '{req.Backend}'. Valid: {string.Join(", ", BackendFactory.ValidSelectors)} " +
+                    "(device backends also accept ':{ordinal}', e.g. cuda:1).", "invalid_request_error");
             }
 
             try

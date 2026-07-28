@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -27,6 +28,12 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
     /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private static readonly bool KeepModelsResident =
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+
+    /// <summary>Whether the DiT's weights are currently ALL on the device from a previous generation
+    /// (<see cref="KeepModelsResident"/>). Fed to <see cref="VramPlanner.PlanPhase"/> as <c>alreadyResident</c> — the
+    /// availability query cannot see past weights that are themselves occupying the space it measures, so without
+    /// this a warm generation reports "does not fit" and flips between resident and streamed on alternate runs.</summary>
+    private bool _ditResident;
 
     // Prompt-embedding cache (one cond + one uncond, last-used): tapped TE hidden states keyed on
     // (token ids, drop index). See the encode block in GenerateFromTokens.
@@ -179,8 +186,55 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
         }
 
+        // Krea 2 is a 12.9B single-stream MMDiT whose shipped fp8_scaled checkpoint stays packed fp8 on device
+        // (~13 GB of weights, ~11 GB of it in the 28 blocks). That does not fit a 12 GB card at all — measured
+        // 2026-07-27, a fresh process OOM'd at an 11,709 MiB peak. Block streaming gives the denoise loop the same
+        // graceful degradation Ideogram 4 / Qwen-Image got: the shared weights stay resident and the blocks ride a
+        // sliding window. Cards with real headroom take the planner's Resident branch and behave exactly as before.
         long phT4 = sw.ElapsedMilliseconds;
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
+        BlockStreamingController? streamer = null;
+        if (Backend.StreamingCache is not null)
+        {
+            IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
+            for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
+            long totalBlockBytes = 0;
+            foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
+            long sharedBytes = SumBytes(_transformer.EnumerateSharedWeights());
+            int txtSeqLen = (int)condHidden.Shape[1];
+            long reserve = EstimateActivationReserveBytes(txtSeqLen, imageSeqLen, _config) + sharedBytes;
+
+            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "Krea2", Backend);
+            PhasePlacement placement = planner.PlanPhase(
+                "denoise", totalBlockBytes, reserve, alreadyResident: _ditResident, canStream: true);
+            if (placement == PhasePlacement.Resident)
+            {
+                // Unconditional even when already resident — byte-for-byte the pre-streaming behavior. Per-weight
+                // preload is a cache lookup for anything already on the device, so this costs nothing on a warm
+                // generation and self-heals if the cache dropped a weight behind our back (which _ditResident,
+                // being only a planner hint, would not notice).
+                Backend.PreloadWeights(_transformer.EnumerateWeights());
+                _ditResident = true;
+            }
+            else
+            {
+                Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+                long avail = Backend.StreamingCache.QueryAvailableWeightCacheBytes(reserve);
+                long perBlock = blocks.Length > 0 ? blocks[0].EstimatedWeightBytes : 0;
+                int prefetchAhead = perBlock > 0 ? Math.Clamp((int)(avail / perBlock) - 2, 0, 2) : 0;
+                streamer = new BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
+                _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
+                streamer.Prime();
+                _ditResident = false;
+                Logs.Info($"Krea2 streaming: {blocks.Length} blocks, prefetchAhead={prefetchAhead}, " +
+                    $"total ~{totalBlockBytes / (1024 * 1024)} MB, shared ~{sharedBytes / (1024 * 1024)} MB resident, " +
+                    $"reserve ~{reserve / (1024 * 1024)} MB");
+            }
+        }
+        else
+        {
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+            _ditResident = true;
+        }
         Logs.Verbose($"[krea2-phase] DiT preload={sw.ElapsedMilliseconds - phT4}ms");
 
         // Fast path (plain t2i, no img2img / masked-inpaint): keep the latent in the transformer's patchified token
@@ -220,7 +274,10 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // Step-graph mode (HARTSY_DIT_GRAPH, fast path only, no CFG): route the latent through the
         // transformer's FIXED buffer so the captured graph's baked address stays valid across steps and gens.
         // The fixed tensor is transformer-owned: never disposed here, never DataPointer-read (snapshot instead).
-        bool graphMode = fastPath && !useCfg && condCache is null
+        // NEVER on the streamed path: the transformer refuses to capture while BeforeBlockForward is hooked (a graph
+        // bakes weight pointers that streaming re-points every forward), so it returns a fresh eager velocity — and
+        // the graph-mode branch below skips disposing it, which would leak one velocity buffer per step.
+        bool graphMode = fastPath && !useCfg && condCache is null && streamer is null
             && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
         Tensor? patchLatent = null;
         if (fastPath)
@@ -275,6 +332,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                 stepSw.Stop();
                 Logs.Verbose($"[krea2-phase] step {i + 1}/{steps}: {stepSw.ElapsedMilliseconds}ms");
                 onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+                TrimPoolOnStreamedPath(streamer);
                 continue;
             }
 
@@ -323,6 +381,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            TrimPoolOnStreamedPath(streamer);
         }
 
         // Fast path: bring the final patchified latent back to pixel space once for the VAE. Graph mode reads a
@@ -353,9 +412,26 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         long phT5 = sw.ElapsedMilliseconds;
         Backend.Sync();
         long phT6 = sw.ElapsedMilliseconds;
-        if (!KeepModelsResident)
+        if (streamer is not null)
+        {
+            // Streamed path always tears down regardless of KEEP_MODELS: nothing was fully resident to keep, and the
+            // VAE decode needs the window's VRAM. Detach the hook first so a later eager generation on this same
+            // transformer instance cannot call into a disposed controller.
+            _transformer.BeforeBlockForward = null;
+            streamer.EvictAll();
+            streamer.Dispose();
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            _ditResident = false;
+            // Unconditional, even though this generation never captured: a graph captured by an EARLIER resident
+            // generation is still owned by this transformer at a matching signature, and streaming has since
+            // re-uploaded every block to fresh addresses. The next resident generation would replay it against
+            // freed memory (CUDA 700, context-poisoning). Idempotent and cheap.
+            _transformer.InvalidateStepGraph(Backend);
+        }
+        else if (!KeepModelsResident)
         {
             Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
             // The captured step graph bakes weight device pointers — freeing the weights leaves it pointing at
             // freed memory (replay = CUDA 700 that poisons the context). Invalidate; next gen re-captures.
             if (graphMode)
@@ -440,6 +516,51 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             return (scaled, null);
         }
         return (t2iNoise, null);
+    }
+
+    /// <summary>Streamed path only: returns the stream-ordered pool's reservations to the driver once per step.</summary>
+    /// <remarks><c>retainBehind: 0</c> frees every block via <c>cuMemFreeAsync</c>, and <c>HARTSY_MEMPOOL_KEEP</c> (on
+    /// by default) raises the pool's release threshold so those bytes stay reserved. That is a pure win when the DiT
+    /// is resident (the same buffers get reused), but on the streamed path the pool grows by roughly a block per step.
+    /// Measured on Ideogram 4: 4.1 → 11.6 GiB — the entire card — by step 17, versus a flat 5.1 GiB with this trim,
+    /// for +1.4% wall-clock. See benchmarks/results/2026-07-27_lowvram_leak_fix.md §5f. Called from BOTH loop exits:
+    /// the patchified fast path <c>continue</c>s before the loop body's tail.</remarks>
+    private void TrimPoolOnStreamedPath(BlockStreamingController? streamer)
+    {
+        if (streamer is not null)
+        {
+            Backend.TrimMemoryPool();
+        }
+    }
+
+    /// <summary>Sums a tensor set's true on-device footprint.</summary>
+    /// <remarks>Via <see cref="DType.ComputeByteCount"/> — block-quantized dtypes report <c>SizeInBytes == 0</c>, so
+    /// the naive product would total to zero and silently disable streaming.</remarks>
+    private static long SumBytes(IEnumerable<Tensor> tensors)
+    {
+        long total = 0;
+        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
+        return total;
+    }
+
+    /// <summary>Per-forward activation/workspace estimate for one Krea 2 pass over the joint <c>[text, image]</c> sequence.</summary>
+    /// <remarks>Single-stream: text and image share one sequence through all 28 blocks, so every term is counted once
+    /// over the combined length at the block activation dtype (F16 on the default <c>HARTSY_DIT_F16</c> path). The
+    /// SwiGLU term dominates — inner 16384 is 2.7× hidden. The flat 1 GB tail covers cuBLAS workspace, the fp8 GEMM
+    /// dequant scratch and the RoPE tables. Deliberately generous: over-estimating costs a smaller prefetch window,
+    /// under-estimating costs an OOM.</remarks>
+    private static long EstimateActivationReserveBytes(int txtSeqLen, int imgSeqLen, Krea2Config config)
+    {
+        long seq = txtSeqLen + imgSeqLen;
+        long actBytes = Models.Denoisers.DiTBlocks.DitDtype.Act == DType.F16 ? 2 : 4;
+        long hidden = config.HiddenSize;
+        long kvDim = (long)config.NumKvHeads * config.AttentionHeadDim;
+        long ffnBytes = 3L * seq * config.IntermediateSize * actBytes;   // SwiGLU gate/up/silu/gated, ~3 live at once
+        long qkvBytes = seq * (hidden * 3 + kvDim * 4) * actBytes;       // q/k/v, their permuted views, GQA-repeated k/v
+        long attnBytes = 3L * seq * hidden * actBytes;                   // SDPA output, sigmoid gate, to_out
+        long streamBytes = 6L * seq * hidden * actBytes;                 // residual + both norm/modulate pairs
+        long f32Bytes = 2L * seq * hidden * 4;                           // F32 [text, image] concat + the final-layer tail
+        return ffnBytes + qkvBytes + attnBytes + streamBytes + f32Bytes + 1024L * 1024 * 1024;
     }
 
     /// <summary>Releases the prompt-embedding cache (pipeline-internal state; see DiffusionPipelineBase).</summary>

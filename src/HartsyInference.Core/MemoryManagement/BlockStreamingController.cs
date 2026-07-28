@@ -9,6 +9,7 @@ namespace HartsyInference.Core.MemoryManagement;
 public sealed class BlockStreamingController : IDisposable
 {
     private readonly IStreamingWeightCache _cache;
+    private readonly IBackend? _backend;
     private readonly IReadOnlyList<IStreamingBlock> _blocks;
     private readonly int _prefetchAhead;
     private readonly int _retainBehind;
@@ -20,12 +21,14 @@ public sealed class BlockStreamingController : IDisposable
 
     /// <summary>Constructs a streaming controller with the given prefetch depth and retain window.</summary>
     /// <remarks><paramref name="prefetchAhead"/> is the in-flight depth (0 = synchronous, 1 = typical overlap); <paramref name="retainBehind"/> keeps
-    /// already-used blocks cached for reuse (0 = evict immediately).</remarks>
+    /// already-used blocks cached for reuse (0 = evict immediately). <paramref name="backend"/> is only used by
+    /// <see cref="TrimAfterStep"/>, which is inert when it is null.</remarks>
     public BlockStreamingController(
         IStreamingWeightCache cache,
         IReadOnlyList<IStreamingBlock> blocks,
         int prefetchAhead = 1,
-        int retainBehind = 0)
+        int retainBehind = 0,
+        IBackend? backend = null)
     {
         if (cache is null) throw new ArgumentNullException(nameof(cache));
         if (blocks is null) throw new ArgumentNullException(nameof(blocks));
@@ -33,6 +36,7 @@ public sealed class BlockStreamingController : IDisposable
         if (retainBehind < 0) throw new ArgumentOutOfRangeException(nameof(retainBehind));
 
         _cache = cache;
+        _backend = backend;
         _blocks = blocks;
         _prefetchAhead = prefetchAhead;
         _retainBehind = retainBehind;
@@ -111,6 +115,21 @@ public sealed class BlockStreamingController : IDisposable
             EvictBlock(i);
         }
         _cache.DrainAndReleasePool();
+    }
+
+    /// <summary>Returns the stream-ordered pool's reservations to the driver; call once at the end of every denoise step of a streamed loop.</summary>
+    /// <remarks><c>retainBehind: 0</c> frees every block via <c>cuMemFreeAsync</c>, and <c>HARTSY_MEMPOOL_KEEP</c> (on by default) raises the
+    /// pool's release threshold so those bytes stay reserved. On a resident pipeline that is a pure win — the same buffers get reused. On the
+    /// streamed path the pool instead grows by roughly a block per step: measured on Ideogram 4 (3060, 1024²/20 steps) VRAM climbed 4.1 → 11.6 GiB
+    /// (the entire card) by step 17, versus a flat 5.1 GiB with this trim, for +1.4 % wall-clock. See
+    /// <c>benchmarks/results/2026-07-27_lowvram_leak_fix.md</c> §5f.
+    /// <para>Deliberately NOT <see cref="EvictAll"/>'s <see cref="IStreamingWeightCache.DrainAndReleasePool"/>: that also synchronizes the upload
+    /// stream, which would stall on the prefetch this step just primed. The backend's trim syncs the compute stream only. Inert when the controller
+    /// was constructed without a backend.</para></remarks>
+    public void TrimAfterStep()
+    {
+        ThrowIfDisposed();
+        _backend?.TrimMemoryPool();
     }
 
     /// <summary>Drives NotUploaded/Evicted block to <see cref="BlockState.Uploading"/>.</summary>

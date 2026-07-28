@@ -1,11 +1,12 @@
 # Video models — HartsyInference vs ComfyUI scoreboard
 
 Canonical, single-source-of-truth scoreboard for video (T2V) diffusion models. Consolidates the
-`video_comfy-vs-hartsy_*` campaign files and the per-model bring-up benchmarks in
-[`benchmarks/results/`](../results/) into one table. Where multiple source files cover the same model,
-the **freshest scoreboard run wins** (07-11 over 07-08 over 07-03), unless a later per-model or
-per-feature file gives a more precise number for that specific model — see Notes below for the one
-case where that applies (Wan2.2 TI2V-5B step-cache).
+`video_comfy-vs-hartsy_*` campaign write-ups and the per-model bring-up benchmarks that formerly lived
+as separate dated files in [`benchmarks/results/`](../results/) (now retired — this table is the
+successor) into one table. Where multiple source runs covered the same model, the **freshest scoreboard
+run wins** (07-11 over 07-08 over 07-03), unless a later per-model or per-feature result gave a more
+precise number for that specific model — see Notes below for the one case where that applies (Wan2.2
+TI2V-5B step-cache).
 
 **Hardware:** RTX 4090 24 GB only — no video benchmarks have been run on the RTX 3060.
 **Methodology:** end-to-end wall-clock through the **SwarmUI API** — the identical generation request
@@ -19,13 +20,13 @@ how to reproduce these numbers. Standard workload (unless noted): 25 frames, 512
 
 | Model | GPU | HartsyInference | ComfyUI | Ratio | Date | Source |
 |---|---|---:|---:|---:|---|---|
-| Wan 2.1 T2V 14B (fp8, 15 steps) | RTX 4090 | 30.58 s | 30.62 s | 1.00× — tied (parity) | 2026-07-11 | [video_comfy-vs-hartsy_2026-07-11.md](../results/video_comfy-vs-hartsy_2026-07-11.md) |
-| Wan 2.1 T2V 1.3B (fp16, 20 steps) | RTX 4090 | 11.22 s | **6.28 s** | 1.79× slower | 2026-07-11 | [video_comfy-vs-hartsy_2026-07-11.md](../results/video_comfy-vs-hartsy_2026-07-11.md) |
-| LTX-0.9 2B (fp16, 20 steps) | RTX 4090 | 4.59 s | **2.84 s** | 1.62× slower | 2026-07-11 | [video_comfy-vs-hartsy_2026-07-11.md](../results/video_comfy-vs-hartsy_2026-07-11.md) |
-| Wan 2.2 TI2V-5B (fp16, 20 steps) | RTX 4090 | 15.5 s | **4.52 s** | 3.4× slower | 2026-07-11 | [video_comfy-vs-hartsy_2026-07-11.md](../results/video_comfy-vs-hartsy_2026-07-11.md) |
-| LTX-2.3 22B (video+audio, 20 steps) | RTX 4090 | 42.3 s | n/a — no comparable Comfy workflow | n/a | 2026-07-11 | [video_comfy-vs-hartsy_2026-07-11.md](../results/video_comfy-vs-hartsy_2026-07-11.md) |
-| HunyuanVideo 13B T2V (fp8, 20 steps) | RTX 4090 | 1m26s e2e (~2.15 s/step) | n/a — no Comfy Hunyuan T2V workflow benched yet | n/a | 2026-07-02 | [hunyuanvideo_e2e_2026-07-02.md](../results/hunyuanvideo_e2e_2026-07-02.md) |
-| Kandinsky-5.0 T2V Lite (2B, 30 steps) | RTX 4090 | 102.0 s e2e (~2.9 s/step) | n/a — not yet wired through SwarmUI (in-engine text encoders pending) | n/a | 2026-07-02 | [kandinsky5_t2v_e2e_2026-07-02.md](../results/kandinsky5_t2v_e2e_2026-07-02.md) |
+| Wan 2.1 T2V 14B (fp8, 15 steps) | RTX 4090 | 30.58 s | 30.62 s | 1.00× — tied (parity) | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
+| Wan 2.1 T2V 1.3B (fp16, 20 steps) | RTX 4090 | 11.22 s | **6.28 s** | 1.79× slower | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
+| LTX-0.9 2B (fp16, 20 steps) | RTX 4090 | 4.59 s | **2.84 s** | 1.62× slower | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
+| Wan 2.2 TI2V-5B (fp16, 20 steps) | RTX 4090 | 15.5 s | **4.52 s** | 3.4× slower | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
+| LTX-2.3 22B (video+audio, 20 steps) | RTX 4090 | 42.3 s | n/a — no comparable Comfy workflow | n/a | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
+| HunyuanVideo 13B T2V (fp8, 20 steps) | RTX 4090 | 1m26s e2e (~2.15 s/step) | n/a — no Comfy Hunyuan T2V workflow benched yet | n/a | 2026-07-02 | hunyuanvideo_e2e_2026-07-02.md |
+| Kandinsky-5.0 T2V Lite (2B, 30 steps) | RTX 4090 | 102.0 s e2e (~2.9 s/step) | n/a — not yet wired through SwarmUI (in-engine text encoders pending) | n/a | 2026-07-02 | kandinsky5_t2v_e2e_2026-07-02.md |
 
 Row count: 7. Bold marks the faster (lower-wall-clock) side of each head-to-head comparison; rows with no
 ComfyUI baseline are left unbolded.
@@ -40,7 +41,7 @@ ComfyUI baseline are left unbolded.
   ComfyUI's own performance did not change across engine versions, only the Hartsy side did (per the
   07-11 file), so reusing the 07-03 Comfy numbers against the 07-11 Hartsy numbers is valid.
 - **Wan2.2 TI2V-5B step-cache is opt-in and NOT the shipped-default number in the table above.**
-  [`2026-07-22_accel_stepcache_wan_4090.md`](../results/2026-07-22_accel_stepcache_wan_4090.md) measured
+  `2026-07-22_accel_stepcache_wan_4090.md` measured
   1.18–1.55× speedups (44.1–57.7 s vs a 68 s warm baseline) via `HARTSY_STEP_CACHE`, but on a *different*
   workload (832×480, 33 frames, 50 steps — not the standard 512×320/25f/20-step scoreboard workload, so
   the 68 s baseline there isn't directly comparable to the 15.5 s row above). More importantly, the

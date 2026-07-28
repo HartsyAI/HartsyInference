@@ -27,25 +27,42 @@ public sealed class VramPlanner
     private readonly IStreamingWeightCache? _cache;
     private readonly LowVramMode _mode;
     private readonly string _modelName;
+    private readonly IBackend? _backend;
 
     /// <summary>Creates a planner for one generation. Pass the backend's <see cref="IBackend.StreamingCache"/>; a null
     /// cache (CPU, Vulkan) forces <see cref="PhasePlacement.Resident"/> for every phase, matching today's behavior on
     /// backends that have no notion of a device weight cache.</summary>
-    public VramPlanner(IStreamingWeightCache? cache, string modelName)
-        : this(cache, modelName, LowVramPolicy.Resolve())
+    /// <param name="backend">Optional, but strongly recommended — see <see cref="TrimBeforeQuery"/>. Without it the
+    /// planner can badly under-estimate free VRAM and stream a model that would have fit resident.</param>
+    public VramPlanner(IStreamingWeightCache? cache, string modelName, IBackend? backend = null)
+        : this(cache, modelName, LowVramPolicy.Resolve(), backend)
     {
     }
 
     /// <summary>Creates a planner with an explicit policy instead of the process-wide one.</summary>
     /// <remarks>Lets callers (and tests) pin a mode without mutating process environment state that every other
     /// concurrently-running generation would also see.</remarks>
-    public VramPlanner(IStreamingWeightCache? cache, string modelName, LowVramMode mode)
+    public VramPlanner(IStreamingWeightCache? cache, string modelName, LowVramMode mode, IBackend? backend = null)
     {
         ArgumentNullException.ThrowIfNull(modelName);
         _cache = cache;
         _modelName = modelName;
         _mode = mode;
+        _backend = backend;
     }
+
+    /// <summary>Returns the stream-ordered pool's reservations to the driver so the availability query below measures
+    /// what is really free, not what the allocator happens to be holding.</summary>
+    /// <remarks><b>This is load-bearing, not hygiene.</b> Weights freed moments earlier — a text encoder released just
+    /// before the denoise phase, say — go back via <c>cuMemFreeAsync</c>, and with <c>HARTSY_MEMPOOL_KEEP</c> (on by
+    /// default) the pool keeps those bytes reserved. <c>QueryAvailableWeightCacheBytes</c> then reports them as
+    /// unavailable. Measured on Krea2/3060: the planner saw <c>3879 MB</c> available while the card was really holding
+    /// only ~5.9 GB of 12 GB, an under-report of roughly 5 GB — the size of the text encoder freed 146 ms earlier.
+    /// <para>Under-reporting is not symmetric in cost: it biases toward <see cref="PhasePlacement.Streamed"/>, and
+    /// streaming is 5-8× slower. A large card could silently take the slow path for a model that fits comfortably.
+    /// One compute-stream sync per <i>phase</i> (not per step) is cheap insurance. `QwenImagePipeline` already did this
+    /// by hand before its VAE-decode gate for exactly this reason.</para></remarks>
+    private void TrimBeforeQuery() => _backend?.TrimMemoryPool();
 
     /// <summary>True when this planner can produce a streamed plan at all.</summary>
     public bool CanStream => _cache is not null && _mode != LowVramMode.ForceOff;
@@ -93,6 +110,7 @@ public sealed class VramPlanner
             return PhasePlacement.Resident;
         }
 
+        TrimBeforeQuery();
         long available = _cache.QueryAvailableWeightCacheBytes(activationReserveBytes);
         if (_mode == LowVramMode.ForceOn)
         {
@@ -125,6 +143,7 @@ public sealed class VramPlanner
         {
             return false;
         }
+        TrimBeforeQuery();
         long available = _cache.QueryAvailableWeightCacheBytes(requiredBytes);
         if (available > 0)
         {

@@ -272,7 +272,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             // generations oscillating resident→streaming→resident — belongs to VramPlanner, so every pipeline
             // decides identically and HARTSY_LOWVRAM can override it. The reserve estimate above stays here:
             // it is genuinely per-architecture, unlike the decision.
-            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "HunyuanImage");
+            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "HunyuanImage", Backend);
             PhasePlacement placement = planner.PlanPhase(
                 "denoise", totalBlockBytes, activationReserve, alreadyResident: _ditResident, canStream: true);
             if (placement == PhasePlacement.Resident)
@@ -288,7 +288,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
                 // clamp-at-2 cap — not worth threading a second reserve value through.
                 int prefetchAhead = ChoosePrefetchAhead(Backend.StreamingCache, blocks, activationReserve);
                 streamer = new BlockStreamingController(Backend.StreamingCache, blocks,
-                    prefetchAhead: prefetchAhead, retainBehind: 0);
+                    prefetchAhead: prefetchAhead, retainBehind: 0, backend: Backend);
                 _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
                 streamer.Prime();
                 long totalMb = streamer.EstimatedTotalWeightBytes / (1024 * 1024);

@@ -1,8 +1,0 @@
-Tier1 direct-engine decode  CUDA  HARTSY_LOWVRAM=1 (compressed, matches llama.cpp)  genTokens=128  Fri Jul  3 11:21:32 PM UTC 2026
-Qwen3-0.6B-Q4_K_M.gguf ||   prompt tokens : 67 ||   generated     : 128 tokens in 7.28s (17.59 tok/s overall) ||   total D2H syncs (incl. per-token logits reads): 129 || 
-llama-3.2-1b-instruct-q8_0.gguf ||   prompt tokens : 90 ||   generated     : 128 tokens in 21.15s (6.05 tok/s overall) ||   total D2H syncs (incl. per-token logits reads): 129 || 
-gemma-3-1b-it-Q4_K_M.gguf ||   prompt tokens : 68 ||   generated     : 128 tokens in 15.68s (8.16 tok/s overall) ||   total D2H syncs (incl. per-token logits reads): 129 || 
-Phi-4-mini-instruct-Q4_K_M.gguf ||   prompt tokens : 58 ||   generated     : 128 tokens in 46.73s (2.74 tok/s overall) ||   total D2H syncs (incl. per-token logits reads): 129 || 
-granite-3.1-2b-instruct-Q4_K_M.gguf ||   prompt tokens : 104 ||   generated     : 128 tokens in 40.30s (3.18 tok/s overall) ||   total D2H syncs (incl. per-token logits reads): 129 || 
-OLMoE-1B-7B-0924-Instruct-Q4_K_M.gguf ||  ||  ||  || Unhandled exception. HartsyInference.Cuda.CudaException: CUDA error 2: CUDA_ERROR_OUT_OF_MEMORY — out of memory
-Mistral-7B-Instruct-v0.3-Q4_K_M.gguf ||   prompt tokens : 65 ||   generated     : 128 tokens in 102.89s (1.24 tok/s overall) ||   total D2H syncs (incl. per-token logits reads): 129 || 

@@ -468,7 +468,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             int txtSeqLen = (int)condHidden.Shape[1];
             long reserve = EstimateActivationReserveBytes(txtSeqLen, forwardImgSeqLen, _config.HiddenSize) + sharedBytes;
 
-            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "QwenImage");
+            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "QwenImage", Backend);
             PhasePlacement placement = planner.PlanPhase(
                 "denoise", totalBlockBytes, reserve, alreadyResident: _ditResident, canStream: true);
             if (placement == PhasePlacement.Resident)
@@ -482,7 +482,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                 long avail = Backend.StreamingCache.QueryAvailableWeightCacheBytes(reserve);
                 long perBlock = blocks.Length > 0 ? blocks[0].EstimatedWeightBytes : 0;
                 int prefetchAhead = perBlock > 0 ? Math.Clamp((int)(avail / perBlock) - 2, 0, 2) : 0;
-                streamer = new BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
+                streamer = new BlockStreamingController(
+                    Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0, backend: Backend);
                 _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
                 streamer.Prime();
                 _ditResident = false;
@@ -629,16 +630,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                 Backend.FreeActivations();
             }
 
-            // Streamed path only: return the stream-ordered pool's reservations to the driver once per step.
-            // retainBehind:0 frees every block via cuMemFreeAsync, and HARTSY_MEMPOOL_KEEP (on by default) raises the
-            // pool's release threshold so those bytes stay reserved. That is a pure win when the DiT is resident (the
-            // same buffers get reused), but on the streamed path the pool grows by roughly a block per step. Measured
-            // on Ideogram 4 (the same shape of workload): 4.1 → 11.6 GiB — the entire card — by step 17, versus a flat
-            // 5.1 GiB with this trim, for +1.4% wall-clock. See benchmarks/results/2026-07-27_lowvram_leak_fix.md §5f.
-            if (streamer is not null)
-            {
-                Backend.TrimMemoryPool();
-            }
+            // Streamed path only; rationale and measurements live on BlockStreamingController.TrimAfterStep.
+            streamer?.TrimAfterStep();
         }
 
         // condHidden/uncondHidden and packedEditRef (the pinned ref-latent cache slot) are cross-generation
@@ -697,7 +690,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (_ditResident && Backend.StreamingCache is not null)
         {
             long decodeReserveBytes = (long)width * height * 5120L;
-            VramPlanner decodePlanner = new VramPlanner(Backend.StreamingCache, "QwenImage");
+            VramPlanner decodePlanner = new VramPlanner(Backend.StreamingCache, "QwenImage", Backend);
             if (decodePlanner.ShouldEvictForHeadroom("vae-decode", decodeReserveBytes))
                 EvictResidentTransformer($"VAE decode ({width}x{height} needs ~{decodeReserveBytes / (1024 * 1024)} MB free)");
         }

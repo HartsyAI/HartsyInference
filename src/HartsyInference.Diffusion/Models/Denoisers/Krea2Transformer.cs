@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -89,8 +90,28 @@ public sealed unsafe class Krea2Transformer : IDisposable
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"transformer_blocks.{i}");
     }
 
-    /// <summary>Enumerates every weight tensor for GPU preload.</summary>
-    public IEnumerable<Tensor> EnumerateWeights()
+    /// <summary>The number of streamable transformer blocks (28).</summary>
+    public int BlockCount => _blocks.Length;
+
+    /// <summary>The streamable block at <paramref name="idx"/>.</summary>
+    /// <remarks>Returns the live block instance so <see cref="IStreamingBlock.EnumerateWeights"/> hands back the same
+    /// tensor references every call — <c>BlockStreamingController</c> tracks residency by reference.</remarks>
+    public IStreamingBlock GetBlock(int idx) => _blocks[idx];
+
+    /// <summary>Hook invoked with each block index immediately before that block's forward pass; null = no streaming.</summary>
+    /// <remarks>Pipelines plug a <c>BlockStreamingController</c> here so resident VRAM peaks at roughly
+    /// (activations + the prefetch window) instead of the whole 13 GB fp8 DiT.
+    /// <para><b>The captured step graph is disabled while this is non-null</b> (see <see cref="ForwardPatched"/>): a
+    /// graph bakes weight device pointers and streaming re-points them every forward, so replay would read freed
+    /// memory — a context-poisoning CUDA 700. Same guard as <c>HunyuanVideoDit</c> / <c>LtxVideo2Transformer</c>.</para></remarks>
+    public Action<int>? BeforeBlockForward { get; set; }
+
+    /// <summary>The non-block weights: <c>img_in</c>, the timestep MLP + modulation projection, the text-fusion stage,
+    /// the text projection, and the final layer.</summary>
+    /// <remarks>Touched on every forward regardless of which block runs, so they stay eagerly resident even when
+    /// streaming. Unlike Qwen-Image's (which bracket its blocks), these are all a PREFIX of
+    /// <see cref="EnumerateWeights"/> — the blocks are its tail — but the split is still a genuine partition.</remarks>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
     {
         Tensor?[] top =
         [
@@ -99,6 +120,12 @@ public sealed unsafe class Krea2Transformer : IDisposable
         ];
         foreach (Tensor? t in top) if (t is not null) yield return t;
         foreach (Tensor t in _textFusion.EnumerateWeights()) yield return t;
+    }
+
+    /// <summary>Enumerates every weight tensor for GPU preload.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor t in EnumerateSharedWeights()) yield return t;
         foreach (Krea2Block b in _blocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
     }
 
@@ -206,7 +233,11 @@ public sealed unsafe class Krea2Transformer : IDisposable
         // is refreshed into fixed device buffers before the launch. Self-disables on capture failure or a
         // CFG-style signature flip storm.
         // An armed step cache is per-step-variable topology (hit vs miss) — a captured graph cannot replay it.
-        bool graphMode = stepCache is null && DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported
+        // FULLY RESIDENT only (BeforeBlockForward null): block streaming re-points every block's weights each
+        // forward, so a graph that baked their device pointers would replay against freed memory — a CUDA 700 that
+        // poisons the whole context. Same guard as HunyuanVideoDit / LtxVideo2Transformer.
+        bool graphMode = stepCache is null && BeforeBlockForward is null
+            && DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported
             && !_graphDead && ReferenceEquals(patchLatent, _latentFixed);
         if (!graphMode)
         {
@@ -381,6 +412,7 @@ public sealed unsafe class Krea2Transformer : IDisposable
         int startBlock = 0;
         if (stepCache is not null && _blocks.Length > 1)
         {
+            BeforeBlockForward?.Invoke(0);
             Tensor block0 = _blocks[0].Forward(backend, joint, tembMod, _rope, batch, jointSeq);
             joint.Dispose();
             joint = block0;
@@ -400,6 +432,10 @@ public sealed unsafe class Krea2Transformer : IDisposable
 
         for (int i = startBlock; i < _blocks.Length; i++)
         {
+            // A step-cache HIT sets startBlock = _blocks.Length, skipping this loop and its streaming hook entirely.
+            // The controller simply keeps whatever it had prefetched (bounded by the prefetch window) and the next
+            // miss resumes from there — residency is per-block state, not a position in a sequence.
+            BeforeBlockForward?.Invoke(i);
             Tensor next = _blocks[i].Forward(backend, joint, tembMod, _rope, batch, jointSeq);
             if (joint != cacheAnchor) joint.Dispose();
             joint = next;

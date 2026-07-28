@@ -22,6 +22,13 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// </list></summary>
 public sealed unsafe class LensPipeline : DiffusionPipelineBase
 {
+    /// <summary>Strict opt-in (<c>LENS_DEBUG_STATS=1</c>) for the per-step D2H-sync/latency line. Off by default so
+    /// nothing in the loop is tempted to read a <c>DataPointer</c> on a real run.</summary>
+    private static readonly bool DiagnosticStats = Environment.GetEnvironmentVariable("LENS_DEBUG_STATS") == "1";
+
+    /// <summary>Upstream's <c>max(||comb||, 1e-12)</c> floor on the per-token combined norm.</summary>
+    private const float RescaleNormFloor = 1e-12f;
+
     private readonly LensTransformer _transformer;
     private readonly LensGptOssEncoder? _textEncoder;
     private readonly VaeDecoder _vaeDecoder;
@@ -29,6 +36,11 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
     private readonly Tensor _bnMean;
     private readonly Tensor _bnVar;
     private readonly float _bnEps;
+
+    // Constant operands of the on-device norm-rescaled CFG (built once, then served from the backend's
+    // weight cache). Sized on first CFG step from the velocity's channel count.
+    private Tensor? _rescaleOnes;
+    private Tensor? _rescaleChannelMean;
 
     /// <summary>Creates a Lens pipeline without an attached text encoder. Use this when callers will
     /// supply pre-computed multi-layer text embeddings via <see cref="GenerateFromEmbeddings"/>.</summary>
@@ -169,13 +181,16 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         for (int i = 0; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
+            if (DiagnosticStats) Backend.ResetD2hSyncCount();
             float sigma = timesteps[i] / 1000.0f;
 
             Tensor noisePred;
+            long forwardSyncs;
             if (useCfg)
             {
                 Tensor condPred = _transformer.Forward(Backend, packedLatent, positiveLayers, sigma, patH, patW);
                 Tensor uncondPred = _transformer.Forward(Backend, packedLatent, negativeLayers!, sigma, patH, patW);
+                forwardSyncs = DiagnosticStats ? Backend.GetD2hSyncCount() : 0;
                 noisePred = ApplyNormRescaledCfg(condPred, uncondPred, cfgScale);
                 condPred.Dispose();
                 uncondPred.Dispose();
@@ -183,16 +198,19 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             else
             {
                 noisePred = _transformer.Forward(Backend, packedLatent, positiveLayers, sigma, patH, patW);
+                forwardSyncs = DiagnosticStats ? Backend.GetD2hSyncCount() : 0;
             }
 
-            TensorShape stepShape = new TensorShape(1, imgSeqLen, _config.InChannels);
-            Tensor newLatent = new Tensor(stepShape, DType.F32);
-            scheduler.Step(newLatent, noisePred, packedLatent, i);
+            // Flow-match Euler as ONE in-place device op (`v == pos == neg`, guidance 1 ⇒ z += v·dt), so the
+            // latent never leaves the GPU between steps — same substitution Anima/Krea2 made for the host
+            // FlowMatchEulerDiscreteScheduler.Step loop.
+            Backend.CfgEulerStep(packedLatent, noisePred, noisePred, 1.0f, scheduler.Dt(i));
             noisePred.Dispose();
-            packedLatent.Dispose();
-            packedLatent = newLatent;
 
             stepSw.Stop();
+            if (DiagnosticStats)
+                Logs.Info($"[Lens] step {i + 1}/{steps} sigma={sigma:F4} {stepSw.ElapsedMilliseconds}ms | " +
+                          $"D2H syncs {Backend.GetD2hSyncCount()} (forwards {forwardSyncs})");
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
             {
@@ -249,44 +267,80 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         return (float)(a * numSteps + b);
     }
 
-    /// <summary>Applies upstream's norm-rescaled CFG: <c>comb = uncond + cfg * (cond - uncond)</c>, then per-token L2-norm rescale <c>noise = comb * (||cond|| / max(||comb||, 1e-12))</c>. Operates on packed-token tensors <c>[B, S, C]</c>; the norm is over the channel dim.</summary>
-    private static Tensor ApplyNormRescaledCfg(Tensor cond, Tensor uncond, float cfgScale)
+    /// <summary>Applies upstream's norm-rescaled CFG: <c>comb = uncond + cfg * (cond - uncond)</c>, then per-token L2-norm rescale <c>noise = comb * (||cond|| / max(||comb||, 1e-12))</c>. Operates on packed-token tensors <c>[B, S, C]</c>; the norm is over the channel dim. Runs entirely through <see cref="IBackend"/> ops so the two velocity predictions never leave the device — the host <c>float*</c> version this replaces D2H-synced and evicted both of them (2 syncs + two 2 MB round-trips) on every step.</summary>
+    /// <remarks>Both tensors share <c>C</c>, so the L2 ratio equals the RMS ratio and the whole rescale is
+    /// <c>RmsNorm(comb) · rms(cond)</c>. <c>rms(cond)</c> is recovered as a full-width tensor — the shape a plain
+    /// element-wise multiply needs — via <c>mean_c(cond · RmsNorm(cond)) = mean(cond²)/rms(cond) = rms(cond)</c>,
+    /// where the channel-mean-and-broadcast is the <c>[C, C]</c> all-<c>1/C</c> Linear. Upstream's
+    /// <c>max(||comb||, 1e-12)</c> clamp becomes RmsNorm's inside-the-sqrt <c>eps</c>, i.e.
+    /// <c>sqrt(||comb||² + 1e-24)</c> — the same floor, smoothed at the crossover, and equal to a zero result for a
+    /// zero row exactly as the host version's <c>combNorm &gt; 0</c> branch was.</remarks>
+    private Tensor ApplyNormRescaledCfg(Tensor cond, Tensor uncond, float cfgScale)
     {
         if (cond.Shape != uncond.Shape)
             throw new ArgumentException($"cond shape {cond.Shape} must match uncond shape {uncond.Shape}.");
-        int batch = (int)cond.Shape[0];
-        int seqLen = (int)cond.Shape[1];
-        int channels = (int)cond.Shape[2];
+        int channels = (int)cond.Shape[cond.Shape.Rank - 1];
+        EnsureRescaleConstants(channels);
+        float eps = RescaleNormFloor * RescaleNormFloor / channels;
+
+        Tensor condUnit = new Tensor(cond.Shape, DType.F32);
+        Backend.RmsNorm(condUnit, cond, _rescaleOnes!, eps);
+        Tensor condScaledSq = new Tensor(cond.Shape, DType.F32);
+        Backend.Mul(condScaledSq, cond, condUnit);
+        condUnit.Dispose();
+        Tensor condRms = new Tensor(cond.Shape, DType.F32);
+        Backend.Linear(condRms, condScaledSq, _rescaleChannelMean!, null);
+        condScaledSq.Dispose();
+
+        // comb = (1 - cfg)·uncond + cfg·cond. CfgEulerStep with pos == neg is `z += pos·delta`, which supplies
+        // the second term in place on top of the scaled uncond.
+        Tensor comb = new Tensor(cond.Shape, DType.F32);
+        Backend.Scale(comb, uncond, 1.0f - cfgScale);
+        Backend.CfgEulerStep(comb, cond, cond, 1.0f, cfgScale);
+
+        Tensor combUnit = new Tensor(cond.Shape, DType.F32);
+        Backend.RmsNorm(combUnit, comb, _rescaleOnes!, eps);
+        comb.Dispose();
 
         Tensor output = new Tensor(cond.Shape, DType.F32);
-        float* condPtr = (float*)cond.DataPointer;
-        float* uncondPtr = (float*)uncond.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int tokOffset = (b * seqLen + s) * channels;
-                float condNormSq = 0f;
-                float combNormSq = 0f;
-                for (int c = 0; c < channels; c++)
-                {
-                    float condVal = condPtr[tokOffset + c];
-                    float uncondVal = uncondPtr[tokOffset + c];
-                    float combVal = uncondVal + cfgScale * (condVal - uncondVal);
-                    outPtr[tokOffset + c] = combVal;
-                    condNormSq += condVal * condVal;
-                    combNormSq += combVal * combVal;
-                }
-                float condNorm = MathF.Sqrt(condNormSq);
-                float combNorm = MathF.Sqrt(combNormSq);
-                float scale = combNorm > 0f ? condNorm / MathF.Max(combNorm, 1e-12f) : 1.0f;
-                for (int c = 0; c < channels; c++)
-                    outPtr[tokOffset + c] *= scale;
-            }
-        }
+        Backend.Mul(output, combUnit, condRms);
+        combUnit.Dispose();
+        condRms.Dispose();
         return output;
+    }
+
+    /// <summary>Builds the two step-invariant operands of <see cref="ApplyNormRescaledCfg"/> and bulk-uploads them, so the per-step ops hit the backend's weight cache instead of re-transferring: an all-ones <c>[C]</c> RmsNorm scale (identity), and an all-<c>1/C</c> <c>[C, C]</c> matrix whose Linear is a channel-mean broadcast (<c>out[.., n] = Σ_k in[.., k]/C</c> for every <c>n</c>).</summary>
+    private void EnsureRescaleConstants(int channels)
+    {
+        if (_rescaleOnes is not null && _rescaleOnes.Shape[0] == channels) return;
+        if (_rescaleOnes is not null && _rescaleChannelMean is not null)
+            Backend.FreeWeights(new Tensor[] { _rescaleOnes, _rescaleChannelMean });
+        _rescaleOnes?.Dispose();
+        _rescaleChannelMean?.Dispose();
+
+        _rescaleOnes = new Tensor(new TensorShape(channels), DType.F32);
+        float* onesPtr = (float*)_rescaleOnes.DataPointer;
+        for (int c = 0; c < channels; c++) onesPtr[c] = 1.0f;
+
+        _rescaleChannelMean = new Tensor(new TensorShape(channels, channels), DType.F32);
+        float* meanPtr = (float*)_rescaleChannelMean.DataPointer;
+        float inv = 1.0f / channels;
+        for (long i = 0; i < (long)channels * channels; i++) meanPtr[i] = inv;
+
+        Backend.PreloadWeights(new Tensor[] { _rescaleOnes, _rescaleChannelMean });
+    }
+
+    /// <inheritdoc/>
+    protected override void DisposeCore()
+    {
+        // Symmetric with the PreloadWeights in EnsureRescaleConstants — the weight cache keys on the Tensor
+        // reference, so disposing without freeing would strand both device buffers.
+        if (_rescaleOnes is not null && _rescaleChannelMean is not null)
+            Backend.FreeWeights(new Tensor[] { _rescaleOnes, _rescaleChannelMean });
+        _rescaleOnes?.Dispose();
+        _rescaleOnes = null;
+        _rescaleChannelMean?.Dispose();
+        _rescaleChannelMean = null;
     }
 
     private void ValidateEmbeddings(IReadOnlyList<Tensor> positives, IReadOnlyList<Tensor>? negatives)

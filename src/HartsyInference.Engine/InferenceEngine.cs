@@ -38,7 +38,7 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly Lazy<EmbeddingService> _embeddings;
 
     /// <summary>Creates an engine that lazily constructs the backend named by <paramref name="backendSelector"/>
-    /// (<c>auto</c>/<c>cpu</c>/<c>cuda</c>/<c>vulkan</c>) on first use.</summary>
+    /// (<c>auto</c>/<c>cpu</c>/<c>cuda</c>/<c>vulkan</c>, optionally with a <c>:{ordinal}</c> device suffix) on first use.</summary>
     public InferenceEngine(string backendSelector = "auto")
     {
         _backendSelector = backendSelector;
@@ -56,8 +56,19 @@ public sealed class InferenceEngine : IInferenceEngine
         _embeddings = new Lazy<EmbeddingService>(() => new EmbeddingService(this));
     }
 
+    /// <summary>Creates an engine on a specific device, for hosts that carry the backend name and the GPU id as separate settings.</summary>
+    /// <remarks>Equivalent to passing <c>"cuda:1"</c> to the single-argument constructor; ordinal 0 composes back to the plain selector, so
+    /// the default path is byte-identical to what callers passed before device selection existed.</remarks>
+    public InferenceEngine(string backendSelector, int deviceOrdinal)
+        : this(BackendFactory.WithOrdinal(backendSelector, deviceOrdinal))
+    {
+    }
+
     /// <inheritdoc/>
     public string BackendSelector => _backendSelector;
+
+    /// <summary>The device ordinal this engine's backend will be (or was) constructed on; 0 unless the selector carries a suffix.</summary>
+    public int DeviceOrdinal => BackendFactory.ParseOrdinal(_backendSelector);
 
     /// <inheritdoc/>
     public string BackendDescription => BackendFactory.Describe(_backendSelector);

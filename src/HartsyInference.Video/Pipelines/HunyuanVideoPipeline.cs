@@ -110,7 +110,8 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
             Backend.PreloadWeights(_dit.EnumerateSharedWeights());
             IStreamingBlock[] blocks = new IStreamingBlock[_dit.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _dit.GetBlock(b);
-            streamer = new BlockStreamingController(Backend.StreamingCache!, blocks, prefetchAhead: 2, retainBehind: 0);
+            streamer = new BlockStreamingController(
+                Backend.StreamingCache!, blocks, prefetchAhead: 2, retainBehind: 0, backend: Backend);
             _dit.BeforeBlockForward = streamer.BeforeBlockForward;
             streamer.Prime();
             Logs.Info($"HunyuanVideo streaming: {blocks.Length} blocks, ~{streamer.EstimatedTotalWeightBytes / (1024 * 1024)} MB total");

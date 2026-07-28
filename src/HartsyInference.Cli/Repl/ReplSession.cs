@@ -170,9 +170,10 @@ public sealed class ReplSession : IDisposable
             AnsiConsole.MarkupLine($"[#9aa4af]backend is[/] [{CliTheme.Accent}]{Markup.Escape(_engine.BackendDescription)}[/]");
             return;
         }
-        if (!BackendFactory.ValidSelectors.Contains(selector, StringComparer.OrdinalIgnoreCase))
+        if (!BackendFactory.IsValidSelector(selector))
         {
-            AnsiConsole.MarkupLine($"[red]Unknown backend '{Markup.Escape(selector)}'.[/] Valid: {string.Join(", ", BackendFactory.ValidSelectors)}.");
+            AnsiConsole.MarkupLine($"[red]Unknown backend '{Markup.Escape(selector)}'.[/] " +
+                $"Valid: {string.Join(", ", BackendFactory.ValidSelectors)} (device backends also accept ':{{ordinal}}', e.g. cuda:1).");
             return;
         }
         _engine.SetBackend(selector.ToLowerInvariant());

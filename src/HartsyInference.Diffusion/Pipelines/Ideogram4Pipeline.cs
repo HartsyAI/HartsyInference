@@ -297,7 +297,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             // The shared sets stay resident on both paths, so they are part of what the block budget must fit beside.
             long reserve = EstimateActivationReserveBytes(seqLen, _config.EmbDim, _config.IntermediateSize) + sharedBytes;
 
-            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "Ideogram4");
+            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "Ideogram4", Backend);
             PhasePlacement placement = planner.PlanPhase(
                 "denoise", condBytes + uncondBytes, reserve, alreadyResident: _ditResident, canStream: true);
             if (placement == PhasePlacement.Resident)
@@ -442,18 +442,10 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
                 Backend.FreeActivations();
             }
 
-            // Streamed path only: return the stream-ordered pool's reservations to the driver once per step.
-            // retainBehind:0 frees every block via cuMemFreeAsync, and HARTSY_MEMPOOL_KEEP (on by default) raises
-            // the pool's release threshold so those bytes stay reserved. On a resident pipeline that is a pure win
-            // — the same buffers get reused. On the streamed path the pool instead grows by roughly a block per
-            // step: measured on the 3060 at 1024²/20st, VRAM climbed 4.1 → 11.6 GiB (the entire card) by step 17,
-            // versus a flat 5.5 GiB plateau with HARTSY_MEMPOOL_KEEP=0 — for a wall-clock difference of 202.4 s vs
-            // 203.7 s, i.e. nothing. The retention buys no speed here and costs ~6 GiB of headroom, which is what
-            // decides whether a higher resolution or a longer preset fits at all.
-            if (condStreamer is not null || uncondStreamer is not null)
-            {
-                Backend.TrimMemoryPool();
-            }
+            // Streamed path only, and exactly ONCE per step even though two windows are live: the mempool is
+            // device-global, so a second trim in the same step would sync the stream again and find nothing.
+            // Rationale and measurements live on BlockStreamingController.TrimAfterStep.
+            (condStreamer ?? uncondStreamer)?.TrimAfterStep();
         }
 
         if (condCache is not null)
@@ -839,7 +831,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         int prefetchAhead = perBlock > 0 ? Math.Clamp((int)(avail / 2 / perBlock) - 2, 0, 1) : 0;
 
         BlockStreamingController streamer = new BlockStreamingController(
-            Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
+            Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0, backend: Backend);
         transformer.BeforeBlockForward = streamer.BeforeBlockForward;
         streamer.Prime();
         return streamer;

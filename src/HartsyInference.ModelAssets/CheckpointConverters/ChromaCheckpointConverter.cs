@@ -1,4 +1,3 @@
-using System.Linq;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
@@ -106,6 +105,21 @@ public sealed class ChromaCheckpointConverter
         static bool FusableDType(Tensor t) =>
             t.DType == DType.F32 || t.DType == DType.F16 || t.DType == DType.BF16 || t.DType == DType.F8E4M3;
 
+        // fp8 block requant (Radiance only — see the note where QuantizeDitBlocksToFp8 is called below) is decided
+        // HERE, before the split loops, so each split chunk can be requantized the instant it is produced and its
+        // wide BF16 buffer freed. Splitting the whole model first and requantizing afterwards orphans the ENTIRE
+        // BF16 split set (~7 GB on Chroma Radiance: the fused img/txt qkv and single-block linear1 copies) on the
+        // native heap on top of the ~8 GB fp8 result, reclaimed only whenever the GC next reacts to the
+        // NativeBuffer memory pressure — i.e. peak host RAM depended on GC timing rather than on the data.
+        // Detection reads `bfl` (the nerf_* keys pass through to `transformer` verbatim further down, so this is
+        // the same predicate as before, just available earlier).
+        bool isRadiance = false;
+        foreach (string key in bfl.Keys)
+        {
+            if (key.StartsWith("nerf_", StringComparison.Ordinal)) { isRadiance = true; break; }
+        }
+        bool fp8Blocks = isRadiance && EnvSwitch.IsEnabled("HARTSY_RADIANCE_FP8", defaultOn: true);
+
         // ── Double transformer blocks ───────────────────────────────────
         for (int i = 0; i < numDoubles; i++)
         {
@@ -125,10 +139,10 @@ public sealed class ChromaCheckpointConverter
             {
                 // Image stream: split fused img_attn.qkv → to_q / to_k / to_v
                 SplitFusedQkv(bfl, $"{srcBase}.img_attn.qkv.weight", $"{srcBase}.img_attn.qkv.bias",
-                    dstBase, "attn.to_q", "attn.to_k", "attn.to_v", InnerDim, transformer);
+                    dstBase, "attn.to_q", "attn.to_k", "attn.to_v", InnerDim, transformer, fp8Blocks);
                 // Text stream: split fused txt_attn.qkv → add_q_proj / add_k_proj / add_v_proj
                 SplitFusedQkv(bfl, $"{srcBase}.txt_attn.qkv.weight", $"{srcBase}.txt_attn.qkv.bias",
-                    dstBase, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", InnerDim, transformer);
+                    dstBase, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", InnerDim, transformer, fp8Blocks);
             }
 
             // QK-norm scales
@@ -170,7 +184,7 @@ public sealed class ChromaCheckpointConverter
             else
             {
                 // 4-way split of fused linear1 → to_q / to_k / to_v / proj_mlp.
-                SplitFusedLinear1Weight(bfl, $"{srcBase}.linear1.weight", dstBase, transformer);
+                SplitFusedLinear1Weight(bfl, $"{srcBase}.linear1.weight", dstBase, transformer, fp8Blocks);
                 SplitFusedLinear1Bias(bfl, $"{srcBase}.linear1.bias", dstBase, transformer);
             }
 
@@ -210,8 +224,10 @@ public sealed class ChromaCheckpointConverter
         // ≥1M-element + rank-2 gate skips them), so the residual-damp bookkeeping (context_embedder + branch-output
         // Fp8ScaleFactor, NeRF param_generator un-damp) is unaffected — those scales just compose with the quant
         // scale. Radiance-only (classic Chroma ships its own fp8 variant). Coherence verified on real weights.
-        bool isRadiance = transformer.Keys.Any(k => k.StartsWith("nerf_", StringComparison.Ordinal));
-        if (isRadiance && EnvSwitch.IsEnabled("HARTSY_RADIANCE_FP8", defaultOn: true))
+        // The split-derived weights were already requantized in the loops above (see `fp8Blocks`); this pass covers
+        // the RENAMED block weights, which are borrowed mmap views and so cost nothing to hold until now. The dtype
+        // gate (BF16/F16 only) makes it skip the already-fp8 splits.
+        if (fp8Blocks)
             CheckpointConvertUtils.QuantizeDitBlocksToFp8(transformer, "transformer_blocks.");
 
         return new ConvertedWeights { Transformer = transformer };
@@ -266,35 +282,43 @@ public sealed class ChromaCheckpointConverter
         if (source.TryGetValue(srcKey, out Tensor? t)) output[dstKey] = t;
     }
 
+    /// <summary>Publishes one freshly-split chunk. With <paramref name="fp8Blocks"/> set, a chunk that qualifies for
+    /// the Radiance block requant is quantized on the spot and its BF16 buffer freed, so the split set never coexists
+    /// with the fp8 set in host RAM. Chunks that don't qualify (biases, sub-1M weights, non-block keys) pass through
+    /// unchanged, which is also the whole classic-Chroma path.</summary>
+    private static void EmitSplit(Dictionary<string, Tensor> output, string key, Tensor chunk, bool fp8Blocks)
+    {
+        if (fp8Blocks && key.Contains("transformer_blocks.", StringComparison.Ordinal)
+            && CheckpointConvertUtils.TryQuantizeWeightToFp8(output, key, chunk))
+        {
+            chunk.Dispose();
+            return;
+        }
+        output[key] = chunk;
+    }
+
     /// <summary>Splits a BFL fused QKV weight+bias along dim 0 into three diffusers-named tensors. Reuses the
     /// row-copy pattern from <see cref="FluxCheckpointConverter"/>; identical layout per dim 0 split.</summary>
     private static unsafe void SplitFusedQkv(Dictionary<string, Tensor> source,
         string weightKey, string biasKey, string dstPrefix,
-        string qName, string kName, string vName, int innerDim, Dictionary<string, Tensor> output)
+        string qName, string kName, string vName, int innerDim, Dictionary<string, Tensor> output, bool fp8Blocks)
     {
         if (source.TryGetValue(weightKey, out Tensor? wFused))
         {
             int inDim = (int)wFused.Shape[1];
-            long elemBytes = wFused.DType.SizeInBytes;
-            long rowBytes = (long)inDim * elemBytes;
-            long chunkBytes = (long)innerDim * rowBytes;
+            long chunkBytes = (long)innerDim * inDim * wFused.DType.SizeInBytes;
             TensorShape splitShape = new TensorShape(innerDim, inDim);
-
-            Tensor qW = new Tensor(splitShape, wFused.DType);
-            Tensor kW = new Tensor(splitShape, wFused.DType);
-            Tensor vW = new Tensor(splitShape, wFused.DType);
-            qW.Fp8ScaleFactor = wFused.Fp8ScaleFactor;
-            kW.Fp8ScaleFactor = wFused.Fp8ScaleFactor;
-            vW.Fp8ScaleFactor = wFused.Fp8ScaleFactor;
-
             byte* src = (byte*)wFused.DataPointer;
-            Buffer.MemoryCopy(src, (void*)qW.DataPointer, chunkBytes, chunkBytes);
-            Buffer.MemoryCopy(src + chunkBytes, (void*)kW.DataPointer, chunkBytes, chunkBytes);
-            Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vW.DataPointer, chunkBytes, chunkBytes);
+            string[] names = [qName, kName, vName];
 
-            output[$"{dstPrefix}.{qName}.weight"] = qW;
-            output[$"{dstPrefix}.{kName}.weight"] = kW;
-            output[$"{dstPrefix}.{vName}.weight"] = vW;
+            // One chunk at a time: copy, publish (possibly requantizing to fp8 and freeing the copy), then the next.
+            for (int c = 0; c < names.Length; c++)
+            {
+                Tensor chunk = new Tensor(splitShape, wFused.DType);
+                chunk.Fp8ScaleFactor = wFused.Fp8ScaleFactor;
+                Buffer.MemoryCopy(src + c * chunkBytes, (void*)chunk.DataPointer, chunkBytes, chunkBytes);
+                EmitSplit(output, $"{dstPrefix}.{names[c]}.weight", chunk, fp8Blocks);
+            }
         }
 
         if (source.TryGetValue(biasKey, out Tensor? bFused))
@@ -325,37 +349,26 @@ public sealed class ChromaCheckpointConverter
     /// <summary>Splits Chroma's single-block fused <c>linear1.weight</c> [3*inner + mlpDim, inner] along dim 0
     /// into <c>(to_q, to_k, to_v, proj_mlp)</c>. Same layout as <see cref="FluxCheckpointConverter"/>'s splitter.</summary>
     private static unsafe void SplitFusedLinear1Weight(Dictionary<string, Tensor> source, string srcKey,
-        string dstPrefix, Dictionary<string, Tensor> output)
+        string dstPrefix, Dictionary<string, Tensor> output, bool fp8Blocks)
     {
         if (!source.TryGetValue(srcKey, out Tensor? fused)) return;
 
         int inDim = (int)fused.Shape[1];
         long rowBytes = (long)inDim * fused.DType.SizeInBytes;
-        TensorShape qkvShape = new TensorShape(InnerDim, inDim);
-        TensorShape mlpShape = new TensorShape(MlpDim, inDim);
-
-        Tensor qW = new Tensor(qkvShape, fused.DType);
-        Tensor kW = new Tensor(qkvShape, fused.DType);
-        Tensor vW = new Tensor(qkvShape, fused.DType);
-        Tensor mlpW = new Tensor(mlpShape, fused.DType);
-        qW.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kW.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vW.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        mlpW.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
         long qkvChunkBytes = (long)InnerDim * rowBytes;
-        long mlpChunkBytes = (long)MlpDim * rowBytes;
+        byte* src = (byte*)fused.DataPointer;
+        string[] names = ["attn.to_q", "attn.to_k", "attn.to_v", "proj_mlp"];
 
-        Buffer.MemoryCopy(src, (void*)qW.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + qkvChunkBytes, (void*)kW.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + 2 * qkvChunkBytes, (void*)vW.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + 3 * qkvChunkBytes, (void*)mlpW.DataPointer, mlpChunkBytes, mlpChunkBytes);
-
-        output[$"{dstPrefix}.attn.to_q.weight"] = qW;
-        output[$"{dstPrefix}.attn.to_k.weight"] = kW;
-        output[$"{dstPrefix}.attn.to_v.weight"] = vW;
-        output[$"{dstPrefix}.proj_mlp.weight"] = mlpW;
+        // One chunk at a time: copy, publish (possibly requantizing to fp8 and freeing the copy), then the next.
+        for (int c = 0; c < names.Length; c++)
+        {
+            int rows = c == 3 ? MlpDim : InnerDim;
+            long chunkBytes = (long)rows * rowBytes;
+            Tensor chunk = new Tensor(new TensorShape(rows, inDim), fused.DType);
+            chunk.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+            Buffer.MemoryCopy(src + c * qkvChunkBytes, (void*)chunk.DataPointer, chunkBytes, chunkBytes);
+            EmitSplit(output, $"{dstPrefix}.{names[c]}.weight", chunk, fp8Blocks);
+        }
     }
 
     private static unsafe void SplitFusedLinear1Bias(Dictionary<string, Tensor> source, string srcKey,

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -13,7 +14,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// </code>
 /// Gates are raw (not tanh'd). The shared <c>temb_mod</c> (width <c>6·hidden</c>) is computed once by the transformer
 /// and broadcast across tokens; each block only owns the additive table.</summary>
-public sealed unsafe class Krea2Block
+public sealed unsafe class Krea2Block : IStreamingBlock
 {
     private readonly int _hidden;
     private readonly int _ffnInner;
@@ -46,6 +47,19 @@ public sealed unsafe class Krea2Block
         _ffGate = w[$"{p}.ff.gate.weight"];
         _ffUp = w[$"{p}.ff.up.weight"];
         _ffDown = w[$"{p}.ff.down.weight"];
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>Via <see cref="DType.ComputeByteCount"/>, not <c>ElementCount * SizeInBytes</c>: block-quantized
+    /// dtypes report <c>SizeInBytes == 0</c>, so the naive product totals to zero and silently disables streaming.</remarks>
+    public long EstimatedWeightBytes
+    {
+        get
+        {
+            long total = 0;
+            foreach (Tensor w in EnumerateWeights()) total += w.DType.ComputeByteCount(w.ElementCount);
+            return total;
+        }
     }
 
     /// <summary>Enumerates weight tensors for GPU preload.</summary>

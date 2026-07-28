@@ -490,7 +490,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // generations from oscillating resident→streaming→resident) now lives in VramPlanner, so every
             // pipeline makes it the same way and HARTSY_LOWVRAM can override it. On the default `auto` policy
             // this is exactly the comparison that was inlined here.
-            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "Flux");
+            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "Flux", Backend);
             PhasePlacement placement = planner.PlanPhase(
                 "denoise", totalBlockBytes, activationReserve, alreadyResident: _ditResident, canStream: true);
             if (placement == PhasePlacement.Resident)
@@ -501,7 +501,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             {
                 Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
                 int prefetchAhead = ChooseFluxPrefetchAhead(Backend.StreamingCache, blocks, activationReserve);
-                streamer = new BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
+                streamer = new BlockStreamingController(
+                    Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0, backend: Backend);
                 _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
                 streamer.Prime();
                 long perBlockMb = streamer.EstimatedTotalWeightBytes / blocks.Length / (1024 * 1024);

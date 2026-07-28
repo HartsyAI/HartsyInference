@@ -690,7 +690,8 @@ public sealed class TextService : ITextService, IDisposable
     private string PrimaryDeviceKey()
     {
         string resolved = BackendFactory.Resolve(_engine.BackendSelector);
-        return resolved == "cpu" ? "cpu" : "cuda:0";
+        // Carry the engine's ordinal through: otherwise a 'cuda:1' engine renders on GPU 1 while its LLM lands on GPU 0.
+        return resolved == "cpu" ? "cpu" : $"cuda:{BackendFactory.ParseOrdinal(_engine.BackendSelector)}";
     }
 
     /// <summary>Creates the compute backend for a device key ("cpu" / "cuda:{ordinal}").</summary>

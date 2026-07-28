@@ -20,7 +20,7 @@ tg128 definition (`(gen_tokens−1) ÷ (t_last_token−t_first_token)`). **Ratio
 llama.cpp** throughout (e.g. 1.32× means the engine generates 32% more tokens/sec than llama.cpp, not
 2.32×; below 1.00× means the engine is slower — same convention the source doc explicitly calls out to
 avoid misreading). A raw `llama-bench` baseline for 7 models also exists
-([`benchmarks/results/llamacpp_baseline_3060.md`](../results/llamacpp_baseline_3060.md)) and was used
+(`benchmarks/results/llamacpp_baseline_3060.md`) and was used
 only to sanity-check the llama.cpp-side numbers below, not as a separate set of rows: for the two
 models it shares with the table (Llama-3.2-1B Q8_0 and gemma-3-1b Q4_K_M), raw `llama-bench` reads
 ~8-13% above the `llama-cpp-python` baselines used here (212-216 vs 192.0 for Llama-3.2-1B; 225-230 vs
