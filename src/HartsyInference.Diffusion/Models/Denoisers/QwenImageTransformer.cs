@@ -55,7 +55,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
                 config.QkNormEps);
         }
 
-        _rope = new QwenImageRope(theta: config.RopeTheta);
+        _rope = new QwenImageRope(theta: config.RopeTheta, ropeText: config.RopeText);
     }
 
     /// <summary>Loads all transformer weights from named tensors using diffusers naming.</summary>

@@ -328,6 +328,18 @@ public static class SideModels
         Sha256 = "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
     };
 
+    /// <summary>Mage-Flow VAE — bespoke 128-channel /16 one-step-diffusion codec (MageVAE). Decoder only is used at
+    /// inference; the <c>student.*</c> / <c>y_embedder.encoder|bottleneck</c> encoder side is skipped at load. Official
+    /// microsoft/Mage-Flow repo ships bf16; no sha pinned yet.</summary>
+    public static readonly ModelAsset MageVae = new ModelAsset
+    {
+        Repo = "microsoft/Mage-Flow",
+        RepoPath = "vae/diffusion_pytorch_model.safetensors",
+        TargetSubdir = "VAE",
+        TargetName = "MageFlow/mage_vae.safetensors",
+        Role = "vae",
+    };
+
     /// <summary>SD3 / SD3.5 VAE — 16-channel autoencoder shared by every SD3.x variant; already diffusers-keyed, so it stages through <see cref="Features.LoaderVaeUtils.LoadFluxVaeF32"/> unchanged. Same mcmonkey/swarm-vaes repo as <see cref="FluxAe"/>, so a SwarmUI install shares the file.</summary>
     public static readonly ModelAsset Sd35Vae = new ModelAsset
     {

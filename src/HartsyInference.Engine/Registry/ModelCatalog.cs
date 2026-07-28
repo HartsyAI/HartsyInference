@@ -915,6 +915,25 @@ public static class ModelCatalog
                     SideModels.QwenImageVae,
                 },
             },
+            // Mage-Flow (Microsoft, 4B NR-MMDiT). Reuses the Qwen-Image DiT (MageFlow preset) + Qwen3-VL-4B encoder;
+            // bespoke 128-ch one-step MageVAE. Status ValidationPending — built + compiles but only GPU-verifiable
+            // (~8.5B bf16; run an fp8/GGUF DiT via --model-path on a 12GB card). Official transformer is bf16.
+            new CatalogEntry
+            {
+                Id = "mage-flow",
+                Modality = img,
+                DisplayName = "Mage-Flow (T2I)",
+                Architecture = "NR-MMDiT dual-stream (Qwen3-VL-4B + MageVAE)",
+                Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "microsoft/Mage-Flow", RepoPath = "transformer/diffusion_pytorch_model.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MageFlow", Role = "transformer" },
+                    SideModels.Qwen3VL_4B,
+                    SideModels.MageVae,
+                },
+            },
 
             // Transcription — repos/files below are exactly what SttCatalog's descriptors (src/HartsyInference.Engine/
             // Audio/Stt/SttCatalog.cs) already resolve; Assets here only drive the CLI's pre-download confirm prompt

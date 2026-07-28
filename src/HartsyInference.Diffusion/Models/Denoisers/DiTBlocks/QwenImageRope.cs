@@ -9,6 +9,9 @@ public sealed unsafe class QwenImageRope
     private readonly int[] _axesDim;
     private readonly int _theta;
     private readonly int _headDim;
+    // false → text tokens get NO positional embedding (identity rotation): Mage-Flow's apply_text_rotary_emb=false.
+    // Achieved by putting text at position 0 on all axes (angle 0 → cos 1 / sin 0). Qwen-Image ropes text (=true).
+    private readonly bool _ropeText;
 
     // Cached joint cos/sin tables in the [S, headDim] layout IBackend.WanRopeInterleaved reads (the angle for
     // pair i lives at index 2i; both slots filled). Position-only, so one host build serves every block of
@@ -19,12 +22,13 @@ public sealed unsafe class QwenImageRope
     private Tensor? _jointCos;
     private Tensor? _jointSin;
 
-    public QwenImageRope(int[]? axesDim = null, int theta = 10000)
+    public QwenImageRope(int[]? axesDim = null, int theta = 10000, bool ropeText = true)
     {
         _axesDim = axesDim ?? [16, 56, 56];
         if (_axesDim.Length != 3)
             throw new ArgumentException("QwenImageRope requires exactly 3 axes (frame, height, width).", nameof(axesDim));
         _theta = theta;
+        _ropeText = ropeText;
         _headDim = 0;
         for (int i = 0; i < _axesDim.Length; i++)
             _headDim += _axesDim[i];
@@ -112,7 +116,8 @@ public sealed unsafe class QwenImageRope
     {
         for (int s = 0; s < txtSeqLen; s++)
         {
-            int pos = txtPositionStart + s;
+            // _ropeText=false (Mage-Flow): position 0 on every axis → angle 0 → cos 1/sin 0 → identity (no rope).
+            int pos = _ropeText ? txtPositionStart + s : 0;
             FillTokenFreqs(cosTable, sinTable, s, frame: pos, height: pos, width: pos);
         }
         int imgSeqLen = imgPackedH * imgPackedW;
