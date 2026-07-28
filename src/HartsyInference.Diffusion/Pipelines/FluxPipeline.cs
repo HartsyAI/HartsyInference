@@ -486,19 +486,15 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // that never needed streaming in the first place (Krea2, same weight class, always ran resident).
             long totalBlockBytes = 0;
             foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
-            // A DiT that is ALREADY resident (KEEP_MODELS) trivially fits — the availability query must be
-            // skipped for it, because free VRAM no longer counts the weights' own footprint. Without this
-            // short-circuit warm gens alternate resident→streaming→resident: the query sees "not enough
-            // free" purely because the weights it is asking about are occupying the space.
-            long availForWeights = _ditResident
-                ? long.MaxValue
-                : Backend.StreamingCache.QueryAvailableWeightCacheBytes(activationReserve);
-            if (availForWeights >= totalBlockBytes)
+            // The resident-vs-streamed decision (including the already-resident short-circuit that keeps warm
+            // generations from oscillating resident→streaming→resident) now lives in VramPlanner, so every
+            // pipeline makes it the same way and HARTSY_LOWVRAM can override it. On the default `auto` policy
+            // this is exactly the comparison that was inlined here.
+            VramPlanner planner = new VramPlanner(Backend.StreamingCache, "Flux");
+            PhasePlacement placement = planner.PlanPhase(
+                "denoise", totalBlockBytes, activationReserve, alreadyResident: _ditResident, canStream: true);
+            if (placement == PhasePlacement.Resident)
             {
-                Logs.Info(_ditResident
-                    ? "Flux: DiT already resident (KEEP_MODELS) — eager path."
-                    : $"Flux: full DiT fits resident ({totalBlockBytes / (1024 * 1024)} MB weights, " +
-                      $"{availForWeights / (1024 * 1024)} MB available) — eager preload, streaming skipped.");
                 Backend.PreloadWeights(_transformer.EnumerateWeights());
             }
             else

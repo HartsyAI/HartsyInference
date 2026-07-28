@@ -60,6 +60,65 @@ providers but are unselectable via `GenerateText2Image`** — root-caused to an 
 independent timeouts); **AudioGen hard-hangs the whole Swarm process at 45s duration** (fine at 10s/20s,
 required `SIGKILL` at 45s, reproduced twice). Full write-ups in the doc.
 
+## Low-VRAM streaming + leak-on-OOM fix (2026-07-27) — supersedes several 2026-07-26 conclusions
+
+Follow-on pass acting on the 2026-07-26 findings below. **Read this before trusting that pass's 3060 column.**
+Full writeup: [`results/2026-07-27_lowvram_leak_fix.md`](results/2026-07-27_lowvram_leak_fix.md).
+
+- **Leak-on-OOM fixed and verified**, including the cross-process claim: an OOM'd process that stays alive now
+  holds **152 MiB instead of ~11.5 GB**, and a separate process on the same card succeeds where it previously failed.
+- **Low-VRAM weight streaming is live** (`HARTSY_LOWVRAM`, three-state, `auto` by default). The machinery already
+  existed (`BlockStreamingController`) but only 1 of ~25 image pipelines used it. **Three models that could not run on
+  the 12 GB 3060 at all now do** (all 1024², quality-gate clean): **HunyuanImage-2.1** (19.7 s; 11.5 GB needed vs
+  9.4 GB free), **Ideogram 4** — whose *pair* of 9.3 GB DiTs needs 19.7 GB against 9.2 GB available (20 steps in
+  205 s, peak 5.1/11.6 GiB) — and **Qwen-Image**, a 20B MMDiT needing 14.3 GB against 9.7 GB available (20 steps in
+  231 s, peak 9.96/11.6 GiB).
+- **A bug had made streaming inert for every GGUF model**: `Q4_K.SizeInBytes` is 0, so block-size sums came out
+  **zero bytes** and the "fits resident?" test was always trivially true. Flux had therefore never streamed a GGUF.
+- **Lens solid-black: root-caused and fixed.** SageAttention's INT8 path materializes V as F16; Lens does not
+  RMS-norm V, and `max|V|` crossed F16's 65504 at block 45. Not a Lens port bug — verified against ComfyUI's own
+  reference implementation on the same checkpoint.
+- **Anima: 792 → 3 D2H syncs/step**, 29× faster per step. Its documented "1024² hangs on the 4090" was never a hang.
+- **The 2026-07-26 3060 column is partly unsound** — it ran 13 models in one process *with the leak active*, so only
+  the first failure is necessarily genuine. Anima is proven contamination (failed in-sweep, passed standalone at
+  7.5 GB the same day). Re-measured in fresh processes: **OmniGen2 passes** at 10.0 GB, and **Ideogram 4 never OOM'd
+  at all** — it hit a hardcoded `>= 20 GB` refusal, i.e. a policy, not a memory failure. That constant is now a
+  planner decision.
+
+## Image T2I e2e vs ComfyUI, 4090 + 3060 (2026-07-26)
+
+Full 4-lane sweep (Hartsy/Comfy × RTX 4090/RTX 3060) through the **SwarmUI API**, 16 models (13 from the
+original sweep + SDXL, Chroma1-HD, Flux-Schnell added in a same-day follow-up that downloaded, benchmarked,
+and — for Chroma1-HD — deleted each checkpoint to demonstrate the disk-constrained workflow end to end),
+quality-gated + manually visually inspected. Supersedes the 2026-07-05 image pass below for anything it
+overlaps with. Full table + reproduce commands: [`results/2026-07-26_image_comfy-vs-hartsy.md`](results/2026-07-26_image_comfy-vs-hartsy.md).
+Handoff for the next agent (prioritized bug/perf list): [`../docs/Checklists/IMAGE_COMFY_BENCH_HANDOFF.md`](../docs/Checklists/IMAGE_COMFY_BENCH_HANDOFF.md).
+
+**Headline**: on the 4090, Hartsy wins warm-generation on 7 of 13 models directly comparable to Comfy (up
+to 1.6× faster, on Flux-Schnell); Comfy wins the rest, mostly within 1.05-1.45× except one real
+Hartsy-side gap (Anima, ~60× slower — a missing perf pass, not a Comfy strength). Lens is excluded from
+that count since it's currently broken on the Hartsy API path (see below) — Comfy is correct from the
+identical checkpoint. On the 3060, Comfy wins essentially by default because it has VRAM-constrained
+weight-offloading and Hartsy does not (10/13 models ran on Comfy vs 1/13 on Hartsy at identical params —
+SDXL confirms the same pattern: OOM on Hartsy, 9.6GB and functional on Comfy).
+
+> **Superseded 2026-07-27 (see the section above).** Hartsy now *has* VRAM-constrained streaming, and the 3060
+> column here overstates the gap: that lane ran all 13 models in one process while the leak-on-OOM bug was live, so
+> only the first failure is necessarily a genuine capacity limit. Do not cite the `OOM²` cells as capacity data.
+
+**Bugs found this pass, ranked**: (1) **Lens produces solid-black output via the SwarmUI API** — 16/16
+failures, both variants, 2 param sets, zero server-side errors; ComfyUI is correct from the identical
+checkpoint (0/16 failures) — contradicts `MODEL_STATUS_IMAGE.md`'s existing ✅, see that doc's Lens entry
+for the amended note. (2) **The engine leaks GPU memory on OOM** — one oversized request early in a
+process poisons every subsequent request, even ones that would otherwise fit (isolated and proven: a
+13-model 3060 sweep failed 13/13; a fresh process with only the one model that actually fits succeeded
+cleanly). (3) No VRAM-constrained fallback path (see headline above). Full list of 10 findings in the
+handoff doc.
+
+> **All three of those are fixed as of 2026-07-27** — see the section above. Bug 1's root cause turned out to be
+> SageAttention casting V to F16 (not anything Lens-specific); Bug 2 is fixed and verified cross-process; Bug 3's
+> machinery already existed and just was not wired up.
+
 ## Diffusion / video e2e vs ComfyUI (2026-07-03)
 
 End-to-end wall-clock through the **SwarmUI API** (the identical request routed to the ComfyUI backend, then the HartsyInference backend, on the same RTX 4090). This is the user-perceived-latency comparison; it complements the in-engine microbench harness. Full write-up + host-vs-compute diagnosis: [`results/video_comfy-vs-hartsy_2026-07-03.md`](results/video_comfy-vs-hartsy_2026-07-03.md).

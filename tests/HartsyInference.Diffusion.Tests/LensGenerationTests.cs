@@ -81,10 +81,26 @@ public sealed class LensGenerationTests
         ImagePostProcessor.SaveBmp(outputPath, rgb, w, h);
         _output.WriteLine($"Saved: {outputPath}");
 
+        // Near-black guard: any NaN reaching ImagePostProcessor lands on byte 0, so a mid-denoise numeric
+        // blow-up shows up as a solid-black PNG with no error logged anywhere. Runs at every step count —
+        // even a 1-step probe decodes to a real image — and precedes the noise guard, whose "looks like
+        // uniform noise" message is misleading for an all-zero buffer.
+        AssertNotNearBlack(rgb);
+
         // Uniform-noise guard: a coherent image has strong per-row structure; noise does not.
         // Skipped for truncated (parity-probe) schedules — a 1-step partial denoise is legitimately noisy.
         if (steps >= 4)
             AssertNotUniformNoise(rgb, w, h);
+    }
+
+    /// <summary>Fails on the NaN-to-black signature: a mean below the near-black threshold the image benchmark's <c>quality_gate.py</c> uses.</summary>
+    private void AssertNotNearBlack(byte[] rgb)
+    {
+        long sum = 0;
+        for (int i = 0; i < rgb.Length; i++) sum += rgb[i];
+        double mean = (double)sum / rgb.Length;
+        _output.WriteLine($"Mean pixel value: {mean:F2} (near-black < 8)");
+        Assert.True(mean >= 8.0, $"output is near-black (mean {mean:F2}) — a NaN almost certainly reached the VAE decode.");
     }
 
     /// <summary>Fails on the classic never-validated-port signature: per-pixel IID noise. Coherent images have neighboring-pixel correlation far above noise's ~0.</summary>

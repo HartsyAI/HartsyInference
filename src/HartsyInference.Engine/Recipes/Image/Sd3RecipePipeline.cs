@@ -14,17 +14,15 @@ public sealed class Sd3RecipePipeline : IRecipePipeline
     private readonly Sd3Pipeline _pipeline;
     private readonly ClipTokenizer _clipTokenizer;
     private readonly T5Tokenizer? _t5Tokenizer;
-    private readonly SafeTensorsLoader _checkpointLoader;
-    private readonly SafeTensorsLoader? _t5Loader;
+    private readonly List<SafeTensorsLoader> _loaders;
 
-    /// <summary>Wraps the constructed SD3 pipeline plus its tokenizers, taking ownership of every disposable (the T5 loader is null when T5 was bundled in the checkpoint).</summary>
-    public Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer? t5Tokenizer, SafeTensorsLoader checkpointLoader, SafeTensorsLoader? t5Loader)
+    /// <summary>Wraps the constructed SD3 pipeline plus its tokenizers, taking ownership of every disposable. <paramref name="loaders"/> holds the checkpoint plus one loader per component resolved as a separate file, and must outlive the weights it mmaps.</summary>
+    public Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer? t5Tokenizer, List<SafeTensorsLoader> loaders)
     {
         _pipeline = pipeline;
         _clipTokenizer = clipTokenizer;
         _t5Tokenizer = t5Tokenizer;
-        _checkpointLoader = checkpointLoader;
-        _t5Loader = t5Loader;
+        _loaders = loaders;
     }
 
     /// <inheritdoc/>
@@ -96,7 +94,9 @@ public sealed class Sd3RecipePipeline : IRecipePipeline
         _pipeline.Dispose();
         _clipTokenizer.Dispose();
         _t5Tokenizer?.Dispose();
-        _checkpointLoader.Dispose();
-        _t5Loader?.Dispose();
+        foreach (SafeTensorsLoader loader in _loaders)
+        {
+            loader.Dispose();
+        }
     }
 }

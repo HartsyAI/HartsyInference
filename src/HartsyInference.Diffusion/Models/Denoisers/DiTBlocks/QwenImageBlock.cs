@@ -1,11 +1,26 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Qwen-Image dual-stream MMDiT block (<c>QwenImageTransformerBlock</c>). Maintains separate image and text streams with independent AdaLN-Zero modulation (12 params each: <c>shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp</c> for both <c>mod1</c> and <c>mod2</c>), QK-norm, and GELU(approximate) FFNs. Joint attention concatenates <c>[txt, img]</c> along the sequence dim and applies precomputed RoPE separately to image and text (image-only RoPE for image tokens; zero-position RoPE rows for text tokens). Mirrors <c>diffusers/models/transformers/transformer_qwenimage.py:QwenImageTransformerBlock.forward</c> 1:1.</summary>
-public sealed unsafe class QwenImageBlock
+public sealed unsafe class QwenImageBlock : IStreamingBlock
 {
+    /// <inheritdoc/>
+    /// <remarks>Via <see cref="DType.ComputeByteCount"/>, not <c>ElementCount * SizeInBytes</c>: Qwen-Image ships as a
+    /// Q4_K GGUF, and block-quantized dtypes report <c>SizeInBytes == 0</c> — the naive form would total this 20B
+    /// model's blocks to zero bytes and make the streaming budget believe the DiT is weightless.</remarks>
+    public long EstimatedWeightBytes
+    {
+        get
+        {
+            long total = 0;
+            foreach (Tensor w in EnumerateWeights()) total += w.DType.ComputeByteCount(w.ElementCount);
+            return total;
+        }
+    }
+
     private readonly int _hiddenSize;
     private readonly int _numHeads;
     private readonly int _headDim;

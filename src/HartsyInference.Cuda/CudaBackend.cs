@@ -4402,6 +4402,25 @@ public sealed class CudaBackend : IBackend
 
         if (query.DType == DType.F32)
         {
+            // ── HAZARD: the SageAttention branches below do NOT honor `allowF16`. ──────────────────────────
+            // Sage quantizes Q/K to INT8 (smoothed, so their range is handled) but materializes V as an F16
+            // transpose (LaunchSageVF16T). Any architecture whose |V| exceeds F16's 65504 therefore gets INF in
+            // V, which softmax·V smears across every query row.
+            //
+            // This is deliberately NOT gated on `allowF16`: that parameter DEFAULTS to false, so 33 of the ~80
+            // call sites in this repo are nominally "F16 not allowed" while running Sage happily today. Gating
+            // here would silently disable Sage for all of them — a broad perf regression to fix a hazard that
+            // has bitten exactly one model. The cuDNN branch below can gate on it precisely because its callers
+            // opt IN explicitly.
+            //
+            // Diagnostic fingerprint, if a future model renders black/NaN: exactly ONE bad element per token in
+            // the SDPA output (a single overflowing (head, dim) column of V, spread over all query rows by the
+            // softmax). Check max|V| per block against 65504. Lens hit this at block 45 with max|V| growing
+            // 18940 → 31281 → 71583 across forwards; its fix (LensTransformerBlock) scales V by 1/256 before
+            // SDPA and back after — exact, since attention is linear in V, and power-of-two so exponent-only.
+            // A model-agnostic fix belongs inside SageAttentionInt8, not here: a blanket V damp would push small
+            // values toward F16 subnormals, so it needs its own range analysis.
+            // ──────────────────────────────────────────────────────────────────────────────────────────────
             // SageAttention preference (opt-in, HARTSY_SAGE_ATTN=1): for no-mask F32 calls the INT8 flash
             // path beats the cuDNN-F16-cast branch below at large seq (110.6 vs 130.4 ms at 16384²/D=128,
             // 2026-07-22 BDN A/B) — and unlike it, keeps F32-fidelity accumulation. Gate on Skv ≥ 2048:
@@ -7201,12 +7220,46 @@ public sealed class CudaBackend : IBackend
     #region GPU Cache Management
 
     /// <summary>Preloads weight tensors to GPU memory. Subsequent ops using these tensors skip H2D transfer.</summary>
+    /// <remarks>Rolls the batch back on failure. A mid-loop OOM otherwise leaves the successfully-uploaded prefix
+    /// registered against a model that will never finish constructing — its <see cref="Tensor"/> keys become
+    /// unreachable, so nothing can ever <see cref="FreeWeights"/> them and the VRAM is held until the process
+    /// exits, starving every other consumer of the card (including separate processes).</remarks>
     public void PreloadWeights(IEnumerable<Tensor> weights)
     {
         _context.EnsureCurrent();
-        foreach (Tensor weight in weights)
+        List<Tensor>? uploaded = null;
+        try
         {
-            GpuTransferHelper.PreloadWeight(weight);
+            foreach (Tensor weight in weights)
+            {
+                // Only weights this call actually uploaded are rollback candidates — one already resident from
+                // an earlier phase (or from HARTSY_KEEP_MODELS) is not ours to free. PreloadWeight reports this
+                // itself so ownership is decided by the same lookup that does the registration.
+                if (GpuTransferHelper.PreloadWeight(weight))
+                {
+                    uploaded ??= new List<Tensor>();
+                    uploaded.Add(weight);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            HartsyInference.Core.Logging.Logs.Error(
+                $"[Cuda] PreloadWeights failed after {uploaded?.Count ?? 0} weight(s) — rolling back this batch.", ex);
+            try
+            {
+                if (uploaded is not null)
+                {
+                    GpuTransferHelper.FreeWeights(uploaded);
+                }
+                GpuTransferHelper.SyncStreamsAndReleasePool();
+            }
+            catch (Exception cleanupEx)
+            {
+                HartsyInference.Core.Logging.Logs.Error(
+                    "[Cuda] PreloadWeights rollback failed — device memory may still be held.", cleanupEx);
+            }
+            throw;
         }
     }
 

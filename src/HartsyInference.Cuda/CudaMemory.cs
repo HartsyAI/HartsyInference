@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
@@ -77,7 +78,7 @@ public static class CudaMemory
             if (retryResult != 0)
             {
                 LogOomDiagnostic("OOM after sync+pool-trim retry", byteSize);
-                retryResult.ThrowOnError();
+                ThrowExhausted(retryResult, byteSize);
             }
         }
         else
@@ -85,6 +86,34 @@ public static class CudaMemory
             result.ThrowOnError();
         }
         return dptr;
+    }
+
+    /// <summary>Throws for a terminal allocation failure, surfacing a genuine exhaustion as the typed
+    /// <see cref="OutOfVramException"/> (carrying requested vs free bytes) rather than a bare CUDA error 2.</summary>
+    /// <remarks>Callers that can degrade — the VRAM planner re-planning to a streamed layout, the graph arena falling
+    /// back to un-arena'd allocation, the service layer reclaiming device memory before rethrowing — need to
+    /// distinguish "the card is full" from "the driver is broken". Every other error code stays a
+    /// <see cref="CudaException"/>: those are bugs, not capacity, and must not be caught by a capacity handler.</remarks>
+    private static void ThrowExhausted(int result, nuint requested)
+    {
+        if (result != 2) // not CUDA_ERROR_OUT_OF_MEMORY
+        {
+            result.ThrowOnError();
+            return;
+        }
+        // Reporting free bytes is a nicety; raising the TYPED exception is load-bearing (it is what the
+        // service layer's reclaim and the VRAM planner's re-plan key off). A poisoned context makes further
+        // driver calls fail, so a failed query must degrade to 0 rather than throw over the real error.
+        long freeBytes = 0;
+        try
+        {
+            (freeBytes, _) = GetMemInfo();
+        }
+        catch
+        {
+            // Deliberately swallowed: see above — losing the number is survivable, losing the type is not.
+        }
+        throw new OutOfVramException((long)requested, freeBytes);
     }
 
     /// <summary>Emits a one-line diagnostic showing requested bytes alongside the driver's
@@ -227,7 +256,7 @@ public static class CudaMemory
             if (retryResult != 0)
             {
                 LogOomDiagnostic("OOM after async sync+pool-trim retry", byteSize);
-                retryResult.ThrowOnError();
+                ThrowExhausted(retryResult, byteSize);
             }
         }
         else

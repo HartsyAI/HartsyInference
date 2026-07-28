@@ -153,6 +153,11 @@ public sealed unsafe class AnimaBlock
     /// <param name="ropeSin">RoPE sin table <c>[S, headDim]</c> for image self-attn.</param>
     /// <param name="rope">RoPE applier (re-used across blocks).</param>
     /// <param name="crossAttentionMask">Optional cross-attn mask <c>[B, 1, 1, T]</c>.</param>
+    // GPU-residency rewrite (mirrors the verified Krea2Block / Krea2Attention ports): every glue op — the
+    // AdaLN-LoRA temb add + 3-way chunk, the LayerNorm+modulate, the head split/merge, the per-head QK-RMSNorm,
+    // the rotary, and the gated residuals — now runs as an IBackend op, so the activation chain stays
+    // device-resident. The previous host `float*` loops D2H-synced (and freed) every Linear/SDPA output around
+    // every GEMM: 14 pipeline drains per block × 28 blocks × 2 CFG passes = 792 D2H syncs per denoise step.
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoderHidden,
         Tensor embeddedTimestep, Tensor temb,
         Tensor ropeCos, Tensor ropeSin, AnimaRope rope,
@@ -168,7 +173,8 @@ public sealed unsafe class AnimaBlock
             _adaSelfL1!, _adaSelfL2!, batch, seqLen);
         Tensor attn1Out = SelfAttention(backend, norm1, ropeCos, ropeSin, rope, batch, seqLen);
         norm1.Dispose();
-        Tensor afterAttn1 = AddGated(hidden, attn1Out, gate1, batch, seqLen, _hidden);
+        Tensor afterAttn1 = new Tensor(hiddenShape, DType.F32);
+        backend.GatedResidualLastDim(afterAttn1, hidden, attn1Out, gate1);
         attn1Out.Dispose();
         gate1.Dispose();
 
@@ -177,7 +183,8 @@ public sealed unsafe class AnimaBlock
             _adaCrossL1!, _adaCrossL2!, batch, seqLen);
         Tensor attn2Out = CrossAttention(backend, norm2, encoderHidden, crossAttentionMask, batch, seqLen, textSeq);
         norm2.Dispose();
-        Tensor afterAttn2 = AddGated(afterAttn1, attn2Out, gate2, batch, seqLen, _hidden);
+        Tensor afterAttn2 = new Tensor(hiddenShape, DType.F32);
+        backend.GatedResidualLastDim(afterAttn2, afterAttn1, attn2Out, gate2);
         attn2Out.Dispose();
         afterAttn1.Dispose();
         gate2.Dispose();
@@ -187,7 +194,8 @@ public sealed unsafe class AnimaBlock
             _adaMlpL1!, _adaMlpL2!, batch, seqLen);
         Tensor ffOut = FeedForward(backend, norm3, batch, seqLen);
         norm3.Dispose();
-        Tensor result = AddGated(afterAttn2, ffOut, gate3, batch, seqLen, _hidden);
+        Tensor result = new Tensor(hiddenShape, DType.F32);
+        backend.GatedResidualLastDim(result, afterAttn2, ffOut, gate3);
         afterAttn2.Dispose();
         ffOut.Dispose();
         gate3.Dispose();
@@ -222,23 +230,23 @@ public sealed unsafe class AnimaBlock
         rank.Dispose();
 
         // + temb[:6144] (broadcast over batch — temb is [B, 6144], so element-wise add)
-        AddTembSlice(expanded, temb, batch, _adaLnExpandWidth);
+        Tensor modulation = AddTembSlice(backend, expanded, temb, batch, _adaLnExpandWidth);
+        expanded.Dispose();
 
         // chunk(3) → shift, scale, gate, each [B, hidden]
         TensorShape chunkShape = new TensorShape(batch, _hidden);
         Tensor shift = new Tensor(chunkShape, DType.F32);
         Tensor scale = new Tensor(chunkShape, DType.F32);
         Tensor gate = new Tensor(chunkShape, DType.F32);
-        SplitThree(expanded, shift, scale, gate, batch, _hidden);
-        expanded.Dispose();
+        backend.SliceLastDim(shift, modulation, 0);
+        backend.SliceLastDim(scale, modulation, _hidden);
+        backend.SliceLastDim(gate, modulation, 2 * _hidden);
+        modulation.Dispose();
 
-        // LayerNorm-no-affine on x along last dim, then x * (1 + scale) + shift.
+        // LayerNorm-no-affine on x along last dim, then x * (1 + scale) + shift — one fused device op.
         TensorShape xShape = new TensorShape(batch, seqLen, _hidden);
-        Tensor normed = new Tensor(xShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, x, batch, seqLen, _hidden, _eps);
-
-        Tensor modulated = AdaLNModulation.ApplyModulation(normed, shift, scale, batch, seqLen, _hidden);
-        normed.Dispose();
+        Tensor modulated = new Tensor(xShape, DType.F32);
+        backend.LayerNormModulate(modulated, x, scale, shift, _eps);
         shift.Dispose();
         scale.Dispose();
 
@@ -246,42 +254,62 @@ public sealed unsafe class AnimaBlock
     }
 
     /// <summary>Self-attention with QK-RMSNorm and 3D RoPE on Q,K.</summary>
+    // Q/K/V are declared directly as [B, S, H, D] — byte-identical to [B, S, H·D], so the head split costs
+    // nothing, RmsNorm normalizes over headDim with no reshape, and the rotary runs on the pre-permute layout
+    // (IBackend.ApplyRope indexes cos/sin at row = b·S + s, which for B=1 is exactly AnimaRope's s·headDim
+    // offset and the identical rotate-half formula). Permute0213 then produces SDPA's [B, H, S, D].
     private Tensor SelfAttention(IBackend backend, Tensor x, Tensor ropeCos, Tensor ropeSin, AnimaRope rope, int batch, int seqLen)
     {
         TensorShape flatShape = new TensorShape(batch, seqLen, _hidden);
+        TensorShape headShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
+        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
-        Tensor q = new Tensor(flatShape, DType.F32);
-        Tensor k = new Tensor(flatShape, DType.F32);
-        Tensor v = new Tensor(flatShape, DType.F32);
+        Tensor q = new Tensor(headShape, DType.F32);
+        Tensor k = new Tensor(headShape, DType.F32);
+        Tensor v = new Tensor(headShape, DType.F32);
         backend.Linear(q, x, _selfQ!, null);
         backend.Linear(k, x, _selfK!, null);
         backend.Linear(v, x, _selfV!, null);
 
-        Tensor qMh = DiTUtils.ReshapeToMultiHead(q, batch, seqLen, _numHeads, _headDim);
-        Tensor kMh = DiTUtils.ReshapeToMultiHead(k, batch, seqLen, _numHeads, _headDim);
-        Tensor vMh = DiTUtils.ReshapeToMultiHead(v, batch, seqLen, _numHeads, _headDim);
+        Tensor qNorm = new Tensor(headShape, DType.F32);
+        Tensor kNorm = new Tensor(headShape, DType.F32);
+        backend.RmsNorm(qNorm, q, _selfQNorm.Weight, _qkEps);
+        backend.RmsNorm(kNorm, k, _selfKNorm.Weight, _qkEps);
         q.Dispose();
         k.Dispose();
-        v.Dispose();
 
-        int totalVecs = batch * _numHeads * seqLen;
-        Tensor qNorm = new Tensor(qMh.Shape, DType.F32);
-        Tensor kNorm = new Tensor(kMh.Shape, DType.F32);
-        _selfQNorm.Forward(qNorm, qMh, totalVecs);
-        _selfKNorm.Forward(kNorm, kMh, totalVecs);
-        qMh.Dispose();
-        kMh.Dispose();
+        // The device rotary broadcasts one cos/sin row per (batch, position); AnimaRope's table is position-only,
+        // so B > 1 keeps the host applier on the post-permute layout.
+        bool gpuRope = batch == 1;
+        if (gpuRope)
+        {
+            backend.ApplyRope(qNorm, kNorm, ropeCos, ropeSin);
+        }
 
-        rope.ApplyRotation(qNorm, kNorm, ropeCos, ropeSin, batch, _numHeads, seqLen);
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(qMh.Shape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qNorm, kNorm, vMh, null, scale);
+        Tensor qMh = new Tensor(mhShape, DType.F32);
+        Tensor kMh = new Tensor(mhShape, DType.F32);
+        Tensor vMh = new Tensor(mhShape, DType.F32);
+        backend.Permute0213(qMh, qNorm, seqLen, _numHeads, _headDim);
+        backend.Permute0213(kMh, kNorm, seqLen, _numHeads, _headDim);
+        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
         qNorm.Dispose();
         kNorm.Dispose();
+        v.Dispose();
+
+        if (!gpuRope)
+        {
+            rope.ApplyRotation(qMh, kMh, ropeCos, ropeSin, batch, _numHeads, seqLen);
+        }
+
+        float scale = 1.0f / MathF.Sqrt(_headDim);
+        Tensor attnOut = new Tensor(mhShape, DType.F32);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
+        qMh.Dispose();
+        kMh.Dispose();
         vMh.Dispose();
 
-        Tensor flat = DiTUtils.ReshapeFromMultiHead(attnOut, batch, seqLen, _numHeads, _headDim);
+        Tensor flat = new Tensor(flatShape, DType.F32);
+        backend.Permute0213(flat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
         Tensor projected = new Tensor(flatShape, DType.F32);
@@ -297,39 +325,44 @@ public sealed unsafe class AnimaBlock
         int batch, int seqLen, int textSeq)
     {
         TensorShape qShape = new TensorShape(batch, seqLen, _hidden);
-        TensorShape kvShape = new TensorShape(batch, textSeq, _hidden);
+        TensorShape qHeadShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
+        TensorShape kvHeadShape = new TensorShape(batch, textSeq, _numHeads, _headDim);
+        TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
+        TensorShape kvMhShape = new TensorShape(batch, _numHeads, textSeq, _headDim);
 
-        Tensor q = new Tensor(qShape, DType.F32);
-        Tensor k = new Tensor(kvShape, DType.F32);
-        Tensor v = new Tensor(kvShape, DType.F32);
+        Tensor q = new Tensor(qHeadShape, DType.F32);
+        Tensor k = new Tensor(kvHeadShape, DType.F32);
+        Tensor v = new Tensor(kvHeadShape, DType.F32);
         backend.Linear(q, x, _crossQ!, null);
         backend.Linear(k, encoderHidden, _crossK!, null);
         backend.Linear(v, encoderHidden, _crossV!, null);
 
-        Tensor qMh = DiTUtils.ReshapeToMultiHead(q, batch, seqLen, _numHeads, _headDim);
-        Tensor kMh = DiTUtils.ReshapeToMultiHead(k, batch, textSeq, _numHeads, _headDim);
-        Tensor vMh = DiTUtils.ReshapeToMultiHead(v, batch, textSeq, _numHeads, _headDim);
+        Tensor qNorm = new Tensor(qHeadShape, DType.F32);
+        Tensor kNorm = new Tensor(kvHeadShape, DType.F32);
+        backend.RmsNorm(qNorm, q, _crossQNorm.Weight, _qkEps);
+        backend.RmsNorm(kNorm, k, _crossKNorm.Weight, _qkEps);
         q.Dispose();
         k.Dispose();
-        v.Dispose();
 
-        int qVecs = batch * _numHeads * seqLen;
-        int kVecs = batch * _numHeads * textSeq;
-        Tensor qNorm = new Tensor(qMh.Shape, DType.F32);
-        Tensor kNorm = new Tensor(kMh.Shape, DType.F32);
-        _crossQNorm.Forward(qNorm, qMh, qVecs);
-        _crossKNorm.Forward(kNorm, kMh, kVecs);
-        qMh.Dispose();
-        kMh.Dispose();
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(qMh.Shape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qNorm, kNorm, vMh, attnMask, scale);
+        Tensor qMh = new Tensor(qMhShape, DType.F32);
+        Tensor kMh = new Tensor(kvMhShape, DType.F32);
+        Tensor vMh = new Tensor(kvMhShape, DType.F32);
+        backend.Permute0213(qMh, qNorm, seqLen, _numHeads, _headDim);
+        backend.Permute0213(kMh, kNorm, textSeq, _numHeads, _headDim);
+        backend.Permute0213(vMh, v, textSeq, _numHeads, _headDim);
         qNorm.Dispose();
         kNorm.Dispose();
+        v.Dispose();
+
+        float scale = 1.0f / MathF.Sqrt(_headDim);
+        Tensor attnOut = new Tensor(qMhShape, DType.F32);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnMask, scale);
+        qMh.Dispose();
+        kMh.Dispose();
         vMh.Dispose();
 
-        Tensor flat = DiTUtils.ReshapeFromMultiHead(attnOut, batch, seqLen, _numHeads, _headDim);
+        Tensor flat = new Tensor(qShape, DType.F32);
+        backend.Permute0213(flat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
         Tensor projected = new Tensor(qShape, DType.F32);
@@ -357,65 +390,23 @@ public sealed unsafe class AnimaBlock
         return output;
     }
 
-    /// <summary><c>output = residual + gate[b] * value</c>. Gate broadcast over the sequence dim.</summary>
-    private static Tensor AddGated(Tensor residual, Tensor value, Tensor gate, int batch, int seqLen, int hidden)
-    {
-        TensorShape shape = new TensorShape(batch, seqLen, hidden);
-        Tensor output = new Tensor(shape, DType.F32);
-
-        float* resPtr = (float*)residual.DataPointer;
-        float* valPtr = (float*)value.DataPointer;
-        float* gatePtr = (float*)gate.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            int condBase = b * hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int rowOff = (b * seqLen + s) * hidden;
-                for (int d = 0; d < hidden; d++)
-                {
-                    outPtr[rowOff + d] = resPtr[rowOff + d] + gatePtr[condBase + d] * valPtr[rowOff + d];
-                }
-            }
-        }
-        return output;
-    }
-
-    /// <summary>Adds the first <paramref name="sliceLen"/> elements of <paramref name="temb"/> per batch into
-    /// <paramref name="expand"/> in-place. Implements the <c>expand + temb[:sliceLen]</c> step of the AdaLN-LoRA.</summary>
-    private static void AddTembSlice(Tensor expand, Tensor temb, int batch, int sliceLen)
+    /// <summary>Device <c>expand + temb[:, :sliceLen]</c>, returning a new <c>[B, sliceLen]</c> tensor. Shared with
+    /// <c>AnimaTransformer</c>'s final layer, which slices 2·hidden out of the 3·hidden-wide temb.</summary>
+    internal static Tensor AddTembSlice(IBackend backend, Tensor expand, Tensor temb, int batch, int sliceLen)
     {
         int tembStride = (int)temb.Shape[1];
         if (tembStride < sliceLen)
             throw new ArgumentException($"temb width {tembStride} < slice {sliceLen}.", nameof(temb));
-        float* outPtr = (float*)expand.DataPointer;
-        float* tembPtr = (float*)temb.DataPointer;
-        for (int b = 0; b < batch; b++)
+        TensorShape shape = new TensorShape(batch, sliceLen);
+        Tensor slice = temb;
+        if (tembStride > sliceLen)
         {
-            int rowOff = b * sliceLen;
-            int tRowOff = b * tembStride;
-            for (int d = 0; d < sliceLen; d++)
-                outPtr[rowOff + d] += tembPtr[tRowOff + d];
+            slice = new Tensor(shape, DType.F32);
+            backend.SliceLastDim(slice, temb, 0);
         }
-    }
-
-    /// <summary>Splits <c>[B, 3*hidden]</c> into three <c>[B, hidden]</c> tensors (shift, scale, gate) in Cosmos order.</summary>
-    private static void SplitThree(Tensor src, Tensor a, Tensor b, Tensor c, int batch, int hidden)
-    {
-        float* sPtr = (float*)src.DataPointer;
-        float* aPtr = (float*)a.DataPointer;
-        float* bPtr = (float*)b.DataPointer;
-        float* cPtr = (float*)c.DataPointer;
-        for (int batchIdx = 0; batchIdx < batch; batchIdx++)
-        {
-            long src0 = (long)batchIdx * 3 * hidden;
-            long dst = (long)batchIdx * hidden;
-            long bytes = (long)hidden * sizeof(float);
-            Buffer.MemoryCopy(sPtr + src0, aPtr + dst, bytes, bytes);
-            Buffer.MemoryCopy(sPtr + src0 + hidden, bPtr + dst, bytes, bytes);
-            Buffer.MemoryCopy(sPtr + src0 + 2 * hidden, cPtr + dst, bytes, bytes);
-        }
+        Tensor sum = new Tensor(shape, DType.F32);
+        backend.Add(sum, expand, slice);
+        if (!ReferenceEquals(slice, temb)) slice.Dispose();
+        return sum;
     }
 }

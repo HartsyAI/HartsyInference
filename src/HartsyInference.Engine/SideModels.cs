@@ -328,6 +328,17 @@ public static class SideModels
         Sha256 = "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
     };
 
+    /// <summary>SD3 / SD3.5 VAE — 16-channel autoencoder shared by every SD3.x variant; already diffusers-keyed, so it stages through <see cref="Features.LoaderVaeUtils.LoadFluxVaeF32"/> unchanged. Same mcmonkey/swarm-vaes repo as <see cref="FluxAe"/>, so a SwarmUI install shares the file.</summary>
+    public static readonly ModelAsset Sd35Vae = new ModelAsset
+    {
+        Repo = "mcmonkey/swarm-vaes",
+        RepoPath = "sd35_vae.safetensors",
+        TargetSubdir = "VAE",
+        TargetName = "SD3/sd35_vae.safetensors",
+        Role = "vae",
+        Sha256 = "6ad8546282f0f74d6a1184585f1c9fe6f1509f38f284e7c4f7ed578554209859"
+    };
+
     // ── Diffusion transformers (folder = "Stable-Diffusion" — companion DiT weights) ──
 
     /// <summary>Ideogram 4's unconditional transformer — the second 9.3B DiT (identical architecture to the conditional one) for the asymmetric-CFG negative pass; auto-resolves the companion, fp8_scaled, saved under Ideogram4/.</summary>

@@ -134,6 +134,7 @@ public sealed unsafe class AnimaTransformer : IDisposable
             throw new ArgumentException(
                 $"Latent {latentH}x{latentW} not divisible by patch {patchH}x{patchW}.", nameof(latent));
 
+        System.Diagnostics.Stopwatch phaseSw = System.Diagnostics.Stopwatch.StartNew();
         // ── 1. Concat padding-mask channel → [B, 17, H, W] ──
         Tensor latentExpanded = _config.ConcatPaddingMask
             ? AppendPaddingMaskChannel(latent)
@@ -147,8 +148,10 @@ public sealed unsafe class AnimaTransformer : IDisposable
         if (!ReferenceEquals(latentExpanded, latent)) latentExpanded.Dispose();
         AnimaDebugDump.Dump("patch_embed", imgTokens);
 
+        long tPatch = phaseSw.ElapsedMilliseconds;
         // ── 3. RoPE table for image self-attn ──
         (Tensor ropeCos, Tensor ropeSin) = _rope.BuildFreqs(tFrames: 1, hPatched: gridH, wPatched: gridW);
+        long tRope = phaseSw.ElapsedMilliseconds;
         AnimaDebugDump.Dump("rope_cos", ropeCos);
         AnimaDebugDump.Dump("rope_sin", ropeSin);
 
@@ -172,6 +175,7 @@ public sealed unsafe class AnimaTransformer : IDisposable
             AnimaDebugDump.Dump($"block_{i}", x);
         }
 
+        long tBlocks = phaseSw.ElapsedMilliseconds;
         ropeCos.Dispose();
         ropeSin.Dispose();
         crossMask?.Dispose();
@@ -184,9 +188,11 @@ public sealed unsafe class AnimaTransformer : IDisposable
         AnimaDebugDump.Dump("final_proj", projected);
 
         // ── 8. Unpatchify ──
+        long tFinal = phaseSw.ElapsedMilliseconds;
         Tensor velocity = Unpatchify(projected, batch, gridH, gridW, patchH, patchW, _config.OutChannels);
         projected.Dispose();
         AnimaDebugDump.DumpOutput(velocity);
+        HartsyInference.Core.Logging.Logs.Verbose($"[anima-phase] patch={tPatch}ms rope={tRope - tPatch}ms blocks={tBlocks - tRope}ms final={tFinal - tBlocks}ms unpatch={phaseSw.ElapsedMilliseconds - tFinal}ms");
 
         return velocity;
     }
@@ -352,21 +358,20 @@ public sealed unsafe class AnimaTransformer : IDisposable
         rankProj.Dispose();
 
         // + temb[:2*hidden]
-        AddTembSliceInPlace(expanded, temb, batch, expandWidth);
+        Tensor modulation = AnimaBlock.AddTembSlice(backend, expanded, temb, batch, expandWidth);
+        expanded.Dispose();
 
         // chunk(2) → shift, scale
         Tensor shift = new Tensor(new TensorShape(batch, hidden), DType.F32);
         Tensor scale = new Tensor(new TensorShape(batch, hidden), DType.F32);
-        SplitTwo(expanded, shift, scale, batch, hidden);
-        expanded.Dispose();
+        backend.SliceLastDim(shift, modulation, 0);
+        backend.SliceLastDim(scale, modulation, hidden);
+        modulation.Dispose();
 
-        // LayerNorm-no-affine + modulate.
+        // LayerNorm-no-affine + modulate, fused on-device.
         TensorShape seqShape = new TensorShape(batch, seqLen, hidden);
-        Tensor normed = new Tensor(seqShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, x, batch, seqLen, hidden, _config.RmsNormEps);
-
-        Tensor modulated = AdaLNModulation.ApplyModulation(normed, shift, scale, batch, seqLen, hidden);
-        normed.Dispose();
+        Tensor modulated = new Tensor(seqShape, DType.F32);
+        backend.LayerNormModulate(modulated, x, scale, shift, _config.RmsNormEps);
         shift.Dispose();
         scale.Dispose();
 
@@ -429,37 +434,6 @@ public sealed unsafe class AnimaTransformer : IDisposable
             }
         }
         return output;
-    }
-
-    private static void AddTembSliceInPlace(Tensor dst, Tensor temb, int batch, int sliceLen)
-    {
-        int tembStride = (int)temb.Shape[1];
-        if (tembStride < sliceLen)
-            throw new ArgumentException($"temb width {tembStride} < slice {sliceLen}.", nameof(temb));
-        float* dstPtr = (float*)dst.DataPointer;
-        float* tembPtr = (float*)temb.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int dstOff = b * sliceLen;
-            int tOff = b * tembStride;
-            for (int d = 0; d < sliceLen; d++)
-                dstPtr[dstOff + d] += tembPtr[tOff + d];
-        }
-    }
-
-    private static void SplitTwo(Tensor src, Tensor shift, Tensor scale, int batch, int hidden)
-    {
-        float* sPtr = (float*)src.DataPointer;
-        float* shiftPtr = (float*)shift.DataPointer;
-        float* scalePtr = (float*)scale.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            long src0 = (long)b * 2 * hidden;
-            long dst = (long)b * hidden;
-            long bytes = (long)hidden * sizeof(float);
-            Buffer.MemoryCopy(sPtr + src0, shiftPtr + dst, bytes, bytes);
-            Buffer.MemoryCopy(sPtr + src0 + hidden, scalePtr + dst, bytes, bytes);
-        }
     }
 
     private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)

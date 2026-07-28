@@ -12,7 +12,11 @@ public static class Program
     /// <summary>Parses <paramref name="args"/> and dispatches to a command; with no args, shows the banner and usage.</summary>
     public static int Main(string[] args)
     {
-        Logs.MinLevel = LogLevel.Warning;
+        // Warning by default keeps the REPL/one-shot output clean; HARTSY_LOG_LEVEL exposes the engine's
+        // per-phase / per-step diagnostics (D2H sync counts, phase timings) without a rebuild.
+        Logs.MinLevel = Enum.TryParse(Environment.GetEnvironmentVariable("HARTSY_LOG_LEVEL"), ignoreCase: true, out LogLevel level)
+            ? level
+            : LogLevel.Warning;
 
         if (args.Length == 0)
         {
