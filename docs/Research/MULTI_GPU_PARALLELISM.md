@@ -318,7 +318,7 @@ all_reduce(local[r], bytes):
 - **Optional custom-AR win window:** if we later add a hand-rolled one-shot AR for tiny decode messages, how close to / better than NCCL on our hardware? Narrow window (≤8 MB, ≤8 GPUs, full NVLink). Microbenchmark before investing. Not on the critical path.
 - **Exact MLA + EP interplay** when wiring DeepSeek-V3 routing (slice-verified, Phase 8a) onto real multi-GPU EP — node-limited-routing all-to-all dispatch is non-trivial.
 - **CUDA-graph capture across devices:** vLLM/SGLang capture per-step graphs; whether our `CudaGraph` can span a multi-device step or must be per-device is unverified.
-- **Exact MLA + EP interplay** when we eventually wire DeepSeek-V3 routing (already slice-verified per `LLM_MODEL_COVERAGE.md` Phase 8a) onto real multi-GPU EP — the all-to-all dispatch of node-limited routing is non-trivial.
+- **Exact MLA + EP interplay** when we eventually wire DeepSeek-V3 routing (already slice-verified per `MODEL_STATUS_LLM.md` Phase 8a) onto real multi-GPU EP — the all-to-all dispatch of node-limited routing is non-trivial.
 
 ## Implementation Notes for HartsyInference
 
@@ -338,7 +338,7 @@ all_reduce(local[r], bytes):
 | — | **Sequence/context parallel** | >32k-context TTFT | ring/all-to-all | High | low priority |
 
 **Design recommendations:**
-- **Build the parallelism plan as config, not new model classes** — mirror `LLM_MODEL_COVERAGE.md`'s "preset + knob" philosophy. A `ParallelConfig { TpSize, PpSize, EpSize, DpSize }` consumed by `GenericTransformer`, with the layer loop dispatching to the right device(s). TP is column/row loader variants of the existing Linear; EP is a device assignment over the existing expert split; PP is a stage-partition over the existing layer loop.
+- **Build the parallelism plan as config, not new model classes** — mirror `MODEL_STATUS_LLM.md`'s "preset + knob" philosophy. A `ParallelConfig { TpSize, PpSize, EpSize, DpSize }` consumed by `GenericTransformer`, with the layer loop dispatching to the right device(s). TP is column/row loader variants of the existing Linear; EP is a device assignment over the existing expert split; PP is a stage-partition over the existing layer loop.
 - **Start single-node, thread-per-GPU, in-process.** No IPC handles, no MPI, no Ray; one host thread owns each device's context. Defer multi-node (and its native-transport question) entirely.
 - **Layer split first and possibly forever for consumer hardware** — without NVLink, TP's small all-reduces are PCIe-latency-bound and lose (the 3× P40 data: layer ≥ row except on token-gen). On a 2-GPU consumer rig, layer split is the only mode that reliably wins.
 - **Reuse the existing P2P/event machinery** from `CudaStreamingWeightCache` (pinned staging, `cuMemcpyHtoDAsync`, `cuEventRecord`/`cuStreamWaitEvent`); the layer-split boundary is structurally identical to the block-swap transfer, just device→device instead of host→device.

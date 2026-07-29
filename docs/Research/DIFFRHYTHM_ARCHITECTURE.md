@@ -377,7 +377,7 @@ All three target full-length (multi-minute) song generation with synchronized vo
 
 ### 8.5 Suggested Package Layout
 
-Following [NUGET_PACKAGE_DESIGN.md](../Design/NUGET_PACKAGE_DESIGN.md):
+Package placement (one folder per package under `src/`, GPU behind `IBackend`):
 
 ```
 HartsyInference.Audio

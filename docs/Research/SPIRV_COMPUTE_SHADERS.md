@@ -123,7 +123,7 @@ Key points:
 2. **Bindings** must match the `VkDescriptorSetLayout` used at pipeline creation. Use a stable convention across the engine:
    - `binding = 0` always reserved for the primary output
    - `binding = 1..` inputs in fixed order (A, B, bias, ...)
-3. **`readonly` / `writeonly`** qualifiers let the driver elide hazards/coherency you don't need. Use them — but only after verifying every spec-const path. Example: the matmul output binding *cannot* be `writeonly` if the kernel supports `C = alpha*A*B + beta*C` (the `beta != 0` path reads C). See [PHASE_3_5_DEVIATIONS.md #8](../Checklists/PHASE_3_5_DEVIATIONS.md). Also note: GLSL has no built-in `erf`; the exact-GELU path uses an inline Abramowitz & Stegun 7.1.26 approximation — see [PHASE_3_5_DEVIATIONS.md #7](../Checklists/PHASE_3_5_DEVIATIONS.md).
+3. **`readonly` / `writeonly`** qualifiers let the driver elide hazards/coherency you don't need. Use them — but only after verifying every spec-const path. Example: the matmul output binding *cannot* be `writeonly` if the kernel supports `C = alpha*A*B + beta*C` (the `beta != 0` path reads C). See [TROUBLESHOOTING.md #8](../Checklists/TROUBLESHOOTING.md). Also note: GLSL has no built-in `erf`; the exact-GELU path uses an inline Abramowitz & Stegun 7.1.26 approximation — see [TROUBLESHOOTING.md #7](../Checklists/TROUBLESHOOTING.md).
 4. **`shared` memory** — per-workgroup scratch. Vulkan minimum: 16 KB; modern desktop ≥ 32 KB. Statically sized at SPIR-V compile time (use `layout_size_id` spec consts to scale at pipeline creation).
 5. **`push_constant`** struct mapped to the `vkCmdPushConstants` blob — exact byte layout enforced; `std430` rules apply. Keep ≤ 128 bytes.
 
@@ -633,7 +633,7 @@ void main() {
 }
 ```
 
-**Use 64-bit indexing for resolutions ≥ 1024**. Same pitfall as PTX: products like `C × kH × kW × outH × outW` overflow `uint32` for SDXL's largest layer. Either split the dispatch or compute the index in `uint64_t` (`GL_EXT_shader_explicit_arithmetic_types_int64`) — see [PHASE_3_DEVIATIONS.md #12](../Checklists/PHASE_3_DEVIATIONS.md).
+**Use 64-bit indexing for resolutions ≥ 1024**. Same pitfall as PTX: products like `C × kH × kW × outH × outW` overflow `uint32` for SDXL's largest layer. Either split the dispatch or compute the index in `uint64_t` (`GL_EXT_shader_explicit_arithmetic_types_int64`) — see [TROUBLESHOOTING.md #12](../Checklists/TROUBLESHOOTING.md).
 
 After im2col, dispatch the tiled GEMM kernel (`matmul_tiled.comp.glsl`) with A = weight `[C_out, C_in*kH*kW]`, B = col `[C_in*kH*kW, N*outH*outW]`, C = output `[C_out, N*outH*outW]`, then use `col2bias_add.comp.glsl` (or fused into the GEMM) to add bias and reshape to NCHW.
 
@@ -662,7 +662,7 @@ void main() {
 }
 ```
 
-**Last-dim split**, not flat midpoint — exactly the same pitfall fixed in [PHASE_3_DEVIATIONS.md #16](../Checklists/PHASE_3_DEVIATIONS.md). The bug bit us in PTX; transferring the bug to GLSL would be regression. Test with multi-row inputs.
+**Last-dim split**, not flat midpoint — exactly the same pitfall fixed in [TROUBLESHOOTING.md #16](../Checklists/TROUBLESHOOTING.md). The bug bit us in PTX; transferring the bug to GLSL would be regression. Test with multi-row inputs.
 
 ### `transpose.comp.glsl`
 

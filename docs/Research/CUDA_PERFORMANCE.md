@@ -172,9 +172,9 @@ ComfyUI/PyTorch achieve ~3s/step because they combine async execution + FP16 + c
 - OOM retry in `CudaMemory.Allocate`: sync stream on `CUDA_ERROR_OUT_OF_MEMORY`, then retry
 
 **Bugs found and fixed during Phase 2**:
-- **GEGLU flat-split bug**: Kernel split input at flat midpoint instead of along last dimension. Fixed by decomposing output index into (outerIdx, d) and computing correct per-row offsets. See `PHASE_3_DEVIATIONS.md` #16.
-- **BroadcastAdd in-place caching**: Old `_gpuSyncCallback` freed the GPU pointer being re-cached. Fixed by clearing callbacks before `CacheActivation`. See `PHASE_3_DEVIATIONS.md` #17.
-- **OOM during VAE decode**: `FreeAsync` deferred frees weren't reclaimed for new allocations. Fixed with weight eviction + OOM retry. See `PHASE_3_DEVIATIONS.md` #18.
+- **GEGLU flat-split bug**: Kernel split input at flat midpoint instead of along last dimension. Fixed by decomposing output index into (outerIdx, d) and computing correct per-row offsets. See `TROUBLESHOOTING.md` #16.
+- **BroadcastAdd in-place caching**: Old `_gpuSyncCallback` freed the GPU pointer being re-cached. Fixed by clearing callbacks before `CacheActivation`. See `TROUBLESHOOTING.md` #17.
+- **OOM during VAE decode**: `FreeAsync` deferred frees weren't reclaimed for new allocations. Fixed with weight eviction + OOM retry. See `TROUBLESHOOTING.md` #18.
 
 **Results**: 82.6% cache hit rate, 43% step time reduction (53s vs 93s at 1024x1024). Output verified visually correct.
 

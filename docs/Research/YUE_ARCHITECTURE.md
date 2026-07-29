@@ -478,7 +478,7 @@ This section is the implementer's bridge.
 3. **`HartsyInference.Audio.YuE.YuES1Stage`** — owns the S1 model instance, the section parser, the per-section loop, the cb0-extraction post-processor.
 4. **`HartsyInference.Audio.YuE.YuES2Stage`** — owns the S2 model instance, the cb0-prefix packing, batched chunk inference.
 5. **`HartsyInference.Audio.XCodec.XCodecDecoder`** — 8-codebook RVQ table lookup (vector add) followed by a transposed-conv decoder. Cross-ref the GAN-vocoder code in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md) — the architecture is closely related (DAC/EnCodec style). PTX kernel needs: transposed conv1d, leaky-ReLU/Snake activation, weight-normed conv1d.
-6. **`HartsyInference.Audio.YuE.VocosUpsampler`** — optional ConvNeXt + ISTFT. Reuses STFT/ISTFT from `HartsyInference.Audio.Dsp` (already needed for Whisper/Kokoro per `PHASE_5_AUDIO.md`).
+6. **`HartsyInference.Audio.YuE.VocosUpsampler`** — optional ConvNeXt + ISTFT. Reuses STFT/ISTFT from `HartsyInference.Audio.Dsp` (already needed for Whisper/Kokoro per `MODEL_STATUS_AUDIO.md`).
 
 **Key implementation gotchas:**
 

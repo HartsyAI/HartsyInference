@@ -3,8 +3,8 @@
 Concise status for native text generation, text/vision encoders, and vision-language models. Goal:
 support every architecture Ollama / llama.cpp runs via the config-driven `GenericTransformer` spine, so a
 new model is *a preset + key-mapper + (rarely) one engine knob*, never a new transformer class. Full
-phased plan + per-model bring-up notes live in [LLM_MODEL_COVERAGE.md](LLM_MODEL_COVERAGE.md) and
-[PHASE_12_LANGUAGE.md](PHASE_12_LANGUAGE.md). Legend: [MODEL_STATUS.md](MODEL_STATUS.md).
+phased plan + per-model open work live in the [Remaining work](#remaining-work) section below; bring-up
+debugging notes live in [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Legend: [MODEL_STATUS.md](MODEL_STATUS.md).
 
 Two bars apply: **Runnable@3060** (fits 12 GB at Q4/Q8, verified coherent e2e on this box) and
 **build-defer** (arch + key-map + slice tests land, e2e marked pending-hardware for >12 GB models).
@@ -12,7 +12,7 @@ Two bars apply: **Runnable@3060** (fits 12 GB at Q4/Q8, verified coherent e2e on
 > **Decode throughput (2026-07-04):** benchmarked vs a CUDA `llama-bench` baseline and optimized from
 > **20-54× slower → 1.94-2.88× off llama.cpp** (Llama-3.2-1B under 2×). Fused quantized GEMV decode
 > kernels (Q4_K/Q6_K/Q8_0) + quantized lm_head + split-K flash-decode attention + vectorized loads.
-> Full record: [LLM_THROUGHPUT_BENCHMARK.md](LLM_THROUGHPUT_BENCHMARK.md) + [LLM_DECODE_PERF_GRIND.md](LLM_DECODE_PERF_GRIND.md).
+> Full record: [ROADMAP.md](ROADMAP.md).
 > **UPDATE (2026-07-10): CUDA-graph decode DONE** for the plain dense GQA/RoPE shape (Llama/Qwen2/Qwen3/Mistral) —
 > Qwen3-0.6B 2.57× faster (1.77× off llama.cpp, was 4.5×), byte-identical output verified. Greedy-only, opt-in
 > `HARTSY_GRAPH_DECODE=1`. Also fixed a missing fused Q5_0 GEMV kernel (odd-hidden-dim models, e.g. qwen2.5-0.5b,
@@ -39,7 +39,7 @@ Everything above this section is **engine-internal** parity verification (`MlaTe
 comparisons against HF) — it does not prove `hartsy text -m <id>` itself works. This pass actually ran
 `hartsy text` (built `-c Release -f net10.0`; net8.0 runtime is absent on this box) against real downloaded
 GGUFs for every catalog entry added by the prior CLI-wiring session, per
-[LLM_CLI_CATALOG_HANDOFF.md](LLM_CLI_CATALOG_HANDOFF.md). Two GPUs used in parallel — RTX 3060 (12GB,
+the prior CLI-wiring session. Two GPUs used in parallel — RTX 3060 (12GB,
 `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0`) and RTX 4090 (24GB, `=1`), confirmed empirically. Full
 per-model prompt/output/dmon logs and exact repro commands are preserved in this session's transcript; the
 `ModelCatalog.cs` entries themselves carry the source repo + sha256 for every model that passed.
@@ -454,7 +454,7 @@ E2E via GGUF-vocab `BertWordPieceTokenizer`: cos(cat,kitten) 0.91 > cos(cat,car)
 | **T5 / UMT5 / Pile-T5 (AuraFlow) / BERT / SigLIP / Qwen3-VL vision tower** | 🔬 | Diff tests present (`T5EncoderDiff`, `BertModel`, `Siglip`, `Qwen3VlVisionTower`); Pile-T5 == UMT5 (per-layer rel-attn-bias). |
 | **Native LLM package** (Phase 12) | 🚧 | One config-driven transformer backing both LLM + text encoders; CUDA-first quant; GPU-resident decode is the gating blocker. |
 
-## Remaining for FULL LLM support — see [LLM_MODEL_COVERAGE.md § Completion plan](LLM_MODEL_COVERAGE.md) (Phases 6–9)
+## Remaining for FULL LLM support (Phases 6–9)
 
 Transformer-family LLMs (dense · MoE · MLA · VLM · embeddings) are effectively complete for common/SOTA models.
 What's left, by phase:
@@ -470,3 +470,27 @@ What's left, by phase:
   Mixtral/Qwen3-MoE/Qwen2.5-VL-7B/DeepSeek-V2-Lite needs a bigger GPU.
 - **Phase 9 — serving/quality (optional):** batch>1 / paged KV, speculative decode, long-context stress, CPU GGUF
   parity tests + the pre-existing `RoundTrip_SimpleF32` test fix, tool-calling/grammar-constrained decode.
+
+## Remaining work
+
+Distilled from the retired PHASE_12_LANGUAGE / LLM_MODEL_COVERAGE / LLM_CLI_CATALOG_HANDOFF /
+VPS_GPU_HANDOFF / QWEN35_GPU_VERIFICATION plans. The "Remaining for FULL LLM support" (Phases 6-9) section
+above already tracks the hybrid families, build-defer e2e, and serving items; this section captures the rest.
+Items now ✅ above (Llama-3.x / Mistral / Qwen coverage, flash-attention, the small VLMs, gpt2, starcoder2,
+`--thinking`/`--no-thinking`, `--image`) are omitted.
+See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, quant, serving).
+
+### Architecture coverage frontier
+- [ ] Nemotron-H (Mamba-proper hybrid — beyond the Jamba / Zamba2 / Granite-4 hybrids already in Phase 7).
+
+### CLI catalog
+- [ ] ~26 LLM catalog entries still need real-hardware runs + HF GGUF `Assets` sourcing.
+- [ ] Wire the T5 / seq2seq generation loop in `TextService` (T5 is not reachable via `hartsy text` today).
+- [ ] `glm4` still FAIL — root-cause the quantized (Q4_K) precise-retrieval bug (the F32 path is proven correct).
+
+### Qwen3.5 GPU verification (OOM'd the dev box — needs a big-VRAM GPU)
+- [ ] `moe-text` (35B-A3B), `moe-vl`, `vl9b`, `kat` tiers unrun.
+- [ ] Flip `qwen35moe` to Verified once green on a big-VRAM GPU.
+
+### Testing
+- [ ] 8 research docs + parity/testing items still unchecked.

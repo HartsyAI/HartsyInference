@@ -1,9 +1,9 @@
 # Audio Models — status
 
 Concise status for every audio model: TTS, STT, and the codec / voice-conversion / music / separation
-family. Build detail lives in [PHASE_5_AUDIO.md](PHASE_5_AUDIO.md); the music-specific completion plan is
-[MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md). Parity evidence (maxAbs, bugs found)
-lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS.md](MODEL_STATUS.md).
+family. Open work (including the music-model completion list) is in the [Remaining work](#remaining-work)
+section below; bring-up debugging notes live in [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Parity evidence
+(maxAbs, bugs found) lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS.md](MODEL_STATUS.md).
 
 > ## 🔧 Sweep-failure fix pass (2026-07-24) — the 37-model Swarm-API benchmark's failures root-caused
 > The full-fleet Swarm-API sweep (27/37 generated; results in `benchmarks/swarm_audio_bench/
@@ -215,7 +215,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 > |---|---|
 > | ✅ **verified word-correct** | Kokoro, Piper, MeloTTS, F5-TTS, **Bark**, **Chatterbox**, **VibeVoice**, **FishSpeech**, **Orpheus**, **Dia** (Swarm 10/10, all 3 turns, EOS-stops 11.4s — fixed by switching to the `Dia-1.6B-0626` checkpoint), **Kyutai TTS** (DSM, in-engine e2e word-correct 2026-07-16; **Swarm-deployed + verified word-perfect 2026-07-16**) |
 > | ✅ **Qwen3-TTS all 3 modes SWARM-VERIFIED** 2026-07-18 (alpha.51) | custom_voice + voice_design word-perfect (after the extension `Encode`→`EncodeRaw` tokenizer-padding fix); **voice_clone (x-vector)** implemented + Swarm-verified word-perfect (T2I path, model `Audio Models/Qwen3TTS/1.7B-Base` + `referenceaudio` param → `mode=voice_clone`) — rewrote `EcapaSpeakerEncoder` to the real no-BatchNorm `speaker_encoder.*` layout, 128-bin slaney log-mel, ECAPA x-vector injected at the codec speaker position (Base checkpoint). Voice-responsive (corr 0.01 across two refs). ICL mode (needs the codec encoder port) is the only remaining variant. **Deploy TRAP: keep the extension TFM net8.0 (host is net8.0); a net10.0 override → `ReflectionTypeLoadException`. And purge stale local-feed/nuget-cache versions or they shadow the real publish.** NeuTTS voice-clone ✅ works e2e (the "CodecEnc.*" gate was stale). **PERF 07-18: warm RTF 0.88→~0.50 on the 3060 (1.77×, bit-identical) — root was `FixedKvCache` re-uploading ~1.9 GB of zeroed KV across PCIe every gen (device-resident-KV fix helps ALL AR audio models) + zero-alloc top-K sampler + on-device vocoder residual; talker is HBM-bandwidth-bound (FP8 is the next lever). See `benchmarks/results/qwen3_tts_perf_2026-07-18.md`.** |
-> | 🚧 **build started 2026-07-15** | **StyleTTS2** (LibriTTS) — recon done: checkpoint downloaded, structure mapped, dims confirmed Kokoro-compatible (hidden 512 / style 128×2 / n_token 178 / 24 kHz / decoder 8h·3L → bert/text_encoder/predictor/decoder reuse Kokoro loaders). Remaining: reconcile the two style submodules to the real checkpoint (StyleEncoder ResBlk uses a **learned depthwise downsample** `downsample_res.conv` + `conv1` is dim_in→dim_in, not the scaffold's avgpool/dim_out; diffusion transformer uses archinetai `net.blocks`/fused-`to_kv`/`norm.fc`-AdaLN, not the scaffold's `unet.blocks`) + spectral-norm σ-fold + write `LoadFromCheckpoint`. See `AUDIO_TTS_BRINGUP_PLAN.md`. |
+> | 🚧 **build started 2026-07-15** | **StyleTTS2** (LibriTTS) — recon done: checkpoint downloaded, structure mapped, dims confirmed Kokoro-compatible (hidden 512 / style 128×2 / n_token 178 / 24 kHz / decoder 8h·3L → bert/text_encoder/predictor/decoder reuse Kokoro loaders). Remaining: reconcile the two style submodules to the real checkpoint (StyleEncoder ResBlk uses a **learned depthwise downsample** `downsample_res.conv` + `conv1` is dim_in→dim_in, not the scaffold's avgpool/dim_out; diffusion transformer uses archinetai `net.blocks`/fused-`to_kv`/`norm.fc`-AdaLN, not the scaffold's `unet.blocks`) + spectral-norm σ-fold + write `LoadFromCheckpoint`. See the Remaining work section. |
 > | ✅ **Swarm-deployed 2026-07-16/17** (extension wired, whisper word-perfect) | **Kyutai TTS**, **Spark-TTS** (controllable mode), **PocketTTS** (voice-KV-primed continuous-latent flow-LM; full engine port, parity corr 1.0), **Zonos-v0.1** (transformer; voice-clone, gallery gen verbatim `Audio Models/Zonos/transformer`), **CosyVoice 2** (0.5B; zero-shot clone, gallery gen `Audio Models/CosyVoice/2-0.5b`, whisper word-perfect 2026-07-17; perf pass → **warm 5.1 s/clip** (was 28.9 s, 5.7×) via GPU-resident CFM flow decoder, RTF 1.34) |
 > | ⛔ **not wired** (install throws a clear "not runnable yet") | CSM (no runtime model) |
 >
@@ -315,13 +315,62 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **Demucs** (separation) | 🔧 | Built; parity pending. |
 | **CSM** (Sesame) | ✅ | Fixed 2026-07-21 (unsloth/csm-1b key remap + bundled 32-cb Mimi + I32 codes dtype + real all-zero EOS + `[speaker]text` prompt template); Whisper word-perfect on two independent sentences. `hartsy speak -m csm`. |
 | **Stable Audio Open Small** | ✅ | DiT/VAE/timing-conditioner parity cosine 1.0 each. **Engine-wired 2026-07-20** as `stableaudio` (was built+parity-verified but had no `MusicCatalog` entry, and the AudioLab extension's own binding was also missing — both fixed). **GPU-residency perf pass 2026-07-20**: host RoPE/multi-head-reshape/ping-pong-scheduler loops ported to existing `IBackend` ops (`ApplyRopeSingle`/`Permute0213`/`RepeatKvHeads`/chained `Scale`+`Add`) — no new kernels needed, cosine 1.0 held after rewrite. Swarm `/API/GenerateText2Image` verified: 11.89s stereo 44.1kHz in 2.85s gen time. |
-| **DiffRhythm / AudioLDM 2 / ACE-Step XL** | ❌/🔧 | Music roadmap; see [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md) for the per-model build state and ROI order. |
+| **DiffRhythm / AudioLDM 2 / ACE-Step XL** | ❌/🔧 | Music roadmap; see the [Remaining work](#remaining-work) section for the per-model build state and ROI order. |
 | **PocketTTS** (continuous-latent) | ✅ | **Swarm-deployed + parity-verified 2026-07-16.** Production voiced path built on the verified cores: `PocketTtsStreamingTransformer.ForwardPrimed` (voice-KV prefix + RoPE offset), `PocketTtsFlowLm.GenerateVoiced` (LUT conditioner + out_eos stop + noise std=√temp), `PocketTtsVoice` (KV-state loader), rewritten `PocketTtsPipeline` (SentencePiece + emb_std/mean denorm). All transformer layers + hidden + latents **corr 1.000000** vs `pocket_tts` 2.1.0. Voice REQUIRED (default `alba`). Weights = non-gated `kyutai/pocket-tts-without-voice-cloning` `languages/english/` (NOT the generic `tts_*.safetensors`). Whisper `medium.en` word-perfect via `/API/GenerateText2Image`. |
 
 ## Notes
 
 - Music models have their own definition of "production-ready" and a sequenced completion plan in
-  [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md); the universal missing piece there is
+  the [Remaining work](#remaining-work) section; the universal missing piece there is
   the audio parity harness, now proven on ACE-Step's DiT.
 - Build audio with `-m:1`; the Audio test suite crashes under xunit parallel, run it sequentially
   (`-- xUnit.ParallelizeTestCollections=false`) and reuse a model cache via `HARTSYINFERENCE_MODEL_CACHE`.
+
+## Remaining work
+
+Distilled from the retired PHASE_5_AUDIO / MUSIC_MODELS_COMPLETION_PLAN / MUSIC_PARAM_AUDIT /
+AUDIO_TTS_BRINGUP_PLAN plans. Items now ✅ above (Bark, CSM, Orpheus, Kyutai TTS, StyleTTS2 clone, Demucs,
+Spark-TTS, Zonos, PocketTTS, CosyVoice 2, Chatterbox clone, Stable Audio Open Small) are omitted.
+See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, quant, serving).
+
+### Build / validation status
+- [ ] Overall ~70% built / ~25% validated.
+- [ ] Build the PTX/Vulkan audio kernels (currently source-only, awaiting nvcc/glslc).
+- [ ] Codec STOI validation (pending checkpoints).
+
+### Not-started ASR / TTS models
+- [ ] NVIDIA NeMo family: Parakeet CTC / RNN-T / TDT, Canary, FastConformer.
+- [ ] SenseVoice, FireRedASR.
+- [ ] XTTS-v2, ChatTTS, Higgs Audio v2, IndexTTS 1.5 / 2, CosyVoice 1.
+
+### Checkpoint-gated scaffolds (backbone verified, need real weights)
+- [ ] Kyutai STT (no depformer).
+- [ ] NeuTTS clone path (X-Codec2 encoder key map).
+- [ ] Fish-Speech firefly-gan-vq codec.
+- [ ] Resemble Enhance real-weight load (denoiser/IRMAE/UnivNet module-composition mismatch).
+- [ ] GPT-SoVITS enc_p (zero-shot clone encoder).
+- [ ] StyleTTS2 random-mode (no-reference) diffusion sampler + whisper-drop quality follow-ups.
+
+### Streaming
+- [ ] Streaming pipelines deferred across the board.
+
+### Music — not built
+- [ ] Stable Audio Open 1.0 / 2 (Small is ✅).
+- [ ] DiffRhythm, AudioLDM 2, ACE-Step XL.
+- [ ] YuE Stage-2 upsampler.
+- [ ] Shared music infra: dpmpp-3m-sde sampler, G2P, MuQ-MuLan, CLAP, GPT-2 continuous decoder.
+
+### Music — P2 params
+- [ ] ACE-Step task modes (retake / repaint / edit / audio2audio / LoRA).
+- [ ] MusicGen extend_stride / melody / continuation.
+- [ ] YuE stage-2 + dual-track.
+- [ ] ACE-1.5 cover-mode LM.
+
+### Remaining TTS clone paths
+- [ ] NeuTTS, Qwen3-TTS ICL mode, Kyutai clone.
+
+### Perf follow-ups
+- [ ] Dia realtime (CUDA-graph decode + CFG batching).
+- [ ] AudioGen duration cap 45s → 30s (unroot-caused).
+- [ ] ZipVoice GPU-residency pass.
+- [ ] Per-provider unload endpoint.

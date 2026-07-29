@@ -312,7 +312,7 @@ These bite every GPU benchmarker. Document them so reviewers can confirm we avoi
    ```
 5. **PCIe traffic**: external host activity (e.g. test result CSV writes) can interfere. The harness writes results to `/tmp/...` then atomically moves to `benchmarks/results/` after the measurement window closes.
 6. **GPU thermal throttling**: long-running suites can heat-throttle. The harness samples GPU temperature; if it exceeds 80 °C, sleeps 30 s between trials.
-7. **Different CUDA streams**: HartsyInference uses `nonBlocking=false` (per [`PHASE_3_DEVIATIONS.md`](../Checklists/PHASE_3_DEVIATIONS.md) #4); always benchmark on this stream, not on a fresh one.
+7. **Different CUDA streams**: HartsyInference uses `nonBlocking=false` (per [`TROUBLESHOOTING.md`](../Checklists/TROUBLESHOOTING.md) #4); always benchmark on this stream, not on a fresh one.
 8. **Process forking and CUDA context**: after `Parallel.For` etc., the CUDA context state may not match. Benchmarks always run on the main thread.
 9. **`nsys --capture-range=cudaProfilerApi`**: without this, the trace includes test-runner startup, which dominates the timeline. With it, only the measurement window is captured.
 

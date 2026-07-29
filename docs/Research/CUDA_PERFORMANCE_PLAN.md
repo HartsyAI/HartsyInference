@@ -8,7 +8,7 @@
 This is the master tracking document for Phase B. It supersedes the optimization roadmap in [`CUDA_PERFORMANCE.md`](CUDA_PERFORMANCE.md) (the older doc remains as the historical Phase 0–2 record). Companion docs:
 
 - [`PROFILING_METHODOLOGY.md`](PROFILING_METHODOLOGY.md) — how to profile (Nsight Systems / Compute, NVTX, cuBLAS log)
-- [`../Checklists/PHASE_B_GPU_PERFORMANCE.md`](../Checklists/PHASE_B_GPU_PERFORMANCE.md) — checkbox tracking
+- [`../Checklists/ROADMAP.md`](../Checklists/ROADMAP.md) — checkbox tracking
 - [`TECH_PAPER_OUTLINE.md`](TECH_PAPER_OUTLINE.md) — paper skeleton, populated as we go
 - [`FLASH_ATTENTION.md`](FLASH_ATTENTION.md) — algorithm reference (existing, unchanged)
 - [`BENCHMARKING.md`](BENCHMARKING.md) — earlier procedural notes (existing, superseded by this doc + the run scripts under `benchmarks/`)
@@ -116,7 +116,7 @@ Updated as B2 produces real numbers. The "predicted" column is from [`BENCHMARKI
 Deliverables (one-shot, no code):
 - [x] [`CUDA_PERFORMANCE_PLAN.md`](CUDA_PERFORMANCE_PLAN.md) — this doc
 - [x] [`PROFILING_METHODOLOGY.md`](PROFILING_METHODOLOGY.md) — Nsight + NVTX commands, reproducibility
-- [x] [`../Checklists/PHASE_B_GPU_PERFORMANCE.md`](../Checklists/PHASE_B_GPU_PERFORMANCE.md) — checkbox tracking
+- [x] [`../Checklists/ROADMAP.md`](../Checklists/ROADMAP.md) — checkbox tracking
 - [x] [`TECH_PAPER_OUTLINE.md`](TECH_PAPER_OUTLINE.md) — paper skeleton
 
 ### B1 — Benchmark Infrastructure (no perf changes)
@@ -196,7 +196,7 @@ The phase is complete only when **every** condition holds:
 3. **End-to-end target met**: SDXL 1024² @ 20 steps ≤ 5 s/step on RTX 3060.
 4. **Reproducible**: `bash benchmarks/run_benchmarks.sh` on any CUDA box with the pinned stack produces a `results/run_*/comparison.md` directly comparable to ours.
 5. **Cross-device coverage**: at least three SM generations measured (Ampere / Ada / Hopper).
-6. **Documented**: every kernel change has a deviation entry in `PHASE_3_DEVIATIONS.md` with before/after numbers + accuracy metric. The paper skeleton has every section populated with real figures.
+6. **Documented**: every kernel change has a deviation entry in `TROUBLESHOOTING.md` with before/after numbers + accuracy metric. The paper skeleton has every section populated with real figures.
 
 ---
 
@@ -230,8 +230,8 @@ These are the falsifiable claims the experiments are designed to confirm or reje
 ## Out of Scope
 
 - **CPU backend optimization** — `HartsyInference.Cpu` perf is tracked in `SIMD_INTRINSICS_DOTNET.md`; not part of this phase.
-- **Vulkan backend** — `HartsyInference.Vulkan` is in `PHASE_3_5_VULKAN_BACKEND.md`; not Phase B.
-- **Per-block weight streaming for huge models** — covered in `PHASE_4_MODEL_BREADTH.md` follow-ups (Flux.2 Dev, Hunyuan Image 2.1, Qwen-Image at 12 GB).
+- **Vulkan backend** — `HartsyInference.Vulkan` is in `ROADMAP.md`; not Phase B.
+- **Per-block weight streaming for huge models** — covered in `MODEL_STATUS_IMAGE.md` follow-ups (Flux.2 Dev, Hunyuan Image 2.1, Qwen-Image at 12 GB).
 - **Pure inference compilation** (e.g. via TVM, Triton) — orthogonal track; would compete with the PTX kernels we're authoring.
 - **Audio / vision modalities** — Phase 5 / 6.
 
