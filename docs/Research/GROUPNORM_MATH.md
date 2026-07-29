@@ -268,12 +268,12 @@ For the Welford mean/variance pass, use `TensorPrimitives` or a manual SIMD Welf
 
 ### PyTorch Native (C++/CUDA)
 
-- **Source**: `aten/src/ATen/native/cuda/group_norm_kernel.cu`
+- **Source**: `aten/src/ATen/src/HartsyInference.Cuda/Kernels/group_norm_kernel.cu`
 - **Algorithm**: Welford online algorithm via `WelfordData<T_ACC, int64_t>` and `WelfordOps`
 - **Accumulation**: `acc_type<T, true>` maps `half -> float`, `bfloat16 -> float`
 - **Dispatch**: `AT_DISPATCH_FLOATING_TYPES_AND_HALF` covers float32, float64, float16, bfloat16
 - **Affine**: Fused into `ComputeFusedParamsCUDAKernel` which precomputes `a = gamma * rstd` and `b = beta - mean * a` so the normalize+scale+shift is a single FMA: `y = a * x + b`
-- **URL**: [PyTorch group_norm_kernel.cu](https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/cuda/group_norm_kernel.cu)
+- **URL**: [PyTorch group_norm_kernel.cu](https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/src/HartsyInference.Cuda/Kernels/group_norm_kernel.cu)
 
 ### NVIDIA Apex (CUDA, NHWC-optimized)
 
@@ -364,7 +364,7 @@ For the Welford mean/variance pass, use `TensorPrimitives` or a manual SIMD Welf
 - [Group Normalization (Wu & He, 2018) — arXiv](https://arxiv.org/abs/1803.08494)
 - [Group Normalization — ECCV 2018 PDF](https://openaccess.thecvf.com/content_ECCV_2018/papers/Yuxin_Wu_Group_Normalization_ECCV_2018_paper.pdf)
 - [PyTorch GroupNorm documentation](https://docs.pytorch.org/docs/stable/generated/torch.nn.GroupNorm.html)
-- [PyTorch group_norm_kernel.cu source](https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/cuda/group_norm_kernel.cu)
+- [PyTorch group_norm_kernel.cu source](https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/src/HartsyInference.Cuda/Kernels/group_norm_kernel.cu)
 - [PyTorch Numerical Accuracy notes](https://docs.pytorch.org/docs/stable/notes/numerical_accuracy.html)
 - [NVIDIA Apex GroupNorm (NHWC + SiLU fusion)](https://github.com/NVIDIA/apex/blob/master/apex/contrib/group_norm/group_norm.py)
 - [channels-last-groupnorm (fused NHWC kernels)](https://github.com/latentCall145/channels-last-groupnorm)

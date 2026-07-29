@@ -16,14 +16,14 @@
   </ItemGroup>
 
   <!-- SPIR-V kernel files shipped as content, loaded from disk at runtime.
-       Built from native/vulkan/shaders/*.comp.glsl by native/vulkan/build.sh.
+       Built from Shaders/*.comp.glsl by Shaders/build.sh into Spirv/.
        The build is invoked manually (not as MSBuild target) because not every
        dev box has glslangValidator installed; CI handles compilation. -->
   <ItemGroup>
     <!-- One item, two jobs: copy SPIR-V next to THIS project's own output under Spirv/
          (local build/tests), AND pack it into the nupkg under spirv/.
          HartsyInference.Vulkan.targets then copies it into a *consumer's* output. -->
-    <Content Include="..\..\native\vulkan\build\*.spv" Link="Spirv\%(Filename)%(Extension)" Pack="true" PackagePath="spirv/">
+    <Content Include="Spirv\*.spv" Pack="true" PackagePath="spirv/">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <!-- Ship the copy logic. build/ = direct package refs; buildTransitive/ = via meta-package. -->

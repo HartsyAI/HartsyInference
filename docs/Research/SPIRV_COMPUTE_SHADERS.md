@@ -31,8 +31,8 @@ glslangValidator \
     -V \
     -O \
     --quiet \
-    -o native/vulkan/build/groupnorm_silu.spv \
-    native/vulkan/shaders/groupnorm_silu.comp.glsl
+    -o src/HartsyInference.Vulkan/Spirv/groupnorm_silu.spv \
+    src/HartsyInference.Vulkan/Shaders/groupnorm_silu.comp.glsl
 ```
 
 Flags:
@@ -44,7 +44,7 @@ Flags:
 - `-g` — keep debug info (use for `spirv-dis` debugging only; remove for ship)
 - `-DNAME=value` — preprocessor define (we use this for backend variants like `-DUSE_FP16=1`)
 
-### Build script (`native/vulkan/build.sh`)
+### Build script (`src/HartsyInference.Vulkan/Shaders/build.sh`)
 
 ```bash
 #!/usr/bin/env bash
@@ -60,14 +60,14 @@ for f in shaders/*.comp.glsl; do
 done
 ```
 
-Mirror the CUDA pattern in `native/cuda/build.sh`. The MSBuild target in `HartsyInference.Vulkan.csproj` invokes this script during build and copies `.spv` files into the package's `Spirv/` content directory.
+Mirror the CUDA pattern in `src/HartsyInference.Cuda/Kernels/build.sh`. The MSBuild target in `HartsyInference.Vulkan.csproj` invokes this script during build and copies `.spv` files into the package's `Spirv/` content directory.
 
 ### MSBuild integration
 
 ```xml
 <Target Name="BuildSpirv" BeforeTargets="BeforeBuild" Condition="'$(SkipNativeBuild)' != 'true'">
-    <Exec Command="bash $(MSBuildProjectDirectory)/../../native/vulkan/build.sh"
-          WorkingDirectory="$(MSBuildProjectDirectory)/../../native/vulkan/" />
+    <Exec Command="bash $(MSBuildProjectDirectory)/../../src/HartsyInference.Vulkan/Shaders/build.sh"
+          WorkingDirectory="$(MSBuildProjectDirectory)/../../src/HartsyInference.Vulkan/Shaders/" />
 </Target>
 <ItemGroup>
     <Content Include="..\..\native\vulkan\build\*.spv" Link="Spirv\%(Filename)%(Extension)">
@@ -270,7 +270,7 @@ Equivalent to PTX `add.rn.f16x2`. Useful for elementwise add/scale/silu where th
 
 ## Kernel Catalog
 
-Every kernel in [src/HartsyInference.Cuda/Ptx/](../../src/HartsyInference.Cuda/Ptx/) needs a Vulkan counterpart in `native/vulkan/shaders/`. The mapping:
+Every kernel in [src/HartsyInference.Cuda/Ptx/](../../src/HartsyInference.Cuda/Ptx/) needs a Vulkan counterpart in `src/HartsyInference.Vulkan/Shaders/`. The mapping:
 
 | CUDA PTX file | GLSL shader | Notes |
 |---|---|---|

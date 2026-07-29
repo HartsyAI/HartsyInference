@@ -29,7 +29,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _stepCacheRelL1F32;
     private readonly nint _stepCacheRelL1F16;
 
-    // Optional: W8A8 IMMA chain kernels (w8a8.ptx, native/cuda/dequant) — per-row INT8 activation quant +
+    // Optional: W8A8 IMMA chain kernels (w8a8.ptx, src/HartsyInference.Cuda/Kernels/dequant) — per-row INT8 activation quant +
     // int32→F16/F32 dequant epilogue around Int8GemmExecutor. Null when not compiled.
     private readonly CudaModule? _w8a8Module;
     private readonly nint _w8a8QuantRowwiseF16;
@@ -37,7 +37,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _w8a8DequantBiasF16;
     private readonly nint _w8a8DequantBiasF32;
 
-    // Optional: SageAttention-v1 INT8 flash attention (sage_attn_int8.ptx, native/cuda/attention). Null when
+    // Optional: SageAttention-v1 INT8 flash attention (sage_attn_int8.ptx, src/HartsyInference.Cuda/Kernels/attention). Null when
     // not compiled — CudaBackend.ScaledDotProductAttention gates on HasSageAttentionKernels and falls through.
     private readonly CudaModule? _sageAttnModule;
     private readonly nint _sageKMeanF32;
@@ -444,7 +444,7 @@ public sealed class CudaKernels : IDisposable
         _broadcastAddModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "broadcast_add_f32.ptx"));
         _broadcastAddF32 = _broadcastAddModule.GetFunction("broadcast_add_f32");
 
-        // Optional module: present only after native/cuda/dit/build.sh has compiled stepcache.cu on a
+        // Optional module: present only after src/HartsyInference.Cuda/Kernels/dit/build.sh has compiled stepcache.cu on a
         // CUDA-toolkit box. Absence is not an error — the step-cache feature reports unsupported instead.
         string stepCachePath = Path.Combine(ptxDir, "stepcache.ptx");
         if (File.Exists(stepCachePath))
@@ -454,7 +454,7 @@ public sealed class CudaKernels : IDisposable
             _stepCacheRelL1F16 = _stepCacheModule.GetFunction("stepcache_rel_l1_f16");
         }
 
-        // Optional module: W8A8 IMMA chain (native/cuda/dequant/w8a8.cu). Absence is not an error.
+        // Optional module: W8A8 IMMA chain (src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu). Absence is not an error.
         string w8a8Path = Path.Combine(ptxDir, "w8a8.ptx");
         if (File.Exists(w8a8Path))
         {
@@ -465,7 +465,7 @@ public sealed class CudaKernels : IDisposable
             _w8a8DequantBiasF32 = _w8a8Module.GetFunction("w8a8_dequant_bias_f32");
         }
 
-        // Optional module: SageAttention INT8 (native/cuda/attention/build.sh). Absence is not an error.
+        // Optional module: SageAttention INT8 (src/HartsyInference.Cuda/Kernels/attention/build.sh). Absence is not an error.
         string sageAttnPath = Path.Combine(ptxDir, "sage_attn_int8.ptx");
         if (File.Exists(sageAttnPath))
         {
@@ -1633,7 +1633,7 @@ public sealed class CudaKernels : IDisposable
     public void LaunchAdd(ulong output, ulong a, ulong b, int count, nint stream)
         => LaunchBinaryImpl(_addF32, output, a, b, count, stream);
 
-    /// <summary>Whether the optional stepcache.ptx module was found and loaded (see native/cuda/dit/stepcache.cu).</summary>
+    /// <summary>Whether the optional stepcache.ptx module was found and loaded (see src/HartsyInference.Cuda/Kernels/dit/stepcache.cu).</summary>
     public bool HasStepCacheKernels => _stepCacheModule is not null;
 
     /// <summary>Launches the feature-cache gate reduction: sums[0] += Σ|a−b|, sums[1] += Σ|b| over count elements.</summary>
@@ -1662,7 +1662,7 @@ public sealed class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Whether the optional w8a8.ptx module was found and loaded (native/cuda/dequant/w8a8.cu).</summary>
+    /// <summary>Whether the optional w8a8.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu).</summary>
     public bool HasW8A8Kernels => _w8a8Module is not null;
 
     /// <summary>W8A8 prologue — per-row dynamic INT8 quant: x[rows,cols] → q8 + rowScale[rows] (256-thread block per row).</summary>
@@ -1695,7 +1695,7 @@ public sealed class CudaKernels : IDisposable
             grid, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Whether the optional sage_attn_int8.ptx module was found and loaded (native/cuda/attention).</summary>
+    /// <summary>Whether the optional sage_attn_int8.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/attention).</summary>
     public bool HasSageAttentionKernels => _sageAttnModule is not null;
 
     /// <summary>SageAttention prologue 1/3 — K per-channel mean over the sequence: kmean[b,h,d]. Grid (H,B), block 128.</summary>

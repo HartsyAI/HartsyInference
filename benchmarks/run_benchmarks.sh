@@ -181,7 +181,7 @@ echo "[1/6] Capturing hardware + software fingerprints..."
     echo "## PTX SHA-256"
     find src/HartsyInference.Cuda/Ptx -name '*.ptx' 2>/dev/null | sort | xargs -r sha256sum
     echo "## Native CUDA SHA-256"
-    find native/cuda -name '*.cu' 2>/dev/null | sort | xargs -r sha256sum
+    find src/HartsyInference.Cuda/Kernels -name '*.cu' 2>/dev/null | sort | xargs -r sha256sum
 } > "$STAGING/digests.txt"
 
 # ── 2. C# build (Release) ───────────────────────────────────────────────────

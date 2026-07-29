@@ -151,7 +151,7 @@ repro-then-fixed verification):**
 ## glm4 bug (2) root-caused + fixed (2026-07-22, follow-up session)
 
 **Root cause**: `IBackend.ApplyRopeInterleaved` (and its CUDA kernel `lm_rope_interleaved_f32`,
-`native/cuda/lm/lm_f32.cu`) always rotated all `headDim/2` adjacent pairs — it had no `rotaryDim` parameter at
+`src/HartsyInference.Cuda/Kernels/lm/lm_f32.cu`) always rotated all `headDim/2` adjacent pairs — it had no `rotaryDim` parameter at
 all, unlike the split-half sibling `ApplyRopeSingle` which already did. GLM-4 uses **partial rotary**
 (`partial_rotary_factor=0.5`, confirmed against HF `transformers`' `Glm4RotaryEmbedding` and llama.cpp's
 `glm4.cpp`/`llama-model.cpp` — `LLM_ARCH_GLM4` resolves to `LLAMA_ROPE_TYPE_NORM`, i.e. interleaved/GPT-J

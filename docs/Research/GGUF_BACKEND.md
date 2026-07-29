@@ -131,11 +131,11 @@ GPU-side dequant for the four most-shipped GGUF quant types. CUDA C source compi
 
 ### Files shipped
 
-- [`native/cuda/dequant/dequant_q8_0_to_f16.cu`](../../native/cuda/dequant/dequant_q8_0_to_f16.cu) — 32-element block, 1 thread per element.
-- [`native/cuda/dequant/dequant_q4_k_to_f16.cu`](../../native/cuda/dequant/dequant_q4_k_to_f16.cu) — 256-element super-block, 256 threads, on-device `get_scale_min_k4` device helper.
-- [`native/cuda/dequant/dequant_q5_k_to_f16.cu`](../../native/cuda/dequant/dequant_q5_k_to_f16.cu) — same shape as Q4_K plus high-bit bookkeeping.
-- [`native/cuda/dequant/dequant_q6_k_to_f16.cu`](../../native/cuda/dequant/dequant_q6_k_to_f16.cu) — 128 threads × 4 elements per thread (matches the canonical ggml unrolled access pattern).
-- [`native/cuda/dequant/build.sh`](../../native/cuda/dequant/build.sh) — `nvcc -ptx -arch=sm_70` builds + installs into `src/HartsyInference.Cuda/Ptx/`. SM 7.0 covers Volta and later (RTX 20-series onward).
+- [`src/HartsyInference.Cuda/Kernels/dequant/dequant_q8_0_to_f16.cu`](../../src/HartsyInference.Cuda/Kernels/dequant/dequant_q8_0_to_f16.cu) — 32-element block, 1 thread per element.
+- [`src/HartsyInference.Cuda/Kernels/dequant/dequant_q4_k_to_f16.cu`](../../src/HartsyInference.Cuda/Kernels/dequant/dequant_q4_k_to_f16.cu) — 256-element super-block, 256 threads, on-device `get_scale_min_k4` device helper.
+- [`src/HartsyInference.Cuda/Kernels/dequant/dequant_q5_k_to_f16.cu`](../../src/HartsyInference.Cuda/Kernels/dequant/dequant_q5_k_to_f16.cu) — same shape as Q4_K plus high-bit bookkeeping.
+- [`src/HartsyInference.Cuda/Kernels/dequant/dequant_q6_k_to_f16.cu`](../../src/HartsyInference.Cuda/Kernels/dequant/dequant_q6_k_to_f16.cu) — 128 threads × 4 elements per thread (matches the canonical ggml unrolled access pattern).
+- [`src/HartsyInference.Cuda/Kernels/dequant/build.sh`](../../src/HartsyInference.Cuda/Kernels/dequant/build.sh) — `nvcc -ptx -arch=sm_70` builds + installs into `src/HartsyInference.Cuda/Ptx/`. SM 7.0 covers Volta and later (RTX 20-series onward).
 - Compiled PTX: `dequant_q8_0_to_f16.ptx`, `dequant_q4_k_to_f16.ptx`, `dequant_q5_k_to_f16.ptx`, `dequant_q6_k_to_f16.ptx` in [`src/HartsyInference.Cuda/Ptx/`](../../src/HartsyInference.Cuda/Ptx/).
 
 ### Wiring

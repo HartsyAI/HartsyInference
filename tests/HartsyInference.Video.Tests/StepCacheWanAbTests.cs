@@ -147,7 +147,7 @@ public class StepCacheWanAbTests
         string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(StepCacheWanAbTests).Assembly.Location)!, "Ptx");
         if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: no Ptx dir: {ptxDir}"); return; }
         Assert.True(File.Exists(Path.Combine(ptxDir, "stepcache.ptx")),
-            "stepcache.ptx missing — the A/B cannot arm; run native/cuda/dit/build.sh.");
+            "stepcache.ptx missing — the A/B cannot arm; run src/HartsyInference.Cuda/Kernels/dit/build.sh.");
 
         Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE", null);
         Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE_CAP", null);

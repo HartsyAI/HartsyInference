@@ -39,13 +39,11 @@ HartsyInference/
 ├── CLAUDE.md                          ← You are here
 ├── docs/
 │   ├── CODE_STYLE.md                  Mandatory code style
-│   ├── Design/                        Architecture and design documents
 │   ├── Research/                      Research notes (read before implementing)
 │   ├── Checklists/                    Model status, roadmap & troubleshooting
 │   └── Agents/                        AGENTS.md (core) + specialized agent files
-├── src/                               Source code (one folder per NuGet package)
+├── src/                               Source code (one folder per NuGet package; GPU kernel sources in HartsyInference.Cuda/Kernels + HartsyInference.Vulkan/Shaders)
 ├── tests/                             Test projects
 ├── samples/                           Example applications
-├── benchmarks/                        Performance benchmarks
-└── native/cuda/                       CUDA C++ source for PTX generation
+└── benchmarks/                        Performance benchmarks
 ```

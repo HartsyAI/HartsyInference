@@ -9,19 +9,19 @@ self-attn ≈ 963 MB → ~4 GB HBM traffic/call). The existing `FlashAttention` 
 `nvrtc_compile.c` was patched to accept include dirs (argv[4..] → `--include-path=`). A WMMA TF32 test kernel now
 compiles to PTX with real tensor-core ops (`wmma.mma.sync.aligned.row.col.m16n16k8.f32.tf32.tf32.f32`). Recipe:
 ```bash
-cc -O2 -o native/cuda/nvrtc_compile native/cuda/nvrtc_compile.c -ldl   # rebuild helper (once, after the patch)
+cc -O2 -o src/HartsyInference.Cuda/Kernels/nvrtc_compile src/HartsyInference.Cuda/Kernels/nvrtc_compile.c -ldl   # rebuild helper (once, after the patch)
 TINC="/home/hartsy/Desktop/Swarm/SwarmUI.not too old/dlbackend/ComfyUI/venv/lib/python3.12/site-packages/triton/backends/nvidia/include"
-LD_LIBRARY_PATH=~/.local/lib/cuda13 native/cuda/nvrtc_compile in.cu out.ptx compute_80 "$TINC"
+LD_LIBRARY_PATH=~/.local/lib/cuda13 src/HartsyInference.Cuda/Kernels/nvrtc_compile in.cu out.ptx compute_80 "$TINC"
 ```
 `$TINC` is a complete CUDA header set (`mma.h`, `cuda_fp16.h`, `cooperative_groups`, `crt/`). TF32 WMMA fragment sizes
 are 16×16×8 (`wmma::precision::tf32`); cast fragment elements with `wmma::__float_to_tf32(...)` before `mma_sync`.
 
 ## Build reality (CRITICAL)
-- **No `nvcc` on this box.** The `native/cuda/*/build.sh` scripts (which call `nvcc -ptx`) are misleading.
-- Real recipe: the committed helper `native/cuda/nvrtc_compile` (dlopens `libnvrtc.so`):
+- **No `nvcc` on this box.** The `src/HartsyInference.Cuda/Kernels/*/build.sh` scripts (which call `nvcc -ptx`) are misleading.
+- Real recipe: the committed helper `src/HartsyInference.Cuda/Kernels/nvrtc_compile` (dlopens `libnvrtc.so`):
   ```bash
   export LD_LIBRARY_PATH=~/.local/lib/cuda13        # libnvrtc.so.13
-  cd native/cuda/lm
+  cd src/HartsyInference.Cuda/Kernels/lm
   ../nvrtc_compile flash_attn_v2_f32.cu flash_attn_v2_f32.ptx compute_80
   cp flash_attn_v2_f32.ptx ../../../src/HartsyInference.Cuda/Ptx/flash_attn_v2_f32.ptx
   ```
@@ -57,7 +57,7 @@ in M2); `S=Q·Kᵀ` (WMMA TF32, F32 accum); online-softmax update `m/l`, rescale
 naive `FlashAttention` paths as oracle + fallback for masked (Matrix-Game block-causal), GQA (`kvGroup>1`), BF16, other-D.
 
 ## Integration
-1. `native/cuda/lm/flash_attn_v2_f32.cu` (entry `lm_flash_attn_v2(out,Q,K,V,B,H,Sq,Skv,D,scale,useF16)`); add to
+1. `src/HartsyInference.Cuda/Kernels/lm/flash_attn_v2_f32.cu` (entry `lm_flash_attn_v2(out,Q,K,V,B,H,Sq,Skv,D,scale,useF16)`); add to
    `lm/build.sh` `KERNELS=()`; build via nvrtc; land `Ptx/flash_attn_v2_f32.ptx`.
 2. `CudaKernels.cs`: module load + `GetFunction` (mirror ~L389) + `LaunchFlashAttentionV2` wrapper (mirror
    `LaunchFlashAttention` ~L1230), grid/block/sharedBytes; call `cuFuncSetAttribute` once at load if >48 KB.
@@ -85,7 +85,7 @@ Wan-gated F16 opt-in. Related: [`BENCHMARKING.md`](BENCHMARKING.md),
 `../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md`.
 
 ## Status 2026-07-03: M1 kernel CORRECT, needs M2 tuning
-`native/cuda/lm/flash_attn_v2_tf32.cu` written, compiles (WMMA tf32 for both GEMMs), fully wired
+`src/HartsyInference.Cuda/Kernels/lm/flash_attn_v2_tf32.cu` written, compiles (WMMA tf32 for both GEMMs), fully wired
 (`LaunchFlashAttentionV2Tf32`, `CudaBackend.FlashAttentionV2`, dispatch behind `HARTSY_SDPA_V2=1`,
 `cuFuncSetAttribute` 96KB). **Verified NUMERICALLY CORRECT** on real Wan-1.3B T2V (coherent frames, mean 151).
 But **SLOWER than baseline: 54.7s vs 23.65s** — the M1 layout keeps the O accumulator + K/V/S in shared memory

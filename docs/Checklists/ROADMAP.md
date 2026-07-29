@@ -48,6 +48,10 @@ assumed (see the profiling pitfalls in `TROUBLESHOOTING.md`).
   `IDiscreteVideoTokenizer` (Cosmos), sparse video attention (Wan/LTX — measure-then-design).
 - [ ] **Vision GPU-native ops:** `MaxPool2D`, `Conv2dDepthwise` (currently CPU); JPEG/WebP decoders.
 - [ ] **3D residuals:** GPU marching cubes; DINO per-op fusion.
+- [ ] **Kernel-source hygiene (maintainability):** ~28 shipped CUDA kernels (`softmax`, `groupnorm`,
+  `layernorm`, `geglu`, `cast_*`, `elementwise_*`, `transpose`, `broadcast_add`, `spatial`) are hand-written
+  PTX with no `.cu` source. Backfill a `.cu` for each opportunistically (verify PTX parity, then delete the
+  hand-PTX); keep `hgemm_mma_sm80` hand-authored (intentional MMA). See `src/HartsyInference.Cuda/Kernels/README.md`.
 
 ## 3. AMD / ROCm + cross-vendor (Vulkan) support
 

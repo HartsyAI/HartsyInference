@@ -21,7 +21,7 @@ namespace HartsyInference.Video.Tests;
 /// reference) on a REAL captured Kandinsky5 Linear operand pair — not synthetic data, since stage 4a/4b
 /// already found real checkpoints are 3-5x worse than synthetic. The captured operands come from
 /// CudaBackend.CaptureW8A8Operands, a test-only hook fired once from inside a real ForwardVideo pass.
-/// Quantization formulas mirror native/cuda/dequant/w8a8.cu (activation: per-row absmax/127, round,
+/// Quantization formulas mirror src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu (activation: per-row absmax/127, round,
 /// clamp[-127,127]) and CudaBackend.QuantizeWeightForW8A8 (weight: per-output-channel absmax/127) exactly,
 /// so the ablation measures the SAME quantization the real kernels perform, just staged separately.
 /// Run explicitly:
@@ -837,7 +837,7 @@ public sealed unsafe class Kandinsky5W8A8OperandAblationTests
         }
     }
 
-    /// <summary>Mirrors native/cuda/dequant/w8a8.cu w8a8_quant_rowwise_{f16,f32}: per-row absmax/127
+    /// <summary>Mirrors src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu w8a8_quant_rowwise_{f16,f32}: per-row absmax/127
     /// symmetric quant, round-to-nearest, clamp[-127,127], then immediately dequantized back to F32
     /// (fake-quant) so the error can be measured through a plain F32 GEMM.</summary>
     /// <summary>Fake-quant relL2 with vs without SmoothQuant smoothing for one Linear's real captured

@@ -446,16 +446,14 @@ Each package is one folder under `src/`; the meta **HartsyInference** package pu
 HartsyInference/
 ├── CLAUDE.md                  AI agent dispatcher
 ├── README.md                  ← You are here
-├── src/                       Source code (one folder per NuGet package)
+├── src/                       Source code (one folder per NuGet package; GPU kernel sources in HartsyInference.Cuda/Kernels + HartsyInference.Vulkan/Shaders)
 ├── tests/                     Test projects
 ├── samples/                   Example applications
 ├── benchmarks/                Performance benchmarks
-├── docs/
-│   ├── Design/                Architecture and design documents
-│   ├── Research/              Technical research notes
-│   ├── Checklists/            Phase progress tracking
-│   └── Agents/                AI agent instruction files
-└── native/cuda/               CUDA C++ source for PTX generation
+└── docs/
+    ├── Research/              Technical research notes
+    ├── Checklists/            Model status, roadmap & troubleshooting
+    └── Agents/                AI agent instruction files
 ```
 
 </details>

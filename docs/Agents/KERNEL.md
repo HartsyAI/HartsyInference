@@ -20,7 +20,7 @@ CudaDriverApi.cuLaunchKernel(func, grid,1,1, 256,1,1, 0, stream, (nint)args, 0).
 void** bad = stackalloc void*[] { &this.OutputPtr };   // unstable address → corruption
 ```
 
-- `.cu` sources live in `native/cuda/{attention,conv,dit,lm,dequant,vision,wan,audio}/`; compile
+- `.cu` sources live in `src/HartsyInference.Cuda/Kernels/{attention,conv,dit,lm,dequant,vision,wan,audio}/`; compile
   `nvcc -ptx -arch=compute_80` (target `sm_80` minimum) and **ship the `.ptx` as a content file**
   (`<Content Include="Ptx\*.ptx" CopyToOutputDirectory="PreserveNewest" .../>`), loaded at runtime via
   `CudaModule.LoadFromFile` → `GetFunction` — never an embedded resource. Store each handle as an `nint`

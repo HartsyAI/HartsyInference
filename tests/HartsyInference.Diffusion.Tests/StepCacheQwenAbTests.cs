@@ -117,7 +117,7 @@ public class StepCacheQwenAbTests
 
         // The A/B is meaningless if the knob can't arm — fail loud rather than silently measuring baseline twice.
         Assert.True(File.Exists(Path.Combine(ptxDir, "stepcache.ptx")),
-            "stepcache.ptx missing — run native/cuda/dit/build.sh before the A/B.");
+            "stepcache.ptx missing — run src/HartsyInference.Cuda/Kernels/dit/build.sh before the A/B.");
 
         // Guard against ambient knobs polluting the baseline (e.g. leftovers from a Swarm launcher env).
         Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE", null);

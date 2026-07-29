@@ -196,7 +196,7 @@ public sealed class CudaBackend : IBackend
 
     /// <summary>Sets (or replaces) the SmoothQuant per-input-channel scale s[K] for <paramref name="weight"/>: X_hat = X/s, W_hat = W*s.</summary>
     /// <remarks>Product-preserving pre-quantization — migrates activation outlier difficulty into the weight (see
-    /// native/cuda/dequant/w8a8.cu's invScale param). Must be called BEFORE the weight's first W8A8 use to take
+    /// src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu's invScale param). Must be called BEFORE the weight's first W8A8 use to take
     /// effect on the initial quantization; calling it after evicts the already-cached quantized weight so the NEXT
     /// use re-quantizes smoothed (safe, just a re-pay of the one-time quant cost). <paramref name="s"/> length must
     /// equal the weight's K (in-dim).</remarks>
@@ -2176,7 +2176,7 @@ public sealed class CudaBackend : IBackend
     public bool SupportsF16Activations => true;
 
     /// <summary>True once the optional stepcache.ptx module is compiled/shipped; the step-cache stays disabled on CUDA without it.</summary>
-    /// <remarks>Built via native/cuda/dit/build.sh.</remarks>
+    /// <remarks>Built via src/HartsyInference.Cuda/Kernels/dit/build.sh.</remarks>
     public bool SupportsDeviceStepCacheGate => _kernels is not null && _kernels.HasStepCacheKernels;
 
     /// <summary>Marks a tensor's device activation as surviving <see cref="FreeActivations()"/> (see IBackend doc).</summary>
@@ -4883,7 +4883,7 @@ public sealed class CudaBackend : IBackend
         return int.TryParse(v, out int n) && n > 0 ? n : 8192;   // measured: 1.11x at 8192, 1.15x at 12288, parity at 4096 (3060)
     }
 
-    /// <summary>SageAttention-v1 INT8 flash attention (native/cuda/attention/sage_attn_int8.cu).</summary>
+    /// <summary>SageAttention-v1 INT8 flash attention (src/HartsyInference.Cuda/Kernels/attention/sage_attn_int8.cu).</summary>
     /// <remarks>Four launches: K channel-mean → Q per-row INT8 quant (attn scale folded into the row scales) →
     /// (K−mean) per-row INT8 quant (the softmax-invariant smoothing that absorbs the DiT outlier channels) →
     /// fused INT8-QK^T flash loop with online softmax and TF32 PV. Workspace: Q8/K8 mirrors (¼ the F32 bytes),
@@ -5779,7 +5779,7 @@ public sealed class CudaBackend : IBackend
         EnsureKernels();
         if (!_kernels!.HasStepCacheKernels)
             throw new NotSupportedException(
-                "stepcache.ptx not present — run native/cuda/dit/build.sh and gate on SupportsDeviceStepCacheGate.");
+                "stepcache.ptx not present — run src/HartsyInference.Cuda/Kernels/dit/build.sh and gate on SupportsDeviceStepCacheGate.");
 
         ulong pA = 0, pB = 0, pSums = 0;
         try

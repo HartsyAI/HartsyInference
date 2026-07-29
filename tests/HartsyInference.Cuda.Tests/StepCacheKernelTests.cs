@@ -56,7 +56,7 @@ public sealed unsafe class StepCacheKernelTests
         }
 
         Assert.True(File.Exists(Path.Combine(PtxDir(), "stepcache.ptx")),
-            "stepcache.ptx missing from Ptx dir — run native/cuda/dit/build.sh");
+            "stepcache.ptx missing from Ptx dir — run src/HartsyInference.Cuda/Kernels/dit/build.sh");
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         Assert.True(cuda.SupportsDeviceStepCacheGate);
     }
