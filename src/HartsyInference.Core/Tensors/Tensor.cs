@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Memory;
@@ -268,6 +269,47 @@ public sealed unsafe class Tensor : IDisposable
             $"Direct tensor copy from {Device} to {targetDevice} is not supported. Use IBackend.CopyTo for cross-device transfers.");
     }
 
+    /// <summary>Element count at or above which elementwise dtype conversion is split across cores. Checkpoint load runs
+    /// thousands of tiny casts (biases, norms, scalars) where the <see cref="Parallel.For"/> dispatch — measured at 22µs
+    /// for 16 chunks on a 16-core box — costs more than the whole conversion. At 2^20 even the cheapest conversion here
+    /// (BF16→F32) is ~500µs serial, so the dispatch is under 5% and the win is 4-6×; below the threshold the code path is
+    /// byte-for-byte the pre-existing serial loop.</summary>
+    private const long ParallelCastMinElements = 1L << 20;
+
+    /// <summary>Minimum elements per chunk, so a barely-over-threshold cast fans out to a few fat slices rather than
+    /// <see cref="Environment.ProcessorCount"/> slivers that cost more to dispatch than to run.</summary>
+    private const long ParallelCastChunkElements = 1L << 18;
+
+    /// <summary>Splits <paramref name="count"/> elements into per-core chunks and invokes <paramref name="body"/>(start, length)
+    /// on each.</summary>
+    /// <remarks>Every elementwise conversion below is a pure <c>dst[i] = f(src[i])</c> with no loop-carried state, so
+    /// chunking produces bit-identical output to the serial loop. The <see cref="AggregateException"/> unwrap preserves the
+    /// serial contract that an unsupported dtype pair surfaces as <c>HartsyInferenceException</c>.</remarks>
+    private static void ParallelChunks(long count, Action<long, long> body)
+    {
+        int chunks = (int)Math.Min(Environment.ProcessorCount, Math.Max(1L, count / ParallelCastChunkElements));
+        if (chunks <= 1)
+        {
+            body(0, count);
+            return;
+        }
+        long perChunk = (count + chunks - 1) / chunks;
+        try
+        {
+            Parallel.For(0, chunks, c =>
+            {
+                long start = c * perChunk;
+                long length = Math.Min(perChunk, count - start);
+                if (length > 0)
+                    body(start, length);
+            });
+        }
+        catch (AggregateException ex) when (ex.InnerException is not null)
+        {
+            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+        }
+    }
+
     /// <summary>Creates a copy cast to the specified dtype. Quantized types require GgufDequantizer.</summary>
     public Tensor CastTo(DType targetDtype)
     {
@@ -289,129 +331,21 @@ public sealed unsafe class Tensor : IDisposable
             // GEMM alpha logic sees an ordinary unscaled tensor. Scale is 1.0 for everything non-fp8_scaled,
             // making the multiply a no-op on plain checkpoints.
             float fp8Scale = Fp8ScaleFactor;
+            void* dst = result.DataPointer;
 
-            if (DType == DType.F32 && targetDtype == DType.F16)
+            if (count >= ParallelCastMinElements)
             {
-                ReadOnlySpan<float> src = new ReadOnlySpan<float>(ptr, (int)count);
-                Span<Half> dst = new Span<Half>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = (Half)src[i];
-            }
-            else if (DType == DType.F16 && targetDtype == DType.F32)
-            {
-                ReadOnlySpan<Half> src = new ReadOnlySpan<Half>(ptr, (int)count);
-                Span<float> dst = new Span<float>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = (float)src[i];
-            }
-            else if (DType == DType.F32 && targetDtype == DType.BF16)
-            {
-                ReadOnlySpan<float> src = new ReadOnlySpan<float>(ptr, (int)count);
-                Span<ushort> dst = new Span<ushort>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                {
-                    // BF16: truncate lower 16 bits of F32
-                    uint bits = BitConverter.SingleToUInt32Bits(src[i]);
-                    dst[i] = (ushort)(bits >> 16);
-                }
-            }
-            else if (DType == DType.BF16 && targetDtype == DType.F32)
-            {
-                ReadOnlySpan<ushort> src = new ReadOnlySpan<ushort>(ptr, (int)count);
-                Span<float> dst = new Span<float>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = BitConverter.UInt32BitsToSingle((uint)src[i] << 16);
-            }
-            else if (DType == DType.F8E4M3 && targetDtype == DType.F32)
-            {
-                ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(ptr, (int)count);
-                Span<float> dst = new Span<float>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = Fp8E4M3ToFloat(src[i]) * fp8Scale;
-            }
-            else if (DType == DType.F32 && targetDtype == DType.F8E4M3)
-            {
-                ReadOnlySpan<float> src = new ReadOnlySpan<float>(ptr, (int)count);
-                Span<byte> dst = new Span<byte>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = FloatToFp8E4M3(src[i]);
-            }
-            else if (DType == DType.F8E4M3 && targetDtype == DType.F16)
-            {
-                ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(ptr, (int)count);
-                Span<Half> dst = new Span<Half>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = (Half)(Fp8E4M3ToFloat(src[i]) * fp8Scale);
-            }
-            else if (DType == DType.F16 && targetDtype == DType.F8E4M3)
-            {
-                ReadOnlySpan<Half> src = new ReadOnlySpan<Half>(ptr, (int)count);
-                Span<byte> dst = new Span<byte>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = FloatToFp8E4M3((float)src[i]);
-            }
-            else if (DType == DType.F8E5M2 && targetDtype == DType.F32)
-            {
-                ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(ptr, (int)count);
-                Span<float> dst = new Span<float>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = Fp8E5M2ToFloat(src[i]) * fp8Scale;
-            }
-            else if (DType == DType.F32 && targetDtype == DType.F8E5M2)
-            {
-                ReadOnlySpan<float> src = new ReadOnlySpan<float>(ptr, (int)count);
-                Span<byte> dst = new Span<byte>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = FloatToFp8E5M2(src[i]);
-            }
-            else if (DType == DType.BF16 && targetDtype == DType.F8E4M3)
-            {
-                ReadOnlySpan<ushort> src = new ReadOnlySpan<ushort>(ptr, (int)count);
-                Span<byte> dst = new Span<byte>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = FloatToFp8E4M3(BitConverter.UInt32BitsToSingle((uint)src[i] << 16));
-            }
-            else if (DType == DType.BF16 && targetDtype == DType.F16)
-            {
-                // BF16 has F32-range exponent; values |x| > 65504 saturate to ±Inf in F16,
-                // matching the standard half cast.
-                ReadOnlySpan<ushort> src = new ReadOnlySpan<ushort>(ptr, (int)count);
-                Span<Half> dst = new Span<Half>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = (Half)BitConverter.UInt32BitsToSingle((uint)src[i] << 16);
-            }
-            else if (DType == DType.F16 && targetDtype == DType.BF16)
-            {
-                ReadOnlySpan<Half> src = new ReadOnlySpan<Half>(ptr, (int)count);
-                Span<ushort> dst = new Span<ushort>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                {
-                    uint bits = BitConverter.SingleToUInt32Bits((float)src[i]);
-                    dst[i] = (ushort)(bits >> 16);
-                }
-            }
-            else if (DType == DType.F8E4M3 && targetDtype == DType.BF16)
-            {
-                ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(ptr, (int)count);
-                Span<ushort> dst = new Span<ushort>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                {
-                    float f = Fp8E4M3ToFloat(src[i]) * fp8Scale;
-                    dst[i] = (ushort)(BitConverter.SingleToUInt32Bits(f) >> 16);
-                }
-            }
-            else if (DType == DType.F64 && targetDtype == DType.F32)
-            {
-                // PyTorch pickle checkpoints occasionally store parameters as float64 (e.g. LDA heads).
-                ReadOnlySpan<double> src = new ReadOnlySpan<double>(ptr, (int)count);
-                Span<float> dst = new Span<float>(result.DataPointer, (int)count);
-                for (int i = 0; i < (int)count; i++)
-                    dst[i] = (float)src[i];
+                // Both pointers are resolved above: DataPointer can lazily allocate the host buffer, which must not
+                // race across chunk threads. Strides are element sizes — safe here because quantized pairs already threw.
+                DType from = DType, to = targetDtype;
+                nint srcBase = (nint)ptr, dstBase = (nint)dst;
+                long srcStride = from.SizeInBytes, dstStride = to.SizeInBytes;
+                ParallelChunks(count, (start, length) => ConvertRange(from, to,
+                    (void*)(srcBase + (nint)(start * srcStride)), (void*)(dstBase + (nint)(start * dstStride)), length, fp8Scale));
             }
             else
             {
-                throw new HartsyInferenceException(
-                    $"Unsupported dtype conversion: {DType} → {targetDtype}.");
+                ConvertRange(DType, targetDtype, ptr, dst, count, fp8Scale);
             }
 
             return result;
@@ -420,6 +354,135 @@ public sealed unsafe class Tensor : IDisposable
         {
             result.Dispose();
             throw;
+        }
+    }
+
+    /// <summary>Converts <paramref name="count"/> elements from <paramref name="srcPtr"/> into <paramref name="dstPtr"/>.</summary>
+    /// <param name="fp8Scale">Per-tensor fp8_scaled factor folded into the value when decoding an FP8 source.</param>
+    private static void ConvertRange(DType from, DType to, void* srcPtr, void* dstPtr, long count, float fp8Scale)
+    {
+        if (from == DType.F32 && to == DType.F16)
+        {
+            ReadOnlySpan<float> src = new ReadOnlySpan<float>(srcPtr, (int)count);
+            Span<Half> dst = new Span<Half>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = (Half)src[i];
+        }
+        else if (from == DType.F16 && to == DType.F32)
+        {
+            ReadOnlySpan<Half> src = new ReadOnlySpan<Half>(srcPtr, (int)count);
+            Span<float> dst = new Span<float>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = (float)src[i];
+        }
+        else if (from == DType.F32 && to == DType.BF16)
+        {
+            ReadOnlySpan<float> src = new ReadOnlySpan<float>(srcPtr, (int)count);
+            Span<ushort> dst = new Span<ushort>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+            {
+                // BF16: truncate lower 16 bits of F32
+                uint bits = BitConverter.SingleToUInt32Bits(src[i]);
+                dst[i] = (ushort)(bits >> 16);
+            }
+        }
+        else if (from == DType.BF16 && to == DType.F32)
+        {
+            ReadOnlySpan<ushort> src = new ReadOnlySpan<ushort>(srcPtr, (int)count);
+            Span<float> dst = new Span<float>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = BitConverter.UInt32BitsToSingle((uint)src[i] << 16);
+        }
+        else if (from == DType.F8E4M3 && to == DType.F32)
+        {
+            ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(srcPtr, (int)count);
+            Span<float> dst = new Span<float>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = Fp8E4M3ToFloat(src[i]) * fp8Scale;
+        }
+        else if (from == DType.F32 && to == DType.F8E4M3)
+        {
+            ReadOnlySpan<float> src = new ReadOnlySpan<float>(srcPtr, (int)count);
+            Span<byte> dst = new Span<byte>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = FloatToFp8E4M3(src[i]);
+        }
+        else if (from == DType.F8E4M3 && to == DType.F16)
+        {
+            ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(srcPtr, (int)count);
+            Span<Half> dst = new Span<Half>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = (Half)(Fp8E4M3ToFloat(src[i]) * fp8Scale);
+        }
+        else if (from == DType.F16 && to == DType.F8E4M3)
+        {
+            ReadOnlySpan<Half> src = new ReadOnlySpan<Half>(srcPtr, (int)count);
+            Span<byte> dst = new Span<byte>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = FloatToFp8E4M3((float)src[i]);
+        }
+        else if (from == DType.F8E5M2 && to == DType.F32)
+        {
+            ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(srcPtr, (int)count);
+            Span<float> dst = new Span<float>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = Fp8E5M2ToFloat(src[i]) * fp8Scale;
+        }
+        else if (from == DType.F32 && to == DType.F8E5M2)
+        {
+            ReadOnlySpan<float> src = new ReadOnlySpan<float>(srcPtr, (int)count);
+            Span<byte> dst = new Span<byte>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = FloatToFp8E5M2(src[i]);
+        }
+        else if (from == DType.BF16 && to == DType.F8E4M3)
+        {
+            ReadOnlySpan<ushort> src = new ReadOnlySpan<ushort>(srcPtr, (int)count);
+            Span<byte> dst = new Span<byte>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = FloatToFp8E4M3(BitConverter.UInt32BitsToSingle((uint)src[i] << 16));
+        }
+        else if (from == DType.BF16 && to == DType.F16)
+        {
+            // BF16 has F32-range exponent; values |x| > 65504 saturate to ±Inf in F16,
+            // matching the standard half cast.
+            ReadOnlySpan<ushort> src = new ReadOnlySpan<ushort>(srcPtr, (int)count);
+            Span<Half> dst = new Span<Half>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = (Half)BitConverter.UInt32BitsToSingle((uint)src[i] << 16);
+        }
+        else if (from == DType.F16 && to == DType.BF16)
+        {
+            ReadOnlySpan<Half> src = new ReadOnlySpan<Half>(srcPtr, (int)count);
+            Span<ushort> dst = new Span<ushort>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+            {
+                uint bits = BitConverter.SingleToUInt32Bits((float)src[i]);
+                dst[i] = (ushort)(bits >> 16);
+            }
+        }
+        else if (from == DType.F8E4M3 && to == DType.BF16)
+        {
+            ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(srcPtr, (int)count);
+            Span<ushort> dst = new Span<ushort>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+            {
+                float f = Fp8E4M3ToFloat(src[i]) * fp8Scale;
+                dst[i] = (ushort)(BitConverter.SingleToUInt32Bits(f) >> 16);
+            }
+        }
+        else if (from == DType.F64 && to == DType.F32)
+        {
+            // PyTorch pickle checkpoints occasionally store parameters as float64 (e.g. LDA heads).
+            ReadOnlySpan<double> src = new ReadOnlySpan<double>(srcPtr, (int)count);
+            Span<float> dst = new Span<float>(dstPtr, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = (float)src[i];
+        }
+        else
+        {
+            throw new HartsyInferenceException(
+                $"Unsupported dtype conversion: {from} → {to}.");
         }
     }
 
@@ -437,10 +500,16 @@ public sealed unsafe class Tensor : IDisposable
         try
         {
             long count = Shape.ElementCount;
-            ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(DataPointer, (int)count);
-            Span<Half> dst = new Span<Half>(result.DataPointer, (int)count);
-            for (int i = 0; i < (int)count; i++)
-                dst[i] = (Half)(Fp8E4M3ToFloat(src[i]) * scale);
+            nint srcBase = (nint)DataPointer, dstBase = (nint)result.DataPointer;
+            if (count >= ParallelCastMinElements)
+            {
+                ParallelChunks(count, (start, length) =>
+                    DequantFp8E4M3ScaledToF16Range((byte*)(srcBase + (nint)start), (Half*)(dstBase + (nint)(start * 2)), length, scale));
+            }
+            else
+            {
+                DequantFp8E4M3ScaledToF16Range((byte*)srcBase, (Half*)dstBase, count, scale);
+            }
             return result;
         }
         catch
@@ -448,6 +517,14 @@ public sealed unsafe class Tensor : IDisposable
             result.Dispose();
             throw;
         }
+    }
+
+    private static void DequantFp8E4M3ScaledToF16Range(byte* srcPtr, Half* dstPtr, long count, float scale)
+    {
+        ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(srcPtr, (int)count);
+        Span<Half> dst = new Span<Half>(dstPtr, (int)count);
+        for (int i = 0; i < (int)count; i++)
+            dst[i] = (Half)(Fp8E4M3ToFloat(src[i]) * scale);
     }
 
     /// <summary>Computes the total byte size for a tensor of the given shape and dtype.</summary>

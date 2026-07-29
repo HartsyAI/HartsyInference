@@ -443,15 +443,113 @@ public static unsafe class CheckpointConvertUtils
         Tensor f32 = w.CastTo(DType.F32);        // BF16/F16 → fresh F32 (source unmodified)
         long n = f32.ElementCount;
         float* p = (float*)f32.DataPointer;
-        float absmax = 0f;
-        for (long i = 0; i < n; i++) { float a = MathF.Abs(p[i]); if (a > absmax) absmax = a; }
+        float absmax = AbsMax(p, n);
         float scale = absmax > 0f ? absmax / 448f : 1f;
         float inv = 1f / scale;
-        for (long i = 0; i < n; i++) p[i] *= inv;
+        ScaleInPlace(p, n, inv);
         Tensor fp8 = f32.CastTo(DType.F8E4M3);
         f32.Dispose();
         fp8.Fp8ScaleFactor = scale;
         return fp8;
+    }
+
+    /// <summary>Element count at or above which the fp8 absmax/scale passes fan out across cores. Once vectorized these
+    /// passes are memory-bound, so a <see cref="Parallel.For"/> dispatch (measured at 22µs for 16 chunks on this box) only
+    /// pays for itself on a fairly large buffer: the measured crossover is 2^19 elements (vector-serial 91µs vs parallel
+    /// 84µs; at 2^18 serial still wins 43µs vs 66µs). Everything reaching <see cref="QuantizeToFp8Scaled"/> is already
+    /// ≥ <c>minElements</c> (2^20), so this is a guard for any future caller with smaller tensors.</summary>
+    private const long ParallelPassMinElements = 1L << 19;
+
+    /// <summary>Minimum elements per chunk, so a barely-over-threshold pass fans out to a few fat slices instead of
+    /// <see cref="Environment.ProcessorCount"/> slivers that cost more to dispatch than to run.</summary>
+    private const long ParallelPassChunkElements = 1L << 17;
+
+    /// <summary>Largest <c>|x|</c> over <paramref name="n"/> floats, ignoring NaN.</summary>
+    /// <remarks>Bit-identical to the scalar <c>if (MathF.Abs(p[i]) &gt; absmax) absmax = …</c> it replaces, including
+    /// under NaN: the lane update uses <c>GreaterThan</c> + <c>ConditionalSelect</c>, NOT <see cref="Vector.Max{T}"/>,
+    /// which lowers to <c>maxps</c> and would let a NaN lane win. Max is order-independent, so chunking across cores
+    /// cannot perturb the result the way a sum reduction would.</remarks>
+    private static unsafe float AbsMax(float* p, long n)
+    {
+        if (n < ParallelPassMinElements)
+            return AbsMaxRange(p, n);
+
+        long chunks = Math.Min(Environment.ProcessorCount, Math.Max(1L, n / ParallelPassChunkElements));
+        long perChunk = (n + chunks - 1) / chunks;
+        float[] partials = new float[chunks];
+        nint basePtr = (nint)p;
+        Parallel.For(0, (int)chunks, c =>
+        {
+            long start = c * perChunk;
+            long length = Math.Min(perChunk, n - start);
+            partials[c] = length > 0 ? AbsMaxRange((float*)(basePtr + (nint)(start * sizeof(float))), length) : 0f;
+        });
+        float absmax = 0f;
+        foreach (float partial in partials)
+        {
+            if (partial > absmax) absmax = partial;
+        }
+        return absmax;
+    }
+
+    private static unsafe float AbsMaxRange(float* p, long n)
+    {
+        int width = Vector<float>.Count;
+        Vector<float> acc = Vector<float>.Zero;
+        long i = 0;
+        for (; i <= n - width; i += width)
+        {
+            Vector<float> a = Vector.Abs(Vector.Load(p + i));
+            acc = Vector.ConditionalSelect(Vector.GreaterThan(a, acc), a, acc);
+        }
+        float absmax = 0f;
+        for (int lane = 0; lane < width; lane++)
+        {
+            if (acc[lane] > absmax) absmax = acc[lane];
+        }
+        for (; i < n; i++)
+        {
+            float a = MathF.Abs(p[i]);
+            if (a > absmax) absmax = a;
+        }
+        return absmax;
+    }
+
+    /// <summary>Multiplies <paramref name="n"/> floats in place by <paramref name="inv"/>.</summary>
+    /// <remarks>Bit-identical to the scalar loop: IEEE multiply is exact per element and every element is independent,
+    /// so neither vector width nor chunk boundaries can change a result.</remarks>
+    private static unsafe void ScaleInPlace(float* p, long n, float inv)
+    {
+        if (n < ParallelPassMinElements)
+        {
+            ScaleRange(p, n, inv);
+            return;
+        }
+        long chunks = Math.Min(Environment.ProcessorCount, Math.Max(1L, n / ParallelPassChunkElements));
+        long perChunk = (n + chunks - 1) / chunks;
+        nint basePtr = (nint)p;
+        Parallel.For(0, (int)chunks, c =>
+        {
+            long start = c * perChunk;
+            long length = Math.Min(perChunk, n - start);
+            if (length > 0)
+                ScaleRange((float*)(basePtr + (nint)(start * sizeof(float))), length, inv);
+        });
+    }
+
+    private static unsafe void ScaleRange(float* p, long n, float inv)
+    {
+        int width = Vector<float>.Count;
+        Vector<float> factor = new Vector<float>(inv);
+        long i = 0;
+        for (; i <= n - width; i += width)
+        {
+            Vector.Store(Vector.Load(p + i) * factor, p + i);
+        }
+        for (; i < n; i++)
+        {
+            p[i] *= inv;
+        }
     }
 
     /// <summary>The 8 magnitudes representable by FP4 E2M1, indexed by bits [e1 e0 m]: exp==0 → {0, 0.5}
