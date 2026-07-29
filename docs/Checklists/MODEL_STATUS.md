@@ -1,22 +1,34 @@
-# Model Status — index (by modality)
+# Checklists — index
 
-One concise per-modality status doc tells you, at a glance, which models are **fully complete and
-verified end-to-end** versus built-but-pending. Each type doc is the model *list* (status table);
-the matching `PHASE_*` doc holds the per-model build detail, deviations, and task plans, and
-[`PARITY_VERIFICATION.md`](PARITY_VERIFICATION.md) is the cross-modality source of truth for what has
-been *proven correct against real weights*.
+This folder is deliberately small. It holds four kinds of doc and nothing else:
 
-## The docs
+1. **Per-modality status + open work** — one doc per modality. Each has the model *status table* (what's
+   verified end-to-end vs. built-but-pending) **and** a `## Remaining work` checklist of what's left for
+   that modality. This is where per-model work is tracked.
+2. **[ROADMAP.md](ROADMAP.md)** — the cross-cutting engineering roadmap: multi-GPU / model-sharding,
+   AMD/ROCm + Vulkan, kernel performance, quantization, LLM serving throughput, robotics, new SwarmUI
+   extensions, CLI/API, and release/NuGet. Anything that spans modalities lives here, not in a status doc.
+3. **[PARITY_VERIFICATION.md](PARITY_VERIFICATION.md)** — the cross-modality source of truth for what has
+   been *proven correct against real weights* (maxAbs, components checked, bugs found).
+4. **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** — the consolidated model bring-up debugging reference:
+   common bugs, model-specific gotchas, notable outliers, and the parity-debugging methodology. **Read
+   this first when a new model port is wrong, crashes, or is slow.**
 
-| Modality | Status doc | Build detail / plan |
-|---|---|---|
-| **Image** (diffusion T2I) | [MODEL_STATUS_IMAGE.md](MODEL_STATUS_IMAGE.md) | [PHASE_4_MODEL_BREADTH.md](PHASE_4_MODEL_BREADTH.md), [PHASE_3_DEVIATIONS.md](PHASE_3_DEVIATIONS.md) |
-| **Audio** (TTS / STT / codec / VC / music / separation) | [MODEL_STATUS_AUDIO.md](MODEL_STATUS_AUDIO.md) | [PHASE_5_AUDIO.md](PHASE_5_AUDIO.md), [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md) |
-| **Video** (T2V / I2V) | [MODEL_STATUS_VIDEO.md](MODEL_STATUS_VIDEO.md) | [PHASE_9_VIDEO.md](PHASE_9_VIDEO.md) |
-| **World / interactive** | [MODEL_STATUS_WORLD.md](MODEL_STATUS_WORLD.md) | [PHASE_10_INTERACTIVE.md](PHASE_10_INTERACTIVE.md) |
-| **3D** (image → mesh) | [MODEL_STATUS_3D.md](MODEL_STATUS_3D.md) | [PHASE_11_THREED.md](PHASE_11_THREED.md) |
-| **Vision** (CLIP / detection / segmentation) | [MODEL_STATUS_VISION.md](MODEL_STATUS_VISION.md) | [PHASE_6_VISION.md](PHASE_6_VISION.md) |
-| **LLM + text encoders + VLMs + embeddings** | [MODEL_STATUS_LLM.md](MODEL_STATUS_LLM.md) | [LLM_MODEL_COVERAGE.md](LLM_MODEL_COVERAGE.md), [PHASE_12_LANGUAGE.md](PHASE_12_LANGUAGE.md); **decode perf:** [LLM_THROUGHPUT_BENCHMARK.md](LLM_THROUGHPUT_BENCHMARK.md) + [LLM_DECODE_PERF_GRIND.md](LLM_DECODE_PERF_GRIND.md) (2026-07-04: 20-54× → 1.94-2.88× off llama.cpp) |
+> History note: the old per-phase build logs (`PHASE_*`), perf grinds (`*_GRIND`, `*_BENCHMARK`),
+> handoffs, and one-off plans were consolidated into the four buckets above and deleted. The full
+> originals remain recoverable from git history.
+
+## Per-modality status docs
+
+| Modality | Status + open work |
+|---|---|
+| **Image** (diffusion T2I) | [MODEL_STATUS_IMAGE.md](MODEL_STATUS_IMAGE.md) |
+| **Audio** (TTS / STT / codec / VC / music / separation) | [MODEL_STATUS_AUDIO.md](MODEL_STATUS_AUDIO.md) |
+| **Video** (T2V / I2V) | [MODEL_STATUS_VIDEO.md](MODEL_STATUS_VIDEO.md) |
+| **World / interactive** | [MODEL_STATUS_WORLD.md](MODEL_STATUS_WORLD.md) |
+| **3D** (image → mesh) | [MODEL_STATUS_3D.md](MODEL_STATUS_3D.md) |
+| **Vision** (CLIP / detection / segmentation) | [MODEL_STATUS_VISION.md](MODEL_STATUS_VISION.md) |
+| **LLM + text encoders + VLMs + embeddings** | [MODEL_STATUS_LLM.md](MODEL_STATUS_LLM.md) |
 
 ## Shared legend
 
@@ -35,6 +47,6 @@ Every status doc uses the same symbols:
 ## How to read "verified e2e"
 
 A model is counted as ✅ only when it has been run against **real downloaded weights** and the output
-checked, not merely "finite floats" from a synthetic structural test. The bar and the per-model
-parity evidence (maxAbs, components checked, bugs found) live in
+checked, not merely "finite floats" from a synthetic structural test. The bar and the per-model parity
+evidence (maxAbs, components checked, bugs found) live in
 [`PARITY_VERIFICATION.md`](PARITY_VERIFICATION.md).

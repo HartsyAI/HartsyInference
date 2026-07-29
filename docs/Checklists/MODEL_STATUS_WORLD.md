@@ -1,7 +1,8 @@
 # World / Interactive Models — status
 
-Concise status for interactive world models (action-conditioned, real-time frame generation). Build
-detail lives in [PHASE_10_INTERACTIVE.md](PHASE_10_INTERACTIVE.md). Parity evidence lives in
+Concise status for interactive world models (action-conditioned, real-time frame generation). Open work
+is in the [Remaining work](#remaining-work) section below; bring-up debugging notes live in
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md). Parity evidence lives in
 [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS.md](MODEL_STATUS.md).
 
 ## Verified end-to-end (✅)
@@ -69,3 +70,24 @@ either upstream repo today hits a hard wall at `--model-path`/`--vae-path`** unt
 conversion themselves — the CLI does not ingest `.pt` directly. This is a real gap in "usable via CLI," not
 just a doc footnote; a `.pt`-ingesting loader (or a documented conversion script checked into the repo) is
 still open work.
+
+## Remaining work
+
+Distilled from the retired PHASE_10_INTERACTIVE plan.
+See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, quant, serving).
+
+### Validation
+- [ ] Overall ~75% built / low validated; numeric validation is checkpoint-gated for MatrixGame2/3, Oasis, GameCraft, DIAMOND.
+
+### Live / streaming
+- [ ] `MatrixGame3InteractivePipeline`.
+- [ ] `RollingKvCache`.
+- [ ] Streaming `IFrameStepper`.
+- [ ] `MgLightVaeDecoder` + converter.
+
+### Bugs
+- [ ] DIAMOND one-frame action-lag (unbisected — resolve via a C#-vs-reference `play.py` rollout diff on the same seed + action sequence).
+
+### Deferred foundations
+- [ ] AR-token KV cache.
+- [ ] VQ / MagViT tokenizers.

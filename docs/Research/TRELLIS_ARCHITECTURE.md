@@ -1,7 +1,7 @@
 # TRELLIS-image-large — architecture spec (bit-exact port ground-truth, 2026-07-15)
 
 Reconstructed from the reference (`/tmp/TRELLIS`) + real weight keys (`/tmp/TRELLIS-weights/ckpts/*.safetensors`).
-Build plan + phasing: [`docs/Checklists/TRELLIS_BUILD_PLAN.md`](../Checklists/TRELLIS_BUILD_PLAN.md). Every numeric
+Build plan + phasing: [`docs/Checklists/MODEL_STATUS_3D.md`](../Checklists/MODEL_STATUS_3D.md). Every numeric
 detail below (norm eps, modulation chunk order, qk-rmsnorm scale, sampler params, weight-key names) must be matched
 for parity — validate F32-first on CUDA (F16 amplifies tail drift).
 

@@ -642,7 +642,7 @@ Q4_K GGUF dumps are not yet available for Lance (model just released). When `uns
 
 ### Ordering / dependencies for the build
 
-1. **Land MoT + packed attention first.** This is the high-risk net-new infra. Validate on image-only T2I @ 512×512 against `Lance_3B`. Use the standard layer-by-layer Python diff harness (see SD3.5 / Z-Image patterns in `PHASE_3_DEVIATIONS.md`).
+1. **Land MoT + packed attention first.** This is the high-risk net-new infra. Validate on image-only T2I @ 512×512 against `Lance_3B`. Use the standard layer-by-layer Python diff harness (see SD3.5 / Z-Image patterns in `TROUBLESHOOTING.md`).
 2. **Then add ViT (frozen forward).** Once T2I works text-only, plug the ViT into image-editing.
 3. **Then add Wan2.2 VAE.** First with `T=1` (image), reusing existing 2D Conv2D paths where the 3rd dim is 1; then promote `CausalConv3d` to a real 3D conv for video.
 4. **Finally, video pipeline + frame streaming + 4× temporal decode chunking.** Phase 9.

@@ -477,7 +477,7 @@ This pipeline is roughly 70% reuse from existing HartsyInference components and 
 - Vocoder: max |Δ| < 1e-3 on waveform sample values (with the same input mel).
 - End-to-end: not bit-exact (DDIM noise sampling differs); compare on **CLAP audio score** of the generated waveform vs the prompt — should match Python within ±0.01 CLAP score over a 32-prompt benchmark.
 
-**Package placement.** Per [NUGET_PACKAGE_DESIGN.md](../Design/NUGET_PACKAGE_DESIGN.md):
+**Package placement** (one folder per package under `src/`, GPU behind `IBackend`):
 - `HartsyInference.Audio.AudioLDM2` — pipeline class, projection model, UNet 2D dual-stream override.
 - `HartsyInference.TextEncoders.Clap` — new package (text-only for v1; can grow to add audio tower later).
 - `HartsyInference.TextEncoders.T5` — existing.

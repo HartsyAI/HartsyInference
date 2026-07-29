@@ -465,7 +465,7 @@ No new PTX kernels needed.
 
 - `HartsyInference.Audio.Models.VibeVoice/` — all new model code
 - `HartsyInference.Audio.Pipelines.VibeVoicePipeline.cs` — orchestration
-- **HartsyInference.LLM** dependency: Qwen2.5 LM only (existing). VibeVoice should reference only the `HartsyInference.LLM` package (Qwen2.5 LM), not the CLI or sample projects, beyond what F5-TTS already uses (if any). See [`docs/Design/NUGET_PACKAGE_DESIGN.md`](../Design/NUGET_PACKAGE_DESIGN.md).
+- **HartsyInference.LLM** dependency: Qwen2.5 LM only (existing). VibeVoice should reference only the `HartsyInference.LLM` package (Qwen2.5 LM), not the CLI or sample projects, beyond what F5-TTS already uses (if any). (Package placement: one folder per package under `src/`.)
 
 ### 13. Open Questions / Pre-Implementation Verification
 

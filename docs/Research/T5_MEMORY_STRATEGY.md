@@ -1,7 +1,7 @@
 # T5-XXL Memory Strategy for Consumer GPUs
 
 > **Audience:** Pipeline authors choosing the T5 dtype/eviction policy for Flux, SD3, SD3.5, AuraFlow, Chroma.
-> **Cross-references:** [`QUANTIZATION_DIFFUSION.md`](QUANTIZATION_DIFFUSION.md), [`CUDA_PERFORMANCE.md`](CUDA_PERFORMANCE.md), [`PHASE_3_DEVIATIONS.md`](../Checklists/PHASE_3_DEVIATIONS.md) §18 / §33.
+> **Cross-references:** [`QUANTIZATION_DIFFUSION.md`](QUANTIZATION_DIFFUSION.md), [`CUDA_PERFORMANCE.md`](CUDA_PERFORMANCE.md), [`TROUBLESHOOTING.md`](../Checklists/TROUBLESHOOTING.md) §18 / §33.
 
 ---
 
@@ -148,7 +148,7 @@ _backend.FreeWeights(_transformer.EnumerateWeights());
 Tensor image = _vae.Decode(_backend, latent);
 ```
 
-Without `Sync()` before `FreeWeights()`, GPU ops queued in flight may still be reading from the freed memory — undefined behavior, often surfaces as silent garbage outputs or `CUDA_ERROR_INVALID_VALUE` at the next dispatch. See [`PHASE_3_DEVIATIONS.md`](../Checklists/PHASE_3_DEVIATIONS.md) §18.
+Without `Sync()` before `FreeWeights()`, GPU ops queued in flight may still be reading from the freed memory — undefined behavior, often surfaces as silent garbage outputs or `CUDA_ERROR_INVALID_VALUE` at the next dispatch. See [`TROUBLESHOOTING.md`](../Checklists/TROUBLESHOOTING.md) §18.
 
 ---
 
@@ -189,6 +189,6 @@ Need to fit T5 + transformer on 12 GB GPU?
 
 ## Future Work
 
-- **GGUF K-quant reader** (Q8_0, Q4_K, Q5_K) — common blocker called out in [`PHASE_4_MODEL_BREADTH.md`](../Checklists/PHASE_4_MODEL_BREADTH.md) §5b. Unlocks Pattern C for T5 plus smaller variants of all DiT backbones.
+- **GGUF K-quant reader** (Q8_0, Q4_K, Q5_K) — common blocker called out in [`MODEL_STATUS_IMAGE.md`](../Checklists/MODEL_STATUS_IMAGE.md) §5b. Unlocks Pattern C for T5 plus smaller variants of all DiT backbones.
 - **Block streaming for T5** — currently we load all 24 layers up front. A streaming pattern (load layer N, run, free layer N) would let T5-XXL run in ~400 MB peak. PCIe-bound at ~1 second extra per encode; only worth it on 8 GB GPUs.
 - **Native FP8 GEMM** — Ada+ tensor cores (SM 8.9+) can run FP8 GEMM directly with per-tensor scale via `cublasLtMatmul`. Ampere falls back to cast-to-F16. Ampere fallback is already wired; Ada path is documented in [`CUDA_PERFORMANCE.md`](CUDA_PERFORMANCE.md).

@@ -1,7 +1,8 @@
 # Vision Models — status
 
-Concise status for vision models: CLIP embeddings, object detection, and segmentation / face. Build
-detail lives in [PHASE_6_VISION.md](PHASE_6_VISION.md). Vision-tower parity for VLM use is tracked in
+Concise status for vision models: CLIP embeddings, object detection, and segmentation / face. Open work
+is in the [Remaining work](#remaining-work) section below; bring-up debugging notes live in
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md). Vision-tower parity for VLM use is tracked in
 [MODEL_STATUS_LLM.md](MODEL_STATUS_LLM.md) and [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend:
 [MODEL_STATUS.md](MODEL_STATUS.md).
 
@@ -52,7 +53,7 @@ Python step outside the engine. See `src/HartsyInference.Cli/Infra/ModelCatalog.
 tower: RoPE + SwiGLU + sub-LN — preset added, blocked on tower support), MetaCLIP / AM-RADIO.
 *(Done 2026-07-17, moved out of deferred: YOLO-seg head validated; SigLIP 2 + MetaCLIP presets are drop-ins;
 GPU-native MaxPool2D + depthwise-Conv kernels shipped with CUDA PTX + GPU-parity gate.)*
-See [PHASE_6_VISION.md § 8](PHASE_6_VISION.md) for the stretch list. **Segmentation ControlNet
+See the [Remaining work](#remaining-work) section for the stretch list. **Segmentation ControlNet
 preprocessing** shipped 2026-07-16 via UperNet-ConvNeXt-Small (see ✅ table) — UniFormer / OneFormer
 variants remain deferred (custom-mmcv fork / 1GB+ checkpoints) with no quality need while UperNet matches
 the diffusers reference exactly.
@@ -62,3 +63,22 @@ the diffusers reference exactly.
 CLIP and SigLIP **vision towers used inside diffusion and VLMs** are validated separately (SigLIP tower
 corr 1.0 for Gemma-3 / SmolVLM); see [MODEL_STATUS_LLM.md](MODEL_STATUS_LLM.md). The standalone Vision
 package wraps the existing `ClipVisionEncoder` rather than duplicating the math.
+
+## Remaining work
+
+Distilled from the retired PHASE_6_VISION plan. Items now ✅ above (SAM 2 / MobileSAM, RT-DETR,
+Grounding DINO, YOLO-Face, YOLO-seg, SigLIP 2) are omitted.
+See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, quant, serving).
+
+### Deferred stretch models
+- [ ] DINOv3 (encoder RoPE support).
+- [ ] EVA-CLIP / EVA-02 vision tower (RoPE + SwiGLU + sub-LN).
+- [ ] MetaCLIP, AM-RADIO.
+
+### Decoders
+- [ ] JPEG / WebP decoders.
+
+### Testing gaps
+- [ ] CLIP bit-exact Python parity.
+- [ ] All YOLO validation tests.
+- [ ] CI.

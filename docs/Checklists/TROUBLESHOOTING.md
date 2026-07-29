@@ -1,0 +1,590 @@
+# Model Bring-up Troubleshooting — consolidated reference
+
+> The single place to look when a **new** model port is wrong, crashes, or is slow. Every entry is a
+> real symptom → cause → fix distilled from bring-up work across the diffusion, LLM, audio, video,
+> world, 3D, and vision stacks. Organised by theme so you can jump to the class of bug you're seeing.
+> Ephemeral run-logs (dates, wall-clock, seeds) were dropped on purpose — only the reusable lesson is
+> kept. Deep original journals live in git history (the old `PHASE_*_DEVIATIONS`, `*_GRIND`,
+> `*_HANDOFF` files) if you ever need the blow-by-blow.
+
+**How to use:** find the symptom (black image, word-salad, NaN, "GPU idle", garbled-but-plausible
+output), read the matching section, then confirm with the [parity-debugging methodology](#parity-debugging-methodology)
+at the bottom. When math is proven but output is wrong, suspect **encoder tap/order → tokenizer →
+real-weight converter**, *not* the DiT/backbone.
+
+---
+
+## Parity-debugging methodology
+
+**The layer-by-layer bisect (the workhorse):**
+1. Build a Python reference (venv) that dumps: initial noise, text embeddings, per-step latents
+   (binary + mean/std/min/max JSON), final latent. Run C# with Python's **saved** noise/embeddings —
+   compare with **shared noise tensors, never by matching seeds** (C# Box-Muller ≠ PyTorch RNG).
+2. Isolate a single forward pass; if it diverges the bug is in the model, not the scheduler.
+3. Hook every layer in Python, step C# one layer at a time, find the **first divergent layer**.
+4. Sub-layer decompose that layer (GroupNorm / proj_in / LayerNorm / QKV / reshape / logits / softmax
+   / out-proj / FFN).
+5. Re-run to confirm all layers match (`avg_err < 1e-3`, ideally `< 1e-4`).
+
+**Expected FP32 tolerances** (exceed by 10×+ = real bug, not FP noise):
+element-wise `<1e-7`; GroupNorm/LayerNorm `<1e-6`; Linear/Conv GEMM `<1e-5`; full attention block
+`<1e-4`; full UNet/DiT pass `<1e-3`.
+
+**Vision bisect variant:** write a Python forward using the **same folded weights** (isolates C# impl
+vs weights/converter); dump the preprocessed input to disk so C# reads identical bytes; run C#
+layer-by-layer; **check actual checkpoint tensor shapes against assumed shapes** before debugging
+numerics (channel-width assumptions are where it breaks).
+
+**Higher-order lessons:**
+- A passing **synthetic-weight** parity harness proves the backbone MATH, not the encoder or the
+  real-weight load. Math-proven but image wrong ⇒ suspect encoder concat/tap order → tokenizer/chat
+  template → real-weight converter, in that order.
+- **Backend A/B (CUDA vs Vulkan)** instantly eliminates "model logic is wrong" as a hypothesis class
+  (they share the model, not the kernels).
+- **All-step tracing for any "works once, fails on iteration N"** — accumulation/threshold bugs are
+  clean at step 0; don't trust the previous step's clean trace.
+- Read what the trace SAYS: `INF` (not NaN) ⇒ an operand went Inf going in ⇒ points at an F32→F16
+  cast. A **step-dependent** NaN is a threshold crossing (F16 65504, F32 3.4e38), not a logic bug —
+  chart the suspect tensor's magnitude across steps. One bad element per token in an attention output
+  localizes to one `(head,dim)` column of V (`softmax·V` smears one Inf V element across every query
+  row).
+- For asymmetric/dual-network CFG, **`cfgΔ` proves nothing** (nonzero from the weight difference alone
+  even if text is ignored). Build a real conditioning probe: same network, real vs zeroed text.
+- Diffing directly against **ComfyUI's `comfy/text_encoders/*.py` / `comfy.sd.VAE`** is one of the
+  fastest ways to localize a porting bug.
+- **Never trust "tests pass" = "output correct" — visually inspect.** Numerically-plausible output
+  (right ranges, no NaN) can be completely wrong. Keep known-good reference images.
+- **Conditioning paths are stricter than denoising paths** — img2img re-projects latents onto the
+  manifold and hides encoder errors that Kontext/Fill/IP-Adapter amplify. Pick test images with large
+  flat regions plus fine texture (content-dependent triggers make a systematic bug look flaky).
+
+---
+
+## Tokenizer & text-encoder gotchas
+
+- **CLIP/OpenAI BPE needs the regex pre-tokenizer + `</w>` suffix + EOS-padding.** The 2-arg
+  `Microsoft.ML.Tokenizers.BpeTokenizer.Create(vocab,merges)` runs generic byte-level BPE and produces
+  character-level garbage. Use the long-form overload with `RegexPreTokenizer` (CLIP `pat`),
+  `LowercaseNormalizer`, `endOfWordSuffix="</w>"`, and **pad with EOT (49407), not 0** (CLIP pad==EOS).
+  Smoke test: encode `"a photograph of an astronaut riding a horse"`, assert first 10 IDs match HF.
+  SDXL tolerated corrupted tokens; SD3 did not.
+- **Apply the chat template for LLM text encoders.** Z-Image/Qwen3: raw `Encode(prompt)` vs
+  `apply_chat_template(..., add_generation_prompt=True, enable_thinking=True)` conditions the model on a
+  distribution it never saw. The `<think>` block varies by model (Qwen3-VL-Instruct emits none;
+  Flux.2-Klein's Qwen3-text template does) — it's causally appended so it can't corrupt prompt-token
+  hiddens; minor vs other bugs.
+- **Penultimate vs final hidden state matters a lot.** Z-Image wants `hidden_states[-2]` (raw, no final
+  RMSNorm): post-norm `abs_mean≈1.25` vs penultimate `abs_mean≈6.4`. Feeding post-norm sends every
+  downstream layer off-spec.
+- **Multi-layer tap concat ORDER (tap-major vs hidden-major) is load-bearing and survives every math
+  diff.** Ideogram 4 (13-layer Qwen3-VL): upstream/ComfyUI build **hidden-major** (`c = hidden*K + tap`);
+  a **tap-major** default (`c = tap*H + hidden`) transposes the projection's input columns → "coherent
+  image, ignored prompt." For single-tap (K=1) the layouts are identical, which hides it.
+- **Filter padding tokens out of caption embeddings.** Diffusers slices `embeds[mask]`; passing full
+  padded `[1,64,2560]` feeds garbage pad-position hiddens (LLM hallucinations at causally-blind pads).
+  Also unmasked T5 padding (~120 PAD tokens) dilutes the caption — truncate to real tokens.
+- **A `ProjectionDim=0` preset silently disables pooled output.** SD3 CLIP-L needs `ProjectionDim=768`;
+  reusing SDXL's preset (falls back to SD1.5's `ProjectionDim=0`) returns null pooled → NRE in
+  `ConcatPooled`. (SD3.5 CLIP-L `text_projection` is 99.9999% zero by design — still must project.)
+- **Moonshine-streaming HF reference silently skips the sliding-window mask when no `attention_mask` is
+  passed** — parity looks broken (cosine ~0.86) despite a correct port. Fix: pass an explicit all-ones
+  mask.
+- **`Qwen2Tokenizer.Decode` leaks the GPT-2 byte-level marker `Ġ`** — strip it.
+
+---
+
+## Attention / RoPE / multi-head parity
+
+- **diffusers `attention_head_dim` is a TRAP — it means head COUNT, not head dim** when
+  `num_attention_heads` is unset. SD1.5 `attention_head_dim=8` = 8 heads (head_dim=40), not 40 heads of
+  dim 8. Wrong split → 2.24× too-large attention scale and ~56% signal dampening. Print `model.attn.heads`
+  and check actual Q/K/V reshape dims before writing config.
+- **Self-attention must norm K/V from the SAME normed tensor as Q.** Bug: Q from `norm(hidden)`, K/V from
+  raw `context`; for self-attn (`context==hidden`) both must use normed. Fix: `ReferenceEquals(hidden,context)`.
+- **GQA needs SEPARATE Q and K head counts.** A rotate/kernel taking one `numHeads` for both writes OOB
+  on K and under-rotates Q (OmniGen2: 21 vs 7 heads).
+- **RoPE that a block applies internally can't be "applied externally."** RoPE acts on Q/K after
+  projection; if the block computes Q/K, the block must rotate them. A "None/external" mode silently
+  means *no* positional encoding.
+- **Same reused block class → don't split into separate C# classes that silently drop plumbing.**
+  Z-Image reused one block for context_refiner/noise_refiner/layers; splitting the `modulation=False`
+  path dropped RoPE from context_refiner → 7-orders-of-magnitude layer error, glitch banding.
+  Image-only attention with a shared frame index is rotation-invariant (offset cancels in softmax) so
+  noise_refiner masked it; caption tokens with per-token frames did not.
+- **PSA/specialized attention may not be standard SDPA.** YOLO11 C2PSA: Q/K have
+  `key_dim = head_dim*attn_ratio`, V has full `head_dim`; spatial axis is second-to-last; a depthwise
+  3×3 positional encoding is added to V. Check QKV output channels against `3*total_head_channels`.
+- **Recurring RoPE-family bug patterns** (each surfaced as fluent word-salad or instant EOS, not a
+  crash): interleaved vs split-half RoPE; wrong attention scale (`1/√head_dim` vs `1.0` vs `1/√8`);
+  `up·silu(gate)` MLP half-order; DenseGeneral/`[in,h,k]→[out,in]` transposes; missing
+  `cache.AdvanceLength()`. Concrete cases: Zonos (interleaved RoPE + MLP half-order + `1/√head_dim` +
+  channels-first vs channels-last prefix → instant EOS); Dia (split-half RoPE + scale 1.0 + prefix +
+  missing cache advance); Qwen3.5 Gated DeltaNet (missing `q *= 1/√head_dim` before the recurrence).
+- **Un-normalized V + an F16 attention fast path = threshold NaN.** Microsoft Lens RMS-norms Q/K but not
+  V; its residual stream is architecturally huge (`max|V|` 18940→71583 across forwards), crossing F16's
+  65504 → solid black. SageAttention's INT8 path casts V to F16 and is **default-on regardless of
+  `allowF16`** (only the cuDNN branch honors the flag). Fix: scale joint V by 1/256 before SDPA, scale
+  output back by 256 (attention is linear in V; power-of-2 = exponent-only).
+- **YaRN RoPE needs HF's dimension-index ramp + `attention_factor` mscale** (Lens: 1.3466×), not a
+  wavelength ramp.
+- **Phi head_dim=96** (non-power-of-two) hit an infinite CUDA fallback recursion; pad the flash-attn
+  block to next power of two, and extract the CPU reference to `AttentionReference` so the GPU fallback
+  can't re-dispatch into itself. **Phi-4-mini fused-QKV split** must use real `head_dim=128`, not
+  `rope.dimension_count=96` (they coincided on Phi-3.5, hiding the bug).
+
+---
+
+## Weight layout / transpose / converter parity
+
+- **PyTorch `nn.Linear.weight` is `[out, in]`; forward is `x @ W.T`.** Raw-pointer GEMM must index
+  `w[o*in + i]`, not `w[i*out + o]`. A transposed square matrix (CLIP `text_projection` 768²/1280²)
+  silently "looks fine" (right norm, no NaN) but is 100% relative error (SD3.5: 270× error drop after
+  fix). Verify against a **non-square 2×3/3×2** reference, or route through `backend.Linear` (cuBLAS
+  `OP_T`) to make the bug structurally impossible.
+- **GGUF `nn.Linear` weights need a shape *relabel* to `[out,in]`, NOT a data transpose** (bytes already
+  row-major). Only raw params like `mm.input_projection` need an actual transpose. Recurs across every
+  VLM.
+- **BFL vs diffusers `.chunk()` order differs — verify BOTH frameworks.** BFL Flux final-layer AdaLN
+  chunks `[shift, scale]`; diffusers chunks `[scale, shift]`. Loading a BFL checkpoint without swapping
+  the AdaLN weight rows along dim 0 applies shift-as-scale → magenta/purple cast, per-channel velocity
+  growing monotonically. Use the official `convert_*` `swap_scale_shift()`. Recurs on
+  Flux.2/AuraFlow/HunyuanImage/QwenImage/Chroma/Lens.
+- **Patchify in-patch dimension order is load-bearing — read the einops string.** diffusers uses
+  channel-**innermost** `'B C (H p)(W q) -> B (H W)(p q C)'` → loop `for py,for px,for c`. Z-Image uses
+  `[pH,pW,C]` channel-last via `permute(1,3,5,2,4,6,0)`. Wrong order silently misaligns
+  `patch_embed.weight` columns. Same class: Oasis DiT unpatchify vector order `[py,px,c]`.
+- **Adapter per-layer weight lists follow diffusers `attn_processors` registration order:
+  down → up → MID LAST**, NOT forward traversal (down→mid→up). IP-Adapter mid-onward got wrong-shaped
+  K_ip/V_ip → Linear under-filled/overran → NaN → black. Match per-index row-dims against UNet block
+  widths; fail-fast on mismatch at the injection site.
+- **llama.cpp SigLIP mmproj naming is swapped:** `ffn_down` is actually fc1 (up-projection),
+  `ffn_up` is fc2 (down); bias sizes give it away. Wire by role, not name. (Same swap for mllama clip
+  MLP.)
+- **Lens MXFP4 codec was missing upstream `transpose(1,2)` on expert weights** — silently garbles every
+  MoE layer.
+- **`Fp8ScaleFactor` (per-tensor scale) must propagate through EVERY tensor-copying converter site** —
+  QKV/single-linear splits, transposes, half-swaps, permutations. Missing propagation surfaces only at
+  that layer's GEMM. Audit: grep `new Tensor(` inside converters after adding per-tensor quant metadata.
+  Fold the scale into cuBLAS `alpha` (zero cost) rather than dequanting a 12B transformer (would OOM).
+- **Drive conversion off patterns, not named layer indices.** A hardcoded `"model.22."` head check
+  missed YOLO11's layer-23 head. Two-pass: Pass 1 fold BN siblings on `*.conv.weight`; Pass 2 copy any
+  remaining `*.weight`/`*.bias` as-is → architecture-agnostic.
+
+---
+
+## Mixed-dtype checkpoints & dtype-sensitive kernels (recurring)
+
+- **`(float*)weight.DataPointer` is a latent dtype bug.** Any CPU-fallback op reading a weight as
+  `float*` bit-reinterprets BF16/F16 storage (two BF16 → one garbage F32). Z-Image-Base RMSNorm did
+  this → clean 16-px grid of tinted blobs. Turbo hid it (F32 norms); Base stores norms BF16. Fix: cast
+  non-F32 norm scales to F32 at load. Audit every `DataPointer` cast against the **actual** checkpoint
+  dtypes, not the previous variant's. Same class: SD3 `pos_embed` F16, Z-Image.
+- **Safetensors dtypes are NOT uniform per file.** Juggernaut XL: conv mostly F32, linear mostly F16,
+  norms mixed. For F16 inference, explicitly `CastWeightsToF16` on ALL weights before loading.
+- **PTX kernels are load-width-sensitive** (`ld.global.b16` vs `.b32`). When dispatching by
+  `input.DType`, verify ALL operands (weights, biases) match; cast before launch (temp buffer +
+  `LaunchCastF32ToF16`, free in finally). F32 norm weights read by an F16 kernel → pure noise.
+- **cuBLAS `GemmEx` requires A and B the SAME dtype.** Supported: F16×F16→F16/F32, F32×F32→F32. NOT
+  A=F32,B=F16 (`CUBLAS_STATUS_NOT_SUPPORTED`, err 15). Cast the mismatched operand first.
+- **When narrowing an F32 activation for a mixed-precision GEMM, use BF16, not F16.** F16's ±65504
+  ceiling overflows on gated activations (SwiGLU/GeGLU multiply two large activations): Z-Image SwiGLU
+  produced +Inf → RmsNorm sees Inf → `Inf×(1/√Inf)=NaN` → all-black. **Dynamic range matters, not just
+  declared dtype.** BF16 has F32's range, same byte count, Tensor-Core-fast on Ampere+. Bug only
+  appeared step 1+ (step 0 stayed under 65504 by luck).
+- **cuBLASLt bias epilogue reads bias in the OUTPUT dtype** — F16-out GEMM + F32 bias buffer = silent
+  NaN, no error.
+- **pos_embed / norm weights read as F32 via `(float*)ptr` when the checkpoint stores F16** → auto-cast
+  to F32 at load.
+
+---
+
+## Quant / FP8 / W8A8 numerical findings
+
+- **Recognize ComfyUI `fp8_scaled` format:** raw FP8 E4M3 (±448, mean abs ~14) + `.scale_weight` (F32)
+  + `.scale_input` (F32) + a `scaled_fp8` marker. Plain Comfy Dev FP8 is pre-scaled (mean abs ~0.014,
+  no companions). Z-Image single-file uses `.weight_scale` + `.comfy_quant` (U8). **Always inspect the
+  safetensors header before writing the loader** — single-file checkpoints fuse QKV, drop patch-size
+  suffixes, rename scale companions. 10 sec to inspect vs hours of KeyNotFound.
+- **fp8_scaled companions must fold into `Tensor.Fp8ScaleFactor` (cuBLAS alpha)**; the `.scaled_fp8`
+  zero-byte marker is skipped; `MmapHandle.PointerAt` bound check loosened `>=`→`>` for past-the-end
+  zero-byte tensors.
+- **W8A8 real-checkpoint activations are 3–5× uglier than synthetic** (relL2 3–5.5e-3 synthetic →
+  1.35–2.52e-2 real). **Local per-layer relL2 improvement does NOT predict e2e SSIM** — SmoothQuant
+  dropped aggregate local relL2 29% yet **regressed** SSIM 0.9210→0.9144. Error terms add in
+  **quadrature**, so with activation error dominating ~2:1, driving weight error to zero caps local
+  reduction at ~10%. SmoothQuant fails the 0.95 SSIM gate because the weight-side quant floor is
+  binding, not activation outliers.
+- **cuBLASLt int8 TN routes to IMMA with plain column-major layouts on cuBLAS 13.1** — the
+  COL32/COL4_4R2_8C interleave plumbing is a Turing-era caveat, obsolete here. Raw int8 GEMM 3.2–3.7×
+  over F16 at DiT shapes (~78–94% of INT8 TOPS peak).
+- **fp8 (E4M3) common-scale requant is exact for power-of-two scale ratios**, within ½ ulp for normal
+  values; only weights below `s*·2⁻⁶` degrade — negligible at real ratios (≤~8×). Enables QKV/w1w3
+  fusion but measured **neutral at ≥4k-token image shapes** (GPU is GEMM-saturated; launch savings are
+  noise).
+- **Q6_K GEMV was latency-bound, not bandwidth-bound** — interleaved load-then-use serialized on each
+  load. Fix: issue all loads up front into named locals before any unpack/FMA (bit-identical, +6.4%).
+  Q4_K/Q5_K already use upfront `uint2`/`float4` vectorized loads.
+- **R4 row-interleave repack rejected on evidence:** decode GEMV is compute/memory co-limited (68.65%
+  DRAM / 74.6% ALU), not bandwidth-bound; input-vector-reuse shared-mem staging measured an **11%
+  regression** (`__syncthreads()` cost > redundant-read savings).
+- **GGUF K-quant sign/rescale bakes (recurring):** Mamba `ssm_a` — GGUF already stores `A = −exp(A_log)`
+  (llama.cpp bakes it), use directly, do NOT re-apply `−exp` (caught by ssm_a cosine −0.18→1.0).
+  RWKV-6 — GGUF pre-divides deep-layer output weights by `2^(layer//rescale_every_n_layers)` → apply
+  runtime `x *= 0.5` every 6 layers.
+
+---
+
+## Gated activations (GEGLU / SwiGLU / GLU)
+
+- **Split along the LAST dimension, never the flat midpoint.** For `[..., 2D]`: first D per row = value,
+  next D = gate. In a flat-indexed PTX kernel decompose `outerIdx = i/D, d = i%D`, then
+  `inputX = outerIdx*2D + d`, `inputGate = inputX + D`. Flat split (`input[i]`, `input[i+totalOutput]`)
+  is WRONG for any multi-row tensor → garbled vertical banding with **correct tensor statistics**
+  (invisible to 1-row unit tests). Test with `[2,2,2D]`. PTX is especially dangerous (no shape metadata).
+  Same bug appeared in the Vulkan GeGlu (`inputX=outerIdx*2*D+d` fix; `[2,2,2*D]` regression guard).
+
+---
+
+## Norm-layer architecture quirks
+
+- **Gemma 2 has 4 norms per block** (pre-attn, post-attn sandwich, pre-FFN, post-FFN sandwich),
+  **GeluTanh** (not SiLU), and **offset-from-1 RMSNorm scale** (stored = scale−1, apply `(1+weight)` —
+  fold `+1` at load). Name-collision warning: Gemma's `post_attention_layernorm` is a real post-attn
+  sandwich norm, not the pre-MLP norm.
+- **Final-layer norm epsilon/type is exact:** Z-Image `norm_final` is
+  `LayerNorm(elementwise_affine=False, eps=1e-6)` — literally 1e-6, not RMSNorm, not the config's 1e-5.
+- **Final-layer modulation can be scale-only:** Z-Image outputs one chunk → `norm(x)*(1+scale)`, no
+  shift/gate (unlike Lumina2's NextDiT 2×hidden scale+shift).
+- **`AdaInstanceNorm1d` single-pass variance** `E[x²]−E[x]²` NaN'd via catastrophic cancellation on
+  ~30k-sample HiFiGAN stages → use two-pass double-precision variance.
+- **CLIP encoder missing final LayerNorm** → embeddings std ~5 instead of ~1 → 5× amplified
+  conditioning → abstract patterns. Apply `final_layer_norm` per `CLIPTextTransformer.forward()`.
+
+---
+
+## VAE / latent scaling & encoder parity
+
+- **VAE stride-2 downsample: asymmetric vs symmetric padding is a DIFFERENT operator, same output
+  size.** diffusers/BFL/Comfy use `F.pad((0,1,0,1))` (right/bottom) + `Conv2d(padding=0)`; symmetric
+  `Conv2d(padding=1)` samples the opposite pixel parity. Three stages compound → ~1-latent-pixel phase
+  error → Flux Kontext maze/speckle on flat regions. **A same-engine encode→decode round trip CANNOT
+  reveal this** (decoder is misalignment-agnostic); diff the latent against ComfyUI's `comfy.sd.VAE`. A
+  correlation that *improves* under a (+1,+1) shift is the smoking gun. Conditioning paths
+  (Kontext/Fill) are stricter than denoising.
+- **VAE latent denormalization:** the decoder must apply `raw = latent·std + mean` from checkpoint
+  `per_channel_statistics`; skipping → lattice/blotches (hit LTX-Video 0.9 AND LTX-2 22B).
+- **VAE decode OOM at the pipeline stage boundary:** im2col temp buffers (300MB–4.8GB at 512ch/1024²)
+  can't fit while the transformer/UNet is still resident. Fix: `backend.Sync()` then
+  `backend.FreeWeights(model.EnumerateWeights())` after denoise, before VAE decode. (Recurring — applied
+  in SD3, AuraFlow, Chroma, Lens.)
+- **VAE attention: 3D→4D reshape before SDPA.** Passing `[B,seq,C]` to a 4D-expecting kernel makes
+  `Shape[3]=0` (uninitialized) → head dim D=0 → zero-iteration loops → all zeros. Reshape to `[B,1,seq,C]`.
+
+---
+
+## Scheduler / flow-match / sampling
+
+- **Flow-match Euler: negate the transformer output** (`noise_pred = -noise_pred`) before the step, else
+  integration ascends in the noise direction → pure RGB static.
+- **Timestep inversion:** flow-match `t = 1 - sigma`; forgetting conditions the model on the opposite
+  schedule point every step.
+- **Gates need `tanh()`** (`gate_msa = mod[1].tanh()`) or they blow up at init and modulated residuals
+  dominate.
+- **Euler scheduler needs `scale_model_input`:** divide latent by `sqrt(sigma²+1)` before each UNet call.
+- **Euler step div-by-zero at final timestep (sigma→0):** for epsilon prediction the algebra simplifies
+  to `derivative = model_output`; guard sigma for v-prediction.
+- **Timestep embedding:** SD1.5 uses `flip_sin_to_cos=True` → `[cos, sin]` layout (not `[sin,cos]`), and
+  frequency divisor `/(half_dim - 1)` not `/half_dim`. Hunyuan3D `max_period = time_factor = 1000`, not
+  10000. F5-TTS uses a **×1000 timestep sinusoid scale**.
+- **Position IDs for DiT caption vs image tokens:** caption gets per-token frame indices `1..capPaddedLen`
+  (h=w=0); image tokens share one frame `capPaddedLen+1` with varying h/w; pad slots stay (0,0,0). Use
+  padded length, not real length (synthetic tests with real==padded mask the diff).
+- **Sequence concat order** (`[image, caption]` vs `[caption, image]`) affects both the attention pattern
+  and post-block slicing — verify against the reference line.
+- **Step-cache gate signature is per-model** — check indicator schedule-informativeness before fitting a
+  poly gate: Qwen informative (poly 1.20×), Ideogram uninformative (needs late-window gate, 1.39×),
+  Flux.2 V-shaped (poly 2.49×), Wan/video negative under any reuse (use FVD not SSIM). Poly + late-window
+  gates are substitutes, not additive.
+- **CFG-interval paper result does NOT transfer** — skipping guidance on early high-noise steps (t>0.85)
+  flips prompt category on text-prompt models (SSIM 0.35); only late-only bands (`0.15,1`) are
+  quality-safe but marginal.
+
+---
+
+## GPU memory / caching / lifetime (CUDA)
+
+- **After enabling GPU weight caching, ALL weight/bias access must route through the cache-aware
+  `CopyToDevice`.** Direct `weight.DataPointer` for computation crashes (pointer=0) after CPU disposal.
+  Audit all model code for direct `DataPointer` on weights.
+- **Don't evict the GPU weight cache between pipeline stages.** Vestigial `EvictBackendCache("CLIP"/"UNet")`
+  destroyed preloaded weights → `ObjectDisposedException` on the next stage.
+- **In-place GPU ops must clear `_gpuSyncCallback`/`_gpuDisposeCallback` before `CacheActivation`.** The
+  old callbacks close over the previous GPU pointer; re-caching fires them and `FreeAsync`'s the pointer
+  you just modified → intermittent corruption depending on allocator reuse.
+- **`cuMemFreeAsync` is stream-ordered — memory is NOT immediately reclaimed.** At stage boundaries
+  explicitly `Sync()`+`FreeWeights()`; add an OOM-retry that syncs the stream (flushes pending frees) then
+  retries `cuMemAlloc`.
+- **Never mix synchronous `cuMemAlloc` with the deferred-free (`cuMemFreeAsync`) world** — a sync alloc
+  can receive a VA whose earlier async free hasn't executed; the late free destroys the new buffer and the
+  eventual free double-frees. Route all caches through the stream-ordered pool.
+- **A raw `DataPointer`/`AsSpan` does NOT root a Tensor.** An undisposed tensor whose pointer is being read
+  can be finalized mid-read; `~Tensor→AlignedFree` frees the live buffer and glibc `free()` writes tcache
+  metadata (value `addr>>12`, high dword ≈ `0x7`) into bytes 0–7. Manifests as a "parallel-only native
+  stomp" where class-set bisection never converges (co-running classes are only GC pressure, not writers).
+  Prove it: forced `GC.Collect()+WaitForPendingFinalizers()` between write and read reproduces
+  deterministically single-threaded. Fix: `using` declarations + `GC.KeepAlive` around raw-pointer copy
+  loops. Same class: `ConvWeightSlices` cast-weight freed mid-loop → `GC.KeepAlive(wf)` after the write
+  loops.
+- **Pass-through helpers that MIGHT allocate are disposal traps.** `PadCaption`/`PadImage` returning the
+  input unchanged when already aligned → caller disposes an aliased tensor → `ObjectDisposedException`.
+  Guard `if (!ReferenceEquals(result,input)) input.Dispose();` or always allocate.
+- **DeepSeek/large-MoE memory:** expert split must be a zero-copy view over mmap (copying ~7GB → host
+  OOM-kill); keep the untied embedding table host-only (not uploaded to GPU) to save ~0.8GB.
+- **`TextService.EnsureRamHeadroomFor` refuses to load a GGUF unless free RAM ≥ 2.5× file size** (dequant
+  headroom) — large models fail here before touching GPU; this is the loader protecting from OOM-kill,
+  not a bug.
+
+---
+
+## GPU residency / throughput (CUDA)
+
+- **A model is GPU-resident only if EVERY hot-path op is a backend op.** One `.DataPointer`/`AsSpan` read
+  on a GPU tensor fires `cuStreamSynchronize`+D2H copy (lazy-sync). Ideogram 4's CPU "glue" (modulation
+  split, gating, QK-norm, RoPE, slice/reshape, CFG/Euler) caused ~370 syncs/forward → 57 min/gen. Fix: a
+  PTX kernel family for all glue; assert `GetD2hSyncCount()==0` per forward. `nvidia-smi` shows GPU idle.
+- **GPU idle during a gen (low `nvidia-smi` util) = host/dispatch-bound — diagnose before tuning
+  kernels.** `Tensor`'s ctor eagerly did `NativeMemory.AlignedAlloc + Clear` (zeroing page-faults the
+  whole buffer) for every tensor, including device-only intermediates (a `[1,4121,12288]` F32 ≈ 202MB ×
+  many × steps of host malloc+memset+free the host never reads). Fix: lazy host-buffer allocation
+  (`EnsureHostBuffer()` on first CPU access); `CacheActivation` must not read `DataPointer` up front.
+  Result: 45s→2s/step. Decisive probe: `nvidia-smi dmon -s u`.
+- **Host `DataPointer` reads mid-forward drain the compute stream every block/step**, serializing GPU
+  work. Recurring root cause across GEGLU loops, LayerScale, SwiGLU gates, per-step CFG/Euler. Fix: port
+  the glue op to device so activations stay resident. Health assert: ~0 mid-decode D2H syncs; any per-token
+  sync is a residency bug (MoE routing readback is a current offender at 2193–3225 syncs/rep).
+- **`CudaBackend.Concat` `dim>0` pathology:** issued one `cuMemcpyDtoDAsync` per outer element → ~280k
+  tiny memcpy nodes/forward captured into a CUDA graph (hid ~300ms/fwd; Hunyuan3D DiT-loop 27.7→7.5s,
+  bit-identical). Fixed with a single-launch `dit_concat2_f32/_f16` kernel. Shared win for any
+  non-leading-dim concat (video/audio/LLM).
+- **`ConvTranspose2d` silently ran on CPU** (`CudaBackend` never overrode it) — 1549ms for a 32²→64²
+  upsample → 3ms with a gather-form kernel. Shared by ClipSeg/YOLO/Demucs/RVC/ResembleEnhance. Grouped
+  `ConvTranspose1d` (`groups=768`, BigVGAN) was likewise rejected — add `groups` to the kernel.
+- **F16/CUDA-graph only help when host-launch-bound:** `HARTSY_GEMM_F16=1` moving DiT time 0% proves it's
+  per-op-launch-bound, not GEMM-bound; graph capture is then the real lever.
+- **The lm_head dominates decode for large-vocab models.** Orpheus: the tied lm_head (3072→156,940 vocab)
+  ran as an F32 GEMM at M=1 = 90% of the step. Fused BF16/F16 M=1 GEMV → 221ms→3.8ms/tok. Same class:
+  `Qwen2Model` re-transposing weights per call via `WhisperOps.ProjectLinear` defeated the weight cache
+  (~123× decode slowdown when non-resident).
+- **Method rule (hard-won, stated twice):** instrument EVERY device op before concluding a bottleneck is
+  "many small kernels / occupancy-bound" — an uninstrumented op (Concat, host FourierEmbed) hid the real
+  wall repeatedly. Also **measure the premise/headroom of an optimization before building it** — the
+  Concat fix silently invalidated the "batched CFG saves 3s" premise.
+- **TripoSR triplane density decode:** the whole 25s wall was a host per-point loop over a 16.7M-point
+  256³ grid; a GPU `triplane_grid_sample_f32` kernel → 354ms (beats Python's 469ms).
+
+---
+
+## CUDA / PTX kernel pitfalls & toolchain
+
+- **PTX ISA version trap (recurring):** pip `nvidia-cuda-nvcc` floats `nvidia-nvvm` to 13.3 which emits
+  PTX ISA 9.3; driver 580.x JIT caps at 9.0 → `CUDA error 222: Unsupported .version 9.3`. Fix: pin
+  `nvidia-cuda-nvcc==13.0.88` **and** `nvidia-nvvm==13.0.*` (nvvm is the ISA-determining piece, not nvcc)
+  into an isolated `pip --target` dir; **verify every emitted PTX starts `.version 9.0` before shipping.**
+- **Integer overflow in im2col at 1024²+.** `channels×kH×kW×outH×outW` exceeds uint32 (512ch/3×3/1024² →
+  `CUDA_ERROR_ILLEGAL_ADDRESS`; 256²/512² fit in 32-bit and pass). Cast to `long` before all GPU
+  buffer-size multiplications in C#; use `cvt.u64.u32`+`mul.lo.u64`+`setp.ge.u64` in PTX.
+- **CausalConv3d batched fast-path OOB write** (Wan/HunyuanVideo/LTX/Kandinsky5 3D-causal VAE): with
+  `_spatialReplicatePad`, `padded` was allocated at unpadded spatial size (`hp=h`) but `BuildPaddedFrames`
+  padded internally → wrote ~7.5 KB past the buffer. Manifested as `CUDA_ERROR_ILLEGAL_ADDRESS` on the
+  24GB card, OOM on the 12GB card (same bug, different symptom). Fix: compute post-pad `hp=h+2·_padH` for
+  the `spatialPre` case too.
+- **2D right-operand in BatchedMatMul silently produced zeros.** `N = b.Shape[2]` returns 0 for a `[K,N]`
+  2D tensor (uninitialized `_dim2`) → all-zero matmul → CLIP/VAE-attn became residual passthroughs
+  ("brownish blob"). Detect rank-2, use `Shape[1]`. Same uninitialized-`Shape[3]` class as the VAE 3D→4D
+  bug.
+- **`MatMulKernels.LinearTransB` heap corruption (0xC0000374):** a wrong-shaped weight wrote past the
+  output buffer with no stack trace. Now fails fast on `output.ElementCount != M·N`.
+- **`UnidirectionalLstm`:** multi-layer with `InputDim < HiddenDim` reshaped the per-step buffer too small
+  (only worked when input dim == hidden). Allocate per-layer at `dimIn`.
+- **Exception-masking on CUDA crash:** a `using CudaBackend` disposes during stack-unwind on a broken
+  context; Dispose throws its own error, .NET reports the *later* exception and discards the real one.
+  Construct explicitly + try/catch/log-real-exception + Dispose in a finally that separately catches.
+
+---
+
+## Profiling pitfalls
+
+- **`CUDA_VISIBLE_DEVICES=0` alone does NOT pin a specific GPU** — CUDA defaults to `FASTEST_FIRST`,
+  silently selecting the fastest card. Always set `CUDA_DEVICE_ORDER=PCI_BUS_ID` too; verify by name via
+  `nvidia-smi -L`. (Caused a phantom "we're faster than llama.cpp" reading that evaporated on re-run.)
+- **Isolated-kernel `ncu` "Est. Speedup: X%" overstates** the achievable win on a co-limited kernel —
+  it's against that one metric's ceiling, not the actual co-limiting bottleneck. Price against the
+  SM/DRAM SoL balance, then confirm end-to-end tok/s.
+- **`nsys --trace=cuda` undercounts kernels inside CUDA-graph replay** (260 vs ~33,000). Verify graph-only
+  counts against an eager-inclusive trace.
+- **`nsys` host/API overhead must be cross-checked against a clean unprofiled wall-clock** — instrumentation
+  tax scales with graph-node count; an allocation-arena "win" was a pure measurement artifact.
+- **`ncu` on GeForce:** `ERR_NVGPUCTRPERM` is a driver policy (admin-only perf counters). Bypass per-invocation
+  with `sudo env HOME=… LD_LIBRARY_PATH=… CUDA_VISIBLE_DEVICES=n dotnet test …` (sudo resets env; engine
+  resolves native libs relative to `$HOME`); `chown` report files back afterward.
+- **`compute-sanitizer` pip wheel ships an incomplete layout** — needs manual symlinks for
+  `libTreeLauncher*.so`/`TreeLauncher*` from the Nsight Compute bundle, else it silently no-ops.
+- **Profile decode *sections* before scoping** (Orpheus mis-diagnosed 3× before a 1-gen env-gated
+  Stopwatch nailed it). Always verify TTS with whisper `medium.en`, never `base.en` (actively misleading).
+
+---
+
+## Vulkan (SPIR-V / GLSL) pitfalls
+
+- **Kernel-level dtype selection must be a function of the OUTPUT tensor, not the inputs.** FP8→F16 GEMM
+  writing into a caller's F32 buffer (2 bytes written, 4 read) → every other element garbage → NaN within
+  1–2 ops → all-black Flux. Cast FP8 inputs up to F16 for the multiply but land the result in an
+  output-dtype buffer.
+- **Tensor-core/coopmat paths must store to whatever dtype the pipeline allocated.** An F16-only output
+  guard made the coopmat path inert on Flux (Linears allocate F32 output) — 1.4% "improvement" = never
+  launched. Relax to F16-or-F32 with an `OUTPUT_F32` spec-const. Gate coopmat on actual shape enumeration
+  (`vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR`), not extension presence.
+- **"Every-N-dispatches" auto-flush must respect op atomicity — drain only at op boundaries.** Mid-op
+  flush freed shared Q/K/V upload buffers still in use by later SDPA heads → garbage from head 2 onward.
+  Fix: an `OpScope`/`EnterOp()` RAII nesting counter; wrap public ops.
+- **Deferred-free timeline tag must be `_value + 1`** (the NEXT tick the recording op will signal), not
+  `_lastSubmitted`. Tagging with the already-submitted tick lets the next reclaim destroy a still-pending
+  buffer → latent UAF.
+- **Cross-subgroup reductions drop partials when `gl_NumSubgroups > subgroupSize`.** With `local_size=256`
+  on small-subgroup devices (LLVMpipe/older Intel, subgroup 4–8 → 32–64 subgroups), the single-subgroup
+  final combine reads only `subgroupSize` partials → wrong GroupNorm/LayerNorm/RmsNorm/Softmax. NVIDIA (32)
+  and AMD (32/64) unaffected. Fix: strided fold `for k=SubgroupInvocationID; k<NumSubgroups; k+=SubgroupSize`;
+  size `warp_*` shared arrays `[64]`. Alternative: pin `requiredSubgroupSize`≥16.
+- **NVIDIA Linux blob under-reports promoted core features.** 535-series advertises `apiVersion 1.3.x` but
+  returns zeros for `shaderFloat16`/`timelineSemaphore`/`bufferDeviceAddress`/`synchronization2`/
+  `subgroupSizeControl`/`shaderIntegerDotProduct` through the **consolidated** v1.2/v1.3 feature structs
+  (original extension structs return the truth). Fix: trust `apiVersion` for guaranteed-promoted features,
+  gated by vendorID (NVIDIA 0x10DE / AMD 0x1002 / Intel 0x8086). Re-check on driver upgrades.
+- **Slab granularity matters more than allocation count near VRAM limit.** 256MB slabs OOM'd mid-load on a
+  12GB 3060 (Flux ~12GB); 64MB/8MB slabs fit into post-deferred-free gaps. Add an `OnOutOfMemory`
+  drain+retry.
+- **Cache-miss upload buffers must be tracked and drained** or each step leaks one `VkBuffer` per miss
+  (Mesa validation catches it, the NVIDIA blob doesn't).
+- **GLSL has no built-in `erf`** — use Abramowitz & Stegun 7.1.26 (max err 1.5e-7) for exact GELU.
+- **matmul C buffer can't be `writeonly` when `beta≠0`** (residual-add fusion reads C).
+- **Older `glslangValidator` (Ubuntu 22.04) rejects `-O`** — ship unoptimized SPIR-V, let the driver
+  optimize (~100ms colder first-pipeline build).
+- **`VkAccessFlags2` sync2 constants are easy to get wrong** and NVIDIA over-flushes so tests pass anyway:
+  `UniformRead=0x08`, `ShaderStorageRead=0x200000000`, `ShaderStorageWrite=0x400000000`,
+  `ShaderSampledRead=0x100000000`. A wrong compute-to-compute barrier silently drops the write→read hazard.
+  Pin with CPU-only constant regression tests. Same for coopmat sType values
+  (`COOPERATIVE_MATRIX_PROPERTIES_KHR=1000506000`, `..._FEATURES_KHR=1000506001` — reverse of intuitive
+  order).
+- **`nonCoherentAtomSize` flush/invalidate must align both ends:** `start=AlignDown(off,atom);
+  end=AlignUp(off+size,atom)` — computing size independently can miss the buffer tail (silent stale data on
+  non-coherent/ReBAR drivers).
+- **`Span<T>(ptr,(int)(Size/sizeof(T)))` truncates 64-bit element counts** above int.MaxValue (Vulkan
+  analogue of the CUDA im2col overflow) — throw instead of returning a partial view.
+- **Push descriptors regressed 7% on NVIDIA** (pool-ring is highly tuned there) — not every "best
+  practice" generalizes; kept default-off, opt-in `HARTSYINFERENCE_VK_PUSH_DESCRIPTORS=1` for AMD/Intel.
+- **INT8 `dotPacked4x8` overload is selected by operand type:** `uint[]` → unsigned, `int[]` → signed.
+  Same bytes, different interpretation.
+- **GeGlu flat-midpoint bug (same as the CUDA one):** decompose `outerIdx=i/D; d=i%D` then
+  `inputX=outerIdx*2*D+d`; a multi-row `[2,2,2*D]` test is the regression guard.
+
+---
+
+## LLM / GGUF loading gotchas
+
+- See also GGUF sign/rescale bakes under [Quant](#quant--fp8--w8a8-numerical-findings) (Mamba `ssm_a`,
+  RWKV-6 rescale) and the SigLIP mmproj swap under [Weight layout](#weight-layout--transpose--converter-parity).
+- **Qwen3.5 Gated DeltaNet:** missing `q *= 1/√head_dim` before the recurrence produces fluent-looking
+  word salad (not a crash).
+- **nn.Linear GGUF weights need a shape relabel to `[out,in]`, NOT a data transpose** (bytes already
+  row-major); only raw params like `mm.input_projection` need an actual transpose. Recurs across every VLM.
+
+---
+
+## TTS / STT lessons
+
+- **When a model degenerates but the forward looks faithful, check the checkpoint version/source FIRST**
+  — don't deep-layer-diff until reference and engine load the *same* weights. Dia-1.6B looped garbage
+  purely because the old `nari-labs/Dia-1.6B` was downloaded instead of `Dia-1.6B-0626` (identical 343
+  keys/shapes, only values differ). Orpheus "silent output" traced to weights/sourcing (unsloth mirror),
+  not engine code.
+- **Always verify TTS with whisper `medium.en`, never `base.en`** — `base.en` was actively misleading in
+  multiple cases.
+- **F5-TTS:** ConvNeXt filler-tail masking; ×1000 timestep sinusoid scale; erf-GELU stem vs tanh-GELU FFN.
+- **Fish-Speech:** the fast depth-LM must take the **PRE-norm** slow hidden (`norm_fastlayer_input=False`).
+- **espeak `MatchRule` RULE_PRE OOB:** indexed past the per-word buffer start on words like "Americans" —
+  guard the OOB read as a space boundary; fixes all espeak TTS.
+- **CosyVoice 2 load recipe (outlier worth keeping):** the LM is **not** a single extended-vocab softmax
+  (keeps Qwen text embed + separate `speech_embedding`/`llm_decoder`/`llm_embedding`); the frozen S3
+  tokenizer + CAM++ must load from **chatterbox `s3gen.safetensors`** because CosyVoice's ONNX export fuses
+  Conv+BN (CAM++ `head.bn*` vanish); the AR loop needs F32 (`HighPrecisionGemm`); the flow decoder must
+  trim the prompt-mel region or it replays the reference clip.
+- **`AudioRuntime._genLock` is a global single-slot semaphore** — one slow request makes every queued
+  request look "hung." Dia's real "hang" was 1152 unbatched `cublasGemmEx` launches/decode-step (16 heads
+  × 2 CFG × 18 layers × 2), each a GEMV-as-GEMM at Sq=1; fixed via `cublasGemmStridedBatchedEx` (~32× fewer
+  launches): 350–800s → 44–66s.
+
+---
+
+## Video-specific bugs
+
+- **LTX-2 `rope_type = "split"` vs interleaved:** the 22B config declares `split` (rotates two halves
+  within each head, compact `dim/2` front-padded freqs) but only interleaved was implemented → persistent
+  32-px lattice identical at 8 and 30 steps (colors survive because text cross-attn carries no RoPE). Key
+  diagnostic: **a grid identical across step counts rules out under-denoising** and points at RoPE/VAE.
+- **Caption projection rank-3 bug:** read the batch dim (`Shape[0]=1`) as token count, collapsing the
+  caption to one token + GPU OOB write. Derive length from `ElementCount / lastDim`. Also truncate T5
+  padding (unmasked ~120 PAD tokens dilute the caption).
+- See CausalConv3d OOB and Concat-graph bloat under [CUDA kernel pitfalls](#cuda--ptx-kernel-pitfalls--toolchain)
+  and [GPU residency](#gpu-residency--throughput-cuda) — both first surfaced on video VAEs.
+
+---
+
+## 3D / mesh bugs
+
+- **TRELLIS `SparseDownsample`** = `scatter_reduce(reduce='mean', include_self=True)` → divides by
+  **count+1** (zero self is in the mean), not count. A first-principles numpy port made the same mistake so
+  it passed — only the real model exposed it.
+- **TripoSR:** DINO pos-embed `+0.1`; a CUDA activation-cache reshape-identity bug; the triplane density
+  decode host-loop (see GPU residency).
+- **Hunyuan3D:** `Concat` per-slice memcpy graph bloat (see GPU residency); timestep `max_period=1000`.
+
+---
+
+## Vision / detection porting traps
+
+- **Don't trust the class name — grep `class XYZ(` for the actual parent.** YOLO11 `C3k` inherits `C3`
+  (3 convs, parallel cv1/cv2 both taking input), not `C2f` (expand→split→chain→concat). Wrong parent →
+  wrong structure and weight keys.
+- **Don't trust a default parameter because "every other call uses it."** Ultralytics `C2f`/`C3k` override
+  Bottleneck `e=1.0`, but `C3k2(c3k=False)` uses default `e=0.5` (hidden compresses by half). The loader
+  used actual tensor shapes so it didn't error at load — the mismatch surfaced as silent wrong output.
+  Dump actual checkpoint tensor shapes per block type and verify against assumed channel widths first.
+- **YOLO11 class branch uses depthwise-separable convs** (`DWConv 3×3 + Conv 1×1`) where YOLOv8 used plain
+  convs — different key nesting, needs `Conv2dDepthwise` (weight `[C,1,kH,kW]`). Reusable for
+  MobileNet/DINOv2 patch embed.
+- **Verify what the transformer's `Forward` actually consumes — don't infer from the diffusers pipeline
+  ctor signature.** Hunyuan Image 2.1 took a `ClipTextEncoder` param never used (no pooled conditioning);
+  the model uses per-token T5-XXL + optional ByT5.
+
+---
+
+## Serving / production
+
+- **`AccessViolationException`/corrupted-state exceptions from native code are uncatchable in .NET Core**
+  — the process dies before any handler (incl. exception middleware) runs. Requires external process
+  supervision (`Restart=always`), not a code fix. Verified live: a CPU-backend MoE kernel bug killed the
+  whole process.
+- **Decode-round fault isolation:** an exception escaping `DynamicBatchScheduler`'s decode round previously
+  killed the model's background loop silently — no crash, no log, every future request to that model hung
+  forever. Wrap the round to fail only that round's sequences.
+- **`/ready` must check real state** (`ModelManager.UnhealthyChatModels`/`IsLoopAlive`) — an unconditional
+  200 made a dead scheduler loop look healthy. Keep `/health` cheap/dependency-free (k8s split).
+- **`PagedKvCache.Gather` scratch realloc bug:** the size check was "changed at all" instead of "too
+  small," reallocating a full GPU tensor every decode round for every sequence → grow-only, page-rounded
+  fix.
+- **CUDA-graph cold-capture bug:** the first-ever capture failed `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`
+  due to weight auto-promotion during capture — hidden because every prior test warmed the backend with an
+  eager call first.
+- **MoE D2H-sync bug (open, high-sev):** olmoe/granite-moe do per-token host routing readback (2193–3225
+  syncs/rep), invalidating the tok/s number and blocking graph decode. On-device MoE routing is the fix
+  (tracked in ROADMAP).

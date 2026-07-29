@@ -1,7 +1,7 @@
 # Hunyuan-GameCraft 1.0 — Research Notes
 
 > 🏗️ **Build status (2026-06-15): BUILT end-to-end — structural, numerics validation-pending.** See
-> [PHASE_10_INTERACTIVE.md §7](../Checklists/PHASE_10_INTERACTIVE.md). **Implementation decision:** the engine
+> [MODEL_STATUS_WORLD.md §7](../Checklists/MODEL_STATUS_WORLD.md). **Implementation decision:** the engine
 > applies **NO license gate** — it's MIT, ships no weights/Tencent code, and the user supplies weights into
 > `/Models` like every other model (weight-license compliance is the user's responsibility). The "License Warning"
 > and license-gate code in this doc are **reference only** and were NOT implemented. The model reuses the existing
@@ -591,5 +591,5 @@ The reference image plays no further role after chunk 0. Action symbol `a_N` and
 13. **Streaming output.** The natural API is `async IAsyncEnumerable<VideoChunk>` yielding one 33-frame chunk at a time, with the caller supplying the next action via a callback or queue. Match the native `HartsyInference.LLM` streaming token API where possible for consistency.
 14. **Validation.** Reproduce the first frame of `asset/village.png + "w 0.2"` exactly (within bf16 tolerance) against the Python reference. Numeric tolerance budget: max-abs ≤ 1e-2 on the final decoded RGB frame after one chunk; mean-abs ≤ 1e-3. (Tight because flow-matching + CFG amplifies small precision errors over 50 steps.)
 15. **Sample app.** `samples/HunyuanGameCraft.Interactive/` — a console app that takes `--reference-image`, `--prompt`, and reads action keys from stdin (`w/a/s/d`) to produce chunks on demand. Must display the license warning before doing anything.
-16. **Documentation in `docs/Checklists/PHASE_10_INTERACTIVE.md`** must call out the license gate as a separate checklist item from "implement transformer" / "implement CameraNet" / "implement VAE decode."
+16. **Documentation in `docs/Checklists/MODEL_STATUS_WORLD.md`** must call out the license gate as a separate checklist item from "implement transformer" / "implement CameraNet" / "implement VAE decode."
 17. **Do not** auto-resolve the model on `dotnet add package HartsyInference.World.HunyuanGameCraft`. The first call into the package must explain how to acquire weights with full license context.

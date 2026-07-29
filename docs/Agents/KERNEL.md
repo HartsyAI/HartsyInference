@@ -1,121 +1,70 @@
-# Kernel Agent
+# Kernel & GPU-Performance Agent
 
-> Write high-performance SIMD CPU kernels, CUDA PTX GPU kernels, and Vulkan SPIR-V compute shaders.
+> Write and optimize compute kernels — CPU SIMD, CUDA PTX, Vulkan SPIR-V — and the GPU math behind them.
+> Assumes you've read `AGENTS.md` + `docs/CODE_STYLE.md`. Kernel pitfalls are catalogued in
+> `docs/Checklists/TROUBLESHOOTING.md`; the open kernel-perf backlog is in `docs/Checklists/ROADMAP.md §2`.
+> Research references: `docs/Research/{CUDA_AND_PTX,CONV2D_CUDA,CUDA_PERFORMANCE,SIMD_INTRINSICS_DOTNET,
+> SPIRV_COMPUTE_SHADERS,VULKAN_COMPUTE_API,VULKAN_MEMORY_MANAGEMENT}.md`.
 
-## Extra Reading
-- `docs/Design/IMPLEMENTATION_DETAILS.md`
-- `docs/Research/DOTLLM_ARCHITECTURE.md` — SIMD dispatch, PTX from disk, `nint` handles, `stackalloc` args (historical study that informed the engine's native patterns; not a live dependency)
-- `docs/Research/SIMD_INTRINSICS_DOTNET.md`
-- `docs/Research/CUDA_AND_PTX.md` — CUDA Driver API + PTX kernel patterns (current implementation)
-- `docs/Research/CONV2D_CUDA.md`, `docs/Research/CUDA_PERFORMANCE.md`
-- `docs/Research/VULKAN_COMPUTE_API.md` — Vulkan instance/device, P/Invoke surface, sync2 (Phase 3.5)
-- `docs/Research/SPIRV_COMPUTE_SHADERS.md` — GLSL → SPIR-V kernel patterns, tiled GEMM design (Phase 3.5)
-- `docs/Research/VULKAN_MEMORY_MANAGEMENT.md` — slab allocator, weight cache, descriptor management (Phase 3.5)
-- `docs/Checklists/PHASE_3_5_VULKAN_BACKEND.md` — Phase 3.5 build plan, sequenced
-- Relevant research docs and existing kernel code
+Every kernel needs a **scalar fallback** and **FP32 accumulation even for FP16 inputs**. Validate every new
+kernel against the CPU reference within tolerance before shipping.
 
-## CPU Kernel Workflow
-1. Understand math → write scalar reference
-2. AVX2 path (`Vector256<float>`) → AVX-512 if beneficial (`Vector512<float>`)
-3. SimdDispatch: `Vector512` → `Vector256` → scalar
-4. Validate vs scalar within tolerance
+## CUDA / PTX
 
-**Standards:** Mandatory scalar fallback. `Span<T>` in public API; `TensorPrimitives` when available. Handle tail elements. Accumulate FP32 even with FP16 inputs. `[AggressiveInlining]` on small helpers. Cross-platform vector types preferred.
-
-**Pitfalls:** Forgotten tail elements, FP16 accumulation, cache-unfriendly im2col, padding/stride edge cases, AVX-512 downclocking.
-
-## PTX Kernel Workflow
-1. Understand math → design tiling → write `.cu` → compile `nvcc -ptx -arch=compute_80`
-2. Ship as content file (not embedded resource)
-3. Write C# launch wrapper (see `AGENTS.md` CUDA Launch Pattern)
-4. Store handle as `nint` field (not dictionary)
-5. Validate vs CPU within FP16 tolerance
-
-**Standards:** Target `sm_80` minimum (forward-compatible). FP16 arithmetic for throughput. Shared memory tiling for memory-bound kernels. Avoid bank conflicts. Warp shuffle (`shfl.sync`) for reductions. BlockSize typically 256. Consider fusion: GroupNorm+SiLU, Conv2D+bias+activation, fused attention.
-
-**Loading Pattern:**
 ```csharp
-public sealed class CudaKernels : IDisposable
-{
-    private readonly nint _groupNormModule;
-    private readonly nint _groupNormF16Func;
-    public CudaKernels(string ptxDir)
-    {
-        _groupNormModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "group_norm.ptx"));
-        _groupNormF16Func = _groupNormModule.GetFunction("group_norm_f16");
-    }
-}
+// ✅ launch args are LOCALS whose addresses are stable; handle is an nint field; PTX loaded from disk
+void** args = stackalloc void*[4];
+args[0] = &outArg; args[1] = &aArg; args[2] = &bArg; args[3] = &countArg;   // CudaKernels.cs:786
+CudaDriverApi.cuLaunchKernel(func, grid,1,1, 256,1,1, 0, stream, (nint)args, 0).ThrowOnError();
+// ❌ taking the address of a field/property, or storing handles in Dictionary<string,nint>
+void** bad = stackalloc void*[] { &this.OutputPtr };   // unstable address → corruption
 ```
 
-**Pitfalls:** Bank conflicts, missing `bar.sync`, wrong grid/block, register spilling, non-multiple tile sizes. See "Known PTX Pitfalls" below for bugs that have bitten us.
+- `.cu` sources live in `native/cuda/{attention,conv,dit,lm,dequant,vision,wan,audio}/`; compile
+  `nvcc -ptx -arch=compute_80` (target `sm_80` minimum) and **ship the `.ptx` as a content file**
+  (`<Content Include="Ptx\*.ptx" CopyToOutputDirectory="PreserveNewest" .../>`), loaded at runtime via
+  `CudaModule.LoadFromFile` → `GetFunction` — never an embedded resource. Store each handle as an `nint`
+  field. Verify every emitted PTX starts `.version 9.0` (driver JIT caps there — see TROUBLESHOOTING §Toolchain).
 
-## SPIR-V Kernel Workflow
-> Authoritative references: [SPIRV_COMPUTE_SHADERS.md](../Research/SPIRV_COMPUTE_SHADERS.md), [VULKAN_COMPUTE_API.md](../Research/VULKAN_COMPUTE_API.md), [VULKAN_MEMORY_MANAGEMENT.md](../Research/VULKAN_MEMORY_MANAGEMENT.md), [PHASE_3_5_VULKAN_BACKEND.md](../Checklists/PHASE_3_5_VULKAN_BACKEND.md). The patterns below are summary; consult the research docs for exact P/Invoke shapes, struct layouts, kernel skeletons, and validation tolerances.
+```c
+// ✅ 64-bit indexing for any spatial kernel at ≥1024² (C·kH·kW·outH·outW overflows u32 → illegal address)
+size_t idx = (size_t)c * kH * kW * outH * outW + ...;
+// ✅ a gated activation splits on the LAST dim — decompose the flat index; test a multi-row [2,2,2D] tensor
+int outerIdx = i / D, d = i % D; float x = in[outerIdx*2*D + d], g = in[outerIdx*2*D + d + D];
+// ❌ flat-midpoint split (in[i], in[i+N]) — correct only for one row, garbles everything else
+```
 
-1. Write `.comp.glsl` with spec-constant workgroup size (`local_size_x_id = 0`) → compile `glslangValidator --target-env vulkan1.3 -S comp -V -O`. `spirv-val` after to fail fast.
-2. Ship as content file under `Spirv/`. Build SPIR-V from `native/vulkan/build.sh` invoked via MSBuild target.
-3. Build pipeline via `vkCreateShaderModule` + `vkCreateComputePipelines` with `VkSpecializationInfo` (tile sizes, dtype flags) and `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` (pin wave size). Cache `VkPipeline` in `Dictionary<KernelKey, ulong>`. Persist `VkPipelineCache` blob to disk.
-4. Pre-build `VkDescriptorSetLayout` + `VkPipelineLayout` for each binding shape (`L_2SSBO`, `L_3SSBO`, `L_4SSBO`, `L_5SSBO`, `L_3SSBO_QKV`). Prefer `VK_KHR_push_descriptor` when supported; pool ring fallback otherwise.
-5. Per dispatch: `vkCmdBindPipeline` + push descriptors / `vkCmdBindDescriptorSets` + `vkCmdPushConstants` + `vkCmdDispatch` + `VkBufferMemoryBarrier2` on output buffer.
-6. Validate vs CPU within 1e-3 (FP16) / 1e-5 (FP32). Validate vs CUDA within 1e-3 on the same NVIDIA HW.
+- Stream/memory: non-blocking streams race with a synchronous `cuMemcpyHtoD`; `cuMemFreeAsync` is deferred,
+  so `Sync()` at stage boundaries + add an OOM-retry; before re-`CacheActivation` on an **in-place** op, null
+  `_gpuSyncCallback`/`_gpuDisposeCallback` first. Never read `weight.DataPointer` after preload.
 
-**Standards:** Target **Vulkan 1.3**. Required device features: `shaderFloat16`, `storageBuffer16BitAccess`, `subgroupSizeControl`, `computeFullSubgroups`, `synchronization2`. Required subgroup ops: `ARITHMETIC | SHUFFLE | SHUFFLE_RELATIVE`. `subgroupAdd`/`subgroupShuffleXor` for reductions. **Always pin `requiredSubgroupSize`** so `gl_SubgroupSize` becomes a compile-time constant — subgroup size varies (32 NVIDIA / Intel Arc, 32 or 64 AMD RDNA, 64 AMD GCN, 8–32 Intel iGPU). `shared` memory + `barrier(); memoryBarrierShared();` for workgroup sync. Push constants ≤128 bytes. Storage buffers for all tensor data. **Always FP32-accumulate** even for FP16 inputs.
+## CPU SIMD & Vulkan SPIR-V
 
-**SPIR-V vs PTX:** No cuBLAS — single `matmul_tiled.comp.glsl` (CUTLASS-style 128×128×16 tile, FP16 inputs / FP32 accum) replaces every `cublasGemmEx`; build N variants via spec consts (transpose, dtype, bias, fused activation). Runtime workgroup size via `local_size_*_id` spec consts. Explicit `barrier(); memoryBarrierShared();` for shared-memory writes-then-reads. Per-buffer `VkBufferMemoryBarrier2` between dispatches (sync2). Push constants 128 B hard cap.
+- **SIMD**: `Vector512` → `Vector256` → scalar via `SimdDispatch`; always handle the tail; use
+  `TensorPrimitives` where it exists; `[AggressiveInlining]` on small helpers. Watch AVX-512 downclocking.
+- **SPIR-V**: target Vulkan 1.3; **pin `requiredSubgroupSize`** (8–64 across vendors — a cross-subgroup
+  reduction silently drops partials otherwise); `barrier(); memoryBarrierShared();` after shared writes;
+  push constants ≤128 B; per-buffer `VkBufferMemoryBarrier2` (sync2). One `matmul_tiled.comp.glsl` with spec
+  constants replaces every `cublasGemmEx`. **Kernel dtype selection follows the OUTPUT tensor, not the
+  inputs** (an F16-only guard leaves an F32-output pipeline running the scalar path). Tile-size starting
+  points are per-vendor — see `SPIRV_COMPUTE_SHADERS.md § Tile-size tuning`.
 
-**Tile-size starting points** (per vendor, override per kernel as profiling dictates): NVIDIA 128×128×16 / `local_size=(16,16,1)`; AMD wave32 128×64×16 / same; AMD wave64 64×64×16 / same; Intel Arc 64×64×16 / `local_size=(8,8,1)`; Apple MoltenVK 32×32×16. See [SPIRV_COMPUTE_SHADERS.md § Tile-size tuning](../Research/SPIRV_COMPUTE_SHADERS.md#tile-size-tuning-per-vendor).
+## Performance
 
-**Pitfalls:** Fixed subgroup-size assumption (without `requiredSubgroupSize` AMD may pick wave64 when shader assumes 32). Missing `memoryBarrierShared()` after writing `shared` memory. Push-constant overflow > 128 B (silent on dev HW, fails on spec-minimum HW). Descriptor pool exhaustion (use push descriptors). 32-bit indexing overflow in spatial kernels at 1024+ resolution (use `GL_EXT_shader_explicit_arithmetic_types_int64`). Last-dim-vs-flat split bug for GEGLU/SwiGLU (regressed in PTX, must not regress in GLSL — multi-row test mandatory). FP16 accumulator instead of FP32. Forgetting `vkFlushMappedMemoryRanges` on non-coherent staging upload. Cache invalidation: in-place GPU ops must clear the activation cache callback before re-caching the same buffer (mirror PTX deviation #17).
+- **Profile before optimizing** — don't guess the bottleneck; instrument *every* op (an uninstrumented
+  Concat or host glue op has hidden the real wall repeatedly). Memory access dominates compute; optimize the
+  hot inner loop, not setup. Isolated-kernel `ncu` "Est. Speedup" over-states co-limited kernels — confirm
+  end-to-end it/s or tok/s. Pin the GPU: `CUDA_DEVICE_ORDER=PCI_BUS_ID` (not just `CUDA_VISIBLE_DEVICES`, which
+  defaults to fastest-first and silently picks the wrong card).
+- Priority order: kernel fusion (GroupNorm+SiLU, Conv+bias+act ~1.5–2×) → FP16 / Tensor-Cores ~1.5–2× →
+  activation `cuMemPool` → CUDA-graph capture (only helps when host-launch-bound) → FlashAttention-style SDPA.
 
-## GPU Performance Optimization
+```csharp
+// ✅ benchmarks are tagged so CPU-only CI skips them; results are archived, not just printed
+[Trait("Category", "GpuIntegration")] // or "Slow" / a bench-specific trait
+// BenchmarkDotNet: [MemoryDiagnoser], [SimpleJob(RuntimeMoniker.Net100)], [Params] over sizes.
+// Write results to benchmarks/results/YYYY-MM-DD_component.md with hw/driver/.NET + gap-vs-reference.
+```
 
-See `docs/Research/CUDA_PERFORMANCE.md` for the full optimization roadmap.
-
-### Current State: Phase 2 Complete
-
-The `CudaBackend` uses lazy-sync activation caching with GPU kernels for all major ops. Per-op `cuStreamSynchronize` has been removed. Weight cache + activation cache give **82.6% hit rate** (~7,300 hits, ~1,500 misses per SDXL step). Current: **~53s/step at 1024x1024** (down from ~93s Phase 1, ~100s Phase 0).
-
-**GPU kernels added in Phase 2**: `transpose_2d_f32` (batched 2D transpose), `permute_0213_f32` (multi-head attention reshape), `geglu_f32` (gated activation), `broadcast_add_f32` (broadcast add with channel indexing).
-
-### Priority Optimizations (Next)
-
-1. **Kernel Fusion** (~1.5-2x): GroupNorm+SiLU, Conv2D+Bias+SiLU, Residual Add in-place. Reduces kernel launch overhead and memory bandwidth.
-2. **FP16 Inference** (~1.5-2x): HGEMM, `f16x2` packed PTX arithmetic, FP32 accumulation. Unlocks Tensor Cores.
-3. **Memory Pool** (moderate): `cuMemPool` for activation memory. Eliminates per-op alloc/free overhead.
-4. **cuDNN Conv2D** (optional, ~2-3x for conv): Winograd 3x3, eliminates large im2col temp buffers.
-5. **FlashAttention-style SDPA** (moderate): Tiled attention with online softmax, reduced memory bandwidth.
-
-### Known PTX Pitfalls
-
-These are bugs that have actually bitten us. Check for them first when writing new kernels.
-
-- **64-bit indexing required** for spatial kernels at 1024+ resolution. Products of `channels × kernel × outH × outW` overflow `u32`. Use `cvt.u64.u32` + `mul.lo.u64` for thread ID and element count. See `PHASE_3_DEVIATIONS.md` #12.
-
-- **Last-dimension split for gated activations (GEGLU/SwiGLU/GLU)**: When a kernel splits `[..., 2*D]` along the last dim, you CANNOT use flat indexing (`input[i]` and `input[i + totalOutput]`). Decompose each thread's output index: `outerIdx = i / D`, `d = i % D`, then `inputX = outerIdx * 2*D + d`, `inputGate = inputX + D`. A flat midpoint split is only correct for 1D/single-row tensors. Test with multi-row inputs like `[2, 2, 2*D]` to catch this. See `PHASE_3_DEVIATIONS.md` #16.
-
-- **Non-blocking streams** cause race conditions with synchronous `cuMemcpyHtoD` (operates on NULL stream). Use blocking streams or async copies on the compute stream. See `PHASE_3_DEVIATIONS.md` #19.
-
-- **`cuMemFreeAsync` deferred cleanup**: Memory freed with `FreeAsync` is NOT immediately available. At pipeline stage boundaries (e.g., freeing model weights before loading another model), must `cuStreamSynchronize` first to flush pending frees. Add OOM retry logic in allocators. See `PHASE_3_DEVIATIONS.md` #18.
-
-- **In-place GPU ops and activation cache**: When a kernel modifies a tensor's GPU buffer in-place, the tensor's old `_gpuSyncCallback`/`_gpuDisposeCallback` (from prior `CacheActivation`) must be cleared to `null` BEFORE calling `CacheActivation` again. Otherwise the old callback fires and `FreeAsync`s the pointer being re-cached. See `PHASE_3_DEVIATIONS.md` #17.
-
-- **Weight DataPointer access**: After GPU weight preloading + CPU disposal, model code must NEVER access `weight.DataPointer` directly. All weight access must go through `IBackend` ops (which use GPU cache). See `PHASE_3_DEVIATIONS.md` #14-15.
-
-## Validation Tolerances
-
-| Kernel Type | Reference | Tolerance |
-|---|---|---|
-| CPU FP32 SIMD | CPU scalar | 1e-5 |
-| CPU FP16 SIMD | CPU scalar | 1e-3 |
-| CUDA FP32 PTX | CPU kernel | 1e-5 |
-| CUDA FP16 PTX | CPU kernel | 1e-3 |
-| CUDA cuBLAS | CPU matmul | 1e-3 |
-| Vulkan SPIR-V | CUDA PTX | 1e-3 |
-| Fused kernel | Unfused ops (same backend) | 1e-3 |
-
-### Measured GPU Accuracy
-
-| Model | avg_err | max_err |
-|---|---|---|
-| SD1.5 UNet (GPU vs CPU) | 5.188E-007 | — |
-| SDXL UNet (GPU vs CPU) | 5.510E-007 | 8.821E-006 |
+Validation tolerances: CPU FP32 `1e-5` / FP16 `1e-3`; CUDA-vs-CPU same; SPIR-V-vs-CUDA `1e-3`;
+fused-vs-unfused `1e-3`.

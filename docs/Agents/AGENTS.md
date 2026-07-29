@@ -5,35 +5,30 @@
 ## Before Any Task
 
 1. Read `docs/CODE_STYLE.md` — mandatory, no exceptions
-2. Read `docs/Design/CORE_DESIGN.md` — architecture overview
-3. Check `docs/Checklists/` — find the active phase (earliest with unchecked items)
+2. Read the **Shared Design Rules** + **Core Engine Patterns** below — the architecture single source of
+   truth (they replace the old `docs/Design/` overview; the design folder was retired)
+3. Check `docs/Checklists/` — cross-cutting open work is in `ROADMAP.md`; per-model open work is in the
+   `Remaining work` section of the matching `MODEL_STATUS_*` doc; `TROUBLESHOOTING.md` is the model
+   bring-up debugging reference (read it first when a model is wrong, crashes, or is slow)
 4. For model coverage, read the per-modality status docs indexed in `docs/Checklists/MODEL_STATUS.md`
    (Image / Audio / Video / World / 3D / Vision / LLM); `docs/Checklists/PARITY_VERIFICATION.md` is the
    real-weight parity authority
 
 ## Task Routing
 
-Pick the specialized agent file that matches your task. Read it before starting work.
+Pick the specialized agent file that matches your task. Read it before starting work. Each file is
+example-driven (✅ good / ❌ bad) and assumes you have already read this core + `docs/CODE_STYLE.md`.
 
 | Task | Agent File |
 |---|---|
-| Research a topic | `RESEARCH.md` |
-| Plan an implementation | `ARCHITECT.md` |
-| Write implementation code | `BUILDER.md` |
-| Write SIMD/PTX/SPIR-V kernels | `KERNEL.md` |
-| Write or run tests | `TESTER.md` |
-| Review code | `REVIEWER.md` |
-| Debug a failure | `DEBUG.md` |
-| Refactor or optimize | `REFACTOR.md` |
-| Extend the public library API / SwarmUI-extension surface | `API.md` |
-| Wire cross-package integration | `INTEGRATION.md` |
-| Convert model formats | `CONVERT.md` |
-| Run benchmarks | `BENCHMARK.md` |
-| Update docs/README | `DOCS.md` |
-| Update checklists | `CHECKLIST.md` |
-| Package for NuGet | `DEPLOY.md` |
+| Add a new model (any modality) | `ADD_MODEL.md` |
+| Build a new non-model feature (engine, CLI, API, extension) | `BUILD_FEATURE.md` |
+| Review / audit code for correctness & quality | `AUDIT.md` |
+| GPU math, SIMD/PTX/SPIR-V kernels & performance | `KERNEL.md` |
+| Research a topic in depth before implementing | `RESEARCH.md` |
+| Cleanup, formatting, doc/checklist upkeep, NuGet packaging | `CLEANUP.md` |
 
-If your task spans multiple agents (e.g., build + test), load both files.
+If your task spans two agents (e.g. add a model *and* write its kernel), load both files.
 
 ## Shared Design Rules
 
@@ -47,7 +42,7 @@ These apply to ALL agents. Specialized files only add task-specific rules.
 
 **IBackend abstraction** — model code never calls CPU/CUDA/Vulkan directly. Each backend delegates to static kernels.
 
-**Package boundaries** — respect `docs/Design/NUGET_PACKAGE_DESIGN.md`. Don't leak CUDA/Vulkan into CPU packages.
+**Package boundaries** — one folder per NuGet package under `src/`; the dependency direction is one-way (`Core` ← modality packages ← `Engine` ← CLI/API/extension). Don't leak CUDA/Vulkan into CPU-only packages (`HartsyInference.Core`, model packages) — GPU code lives behind `IBackend` in the backend packages. When unsure, match the package a sibling model/feature already lives in.
 
 **Reuse shared primitives — no redundant bloat.** The backend is modular *so that models share it*. Before writing ANY helper (inline or a new shared one), grep for an existing primitive: `IBackend` ops first (`Transpose2D`, `Conv1d`/`ConvTranspose1d`, `Snake`, `Silu`, `GroupNorm`, `ScaledDotProductAttention`, …), then the shared statics (`WhisperOps` for `ProjectLinear`/`EnsureF32`, `WeightNorm`, `IStft`, and `HartsyInference.Audio/Dsp/` → `NsfVocoderDsp` for NSF source / forward-STFT / iSTFT head / pad / scale, `DeterministicRng` for seeded noise). Concrete: a `[1,C,T]↔[1,T,C]` layout transpose is `backend.Transpose2D(out, in, d1, d2)` — never a hand-rolled loop. When 2+ models need the same operation, hoist ONE helper **parameterized by the differences** (a few extra params or a `switch` beats a dozen near-identical small methods). When adding a model, audit it for duplication against the models already built and fold the shared parts. Re-run affected models' tests after hoisting — shared code is load-bearing.
 
@@ -125,7 +120,7 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 - `FreeDevice` uses `cuMemFreeAsync` (stream-ordered) — memory is NOT immediately reclaimed
 - **In-place ops**: When modifying a tensor's GPU buffer in-place (BroadcastAdd, etc.), clear `_gpuSyncCallback` and `_gpuDisposeCallback` to `null` BEFORE calling `CacheActivation`. Old callbacks close over the GPU pointer and will free it.
 - **OOM retry**: `CudaMemory.Allocate` syncs the stream on `CUDA_ERROR_OUT_OF_MEMORY` to flush pending `FreeAsync` ops, then retries
-- **Gated activations (GEGLU/SwiGLU)**: Split along last dimension, NOT at flat midpoint. See `PHASE_3_DEVIATIONS.md` #16.
+- **Gated activations (GEGLU/SwiGLU)**: Split along last dimension, NOT at flat midpoint. See `TROUBLESHOOTING.md` #16.
 
 ### What NOT to Do
 - No Python/C++ wrappers, ONNX Runtime, managed GPU wrappers

@@ -37,7 +37,7 @@ HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpo
 | **Modular NuGet** | Pull in only the modality you need — `HartsyInference.Diffusion` for images, `HartsyInference.Audio` for speech, etc. |
 | **Validated** | Every component matches a Python/C++ reference within documented tolerances. |
 | **World models** | Real-time, action-conditioned interactive generation (keyboard / mouse / camera-pose → streamed frames). |
-| **Runs models bigger than your GPU** | VRAM-aware weight streaming: the engine measures free VRAM per generation phase and streams a denoiser's blocks from host RAM only when the model would not otherwise fit. A 12 GB card runs models needing ~20 GB resident. Automatic by default, and switchable off for operators who prefer a hard failure — see [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). |
+| **Runs models bigger than your GPU** | VRAM-aware weight streaming: the engine measures free VRAM per generation phase and streams a denoiser's blocks from host RAM only when the model would not otherwise fit. A 12 GB card runs models needing ~20 GB resident. Automatic by default, and switchable off for operators who prefer a hard failure. |
 | **Production-grade** | Streaming progress, memory budgeting, VRAM monitoring, model hot-swap. |
 | **SwarmUI-native** | Ships as a first-class [SwarmUI backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend), a pure-C# alternative to the ComfyUI backend. |
 
@@ -53,7 +53,7 @@ HartsyInference does not ship its own front-end. There are a few ways to run it,
 
 **3. Sample CLI (developer tool).** The bundled [`hartsy` CLI](#quick-start-cli-developer-tool) drives every modality from the terminal — the fastest way to verify a checkpoint end-to-end. It's a development/validation tool, not the intended end-user surface.
 
-**4. OpenAI-compatible HTTP server.** `HartsyInference.API` hosts an OpenAI-shaped REST API: `/v1/chat/completions` (LLM/SSM chat — streaming, non-streaming, and JSON-mode — with **continuous batching** and a **paged KV cache**), `/v1/images/generations` (+ a streaming variant), and `/v1/models` load / list / pull / unload. Audio and image-edit routes are shaped for API completeness but return `501` until wired. It runs from source (`IsPackable=false`), CPU by default; set `HartsyInference:Backend=Cuda` + `HartsyInference:PtxDirectory` for GPU. See [`PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what's left before it's published.
+**4. OpenAI-compatible HTTP server.** `HartsyInference.API` hosts an OpenAI-shaped REST API: `/v1/chat/completions` (LLM/SSM chat — streaming, non-streaming, and JSON-mode — with **continuous batching** and a **paged KV cache**), `/v1/images/generations` (+ a streaming variant), and `/v1/models` load / list / pull / unload. Audio and image-edit routes are shaped for API completeness but return `501` until wired. It runs from source (`IsPackable=false`), CPU by default; set `HartsyInference:Backend=Cuda` + `HartsyInference:PtxDirectory` for GPU. See [`ROADMAP.md`](docs/Checklists/ROADMAP.md) for what's left before it's published.
 
 ```bash
 dotnet run --project src/HartsyInference.API -c Release --urls http://127.0.0.1:8080
@@ -308,7 +308,7 @@ await foreach (VideoFrame frame in session.ReadFramesAsync())
 
 ## Benchmarks
 
-We publish real numbers and we are honest about where we stand. HartsyInference is a young pure-C# engine: it is correct across a very wide model set, and on several flagship image models it is now **faster than ComfyUI on the same GPU** — while other models are still mid-optimization. We are closing the remaining gaps in the open. Each modality has one canonical scoreboard table under [`benchmarks/scoreboards/`](benchmarks/scoreboards/) — that's where the numbers live now; the exact methodology, required libraries, and the engine's default performance profile are specified in the **[Performance Guide](docs/PERFORMANCE.md)**.
+We publish real numbers and we are honest about where we stand. HartsyInference is a young pure-C# engine: it is correct across a very wide model set, and on several flagship image models it is now **faster than ComfyUI on the same GPU** — while other models are still mid-optimization. We are closing the remaining gaps in the open. Each modality has one canonical scoreboard table under [`benchmarks/scoreboards/`](benchmarks/scoreboards/) — that's where the numbers, methodology, and sources live now.
 
 **Headlines** (see each scoreboard for the full per-model table, GPU, date, and source):
 
@@ -320,11 +320,11 @@ We publish real numbers and we are honest about where we stand. HartsyInference 
 | Audio (TTS / STT / Music / VC / Fx) | Model-specific Python reference or self-comparison — no shared engine exists for audio | RTF up to ~15× real-time on the fastest STT models; several TTS models still sub-real-time | [`AUDIO.md`](benchmarks/scoreboards/AUDIO.md) |
 | 3D mesh (image → mesh) | Python reference (`tsr`, `hy3dgen`) | Within 1.2-1.6× of the Python reference after a multi-round optimization campaign | [`THREED.md`](benchmarks/scoreboards/THREED.md) |
 
-These times require **zero configuration**: the engine's standard performance profile (cuDNN fused flash attention, fp8 tensor-core GEMM, F16 DiT activations, resident weights, warm activation pool) is default-on with per-feature kill-switches and graceful fallbacks — see the [Performance Guide](docs/PERFORMANCE.md).
+These times require **zero configuration**: the engine's standard performance profile (cuDNN fused flash attention, fp8 tensor-core GEMM, F16 DiT activations, resident weights, warm activation pool) is default-on with per-feature kill-switches and graceful fallbacks.
 
 **Image conditioning features (all verified end-to-end through SwarmUI, 2026-07-16/17):** FLUX.1 Kontext instruction editing, FLUX.1 Fill inpaint/outpaint, FLUX.1 Canny / Depth (with an in-engine Depth-Anything-V2 annotator, parity 2.9e-7 vs the official implementation; the FLUX-Depth conditioning map is numerically exact to BFL's own `DepthImageEncoder`, corr 1.000000), FLUX.1 Redux image variation (SigLIP + projection numerically A/B'd vs `FluxPriorReduxPipeline`, tokens corr 1.000000), and FLUX DiT ControlNet (union + single-mode, parity 3.7e-9 vs diffusers). SDXL + SD1.5 ControlNet with a full in-engine preprocessor set (canny / depth / openpose / lineart / softedge / scribble / normal / **segmentation** — UperNet-ConvNeXt ADE20K, 100% class parity), multi-net stacking, start/end step windows, both diffusers and original LDM checkpoint layouts, plus **union-type SDXL ControlNet** (xinsir controlnet-union ProMax, all residuals corr ≥0.9999998). IP-Adapter across SDXL standard / Plus / Plus-Face, SD1.5, **FaceID** (ArcFace IR-50, cosine 1.000000) and **FaceID-Plus / FaceID-PlusV2** (SD1.5 + SDXL, projection corr 1.000000). Instruction-edit models: OmniGen2, Boogu-Edit, Qwen-Image-Edit 2511. See [`docs/Checklists/MODEL_STATUS_IMAGE.md`](docs/Checklists/MODEL_STATUS_IMAGE.md).
 
-The server (`HartsyInference.API`) additionally supports **continuous batching** for LLMs — concurrently-submitted requests against the same model share decode rounds instead of running one at a time — and a **paged KV cache**, both independent of graph decode. LLM details: [`LLM_THROUGHPUT_BENCHMARK.md`](docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) + [`LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md). Audio full-fleet verification methodology and per-model bug writeups: [`AUDIO_THROUGHPUT_BENCHMARK.md`](docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md). GPU op microbenchmarks (MatMul / Conv2D / norm / SDPA / elementwise vs PyTorch) reproduce via [`benchmarks/README.md`](benchmarks/README.md).
+The server (`HartsyInference.API`) additionally supports **continuous batching** for LLMs — concurrently-submitted requests against the same model share decode rounds instead of running one at a time — and a **paged KV cache**, both independent of graph decode. LLM details: [`ROADMAP.md`](docs/Checklists/ROADMAP.md) + [`ROADMAP.md`](docs/Checklists/ROADMAP.md). Audio full-fleet verification methodology and per-model bug writeups: [`ROADMAP.md`](docs/Checklists/ROADMAP.md). GPU op microbenchmarks (MatMul / Conv2D / norm / SDPA / elementwise vs PyTorch) reproduce via [`benchmarks/README.md`](benchmarks/README.md).
 
 ---
 
@@ -334,7 +334,7 @@ The engine covers a very wide model set across every modality. The **[benchmark 
 
 | Modality | Breadth (representative) | Status doc |
 |---|---|---|
-| **Language / LLM** | Llama, Qwen2/Qwen3, Gemma 2/3/4, Phi, Mistral (dense); Qwen3.5 gated-DeltaNet hybrid; MoE/MLA giants (Mixtral, Qwen3-MoE, DeepSeek-V3, Kimi-K2, GPT-OSS); VLMs; embeddings/rerankers; Mamba/RWKV/T5 — quantized GGUF throughout | [MODEL_STATUS_LLM](docs/Checklists/MODEL_STATUS_LLM.md) · [coverage](docs/Checklists/LLM_MODEL_COVERAGE.md) |
+| **Language / LLM** | Llama, Qwen2/Qwen3, Gemma 2/3/4, Phi, Mistral (dense); Qwen3.5 gated-DeltaNet hybrid; MoE/MLA giants (Mixtral, Qwen3-MoE, DeepSeek-V3, Kimi-K2, GPT-OSS); VLMs; embeddings/rerankers; Mamba/RWKV/T5 — quantized GGUF throughout | [MODEL_STATUS_LLM](docs/Checklists/MODEL_STATUS_LLM.md) · [coverage](docs/Checklists/MODEL_STATUS_LLM.md) |
 | **Image** | SD1.5 / SDXL (UNet); Flux.1/.2, SD3, Chroma / Radiance, Qwen-Image (+ Edit), HunyuanImage, HiDream, AuraFlow, Lumina 2, ERNIE-Image, Kandinsky 5, OmniGen 2, Ideogram 4 (DiT / MMDiT / NextDiT) | [MODEL_STATUS_IMAGE](docs/Checklists/MODEL_STATUS_IMAGE.md) |
 | **Audio & Music** | Whisper / Moonshine (STT); Kokoro, Piper, StyleTTS2, Bark, Spark-TTS, CosyVoice, VibeVoice, MeloTTS, F5-TTS clone (TTS); ACE-Step, MusicGen, YuE, HeartMuLa (music); 9 neural codecs | [MODEL_STATUS_AUDIO](docs/Checklists/MODEL_STATUS_AUDIO.md) |
 | **Vision** | CLIP / SigLIP / DINOv2-3 embeddings; YOLO8 / YOLO11 / RT-DETR / Grounding DINO detection; SAM / SAM 2 / 2.1 segmentation; Depth-Anything-V2 depth estimation; face detection | [MODEL_STATUS_VISION](docs/Checklists/MODEL_STATUS_VISION.md) |
@@ -342,14 +342,14 @@ The engine covers a very wide model set across every modality. The **[benchmark 
 | **3D** | TripoSR, Hunyuan3D-2 (image → mesh; glTF / OBJ / PLY export) | [MODEL_STATUS_3D](docs/Checklists/MODEL_STATUS_3D.md) |
 | **World / interactive** | Oasis, DIAMOND (action-conditioned, real-time, loadable today); Matrix-Game 2.0 / 3.0 and Hunyuan-GameCraft are parity-verified but catalogued only — no `WorldService` loader yet, multi-checkpoint sets 9-51GB | [MODEL_STATUS_WORLD](docs/Checklists/MODEL_STATUS_WORLD.md) |
 
-Index of all status docs: [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md). Cross-modality real-weight parity authority: [`PARITY_VERIFICATION.md`](docs/Checklists/PARITY_VERIFICATION.md). Planned additions: [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md).
+Index of all status docs: [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md). Cross-modality real-weight parity authority: [`PARITY_VERIFICATION.md`](docs/Checklists/PARITY_VERIFICATION.md). Planned additions live in each status doc's **Remaining work** section; cross-cutting engineering work is in [`ROADMAP.md`](docs/Checklists/ROADMAP.md).
 
 ---
 
 ## Future Features
 
 > [!WARNING]
-> These are planned and **not yet implemented**. Tracking lives in the [roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md).
+> These are planned and **not yet implemented**. Tracking lives in [`ROADMAP.md`](docs/Checklists/ROADMAP.md) and each modality's [status doc](docs/Checklists/MODEL_STATUS.md) (Remaining work section).
 
 - **Image:** LCM/Turbo distillation across more architectures; ControlNet tile / inpaint modes; union-type segment / tile / repaint control types (raw-map pass-through wired, dedicated preprocessing pending). *(Shipped 2026-07: IP-Adapter FaceID + FaceID-Plus/PlusV2, Flux-DiT ControlNet, union-type SDXL ControlNet, and the lineart / softedge / normal / segmentation preprocessors — see the image conditioning list above.)*
 - **Vision:** YOLO-World, OWLv2, Florence-2, pose estimation, OCR, tracking. *(Shipped 2026-07: Grounding DINO open-vocab detection, RT-DETR, and Depth-Anything-V2 depth estimation, all real-weight verified end-to-end — see [MODEL_STATUS_VISION](docs/Checklists/MODEL_STATUS_VISION.md).)*
@@ -382,7 +382,7 @@ Index of all status docs: [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md). 
 | `HartsyInference.Cli` | Command-line sample/validation tool (not published as a package) |
 | `HartsyInference.API` | OpenAI-compatible HTTP API host — chat completions (continuous-batched, streaming, JSON-mode), image generation, model management. Runs from source (`IsPackable=false`), not published; see [How to Use It](#how-to-use-it). |
 
-See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependency graph and minimum install examples.
+Each package is one folder under `src/`; the meta **HartsyInference** package pulls in the modality packages (add `HartsyInference.LLM` and `HartsyInference.Audio.Phonemizer` explicitly). GPU code stays behind `IBackend` in the backend packages — CPU-only packages never depend on CUDA/Vulkan.
 
 ---
 
@@ -393,7 +393,7 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
 ### CUDA backend (NVIDIA, fastest)
 - **CUDA 13.x / 12.x** userspace libraries (cuBLAS, cuBLASLt)
 - **NVIDIA GPU** with compute capability 8.0+ (RTX 30xx/40xx, A100, H100); fp8 tensor-core paths need 8.9+ (Ada)
-- **cuDNN 9.21+** (optional) for fused flash attention — without it the engine falls back to materialized attention (slower, identical output). Library locations and resolution order: [Performance Guide §3](docs/PERFORMANCE.md#3-native-library-requirements-and-resolution)
+- **cuDNN 9.21+** (optional) for fused flash attention — without it the engine falls back to materialized attention (slower, identical output).
 
 ### Vulkan backend (NVIDIA / AMD / Intel, cross-vendor)
 - **Vulkan 1.3+ runtime**, almost always pre-installed by the GPU vendor driver
@@ -406,7 +406,7 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
   - **Linux:** `sudo apt install mesa-vulkan-drivers vulkan-tools` (AMD/Intel; NVIDIA blob ships its own ICD)
   - **Windows:** the AMD / Intel / NVIDIA driver ships Vulkan; no extra install
 - Validation layers (optional, for debugging): install the [LunarG Vulkan SDK](https://www.lunarg.com/vulkan-sdk/) and set `HARTSYINFERENCE_VK_VALIDATION=1`.
-- See [PHASE_3_5_VULKAN_BACKEND.md](docs/Checklists/PHASE_3_5_VULKAN_BACKEND.md) for current model support and acceptance status.
+- See [ROADMAP.md](docs/Checklists/ROADMAP.md) for current model support and acceptance status.
 
 </details>
 
@@ -422,15 +422,12 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
 
 | Document | Description |
 |---|---|
-| [Performance Guide](docs/PERFORMANCE.md) | The default performance profile, native library requirements, benchmark methodology |
 | [Benchmark Scoreboards](benchmarks/scoreboards/) | Per-modality HartsyInference-vs-baseline results tables (Image / Video / Audio / LLM / 3D) |
-| [Core Design](docs/Design/CORE_DESIGN.md) | Architecture, design pillars, key decisions, goals/non-goals, per-modality capabilities |
-| [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md) | Full model support plan |
-| [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) | Package breakdown, dependencies, install examples |
-| [File Structure](docs/Design/FILE_STRUCTURE.md) | Full project layout |
-| [Implementation Details](docs/Design/IMPLEMENTATION_DETAILS.md) | Per-component technical approach |
-| [Build Order](docs/Design/BUILD_ORDER.md) | Phase-by-phase implementation sequence |
-| [Validation Strategy](docs/Design/VALIDATION_STRATEGY.md) | Reference implementations and tolerances |
+| [Code Style](docs/CODE_STYLE.md) | Mandatory coding conventions (the standards single source of truth) |
+| [Model Status](docs/Checklists/MODEL_STATUS.md) | Per-modality status + remaining work (index) |
+| [Roadmap](docs/Checklists/ROADMAP.md) | Cross-cutting engineering roadmap (multi-GPU, kernel perf, quant, release) |
+| [Parity Verification](docs/Checklists/PARITY_VERIFICATION.md) | Real-weight parity authority |
+| [Troubleshooting](docs/Checklists/TROUBLESHOOTING.md) | Model bring-up debugging reference |
 
 </details>
 
@@ -463,7 +460,7 @@ HartsyInference/
 
 </details>
 
-See [File Structure](docs/Design/FILE_STRUCTURE.md) for the complete layout.
+See the `src/` tree — one folder per NuGet package — for the complete layout.
 
 ---
 

@@ -388,7 +388,7 @@ The per-model research docs are the canonical references. This doc just defines 
 - `HartsyInference.Diffusion/Schedulers/DistilledFlowMatchEuler.cs` — DMD / CM / Lightning support added to flow-match scheduler family.
 - `HartsyInference.Video/Tokenizers/IDiscreteVideoTokenizer.cs` + first impl `CosmosDvTokenizer.cs` (with Cosmos-Predict V2W).
 - `HartsyInference.Video/Streaming/VideoVaeStreamDecoder.cs` — secondary-stream per-frame VAE decode helper.
-- `IBackend.PackedAttention` and `IBackend.Conv3D` — implemented across CPU / CUDA / Vulkan (Phase 9 § 3 of [PHASE_9_VIDEO.md](../Checklists/PHASE_9_VIDEO.md)).
+- `IBackend.PackedAttention` and `IBackend.Conv3D` — implemented across CPU / CUDA / Vulkan (Phase 9 § 3 of [MODEL_STATUS_VIDEO.md](../Checklists/MODEL_STATUS_VIDEO.md)).
 - `HartsyInference.ModelAssets/Licensing/ModelLicense.cs`, `LicenseAcceptance.cs` — restricted-license plumbing for Hunyuan-GameCraft and similar models.
 
 ### Phase 10 deliverables (Interactive) — model pipelines
