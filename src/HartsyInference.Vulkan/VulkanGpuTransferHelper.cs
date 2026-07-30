@@ -53,6 +53,18 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         _stream = stream;
     }
 
+    /// <summary>Peeks the weight/activation caches WITHOUT uploading on a miss — unlike
+    /// <see cref="CopyToDevice"/>, does not touch <c>DataPointer</c> or allocate anything. Lets a caller
+    /// (e.g. <see cref="VulkanBackend.CopyTo"/>) take a device-to-device fast path only when the source
+    /// is ALREADY GPU-resident, instead of always forcing one.</summary>
+    public bool TryGetCached(Tensor tensor, out VulkanBuffer? buffer)
+    {
+        if (_weightCache.TryGetValue(tensor, out buffer)) return true;
+        if (_activationCache.TryGetValue(tensor, out buffer)) return true;
+        buffer = null;
+        return false;
+    }
+
     /// <summary>Returns the GPU buffer for a tensor, using caches to avoid transfers. Priority: weight cache → activation cache → fresh H2D upload.</summary>
     public VulkanBuffer CopyToDevice(Tensor cpuTensor)
     {

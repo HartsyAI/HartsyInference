@@ -577,6 +577,70 @@ numerics (channel-width assumptions are where it breaks).
   short warm-up (proving reuse, not just absence-of-leak) — note the warm-up needs ~20 iterations to reach
   steady state for a dual-large-buffer op (upload + output), not 1, because the transient-upload list only
   drains every `FlushThreshold` dispatches.
+- **`SliceLastDim`, `ApplyRope`, `KvCacheAppend` had NO `VulkanBackend` override at all** — every call
+  fell through to `IBackend`'s CPU-loop default, which reads `.DataPointer` directly. On a GPU-resident
+  input that forces a full device sync + host readback (`GetD2hSyncCount`), and the next GPU op needing
+  the result pays a fresh H2D re-upload on top (`GetTransferCacheStats`'s miss count) — invisible unless
+  you're specifically instrumenting for it, which is exactly why Phase 2 built that instrumentation
+  first. A synthetic LLM decode-step measurement
+  (`VulkanLinearProfileMeasurement.Measure_LlmDecodeStep_ResidencyVsDispatchOverhead`) showed
+  `SliceLastDim` alone accounted for 2 of 5 D2H syncs/step (the QKV split, and `GluActivate`'s own
+  internal `SliceLastDim`-based gate/up split — fixing the shared primitive fixes both call sites via
+  ordinary interface dispatch, no `GluActivate` override needed). Fixed by adding real GPU dispatches
+  (new shaders `slice_last_dim.comp.glsl`, `apply_rope.comp.glsl`, `kv_cache_append.comp.glsl`) —
+  2026-07-29, dropped the decode step from 2.581 ms/5.0 syncs to 1.461 ms/1.0 sync per step (see
+  `benchmarks/scoreboards/VULKAN.md`). `ApplyRope`/`KvCacheAppend` mutate their buffer in place, so the
+  dispatch re-caches the SAME tensor via `CacheOutput` after writing — without that, a later reader would
+  either see stale pre-write data (if it happened to already be host-resident) or force a needless
+  re-upload (if `GetBuffer`'s cache-miss path re-uploaded the tensor's now-stale host copy). `ApplyRope`'s
+  CPU reference assumes q and k have the SAME `numHeads` (it loops `q.Shape[2]` for both) — GQA models
+  with different Q/K head counts use `ApplyRopeSingle` per-tensor instead; the Vulkan shader matches that
+  same MHA-only contract, it doesn't add GQA support IBackend's own default doesn't have.
+- **`CopyTo` was unconditionally a host-side `Buffer.MemoryCopy`**, forcing a D2H sync on `source`
+  whenever it happened to be GPU-resident (the common case — `CopyTo` is mostly used as shape-view glue
+  between two GPU ops), then an H2D re-upload of `destination` the next time a GPU op read it. Fixed by
+  adding `VulkanGpuTransferHelper.TryGetCached` (peeks the weight/activation cache **without** uploading
+  on a miss, unlike `CopyToDevice`) so `VulkanBackend.CopyTo` can take a `vkCmdCopyBuffer`
+  device-to-device fast path when `source` is already cached, falling back to the original host memcpy
+  only when it genuinely isn't (a truly host-only source is cheaper to memcpy directly than to promote to
+  the GPU). Closed the decode step's last D2H sync: 1.461 ms/1.0 sync → 1.382 ms/**0.0 syncs** per step.
+- **No fused/online-softmax attention existed on Vulkan at all** — `ScaledDotProductAttention`
+  materialized the full `[Sq,Skv]` score matrix (3 dispatches: matmul, softmax, matmul), which is the
+  documented root cause of the Wan-video full-resolution OOM (a single self-attention call there needs a
+  ~19-25 GB score matrix), and `FlashAttention`/`FlashAttentionDev` fell through to the CPU reference
+  entirely. Fixed (2026-07-29) with `sdpa_flash.comp.glsl`: one workgroup per (batch, head, query row),
+  each of 32 threads (`TILE`) owns one key within the current 32-key KV tile (so scoring a tile needs no
+  cross-thread reduction, only a tile-level online-softmax combine done by thread 0 over 32 values) —
+  standard tiled online-softmax flash attention with Br=1. Shared-memory budget: `TILE*MAX_D*4 bytes * 2
+  arrays (K,V) = 32*128*4*2 = 32 KiB`, safely under the common 48 KiB limit; `MAX_D=128` bounds real head
+  dims, the rare >128 case (some SDXL variants use 160) falls back to the old materialized path rather
+  than corrupting shared memory. `VulkanBackend.ScaledDotProductAttention`/`FlashAttention` both route
+  through one shared `DispatchFlashAttention` helper. Supports causal masking, GQA (query head `h` reads
+  kv head `h/(hq/hkv)`), a sliding window, and (a separate `HAS_MASK=1`-compiled module, same convention
+  as `snake`'s `USE_BETA`) an optional additive `[Sq,Skv]` mask broadcast across batch/head. Does NOT
+  support softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class) — those fall through to `AttentionReference`'s
+  CPU reference, a documented scope boundary (none of these appear at Wan-video scale, so it doesn't
+  block the OOM fix). Sets `FlashDecodeSupported => true`, unblocking Zonos onto the GPU-resident path.
+  Measured (RTX 4090): the exact previously-unrunnable shape (B=1,H=24,S=16384,D=128) now completes in
+  9.8 s using only the Q/K/V/O tensors' own memory — see `benchmarks/scoreboards/VULKAN.md` for the full
+  before/after and the honest ceiling (this is a correctness-first design, ~30-430× slower than CUDA's
+  cuDNN-fused kernel depending on shape; Phase 5 tunes it).
+- **Real bug the new tests caught before shipping**: the first `sdpa_flash` version indexed the K/V
+  buffer's per-head stride using `skv` (the number of VALID kv positions to attend over), which is only
+  correct when the buffer is EXACTLY that size. Any real KV-cache buffer — always over-allocated to a
+  max sequence length, with only a prefix currently valid — would have silently read the wrong memory for
+  every position past the first head's block. Every test using an untruncated K/V tensor (`skv ==
+  key.Shape[2]`) passed regardless, which is exactly why this needs an explicit test shaped like a real
+  KV cache (`Backend_FlashAttention_GqaAndKvLenLessThanBuffer_MatchesCpu`: `kvLen=9` into a
+  `maxSeq=32`-capacity buffer) rather than trusting same-size tests to generalize. Fixed by adding a
+  separate `kvCapacity` push-constant field (the buffer's real `Shape[2]`) distinct from `skv` (the loop
+  bound), and using `kvCapacity` for the per-head stride.
+- **The Wan-video-scale smoke test (`Backend_FlashAttention_WanVideoScale_CompletesWithoutOom`) takes
+  hours on llvmpipe** (measured: killed after 2.85 CPU-hours, still running) — software-rasterized
+  scalar execution of 16384×24 = 393,216 workgroups × ~512 serial KV-tile iterations each has no
+  business running on a CPU emulator. The test now skips itself when `Vk.DeviceName` contains
+  "llvmpipe"; it proves no-OOM/finite-output on real hardware, which is not something llvmpipe's
+  correctness-only role needs to cover — don't remove the guard to "get more coverage."
 
 ---
 

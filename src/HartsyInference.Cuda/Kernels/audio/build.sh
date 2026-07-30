@@ -30,6 +30,10 @@ for kernel in "${KERNELS[@]}"; do
     fi
     echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_80 ${kernel}.cu"
     nvcc -ptx -arch=sm_80 "$src" -o "$ptx"
+    if ! head -20 "$ptx" | grep -q '^\.version 9\.0$'; then
+        echo "ERROR: ${kernel}.ptx is not PTX ISA 9.0 (driver JIT ceiling) — check toolchain pin." >&2
+        exit 1
+    fi
     if $INSTALL; then
         cp "$ptx" "${PTX_OUT}/${kernel}.ptx"
         echo "  → ${PTX_OUT}/${kernel}.ptx"

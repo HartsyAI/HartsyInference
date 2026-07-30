@@ -48,6 +48,20 @@ int outerIdx = i / D, d = i % D; float x = in[outerIdx*2*D + d], g = in[outerIdx
   constants replaces every `cublasGemmEx`. **Kernel dtype selection follows the OUTPUT tensor, not the
   inputs** (an F16-only guard leaves an F32-output pipeline running the scalar path). Tile-size starting
   points are per-vendor — see `SPIRV_COMPUTE_SHADERS.md § Tile-size tuning`.
+- **`src/HartsyInference.Vulkan/Shaders/*.comp.glsl` is the single source of truth; `Spirv/*.spv` is a
+  checked-in BUILD ARTIFACT of it — never hand-edit a `.spv`.** Same convention as CUDA's `.cu`→`.ptx`
+  (§ above), colocated the same way after the kernel-directory reorg (`Shaders/`+`Spirv/` under the
+  package, matching `Kernels/`+`Ptx/`). After ANY `.comp.glsl` edit or new shader, rebuild via `bash
+  src/HartsyInference.Vulkan/Shaders/build.sh` and commit the resulting `.spv` in the same change — a new
+  shader also needs adding to `build.sh`'s `DTYPE_KERNELS`/`SINGLE_KERNELS` arrays, or it silently never
+  builds (a `.comp.glsl` file existing is not enough). `VulkanShaderDriftTests.
+  CommittedSpirv_MatchesFreshRebuildFromSource` (in `HartsyInference.Vulkan.Tests`) rebuilds every shader
+  and byte-diffs it against the committed `Spirv/` dir to catch exactly this drift — run it after any
+  shader change. **Toolchain gotcha**: Ubuntu's `glslang-tools` apt package cannot compile
+  `matmul_int8.comp.glsl` (`GL_EXT_integer_dot_product` unsupported in its GLSL frontend) — use the
+  LunarG Vulkan SDK's `glslangValidator` instead (`GLSLANG=<path> bash build.sh`; no install needed, see
+  `TROUBLESHOOTING.md`). The drift test skips (doesn't fail) when no compiler is resolvable, or when the
+  resolved one can't build the current shader set — a toolchain gap reads as inconclusive, not a pass.
 
 ## Performance
 

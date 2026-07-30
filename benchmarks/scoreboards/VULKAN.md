@@ -71,18 +71,62 @@ dispatch throughput gap that folds into the same coopmat/dispatch-overhead inves
 numbers above, rather than a separate anomaly. Regression-guarded by
 `VulkanLeakTests.Vulkan_100Iter_LargeTransient_PoolsInsteadOfReallocating`.
 
-## What this does NOT show yet
+## Results — synthetic LLM decode-step, GPU-residency closure (Vulkan-only, no CUDA baseline run)
 
-- No apples-to-apples full-pipeline number (one DiT block / one LLM decode step) against CUDA — see
-  `VulkanLinearProfileMeasurement.Measure_LlmDecodeStep_ResidencyVsDispatchOverhead` for a Vulkan-only
-  synthetic-decode-step measurement (2.58 ms/step, 5.0 D2H syncs/step, 10.0 transfer-cache misses/step —
-  every one a CPU-loop-default `IBackend` member: `SliceLastDim`/`ApplyRope`/`KvCacheAppend`/`CopyTo`/
-  `GluActivate`'s internal `SliceLastDim`). No CUDA equivalent of that synthetic step was run for
-  comparison in this pass.
-- `SdpaGpuBenchmarks`'s largest shape (B=1,H=24,S=16384,D=128 — video-DiT scale) was intentionally not
-  run on Vulkan in this pass: at that size the naive materialized 3-pass SDPA would need to allocate a
-  ~25 GB score matrix (`B·H·Sq·Skv·4` bytes), which is the same class of failure as the documented
-  Wan-video full-resolution OOM. Not measured here; tracked as a Phase 4 (`sdpa_flash`) correctness
+`VulkanLinearProfileMeasurement.Measure_LlmDecodeStep_ResidencyVsDispatchOverhead` drives one synthetic
+decode step (RmsNorm → QKV Linear → RoPE → KV-cache append → attention → out-proj → residual → RmsNorm →
+gate-up Linear → SwiGLU → down-proj → residual) and reports wall-clock plus `GetD2hSyncCount()` /
+transfer-cache hit-miss deltas around it.
+
+| Stage | ms/step | D2H syncs/step | H2D misses/step | Date |
+|---|---:|---:|---:|---|
+| Baseline (audit) | 2.581 | 5.0 | 10.0 | 2026-07-28 |
+| + `SliceLastDim`/`ApplyRope`/`KvCacheAppend` wired to real GPU dispatches | 1.461 | 1.0 | 5.0 | 2026-07-29 |
+| + `CopyTo` device-to-device fast path (`TryGetCached`) | **1.382** | **0.0** | 4.0 | 2026-07-29 |
+
+**~1.87× faster, D2H syncs eliminated entirely** for this step shape. None of `SliceLastDim`, `ApplyRope`,
+`KvCacheAppend` had a `VulkanBackend` override before this pass — every call silently fell through to
+`IBackend`'s CPU-loop default (a full device sync + host readback), and the next GPU op needing the
+result paid a fresh H2D re-upload on top. The remaining 4.0 misses/step are genuinely-always-host
+per-step inputs (the token embedding source, the RoPE cos/sin table) that need a device-resident RoPE
+table (Phase 6) to close, not further residency work on this op set. No CUDA equivalent of this
+synthetic step was run for a head-to-head comparison — this is a before/after on Vulkan alone.
+
+## Results — fused flash attention (`sdpa_flash`), mean time, RTX 4090 (lower is better)
+
+`SdpaGpuBenchmarks.Sdpa_F32`, same shape grid as the GEMM table above. `ScaledDotProductAttention` and
+`FlashAttention` now dispatch the fused online-softmax kernel (`sdpa_flash.comp.glsl`) instead of the
+old materialized 3-pass path for head dims <= 128 (all sampled shapes qualify).
+
+| Shape | CUDA (cuDNN-fused) | Vulkan (`sdpa_flash`) | Ratio | Date |
+|---|---:|---:|---:|---|
+| (H=16,S=1024,D=80) SDXL self-attn | 323.9 μs | 18.9 ms | 58× | 2026-07-29 |
+| (H=16,S=4096,D=80) SDXL self-attn 64×64 | 6,115.7 μs | 220.4 ms | 36× | 2026-07-29 |
+| (H=24,D=64) SD3.5 joint-attn | 250.8 μs | 42.4 ms | 169× | 2026-07-29 |
+| (H=24,D=128) Flux joint-attn | 375.7 μs | 68.4 ms | 182× | 2026-07-29 |
+| **(H=24,S=16384,D=128) video-DiT scale** | 22.8 ms | **9.80 s** | 430× | 2026-07-29 |
+
+**The headline result isn't the ratio — it's that the last row runs at all.** The old materialized path
+needs a ~25 GB score matrix at that shape and cannot complete regardless of time budget (the documented
+Wan-video full-resolution OOM); the fused kernel completes in 9.8 s using only the Q/K/V/O tensors'
+own memory (~800 MB total), no intermediate score matrix at any size. The ratio vs CUDA's cuDNN-fused
+path (a mature vendor-library kernel with full tensor-core tiling) is real and should NOT be read as "the
+Vulkan flash kernel is broken" — this is a deliberately correctness-first design (Br=1: one query row per
+workgroup, no register tiling, no coopmat) that trades throughput for a working first implementation; see
+`docs/Checklists/ROADMAP.md` §3 for the Phase 5 tuning plan (larger query tiles, coopmat/tensor-core
+fusion). Also new: causal masking, GQA, sliding window, and an additive mask are all supported and
+numerically verified against a from-scratch CPU reference (`VulkanBackendSmokeTests`); softcap/sink/ALiBi
+fall through to the CPU reference (Gemma-2/GPT-OSS/MPT-class models don't use Wan-scale attention, so
+this doesn't block the OOM fix) — a documented scope boundary, not an oversight.
+
+**A real, previously-shipping bug this work found and fixed**: the first kernel version indexed the K/V
+buffer using the number of VALID kv positions as the per-head stride — correct only when the buffer is
+exactly that size. Any real KV-cache buffer (over-allocated to a max sequence length, with only a prefix
+valid) would have silently read the wrong memory. Caught by
+`Backend_FlashAttention_GqaAndKvLenLessThanBuffer_MatchesCpu` before this ever shipped; fixed by passing
+the buffer's actual capacity as a separate push-constant field from the loop-bound `skv`.
+
+## What this does NOT show yet
   target, not a perf number to chase on the current naive path.
 - AMD/Intel hardware: none available on this box. Mesa llvmpipe (software) was used for small-subgroup
   *correctness* checks elsewhere in this cycle, not for these perf numbers — llvmpipe throughput is not

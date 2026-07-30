@@ -1500,4 +1500,395 @@ public sealed class VulkanBackendSmokeTests
 
         a.Dispose(); b.Dispose(); outA.Dispose(); outB.Dispose(); concatOut.Dispose();
     }
+
+    // ── Phase 3 GPU-residency closure ───────────────────────────────────────────────────────
+    // SliceLastDim/ApplyRope/KvCacheAppend previously had no VulkanBackend override at all — every
+    // call fell through to IBackend's CPU-loop default. These pin the new GPU dispatches against the
+    // same CPU-reference math (mirroring IBackend.cs's own default bodies).
+
+    [Fact]
+    public void Backend_SliceLastDim_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int rows = 4, inDim = 12, offset = 5, outDim = 4;
+        Tensor input = new(new TensorShape(rows, inDim), DType.F32);
+        Tensor output = new(new TensorShape(rows, outDim), DType.F32);
+        Span<float> inS = input.AsSpan<float>();
+        for (int i = 0; i < rows * inDim; i++) inS[i] = MathF.Sin(i * 0.13f);
+
+        backend.SliceLastDim(output, input, offset);
+
+        ReadOnlySpan<float> outS = output.AsReadOnlySpan<float>();
+        for (int row = 0; row < rows; row++)
+            for (int d = 0; d < outDim; d++)
+                Assert.InRange(outS[row * outDim + d] - inS[row * inDim + offset + d], -1e-5f, 1e-5f);
+
+        input.Dispose(); output.Dispose();
+    }
+
+    [Fact]
+    public void Backend_ApplyRope_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int batch = 1, seqLen = 3, numHeads = 2, headDim = 8, half = headDim / 2;
+        Tensor q = new(new TensorShape(batch, seqLen, numHeads, headDim), DType.F32);
+        Tensor k = new(new TensorShape(batch, seqLen, numHeads, headDim), DType.F32);
+        Tensor cos = new(new TensorShape(batch, seqLen, headDim), DType.F32);
+        Tensor sin = new(new TensorShape(batch, seqLen, headDim), DType.F32);
+        Span<float> qS = q.AsSpan<float>(), kS = k.AsSpan<float>();
+        Span<float> cosS = cos.AsSpan<float>(), sinS = sin.AsSpan<float>();
+        for (int i = 0; i < batch * seqLen * numHeads * headDim; i++) { qS[i] = MathF.Sin(i * 0.11f); kS[i] = MathF.Cos(i * 0.17f); }
+        for (int i = 0; i < batch * seqLen * headDim; i++) { float a = i * 0.05f; cosS[i] = MathF.Cos(a); sinS[i] = MathF.Sin(a); }
+
+        // Reference computed BEFORE mutating q/k in place.
+        float[] qRef = qS.ToArray(), kRef = kS.ToArray();
+        for (int b = 0; b < batch; b++)
+            for (int s = 0; s < seqLen; s++)
+            {
+                int freqBase = (b * seqLen + s) * headDim;
+                for (int h = 0; h < numHeads; h++)
+                {
+                    int vecOff = ((b * seqLen + s) * numHeads + h) * headDim;
+                    for (int i = 0; i < half; i++)
+                    {
+                        float qLower = qRef[vecOff + i], qUpper = qRef[vecOff + i + half];
+                        qRef[vecOff + i] = qLower * cosS[freqBase + i] - qUpper * sinS[freqBase + i];
+                        qRef[vecOff + i + half] = qUpper * cosS[freqBase + i + half] + qLower * sinS[freqBase + i + half];
+                        float kLower = kRef[vecOff + i], kUpper = kRef[vecOff + i + half];
+                        kRef[vecOff + i] = kLower * cosS[freqBase + i] - kUpper * sinS[freqBase + i];
+                        kRef[vecOff + i + half] = kUpper * cosS[freqBase + i + half] + kLower * sinS[freqBase + i + half];
+                    }
+                }
+            }
+
+        backend.ApplyRope(q, k, cos, sin);
+
+        ReadOnlySpan<float> qOut = q.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> kOut = k.AsReadOnlySpan<float>();
+        for (int i = 0; i < batch * seqLen * numHeads * headDim; i++)
+        {
+            Assert.InRange(qOut[i] - qRef[i], -1e-4f, 1e-4f);
+            Assert.InRange(kOut[i] - kRef[i], -1e-4f, 1e-4f);
+        }
+
+        q.Dispose(); k.Dispose(); cos.Dispose(); sin.Dispose();
+    }
+
+    [Fact]
+    public void Backend_KvCacheAppend_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int heads = 3, maxSeq = 16, headDim = 4, tNew = 5, offset = 7;
+        Tensor buffer = new(new TensorShape(1, heads, maxSeq, headDim), DType.F32);
+        Tensor newKv = new(new TensorShape(1, heads, tNew, headDim), DType.F32);
+        Span<float> bufS = buffer.AsSpan<float>();
+        Span<float> newS = newKv.AsSpan<float>();
+        for (int i = 0; i < heads * maxSeq * headDim; i++) bufS[i] = -1f;   // sentinel: untouched region must survive
+        for (int i = 0; i < heads * tNew * headDim; i++) newS[i] = 100f + i;
+
+        float[] expected = bufS.ToArray();
+        for (int h = 0; h < heads; h++)
+            for (int t = 0; t < tNew; t++)
+                for (int d = 0; d < headDim; d++)
+                    expected[(h * maxSeq + offset + t) * headDim + d] = newS[(h * tNew + t) * headDim + d];
+
+        backend.KvCacheAppend(buffer, newKv, offset);
+
+        ReadOnlySpan<float> bufOut = buffer.AsReadOnlySpan<float>();
+        for (int i = 0; i < heads * maxSeq * headDim; i++)
+            Assert.InRange(bufOut[i] - expected[i], -1e-5f, 1e-5f);
+
+        buffer.Dispose(); newKv.Dispose();
+    }
+
+    [Fact]
+    public void Backend_CopyTo_GpuResidentSource_StaysDeviceSideAndMatchesCpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int n = 64;
+        Tensor x = new(new TensorShape(n), DType.F32);
+        Tensor gpuResident = new(new TensorShape(n), DType.F32);
+        Tensor dest = new(new TensorShape(n), DType.F32);
+        Span<float> xS = x.AsSpan<float>();
+        for (int i = 0; i < n; i++) xS[i] = MathF.Sin(i * 0.2f) * 3f;
+
+        // A real GPU dispatch leaves gpuResident cached (lazy-sync armed) — CopyTo should take the
+        // device-to-device fast path instead of forcing gpuResident's D2H sync.
+        backend.Scale(gpuResident, x, 2f);
+        backend.ResetD2hSyncCount();
+        Assert.Equal(0, backend.GetD2hSyncCount());
+
+        backend.CopyTo(dest, gpuResident);
+        Assert.Equal(0, backend.GetD2hSyncCount());   // the whole point of the fast path
+
+        ReadOnlySpan<float> destS = dest.AsReadOnlySpan<float>();   // this read is expected to sync
+        for (int i = 0; i < n; i++)
+            Assert.InRange(destS[i] - xS[i] * 2f, -1e-5f, 1e-5f);
+
+        x.Dispose(); gpuResident.Dispose(); dest.Dispose();
+    }
+
+    [Fact]
+    public void Backend_CopyTo_HostOnlySource_FallsBackToMemcpy()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int n = 32;
+        Tensor src = new(new TensorShape(n), DType.F32);
+        Tensor dest = new(new TensorShape(n), DType.F32);
+        Span<float> srcS = src.AsSpan<float>();
+        for (int i = 0; i < n; i++) srcS[i] = i * 1.5f;
+
+        backend.CopyTo(dest, src);
+
+        ReadOnlySpan<float> destS = dest.AsReadOnlySpan<float>();
+        for (int i = 0; i < n; i++) Assert.Equal(srcS[i], destS[i]);
+
+        src.Dispose(); dest.Dispose();
+    }
+
+    // ── Phase 4 fused flash attention ───────────────────────────────────────────────────────
+    // No online-softmax/fused attention existed on Vulkan before this — ScaledDotProductAttention
+    // materialized the full [Sq,Skv] score matrix (the documented root cause of the Wan-video
+    // full-resolution OOM) and FlashAttention/FlashAttentionDev fell through to the CPU reference.
+    // These pin the new sdpa_flash.comp.glsl dispatch against a from-scratch CPU reference covering
+    // the features specific to flash attention: causal masking, GQA, sliding window, an explicit
+    // additive mask, and the KV-cache-buffer-larger-than-kvLen decode shape.
+
+    /// <summary>Reference matching sdpa_flash.comp.glsl exactly (causal / sliding-window / additive
+    /// mask / GQA), independent of AttentionReference so a bug shared by both wouldn't hide.</summary>
+    private static float[] CpuFlashReference(
+        float[] q, float[] k, float[] v, float[]? mask,
+        int batch, int hq, int hkv, int sq, int skv, int headDim,
+        float scale, bool causal, int qOffset, int slidingWindow)
+    {
+        int kvGroup = hq / hkv;
+        float[] o = new float[batch * hq * sq * headDim];
+        for (int b = 0; b < batch; b++)
+            for (int h = 0; h < hq; h++)
+            {
+                int kvHead = h / kvGroup;
+                for (int sqi = 0; sqi < sq; sqi++)
+                {
+                    int absQ = qOffset + sqi;
+                    long qBase = (((long)b * hq + h) * sq + sqi) * headDim;
+                    float[] scores = new float[skv];
+                    float rowMax = float.NegativeInfinity;
+                    for (int j = 0; j < skv; j++)
+                    {
+                        bool masked = (causal && j > absQ) || (slidingWindow != 0 && (j > absQ || absQ - j >= slidingWindow));
+                        if (masked) { scores[j] = float.NegativeInfinity; continue; }
+                        long kBase = (((long)b * hkv + kvHead) * skv + j) * headDim;
+                        float dot = 0f;
+                        for (int d = 0; d < headDim; d++) dot += q[qBase + d] * k[kBase + d];
+                        float s = dot * scale;
+                        if (mask is not null) s += mask[sqi * skv + j];
+                        scores[j] = s;
+                        if (s > rowMax) rowMax = s;
+                    }
+                    float sum = 0f;
+                    for (int j = 0; j < skv; j++)
+                    {
+                        float p = float.IsNegativeInfinity(rowMax) ? 0f : MathF.Exp(scores[j] - rowMax);
+                        scores[j] = p;
+                        sum += p;
+                    }
+                    for (int d = 0; d < headDim; d++)
+                    {
+                        float acc = 0f;
+                        for (int j = 0; j < skv; j++)
+                        {
+                            if (scores[j] == 0f) continue;
+                            long vBase = (((long)b * hkv + kvHead) * skv + j) * headDim;
+                            acc += scores[j] * v[vBase + d];
+                        }
+                        o[qBase + d] = sum > 0f ? acc / sum : 0f;
+                    }
+                }
+            }
+        return o;
+    }
+
+    private static float[] FillRandom(int n, int seed)
+    {
+        Random rng = new(seed);
+        float[] a = new float[n];
+        for (int i = 0; i < n; i++) a[i] = (float)(rng.NextDouble() * 2 - 1);
+        return a;
+    }
+
+    [Fact]
+    public void Backend_FlashAttention_Causal_MatchesCpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int batch = 1, hq = 4, hkv = 4, sq = 20, skv = 20, headDim = 64;
+        float scale = 1f / MathF.Sqrt(headDim);
+        float[] q = FillRandom(batch * hq * sq * headDim, 1);
+        float[] k = FillRandom(batch * hkv * skv * headDim, 2);
+        float[] v = FillRandom(batch * hkv * skv * headDim, 3);
+        float[] expected = CpuFlashReference(q, k, v, null, batch, hq, hkv, sq, skv, headDim, scale, causal: true, qOffset: 0, slidingWindow: 0);
+
+        Tensor qT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        Tensor kT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
+        Tensor vT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
+        Tensor oT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        q.CopyTo(qT.AsSpan<float>()); k.CopyTo(kT.AsSpan<float>()); v.CopyTo(vT.AsSpan<float>());
+
+        backend.FlashAttention(oT, qT, kT, vT, kvLen: skv, kvGroup: hq / hkv, causal: true, qOffset: 0, scale);
+
+        ReadOnlySpan<float> oS = oT.AsReadOnlySpan<float>();
+        for (int i = 0; i < expected.Length; i++)
+            Assert.InRange(oS[i] - expected[i], -2e-3f, 2e-3f);
+
+        qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose();
+    }
+
+    [Fact]
+    public void Backend_FlashAttention_SlidingWindow_MatchesCpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int batch = 1, hq = 2, hkv = 2, sq = 24, skv = 24, headDim = 32, window = 6;
+        float scale = 1f / MathF.Sqrt(headDim);
+        float[] q = FillRandom(batch * hq * sq * headDim, 11);
+        float[] k = FillRandom(batch * hkv * skv * headDim, 12);
+        float[] v = FillRandom(batch * hkv * skv * headDim, 13);
+        float[] expected = CpuFlashReference(q, k, v, null, batch, hq, hkv, sq, skv, headDim, scale, causal: true, qOffset: 0, slidingWindow: window);
+
+        Tensor qT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        Tensor kT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
+        Tensor vT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
+        Tensor oT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        q.CopyTo(qT.AsSpan<float>()); k.CopyTo(kT.AsSpan<float>()); v.CopyTo(vT.AsSpan<float>());
+
+        backend.FlashAttention(oT, qT, kT, vT, kvLen: skv, kvGroup: hq / hkv, causal: true, qOffset: 0, scale, slidingWindow: window);
+
+        ReadOnlySpan<float> oS = oT.AsReadOnlySpan<float>();
+        for (int i = 0; i < expected.Length; i++)
+            Assert.InRange(oS[i] - expected[i], -2e-3f, 2e-3f);
+
+        qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose();
+    }
+
+    [Fact]
+    public void Backend_FlashAttention_GqaAndKvLenLessThanBuffer_MatchesCpu()
+    {
+        // Simulates a decode step against a KV cache: the K/V buffers are over-allocated to maxSeq,
+        // only the first kvLen positions are valid, and hq/hkv > 1 (GQA).
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int batch = 1, hq = 8, hkv = 2, sq = 1, maxSeq = 32, kvLen = 9, headDim = 32;
+        float scale = 1f / MathF.Sqrt(headDim);
+        float[] q = FillRandom(batch * hq * sq * headDim, 21);
+        float[] kFull = FillRandom(batch * hkv * maxSeq * headDim, 22);
+        float[] vFull = FillRandom(batch * hkv * maxSeq * headDim, 23);
+        // CPU reference only reads the first kvLen positions per head — slice kFull/vFull down to
+        // [batch,hkv,kvLen,headDim] contiguously so the reference's flat-index math matches skv=kvLen.
+        float[] kValid = new float[batch * hkv * kvLen * headDim];
+        float[] vValid = new float[batch * hkv * kvLen * headDim];
+        for (int h = 0; h < hkv; h++)
+        {
+            Array.Copy(kFull, h * maxSeq * headDim, kValid, h * kvLen * headDim, kvLen * headDim);
+            Array.Copy(vFull, h * maxSeq * headDim, vValid, h * kvLen * headDim, kvLen * headDim);
+        }
+        float[] expected = CpuFlashReference(q, kValid, vValid, null, batch, hq, hkv, sq, kvLen, headDim, scale, causal: false, qOffset: 0, slidingWindow: 0);
+
+        Tensor qT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        Tensor kT = new(new TensorShape(batch, hkv, maxSeq, headDim), DType.F32);
+        Tensor vT = new(new TensorShape(batch, hkv, maxSeq, headDim), DType.F32);
+        Tensor oT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        q.CopyTo(qT.AsSpan<float>()); kFull.CopyTo(kT.AsSpan<float>()); vFull.CopyTo(vT.AsSpan<float>());
+
+        backend.FlashAttention(oT, qT, kT, vT, kvLen: kvLen, kvGroup: hq / hkv, causal: false, qOffset: 0, scale);
+
+        ReadOnlySpan<float> oS = oT.AsReadOnlySpan<float>();
+        for (int i = 0; i < expected.Length; i++)
+            Assert.InRange(oS[i] - expected[i], -2e-3f, 2e-3f);
+
+        qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose();
+    }
+
+    [Fact]
+    public void Backend_SDPA_WithMask_MatchesCpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int batch = 1, hq = 3, hkv = 3, sq = 10, skv = 14, headDim = 32;
+        float scale = 1f / MathF.Sqrt(headDim);
+        float[] q = FillRandom(batch * hq * sq * headDim, 31);
+        float[] k = FillRandom(batch * hkv * skv * headDim, 32);
+        float[] v = FillRandom(batch * hkv * skv * headDim, 33);
+        float[] mask = new float[sq * skv];
+        Random rng = new(34);
+        for (int i = 0; i < mask.Length; i++) mask[i] = rng.NextDouble() < 0.3 ? -1e9f : 0f;   // random padding mask
+        float[] expected = CpuFlashReference(q, k, v, mask, batch, hq, hkv, sq, skv, headDim, scale, causal: false, qOffset: 0, slidingWindow: 0);
+
+        Tensor qT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        Tensor kT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
+        Tensor vT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
+        Tensor oT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        Tensor maskT = new(new TensorShape(sq, skv), DType.F32);
+        q.CopyTo(qT.AsSpan<float>()); k.CopyTo(kT.AsSpan<float>()); v.CopyTo(vT.AsSpan<float>()); mask.CopyTo(maskT.AsSpan<float>());
+
+        backend.ScaledDotProductAttention(oT, qT, kT, vT, maskT, scale);
+
+        ReadOnlySpan<float> oS = oT.AsReadOnlySpan<float>();
+        for (int i = 0; i < expected.Length; i++)
+            Assert.InRange(oS[i] - expected[i], -2e-3f, 2e-3f);
+
+        qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose(); maskT.Dispose();
+    }
+
+    /// <summary>The exact shape flagged in benchmarks/scoreboards/VULKAN.md as too large to run on the
+    /// old materialized path (~25 GB score matrix — the documented Wan-video OOM root cause). Not a
+    /// full numeric cross-check (a CPU reference at this scale is too slow for a unit test) — proves
+    /// completion without OOM and finite output, which the old path could not do at all.</summary>
+    [Fact]
+    public void Backend_FlashAttention_WanVideoScale_CompletesWithoutOom()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        // Software rendering (llvmpipe) takes HOURS on this shape (measured: still running after 2.85
+        // CPU-hours, killed) — this test proves no-OOM/finite-output on real hardware, not something
+        // llvmpipe's correctness-only role needs to cover. Skip rather than hang the whole suite.
+        if (backend.Vk.DeviceName.Contains("llvmpipe", StringComparison.OrdinalIgnoreCase)) return;
+
+        const int batch = 1, hq = 24, hkv = 24, sq = 16384, skv = 16384, headDim = 128;
+        float scale = 1f / MathF.Sqrt(headDim);
+        Tensor qT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        Tensor kT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
+        Tensor vT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
+        Tensor oT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        Span<float> qS = qT.AsSpan<float>();
+        for (int i = 0; i < qS.Length; i++) qS[i] = MathF.Sin(i * 0.001f) * 0.1f;
+        Span<float> kS = kT.AsSpan<float>();
+        for (int i = 0; i < kS.Length; i++) kS[i] = MathF.Cos(i * 0.001f) * 0.1f;
+        Span<float> vS = vT.AsSpan<float>();
+        for (int i = 0; i < vS.Length; i++) vS[i] = MathF.Sin(i * 0.0007f) * 0.1f;
+
+        backend.FlashAttention(oT, qT, kT, vT, kvLen: skv, kvGroup: 1, causal: true, qOffset: 0, scale);
+
+        ReadOnlySpan<float> oOut = oT.AsReadOnlySpan<float>();
+        // Spot-check a handful of positions across the tensor for finiteness (a full scan is unnecessary
+        // — the goal is proving the fused kernel completed and produced real numbers, not a NaN/garbage
+        // buffer from an indexing bug at scale).
+        for (int i = 0; i < oOut.Length; i += 999983)   // large odd stride, cheap coverage across the buffer
+            Assert.True(float.IsFinite(oOut[i]), $"Non-finite output at index {i}");
+
+        qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose();
+    }
 }

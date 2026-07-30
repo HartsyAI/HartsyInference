@@ -1080,9 +1080,152 @@ public sealed class VulkanBackend : IBackend
 
     /// <summary>Naive 3-pass SDPA: Q*K^T, mask add, softmax, *V — dispatched once per (B*H) head.</summary>
     // FlashAttention-style fusion is a Phase-4 optimization.
+    /// <summary>Max head dim <see cref="DispatchFlashAttention"/>'s shared-memory KV tile can hold
+    /// (MAX_D in sdpa_flash.comp.glsl). Real model head dims (64-128) fit; the rare >128 case (some
+    /// SDXL variants use 160) falls back to the materialized 3-pass path rather than corrupting memory.</summary>
+    private const int FlashMaxHeadDim = 128;
+
     public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
     {
-        using OpScope _ = EnterOp();
+        using OpScope _op = EnterOp();
+        if (query.Shape.Rank != 4)
+            throw new NotImplementedException("VulkanBackend SDPA expects [B, H, S, D] inputs.");
+
+        int hq = (int)query.Shape[1], hkv = (int)key.Shape[1], headDim = (int)query.Shape[3];
+        if (headDim <= FlashMaxHeadDim && hkv > 0 && hq % hkv == 0)
+        {
+            DispatchFlashAttention(output, query, key, value, mask, scale,
+                causal: false, qOffset: 0, slidingWindow: 0, skv: (int)key.Shape[2], kvGroup: hq / hkv);
+            return;
+        }
+        // Head dim exceeds the flash kernel's shared-memory tile, or Q/K head counts aren't an integer
+        // GQA ratio — fall back to the materialized (but still correct) 3-pass path.
+        ScaledDotProductAttentionNaive(output, query, key, value, mask, scale, allowF16);
+    }
+
+    /// <summary>Fused online-softmax SDPA — never materializes the [Sq,Skv] score matrix. Shared by both
+    /// <see cref="ScaledDotProductAttention"/> (causal=false, kvGroup/skv derived from tensor shapes) and
+    /// <see cref="FlashAttention"/> (explicit kvLen/kvGroup — the KV-cache buffer may be over-allocated
+    /// beyond the currently-valid length, and causal/qOffset/slidingWindow are real for decode).</summary>
+    private void DispatchFlashAttention(
+        Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
+        float scale, bool causal, int qOffset, int slidingWindow, int skv, int kvGroup)
+    {
+        int batch = (int)query.Shape[0], hq = (int)query.Shape[1], sq = (int)query.Shape[2], headDim = (int)query.Shape[3];
+
+        DType dtype = ResolveGemmDtype(output.DType);
+        VulkanBuffer qBuf = GetBuffer(query);
+        VulkanBuffer kBuf = GetBuffer(key);
+        VulkanBuffer vBuf = GetBuffer(value);
+        (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, qBuf, dtype);
+        (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, kBuf, dtype);
+        (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, vBuf, dtype);
+
+        VulkanBuffer? maskBuf = null;
+        if (mask is not null)
+        {
+            if (mask.DType != DType.F32)
+                throw new NotSupportedException($"sdpa_flash mask must be F32, got {mask.DType.Name}");
+            maskBuf = GetBuffer(mask);
+        }
+
+        ulong outBytes = (ulong)((long)batch * hq * sq * headDim * dtype.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            string shader = (mask is null ? "sdpa_flash" : "sdpa_flash_mask") + DtypeSuffix(dtype);
+            int bufferCount = mask is null ? 4 : 5;
+            // Unlike every other kernel here, sdpa_flash hardcodes local_size_x = TILE (one thread per
+            // KV-tile key, not a generically-retunable spec constant) — no spec constants to pass.
+            VulkanKernel k = GetKernel(shader, bufferCount, ReadOnlySpan<SpecConstant>.Empty);
+
+            // kvCapacity is the K/V buffer's ACTUAL per-head stride (key.Shape[2]) — distinct from skv
+            // (the number of valid positions to attend over) whenever the caller passes an
+            // over-allocated KV-cache buffer (FlashAttention's kvLen < the buffer's real capacity).
+            int kvCapacity = (int)key.Shape[2];
+            Span<byte> pc = stackalloc byte[10 * 4];
+            BinaryWriteUInt(pc, 0, (uint)hq);
+            BinaryWriteUInt(pc, 4, (uint)(hq / kvGroup));
+            BinaryWriteUInt(pc, 8, (uint)sq);
+            BinaryWriteUInt(pc, 12, (uint)skv);
+            BinaryWriteUInt(pc, 16, (uint)kvCapacity);
+            BinaryWriteUInt(pc, 20, (uint)headDim);
+            BinaryWriteFloat(pc, 24, scale);
+            BinaryWriteUInt(pc, 28, causal ? 1u : 0u);
+            BinaryWriteUInt(pc, 32, (uint)qOffset);
+            BinaryWriteUInt(pc, 36, (uint)slidingWindow);
+
+            Span<ulong> bufs = mask is null
+                ? stackalloc ulong[] { qRes.Handle, kRes.Handle, vRes.Handle, outBuf.Handle }
+                : stackalloc ulong[] { qRes.Handle, kRes.Handle, vRes.Handle, maskBuf!.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, (uint)sq, (uint)hq, (uint)batch);
+
+            if (output.DType == dtype)
+            {
+                CacheOutput(output, outBuf);
+            }
+            else
+            {
+                ulong outBytesFinal = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+                VulkanBuffer finalBuf = _xfer.AllocateDevice(outBytesFinal);
+                try
+                {
+                    string castShader;
+                    if (dtype == DType.F16 && output.DType == DType.F32) castShader = "cast_f16_f32";
+                    else if (dtype == DType.F32 && output.DType == DType.F16) castShader = "cast_f32_f16";
+                    else throw new NotSupportedException($"sdpa_flash dtype mismatch {dtype.Name}->{output.DType.Name}");
+
+                    VulkanKernel castK = GetKernel(castShader, 2, _default1DSpec);
+                    Span<byte> castPc = stackalloc byte[4]; BinaryWriteUInt(castPc, 0, (uint)output.ElementCount);
+                    Span<ulong> castBufs = stackalloc ulong[] { outBuf.Handle, finalBuf.Handle };
+                    Dispatch(castK, castBufs, castPc, GroupCount(output.ElementCount, LocalX1D));
+                    CacheOutput(output, finalBuf);
+                }
+                catch (Exception ex)
+                {
+                    Logs.Error("Vulkan sdpa_flash output-dtype cast dispatch failed", ex);
+                    finalBuf.Dispose();
+                    throw;
+                }
+                _xfer.FreeDevice(outBuf);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan sdpa_flash dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (qOwned is not null) _xfer.FreeDevice(qOwned);
+            if (kOwned is not null) _xfer.FreeDevice(kOwned);
+            if (vOwned is not null) _xfer.FreeDevice(vOwned);
+        }
+    }
+
+    /// <summary>True — the flash kernel above gives Vulkan the GPU-resident autoregressive decode toolkit
+    /// this flag advertises (e.g. unblocks Zonos onto the fast path instead of CUDA-only host glue).</summary>
+    public bool FlashDecodeSupported => true;
+
+    /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common
+    /// case. Falls back to the CPU numeric reference — the same one <c>IBackend</c>'s own default uses —
+    /// for softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class models) and head dims the shared-memory tile
+    /// can't hold: a documented "flash-lite" scope boundary, not silently wrong output.</summary>
+    public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
+    {
+        int headDim = (int)query.Shape[query.Shape.Rank - 1];
+        if (softcap == 0f && sink is null && alibiSlopes is null && headDim <= FlashMaxHeadDim)
+        {
+            using OpScope _op = EnterOp();
+            DispatchFlashAttention(output, query, key, value, mask: null, scale, causal, qOffset, slidingWindow, skv: kvLen, kvGroup);
+            return;
+        }
+        AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
+    }
+
+    private void ScaledDotProductAttentionNaive(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
+    {
         if (query.Shape.Rank != 4)
             throw new NotImplementedException("VulkanBackend SDPA expects [B, H, S, D] inputs.");
 
@@ -1833,12 +1976,145 @@ public sealed class VulkanBackend : IBackend
 
     #endregion
 
+    #region GPU-residency closure (Phase 3)
+    // These three IBackend members had no VulkanBackend override at all — every call fell through to
+    // IBackend's CPU-loop default, which reads .DataPointer directly. On a GPU-resident tensor that
+    // forces a full device-sync + host readback (see GetD2hSyncCount), and the NEXT GPU op that needs
+    // the result pays a fresh H2D re-upload — measured as the dominant contributor to a synthetic LLM
+    // decode step's residency cost (Measure_LlmDecodeStep_ResidencyVsDispatchOverhead): SliceLastDim
+    // alone accounted for 2 of the 5 D2H syncs/step (QKV split + GluActivate's internal gate/up split),
+    // and ApplyRope/KvCacheAppend are the other links in the same q/k/v-prep chain.
+
+    public void SliceLastDim(Tensor output, Tensor input, int offset)
+    {
+        using OpScope _op = EnterOp();
+        int inDim = (int)input.Shape[input.Shape.Rank - 1];
+        long rows = input.ElementCount / inDim;
+        int outDim = (int)(output.ElementCount / rows);
+        VulkanBuffer inBuf = GetBuffer(input);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            string shader = "slice_last_dim" + DtypeSuffix(output.DType);
+            VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
+            Span<byte> pc = stackalloc byte[4 * 4];
+            BinaryWriteUInt(pc, 0, (uint)inDim);
+            BinaryWriteUInt(pc, 4, (uint)outDim);
+            BinaryWriteUInt(pc, 8, (uint)offset);
+            BinaryWriteUInt(pc, 12, (uint)output.ElementCount);
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan SliceLastDim dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
+    public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin)
+    {
+        using OpScope _op = EnterOp();
+        int batch = (int)q.Shape[0], seqLen = (int)q.Shape[1], numHeads = (int)q.Shape[2], headDim = (int)q.Shape[3];
+        VulkanBuffer qBuf = GetBuffer(q);
+        VulkanBuffer kBuf = GetBuffer(k);
+        VulkanBuffer cosBuf = GetBuffer(cos);
+        VulkanBuffer sinBuf = GetBuffer(sin);
+        try
+        {
+            string shader = "apply_rope" + DtypeSuffix(q.DType);
+            VulkanKernel kernel = GetKernel(shader, 4, _default1DSpec);
+            Span<byte> pc = stackalloc byte[4 * 4];
+            BinaryWriteUInt(pc, 0, (uint)batch);
+            BinaryWriteUInt(pc, 4, (uint)seqLen);
+            BinaryWriteUInt(pc, 8, (uint)numHeads);
+            BinaryWriteUInt(pc, 12, (uint)headDim);
+            long total = (long)batch * seqLen * numHeads * (headDim / 2);
+            Span<ulong> bufs = stackalloc ulong[] { qBuf.Handle, kBuf.Handle, cosBuf.Handle, sinBuf.Handle };
+            Dispatch(kernel, bufs, pc, GroupCount(total, LocalX1D));
+            // In-place on q/k's EXISTING buffers — re-cache so a later reader doesn't see the pre-rope
+            // values via a stale activation-cache entry (or force a redundant re-upload if q/k weren't
+            // cached at all yet).
+            CacheOutput(q, qBuf);
+            CacheOutput(k, kBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan ApplyRope dispatch failed", ex);
+            throw;
+        }
+    }
+
+    public void KvCacheAppend(Tensor buffer, Tensor newKv, int offset)
+    {
+        using OpScope _op = EnterOp();
+        int heads = (int)buffer.Shape[1], maxSeq = (int)buffer.Shape[2], headDim = (int)buffer.Shape[3];
+        int tNew = (int)newKv.Shape[2];
+        VulkanBuffer bufBuf = GetBuffer(buffer);
+        VulkanBuffer newBuf = GetBuffer(newKv);
+        try
+        {
+            string shader = "kv_cache_append" + DtypeSuffix(buffer.DType);
+            VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
+            Span<byte> pc = stackalloc byte[5 * 4];
+            BinaryWriteUInt(pc, 0, (uint)heads);
+            BinaryWriteUInt(pc, 4, (uint)maxSeq);
+            BinaryWriteUInt(pc, 8, (uint)headDim);
+            BinaryWriteUInt(pc, 12, (uint)tNew);
+            BinaryWriteUInt(pc, 16, (uint)offset);
+            long total = (long)heads * tNew * headDim;
+            Span<ulong> bufs = stackalloc ulong[] { bufBuf.Handle, newBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(total, LocalX1D));
+            // In-place on buffer's EXISTING (persistent, caller-owned) buffer — re-cache so the next
+            // reader sees the appended data instead of a stale pre-append activation-cache entry.
+            CacheOutput(buffer, bufBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan KvCacheAppend dispatch failed", ex);
+            throw;
+        }
+    }
+
+    #endregion
+
     #region Data movement
 
     public unsafe void CopyTo(Tensor destination, Tensor source)
     {
-        long byteCount = source.ElementCount * source.DType.SizeInBytes;
-        Buffer.MemoryCopy(source.DataPointer, destination.DataPointer, byteCount, byteCount);
+        // Fast path: source is ALREADY GPU-resident (weight or activation cache) — copy device-to-device
+        // instead of forcing a D2H sync (source) + H2D re-upload (destination, on whatever GPU op reads
+        // it next). TryGetCached never uploads on a miss, so a genuinely host-only source still falls
+        // through to the plain memcpy below — that path is not worth promoting to the GPU.
+        if (_xfer.TryGetCached(source, out VulkanBuffer? srcBuf) && srcBuf is not null)
+        {
+            using OpScope _op = EnterOp();
+            ulong byteCount = (ulong)(source.ElementCount * source.DType.SizeInBytes);
+            VulkanBuffer dstBuf = _xfer.AllocateDevice(byteCount);
+            try
+            {
+                _stream.RecordCopyAndBarrier(srcBuf.Handle, dstBuf.Handle, byteCount,
+                    postStage: VkPipelineStageFlags2.ComputeShader,
+                    postAccess: VkAccessFlags2.ShaderStorageRead);
+                _dispatchesSinceSubmit++;
+                _dispatchesThisOp++;
+                if (_dispatchesSinceSubmit >= FlushThreshold && _opNestingDepth == 0) DrainAndFlush();
+                CacheOutput(destination, dstBuf);
+            }
+            catch (Exception ex)
+            {
+                Logs.Error("Vulkan CopyTo (device-to-device) dispatch failed", ex);
+                dstBuf.Dispose();
+                throw;
+            }
+            return;
+        }
+
+        long hostByteCount = source.ElementCount * source.DType.SizeInBytes;
+        Buffer.MemoryCopy(source.DataPointer, destination.DataPointer, hostByteCount, hostByteCount);
     }
 
     public unsafe void Fill(Tensor tensor, float value)

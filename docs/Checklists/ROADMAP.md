@@ -89,15 +89,33 @@ a stale code comment claiming otherwise.
   that size is now a normal (roughly-linear-with-size) kernel/dispatch throughput gap, folded into the
   GEMM-class finding above rather than a separate pathology. The
   isolated-Linear per-dispatch-overhead finding (~94% of Linear time, `VulkanLinearProfileMeasurement`)
-  and the GPU-residency question (CPU-loop-default `IBackend` fallthrough) are now both instrumented —
-  a synthetic LLM-decode-step measurement shows 5.0 D2H syncs + 10.0 transfer-cache misses per step
-  (`Measure_LlmDecodeStep_ResidencyVsDispatchOverhead`) — but a real head-to-head full-pipeline number
-  vs CUDA doesn't exist yet. Remaining levers once the allocator cliff and coopmat gap are understood:
-  QKV fusion, pre-cast FP8 weights, coopmat bias fusion, vendor tile-size auto-tuner.
+  and the GPU-residency question (CPU-loop-default `IBackend` fallthrough) are now both instrumented AND
+  largely closed for the LLM-decode-step shape: the synthetic step
+  (`Measure_LlmDecodeStep_ResidencyVsDispatchOverhead`) started at 2.58 ms/step with 5.0 D2H syncs +
+  10.0 transfer-cache misses per step; wiring real GPU dispatches for `SliceLastDim`/`ApplyRope`/
+  `KvCacheAppend` (none had a `VulkanBackend` override before — every call fell through to `IBackend`'s
+  CPU-loop default) plus a device-to-device fast path for `CopyTo` (new: `TryGetCached` peeks the
+  weight/activation cache without forcing an upload, so a GPU-resident source copies via
+  `vkCmdCopyBuffer` instead of a D2H-sync-then-H2D-reupload round trip) dropped it to **1.38 ms/step
+  (~1.87×) with 0 D2H syncs and 4.0 misses/step** — the remaining misses are genuinely-always-host
+  per-step inputs (the token, the RoPE cos/sin table) that need Phase 6's device-resident RoPE table to
+  close, not more residency work here. Still no real head-to-head full-pipeline number vs CUDA — that's
+  a Phase 4+ target once flash attention exists (the current naive SDPA dominates any real model's step
+  time enough that the residency win above wouldn't show through end-to-end yet). Remaining levers once
+  the coopmat gap is understood: QKV fusion, pre-cast FP8 weights, coopmat bias fusion, vendor
+  tile-size auto-tuner.
 - [ ] **GGUF dequant shaders:** `dequant_q4_k`, `dequant_q8_0` (quant support on Vulkan).
-- [ ] **FlashAttention `sdpa_flash`** SPIR-V — no online-softmax/fused attention exists on Vulkan at all
-  (naive materialized 3-pass only); this is the documented root cause of the Wan-video full-resolution OOM
-  and the reason `FlashDecodeSupported` gates Zonos onto a slower host-glue path. Not low priority.
+- [x] **FlashAttention `sdpa_flash`** SPIR-V — **done** (2026-07-29): `sdpa_flash.comp.glsl`, a fused
+  online-softmax kernel (one workgroup per query row, tiled KV in shared memory), backs both
+  `ScaledDotProductAttention` and `FlashAttention`/`FlashAttentionDev` for head dims <= 128 (the rare
+  >128 case falls back to the materialized 3-pass path). Fixes the Wan-video full-resolution OOM (the
+  exact previously-failing B=1,H=24,S=16384,D=128 shape now completes — no ~25 GB score matrix) and sets
+  `FlashDecodeSupported => true`, unblocking Zonos onto the GPU-resident path instead of CUDA-only host
+  glue. Supports causal masking, GQA, sliding window, and an optional additive mask; does NOT support
+  softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class) — those fall through to the CPU reference, a documented
+  scope boundary, not a silent gap. See `benchmarks/scoreboards/VULKAN.md` and `TROUBLESHOOTING.md`.
+  Remaining: this is a correctness-first Br=1 (one query row per workgroup) design, not yet tuned for
+  throughput — coopmat/tensor-core fusion and larger query tiles are Phase 5 material.
 - [ ] Small-subgroup `requiredSubgroupSize` pinning; im2col shader 64-bit widening (no longer tooling-blocked
   now that a working SPIR-V compiler is available — same class of bug as the CUDA im2col 32-bit overflow,
   `Conv2D` already throws above ~2^31 im2col elements rather than silently corrupting); descriptor-pool

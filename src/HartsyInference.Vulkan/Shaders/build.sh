@@ -15,7 +15,7 @@ cd "$(dirname "$0")"
 GLSLANG="${GLSLANG:-glslangValidator}"
 SPIRVVAL="${SPIRVVAL:-spirv-val}"
 TARGET="${TARGET:-vulkan1.3}"
-OUT="../Spirv"
+OUT="${OUT:-../Spirv}"
 SRC="."
 
 if ! command -v "$GLSLANG" >/dev/null; then
@@ -52,7 +52,7 @@ compile_one() {
 
     local sz
     sz=$(stat -c%s "$dst" 2>/dev/null || stat -f%z "$dst")
-    printf "  build/%-40s  %5d bytes\n" "${base}${suffix}.spv" "$sz"
+    printf "  %s/%-40s  %5d bytes\n" "$OUT" "${base}${suffix}.spv" "$sz"
 }
 
 # Kernels with FP32 + FP16 variants
@@ -78,6 +78,10 @@ DTYPE_KERNELS=(
     conv1d
     conv_transpose1d
     snake
+    slice_last_dim
+    apply_rope
+    kv_cache_append
+    sdpa_flash
 )
 
 SINGLE_KERNELS=(
@@ -101,5 +105,10 @@ done
 # needs its own SPIR-V module distinct from the vanilla-snake build above.
 compile_one "snake" -DUSE_FP16=0 -DUSE_BETA=1 -- "_beta_f32"
 compile_one "snake" -DUSE_FP16=1 -DUSE_BETA=1 -- "_beta_f16"
+
+# sdpa_flash with an optional additive mask: HAS_MASK gates a #if-compiled binding (like USE_BETA
+# above), so the masked variant needs its own SPIR-V module too.
+compile_one "sdpa_flash" -DUSE_FP16=0 -DHAS_MASK=1 -- "_mask_f32"
+compile_one "sdpa_flash" -DUSE_FP16=1 -DHAS_MASK=1 -- "_mask_f16"
 
 echo "Done. SPIR-V files in $(realpath "$OUT")"
