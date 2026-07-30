@@ -96,6 +96,10 @@ SINGLE_KERNELS=(
     dequant_q4_k
     dequant_q5_k
     dequant_q6_k
+    embed_gather_decode
+    argmax_lastdim
+    history_append
+    repetition_penalty
 )
 
 for k in "${DTYPE_KERNELS[@]}"; do
@@ -116,5 +120,10 @@ compile_one "snake" -DUSE_FP16=1 -DUSE_BETA=1 -- "_beta_f16"
 # above), so the masked variant needs its own SPIR-V module too.
 compile_one "sdpa_flash" -DUSE_FP16=0 -DHAS_MASK=1 -- "_mask_f32"
 compile_one "sdpa_flash" -DUSE_FP16=1 -DHAS_MASK=1 -- "_mask_f16"
+
+# rope_decode_step: INTERLEAVED selects a #if-compiled code path (like USE_BETA/HAS_MASK above), so
+# the two pairing conventions need their own SPIR-V modules. F32-only (decode-graph state is F32).
+compile_one "rope_decode_step" -DINTERLEAVED=0 -- "_splithalf_f32"
+compile_one "rope_decode_step" -DINTERLEAVED=1 -- "_interleaved_f32"
 
 echo "Done. SPIR-V files in $(realpath "$OUT")"

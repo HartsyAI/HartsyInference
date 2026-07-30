@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vulkan;
@@ -2323,6 +2324,304 @@ public sealed class VulkanBackend : IBackend
 
     #endregion
 
+    #region LLM decode-graph (Phase 6)
+    // Vulkan-native analog of CudaBackend's graph-decode device state (CudaBackend.cs ~L6580-6800): the
+    // per-token host work a captured/replayed step CANNOT tolerate (RoPE's Math.Cos/Sin + H2D every step,
+    // the embedding lookup, argmax's D2H-then-H2D chain) converted to one-time device-resident precompute
+    // plus small persistent "control" buffers whose ADDRESSES stay fixed across a decode loop's iterations
+    // and whose CONTENTS are refreshed between steps — exactly CUDA's own design principle, just without
+    // CUDA Graph capture/replay itself (that mechanism is Phase 6's VulkanStepGraph, tracked separately;
+    // these are the leaf ops it will eventually replay). Fully usable standalone today in an eager loop —
+    // a caller can drive AllocDeviceTokenId/WriteDeviceTokenId/EmbedGatherDecodeStep/RopeApplyDecodeStep/
+    // FlashAttentionDev/KvCacheAppendDev/ArgMaxInto every step by hand, at greatly reduced D2H sync count
+    // vs. the eager ApplyRope/KvCacheAppend/host-argmax path, even before a graph wraps them.
+
+    /// <summary>Settable, default OFF: several real production call sites (Qwen35Model, GenericTransformer,
+    /// SsmGenerationPipeline, CsmModel, MusicGenDecoder) gate straight onto the graph-decode path the
+    /// instant this is true, with no separate opt-in of their own. Flip only after a real end-to-end
+    /// decode-loop parity test (not just the per-op unit tests below) confirms this device-buffer path
+    /// matches the eager path on a real model — matching the same staged-rollout discipline used for
+    /// <see cref="EnableInt8Linear"/>, and for the same reason: a capability flag this many callers trust
+    /// unconditionally must not flip on unit-level confidence alone.</summary>
+    public bool GraphDecodeSupported { get; set; }
+
+    /// <summary>Backs every "persistent 1-int/N-int device control buffer" handle below: <see cref="VulkanBuffer.Handle"/>
+    /// (a raw VkBuffer u64, mirroring CUDA's raw-CUdeviceptr-as-ulong convention) keyed back to the owning
+    /// buffer so it can be freed, written (mapped-or-staged), or read (D2H) by handle alone.</summary>
+    private readonly Dictionary<ulong, VulkanBuffer> _scalarBuffers = new();
+
+    /// <summary>Capacity (element count) of each <see cref="AllocDeviceHistory"/> buffer, since
+    /// <see cref="AppendTokenHistoryStep"/>'s IBackend signature carries only the handle, not the size.</summary>
+    private readonly Dictionary<ulong, int> _historyCapacity = new();
+
+    private ulong AllocScalarBuffer(int elementCount)
+    {
+        VulkanBuffer buf = _xfer.AllocateDevice((ulong)(Math.Max(1, elementCount) * sizeof(int)));
+        _scalarBuffers[buf.Handle] = buf;
+        return buf.Handle;
+    }
+
+    private void FreeScalarBuffer(ulong handle)
+    {
+        if (handle == 0) return;
+        if (_scalarBuffers.Remove(handle, out VulkanBuffer? buf))
+        {
+            _historyCapacity.Remove(handle);
+            _xfer.FreeDevice(buf);
+        }
+    }
+
+    /// <summary>Writes <paramref name="values"/> into a scalar control buffer outside any capture region —
+    /// the "refresh fixed-address contents between replays" half of the decode-graph design. Uses the
+    /// mapped fast path when available; otherwise stages through <see cref="VulkanGpuTransferHelper.Upload"/>.</summary>
+    private unsafe void WriteScalarBuffer(ulong handle, ReadOnlySpan<int> values)
+    {
+        if (handle == 0 || !_scalarBuffers.TryGetValue(handle, out VulkanBuffer? buf)) return;
+        using Tensor scratch = new(new TensorShape(values.Length), DType.I32);
+        values.CopyTo(scratch.AsSpan<int>());
+        _xfer.Upload(buf, scratch);
+    }
+
+    /// <summary>D2H sync read of a 1-int scalar control buffer — the one blocking readback a decode step
+    /// needs (to hand the sampled token back to CPU orchestration code), waiting on exactly the work
+    /// queued so far rather than the whole stream's backlog.</summary>
+    private unsafe int ReadScalarBufferInt(ulong handle)
+    {
+        if (handle == 0 || !_scalarBuffers.TryGetValue(handle, out VulkanBuffer? buf))
+            throw new NotSupportedException("ReadScalarBufferInt called with an unallocated buffer.");
+        _stream.WaitIdleHost();
+        int v;
+        _xfer.DownloadToHost((nint)(&v), buf, sizeof(int));
+        return v;
+    }
+
+    // ── Device-side decode position ─────────────────────────────────────────────────────────────────────
+
+    public ulong AllocDevicePos() => AllocScalarBuffer(2);
+
+    public void WriteDevicePos(ulong handle, int kvLen, int qOffset) => WriteScalarBuffer(handle, stackalloc int[] { kvLen, qOffset });
+
+    public void FreeDevicePos(ulong handle) => FreeScalarBuffer(handle);
+
+    // ── Device token-id (embed input / argmax output) ───────────────────────────────────────────────────
+
+    public ulong AllocDeviceTokenId() => AllocScalarBuffer(1);
+
+    public void WriteDeviceTokenId(ulong handle, int tokenId) => WriteScalarBuffer(handle, stackalloc int[] { tokenId });
+
+    public void FreeDeviceTokenId(ulong handle) => FreeScalarBuffer(handle);
+
+    public int ReadDeviceTokenId(ulong handle) => ReadScalarBufferInt(handle);
+
+    // ── RoPE table build + decode-step apply ────────────────────────────────────────────────────────────
+
+    public unsafe (Tensor cos, Tensor sin) BuildRopeTableDevice(int maxPos, int headDim, int rotaryDim, float theta,
+        RopeScaling scaling, bool splitHalfPartial = false)
+    {
+        // Host-side precompute, identical math/layout to CudaBackend.BuildRopeTableDevice (itself matching
+        // GenericTransformer.BuildRope) — just for every position up front instead of one per-step tensor.
+        int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
+        int rotHalf = rdim / 2;
+        int halfDim = headDim / 2;
+        (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(rdim, theta, scaling, maxPos);
+        Tensor cos = new(new TensorShape(maxPos, headDim), DType.F32);
+        Tensor sin = new(new TensorShape(maxPos, headDim), DType.F32);
+        float* pc = (float*)cos.DataPointer;
+        float* ps = (float*)sin.DataPointer;
+        int dupStride = splitHalfPartial ? rotHalf : halfDim;
+        for (int pos = 0; pos < maxPos; pos++)
+        {
+            long baseOff = (long)pos * headDim;
+            for (int i = 0; i < headDim; i++) { pc[baseOff + i] = 1f; ps[baseOff + i] = 0f; }
+            for (int i = 0; i < rotHalf; i++)
+            {
+                double angle = pos * invFreq[i];
+                float c = (float)(Math.Cos(angle) * mscale);
+                float s = (float)(Math.Sin(angle) * mscale);
+                pc[baseOff + i] = c; pc[baseOff + i + dupStride] = c;
+                ps[baseOff + i] = s; ps[baseOff + i + dupStride] = s;
+            }
+        }
+        PreloadWeights(new[] { cos, sin });
+        return (cos, sin);
+    }
+
+    public void RopeApplyDecodeStep(Tensor x, Tensor cosTable, Tensor sinTable, int rotaryDim, bool interleaved, ulong devicePos)
+    {
+        using OpScope _op = EnterOp();
+        if (devicePos == 0 || !_scalarBuffers.TryGetValue(devicePos, out VulkanBuffer? posBuf)
+            || x.DType != DType.F32 || cosTable.DType != DType.F32 || sinTable.DType != DType.F32)
+        {
+            ((IBackend)this).RopeApplyDecodeStep(x, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            return;
+        }
+        int headDim = (int)x.Shape[x.Shape.Rank - 1];
+        int numHeads = (int)(x.ElementCount / headDim);
+        int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
+        VulkanBuffer xBuf = GetBuffer(x);
+        VulkanBuffer cosBuf = GetBuffer(cosTable);
+        VulkanBuffer sinBuf = GetBuffer(sinTable);
+        try
+        {
+            string shader = interleaved ? "rope_decode_step_interleaved_f32" : "rope_decode_step_splithalf_f32";
+            VulkanKernel k = GetKernel(shader, 4, _default1DSpec);
+            Span<byte> pc = stackalloc byte[3 * 4];
+            BinaryWriteUInt(pc, 0, (uint)numHeads);
+            BinaryWriteUInt(pc, 4, (uint)headDim);
+            BinaryWriteUInt(pc, 8, (uint)rdim);
+            long total = (long)numHeads * (rdim / 2);
+            Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, cosBuf.Handle, sinBuf.Handle, posBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(total, LocalX1D));
+            CacheOutput(x, xBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan RopeApplyDecodeStep dispatch failed", ex);
+            throw;
+        }
+    }
+
+    // ── Embed gather + argmax ───────────────────────────────────────────────────────────────────────────
+
+    public void EmbedGatherDecodeStep(Tensor output, Tensor embedTable, ulong tokenId)
+    {
+        using OpScope _op = EnterOp();
+        if (tokenId == 0 || !_scalarBuffers.TryGetValue(tokenId, out VulkanBuffer? tokBuf)
+            || output.DType != DType.F32 || embedTable.DType != DType.F32)
+        {
+            throw new NotSupportedException("EmbedGatherDecodeStep requires an F32 embed table and a valid device token-id buffer.");
+        }
+        int hidden = (int)output.ElementCount;
+        VulkanBuffer embBuf = GetBuffer(embedTable);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            VulkanKernel k = GetKernel("embed_gather_decode", 3, _default1DSpec);
+            Span<byte> pc = stackalloc byte[4];
+            BinaryWriteUInt(pc, 0, (uint)hidden);
+            Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, embBuf.Handle, tokBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(hidden, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan EmbedGatherDecodeStep dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
+    public void ArgMaxInto(ulong outputTokenId, Tensor input)
+    {
+        using OpScope _op = EnterOp();
+        if (outputTokenId == 0 || !_scalarBuffers.TryGetValue(outputTokenId, out VulkanBuffer? outBuf)
+            || input.DType != DType.F32)
+        {
+            throw new NotSupportedException("ArgMaxInto requires F32 input and a valid device token-id buffer.");
+        }
+        int c = (int)input.Shape[input.Shape.Rank - 1];
+        VulkanBuffer inBuf = GetBuffer(input);
+        try
+        {
+            VulkanKernel k = GetKernel("argmax_lastdim", 2, _default1DSpec);
+            Span<byte> pc = stackalloc byte[4];
+            BinaryWriteUInt(pc, 0, (uint)c);
+            Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, inBuf.Handle };
+            Dispatch(k, bufs, pc, 1);   // single workgroup: the reduction spans the whole row itself
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan ArgMaxInto dispatch failed", ex);
+            throw;
+        }
+    }
+
+    // ── Repetition-penalty history ───────────────────────────────────────────────────────────────────────
+
+    public ulong AllocDeviceHistory(int capacity)
+    {
+        ulong handle = AllocScalarBuffer(Math.Max(1, capacity));
+        _historyCapacity[handle] = Math.Max(1, capacity);
+        return handle;
+    }
+
+    public void FreeDeviceHistory(ulong handle) => FreeScalarBuffer(handle);
+
+    public ulong AllocDeviceCounter() => AllocScalarBuffer(1);
+
+    public void FreeDeviceCounter(ulong handle) => FreeScalarBuffer(handle);
+
+    public void WriteDeviceCounter(ulong handle, int value) => WriteScalarBuffer(handle, stackalloc int[] { value });
+
+    public void AppendTokenHistoryStep(ulong history, ulong historyCount, ulong tokenId)
+    {
+        using OpScope _op = EnterOp();
+        if (history == 0 || historyCount == 0 || tokenId == 0) return;
+        if (!_scalarBuffers.TryGetValue(history, out VulkanBuffer? histBuf)
+            || !_scalarBuffers.TryGetValue(historyCount, out VulkanBuffer? countBuf)
+            || !_scalarBuffers.TryGetValue(tokenId, out VulkanBuffer? tokBuf))
+        {
+            return;
+        }
+        int capacity = _historyCapacity.TryGetValue(history, out int cap) ? cap : int.MaxValue;
+        try
+        {
+            VulkanKernel k = GetKernel("history_append", 3, _default1DSpec);
+            Span<byte> pc = stackalloc byte[4];
+            BinaryWriteUInt(pc, 0, (uint)capacity);
+            Span<ulong> bufs = stackalloc ulong[] { histBuf.Handle, countBuf.Handle, tokBuf.Handle };
+            Dispatch(k, bufs, pc, 1);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan AppendTokenHistoryStep dispatch failed", ex);
+            throw;
+        }
+    }
+
+    public void ApplyRepetitionPenaltyStep(Tensor logits, ulong history, ulong historyCount, float penalty)
+    {
+        using OpScope _op = EnterOp();
+        if (history == 0 || historyCount == 0 || logits.DType != DType.F32
+            || !_scalarBuffers.TryGetValue(history, out VulkanBuffer? histBuf)
+            || !_scalarBuffers.TryGetValue(historyCount, out VulkanBuffer? countBuf))
+        {
+            throw new NotSupportedException("ApplyRepetitionPenaltyStep requires F32 logits and valid device history buffers.");
+        }
+        int vocabSize = (int)logits.Shape[logits.Shape.Rank - 1];
+        VulkanBuffer logitsBuf = GetBuffer(logits);
+        try
+        {
+            VulkanKernel k = GetKernel("repetition_penalty", 3, _default1DSpec);
+            Span<byte> pc = stackalloc byte[8];
+            BinaryWriteUInt(pc, 0, (uint)vocabSize);
+            BinaryWriteFloat(pc, 4, penalty);
+            Span<ulong> bufs = stackalloc ulong[] { logitsBuf.Handle, histBuf.Handle, countBuf.Handle };
+            Dispatch(k, bufs, pc, 1);
+            CacheOutput(logits, logitsBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan ApplyRepetitionPenaltyStep dispatch failed", ex);
+            throw;
+        }
+    }
+
+    // ── KV-cache / flash-attention device-position variants (Phase 6d) ─────────────────────────────────
+
+    public void KvCacheAppendDev(Tensor buffer, Tensor newKv, int offset, ulong devicePos)
+    {
+        // No dedicated device-indexed kv_cache_append kernel yet: the append OFFSET is a compile-time-free
+        // push constant already (unlike RoPE's position, it was never baked into a captured command
+        // buffer's bytes), so there is nothing a device-position variant would additionally decouple.
+        // Once VulkanStepGraph (Phase 6e) can actually replay a recorded command buffer, this offset must
+        // move to a device read exactly like RopeApplyDecodeStep's — tracked there, not silently dropped.
+        KvCacheAppend(buffer, newKv, offset);
+    }
+
+    #endregion
+
     #region Disposal
 
     public void Dispose()
@@ -2336,6 +2635,12 @@ public sealed class VulkanBackend : IBackend
         // we lose the device just to be tidy).
         try { _profiler.Dump(); }
         catch (Exception ex) { Logs.Warning($"Vulkan Dispose: profiler dump failed: {ex}"); }
+        // Decode-graph scalar control buffers (Phase 6) aren't in any weight/activation cache _xfer.Dispose()
+        // already sweeps — free them directly so a caller who forgot to call FreeDeviceTokenId/FreeDevicePos/
+        // etc. doesn't leak a VkBuffer + its backing allocation.
+        foreach (VulkanBuffer buf in _scalarBuffers.Values) buf.Dispose();
+        _scalarBuffers.Clear();
+        _historyCapacity.Clear();
         _xfer.Dispose();
         _kernels.Dispose();
         _pipelineCache.Dispose();
