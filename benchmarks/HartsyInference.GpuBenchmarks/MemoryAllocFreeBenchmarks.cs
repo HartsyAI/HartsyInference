@@ -49,7 +49,7 @@ public class MemoryAllocFreeBenchmarks
     public void AllocFree_Async()
     {
         nuint size = _sizes[SizeIndex];
-        nint stream = _fixture!.Backend.Stream.Handle;
+        nint stream = _fixture!.CudaBackend.Stream.Handle;
         ulong p = CudaMemory.AllocateAsync(size, stream);
         CudaMemory.FreeAsync(p, stream);
         _fixture.Sync();

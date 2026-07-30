@@ -26,6 +26,25 @@ public sealed class VulkanBackend : IBackend
     public BackendCapabilities Capabilities { get; }
     public VulkanCapabilities Vk => _vkDevice.Capabilities;
 
+    /// <summary>Count of lazy D2H syncs since <see cref="ResetD2hSyncCount"/>; mirrors <c>CudaBackend</c>'s
+    /// counter of the same name — ~0 means the traced region stayed GPU-resident.</summary>
+    public long GetD2hSyncCount() => _xfer.GetSyncCount();
+
+    /// <summary>Resets the D2H sync counter.</summary>
+    public void ResetD2hSyncCount() => _xfer.ResetSyncCount();
+
+    /// <summary>Weight/activation transfer-cache hit and miss counts since backend construction (a miss
+    /// is a fresh H2D upload — the other half of a residency break that <see cref="GetD2hSyncCount"/>
+    /// alone doesn't show, since a CPU-loop-default <c>IBackend</c> member that reads a GPU-resident
+    /// tensor pays a D2H sync going in AND forces an H2D re-upload the next time a GPU op needs that
+    /// tensor back). Cumulative since construction, not reset by <see cref="ResetD2hSyncCount"/> — diff
+    /// two calls around the region you're measuring.</summary>
+    public (long hits, long misses) GetTransferCacheStats()
+    {
+        (_, long hits, long misses) = _xfer.GetStats();
+        return (hits, misses);
+    }
+
     /// <summary>Filesystem path of the on-disk SPIR-V pipeline cache; exposed for persist/reload tests.</summary>
     public string PipelineCachePath => _pipelineCache.CachePath;
 
@@ -1344,19 +1363,126 @@ public sealed class VulkanBackend : IBackend
 
     public void Snake(Tensor output, Tensor input, Tensor alpha, Tensor? beta)
     {
-        throw new NotSupportedException("Vulkan Snake not yet implemented — use CpuBackend for snake-using vocoders.");
+        using OpScope _op = EnterOp();
+        int batch = (int)input.Shape[0], channels = (int)input.Shape[1], timeDim = (int)input.Shape[2];
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer alphaBuf = GetBuffer(alpha);
+        VulkanBuffer? betaBuf = beta is null ? null : GetBuffer(beta);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            // USE_BETA gates a #if-compiled binding, not a spec constant — vanilla and snake-beta
+            // are distinct SPIR-V modules (snake vs snake_beta) with different buffer counts.
+            string shader = (beta is null ? "snake" : "snake_beta") + DtypeSuffix(output.DType);
+            int bufferCount = beta is null ? 3 : 4;
+            VulkanKernel k = GetKernel(shader, bufferCount, _default1DSpec);
+            Span<byte> pc = stackalloc byte[3 * 4];
+            BinaryWriteUInt(pc, 0, (uint)batch);
+            BinaryWriteUInt(pc, 4, (uint)channels);
+            BinaryWriteUInt(pc, 8, (uint)timeDim);
+            Span<ulong> bufs = beta is null
+                ? stackalloc ulong[] { inBuf.Handle, alphaBuf.Handle, outBuf.Handle }
+                : stackalloc ulong[] { inBuf.Handle, alphaBuf.Handle, betaBuf!.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan Snake dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
     public void Conv1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int stride, int padLeft, int padRight, int dilation, int groups)
     {
-        throw new NotSupportedException("Vulkan Conv1d not yet implemented — use CpuBackend for codec models.");
+        using OpScope _op = EnterOp();
+        int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], tIn = (int)input.Shape[2];
+        int cOut = (int)weight.Shape[0], kernel = (int)weight.Shape[2];
+        int tOut = (int)output.Shape[2];
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer wBuf = GetBuffer(weight);
+        // HAS_BIAS is a real spec constant here (constant_id=10), but the descriptor set layout is
+        // still fixed at 4 sequential bindings regardless — bind the input buffer as a never-read
+        // placeholder when there's no bias, same convention as Conv2dDepthwise.
+        VulkanBuffer biasBuf = bias is null ? inBuf : GetBuffer(bias);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            string shader = "conv1d" + DtypeSuffix(output.DType);
+            SpecConstant[] spec = { _default1DSpec[0], _default1DSpec[1], _default1DSpec[2], SpecConstant.Bool(10, bias is not null) };
+            VulkanKernel k = GetKernel(shader, 4, spec);
+            Span<byte> pc = stackalloc byte[10 * 4];
+            BinaryWriteUInt(pc, 0, (uint)batch);
+            BinaryWriteUInt(pc, 4, (uint)cIn);
+            BinaryWriteUInt(pc, 8, (uint)cOut);
+            BinaryWriteUInt(pc, 12, (uint)tIn);
+            BinaryWriteUInt(pc, 16, (uint)tOut);
+            BinaryWriteUInt(pc, 20, (uint)kernel);
+            BinaryWriteUInt(pc, 24, (uint)stride);
+            BinaryWriteUInt(pc, 28, unchecked((uint)padLeft));
+            BinaryWriteUInt(pc, 32, (uint)dilation);
+            BinaryWriteUInt(pc, 36, (uint)groups);
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, wBuf.Handle, biasBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan Conv1d dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
     public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int stride, int padLeft, int padRight, int dilation, int groups)
     {
-        throw new NotSupportedException("Vulkan ConvTranspose1d not yet implemented — use CpuBackend for codec models.");
+        // The shipped conv_transpose1d.comp.glsl has no groups field at all — its inner loop sums
+        // over the full cIn range assuming dense [cIn, cOut, K] weights. Depthwise (groups>1, e.g.
+        // BigVGAN anti-aliased upsampling) would silently read the wrong weight slice if dispatched
+        // through this path, so fail loudly instead of producing wrong output.
+        if (groups != 1)
+            throw new NotSupportedException(
+                $"Vulkan ConvTranspose1d: groups={groups} not supported — the shipped shader only handles dense (groups=1) weights. " +
+                "Use the CPU backend for depthwise transposed conv (e.g. BigVGAN upsampling).");
+        using OpScope _op = EnterOp();
+        int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], tIn = (int)input.Shape[2];
+        int cOut = (int)weight.Shape[1], kernel = (int)weight.Shape[2];
+        int tOut = (int)output.Shape[2];
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer wBuf = GetBuffer(weight);
+        VulkanBuffer biasBuf = bias is null ? inBuf : GetBuffer(bias);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            string shader = "conv_transpose1d" + DtypeSuffix(output.DType);
+            SpecConstant[] spec = { _default1DSpec[0], _default1DSpec[1], _default1DSpec[2], SpecConstant.Bool(10, bias is not null) };
+            VulkanKernel k = GetKernel(shader, 4, spec);
+            Span<byte> pc = stackalloc byte[9 * 4];
+            BinaryWriteUInt(pc, 0, (uint)batch);
+            BinaryWriteUInt(pc, 4, (uint)cIn);
+            BinaryWriteUInt(pc, 8, (uint)cOut);
+            BinaryWriteUInt(pc, 12, (uint)tIn);
+            BinaryWriteUInt(pc, 16, (uint)tOut);
+            BinaryWriteUInt(pc, 20, (uint)kernel);
+            BinaryWriteUInt(pc, 24, (uint)stride);
+            BinaryWriteUInt(pc, 28, unchecked((uint)padLeft));
+            BinaryWriteUInt(pc, 32, (uint)dilation);
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, wBuf.Handle, biasBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan ConvTranspose1d dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
     #endregion

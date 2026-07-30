@@ -75,6 +75,9 @@ DTYPE_KERNELS=(
     mask_add
     maxpool2d
     depthwise_conv2d
+    conv1d
+    conv_transpose1d
+    snake
 )
 
 SINGLE_KERNELS=(
@@ -93,5 +96,10 @@ done
 for k in "${SINGLE_KERNELS[@]}"; do
     compile_one "$k" -- ""
 done
+
+# snake-beta (BigVGAN-v2): USE_BETA gates a #if-compiled binding, not a spec constant, so it
+# needs its own SPIR-V module distinct from the vanilla-snake build above.
+compile_one "snake" -DUSE_FP16=0 -DUSE_BETA=1 -- "_beta_f32"
+compile_one "snake" -DUSE_FP16=1 -DUSE_BETA=1 -- "_beta_f16"
 
 echo "Done. SPIR-V files in $(realpath "$OUT")"

@@ -486,6 +486,97 @@ numerics (channel-width assumptions are where it breaks).
   Same bytes, different interpretation.
 - **GeGlu flat-midpoint bug (same as the CUDA one):** decompose `outerIdx=i/D; d=i%D` then
   `inputX=outerIdx*2*D+d`; a multi-row `[2,2,2*D]` test is the regression guard.
+- **Ubuntu's `glslang-tools` package (15.1.0-2~ubuntu0.24.04.2, Noble) cannot compile
+  `matmul_int8.comp.glsl`**: its GLSL frontend has no `GL_EXT_integer_dot_product` extension entry at all
+  (confirmed via `strings` on `/usr/bin/glslang` — it knows the SPIR-V-level `SPV_KHR_integer_dot_product`
+  opcodes but never registers the GLSL `#extension` pragma), so `#extension GL_EXT_integer_dot_product :
+  require` fails with "extension not supported" regardless of `--target-env`. The LunarG Vulkan SDK's
+  bundled glslang (1.4.357.0 / glslang 16.4.0) compiles it correctly. Fix: don't rely on the distro
+  package for this shader; extract `glslangValidator`/`glslc`/`spirv-val` from the LunarG SDK tarball
+  (`https://sdk.lunarg.com/sdk/download/latest/linux/vulkan-sdk.tar.xz`, no install/sudo needed — the
+  `x86_64/bin/*` + `x86_64/lib/*` subtree runs standalone) and point `GLSLANG`/`SPIRVVAL` env vars at it
+  when running `src/HartsyInference.Vulkan/Shaders/build.sh`. All 36 other kernels compiled identically (byte-for-byte) with
+  either toolchain, so this is an isolated extension-table gap, not a broader compatibility problem.
+- **A full `src/HartsyInference.Vulkan/Spirv/*.spv` rebuild (2026-07-28, LunarG glslang 16.4.0) reproduced all 37
+  previously-committed files byte-for-byte identical**, and additionally produced `maxpool2d_{f32,f16}.spv`
+  and `depthwise_conv2d_{f32,f16}.spv`, which `VulkanBackend.cs` (`MaxPool2D`/`Conv2dDepthwise`, dispatching
+  `"maxpool2d"+DtypeSuffix`/`"depthwise_conv2d"+DtypeSuffix`) had been dispatching against with **no
+  compiled artifact on disk** — calling either threw a shader-load failure. Root cause: no SPIR-V compiler
+  was available on the dev box, so `build.sh` had never actually been run there; the C# dispatch code and
+  GLSL source already agreed, only the build step was missing. Fixed by rebuilding; regression-pinned in
+  `VulkanBackendSmokeTests.Backend_MaxPool2D_Matches_Cpu` / `Backend_Conv2dDepthwise_Matches_Cpu`. The
+  `Tanh`/`Elu` "dispatches to a nonexistent op-code, produces silent zeros" comment on
+  `VulkanBackend.Tanh`/`.Elu` (ops 8/9) turned out to be **stale** — the committed `elementwise_{f32,f16}.spv`
+  already contains both ops (confirmed via `spirv-dis` showing the `Tanh` ExtInst, and via
+  `Backend_Tanh_Matches_Cpu`/`Backend_Elu_Matches_Cpu` passing on real hardware) — the comment describes a
+  state before someone rebuilt and committed the artifact but never updated the code comment.
+- **Multi-GPU dev boxes: `VulkanBackend`'s default `deviceOrdinal: 0` is NOT nvidia-smi's index 0.**
+  Vulkan's own enumeration order put the RTX 4090 at ordinal 0 and the RTX 3060 at ordinal 1 on this box
+  (confirmed via `vulkaninfo --summary`), independent of `nvidia-smi`'s ordering. If another process (e.g.
+  a live SwarmUI/ComfyUI session) has the ordinal-0 GPU's VRAM mostly claimed, Vulkan tests silently target
+  the busy card and can spuriously `ErrorOutOfDeviceMemory` on workloads that would fit easily on an idle
+  card — this is not a shader or backend bug. Mesa's `VkLayer_MESA_device_select` implicit layer (already
+  present via `mesa-vulkan-drivers`) accepts `MESA_VK_DEVICE_SELECT=<vendorID>:<deviceID>` (list candidates
+  with `MESA_VK_DEVICE_SELECT=list vulkaninfo --summary`) to pin ordinal 0 to a specific physical device —
+  works even for pure-NVIDIA multi-GPU boxes, not just mixed-vendor ones. Useful for CI/benchmark scripts
+  that need a deterministic, known-idle target.
+- **A `.comp.glsl` file existing is not sufficient — it must also be listed in `build.sh`'s kernel
+  arrays.** `conv1d.comp.glsl`, `conv_transpose1d.comp.glsl`, and `snake.comp.glsl` had real GLSL source
+  and matching `VulkanBackend.cs` dispatch code (`GetKernel("conv1d"+DtypeSuffix, ...)` etc. — see the
+  three throw sites) but were never wired because `build.sh`'s `DTYPE_KERNELS` array simply never listed
+  them; `build.sh` silently produces exactly what its arrays name and nothing else, so a shader can sit
+  unbuilt indefinitely with no error. Always cross-check a new/renamed shader against `build.sh`'s arrays,
+  not just against its own file existing.
+- **`snake.comp.glsl` never actually compiled — `flat` is a reserved GLSL keyword** (the interpolation
+  qualifier), not usable as a variable name; `uint flat = gl_GlobalInvocationID.x;` is a syntax error on
+  any real compiler. Because no SPIR-V compiler was available on the dev box, this had never been caught.
+  Renamed to `idx`.
+- **`snake.comp.glsl`'s `USE_BETA` binding gap:** `Beta_` (binding 2) was declared only inside `#if
+  USE_BETA == 1`, but `Out_` was hardcoded to binding 3 unconditionally — so the vanilla (`USE_BETA=0`)
+  module has bindings `{0,1,3}` with a gap at 2. `VulkanDescriptorManager.CreateSetLayout` always builds a
+  *sequential* `0..N-1` layout sized by buffer count (it has no SPIR-V reflection), so a 3-buffer vanilla
+  dispatch would bind a real buffer to slot 2 while the shader's `Out_` still expects slot 3 — silent
+  wrong output, not a validation error. General rule for any `#if`-gated binding: every variant's *used*
+  bindings must independently be contiguous from 0, since the C# side has no idea which bindings a given
+  preprocessor branch kept. Fixed by making `Out_`'s binding itself branch on `USE_BETA` (2 in the vanilla
+  arm, 3 in the beta arm) instead of only gating `Beta_`. `USE_BETA` is also a `#define`, not a
+  `layout(constant_id=...)` spec constant like `conv1d`/`conv_transpose1d`'s `HAS_BIAS` — it needs its own
+  compiled module (`snake_beta_{f32,f16}.spv`, added to `build.sh` as explicit `compile_one` calls since
+  it doesn't fit the array-driven dtype-only loop), not a spec-constant toggle on the vanilla module.
+- **`ConvTranspose1d`'s shipped shader has no `groups` field at all** — its inner loop sums over the full
+  `cIn` range assuming dense `[cIn, cOut, K]` weights, unlike `conv1d.comp.glsl` which does support
+  `groups`. Dispatching a depthwise (`groups>1`) call through it would silently read the wrong weight
+  slice. `VulkanBackend.ConvTranspose1d` now throws `NotSupportedException` for `groups != 1` instead of
+  producing wrong output; extending the shader for grouped transposed conv (needed for BigVGAN-style
+  anti-aliased upsampling) is open work.
+- **llvmpipe gaps surfaced by a full-suite sweep (2026-07-28), not yet root-caused — tracked, not fixed
+  here:** `Backend_Linear_FP8Weight_CachedCast_Matches_Cpu` fails on llvmpipe with large numeric errors
+  (maxAbsErr ~7128) rather than gracefully throwing/skipping — `cast_f8e4m3_f16.spv` is unchanged by the
+  2026-07-28 rebuild (byte-identical), so this is pre-existing llvmpipe FP8-cast behavior, not a
+  regression. Separately, `PipelineCache_PersistsToDisk_AcrossBackends` fails on llvmpipe — the reloaded
+  on-disk pipeline cache is 32 bytes (header-only) instead of >1KB, suggesting llvmpipe's
+  `vkGetPipelineCacheData` doesn't retain pipeline blobs the same way the NVIDIA driver does. Both pass on
+  the 3060 and 4090. Neither blocks NVIDIA-target work; flag for a dedicated llvmpipe investigation before
+  treating llvmpipe as a full correctness oracle for FP8/pipeline-cache-dependent paths.
+- **`VulkanMemoryAllocator` used to destroy a "dedicated" (>= 16 MB, `DedicatedThreshold`) block the
+  instant its one allocation was freed** (`Free()` called `Dispose()` + `_blocks.RemoveAt(i)` whenever
+  `IsDedicated && LiveAllocations == 0`), instead of pooling it like slab blocks. Any op producing a
+  transient output >= 16 MB (`Silu`/`Gelu`/`RmsNorm`/`LayerNorm` all allocate a fresh `outBuf` per call)
+  paid a real `vkAllocateMemory`/`vkFreeMemory` round trip on **every single dispatch** — measured
+  (2026-07-28, RTX 4090) at a sharply non-linear ~30x cliff: 956 μs at 1.31M elements (5.24 MB, under
+  threshold) vs 29,652 μs at 5.24M elements (20.97 MB, over threshold) for the SAME `Silu` op, a 31x time
+  jump for only a 4x element-count increase. `BroadcastAdd` (writes in place, no fresh allocation) didn't
+  show this at the same sizes — the tell that pointed at the allocator rather than the compute shaders.
+  Fixed by removing the special-casing: dedicated blocks are now scanned for reuse exactly like slabs
+  (any request that fits a block's free-list is served from it, not just an exact-size match — see
+  `VulkanMemoryAllocator.Allocate`'s unified scan loop) and are only actually destroyed under memory
+  pressure via the existing `ReleaseEmptySlabs()` OOM-retry path, matching how slabs already behaved.
+  Result: the 5.24M-element case dropped from 29,652 μs to 4,420 μs (~7x). Regression-guarded by
+  `VulkanLeakTests.Vulkan_100Iter_LargeTransient_PoolsInsteadOfReallocating`, which asserts BOTH that VRAM
+  usage plateaus (no leak from keeping blocks alive) and that the live block count stays flat after a
+  short warm-up (proving reuse, not just absence-of-leak) — note the warm-up needs ~20 iterations to reach
+  steady state for a dual-large-buffer op (upload + output), not 1, because the transient-upload list only
+  drains every `FlushThreshold` dispatches.
 
 ---
 

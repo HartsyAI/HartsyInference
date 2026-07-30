@@ -56,16 +56,52 @@ assumed (see the profiling pitfalls in `TROUBLESHOOTING.md`).
 ## 3. AMD / ROCm + cross-vendor (Vulkan) support
 
 The Vulkan backend exists (SPIR-V/GLSL) but is unvalidated on AMD/Intel hardware — that validation is the
-whole point of the backend. See the Vulkan pitfalls in `TROUBLESHOOTING.md`.
+whole point of the backend. See the Vulkan pitfalls in `TROUBLESHOOTING.md`. **A working SPIR-V compiler is
+now available** (2026-07-28): Ubuntu's `glslang-tools` apt package installs but cannot compile
+`matmul_int8.comp.glsl` (no `GL_EXT_integer_dot_product` in its GLSL frontend); use the LunarG Vulkan SDK's
+bundled `glslangValidator`/`spirv-val` instead (extract-and-run, no install needed — see
+`TROUBLESHOOTING.md`). A full rebuild of `src/HartsyInference.Vulkan/Spirv/*.spv` reproduced all prior kernels
+byte-identical and additionally fixed `MaxPool2D`/`Conv2dDepthwise` (dispatched shader names with no
+compiled artifact — now built) and wired up `Snake`/`Conv1d`/`ConvTranspose1d` (source existed, was never
+built or connected in `VulkanBackend.cs`; `ConvTranspose1d` is dense/groups=1 only — depthwise falls back
+to the CPU backend with a clear throw). `Tanh`/`Elu` were already correct in the committed `.spv`, despite
+a stale code comment claiming otherwise.
 
 - [ ] **AMD/Intel cross-vendor bring-up** on real hardware (🔒 needs a dual-vendor box); the "Anticipated
-  Categories" AMD/Intel row is unvalidated.
-- [ ] **Vulkan kernel/perf tuning:** currently ~6.5× CUDA, target ≤1.6×. Per-dispatch overhead is ~94% of
-  Linear time → QKV fusion, pre-cast FP8 weights, coopmat bias fusion, vendor tile-size auto-tuner.
+  Categories" AMD/Intel row is unvalidated. Mesa llvmpipe (software Vulkan, subgroup 8) is available on
+  NVIDIA-only boxes as a substitute for small-subgroup *correctness* checks, not a perf substitute.
+- [ ] **Vulkan kernel/perf tuning:** the old "~6.5× CUDA / ≤1.6× target" figures had no benchmark
+  artifact anywhere in the repo. **Now measured** (2026-07-28, RTX 4090, see
+  `benchmarks/scoreboards/VULKAN.md`): GEMM is **~30×–160× slower** depending on shape/dtype — far worse
+  than the old claim — with F32 (no TF32-equivalent tensor-core path on Vulkan) the worst offender, but
+  F16 (which should hit `matmul_coopmat`) also 30–157× slower, meaning either coopmat isn't actually
+  engaging for these shapes or its real throughput is far below cuBLAS's tuned tensor-core GEMM — needs
+  a `HARTSYINFERENCE_VK_PROFILE=1` check before any further tuning. **A second finding was found AND
+  fixed in the same pass:** Silu/Gelu/RmsNorm/LayerNorm showed a sharply non-linear cliff at ~5.24M
+  elements (Silu: 956 μs at 1.31M elements → 29,652 μs at 5.24M elements, a 31× jump for a 4× size
+  increase) that `BroadcastAdd` (writes in place, no fresh output allocation) did NOT show at the same
+  sizes. Root cause: `VulkanMemoryAllocator` destroyed any "dedicated" (>= 16 MB) block the instant it
+  emptied instead of pooling it like slab blocks — every >= 16 MB transient buffer paid a real
+  `vkAllocateMemory`/`vkFreeMemory` round trip per dispatch. **Fixed** (2026-07-28, see
+  `TROUBLESHOOTING.md`): dedicated blocks are now pooled exactly like slabs; the 5.24M-element case
+  dropped from 29,652 μs to 4,420 μs (~7×), regression-guarded by
+  `VulkanLeakTests.Vulkan_100Iter_LargeTransient_PoolsInsteadOfReallocating`. The remaining ~27× gap at
+  that size is now a normal (roughly-linear-with-size) kernel/dispatch throughput gap, folded into the
+  GEMM-class finding above rather than a separate pathology. The
+  isolated-Linear per-dispatch-overhead finding (~94% of Linear time, `VulkanLinearProfileMeasurement`)
+  and the GPU-residency question (CPU-loop-default `IBackend` fallthrough) are now both instrumented —
+  a synthetic LLM-decode-step measurement shows 5.0 D2H syncs + 10.0 transfer-cache misses per step
+  (`Measure_LlmDecodeStep_ResidencyVsDispatchOverhead`) — but a real head-to-head full-pipeline number
+  vs CUDA doesn't exist yet. Remaining levers once the allocator cliff and coopmat gap are understood:
+  QKV fusion, pre-cast FP8 weights, coopmat bias fusion, vendor tile-size auto-tuner.
 - [ ] **GGUF dequant shaders:** `dequant_q4_k`, `dequant_q8_0` (quant support on Vulkan).
-- [ ] **FlashAttention `sdpa_flash`** SPIR-V (low priority).
-- [ ] Small-subgroup `requiredSubgroupSize` pinning; im2col shader 64-bit widening (🔒 deferred — no
-  SPIR-V compiler on the dev box); descriptor-pool `FlipPool` timeline wait; per-dispatch barrier scoping.
+- [ ] **FlashAttention `sdpa_flash`** SPIR-V — no online-softmax/fused attention exists on Vulkan at all
+  (naive materialized 3-pass only); this is the documented root cause of the Wan-video full-resolution OOM
+  and the reason `FlashDecodeSupported` gates Zonos onto a slower host-glue path. Not low priority.
+- [ ] Small-subgroup `requiredSubgroupSize` pinning; im2col shader 64-bit widening (no longer tooling-blocked
+  now that a working SPIR-V compiler is available — same class of bug as the CUDA im2col 32-bit overflow,
+  `Conv2D` already throws above ~2^31 im2col elements rather than silently corrupting); descriptor-pool
+  `FlipPool` timeline wait; per-dispatch barrier scoping.
 - [ ] Wire the INT8 quantizer into Vulkan model loading.
 - [ ] **RCCL** collectives for multi-GPU on AMD (§1).
 

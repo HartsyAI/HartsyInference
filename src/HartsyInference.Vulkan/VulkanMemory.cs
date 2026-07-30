@@ -153,9 +153,18 @@ internal sealed class VulkanMemoryBlock : IDisposable
 }
 
 /// <summary>Two-tier slab allocator. Sub-allocates buffer regions from large pre-allocated device-memory blocks.</summary>
-/// <remarks>Blocks are 64 MB for big tensors/weights, 8 MB for small temporaries; allocations larger than
-/// <see cref="DedicatedThreshold"/> fall back to dedicated blocks. Not thread-safe — the engine uses one
-/// allocator per <see cref="VulkanBackend"/>. See <c>docs/Research/VULKAN_MEMORY_MANAGEMENT.md</c>.</remarks>
+/// <remarks>Blocks are 64 MB for big tensors/weights, 8 MB for small temporaries; allocations at or above
+/// <see cref="DedicatedThreshold"/> get their own block sized exactly to the request. Dedicated blocks are
+/// POOLED exactly like slab blocks — once a block exists (of either kind), any request that fits in its
+/// free-list is served from it via <see cref="VulkanMemoryBlock.TryAllocate"/> instead of allocating a new
+/// one, and a block is only destroyed under memory pressure via <see cref="ReleaseEmptySlabs"/>. This
+/// matters: a large activation buffer is freed and re-allocated at the SAME size every dispatch in a hot
+/// loop (e.g. every <c>Silu</c>/<c>RmsNorm</c> call), and a real <c>vkAllocateMemory</c>/<c>vkFreeMemory</c>
+/// pair per call was measured at ~30x the cost of reusing a pooled block for a ~21 MB buffer (see
+/// <c>benchmarks/scoreboards/VULKAN.md</c>) — dedicated blocks used to be destroyed the instant they emptied,
+/// which is the anti-pattern <c>docs/Research/VULKAN_MEMORY_MANAGEMENT.md</c>'s suballocation guidance
+/// already warns about; this fixes the one path that still did it. Not thread-safe — the engine uses one
+/// allocator per <see cref="VulkanBackend"/>.</remarks>
 public sealed class VulkanMemoryAllocator : IDisposable
 {
     public const ulong SlabLarge = 64UL * 1024 * 1024;
@@ -191,13 +200,13 @@ public sealed class VulkanMemoryAllocator : IDisposable
 
         uint typeIdx = VulkanMemoryHelpers.FindMemoryType(in _memProps, memoryTypeBitsMask, required, preferred);
 
-        if (size >= DedicatedThreshold) return AllocateDedicated(size, typeIdx, required);
-
-        // Try existing blocks of same type
+        // Try existing blocks of same type — includes pooled dedicated blocks (any request that fits
+        // their free-list is served from them, not just an exact-size match), so a large activation
+        // freed on one iteration is reused on the next instead of re-allocating from the driver.
         for (int i = 0; i < _blocks.Count; i++)
         {
             VulkanMemoryBlock b = _blocks[i];
-            if (b.MemoryTypeIndex != typeIdx || b.IsDedicated) continue;
+            if (b.MemoryTypeIndex != typeIdx) continue;
             ulong off = b.TryAllocate(size, alignment);
             if (off != ulong.MaxValue)
             {
@@ -207,7 +216,10 @@ public sealed class VulkanMemoryAllocator : IDisposable
             }
         }
 
-        // Need a new block
+        // No existing block has room. Large (>= DedicatedThreshold) requests get a new block sized
+        // exactly to fit; smaller ones share a slab.
+        if (size >= DedicatedThreshold) return AllocateDedicated(size, typeIdx, required);
+
         ulong blockSize = size > SlabSmall ? SlabLarge : SlabSmall;
         VulkanMemoryBlock newBlock = AllocateBlock(blockSize, typeIdx, required, dedicated: false);
         _blocks.Add(newBlock);
@@ -258,7 +270,9 @@ public sealed class VulkanMemoryAllocator : IDisposable
         return new VulkanMemoryBlock(_device, mem, size, typeIdx, mt.heapIndex, mt.propertyFlags, mapped, _nextBlockId++, dedicated);
     }
 
-    /// <summary>Returns a sub-allocated region to its owning block's free-list; disposes the block too if it was dedicated and now empty.</summary>
+    /// <summary>Returns a sub-allocated region to its owning block's free-list. The block itself (dedicated
+    /// or slab) is kept alive even when it empties — see the pooling note on the class doc comment — and is
+    /// only actually destroyed by <see cref="ReleaseEmptySlabs"/> under memory pressure.</summary>
     public void Free(VulkanAllocation a)
     {
         if (a.IsEmpty) return;
@@ -267,11 +281,6 @@ public sealed class VulkanMemoryAllocator : IDisposable
             if (_blocks[i].BlockId == a.BlockId)
             {
                 _blocks[i].Free(a.Offset, a.Size);
-                if (_blocks[i].IsDedicated && _blocks[i].LiveAllocations == 0)
-                {
-                    _blocks[i].Dispose();
-                    _blocks.RemoveAt(i);
-                }
                 return;
             }
         }

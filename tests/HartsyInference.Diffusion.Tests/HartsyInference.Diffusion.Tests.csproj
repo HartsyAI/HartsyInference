@@ -27,7 +27,7 @@
 
   <!-- Mirror SPIR-V kernels into the test bin so VulkanBackend can find them at runtime -->
   <ItemGroup>
-    <Content Include="..\..\native\vulkan\build\*.spv" Link="Spirv\%(Filename)%(Extension)">
+    <Content Include="..\..\src\HartsyInference.Vulkan\Spirv\*.spv" Link="Spirv\%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

@@ -42,8 +42,13 @@ layout(set = 0, binding = 0) readonly  buffer In_    { DTYPE in_data[];   };
 layout(set = 0, binding = 1) readonly  buffer Alpha_ { float alpha_data[]; };
 #if USE_BETA == 1
 layout(set = 0, binding = 2) readonly  buffer Beta_  { float beta_data[];  };
-#endif
 layout(set = 0, binding = 3) writeonly buffer Out_   { DTYPE out_data[];   };
+#else
+// No Beta_ binding in this variant — Out_ must stay contiguous (binding 2, not 3) because the
+// C# side (VulkanDescriptorManager.CreateSetLayout) always builds a sequential 0..N-1 descriptor
+// set layout sized by buffer count; a gap at binding 2 here would bind Out_'s data to nothing.
+layout(set = 0, binding = 2) writeonly buffer Out_   { DTYPE out_data[];   };
+#endif
 
 layout(push_constant) uniform Push {
     uint batch;
@@ -52,15 +57,15 @@ layout(push_constant) uniform Push {
 } pc;
 
 void main() {
-    uint flat = gl_GlobalInvocationID.x;
+    uint idx = gl_GlobalInvocationID.x;
     uint total = pc.batch * pc.channels * pc.timeDim;
-    if (flat >= total) return;
+    if (idx >= total) return;
 
-    uint t = flat % pc.timeDim;
-    uint c = (flat / pc.timeDim) % pc.channels;
+    uint t = idx % pc.timeDim;
+    uint c = (idx / pc.timeDim) % pc.channels;
     // batch idx not needed for the math; per-channel alpha/beta only.
 
-    float x = TO_F32(in_data[flat]);
+    float x = TO_F32(in_data[idx]);
     float a = alpha_data[c];
 #if USE_BETA == 1
     float divisor = beta_data[c] + 1e-8;
@@ -69,5 +74,5 @@ void main() {
 #endif
     float s = sin(a * x);
     float y = x + (s * s) / divisor;
-    out_data[flat] = FROM_F32(y);
+    out_data[idx] = FROM_F32(y);
 }

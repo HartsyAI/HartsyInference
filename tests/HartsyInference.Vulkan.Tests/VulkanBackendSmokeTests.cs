@@ -1127,4 +1127,377 @@ public sealed class VulkanBackendSmokeTests
 
         src.Dispose(); dst.Dispose();
     }
+
+    // ── Phase 0 rebuild-trust-gate regressions ──────────────────────────────────────────────
+    // These four ops were dispatchable in VulkanBackend.cs but had never been numerically
+    // verified against a real Vulkan run: Tanh/Elu's shipped elementwise.spv predated the
+    // op-8/op-9 source (silent zeros), and maxpool2d/depthwise_conv2d had no compiled .spv at
+    // all (shader-load failure) because no SPIR-V compiler was available on the dev box. Both
+    // are closed by rebuilding src/HartsyInference.Vulkan/Spirv/*.spv from current source; these tests pin
+    // the fix so a future stale-artifact regression fails loudly instead of silently.
+
+    [Fact]
+    public void Backend_Tanh_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        Tensor x = new(new TensorShape(64), DType.F32);
+        Tensor y = new(new TensorShape(64), DType.F32);
+        Span<float> xS = x.AsSpan<float>();
+        for (int i = 0; i < 64; i++) xS[i] = i * 0.1f - 3.2f;
+
+        backend.Tanh(y, x);
+
+        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
+        for (int i = 0; i < 64; i++)
+            Assert.InRange(yS[i] - MathF.Tanh(xS[i]), -1e-4f, 1e-4f);
+
+        x.Dispose(); y.Dispose();
+    }
+
+    [Fact]
+    public void Backend_Elu_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        Tensor x = new(new TensorShape(64), DType.F32);
+        Tensor y = new(new TensorShape(64), DType.F32);
+        Span<float> xS = x.AsSpan<float>();
+        for (int i = 0; i < 64; i++) xS[i] = i * 0.1f - 3.2f;
+
+        const float alpha = 1.0f;
+        backend.Elu(y, x, alpha);
+
+        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
+        for (int i = 0; i < 64; i++)
+        {
+            float xv = xS[i];
+            float expected = xv >= 0f ? xv : alpha * (MathF.Exp(xv) - 1f);
+            Assert.InRange(yS[i] - expected, -1e-4f, 1e-4f);
+        }
+        x.Dispose(); y.Dispose();
+    }
+
+    [Fact]
+    public void Backend_MaxPool2D_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int N = 1, C = 2, H = 5, W = 5, kH = 3, kW = 3, stride = 2, pad = 1;
+        const int oH = 3, oW = 3; // (5 + 2*1 - 3)/2 + 1 = 3
+        Tensor x = new(new TensorShape(N, C, H, W), DType.F32);
+        Tensor y = new(new TensorShape(N, C, oH, oW), DType.F32);
+        Span<float> xS = x.AsSpan<float>();
+        for (int i = 0; i < N * C * H * W; i++) xS[i] = MathF.Sin(i * 0.31f) * 5f;
+
+        backend.MaxPool2D(y, x, kH, kW, stride, stride, pad, pad);
+
+        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
+        for (int n = 0; n < N; n++)
+            for (int c = 0; c < C; c++)
+                for (int oy = 0; oy < oH; oy++)
+                    for (int ox = 0; ox < oW; ox++)
+                    {
+                        float expected = float.NegativeInfinity;
+                        bool any = false;
+                        for (int ky = 0; ky < kH; ky++)
+                        {
+                            int iy = oy * stride + ky - pad;
+                            if (iy < 0 || iy >= H) continue;
+                            for (int kx = 0; kx < kW; kx++)
+                            {
+                                int ix = ox * stride + kx - pad;
+                                if (ix < 0 || ix >= W) continue;
+                                float v = xS[((n * C + c) * H + iy) * W + ix];
+                                if (v > expected) expected = v;
+                                any = true;
+                            }
+                        }
+                        if (!any) expected = 0f;
+                        int oi = ((n * C + c) * oH + oy) * oW + ox;
+                        Assert.InRange(yS[oi] - expected, -1e-4f, 1e-4f);
+                    }
+
+        x.Dispose(); y.Dispose();
+    }
+
+    [Fact]
+    public void Backend_Conv2dDepthwise_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int N = 1, C = 3, H = 6, W = 6, kH = 3, kW = 3, stride = 1, pad = 1;
+        const int oH = 6, oW = 6;
+        Tensor x = new(new TensorShape(N, C, H, W), DType.F32);
+        Tensor w = new(new TensorShape(C, 1, kH, kW), DType.F32);
+        Tensor bias = new(new TensorShape(C), DType.F32);
+        Tensor y = new(new TensorShape(N, C, oH, oW), DType.F32);
+        Span<float> xS = x.AsSpan<float>();
+        Span<float> wS = w.AsSpan<float>();
+        Span<float> bS = bias.AsSpan<float>();
+        for (int i = 0; i < N * C * H * W; i++) xS[i] = MathF.Cos(i * 0.23f);
+        for (int i = 0; i < C * kH * kW; i++) wS[i] = MathF.Sin(i * 0.41f) * 0.5f;
+        for (int c = 0; c < C; c++) bS[c] = c * 0.25f - 0.1f;
+
+        backend.Conv2dDepthwise(y, x, w, bias, stride, stride, pad, pad);
+
+        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
+        for (int n = 0; n < N; n++)
+            for (int c = 0; c < C; c++)
+                for (int oy = 0; oy < oH; oy++)
+                    for (int ox = 0; ox < oW; ox++)
+                    {
+                        float acc = bS[c];
+                        for (int ky = 0; ky < kH; ky++)
+                        {
+                            int iy = oy * stride + ky - pad;
+                            if (iy < 0 || iy >= H) continue;
+                            for (int kx = 0; kx < kW; kx++)
+                            {
+                                int ix = ox * stride + kx - pad;
+                                if (ix < 0 || ix >= W) continue;
+                                acc += wS[(c * kH + ky) * kW + kx] * xS[((n * C + c) * H + iy) * W + ix];
+                            }
+                        }
+                        int oi = ((n * C + c) * oH + oy) * oW + ox;
+                        Assert.InRange(yS[oi] - acc, -1e-4f, 1e-4f);
+                    }
+
+        x.Dispose(); w.Dispose(); bias.Dispose(); y.Dispose();
+    }
+
+    [Fact]
+    public void Backend_Conv1d_Grouped_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int N = 1, cIn = 4, cOut = 4, tIn = 10, kernel = 3, stride = 1, padLeft = 1, padRight = 1, dilation = 1, groups = 2;
+        const int tOut = 10; // (10 + 1 + 1 - 3)/1 + 1
+        const int cInPerGroup = cIn / groups, cOutPerGroup = cOut / groups;
+        Tensor x = new(new TensorShape(N, cIn, tIn), DType.F32);
+        Tensor w = new(new TensorShape(cOut, cInPerGroup, kernel), DType.F32);
+        Tensor bias = new(new TensorShape(cOut), DType.F32);
+        Tensor y = new(new TensorShape(N, cOut, tOut), DType.F32);
+        Span<float> xS = x.AsSpan<float>();
+        Span<float> wS = w.AsSpan<float>();
+        Span<float> bS = bias.AsSpan<float>();
+        for (int i = 0; i < N * cIn * tIn; i++) xS[i] = MathF.Sin(i * 0.19f);
+        for (int i = 0; i < cOut * cInPerGroup * kernel; i++) wS[i] = MathF.Cos(i * 0.37f) * 0.5f;
+        for (int c = 0; c < cOut; c++) bS[c] = c * 0.1f - 0.2f;
+
+        backend.Conv1d(y, x, w, bias, stride, padLeft, padRight, dilation, groups);
+
+        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
+        for (int oc = 0; oc < cOut; oc++)
+        {
+            int group = oc / cOutPerGroup;
+            int icStart = group * cInPerGroup;
+            for (int j = 0; j < tOut; j++)
+            {
+                float acc = bS[oc];
+                for (int ic = 0; ic < cInPerGroup; ic++)
+                {
+                    int inCh = icStart + ic;
+                    for (int k = 0; k < kernel; k++)
+                    {
+                        int src = j * stride + k * dilation - padLeft;
+                        if (src < 0 || src >= tIn) continue;
+                        acc += xS[inCh * tIn + src] * wS[(oc * cInPerGroup + ic) * kernel + k];
+                    }
+                }
+                Assert.InRange(yS[oc * tOut + j] - acc, -1e-4f, 1e-4f);
+            }
+        }
+        x.Dispose(); w.Dispose(); bias.Dispose(); y.Dispose();
+    }
+
+    [Fact]
+    public void Backend_ConvTranspose1d_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int N = 1, cIn = 3, cOut = 2, tIn = 6, kernel = 4, stride = 2, padLeft = 1, padRight = 1, dilation = 1, groups = 1;
+        const int tOut = 12; // (tIn-1)*stride + dilation*(kernel-1) + 1 - padLeft - padRight = 5*2+3+1-2 = 12
+        Tensor x = new(new TensorShape(N, cIn, tIn), DType.F32);
+        Tensor w = new(new TensorShape(cIn, cOut, kernel), DType.F32);
+        Tensor bias = new(new TensorShape(cOut), DType.F32);
+        Tensor y = new(new TensorShape(N, cOut, tOut), DType.F32);
+        Span<float> xS = x.AsSpan<float>();
+        Span<float> wS = w.AsSpan<float>();
+        Span<float> bS = bias.AsSpan<float>();
+        for (int i = 0; i < N * cIn * tIn; i++) xS[i] = MathF.Sin(i * 0.23f);
+        for (int i = 0; i < cIn * cOut * kernel; i++) wS[i] = MathF.Cos(i * 0.29f) * 0.5f;
+        for (int c = 0; c < cOut; c++) bS[c] = c * 0.15f + 0.05f;
+
+        backend.ConvTranspose1d(y, x, w, bias, stride, padLeft, padRight, dilation, groups);
+
+        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
+        for (int oc = 0; oc < cOut; oc++)
+            for (int j = 0; j < tOut; j++)
+            {
+                float acc = bS[oc];
+                int jShifted = j + padLeft;
+                for (int k = 0; k < kernel; k++)
+                {
+                    int num = jShifted - k * dilation;
+                    if (num < 0 || num % stride != 0) continue;
+                    int i = num / stride;
+                    if (i >= tIn) continue;
+                    for (int ic = 0; ic < cIn; ic++)
+                        acc += xS[ic * tIn + i] * wS[(ic * cOut + oc) * kernel + k];
+                }
+                Assert.InRange(yS[oc * tOut + j] - acc, -1e-4f, 1e-4f);
+            }
+
+        x.Dispose(); w.Dispose(); bias.Dispose(); y.Dispose();
+    }
+
+    [Fact]
+    public void Backend_ConvTranspose1d_GroupsGreaterThanOne_Throws()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        Tensor x = new(new TensorShape(1, 4, 6), DType.F32);
+        Tensor w = new(new TensorShape(4, 1, 3), DType.F32);
+        Tensor y = new(new TensorShape(1, 4, 8), DType.F32);
+        try
+        {
+            Assert.Throws<NotSupportedException>(() => backend.ConvTranspose1d(y, x, w, null, 1, 0, 0, 1, groups: 4));
+        }
+        finally { x.Dispose(); w.Dispose(); y.Dispose(); }
+    }
+
+    [Fact]
+    public void Backend_Snake_Vanilla_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int N = 1, C = 3, T = 8;
+        Tensor x = new(new TensorShape(N, C, T), DType.F32);
+        Tensor alpha = new(new TensorShape(C), DType.F32);
+        Tensor y = new(new TensorShape(N, C, T), DType.F32);
+        Span<float> xS = x.AsSpan<float>();
+        Span<float> aS = alpha.AsSpan<float>();
+        for (int i = 0; i < N * C * T; i++) xS[i] = MathF.Sin(i * 0.31f) * 2f;
+        for (int c = 0; c < C; c++) aS[c] = 0.5f + c * 0.3f;
+
+        backend.Snake(y, x, alpha, null);
+
+        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
+        for (int c = 0; c < C; c++)
+            for (int t = 0; t < T; t++)
+            {
+                float xv = xS[c * T + t];
+                float a = aS[c];
+                float s = MathF.Sin(a * xv);
+                float expected = xv + (s * s) / a;
+                Assert.InRange(yS[c * T + t] - expected, -1e-4f, 1e-4f);
+            }
+        x.Dispose(); alpha.Dispose(); y.Dispose();
+    }
+
+    [Fact]
+    public void Backend_Snake_Beta_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int N = 1, C = 3, T = 8;
+        Tensor x = new(new TensorShape(N, C, T), DType.F32);
+        Tensor alpha = new(new TensorShape(C), DType.F32);
+        Tensor beta = new(new TensorShape(C), DType.F32);
+        Tensor y = new(new TensorShape(N, C, T), DType.F32);
+        Span<float> xS = x.AsSpan<float>();
+        Span<float> aS = alpha.AsSpan<float>();
+        Span<float> bS = beta.AsSpan<float>();
+        for (int i = 0; i < N * C * T; i++) xS[i] = MathF.Cos(i * 0.27f) * 2f;
+        for (int c = 0; c < C; c++) { aS[c] = 0.4f + c * 0.2f; bS[c] = 0.2f + c * 0.1f; }
+
+        backend.Snake(y, x, alpha, beta);
+
+        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
+        for (int c = 0; c < C; c++)
+            for (int t = 0; t < T; t++)
+            {
+                float xv = xS[c * T + t];
+                float a = aS[c];
+                float divisor = bS[c] + 1e-8f;
+                float s = MathF.Sin(a * xv);
+                float expected = xv + (s * s) / divisor;
+                Assert.InRange(yS[c * T + t] - expected, -1e-4f, 1e-4f);
+            }
+        x.Dispose(); alpha.Dispose(); beta.Dispose(); y.Dispose();
+    }
+
+    // ── Phase 2 perf-measurement infrastructure ─────────────────────────────────────────────
+    // GetD2hSyncCount/ResetD2hSyncCount mirror CudaBackend's counter of the same name. These tests
+    // pin the two directions that matter: a GPU-resident op that's never read stays at zero syncs,
+    // and a CPU-loop-default IBackend member (Concat) that reads .DataPointer directly forces one
+    // sync per GPU-resident input it touches — the exact "hidden D2H round trip" the counter exists
+    // to surface.
+
+    [Fact]
+    public void GetD2hSyncCount_TracksLazyActivationReads()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        backend.ResetD2hSyncCount();
+        Assert.Equal(0, backend.GetD2hSyncCount());
+
+        Tensor x = new(new TensorShape(32), DType.F32);
+        Tensor y = new(new TensorShape(32), DType.F32);
+        Span<float> xS = x.AsSpan<float>();
+        for (int i = 0; i < 32; i++) xS[i] = i;
+
+        backend.Scale(y, x, 2f);
+        // The op's output is cached GPU-side (CacheOutput → CacheActivation) — nothing has read it
+        // back yet, so no sync should have fired.
+        Assert.Equal(0, backend.GetD2hSyncCount());
+
+        // Reading y's data forces the lazy D2H sync callback exactly once.
+        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
+        Assert.Equal(1, backend.GetD2hSyncCount());
+        Assert.InRange(yS[5] - 10f, -1e-5f, 1e-5f);
+
+        x.Dispose(); y.Dispose();
+    }
+
+    [Fact]
+    public void GetD2hSyncCount_Concat_SyncsEachGpuResidentInput()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        Tensor a = new(new TensorShape(8), DType.F32);
+        Tensor b = new(new TensorShape(8), DType.F32);
+        Tensor outA = new(new TensorShape(8), DType.F32);
+        Tensor outB = new(new TensorShape(8), DType.F32);
+        Tensor concatOut = new(new TensorShape(16), DType.F32);
+        Span<float> aS = a.AsSpan<float>();
+        Span<float> bS = b.AsSpan<float>();
+        for (int i = 0; i < 8; i++) { aS[i] = i; bS[i] = 100 + i; }
+
+        // Two real GPU dispatches leave outA/outB GPU-resident (cached, lazy-sync armed).
+        backend.Scale(outA, a, 1f);
+        backend.Scale(outB, b, 1f);
+        backend.ResetD2hSyncCount();
+        Assert.Equal(0, backend.GetD2hSyncCount());
+
+        // Concat (VulkanBackend.cs) is a pure CPU loop reading .DataPointer directly on each input —
+        // it never explicitly "reads back" the way a test does, so this is exactly the kind of
+        // silent hidden round-trip the counter is meant to catch.
+        backend.Concat(concatOut, new Tensor[] { outA, outB }, 0);
+
+        Assert.Equal(2, backend.GetD2hSyncCount());
+
+        a.Dispose(); b.Dispose(); outA.Dispose(); outB.Dispose(); concatOut.Dispose();
+    }
 }

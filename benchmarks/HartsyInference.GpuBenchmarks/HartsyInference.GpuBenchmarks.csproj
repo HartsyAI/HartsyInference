@@ -16,6 +16,7 @@
     <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
   </ItemGroup>
 
   <!-- Copy compiled PTX kernels next to the benchmark executable so CudaBackend can locate them. -->
@@ -24,5 +25,14 @@
       <Link>Ptx\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+  </ItemGroup>
+
+  <!-- Mirror the SPIR-V kernels into the benchmark bin directory so VulkanBackend can resolve them
+       (same convention as HartsyInference.Vulkan.Tests.csproj — ProjectReference alone doesn't
+       propagate the Vulkan project's own Content glob). -->
+  <ItemGroup>
+    <Content Include="..\..\src\HartsyInference.Vulkan\Spirv\*.spv" Link="Spirv\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>

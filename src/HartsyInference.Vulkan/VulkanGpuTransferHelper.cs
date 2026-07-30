@@ -29,6 +29,15 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     private long _cachedBytes;
     private long _hits;
     private long _misses;
+    private long _d2hSyncs;
+
+    /// <summary>Number of lazy D2H sync callbacks fired since the last <see cref="ResetSyncCount"/>. Each
+    /// one is a full GPU stall plus a device-to-host copy; a GPU-resident hot loop should fire none.
+    /// Mirrors <c>HartsyInference.Cuda.GpuTransferHelper.GetSyncCount</c>.</summary>
+    public long GetSyncCount() => _d2hSyncs;
+
+    /// <summary>Resets the D2H sync counter (call at the start of a region you want to measure for residency).</summary>
+    public void ResetSyncCount() => _d2hSyncs = 0;
 
     public VulkanGpuTransferHelper(
         nint device,
@@ -124,6 +133,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         {
             if (self._activationCache.Remove(capturedTensor, out VulkanBuffer? cached))
             {
+                self._d2hSyncs++;
                 self._stream.WaitIdleHost();
                 self.DownloadToHost((nint)capturedTensor.EnsureHostBuffer(), cached, capturedSize);
                 self._cachedBuffers.Remove(cached);
