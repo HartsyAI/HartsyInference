@@ -484,6 +484,13 @@ numerics (channel-width assumptions are where it breaks).
   practice" generalizes; kept default-off, opt-in `HARTSYINFERENCE_VK_PUSH_DESCRIPTORS=1` for AMD/Intel.
 - **INT8 `dotPacked4x8` overload is selected by operand type:** `uint[]` → unsigned, `int[]` → signed.
   Same bytes, different interpretation.
+- **Env-var opt-in flags read into `static readonly` fields aren't unit-testable within one test process**
+  (xUnit runs many tests in the same process, so the field is already frozen from whatever the env var was
+  — or wasn't — set to at first touch of the type). `TryDispatchInt8Linear`'s gate started this way; fixed
+  by moving to a settable *instance* property (`EnableInt8Linear`, defaulted from the env var in the
+  constructor) matching `CudaBackend.EnableW8A8`'s existing pattern — tests flip it directly
+  (`backend.EnableInt8Linear = true`) with no env var or fresh process needed. Prefer this pattern for any
+  new opt-in switch that correctness tests need to exercise both on and off.
 - **GeGlu flat-midpoint bug (same as the CUDA one):** decompose `outerIdx=i/D; d=i%D` then
   `inputX=outerIdx*2*D+d`; a multi-row `[2,2,2*D]` test is the regression guard.
 - **Ubuntu's `glslang-tools` package (15.1.0-2~ubuntu0.24.04.2, Noble) cannot compile
@@ -641,6 +648,43 @@ numerics (channel-width assumptions are where it breaks).
   business running on a CPU emulator. The test now skips itself when `Vk.DeviceName` contains
   "llvmpipe"; it proves no-OOM/finite-output on real hardware, which is not something llvmpipe's
   correctness-only role needs to cover — don't remove the guard to "get more coverage."
+- **`VulkanGpuTransferHelper.ByteSize` computed `ElementCount * DType.SizeInBytes` — silently ZERO for
+  every GGUF-quantized dtype** (Q4_0/Q5_0/Q8_0/Q4_K/Q5_K/Q6_K all have `SizeInBytes = 0`; their real size
+  is packed as `BlockByteSize`/`BlockElementCount`, exposed via `DType.ComputeByteCount`). This is the
+  single helper every upload/download/cache-size computation in the class routes through, so **any
+  quantized tensor Vulkan was ever asked to upload has always either thrown
+  (`ArgumentOutOfRangeException: Allocation size must be > 0`) or, on an unlucky code path, allocated a
+  zero-byte buffer instead of erroring** — undetected because nothing had exercised a quantized tensor
+  end-to-end on Vulkan before the Phase 5 GGUF dequant shader tests (`QuantizedMatMul`, the other
+  quantized-tensor consumer, is CUDA-only per `IBackend`'s own contract, so it never touched this path).
+  Fixed: `ByteSize` now delegates to `DType.ComputeByteCount(ElementCount)`, the same API CUDA's
+  equivalent already uses correctly. The ~20 `output.ElementCount * output.DType.SizeInBytes` call sites
+  in `VulkanBackend.cs` were NOT touched — `output` there is always a freshly-allocated GEMM/kernel
+  result (F16/F32/BF16 by construction; no op in this codebase ever produces a quantized output), so
+  those aren't live instances of the same bug, just the same textual pattern used safely.
+- **GGUF k-quant/legacy-quant dequant shaders added** (2026-07-29): `dequant_{q4_0,q5_0,q8_0,q4_k,q5_k,
+  q6_k}.comp.glsl`, mirroring `native/cuda/dequant/*.cu`'s bit-packing exactly (block/super-block layouts,
+  `get_scale_min_k4`, Q6_K's 4-outputs-per-thread pattern) — closes the explicit open `ROADMAP.md` §3
+  item. Read as raw `uint[]` words (no 8-bit storage extension needed) via a `readByte(byteOffset)`
+  helper that extracts one byte at an arbitrary — including unaligned — offset, and `unpackHalf2x16` to
+  reinterpret two bytes as an FP16 scale without needing `float16_t` STORAGE support on the input side
+  (core GLSL, no extension). Wired into `VulkanBackend.CastIfNeeded` — the SAME generic weight-dtype-cast
+  path already used for FP8→F16 — so dequant happens lazily on first use exactly like
+  `CudaBackend.CastOnGpu`'s identical quantized-source handling; there is no separate "model loading"
+  step on either backend. Validated against `HartsyInference.ModelAssets.Gguf.GgufDequantizer` (the
+  engine's own production CPU codec, not a hand-rolled test reimplementation) — all 6 formats matched on
+  the first real run once the `ByteSize` bug above was fixed.
+- **llvmpipe: a workgroup with most threads early-returning (`if (gid >= total) return;`, common when a
+  dispatch's element count is smaller than one workgroup) produces wrong output for the threads that DON'T
+  return** — observed as several dequant-shader output elements reading back as exactly `0`/`-0` instead
+  of the correct value, specifically on the FIRST test pass which used a small (96-256 element) buffer
+  that left the sole workgroup mostly idle. Bumping the test to an element count that's an exact multiple
+  of the workgroup size (256) made it pass everywhere — which also happens to be the realistic case: real
+  GGUF weight tensors are always whole numbers of quant blocks, so a real dequant dispatch only has a
+  partially-occupied workgroup on its very last one (if at all), not throughout. Not root-caused (no
+  `barrier()`/subgroup ops in these shaders, so this shouldn't matter architecturally) — tracked
+  alongside the FP8-cast and pipeline-cache llvmpipe gaps above as a known, undiagnosed llvmpipe quirk,
+  not something blocking NVIDIA-target work.
 
 ---
 

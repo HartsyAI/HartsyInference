@@ -90,6 +90,12 @@ SINGLE_KERNELS=(
     cast_f8e4m3_f16
     matmul_coopmat
     matmul_int8
+    dequant_q4_0
+    dequant_q5_0
+    dequant_q8_0
+    dequant_q4_k
+    dequant_q5_k
+    dequant_q6_k
 )
 
 for k in "${DTYPE_KERNELS[@]}"; do

@@ -95,6 +95,11 @@ public sealed class VulkanBackend : IBackend
         _kernels = new VulkanKernelRegistry(_vkDevice.Handle, Vk, _pipelineCache, _descriptors, _spvDir);
         _xfer = new VulkanGpuTransferHelper(_vkDevice.Handle, _allocator, in memProps, Vk, _stream);
 
+        // Opt-in INT8 dot-product GEMM path for Linear (see TryDispatchInt8Linear). Strict "1" opt-in,
+        // matching this constructor's push-descriptor switch above — an experimental switch, not a proven
+        // default-on profile feature (see EnvSwitch.cs's remarks on that distinction).
+        EnableInt8Linear = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_INT8") == "1";
+
         // OOM retry path: when an allocation fails, force the stream to submit and wait for the
         // GPU, drain the deferred-free list, then release any fully-empty slab blocks back to the
         // device. Mirrors CudaMemory.Allocate's retry path.
@@ -419,6 +424,20 @@ public sealed class VulkanBackend : IBackend
     }
 
     /// <summary>Casts <paramref name="srcBuf"/> to <paramref name="want"/> if needed; caller must free the returned ownedTemp.</summary>
+    /// <summary>Dequantizes a GGUF weight (Q4_0/Q5_0/Q8_0/Q4_K/Q5_K/Q6_K) to F32 via <see cref="CastIfNeeded"/>'s
+    /// dequant path; test/tooling hook (mirrors <c>CudaBackend.DequantizeToF32</c>), not a hot path — the
+    /// hot path dequantizes lazily inside <c>Linear</c>/<c>MatMul</c>'s own weight-cast-to-gemm-dtype call.</summary>
+    public Tensor DequantizeToF32(Tensor quant)
+    {
+        using OpScope _op = EnterOp();
+        long count = quant.ElementCount;
+        Tensor output = new(new TensorShape(count), DType.F32);
+        VulkanBuffer srcBuf = GetBuffer(quant);
+        (VulkanBuffer resultBuf, VulkanBuffer? owned) = CastIfNeeded(quant, srcBuf, DType.F32);
+        CacheOutput(output, owned ?? resultBuf);
+        return output;
+    }
+
     private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want)
     {
         if (src.DType == want) return (srcBuf, null);
@@ -439,6 +458,47 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteFloat(pc, 4, src.Fp8ScaleFactor);
             Span<ulong> bufs = stackalloc ulong[] { srcBuf.Handle, dst.Handle };
             Dispatch(k, bufs, pc, GroupCount(elements, LocalX1D));
+            return FinishCast(src, want, dst, cacheThis);
+        }
+
+        // GGUF quantized -> F16 dequant. Wired the same way as every other weight-dtype cast here
+        // (lazy, on first use, cached via _weightCastCache when the source is a preloaded weight) —
+        // there is no separate "model loading" step, matching CudaBackend.CastOnGpu's identical
+        // quantized-source handling in its own CastIfNeeded-equivalent.
+        if (src.DType.IsQuantized && want == DType.F16)
+        {
+            string dequantShader = src.DType.Name switch
+            {
+                "Q4_0" => "dequant_q4_0",
+                "Q5_0" => "dequant_q5_0",
+                "Q8_0" => "dequant_q8_0",
+                "Q4_K" => "dequant_q4_k",
+                "Q5_K" => "dequant_q5_k",
+                "Q6_K" => "dequant_q6_k",
+                _ => throw new NotSupportedException(
+                    $"Vulkan GGUF dequant for {src.DType.Name} not implemented. Supported: Q4_0, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K."),
+            };
+            long blockCount = elements / src.DType.BlockElementCount;
+            // dequant_q6_k emits 4 outputs/thread (64 threads/super-block); every other dequant kernel
+            // is one thread per output element.
+            long dispatchCount = dequantShader == "dequant_q6_k" ? blockCount * 64 : elements;
+
+            VulkanKernel dqKernel = GetKernel(dequantShader, storageBufferCount: 2, _default1DSpec);
+            Span<byte> dqPc = stackalloc byte[4];
+            BinaryWriteUInt(dqPc, 0, (uint)blockCount);
+            Span<ulong> dqBufs = stackalloc ulong[] { srcBuf.Handle, dst.Handle };
+            Dispatch(dqKernel, dqBufs, dqPc, GroupCount(dispatchCount, LocalX1D));
+            return FinishCast(src, want, dst, cacheThis);
+        }
+        if (src.DType.IsQuantized && want == DType.F32)
+        {
+            // quant -> F16 -> F32 (the dequant kernels' native output is F16, matching CUDA's CastOnGpu).
+            (VulkanBuffer midQ, VulkanBuffer? midQOwned) = CastIfNeeded(src, srcBuf, DType.F16);
+            VulkanKernel castKernel = GetKernel("cast_f16_f32", storageBufferCount: 2, _default1DSpec);
+            Span<byte> castPc = stackalloc byte[4]; BinaryWriteUInt(castPc, 0, (uint)elements);
+            Span<ulong> castBufs = stackalloc ulong[] { midQ.Handle, dst.Handle };
+            Dispatch(castKernel, castBufs, castPc, GroupCount(elements, LocalX1D));
+            if (midQOwned is not null) _xfer.FreeDevice(midQOwned);
             return FinishCast(src, want, dst, cacheThis);
         }
 
@@ -510,11 +570,66 @@ public sealed class VulkanBackend : IBackend
         DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null);
     }
 
+    /// <summary>Opt-in switch for <see cref="Linear"/>'s INT8 dot-product GEMM path (see
+    /// <see cref="TryDispatchInt8Linear"/>). Defaults from <c>HARTSYINFERENCE_VK_INT8=1</c> at construction,
+    /// same as <c>CudaBackend.EnableW8A8</c>; settable afterward so tests/tooling can toggle it without an
+    /// env var and a fresh process.</summary>
+    public bool EnableInt8Linear { get; set; }
+
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
         using OpScope _ = EnterOp();
+        if (TryDispatchInt8Linear(output, input, weight, bias)) return;
         // input [M, K], weight [N, K] → output [M, N]   ⇒  C = A @ B^T  with A=input, B=weight
         DispatchMatmul(output, input, weight, transposeA: false, transposeB: true, bias: bias);
+    }
+
+    /// <summary>Opt-in INT8 dot-product GEMM path for <see cref="Linear"/> (<c>HARTSYINFERENCE_VK_INT8=1</c>),
+    /// wiring the already-validated <see cref="MatMulInt8"/>/<see cref="Int8Quantizer"/> pair (bit-exact
+    /// on the 3060 per <c>docs/Research/VULKAN_OPTIMIZATION.md</c>) into the normal model-code call path —
+    /// the explicit open item both that doc and <c>ROADMAP.md</c> tracked as "wire the INT8 quantizer into
+    /// Vulkan model loading." Re-quantizes BOTH weight and activation on EVERY call via the CPU-side
+    /// <see cref="Int8Quantizer.RowwiseSymmetric"/> — correct and wired end-to-end, but not yet
+    /// perf-optimal: caching the weight's quantized form across calls (weights don't change between
+    /// calls, only activations do) is the natural follow-up and is intentionally NOT done here, to keep
+    /// this pass bounded — a persistent per-weight INT8 cache needs its own lifecycle wiring (freed
+    /// alongside <see cref="FreeWeights"/>) that deserves its own review, not a rushed addition here.
+    /// Narrowly scoped to the plain 2-D F32 case (K%4==0, F32 in/out) on a device exposing the integer
+    /// dot-product feature; anything else (F16, batched, non-4-divisible K, feature unavailable, opted
+    /// out) falls through to the normal GEMM path completely unchanged.</summary>
+    private unsafe bool TryDispatchInt8Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
+    {
+        if (!EnableInt8Linear || !Vk.HasInt8DotProduct) return false;
+        if (output.Shape.Rank != 2 || input.Shape.Rank != 2 || weight.Shape.Rank != 2) return false;
+        if (output.DType != DType.F32 || input.DType != DType.F32 || weight.DType != DType.F32) return false;
+
+        int M = (int)output.Shape[0], N = (int)output.Shape[1], K = (int)input.Shape[1];
+        if ((K & 3) != 0) return false;
+        if ((int)weight.Shape[0] != N || (int)weight.Shape[1] != K) return false;
+        if (bias is not null && bias.DType != DType.F32) return false;
+
+        // Both quantizer calls read .DataPointer directly (CPU-side) — a real, documented D2H sync if
+        // either operand happened to be GPU-resident. Activations from a prior GPU op commonly are; this
+        // is the known cost of this opt-in path until the weight-side cache lands (see doc comment above).
+        (Tensor inQuant, Tensor inScale) = Int8Quantizer.RowwiseSymmetric(input);
+        (Tensor wQuant, Tensor wScale) = Int8Quantizer.RowwiseSymmetric(weight);
+        try
+        {
+            MatMulInt8(output, inQuant, wQuant, inScale, wScale);
+            if (bias is not null)
+            {
+                float* outP = (float*)output.DataPointer;
+                float* biasP = (float*)bias.DataPointer;
+                for (int m = 0; m < M; m++)
+                    for (int n = 0; n < N; n++)
+                        outP[m * N + n] += biasP[n];
+            }
+            return true;
+        }
+        finally
+        {
+            inQuant.Dispose(); inScale.Dispose(); wQuant.Dispose(); wScale.Dispose();
+        }
     }
 
     public void BatchedMatMul(Tensor output, Tensor a, Tensor b)

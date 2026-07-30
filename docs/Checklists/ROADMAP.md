@@ -40,7 +40,15 @@ assumed (see the profiling pitfalls in `TROUBLESHOOTING.md`).
 - [ ] **Benchmark harness:** C# runner + PyTorch/llama.cpp baselines + NVTX ranges + run scripts;
   multi-device baselines (3060 / L40S / A100 / H100).
 - [ ] **FlashAttention-2 PTX** (varlen/packed): `IBackend.PackedAttention` for video; general FA2 kernel.
-- [ ] **cuDNN-free Winograd conv** for the conv-heavy VAEs/vision.
+- [ ] **cuDNN-free Winograd conv** for the conv-heavy VAEs/vision. Evaluated as a Vulkan-side "reverse gap"
+  opportunity too (2026-07-29, see §3 Phase 5) since neither backend has one — **deferred on both**: only
+  3x3-stride-1 convs benefit (~41% of this engine's `Conv2D` call sites, per a grep across
+  `src/HartsyInference.Diffusion`), concentrated in the VAE + classic SD1.5/SDXL UNet path; DiT models
+  (Flux, SD3.5 — the newer direction) call `Conv2D` once per forward pass as a strided patchify op, which
+  Winograd can't accelerate at all (it doesn't support stride > 1). No profiling on either backend shows
+  Conv2D as an actual bottleneck today (CUDA's own SDXL wins came from residency/reshape fixes, not conv
+  algorithm choice — see `MODEL_STATUS_IMAGE.md`). Revisit only if real profiling flags VAE/UNet conv as a
+  measured hotspot.
 - [ ] **Kernel fusion** (QKV projection, gate-up, norm+activation, coopmat bias) where launch-bound.
 - [ ] **Activation memory pool** + **CUDA-graph denoise** capture across the DiT/UNet loop.
 - [ ] **F16/BF16 tensor-core sweep**; **FA3 / WGMMA** on Hopper.
@@ -104,7 +112,13 @@ a stale code comment claiming otherwise.
   time enough that the residency win above wouldn't show through end-to-end yet). Remaining levers once
   the coopmat gap is understood: QKV fusion, pre-cast FP8 weights, coopmat bias fusion, vendor
   tile-size auto-tuner.
-- [ ] **GGUF dequant shaders:** `dequant_q4_k`, `dequant_q8_0` (quant support on Vulkan).
+- [x] **GGUF dequant shaders** — **done** (2026-07-29): all 6 (`dequant_q4_0/q5_0/q8_0/q4_k/q5_k/q6_k`),
+  mirroring `native/cuda/dequant/*.cu` exactly, wired into `VulkanBackend.CastIfNeeded` (lazy, on first
+  use — no separate loading step, same as CUDA). Validated against the engine's production
+  `GgufDequantizer` CPU codec. Along the way, found and fixed a real pre-existing bug:
+  `VulkanGpuTransferHelper.ByteSize` computed zero bytes for any quantized tensor (used `ElementCount *
+  SizeInBytes`, and quantized dtypes have `SizeInBytes=0`) — meaning Vulkan had never successfully
+  uploaded a quantized tensor before this. See `TROUBLESHOOTING.md`.
 - [x] **FlashAttention `sdpa_flash`** SPIR-V — **done** (2026-07-29): `sdpa_flash.comp.glsl`, a fused
   online-softmax kernel (one workgroup per query row, tiled KV in shared memory), backs both
   `ScaledDotProductAttention` and `FlashAttention`/`FlashAttentionDev` for head dims <= 128 (the rare
@@ -119,8 +133,49 @@ a stale code comment claiming otherwise.
 - [ ] Small-subgroup `requiredSubgroupSize` pinning; im2col shader 64-bit widening (no longer tooling-blocked
   now that a working SPIR-V compiler is available — same class of bug as the CUDA im2col 32-bit overflow,
   `Conv2D` already throws above ~2^31 im2col elements rather than silently corrupting); descriptor-pool
-  `FlipPool` timeline wait; per-dispatch barrier scoping.
-- [ ] Wire the INT8 quantizer into Vulkan model loading.
+  `FlipPool` timeline wait.
+- [ ] **Per-dispatch barrier scoping** — re-measured post-flash-attention (2026-07-29), **deprioritized,
+  not built**: `Dispatch()` (`VulkanBackend.cs`) still emits one unconditional global `VkMemoryBarrier2`
+  after every dispatch (`VulkanCommandStream.RecordGlobalComputeBarrier`), with no read/write-direction
+  info threaded through the ~40 call sites that would be needed to scope it. Flash attention already
+  collapsed the actual worst case — the old per-(B·H) naive-SDPA triple-dispatch loop — into one dispatch
+  for head dims <= 128 (the common path); the naive per-head loop only remains as a rare fallback (headDim
+  > 128 or non-integer GQA ratio). No isolated barrier-cost number exists (`VulkanLinearProfileMeasurement`
+  folds it into an undifferentiated per-dispatch host-overhead bucket) and building one means new
+  instrumentation, not just a measurement run. Given GEMM/attention kernel throughput is still 30–430×
+  behind CUDA (see the flash-attention and GEMM tables above) — a far larger, already-quantified gap — this
+  is not worth chasing now. Revisit only if per-dispatch overhead specifically (not kernel throughput)
+  shows up as the bottleneck in a real end-to-end profile.
+- [ ] **coopmat2** (`VK_NV_cooperative_matrix2`): workgroup-scope tiles, fused dequant-on-load,
+  `coopMatReduceNV`-fused softmax, bias/activation epilogue fusion (`VULKAN_OPTIMIZATION.md` §4.2). All
+  capability flags confirmed present on the 3060 — genuine reachable ceiling, but explicitly NVIDIA-only
+  and the highest-effort item in this section. Deliberately deferred past this Phase 5 pass (user chose
+  "portable items now, skip coopmat2" — 2026-07-29) in favor of INT8 wiring/dequant/flash-attention, which
+  land on every vendor exposing the base features; revisit once a coopmat1 vs coopmat2 measured gap on the
+  3060 justifies the NVIDIA-only investment.
+- [~] **Wire the INT8 quantizer into `Linear`'s call surface** — **op-level wiring done** (2026-07-29);
+  **NOT the same as this section's original ask**, which was model *loading* wiring with an e2e SSIM/parity
+  gate — that part is still open, see below. What landed: `VulkanBackend.Linear` has an opt-in INT8
+  dot-product GEMM path (`TryDispatchInt8Linear`), gated by the settable `EnableInt8Linear` property
+  (defaults from `HARTSYINFERENCE_VK_INT8=1`, mirroring `CudaBackend.EnableW8A8`'s instance-property
+  pattern rather than a static-readonly field, specifically so tests/tooling can flip it without an env var
+  + fresh process). Scoped narrowly to plain 2-D F32 Linear (K%4==0, integer dot-product feature present)
+  — anything else falls through to the unchanged GEMM path. Re-quantizes both weight and activation on
+  every call via the already bit-exact-validated `Int8Quantizer.RowwiseSymmetric` + `MatMulInt8`; measured
+  relative Frobenius error ~0.55% vs an exact-path (opt-in off) baseline that itself matches the F32
+  reference to <0.0001% (`Backend_Linear_Int8OptIn_ApproximatesF32Reference`, run twice on identical input
+  with the flag off/on so the test can't pass via a silent fallthrough). Also gated on: a chained-into-a-
+  second-GPU-op test (`Backend_Linear_Int8OptIn_BiasSurvivesDownstreamGpuConsumption`) confirming the
+  bias-add's host-side write doesn't leave a stale cached GPU buffer for a downstream consumer to read —
+  verified safe (the tensor's lazy-sync callback evicts+frees the GPU cache entry on the host read before
+  the write happens), not just assumed safe.
+  **Still open** (the actual model-loading item): no model's weight-loading path calls into this yet, and
+  there is no e2e SSIM/parity gate — `EnableInt8Linear` is a manually-flipped correctness-tested opt-in,
+  not something any real generation pipeline turns on today. Also deliberately deferred: this re-quantizes
+  the weight from scratch on every call — caching the weight's quantized form across calls (weights are
+  static between calls; only activations change) is the natural perf follow-up and needs its own lifecycle
+  wiring (freed alongside `FreeWeights`), not bundled into this pass. Per-shape INT8 tile selection (below)
+  is a separate, still-open item.
 - [ ] **RCCL** collectives for multi-GPU on AMD (§1).
 
 ## 4. Quantization

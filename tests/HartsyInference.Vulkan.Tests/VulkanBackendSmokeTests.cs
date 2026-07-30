@@ -1891,4 +1891,92 @@ public sealed class VulkanBackendSmokeTests
 
         qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose();
     }
+
+    // ── Phase 5: GGUF dequant shaders ───────────────────────────────────────────────────────
+    // Vulkan had zero GGUF k-quant/legacy-quant dequant support before this (an explicit open
+    // ROADMAP.md item). Reference is HartsyInference.ModelAssets.Gguf.GgufDequantizer — the SAME
+    // validated CPU codec used elsewhere in the engine, not a hand-rolled test-only reimplementation.
+    // Block bytes are random EXCEPT the FP16 scale header(s), which get a small fixed value instead of
+    // a random bit pattern — an unconstrained random uint16 has a real chance of landing in FP16's
+    // NaN/Inf exponent range, which would make the whole block NaN/Inf on BOTH sides and prove nothing.
+    // Everything else (nibbles, packed 6-bit scale/min fields, signed int8 sub-scales) is a plain
+    // integer reinterpretation with no such hazard, so full-random there is fine and exercises the
+    // bit-unpacking generically.
+
+    /// <summary>Per-format byte offsets of the block's FP16 scale field(s), relative to block start —
+    /// everywhere else in the block is safe to fill with fully random bytes.</summary>
+    private static int[] DequantScaleByteOffsets(string dtypeName) => dtypeName switch
+    {
+        "Q4_0" => new[] { 0 },
+        "Q5_0" => new[] { 0 },
+        "Q8_0" => new[] { 0 },
+        "Q4_K" => new[] { 0, 2 },
+        "Q5_K" => new[] { 0, 2 },
+        "Q6_K" => new[] { 208 },   // Q6_K's scale sits at the END of the super-block, not the start.
+        _ => throw new ArgumentException(dtypeName),
+    };
+
+    [Theory]
+    [InlineData("Q4_0")]
+    [InlineData("Q5_0")]
+    [InlineData("Q8_0")]
+    [InlineData("Q4_K")]
+    [InlineData("Q5_K")]
+    [InlineData("Q6_K")]
+    public unsafe void Backend_DequantizeToF32_MatchesGgufDequantizer(string dtypeName)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        DType dtype = dtypeName switch
+        {
+            "Q4_0" => DType.Q4_0,
+            "Q5_0" => DType.Q5_0,
+            "Q8_0" => DType.Q8_0,
+            "Q4_K" => DType.Q4_K,
+            "Q5_K" => DType.Q5_K,
+            "Q6_K" => DType.Q6_K,
+            _ => throw new ArgumentException(dtypeName),
+        };
+        // 3 super-blocks/blocks worth of elements — exercises block-boundary handling without a huge buffer.
+        const int blockRepeats = 8;
+        int elementCount = dtype.BlockElementCount * blockRepeats;
+        int blockBytes = dtype.BlockByteSize;
+        Tensor quant = new(new TensorShape(elementCount), dtype);
+        byte* raw = (byte*)quant.DataPointer;
+        long byteCount = dtype.ComputeByteCount(elementCount);
+        Random rng = new(unchecked(dtypeName.GetHashCode()));
+        for (long i = 0; i < byteCount; i++) raw[i] = (byte)rng.Next(256);
+
+        int[] scaleOffsets = DequantScaleByteOffsets(dtypeName);
+        for (int block = 0; block < blockRepeats; block++)
+        {
+            long blockBase = (long)block * blockBytes;
+            // Vary the scale slightly per block/field so the test isn't accidentally insensitive to a
+            // scale-indexing bug (e.g. reading dmin's bytes for d).
+            foreach (int off in scaleOffsets)
+            {
+                Half h = (Half)(0.1f + 0.05f * off / 2f + 0.01f * block);
+                ushort bits = BitConverter.HalfToUInt16Bits(h);
+                raw[blockBase + off] = (byte)(bits & 0xFF);
+                raw[blockBase + off + 1] = (byte)((bits >> 8) & 0xFF);
+            }
+        }
+
+        using Tensor cpuRef = HartsyInference.ModelAssets.Gguf.GgufDequantizer.Dequantize(quant, DType.F32);
+        using Tensor gpuOut = backend.DequantizeToF32(quant);
+
+        ReadOnlySpan<float> cpuS = cpuRef.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> gpuS = gpuOut.AsReadOnlySpan<float>();
+        for (int i = 0; i < elementCount; i++)
+        {
+            // F16 is the GPU dequant kernel's native intermediate (matches CudaBackend.CastOnGpu's own
+            // quant->F16->F32 staging), so tolerance is relative-ish: absolute floor + a percentage.
+            float diff = MathF.Abs(gpuS[i] - cpuS[i]);
+            float tol = 0.05f + MathF.Abs(cpuS[i]) * 0.02f;
+            Assert.True(diff <= tol, $"[{dtypeName}] index {i}: gpu={gpuS[i]} cpu={cpuS[i]} diff={diff} tol={tol}");
+        }
+
+        quant.Dispose();
+    }
 }

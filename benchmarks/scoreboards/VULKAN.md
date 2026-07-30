@@ -126,6 +126,35 @@ valid) would have silently read the wrong memory. Caught by
 `Backend_FlashAttention_GqaAndKvLenLessThanBuffer_MatchesCpu` before this ever shipped; fixed by passing
 the buffer's actual capacity as a separate push-constant field from the loop-bound `skv`.
 
+## Results — INT8 GEMM wired into `Linear`'s call surface (opt-in), correctness only, RTX 3060
+
+`VulkanBackend.Linear` now has an opt-in INT8 dot-product GEMM path (`TryDispatchInt8Linear`, toggled via
+the settable `EnableInt8Linear` property / `HARTSYINFERENCE_VK_INT8=1`). **This is op-level wiring, not
+model-loading wiring** — no model's weight-loading path calls into it yet and there's no e2e SSIM/parity
+gate; see `ROADMAP.md` §3's `[~]` entry for the distinction. This re-uses the already bit-exact-validated
+`MatMulInt8` + `Int8Quantizer.RowwiseSymmetric` pair from the earlier INT8 GEMM effort — no new kernel,
+just a new call site — so there's no separate throughput number to report yet (it dispatches the exact
+same shader the GEMM table above already measures); what's new is the correctness gate at the `Linear`
+call surface with real re-quantization on both operands, plus the CPU-side bias add. Tested on the RTX
+3060; llvmpipe self-skips (no integer dot-product support — deviation #20 in `TROUBLESHOOTING.md`), not a
+pass on that device. Measured on identical input run twice (opt-in off then on), so the numbers below
+can't reflect a silent fallthrough to the exact path:
+
+| Shape (M,K,N) | Exact path (opt-in off) relErr | INT8 opt-in relErr | Date |
+|---|---:|---:|---|
+| 64,128,96 | 0.0000% | 0.549% | 2026-07-29 |
+| 96,256,128 | 0.0000% | 0.566% | 2026-07-29 |
+
+Consistent with the standalone `MatMulInt8_QuantizedWeights_ApproximatesFloatMatmul` result above the
+`Linear` layer didn't add — same per-row symmetric INT8 error budget carries through unchanged. Also
+gated: a chained-into-a-second-GPU-op test confirms the bias-add's host-side write doesn't leave a stale
+cached GPU buffer behind for a downstream consumer (`Backend_Linear_Int8OptIn_BiasSurvivesDownstreamGpuConsumption`)
+— verified safe via the tensor lazy-sync callback's evict-on-read behavior, not just assumed.
+**Not yet done** (explicitly deferred, not forgotten): this re-quantizes the weight from scratch on every
+call; weights don't change between calls, so caching the weight's quantized form is the natural
+throughput follow-up once it has its own freed-with-`FreeWeights` lifecycle. Per-shape INT8 tile selection
+remains a separate open Phase 5 item.
+
 ## What this does NOT show yet
   target, not a perf number to chase on the current naive path.
 - AMD/Intel hardware: none available on this box. Mesa llvmpipe (software) was used for small-subgroup

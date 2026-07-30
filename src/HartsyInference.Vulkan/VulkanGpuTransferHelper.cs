@@ -385,7 +385,14 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static long ByteSize(Tensor t) => t.ElementCount * t.DType.SizeInBytes;
+    // ComputeByteCount handles both plain dtypes (ElementCount * SizeInBytes) and GGUF-quantized ones
+    // (whose SizeInBytes is 0 — the real per-element size is packed as BlockByteSize/BlockElementCount).
+    // A prior version of this method used ElementCount * SizeInBytes directly, which silently computed a
+    // ZERO byte size for any quantized tensor (Q4_0/Q5_0/Q8_0/Q4_K/Q5_K/Q6_K) — every upload of one would
+    // either throw ("Allocation size must be > 0") or, worse, allocate nothing and read/write garbage,
+    // undetected until the Phase 5 GGUF dequant shader tests exercised a quantized tensor for the first
+    // time this backend had ever actually been asked to upload one.
+    public static long ByteSize(Tensor t) => t.DType.ComputeByteCount(t.ElementCount);
 
     public (long cachedBytes, long hits, long misses) GetStats() => (_cachedBytes, _hits, _misses);
 
