@@ -1,11 +1,16 @@
-// im2col: NCHW -> column tensor for use with tiled GEMM Conv2D.
-//   col[(n*Cin*Kh*Kw + c*Kh*Kw + kh*Kw + kw), (oh*outW + ow)] = in[n, c, ih, iw]
-// where ih = oh*sH - pH + kh, iw = ow*sW - pW + kw, with zero-padding outside.
+// im2col: NCHW -> column tensor TILE for use with tiled GEMM Conv2D.
+//   col[(n*Cin*Kh*Kw + c*Kh*Kw + kh*Kw + kw), localCol] = in[n, c, ih, iw]
+// where localCol indexes a [colOffset, colOffset+tileCols) slice of the full oh*outW+ow range,
+// ih = oh*sH - pH + kh, iw = ow*sW - pW + kw, with zero-padding outside. colOffset=0 and
+// tileCols=outH*outW reproduces the original untiled behavior exactly (one tile spanning the
+// whole image) — Conv2D uses this for small convs and only splits into multiple tiles when the
+// full column matrix would be too large to materialize at once (e.g. Krea2's 1024x1024 VAE
+// decode: untiled would need ~7 GB for one im2col buffer).
 //
 // 64-bit indexing required for SDXL spatial sizes (1024+) — see
 // PHASE_3_DEVIATIONS #12.
 //
-// Bindings: 0=in (NCHW), 1=col (rows = N*Cin*Kh*Kw, cols = N*outH*outW)
+// Bindings: 0=in (NCHW), 1=col (rows = N*Cin*Kh*Kw, cols = N*tileCols)
 #version 460
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
@@ -41,22 +46,23 @@ layout(push_constant) uniform Push {
     uint strideW;
     uint outH;
     uint outW;
+    uint colOffset;   // absolute start of this tile's output-position range
+    uint tileCols;    // width of this tile (== outH*outW for the untiled/single-tile case)
 } pc;
 
 void main() {
     uint linear  = gl_GlobalInvocationID.x;
-    uint64_t total = uint64_t(pc.N) * uint64_t(pc.Cin) * uint64_t(pc.Kh) * uint64_t(pc.Kw)
-                   * uint64_t(pc.outH) * uint64_t(pc.outW);
+    uint rowsPerImage = pc.Cin * pc.Kh * pc.Kw;
+    uint64_t total = uint64_t(pc.N) * uint64_t(rowsPerImage) * uint64_t(pc.tileCols);
     if (uint64_t(linear) >= total) return;
 
-    uint colsPerImage = pc.outH * pc.outW;
-    uint rowsPerImage = pc.Cin * pc.Kh * pc.Kw;
-    uint perImage     = rowsPerImage * colsPerImage;
+    uint perImage = rowsPerImage * pc.tileCols;
 
     uint n = linear / perImage;
     uint rc = linear - n * perImage;
-    uint row = rc / colsPerImage;
-    uint colIdx = rc - row * colsPerImage;
+    uint row = rc / pc.tileCols;
+    uint localCol = rc - row * pc.tileCols;
+    uint colIdx = pc.colOffset + localCol;
 
     uint c = row / (pc.Kh * pc.Kw);
     uint kIdx = row - c * (pc.Kh * pc.Kw);
@@ -75,7 +81,7 @@ void main() {
         val = inp[inIdx];
     }
 
-    // Output flat layout: per-image (row, col) blocks
-    uint outIdx = n * perImage + row * colsPerImage + colIdx;
+    // Output flat layout: per-image (row, localCol) blocks, tile-local stride
+    uint outIdx = n * perImage + row * pc.tileCols + localCol;
     col[outIdx] = val;
 }

@@ -28,6 +28,18 @@ public sealed class VulkanDeviceInfoTest
             _out.WriteLine($"  ReBAR={c.HasReBar}  pushDesc={c.HasPushDescriptor}  memBudget={c.HasMemoryBudget}  coopMat={c.HasCooperativeMatrix}  int8dot={c.HasInt8DotProduct}");
             _out.WriteLine($"  maxComputeShared={c.MaxComputeSharedMemoryBytes}  maxWGInvocations={c.MaxComputeWorkGroupInvocations}");
             _out.WriteLine($"  computeQueueFamily={c.ComputeQueueFamilyIndex}  asyncCompute={c.IsAsyncComputeQueue}");
+
+            VkPhysicalDeviceMemoryProperties mp = device.MemoryProperties;
+            _out.WriteLine($"  memoryTypeCount={mp.memoryTypeCount} memoryHeapCount={mp.memoryHeapCount}");
+            VkMemoryHeap[] heaps = { mp.memoryHeaps_0, mp.memoryHeaps_1, mp.memoryHeaps_2, mp.memoryHeaps_3,
+                mp.memoryHeaps_4, mp.memoryHeaps_5, mp.memoryHeaps_6, mp.memoryHeaps_7 };
+            for (int h = 0; h < mp.memoryHeapCount; h++)
+                _out.WriteLine($"    heap[{h}]: size={heaps[h].size / (1L << 20)} MB flags={heaps[h].flags}");
+            for (int t = 0; t < mp.memoryTypeCount; t++)
+            {
+                VkMemoryType mt = mp.GetMemoryType(t);
+                _out.WriteLine($"    type[{t}]: heapIndex={mt.heapIndex} flags={mt.propertyFlags}");
+            }
         }
         catch (Exception e)
         {

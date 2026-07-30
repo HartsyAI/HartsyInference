@@ -26,6 +26,12 @@
 //   glslc -DUSE_FP16=1 sdpa_flash.comp.glsl -o sdpa_flash_f16.spv
 //   glslc -DHAS_MASK=1 sdpa_flash.comp.glsl -o sdpa_flash_mask_f32.spv
 //   glslc -DUSE_FP16=1 -DHAS_MASK=1 sdpa_flash.comp.glsl -o sdpa_flash_mask_f16.spv
+//   glslc -DHAS_DEVICE_POS=1 sdpa_flash.comp.glsl -o sdpa_flash_dev_f32.spv
+//
+// HAS_DEVICE_POS (mutually exclusive with HAS_MASK — FlashAttentionDev's decode-graph signature has no
+// mask parameter): reads skv/qOffset from a device buffer (Pos_[0]=kvLen, Pos_[1]=qOffset, the same
+// layout AllocDevicePos/WriteDevicePos and rope_decode_step/kv_cache_append_dev already use) instead of
+// push constants — a captured/replayed command buffer cannot re-bake a per-step position into its bytes.
 
 #version 460
 
@@ -34,6 +40,9 @@
 #endif
 #ifndef HAS_MASK
 #define HAS_MASK 0
+#endif
+#ifndef HAS_DEVICE_POS
+#define HAS_DEVICE_POS 0
 #endif
 
 #if USE_FP16 == 1
@@ -62,6 +71,9 @@ layout(set = 0, binding = 1) readonly  buffer K_ { DTYPE k_data[]; };
 layout(set = 0, binding = 2) readonly  buffer V_ { DTYPE v_data[]; };
 #if HAS_MASK == 1
 layout(set = 0, binding = 3) readonly  buffer Mask_ { float mask_data[]; };
+layout(set = 0, binding = 4) writeonly buffer O_ { DTYPE o_data[]; };
+#elif HAS_DEVICE_POS == 1
+layout(set = 0, binding = 3) readonly  buffer Pos_ { uint pos_data[]; };   // [0]=kvLen, [1]=qOffset
 layout(set = 0, binding = 4) writeonly buffer O_ { DTYPE o_data[]; };
 #else
 layout(set = 0, binding = 3) writeonly buffer O_ { DTYPE o_data[]; };
@@ -100,6 +112,14 @@ void main() {
     uint kvHeadIdx = hIdx / kvGroup;
     uint D = pc.headDim;
 
+#if HAS_DEVICE_POS == 1
+    uint skv = pos_data[0];
+    uint qOffsetV = pos_data[1];
+#else
+    uint skv = pc.skv;
+    uint qOffsetV = pc.qOffset;
+#endif
+
     uint qBase = ((b * pc.hq + hIdx) * pc.sq + queryRow) * D;
 
     for (uint d = tid; d < D; d += TILE) { sQ[d] = TO_F32(q_data[qBase + d]); sAcc[d] = 0.0; }
@@ -107,10 +127,10 @@ void main() {
     barrier();
     memoryBarrierShared();
 
-    uint absQPos = pc.qOffset + queryRow;
+    uint absQPos = qOffsetV + queryRow;
 
-    for (uint kvStart = 0; kvStart < pc.skv; kvStart += TILE) {
-        uint tileLen = min(uint(TILE), pc.skv - kvStart);
+    for (uint kvStart = 0; kvStart < skv; kvStart += TILE) {
+        uint tileLen = min(uint(TILE), skv - kvStart);
 
         if (tid < tileLen) {
             uint keyIdx = kvStart + tid;
@@ -135,7 +155,7 @@ void main() {
                 for (uint d = 0; d < D; d++) dot += sQ[d] * sK[tid][d];
                 float s = dot * pc.scale;
 #if HAS_MASK == 1
-                s += mask_data[queryRow * pc.skv + keyIdx];
+                s += mask_data[queryRow * skv + keyIdx];
 #endif
                 sScore[tid] = s;
             }

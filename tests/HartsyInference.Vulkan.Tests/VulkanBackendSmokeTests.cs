@@ -1023,6 +1023,65 @@ public sealed class VulkanBackendSmokeTests
         input.Dispose(); weight.Dispose(); bias.Dispose(); output.Dispose();
     }
 
+    /// <summary>Regression gate for the real Krea2-on-Vulkan VAE-decode OOM (2026-07-30):
+    /// <c>Conv2D</c>'s im2col buffer used to materialize the FULL <c>[gemmK, outH*outW]</c> column matrix
+    /// in one allocation — ~7 GB at Krea2's 1024x1024 decode resolution, which OOM'd even with the
+    /// transformer's weights already freed. Fixed by tiling over output positions (see the im2col shader's
+    /// <c>colOffset</c>/<c>tileCols</c> and the matmul kernel's existing <c>bOffset</c>/<c>cOffset</c>).
+    /// Forces the multi-tile path via <see cref="VulkanBackend.Conv2DMaxColTileBytes"/> (tiny here, so a
+    /// small conv still exercises many tile boundaries) and checks every output element, not just probes,
+    /// against the CPU reference — a stride/offset bug in the tiling math would corrupt specific columns,
+    /// which probe-sampling could miss.</summary>
+    [Fact]
+    public void Backend_Conv2D_TiledPath_MatchesUntiled()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int B = 1, Cin = 3, Cout = 5, H = 10, W = 10, Kh = 3, Kw = 3;
+        // gemmK=27, fullN=100: 4 bytes/elem * 27 * 1 col ≈ 108 bytes/col → tileN clamps to 1,
+        // forcing ~100 separate tile iterations (im2col + matmul dispatched once per output column).
+        backend.Conv2DMaxColTileBytes = 128;
+
+        Tensor input = new(new TensorShape(B, Cin, H, W), DType.F32);
+        Tensor weight = new(new TensorShape(Cout, Cin, Kh, Kw), DType.F32);
+        Tensor bias = new(new TensorShape(Cout), DType.F32);
+        Tensor output = new(new TensorShape(B, Cout, H, W), DType.F32);
+
+        Random rng = new(43);
+        Span<float> iS = input.AsSpan<float>();
+        Span<float> wS = weight.AsSpan<float>();
+        Span<float> bS = bias.AsSpan<float>();
+        for (int i = 0; i < B * Cin * H * W; i++) iS[i] = (float)(rng.NextDouble() * 2 - 1);
+        for (int i = 0; i < Cout * Cin * Kh * Kw; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.1f;
+        for (int i = 0; i < Cout; i++) bS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.05f;
+
+        backend.Conv2D(output, input, weight, bias, strideH: 1, strideW: 1, padH: 1, padW: 1);
+
+        ReadOnlySpan<float> oS = output.AsReadOnlySpan<float>();
+        float maxErr = 0f;
+        for (int oc = 0; oc < Cout; oc++)
+            for (int yp = 0; yp < H; yp++)
+                for (int xp = 0; xp < W; xp++)
+                {
+                    float acc = bS[oc];
+                    for (int ic = 0; ic < Cin; ic++)
+                        for (int kh = 0; kh < Kh; kh++)
+                            for (int kw = 0; kw < Kw; kw++)
+                            {
+                                int ih = yp - 1 + kh;
+                                int iw = xp - 1 + kw;
+                                if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
+                                acc += iS[(ic * H + ih) * W + iw] * wS[((oc * Cin + ic) * Kh + kh) * Kw + kw];
+                            }
+                    float got = oS[(oc * H + yp) * W + xp];
+                    maxErr = MathF.Max(maxErr, MathF.Abs(got - acc));
+                }
+        Assert.True(maxErr < 1e-3f, $"Conv2D tiled-path maxErr {maxErr:E3} too high.");
+
+        input.Dispose(); weight.Dispose(); bias.Dispose(); output.Dispose();
+    }
+
     [Fact]
     public void Backend_UpsampleNearest_Matches_Cpu()
     {
@@ -1126,6 +1185,435 @@ public sealed class VulkanBackendSmokeTests
             Assert.InRange(dS[i] - (float)sS[i], -1e-5f, 1e-5f);
 
         src.Dispose(); dst.Dispose();
+    }
+
+    /// <summary>Regression gate for a real OOM-investigation finding (2026-07-30): Krea2's DiT
+    /// (<c>Krea2Transformer.ComputeTimeEmbedding</c>) has a BF16 weight feeding a <c>Linear</c> whose GEMM
+    /// resolves to F32 — <c>CastIfNeeded</c> had no BF16 branch at all before this, throwing
+    /// <c>NotSupportedException</c> the first time any real model exercised it (no synthetic unit test had
+    /// a BF16 tensor). Exercises the private cast indirectly through <c>Linear</c>, the same call path the
+    /// real model hits, rather than testing the cast in isolation.</summary>
+    [Fact]
+    public void Backend_Linear_Bf16Weight_MatchesCpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int M = 8, K = 64, N = 8;
+        Tensor input = new(new TensorShape(M, K), DType.F32);
+        Tensor weightF32 = new(new TensorShape(N, K), DType.F32);
+        Tensor output = new(new TensorShape(M, N), DType.F32);
+
+        Random rng = new(17);
+        Span<float> iS = input.AsSpan<float>();
+        Span<float> wS = weightF32.AsSpan<float>();
+        for (int i = 0; i < M * K; i++) iS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.1f;
+        for (int i = 0; i < N * K; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.05f;
+
+        // BF16 weight, matching the truncated-mantissa CPU reference the rest of the codebase already
+        // uses (Tensor.CastTo) — the shader must match THIS conversion, not a hypothetical exact one.
+        Tensor weightBf16 = weightF32.CastTo(DType.BF16);
+        Tensor weightF32Roundtrip = weightBf16.CastTo(DType.F32);   // the CPU-truncated reference weight
+
+        backend.Linear(output, input, weightBf16, null);
+
+        ReadOnlySpan<float> oS = output.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> wRef = weightF32Roundtrip.AsReadOnlySpan<float>();
+        for (int m = 0; m < M; m++)
+        {
+            for (int n = 0; n < N; n++)
+            {
+                float acc = 0;
+                for (int k = 0; k < K; k++) acc += iS[m * K + k] * wRef[n * K + k];
+                Assert.InRange(oS[m * N + n] - acc, -1e-3f, 1e-3f);
+            }
+        }
+        input.Dispose(); weightF32.Dispose(); weightBf16.Dispose(); weightF32Roundtrip.Dispose(); output.Dispose();
+    }
+
+    /// <summary>Regression gate for a historical CUDA incident with the SAME symptom class as a real
+    /// Krea2-on-Vulkan finding: <c>PARITY_VERIFICATION.md</c>'s "Krea2 / all fp8_scaled DiTs (fused GEMV)"
+    /// row documents a past CUDA bug where BF16 biases on Krea2's time-embed/modulation linears were
+    /// reinterpreted as F32 raw bytes, exploding timestep conditioning into an all-black image. Krea2's
+    /// real checkpoint confirms `time_embed.linear_1/2.bias`, `time_mod_proj.bias`, and `img_in.bias` are
+    /// ALL BF16 — exercised on Vulkan via <see cref="VulkanBackend.Linear"/>'s bias operand for the first
+    /// time by Krea2 (the existing <see cref="Backend_Linear_Bf16Weight_MatchesCpu"/> test only covers a
+    /// BF16 WEIGHT with bias=null). Covers the bias-cast path specifically, independent of the weight cast.</summary>
+    [Theory]
+    [InlineData(8)]
+    [InlineData(1)]   // M=1: the exact shape Krea2's time-embed/img_in projections use (batch=1)
+    public void Backend_Linear_Bf16Bias_MatchesCpu(int M)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int K = 64, N = 8;
+        Tensor input = new(new TensorShape(M, K), DType.F32);
+        Tensor weight = new(new TensorShape(N, K), DType.F32);
+        Tensor output = new(new TensorShape(M, N), DType.F32);
+
+        Random rng = new(19);
+        Span<float> iS = input.AsSpan<float>();
+        Span<float> wS = weight.AsSpan<float>();
+        for (int i = 0; i < M * K; i++) iS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.1f;
+        for (int i = 0; i < N * K; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.05f;
+
+        Tensor biasF32 = new(new TensorShape(N), DType.F32);
+        Span<float> bS = biasF32.AsSpan<float>();
+        for (int i = 0; i < N; i++) bS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.2f;
+
+        // BF16 bias, matching the truncated-mantissa CPU reference the rest of the codebase already uses
+        // (Tensor.CastTo) — the shader must match THIS conversion, not a hypothetical exact one.
+        Tensor biasBf16 = biasF32.CastTo(DType.BF16);
+        Tensor biasF32Roundtrip = biasBf16.CastTo(DType.F32);   // the CPU-truncated reference bias
+
+        backend.Linear(output, input, weight, biasBf16);
+
+        ReadOnlySpan<float> oS = output.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> bRef = biasF32Roundtrip.AsReadOnlySpan<float>();
+        for (int m = 0; m < M; m++)
+        {
+            for (int n = 0; n < N; n++)
+            {
+                float acc = bRef[n];
+                for (int k = 0; k < K; k++) acc += iS[m * K + k] * wS[n * K + k];
+                Assert.InRange(oS[m * N + n] - acc, -1e-3f, 1e-3f);
+            }
+        }
+        input.Dispose(); weight.Dispose(); output.Dispose();
+        biasF32.Dispose(); biasBf16.Dispose(); biasF32Roundtrip.Dispose();
+    }
+
+    /// <summary>Regression gate for another real Krea2-on-Vulkan finding (2026-07-30): no
+    /// <c>AffineBroadcastLastDim</c> override existed at all — every call fell through to IBackend's
+    /// F32-only CPU default, which throws on Krea2's F16 DiT activations
+    /// (<c>Krea2Block.Forward</c> → <c>DiTUtils.Modulate</c>). Covers both the with-shift and
+    /// scale-only (Ideogram 4 adaLN) variants, and both F32 and F16 activations.</summary>
+    [Theory]
+    [InlineData(false, false)]  // F32, with shift
+    [InlineData(false, true)]   // F32, scale-only
+    [InlineData(true, false)]   // F16, with shift
+    [InlineData(true, true)]    // F16, scale-only
+    public unsafe void Backend_AffineBroadcastLastDim_MatchesCpu(bool useF16, bool scaleOnly)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (useF16 && !backend.Capabilities.SupportsF16) return;
+
+        const int B = 2, seqLen = 5, C = 16;
+        DType actDtype = useF16 ? DType.F16 : DType.F32;
+        Tensor input = new(new TensorShape(B, seqLen, C), actDtype);
+        Tensor scale = new(new TensorShape(B, C), DType.F32);
+        Tensor? shift = scaleOnly ? null : new Tensor(new TensorShape(B, C), DType.F32);
+        Tensor output = new(new TensorShape(B, seqLen, C), actDtype);
+
+        Random rng = new(23);
+        float[] inRef = new float[B * seqLen * C];
+        float[] scaleRef = new float[B * C];
+        float[] shiftRef = new float[B * C];
+        if (useF16)
+        {
+            Span<Half> iS = input.AsSpan<Half>();
+            for (int i = 0; i < iS.Length; i++) { float v = (float)(rng.NextDouble() * 2 - 1); iS[i] = (Half)v; inRef[i] = (float)(Half)v; }
+        }
+        else
+        {
+            Span<float> iS = input.AsSpan<float>();
+            for (int i = 0; i < iS.Length; i++) { iS[i] = (float)(rng.NextDouble() * 2 - 1); inRef[i] = iS[i]; }
+        }
+        Span<float> sS = scale.AsSpan<float>();
+        for (int i = 0; i < sS.Length; i++) { sS[i] = (float)(rng.NextDouble() * 2 - 1) + 1f; scaleRef[i] = sS[i]; }
+        if (shift is not null)
+        {
+            Span<float> shS = shift.AsSpan<float>();
+            for (int i = 0; i < shS.Length; i++) { shS[i] = (float)(rng.NextDouble() * 2 - 1); shiftRef[i] = shS[i]; }
+        }
+
+        backend.AffineBroadcastLastDim(output, input, scale, shift);
+
+        float[] actual = new float[B * seqLen * C];
+        if (useF16)
+        {
+            ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+            for (int i = 0; i < actual.Length; i++) actual[i] = (float)oS[i];
+        }
+        else
+        {
+            ReadOnlySpan<float> oS = output.AsReadOnlySpan<float>();
+            oS.CopyTo(actual);
+        }
+
+        float maxErr = 0f;
+        for (int i = 0; i < actual.Length; i++)
+        {
+            int d = i % C, row = i / C, b = row / seqLen;
+            int pIdx = b * C + d;
+            float expected = inRef[i] * scaleRef[pIdx] + (shift is null ? 0f : shiftRef[pIdx]);
+            maxErr = MathF.Max(maxErr, MathF.Abs(actual[i] - expected));
+        }
+        Assert.True(maxErr < (useF16 ? 5e-3f : 1e-4f), $"AffineBroadcastLastDim maxErr {maxErr:E3} too high.");
+
+        input.Dispose(); scale.Dispose(); shift?.Dispose(); output.Dispose();
+    }
+
+    /// <summary>Regression gate for a real Krea2-on-Vulkan crash (2026-07-30): no <c>WanRopeInterleaved</c>
+    /// override existed at all — <c>FluxRope.ApplyGpuGqa</c> (Krea2Attention's GQA rope) fell through to
+    /// IBackend's CPU-loop default, which dereferenced the GPU-resident Q/K tensors' host mirror unsafely
+    /// and crashed the process with an AccessViolationException instead of throwing a catchable managed
+    /// exception. Covers both F32 and F16 activations (cos/sin are always F32).</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public unsafe void Backend_WanRopeInterleaved_MatchesCpu(bool useF16)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (useF16 && !backend.Capabilities.SupportsF16) return;
+
+        const int seqLen = 6, heads = 3, headDim = 8;
+        DType actDtype = useF16 ? DType.F16 : DType.F32;
+        Tensor x = new(new TensorShape(seqLen, heads, headDim), actDtype);
+        Tensor cos = new(new TensorShape(seqLen, headDim), DType.F32);
+        Tensor sin = new(new TensorShape(seqLen, headDim), DType.F32);
+
+        Random rng = new(29);
+        float[] xRef = new float[seqLen * heads * headDim];
+        if (useF16)
+        {
+            Span<Half> xS = x.AsSpan<Half>();
+            for (int i = 0; i < xS.Length; i++) { float v = (float)(rng.NextDouble() * 2 - 1); xS[i] = (Half)v; xRef[i] = (float)(Half)v; }
+        }
+        else
+        {
+            Span<float> xS = x.AsSpan<float>();
+            for (int i = 0; i < xS.Length; i++) { xS[i] = (float)(rng.NextDouble() * 2 - 1); xRef[i] = xS[i]; }
+        }
+        // Duplicated-pair layout (FluxRope.GetGpuTables): pair i's angle is stored at BOTH 2i and 2i+1.
+        Span<float> cS = cos.AsSpan<float>();
+        Span<float> sS = sin.AsSpan<float>();
+        for (int s = 0; s < seqLen; s++)
+            for (int i = 0; i < headDim / 2; i++)
+            {
+                double angle = rng.NextDouble() * Math.PI;
+                float c = (float)Math.Cos(angle), sn = (float)Math.Sin(angle);
+                cS[s * headDim + 2 * i] = c; cS[s * headDim + 2 * i + 1] = c;
+                sS[s * headDim + 2 * i] = sn; sS[s * headDim + 2 * i + 1] = sn;
+            }
+
+        backend.WanRopeInterleaved(x, cos, sin, seqLen, heads, headDim);
+
+        float[] actual = new float[xRef.Length];
+        if (useF16)
+        {
+            ReadOnlySpan<Half> oS = x.AsReadOnlySpan<Half>();
+            for (int i = 0; i < actual.Length; i++) actual[i] = (float)oS[i];
+        }
+        else
+        {
+            ReadOnlySpan<float> oS = x.AsReadOnlySpan<float>();
+            oS.CopyTo(actual);
+        }
+
+        int pairs = headDim / 2;
+        float maxErr = 0f;
+        for (int s = 0; s < seqLen; s++)
+            for (int h = 0; h < heads; h++)
+                for (int i = 0; i < pairs; i++)
+                {
+                    int xoff = (s * heads + h) * headDim, coff = s * headDim, i0 = 2 * i;
+                    float re = xRef[xoff + i0], im = xRef[xoff + i0 + 1];
+                    float c = cS[coff + i0], sn = sS[coff + i0];
+                    float expRe = re * c - im * sn, expIm = re * sn + im * c;
+                    maxErr = MathF.Max(maxErr, MathF.Abs(actual[xoff + i0] - expRe));
+                    maxErr = MathF.Max(maxErr, MathF.Abs(actual[xoff + i0 + 1] - expIm));
+                }
+        Assert.True(maxErr < (useF16 ? 5e-3f : 1e-4f), $"WanRopeInterleaved maxErr {maxErr:E3} too high.");
+
+        x.Dispose(); cos.Dispose(); sin.Dispose();
+    }
+
+    /// <summary>Regression gate for another real Krea2-on-Vulkan finding (2026-07-30): no
+    /// <c>RepeatKvHeads</c> override existed at all — every call fell through to IBackend's F32-only
+    /// CPU default, which throws on Krea2's F16 GQA K/V (<c>Krea2Attention.Forward</c>).</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public unsafe void Backend_RepeatKvHeads_MatchesCpu(bool useF16)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (useF16 && !backend.Capabilities.SupportsF16) return;
+
+        const int batch = 2, kvHeads = 3, groupSize = 4, seqLen = 5, headDim = 8;
+        DType dtype = useF16 ? DType.F16 : DType.F32;
+        Tensor input = new(new TensorShape(batch, kvHeads, seqLen, headDim), dtype);
+        Tensor output = new(new TensorShape(batch, kvHeads * groupSize, seqLen, headDim), dtype);
+
+        Random rng = new(31);
+        float[] inRef = new float[batch * kvHeads * seqLen * headDim];
+        if (useF16)
+        {
+            Span<Half> iS = input.AsSpan<Half>();
+            for (int i = 0; i < iS.Length; i++) { float v = (float)(rng.NextDouble() * 2 - 1); iS[i] = (Half)v; inRef[i] = (float)(Half)v; }
+        }
+        else
+        {
+            Span<float> iS = input.AsSpan<float>();
+            for (int i = 0; i < iS.Length; i++) { iS[i] = (float)(rng.NextDouble() * 2 - 1); inRef[i] = iS[i]; }
+        }
+
+        backend.RepeatKvHeads(output, input, kvHeads, groupSize);
+
+        int qHeads = kvHeads * groupSize;
+        float[] actual = new float[batch * qHeads * seqLen * headDim];
+        if (useF16)
+        {
+            ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+            for (int i = 0; i < actual.Length; i++) actual[i] = (float)oS[i];
+        }
+        else
+        {
+            ReadOnlySpan<float> oS = output.AsReadOnlySpan<float>();
+            oS.CopyTo(actual);
+        }
+
+        int perHead = seqLen * headDim;
+        float maxErr = 0f;
+        for (int b = 0; b < batch; b++)
+            for (int h = 0; h < kvHeads; h++)
+                for (int g = 0; g < groupSize; g++)
+                {
+                    int qHead = h * groupSize + g;
+                    long srcOff = ((long)b * kvHeads + h) * perHead;
+                    long dstOff = ((long)b * qHeads + qHead) * perHead;
+                    for (int d = 0; d < perHead; d++)
+                        maxErr = MathF.Max(maxErr, MathF.Abs(actual[dstOff + d] - inRef[srcOff + d]));
+                }
+        Assert.True(maxErr < 1e-6f, $"RepeatKvHeads maxErr {maxErr:E3} too high.");
+
+        input.Dispose(); output.Dispose();
+    }
+
+    /// <summary>Regression gate for another real Krea2-on-Vulkan finding (2026-07-30): no
+    /// <c>GatedResidualLastDim</c> override existed at all — every call fell through to IBackend's F32-only
+    /// CPU default, which throws on Krea2's F16 activations (<c>Krea2Block.Forward</c>'s attn/mlp gate).</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public unsafe void Backend_GatedResidualLastDim_MatchesCpu(bool useF16)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (useF16 && !backend.Capabilities.SupportsF16) return;
+
+        const int B = 2, seqLen = 5, C = 16;
+        DType actDtype = useF16 ? DType.F16 : DType.F32;
+        Tensor residual = new(new TensorShape(B, seqLen, C), actDtype);
+        Tensor value = new(new TensorShape(B, seqLen, C), actDtype);
+        Tensor gate = new(new TensorShape(B, C), DType.F32);
+        Tensor output = new(new TensorShape(B, seqLen, C), actDtype);
+
+        Random rng = new(37);
+        float[] resRef = new float[B * seqLen * C];
+        float[] valRef = new float[B * seqLen * C];
+        float[] gateRef = new float[B * C];
+        if (useF16)
+        {
+            Span<Half> rS = residual.AsSpan<Half>();
+            Span<Half> vS = value.AsSpan<Half>();
+            for (int i = 0; i < rS.Length; i++)
+            {
+                float rv = (float)(rng.NextDouble() * 2 - 1), vv = (float)(rng.NextDouble() * 2 - 1);
+                rS[i] = (Half)rv; vS[i] = (Half)vv;
+                resRef[i] = (float)(Half)rv; valRef[i] = (float)(Half)vv;
+            }
+        }
+        else
+        {
+            Span<float> rS = residual.AsSpan<float>();
+            Span<float> vS = value.AsSpan<float>();
+            for (int i = 0; i < rS.Length; i++) { rS[i] = (float)(rng.NextDouble() * 2 - 1); vS[i] = (float)(rng.NextDouble() * 2 - 1); resRef[i] = rS[i]; valRef[i] = vS[i]; }
+        }
+        Span<float> gS = gate.AsSpan<float>();
+        for (int i = 0; i < gS.Length; i++) { gS[i] = (float)(rng.NextDouble() * 2 - 1); gateRef[i] = gS[i]; }
+
+        backend.GatedResidualLastDim(output, residual, value, gate);
+
+        float[] actual = new float[B * seqLen * C];
+        if (useF16)
+        {
+            ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+            for (int i = 0; i < actual.Length; i++) actual[i] = (float)oS[i];
+        }
+        else
+        {
+            ReadOnlySpan<float> oS = output.AsReadOnlySpan<float>();
+            oS.CopyTo(actual);
+        }
+
+        float maxErr = 0f;
+        for (int i = 0; i < actual.Length; i++)
+        {
+            int d = i % C, row = i / C, b = row / seqLen;
+            float expected = resRef[i] + gateRef[b * C + d] * valRef[i];
+            maxErr = MathF.Max(maxErr, MathF.Abs(actual[i] - expected));
+        }
+        Assert.True(maxErr < (useF16 ? 5e-3f : 1e-4f), $"GatedResidualLastDim maxErr {maxErr:E3} too high.");
+
+        residual.Dispose(); value.Dispose(); gate.Dispose(); output.Dispose();
+    }
+
+    /// <summary>Regression gate for another real Krea2-on-Vulkan finding (2026-07-30): no <c>SliceRows</c>
+    /// override existed at all — every call fell through to IBackend's F32-only CPU default, which throws
+    /// on Krea2's F16 joint img+txt sequence (<c>Krea2Transformer.SliceTail</c>).</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public unsafe void Backend_SliceRows_MatchesCpu(bool useF16)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (useF16 && !backend.Capabilities.SupportsF16) return;
+
+        const int totalRows = 10, rowOffset = 4, tailRows = 6, dim = 8;
+        DType dtype = useF16 ? DType.F16 : DType.F32;
+        Tensor input = new(new TensorShape(totalRows, dim), dtype);
+        Tensor output = new(new TensorShape(tailRows, dim), dtype);
+
+        Random rng = new(41);
+        float[] inRef = new float[totalRows * dim];
+        if (useF16)
+        {
+            Span<Half> iS = input.AsSpan<Half>();
+            for (int i = 0; i < iS.Length; i++) { float v = (float)(rng.NextDouble() * 2 - 1); iS[i] = (Half)v; inRef[i] = (float)(Half)v; }
+        }
+        else
+        {
+            Span<float> iS = input.AsSpan<float>();
+            for (int i = 0; i < iS.Length; i++) { iS[i] = (float)(rng.NextDouble() * 2 - 1); inRef[i] = iS[i]; }
+        }
+
+        backend.SliceRows(output, input, rowOffset);
+
+        float[] actual = new float[tailRows * dim];
+        if (useF16)
+        {
+            ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+            for (int i = 0; i < actual.Length; i++) actual[i] = (float)oS[i];
+        }
+        else
+        {
+            ReadOnlySpan<float> oS = output.AsReadOnlySpan<float>();
+            oS.CopyTo(actual);
+        }
+
+        float maxErr = 0f;
+        int elemOffset = rowOffset * dim;
+        for (int i = 0; i < actual.Length; i++)
+            maxErr = MathF.Max(maxErr, MathF.Abs(actual[i] - inRef[elemOffset + i]));
+        Assert.True(maxErr < 1e-6f, $"SliceRows maxErr {maxErr:E3} too high.");
+
+        input.Dispose(); output.Dispose();
     }
 
     // ── Phase 0 rebuild-trust-gate regressions ──────────────────────────────────────────────
@@ -1666,7 +2154,10 @@ public sealed class VulkanBackendSmokeTests
 
     /// <summary>Reference matching sdpa_flash.comp.glsl exactly (causal / sliding-window / additive
     /// mask / GQA), independent of AttentionReference so a bug shared by both wouldn't hide.</summary>
-    private static float[] CpuFlashReference(
+    /// <remarks>Internal (not private): reused by VulkanDecodeGraphTests for FlashAttentionDev, which
+    /// dispatches the SAME shader (sdpa_flash_dev_f32) with skv/qOffset routed through a device buffer
+    /// instead of push constants — one reference, not a second copy that could quietly diverge.</remarks>
+    internal static float[] CpuFlashReference(
         float[] q, float[] k, float[] v, float[]? mask,
         int batch, int hq, int hkv, int sq, int skv, int headDim,
         float scale, bool causal, int qOffset, int slidingWindow)
@@ -1718,7 +2209,7 @@ public sealed class VulkanBackendSmokeTests
         return o;
     }
 
-    private static float[] FillRandom(int n, int seed)
+    internal static float[] FillRandom(int n, int seed)
     {
         Random rng = new(seed);
         float[] a = new float[n];

@@ -493,6 +493,37 @@ numerics (channel-width assumptions are where it breaks).
   new opt-in switch that correctness tests need to exercise both on and off.
 - **GeGlu flat-midpoint bug (same as the CUDA one):** decompose `outerIdx=i/D; d=i%D` then
   `inputX=outerIdx*2*D+d`; a multi-row `[2,2,2*D]` test is the regression guard.
+- **A host-side write into a small "control" buffer (decode-graph token-id/position/history/counter) can
+  race ahead of an already-recorded-but-unsubmitted dispatch that still needs the OLD value.**
+  `VulkanBackend.Dispatch()` batches multiple dispatches into one command buffer, submitted only at
+  `FlushThreshold` or on an explicit sync — a mapped-memory host write bypasses that queue entirely and
+  takes effect immediately from the CPU's perspective, regardless of whether the GPU has actually consumed
+  the buffer's previous contents yet. Found via `ApplyRepetitionPenaltyStep_MatchesHfConventionWithRepeats`
+  failing ONLY on llvmpipe (passed on the 3060): 5 token ids written in a loop, each immediately followed
+  by a dispatch reading the CURRENT id — every dispatch ended up reading the LAST id written, since llvmpipe
+  deferred all 5 dispatches' actual execution until later, by which point every write had already
+  happened. This is a genuine race, not an llvmpipe-only quirk — it happened to not manifest on the 3060
+  under this test's specific batch size/timing, which is not something to rely on. Fixed by having
+  `VulkanBackend.WriteScalarBuffer` call `Sync()` (submit pending work + host-wait) before writing —
+  correct but synchronous; a future optimization would record the write as a `vkCmdUpdateBuffer` into the
+  same batched command buffer instead, matching CUDA's async-copy-on-an-in-order-stream approach with no
+  host wait needed. General lesson: any op that writes host-visible memory a PRIOR, not-yet-flushed
+  dispatch might still read must sync first, or its "before" write can retroactively become "after."
+- **`KvCacheAppendDev`/`FlashAttentionDev`'s device-position variants must actually READ the device
+  buffer, not just accept and ignore it while forwarding the caller's other arguments.** Real callers
+  (`GenericTransformer.ForwardGraphDecodeStep`) pass literal placeholder values for the plain
+  `offset`/`kvLen`/`qOffset` parameters (e.g. `KvCacheAppendDev(kCache, k, 0, devicePos)` — the `0` is not
+  a real offset, it's a "this doesn't matter, devicePos is authoritative" marker) — a passthrough that
+  forwards those placeholders to the non-`Dev` method (`KvCacheAppend(buffer, newKv, offset)`) would
+  silently append/attend at the WRONG position every step (e.g. always slot 0) the instant
+  `GraphDecodeSupported` is on, corrupting the KV cache with no exception or visible symptom short of wrong
+  model output. Caught in code review (an advisor pass), not by a test — the bug was invisible with
+  `GraphDecodeSupported` left at its default OFF. Fixed by giving both a real device-buffer-reading kernel
+  variant (`kv_cache_append_dev.comp.glsl`, `sdpa_flash.comp.glsl`'s `HAS_DEVICE_POS` compile flag) that
+  reads the actual slot/length from `Pos_[1]`/`Pos_[0]` (the same `{kvLen, qOffset}` buffer
+  `rope_decode_step` already reads). Regression tests deliberately pass a wrong/stale placeholder alongside
+  the real devicePos value specifically to prove the placeholder is ignored, not merely that a plausible
+  value happens to be correct by coincidence.
 - **Ubuntu's `glslang-tools` package (15.1.0-2~ubuntu0.24.04.2, Noble) cannot compile
   `matmul_int8.comp.glsl`**: its GLSL frontend has no `GL_EXT_integer_dot_product` extension entry at all
   (confirmed via `strings` on `/usr/bin/glslang` — it knows the SPIR-V-level `SPV_KHR_integer_dot_product`
@@ -685,6 +716,119 @@ numerics (channel-width assumptions are where it breaks).
   `barrier()`/subgroup ops in these shaders, so this shouldn't matter architecturally) — tracked
   alongside the FP8-cast and pipeline-cache llvmpipe gaps above as a known, undiagnosed llvmpipe quirk,
   not something blocking NVIDIA-target work.
+- **Five real Vulkan backend gaps surfaced by an actual Krea2 e2e run, invisible to prior static call-site
+  analysis** (2026-07-30, RTX 4090 + 3060 + llvmpipe) — each was found by re-running the same real-weight
+  Krea2 Turbo/NoCfg/1024×1024 test after fixing the previous one, exactly the "static analysis can't rule
+  out runtime issues" caveat the Vulkan bring-up plan itself carried:
+  - `WanRopeInterleaved` had NO `VulkanBackend` override — `FluxRope.ApplyGpuGqa` (Krea2's GQA rope) fell
+    through to `IBackend`'s CPU-loop default, which read/wrote the GPU-resident Q/K tensors' raw
+    `.DataPointer` directly and crashed the TEST HOST PROCESS with `AccessViolationException` (not a
+    catchable managed exception — the worst failure mode seen this session). Fixed with a new
+    `wan_rope_interleaved.comp.glsl` (single-tensor GPT-J-style interleaved-pair rotation, F32/F16) +
+    override; regression-tested via `Backend_WanRopeInterleaved_MatchesCpu` (3060 + llvmpipe).
+  - `RepeatKvHeads` had no override — the F32-only CPU default threw `NotSupportedException` on Krea2's
+    F16 GQA K/V (`Krea2Attention.Forward`). Fixed with `repeat_kv_heads.comp.glsl` (pure gather/broadcast,
+    no arithmetic) + override; `Backend_RepeatKvHeads_MatchesCpu`.
+  - `GatedResidualLastDim` had no override — same F32-only throw on Krea2's F16 activations
+    (`Krea2Block.Forward`'s `h + gate·attn`/`h + gate·ff` residual gates). Fixed with
+    `gated_residual_last_dim.comp.glsl` (same broadcast convention as `affine_broadcast_last_dim`: F16/F32
+    activation, always-F32 gate) + override; `Backend_GatedResidualLastDim_MatchesCpu`.
+  - `SliceRows` had no override — same F32-only throw on Krea2's F16 joint img+txt sequence
+    (`Krea2Transformer.SliceTail`, and `Krea2Block.SplitModulation`'s `[6,hidden]`-table row extraction).
+    Fixed with `slice_rows.comp.glsl` (contiguous offset copy) + override; `Backend_SliceRows_MatchesCpu`.
+  - `Conv2D`'s im2col path materialized the FULL `[gemmK, outH·outW]` column matrix in ONE allocation —
+    correct for the small convs every other model on Vulkan has exercised, but at Krea2's 1024×1024
+    VAE-decode resolution (`QwenImageVaeDecoder` → `QwenImageResample.Forward`, ~192 input channels, 3×3
+    kernel) that's `1728 × 1,048,576 × 4 bytes ≈ 7.25 GB` for a SINGLE `vkAllocateMemory` call — OOM'd even
+    with the transformer's ~13 GB of fp8 weights already freed beforehand (`Backend.FreeWeights` runs
+    before `_vaeDecoder.Decode` in `Krea2Pipeline`). This is the architectural gap the Vulkan bring-up plan
+    named up front (CUDA offloads conv to cuDNN's implicit-GEMM, which never materializes the full im2col
+    matrix; Vulkan hand-writes im2col+GEMM). Fixed by tiling `Conv2D` over output COLUMNS instead of
+    materializing the whole thing: `im2col.comp.glsl` gained `colOffset`/`tileCols` push constants (tile
+    width defaults to reproducing the untiled single-tile behavior exactly when the image is small, so
+    every other Conv2D call site on Vulkan is byte-for-byte unaffected), and the matmul side reuses the
+    GEMM kernel's ALREADY-EXISTING `bOffset`/`cOffset` batched-dispatch offsets (no shader change needed
+    there) with `ldc` kept at the REAL full output width so each tile writes into the correct column range
+    of the one real output buffer. `VulkanBackend.Conv2DMaxColTileBytes` (default 256 MiB) is a settable
+    instance property purely so `Backend_Conv2D_TiledPath_MatchesUntiled` can force the multi-tile path
+    deterministically at small, fast-to-verify scale (every output element checked against the CPU
+    reference, not just probe points) instead of needing a multi-GB shape in the test suite.
+  All five are genuinely closed and regression-tested (3060 + llvmpipe, full 112-test Vulkan suite green
+  after all fixes); they are NOT the reason the Krea2 e2e output is still invalid — see the next entry.
+- **Krea2 Vulkan e2e: F16 activation blowup, root cause not found** (2026-07-30, RTX 4090). After fixing
+  the five real backend gaps above (`WanRopeInterleaved`, `RepeatKvHeads`, `GatedResidualLastDim`,
+  `SliceRows`, `Conv2D` im2col tiling — each caught by re-running the real Krea2 Turbo/NoCfg/1024×1024
+  e2e test after the previous fix), the pipeline runs end-to-end without crashing, OOMing, or throwing
+  (319 s total, 34.3 s/step) but the output is **invalid**: the 28-block DiT loop's activations diverge
+  starting at block 0 (already min≈-5644/max≈13384, plausible-looking but already large for a first
+  block) and grow roughly block-over-block until they overflow F16's ±65504 range (`-Inf` by block 9,
+  full `NaN` by block 10), producing an all-`NaN` final latent and an all-black image. CUDA runs the
+  IDENTICAL model/config (`HARTSY_DIT_F16` defaults on for both backends — this is a model-level, not
+  backend-level, activation-dtype choice) and produces a valid image in 21.9 s, so this is a genuine,
+  Vulkan-specific numeric divergence, not an inherent property of the model's F16 hot path.
+  **Investigation trail (each step used a `HARTSY_DEBUG_VAE_STATS_FILE`-gated instrumentation pass, ALL
+  reverted before this entry was written — see below):**
+  1. Per-step latent stats showed the final latent was already all-`NaN` after step 1 — the divergence is
+     within a SINGLE forward pass, not cross-step drift.
+  2. Per-block stats (one `AsReadOnlySpan` read per block, at the block boundary only) reproducibly showed
+     the gradual block-by-block growth pattern described above.
+  3. Adding FINER per-op reads WITHIN block 0/`Krea2Attention.Forward` (reading `qNorm`, `kNorm`, `qMh`,
+     `kRep`, `attnMh`, etc. individually) changed the failure signature entirely: `qNorm` came back
+     already `NaN` with EXACTLY 51.2% nonzero elements (a half-written-buffer signature), while `kNorm` —
+     computed by the structurally identical `RmsNorm` call, immediately after — was perfectly clean
+     (100% nonzero, finite range). This qNorm/kNorm asymmetry was BYTE-IDENTICAL across three separate
+     re-runs, i.e. deterministic, not a timing-dependent race, despite differing completely from the
+     coarser per-block trace's symptom (which never showed NaN before block ~9). **Conclusion: the
+     fine-grained instrumentation's own `AsReadOnlySpan` D2H-sync reads perturb the Vulkan backend's
+     tensor-cache/residency state enough to change which computation actually runs** — live incremental
+     tensor inspection is NOT a safe technique for isolating this class of bug on this backend, and any
+     future attempt must avoid reading intermediate GPU-resident tensors mid-op.
+  4. Two decisive, code-level experiments were run (per advisor consultation) using ONLY the coarse
+     (block-boundary-only) instrumentation, to avoid the confound in (3):
+     - Forcing a full `Sync()` immediately before every transient weight-cast buffer is freed in
+       `DispatchMatmul` (testing whether a pooled dedicated memory block was being reused before the GPU
+       finished reading it — plausible given `VulkanMemoryAllocator`'s dedicated-block-pooling behavior,
+       see the entry above): **no effect, byte-identical corrupted output.**
+     - `HARTSYINFERENCE_VK_SUBMIT_PER_OP=1` (bounding how many dispatches share one command buffer,
+       testing whether `_descriptors.AllocateSet`'s recycling pool was handing out a descriptor set still
+       referenced by an earlier unsubmitted dispatch — the same class of hazard Phase 6e's
+       `VulkanStepGraph` write-up flagged for captured command buffers): **no effect, byte-identical
+       corrupted output** (block 0 min=-5644/max=13392, matching run 2 above almost exactly).
+  Both experiments ruled out their respective hypotheses cleanly. `Dispatch()` DOES unconditionally insert
+  a global compute→compute memory barrier (`RecordGlobalComputeBarrier`) after every single dispatch, and
+  `VulkanCommandStream`'s deferred-free mechanism IS correctly gated on the GPU-signaled timeline
+  semaphore (`vkGetSemaphoreCounterValue`, not merely "submitted") — both read as correct under direct
+  inspection. **Root cause remains open.** What's confirmed: deterministic (not a race), backend-specific
+  (CUDA doesn't reproduce it), originates inside or before `Krea2Attention.Forward` in block 0 (the coarse
+  per-block trace is the trustworthy one; the qNorm/kNorm asymmetry from the fine-grained trace is
+  itself an instrumentation artifact per (3), not necessarily where the real divergence starts). Prime
+  remaining suspects, not yet individually isolated: the `ScaledDotProductAttention(..., allowF16: true)`
+  F16 SDPA path at this specific GQA/headDim=128/seqLen=4108 shape (a combination no other model has
+  exercised on Vulkan before Krea2), or a subtle correctness bug in one of the five newly-added ops that
+  only manifests at real scale (all five passed their dedicated unit tests at small synthetic scale on
+  both the 3060 and llvmpipe). **One concrete, historically-motivated hypothesis was directly tested and
+  ruled out:** `PARITY_VERIFICATION.md`'s "Krea2 / all fp8_scaled DiTs (fused GEMV)" row documents a PAST
+  CUDA incident with the identical symptom — Krea2's time-embed/modulation linears keep BF16 biases, and a
+  CUDA fused-GEMV fast path once reinterpreted those bias bytes as raw F32, exploding timestep conditioning
+  into an all-black image. Krea2's real checkpoint confirms `img_in`/`time_embed.linear_1`/
+  `time_embed.linear_2`/`time_mod_proj`'s weights AND biases are indeed ALL BF16 on this model — a
+  non-perturbing `.DType` check (no `AsReadOnlySpan`, no residency-cache interaction) confirmed this at
+  load time. This looked like a strong lead: Vulkan's generic `CastIfNeeded` bias-cast path had only ever
+  been exercised with a BF16 WEIGHT (`Backend_Linear_Bf16Weight_MatchesCpu`, bias=null) before Krea2, never
+  a BF16 BIAS specifically. Directly tested via a new `Backend_Linear_Bf16Bias_MatchesCpu` (both M=8 and
+  M=1 — M=1 matches the real model's exact batch-1 timestep/img_in projection shape) — **both pass,
+  bit-exact against the `Tensor.CastTo(BF16)` CPU reference, on both the 3060 and llvmpipe.** Vulkan's BF16
+  bias handling is correct; this is NOT a repeat of the historical CUDA bug. The test is kept as a
+  permanent regression gate (it closed a real, previously-untested code path) but the blowup's root cause
+  is NOT here — don't re-spend time re-deriving this hypothesis. **For whoever picks this up next:** design any further live-tensor
+  inspection to read a GPU-resident tensor's value exactly ONCE, at the very end, via a channel that
+  doesn't touch the tensor's residency/cache state mid-computation (e.g. a CPU-reference or CUDA-side
+  dump captured independently, compared bit-exact against a Vulkan dump taken only after the whole block
+  completes) — repeated incremental `AsReadOnlySpan` probing mid-block was directly shown to change the
+  bug's manifestation and cannot be trusted to localize it further. All debug instrumentation used during
+  this investigation (`Krea2Pipeline.cs`, `Krea2Transformer.cs`, `Krea2Block.cs`, `Krea2Attention.cs`, and
+  a temporary `HARTSY_DEBUG_FORCE_SYNC_BEFORE_CAST_FREE` block in `VulkanBackend.DispatchMatmul`) was
+  fully reverted before this session ended — none of it shipped.
 
 ---
 

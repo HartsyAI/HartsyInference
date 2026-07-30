@@ -14,7 +14,15 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     private readonly Dictionary<Tensor, VulkanBuffer> _activationCache = new(ReferenceEqualityComparer.Instance);
     /// <summary>Per-weight, per-target-dtype cast cache — casts a preloaded weight to the GEMM dtype once instead of on every Linear.</summary>
     private readonly Dictionary<Tensor, Dictionary<string, VulkanBuffer>> _weightCastCache = new(ReferenceEqualityComparer.Instance);
-    private static readonly bool _cacheWeightCasts =
+    /// <summary>Master kill-switch for weight dtype-cast caching (mirrors <c>CudaBackend.CacheWeightCasts</c>
+    /// exactly, exposed on <see cref="VulkanBackend.CacheWeightCasts"/>). Defaults from
+    /// <c>HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1</c>, settable afterward — a large FP8/quantized model
+    /// whose full dtype-cast set (e.g. FP8→F32, 4x expansion) doesn't fit VRAM alongside its own raw
+    /// weights needs this off (transient, recomputed-and-freed-per-call dequant) instead of caching every
+    /// layer's cast forever. Found via a real OOM running Krea2 (13 GB fp8) on Vulkan: with no way to
+    /// disable it, EVERY layer's F32-cast weight stayed resident permanently on top of the raw FP8
+    /// weights, exhausting VRAM partway through just the 4B-param text encoder. See TROUBLESHOOTING.md.</summary>
+    public bool CacheWeightCasts { get; set; } =
         Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE") != "1";
     private readonly HashSet<VulkanBuffer> _cachedBuffers = new();
     /// <summary>Uncached upload buffers from CopyToDevice cache-misses, drained when the command stream flushes.</summary>
@@ -283,13 +291,13 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     /// <summary>True when <paramref name="weight"/> is a preloaded weight whose dtype-cast result is worth
     /// caching (i.e. caching is enabled and the tensor lives in the permanent weight cache). Activations
     /// are never cached this way — they change every step, so the key would never hit.</summary>
-    public bool ShouldCacheCast(Tensor weight) => _cacheWeightCasts && _weightCache.ContainsKey(weight);
+    public bool ShouldCacheCast(Tensor weight) => CacheWeightCasts && _weightCache.ContainsKey(weight);
 
     /// <summary>Returns a previously-cached dtype-cast of <paramref name="weight"/> for <paramref name="want"/>, if present.</summary>
     public bool TryGetWeightCast(Tensor weight, DType want, out VulkanBuffer buffer)
     {
         buffer = null!;
-        if (!_cacheWeightCasts) return false;
+        if (!CacheWeightCasts) return false;
         if (_weightCastCache.TryGetValue(weight, out Dictionary<string, VulkanBuffer>? inner)
             && inner.TryGetValue(want.Name, out VulkanBuffer? hit))
         {

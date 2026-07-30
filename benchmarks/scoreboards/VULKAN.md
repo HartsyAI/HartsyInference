@@ -155,6 +155,47 @@ call; weights don't change between calls, so caching the weight's quantized form
 throughput follow-up once it has its own freed-with-`FreeWeights` lifecycle. Per-shape INT8 tile selection
 remains a separate open Phase 5 item.
 
+## Results — LLM decode-graph device state (Phase 6a-d), correctness only, RTX 3060 + llvmpipe
+
+The leaf ops a future graph replay would drive: device-resident RoPE table build + single-position apply
+(`rope_decode_step`, interleaved + split-half), embed gather + on-device argmax (`embed_gather_decode`/
+`argmax_lastdim`), repetition-penalty history append + apply (`history_append`/`repetition_penalty`), and
+the device-position variants of KV-cache append and flash attention (`kv_cache_append_dev`,
+`sdpa_flash_dev_f32`). All 14 tests in `VulkanDecodeGraphTests` pass on both the 3060 and llvmpipe — no
+throughput numbers yet, since `GraphDecodeSupported` stays off (a settable property, not hardcoded) until
+Phase 6f's real end-to-end decode-loop parity test validates it; see `ROADMAP.md` §3 for what's still open
+and why `VulkanStepGraph` (the actual command-buffer-replay mechanism these ops would eventually run
+under) was deliberately not built this pass.
+
+Two real, would-have-shipped-silently bugs surfaced and fixed here (see `TROUBLESHOOTING.md`):
+- A host-side write into a decode-graph control buffer could race ahead of an already-recorded-but-
+  unsubmitted dispatch still needing the OLD value — passed on the 3060, failed on llvmpipe, the same
+  cross-vendor-catches-what-one-GPU-hides pattern as every prior phase's llvmpipe sweep.
+- `KvCacheAppendDev`/`FlashAttentionDev` initially forwarded the caller's placeholder host
+  `offset`/`kvLen`/`qOffset` (real callers pass literal `0`s expecting the device buffer to be
+  authoritative) instead of reading the real value from `devicePos` — would have silently corrupted the KV
+  cache the instant `GraphDecodeSupported` flipped on. Caught in review before any test ran, not after.
+
+## Results — Krea2 real-weight e2e attempt (Phase 7), RTX 4090 — OUTPUT INVALID, timing only
+
+**Do not treat any number in this section as a parity result.** The Krea2 Turbo/NoCfg/1024×1024/8-step
+e2e test was run on Vulkan after closing five real backend gaps found along the way (`WanRopeInterleaved`,
+`RepeatKvHeads`, `GatedResidualLastDim`, `SliceRows`, `Conv2D` im2col tiling — see `TROUBLESHOOTING.md`).
+The run completes without crashing, OOMing, or throwing, but the output image is **all-black** — the
+28-block DiT loop's F16 activations diverge starting at block 0 and overflow to `NaN` by block 10,
+producing an all-`NaN` latent. Root cause not found this session (see `TROUBLESHOOTING.md`'s "Krea2
+Vulkan e2e: F16 activation blowup" entry for the full investigation and what's ruled out).
+
+| Backend | Wall clock (8 steps, 1024×1024, Turbo, no CFG) | Output |
+|---|---:|---|
+| CUDA (RTX 4090) | 21.9 s | Valid image |
+| Vulkan (RTX 4090) | 319.1 s (34.3 s/step) | **Invalid — all-black / all-NaN latent** |
+
+The 319.1 s / ~14.6× figure is recorded here ONLY so a future session re-measuring after the blowup is
+fixed has a "how much did the fix change performance" baseline — it must NOT be copied into `ROADMAP.md`
+or any parity claim as a Vulkan-vs-CUDA speed comparison, and no `PARITY_VERIFICATION.md` row was added
+for Krea2 (that table only takes models that actually produce a valid image on the backend in question).
+
 ## What this does NOT show yet
   target, not a perf number to chase on the current naive path.
 - AMD/Intel hardware: none available on this box. Mesa llvmpipe (software) was used for small-subgroup

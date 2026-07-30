@@ -82,12 +82,19 @@ DTYPE_KERNELS=(
     apply_rope
     kv_cache_append
     sdpa_flash
+    affine_broadcast_last_dim
+    wan_rope_interleaved
+    repeat_kv_heads
+    gated_residual_last_dim
+    slice_rows
 )
 
 SINGLE_KERNELS=(
     cast_f32_f16
     cast_f16_f32
     cast_f8e4m3_f16
+    cast_bf16_f32
+    cast_f32_bf16
     matmul_coopmat
     matmul_int8
     dequant_q4_0
@@ -100,6 +107,7 @@ SINGLE_KERNELS=(
     argmax_lastdim
     history_append
     repetition_penalty
+    kv_cache_append_dev
 )
 
 for k in "${DTYPE_KERNELS[@]}"; do
@@ -121,9 +129,19 @@ compile_one "snake" -DUSE_FP16=1 -DUSE_BETA=1 -- "_beta_f16"
 compile_one "sdpa_flash" -DUSE_FP16=0 -DHAS_MASK=1 -- "_mask_f32"
 compile_one "sdpa_flash" -DUSE_FP16=1 -DHAS_MASK=1 -- "_mask_f16"
 
+# affine_broadcast_last_dim: HAS_SHIFT=0 is Ideogram 4's scale-only adaLN (shift is null) — a distinct
+# #if-compiled binding layout (like USE_BETA/HAS_MASK above), needing its own SPIR-V module.
+compile_one "affine_broadcast_last_dim" -DUSE_FP16=0 -DHAS_SHIFT=0 -- "_noshift_f32"
+compile_one "affine_broadcast_last_dim" -DUSE_FP16=1 -DHAS_SHIFT=0 -- "_noshift_f16"
+
 # rope_decode_step: INTERLEAVED selects a #if-compiled code path (like USE_BETA/HAS_MASK above), so
 # the two pairing conventions need their own SPIR-V modules. F32-only (decode-graph state is F32).
 compile_one "rope_decode_step" -DINTERLEAVED=0 -- "_splithalf_f32"
 compile_one "rope_decode_step" -DINTERLEAVED=1 -- "_interleaved_f32"
+
+# sdpa_flash device-position variant (FlashAttentionDev): HAS_DEVICE_POS reads skv/qOffset from a device
+# buffer instead of push constants. Mutually exclusive with HAS_MASK (FlashAttentionDev has no mask param).
+# F32-only (decode-graph state is F32).
+compile_one "sdpa_flash" -DUSE_FP16=0 -DHAS_DEVICE_POS=1 -- "_dev_f32"
 
 echo "Done. SPIR-V files in $(realpath "$OUT")"

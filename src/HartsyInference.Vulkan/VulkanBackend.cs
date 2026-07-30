@@ -135,6 +135,22 @@ public sealed class VulkanBackend : IBackend
     /// <summary>Preloads weights to GPU memory. Cached by Tensor reference.</summary>
     public void PreloadWeights(IEnumerable<Tensor> weights) => _xfer.PreloadWeights(weights);
 
+    /// <summary>Master kill-switch for weight dtype-cast caching — mirrors <c>CudaBackend.CacheWeightCasts</c>
+    /// exactly (same name, same purpose): turn off for a large FP8/quantized model whose full cast set
+    /// (e.g. FP8→F32, 4x expansion) doesn't fit VRAM alongside its own raw weights, trading recompute for
+    /// memory via transient (dispatched-and-freed-per-call) dequant instead of a cast cached forever.
+    /// Defaults from <c>HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1</c>.</summary>
+    public bool CacheWeightCasts
+    {
+        get => _xfer.CacheWeightCasts;
+        set => _xfer.CacheWeightCasts = value;
+    }
+
+    /// <summary>Peak per-tile im2col buffer size for <see cref="Conv2D"/> (see its tiling comment). Settable
+    /// so tests can force a small value and exercise the multi-tile path deterministically without needing
+    /// a multi-GB conv shape; production code never needs to touch this. Default 256 MiB.</summary>
+    public ulong Conv2DMaxColTileBytes { get; set; } = 256UL * 1024 * 1024;
+
     public void Sync()
     {
         _xfer.DrainTransients();
@@ -506,6 +522,20 @@ public sealed class VulkanBackend : IBackend
         string shader;
         if (src.DType == DType.F32 && want == DType.F16) shader = "cast_f32_f16";
         else if (src.DType == DType.F16 && want == DType.F32) shader = "cast_f16_f32";
+        else if (src.DType == DType.BF16 && want == DType.F32) shader = "cast_bf16_f32";
+        else if (src.DType == DType.F32 && want == DType.BF16) shader = "cast_f32_bf16";
+        else if (src.DType == DType.BF16 && want == DType.F16)
+        {
+            // BF16 -> F16 = BF16 -> F32 -> F16 (two-stage; no direct kernel, BF16/F16 share no exponent
+            // range shortcut worth a dedicated shader for how rarely this specific pair is hit).
+            (VulkanBuffer mid, _) = CastIfNeeded(src, srcBuf, DType.F32);
+            VulkanKernel kk = GetKernel("cast_f32_f16", storageBufferCount: 2, _default1DSpec);
+            Span<byte> pc2 = stackalloc byte[4]; BinaryWriteUInt(pc2, 0, (uint)elements);
+            Span<ulong> bufs2 = stackalloc ulong[] { mid.Handle, dst.Handle };
+            Dispatch(kk, bufs2, pc2, GroupCount(elements, LocalX1D));
+            _xfer.FreeDevice(mid);
+            return FinishCast(src, want, dst, cacheThis);
+        }
         else if (src.DType == DType.F8E4M3 && want == DType.F32)
         {
             // FP8 -> F32 = FP8 -> F16 -> F32 (two-stage)
@@ -897,18 +927,33 @@ public sealed class VulkanBackend : IBackend
         (VulkanBuffer inRes, VulkanBuffer? inOwned) = CastIfNeeded(input, inBuf, gemmDtype);
         (VulkanBuffer wRes, VulkanBuffer? wOwned) = CastIfNeeded(weight, wBuf, gemmDtype);
 
-        // im2col: rows = N*Cin*kH*kW, cols = N*outH*outW (per the shader's flat layout)
-        long colElements = (long)batch * inCh * kH * kW * outH * outW;
-        // The im2col GLSL addresses the column buffer with 32-bit indices, and a single SSBO
-        // is bounded by maxStorageBufferRange (~4 GB on NVIDIA) regardless. Above int.MaxValue
-        // elements the index would wrap / the buffer can't be fully addressed, silently
-        // corrupting output. Fail loudly instead. (A full fix widens the shader to 64-bit
-        // workgroup-derived indexing; tracked separately.)
-        if (colElements > int.MaxValue)
+        // im2col: rows = N*Cin*kH*kW, cols = N*outH*outW (per the shader's flat layout). Until
+        // per-batch base offsets land in the matmul kernel (Phase 4) we restrict to batch=1.
+        if (batch != 1)
+            throw new NotImplementedException("VulkanBackend.Conv2D: batch>1 requires per-batch base offsets in the matmul kernel — Phase 4 work item.");
+
+        int gemmK = inCh * kH * kW;
+        int fullN = outH * outW;
+
+        // Tile over output positions (fullN) so peak im2col memory is bounded regardless of spatial
+        // resolution — a real Krea2-on-Vulkan finding (2026-07-30): the untiled path materialized one
+        // [gemmK, fullN] column matrix per Conv2D call, which at 1024x1024 VAE-decode resolution with
+        // ~192 input channels needs ~7 GB for a SINGLE allocation and OOM'd even with the transformer's
+        // weights already freed (QwenImageVaeDecoder.Decode -> QwenImageResample.Forward -> Conv2D).
+        // colOffset=0/tileCols=fullN (the tileN==fullN case below) reproduces the prior untiled
+        // dispatch exactly, so small convs (the overwhelming majority of call sites) pay zero extra
+        // allocations or dispatches — this only kicks in above Conv2DMaxColTileBytes.
+        long maxTileN = Math.Max(1L, (long)(Conv2DMaxColTileBytes / ((ulong)gemmK * (ulong)gemmDtype.SizeInBytes)));
+        long tileN = Math.Min(fullN, maxTileN);
+        long tileColElements = (long)gemmK * tileN;
+        // The im2col/matmul GLSL address the column/output buffers with 32-bit indices. Above
+        // int.MaxValue elements the index would wrap, silently corrupting output. Shrinking tileN
+        // can't help when gemmK alone exceeds this range — fail loudly instead.
+        if (tileColElements > int.MaxValue)
             throw new NotSupportedException(
-                $"Vulkan Conv2D im2col buffer needs {colElements} elements (N={batch}, Cin={inCh}, k={kH}x{kW}, out={outH}x{outW}), " +
-                "exceeding the shader's 32-bit index range. Use the CUDA backend or tile this convolution.");
-        ulong colBytes = (ulong)(colElements * gemmDtype.SizeInBytes);
+                $"Vulkan Conv2D im2col tile needs {tileColElements} elements (Cin={inCh}, k={kH}x{kW}), " +
+                "exceeding the shader's 32-bit index range even at the minimum 1-column tile. Use the CUDA backend.");
+        ulong colBytes = (ulong)(tileColElements * gemmDtype.SizeInBytes);
         VulkanBuffer colBuf = _xfer.AllocateDevice(colBytes);
 
         ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
@@ -916,78 +961,78 @@ public sealed class VulkanBackend : IBackend
 
         try
         {
-            // Step 1: im2col
+            (uint BM, uint BN, uint BK, uint TM, uint TN) = PickMatmulTile(outCh, (int)tileN, gemmK);
+            uint localX = BN / TN;
+            uint localY = BM / TM;
+            string matmulShader = "matmul_tiled" + DtypeSuffix(gemmDtype);
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
             {
-                string shader = "im2col" + DtypeSuffix(gemmDtype);
-                VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
-                Span<byte> pc = stackalloc byte[12 * 4];
-                BinaryWriteUInt(pc, 0, (uint)batch);
-                BinaryWriteUInt(pc, 4, (uint)inCh);
-                BinaryWriteUInt(pc, 8, (uint)inH);
-                BinaryWriteUInt(pc, 12, (uint)inW);
-                BinaryWriteUInt(pc, 16, (uint)kH);
-                BinaryWriteUInt(pc, 20, (uint)kW);
-                BinaryWriteUInt(pc, 24, (uint)padH);
-                BinaryWriteUInt(pc, 28, (uint)padW);
-                BinaryWriteUInt(pc, 32, (uint)strideH);
-                BinaryWriteUInt(pc, 36, (uint)strideW);
-                BinaryWriteUInt(pc, 40, (uint)outH);
-                BinaryWriteUInt(pc, 44, (uint)outW);
-                Span<ulong> bufs = stackalloc ulong[] { inRes.Handle, colBuf.Handle };
-                Dispatch(k, bufs, pc, GroupCount(colElements, LocalX1D));
-            }
+                SpecConstant.UInt(0, localX),
+                SpecConstant.UInt(1, localY),
+                SpecConstant.UInt(2, 1),
+                SpecConstant.UInt(10, BM),
+                SpecConstant.UInt(11, BN),
+                SpecConstant.UInt(12, BK),
+                SpecConstant.UInt(13, TM),
+                SpecConstant.UInt(14, TN),
+                SpecConstant.Bool(15, false),
+                SpecConstant.Bool(16, false),
+                SpecConstant.Bool(17, false),
+                SpecConstant.UInt(18, 0u),
+                SpecConstant.Bool(19, false),
+            };
+            VulkanKernel matmulKernel = GetKernel(matmulShader, 5, spec);
+            string im2colShader = "im2col" + DtypeSuffix(gemmDtype);
+            VulkanKernel im2colKernel = GetKernel(im2colShader, 2, _default1DSpec);
 
-            // Step 2: matmul — weight[Cout, Cin*kH*kW] @ col[Cin*kH*kW, outH*outW] = out[Cout, outH*outW]
-            // Until per-batch base offsets land in the matmul kernel (Phase 4) we restrict to batch=1.
-            if (batch != 1)
-                throw new NotImplementedException("VulkanBackend.Conv2D: batch>1 requires per-batch base offsets in the matmul kernel — Phase 4 work item.");
+            Span<byte> im2colPc = stackalloc byte[14 * 4];
+            Span<ulong> im2colBufs = stackalloc ulong[] { inRes.Handle, colBuf.Handle };
+            Span<byte> matmulPc = stackalloc byte[11 * 4];
+            Span<ulong> matmulBufs = stackalloc ulong[] { wRes.Handle, colBuf.Handle, outBuf.Handle, outBuf.Handle, outBuf.Handle };
 
+            for (long nStart = 0; nStart < fullN; nStart += tileN)
             {
-                int M = outCh;
-                int K = inCh * kH * kW;
-                int N = outH * outW;
+                long thisTileN = Math.Min(tileN, fullN - nStart);
 
-                (uint BM, uint BN, uint BK, uint TM, uint TN) = PickMatmulTile(M, N, K);
-                uint localX = BN / TN;
-                uint localY = BM / TM;
-
-                string shader = "matmul_tiled" + DtypeSuffix(gemmDtype);
-                ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+                // Step 1: im2col (tile)
                 {
-                    SpecConstant.UInt(0, localX),
-                    SpecConstant.UInt(1, localY),
-                    SpecConstant.UInt(2, 1),
-                    SpecConstant.UInt(10, BM),
-                    SpecConstant.UInt(11, BN),
-                    SpecConstant.UInt(12, BK),
-                    SpecConstant.UInt(13, TM),
-                    SpecConstant.UInt(14, TN),
-                    SpecConstant.Bool(15, false),
-                    SpecConstant.Bool(16, false),
-                    SpecConstant.Bool(17, false),
-                    SpecConstant.UInt(18, 0u),
-                    SpecConstant.Bool(19, false),
-                };
+                    BinaryWriteUInt(im2colPc, 0, (uint)batch);
+                    BinaryWriteUInt(im2colPc, 4, (uint)inCh);
+                    BinaryWriteUInt(im2colPc, 8, (uint)inH);
+                    BinaryWriteUInt(im2colPc, 12, (uint)inW);
+                    BinaryWriteUInt(im2colPc, 16, (uint)kH);
+                    BinaryWriteUInt(im2colPc, 20, (uint)kW);
+                    BinaryWriteUInt(im2colPc, 24, (uint)padH);
+                    BinaryWriteUInt(im2colPc, 28, (uint)padW);
+                    BinaryWriteUInt(im2colPc, 32, (uint)strideH);
+                    BinaryWriteUInt(im2colPc, 36, (uint)strideW);
+                    BinaryWriteUInt(im2colPc, 40, (uint)outH);
+                    BinaryWriteUInt(im2colPc, 44, (uint)outW);
+                    BinaryWriteUInt(im2colPc, 48, (uint)nStart);
+                    BinaryWriteUInt(im2colPc, 52, (uint)thisTileN);
+                    Dispatch(im2colKernel, im2colBufs, im2colPc, GroupCount(gemmK * thisTileN, LocalX1D));
+                }
 
-                VulkanKernel k = GetKernel(shader, 5, spec);
+                // Step 2: matmul (tile) — weight[Cout, gemmK] @ col[gemmK, thisTileN] written into
+                // the REAL [Cout, fullN] output buffer at column offset nStart (ldc=fullN, cOffset=nStart).
+                {
+                    int M = outCh, K = gemmK, N = (int)thisTileN;
+                    BinaryWriteUInt(matmulPc, 0, (uint)M);
+                    BinaryWriteUInt(matmulPc, 4, (uint)N);
+                    BinaryWriteUInt(matmulPc, 8, (uint)K);
+                    BinaryWriteUInt(matmulPc, 12, (uint)K);
+                    BinaryWriteUInt(matmulPc, 16, (uint)N);
+                    BinaryWriteUInt(matmulPc, 20, (uint)fullN);
+                    BinaryWriteFloat(matmulPc, 24, 1.0f);
+                    BinaryWriteFloat(matmulPc, 28, 0.0f);
+                    BinaryWriteUInt(matmulPc, 32, 0u);
+                    BinaryWriteUInt(matmulPc, 36, 0u);
+                    BinaryWriteUInt(matmulPc, 40, (uint)nStart);
 
-                Span<byte> pc = stackalloc byte[11 * 4];
-                BinaryWriteUInt(pc, 0, (uint)M);
-                BinaryWriteUInt(pc, 4, (uint)N);
-                BinaryWriteUInt(pc, 8, (uint)K);
-                BinaryWriteUInt(pc, 12, (uint)K);
-                BinaryWriteUInt(pc, 16, (uint)N);
-                BinaryWriteUInt(pc, 20, (uint)N);
-                BinaryWriteFloat(pc, 24, 1.0f);
-                BinaryWriteFloat(pc, 28, 0.0f);
-                BinaryWriteUInt(pc, 32, 0u);
-                BinaryWriteUInt(pc, 36, 0u);
-                BinaryWriteUInt(pc, 40, 0u);
-
-                Span<ulong> bufs = stackalloc ulong[] { wRes.Handle, colBuf.Handle, outBuf.Handle, outBuf.Handle, outBuf.Handle };
-                uint groupsX = (uint)((N + BN - 1) / BN);
-                uint groupsY = (uint)((M + BM - 1) / BM);
-                Dispatch(k, bufs, pc, groupsX, groupsY, 1);
+                    uint groupsX = (uint)(((uint)N + BN - 1) / BN);
+                    uint groupsY = (uint)((M + BM - 1) / BM);
+                    Dispatch(matmulKernel, matmulBufs, matmulPc, groupsX, groupsY, 1);
+                }
             }
 
             // Step 3: optional bias add
@@ -1178,6 +1223,91 @@ public sealed class VulkanBackend : IBackend
         int totalRows = (int)(input.ElementCount / normDim);
         string shader = "rmsnorm" + DtypeSuffix(input.DType);
         DispatchPerRowNorm(shader, 3, output, input, weight, null, eps, normDim, totalRows);
+    }
+
+    /// <summary>DiT adaLN modulation: <c>out = in*scale + (shift ?? 0)</c>, broadcasting scale/shift
+    /// <c>[B,C]</c> over input/output <c>[B,seqLen,C]</c>. No override existed at all before this — every
+    /// call fell through to IBackend's F32-only CPU default, which throws on an F16 activation (the shape
+    /// Krea2's DiT actually uses — found via a real Krea2-on-Vulkan run, not a synthetic test).</summary>
+    public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
+    {
+        using OpScope _op = EnterOp();
+        if ((input.DType != DType.F32 && input.DType != DType.F16) || output.DType != input.DType
+            || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
+        {
+            ((IBackend)this).AffineBroadcastLastDim(output, input, scale, shift);
+            return;
+        }
+        int rank = input.Shape.Rank;
+        int dim = (int)input.Shape[rank - 1];
+        int seqLen = rank >= 2 ? (int)input.Shape[rank - 2] : 1;
+        long total = input.ElementCount;
+
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer scaleBuf = GetBuffer(scale);
+        VulkanBuffer? shiftBuf = shift is not null ? GetBuffer(shift) : null;
+        ulong outBytes = (ulong)(total * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            string shader = "affine_broadcast_last_dim" + (shift is null ? "_noshift" : "") + DtypeSuffix(input.DType);
+            int bufferCount = shift is null ? 3 : 4;
+            VulkanKernel k = GetKernel(shader, bufferCount, _default1DSpec);
+            Span<byte> pc = stackalloc byte[3 * 4];
+            BinaryWriteUInt(pc, 0, (uint)dim);
+            BinaryWriteUInt(pc, 4, (uint)seqLen);
+            BinaryWriteUInt(pc, 8, (uint)total);
+            Span<ulong> bufs = shift is null
+                ? stackalloc ulong[] { inBuf.Handle, scaleBuf.Handle, outBuf.Handle }
+                : stackalloc ulong[] { inBuf.Handle, scaleBuf.Handle, shiftBuf!.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(total, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan AffineBroadcastLastDim dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
+    public void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
+    {
+        using OpScope _op = EnterOp();
+        if ((value.DType != DType.F32 && value.DType != DType.F16)
+            || residual.DType != value.DType || output.DType != value.DType || gate.DType != DType.F32)
+        {
+            ((IBackend)this).GatedResidualLastDim(output, residual, value, gate);
+            return;
+        }
+        int rank = value.Shape.Rank;
+        int dim = (int)value.Shape[rank - 1];
+        int seqLen = rank >= 2 ? (int)value.Shape[rank - 2] : 1;
+        long total = value.ElementCount;
+
+        VulkanBuffer resBuf = GetBuffer(residual);
+        VulkanBuffer valBuf = GetBuffer(value);
+        VulkanBuffer gateBuf = GetBuffer(gate);
+        ulong outBytes = (ulong)(total * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            string shader = "gated_residual_last_dim" + DtypeSuffix(value.DType);
+            VulkanKernel k = GetKernel(shader, 4, _default1DSpec);
+            Span<byte> pc = stackalloc byte[3 * 4];
+            BinaryWriteUInt(pc, 0, (uint)dim);
+            BinaryWriteUInt(pc, 4, (uint)seqLen);
+            BinaryWriteUInt(pc, 8, (uint)total);
+            Span<ulong> bufs = stackalloc ulong[] { resBuf.Handle, valBuf.Handle, gateBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(total, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan GatedResidualLastDim dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
     public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
@@ -2131,6 +2261,34 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
+    public void SliceRows(Tensor output, Tensor input, int rowOffset)
+    {
+        using OpScope _op = EnterOp();
+        int dim = (int)output.Shape[output.Shape.Rank - 1];
+        long elemOffset = (long)rowOffset * dim;
+        long total = output.ElementCount;
+        VulkanBuffer inBuf = GetBuffer(input);
+        ulong outBytes = (ulong)(total * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            string shader = "slice_rows" + DtypeSuffix(output.DType);
+            VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
+            Span<byte> pc = stackalloc byte[2 * 4];
+            BinaryWriteUInt(pc, 0, (uint)elemOffset);
+            BinaryWriteUInt(pc, 4, (uint)total);
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(total, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan SliceRows dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
     public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin)
     {
         using OpScope _op = EnterOp();
@@ -2160,6 +2318,70 @@ public sealed class VulkanBackend : IBackend
         catch (Exception ex)
         {
             Logs.Error("Vulkan ApplyRope dispatch failed", ex);
+            throw;
+        }
+    }
+
+    // Real GPU dispatch, NOT the IBackend CPU-loop default: x here is GPU-resident (FluxRope/Krea2's
+    // pre-permute Q/K), so falling through to the default's raw x.DataPointer loop either reads stale
+    // zeroed host memory or, worse, AccessViolationExceptions when the tensor's host mirror was never
+    // synced/allocated the way the default assumes. Same category as apply_rope/kv_cache_append above.
+    public void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
+    {
+        using OpScope _op = EnterOp();
+        VulkanBuffer xBuf = GetBuffer(x);
+        VulkanBuffer cosBuf = GetBuffer(cos);
+        VulkanBuffer sinBuf = GetBuffer(sin);
+        try
+        {
+            string shader = "wan_rope_interleaved" + DtypeSuffix(x.DType);
+            VulkanKernel kernel = GetKernel(shader, 3, _default1DSpec);
+            Span<byte> pc = stackalloc byte[3 * 4];
+            BinaryWriteUInt(pc, 0, (uint)seqLen);
+            BinaryWriteUInt(pc, 4, (uint)heads);
+            BinaryWriteUInt(pc, 8, (uint)headDim);
+            long total = (long)seqLen * heads * (headDim / 2);
+            Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, cosBuf.Handle, sinBuf.Handle };
+            Dispatch(kernel, bufs, pc, GroupCount(total, LocalX1D));
+            // In-place on x's EXISTING buffer — re-cache so a later reader doesn't see the pre-rope
+            // values via a stale activation-cache entry.
+            CacheOutput(x, xBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan WanRopeInterleaved dispatch failed", ex);
+            throw;
+        }
+    }
+
+    // Real GPU dispatch, NOT the IBackend CPU-loop default: the default throws on non-F32 (Krea2's
+    // GQA K/V is F16), and even for F32 it would force a D2H/H2D round trip on a GPU-resident tensor.
+    public void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize)
+    {
+        using OpScope _op = EnterOp();
+        int batch = (int)input.Shape[0], seqLen = (int)input.Shape[2], headDim = (int)input.Shape[3];
+        VulkanBuffer inBuf = GetBuffer(input);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            string shader = "repeat_kv_heads" + DtypeSuffix(input.DType);
+            VulkanKernel kernel = GetKernel(shader, 2, _default1DSpec);
+            Span<byte> pc = stackalloc byte[5 * 4];
+            BinaryWriteUInt(pc, 0, (uint)kvHeads);
+            BinaryWriteUInt(pc, 4, (uint)groupSize);
+            BinaryWriteUInt(pc, 8, (uint)seqLen);
+            BinaryWriteUInt(pc, 12, (uint)headDim);
+            long total = (long)batch * kvHeads * groupSize * seqLen * headDim;
+            BinaryWriteUInt(pc, 16, (uint)total);
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
+            Dispatch(kernel, bufs, pc, GroupCount(total, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan RepeatKvHeads dispatch failed", ex);
+            outBuf.Dispose();
             throw;
         }
     }
@@ -2372,11 +2594,25 @@ public sealed class VulkanBackend : IBackend
     }
 
     /// <summary>Writes <paramref name="values"/> into a scalar control buffer outside any capture region —
-    /// the "refresh fixed-address contents between replays" half of the decode-graph design. Uses the
-    /// mapped fast path when available; otherwise stages through <see cref="VulkanGpuTransferHelper.Upload"/>.</summary>
+    /// the "refresh fixed-address contents between replays" half of the decode-graph design.</summary>
+    /// <remarks>MUST sync first: <see cref="Dispatch"/> batches multiple dispatches into one command
+    /// buffer, submitted only at <c>FlushThreshold</c> or on an explicit sync — a dispatch that reads this
+    /// buffer may still be sitting unsubmitted when this is called. Without waiting for it to actually
+    /// execute, this write can race ahead and land before the GPU ever reads the OLD value the pending
+    /// dispatch needed, silently corrupting decode-step state (caught by
+    /// <c>ApplyRepetitionPenaltyStep_MatchesHfConventionWithRepeats</c> on llvmpipe: 5 distinct token ids
+    /// written in a loop, each immediately followed by a dispatch reading the CURRENT id — every dispatch
+    /// ended up reading the LAST id written, since none had actually run before the next overwrite).
+    /// CUDA avoids this cost entirely via an ASYNC copy on the same in-order stream (no host wait needed —
+    /// stream ordering alone guarantees the old value is consumed first); a Vulkan equivalent would record
+    /// the write as a <c>vkCmdUpdateBuffer</c> into the SAME batched command buffer instead of a host-side
+    /// write, keeping it stream-ordered without blocking. Correctness-first for now, since this executes
+    /// once per decode step, not per dispatch — the real optimization target once a full decode loop's
+    /// wall-clock is being tuned, not before.</remarks>
     private unsafe void WriteScalarBuffer(ulong handle, ReadOnlySpan<int> values)
     {
         if (handle == 0 || !_scalarBuffers.TryGetValue(handle, out VulkanBuffer? buf)) return;
+        Sync();
         using Tensor scratch = new(new TensorShape(values.Length), DType.I32);
         values.CopyTo(scratch.AsSpan<int>());
         _xfer.Upload(buf, scratch);
@@ -2609,15 +2845,108 @@ public sealed class VulkanBackend : IBackend
     }
 
     // ── KV-cache / flash-attention device-position variants (Phase 6d) ─────────────────────────────────
+    // Both `offset`/`kvLen`/`qOffset` parameters below are the CALLER's placeholder host values (real
+    // callers — see GenericTransformer.ForwardGraphDecodeStep — pass literal 0s here on purpose): the
+    // ACTUAL write slot / attend length must come from devicePos, exactly like RopeApplyDecodeStep. A
+    // passthrough that forwards `offset`/`kvLen`/`qOffset` unchanged would silently corrupt the KV cache
+    // (every step writing/attending at slot 0) the moment GraphDecodeSupported flips on — caught in review
+    // before it shipped, not by the parity test that would have found it after.
 
     public void KvCacheAppendDev(Tensor buffer, Tensor newKv, int offset, ulong devicePos)
     {
-        // No dedicated device-indexed kv_cache_append kernel yet: the append OFFSET is a compile-time-free
-        // push constant already (unlike RoPE's position, it was never baked into a captured command
-        // buffer's bytes), so there is nothing a device-position variant would additionally decouple.
-        // Once VulkanStepGraph (Phase 6e) can actually replay a recorded command buffer, this offset must
-        // move to a device read exactly like RopeApplyDecodeStep's — tracked there, not silently dropped.
-        KvCacheAppend(buffer, newKv, offset);
+        using OpScope _op = EnterOp();
+        if (devicePos == 0 || !_scalarBuffers.TryGetValue(devicePos, out VulkanBuffer? posBuf)
+            || buffer.DType != DType.F32 || newKv.DType != DType.F32)
+        {
+            KvCacheAppend(buffer, newKv, offset);
+            return;
+        }
+        int heads = (int)buffer.Shape[1], maxSeq = (int)buffer.Shape[2], headDim = (int)buffer.Shape[3];
+        int tNew = (int)newKv.Shape[2];
+        VulkanBuffer bufBuf = GetBuffer(buffer);
+        VulkanBuffer newBuf = GetBuffer(newKv);
+        try
+        {
+            VulkanKernel k = GetKernel("kv_cache_append_dev", 3, _default1DSpec);
+            Span<byte> pc = stackalloc byte[4 * 4];
+            BinaryWriteUInt(pc, 0, (uint)heads);
+            BinaryWriteUInt(pc, 4, (uint)maxSeq);
+            BinaryWriteUInt(pc, 8, (uint)headDim);
+            BinaryWriteUInt(pc, 12, (uint)tNew);
+            long total = (long)heads * tNew * headDim;
+            Span<ulong> bufs = stackalloc ulong[] { bufBuf.Handle, newBuf.Handle, posBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(total, LocalX1D));
+            CacheOutput(buffer, bufBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan KvCacheAppendDev dispatch failed", ex);
+            throw;
+        }
+    }
+
+    /// <summary>Self-attention whose kvLen/qOffset come from the device position buffer — the
+    /// <c>FlashAttentionDev</c> counterpart to <see cref="KvCacheAppendDev"/>. Same scope boundary as
+    /// <see cref="FlashAttention"/> (head dim &lt;= <see cref="FlashMaxHeadDim"/>, no softcap/sink/ALiBi,
+    /// no mask — <c>FlashAttentionDev</c>'s signature has none) — anything outside that falls back to the
+    /// IBackend default, which forwards the CALLER's placeholder <paramref name="kvLen"/>/
+    /// <paramref name="qOffset"/> host ints straight to <see cref="FlashAttention"/>. That default is ONLY
+    /// correct when those placeholders happen to be right for the eager (non-graph) case; real graph-decode
+    /// callers pass 0s expecting devicePos to be authoritative, so anything reaching that fallback with
+    /// devicePos-dependent placeholders would be silently wrong — scoped narrowly here specifically so it
+    /// doesn't reach that default in the cases graph decode actually exercises.</summary>
+    public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
+        float softcap = 0f, int slidingWindow = 0)
+    {
+        int headDim = (int)query.Shape[query.Shape.Rank - 1];
+        if (devicePos != 0 && _scalarBuffers.ContainsKey(devicePos)
+            && softcap == 0f && slidingWindow == 0 && headDim <= FlashMaxHeadDim
+            && query.DType == DType.F32 && key.DType == DType.F32 && value.DType == DType.F32 && output.DType == DType.F32)
+        {
+            using OpScope _op = EnterOp();
+            DispatchFlashAttentionDev(output, query, key, value, scale, causal, kvGroup, devicePos);
+            return;
+        }
+        // Falls back to the eager path — correct only if kvLen/qOffset are the real (not placeholder)
+        // values; a caller relying on devicePos for a shape this scope excludes (sliding window, softcap,
+        // large head dim) is not yet supported on Vulkan's graph-decode path.
+        FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
+    }
+
+    private void DispatchFlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, float scale, bool causal, int kvGroup, ulong devicePos)
+    {
+        int batch = (int)query.Shape[0], hq = (int)query.Shape[1], sq = (int)query.Shape[2], headDim = (int)query.Shape[3];
+        VulkanBuffer posBuf = _scalarBuffers[devicePos];
+        VulkanBuffer qBuf = GetBuffer(query);
+        VulkanBuffer kBuf = GetBuffer(key);
+        VulkanBuffer vBuf = GetBuffer(value);
+        ulong outBytes = (ulong)((long)batch * hq * sq * headDim * sizeof(float));
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            VulkanKernel k = GetKernel("sdpa_flash_dev_f32", 5, ReadOnlySpan<SpecConstant>.Empty);
+            int kvCapacity = (int)key.Shape[2];
+            Span<byte> pc = stackalloc byte[10 * 4];
+            BinaryWriteUInt(pc, 0, (uint)hq);
+            BinaryWriteUInt(pc, 4, (uint)(hq / kvGroup));
+            BinaryWriteUInt(pc, 8, (uint)sq);
+            BinaryWriteUInt(pc, 12, 0u);            // skv: unused, read from Pos_ instead
+            BinaryWriteUInt(pc, 16, (uint)kvCapacity);
+            BinaryWriteUInt(pc, 20, (uint)headDim);
+            BinaryWriteFloat(pc, 24, scale);
+            BinaryWriteUInt(pc, 28, causal ? 1u : 0u);
+            BinaryWriteUInt(pc, 32, 0u);            // qOffset: unused, read from Pos_ instead
+            BinaryWriteUInt(pc, 36, 0u);             // slidingWindow: excluded from this scope (see caller)
+            Span<ulong> bufs = stackalloc ulong[] { qBuf.Handle, kBuf.Handle, vBuf.Handle, posBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, (uint)sq, (uint)hq, (uint)batch);
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan FlashAttentionDev dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
     }
 
     #endregion

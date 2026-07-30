@@ -176,7 +176,104 @@ a stale code comment claiming otherwise.
   static between calls; only activations change) is the natural perf follow-up and needs its own lifecycle
   wiring (freed alongside `FreeWeights`), not bundled into this pass. Per-shape INT8 tile selection (below)
   is a separate, still-open item.
+- [x] **LLM decode-graph device state (Phase 6a-d)** — **done** (2026-07-30): the Vulkan-native leaf ops a
+  future graph replay would drive, all validated against CPU references on the 3060 + llvmpipe
+  (`VulkanDecodeGraphTests`): `BuildRopeTableDevice`/`RopeApplyDecodeStep` (new `rope_decode_step.comp.glsl`,
+  interleaved + split-half, partial-rotary correct), `EmbedGatherDecodeStep`/`ArgMaxInto` (new
+  `embed_gather_decode.comp.glsl`/`argmax_lastdim.comp.glsl`, single-workgroup reduction), device
+  token-id/position/history/counter buffers (`AllocDeviceTokenId`/`AllocDevicePos`/`AllocDeviceHistory`/
+  `AllocDeviceCounter` + writers), `AppendTokenHistoryStep`/`ApplyRepetitionPenaltyStep` (new
+  `history_append.comp.glsl`/`repetition_penalty.comp.glsl`, matching
+  `HartsyInference.LLM.Sampling.RepetitionPenaltyStep`'s HF-convention compounding-on-repeat exactly),
+  `KvCacheAppendDev` (new `kv_cache_append_dev.comp.glsl`), and `FlashAttentionDev` (new
+  `sdpa_flash_dev_f32.spv`, a `HAS_DEVICE_POS` compile variant of `sdpa_flash.comp.glsl`). `GraphDecodeSupported`
+  is a **settable property defaulting to OFF** (not a hardcoded `true`) — several real production call
+  sites (`Qwen35Model`, `GenericTransformer`, `SsmGenerationPipeline`, `CsmModel`, `MusicGenDecoder`) gate
+  straight onto this path the instant it flips, with no separate opt-in of their own, so it stays off until
+  a real end-to-end decode-loop parity test (not just these per-op unit tests) validates it — tracked below.
+  Two real bugs found and fixed before shipping (both would have been silent, production-breaking
+  correctness bugs, not perf regressions): (1) a host-side scalar-buffer write racing ahead of an
+  already-recorded-but-unsubmitted dispatch that still needed the OLD value — `WriteScalarBuffer` now
+  syncs first (see `TROUBLESHOOTING.md`); (2) `KvCacheAppendDev`/`FlashAttentionDev`'s initial versions
+  forwarded the caller's placeholder host `offset`/`kvLen`/`qOffset` (real callers pass literal `0`s,
+  expecting `devicePos` to be authoritative) instead of reading the actual value from the device buffer —
+  caught in review, not by a test, before it ever ran.
+- [ ] **LLM decode-loop end-to-end parity + throughput** (Phase 6f) — the gate that flips
+  `GraphDecodeSupported` on: token-for-token parity vs. the eager path on a real small model, then a
+  tokens/sec measurement. Deferred past this session (user directed finishing Phases 6/7/8 first, then one
+  e2e image-model run) — a local `qwen2.5-0.5b-instruct-q4_k_m.gguf` is available on this box for it.
+- [ ] **`VulkanStepGraph`** (the plan's Phase 6e, the CUDA-Graph-capture analog backing
+  `StepGraphBegin`/`StepGraphEndAndLaunch`/`StepGraphLaunch`/`StepGraphReset`/`StepGraphOwner` — used far
+  more broadly than LLM decode: nearly every DiT model in this codebase (Flux/Flux2/Krea2/ZImage/Chroma/
+  HunyuanVideoDit/LtxVideo(2)/Kandinsky5/OasisDit/Hunyuan3DDit/F5Dit/MusicGen) gates a full per-step forward
+  pass onto it). **Deliberately NOT built** (2026-07-30) — this is a correctness hazard on THIS box's own
+  descriptor-management scheme, not just an effort estimate: `VulkanBackend.Dispatch()` allocates a
+  descriptor set from a **recycling pool ring** (`_descriptors.AllocateSet`) on every single dispatch. A
+  frozen command buffer that `vkCmdBindDescriptorSets` a set from that ring, then gets replayed after the
+  ring has cycled back and overwritten that set's bindings for an unrelated later dispatch, is undefined
+  behavior — the exact shape of the `WriteScalarBuffer` race just found and fixed above (passed on the
+  3060, failed on llvmpipe). Doing this correctly needs (a) a dedicated, never-recycled descriptor pool for
+  captured sets, and (b) a bump-pointer arena that transient allocations route through during capture so a
+  replayed command buffer's bindings point at stable, deterministically-reproduced offsets instead of
+  fresh `VkBuffer` handles every call — a rearchitecture of the ~40 `Dispatch()` call sites' allocation
+  path, not a new file dropped alongside them. Not building it breaks nothing today:
+  `StepGraphSupported => false` (IBackend's default, unoverridden) means every one of those ~13 DiT models
+  runs its normal eager per-op path on Vulkan, correctly, just without the graph-capture speedup — the
+  Krea2 e2e comparison this session ends with will honestly reflect "Vulkan without graph capture," which
+  is the true current state, not a claim this item quietly closed.
 - [ ] **RCCL** collectives for multi-GPU on AMD (§1).
+- [x] **Diffusion domain fill (Phase 7), scoped to Krea2** — backend-gap-closure **done** (2026-07-30);
+  **e2e output still invalid, tracked open below.** The static call-site analysis performed earlier this
+  session (every `backend.*` call across `Krea2Pipeline`/`Krea2Transformer`/`Krea2Attention`/
+  `Krea2TextFusion`/`LlamaStyleEncoder`/`QwenImageVaeDecoder`, cross-referenced against every
+  `NotImplementedException`/`NotSupportedException` throw site) concluded "zero backend gaps" — **this
+  claim was wrong**, disproven the moment a real weight-loaded e2e run was actually attempted, exactly the
+  failure mode the plan itself warned static analysis alone can't rule out. Five real, previously-unknown
+  gaps surfaced sequentially, each caught by re-running after the previous fix (see `TROUBLESHOOTING.md`
+  for full root-cause writeups): **(1)** `WanRopeInterleaved` had no `VulkanBackend` override at all —
+  `FluxRope.ApplyGpuGqa`'s GQA rope fell through to `IBackend`'s CPU-loop default, which
+  `AccessViolationException`'d on the GPU-resident Q/K tensors (a process-crashing failure, not a catchable
+  exception) — fixed with a new `wan_rope_interleaved.comp.glsl` + override, unit-tested F32/F16 on 3060 +
+  llvmpipe. **(2)** `RepeatKvHeads` had no override — F32-only CPU default threw on Krea2's F16 GQA K/V —
+  fixed with `repeat_kv_heads.comp.glsl`. **(3)** `GatedResidualLastDim` had no override — same F32-only
+  throw on F16 activations — fixed with `gated_residual_last_dim.comp.glsl`. **(4)** `SliceRows` had no
+  override — F32-only throw on Krea2's F16 joint sequence (`Krea2Transformer.SliceTail`) — fixed with
+  `slice_rows.comp.glsl`. **(5)** `Conv2D`'s im2col path materialized the FULL `[gemmK, outH·outW]` column
+  matrix in one allocation — ~7 GB at Krea2's 1024×1024 VAE-decode resolution, OOMing even with the
+  transformer's weights already freed — fixed by tiling over output columns (new `colOffset`/`tileCols`
+  push constants in `im2col.comp.glsl`, reusing the GEMM kernel's existing `bOffset`/`cOffset` for the
+  matmul side; `VulkanBackend.Conv2DMaxColTileBytes` settable for test determinism). All five landed with
+  new GLSL kernels, `VulkanBackend.cs` overrides, and dedicated F32/F16 correctness tests passing on both
+  the 3060 and Mesa llvmpipe — see `Backend_WanRopeInterleaved_MatchesCpu`,
+  `Backend_RepeatKvHeads_MatchesCpu`, `Backend_GatedResidualLastDim_MatchesCpu`, `Backend_SliceRows_MatchesCpu`,
+  `Backend_Conv2D_TiledPath_MatchesUntiled` in `VulkanBackendSmokeTests.cs`. **What's still open:** with all
+  five gaps closed, the Krea2 Turbo/NoCfg/1024×1024/8-step e2e run completes end-to-end (no crash, no OOM,
+  no exception, 319 s / 34.3 s per step on the 4090) but the output is **invalid** — the DiT block-loop
+  activations diverge starting at block 0 and overflow F16 (`+Inf`/`-Inf`) by block 9, producing an
+  all-`NaN` final latent and an all-black image. This is a genuine, still-open Vulkan-vs-CUDA numeric
+  divergence (CUDA, same model, same default F16 activation path, produces a valid image in 21.9 s) — see
+  `TROUBLESHOOTING.md`'s "Krea2 Vulkan e2e: F16 activation blowup, root cause not found" entry for the full
+  investigation (two targeted experiments ruled out a missing weight-cast fence and descriptor-set
+  recycling; root cause remains open). **Do not read the 319 s timing as a parity number** — see
+  `benchmarks/scoreboards/VULKAN.md`, explicitly labeled invalid-output/timing-only. No `PARITY_VERIFICATION.md`
+  row added — the model doesn't yet produce a valid image on Vulkan.
+- [ ] **Krea2 Vulkan e2e: F16 activation blowup — root cause not found, blocks a valid image.** With all
+  five Phase-7 backend gaps above closed, Krea2's 28-block DiT loop diverges numerically on Vulkan (CUDA,
+  same model/config, does not) — see `TROUBLESHOOTING.md` for the full investigation trail (deterministic,
+  not a race; a missing weight-cast fence, descriptor-set-recycling-in-an-unsubmitted-command-buffer, and
+  a historically-motivated BF16-bias-cast hypothesis — matching a past CUDA "Krea2 all-black" incident —
+  were all directly tested and ruled out). Next steps for whoever picks this up: a NON-perturbing
+  bit-exact A/B of `Krea2Attention.Forward`'s output against a CPU or CUDA reference at identical weights/
+  input (live incremental `AsReadOnlySpan` probing was shown to change the failure signature itself — a
+  confound to design around, e.g. dump once via a side channel that doesn't touch the tensor's GPU-residency
+  cache mid-block) would most efficiently localize whether the divergence is in `ScaledDotProductAttention`'s
+  `allowF16` path or in one of the five ops closed this session.
+- [ ] **Video/audio/vision domain fill (Phase 7 menu items)** — explicitly deferred, not evaluated this
+  session: Wan 3D/volumetric conv (blocks the Wan VAE), grid-sample/MSDA (blocks deformable-attention
+  detection models), dedicated audio AdaIN/activation fused kernels. No model in either of these domains
+  was the target this session (Krea2, the one real-weight run performed, is image/diffusion only) — per the
+  plan's own framing, this is "a menu prioritized by which models the user actually runs on Vulkan, not a
+  mandatory checklist." Revisit if/when a specific video, audio, or vision model is the actual target.
 
 ## 4. Quantization
 

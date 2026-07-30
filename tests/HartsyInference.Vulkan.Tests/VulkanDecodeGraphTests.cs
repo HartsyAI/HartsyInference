@@ -246,4 +246,105 @@ public sealed class VulkanDecodeGraphTests
             backend.FreeDeviceTokenId(tokBuf);
         }
     }
+
+    /// <summary>Regression gate for the KvCacheAppendDev bug an advisor review caught before this shipped:
+    /// the caller (GenericTransformer.ForwardGraphDecodeStep) passes a literal <c>offset: 0</c> placeholder
+    /// on every call — the REAL write slot must come from devicePos. A passthrough that forwarded the
+    /// placeholder unchanged would write every decode step to slot 0, silently corrupting the KV cache the
+    /// instant GraphDecodeSupported is on. Appends 3 steps at devicePos-driven slots 0,1,2 (NOT the
+    /// `offset` argument, deliberately left wrong/stale to prove it's ignored) and checks the buffer ends
+    /// up with all 3 slots populated, matching a plain host-loop reference.</summary>
+    [Fact]
+    public unsafe void KvCacheAppendDev_UsesDevicePositionNotHostOffset()
+    {
+        if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = new();
+        const int heads = 2, maxSeq = 8, headDim = 4;
+
+        Tensor cache = new(new TensorShape(1, heads, maxSeq, headDim), DType.F32);
+        ulong pos = backend.AllocDevicePos();
+        try
+        {
+            Span<float> cs = cache.AsSpan<float>();
+            for (int i = 0; i < cs.Length; i++) cs[i] = -1f;   // sentinel: untouched slots stay -1
+
+            Random rng = new(1);
+            float[][] steps = new float[3][];
+            for (int step = 0; step < 3; step++)
+            {
+                Tensor newKv = new(new TensorShape(1, heads, 1, headDim), DType.F32);
+                Span<float> ns = newKv.AsSpan<float>();
+                steps[step] = new float[heads * headDim];
+                for (int i = 0; i < ns.Length; i++) { float v = (float)rng.NextDouble(); ns[i] = v; steps[step][i] = v; }
+
+                backend.WriteDevicePos(pos, kvLen: step + 1, qOffset: step);
+                // `offset: 999` is deliberately wrong — if this were used instead of devicePos, every
+                // step would write out of bounds (or all to the same wrong slot), not to slot `step`.
+                backend.KvCacheAppendDev(cache, newKv, offset: 999, pos);
+                newKv.Dispose();
+            }
+
+            ReadOnlySpan<float> actual = cache.AsReadOnlySpan<float>();
+            for (int step = 0; step < 3; step++)
+            {
+                for (int h = 0; h < heads; h++)
+                {
+                    for (int d = 0; d < headDim; d++)
+                    {
+                        long idx = ((long)h * maxSeq + step) * headDim + d;
+                        Assert.Equal(steps[step][h * headDim + d], actual[(int)idx], 5);
+                    }
+                }
+            }
+            // Slot 3 (never appended to) must still hold the sentinel — proves this didn't just fill
+            // every slot with the last value or otherwise paper over a wrong-index bug.
+            for (int h = 0; h < heads; h++)
+                for (int d = 0; d < headDim; d++)
+                    Assert.Equal(-1f, actual[(int)(((long)h * maxSeq + 3) * headDim + d)]);
+        }
+        finally { cache.Dispose(); backend.FreeDevicePos(pos); }
+    }
+
+    [Theory]
+    [InlineData(0)]   // first decode step: no prior context
+    [InlineData(9)]   // mid-generation: kvLen < the K/V buffer's over-allocated maxSeq
+    public unsafe void FlashAttentionDev_MatchesCpuReference(int priorLen)
+    {
+        if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = new();
+        const int batch = 1, hq = 8, hkv = 2, sq = 1, maxSeq = 32, headDim = 32;
+        int kvLen = priorLen + 1;   // this step's own K/V was already appended before attending
+        float scale = 1f / MathF.Sqrt(headDim);
+
+        float[] q = VulkanBackendSmokeTests.FillRandom(batch * hq * sq * headDim, 51);
+        float[] kFull = VulkanBackendSmokeTests.FillRandom(batch * hkv * maxSeq * headDim, 52);
+        float[] vFull = VulkanBackendSmokeTests.FillRandom(batch * hkv * maxSeq * headDim, 53);
+        float[] kValid = new float[batch * hkv * kvLen * headDim];
+        float[] vValid = new float[batch * hkv * kvLen * headDim];
+        for (int h = 0; h < hkv; h++)
+        {
+            Array.Copy(kFull, h * maxSeq * headDim, kValid, h * kvLen * headDim, kvLen * headDim);
+            Array.Copy(vFull, h * maxSeq * headDim, vValid, h * kvLen * headDim, kvLen * headDim);
+        }
+        float[] expected = VulkanBackendSmokeTests.CpuFlashReference(q, kValid, vValid, null, batch, hq, hkv, sq, kvLen, headDim, scale, causal: false, qOffset: 0, slidingWindow: 0);
+
+        Tensor qT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        Tensor kT = new(new TensorShape(batch, hkv, maxSeq, headDim), DType.F32);
+        Tensor vT = new(new TensorShape(batch, hkv, maxSeq, headDim), DType.F32);
+        Tensor oT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
+        q.CopyTo(qT.AsSpan<float>()); kFull.CopyTo(kT.AsSpan<float>()); vFull.CopyTo(vT.AsSpan<float>());
+        ulong pos = backend.AllocDevicePos();
+        try
+        {
+            // Deliberately wrong host placeholders (0,0) — mirrors GenericTransformer's real call
+            // convention and proves devicePos, not these arguments, drives the kernel.
+            backend.WriteDevicePos(pos, kvLen: kvLen, qOffset: 0);
+            backend.FlashAttentionDev(oT, qT, kT, vT, kvLen: 0, kvGroup: hq / hkv, causal: false, qOffset: 0, scale, pos);
+
+            ReadOnlySpan<float> oS = oT.AsReadOnlySpan<float>();
+            for (int i = 0; i < expected.Length; i++)
+                Assert.InRange(oS[i] - expected[i], -2e-3f, 2e-3f);
+        }
+        finally { qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose(); backend.FreeDevicePos(pos); }
+    }
 }
