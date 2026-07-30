@@ -176,25 +176,42 @@ Two real, would-have-shipped-silently bugs surfaced and fixed here (see `TROUBLE
   authoritative) instead of reading the real value from `devicePos` — would have silently corrupted the KV
   cache the instant `GraphDecodeSupported` flipped on. Caught in review before any test ran, not after.
 
-## Results — Krea2 real-weight e2e attempt (Phase 7), RTX 4090 — OUTPUT INVALID, timing only
+## Results — Krea2 real-weight e2e (Phase 7), RTX 4090 — CORRECTNESS FIXED, speed not at parity
 
-**Do not treat any number in this section as a parity result.** The Krea2 Turbo/NoCfg/1024×1024/8-step
-e2e test was run on Vulkan after closing five real backend gaps found along the way (`WanRopeInterleaved`,
-`RepeatKvHeads`, `GatedResidualLastDim`, `SliceRows`, `Conv2D` im2col tiling — see `TROUBLESHOOTING.md`).
-The run completes without crashing, OOMing, or throwing, but the output image is **all-black** — the
-28-block DiT loop's F16 activations diverge starting at block 0 and overflow to `NaN` by block 10,
-producing an all-`NaN` latent. Root cause not found this session (see `TROUBLESHOOTING.md`'s "Krea2
-Vulkan e2e: F16 activation blowup" entry for the full investigation and what's ruled out).
+**Update 2026-07-30 — the earlier "OUTPUT INVALID" state below was root-caused and fixed.** `DispatchMatmul`
+derived `M`/`N` from `output.Shape`'s rank structure instead of from the weight tensor — silently wrong for
+any Linear whose output is shaped `[B, S, heads, headDim]` (Krea2's Q/K/V). Fixed by deriving `N` from the
+weight operand, mirroring `CudaBackend.LinearImpl`. See `TROUBLESHOOTING.md`'s "Krea2 Vulkan e2e: F16
+activation blowup — ROOT CAUSE FOUND AND FIXED" entry for the full writeup. Krea2 now produces a correct,
+coherent image on Vulkan, verified via the CLI with the identical prompt/seed/steps/cfg as CUDA.
 
-| Backend | Wall clock (8 steps, 1024×1024, Turbo, no CFG) | Output |
-|---|---:|---|
-| CUDA (RTX 4090) | 21.9 s | Valid image |
-| Vulkan (RTX 4090) | 319.1 s (34.3 s/step) | **Invalid — all-black / all-NaN latent** |
+**Speed is measured, and is NOT comparable to CUDA** — this is a real, substantial, still-open gap, not a
+residual correctness issue. `HARTSY_LOG_LEVEL=Verbose` breakdown, same Turbo/NoCfg/1024×1024/8-step config:
 
-The 319.1 s / ~14.6× figure is recorded here ONLY so a future session re-measuring after the blowup is
-fixed has a "how much did the fix change performance" baseline — it must NOT be copied into `ROADMAP.md`
-or any parity claim as a Vulkan-vs-CUDA speed comparison, and no `PARITY_VERIFICATION.md` row was added
-for Krea2 (that table only takes models that actually produce a valid image on the backend in question).
+| Stage | CUDA (RTX 4090) | Vulkan (RTX 4090) | Ratio |
+|---|---:|---:|---:|
+| Text encode (preload+encode+free) | 1.05 s | ~2.4 s (2.0s preload + 0.34s encode) | ~2× |
+| DiT preload | 2.04 s | ~2.2 s | ~1× |
+| Denoise loop (8 steps) | 4.26 s total (~0.53 s/step steady-state; step 1 = 0.87s, warmup) | 275.9 s total (**34.4 s/step**, stable ±1.1s across all 8) | **~65×/step** |
+| VAE decode | 0.017 s | ~39.0 s | ~2300× |
+| **Total (cold single-shot CLI)** | **7.9 s** (`[krea2-phase]` internal total) / 11.3 s (wall, incl. process startup) | **321.5 s** | **~29–41×** |
+
+Both breakdowns are real `HARTSY_LOG_LEVEL=Verbose` `[krea2-phase]` measurements from the identical CLI
+invocation, not estimates. CUDA's VAE decode (17 ms) is essentially free — the QwenImage VAE decoder runs
+through cuDNN's implicit-GEMM conv path; Vulkan's hand-written im2col+GEMM conv (see Phase 1's tiling fix
+above) is the single largest per-stage ratio in this table, even larger than the per-step GEMM/attention
+gap. The per-step timing's tight stability (34.4–35.6 s range across all 8 independent steps) was specifically
+checked against a "stray D2H sync" or "un-batched dispatch submit" explanation before concluding this is
+architectural: `HARTSYINFERENCE_VK_SUBMIT_PER_OP` defaults off (dispatches already batch, `FlushThreshold=8`),
+and a fixable stall would show as an outlier step or a large host-idle gap concentrated in one place, not
+uniform per-step cost. This is the same dispatch-overhead ceiling the GEMM table at the top of this file
+already measures (30–160× per-op on hand-written GLSL kernels vs. cuBLAS/cuDNN) compounding across 28
+blocks × 8 steps with no graph-capture/command-buffer-reuse to amortize per-dispatch host overhead — see
+`docs/Checklists/ROADMAP.md`'s open item for the scoped path (Phase 5 core-primitive perf ceiling + Phase 7
+denoise-loop graph capture). Not attempted this session beyond confirming it isn't a quick fix.
+
+A `PARITY_VERIFICATION.md` row for Krea2/Vulkan is warranted now (coherent image, matches CUDA) — tracked
+as follow-up, not yet added.
 
 ## What this does NOT show yet
   target, not a perf number to chase on the current naive path.

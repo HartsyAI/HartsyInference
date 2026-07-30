@@ -755,80 +755,61 @@ numerics (channel-width assumptions are where it breaks).
     reference, not just probe points) instead of needing a multi-GB shape in the test suite.
   All five are genuinely closed and regression-tested (3060 + llvmpipe, full 112-test Vulkan suite green
   after all fixes); they are NOT the reason the Krea2 e2e output is still invalid — see the next entry.
-- **Krea2 Vulkan e2e: F16 activation blowup, root cause not found** (2026-07-30, RTX 4090). After fixing
-  the five real backend gaps above (`WanRopeInterleaved`, `RepeatKvHeads`, `GatedResidualLastDim`,
-  `SliceRows`, `Conv2D` im2col tiling — each caught by re-running the real Krea2 Turbo/NoCfg/1024×1024
-  e2e test after the previous fix), the pipeline runs end-to-end without crashing, OOMing, or throwing
-  (319 s total, 34.3 s/step) but the output is **invalid**: the 28-block DiT loop's activations diverge
-  starting at block 0 (already min≈-5644/max≈13384, plausible-looking but already large for a first
-  block) and grow roughly block-over-block until they overflow F16's ±65504 range (`-Inf` by block 9,
-  full `NaN` by block 10), producing an all-`NaN` final latent and an all-black image. CUDA runs the
-  IDENTICAL model/config (`HARTSY_DIT_F16` defaults on for both backends — this is a model-level, not
-  backend-level, activation-dtype choice) and produces a valid image in 21.9 s, so this is a genuine,
-  Vulkan-specific numeric divergence, not an inherent property of the model's F16 hot path.
-  **Investigation trail (each step used a `HARTSY_DEBUG_VAE_STATS_FILE`-gated instrumentation pass, ALL
-  reverted before this entry was written — see below):**
-  1. Per-step latent stats showed the final latent was already all-`NaN` after step 1 — the divergence is
-     within a SINGLE forward pass, not cross-step drift.
-  2. Per-block stats (one `AsReadOnlySpan` read per block, at the block boundary only) reproducibly showed
-     the gradual block-by-block growth pattern described above.
-  3. Adding FINER per-op reads WITHIN block 0/`Krea2Attention.Forward` (reading `qNorm`, `kNorm`, `qMh`,
-     `kRep`, `attnMh`, etc. individually) changed the failure signature entirely: `qNorm` came back
-     already `NaN` with EXACTLY 51.2% nonzero elements (a half-written-buffer signature), while `kNorm` —
-     computed by the structurally identical `RmsNorm` call, immediately after — was perfectly clean
-     (100% nonzero, finite range). This qNorm/kNorm asymmetry was BYTE-IDENTICAL across three separate
-     re-runs, i.e. deterministic, not a timing-dependent race, despite differing completely from the
-     coarser per-block trace's symptom (which never showed NaN before block ~9). **Conclusion: the
-     fine-grained instrumentation's own `AsReadOnlySpan` D2H-sync reads perturb the Vulkan backend's
-     tensor-cache/residency state enough to change which computation actually runs** — live incremental
-     tensor inspection is NOT a safe technique for isolating this class of bug on this backend, and any
-     future attempt must avoid reading intermediate GPU-resident tensors mid-op.
-  4. Two decisive, code-level experiments were run (per advisor consultation) using ONLY the coarse
-     (block-boundary-only) instrumentation, to avoid the confound in (3):
-     - Forcing a full `Sync()` immediately before every transient weight-cast buffer is freed in
-       `DispatchMatmul` (testing whether a pooled dedicated memory block was being reused before the GPU
-       finished reading it — plausible given `VulkanMemoryAllocator`'s dedicated-block-pooling behavior,
-       see the entry above): **no effect, byte-identical corrupted output.**
-     - `HARTSYINFERENCE_VK_SUBMIT_PER_OP=1` (bounding how many dispatches share one command buffer,
-       testing whether `_descriptors.AllocateSet`'s recycling pool was handing out a descriptor set still
-       referenced by an earlier unsubmitted dispatch — the same class of hazard Phase 6e's
-       `VulkanStepGraph` write-up flagged for captured command buffers): **no effect, byte-identical
-       corrupted output** (block 0 min=-5644/max=13392, matching run 2 above almost exactly).
-  Both experiments ruled out their respective hypotheses cleanly. `Dispatch()` DOES unconditionally insert
-  a global compute→compute memory barrier (`RecordGlobalComputeBarrier`) after every single dispatch, and
-  `VulkanCommandStream`'s deferred-free mechanism IS correctly gated on the GPU-signaled timeline
-  semaphore (`vkGetSemaphoreCounterValue`, not merely "submitted") — both read as correct under direct
-  inspection. **Root cause remains open.** What's confirmed: deterministic (not a race), backend-specific
-  (CUDA doesn't reproduce it), originates inside or before `Krea2Attention.Forward` in block 0 (the coarse
-  per-block trace is the trustworthy one; the qNorm/kNorm asymmetry from the fine-grained trace is
-  itself an instrumentation artifact per (3), not necessarily where the real divergence starts). Prime
-  remaining suspects, not yet individually isolated: the `ScaledDotProductAttention(..., allowF16: true)`
-  F16 SDPA path at this specific GQA/headDim=128/seqLen=4108 shape (a combination no other model has
-  exercised on Vulkan before Krea2), or a subtle correctness bug in one of the five newly-added ops that
-  only manifests at real scale (all five passed their dedicated unit tests at small synthetic scale on
-  both the 3060 and llvmpipe). **One concrete, historically-motivated hypothesis was directly tested and
-  ruled out:** `PARITY_VERIFICATION.md`'s "Krea2 / all fp8_scaled DiTs (fused GEMV)" row documents a PAST
-  CUDA incident with the identical symptom — Krea2's time-embed/modulation linears keep BF16 biases, and a
-  CUDA fused-GEMV fast path once reinterpreted those bias bytes as raw F32, exploding timestep conditioning
-  into an all-black image. Krea2's real checkpoint confirms `img_in`/`time_embed.linear_1`/
-  `time_embed.linear_2`/`time_mod_proj`'s weights AND biases are indeed ALL BF16 on this model — a
-  non-perturbing `.DType` check (no `AsReadOnlySpan`, no residency-cache interaction) confirmed this at
-  load time. This looked like a strong lead: Vulkan's generic `CastIfNeeded` bias-cast path had only ever
-  been exercised with a BF16 WEIGHT (`Backend_Linear_Bf16Weight_MatchesCpu`, bias=null) before Krea2, never
-  a BF16 BIAS specifically. Directly tested via a new `Backend_Linear_Bf16Bias_MatchesCpu` (both M=8 and
-  M=1 — M=1 matches the real model's exact batch-1 timestep/img_in projection shape) — **both pass,
-  bit-exact against the `Tensor.CastTo(BF16)` CPU reference, on both the 3060 and llvmpipe.** Vulkan's BF16
-  bias handling is correct; this is NOT a repeat of the historical CUDA bug. The test is kept as a
-  permanent regression gate (it closed a real, previously-untested code path) but the blowup's root cause
-  is NOT here — don't re-spend time re-deriving this hypothesis. **For whoever picks this up next:** design any further live-tensor
-  inspection to read a GPU-resident tensor's value exactly ONCE, at the very end, via a channel that
-  doesn't touch the tensor's residency/cache state mid-computation (e.g. a CPU-reference or CUDA-side
-  dump captured independently, compared bit-exact against a Vulkan dump taken only after the whole block
-  completes) — repeated incremental `AsReadOnlySpan` probing mid-block was directly shown to change the
-  bug's manifestation and cannot be trusted to localize it further. All debug instrumentation used during
-  this investigation (`Krea2Pipeline.cs`, `Krea2Transformer.cs`, `Krea2Block.cs`, `Krea2Attention.cs`, and
-  a temporary `HARTSY_DEBUG_FORCE_SYNC_BEFORE_CAST_FREE` block in `VulkanBackend.DispatchMatmul`) was
-  fully reverted before this session ended — none of it shipped.
+- **Krea2 Vulkan e2e: F16 activation blowup — ROOT CAUSE FOUND AND FIXED** (2026-07-30, RTX 4090). After
+  fixing the five real backend gaps above, the pipeline ran end-to-end without crashing/OOMing but produced
+  an invalid (NaN/all-black, or noise once F16 was worked around) image, while the identical CLI path on
+  CUDA produced a correct astronaut-on-horse photo. A prior pass at this investigation forced F32
+  activations on Vulkan (`DitDtype.ActFor`, since removed) after observing that eliminated the NaN — this
+  was a **false fix**: the resulting image, when actually opened and viewed (not just checked for
+  "not all-black"), was pure noise/static. No-NaN is not the same as correct; every e2e claim needs the
+  PNG viewed, not just a statistical sanity check.
+  **The real bug:** `VulkanBackend.DispatchMatmul` derived `M`/`N` from `output.Shape`'s RANK STRUCTURE
+  ("flatten all-but-last dims into `M`, last dim is `N`") instead of from the weight tensor — unlike
+  `CudaBackend.LinearImpl`, which derives `n = weight.Shape[0]`, `k = weight.Shape[1]` and never even reads
+  `output.Shape`. This is silently wrong whenever a caller shapes a Linear's output as
+  `[B, S, heads, headDim]` — exactly what `Krea2Attention.Forward` does for Q/K/V, so that the downstream
+  per-head `RmsNorm`/RoPE can normalize over `headDim` without a reshape. The true output width is
+  `heads·headDim`, spanning TWO trailing dims, not just the last one; the old code computed `M` far too
+  large (folding `heads` into it) and `N` far too small (just `headDim`), so the GEMM kernel read `x`'s
+  buffer out of its actual bounds (undefined/zero-initialized VRAM for most "rows") and used only a
+  `headDim`-wide slice of the real `hidden`-wide weight matrix. Real-data validation against the actual
+  Krea2 checkpoint at production scale (seqLen≈4109) showed `to_q`/`to_k`'s Linear output was **~90% exact
+  zero** against the correct CPU dot-product reference. Every downstream op (`RmsNorm`, RoPE, `Sigmoid`,
+  `ScaledDotProductAttention`) independently validated bit-correct against ITS OWN real input — because each
+  op correctly computed its formula on already-corrupted data. **This is the methodological lesson: per-op
+  real-data validation cannot catch an upstream shape-contract violation, because a wrong-shaped GEMM still
+  produces internally-consistent (if wrong) numbers that every downstream op faithfully propagates.** What
+  broke the case open was comparing the SAME stage across backends (Vulkan vs. CUDA, both forced F32 for a
+  fair comparison) at the `to_q`/`to_k` Linear boundary specifically — `x` (the shared input) matched almost
+  exactly between backends, but `q`/`k` (the Linear output) diverged by 2× in magnitude, which is what a
+  wrong-shaped GEMM looks like and a precision/rounding difference does not.
+  **The fix** (`VulkanBackend.DispatchMatmul`): derive `N` from the weight operand
+  (`transposeB ? b.Shape[0] : b.Shape[b.Shape.Rank - 1]`), then `M = output.ElementCount / N` — a strict
+  generalization that leaves every currently-correct call site (rank-2, and rank-3 outputs where the last
+  dim already IS the true width, e.g. Krea2's FFN/gate Linears) byte-identical, while fixing the rank-4
+  split-head case. Regression-tested via `Backend_Linear_SplitHeadOutputShape_MatchesCpu` (a rank-4 output
+  shape with `heads·headDim` split across two dims — the exact shape class that exposed the bug); full
+  124-test Vulkan suite green after the fix (3060). `DitDtype.ActFor` (the F32-on-Vulkan workaround) has
+  been REMOVED — it masked a symptom, cost an ~18× activation-precision perf hit, and is unnecessary now
+  that the actual bug is fixed: Krea2 on Vulkan runs its normal F16 hot path and produces a coherent image,
+  verified via the CLI (`HartsyInference.Cli`, not the xUnit test harness) with the identical
+  prompt/seed/steps/cfg as the CUDA reference — both produce the same recognizable astronaut-on-horse photo.
+  **Speed, once correctness was fixed** (RTX 4090, `HARTSY_LOG_LEVEL=Verbose` breakdown): text encode ~2.4s,
+  DiT preload ~2.2s, denoise loop **~34.4s/step × 8 steps ≈ 276s** (remarkably stable step-to-step, within
+  1.1s across all 8 — a steady-state cost, not an anomalous stall), VAE decode ~39s, total ~322s. CUDA runs
+  the identical config in ~11s end-to-end. This gap was checked for a fixable cause (stray D2H sync,
+  un-batched submit-per-dispatch) before concluding anything — dispatches already batch by default
+  (`HARTSYINFERENCE_VK_SUBMIT_PER_OP` defaults off, `FlushThreshold=8`), and the per-step timing's tight,
+  uniform stability across 8 independent steps is inconsistent with a stray-sync/one-off explanation. This
+  is the known, already-scoped Vulkan dispatch-overhead ceiling (hand-written GLSL kernels + per-dispatch
+  submit/barrier overhead vs. CUDA's cuBLAS/cuDNN + graph capture) — see `benchmarks/scoreboards/VULKAN.md`
+  and Phase 5–7 of the Vulkan bring-up plan (core-primitive perf ceiling, denoise-loop graph capture) for
+  the scoped path to closing it. Closing it is a substantial, separate perf-engineering effort, not a bug
+  fix; it was NOT attempted in this session beyond confirming it isn't a quick fix. All debug instrumentation
+  used during this investigation (temporary prints/validators in `Krea2Attention.cs`, `FluxRope.cs`, an env
+  override in `Krea2Recipe.cs`) was fully reverted; the only permanent code changes are the `DispatchMatmul`
+  fix itself, the `Krea2Recipe.CacheWeightCasts=false` production OOM fix (a separate, genuine bug found
+  earlier in this investigation), and the five backend-gap fixes above.
 
 ---
 

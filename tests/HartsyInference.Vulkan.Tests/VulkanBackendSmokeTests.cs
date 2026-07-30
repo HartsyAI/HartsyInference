@@ -413,6 +413,68 @@ public sealed class VulkanBackendSmokeTests
         input.Dispose(); weight.Dispose(); bias.Dispose(); output.Dispose();
     }
 
+    /// <summary>Regression gate for a real Krea2-on-Vulkan bug (2026-07-30): <c>DispatchMatmul</c> derived
+    /// M/N from <c>output.Shape</c>'s rank structure ("flatten all-but-last dims into M, last dim is N"),
+    /// which is silently wrong whenever a caller shapes a Linear's output as <c>[B, S, heads, headDim]</c>
+    /// (done so a downstream per-head op like RmsNorm can normalize over headDim without a reshape) — the
+    /// true output width is <c>heads·headDim</c>, spanning two trailing dims, not just the last one. The old
+    /// code computed M too large and N too small, reading input rows past their actual extent (out-of-bounds
+    /// VRAM) and using only a slice of the weight matrix — Krea2's to_q/to_k Linears came back ~90% exact
+    /// zero against the real checkpoint at production scale, corrupting every downstream op (each of which
+    /// tested bit-correct against ITS OWN already-wrong input, hiding the bug from per-op checks) and
+    /// producing a pure-noise image end-to-end despite individual ops appearing correct in isolation. Fixed
+    /// by deriving N from the weight tensor (mirrors <c>CudaBackend.LinearImpl</c>, which never consults
+    /// output.Shape at all) and M as <c>output.ElementCount / N</c>. This test uses a rank-4 output shape
+    /// with heads·headDim split across two dims — the exact shape class that exposed the bug.</summary>
+    [Fact]
+    public void Backend_Linear_SplitHeadOutputShape_MatchesCpu()
+    {
+        if (!VulkanAvailable())
+            return;
+        using VulkanBackend backend = new();
+
+        const int batch = 1, seqLen = 37, heads = 6, headDim = 8, hidden = 96;
+        const int K = hidden, N = heads * headDim;   // N = 48; deliberately != hidden to catch any accidental K/N mixup
+        Tensor input = new(new TensorShape(batch, seqLen, K), DType.F32);
+        Tensor weight = new(new TensorShape(N, K), DType.F32);
+        Tensor output = new(new TensorShape(batch, seqLen, heads, headDim), DType.F32);   // rank-4: split last dim
+
+        Random rng = new(7);
+        Span<float> iS = input.AsSpan<float>();
+        Span<float> wS = weight.AsSpan<float>();
+        for (int i = 0; i < batch * seqLen * K; i++) iS[i] = (float)(rng.NextDouble() * 2 - 1);
+        for (int i = 0; i < N * K; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.1f;
+
+        backend.Linear(output, input, weight, null);
+        ReadOnlySpan<float> oS = output.AsReadOnlySpan<float>();
+
+        // CPU reference: out[s, n] = sum_k input[s, k] * weight[n, k], flat-indexed [seqLen, N] (byte-identical
+        // to the rank-4 [batch, seqLen, heads, headDim] output layout).
+        int errs = 0; int firstS = -1, firstN = -1; float maxAbs = 0;
+        for (int s = 0; s < seqLen; s++)
+        for (int n = 0; n < N; n++)
+        {
+            float acc = 0;
+            for (int k = 0; k < K; k++) acc += iS[s * K + k] * wS[n * K + k];
+            float vk = oS[s * N + n];
+            float err = MathF.Abs(vk - acc);
+            if (err > 1e-3f)
+            {
+                if (errs == 0) { firstS = s; firstN = n; }
+                errs++;
+                maxAbs = MathF.Max(maxAbs, err);
+            }
+        }
+        if (errs > 0)
+        {
+            float exp = 0;
+            for (int k = 0; k < K; k++) exp += iS[firstS * K + k] * wS[firstN * K + k];
+            Assert.Fail($"Linear split-head-output: {errs}/{seqLen * N} probe diffs. First at out[{firstS},{firstN}]: vk={oS[firstS * N + firstN]:G6} cpu={exp:G6}  maxAbsErr={maxAbs:G6}");
+        }
+
+        input.Dispose(); weight.Dispose(); output.Dispose();
+    }
+
     /// <summary>Gate for the Stage-1b weight-cast cache: a preloaded FP8 weight feeds two consecutive
     /// Linears (first call populates the cast cache, second reuses it). Both outputs must match the CPU
     /// reference (computed from the same FP8→F16 dequant) — catches a stale/aliased/freed cached cast.</summary>
@@ -473,6 +535,205 @@ public sealed class VulkanBackendSmokeTests
         }
 
         input.Dispose(); weightF32.Dispose(); weightFp8.Dispose(); weightF16Ref.Dispose(); bias.Dispose();
+    }
+
+    /// <summary>Regression gate for a real Krea2-on-Vulkan finding (2026-07-30): every prior FP8-weight test
+    /// (including <see cref="Backend_Linear_FP8Weight_CachedCast_Matches_Cpu"/> above) left
+    /// <see cref="Tensor.Fp8ScaleFactor"/> at its default 1.0 — never exercising the actual "fp8_scaled"
+    /// checkpoint convention the name implies. `CudaBackend` folds a non-1.0 <c>Fp8ScaleFactor</c> into the
+    /// GEMM's <c>alpha</c> (raw dequant, scale at matmul time); `VulkanBackend.CastIfNeeded`'s
+    /// <c>cast_f8e4m3_f16</c> instead bakes the scale into the dequant itself and hardcodes <c>alpha=1.0</c>
+    /// in both the coopmat and tiled matmul paths — a different but should-be-equivalent split of the same
+    /// math, IF the cast is applied exactly once. Live e2e evidence (block-by-block CUDA-vs-Vulkan
+    /// comparison on the real Krea2 checkpoint) showed Krea2's FFN output ~3x too large on Vulkan
+    /// specifically — the `ff.gate/up/down` weights are exactly the fp8_scaled tensors most likely to carry
+    /// a non-trivial scale. Covers both the coopmat-eligible shape (M,N,K all multiples of 16) and the
+    /// tiled-fallback shape, since they apply alpha independently.</summary>
+    [Theory]
+    [InlineData(256, 512, 256, 6.7f)]        // multiples of 16 → coopmat fast path, large scale
+    [InlineData(37, 96, 41, 6.7f)]           // tiled fallback path, large scale
+    [InlineData(256, 512, 256, 0.0021f)]     // coopmat path, REAL Krea2 ff.gate/up/down scale magnitude
+    [InlineData(37, 96, 41, 0.0021f)]        // tiled path, same real-world small scale
+    public void Backend_Linear_FP8Weight_NonUnitScaleFactor_MatchesCpu(int M, int K, int N, float scale)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (!backend.Capabilities.SupportsF16) return;
+
+        Tensor input = new(new TensorShape(M, K), DType.F16);
+        Tensor weightF32 = new(new TensorShape(N, K), DType.F32);
+
+        // Tensor.CastTo(F8E4M3) encodes the F32 value's magnitude DIRECTLY into the raw fp8 byte (no
+        // scale-aware pre-division — see Tensor.ConvertRange's F32->F8E4M3 branch); Fp8ScaleFactor is only
+        // applied on DEQUANT. So to exercise the REAL checkpoint's raw-byte magnitude regime (real_weight
+        // ~= raw_byte * scale, and Krea2's real ff.gate/up/down scale is ~0.002 with normal ~0.01-0.1
+        // weight magnitudes, so raw_byte ~= weight/scale ~= 5-50) the pre-cast F32 values must be scaled up
+        // by ~1/scale here — encoding a tiny weight value directly (raw_byte ~0.05) would only ever
+        // exercise fp8's near-zero/subnormal range, never the real checkpoint's actual regime.
+        float rawMagnitude = 0.05f / MathF.Max(scale, 1e-6f);
+        Random rng = new(29);
+        Span<Half> iS = input.AsSpan<Half>();
+        Span<float> wS = weightF32.AsSpan<float>();
+        for (int i = 0; i < M * K; i++) iS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.1f);
+        for (int i = 0; i < N * K; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * rawMagnitude;
+
+        Tensor weightFp8 = weightF32.CastTo(DType.F8E4M3);
+        weightFp8.Fp8ScaleFactor = scale;
+        Tensor weightF16Ref = weightFp8.CastTo(DType.F16);   // CPU reference already folds Fp8ScaleFactor
+        ReadOnlySpan<Half> wRef = weightF16Ref.AsReadOnlySpan<Half>();
+
+        Tensor output = new(new TensorShape(M, N), DType.F16);
+        backend.Linear(output, input, weightFp8, null);
+        ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+
+        float maxRel = 0f;
+        for (int m = 0; m < M; m++)
+        {
+            for (int n = 0; n < N; n++)
+            {
+                float acc = 0;
+                for (int k = 0; k < K; k++) acc += (float)iS[m * K + k] * (float)wRef[n * K + k];
+                float got = (float)oS[m * N + n];
+                float rel = MathF.Abs(got - acc) / MathF.Max(1e-3f, MathF.Abs(acc));
+                maxRel = MathF.Max(maxRel, rel);
+            }
+        }
+        Assert.True(maxRel < 0.05f, $"FP8 Linear (scale={scale}) maxRelErr {maxRel:P2} too high — suggests the scale factor isn't applied exactly once.");
+
+        input.Dispose(); weightF32.Dispose(); weightFp8.Dispose(); weightF16Ref.Dispose(); output.Dispose();
+    }
+
+    /// <summary>Reproduces Krea2's exact SwiGLU shape: two DIFFERENT fp8_scaled weights (gate/up, each its
+    /// own <see cref="Tensor.Fp8ScaleFactor"/>) Linear'd against the SAME input back-to-back, THEN
+    /// multiplied together (<c>silu(g)*u</c>) — with <see cref="VulkanBackend.CacheWeightCasts"/> disabled
+    /// (the exact setting the real Krea2 Vulkan test uses for its 13 GB checkpoint), unlike every other FP8
+    /// test in this file which leaves caching at its default (on). If each Linear is individually correct
+    /// but the transient (uncached) cast path has any cross-call bleed — e.g. a scale-factor mixup between
+    /// back-to-back casts of different tensors — this compounds multiplicatively in the product, matching
+    /// the ~3x-too-large `ffOut` a live block-by-block CUDA-vs-Vulkan Krea2 comparison found.</summary>
+    [Fact]
+    public void Backend_SwiGlu_TwoFp8ScaledWeights_UncachedCasts_MatchesCpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (!backend.Capabilities.SupportsF16) return;
+        backend.CacheWeightCasts = false;
+
+        const int M = 37, K = 96, N = 41;
+        Tensor input = new(new TensorShape(M, K), DType.F16);
+        Tensor gateWF32 = new(new TensorShape(N, K), DType.F32);
+        Tensor upWF32 = new(new TensorShape(N, K), DType.F32);
+
+        // REAL Krea2 ff.gate/up scale magnitude (~0.0017-0.002), not an arbitrary large value — see the
+        // raw-byte-magnitude note on Backend_Linear_FP8Weight_NonUnitScaleFactor_MatchesCpu above.
+        // Tensor.CastTo(F8E4M3) encodes F32 directly (no scale-aware pre-division), so the pre-cast values
+        // must be scaled up by ~1/scale to land in the same raw-byte regime a real tiny-scale checkpoint uses.
+        const float gateScale = 0.00166f, upScale = 0.00201f;   // Krea2's actual per-tensor values, deliberately DIFFERENT
+        float gateRawMag = 0.05f / gateScale, upRawMag = 0.05f / upScale;
+        Random rng = new(31);
+        Span<Half> iS = input.AsSpan<Half>();
+        Span<float> gS = gateWF32.AsSpan<float>();
+        Span<float> uS = upWF32.AsSpan<float>();
+        for (int i = 0; i < M * K; i++) iS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.1f);
+        for (int i = 0; i < N * K; i++) gS[i] = (float)(rng.NextDouble() * 2 - 1) * gateRawMag;
+        for (int i = 0; i < N * K; i++) uS[i] = (float)(rng.NextDouble() * 2 - 1) * upRawMag;
+
+        Tensor gateFp8 = gateWF32.CastTo(DType.F8E4M3); gateFp8.Fp8ScaleFactor = gateScale;
+        Tensor upFp8 = upWF32.CastTo(DType.F8E4M3); upFp8.Fp8ScaleFactor = upScale;
+        Tensor gateF16Ref = gateFp8.CastTo(DType.F16);
+        Tensor upF16Ref = upFp8.CastTo(DType.F16);
+        ReadOnlySpan<Half> gRef = gateF16Ref.AsReadOnlySpan<Half>();
+        ReadOnlySpan<Half> uRef = upF16Ref.AsReadOnlySpan<Half>();
+
+        Tensor g = new(new TensorShape(M, N), DType.F16);
+        Tensor u = new(new TensorShape(M, N), DType.F16);
+        backend.Linear(g, input, gateFp8, null);
+        backend.Linear(u, input, upFp8, null);
+        Tensor silu = new(new TensorShape(M, N), DType.F16);
+        backend.Silu(silu, g);
+        Tensor gated = new(new TensorShape(M, N), DType.F16);
+        backend.Mul(gated, silu, u);
+        ReadOnlySpan<Half> gatedS = gated.AsReadOnlySpan<Half>();
+
+        float maxRel = 0f;
+        for (int m = 0; m < M; m++)
+        {
+            for (int n = 0; n < N; n++)
+            {
+                float accG = 0, accU = 0;
+                for (int k = 0; k < K; k++)
+                {
+                    accG += (float)iS[m * K + k] * (float)gRef[n * K + k];
+                    accU += (float)iS[m * K + k] * (float)uRef[n * K + k];
+                }
+                float siluRef = accG / (1.0f + MathF.Exp(-accG));
+                float expected = siluRef * accU;
+                float got = (float)gatedS[m * N + n];
+                float rel = MathF.Abs(got - expected) / MathF.Max(1e-3f, MathF.Abs(expected));
+                maxRel = MathF.Max(maxRel, rel);
+            }
+        }
+        Assert.True(maxRel < 0.05f, $"SwiGLU (two differently-scaled FP8 weights, uncached) maxRelErr {maxRel:P2} too high.");
+
+        input.Dispose(); gateWF32.Dispose(); upWF32.Dispose(); gateFp8.Dispose(); upFp8.Dispose();
+        gateF16Ref.Dispose(); upF16Ref.Dispose(); g.Dispose(); u.Dispose(); silu.Dispose(); gated.Dispose();
+    }
+
+    /// <summary>Same FP8-scaled Linear correctness check as
+    /// <see cref="Backend_Linear_FP8Weight_NonUnitScaleFactor_MatchesCpu"/> but at Krea2's EXACT real
+    /// <c>ff.gate</c>/<c>ff.up</c> shape (M=jointSeq=4108, K=hidden=6144, N=intermediateSize=16384) — every
+    /// prior FP8-scale test used M,N ≤ 256, far smaller than the real model's tile-count (real N=16384 is
+    /// 128 tiles of 128 vs. 2 tiles at N=256; real K=6144 is 384 K-blocks of 16 vs. 32 at K=512), so an
+    /// accumulator or tile-index bug that only manifests after many loop iterations would be invisible at
+    /// the smaller shapes already tested. Uses probe sampling (not every output element) since a full
+    /// M×N×K reference here is ~4×10^11 multiply-adds — probes still cover corners/tile-boundaries.</summary>
+    [Fact]
+    public void Backend_Linear_FP8Weight_NonUnitScaleFactor_MatchesCpu_RealKrea2FfnShape()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (!backend.Capabilities.SupportsF16) return;
+        backend.CacheWeightCasts = false;
+
+        const int M = 4108, K = 6144, N = 16384;
+        const float scale = 0.00166f;   // Krea2's actual ff.gate scale magnitude
+        float rawMagnitude = 0.05f / scale;
+
+        Tensor input = new(new TensorShape(M, K), DType.F16);
+        Tensor weightF32 = new(new TensorShape(N, K), DType.F32);
+
+        Random rng = new(37);
+        Span<Half> iS = input.AsSpan<Half>();
+        Span<float> wS = weightF32.AsSpan<float>();
+        for (int i = 0; i < M * K; i++) iS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.1f);
+        for (int i = 0; i < N * K; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * rawMagnitude;
+
+        Tensor weightFp8 = weightF32.CastTo(DType.F8E4M3);
+        weightFp8.Fp8ScaleFactor = scale;
+        Tensor weightF16Ref = weightFp8.CastTo(DType.F16);
+        ReadOnlySpan<Half> wRef = weightF16Ref.AsReadOnlySpan<Half>();
+
+        Tensor output = new(new TensorShape(M, N), DType.F16);
+        backend.Linear(output, input, weightFp8, null);
+        ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+
+        // Probe corners, tile boundaries (every 128th row/col — the coopmat/128-tile boundary), and a
+        // scattered sample across the full M/N range.
+        int[] mProbes = { 0, 1, 127, 128, 129, 2048, 4106, 4107 };
+        int[] nProbes = { 0, 1, 127, 128, 129, 8192, 16382, 16383 };
+        int errs = 0; float maxRel = 0f; int firstM = -1, firstN = -1;
+        foreach (int m in mProbes)
+        foreach (int n in nProbes)
+        {
+            float acc = 0;
+            for (int k = 0; k < K; k++) acc += (float)iS[m * K + k] * (float)wRef[n * K + k];
+            float got = (float)oS[m * N + n];
+            float rel = MathF.Abs(got - acc) / MathF.Max(1e-3f, MathF.Abs(acc));
+            if (rel > 0.05f) { if (errs == 0) { firstM = m; firstN = n; } errs++; maxRel = MathF.Max(maxRel, rel); }
+        }
+        Assert.True(errs == 0, $"FP8 Linear (real Krea2 FFN shape, scale={scale}) {errs} probe diffs, first out[{firstM},{firstN}] maxRelErr={maxRel:P2}.");
+
+        input.Dispose(); weightF32.Dispose(); weightFp8.Dispose(); weightF16Ref.Dispose(); output.Dispose();
     }
 
     /// <summary>Matmul at Flux DiT dimensions (M=32, K=3072, N=3072) — checks accumulator precision survives ~3K-deep dot products without overflowing.</summary>
@@ -1280,6 +1541,54 @@ public sealed class VulkanBackendSmokeTests
                 Assert.InRange(oS[m * N + n] - acc, -1e-3f, 1e-3f);
             }
         }
+        input.Dispose(); weight.Dispose(); output.Dispose();
+        biasF32.Dispose(); biasBf16.Dispose(); biasF32Roundtrip.Dispose();
+    }
+
+    /// <summary>Same as <see cref="Backend_Linear_Bf16Bias_MatchesCpu"/> but at Krea2's EXACT real shape for
+    /// <c>time_mod_proj</c> (M=1, K=hidden=6144, N=6·hidden=36864) — the live e2e run showed block 0's output
+    /// already ~5-10x larger than the CUDA reference (min/max magnitude), and `time_mod_proj`'s BF16
+    /// weight+bias feed EVERY block's modulation (gate/scale/shift) vectors, so a scale-dependent bug in the
+    /// tiny-tile (M=1) GEMM+bias-fusion path at this specific large-N width would explain a uniform per-block
+    /// amplification invisible at the smaller N=8 shape already tested.</summary>
+    [Fact]
+    public void Backend_Linear_Bf16Bias_MatchesCpu_RealKrea2ModProjShape()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (!backend.Capabilities.SupportsF16) return;
+
+        const int M = 1, K = 6144, N = 6 * 6144;
+        Tensor input = new(new TensorShape(M, K), DType.F32);
+        Tensor weight = new(new TensorShape(N, K), DType.F32);
+        Tensor output = new(new TensorShape(M, N), DType.F32);
+
+        Random rng = new(23);
+        Span<float> iS = input.AsSpan<float>();
+        Span<float> wS = weight.AsSpan<float>();
+        for (int i = 0; i < M * K; i++) iS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.05f;
+        for (int i = 0; i < N * K; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.02f;
+
+        Tensor biasF32 = new(new TensorShape(N), DType.F32);
+        Span<float> bS = biasF32.AsSpan<float>();
+        for (int i = 0; i < N; i++) bS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.2f;
+
+        Tensor biasBf16 = biasF32.CastTo(DType.BF16);
+        Tensor biasF32Roundtrip = biasBf16.CastTo(DType.F32);
+
+        backend.Linear(output, input, weight, biasBf16);
+
+        ReadOnlySpan<float> oS = output.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> bRef = biasF32Roundtrip.AsReadOnlySpan<float>();
+        float maxErr = 0f;
+        for (int n = 0; n < N; n++)
+        {
+            float acc = bRef[n];
+            for (int k = 0; k < K; k++) acc += iS[k] * wS[n * K + k];
+            maxErr = MathF.Max(maxErr, MathF.Abs(oS[n] - acc));
+        }
+        Assert.True(maxErr < 1e-2f, $"Linear (BF16 bias, real time_mod_proj shape) maxErr {maxErr:E3} too high.");
+
         input.Dispose(); weight.Dispose(); output.Dispose();
         biasF32.Dispose(); biasBf16.Dispose(); biasF32Roundtrip.Dispose();
     }
@@ -2308,6 +2617,52 @@ public sealed class VulkanBackendSmokeTests
         ReadOnlySpan<float> oS = oT.AsReadOnlySpan<float>();
         for (int i = 0; i < expected.Length; i++)
             Assert.InRange(oS[i] - expected[i], -2e-3f, 2e-3f);
+
+        qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose();
+    }
+
+    /// <summary>Regression gate for a real Krea2-on-Vulkan investigation (2026-07-30): <c>FlashMaxHeadDim = 128</c>
+    /// is the exact boundary between the fused flash-attention path and the naive fallback
+    /// (<c>headDim &lt;= FlashMaxHeadDim</c>) — and Krea2's <c>headDim</c> is EXACTLY 128, a boundary value no
+    /// existing flash-attention test exercised (all prior tests use headDim 32/64). Also matches Krea2's
+    /// EXACT `ScaledDotProductAttention` call shape: mask=null, non-causal, GQA, self-attention (sq==skv,
+    /// both large — Krea2 runs jointSeq≈4108, kept smaller here for CPU-reference speed), F32. This hypothesis
+    /// was ruled out during the investigation (both cases pass) — the real bug was
+    /// <c>VulkanBackend.DispatchMatmul</c> deriving M/N from <c>output.Shape</c>'s rank structure instead of
+    /// from the weight tensor, which silently computed the wrong-shaped GEMM for any Linear whose output is
+    /// shaped <c>[B, S, heads, headDim]</c> (Krea2's Q/K/V). Kept as a permanent regression gate for this
+    /// specific boundary value regardless.</summary>
+    [Theory]
+    [InlineData(128)]   // Krea2's exact headDim — the FlashMaxHeadDim boundary
+    [InlineData(64)]    // one below a power-of-two step, sanity control
+    public void Backend_ScaledDotProductAttention_HeadDim128Boundary_MatchesCpu(int headDim)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int batch = 1, hq = 8, hkv = 2, seqLen = 48;   // GQA, self-attention (sq==skv)
+        float scale = 1f / MathF.Sqrt(headDim);
+        float[] q = FillRandom(batch * hq * seqLen * headDim, 41);
+        float[] k = FillRandom(batch * hkv * seqLen * headDim, 42);
+        float[] v = FillRandom(batch * hkv * seqLen * headDim, 43);
+        float[] expected = CpuFlashReference(q, k, v, null, batch, hq, hkv, seqLen, seqLen, headDim, scale, causal: false, qOffset: 0, slidingWindow: 0);
+
+        Tensor qT = new(new TensorShape(batch, hq, seqLen, headDim), DType.F32);
+        Tensor kT = new(new TensorShape(batch, hkv, seqLen, headDim), DType.F32);
+        Tensor vT = new(new TensorShape(batch, hkv, seqLen, headDim), DType.F32);
+        Tensor oT = new(new TensorShape(batch, hq, seqLen, headDim), DType.F32);
+        q.CopyTo(qT.AsSpan<float>()); k.CopyTo(kT.AsSpan<float>()); v.CopyTo(vT.AsSpan<float>());
+
+        backend.ScaledDotProductAttention(oT, qT, kT, vT, mask: null, scale);
+
+        ReadOnlySpan<float> oS = oT.AsReadOnlySpan<float>();
+        float maxAbs = 0f; int firstBad = -1;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            float diff = MathF.Abs(oS[i] - expected[i]);
+            if (diff > maxAbs) { maxAbs = diff; if (diff > 2e-3f) firstBad = i; }
+        }
+        Assert.True(maxAbs < 2e-3f, $"ScaledDotProductAttention (headDim={headDim}) maxAbsDiff={maxAbs:E3} firstBadIdx={firstBad}.");
 
         qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose();
     }

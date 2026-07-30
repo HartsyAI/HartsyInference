@@ -1,5 +1,7 @@
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cuda;
+using HartsyInference.Vulkan;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
@@ -64,6 +66,21 @@ public sealed class Krea2Recipe : IArchitectureRecipe
 
             (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoadComponent(vaePath, key => key, applyFp8Dequant: false);
             loaders.Add(vaeLoader);
+
+            // Krea 2's fp8-scaled transformer is ~13 GB; caching every fp8->F16/BF16 weight cast roughly doubles
+            // that in VRAM (original fp8 + cached activation-dtype copy) and OOMs partway through text encoding —
+            // same class of fix as Flux1Recipe/LtxVideoRecipe/HunyuanVideoRecipe above. Keep weights resident in
+            // their checkpoint dtype with a transient per-GEMM dequant instead.
+            if (context.Backend is CudaBackend cudaBackend)
+            {
+                cudaBackend.CacheWeightCasts = false;
+                Logs.Info("[Krea2Recipe] CacheWeightCasts disabled (fp8-resident, transient per-GEMM dequant).");
+            }
+            else if (context.Backend is VulkanBackend vulkanBackend)
+            {
+                vulkanBackend.CacheWeightCasts = false;
+                Logs.Info("[Krea2Recipe] CacheWeightCasts disabled (fp8-resident, transient per-GEMM dequant).");
+            }
 
             Logs.Info("[Krea2Recipe] Building Krea 2 models (single-stream MMDiT, 28 blocks, text-fusion stage).");
             Krea2Transformer transformer = new Krea2Transformer(config);

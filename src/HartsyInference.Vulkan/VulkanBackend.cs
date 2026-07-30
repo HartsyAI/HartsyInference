@@ -708,22 +708,20 @@ public sealed class VulkanBackend : IBackend
 
     private void DispatchMatmul(Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias)
     {
-        // Resolve M, N, K from logical shapes
-        int M, N, K;
-        if (output.Shape.Rank == 2)
-        {
-            M = (int)output.Shape[0];
-            N = (int)output.Shape[1];
-        }
-        else
-        {
-            // Multi-dim output — flatten leading dims for matmul
-            long m = 1;
-            for (int d = 0; d < output.Shape.Rank - 1; d++) m *= output.Shape[d];
-            M = (int)m;
-            N = (int)output.Shape[output.Shape.Rank - 1];
-        }
-        K = transposeA ? (int)a.Shape[0] : (int)a.Shape[a.Shape.Rank - 1];
+        // Resolve M, N, K from the OPERAND shapes (mirrors CudaBackend.LinearImpl: n/k come from the
+        // weight, m from element-count / k) — NOT from output.Shape's rank structure. A caller may
+        // legitimately shape the output as [B, S, heads, headDim] (e.g. Krea2Attention's Q/K/V, split
+        // this way so RmsNorm/RoPE can normalize over headDim without a reshape) where the true GEMM
+        // column count (heads·headDim) spans TWO trailing dims, not just the last one. Naively flattening
+        // "all-but-last dims into M, last dim into N" silently computes the wrong-shaped GEMM in that case
+        // (M too large, N too small) — reading input rows past its actual extent (out-of-bounds VRAM) and
+        // using only a slice of the weight matrix, producing near-zero/garbage output for most rows.
+        // N is fully determined by B's column count regardless of how output happens to be shaped, so
+        // deriving M as ElementCount/N is always correct and a strict generalization of the old rank==2
+        // and "last dim is the real N" cases (both keep the same M/N here).
+        int N = transposeB ? (int)b.Shape[0] : (int)b.Shape[b.Shape.Rank - 1];
+        int M = (int)(output.ElementCount / N);
+        int K = transposeA ? (int)a.Shape[0] : (int)a.Shape[a.Shape.Rank - 1];
 
         // Pick GEMM dtype to MATCH the output's storage dtype — otherwise the matmul kernel writes
         // a smaller element type (e.g. F16) into an F32-sized buffer and the model reads garbage

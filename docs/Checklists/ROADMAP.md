@@ -222,52 +222,57 @@ a stale code comment claiming otherwise.
   Krea2 e2e comparison this session ends with will honestly reflect "Vulkan without graph capture," which
   is the true current state, not a claim this item quietly closed.
 - [ ] **RCCL** collectives for multi-GPU on AMD (§1).
-- [x] **Diffusion domain fill (Phase 7), scoped to Krea2** — backend-gap-closure **done** (2026-07-30);
-  **e2e output still invalid, tracked open below.** The static call-site analysis performed earlier this
-  session (every `backend.*` call across `Krea2Pipeline`/`Krea2Transformer`/`Krea2Attention`/
-  `Krea2TextFusion`/`LlamaStyleEncoder`/`QwenImageVaeDecoder`, cross-referenced against every
-  `NotImplementedException`/`NotSupportedException` throw site) concluded "zero backend gaps" — **this
-  claim was wrong**, disproven the moment a real weight-loaded e2e run was actually attempted, exactly the
-  failure mode the plan itself warned static analysis alone can't rule out. Five real, previously-unknown
-  gaps surfaced sequentially, each caught by re-running after the previous fix (see `TROUBLESHOOTING.md`
-  for full root-cause writeups): **(1)** `WanRopeInterleaved` had no `VulkanBackend` override at all —
-  `FluxRope.ApplyGpuGqa`'s GQA rope fell through to `IBackend`'s CPU-loop default, which
-  `AccessViolationException`'d on the GPU-resident Q/K tensors (a process-crashing failure, not a catchable
-  exception) — fixed with a new `wan_rope_interleaved.comp.glsl` + override, unit-tested F32/F16 on 3060 +
-  llvmpipe. **(2)** `RepeatKvHeads` had no override — F32-only CPU default threw on Krea2's F16 GQA K/V —
-  fixed with `repeat_kv_heads.comp.glsl`. **(3)** `GatedResidualLastDim` had no override — same F32-only
-  throw on F16 activations — fixed with `gated_residual_last_dim.comp.glsl`. **(4)** `SliceRows` had no
-  override — F32-only throw on Krea2's F16 joint sequence (`Krea2Transformer.SliceTail`) — fixed with
+- [x] **Diffusion domain fill (Phase 7), scoped to Krea2** — **done, e2e image valid** (2026-07-30). The
+  static call-site analysis performed earlier this session (every `backend.*` call across
+  `Krea2Pipeline`/`Krea2Transformer`/`Krea2Attention`/`Krea2TextFusion`/`LlamaStyleEncoder`/
+  `QwenImageVaeDecoder`, cross-referenced against every `NotImplementedException`/`NotSupportedException`
+  throw site) concluded "zero backend gaps" — **this claim was wrong**, disproven the moment a real
+  weight-loaded e2e run was actually attempted, exactly the failure mode the plan itself warned static
+  analysis alone can't rule out. Five real, previously-unknown backend gaps surfaced sequentially, each
+  caught by re-running after the previous fix (see `TROUBLESHOOTING.md` for full root-cause writeups):
+  **(1)** `WanRopeInterleaved` had no `VulkanBackend` override at all — `FluxRope.ApplyGpuGqa`'s GQA rope
+  fell through to `IBackend`'s CPU-loop default, which `AccessViolationException`'d on the GPU-resident
+  Q/K tensors (a process-crashing failure, not a catchable exception) — fixed with a new
+  `wan_rope_interleaved.comp.glsl` + override, unit-tested F32/F16 on 3060 + llvmpipe. **(2)**
+  `RepeatKvHeads` had no override — F32-only CPU default threw on Krea2's F16 GQA K/V — fixed with
+  `repeat_kv_heads.comp.glsl`. **(3)** `GatedResidualLastDim` had no override — same F32-only throw on F16
+  activations — fixed with `gated_residual_last_dim.comp.glsl`. **(4)** `SliceRows` had no override —
+  F32-only throw on Krea2's F16 joint sequence (`Krea2Transformer.SliceTail`) — fixed with
   `slice_rows.comp.glsl`. **(5)** `Conv2D`'s im2col path materialized the FULL `[gemmK, outH·outW]` column
   matrix in one allocation — ~7 GB at Krea2's 1024×1024 VAE-decode resolution, OOMing even with the
-  transformer's weights already freed — fixed by tiling over output columns (new `colOffset`/`tileCols`
-  push constants in `im2col.comp.glsl`, reusing the GEMM kernel's existing `bOffset`/`cOffset` for the
-  matmul side; `VulkanBackend.Conv2DMaxColTileBytes` settable for test determinism). All five landed with
-  new GLSL kernels, `VulkanBackend.cs` overrides, and dedicated F32/F16 correctness tests passing on both
-  the 3060 and Mesa llvmpipe — see `Backend_WanRopeInterleaved_MatchesCpu`,
+  transformer's weights already freed — fixed by tiling over output columns. **Sixth, the actual blocker:**
+  after all five gaps closed, the e2e run completed without crashing but produced an invalid image
+  (NaN/all-black in F16, pure noise if F16 was worked around to F32). Root-caused to `DispatchMatmul`
+  deriving `M`/`N` from `output.Shape`'s rank structure instead of from the weight tensor — silently wrong
+  for any Linear whose output is shaped `[B, S, heads, headDim]` (Krea2's Q/K/V, split that way so a
+  downstream per-head `RmsNorm` can normalize without a reshape). Fixed by deriving `N` from the weight
+  operand (mirrors `CudaBackend.LinearImpl`, which never reads `output.Shape` at all) and `M` as
+  `output.ElementCount / N`. **Krea2 now produces a correct, coherent image on Vulkan** — verified via the
+  CLI (`HartsyInference.Cli`, the production path, not the xUnit test harness) with the identical
+  prompt/seed/steps/cfg as CUDA; both produce the same recognizable astronaut-on-horse photo. Also fixed
+  along the way: a real production OOM in `Krea2Recipe.cs` (`CacheWeightCasts` wasn't disabled on the
+  Engine/CLI path, only in the xUnit test's manual pipeline construction — a class of bug the test suite
+  structurally cannot catch). All fixes landed with new GLSL kernels/overrides and dedicated regression
+  tests passing on the 3060 and Mesa llvmpipe — see `Backend_WanRopeInterleaved_MatchesCpu`,
   `Backend_RepeatKvHeads_MatchesCpu`, `Backend_GatedResidualLastDim_MatchesCpu`, `Backend_SliceRows_MatchesCpu`,
-  `Backend_Conv2D_TiledPath_MatchesUntiled` in `VulkanBackendSmokeTests.cs`. **What's still open:** with all
-  five gaps closed, the Krea2 Turbo/NoCfg/1024×1024/8-step e2e run completes end-to-end (no crash, no OOM,
-  no exception, 319 s / 34.3 s per step on the 4090) but the output is **invalid** — the DiT block-loop
-  activations diverge starting at block 0 and overflow F16 (`+Inf`/`-Inf`) by block 9, producing an
-  all-`NaN` final latent and an all-black image. This is a genuine, still-open Vulkan-vs-CUDA numeric
-  divergence (CUDA, same model, same default F16 activation path, produces a valid image in 21.9 s) — see
-  `TROUBLESHOOTING.md`'s "Krea2 Vulkan e2e: F16 activation blowup, root cause not found" entry for the full
-  investigation (two targeted experiments ruled out a missing weight-cast fence and descriptor-set
-  recycling; root cause remains open). **Do not read the 319 s timing as a parity number** — see
-  `benchmarks/scoreboards/VULKAN.md`, explicitly labeled invalid-output/timing-only. No `PARITY_VERIFICATION.md`
-  row added — the model doesn't yet produce a valid image on Vulkan.
-- [ ] **Krea2 Vulkan e2e: F16 activation blowup — root cause not found, blocks a valid image.** With all
-  five Phase-7 backend gaps above closed, Krea2's 28-block DiT loop diverges numerically on Vulkan (CUDA,
-  same model/config, does not) — see `TROUBLESHOOTING.md` for the full investigation trail (deterministic,
-  not a race; a missing weight-cast fence, descriptor-set-recycling-in-an-unsubmitted-command-buffer, and
-  a historically-motivated BF16-bias-cast hypothesis — matching a past CUDA "Krea2 all-black" incident —
-  were all directly tested and ruled out). Next steps for whoever picks this up: a NON-perturbing
-  bit-exact A/B of `Krea2Attention.Forward`'s output against a CPU or CUDA reference at identical weights/
-  input (live incremental `AsReadOnlySpan` probing was shown to change the failure signature itself — a
-  confound to design around, e.g. dump once via a side channel that doesn't touch the tensor's GPU-residency
-  cache mid-block) would most efficiently localize whether the divergence is in `ScaledDotProductAttention`'s
-  `allowF16` path or in one of the five ops closed this session.
+  `Backend_Conv2D_TiledPath_MatchesUntiled`, `Backend_Linear_SplitHeadOutputShape_MatchesCpu` in
+  `VulkanBackendSmokeTests.cs` (124/124 total suite green). **Speed is NOT yet at parity** — see the open
+  item immediately below and `benchmarks/scoreboards/VULKAN.md`. `PARITY_VERIFICATION.md` can now take a
+  real Krea2/Vulkan row (coherent image, CLI path, matches CUDA) — not yet added, tracked as follow-up.
+- [ ] **Krea2 Vulkan e2e speed: ~29× slower than CUDA, known dispatch-overhead ceiling, not a bug.** With
+  correctness fixed (above), a `HARTSY_LOG_LEVEL=Verbose` breakdown on the 4090 shows: text encode ~2.4s,
+  DiT preload ~2.2s, denoise loop ~34.4s/step × 8 steps ≈ 276s (stable within 1.1s across all 8 steps — a
+  steady-state cost, not a stall), VAE decode ~39s, total ~322s vs. CUDA's ~11s end-to-end for the identical
+  config. Checked for a fixable cause before concluding this is architectural: dispatches already batch by
+  default (`HARTSYINFERENCE_VK_SUBMIT_PER_OP` defaults off, `FlushThreshold=8`), and the tight, uniform
+  per-step timing across 8 independent steps is inconsistent with a stray-D2H-sync or un-batched-submit
+  explanation (either would show as an outlier step or a large idle gap, not uniform stability). This is the
+  already-scoped Vulkan dispatch-overhead ceiling — hand-written GLSL kernels with per-dispatch
+  submit/barrier overhead vs. CUDA's cuBLAS/cuDNN + graph capture — not a new finding. Closing it is Phase
+  5's core-primitive perf ceiling work (coopmat2, INT8 GEMM wired into model loading) plus extending Phase
+  6's step-graph-capture mechanism (built for LLM decode) to the diffusion denoise loop, per Phase 7's
+  "denoise-loop graph capture reusing Phase 6's command-buffer-reuse mechanism" item — a substantial,
+  separate perf-engineering effort, not attempted this session beyond confirming it isn't a quick fix.
 - [ ] **Video/audio/vision domain fill (Phase 7 menu items)** — explicitly deferred, not evaluated this
   session: Wan 3D/volumetric conv (blocks the Wan VAE), grid-sample/MSDA (blocks deformable-attention
   detection models), dedicated audio AdaIN/activation fused kernels. No model in either of these domains
