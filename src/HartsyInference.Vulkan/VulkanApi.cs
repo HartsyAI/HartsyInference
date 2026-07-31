@@ -191,12 +191,11 @@ internal static partial class VulkanApi
     [LibraryImport(Lib)]
     internal static partial void vkCmdBindDescriptorSets(nint commandBuffer, VkPipelineBindPoint pipelineBindPoint, ulong layout, uint firstSet, uint descriptorSetCount, nint pDescriptorSets, uint dynamicOffsetCount, nint pDynamicOffsets);
 
-    /// <summary>Records descriptor-set bindings directly into the command buffer without a descriptor pool.</summary>
-    /// <remarks>Requires Vulkan 1.4 core or the <c>VK_KHR_push_descriptor</c> extension (loader exposes both
-    /// via the same unsuffixed entry point on modern builds). Saves the vkAllocateDescriptorSets +
-    /// vkUpdateDescriptorSets round-trip per dispatch.</remarks>
-    [LibraryImport(Lib)]
-    internal static partial void vkCmdPushDescriptorSet(nint commandBuffer, VkPipelineBindPoint pipelineBindPoint, ulong layout, uint set, uint descriptorWriteCount, nint pDescriptorWrites);
+    // vkCmdPushDescriptorSet is NOT statically exported by vulkan-1 on drivers that only expose it via the
+    // VK_KHR_push_descriptor extension (confirmed on this box's NVIDIA driver — a direct LibraryImport here
+    // threw EntryPointNotFoundException) — resolved dynamically instead via vkGetDeviceProcAddr in
+    // VulkanDescriptorManager.PushDescriptorSetFn(), trying the KHR-suffixed name first, falling back to the
+    // unsuffixed Vulkan 1.4 core name.
 
     [LibraryImport(Lib)]
     internal static partial void vkCmdPushConstants(nint commandBuffer, ulong layout, VkShaderStageFlags stageFlags, uint offset, uint size, nint pValues);

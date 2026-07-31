@@ -23,6 +23,16 @@ public sealed class VulkanBackend : IBackend
     private readonly string _spvDir;
     private bool _disposed;
 
+    // ── GEMM fast-path engagement counters (diagnostic only; see VulkanProfiler.Dump) ────────────────────────
+    // Answers "is coopmat actually engaging?" directly instead of inferring it from dispatch counts, which
+    // can't distinguish a 1-dispatch coopmat launch from a 1-dispatch matmul_tiled fallback.
+    private long _coopmatGemmCount;
+    private long _tiledGemmCount;
+
+    // ── Step-graph capture (Phase 6e/7; see VulkanStepGraph's doc comment for the full design) ──────────────
+    private VulkanStepGraph? _stepGraph;
+    private bool _capturingStepGraph;
+
     public DeviceKind Device { get; }
     public BackendCapabilities Capabilities { get; }
     public VulkanCapabilities Vk => _vkDevice.Capabilities;
@@ -178,7 +188,7 @@ public sealed class VulkanBackend : IBackend
 
     /// <summary>The kernel binding count (number of SSBOs) for a given shape — drives descriptor-set-layout selection.</summary>
     private VulkanKernel GetKernel(string shaderName, int storageBufferCount, ReadOnlySpan<SpecConstant> spec)
-        => _kernels.Get(shaderName, storageBufferCount, spec);
+        => _kernels.Get(shaderName, storageBufferCount, spec, forCapture: _capturingStepGraph);
 
     /// <summary>Recorded dispatches since last submit — flushed periodically so deferred-free buffers can be reclaimed.</summary>
     // Otherwise large models accumulate hundreds of allocations between submits and exhaust the heap.
@@ -200,6 +210,28 @@ public sealed class VulkanBackend : IBackend
         ReadOnlySpan<byte> pushConstants,
         uint groupX, uint groupY = 1, uint groupZ = 1)
     {
+        // Step-graph capture: record onto the graph's own persistent command buffer instead of the normal
+        // stream, and ALWAYS push-descriptor-bind (regardless of the process's default eager-mode strategy —
+        // see VulkanStepGraph's doc comment for why a pool-allocated set is unsafe for a replayed buffer).
+        // kernel itself is already the push-descriptor-flavored variant here: GetKernel passes
+        // forCapture: _capturingStepGraph through to the registry, which builds against the matching layout.
+        if (_capturingStepGraph)
+        {
+            nint capCb = _stepGraph!.RecordingBuffer;
+            VulkanApi.vkCmdBindPipeline(capCb, VkPipelineBindPoint.Compute, kernel.Pipeline);
+            _descriptors.PushSet(capCb, kernel.PipelineLayout, bufferHandles);
+            if (pushConstants.Length > 0)
+            {
+                fixed (byte* p = pushConstants)
+                    VulkanApi.vkCmdPushConstants(capCb, kernel.PipelineLayout, VkShaderStageFlags.Compute, 0, (uint)pushConstants.Length, (nint)p);
+            }
+            VulkanApi.vkCmdDispatch(capCb, groupX, groupY, groupZ);
+            VulkanCommandStream.RecordGlobalComputeBarrierOn(capCb);
+            // No dispatch-count/flush bookkeeping: this buffer isn't part of the normal stream's tick/submit
+            // lifecycle at all — it's ended and submitted explicitly by StepGraphEndAndLaunch/Launch.
+            return;
+        }
+
         nint cb = _stream.AcquireRecording();
         VulkanApi.vkCmdBindPipeline(cb, VkPipelineBindPoint.Compute, kernel.Pipeline);
 
@@ -272,6 +304,12 @@ public sealed class VulkanBackend : IBackend
             if (_b._opNestingDepth == 0)
             {
                 int dispatches = _b._dispatchesThisOp;
+                // Step-graph capture: every dispatch this op issued was recorded onto the capture buffer, not
+                // _stream (see VulkanBackend.Dispatch) — _stream has nothing pending, so a submit here would
+                // be at best a wasted no-op and at worst an assumption this comment exists to keep from ever
+                // becoming false. DrainTransients() is capture-safe on its own (redirects to the retain list),
+                // but skip the whole block explicitly rather than relying on that alone.
+                if (_b._capturingStepGraph) return;
                 // Tag this op's transient uploads for deferred-free at the op boundary (safe — every
                 // dispatch that referenced them is already recorded). Submitting, however, is batched:
                 // only flush the command buffer once enough dispatches accumulate, so a stream of tiny
@@ -334,8 +372,19 @@ public sealed class VulkanBackend : IBackend
 
     /// <summary>Attempts the cooperative-matrix matmul fast path; returns true when the kernel was dispatched (op fully handled).</summary>
     // Returns false when the path doesn't apply and the caller should fall through to matmul_tiled. Constraints
-    // for v1: (a) HasCooperativeMatrix capability, (b) GEMM dtype is FP16, (c) M, N, K all multiples of FRAG=16,
-    // (d) no fused activation. Bias is handled via a follow-up BroadcastAdd(N, 1) dispatch — see comments below.
+    // for v1: (a) HasCooperativeMatrix capability, (b) GEMM dtype is FP16, (c) N, K multiples of FRAG=16 (see
+    // below for M), (d) no fused activation. Bias is handled via a follow-up BroadcastAdd(N, 1) dispatch — see
+    // comments below.
+    //
+    // M does NOT need to be a multiple of 16 when transposeA is false: matmul_coopmat_partial_m.comp.glsl (a
+    // separate shader file, not a branch in matmul_coopmat.comp.glsl — see its doc comment) handles a
+    // non-aligned M via bounds-checked shared-memory staging, mirroring matmul_tiled.comp.glsl's own proven
+    // idiom. This is the SECOND attempt at this problem (2026-07-31): the first (a host-side scratch-buffer +
+    // device-to-device copy) passed every test thrown at it but caused a real `ErrorDeviceLost` on a full
+    // Krea2 run and was reverted — see docs/Checklists/TROUBLESHOOTING.md. This shared-memory design avoids
+    // that whole risk class (no separate command buffer, no cross-submission barrier — everything happens
+    // inside one dispatch). Scoped to transposeA=false because that's the only case Linear (the real caller
+    // this exists for) ever uses and the only case tested; transposeB may be either.
     private bool TryDispatchCoopmat(
         Tensor output, VulkanBuffer aRes, VulkanBuffer bRes,
         int M, int N, int K, bool transposeA, bool transposeB, DType gemmDtype,
@@ -345,7 +394,8 @@ public sealed class VulkanBackend : IBackend
         if (_disableCoopmat) return false;
         if (!Vk.HasCooperativeMatrix) return false;
         if (gemmDtype != DType.F16) return false;
-        if ((M % FRAG) != 0 || (N % FRAG) != 0 || (K % FRAG) != 0) return false;
+        bool mAligned = (M % FRAG) == 0;
+        if ((!mAligned && transposeA) || (N % FRAG) != 0 || (K % FRAG) != 0) return false;
         // Output must be FP16 or FP32 — coopmat shader supports both via OUTPUT_F32 spec const.
         // Other output dtypes (BF16, FP8, etc.) fall through to the tiled path.
         bool outputIsF32 = output.DType == DType.F32;
@@ -361,8 +411,13 @@ public sealed class VulkanBackend : IBackend
         // 16*32 = 512 — fine. On AMD wave64 it's 16*64 = 1024, and on small devices that can exceed
         // maxComputeWorkGroupInvocations / sizeX. Shrink the tile (never below the 16×16 fragment, which is
         // always one subgroup ≤ the limit) so the dispatch stays valid cross-vendor. No-op on NVIDIA.
+        // The partial-M kernel ALSO needs its BM*FRAG_K*2 + BM*BN*4 byte shared-memory scratch (sA + sC —
+        // see matmul_coopmat_partial_m.comp.glsl) to fit the device's budget; the aligned kernel uses no
+        // shared memory at all, so this second condition is a no-op (always false) when mAligned.
         uint maxInvocations = Math.Min(Vk.MaxComputeWorkGroupInvocations, Vk.MaxComputeWorkGroupSizeX);
-        while ((BM > FRAG || BN > FRAG) && (BM / FRAG) * (BN / FRAG) * subgroupSize > maxInvocations)
+        while ((BM > FRAG || BN > FRAG) &&
+               ((BM / FRAG) * (BN / FRAG) * subgroupSize > maxInvocations ||
+                (!mAligned && (BM * FRAG * 2 + BM * BN * 4) > Vk.MaxComputeSharedMemoryBytes)))
         {
             if (BN >= BM && BN > FRAG) BN /= 2;
             else if (BM > FRAG) BM /= 2;
@@ -374,7 +429,7 @@ public sealed class VulkanBackend : IBackend
 
         try
         {
-            string shader = "matmul_coopmat";
+            string shader = mAligned ? "matmul_coopmat" : "matmul_coopmat_partial_m";
             ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
             {
                 SpecConstant.UInt(0, localX),
@@ -698,6 +753,16 @@ public sealed class VulkanBackend : IBackend
     }
 
     /// <summary>Resolves the GEMM compute dtype: FP8 outputs compute in F16; F16 falls back to F32 without device support.</summary>
+    // Deliberately does NOT promote F32 outputs to F16 to reach coopmat: tried this (2026-07-31), reverted the
+    // same session. Measured payoff was ~0 (16/2112 GEMMs on a real Krea2 run — see the coopmat engagement
+    // counters below) because the real blocker turns out to be shape, not dtype (see DispatchMatmul's M/N/K
+    // comment), so there was no throughput win to weigh against the real, unverified precision cost: F16 has
+    // a 5-bit exponent (max ~65504) vs F32/TF32's 8-bit range, and this path would have applied to FP8-
+    // dequantized-weight GEMMs specifically, exactly where activation magnitudes are least predictable — never
+    // actually exercised under that condition before it was reverted. If the shape blocker (below) gets fixed
+    // and F32-output coopmat becomes worth revisiting, re-derive this from a real e2e SSIM/pixel-diff gate,
+    // not from "CUDA already runs GEMMs at reduced precision by default" alone — that's necessary but not
+    // sufficient (TF32's wider exponent range is not the same guarantee as F16's).
     private DType ResolveGemmDtype(DType outputDType)
     {
         DType gemmDtype = outputDType;
@@ -723,6 +788,47 @@ public sealed class VulkanBackend : IBackend
         int M = (int)(output.ElementCount / N);
         int K = transposeA ? (int)a.Shape[0] : (int)a.Shape[a.Shape.Rank - 1];
 
+        // TryDispatchCoopmat below hard-requires M/N/K all multiples of 16 (its own doc comment: "spec
+        // handles partial fragments IF the host pads the buffer" — this codebase doesn't pad, so it needs
+        // exact multiples). Measured on a real Krea2 run (2026-07-31, the coopmat engagement counters
+        // below): 0.8% (16/2112) of this model's GEMMs reach coopmat at all, and the 16 that do aren't the
+        // expensive ones — every per-block QKV/FFN/out-proj Linear operates on the joint [txtSeq+imgSeq]
+        // sequence, and txtSeq comes straight from the tokenized+encoded prompt length (Krea2Transformer.cs:
+        // `txtSeq = (int)encoderHidden.Shape[1]`) with no padding to a fixed length. Root-caused on this
+        // exact prompt: imgSeq=4096 (a multiple of 16, as expected for a square patchified latent), but
+        // txtSeq=13 → jointSeq=4109, 3 short of the next multiple of 16 — and since txtSeq is
+        // prompt-length-dependent, essentially no real prompt will land on a multiple of 16 by chance. This
+        // was chased down a dtype path first (an F32-output Linear could never reach coopmat's OUTPUT_F32
+        // support because gemmDtype was derived from output.DType with no F32→F16 promotion) — that fix was
+        // real and correct but bought ~0 wall-clock (see ResolveGemmDtype's comment for why it was reverted
+        // the same session) BECAUSE this shape gate blocks the same GEMMs regardless of dtype.
+        //
+        // A host-side M-padding fix (allocate a scratch A/output buffer padded to the next multiple of 16,
+        // device-to-device copy the real M rows in, dispatch coopmat against the padded shape, let the
+        // caller's tensor size naturally ignore the padding tail) was ATTEMPTED AND REVERTED 2026-07-31.
+        // It passed every test thrown at it — a from-scratch CPU-reference correctness check, a 200-iteration
+        // no-sync leak/stress test at Krea2's exact real M/K/N scale, and two full real-CLI runs (2-step,
+        // 4-step) with correct-looking output and coopmat engagement climbing to 48-75% — but a subsequent
+        // full 8-step real Krea2 run failed with `Vulkan error -4 (ErrorDeviceLost): vkQueueSubmit2` — a
+        // genuine GPU driver-level fault/reset, not a logical bug or an allocation failure (which would throw
+        // ErrorOutOfDeviceMemory, not lose the device). This happened on an otherwise-clean 4090 (an earlier,
+        // separate 40-minute apparent "hang" on the SAME fix turned out to be caused by an unrelated external
+        // process — a ComfyUI backend — silently consuming ~12.7GB of VRAM on this shared box; that was ruled
+        // out as the sole explanation once the device-loss reproduced on a verified-clean GPU). No root cause
+        // was found before reverting — the leading suspects are (a) RecordCopyAndBarrier's barrier not
+        // actually bridging the copy and the coopmat dispatch's read if VulkanCommandStream.AcquireRecording
+        // ever splits them across two separately-submitted command buffers (same-queue submission order does
+        // NOT by itself guarantee memory-visibility ordering across separate vkQueueSubmit2 calls — only an
+        // explicit barrier within the SAME command buffer does), or (b) a genuine out-of-bounds access from a
+        // size/offset miscalculation that only manifests under the real model's specific op-interleaving
+        // (SDPA's per-head shared-buffer reuse, Concat, CfgEulerStep's address-preserving in-place update)
+        // rather than a simple repeated-Linear loop. Debugging this properly needs Vulkan validation layers
+        // or compute-sanitizer-class tooling (already used elsewhere in this repo for exactly this bug class
+        // — see TROUBLESHOOTING.md), not more blind full-CLI-run attempts. See benchmarks/scoreboards/
+        // VULKAN.md and docs/Checklists/ROADMAP.md §3 for the full writeup; the ggml/llama.cpp shared-memory-
+        // staged-clamp alternative (see TryDispatchCoopmat's neighborhood) sidesteps this whole class of risk
+        // by never allocating a separate scratch buffer at all, and is the recommended next attempt.
+        //
         // Pick GEMM dtype to MATCH the output's storage dtype — otherwise the matmul kernel writes
         // a smaller element type (e.g. F16) into an F32-sized buffer and the model reads garbage
         // when it interprets the bytes as F32. The model's choice of output dtype dictates the
@@ -754,12 +860,14 @@ public sealed class VulkanBackend : IBackend
         if (TryDispatchCoopmat(output, aRes, bRes, M, N, K, transposeA, transposeB,
                                gemmDtype, outBuf, bias, biasRes, biasRaw))
         {
+            if (_profiler.IsEnabled) _coopmatGemmCount++;
             if (aOwned is not null) _xfer.FreeDevice(aOwned);
             if (bOwned is not null) _xfer.FreeDevice(bOwned);
             if (biasOwned is not null) _xfer.FreeDevice(biasOwned);
             return;
         }
 
+        if (_profiler.IsEnabled) _tiledGemmCount++;
         try
         {
             // Tile shape selected from M, N, K — see PickMatmulTile. Big tiles (128x128) win on
@@ -1223,6 +1331,55 @@ public sealed class VulkanBackend : IBackend
         DispatchPerRowNorm(shader, 3, output, input, weight, null, eps, normDim, totalRows);
     }
 
+    /// <summary>Wan2.2 VAE channel-wise RMS norm (mirrors <c>CudaBackend.WanRmsNormChannel</c>). No override
+    /// existed at all before this — every call fell through to <c>IBackend</c>'s CPU-loop default, which reads
+    /// <c>input.DataPointer</c>/writes <c>output.DataPointer</c> directly: a full D2H sync, a single-threaded
+    /// scalar reduction over C with a cache-hostile stride-<c>spatial</c> access pattern (each channel step is
+    /// a full row apart), then an H2D re-upload for whatever consumes the result. Found via the Krea2 VAE
+    /// decode profiling pass (2026-07-31): the decoder's one call site (<c>QwenImageVaeDecoder</c>'s final
+    /// head norm) runs at the FULL 1024×1024 output resolution — <c>[1,96,1024,1024]</c>, ~402 MB — the worst
+    /// possible shape for this fallthrough, and a real contributor to Krea2's ~2300× VAE-decode gap vs CUDA
+    /// (which has always had a real kernel for this op). F32 only, matching both references (CUDA and the CPU
+    /// default read/write <c>float*</c> unconditionally); anything else falls back to the CPU default.</summary>
+    public void WanRmsNormChannel(Tensor output, Tensor input, Tensor? gamma, float eps)
+    {
+        using OpScope _op = EnterOp();
+        if (input.DType != DType.F32 || output.DType != DType.F32 || (gamma is not null && gamma.DType != DType.F32))
+        {
+            ((IBackend)this).WanRmsNormChannel(output, input, gamma, eps);
+            return;
+        }
+        int c = (int)input.Shape[1];
+        long spatial = input.ElementCount / ((long)input.Shape[0] * c);
+        long numPos = input.Shape[0] * spatial;
+        float sqrtC = MathF.Sqrt(c);
+
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer gammaBuf = gamma is not null ? GetBuffer(gamma) : inBuf;   // dummy when hasGamma=0 — never read
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            VulkanKernel k = GetKernel("wan_rms_norm_channel", 3, _default1DSpec);
+            Span<byte> pc = stackalloc byte[6 * 4];
+            BinaryWriteUInt(pc, 0, (uint)c);
+            BinaryWriteUInt(pc, 4, (uint)spatial);
+            BinaryWriteFloat(pc, 8, eps);
+            BinaryWriteFloat(pc, 12, sqrtC);
+            BinaryWriteUInt(pc, 16, gamma is not null ? 1u : 0u);
+            BinaryWriteUInt(pc, 20, (uint)numPos);
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, gammaBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(numPos, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan WanRmsNormChannel dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
     /// <summary>DiT adaLN modulation: <c>out = in*scale + (shift ?? 0)</c>, broadcasting scale/shift
     /// <c>[B,C]</c> over input/output <c>[B,seqLen,C]</c>. No override existed at all before this — every
     /// call fell through to IBackend's F32-only CPU default, which throws on an F16 activation (the shape
@@ -1451,6 +1608,65 @@ public sealed class VulkanBackend : IBackend
     /// <summary>True — the flash kernel above gives Vulkan the GPU-resident autoregressive decode toolkit
     /// this flag advertises (e.g. unblocks Zonos onto the fast path instead of CUDA-only host glue).</summary>
     public bool FlashDecodeSupported => true;
+
+    // ── Step-graph capture (see VulkanStepGraph's doc comment for the full design) ─────────────────────────
+    // Requires push descriptors (VK_KHR_push_descriptor) — without them there is no descriptor-binding
+    // mechanism a replayed command buffer can safely use (a pool-allocated set can be invalidated by a later
+    // pool reset). Gated on Vk.HasPushDescriptor, NOT on the process's eager-mode HARTSYINFERENCE_VK_PUSH_DESCRIPTORS
+    // default — capture always pushes regardless of that setting (see Dispatch's capture branch).
+    public bool StepGraphSupported => Vk.HasPushDescriptor;
+
+    public bool StepGraphReady => _stepGraph?.IsReady == true && !_capturingStepGraph;
+
+    /// <summary>Owner token for the single step-graph slot (see IBackend.StepGraphOwner) — shared across models
+    /// the way CudaBackend's is, so alternating models under KEEP_MODELS correctly force a recapture.</summary>
+    public object? StepGraphOwner { get; set; }
+
+    public void StepGraphBegin()
+    {
+        // The capture buffer is a SEPARATE VkCommandBuffer/submission from the normal stream — Vulkan gives no
+        // automatic memory-visibility ordering between independent submissions to the same queue without an
+        // explicit wait. Krea2Transformer.ForwardPatched always issues at least one normal-mode CopyInto (the
+        // per-step temb/tembMod refresh) immediately before this call; without flushing+waiting here, that
+        // write can still be sitting unsubmitted (or submitted-but-not-completed) when the capture buffer's
+        // dispatches read it, reading stale/zero data instead — silently wrong, not a crash.
+        _stream.WaitIdleHost();
+        _stepGraph ??= new VulkanStepGraph(_vkDevice.Handle, _vkDevice.ComputeQueue, Vk.ComputeQueueFamilyIndex);
+        _stepGraph.BeginCapture();
+        _capturingStepGraph = true;
+        _xfer.CapturingStepGraph = true;
+    }
+
+    public void StepGraphEndAndLaunch()
+    {
+        if (!_capturingStepGraph || _stepGraph is null) return;
+        _capturingStepGraph = false;
+        _xfer.CapturingStepGraph = false;
+        _stepGraph.EndCaptureAndLaunch();
+    }
+
+    public void StepGraphLaunch()
+    {
+        if (_stepGraph is null || !_stepGraph.IsReady)
+            throw new InvalidOperationException("VulkanBackend.StepGraphLaunch called with no captured graph.");
+        // Same cross-submission visibility requirement as StepGraphBegin — the caller's pre-launch CopyInto
+        // refresh (normal stream) must be complete before the captured buffer's dispatches read it.
+        _stream.WaitIdleHost();
+        _stepGraph.Launch();
+    }
+
+    public void StepGraphReset()
+    {
+        if (_capturingStepGraph)
+        {
+            _capturingStepGraph = false;
+            _xfer.CapturingStepGraph = false;
+        }
+        _stepGraph?.Reset();
+        // Free everything the capture (or an aborted attempt at one) retained — safe only now that the
+        // graph itself can no longer be replayed (Reset() above dropped IsReady).
+        _xfer.ReleaseStepGraphRetained();
+    }
 
     /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common
     /// case. Falls back to the CPU numeric reference — the same one <c>IBackend</c>'s own default uses —
@@ -1882,6 +2098,13 @@ public sealed class VulkanBackend : IBackend
     public void Clamp(Tensor output, Tensor input, float min, float max)
         => DispatchElementwise(7u, output, input, null, scalar: 0, minVal: min, maxVal: max);
 
+    /// <summary>Regression gate for a real Krea2-on-Vulkan bug (2026-07-30): no <c>VulkanBackend</c> override
+    /// existed, so every call fell through to <c>IBackend</c>'s CPU-loop default — found capture-illegal via
+    /// a real <c>HARTSY_DIT_GRAPH=1</c> Krea2 run (<c>DiTUtils.Modulate</c>'s <c>AddScalar(scale, +1)</c>,
+    /// called TWICE per block × 28 blocks per forward pass — the (1+scale) modulation convention every DiT
+    /// block uses) and, independent of graph mode, a D2H sync 56 times per denoise step regardless.</summary>
+    public void AddScalar(Tensor output, Tensor input, float scalar) => DispatchElementwise(10u, output, input, null, scalar, minVal: 0, maxVal: 0);
+
     private void DispatchElementwise(uint op, Tensor output, Tensor a, Tensor? b, float scalar, float minVal, float maxVal)
     {
         VulkanBuffer aBuf = GetBuffer(a);
@@ -2039,31 +2262,64 @@ public sealed class VulkanBackend : IBackend
     #region Shape ops
 
     /// <summary>CPU fallback for concat — dtypes/strides handling is non-trivial, and concat is rare on hot paths.</summary>
+    /// <summary>Device-resident concat along <paramref name="dim"/>: one <c>vkCmdCopyBuffer</c> (multi-region
+    /// when <c>dim</c> isn't the leading axis) per input, straight into <paramref name="output"/>'s buffer at
+    /// the right byte offset — no compute shader needed, concatenation with contiguous inner strides is pure
+    /// data movement. Overrides <c>IBackend</c>'s CPU-loop default (found capture-illegal via a real
+    /// <c>HARTSY_DIT_GRAPH=1</c> Krea2 run: `ForwardCore`'s `Concat(joint, [txt, img], dim: 1)` — the
+    /// text+image sequence join every DiT forward pass — read both inputs' <c>DataPointer</c> directly, which
+    /// is capture-illegal and, outside capture, forced a D2H sync on every forward regardless of graph mode).
+    /// Capture-aware, matching <see cref="CopyInto"/>'s pattern.</summary>
     public unsafe void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim)
     {
-        // Force lazy sync of all participants
         long elemSize = output.DType.SizeInBytes;
-        byte* outPtr = (byte*)output.DataPointer;
-        // Compute strides
         long innerStride = 1;
         for (int d = dim + 1; d < output.Shape.Rank; d++) innerStride *= output.Shape[d];
         long outerStride = 1;
         for (int d = 0; d < dim; d++) outerStride *= output.Shape[d];
 
-        // For each "outer" index, concat slices along dim
-        for (long o = 0; o < outerStride; o++)
+        // Resolve every input's buffer BEFORE acquiring the recording command buffer: GetBuffer's cache-miss
+        // path (Upload's non-ReBAR staging copy) calls _stream.SubmitAndAdvance() internally, which would end
+        // any command buffer already acquired — issuing vkCmdCopyBuffer against a stale, already-submitted
+        // handle afterward (caught by validation: "was recorded, but vkBeginCommandBuffer() was not called").
+        VulkanBuffer[] srcBufs = new VulkanBuffer[inputs.Length];
+        for (int i = 0; i < inputs.Length; i++) srcBufs[i] = GetBuffer(inputs[i]);
+
+        VulkanBuffer outBuf = _capturingStepGraph
+            ? (_xfer.TryGetCached(output, out VulkanBuffer? existingOut) && existingOut is not null ? existingOut : _xfer.AllocateDevice((ulong)(output.ElementCount * elemSize)))
+            : _xfer.AllocateDevice((ulong)(output.ElementCount * elemSize));
+        nint cb = _capturingStepGraph ? _stepGraph!.RecordingBuffer : _stream.AcquireRecording();
+
+        long curDim = 0;
+        Span<VkBufferCopy> regions = stackalloc VkBufferCopy[(int)outerStride];
+        for (int i = 0; i < inputs.Length; i++)
         {
-            long writeOffset = o * output.Shape[dim] * innerStride;
-            long curDimOffset = 0;
-            foreach (Tensor t in inputs)
+            Tensor t = inputs[i];
+            VulkanBuffer srcBuf = srcBufs[i];
+            long tSize = t.Shape[dim] * innerStride * elemSize;
+            for (long o = 0; o < outerStride; o++)
             {
-                byte* tPtr = (byte*)t.DataPointer;
-                long tSize = t.Shape[dim] * innerStride * elemSize;
                 long srcOffset = o * tSize;
-                Buffer.MemoryCopy(tPtr + srcOffset, outPtr + (writeOffset + curDimOffset * innerStride) * elemSize, tSize, tSize);
-                curDimOffset += t.Shape[dim];
+                long dstOffset = (o * output.Shape[dim] * innerStride + curDim * innerStride) * elemSize;
+                regions[(int)o] = new VkBufferCopy { srcOffset = (ulong)srcOffset, dstOffset = (ulong)dstOffset, size = (ulong)tSize };
             }
+            fixed (VkBufferCopy* pRegions = regions)
+                VulkanApi.vkCmdCopyBuffer(cb, srcBuf.Handle, outBuf.Handle, (uint)outerStride, (nint)pRegions);
+            curDim += t.Shape[dim];
         }
+
+        if (_capturingStepGraph)
+        {
+            VulkanCommandStream.RecordGlobalComputeBarrierOn(cb);
+            CacheOutput(output, outBuf);
+            return;
+        }
+
+        _stream.RecordGlobalComputeBarrier();
+        _dispatchesSinceSubmit++;
+        _dispatchesThisOp++;
+        if (_dispatchesSinceSubmit >= FlushThreshold && _opNestingDepth == 0) DrainAndFlush();
+        CacheOutput(output, outBuf);
     }
 
     public unsafe void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim)
@@ -2451,6 +2707,82 @@ public sealed class VulkanBackend : IBackend
 
         long hostByteCount = source.ElementCount * source.DType.SizeInBytes;
         Buffer.MemoryCopy(source.DataPointer, destination.DataPointer, hostByteCount, hostByteCount);
+    }
+
+    /// <summary>In-place flow-match Euler step with the CFG combine folded in: <c>z += (guidance·pos +
+    /// (1-guidance)·neg)·delta</c>. Overrides <c>IBackend</c>'s CPU-loop default (mirrors
+    /// <c>CudaBackend.CfgEulerStep</c>) — the default reads/writes <c>z.DataPointer</c> directly, which for a
+    /// GPU-resident z (Krea2's fixed per-step latent, <c>_latentFixed</c>) forces a full D2H sync + evicts it
+    /// from the activation cache every step: a real, previously-undiscovered perf cost on every Krea2 Vulkan
+    /// generation (not just step-graph mode — this call happens once per denoise step regardless), and the
+    /// exact bug that broke step-graph capture (found via a genuine `HARTSY_DIT_GRAPH=1` Krea2 run: capture
+    /// failed with a cache-miss on the patchified latent, because THIS default eviction between steps left it
+    /// uncached by the time the next capture attempt read it).</summary>
+    public unsafe void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
+    {
+        using OpScope _op = EnterOp();
+        VulkanBuffer zBuf = GetBuffer(z);
+        VulkanBuffer posBuf = GetBuffer(pos);
+        VulkanBuffer negBuf = GetBuffer(neg);
+
+        VulkanKernel k = GetKernel("cfg_euler", 3, _default1DSpec);
+        Span<byte> pc = stackalloc byte[3 * 4];
+        BinaryWriteUInt(pc, 0, (uint)z.ElementCount);
+        BinaryWriteFloat(pc, 4, guidance);
+        BinaryWriteFloat(pc, 8, delta);
+        Span<ulong> bufs = stackalloc ulong[] { zBuf.Handle, posBuf.Handle, negBuf.Handle };
+        Dispatch(k, bufs, pc, GroupCount(z.ElementCount, LocalX1D));
+
+        // In-place re-assert (the CopyInto/CudaBackend.CfgEulerStep pattern): z keeps this buffer. Clear stale
+        // callbacks BEFORE re-caching so the old sync callback can't free the buffer we're keeping resident.
+        z._gpuSyncCallback = null;
+        z._gpuDisposeCallback = null;
+        CacheOutput(z, zBuf);
+
+        _xfer.FreeDevice(posBuf);
+        _xfer.FreeDevice(negBuf);
+    }
+
+    /// <summary>Device copy into <paramref name="dst"/>'s EXISTING buffer (address-preserving — the captured-graph
+    /// boundary refresh; mirrors <c>CudaBackend.CopyInto</c>). First call materializes a device buffer for dst;
+    /// subsequent calls reuse it. Host src is uploaded; device src is device-to-device copied. Capture-aware:
+    /// <c>Krea2Transformer.ForwardPatched</c> issues this as the graph's LAST captured op (the velocity-output
+    /// boundary write), so it must record onto the capture buffer exactly like a kernel dispatch when capturing.</summary>
+    public unsafe void CopyInto(Tensor dst, Tensor src)
+    {
+        if (_capturingStepGraph)
+        {
+            ulong capByteCount = (ulong)(dst.ElementCount * dst.DType.SizeInBytes);
+            VulkanBuffer capDstBuf = _xfer.TryGetCached(dst, out VulkanBuffer? capExisting) && capExisting is not null
+                ? capExisting
+                : _xfer.AllocateDevice(capByteCount);
+            VulkanBuffer capSrcBuf = GetBuffer(src);
+            VulkanCommandStream.RecordCopyAndBarrierOn(_stepGraph!.RecordingBuffer, capSrcBuf.Handle, capDstBuf.Handle, capByteCount,
+                postStage: VkPipelineStageFlags2.ComputeShader,
+                postAccess: VkAccessFlags2.ShaderStorageRead);
+            dst._gpuSyncCallback = null;
+            dst._gpuDisposeCallback = null;
+            CacheOutput(dst, capDstBuf);
+            return;
+        }
+
+        using OpScope _op = EnterOp();
+        ulong byteCount = (ulong)(dst.ElementCount * dst.DType.SizeInBytes);
+        VulkanBuffer dstBuf = _xfer.TryGetCached(dst, out VulkanBuffer? existingDst) && existingDst is not null
+            ? existingDst
+            : _xfer.AllocateDevice(byteCount);
+        VulkanBuffer srcBuf = GetBuffer(src);
+        _stream.RecordCopyAndBarrier(srcBuf.Handle, dstBuf.Handle, byteCount,
+            postStage: VkPipelineStageFlags2.ComputeShader,
+            postAccess: VkAccessFlags2.ShaderStorageRead);
+        _dispatchesSinceSubmit++;
+        _dispatchesThisOp++;
+        if (_dispatchesSinceSubmit >= FlushThreshold && _opNestingDepth == 0) DrainAndFlush();
+        // In-place re-assert (the CfgEulerStep pattern): dst keeps this buffer across the copy. Clear stale
+        // callbacks BEFORE re-caching — skipping this reproduces a stale-callback bug on the next dispose/sync.
+        dst._gpuSyncCallback = null;
+        dst._gpuDisposeCallback = null;
+        CacheOutput(dst, dstBuf);
     }
 
     public unsafe void Fill(Tensor tensor, float value)
@@ -2962,12 +3294,23 @@ public sealed class VulkanBackend : IBackend
         // we lose the device just to be tidy).
         try { _profiler.Dump(); }
         catch (Exception ex) { Logs.Warning($"Vulkan Dispose: profiler dump failed: {ex}"); }
+        if (_profiler.IsEnabled && (_coopmatGemmCount + _tiledGemmCount) > 0)
+        {
+            long total = _coopmatGemmCount + _tiledGemmCount;
+            Console.Error.WriteLine(
+                $"  GEMM fast-path: coopmat={_coopmatGemmCount} ({100.0 * _coopmatGemmCount / total:F1}%), " +
+                $"tiled-fallback={_tiledGemmCount} ({100.0 * _tiledGemmCount / total:F1}%)");
+        }
         // Decode-graph scalar control buffers (Phase 6) aren't in any weight/activation cache _xfer.Dispose()
         // already sweeps — free them directly so a caller who forgot to call FreeDeviceTokenId/FreeDevicePos/
         // etc. doesn't leak a VkBuffer + its backing allocation.
         foreach (VulkanBuffer buf in _scalarBuffers.Values) buf.Dispose();
         _scalarBuffers.Clear();
         _historyCapacity.Clear();
+        // Step-graph retained buffers aren't in any weight/activation cache either — release them (the
+        // command pool/fence themselves are freed by _stepGraph.Dispose() below) before _xfer tears down.
+        _xfer.ReleaseStepGraphRetained();
+        _stepGraph?.Dispose();
         _xfer.Dispose();
         _kernels.Dispose();
         _pipelineCache.Dispose();

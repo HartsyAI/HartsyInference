@@ -14,9 +14,40 @@ public sealed class VulkanDescriptorManager : IDisposable
     private readonly bool _pushDescriptor;
     private readonly Dictionary<int, ulong> _setLayouts = new();      // bindingCount -> VkDescriptorSetLayout
     private readonly Dictionary<int, ulong> _pipelineLayouts = new(); // bindingCount -> VkPipelineLayout (push-const = 128B compute stage)
+    // Push-descriptor-flavored layouts, cached independently of the constructor's default mode (_pushDescriptor
+    // above only decides which flavor EAGER dispatches use by default — see VulkanBackend.Dispatch). Step-graph
+    // capture ALWAYS needs the push flavor regardless of that default: a pool-allocated descriptor set can be
+    // invalidated by a later vkResetDescriptorPool (FlipPool) while a captured, replayed command buffer still
+    // references it — undefined behavior. A push-descriptor-flagged set has no such external object to
+    // invalidate; the binding is baked directly into the command stream. Per spec, a set layout created WITH
+    // VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR cannot be pool-allocated (and vice versa), so this
+    // genuinely needs a second cache, not a runtime flag on the existing one.
+    private readonly Dictionary<int, ulong> _pushSetLayouts = new();
+    private readonly Dictionary<int, ulong> _pushPipelineLayouts = new();
     private readonly ulong[] _pools = new ulong[2];
     private int _activePool;
     private uint _setsInActive;
+
+    // vkCmdPushDescriptorSet is NOT statically exported by vulkan-1 on drivers that only expose it via the
+    // VK_KHR_push_descriptor extension (the common case as of Vulkan 1.4 — promoted to core there under the
+    // SAME unsuffixed name, but most current drivers only ship the KHR-suffixed extension entry point). A
+    // direct P/Invoke on the unsuffixed name throws EntryPointNotFoundException on those drivers — resolve it
+    // dynamically via vkGetDeviceProcAddr instead, trying the KHR name first (the common case) and falling
+    // back to the unsuffixed core name.
+    private nint _pushDescriptorSetFn;
+
+    private unsafe nint PushDescriptorSetFn()
+    {
+        if (_pushDescriptorSetFn != 0) return _pushDescriptorSetFn;
+        nint fp = VulkanApi.vkGetDeviceProcAddr(_device, "vkCmdPushDescriptorSetKHR");
+        if (fp == 0) fp = VulkanApi.vkGetDeviceProcAddr(_device, "vkCmdPushDescriptorSet");
+        if (fp == 0)
+            throw new NotSupportedException(
+                "Neither vkCmdPushDescriptorSetKHR nor vkCmdPushDescriptorSet resolved via vkGetDeviceProcAddr — " +
+                "VK_KHR_push_descriptor / Vulkan 1.4 core push descriptors not actually available on this device.");
+        _pushDescriptorSetFn = fp;
+        return fp;
+    }
 
     /// <summary>True when VK_KHR_push_descriptor / Vulkan 1.4 core push descriptors are active.
     /// In this mode <see cref="PushSet"/> writes descriptors directly into the command buffer,
@@ -35,21 +66,25 @@ public sealed class VulkanDescriptorManager : IDisposable
         }
     }
 
-    /// <summary>Returns (or creates) a layout for <c>n</c> storage buffers at bindings 0..n-1, all visible to the compute stage.</summary>
-    public ulong GetSetLayout(int storageBufferCount)
+    /// <summary>Returns (or creates) a layout for <c>n</c> storage buffers at bindings 0..n-1, all visible to the
+    /// compute stage. <paramref name="forPush"/> selects the push-descriptor-flagged flavor (see the field doc
+    /// above) — cached separately from the pool-allocatable default.</summary>
+    public ulong GetSetLayout(int storageBufferCount, bool forPush = false)
     {
-        if (_setLayouts.TryGetValue(storageBufferCount, out ulong cached)) return cached;
-        cached = CreateSetLayout(storageBufferCount);
-        _setLayouts[storageBufferCount] = cached;
+        Dictionary<int, ulong> cache = forPush ? _pushSetLayouts : _setLayouts;
+        if (cache.TryGetValue(storageBufferCount, out ulong cached)) return cached;
+        cached = CreateSetLayout(storageBufferCount, forPush);
+        cache[storageBufferCount] = cached;
         return cached;
     }
 
     /// <summary>Returns (or creates) a pipeline layout = (set layout for n SSBOs) + 128-byte compute push-constant range.</summary>
-    public ulong GetPipelineLayout(int storageBufferCount)
+    public ulong GetPipelineLayout(int storageBufferCount, bool forPush = false)
     {
-        if (_pipelineLayouts.TryGetValue(storageBufferCount, out ulong cached)) return cached;
+        Dictionary<int, ulong> cache = forPush ? _pushPipelineLayouts : _pipelineLayouts;
+        if (cache.TryGetValue(storageBufferCount, out ulong cached)) return cached;
 
-        ulong setLayout = GetSetLayout(storageBufferCount);
+        ulong setLayout = GetSetLayout(storageBufferCount, forPush);
         unsafe
         {
             VkPushConstantRange pcRange = new()
@@ -68,11 +103,11 @@ public sealed class VulkanDescriptorManager : IDisposable
             };
             VulkanApi.vkCreatePipelineLayout(_device, in ci, 0, out cached).ThrowOnError("vkCreatePipelineLayout");
         }
-        _pipelineLayouts[storageBufferCount] = cached;
+        cache[storageBufferCount] = cached;
         return cached;
     }
 
-    private unsafe ulong CreateSetLayout(int n)
+    private unsafe ulong CreateSetLayout(int n, bool forPush)
     {
         Span<VkDescriptorSetLayoutBinding> bindings = stackalloc VkDescriptorSetLayoutBinding[Math.Max(n, 1)];
         for (int i = 0; i < n; i++)
@@ -96,7 +131,7 @@ public sealed class VulkanDescriptorManager : IDisposable
             VkDescriptorSetLayoutCreateInfo ci = new()
             {
                 sType = VkStructureType.DescriptorSetLayoutCreateInfo,
-                flags = _pushDescriptor ? pushDescriptorFlag : 0u,
+                flags = forPush ? pushDescriptorFlag : 0u,
                 bindingCount = (uint)n,
                 pBindings = (nint)p,
             };
@@ -195,8 +230,9 @@ public sealed class VulkanDescriptorManager : IDisposable
             }
             fixed (VkWriteDescriptorSet* pWrites = writes)
             {
-                VulkanApi.vkCmdPushDescriptorSet(commandBuffer, VkPipelineBindPoint.Compute,
-                    pipelineLayout, set: 0, descriptorWriteCount: (uint)n, pDescriptorWrites: (nint)pWrites);
+                delegate* unmanaged<nint, VkPipelineBindPoint, ulong, uint, uint, nint, void> pushFn =
+                    (delegate* unmanaged<nint, VkPipelineBindPoint, ulong, uint, uint, nint, void>)PushDescriptorSetFn();
+                pushFn(commandBuffer, VkPipelineBindPoint.Compute, pipelineLayout, 0, (uint)n, (nint)pWrites);
             }
         }
     }
@@ -243,6 +279,10 @@ public sealed class VulkanDescriptorManager : IDisposable
         _pipelineLayouts.Clear();
         foreach ((_, ulong layout) in _setLayouts) VulkanApi.vkDestroyDescriptorSetLayout(_device, layout, 0);
         _setLayouts.Clear();
+        foreach ((_, ulong layout) in _pushPipelineLayouts) VulkanApi.vkDestroyPipelineLayout(_device, layout, 0);
+        _pushPipelineLayouts.Clear();
+        foreach ((_, ulong layout) in _pushSetLayouts) VulkanApi.vkDestroyDescriptorSetLayout(_device, layout, 0);
+        _pushSetLayouts.Clear();
         if (!_pushDescriptor)
         {
             for (int i = 0; i < 2; i++)

@@ -123,6 +123,78 @@ public sealed class VulkanLeakTests
         }
     }
 
+    /// <summary>Stress test for the second (shared-memory) attempt at unaligned-M coopmat
+    /// (<c>matmul_coopmat_partial_m.comp.glsl</c>). Unlike the first (reverted) attempt, this design
+    /// allocates no extra host-side scratch buffer per dispatch — all staging is workgroup-local shared
+    /// memory, freed automatically when the dispatch completes — so a VRAM leak is less likely by
+    /// construction, but this is still worth confirming directly at Krea2's real scale before trusting it
+    /// in a real run, matching the rigor the first attempt's own stress test had (which passed cleanly and
+    /// did NOT catch the bug that actually shipped — a divergent-barrier correctness bug, not a leak; see
+    /// TROUBLESHOOTING.md). 200 iterations, no intervening <c>Sync()</c> (matching a real forward pass'
+    /// dense call pattern), at M=4109/K=N=6144 (Krea2's exact real joint-sequence/hidden-size shape).</summary>
+    [Fact]
+    public void Vulkan_CoopmatPartialM_Krea2Shape_DoesNotLeak()
+    {
+        if (!VulkanAvailable()) { _output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = new();
+        if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix)
+        {
+            _output.WriteLine("SKIPPED: no F16/coopmat support");
+            return;
+        }
+
+        const int M = 4109, K = 6144, N = 6144;
+        const int WarmupIterations = 5;
+        const int Iterations = 200;
+        const long EpsilonBytes = 64L * 1024 * 1024;
+
+        for (int i = 0; i < WarmupIterations; i++) RunOneCoopmatPartialMIter(backend, M, K, N, iter: -1);
+        backend.Sync();
+
+        (long baselineUsed, long baselineReserved, int baselineBlocks, _) = backend.MemoryStats;
+        _output.WriteLine($"Baseline (post-warmup): used={baselineUsed / 1024 / 1024} MB, reserved={baselineReserved / 1024 / 1024} MB, blocks={baselineBlocks}");
+
+        for (int i = 0; i < Iterations; i++)
+        {
+            RunOneCoopmatPartialMIter(backend, M, K, N, i);
+            if (i % 20 == 0)
+            {
+                (long u, long r, int b, _) = backend.MemoryStats;
+                _output.WriteLine($"  iter {i}: used={u / 1024 / 1024} MB, reserved={r / 1024 / 1024} MB, blocks={b}");
+            }
+        }
+        backend.Sync();
+
+        (long endUsed, long endReserved, int endBlocks, _) = backend.MemoryStats;
+        _output.WriteLine($"After {Iterations} iters: used={endUsed / 1024 / 1024} MB, reserved={endReserved / 1024 / 1024} MB, blocks={endBlocks}");
+
+        long delta = endUsed - baselineUsed;
+        Assert.True(delta <= EpsilonBytes,
+            $"VRAM grew by {delta / 1024 / 1024} MB after {Iterations} iters of the partial-M coopmat path.");
+    }
+
+    private static void RunOneCoopmatPartialMIter(VulkanBackend backend, int M, int K, int N, int iter)
+    {
+        Tensor input = new(new TensorShape(M, K), DType.F16);
+        Tensor weight = new(new TensorShape(N, K), DType.F16);
+        Tensor bias = new(new TensorShape(N), DType.F16);
+        Tensor output = new(new TensorShape(M, N), DType.F16);
+        try
+        {
+            Span<Half> iS = input.AsSpan<Half>();
+            iS[0] = (Half)(0.001f * iter);
+
+            backend.Linear(output, input, weight, bias);
+
+            ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+            float _ = (float)oS[0];
+        }
+        finally
+        {
+            input.Dispose(); weight.Dispose(); bias.Dispose(); output.Dispose();
+        }
+    }
+
     private static void RunOneIter(VulkanBackend backend, int M, int K, int N, int iter)
     {
         Tensor a = new(new TensorShape(M, K), DType.F32);

@@ -475,6 +475,275 @@ public sealed class VulkanBackendSmokeTests
         input.Dispose(); weight.Dispose(); output.Dispose();
     }
 
+    /// <summary>Step-graph prerequisite (Phase 7): <c>CopyInto</c> must preserve <c>dst</c>'s buffer ADDRESS across
+    /// repeated calls (the captured-graph boundary-refresh pattern — <c>Krea2Transformer</c> refreshes
+    /// <c>_tembFixed</c>/writes <c>_graphVelocity</c> via this exact call every step, and a captured command buffer
+    /// bakes the destination's device address at record time). Covers both src origins: a device-resident source
+    /// (weight/activation cache hit — the D2D fast path) and a host-only source (fresh upload).</summary>
+    [Fact]
+    public void Backend_CopyInto_PreservesDstAddress_MatchesCpu_DeviceSrc()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        // dst mirrors the real usage (Krea2Transformer's _tembFixed/_graphVelocity): a plain, never-preloaded
+        // tensor whose device buffer CopyInto itself materializes on first use. Pre-caching dst as a WEIGHT
+        // before CopyInto would leave it double-registered (weight cache + CopyInto's own activation cache)
+        // and double-freed on dispose — not a real usage pattern, so the test doesn't do it either. Likewise,
+        // real step-graph usage NEVER reads dst's value from host BETWEEN CopyInto calls (that's the whole
+        // point — DataPointer reads are capture-illegal) — reading it via AsReadOnlySpan mid-sequence here
+        // would trigger the lazy-sync eviction callback and free the buffer, breaking the very address
+        // stability being tested. Address checks stay reflection-only (AddressOf, no host read) until the end.
+        const int n = 257;   // deliberately not a round dispatch-tile size
+        Tensor dst = new(new TensorShape(n), DType.F32);
+
+        float[] src1Data = FillRandom(n, 11);
+        Tensor src1 = new(new TensorShape(n), DType.F32);
+        src1Data.CopyTo(src1.AsSpan<float>());
+        backend.PreloadWeights(new[] { src1 });   // device-resident source (D2D path)
+
+        backend.CopyInto(dst, src1);
+        ulong addrAfterFirst = AddressOf(backend, dst);
+
+        float[] src2Data = FillRandom(n, 22);
+        Tensor src2 = new(new TensorShape(n), DType.F32);
+        src2Data.CopyTo(src2.AsSpan<float>());
+        backend.PreloadWeights(new[] { src2 });
+
+        backend.CopyInto(dst, src2);
+        ulong addrAfterSecond = AddressOf(backend, dst);
+        Assert.Equal(addrAfterFirst, addrAfterSecond);
+        AssertMatches(dst, src2Data);   // final value only — host read is fine now, nothing depends on dst after this
+
+        backend.FreeWeights(new[] { src1, src2 });
+        dst.Dispose(); src1.Dispose(); src2.Dispose();
+    }
+
+    [Fact]
+    public void Backend_CopyInto_PreservesDstAddress_MatchesCpu_HostSrc()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int n = 129;
+        Tensor dst = new(new TensorShape(n), DType.F32);
+
+        float[] src1Data = FillRandom(n, 33);
+        Tensor src1 = new(new TensorShape(n), DType.F32);   // host-only: never preloaded/cached
+        src1Data.CopyTo(src1.AsSpan<float>());
+
+        backend.CopyInto(dst, src1);
+        ulong addrAfterFirst = AddressOf(backend, dst);
+
+        float[] src2Data = FillRandom(n, 44);
+        Tensor src2 = new(new TensorShape(n), DType.F32);
+        src2Data.CopyTo(src2.AsSpan<float>());
+
+        backend.CopyInto(dst, src2);
+        ulong addrAfterSecond = AddressOf(backend, dst);
+        Assert.Equal(addrAfterFirst, addrAfterSecond);
+        AssertMatches(dst, src2Data);
+
+        dst.Dispose(); src1.Dispose(); src2.Dispose();
+    }
+
+    private static ulong AddressOf(VulkanBackend backend, Tensor t)
+    {
+        System.Reflection.MethodInfo? m = typeof(VulkanBackend).GetMethod("GetBuffer", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        VulkanBuffer buf = (VulkanBuffer)m!.Invoke(backend, new object[] { t })!;
+        return buf.Handle;
+    }
+
+    private static void AssertMatches(Tensor t, float[] expected)
+    {
+        ReadOnlySpan<float> actual = t.AsReadOnlySpan<float>();
+        for (int i = 0; i < expected.Length; i++)
+            Assert.Equal(expected[i], actual[i], 3);
+    }
+
+    /// <summary>THE gate for step-graph capture (Phase 6e/7): captures a trivial 2-dispatch sequence (Sigmoid
+    /// then Mul — SiLU decomposed manually) reading/writing FIXED buffers, disposing its one intermediate
+    /// tensor mid-capture (exactly like Krea2Attention.Forward's per-op q/k/v Dispose() calls) to directly
+    /// exercise the capture-time buffer-retention path, then replays it 3 times with FRESH input each time —
+    /// proving the graph reads live refreshed data rather than freezing capture-time values, and that the
+    /// disposed intermediate survived for the Mul dispatch that references it on every replay. If this doesn't
+    /// pass, a 28-block Krea2 capture never will (see VulkanStepGraph's doc comment for why: pool-allocated
+    /// descriptor sets and normal buffer-dispose-frees are both unsafe for a replayed command buffer).</summary>
+    [Fact]
+    public void StepGraph_TrivialCapture_ReplaysWithFreshDataAcrossThreeSteps()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (!backend.StepGraphSupported) return;   // push descriptors unavailable on this device/driver
+
+        const int n = 64;
+        TensorShape shape = new(n);
+        Tensor inputFixed = new(shape, DType.F32);     // refreshed via CopyInto before each launch
+        Tensor outputFixed = new(shape, DType.F32);    // the graph's fixed output boundary
+
+        void RefreshInput(float[] data)
+        {
+            Tensor src = new(shape, DType.F32);
+            data.CopyTo(src.AsSpan<float>());
+            backend.CopyInto(inputFixed, src);
+            src.Dispose();
+        }
+
+        // Reading a graph-owned fixed tensor's DataPointer directly would D2H-and-free the buffer the
+        // captured command buffer's descriptors point at (see Krea2Transformer.SnapshotGraphLatent's doc) —
+        // CopyInto into a throwaway tensor first, exactly like the real pipeline does.
+        float[] ReadSnapshot()
+        {
+            Tensor snap = new(shape, DType.F32);
+            backend.CopyInto(snap, outputFixed);
+            float[] result = snap.AsReadOnlySpan<float>().ToArray();
+            snap.Dispose();
+            return result;
+        }
+
+        static float[] CpuSilu(float[] x)
+        {
+            float[] o = new float[x.Length];
+            for (int i = 0; i < x.Length; i++)
+            {
+                float s = 1f / (1f + MathF.Exp(-x[i]));
+                o[i] = x[i] * s;
+            }
+            return o;
+        }
+
+        float[] step1 = FillRandom(n, 101);
+        RefreshInput(step1);
+
+        backend.StepGraphBegin();
+        Tensor mid = new(shape, DType.F32);
+        backend.Sigmoid(mid, inputFixed);
+        backend.Mul(outputFixed, mid, inputFixed);
+        mid.Dispose();   // mid-capture dispose — exercises VulkanGpuTransferHelper's retain-instead-of-free path
+        backend.StepGraphEndAndLaunch();   // capture records without executing beyond this call — this IS step 1's replay
+
+        float[] expected1 = CpuSilu(step1);
+        float[] actual1 = ReadSnapshot();
+        for (int i = 0; i < n; i++) Assert.Equal(expected1[i], actual1[i], 4);
+
+        foreach (int seed in new[] { 202, 303 })
+        {
+            float[] stepData = FillRandom(n, seed);
+            RefreshInput(stepData);
+            Assert.True(backend.StepGraphReady);
+            backend.StepGraphLaunch();
+
+            float[] expected = CpuSilu(stepData);
+            float[] actual = ReadSnapshot();
+            for (int i = 0; i < n; i++) Assert.Equal(expected[i], actual[i], 4);
+        }
+
+        backend.StepGraphReset();
+        inputFixed.Dispose(); outputFixed.Dispose();
+    }
+
+    /// <summary>Regression gate for a real Krea2-on-Vulkan bug (2026-07-30): <c>VulkanBackend</c> had no
+    /// <c>CfgEulerStep</c> override, so every call fell through to <c>IBackend</c>'s CPU-loop default, which
+    /// reads/writes <c>z.DataPointer</c> directly — evicting Krea2's fixed per-step latent from the GPU
+    /// activation cache EVERY denoise step (a full D2H sync + host materialize, whether step-graph capture is
+    /// in use or not), and specifically breaking step-graph capture: the evicted latent showed up as a cache
+    /// miss the next time a captured dispatch tried to read it. This test proves the new GPU-resident
+    /// override (a) matches the CPU-reference math for guidance != 1 (the real CFG combine, not just Krea2
+    /// Turbo's guidance=1 identity case) and (b) preserves z's buffer address across repeated in-place calls —
+    /// address preservation is exactly what step-graph capture requires from a fixed boundary tensor.</summary>
+    [Fact]
+    public void Backend_CfgEulerStep_MatchesCpu_PreservesZAddress()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int n = 200;
+        TensorShape shape = new(n);
+        float[] zData = FillRandom(n, 51);
+        float[] posData = FillRandom(n, 52);
+        float[] negData = FillRandom(n, 53);
+        const float guidance = 4.5f;   // Krea2 Base's real guidance scale — NOT the Turbo guidance=1 identity case
+        const float delta = -0.125f;   // a real scheduler dt is negative (flow-match integrates sigma -> 0)
+
+        // z is NOT preloaded as a weight — CfgEulerStep's own first-touch-then-cache-as-activation path
+        // establishes its ONE cache entry, exactly like the real _latentFixed usage (first populated via
+        // CopyInto, never pre-registered as a weight). Preloading it as a weight too would leave it
+        // double-registered (weight cache + CfgEulerStep's activation re-cache) and double-freed on dispose —
+        // the same pitfall the CopyInto address test above documents.
+        Tensor z = new(shape, DType.F32);
+        zData.CopyTo(z.AsSpan<float>());
+        Tensor pos = new(shape, DType.F32);
+        posData.CopyTo(pos.AsSpan<float>());
+        Tensor neg = new(shape, DType.F32);
+        negData.CopyTo(neg.AsSpan<float>());
+        backend.PreloadWeights(new[] { pos, neg });   // device-resident sources, matching real usage
+
+        backend.CfgEulerStep(z, pos, neg, guidance, delta);
+        ulong addrAfterFirst = AddressOf(backend, z);
+
+        float[] expected1 = new float[n];
+        for (int i = 0; i < n; i++)
+        {
+            float v = guidance * posData[i] + (1f - guidance) * negData[i];
+            expected1[i] = zData[i] + v * delta;
+        }
+
+        // Second in-place call — z is now its OWN pos/neg source too (the real "pos=neg=v, z+=...*dt" pattern
+        // when a caller re-derives pos/neg from the updated z). Feed fresh pos/neg to keep the CPU reference
+        // simple; the point is verifying the address stays stable across a SECOND in-place write.
+        float[] posData2 = FillRandom(n, 62);
+        float[] negData2 = FillRandom(n, 63);
+        Tensor pos2 = new(shape, DType.F32);
+        posData2.CopyTo(pos2.AsSpan<float>());
+        Tensor neg2 = new(shape, DType.F32);
+        negData2.CopyTo(neg2.AsSpan<float>());
+        backend.PreloadWeights(new[] { pos2, neg2 });
+
+        backend.CfgEulerStep(z, pos2, neg2, guidance, delta);
+        ulong addrAfterSecond = AddressOf(backend, z);
+        Assert.Equal(addrAfterFirst, addrAfterSecond);
+
+        float[] expected2 = new float[n];
+        for (int i = 0; i < n; i++)
+        {
+            float v = guidance * posData2[i] + (1f - guidance) * negData2[i];
+            expected2[i] = expected1[i] + v * delta;
+        }
+        AssertMatches(z, expected2);
+
+        backend.FreeWeights(new[] { pos, neg, pos2, neg2 });
+        z.Dispose(); pos.Dispose(); neg.Dispose(); pos2.Dispose(); neg2.Dispose();
+    }
+
+    /// <summary>Regression gate for a real Krea2-on-Vulkan bug (2026-07-30): no <c>VulkanBackend</c> override
+    /// existed for <c>AddScalar</c>, so it fell through to <c>IBackend</c>'s CPU-loop default — found
+    /// capture-illegal via a real <c>HARTSY_DIT_GRAPH=1</c> Krea2 run (<c>DiTUtils.Modulate</c>'s
+    /// <c>AddScalar(scale, +1)</c>, the <c>(1+scale)</c> modulation convention every DiT block uses, twice
+    /// per block × 28 blocks per forward pass) and, independent of graph mode, a D2H sync 56 times per
+    /// denoise step regardless. New elementwise op-code 10 (<c>add_scalar</c>) in <c>elementwise.comp.glsl</c>.</summary>
+    [Fact]
+    public void Backend_AddScalar_MatchesCpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int n = 133;
+        float[] inputData = FillRandom(n, 81);
+        const float scalar = 1.0f;   // the real (1+scale) modulation use
+
+        Tensor input = new(new TensorShape(n), DType.F32);
+        inputData.CopyTo(input.AsSpan<float>());
+        Tensor output = new(new TensorShape(n), DType.F32);
+
+        backend.AddScalar(output, input, scalar);
+
+        float[] expected = new float[n];
+        for (int i = 0; i < n; i++) expected[i] = inputData[i] + scalar;
+        AssertMatches(output, expected);
+
+        input.Dispose(); output.Dispose();
+    }
+
     /// <summary>Gate for the Stage-1b weight-cast cache: a preloaded FP8 weight feeds two consecutive
     /// Linears (first call populates the cast cache, second reuses it). Both outputs must match the CPU
     /// reference (computed from the same FP8→F16 dequant) — catches a stale/aliased/freed cached cast.</summary>
@@ -734,6 +1003,138 @@ public sealed class VulkanBackendSmokeTests
         Assert.True(errs == 0, $"FP8 Linear (real Krea2 FFN shape, scale={scale}) {errs} probe diffs, first out[{firstM},{firstN}] maxRelErr={maxRel:P2}.");
 
         input.Dispose(); weightF32.Dispose(); weightFp8.Dispose(); weightF16Ref.Dispose(); output.Dispose();
+    }
+
+    /// <summary>Regression gate for <c>matmul_coopmat_partial_m.comp.glsl</c> (2026-07-31, the SECOND attempt
+    /// at unaligned-M coopmat — see TROUBLESHOOTING.md for the first attempt's host-side scratch-buffer
+    /// design and the real `ErrorDeviceLost` that reverted it). This design instead stages the boundary
+    /// row-tile through workgroup shared memory (mirroring matmul_tiled.comp.glsl's own proven bounds-checked
+    /// idiom), entirely within one dispatch — no separate command buffer, no cross-submission barrier.
+    /// Covers: M values straddling every relevant boundary (1: a single, fully-partial 16-row tile; 13:
+    /// Krea2's REAL measured txtSeq bug value; 17: one past the first 16-aligned value; 63/65: straddling the
+    /// 64-row BM workgroup-tile boundary; 100: an interior case with no special alignment) × bias present or
+    /// absent × F16/F32 output. Verified two ways per case: (1) numerically against a from-scratch CPU GEMM
+    /// reference, and (2) that the partial-M kernel actually engaged (not a silent fallback to matmul_tiled)
+    /// via the same reflection-based engagement-counter check used for the first (reverted) attempt.</summary>
+    /// <summary>Regression gate for <c>matmul_coopmat_partial_m.comp.glsl</c> (2026-07-31, the SECOND attempt
+    /// at unaligned-M coopmat — see TROUBLESHOOTING.md for the first attempt's host-side scratch-buffer
+    /// design and the real `ErrorDeviceLost` that reverted it). This design instead stages the boundary
+    /// row-tile through workgroup shared memory (mirroring matmul_tiled.comp.glsl's own proven bounds-checked
+    /// idiom), entirely within one dispatch — no separate command buffer, no cross-submission barrier.
+    /// Covers: M values straddling every relevant boundary (1: a single, fully-partial 16-row tile; 13:
+    /// Krea2's REAL measured txtSeq bug value; 17: one past the first 16-aligned value; 33: creates a
+    /// FULLY-invalid subgroup-row, zero valid rows, not just a partial one; 63/65: straddling the 64-row BM
+    /// workgroup-tile boundary; 100: an interior case with no special alignment) × bias present or absent,
+    /// all F16 output (matching Krea2's real per-block dtype — DitDtype.Act defaults to F16, so this is the
+    /// case that actually matters; F32 output stays gated off, see ResolveGemmDtype's comment). N=48 is
+    /// deliberately NOT a multiple of BN (32) — this is what caught a real, separate bug (2026-07-31): a
+    /// divergent-barrier UB from an early `return` for out-of-N-bounds subgroups racing this kernel's
+    /// barrier() (fixed by removing all early returns in favor of scalar bounds-checked draining — see the
+    /// shader's own comment). Verified two ways per case: (1) numerically against a from-scratch CPU GEMM
+    /// reference, and (2) that the partial-M kernel actually engaged (not a silent fallback to matmul_tiled)
+    /// via reflection on the engagement counters.</summary>
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(1, true)]
+    [InlineData(13, false)]
+    [InlineData(13, true)]
+    [InlineData(17, true)]
+    [InlineData(33, false)]
+    [InlineData(63, false)]
+    [InlineData(65, true)]
+    [InlineData(100, false)]
+    public void Backend_Linear_CoopmatPartialM_NonMultipleOf16_MatchesCpu(int M, bool hasBias)
+    {
+        if (!VulkanAvailable()) return;
+        Environment.SetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE", "1");
+        using VulkanBackend backend = new();
+        Environment.SetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE", null);
+        if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix) return;
+
+        const int K = 32, N = 48;   // multiples of 16, matching real Krea2-like hidden dims
+        Tensor input = new(new TensorShape(M, K), DType.F16);
+        Tensor weight = new(new TensorShape(N, K), DType.F16);
+        Tensor? bias = hasBias ? new Tensor(new TensorShape(N), DType.F16) : null;
+        Tensor output = new(new TensorShape(M, N), DType.F16);
+
+        Random rng = new(1000 + M);
+        Span<Half> iS = input.AsSpan<Half>();
+        Span<Half> wS = weight.AsSpan<Half>();
+        Half[] bS = new Half[N];
+        for (int i = 0; i < M * K; i++) iS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.3f);
+        for (int i = 0; i < N * K; i++) wS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.2f);
+        if (hasBias)
+        {
+            Span<Half> bSpan = bias!.AsSpan<Half>();
+            for (int i = 0; i < N; i++) { bS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.05f); bSpan[i] = bS[i]; }
+        }
+
+        backend.Linear(output, input, weight, bias);
+
+        long coopmatCount = (long)typeof(VulkanBackend).GetField("_coopmatGemmCount",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(backend)!;
+        long tiledCount = (long)typeof(VulkanBackend).GetField("_tiledGemmCount",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(backend)!;
+        Assert.True(coopmatCount == 1 && tiledCount == 0,
+            $"Expected the partial-M coopmat kernel to engage for M={M} (not a multiple of 16); " +
+            $"got coopmatCount={coopmatCount}, tiledCount={tiledCount} — suggests a silent fallback to matmul_tiled.");
+
+        float maxRel = 0f;
+        ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+        for (int m = 0; m < M; m++)
+            for (int n = 0; n < N; n++)
+            {
+                float acc = hasBias ? (float)bS[n] : 0f;
+                for (int k = 0; k < K; k++) acc += (float)iS[m * K + k] * (float)wS[n * K + k];
+                float rel = MathF.Abs((float)oS[m * N + n] - acc) / MathF.Max(1e-3f, MathF.Abs(acc));
+                maxRel = MathF.Max(maxRel, rel);
+            }
+        Assert.True(maxRel < 0.02f, $"Coopmat-partial-M Linear (M={M}, bias={hasBias}) maxRelErr {maxRel:P2} too high.");
+
+        input.Dispose(); weight.Dispose(); bias?.Dispose(); output.Dispose();
+    }
+
+    /// <summary>Confirms M values that ARE already multiples of 16 still take the unmodified,
+    /// already-proven <c>matmul_coopmat</c> path (not the new partial-M kernel) — i.e. this change is
+    /// additive, not a behavior change for the case that already worked.</summary>
+    [Fact]
+    public void Backend_Linear_CoopmatAlignedM_StillUsesOriginalKernel()
+    {
+        if (!VulkanAvailable()) return;
+        Environment.SetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE", "1");
+        using VulkanBackend backend = new();
+        Environment.SetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE", null);
+        if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix) return;
+
+        const int M = 64, K = 32, N = 48;
+        Tensor input = new(new TensorShape(M, K), DType.F16);
+        Tensor weight = new(new TensorShape(N, K), DType.F16);
+        Tensor output = new(new TensorShape(M, N), DType.F16);
+        Random rng = new(55);
+        Span<Half> iS = input.AsSpan<Half>();
+        Span<Half> wS = weight.AsSpan<Half>();
+        for (int i = 0; i < M * K; i++) iS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.3f);
+        for (int i = 0; i < N * K; i++) wS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.2f);
+
+        backend.Linear(output, input, weight, null);
+
+        long coopmatCount = (long)typeof(VulkanBackend).GetField("_coopmatGemmCount",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(backend)!;
+        Assert.Equal(1, coopmatCount);
+
+        ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+        float maxRel = 0f;
+        for (int m = 0; m < M; m++)
+            for (int n = 0; n < N; n++)
+            {
+                float acc = 0f;
+                for (int k = 0; k < K; k++) acc += (float)iS[m * K + k] * (float)wS[n * K + k];
+                float rel = MathF.Abs((float)oS[m * N + n] - acc) / MathF.Max(1e-3f, MathF.Abs(acc));
+                maxRel = MathF.Max(maxRel, rel);
+            }
+        Assert.True(maxRel < 0.02f, $"Aligned-M coopmat Linear maxRelErr {maxRel:P2} too high.");
+
+        input.Dispose(); weight.Dispose(); output.Dispose();
     }
 
     /// <summary>Matmul at Flux DiT dimensions (M=32, K=3072, N=3072) — checks accumulator precision survives ~3K-deep dot products without overflowing.</summary>
@@ -1803,6 +2204,59 @@ public sealed class VulkanBackendSmokeTests
         input.Dispose(); output.Dispose();
     }
 
+    /// <summary>Regression gate for a real Vulkan VAE-decode finding (2026-07-31): no <c>WanRmsNormChannel</c>
+    /// override existed at all — every call fell through to <c>IBackend</c>'s CPU-loop default, which reads/
+    /// writes <c>DataPointer</c> directly (a full D2H sync, a single-threaded cache-hostile stride-<c>spatial</c>
+    /// reduction over C, then an H2D re-upload). <c>QwenImageVaeDecoder</c>'s one call site runs at the VAE's
+    /// full output resolution — the worst possible shape for this fallthrough — and was a real contributor to
+    /// Krea2's ~2300x VAE-decode gap vs CUDA (which has always had a real kernel for this op, see
+    /// <c>CudaBackend.WanRmsNormChannel</c>). Covers both the gamma and no-gamma (null) paths.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Backend_WanRmsNormChannel_MatchesCpu(bool hasGamma)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int batch = 2, c = 6, h = 3, w = 4;
+        const float eps = 1e-12f;
+        long spatial = h * w;
+
+        Tensor input = new(new TensorShape(batch, c, h, w), DType.F32);
+        Tensor output = new(new TensorShape(batch, c, h, w), DType.F32);
+        Tensor? gamma = hasGamma ? new Tensor(new TensorShape(c), DType.F32) : null;
+
+        float[] inRef = FillRandom((int)(batch * c * spatial), 53);
+        inRef.CopyTo(input.AsSpan<float>());
+        float[] gammaRef = hasGamma ? FillRandom(c, 54) : new float[c];
+        if (hasGamma) gammaRef.CopyTo(gamma!.AsSpan<float>());
+
+        backend.WanRmsNormChannel(output, input, gamma, eps);
+
+        float sqrtC = MathF.Sqrt(c);
+        float[] expected = new float[inRef.Length];
+        for (int b = 0; b < batch; b++)
+        {
+            long baseB = (long)b * c * spatial;
+            for (long s = 0; s < spatial; s++)
+            {
+                double sumSq = 0;
+                for (int ci = 0; ci < c; ci++) { float v = inRef[baseB + ci * spatial + s]; sumSq += (double)v * v; }
+                float denom = MathF.Max((float)Math.Sqrt(sumSq), eps);
+                float scale = sqrtC / denom;
+                for (int ci = 0; ci < c; ci++)
+                {
+                    long off = baseB + ci * spatial + s;
+                    expected[off] = inRef[off] * scale * (hasGamma ? gammaRef[ci] : 1f);
+                }
+            }
+        }
+        AssertMatches(output, expected);
+
+        input.Dispose(); output.Dispose(); gamma?.Dispose();
+    }
+
     /// <summary>Regression gate for another real Krea2-on-Vulkan finding (2026-07-30): no
     /// <c>GatedResidualLastDim</c> override existed at all — every call fell through to IBackend's F32-only
     /// CPU default, which throws on Krea2's F16 activations (<c>Krea2Block.Forward</c>'s attn/mlp gate).</summary>
@@ -2267,8 +2721,16 @@ public sealed class VulkanBackendSmokeTests
         x.Dispose(); y.Dispose();
     }
 
+    /// <summary>Regression gate for a real Krea2-on-Vulkan bug (2026-07-30): <c>Concat</c> was a pure CPU loop
+    /// reading <c>.DataPointer</c> directly on every input AND the output — found capture-illegal via a real
+    /// <c>HARTSY_DIT_GRAPH=1</c> Krea2 run (`ForwardCore`'s `Concat(joint, [txt, img], dim: 1)`, the
+    /// text+image sequence join every DiT forward pass) and, independent of graph mode, a D2H sync on every
+    /// GPU-resident input on every forward pass regardless. Fixed with a device-resident <c>vkCmdCopyBuffer</c>
+    /// implementation (concatenation with contiguous inner strides is pure data movement — no compute shader
+    /// needed). This test used to assert the OLD broken behavior (2 syncs) as documentation of the gap; now it
+    /// asserts the fix.</summary>
     [Fact]
-    public void GetD2hSyncCount_Concat_SyncsEachGpuResidentInput()
+    public void GetD2hSyncCount_Concat_StaysGpuResident()
     {
         if (!VulkanAvailable()) return;
         using VulkanBackend backend = new();
@@ -2288,14 +2750,50 @@ public sealed class VulkanBackendSmokeTests
         backend.ResetD2hSyncCount();
         Assert.Equal(0, backend.GetD2hSyncCount());
 
-        // Concat (VulkanBackend.cs) is a pure CPU loop reading .DataPointer directly on each input —
-        // it never explicitly "reads back" the way a test does, so this is exactly the kind of
-        // silent hidden round-trip the counter is meant to catch.
         backend.Concat(concatOut, new Tensor[] { outA, outB }, 0);
+        Assert.Equal(0, backend.GetD2hSyncCount());
 
-        Assert.Equal(2, backend.GetD2hSyncCount());
+        float[] expected = new float[16];
+        for (int i = 0; i < 8; i++) { expected[i] = i; expected[8 + i] = 100 + i; }
+        AssertMatches(concatOut, expected);
 
         a.Dispose(); b.Dispose(); outA.Dispose(); outB.Dispose(); concatOut.Dispose();
+    }
+
+    /// <summary>Concat along a NON-leading axis (dim=1 of a 3D [B,S,hidden] tensor, batch &gt; 1) — the
+    /// multi-region <c>vkCmdCopyBuffer</c> path (outerStride &gt; 1), distinct from the dim=0/batch=1 case
+    /// above where outerStride is trivially 1. Matches Krea2's real `Concat(joint, [txt, img], dim: 1)` shape
+    /// class (that call happens to run at batch=1, so this closes the batch&gt;1 case it doesn't exercise).</summary>
+    [Fact]
+    public void Backend_Concat_NonLeadingDim_BatchGreaterThanOne_MatchesCpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int batch = 3, s1 = 4, s2 = 5, hidden = 6;
+        Tensor a = new(new TensorShape(batch, s1, hidden), DType.F32);
+        Tensor b = new(new TensorShape(batch, s2, hidden), DType.F32);
+        float[] aData = FillRandom(batch * s1 * hidden, 71);
+        float[] bData = FillRandom(batch * s2 * hidden, 72);
+        aData.CopyTo(a.AsSpan<float>());
+        bData.CopyTo(b.AsSpan<float>());
+
+        Tensor output = new(new TensorShape(batch, s1 + s2, hidden), DType.F32);
+        backend.Concat(output, new Tensor[] { a, b }, dim: 1);
+
+        float[] expected = new float[batch * (s1 + s2) * hidden];
+        for (int bIdx = 0; bIdx < batch; bIdx++)
+        {
+            for (int s = 0; s < s1; s++)
+                for (int h = 0; h < hidden; h++)
+                    expected[(bIdx * (s1 + s2) + s) * hidden + h] = aData[(bIdx * s1 + s) * hidden + h];
+            for (int s = 0; s < s2; s++)
+                for (int h = 0; h < hidden; h++)
+                    expected[(bIdx * (s1 + s2) + s1 + s) * hidden + h] = bData[(bIdx * s2 + s) * hidden + h];
+        }
+        AssertMatches(output, expected);
+
+        a.Dispose(); b.Dispose(); output.Dispose();
     }
 
     // ── Phase 3 GPU-residency closure ───────────────────────────────────────────────────────

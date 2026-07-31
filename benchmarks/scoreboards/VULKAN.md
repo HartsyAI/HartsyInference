@@ -213,6 +213,146 @@ denoise-loop graph capture). Not attempted this session beyond confirming it isn
 A `PARITY_VERIFICATION.md` row for Krea2/Vulkan is warranted now (coherent image, matches CUDA) — tracked
 as follow-up, not yet added.
 
+**Update 2026-07-30 — denoise-loop graph capture attempted, does not close the gap for Krea2.** The
+`VulkanStepGraph` mechanism (Phase 6e/7, see `TROUBLESHOOTING.md`) was built and wired into Krea2 via
+`HARTSY_DIT_GRAPH=1`. Four real CLI runs each hit a distinct capture-illegal op (fixed permanently:
+`CfgEulerStep`, `Concat`, `AddScalar` — all three now have real GPU-resident overrides, not just
+capture-time shims, so they also close real per-step D2H syncs in the EAGER path Krea2 actually runs) before
+run 4 hit a structural OOM: capture retains every transient buffer touched during recording, but Krea2's
+`CacheWeightCasts=false` strategy depends on freeing each block's transient fp8→F16 weight casts
+immediately — retaining all ~224 of them across one capture exhausts VRAM even on the 4090. This is a
+genuine conflict between two correct designs, not a bug; closing it needs an intra-capture bump-pointer
+arena with slot reuse (no Vulkan equivalent to CUDA Graph's allocation-node semantics exists — see the
+plan's Non-Goals). Every one of the 4 runs still completed with a correct, coherent image via the model's
+existing eager fallback, proving that safety net robust including under a mid-capture OOM — no run has yet
+produced an actual graph-captured-and-replayed step, so there is no capture-mode speedup number to report.
+
+The default (no-`HARTSY_DIT_GRAPH`) CLI path was re-run after all three op-override fixes landed to confirm
+they don't regress the path every user actually gets: **338.2 s total, ~36.5 s/step avg** (35.5–40.4 s
+range) — within the same steady-state band as the 34.4 s/step figure measured before this work, confirming
+no regression. (The per-run jitter between 34–40 s/step across different processes/times is consistent with
+other background GPU load on this box, not attributable to these changes — each individual run's own
+step-to-step variance stays tight, which is the signal that matters.) Output image verified pixel-composition-identical
+to the pre-existing baseline. See `docs/Checklists/ROADMAP.md` for the single-block-capture experiment
+recommended as the next step before building the weight-cast arena.
+
+**Update 2026-07-31 — denoise loop confirmed kernel-bound (not dispatch-bound); VAE decode fixed (~65×);
+coopmat engagement measured directly and found shape-blocked.** Three follow-on findings, RTX 4090 unless
+noted:
+
+1. **Kernel-bound, not dispatch-bound.** `HARTSYINFERENCE_VK_SUBMIT_PER_OP=1` (forces a submit per dispatch
+   instead of the default `FlushThreshold=8` batching — an upper bound on what removing submit/dispatch
+   overhead entirely could buy) added only ~1.3–1.5s to a ~35.5s step (~4%), and changed VAE decode by
+   ~0% (33.12s vs 33.12s). This settles the open question from the Phase 7 entry above: the denoise loop's
+   cost is GPU kernel time, not host dispatch/submit overhead — graph capture's ceiling here is small,
+   correctly deprioritizing the weight-cast bump-arena needed to make capture fit Krea2's VRAM budget.
+
+2. **VAE decode: 33.0s → 0.50s (~65×).** `WanRmsNormChannel` had no `VulkanBackend` override — every call
+   fell through to `IBackend`'s CPU-loop default (full D2H sync + single-threaded host reduction + H2D
+   re-upload) at the decoder's largest tensor shape (`[1,96,1024,1024]`, the final head norm). Fixed with a
+   real GLSL kernel (`wan_rms_norm_channel.comp.glsl`) mirroring `CudaBackend`'s existing CUDA kernel for the
+   same op. VAE decode now lands at **~30× vs CUDA's 17ms** — inside the normal hand-written-vs-cuDNN band
+   from the rest of this scoreboard, not a separate pathology. Full generation: 331.1s → 296.2s (~10.6%
+   faster). (VAE decode measured 0.50–0.65s across separate runs — run-to-run jitter consistent with this
+   box's already-documented background-GPU-load pattern; either way it's a ~50–65× win, not a separate
+   pathology.) See `docs/Checklists/TROUBLESHOOTING.md` for the full root-cause writeup.
+
+3. **Coopmat engagement measured directly: ~1% (16/2112 GEMMs) on a real Krea2 run.** New engagement
+   counters (`VulkanBackend`'s `_coopmatGemmCount`/`_tiledGemmCount`, printed alongside
+   `HARTSYINFERENCE_VK_PROFILE=1`) answer the "needs a profile check" question the GEMM table above raised:
+   coopmat is not silently broken, it is genuinely almost never reached for this model. A real dtype gap was
+   found and fixed (F32-output Linears — every Linear in `Krea2Transformer` — could never reach
+   `TryDispatchCoopmat`'s existing `OUTPUT_F32` support because `ResolveGemmDtype` never promoted F32 to F16
+   to get there), but fixing it only moved engagement from 0/2112 to 16/2112: the real, binding constraint is
+   shape, not dtype. `matmul_coopmat.comp.glsl` requires M/N/K all exact multiples of 16 (no buffer-padding
+   support built), and every per-block QKV/FFN/out-proj Linear runs on the joint `[txtSeq+imgSeq]` sequence —
+   measured directly on the reference prompt as `imgSeq=4096` (multiple of 16) + `txtSeq=13` (raw
+   prompt-token count, unpadded) = `jointSeq=4109`, 3 short of the next multiple of 16. Since `txtSeq` is
+   prompt-length-dependent, essentially no real prompt lands on a multiple of 16 by chance — this is a
+   structural blocker on almost every expensive GEMM in the model, independent of the dtype question. **The
+   dtype fix was reverted the same session** (kept only the zero-cost counters) since it carried a real,
+   unverified precision cost (full F16 compute on FP8-dequantized-weight GEMMs) for a measured ~0 throughput
+   win. See `docs/Checklists/TROUBLESHOOTING.md` and `docs/Checklists/ROADMAP.md` §3 for the next concrete
+   step (M/N/K padding).
+
+4. **M-padding attempted, also reverted, after a real GPU crash — no speedup number to report.** Built and
+   extensively tested (from-scratch CPU-reference correctness, a 200-iteration no-sync leak/stress test at
+   Krea2's exact real scale, two full CLI runs at 2 and 4 steps completing cleanly with coopmat engagement
+   climbing to 60.7% then 74.9%). A full 8-step run then failed with `Vulkan error -4 (ErrorDeviceLost):
+   vkQueueSubmit2` — a genuine GPU driver fault/reset, ruled out as VRAM pressure (an unrelated external
+   ComfyUI backend process on this shared box, independently consuming ~12.7GB, was found and killed; the
+   crash reproduced again on a verified-clean GPU with ~22GB free). Reverted before root-causing further —
+   this needs Vulkan validation layers or `compute-sanitizer`-class tooling, not more full-model runs. See
+   `docs/Checklists/TROUBLESHOOTING.md` for the two leading (unconfirmed) suspects and the recommended next
+   design (ggml/llama.cpp's shared-memory-staged bounds-check, which avoids the scratch-buffer/barrier risk
+   surface this attempt hit entirely).
+
+5. **M-padding, third attempt (the ggml shared-memory design) — built, a real bug caught by testing and
+   fixed, verified stable through a full 8-step run — and it definitively answers the question finding #3
+   raised: engagement was never the bottleneck.** Built `matmul_coopmat_partial_m.comp.glsl`, a separate
+   shader mirroring `matmul_tiled.comp.glsl`'s own bounds-checked shared-memory staging (no scratch buffer,
+   no device-to-device copy, no cross-command-buffer barrier — everything inside one dispatch). A 9-case
+   parameterized test caught a real, separate divergent-barrier bug before it ever reached the real model
+   (N not being a multiple of the workgroup tile width BN — independent of N being a multiple of 16 — left
+   some subgroups early-`return`ing past this kernel's `barrier()` while siblings continued to it; fixed by
+   removing all early returns in favor of unconditional barrier participation + bounds-checked scalar
+   draining). After the fix: 9/9 correctness cases pass, a pre-existing large-scale real-shape test (M=4108)
+   now automatically exercises this kernel and passes unmodified, a 200-iteration no-sync stress test at
+   Krea2's exact scale shows zero leak, and three consecutive real Krea2 CLI runs (2/4/8-step) all completed
+   cleanly with GPU pinned at 100% utilization throughout (never idle/stuck) and correct output:
+
+   | Steps | Total | Coopmat engagement |
+   |---|---:|---:|
+   | 2 | 80.5s | 60.7% (448/738) |
+   | 4 | 154.9s | 74.9% (896/1196) |
+   | 8 | **296.7s** | **84.8% (1792/2112)** |
+
+   Full suite 143/143 (3060 + 4090); llvmpipe unaffected (no coopmat hardware — these tests self-skip
+   there). **The result: coopmat engagement climbing from 0% to 84.8% bought ~0 wall-clock.** An A/B at
+   matched shape (78.9s coopmat fully off vs. 80.5s at 60.7% engagement, 2-step) shows the delta is noise,
+   not signal — consistent with the 296.7s 8-step total landing in the same steady-state band this table
+   already measured pre-coopmat-fix. This confirms finding #3's open question: coopmat's own per-op
+   throughput (not whether it engages) was already the real ceiling, matching the GEMM table's 30–157×
+   F16 gap at the top of this file, measured well before engagement was ever fixed. **Kept in the codebase**
+   (unlike the second, reverted attempt) — it's proven correct and safe, closes a real capability gap, and
+   any future coopmat-kernel-throughput work now reaches these GEMMs automatically. See
+   `docs/Checklists/TROUBLESHOOTING.md` for the full writeup and `docs/Checklists/ROADMAP.md` §2/§3 for
+   next levers (tile size, register blocking, coopmat2 — not engagement).
+
+## Next levers, informed by ggml/llama.cpp's mature Vulkan backend (research pass, 2026-07-31)
+
+A research pass (reading `ggml-vulkan`'s `mul_mm.comp`/`mul_mm_cm2.comp` source directly, plus PR history)
+surfaced concrete, higher-leverage directions than anything attempted so far in this file — not implemented
+this session, listed here so the next pass doesn't have to re-derive them:
+
+- **Diffusion-shaped GEMM tile-size tuning has prior art with real numbers.** ggml PR #10942 ("vulkan: im2col
+  and matmul optimizations for stable diffusion") took RTX 4070 sd.cpp throughput from 3.68→4.65 it/s via a
+  larger coopmat2 tile size alone, then 4.65→5.07 it/s combined with im2col kernel tuning (more elements per
+  thread, workgroup 256→512). This is direct evidence that diffusion's skewed, small-batch GEMM shapes are a
+  known, fixable tuning target — not evidence that the 30–157× gap is fundamental. `TryDispatchCoopmat`'s
+  current BM/BN selection (64×64, dropping to 32×32/16×16 only for tiny shapes) has never been tuned against
+  Krea2/Flux/SDXL's actual shapes the way ggml tuned against theirs.
+- **`split_k`** (ggml PR #10637): splits the K dimension across workgroups to improve occupancy specifically
+  for small-M / imbalanced matmuls. Less obviously relevant here than for LLM decode (M=1 GEMVs), since
+  Krea2's M (~4096+) isn't tiny, but worth a real measurement before ruling out.
+- **`VK_NV_cooperative_matrix2`** (NVIDIA-only, already flagged as deferred in ROADMAP.md §3): direct
+  global-memory loads (skips shared-memory staging entirely), tensor layout descriptors, K-loop unrolling.
+  ggml uses it for both `mul_mat` and FlashAttention2. Higher-effort, NVIDIA-only, but the highest-ceiling
+  single item on this list given coopmat1's throughput is the now-confirmed bottleneck.
+- **Cross-vendor coopmat reliability is not uniform** — relevant to this project's AMD/Intel roadmap even
+  without hardware to test on yet: ggml maintains a device-specific coopmat allow/deny list (PR #11074
+  disables coopmat entirely on the AMD proprietary driver; on Strix Halo/gfx1151, disabling coopmat improves
+  AMDVLK performance by 17% while RADV handles it fine). Budget for a per-vendor/per-driver capability check
+  before assuming `HasCooperativeMatrix` being true means it's actually fast.
+- **Quantized (Q4/Q8) GEMM is not a universal win** — vendor-dependent. NVIDIA RTX 30/40-series: Q8_0 is
+  <5% slower than Q4 (both hit INT8 tensor cores, close to free). Intel Arc B70 (Xe2): Q8_0 only reaches
+  21–24% of theoretical bandwidth vs. Q4_K_M's 53–64% — quant kernel maturity varies a lot by backend/vendor,
+  don't assume NVIDIA's numbers transfer.
+- **Rough magnitude context** (LLM, not diffusion, weak signal — old GT 1030): ggml's Vulkan backend runs
+  prompt-processing at roughly 2–3× slower than its CUDA backend, not orders of magnitude. This is a
+  meaningfully SMALLER gap than this project's current 30–157×, suggesting a well-tuned Vulkan GEMM path can
+  land much closer to CUDA than what's shipped here today — the ceiling is not architectural.
+
 ## What this does NOT show yet
   target, not a perf number to chase on the current naive path.
 - AMD/Intel hardware: none available on this box. Mesa llvmpipe (software) was used for small-subgroup

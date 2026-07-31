@@ -90,12 +90,15 @@ DTYPE_KERNELS=(
 )
 
 SINGLE_KERNELS=(
+    cfg_euler
+    wan_rms_norm_channel
     cast_f32_f16
     cast_f16_f32
     cast_f8e4m3_f16
     cast_bf16_f32
     cast_f32_bf16
     matmul_coopmat
+    matmul_coopmat_partial_m
     matmul_int8
     dequant_q4_0
     dequant_q5_0

@@ -47,6 +47,35 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     /// <summary>Resets the D2H sync counter (call at the start of a region you want to measure for residency).</summary>
     public void ResetSyncCount() => _d2hSyncs = 0;
 
+    // ── Step-graph capture support ──────────────────────────────────────────────────────────────────────
+    // A captured command buffer bakes device buffer addresses at record time (both via bound descriptors and
+    // any push-descriptor writes). Every buffer referenced by a dispatch recorded during the capture window
+    // must therefore stay alive for the graph's ENTIRE lifetime, not just until the next normal deferred-free
+    // tick — the model's usual "allocate a fresh scratch buffer, dispatch, dispose" pattern runs unmodified
+    // during capture (see Krea2Attention.Forward's per-op q/k/v Dispose() calls), so every one of those
+    // disposals must be intercepted and redirected here instead of freed. Set by VulkanBackend.StepGraphBegin/
+    // EndAndLaunch/Reset; ReleaseStepGraphRetained() (called from StepGraphReset) is what actually frees them.
+    public bool CapturingStepGraph { get; set; }
+    private readonly List<VulkanBuffer> _stepGraphRetained = new();
+
+    /// <summary>Redirects a buffer that would normally be freed to the capture-lifetime retain list instead.
+    /// Returns true if the buffer was retained (caller must NOT free it); false if capture isn't active.</summary>
+    private bool TryRetainForCapture(VulkanBuffer buffer)
+    {
+        if (!CapturingStepGraph) return false;
+        _stepGraphRetained.Add(buffer);
+        return true;
+    }
+
+    /// <summary>Frees every buffer retained during step-graph capture. Call after the graph itself is torn
+    /// down (StepGraphReset) — these buffers back the captured command buffer's baked-in descriptor bindings,
+    /// so freeing them while the graph could still be replayed would leave it referencing destroyed memory.</summary>
+    public void ReleaseStepGraphRetained()
+    {
+        foreach (VulkanBuffer b in _stepGraphRetained) b.Dispose();
+        _stepGraphRetained.Clear();
+    }
+
     public VulkanGpuTransferHelper(
         nint device,
         VulkanMemoryAllocator allocator,
@@ -82,6 +111,19 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         if (_activationCache.TryGetValue(cpuTensor, out VulkanBuffer? cachedAct))
         { _hits++; return cachedAct; }
 
+        // A cache miss during capture means Upload() below would run its OWN immediate (non-captured)
+        // H2D upload + submit right now, freezing this tensor's CURRENT data into the graph forever — every
+        // future replay would silently reuse this one step's stale value instead of the refreshed one. The
+        // two eager warmup calls before capture (see Krea2Transformer.ForwardPatched's GraphCaptureCall
+        // comment) exist specifically so every tensor the capture touches is already weight/activation-cached
+        // by the time capture starts; a miss here means that invariant broke. Throw so the caller's existing
+        // `catch (Exception ex) when (capture)` fallback disables graph mode for the session instead of
+        // silently corrupting future steps.
+        if (CapturingStepGraph)
+            throw new InvalidOperationException(
+                $"VulkanGpuTransferHelper.CopyToDevice: cache miss during step-graph capture for tensor {cpuTensor.Shape} {cpuTensor.DType.Name} — " +
+                "would freeze a fresh upload's data into the graph. The pre-capture warmup passes should have cached every tensor the capture touches.");
+
         _misses++;
         ulong byteSize = (ulong)ByteSize(cpuTensor);
         VulkanBuffer dst = AllocateDevice(byteSize);
@@ -98,7 +140,9 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     {
         foreach (VulkanBuffer t in _transientBuffers)
         {
-            if (!_cachedBuffers.Contains(t)) _stream.DeferredFree(t);
+            if (_cachedBuffers.Contains(t)) continue;
+            if (TryRetainForCapture(t)) continue;
+            _stream.DeferredFree(t);
         }
         _transientBuffers.Clear();
     }
@@ -125,6 +169,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     {
         if (buffer is null) return;
         if (_cachedBuffers.Contains(buffer)) return;
+        if (TryRetainForCapture(buffer)) return;
         _stream.DeferredFree(buffer);
     }
 
@@ -148,9 +193,16 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         VulkanBuffer capturedBuffer = buffer;
         ulong capturedSize = byteSize;
 
-        // Lazy sync: when CPU code reads the tensor, wait for the stream, copy back, free GPU buffer.
+        // Lazy sync: when CPU code reads the tensor, wait for the stream, copy back, free GPU buffer. A read
+        // during step-graph capture is a hard contract violation (IBackend's step-graph doc: "no DataPointer
+        // reads" between Begin and EndAndLaunch) — WaitIdleHost would also try to submit/drain the NORMAL
+        // stream while the capture command buffer is still recording, which is its own separate hazard. Throw
+        // instead of silently doing the wrong (or a dangerous) thing; the caller's capture try/catch handles it.
         tensor._gpuSyncCallback = () =>
         {
+            if (self.CapturingStepGraph)
+                throw new InvalidOperationException(
+                    "VulkanGpuTransferHelper: a tensor was read from host (DataPointer/AsReadOnlySpan) during step-graph capture — capture-illegal.");
             if (self._activationCache.Remove(capturedTensor, out VulkanBuffer? cached))
             {
                 self._d2hSyncs++;
@@ -166,6 +218,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
             if (self._activationCache.Remove(capturedTensor, out VulkanBuffer? cached))
             {
                 self._cachedBuffers.Remove(cached);
+                if (self.TryRetainForCapture(cached)) return;
                 self._stream.DeferredFree(cached);
             }
         };

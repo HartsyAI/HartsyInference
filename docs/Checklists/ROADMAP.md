@@ -84,7 +84,13 @@ a stale code comment claiming otherwise.
   than the old claim — with F32 (no TF32-equivalent tensor-core path on Vulkan) the worst offender, but
   F16 (which should hit `matmul_coopmat`) also 30–157× slower, meaning either coopmat isn't actually
   engaging for these shapes or its real throughput is far below cuBLAS's tuned tensor-core GEMM — needs
-  a `HARTSYINFERENCE_VK_PROFILE=1` check before any further tuning. **A second finding was found AND
+  a `HARTSYINFERENCE_VK_PROFILE=1` check before any further tuning. **Answered definitively (2026-07-31,
+  §3's coopmat-engagement entries below):** it's the latter. Coopmat engagement on a real Krea2 run was
+  raised from 0% to 84.8% (the M/N/K-alignment gap that blocked it is now closed — see below), and it
+  bought ~0 measured wall-clock (a same-shape A/B: 78.9s coopmat-off vs. 80.5s at 60.7% engagement — noise,
+  not a real difference). The GEMM ceiling really is coopmat's own per-op throughput, not an engagement
+  problem — tile size, register blocking, and coopmat2 (below) are the actual remaining levers, not
+  anything about WHETHER coopmat runs. **A second finding was found AND
   fixed in the same pass:** Silu/Gelu/RmsNorm/LayerNorm showed a sharply non-linear cliff at ~5.24M
   elements (Silu: 956 μs at 1.31M elements → 29,652 μs at 5.24M elements, a 31× jump for a 4× size
   increase) that `BroadcastAdd` (writes in place, no fresh output allocation) did NOT show at the same
@@ -202,25 +208,32 @@ a stale code comment claiming otherwise.
   `GraphDecodeSupported` on: token-for-token parity vs. the eager path on a real small model, then a
   tokens/sec measurement. Deferred past this session (user directed finishing Phases 6/7/8 first, then one
   e2e image-model run) — a local `qwen2.5-0.5b-instruct-q4_k_m.gguf` is available on this box for it.
-- [ ] **`VulkanStepGraph`** (the plan's Phase 6e, the CUDA-Graph-capture analog backing
-  `StepGraphBegin`/`StepGraphEndAndLaunch`/`StepGraphLaunch`/`StepGraphReset`/`StepGraphOwner` — used far
-  more broadly than LLM decode: nearly every DiT model in this codebase (Flux/Flux2/Krea2/ZImage/Chroma/
-  HunyuanVideoDit/LtxVideo(2)/Kandinsky5/OasisDit/Hunyuan3DDit/F5Dit/MusicGen) gates a full per-step forward
-  pass onto it). **Deliberately NOT built** (2026-07-30) — this is a correctness hazard on THIS box's own
-  descriptor-management scheme, not just an effort estimate: `VulkanBackend.Dispatch()` allocates a
-  descriptor set from a **recycling pool ring** (`_descriptors.AllocateSet`) on every single dispatch. A
-  frozen command buffer that `vkCmdBindDescriptorSets` a set from that ring, then gets replayed after the
-  ring has cycled back and overwritten that set's bindings for an unrelated later dispatch, is undefined
-  behavior — the exact shape of the `WriteScalarBuffer` race just found and fixed above (passed on the
-  3060, failed on llvmpipe). Doing this correctly needs (a) a dedicated, never-recycled descriptor pool for
-  captured sets, and (b) a bump-pointer arena that transient allocations route through during capture so a
-  replayed command buffer's bindings point at stable, deterministically-reproduced offsets instead of
-  fresh `VkBuffer` handles every call — a rearchitecture of the ~40 `Dispatch()` call sites' allocation
-  path, not a new file dropped alongside them. Not building it breaks nothing today:
-  `StepGraphSupported => false` (IBackend's default, unoverridden) means every one of those ~13 DiT models
-  runs its normal eager per-op path on Vulkan, correctly, just without the graph-capture speedup — the
-  Krea2 e2e comparison this session ends with will honestly reflect "Vulkan without graph capture," which
-  is the true current state, not a claim this item quietly closed.
+- [x] **`VulkanStepGraph`** (the plan's Phase 6e, the CUDA-Graph-capture analog backing
+  `StepGraphBegin`/`StepGraphEndAndLaunch`/`StepGraphLaunch`/`StepGraphReset`/`StepGraphOwner`) — **built**
+  (2026-07-30), reversing the earlier "deliberately NOT built" call in this same entry. The descriptor
+  hazard that call was based on (`Dispatch()`'s pool-ring set could be overwritten by a later dispatch
+  before a frozen command buffer replays it) is real for pool-allocated sets, but dissolves entirely for
+  **push descriptors** (`VK_KHR_push_descriptor`): a push-descriptor-bound set has no backing `VkDescriptorSet`
+  object for a ring to invalidate — the bindings are baked directly into the command buffer at record time.
+  `VulkanBackend.StepGraphBegin()` now switches `Dispatch()`/`CopyInto()` onto a capture branch that records
+  into `VulkanStepGraph`'s own persistent `VkCommandBuffer` via `PushSet` instead of `AllocateSet`, with no
+  rearchitecture of the ~40 existing `Dispatch()` call sites — one `forCapture` bool threaded through
+  `VulkanDescriptorManager`/`VulkanKernelRegistry`/`GetKernel` selects a parallel, push-descriptor-flagged
+  layout cache instead of the pool-allocated one. `vkCmdPushDescriptorSet` is not statically exported by
+  this NVIDIA driver (`EntryPointNotFoundException` on a direct P/Invoke) — resolved dynamically via
+  `vkGetDeviceProcAddr`, trying the `KHR`-suffixed name first, falling back to the unsuffixed Vulkan 1.4
+  core name (see `TROUBLESHOOTING.md`). Every transient buffer touched during capture must be redirected
+  from "free now" to "retain until `StepGraphReset()`" (`VulkanGpuTransferHelper.CapturingStepGraph`) since a
+  recorded command buffer bakes device addresses at record time; independent queue submissions have no
+  automatic ordering in Vulkan, so `_stream.WaitIdleHost()` must precede both `StepGraphBegin()` and
+  `StepGraphLaunch()` or a replay can race a still-in-flight normal-stream write. Proven correct by
+  `StepGraph_TrivialCapture_ReplaysWithFreshDataAcrossThreeSteps` (130/130 suite green). **Not wired into
+  any real model yet** — see the Krea2 attempt below, which found it works but doesn't fit that model's
+  memory profile. `StepGraphSupported => Vk.HasPushDescriptor` is now `true` on this box, so any of the ~13
+  DiT models gating onto `HARTSY_DIT_GRAPH=1` will now attempt capture where they previously couldn't; the
+  existing `catch (Exception ex) when (capture)` fallback in each model's forward pass is the only thing
+  standing between a capture-illegal op and a crash for models not yet audited against the capture
+  contract — audit before flipping the env var on for a model this entry hasn't covered.
 - [ ] **RCCL** collectives for multi-GPU on AMD (§1).
 - [x] **Diffusion domain fill (Phase 7), scoped to Krea2** — **done, e2e image valid** (2026-07-30). The
   static call-site analysis performed earlier this session (every `backend.*` call across
@@ -271,8 +284,122 @@ a stale code comment claiming otherwise.
   submit/barrier overhead vs. CUDA's cuBLAS/cuDNN + graph capture — not a new finding. Closing it is Phase
   5's core-primitive perf ceiling work (coopmat2, INT8 GEMM wired into model loading) plus extending Phase
   6's step-graph-capture mechanism (built for LLM decode) to the diffusion denoise loop, per Phase 7's
-  "denoise-loop graph capture reusing Phase 6's command-buffer-reuse mechanism" item — a substantial,
-  separate perf-engineering effort, not attempted this session beyond confirming it isn't a quick fix.
+  "denoise-loop graph capture reusing Phase 6's command-buffer-reuse mechanism" item — **attempted
+  (2026-07-30), does not close this gap for Krea2 specifically.** `VulkanStepGraph` (above) now exists and
+  works, but wiring Krea2's denoise loop onto it via `HARTSY_DIT_GRAPH=1` and running the real CLI found a
+  structural conflict, not a bug: capture requires retaining every transient buffer touched during the
+  recorded pass (a replayed command buffer's bindings point at fixed device addresses), but Krea2 runs with
+  `CacheWeightCasts=false` specifically because its fp8 weights transient-dequant to F16 per-GEMM and get
+  freed immediately — retaining all ~224 (28 blocks × 8 Linears) of those casts across one capture instead
+  of freeing-and-reusing them OOMs (`vkAllocateMemory` failed on the 4th block's SwiGlu Linear, size
+  ~128MB, `ErrorOutOfDeviceMemory`) even on the 4090. These two requirements are mutually exclusive for this
+  model at this VRAM budget, not merely hard to reconcile — closing it needs an intra-capture bump-pointer
+  arena with slot reuse for weight casts specifically (the "CUDA Graph allocation-node semantics have no
+  Vulkan equivalent" gap this plan's Non-Goals section already named), which is real, separate engineering,
+  not a quick follow-up. Before building it: run a **single-block capture** (1 of 28) instead of all-block
+  to measure the actual per-block replay speedup against eager — peak retained VRAM drops ~28× (should
+  easily fit) and the number tells you whether the arena is worth building at all, since capture removes
+  host dispatch/submit overhead, not GPU kernel time, and the GEMM scoreboard's 30–160× per-op kernel gap
+  means the ceiling on what capture alone can buy here may be modest. Along the way, three real,
+  previously-unknown `VulkanBackend` gaps surfaced (found via the real-CLI-run loop, each independently
+  caught by the model's own `catch when (capture)` safety net, which fell back to eager and completed with
+  a correct image in all 4 attempted runs — the fallback itself is now proven robust including under a
+  mid-capture OOM): `CfgEulerStep` (the CFG/Euler combine step had no GPU-resident override at all —
+  `IBackend`'s CPU-loop default was reading/writing `.DataPointer` every denoise step even in the normal
+  EAGER path, not just breaking capture), `Concat` (was a pure CPU `Buffer.MemoryCopy` loop — rewritten
+  device-resident via `vkCmdCopyBuffer`, closing a real per-step D2H sync), and `AddScalar` (`DiTUtils.Modulate`
+  had no override, same CPU-default D2H cost). All three are fixed permanently and eliminate real per-step
+  D2H syncs in the eager path Krea2 actually runs today, independent of whether graph capture ever lands for
+  this model — see `Backend_CfgEulerStep_MatchesCpu_PreservesZAddress`,
+  `GetD2hSyncCount_Concat_StaysGpuResident`, `Backend_AddScalar_MatchesCpu` (130/130 suite green).
+- [x] **VAE decode fixed (2026-07-31): ~33s → ~0.5s (~65×), closing a real bug, not the kernel-throughput
+  ceiling.** `HARTSYINFERENCE_VK_SUBMIT_PER_OP=1` A/B'd against default batching first (~4% delta on the
+  denoise loop, ~0% on VAE decode) — confirming the denoise loop is kernel-bound, not dispatch-overhead-bound
+  (graph capture's ceiling here is small; the weight-cast arena above is correctly not worth building). VAE
+  decode's near-zero sensitivity to batching pointed away from a dispatch storm and toward a CPU-loop
+  fallthrough: `WanRmsNormChannel` had **no `VulkanBackend` override at all** — every call (the decoder's
+  final head norm, `[1,96,1024,1024]`, ~402MB, the worst possible shape for this) fell through to
+  `IBackend`'s CPU-loop default (full D2H sync, single-threaded cache-hostile reduction, H2D re-upload).
+  Fixed with a real GLSL kernel mirroring `CudaBackend`'s existing `wan_vae_rms_norm_channel.cu`. VAE decode:
+  33.0s → 0.5–0.65s (run-to-run jitter); full generation: 331.1s → 296.2s (~10.6%). Now inside the normal
+  ~30–50× hand-written-vs-cuDNN band, not a pathological outlier. See `TROUBLESHOOTING.md` for the full
+  writeup, `benchmarks/scoreboards/
+  VULKAN.md` for before/after numbers, `Backend_WanRmsNormChannel_MatchesCpu` for the regression gate
+  (132/132 suite green, 3060 + llvmpipe). Also found (not fixed, documented as a trap for next time):
+  `HARTSYINFERENCE_VK_PROFILE=1` is blind to `Add`/`Clamp`/`Fill`/`Scale`/`Silu`/`Gelu`/`Sigmoid`/`Tanh`/
+  `Elu` (they dispatch without opening an `EnterOp()` scope, so `VulkanProfiler.Record` never sees them) —
+  this is why the first profiling pass read "`Conv2D` = 32ms" against a 33s phase instead of pointing at the
+  real cost.
+- [ ] **Coopmat is engaged for only ~1% of a real Krea2 run (16/2112 GEMMs) — root cause is shape
+  (M/N/K must be exact multiples of 16, no padding support), not dtype.** Measured directly (2026-07-31) via
+  new `VulkanBackend` engagement counters (`_coopmatGemmCount`/`_tiledGemmCount`, printed alongside
+  `HARTSYINFERENCE_VK_PROFILE=1`). A real dtype bug was found and fixed along the way — `ResolveGemmDtype`
+  never promoted F32 outputs to F16 to reach `TryDispatchCoopmat`'s existing `OUTPUT_F32` support, so no
+  F32-output Linear (which is every Linear in `Krea2Transformer`, matching `CudaBackend.LinearImpl`'s own
+  convention) could ever reach coopmat regardless of input dtype — but fixing it only moved the number from
+  0/2112 to 16/2112: the dtype gate was never the binding constraint for this model. The real blocker is
+  that `matmul_coopmat.comp.glsl` hard-requires M/N/K all exact multiples of 16 (its own comment: "spec
+  handles partial fragments... IF the host pads the buffer... We require multiples of 16 here" — no padding
+  is built), and every per-block QKV/FFN/out-proj Linear operates on the joint `[txtSeq+imgSeq]` sequence,
+  where `txtSeq` is the raw tokenized+encoded prompt length with no padding to a fixed size. Measured on the
+  reference prompt: `imgSeq=4096` (a multiple of 16), `txtSeq=13` → `jointSeq=4109`, 3 short of the next
+  multiple of 16 — and since `txtSeq` is prompt-dependent, essentially no real prompt lands on a multiple of
+  16 by chance, so this blocks nearly every expensive GEMM in the model regardless of prompt. **The dtype fix
+  was reverted the same session** (kept only the zero-cost engagement counters): it introduced a real,
+  never-actually-verified precision trade-off (full F16 compute — 5-bit exponent, vs. F32/TF32's 8-bit
+  range — on FP8-dequantized-weight GEMMs specifically, where activation magnitudes are least predictable)
+  for a measured zero-throughput win, since the shape gate blocks the same GEMMs either way.
+  **Update 2026-07-31 — the host-side M-padding fix was also attempted, and also reverted, after a real GPU
+  crash.** Built `TryDispatchCoopmatMPadded`: pad the M dimension up to the next multiple of 16 via a scratch
+  buffer + device-to-device copy, dispatch the existing (unchanged) coopmat kernel against the padded shape.
+  Passed a from-scratch CPU-reference correctness test, a 200-iteration no-sync stress test at Krea2's exact
+  real scale (zero leak, 17s), and two full real CLI runs (2-step, 4-step — both completed cleanly, GPU
+  pinned at 100% utilization, coopmat engagement climbing to 60.7% then 74.9%). **A full 8-step run then
+  failed with `Vulkan error -4 (ErrorDeviceLost): vkQueueSubmit2`** — a genuine GPU driver fault/reset, not
+  an allocation failure (which the existing retry-then-throw OOM path already handles cleanly and would have
+  produced instead). An earlier apparent 40-minute "hang" on the same fix turned out to be confounded by an
+  unrelated external process (a ComfyUI backend, independently consuming ~12.7GB of the same 4090, started
+  sometime mid-session outside this work) — ruled out as the sole cause once the device-loss reproduced
+  again on a verified-clean GPU with ~22GB of headroom. No root cause found before reverting (two leading,
+  unconfirmed suspects — a possible barrier gap if `AcquireRecording()` ever splits the padding copy and the
+  coopmat dispatch across separate command-buffer submissions, or an out-of-bounds access that only
+  manifests under the real model's op-interleaving, not a simple repeated-Linear stress loop); needs Vulkan
+  validation layers or `compute-sanitizer`-class tooling to pin down properly, not more full-CLI-run
+  attempts. **Recommended next design, not a repeat of this one:** ggml/llama.cpp's Vulkan backend
+  (`mul_mm.comp`) handles the same non-tile-aligned-GEMM problem via a specialization-constant `ALIGNED` flag
+  selecting a per-element-bounds-checked, shared-memory-staged load/store — no separate scratch buffer, no
+  device-to-device copy, no cross-command-buffer barrier risk, since everything stays inside one dispatch's
+  own shared memory. Real shader work (its own new risk surface, needs its own careful verification), but
+  structurally avoids this whole bug class. If/when either approach lands, re-evaluate the F32→F16 dtype
+  promotion from a real e2e SSIM/pixel-diff gate rather than the "CUDA already runs reduced-precision GEMMs
+  by default" argument alone (necessary, not sufficient — TF32's wider exponent range isn't the same
+  guarantee as F16's). See `TROUBLESHOOTING.md` for the full writeup.
+- [x] **Update 2026-07-31 — the ggml shared-memory design (the recommended next attempt above) is DONE and
+  KEPT: coopmat engagement 0% → 84.8% on a real Krea2 run, verified stable, but delivers ~0 real-world
+  speedup — the actual lever is coopmat kernel throughput, not engagement.** Built
+  `matmul_coopmat_partial_m.comp.glsl`, a separate shader (the existing aligned fast path stays byte-
+  identical, zero new risk there) mirroring `matmul_tiled.comp.glsl`'s own proven bounds-checked shared-
+  memory staging idiom — no scratch VulkanBuffer, no device-to-device copy, no cross-command-buffer barrier,
+  structurally avoiding the risk class that caused the previous attempt's `ErrorDeviceLost`. **A real,
+  separate bug was caught by a 9-case parameterized test BEFORE ever touching the real model**: a divergent-
+  barrier bug (some subgroups in a workgroup hitting an early `return` for out-of-N-bounds columns while
+  siblings continued to this kernel's `barrier()` — undefined behavior, silent 100%-wrong output on this
+  GPU, not a crash) triggered whenever N wasn't a multiple of the workgroup tile width BN, independent of
+  N being a multiple of 16 (the host's existing gate). Fixed by removing every early return after the
+  K-loop in favor of unconditional barrier participation + bounds-checked scalar draining. After the fix:
+  9/9 correctness cases pass, a pre-existing large-scale real-shape test (M=4108) now automatically
+  exercises this kernel and passes unmodified, a 200-iteration no-sync stress test at Krea2's exact scale
+  shows zero leak, and three consecutive real Krea2 CLI runs (2/4/8-step) all completed cleanly — the
+  8-step run specifically: 296.7s, coopmat engagement 84.8% (1792/2112), GPU pinned at 100% utilization
+  throughout (not idle/stuck), correct verified-by-eye output image. Full suite 143/143 (3060 + 4090);
+  llvmpipe unaffected (no coopmat hardware, these tests self-skip there). **The honest result**: an A/B done
+  earlier this session (78.9s coopmat fully OFF vs. 80.5s at 60.7% engagement, same 2-step shape) already
+  showed engagement rate doesn't move wall-clock, and the 8-step number confirms it at full scale — coopmat
+  was ALREADY measured 30–157× slower than CUDA's cuBLAS even where it engages (see the GEMM table at the
+  top of `benchmarks/scoreboards/VULKAN.md`), so raising engagement from 0%→84.8% correctly fixes a real
+  capability gap (and sets up any future coopmat-kernel-throughput work to reach these GEMMs automatically)
+  but was never going to close Krea2's CUDA gap on its own. **Kept in the codebase** (unlike the second,
+  reverted attempt) because it's proven correct and safe. See `TROUBLESHOOTING.md` for the full writeup.
 - [ ] **Video/audio/vision domain fill (Phase 7 menu items)** — explicitly deferred, not evaluated this
   session: Wan 3D/volumetric conv (blocks the Wan VAE), grid-sample/MSDA (blocks deformable-attention
   detection models), dedicated audio AdaIN/activation fused kernels. No model in either of these domains

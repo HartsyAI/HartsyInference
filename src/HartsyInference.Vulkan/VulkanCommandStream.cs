@@ -105,9 +105,13 @@ public sealed class VulkanCommandStream : IDisposable
     }
 
     /// <summary>Records a global compute->compute memory barrier (covers all buffers). Cheap fallback when per-buffer scope is unwieldy.</summary>
-    public unsafe void RecordGlobalComputeBarrier()
+    public void RecordGlobalComputeBarrier() => RecordGlobalComputeBarrierOn(AcquireRecording());
+
+    /// <summary>Same barrier as <see cref="RecordGlobalComputeBarrier"/>, recorded onto an explicit command
+    /// buffer instead of this stream's own recording buffer — used by <see cref="VulkanStepGraph"/>, whose
+    /// captured dispatches record onto a separate, persistent command buffer.</summary>
+    public static unsafe void RecordGlobalComputeBarrierOn(nint cb)
     {
-        nint cb = AcquireRecording();
         VkMemoryBarrier2 mb = new()
         {
             sType = VkStructureType.MemoryBarrier2,
@@ -126,9 +130,13 @@ public sealed class VulkanCommandStream : IDisposable
     }
 
     /// <summary>Records a buffer→buffer copy followed by a barrier transitioning to the requested consumer stage/access.</summary>
-    public unsafe void RecordCopyAndBarrier(ulong src, ulong dst, ulong size, ulong postStage, ulong postAccess)
+    public void RecordCopyAndBarrier(ulong src, ulong dst, ulong size, ulong postStage, ulong postAccess)
+        => RecordCopyAndBarrierOn(AcquireRecording(), src, dst, size, postStage, postAccess);
+
+    /// <summary>Same as <see cref="RecordCopyAndBarrier"/>, recorded onto an explicit command buffer — used by
+    /// <see cref="VulkanStepGraph"/> capture (see <see cref="RecordGlobalComputeBarrierOn"/>'s doc for why).</summary>
+    public static unsafe void RecordCopyAndBarrierOn(nint cb, ulong src, ulong dst, ulong size, ulong postStage, ulong postAccess)
     {
-        nint cb = AcquireRecording();
         VkBufferCopy region = new() { srcOffset = 0, dstOffset = 0, size = size };
         VulkanApi.vkCmdCopyBuffer(cb, src, dst, 1, (nint)(&region));
 
