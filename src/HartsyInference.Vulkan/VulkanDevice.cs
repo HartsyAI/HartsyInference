@@ -188,7 +188,7 @@ public sealed class VulkanDevice : IDisposable
             if ((h.flags & VkMemoryHeapFlags.DeviceLocal) != 0) vram += h.size;
         }
 
-        (bool hasMemoryBudget, bool hasPushDescriptor, bool hasCoopMatrix) = QueryDeviceExtensions(pd);
+        (bool hasMemoryBudget, bool hasPushDescriptor, bool hasCoopMatrix, bool hasCoopMatrix2Raw) = QueryDeviceExtensions(pd);
 
         // The extension being present is not enough: the matmul_coopmat shader hard-codes a
         // specific configuration (16x16x16, FP16 A/B, FP32 accumulate, subgroup scope). NVIDIA
@@ -197,6 +197,14 @@ public sealed class VulkanDevice : IDisposable
         // creation fails or the matmul silently miscomputes on non-NVIDIA hardware.
         if (hasCoopMatrix)
             hasCoopMatrix = CoopMatShapeSupported(instance, pd);
+
+        // VK_NV_cooperative_matrix2 requires VK_KHR_cooperative_matrix as a dependency (spec),
+        // so only probe it once the base coopmat1 shape is already confirmed. Like coopmat1,
+        // presence of the extension doesn't guarantee a usable FP16/FP32 workgroup-scope
+        // configuration exists — enumerate flexible-dimensions properties and confirm one does.
+        uint coopMat2MGran = 0, coopMat2NGran = 0, coopMat2KGran = 0, coopMat2WgInvocations = 0;
+        bool hasCoopMatrix2 = hasCoopMatrix && hasCoopMatrix2Raw
+            && CoopMat2Supported(instance, pd, out coopMat2MGran, out coopMat2NGran, out coopMat2KGran, out coopMat2WgInvocations);
 
         // Some drivers (notably older NVIDIA Linux blobs) advertise apiVersion 1.3+ but
         // return zeros for shaderFloat16 / timelineSemaphore / synchronization2 / etc.
@@ -263,29 +271,35 @@ public sealed class VulkanDevice : IDisposable
             HasMemoryBudget = hasMemoryBudget,
             HasPushDescriptor = hasPushDescriptor,
             HasCooperativeMatrix = hasCoopMatrix,
+            HasCooperativeMatrix2 = hasCoopMatrix2,
+            CoopMat2MGranularity = coopMat2MGran,
+            CoopMat2NGranularity = coopMat2NGran,
+            CoopMat2KGranularity = coopMat2KGran,
+            CoopMat2WorkgroupInvocations = coopMat2WgInvocations,
             HasReBar = hasReBar,
 
             ComputeQueueFamilyIndex = queueFamily,
             IsAsyncComputeQueue = isAsyncCompute,
+            TimestampPeriod = props2.properties.limits.timestampPeriod,
         };
 
         return (caps, memProps);
     }
 
-    private static unsafe (bool memBudget, bool pushDesc, bool coopMatrix) QueryDeviceExtensions(nint pd)
+    private static unsafe (bool memBudget, bool pushDesc, bool coopMatrix, bool coopMatrix2) QueryDeviceExtensions(nint pd)
     {
         uint count = 0;
         if (VulkanApi.vkEnumerateDeviceExtensionProperties(pd, 0, ref count, 0) != VkResult.Success || count == 0)
-            return (false, false, false);
+            return (false, false, false, false);
 
         int sz = sizeof(VkExtensionProperties);
         nint block = Marshal.AllocHGlobal((int)count * sz);
         try
         {
             if (VulkanApi.vkEnumerateDeviceExtensionProperties(pd, 0, ref count, block) != VkResult.Success)
-                return (false, false, false);
+                return (false, false, false, false);
 
-            bool budget = false, push = false, coop = false;
+            bool budget = false, push = false, coop = false, coop2 = false;
             byte* p = (byte*)block;
             for (uint i = 0; i < count; i++)
             {
@@ -294,8 +308,9 @@ public sealed class VulkanDevice : IDisposable
                 if (name == "VK_EXT_memory_budget") budget = true;
                 else if (name == "VK_KHR_push_descriptor") push = true;
                 else if (name == "VK_KHR_cooperative_matrix") coop = true;
+                else if (name == "VK_NV_cooperative_matrix2") coop2 = true;
             }
-            return (budget, push, coop);
+            return (budget, push, coop, coop2);
         }
         finally { Marshal.FreeHGlobal(block); }
     }
@@ -332,6 +347,56 @@ public sealed class VulkanDevice : IDisposable
         return false;
     }
 
+    /// <summary>Confirms the device's enumerated <c>VK_NV_cooperative_matrix2</c> "flexible dimensions"
+    /// configurations include a usable one: FP16 A and B, FP32 accumulate (C and Result), WORKGROUP
+    /// scope (not subgroup — this is the architectural difference from coopmat1), non-saturating.
+    /// Unlike coopmat1's fixed 16x16x16 shape, this reports granularities (M/N/K tile dims used by a
+    /// kernel must be multiples of these) and the exact workgroup invocation count the driver expects
+    /// for this configuration, both needed to size the <c>matmul_coopmat2</c> shader correctly.</summary>
+    private static unsafe bool CoopMat2Supported(nint instance, nint pd, out uint mGranularity, out uint nGranularity, out uint kGranularity, out uint workgroupInvocations)
+    {
+        mGranularity = nGranularity = kGranularity = workgroupInvocations = 0;
+
+        nint fp = VulkanApi.vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV");
+        if (fp == 0) return false;
+        delegate* unmanaged<nint, uint*, VkCooperativeMatrixFlexibleDimensionsPropertiesNV*, VkResult> query =
+            (delegate* unmanaged<nint, uint*, VkCooperativeMatrixFlexibleDimensionsPropertiesNV*, VkResult>)fp;
+
+        uint count = 0;
+        if (query(pd, &count, null) != VkResult.Success || count == 0) return false;
+
+        VkCooperativeMatrixFlexibleDimensionsPropertiesNV[] props = new VkCooperativeMatrixFlexibleDimensionsPropertiesNV[count];
+        for (uint i = 0; i < count; i++) props[i].sType = VkStructureType.CooperativeMatrixFlexibleDimensionsPropertiesNV;
+        fixed (VkCooperativeMatrixFlexibleDimensionsPropertiesNV* p = props)
+        {
+            if (query(pd, &count, p) != VkResult.Success) return false;
+            bool found = false;
+            for (uint i = 0; i < count; i++)
+            {
+                VkCooperativeMatrixFlexibleDimensionsPropertiesNV e = p[i];
+                if (System.Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_DUMP_COOPMAT2") == "1")
+                {
+                    Logs.Warning($"coopmat2[{i}]: M/N/Kgran={e.MGranularity}/{e.NGranularity}/{e.KGranularity} A={e.AType} B={e.BType} C={e.CType} R={e.ResultType} sat={e.saturatingAccumulation} scope={e.scope} wgInvocations={e.workgroupInvocations}");
+                }
+                // Prefer the config with the largest workgroupInvocations among FP16-in/FP32-out,
+                // workgroup-scope, non-saturating matches — a bigger workgroup does more MACs per
+                // dispatch of the coopmat2 op, which is the whole point of workgroup (vs subgroup) scope.
+                if (e.AType == VkComponentTypeKHR.Float16 && e.BType == VkComponentTypeKHR.Float16
+                    && e.CType == VkComponentTypeKHR.Float32 && e.ResultType == VkComponentTypeKHR.Float32
+                    && e.scope == VkScopeKHR.Workgroup && e.saturatingAccumulation == 0
+                    && (!found || e.workgroupInvocations > workgroupInvocations))
+                {
+                    mGranularity = e.MGranularity;
+                    nGranularity = e.NGranularity;
+                    kGranularity = e.KGranularity;
+                    workgroupInvocations = e.workgroupInvocations;
+                    found = true;
+                }
+            }
+            return found;
+        }
+    }
+
     private static unsafe nint CreateLogicalDevice(nint pd, VulkanCapabilities caps)
     {
         VkPhysicalDeviceVulkan11Features f11 = new()
@@ -363,10 +428,20 @@ public sealed class VulkanDevice : IDisposable
             pNext = (nint)(&f13),
             cooperativeMatrix = caps.HasCooperativeMatrix ? 1u : 0u,
         };
+        VkPhysicalDeviceCooperativeMatrix2FeaturesNV fCoop2 = new()
+        {
+            sType = VkStructureType.PhysicalDeviceCooperativeMatrix2FeaturesNV,
+            pNext = (nint)(&fCoop),
+            cooperativeMatrixWorkgroupScope = caps.HasCooperativeMatrix2 ? 1u : 0u,
+            cooperativeMatrixFlexibleDimensions = caps.HasCooperativeMatrix2 ? 1u : 0u,
+            cooperativeMatrixTensorAddressing = caps.HasCooperativeMatrix2 ? 1u : 0u,
+        };
         VkPhysicalDeviceFeatures2 feat2 = new()
         {
             sType = VkStructureType.PhysicalDeviceFeatures2,
-            pNext = caps.HasCooperativeMatrix ? (nint)(&fCoop) : (nint)(&f13),
+            pNext = caps.HasCooperativeMatrix2 ? (nint)(&fCoop2)
+                  : caps.HasCooperativeMatrix ? (nint)(&fCoop)
+                  : (nint)(&f13),
         };
 
         float prio = 1.0f;
@@ -382,6 +457,7 @@ public sealed class VulkanDevice : IDisposable
         if (caps.HasMemoryBudget) extList.Add("VK_EXT_memory_budget");
         if (caps.HasPushDescriptor) extList.Add("VK_KHR_push_descriptor");
         if (caps.HasCooperativeMatrix) extList.Add("VK_KHR_cooperative_matrix");
+        if (caps.HasCooperativeMatrix2) extList.Add("VK_NV_cooperative_matrix2");
 
         using PinnedStringArray ext = new(extList);
 

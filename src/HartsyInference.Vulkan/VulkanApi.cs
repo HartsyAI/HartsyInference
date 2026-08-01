@@ -212,6 +212,23 @@ internal static partial class VulkanApi
     [LibraryImport(Lib)]
     internal static partial void vkCmdPipelineBarrier2(nint commandBuffer, in VkDependencyInfo pDependencyInfo);
 
+    // ── Query pools (GPU timestamp instrumentation — see VulkanGpuTimer) ──
+
+    [LibraryImport(Lib)]
+    internal static partial VkResult vkCreateQueryPool(nint device, in VkQueryPoolCreateInfo pCreateInfo, nint pAllocator, out ulong pQueryPool);
+
+    [LibraryImport(Lib)]
+    internal static partial void vkDestroyQueryPool(nint device, ulong queryPool, nint pAllocator);
+
+    [LibraryImport(Lib)]
+    internal static partial void vkCmdResetQueryPool(nint commandBuffer, ulong queryPool, uint firstQuery, uint queryCount);
+
+    [LibraryImport(Lib)]
+    internal static partial void vkCmdWriteTimestamp2(nint commandBuffer, ulong stage, ulong queryPool, uint query);
+
+    [LibraryImport(Lib)]
+    internal static partial VkResult vkGetQueryPoolResults(nint device, ulong queryPool, uint firstQuery, uint queryCount, nuint dataSize, nint pData, long stride, uint flags);
+
     // ── Sync ────────────────────────────────────────────────────────────
 
     [LibraryImport(Lib)]

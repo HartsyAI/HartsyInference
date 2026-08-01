@@ -101,6 +101,10 @@ public enum VkStructureType
     CooperativeMatrixPropertiesKHR = 1000506000,
     PhysicalDeviceCooperativeMatrixFeaturesKHR = 1000506001,
     PhysicalDeviceCooperativeMatrixPropertiesKHR = 1000506002,
+
+    PhysicalDeviceCooperativeMatrix2FeaturesNV = 1000593000,
+    CooperativeMatrixFlexibleDimensionsPropertiesNV = 1000593001,
+    PhysicalDeviceCooperativeMatrix2PropertiesNV = 1000593002,
 }
 
 /// <summary>VkBufferUsageFlags — bits we actually use.</summary>

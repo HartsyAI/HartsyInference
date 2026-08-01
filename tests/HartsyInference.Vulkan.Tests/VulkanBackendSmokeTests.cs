@@ -46,6 +46,13 @@ public sealed class VulkanBackendSmokeTests
         Assert.NotNull(device.Capabilities.DeviceName);
         Assert.True(device.Capabilities.SubgroupSize >= 4 && device.Capabilities.SubgroupSize <= 128);
         Assert.True(device.Capabilities.MaxComputeWorkGroupInvocations >= 128);
+        if (device.Capabilities.HasCooperativeMatrix2)
+        {
+            Assert.True(device.Capabilities.CoopMat2MGranularity > 0);
+            Assert.True(device.Capabilities.CoopMat2NGranularity > 0);
+            Assert.True(device.Capabilities.CoopMat2KGranularity > 0);
+            Assert.True(device.Capabilities.CoopMat2WorkgroupInvocations > 0);
+        }
     }
 
     [Fact]
@@ -3322,5 +3329,119 @@ public sealed class VulkanBackendSmokeTests
         }
 
         quant.Dispose();
+    }
+
+    /// <summary>Correctness gate for <c>matmul_coopmat_blocked.comp.glsl</c> (2026-07-31), the register-
+    /// blocked GEMM built to test whether ggml/llama.cpp's core GEMM optimization (each subgroup computes
+    /// a GRID of 16x16 output tiles from ONE shared-memory-staged input tile, instead of one tile per
+    /// direct global-memory load) closes the ~30-160x Vulkan-vs-CUDA gap — see
+    /// docs/Checklists/TROUBLESHOOTING.md. NOT wired into DispatchMatmul; called directly via the internal
+    /// diagnostic entry point. Shapes deliberately >= 128 in M/N so BOTH register-blocking dimensions
+    /// (multiple subgroups per workgroup AND multiple accumulators per subgroup) are actually exercised —
+    /// a shape smaller than one workgroup tile (64) wouldn't test the thing this kernel exists to test.</summary>
+    [Theory]
+    [InlineData(128, 128, 128, false, 32u, 32u)]
+    [InlineData(256, 512, 256, true, 32u, 32u)]
+    [InlineData(129, 128, 144, false, 32u, 32u)]   // M not a multiple of 16; N not a multiple of 64 (both 16-aligned per the gate)
+    [InlineData(256, 512, 256, true, 16u, 16u)]    // register blocking DISABLED (1 accumulator/subgroup) -- the
+                                                    // "staged-only" benchmark config, needs its own correctness check
+    public void Backend_CoopmatBlocked_Diagnostic_MatchesCpu(int M, int K, int N, bool hasBias, uint wm, uint wn)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix) return;
+
+        Tensor input = new(new TensorShape(M, K), DType.F16);
+        Tensor weight = new(new TensorShape(N, K), DType.F16);
+        Tensor? bias = hasBias ? new Tensor(new TensorShape(N), DType.F16) : null;
+        Tensor output = new(new TensorShape(M, N), DType.F16);
+
+        Random rng = new(2000 + M + N);
+        Span<Half> iS = input.AsSpan<Half>();
+        Span<Half> wS = weight.AsSpan<Half>();
+        Half[] bS = new Half[N];
+        for (int i = 0; i < M * K; i++) iS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.3f);
+        for (int i = 0; i < N * K; i++) wS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.2f);
+        if (hasBias)
+        {
+            Span<Half> bSpan = bias!.AsSpan<Half>();
+            for (int i = 0; i < N; i++) { bS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.05f); bSpan[i] = bS[i]; }
+        }
+
+        bool dispatched = backend.TryDispatchCoopmatBlockedDiagnostic(output, input, weight, transposeA: false, transposeB: true, bias, wm, wn);
+        Assert.True(dispatched, "TryDispatchCoopmatBlockedDiagnostic returned false (gate didn't pass) for a shape it should handle.");
+
+        ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+        float maxRel = 0f; int firstM = -1, firstN = -1;
+        for (int m = 0; m < M; m++)
+            for (int n = 0; n < N; n++)
+            {
+                float acc = hasBias ? (float)bS[n] : 0f;
+                for (int k = 0; k < K; k++) acc += (float)iS[m * K + k] * (float)wS[n * K + k];
+                float rel = MathF.Abs((float)oS[m * N + n] - acc) / MathF.Max(1e-3f, MathF.Abs(acc));
+                if (rel > maxRel) { maxRel = rel; firstM = m; firstN = n; }
+            }
+        Assert.True(maxRel < 0.02f, $"Coopmat-blocked (M={M},K={K},N={N},bias={hasBias}) maxRelErr {maxRel:P2} at [{firstM},{firstN}] too high.");
+
+        input.Dispose(); weight.Dispose(); bias?.Dispose(); output.Dispose();
+    }
+
+    /// <summary>Correctness gate for <c>matmul_coopmat2.comp.glsl</c> (2026-07-31), the
+    /// <c>VK_NV_cooperative_matrix2</c> kernel — a genuinely different instruction/memory path from coopmat1
+    /// (workgroup-scope + tensor-layout addressing vs subgroup-scope + manual fragment loads), built after
+    /// coopmat1 was measured to have zero real-throughput advantage over the scalar fallback on this RTX
+    /// 4090 (see docs/Checklists/TROUBLESHOOTING.md). Called directly via the internal entry point (not
+    /// through <c>Linear</c>/<c>DispatchMatmul</c>'s <see cref="VulkanBackend.EnableCoopMat2"/> gate) so this
+    /// exercises the kernel/bias-epilogue in isolation regardless of that flag's default. Deliberately
+    /// includes shapes where M, K, and N are NOT multiples of the device's coopmat2 tile granularity
+    /// (32/16 on this hardware) — the whole point of the extension's built-in CLAMPED tensor addressing is
+    /// that no manual bounds-checking is needed for non-aligned shapes, unlike every coopmat1 kernel in this
+    /// codebase, so this is the key thing to prove. Also covers the bias epilogue (a follow-up
+    /// <see cref="VulkanBackend.BroadcastAdd"/> dispatch, not fused into the shader — see
+    /// <see cref="VulkanBackend.TryDispatchCoopMat2"/>'s doc comment).</summary>
+    [Theory]
+    [InlineData(128, 128, 128, false)]
+    [InlineData(256, 512, 256, true)]
+    [InlineData(129, 130, 144, true)]     // none of M/K/N a multiple of the 32/16/32 tile granularity
+    [InlineData(17, 33, 5, false)]        // smaller than one tile in every dimension
+    public void Backend_CoopMat2_MatchesCpu(int M, int K, int N, bool hasBias)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix2) return;
+
+        Tensor input = new(new TensorShape(M, K), DType.F16);
+        Tensor weight = new(new TensorShape(N, K), DType.F16);
+        Tensor? bias = hasBias ? new Tensor(new TensorShape(N), DType.F16) : null;
+        Tensor output = new(new TensorShape(M, N), DType.F16);
+
+        Random rng = new(3000 + M + N);
+        Span<Half> iS = input.AsSpan<Half>();
+        Span<Half> wS = weight.AsSpan<Half>();
+        Half[] bS = new Half[N];
+        for (int i = 0; i < M * K; i++) iS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.3f);
+        for (int i = 0; i < N * K; i++) wS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.2f);
+        if (hasBias)
+        {
+            Span<Half> bSpan = bias!.AsSpan<Half>();
+            for (int i = 0; i < N; i++) { bS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.05f); bSpan[i] = bS[i]; }
+        }
+
+        bool dispatched = backend.TryDispatchCoopMat2(output, input, weight, transposeA: false, transposeB: true, bias);
+        Assert.True(dispatched, "TryDispatchCoopMat2 returned false (gate didn't pass) for a shape it should handle.");
+
+        ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+        float maxRel = 0f; int firstM = -1, firstN = -1;
+        for (int m = 0; m < M; m++)
+            for (int n = 0; n < N; n++)
+            {
+                float acc = hasBias ? (float)bS[n] : 0f;
+                for (int k = 0; k < K; k++) acc += (float)iS[m * K + k] * (float)wS[n * K + k];
+                float rel = MathF.Abs((float)oS[m * N + n] - acc) / MathF.Max(1e-3f, MathF.Abs(acc));
+                if (rel > maxRel) { maxRel = rel; firstM = m; firstN = n; }
+            }
+        Assert.True(maxRel < 0.02f, $"CoopMat2 (M={M},K={K},N={N},bias={hasBias}) maxRelErr {maxRel:P2} at [{firstM},{firstN}] too high.");
+
+        input.Dispose(); weight.Dispose(); bias?.Dispose(); output.Dispose();
     }
 }

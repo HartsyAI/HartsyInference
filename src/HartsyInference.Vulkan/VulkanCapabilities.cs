@@ -117,6 +117,26 @@ public sealed class VulkanCapabilities
     /// <summary>Whether <c>VK_KHR_cooperative_matrix</c> is available and exposes the shape this backend needs.</summary>
     public required bool HasCooperativeMatrix { get; init; }
 
+    /// <summary>Whether <c>VK_NV_cooperative_matrix2</c> is available and exposes a usable FP16/FP32
+    /// workgroup-scope "flexible dimensions" configuration. NVIDIA-only (revision 1 confirmed on both
+    /// RTX 4090 and RTX 3060); architecturally distinct from <see cref="HasCooperativeMatrix"/> —
+    /// workgroup scope + tensor-layout addressing rather than subgroup-scope fixed 16x16x16 fragments.</summary>
+    public required bool HasCooperativeMatrix2 { get; init; }
+
+    /// <summary>M-dimension granularity for the coopmat2 configuration selected in
+    /// <see cref="HasCooperativeMatrix2"/> — kernel M tile size must be a multiple of this. 0 if unsupported.</summary>
+    public required uint CoopMat2MGranularity { get; init; }
+
+    /// <summary>N-dimension granularity for the selected coopmat2 configuration. 0 if unsupported.</summary>
+    public required uint CoopMat2NGranularity { get; init; }
+
+    /// <summary>K-dimension granularity for the selected coopmat2 configuration. 0 if unsupported.</summary>
+    public required uint CoopMat2KGranularity { get; init; }
+
+    /// <summary>Exact workgroup invocation count (local_size_x * y * z) the driver expects for this
+    /// coopmat2 configuration's <c>gl_ScopeWorkgroup</c> matrices. 0 if unsupported.</summary>
+    public required uint CoopMat2WorkgroupInvocations { get; init; }
+
     /// <summary>True if any memory type advertises both DEVICE_LOCAL and HOST_VISIBLE — the ReBAR / Smart Access Memory fast path that skips staging copies.</summary>
     public required bool HasReBar { get; init; }
 
@@ -125,6 +145,10 @@ public sealed class VulkanCapabilities
 
     /// <summary>True if the chosen queue family is compute-only (no GRAPHICS bit). Better for async-compute on AMD/NV.</summary>
     public required bool IsAsyncComputeQueue { get; init; }
+
+    /// <summary>Nanoseconds per tick of <c>vkCmdWriteTimestamp2</c> results (<c>VkPhysicalDeviceLimits.timestampPeriod</c>).
+    /// Used by <see cref="VulkanGpuTimer"/> to convert raw timestamp deltas into wall-clock GPU execution time.</summary>
+    public required float TimestampPeriod { get; init; }
 
     /// <summary>Returns vendor string suitable for logs / cache file names.</summary>
     public string VendorString => VendorId switch
@@ -142,5 +166,5 @@ public sealed class VulkanCapabilities
         => $"Vulkan({DeviceName}, {VendorString}, {DeviceType}, " +
            $"VRAM={TotalVramBytes / (1L << 30)} GB, subgroup={SubgroupSize} " +
            $"[{MinSubgroupSize}-{MaxSubgroupSize}], FP16={SupportsFp16}, " +
-           $"ReBAR={HasReBar}, CoopMat={HasCooperativeMatrix})";
+           $"ReBAR={HasReBar}, CoopMat={HasCooperativeMatrix}, CoopMat2={HasCooperativeMatrix2})";
 }

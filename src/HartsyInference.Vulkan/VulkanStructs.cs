@@ -609,6 +609,52 @@ public struct VkCooperativeMatrixPropertiesKHR
     public VkScopeKHR scope;
 }
 
+/// <summary>One supported <c>VK_NV_cooperative_matrix2</c> "flexible dimensions" configuration —
+/// enumerated via <c>vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV</c>. Unlike
+/// coopmat1's fixed 16x16x16 shapes, coopmat2 reports GRANULARITIES (the M/N/K dims used must be
+/// multiples of these) plus <c>workgroupInvocations</c> (the exact workgroup size the driver expects for
+/// this configuration's <c>gl_ScopeWorkgroup</c> matrices).</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct VkCooperativeMatrixFlexibleDimensionsPropertiesNV
+{
+    public VkStructureType sType;
+    public nint pNext;
+    public uint MGranularity;
+    public uint NGranularity;
+    public uint KGranularity;
+    public VkComponentTypeKHR AType;
+    public VkComponentTypeKHR BType;
+    public VkComponentTypeKHR CType;
+    public VkComponentTypeKHR ResultType;
+    public uint saturatingAccumulation; // VkBool32
+    public VkScopeKHR scope;
+    public uint workgroupInvocations;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct VkPhysicalDeviceCooperativeMatrix2FeaturesNV
+{
+    public VkStructureType sType;
+    public nint pNext;
+    public uint cooperativeMatrixWorkgroupScope;      // VkBool32 — the feature matmul_coopmat2 needs
+    public uint cooperativeMatrixFlexibleDimensions;   // VkBool32 — lets M/N/K be chosen at pipeline-creation time
+    public uint cooperativeMatrixReductions;
+    public uint cooperativeMatrixConversions;
+    public uint cooperativeMatrixPerElementOperations;
+    public uint cooperativeMatrixTensorAddressing;     // VkBool32 — tensorLayoutNV / coopMatLoadTensorNV
+    public uint cooperativeMatrixBlockLoads;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct VkPhysicalDeviceCooperativeMatrix2PropertiesNV
+{
+    public VkStructureType sType;
+    public nint pNext;
+    public uint cooperativeMatrixWorkgroupScopeMaxWorkgroupSize;
+    public uint cooperativeMatrixFlexibleDimensionsMaxDimension;
+    public uint cooperativeMatrixWorkgroupScopeReservedSharedMemory;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct VkComputePipelineCreateInfo
 {
@@ -783,6 +829,17 @@ public struct VkFenceCreateInfo
     public VkStructureType sType;
     public nint pNext;
     public uint flags;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct VkQueryPoolCreateInfo
+{
+    public VkStructureType sType;
+    public nint pNext;
+    public uint flags;
+    public uint queryType;   // VkQueryType — 2 = VK_QUERY_TYPE_TIMESTAMP (the only value this backend uses)
+    public uint queryCount;
+    public uint pipelineStatistics;
 }
 
 [StructLayout(LayoutKind.Sequential)]

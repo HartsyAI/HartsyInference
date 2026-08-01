@@ -23,11 +23,21 @@ public sealed class VulkanBackend : IBackend
     private readonly string _spvDir;
     private bool _disposed;
 
-    // ── GEMM fast-path engagement counters (diagnostic only; see VulkanProfiler.Dump) ────────────────────────
+    // ── GEMM fast-path engagement counters ───────────────────────────────────────────────────────────────
     // Answers "is coopmat actually engaging?" directly instead of inferring it from dispatch counts, which
-    // can't distinguish a 1-dispatch coopmat launch from a 1-dispatch matmul_tiled fallback.
+    // can't distinguish a 1-dispatch coopmat launch from a 1-dispatch matmul_tiled fallback. Always counted
+    // (not gated on _profiler.IsEnabled — a `long` increment is free) so GemmEngagementCounts is accurate
+    // for tests without needing HARTSYINFERENCE_VK_PROFILE=1; the stderr summary in Dispose() stays
+    // profiler-gated since THAT'S a logging concern, not a tracking one.
     private long _coopmatGemmCount;
+    private long _coopmat2GemmCount;
     private long _tiledGemmCount;
+
+    /// <summary>Test/diagnostic accessor for the GEMM fast-path engagement counters — lets a test prove
+    /// WHICH path actually handled a dispatch (coopmat2 vs coopmat1 vs tiled fallback), since correctness
+    /// alone can't distinguish them (all three produce the same numeric result for a shape all three can
+    /// handle).</summary>
+    internal (long CoopMat2, long CoopMat, long Tiled) GemmEngagementCounts => (_coopmat2GemmCount, _coopmatGemmCount, _tiledGemmCount);
 
     // ── Step-graph capture (Phase 6e/7; see VulkanStepGraph's doc comment for the full design) ──────────────
     private VulkanStepGraph? _stepGraph;
@@ -495,6 +505,246 @@ public sealed class VulkanBackend : IBackend
         return true;
     }
 
+    /// <summary>Diagnostic-only entry point for <c>matmul_coopmat_blocked.comp.glsl</c> (2026-07-31) —
+    /// NOT called from <see cref="DispatchMatmul"/> or any production path. Exists purely so
+    /// correctness/throughput can be measured in isolation (unit test + GPU benchmark) before any decision
+    /// to integrate register blocking into the real dispatch path. Fixed BM=BN=64, WM=WN=32 (no device-
+    /// aware tile shrinking yet — this is a diagnostic, not production code); requires N, K exact multiples
+    /// of 16 (M may be anything — the shader bounds-checks it the same way
+    /// <c>matmul_coopmat_partial_m.comp.glsl</c> does) and F16 GEMM dtype. See
+    /// docs/Checklists/TROUBLESHOOTING.md for the full writeup and benchmark results.</summary>
+    internal bool TryDispatchCoopmatBlockedDiagnostic(
+        Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias, uint wm = 32, uint wn = 32)
+    {
+        if (!Vk.HasCooperativeMatrix) return false;
+        int N = transposeB ? (int)b.Shape[0] : (int)b.Shape[b.Shape.Rank - 1];
+        int M = (int)(output.ElementCount / N);
+        int K = transposeA ? (int)a.Shape[0] : (int)a.Shape[a.Shape.Rank - 1];
+        if ((N % 16) != 0 || (K % 16) != 0) return false;
+        if (output.DType != DType.F16 && output.DType != DType.F32) return false;
+        bool outputIsF32 = output.DType == DType.F32;
+
+        const uint BM = 64, BN = 64;
+        uint WM = wm, WN = wn;
+        uint subgroupSize = Vk.SubgroupSize;
+        uint subgroupsPerWg = (BM / WM) * (BN / WN);
+        uint localX = subgroupsPerWg * subgroupSize;
+        ulong sharedBytes = (ulong)(BM * 32 * 2 + 32 * BN * 2 + subgroupsPerWg * 16 * 16 * 4);
+        if (sharedBytes > Vk.MaxComputeSharedMemoryBytes)
+            throw new InvalidOperationException($"matmul_coopmat_blocked needs {sharedBytes} B shared memory, device has {Vk.MaxComputeSharedMemoryBytes} B.");
+
+        VulkanBuffer aBuf = GetBuffer(a);
+        VulkanBuffer bBuf = GetBuffer(b);
+        (VulkanBuffer aRes, VulkanBuffer? aOwned) = CastIfNeeded(a, aBuf, DType.F16);
+        (VulkanBuffer bRes, VulkanBuffer? bOwned) = CastIfNeeded(b, bBuf, DType.F16);
+        VulkanBuffer? biasRaw = null, biasOwned = null;
+        if (bias is not null)
+        {
+            biasRaw = GetBuffer(bias);
+            (VulkanBuffer biasF32, VulkanBuffer? owned) = CastIfNeeded(bias, biasRaw, DType.F32);
+            biasRaw = biasF32;
+            biasOwned = owned;
+        }
+
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, localX),
+                SpecConstant.UInt(1, 1),
+                SpecConstant.UInt(2, 1),
+                SpecConstant.UInt(10, BM),
+                SpecConstant.UInt(11, BN),
+                SpecConstant.UInt(12, subgroupSize),
+                SpecConstant.Bool(13, transposeA),
+                SpecConstant.Bool(14, transposeB),
+                SpecConstant.Bool(15, outputIsF32),
+                SpecConstant.Bool(16, bias is not null),
+                SpecConstant.UInt(17, WM),
+                SpecConstant.UInt(18, WN),
+            };
+            VulkanKernel k = GetKernel("matmul_coopmat_blocked", storageBufferCount: 5, spec);
+
+            Span<byte> pc = stackalloc byte[11 * 4];
+            BinaryWriteUInt(pc, 0, (uint)M);
+            BinaryWriteUInt(pc, 4, (uint)N);
+            BinaryWriteUInt(pc, 8, (uint)K);
+            BinaryWriteUInt(pc, 12, (uint)(transposeA ? M : K));
+            BinaryWriteUInt(pc, 16, (uint)(transposeB ? K : N));
+            BinaryWriteUInt(pc, 20, (uint)N);
+            BinaryWriteFloat(pc, 24, 1.0f);
+            BinaryWriteFloat(pc, 28, 0.0f);
+            BinaryWriteUInt(pc, 32, 0u);
+            BinaryWriteUInt(pc, 36, 0u);
+            BinaryWriteUInt(pc, 40, 0u);
+
+            ulong outHandle = outBuf.Handle;
+            ulong biasHandle = bias is not null ? biasRaw!.Handle : outHandle;
+            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, outHandle, biasHandle, outHandle };
+
+            uint groupsX = (uint)((N + BN - 1) / BN);
+            uint groupsY = (uint)((M + BM - 1) / BM);
+            Dispatch(k, bufs, pc, groupsX, groupsY, 1);
+
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan TryDispatchCoopmatBlockedDiagnostic dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (aOwned is not null) _xfer.FreeDevice(aOwned);
+            if (bOwned is not null) _xfer.FreeDevice(bOwned);
+            if (biasOwned is not null) _xfer.FreeDevice(biasOwned);
+        }
+        return true;
+    }
+
+    /// <summary>Opt-in switch for <see cref="TryDispatchCoopMat2"/> being tried (before <see cref="TryDispatchCoopmat"/>)
+    /// from <see cref="DispatchMatmul"/>. Defaults from <c>HARTSYINFERENCE_VK_COOPMAT2=1</c>, same
+    /// opt-in-property pattern as <see cref="EnableInt8Linear"/> — OFF by default. Deliberately not
+    /// default-on yet: this session's coopmat1 M-padding fix passed every synthetic test (CPU-reference
+    /// correctness, a 200-iteration stress test at Krea2's real scale, even two full real CLI runs) and
+    /// still caused a genuine `ErrorDeviceLost` on an 8-step real run (see
+    /// docs/Checklists/TROUBLESHOOTING.md) — a direct precedent for why a new GEMM dispatch path needs a
+    /// real end-to-end model run under sustained iteration before being trusted unconditionally, not just
+    /// synthetic GEMM correctness/throughput numbers.</summary>
+    public bool EnableCoopMat2 { get; set; } = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_COOPMAT2") == "1";
+
+    /// <summary>Cooperative-matrix-2 fast path for <see cref="DispatchMatmul"/>, tried before
+    /// <see cref="TryDispatchCoopmat"/> when <see cref="EnableCoopMat2"/> is set. Built on
+    /// <c>matmul_coopmat2.comp.glsl</c> (<c>VK_NV_cooperative_matrix2</c> — workgroup-scope,
+    /// tensor-layout-addressed, hardware-clamped GEMM; see docs/Checklists/TROUBLESHOOTING.md for the full
+    /// coopmat1-vs-coopmat2 investigation this came out of). Unlike <see cref="TryDispatchCoopmat"/>, this
+    /// has NO M/N/K alignment requirement at all — the hardware clamp mode zero-fills/drops out-of-bounds
+    /// tensor accesses. Specialized for transposeA=false, transposeB=true (the only combination
+    /// <see cref="Linear"/> — the real caller this exists for — ever uses) — throws for any other
+    /// combination rather than silently computing the wrong answer. Bias is fused directly into the shader
+    /// via a broadcast tensorLayoutNV (2026-07-31 revision) — an earlier follow-up-BroadcastAdd-dispatch
+    /// design measured FASTER in isolated GPU-only-time benchmarks but SLOWER in a real Krea2 e2e run: the
+    /// extra dispatch's host-side submission + the unconditional per-dispatch VkMemoryBarrier2 (see
+    /// ROADMAP.md's "per-dispatch barrier scoping" entry) isn't visible to VkQueryPool-timestamp-only
+    /// measurement, but it's very real — see docs/Checklists/TROUBLESHOOTING.md for the full writeup.</summary>
+    internal bool TryDispatchCoopMat2(
+        Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias, uint bk = 0)
+    {
+        if (!Vk.HasCooperativeMatrix2) return false;
+        if (transposeA || !transposeB)
+            throw new NotSupportedException("TryDispatchCoopMat2 only supports transposeA=false, transposeB=true (the production Linear-layer convention).");
+        if (output.DType != DType.F16 && output.DType != DType.F32) return false;
+        bool outputIsF32 = output.DType == DType.F32;
+
+        int N = (int)b.Shape[0];
+        int M = (int)(output.ElementCount / N);
+        int K = (int)a.Shape[a.Shape.Rank - 1];
+
+        uint BM = Vk.CoopMat2MGranularity;
+        uint BN = Vk.CoopMat2NGranularity;
+        // Swept BK in {16,32,64,128,256} against real shapes (see docs/Checklists/TROUBLESHOOTING.md):
+        // BK=16 (the bare K-granularity minimum) was measurably WORSE than larger values on K=3072 shapes
+        // (14983us vs ~9260-9925us) — each coopMatLoadTensorNV is itself an expensive workgroup-cooperative
+        // op, so more, smaller K-steps means paying that overhead more often. BK=64 was best-or-near-best
+        // across both swept shapes; use it as the default when the caller doesn't override.
+        uint BK = bk != 0 ? bk : 64u;
+        uint localX = Vk.CoopMat2WorkgroupInvocations;
+
+        VulkanBuffer aBuf = GetBuffer(a);
+        VulkanBuffer bBuf = GetBuffer(b);
+        (VulkanBuffer aRes, VulkanBuffer? aOwned) = CastIfNeeded(a, aBuf, DType.F16);
+        (VulkanBuffer bRes, VulkanBuffer? bOwned) = CastIfNeeded(b, bBuf, DType.F16);
+
+        // Bias always cast to F32, matching the accumulator's precision and matmul_coopmat.comp.glsl's own
+        // convention (see that kernel's binding-3 comment) — independent of the GEMM's F16 input dtype.
+        VulkanBuffer? biasOwned = null;
+        VulkanBuffer? biasRaw = null;
+        ulong biasHandle;
+        if (bias is not null)
+        {
+            biasRaw = GetBuffer(bias);
+            (VulkanBuffer biasF32, VulkanBuffer? owned) = CastIfNeeded(bias, biasRaw, DType.F32);
+            biasOwned = owned;
+            biasHandle = biasF32.Handle;
+        }
+        else
+        {
+            biasHandle = aRes.Handle;   // placeholder — HAS_BIAS=false means the shader never reads binding 4
+        }
+
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, localX),
+                SpecConstant.UInt(1, 1),
+                SpecConstant.UInt(2, 1),
+                SpecConstant.UInt(10, BM),
+                SpecConstant.UInt(11, BN),
+                SpecConstant.UInt(12, BK),
+                SpecConstant.Bool(15, outputIsF32),
+                SpecConstant.Bool(16, bias is not null),
+            };
+            VulkanKernel k = GetKernel("matmul_coopmat2", storageBufferCount: 5, spec);
+
+            Span<byte> pc = stackalloc byte[9 * 4];
+            BinaryWriteUInt(pc, 0, (uint)M);
+            BinaryWriteUInt(pc, 4, (uint)N);
+            BinaryWriteUInt(pc, 8, (uint)K);
+            BinaryWriteUInt(pc, 12, (uint)K);   // lda: A is [M,K] row-major
+            BinaryWriteUInt(pc, 16, (uint)K);   // ldb: B is [N,K] row-major (transposeB)
+            BinaryWriteUInt(pc, 20, (uint)N);   // ldc: C is [M,N] row-major
+            BinaryWriteUInt(pc, 24, 0u);
+            BinaryWriteUInt(pc, 28, 0u);
+            BinaryWriteUInt(pc, 32, 0u);
+
+            ulong outHandle = outBuf.Handle;
+            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, outHandle, outHandle, biasHandle };
+
+            uint groupsX = (uint)((N + BN - 1) / BN);
+            uint groupsY = (uint)((M + BM - 1) / BM);
+            Dispatch(k, bufs, pc, groupsX, groupsY, 1);
+
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan TryDispatchCoopMat2 dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (aOwned is not null) _xfer.FreeDevice(aOwned);
+            if (bOwned is not null) _xfer.FreeDevice(bOwned);
+            if (biasOwned is not null) _xfer.FreeDevice(biasOwned);
+        }
+        return true;
+    }
+
+    /// <summary>Diagnostic-only: measures PURE GPU execution time (via <see cref="VulkanGpuTimer"/>'s
+    /// <c>VkQueryPool</c> timestamps) of <paramref name="iterations"/> calls to <paramref name="dispatchOne"/>
+    /// — separates real kernel execution time from host-side submission/dispatch/wait overhead, which a
+    /// plain <c>Stopwatch</c>-around-<c>Sync()</c> measurement cannot do (it includes both). Not used on any
+    /// production path. See docs/Checklists/TROUBLESHOOTING.md for what this was built to answer.</summary>
+    internal double MeasureGpuTimeMs(int iterations, Action dispatchOne)
+    {
+        using VulkanGpuTimer timer = new(_vkDevice.Handle, Vk.TimestampPeriod);
+        nint cb = _stream.AcquireRecording();
+        timer.RecordReset(cb);
+        timer.RecordStart(cb);
+        for (int i = 0; i < iterations; i++) dispatchOne();
+        nint cbEnd = _stream.AcquireRecording();   // same buffer unless an internal auto-flush happened
+        timer.RecordEnd(cbEnd);
+        _stream.WaitIdleHost();   // submits + host-waits, guaranteeing RecordEnd's write has completed
+        return timer.ReadElapsedMs();
+    }
+
     /// <summary>Casts <paramref name="srcBuf"/> to <paramref name="want"/> if needed; caller must free the returned ownedTemp.</summary>
     /// <summary>Dequantizes a GGUF weight (Q4_0/Q5_0/Q8_0/Q4_K/Q5_K/Q6_K) to F32 via <see cref="CastIfNeeded"/>'s
     /// dequant path; test/tooling hook (mirrors <c>CudaBackend.DequantizeToF32</c>), not a hot path — the
@@ -836,6 +1086,20 @@ public sealed class VulkanBackend : IBackend
         // the output dtype, not just to F16.
         DType gemmDtype = ResolveGemmDtype(output.DType);
 
+        // Coopmat2 fast path — tried BEFORE coopmat1, opt-in only (see EnableCoopMat2's doc comment for
+        // why it isn't unconditional yet). Self-contained (does its own buffer acquisition/allocation), so
+        // this must run before the coopmat1/tiled path's own outBuf is allocated below, or a successful
+        // coopmat2 dispatch would leak that unused allocation. Gated on !transposeA && transposeB HERE
+        // (not just inside TryDispatchCoopMat2, which throws on any other combination) because
+        // DispatchMatmul is also the shared entry point for MatMul/BatchedMatMul, which call with
+        // transposeB=false — must fall through to coopmat1/tiled cleanly for those, not throw.
+        if (EnableCoopMat2 && gemmDtype == DType.F16 && !transposeA && transposeB
+            && TryDispatchCoopMat2(output, a, b, transposeA, transposeB, bias))
+        {
+            _coopmat2GemmCount++;
+            return;
+        }
+
         VulkanBuffer aBuf = GetBuffer(a);
         VulkanBuffer bBuf = GetBuffer(b);
         (VulkanBuffer aRes, VulkanBuffer? aOwned) = CastIfNeeded(a, aBuf, gemmDtype);
@@ -860,14 +1124,14 @@ public sealed class VulkanBackend : IBackend
         if (TryDispatchCoopmat(output, aRes, bRes, M, N, K, transposeA, transposeB,
                                gemmDtype, outBuf, bias, biasRes, biasRaw))
         {
-            if (_profiler.IsEnabled) _coopmatGemmCount++;
+            _coopmatGemmCount++;
             if (aOwned is not null) _xfer.FreeDevice(aOwned);
             if (bOwned is not null) _xfer.FreeDevice(bOwned);
             if (biasOwned is not null) _xfer.FreeDevice(biasOwned);
             return;
         }
 
-        if (_profiler.IsEnabled) _tiledGemmCount++;
+        _tiledGemmCount++;
         try
         {
             // Tile shape selected from M, N, K — see PickMatmulTile. Big tiles (128x128) win on
@@ -3294,11 +3558,12 @@ public sealed class VulkanBackend : IBackend
         // we lose the device just to be tidy).
         try { _profiler.Dump(); }
         catch (Exception ex) { Logs.Warning($"Vulkan Dispose: profiler dump failed: {ex}"); }
-        if (_profiler.IsEnabled && (_coopmatGemmCount + _tiledGemmCount) > 0)
+        if (_profiler.IsEnabled && (_coopmatGemmCount + _coopmat2GemmCount + _tiledGemmCount) > 0)
         {
-            long total = _coopmatGemmCount + _tiledGemmCount;
+            long total = _coopmatGemmCount + _coopmat2GemmCount + _tiledGemmCount;
             Console.Error.WriteLine(
-                $"  GEMM fast-path: coopmat={_coopmatGemmCount} ({100.0 * _coopmatGemmCount / total:F1}%), " +
+                $"  GEMM fast-path: coopmat2={_coopmat2GemmCount} ({100.0 * _coopmat2GemmCount / total:F1}%), " +
+                $"coopmat={_coopmatGemmCount} ({100.0 * _coopmatGemmCount / total:F1}%), " +
                 $"tiled-fallback={_tiledGemmCount} ({100.0 * _tiledGemmCount / total:F1}%)");
         }
         // Decode-graph scalar control buffers (Phase 6) aren't in any weight/activation cache _xfer.Dispose()

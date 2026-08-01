@@ -152,13 +152,15 @@ a stale code comment claiming otherwise.
   behind CUDA (see the flash-attention and GEMM tables above) — a far larger, already-quantified gap — this
   is not worth chasing now. Revisit only if per-dispatch overhead specifically (not kernel throughput)
   shows up as the bottleneck in a real end-to-end profile.
-- [ ] **coopmat2** (`VK_NV_cooperative_matrix2`): workgroup-scope tiles, fused dequant-on-load,
-  `coopMatReduceNV`-fused softmax, bias/activation epilogue fusion (`VULKAN_OPTIMIZATION.md` §4.2). All
-  capability flags confirmed present on the 3060 — genuine reachable ceiling, but explicitly NVIDIA-only
-  and the highest-effort item in this section. Deliberately deferred past this Phase 5 pass (user chose
-  "portable items now, skip coopmat2" — 2026-07-29) in favor of INT8 wiring/dequant/flash-attention, which
-  land on every vendor exposing the base features; revisit once a coopmat1 vs coopmat2 measured gap on the
-  3060 justifies the NVIDIA-only investment.
+- [~] **coopmat2** (`VK_NV_cooperative_matrix2`): the base GEMM kernel is built, measured, wired into
+  `Linear`/`DispatchMatmul` behind an opt-in flag (`EnableCoopMat2`), and validated against real Krea2
+  weights (2026-07-31, see the §2 GEMM-perf-tuning update below) — correctness is perfect, but real e2e
+  wall-clock REGRESSED, contradicting the isolated 1.2-2.5x-speedup benchmark. Stays off by default. **Still
+  open**: benchmark against the correct coopmat1 competitor (`matmul_coopmat_partial_m`, not
+  `matmul_coopmat`), fuse bias into the shader instead of a follow-up dispatch, isolate an unexplained ~4s
+  one-time per-run stall, fused dequant-on-load, `coopMatReduceNV`-fused softmax,
+  `VULKAN_OPTIMIZATION.md` §4.2's broader epilogue fusion, diffusion-shaped tile-size tuning (ggml PR
+  #10942). Explicitly NVIDIA-only.
 - [~] **Wire the INT8 quantizer into `Linear`'s call surface** — **op-level wiring done** (2026-07-29);
   **NOT the same as this section's original ask**, which was model *loading* wiring with an e2e SSIM/parity
   gate — that part is still open, see below. What landed: `VulkanBackend.Linear` has an opt-in INT8
@@ -400,6 +402,75 @@ a stale code comment claiming otherwise.
   capability gap (and sets up any future coopmat-kernel-throughput work to reach these GEMMs automatically)
   but was never going to close Krea2's CUDA gap on its own. **Kept in the codebase** (unlike the second,
   reverted attempt) because it's proven correct and safe. See `TROUBLESHOOTING.md` for the full writeup.
+- [ ] **Update 2026-07-31 — register blocking (ggml's core coopmat optimization) tested directly and found
+  to be a net LOSS on this RTX 4090; the 30–157× gap is confirmed NOT primarily an arithmetic-intensity
+  problem.** Read ggml/llama.cpp's actual `mul_mm.comp` source (not just PR summaries) and built
+  `matmul_coopmat_blocked.comp.glsl` — a standalone diagnostic kernel (not wired into any production path)
+  implementing its core technique: each subgroup computes a grid of accumulators from one shared-memory-
+  staged tile instead of one accumulator per direct global load. Verified correct (4/4 CPU-reference cases),
+  then A/B'd against the existing naive kernel at the GEMM table's own shapes: **register blocking
+  (WM=WN=32, 4 subgroups/workgroup instead of 16): 0.79–1.05×, neutral to worse** — losing occupancy costs
+  more than the reduced memory traffic saves on this GPU. **Plain shared-memory staging alone (occupancy
+  unchanged): 1.00–1.41×, a real but modest win**, correlated with K-depth. Neither closes a meaningful
+  fraction of 30–157×. **This redirects the investigation**: the bottleneck isn't primarily memory access
+  pattern — it's likely raw `coopMatMulAdd` throughput on this driver's coopmat1 implementation vs. CUDA's
+  hand-tuned WMMA/MMA, or fixed per-dispatch overhead no kernel-level tiling can amortize. Real GPU profiling
+  (Nsight Compute / Vulkan validation layers) is the recommended next step — neither is available on this
+  box (no passwordless `sudo` to install `vulkan-validationlayers`, though the package exists). Barring that,
+  `VK_NV_cooperative_matrix2` (NVIDIA-only, §3 below) is the next concrete kernel-level lever, since it
+  changes the underlying instruction/memory path rather than the tiling strategy around the same coopmat1
+  instructions this pass tuned. See `benchmarks/scoreboards/VULKAN.md` for the full numbers and a
+  methodology caveat on the absolute (not relative) timing figures.
+- [x] **Update 2026-07-31 — got real GPU profiling working with root access; the true gap is 10–22×, not
+  30–157×, and coopmat is NOT meaningfully faster than the plain scalar kernel on this hardware.** Nsight
+  Compute (already installed) confirmed CUDA-only (`No kernels were profiled` against the Vulkan process,
+  zero Vulkan/graphics mentions in its own `--help`); Nsight Graphics (the tool that would show real SM/
+  tensor-core utilization) isn't apt-installable. **Built real GPU-side profiling instead**: `VulkanGpuTimer`
+  + `VulkanBackend.MeasureGpuTimeMs`, using `VkQueryPool` timestamps (`vkCmdWriteTimestamp2`) — a core Vulkan
+  feature, always available, the standard fallback when vendor tooling isn't cooperating. This measures pure
+  GPU execution time with zero host-overhead confound, unlike every prior `Stopwatch`-based number in this
+  file. Result: the GEMM table's shapes actually run at **10.6–22.4× vs. CUDA**, not 30–157× — most of that
+  earlier figure was host/dispatch/sync overhead specific to an isolated-per-call benchmark methodology, not
+  kernel throughput. **Bigger finding**: re-measuring with `HARTSYINFERENCE_VK_DISABLE_COOPMAT=1` (forcing
+  the scalar `matmul_tiled` fallback, confirmed via the engagement counters) produced a STATISTICALLY
+  IDENTICAL number to coopmat-enabled (22.7× vs. 21.3×) — coopmat isn't actually faster than the plain
+  scalar kernel at these shapes on this GPU. This is the finding that makes every other result this session
+  consistent (why raising coopmat engagement 0%→84.8% didn't speed up Krea2; why register blocking/staging
+  only moved the needle 0.8–1.4×) — those techniques all assume coopmat's tensor-core path has more headroom
+  than a well-written scalar kernel, and if it doesn't, tuning its tiling can't create headroom that isn't
+  there. Most likely explanation: `VK_KHR_cooperative_matrix` (coopmat1) on this driver isn't compiling down
+  to real tensor-core instructions as effectively as CUDA's WMMA/MMA PTX — a driver/compiler characteristic,
+  not fixable by further kernel restructuring. **Next step**: `VK_NV_cooperative_matrix2` (a genuinely
+  different instruction path, not just different tiling — §3 below) as the concrete next experiment, or
+  Nsight Graphics (needs an NVIDIA account login) for a direct SASS-level answer. See
+  `benchmarks/scoreboards/VULKAN.md` for full numbers.
+- [x] **Update 2026-07-31 — `VK_NV_cooperative_matrix2` built and measured: a real 1.2-2.5x speedup over
+  coopmat1/scalar, confirming the hypothesis above, though it does NOT close the CUDA gap.** Built
+  `matmul_coopmat2.comp.glsl` (WORKGROUP-scope coopmat, `tensorLayoutNV` + `coopMatLoadTensorNV`/
+  `coopMatStoreTensorNV` direct-to-global-memory addressing, built-in bounds clamping — architecturally
+  distinct from coopmat1, not just a different tiling of the same instructions). Wired full device support:
+  extension detection, `vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV` capability
+  querying (RTX 4090 auto-selects the largest FP16/FP32 workgroup-scope config: 32x32 tile granularity,
+  K-granularity 16, 256 invocations/workgroup), and the `VkPhysicalDeviceCooperativeMatrix2FeaturesNV`
+  feature-chain/extension-enable plumbing (`VulkanCapabilities.HasCooperativeMatrix2` +
+  `CoopMat2{M,N,K}Granularity`/`CoopMat2WorkgroupInvocations`). Correctness verified including shapes where
+  none of M/K/N are multiples of the tile size — the clamp-mode addressing needs zero manual bounds-checking,
+  unlike every coopmat1 kernel here. K-block size swept {16..256}; BK=64 is the measured-best default.
+  **GPU-only-time result: coopmat2 is 1.2-2.5x faster than naive coopmat1/scalar (best on the smallest-K
+  shape), landing the CUDA gap at 8.3-15.6x — roughly HALF the prior 10.5-25.1x gap.** Confirms coopmat1's
+  tensor-core engagement specifically was the bottleneck, as hypothesized. **Update, same day**: wired into
+  `Linear`/`DispatchMatmul` behind a new opt-in `VulkanBackend.EnableCoopMat2` property
+  (`HARTSYINFERENCE_VK_COOPMAT2=1`, off by default) and validated against real Krea2 weights — correctness
+  is perfect (5/5 runs byte-identical PNG output vs. baseline), but real e2e wall-clock is a REGRESSION
+  (65.7-65.9s vs. 58.6s baseline, reproducible), not the win the isolated benchmark predicted. Root causes:
+  the isolated benchmark compared against the wrong coopmat1 variant (`matmul_coopmat`, not
+  `matmul_coopmat_partial_m`, which is what coopmat1 actually uses for most of Krea2's real shapes and was
+  never benchmarked against), the un-fused bias epilogue costs a real extra dispatch, and an unexplained
+  ~4-second one-time per-run stall the isolated benchmark's warmup loop couldn't see. **Stays off by
+  default.** See `benchmarks/scoreboards/VULKAN.md` and `TROUBLESHOOTING.md` for full numbers,
+  `tests/HartsyInference.Vulkan.Tests/VulkanCoopMat2LinearTests.cs` for the wiring tests. **Next step**:
+  benchmark against `matmul_coopmat_partial_m` specifically (not `matmul_coopmat`), fuse bias into the
+  shader, isolate the ~4s stall — THEN reconsider ggml PR #10942's tile-size tuning or Nsight Graphics.
 - [ ] **Video/audio/vision domain fill (Phase 7 menu items)** — explicitly deferred, not evaluated this
   session: Wan 3D/volumetric conv (blocks the Wan VAE), grid-sample/MSDA (blocks deformable-attention
   detection models), dedicated audio AdaIN/activation fused kernels. No model in either of these domains
