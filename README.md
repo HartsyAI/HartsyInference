@@ -85,7 +85,7 @@ dotnet run -c Release --project src/HartsyInference.Cli -- \
 dotnet run -c Release --project src/HartsyInference.Cli -- transcribe speech.wav -m whisper-base
 ```
 
-Commands span every modality — `text`, `image`, `transcribe`, `speak`, `3d`, `vision`, `music`, `video`, `world`, `convert` (voice conversion), `fx separate` / `fx enhance` (stem separation / speech enhancement) — plus catalog helpers `list`, `models`, `pull`, and `preview` (inline terminal image display). Common flags: `-b|--backend cpu|cuda|vulkan`, `-m|--model <name>`, `--model-path <path>`. Run `hartsy <command> --help` for a command's full option set.
+Commands span every modality — `text`, `image`, `transcribe`, `speak`, `3d`, `vision`, `music`, `video`, `world`, `restore` (SeedVR2 video/image restoration: `hartsy restore old_clip.mp4` → upscaled/deartifacted PNG frames + MP4; also chainable as `hartsy video ... --restore`), `convert` (voice conversion), `fx separate` / `fx enhance` (stem separation / speech enhancement) — plus catalog helpers `list`, `models`, `pull`, and `preview` (inline terminal image display). Common flags: `-b|--backend cpu|cuda|vulkan`, `-m|--model <name>`, `--model-path <path>`. Run `hartsy <command> --help` for a command's full option set.
 
 > [!TIP]
 > `pull` downloads a model from HuggingFace (or registers a local path) into the cache; `list` and `models` show the catalog and what's already cached. Image checkpoints also resolve from a ComfyUI-style layout under `<repo>/Models`.
@@ -338,7 +338,7 @@ The engine covers a very wide model set across every modality. The **[benchmark 
 | **Image** | SD1.5 / SDXL (UNet); Flux.1/.2, SD3, Chroma / Radiance, Qwen-Image (+ Edit), HunyuanImage, HiDream, AuraFlow, Lumina 2, ERNIE-Image, Kandinsky 5, OmniGen 2, Ideogram 4 (DiT / MMDiT / NextDiT) | [MODEL_STATUS_IMAGE](docs/Checklists/MODEL_STATUS_IMAGE.md) |
 | **Audio & Music** | Whisper / Moonshine (STT); Kokoro, Piper, StyleTTS2, Bark, Spark-TTS, CosyVoice, VibeVoice, MeloTTS, F5-TTS clone (TTS); ACE-Step, MusicGen, YuE, HeartMuLa (music); 9 neural codecs | [MODEL_STATUS_AUDIO](docs/Checklists/MODEL_STATUS_AUDIO.md) |
 | **Vision** | CLIP / SigLIP / DINOv2-3 embeddings; YOLO8 / YOLO11 / RT-DETR / Grounding DINO detection; SAM / SAM 2 / 2.1 segmentation; Depth-Anything-V2 depth estimation; face detection | [MODEL_STATUS_VISION](docs/Checklists/MODEL_STATUS_VISION.md) |
-| **Video** | LTX-Video, Wan 2.x (T2V + I2V), HunyuanVideo, Lance, Kandinsky 5 Video | [MODEL_STATUS_VIDEO](docs/Checklists/MODEL_STATUS_VIDEO.md) |
+| **Video** | LTX-Video, Wan 2.x (T2V + I2V), HunyuanVideo, Lance, Kandinsky 5 Video; **SeedVR2 3B/7B video+image restoration** (`hartsy restore` — one-step upscale/deartifact/denoise, parity-verified SSIM 0.9995 vs the Python reference) | [MODEL_STATUS_VIDEO](docs/Checklists/MODEL_STATUS_VIDEO.md) |
 | **3D** | TripoSR, Hunyuan3D-2 (image → mesh; glTF / OBJ / PLY export) | [MODEL_STATUS_3D](docs/Checklists/MODEL_STATUS_3D.md) |
 | **World / interactive** | Oasis, DIAMOND (action-conditioned, real-time, loadable today); Matrix-Game 2.0 / 3.0 and Hunyuan-GameCraft are parity-verified but catalogued only — no `WorldService` loader yet, multi-checkpoint sets 9-51GB | [MODEL_STATUS_WORLD](docs/Checklists/MODEL_STATUS_WORLD.md) |
 

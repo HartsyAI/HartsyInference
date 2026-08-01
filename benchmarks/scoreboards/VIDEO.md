@@ -31,6 +31,26 @@ how to reproduce these numbers. Standard workload (unless noted): 25 frames, 512
 Row count: 7. Bold marks the faster (lower-wall-clock) side of each head-to-head comparison; rows with no
 ComfyUI baseline are left unbolded.
 
+## SeedVR2-3B restoration — bring-up baseline vs Python reference (2026-08-01)
+
+Not a T2V row: restoration (`hartsy restore`), measured at the E2E-parity operating point — 9-frame
+Big Buck Bunny 360p clip, 640×360-area output, 4090, N=5, 95% CI (Student-t df=4). Correctness is
+settled separately (C# output ≡ Python at SSIM 0.99950 with injected reference noises — see
+`PARITY_VERIFICATION.md`); this row is the SPEED baseline for the future perf pass.
+
+| Impl | Shape | Wall (9 frames) | s/frame | Peak VRAM |
+|---|---|---|---|---|
+| Python reference | **warm in-process**, bf16, causal slicing, dit-offload | 1.45 s ± 0.09 | 0.161 | 17.6 GiB |
+| HartsyInference (bring-up) | **cold CLI e2e** (process + 13.6 GB fp32 mmap load + ffmpeg decode/mux), fp32, host-math DiT | 44.00 s ± 0.27 | 4.89 | ~16 GiB |
+
+**Read the caveats before quoting a ratio:** the runs differ in warmth (in-process warm vs full CLI
+cold start), dtype (bf16 vs fp32), and DiT execution (torch device kernels vs the deliberate host-math
+bring-up shape — window gather/scatter, RoPE, qk-norm, AdaSingle all CPU-side). From the E2E gate run,
+pipeline-only C# time at this shape is ~52.7 s *including first CUDA touch*; the perf-pass levers
+(device window pack/unpack, GPU RoPE à la `HunyuanImageRope.ApplyGpu`, F16 activations, graph capture)
+are enumerated in `MODEL_STATUS_VIDEO.md` §SeedVR2 follow-ups. Matrix-scale numbers (25f, 960×540-area):
+~14 s/frame, 17.1 GB peak, 7/7 clips green.
+
 ## Notes
 
 - **Wan 2.1 T2V 14B is the only video model at parity with ComfyUI** (30.58 s vs 30.62 s) — first video

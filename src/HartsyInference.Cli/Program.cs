@@ -66,6 +66,9 @@ public static class Program
             config.AddCommand<VideoCommand>("video")
                 .WithDescription("Generate a video (frame sequence) from a prompt with any registered video family (CUDA).")
                 .WithExample("video", "a cat walking through a sunlit garden", "-m", "ltx-video");
+            config.AddCommand<RestoreCommand>("restore")
+                .WithDescription("Restore a degraded video or image with SeedVR2 (upscale, deartifact, denoise).")
+                .WithExample("restore", "old_clip.mp4", "-m", "seedvr2-3b");
             config.AddCommand<WorldCommand>("world")
                 .WithDescription("Roll out an Oasis world model from a first-frame image (canned action plan).");
             config.AddCommand<PreviewCommand>("preview")

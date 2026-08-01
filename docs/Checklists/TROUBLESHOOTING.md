@@ -1331,13 +1331,40 @@ numerics (channel-width assumptions are where it breaks).
   (crashed a test host outright at 14/24 simulated blocks with no step-graph capture involved at all — a
   DIFFERENT OOM trigger than the already-root-caused step-graph one). **Not fixed this pass** — a real
   reclaim-cadence fix needs care to avoid trading this away for more `Sync()`-induced host stalls, which is
-  exactly the kind of overhead this whole investigation is trying to eliminate. **The core ~53x marginal
-  per-step / ~82-135ms-vs-~33ms Linear-call mystery remains OPEN** — the isolated SwiGlu-only benchmark still
-  doesn't reproduce it even at the real shape with real dependencies; the next things to try are a full
-  `Krea2Block`-scale synthetic benchmark (attention + SDPA + RmsNorm + Modulate + GatedResidual, not just
-  SwiGlu, at the real 28-block count) or genuine GPU-level profiling (Nsight Graphics, still not available
-  on this box) to see what's actually different about full-scale real-model execution. See
-  `VulkanFp8WeightCastOverheadBenchmark.cs` for the benchmarks backing all three ruled-out hypotheses.
+  exactly the kind of overhead this whole investigation is trying to eliminate.
+
+- **Solved: the full `Krea2Block` (with attention) reproduces and exceeds the real ~82-135 ms/Linear-call
+  cost, and it's coopmat-independent — pointing squarely at the allocator pooling bug as the real driver
+  of the ~53x marginal-per-step gap.** (2026-08-01, immediate follow-on — "next lever" after the entry
+  above.) Built `VulkanKrea2BlockFullScaleBenchmark.cs`, using the REAL `Krea2Block`/`Krea2Attention`
+  classes directly (not a re-implementation) with synthetic FP8 weights at Krea2's real config
+  (hidden=6144, ffnInner=16384, 48 heads/12 kv-heads, headDim=128) and real joint sequence length
+  (imgSeq=4096 + txtSeq=13 = 4109, matching a real 1024x1024 generation) — the piece the earlier
+  SwiGlu-only benchmark was missing: full attention (QKV projections, per-head RMSNorm, GQA, RoPE, SDPA,
+  sigmoid output gate, out-proj), not just the FFN half. **Result: 160-170 ms/GEMM-call — matching and
+  exceeding the real run's 82-135 ms/call**, the first synthetic reproduction all investigation. Flat
+  across 2 vs. 4 simulated blocks (160 vs. 165 ms/call — confirms again it's not block-count scaling) AND
+  flat across `EnableCoopMat2` on vs. off (162 ms with coopmat2, 170 ms with coopmat1 — confirms it's NOT
+  about which GEMM kernel runs at all). What correlates instead: `reserved` VRAM hit **19.8 GB at just 4
+  synthetic blocks** (vs. real Krea2's 28 blocks + 12.5 GB of actual weights) and allocator block count hit
+  268 — the SAME pooling/reclaim bug found in the SwiGlu-only investigation, but now shown to be triggered
+  MUCH more severely by attention's rich diversity of small, differently-shaped intermediate tensors
+  (per-head Q/K/V, permutes, RoPE outputs, GQA-repeated K/V) than by the FFN's 2-3 recurring large sizes
+  (which pool cleanly even at 8 simulated blocks). **This is now the clear next lever**: fixing (or at
+  least mitigating) `VulkanMemoryAllocator`'s block-pooling/reclaim-cadence gap is very likely the
+  single biggest remaining factor in the real-world Vulkan-vs-CUDA gap — bigger than raw GEMM kernel
+  throughput, which is "only" 8.3-15.6x behind CUDA in isolation vs. the ~53x real marginal-per-step gap.
+  Not fixed this pass (needs a careful design — more aggressive reclaim trades against more `Sync()`-
+  induced host stalls, the same tension flagged in the entry above) but the root cause is now identified
+  with high confidence, not just suspected. **New assembly-wide gap also found and fixed along the way**:
+  this benchmark's real VRAM footprint (up to ~20 GB) exposed that `HartsyInference.Vulkan.Tests` had no
+  GPU-test parallelism control — xUnit's default cross-class parallelism let multiple `VulkanBackend`
+  instances from unrelated test classes allocate concurrently against the same physical device, causing
+  spurious `ErrorOutOfDeviceMemory` failures in PRE-EXISTING, unrelated tests
+  (`Backend_AffineBroadcastLastDim_MatchesCpu`, `Compare_Naive_Vs_Blocked_Coopmat_GpuOnlyTime` — both pass
+  cleanly alone). Added `[assembly: CollectionBehavior(DisableTestParallelization = true)]` — there's no
+  legitimate reason for tests sharing one physical GPU to run concurrently. All 167 tests pass with it in
+  place. See `VulkanKrea2BlockFullScaleBenchmark.cs` and `AssemblyInfo.cs`.
 
 ---
 

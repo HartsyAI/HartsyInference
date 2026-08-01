@@ -1,5 +1,13 @@
 # SeedVR2 Architecture — One-Step Diffusion Video Restoration
 
+> **STATUS: IMPLEMENTED & VERIFIED (2026-08-01).** All 7 port phases parity-gated (window partition exact;
+> preprocess 2.3e-6; VAE ≤2.9e-6 real-weight; DiT trace ≤8.9e-4; E2E vs Python SSIM 0.99950 / 56.6 dB).
+> 7-clip real-footage matrix green on the 4090 (~14 s/frame @ 960×540-area, 17.1 GB peak). Surfaces:
+> `hartsy restore`, `hartsy video --restore`, `/v1/native/restore[/stream]`, SwarmUI "Video Restore" group.
+> Evidence: `MODEL_STATUS_VIDEO.md` (SeedVR2 rows) + `PARITY_VERIFICATION.md` (§VIDEO + bugs ledger).
+> Open follow-ups: fp32 720p-area activation ceiling (bf16/tiled VAE), host-math DiT perf pass, publish
+> converted weights to the catalog repo. §2.5 below records the decoded semantics the port depends on.
+
 Research notes for porting ByteDance-Seed **SeedVR2** (ICLR 2026) into HartsyInference.
 Everything below was read from the reference implementation at
 `github.com/ByteDance-Seed/SeedVR` (Apache 2.0), not from the paper prose — the paper
@@ -189,7 +197,52 @@ Sizing at 720p (1280×720): latent 160×90 → patchified 80×45. Windows are ~1
 `wt` temporal. A 100-frame clip → 25 latent frames → `wt = ceil(25/4) = 7`, so
 **~2.8k tokens per window, ~36 windows per layer**.
 
-### 2.5 Dependency audit
+### 2.5 Decoded implementation semantics (verified against reference code + probes, 2026-08-01)
+
+Recorded here so the port never re-derives them. All empirically verified.
+
+**AdaSingle modulation** (`modulation.py`): shared emb (b,15360) is laid out `(d l g)` — for channel d,
+layer l∈{attn=0,mlp=1}, gate-component g∈{shift=0,scale=1,gate=2}: element index = d·6 + l·3 + g.
+Per-block learned vectors combine additively: mode "in" → `hid·(scaleA+scaleB) + (shiftA+shiftB)`;
+mode "out" → `hid·(gateA+gateB)`. No "1+scale" at runtime — the +1 is baked into the learned scale init.
+
+**Tail `vid_out_ada` cache-collision (LANDMINE, verified by probe).** With `layers=["out"]` the naive
+reshape is dimensionally impossible (crashes standalone). In the real forward it works ONLY because the
+`emb_repeat_0_vid` cache entry — stored by every block's attn-layer ada — is hit by the tail's idx=0
+lookup. Effective trained semantics: `vid_out = vid·(emb_attn_scale + out_scale) + (emb_attn_shift +
+out_shift)` — the tail reuses the ATTN slice of the emb, not an "out" slice. Port this rule directly.
+
+**SwiGLU** (`mlp.py`): `proj_out(silu(proj_in_gate(x)) · proj_in(x))`, no biases;
+hidden = round_up(2·dim·4/3, 256) = 6912 for dim 2560.
+
+**TimeEmbedding** (`embedding.py`): sinusoidal dim 256, `flip_sin_to_cos=False`, `downscale_freq_shift=0`
+(sin half first, then cos) → Linear(256→2560) → SiLU → Linear(2560→2560) → SiLU → Linear(2560→15360).
+
+**Patchify** (`patch_v1.py`): tokens are channels-LAST. `b c (T t)(H h)(W w) → b T H W (t h w c)` with
+patch order t-outer, h, w, c-inner; for 1×2×2: token vec = [c@(h0,w0), c@(h0,w1), c@(h1,w0), c@(h1,w1)],
+then Linear(132→2560). PatchOut mirrors (Linear 2560→64, inverse rearrange). Latents already arrive
+channels-last from `vae_encode` (`rearrange b c ... -> b ... c`).
+
+**Attention block flow** (`mmattn.py` NaSwinAttention): per-branch fused QKV Linear (no bias) → window
+gather of vid tokens → per-branch RMS qk-norm (head_dim 128, affine) → window-local mmrope3d (video: axial
+freqs over (1024,128,128) table sliced `[l:l+f,:h,:w]` — temporal OFFSET BY TEXT LENGTH l; text: 1D lang
+RoPE θ=10000 dim 42, repeated ×3 → 126 of 128 dims... freqs (21,) per checkpoint) → per-window sequence
+[vid_window ; full text] → varlen attention → unconcat → scatter back → per-branch proj_out (with bias).
+Text tokens are REPLICATED into every window. RoPE positions restart per window (window_shape, not global).
+
+**VAE decoded semantics** (all parity-verified at ≤3e-6 relL2 vs real weights):
+per-frame GroupNorm stats (`(b t) c h w`, NOT clip-wide); zero spatial conv padding (not replicate);
+temporal causal pad = 2× frame-0 replicate; downsamplers pre-pad (0,1,0,1) zeros then stride-2 pad-0 conv;
+upsampler = 1×1×1 upscale_conv → channel-to-space `(x y z c)` order → drop output frame INDEX 1 when
+temporal (T→2T−1; LTX drops index 0 — different) → k3 causal conv; encoder emits mean‖logvar (32ch, no
+quant convs), runner SAMPLES posterior (`use_sample: True`); latent → DiT is channels-last ×0.9152.
+
+**Bugs the parity harness caught so far** (for the PARITY_VERIFICATION ledger):
+1. torchvision AA bicubic kernel is a=−0.5 (PIL-compatible), not torch's non-AA −0.75 → 0.18 maxAbs.
+2. ATen computes resize weights in float32 (scalar_t) — double-precision weights drift linearly with
+   output index (3.4e-5 at i≈1000).
+
+### 2.6 Dependency audit
 
 | Reference dep | Needed? | Replacement |
 |---|---|---|

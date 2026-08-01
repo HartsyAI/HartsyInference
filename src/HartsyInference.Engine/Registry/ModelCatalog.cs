@@ -1493,6 +1493,42 @@ public static class ModelCatalog
                 },
             },
 
+            // Restoration (SeedVR2). Weights ship converted (pth→safetensors via tools/); the HF repo below
+            // is the Hartsy re-publish target — Sha256 pinned only after a verified download (repo convention).
+            // Until published, place the converted files under Models/Video/SeedVr2/ and the resolver finds them.
+            new CatalogEntry
+            {
+                Id = "seedvr2-3b", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (video/image restoration)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_3b_dit_f32.safetensors",
+                        TargetSubdir = "Video/SeedVr2", Role = "transformer" },
+                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_vae_f32.safetensors",
+                        TargetSubdir = "Video/SeedVr2", Role = "vae" },
+                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_embeddings.safetensors",
+                        TargetSubdir = "Video/SeedVr2", Role = "embeddings" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (video/image restoration)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // 7B ships F16-converted (the fp32 state dict is 33 GB; F16 halves disk and GEMM
+                    // weights load F16 fine — host-math vectors upcast at load).
+                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_7b_dit_f16.safetensors",
+                        TargetSubdir = "Video/SeedVr2", Role = "transformer" },
+                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_vae_f32.safetensors",
+                        TargetSubdir = "Video/SeedVr2", Role = "vae" },
+                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_embeddings.safetensors",
+                        TargetSubdir = "Video/SeedVr2", Role = "embeddings" },
+                },
+            },
+
             // Video
             new CatalogEntry
             {

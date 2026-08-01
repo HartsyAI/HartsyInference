@@ -6,6 +6,44 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what a
 stable release will require. Dates are UTC.
 
+## [2.0.0-alpha.6] — 2026-08-01
+
+SeedVR2 video/image restoration — a new modality, end to end.
+
+### Added
+- **SeedVR2 one-step video restoration** (`Modality.Restore`, catalog ids `seedvr2-3b`/`seedvr2-7b`):
+  NaDiT windowed MM-DiT + s8c16t4 causal video VAE ported to pure C#, every stage parity-gated against
+  the ByteDance reference — window partition **exact** (2,490 slices), preprocessing maxAbs **2.3e-6**,
+  VAE relL2 **≤2.9e-6** vs real weights, full-model E2E **SSIM 0.99950 / 56.6 dB PSNR** vs the Python
+  pipeline with injected reference noises. Surfaces: `hartsy restore <video|image>` (PNG frames + H.264
+  MP4 out), `--restore` chain on `hartsy video`, REPL `/mode restore`, `POST /v1/native/restore[/stream]`,
+  and the SwarmUI extension's "Video Restore" param group. 7-clip real-footage matrix verified on the
+  4090 (USIA Reagan '87, NASA Apollo 11, JFK '61, Steamboat Willie, Prelinger '62, Big Buck Bunny
+  ground-truth, still-image t==1 branch): 25-frame clips at 960×540-area, **~14 s/frame, 17.1 GB peak,
+  zero OOM**. Ground-truth profile matches the paper: pixel metrics prefer bicubic (SSIM −0.05) but
+  **LPIPS improves 26–28%** (0.735→0.541 extreme; 0.448→0.324 mild) — it repaints, it doesn't
+  reconstruct; `--strength` guards oversharpening.
+- **`FfmpegProcessDecoder`** (ffmpeg/ffprobe child processes) — first video-INPUT path in the engine;
+  `VideoClip`/`RestoreRequest` DTOs; `TorchResize` (torchvision-exact antialiased bicubic, a=−0.5
+  float32 weights — two silent-divergence bugs caught by parity, see PARITY_VERIFICATION).
+- **Reference quirks ported deliberately** (SEEDVR2_ARCHITECTURE.md §2.5): the tail `vid_out_ada`
+  cache-collision (uses the ATTN emb slice — the code as written is dimensionally impossible), last-layer
+  `vid_only` semantics incl. the txt self-residual doubling, per-frame VAE GroupNorm stats, asymmetric
+  (0,1,0,1) downsampler padding, MAGViT `(x y z c)` pixel-shuffle dropping output frame index 1.
+
+### Known limitations
+- fp32 whole-clip VAE activations cap restoration at ~960×540-area on 24 GB (5-frame chunks); 720p+
+  needs bf16 activations or tiled VAE — tracked in MODEL_STATUS_VIDEO remaining work.
+- DiT window gather/scatter and RoPE run host-side (bring-up shape): ~14 s/frame. Residency/CUDA-graph
+  optimization is the follow-up perf pass.
+- Catalog weights point at `HartsyAI/SeedVR2-safetensors` (unpublished — convert with
+  `tools/convert_pth_to_safetensors.py` or place files under `Models/Video/SeedVr2/`; Sha256 pinned
+  after first verified publish).
+- **seedvr2-7b is catalog-registered but BLOCKED**: its smoke run revealed the 7B is the **v1 NaDiT**
+  (`models/dit`, `qk_rope`/`shared_qkv`) whose state-dict keys coincide with v2 — it loaded and produced
+  plausible-but-wrong mud (GT SSIM 0.71 vs 3B's 0.88). `SeedVr2Config.Detect` now throws on the v1
+  signature instead of running it; the v1 port is tracked in MODEL_STATUS_VIDEO.
+
 ## [2.0.0-alpha.5] — 2026-07-27
 
 Low-VRAM generation, a GPU-memory leak fix, and selectable devices.

@@ -127,9 +127,12 @@ public sealed class VulkanFp8WeightCastOverheadBenchmark
     /// chained version's ms/call is much closer to the real run's ~82-135 ms/call than the independent
     /// version's ~17 ms/call, dependency-chain serialization (not weight-cast, not raw GEMM throughput) is
     /// the dominant remaining real-world cost.</summary>
+    // 8 blocks reserved ~17GB (close to this box's real ceiling) — risky under xUnit's default cross-class
+    // test parallelism (no [Collection] serialization exists for GPU tests in this suite). Reduced to 6,
+    // which still shows the flat-cost trend clearly without approaching the ceiling under concurrency.
     [Theory]
     [InlineData(4)]
-    [InlineData(8)]
+    [InlineData(6)]
     public unsafe void Measure_SwiGluDependencyChain_RealShapes(int NumDistinctBlocks)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }

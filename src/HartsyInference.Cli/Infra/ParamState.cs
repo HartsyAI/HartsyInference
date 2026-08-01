@@ -167,6 +167,15 @@ public sealed class ParamState
                 _values["tau"] = "";
                 _values["seed"] = "-1";
                 break;
+            case Modality.Restore:
+                _values["width"] = "";
+                _values["height"] = "";
+                _values["clip-frames"] = "";
+                _values["overlap"] = "";
+                _values["strength"] = "";
+                _values["fps"] = "";
+                _values["seed"] = "-1";
+                break;
         }
     }
 }

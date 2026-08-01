@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Services;
 using HartsyInference.Vision.Codec;
 
@@ -40,6 +41,7 @@ public static class GenerationDispatch
             Modality.World => await WorldAsync(engine, spec, prompt, parameters, outputDir, quiet, cancel).ConfigureAwait(false),
             Modality.VoiceConvert => await VoiceConvertAsync(engine, spec, prompt, parameters, cancel).ConfigureAwait(false),
             Modality.Fx => await FxAsync(engine, spec, prompt, parameters, outputDir, cancel).ConfigureAwait(false),
+            Modality.Restore => await RestoreAsync(engine, spec, prompt, parameters, outputDir, quiet, cancel).ConfigureAwait(false),
             _ => throw new NotSupportedException($"The '{Modalities.ToCliName(spec.Modality)}' modality has no CLI dispatch."),
         };
     }
@@ -406,6 +408,33 @@ public static class GenerationDispatch
         {
             progress?.Finish();
         }
+
+        // Optional --restore chain: feed the generated frames straight into SeedVR2 (no encode round-trip),
+        // reusing the loaded engine. Generate small, restore up.
+        if (parameters.GetStringOrNull("restore") is { } restoreModel && frames.Count > 0)
+        {
+            ModelSpec restoreSpec = ModelResolver.Resolve(restoreModel, null, Modality.Restore);
+            RestoreRequest restoreRequest = new RestoreRequest
+            {
+                Frames = frames.Select(f => new ImageData { Rgb = f.Rgb, Width = f.Width, Height = f.Height }).ToList(),
+                TargetWidth = parameters.GetIntOrNull("restore-width"),
+                TargetHeight = parameters.GetIntOrNull("restore-height"),
+            };
+            ConsoleStepProgress? restoreProgress = quiet ? null : new ConsoleStepProgress("restore");
+            List<VideoFrame> restored = new List<VideoFrame>();
+            try
+            {
+                await foreach (VideoFrame frame in engine.Restore.RestoreAsync(restoreSpec, restoreRequest, restoreProgress, cancel).ConfigureAwait(false))
+                {
+                    restored.Add(frame);
+                }
+            }
+            finally
+            {
+                restoreProgress?.Finish();
+            }
+            frames = restored;
+        }
         return FrameArtifact(frames, outputDir, prompt, "video");
     }
 
@@ -497,6 +526,108 @@ public static class GenerationDispatch
     }
 
     /// <summary>Writes a frame sequence to disk and describes it, previewing the first frame inline.</summary>
+    /// <summary>Video/image restoration through <see cref="IRestoreService"/>; the CLI's "prompt" is the input
+    /// file path. Video inputs are decoded ONCE here (ffmpeg subprocess) so the service skips the container
+    /// round-trip and the source fps is known for the MP4 remux; still images ride the t==1 branch. Output is
+    /// the standard PNG frame sequence plus an H.264 MP4 when the input was a video.</summary>
+    private static async Task<GeneratedArtifact> RestoreAsync(
+        IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir,
+        bool quiet, CancellationToken cancel)
+    {
+        string inputPath = prompt.Trim().Trim('"');
+        if (!File.Exists(inputPath))
+        {
+            throw new FileNotFoundException($"Restore input not found: {inputPath}");
+        }
+        bool isImage = Path.GetExtension(inputPath).ToLowerInvariant() is ".png" or ".bmp" or ".jpg" or ".jpeg";
+
+        double sourceFps = 25.0;
+        RestoreRequest request;
+        RestoreRequest baseRequest = new RestoreRequest
+        {
+            TargetWidth = parameters.GetIntOrNull("width"),
+            TargetHeight = parameters.GetIntOrNull("height"),
+            ClipFrames = parameters.GetIntOrNull("clip-frames"),
+            Overlap = parameters.GetIntOrNull("overlap"),
+            Strength = parameters.GetFloatOrNull("strength"),
+            Fps = parameters.GetDoubleOrNull("fps"),
+            Seed = parameters.GetIntOrNull("seed") is int s and >= 0 ? s : null,
+        };
+        if (isImage)
+        {
+            request = baseRequest with { Image = LoadImage(inputPath) };
+        }
+        else
+        {
+            HartsyInference.Video.Encoding.FfmpegProcessDecoder decoder = new();
+            HartsyInference.Video.Encoding.FfmpegProcessDecoder.Result decoded =
+                await decoder.DecodeFileAsync(inputPath, cancel).ConfigureAwait(false);
+            sourceFps = decoded.Fps;
+            request = baseRequest with
+            {
+                Frames = decoded.Frames
+                    .Select(f => new ImageData { Rgb = f, Width = decoded.Width, Height = decoded.Height })
+                    .ToList(),
+            };
+        }
+
+        ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("restore");
+        List<VideoFrame> frames = new List<VideoFrame>();
+        try
+        {
+            await foreach (VideoFrame frame in engine.Restore.RestoreAsync(spec, request, progress, cancel).ConfigureAwait(false))
+            {
+                frames.Add(frame);
+            }
+        }
+        finally
+        {
+            progress?.Finish();
+        }
+
+        string slug = Path.GetFileNameWithoutExtension(inputPath);
+        GeneratedArtifact artifact = FrameArtifact(frames, outputDir, slug, "restore");
+        if (!isImage && frames.Count > 1)
+        {
+            double fps = request.Fps ?? sourceFps;
+            string mp4Path = Path.Combine(outputDir ?? RepoPaths.OutputRoot(), $"{Slug.Make(slug)}-restored.mp4");
+            try
+            {
+                await new HartsyInference.Video.Encoding.FfmpegProcessEncoder().EncodeAsync(
+                    ToEncoderFrames(frames), mp4Path, (int)Math.Round(fps), cancel).ConfigureAwait(false);
+                artifact.Meta["mp4"] = mp4Path;
+                GeneratedArtifact withMp4 = new GeneratedArtifact
+                {
+                    Kind = artifact.Kind,
+                    Extension = artifact.Extension,
+                    Text = $"{artifact.Text} + {mp4Path}",
+                    PreviewRgb = artifact.PreviewRgb,
+                    PreviewWidth = artifact.PreviewWidth,
+                    PreviewHeight = artifact.PreviewHeight,
+                    SelfWritten = artifact.SelfWritten,
+                };
+                foreach ((string key, string value) in artifact.Meta)
+                    withMp4.Meta[key] = value;
+                artifact = withMp4;
+            }
+            catch (InvalidOperationException ex)
+            {
+                Logs.Error("MP4 remux skipped (ffmpeg unavailable?) — PNG frames were written.", ex);
+            }
+        }
+        return artifact;
+    }
+
+    private static async IAsyncEnumerable<HartsyInference.Video.VideoFrame> ToEncoderFrames(
+        IReadOnlyList<VideoFrame> frames)
+    {
+        for (int i = 0; i < frames.Count; i++)
+        {
+            yield return new HartsyInference.Video.VideoFrame(i, frames[i].Width, frames[i].Height, frames[i].Rgb);
+        }
+        await Task.CompletedTask.ConfigureAwait(false);
+    }
+
     private static GeneratedArtifact FrameArtifact(IReadOnlyList<VideoFrame> frames, string? outputDir, string slug, string label)
     {
         if (frames.Count == 0)

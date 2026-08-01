@@ -73,6 +73,21 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("RNG seed; negative randomizes.")]
         public int Seed { get; init; } = -1;
 
+        /// <summary>Optional SeedVR2 restore pass over the generated frames.</summary>
+        [CommandOption("--restore [MODEL]")]
+        [Description("Restore/upscale the generated frames with SeedVR2 in the same run (default model seedvr2-3b). Generate small, restore up.")]
+        public FlagValue<string> Restore { get; init; } = new();
+
+        /// <summary>Restore target-area width (with --restore); default 1280.</summary>
+        [CommandOption("--restore-width")]
+        [Description("Restore target-area width (default 1280).")]
+        public int? RestoreWidth { get; init; }
+
+        /// <summary>Restore target-area height (with --restore); default 720.</summary>
+        [CommandOption("--restore-height")]
+        [Description("Restore target-area height (default 720).")]
+        public int? RestoreHeight { get; init; }
+
         /// <summary>Directory to write the frame sequence into.</summary>
         [CommandOption("-o|--output")]
         [Description("Directory to write the frame sequence into (defaults to the output root).")]
@@ -104,6 +119,12 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         parameters.PutIfSet("cfg", settings.Cfg);
         parameters.PutIfSet("fps", settings.Fps);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
+        if (settings.Restore.IsSet)
+        {
+            parameters.Put("restore", string.IsNullOrWhiteSpace(settings.Restore.Value) ? "seedvr2-3b" : settings.Restore.Value);
+            parameters.PutIfSet("restore-width", settings.RestoreWidth);
+            parameters.PutIfSet("restore-height", settings.RestoreHeight);
+        }
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Video);
         string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath);

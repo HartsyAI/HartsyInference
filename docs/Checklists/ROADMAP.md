@@ -208,27 +208,35 @@ a stale code comment claiming otherwise.
   `HARTSYINFERENCE_VK_COOPMAT2=0`); several coopmat1-specific tests needed an explicit `EnableCoopMat2 =
   false` to keep testing coopmat1 in isolation now that coopmat2 engages first by default. See
   `benchmarks/scoreboards/VULKAN.md` and `TROUBLESHOOTING.md` for full numbers.
-- [ ] **Beyond-GEMM investigation of the real ~53x per-step Vulkan-vs-CUDA gap (2026-08-01) — three
-  hypotheses ruled out, one real separate bug found, root cause still open.** Real full-process wall-clock
-  comparison (same prompt/seed/steps, same 4090): CUDA marginal ~0.67s/denoise-step vs. Vulkan ~35.9s/step —
-  a 53.5x gap, far beyond the 8.3-15.6x isolated-GEMM gap. Ruled out with controlled benchmarks at Krea2's
-  real FFN shape (M=4109, K=6144 — corrected from an earlier wrong guess of 3072, N=16384): weight-cast
-  caching (0.99-1.01x ratio — negligible, and it's a deliberate cross-backend VRAM tradeoff anyway, not
-  Vulkan-specific), dependency-chain barrier serialization (chained SwiGlu ops measured the same as
-  independent Linear calls, ~33ms/call either way), and allocator block-count scaling (flat ~32.7-32.8ms/
-  call at 4 vs. 8 simulated blocks). **Found along the way**: `VulkanGpuTransferHelper.CacheActivation`
-  leaks a tensor's previously-cached GPU buffer when the same Tensor object is reused as a non-in-place op's
-  output more than once (deliberately-in-place ops like `CfgEulerStep`/`CopyInto` correctly avoid this —
-  real `Krea2Block` code doesn't hit it either, always fresh tensors — but a synthetic benchmark that
-  accidentally reused tensors exposed it), and separately, `VulkanMemoryAllocator`'s dedicated-block pooling
-  doesn't reclaim/reuse freed blocks promptly within a tight no-`Sync()` dispatch loop — `reserved` bytes
-  and block count grow unboundedly even though `used` bytes stays flat, independently reproducing the same
-  `ErrorOutOfDeviceMemory` (crashed a test host at 14/24 simulated blocks, no step-graph capture involved —
-  a different trigger than the already-root-caused capture-retention OOM). Not fixed (needs care to avoid
-  trading it for more `Sync()`-induced stalls). **Still open**: the real ~82-135ms/Linear-call vs. ~33ms
-  isolated-SwiGlu-benchmark gap needs either a full `Krea2Block`-scale synthetic benchmark (attention + SDPA
-  + norms, not just SwiGlu, at the real 28-block count) or Nsight Graphics (still unavailable). See
-  `docs/Checklists/TROUBLESHOOTING.md` and `VulkanFp8WeightCastOverheadBenchmark.cs`.
+- [x] **Beyond-GEMM investigation of the real ~53x per-step Vulkan-vs-CUDA gap (2026-08-01) — root cause
+  identified: `VulkanMemoryAllocator`'s block-pooling/reclaim gap, not GEMM kernel throughput.** Real
+  full-process wall-clock comparison (same prompt/seed/steps, same 4090): CUDA marginal ~0.67s/denoise-step
+  vs. Vulkan ~35.9s/step — a 53.5x gap, far beyond the 8.3-15.6x isolated-GEMM gap. Ruled out with
+  controlled benchmarks at Krea2's real FFN shape (M=4109, K=6144, N=16384): weight-cast caching
+  (0.99-1.01x — negligible, and a deliberate cross-backend VRAM tradeoff, not Vulkan-specific),
+  dependency-chain barrier serialization (chained SwiGlu ~33ms/call, same as independent calls), and
+  allocator block-count scaling for FFN-only shapes (flat ~32.7-32.8ms/call at 4 vs. 8 blocks). **Then
+  solved**: built `VulkanKrea2BlockFullScaleBenchmark.cs` using the REAL `Krea2Block`/`Krea2Attention`
+  classes (not a re-implementation) at Krea2's real config and real joint sequence length (4109) — the full
+  attention machinery (QKV, per-head RMSNorm, GQA, RoPE, SDPA, output gate), not just FFN. Result:
+  **160-170 ms/GEMM-call — matches and exceeds the real run's 82-135 ms/call**, the first synthetic
+  reproduction. Flat across block count AND flat across `EnableCoopMat2` on/off (162 vs. 170ms — rules out
+  the GEMM kernel choice entirely). What correlates: `reserved` VRAM hit 19.8 GB at just 4 synthetic blocks
+  and allocator block count hit 268 — attention's rich diversity of small, differently-shaped tensors
+  (per-head Q/K/V, permutes, RoPE, GQA-repeated K/V) triggers the SAME pooling/reclaim bug found in the
+  FFN-only pass, far more severely than FFN's 2-3 recurring large sizes (which pool cleanly). **Root cause
+  identified with high confidence: fixing `VulkanMemoryAllocator`'s reclaim cadence is likely the single
+  biggest remaining lever on the real Vulkan-vs-CUDA gap — bigger than GEMM kernel throughput.** Not fixed
+  yet (needs a careful design — more aggressive reclaim trades against more `Sync()`-induced host stalls).
+  **Also found and fixed along the way**: (a) `VulkanGpuTransferHelper.CacheActivation` leaks a tensor's
+  previously-cached GPU buffer when the same Tensor object is reused as a non-in-place op's output more
+  than once (real `Krea2Block` code doesn't hit this — always fresh tensors — a synthetic-benchmark-only
+  artifact, not fixed, just documented); (b) `HartsyInference.Vulkan.Tests` had no GPU-test parallelism
+  control, letting concurrent `VulkanBackend` instances from unrelated test classes cause spurious
+  `ErrorOutOfDeviceMemory` in PRE-EXISTING tests — fixed via `[assembly: CollectionBehavior(
+  DisableTestParallelization = true)]` (`AssemblyInfo.cs`); all 167 tests pass with it in place. **Next
+  step**: design and implement a safe allocator reclaim-cadence fix. See `docs/Checklists/
+  TROUBLESHOOTING.md`, `VulkanFp8WeightCastOverheadBenchmark.cs`, `VulkanKrea2BlockFullScaleBenchmark.cs`.
 - [~] **Wire the INT8 quantizer into `Linear`'s call surface** — **op-level wiring done** (2026-07-29);
   **NOT the same as this section's original ask**, which was model *loading* wiring with an e2e SSIM/parity
   gate — that part is still open, see below. What landed: `VulkanBackend.Linear` has an opt-in INT8

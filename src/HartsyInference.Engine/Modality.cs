@@ -39,4 +39,8 @@ public enum Modality
     /// <summary>Text-to-vector embeddings (RAG/semantic-search style dense sentence vectors) — not yet
     /// CLI-drivable, only reachable via the HTTP API's native/OpenAI-compat routes.</summary>
     Embedding,
+
+    /// <summary>Video/image restoration — upscale, deartifact, denoise (SeedVR2). Distinct from
+    /// <see cref="Video"/> so the catalog and CLI never conflate restorers with generators.</summary>
+    Restore,
 }

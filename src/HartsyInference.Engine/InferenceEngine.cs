@@ -33,6 +33,7 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly Lazy<VoiceConversionService> _voiceConversion;
     private readonly Lazy<FxService> _fx;
     private readonly Lazy<VisionService> _vision;
+    private readonly Lazy<RestoreService> _restore;
     private readonly Lazy<MeshService> _mesh;
     private readonly Lazy<WorldService> _world;
     private readonly Lazy<EmbeddingService> _embeddings;
@@ -51,6 +52,7 @@ public sealed class InferenceEngine : IInferenceEngine
         _voiceConversion = new Lazy<VoiceConversionService>(() => new VoiceConversionService(this));
         _fx = new Lazy<FxService>(() => new FxService(this));
         _vision = new Lazy<VisionService>(() => new VisionService(this));
+        _restore = new Lazy<RestoreService>(() => new RestoreService(this));
         _mesh = new Lazy<MeshService>(() => new MeshService(this));
         _world = new Lazy<WorldService>(() => new WorldService(this));
         _embeddings = new Lazy<EmbeddingService>(() => new EmbeddingService(this));
@@ -106,6 +108,9 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <inheritdoc/>
     public IVisionService Vision => _vision.Value;
+
+    /// <summary>Video/image restoration (SeedVR2).</summary>
+    public IRestoreService Restore => _restore.Value;
 
     /// <inheritdoc/>
     public IMeshService Mesh => _mesh.Value;
@@ -393,6 +398,11 @@ public sealed class InferenceEngine : IInferenceEngine
         if (_vision.IsValueCreated)
         {
             _vision.Value.Dispose();
+        }
+        // RestoreService caches the SeedVR2 pipeline + mmap-backed weight loaders bound to the backend.
+        if (_restore.IsValueCreated)
+        {
+            _restore.Value.ReleasePipeline();
         }
         if (_mesh.IsValueCreated)
         {

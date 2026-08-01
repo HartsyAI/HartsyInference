@@ -55,6 +55,9 @@ public interface IInferenceEngine : IDisposable
     /// <summary>Vision: embed / detect / segment.</summary>
     IVisionService Vision { get; }
 
+    /// <summary>Video/image restoration (SeedVR2).</summary>
+    IRestoreService Restore { get; }
+
     /// <summary>3D mesh generation.</summary>
     IMeshService Mesh { get; }
 

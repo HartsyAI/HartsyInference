@@ -2,6 +2,16 @@
 
 This directory holds the benchmarking infrastructure for [Phase B GPU performance optimization](../docs/Checklists/PHASE_B_GPU_PERFORMANCE.md). Read [`docs/Research/CUDA_PERFORMANCE_PLAN.md`](../docs/Research/CUDA_PERFORMANCE_PLAN.md) and [`docs/Research/PROFILING_METHODOLOGY.md`](../docs/Research/PROFILING_METHODOLOGY.md) before adding new benchmarks — the methodology is non-trivial.
 
+## SeedVR2 restoration bring-up (2026-08-01)
+
+First benchmark of the new `Modality.Restore` (SeedVR2-3B, one-step video restoration). Headline lives
+in [`scoreboards/VIDEO.md`](scoreboards/VIDEO.md) §SeedVR2: Python reference (warm, bf16, sliced)
+**0.161 s/frame** vs HartsyInference bring-up (cold CLI, fp32, host-math DiT) **4.89 s/frame** at the
+E2E-parity point (9f BBB, 640×360-area, 4090, N=5, 95% CI both sides). No speedup is claimed — this is
+the documented pre-optimization baseline; correctness is the shipped result (SSIM 0.99950 vs reference,
+`PARITY_VERIFICATION.md`). Bench scripts: `tests/python-reference/seedvr2_reference/bench_seedvr2_python.py`
+(needs dit-offload staging — co-resident bf16 vae+dit OOMs 24 GB) + 5× cold `hartsy restore` invocations.
+
 ## LLM decode throughput vs llama.cpp (2026-07-04)
 
 Separate from the diffusion/Phase-B harness below. Docs: [`LLM_THROUGHPUT_BENCHMARK.md`](../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) (baseline + method) and [`LLM_DECODE_PERF_GRIND.md`](../docs/Checklists/LLM_DECODE_PERF_GRIND.md) (optimization log). Assets:
