@@ -1291,6 +1291,54 @@ numerics (channel-width assumptions are where it breaks).
   `backend.EnableCoopMat2 = false` since coopmat2 now engages first by default. See
   `benchmarks/scoreboards/VULKAN.md` for the full numbers.
 
+- **Investigated the beyond-GEMM part of the real Vulkan-vs-CUDA gap: real full-process wall-clock is
+  ~53x slower than CUDA per marginal denoise step, far beyond the ~8-16x isolated GEMM gap — three leading
+  hypotheses tested and ruled out, one real (separate) allocator bug found along the way, root cause still
+  open.** (2026-08-01.) First got an honest, apples-to-apples number: full CLI process wall-clock (not just
+  backend-op time) for real Krea2 generations on the same 4090 — CUDA 2-step 15.4s / 8-step 19.5s (marginal
+  ~0.67s/step); Vulkan (coopmat2 default-on) 2-step 87.4s / 8-step 302.7s (marginal ~35.9s/step) — a **53.5x
+  marginal-per-step gap**, well beyond the 8.3-15.6x isolated coopmat2-vs-CUDA GEMM gap. `HARTSY_LOG_LEVEL=
+  Verbose` phase logging + `HARTSYINFERENCE_VK_PROFILE=1` on the same clean (no-OOM) 2-step run showed Linear
+  at 99.1% of backend-op time (60,349ms of 60,910ms) — SDPA and other ops are NOT the story (their OOM-run
+  "~4s" numbers were purely the already-root-caused step-graph-capture stall, not real per-op cost); the gap
+  is still fundamentally inside Linear/GEMM, just far larger at full-model scale than the 5-shape isolated
+  benchmark predicted (real avg ~82-135 ms/Linear-call vs. ~1.5-10 ms in isolated GPU-only timing).
+  **Hypothesis 1, weight-cast caching (`CacheWeightCasts=false` — Krea2 runs with it OFF on BOTH backends,
+  a deliberate ~13GB-fp8-checkpoint VRAM tradeoff, not Vulkan-specific): RULED OUT.** A controlled benchmark
+  with many distinct FP8 weights at Krea2's real FFN shape (M=4109, K=6144, N=16384 — K corrected from an
+  earlier wrong guess of 3072; Krea2Config.HiddenSize = 48 heads x 128 headDim = 6144) showed transient-vs-
+  cached-cast ratio of 0.99-1.01x — negligible. **Hypothesis 2, dependency-chain serialization from
+  `Dispatch()`'s unconditional per-dispatch `VkMemoryBarrier2` (ROADMAP.md's "per-dispatch barrier scoping"
+  entry): RULED OUT.** A benchmark chaining real SwiGlu ops (gate/up Linear -> Silu -> Mul -> down Linear,
+  genuine data dependencies, matching `Krea2Block.SwiGlu` exactly) measured 32.7-33.1 ms/Linear-call — same
+  ballpark as independent back-to-back Linear calls at the same shape (35.6-36.2 ms/call), not worse.
+  **Hypothesis 3, allocator block-count scaling: also doesn't explain per-call latency (32.7-32.8 ms/call
+  flat across 4 vs. 8 distinct simulated blocks) — but surfaced a real, separate bug along the way.** An
+  earlier version of the SwiGlu-chain benchmark (before it was corrected to match `Krea2Block`'s real
+  per-call-fresh-tensor pattern) reused the same `g`/`u`/`silu`/`gated`/`down` `Tensor` objects across every
+  block/step — this doesn't happen in real Krea2Block code (which always allocates fresh tensors and
+  disposes them, verified by reading `Krea2Block.cs`), but it exposed that
+  `VulkanGpuTransferHelper.CacheActivation` overwrites a tensor's cached-buffer dictionary entry WITHOUT
+  freeing the buffer being replaced when the same tensor object is reused as a non-in-place op's output more
+  than once (deliberately-in-place ops like `CfgEulerStep`/`CopyInto` correctly avoid this by re-caching the
+  SAME buffer handle — this is a gap in the general `CacheOutput` path, not those). Real impact confirmed
+  even with the CORRECTED (fresh-tensor, real-pattern) benchmark: allocator block count and `reserved` bytes
+  keep growing across repeated passes (16->73->90 blocks at 4 simulated blocks; 9.6GB->17GB reserved) even
+  though `used` bytes stays flat — meaning `VulkanMemoryAllocator.Allocate()`'s pooling isn't reclaiming/
+  reusing already-freed dedicated blocks promptly within a tight dispatch loop (deferred-free reclamation
+  lags the allocation rate when no `Sync()` happens mid-loop), so empty blocks pile up as pure `reserved`
+  overhead rather than being found and reused, which independently reproduced the SAME `ErrorOutOfDeviceMemory`
+  (crashed a test host outright at 14/24 simulated blocks with no step-graph capture involved at all — a
+  DIFFERENT OOM trigger than the already-root-caused step-graph one). **Not fixed this pass** — a real
+  reclaim-cadence fix needs care to avoid trading this away for more `Sync()`-induced host stalls, which is
+  exactly the kind of overhead this whole investigation is trying to eliminate. **The core ~53x marginal
+  per-step / ~82-135ms-vs-~33ms Linear-call mystery remains OPEN** — the isolated SwiGlu-only benchmark still
+  doesn't reproduce it even at the real shape with real dependencies; the next things to try are a full
+  `Krea2Block`-scale synthetic benchmark (attention + SDPA + RmsNorm + Modulate + GatedResidual, not just
+  SwiGlu, at the real 28-block count) or genuine GPU-level profiling (Nsight Graphics, still not available
+  on this box) to see what's actually different about full-scale real-model execution. See
+  `VulkanFp8WeightCastOverheadBenchmark.cs` for the benchmarks backing all three ruled-out hypotheses.
+
 ---
 
 ## LLM / GGUF loading gotchas

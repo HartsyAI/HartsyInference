@@ -208,6 +208,27 @@ a stale code comment claiming otherwise.
   `HARTSYINFERENCE_VK_COOPMAT2=0`); several coopmat1-specific tests needed an explicit `EnableCoopMat2 =
   false` to keep testing coopmat1 in isolation now that coopmat2 engages first by default. See
   `benchmarks/scoreboards/VULKAN.md` and `TROUBLESHOOTING.md` for full numbers.
+- [ ] **Beyond-GEMM investigation of the real ~53x per-step Vulkan-vs-CUDA gap (2026-08-01) — three
+  hypotheses ruled out, one real separate bug found, root cause still open.** Real full-process wall-clock
+  comparison (same prompt/seed/steps, same 4090): CUDA marginal ~0.67s/denoise-step vs. Vulkan ~35.9s/step —
+  a 53.5x gap, far beyond the 8.3-15.6x isolated-GEMM gap. Ruled out with controlled benchmarks at Krea2's
+  real FFN shape (M=4109, K=6144 — corrected from an earlier wrong guess of 3072, N=16384): weight-cast
+  caching (0.99-1.01x ratio — negligible, and it's a deliberate cross-backend VRAM tradeoff anyway, not
+  Vulkan-specific), dependency-chain barrier serialization (chained SwiGlu ops measured the same as
+  independent Linear calls, ~33ms/call either way), and allocator block-count scaling (flat ~32.7-32.8ms/
+  call at 4 vs. 8 simulated blocks). **Found along the way**: `VulkanGpuTransferHelper.CacheActivation`
+  leaks a tensor's previously-cached GPU buffer when the same Tensor object is reused as a non-in-place op's
+  output more than once (deliberately-in-place ops like `CfgEulerStep`/`CopyInto` correctly avoid this —
+  real `Krea2Block` code doesn't hit it either, always fresh tensors — but a synthetic benchmark that
+  accidentally reused tensors exposed it), and separately, `VulkanMemoryAllocator`'s dedicated-block pooling
+  doesn't reclaim/reuse freed blocks promptly within a tight no-`Sync()` dispatch loop — `reserved` bytes
+  and block count grow unboundedly even though `used` bytes stays flat, independently reproducing the same
+  `ErrorOutOfDeviceMemory` (crashed a test host at 14/24 simulated blocks, no step-graph capture involved —
+  a different trigger than the already-root-caused capture-retention OOM). Not fixed (needs care to avoid
+  trading it for more `Sync()`-induced stalls). **Still open**: the real ~82-135ms/Linear-call vs. ~33ms
+  isolated-SwiGlu-benchmark gap needs either a full `Krea2Block`-scale synthetic benchmark (attention + SDPA
+  + norms, not just SwiGlu, at the real 28-block count) or Nsight Graphics (still unavailable). See
+  `docs/Checklists/TROUBLESHOOTING.md` and `VulkanFp8WeightCastOverheadBenchmark.cs`.
 - [~] **Wire the INT8 quantizer into `Linear`'s call surface** — **op-level wiring done** (2026-07-29);
   **NOT the same as this section's original ask**, which was model *loading* wiring with an e2e SSIM/parity
   gate — that part is still open, see below. What landed: `VulkanBackend.Linear` has an opt-in INT8
