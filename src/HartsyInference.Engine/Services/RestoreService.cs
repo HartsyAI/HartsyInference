@@ -93,6 +93,10 @@ public sealed class RestoreService : IRestoreService
             if (_pipeline is not null && _loadedPath == ditPath)
                 return _pipeline;
             ReleasePipeline();
+            // Release other resident pipelines (e.g. the T2V model that just generated the frames being
+            // restored): SeedVR2's fp32 VAE peak (~12 GB) cannot coexist with a resident 20 GB video DiT.
+            // Re-entrant into our own ReleasePipeline (no-op — state was just cleared above).
+            _engine.FreeMemory();
 
             (string vaePath, string embPath) = ResolveSideAssets(spec, ditPath);
             Logs.Info($"Loading SeedVR2: dit={ditPath} vae={vaePath} emb={embPath}");
@@ -133,9 +137,11 @@ public sealed class RestoreService : IRestoreService
                 return (ModelDownloader.TargetPath(vae), ModelDownloader.TargetPath(emb));
         }
         string dir = Path.GetDirectoryName(ditPath)!;
-        string? vaeSibling = Directory.EnumerateFiles(dir, "*.safetensors")
+        // Ordered so the choice is deterministic when multiple candidates coexist (e.g. the catalog's
+        // fp16 VAE beside a locally converted fp32 one — EnumerateFiles order is filesystem-dependent).
+        string? vaeSibling = Directory.EnumerateFiles(dir, "*.safetensors").Order()
             .FirstOrDefault(f => Path.GetFileName(f).Contains("vae", StringComparison.OrdinalIgnoreCase));
-        string? embSibling = Directory.EnumerateFiles(dir, "*.safetensors")
+        string? embSibling = Directory.EnumerateFiles(dir, "*.safetensors").Order()
             .FirstOrDefault(f => Path.GetFileName(f).Contains("emb", StringComparison.OrdinalIgnoreCase));
         if (vaeSibling is null || embSibling is null)
             throw new InvalidOperationException(

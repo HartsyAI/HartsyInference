@@ -55,8 +55,13 @@ public unsafe class AceStep15DitParityTests
             return;
         }
         string refDir = RefDir();
-        Assert.True(File.Exists(Path.Combine(refDir, "cond.bin")),
-            $"reference dumps missing in {refDir}; regenerate via dump_acestep15_reference.py.");
+        if (!File.Exists(Path.Combine(refDir, "cond.bin")))
+        {
+            // Gitignored python-reference dumps must skip-guard, not assert (CODE_STYLE §Test tiers) — the
+            // checkpoint can survive disk cleanups that delete the .bin dumps, and this machine proves it.
+            _output.WriteLine($"SKIP: reference dumps missing in {refDir}; regenerate via dump_acestep15_reference.py.");
+            return;
+        }
 
         CpuBackend backend = new();
         AceStep15Config cfg = new();

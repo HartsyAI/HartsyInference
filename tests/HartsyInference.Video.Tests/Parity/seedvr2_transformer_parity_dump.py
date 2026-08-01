@@ -8,9 +8,9 @@ injected BEFORE import (varlen == per-sequence SDPA at scale 1/sqrt(d) — no nu
 kernel-order float noise).
 
 Usage:  <seedvr2-venv-python> seedvr2_transformer_parity_dump.py <SeedVR-checkout> $SEEDVR2_PARITY_DIR
-Then:   SEEDVR2_PARITY_DIR=... dotnet test --filter SeedVr2DitParityTests
+Then:   SEEDVR2_PARITY_DIR=... dotnet test --filter SeedVr2Tests
 
-Tiny dims must match SeedVr2DitParityTests.TinyConfig exactly.
+Tiny dims must match SeedVr2Tests.TinyConfig exactly.
 """
 import os
 import sys
@@ -47,7 +47,7 @@ from models.dit_v2.nadit import NaDiT  # noqa: E402
 OUT = sys.argv[2]
 os.makedirs(OUT, exist_ok=True)
 
-# Must match SeedVr2DitParityTests.TinyConfig exactly.
+# Must match SeedVr2Tests.TinyConfig exactly.
 VID_DIM, TXT_IN_DIM, HEADS, HEAD_DIM = 128, 32, 1, 128
 LAYERS, MM_LAYERS = 4, 2
 T, H, W = 5, 90, 160          # pre-patchify latent grid (patch 1x2x2 -> tokens 5x45x80)

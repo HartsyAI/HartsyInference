@@ -18,4 +18,11 @@
     <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
   </ItemGroup>
 
+  <!-- Committed reference fixtures (Unit tier — small, deterministic, ship with the repo) -->
+  <ItemGroup>
+    <Content Include="fixtures\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

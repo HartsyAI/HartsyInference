@@ -7,7 +7,7 @@ namespace HartsyInference.Diffusion.Utilities;
 /// taps are truncated and weights renormalized (NOT edge-clamped — that is the non-AA kernel, which torchvision
 /// no longer uses by default). Separable: width pass then height pass, per-output tap weights precomputed once
 /// per axis, entirely in float32 to mirror ATen's scalar_t arithmetic (validated ≤1e-5 maxAbs in
-/// SeedVr2PreprocessParityTests).</summary>
+/// SeedVr2Tests).</summary>
 public static class TorchResize
 {
     private const float A = -0.5f;

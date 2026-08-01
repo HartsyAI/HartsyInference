@@ -1493,9 +1493,14 @@ public static class ModelCatalog
                 },
             },
 
-            // Restoration (SeedVR2). Weights ship converted (pth→safetensors via tools/); the HF repo below
-            // is the Hartsy re-publish target — Sha256 pinned only after a verified download (repo convention).
-            // Until published, place the converted files under Models/Video/SeedVr2/ and the resolver finds them.
+            // Restoration (SeedVR2). DiT + VAE download from the community safetensors mirror
+            // (numz/SeedVR2_comfyUI) — VERBATIM original state-dict keys (header-verified: 3B fp16 635
+            // tensors incl. the recomputable rope freqs the converter drops; VAE 250 tensors), so the
+            // converter chain loads them directly; F16 is fine (GEMM weights load F16, host-math vectors
+            // upcast at load). Sha256 pinned only after a verified download (repo convention). The frozen
+            // pos/neg embeddings exist upstream only as torch-pickle .pt (unloadable in pure C#) — the
+            // 1.2 MB converted safetensors ships from the Hartsy repo; until published, place it under
+            // Models/Video/SeedVr2/ and the resolver finds it.
             new CatalogEntry
             {
                 Id = "seedvr2-3b", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (video/image restoration)",
@@ -1503,10 +1508,12 @@ public static class ModelCatalog
                 CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
-                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_3b_dit_f32.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "transformer" },
-                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_vae_f32.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "vae" },
+                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_3b_fp16.safetensors",
+                        TargetSubdir = "Video/SeedVr2", Role = "transformer",
+                        Sha256 = "2fd0e03a3dad24e07086750360727ca437de4ecd456f769856e960ae93e2b304" },
+                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
+                        TargetSubdir = "Video/SeedVr2", Role = "vae",
+                        Sha256 = "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1" },
                     new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_embeddings.safetensors",
                         TargetSubdir = "Video/SeedVr2", Role = "embeddings" },
                 },
@@ -1518,12 +1525,11 @@ public static class ModelCatalog
                 CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
-                    // 7B ships F16-converted (the fp32 state dict is 33 GB; F16 halves disk and GEMM
-                    // weights load F16 fine — host-math vectors upcast at load).
-                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_7b_dit_f16.safetensors",
+                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_7b_fp16.safetensors",
                         TargetSubdir = "Video/SeedVr2", Role = "transformer" },
-                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_vae_f32.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "vae" },
+                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
+                        TargetSubdir = "Video/SeedVr2", Role = "vae",
+                        Sha256 = "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1" },
                     new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_embeddings.safetensors",
                         TargetSubdir = "Video/SeedVr2", Role = "embeddings" },
                 },
@@ -1549,9 +1555,11 @@ public static class ModelCatalog
                 Assets = new ModelAsset[]
                 {
                     // TI2V-5B; umT5-XXL + the Wan2.2 VAE resolve as side models inside WanVideoRecipe.
+                    // Sha256 re-pinned 2026-08-01: Comfy-Org replaced the upstream LFS object since the
+                    // 2026-07-21 pin (old 7057d12b…) — new hash matches the HF API's authoritative LFS oid.
                     new() { Repo = "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", RepoPath = "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
                         TargetSubdir = "Stable-Diffusion/Wan", Role = "transformer",
-                        Sha256 = "7057d12b745db48a79e449825f1ae26c75b14228148ea338fb94703452369555" },
+                        Sha256 = "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e" },
                 },
             },
             new CatalogEntry
@@ -1615,6 +1623,9 @@ public static class ModelCatalog
             // DV8x16x16 tokenizer + AR backbone). Engine-only; run via the sample invocation in VideoCommand help.
             E("cosmos-predict1-5b-v2w", vid, "Cosmos-Predict1 5B Video2World", "AR discrete-token transformer", vp),
             E("cosmos-predict1-13b-v2w", vid, "Cosmos-Predict1 13B Video2World", "AR discrete-token transformer", vp),
+            // Announced 2026-07-31, weights promised but not published — no Assets to list and not CLI-drivable.
+            // MiniMaxH3Recipe resolves the family and throws with the reason; see docs/Research/MINIMAX_H3.md.
+            E("minimax-h3", vid, "MiniMax-H3 (omni, video + stereo audio)", "H3-Omni Transformer + H3-VAE", st),
 
             // 3D
             E("triposr", d3, "TripoSR", "triplane / NeRF", st, cli: true),

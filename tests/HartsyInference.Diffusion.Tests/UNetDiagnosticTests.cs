@@ -38,9 +38,11 @@ public class UNetDiagnosticTests
     [Fact]
     public unsafe void InstrumentedUNetForwardPass()
     {
-        if (!Directory.Exists(ModelDir))
+        // File-level guard: disk-hygiene cleanups delete checkpoints but leave the folder skeleton, so a
+        // Directory.Exists check alone lets the test run into FileNotFoundException on gate machines.
+        if (!File.Exists(Path.Combine(ModelDir, "unet", "diffusion_pytorch_model.fp16.safetensors")))
         {
-            _output.WriteLine($"SKIPPED: Model directory not found: {ModelDir}");
+            _output.WriteLine($"SKIPPED: SD15 UNet checkpoint not found under {ModelDir}");
             return;
         }
 
@@ -248,9 +250,10 @@ public class UNetDiagnosticTests
     [Fact]
     public unsafe void CfgGuidanceEffectiveness()
     {
-        if (!Directory.Exists(ModelDir))
+        if (!File.Exists(Path.Combine(ModelDir, "unet", "diffusion_pytorch_model.fp16.safetensors"))
+            || !File.Exists(Path.Combine(ModelDir, "text_encoder", "model.fp16.safetensors")))
         {
-            _output.WriteLine($"SKIPPED: Model directory not found: {ModelDir}");
+            _output.WriteLine($"SKIPPED: SD15 UNet/text-encoder checkpoints not found under {ModelDir}");
             return;
         }
 
@@ -410,9 +413,9 @@ public class UNetDiagnosticTests
     [Fact]
     public void UNetOutputSanityCheck()
     {
-        if (!Directory.Exists(ModelDir))
+        if (!File.Exists(Path.Combine(ModelDir, "unet", "diffusion_pytorch_model.fp16.safetensors")))
         {
-            _output.WriteLine($"SKIPPED: Model directory not found: {ModelDir}");
+            _output.WriteLine($"SKIPPED: SD15 UNet checkpoint not found under {ModelDir}");
             return;
         }
 

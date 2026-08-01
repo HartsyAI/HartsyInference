@@ -36,9 +36,12 @@ SeedVR2 video/image restoration — a new modality, end to end.
   needs bf16 activations or tiled VAE — tracked in MODEL_STATUS_VIDEO remaining work.
 - DiT window gather/scatter and RoPE run host-side (bring-up shape): ~14 s/frame. Residency/CUDA-graph
   optimization is the follow-up perf pass.
-- Catalog weights point at `HartsyAI/SeedVR2-safetensors` (unpublished — convert with
-  `tools/convert_pth_to_safetensors.py` or place files under `Models/Video/SeedVr2/`; Sha256 pinned
-  after first verified publish).
+- Catalog DiT + VAE download from the community safetensors mirror `numz/SeedVR2_comfyUI` (verbatim
+  original state-dict keys, fp16; Sha256 pinned from a verified download → convert → restore run, and
+  the fp16 output is visually equivalent to fp32 — remaining delta is generative high-frequency repaint).
+  Only the 1.2 MB frozen pos/neg embeddings ship from `HartsyAI/SeedVR2-safetensors` (upstream has them
+  as torch-pickle `.pt` only); until published, place `seedvr2_embeddings.safetensors` under
+  `Models/Video/SeedVr2/`.
 - **seedvr2-7b is catalog-registered but BLOCKED**: its smoke run revealed the 7B is the **v1 NaDiT**
   (`models/dit`, `qk_rope`/`shared_qkv`) whose state-dict keys coincide with v2 — it loaded and produced
   plausible-but-wrong mud (GT SSIM 0.71 vs 3B's 0.88). `SeedVr2Config.Detect` now throws on the v1

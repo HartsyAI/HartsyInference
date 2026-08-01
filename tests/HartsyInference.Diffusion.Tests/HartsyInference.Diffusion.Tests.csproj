@@ -32,11 +32,4 @@
     </Content>
   </ItemGroup>
 
-  <!-- Committed reference fixtures (Unit tier — small, deterministic, ship with the repo) -->
-  <ItemGroup>
-    <Content Include="fixtures\*.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-  </ItemGroup>
-
 </Project>

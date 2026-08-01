@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Tests.Common;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -24,7 +25,9 @@ public sealed unsafe class HunyuanVideoDitTests
         using IBackend cpu = new CpuBackend();
         HunyuanVideoConfig c = Tiny;
         HunyuanVideoDit dit = new(c);
-        dit.LoadWeights(BuildWeights(c));
+        // The shared generator tracks the DiT's key layout (the local BuildWeights predates the token
+        // refiner: it emits a plain txt_in Linear, missing txt_in.input_embedder/t_embedder/c_embedder).
+        dit.LoadWeights(HunyuanVideoSyntheticWeights.BuildDit(c));
 
         int T = 2, H = 4, W = 4, L = 3;
         using Tensor latent = Filled(0.05f, 1, c.InChannels, T, H, W);

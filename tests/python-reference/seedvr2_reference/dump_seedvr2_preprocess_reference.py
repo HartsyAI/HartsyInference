@@ -7,7 +7,7 @@ on seeded synthetic uint8 video tensors, and saves input/output pairs to one saf
 Usage:
     <seedvr2-venv-python> dump_seedvr2_preprocess_reference.py <path-to-SeedVR-checkout> <out.safetensors>
 
-The C# side (SeedVr2PreprocessParityTests, env var SEEDVR2_PRE_REF) reads the dump. CPU, fp32,
+The C# side (SeedVr2Tests, env var SEEDVR2_PRE_REF) reads the dump. CPU, fp32,
 deterministic. Sizes cover: upscale (the dominant restore path), downscale (>720p-area input),
 non-divisible dims (DivisibleCrop both-side raggedness), odd frame counts (cut_videos padding),
 t==1 stills, and a tiny input (bicubic border handling dominates).
