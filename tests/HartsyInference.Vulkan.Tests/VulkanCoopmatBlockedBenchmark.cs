@@ -369,10 +369,12 @@ public sealed class VulkanCoopmatBlockedBenchmark
             input.Dispose(); weight.Dispose(); output.Dispose();
         }
 
-        // Fresh backend, coopmat1 path (opt-in off), same shape — is the cold-start cost coopmat2-specific?
+        // Fresh backend, coopmat1 path (coopmat2 explicitly off — EnableCoopMat2 defaults ON since
+        // 2026-07-31), same shape — is the cold-start cost coopmat2-specific?
         using (VulkanBackend backend = new())
         {
             if (!backend.Vk.HasCooperativeMatrix) { _output.WriteLine("SKIPPED: no coopmat1"); return; }
+            backend.EnableCoopMat2 = false;
 
             Tensor input = new(new TensorShape(M, K), DType.F16);
             Tensor weight = new(new TensorShape(N, K), DType.F16);

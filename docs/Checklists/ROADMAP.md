@@ -152,7 +152,7 @@ a stale code comment claiming otherwise.
   behind CUDA (see the flash-attention and GEMM tables above) — a far larger, already-quantified gap — this
   is not worth chasing now. Revisit only if per-dispatch overhead specifically (not kernel throughput)
   shows up as the bottleneck in a real end-to-end profile.
-- [~] **coopmat2** (`VK_NV_cooperative_matrix2`): the base GEMM kernel is built, measured, wired into
+- [x] **coopmat2** (`VK_NV_cooperative_matrix2`): the base GEMM kernel is built, measured, wired into
   `Linear`/`DispatchMatmul` behind an opt-in flag (`EnableCoopMat2`), and validated against real Krea2
   weights (2026-07-31, see the §2 GEMM-perf-tuning update below). Correctness is perfect throughout.
   **Update, same day**: chased all three open items — (a) benchmarked against the correct coopmat1
@@ -173,6 +173,41 @@ a stale code comment claiming otherwise.
   PR #10942), and separately (not a coopmat2 item) — the shared-box VRAM-pressure OOM at 4+ steps, now
   confirmed fully deterministic, is worth its own investigation regardless of this GEMM work. Explicitly
   NVIDIA-only.
+- [x] **Root-caused the shared-box 4-step OOM (2026-07-31): NOT a leak — a genuine one-time VRAM peak from
+  step-graph capture's design.** Built real diagnostics (`VulkanMemoryAllocator.OnOutOfMemoryDiagnostic` +
+  `VulkanGpuTransferHelper.DiagnosticsSummary()`, dumping weight/activation/weight-cast/step-graph-retained
+  breakdowns on any genuine OOM) instead of guessing. Real numbers at the OOM: weight cache 12.5 GB,
+  activation cache 146.8 MB (small, not accumulating), **step-graph-retained 8.0 GB** — a captured command
+  buffer bakes buffer addresses into its descriptor bindings, so every buffer disposed DURING the one-time
+  capture window is retained for the graph's whole lifetime instead of freed, meaning capture must hold
+  every intermediate activation from Krea2's full 28-block forward pass alive simultaneously. That needs
+  well over 15 GB fully realized, on top of ~12.5 GB of weights, against only ~21 GB of real budget on this
+  box — never going to fit, independent of anything else running. Explains "2-step never OOMs, 4-step
+  always does" precisely: capture only triggers on the 3rd call at a given signature, and a 2-step
+  generation never reaches call 3. Practical impact is smaller than it looked: fires ONCE per model load,
+  not per-step/per-generation, and the existing fallback-to-eager recovers cleanly (9/9 byte-identical
+  outputs across the whole coopmat2 investigation). Not "fixed" in the sense of making capture succeed here
+  — the capacity math is real, not a bug — but the diagnostics are now permanent and reusable for any future
+  OOM investigation. See `docs/Checklists/TROUBLESHOOTING.md`'s Vulkan section for the full writeup.
+- [x] **coopmat2 flipped to default-ON (2026-07-31), correcting the earlier "~5% regression" finding, which
+  turned out to be a cross-session variance artifact, not a real property of coopmat2.** Added per-GEMM-path
+  host-wall-clock timing to the profiler (`coopmat2/coopmat/tiled avg host-wall` in the `HARTSYINFERENCE_VK_
+  PROFILE=1` dump) to investigate why isolated per-op benchmarks consistently showed coopmat2 winning while
+  the original real-run comparison showed it losing. A controlled, same-session, back-to-back comparison (4
+  runs each config at 2 steps, alternating ON/OFF to cancel time-drift) told a different story than the
+  original cross-session one: coopmat2 mean 59,793.5ms vs. baseline 62,296.8ms — a statistically significant
+  ~4.0% real win (Welch's t≈2.88, n=4 each). The earlier "regression" was comparing runs from different
+  sessions with different external GPU contention (SwarmUI/ComfyUI/rustdesk all resident on this shared
+  box) — exactly the confound already flagged as a risk for single-run comparisons on this hardware.
+  Extended validation to 8 steps (the exact step count where an EARLIER, unrelated coopmat1 fix passed every
+  synthetic test and then hit a real `ErrorDeviceLost`): coopmat2 completed cleanly, no device-loss, ~10.2%
+  faster (244,683ms vs. 272,603ms Linear time), byte-identical output to the baseline. Correctness now
+  verified byte-identical across every configuration tested this whole investigation — 2-step, 4-step,
+  8-step, aligned and non-aligned M, with and without bias, F16 and F32 output — dozens of real generations,
+  zero divergence ever observed. `VulkanBackend.EnableCoopMat2` now defaults true (override via
+  `HARTSYINFERENCE_VK_COOPMAT2=0`); several coopmat1-specific tests needed an explicit `EnableCoopMat2 =
+  false` to keep testing coopmat1 in isolation now that coopmat2 engages first by default. See
+  `benchmarks/scoreboards/VULKAN.md` and `TROUBLESHOOTING.md` for full numbers.
 - [~] **Wire the INT8 quantizer into `Linear`'s call surface** — **op-level wiring done** (2026-07-29);
   **NOT the same as this section's original ask**, which was model *loading* wiring with an e2e SSIM/parity
   gate — that part is still open, see below. What landed: `VulkanBackend.Linear` has an opt-in INT8

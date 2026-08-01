@@ -28,12 +28,15 @@ public sealed class VulkanCoopMat2LinearTests
         catch { return false; }
     }
 
+    /// <summary>Default flipped to ON 2026-07-31 after full validation against real Krea2 weights (2-step,
+    /// 4-step, 8-step generations — correctness byte-identical throughout, ~4-10% real wall-clock win in
+    /// controlled comparisons). Still overridable via <c>HARTSYINFERENCE_VK_COOPMAT2=0</c>.</summary>
     [Fact]
-    public void Backend_Linear_CoopMat2OptIn_DefaultsOff()
+    public void Backend_Linear_CoopMat2OptIn_DefaultsOn()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
         using VulkanBackend backend = new();
-        Assert.False(backend.EnableCoopMat2, "EnableCoopMat2 must default to off unless HARTSYINFERENCE_VK_COOPMAT2=1 is set.");
+        Assert.True(backend.EnableCoopMat2, "EnableCoopMat2 must default to on unless HARTSYINFERENCE_VK_COOPMAT2=0 is set.");
     }
 
     /// <summary>The core claim: with the opt-in enabled, a Linear call at a shape coopmat1 could NEVER

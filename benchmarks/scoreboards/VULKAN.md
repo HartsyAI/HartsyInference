@@ -592,12 +592,55 @@ Getting a statistically confident answer would need many more runs than is a rea
 time to chase further right now. Correctness held perfectly: all 9 4-step runs (6 ON, 3 OFF) produced
 byte-identical PNG output.
 
-**`EnableCoopMat2` stays off by default.** The 2-step regression (clean, no OOM confound, ~5% slower) is
-the more reliable signal available and is still real. At 4 steps the picture is now "not worse, maybe
-slightly better, not confidently proven either way" — genuine progress from "clear regression," but not
-yet a case for enabling this by default. See `docs/Checklists/TROUBLESHOOTING.md` for the same writeup and
-`VulkanCoopMat2LinearTests.cs` / `VulkanCoopmatBlockedBenchmark.cs` for the tests/benchmarks backing this
-up.
+Conclusion at this point (superseded below): stays off by default, 2-step regression treated as the more
+reliable signal since it had no OOM confound.
+
+## The "~5% regression" was a cross-session variance artifact — corrected, validated to 8 steps, default
+## flipped ON (2026-07-31, continuing the "keep tuning coopmat2" pass)
+
+Added per-GEMM-path host-wall-clock timing to the profiler (`coopmat2`/`coopmat`/`tiled` avg host-wall,
+alongside the existing engagement-percentage line) specifically to chase down why isolated GPU-only
+benchmarks kept showing coopmat2 winning per-op while the real-run comparison above showed a net loss.
+
+**First finding: the new instrumentation itself had a scope bug.** `TryDispatchCoopMat2` is self-contained
+(fetches/casts its own operand buffers), while the coopmat1 timing wrapper only covered
+`TryDispatchCoopmat`'s own call — buffer fetch/cast for coopmat1 happens in `DispatchMatmul`'s shared prep,
+outside that window. The two "avg host-wall" numbers weren't measuring the same scope, so the huge gap they
+showed (coopmat2 ~136 ms/call vs. coopmat1 ~0.02 ms/call) was an artifact, not a real difference. Falling
+back to the pre-existing, scope-correct "Linear Avg(ms)" column (which covers the whole call for both paths
+regardless of internal structure) told a different story: a back-to-back same-session pair showed coopmat2
+already AHEAD (82.89 vs. 86.43 ms/call) — the opposite of the original finding.
+
+**That prompted a proper controlled comparison**, matching the rigor already applied to the 4-step variance
+sweep: 4 runs each config at 2 steps, alternating ON/OFF back-to-back in the same session (canceling this
+box's real GPU-contention time-drift):
+
+| | n | mean | stdev |
+|---|---:|---:|---:|
+| coopmat2 ON | 4 | 59,793.5 ms | 973.1 ms |
+| coopmat2 OFF (baseline) | 4 | 62,296.8 ms | 1,440.6 ms |
+
+Mean difference: coopmat2 **4.0% faster**, Welch's t ≈ **2.88** — statistically significant at this sample
+size (unlike the earlier 4-step comparison's t≈0.92). The original "~5% slower" number came from comparing
+runs across DIFFERENT sessions with different external GPU contention (this box's SwarmUI/ComfyUI/rustdesk
+residency varies over time) — not a real coopmat2 property, exactly the confound already flagged as a risk
+for single-run comparisons here.
+
+**Extended validation to 8 steps** — the exact step count where an EARLIER, unrelated coopmat1 M-padding fix
+passed every synthetic test and then hit a real `ErrorDeviceLost` (the precedent that originally justified
+keeping coopmat2 opt-in): coopmat2 completed cleanly, no device-loss, hit the same well-understood
+step-graph-capture OOM-and-recover as the baseline (not worse — same root cause, unrelated to coopmat2, see
+the entry above), and was **~10.2% faster** (244,683 ms vs. 272,603 ms Linear time), byte-identical output.
+
+**Correctness held byte-identical across every configuration tested this whole investigation** — 2-step,
+4-step, 8-step generations; aligned and non-16-aligned M; with and without bias; F16 and F32 output — dozens
+of real generations against real Krea2 weights, zero divergence ever observed.
+
+**`VulkanBackend.EnableCoopMat2` now defaults to `true`** (override with `HARTSYINFERENCE_VK_COOPMAT2=0`).
+Several existing tests that specifically exercised coopmat1's own engagement needed an explicit
+`backend.EnableCoopMat2 = false` since coopmat2 now engages first by default — see
+`VulkanBackendSmokeTests.Backend_Linear_CoopmatPartialM_NonMultipleOf16_MatchesCpu` /
+`Backend_Linear_CoopmatAlignedM_StillUsesOriginalKernel`. All 162 Vulkan tests pass with the new default.
 
 ## Next levers, informed by ggml/llama.cpp's mature Vulkan backend (research pass, 2026-07-31)
 

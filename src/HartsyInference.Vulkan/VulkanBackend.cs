@@ -32,6 +32,15 @@ public sealed class VulkanBackend : IBackend
     private long _coopmatGemmCount;
     private long _coopmat2GemmCount;
     private long _tiledGemmCount;
+    // Host-wall-clock ticks (Stopwatch.GetTimestamp() units) spent inside each dispatch path's own call —
+    // NOT GPU execution time (see MeasureGpuTimeMs for that) but the thing that actually determines real
+    // wall-clock: per-call host overhead (buffer acquisition, spec-constant/push-constant construction,
+    // kernel lookup, command recording) that GPU-only timing structurally can't see. Gated on
+    // _profiler.IsEnabled like the rest of the op-timing machinery (Stopwatch.GetTimestamp() has a real,
+    // if small, cost — unlike the count-only engagement counters above, which are always-on).
+    private long _coopmat2GemmTicks;
+    private long _coopmatGemmTicks;
+    private long _tiledGemmTicks;
 
     /// <summary>Test/diagnostic accessor for the GEMM fast-path engagement counters — lets a test prove
     /// WHICH path actually handled a dispatch (coopmat2 vs coopmat1 vs tiled fallback), since correctness
@@ -135,6 +144,17 @@ public sealed class VulkanBackend : IBackend
             {
                 Logs.Error("Vulkan OOM-retry callback failed while releasing empty slabs", ex);
             }
+        };
+        // Genuine (post-retry) OOM diagnostics: the allocator's own byte/block counters don't cover
+        // weight/activation caches or step-graph-retained buffers, both of which live in the transfer
+        // helper — dump the full picture so a real OOM's root cause (leak vs. a genuine peak-VRAM spike,
+        // e.g. step-graph capture retaining every intermediate activation for the graph's lifetime) is
+        // visible in the log instead of needing a repro + ad-hoc instrumentation every time.
+        _allocator.OnOutOfMemoryDiagnostic = () =>
+        {
+            (long usedBytes, long reservedBytes, int blocks, _) = MemoryStats;
+            return $"  allocator: used={usedBytes / (1024.0 * 1024):F1} MB, reserved={reservedBytes / (1024.0 * 1024):F1} MB, blocks={blocks}\n" +
+                   _xfer.DiagnosticsSummary();
         };
 
         Device = DeviceKind.Vulkan(deviceOrdinal);
@@ -605,16 +625,23 @@ public sealed class VulkanBackend : IBackend
         return true;
     }
 
-    /// <summary>Opt-in switch for <see cref="TryDispatchCoopMat2"/> being tried (before <see cref="TryDispatchCoopmat"/>)
-    /// from <see cref="DispatchMatmul"/>. Defaults from <c>HARTSYINFERENCE_VK_COOPMAT2=1</c>, same
-    /// opt-in-property pattern as <see cref="EnableInt8Linear"/> — OFF by default. Deliberately not
-    /// default-on yet: this session's coopmat1 M-padding fix passed every synthetic test (CPU-reference
-    /// correctness, a 200-iteration stress test at Krea2's real scale, even two full real CLI runs) and
-    /// still caused a genuine `ErrorDeviceLost` on an 8-step real run (see
-    /// docs/Checklists/TROUBLESHOOTING.md) — a direct precedent for why a new GEMM dispatch path needs a
-    /// real end-to-end model run under sustained iteration before being trusted unconditionally, not just
-    /// synthetic GEMM correctness/throughput numbers.</summary>
-    public bool EnableCoopMat2 { get; set; } = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_COOPMAT2") == "1";
+    /// <summary>Switch for <see cref="TryDispatchCoopMat2"/> being tried (before <see cref="TryDispatchCoopmat"/>)
+    /// from <see cref="DispatchMatmul"/>. Default-ON as of 2026-07-31 (settable/overridable via
+    /// <c>HARTSYINFERENCE_VK_COOPMAT2=0</c>) after a full validation pass against real Krea2 weights on the
+    /// RTX 4090: correctness held byte-identical to the coopmat1 baseline across every configuration tested
+    /// — 2-step, 4-step, and 8-step generations (the exact step count at which an EARLIER, unrelated
+    /// coopmat1 M-padding fix passed every synthetic test and then hit a real `ErrorDeviceLost` — see
+    /// docs/Checklists/TROUBLESHOOTING.md), aligned and non-16-aligned M, with and without bias, F16 and F32
+    /// output, across dozens of real generations. Performance: a controlled same-session comparison (4 runs
+    /// each config, alternating, isolating this box's real GPU-contention variance) showed a statistically
+    /// significant ~4% real-wall-clock win at 2 steps (Welch's t≈2.88) and a ~10% win at 8 steps — this
+    /// SUPERSEDES an earlier same-day finding of a "~5% regression," which turned out to be a cross-session
+    /// comparison artifact (this shared box's run-to-run variance from contending processes, not a real
+    /// property of coopmat2 — see the full writeup for how that got sorted out). The only failure mode found
+    /// anywhere in this investigation (a step-graph-capture VRAM peak causing a graceful OOM-and-fallback on
+    /// this box at 4+ steps) is root-caused, unrelated to coopmat2 specifically (reproduces identically with
+    /// this flag off), and already recovers correctly via the existing capture-fallback path.</summary>
+    public bool EnableCoopMat2 { get; set; } = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_COOPMAT2") != "0";
 
     /// <summary>Cooperative-matrix-2 fast path for <see cref="DispatchMatmul"/>, tried before
     /// <see cref="TryDispatchCoopmat"/> when <see cref="EnableCoopMat2"/> is set. Built on
@@ -1093,11 +1120,16 @@ public sealed class VulkanBackend : IBackend
         // (not just inside TryDispatchCoopMat2, which throws on any other combination) because
         // DispatchMatmul is also the shared entry point for MatMul/BatchedMatMul, which call with
         // transposeB=false — must fall through to coopmat1/tiled cleanly for those, not throw.
-        if (EnableCoopMat2 && gemmDtype == DType.F16 && !transposeA && transposeB
-            && TryDispatchCoopMat2(output, a, b, transposeA, transposeB, bias))
+        if (EnableCoopMat2 && gemmDtype == DType.F16 && !transposeA && transposeB)
         {
-            _coopmat2GemmCount++;
-            return;
+            long t0 = _profiler.IsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            bool coopmat2Ok = TryDispatchCoopMat2(output, a, b, transposeA, transposeB, bias);
+            if (_profiler.IsEnabled) _coopmat2GemmTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            if (coopmat2Ok)
+            {
+                _coopmat2GemmCount++;
+                return;
+            }
         }
 
         VulkanBuffer aBuf = GetBuffer(a);
@@ -1121,8 +1153,11 @@ public sealed class VulkanBackend : IBackend
         // Only applicable when (a) the device exposes coopmat, (b) GEMM dtype is FP16, and
         // (c) M, N, K are all multiples of 16 (the fragment size). Bias is folded as a separate
         // BroadcastAdd dispatch after the matmul. Falls through to the tiled path otherwise.
-        if (TryDispatchCoopmat(output, aRes, bRes, M, N, K, transposeA, transposeB,
-                               gemmDtype, outBuf, bias, biasRes, biasRaw))
+        long tCoopmat0 = _profiler.IsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        bool coopmatOk = TryDispatchCoopmat(output, aRes, bRes, M, N, K, transposeA, transposeB,
+                               gemmDtype, outBuf, bias, biasRes, biasRaw);
+        if (_profiler.IsEnabled) _coopmatGemmTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tCoopmat0;
+        if (coopmatOk)
         {
             _coopmatGemmCount++;
             if (aOwned is not null) _xfer.FreeDevice(aOwned);
@@ -1132,6 +1167,7 @@ public sealed class VulkanBackend : IBackend
         }
 
         _tiledGemmCount++;
+        long tTiled0 = _profiler.IsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         try
         {
             // Tile shape selected from M, N, K — see PickMatmulTile. Big tiles (128x128) win on
@@ -1200,6 +1236,7 @@ public sealed class VulkanBackend : IBackend
             if (aOwned is not null) _xfer.FreeDevice(aOwned);
             if (bOwned is not null) _xfer.FreeDevice(bOwned);
             if (biasOwned is not null) _xfer.FreeDevice(biasOwned);
+            if (_profiler.IsEnabled) _tiledGemmTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tTiled0;
         }
     }
 
@@ -3565,6 +3602,16 @@ public sealed class VulkanBackend : IBackend
                 $"  GEMM fast-path: coopmat2={_coopmat2GemmCount} ({100.0 * _coopmat2GemmCount / total:F1}%), " +
                 $"coopmat={_coopmatGemmCount} ({100.0 * _coopmatGemmCount / total:F1}%), " +
                 $"tiled-fallback={_tiledGemmCount} ({100.0 * _tiledGemmCount / total:F1}%)");
+            // Per-path host-wall-clock average — the thing that actually determines real wall-clock, distinct
+            // from GPU-only execution time (see MeasureGpuTimeMs). Ticks are Stopwatch.GetTimestamp() units;
+            // Stopwatch.Frequency converts to seconds.
+            double freq = System.Diagnostics.Stopwatch.Frequency;
+            if (_coopmat2GemmCount > 0)
+                Console.Error.WriteLine($"    coopmat2 avg host-wall: {1000.0 * _coopmat2GemmTicks / freq / _coopmat2GemmCount:F3} ms/call ({1000.0 * _coopmat2GemmTicks / freq:F1} ms total)");
+            if (_coopmatGemmCount > 0)
+                Console.Error.WriteLine($"    coopmat  avg host-wall: {1000.0 * _coopmatGemmTicks / freq / _coopmatGemmCount:F3} ms/call ({1000.0 * _coopmatGemmTicks / freq:F1} ms total)");
+            if (_tiledGemmCount > 0)
+                Console.Error.WriteLine($"    tiled    avg host-wall: {1000.0 * _tiledGemmTicks / freq / _tiledGemmCount:F3} ms/call ({1000.0 * _tiledGemmTicks / freq:F1} ms total)");
         }
         // Decode-graph scalar control buffers (Phase 6) aren't in any weight/activation cache _xfer.Dispose()
         // already sweeps — free them directly so a caller who forgot to call FreeDeviceTokenId/FreeDevicePos/

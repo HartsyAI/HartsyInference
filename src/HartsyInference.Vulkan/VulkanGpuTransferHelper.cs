@@ -76,6 +76,40 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         _stepGraphRetained.Clear();
     }
 
+    /// <summary>Buffers currently redirected to the capture-lifetime retain list, and their total size —
+    /// diagnostic only (see <see cref="DiagnosticsSummary"/>). Every buffer disposed DURING a step-graph
+    /// capture window stays alive here for the graph's whole lifetime (the captured command buffer bakes
+    /// its address into descriptor bindings), so capture has a fundamentally higher peak-VRAM requirement
+    /// than eager execution: it must hold every intermediate activation touched by the ENTIRE recorded
+    /// forward pass alive simultaneously, not free-and-reuse block-by-block the way eager mode does.</summary>
+    public (int count, long bytes) StepGraphRetainedStats()
+    {
+        long bytes = 0;
+        foreach (VulkanBuffer b in _stepGraphRetained) bytes += (long)b.Size;
+        return (_stepGraphRetained.Count, bytes);
+    }
+
+    /// <summary>Full per-cache byte/count breakdown, computed directly from each dictionary rather than the
+    /// running <see cref="_cachedBytes"/> counter (which historically only tracked weight/weight-cast
+    /// bytes, not activation-cache bytes — see the OOM investigation this was built for in
+    /// docs/Checklists/TROUBLESHOOTING.md). Diagnostic only, not on any hot path.</summary>
+    public string DiagnosticsSummary()
+    {
+        long weightBytes = 0; foreach (VulkanBuffer b in _weightCache.Values) weightBytes += (long)b.Size;
+        long activationBytes = 0; foreach (VulkanBuffer b in _activationCache.Values) activationBytes += (long)b.Size;
+        long castBytes = 0; int castCount = 0;
+        foreach (Dictionary<string, VulkanBuffer> inner in _weightCastCache.Values)
+            foreach (VulkanBuffer b in inner.Values) { castBytes += (long)b.Size; castCount++; }
+        (int retainedCount, long retainedBytes) = StepGraphRetainedStats();
+
+        static string Mb(long bytes) => $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"  weight cache: {_weightCache.Count} tensors, {Mb(weightBytes)}\n" +
+               $"  activation cache: {_activationCache.Count} tensors, {Mb(activationBytes)}\n" +
+               $"  weight-cast cache: {castCount} casts, {Mb(castBytes)}\n" +
+               $"  step-graph-retained: {retainedCount} buffers, {Mb(retainedBytes)} (capturing={CapturingStepGraph})\n" +
+               $"  transient (in-flight, uncached) buffers: {_transientBuffers.Count}";
+    }
+
     public VulkanGpuTransferHelper(
         nint device,
         VulkanMemoryAllocator allocator,

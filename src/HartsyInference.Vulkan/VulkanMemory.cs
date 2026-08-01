@@ -1,4 +1,5 @@
 using System.Numerics;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Vulkan;
 
@@ -182,6 +183,13 @@ public sealed class VulkanMemoryAllocator : IDisposable
     /// constructed (chicken-and-egg: allocator created before stream).</summary>
     public Action? OnOutOfMemory { get; set; }
 
+    /// <summary>Optional callback producing a human-readable VRAM breakdown, logged right before a
+    /// genuine (post-retry) OOM is thrown — the allocator's own byte/block counters don't cover
+    /// weight/activation caches or step-graph-retained buffers (those live in VulkanGpuTransferHelper),
+    /// so VulkanBackend wires this up to include the full picture. Diagnostic only; adds no cost on the
+    /// success path.</summary>
+    public Func<string>? OnOutOfMemoryDiagnostic { get; set; }
+
     public VulkanMemoryAllocator(nint device, in VkPhysicalDeviceMemoryProperties memProps)
     {
         _device = device;
@@ -256,6 +264,11 @@ public sealed class VulkanMemoryAllocator : IDisposable
             // Mirrors CUDA's cuMemAlloc OOM retry path.
             OnOutOfMemory();
             r = VulkanApi.vkAllocateMemory(_device, in ai, 0, out mem);
+        }
+        if (r == VkResult.ErrorOutOfDeviceMemory && OnOutOfMemoryDiagnostic is not null)
+        {
+            try { Logs.Warning($"Vulkan OOM diagnostics (allocating {size} bytes, typeIdx={typeIdx}):\n{OnOutOfMemoryDiagnostic()}"); }
+            catch (Exception ex) { Logs.Warning($"Vulkan OOM diagnostics callback itself failed: {ex.Message}"); }
         }
         r.ThrowOnError($"vkAllocateMemory(size={size}, typeIdx={typeIdx})");
 

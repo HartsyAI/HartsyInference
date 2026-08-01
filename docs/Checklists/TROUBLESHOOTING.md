@@ -1225,6 +1225,72 @@ numerics (channel-width assumptions are where it breaks).
   signal: **`EnableCoopMat2` stays off by default.** See `benchmarks/scoreboards/VULKAN.md`'s variance-sweep
   table for the full per-run numbers.
 
+- **Root-caused the shared-box 4-step OOM: NOT a leak — a genuine one-time VRAM peak from step-graph
+  capture's retain-everything design, colliding with Krea2's real footprint on this box's real budget.**
+  (2026-07-31, follow-on to the entries above, investigated separately from the coopmat2 work since it
+  turned out to be unrelated.) Built real diagnostics instead of guessing: a new
+  `VulkanMemoryAllocator.OnOutOfMemoryDiagnostic` hook + `VulkanGpuTransferHelper.DiagnosticsSummary()`
+  dump a full weight-cache / activation-cache / weight-cast-cache / step-graph-retained breakdown (each
+  computed directly from its own dictionary, not the older `_cachedBytes` running counter, which turned out
+  to only track weight/cast bytes — never activation-cache bytes) right before a genuine (post-retry) OOM is
+  thrown. Re-ran the 4-step repro with this wired in: `allocator: used=20865.6 MB, reserved=21705.9 MB,
+  blocks=264` / `weight cache: 433 tensors, 12539.9 MB` / `activation cache: 13 tensors, 146.8 MB` (small —
+  not accumulating) / `weight-cast cache: 0 casts, 0.0 MB` / **`step-graph-retained: 163 buffers, 7987.0
+  MB`**. The mechanism: a captured Vulkan command buffer bakes buffer ADDRESSES into its descriptor
+  bindings at record time, so every buffer that gets disposed DURING the one-time capture window is
+  redirected to a "retain for the graph's whole lifetime" list instead of actually being freed (see
+  `VulkanGpuTransferHelper.TryRetainForCapture`) — capture must hold every intermediate activation from the
+  ENTIRE forward pass alive simultaneously, unlike eager execution's free-and-reuse-per-block pattern. Krea2
+  is 28 DiT blocks deep with several ~25 MB (hidden-sized) and ~135 MB (FFN-inner-sized, `Krea2Block.SwiGlu`)
+  intermediates per block; by ~10 of 28 blocks into capture, retained buffers already totaled ~8 GB — on top
+  of ~12.5 GB of permanently-cached weights, against a real driver-reported budget of only ~21 GB on this
+  box (24 GB card minus ~1.8 GB held by other resident processes minus driver reserve, confirmed via
+  `nvidia-smi --query-compute-apps` and `vulkaninfo`'s `VkPhysicalDeviceMemoryProperties` budget field). A
+  full 28-block capture needs well over 15 GB just for retained activations — this was never going to fit
+  here regardless of what else got freed first. **Explains the "2-step never OOMs, 4-step always does"
+  pattern precisely**: capture only triggers on the 3rd call to the transformer at a given signature (2
+  eager warmup passes, then capture — see `Krea2Transformer.ForwardPatched`'s `GraphCaptureCall = 3`), and a
+  2-step, no-CFG generation never reaches call 3 at all — it's not step-count-driven accumulation, capture
+  is simply never attempted. **Practical impact is smaller than the alarming log suggested**: this fires
+  ONCE per model load (not per-step, not per-generation) — after failing once, `_graphDead` is set and the
+  transformer permanently, cleanly falls back to eager for that model instance; a long-running server
+  generating many images pays this cost once, not repeatedly. Correctness held perfectly through every
+  occurrence (9/9 byte-identical outputs across this whole investigation, from the coopmat2 variance sweep).
+  Not fixed (the underlying capacity math is real, not a bug — Krea2 + full step-graph capture genuinely
+  needs more VRAM than this box's ~21 GB budget provides on top of its own weights), but now instantly
+  diagnosable instead of needing a fresh multi-hour repro-and-instrument cycle next time. See
+  `VulkanGpuTransferHelper.DiagnosticsSummary()` / `VulkanMemory.cs`'s `OnOutOfMemoryDiagnostic`.
+
+- **coopmat2 flipped to default-ON: the earlier "~5% regression" was a cross-session variance artifact, not
+  a real property of coopmat2 — corrected with a controlled comparison, then validated to 8 steps.**
+  (2026-07-31, continuing the "keep tuning coopmat2" pass.) Added per-GEMM-path host-wall-clock timing to
+  the profiler (`coopmat2/coopmat/tiled avg host-wall`) to chase down why isolated GPU-only benchmarks kept
+  showing coopmat2 winning per-op while the original real-run comparison showed a net loss. First finding:
+  the new timing revealed a MEASUREMENT bug of its own, not a real one — `TryDispatchCoopMat2` is
+  self-contained (does its own buffer fetch/cast), while coopmat1's per-path timing only wrapped its final
+  dispatch call (buffer fetch/cast happens in `DispatchMatmul`'s shared prep, outside that window) — so the
+  two "avg host-wall" numbers weren't measuring the same scope. Comparing the full, apples-to-apples "Linear
+  Avg(ms)" column instead (which captures the whole call for both paths regardless of internal structure),
+  a back-to-back same-session pair showed coopmat2 already AHEAD (82.89 vs. 86.43 ms/call) — the opposite of
+  the original finding. That prompted a proper controlled comparison: 4 runs each config at 2 steps,
+  alternating ON/OFF back-to-back in the same session (canceling this box's real GPU-contention time-drift,
+  the same confound already flagged for the 4-step variance sweep). Result: coopmat2 mean 59,793.5 ms vs.
+  baseline 62,296.8 ms — a statistically significant ~4.0% real win (Welch's t≈2.88, n=4 each). The original
+  "~5% slower" number came from comparing runs across DIFFERENT sessions with different external GPU
+  contention (SwarmUI/ComfyUI/rustdesk residency varies over time on this shared box) — not a real coopmat2
+  property. **Extended validation to 8 steps** — the exact step count where an EARLIER, unrelated coopmat1
+  M-padding fix passed every synthetic test and then hit a real `ErrorDeviceLost` (the precedent that
+  originally justified keeping this opt-in): coopmat2 completed cleanly, no device-loss, hit the same
+  well-understood step-graph-capture OOM-and-recover as the baseline (not worse), and was ~10.2% faster
+  (244,683 ms vs. 272,603 ms Linear time), byte-identical output. Correctness held byte-identical across
+  every configuration tested this whole investigation — 2-step, 4-step, 8-step, aligned/non-aligned M,
+  with/without bias, F16/F32 output — dozens of real generations, zero divergence ever. **`VulkanBackend.
+  EnableCoopMat2` now defaults to `true`** (override with `HARTSYINFERENCE_VK_COOPMAT2=0`). Several existing
+  tests that specifically exercised coopmat1's own engagement (`Backend_Linear_CoopmatPartialM_
+  NonMultipleOf16_MatchesCpu`, `Backend_Linear_CoopmatAlignedM_StillUsesOriginalKernel`) needed an explicit
+  `backend.EnableCoopMat2 = false` since coopmat2 now engages first by default. See
+  `benchmarks/scoreboards/VULKAN.md` for the full numbers.
+
 ---
 
 ## LLM / GGUF loading gotchas

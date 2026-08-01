@@ -1057,6 +1057,10 @@ public sealed class VulkanBackendSmokeTests
         using VulkanBackend backend = new();
         Environment.SetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE", null);
         if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix) return;
+        // This test specifically exercises coopmat1's partial-M kernel — coopmat2 (default ON since
+        // 2026-07-31) would otherwise engage first and handle any M transparently, masking what this
+        // test exists to check.
+        backend.EnableCoopMat2 = false;
 
         const int K = 32, N = 48;   // multiples of 16, matching real Krea2-like hidden dims
         Tensor input = new(new TensorShape(M, K), DType.F16);
@@ -1112,6 +1116,9 @@ public sealed class VulkanBackendSmokeTests
         using VulkanBackend backend = new();
         Environment.SetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE", null);
         if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix) return;
+        // Specifically checking coopmat1's own engagement — coopmat2 (default ON since 2026-07-31) would
+        // otherwise handle this shape first, which is not what this test exists to check.
+        backend.EnableCoopMat2 = false;
 
         const int M = 64, K = 32, N = 48;
         Tensor input = new(new TensorShape(M, K), DType.F16);
