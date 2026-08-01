@@ -1179,6 +1179,52 @@ numerics (channel-width assumptions are where it breaks).
   the stall's root cause. See `benchmarks/scoreboards/VULKAN.md` for full numbers and
   `tests/HartsyInference.Vulkan.Tests/VulkanCoopMat2LinearTests.cs` for the wiring tests.
 
+- **All three coopmat2 open items chased down: the correct-competitor theory didn't hold, bias fusion barely
+  moved the real number, and the "~4s stall" turned out to be a pre-existing memory-pressure bug on this
+  shared box that has NOTHING to do with coopmat2.** (2026-07-31, same day, follow-on to the entry above.)
+  (a) Re-benchmarked against `matmul_coopmat_partial_m` (the actual coopmat1 competitor for non-aligned M,
+  not `matmul_coopmat`) through the real `Linear` path — coopmat2 still wins, 0.74-0.98x of coopmat1's time
+  across 20 shape/alignment/bias combinations. (b) Fused bias directly into `matmul_coopmat2.comp.glsl` via
+  a broadcast `tensorLayoutNV` (stride 0 on the M dimension — every row's `coopMatLoadTensorNV` reads the
+  same `bias[n]`) loaded straight into an Accumulator-typed coopmat, eliminating the follow-up
+  `BroadcastAdd` dispatch entirely. Real wins: correctness tolerance improved 1.5% -> 0.05% max relative
+  error (bias no longer round-trips through F16 via a second dispatch), and isolated GPU-only-time for
+  biased cases dropped sharply. But real Krea2 e2e time barely changed (65.7s before and after) — bias
+  overhead wasn't the dominant real-world cost after all. (c) The "~4s stall": a 4-step real Krea2 run
+  logged `[WRN] [Krea2 graph] capture invalidated — falling back to eager: ... ErrorOutOfDeviceMemory:
+  vkAllocateMemory(size=134643712, typeIdx=1)` inside `TryDispatchCoopMat2 -> AllocateDedicated`, during a
+  `Krea2Block.SwiGlu` Linear call on step 2. **Ran the identical 4-step generation with coopmat2 OFF as a
+  control — hit the EXACT SAME OOM, same size, same step, same call site pattern.** This is a real,
+  pre-existing VRAM-pressure issue on this shared box (SwarmUI + a ComfyUI Python process + rustdesk all
+  hold GPU memory even at idle — confirmed via `nvidia-smi --query-compute-apps`), completely unrelated to
+  coopmat2; it doesn't reproduce at 2 steps (less accumulated pressure) but reliably does at 4, in BOTH
+  configs. Output correctness held perfectly through the OOM+recovery: all three 4-step runs (baseline,
+  coopmat2 x2) produced byte-identical PNG output. **Corrected picture once this shared, unrelated cost is
+  factored out**: at 2 steps (no OOM in any run), coopmat2+fused-bias is still ~5% slower in aggregate
+  Linear time (60,952ms vs. 58,085ms baseline) — smaller than first measured, but still real. At 4 steps
+  (both configs hit the same OOM once), coopmat2's Linear time was at-or-below baseline in both runs
+  (121,335-131,534ms vs. baseline's 132,404ms) — genuinely competitive, possibly ahead, though run-to-run
+  variance on this box (~10s spread between the two coopmat2 runs) means this isn't confidently a win yet.
+  **`EnableCoopMat2` stays off by default** — the investigation converted "unexplained mystery regression"
+  into "small, understood, shrinking gap," which is real progress even without a clean win yet. See
+  `benchmarks/scoreboards/VULKAN.md`'s follow-up section for full numbers.
+
+- **Ran 6 more 4-step Krea2 runs (4 ON, 2 OFF) to check the variance — 9 total samples confirm "roughly on
+  par, not a confident win," and the OOM is deterministic (fires in ALL 9 runs, both configs, same exact
+  allocation).** (2026-07-31, same day, follow-on to the entry above.) coopmat2 ON: n=6, mean 121,486ms,
+  stdev 6,271ms (range 113,653-131,534ms). coopmat2 OFF: n=3, mean 126,456ms, stdev 8,199ms (range
+  117,104-132,404ms). Mean difference: coopmat2 3.9% faster — but Welch's t ~ 0.92, well under the ~2
+  threshold for significance, and the OFF group's minimum sits below 4 of the 6 ON runs, meaning the
+  distributions substantially overlap. **Honest read: at 4 steps coopmat2 is roughly on par with baseline,
+  plausibly a small win, but not confidently distinguishable from run-to-run noise on this shared, contended
+  GPU with only 9 samples** — resolving this further would need many more runs than is a reasonable use of
+  shared GPU time right now. All 9 runs (6 ON, 3 OFF) hit the identical OOM at the identical allocation/step
+  and produced byte-identical PNG output — the OOM is a fully deterministic property of this box at 4+
+  steps, not intermittent, confirming it's valid to treat as common-mode noise between configs. Combined
+  with the clean, OOM-free 2-step result (still ~5% slower, no confound), 2-step remains the more reliable
+  signal: **`EnableCoopMat2` stays off by default.** See `benchmarks/scoreboards/VULKAN.md`'s variance-sweep
+  table for the full per-run numbers.
+
 ---
 
 ## LLM / GGUF loading gotchas

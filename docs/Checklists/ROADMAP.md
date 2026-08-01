@@ -154,13 +154,25 @@ a stale code comment claiming otherwise.
   shows up as the bottleneck in a real end-to-end profile.
 - [~] **coopmat2** (`VK_NV_cooperative_matrix2`): the base GEMM kernel is built, measured, wired into
   `Linear`/`DispatchMatmul` behind an opt-in flag (`EnableCoopMat2`), and validated against real Krea2
-  weights (2026-07-31, see the §2 GEMM-perf-tuning update below) — correctness is perfect, but real e2e
-  wall-clock REGRESSED, contradicting the isolated 1.2-2.5x-speedup benchmark. Stays off by default. **Still
-  open**: benchmark against the correct coopmat1 competitor (`matmul_coopmat_partial_m`, not
-  `matmul_coopmat`), fuse bias into the shader instead of a follow-up dispatch, isolate an unexplained ~4s
-  one-time per-run stall, fused dequant-on-load, `coopMatReduceNV`-fused softmax,
-  `VULKAN_OPTIMIZATION.md` §4.2's broader epilogue fusion, diffusion-shaped tile-size tuning (ggml PR
-  #10942). Explicitly NVIDIA-only.
+  weights (2026-07-31, see the §2 GEMM-perf-tuning update below). Correctness is perfect throughout.
+  **Update, same day**: chased all three open items — (a) benchmarked against the correct coopmat1
+  competitor (`matmul_coopmat_partial_m`), coopmat2 still wins 0.74-0.98x; (b) fused bias directly into the
+  shader (real correctness/precision win, 1.5%->0.05% max error, but barely moved the real e2e number,
+  meaning bias overhead wasn't the dominant real-world cost); (c) the "~4s stall" turned out to be a
+  pre-existing `ErrorOutOfDeviceMemory` issue on this shared GPU box, reproduced IDENTICALLY with coopmat2
+  OFF — unrelated to coopmat2 entirely. With that shared confound factored out: still ~5% slower at 2 steps,
+  but at-or-below baseline at 4 steps. **Update, same day — ran 6 more 4-step runs (4 ON, 2 OFF) to check
+  the variance, 9 total samples**: ON mean 121,486ms (n=6, stdev 6,271ms), OFF mean 126,456ms (n=3, stdev
+  8,199ms) — coopmat2 3.9% faster on average but NOT statistically significant (Welch's t~0.92, well under
+  the ~2 significance threshold; the groups substantially overlap). Honest read: roughly on par at 4 steps,
+  plausibly a small win, not confidently provable with 9 samples on this noisy shared box — not worth more
+  GPU time chasing further right now. The 2-step result (clean, no OOM confound, ~5% slower) remains the
+  more reliable signal. All 9 4-step runs (6 ON, 3 OFF) hit the identical deterministic OOM and produced
+  byte-identical output. **Stays off by default.** Still open: fused dequant-on-load, `coopMatReduceNV`-fused
+  softmax, `VULKAN_OPTIMIZATION.md` §4.2's broader epilogue fusion, diffusion-shaped tile-size tuning (ggml
+  PR #10942), and separately (not a coopmat2 item) — the shared-box VRAM-pressure OOM at 4+ steps, now
+  confirmed fully deterministic, is worth its own investigation regardless of this GEMM work. Explicitly
+  NVIDIA-only.
 - [~] **Wire the INT8 quantizer into `Linear`'s call surface** — **op-level wiring done** (2026-07-29);
   **NOT the same as this section's original ask**, which was model *loading* wiring with an e2e SSIM/parity
   gate — that part is still open, see below. What landed: `VulkanBackend.Linear` has an opt-in INT8
@@ -463,14 +475,22 @@ a stale code comment claiming otherwise.
   (`HARTSYINFERENCE_VK_COOPMAT2=1`, off by default) and validated against real Krea2 weights — correctness
   is perfect (5/5 runs byte-identical PNG output vs. baseline), but real e2e wall-clock is a REGRESSION
   (65.7-65.9s vs. 58.6s baseline, reproducible), not the win the isolated benchmark predicted. Root causes:
-  the isolated benchmark compared against the wrong coopmat1 variant (`matmul_coopmat`, not
-  `matmul_coopmat_partial_m`, which is what coopmat1 actually uses for most of Krea2's real shapes and was
-  never benchmarked against), the un-fused bias epilogue costs a real extra dispatch, and an unexplained
-  ~4-second one-time per-run stall the isolated benchmark's warmup loop couldn't see. **Stays off by
-  default.** See `benchmarks/scoreboards/VULKAN.md` and `TROUBLESHOOTING.md` for full numbers,
-  `tests/HartsyInference.Vulkan.Tests/VulkanCoopMat2LinearTests.cs` for the wiring tests. **Next step**:
-  benchmark against `matmul_coopmat_partial_m` specifically (not `matmul_coopmat`), fuse bias into the
-  shader, isolate the ~4s stall — THEN reconsider ggml PR #10942's tile-size tuning or Nsight Graphics.
+  three hypothesized causes: wrong coopmat1 baseline in the isolated benchmark, un-fused bias epilogue, and
+  an unexplained ~4s one-time per-run stall. **Update, same day — all three chased down:** re-benchmarking
+  against the correct competitor (`matmul_coopmat_partial_m`) showed coopmat2 STILL wins (0.74-0.98x); fusing
+  bias directly into the shader was a real correctness/precision win (1.5%->0.05% error) but barely moved the
+  real e2e number; and the "~4s stall" turned out to be a pre-existing `ErrorOutOfDeviceMemory` on this
+  shared GPU box, reproduced IDENTICALLY with coopmat2 completely OFF — nothing to do with coopmat2. Once
+  that shared confound is factored out: still ~5% slower at 2 steps, roughly on par at 4 steps. **Update,
+  same day — 6 more 4-step runs (9 total samples)**: coopmat2 3.9% faster on average (121,486ms vs.
+  126,456ms) but NOT statistically significant (Welch's t~0.92) — the distributions overlap too much to call
+  a confident winner with 9 samples on this noisy shared box, and more runs isn't a good use of shared GPU
+  time right now. The clean 2-step result (no OOM confound, ~5% slower) is the more reliable signal.
+  **Stays off by default** — see `benchmarks/scoreboards/VULKAN.md` and `TROUBLESHOOTING.md` for full
+  numbers, `tests/HartsyInference.Vulkan.Tests/VulkanCoopMat2LinearTests.cs` for the wiring tests. **Next
+  step**: ggml PR #10942's tile-size tuning or Nsight Graphics, if this gets revisited. Separately (not a
+  coopmat2 item): the shared-box OOM, now confirmed fully deterministic at 4+ steps, is worth its own look
+  regardless.
 - [ ] **Video/audio/vision domain fill (Phase 7 menu items)** — explicitly deferred, not evaluated this
   session: Wan 3D/volumetric conv (blocks the Wan VAE), grid-sample/MSDA (blocks deformable-attention
   detection models), dedicated audio AdaIN/activation fused kernels. No model in either of these domains

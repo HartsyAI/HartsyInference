@@ -254,8 +254,8 @@ public sealed class VulkanCoopmatBlockedBenchmark
     /// before (forces <c>matmul_coopmat</c>) and those values +3 (forces <c>matmul_coopmat_partial_m</c> —
     /// N, K stay 16-aligned so only M's alignment changes which coopmat1 kernel engages). Goes through the
     /// REAL <see cref="VulkanBackend.Linear"/>/<c>DispatchMatmul</c> path (not the raw kernel entry points)
-    /// so bias-epilogue cost (fused for coopmat1, a follow-up dispatch for coopmat2) is included exactly as
-    /// it is in production — measured both with and without bias to isolate that cost specifically.</summary>
+    /// so bias-epilogue cost is included exactly as it is in production — measured both with and without
+    /// bias since both kernels fuse it (coopmat2's fusion landed 2026-07-31, same day as this test).</summary>
     [Fact]
     public void Compare_CoopMat1PartialM_Vs_CoopMat2_GpuOnlyTime()
     {

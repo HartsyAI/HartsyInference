@@ -527,13 +527,77 @@ runs. **Two compounding causes found:**
    isolated benchmark's 5-iteration warmup loop would absorb exactly this kind of cost, hiding it completely.
    Unconfirmed; would need Nsight Graphics or a bisection harness to pin down definitively.
 
-**Conclusion: `EnableCoopMat2` stays off by default.** The wiring is correct and safe to leave in the
-codebase (opt-in, zero effect on default behavior — confirmed via
-`VulkanCoopMat2LinearTests.Backend_Linear_CoopMat2OptIn_DefaultsOff`), but it is NOT currently a win on a
-real model and should not be recommended to users. Next steps before revisiting: (a) benchmark coopmat2
-head-to-head against `matmul_coopmat_partial_m` specifically (the actual competitor, not the aligned-only
-kernel), (b) fuse bias into the coopmat2 shader instead of a follow-up dispatch, (c) isolate the ~4s stall's
-root cause. See `VulkanCoopMat2LinearTests.cs` for the wiring/correctness tests that back this up.
+**Conclusion at this point: `EnableCoopMat2` stays off by default**, pending the follow-up below — the
+wiring is correct (opt-in, zero effect on default behavior — confirmed via
+`VulkanCoopMat2LinearTests.Backend_Linear_CoopMat2OptIn_DefaultsOff`) but the causes weren't fully understood
+yet.
+
+## Follow-up: benchmarked against the correct competitor, fused bias, and the "~4s stall" turned out to be a
+## pre-existing, coopmat2-UNRELATED memory-pressure bug on this shared box (2026-07-31, same day)
+
+Chased all three open items from the section above:
+
+**(a) Correct competitor.** Re-ran the GPU-only-time comparison against `matmul_coopmat_partial_m`
+specifically (M shifted +3 off alignment to force it, same K/N as the scoreboard shapes, going through the
+real `Linear`/`DispatchMatmul` path so bias-epilogue cost is included). **coopmat2 still wins**: 0.74–0.98×
+of coopmat1's time across 20 shape/alignment/bias combinations — the "wrong baseline" theory doesn't explain
+the real-run regression after all.
+
+**(b) Fused bias.** Bias is now added directly in the shader via a broadcast `tensorLayoutNV` (stride 0 on
+the M dimension, so every row's `coopMatLoadTensorNV` reads the same `bias[n]` — no shared memory, no extra
+dispatch), loaded straight into an Accumulator-typed coopmat at full F32 precision. Real wins: correctness
+tolerance improved from 1.5% to 0.05% max relative error (bias no longer round-trips through F16 via a
+second dispatch), and the isolated GPU-only-time benchmark's biased cases dropped sharply (e.g. the aligned
+SDXL-QKV-with-bias case went from 0.87× to 0.31× of coopmat1's time). **But it barely moved the real Krea2
+e2e number** (65.7s before vs. 65.7s after, Linear-only ~61.0ms both times) — meaning bias dispatch overhead,
+while real, was NOT the dominant cause of the earlier regression. Most of Krea2's actual coopmat2-eligible
+Linears apparently don't carry bias (or carry little enough that fusing it doesn't move the aggregate).
+
+**(c) The "~4s stall" — solved, and it's not about coopmat2 at all.** A 4-step real Krea2 run
+(`HARTSY_DIT_GRAPH=1`, coopmat2 ON) logged: `[WRN] [Krea2 graph] capture invalidated — falling back to
+eager: HartsyInference.Vulkan.VulkanException: Vulkan error -2 (ErrorOutOfDeviceMemory):
+vkAllocateMemory(size=134643712, typeIdx=1)`, inside `TryDispatchCoopMat2 → VulkanMemoryAllocator.
+AllocateDedicated`, during a `Krea2Block.SwiGlu` Linear call on step 2 — a genuine ~128MB VRAM allocation
+failure, caught by the existing (pre-existing, not something built this session) step-graph-capture
+fallback-to-eager exception handling. **Ran the identical 4-step generation with coopmat2 OFF as a
+control — it hit the EXACT SAME OOM, same allocation size, same step, same call site pattern
+(`SwiGlu`'s Linear).** This is a real, pre-existing memory-pressure issue on this box — most likely the
+GPU contention already noted earlier (SwarmUI + a ComfyUI Python process + rustdesk all resident on the
+4090; `nvidia-smi --query-compute-apps` shows ~1.8GB held by other processes even at idle) — completely
+unrelated to coopmat2. It doesn't reproduce at 2 steps (less accumulated VRAM pressure over the run) but
+reliably does at 4. Output correctness held perfectly through the OOM+recovery in both configs: all three
+4-step runs (baseline, coopmat2 run 1, coopmat2 run 2) produced **byte-identical PNG output**.
+
+**Corrected picture once this shared, coopmat2-unrelated cost is factored out as common-cause noise**: at
+2 steps (no OOM event in any run), coopmat2 with fused bias is still ~5% slower in aggregate Linear time
+than the coopmat1 baseline (60,952ms vs. 58,085ms) — a real, if now much smaller, regression.
+
+**4-step variance sweep (2026-07-31, same day): 6 more runs (4 coopmat2-ON, 2 coopmat2-OFF), added to the 2
+existing ON runs and 1 existing OFF run for 6 ON / 3 OFF total.** Every single one of the 9 runs hit the
+IDENTICAL `ErrorOutOfDeviceMemory` at the identical allocation and step, confirming it's a fully
+deterministic, pre-existing property of this box at 4+ steps — not intermittent, and identical in both
+configs, so it's valid common-mode noise to factor out. Aggregate Linear-only time:
+
+| | n | mean | stdev | min | max |
+|---|---:|---:|---:|---:|---:|
+| coopmat2 ON | 6 | 121,486 ms | 6,271 ms | 113,653 ms | 131,534 ms |
+| coopmat2 OFF (baseline) | 3 | 126,456 ms | 8,199 ms | 117,104 ms | 132,404 ms |
+
+Mean difference: coopmat2 is 4,970ms (3.9%) faster on average. **Not statistically significant at this
+sample size** (Welch's t ≈ 0.92, |t| well under the ~2 threshold for significance — the two groups'
+distributions substantially overlap: the OFF group's minimum, 117,104ms, is below 4 of the 6 ON runs).
+**Honest conclusion: at 4 steps, coopmat2 is roughly on par with baseline — plausibly a small win, but not
+confidently distinguishable from run-to-run noise on this shared, contended GPU with only 9 total samples.**
+Getting a statistically confident answer would need many more runs than is a reasonable use of shared GPU
+time to chase further right now. Correctness held perfectly: all 9 4-step runs (6 ON, 3 OFF) produced
+byte-identical PNG output.
+
+**`EnableCoopMat2` stays off by default.** The 2-step regression (clean, no OOM confound, ~5% slower) is
+the more reliable signal available and is still real. At 4 steps the picture is now "not worse, maybe
+slightly better, not confidently proven either way" — genuine progress from "clear regression," but not
+yet a case for enabling this by default. See `docs/Checklists/TROUBLESHOOTING.md` for the same writeup and
+`VulkanCoopMat2LinearTests.cs` / `VulkanCoopmatBlockedBenchmark.cs` for the tests/benchmarks backing this
+up.
 
 ## Next levers, informed by ggml/llama.cpp's mature Vulkan backend (research pass, 2026-07-31)
 
