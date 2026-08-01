@@ -68,6 +68,10 @@ internal static class VideoRecipeUtils
         return (SnapToMultiple(fitW, multiple), SnapToMultiple(fitH, multiple));
     }
 
+    /// <summary>Frame-edited result for a silent family; <paramref name="audio"/> attaches a soundtrack meant to be heard.</summary>
+    internal static VideoGenerationResult ToResult(byte[][] frames, int width, int height, VideoRequest request, AudioBuffer? audio = null) =>
+        new VideoGenerationResult { Frames = ToVideoFrames(frames, width, height, request), Audio = audio };
+
     /// <summary>Applies the request's trim + boomerang frame edits and wraps the raw interleaved-RGB frames as the
     /// Engine's <see cref="VideoFrame"/> contract (mirrors the extension's <c>VideoOutputEncoder.ApplyFrameEdits</c>).</summary>
     internal static IReadOnlyList<VideoFrame> ToVideoFrames(byte[][] frames, int width, int height, VideoRequest request)

@@ -47,6 +47,11 @@ public class LtxVideo2GenerationTests
         using SafeTensorsLoader _ckpt = ckptLoader;
         _output.WriteLine($"  DiT {conv.Transformer.Count} / connectors {conv.Connectors.Count} / vae {conv.Vae.Count} / " +
             $"audioVae {conv.AudioVae.Count} / vocoder {conv.Vocoder.Count} keys in {sw.ElapsedMilliseconds}ms");
+        if (conv.Vae.Count == 0)
+        {
+            _output.WriteLine("SKIPPED: transformer-only split file (no bundled VAE) — this test needs a bundled checkpoint; the split path is covered by the ltx-2 recipe.");
+            return;
+        }
 
         LtxVideo2Config cfg = LtxVideo2Config.V23;
         using LtxVideo2Transformer transformer = new(cfg);
@@ -168,6 +173,11 @@ public class LtxVideo2GenerationTests
         string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(LtxVideo2GenerationTests).Assembly.Location)!, "Ptx");
         (LtxVideo2CheckpointConverter.ConvertedWeights conv, SafeTensorsLoader loader) = LtxVideo2CheckpointConverter.LoadAndConvert(ckpt);
         using SafeTensorsLoader _l = loader;
+        if (conv.Vae.Count == 0)
+        {
+            _output.WriteLine("SKIPPED: transformer-only split file (no bundled VAE) — this test needs a bundled checkpoint.");
+            return;
+        }
         float[]? lm = ExtractStat(conv.Vae, "latents_mean"), ls = ExtractStat(conv.Vae, "latents_std");
 
         // Tiny smooth-ish random latent [1,128,2,6,8] → output 9×192×256. Same data for both backends.

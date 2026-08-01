@@ -47,7 +47,7 @@ public sealed class WanVaceRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public IReadOnlyList<VideoFrame> Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         // TODO(E-IMG-4/5): a real control VIDEO (and the reactive/inactive control mask) needs the host-side video
@@ -100,7 +100,7 @@ public sealed class WanVaceRecipePipeline : IVideoRecipePipeline
         {
             (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromControl(promptEmbeds, negEmbeds, controlClip, inner, ControlScale, bridge);
             Logs.Info($"[WanVaceRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH} ({numFrames}f control).");
-            return VideoRecipeUtils.ToVideoFrames(frames, outW, outH, request);
+            return VideoRecipeUtils.ToResult(frames, outW, outH, request);
         }
         catch (Exception ex)
         {

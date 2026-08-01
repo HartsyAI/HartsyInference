@@ -42,7 +42,7 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public IReadOnlyList<VideoFrame> Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
@@ -76,14 +76,10 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
         try
         {
             LtxVideo2Pipeline.Ltx2Result result = _pipeline.GenerateFromTokens(promptTokens, negTokens, inner, numFrames, frameRate, bridge);
-            // TODO(E-IMG-4/5): the generated soundtrack (result.Audio) has no home on the frame-only video contract —
-            // the extension muxed it into the container. Dropped here rather than silently mis-timed.
-            if (result.Audio is not null && result.Audio.Length > 0)
-            {
-                Logs.Warning($"[LtxVideo2RecipePipeline] LTX-2 generated a {result.AudioSampleRate} Hz soundtrack, which the frame-only video contract cannot carry — dropped.");
-            }
-            Logs.Info($"[LtxVideo2RecipePipeline] Pipeline returned {result.Frames.Length} frames {result.Width}x{result.Height}.");
-            return VideoRecipeUtils.ToVideoFrames(result.Frames, result.Width, result.Height, request);
+            AudioBuffer audio = AudioBuffer.FromChannels(result.Audio, result.AudioSampleRate);
+            Logs.Info($"[LtxVideo2RecipePipeline] Pipeline returned {result.Frames.Length} frames {result.Width}x{result.Height}"
+                + (audio.IsEmpty ? "." : $" plus a {audio.SampleRate} Hz {audio.ChannelCount}ch soundtrack."));
+            return VideoRecipeUtils.ToResult(result.Frames, result.Width, result.Height, request, audio.IsEmpty ? null : audio);
         }
         catch (Exception ex)
         {

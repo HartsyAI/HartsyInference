@@ -13,18 +13,9 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Video.Tests;
 
-/// <summary>The complete SeedVR2 verification chain in one file, staged so a failure bisects to its stage
-/// (see PARITY_VERIFICATION.md §SeedVR2 for the recorded gate results and the bugs each stage caught).
-/// Unit-tier facts (windowing, converter negatives, frame padding) run everywhere with no weights; the
-/// env-gated Integration/GpuIntegration facts skip cleanly unless pointed at dumps/checkpoints:
-/// <list type="bullet">
-/// <item><c>SEEDVR2_PRE_REF</c> — preprocess dump (<c>dump_seedvr2_preprocess_reference.py</c>)</item>
-/// <item><c>SEEDVR2_DIT</c> / <c>SEEDVR2_VAE</c> / <c>SEEDVR2_EMB</c> — converted safetensors</item>
-/// <item><c>SEEDVR2_VAE_REF</c> — VAE dump (<c>dump_seedvr2_vae_reference.py</c>)</item>
-/// <item><c>SEEDVR2_PARITY_DIR</c> — tiny-config DiT dump (<c>Parity/seedvr2_transformer_parity_dump.py</c>)</item>
-/// <item><c>SEEDVR2_E2E_REF</c> / <c>SEEDVR2_FRAMES</c> / <c>SEEDVR2_AREA</c> / <c>SEEDVR2_E2E_BACKEND</c> —
-/// full-pipeline gate (<c>run_seedvr2_e2e_reference.py</c>)</item>
-/// </list></summary>
+/// <summary>The SeedVR2 verification chain, staged so a failure bisects to its stage (recorded gate
+/// results: PARITY_VERIFICATION.md). Reference dumps for the env-gated facts come from
+/// <c>tests/python-reference/seedvr2_reference/</c> and <c>Parity/seedvr2_transformer_parity_dump.py</c>.</summary>
 public sealed class SeedVr2Tests
 {
     private readonly ITestOutputHelper _output;
@@ -36,10 +27,8 @@ public sealed class SeedVr2Tests
 
     #region Window partition (Unit tier — committed fixture, no weights)
 
-    /// <summary>Exact-equality vs slices emitted by ByteDance's <c>models/dit_v2/window.py</c>. Fixture
-    /// committed at <c>fixtures/seedvr2_windows.json</c>; regenerate with
-    /// <c>fixtures/seedvr2_window_fixture_dump.py &lt;SeedVR&gt;/models/dit_v2/window.py</c>. Covers ragged
-    /// boundaries, the t&gt;30 clamp, single-window axes, and banker's-rounding area normalization.</summary>
+    /// <summary>Exact-equality vs slices emitted by ByteDance's <c>models/dit_v2/window.py</c>; regenerate
+    /// the fixture with <c>fixtures/seedvr2_window_fixture_dump.py</c>.</summary>
     [Fact]
     public void WindowSlices_MatchReference_AllFixtureCases()
     {
@@ -121,9 +110,8 @@ public sealed class SeedVr2Tests
     public void PaddedFrameCount_MatchesCutVideos(int frames, int expected)
         => Assert.Equal(expected, SeedVr2Preprocess.PaddedFrameCount(frames));
 
-    /// <summary>Preprocess chain vs ByteDance's own transforms. Crop/normalize/pad exact; the antialiased
-    /// bicubic is float-tolerance (maxAbs ≤ 1e-5 fp32 — this stage caught the a=−0.5 kernel and the
-    /// float32-weights ATen conventions, see the PARITY bugs ledger).</summary>
+    /// <summary>Preprocess chain vs ByteDance's own transforms; the antialiased bicubic is
+    /// float-tolerance, the rest exact.</summary>
     [Fact]
     [Trait("Category", "Integration")]
     public void Preprocess_MatchesReference_AllCases()
@@ -195,9 +183,8 @@ public sealed class SeedVr2Tests
         Assert.ThrowsAny<Exception>(() => SeedVr2CheckpointConverter.Convert(synthetic));
     }
 
-    /// <summary>Real converted 3B checkpoint: full inventory validated (every tensor consumed, none
-    /// missing) and <see cref="SeedVr2Config.Detect"/> reproduces the published dims — including the
-    /// mm_layers=10 separate/shared boundary, the most bug-prone loading detail.</summary>
+    /// <summary>Real 3B checkpoint: full inventory consumed and <see cref="SeedVr2Config.Detect"/>
+    /// reproduces the published dims, including the mm_layers=10 separate/shared boundary.</summary>
     [Fact]
     [Trait("Category", "Integration")]
     public void RealCheckpoint_ConvertsAndDetects3BConfig()
@@ -232,8 +219,8 @@ public sealed class SeedVr2Tests
 
     #region VAE parity (Integration — real weights vs Python dump)
 
-    /// <summary>Encoder mean/logvar + decoder RGB vs the real-weight Python reference (basic_forward path,
-    /// no slicing). relL2 &lt; 1e-3 per the full-model fp32 ladder; recorded results ≤2.9e-6.</summary>
+    /// <summary>Encoder mean/logvar + decoder RGB vs the real-weight Python reference (basic_forward
+    /// path, no slicing).</summary>
     [Fact]
     [Trait("Category", "Integration")]
     public void Vae_EncoderAndDecoder_MatchRealWeightReference()
@@ -291,8 +278,7 @@ public sealed class SeedVr2Tests
     };
 
     /// <summary>SeedVr2Dit vs ByteDance's NaDiT at a tiny seeded-random config, with per-block relL2 and
-    /// first-divergence reporting (this stage caught the last-layer vid_only ada scope and the txt
-    /// self-residual doubling). Assert full output &lt; 1e-3 (fp32 ladder).</summary>
+    /// first-divergence reporting.</summary>
     [Fact]
     [Trait("Category", "Integration")]
     public void Dit_TinyConfig_ForwardMatchesReference_PerBlock()
@@ -342,9 +328,8 @@ public sealed class SeedVr2Tests
 
     #region Full-pipeline E2E (GpuIntegration — real weights, reference noises injected)
 
-    /// <summary>Full C# restore of the BBB clip vs the real-weight Python reference, reference noises
-    /// injected via <see cref="SeedVr2RestorePipeline.NoiseHook"/> (torch RNG is unmatchable). FP32 both
-    /// sides at SEEDVR2_AREA. Gate: mean SSIM ≥ 0.995 (recorded: 0.99950 / 56.6 dB).</summary>
+    /// <summary>Full C# restore vs the real-weight Python reference, reference noises injected via
+    /// <see cref="SeedVr2RestorePipeline.NoiseHook"/> (torch RNG is unmatchable).</summary>
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void E2e_BigBuckBunny_RestoreMatchesPythonReference()
@@ -410,8 +395,7 @@ public sealed class SeedVr2Tests
             return copy;
         };
 
-        // Gate area matches the Python side: f32 whole-clip VAE at 720p-area needs ~18+ GB of activations,
-        // so the dtype-clean parity gate runs at a reduced area (matrix coverage runs at 960×540-area).
+        // f32 whole-clip VAE at 720p-area exceeds 24 GB; the parity gate runs reduced.
         long area = long.TryParse(Env("SEEDVR2_AREA"), out long a) ? a : 1280L * 720L;
         long t0 = Environment.TickCount64;
         (List<byte[]> restored, int outW, int outH) = pipeline.Restore(

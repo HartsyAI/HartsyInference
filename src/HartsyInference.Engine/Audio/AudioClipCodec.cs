@@ -9,10 +9,10 @@ namespace HartsyInference.Engine.Audio;
 /// <summary>Decodes request <see cref="AudioClip"/>s to float PCM and encodes generated waveforms back to WAV. Only
 /// RIFF/WAVE is decodable in-engine: the extension shelled out to ffmpeg for compressed containers, which is a host
 /// dependency the Engine deliberately does not take, so anything else is refused with a message naming the limit.</summary>
-internal static class AudioClipCodec
+public static class AudioClipCodec
 {
     /// <summary>Decodes a clip to mono float PCM in [-1, 1] at <paramref name="targetSampleRate"/>; empty for no input.</summary>
-    internal static float[] DecodeMono(AudioClip? clip, int targetSampleRate)
+    public static float[] DecodeMono(AudioClip? clip, int targetSampleRate)
     {
         if (clip is null || clip.Data.Length == 0)
         {
@@ -27,7 +27,7 @@ internal static class AudioClipCodec
 
     /// <summary>Decodes a clip to a stereo pair at <paramref name="targetSampleRate"/> (mono sources duplicate the
     /// single channel), for the models that need true stereo input such as Demucs.</summary>
-    internal static (float[] Left, float[] Right) DecodeStereo(AudioClip? clip, int targetSampleRate)
+    public static (float[] Left, float[] Right) DecodeStereo(AudioClip? clip, int targetSampleRate)
     {
         if (clip is null || clip.Data.Length == 0)
         {
@@ -48,8 +48,19 @@ internal static class AudioClipCodec
         return (outLeft, outRight);
     }
 
+    /// <summary>Decodes a clip at its native rate and channel count, for pass-through paths that must not resample.</summary>
+    public static AudioBuffer DecodeNative(AudioClip? clip)
+    {
+        if (clip is null || clip.Data.Length == 0)
+        {
+            return AudioBuffer.Empty;
+        }
+        WavFile.DecodedAudio decoded = Decode(clip);
+        return AudioBuffer.FromChannels(decoded.Channels, decoded.SampleRate);
+    }
+
     /// <summary>Encodes a mono (<paramref name="right"/> null) or stereo waveform as a 16-bit PCM WAV container.</summary>
-    internal static byte[] EncodeWav(float[] left, float[]? right, int sampleRate)
+    public static byte[] EncodeWav(float[] left, float[]? right, int sampleRate)
     {
         ArgumentNullException.ThrowIfNull(left);
         if (right is null)
@@ -86,8 +97,22 @@ internal static class AudioClipCodec
         return stream.ToArray();
     }
 
+    /// <summary>Encodes a buffer as a 16-bit PCM WAV container, mono when it carries a single channel.</summary>
+    public static byte[] EncodeWav(AudioBuffer audio)
+    {
+        ArgumentNullException.ThrowIfNull(audio);
+        if (audio.IsEmpty)
+        {
+            return EncodeWav([], null, Math.Max(1, audio.SampleRate));
+        }
+        (float[] left, float[] right) = audio.ToStereo();
+        return audio.ChannelCount == 1
+            ? EncodeWav(left, null, audio.SampleRate)
+            : EncodeWav(left, right, audio.SampleRate);
+    }
+
     /// <summary>The clip's duration in seconds at <paramref name="sampleRate"/>.</summary>
-    internal static double Seconds(int sampleCount, int sampleRate) => sampleRate <= 0 ? 0d : sampleCount / (double)sampleRate;
+    public static double Seconds(int sampleCount, int sampleRate) => sampleRate <= 0 ? 0d : sampleCount / (double)sampleRate;
 
     private static WavFile.DecodedAudio Decode(AudioClip clip)
     {

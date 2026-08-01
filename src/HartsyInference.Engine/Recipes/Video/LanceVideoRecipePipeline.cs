@@ -39,7 +39,7 @@ public sealed class LanceVideoRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public IReadOnlyList<VideoFrame> Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
@@ -74,7 +74,7 @@ public sealed class LanceVideoRecipePipeline : IVideoRecipePipeline
         {
             (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromTokens(promptTokens, negativeTokens, inner, numFrames, bridge);
             Logs.Info($"[LanceVideoRecipePipeline] T2V returned {frames.Length} frames {outW}x{outH}.");
-            return VideoRecipeUtils.ToVideoFrames(frames, outW, outH, request);
+            return VideoRecipeUtils.ToResult(frames, outW, outH, request);
         }
         catch (Exception ex)
         {

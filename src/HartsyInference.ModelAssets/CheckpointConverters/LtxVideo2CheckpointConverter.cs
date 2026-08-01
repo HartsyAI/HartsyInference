@@ -119,7 +119,8 @@ public sealed class LtxVideo2CheckpointConverter
         if (IsConnectorKey(key))
             return (Ltx2Bucket.Connectors, key);
         if (key.StartsWith("decoder.", StringComparison.Ordinal) || key.StartsWith("encoder.", StringComparison.Ordinal)
-            || key.StartsWith("latents_", StringComparison.Ordinal))
+            || key.StartsWith("latents_", StringComparison.Ordinal)
+            || key.StartsWith("per_channel_statistics", StringComparison.Ordinal))
             return MapVae(key);
         return MapTransformer(key);
     }

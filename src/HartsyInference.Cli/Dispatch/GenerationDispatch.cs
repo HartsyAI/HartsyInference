@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using HartsyInference.Cli.Infra;
 using HartsyInference.Core.Logging;
+using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Services;
 using HartsyInference.Vision.Codec;
 
@@ -396,18 +397,17 @@ public static class GenerationDispatch
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("denoise");
-        List<VideoFrame> frames = new List<VideoFrame>();
+        VideoGenerationResult generated;
         try
         {
-            await foreach (VideoFrame frame in engine.Video.GenerateAsync(spec, request, progress, cancel).ConfigureAwait(false))
-            {
-                frames.Add(frame);
-            }
+            generated = await engine.Video.GenerateAsync(spec, request, progress, cancel).ConfigureAwait(false);
         }
         finally
         {
             progress?.Finish();
         }
+        List<VideoFrame> frames = [.. generated.Frames];
+        AudioBuffer? soundtrack = generated.Audio;
 
         // Optional --restore chain: feed the generated frames straight into SeedVR2 (no encode round-trip),
         // reusing the loaded engine. Generate small, restore up.
@@ -435,7 +435,7 @@ public static class GenerationDispatch
             }
             frames = restored;
         }
-        return FrameArtifact(frames, outputDir, prompt, "video");
+        return FrameArtifact(frames, outputDir, prompt, "video", soundtrack);
     }
 
     /// <summary>Image-to-3D through <see cref="IMeshService"/>; the CLI's "prompt" is the input image path.</summary>
@@ -628,7 +628,8 @@ public static class GenerationDispatch
         await Task.CompletedTask.ConfigureAwait(false);
     }
 
-    private static GeneratedArtifact FrameArtifact(IReadOnlyList<VideoFrame> frames, string? outputDir, string slug, string label)
+    private static GeneratedArtifact FrameArtifact(IReadOnlyList<VideoFrame> frames, string? outputDir, string slug, string label,
+        AudioBuffer? audio = null)
     {
         if (frames.Count == 0)
         {
@@ -642,12 +643,20 @@ public static class GenerationDispatch
             pixels[i] = frames[i].Rgb;
         }
         string dir = FrameWriter.WriteFrames(pixels, width, height, outputDir ?? RepoPaths.OutputRoot(), slug);
+        // The CLI writes a frame directory, not a container, so the soundtrack lands beside it for the muxer of choice.
+        string? audioPath = null;
+        if (audio is not null && !audio.IsEmpty)
+        {
+            audioPath = Path.Combine(dir, "audio.wav");
+            File.WriteAllBytes(audioPath, AudioClipCodec.EncodeWav(audio));
+        }
 
         GeneratedArtifact artifact = new GeneratedArtifact
         {
             Kind = ArtifactKind.Video,
             Extension = "png",
-            Text = $"{frames.Count} frames ({width}x{height}) → {dir}",
+            Text = $"{frames.Count} frames ({width}x{height}) → {dir}"
+                + (audioPath is null ? "" : $" + {audio!.Seconds:0.0}s audio.wav"),
             PreviewRgb = frames[0].Rgb,
             PreviewWidth = width,
             PreviewHeight = height,

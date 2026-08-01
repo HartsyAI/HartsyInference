@@ -1493,14 +1493,10 @@ public static class ModelCatalog
                 },
             },
 
-            // Restoration (SeedVR2). DiT + VAE download from the community safetensors mirror
-            // (numz/SeedVR2_comfyUI) — VERBATIM original state-dict keys (header-verified: 3B fp16 635
-            // tensors incl. the recomputable rope freqs the converter drops; VAE 250 tensors), so the
-            // converter chain loads them directly; F16 is fine (GEMM weights load F16, host-math vectors
-            // upcast at load). Sha256 pinned only after a verified download (repo convention). The frozen
-            // pos/neg embeddings exist upstream only as torch-pickle .pt (unloadable in pure C#) — the
-            // 1.2 MB converted safetensors ships from the Hartsy repo; until published, place it under
-            // Models/Video/SeedVr2/ and the resolver finds it.
+            // Restoration (SeedVR2). numz/SeedVR2_comfyUI ships the original state-dict keys verbatim, so
+            // the converter loads its fp16 files directly. The pos/neg embeddings exist upstream only as
+            // torch-pickle .pt, hence the Hartsy-hosted converted copy (until published, place it under
+            // Models/Video/SeedVr2/).
             new CatalogEntry
             {
                 Id = "seedvr2-3b", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (video/image restoration)",
@@ -1555,8 +1551,6 @@ public static class ModelCatalog
                 Assets = new ModelAsset[]
                 {
                     // TI2V-5B; umT5-XXL + the Wan2.2 VAE resolve as side models inside WanVideoRecipe.
-                    // Sha256 re-pinned 2026-08-01: Comfy-Org replaced the upstream LFS object since the
-                    // 2026-07-21 pin (old 7057d12b…) — new hash matches the HF API's authoritative LFS oid.
                     new() { Repo = "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", RepoPath = "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
                         TargetSubdir = "Stable-Diffusion/Wan", Role = "transformer",
                         Sha256 = "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e" },
@@ -1616,7 +1610,8 @@ public static class ModelCatalog
                     // video/audio VAE + text-projection + Gemma-3-12B side models the engine already resolves —
                     // avoids re-downloading ~25GB of duplicated side-model weights.
                     new() { Repo = "Kijai/LTX2.3_comfy", RepoPath = "diffusion_models/ltx-2.3-22b-dev_transformer_only_fp8_scaled.safetensors",
-                        TargetSubdir = "Stable-Diffusion/LtxVideo2", TargetName = "ltx-2.3-22b-dev-fp8.safetensors", Role = "transformer", Sha256 = null },
+                        TargetSubdir = "Stable-Diffusion/LtxVideo2", TargetName = "ltx-2.3-22b-dev-fp8.safetensors", Role = "transformer",
+                        Sha256 = "f0b8f92f8a33daf7e7f508878db6d6f25f9c8bc7b90fcb5650fb402a9d9e9f13" },
                 },
             },
             // Cosmos-Predict1 Video2World — discrete-token autoregressive video continuation (T5-11B cross-attn +

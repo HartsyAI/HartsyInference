@@ -54,7 +54,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public IReadOnlyList<VideoFrame> Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
@@ -132,7 +132,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
                 (byte[][] concatFrames, int concatW, int concatH, int _) = _pipeline.GenerateImageToVideoConcat(
                     promptEmbeds, negEmbeds, imageEmbeds, frameRgb, inner, numFrames, bridge, lastRgb);
                 Logs.Info($"[WanVideoRecipePipeline] Concat-I2V returned {concatFrames.Length} frames {concatW}x{concatH}.");
-                return VideoRecipeUtils.ToVideoFrames(concatFrames, concatW, concatH, request);
+                return VideoRecipeUtils.ToResult(concatFrames, concatW, concatH, request);
             }
 
             if (request.InitImage is not null)
@@ -144,7 +144,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
             }
             (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromEmbeddings(promptEmbeds, negEmbeds, inner, numFrames, bridge, firstFrameLatent);
             Logs.Info($"[WanVideoRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH} ({(firstFrameLatent is null ? "T2V" : "I2V")}).");
-            return VideoRecipeUtils.ToVideoFrames(frames, outW, outH, request);
+            return VideoRecipeUtils.ToResult(frames, outW, outH, request);
         }
         catch (Exception ex)
         {

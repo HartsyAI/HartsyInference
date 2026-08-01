@@ -1,4 +1,5 @@
 using HartsyInference.Engine;
+using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
@@ -29,17 +30,26 @@ public static class VideoEndpoints
                 // Runs inside the queue's held slot — call the service directly, not through a second EnqueueAsync.
                 Progress<StepPreview> progress = new Progress<StepPreview>(p =>
                     writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
-                int frameCount = 0;
-                await foreach (VideoFrame frame in engine.Video.GenerateAsync(spec, req.Request, progress, ct))
+                VideoGenerationResult result = await engine.Video.GenerateAsync(spec, req.Request, progress, ct);
+                foreach (VideoFrame frame in result.Frames)
                 {
+                    ct.ThrowIfCancellationRequested();
                     writer.TryWrite(SseHelpers.Event("frame", new
                     {
                         index = frame.Index,
                         png = Convert.ToBase64String(PngEncoder.Encode(frame.Rgb, frame.Width, frame.Height)),
                     }, jsonOptions));
-                    frameCount++;
                 }
-                writer.TryWrite(SseHelpers.Event("complete", new { frames = frameCount }, jsonOptions));
+                if (result.Audio is not null && !result.Audio.IsEmpty)
+                {
+                    writer.TryWrite(SseHelpers.Event("audio", new
+                    {
+                        sampleRate = result.Audio.SampleRate,
+                        channels = result.Audio.ChannelCount,
+                        wav = Convert.ToBase64String(AudioClipCodec.EncodeWav(result.Audio)),
+                    }, jsonOptions));
+                }
+                writer.TryWrite(SseHelpers.Event("complete", new { frames = result.Frames.Count }, jsonOptions));
             }, ct);
         });
     }

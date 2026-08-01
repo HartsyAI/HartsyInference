@@ -56,7 +56,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public IReadOnlyList<VideoFrame> Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         // TODO(E-IMG-4/5): the driving POSE and FACE clips come from extension-side preprocessors (YOLO11-pose skeleton
@@ -144,7 +144,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 promptEmbeds, negEmbeds, referenceRgb, poseClip, faceClip, inner, clipImageEmbeds: clipEmbeds, cachedConditioning: null, onProgress: bridge);
             conditioning = used;
             Logs.Info($"[WanAnimateRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH} ({numFrames}f pose / {numFrames - 1}f face).");
-            return VideoRecipeUtils.ToVideoFrames(frames, outW, outH, request);
+            return VideoRecipeUtils.ToResult(frames, outW, outH, request);
         }
         catch (Exception ex)
         {

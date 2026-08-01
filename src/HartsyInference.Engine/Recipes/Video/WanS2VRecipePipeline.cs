@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -53,15 +54,15 @@ public sealed class WanS2VRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public IReadOnlyList<VideoFrame> Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
-        // TODO(E-IMG-4/5): the extension muxed the driving speech back into the output container at Wan's native
-        // 16 fps; the native contract returns frames only, so the caller re-muxes the same clip it supplied.
         AudioClip speech = request.VideoAudioReference ?? request.VideoAudioInput
             ?? throw new InvalidOperationException(
                 "Wan S2V needs driving speech in VideoRequest.VideoAudioReference (or VideoAudioInput) — that's what drives the video.");
         float[] waveform = VideoRecipeUtils.DecodeMono16k(speech);
+        // The speech that drove the video is the soundtrack; conditioning downmixes to 16k mono, muxing keeps the source.
+        AudioBuffer drivingSpeech = AudioClipCodec.DecodeNative(speech);
 
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
@@ -129,7 +130,7 @@ public sealed class WanS2VRecipePipeline : IVideoRecipePipeline
                 (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromAudioFeatures(
                     promptEmbeds, negEmbeds, resampled, inner, numFrames, onProgress: bridge, referenceLatent: refLatent);
                 Logs.Info($"[WanS2VRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH}.");
-                return VideoRecipeUtils.ToVideoFrames(frames, outW, outH, request);
+                return VideoRecipeUtils.ToResult(frames, outW, outH, request, drivingSpeech.IsEmpty ? null : drivingSpeech);
             }
             finally
             {

@@ -6,6 +6,52 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what a
 stable release will require. Dates are UTC.
 
+## [2.0.0-alpha.7] — 2026-08-01
+
+Video gets its sound back: generated audio now reaches the caller (closes `TODO(E-IMG-4/5)`), plus the
+LTX-2 split-checkpoint decode fix.
+
+### Added
+- **`AudioBuffer`** (`Engine.Requests`) — engine-native raw planar-float PCM, the decoded counterpart to
+  `AudioClip` (encoded in) and `AudioResult` (encoded out). Mono/stereo conversion + duration trim; the
+  shared currency for moving a waveform between components in any modality.
+- **`VideoGenerationResult`** — frames plus the soundtrack that belongs with them.
+- **`VideoAudioResolver`** — one place that decides which track ships with a generation: what the pipeline
+  attached beats `VideoRequest.VideoAudioInput` pass-through, then the track is trimmed to video length.
+  `VideoAudioReference` is deliberately not a fallback (it is conditioning; a family that means it to be
+  heard attaches it itself).
+- `AudioClipCodec` is now public and gained `DecodeNative` (native rate/channels, no resample) and an
+  `EncodeWav(AudioBuffer)` overload.
+- REST `/v1/native/video/stream` emits an `audio` SSE event (base64 WAV + rate/channels).
+
+### Fixed
+- **LTX-2 split-checkpoint output was checkerboard garbage** (the known-broken `hartsy video -m ltx-2`
+  path, which SwarmUI also hits). The split VAE file ships bare keys, and the converter's bare-key router
+  only recognized `decoder.`/`encoder.`/`latents_` as VAE keys — `per_channel_statistics.{mean-of-means,
+  std-of-means}` fell into the Transformer bucket, so latent denormalization silently became an identity
+  no-op. With std-of-means as low as 0.074, the decoder received channels up to ~13× too hot; the up-stack
+  amplified that to ±943 and the RGB clamp saturated to checkerboard. One added route in
+  `LtxVideo2CheckpointConverter.RouteKey` fixes it: decode now lands in [-1,1] and the catalog path produces
+  coherent frames (verified 512×320×25f, seed 42; transformer Sha256 pinned). Bundled single-file
+  checkpoints were never affected.
+- **LTX-2.3's generated soundtrack was dropped**, not muxed — `LtxVideo2RecipePipeline` logged a warning
+  and discarded it because the pipeline contract carried frames only. It is now attached and muxed.
+- **Wan2.2-S2V's driving speech was not muxed either.** The mux moved to the Engine when the extension was
+  thinned to a wrapper, but was never implemented there; `VideoRequest.VideoAudioInput` was documented as a
+  mux track with no consumer. S2V now attaches the speech it consumed, at source rate rather than the 16 kHz
+  mono conditioning downmix.
+- The SwarmUI extension's ffmpeg audio mux (`VideoOutputEncoder.AudioTrack`, `FormatSupportsAudio`) was
+  unreachable dead code — never constructed, never passed. Reconnected, with a warning when the chosen
+  container (gif/webp) cannot carry a track.
+
+### Changed
+- **Breaking:** `IVideoRecipePipeline.Generate` returns `VideoGenerationResult` instead of
+  `IReadOnlyList<VideoFrame>`, and `IVideoService.GenerateAsync` returns `Task<VideoGenerationResult>`
+  instead of `IAsyncEnumerable<VideoFrame>`. The enumerable never streamed — it awaited the full frame list
+  before yielding — so no delivery behaviour is lost. Replaced rather than added alongside: a second
+  frame-only overload would silently drop audio, which is the bug being fixed.
+- `hartsy video` writes `audio.wav` beside the frame directory when a generation produces sound.
+
 ## [2.0.0-alpha.6] — 2026-08-01
 
 SeedVR2 video/image restoration — a new modality, end to end.

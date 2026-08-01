@@ -39,7 +39,7 @@ public sealed class HunyuanVideoRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public IReadOnlyList<VideoFrame> Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         IBackend backend = _backend;
@@ -87,7 +87,7 @@ public sealed class HunyuanVideoRecipePipeline : IVideoRecipePipeline
 
             (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromEmbeddings(promptEmbeds, pooled, inner, numFrames, bridge);
             Logs.Info($"[HunyuanVideoRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH}.");
-            return VideoRecipeUtils.ToVideoFrames(frames, outW, outH, request);
+            return VideoRecipeUtils.ToResult(frames, outW, outH, request);
         }
         catch (Exception ex)
         {

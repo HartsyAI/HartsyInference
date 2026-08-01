@@ -147,18 +147,12 @@ H3's API takes **duration in integer seconds (5–15)** while `VideoRequest` car
   (so expect `MiniMaxAI/MiniMax-H3`). Check both hosts — MiniMax has historically published to
   ModelScope first.
 
-**The blocking engine gap: generated audio has nowhere to go.** `IVideoRecipePipeline.Generate`
-returns `IReadOnlyList<VideoFrame>` — frames only. This is already a live TODO: `LtxVideo2RecipePipeline`
-generates an LTX-2.3 soundtrack and **logs a warning and drops it** (`TODO(E-IMG-4/5)`), because the
-frame-only contract cannot carry it. Wan2.2-S2V muxes audio only because its audio is an *input* that
-gets passed through to `VideoOutputEncoder.AudioTrack`.
-
-For LTX-2.3 that gap is a missing feature. **For H3 it is fatal** — every H3 clip has a jointly
-generated soundtrack, and a video model that silently discards half its output is worse than one that
-doesn't load. Widening the video result contract to carry a generated waveform (sample rate + channel
-count + PCM, alongside the frames) is therefore a **prerequisite** for H3, not a follow-up. LTX-2.3
-picks up the fix for free, which makes it independently verifiable against a model we already have
-working before H3 ever arrives.
+**The audio return path is already built (2026-08-01) — H3 does not have to solve it.** This was the
+one blocking prerequisite: `IVideoRecipePipeline.Generate` used to return frames only, so LTX-2.3's
+generated soundtrack was logged-and-dropped. It now returns `VideoGenerationResult` (frames plus an
+optional `AudioBuffer`), `VideoAudioResolver` picks and trims the track, and the SwarmUI extension's
+ffmpeg mux is reconnected. An H3 pipeline that produces a stereo waveform just attaches it to its
+result and the mux happens for free.
 
 **Precedents worth reading first.** LTX-2.3 (`LtxVideo2Pipeline`, `Ltx2Result`) is the closest
 existing architecture: dual-stream video+audio DiT with separate video and audio VAEs and a BigVGAN

@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
@@ -5,9 +6,9 @@ using HartsyInference.Engine.Requests;
 namespace HartsyInference.Engine.Services;
 
 /// <summary>Video-generation service: resolves the checkpoint's family recipe from the
-/// <see cref="VideoRecipeRegistry"/>, constructs (and caches) the pipeline, and streams the decoded frames as they
-/// become available. Composition features are applied by the feature-resolver phase (E-IMG-4); a request that sets
-/// one is rejected rather than silently ignored.</summary>
+/// <see cref="VideoRecipeRegistry"/>, constructs (and caches) the pipeline, and returns the decoded frames plus the
+/// soundtrack <see cref="VideoAudioResolver"/> selects for them. Composition features are applied by the
+/// feature-resolver phase (E-IMG-4); a request that sets one is rejected rather than silently ignored.</summary>
 public sealed class VideoService : IVideoService
 {
     private readonly InferenceEngine _engine;
@@ -16,8 +17,8 @@ public sealed class VideoService : IVideoService
     internal VideoService(InferenceEngine engine) => _engine = engine;
 
     /// <inheritdoc/>
-    public async IAsyncEnumerable<VideoFrame> GenerateAsync(ModelSpec spec, VideoRequest request, IProgress<StepPreview>? progress = null,
-        [EnumeratorCancellation] CancellationToken cancel = default)
+    public async Task<VideoGenerationResult> GenerateAsync(ModelSpec spec, VideoRequest request, IProgress<StepPreview>? progress = null,
+        CancellationToken cancel = default)
     {
         if (request.Loras is not null)
         {
@@ -25,19 +26,15 @@ public sealed class VideoService : IVideoService
                 "Video composition features (LoRA) are applied by the feature-resolver phase (E-IMG-4); not yet available.");
         }
 
-        IReadOnlyList<VideoFrame> frames = await Task.Run(
+        return await Task.Run(
             () =>
             {
                 IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(spec);
                 VideoRequest resolved = InferenceEngine.VideoDefaultsFor(spec).Apply(request);
-                return pipeline.Generate(resolved, progress, cancel);
+                VideoGenerationResult result = pipeline.Generate(resolved, progress, cancel);
+                double seconds = VideoAudioResolver.VideoSeconds(result.Frames.Count, resolved.Fps);
+                return VideoAudioResolver.Resolve(result, resolved, seconds);
             },
             cancel).ConfigureAwait(false);
-
-        foreach (VideoFrame frame in frames)
-        {
-            cancel.ThrowIfCancellationRequested();
-            yield return frame;
-        }
     }
 }

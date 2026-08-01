@@ -1,0 +1,16 @@
+namespace HartsyInference.Engine.Requests;
+
+/// <summary>One video generation's full output: the decoded frames plus the soundtrack that belongs with them, so a
+/// model that generates audio jointly with video (LTX-2.3, MiniMax-H3) can hand both to the caller that muxes them.</summary>
+public sealed record VideoGenerationResult
+{
+    /// <summary>Decoded frames in sequence order.</summary>
+    public required IReadOnlyList<VideoFrame> Frames { get; init; }
+
+    /// <summary>The audio to mux alongside <see cref="Frames"/>; null for a silent generation.</summary>
+    public AudioBuffer? Audio { get; init; }
+
+    /// <summary>Wraps a frame-only generation.</summary>
+    public static VideoGenerationResult FromFrames(IReadOnlyList<VideoFrame> frames) =>
+        new VideoGenerationResult { Frames = frames };
+}
