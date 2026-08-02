@@ -33,7 +33,7 @@ public sealed class SpeechService : ISpeechService
         string repo = descriptor.ResolveRepo(selector.Variant);
         IBackend backend = _engine.Backend;
 
-        return AudioRuntime.RunAsync(backend, $"tts:{repo}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, $"tts:{repo}", async ct =>
         {
             // Materialize the reference once: mono 24 kHz samples plus a temp WAV for pipelines that take a path.
             float[]? referenceMono = null;
@@ -48,7 +48,7 @@ public sealed class SpeechService : ISpeechService
             try
             {
                 ct.ThrowIfCancellationRequested();
-                ITtsRunner runner = await TtsCatalog.Cache
+                ITtsRunner runner = await _engine.AudioRuntime.Tts
                     .GetOrLoadAsync(repo, token => descriptor.LoadAsync(selector.Variant, token), ct).ConfigureAwait(false);
                 TtsJob job = new TtsJob
                 {

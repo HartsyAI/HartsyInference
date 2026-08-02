@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
@@ -23,6 +24,8 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly Dictionary<string, IVideoRecipePipeline> _videoRecipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private string _backendSelector;
     private IBackend? _backend;
+    private readonly EngineOptions? _options;
+    private Audio.AudioRuntime? _audioRuntime;
 
     private readonly Lazy<ImagesService> _images;
     private readonly Lazy<VideoService> _video;
@@ -40,9 +43,10 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>Creates an engine that lazily constructs the backend named by <paramref name="backendSelector"/>
     /// (<c>auto</c>/<c>cpu</c>/<c>cuda</c>/<c>vulkan</c>, optionally with a <c>:{ordinal}</c> device suffix) on first use.</summary>
-    public InferenceEngine(string backendSelector = "auto")
+    public InferenceEngine(string backendSelector = "auto", EngineOptions? options = null)
     {
         _backendSelector = backendSelector;
+        _options = options;
         _images = new Lazy<ImagesService>(() => new ImagesService(this));
         _video = new Lazy<VideoService>(() => new VideoService(this));
         _text = new Lazy<TextService>(() => new TextService(this));
@@ -61,8 +65,8 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>Creates an engine on a specific device, for hosts that carry the backend name and the GPU id as separate settings.</summary>
     /// <remarks>Equivalent to passing <c>"cuda:1"</c> to the single-argument constructor; ordinal 0 composes back to the plain selector, so
     /// the default path is byte-identical to what callers passed before device selection existed.</remarks>
-    public InferenceEngine(string backendSelector, int deviceOrdinal)
-        : this(BackendFactory.WithOrdinal(backendSelector, deviceOrdinal))
+    public InferenceEngine(string backendSelector, int deviceOrdinal, EngineOptions? options = null)
+        : this(BackendFactory.WithOrdinal(backendSelector, deviceOrdinal), options)
     {
     }
 
@@ -131,6 +135,16 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>The compute backend, constructed on first use. Used by the typed services that drive pipelines directly
     /// (the recipe registry) rather than through a modality handler.</summary>
     internal IBackend Backend => EnsureBackend();
+
+    /// <summary>The engine's compute backend for hosts that run auxiliary work (e.g. ControlNet annotators) on the
+    /// same device. The engine owns it — callers must never dispose it; disposal would evict the engine's resident
+    /// weights and unbind its compute stream.</summary>
+    public IBackend ComputeBackend => EnsureBackend();
+
+    /// <summary>This engine's audio runtime (generation lock + resident runner caches), created on first audio use.
+    /// Per-engine so audio on two engines/GPUs runs concurrently and one engine's FreeMemory cannot unload another's
+    /// models.</summary>
+    internal Audio.AudioRuntime AudioRuntime => _audioRuntime ??= new Audio.AudioRuntime();
 
     /// <summary>Detects the checkpoint architecture for <paramref name="spec"/>, resolves its recipe, and constructs
     /// (or returns a cached) pipeline. Throws when no recipe is registered for the detected family yet.</summary>
@@ -320,7 +334,19 @@ public sealed class InferenceEngine : IInferenceEngine
         };
     }
 
-    private IBackend EnsureBackend() => _backend ??= BackendFactory.Create(_backendSelector);
+    private IBackend EnsureBackend()
+    {
+        if (_backend is null)
+        {
+            _backend = BackendFactory.Create(_backendSelector);
+            // Weak-keyed override: it dies with the backend, so rebuilds re-apply here and disposal needs no cleanup.
+            if (_options?.LowVram is LowVramMode lowVram)
+            {
+                LowVramPolicy.SetOverride(_backend, lowVram);
+            }
+        }
+        return _backend;
+    }
 
     /// <summary>Disposes every cached image/video pipeline bound to a checkpoint OTHER than
     /// <paramref name="keepPath"/> and returns their device memory to the driver. Called on a cache miss
@@ -424,9 +450,9 @@ public sealed class InferenceEngine : IInferenceEngine
         {
             _embeddings.Value.Dispose();
         }
-        // Audio pipelines are cached process-wide by the audio catalogs; drop them here so none outlives the backend
-        // it was constructed against.
-        Audio.AudioRuntime.UnloadAll(AudioUnloadWaitSeconds);
+        // Audio pipelines are cached per-engine by the audio runtime; drop THIS engine's so none outlives the backend
+        // it was constructed against. Other engines' resident audio models are untouched.
+        _audioRuntime?.UnloadAll(AudioUnloadWaitSeconds);
         if (disposeBackend)
         {
             _backend?.Dispose();

@@ -78,5 +78,15 @@ public sealed record LtxVideo2Config
     public int NumInferenceSteps { get; init; } = 50;
     public float GuidanceScale { get; init; } = 3.0f;
 
+    /// <summary>The audio stream's own CFG scale; null follows the video scale, matching the reference default.
+    /// The authors' 7.0-for-audio recommendation assumes the guidance rescale/STG this port does not implement —
+    /// measured alone it makes the soundtrack quieter, not louder.</summary>
+    public float? AudioGuidanceScale { get; init; }
+
+    /// <summary>Blend factor for rescaling the guided audio velocity back to the conditional's statistics
+    /// (diffusers' <c>rescale_noise_cfg</c>); 0 disables it. Full rescale is the default because CFG otherwise
+    /// leaves the audio latent ~2.5x over-dispersed and the soundtrack ~30 dB down.</summary>
+    public float AudioGuidanceRescale { get; init; } = 1.0f;
+
     public static LtxVideo2Config V23 => new();
 }

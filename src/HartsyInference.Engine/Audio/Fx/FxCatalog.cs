@@ -13,12 +13,6 @@ namespace HartsyInference.Engine.Audio;
 /// weights are fetched directly from Meta's public CDN).</summary>
 internal static class FxCatalog
 {
-    /// <summary>Resident Demucs separators, keyed by checkpoint path.</summary>
-    internal static readonly AudioRunnerCache<DemucsRunner> DemucsCache = new AudioRunnerCache<DemucsRunner>();
-
-    /// <summary>Resident enhancement pipelines, keyed by repo.</summary>
-    internal static readonly AudioRunnerCache<EnhanceRunner> EnhanceCache = new AudioRunnerCache<EnhanceRunner>();
-
     /// <summary>Sample rate Demucs input is decoded to.</summary>
     internal const int DemucsSampleRate = 44_100;
 

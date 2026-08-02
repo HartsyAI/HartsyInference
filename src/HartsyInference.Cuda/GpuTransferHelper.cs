@@ -461,7 +461,7 @@ internal static unsafe class GpuTransferHelper
         // Stream sync is needed because per-op Sync() has been removed — the producing kernel may still be in flight.
         // EnsureCurrent in both callbacks: they fire from whatever thread later reads/disposes
         // the tensor (potentially the GC finalizer thread), which won't have bound the context.
-        tensor._gpuSyncCallback = () =>
+        Action syncCallback = () =>
         {
             if (s.ActivationCache.Remove(tensor, out (ulong gpuPtr, nuint bytes) cached))
             {
@@ -488,7 +488,7 @@ internal static unsafe class GpuTransferHelper
         };
 
         // On dispose without sync: free GPU memory asynchronously (skip D2H — data not needed)
-        tensor._gpuDisposeCallback = () =>
+        Action disposeCallback = () =>
         {
             if (s.ActivationCache.Remove(tensor, out (ulong gpuPtr, nuint bytes) cached))
             {
@@ -499,9 +499,9 @@ internal static unsafe class GpuTransferHelper
                 if (!arenaBacked && !IsArenaPtr(s, cached.gpuPtr)) CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
             }
         };
-        // Route this tensor's finalizer cleanup into THIS backend's context bucket so a concurrent backend's
-        // drain thread never runs it against the wrong (and unsynchronized) State.
-        tensor._gpuCleanupContext = s.Context?.Handle ?? 0;
+        // Keyed binding routes this tensor's finalizer cleanup into THIS backend's context bucket so a concurrent
+        // backend's drain thread never runs it against the wrong (and unsynchronized) State.
+        tensor.SetGpuBinding(s.Context?.Handle ?? 0, syncCallback, disposeCallback);
     }
 
     /// <summary>Frees EVERY cached weight cast (they are pure caches — always rebuildable from the source
@@ -594,10 +594,10 @@ internal static unsafe class GpuTransferHelper
         RegisterCachedWeight(cpuTensor, dptr, byteSize);
         state.Promoted = true;
         // Capture the owning State: demotion must free against this backend's context/stream even if
-        // another backend registers later (same rule as the activation callbacks).
-        cpuTensor._gpuSyncCallback = () => OnPromotedHostAccess(s, cpuTensor);
-        cpuTensor._gpuDisposeCallback = () => OnPromotedHostAccess(s, cpuTensor);
-        cpuTensor._gpuCleanupContext = s.Context?.Handle ?? 0;
+        // another backend registers later (same rule as the activation callbacks). The keyed binding is what
+        // lets a SECOND backend promote this same host tensor without overwriting our demote hook.
+        Action demote = () => OnPromotedHostAccess(s, cpuTensor);
+        cpuTensor.SetGpuBinding(s.Context?.Handle ?? 0, demote, demote);
         return true;
     }
 
@@ -653,9 +653,9 @@ internal static unsafe class GpuTransferHelper
         if (s.UploadTracker.TryGetValue(tensor, out UploadState? promo) && promo.Promoted)
         {
             promo.Promoted = false;
-            tensor._gpuSyncCallback = null;
-            tensor._gpuDisposeCallback = null;
-            tensor._gpuCleanupContext = 0;
+            // Keyed clear: only THIS backend's binding goes — a sibling backend's promotion of the same host
+            // tensor keeps its own demote hook.
+            tensor.ClearGpuBinding(s.Context?.Handle ?? 0);
         }
     }
 

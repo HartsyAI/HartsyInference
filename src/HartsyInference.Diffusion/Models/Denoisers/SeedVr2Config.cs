@@ -53,6 +53,16 @@ public sealed record SeedVr2Config
     /// <summary>Whether the tail RMS norm + attn-slice modulation exists (3B yes; 7B has a bare vid_out).</summary>
     public bool HasTailNorm { get; init; } = true;
 
+    /// <summary>True = v1 NaDiT rope (7B, <c>models/dit</c>): pixel-basis freqs <c>linspace(1,128,10)·π</c>,
+    /// 60 of 128 head dims rotated, positions normalized to <c>linspace(−1,1)</c> over each window axis,
+    /// VIDEO ONLY (text never rotated). False = v2 mmrope3d (3B): lang freqs θ=10000, 126 dims, integer
+    /// positions with the temporal axis offset by text length, text roped too.</summary>
+    public bool PixelRope { get; init; }
+
+    /// <summary>v2-only last-layer asymmetry (text enters attention plain-normed/ungated, text mlp skipped,
+    /// txt self-doubled). v1 computes the final block's text branch in full.</summary>
+    public bool LastLayerVidOnly { get; init; } = true;
+
     /// <summary>SeedVR2-3B dims (configs_3b/main.yaml).</summary>
     public static SeedVr2Config Seedvr2_3B => new()
     {
@@ -118,16 +128,15 @@ public sealed record SeedVr2Config
 
         bool hasTailNorm = weights.ContainsKey("vid_out_norm.weight");
         // Plain-MLP + no tail norm = the 7B checkpoint, which configs_7b/main.yaml builds from
-        // models.dit.nadit — the V1 architecture, not the dit_v2 this class implements. The key names
-        // coincide, so it LOADS and silently produces mud (verified 2026-08-01: GT SSIM 0.71 vs the 3B's
-        // 0.88, visually smeared). Fail loudly until the v1 NaDiT is ported with its own parity chain.
-        if (!swiglu && !hasTailNorm)
-            throw new HartsyInferenceException(
-                "This SeedVR2 checkpoint is the 7B (v1 NaDiT: models/dit — qk_rope/shared_qkv layout); " +
-                "only the dit_v2 architecture (3B) is ported. See MODEL_STATUS_VIDEO.md SeedVR2 follow-ups.");
+        // models.dit.nadit — the V1 architecture (pixel rope, video-only rotation, full-split blocks, no
+        // last-layer text shortcut). The key names coincide with v2, so this signature is the load-bearing
+        // discriminator (loading 7B as v2 silently produces mud — GT SSIM 0.71, verified 2026-08-01).
+        bool v1 = !swiglu && !hasTailNorm;
 
         return new SeedVr2Config
         {
+            PixelRope = v1,
+            LastLayerVidOnly = !v1,
             VidDim = vidDim,
             TxtInDim = txtInDim,
             EmbDim = (int)embOut.Shape[0],

@@ -217,6 +217,15 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _wanVaeBuildPadded;
     private readonly nint _wanVaeFillBias;
     private readonly nint _wanVaeAccumulateTap;
+    private readonly nint _wanVaeExtractFrameBf16;
+    private readonly nint _wanVaeWriteFrameBf16;
+    private readonly nint _wanVaeBuildPaddedBf16;
+    private readonly nint _wanVaeFillBiasBf16;
+    private readonly nint _wanVaeAccumulateTapBf16;
+    private readonly nint _seedVr2PixelShuffle;
+    private readonly nint _seedVr2PixelShuffleBf16;
+    private readonly nint _seedVr2PadBr;
+    private readonly nint _seedVr2PadBrBf16;
     private readonly nint _wanVaeRmsNormChannel;
     private readonly nint _wanVaeUnpatchify;
     private readonly nint _wanVaeSplitQkv;
@@ -426,11 +435,20 @@ public sealed class CudaKernels : IDisposable
         _wanVaeFramesModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "wan_vae_frames.ptx"));
         _wanVaeExtractFrame = _wanVaeFramesModule.GetFunction("wan_vae_extract_frame");
         _wanVaeWriteFrame = _wanVaeFramesModule.GetFunction("wan_vae_write_frame");
+        _wanVaeExtractFrameBf16 = _wanVaeFramesModule.GetFunction("wan_vae_extract_frame_bf16");
+        _wanVaeWriteFrameBf16 = _wanVaeFramesModule.GetFunction("wan_vae_write_frame_bf16");
 
         _wanVaeConv3dModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "wan_vae_conv3d.ptx"));
         _wanVaeBuildPadded = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded");
         _wanVaeFillBias = _wanVaeConv3dModule.GetFunction("wan_vae_fill_bias");
         _wanVaeAccumulateTap = _wanVaeConv3dModule.GetFunction("wan_vae_accumulate_tap");
+        _wanVaeBuildPaddedBf16 = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded_bf16");
+        _wanVaeFillBiasBf16 = _wanVaeConv3dModule.GetFunction("wan_vae_fill_bias_bf16");
+        _wanVaeAccumulateTapBf16 = _wanVaeConv3dModule.GetFunction("wan_vae_accumulate_tap_bf16");
+        _seedVr2PixelShuffle = _wanVaeConv3dModule.GetFunction("seedvr2_pixel_shuffle_f32");
+        _seedVr2PixelShuffleBf16 = _wanVaeConv3dModule.GetFunction("seedvr2_pixel_shuffle_bf16");
+        _seedVr2PadBr = _wanVaeConv3dModule.GetFunction("seedvr2_pad_br_f32");
+        _seedVr2PadBrBf16 = _wanVaeConv3dModule.GetFunction("seedvr2_pad_br_bf16");
 
         _wanVaeNormModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "wan_vae_norm.ptx"));
         _wanVaeRmsNormChannel = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel");
@@ -3065,33 +3083,33 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>Extracts temporal frame <paramref name="ti"/> of a 5D <c>[B,C,Tsrc,H,W]</c> tensor into a 4D
     /// <c>[B,C,H,W]</c> frame, on-device.</summary>
-    public unsafe void LaunchWanVaeExtractFrame(ulong outp, ulong src, int ti, int B, int C, int Tsrc, int frameHW, nint stream)
+    public unsafe void LaunchWanVaeExtractFrame(ulong outp, ulong src, int ti, int B, int C, int Tsrc, int frameHW, nint stream, bool bf16 = false)
     {
         ulong oA = outp, sA = src; uint tiA = (uint)ti, bA = (uint)B, cA = (uint)C, tsA = (uint)Tsrc, fA = (uint)frameHW;
         void** args = stackalloc void*[7];
         args[0] = &oA; args[1] = &sA; args[2] = &tiA; args[3] = &bA; args[4] = &cA; args[5] = &tsA; args[6] = &fA;
         long total = (long)B * C * frameHW;
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_wanVaeExtractFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeExtractFrameBf16 : _wanVaeExtractFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Writes a 4D <c>[B,C,H,W]</c> frame (plus optional per-channel bias) into temporal slot
     /// <paramref name="to"/> of a 5D <c>[B,C,Tout,H,W]</c> tensor, on-device. <paramref name="bias"/>=0 for none.</summary>
-    public unsafe void LaunchWanVaeWriteFrame(ulong outp, ulong acc, ulong bias, int to, int B, int C, int Tout, int frameHW, nint stream)
+    public unsafe void LaunchWanVaeWriteFrame(ulong outp, ulong acc, ulong bias, int to, int B, int C, int Tout, int frameHW, nint stream, bool bf16 = false)
     {
         ulong oA = outp, aA = acc, bsA = bias; uint toA = (uint)to, bA = (uint)B, cA = (uint)C, tA = (uint)Tout, fA = (uint)frameHW;
         void** args = stackalloc void*[8];
         args[0] = &oA; args[1] = &aA; args[2] = &bsA; args[3] = &toA; args[4] = &bA; args[5] = &cA; args[6] = &tA; args[7] = &fA;
         long total = (long)B * C * frameHW;
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_wanVaeWriteFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeWriteFrameBf16 : _wanVaeWriteFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Builds the frame-major padded input [paddedT, cIn, H+2·padH, W+2·padW] (transpose + temporal
     /// zero/replicate-first pad + cache + spatial edge-replicate pad) for batched CausalConv3d.
     /// <paramref name="cache"/>=0 for none.</summary>
     public unsafe void LaunchWanVaeBuildPadded(ulong padded, ulong input, ulong cache, int paddedT, int cIn, int Tin, int cacheLen, int zeroPad,
-        int H, int W, int padH, int padW, bool replicateFirst, nint stream)
+        int H, int W, int padH, int padW, bool replicateFirst, nint stream, bool bf16 = false)
     {
         ulong pA = padded, iA = input, cA = cache;
         uint ptA = (uint)paddedT, ciA = (uint)cIn, tiA = (uint)Tin, clA = (uint)cacheLen, zpA = (uint)zeroPad;
@@ -3101,7 +3119,7 @@ public sealed class CudaKernels : IDisposable
         args[8] = &hA; args[9] = &wA; args[10] = &phA; args[11] = &pwA; args[12] = &rfA;
         long total = (long)paddedT * cIn * (H + 2L * padH) * (W + 2L * padW);
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_wanVaeBuildPadded, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeBuildPaddedBf16 : _wanVaeBuildPadded, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Per-channel RMS norm: out[c] = x[c] * (sqrtC / max(||x||_2, eps)) * gamma[c], over the C axis at each spatial position.</summary>
@@ -3147,26 +3165,56 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Fills output [cOut, tout, HW] with per-channel bias (or 0 when <paramref name="bias"/>=0).</summary>
-    public unsafe void LaunchWanVaeFillBias(ulong outp, ulong bias, int cOut, int tout, int HW, nint stream)
+    public unsafe void LaunchWanVaeFillBias(ulong outp, ulong bias, int cOut, int tout, int HW, nint stream, bool bf16 = false)
     {
         ulong oA = outp, bA = bias; uint coA = (uint)cOut, toA = (uint)tout, hwA = (uint)HW;
         void** args = stackalloc void*[5];
         args[0] = &oA; args[1] = &bA; args[2] = &coA; args[3] = &toA; args[4] = &hwA;
         long total = (long)cOut * tout * HW;
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_wanVaeFillBias, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeFillBiasBf16 : _wanVaeFillBias, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Temporal gather-sum: out[co][to][hw] += convDt[to·strideT+dt][co][hw]. out=[cOut,tout,HW],
     /// convDt=[paddedT,cOut,HW].</summary>
-    public unsafe void LaunchWanVaeAccumulateTap(ulong outp, ulong convDt, int dt, int strideT, int cOut, int tout, int HW, nint stream)
+    public unsafe void LaunchWanVaeAccumulateTap(ulong outp, ulong convDt, int dt, int strideT, int cOut, int tout, int HW, nint stream, bool bf16 = false)
     {
         ulong oA = outp, cA = convDt; uint dtA = (uint)dt, stA = (uint)strideT, coA = (uint)cOut, toA = (uint)tout, hwA = (uint)HW;
         void** args = stackalloc void*[7];
         args[0] = &oA; args[1] = &cA; args[2] = &dtA; args[3] = &stA; args[4] = &coA; args[5] = &toA; args[6] = &hwA;
         long total = (long)cOut * tout * HW;
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_wanVaeAccumulateTap, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeAccumulateTapBf16 : _wanVaeAccumulateTap, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>SeedVR2 MAGViT channel-to-space shuffle (gather over output elements; temporal drops output frame 1).</summary>
+    public unsafe void LaunchSeedVr2PixelShuffle(ulong outp, ulong inp, int c, int fFinal, int hOut, int wOut,
+        int cIn, int f, int h, int w, int sr, int tr, bool dropDup, nint stream, bool bf16 = false)
+    {
+        ulong oA = outp, iA = inp;
+        uint cA = (uint)c, ffA = (uint)fFinal, hoA = (uint)hOut, woA = (uint)wOut;
+        uint ciA = (uint)cIn, fA = (uint)f, hA = (uint)h, wA = (uint)w;
+        uint srA = (uint)sr, trA = (uint)tr, ddA = dropDup ? 1u : 0u;
+        void** args = stackalloc void*[13];
+        args[0] = &oA; args[1] = &iA; args[2] = &cA; args[3] = &ffA; args[4] = &hoA; args[5] = &woA;
+        args[6] = &ciA; args[7] = &fA; args[8] = &hA; args[9] = &wA; args[10] = &srA; args[11] = &trA; args[12] = &ddA;
+        long total = (long)c * fFinal * hOut * wOut;
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(bf16 ? _seedVr2PixelShuffleBf16 : _seedVr2PixelShuffle,
+            gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>SeedVR2 asymmetric zero pad (right/bottom only): [planes,h,w] → [planes,h+1,w+1].</summary>
+    public unsafe void LaunchSeedVr2PadBottomRight(ulong outp, ulong inp, long planes, int h, int w, nint stream, bool bf16 = false)
+    {
+        ulong oA = outp, iA = inp, pA = (ulong)planes;
+        uint hA = (uint)h, wA = (uint)w;
+        void** args = stackalloc void*[5];
+        args[0] = &oA; args[1] = &iA; args[2] = &pA; args[3] = &hA; args[4] = &wA;
+        long total = planes * (h + 1L) * (w + 1L);
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(bf16 ? _seedVr2PadBrBf16 : _seedVr2PadBr,
+            gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     // ── GeGlu Launches ──────────────────────────────────────────────────

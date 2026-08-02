@@ -31,6 +31,10 @@ public sealed unsafe class Tensor : IDisposable
     private bool _disposed;
 
     /// <summary>Backend-set callback: copies GPU→CPU then frees GPU pointer. Invoked lazily on first CPU data access.</summary>
+    /// <remarks>Single-owner fast slot. Backends may null this directly ONLY for tensors they created themselves
+    /// (activations, graph buffers) — those have exactly one owner. Multi-owner tensors (a shared host weight
+    /// promoted on two backends) overflow into <see cref="_extraGpuBindings"/> via <see cref="SetGpuBinding"/>,
+    /// which is the only correct plant path for cache/promotion machinery.</remarks>
     internal Action? _gpuSyncCallback;
 
     /// <summary>Backend-set callback: frees GPU pointer without D2H copy. Invoked on Dispose when GPU data was never synced to CPU.</summary>
@@ -42,6 +46,102 @@ public sealed unsafe class Tensor : IDisposable
     /// cleanup into the owning context's queue so the draining thread only ever touches its own backend's state
     /// (see <see cref="PendingFinalizerGpuCleanup"/>).</remarks>
     internal nint _gpuCleanupContext;
+
+    /// <summary>Bindings past the first when MORE THAN ONE backend holds a device copy of this host tensor (shared
+    /// model caches — Redux/TAESD encoders, audio converters — promoted on two GPUs). Before this existed the
+    /// second backend's promotion overwrote the first's demote hook in the single slot above: the first backend's
+    /// device copy then never demoted on host mutation and its cleanup routed into the wrong context bucket.
+    /// Null in the overwhelmingly common single-owner case. Guarded by <c>lock (this)</c> — internal type, no
+    /// external lockers, and a dedicated lock object would cost 8 bytes on every tensor for a rare case.</summary>
+    private List<GpuBinding>? _extraGpuBindings;
+
+    /// <summary>One backend's (sync, dispose, owner-key) triple for <see cref="_extraGpuBindings"/>.</summary>
+    private readonly record struct GpuBinding(nint Key, Action Sync, Action Dispose);
+
+    /// <summary>Registers backend callbacks for this tensor's device copy, keyed by the owning backend's cleanup
+    /// key. First owner takes the fast single-slot fields; a DIFFERENT owner lands in the overflow list instead of
+    /// overwriting; a repeat plant by the same owner replaces its own entry (the pre-existing semantics).</summary>
+    internal void SetGpuBinding(nint key, Action sync, Action dispose)
+    {
+        lock (this)
+        {
+            if ((_gpuSyncCallback is null && _gpuDisposeCallback is null) || _gpuCleanupContext == key)
+            {
+                _gpuCleanupContext = key;
+                _gpuSyncCallback = sync;
+                _gpuDisposeCallback = dispose;
+                return;
+            }
+            List<GpuBinding> extras = _extraGpuBindings ??= [];
+            for (int i = 0; i < extras.Count; i++)
+            {
+                if (extras[i].Key == key)
+                {
+                    extras[i] = new GpuBinding(key, sync, dispose);
+                    return;
+                }
+            }
+            extras.Add(new GpuBinding(key, sync, dispose));
+        }
+    }
+
+    /// <summary>Removes ONLY <paramref name="key"/>'s binding, leaving other backends' bindings intact — a bulk
+    /// eviction on one backend must not strip a sibling's demote hook. Promotes the first overflow entry into the
+    /// fast slot so the single-owner invariant is restored.</summary>
+    internal void ClearGpuBinding(nint key)
+    {
+        lock (this)
+        {
+            List<GpuBinding>? extras = _extraGpuBindings;
+            if (_gpuCleanupContext == key && (_gpuSyncCallback is not null || _gpuDisposeCallback is not null))
+            {
+                _gpuSyncCallback = null;
+                _gpuDisposeCallback = null;
+                _gpuCleanupContext = 0;
+                if (extras is not null && extras.Count > 0)
+                {
+                    GpuBinding hoisted = extras[0];
+                    extras.RemoveAt(0);
+                    _gpuCleanupContext = hoisted.Key;
+                    _gpuSyncCallback = hoisted.Sync;
+                    _gpuDisposeCallback = hoisted.Dispose;
+                }
+                return;
+            }
+            if (extras is null)
+            {
+                return;
+            }
+            for (int i = 0; i < extras.Count; i++)
+            {
+                if (extras[i].Key == key)
+                {
+                    extras.RemoveAt(i);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// <summary>Snapshots and empties the overflow bindings; null when there were none (the common case).</summary>
+    private GpuBinding[]? TakeExtraBindings()
+    {
+        List<GpuBinding>? extras = _extraGpuBindings;
+        if (extras is null)
+        {
+            return null;
+        }
+        lock (this)
+        {
+            if (extras.Count == 0)
+            {
+                return null;
+            }
+            GpuBinding[] snapshot = [.. extras];
+            extras.Clear();
+            return snapshot;
+        }
+    }
 
     /// <summary>GPU cleanup callbacks from finalizer-reclaimed tensors (never explicitly Disposed), queued rather than invoked inline.</summary>
     /// <remarks>The finalizer thread has no business making CUDA driver calls (stream enqueue order across threads
@@ -530,7 +630,9 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Computes the total byte size for a tensor of the given shape and dtype.</summary>
     public static long ComputeByteSize(TensorShape shape, DType dtype) => dtype.ComputeByteCount(shape.ElementCount);
 
-    /// <summary>If GPU data is cached on this tensor, syncs it to CPU and clears the callbacks.</summary>
+    /// <summary>If GPU data is cached on this tensor, syncs it to CPU and clears the callbacks — for EVERY owning
+    /// backend: host access is about to read (or mutate) the host buffer, so each backend's device copy must sync
+    /// or demote, not just the first owner's.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void EnsureCpuData()
     {
@@ -539,7 +641,16 @@ public sealed unsafe class Tensor : IDisposable
         {
             _gpuSyncCallback = null;
             _gpuDisposeCallback = null;
+            _gpuCleanupContext = 0;
             sync();
+        }
+        GpuBinding[]? extras = TakeExtraBindings();
+        if (extras is not null)
+        {
+            foreach (GpuBinding binding in extras)
+            {
+                binding.Sync();
+            }
         }
     }
 
@@ -634,7 +745,8 @@ public sealed unsafe class Tensor : IDisposable
         return upper;
     }
 
-    /// <summary>Frees owned memory via atomic pointer exchange; frees cached GPU data without D2H copy. Borrowed tensors are no-ops.</summary>
+    /// <summary>Frees owned memory via atomic pointer exchange; frees cached GPU data (on every owning backend)
+    /// without D2H copy. Borrowed tensors are no-ops.</summary>
     public void Dispose()
     {
         _disposed = true;
@@ -642,6 +754,14 @@ public sealed unsafe class Tensor : IDisposable
         Action? gpuDispose = Interlocked.Exchange(ref _gpuDisposeCallback, null);
         Interlocked.Exchange(ref _gpuSyncCallback, null);
         gpuDispose?.Invoke();
+        GpuBinding[]? extras = TakeExtraBindings();
+        if (extras is not null)
+        {
+            foreach (GpuBinding binding in extras)
+            {
+                binding.Dispose();
+            }
+        }
         NativeBuffer? buffer = Interlocked.Exchange(ref _ownedBuffer, null);
         if (ptr != 0 && buffer is not null)
         {
@@ -658,10 +778,19 @@ public sealed unsafe class Tensor : IDisposable
         Action? gpuDispose = Interlocked.Exchange(ref _gpuDisposeCallback, null);
         Interlocked.Exchange(ref _gpuSyncCallback, null);
         // Never invoke a CUDA-touching callback from the finalizer thread directly — queue it under the owning
-        // context so only that backend's own thread drains it (see PendingFinalizerGpuCleanup).
+        // context so only that backend's own thread drains it (see PendingFinalizerGpuCleanup). Each overflow
+        // binding routes into ITS OWN key's bucket — that per-owner routing is the whole point of keyed bindings.
         if (gpuDispose is not null)
         {
             EnqueueFinalizerGpuCleanup(_gpuCleanupContext, gpuDispose);
+        }
+        GpuBinding[]? extras = TakeExtraBindings();
+        if (extras is not null)
+        {
+            foreach (GpuBinding binding in extras)
+            {
+                EnqueueFinalizerGpuCleanup(binding.Key, binding.Dispose);
+            }
         }
         NativeBuffer? buffer = Interlocked.Exchange(ref _ownedBuffer, null);
         if (ptr != 0 && buffer is not null)

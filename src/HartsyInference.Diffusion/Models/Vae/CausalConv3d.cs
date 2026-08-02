@@ -32,13 +32,17 @@ public sealed unsafe class CausalConv3d
     private readonly bool _spatialReflectPad;   // LTX-2: F.pad(mode="reflect") spatially instead of zero-pad
     private readonly Tensor[] _weight2d;  // kt slices of [cOut, cIn, kh, kw]
     private readonly Tensor? _bias;
+    private readonly DType _computeDtype; // activation + conv-weight dtype (F32 default; BF16 = SeedVR2 memory mode, batched path only)
 
     /// <summary>Builds the op from a 5-D conv weight <c>[cOut, cIn, kt, kh, kw]</c> and optional bias, pre-slicing the kt temporal taps into 2-D conv weights. <paramref name="padT"/>/<paramref name="padH"/>/<paramref name="padW"/> are the nn.Conv3d <c>padding</c> values (temporal becomes <c>2·padT</c> causal-left). <paramref name="replicateFirstPad"/> fills the leading causal frames with copies of the input's first frame (LTX-Video, HunyuanVideo) instead of zeros (Wan2.2). <paramref name="spatialReplicatePad"/> pads H/W borders by edge replication (HunyuanVideo <c>F.pad(mode="replicate")</c>) instead of zeros. <paramref name="spatialReflectPad"/> pads H/W borders by mirror-reflection (LTX-2 <c>F.pad(mode="reflect")</c>) instead of zeros — mutually exclusive with <paramref name="spatialReplicatePad"/>, and only supported on the batch-1 fast path with no streaming cache.</summary>
     public CausalConv3d(Tensor weight5d, Tensor? bias,
         int strideT = 1, int strideH = 1, int strideW = 1,
         int padT = 0, int padH = 0, int padW = 0, bool replicateFirstPad = false, bool causal = true,
-        bool spatialReplicatePad = false, bool spatialReflectPad = false)
+        bool spatialReplicatePad = false, bool spatialReflectPad = false, DType? computeDtype = null)
     {
+        _computeDtype = computeDtype ?? DType.F32;
+        if (_computeDtype != DType.F32 && _computeDtype != DType.BF16)
+            throw new ArgumentException($"CausalConv3d computeDtype supports F32 or BF16, got {_computeDtype}.", nameof(computeDtype));
         _replicateFirstPad = replicateFirstPad;
         _spatialReplicatePad = spatialReplicatePad;
         _spatialReflectPad = spatialReflectPad;
@@ -87,7 +91,15 @@ public sealed unsafe class CausalConv3d
                     long dstOff = ((long)co * _cIn + ci) * khw;
                     Buffer.MemoryCopy(sp + srcOff, dp + dstOff, (long)khw * 4, (long)khw * 4);
                 }
-            slices[dt] = w;
+            if (_computeDtype == DType.F32)
+            {
+                slices[dt] = w;
+            }
+            else
+            {
+                slices[dt] = w.CastTo(_computeDtype);
+                w.Dispose();
+            }
         }
         cast?.Dispose();
         GC.KeepAlive(weight5d);
@@ -104,6 +116,8 @@ public sealed unsafe class CausalConv3d
     /// <summary>Runs the causal 3D conv. <paramref name="input"/> is <c>[B, cIn, Tin, H, W]</c>; <paramref name="cacheFrames"/> (optional <c>[B, cIn, C, H, W]</c>) prepends streaming context, replacing that many zero-pad frames. Returns <c>[B, cOut, Tout, H', W']</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor input, Tensor? cacheFrames = null)
     {
+        if (input.DType != _computeDtype)
+            throw new ArgumentException($"CausalConv3d compute dtype is {_computeDtype} but input is {input.DType}.", nameof(input));
         int batch = (int)input.Shape[0];
         int tin = (int)input.Shape[2];
         int h = (int)input.Shape[3];
@@ -147,15 +161,15 @@ public sealed unsafe class CausalConv3d
             // convs (LTX's reflectPre path and Wan's zero-pad path were never affected).
             int hp = reflectPre ? hSrc : spatialPre ? h + 2 * _padH : h;
             int wp = reflectPre ? wSrc : spatialPre ? w + 2 * _padW : w;
-            using Tensor padded = new Tensor(new TensorShape(paddedT, _cIn, hp, wp), DType.F32);
+            using Tensor padded = new Tensor(new TensorShape(paddedT, _cIn, hp, wp), _computeDtype);
             backend.BuildPaddedFrames(padded, convInput, cacheFrames, zeroPad, _replicateFirstPad,
                 spatialPre ? _padH : 0, spatialPre ? _padW : 0);
             reflectPadded?.Dispose();
-            Tensor fastOut = new Tensor(new TensorShape([1L, _cOut, tout, hOut, wOut]), DType.F32);
+            Tensor fastOut = new Tensor(new TensorShape([1L, _cOut, tout, hOut, wOut]), _computeDtype);
             backend.FillBias(fastOut, _bias);
             for (int dt = 0; dt < _kt; dt++)
             {
-                using Tensor convDt = new Tensor(new TensorShape(paddedT, _cOut, hOut, wOut), DType.F32);
+                using Tensor convDt = new Tensor(new TensorShape(paddedT, _cOut, hOut, wOut), _computeDtype);
                 backend.Conv2D(convDt, padded, _weight2d[dt], null, _strideH, _strideW, convPadH, convPadW);
                 backend.AccumulateTap(fastOut, convDt, dt, _strideT);
             }
@@ -163,6 +177,8 @@ public sealed unsafe class CausalConv3d
         }
 
         // Device-resident output: every temporal slot is written by WriteVaeFrame below (GPU), so no host clear.
+        if (_computeDtype != DType.F32)
+            throw new NotSupportedException("CausalConv3d BF16 compute supports only the batched B=1 fast path.");
         Tensor output = new Tensor(new TensorShape([(long)batch, _cOut, tout, hOut, wOut]), DType.F32);
 
         for (int to = 0; to < tout; to++)

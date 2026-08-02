@@ -3,24 +3,27 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Device management for audio inference on the Engine's shared backend: one generation at a time, other
-/// models evicted when a switch would not fit, and activations plus the memory pool trimmed after every run.
-/// Lifted from the extension's in-process audio engine, minus its private backend (the Engine owns one).</summary>
-internal static class AudioRuntime
+/// <summary>Device management for audio inference on ONE engine's backend: one generation at a time on that engine,
+/// other models evicted when a switch would not fit, and activations plus the memory pool trimmed after every run.
+/// One instance per <see cref="InferenceEngine"/> — the caches and the generation lock used to be process-wide
+/// statics, which serialized audio across every GPU and handed engine B a runner whose weights lived on engine A's
+/// device.</summary>
+internal sealed class AudioRuntime
 {
-    /// <summary>Serializes inference across requests — one shared device per process.</summary>
-    private static readonly SemaphoreSlim _genLock = new(1, 1);
+    /// <summary>Serializes inference across this engine's requests — one device per engine.</summary>
+    private readonly SemaphoreSlim _genLock = new(1, 1);
 
-    private static readonly List<IAudioRunnerCache> _caches = [];
-    private static readonly object _cacheLock = new();
+    private readonly IAudioRunnerCache[] _caches;
 
     /// <summary>Model that ran most recently — switches trigger the memory-pressure eviction check.</summary>
-    private static string? _lastKey;
+    private string? _lastKey;
 
     /// <summary>Free-host-RAM floor (KiB) below which switching models evicts every OTHER resident audio pipeline
     /// first. Runners otherwise accumulate (each holds multi-GB weight copies) until the kernel OOM-kills the
     /// process — observed at 21.8 GB RSS on a 32 GB box, and again at 11.5 GB with a desktop session sharing the
-    /// machine, so the floor is generous. Override via HARTSY_AUDIO_EVICT_BELOW_GB.</summary>
+    /// machine, so the floor is generous. Override via HARTSY_AUDIO_EVICT_BELOW_GB. Host RAM is process-wide, so
+    /// with several engines each judges the floor independently — acceptable: the floor is generous and the VRAM
+    /// floor below is genuinely per-device.</summary>
     private static readonly long EvictBelowAvailableKb =
         (long.TryParse(Environment.GetEnvironmentVariable("HARTSY_AUDIO_EVICT_BELOW_GB"), out long gb) && gb > 0 ? gb : 14L) * 1024 * 1024;
 
@@ -28,20 +31,40 @@ internal static class AudioRuntime
     /// would OOM at load even with plenty of host RAM free.</summary>
     private const long EvictBelowFreeVramBytes = 3L * 1024 * 1024 * 1024;
 
-    /// <summary>Registers a category cache so eviction sweeps can reach its resident runners.</summary>
-    internal static void Register(IAudioRunnerCache cache)
+    /// <summary>Resident speech pipelines, keyed by resolved repo.</summary>
+    internal AudioRunnerCache<ITtsRunner> Tts { get; }
+
+    /// <summary>Resident transcription pipelines, keyed by resolved repo.</summary>
+    internal AudioRunnerCache<ISttRunner> Stt { get; }
+
+    /// <summary>Resident music pipelines, keyed by resolved model key.</summary>
+    internal AudioRunnerCache<IMusicRunner> Music { get; }
+
+    /// <summary>Resident voice-conversion pipelines, keyed by resolved model key.</summary>
+    internal AudioRunnerCache<IVcRunner> Vc { get; }
+
+    /// <summary>Resident Demucs stem-separation pipelines, keyed by model name.</summary>
+    internal AudioRunnerCache<DemucsRunner> Demucs { get; }
+
+    /// <summary>Resident Resemble-Enhance pipelines.</summary>
+    internal AudioRunnerCache<EnhanceRunner> Enhance { get; }
+
+    internal AudioRuntime()
     {
-        lock (_cacheLock)
-        {
-            _caches.Add(cache);
-        }
+        Tts = new AudioRunnerCache<ITtsRunner>();
+        Stt = new AudioRunnerCache<ISttRunner>();
+        Music = new AudioRunnerCache<IMusicRunner>();
+        Vc = new AudioRunnerCache<IVcRunner>();
+        Demucs = new AudioRunnerCache<DemucsRunner>();
+        Enhance = new AudioRunnerCache<EnhanceRunner>();
+        _caches = [Tts, Stt, Music, Vc, Demucs, Enhance];
     }
 
-    /// <summary>Drops every resident audio pipeline. Called when the engine releases its backend or frees memory, since
-    /// a pipeline that bound to the old device (ACE-Step) must not survive into the next one. Waits up to
-    /// <paramref name="waitSeconds"/> for an in-flight generation so the release does not dispose a pipeline out from
-    /// under it; on timeout it proceeds anyway — teardown must never hang.</summary>
-    internal static void UnloadAll(int waitSeconds = 0)
+    /// <summary>Drops every resident audio pipeline of THIS engine. Called when the engine releases its backend or
+    /// frees memory, since a pipeline that bound to the old device (ACE-Step) must not survive into the next one.
+    /// Waits up to <paramref name="waitSeconds"/> for an in-flight generation so the release does not dispose a
+    /// pipeline out from under it; on timeout it proceeds anyway — teardown must never hang.</summary>
+    internal void UnloadAll(int waitSeconds = 0)
     {
         bool held = _genLock.Wait(TimeSpan.FromSeconds(Math.Max(0, waitSeconds)));
         if (!held)
@@ -61,21 +84,19 @@ internal static class AudioRuntime
         }
     }
 
-    private static void UnloadAllCore()
+    private void UnloadAllCore()
     {
-        lock (_cacheLock)
+        foreach (IAudioRunnerCache cache in _caches)
         {
-            foreach (IAudioRunnerCache cache in _caches)
-            {
-                cache.UnloadAllExcept(null);
-            }
+            cache.UnloadAllExcept(null);
         }
         _lastKey = null;
     }
 
-    /// <summary>Runs one audio job under the shared generation lock: evicts other models first when memory is tight,
-    /// then frees leftover activations and trims the pool afterwards so a finished generation leaves nothing behind.</summary>
-    internal static async Task<T> RunAsync<T>(IBackend backend, string modelKey, Func<CancellationToken, Task<T>> work, CancellationToken cancel)
+    /// <summary>Runs one audio job under this engine's generation lock: evicts other models first when memory is
+    /// tight, then frees leftover activations and trims the pool afterwards so a finished generation leaves nothing
+    /// behind.</summary>
+    internal async Task<T> RunAsync<T>(IBackend backend, string modelKey, Func<CancellationToken, Task<T>> work, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(work);
@@ -116,7 +137,7 @@ internal static class AudioRuntime
     /// <summary>When switching to a different model with low free host RAM or VRAM, drops every other resident
     /// pipeline (runner disposal also releases their auto-promoted GPU weights). Same-model repeat requests never
     /// evict, so warm generation stays warm.</summary>
-    private static void EvictOthersUnderMemoryPressure(IBackend backend, string modelKey)
+    private void EvictOthersUnderMemoryPressure(IBackend backend, string modelKey)
     {
         if (string.Equals(_lastKey, modelKey, StringComparison.Ordinal))
         {
@@ -130,12 +151,9 @@ internal static class AudioRuntime
         {
             Logs.Info($"[Audio] Memory pressure (host {availableKb / 1024 / 1024.0:0.0} GB free, VRAM "
                 + $"{freeVramBytes / 1024.0 / 1024 / 1024:0.0} GB free) — unloading other resident audio models before '{modelKey}'.");
-            lock (_cacheLock)
+            foreach (IAudioRunnerCache cache in _caches)
             {
-                foreach (IAudioRunnerCache cache in _caches)
-                {
-                    cache.UnloadAllExcept(modelKey);
-                }
+                cache.UnloadAllExcept(modelKey);
             }
             // Disposal only drops host references; the finalizer queue that frees the promoted GPU copies is drained
             // lazily on the compute thread, so without forcing it here the card stays full across a model switch and

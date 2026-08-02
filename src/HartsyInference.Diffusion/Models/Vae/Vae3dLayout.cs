@@ -19,7 +19,7 @@ public static unsafe class Vae3dLayout
     {
         int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
         if (b != 1) return ToFrames(x, b, c, t, h, w);
-        Tensor outT = new Tensor(new TensorShape(t, c, h, w), DType.F32);
+        Tensor outT = new Tensor(new TensorShape(t, c, h, w), x.DType);
         backend.Permute0213(outT, x, c, t, h * w);          // [C,T,HW] → [T,C,HW]
         return outT;
     }
@@ -28,7 +28,7 @@ public static unsafe class Vae3dLayout
     public static Tensor FromFrames(IBackend backend, Tensor x, int b, int c, int t, int h, int w)
     {
         if (b != 1) return FromFrames(x, b, c, t, h, w);
-        Tensor outT = new Tensor(new TensorShape([1L, c, t, h, w]), DType.F32);
+        Tensor outT = new Tensor(new TensorShape([1L, c, t, h, w]), x.DType);
         backend.Permute0213(outT, x, t, c, h * w);          // [T,C,HW] → [C,T,HW]
         return outT;
     }
@@ -38,7 +38,7 @@ public static unsafe class Vae3dLayout
     {
         int b = (int)parts[0].Shape[0], c = (int)parts[0].Shape[1], h = (int)parts[0].Shape[3], w = (int)parts[0].Shape[4];
         int totalT = 0; foreach (Tensor p in parts) totalT += (int)p.Shape[2];
-        Tensor outT = new Tensor(new TensorShape([(long)b, c, totalT, h, w]), DType.F32);
+        Tensor outT = new Tensor(new TensorShape([(long)b, c, totalT, h, w]), parts[0].DType);
         Tensor[] arr = parts as Tensor[] ?? System.Linq.Enumerable.ToArray(parts);
         backend.Concat(outT, arr, dim: 2);
         return outT;
@@ -51,7 +51,7 @@ public static unsafe class Vae3dLayout
         int b = (int)x.Shape[0], c = (int)x.Shape[1], h = (int)x.Shape[3], w = (int)x.Shape[4];
         if (b != 1) return SliceFrames(x, tStart, count);
         using Tensor fm = ToFrames(backend, x);              // [T,C,H,W] contiguous frame-major
-        using Tensor slice = new Tensor(new TensorShape(count, c, h, w), DType.F32);
+        using Tensor slice = new Tensor(new TensorShape(count, c, h, w), x.DType);
         backend.SliceRows(slice, fm, tStart * c * h);        // contiguous block [tStart..tStart+count) frames
         return FromFrames(backend, slice, 1, c, count, h, w);
     }
@@ -68,8 +68,8 @@ public static unsafe class Vae3dLayout
     public static Tensor PrependZeroFrame(IBackend backend, Tensor x)
     {
         int b = (int)x.Shape[0], c = (int)x.Shape[1], h = (int)x.Shape[3], w = (int)x.Shape[4];
-        using Tensor zero = new Tensor(new TensorShape([(long)b, c, 1, h, w]), DType.F32);
-        new Span<float>((float*)zero.DataPointer, checked((int)zero.Shape.ElementCount)).Clear();
+        using Tensor zero = new Tensor(new TensorShape([(long)b, c, 1, h, w]), x.DType);
+        System.Runtime.InteropServices.NativeMemory.Clear(zero.DataPointer, (nuint)(zero.Shape.ElementCount * x.DType.SizeInBytes));
         return ConcatFrames(backend, [zero, x]);
     }
 
@@ -78,9 +78,10 @@ public static unsafe class Vae3dLayout
     /// <summary><c>[B, C, T, H, W] → [B·T, C, H, W]</c> (frames batched).</summary>
     public static Tensor ToFrames(Tensor x, int b, int c, int t, int h, int w)
     {
-        Tensor outT = new Tensor(new TensorShape(b * t, c, h, w), DType.F32);
-        float* s = (float*)x.DataPointer;
-        float* d = (float*)outT.DataPointer;
+        int es = x.DType.SizeInBytes;
+        Tensor outT = new Tensor(new TensorShape(b * t, c, h, w), x.DType);
+        byte* s = (byte*)x.DataPointer;
+        byte* d = (byte*)outT.DataPointer;
         long frame = (long)h * w;
         for (int bi = 0; bi < b; bi++)
             for (int ti = 0; ti < t; ti++)
@@ -88,7 +89,7 @@ public static unsafe class Vae3dLayout
                 {
                     long src = (((long)bi * c + ci) * t + ti) * frame;
                     long dst = (((long)bi * t + ti) * c + ci) * frame;
-                    Buffer.MemoryCopy(s + src, d + dst, frame * 4, frame * 4);
+                    Buffer.MemoryCopy(s + src * es, d + dst * es, frame * es, frame * es);
                 }
         return outT;
     }
@@ -97,9 +98,10 @@ public static unsafe class Vae3dLayout
     public static Tensor SliceFrames(Tensor x, int tStart, int count)
     {
         int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
-        Tensor outT = new Tensor(new TensorShape([(long)b, c, count, h, w]), DType.F32);
-        float* s = (float*)x.DataPointer;
-        float* d = (float*)outT.DataPointer;
+        int es = x.DType.SizeInBytes;
+        Tensor outT = new Tensor(new TensorShape([(long)b, c, count, h, w]), x.DType);
+        byte* s = (byte*)x.DataPointer;
+        byte* d = (byte*)outT.DataPointer;
         long frame = (long)h * w;
         for (int bi = 0; bi < b; bi++)
             for (int ci = 0; ci < c; ci++)
@@ -107,7 +109,7 @@ public static unsafe class Vae3dLayout
                 {
                     long src = (((long)bi * c + ci) * t + (tStart + ti)) * frame;
                     long dst = (((long)bi * c + ci) * count + ti) * frame;
-                    Buffer.MemoryCopy(s + src, d + dst, frame * 4, frame * 4);
+                    Buffer.MemoryCopy(s + src * es, d + dst * es, frame * es, frame * es);
                 }
         return outT;
     }
@@ -118,21 +120,22 @@ public static unsafe class Vae3dLayout
         int b = (int)parts[0].Shape[0], c = (int)parts[0].Shape[1], h = (int)parts[0].Shape[3], w = (int)parts[0].Shape[4];
         int totalT = 0;
         foreach (Tensor p in parts) totalT += (int)p.Shape[2];
-        Tensor outT = new Tensor(new TensorShape([(long)b, c, totalT, h, w]), DType.F32);
-        float* d = (float*)outT.DataPointer;
+        int es = parts[0].DType.SizeInBytes;
+        Tensor outT = new Tensor(new TensorShape([(long)b, c, totalT, h, w]), parts[0].DType);
+        byte* d = (byte*)outT.DataPointer;
         long frame = (long)h * w;
         int tOff = 0;
         foreach (Tensor p in parts)
         {
             int pt = (int)p.Shape[2];
-            float* s = (float*)p.DataPointer;
+            byte* s = (byte*)p.DataPointer;
             for (int bi = 0; bi < b; bi++)
                 for (int ci = 0; ci < c; ci++)
                     for (int ti = 0; ti < pt; ti++)
                     {
                         long src = (((long)bi * c + ci) * pt + ti) * frame;
                         long dst = (((long)bi * c + ci) * totalT + (tOff + ti)) * frame;
-                        Buffer.MemoryCopy(s + src, d + dst, frame * 4, frame * 4);
+                        Buffer.MemoryCopy(s + src * es, d + dst * es, frame * es, frame * es);
                     }
             tOff += pt;
         }
@@ -151,8 +154,8 @@ public static unsafe class Vae3dLayout
     public static Tensor PrependZeroFrame(Tensor x)
     {
         int b = (int)x.Shape[0], c = (int)x.Shape[1], h = (int)x.Shape[3], w = (int)x.Shape[4];
-        Tensor zero = new Tensor(new TensorShape([(long)b, c, 1, h, w]), DType.F32);
-        new Span<float>((float*)zero.DataPointer, checked((int)zero.Shape.ElementCount)).Clear();
+        Tensor zero = new Tensor(new TensorShape([(long)b, c, 1, h, w]), x.DType);
+        System.Runtime.InteropServices.NativeMemory.Clear(zero.DataPointer, (nuint)(zero.Shape.ElementCount * x.DType.SizeInBytes));
         Tensor outT = ConcatFrames([zero, x]);
         zero.Dispose();
         return outT;
@@ -161,9 +164,10 @@ public static unsafe class Vae3dLayout
     /// <summary><c>[B·T, C, H, W] → [B, C, T, H, W]</c> (inverse of <see cref="ToFrames"/>; H/W may differ from the input to ToFrames after a spatial op).</summary>
     public static Tensor FromFrames(Tensor x, int b, int c, int t, int h, int w)
     {
-        Tensor outT = new Tensor(new TensorShape([(long)b, c, t, h, w]), DType.F32);
-        float* s = (float*)x.DataPointer;
-        float* d = (float*)outT.DataPointer;
+        int es = x.DType.SizeInBytes;
+        Tensor outT = new Tensor(new TensorShape([(long)b, c, t, h, w]), x.DType);
+        byte* s = (byte*)x.DataPointer;
+        byte* d = (byte*)outT.DataPointer;
         long frame = (long)h * w;
         for (int bi = 0; bi < b; bi++)
             for (int ti = 0; ti < t; ti++)
@@ -171,7 +175,7 @@ public static unsafe class Vae3dLayout
                 {
                     long src = (((long)bi * t + ti) * c + ci) * frame;
                     long dst = (((long)bi * c + ci) * t + ti) * frame;
-                    Buffer.MemoryCopy(s + src, d + dst, frame * 4, frame * 4);
+                    Buffer.MemoryCopy(s + src * es, d + dst * es, frame * es, frame * es);
                 }
         return outT;
     }

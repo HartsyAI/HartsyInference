@@ -16,9 +16,6 @@ namespace HartsyInference.Engine.Audio;
 /// resolution the placed-weights families (ACE-Step, YuE) use.</summary>
 internal static class MusicCatalog
 {
-    /// <summary>Resident music pipelines, keyed by resolved repo or checkpoint path.</summary>
-    internal static readonly AudioRunnerCache<IMusicRunner> Cache = new AudioRunnerCache<IMusicRunner>();
-
     private const int T5MaxTokens = 256;
 
     /// <summary>Resolves a catalog id to its descriptor, or throws naming what is available.</summary>

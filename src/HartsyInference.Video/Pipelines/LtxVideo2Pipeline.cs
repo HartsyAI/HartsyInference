@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
@@ -112,6 +113,19 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
+        // The reference carries a separate audio CFG scale; unset follows the video scale.
+        float audioGuidance = _config.AudioGuidanceScale ?? guidance;
+        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_AUDIO_CFG") is { Length: > 0 } audioCfgOverride
+            && float.TryParse(audioCfgOverride, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedAudioCfg))
+        {
+            audioGuidance = parsedAudioCfg;
+        }
+        float audioRescale = _config.AudioGuidanceRescale;
+        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_AUDIO_RESCALE") is { Length: > 0 } rescaleOverride
+            && float.TryParse(rescaleOverride, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedRescale))
+        {
+            audioRescale = parsedRescale;
+        }
 
         // Dynamic flow-match shift (LTX-2 scheduler: base_seq 1024 → base_shift 0.95, max_seq 4096 → max_shift 2.05).
         double m = (2.05 - 0.95) / (4096 - 1024), bShift = 0.95 - m * 1024;
@@ -298,7 +312,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             // Device CFG+Euler, in-place on the resident latents: z += (g·cond + (1−g)·uncond)·(−dt) ≡ z −= v·dt.
             // The latents stay GPU-resident across the whole loop; the final host read (UnpackVideoLatents) syncs.
             Backend.CfgEulerStep(videoLat, vCondV, vUncondV, guidance, -dt);
-            Backend.CfgEulerStep(audioLat, vCondA, vUncondA, guidance, -dt);
+            AudioCfgEulerStep(audioLat, vCondA, vUncondA, audioGuidance, audioRescale, -dt);
             // On the step-graph path the four velocities are transformer-owned fixed buffers (rewritten next step) —
             // don't dispose them; on the eager path they're fresh and must be freed.
             if (!_transformer.StepGraphActive) { vCondV.Dispose(); vCondA.Dispose(); vUncondV.Dispose(); vUncondA.Dispose(); }
@@ -374,24 +388,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         videoLat.Dispose();
         Logs.Info($"[ltx2-phase] latent unpack (host): {phase.ElapsedMilliseconds} ms");
         phase.Restart();
-        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") == "1")
-        {
-            Tensor f32 = videoVaeLatent.DType == DType.F32 ? videoVaeLatent : videoVaeLatent.CastTo(DType.F32);
-            float* p = (float*)f32.DataPointer;
-            long n = f32.ElementCount;
-            float mn = float.MaxValue, mx = float.MinValue; double sum = 0; long nanCount = 0, infCount = 0;
-            for (long e = 0; e < n; e++)
-            {
-                float v = p[e];
-                if (float.IsNaN(v)) { nanCount++; continue; }
-                if (float.IsInfinity(v)) { infCount++; continue; }
-                if (v < mn) mn = v;
-                if (v > mx) mx = v;
-                sum += v;
-            }
-            Logs.Warning($"[ltx2-probe] pre-decode videoVaeLatent: min={mn:F4} max={mx:F4} mean={sum / n:F4} nan={nanCount} inf={infCount} n={n}");
-            if (!ReferenceEquals(f32, videoVaeLatent)) f32.Dispose();
-        }
+        ProbeTensor("pre-decode videoVaeLatent", videoVaeLatent);
         Tensor rgb = _vae.Decode(Backend, videoVaeLatent);
         videoVaeLatent.Dispose();
         Backend.Sync();
@@ -462,6 +459,76 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         return (video, audio);
     }
 
+    /// <summary>CFG + Euler for the audio stream, optionally rescaling the guided velocity back to the conditional's
+    /// mean/std (diffusers' <c>rescale_noise_cfg</c>). CFG over-disperses this stream badly — at guidance 3 the latent
+    /// lands 2.5x wider than the checkpoint's own latent stats, and the decoded soundtrack drops ~40 dB.
+    /// The blend is affine in the guided velocity, so only the four scalars come to the host and the step stays on
+    /// device (the latent is never written host-side, which would go stale against its GPU cache).</summary>
+    private void AudioCfgEulerStep(Tensor z, Tensor cond, Tensor uncond, float guidance, float rescale, float delta)
+    {
+        if (rescale <= 0f)
+        {
+            Backend.CfgEulerStep(z, cond, uncond, guidance, delta);
+            return;
+        }
+        Backend.Sync();
+        long n = cond.ElementCount;
+        float* c = (float*)cond.DataPointer;
+        float* u = (float*)uncond.DataPointer;
+        double sumC = 0, sumG = 0;
+        for (long i = 0; i < n; i++)
+        {
+            sumC += c[i];
+            sumG += guidance * c[i] + (1f - guidance) * u[i];
+        }
+        double meanC = sumC / n, meanG = sumG / n;
+        double varC = 0, varG = 0;
+        for (long i = 0; i < n; i++)
+        {
+            double dc = c[i] - meanC;
+            double dg = (guidance * c[i] + (1f - guidance) * u[i]) - meanG;
+            varC += dc * dc;
+            varG += dg * dg;
+        }
+        double factor = Math.Sqrt(varC / n) / Math.Max(Math.Sqrt(varG / n), 1e-8);
+        double a = rescale * factor + (1f - rescale);
+        double b = rescale * (meanC - factor * meanG);
+        Backend.CfgEulerStep(z, cond, uncond, guidance, (float)(a * delta));
+        if (Math.Abs(b) > 1e-12)
+        {
+            Backend.AddScalar(z, z, (float)(b * delta));
+        }
+    }
+
+    /// <summary>Logs min/max/mean/rms for a stage output under <c>HARTSY_LTX2_PROBE=1</c>; no-op otherwise.</summary>
+    private static void ProbeTensor(string label, Tensor tensor)
+    {
+        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") != "1")
+        {
+            return;
+        }
+        Tensor f32 = tensor.DType == DType.F32 ? tensor : tensor.CastTo(DType.F32);
+        float* p = (float*)f32.DataPointer;
+        long n = f32.ElementCount;
+        float mn = float.MaxValue, mx = float.MinValue;
+        double sum = 0, sumSq = 0;
+        long nanCount = 0, infCount = 0;
+        for (long e = 0; e < n; e++)
+        {
+            float v = p[e];
+            if (float.IsNaN(v)) { nanCount++; continue; }
+            if (float.IsInfinity(v)) { infCount++; continue; }
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+            sum += v;
+            sumSq += (double)v * v;
+        }
+        double rms = n > 0 ? Math.Sqrt(sumSq / n) : 0d;
+        Logs.Warning($"[ltx2-probe] {label}: min={mn:F5} max={mx:F5} mean={sum / n:F5} rms={rms:F5} "
+            + $"nan={nanCount} inf={infCount} n={n} shape={tensor.Shape}");
+        if (!ReferenceEquals(f32, tensor)) f32.Dispose();
+    }
+
     /// <summary>Audio VAE + vocoder: denormalize → unpack <c>[L,128]→[1,8,L,16]</c> → mel → 48 kHz waveform.</summary>
     private float[][] DecodeAudio(Tensor audioLat, int audioFrames, out int sampleRate)
     {
@@ -470,14 +537,18 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 
         int latentChannels = 8;
         int melLat = _config.AudioInChannels / latentChannels;   // 128 / 8 = 16
+        ProbeTensor("audio latent (raw, pre-denorm)", audioLat);
         Tensor unpacked = UnpackAudioLatents(audioLat, audioFrames, latentChannels, melLat);
+        ProbeTensor("audio latent (unpacked, post-denorm)", unpacked);
         Tensor mel = _audioVae.Decode(Backend, unpacked);        // [1, 2, T, 64]
+        ProbeTensor("audio VAE out (log-mel)", mel);
         unpacked.Dispose();
         Backend.Sync();
         Logs.Info($"[ltx2-phase]   audio VAE (preload+unpack+decode): {phase.ElapsedMilliseconds} ms");
         phase.Restart();
         // The vocoder manages its own weights (no bulk EnumerateWeights); ops fault them in on demand.
         Tensor wave = _vocoder!.Forward(Backend, mel);           // [1, channels, samples]
+        ProbeTensor("vocoder out (waveform)", wave);
         mel.Dispose();
         Backend.Sync();
         Logs.Info($"[ltx2-phase]   vocoder: {phase.ElapsedMilliseconds} ms");

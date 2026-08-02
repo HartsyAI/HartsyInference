@@ -1570,22 +1570,23 @@ public sealed class CudaBackend : IBackend
 
     /// <summary>Casts weight/bias down from F32 to <paramref name="target"/> (F16/BF16) — common for norm params in low-precision models.</summary>
     /// <returns>Pointers to use (the originals when no cast was needed) plus any allocated cast buffers, which the caller must free.</returns>
+    // Any affine dtype other than the kernel's must be converted, not just F32 — an F16-checkpoint affine
+    // fed raw to the BF16 GroupNorm reads as garbage scale/shift (flat-gray output; caught by the SeedVR2
+    // BF16-VAE bring-up on the numz fp16 checkpoint, 2026-08-01).
     private (ulong wPtr, ulong bPtr, ulong wCast, ulong bCast) CastAffineDownIfF32(
         ulong pW, DType wDType, long wCount, ulong pB, DType bDType, long bCount, DType target)
     {
         ulong wPtr = pW, bPtr = pB, wCast = 0, bCast = 0;
-        if (wDType == DType.F32)
+        if (wDType != target)
         {
-            wCast = CudaMemory.Allocate((nuint)(wCount * 2));
-            if (target == DType.F16) _kernels!.LaunchCastF32ToF16(wCast, pW, (int)wCount, _stream.Handle);
-            else _kernels!.LaunchCastF32ToBf16(wCast, pW, (int)wCount, _stream.Handle);
+            wCast = CudaMemory.Allocate((nuint)(wCount * target.SizeInBytes));
+            CastOnGpu(wCast, pW, wDType, target, (int)wCount);
             wPtr = wCast;
         }
-        if (bDType == DType.F32)
+        if (bDType != target)
         {
-            bCast = CudaMemory.Allocate((nuint)(bCount * 2));
-            if (target == DType.F16) _kernels!.LaunchCastF32ToF16(bCast, pB, (int)bCount, _stream.Handle);
-            else _kernels!.LaunchCastF32ToBf16(bCast, pB, (int)bCount, _stream.Handle);
+            bCast = CudaMemory.Allocate((nuint)(bCount * target.SizeInBytes));
+            CastOnGpu(bCast, pB, bDType, target, (int)bCount);
             bPtr = bCast;
         }
         return (wPtr, bPtr, wCast, bCast);
@@ -2707,6 +2708,16 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>GPU temporal frame extract: output[B,C,H,W] = src[B,C,Tsrc,H,W][:,:,ti,:,:]. Keeps CausalConv3d slicing on-device (no D2H).</summary>
+    /// <summary>Resolves the wan_vae kernel dtype: F32 → false, BF16 → true (bias, when present, must be F32 — the BF16 kernels read it as float).</summary>
+    private static bool RequireVaeFrameDtype(DType a, DType b, Tensor? bias = null)
+    {
+        if (a != b || (a != DType.F32 && a != DType.BF16))
+            throw new NotSupportedException($"CUDA VAE frame ops support matching F32 or BF16 tensors, got {a}/{b}.");
+        if (a == DType.BF16 && bias is not null && bias.DType != DType.F32)
+            throw new NotSupportedException($"CUDA VAE frame ops require an F32 bias on the BF16 path, got {bias.DType}.");
+        return a == DType.BF16;
+    }
+
     public unsafe void ExtractVaeFrame(Tensor output, Tensor src, int ti)
     {
         _context.EnsureCurrent();
@@ -2721,7 +2732,8 @@ public sealed class CudaBackend : IBackend
             pSrc = GpuTransferHelper.CopyToDevice(src);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchWanVaeExtractFrame(pOut, pSrc, ti, b, c, tsrc, frameHW, _stream.Handle);
+            _kernels!.LaunchWanVaeExtractFrame(pOut, pSrc, ti, b, c, tsrc, frameHW, _stream.Handle,
+                bf16: RequireVaeFrameDtype(output.DType, src.DType));
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -2747,7 +2759,8 @@ public sealed class CudaBackend : IBackend
             pOut = GpuTransferHelper.CopyToDevice(output);   // in-place target: output's device buffer
             pAcc = GpuTransferHelper.CopyToDevice(acc);
             if (bias is not null) pBias = GpuTransferHelper.CopyToDevice(bias);
-            _kernels!.LaunchWanVaeWriteFrame(pOut, pAcc, pBias, to, b, c, tout, frameHW, _stream.Handle);
+            _kernels!.LaunchWanVaeWriteFrame(pOut, pAcc, pBias, to, b, c, tout, frameHW, _stream.Handle,
+                bf16: RequireVaeFrameDtype(output.DType, acc.DType, bias));
             GpuTransferHelper.CacheActivation(output, pOut, GpuTransferHelper.ByteSize(output));   // in-place re-assert
         }
         finally
@@ -2777,7 +2790,8 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(padded);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             _kernels!.LaunchWanVaeBuildPadded(pOut, pIn, pCache, paddedT, cIn, Tin, cacheLen, zeroPad, h, w,
-                padH, padW, replicateFirst, _stream.Handle);
+                padH, padW, replicateFirst, _stream.Handle,
+                bf16: RequireVaeFrameDtype(padded.DType, input.DType));
             GpuTransferHelper.CacheActivation(padded, pOut, outBytes);
             cachedOutput = true;
         }
@@ -2786,6 +2800,60 @@ public sealed class CudaBackend : IBackend
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
             if (pCache != 0) GpuTransferHelper.FreeDevice(pCache);
+        }
+    }
+
+    /// <summary>GPU MAGViT channel→space shuffle (SeedVR2 upsampler) — replaces the host per-element loop
+    /// that forced a multi-GB D2H+H2D round trip per upsampler.</summary>
+    public unsafe void SeedVr2PixelShuffle(Tensor output, Tensor input, int spatialRatio, int temporalRatio)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        bool bf16 = RequireVaeFrameDtype(output.DType, input.DType);
+        int cIn = (int)input.Shape[1], f = (int)input.Shape[2], h = (int)input.Shape[3], w = (int)input.Shape[4];
+        int c = (int)output.Shape[1], fFinal = (int)output.Shape[2], hOut = (int)output.Shape[3], wOut = (int)output.Shape[4];
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchSeedVr2PixelShuffle(pOut, pIn, c, fFinal, hOut, wOut, cIn, f, h, w,
+                spatialRatio, temporalRatio, dropDup: temporalRatio > 1, _stream.Handle, bf16);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <summary>GPU asymmetric (0,1,0,1) zero pad (SeedVR2 downsampler) — replaces the host copy loop.</summary>
+    public unsafe void SeedVr2PadBottomRight(Tensor output, Tensor input)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        bool bf16 = RequireVaeFrameDtype(output.DType, input.DType);
+        int h = (int)input.Shape[3], w = (int)input.Shape[4];
+        long planes = input.ElementCount / ((long)h * w);
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchSeedVr2PadBottomRight(pOut, pIn, planes, h, w, _stream.Handle, bf16);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
         }
     }
 
@@ -2803,7 +2871,8 @@ public sealed class CudaBackend : IBackend
             if (bias is not null) pBias = GpuTransferHelper.CopyToDevice(bias);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchWanVaeFillBias(pOut, pBias, cOut, tout, HW, _stream.Handle);
+            _kernels!.LaunchWanVaeFillBias(pOut, pBias, cOut, tout, HW, _stream.Handle,
+                bf16: RequireVaeFrameDtype(output.DType, output.DType, bias));
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -2826,7 +2895,8 @@ public sealed class CudaBackend : IBackend
         {
             pOut = GpuTransferHelper.CopyToDevice(output);   // in-place accumulate target
             pConv = GpuTransferHelper.CopyToDevice(convDt);
-            _kernels!.LaunchWanVaeAccumulateTap(pOut, pConv, dt, strideT, cOut, tout, HW, _stream.Handle);
+            _kernels!.LaunchWanVaeAccumulateTap(pOut, pConv, dt, strideT, cOut, tout, HW, _stream.Handle,
+                bf16: RequireVaeFrameDtype(output.DType, convDt.DType));
             GpuTransferHelper.CacheActivation(output, pOut, GpuTransferHelper.ByteSize(output));   // in-place re-assert
         }
         finally
@@ -4010,8 +4080,8 @@ public sealed class CudaBackend : IBackend
 
     public void SliceRows(Tensor output, Tensor input, int rowOffset)
     {
-        if (input.DType != output.DType || (output.DType != DType.F32 && output.DType != DType.F16))
-            throw new NotSupportedException("CUDA SliceRows supports F32 or F16 (matching input/output dtype).");
+        if (input.DType != output.DType || (output.DType != DType.F32 && output.DType != DType.F16 && output.DType != DType.BF16))
+            throw new NotSupportedException("CUDA SliceRows supports F32, F16 or BF16 (matching input/output dtype).");
         _context.EnsureCurrent();
         EnsureKernels();
         int dim = (int)output.Shape[output.Shape.Rank - 1];
@@ -4024,7 +4094,8 @@ public sealed class CudaBackend : IBackend
             pIn = GpuTransferHelper.CopyToDevice(input);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            if (output.DType == DType.F16)
+            // BF16 piggy-backs on the F16 kernel (pure 16-bit copy, see Permute0213).
+            if (output.DType == DType.F16 || output.DType == DType.BF16)
                 _kernels!.LaunchSliceRowsF16(pOut, pIn, elemOffset, output.ElementCount, _stream.Handle);
             else
                 _kernels!.LaunchSliceRows(pOut, pIn, elemOffset, output.ElementCount, _stream.Handle);

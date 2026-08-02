@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Core.MemoryManagement;
@@ -23,11 +25,49 @@ public enum LowVramMode
 /// streaming speed.</remarks>
 public static class LowVramPolicy
 {
-    /// <summary>The environment variable read by <see cref="Resolve"/>.</summary>
+    /// <summary>The environment variable read by <see cref="Resolve()"/>.</summary>
     public const string EnvironmentVariable = "HARTSY_LOWVRAM";
 
     /// <summary>The last value logged, so a stable setting announces itself once instead of every phase.</summary>
     private static string? _lastLogged;
+
+    /// <summary>Per-backend overrides, so two engines in one process (one per GPU) can run different policies. Weak
+    /// keys: a disposed backend's entry vanishes with it, no unregistration required on the failure paths.</summary>
+    private static readonly ConditionalWeakTable<IBackend, ModeBox> _overrides = new();
+
+    /// <summary>Pins the policy for <paramref name="backend"/>; wins over the environment variable in
+    /// <see cref="Resolve(IBackend?)"/>. Hosts with a per-backend low-VRAM setting (the SwarmUI extension) use this
+    /// instead of the env var, whose process-wide last-writer-wins semantics broke multi-backend setups.</summary>
+    public static void SetOverride(IBackend backend, LowVramMode mode)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        _overrides.AddOrUpdate(backend, new ModeBox(mode));
+    }
+
+    /// <summary>Removes <paramref name="backend"/>'s override so it falls back to the environment variable.</summary>
+    public static void ClearOverride(IBackend backend)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        _overrides.Remove(backend);
+    }
+
+    /// <summary>The mode governing <paramref name="backend"/>: its override when one is set, else the process-wide
+    /// environment resolution. Null backend = environment only.</summary>
+    public static LowVramMode Resolve(IBackend? backend)
+    {
+        if (backend is not null && _overrides.TryGetValue(backend, out ModeBox? box))
+        {
+            return box.Mode;
+        }
+        return Resolve();
+    }
+
+    private sealed class ModeBox
+    {
+        public ModeBox(LowVramMode mode) => Mode = mode;
+
+        public LowVramMode Mode { get; }
+    }
 
     /// <summary>The current mode: unset/unrecognized → <see cref="LowVramMode.Auto"/>; <c>1</c>/<c>on</c>/<c>true</c>
     /// → <see cref="LowVramMode.ForceOn"/>; <c>0</c>/<c>off</c>/<c>false</c> → <see cref="LowVramMode.ForceOff"/>.</summary>

@@ -11,9 +11,6 @@ namespace HartsyInference.Engine.Audio;
 /// <summary>The speech-to-text model registry: catalog id → descriptor, plus the shared runner cache.</summary>
 internal static class SttCatalog
 {
-    /// <summary>Resident transcription pipelines, keyed by resolved repo.</summary>
-    internal static readonly AudioRunnerCache<ISttRunner> Cache = new AudioRunnerCache<ISttRunner>();
-
     private static Dictionary<string, SttModelDescriptor>? _registry;
 
     // Built on first use, not in a static initializer: the descriptor properties below would still be null if the

@@ -10,9 +10,10 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// Tail modulation implements the verified cache-collision semantics: the ATTN slice of the shared emb
 /// combines with <c>vid_out_ada.out_shift/out_scale</c> (see SEEDVR2_ARCHITECTURE.md §2.5 — porting the
 /// code as written, without the reference's cache hit, is dimensionally impossible AND wrong).
-/// Single-clip (B=1), host-resident tokens with backend GEMM/SDPA — bring-up shape; residency and CUDA
-/// graphs land with the pipeline pass.</summary>
-public sealed class SeedVr2Dit
+/// Single-clip (B=1). Tokens are device-resident across all blocks (<see cref="SeedVr2DitBlock"/>); the
+/// only host work per forward is patchify/unpatchify and the scalar time-embed. Geometry constants live in
+/// a cached <see cref="SeedVr2DevicePlan"/> — chunks of one clip share it.</summary>
+public sealed class SeedVr2Dit : IDisposable
 {
     private readonly SeedVr2Config _config;
     private readonly SeedVr2DitBlock[] _blocks;
@@ -21,6 +22,14 @@ public sealed class SeedVr2Dit
     private Tensor _embOutW = null!, _embOutB = null!;
     private Tensor _vidOutW = null!, _vidOutB = null!;
     private float[]? _vidOutNormW, _outShift, _outScale;
+
+    private IBackend? _planBackend;
+    private SeedVr2DevicePlan? _plan;
+    private Tensor? _ones;
+    private Tensor? _tailNormW, _tailScale, _tailShift;
+    private float[]? _emb;          // cached time embedding (timestep is constant across a clip's chunks)
+    private float _embTimestep = float.NaN;
+    private bool _disposed;
 
     /// <summary>Per-block tap for parity bisection: (blockIndex, vidTokens, txtTokens); −1 = post-embed.</summary>
     public Action<int, Tensor, Tensor>? OnBlockOutput { get; set; }
@@ -75,6 +84,10 @@ public sealed class SeedVr2Dit
             throw new HartsyInferenceException($"Latent grid {h}x{w} not divisible by patch {pH}x{pW}.");
         int gridT = t / pT, gridH = h / pH, gridW = w / pW;
         int lv = gridT * gridH * gridW;
+        int lt = (int)txtEmbed.Shape[0];
+
+        EnsurePlan(backend, gridT, gridH, gridW, lt);
+        float[] emb = EnsureEmb(backend, timestep);
 
         // Patchify (t h w c) then vid_in projection.
         Tensor patches = Patchify(latent, t, h, w, gridH, gridW);
@@ -83,24 +96,29 @@ public sealed class SeedVr2Dit
         patches.Dispose();
 
         // txt_in projection of the frozen embedding.
-        int lt = (int)txtEmbed.Shape[0];
         Tensor txt = new Tensor(new TensorShape(lt, _config.VidDim), DType.F32);
         backend.Linear(txt, txtEmbed, _txtInW, _txtInB);
 
-        float[] emb = TimeEmbed(backend, timestep);
-        backend.Sync();
         OnBlockOutput?.Invoke(-1, vid, txt);
 
         for (int i = 0; i < _blocks.Length; i++)
         {
-            _blocks[i].Forward(backend, vid, txt, gridT, gridH, gridW, emb);
+            (vid, txt) = _blocks[i].Forward(backend, vid, txt, _plan!, _ones!);
             OnBlockOutput?.Invoke(i, vid, txt);
         }
 
         // Tail: affine RMS norm + attn-slice modulation (cache-collision semantics) — 3B only; the 7B has a
         // bare vid_out (no vid_out_norm in its config or checkpoint).
         if (_config.HasTailNorm)
-            TailModulate(vid, emb);
+        {
+            Tensor normed = new Tensor(vid.Shape, DType.F32);
+            backend.RmsNorm(normed, vid, _tailNormW!, 1e-5f);
+            Tensor modded = new Tensor(vid.Shape, DType.F32);
+            backend.AffineBroadcastLastDim(modded, normed, _tailScale!, _tailShift!);
+            normed.Dispose();
+            vid.Dispose();
+            vid = modded;
+        }
         Tensor projected = new Tensor(new TensorShape(lv, _config.OutChannels * pT * pH * pW), DType.F32);
         backend.Linear(projected, vid, _vidOutW, _vidOutB);
         backend.Sync();
@@ -110,6 +128,96 @@ public sealed class SeedVr2Dit
         Tensor output = Unpatchify(projected, t, h, w, gridH, gridW);
         projected.Dispose();
         return output;
+    }
+
+    private void EnsurePlan(IBackend backend, int gridT, int gridH, int gridW, int lt)
+    {
+        if (_plan is not null && _plan.Key == (gridT, gridH, gridW, lt) && ReferenceEquals(_planBackend, backend))
+            return;
+        _plan?.Release(_planBackend ?? backend);
+        _plan = new SeedVr2DevicePlan(backend, _config, gridT, gridH, gridW, lt);
+        _planBackend = backend;
+        if (_ones is null)
+        {
+            _ones = new Tensor(new TensorShape(_config.VidDim), DType.F32);
+            _ones.AsSpan<float>().Fill(1f);
+            backend.PreloadWeights([_ones]);
+        }
+    }
+
+    private float[] EnsureEmb(IBackend backend, float timestep)
+    {
+        if (_emb is not null && _embTimestep == timestep)
+        {
+            foreach (SeedVr2DitBlock block in _blocks)
+                block.PrepareMod(backend, _emb);
+            return _emb;
+        }
+        _emb = TimeEmbed(backend, timestep);
+        _embTimestep = timestep;
+        foreach (SeedVr2DitBlock block in _blocks)
+            block.PrepareMod(backend, _emb);
+        if (_config.HasTailNorm)
+        {
+            int c = _config.VidDim;
+            ReleaseTail(backend);
+            _tailNormW = FromHost(_vidOutNormW!);
+            Tensor scale = new Tensor(new TensorShape(c), DType.F32);
+            Tensor shift = new Tensor(new TensorShape(c), DType.F32);
+            Span<float> sc = scale.AsSpan<float>(), sh = shift.AsSpan<float>();
+            for (int i = 0; i < c; i++)
+            {
+                sc[i] = _emb[i * 6 + 1] + _outScale![i];
+                sh[i] = _emb[i * 6 + 0] + _outShift![i];
+            }
+            _tailScale = scale;
+            _tailShift = shift;
+            backend.PreloadWeights([_tailNormW, _tailScale, _tailShift]);
+        }
+        return _emb;
+    }
+
+    private static Tensor FromHost(float[] values)
+    {
+        Tensor t = new Tensor(new TensorShape(values.Length), DType.F32);
+        values.AsSpan().CopyTo(t.AsSpan<float>());
+        return t;
+    }
+
+    private void ReleaseTail(IBackend backend)
+    {
+        if (_tailNormW is null)
+            return;
+        backend.FreeWeights([_tailNormW, _tailScale!, _tailShift!]);
+        _tailNormW.Dispose();
+        _tailScale!.Dispose();
+        _tailShift!.Dispose();
+        _tailNormW = _tailScale = _tailShift = null;
+    }
+
+    /// <summary>Frees the geometry plan, modulation constants, and other DiT-owned device tensors.</summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+        _disposed = true;
+        IBackend? backend = _planBackend;
+        if (backend is not null)
+        {
+            _plan?.Release(backend);
+            foreach (SeedVr2DitBlock block in _blocks)
+                block.ReleaseOwned(backend);
+            ReleaseTail(backend);
+            if (_ones is not null)
+                backend.FreeWeights([_ones]);
+        }
+        else
+        {
+            _plan?.Dispose();
+        }
+        _plan = null;
+        _ones?.Dispose();
+        _ones = null;
     }
 
     // Host-math vectors must be F32 regardless of checkpoint dtype (the 7B ships F16-converted for disk).
@@ -228,27 +336,4 @@ public sealed class SeedVr2Dit
         for (int i = 0; i < s.Length; i++)
             s[i] = s[i] / (1f + MathF.Exp(-s[i]));
     }
-
-    /// <summary>Affine RMS norm then <c>vid·(embAttnScale+outScale) + (embAttnShift+outShift)</c> — the
-    /// verified tail semantics (emb ATTN slice via the reference's cache-key collision).</summary>
-    private void TailModulate(Tensor vid, float[] emb)
-    {
-        int c = _config.VidDim;
-        int rows = (int)vid.Shape[0];
-        Span<float> data = vid.AsSpan<float>();
-        for (int r = 0; r < rows; r++)
-        {
-            Span<float> row = data.Slice(r * c, c);
-            double ss = 0;
-            for (int i = 0; i < c; i++)
-                ss += (double)row[i] * row[i];
-            float inv = (float)(1.0 / Math.Sqrt(ss / c + 1e-5));
-            for (int i = 0; i < c; i++)
-            {
-                float normed = row[i] * inv * _vidOutNormW![i];
-                row[i] = normed * (emb[i * 6 + 1] + _outScale![i]) + emb[i * 6 + 0] + _outShift![i];
-            }
-        }
-    }
-
 }

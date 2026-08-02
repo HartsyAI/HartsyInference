@@ -7,9 +7,8 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// the HunyuanVideo classes and would fail SILENTLY if inherited: (1) GroupNorm uses PER-FRAME statistics —
 /// the reference's <c>causal_norm_wrapper</c> rearranges <c>b c t h w → (b t) c h w</c> before nn.GroupNorm,
 /// so stats span (C/g,H,W) of one frame, never the whole clip; (2) spatial conv padding is ZEROS (plain
-/// diffusers Conv3d), not replicate — only the temporal head uses frame-0 replication. Bring-up note: the
-/// asymmetric pad + pixel-shuffle helpers are host-side (LTX upsampler precedent); GPU-resident variants are
-/// a Part-A7 perf follow-up.</summary>
+/// diffusers Conv3d), not replicate — only the temporal head uses frame-0 replication. The asymmetric pad
+/// and pixel-shuffle run device-resident on CUDA (IBackend default = host reference on CPU).</summary>
 public static class SeedVr2VaeOps
 {
     /// <summary>Per-frame GroupNorm + SiLU on <c>[B,C,T,H,W]</c> (reference <c>causal_norm_wrapper</c>).
@@ -18,7 +17,7 @@ public static class SeedVr2VaeOps
     {
         int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
         Tensor frames = Vae3dLayout.ToFrames(backend, x);
-        Tensor normed = new Tensor(frames.Shape, DType.F32);
+        Tensor normed = new Tensor(frames.Shape, frames.DType);
         backend.GroupNorm(normed, frames, weight, bias, groups, eps);
         backend.Silu(normed, normed);
         frames.Dispose();
@@ -30,7 +29,7 @@ public static class SeedVr2VaeOps
     /// <summary>Per-frame GroupNorm + SiLU when the activation is already frame-major <c>[B·T,C,H,W]</c>.</summary>
     public static Tensor NormSiluFrames(IBackend backend, Tensor frames, Tensor weight, Tensor bias, int groups, float eps)
     {
-        Tensor normed = new Tensor(frames.Shape, DType.F32);
+        Tensor normed = new Tensor(frames.Shape, frames.DType);
         backend.GroupNorm(normed, frames, weight, bias, groups, eps);
         backend.Silu(normed, normed);
         return normed;
@@ -38,73 +37,31 @@ public static class SeedVr2VaeOps
 
     /// <summary>Asymmetric zero pad (right/bottom only) on <c>[B,C,T,H,W]</c> — the diffusers
     /// <c>Downsample2D(padding=0)</c> convention: <c>F.pad(x, (0,1,0,1))</c> before the stride-2 conv.
-    /// Host-side copy; requires host-valid data (call after a backend Sync on GPU paths).</summary>
-    public static unsafe Tensor PadBottomRight(IBackend backend, Tensor x)
+    /// Device-resident via <see cref="IBackend.SeedVr2PadBottomRight"/> (host reference on CPU).</summary>
+    public static Tensor PadBottomRight(IBackend backend, Tensor x)
     {
-        backend.Sync();
         int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
-        int hp = h + 1, wp = w + 1;
-        Tensor padded = new Tensor(new TensorShape([(long)b, c, t, hp, wp]), DType.F32);
-        float* src = (float*)x.DataPointer;
-        float* dst = (float*)padded.DataPointer;
-        new Span<float>(dst, (int)padded.Shape.ElementCount).Clear();
-        long planes = (long)b * c * t;
-        for (long p = 0; p < planes; p++)
-            for (int y = 0; y < h; y++)
-                Buffer.MemoryCopy(src + (p * h + y) * w, dst + (p * hp + y) * wp,
-                    w * sizeof(float), w * sizeof(float));
+        Tensor padded = new Tensor(new TensorShape([(long)b, c, t, h + 1, w + 1]), x.DType);
+        backend.SeedVr2PadBottomRight(padded, x);
         return padded;
     }
 
     /// <summary>MAGViT-style channel→space shuffle (reference Upsample3D):
     /// <c>b (x y z c) f h w → b c (f·z) (h·x) (w·y)</c> with x,y spatial and z temporal ratios, followed by
     /// <c>remove_head</c> when temporal (drops OUTPUT FRAME INDEX 1 — the duplicated half of frame 0 — giving
-    /// T→2T−1; note LTX drops index 0, the conventions differ). Host-side.</summary>
-    public static unsafe Tensor PixelShuffle(IBackend backend, Tensor x, int spatialRatio, int temporalRatio)
+    /// T→2T−1; note LTX drops index 0, the conventions differ). Device-resident via
+    /// <see cref="IBackend.SeedVr2PixelShuffle"/> (host reference on CPU).</summary>
+    public static Tensor PixelShuffle(IBackend backend, Tensor x, int spatialRatio, int temporalRatio)
     {
-        backend.Sync();
         int b = (int)x.Shape[0], cIn = (int)x.Shape[1], f = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
         int ratio = spatialRatio * spatialRatio * temporalRatio;
         int c = cIn / ratio;
         if (c * ratio != cIn)
             throw new ArgumentException($"Channels {cIn} not divisible by shuffle ratio {ratio}.");
-
         int fOut = f * temporalRatio;
-        int hOut = h * spatialRatio, wOut = w * spatialRatio;
-        bool dropDup = temporalRatio > 1;
-        int fFinal = dropDup ? fOut - 1 : fOut;
-        Tensor output = new Tensor(new TensorShape([(long)b, c, fFinal, hOut, wOut]), DType.F32);
-        float* src = (float*)x.DataPointer;
-        float* dst = (float*)output.DataPointer;
-
-        for (int bi = 0; bi < b; bi++)
-        for (int xi = 0; xi < spatialRatio; xi++)
-        for (int yi = 0; yi < spatialRatio; yi++)
-        for (int zi = 0; zi < temporalRatio; zi++)
-        for (int ci = 0; ci < c; ci++)
-        {
-            int srcC = ((xi * spatialRatio + yi) * temporalRatio + zi) * c + ci;
-            for (int fi = 0; fi < f; fi++)
-            {
-                int outF = fi * temporalRatio + zi;
-                if (dropDup)
-                {
-                    if (outF == 1)
-                        continue;
-                    if (outF > 1)
-                        outF--;
-                }
-                float* srcPlane = src + (((long)(bi * cIn + srcC) * f + fi) * h) * w;
-                float* dstPlane = dst + (((long)(bi * c + ci) * fFinal + outF) * hOut) * wOut;
-                for (int y = 0; y < h; y++)
-                {
-                    float* srcRow = srcPlane + (long)y * w;
-                    float* dstRow = dstPlane + (long)(y * spatialRatio + xi) * wOut + yi;
-                    for (int xw = 0; xw < w; xw++)
-                        dstRow[(long)xw * spatialRatio] = srcRow[xw];
-                }
-            }
-        }
+        int fFinal = temporalRatio > 1 ? fOut - 1 : fOut;
+        Tensor output = new Tensor(new TensorShape([(long)b, c, fFinal, h * spatialRatio, w * spatialRatio]), x.DType);
+        backend.SeedVr2PixelShuffle(output, x, spatialRatio, temporalRatio);
         return output;
     }
 
@@ -112,7 +69,7 @@ public static class SeedVr2VaeOps
     /// (kt=1 → padT 0 — passing padT 1 to a kt=1 causal conv ADDS frames), frame-0-replicate causal head,
     /// zero spatial padding.</summary>
     public static CausalConv3d Conv(IReadOnlyDictionary<string, Tensor> weights, string baseKey,
-        int strideT = 1, int strideH = 1, int strideW = 1, bool padSpatial = true)
+        int strideT = 1, int strideH = 1, int strideW = 1, bool padSpatial = true, DType? computeDtype = null)
     {
         Tensor weight = weights[$"{baseKey}.weight"];
         weights.TryGetValue($"{baseKey}.bias", out Tensor? bias);
@@ -122,6 +79,6 @@ public static class SeedVr2VaeOps
             padT: (kt - 1) / 2,
             padH: padSpatial ? (kh - 1) / 2 : 0,
             padW: padSpatial ? (kw - 1) / 2 : 0,
-            replicateFirstPad: true, causal: true);
+            replicateFirstPad: true, causal: true, computeDtype: computeDtype);
     }
 }

@@ -25,7 +25,7 @@ public sealed class TranscribeService : ITranscribeService
         string repo = descriptor.ResolveRepo(selector.Variant);
         IBackend backend = _engine.Backend;
 
-        return AudioRuntime.RunAsync(backend, $"stt:{repo}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, $"stt:{repo}", async ct =>
         {
             // Decode straight to the rate the pipeline wants (it would resample otherwise).
             float[] audio = AudioClipCodec.DecodeMono(request.Audio, descriptor.InputSampleRate);
@@ -35,7 +35,7 @@ public sealed class TranscribeService : ITranscribeService
             }
             ct.ThrowIfCancellationRequested();
 
-            ISttRunner runner = await SttCatalog.Cache
+            ISttRunner runner = await _engine.AudioRuntime.Stt
                 .GetOrLoadAsync(repo, token => descriptor.LoadAsync(repo, token), ct).ConfigureAwait(false);
             long started = Environment.TickCount64;
 

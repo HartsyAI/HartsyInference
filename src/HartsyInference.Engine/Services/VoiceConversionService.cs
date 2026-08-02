@@ -25,7 +25,7 @@ public sealed class VoiceConversionService : IVoiceConversionService
         string key = descriptor.CacheKey(selector);
         IBackend backend = _engine.Backend;
 
-        return AudioRuntime.RunAsync(backend, $"vc:{key}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, $"vc:{key}", async ct =>
         {
             float[] source = AudioClipCodec.DecodeMono(request.Source, descriptor.InputSampleRate);
             if (source.Length == 0)
@@ -36,7 +36,7 @@ public sealed class VoiceConversionService : IVoiceConversionService
             float[]? target = request.Target is null ? null : AudioClipCodec.DecodeMono(request.Target, descriptor.InputSampleRate);
             ct.ThrowIfCancellationRequested();
 
-            IVcRunner runner = await VcCatalog.Cache
+            IVcRunner runner = await _engine.AudioRuntime.Vc
                 .GetOrLoadAsync(key, token => descriptor.LoadAsync(selector, token), ct).ConfigureAwait(false);
             long started = Environment.TickCount64;
             float[] audio = runner.Convert(backend, source, target, request);

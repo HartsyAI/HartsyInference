@@ -48,7 +48,7 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
         {
             (nuint freeBytes, nuint totalBytes) = cuda.Context.GetMemoryInfo();
             double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
-            bool canStream = cuda.StreamingCache is not null && LowVramPolicy.Resolve() != LowVramMode.ForceOff;
+            bool canStream = cuda.StreamingCache is not null && LowVramPolicy.Resolve(cuda) != LowVramMode.ForceOff;
             if (freeGb < MinRequiredVramGb && !canStream)
             {
                 throw new InvalidOperationException(

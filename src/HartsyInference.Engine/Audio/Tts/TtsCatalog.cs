@@ -21,9 +21,6 @@ namespace HartsyInference.Engine.Audio;
 /// is a descriptor, not a class.</summary>
 internal static class TtsCatalog
 {
-    /// <summary>Resident speech pipelines, keyed by resolved repo.</summary>
-    internal static readonly AudioRunnerCache<ITtsRunner> Cache = new AudioRunnerCache<ITtsRunner>();
-
     /// <summary>Public-domain CMU Pronouncing Dictionary — the English G2P source, fetched on first use.</summary>
     private const string CmudictUrl = "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict";
 

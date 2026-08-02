@@ -185,6 +185,46 @@ public static class BackendFactory
     /// <summary>Whether <paramref name="kind"/> names a backend that runs on a selectable device.</summary>
     private static bool IsDeviceKind(string kind) => kind == "cuda" || kind == "vulkan";
 
+    /// <summary>Throws when <paramref name="selector"/> cannot resolve to a constructible backend on this machine,
+    /// without constructing one — syntax plus a driver device-count query only. Lets a host surface a bad
+    /// configuration (missing driver, out-of-range GPU id) at startup instead of on the first generation.</summary>
+    /// <remarks>Stricter than <see cref="Create"/>'s lazy path in one way: an explicit <c>cuda</c>/<c>cuda:0</c>
+    /// selector fails here when no CUDA device exists at all, instead of deferring to a driver error mid-generation.
+    /// Vulkan has no cheap availability probe, so only its syntax is checked. <c>auto</c> always validates — it
+    /// falls back to CPU by design.</remarks>
+    public static void Validate(string selector)
+    {
+        if (!IsValidSelector(selector))
+        {
+            if (!TryParseOrdinal(selector, out _, out string? ordinalError) && ordinalError is not null)
+            {
+                throw new ArgumentException(ordinalError, nameof(selector));
+            }
+            throw new ArgumentException(
+                $"Unknown backend '{selector}'. Valid: {string.Join(", ", ValidSelectors)}.", nameof(selector));
+        }
+        if (Kind(selector) != "cuda")
+        {
+            return;
+        }
+        int ordinal = ParseOrdinal(selector);
+        int count = CudaContext.IsAvailable() ? CudaContext.GetDeviceCount() : 0;
+        if (count == 0)
+        {
+            throw new ArgumentException(
+                $"Backend selector '{selector}' requires CUDA, but no CUDA driver/device is available on this machine.",
+                nameof(selector));
+        }
+        if (ordinal >= count)
+        {
+            throw new ArgumentException(
+                $"Backend selector '{selector}' requests CUDA device {ordinal}, but this machine has {count} CUDA " +
+                $"device(s) (valid ordinals 0..{count - 1}). " +
+                "Note CUDA's default enumeration is fastest-first and need not match nvidia-smi's PCI order.",
+                nameof(selector));
+        }
+    }
+
     /// <summary>Fails with a message naming both the requested ordinal and what the machine actually has.</summary>
     /// <remarks>Ordinal 0 is skipped deliberately: it is the pre-existing default path, and the only case the check would
     /// catch there is "no CUDA devices at all", which <see cref="CudaBackend"/>'s own driver error already reports. Leaving

@@ -6,6 +6,61 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what a
 stable release will require. Dates are UTC.
 
+## [Unreleased]
+
+### Added
+- **SeedVR2-7B support (v1 NaDiT port).** The 7B checkpoint is the V1 architecture (`models/dit`, not the
+  3B's `dit_v2`) — same windowing/attention/AdaSingle, but a different RoPE (pixel-basis freqs
+  `linspace(1,128,10)·π` matching the checkpoint's `rope.rope.freqs`, 60 of 128 head dims rotated,
+  positions normalized to `linspace(−1,1)` over each window axis, applied to video only — text is never
+  rotated), plain GELU-tanh MLP with biases, all 36 blocks fully split (no `mm_layers`), and no tail
+  norm/ada or last-layer text shortcut. `SeedVr2Config.Detect` now configures all of this from the
+  plain-MLP+no-tail signature instead of throwing. Parity: a v1 tiny-config dump against ByteDance's own
+  `models.dit.nadit` (`seedvr2_transformer_v1_parity_dump.py`) passes at blocks ≤9.1e-4 / output 8.96e-4
+  (`Dit_TinyConfigV1_ForwardMatchesReference_PerBlock`).
+- **SeedVR2 BF16 VAE activations** (CUDA default; `HARTSY_SEEDVR2_VAE_F32=1` reverts): the fp32
+  whole-clip activation peak that OOM'd 24 GB at 720p-area is halved — 720p-area now restores a full
+  25-frame clip at a measured 13.3 GB peak, 960×540-area at 9.0 GB, and **the 12 GB 3060 runs 960×540-area
+  end-to-end (peak 7.8 GB)**. Pixel/latent boundaries stay F32; the mid-block attention runs F32 (the
+  known F16-attention precision class). BF16 variants of the five `wan_vae` glue kernels; BF16 admitted
+  through `SliceRows`/`Permute0213`. Output vs the f32 path: SSIM 0.9998. 1080p-area still exceeds 24 GB —
+  tiled/sliced VAE remains open.
+
+- **LTX-2.3 audio guidance rescale — the near-silent soundtrack is ~14 dB louder.** Root cause measured:
+  CFG over-disperses the audio latent (σ 0.89 at guidance 1 → 2.22 at 3 → 2.69 at 7, against the
+  checkpoint's own 1.17) and the decoded level falls with it; the audio VAE is not at fault (fed a
+  training-distribution latent it decodes to a healthy level). `AudioGuidanceRescale` (default 1.0) applies
+  diffusers' `rescale_noise_cfg` to the audio stream, restoring σ to 1.141. Real 20-step generation
+  (512×320×25f, seed 42): **peak −43.9 → −28.2 dBFS, RMS −59.4 → −45.4 dBFS**, video unchanged.
+  Implemented as an affine transform so only four scalars reach the host and the step stays on-device.
+  Also adds `AudioGuidanceScale` (null = follow the video scale, the reference default) with
+  `HARTSY_LTX2_AUDIO_CFG` / `HARTSY_LTX2_AUDIO_RESCALE` overrides. **Still ~20 dB below a healthy
+  soundtrack** — the reference's STG + modality-isolation guidance remain unimplemented; see
+  MODEL_STATUS_VIDEO. Note for anyone tempted: raising audio guidance to the authors' recommended 7.0
+  *alone* makes it ~17 dB worse, because that recommendation assumes the rescale/STG stack.
+- `HARTSY_LTX2_PROBE=1` now also dumps the audio stages (latent pre/post-denorm, VAE log-mel, vocoder
+  waveform) via a shared `ProbeTensor` helper.
+
+### Changed
+- **SeedVR2 DiT is device-resident** — the bring-up host-math forward (window gather/scatter, rope,
+  qk-norm, AdaSingle on CPU spans; ~200 stream drains per forward) is replaced with backend-op
+  composition: fused `QkvSplitNorm`, `RowGather`/`RowScatterAdd` window packing over cached per-geometry
+  index tensors, `WanRopeInterleaved` with per-token identity-padded tables, and modulation vectors
+  precombined per timestep (constant 1000) and cached across chunks (`SeedVr2DevicePlan`). No new
+  kernels beyond GPU-resident `SeedVr2PixelShuffle`/`SeedVr2PadBottomRight` (the VAE upsampler/downsampler
+  host loops, previously a multi-GB D2H+H2D round trip each). **Measured e2e: 960×540-area 14.5 → 2.7
+  s/frame (362 → 68 s); 720p-area 25.7 → 8.4 s/frame (4090, BBB 25 f). The 3060 runs the same clip in
+  169 s.** Existing tiny-config parity numbers are unchanged to the printed digit; per-chunk phase timing
+  is logged at Debug level.
+
+### Fixed
+- **CUDA BF16/F16 GroupNorm mis-read non-F32 affine weights.** `CastAffineDownIfF32` only converted an
+  F32 affine down to the kernel dtype; an F16-checkpoint affine (e.g. the numz SeedVR2 VAE) was passed
+  raw to the BF16 kernel — F16 bits reinterpreted as BF16 → garbage scale/shift and flat-gray output.
+  Any affine dtype is now converted to the kernel's dtype. Caught by the SeedVR2 BF16-VAE bring-up: the
+  isolated parity test passed against the f32 checkpoint while the pipeline (fp16 catalog checkpoint)
+  produced uniform gray.
+
 ## [2.0.0-alpha.8] — 2026-08-01
 
 ### Fixed

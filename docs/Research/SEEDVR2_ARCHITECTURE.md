@@ -237,6 +237,21 @@ upsampler = 1×1×1 upscale_conv → channel-to-space `(x y z c)` order → drop
 temporal (T→2T−1; LTX drops index 0 — different) → k3 causal conv; encoder emits mean‖logvar (32ch, no
 quant convs), runner SAMPLES posterior (`use_sample: True`); latent → DiT is channels-last ×0.9152.
 
+**v1 NaDiT (7B, `models/dit`) — decoded diff vs v2 (verified against reference code + the real
+checkpoint, 2026-08-02; ported, tiny-config parity 8.96e-4).** Everything above transfers EXCEPT:
+(1) **RoPE is a different function**: `RotaryEmbedding(freqs_for="pixel", max_freq=256)` →
+freqs = `linspace(1,128,10)·π` (matches `blocks.*.attn.rope.rope.freqs`, shape [10]); per-axis rot
+width 2·10 = 20 → **60 of 128 head dims rotated** (68 pass through); positions are
+`torch.linspace(−1,1,steps=extent)` over each WINDOW axis (per-window normalization — ragged boundary
+windows get different angles for the same local index; `steps=1` → `[-1]`, NOT 0); applied to
+**video q/k only** — text is never rotated; no text-length temporal offset. Same interleaved-pair
+convention and fp32 rotation as v2. (2) Plain GELU-**tanh** MLP with biases (hidden 4·dim = 12288),
+not SwiGLU. (3) All 36 blocks fully split — no `mm_layers`, zero `.all.` keys (express as
+`MmLayers == NumLayers`). (4) No `vid_out_norm`/`vid_out_ada` (bare `vid_out`) and NO last-layer
+text asymmetry — block 35 computes the text branch in full (the v2 `vid_only` quirks must not fire).
+Discriminator: plain-MLP + no-tail signature in `SeedVr2Config.Detect`. 7B dims: 3072 wide, 24 heads,
+36 layers, emb 18432, txt_in 5120→3072 bare Linear; window/patch/VAE/scheduler identical to 3B.
+
 **Bugs the parity harness caught so far** (for the PARITY_VERIFICATION ledger):
 1. torchvision AA bicubic kernel is a=−0.5 (PIL-compatible), not torch's non-AA −0.75 → 0.18 maxAbs.
 2. ATen computes resize weights in float32 (scalar_t) — double-precision weights drift linearly with

@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
@@ -14,10 +15,10 @@ public sealed class SeedVr2VaeMidBlock3d
     private readonly VaeAttention _attention;
 
     /// <summary>Creates the block for <paramref name="channels"/>-wide activations.</summary>
-    public SeedVr2VaeMidBlock3d(int channels, int groups, float eps)
+    public SeedVr2VaeMidBlock3d(int channels, int groups, float eps, DType? actDtype = null)
     {
-        _resnet0 = new SeedVr2VaeResnetBlock3d(groups, eps);
-        _resnet1 = new SeedVr2VaeResnetBlock3d(groups, eps);
+        _resnet0 = new SeedVr2VaeResnetBlock3d(groups, eps, actDtype);
+        _resnet1 = new SeedVr2VaeResnetBlock3d(groups, eps, actDtype);
         _attention = new VaeAttention(channels, groups, eps);
     }
 
@@ -35,9 +36,14 @@ public sealed class SeedVr2VaeMidBlock3d
         Tensor r0 = _resnet0.Forward(backend, x);
         int b = (int)r0.Shape[0], c = (int)r0.Shape[1], t = (int)r0.Shape[2], hh = (int)r0.Shape[3], ww = (int)r0.Shape[4];
         Tensor frames = Vae3dLayout.ToFrames(backend, r0);
+        DType actDtype = r0.DType;
         r0.Dispose();
+        // Attention runs F32 regardless of the activation dtype: the SDPA F32 route is the tiled/flash one,
+        // and the mid-block tensors are latent-resolution (small) so the upcast is cheap.
+        frames = DtypeCastHelper.EnsureF32(backend, frames);
         Tensor attended = _attention.Forward(backend, frames);
         frames.Dispose();
+        attended = DtypeCastHelper.EnsureDtype(backend, attended, actDtype);
         Tensor h = Vae3dLayout.FromFrames(backend, attended, b, c, t, hh, ww);
         attended.Dispose();
         Tensor output = _resnet1.Forward(backend, h);

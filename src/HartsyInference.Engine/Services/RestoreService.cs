@@ -22,6 +22,7 @@ public sealed class RestoreService : IRestoreService
     private readonly object _lock = new();
     private string? _loadedPath;
     private SeedVr2RestorePipeline? _pipeline;
+    private SeedVr2Dit? _dit;
     private readonly List<SafeTensorsLoader> _loaders = new();
     private Tensor? _posEmb;
 
@@ -112,10 +113,20 @@ public sealed class RestoreService : IRestoreService
             SeedVr2Config config = SeedVr2Config.Detect(ditWeights);
             SeedVr2Dit dit = new(config);
             dit.LoadWeights(ditWeights);
+            _dit = dit;
             Dictionary<string, Tensor> vaeWeights = vaeLoader.GetAllTensors();
-            SeedVr2VaeEncoder encoder = new(SeedVr2VaeConfig.Default);
+            // BF16 VAE activations on CUDA (reference precision): halves the fp32 activation peak that
+            // OOMs 24 GB at 720p-area. HARTSY_SEEDVR2_VAE_F32=1 is the kill-switch back to full precision.
+            bool vaeBf16 = _engine.Backend.Device.IsCuda
+                && Environment.GetEnvironmentVariable("HARTSY_SEEDVR2_VAE_F32") != "1";
+            SeedVr2VaeConfig vaeConfig = SeedVr2VaeConfig.Default with
+            {
+                ActivationDType = vaeBf16 ? DType.BF16 : DType.F32,
+            };
+            Logs.Info($"SeedVR2 VAE activation dtype: {vaeConfig.ActivationDType}");
+            SeedVr2VaeEncoder encoder = new(vaeConfig);
             encoder.LoadWeights(vaeWeights);
-            SeedVr2VaeDecoder decoder = new(SeedVr2VaeConfig.Default);
+            SeedVr2VaeDecoder decoder = new(vaeConfig);
             decoder.LoadWeights(vaeWeights);
             _posEmb = embLoader.GetTensor("pos_emb").CastTo(DType.F32);
 
@@ -154,6 +165,8 @@ public sealed class RestoreService : IRestoreService
         {
             _pipeline?.Dispose();
             _pipeline = null;
+            _dit?.Dispose();
+            _dit = null;
             _posEmb?.Dispose();
             _posEmb = null;
             foreach (SafeTensorsLoader loader in _loaders)

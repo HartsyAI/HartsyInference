@@ -7,10 +7,13 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// modulation (emb slice + per-block learned vectors, additive). Blocks below mm_layers hold separate
 /// vid/txt weights (<c>.vid./.txt.</c>); above, one shared set (<c>.all.</c>). The LAST block computes the
 /// text branch through attention (joint attention needs it) but skips text mlp/ada — <c>vid_only</c>.
-/// <para>Attention: per-window sequences <c>[window vid tokens ; full text]</c>, text REPLICATED into every
-/// window and MEAN-pooled across windows afterwards; RMS qk-norm per 128-dim head; window-local
-/// <see cref="SeedVr2Rope"/>; same-shape windows batched into one SDPA call. Host gather/scatter with
-/// backend GEMM/SDPA — bring-up layout, residency/graph discipline lands in the pipeline pass.</para></summary>
+/// <para>Device-resident: tokens stay <c>[L, C]</c> backend tensors end-to-end — RMS/modulate/gate via the
+/// DiT glue kernels, fused QKV split + per-head RMS qk-norm, window-local rope via
+/// <c>WanRopeInterleaved</c> over <see cref="SeedVr2DevicePlan"/>'s global-token-order tables, window
+/// gather/scatter via <c>RowGather</c>/<c>RowScatterAdd</c> index tensors, same-shape windows batched into
+/// one SDPA call. Text is REPLICATED into every window and MEAN-pooled across windows afterwards
+/// (scatter-add + 1/N scale). The emb+ada modulation vectors are additive constants per timestep, combined
+/// once and cached (<see cref="PrepareMod"/>).</para></summary>
 public sealed class SeedVr2DitBlock
 {
     private readonly SeedVr2Config _config;
@@ -24,10 +27,14 @@ public sealed class SeedVr2DitBlock
     private Tensor _mlpVidInW = null!, _mlpVidOutW = null!;
     private Tensor? _mlpVidInB, _mlpVidOutB;
     private Tensor? _mlpTxtGateW, _mlpTxtInW, _mlpTxtOutW, _mlpTxtInB, _mlpTxtOutB;
-    private float[] _normQVid = null!, _normKVid = null!;
-    private float[]? _normQTxt, _normKTxt;
+    private Tensor _normQVid = null!, _normKVid = null!;
+    private Tensor? _normQTxt, _normKTxt;
     private float[][] _adaVid = null!;   // [attnShift, attnScale, attnGate, mlpShift, mlpScale, mlpGate]
     private float[][]? _adaTxt;
+
+    private readonly List<Tensor> _owned = [];
+    private Tensor[]? _mod;      // combined emb+ada vectors, [C]: vid attn s/sc/g, mlp s/sc/g, then txt ditto (when split)
+    private float[]? _modEmb;    // emb the cached _mod was built from
 
     /// <summary>Creates block <paramref name="index"/>; even layers use the regular window partition, odd
     /// layers the shifted one (config <c>window_method</c> alternation).</summary>
@@ -39,6 +46,9 @@ public sealed class SeedVr2DitBlock
         _shifted = index % 2 == 1;
     }
 
+    /// <summary>Whether this block uses the shifted window partition (odd layers).</summary>
+    public int Parity => _shifted ? 1 : 0;
+
     /// <summary>Binds <c>blocks.{i}.*</c> checkpoint keys (verbatim names via the near-identity converter).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, int index)
     {
@@ -47,8 +57,8 @@ public sealed class SeedVr2DitBlock
         _qkvVidW = weights[$"{p}.attn.proj_qkv.{b}.weight"];
         _projVidW = weights[$"{p}.attn.proj_out.{b}.weight"];
         _projVidB = weights[$"{p}.attn.proj_out.{b}.bias"];
-        _normQVid = ToHost(weights[$"{p}.attn.norm_q.{b}.weight"]);
-        _normKVid = ToHost(weights[$"{p}.attn.norm_k.{b}.weight"]);
+        _normQVid = ToF32Tensor(weights[$"{p}.attn.norm_q.{b}.weight"]);
+        _normKVid = ToF32Tensor(weights[$"{p}.attn.norm_k.{b}.weight"]);
         _mlpVidGateW = _config.SwiGluMlp ? weights[$"{p}.mlp.{b}.proj_in_gate.weight"] : null;
         _mlpVidInW = weights[$"{p}.mlp.{b}.proj_in.weight"];
         _mlpVidOutW = weights[$"{p}.mlp.{b}.proj_out.weight"];
@@ -60,8 +70,8 @@ public sealed class SeedVr2DitBlock
             _qkvTxtW = weights[$"{p}.attn.proj_qkv.txt.weight"];
             _projTxtW = weights[$"{p}.attn.proj_out.txt.weight"];
             _projTxtB = weights[$"{p}.attn.proj_out.txt.bias"];
-            _normQTxt = ToHost(weights[$"{p}.attn.norm_q.txt.weight"]);
-            _normKTxt = ToHost(weights[$"{p}.attn.norm_k.txt.weight"]);
+            _normQTxt = ToF32Tensor(weights[$"{p}.attn.norm_q.txt.weight"]);
+            _normKTxt = ToF32Tensor(weights[$"{p}.attn.norm_k.txt.weight"]);
             _mlpTxtGateW = _config.SwiGluMlp ? weights[$"{p}.mlp.txt.proj_in_gate.weight"] : null;
             _mlpTxtInW = weights[$"{p}.mlp.txt.proj_in.weight"];
             _mlpTxtOutW = weights[$"{p}.mlp.txt.proj_out.weight"];
@@ -78,7 +88,7 @@ public sealed class SeedVr2DitBlock
         ToHost(weights[$"{p}.ada.{b}.mlp_scale"]), ToHost(weights[$"{p}.ada.{b}.mlp_gate"]),
     ];
 
-    // Host-math vectors must be F32 regardless of checkpoint dtype (the 7B ships F16-converted for disk).
+    // Combined-mod math runs on host F32 regardless of checkpoint dtype (the 7B ships F16-converted for disk).
     private static float[] ToHost(Tensor t)
     {
         if (t.DType == DType.F32)
@@ -89,33 +99,110 @@ public sealed class SeedVr2DitBlock
         return result;
     }
 
-    /// <summary>Runs the block in place on host-resident token tensors <paramref name="vid"/> [Lv,C] and
-    /// <paramref name="txt"/> [Lt,C]. <paramref name="emb"/> is the 15360-dim AdaSingle vector, sliced
-    /// (d l g)-wise here. Grid is the patchified token grid for the window partition.</summary>
-    public void Forward(IBackend backend, Tensor vid, Tensor txt, int gridT, int gridH, int gridW, float[] emb)
+    /// <summary>F32 view of a (possibly F16) checkpoint vector; cast copies are block-owned.</summary>
+    private Tensor ToF32Tensor(Tensor t)
     {
+        if (t.DType == DType.F32)
+            return t;
+        Tensor cast = t.CastTo(DType.F32);
+        _owned.Add(cast);
+        return cast;
+    }
+
+    /// <summary>Builds (or reuses) the combined emb+ada modulation vectors for <paramref name="emb"/> —
+    /// they are constants per timestep, so one build serves every chunk of a clip.</summary>
+    public void PrepareMod(IBackend backend, float[] emb)
+    {
+        if (_mod is not null && ReferenceEquals(_modEmb, emb))
+            return;
+        ReleaseMod(backend);
+        int c = _config.VidDim;
+        List<Tensor> mod = [];
+        foreach (float[][] ada in _adaTxt is null ? new[] { _adaVid } : [_adaVid, _adaTxt])
+        {
+            for (int layer = 0; layer < 2; layer++)
+            {
+                mod.Add(CombineVector(c, i => emb[i * 6 + layer * 3 + 0] + ada[layer * 3 + 0][i]));
+                mod.Add(CombineVector(c, i => emb[i * 6 + layer * 3 + 1] + ada[layer * 3 + 1][i]));
+                mod.Add(CombineVector(c, i => emb[i * 6 + layer * 3 + 2] + ada[layer * 3 + 2][i]));
+            }
+        }
+        _mod = [.. mod];
+        _modEmb = emb;
+        backend.PreloadWeights(_mod);
+    }
+
+    private static Tensor CombineVector(int c, Func<int, float> f)
+    {
+        Tensor t = new Tensor(new TensorShape(c), DType.F32);
+        Span<float> s = t.AsSpan<float>();
+        for (int i = 0; i < c; i++)
+            s[i] = f(i);
+        return t;
+    }
+
+    private void ReleaseMod(IBackend backend)
+    {
+        if (_mod is null)
+            return;
+        backend.FreeWeights(_mod);
+        foreach (Tensor t in _mod)
+            t.Dispose();
+        _mod = null;
+        _modEmb = null;
+    }
+
+    /// <summary>Frees block-owned tensors (mod vectors, F32 casts of F16 checkpoint vectors).</summary>
+    public void ReleaseOwned(IBackend backend)
+    {
+        ReleaseMod(backend);
+        foreach (Tensor t in _owned)
+            t.Dispose();
+        _owned.Clear();
+    }
+
+    // _mod layout: [vid attnShift, attnScale, attnGate, mlpShift, mlpScale, mlpGate, (txt ditto when split)]
+    private Tensor ModVec(bool txt, int layer, int component)
+    {
+        int branch = txt && _adaTxt is not null ? 6 : 0;
+        return _mod![branch + layer * 3 + component];
+    }
+
+    /// <summary>Runs the block on device-resident token tensors <paramref name="vid"/> [Lv,C] and
+    /// <paramref name="txt"/> [Lt,C]; returns the updated pair (inputs are consumed/disposed).
+    /// <paramref name="ones"/> is the shared all-ones [C] vector for affine-free RMS norms.</summary>
+    public (Tensor Vid, Tensor Txt) Forward(IBackend backend, Tensor vid, Tensor txt,
+        SeedVr2DevicePlan plan, Tensor ones)
+    {
+        if (_mod is null)
+            throw new InvalidOperationException("PrepareMod must run before Forward.");
         int c = _config.VidDim;
         int lv = (int)vid.Shape[0], lt = (int)txt.Shape[0];
-        (int nT, int nH, int nW) = _config.WindowCounts;
-        SeedVr2WindowSlice[] windows = _shifted
-            ? SeedVr2Windowing.MakeShiftedWindows(gridT, gridH, gridW, nT, nH, nW)
-            : SeedVr2Windowing.MakeWindows(gridT, gridH, gridW, nT, nH, nW);
+        SeedVr2DevicePlan.Partition part = plan.Partitions[Parity];
+        // v2-only last-layer asymmetry; v1 (7B) runs the final text branch like any other block.
+        bool lastVidOnly = _isLast && _config.LastLayerVidOnly;
 
         // ---- attention ----
-        // Last layer: ada is vid_only in the reference — text enters attention PLAIN-NORMED (no ada-in)
-        // and its attention output is residual-added UNGATED. Missing this pollutes vid K/V (caught by
-        // block3 parity: txt relL2 0.64, vid 1e-2).
-        Tensor vidMod = ModulateIn(backend, vid, emb, _adaVid, layer: 0);
-        Tensor txtMod = _isLast
-            ? RmsNoAffine(txt)
-            : ModulateIn(backend, txt, emb, _adaTxt ?? _adaVid, layer: 0);
+        // Last layer (v2): ada is vid_only in the reference — text enters attention PLAIN-NORMED (no
+        // ada-in) and its attention output is residual-added UNGATED. Missing this pollutes vid K/V
+        // (caught by block3 parity: txt relL2 0.64, vid 1e-2).
+        Tensor vidMod = Modulate(backend, vid, ones, txt: false, layer: 0);
+        Tensor txtMod;
+        if (lastVidOnly)
+        {
+            txtMod = new Tensor(txt.Shape, DType.F32);
+            backend.RmsNorm(txtMod, txt, ones, 1e-5f);
+        }
+        else
+        {
+            txtMod = Modulate(backend, txt, ones, txt: true, layer: 0);
+        }
         Tensor vidQkv = Linear(backend, vidMod, _qkvVidW, null);
         Tensor txtQkv = Linear(backend, txtMod, _qkvTxtW ?? _qkvVidW, null);
         vidMod.Dispose();
         txtMod.Dispose();
-        backend.Sync();
 
-        (Tensor vidAttn, Tensor txtAttn) = WindowedAttention(backend, vidQkv, txtQkv, windows, gridH, gridW, lv, lt);
+        (Tensor vidAttn, Tensor txtAttn) = WindowedAttention(backend, vidQkv, txtQkv, part, plan, lv, lt);
         vidQkv.Dispose();
         txtQkv.Dispose();
 
@@ -123,20 +210,28 @@ public sealed class SeedVr2DitBlock
         Tensor txtProj = Linear(backend, txtAttn, _projTxtW ?? _projVidW, _projTxtB ?? _projVidB);
         vidAttn.Dispose();
         txtAttn.Dispose();
-        backend.Sync();
-        GateAndAdd(vid, vidProj, emb, _adaVid, layer: 0);
-        if (_isLast)
-            AddInPlace(txt, txtProj);
+
+        vid = GateAdd(backend, vid, vidProj, txt: false, layer: 0);
+        if (lastVidOnly)
+        {
+            Tensor sum = new Tensor(txt.Shape, DType.F32);
+            backend.Add(sum, txt, txtProj);
+            txt.Dispose();
+            txt = sum;
+        }
         else
-            GateAndAdd(txt, txtProj, emb, _adaTxt ?? _adaVid, layer: 0);
+        {
+            txt = GateAdd(backend, txt, txtProj, txt: true, layer: 0);
+        }
         vidProj.Dispose();
         txtProj.Dispose();
 
         // ---- mlp (video always; text skipped on the last layer) ----
-        MlpBranch(backend, vid, emb, _adaVid, _mlpVidGateW, _mlpVidInW, _mlpVidInB, _mlpVidOutW, _mlpVidOutB);
-        if (!_isLast)
+        vid = MlpBranch(backend, vid, ones, txtBranch: false,
+            _mlpVidGateW, _mlpVidInW, _mlpVidInB, _mlpVidOutW, _mlpVidOutB);
+        if (!lastVidOnly)
         {
-            MlpBranch(backend, txt, emb, _adaTxt ?? _adaVid,
+            txt = MlpBranch(backend, txt, ones, txtBranch: true,
                 _mlpTxtGateW ?? _mlpVidGateW, _mlpTxtInW ?? _mlpVidInW, _mlpTxtInB ?? _mlpVidInB,
                 _mlpTxtOutW ?? _mlpVidOutW, _mlpTxtOutB ?? _mlpVidOutB);
         }
@@ -145,28 +240,26 @@ public sealed class SeedVr2DitBlock
             // Reference quirk: vid_only MMModules return txt UNCHANGED, so the "skipped" mlp branch
             // residual-adds txt to itself → final txt = 2×post-attention txt. txt is discarded after this
             // layer; doubled here only so parity traces match the reference exactly (relL2 0.5 otherwise).
-            AddInPlace(txt, txt);
+            Tensor doubled = new Tensor(txt.Shape, DType.F32);
+            backend.Add(doubled, txt, txt);
+            txt.Dispose();
+            txt = doubled;
         }
+        return (vid, txt);
     }
 
-    private void MlpBranch(IBackend backend, Tensor tokens, float[] emb, float[][] ada,
+    private Tensor MlpBranch(IBackend backend, Tensor tokens, Tensor ones, bool txtBranch,
         Tensor? gateW, Tensor inW, Tensor? inB, Tensor outW, Tensor? outB)
     {
-        Tensor modded = ModulateIn(backend, tokens, emb, ada, layer: 1);
+        Tensor modded = Modulate(backend, tokens, ones, txtBranch, layer: 1);
         Tensor hidden;
         if (gateW is not null)
         {
             // SwiGLU (3B): proj_out(silu(gate(x)) · in(x)), bias-free.
             Tensor gate = Linear(backend, modded, gateW, null);
             Tensor lin = Linear(backend, modded, inW, null);
-            backend.Sync();
-            Span<float> g = gate.AsSpan<float>();
-            ReadOnlySpan<float> l = lin.AsSpan<float>();
-            for (int i = 0; i < g.Length; i++)
-            {
-                float x = g[i];
-                g[i] = x / (1f + MathF.Exp(-x)) * l[i];
-            }
+            backend.Silu(gate, gate);
+            backend.Mul(gate, gate, lin);
             lin.Dispose();
             hidden = gate;
         }
@@ -174,90 +267,34 @@ public sealed class SeedVr2DitBlock
         {
             // Plain MLP (7B): proj_out(gelu_tanh(proj_in(x))), biased.
             hidden = Linear(backend, modded, inW, inB);
-            backend.Sync();
-            Span<float> h = hidden.AsSpan<float>();
-            for (int i = 0; i < h.Length; i++)
-            {
-                float x = h[i];
-                float inner = 0.7978845608f * (x + 0.044715f * x * x * x);
-                h[i] = 0.5f * x * (1f + MathF.Tanh(inner));
-            }
+            backend.Gelu(hidden, hidden);
         }
         modded.Dispose();
         Tensor output = Linear(backend, hidden, outW, outB);
         hidden.Dispose();
-        backend.Sync();
-        GateAndAdd(tokens, output, emb, ada, layer: 1);
+        Tensor result = GateAdd(backend, tokens, output, txtBranch, layer: 1);
         output.Dispose();
+        return result;
     }
 
-    /// <summary>RMS-norm (no affine) then AdaSingle "in": <c>x̂·(embScale+adaScale) + (embShift+adaShift)</c>.
-    /// emb layout (d l g): element for channel d, layer l, component g is emb[d·6 + l·3 + g].</summary>
-    private Tensor ModulateIn(IBackend backend, Tensor tokens, float[] emb, float[][] ada, int layer)
+    /// <summary>RMS-norm (no affine) then AdaSingle "in": <c>x̂·(embScale+adaScale) + (embShift+adaShift)</c>.</summary>
+    private Tensor Modulate(IBackend backend, Tensor tokens, Tensor ones, bool txt, int layer)
     {
-        int c = _config.VidDim;
-        int rows = (int)tokens.Shape[0];
+        Tensor normed = new Tensor(tokens.Shape, DType.F32);
+        backend.RmsNorm(normed, tokens, ones, 1e-5f);
         Tensor output = new Tensor(tokens.Shape, DType.F32);
-        ReadOnlySpan<float> src = tokens.AsSpan<float>();
-        Span<float> dst = output.AsSpan<float>();
-        float[] shift = ada[layer * 3 + 0], scale = ada[layer * 3 + 1];
-        const float eps = 1e-5f;
-        for (int r = 0; r < rows; r++)
-        {
-            ReadOnlySpan<float> row = src.Slice(r * c, c);
-            double ss = 0;
-            for (int i = 0; i < c; i++)
-                ss += (double)row[i] * row[i];
-            float inv = (float)(1.0 / Math.Sqrt(ss / c + eps));
-            Span<float> outRow = dst.Slice(r * c, c);
-            for (int i = 0; i < c; i++)
-                outRow[i] = row[i] * inv * (emb[i * 6 + layer * 3 + 1] + scale[i])
-                    + emb[i * 6 + layer * 3 + 0] + shift[i];
-        }
+        backend.AffineBroadcastLastDim(output, normed, ModVec(txt, layer, 1), ModVec(txt, layer, 0));
+        normed.Dispose();
         return output;
     }
 
-    /// <summary>AdaSingle "out" + residual: <c>tokens += branchOut·(embGate+adaGate)</c>.</summary>
-    private void GateAndAdd(Tensor tokens, Tensor branchOut, float[] emb, float[][] ada, int layer)
+    /// <summary>AdaSingle "out" + residual: <c>tokens + branchOut·(embGate+adaGate)</c>; consumes tokens.</summary>
+    private Tensor GateAdd(IBackend backend, Tensor tokens, Tensor branchOut, bool txt, int layer)
     {
-        int c = _config.VidDim;
-        Span<float> acc = tokens.AsSpan<float>();
-        ReadOnlySpan<float> add = branchOut.AsSpan<float>();
-        float[] gate = ada[layer * 3 + 2];
-        for (int i = 0; i < acc.Length; i++)
-        {
-            int ch = i % c;
-            acc[i] += add[i] * (emb[ch * 6 + layer * 3 + 2] + gate[ch]);
-        }
-    }
-
-    private Tensor RmsNoAffine(Tensor tokens)
-    {
-        int c = _config.VidDim;
-        int rows = (int)tokens.Shape[0];
         Tensor output = new Tensor(tokens.Shape, DType.F32);
-        ReadOnlySpan<float> src = tokens.AsSpan<float>();
-        Span<float> dst = output.AsSpan<float>();
-        for (int r = 0; r < rows; r++)
-        {
-            ReadOnlySpan<float> row = src.Slice(r * c, c);
-            double ss = 0;
-            for (int i = 0; i < c; i++)
-                ss += (double)row[i] * row[i];
-            float inv = (float)(1.0 / Math.Sqrt(ss / c + 1e-5));
-            Span<float> outRow = dst.Slice(r * c, c);
-            for (int i = 0; i < c; i++)
-                outRow[i] = row[i] * inv;
-        }
+        backend.GatedResidualLastDim(output, tokens, branchOut, ModVec(txt, layer, 2));
+        tokens.Dispose();
         return output;
-    }
-
-    private static void AddInPlace(Tensor tokens, Tensor add)
-    {
-        Span<float> acc = tokens.AsSpan<float>();
-        ReadOnlySpan<float> a = add.AsSpan<float>();
-        for (int i = 0; i < acc.Length; i++)
-            acc[i] += a[i];
     }
 
     private static Tensor Linear(IBackend backend, Tensor input, Tensor weight, Tensor? bias)
@@ -267,7 +304,8 @@ public sealed class SeedVr2DitBlock
         return output;
     }
 
-    /// <summary>GEMM weights for backend preload/free (host-copied ada/norm vectors excluded — never uploaded).</summary>
+    /// <summary>GEMM weights for backend preload/free (mod vectors and qk-norm affines are plan-lifetime
+    /// weight-cache entries, not phase-staged — excluded here).</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         yield return _qkvVidW;
@@ -286,184 +324,101 @@ public sealed class SeedVr2DitBlock
         if (_mlpTxtOutW is not null) yield return _mlpTxtOutW;
         if (_mlpTxtInB is not null) yield return _mlpTxtInB;
         if (_mlpTxtOutB is not null) yield return _mlpTxtOutB;
+        yield return _normQVid;
+        yield return _normKVid;
+        if (_normQTxt is not null) yield return _normQTxt;
+        if (_normKTxt is not null) yield return _normKTxt;
     }
 
     private (Tensor Vid, Tensor Txt) WindowedAttention(IBackend backend, Tensor vidQkv, Tensor txtQkv,
-        SeedVr2WindowSlice[] windows, int gridH, int gridW, int lv, int lt)
+        SeedVr2DevicePlan.Partition part, SeedVr2DevicePlan plan, int lv, int lt)
     {
         int heads = _config.Heads, hd = _config.HeadDim, c = _config.VidDim;
-        float[] normQTxt = _normQTxt ?? _normQVid, normKTxt = _normKTxt ?? _normKVid;
-        ReadOnlySpan<float> vq = vidQkv.AsSpan<float>();
-        ReadOnlySpan<float> tq = txtQkv.AsSpan<float>();
+        Tensor normQTxt = _normQTxt ?? _normQVid, normKTxt = _normKTxt ?? _normKVid;
 
-        Tensor vidOut = new Tensor(new TensorShape(lv, c), DType.F32);
-        Tensor txtOut = new Tensor(new TensorShape(lt, c), DType.F32);
-        txtOut.AsSpan<float>().Clear();
-
-        // Pre-normalized+roped text q/k and raw v, reused for every window (rope restarts per window and
-        // text positions are 0..lt−1 in every copy, so one preparation serves all windows).
-        float[] txtQ = new float[lt * heads * hd], txtK = new float[lt * heads * hd], txtV = new float[lt * heads * hd];
-        ExtractQkv(tq, txtQ, txtK, txtV, lt, heads, hd, normQTxt, normKTxt);
-
-        foreach (IGrouping<(int F, int R, int Cc), SeedVr2WindowSlice> group in
-            windows.GroupBy(s => (s.Frames, s.Rows, s.Cols)))
+        // Fused split + per-head RMS qk-norm, then window-local rope over the plan's per-token tables.
+        Tensor vq = new Tensor(new TensorShape(lv, c), DType.F32);
+        Tensor vk = new Tensor(new TensorShape(lv, c), DType.F32);
+        Tensor vv = new Tensor(new TensorShape(lv, c), DType.F32);
+        backend.QkvSplitNorm(vq, vk, vv, vidQkv, _normQVid, _normKVid, 1e-5f);
+        Tensor tq = new Tensor(new TensorShape(lt, c), DType.F32);
+        Tensor tk = new Tensor(new TensorShape(lt, c), DType.F32);
+        Tensor tv = new Tensor(new TensorShape(lt, c), DType.F32);
+        backend.QkvSplitNorm(tq, tk, tv, txtQkv, normQTxt, normKTxt, 1e-5f);
+        backend.WanRopeInterleaved(vq, part.VidCos, part.VidSin, lv, heads, hd);
+        backend.WanRopeInterleaved(vk, part.VidCos, part.VidSin, lv, heads, hd);
+        if (plan.TxtCos is not null)
         {
-            SeedVr2WindowSlice[] grp = [.. group];
-            int winTokens = group.Key.F * group.Key.R * group.Key.Cc;
-            int s = winTokens + lt;
-            (float[] cos, float[] sin) = SeedVr2Rope.BuildTables(group.Key.F, group.Key.R, group.Key.Cc, lt);
-            (float[] txtQr, float[] txtKr) = RopeText(txtQ, txtK, cos, sin, winTokens, lt, heads, hd);
-
-            Tensor q = new Tensor(new TensorShape([(long)grp.Length, heads, s, hd]), DType.F32);
-            Tensor k = new Tensor(new TensorShape([(long)grp.Length, heads, s, hd]), DType.F32);
-            Tensor v = new Tensor(new TensorShape([(long)grp.Length, heads, s, hd]), DType.F32);
-            Span<float> qs = q.AsSpan<float>(), ks = k.AsSpan<float>(), vs = v.AsSpan<float>();
-
-            for (int g = 0; g < grp.Length; g++)
-            {
-                int row = 0;
-                foreach (int tokenIdx in TokensOf(grp[g], gridH, gridW))
-                {
-                    PackToken(vq, tokenIdx, qs, ks, vs, g, row, s, heads, hd, _normQVid, _normKVid,
-                        cos, sin, row, winTokens + lt);
-                    row++;
-                }
-                for (int p = 0; p < lt; p++, row++)
-                    PackText(txtQr, txtKr, txtV, p, qs, ks, vs, g, row, s, heads, hd);
-            }
-
-            Tensor attn = new Tensor(q.Shape, DType.F32);
-            backend.ScaledDotProductAttention(attn, q, k, v, null, 1f / MathF.Sqrt(hd));
-            backend.Sync();
-            q.Dispose(); k.Dispose(); v.Dispose();
-
-            ReadOnlySpan<float> asp = attn.AsSpan<float>();
-            Span<float> vo = vidOut.AsSpan<float>();
-            Span<float> to = txtOut.AsSpan<float>();
-            for (int g = 0; g < grp.Length; g++)
-            {
-                int row = 0;
-                foreach (int tokenIdx in TokensOf(grp[g], gridH, gridW))
-                {
-                    for (int h = 0; h < heads; h++)
-                    {
-                        int src = ((g * heads + h) * s + row) * hd;
-                        asp.Slice(src, hd).CopyTo(vo.Slice(tokenIdx * c + h * hd, hd));
-                    }
-                    row++;
-                }
-                for (int p = 0; p < lt; p++, row++)
-                    for (int h = 0; h < heads; h++)
-                    {
-                        int src = ((g * heads + h) * s + row) * hd;
-                        Span<float> dst = to.Slice(p * c + h * hd, hd);
-                        ReadOnlySpan<float> add = asp.Slice(src, hd);
-                        for (int i = 0; i < hd; i++)
-                            dst[i] += add[i];
-                    }
-            }
-            attn.Dispose();
+            backend.WanRopeInterleaved(tq, plan.TxtCos, plan.TxtSin!, lt, heads, hd);
+            backend.WanRopeInterleaved(tk, plan.TxtCos, plan.TxtSin!, lt, heads, hd);
         }
 
-        // Mean-pool the text accumulation over ALL windows (reference unconcat_coalesce .mean).
-        float invWindows = 1f / windows.Length;
-        Span<float> tspan = txtOut.AsSpan<float>();
-        for (int i = 0; i < tspan.Length; i++)
-            tspan[i] *= invWindows;
+        Tensor catQ = Concat0(backend, vq, tq);
+        Tensor catK = Concat0(backend, vk, tk);
+        Tensor catV = Concat0(backend, vv, tv);
+        vq.Dispose(); vk.Dispose(); vv.Dispose();
+        tq.Dispose(); tk.Dispose(); tv.Dispose();
+
+        // Scatter-add target: vid rows are written once (windows partition the grid); txt rows accumulate
+        // across every window and are mean-pooled below (reference unconcat_coalesce .mean).
+        Tensor attnCat = new Tensor(new TensorShape(lv + lt, c), DType.F32);
+        backend.Fill(attnCat, 0f);
+
+        foreach (SeedVr2DevicePlan.ShapeGroup group in part.Groups)
+        {
+            int s = group.WindowTokens + lt;
+            int g = group.WindowCount;
+            long gs = (long)g * s;
+            Tensor gq = Gather(backend, catQ, group.Indices, gs, c);
+            Tensor gk = Gather(backend, catK, group.Indices, gs, c);
+            Tensor gv = Gather(backend, catV, group.Indices, gs, c);
+
+            Tensor qp = PackHeads(backend, gq, g, s, heads, hd);
+            Tensor kp = PackHeads(backend, gk, g, s, heads, hd);
+            Tensor vp = PackHeads(backend, gv, g, s, heads, hd);
+            gq.Dispose(); gk.Dispose(); gv.Dispose();
+
+            Tensor attn = new Tensor(qp.Shape, DType.F32);
+            backend.ScaledDotProductAttention(attn, qp, kp, vp, null, 1f / MathF.Sqrt(hd));
+            qp.Dispose(); kp.Dispose(); vp.Dispose();
+
+            // [G, heads, s, hd] → [G, s, heads·hd] rows, scattered back through the same index list.
+            Tensor back = new Tensor(new TensorShape(gs, c), DType.F32);
+            backend.Permute0213(back, attn, heads, s, hd);
+            attn.Dispose();
+            backend.RowScatterAdd(attnCat, back, group.Indices, (int)gs, c);
+            back.Dispose();
+        }
+        catQ.Dispose(); catK.Dispose(); catV.Dispose();
+
+        Tensor vidOut = new Tensor(new TensorShape(lv, c), DType.F32);
+        backend.SliceRows(vidOut, attnCat, 0);
+        Tensor txtOut = new Tensor(new TensorShape(lt, c), DType.F32);
+        backend.SliceRows(txtOut, attnCat, lv);
+        attnCat.Dispose();
+        backend.Scale(txtOut, txtOut, 1f / part.WindowCount);
         return (vidOut, txtOut);
     }
 
-    private static IEnumerable<int> TokensOf(SeedVr2WindowSlice slice, int gridH, int gridW)
+    private static Tensor Concat0(IBackend backend, Tensor a, Tensor b)
     {
-        for (int t = slice.T0; t < slice.T1; t++)
-        for (int h = slice.H0; h < slice.H1; h++)
-        for (int w = slice.W0; w < slice.W1; w++)
-            yield return (t * gridH + h) * gridW + w;
+        Tensor output = new Tensor(new TensorShape(a.Shape[0] + b.Shape[0], a.Shape[1]), DType.F32);
+        backend.Concat(output, [a, b], dim: 0);
+        return output;
     }
 
-    private void ExtractQkv(ReadOnlySpan<float> qkv, float[] q, float[] k, float[] v,
-        int rows, int heads, int hd, float[] normQ, float[] normK)
+    private static Tensor Gather(IBackend backend, Tensor src, Tensor indices, long rows, int channels)
     {
-        int c = heads * hd;
-        for (int r = 0; r < rows; r++)
-        for (int h = 0; h < heads; h++)
-        {
-            int src = r * 3 * c + h * hd;
-            int dst = (r * heads + h) * hd;
-            RmsHead(qkv.Slice(src, hd), q.AsSpan(dst, hd), normQ);
-            RmsHead(qkv.Slice(src + c, hd), k.AsSpan(dst, hd), normK);
-            qkv.Slice(src + 2 * c, hd).CopyTo(v.AsSpan(dst, hd));
-        }
+        Tensor output = new Tensor(new TensorShape(rows, channels), DType.F32);
+        backend.RowGather(output, src, indices, (int)rows, channels);
+        return output;
     }
 
-    private static void RmsHead(ReadOnlySpan<float> src, Span<float> dst, float[] weight)
+    /// <summary>[G·s, heads·hd] rows → [G, heads, s, hd] SDPA layout.</summary>
+    private static Tensor PackHeads(IBackend backend, Tensor rows, int g, int s, int heads, int hd)
     {
-        double ss = 0;
-        for (int i = 0; i < src.Length; i++)
-            ss += (double)src[i] * src[i];
-        float inv = (float)(1.0 / Math.Sqrt(ss / src.Length + 1e-5));
-        for (int i = 0; i < src.Length; i++)
-            dst[i] = src[i] * inv * weight[i];
-    }
-
-    private (float[] Q, float[] K) RopeText(float[] txtQ, float[] txtK, float[] cos, float[] sin,
-        int vidTokens, int lt, int heads, int hd)
-    {
-        float[] q = (float[])txtQ.Clone();
-        float[] k = (float[])txtK.Clone();
-        for (int p = 0; p < lt; p++)
-        {
-            int tbl = (vidTokens + p) * SeedVr2Rope.RotDim;
-            for (int h = 0; h < heads; h++)
-            {
-                int b = (p * heads + h) * hd;
-                for (int i = 0; i < SeedVr2Rope.RotDim; i += 2)
-                {
-                    float cc = cos[tbl + i], ss = sin[tbl + i];
-                    (q[b + i], q[b + i + 1]) = (q[b + i] * cc - q[b + i + 1] * ss, q[b + i + 1] * cc + q[b + i] * ss);
-                    (k[b + i], k[b + i + 1]) = (k[b + i] * cc - k[b + i + 1] * ss, k[b + i + 1] * cc + k[b + i] * ss);
-                }
-            }
-        }
-        return (q, k);
-    }
-
-    private void PackToken(ReadOnlySpan<float> vidQkv, int tokenIdx, Span<float> q, Span<float> k, Span<float> v,
-        int g, int row, int s, int heads, int hd, float[] normQ, float[] normK, float[] cos, float[] sin,
-        int ropeRow, int tableRows)
-    {
-        int c = heads * hd;
-        Span<float> qh = stackalloc float[hd];
-        Span<float> kh = stackalloc float[hd];
-        int tbl = ropeRow * SeedVr2Rope.RotDim;
-        for (int h = 0; h < heads; h++)
-        {
-            int src = tokenIdx * 3 * c + h * hd;
-            RmsHead(vidQkv.Slice(src, hd), qh, normQ);
-            RmsHead(vidQkv.Slice(src + c, hd), kh, normK);
-            for (int i = 0; i < SeedVr2Rope.RotDim; i += 2)
-            {
-                float cc = cos[tbl + i], ss = sin[tbl + i];
-                (qh[i], qh[i + 1]) = (qh[i] * cc - qh[i + 1] * ss, qh[i + 1] * cc + qh[i] * ss);
-                (kh[i], kh[i + 1]) = (kh[i] * cc - kh[i + 1] * ss, kh[i + 1] * cc + kh[i] * ss);
-            }
-            int dst = ((g * heads + h) * s + row) * hd;
-            qh.CopyTo(q.Slice(dst, hd));
-            kh.CopyTo(k.Slice(dst, hd));
-            vidQkv.Slice(src + 2 * c, hd).CopyTo(v.Slice(dst, hd));
-        }
-    }
-
-    private static void PackText(float[] txtQ, float[] txtK, float[] txtV, int p,
-        Span<float> q, Span<float> k, Span<float> v, int g, int row, int s, int heads, int hd)
-    {
-        for (int h = 0; h < heads; h++)
-        {
-            int src = (p * heads + h) * hd;
-            int dst = ((g * heads + h) * s + row) * hd;
-            txtQ.AsSpan(src, hd).CopyTo(q.Slice(dst, hd));
-            txtK.AsSpan(src, hd).CopyTo(k.Slice(dst, hd));
-            txtV.AsSpan(src, hd).CopyTo(v.Slice(dst, hd));
-        }
+        Tensor output = new Tensor(new TensorShape([(long)g, heads, s, hd]), DType.F32);
+        backend.Permute0213(output, rows, s, heads, hd);
+        return output;
     }
 }

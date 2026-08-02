@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
@@ -29,11 +30,11 @@ public sealed class SeedVr2VaeEncoder
         {
             _resnets[s] = new SeedVr2VaeResnetBlock3d[config.LayersPerBlock];
             for (int r = 0; r < config.LayersPerBlock; r++)
-                _resnets[s][r] = new SeedVr2VaeResnetBlock3d(config.NormGroups, config.NormEps);
+                _resnets[s][r] = new SeedVr2VaeResnetBlock3d(config.NormGroups, config.NormEps, config.ActivationDType);
             if (config.StageHasDownsample(s))
-                _downsamplers[s] = new SeedVr2VaeDownsample3d(config.StageDownsamplesTime(s));
+                _downsamplers[s] = new SeedVr2VaeDownsample3d(config.StageDownsamplesTime(s), config.ActivationDType);
         }
-        _mid = new SeedVr2VaeMidBlock3d(config.BlockOutChannels[^1], config.NormGroups, config.NormEps);
+        _mid = new SeedVr2VaeMidBlock3d(config.BlockOutChannels[^1], config.NormGroups, config.NormEps, config.ActivationDType);
     }
 
     /// <summary>Latent channels (16).</summary>
@@ -45,7 +46,7 @@ public sealed class SeedVr2VaeEncoder
     /// <summary>Binds diffusers-style <c>encoder.*</c> keys (verbatim checkpoint names).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
-        _convIn = SeedVr2VaeOps.Conv(weights, "encoder.conv_in");
+        _convIn = SeedVr2VaeOps.Conv(weights, "encoder.conv_in", computeDtype: _config.ActivationDType);
         for (int s = 0; s < _resnets.Length; s++)
         {
             for (int r = 0; r < _resnets[s].Length; r++)
@@ -55,7 +56,7 @@ public sealed class SeedVr2VaeEncoder
         _mid.LoadWeights(weights, "encoder.mid_block");
         _normOutW = weights["encoder.conv_norm_out.weight"];
         _normOutB = weights["encoder.conv_norm_out.bias"];
-        _convOut = SeedVr2VaeOps.Conv(weights, "encoder.conv_out");
+        _convOut = SeedVr2VaeOps.Conv(weights, "encoder.conv_out", computeDtype: _config.ActivationDType);
     }
 
     /// <summary>Encodes <c>[B,3,F,H,W]</c> F32 in [-1,1] to (mean, logvar), each <c>[B,16,T',H/8,W/8]</c>.
@@ -68,7 +69,11 @@ public sealed class SeedVr2VaeEncoder
         if (f != 1 && (f - 1) % _config.TemporalCompression != 0)
             throw new HartsyInferenceException($"Frame count {f} violates (F-1) % {_config.TemporalCompression} == 0.");
 
-        Tensor h = _convIn.Forward(backend, pixels);
+        // BF16 mode: cast at the pixel boundary only — the caller keeps its F32 tensor either way.
+        Tensor entry = DtypeCastHelper.EnsureDtype(backend, pixels, _config.ActivationDType, disposeSourceOnCast: false);
+        Tensor h = _convIn.Forward(backend, entry);
+        if (!ReferenceEquals(entry, pixels))
+            entry.Dispose();
         for (int s = 0; s < _resnets.Length; s++)
         {
             foreach (SeedVr2VaeResnetBlock3d resnet in _resnets[s])
@@ -80,6 +85,7 @@ public sealed class SeedVr2VaeEncoder
         h = Advance(backend, h, (b, x) => SeedVr2VaeOps.NormSiluPerFrame(b, x, _normOutW, _normOutB, _config.NormGroups, _config.NormEps));
         Tensor moments = _convOut.Forward(backend, h);
         h.Dispose();
+        moments = DtypeCastHelper.EnsureF32(backend, moments);
 
         int c = _config.LatentChannels;
         (Tensor mean, Tensor logvar) = (SliceChannels(backend, moments, 0, c), SliceChannels(backend, moments, c, c));

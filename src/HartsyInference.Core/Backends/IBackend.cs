@@ -817,6 +817,59 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>SeedVR2 MAGViT channel→space shuffle: <c>[1,cIn,f,h,w] → [1,c,fFinal,h·sr,w·sr]</c> with
+    /// <c>c = cIn/(sr²·tr)</c>, source channel <c>((xi·sr+yi)·tr+zi)·c+ci</c>, and (temporal only) OUTPUT
+    /// FRAME INDEX 1 dropped (T→2T−1). Shapes carry every dim; F32/BF16. Default is the host reference.</summary>
+    unsafe void SeedVr2PixelShuffle(Tensor output, Tensor input, int spatialRatio, int temporalRatio)
+    {
+        if (input.DType != DType.F32 || output.DType != DType.F32)
+            throw new NotSupportedException("SeedVr2PixelShuffle default fallback only supports F32.");
+        Sync();
+        int cIn = (int)input.Shape[1], f = (int)input.Shape[2], h = (int)input.Shape[3], w = (int)input.Shape[4];
+        int c = (int)output.Shape[1], fFinal = (int)output.Shape[2], hOut = (int)output.Shape[3], wOut = (int)output.Shape[4];
+        bool dropDup = temporalRatio > 1;
+        float* src = (float*)input.DataPointer;
+        float* dst = (float*)output.DataPointer;
+        long total = (long)c * fFinal * hOut * wOut;
+        for (long idx = 0; idx < total; idx++)
+        {
+            int ox = (int)(idx % wOut);
+            long r = idx / wOut;
+            int oy = (int)(r % hOut); r /= hOut;
+            int of = (int)(r % fFinal);
+            int ci = (int)(r / fFinal);
+            int outF = dropDup && of >= 1 ? of + 1 : of;
+            int fi = outF / temporalRatio, zi = outF % temporalRatio;
+            int y = oy / spatialRatio, xi = oy % spatialRatio;
+            int x = ox / spatialRatio, yi = ox % spatialRatio;
+            int srcC = ((xi * spatialRatio + yi) * temporalRatio + zi) * c + ci;
+            dst[idx] = src[(((long)srcC * f + fi) * h + y) * w + x];
+        }
+    }
+
+    /// <summary>SeedVR2 asymmetric zero pad (right/bottom only, diffusers <c>Downsample2D(padding=0)</c>):
+    /// <c>[B,C,T,h,w] → [B,C,T,h+1,w+1]</c>. F32/BF16. Default is the host reference.</summary>
+    unsafe void SeedVr2PadBottomRight(Tensor output, Tensor input)
+    {
+        if (input.DType != DType.F32 || output.DType != DType.F32)
+            throw new NotSupportedException("SeedVr2PadBottomRight default fallback only supports F32.");
+        Sync();
+        int h = (int)input.Shape[3], w = (int)input.Shape[4];
+        long planes = input.ElementCount / ((long)h * w);
+        int hp = h + 1, wp = w + 1;
+        float* src = (float*)input.DataPointer;
+        float* dst = (float*)output.DataPointer;
+        long total = planes * hp * wp;
+        for (long idx = 0; idx < total; idx++)
+        {
+            int x = (int)(idx % wp);
+            long r = idx / wp;
+            int y = (int)(r % hp);
+            long p = r / hp;
+            dst[idx] = y < h && x < w ? src[(p * h + y) * w + x] : 0f;
+        }
+    }
+
     /// <summary>Wan2.2 VAE channel RMS norm: <c>scale = sqrt(C)/max(L2_over_C, eps)</c>, <c>out = x·scale·gamma</c>.</summary>
     unsafe void WanRmsNormChannel(Tensor output, Tensor input, Tensor? gamma, float eps)
     {

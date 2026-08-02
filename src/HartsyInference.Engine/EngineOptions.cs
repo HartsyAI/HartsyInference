@@ -1,3 +1,5 @@
+using HartsyInference.Core.MemoryManagement;
+
 namespace HartsyInference.Engine;
 
 /// <summary>Compute/model-lifecycle configuration for the inference engine, independent of any transport. The HTTP
@@ -6,6 +8,11 @@ public sealed class EngineOptions
 {
     /// <summary>Model cache directory for HuggingFace downloads (null = default <c>~/.hartsyinference/models</c>).</summary>
     public string? ModelCacheDirectory { get; set; }
+
+    /// <summary>Low-VRAM policy for this engine's backend; null = follow the <c>HARTSY_LOWVRAM</c> environment
+    /// variable. Hosts with a per-backend setting (the SwarmUI extension) pass it here — the env var is process-wide
+    /// last-writer-wins, which breaks one-backend-per-GPU setups with differing card sizes.</summary>
+    public LowVramMode? LowVram { get; set; }
 
     /// <summary>Tokens per KV page for each loaded chat (dense/MoE transformer) model's <c>PagedKvPool</c>.</summary>
     public int KvPageSize { get; set; } = 16;

@@ -264,6 +264,104 @@ public sealed class SeedVr2Tests
 
     #endregion
 
+    #region VAE BF16 activations (GpuIntegration — bf16 memory mode vs f32, staged conv → encoder → decoder)
+
+    /// <summary>BF16 VAE activation mode (the 720p+ memory path) vs the F32 reference path on CUDA, staged
+    /// so a failure localizes: bare CausalConv3d first, then full encoder, then full decoder.</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void Vae_Bf16Activations_MatchF32_OnCuda()
+    {
+        string? vaePath = Env("SEEDVR2_VAE");
+        if (vaePath is null || !File.Exists(vaePath))
+        {
+            _output.WriteLine("SKIPPED: set SEEDVR2_VAE.");
+            return;
+        }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(SeedVr2Tests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir))
+        {
+            _output.WriteLine("SKIPPED: no Ptx dir (CUDA backend unavailable).");
+            return;
+        }
+        IBackend backend = new HartsyInference.Cuda.CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
+
+        using SafeTensorsLoader weightsLoader = new();
+        weightsLoader.Load(vaePath);
+        Dictionary<string, Tensor> weights = weightsLoader.GetAllTensors();
+
+        // Stage 1: bare conv (encoder conv_in, k3 causal, 3→128) on a seeded clip.
+        Tensor clip = SeededClip(1, 3, 5, 32, 48, seed: 42);
+        CausalConv3d convF32 = SeedVr2VaeOps.Conv(weights, "encoder.conv_in");
+        CausalConv3d convBf16 = SeedVr2VaeOps.Conv(weights, "encoder.conv_in", computeDtype: DType.BF16);
+        Tensor outF32 = convF32.Forward(backend, clip);
+        backend.Sync();
+        Tensor clipBf = clip.CastTo(DType.BF16);
+        Tensor outBfRaw = convBf16.Forward(backend, clipBf);
+        backend.Sync();
+        Tensor outBf = outBfRaw.CastTo(DType.F32);
+        double convRel = RelL2(outBf, outF32);
+        _output.WriteLine($"conv_in bf16-vs-f32 relL2 {convRel:e2}");
+        Assert.True(convRel < 2e-2, $"CausalConv3d bf16 relL2 {convRel:e2} exceeds 2e-2");
+        outF32.Dispose(); outBfRaw.Dispose(); outBf.Dispose(); clipBf.Dispose();
+
+        // Stage 2: full encoder.
+        SeedVr2VaeEncoder encF32 = new(SeedVr2VaeConfig.Default);
+        encF32.LoadWeights(weights);
+        SeedVr2VaeEncoder encBf16 = new(SeedVr2VaeConfig.Default with { ActivationDType = DType.BF16 });
+        encBf16.LoadWeights(weights);
+        (Tensor meanF, Tensor logvarF) = encF32.Encode(backend, clip);
+        backend.Sync();
+        (Tensor meanB, Tensor logvarB) = encBf16.Encode(backend, clip);
+        backend.Sync();
+        double meanRel = RelL2(meanB, meanF), logvarRel = RelL2(logvarB, logvarF);
+        _output.WriteLine($"encoder bf16-vs-f32: mean relL2 {meanRel:e2}, logvar relL2 {logvarRel:e2}");
+        Assert.True(meanRel < 3e-2, $"encoder mean bf16 relL2 {meanRel:e2} exceeds 3e-2");
+        meanF.Dispose(); logvarF.Dispose(); meanB.Dispose(); logvarB.Dispose(); clip.Dispose();
+
+        // Stage 2b: encoder under the pipeline's weight-residency cycle (Preload → encode → Sync → Free →
+        // TrimMemoryPool) — the phase staging is the only structural difference from the bare call above.
+        backend.PreloadWeights(encBf16.EnumerateWeights());
+        Tensor clip2 = SeededClip(1, 3, 5, 32, 48, seed: 42);
+        (Tensor meanP, Tensor logvarP) = encBf16.Encode(backend, clip2);
+        backend.Sync();
+        backend.FreeWeights(encBf16.EnumerateWeights());
+        backend.TrimMemoryPool();
+        (Tensor meanF2, Tensor logvarF2) = encF32.Encode(backend, clip2);
+        backend.Sync();
+        double meanRelP = RelL2(meanP, meanF2);
+        _output.WriteLine($"encoder (preload cycle) bf16-vs-f32: mean relL2 {meanRelP:e2}");
+        Assert.True(meanRelP < 3e-2, $"encoder preload-cycle bf16 relL2 {meanRelP:e2} exceeds 3e-2");
+        meanP.Dispose(); logvarP.Dispose(); meanF2.Dispose(); logvarF2.Dispose(); clip2.Dispose();
+
+        // Stage 3: full decoder on a seeded latent.
+        Tensor latent = SeededClip(1, 16, 2, 6, 8, seed: 7);
+        SeedVr2VaeDecoder decF32 = new(SeedVr2VaeConfig.Default);
+        decF32.LoadWeights(weights);
+        SeedVr2VaeDecoder decBf16 = new(SeedVr2VaeConfig.Default with { ActivationDType = DType.BF16 });
+        decBf16.LoadWeights(weights);
+        Tensor decF = decF32.Decode(backend, latent);
+        backend.Sync();
+        Tensor decB = decBf16.Decode(backend, latent);
+        backend.Sync();
+        double decRel = RelL2(decB, decF);
+        _output.WriteLine($"decoder bf16-vs-f32: relL2 {decRel:e2}");
+        Assert.True(decRel < 5e-2, $"decoder bf16 relL2 {decRel:e2} exceeds 5e-2");
+        decF.Dispose(); decB.Dispose(); latent.Dispose();
+    }
+
+    private static Tensor SeededClip(int b, int c, int t, int h, int w, int seed)
+    {
+        Tensor clip = new Tensor(new TensorShape([(long)b, c, t, h, w]), DType.F32);
+        Span<float> s = clip.AsSpan<float>();
+        Random rng = new(seed);
+        for (int i = 0; i < s.Length; i++)
+            s[i] = (float)(rng.NextDouble() * 2.0 - 1.0);
+        return clip;
+    }
+
+    #endregion
+
     #region DiT parity (Integration — tiny seeded config, per-block bisection)
 
     // Must match Parity/seedvr2_transformer_parity_dump.py exactly.
@@ -296,6 +394,64 @@ public sealed class SeedVr2Tests
             loader.GetAllTensors().Where(kv => !kv.Key.EndsWith(".rope.rope.freqs", StringComparison.Ordinal)));
 
         SeedVr2Dit dit = new(TinyConfig);
+        dit.LoadWeights(weights);
+        IBackend backend = new CpuBackend();
+
+        Tensor latent = LoadBin(Path.Combine(dir, "input_latent.bin"), [TinyT, TinyH, TinyW, 33]);
+        Tensor txt = LoadBin(Path.Combine(dir, "input_txt.bin"), [TinyTxtLen, TinyTxtInDim]);
+
+        string? firstDivergence = null;
+        dit.OnBlockOutput = (idx, vid, txtTok) =>
+        {
+            if (idx < 0)
+                return;
+            double vidRel = RelL2(vid, Path.Combine(dir, $"block{idx}_vid.bin"));
+            double txtRel = RelL2(txtTok, Path.Combine(dir, $"block{idx}_txt.bin"));
+            _output.WriteLine($"block{idx}: vid relL2 {vidRel:e2}, txt relL2 {txtRel:e2}");
+            if (firstDivergence is null && (vidRel > 1e-3 || txtRel > 1e-3))
+                firstDivergence = $"block{idx}";
+        };
+
+        Tensor output = dit.Forward(backend, latent, txt, TinyTimestep);
+        backend.Sync();
+        double outRel = RelL2(output, Path.Combine(dir, "output.bin"));
+        _output.WriteLine($"output: relL2 {outRel:e2}");
+        if (firstDivergence is not null)
+            _output.WriteLine($"FIRST DIVERGENCE at '{firstDivergence}' — the bug is in/before that stage.");
+        Assert.True(outRel < 1e-3, $"final output relL2 {outRel:e2} exceeds 1e-3" +
+            (firstDivergence is null ? "" : $" (first divergence: {firstDivergence})"));
+    }
+
+    private static SeedVr2Config TinyV1Config => new()
+    {
+        VidDim = TinyVidDim, TxtInDim = TinyTxtInDim, EmbDim = 6 * TinyVidDim, Heads = 1, HeadDim = 128,
+        MlpDim = 512, NumLayers = 4, MmLayers = 4, InChannels = 33, OutChannels = 16,
+        SwiGluMlp = false, HasTailNorm = false, PixelRope = true, LastLayerVidOnly = false,
+    };
+
+    /// <summary>v1 NaDiT (7B architecture, models/dit) vs ByteDance's reference at a tiny seeded config —
+    /// pixel rope, plain GELU-tanh MLP, full-split blocks, no tail norm, no last-layer text shortcut.</summary>
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void Dit_TinyConfigV1_ForwardMatchesReference_PerBlock()
+    {
+        string dir = Env("SEEDVR2_PARITY_V1_DIR") ?? "/tmp/seedvr2_parity_v1";
+        if (!File.Exists(Path.Combine(dir, "weights.safetensors")))
+        {
+            _output.WriteLine($"SKIPPED: no dump at {dir} — run seedvr2_transformer_v1_parity_dump.py first.");
+            return;
+        }
+
+        using SafeTensorsLoader loader = new();
+        loader.Load(Path.Combine(dir, "weights.safetensors"));
+        Dictionary<string, Tensor> weights = new(
+            loader.GetAllTensors().Where(kv => !kv.Key.EndsWith(".rope.rope.freqs", StringComparison.Ordinal)));
+
+        SeedVr2Config detected = SeedVr2Config.Detect(weights);
+        Assert.True(detected.PixelRope, "Detect should flag the v1 (plain-MLP + no-tail) signature as PixelRope.");
+        Assert.False(detected.LastLayerVidOnly, "v1 must not apply the v2 last-layer text shortcut.");
+
+        SeedVr2Dit dit = new(TinyV1Config);
         dit.LoadWeights(weights);
         IBackend backend = new CpuBackend();
 

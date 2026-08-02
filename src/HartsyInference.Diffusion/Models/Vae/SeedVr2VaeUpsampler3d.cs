@@ -9,20 +9,22 @@ namespace HartsyInference.Diffusion.Models.Vae;
 public sealed class SeedVr2VaeUpsampler3d
 {
     private readonly bool _temporal;
+    private readonly DType _actDtype;
     private CausalConv3d _upscale = null!;
     private CausalConv3d _conv = null!;
 
     /// <summary>Creates the upsampler; <paramref name="temporal"/> per <see cref="SeedVr2VaeConfig.StageUpsamplesTime"/>.</summary>
-    public SeedVr2VaeUpsampler3d(bool temporal)
+    public SeedVr2VaeUpsampler3d(bool temporal, DType? actDtype = null)
     {
         _temporal = temporal;
+        _actDtype = actDtype ?? DType.F32;
     }
 
     /// <summary>Binds <c>{prefix}.upscale_conv</c> and <c>{prefix}.conv</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _upscale = SeedVr2VaeOps.Conv(weights, $"{prefix}.upscale_conv");
-        _conv = SeedVr2VaeOps.Conv(weights, $"{prefix}.conv");
+        _upscale = SeedVr2VaeOps.Conv(weights, $"{prefix}.upscale_conv", computeDtype: _actDtype);
+        _conv = SeedVr2VaeOps.Conv(weights, $"{prefix}.conv", computeDtype: _actDtype);
     }
 
     /// <summary>Forward on <c>[B,C,T,H,W]</c> F32.</summary>

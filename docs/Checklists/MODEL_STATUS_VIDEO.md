@@ -10,7 +10,7 @@ Concise status for every video-generation (T2V / I2V) model. Open work is in the
 | Model | Notes |
 |---|---|
 | **SeedVR2-3B (video/image RESTORATION — `Modality.Restore`, not T2V)** | **Full parity chain + 7-clip real-footage matrix verified (2026-08-01, 4090).** Per-stage gates: window partition EXACT (40 grids / 2,490 slices, Unit-tier fixture `SeedVr2Tests` (windowing facts)); preprocessing maxAbs 2.3e-6 (`SeedVr2Tests`, env `SEEDVR2_PRE_REF`) — caught 2 real bugs (torchvision AA bicubic is a=−0.5 PIL-kernel not −0.75, and ATen computes resize weights in float32: double-math drifts 3.4e-5 by output index ~1000); VAE enc+dec relL2 ≤2.9e-6 vs REAL weights (`SeedVr2Tests`, `SEEDVR2_VAE`+`SEEDVR2_VAE_REF`); tiny-config DiT per-block relL2 ≤8.9e-4 / output 1.05e-4 (`SeedVr2Tests`, `SEEDVR2_PARITY_DIR`, dump `Parity/seedvr2_transformer_parity_dump.py` w/ flash_attn SDPA shim); **E2E vs Python real-weight restoration: mean SSIM 0.99950 / PSNR 56.6 dB** (`SeedVr2Tests`, `SEEDVR2_DIT/VAE/EMB/E2E_REF/FRAMES/AREA`, staged driver `run_seedvr2_e2e_reference.py` — reference noises injected via `NoiseHook`; torch RNG unmatchable). Reference quirks ported deliberately (SEEDVR2_ARCHITECTURE.md §2.5): tail-ada cache-collision (attn emb slice), last-layer vid_only (plain-normed txt K/V + ungated residual + txt self-doubling), per-frame VAE GroupNorm, (0,1,0,1) downsampler pad, MAGViT (x y z c) shuffle dropping output frame 1. **Matrix (25f clips, 960×540-area, `--clip-frames 5 --overlap 1`): Reagan USIA '87 / Apollo 11 / JFK '61 / Steamboat Willie / Prelinger '62 / BBB ground-truth / still (t==1) — 7/7 rc=0, ~14 s/frame, peak 17.1 GB, zero OOM** (`Models/TestAssets/restore/run_matrix.sh`, log `matrix_results.log`). Ground truth is honest: pixel metrics prefer bicubic (SSIM 0.877 vs 0.926 extreme; strength 0.7 ≈ unchanged — the loss lives in repainted high frequencies) but **LPIPS wins 26–28%** (extreme 0.735→0.541, mild 0.448→0.324) and Reagan crowd faces visibly resolve — the paper's own generative perception-over-distortion profile. CLI catalog path verified (`hartsy restore`, PNG frames + ffmpeg-subprocess MP4). |
-| **SeedVR2-7B (restoration)** | **⛔ BLOCKED — v1 architecture, guarded (2026-08-01).** The smoke run surfaced it: `configs_7b/main.yaml` builds `models.dit.nadit` (**v1**), NOT the `models/dit_v2` tree the 3B uses (v1 knobs: `qk_rope: True`, `shared_mlp`/`shared_qkv`, plain GELU MLP w/ biases, no `vid_out_norm`, 36×3072/24h full-split). The state-dict key names COINCIDE with v2, so the checkpoint loads and silently produces mud (GT SSIM 0.71 vs the 3B's 0.88; smeared/desaturated frames — pipeline ran 2 clips rc=0, output plausible-but-wrong: the exact silent-wrongness class the parity discipline exists for). `SeedVr2Config.Detect` now throws `HartsyInferenceException` on the plain-MLP+no-tail signature instead. Porting = read `models/dit/*` (v1 rope/window/block conventions), own tiny-config parity dump, then unguard. F16-converted weights staged at `Models/Video/SeedVr2/seedvr2_7b_dit_f16.safetensors` (33 GB fp32 halved; host-math vectors upcast at load — that plumbing is in and 3B-regression-clean). |
+| **SeedVR2-7B (restoration)** | **✅ v1 NaDiT ported + real-weight smoke (2026-08-02).** The smoke run of 2026-08-01 had surfaced that `configs_7b/main.yaml` builds `models.dit.nadit` (**v1**), NOT the `models/dit_v2` tree the 3B uses — key names coincide, so it loaded and silently produced mud (GT SSIM 0.71; `Detect` then threw on the plain-MLP+no-tail signature). The v1 port landed 2026-08-02: pixel-basis rope (`linspace(1,128,10)·π` — matches the checkpoint's `rope.rope.freqs` [10]; 60 of 128 head dims; positions `linspace(−1,1)` per WINDOW axis, `steps=1→[-1]`; VIDEO ONLY — text never rotated), plain GELU-tanh MLP w/ biases (hidden 12288), all 36 blocks fully split (`MmLayers==NumLayers`, zero `.all.` keys), no tail norm/ada, and NO v2 last-layer text shortcut (block 35 computes text in full). `SeedVr2Config.Detect` now returns a v1 config (`PixelRope`/`LastLayerVidOnly`) instead of throwing. **Gates: tiny-config parity vs ByteDance's `models.dit.nadit` blocks ≤9.1e-4 / output 8.96e-4** (`Dit_TinyConfigV1_ForwardMatchesReference_PerBlock`, dump `Parity/seedvr2_transformer_v1_parity_dump.py`); **real-weight smoke on the 4090: BBB GT clip + Reagan at 640×360-area, both rc=0, full-range structured output, GT SSIM 0.8797** — right at the 3B's generative profile (0.877), vs the mis-architecture 0.71. VRAM: the fp16 DiT alone is 16.4 GB — 640×360-area works with ~1 GB to spare; 960×540 grinds the OOM-retry path and 720×405 is marginal, so treat ≤640×360 as the 24 GB envelope until weights are quantized or streamed. F16 weights staged at `Models/Video/SeedVr2/seedvr2_7b_dit_f16.safetensors`; catalog Sha256 still unpinned (pin on first catalog-download verification). |
 | **Wan 2.1/2.2 mainstream family** (TI2V-5B, T2V-1.3B fp16, T2V-14B fp8, I2V-14B CLIP fp8, I2V-A14B MoE, T2V-A14B MoE, FLF2V) | **All validated e2e on real weights (2026-07-01/02, 4090): coherent output.** The backbone is numerically de-risked: a Python layer-diff (faithful `comfy/ldm/wan/model.py` port, fp8-dequantized weights) proved the C# transformer matches end-to-end — patch_embed exact, all 40 blocks ~1e-3 (teacher-forced), autoregressive output relL2 4e-3 = the fp8 noise floor (memory `wan-14b-fp8-divergence`). **fp8 dark-output fix:** CFG amplifies an fp8 velocity DC bias → `LancePipelineCommon.CfgCombineRenormInPlace` with `WanVideoConfig.CfgRescale` auto-set 0.7 for fp8 by `WanConfigDetector` (fp16 stays plain CFG, byte-identical). **MoE (A14B):** expert-swap keeps only the active 14 GB expert GPU-resident. Generalized harness `WanVariant_Gpu_E2E` (env-driven, auto-detect). **Production entry:** `WanVideoLoader` (checkpoint+VAE paths → auto-detected ready pipeline incl. MoE/VACE routing + `EncodePrompts` umT5 helper), e2e-validated on T2V-1.3B and VACE-1.3B. Numeric parity beyond the 14B layer-diff (per-variant) still open. **I2V-14B perf SOLVED (2026-07-11, 44.78-local): warm 234/218 → 52.6/51.9 s (4.3×), steps 13.1 → 1.82 s/step = the T2V floor, seed-42 frames byte-identical** — the ~160 s I2V-vs-T2V overhead was the CLIP-image branch of `WanVideoBlock.CrossAttention` (host `AddInPlace` D2H-summing both ~92 MB cross-attn branch outputs + host `SliceRows` fresh-tensor cache-miss drains, per block per forward ×40×2 CFG); GPU-ported with existing ops (`backend.SliceRows` + `GatedResidualLastDim` add), I2V loop gained per-step `FreeActivations` + `[wan-phase]` probes. Warm profile now: cond encode+evict 7.4 s · TE/CLIP ~11 s (umT5 prompt cache = next lever) · DiT preload 2.2 s · steps 27.4 s · decode 3.8 s. Animate inherits the block fix. **Warm-path residency shipped (2026-07-11, 44.80-local): same-prompt+image I2V warm 52.6 → 31.9 s, T2V warm ~37 → 30.3 s** — three cross-generation caches + KEEP_MODELS DiT residency: umT5 prompt cache per (pos,neg) token key + CLIP image cache per init-image SHA-256 (extension `WanVideoLoader`; a MISS gates DiT coexistence on measured free VRAM — 8.4 GB umT5 never fits beside the resident 16.4 GB fp8 DiT → logged evict + 1.9–3.4 s re-upload) + **I2V conditioning cache** per (image-hash, geometry) in `WanVideoPipeline` (a same-image repeat skips the whole-padded-clip VAE encode, whose REAL conv peak is ~7.5 GB at 25f 512×320 ≈ 153 F32 copies/frame — measured via the 44.79 OOM; `EnsureVaeEncodeHeadroom` estimate corrected ×24→×160 + pool-trim before the free-VRAM read) + `ReleaseOrKeepTransformer` (single-expert DiT resident across gens unless the decode estimate `max(3 GB, f·h·w·160)` doesn't fit; warm `DiT preload: 0 ms`; MoE always frees; LoRA gens free the base up front; `DisposeCore` evicts on model switch — I2V→T2V switch verified, next load at free 22.58 GB). **gen-1/gen-2/44.78-baseline seed-42 mp4s md5-IDENTICAL** (byte-exact residency path); warm all-HIT profile = steps 27.4 s + decode 3.8 s + mux; peak VRAM 23.0 GB unchanged. **Step-floor = fp8 COMPUTE FLOOR, confirmed (round 10, 2026-07-11, `44.82-local`, no code shipped).** Profiled T2V-14B at 25f 512×320 under `HARTSY_PROFILE_SYNC=1` (a `cuStreamSynchronize` after every op): the step stayed at **~1.79 s/step — identical to the un-profiled 1.82 s baseline**, the definitive compute-bound signature (no async overlap lost, launch overhead ~0% → **CUDA-graph capture would NOT help** and was not attempted). True-GPU-time op table: **Linear (native fp8 GEMM) 4930 ms + SDPA (cuDNN fused flash) 2003 ms = ~68% of GPU time**; the AdaLN/norm/rope/permute glue is already device-resident (~0.4 s/step, ~22%); `H2D_MISS_BIG` 1335 ms is one-time cold-start (umT5 8.4 GB encode + DiT 16.4 GB preload), NOT per-step. The host `scheduler.Step`/CFG-combine round-trip is a tiny 1.1 MB latent (a few ms/step, <0.3%) — a device-Euler port saves nothing and does not unlock graph capture, so it was NOT shipped. **fp8 GEMM coverage audit CLEAN:** `NativeFp8Gemm=True`, every Wan GEMM shape clears the `K%16 && N·outBytes%16` guards (`CudaBackend.cs:511-515`; dims 5120/13824), and the profile shows NO `Cast`/dequant-to-F16 op → zero fp8→F16 recasts; no guard-widening needed (shared kernel untouched). Round 9 already ruled out batched-CFG (fully-resident DiT = no stream to fetch once; per-tensor fp8 activation quant breaks bit-exactness). Only remaining theoretical lever = F16 activations (`HARTSY_DIT_F16`) for the ~0.4 s/step glue — minority, fp8-CFG-risky, out of scope. Decode 3.8 s. **CLI catalog-path verified 2026-07-21:** `hartsy video -m wan` (TI2V-5B, `wan2.2_ti2v_5B_fp16.safetensors`) — catalog `Assets` lists only the DiT file; umT5-XXL and the Wan2.2 VAE resolve as side models inside `WanVideoRecipe` (already staged on disk, zero download). Ran at the declared default (832×480, 33 frames, 50 steps, cfg 5.0): sampled frames 1/17/33 all show a coherent red fox trotting across a snowy field at dawn, correct subject, clear continuous leg/gait motion across the whole clip, no bug found — unlike LTX-Video, `WanVideoRecipePipeline`'s zero-pad-to-512-context umT5 conditioning matched the validated `WanVideoLoader` production path on the first try. |
 | **Wan 2.1 VACE-1.3B** (control video) | **Real-weight coherent control-conditioned output confirmed (2026-07-02, 4090):** `wan2.1_vace_1.3B_fp16.safetensors`, 25f 480×320, 20 steps, moving-square control clip → coherent prompt-styled clip (`WanVace_Gpu_E2E`). Control context rebuilt to the ComfyUI reference (`WanVaceToVideo` + `WAN21_Vace.extra_conds`): inactive/reactive = control·(1−m)/control·m in [-1,1], each VAE-encoded + latent-normalized, plus the 8×8 space-to-depth pixel mask (64 ch, nearest-exact temporal resample) → 96-ch context; per-block hints `proj_out(block(c))·scale` verified structurally identical to `VaceWanAttentionBlock`. Converter gained the `before_proj/after_proj → proj_in/proj_out` renames; `WanConfigDetector` detects VACE from `vace_patch_embedding` + evenly-spread `vace_blocks`. Reference-image (identity) conditioning not modeled yet; 14B VACE untested (34 GB fp16 only). **Control causality proven** (2026-07-02): identical seed at control-scale 0 vs 1 → completely divergent outputs (collapsed dark vs bright control-tracking clip), so the hint branch demonstrably steers generation. |
 | **HunyuanVideo 13B (T2V, 720p)** | **Real-weight coherent output confirmed (2026-07-02, 4090); production config is now the fp8 checkpoint at 2.15 s/step, full clip in 1m26s** (25f 512×320, 20 steps, embedded-guidance 6.0; day-one arc was ~20 min). Conditioning: LLaVA-Llama-3-8B (fp8, layer −3, template+crop-95) + CLIP-L pooled. MMDiT (20 double + 40 single blocks) **numerically parity-verified** vs diffusers `HunyuanVideoTransformer3DModel` (per-stage relL2 ~1e-6). Perf chain, each step verified output-identical: (1) blocks on the **GPU-resident Qwen recipe** 75→19 s/step; (2) **fp8-resident DiT** — Kijai `hunyuan_video_720_cfgdistill_fp8_e4m3fn` (13.2 GB identity-scale; converter `NormalizeTencentRaw` for the raw Tencent key scheme; `HunyuanVideoPipeline` picks resident-vs-stream by weight size + 6 GB headroom); (3) **GPU RoPE** — `HunyuanImageRope.ApplyGpu` reuses `WanRopeInterleaved` pre-permute (tables cached per grid) 16.5→7 s/step; (4) per-step/per-tile `FreeActivations(trimPool:false)` (pool trim only at stage transitions) 7→6.1 s; (5) **`HARTSY_FP8_NATIVE=1`** (dynamic e4m3 activation quant → fp8 tensor cores, `Fp8NativeGemmTests`) 6.1→**2.15 s/step**, quality clean (no CFG here to amplify fp8 noise). **VAE decode 9 min → 9.6 s**: the batched `CausalConv3d` fast path extended to replicate padding (`wan_vae_build_padded` w/ replicate-first + spatial edge-clamp; parity corr=1.000000 vs the per-frame reference, Wan guard byte-identical; LTX/Kandinsky decoders share the win) + GPU `Vae3dLayout` in `Upsample` + `DecodeTiled` row-sequential blend. **THE blank-output bug: `CudaBackend.GroupNorm` F32-input path didn't upcast the F16/BF16 VAE affine** → fixed with `CastOnGpu` affine→F32 (memory `groupnormsilu-f32-bf16-affine`; shared VAE ⇒ also fixes Kandinsky-5). Full-res decode >24 GB → `DecodeTiled` feather-blend (corr 1.0). Open (non-blocking): VAE numeric parity vs Python (visual-only today), 720p + I2V unexercised, SDPA unfused (~1 s/step), fp8 bias-add not yet fused into the cublasLt epilogue, bf16-vs-fp8 quality A/B (bf16 ckpt was disk-pruned). **CLI catalog-path verified 2026-07-21:** new `HunyuanVideoRecipe`/`HunyuanVideoRecipePipeline` (registered in `VideoRecipeRegistry`) wrap the already-proven `HunyuanVideoGenerationTests` construction path — `hartsy video -m hunyuan-video` auto-downloads the bf16 (not fp8) `hunyuan_video_t2v_720p_bf16.safetensors` DiT (25.6 GB, sha256-pinned this pass) via catalog `Assets`, then casts BF16→F16 in `HunyuanVideoRecipe.Construct`; LLaVA-Llama-3-8B, CLIP-L, and the 3D VAE (bf16, ~493 MB, sha256-pinned, kept on disk as a `SideModels.HunyuanVideoVae3D` entry) resolve as side models. Ran at the declared default (512×320, 25 frames, 20 steps, cfg 6.0, "a cat walks on the grass, realistic style"): sampled frames 1/13/25 show a coherent, correctly-posed photorealistic cat with continuous walking motion (head bob, leg placement shifting frame to frame) and no late-clip drift — correct on the first attempt, no bug found. Multi-GB DiT download deleted after verification per disk hygiene (sha256 pinned, re-fetchable); the VAE was kept (small, shared-architecture side model). **SwarmUI production path verified 2026-07-23:** the last missing link was one extension-side `ModelSupport` compat-class mapping (`hunyuan-video` → family `hunyuan-video`, Video) — recipe + registry were already live, so Swarm refused the architecture purely for lack of the table entry. Verified e2e through `/API/GenerateText2Image` (512×320, 25f, 20 steps, cfg 6.0, seed 42): decoded frames 1/13/25 show a red vintage convertible on a coastal road w/ ocean waves, coherent motion (background pan + car bob + motion blur). Warm-loop steps ~1.6 s wall each with Sage default-on vs the 2.15 s/step pre-Sage record at this geometry; sampling 20 steps ≈ 78 s + VAE decode; DiT load+convert ~91 s cold. First attempt died disk-full mid-download of the LLaVA side model (9.1 GB need vs 7.7 GB free, root disk at 100%) — fixed by symlinking the existing `HartsyInference/Models/text_encoders/llava_llama3_fp8_scaled.safetensors` into Swarm's `Models/text_encoders/` (same pattern as the DiT symlink; no re-download). Flagship regression gates re-checked after the extension redeploy: Krea2-Turbo 4.41 s, Z-Image-Turbo 2.69–2.90 s engine-internal — both hold. **720p through Swarm exercised same day** (1280×720/17f/10st): ~6.5 s/step, tiled VAE decode ~29.5 s, no OOM, frames crisp + motion-coherent — the "720p unexercised" open item is closed for T2V (I2V remains recipe-TODO). |
@@ -65,21 +65,45 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] All models are built structurally; numeric parity vs a Python reference is pending for every one not already ✅ (LTX 0.9 / 0.9.5 / 13B and LTX-2 22B are verified e2e).
 
 ### SeedVR2 restoration follow-ups
-- [ ] fp32 whole-clip VAE activation ceiling: 720p-area needs ~5 concurrent multi-GB stage-0 tensors and
-      OOMs 24 GB even at 5-frame chunks (matrix ran at 960×540-area). Fix = bf16/F16 VAE activations or a
-      tiled/sliced 3D encode+decode (reference uses bf16 + `set_causal_slicing`).
-- [ ] DiT perf pass: window gather/scatter, RoPE, qk-norm, and AdaSingle run host-side (~14 s/frame @
-      960×540-area on the 4090). Levers: device-resident window pack/unpack, batched-graph block path,
-      GPU RoPE (same shape as `HunyuanImageRope.ApplyGpu`), F16 activations.
+- [x] ~~fp32 whole-clip VAE activation ceiling~~ **BF16 VAE activations landed (2026-08-02)** — reference
+      precision, CUDA default, `HARTSY_SEEDVR2_VAE_F32=1` reverts; pixel/latent boundaries stay F32 and the
+      mid-block attention runs F32 (the recorded F16-attention all-black class). New BF16 variants of the
+      five `wan_vae` glue kernels + BF16 `SliceRows`; `SeedVr2VaeConfig.ActivationDType` plumbs the dtype.
+      **Measured (4090, BBB 25f, `--clip-frames 5`): 960×540-area peak 17.1 → 9.0 GB; 720p-area now runs
+      whole-clip at 13.3 GB peak** (fp32 needed ~30 GB); output vs the f32 path SSIM 0.9998 / PSNR 46.9.
+      **3060 (12 GB) now runs 960×540-area end-to-end: 201 s / 25 f, peak 7.8 GB**, output identical to the
+      4090's. Gates: `Vae_Bf16Activations_MatchF32_OnCuda` (staged conv→encoder→decoder, relL2 ≲1.4e-2,
+      passes against BOTH the f32 and numz-fp16 checkpoints) + the f32 real-weight parity re-verified
+      unchanged (enc 2.9e-6 / dec 2.6e-6). Bug found on the way (fixed in `CudaBackend`): the BF16/F16
+      GroupNorm paths fed a NON-F32 affine (the fp16 checkpoint's) to the kernel raw — F16 bits read as
+      BF16 → flat-gray output; `CastAffineDownIfF32` now converts any affine dtype to the kernel's.
+      REMAINING: 1080p-area still exceeds 24 GB even in bf16 (measured OOM 2026-08-02) — needs tiled or
+      temporal-slab conv (`convDt`/`padded` are the peak) before 1080p+ targets work.
+- [x] ~~DiT perf pass~~ **Device-resident DiT landed (2026-08-02)** — tokens stay `[L,C]` backend tensors
+      end-to-end; fused `QkvSplitNorm` (per-head RMS qk-norm), window pack/unpack via
+      `RowGather`/`RowScatterAdd` over per-geometry I32 index tensors, rope via `WanRopeInterleaved` with
+      per-token tables (identity-padded beyond RotDim), AdaSingle as precombined emb+ada constant vectors
+      (timestep is fixed at 1000), all cached in `SeedVr2DevicePlan` + block mod caches across chunks.
+      Plus GPU-resident `SeedVr2PixelShuffle`/`SeedVr2PadBottomRight` (the VAE's last host round-trips;
+      IBackend defaults keep the host reference for CPU). **Measured e2e (4090, BBB 25f): 960×540-area
+      14.5 → 2.7 s/frame (362 → 68 s); 720p-area 25.7 → 8.4 s/frame (pre-shuffle-kernel).** Per-chunk
+      phase split at 960×540 (`HARTSY_LOG_LEVEL=Debug` prints it): 4090 encode 1.0 s / dit 6.3 s /
+      decode 2.5 s; 3060 5.2 / 6.2 / 13.8 (169 s wall — compute-bound in the decoder convs). Tiny-config
+      parity unchanged (blocks ≤8.9e-4, output 1.05e-4); output vs the host-math implementation SSIM
+      0.9998. Weight residency across chunks was measured a wash (uploads are not the bottleneck;
+      resident peaked 23.98/24 GB for ~0% wall) — phase staging stays, which is also what 12 GB cards
+      need. Remaining lever toward sub-2 s/frame: the DiT phase is now HOST-LAUNCH-BOUND (~6.3 s for
+      ~0.4 s of GEMM math — ~2k small op dispatches across 32 blocks), i.e. the CUDA-graph block path
+      (KERNEL.md priority list: graphs only help when launch-bound — that is now measured true here).
 - [x] ~~Publish converted weights~~ Catalog repointed at `numz/SeedVR2_comfyUI` fp16 safetensors
       (verbatim original keys — verified 2026-08-01 via catalog download → convert → bbb9 restore; fp16
       output visually equivalent to fp32, delta is generative HF repaint; 3B DiT + VAE Sha256s pinned).
       REMAINING: upload the 1.2 MB `seedvr2_embeddings.safetensors` to `HartsyAI/SeedVR2-safetensors`
       (upstream ships pos/neg emb as torch-pickle `.pt` only — unloadable in pure C#); until then local
       file under `Models/Video/SeedVr2/` serves it. Pin 7B DiT Sha256 after its v1 port verifies.
-- [ ] 7B = **v1 NaDiT port** (`models/dit`, not dit_v2 — see its ⛔ row): v1 rope/window/block read-through,
-      tiny-config parity dump against `models.dit.nadit`, then remove the plain-MLP+no-tail guard in
-      `SeedVr2Config.Detect`.
+- [x] ~~7B v1 NaDiT port~~ **DONE 2026-08-02** — see the SeedVR2-7B row above (parity 8.96e-4 + real-weight
+      smoke GT SSIM 0.8797 at 640×360-area; ≤640×360 is the 24 GB envelope for the 16.4 GB fp16 DiT).
+      Catalog 7B Sha256 still unpinned.
 - [ ] SwarmUI full generation+restore run. Progress 2026-08-01: alpha.6 PUBLISHED; extension compiles
       clean against the pure NuGet package; stock Swarm build verified live — backend registers and all
       six Video Restore params appear in ListT2IParams. Remaining: one video generation with the group
@@ -87,10 +111,15 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
       2.0.0-alpha.64/65-local packs in the dev feed (~/.local/share/hartsy-local-nuget) SemVer-outranked
       alpha.6 and broke restore with NU1605 downgrades — quarantined to hartsy-local-nuget-quarantine/;
       future publishes must stay above any local pack version or the feed must be kept clean.
-      **2026-08-01 update: the extension now pins `2.0.0-alpha.7` and will NOT restore until that version is
-      published** — it does not compile against alpha.6 (`IVideoService.GenerateAsync` returns
-      `VideoGenerationResult`, not `IAsyncEnumerable<VideoFrame>`). For local work before the publish, build
-      with `-p:UseLocalHartsy=true -p:HartsyRepo=<engine repo>` against a Release net8.0 CLI bin.
+      **2026-08-01 update: DONE for video generation.** The extension pins `2.0.0-alpha.8` (alpha.7 was tagged
+      but never reached nuget.org — the index goes alpha.6 → alpha.8; do not pin it). Verified end-to-end through
+      stock SwarmUI on the published package (no `UseLocalHartsy`): extension restore + build clean, backend #7
+      live on the 4090, `POST /API/GenerateText2Image` with `LtxVideo2/ltx-2.3-22b-dev-fp8` at 512×320,
+      `textvideoframes` 25, 20 steps, cfg 3.0, seed 42 → **`h264` 512×320 25 frames @24fps + a muxed AAC stereo
+      48 kHz track**, frames coherent (cat walking through a sunlit garden). Note Swarm ran on port 7802 bound to
+      the LAN IP, not `localhost:7801`. Restore group still not exercised in the same pass.
+      For local work ahead of a publish, build with `-p:UseLocalHartsy=true -p:HartsyRepo=<engine repo>` against a
+      Release net8.0 CLI bin.
 
 ### Shared-infra gaps
 - [x] **Generated-audio return path on the video contract** (`TODO(E-IMG-4/5)`) — **DONE 2026-08-01.**
@@ -102,8 +131,10 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
       speech at source quality. The extension's ffmpeg mux (`VideoOutputEncoder.AudioTrack`) was orphaned dead
       code — never constructed — and is reconnected. Gate: 9 Unit-tier `VideoAudioContractTests` + a synthetic
       ffmpeg mux check (rgb24 stdin + f32le stereo → mp4 with a 48 kHz AAC stereo stream, durations aligned).
-      **Not yet exercised on a real LTX-2.3 checkpoint** — the split-VAE CLI path is the ⛔ noise-output bug above,
-      so an e2e run would confirm the audio branch against broken video; do it once that is fixed.
+      **Verified on real LTX-2.3 weights 2026-08-01**, both surfaces: `hartsy video -m ltx-2` writes 25 coherent
+      frames + `audio.wav` (2ch/48 kHz/1.0417s), and stock SwarmUI produces an mp4 carrying video **and** a muxed
+      AAC stereo track. The split-VAE decode bug listed above is fixed, so the video is coherent too.
+      Caveat: the soundtrack is real but ~80 dB too quiet — see the LTX-2.3 audio section below.
 - [ ] `IBackend.PackedAttention` (varlen FlashAttention).
 - [ ] `DenoiseKvCache` (~2-3× denoise speedup).
 - [ ] `DistilledFlowMatchEuler` (DMD / CM / Lightning few-step schedules).
@@ -111,6 +142,91 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] LTX 0.9.5 timestep-conditioned VAE variant.
 - [ ] Wan multi-frame encode.
 - [ ] Native 3D-conv / temporal-attn PTX.
+
+### LTX-2.3 audio is ~80 dB too quiet (open, localized 2026-08-01)
+Real generation (512×320×25f, seed 42) produces a stereo soundtrack with correct duration, true L/R
+decorrelation and real temporal structure — but at **peak −43.9 dBFS / RMS −59.4 dBFS**, effectively
+inaudible. `HARTSY_LTX2_PROBE=1` now covers the audio stages (`ProbeTensor` in `LtxVideo2Pipeline`) and
+localizes the loss to **at or before the audio VAE output**:
+
+| stage | measured |
+|---|---|
+| audio latent (raw, pre-denorm) | min −7.30 max 4.36 rms 2.47 |
+| audio latent (unpacked, post-denorm) | min −7.18 max 4.74 rms 3.25 |
+| **audio VAE out (log-mel)** | **min −11.73 max −4.71 mean −10.10** |
+| vocoder out (waveform) | peak 0.0019 rms 0.00022 |
+
+Confirmed through SwarmUI on the muxed mp4 as well (`volumedetect`: mean −56.6 dB, max −45.1 dB), so this is
+the engine's output, not a CLI-only artifact.
+
+The log-mel sits essentially on the `log(clamp(mel,1e-5))` silence floor (−11.51). A real 16 kHz speech
+reference through the same convention measures **min −11.51 max +4.54 mean −1.33** — our mean is 8.8 nats
+low and our max 9.25 nats (~80 dB in magnitude) low. The vocoder is faithfully rendering near-silence, so
+it is not the culprit.
+
+**Ruled out this pass** (do not re-check these first):
+- Latent denorm is applied and correct — `MapAudioVae` strips the `audio_vae.` prefix so
+  `ReadStats(conv.AudioVae, …)` finds `per_channel_statistics.*`; our `v*std+mean` matches diffusers'
+  `_denormalize_audio_latents`. Magnitude cannot explain it anyway: `std-of-means` averages 1.17
+  (range 0.74–2.05), worth ~1.4 dB. This is NOT the video `per_channel_statistics` bug's twin.
+- `norm_out` type — the reference picks affine GroupNorm for `norm_type="group"` vs parameter-free
+  `LTX2AudioPixelNorm` for `"pixel"`; the checkpoint ships **zero** norm weights, so our hardcoded
+  pixel-norm is right.
+- Vocoder STFT config matches the reference exactly (filter 512, hop 80, window 512, 16 kHz in,
+  natural-log clamp 1e-5), and the chain order `denorm → unpack → audio_vae.decode → vocoder` matches
+  `pipeline_ltx2.py`.
+
+**The audio VAE is EXONERATED (2026-08-02).** `LtxAudioVaeLevelDiagnosticTests` (GpuIntegration, env
+`LTX2_AUDIO_VAE`) decodes synthetic latents through the real decoder and compares log-mel levels:
+
+| latent fed to the VAE | log-mel mean | max |
+|---|---|---|
+| drawn from the checkpoint's own `per_channel_statistics` | **−4.34** | +0.58 |
+| drawn from the observed generation's stats (mean −1.48, σ 2.89) | −6.14 | +2.23 |
+| unit normal | −4.42 | −1.21 |
+| **the actual generation** | **−10.10** | −4.71 |
+
+Given a latent from the training distribution the decoder produces healthy levels. **The fault is upstream:
+the audio latent itself is off-distribution** — mean −1.48 / σ 2.89 against the checkpoint's +0.018 / 1.17
+(2.47× over-dispersed, far beyond sampling noise at n=3328).
+
+**CFG is what disperses it, and dispersion tracks quietness** (8 steps, seed 42, video cfg 3.0):
+
+| audio CFG | latent σ (pre-denorm) | log-mel mean | waveform peak |
+|---|---|---|---|
+| 3.0 (= video, shipped behaviour) | 2.22 | −10.10 | −43.9 dBFS |
+| 7.0 (the authors' recommendation) | 2.69 | −11.09 | −60.5 dBFS |
+
+**Do not "fix" this by raising `audio_guidance_scale` to the authors' 7.0** — measured, it makes the
+soundtrack ~17 dB QUIETER. Their recommendation assumes the guidance rescale + STG + modality-isolation
+guidance that accompany it in `pipeline_ltx2.py`, none of which this port implements. `AudioGuidanceScale`
+exists on the config (null = follow the video scale, the reference default) with `HARTSY_LTX2_AUDIO_CFG`
+for A/B, but the default is deliberately NOT 7.0.
+
+**PARTIAL FIX SHIPPED — guidance rescale (2026-08-02).** `AudioGuidanceRescale` (default **1.0**, knob
+`HARTSY_LTX2_AUDIO_RESCALE`) applies diffusers' `rescale_noise_cfg` to the audio stream: the guided velocity
+is pulled back to the conditional prediction's mean/σ. Implemented as an affine transform of the guided
+velocity (`v_final = A·v_cfg + B`) so only four scalars reach the host and the Euler step stays on device —
+`LancePipelineCommon.CfgCombineRenormInPlace` was NOT reused directly because it writes host-side and the
+audio latent is GPU-cached (a host write would go stale against its device copy).
+
+Effect at 8 steps: latent σ **2.216 → 1.141** (checkpoint target 1.17), log-mel mean **−10.10 → −6.60**.
+**Verified on a real 20-step generation** (512×320×25f, seed 42, cfg 3.0): soundtrack
+**peak −43.9 → −28.2 dBFS, RMS −59.4 → −45.4 dBFS** (~14 dB recovered), still true stereo, 25 frames intact,
+video coherent and visually unchanged (the video Euler step is untouched).
+
+**Still not fully fixed.** −28 dBFS peak is audible but roughly 20 dB below a healthy soundtrack, and the
+log-mel (−6.60) remains short of the −4.34 a training-distribution latent produces in the VAE diagnostic.
+The gain at 20 steps (~14 dB) is also smaller than the 8-step log-mel delta suggested (~30 dB), so step
+count interacts with the residual. Remaining suspects, in order: the STG (`stg_scale` 1.0, blocks `[28]`)
+and modality-isolation guidance (`modality_scale` 3.0) that the reference pairs with LTX-2.3 and this port
+does not implement — those add extra DiT forward passes with modified conditioning, so they are a real
+piece of work; then a parity dump of the audio VAE/vocoder, which still have no captured reference
+activations.
+
+Still unvalidated independently: the audio VAE and vocoder have no reference activations captured (the
+BigVGAN anti-alias filters are recomputed rather than loaded), so a parity dump remains worthwhile even
+though the level defect is now traced upstream of them.
 
 ### MiniMax-H3 (blocked on the vendor)
 - [ ] Weight-drop watch: ModelScope `MiniMax/MiniMax-H3` **and** HuggingFace `MiniMaxAI/MiniMax-H3` (org slug differs

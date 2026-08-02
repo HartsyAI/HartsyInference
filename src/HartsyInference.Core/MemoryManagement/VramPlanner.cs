@@ -35,7 +35,7 @@ public sealed class VramPlanner
     /// <param name="backend">Optional, but strongly recommended — see <see cref="TrimBeforeQuery"/>. Without it the
     /// planner can badly under-estimate free VRAM and stream a model that would have fit resident.</param>
     public VramPlanner(IStreamingWeightCache? cache, string modelName, IBackend? backend = null)
-        : this(cache, modelName, LowVramPolicy.Resolve(), backend)
+        : this(cache, modelName, LowVramPolicy.Resolve(backend), backend)
     {
     }
 

@@ -215,9 +215,9 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         // tensor, inside the sync callback below (via Tensor.EnsureHostBuffer).
         ulong byteSize = (ulong)ByteSize(tensor);
 
-        // Old callbacks may close over an earlier GPU buffer (in-place ops on the same Tensor). Clear before re-cache.
-        tensor._gpuSyncCallback = null;
-        tensor._gpuDisposeCallback = null;
+        // Old callbacks may close over an earlier GPU buffer (in-place ops on the same Tensor). Clear before
+        // re-cache — keyed, so a CUDA backend's binding on the same host tensor (if any) is left alone.
+        tensor.ClearGpuBinding(0);
 
         _activationCache[tensor] = buffer;
         _cachedBuffers.Add(buffer);
@@ -232,7 +232,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         // reads" between Begin and EndAndLaunch) — WaitIdleHost would also try to submit/drain the NORMAL
         // stream while the capture command buffer is still recording, which is its own separate hazard. Throw
         // instead of silently doing the wrong (or a dangerous) thing; the caller's capture try/catch handles it.
-        tensor._gpuSyncCallback = () =>
+        Action syncCallback = () =>
         {
             if (self.CapturingStepGraph)
                 throw new InvalidOperationException(
@@ -247,7 +247,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
             }
         };
 
-        tensor._gpuDisposeCallback = () =>
+        Action disposeCallback = () =>
         {
             if (self._activationCache.Remove(capturedTensor, out VulkanBuffer? cached))
             {
@@ -256,6 +256,9 @@ public sealed class VulkanGpuTransferHelper : IDisposable
                 self._stream.DeferredFree(cached);
             }
         };
+
+        // Vulkan has no per-device context handle; key 0 is the context-less bucket (drained by the drain-all path).
+        tensor.SetGpuBinding(0, syncCallback, disposeCallback);
     }
 
     /// <summary>Uploads a CPU tensor's bytes into a device-local Vulkan buffer. Uses the ReBAR fast path if the buffer's memory type is mappable.</summary>
@@ -461,8 +464,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         // "vkDestroyBuffer: Invalid device".
         foreach (Tensor t in _activationCache.Keys)
         {
-            t._gpuSyncCallback = null;
-            t._gpuDisposeCallback = null;
+            t.ClearGpuBinding(0);
         }
         foreach (VulkanBuffer b in _cachedBuffers) b.Dispose();
         // Synchronously dispose any uncached upload buffers too — these would otherwise leak until

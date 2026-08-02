@@ -30,7 +30,7 @@ public sealed class FxService : IFxService
         string modelName = string.IsNullOrWhiteSpace(request.Model) ? selector.Variant : request.Model;
         IBackend backend = _cpuBackend.Value;
 
-        return AudioRuntime.RunAsync(backend, $"fx:demucs:{modelName}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, $"fx:demucs:{modelName}", async ct =>
         {
             (float[] left, float[] right) = AudioClipCodec.DecodeStereo(request.Audio, FxCatalog.DemucsSampleRate);
             if (left.Length == 0)
@@ -40,7 +40,7 @@ public sealed class FxService : IFxService
             ct.ThrowIfCancellationRequested();
 
             string path = await FxCatalog.EnsureDemucsPathAsync(modelName, selector.LocalPath, ct).ConfigureAwait(false);
-            DemucsRunner runner = await FxCatalog.DemucsCache
+            DemucsRunner runner = await _engine.AudioRuntime.Demucs
                 .GetOrLoadAsync(path, _ => Task.FromResult(FxCatalog.LoadDemucs(path, modelName)), ct).ConfigureAwait(false);
             long started = Environment.TickCount64;
             (float[] Left, float[] Right)[] stems = runner.Separate(backend, left, right);
@@ -68,7 +68,7 @@ public sealed class FxService : IFxService
         ArgumentNullException.ThrowIfNull(request);
         IBackend backend = _cpuBackend.Value;
 
-        return AudioRuntime.RunAsync(backend, $"fx:enhance:{FxCatalog.EnhanceRepo}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, $"fx:enhance:{FxCatalog.EnhanceRepo}", async ct =>
         {
             float[] mono = AudioClipCodec.DecodeMono(request.Audio, FxCatalog.EnhanceSampleRate);
             if (mono.Length == 0)
@@ -77,7 +77,7 @@ public sealed class FxService : IFxService
             }
             ct.ThrowIfCancellationRequested();
 
-            EnhanceRunner runner = await FxCatalog.EnhanceCache
+            EnhanceRunner runner = await _engine.AudioRuntime.Enhance
                 .GetOrLoadAsync(FxCatalog.EnhanceRepo, FxCatalog.LoadEnhanceAsync, ct).ConfigureAwait(false);
             long started = Environment.TickCount64;
             // lambd = denoise/enhance blend, tau = prior temperature, seed = determinism. The engine's Enhance does

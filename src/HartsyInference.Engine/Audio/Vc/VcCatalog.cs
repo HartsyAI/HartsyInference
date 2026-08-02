@@ -15,9 +15,6 @@ namespace HartsyInference.Engine.Audio;
 /// using the engine's HuBERT/ContentVec content encoder plus YIN pitch; OpenVoice does tone-color transfer.</summary>
 internal static class VcCatalog
 {
-    /// <summary>Resident voice-conversion pipelines, keyed by resolved model.</summary>
-    internal static readonly AudioRunnerCache<IVcRunner> Cache = new AudioRunnerCache<IVcRunner>();
-
     /// <summary>Category folder RVC voice models are placed in: <c>{models}/audio/clone/rvc</c>.</summary>
     internal const string RvcCategory = "clone";
 

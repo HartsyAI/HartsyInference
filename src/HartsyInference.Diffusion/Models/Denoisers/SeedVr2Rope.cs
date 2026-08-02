@@ -1,23 +1,32 @@
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>SeedVR2 window-local 3-axis RoPE (mmrope3d): lang-style inverse frequencies (θ=10000, per-axis
-/// rot dim 42 → 21 freqs, matching the checkpoint's dropped <c>rope.rope.freqs</c> buffers), axial
-/// concatenation T‖H‖W → 126 rotated dims of the 128-dim head (last 2 pass through), interleaved-PAIR
-/// rotation (rotary_embedding_torch convention: freqs repeated <c>(n r)</c>, r=2 — NeoX-style pairs, not
-/// half-split). Video queries/keys use axial positions with the temporal axis OFFSET BY THE TEXT LENGTH
-/// (<c>vid_freqs[l:l+f, :h, :w]</c>); text tokens use 1-D positions 0..l−1 with the same freqs replicated
-/// across all three axes. Positions restart at zero inside every window — freqs are computed per window
-/// shape, never globally. CPU-precomputed cos/sin tables; rotation applied on host F32 (bring-up; the DiT
-/// runs rope on host between backend GEMMs, matching the reference's fp32 rope-in-attn).</summary>
+/// <summary>SeedVR2 window-local 3-axis RoPE table builders for the <c>WanRopeInterleaved</c> kernel's
+/// <c>[S, headDim]</c> interleaved layout (duplicated cos/sin per adjacent pair — NeoX-style, not
+/// half-split; identical rotation math in both architectures). Positions restart at zero inside every
+/// window; tables are built per token in GLOBAL token order by <see cref="SeedVr2DevicePlan"/>, with
+/// identity fill (cos=1/sin=0) beyond the rotated dims so one full-head rope pass leaves them unrotated.
+/// <para><b>v2 (3B, mmrope3d):</b> lang freqs θ=10000, per-axis rot dim 42 → 126 of 128 dims, integer
+/// positions with the temporal axis OFFSET BY THE TEXT LENGTH (<c>vid_freqs[l:l+f, :h, :w]</c>), text
+/// roped with 1-D positions on all three axes.</para>
+/// <para><b>v1 (7B, models/dit):</b> pixel freqs <c>linspace(1,128,10)·π</c> (matches the checkpoint's
+/// dropped <c>rope.rope.freqs</c>), per-axis rot dim 20 → 60 of 128 dims, positions normalized to
+/// <c>linspace(−1,1)</c> over each window axis extent, VIDEO ONLY — text is never rotated.</para></summary>
 public static class SeedVr2Rope
 {
-    /// <summary>Per-axis rotation dim (head_dim 128 / 3 axes → 42, floor).</summary>
+    /// <summary>v2 per-axis rotation dim (head_dim 128 / 3 axes → 42, floor).</summary>
     public const int AxisDim = 42;
 
-    /// <summary>Total rotated dims (3 × 42); head dims beyond this pass through unrotated.</summary>
+    /// <summary>v2 total rotated dims (3 × 42); head dims beyond this pass through unrotated.</summary>
     public const int RotDim = 126;
 
+    /// <summary>v1 per-axis rotation dim (10 pixel freqs, interleaved pairs).</summary>
+    public const int AxisDimV1 = 20;
+
+    /// <summary>v1 total rotated dims (3 × 20); dims 60..127 pass through.</summary>
+    public const int RotDimV1 = 60;
+
     private static readonly double[] InvFreq = BuildInvFreq();
+    private static readonly double[] PixelFreq = BuildPixelFreq();
 
     private static double[] BuildInvFreq()
     {
@@ -27,38 +36,39 @@ public static class SeedVr2Rope
         return inv;
     }
 
-    /// <summary>Builds interleaved cos/sin tables for one window: rows = t·h·w video tokens followed by
-    /// <paramref name="txtLen"/> text tokens; cols = <see cref="RotDim"/>. Video token (ti,hi,wi) gets axis
-    /// angles from positions (txtLen+ti, hi, wi); text token p gets angle(p) on all three axes.</summary>
-    public static (float[] Cos, float[] Sin) BuildTables(int t, int h, int w, int txtLen)
+    private static double[] BuildPixelFreq()
     {
-        int vidTokens = t * h * w;
-        int rows = vidTokens + txtLen;
-        float[] cos = new float[rows * RotDim];
-        float[] sin = new float[rows * RotDim];
-
-        for (int ti = 0; ti < t; ti++)
-        for (int hi = 0; hi < h; hi++)
-        for (int wi = 0; wi < w; wi++)
-        {
-            int row = (ti * h + hi) * w + wi;
-            FillAxis(cos, sin, row, 0, txtLen + ti);
-            FillAxis(cos, sin, row, 1, hi);
-            FillAxis(cos, sin, row, 2, wi);
-        }
-        for (int p = 0; p < txtLen; p++)
-        {
-            int row = vidTokens + p;
-            FillAxis(cos, sin, row, 0, p);
-            FillAxis(cos, sin, row, 1, p);
-            FillAxis(cos, sin, row, 2, p);
-        }
-        return (cos, sin);
+        double[] f = new double[AxisDimV1 / 2];
+        for (int i = 0; i < f.Length; i++)
+            f[i] = (1.0 + 127.0 * i / (f.Length - 1)) * Math.PI;   // linspace(1, 128, 10) · π
+        return f;
     }
 
-    private static void FillAxis(float[] cos, float[] sin, int row, int axis, int position)
+    /// <summary>Fills one v2 row at <paramref name="rowBase"/> with the three axis angles (integer T, H, W
+    /// positions; the caller passes the text-length temporal offset).</summary>
+    public static void FillRow(Span<float> cos, Span<float> sin, int rowBase, int posT, int posH, int posW)
     {
-        int baseCol = row * RotDim + axis * AxisDim;
+        FillAxisAt(cos, sin, rowBase, 0, posT);
+        FillAxisAt(cos, sin, rowBase, 1, posH);
+        FillAxisAt(cos, sin, rowBase, 2, posW);
+    }
+
+    /// <summary>Fills one v1 row: axis angles are <c>linspace(−1,1,extent)[index]·freq</c> per window axis.</summary>
+    public static void FillRowV1(Span<float> cos, Span<float> sin, int rowBase,
+        int idxT, int extentT, int idxH, int extentH, int idxW, int extentW)
+    {
+        FillAxisV1(cos, sin, rowBase, 0, NormalizedPos(idxT, extentT));
+        FillAxisV1(cos, sin, rowBase, 1, NormalizedPos(idxH, extentH));
+        FillAxisV1(cos, sin, rowBase, 2, NormalizedPos(idxW, extentW));
+    }
+
+    // torch.linspace(-1,1,steps=N): N==1 → [-1] (NOT 0 — a (steps-1) division would NaN or silently zero).
+    private static double NormalizedPos(int index, int extent)
+        => extent == 1 ? -1.0 : -1.0 + 2.0 * index / (extent - 1);
+
+    private static void FillAxisAt(Span<float> cos, Span<float> sin, int rowBase, int axis, int position)
+    {
+        int baseCol = rowBase + axis * AxisDim;
         for (int i = 0; i < AxisDim / 2; i++)
         {
             double angle = position * InvFreq[i];
@@ -70,24 +80,17 @@ public static class SeedVr2Rope
         }
     }
 
-    /// <summary>Rotates rows of <paramref name="qk"/> (layout [rows, heads, 128]) in place using tables from
-    /// <see cref="BuildTables"/>. Pair rotation: (x₀,x₁) → (x₀c−x₁s, x₁c+x₀s) per adjacent pair.</summary>
-    public static void Apply(Span<float> qk, int rows, int heads, int headDim, float[] cos, float[] sin)
+    private static void FillAxisV1(Span<float> cos, Span<float> sin, int rowBase, int axis, double position)
     {
-        for (int r = 0; r < rows; r++)
+        int baseCol = rowBase + axis * AxisDimV1;
+        for (int i = 0; i < AxisDimV1 / 2; i++)
         {
-            int tblBase = r * RotDim;
-            for (int hd = 0; hd < heads; hd++)
-            {
-                int rowBase = (r * heads + hd) * headDim;
-                for (int i = 0; i < RotDim; i += 2)
-                {
-                    float c = cos[tblBase + i], s = sin[tblBase + i];
-                    float x0 = qk[rowBase + i], x1 = qk[rowBase + i + 1];
-                    qk[rowBase + i] = x0 * c - x1 * s;
-                    qk[rowBase + i + 1] = x1 * c + x0 * s;
-                }
-            }
+            double angle = position * PixelFreq[i];
+            float c = (float)Math.Cos(angle), s = (float)Math.Sin(angle);
+            cos[baseCol + 2 * i] = c;
+            cos[baseCol + 2 * i + 1] = c;
+            sin[baseCol + 2 * i] = s;
+            sin[baseCol + 2 * i + 1] = s;
         }
     }
 }

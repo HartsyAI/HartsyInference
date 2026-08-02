@@ -31,9 +31,9 @@ public sealed class MusicService : IMusicService
         string key = descriptor.CacheKey(selector);
         IBackend backend = _engine.Backend;
 
-        return AudioRuntime.RunAsync(backend, $"music:{key}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, $"music:{key}", async ct =>
         {
-            IMusicRunner runner = await MusicCatalog.Cache
+            IMusicRunner runner = await _engine.AudioRuntime.Music
                 .GetOrLoadAsync(key, token => descriptor.LoadAsync(backend, selector, token), ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             long started = Environment.TickCount64;

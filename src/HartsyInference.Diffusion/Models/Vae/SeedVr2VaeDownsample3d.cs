@@ -10,18 +10,20 @@ namespace HartsyInference.Diffusion.Models.Vae;
 public sealed class SeedVr2VaeDownsample3d
 {
     private readonly bool _temporal;
+    private readonly DType _actDtype;
     private CausalConv3d _conv = null!;
 
     /// <summary>Creates the downsampler; <paramref name="temporal"/> per <see cref="SeedVr2VaeConfig.StageDownsamplesTime"/>.</summary>
-    public SeedVr2VaeDownsample3d(bool temporal)
+    public SeedVr2VaeDownsample3d(bool temporal, DType? actDtype = null)
     {
         _temporal = temporal;
+        _actDtype = actDtype ?? DType.F32;
     }
 
     /// <summary>Binds <c>{prefix}.conv</c>; pads derive from the kernel shape (kt=1 → padT 0).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
         => _conv = SeedVr2VaeOps.Conv(weights, $"{prefix}.conv",
-            strideT: _temporal ? 2 : 1, strideH: 2, strideW: 2, padSpatial: false);
+            strideT: _temporal ? 2 : 1, strideH: 2, strideW: 2, padSpatial: false, computeDtype: _actDtype);
 
     /// <summary>Forward on <c>[B,C,T,H,W]</c> F32.</summary>
     public Tensor Forward(IBackend backend, Tensor x)

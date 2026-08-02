@@ -4,16 +4,13 @@ using HartsyInference.Core.Logging;
 namespace HartsyInference.Engine.Audio;
 
 /// <summary>Caches loaded audio runners by resolved model key so a repeated request reuses the resident pipeline.
-/// One instance per category; it registers itself with <see cref="AudioRuntime"/> so a model switch under memory
-/// pressure can drop everything that is not the incoming model.</summary>
+/// One instance per category per <see cref="AudioRuntime"/> (i.e. per engine), which owns it and sweeps it on
+/// memory pressure — runners bind device state, so caches must never be shared across engines/devices.</summary>
 internal sealed class AudioRunnerCache<TRunner> : IAudioRunnerCache
     where TRunner : class, IDisposable
 {
     private readonly ConcurrentDictionary<string, TRunner> _entries = new(StringComparer.Ordinal);
     private readonly object _loadLock = new();
-
-    /// <summary>Creates the cache and registers it for memory-pressure eviction.</summary>
-    internal AudioRunnerCache() => AudioRuntime.Register(this);
 
     /// <summary>Returns the cached runner for <paramref name="key"/>, loading it when absent. The double-check keeps
     /// two concurrent callers from keeping two copies of the same model resident.</summary>

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
@@ -124,14 +125,18 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
             pre.Data.AsSpan((int)(((long)c * pre.Frames + begin) * h * w), len * h * w)
                 .CopyTo(px.Slice(c * len * h * w, len * h * w));
 
-        // Phase-staged weight residency: at 720p-area the fp32 activations alone reach many GB, so only one
-        // component's weights stay on-device at a time (DiT 13.6 GB f32 + VAE + activations exceed 24 GB).
+        // Phase-staged weight residency: only one component's weights stay on-device at a time — the VAE
+        // activation peak wants the DiT's VRAM (and 12 GB cards need every phase alone). Measured: keeping
+        // all three resident at 960×540-area peaked 23.98 GB for a ~0% wall win (uploads are not the
+        // bottleneck; the DiT's rope/index/mod constants persist across chunks separately).
+        long tEnc = Environment.TickCount64;
         Backend.PreloadWeights(_encoder.EnumerateWeights());
         (Tensor mean, Tensor logvar) = _encoder.Encode(Backend, pixels);
         Backend.Sync();
         Backend.FreeWeights(_encoder.EnumerateWeights());
         Backend.TrimMemoryPool();
         pixels.Dispose();
+        tEnc = Environment.TickCount64 - tEnc;
 
         int lt = (int)mean.Shape[2], lh = (int)mean.Shape[3], lw = (int)mean.Shape[4];
         int cells = lt * lh * lw;
@@ -162,12 +167,14 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         }
         mean.Dispose(); logvar.Dispose(); noiseA.Dispose();
 
+        long tDit = Environment.TickCount64;
         Backend.PreloadWeights(_dit.EnumerateWeights());
         Tensor v = _dit.Forward(Backend, ditIn, _posEmb, Timestep);
         Backend.Sync();
         Backend.FreeWeights(_dit.EnumerateWeights());
         Backend.TrimMemoryPool();
         ditIn.Dispose();
+        tDit = Environment.TickCount64 - tDit;
 
         // One Euler step from σ=1: x₀ = x_t − v with x_t = the init noise; then ÷scaling, channels-first.
         Tensor latent = new Tensor(new TensorShape([1L, C, lt, lh, lw]), DType.F32);
@@ -181,6 +188,7 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         }
         v.Dispose(); noiseB.Dispose();
 
+        long tDec = Environment.TickCount64;
         Backend.PreloadWeights(_decoder.EnumerateWeights());
         Tensor decoded = _decoder.Decode(Backend, latent);
         Backend.Sync();
@@ -189,6 +197,8 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         latent.Dispose();
         float[] chunk = decoded.AsSpan<float>().ToArray();
         decoded.Dispose();
+        tDec = Environment.TickCount64 - tDec;
+        Logs.Debug($"SeedVR2 chunk {chunkIndex} ({len}f): encode {tEnc} ms, dit {tDit} ms, decode {tDec} ms");
         return chunk;
     }
 

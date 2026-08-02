@@ -1,3 +1,5 @@
+using HartsyInference.Core.Tensors;
+
 namespace HartsyInference.Diffusion.Models.Vae;
 
 /// <summary>Config for the SeedVR2 causal video VAE (<c>s8_c16_t4_inflation_sd3</c>): SD-inflated 3D,
@@ -24,6 +26,11 @@ public sealed record SeedVr2VaeConfig
 
     /// <summary>Latent scaling: DiT-space latent = (raw − shift) × scale.</summary>
     public float ScalingFactor { get; init; } = 0.9152f;
+
+    /// <summary>Activation/conv-weight dtype inside the VAE. BF16 halves the fp32 activation peak that OOMs
+    /// 24 GB at 720p-area (the reference runs bf16); pixel/latent boundaries stay F32 either way. CUDA-only —
+    /// the CPU/Vulkan conv path and the host-parity tests keep F32.</summary>
+    public DType ActivationDType { get; init; } = DType.F32;
 
     /// <summary>Pixels per latent cell on H/W.</summary>
     public int SpatialCompression { get; init; } = 8;

@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
@@ -28,11 +29,11 @@ public sealed class SeedVr2VaeDecoder
         {
             _resnets[s] = new SeedVr2VaeResnetBlock3d[config.LayersPerBlock + 1];
             for (int r = 0; r < _resnets[s].Length; r++)
-                _resnets[s][r] = new SeedVr2VaeResnetBlock3d(config.NormGroups, config.NormEps);
+                _resnets[s][r] = new SeedVr2VaeResnetBlock3d(config.NormGroups, config.NormEps, config.ActivationDType);
             if (config.StageHasUpsample(s))
-                _upsamplers[s] = new SeedVr2VaeUpsampler3d(config.StageUpsamplesTime(s));
+                _upsamplers[s] = new SeedVr2VaeUpsampler3d(config.StageUpsamplesTime(s), config.ActivationDType);
         }
-        _mid = new SeedVr2VaeMidBlock3d(config.BlockOutChannels[^1], config.NormGroups, config.NormEps);
+        _mid = new SeedVr2VaeMidBlock3d(config.BlockOutChannels[^1], config.NormGroups, config.NormEps, config.ActivationDType);
     }
 
     /// <summary>Config this decoder was built for.</summary>
@@ -41,7 +42,7 @@ public sealed class SeedVr2VaeDecoder
     /// <summary>Binds diffusers-style <c>decoder.*</c> keys (verbatim checkpoint names).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
-        _convIn = SeedVr2VaeOps.Conv(weights, "decoder.conv_in");
+        _convIn = SeedVr2VaeOps.Conv(weights, "decoder.conv_in", computeDtype: _config.ActivationDType);
         _mid.LoadWeights(weights, "decoder.mid_block");
         for (int s = 0; s < _resnets.Length; s++)
         {
@@ -51,7 +52,7 @@ public sealed class SeedVr2VaeDecoder
         }
         _normOutW = weights["decoder.conv_norm_out.weight"];
         _normOutB = weights["decoder.conv_norm_out.bias"];
-        _convOut = SeedVr2VaeOps.Conv(weights, "decoder.conv_out");
+        _convOut = SeedVr2VaeOps.Conv(weights, "decoder.conv_out", computeDtype: _config.ActivationDType);
     }
 
     /// <summary>Decodes <c>[B,16,T',h,w]</c> F32 (already un-scaled) to <c>[B,3,F,h·8,w·8]</c> in [-1,1] range
@@ -61,7 +62,11 @@ public sealed class SeedVr2VaeDecoder
         if (latent.Shape.Rank != 5 || latent.Shape[1] != _config.LatentChannels)
             throw new HartsyInferenceException($"Decoder expects [B,{_config.LatentChannels},T,h,w], got {latent.Shape}.");
 
-        Tensor h = _convIn.Forward(backend, latent);
+        // BF16 mode: cast at the latent boundary only — the caller keeps its F32 tensor either way.
+        Tensor entry = DtypeCastHelper.EnsureDtype(backend, latent, _config.ActivationDType, disposeSourceOnCast: false);
+        Tensor h = _convIn.Forward(backend, entry);
+        if (!ReferenceEquals(entry, latent))
+            entry.Dispose();
         h = Advance(backend, h, _mid.Forward);
         for (int s = 0; s < _resnets.Length; s++)
         {
@@ -73,7 +78,7 @@ public sealed class SeedVr2VaeDecoder
         h = Advance(backend, h, (b, x) => SeedVr2VaeOps.NormSiluPerFrame(b, x, _normOutW, _normOutB, _config.NormGroups, _config.NormEps));
         Tensor output = _convOut.Forward(backend, h);
         h.Dispose();
-        return output;
+        return DtypeCastHelper.EnsureF32(backend, output);
     }
 
     /// <summary>Runs one stage and disposes the previous activation (VRAM discipline; see encoder note).</summary>
