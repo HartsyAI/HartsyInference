@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what a
 stable release will require. Dates are UTC.
 
-## [Unreleased]
+## [2.0.0-alpha.8] — 2026-08-01
 
 ### Fixed
 - **A short soundtrack silently dropped trailing video frames.** Muxers cut to the shorter stream
@@ -17,7 +17,11 @@ stable release will require. Dates are UTC.
   since that indicates the wrong track rather than latent rounding. Verified on a real LTX-2.3
   generation: audio 1.0417s, muxed mp4 keeps all 25 frames, and the generated samples are
   bit-identical to the pre-fix run with the padding appended as pure silence.
-  **Not in 2.0.0-alpha.7** — found by the post-publish e2e run.
+  Found by the e2e run after alpha.7 was cut, hence the separate version.
+
+### Note
+- `2.0.0-alpha.7` was tagged but never appeared on nuget.org (both the flat-container and registration
+  indexes still topped out at alpha.6 more than 30 minutes after publish). Consume alpha.8 instead.
 
 ## [2.0.0-alpha.7] — 2026-08-01
 
