@@ -6,6 +6,19 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what a
 stable release will require. Dates are UTC.
 
+## [Unreleased]
+
+### Fixed
+- **A short soundtrack silently dropped trailing video frames.** Muxers cut to the shorter stream
+  (ffmpeg `-shortest`), and LTX-2.3's audio-latent count rounds down: a real 25-frame @24fps clip
+  (1.0417s) came back with 1.010s of audio, so the muxed mp4 contained **24 frames, not 25**.
+  `VideoAudioResolver` now fits the track to the clip in both directions — trim if long, silence-pad
+  (`AudioBuffer.PadTo`) if short — so frame count is preserved; a shortfall over 0.25s still warns,
+  since that indicates the wrong track rather than latent rounding. Verified on a real LTX-2.3
+  generation: audio 1.0417s, muxed mp4 keeps all 25 frames, and the generated samples are
+  bit-identical to the pre-fix run with the padding appended as pure silence.
+  **Not in 2.0.0-alpha.7** — found by the post-publish e2e run.
+
 ## [2.0.0-alpha.7] — 2026-08-01
 
 Video gets its sound back: generated audio now reaches the caller (closes `TODO(E-IMG-4/5)`), plus the

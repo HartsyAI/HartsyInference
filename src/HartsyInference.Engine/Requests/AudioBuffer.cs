@@ -87,6 +87,23 @@ public sealed record AudioBuffer
         return this with { Channels = trimmed };
     }
 
+    /// <summary>Silence-pads every channel up to <paramref name="seconds"/>; returns this buffer when already that long.</summary>
+    public AudioBuffer PadTo(double seconds)
+    {
+        if (IsEmpty || seconds <= 0d)
+            return this;
+        int target = (int)Math.Ceiling(seconds * SampleRate);
+        if (target <= FrameCount)
+            return this;
+        float[][] padded = new float[Channels.Length][];
+        for (int c = 0; c < Channels.Length; c++)
+        {
+            padded[c] = new float[target];
+            Array.Copy(Channels[c], padded[c], Math.Min(Channels[c].Length, target));
+        }
+        return this with { Channels = padded };
+    }
+
     /// <summary>Wraps planar channel arrays, normalizing a null/empty set to <see cref="Empty"/>.</summary>
     public static AudioBuffer FromChannels(float[][]? channels, int sampleRate)
     {

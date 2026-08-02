@@ -129,6 +129,23 @@ public class VideoAudioContractTests
     }
 
     [Fact]
+    public void ShortTrackIsPaddedSoTheMuxerCannotDropVideoFrames()
+    {
+        // Real LTX-2.3 case: 25 frames @24fps = 1.0417s of video against a 1.010s soundtrack. ffmpeg -shortest
+        // cut the 25th frame until the track was padded to match.
+        double videoSeconds = VideoAudioResolver.VideoSeconds(25, 24);
+        AudioBuffer shortTrack = Stereo(48_480);
+        Assert.True(shortTrack.Seconds < videoSeconds);
+        VideoGenerationResult resolved = VideoAudioResolver.Resolve(
+            Frames(25) with { Audio = shortTrack }, new VideoRequest { Prompt = "x" }, videoSeconds);
+        Assert.True(resolved.Audio!.Seconds >= videoSeconds);
+        Assert.Equal(2, resolved.Audio.ChannelCount);
+        // Padding is silence appended to the tail, not a resample of the original.
+        Assert.Equal(shortTrack.Channels[0][100], resolved.Audio.Channels[0][100]);
+        Assert.Equal(0f, resolved.Audio.Channels[0][^1]);
+    }
+
+    [Fact]
     public void SilentGenerationStaysSilent()
     {
         VideoRequest request = new VideoRequest { Prompt = "x" };
