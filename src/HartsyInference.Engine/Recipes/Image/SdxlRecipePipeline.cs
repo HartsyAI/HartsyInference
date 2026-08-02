@@ -22,6 +22,9 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
     private readonly SdxlPipeline _pipeline;
     private readonly ClipTokenizer _tokenizer = new ClipTokenizer();
     private readonly IBackend _backend;
+    /// <summary>Backend for weighted CLIP conditioning — follows the pipeline's text-encoder placement so the
+    /// weighted and unweighted encode paths agree on where the encoders live.</summary>
+    private readonly IBackend _textBackend;
     private readonly ClipTextEncoder _clipL;
     private readonly ClipTextEncoder _clipG;
     private readonly MergedLoraStack? _loraStack;
@@ -41,6 +44,7 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
     {
         _pipeline = pipeline;
         _backend = backend;
+        _textBackend = pipeline.TextEncoderBackend;
         _clipL = clipL;
         _clipG = clipG;
         _loraStack = loraStack;
@@ -65,7 +69,7 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
             _backend,
             UNetConfig.SdxlBase,
             IpAdapterBaseModel.Sdxl,
-            () => WeightedConditioning.BuildDualClip(_backend, _clipL, _clipG, _tokenizer, request.Prompt, negative, SdxlLayersFromEnd),
+            () => WeightedConditioning.BuildDualClip(_textBackend, _clipL, _clipG, _tokenizer, request.Prompt, negative, SdxlLayersFromEnd),
             LookupIpAdapter,
             CacheIpAdapter,
             cancel);

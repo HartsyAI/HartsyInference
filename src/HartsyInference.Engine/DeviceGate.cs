@@ -35,7 +35,20 @@ public static class DeviceGate
         {
             return _noop;
         }
-        SemaphoreSlim gate = _gates.GetOrAdd(backend.Device.Ordinal, static _ => new SemaphoreSlim(1, 1));
+        return AcquireForCudaOrdinal(backend.Device.Ordinal, cancel);
+    }
+
+    /// <summary>Acquires a device's slot by ORDINAL, for callers that know the device before they have a backend
+    /// object (a model load that has yet to construct one). Callers must take at most ONE gate — a layer-split
+    /// load spans devices and gates only on the stage that owns its logits, so the single-gate rule (and with it
+    /// deadlock freedom) holds.</summary>
+    public static IDisposable AcquireForCudaOrdinal(int ordinal, CancellationToken cancel = default)
+    {
+        if (_concurrent || ordinal < 0)
+        {
+            return _noop;
+        }
+        SemaphoreSlim gate = _gates.GetOrAdd(ordinal, static _ => new SemaphoreSlim(1, 1));
         gate.Wait(cancel);
         return new Releaser(gate);
     }

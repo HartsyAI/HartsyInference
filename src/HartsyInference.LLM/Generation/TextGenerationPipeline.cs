@@ -19,13 +19,25 @@ public sealed class TextGenerationPipeline
     private readonly IBackend _backend;
     private readonly HashSet<int> _stopIds;
 
-    /// <summary>Creates the pipeline. <paramref name="template"/> defaults to ChatML when not supplied.</summary>
+    /// <summary>Layer-split plan when this pipeline runs sharded across devices; null = single-backend. When
+    /// set, <see cref="_backend"/> is the LAST stage's backend (final norm, logits, sampling live there).</summary>
+    private readonly LlmPlacement? _placement;
+
+    /// <summary>True when a genuine multi-stage placement is active.</summary>
+    private bool Staged => _placement is not null && !_placement.IsSingle;
+
+    /// <summary>Creates the pipeline. <paramref name="template"/> defaults to ChatML when not supplied.
+    /// <paramref name="placement"/> shards the decoder layers across devices (VRAM pooling); null keeps the
+    /// single-backend path byte-identical.</summary>
     public TextGenerationPipeline(GenericTransformer model, ILlmTokenizer tokenizer, IBackend backend,
-        IChatTemplate? template = null)
+        IChatTemplate? template = null, LlmPlacement? placement = null)
     {
         _model = model;
         _tokenizer = tokenizer;
-        _backend = backend;
+        _placement = placement;
+        // Sharded: the pipeline's own backend is the last stage's — that is where the final hidden state,
+        // logits projection, and sampler inputs live.
+        _backend = placement is not null ? placement.LastBackend : backend;
         _template = template ?? new ChatMlTemplate();
         _stopIds = [.. tokenizer.StopIds];
         // Make decode weights device-resident up front (headroom-guarded — see PreloadDecodeWeights).
@@ -34,6 +46,13 @@ public sealed class TextGenerationPipeline
         // them (measured: 5271 small H2D misses in a 7-generation qwen2.5 run, ~26 ms/generation).
         PreloadDecodeWeights();
     }
+
+    /// <summary>The hidden-state forward for one step: staged across the placement when sharded, else the
+    /// plain single-backend path.</summary>
+    private Tensor ForwardTokens(ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache) =>
+        Staged
+            ? _model.ForwardStaged(_placement!, tokenIds, posStart, cache)
+            : _model.Forward(_backend, tokenIds, posStart, cache);
 
     /// <summary>Headroom-guarded weight preload: uploads every transformer weight that fits while leaving
     /// 2 GB of VRAM free (large stragglers stay lazy). Idempotent — already-cached tensors are skipped.</summary>
@@ -54,6 +73,33 @@ public sealed class TextGenerationPipeline
             // weights are catastrophic under graph decode — they bake per-token PCIe memcpy nodes into the
             // captured graph (GLM 43.8 → 27.9 tok/s). Decode residency outranks prefill slack; prefill
             // transients are protected by the cast cache's budget floor and the OOM cast-eviction retry.
+            if (Staged)
+            {
+                // Sharded: budget each stage against ITS device and preload that stage's slice. The lazy GGUF
+                // matmul path covers anything skipped — each layer's ops run on its stage backend, so lazy
+                // uploads land on the right device by construction.
+                for (int s = 0; s < _placement!.Stages.Count; s++)
+                {
+                    LlmStage stage = _placement.Stages[s];
+                    long stageHeadroom = s == _placement.Stages.Count - 1 ? headroom : 2L << 30;
+                    long stageFree = stage.Backend.FreeMemoryBytes();
+                    if (stageFree <= stageHeadroom) continue;
+                    long stageBudget = stageFree - stageHeadroom;
+                    List<Tensor> stageLoad = [];
+                    foreach (Tensor t in _model.EnumerateStageWeights(stage.StartLayer, stage.EndLayer,
+                        isFirstStage: s == 0, isLastStage: s == _placement.Stages.Count - 1, includeRedundantSplits: false))
+                    {
+                        long bytes = Tensor.ComputeByteSize(t.Shape, t.DType);
+                        if (stageBudget - bytes < 0) continue;
+                        stageBudget -= bytes;
+                        stageLoad.Add(t);
+                    }
+                    HartsyInference.Core.Logging.Logs.Info(
+                        $"[preload] stage {s} [{stage.StartLayer},{stage.EndLayer}) kept={stageLoad.Count} on its device.");
+                    stage.Backend.PreloadWeights(stageLoad);
+                }
+                return;
+            }
             if (_backend.FreeMemoryBytes() is long free && free > headroom)
             {
                 List<Tensor> toPreload = [];
@@ -107,7 +153,7 @@ public sealed class TextGenerationPipeline
 
         bool stopped = false;
         int next;
-        using (Tensor hidden = _model.Forward(_backend, promptIds, 0, cache))
+        using (Tensor hidden = ForwardTokens(promptIds, 0, cache))
         {
             // Project logits for the LAST prompt position only: sampling reads a single row, and slicing
             // BEFORE the head projection (a) skips (promptLen−1)/promptLen of the vocab GEMM — the single
@@ -143,9 +189,12 @@ public sealed class TextGenerationPipeline
         // including any JSON grammar step — so combining the two would silently produce unconstrained output.
         // (Previously missing here even though DynamicBatchScheduler's equivalent admission check already
         // excluded it — now consistent.)
+        // Staged v1 keeps decode eager: the step graph is a single-backend capture (one slot per backend,
+        // baked device pointers), so per-stage graphs are a measured follow-up, not a default.
         bool useGraphDecode = request.Sampling.Greedy
             && !request.Sampling.HasJsonConstraint
             && graphDecodeRequested
+            && !Staged
             && _model.SupportsGraphDecode(_backend);
 
         // Prompt-lookup speculative decoding: batches a verify pass across several drafted tokens instead of
@@ -156,6 +205,7 @@ public sealed class TextGenerationPipeline
         bool useSpecDecode = !useGraphDecode
             && request.Sampling.Greedy
             && !request.Sampling.HasJsonConstraint
+            && !Staged
             && specDecodeRequested;
 
         if (useGraphDecode)
@@ -175,7 +225,7 @@ public sealed class TextGenerationPipeline
                 generated.Add(next);
                 onToken?.Invoke(next);
 
-                using Tensor hidden = _model.Forward(_backend, [next], cache.CurrentLength, cache);
+                using Tensor hidden = ForwardTokens([next], cache.CurrentLength, cache);
                 using Tensor logits = _model.ProjectLogits(_backend, hidden, 1);
                 Span<float> row = LastRow(logits, 1, cfg.VocabSize);
                 next = sampler.Next(row, generated);

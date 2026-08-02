@@ -14,6 +14,40 @@ public sealed record RecipeContext
     /// <summary>Compute backend the constructed pipeline runs on.</summary>
     public required IBackend Backend { get; init; }
 
+    /// <summary>Backend for prompt/text encoders (CLIP/T5/umT5/LLM-style); null = <see cref="Backend"/>. Safe
+    /// without any peer-copy machinery because every encoder→denoiser handoff host-materializes the embeddings —
+    /// an invariant the pipelines assert with their pre-loop <c>DataPointer</c> sweeps.</summary>
+    public IBackend? TextEncoderBackend { get; init; }
+
+    /// <summary>Backend for VAE encode/decode; null = <see cref="Backend"/>. The latent handoff is host-side
+    /// (UnpackLatent and friends), so this is placement-safe like the text encoder.</summary>
+    public IBackend? VaeBackend { get; init; }
+
+    /// <summary>The text-encoder backend with the primary fallback applied.</summary>
+    public IBackend TextEncoderBackendOrDefault => TextEncoderBackend ?? Backend;
+
+    /// <summary>The VAE backend with the primary fallback applied.</summary>
+    public IBackend VaeBackendOrDefault => VaeBackend ?? Backend;
+
+    /// <summary>Every distinct backend this recipe will touch — recipes that set per-backend flags
+    /// (CacheWeightCasts, fp8 toggles) must apply them to ALL of these, not just <see cref="Backend"/>.</summary>
+    public IEnumerable<IBackend> AllBackends
+    {
+        get
+        {
+            yield return Backend;
+            if (TextEncoderBackend is not null && !ReferenceEquals(TextEncoderBackend, Backend))
+            {
+                yield return TextEncoderBackend;
+            }
+            if (VaeBackend is not null && !ReferenceEquals(VaeBackend, Backend)
+                && !ReferenceEquals(VaeBackend, TextEncoderBackend))
+            {
+                yield return VaeBackend;
+            }
+        }
+    }
+
     /// <summary>Optional swappable-component overrides; null keeps the recipe's defaults.</summary>
     public ComponentOverrides? Components { get; init; }
 

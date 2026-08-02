@@ -136,6 +136,30 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName, EntryPoint = "cuMemcpyDtoHAsync_v2")]
     internal static partial int cuMemcpyDtoHAsync(nint dst, ulong src, nuint bytes, nint stream);
 
+    // ── Peer (device-to-device across GPUs) ─────────────────────────────
+    //
+    // CUDA 4.0+ entry points (no legacy _v2 split — they postdate the 64-bit ABI
+    // change). Peer copies work with or without peer ACCESS: without enabled
+    // access the driver stages through host memory internally; with it (PCIe P2P
+    // or NVLink) the copy goes device-to-device direct. CudaPeerAccess owns the
+    // probe/enable memo; consumer boards commonly report no P2P, which is fine —
+    // the engine's own pinned-staging fallback path is the primary-tested route.
+
+    /// <summary>1 when <paramref name="dev"/> can access <paramref name="peerDev"/>'s memory directly (P2P/NVLink).</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuDeviceCanAccessPeer(out int canAccessPeer, int dev, int peerDev);
+
+    /// <summary>Grants the CURRENT context direct access to <paramref name="peerContext"/>'s memory. Flags must be 0.
+    /// Returns CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED (=704) on repeat — treat as success.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuCtxEnablePeerAccess(nint peerContext, uint flags);
+
+    [LibraryImport(LibName)]
+    internal static partial int cuMemcpyPeer(ulong dstDevice, nint dstContext, ulong srcDevice, nint srcContext, nuint byteCount);
+
+    [LibraryImport(LibName)]
+    internal static partial int cuMemcpyPeerAsync(ulong dstDevice, nint dstContext, ulong srcDevice, nint srcContext, nuint byteCount, nint hStream);
+
     // ── Pinned (page-locked) host memory ────────────────────────────────
     //
     // The GPU copy engine cannot DMA out of pageable host memory; the driver

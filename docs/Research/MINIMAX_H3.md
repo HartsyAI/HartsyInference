@@ -1,10 +1,11 @@
 # MiniMax-H3 — pre-release research
 
-> **Status as of 2026-08-01: weights are NOT released.** Everything architectural below is vendor
-> marketing copy, not a spec. Nothing in this document is sufficient to write a forward pass. The
-> engine seam is wired (`MiniMaxH3Recipe`) and fails loudly *when handed a checkpoint* — see
-> [Engine state](#engine-state) for what actually surfaces. The bring-up checklist starts at
-> [Unknowns](#unknowns--the-day-one-checklist).
+> **Status 2026-08-02: weights still NOT released, but the ARCHITECTURE IS NOW PUBLIC.** Kijai's open
+> ComfyUI PR **#15224** is a complete native implementation (DiT + both VAEs + text encoder + nodes) —
+> see [that section](#the-architecture-is-public--kijais-comfyui-pr-15224-2026-08-02), which supersedes
+> the marketing-level "Architecture" section below and most of the unknowns checklist. A port can start
+> now; only real-weight testing is still blocked. The engine seam is wired (`MiniMaxH3Recipe`) and fails
+> loudly when handed a checkpoint.
 
 ## What H3 is
 
@@ -33,8 +34,9 @@ Checked 2026-08-01:
 `MinimaxHailuo03FirstLastFrameNode`, `MinimaxHailuo03ReferenceNode`) POST to
 `/proxy/minimax/v2/video_generation` and poll `/proxy/minimax/v2/query/video_generation/{task_id}` —
 they are a thin cloud client. ComfyUI's own announcement says "Native open-weight support is coming
-soon." **There is nothing to port from Comfy.** Re-check that file when weights drop; the local
-implementation will land somewhere else entirely (`comfy/ldm/…`).
+soon." **SUPERSEDED 2026-08-02** — that prediction was right about *where* (`comfy/ldm/minimax/`) and it
+has since arrived as PR #15224. The paragraph above describes only the merged-to-main API nodes; there is
+now a full native implementation to port from.
 
 ## Capability contract (KNOWN — this part is not speculation)
 
@@ -188,6 +190,56 @@ blocks**. State-dict prefix `text_encoders.qwen3vl_32b.transformer.`.
 
 ### Non-model changes in the PR
 ModelOpt AWQ-style `pre_quant_scale` in quant ops, and a fused activation+quantize path for INT8 linears.
+
+## Device-op plan (audited 2026-08-02) — write the DiT device-first
+
+Every H3 stage mapped to an existing `IBackend` op, so the port composes rather than inventing kernels.
+**`IBackend` gives almost every op a host default body**, so a backend that lacks an override does not fail —
+it silently runs on the CPU through `DataPointer`, draining the stream. Absence of an override is therefore
+a *performance and correctness* trap, not a compile error. Coverage below is what the audit found.
+
+### Per-block hot path (runs x50 — must never touch the host)
+
+| H3 stage | op | CUDA | Vulkan |
+|---|---|---|---|
+| `norm1`/`norm2`, refiner norms | `RmsNorm` | ✅ | ✅ |
+| adaln scale/shift (`_mod_scale_shift`) | `AffineBroadcastLastDim` (`out = in*scale + shift`; precompute `1+scale` once per step on the small adaln tensor) | ✅ | ✅ |
+| gated residual (`_mod_gate` addcmul) | `GatedResidualLastDim` (`out = residual + gate*value`) — exact match | ✅ | ✅ |
+| qkv / out / fc1 / fc2 | `Linear` | ✅ | ✅ |
+| attention | `ScaledDotProductAttention` / `FlashAttention` | ✅ | ✅ |
+| per-head q/k RMS + **partial split-half RoPE** | `ApplyRopeSingle(x, cos, sin, rotaryDim)` | ✅ | ❌ host |
+| SwiGLU (`fc1` gated pair → `fc2`) | `GluActivate` | ✅ | ❌ host |
+
+**RoPE is the one that had to be gotten right.** H3 rotates **96 of 128** head dims with NEOX split-half
+pairing `(i, i+48)`, leaving dims 96–127 untouched (`rope_freqs` builds `[S,48*3=144?]` no — `cat(t,h,w)`
+= `[S,48]` then `cat(half,half)` = `[S,96]`; `rope_rotation_table` reads `angles[:, :48]`, and the attention
+computes `rot_dim = 48*2 = 96`). Two nearby ops are WRONG for this:
+- `Ltx2SplitRope` hardcodes `r = headDim / 2` — full rotary only, would rotate 64/64 instead of 48/48.
+- the interleaved family (`WanRopeInterleaved`, `ApplyRopeInterleaved`) pairs `(2i, 2i+1)`, not split-half.
+
+`ApplyRopeSingle` is the correct one: NEOX `(i, i+rotaryDim/2)` pairing, partial-rotary aware, cos/sin kept
+at `headDim` stride with only the first `rotaryDim` entries read, `x` shaped `[B,L,heads,headDim]`. The CUDA
+override forwards `rotaryDim` to the kernel and clears the stale in-place callbacks (pitfall #17). Getting
+this wrong is the coherent-but-wrong failure class (the GLM-4 partial-rotary and Qwen3.5 split-half bugs).
+
+### Once per forward
+`Permute0213` (patchify/unpatchify video, pack/unpack audio) ✅ both; `SliceRows` ✅ both;
+`RowGather` ✅ CUDA / ❌ Vulkan (only needed when conditioning rows interleave with target rows).
+
+### Legitimately host-side — not "host glue"
+The time embedder's sin/cos and the adaln curve-table lerp run over the **unique timesteps only**, of which
+there are at most four per step (video, audio, and optionally the visual/audio conditioning pins). That is a
+handful of scalars per sampling step, not per token or per block, and it is fp32 in the reference too.
+Keep it host-side and don't let a reviewer mistake it for the SeedVR2-class host-math problem.
+
+### Vulkan status — honest
+The per-block path is fully device-resident **on CUDA**. On Vulkan, **RoPE and SwiGLU fall back to host**,
+which would mean ~100 stream drains per forward (50 blocks x 2). This is **pre-existing and not H3-specific**:
+`ApplyRopeSingle`, `Ltx2SplitRope`, `ApplyRopeInterleaved` and `WanRopeInterleavedPerHead` have **no Vulkan
+override at all**, so every video DiT in the repo (Wan, LTX-2, …) has the same gap. Closing it means SPIR-V
+shaders for a rope family + `GluActivate`, which is its own task — tracked in MODEL_STATUS_VIDEO, not
+something to discover during H3 bring-up. Until then, H3 on Vulkan will run but slowly, and that is a
+known-and-stated limitation rather than a surprise.
 
 ## Unknowns — the day-one checklist
 

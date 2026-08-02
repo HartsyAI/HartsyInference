@@ -27,6 +27,11 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     private const float DefaultFlowShift = 8f;
 
     private readonly IBackend _backend;
+    /// <summary>Backend the umT5 prompt encoder runs on — separable from <see cref="_backend"/> because the
+    /// embeddings are host-materialized (SliceBatchElement/ZeroPaddedRows are host loops) before the denoiser
+    /// consumes them. Wan always runs real CFG with a ~T5-XXL-class encoder, so moving it off the denoiser GPU is
+    /// the single biggest consumer-tier VRAM win in the video stack.</summary>
+    private readonly IBackend _textBackend;
     private readonly WanVideoPipeline _pipeline;
     private readonly WanVideoConfig _config;
     private readonly bool _isClipI2V;
@@ -37,11 +42,13 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     private readonly ClipVisionEncoder? _clipVision;
     private readonly List<SafeTensorsLoader> _loaders;
 
-    /// <summary>Wraps the constructed Wan pipeline plus its encoders, taking ownership of every disposable.</summary>
-    public WanVideoRecipePipeline(IBackend backend, WanVideoPipeline pipeline, WanVideoConfig config, bool isClipI2V, T5Tokenizer tokenizer,
+    /// <summary>Wraps the constructed Wan pipeline plus its encoders, taking ownership of every disposable.
+    /// <paramref name="textBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
+    public WanVideoRecipePipeline(IBackend backend, IBackend textBackend, WanVideoPipeline pipeline, WanVideoConfig config, bool isClipI2V, T5Tokenizer tokenizer,
         T5TextEncoder umt5, WanVideoTransformer transformer, IWanVaeEncoder vaeEncoder, ClipVisionEncoder? clipVision, List<SafeTensorsLoader> loaders)
     {
         _backend = backend;
+        _textBackend = textBackend;
         _pipeline = pipeline;
         _config = config;
         _isClipI2V = isClipI2V;
@@ -76,15 +83,18 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
-        Tensor batch = _umt5.Encode(_backend, [promptTokens, negTokens],
+        // umT5 runs on the (possibly separate) text backend; the host-side slice/zero passes below ARE the
+        // cross-device boundary — they force the embeddings to host, so the denoiser's backend re-uploads from
+        // there. Load-bearing for TextEncoderDevice placement: keep them host-side.
+        Tensor batch = _umt5.Encode(_textBackend, [promptTokens, negTokens],
             [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
         Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
         Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
         batch.Dispose();
         VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
         VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
-        _backend.Sync();
-        _backend.FreeWeights(_umt5.EnumerateWeights());
+        _textBackend.Sync();
+        _textBackend.FreeWeights(_umt5.EnumerateWeights());
 
         VideoGenerationRequest inner = new VideoGenerationRequest
         {

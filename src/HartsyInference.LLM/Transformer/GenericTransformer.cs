@@ -236,6 +236,85 @@ public sealed unsafe class GenericTransformer : IDisposable
             foreach (Tensor t in l.EnumerateWeights(includeRedundantSplits)) yield return t;
     }
 
+    /// <summary>The weight subset one pipeline stage needs resident on ITS backend: the layer range's tensors,
+    /// plus (first stage) the embedding norm and (last stage) the tied/untied head, final norm, and PLE
+    /// projection. The union over a full contiguous stage tiling equals <see cref="EnumerateWeights"/> exactly —
+    /// unit-asserted, since a dropped tensor here silently becomes a per-op PCIe re-upload.</summary>
+    public IEnumerable<Tensor> EnumerateStageWeights(int startLayer, int endLayer, bool isFirstStage, bool isLastStage,
+        bool includeRedundantSplits = true)
+    {
+        ThrowIfDisposed();
+        if (startLayer < 0 || endLayer > _layers.Length || startLayer >= endLayer)
+            throw new ArgumentException($"Invalid stage range [{startLayer}, {endLayer}) for a stack of {_layers.Length}.");
+        if (isLastStage && _cfg.TieWordEmbeddings)
+        {
+            if (_lmHeadQuant is not null) yield return _lmHeadQuant;
+            else if (_embed is not null) yield return _embed;
+        }
+        if (isFirstStage && _embedNorm is not null) { yield return _embedNorm; yield return _embedNormBias!; }
+        if (isLastStage)
+        {
+            if (_finalNorm is not null) yield return _finalNorm;
+            if (_finalNormBias is not null) yield return _finalNormBias;
+            if (_perLayerModelProj is not null) { yield return _perLayerModelProj; yield return _perLayerProjNorm!; }
+            if (_lmHead is not null) yield return _lmHead;
+        }
+        for (int i = startLayer; i < endLayer; i++)
+            foreach (Tensor t in _layers[i].EnumerateWeights(includeRedundantSplits)) yield return t;
+    }
+
+    /// <summary>Runs the full stack across a layer-split placement: one <see cref="ForwardEmbeds"/> call per
+    /// stage on that stage's backend, final norm and cache advance only on the last, and a HOST-staged hidden
+    /// handoff between stages (the read fires the producing backend's lazy D2H; the next stage re-uploads —
+    /// ~T×hidden F32 per boundary, 16-32 KB at decode). Works on any hardware; a direct
+    /// <c>CopyFromPeer</c> boundary is a measured follow-up. Not supported for Gemma-4 PLE (per-layer inputs are
+    /// computed against the full stack) or mllama cross-attention (vision states would need per-stage copies).</summary>
+    public Tensor ForwardEmbedsStaged(LlmPlacement placement, Tensor embeds, int t, int posStart, IKvCache cache,
+        ReadOnlySpan<int> tokenIds = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(placement);
+        if (placement.LayerCount != _layers.Length)
+            throw new ArgumentException($"Placement covers {placement.LayerCount} layers; model has {_layers.Length}.");
+        if (placement.IsSingle)
+            return ForwardEmbeds(placement.Stages[0].Backend, embeds, t, posStart, cache, tokenIds: tokenIds);
+        if (_cfg.PerLayerEmbeddingDim > 0)
+            throw new NotSupportedException("Layer-split placement does not support Gemma-4 per-layer embeddings yet.");
+
+        Tensor hidden = embeds;
+        bool owns = false;
+        for (int s = 0; s < placement.Stages.Count; s++)
+        {
+            LlmStage stage = placement.Stages[s];
+            bool last = s == placement.Stages.Count - 1;
+            Tensor next = ForwardEmbeds(stage.Backend, hidden, t, posStart, cache,
+                applyFinalNorm: last, startLayer: stage.StartLayer, endLayer: stage.EndLayer,
+                tokenIds: tokenIds, advanceCache: last);
+            if (!last)
+            {
+                // LOAD-BEARING host materialization: this read IS the stage boundary — it syncs the hidden state
+                // off the producing stage's device so the next stage's backend uploads from the host copy.
+                _ = next.DataPointer;
+            }
+            if (owns) hidden.Dispose();
+            hidden = next;
+            owns = true;
+        }
+        return hidden;
+    }
+
+    /// <summary>Token-IDs-in convenience over <see cref="ForwardEmbedsStaged"/>, mirroring <see cref="Forward"/>.</summary>
+    public Tensor ForwardStaged(LlmPlacement placement, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache)
+    {
+        ThrowIfDisposed();
+        int t = tokenIds.Length;
+        Tensor embeds = new(new TensorShape(1, t, _cfg.HiddenSize), DType.F32);
+        EmbedLookup(embeds, tokenIds);
+        Tensor output = ForwardEmbedsStaged(placement, embeds, t, posStart, cache, tokenIds: tokenIds);
+        embeds.Dispose();
+        return output;
+    }
+
     /// <summary>Token-IDs-in path: host embedding gather (one tiny H2D), then the resident transformer.
     /// Returns the final <c>[1, T, hidden]</c> hidden state (post final RMSNorm).</summary>
     public Tensor Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache)
@@ -252,13 +331,16 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// <summary>Embedding-in path. Runs decoder layers <c>[startLayer, endLayer)</c> (default the full stack)
     /// and returns the <c>[1, T, hidden]</c> hidden state, final-normed when <paramref name="applyFinalNorm"/>
     /// is true (else the raw last-layer hidden). <paramref name="posStart"/> = <see cref="IKvCache.CurrentLength"/>.
-    /// The cache advances once per call (after the layers run), matching the reference decoder.
+    /// The cache advances once per call (after the layers run), matching the reference decoder — UNLESS
+    /// <paramref name="advanceCache"/> is false: a staged (layer-split) driver calls this once per stage over ONE
+    /// shared cache, and only the final stage may advance, or the write cursor moves stages× per token.
     /// <paramref name="tokenIds"/> is required (throws otherwise) when <see cref="TransformerConfig.PerLayerEmbeddingDim"/>
     /// is set (Gemma-4): its per-layer embedding mixing needs the actual token ids, not just their embedding —
     /// every other architecture ignores it.</summary>
     public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache,
         bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null,
-        Tensor? crossStates = null, int crossLen = 0, ReadOnlySpan<int> tokenIds = default)
+        Tensor? crossStates = null, int crossLen = 0, ReadOnlySpan<int> tokenIds = default,
+        bool advanceCache = true)
     {
         ThrowIfDisposed();
         int last = endLayer ?? _layers.Length;
@@ -348,7 +430,10 @@ public sealed unsafe class GenericTransformer : IDisposable
                 hidden = next;
                 ownsHidden = true;
             }
-            cache.AdvanceLength(t);
+            if (advanceCache)
+            {
+                cache.AdvanceLength(t);
+            }
 
             if (applyFinalNorm)
             {

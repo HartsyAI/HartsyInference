@@ -156,14 +156,14 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             // Bulk-upload both encoders for the duration of the encode, then release them below (the
             // PreloadWeights/FreeWeights symmetry AGENTS.md requires). Only reached on a prompt-cache MISS —
             // a hit skips the whole phase, so repeat prompts pay nothing.
-            Backend.PreloadWeights(_clipL.EnumerateWeights());
-            Backend.PreloadWeights(_clipG.EnumerateWeights());
+            TextEncoderBackend.PreloadWeights(_clipL.EnumerateWeights());
+            TextEncoderBackend.PreloadWeights(_clipG.EnumerateWeights());
             int[][] batchTokenIdsL = [negativePromptTokenIdsL, promptTokenIdsL];
-            (Tensor clipLHidden, _) = _clipL.EncodePenultimate(Backend, batchTokenIdsL, [0, 0], clipSkip);
+            (Tensor clipLHidden, _) = _clipL.EncodePenultimate(TextEncoderBackend, batchTokenIdsL, [0, 0], clipSkip);
 
             int[][] batchTokenIdsG = [negativePromptTokenIdsG, promptTokenIdsG];
             int[] eosPositions = [negativeEosPositionG, promptEosPositionG];
-            (Tensor clipGHidden, Tensor? pooled) = _clipG.EncodePenultimate(Backend, batchTokenIdsG, eosPositions, clipSkip);
+            (Tensor clipGHidden, Tensor? pooled) = _clipG.EncodePenultimate(TextEncoderBackend, batchTokenIdsG, eosPositions, clipSkip);
             pooledOutput = pooled;
 
             textEmbeddings = CfgHelper.ConcatLastDim(clipLHidden, clipGHidden);
@@ -179,9 +179,9 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             // budget the VAE decode actively bids for: VaeDecoder picks full-res vs tiled on measured free VRAM
             // (needs workspace + 1.5 GB headroom), so holding dead weights here can push a decode to the slower
             // tiled path for no reason. Sync first so the encode's in-flight reads finish before the free.
-            Backend.Sync();
-            Backend.FreeWeights(_clipL.EnumerateWeights());
-            Backend.FreeWeights(_clipG.EnumerateWeights());
+            TextEncoderBackend.Sync();
+            TextEncoderBackend.FreeWeights(_clipL.EnumerateWeights());
+            TextEncoderBackend.FreeWeights(_clipG.EnumerateWeights());
             Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
             if (teCacheEligible && pooledOutput is not null)
@@ -291,7 +291,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         Stopwatch vaeSw = Stopwatch.StartNew();
 
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
-        Tensor image = _vaeDecoder.DecodeTiled(Backend, latent);
+        Tensor image = _vaeDecoder.DecodeTiled(VaeBackend, latent);
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 

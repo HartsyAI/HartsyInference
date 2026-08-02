@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -95,11 +96,18 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             // fp8 checkpoints on hardware without native FP8 GEMM (Ampere and below) cast each fp8 weight to F16/BF16
             // on first use; caching those casts roughly doubles VRAM per fp8 tensor and OOMs a 12 GB card partway
             // through Flux text encoding. Keep the weights fp8-resident with a transient per-GEMM dequant instead.
-            if (context.Backend is HartsyInference.Cuda.CudaBackend cudaBackend && !cudaBackend.EnableNativeFp8Gemm
-                && (HasFp8Weights(transformerWeights) || HasFp8Weights(clipLWeights) || HasFp8Weights(t5Weights)))
+            // Applied to EVERY placement backend: with the T5 on its own device, that device's backend needs the
+            // same flag or it re-inflates the fp8 encoder there.
+            if (HasFp8Weights(transformerWeights) || HasFp8Weights(clipLWeights) || HasFp8Weights(t5Weights))
             {
-                cudaBackend.CacheWeightCasts = false;
-                Logs.Info("[Flux1Recipe] fp8 checkpoint on non-native-FP8 hardware: CacheWeightCasts disabled (fp8-resident, transient per-GEMM dequant).");
+                foreach (IBackend b in context.AllBackends)
+                {
+                    if (b is HartsyInference.Cuda.CudaBackend cudaBackend && !cudaBackend.EnableNativeFp8Gemm)
+                    {
+                        cudaBackend.CacheWeightCasts = false;
+                        Logs.Info("[Flux1Recipe] fp8 checkpoint on non-native-FP8 hardware: CacheWeightCasts disabled (fp8-resident, transient per-GEMM dequant).");
+                    }
+                }
             }
 
             loraStack = LoraApplier.BuildAndApply(
@@ -120,7 +128,11 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
             vae.LoadWeights(vaeWeights);
 
-            FluxPipeline pipeline = new FluxPipeline(context.Backend, clipL, t5, transformer, vae, config);
+            FluxPipeline pipeline = new FluxPipeline(context.Backend, clipL, t5, transformer, vae, config)
+            {
+                TextEncoderBackend = context.TextEncoderBackendOrDefault,
+                VaeBackend = context.VaeBackendOrDefault,
+            };
             ClipTokenizer clipTok = new ClipTokenizer();
             T5Tokenizer t5Tok = new T5Tokenizer(maxLength: hasGuidance ? 512 : 256);
             Logs.Info($"[Flux1Recipe] Flux.1 ready (Dev={hasGuidance}).");

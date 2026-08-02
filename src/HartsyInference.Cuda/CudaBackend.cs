@@ -7237,6 +7237,100 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>This backend's cached device pointer for <paramref name="tensor"/> (weight or activation shadow),
+    /// or 0 when none. Read-only peek for the peer-copy boundary; the owning backend must be quiescent (the
+    /// per-device gate / stage sequencing guarantees the producing stage finished issuing work).</summary>
+    internal ulong TryGetDevicePointer(Tensor tensor)
+    {
+        if (_transferState.WeightCache.TryGetValue(tensor, out ulong weightPtr))
+        {
+            return weightPtr;
+        }
+        return _transferState.ActivationCache.TryGetValue(tensor, out (ulong gpuPtr, nuint bytes) cached) ? cached.gpuPtr : 0;
+    }
+
+    /// <summary>Count of copies that took the direct peer path.</summary>
+    private long _peerCopies;
+
+    /// <inheritdoc/>
+    public long GetPeerCopyCount() => Interlocked.Read(ref _peerCopies);
+
+    /// <summary>Cross-backend boundary copy. When the source lives on another CUDA device and P2P is available,
+    /// the device copy moves directly (event-ordered against the source's stream, no host round-trip and no
+    /// eviction of the source backend's resident copy). Otherwise the source's device data is staged into the
+    /// DESTINATION's host buffer — deliberately not the default interface path, which would fire the source
+    /// tensor's demote hooks and evict it from the source backend.</summary>
+    public unsafe void CopyFromPeer(Tensor destination, Tensor source, IBackend sourceBackend)
+    {
+        nuint byteSize = (nuint)(source.ElementCount * source.DType.SizeInBytes);
+        if ((nuint)(destination.ElementCount * destination.DType.SizeInBytes) != byteSize)
+        {
+            throw new ArgumentException(
+                $"CopyFromPeer size mismatch: source {byteSize} bytes vs destination " +
+                $"{destination.ElementCount * destination.DType.SizeInBytes} bytes.");
+        }
+        if (sourceBackend is not CudaBackend srcCuda || ReferenceEquals(srcCuda, this))
+        {
+            _ = source.DataPointer;
+            CopyTo(destination, source);
+            return;
+        }
+
+        ulong srcPtr = srcCuda.TryGetDevicePointer(source);
+        if (srcPtr == 0)
+        {
+            // No device shadow — the data already lives (only) in the source's host buffer.
+            _ = source.DataPointer;
+            CopyTo(destination, source);
+            return;
+        }
+
+        if (CudaPeerAccess.TryEnable(_context, srcCuda._context))
+        {
+            // The ordering event must be CREATED and RECORDED under the SOURCE context (event/stream must share a
+            // context); the cross-context part CUDA explicitly supports is waiting on it from OUR stream.
+            srcCuda.EnterOp();
+            CudaDriverApi.cuEventCreate(out nint evt, CudaDriverApi.CU_EVENT_DISABLE_TIMING).ThrowOnError();
+            try
+            {
+                CudaDriverApi.cuEventRecord(evt, srcCuda._stream.Handle).ThrowOnError();
+                EnterOp();
+                ulong dstPtr = GpuTransferHelper.AllocateDevice(byteSize);
+                try
+                {
+                    CudaDriverApi.cuStreamWaitEvent(_stream.Handle, evt, CudaDriverApi.CU_EVENT_WAIT_DEFAULT).ThrowOnError();
+                    CudaDriverApi.cuMemcpyPeerAsync(dstPtr, _context.Handle, srcPtr, srcCuda._context.Handle, byteSize, _stream.Handle)
+                        .ThrowOnError();
+                }
+                catch
+                {
+                    GpuTransferHelper.FreeDevice(dstPtr);
+                    throw;
+                }
+                // Register as OUR activation shadow so downstream ops consume it device-resident and its lifecycle
+                // (dispose/lazy-sync) is managed like any other op output.
+                GpuTransferHelper.CacheActivation(destination, dstPtr, byteSize);
+                Interlocked.Increment(ref _peerCopies);
+            }
+            finally
+            {
+                // Destroy under the event's own context; the driver defers teardown past the pending stream wait.
+                srcCuda._context.EnsureCurrent();
+                CudaDriverApi.cuEventDestroy(evt);
+                _context.EnsureCurrent();
+            }
+            return;
+        }
+
+        // No P2P: drain the producing stream, then stage the source's DEVICE data into the DESTINATION's host
+        // buffer. The source backend's resident copy is untouched (unlike source.DataPointer, which would demote
+        // it), and the destination uploads lazily on its first use here.
+        srcCuda.EnterOp();
+        CudaDriverApi.cuStreamSynchronize(srcCuda._stream.Handle).ThrowOnError();
+        CudaMemory.CopyDeviceToHost(destination.EnsureHostBuffer(), srcPtr, byteSize);
+        EnterOp();
+    }
+
     /// <summary>Fills a tensor with a constant float value. Works on CPU tensors directly.</summary>
     public unsafe void Fill(Tensor tensor, float value)
     {

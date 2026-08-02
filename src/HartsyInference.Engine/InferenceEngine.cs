@@ -196,6 +196,8 @@ public sealed class InferenceEngine : IInferenceEngine
         {
             CheckpointPath = spec.LocalPath,
             Backend = backend,
+            TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
+            VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
             Components = request?.Components,
             Loras = request?.Loras,
         }));
@@ -338,7 +340,13 @@ public sealed class InferenceEngine : IInferenceEngine
 
         IBackend backend = EnsureBackend();
         IVideoRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec,
-            () => recipe.Construct(new RecipeContext { CheckpointPath = spec.LocalPath, Backend = backend }));
+            () => recipe.Construct(new RecipeContext
+            {
+                CheckpointPath = spec.LocalPath,
+                Backend = backend,
+                TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
+                VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
+            }));
         _videoRecipePipelines[key] = pipeline;
         return pipeline;
     }

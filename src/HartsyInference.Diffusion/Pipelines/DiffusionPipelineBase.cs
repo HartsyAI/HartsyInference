@@ -31,8 +31,19 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// </summary>
 public abstract class DiffusionPipelineBase : IDisposable
 {
-    /// <summary>Compute backend used by every model component the pipeline routes through. Injected at construction, immutable for the pipeline's lifetime.</summary>
+    /// <summary>Compute backend used by every model component the pipeline routes through unless a component
+    /// backend below overrides it. Injected at construction, immutable for the pipeline's lifetime.</summary>
     protected IBackend Backend { get; }
+
+    /// <summary>Backend the prompt/text encoders run on; defaults to <see cref="Backend"/>. Settable at
+    /// construction only (init) — cached pipelines are keyed by placement, so a live pipeline never re-places.
+    /// Safe to point at another GPU because encoder→denoiser handoffs host-materialize the conditioning (the
+    /// pre-loop <c>DataPointer</c> sweeps are the load-bearing boundary).</summary>
+    public IBackend TextEncoderBackend { get; init; }
+
+    /// <summary>Backend the VAE encode/decode runs on; defaults to <see cref="Backend"/>. Same host-side
+    /// boundary argument as <see cref="TextEncoderBackend"/> (latents cross via host tensors).</summary>
+    public IBackend VaeBackend { get; init; }
 
     private int _disposed;
 
@@ -40,6 +51,8 @@ public abstract class DiffusionPipelineBase : IDisposable
     protected DiffusionPipelineBase(IBackend backend)
     {
         Backend = backend ?? throw new ArgumentNullException(nameof(backend));
+        TextEncoderBackend = backend;
+        VaeBackend = backend;
     }
 
     /// <summary>Throws <see cref="ObjectDisposedException"/> if the pipeline has already been disposed. Every public <c>GenerateXxx</c> entry point should call this on first line.</summary>

@@ -71,7 +71,11 @@ public sealed class SdxlRecipe : IArchitectureRecipe
             VaeEncoder vaeEncoder = new VaeEncoder(VaeConfig.Sdxl);
             vaeEncoder.LoadWeights(vaeWeights);
 
-            SdxlPipeline pipeline = new SdxlPipeline(context.Backend, clipL, clipG, unet, vaeDecoder, vaeEncoder);
+            SdxlPipeline pipeline = new SdxlPipeline(context.Backend, clipL, clipG, unet, vaeDecoder, vaeEncoder)
+            {
+                TextEncoderBackend = context.TextEncoderBackendOrDefault,
+                VaeBackend = context.VaeBackendOrDefault,
+            };
             Logs.Info("[SdxlRecipe] SDXL ready.");
             return new SdxlRecipePipeline(pipeline, context.Backend, clipL, clipG, loraStack);
         }

@@ -229,8 +229,9 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             Logs.Info("Encoding text with CLIP-L (pooled) + T5-XXL (per-token)...");
 
             // The T5 cannot always coexist with a resident DiT (HARTSY_KEEP_MODELS); evict for this
-            // encode, the denoise section re-preloads. Cache hits never pay this.
-            if (_ditResident)
+            // encode, the denoise section re-preloads. Cache hits never pay this — and a text encoder placed
+            // on its OWN device (TextEncoderBackend) never contends with the DiT at all, so skip the evict.
+            if (_ditResident && ReferenceEquals(TextEncoderBackend, Backend))
             {
                 _transformer.InvalidateStepGraph(Backend);
                 Backend.FreeWeights(_transformer.EnumerateWeights());
@@ -243,17 +244,17 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // text encoding into thousands of ~MB-sized PCIe ping-pongs instead of one
             // bulk transfer + many on-GPU reuses. Backends that don't support a weight
             // cache (Cpu, Vulkan) treat PreloadWeights as a no-op.
-            Backend.PreloadWeights(_t5.EnumerateWeights());
+            TextEncoderBackend.PreloadWeights(_t5.EnumerateWeights());
 
             int[][] batchTokenIdsL = [promptTokenIdsL];
-            Tensor clipLHidden = _clipL.Encode(Backend, batchTokenIdsL);
+            Tensor clipLHidden = _clipL.Encode(TextEncoderBackend, batchTokenIdsL);
             LogTensorStats("CLIP hidden (full)", clipLHidden);
             clipPooled = ExtractEosHiddenState(clipLHidden, promptEosPositionL);
             clipLHidden.Dispose();
 
             int[][] batchTokenIdsT5 = [promptTokenIdsT5];
             int[][]? batchMaskT5 = promptAttentionMaskT5 is not null ? [promptAttentionMaskT5] : null;
-            t5Embeddings = _t5.Encode(Backend, batchTokenIdsT5, batchMaskT5);
+            t5Embeddings = _t5.Encode(TextEncoderBackend, batchTokenIdsT5, batchMaskT5);
 
             Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (T5 seqLen={t5Embeddings.Shape[1]})");
             LogTensorStats("CLIP pooled", clipPooled);
@@ -263,13 +264,13 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             {
                 Logs.Info($"Flux true-CFG enabled (true_cfg_scale={trueCfgScale}); encoding negative prompt...");
                 int[][] negBatchTokenIdsL = [negPromptTokenIdsL ?? promptTokenIdsL];
-                Tensor negClipLHidden = _clipL.Encode(Backend, negBatchTokenIdsL);
+                Tensor negClipLHidden = _clipL.Encode(TextEncoderBackend, negBatchTokenIdsL);
                 negClipPooled = ExtractEosHiddenState(negClipLHidden, negPromptEosPositionL);
                 negClipLHidden.Dispose();
 
                 int[][] negBatchTokenIdsT5 = [negPromptTokenIdsT5!];
                 int[][]? negBatchMaskT5 = negPromptAttentionMaskT5 is not null ? [negPromptAttentionMaskT5] : null;
-                negT5Embeddings = _t5.Encode(Backend, negBatchTokenIdsT5, negBatchMaskT5);
+                negT5Embeddings = _t5.Encode(TextEncoderBackend, negBatchTokenIdsT5, negBatchMaskT5);
                 LogTensorStats("Neg CLIP pooled", negClipPooled);
                 LogTensorStats("Neg T5 embeddings", negT5Embeddings);
             }
@@ -277,16 +278,18 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // Free T5 weights from GPU now that text encoding is done. T5-XXL is ~5 GB —
             // keeping it cached through sampling + VAE decode would OOM 12 GB cards on Flux.
             // The activation tensors live independently of the encoder weights.
-            Backend.FreeWeights(_t5.EnumerateWeights());
+            TextEncoderBackend.FreeWeights(_t5.EnumerateWeights());
 
             // Materialize the conditioning on the host (clipPooled already is — ExtractEosHiddenState reads it),
             // then reclaim every encoder intermediate. CLIP+T5 leave hundreds of device-cached activations that
             // otherwise linger until GC finalization — they held multi-GB into the DiT phase and were a chunk of
             // the fp8 auto-transfer OOM. Host-materializing is also what lets the cached embeddings survive
             // every later FreeActivations sweep across generations.
+            // LOAD-BEARING for TextEncoderDevice placement: these host reads ARE the cross-device boundary —
+            // the denoiser's backend re-uploads the conditioning from the host copies.
             _ = t5Embeddings.DataPointer;
             if (negT5Embeddings is not null) _ = negT5Embeddings.DataPointer;
-            Backend.FreeActivations();
+            TextEncoderBackend.FreeActivations();
 
             // Install into the cross-generation cache (dispose whatever it replaces).
             if (!condHit)
@@ -426,7 +429,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                 throw new ArgumentException(
                     $"kontextRefImage shape must be [1, 3, {height}, {width}] (resized to the output resolution); got {kontextRefImage.Shape}.",
                     nameof(kontextRefImage));
-            Tensor refLatentUnpacked = _vaeEncoder.Encode(Backend, kontextRefImage);
+            Tensor refLatentUnpacked = _vaeEncoder.Encode(VaeBackend, kontextRefImage);
             packedKontextRef = PackLatent(refLatentUnpacked, latentH, latentW);
             refLatentUnpacked.Dispose();
             kontextRefSeqLen = (int)packedKontextRef.Shape[1];
@@ -862,8 +865,9 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
 
         // ── 6. VAE decode ─────────────────────────────────────────────
         // Preload VAE weights too — many small conv+norm ops in a row, same per-op
-        // re-upload pattern would apply.
-        Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
+        // re-upload pattern would apply. Runs on VaeBackend (defaults to Backend): the unpacked latent above is
+        // host-side (UnpackLatent), so a VAE placed on another device just uploads from there.
+        VaeBackend.PreloadWeights(_vaeDecoder.EnumerateWeights());
 
         // Always go through DecodeTiled. It internally fast-paths to a single direct
         // decode when the latent fits in one tile (small images), so there's no overhead
@@ -875,7 +879,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         // GroupNorm/softmax precision investigation before re-enabling.)
         Logs.Info("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(Backend, unpackedLatent);
+        Tensor image = _vaeDecoder.DecodeTiled(VaeBackend, unpackedLatent);
         unpackedLatent.Dispose();
         LogTensorStats("VAE output", image);
         LogPerChannelStats("VAE output", image);

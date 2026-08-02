@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Multimodal;
 using HartsyInference.LLM.Ssm;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Engine.Services;
 
@@ -13,8 +14,16 @@ internal sealed class TextDeviceSlot
     /// <summary>Serializes generation on this slot; different slots run concurrently.</summary>
     public SemaphoreSlim Lock { get; } = new SemaphoreSlim(1, 1);
 
-    /// <summary>The compute backend (CPU/CUDA) bound to this slot's device.</summary>
+    /// <summary>The compute backend (CPU/CUDA) bound to this slot's device. For a layer-split load this is the
+    /// LAST stage's backend (logits/sampling live there).</summary>
     public IBackend? Backend { get; set; }
+
+    /// <summary>The other stage backends of a layer-split load (everything except <see cref="Backend"/>).
+    /// Slot-owned: disposed with the slot, exactly like <see cref="Backend"/>.</summary>
+    public List<IBackend>? ExtraStageBackends { get; set; }
+
+    /// <summary>The active layer-split plan, or null for a single-device load.</summary>
+    public LlmPlacement? Placement { get; set; }
 
     /// <summary>The loaded GGUF transformer model, or null when nothing (or an SSM model) is loaded.</summary>
     public GgufLanguageModel? Model { get; set; }

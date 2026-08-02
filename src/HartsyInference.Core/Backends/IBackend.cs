@@ -2275,6 +2275,21 @@ public interface IBackend : IDisposable
     /// <summary>Copy tensor data to a different device.</summary>
     void CopyTo(Tensor destination, Tensor source);
 
+    /// <summary>Copies <paramref name="source"/> (produced/resident on <paramref name="sourceBackend"/>) into
+    /// <paramref name="destination"/> on THIS backend — the cross-backend boundary handoff for multi-GPU
+    /// placement (LLM stage boundaries, CFG-branch results). The default stages through the host: forcing
+    /// <c>source.DataPointer</c> fires the source backend's lazy D2H sync, then <see cref="CopyTo"/> uploads
+    /// here. Device-capable backends override with a direct device-to-device path when available.</summary>
+    unsafe void CopyFromPeer(Tensor destination, Tensor source, IBackend sourceBackend)
+    {
+        _ = source.DataPointer;
+        CopyTo(destination, source);
+    }
+
+    /// <summary>Count of cross-device copies that took a DIRECT peer path (P2P/NVLink), for placement diagnostics;
+    /// 0 on backends without one. Host-staged fallbacks show up in <see cref="GetD2hSyncCount"/> instead.</summary>
+    long GetPeerCopyCount() => 0;
+
     /// <summary>Fill a tensor with a constant value.</summary>
     void Fill(Tensor tensor, float value);
 

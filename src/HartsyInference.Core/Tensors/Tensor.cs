@@ -366,7 +366,9 @@ public sealed unsafe class Tensor : IDisposable
         }
 
         throw new HartsyInferenceException(
-            $"Direct tensor copy from {Device} to {targetDevice} is not supported. Use IBackend.CopyTo for cross-device transfers.");
+            $"Direct tensor copy from {Device} to {targetDevice} is not supported. Use the destination backend's " +
+            "CopyFromPeer(dst, src, srcBackend) for cross-device transfers (direct peer copy when available, " +
+            "host-staged otherwise), or CopyTo for host<->device moves within one backend.");
     }
 
     /// <summary>Element count at or above which elementwise dtype conversion is split across cores. Checkpoint load runs

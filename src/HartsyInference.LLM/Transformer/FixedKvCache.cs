@@ -17,7 +17,11 @@ public sealed class FixedKvCache : IKvCache, IDisposable
     private readonly Tensor[] _k;
     private readonly Tensor[] _v;
     private int _currentLength;
-    private bool _resident;
+    /// <summary>Per-layer device residency: each layer's K/V allocate on the backend that first APPENDS to that
+    /// layer. Under multi-device layer-split placement this puts every layer's KV on its stage's device with no
+    /// placement API at all; it also stops shared-KV-slot layers (Gemma-4) from ever going device-resident, since
+    /// nothing appends to them.</summary>
+    private readonly bool[] _residentLayer;
     private int _disposed;
 
     public int NumLayers => _k.Length;
@@ -52,6 +56,7 @@ public sealed class FixedKvCache : IKvCache, IDisposable
         MaxSequenceLength = maxSequenceLength;
         _k = new Tensor[numLayers];
         _v = new Tensor[numLayers];
+        _residentLayer = new bool[numLayers];
         for (int i = 0; i < numLayers; i++)
         {
             int hd = headDimPerLayer[i];
@@ -72,13 +77,16 @@ public sealed class FixedKvCache : IKvCache, IDisposable
     public void AppendStep(IBackend backend, int layer, Tensor newK, Tensor newV)
     {
         ThrowIfDisposed();
-        // First append: place every layer's K/V buffer directly on the device (no per-buffer H2D of the zeroed
-        // host allocation). Backends without a device treat this as a no-op and fall back to lazy upload. The tail
-        // beyond the valid length is never read, so the buffers are left uninitialized.
-        if (!_resident)
+        // First append TO THIS LAYER: place its K/V buffers directly on the appending backend's device (no
+        // per-buffer H2D of the zeroed host allocation). Per-layer rather than all-at-once so a layer-split
+        // placement lands each layer's KV on its own stage's device, and never-appended layers (shared KV slots)
+        // never go resident. Backends without a device treat this as a no-op and fall back to lazy upload. The
+        // tail beyond the valid length is never read, so the buffers are left uninitialized.
+        if (!_residentLayer[layer])
         {
-            _resident = true;
-            for (int i = 0; i < _k.Length; i++) { backend.ResidentAllocateKv(_k[i]); backend.ResidentAllocateKv(_v[i]); }
+            _residentLayer[layer] = true;
+            backend.ResidentAllocateKv(_k[layer]);
+            backend.ResidentAllocateKv(_v[layer]);
         }
         int tNew = (int)newK.Shape[2];
         if (_currentLength + tNew > MaxSequenceLength)
