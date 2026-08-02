@@ -48,6 +48,13 @@ public sealed class VulkanBackend : IBackend
     /// handle).</summary>
     internal (long CoopMat2, long CoopMat, long Tiled) GemmEngagementCounts => (_coopmat2GemmCount, _coopmatGemmCount, _tiledGemmCount);
 
+    /// <summary>Diagnostic pass-through to <see cref="VulkanMemoryAllocator.VkAllocateMemoryStats"/> —
+    /// isolates driver allocation cost from everything else a GEMM call pays for.</summary>
+    internal (long CallCount, double TotalMs) VkAllocateMemoryStats => _allocator.VkAllocateMemoryStats;
+
+    /// <summary>Diagnostic pass-through to <see cref="VulkanMemoryAllocator.SnapshotBlocks"/>.</summary>
+    internal IReadOnlyList<(bool IsDedicated, int LiveAllocations, ulong Size)> AllocatorBlockSnapshot() => _allocator.SnapshotBlocks();
+
     // ── Step-graph capture (Phase 6e/7; see VulkanStepGraph's doc comment for the full design) ──────────────
     private VulkanStepGraph? _stepGraph;
     private bool _capturingStepGraph;

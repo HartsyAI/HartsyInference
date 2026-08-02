@@ -159,6 +159,12 @@ public sealed class TextService : ITextService, IDisposable
         Action<TextChunk>? sink, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
+        // Backend exists before the gate (gate keys off its device); the load itself then runs gated too —
+        // uploading weights concurrent with a same-device sibling's generation is what the gate serializes.
+        // Device gate INSIDE slot.Lock (gate is always innermost): an LLM slot and an image generation on the
+        // same GPU are two backends on one device — state-isolated, but not yet audited for concurrent execution.
+        IBackend gateBackend = slot.Backend ??= CreateBackendFor(deviceKey);
+        using IDisposable gate = DeviceGate.Acquire(gateBackend, cancel);
         LoadInto(slot, deviceKey, spec, request);
         try
         {

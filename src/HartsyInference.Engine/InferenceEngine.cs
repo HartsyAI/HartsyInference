@@ -26,6 +26,12 @@ public sealed class InferenceEngine : IInferenceEngine
     private IBackend? _backend;
     private readonly EngineOptions? _options;
     private Audio.AudioRuntime? _audioRuntime;
+    private PlacementConfig _placement = PlacementConfig.Single;
+
+    /// <summary>Placement-resolved SECONDARY backends (text-encoder device, shard stages), keyed by canonical
+    /// selector. The primary stays in <see cref="_backend"/>; this pool only fills when a placement names other
+    /// devices, so single-device engines never pay for it.</summary>
+    private readonly Dictionary<string, IBackend> _placementBackends = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly Lazy<ImagesService> _images;
     private readonly Lazy<VideoService> _video;
@@ -47,6 +53,7 @@ public sealed class InferenceEngine : IInferenceEngine
     {
         _backendSelector = backendSelector;
         _options = options;
+        _placement = options?.Placement ?? PlacementConfig.Single;
         _images = new Lazy<ImagesService>(() => new ImagesService(this));
         _video = new Lazy<VideoService>(() => new VideoService(this));
         _text = new Lazy<TextService>(() => new TextService(this));
@@ -132,6 +139,22 @@ public sealed class InferenceEngine : IInferenceEngine
         DisposeLoaded();
     }
 
+    /// <summary>This engine's multi-device placement. <see cref="PlacementConfig.Single"/> unless configured.</summary>
+    public PlacementConfig Placement => _placement;
+
+    /// <summary>Replaces the placement and drops loaded pipelines (their weights live on the old devices).
+    /// The all-defaults config restores exact single-device behavior.</summary>
+    public void SetPlacement(PlacementConfig placement)
+    {
+        ArgumentNullException.ThrowIfNull(placement);
+        if (_placement == placement)
+        {
+            return;
+        }
+        _placement = placement;
+        DisposeLoaded();
+    }
+
     /// <summary>The compute backend, constructed on first use. Used by the typed services that drive pipelines directly
     /// (the recipe registry) rather than through a modality handler.</summary>
     internal IBackend Backend => EnsureBackend();
@@ -157,7 +180,7 @@ public sealed class InferenceEngine : IInferenceEngine
         }
 
         // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity.
-        string key = $"recipe:{spec.LocalPath}|{RecipeCacheKey.Describe(request)}";
+        string key = $"recipe:{spec.LocalPath}|{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
         if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
             return cached;
 
@@ -190,6 +213,9 @@ public sealed class InferenceEngine : IInferenceEngine
     /// The reclaim is best-effort — an exception inside it must never replace the real one the caller needs to see.</remarks>
     internal T GenerateWithVramCleanup<T>(Func<T> generate)
     {
+        // Per-device serialization: with two backends sharing one GPU (two SwarmUI backends, or image + LLM
+        // slots), state is isolated per backend but concurrent same-device execution is not yet in contract.
+        using IDisposable gate = DeviceGate.Acquire(EnsureBackend());
         try
         {
             return generate();
@@ -231,6 +257,10 @@ public sealed class InferenceEngine : IInferenceEngine
     /// boundary rather than per recipe.</para></remarks>
     private static T ConstructWithVramCleanup<T>(IBackend backend, ModelSpec spec, Func<T> construct)
     {
+        // Construction uploads multi-GB weight sets — serialize it against a same-device sibling's generation
+        // exactly like the generate path (callers run construct and generate sequentially, never nested, so the
+        // non-reentrant gate cannot self-deadlock).
+        using IDisposable gate = DeviceGate.Acquire(backend);
         try
         {
             return construct();
@@ -293,7 +323,7 @@ public sealed class InferenceEngine : IInferenceEngine
                 "No checkpoint found for this model. Pass a checkpoint via --model-path or let the catalog fetch it first.");
         }
 
-        string key = $"video-recipe:{spec.LocalPath}";
+        string key = $"video-recipe:{spec.LocalPath}{_placement.CacheKey()}";
         if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))
             return cached;
 
@@ -347,6 +377,38 @@ public sealed class InferenceEngine : IInferenceEngine
         }
         return _backend;
     }
+
+    /// <summary>The backend for a placement device selector: the primary when the selector resolves to the
+    /// engine's own device, else a pooled secondary constructed on first use (with the engine's LowVram override
+    /// applied). Null/blank selector = primary.</summary>
+    internal IBackend EnsureBackend(string? selector)
+    {
+        if (string.IsNullOrWhiteSpace(selector))
+        {
+            return EnsureBackend();
+        }
+        string canonical = CanonicalSelector(selector);
+        if (canonical.Equals(CanonicalSelector(_backendSelector), StringComparison.OrdinalIgnoreCase))
+        {
+            return EnsureBackend();
+        }
+        if (_placementBackends.TryGetValue(canonical, out IBackend? existing))
+        {
+            return existing;
+        }
+        IBackend created = BackendFactory.Create(canonical);
+        if (_options?.LowVram is LowVramMode lowVram)
+        {
+            LowVramPolicy.SetOverride(created, lowVram);
+        }
+        _placementBackends[canonical] = created;
+        return created;
+    }
+
+    /// <summary>Canonical device identity for pooling: resolved kind plus ordinal ("cuda:1", "cuda", "cpu"), so
+    /// "auto", "cuda:0" and "cuda" on a CUDA box all pool to the same backend.</summary>
+    private static string CanonicalSelector(string selector) =>
+        BackendFactory.WithOrdinal(BackendFactory.Resolve(selector), BackendFactory.ParseOrdinal(selector));
 
     /// <summary>Disposes every cached image/video pipeline bound to a checkpoint OTHER than
     /// <paramref name="keepPath"/> and returns their device memory to the driver. Called on a cache miss
@@ -455,6 +517,11 @@ public sealed class InferenceEngine : IInferenceEngine
         _audioRuntime?.UnloadAll(AudioUnloadWaitSeconds);
         if (disposeBackend)
         {
+            foreach (IBackend extra in _placementBackends.Values)
+            {
+                extra.Dispose();
+            }
+            _placementBackends.Clear();
             _backend?.Dispose();
             _backend = null;
             return;
@@ -472,6 +539,18 @@ public sealed class InferenceEngine : IInferenceEngine
         catch (Exception ex)
         {
             Logs.Warning($"[Engine] Releasing device memory failed: {ex.Message}");
+        }
+        foreach (IBackend extra in _placementBackends.Values)
+        {
+            try
+            {
+                extra.FreeAllDeviceMemory();
+                extra.TrimMemoryPool();
+            }
+            catch (Exception ex)
+            {
+                Logs.Warning($"[Engine] Releasing a placement backend's device memory failed: {ex.Message}");
+            }
         }
     }
 

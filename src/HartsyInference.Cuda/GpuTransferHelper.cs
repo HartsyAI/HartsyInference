@@ -10,21 +10,27 @@ namespace HartsyInference.Cuda;
 /// <summary>GPU memory transfer helper with weight and activation caching. Weights preload via PreloadWeight() and stay
 /// until FreeAllCached(); activations set by CacheActivation() after each op and are consumed by the next op's
 /// CopyToDevice(). Lazy sync: CPU access to DataPointer triggers a GPU→CPU sync on demand.
-/// <para><b>Multi-backend safety:</b> all mutable state lives in a per-CUDA-context <see cref="State"/> object,
-/// registered by each <see cref="CudaBackend"/> at construction and resolved at every call via the calling
-/// thread's CURRENT context (every CudaBackend op binds its context before calling in here — the long-standing
-/// invariant this relies on). Activation callbacks capture their owning State directly, so a tensor produced on
+/// <para><b>Multi-backend safety:</b> all mutable state lives in a per-BACKEND <see cref="State"/> object (one per
+/// <see cref="CudaBackend"/> registration, identified by a process-unique <see cref="State.Key"/> that is never
+/// reused), resolved at every call via the ambient thread-static the owning backend binds at each op entry
+/// (<c>CudaBackend.EnterOp</c>). Activation callbacks capture their owning State directly, so a tensor produced on
 /// backend A always syncs/frees against A's context and stream even when backend B was used more recently.
-/// Previously this was a single set of static fields: constructing a second CudaBackend (e.g. a 3060 alongside
-/// the 4090) silently retargeted ALL cached state and callbacks at the new context → cross-device frees →
-/// CUDA_ERROR_ILLEGAL_ADDRESS on both GPUs and a poisoned process. Two backends on the SAME device share the
-/// primary context handle and therefore a State — supported for caches (they're per-Tensor), with
-/// last-registered-wins for the stream/streaming-cache bindings.</para></summary>
+/// History: this was once a single set of static fields (constructing a second CudaBackend silently retargeted ALL
+/// cached state → cross-device frees → CUDA_ERROR_ILLEGAL_ADDRESS on both GPUs), then keyed by CUDA context handle
+/// — which collapsed two backends on the SAME device into one State (primary contexts are one-per-device), giving
+/// last-writer-wins stream bindings, cross-backend H2D copies on the wrong stream, and Dispose wiping the sibling's
+/// live weights. Per-backend keys + the ambient make same-device backends fully independent; the cost is that a
+/// host tensor shared by two same-device backends holds two device copies (accepted: preserves the "each backend
+/// owns its VRAM" invariant and PreloadWeight's ownership contract, no refcounting).</para></summary>
 internal static unsafe class GpuTransferHelper
 {
-    /// <summary>All per-backend mutable state, keyed by the owning CUDA context.</summary>
+    /// <summary>All per-backend mutable state, identified by a process-unique <see cref="Key"/>.</summary>
     internal sealed class State
     {
+        /// <summary>Process-unique identity of this backend registration, never reused. Keys the registry, each
+        /// tensor's GPU bindings, and the finalizer-cleanup buckets.</summary>
+        public nint Key;
+
         /// <summary>Cache mapping Tensor object references to GPU device pointers (weights — permanent).</summary>
         public readonly Dictionary<Tensor, ulong> WeightCache = new(ReferenceEqualityComparer.Instance);
 
@@ -125,62 +131,145 @@ internal static unsafe class GpuTransferHelper
     /// the most likely to be mutated scratch buffers.</summary>
     private const nuint AutoPromoteMinBytes = 1 << 20;
 
-    /// <summary>Registered states keyed by CUDA context handle. Concurrent: registration happens on backend
+    /// <summary>Registered states keyed by <see cref="State.Key"/>. Concurrent: registration happens on backend
     /// construction threads while Resolve() reads from compute threads.</summary>
     private static readonly ConcurrentDictionary<nint, State> _states = new();
 
-    /// <summary>Fast path: the single registered state when only one backend exists (the overwhelmingly
-    /// common case), avoiding a cuCtxGetCurrent per call. Null when zero or 2+ states are registered.</summary>
-    private static volatile State? _single;
+    /// <summary>Last-registered live state per CUDA context handle — the ambient-less resolution fallback for
+    /// helper calls arriving outside a backend op (tests, tooling). Ambiguous by construction when two backends
+    /// share a device; <see cref="Resolve"/> warns once per handle in that case.</summary>
+    private static readonly ConcurrentDictionary<nint, State> _byContext = new();
+
+    /// <summary>The calling thread's current backend State, bound by <c>CudaBackend.EnterOp</c> at every op entry.
+    /// This is THE resolution path — cuCtxGetCurrent cannot distinguish two same-device backends (they share the
+    /// primary context), so context identity stopped being usable as the owner identity.</summary>
+    [ThreadStatic]
+    private static State? _ambient;
+
+    /// <summary>Fast path for ambient-less callers: the sole registered state when exactly one backend exists.
+    /// Null when zero or 2+ states are registered.</summary>
+    private static volatile State? _sole;
+
+    /// <summary>Monotonic source for <see cref="State.Key"/>. Starts at 1; key 0 is the context-less bucket.</summary>
+    private static long _nextKey;
+
+    /// <summary>Serializes Register/Unregister so <see cref="_sole"/> and the indexes stay consistent.</summary>
+    private static readonly object _registryLock = new();
+
+    /// <summary>Context handles already warned about ambiguous ambient-less resolution.</summary>
+    private static readonly ConcurrentDictionary<nint, bool> _ambiguityWarned = new();
+
+    /// <summary>Debug tripwire (HARTSY_ASSERT_AMBIENT=1): throw instead of falling back when an ambient-less call
+    /// happens while multiple backends are live — catches op entry points the EnterOp transform missed.</summary>
+    private static readonly bool _assertAmbient = Environment.GetEnvironmentVariable("HARTSY_ASSERT_AMBIENT") == "1";
 
     /// <summary>Fallback state for calls made before any backend registers (unit tests exercising pure
     /// helpers). Its stream is 0 and context null, so every code path degrades to the safe no-op branch.</summary>
     private static readonly State _unregistered = new();
 
-    /// <summary>Registers (or re-binds) the state for a backend's context. Called once from
-    /// <see cref="CudaBackend"/>'s constructor with the context, compute stream, and streaming cache.</summary>
-    public static void Register(CudaContext context, nint stream, IStreamingWeightCache? streamingCache)
+    /// <summary>Creates and registers a NEW state for one backend. Called once from <see cref="CudaBackend"/>'s
+    /// constructor with the context, compute stream, and streaming cache; the returned state is the backend's
+    /// identity for ambient binding, tensor GPU bindings, and finalizer-cleanup routing.</summary>
+    public static State Register(CudaContext context, nint stream, IStreamingWeightCache? streamingCache)
     {
-        State state = _states.GetOrAdd(context.Handle, _ => new State());
-        state.Context = context;
-        state.StreamHandle = stream;
-        state.StreamingCache = streamingCache;
-        // A same-device re-registration revives a previously torn-down handle's state.
-        state.Unregistered = false;
-        _single = _states.Count == 1 ? state : null;
-    }
-
-    /// <summary>Removes a context's state at backend disposal (after <see cref="FreeAllCached"/>).
-    /// Only removes when the registered state still belongs to this context instance — a same-device
-    /// backend that re-registered the handle keeps its binding. Returns true when the state was removed,
-    /// i.e. the caller was the handle's last owner and may discard the handle's pending-cleanup queue.</summary>
-    public static bool Unregister(CudaContext context)
-    {
-        bool removed = false;
-        if (_states.TryGetValue(context.Handle, out State? state) && ReferenceEquals(state.Context, context))
+        State state = new State
         {
-            // Mark dead BEFORE removal: any promoted-weight callback that still fires (finalizer-queued before
-            // its tensor could be detached) must see the flag and no-op instead of touching this state's caches.
-            state.Unregistered = true;
-            removed = _states.TryRemove(context.Handle, out _);
+            Key = (nint)Interlocked.Increment(ref _nextKey),
+            Context = context,
+            StreamHandle = stream,
+            StreamingCache = streamingCache,
+        };
+        lock (_registryLock)
+        {
+            _states[state.Key] = state;
+            _byContext[context.Handle] = state;
+            _sole = _states.Count == 1 ? state : null;
         }
-        _single = _states.Count == 1 ? Enumerable.First(_states.Values) : null;
-        return removed;
+        return state;
     }
 
-    /// <summary>Resolves the state for the calling thread's CURRENT CUDA context. Every CudaBackend op
-    /// (and the streaming cache) binds its own context via EnsureCurrent before calling in here, so the
-    /// current context identifies the owning backend. Falls back to the single registered state, then to
-    /// an inert empty state (pre-registration test paths).</summary>
+    /// <summary>Removes a backend's state at disposal (after <see cref="FreeAllCached"/>). Keys are never reused,
+    /// so the caller may always discard its key's pending-cleanup queue afterwards.</summary>
+    public static void Unregister(State state)
+    {
+        // Mark dead BEFORE removal: any promoted-weight callback that still fires (finalizer-queued before
+        // its tensor could be detached) must see the flag and no-op instead of touching this state's caches.
+        state.Unregistered = true;
+        lock (_registryLock)
+        {
+            _states.TryRemove(state.Key, out _);
+            // The context-handle index only drops when it still points at us — a same-device sibling that
+            // registered later keeps its binding.
+            if (_byContext.TryGetValue(state.Context?.Handle ?? 0, out State? current) && ReferenceEquals(current, state))
+            {
+                _byContext.TryRemove(state.Context!.Handle, out _);
+            }
+            _sole = _states.Count == 1 ? Enumerable.First(_states.Values) : null;
+        }
+        if (ReferenceEquals(_ambient, state))
+        {
+            _ambient = null;
+        }
+    }
+
+    /// <summary>Binds <paramref name="state"/> as the calling thread's current backend. Called by
+    /// <c>CudaBackend.EnterOp</c> on every op entry; cheap (one thread-static write).</summary>
+    internal static void SetAmbient(State state) => _ambient = state;
+
+    /// <summary>Resolves the calling thread's owning backend State: the ambient bound by the current op, else the
+    /// sole registered state, else the last state registered for the thread's current CUDA context (ambiguous for
+    /// same-device siblings — warned once), else an inert empty state (pre-registration test paths).</summary>
     private static State Resolve()
     {
-        State? single = _single;
-        if (single is not null) return single;
+        State? ambient = _ambient;
+        if (ambient is not null && !ambient.Unregistered) return ambient;
+        State? sole = _sole;
+        if (sole is not null) return sole;
         if (_states.IsEmpty) return _unregistered;
-        if (CudaDriverApi.cuCtxGetCurrent(out nint current) == 0 && _states.TryGetValue(current, out State? state))
+        if (_assertAmbient)
+        {
+            throw new InvalidOperationException(
+                "GpuTransferHelper.Resolve: no ambient State with multiple backends registered — an op entry point "
+                + "missed the EnterOp transform (HARTSY_ASSERT_AMBIENT=1).");
+        }
+        if (CudaDriverApi.cuCtxGetCurrent(out nint current) == 0 && _byContext.TryGetValue(current, out State? state))
+        {
+            if (_ambiguityWarned.TryAdd(current, true) && SameContextStateCount(current) > 1)
+            {
+                Logs.Warning("[Cuda] Ambient-less state resolution with two backends on one device — using the "
+                    + "most recently registered. Op entry points should bind the ambient (EnterOp).");
+            }
             return state;
+        }
         return _unregistered;
     }
+
+    /// <summary>Live states bound to <paramref name="contextHandle"/> (2+ = same-device siblings).</summary>
+    private static int SameContextStateCount(nint contextHandle)
+    {
+        int count = 0;
+        foreach (State s in _states.Values)
+        {
+            if ((s.Context?.Handle ?? 0) == contextHandle) count++;
+        }
+        return count;
+    }
+
+    /// <summary>Every live registered state sharing <paramref name="deviceOrdinal"/> — the same-device escalation
+    /// sweep for OOM retries (a sibling backend's pool reservations can hold the memory this one needs).</summary>
+    internal static List<State> StatesOnDevice(int deviceOrdinal)
+    {
+        List<State> result = [];
+        foreach (State s in _states.Values)
+        {
+            if (!s.Unregistered && s.Context?.DeviceOrdinal == deviceOrdinal) result.Add(s);
+        }
+        return result;
+    }
+
+    /// <summary>The ambient (or resolved) state's compute stream, for <see cref="CudaMemory"/>'s allocator routing;
+    /// 0 when nothing is resolvable (sync-allocation fallback).</summary>
+    internal static nint ResolvedStreamHandle => Resolve().StreamHandle;
 
     /// <summary>Synchronizes the CUDA stream to flush pending FreeAsync operations. Called by CudaMemory.Allocate on OOM retry.</summary>
     public static void SyncStream()
@@ -207,6 +296,28 @@ internal static unsafe class GpuTransferHelper
         // Cache also drains its own upload stream + calls cuMemPoolTrimTo on the
         // default mempool. No-op if no streaming cache is wired (CPU/Vulkan, tests).
         s.StreamingCache?.DrainAndReleasePool();
+        // Same-device escalation: a SIBLING backend's stream-ordered pool reservations can hold the very bytes
+        // this OOM needs (each backend frees onto its own stream). Draining a sibling is only stream syncs +
+        // pool trims — no mutation of its caches — and the per-device generation gate means it is quiescent
+        // while we are mid-allocation, so this cannot stall its in-flight work.
+        if (s.Context is not null)
+        {
+            foreach (State sibling in StatesOnDevice(s.Context.DeviceOrdinal))
+            {
+                if (ReferenceEquals(sibling, s))
+                {
+                    continue;
+                }
+                if (sibling.StreamHandle != 0)
+                {
+                    CudaDriverApi.cuStreamSynchronize(sibling.StreamHandle);
+                }
+                sibling.StreamingCache?.DrainAndReleasePool();
+            }
+            // The sibling cache's entry guard re-bound the thread ambient to the sibling — restore OURS, or the
+            // very allocation retry this drain serves would land on the sibling's stream.
+            SetAmbient(s);
+        }
         // Always trim the default pool too: with no streaming cache wired (auto-transfer paths, tests), every
         // cuMemFreeAsync'd transient stays RESERVED in the stream-ordered pool. An OOM retry that never trims
         // reports "GPU full" (cuMemGetInfo counts reservations as used) even though most of it is reusable —
@@ -501,7 +612,7 @@ internal static unsafe class GpuTransferHelper
         };
         // Keyed binding routes this tensor's finalizer cleanup into THIS backend's context bucket so a concurrent
         // backend's drain thread never runs it against the wrong (and unsynchronized) State.
-        tensor.SetGpuBinding(s.Context?.Handle ?? 0, syncCallback, disposeCallback);
+        tensor.SetGpuBinding(s.Key, syncCallback, disposeCallback);
     }
 
     /// <summary>Frees EVERY cached weight cast (they are pure caches — always rebuildable from the source
@@ -597,7 +708,7 @@ internal static unsafe class GpuTransferHelper
         // another backend registers later (same rule as the activation callbacks). The keyed binding is what
         // lets a SECOND backend promote this same host tensor without overwriting our demote hook.
         Action demote = () => OnPromotedHostAccess(s, cpuTensor);
-        cpuTensor.SetGpuBinding(s.Context?.Handle ?? 0, demote, demote);
+        cpuTensor.SetGpuBinding(s.Key, demote, demote);
         return true;
     }
 
@@ -655,7 +766,7 @@ internal static unsafe class GpuTransferHelper
             promo.Promoted = false;
             // Keyed clear: only THIS backend's binding goes — a sibling backend's promotion of the same host
             // tensor keeps its own demote hook.
-            tensor.ClearGpuBinding(s.Context?.Handle ?? 0);
+            tensor.ClearGpuBinding(s.Key);
         }
     }
 

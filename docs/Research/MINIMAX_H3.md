@@ -93,25 +93,119 @@ treat every one as an open research question, not a design input.
 Unverified: a widely-reshared tweet claims H3 "can run on RTX 3060." That is tweet-level, contradicts
 nothing but is supported by nothing. Do not size the implementation around it.
 
+## Pre-drop intel (2026-08-02) — the text encoder is ANSWERED
+
+**`DeepBeepMeep/MiniMax-H3` on HuggingFace is staging H3 components** (last modified 2026-08-02 14:51).
+DeepBeepMeep is the Wan2GP/WanGP author, who repacks models for low-VRAM use — the README says these are
+"the MiniMax H3 image models used with WanGP". Files present so far:
+
+```
+Qwen3-VL-32B-Instruct/Qwen3-VL-32B-Instruct-layer50_bf16.safetensors
+Qwen3-VL-32B-Instruct/Qwen3-VL-32B-Instruct-layer50_quanto_bf16_int8.safetensors
+Qwen3-VL-32B-Instruct/{config,tokenizer,tokenizer_config,preprocessor_config,chat_template,vocab}.json
+```
+
+So **H3's conditioning is Qwen3-VL-32B-Instruct, tapped at layer 50** — one of the day-one unknowns below is
+now answered. From its `config.json`: `Qwen3VLForConditionalGeneration`, text hidden 5120, 64 layers,
+64 heads / 8 KV heads (GQA), vocab 151936, rope_theta 5e6, max_position 262144; vision hidden 1152.
+The layer-50-of-64 tap is the same middle-layer-hidden-state idiom Hunyuan/Qwen-Image use.
+
+**This is a big head start: the engine already has Qwen3-VL** — `Qwen3VlMultimodalEncoder`,
+`Qwen3VlEncoder`, `Qwen3VlVisionEncoder`, `Qwen3VlImageProcessor`, `Qwen3VlVisionConfig`. The conditioning
+tower should be reuse, not a port.
+
+Only the text encoder is staged; the DiT and VAEs are not up yet, which is why a watcher polls for them.
+
+**ComfyUI still has NO native support.** Verified: `Add minimax h3 support (#15167)` (2026-07-31) touches
+only `comfy_api_nodes/apis/minimax.py` and `comfy_api_nodes/nodes_minimax.py` — the cloud client, no
+`comfy/ldm` changes; and `comfy/ldm/` contains no h3/hailuo/minimax directory. Today's
+`[Partner Nodes] feat(Minimax): add 768P resolution for H3 model (#15227)` is also API-only, but it does
+tell us **H3 now exposes 768P as well as 2K**. Note the repo moved to **`Comfy-Org/ComfyUI`**
+(`comfyanonymous/ComfyUI` 301-redirects; the API needs `-L` or the new slug).
+
+## THE ARCHITECTURE IS PUBLIC — Kijai's ComfyUI PR #15224 (2026-08-02)
+
+**`feat: Support MiniMax-H3 (CORE-375)`**, open (not merged), +2599/−6 across 16 files, branch
+`kijai:minimax_h3`, head `e2ab36d933356bc8cd6ecb39c655fe8be75af4e5`. This is the **native open-weight
+implementation** — it supersedes everything below that says "undisclosed". Re-fetch with:
+`https://raw.githubusercontent.com/kijai/ComfyUI/<sha>/comfy/ldm/minimax/model.py` (also `vae.py`,
+`audio_vae.py`, `comfy/text_encoders/minimax.py`, `comfy_extras/nodes_minimax_h3.py`).
+
+### DiT (`comfy/ldm/minimax/model.py`, 646 lines)
+Single-stream **packed-token** transformer denoising video and audio jointly. Defaults:
+
+| | |
+|---|---|
+| hidden_size | 5376 |
+| num_layers | 50 |
+| token_refiner_num_layers | 2 |
+| num_attention_heads / head_dim | 56 / 128 |
+| ffn_hidden_size | 14336 |
+| latents_dim (video) | 24, patch (1,2,2) |
+| audio_latents_dim | 32 |
+| text_dim | 5120 (Qwen3-VL hidden) |
+| rope_inv_freq_len | 16 |
+| norm/qk_norm/final eps | 1e-5 |
+| sigma_shift video / audio | **12.0 / 3.0** |
+| dtypes | bf16 + fp32; `memory_usage_factor` 0.114 |
+
+Packed sequence: `[text | cond rows | audio | video]` for t2va/fl2va, `[text | reference blocks | audio |
+video]` for ref2va (`PackedLayout` class). Constants: `FRAME_PER_TOKEN=(1,4,4,4,4)`, `FRAME_RESCALE=5/3`,
+`VISUAL_COND_TIMESTEP=0.999`, `AUDIO_COND_TIMESTEP=1.0`. Structure: `TimeEmbedder`, `Attention` (qkv_proj +
+q_norm/k_norm), `MLP` (fc1 gated — `//2`), `AdalnProj`, `RefinerBlock`/`TokenRefiner`, `DiTBlock`,
+`FinalLayer` (separate `video_out` / `audio_out`).
+
+**The audio timestep trick** — worth reading even outside H3, given our LTX-2 audio history: the sampler
+supplies the *video* sigma; per-token timesteps are `t = 1 − sigma`; the audio stream runs its own shifted
+schedule derived in closed form, and **the returned audio velocity is scaled by `d(sigma_a)/d(sigma_v)`**
+(`time_shift_sigma` / `time_shift_slope`) so a stock sampler integrating the flat AV pack still solves each
+stream's true ODE. `sampling_settings = {"shift": 12.0}`.
+
+**Two checkpoint variants**: the original time-embedder, and a pruned (~40% smaller) variant that replaces
+the time embedder + full-width adaln weights with a precomputed `adaln_t_table` curve basis
+(`adaln_curve_grid`). Detection keys off `adaln_t_table` being present.
+
+### VAEs
+- **Video** (`vae.py`, 694 lines): 3D causal CNN encoder + **ViT3D decoder**, internal spatial tiling and
+  temporal chunking. 24 latent channels, **16× spatial / 4× temporal** downscale, `scale_factor` 1.0.
+- **Audio** (`audio_vae.py`, 442 lines): **DAC-lineage encoder + BigVGAN decoder**, stereo at **32 kHz,
+  800 samples per latent frame** (→ the 40 Hz latent rate). Our LTX-2 BigVGAN work is adjacent prior art.
+- `latent_formats.MiniMaxH3AV` packs both streams at `latent_channels = 32` (max of video 24 / audio 32).
+
+### Detection (`comfy/model_detection.py`)
+Signature is `video_patch_proj.weight` **and** `audio_patch_proj.weight`; everything else is derived from
+shapes (`blocks.N.attn.qkv_proj`, `blocks.0.attn.q_norm`, `blocks.0.mlp.fc1`, `condition_proj`,
+`final_layer.video_out` `//4` for patch 1×2×2, `rope.inv_freq`). Prefixes: `vae.`, `text_encoders.`.
+
+### Text encoder (`comfy/text_encoders/minimax.py`)
+Qwen3-VL-32B **truncated to 50 layers**, consumed as the **unnormalized last hidden state**,
+**non-chat-templated**, with `<Picture i>` / `<Video k>` / `<Audio j>` labels and **2 fps timestamped video
+blocks**. State-dict prefix `text_encoders.qwen3vl_32b.transformer.`.
+
+### Nodes
+`EmptyMiniMaxH3LatentAV`, `MiniMaxH3ImageToVideo`, `MiniMaxH3ReferenceToVideo`, `MiniMaxH3SigmaShift`
+(exposes `minimax_h3_sigma_shift_video` / `_audio`). Reuses LTXV's AV latent concat/separate nodes.
+
+### Non-model changes in the PR
+ModelOpt AWQ-style `pre_quant_scale` in quant ops, and a fused activation+quantize path for INT8 linears.
+
 ## Unknowns — the day-one checklist
 
 When weights land, these are the questions to answer in order. Every one of them currently blocks
 writing a single line of forward pass.
 
-- [ ] **Parameter count** and checkpoint layout (single file vs sharded vs diffusers folder).
-- [ ] **H3-VAE**: spatial and temporal compression factors, latent channel count, encoder/decoder
-      block structure, whether it is causal 3D (Wan/Hunyuan-style) or something new.
-- [ ] **Audio latent path**: does audio share the video latent space, or is there a separate audio
-      VAE + vocoder like LTX-2.3? Sample rate, channel layout (true stereo latents vs mono + spatializer).
-- [ ] **Text encoder identity** — which LLM/encoder, which layer is tapped, what prompt template.
-      "Contextual Omni Representation" implies a real language model in the conditioning path.
-- [ ] **DiT block structure**: single-stream vs dual-stream vs MMDiT, patch size, RoPE convention
-      (interleaved vs split-half — this has burned us on LTX-2.3 and Qwen3.5 already), norm placement,
-      QK-norm, AdaLN vs modulation table.
-- [ ] **Scheduler**: flow-match vs ε-prediction, sigma shift, guidance convention (CFG vs embedded /
-      distilled guidance).
-- [ ] **In-Context Regeneration mechanics** — how the low-res pass is fed back in. This determines
-      whether generation is one pipeline call or two, and it changes the pipeline's shape.
+- [x] **Parameter count / layout** — DiT hidden 5376, 50 layers, 56x128 heads, ffn 14336 (PR #15224).
+- [x] **H3-VAE** — video: 24 latent ch, 16x spatial / 4x temporal, 3D causal CNN encoder + ViT3D decoder.
+- [x] **Audio latent path** — SEPARATE audio VAE: DAC-lineage encoder + BigVGAN decoder, stereo 32 kHz,
+      32 latent ch at 40 Hz (800 samples/latent frame).
+- [x] **Text encoder** — Qwen3-VL-32B truncated to 50 layers, unnormalized last hidden state,
+      non-chat-templated with `<Picture i>`/`<Video k>`/`<Audio j>` labels + 2 fps timestamped video blocks.
+- [x] **DiT block structure / RoPE** — single-stream packed tokens, qkv_proj + q/k RMS-norm, gated MLP,
+      adaln modulation, `rope.inv_freq` length 16.
+- [x] **Scheduler / guidance** — flow-match, sigma_shift video 12.0 / audio 3.0; audio schedule derived
+      from the video sigma in closed form with the velocity scaled by d(sigma_a)/d(sigma_v).
+- [ ] **In-Context Regeneration mechanics** — how the low-res pass feeds back for 2K. Not obviously in the
+      PR; may be a pipeline-level two-pass rather than a model feature.
 - [ ] **License** — MiniMax say "subject to applicable laws and regulations," which is not a license
       name. Confirm before shipping catalog assets.
 

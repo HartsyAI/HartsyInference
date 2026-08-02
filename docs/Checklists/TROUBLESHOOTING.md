@@ -1366,6 +1366,58 @@ numerics (channel-width assumptions are where it breaks).
   legitimate reason for tests sharing one physical GPU to run concurrently. All 167 tests pass with it in
   place. See `VulkanKrea2BlockFullScaleBenchmark.cs` and `AssemblyInfo.cs`.
 
+- **Correction (2026-08-02): the entry above's "root cause identified with high confidence" claim doesn't
+  survive direct measurement — the allocator pooling bug is real and worth fixing, but it does NOT explain
+  the 160-170 ms/GEMM-call figure.** Added always-on diagnostics to isolate driver-allocation cost from
+  everything else a GEMM call pays for: `VulkanMemoryAllocator.VkAllocateMemoryStats` (call count + cumulative
+  `vkAllocateMemory` time) and `.SnapshotBlocks()` (per-block `IsDedicated`/`LiveAllocations`/`Size`), plus a
+  new `VulkanBufferDiagnostics` static counter for `vkCreateBuffer`/`vkDestroyBuffer` overhead (timing gated
+  on `HARTSYINFERENCE_VK_PROFILE=1`; counts are always-on and free). Re-ran
+  `VulkanKrea2BlockFullScaleBenchmark` (2 blocks x 2 steps, RTX 4090) with these wired into the measured
+  window:
+  - **Block histogram confirms the bug is real**: 111-115 of ~124-125 dedicated blocks are genuinely EMPTY
+    (8.95-9.2 GB), vs. only 10 pinned by a live allocation (720 MB) — not a placement/pinning problem, an
+    eviction problem. The fix direction in the entry above is correct.
+  - **But `vkAllocateMemory` accounts for only 0.1-0.3% of the measured wall-clock** (2-3 calls, 6-19 ms out
+    of ~5.2-5.5 s) **and `vkCreateBuffer`/`vkDestroyBuffer` overhead only 0.1-0.4%** (232 create+destroy pairs,
+    ~7-19 ms). Caveat: this is a STEADY-STATE measurement — the measured window starts after warmup, when the
+    ~125 blocks already exist and `reserved` has plateaued, so it correctly refutes "allocation cost drives
+    per-call latency once the block set is built" but says nothing about whether the growth phase itself was
+    expensive (those `vkAllocateMemory` calls happened during warmup, before the stopwatch started).
+  - **The "160-170 ms/GEMM-call" metric itself is the actual defect, not evidence of a 100x kernel
+    regression.** `VulkanCommandStream` batches dispatches into a command buffer (`FlushThreshold=8`) and
+    each op call returns once *recording* is done, not once the GPU has executed it — real GPU execution
+    time surfaces later, collected at whatever call forces a submit-and-wait (the benchmark's `backend.Sync()`
+    at the end of the measured loop). Confirmed directly: with `HARTSYINFERENCE_VK_PROFILE=1`, the backend's
+    own per-op profiler shows only ~620 ms (coopmat1) / ~164 ms (coopmat2) of *host-wall recording time*
+    across the WHOLE backend lifetime (warmup + measured), while the benchmark's external `Stopwatch` around
+    just the measured half reports ~5.2-5.5 s — that gap is GPU execution time landing at `Sync()`, not
+    unaccounted mystery cost (`Linear Max 43.57 ms` vs. `Avg 6.96 ms` in that dump is exactly the periodic
+    flush-and-wait landing on one call). So `ms/GEMM-call` = (all ops' Sync()-collected GPU time for the
+    window) / (GEMM call count alone) — it is an amortized per-block-forward cost that includes SDPA, RoPE,
+    per-head norms, and GQA-repeat, not a per-Linear GPU-execution cost. **It is not directly comparable to
+    the isolated GPU-only-timing benchmarks elsewhere in this file (1.5-10 ms range).** It's also not
+    directly comparable to the real e2e run's "82-135 ms/Linear-call" figure, though for a weaker reason —
+    that number came from `HARTSY_LOG_LEVEL=Verbose` phase logging, a different derivation than this
+    benchmark's wall-clock-divided-by-GEMM-count arithmetic, so it may or may not share the same issue; not
+    checked this pass. Isolating true per-op GPU time needs `VulkanGpuTimer`/`MeasureGpuTimeMs`
+    (`benchmarks/scoreboards/VULKAN.md`'s coopmat2 section already uses this) at Krea2's real shape — not
+    done this pass.
+  - **A separate, previously-recorded tension is also stale**: the "more aggressive reclaim trades against
+    more `Sync()`-induced host stalls" framing (this file and `ROADMAP.md`) assumed a reclaim fix would need
+    new blocking waits. It doesn't — `VulkanCommandStream.SubmitAndAdvance()` already reclaims opportunistically
+    off a non-blocking `vkGetSemaphoreCounterValue` peek after every submit, and destroying a block once
+    `LiveAllocations == 0` needs no more synchronization than `ReleaseEmptySlabs()` (the existing OOM-path
+    reclaim) already relies on. A reclaim-cadence fix does not need to add host stalls.
+  - **Net effect on the "next lever" framing**: the allocator fix is still worth doing — it targets the
+    deterministic ~9 GB of dead reserved VRAM directly, which is the same shape of problem as the documented
+    4+-step `ErrorOutOfDeviceMemory` on this box (see the coopmat2 sections above) — but it should be sold as
+    VRAM-headroom/OOM-avoidance work, not as the fix for the ~53x marginal-per-step gap. What actually drives
+    that gap remains open; the real-run "Linear = 99.1% of backend-op time" finding is still a valid statement
+    about which op dominates *within* backend-op time, but backend-op time itself was never shown to equal
+    wall-clock, and this pass's finding suggests it doesn't. See `VulkanKrea2BlockFullScaleBenchmark.cs`,
+    `VulkanMemory.cs` (`VkAllocateMemoryStats`/`SnapshotBlocks`/`VulkanBufferDiagnostics`).
+
 ---
 
 ## LLM / GGUF loading gotchas

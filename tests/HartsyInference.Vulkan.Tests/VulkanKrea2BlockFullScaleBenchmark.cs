@@ -148,21 +148,58 @@ public sealed class VulkanKrea2BlockFullScaleBenchmark
         (long usedAfterWarmup, long reservedAfterWarmup, int blocksAfterWarmup, _) = backend.MemoryStats;
 
         (long coopMat2Before, long coopMatBefore, long tiledBefore) = backend.GemmEngagementCounts;
+        (long vkAllocCallsBefore, double vkAllocMsBefore) = backend.VkAllocateMemoryStats;
+        (long createCountBefore, double createMsBefore, long destroyCountBefore, double destroyMsBefore) = VulkanBufferDiagnostics.Snapshot();
         Stopwatch sw = Stopwatch.StartNew();
         for (int i = 0; i < NumSimulatedSteps; i++) RunAllBlocksOnce();
         backend.Sync();
         sw.Stop();
         (long coopMat2After, long coopMatAfter, long tiledAfter) = backend.GemmEngagementCounts;
+        (long vkAllocCallsAfter, double vkAllocMsAfter) = backend.VkAllocateMemoryStats;
+        (long createCountAfter, double createMsAfter, long destroyCountAfter, double destroyMsAfter) = VulkanBufferDiagnostics.Snapshot();
 
         long coopMat2Calls = coopMat2After - coopMat2Before;
         long coopMatCalls = coopMatAfter - coopMatBefore;
         long tiledCalls = tiledAfter - tiledBefore;
         long totalGemmCalls = coopMat2Calls + coopMatCalls + tiledCalls;
         double msPerGemmCall = totalGemmCalls > 0 ? sw.Elapsed.TotalMilliseconds / totalGemmCalls : -1;
+        long vkAllocCalls = vkAllocCallsAfter - vkAllocCallsBefore;
+        double vkAllocMs = vkAllocMsAfter - vkAllocMsBefore;
+        double vkAllocShare = sw.Elapsed.TotalMilliseconds > 0 ? vkAllocMs / sw.Elapsed.TotalMilliseconds * 100.0 : 0;
         _out.WriteLine($"Full Krea2Block (Hidden={Hidden},FfnInner={FfnInner},Heads={NumHeads}/{NumKvHeads},JointSeq={JointSeq}), {NumDistinctBlocks} blocks x {NumSimulatedSteps} steps:");
         _out.WriteLine($"  {sw.Elapsed.TotalMilliseconds:F1} ms total, {totalGemmCalls} GEMM calls, {msPerGemmCall:F3} ms/GEMM-call");
+        _out.WriteLine($"  NOTE: ms/GEMM-call divides the WHOLE window's Sync()-collected time (all ops: SDPA, RoPE,");
+        _out.WriteLine($"  norms, GQA-repeat, plus batched GEMM GPU execution surfacing at Sync()) by GEMM-call count");
+        _out.WriteLine($"  alone. It is an amortized per-block-forward cost, NOT a per-Linear GPU-execution cost — do");
+        _out.WriteLine($"  not compare it directly to isolated GPU-only-timing numbers (VulkanGpuTimer/MeasureGpuTimeMs).");
         _out.WriteLine($"  GEMM path split: coopmat2={coopMat2Calls}, coopmat={coopMatCalls}, tiled={tiledCalls}");
         _out.WriteLine($"  Allocator: after warmup blocks={blocksAfterWarmup}, used={usedAfterWarmup / (1024.0 * 1024):F1} MB, reserved={reservedAfterWarmup / (1024.0 * 1024):F1} MB");
+        _out.WriteLine($"  vkAllocateMemory during measured window: {vkAllocCalls} calls, {vkAllocMs:F1} ms total ({vkAllocShare:F1}% of measured wall-clock)");
+
+        long createCount = createCountAfter - createCountBefore;
+        double createMs = createMsAfter - createMsBefore;
+        long destroyCount = destroyCountAfter - destroyCountBefore;
+        double destroyMs = destroyMsAfter - destroyMsBefore;
+        double bufferObjShare = sw.Elapsed.TotalMilliseconds > 0 ? (createMs + destroyMs) / sw.Elapsed.TotalMilliseconds * 100.0 : 0;
+        string timingCaveat = VulkanBufferDiagnostics.TimingEnabled ? "" : " (ms values are 0 — set HARTSYINFERENCE_VK_PROFILE=1 to measure timing; counts are always accurate)";
+        _out.WriteLine($"  VkBuffer object overhead during measured window: {createCount} creates ({createMs:F1} ms), {destroyCount} destroys ({destroyMs:F1} ms) — {bufferObjShare:F1}% of measured wall-clock{timingCaveat}");
+
+        IReadOnlyList<(bool IsDedicated, int LiveAllocations, ulong Size)> blockSnapshot = backend.AllocatorBlockSnapshot();
+        int dedicatedEmpty = 0, dedicatedPinned = 0, slabEmpty = 0, slabPinned = 0;
+        ulong dedicatedEmptyBytes = 0, dedicatedPinnedBytes = 0;
+        foreach ((bool isDedicated, int live, ulong size) in blockSnapshot)
+        {
+            if (isDedicated)
+            {
+                if (live == 0) { dedicatedEmpty++; dedicatedEmptyBytes += size; }
+                else { dedicatedPinned++; dedicatedPinnedBytes += size; }
+            }
+            else
+            {
+                if (live == 0) slabEmpty++; else slabPinned++;
+            }
+        }
+        _out.WriteLine($"  Block histogram: dedicated empty={dedicatedEmpty} ({dedicatedEmptyBytes / (1024.0 * 1024):F1} MB), dedicated pinned={dedicatedPinned} ({dedicatedPinnedBytes / (1024.0 * 1024):F1} MB), slab empty={slabEmpty}, slab pinned={slabPinned}");
         _out.WriteLine($"  Compare: isolated SwiGlu-only chain (previous benchmark) was ~32.7-33.1 ms/Linear-call;");
         _out.WriteLine($"  real Krea2 e2e run measured ~82-135 ms/Linear-call.");
 

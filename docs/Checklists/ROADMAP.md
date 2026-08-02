@@ -234,8 +234,31 @@ a stale code comment claiming otherwise.
   artifact, not fixed, just documented); (b) `HartsyInference.Vulkan.Tests` had no GPU-test parallelism
   control, letting concurrent `VulkanBackend` instances from unrelated test classes cause spurious
   `ErrorOutOfDeviceMemory` in PRE-EXISTING tests — fixed via `[assembly: CollectionBehavior(
-  DisableTestParallelization = true)]` (`AssemblyInfo.cs`); all 167 tests pass with it in place. **Next
-  step**: design and implement a safe allocator reclaim-cadence fix. See `docs/Checklists/
+  DisableTestParallelization = true)]` (`AssemblyInfo.cs`); all 167 tests pass with it in place.
+  **Correction (2026-08-02): the "root cause identified with high confidence" claim above does not survive
+  direct measurement.** Added always-on allocator/buffer diagnostics (`VulkanMemoryAllocator.
+  VkAllocateMemoryStats`/`.SnapshotBlocks()`, `VulkanBufferDiagnostics`) and re-ran the same benchmark.
+  Findings: (a) the pooling bug is real — 111-115 of ~125 dedicated blocks are genuinely empty (~9 GB) vs.
+  10 pinned (720 MB), confirming eviction (not placement) is the right fix; (b) but `vkAllocateMemory`
+  (0.1-0.3%) and `vkCreateBuffer`/`vkDestroyBuffer` overhead (0.1-0.4%) together account for well under 1%
+  of the measured wall-clock in steady state — the allocator does NOT explain the 160-170 ms/GEMM-call
+  figure; (c) that figure is itself the actual defect: `VulkanCommandStream` batches dispatches
+  (`FlushThreshold=8`) so per-op host-wall (what `VulkanProfiler` measures) is recording cost only — real GPU
+  execution time surfaces later, collected at whatever call forces a submit-and-wait (here, the benchmark's
+  final `Sync()`). Confirmed directly: the profiler's own per-op accounting covers only ~620ms/~164ms
+  (coopmat1/coopmat2) of host-wall across the WHOLE backend lifetime, while the benchmark's external
+  Stopwatch around half that work reports ~5.2-5.5s — GPU execution collected at sync, not unaccounted cost.
+  So `ms/GEMM-call` = all-ops'-Sync()-collected-GPU-time / GEMM-count-alone, not a per-Linear GPU cost, and
+  isn't comparable to the isolated GPU-only-timing numbers elsewhere in this doc. It's also not directly
+  comparable to the real run's "82-135 ms/Linear-call" figure, though for a weaker reason — that number came
+  from `HARTSY_LOG_LEVEL=Verbose` phase logging, a different derivation than this benchmark's arithmetic, so
+  it may or may not share the same issue; not checked this pass. Also stale: the "reclaim trades against more
+  `Sync()`-induced stalls" tension — `SubmitAndAdvance()` already reclaims opportunistically off a
+  non-blocking timeline peek, so a reclaim fix needs no new waits.
+  **Revised next step**: the allocator eviction fix is still worth doing (real ~9 GB of dead reserved VRAM,
+  same shape as the documented 4+-step OOM below), but as VRAM-headroom/OOM-avoidance work, not as the fix
+  for the ~53x gap — what actually drives that gap is open again; isolating true per-op GPU time via
+  `VulkanGpuTimer`/`MeasureGpuTimeMs` at Krea2's real shape is the way to reopen it. See `docs/Checklists/
   TROUBLESHOOTING.md`, `VulkanFp8WeightCastOverheadBenchmark.cs`, `VulkanKrea2BlockFullScaleBenchmark.cs`.
 - [~] **Wire the INT8 quantizer into `Linear`'s call surface** — **op-level wiring done** (2026-07-29);
   **NOT the same as this section's original ask**, which was model *loading* wiring with an e2e SSIM/parity

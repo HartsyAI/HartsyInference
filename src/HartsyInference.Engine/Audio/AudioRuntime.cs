@@ -101,6 +101,8 @@ internal sealed class AudioRuntime
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(work);
         await _genLock.WaitAsync(cancel).ConfigureAwait(false);
+        // Device gate INSIDE the engine's audio lock (gate is always innermost, process-wide lock order).
+        IDisposable gate = await DeviceGate.AcquireAsync(backend, cancel).ConfigureAwait(false);
         try
         {
             EvictOthersUnderMemoryPressure(backend, modelKey);
@@ -130,6 +132,7 @@ internal sealed class AudioRuntime
             {
                 Logs.Warning($"[Audio] Post-generation device cleanup failed: {ex.Message}");
             }
+            gate.Dispose();
             _genLock.Release();
         }
     }

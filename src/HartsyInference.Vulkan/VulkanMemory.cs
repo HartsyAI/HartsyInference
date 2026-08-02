@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics;
 using HartsyInference.Core.Logging;
 
@@ -178,6 +179,29 @@ public sealed class VulkanMemoryAllocator : IDisposable
     private int _nextBlockId;
     private bool _disposed;
 
+    // ── vkAllocateMemory cost diagnostics ────────────────────────────────────────────────────────────────
+    // Answers "is the block-pooling gap's reserved-VRAM growth actually costing wall-clock, or just
+    // reserving bytes?" (see docs/Checklists/TROUBLESHOOTING.md's Krea2Block full-scale finding) — always
+    // counted (two field writes is free) so a caller doesn't need HARTSYINFERENCE_VK_PROFILE=1 to see it.
+    private long _vkAllocateMemoryCallCount;
+    private double _vkAllocateMemoryTotalMs;
+
+    /// <summary>Cumulative <c>vkAllocateMemory</c> call count and host-wall-clock time spent inside it
+    /// (including any OOM-retry re-attempt) since construction — isolates driver allocation cost from
+    /// everything else a GEMM call pays for.</summary>
+    public (long CallCount, double TotalMs) VkAllocateMemoryStats => (_vkAllocateMemoryCallCount, _vkAllocateMemoryTotalMs);
+
+    /// <summary>Diagnostic snapshot of every live block's pooling state — lets a caller tell empty-and-idle
+    /// blocks (reclaimable) apart from blocks pinned by a live sub-allocation (not reclaimable by eviction
+    /// alone; see the placement question in TROUBLESHOOTING.md).</summary>
+    public IReadOnlyList<(bool IsDedicated, int LiveAllocations, ulong Size)> SnapshotBlocks()
+    {
+        (bool, int, ulong)[] snapshot = new (bool, int, ulong)[_blocks.Count];
+        for (int i = 0; i < _blocks.Count; i++)
+            snapshot[i] = (_blocks[i].IsDedicated, _blocks[i].LiveAllocations, _blocks[i].Size);
+        return snapshot;
+    }
+
     /// <summary>Optional callback fired on OOM allocation — used by VulkanBackend to flush the
     /// command stream and drain the deferred-free list before retrying. Set after the stream is
     /// constructed (chicken-and-egg: allocator created before stream).</summary>
@@ -257,14 +281,19 @@ public sealed class VulkanMemoryAllocator : IDisposable
             allocationSize = size,
             memoryTypeIndex = typeIdx,
         };
+        Stopwatch allocSw = Stopwatch.StartNew();
         VkResult r = VulkanApi.vkAllocateMemory(_device, in ai, 0, out ulong mem);
+        _vkAllocateMemoryCallCount++;
         if (r == VkResult.ErrorOutOfDeviceMemory && OnOutOfMemory is not null)
         {
             // Drain the command-stream's deferred-free list and any pending command buffers.
             // Mirrors CUDA's cuMemAlloc OOM retry path.
             OnOutOfMemory();
             r = VulkanApi.vkAllocateMemory(_device, in ai, 0, out mem);
+            _vkAllocateMemoryCallCount++;
         }
+        allocSw.Stop();
+        _vkAllocateMemoryTotalMs += allocSw.Elapsed.TotalMilliseconds;
         if (r == VkResult.ErrorOutOfDeviceMemory && OnOutOfMemoryDiagnostic is not null)
         {
             try { Logs.Warning($"Vulkan OOM diagnostics (allocating {size} bytes, typeIdx={typeIdx}):\n{OnOutOfMemoryDiagnostic()}"); }
@@ -393,9 +422,11 @@ public sealed class VulkanBuffer : IDisposable
     {
         if (Handle != 0)
         {
+            Stopwatch? destroySw = VulkanBufferDiagnostics.TimingEnabled ? Stopwatch.StartNew() : null;
             VulkanApi.vkDestroyBuffer(_device, Handle, 0);
             Handle = 0;
             _allocator.Free(Allocation);
+            VulkanBufferDiagnostics.RecordDestroy(destroySw?.Elapsed.TotalMilliseconds ?? 0);
         }
         GC.SuppressFinalize(this);
     }
@@ -408,6 +439,32 @@ public sealed class VulkanBuffer : IDisposable
             _allocator.Free(Allocation);
         }
     }
+}
+
+/// <summary>Diagnostic-only counters for per-<see cref="VulkanBuffer"/> object overhead (<c>vkCreateBuffer</c>/
+/// <c>vkGetBufferMemoryRequirements</c>/<c>vkBindBufferMemory</c>/<c>vkDestroyBuffer</c>) — separate from
+/// <see cref="VulkanMemoryAllocator.VkAllocateMemoryStats"/>, which only measures the underlying
+/// <c>vkAllocateMemory</c> block calls. A tensor pays this cost on every create/destroy regardless of
+/// whether its memory came from a pooled block or a fresh one, so it can dominate even when block-pooling
+/// is working perfectly. Process-wide (not per-backend) since <see cref="VulkanBufferFactory"/> is static;
+/// diff two snapshots around the region being measured. Counts are always on (a `long` increment is free,
+/// same convention as <c>VulkanBackend</c>'s GEMM engagement counters); the per-call <see cref="Stopwatch"/>
+/// timing is gated on <c>HARTSYINFERENCE_VK_PROFILE=1</c> since this runs on every tensor create/destroy
+/// in every model, not just diagnostic benchmarks.</summary>
+public static class VulkanBufferDiagnostics
+{
+    internal static readonly bool TimingEnabled = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE") == "1";
+
+    private static long _createCount;
+    private static double _createTotalMs;
+    private static long _destroyCount;
+    private static double _destroyTotalMs;
+
+    public static (long CreateCount, double CreateTotalMs, long DestroyCount, double DestroyTotalMs) Snapshot()
+        => (_createCount, _createTotalMs, _destroyCount, _destroyTotalMs);
+
+    internal static void RecordCreate(double ms) { _createCount++; _createTotalMs += ms; }
+    internal static void RecordDestroy(double ms) { _destroyCount++; _destroyTotalMs += ms; }
 }
 
 /// <summary>Static buffer-creation helper: creates a VkBuffer + binds it to allocator-provided memory.</summary>
@@ -423,6 +480,7 @@ public static class VulkanBufferFactory
         VkMemoryPropertyFlags requiredProps,
         VkMemoryPropertyFlags preferredProps = 0)
     {
+        Stopwatch? createSw = VulkanBufferDiagnostics.TimingEnabled ? Stopwatch.StartNew() : null;
         VkBufferCreateInfo bci = new()
         {
             sType = VkStructureType.BufferCreateInfo,
@@ -439,6 +497,7 @@ public static class VulkanBufferFactory
         VulkanApi.vkBindBufferMemory(device, buffer, alloc.DeviceMemory, alloc.Offset)
             .ThrowOnError("vkBindBufferMemory");
 
+        VulkanBufferDiagnostics.RecordCreate(createSw?.Elapsed.TotalMilliseconds ?? 0);
         return new VulkanBuffer(device, allocator, buffer, alloc, size, usage);
     }
 }

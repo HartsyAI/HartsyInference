@@ -7,11 +7,12 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>Guards the per-context transfer-state isolation: two <see cref="CudaBackend"/>s in one process
-/// (different GPUs when available, same GPU otherwise) must not clobber each other's streams, caches, or
-/// activation callbacks. Before the per-context refactor, constructing the second backend silently retargeted
-/// ALL of GpuTransferHelper's static state at the new context — interleaved ops then issued cross-device
-/// stream/free calls → CUDA_ERROR_ILLEGAL_ADDRESS on both GPUs and a poisoned process.</summary>
+/// <summary>Guards the per-BACKEND transfer-state isolation: two <see cref="CudaBackend"/>s in one process — on
+/// different GPUs or the SAME one — must not clobber each other's streams, caches, or activation callbacks.
+/// History: with fully-static state, constructing a second backend retargeted everything at the new context
+/// (cross-device frees → CUDA_ERROR_ILLEGAL_ADDRESS); with per-context keying, two same-device backends still
+/// collapsed into one State (primary contexts are one-per-device). States are now keyed per backend and resolved
+/// via the EnterOp thread ambient, so the SameDevice_* tests below are first-class contract, not a fallback.</summary>
 [Collection("CudaSerial")]
 public sealed unsafe class MultiBackendIsolationTests
 {
@@ -39,6 +40,10 @@ public sealed unsafe class MultiBackendIsolationTests
     /// and returns the first output element (forces the lazy D2H sync — exercises the activation callback).</summary>
     private static float RunLinear(CudaBackend backend, Tensor input, Tensor weight, Tensor output)
     {
+        // This test guards state isolation, not GEMM numerics — pin full-F32 math so the 3-decimal assert
+        // against the CPU reference can't sit on the default TF32 path's ~1e-3 error boundary (it did: seed 1/2
+        // lands at -1.6545 CPU vs -1.6552 TF32 on Ada).
+        backend.HighPrecisionGemm = true;
         backend.PreloadWeights(new[] { weight });
         backend.Linear(output, input, weight, bias: null);
         return ((float*)output.DataPointer)[0]; // lazy sync fires here, on this backend's stream/context
@@ -136,10 +141,11 @@ public sealed unsafe class MultiBackendIsolationTests
 
     /// <summary>The concurrency guard the interleaved test can't provide: two backends on two DISTINCT GPUs generating
     /// on two threads AT THE SAME TIME, while each thread abandons GPU tensors and forces GC so finalizer-cleanup
-    /// callbacks pile up. Before the queue was partitioned by context, thread B's EnsureCurrent drained thread A's
-    /// callbacks — mutating A's non-thread-safe GpuTransferHelper State while A's own thread mutated it → intermittent
-    /// leak / throw / illegal-address. Requires 2 physical GPUs: two backends on ONE device intentionally share a
-    /// primary context (and thus per-context State), so concurrent use there is out of contract and would race by design.</summary>
+    /// callbacks pile up. Before the queue was partitioned (first by context, now by per-backend StateKey), thread
+    /// B's drain ran thread A's callbacks — mutating A's non-thread-safe GpuTransferHelper State while A's own
+    /// thread mutated it → intermittent leak / throw / illegal-address. Requires 2 physical GPUs so the kernels
+    /// genuinely execute concurrently; the same-device analogue (still serialized by the engine's DeviceGate until
+    /// the concurrency milestone) is <see cref="SameDevice_TwoBackends_InterleavedOps_IndependentStreamsAndCaches"/>.</summary>
     [Fact]
     public void TwoBackends_ConcurrentThreads_NoFinalizerDrainRace()
     {
@@ -175,6 +181,7 @@ public sealed unsafe class MultiBackendIsolationTests
             {
                 try
                 {
+                    backend.HighPrecisionGemm = true; // isolation test, not a numerics test — keep off the TF32 tolerance boundary
                     gate.SignalAndWait();
                     for (int i = 0; i < iters; i++)
                     {
@@ -199,6 +206,207 @@ public sealed unsafe class MultiBackendIsolationTests
             Assert.Null(failure);
             backendA.FreeWeights(new[] { weightA });
             backendB.FreeWeights(new[] { weightB });
+        }
+        finally
+        {
+            backendA.Dispose();
+            backendB.Dispose();
+        }
+    }
+
+    /// <summary>Two backends on ONE device (shared primary context) must have fully independent transfer states:
+    /// distinct StateKeys, per-backend weight caches, and correct interleaved results. This was the broken case the
+    /// per-backend StateKey + ambient refactor exists for — context-handle keying collapsed both backends into one
+    /// State with last-registered-wins stream bindings. Runs on any box with one CUDA GPU.</summary>
+    [Fact]
+    public void SameDevice_TwoBackends_InterleavedOps_IndependentStreamsAndCaches()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        const int dim = 64;
+        TensorShape ioShape = new(2, dim);
+        TensorShape wShape = new(dim, dim);
+        using Tensor inputA = RandomF32(ioShape, 101);
+        using Tensor weightA = RandomF32(wShape, 102);
+        using Tensor inputB = RandomF32(ioShape, 103);
+        using Tensor weightB = RandomF32(wShape, 104);
+        float expectedA = ExpectedFirst(inputA, weightA, dim);
+        float expectedB = ExpectedFirst(inputB, weightB, dim);
+
+        CudaBackend backendA = new(0, PtxDir());
+        CudaBackend backendB = new(0, PtxDir());
+        try
+        {
+            Assert.NotSame(backendA.TransferState, backendB.TransferState);
+            Assert.NotEqual(backendA.TransferState.Key, backendB.TransferState.Key);
+
+            using Tensor outA1 = new(ioShape, DType.F32);
+            using Tensor outB1 = new(ioShape, DType.F32);
+            using Tensor outA2 = new(ioShape, DType.F32);
+            using Tensor outB2 = new(ioShape, DType.F32);
+
+            float a1 = RunLinear(backendA, inputA, weightA, outA1);
+            float b1 = RunLinear(backendB, inputB, weightB, outB1);
+            float a2 = RunLinear(backendA, inputA, weightA, outA2);
+            float b2 = RunLinear(backendB, inputB, weightB, outB2);
+
+            Assert.Equal(expectedA, a1, 3);
+            Assert.Equal(expectedB, b1, 3);
+            Assert.Equal(a1, a2, 5);
+            Assert.Equal(b1, b2, 5);
+
+            // Each backend caches ITS weight only — the sibling's cache is untouched.
+            Assert.True(backendA.TransferState.WeightCache.ContainsKey(weightA));
+            Assert.False(backendA.TransferState.WeightCache.ContainsKey(weightB));
+            Assert.True(backendB.TransferState.WeightCache.ContainsKey(weightB));
+            Assert.False(backendB.TransferState.WeightCache.ContainsKey(weightA));
+
+            backendA.FreeWeights(new[] { weightA });
+            backendB.FreeWeights(new[] { weightB });
+        }
+        finally
+        {
+            backendA.Dispose();
+            backendB.Dispose();
+        }
+    }
+
+    /// <summary>Disposing one same-device backend must not free the sibling's live weights or unbind its stream.
+    /// Before the per-backend split, B's Dispose ran EvictAll on the SHARED per-context State (wiping A's resident
+    /// weights → dangling device pointers) and removed the compute-stream binding A still allocates through.</summary>
+    [Fact]
+    public void SameDevice_DisposeOne_SiblingWeightsSurvive()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        const int dim = 64;
+        TensorShape ioShape = new(2, dim);
+        TensorShape wShape = new(dim, dim);
+        using Tensor inputA = RandomF32(ioShape, 201);
+        using Tensor weightA = RandomF32(wShape, 202);
+        using Tensor inputB = RandomF32(ioShape, 203);
+        using Tensor weightB = RandomF32(wShape, 204);
+        float expectedA = ExpectedFirst(inputA, weightA, dim);
+
+        CudaBackend backendA = new(0, PtxDir());
+        try
+        {
+            using Tensor outA1 = new(ioShape, DType.F32);
+            float a1 = RunLinear(backendA, inputA, weightA, outA1);
+            Assert.Equal(expectedA, a1, 3);
+
+            CudaBackend backendB = new(0, PtxDir());
+            using (Tensor outB = new(ioShape, DType.F32))
+            {
+                RunLinear(backendB, inputB, weightB, outB);
+            }
+            backendB.Dispose();
+
+            // A's weight is still resident (B's EvictAll must only hit B's state)...
+            Assert.True(backendA.TransferState.WeightCache.ContainsKey(weightA));
+            long hitsBefore = backendA.TransferState.Hits;
+
+            // ...and A still computes correctly, via a cache HIT (not a silent re-upload after a wipe).
+            using Tensor outA2 = new(ioShape, DType.F32);
+            float a2 = RunLinear(backendA, inputA, weightA, outA2);
+            Assert.Equal(expectedA, a2, 3);
+            Assert.True(backendA.TransferState.Hits > hitsBefore,
+                $"expected a weight-cache hit after sibling dispose (hits {hitsBefore} -> {backendA.TransferState.Hits})");
+
+            backendA.FreeWeights(new[] { weightA });
+        }
+        finally
+        {
+            backendA.Dispose();
+        }
+    }
+
+    /// <summary>One tensor carrying activation bindings from TWO backends must keep BOTH: with the old single-slot
+    /// callbacks, backend B re-binding a tensor backend A had cached silently overwrote A's dispose hook, so A's
+    /// device buffer (and cache entry) leaked forever. Multi-slot keyed bindings free both on Dispose.</summary>
+    [Fact]
+    public void SameDevice_ActivationReboundOnSecondBackend_BothBuffersFreed()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        const int dim = 64;
+        TensorShape ioShape = new(2, dim);
+        TensorShape wShape = new(dim, dim);
+        using Tensor inputA = RandomF32(ioShape, 301);
+        using Tensor weightA = RandomF32(wShape, 302);
+        using Tensor inputB = RandomF32(ioShape, 303);
+        using Tensor weightB = RandomF32(wShape, 304);
+
+        CudaBackend backendA = new(0, PtxDir());
+        CudaBackend backendB = new(0, PtxDir());
+        try
+        {
+            backendA.HighPrecisionGemm = true;
+            backendB.HighPrecisionGemm = true;
+            Tensor shared = new(ioShape, DType.F32);
+
+            backendA.Linear(shared, inputA, weightA, bias: null);
+            backendA.Sync();
+            Assert.True(backendA.TransferState.ActivationCache.ContainsKey(shared), "A should hold shared's activation");
+
+            // B writes its own result into the SAME tensor object — the cross-backend in-place reuse that used to
+            // orphan A's binding. (B reads inputB/weightB, allocates its own output buffer, re-binds shared.)
+            backendB.Linear(shared, inputB, weightB, bias: null);
+            backendB.Sync();
+            Assert.True(backendB.TransferState.ActivationCache.ContainsKey(shared), "B should hold shared's activation");
+
+            // Multi-slot: BOTH backends' dispose hooks must fire, emptying both caches — under the single-slot
+            // scheme A's entry (and its device buffer) survived the Dispose as an unfreeable leak.
+            shared.Dispose();
+            Assert.False(backendA.TransferState.ActivationCache.ContainsKey(shared), "A leaked its activation entry after Dispose");
+            Assert.False(backendB.TransferState.ActivationCache.ContainsKey(shared), "B leaked its activation entry after Dispose");
+
+            backendA.FreeWeights(new[] { weightA });
+            backendB.FreeWeights(new[] { weightB });
+        }
+        finally
+        {
+            backendA.Dispose();
+            backendB.Dispose();
+        }
+    }
+
+    /// <summary>While backend A has a graph-capture arena active, backend B's allocations must NOT bump-allocate
+    /// out of A's arena — the arena scalars live on each backend's own State now (they were single-valued on the
+    /// shared per-context State, so B's allocations landed inside A's arena and died with it).</summary>
+    [Fact]
+    public void SameDevice_GraphArena_Isolation()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        CudaBackend backendA = new(0, PtxDir());
+        CudaBackend backendB = new(0, PtxDir());
+        try
+        {
+            GpuTransferHelper.SetAmbient(backendA.TransferState);
+            ulong arenaBase = GpuTransferHelper.BeginGraphArena();
+            if (arenaBase == 0)
+            {
+                _output.WriteLine("SKIPPED-SOFT: arena allocation failed (VRAM-tight) — nothing to isolate.");
+                return;
+            }
+            try
+            {
+                ulong insideA = GpuTransferHelper.AllocateDevice(4096);
+                Assert.True(GpuTransferHelper.IsArenaPtr(backendA.TransferState, insideA), "A's capture alloc should be arena-backed");
+
+                GpuTransferHelper.SetAmbient(backendB.TransferState);
+                ulong fromB = GpuTransferHelper.AllocateDevice(4096);
+                Assert.False(GpuTransferHelper.IsArenaPtr(backendA.TransferState, fromB),
+                    "backend B's allocation bump-allocated out of backend A's live capture arena");
+                GpuTransferHelper.FreeDevice(fromB);
+            }
+            finally
+            {
+                GpuTransferHelper.SetAmbient(backendA.TransferState);
+                GpuTransferHelper.EndGraphArena();
+                GpuTransferHelper.FreeGraphArena(arenaBase);
+            }
         }
         finally
         {

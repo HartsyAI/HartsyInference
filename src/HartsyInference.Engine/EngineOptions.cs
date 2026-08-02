@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
 
 namespace HartsyInference.Engine;
@@ -13,6 +14,10 @@ public sealed class EngineOptions
     /// variable. Hosts with a per-backend setting (the SwarmUI extension) pass it here — the env var is process-wide
     /// last-writer-wins, which breaks one-backend-per-GPU setups with differing card sizes.</summary>
     public LowVramMode? LowVram { get; set; }
+
+    /// <summary>Multi-device placement for this engine (component devices, shard devices); null = single-device.
+    /// Can also be changed later via <c>InferenceEngine.SetPlacement</c>.</summary>
+    public PlacementConfig? Placement { get; set; }
 
     /// <summary>Tokens per KV page for each loaded chat (dense/MoE transformer) model's <c>PagedKvPool</c>.</summary>
     public int KvPageSize { get; set; } = 16;

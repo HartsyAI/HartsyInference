@@ -54,28 +54,35 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         _context = context;
         _computeStream = computeStream;
         _uploadStream = uploadStream;
-
-        // Configure the device's default mempool to be aggressive about returning
-        // freed memory to the driver. Without this, the pool can hold many GB of
-        // reserved memory across cuMemFreeAsync calls — invisible to subsequent
-        // sync cuMemAlloc requests, manifesting as OOM mid-streaming. The default
-        // is supposed to be 0 but at least one Linux driver leaves it at "infinite"
-        // unless we set it explicitly. Stream syncs (or explicit trim) then return
-        // the bytes to the driver immediately.
+        // Mempool release-threshold policy is DEVICE state owned by DeviceMempoolPolicy (set once per device by
+        // the first backend, refcounted) — this ctor used to force it to 0 here, which flipped a same-device
+        // sibling backend's live pool into release-everything mode mid-generation.
         context.EnsureCurrent();
-        CudaDriverApi.cuDeviceGetDefaultMemPool(out nint pool, context.DeviceOrdinal).ThrowOnError();
-        unsafe
+    }
+
+    /// <summary>The owning backend's transfer state; bound after registration so this cache's entry points can set
+    /// the ambient (two same-device backends share a context, so context identity cannot route these calls).</summary>
+    private GpuTransferHelper.State? _state;
+
+    /// <summary>Binds the owning backend's transfer state. Called once by <see cref="CudaBackend"/> right after it
+    /// registers with <see cref="GpuTransferHelper"/>.</summary>
+    internal void BindState(GpuTransferHelper.State state) => _state = state;
+
+    /// <summary>Entry-point guard: binds this cache's owning backend as the thread's ambient state, then the context.</summary>
+    private void Enter()
+    {
+        if (_state is not null)
         {
-            ulong releaseThreshold = 0;
-            CudaDriverApi.cuMemPoolSetAttribute(pool, CudaDriverApi.CU_MEMPOOL_ATTR_RELEASE_THRESHOLD, &releaseThreshold).ThrowOnError();
+            GpuTransferHelper.SetAmbient(_state);
         }
+        _context.EnsureCurrent();
     }
 
     /// <inheritdoc/>
     public StreamingUploadToken BeginUploadAsync(IEnumerable<Tensor> weights)
     {
         if (weights is null) throw new ArgumentNullException(nameof(weights));
-        _context.EnsureCurrent();
+        Enter();
 
         // Materialize the to-upload set first: the staging path needs the total byte count up front.
         List<Tensor> pending = new();
@@ -105,8 +112,8 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
             // cuMemFreeAsync) routed memory in the front door but out the back: freed
             // bytes ended up in the pool while subsequent sync cuMemAlloc calls couldn't
             // see them, manifesting as OOM-despite-free. With consistent async use, the
-            // pool's release threshold (set to 0 in the constructor) returns bytes to the
-            // driver promptly and DrainAndReleasePool's trim is meaningful.
+            // pool's release policy (owned by DeviceMempoolPolicy) governs when bytes
+            // return to the driver and DrainAndReleasePool's trim is meaningful.
             ulong dptr = CudaMemory.AllocateAsync(byteSize, _uploadStream);
             unsafe
             {
@@ -213,7 +220,7 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
                 "StreamingUploadToken was issued by a different cache. Tokens are not " +
                 "transferable between backend instances.");
         }
-        _context.EnsureCurrent();
+        Enter();
         // Compute stream waits until the upload event is recorded — i.e. the H2D
         // copies are visible to any kernel queued after this point. Host thread
         // does not block; only the GPU compute stream is gated.
@@ -228,7 +235,7 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
     public void EvictAsync(IEnumerable<Tensor> weights)
     {
         if (weights is null) throw new ArgumentNullException(nameof(weights));
-        _context.EnsureCurrent();
+        Enter();
         foreach (Tensor weight in weights)
         {
             if (GpuTransferHelper.TryUnregisterCachedWeight(weight, out ulong dptr))
@@ -246,7 +253,7 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
     /// page-locked memory is returned to the OS.</summary>
     public void UnregisterPinnedSources()
     {
-        _context.EnsureCurrent();
+        Enter();
         ReleaseStaging();
     }
 
@@ -254,7 +261,7 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
     public long QueryAvailableWeightCacheBytes(long activationReserve)
     {
         if (activationReserve < 0) throw new ArgumentOutOfRangeException(nameof(activationReserve));
-        _context.EnsureCurrent();
+        Enter();
         CudaDriverApi.cuMemGetInfo(out nuint freeBytes, out _).ThrowOnError();
         long avail = (long)freeBytes - activationReserve;
         return avail < 0 ? 0 : avail;
@@ -263,7 +270,7 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
     /// <inheritdoc/>
     public void DrainAndReleasePool()
     {
-        _context.EnsureCurrent();
+        Enter();
         // Drain both streams so any queued cuMemFreeAsync calls actually return
         // their memory to the stream-ordered allocator pool. Without this the trim
         // below would only release whatever already-completed frees the pool sees.
