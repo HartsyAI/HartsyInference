@@ -622,7 +622,14 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             else if (drainFree)
             {
                 Tensor velocityPred;
-                if (doTrueCfg && cfgParallelEligible)
+                // condTxtSeqLen != txtSeqLen (Redux tokens / regional conditioning extend the cond stream only)
+                // means cond and uncond would precompute DIFFERENT RoPE signatures on the SAME shared _rope
+                // object. FluxRope.Precompute is now lock-safe against concurrent calls, but a lock only stops
+                // torn writes — it cannot make one cached _cosCache serve two different signatures at once, so
+                // running cond/uncond concurrently here would still let one branch's tables get clobbered by the
+                // other's mid-step. Fall back to sequential (silent, matches the rest of this eligibility chain)
+                // whenever the signatures could actually differ.
+                if (doTrueCfg && cfgParallelEligible && condTxtSeqLen == txtSeqLen)
                 {
                     // CopyFromPeer, not .DataPointer, for BOTH hops — that's what keeps drainFree drain-free.
                     // packedLatent stays device-resident and cache-hit on Backend throughout (CopyFromPeer reads

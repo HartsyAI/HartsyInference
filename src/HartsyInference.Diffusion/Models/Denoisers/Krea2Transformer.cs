@@ -129,6 +129,17 @@ public sealed unsafe class Krea2Transformer : IDisposable
         foreach (Krea2Block b in _blocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
     }
 
+    /// <summary>Enumerates only blocks <c>[startBlock, endBlock)</c>'s weights — the asymmetric preload a
+    /// block-range shard needs: the SECOND backend must load ONLY its block range, not
+    /// <see cref="EnumerateWeights"/>'s full set, or the VRAM-pooling point of sharding is defeated (both
+    /// cards would hold the whole DiT, same as CFG-branch parallelism's weight-replication case). See
+    /// <see cref="ForwardSharded"/>.</summary>
+    public IEnumerable<Tensor> EnumerateBlockRangeWeights(int startBlock, int endBlock)
+    {
+        for (int i = startBlock; i < endBlock; i++)
+            foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
+    }
+
     /// <summary>Predicts the flow-match velocity for one step.</summary>
     /// <param name="latent">Noisy latent <c>[1, 16, H, W]</c>.</param>
     /// <param name="timestep">Flow-match time <c>t</c> in <c>[0, 1]</c> (1 = noise, 0 = data).</param>
@@ -151,6 +162,122 @@ public sealed unsafe class Krea2Transformer : IDisposable
         Tensor velocity = UnpatchifyChannelOuter(projected, 1, channels, hPacked, wPacked, patch);
         projected.Dispose();
         return velocity;
+    }
+
+    /// <summary>Predicts the flow-match velocity for one step with the 28-block loop split across two backends:
+    /// blocks <c>[0, splitBlock)</c> run on <paramref name="backendA"/>, blocks <c>[splitBlock, BlockCount)</c>
+    /// on <paramref name="backendB"/> — a sequential pipeline split, not tensor-parallel, so there is
+    /// <b>no latency win</b>; the win is VRAM pooling (a DiT that doesn't fit on one card, split across two).
+    /// <paramref name="backendA"/> must hold <see cref="EnumerateSharedWeights"/> +
+    /// <see cref="EnumerateBlockRangeWeights"/><c>(0, splitBlock)</c>; <paramref name="backendB"/> must hold
+    /// ONLY <see cref="EnumerateBlockRangeWeights"/><c>(splitBlock, BlockCount)</c> — preloading
+    /// <see cref="EnumerateWeights"/> on both defeats the point (replicates instead of pools). Excludes
+    /// step-cache and the CUDA step-graph (see <see cref="ForwardPatchedSharded"/>): use <see cref="Forward"/>
+    /// for those. Not composable with block streaming (<see cref="BeforeBlockForward"/> IS the split
+    /// mechanism here, same single-field constraint as CFG-branch parallelism's streaming exclusion).</summary>
+    public Tensor ForwardSharded(IBackend backendA, IBackend backendB, Tensor latent, float timestep,
+        Tensor encoderHidden, int splitBlock)
+    {
+        ThrowIfDisposed();
+        if (latent.Shape.Rank != 4 || latent.Shape[0] != 1)
+            throw new ArgumentException($"latent must be [1, 16, H, W], got {latent.Shape}.", nameof(latent));
+        if (splitBlock <= 0 || splitBlock >= _blocks.Length)
+            throw new ArgumentOutOfRangeException(nameof(splitBlock),
+                $"splitBlock must be in (0, {_blocks.Length}) — 0 or {_blocks.Length} would put the whole DiT on one backend.");
+
+        int channels = (int)latent.Shape[1];
+        int patch = _config.PatchSize;
+        int hPacked = (int)latent.Shape[2] / patch;
+        int wPacked = (int)latent.Shape[3] / patch;
+
+        Tensor patchLatent = PatchifyLatent(latent);
+        Tensor projected = ForwardPatchedSharded(backendA, backendB, patchLatent, timestep, encoderHidden,
+            hPacked, wPacked, splitBlock);
+        patchLatent.Dispose();
+        Tensor velocity = UnpatchifyChannelOuter(projected, 1, channels, hPacked, wPacked, patch);
+        projected.Dispose();
+        return velocity;
+    }
+
+    /// <summary>The block-range-split denoise-step core (see <see cref="ForwardSharded"/>). Always eager: unlike
+    /// <see cref="ForwardPatched"/>, there is no step-graph route (a captured graph bakes device pointers for
+    /// ONE context; replaying it against a cross-device split is not meaningful) and no step-cache parameter
+    /// (its block-0-as-indicator + variable-topology-per-step shape doesn't compose with a fixed block-range
+    /// boundary — same "narrow the v1 surface" precedent as excluding block streaming and Wan from Phase 8).</summary>
+    public Tensor ForwardPatchedSharded(IBackend backendA, IBackend backendB, Tensor patchLatent, float timestep,
+        Tensor encoderHidden, int hPacked, int wPacked, int splitBlock)
+    {
+        ThrowIfDisposed();
+        const int batch = 1;
+        int hidden = _config.HiddenSize;
+        int imgSeq = hPacked * wPacked;
+        int txtSeq = (int)encoderHidden.Shape[1];
+        int jointSeq = txtSeq + imgSeq;
+
+        // ── timestep embedding + shared modulation (backendA — these weights are in EnumerateSharedWeights) ──
+        Tensor temb = ComputeTimeEmbedding(backendA, timestep, batch, hidden);
+        Tensor tembGelu = new Tensor(temb.Shape, DType.F32);
+        backendA.Gelu(tembGelu, temb);
+        Tensor tembMod = new Tensor(new TensorShape(batch, 6 * hidden), DType.F32);
+        backendA.Linear(tembMod, tembGelu, _timeModW!, _timeModB);
+        tembGelu.Dispose();
+
+        // ── text: fusion → projection (cached across steps, same as ForwardPatched) ──
+        bool txtCached = ReferenceEquals(_cachedTxtKey, encoderHidden) && _cachedTxt is not null;
+        Tensor txt;
+        if (txtCached)
+        {
+            txt = _cachedTxt!;
+        }
+        else
+        {
+            Tensor fused = _textFusion.Forward(backendA, encoderHidden, batch, txtSeq);
+            Tensor computedTxt = ApplyTxtIn(backendA, fused, batch, txtSeq, hidden);
+            fused.Dispose();
+            _ = computedTxt.DataPointer;
+            if (_cachedTxt is not null)
+            {
+                backendA.FreeWeights(new[] { _cachedTxt });
+                _cachedTxt.Dispose();
+            }
+            _cachedTxt = computedTxt;
+            _cachedTxtKey = encoderHidden;
+            txt = computedTxt;
+        }
+
+        // ── RoPE tables (host build, cached across steps) — FluxRope's per-backend GPU table cache makes it
+        // safe for _blocks on backendA and backendB to both call ApplyGpuGqa against the SAME _rope instance. ──
+        long ropeSig = ((long)txtSeq * 73856093L) ^ ((long)hPacked * 19349663L) ^ ((long)wPacked * 83492791L);
+        if (_ropeSig != ropeSig)
+        {
+            Tensor posIds = FluxRope.BuildPositionIds(txtSeq, hPacked, wPacked);
+            _rope.Precompute(posIds);
+            posIds.Dispose();
+            _ropeSig = ropeSig;
+        }
+
+        Tensor joint = ForwardEmbedIn(backendA, patchLatent, txt, batch, imgSeq, txtSeq, hidden);
+        joint = ForwardBlocksRange(backendA, joint, tembMod, batch, jointSeq, 0, splitBlock);
+
+        // ── hand off to backendB: the activation AND tembMod (created on A, read by every block) ──
+        Tensor jointB = new Tensor(joint.Shape, joint.DType);
+        backendB.CopyFromPeer(jointB, joint, backendA);
+        joint.Dispose();
+        Tensor tembModB = new Tensor(tembMod.Shape, tembMod.DType);
+        backendB.CopyFromPeer(tembModB, tembMod, backendA);
+
+        jointB = ForwardBlocksRange(backendB, jointB, tembModB, batch, jointSeq, splitBlock, _blocks.Length);
+        tembModB.Dispose();
+
+        // ── hand back to backendA: the final-layer weights live there (EnumerateSharedWeights) ──
+        Tensor jointFinal = new Tensor(jointB.Shape, jointB.DType);
+        backendA.CopyFromPeer(jointFinal, jointB, backendB);
+        jointB.Dispose();
+
+        Tensor projected = ForwardHeadOut(backendA, jointFinal, temb, batch, txtSeq, imgSeq, hidden);
+        tembMod.Dispose();
+        temb.Dispose();
+        return projected;
     }
 
     /// <summary>Patchifies a pixel latent <c>[1, C, H, W]</c> → the channel-outer token grid <c>[1, imgSeq, C·p²]</c>
@@ -384,26 +511,8 @@ public sealed unsafe class Krea2Transformer : IDisposable
     private Tensor ForwardCore(IBackend backend, Tensor patchLatent, Tensor txt, Tensor temb, Tensor tembMod,
         int batch, int imgSeq, int txtSeq, int hidden, Utilities.DeviceFeatureCache? stepCache = null)
     {
-        // ── image: img_in (patchLatent is already the [1, imgSeq, C·p²] token grid) ──
-        Tensor img = new Tensor(new TensorShape(batch, imgSeq, hidden), DType.F32);
-        backend.Linear(img, patchLatent, _imgInW!, _imgInB);
-
-        // ── concat [text, image] (device concat — see the GPU-residency notes in git history) ──
         int jointSeq = txtSeq + imgSeq;
-        Tensor joint = new Tensor(new TensorShape(batch, jointSeq, hidden), DType.F32);
-        backend.Concat(joint, new[] { txt, img }, dim: 1);
-        img.Dispose();
-
-        // F16 hot path (HARTSY_DIT_F16): one cast into F16 before the 28-block loop — the blocks and attention
-        // then run entirely in F16 (half the HBM traffic of the bandwidth-bound glue kernels). The once-per-forward
-        // text/image/timestep paths stay F32; the tail is cast back after the loop.
-        if (DiTBlocks.DitDtype.Act == DType.F16)
-        {
-            Tensor jointF16 = new Tensor(joint.Shape, DType.F16);
-            backend.CastToF16(jointF16, joint);
-            joint.Dispose();
-            joint = jointF16;
-        }
+        Tensor joint = ForwardEmbedIn(backend, patchLatent, txt, batch, imgSeq, txtSeq, hidden);
 
         // Across-step First-Block cache (QwenImageTransformer wiring; see DeviceFeatureCache): block 0 always
         // runs as the gate indicator; hit ⇒ blocks 1..N−1 replaced by block0 + previous residual; miss ⇒ the
@@ -447,7 +556,58 @@ public sealed unsafe class Krea2Transformer : IDisposable
             cacheAnchor.Dispose();
         }
 
-        // ── strip text prefix, final layer (device-resident; returns the patchified velocity) ──
+        return ForwardHeadOut(backend, joint, temb, batch, txtSeq, imgSeq, hidden);
+    }
+
+    /// <summary>img_in → concat[text, image] → (F16 cast). The prefix of <see cref="ForwardCore"/> that never
+    /// depends on a block range, so it always runs on the block-range split's FIRST backend.</summary>
+    private Tensor ForwardEmbedIn(IBackend backend, Tensor patchLatent, Tensor txt, int batch, int imgSeq,
+        int txtSeq, int hidden)
+    {
+        Tensor img = new Tensor(new TensorShape(batch, imgSeq, hidden), DType.F32);
+        backend.Linear(img, patchLatent, _imgInW!, _imgInB);
+
+        int jointSeq = txtSeq + imgSeq;
+        Tensor joint = new Tensor(new TensorShape(batch, jointSeq, hidden), DType.F32);
+        backend.Concat(joint, new[] { txt, img }, dim: 1);
+        img.Dispose();
+
+        // F16 hot path (HARTSY_DIT_F16): one cast into F16 before the block loop — the blocks and attention
+        // then run entirely in F16 (half the HBM traffic of the bandwidth-bound glue kernels). The once-per-forward
+        // text/image/timestep paths stay F32; the tail is cast back after the loop.
+        if (DiTBlocks.DitDtype.Act == DType.F16)
+        {
+            Tensor jointF16 = new Tensor(joint.Shape, DType.F16);
+            backend.CastToF16(jointF16, joint);
+            joint.Dispose();
+            joint = jointF16;
+        }
+        return joint;
+    }
+
+    /// <summary>Runs blocks <c>[startBlock, endBlock)</c> in order, calling <see cref="BeforeBlockForward"/> before
+    /// each — the same per-block hook <c>BlockStreamingController</c> uses, and the seam a block-range shard
+    /// splits on. No step-cache awareness (step-cache and sharding are mutually exclusive — see
+    /// <see cref="ForwardPatchedSharded"/>): every block in the range always runs.</summary>
+    private Tensor ForwardBlocksRange(IBackend backend, Tensor joint, Tensor tembMod, int batch, int jointSeq,
+        int startBlock, int endBlock)
+    {
+        for (int i = startBlock; i < endBlock; i++)
+        {
+            BeforeBlockForward?.Invoke(i);
+            Tensor next = _blocks[i].Forward(backend, joint, tembMod, _rope, batch, jointSeq);
+            joint.Dispose();
+            joint = next;
+        }
+        return joint;
+    }
+
+    /// <summary>Strip text prefix → (F32 cast) → final layer. The suffix of <see cref="ForwardCore"/> that never
+    /// depends on a block range, so it always runs on the block-range split's FIRST backend (where the final-layer
+    /// weights live) after the last block range's output is handed back.</summary>
+    private Tensor ForwardHeadOut(IBackend backend, Tensor joint, Tensor temb, int batch, int txtSeq, int imgSeq,
+        int hidden)
+    {
         Tensor imgTail = SliceTail(backend, joint, txtSeq, imgSeq, hidden);
         joint.Dispose();
         if (imgTail.DType == DType.F16)

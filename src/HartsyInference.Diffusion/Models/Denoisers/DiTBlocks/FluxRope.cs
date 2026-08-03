@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -17,8 +18,22 @@ public sealed unsafe class FluxRope
     private int _cachedSeqLen;
 
     // GPU duplicated-pair tables [S, headDim] (pair i stored at both 2i and 2i+1 — the layout
-    // IBackend.WanRopeInterleaved reads). Rebuilt whenever Precompute refreshes the host tables.
-    private Tensor? _gpuCos, _gpuSin;
+    // IBackend.WanRopeInterleaved reads), one pair PER BACKEND: CFG-branch parallelism and DiT block
+    // sharding both route two IBackend instances through one shared transformer/rope object (the
+    // transformer's `_rope` field is not duplicated per backend), so ApplyGpu/ApplyGpuGqa can be called
+    // for two different backends against the same FluxRope — concurrently (CFG-parallel: cond/uncond on
+    // two threads) or sequentially (a block-range shard: backend A's block range, then backend B's).
+    // WanRopeInterleaved re-stages cos/sin fresh via GpuTransferHelper.CopyToDevice/FreeDevice on every
+    // call (not a weight-cache hit), so a single shared Tensor object used by two backends already reads
+    // correctly regardless of which one built it — a stale reference here is not a wrong-device numerics
+    // bug. The real hazard: a single unkeyed slot's rebuild-on-dirty path called backend.FreeWeights +
+    // Tensor.Dispose() unconditionally, which can tear the tensor down while ANOTHER backend/thread is
+    // mid-CopyToDevice against it (the same class of lifecycle race as the EnsureCpuData fix elsewhere in
+    // this plan) — and concurrent Precompute calls raced unsynchronized writes to _cosCache/_sinCache.
+    // _gpuLock serializes both; the per-backend keying also avoids redundant rebuild churn when two
+    // backends alternate through one FluxRope.
+    private readonly object _gpuLock = new();
+    private readonly Dictionary<IBackend, (Tensor Cos, Tensor Sin)> _gpuTables = new();
     private bool _gpuTablesDirty = true;
 
     /// <summary>Creates a FluxRope with the given per-axis dimensions.</summary>
@@ -40,52 +55,63 @@ public sealed unsafe class FluxRope
     /// <param name="posIds">Position IDs [totalSeqLen, numAxes] as float32. Text tokens: all zeros. Image tokens: [0, row, col].</param>
     public void Precompute(Tensor posIds)
     {
-        int totalSeqLen = (int)posIds.Shape[0];
-        int numAxes = (int)posIds.Shape[1];
-        int halfDim = _headDim / 2;
-
-        _cosCache = new float[totalSeqLen * halfDim];
-        _sinCache = new float[totalSeqLen * halfDim];
-        _cachedSeqLen = totalSeqLen;
-
-        float* posPtr = (float*)posIds.DataPointer;
-        int freqOffset = 0;
-
-        // Max pairs across all axes (56/2=28 for Flux)
-        int maxPairs = 0;
-        for (int a = 0; a < numAxes; a++)
-            maxPairs = Math.Max(maxPairs, _axesDim[a] / 2);
-        Span<double> omega = stackalloc double[maxPairs];
-
-        for (int axis = 0; axis < numAxes; axis++)
+        // Locked: two backends sharing this FluxRope (CFG-branch parallelism) can call Precompute
+        // concurrently for the same step. Without this, concurrent writers race on _cosCache/_sinCache/
+        // _cachedSeqLen (a torn read is possible even when both calls compute identical values, since
+        // .NET gives no ordering guarantee between the array-content writes and the field publish without
+        // a barrier). Callers with DIFFERING signatures (e.g. cond/uncond token counts differ under
+        // regional conditioning) must not be routed here concurrently at all — one _cosCache instance
+        // cannot correctly serve two different signatures at once; see FluxPipeline's cfgParallelEligible
+        // guard, which requires matching signatures before allowing the concurrent branch.
+        lock (_gpuLock)
         {
-            int axisDim = _axesDim[axis];
-            int numPairs = axisDim / 2;
+            int totalSeqLen = (int)posIds.Shape[0];
+            int numAxes = (int)posIds.Shape[1];
+            int halfDim = _headDim / 2;
 
-            // Precompute omega for this axis: omega[k] = 1 / (theta ^ (2k / axisDim))
-            for (int k = 0; k < numPairs; k++)
+            _cosCache = new float[totalSeqLen * halfDim];
+            _sinCache = new float[totalSeqLen * halfDim];
+            _cachedSeqLen = totalSeqLen;
+
+            float* posPtr = (float*)posIds.DataPointer;
+            int freqOffset = 0;
+
+            // Max pairs across all axes (56/2=28 for Flux)
+            int maxPairs = 0;
+            for (int a = 0; a < numAxes; a++)
+                maxPairs = Math.Max(maxPairs, _axesDim[a] / 2);
+            Span<double> omega = stackalloc double[maxPairs];
+
+            for (int axis = 0; axis < numAxes; axis++)
             {
-                double scale = (double)(2 * k) / axisDim;
-                omega[k] = 1.0 / Math.Pow(_theta, scale);
-            }
+                int axisDim = _axesDim[axis];
+                int numPairs = axisDim / 2;
 
-            for (int s = 0; s < totalSeqLen; s++)
-            {
-                double pos = posPtr[s * numAxes + axis];
-
+                // Precompute omega for this axis: omega[k] = 1 / (theta ^ (2k / axisDim))
                 for (int k = 0; k < numPairs; k++)
                 {
-                    double angle = pos * omega[k];
-                    int idx = s * halfDim + freqOffset + k;
-                    _cosCache[idx] = (float)Math.Cos(angle);
-                    _sinCache[idx] = (float)Math.Sin(angle);
+                    double scale = (double)(2 * k) / axisDim;
+                    omega[k] = 1.0 / Math.Pow(_theta, scale);
                 }
+
+                for (int s = 0; s < totalSeqLen; s++)
+                {
+                    double pos = posPtr[s * numAxes + axis];
+
+                    for (int k = 0; k < numPairs; k++)
+                    {
+                        double angle = pos * omega[k];
+                        int idx = s * halfDim + freqOffset + k;
+                        _cosCache[idx] = (float)Math.Cos(angle);
+                        _sinCache[idx] = (float)Math.Sin(angle);
+                    }
+                }
+
+                freqOffset += numPairs;
             }
 
-            freqOffset += numPairs;
+            _gpuTablesDirty = true;   // host tables changed → every backend's GPU tables must be rebuilt
         }
-
-        _gpuTablesDirty = true;   // host tables changed → GPU duplicated-pair tables must be rebuilt
     }
 
     /// <summary>GPU-resident RoPE on a <c>[1, S, H, D]</c> (pre-permute) Q/K pair via
@@ -135,44 +161,52 @@ public sealed unsafe class FluxRope
         backend.WanRopeInterleaved(k, cos, sin, _cachedSeqLen, numKvHeads, _headDim);
     }
 
-    /// <summary>Builds (or returns the cached) duplicated-pair cos/sin tables <c>[S, headDim]</c> from the host
-    /// <see cref="Precompute"/> tables — a pure copy-expansion, no trig — and preloads them into the backend
-    /// weight cache so the per-block op skips the H2D upload. Rebuilt only when Precompute has refreshed the
-    /// host tables (FluxTransformer calls Precompute per step, so this re-uploads ~2·S·headDim floats per step —
-    /// negligible next to a single activation).</summary>
+    /// <summary>Builds (or returns the per-backend cached) duplicated-pair cos/sin tables <c>[S, headDim]</c> from
+    /// the host <see cref="Precompute"/> tables — a pure copy-expansion, no trig — and preloads them into
+    /// <paramref name="backend"/>'s weight cache so the per-block op skips the H2D upload. All backends' cached
+    /// tables are evicted (freed against their OWNING backend, not the caller) the first time this is called
+    /// after Precompute refreshes the host tables; each backend then rebuilds lazily on its own next call.
+    /// Locked: two backends can call this concurrently (CFG-branch parallelism) or in sequence (a block-range
+    /// shard handing off from one backend to another mid-step) — either way each backend gets its own tensors,
+    /// never another backend's.</summary>
     private unsafe (Tensor cos, Tensor sin) GetGpuTables(IBackend backend)
     {
-        if (!_gpuTablesDirty)
-            return (_gpuCos!, _gpuSin!);
-
-        if (_gpuCos is not null)
+        lock (_gpuLock)
         {
-            backend.FreeWeights([_gpuCos, _gpuSin!]);
-            _gpuCos.Dispose();
-            _gpuSin!.Dispose();
-        }
-
-        int halfDim = _headDim / 2;
-        Tensor cos = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
-        Tensor sin = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
-        float* cp = (float*)cos.DataPointer;
-        float* sp = (float*)sin.DataPointer;
-        for (int s = 0; s < _cachedSeqLen; s++)
-        {
-            long srcOff = (long)s * halfDim;
-            long dstOff = (long)s * _headDim;
-            for (int i = 0; i < halfDim; i++)
+            if (_gpuTablesDirty)
             {
-                cp[dstOff + 2 * i] = _cosCache![srcOff + i]; cp[dstOff + 2 * i + 1] = _cosCache[srcOff + i];
-                sp[dstOff + 2 * i] = _sinCache![srcOff + i]; sp[dstOff + 2 * i + 1] = _sinCache[srcOff + i];
+                foreach (KeyValuePair<IBackend, (Tensor Cos, Tensor Sin)> entry in _gpuTables)
+                {
+                    entry.Key.FreeWeights([entry.Value.Cos, entry.Value.Sin]);
+                    entry.Value.Cos.Dispose();
+                    entry.Value.Sin.Dispose();
+                }
+                _gpuTables.Clear();
+                _gpuTablesDirty = false;
             }
-        }
+            if (_gpuTables.TryGetValue(backend, out (Tensor Cos, Tensor Sin) cached))
+                return (cached.Cos, cached.Sin);
 
-        backend.PreloadWeights([cos, sin]);
-        _gpuCos = cos;
-        _gpuSin = sin;
-        _gpuTablesDirty = false;
-        return (cos, sin);
+            int halfDim = _headDim / 2;
+            Tensor cos = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
+            Tensor sin = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
+            float* cp = (float*)cos.DataPointer;
+            float* sp = (float*)sin.DataPointer;
+            for (int s = 0; s < _cachedSeqLen; s++)
+            {
+                long srcOff = (long)s * halfDim;
+                long dstOff = (long)s * _headDim;
+                for (int i = 0; i < halfDim; i++)
+                {
+                    cp[dstOff + 2 * i] = _cosCache![srcOff + i]; cp[dstOff + 2 * i + 1] = _cosCache[srcOff + i];
+                    sp[dstOff + 2 * i] = _sinCache![srcOff + i]; sp[dstOff + 2 * i + 1] = _sinCache[srcOff + i];
+                }
+            }
+
+            backend.PreloadWeights([cos, sin]);
+            _gpuTables[backend] = (cos, sin);
+            return (cos, sin);
+        }
     }
 
     /// <summary>Applies RoPE rotation to Q and K tensors in-place. Q/K must be [B, numHeads, seqLen, headDim] laid out as contiguous floats. Precompute must be called first with matching seqLen.</summary>
