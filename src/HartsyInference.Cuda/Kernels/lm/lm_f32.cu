@@ -74,6 +74,36 @@ __global__ void lm_kv_append_f32(
     buffer[bufIdx] = newKv[i];
 }
 
+// F16-storage KV cache append: same addressing as lm_kv_append_f32, but the resident buffer is __half
+// (halves the KV cache's VRAM footprint) while the source stays F32 (K/V straight out of the projection —
+// no upstream code needs to know the cache is narrower than what produced it). Round-to-nearest-even via
+// __float2half, CUDA's standard conversion. Attention's read side (lm_flash_attn_f16kv_f32) upconverts
+// back to F32 before the QK dot / softmax / PV accumulate — only storage is narrower, not compute.
+__global__ void lm_kv_append_f16(
+    __half* __restrict__ buffer,
+    const float* __restrict__ newKv,
+    unsigned int heads,
+    unsigned int maxSeq,
+    unsigned int tNew,
+    unsigned int headDim,
+    unsigned int offset,
+    unsigned long long total,
+    const int* __restrict__ dPos)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+
+    if (dPos != nullptr) offset = (unsigned int)dPos[1];
+
+    unsigned int d = (unsigned int)(i % headDim);
+    unsigned long long rem = i / headDim;
+    unsigned int ti = (unsigned int)(rem % tNew);
+    unsigned int h = (unsigned int)(rem / tNew);
+
+    unsigned long long bufIdx = (((unsigned long long)h * maxSeq) + (offset + ti)) * headDim + d;
+    buffer[bufIdx] = __float2half(newKv[i]);
+}
+
 // ── Paged KV: contiguous time-range extraction ──────────────────────────────
 // output[1,h,t,d] = input[1,h,start+t,d] for t in [0,len). Mirror of lm_kv_append_f32's per-head
 // addressing but reading a sub-range instead of writing one — used by the paged KV cache to (a) split a

@@ -469,6 +469,16 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         //   - StreamingCache == null (CPU/Vulkan): preload everything eagerly. CPU has
         //     no notion of "device memory"; Vulkan's allocator is independent of this API.
         //     Same behavior as before this refactor.
+        // CFG-branch parallelism (ROADMAP.md §1): uncond runs concurrently on a second backend instead of after
+        // cond on this one. Structurally blocked, not just untested, when block-streaming is active — the
+        // streaming controller's BeforeBlockForward hook is a SINGLE field on the shared _transformer object, so
+        // two backends' controllers can't both drive it concurrently. Eligibility can only be decided AFTER the
+        // resident-vs-streaming placement below, from the ACTUAL decision for THIS generation (VRAM pressure
+        // varies run to run) — never from static config. Falls back to sequential silently (one log line, never
+        // a throw) if CfgParallelBackend can't also hold the whole DiT resident (~2× the VRAM of a single card
+        // resident, e.g. ~24 GB total for Flux-dev fp8 across two cards — rarely available on consumer pairs;
+        // correct when it is, honestly narrow when it isn't).
+        bool cfgParallelEligible = false;
         BlockStreamingController? streamer = null;
         if (Backend.StreamingCache is not null)
         {
@@ -499,6 +509,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             if (placement == PhasePlacement.Resident)
             {
                 Backend.PreloadWeights(_transformer.EnumerateWeights());
+                cfgParallelEligible = TryPreloadCfgParallel(doTrueCfg);
             }
             else
             {
@@ -517,6 +528,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         else
         {
             Backend.PreloadWeights(_transformer.EnumerateWeights());
+            cfgParallelEligible = TryPreloadCfgParallel(doTrueCfg);
         }
 
         // ControlNet adapter weights ride beside the DiT for the whole loop (they run every step).
@@ -609,20 +621,51 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             }
             else if (drainFree)
             {
-                Tensor velocityPred = _transformer.Forward(
-                    Backend, packedLatent, condStream, sigma,
-                    clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, null, 0, 0, 0);
-                if (doTrueCfg)
+                Tensor velocityPred;
+                if (doTrueCfg && cfgParallelEligible)
                 {
-                    Tensor velocityNeg = _transformer.Forward(
-                        Backend, packedLatent, negT5Embeddings!, sigma,
-                        negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked, null, 0, 0, 0);
-                    Backend.CfgEulerStep(packedLatent, velocityPred, velocityNeg, trueCfgScale, scheduler.Dt(i));
-                    velocityNeg.Dispose();
+                    // CopyFromPeer, not .DataPointer, for BOTH hops — that's what keeps drainFree drain-free.
+                    // packedLatent stays device-resident and cache-hit on Backend throughout (CopyFromPeer reads
+                    // the raw device pointer via TryGetDevicePointer, never touching .DataPointer, so it can't
+                    // trip the demote hook that would otherwise evict Backend's cached copy from under its own
+                    // concurrent kernel launches — the same hazard CfgBranchRunner's doc comment calls out for
+                    // shared weight tensors, but here for a per-step activation instead). uncondLatent is an
+                    // independent tensor only the worker thread ever touches.
+                    Tensor uncondLatent = new Tensor(packedLatent.Shape, packedLatent.DType);
+                    CfgParallelBackend!.CopyFromPeer(uncondLatent, packedLatent, Backend);
+                    Tensor velocityNegLocal;
+                    try
+                    {
+                        (velocityPred, Tensor velocityNegRemote) = CfgBranchRunner.Run(
+                            () => _transformer.Forward(Backend, packedLatent, condStream, sigma,
+                                clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, null, 0, 0, 0),
+                            () => _transformer.Forward(CfgParallelBackend!, uncondLatent, negT5Embeddings!, sigma,
+                                negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked, null, 0, 0, 0));
+                        velocityNegLocal = new Tensor(velocityNegRemote.Shape, velocityNegRemote.DType);
+                        Backend.CopyFromPeer(velocityNegLocal, velocityNegRemote, CfgParallelBackend!);
+                        velocityNegRemote.Dispose();
+                    }
+                    finally { uncondLatent.Dispose(); }
+                    Backend.CfgEulerStep(packedLatent, velocityPred, velocityNegLocal, trueCfgScale, scheduler.Dt(i));
+                    velocityNegLocal.Dispose();
                 }
                 else
                 {
-                    Backend.CfgEulerStep(packedLatent, velocityPred, velocityPred, 1.0f, scheduler.Dt(i));
+                    velocityPred = _transformer.Forward(
+                        Backend, packedLatent, condStream, sigma,
+                        clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, null, 0, 0, 0);
+                    if (doTrueCfg)
+                    {
+                        Tensor velocityNeg = _transformer.Forward(
+                            Backend, packedLatent, negT5Embeddings!, sigma,
+                            negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked, null, 0, 0, 0);
+                        Backend.CfgEulerStep(packedLatent, velocityPred, velocityNeg, trueCfgScale, scheduler.Dt(i));
+                        velocityNeg.Dispose();
+                    }
+                    else
+                    {
+                        Backend.CfgEulerStep(packedLatent, velocityPred, velocityPred, 1.0f, scheduler.Dt(i));
+                    }
                 }
                 velocityPred.Dispose();
             }
@@ -785,6 +828,14 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             {
                 Backend.FreeActivations();
             }
+            // CfgParallelBackend never holds packedLatent (only the per-step uncondLatent clone, already disposed
+            // above) — nothing to protect there, and its per-step DiT-internal activations need a sweep or they
+            // accumulate to OOM over the loop exactly like Wan's uncond branch does (CfgBranchRunner's doc
+            // comment). Unlike Backend, this is unconditional even on drainFree.
+            if (doTrueCfg && cfgParallelEligible)
+            {
+                CfgParallelBackend!.FreeActivations();
+            }
         }
 
         // On the graph route packedLatent IS the transformer-owned fixed buffer (alive across generations
@@ -924,6 +975,31 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     /// DiT weights — the deepest valley is a SingleStreamBlock holding the F16 mlpInput + mlpActivated and
     /// the F16 concatted simultaneously alongside the F32 attention tensors. Shared by the resident-vs-stream
     /// decision and the prefetch-depth choice so the two can never disagree. Byte sizes are for B=1.</summary>
+    /// <summary>Attempts to preload the whole DiT onto <see cref="DiffusionPipelineBase.CfgParallelBackend"/> so
+    /// the true-CFG uncond branch can run there concurrently with cond on <see cref="DiffusionPipelineBase.Backend"/>.
+    /// Never throws — a card that can't also hold the DiT resident (~2× a single card's worth of VRAM) falls back
+    /// to the sequential path with one log line, exactly like the "no CfgParallelBackend configured" case. Called
+    /// only from the Resident placement branches; block-streaming and CFG-parallel don't compose (see the call
+    /// sites' comment).</summary>
+    private bool TryPreloadCfgParallel(bool doTrueCfg)
+    {
+        if (!doTrueCfg || CfgParallelBackend is null)
+        {
+            return false;
+        }
+        try
+        {
+            CfgParallelBackend.PreloadWeights(_transformer.EnumerateWeights());
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"Flux CFG-parallel: couldn't preload the DiT onto the second backend (falling back to "
+                + $"sequential true-CFG this generation): {ex.Message}");
+            return false;
+        }
+    }
+
     private static long EstimateFluxActivationReserveBytes(int txtSeqLen, int imgSeqLen, int hiddenSize, int mlpDim)
     {
         long totalSeqLen = txtSeqLen + imgSeqLen;

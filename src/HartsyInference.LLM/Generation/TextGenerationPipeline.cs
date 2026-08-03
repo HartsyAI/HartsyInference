@@ -149,7 +149,8 @@ public sealed class TextGenerationPipeline
         // architecture's HeadDimFor is just the uniform HeadDim, so this is a no-op for them.
         int[] headDimPerLayer = new int[cfg.NumLayers];
         for (int i = 0; i < cfg.NumLayers; i++) headDimPerLayer[i] = cfg.HeadDimFor(i);
-        using FixedKvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, headDimPerLayer, maxSeq);
+        using FixedKvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, headDimPerLayer, maxSeq,
+            KvCaches.F16Enabled ? DType.F16 : DType.F32);
 
         bool stopped = false;
         int next;

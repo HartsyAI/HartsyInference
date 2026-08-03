@@ -198,6 +198,7 @@ public sealed class InferenceEngine : IInferenceEngine
             Backend = backend,
             TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
             VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
+            CfgParallelBackend = _placement.CfgParallelDevice is null ? null : EnsureBackend(_placement.CfgParallelDevice),
             Components = request?.Components,
             Loras = request?.Loras,
         }));
@@ -346,6 +347,7 @@ public sealed class InferenceEngine : IInferenceEngine
                 Backend = backend,
                 TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
                 VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
+                CfgParallelBackend = _placement.CfgParallelDevice is null ? null : EnsureBackend(_placement.CfgParallelDevice),
             }));
         _videoRecipePipelines[key] = pipeline;
         return pipeline;

@@ -324,13 +324,24 @@ all_reduce(local[r], bytes):
 
 **Backend:** **NCCL** (library-policy exception, same category as the cuBLAS/cuBLASLt the engine already P/Invokes) for all collectives; RCCL for AMD via lib swap. The layer-split boundary can use NCCL `ncclSend`/`ncclRecv` or a direct `cuMemcpyPeerAsync` (no NCCL needed for pure point-to-point).
 
-**Current state:** `CudaContext` wraps **one primary context per device** (`cuDevicePrimaryCtxRetain` + `cuCtxSetCurrent`), `GetDeviceCount` exists, `cuMemcpyDtoD` is bound, and the engine already has `CublasApi`/`CublasLtApi` native-lib bindings + a `CudaLibraryResolver` for runtime lib-name resolution (the pattern an `NcclApi` binding follows). **Missing bindings to add:** `cuDeviceCanAccessPeer`, `cuCtxEnablePeerAccess`, `cuMemcpyPeer`/`cuMemcpyPeerAsync` (for layer-split + topology probing), and a new `NcclApi` (resolve `nccl`→`libnccl.so.2`/`nccl64_*.dll` via `CudaLibraryResolver`). The streaming weight cache already has the `cuEvent`/`cuStreamWaitEvent` sync we'd reuse cross-device.
+**Current state (updated 2026-08-02 — milestone 1 below has shipped, see `ROADMAP.md` §1 for the live
+tracker; this section now describes what's built vs what NCCL/TP still needs):** `CudaContext` wraps
+**one primary context per device** (`cuDevicePrimaryCtxRetain` + `cuCtxSetCurrent`), `GetDeviceCount`
+exists, `cuMemcpyDtoD` is bound, and the engine already has `CublasApi`/`CublasLtApi` native-lib bindings
++ a `CudaLibraryResolver` for runtime lib-name resolution (the pattern an `NcclApi` binding follows).
+`cuDeviceCanAccessPeer`, `cuCtxEnablePeerAccess`, and `cuMemcpyPeer`/`cuMemcpyPeerAsync` are now bound
+(`CudaDriverApi.cs`) and wired into `IBackend.CopyFromPeer` (P2P path + host-staged fallback, per-pair
+probe/enable memo in `CudaPeerAccess`) — layer-split (milestone 1) uses this and topology probing is
+`CudaTopology.Probe()`. **Still missing:** a new `NcclApi` (resolve `nccl`→`libnccl.so.2`/`nccl64_*.dll`
+via `CudaLibraryResolver`) for milestone 2+ (tensor/expert parallel need real collectives; layer-split
+needed only point-to-point copy, which is why it shipped first). The streaming weight cache already has
+the `cuEvent`/`cuStreamWaitEvent` sync milestone 2 would reuse cross-device.
 
 **Recommended build order (each independently shippable):**
 
 | # | Milestone | What it enables | Collective | Effort | Hardware to verify |
 |---|---|---|---|---|---|
-| 1 | **Layer split (pipeline)** — one `CudaContext` per device, contiguous layer ranges sized by free VRAM/ratios, KV co-located, `cuMemcpyPeerAsync` (host-staged fallback) at stage boundaries | Run a model 2-N× too big for one GPU; **memory scales** (not latency) | **none** (P2P copy) | Medium | 2-N cheap GPUs (1080 Ti class), PCIe — verifiable without NVLink |
+| 1 | **Layer split (pipeline)** — one `CudaContext` per device, contiguous layer ranges sized by free VRAM/ratios, KV co-located, `cuMemcpyPeerAsync` (host-staged fallback) at stage boundaries — **✅ shipped 2026-08-02**, verified on 4090+3060 (Llama-3.2-1B, exact token parity, VRAM genuinely pooled) | Run a model 2-N× too big for one GPU; **memory scales** (not latency) | **none** (P2P copy) | Medium | 2-N cheap GPUs (1080 Ti class), PCIe — verifiable without NVLink |
 | 2 | **NCCL binding + tensor parallel** — `NcclApi` P/Invoke + TCP rendezvous bootstrap; column/row-parallel linear loaders; 2 `ncclAllReduce`/layer | **Latency** speedup for a single request; the real "fast" mode | NCCL all-reduce | High | needs NVLink/NVSwitch to pay off; PCIe-only >2 GPUs ≈ no benefit |
 | 3 | **Expert parallel** — distribute experts across devices, all-to-all dispatch/combine via grouped `ncclSend`/`ncclRecv` (reuse `SplitStackedExperts`) | Scale MoE expert weight (Kimi-K2/DeepSeek/Mixtral) past one GPU | NCCL grouped send/recv | High | multi-GPU node |
 | 4 | **DP-attention + EP hybrid** — replicate MLA attention per DP rank, `ncclAllGather` before MoE, EP the experts | The efficient DeepSeek/Kimi serving recipe (no MLA KV duplication) | all-gather + all-to-all | High | datacenter |

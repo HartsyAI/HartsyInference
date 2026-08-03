@@ -413,7 +413,8 @@ public sealed class CudaBackend : IBackend
         // synchronize with the NULL stream, causing race conditions where kernels read incomplete
         // data from in-progress H2D transfers. Fix: switch to cuMemcpyHtoDAsync on this stream.
         _stream = new CudaStream(nonBlocking: false);
-        Profiling.NvtxRange.ProfileSyncStream = _stream.Handle;   // enables HARTSY_PROFILE_SYNC per-op GPU-time attribution
+        // HARTSY_PROFILE_SYNC's per-op GPU-time attribution resolves ITS stream from the ambient backend State
+        // (see NvtxRange.Dispose) — no registration needed here.
         // Upload stream is non-blocking so its in-flight work doesn't gate the compute
         // stream's NULL-stream "wait for everything" semantics — without that, prefetched
         // uploads would force compute to wait, defeating overlap. The streaming cache uses
@@ -2203,14 +2204,14 @@ public sealed class CudaBackend : IBackend
         EnterOp();
         _stepGraph ??= new CudaGraph(_stream.Handle, autoFreeAllocationsOnRelaunch: true);
         _stepGraph.Reset();
-        lock (CudaMemory.CaptureAllocs)
+        lock (_transferState.CaptureAllocs)
         {
-            CudaMemory.CaptureAllocs.Clear();
-            CudaMemory.CaptureAllocBytes = 0;
-            CudaMemory.CaptureFreeBytes = 0;
-            CudaMemory.CaptureAllocCount = 0;
-            CudaMemory.CaptureFreeCount = 0;
-            CudaMemory.TrackCaptureWindow = true;
+            _transferState.CaptureAllocs.Clear();
+            _transferState.CaptureAllocBytes = 0;
+            _transferState.CaptureFreeBytes = 0;
+            _transferState.CaptureAllocCount = 0;
+            _transferState.CaptureFreeCount = 0;
+            _transferState.TrackCaptureWindow = true;
         }
         _stepGraph.BeginCapture();
         _stepGraphCapturing = true;
@@ -2221,17 +2222,17 @@ public sealed class CudaBackend : IBackend
         if (!_stepGraphCapturing || _stepGraph is null)
             return;
         _stepGraphCapturing = false;
-        CudaMemory.TrackCaptureWindow = false;
+        _transferState.TrackCaptureWindow = false;
         long outstanding;
         int outstandingCount;
-        lock (CudaMemory.CaptureAllocs)
+        lock (_transferState.CaptureAllocs)
         {
-            outstanding = CudaMemory.CaptureAllocBytes - CudaMemory.CaptureFreeBytes;
-            outstandingCount = CudaMemory.CaptureAllocs.Count;
+            outstanding = _transferState.CaptureAllocBytes - _transferState.CaptureFreeBytes;
+            outstandingCount = _transferState.CaptureAllocs.Count;
         }
         HartsyInference.Core.Logging.Logs.Info(
-            $"[Cuda] step-graph capture window: allocs {CudaMemory.CaptureAllocCount} ({CudaMemory.CaptureAllocBytes >> 20} MB), " +
-            $"frees {CudaMemory.CaptureFreeCount} ({CudaMemory.CaptureFreeBytes >> 20} MB), " +
+            $"[Cuda] step-graph capture window: allocs {_transferState.CaptureAllocCount} ({_transferState.CaptureAllocBytes >> 20} MB), " +
+            $"frees {_transferState.CaptureFreeCount} ({_transferState.CaptureFreeBytes >> 20} MB), " +
             $"OUTSTANDING {outstandingCount} allocs / {outstanding >> 20} MB");
         _stepGraph.EndCaptureAndInstantiate();
         _stepGraph.Launch();
@@ -2251,7 +2252,7 @@ public sealed class CudaBackend : IBackend
         {
             _stepGraph?.AbortCapture();
             _stepGraphCapturing = false;
-            CudaMemory.TrackCaptureWindow = false;
+            _transferState.TrackCaptureWindow = false;
         }
         bool hadCapturedGraph = _stepGraph?.IsReady == true;
         _stepGraph?.Reset();
@@ -6317,7 +6318,12 @@ public sealed class CudaBackend : IBackend
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
         // The kernel pads the block to the next power of two >= D, so any D up to 1024 works (Phi-3 D=96 etc.).
         bool kernelOk = d > 0 && d <= 1024;
-        if (query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32 || !kernelOk
+        // F16-storage KV cache (halved VRAM): key/value are the FixedKvCache buffers, which under kvDtype=F16
+        // are __half-typed; Q/out/sink/alibi are unaffected (still F32). v1 scope: monolithic kernel only —
+        // the split-K path below is forced off for this case (LaunchFlashAttentionF16Kv has no split variant).
+        bool f16Kv = key.DType == DType.F16 && value.DType == DType.F16;
+        bool kvOk = f16Kv || (key.DType == DType.F32 && value.DType == DType.F32);
+        if (query.DType != DType.F32 || !kvOk || output.DType != DType.F32 || !kernelOk
             || (sink is not null && sink.DType != DType.F32) || (alibiSlopes is not null && alibiSlopes.DType != DType.F32))
         {
             AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
@@ -6347,7 +6353,8 @@ public sealed class CudaBackend : IBackend
             // clamp — see flash_attn_f32_split.cu); only sink and ALiBi still require the monolithic kernel.
             // This matters enormously for low-head-count windowed models: gemma3-1b decodes with FOUR query
             // heads, so the monolithic path put 4 blocks on 28 SMs (measured 5.4× slower than llama.cpp e2e).
-            bool splitEligible = pSink == 0 && pAlibi == 0;
+            // F16 KV forces the monolithic path — LaunchFlashAttentionSplit has no F16-KV variant (v1 scope).
+            bool splitEligible = pSink == 0 && pAlibi == 0 && !f16Kv;
             bool forceSplit = EnvFlag("HARTSY_FLASH_SPLIT_FORCE");
             // Occupancy-limited = the LLM decode case (tq=1, few heads → e.g. 16 blocks on 28 SMs). Splitting the
             // key axis there fills the GPU and is a large decode win (attention was ~30% of decode; split-K ≈ +38%
@@ -6394,6 +6401,10 @@ public sealed class CudaBackend : IBackend
                     GpuTransferHelper.FreeDevice(pM); GpuTransferHelper.FreeDevice(pL); GpuTransferHelper.FreeDevice(pAcc);
                 }
             }
+            else if (f16Kv)
+            {
+                _kernels!.LaunchFlashAttentionF16Kv(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, slidingWindow, pAlibi, _stream.Handle);
+            }
             else
             {
                 _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, slidingWindow, pAlibi, _stream.Handle);
@@ -6430,7 +6441,10 @@ public sealed class CudaBackend : IBackend
     /// <summary>In-place KV-cache append (device-to-device strided write); no reallocation, buffer stays GPU-resident.</summary>
     public unsafe void KvCacheAppend(Tensor buffer, Tensor newKv, int offset)
     {
-        if (buffer.DType != DType.F32 || newKv.DType != DType.F32)
+        // F16-storage KV cache (halved VRAM): the source stays F32 (straight out of the K/V projection) and
+        // the destination buffer is F16 — a distinct dtype-converting kernel, not the plain-copy F32 path.
+        bool f16Dest = buffer.DType == DType.F16 && newKv.DType == DType.F32;
+        if (!f16Dest && (buffer.DType != DType.F32 || newKv.DType != DType.F32))
         {
             ((IBackend)this).KvCacheAppend(buffer, newKv, offset);
             return;
@@ -6443,7 +6457,14 @@ public sealed class CudaBackend : IBackend
         {
             pBuf = GpuTransferHelper.CopyToDevice(buffer);
             pNew = GpuTransferHelper.CopyToDevice(newKv);
-            _kernels!.LaunchKvAppend(pBuf, pNew, h, maxSeq, tNew, d, offset, _stream.Handle);
+            if (f16Dest)
+            {
+                _kernels!.LaunchKvAppendF16(pBuf, pNew, h, maxSeq, tNew, d, offset, _stream.Handle);
+            }
+            else
+            {
+                _kernels!.LaunchKvAppend(pBuf, pNew, h, maxSeq, tNew, d, offset, _stream.Handle);
+            }
             // buffer is updated in place; it is a cache-owned resident activation, so re-cache its pointer.
             buffer._gpuSyncCallback = null;
             buffer._gpuDisposeCallback = null;
@@ -6561,6 +6582,10 @@ public sealed class CudaBackend : IBackend
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
         bool kernelOk = d > 0 && d <= 1024;
+        // key/value != F32 also catches F16-storage KV (v1 scope: graph-decode has no F16-KV variant) — falls
+        // through to the eager FlashAttention above, which DOES handle F16 KV (monolithic kernel only, split
+        // forced off there too). Intentional, not a gap: same "disable the fast path, not extend it" precedent
+        // as Phase 6 disabling CUDA-graph decode when LLM layers are staged across devices.
         if (devicePos == 0 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32 || !kernelOk)
         {
             FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
@@ -7651,10 +7676,6 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.Unregister(_transferState);
             HartsyInference.Core.Tensors.Tensor.DiscardPendingFinalizerGpuCleanup(_transferState.Key);
             DeviceMempoolPolicy.Release(_context.DeviceOrdinal);
-            if (NvtxRange.ProfileSyncStream == _stream.Handle)
-            {
-                NvtxRange.ProfileSyncStream = 0;
-            }
 
             // Order: upload stream first (no other code holds events on it after
             // EvictAll above), then compute stream, then context.

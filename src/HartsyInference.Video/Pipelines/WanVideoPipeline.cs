@@ -203,7 +203,18 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         Logs.Info($"Wan-Video {mode}: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, seed={seed} (latent {_config.InChannels}x{tLat}x{hLat}x{wLat}, shift={shift})");
         Logs.Warning("Wan-Video pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
+        // CFG-branch parallelism (ROADMAP.md §1): uncond runs concurrently on a second backend instead of after
+        // cond on this one. MoE (A14B) is excluded from v1 — SwapToExpert below keeps only one expert resident on
+        // Backend, and mirroring that swap onto a second backend under VRAM pressure is unbuilt; single-expert
+        // variants (the on-disk TI2V-5B checkpoint) always qualify. Preloading BOTH backends' weight caches here,
+        // sequentially before the loop, is load-bearing for correctness, not just perf: once both caches are warm,
+        // every in-loop weight read is a per-backend cache-hit dictionary lookup that never touches the shared
+        // weight tensor's mutable GPU-binding state, which is what makes concurrent cond/uncond reads of the same
+        // weight tensors safe (see CfgBranchRunner's doc comment). Only this loop opts in — the CLIP-I2V and
+        // video-to-video loops below stay sequential.
+        bool cfgParallelEnabled = CfgParallelBackend is not null && _transformer2 is null;
         if (_transformer2 is null) Backend.PreloadWeights(_transformer.EnumerateWeights());
+        if (cfgParallelEnabled) CfgParallelBackend!.PreloadWeights(_transformer.EnumerateWeights());
         // MoE (A14B): SwapToExpert in the loop keeps only the active expert resident (2×14 GB won't co-reside in 24 GB).
         // T2V/TI2V denoise in VAE-latent space; the latent channel count is the VAE z, not the (possibly larger,
         // I2V-concat) transformer in_channels.
@@ -269,10 +280,29 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             if (!cfgThisStep) cfgSkippedSteps++;
             Tensor vCond;
             Tensor? vUncond = null;
+            // Clone the shared latent BEFORE forking, on this (the main) thread — cloning inside the uncond
+            // thunk would still race the main thread's own read of the same source tensor. Weights are safe to
+            // share across the two threads (both backends' caches are warm from the preload above), but the
+            // per-step latent mutates every iteration and is the one tensor both branches would otherwise touch.
+            bool cfgParallel = cfgThisStep && cfgParallelEnabled;
             if (firstFrameLatent is null)
             {
-                vCond = expert.Forward(Backend, latents, promptEmbeds, tEmb, condCache);
-                if (cfgThisStep) vUncond = expert.Forward(Backend, latents, negativeEmbeds, tEmb, uncondCache);
+                if (cfgParallel)
+                {
+                    Tensor uncondLatents = CloneLatents(latents);
+                    try
+                    {
+                        (vCond, vUncond) = CfgBranchRunner.Run(
+                            () => expert.Forward(Backend, latents, promptEmbeds, tEmb, condCache),
+                            () => expert.Forward(CfgParallelBackend!, uncondLatents, negativeEmbeds, tEmb, uncondCache));
+                    }
+                    finally { uncondLatents.Dispose(); }
+                }
+                else
+                {
+                    vCond = expert.Forward(Backend, latents, promptEmbeds, tEmb, condCache);
+                    if (cfgThisStep) vUncond = expert.Forward(Backend, latents, negativeEmbeds, tEmb, uncondCache);
+                }
             }
             else
             {
@@ -281,8 +311,22 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 WriteFirstFrame(modelInput, firstFrameLatent);
                 frameTs![0] = 0f;
                 for (int f = 1; f < tLat; f++) frameTs[f] = tEmb;
-                vCond = expert.Forward(Backend, modelInput, promptEmbeds, frameTs, condCache);
-                if (cfgThisStep) vUncond = expert.Forward(Backend, modelInput, negativeEmbeds, frameTs, uncondCache);
+                if (cfgParallel)
+                {
+                    Tensor uncondModelInput = CloneLatents(modelInput);
+                    try
+                    {
+                        (vCond, vUncond) = CfgBranchRunner.Run(
+                            () => expert.Forward(Backend, modelInput, promptEmbeds, frameTs, condCache),
+                            () => expert.Forward(CfgParallelBackend!, uncondModelInput, negativeEmbeds, frameTs, uncondCache));
+                    }
+                    finally { uncondModelInput.Dispose(); }
+                }
+                else
+                {
+                    vCond = expert.Forward(Backend, modelInput, promptEmbeds, frameTs, condCache);
+                    if (cfgThisStep) vUncond = expert.Forward(Backend, modelInput, negativeEmbeds, frameTs, uncondCache);
+                }
                 modelInput.Dispose();
             }
             // Fold CFG into vCond, then take a UniPC predictor/corrector step in place. Outside the guidance
@@ -303,8 +347,10 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             });
             // Reclaim GPU-resident activation buffers between steps: the DiT keeps intermediates on-device, and any
             // not read-back or disposed would linger until GC and accumulate to OOM over many steps. The latent is
-            // host-side, so nothing cross-step is lost.
+            // host-side, so nothing cross-step is lost. With CFG-parallel active, the uncond branch accumulates its
+            // own activations on CfgParallelBackend — free both, or the second card OOMs a few steps in.
             Backend.FreeActivations();
+            if (cfgParallelEnabled) CfgParallelBackend!.FreeActivations();
         }
 
         if (firstFrameLatent is not null) WriteFirstFrame(latents, firstFrameLatent);

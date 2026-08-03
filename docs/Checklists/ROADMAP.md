@@ -18,18 +18,82 @@ Not "one gen per GPU" — a single large model **spread across GPUs**: big LLM/M
 together several small consumer cards (e.g. 8 GB each) into one usable pool. Unblocks the build-deferred
 giants (Kimi-K2, DeepSeek-V3, Mixtral, Qwen3-MoE, Qwen2.5-VL-7B).
 
-- [ ] **M0 — device topology + placement:** enumerate GPUs, PCIe/NVLink topology, per-device VRAM
-  budget; a placement planner that assigns layers/experts to devices.
-- [ ] **M1 — layer-split (pipeline) parallel:** shard transformer blocks across devices, micro-batch the
-  pipeline; the entry path for "many small cards."
+- [x] **M0 — device topology + placement** — **done** (2026-08-02): `CudaTopology.Probe()` (per-device
+  name/VRAM/CC), `PlacementConfig` (shard devices/ratios, TE/VAE/CFG-parallel device, all-defaults =
+  byte-identical to pre-plan behavior), `PlacementPlanner` (`LlmSplitPlan` proportional-to-free-VRAM,
+  `DiffusionAutoPlan`), `InferenceEngine` backend pool keyed by selector.
+- [x] **M1 — layer-split (pipeline) parallel** — **done** (2026-08-02): `LlmPlacement`/`LlmStage`,
+  `GenericTransformer.EnumerateStageWeights`/`ForwardEmbedsStaged`, per-stage VRAM budgeting in
+  `TextGenerationPipeline`. Verified on the 4090+3060 dev box: Llama-3.2-1B split 8/8 across both cards
+  gives **exact token parity** vs single-GPU with VRAM genuinely pooled (2058 MB on one card → 528 MB +
+  796 MB). v1 gaps (documented, not silent): per-stage CUDA graph decode disabled (eager only), mllama
+  and SSM-family excluded (host-recurrence/cross-state incompatible with staging).
+- [x] **Same-GPU multi-backend support** (not in the original M0–M5 taxonomy — a real gap it missed:
+  "many small cards" and "one big card, two tenants" are different problems) — **done** (2026-08-02):
+  per-backend `State` keyed by a process-unique token (not context handle) so two `CudaBackend` instances
+  can share one device with isolated streams/caches/mempool-threshold and guarded disposal;
+  `Engine/DeviceGate.cs` serializes concurrent generations per ordinal by default
+  (`HARTSY_SAME_GPU_CONCURRENT=1` opts into the audited-safe concurrent path). 8/8 same-device isolation
+  tests pass, including interleaved-op and step-graph-capture cases.
+- [x] **Peer-copy layer** — **done** (2026-08-02): `cuDeviceCanAccessPeer`/`cuCtxEnablePeerAccess`/
+  `cuMemcpyPeer{,Async}` bound in `CudaDriverApi.cs` (the "Missing bindings" this doc's Implementation
+  Notes section used to list — no longer missing); `IBackend.CopyFromPeer` with a P2P path and a
+  host-staged fallback for consumer hardware without P2P (`HARTSY_P2P_DISABLE=1` forces the fallback
+  deterministically for testing); `CudaPeerAccess` per-pair probe/enable memo.
+- [x] **Diffusion component placement (TE/VAE on another GPU)** — **done** (2026-08-02): `RecipeContext`
+  gained `TextEncoderBackend`/`VaeBackend`, wired for Wan (umT5) → Flux (T5/CLIP + VAE) → SDXL (CLIP);
+  host-materialization at the existing stage boundary means no peer copy is even needed for this one.
+  Bit-identical output vs single-GPU expected (placement only, math unchanged) — not yet measured on
+  real hardware pending a free GPU window (see CFG-parallel note below).
+- [x] **CFG-branch parallelism** (Wan first, then Flux true-CFG) — **done** (2026-08-02):
+  `Diffusion/Utilities/CfgBranchRunner.cs` (dedicated background `Thread`, not `Task.Run` — a
+  seconds-long blocking GPU call must not invite thread-pool injection stalls); `PlacementConfig.CfgParallelDevice`
+  → `RecipeContext.CfgParallelBackend` → `DiffusionPipelineBase.CfgParallelBackend`, resolved in
+  `InferenceEngine.cs` at both recipe-construction sites; extension setting `CfgParallelGpuId`
+  (`HartsyInferenceBackend.cs`) mirroring `TextEncoderGpuId`. **Wan** (`WanVideoPipeline.cs`, the T2V/TI2V
+  loop matching the on-disk checkpoint): weights preloaded on both backends before the loop (load-bearing
+  for correctness — makes every in-loop weight read a per-backend cache-hit, not just a perf win), the
+  one shared mutable tensor (the per-step latent) cloned before the fork, both backends' activations freed
+  per step, MoE (A14B) falls back to sequential (`SwapToExpert` is Backend-only). **Verified**: same-GPU
+  (two `CudaBackend` on one ordinal) bit-parity vs sequential on a synthetic tiny Wan config, real CUDA
+  kernels, `HARTSY_ASSERT_AMBIENT=1` clean (`CfgBranchParallelWanTests.cs`). **Flux** (`FluxPipeline.cs`,
+  the `drainFree` true-CFG branch): structurally excludes block-streaming (the streaming controller's
+  `BeforeBlockForward` hook is a single field on the shared transformer — two backends' controllers can't
+  both drive it), gated on the ACTUAL per-generation resident-vs-streaming placement decision (VRAM
+  pressure varies run to run, so this can't be a static config check), falls back to sequential silently
+  (one log line, never a throw) if the second backend can't also hold the whole DiT resident. Uses
+  `CopyFromPeer` (not `.DataPointer`) for both the latent hand-off and the velocity hand-back, preserving
+  `drainFree`'s whole point (device-resident latent, no per-step D2H). **Gap, honestly recorded**: no
+  synthetic-weight Flux test harness exists in this codebase (unlike Wan) and no real Flux checkpoint is on
+  this box, so the Flux path has no end-to-end bit-parity test — verified instead via its underlying
+  primitives independently (below) plus a careful diff self-review; existing Flux structural/unit suite
+  (63 tests) regression-clean.
+  **Found + fixed along the way** (pre-existing, not scoped to this feature — CFG-parallel is just what
+  surfaced it, since it's the first code path to have two threads genuinely touch a shared tensor at the
+  same wall-clock time): a real double-free race in `Tensor.EnsureCpuData` (`src/HartsyInference.Core/Tensors/Tensor.cs`)
+  — the primary GPU-binding slot was read/cleared without the lock every other mutator uses. Fixed with a
+  claim-under-lock/invoke-outside pattern matching the file's own `TakeExtraBindings`; regression tests in
+  `tests/HartsyInference.Core.Tests/TensorConcurrentSyncTests.cs` reproduce the double-invoke on the old
+  code and confirm the fix. Confirmed independently live TODAY (no CFG-parallel needed) via `ReduxResolver`'s
+  process-wide cached SigLIP/projector weights, reachable by two ordinary concurrent one-backend-per-GPU
+  generations sharing a style model.
+- [ ] **DiT sharding, experimental** (Flux block-split across GPUs, VRAM-pooling not latency) —
+  investigated 2026-08-02, **paused before writing code**: `FluxTransformer.Forward` threads F16
+  loop-mode casting, ControlNet residual injection, and Kontext ref-token bookkeeping through the same
+  block loops a split would need to isolate — a correct split has to recompose bitwise across all of
+  that, and there's currently no Flux checkpoint on this box to verify against even once CUDA is
+  available. Deferred, not abandoned.
 - [ ] **M2 — tensor parallel:** split individual GEMMs (QKV, MLP, lm_head) across devices; all-reduce on
-  the seam.
+  the seam. Plan-level only (`NcclApi` design in `MULTI_GPU_PARALLELISM.md`); needs NVLink hardware this
+  box doesn't have to pay off.
 - [ ] **M3 — expert parallel (MoE):** route experts to devices; ties to on-device MoE routing (§4).
 - [ ] **M4 — DP-attention / sequence parallel:** for long context and video (Ulysses-style seq-parallel,
   see §2 D3).
 - [ ] **M5 — disaggregated serving:** separate prefill and decode pools.
-- [ ] **Collectives:** NCCL (NVIDIA) via Driver-API P/Invoke; **RCCL** for the AMD/ROCm path (§3).
-- [ ] **Tiers to validate:** consumer multi-card (e.g. 2–8× 8 GB, Pascal+) and enterprise (H200-class).
+- [ ] **Collectives:** NCCL (NVIDIA) via Driver-API P/Invoke; **RCCL** for the AMD/ROCm path (§3). Not
+  started — M1's layer-split needed only point-to-point copy, not a collective library.
+- [~] **Tiers to validate:** consumer (4090+3060, no P2P) verified for M0/M1/same-GPU above; enterprise
+  (multi-datacenter-GPU, P2P/NVLink) still unvalidated — no such hardware available to this session.
 - [ ] **Diffusion D1–D3:** cross-device latent/sequence parallel for video (Wan/LTX) once M4 lands.
 
 ## 2. GPU kernel performance
@@ -52,6 +116,22 @@ assumed (see the profiling pitfalls in `TROUBLESHOOTING.md`).
 - [ ] **Kernel fusion** (QKV projection, gate-up, norm+activation, coopmat bias) where launch-bound.
 - [ ] **Activation memory pool** + **CUDA-graph denoise** capture across the DiT/UNet loop.
 - [ ] **F16/BF16 tensor-core sweep**; **FA3 / WGMMA** on Hopper.
+- [x] **LLM decode: F16-storage KV cache** (`HARTSY_KV_F16=1`, opt-in — halves KV VRAM, the actual fix
+  for 12 GB cards OOM'ing) — **done** (2026-08-02): two new CUDA kernels, `lm_kv_append_f16` (K/V
+  projection stays F32; converts on write) and `lm_flash_attn_f16kv_f32` (upconverts to F32 on load —
+  Q/scores/softmax/accumulator all stay F32, this is a storage/bandwidth change, not a numerically new
+  kernel). `FixedKvCache` gained a `kvDtype` param (default F32, unchanged); `KvCaches.F16Enabled` is the
+  one place the env var is read, threaded to every direct `FixedKvCache` construction site EXCEPT the
+  CUDA-graph-decode path, which stays F32 on purpose (`FlashAttentionDev` refuses F16 KV structurally —
+  its split-K/graph fast paths have no F16 variant in v1, so engaging them falls back to the monolithic
+  eager kernel silently rather than corrupting or crashing). Verified: kernel-level round-trip + tolerance
+  tests (`KvF16StorageTests.cs`, includes a split-K-force stress case); real-weight Llama-3.2-1B —
+  short generation byte-identical to F32, longer generation diverges partway through (expected: F16 is
+  ~3 decimal digits, greedy decoding cascades after any near-tied argmax flip — output stays fully
+  coherent both sides, F16 mode itself is deterministic across repeated runs, ruling out a race/bug); VRAM
+  delta measured 960 MiB saved at 30K max-seq-len vs a ~938 MiB theoretical prediction (16 layers × 8 KV
+  heads × 64 head-dim × 2 bytes saved × 2 (K+V)) — matches within noise. Default stays F32 (same
+  soak-before-flip precedent as `DeviceGate`'s `HARTSY_SAME_GPU_CONCURRENT`).
 - [ ] **Video shared-infra:** `DenoiseKvCache` (~2–3×), `DistilledFlowMatchEuler` (DMD/CM/Lightning few-step),
   `IDiscreteVideoTokenizer` (Cosmos), sparse video attention (Wan/LTX — measure-then-design).
 - [ ] **Vision GPU-native ops:** `MaxPool2D`, `Conv2dDepthwise` (currently CPU); JPEG/WebP decoders.

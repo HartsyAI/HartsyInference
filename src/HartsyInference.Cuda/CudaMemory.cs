@@ -173,22 +173,22 @@ public static class CudaMemory
     // Capture-window alloc/free tracker (diagnostic): during step-graph capture, every cuMemAllocAsync
     // becomes a graph allocation whose lifetime the graph owns — an alloc without a matching captured free
     // leaks one launch's worth of memory permanently when the graph is destroyed. Enabled by
-    // CudaBackend.StepGraphBegin, reported at EndAndLaunch.
-    internal static bool TrackCaptureWindow;
-    internal static readonly Dictionary<ulong, nuint> CaptureAllocs = new();
-    internal static long CaptureAllocBytes, CaptureFreeBytes;
-    internal static int CaptureAllocCount, CaptureFreeCount;
-
+    // CudaBackend.StepGraphBegin, reported at EndAndLaunch. Lives on GpuTransferHelper.State (per backend) —
+    // see that field's doc for why a process-wide version was wrong with two live backends.
     public static ulong AllocateAsync(nuint byteSize, nint stream)
     {
         int result = CudaDriverApi.cuMemAllocAsync(out ulong dptr, byteSize, stream);
-        if (TrackCaptureWindow && result == 0)
+        if (result == 0)
         {
-            lock (CaptureAllocs)
+            GpuTransferHelper.State s = GpuTransferHelper.CurrentState;
+            if (s.TrackCaptureWindow)
             {
-                CaptureAllocs[dptr] = byteSize;
-                CaptureAllocBytes += (long)byteSize;
-                CaptureAllocCount++;
+                lock (s.CaptureAllocs)
+                {
+                    s.CaptureAllocs[dptr] = byteSize;
+                    s.CaptureAllocBytes += (long)byteSize;
+                    s.CaptureAllocCount++;
+                }
             }
         }
         if (result == 2) // CUDA_ERROR_OUT_OF_MEMORY
@@ -241,14 +241,15 @@ public static class CudaMemory
     {
         if (dptr != 0)
         {
-            if (TrackCaptureWindow)
+            GpuTransferHelper.State s = GpuTransferHelper.CurrentState;
+            if (s.TrackCaptureWindow)
             {
-                lock (CaptureAllocs)
+                lock (s.CaptureAllocs)
                 {
-                    if (CaptureAllocs.Remove(dptr, out nuint sz))
+                    if (s.CaptureAllocs.Remove(dptr, out nuint sz))
                     {
-                        CaptureFreeBytes += (long)sz;
-                        CaptureFreeCount++;
+                        s.CaptureFreeBytes += (long)sz;
+                        s.CaptureFreeCount++;
                     }
                     else
                     {

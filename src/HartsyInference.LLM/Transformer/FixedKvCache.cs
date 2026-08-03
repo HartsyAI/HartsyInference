@@ -34,21 +34,30 @@ public sealed class FixedKvCache : IKvCache, IDisposable
 
     /// <summary>Allocates per-layer fixed buffers sized for <paramref name="maxSequenceLength"/> tokens, all
     /// layers sharing one <paramref name="headDim"/> (every architecture except Gemma-4).</summary>
-    public FixedKvCache(int numLayers, int batch, int numKvHeads, int headDim, int maxSequenceLength)
-        : this(numLayers, batch, numKvHeads, UniformHeadDims(numLayers, headDim), maxSequenceLength) { }
+    public FixedKvCache(int numLayers, int batch, int numKvHeads, int headDim, int maxSequenceLength, DType? kvDtype = null)
+        : this(numLayers, batch, numKvHeads, UniformHeadDims(numLayers, headDim), maxSequenceLength, kvDtype) { }
 
     /// <summary>Allocates per-layer fixed buffers with a PER-LAYER head dimension (Gemma-4: local/SWA layers are
     /// narrower than global layers). <paramref name="headDimPerLayer"/> must have <paramref name="numLayers"/>
     /// entries — a layer that shares another layer's KV cache slot (see <see cref="TransformerConfig.HasOwnKv"/>)
     /// still gets an entry here (simplest to allocate and just never write/read it) sized to its OWN head dim,
     /// even though nothing ever appends to it.</summary>
-    public FixedKvCache(int numLayers, int batch, int numKvHeads, int[] headDimPerLayer, int maxSequenceLength)
+    /// <param name="kvDtype">Storage dtype for the K/V buffers. Default F32 (unchanged behavior). F16 halves
+    /// the cache's VRAM footprint (K/V straight out of the projection stay F32 — <see cref="IBackend.KvCacheAppend"/>
+    /// converts on write; <see cref="IBackend.FlashAttention"/> upconverts back to F32 on read, so compute is
+    /// unaffected — only storage is narrower). Opt-in: the CUDA kernels support it (v1: monolithic FlashAttention
+    /// only, not the split-K or graph-decode fast paths, which fall back to the monolithic kernel automatically),
+    /// but this isn't the default until it's soaked — same reasoning as <c>DeviceGate</c>'s concurrent-mode flag.</param>
+    public FixedKvCache(int numLayers, int batch, int numKvHeads, int[] headDimPerLayer, int maxSequenceLength, DType? kvDtype = null)
     {
+        DType dtype = kvDtype ?? DType.F32;
         if (numLayers <= 0) throw new ArgumentOutOfRangeException(nameof(numLayers));
         if (batch != 1) throw new NotSupportedException("FixedKvCache supports batch=1.");
         if (numKvHeads <= 0) throw new ArgumentOutOfRangeException(nameof(numKvHeads));
         if (headDimPerLayer.Length != numLayers) throw new ArgumentException($"headDimPerLayer has {headDimPerLayer.Length} entries, expected {numLayers}.", nameof(headDimPerLayer));
         if (maxSequenceLength <= 0) throw new ArgumentOutOfRangeException(nameof(maxSequenceLength));
+        if (dtype != DType.F32 && dtype != DType.F16)
+            throw new ArgumentOutOfRangeException(nameof(kvDtype), $"FixedKvCache supports F32 or F16 storage; got {dtype}.");
 
         BatchSize = batch;
         NumKvHeads = numKvHeads;
@@ -62,8 +71,8 @@ public sealed class FixedKvCache : IKvCache, IDisposable
             int hd = headDimPerLayer[i];
             if (hd <= 0) throw new ArgumentOutOfRangeException(nameof(headDimPerLayer), $"layer {i} head dim must be positive.");
             TensorShape shape = new(1, numKvHeads, maxSequenceLength, hd);
-            _k[i] = new Tensor(shape, DType.F32);
-            _v[i] = new Tensor(shape, DType.F32);
+            _k[i] = new Tensor(shape, dtype);
+            _v[i] = new Tensor(shape, dtype);
         }
     }
 

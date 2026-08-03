@@ -142,7 +142,10 @@ public sealed class WanVideoRecipe : IVideoRecipe
             umt5.LoadWeights(umt5Weights);
             T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: TokenLength);
 
-            WanVideoPipeline pipeline = new WanVideoPipeline(context.Backend, transformer, vaeDecoder, config, vaeEncoder);
+            WanVideoPipeline pipeline = new WanVideoPipeline(context.Backend, transformer, vaeDecoder, config, vaeEncoder)
+            {
+                CfgParallelBackend = context.CfgParallelBackend,
+            };
             Logs.Info($"[WanVideoRecipe] Wan ready ({mode}).");
             return new WanVideoRecipePipeline(context.Backend, context.TextEncoderBackendOrDefault, pipeline, config,
                 isClipI2V, tokenizer, umt5, transformer, vaeEncoder, clipVision, loaders);

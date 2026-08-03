@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Threading;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using Xunit;
@@ -410,6 +411,122 @@ public sealed unsafe class MultiBackendIsolationTests
         }
         finally
         {
+            backendA.Dispose();
+            backendB.Dispose();
+        }
+    }
+
+    /// <summary>The step-graph capture-window diagnostic tracker (<c>TrackCaptureWindow</c>/<c>CaptureAllocs</c>)
+    /// used to be process-wide statics on <see cref="CudaMemory"/>: backend B beginning its own capture cleared
+    /// backend A's in-flight window, and any of A's allocations issued while B's window happened to be open got
+    /// folded into B's leak-detection report. Now lives on <see cref="GpuTransferHelper.State"/> — per backend,
+    /// including two backends sharing one GPU.</summary>
+    [Fact]
+    public void SameDevice_StepGraphCaptureWindow_IsolatedPerBackend()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        CudaBackend backendA = new(0, PtxDir());
+        CudaBackend backendB = new(0, PtxDir());
+        try
+        {
+            // A opens its capture window and allocates — recorded in A's tracker only.
+            GpuTransferHelper.SetAmbient(backendA.TransferState);
+            backendA.TransferState.TrackCaptureWindow = true;
+            ulong aPtr = GpuTransferHelper.AllocateDevice(4096);
+            Assert.Single(backendA.TransferState.CaptureAllocs);
+
+            // B is NOT tracking; an ordinary allocation on B must not appear in A's window (the old bug: a
+            // single process-wide flag meant ANY backend's alloc while capturing recorded into the wrong tracker).
+            GpuTransferHelper.SetAmbient(backendB.TransferState);
+            Assert.False(backendB.TransferState.TrackCaptureWindow);
+            ulong bPtr = GpuTransferHelper.AllocateDevice(4096);
+            Assert.Empty(backendB.TransferState.CaptureAllocs);
+            Assert.Single(backendA.TransferState.CaptureAllocs, kv => kv.Key != bPtr);
+
+            // B opening ITS OWN window must not clear or touch A's still-open one.
+            backendB.TransferState.TrackCaptureWindow = true;
+            Assert.Single(backendA.TransferState.CaptureAllocs);
+            Assert.True(backendA.TransferState.TrackCaptureWindow, "B starting its own window must not close A's");
+
+            GpuTransferHelper.SetAmbient(backendA.TransferState);
+            GpuTransferHelper.FreeDevice(aPtr);
+            Assert.Empty(backendA.TransferState.CaptureAllocs);
+            Assert.Equal(1, backendA.TransferState.CaptureFreeCount);
+            Assert.Equal(0, backendB.TransferState.CaptureFreeCount);
+
+            GpuTransferHelper.SetAmbient(backendB.TransferState);
+            GpuTransferHelper.FreeDevice(bPtr);
+            backendA.TransferState.TrackCaptureWindow = false;
+            backendB.TransferState.TrackCaptureWindow = false;
+        }
+        finally
+        {
+            backendA.Dispose();
+            backendB.Dispose();
+        }
+    }
+
+    /// <summary>Fidelity check on the real public API: two same-device backends each run a genuine
+    /// StepGraphBegin/EndAndLaunch cycle with actual captured work (a Linear), interleaved, and each must produce
+    /// correct output — the isolated tracker from the test above is what makes this safe, but this exercises the
+    /// path an inference pipeline actually calls.</summary>
+    [Fact]
+    public void SameDevice_TwoBackends_InterleavedStepGraphCapture_ProducesCorrectResults()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        const int dim = 64;
+        TensorShape ioShape = new(2, dim);
+        TensorShape wShape = new(dim, dim);
+        using Tensor inputA = RandomF32(ioShape, 801);
+        using Tensor weightA = RandomF32(wShape, 802);
+        using Tensor inputB = RandomF32(ioShape, 803);
+        using Tensor weightB = RandomF32(wShape, 804);
+        float expectedA = ExpectedFirst(inputA, weightA, dim);
+        float expectedB = ExpectedFirst(inputB, weightB, dim);
+
+        CudaBackend backendA = new(0, PtxDir());
+        CudaBackend backendB = new(0, PtxDir());
+        try
+        {
+            if (!((IBackend)backendA).StepGraphSupported)
+            {
+                _output.WriteLine("SKIPPED: StepGraph unsupported");
+                return;
+            }
+            backendA.HighPrecisionGemm = true;
+            backendB.HighPrecisionGemm = true;
+            backendA.StepGraphOwner = this;
+            backendB.StepGraphOwner = this;
+
+            using Tensor outA = new(ioShape, DType.F32);
+            using Tensor outB = new(ioShape, DType.F32);
+
+            backendA.PreloadWeights(new[] { weightA });
+            backendA.StepGraphBegin();
+            backendA.Linear(outA, inputA, weightA, bias: null);
+            backendA.StepGraphEndAndLaunch();
+
+            backendB.PreloadWeights(new[] { weightB });
+            backendB.StepGraphBegin();
+            backendB.Linear(outB, inputB, weightB, bias: null);
+            backendB.StepGraphEndAndLaunch();
+
+            backendA.Sync();
+            backendB.Sync();
+            Assert.Equal(expectedA, ((float*)outA.DataPointer)[0], 3);
+            Assert.Equal(expectedB, ((float*)outB.DataPointer)[0], 3);
+
+            backendA.FreeWeights(new[] { weightA });
+            backendB.FreeWeights(new[] { weightB });
+        }
+        finally
+        {
+            backendA.StepGraphReset();
+            backendB.StepGraphReset();
+            if (ReferenceEquals(backendA.StepGraphOwner, this)) backendA.StepGraphOwner = null;
+            if (ReferenceEquals(backendB.StepGraphOwner, this)) backendB.StepGraphOwner = null;
             backendA.Dispose();
             backendB.Dispose();
         }

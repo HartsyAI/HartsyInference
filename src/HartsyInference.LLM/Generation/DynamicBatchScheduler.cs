@@ -333,6 +333,9 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
 
         // Throws KvPoolExhaustedException if the pool can't fit the prompt (PagedKvCache path only) —
         // propagates to the caller's SubmitAsync task as a fault, the reject policy PagedKvPool documents.
+        // Stays F32 regardless of HARTSY_KV_F16: this branch exists specifically BECAUSE graphEligible, and
+        // FlashAttentionDev refuses F16-storage KV (v1 scope — see CudaBackend), silently falling back to
+        // eager per-token. Honoring the switch here would sabotage the very feature this branch selects for.
         IKvCache cache = graphEligible
             ? new FixedKvCache(cfg.NumLayers, 1, cfg.NumKvHeads, HeadDimPerLayer(cfg), promptIds.Length + req.MaxTokens + 1)
             : new PagedKvCache(_pool);

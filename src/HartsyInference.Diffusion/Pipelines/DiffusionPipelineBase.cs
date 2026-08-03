@@ -45,6 +45,12 @@ public abstract class DiffusionPipelineBase : IDisposable
     /// boundary argument as <see cref="TextEncoderBackend"/> (latents cross via host tensors).</summary>
     public IBackend VaeBackend { get; init; }
 
+    /// <summary>Second backend to run the CFG uncond branch on, concurrent with cond on <see cref="Backend"/>;
+    /// null (unlike <see cref="TextEncoderBackend"/>/<see cref="VaeBackend"/>, which default to
+    /// <see cref="Backend"/>) means CFG-branch parallelism is off — the denoise loop runs cond/uncond
+    /// sequentially on <see cref="Backend"/> as before. Settable at construction only (init).</summary>
+    public IBackend? CfgParallelBackend { get; init; }
+
     private int _disposed;
 
     /// <summary>Initializes the base with the compute backend. Subclasses pass <c>backend</c> through from their constructor and assign their own component fields after this call.</summary>

@@ -111,6 +111,17 @@ internal static unsafe class GpuTransferHelper
         /// <summary>Count of lazy D2H sync callbacks fired (each forces a cuStreamSynchronize + device-to-host copy).
         /// A residency-health metric: during a fully GPU-resident denoise loop this must stay at ~0.</summary>
         public long D2hSyncs;
+
+        /// <summary>Step-graph capture-window alloc/free tracker (diagnostic — see <see cref="CudaBackend.StepGraphBegin"/>).
+        /// Per-State: this used to be process-wide statics on <see cref="CudaMemory"/>, so a second backend
+        /// beginning its own capture cleared the first backend's in-flight window and folded its own
+        /// non-capturing allocations into the wrong backend's report. Diagnostic-only (guarded by
+        /// <see cref="CaptureAllocs"/>'s lock, never touches memory), but the leak-detection numbers were
+        /// silently wrong under two live backends.</summary>
+        public bool TrackCaptureWindow;
+        public readonly Dictionary<ulong, nuint> CaptureAllocs = new();
+        public long CaptureAllocBytes, CaptureFreeBytes;
+        public int CaptureAllocCount, CaptureFreeCount;
     }
 
     /// <summary>Per-tensor H2D upload bookkeeping for weight auto-promotion.</summary>
@@ -270,6 +281,10 @@ internal static unsafe class GpuTransferHelper
     /// <summary>The ambient (or resolved) state's compute stream, for <see cref="CudaMemory"/>'s allocator routing;
     /// 0 when nothing is resolvable (sync-allocation fallback).</summary>
     internal static nint ResolvedStreamHandle => Resolve().StreamHandle;
+
+    /// <summary>The calling thread's owning backend State, for callers (<see cref="CudaMemory"/>'s capture-window
+    /// tracker) that need more than just the stream handle. Same ambient-first resolution as every other lookup.</summary>
+    internal static State CurrentState => Resolve();
 
     /// <summary>Synchronizes the CUDA stream to flush pending FreeAsync operations. Called by CudaMemory.Allocate on OOM retry.</summary>
     public static void SyncStream()

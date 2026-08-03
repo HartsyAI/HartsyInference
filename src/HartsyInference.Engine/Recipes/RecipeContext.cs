@@ -23,6 +23,14 @@ public sealed record RecipeContext
     /// (UnpackLatent and friends), so this is placement-safe like the text encoder.</summary>
     public IBackend? VaeBackend { get; init; }
 
+    /// <summary>Second backend to run the CFG uncond branch on, concurrent with cond on <see cref="Backend"/>;
+    /// null (the default) means no CFG-branch parallelism — cond/uncond run sequentially on <see cref="Backend"/>
+    /// as before. Unlike <see cref="TextEncoderBackend"/>/<see cref="VaeBackend"/> there is no "OrDefault" —
+    /// null here is a meaningful "not configured", not a fallback to resolve. The denoiser's weights must be
+    /// replicated on this backend too (VRAM cost, not split — see <c>ROADMAP.md</c> §1), so recipes only opt in
+    /// when they can preload onto it.</summary>
+    public IBackend? CfgParallelBackend { get; init; }
+
     /// <summary>The text-encoder backend with the primary fallback applied.</summary>
     public IBackend TextEncoderBackendOrDefault => TextEncoderBackend ?? Backend;
 
@@ -44,6 +52,11 @@ public sealed record RecipeContext
                 && !ReferenceEquals(VaeBackend, TextEncoderBackend))
             {
                 yield return VaeBackend;
+            }
+            if (CfgParallelBackend is not null && !ReferenceEquals(CfgParallelBackend, Backend)
+                && !ReferenceEquals(CfgParallelBackend, TextEncoderBackend) && !ReferenceEquals(CfgParallelBackend, VaeBackend))
+            {
+                yield return CfgParallelBackend;
             }
         }
     }

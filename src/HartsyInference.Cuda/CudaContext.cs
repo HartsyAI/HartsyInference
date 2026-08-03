@@ -183,6 +183,10 @@ public sealed class CudaContext : IDisposable
     /// Windows — typically requires the CUDA Toolkit, not just the driver), <c>cuInit</c> fails, or no CUDA-capable
     /// devices are present. Used by tests to skip cleanly when CUDA isn't fully usable, mirroring the
     /// <c>VulkanAvailable</c> pattern.</remarks>
+    /// <summary>Why the last <see cref="IsAvailable"/> call returned <c>false</c>; <c>null</c> when it returned true.
+    /// Without this the reason is swallowed and a host silently degrades to CPU with nothing to report.</summary>
+    public static string? LastUnavailableReason { get; private set; }
+
     public static bool IsAvailable()
     {
         try
@@ -193,14 +197,25 @@ public sealed class CudaContext : IDisposable
             // the toolkit, in which case CudaBackend construction would fail at cublasCreate. Uses the
             // resolver's own search (probe dirs like ~/.local/lib/cuda13 + soname fallback) so this
             // check can't disagree with what actual P/Invoke resolution would find.
-            if (!CudaLibraryResolver.CublasLoadable()) return false;
+            if (!CudaLibraryResolver.CublasLoadable())
+            {
+                LastUnavailableReason = "cuBLAS could not be loaded (libcublas.so.13/.12/.11 — usually means the CUDA Toolkit is missing, not just the driver).";
+                return false;
+            }
 
             EnsureCudaInitialized();
             CudaDriverApi.cuDeviceGetCount(out int count).ThrowOnError();
-            return count > 0;
+            if (count <= 0)
+            {
+                LastUnavailableReason = "the CUDA driver loaded but reported 0 CUDA-capable devices.";
+                return false;
+            }
+            LastUnavailableReason = null;
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
+            LastUnavailableReason = $"{ex.GetType().Name}: {ex.Message}";
             return false;
         }
     }

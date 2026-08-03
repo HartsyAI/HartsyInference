@@ -143,6 +143,33 @@ public sealed unsafe class Tensor : IDisposable
         }
     }
 
+    /// <summary>Claims (and clears) the primary-slot sync callback under the same lock <see cref="SetGpuBinding"/>/
+    /// <see cref="ClearGpuBinding"/> use, then returns it for the caller to invoke OUTSIDE the lock (mirrors
+    /// <see cref="TakeExtraBindings"/> twelve lines up). Without this, two threads racing <c>EnsureCpuData</c> on a
+    /// tensor shared by two backends (a weight promoted on both, mid-CFG-parallel-step) could both read the same
+    /// non-null callback before either clears it and both invoke it — a double D2H-sync / double-free of the same
+    /// GPU pointer. The unlocked null-check first keeps the overwhelmingly common no-GPU-shadow case a plain field
+    /// read.</summary>
+    private Action? ClaimPrimarySync()
+    {
+        if (_gpuSyncCallback is null)
+        {
+            return null;
+        }
+        lock (this)
+        {
+            Action? sync = _gpuSyncCallback;
+            if (sync is null)
+            {
+                return null;
+            }
+            _gpuSyncCallback = null;
+            _gpuDisposeCallback = null;
+            _gpuCleanupContext = 0;
+            return sync;
+        }
+    }
+
     /// <summary>GPU cleanup callbacks from finalizer-reclaimed tensors (never explicitly Disposed), queued rather than invoked inline.</summary>
     /// <remarks>The finalizer thread has no business making CUDA driver calls (stream enqueue order across threads
     /// is a race even though individual driver calls are thread-safe): a free enqueued from the finalizer thread
@@ -638,14 +665,8 @@ public sealed unsafe class Tensor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void EnsureCpuData()
     {
-        Action? sync = _gpuSyncCallback;
-        if (sync != null)
-        {
-            _gpuSyncCallback = null;
-            _gpuDisposeCallback = null;
-            _gpuCleanupContext = 0;
-            sync();
-        }
+        Action? sync = ClaimPrimarySync();
+        sync?.Invoke();
         GpuBinding[]? extras = TakeExtraBindings();
         if (extras is not null)
         {

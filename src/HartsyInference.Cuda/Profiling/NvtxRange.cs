@@ -36,8 +36,6 @@ public readonly ref struct NvtxRange
     internal static readonly bool ProfileSync =
         Environment.GetEnvironmentVariable("HARTSY_PROFILE_SYNC") == "1";
 
-    /// <summary>Compute-stream handle set by CudaBackend at init, so the sync-profiler can drain it. 0 = unset.</summary>
-    internal static nint ProfileSyncStream;
     private static readonly ConcurrentDictionary<string, long[]> _profStats = new();
 
     /// <summary>Writes the accumulated per-op wall-time table (sorted by total) to <paramref name="path"/>.</summary>
@@ -117,10 +115,18 @@ public readonly ref struct NvtxRange
             // HARTSY_PROFILE_SYNC=1: drain the compute stream before timestamping so each op's recorded time is its
             // TRUE GPU execution time (not just the async launch cost). Serializes execution — profiling only — but
             // it's the only way, without Nsight, to attribute where GPU time actually goes across async ops.
-            if (ProfileSync && ProfileSyncStream != 0)
+            // Resolved via the ambient backend State (not a static field): a static stream handle here was
+            // exactly the multi-backend poison this file's caches were fixed for elsewhere — with two live
+            // backends, one's Dispose clearing (or simply the last-constructed backend's ctor overwriting) a
+            // shared field would sync the WRONG backend's stream while attributing the time to this op's caller.
+            if (ProfileSync)
             {
-                try { CudaDriverApi.cuStreamSynchronize(ProfileSyncStream); }
-                catch (Exception ex) { Logs.Error("[NvtxRange] profile-sync cuStreamSynchronize failed.", ex); }
+                nint stream = GpuTransferHelper.ResolvedStreamHandle;
+                if (stream != 0)
+                {
+                    try { CudaDriverApi.cuStreamSynchronize(stream); }
+                    catch (Exception ex) { Logs.Error("[NvtxRange] profile-sync cuStreamSynchronize failed.", ex); }
+                }
             }
             long elapsed = Stopwatch.GetTimestamp() - _startTicks;
             long[] slot = _profStats.GetOrAdd(_profName, static _ => new long[2]);

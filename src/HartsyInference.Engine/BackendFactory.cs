@@ -79,6 +79,10 @@ public static class BackendFactory
         return CudaContext.IsAvailable() && CudaContext.GetDeviceCount() > 0 ? "cuda" : "cpu";
     }
 
+    /// <summary>Why <see cref="Resolve"/> last fell back to CPU instead of CUDA; <c>null</c> when CUDA was usable.
+    /// Only meaningful after a Resolve/IsAvailable call.</summary>
+    public static string? CudaUnavailableReason => CudaContext.LastUnavailableReason;
+
     /// <summary>The bare backend kind of <paramref name="selector"/> with any <c>:{ordinal}</c> suffix removed; <c>auto</c> stays <c>auto</c>.</summary>
     public static string Kind(string? selector)
     {

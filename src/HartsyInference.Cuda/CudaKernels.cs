@@ -113,6 +113,7 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _lmF32Module;
     private readonly nint _lmRepeatKvF32;
     private readonly nint _lmKvAppendF32;
+    private readonly nint _lmKvAppendF16;
     private readonly nint _lmGatherRowsF32;
     private readonly nint _lmScatterAddWeightedRowsF32;
     private readonly nint _lmArgMaxLastDimF32;
@@ -144,6 +145,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmKvSliceTimeF32;
     private readonly CudaModule _flashAttnF32Module;
     private readonly nint _flashAttnF32;
+    private readonly nint _flashAttnF16Kv;
     private readonly CudaModule _flashAttnF32SplitModule;
     private readonly nint _flashAttnF32Split;
     private readonly CudaModule _flashV2Module;
@@ -688,6 +690,7 @@ public sealed class CudaKernels : IDisposable
         _lmF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "lm_f32.ptx"));
         _lmRepeatKvF32 = _lmF32Module.GetFunction("lm_repeat_kv_f32");
         _lmKvAppendF32 = _lmF32Module.GetFunction("lm_kv_append_f32");
+        _lmKvAppendF16 = _lmF32Module.GetFunction("lm_kv_append_f16");
         _lmGatherRowsF32 = _lmF32Module.GetFunction("lm_gather_rows_f32");
         _lmScatterAddWeightedRowsF32 = _lmF32Module.GetFunction("lm_scatter_add_weighted_rows_f32");
         _lmArgMaxLastDimF32 = _lmF32Module.GetFunction("lm_argmax_lastdim_f32");
@@ -719,6 +722,7 @@ public sealed class CudaKernels : IDisposable
         _lmKvSliceTimeF32 = _lmF32Module.GetFunction("lm_kv_slice_time_f32");
         _flashAttnF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32.ptx"));
         _flashAttnF32 = _flashAttnF32Module.GetFunction("lm_flash_attn_f32");
+        _flashAttnF16Kv = _flashAttnF32Module.GetFunction("lm_flash_attn_f16kv_f32");
         _flashAttnF32SplitModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32_split.ptx"));
         _flashAttnF32Split = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_split");
         _flashAttnF32Combine = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_combine");
@@ -1988,6 +1992,38 @@ public sealed class CudaKernels : IDisposable
             sharedBytes, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Same as <see cref="LaunchFlashAttention"/> but <paramref name="k"/>/<paramref name="v"/> point at
+    /// F16-storage KV buffers — the kernel upconverts to F32 on load; Q/out/scores/softmax/accumulate are
+    /// unchanged. v1 scope: monolithic path only (no split-K, no graph-decode variant) — callers must not reach
+    /// this with an F16 KV buffer via those paths.</summary>
+    public unsafe void LaunchFlashAttentionF16Kv(
+        ulong outPtr, ulong q, ulong k, ulong v,
+        int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen, int kvGroup,
+        bool causal, int qOffset, float scale, float softcap, ulong sink, int slidingWindow,
+        ulong alibiSlopes, nint stream, ulong dPos = 0)
+    {
+        ulong outArg = outPtr, qArg = q, kArg = k, vArg = v, sinkArg = sink, alibiArg = alibiSlopes, dPosArg = dPos;
+        uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
+        uint hkvArg = (uint)hkv, lkArg = (uint)lk, kvLenArg = (uint)kvLen, grpArg = (uint)kvGroup;
+        int causalArg = causal ? 1 : 0, offArg = qOffset, swArg = slidingWindow;
+        float scaleArg = scale, softcapArg = softcap;
+
+        void** args = stackalloc void*[20];
+        args[0] = &outArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
+        args[4] = &bArg; args[5] = &hqArg; args[6] = &tqArg; args[7] = &dArg;
+        args[8] = &hkvArg; args[9] = &lkArg; args[10] = &kvLenArg; args[11] = &grpArg;
+        args[12] = &causalArg; args[13] = &offArg; args[14] = &scaleArg; args[15] = &softcapArg;
+        args[16] = &sinkArg; args[17] = &swArg; args[18] = &alibiArg; args[19] = &dPosArg;
+
+        uint blockThreads = 1;
+        while (blockThreads < (uint)headDim) blockThreads <<= 1;
+        uint gridDim = (uint)((long)batch * hq * tq);
+        uint sharedBytes = blockThreads * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(
+            _flashAttnF16Kv, gridDim, 1, 1, blockThreads, 1, 1,
+            sharedBytes, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Fused FlashAttention-2, TF32 tensor cores, F32 accumulate — no-mask MHA, D∈{64,128}, Hkv==Hq.
     /// Q/out [B,Hq,Sq,D], K/V [B,Hq,Skv,D]. Grid (ceil(Sq/64), Hq, B); block 128 (4 warps); BR=64/BC=32 tiles.</summary>
     public unsafe void LaunchFlashAttentionV2Tf32(ulong outPtr, ulong q, ulong k, ulong v,
@@ -2074,6 +2110,25 @@ public sealed class CudaKernels : IDisposable
 
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_lmKvAppendF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Same as <see cref="LaunchKvAppend"/> but the resident buffer is F16-storage (halved VRAM) —
+    /// the source stays F32 (straight out of the K/V projection); the kernel converts on write.</summary>
+    public unsafe void LaunchKvAppendF16(
+        ulong buffer, ulong newKv, int heads, int maxSeq, int tNew, int headDim, int offset,
+        nint stream, ulong dPos = 0)
+    {
+        ulong bufArg = buffer, newArg = newKv, dPosArg = dPos;
+        uint hArg = (uint)heads, maxArg = (uint)maxSeq, tArg = (uint)tNew, dArg = (uint)headDim, offArg = (uint)offset;
+        ulong total = (ulong)heads * (ulong)tNew * (ulong)headDim;
+        ulong totalArg = total;
+
+        void** args = stackalloc void*[9];
+        args[0] = &bufArg; args[1] = &newArg; args[2] = &hArg; args[3] = &maxArg;
+        args[4] = &tArg; args[5] = &dArg; args[6] = &offArg; args[7] = &totalArg; args[8] = &dPosArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_lmKvAppendF16, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches KV time-range extraction: output[1,h,t,d] = input[1,h,start+t,d] for t in [0,len).</summary>
