@@ -51,6 +51,18 @@ public abstract class DiffusionPipelineBase : IDisposable
     /// sequentially on <see cref="Backend"/> as before. Settable at construction only (init).</summary>
     public IBackend? CfgParallelBackend { get; init; }
 
+    /// <summary>Second backend to run the DiT's tail block range on for VRAM-pooling sharding (Phase 8); null
+    /// (unlike <see cref="TextEncoderBackend"/>/<see cref="VaeBackend"/>) means it's off — the denoise loop runs
+    /// the whole DiT on <see cref="Backend"/> as before. Unlike <see cref="CfgParallelBackend"/> this SPLITS the
+    /// block range instead of replicating weights, so the win is pooled VRAM, not latency. Settable at
+    /// construction only (init); pairs with <see cref="DitShardSplitBlock"/>.</summary>
+    public IBackend? DitShardBackend { get; init; }
+
+    /// <summary>Block index at which the DiT's block loop splits when <see cref="DitShardBackend"/> is set:
+    /// <see cref="Backend"/> runs <c>[0, DitShardSplitBlock)</c>, <see cref="DitShardBackend"/> runs
+    /// <c>[DitShardSplitBlock, BlockCount)</c>. Meaningless when <see cref="DitShardBackend"/> is null.</summary>
+    public int DitShardSplitBlock { get; init; }
+
     private int _disposed;
 
     /// <summary>Initializes the base with the compute backend. Subclasses pass <c>backend</c> through from their constructor and assign their own component fields after this call.</summary>

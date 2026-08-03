@@ -73,13 +73,13 @@ public sealed class VibeVoicePipeline : IDisposable
     /// use). Returns a fully-wired pipeline ready to synthesize.</summary>
     public static async Task<VibeVoicePipeline> LoadAsync(CancellationToken ct = default)
     {
-        string repoDir = AudioModelCache.GetRepoDirectory("microsoft/VibeVoice-1.5B");
+        string repoDir = AudioModelCache.GetRepoDirectory("microsoft/VibeVoice-1.5B", "tts");
         await Task.WhenAll(
-            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model-00001-of-00003.safetensors", ct: ct),
-            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model-00002-of-00003.safetensors", ct: ct),
-            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model-00003-of-00003.safetensors", ct: ct),
-            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model.safetensors.index.json", ct: ct),
-            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "config.json", ct: ct))
+            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model-00001-of-00003.safetensors", category: "tts", ct: ct),
+            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model-00002-of-00003.safetensors", category: "tts", ct: ct),
+            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model-00003-of-00003.safetensors", category: "tts", ct: ct),
+            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model.safetensors.index.json", category: "tts", ct: ct),
+            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "config.json", category: "tts", ct: ct))
             .ConfigureAwait(false);
 
         VibeVoiceConfig cfg = VibeVoiceConfig.V15B;

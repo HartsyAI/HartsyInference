@@ -1,6 +1,7 @@
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
+using HartsyInference.Engine.Placement;
 using HartsyInference.Vulkan;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -86,13 +87,36 @@ public sealed class Krea2Recipe : IArchitectureRecipe
             Krea2Transformer transformer = new Krea2Transformer(config);
             transformer.LoadWeights(ditWeights);
 
+            // Phase 8 DiT sharding (VRAM pooling, not latency — see Krea2Pipeline's use of DitShardBackend): the
+            // split point depends on the transformer's actual block count and free VRAM on the two backends, both
+            // only known here (RecipeContext is built before weights load), so it's computed at construction time
+            // rather than passed in from InferenceEngine.
+            int ditShardSplitBlock = 0;
+            if (context.DitShardBackend is not null)
+            {
+                long sharedWeightBytes = 0;
+                foreach (Tensor t in transformer.EnumerateSharedWeights())
+                {
+                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
+                }
+                (long freeA, _) = context.Backend.GetVramInfo();
+                (long freeB, _) = context.DitShardBackend.GetVramInfo();
+                ditShardSplitBlock = PlacementPlanner.DitSplitPlan(freeA, freeB, transformer.BlockCount, sharedWeightBytes);
+                Logs.Info($"[Krea2Recipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
+                    + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
+            }
+
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_VL_4B);
             textEncoder.LoadWeights(teWeights);
 
             QwenImageVaeDecoder vae = new QwenImageVaeDecoder(VaeConfig.QwenImage);
             vae.LoadWeights(CastToF32(vaeWeights));
 
-            Krea2Pipeline pipeline = new Krea2Pipeline(context.Backend, textEncoder, transformer, vae, config);
+            Krea2Pipeline pipeline = new Krea2Pipeline(context.Backend, textEncoder, transformer, vae, config)
+            {
+                DitShardBackend = context.DitShardBackend,
+                DitShardSplitBlock = ditShardSplitBlock,
+            };
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             Logs.Info("[Krea2Recipe] Krea 2 ready.");
             return new Krea2RecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, isTurbo, loaders);

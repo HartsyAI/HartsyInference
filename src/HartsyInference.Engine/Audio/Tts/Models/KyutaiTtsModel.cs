@@ -34,9 +34,9 @@ internal static class KyutaiTtsModel
         ResolveRepo = _ => Repo,
         LoadAsync = async (_, cancel) =>
         {
-            string dsmPath = await AudioModelCache.GetAsync(Repo, BackboneFile, ct: cancel).ConfigureAwait(false);
-            string mimiPath = await AudioModelCache.GetAsync(Repo, MimiFile, ct: cancel).ConfigureAwait(false);
-            string spmPath = await AudioModelCache.GetAsync(Repo, SpmFile, ct: cancel).ConfigureAwait(false);
+            string dsmPath = await AudioModelCache.GetAsync(Repo, BackboneFile, category: "tts", ct: cancel).ConfigureAwait(false);
+            string mimiPath = await AudioModelCache.GetAsync(Repo, MimiFile, category: "tts", ct: cancel).ConfigureAwait(false);
+            string spmPath = await AudioModelCache.GetAsync(Repo, SpmFile, category: "tts", ct: cancel).ConfigureAwait(false);
             await EnsureVoiceAsync(DefaultVoice, cancel).ConfigureAwait(false);
 
             Session session = Session.Load(dsmPath, mimiPath, spmPath);
@@ -50,7 +50,7 @@ internal static class KyutaiTtsModel
     private static async Task<string> EnsureVoiceAsync(string voiceName, CancellationToken cancel)
     {
         string file = voiceName.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase) ? voiceName : voiceName + VoiceSuffix;
-        return await AudioModelCache.GetAsync(VoicesRepo, file, ct: cancel).ConfigureAwait(false);
+        return await AudioModelCache.GetAsync(VoicesRepo, file, category: "tts", ct: cancel).ConfigureAwait(false);
     }
 
     /// <summary>A loaded Kyutai TTS model: generator + Mimi codec + SentencePiece tokenizer, plus a cache of

@@ -121,7 +121,7 @@ internal static class TtsCatalog
         ResolveRepo = _ => "suno/bark",
         LoadAsync = async (_, cancel) =>
         {
-            string vocabPath = await AudioModelCache.GetAsync("google-bert/bert-base-multilingual-cased", "vocab.txt", ct: cancel).ConfigureAwait(false);
+            string vocabPath = await AudioModelCache.GetAsync("google-bert/bert-base-multilingual-cased", "vocab.txt", category: "tts", ct: cancel).ConfigureAwait(false);
             (IReadOnlyDictionary<string, Tensor> dict, IDisposable loader) = await LoadBarkWeightsAsync(cancel).ConfigureAwait(false);
 
             BarkConfig config = BarkConfig.Full;
@@ -162,9 +162,9 @@ internal static class TtsCatalog
         ResolveRepo = _ => "nari-labs/Dia-1.6B-0626",
         LoadAsync = async (_, cancel) =>
         {
-            string modelPath = await AudioModelCache.GetAsync("nari-labs/Dia-1.6B-0626", "pytorch_model.bin", ct: cancel).ConfigureAwait(false);
+            string modelPath = await AudioModelCache.GetAsync("nari-labs/Dia-1.6B-0626", "pytorch_model.bin", category: "tts", ct: cancel).ConfigureAwait(false);
             // The canonical descript .pth has the layout the engine expects (the HF safetensors mirrors are reshaped).
-            string dacPath = await AudioModelCache.GetAsync("descript/descript-audio-codec", "weights.pth", ct: cancel).ConfigureAwait(false);
+            string dacPath = await AudioModelCache.GetAsync("descript/descript-audio-codec", "weights.pth", category: "tts", ct: cancel).ConfigureAwait(false);
             // 0626 is a flat pickle state_dict; non-recursive flatten keeps the encoder./decoder. prefixes intact.
             PytorchPickleLoader modelLoader = new PytorchPickleLoader();
             modelLoader.Load(modelPath, recursiveFlatten: false);
@@ -199,9 +199,9 @@ internal static class TtsCatalog
         LoadAsync = async (_, cancel) =>
         {
             (IReadOnlyDictionary<string, Tensor> backbone, IDisposable[] backboneLoaders) =
-                await AudioCheckpoints.LoadAsync("unsloth/orpheus-3b-0.1-ft", cancel).ConfigureAwait(false);
+                await AudioCheckpoints.LoadAsync("unsloth/orpheus-3b-0.1-ft", "tts", cancel).ConfigureAwait(false);
             (IReadOnlyDictionary<string, Tensor> snac, IDisposable[] snacLoaders) =
-                await AudioCheckpoints.LoadAsync("hubertsiuzdak/snac_24khz", cancel).ConfigureAwait(false);
+                await AudioCheckpoints.LoadAsync("hubertsiuzdak/snac_24khz", "tts", cancel).ConfigureAwait(false);
             OrpheusPipeline pipeline = new OrpheusPipeline(OrpheusConfig.Orpheus3B);
             pipeline.LoadWeights(backbone, snac);
             Logs.Info("[Audio][Orpheus] Loaded unsloth/orpheus-3b-0.1-ft (Llama-3.2-3B + SNAC 24 kHz).");
@@ -225,7 +225,7 @@ internal static class TtsCatalog
         LoadAsync = async (_, cancel) =>
         {
             (IReadOnlyDictionary<string, Tensor> modelDict, IDisposable[] modelLoaders) =
-                await AudioCheckpoints.LoadAsync("unsloth/csm-1b", cancel).ConfigureAwait(false);
+                await AudioCheckpoints.LoadAsync("unsloth/csm-1b", "tts", cancel).ConfigureAwait(false);
             CsmModel model = new CsmModel(CsmConfig.V1B);
             model.LoadWeights(CsmWeightRemap.Remap(modelDict));
             Mimi mimi = new Mimi(MimiConfig.Mimi24kHzDsm);
@@ -242,14 +242,14 @@ internal static class TtsCatalog
     /// each voice as a torch-saved <c>.pt</c> whose single contiguous f32 storage at <c>*/data/0</c> is that payload.</summary>
     private static async Task EnsureKokoroVoiceAsync(string voiceName, CancellationToken cancel)
     {
-        string repoDir = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M");
+        string repoDir = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M", "tts");
         string binPath = Path.Combine(repoDir, "voices", $"{voiceName}.bin");
         if (File.Exists(binPath))
         {
             return;
         }
         Logs.Info($"[Audio][Kokoro] Fetching voice pack '{voiceName}'...");
-        string ptPath = await AudioModelCache.GetAsync("hexgrad/Kokoro-82M", $"voices/{voiceName}.pt", ct: cancel).ConfigureAwait(false);
+        string ptPath = await AudioModelCache.GetAsync("hexgrad/Kokoro-82M", $"voices/{voiceName}.pt", category: "tts", ct: cancel).ConfigureAwait(false);
         Directory.CreateDirectory(Path.GetDirectoryName(binPath)!);
         using ZipArchive zip = ZipFile.OpenRead(ptPath);
         ZipArchiveEntry storage = zip.Entries.FirstOrDefault(e => e.FullName.Replace('\\', '/').EndsWith("/data/0", StringComparison.Ordinal))
@@ -269,7 +269,7 @@ internal static class TtsCatalog
     {
         try
         {
-            string path = await AudioModelCache.GetAsync("suno/bark", "model.safetensors", ct: cancel).ConfigureAwait(false);
+            string path = await AudioModelCache.GetAsync("suno/bark", "model.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
             SafeTensorsLoader loader = new SafeTensorsLoader();
             loader.Load(path);
             return (loader.GetAllTensors(), loader);
@@ -277,7 +277,7 @@ internal static class TtsCatalog
         catch (FileNotFoundException ex)
         {
             Logs.Debug($"[Audio][Bark] No model.safetensors ({ex.Message}); loading pytorch_model.bin.");
-            string path = await AudioModelCache.GetAsync("suno/bark", "pytorch_model.bin", ct: cancel).ConfigureAwait(false);
+            string path = await AudioModelCache.GetAsync("suno/bark", "pytorch_model.bin", category: "tts", ct: cancel).ConfigureAwait(false);
             PytorchPickleLoader loader = new PytorchPickleLoader();
             loader.Load(path);
             return (loader.GetAllTensors(), loader);

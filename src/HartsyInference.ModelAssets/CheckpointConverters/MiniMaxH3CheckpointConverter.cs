@@ -130,6 +130,9 @@ public sealed class MiniMaxH3CheckpointConverter
     {
         ArgumentNullException.ThrowIfNull(allWeights);
         ThrowIfInt8Convrot(allWeights);
+        // Comfy-Org's *_pruned_fp8_scaled repack is the only H3 variant that fits a 24 GB card, so fold its
+        // per-tensor .scale_weight companions before routing or those keys look like unknown weights.
+        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
 
         Dictionary<string, Tensor> transformer = new Dictionary<string, Tensor>(allWeights.Count);
         Dictionary<string, Tensor> videoVae = new Dictionary<string, Tensor>(512);

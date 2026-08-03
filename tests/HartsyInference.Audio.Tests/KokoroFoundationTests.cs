@@ -17,7 +17,7 @@ public sealed class KokoroFoundationTests
     private readonly ITestOutputHelper _out;
     public KokoroFoundationTests(ITestOutputHelper output) => _out = output;
 
-    private static string KokoroRepo => AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M");
+    private static string KokoroRepo => AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M", "tts");
     private static string ConfigPath => Path.Combine(KokoroRepo, "config.json");
     private static string VoicePath => Path.Combine(KokoroRepo, "voices", "af_heart.bin");
 

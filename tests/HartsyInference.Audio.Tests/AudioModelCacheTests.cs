@@ -13,7 +13,7 @@ public sealed class AudioModelCacheTests
     {
         // HF convention: "openai/whisper-tiny" → "openai--whisper-tiny" so a user
         // can symlink an existing HF cache without rename.
-        string dir = AudioModelCache.GetRepoDirectory("openai/whisper-tiny");
+        string dir = AudioModelCache.GetRepoDirectory("openai/whisper-tiny", "stt");
         Assert.EndsWith("openai--whisper-tiny", dir);
         Assert.True(Directory.Exists(dir));
     }
@@ -30,7 +30,7 @@ public sealed class AudioModelCacheTests
     {
         // openai/whisper-tiny/config.json is small (~2 KB) — safe to pull in a unit test
         // when network is available. Re-running uses the cached copy.
-        string path = await AudioModelCache.GetAsync("openai/whisper-tiny", "config.json");
+        string path = await AudioModelCache.GetAsync("openai/whisper-tiny", "config.json", "stt");
         Assert.True(File.Exists(path));
         string content = await File.ReadAllTextAsync(path);
         Assert.Contains("\"model_type\"", content);

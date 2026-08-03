@@ -23,7 +23,7 @@ internal static class StyleTts2Model
         ResolveRepo = _ => Repo,
         LoadAsync = async (_, cancel) =>
         {
-            string checkpoint = await AudioModelCache.GetAsync(Repo, CheckpointFile, ct: cancel).ConfigureAwait(false);
+            string checkpoint = await AudioModelCache.GetAsync(Repo, CheckpointFile, category: "tts", ct: cancel).ConfigureAwait(false);
             StyleTts2Pipeline pipeline = StyleTts2Pipeline.LoadFromCheckpoint(checkpoint);
             EspeakPhonemizer phonemizer = EspeakPhonemizer.FromCache(EspeakLanguage);
             Logs.Info("[Audio][StyleTTS2] Loaded yl4579/StyleTTS2-LibriTTS (StarGAN-v2 clone + HiFiGAN, 24 kHz).");

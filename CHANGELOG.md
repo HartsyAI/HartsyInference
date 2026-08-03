@@ -9,6 +9,16 @@ stable release will require. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **MiniMax-H3 ("Hailuo 03") — full port, real-weight video + audio verified on a 12 GB RTX 3060.** Single-stream
+  packed-token DiT (`[text | cond | audio | video]`, hidden 5376, 50 blocks) denoising 24-channel video and 32-channel
+  40 Hz stereo audio jointly, with a ViT3D video VAE, a DAC/BigVGAN audio VAE, and an NVFP4-AWQ Qwen3-VL text encoder.
+  Verified end-to-end: 512×288 / 39 frames / 30 steps produces a tracking shot of a dog splashing through a stream with
+  a 1.625 s stereo soundtrack at −12.5 dBFS peak. The 66 GB bf16 DiT is mmap-backed and loads at 943 MB RSS.
+  Layout, dual-shift schedule, audio row packing and final-layer modulation rows are byte-identical to upstream
+  ComfyUI master; the audio VAE decoder matches the reference module shipped inside the checkpoint at relL2 4.9e-6
+  (CPU) / 1.3e-3 (CUDA), covered by the new `MiniMaxH3AudioVaeParityTests` + `tests/python-reference/
+  minimax_h3_audio_vae_ref.py`.
+
 - **SeedVR2-7B support (v1 NaDiT port).** The 7B checkpoint is the V1 architecture (`models/dit`, not the
   3B's `dit_v2`) — same windowing/attention/AdaSingle, but a different RoPE (pixel-basis freqs
   `linspace(1,128,10)·π` matching the checkpoint's `rope.rope.freqs`, 60 of 128 head dims rotated,
@@ -60,6 +70,40 @@ stable release will require. Dates are UTC.
   Any affine dtype is now converted to the kernel's dtype. Caught by the SeedVR2 BF16-VAE bring-up: the
   isolated parity test passed against the f32 checkpoint while the pipeline (fp16 catalog checkpoint)
   produced uniform gray.
+
+- **Borrowed views passed as an in-place op's OUTPUT silently discard the write on CUDA** — a hazard class, found via
+  MiniMax-H3. The backend binds the result to the borrowed `View`/`RowView` and the dispose callback skips the D2H, so
+  the store never lands; the CPU path is unaffected, which is why unit tests passed. In H3 this made RoPE, adaLN
+  modulation and the gated residual no-ops across all 50 blocks — `h` never left the patch embedding and every frame
+  decoded to a regular-grid mosaic. Fixed by forcing the read-back at the three sites; CPU-vs-CUDA parity went
+  0.246 → 4.75e-4 and step-0 velocity rms 7.90 → 2.24. The rest of the repo was swept for the same pattern and is
+  clean: the only other borrowed views outside `HartsyInference.Core` feed a host `float*` loop (video-VAE tile
+  blending) or are read-only GEMM inputs (LLM stacked-weight slicers).
+- **MiniMax-H3 now loads SwarmUI/Comfy's flat checkpoint layout, not just the vendor folder tree.** The vendor
+  publishes `transformer/` + `video_vae/` + `audio_vae/` + `text_encoder/` folders; Comfy-Org repackages the same
+  weights as one file per component under `diffusion_models/`, `vae/` and `text_encoders/`, and that is what SwarmUI's
+  native H3 support downloads — so a Swarm-driven load previously failed looking for a `transformer/` subfolder that
+  does not exist. New `MiniMaxH3Assets` resolves both layouts, walking up from the DiT to find components and ranking
+  variants so an unloadable `int8_convrot` file never beats a loadable sibling. Nothing is downloaded: re-fetching
+  under the engine's own model directory would duplicate the ~5.8 GB of VAEs Swarm already has. Falls back to the
+  embedded Qwen BPE and to `MiniMaxH3VideoVaeConfig.Detect` since the flat repack ships no tokenizer or `config.json`.
+- **MiniMax-H3 fp8-scaled fold wired (untested).** The converter never called the shared
+  `CheckpointConvertUtils.ApplyFp8ScaledDequant`, so a `pruned_fp8_scaled` checkpoint's `.scale_weight` companions
+  were treated as unknown weights. That fold is now applied, which should make Comfy-Org's 21 GB
+  `minimax_h3_*_pruned_fp8_scaled` build — the only variant sized for a 24 GB card — loadable. **Not yet verified on
+  real weights:** every generation to date used the vendor bf16 folder tree, so neither the fp8 path nor the *pruned*
+  checkpoint's `adaln_t_table` curve path (`curves=True`) has executed against a real file.
+
+- **MiniMax-H3 geometry was wrong at its own declared defaults.** Three grids were mis-derived: frame counts must
+  snap up onto `17k+5`, video latent frames are `(frames-5)/17*5 + 2` rather than `frames/4`, and pixel axes round to
+  32 rather than 16 (a multiple of 16 that is not a multiple of 32 gives an odd latent axis, and the 2x2 patchifier
+  silently drops its last row/column). At the shipped defaults `1360x768x121f` that meant 1344x768 output and 102
+  delivered frames sized against ~5.0 s of audio — roughly 0.8 s of soundtrack generated and then trimmed away. The
+  reference grids now live in `MiniMaxH3Geometry` and are pinned by `MiniMaxH3GeometryTests`, including a round-trip
+  asserting the latent count re-expands to exactly the requested frames. Defaults corrected to 1344x768x124f.
+- **`CudaBackend` now logs the device name at construction.** `CUDA_VISIBLE_DEVICES` defaults to fastest-first
+  ordering, so it does not agree with `nvidia-smi` indices — every perf and VRAM figure from an H3 bring-up run was
+  initially attributed to the wrong GPU because only the ordinal was logged.
 
 ## [2.0.0-alpha.8] — 2026-08-01
 

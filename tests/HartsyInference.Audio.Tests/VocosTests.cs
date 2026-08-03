@@ -49,7 +49,7 @@ public sealed class VocosTests
     [Trait("Category", "Integration")]
     public void Vocos_ReconstructsAudio_FromCachedMel()
     {
-        string repoDir = AudioModelCache.GetRepoDirectory("charactr/vocos-mel-24khz");
+        string repoDir = AudioModelCache.GetRepoDirectory("charactr/vocos-mel-24khz", "tts");
         string modelPath = Path.Combine(repoDir, "model.safetensors");
         // The mel fixture is generated offline (see tools/dump_vocos_mel.py) — skip if
         // neither the cache nor the fixture is present.

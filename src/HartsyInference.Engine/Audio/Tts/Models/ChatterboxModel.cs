@@ -25,11 +25,11 @@ internal static class ChatterboxModel
         ResolveRepo = _ => Repo,
         LoadAsync = async (_, cancel) =>
         {
-            string t3Path = await AudioModelCache.GetAsync(Repo, "t3_cfg.safetensors", ct: cancel).ConfigureAwait(false);
-            string s3Path = await AudioModelCache.GetAsync(Repo, "s3gen.safetensors", ct: cancel).ConfigureAwait(false);
-            string vePath = await AudioModelCache.GetAsync(Repo, "ve.safetensors", ct: cancel).ConfigureAwait(false);
-            string tokenizerPath = await AudioModelCache.GetAsync(Repo, "tokenizer.json", ct: cancel).ConfigureAwait(false);
-            string condsPath = await AudioModelCache.GetAsync(Repo, "conds.pt", ct: cancel).ConfigureAwait(false);
+            string t3Path = await AudioModelCache.GetAsync(Repo, "t3_cfg.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
+            string s3Path = await AudioModelCache.GetAsync(Repo, "s3gen.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
+            string vePath = await AudioModelCache.GetAsync(Repo, "ve.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
+            string tokenizerPath = await AudioModelCache.GetAsync(Repo, "tokenizer.json", category: "tts", ct: cancel).ConfigureAwait(false);
+            string condsPath = await AudioModelCache.GetAsync(Repo, "conds.pt", category: "tts", ct: cancel).ConfigureAwait(false);
 
             // Merge the three checkpoints under the prefixes ChatterboxPipeline.LoadWeights validates.
             Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(StringComparer.Ordinal);

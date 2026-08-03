@@ -220,6 +220,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 using Tensor k4 = View(k, 1, seq, heads, hd);
                 backend.ApplyRopeSingle(q4, cos, sin, rotary);
                 backend.ApplyRopeSingle(k4, cos, sin, rotary);
+                Flush(q4);
+                Flush(k4);
             }
 
             Tensor qh = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
@@ -313,6 +315,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             using Tensor s = RowView(onePlus, row, 1, hidden);
             using Tensor b = RowView(shift, row, 1, hidden);
             backend.AffineBroadcastLastDim(slice, slice, s, b);
+            Flush(slice);
         }
     }
 
@@ -326,6 +329,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             using Tensor vs = RowView(value, start, stop - start, hidden);
             using Tensor g = RowView(gate, row, 1, hidden);
             backend.GatedResidualLastDim(hs, hs, vs, g);
+            Flush(hs);
         }
     }
 
@@ -488,6 +492,11 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         float* a = (float*)addend.DataPointer;
         for (long i = 0; i < target.ElementCount; i++) t[i] += a[i];
     }
+
+    /// <summary>Pulls an in-place op's result back into the buffer a borrowed view aliases. Device backends bind the
+    /// output to the view object and free it unread on dispose (no device-to-host copy), so without this the write
+    /// never reaches the parent and the op is silently a no-op on GPU while CPU stays correct.</summary>
+    private static void Flush(Tensor view) => _ = view.DataPointer;
 
     private static Tensor View(Tensor t, params long[] shape) =>
         new Tensor((void*)t.DataPointer, new TensorShape(shape), t.DType);

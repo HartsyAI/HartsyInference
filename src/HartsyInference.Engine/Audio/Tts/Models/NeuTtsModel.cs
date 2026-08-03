@@ -25,9 +25,9 @@ internal static class NeuTtsModel
         LoadAsync = async (_, cancel) =>
         {
             (IReadOnlyDictionary<string, Tensor> backbone, IDisposable[] backboneLoaders) =
-                await AudioCheckpoints.LoadAsync(BackboneRepo, cancel).ConfigureAwait(false);
+                await AudioCheckpoints.LoadAsync(BackboneRepo, "tts", cancel).ConfigureAwait(false);
             (IReadOnlyDictionary<string, Tensor> codec, IDisposable[] codecLoaders) =
-                await AudioCheckpoints.LoadAsync(CodecRepo, cancel).ConfigureAwait(false);
+                await AudioCheckpoints.LoadAsync(CodecRepo, "tts", cancel).ConfigureAwait(false);
 
             NeuTtsConfig config = NeuTtsConfig.Air;
             NeuTtsPipeline pipeline = new NeuTtsPipeline(config);

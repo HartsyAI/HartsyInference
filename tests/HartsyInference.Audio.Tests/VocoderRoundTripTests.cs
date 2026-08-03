@@ -32,9 +32,9 @@ public sealed class VocoderRoundTripTests
     public async Task JfkClip_ThroughMelAndVocos_RecoversCanonicalTranscript()
     {
         string jfkPath = Path.Combine(AudioModelCache.CacheRoot, "test-clips", "jfk.wav");
-        string vocosRepo = AudioModelCache.GetRepoDirectory("charactr/vocos-mel-24khz");
+        string vocosRepo = AudioModelCache.GetRepoDirectory("charactr/vocos-mel-24khz", "tts");
         string vocosWeights = Path.Combine(vocosRepo, "model.safetensors");
-        string whisperRepo = AudioModelCache.GetRepoDirectory("openai/whisper-tiny");
+        string whisperRepo = AudioModelCache.GetRepoDirectory("openai/whisper-tiny", "stt");
 
         if (!File.Exists(jfkPath) || !File.Exists(vocosWeights) || !File.Exists(Path.Combine(whisperRepo, "model.safetensors")))
         {
@@ -116,10 +116,10 @@ public sealed class VocoderRoundTripTests
     public async Task JfkClip_VocosRoundTrip_PassesBothSttModels()
     {
         string jfkPath = Path.Combine(AudioModelCache.CacheRoot, "test-clips", "jfk.wav");
-        string vocosRepo = AudioModelCache.GetRepoDirectory("charactr/vocos-mel-24khz");
+        string vocosRepo = AudioModelCache.GetRepoDirectory("charactr/vocos-mel-24khz", "tts");
         string vocosWeights = Path.Combine(vocosRepo, "model.safetensors");
-        string whisperRepo = AudioModelCache.GetRepoDirectory("openai/whisper-tiny");
-        string moonshineRepo = AudioModelCache.GetRepoDirectory("UsefulSensors/moonshine-base");
+        string whisperRepo = AudioModelCache.GetRepoDirectory("openai/whisper-tiny", "stt");
+        string moonshineRepo = AudioModelCache.GetRepoDirectory("UsefulSensors/moonshine-base", "stt");
 
         if (!File.Exists(jfkPath) || !File.Exists(vocosWeights)
             || !File.Exists(Path.Combine(whisperRepo, "model.safetensors"))

@@ -32,8 +32,8 @@ internal static class Qwen3TtsModel
 
             // Two checkpoints: model.safetensors carries talker.* (+ MTP under talker.code_predictor.*) and
             // speaker_encoder.* (ECAPA); speech_tokenizer/model.safetensors carries the codec.
-            string talkerPath = await AudioModelCache.GetAsync(repo, "model.safetensors", ct: cancel).ConfigureAwait(false);
-            string codecPath = await AudioModelCache.GetAsync(repo, "speech_tokenizer/model.safetensors", ct: cancel).ConfigureAwait(false);
+            string talkerPath = await AudioModelCache.GetAsync(repo, "model.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
+            string codecPath = await AudioModelCache.GetAsync(repo, "speech_tokenizer/model.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
             SafeTensorsLoader talkerLoader = new SafeTensorsLoader();
             talkerLoader.Load(talkerPath);
             SafeTensorsLoader codecLoader = new SafeTensorsLoader();

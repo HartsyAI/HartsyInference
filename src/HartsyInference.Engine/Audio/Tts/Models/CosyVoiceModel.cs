@@ -25,10 +25,10 @@ internal static class CosyVoiceModel
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : Repo,
         LoadAsync = async (_, cancel) =>
         {
-            string llmPath = await AudioModelCache.GetAsync(Repo, "llm.pt", ct: cancel).ConfigureAwait(false);
-            string flowPath = await AudioModelCache.GetAsync(Repo, "flow.pt", ct: cancel).ConfigureAwait(false);
-            string hiftPath = await AudioModelCache.GetAsync(Repo, "hift.pt", ct: cancel).ConfigureAwait(false);
-            string s3genPath = await AudioModelCache.GetAsync(FrozenRepo, "s3gen.safetensors", ct: cancel).ConfigureAwait(false);
+            string llmPath = await AudioModelCache.GetAsync(Repo, "llm.pt", category: "tts", ct: cancel).ConfigureAwait(false);
+            string flowPath = await AudioModelCache.GetAsync(Repo, "flow.pt", category: "tts", ct: cancel).ConfigureAwait(false);
+            string hiftPath = await AudioModelCache.GetAsync(Repo, "hift.pt", category: "tts", ct: cancel).ConfigureAwait(false);
+            string s3genPath = await AudioModelCache.GetAsync(FrozenRepo, "s3gen.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
 
             PytorchPickleLoader llmLoader = new PytorchPickleLoader();
             llmLoader.Load(llmPath);

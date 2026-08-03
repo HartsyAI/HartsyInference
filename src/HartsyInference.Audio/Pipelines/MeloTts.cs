@@ -67,9 +67,9 @@ public sealed class MeloTts : IDisposable
         string meloFile = "checkpoint.pth", string bertRepo = "bert-base-uncased",
         string bertFile = "pytorch_model.bin", MeloTtsConfig? config = null, CancellationToken ct = default)
     {
-        Task<string> melo = AudioModelCache.GetAsync(meloRepo, meloFile, ct: ct);
-        Task<string> bertModel = AudioModelCache.GetAsync(bertRepo, bertFile, ct: ct);
-        Task<string> bertVocab = AudioModelCache.GetAsync(bertRepo, "vocab.txt", ct: ct);
+        Task<string> melo = AudioModelCache.GetAsync(meloRepo, meloFile, category: "tts", ct: ct);
+        Task<string> bertModel = AudioModelCache.GetAsync(bertRepo, bertFile, category: "tts", ct: ct);
+        Task<string> bertVocab = AudioModelCache.GetAsync(bertRepo, "vocab.txt", category: "tts", ct: ct);
         await Task.WhenAll(melo, bertModel, bertVocab).ConfigureAwait(false);
         return LoadFromFiles(melo.Result, bertModel.Result, bertVocab.Result, config);
     }

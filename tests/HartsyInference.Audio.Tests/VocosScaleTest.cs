@@ -26,7 +26,7 @@ public sealed class VocosScaleTest
         Tensor mel = new(new TensorShape(1, 100, t), DType.F32);
         unsafe { fixed (byte* p = raw) Buffer.MemoryCopy(p, (void*)mel.DataPointer, raw.Length, raw.Length); }
 
-        string vocosPath = await AudioModelCache.GetAsync("lucasnewman/vocos-mel-24khz", "model.safetensors");
+        string vocosPath = await AudioModelCache.GetAsync("lucasnewman/vocos-mel-24khz", "model.safetensors", "tts");
         SafeTensorsLoader loader = new(); loader.Load(vocosPath);
         Vocos vocos = new(VocosConfig.Mel24k);
         vocos.LoadWeights(loader.GetAllTensors());

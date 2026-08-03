@@ -71,11 +71,11 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     {
         WhisperConfig resolvedCfg = cfg ?? InferConfig(hfRepoId);
 
-        string repoDir = AudioModelCache.GetRepoDirectory(hfRepoId);
-        Task<string> safetensors = AudioModelCache.GetAsync(hfRepoId, "model.safetensors", ct: ct);
-        Task<string> vocab = AudioModelCache.GetAsync(hfRepoId, "vocab.json", ct: ct);
-        Task<string> merges = AudioModelCache.GetAsync(hfRepoId, "merges.txt", ct: ct);
-        Task<string> config = AudioModelCache.GetAsync(hfRepoId, "config.json", ct: ct);
+        string repoDir = AudioModelCache.GetRepoDirectory(hfRepoId, "stt");
+        Task<string> safetensors = AudioModelCache.GetAsync(hfRepoId, "model.safetensors", category: "stt", ct: ct);
+        Task<string> vocab = AudioModelCache.GetAsync(hfRepoId, "vocab.json", category: "stt", ct: ct);
+        Task<string> merges = AudioModelCache.GetAsync(hfRepoId, "merges.txt", category: "stt", ct: ct);
+        Task<string> config = AudioModelCache.GetAsync(hfRepoId, "config.json", category: "stt", ct: ct);
         // added_tokens is optional — only multilingual checkpoints ship it.
         Task<string> addedTokens = TryGetOptional(hfRepoId, "added_tokens.json", ct);
         Task<string> tokenizerConfig = TryGetOptional(hfRepoId, "tokenizer_config.json", ct);
@@ -297,7 +297,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
 
     private static async Task<string> TryGetOptional(string hfRepoId, string filename, CancellationToken ct)
     {
-        try { return await AudioModelCache.GetAsync(hfRepoId, filename, ct: ct).ConfigureAwait(false); }
+        try { return await AudioModelCache.GetAsync(hfRepoId, filename, category: "stt", ct: ct).ConfigureAwait(false); }
         catch (FileNotFoundException) { return string.Empty; }
     }
 

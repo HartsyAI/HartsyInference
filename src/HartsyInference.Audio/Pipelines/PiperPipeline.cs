@@ -88,8 +88,8 @@ public sealed class PiperPipeline : IDisposable
         string repo = "rhasspy/piper-voices", IPhonemizer? phonemizer = null, CancellationToken ct = default)
     {
         string inRepo = VoiceRepoPath(voiceId);
-        Task<string> onnx = AudioModelCache.GetAsync(repo, $"{inRepo}.onnx", ct: ct);
-        Task<string> json = AudioModelCache.GetAsync(repo, $"{inRepo}.onnx.json", ct: ct);
+        Task<string> onnx = AudioModelCache.GetAsync(repo, $"{inRepo}.onnx", category: "tts", ct: ct);
+        Task<string> json = AudioModelCache.GetAsync(repo, $"{inRepo}.onnx.json", category: "tts", ct: ct);
         await Task.WhenAll(onnx, json).ConfigureAwait(false);
         return LoadFromFiles(onnx.Result, json.Result, phonemizer);
     }

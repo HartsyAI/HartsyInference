@@ -81,7 +81,7 @@ public sealed class F5TtsSmokeTests
         string? path = Environment.GetEnvironmentVariable("F5_DIT");
         if (string.IsNullOrEmpty(path))
         {
-            string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS");
+            string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS", "tts");
             path = Path.Combine(repoDir, "F5TTS_v1_Base", "model_1250000.safetensors");
         }
         if (!File.Exists(path)) return;

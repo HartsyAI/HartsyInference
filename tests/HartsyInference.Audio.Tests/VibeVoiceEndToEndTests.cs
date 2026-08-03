@@ -29,7 +29,7 @@ public sealed class VibeVoiceEndToEndTests
 
     private static bool CacheReady()
     {
-        string vvRepo = AudioModelCache.GetRepoDirectory("vibevoice/VibeVoice-1.5B");
+        string vvRepo = AudioModelCache.GetRepoDirectory("vibevoice/VibeVoice-1.5B", "tts");
         string jfk = Path.Combine(AudioModelCache.CacheRoot, "test-clips", "jfk.wav");
         return File.Exists(Path.Combine(vvRepo, "model-00001-of-00003.safetensors"))
             && File.Exists(Path.Combine(vvRepo, "model-00002-of-00003.safetensors"))

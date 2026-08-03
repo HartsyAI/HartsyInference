@@ -46,11 +46,11 @@ public sealed class ZipVoiceE2eTests
         string jfkPath = Path.Combine(RepoRootDir(), "tests", "python-reference", "silerovad_reference", "jfk.wav");
         if (!File.Exists(jfkPath)) { _out.WriteLine("jfk.wav missing — skipping."); return; }
 
-        string whisperRepoDir = AudioModelCache.GetRepoDirectory("distil-whisper/distil-large-v3");
+        string whisperRepoDir = AudioModelCache.GetRepoDirectory("distil-whisper/distil-large-v3", "stt");
         string whisperRepoId = "distil-whisper/distil-large-v3";
         if (!File.Exists(Path.Combine(whisperRepoDir, "model.safetensors")))
         {
-            whisperRepoDir = AudioModelCache.GetRepoDirectory("openai/whisper-base");
+            whisperRepoDir = AudioModelCache.GetRepoDirectory("openai/whisper-base", "stt");
             whisperRepoId = "openai/whisper-base";
         }
         if (!File.Exists(Path.Combine(whisperRepoDir, "model.safetensors")))
@@ -92,11 +92,11 @@ public sealed class ZipVoiceE2eTests
             return;
         }
 
-        string whisperRepoDir = AudioModelCache.GetRepoDirectory("distil-whisper/distil-large-v3");
+        string whisperRepoDir = AudioModelCache.GetRepoDirectory("distil-whisper/distil-large-v3", "stt");
         string whisperRepoId = "distil-whisper/distil-large-v3";
         if (!File.Exists(Path.Combine(whisperRepoDir, "model.safetensors")))
         {
-            whisperRepoDir = AudioModelCache.GetRepoDirectory("openai/whisper-base");
+            whisperRepoDir = AudioModelCache.GetRepoDirectory("openai/whisper-base", "stt");
             whisperRepoId = "openai/whisper-base";
         }
         if (!File.Exists(Path.Combine(whisperRepoDir, "model.safetensors")))

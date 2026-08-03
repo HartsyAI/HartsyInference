@@ -24,11 +24,11 @@ internal static class ZonosModel
         ResolveRepo = _ => ModelRepo,
         LoadAsync = async (_, cancel) =>
         {
-            string modelPath = await AudioModelCache.GetAsync(ModelRepo, "model.safetensors", ct: cancel).ConfigureAwait(false);
+            string modelPath = await AudioModelCache.GetAsync(ModelRepo, "model.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
             // The engine DAC consumes the canonical descript .pth layout (the HF safetensors mirrors are reshaped).
-            string dacPath = await AudioModelCache.GetAsync("descript/descript-audio-codec", "weights.pth", ct: cancel).ConfigureAwait(false);
-            string speakerPath = await AudioModelCache.GetAsync(SpeakerRepo, "ResNet293_SimAM_ASP_base.pt", ct: cancel).ConfigureAwait(false);
-            string ldaPath = await AudioModelCache.GetAsync(SpeakerRepo, "ResNet293_SimAM_ASP_base_LDA-128.pt", ct: cancel).ConfigureAwait(false);
+            string dacPath = await AudioModelCache.GetAsync("descript/descript-audio-codec", "weights.pth", category: "tts", ct: cancel).ConfigureAwait(false);
+            string speakerPath = await AudioModelCache.GetAsync(SpeakerRepo, "ResNet293_SimAM_ASP_base.pt", category: "tts", ct: cancel).ConfigureAwait(false);
+            string ldaPath = await AudioModelCache.GetAsync(SpeakerRepo, "ResNet293_SimAM_ASP_base_LDA-128.pt", category: "tts", ct: cancel).ConfigureAwait(false);
 
             SafeTensorsLoader modelLoader = new SafeTensorsLoader();
             modelLoader.Load(modelPath);

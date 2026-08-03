@@ -18,7 +18,7 @@ public sealed class F5ForwardLiveTest
     [Fact]
     public async Task F5Dit_SmokeForward_ProducesFiniteOutput()
     {
-        string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS");
+        string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS", "tts");
         string ditPath = Path.Combine(repoDir, "F5TTS_v1_Base", "model_1250000.safetensors");
         if (!File.Exists(ditPath))
         {

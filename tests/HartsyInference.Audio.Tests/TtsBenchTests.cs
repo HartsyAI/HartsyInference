@@ -46,8 +46,8 @@ public sealed class TtsBenchTests
     [Fact]
     public async Task Bench_Kokoro()
     {
-        string w = AudioModelCache.GetRepoDirectory("Hartsy/kokoro-82m-safetensors");
-        string v = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M");
+        string w = AudioModelCache.GetRepoDirectory("Hartsy/kokoro-82m-safetensors", "tts");
+        string v = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M", "tts");
         if (!File.Exists(Path.Combine(w, "kokoro-82m.safetensors")) || !File.Exists(Path.Combine(v, "voices", "af_heart.bin")))
         { _out.WriteLine("Kokoro not cached — skip."); return; }
         using KokoroPipeline k = await KokoroPipeline.LoadAsync();
@@ -60,8 +60,8 @@ public sealed class TtsBenchTests
     [Fact]
     public async Task Bench_F5()
     {
-        string dit = Path.Combine(AudioModelCache.GetRepoDirectory("SWivid/F5-TTS"), "F5TTS_v1_Base", "model_1250000.safetensors");
-        string vocos = Path.Combine(AudioModelCache.GetRepoDirectory("lucasnewman/vocos-mel-24khz"), "model.safetensors");
+        string dit = Path.Combine(AudioModelCache.GetRepoDirectory("SWivid/F5-TTS", "tts"), "F5TTS_v1_Base", "model_1250000.safetensors");
+        string vocos = Path.Combine(AudioModelCache.GetRepoDirectory("lucasnewman/vocos-mel-24khz", "tts"), "model.safetensors");
         string jfk = Path.Combine(AudioModelCache.CacheRoot, "test-clips", "jfk.wav");
         if (!File.Exists(dit) || !File.Exists(vocos) || !File.Exists(jfk)) { _out.WriteLine("F5/vocos/jfk missing — skip."); return; }
         using F5TtsPipeline pipe = await F5TtsPipeline.LoadAsync();
@@ -81,7 +81,7 @@ public sealed class TtsBenchTests
     [Fact]
     public void Bench_Piper()
     {
-        string onnx = Path.Combine(AudioModelCache.GetRepoDirectory("rhasspy/piper-voices"),
+        string onnx = Path.Combine(AudioModelCache.GetRepoDirectory("rhasspy/piper-voices", "tts"),
             "en", "en_US", "lessac", "medium", "en_US-lessac-medium.onnx");
         if (!File.Exists(onnx) || string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ESPEAK_DATA_DIR")))
         { _out.WriteLine("Piper onnx or ESPEAK_DATA_DIR missing — skip."); return; }
@@ -95,8 +95,8 @@ public sealed class TtsBenchTests
     [Fact]
     public void Bench_MeloTts()
     {
-        string ckpt = Path.Combine(AudioModelCache.GetRepoDirectory("myshell-ai/MeloTTS-English-v3"), "checkpoint.pth");
-        string bd = AudioModelCache.GetRepoDirectory("bert-base-uncased");
+        string ckpt = Path.Combine(AudioModelCache.GetRepoDirectory("myshell-ai/MeloTTS-English-v3", "tts"), "checkpoint.pth");
+        string bd = AudioModelCache.GetRepoDirectory("bert-base-uncased", "tts");
         string bert = File.Exists(Path.Combine(bd, "model.safetensors")) ? Path.Combine(bd, "model.safetensors") : Path.Combine(bd, "pytorch_model.bin");
         string vocab = Path.Combine(bd, "vocab.txt");
         if (!File.Exists(ckpt) || !File.Exists(bert)) { _out.WriteLine("MeloTTS not cached — skip."); return; }

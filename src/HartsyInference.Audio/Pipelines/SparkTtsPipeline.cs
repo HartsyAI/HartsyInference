@@ -66,11 +66,11 @@ public sealed class SparkTtsPipeline : IDisposable
     public static async Task<SparkTtsPipeline> LoadAsync(string repo = "SparkAudio/Spark-TTS-0.5B",
         SparkTtsConfig? config = null, CancellationToken ct = default)
     {
-        Task<string> llm = AudioModelCache.GetAsync(repo, "LLM/model.safetensors", ct: ct);
-        Task<string> bicodec = AudioModelCache.GetAsync(repo, "BiCodec/model.safetensors", ct: ct);
-        Task<string> vocab = AudioModelCache.GetAsync(repo, "LLM/vocab.json", ct: ct);
-        Task<string> merges = AudioModelCache.GetAsync(repo, "LLM/merges.txt", ct: ct);
-        Task<string> added = AudioModelCache.GetAsync(repo, "LLM/added_tokens.json", ct: ct);
+        Task<string> llm = AudioModelCache.GetAsync(repo, "LLM/model.safetensors", category: "tts", ct: ct);
+        Task<string> bicodec = AudioModelCache.GetAsync(repo, "BiCodec/model.safetensors", category: "tts", ct: ct);
+        Task<string> vocab = AudioModelCache.GetAsync(repo, "LLM/vocab.json", category: "tts", ct: ct);
+        Task<string> merges = AudioModelCache.GetAsync(repo, "LLM/merges.txt", category: "tts", ct: ct);
+        Task<string> added = AudioModelCache.GetAsync(repo, "LLM/added_tokens.json", category: "tts", ct: ct);
         await Task.WhenAll(llm, bicodec, vocab, merges, added).ConfigureAwait(false);
         // All files land under the same cached repo dir; pass its root (parent of LLM/).
         string root = Path.GetDirectoryName(Path.GetDirectoryName(llm.Result)!)!;

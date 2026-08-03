@@ -28,7 +28,7 @@ public sealed class TranscribeWavFileTests
         // Oracle model is selectable: the TTS-verify campaign dropped `base` (it hallucinates the target words
         // onto broken audio) in favor of `medium`. Default stays base for the cheap CPU smoke.
         string whisperRepo = Environment.GetEnvironmentVariable("TRANSCRIBE_MODEL") ?? "openai/whisper-base";
-        string whisperDir = AudioModelCache.GetRepoDirectory(whisperRepo);
+        string whisperDir = AudioModelCache.GetRepoDirectory(whisperRepo, "stt");
         if (!File.Exists(Path.Combine(whisperDir, "model.safetensors"))) { _out.WriteLine($"{whisperRepo} not cached — skipping."); return; }
 
         // Ensure 16 kHz mono for Whisper.

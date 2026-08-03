@@ -12,25 +12,39 @@ namespace HartsyInference.Diffusion.Models.TextEncoders;
 public sealed unsafe class Qwen3VlImageProcessor
 {
     // OpenAI CLIP normalization (Qwen-VL default image_mean / image_std).
-    private static readonly float[] Mean = [0.48145466f, 0.4578275f, 0.40821073f];
-    private static readonly float[] Std = [0.26862954f, 0.26130258f, 0.27577711f];
+    private static readonly float[] ClipMean = [0.48145466f, 0.4578275f, 0.40821073f];
+    private static readonly float[] ClipStd = [0.26862954f, 0.26130258f, 0.27577711f];
 
     private readonly Qwen3VlVisionConfig _config;
     private readonly int _minPixels;
     private readonly int _maxPixels;
     private readonly int _maxSideLength;
+    private readonly float[] _mean;
+    private readonly float[] _std;
 
     /// <summary>Creates an image processor. <paramref name="minPixels"/>/<paramref name="maxPixels"/> bound the resized
     /// pixel count (defaults pick a ~256–1024 token budget at patch 16 / merge 2); <paramref name="maxSideLength"/>
     /// optionally caps the longer side (0 = uncapped). Boogu-Image's reference pipeline feeds the VLM at most
     /// 384·384 pixels with side ≤ 768 (its training-data budget) — callers replicating it pass those here.</summary>
-    public Qwen3VlImageProcessor(Qwen3VlVisionConfig config, int minPixels = 0, int maxPixels = 0, int maxSideLength = 0)
+    /// <param name="imageMean">Per-channel normalization mean; null keeps CLIP's. MiniMax-H3 / upstream Qwen3-VL use <c>[0.5, 0.5, 0.5]</c>.</param>
+    /// <param name="imageStd">Per-channel normalization std; null keeps CLIP's.</param>
+    public Qwen3VlImageProcessor(Qwen3VlVisionConfig config, int minPixels = 0, int maxPixels = 0, int maxSideLength = 0,
+        IReadOnlyList<float>? imageMean = null, IReadOnlyList<float>? imageStd = null)
     {
         _config = config;
         int factor = config.PatchSize * config.SpatialMergeSize;
         _minPixels = minPixels > 0 ? minPixels : factor * factor * 4;
         _maxPixels = maxPixels > 0 ? maxPixels : factor * factor * 1024;
         _maxSideLength = maxSideLength;
+        _mean = ToChannelTriple(imageMean, ClipMean, nameof(imageMean));
+        _std = ToChannelTriple(imageStd, ClipStd, nameof(imageStd));
+    }
+
+    private static float[] ToChannelTriple(IReadOnlyList<float>? values, float[] fallback, string name)
+    {
+        if (values is null) return fallback;
+        if (values.Count != 3) throw new ArgumentException($"Expected 3 channel values, got {values.Count}.", name);
+        return [values[0], values[1], values[2]];
     }
 
     /// <summary>Smart-resizes (h, w) to multiples of <c>patch·merge</c> within the pixel budget (and the optional
@@ -76,8 +90,8 @@ public sealed unsafe class Qwen3VlImageProcessor
         int srcW = (int)rgb.Shape[2];
         (int dstH, int dstW) = SmartResize(srcH, srcW);
 
-        // Bilinear resize + CLIP normalize into a [3, dstH, dstW] buffer.
-        float[] img = ResizeAndNormalize(rgb, srcH, srcW, dstH, dstW);
+        // Bilinear resize + normalize into a [3, dstH, dstW] buffer.
+        float[] img = ResizeAndNormalize(rgb, srcH, srcW, dstH, dstW, _mean, _std);
 
         int patch = _config.PatchSize;
         int merge = _config.SpatialMergeSize;
@@ -114,7 +128,8 @@ public sealed unsafe class Qwen3VlImageProcessor
         return (pixelValues, 1, gridH, gridW);
     }
 
-    private static float[] ResizeAndNormalize(Tensor rgb, int srcH, int srcW, int dstH, int dstW)
+    private static float[] ResizeAndNormalize(Tensor rgb, int srcH, int srcW, int dstH, int dstW,
+        float[] meanPerChannel, float[] stdPerChannel)
     {
         float* src = (float*)rgb.DataPointer;
         float[] outImg = new float[3 * dstH * dstW];
@@ -123,7 +138,7 @@ public sealed unsafe class Qwen3VlImageProcessor
         double scaleW = (double)srcW / dstW;
         for (int c = 0; c < 3; c++)
         {
-            float mean = Mean[c], std = Std[c];
+            float mean = meanPerChannel[c], std = stdPerChannel[c];
             long srcPlane = (long)c * srcH * srcW;
             long dstPlane = (long)c * dstH * dstW;
             for (int y = 0; y < dstH; y++)

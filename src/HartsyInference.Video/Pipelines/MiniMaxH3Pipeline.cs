@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Video.Pipelines;
 
@@ -44,7 +45,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         ArgumentNullException.ThrowIfNull(request);
 
         int latentT = request.LatentFrames, latentH = request.Height / 16, latentW = request.Width / 16;
-        if (latentH * 16 != request.Width && latentW * 16 != request.Height)
+        if (latentH * 16 != request.Height || latentW * 16 != request.Width)
         {
             // 16x spatial compression; the caller snaps geometry before reaching here.
             Logs.Warning($"[MiniMaxH3] {request.Width}x{request.Height} is not a multiple of 16.");
@@ -84,12 +85,23 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                     [MiniMaxH3SegmentKind.RefAudio] = 1,
                 };
 
+                if (step == 0)
+                {
+                    Probe("video latent (noise, pre-step)", videoLat);
+                    Probe("audio latent (noise, pre-step)", audioLat);
+                }
                 (Tensor vVideo, Tensor vAudio) = _transformer.Forward(
                     Backend, layout, videoLat, audioLat, textStates, cos, sin, uniqueT, rowOf, textTagRuns);
                 try
                 {
-                    // The model returns negated velocity; the audio branch additionally carries the schedule slope.
+                    // Both heads return the flow velocity; the audio one is integrated over the video sigma, so it
+                    // takes the schedule map's derivative as an extra factor.
                     float slope = (float)MiniMaxH3Schedule.ShiftSlope(sigma, shiftV, shiftA);
+                    if (step == 0 || step == request.Steps / 2 || step == request.Steps - 1)
+                    {
+                        Probe($"DiT velocity (video, step {step})", vVideo);
+                        Probe($"DiT velocity (audio, step {step}, sigmaV={sigma:F4} tA={tAudio:F4} slope={slope:F4})", vAudio);
+                    }
                     EulerStep(videoLat, vVideo, (float)-dSigma);
                     EulerStep(audioLat, vAudio, (float)(-dSigma * slope));
                 }
@@ -104,6 +116,10 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                 onProgress?.Invoke(new GenerationProgress(step + 1, request.Steps, sw.Elapsed.TotalMilliseconds));
             }
 
+            Probe("video latent (final)", videoLat);
+            Probe("audio latent (final)", audioLat);
+            Dump("video_latent_final", videoLat);
+            Dump("audio_latent_final", audioLat);
             Tensor videoLatent = MiniMaxH3Latents.UnpackVideo(videoLat, latentT, latentH, latentW, _config);
             Tensor rgb;
             try
@@ -166,6 +182,50 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             cos.Dispose();
             sin.Dispose();
         }
+    }
+
+    /// <summary>Logs min/max/mean/rms under <c>HARTSY_H3_PROBE=1</c>; no-op otherwise.</summary>
+    private static void Probe(string label, Tensor t)
+    {
+        if (Environment.GetEnvironmentVariable("HARTSY_H3_PROBE") != "1")
+        {
+            return;
+        }
+        Tensor f = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+        float* p = (float*)f.DataPointer;
+        long n = f.ElementCount;
+        float mn = float.MaxValue, mx = float.MinValue;
+        double sum = 0, sq = 0;
+        long bad = 0;
+        for (long i = 0; i < n; i++)
+        {
+            float v = p[i];
+            if (!float.IsFinite(v)) { bad++; continue; }
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+            sum += v; sq += (double)v * v;
+        }
+        Logs.Warning($"[h3-probe] {label}: min={mn:F4} max={mx:F4} mean={sum / n:F4} rms={Math.Sqrt(sq / n):F4} nonfinite={bad} n={n}");
+        if (!ReferenceEquals(f, t)) f.Dispose();
+    }
+
+    /// <summary>Writes the raw F32 tensor to <c>$HARTSY_H3_DUMP/&lt;name&gt;.bin</c> for reference comparison; no-op
+    /// when the variable is unset.</summary>
+    private static void Dump(string name, Tensor t)
+    {
+        string? dir = Environment.GetEnvironmentVariable("HARTSY_H3_DUMP");
+        if (string.IsNullOrEmpty(dir))
+        {
+            return;
+        }
+        Directory.CreateDirectory(dir);
+        Tensor f = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+        using (FileStream fs = File.Create(Path.Combine(dir, name + ".bin")))
+        {
+            fs.Write(new ReadOnlySpan<byte>((void*)f.DataPointer, checked((int)(f.ElementCount * 4))));
+        }
+        Logs.Warning($"[h3-dump] {name} {f.Shape} -> {dir}");
+        if (!ReferenceEquals(f, t)) { f.Dispose(); }
     }
 
     /// <summary><c>z += v * delta</c> in place.</summary>

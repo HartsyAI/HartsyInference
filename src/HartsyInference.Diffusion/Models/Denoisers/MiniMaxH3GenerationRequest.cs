@@ -9,7 +9,8 @@ public sealed record MiniMaxH3GenerationRequest
 
     public required int Height { get; init; }
 
-    /// <summary>Video latent frames (pixel frames / 4, the VAE's temporal compression).</summary>
+    /// <summary>Video latent frames — derive with <see cref="MiniMaxH3Geometry.VideoLatentFrames"/>; it is NOT
+    /// pixel frames / 4.</summary>
     public required int LatentFrames { get; init; }
 
     /// <summary>Audio latent frames at 40 Hz — 800 samples each at 32 kHz.</summary>
@@ -23,7 +24,9 @@ public sealed record MiniMaxH3GenerationRequest
 
     public float SigmaShiftAudio { get; init; } = MiniMaxH3Schedule.DefaultShiftAudio;
 
-    /// <summary>Audio latent frames covering <paramref name="pixelFrames"/> at <paramref name="fps"/>.</summary>
+    /// <summary>Audio latent frames covering <paramref name="pixelFrames"/> at <paramref name="fps"/>. Pass the
+    /// <see cref="MiniMaxH3Geometry.AlignFrameCount"/>ed count — sizing this from the caller's raw request generates
+    /// audio past the end of the video, which then gets trimmed away.</summary>
     public static int AudioFramesFor(int pixelFrames, double fps, int audioLatentRate = 40) =>
         Math.Max(1, (int)Math.Round(pixelFrames / fps * audioLatentRate));
 }

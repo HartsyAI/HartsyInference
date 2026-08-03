@@ -66,10 +66,10 @@ internal static class AceStepMusicModel
         }
         else
         {
-            mainPath = await AudioModelCache.GetAsync(AceStep15Repo, AceStep15TurboFile, ct: cancel).ConfigureAwait(false);
+            mainPath = await AudioModelCache.GetAsync(AceStep15Repo, AceStep15TurboFile, category: "music", ct: cancel).ConfigureAwait(false);
         }
-        string vaePath = await AudioModelCache.GetAsync(AceStep15Repo, AceStep15VaeFile, ct: cancel).ConfigureAwait(false);
-        string qwenPath = await AudioModelCache.GetAsync(QwenEmbeddingRepo, QwenEmbeddingFile, ct: cancel).ConfigureAwait(false);
+        string vaePath = await AudioModelCache.GetAsync(AceStep15Repo, AceStep15VaeFile, category: "music", ct: cancel).ConfigureAwait(false);
+        string qwenPath = await AudioModelCache.GetAsync(QwenEmbeddingRepo, QwenEmbeddingFile, category: "music", ct: cancel).ConfigureAwait(false);
 
         // The sidecar config.json (downloaded with the variant) drives dims + is_turbo; absent = 2B turbo defaults.
         string sidecarConfig = Path.ChangeExtension(mainPath, null) + ".config.json";
@@ -576,7 +576,7 @@ internal static class AceStepMusicModel
             string repo = want == "4b" ? "ACE-Step/acestep-5Hz-lm-4B" : "ACE-Step/acestep-5Hz-lm-0.6B";
             Logs.Info($"[Audio][ACE-Step] Loading 5 Hz LM planner '{repo}'...");
             (IReadOnlyDictionary<string, Tensor> weights, IDisposable[] loaders) =
-                AudioCheckpoints.LoadAsync(repo, CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+                AudioCheckpoints.LoadAsync(repo, "music", CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
             _loaders.AddRange(loaders);
             _planner = new AceStepLmPlanner(want == "4b" ? AceStepLmPlanner.Config4B : AceStepLmPlanner.Config0_6B, weights);
             _kind = want;

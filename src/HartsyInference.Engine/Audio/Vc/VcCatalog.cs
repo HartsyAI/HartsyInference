@@ -122,7 +122,7 @@ internal static class VcCatalog
             return;
         }
         Logs.Info($"[Audio][RVC] ContentVec encoder missing — fetching {ContentVecRepo} and converting to {ContentVecFile}...");
-        string binPath = await AudioModelCache.GetAsync(ContentVecRepo, ContentVecSourceFile, ct: cancel).ConfigureAwait(false);
+        string binPath = await AudioModelCache.GetAsync(ContentVecRepo, ContentVecSourceFile, category: "clone", ct: cancel).ConfigureAwait(false);
         PytorchPickleLoader loader = new PytorchPickleLoader();
         try
         {

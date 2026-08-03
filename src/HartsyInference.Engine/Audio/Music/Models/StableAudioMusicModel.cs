@@ -33,10 +33,10 @@ internal static class StableAudioMusicModel
 
     private static async Task<IMusicRunner> LoadAsync(IBackend backend, AudioModelSelector selector, CancellationToken cancel)
     {
-        Task<string> ditPath = AudioModelCache.GetAsync(Repo, "transformer/diffusion_pytorch_model.safetensors", ct: cancel);
-        Task<string> vaePath = AudioModelCache.GetAsync(Repo, "vae/diffusion_pytorch_model.safetensors", ct: cancel);
-        Task<string> condPath = AudioModelCache.GetAsync(Repo, "conditioner/diffusion_pytorch_model.safetensors", ct: cancel);
-        Task<string> t5Path = AudioModelCache.GetAsync(T5Repo, "model.safetensors", ct: cancel);
+        Task<string> ditPath = AudioModelCache.GetAsync(Repo, "transformer/diffusion_pytorch_model.safetensors", category: "music", ct: cancel);
+        Task<string> vaePath = AudioModelCache.GetAsync(Repo, "vae/diffusion_pytorch_model.safetensors", category: "music", ct: cancel);
+        Task<string> condPath = AudioModelCache.GetAsync(Repo, "conditioner/diffusion_pytorch_model.safetensors", category: "music", ct: cancel);
+        Task<string> t5Path = AudioModelCache.GetAsync(T5Repo, "model.safetensors", category: "music", ct: cancel);
         await Task.WhenAll(ditPath, vaePath, condPath, t5Path).ConfigureAwait(false);
 
         StableAudioDitConfig config = StableAudioDitConfig.OpenSmall;

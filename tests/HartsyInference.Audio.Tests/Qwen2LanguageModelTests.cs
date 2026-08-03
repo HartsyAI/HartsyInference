@@ -34,7 +34,7 @@ public sealed class Qwen2LanguageModelTests : IDisposable
     public Qwen2LanguageModelTests(ITestOutputHelper output)
     {
         _out = output;
-        string repoDir = AudioModelCache.GetRepoDirectory("vibevoice/VibeVoice-1.5B");
+        string repoDir = AudioModelCache.GetRepoDirectory("vibevoice/VibeVoice-1.5B", "tts");
         _cacheReady = File.Exists(Path.Combine(repoDir, "model-00001-of-00003.safetensors"))
             && File.Exists(Path.Combine(repoDir, "model-00002-of-00003.safetensors"))
             && File.Exists(Path.Combine(repoDir, "model-00003-of-00003.safetensors"));

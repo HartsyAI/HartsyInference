@@ -65,8 +65,8 @@ internal static class HeartMulaMusicModel
 
     private static async Task<IMusicRunner> LoadAsync(string repo, string? quant, CancellationToken cancel)
     {
-        (IReadOnlyDictionary<string, Tensor> lmWeights, IDisposable[] lmLoaders) = await AudioCheckpoints.LoadAsync(repo, cancel).ConfigureAwait(false);
-        (IReadOnlyDictionary<string, Tensor> codecWeights, IDisposable[] codecLoaders) = await AudioCheckpoints.LoadAsync(CodecRepo, cancel).ConfigureAwait(false);
+        (IReadOnlyDictionary<string, Tensor> lmWeights, IDisposable[] lmLoaders) = await AudioCheckpoints.LoadAsync(repo, "music", cancel).ConfigureAwait(false);
+        (IReadOnlyDictionary<string, Tensor> codecWeights, IDisposable[] codecLoaders) = await AudioCheckpoints.LoadAsync(CodecRepo, "music", cancel).ConfigureAwait(false);
 
         // The AR decode is memory-bandwidth-bound (per-token weight streaming), so the Q8/Q4 variants are faster AND
         // smaller. The pipeline quantizes the REMAPPED weights once to a disk GGUF cache and loads from there after.

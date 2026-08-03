@@ -5,15 +5,21 @@ using System.Security.Cryptography;
 namespace HartsyInference.Audio.Cache;
 
 /// <summary>Resolves HuggingFace model artifacts to a local file path, downloading them
-/// on first use into a shared on-disk cache at <c>~/.cache/hartsyinference/models/</c>.
+/// on first use into a shared on-disk cache under the audio Models tree, organized by category
+/// (<c>tts</c>/<c>stt</c>/<c>music</c>/<c>clone</c>/<c>fx</c>/<c>misc</c>) — the same taxonomy
+/// <c>AudioModelRoot.WeightsDirectory</c> (Engine) uses for placed-checkpoint providers, so both
+/// download paths land under one tree instead of splintering into a separate flat cache.
 ///
 /// <para>The cache layout mirrors HuggingFace conventions so a given repo lives under
-/// <c>~/.cache/hartsyinference/models/{owner}--{name}/</c>. Multi-file repos (Whisper has
+/// <c>{root}/{category}/{owner}--{name}/</c>. Multi-file repos (Whisper has
 /// <c>model.safetensors</c>, <c>config.json</c>, <c>tokenizer.json</c>, etc.) all land in
 /// the same directory.</para>
 ///
-/// <para>Override the cache root with the <c>HARTSYINFERENCE_MODEL_CACHE</c> environment
-/// variable. Override the HuggingFace mirror with <c>HF_ENDPOINT</c>. Pass a token in
+/// <para>Root resolution, highest priority first: the <c>HARTSYINFERENCE_MODEL_CACHE</c>
+/// environment variable (an explicit override); else <c>{HARTSYINFERENCE_MODELS}/audio</c> when
+/// that's set (aligning with every other model path in the engine); else
+/// <c>~/.cache/hartsyinference/models</c> (standalone fallback, e.g. running outside the Engine's
+/// placement). Override the HuggingFace mirror with <c>HF_ENDPOINT</c>. Pass a token in
 /// <c>HF_TOKEN</c> for gated repos.</para>
 ///
 /// <para><b>Thread safety:</b> safe to call <see cref="GetAsync"/> concurrently from
@@ -28,21 +34,23 @@ public static class AudioModelCache
     private static readonly Dictionary<string, Task<string>> _inflight = new(StringComparer.Ordinal);
     private static readonly object _inflightLock = new();
 
-    /// <summary>The active cache root. Honors <c>HARTSYINFERENCE_MODEL_CACHE</c>;
-    /// defaults to <c>~/.cache/hartsyinference/models</c>.</summary>
+    /// <summary>The active cache root (category subfolders live underneath this — see
+    /// <see cref="GetRepoDirectory"/>). See the class doc for the resolution order.</summary>
     public static string CacheRoot { get; } = ResolveCacheRoot();
 
     /// <summary>Returns the local directory that holds files for <paramref name="hfRepoId"/>
-    /// (e.g. <c>"openai/whisper-large-v3-turbo"</c>). The directory is created if it
-    /// does not already exist; files inside it may or may not be present yet.</summary>
-    public static string GetRepoDirectory(string hfRepoId)
+    /// (e.g. <c>"openai/whisper-large-v3-turbo"</c>) under <paramref name="category"/>
+    /// (<c>"tts"</c>/<c>"stt"</c>/<c>"music"</c>/<c>"clone"</c>/<c>"fx"</c>/<c>"misc"</c>). The
+    /// directory is created if it does not already exist; files inside it may or may not be
+    /// present yet.</summary>
+    public static string GetRepoDirectory(string hfRepoId, string category)
     {
         // The double-dash convention matches HF's own hub cache layout, so a user who
         // already has whisper downloaded under ~/.cache/huggingface/hub can symlink it
         // into ours without renaming. Only the org/name separator becomes `--`; existing
         // dashes in repo names stay single.
         string safe = hfRepoId.Replace("/", "--", StringComparison.Ordinal);
-        string dir = Path.Combine(CacheRoot, safe);
+        string dir = Path.Combine(CacheRoot, category, safe);
         Directory.CreateDirectory(dir);
         return dir;
     }
@@ -52,17 +60,19 @@ public static class AudioModelCache
     /// <param name="hfRepoId">Repo id such as <c>"openai/whisper-large-v3-turbo"</c>.</param>
     /// <param name="filename">File path within the repo, e.g. <c>"model.safetensors"</c>
     /// or <c>"tokenizer.json"</c>. Subdirectories are allowed.</param>
+    /// <param name="category">The audio category this model belongs to — see <see cref="GetRepoDirectory"/>.</param>
     /// <param name="revision">Optional git revision (branch / tag / commit SHA).
     /// Defaults to <c>"main"</c>.</param>
     /// <param name="progress">Optional progress callback receiving downloaded-byte counts.</param>
     public static async Task<string> GetAsync(
         string hfRepoId,
         string filename,
+        string category,
         string revision = "main",
         IProgress<long>? progress = null,
         CancellationToken ct = default)
     {
-        string repoDir = GetRepoDirectory(hfRepoId);
+        string repoDir = GetRepoDirectory(hfRepoId, category);
         string localPath = Path.Combine(repoDir, filename);
         if (IsUsableFile(localPath)) return localPath;
 
@@ -93,8 +103,8 @@ public static class AudioModelCache
 
     /// <summary>Synchronous wrapper around <see cref="GetAsync"/>. Convenience for code
     /// that loads at startup time and doesn't want to plumb async through.</summary>
-    public static string Get(string hfRepoId, string filename, string revision = "main")
-        => GetAsync(hfRepoId, filename, revision).GetAwaiter().GetResult();
+    public static string Get(string hfRepoId, string filename, string category, string revision = "main")
+        => GetAsync(hfRepoId, filename, category, revision).GetAwaiter().GetResult();
 
     /// <summary>Throws if <paramref name="filePath"/>'s SHA-256 does not match the pinned
     /// <paramref name="expectedHex"/> (case-insensitive). Used to verify a repacked single-file
@@ -192,8 +202,12 @@ public static class AudioModelCache
 
     private static string ResolveCacheRoot()
     {
-        string? env = Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODEL_CACHE");
-        if (!string.IsNullOrEmpty(env)) return env;
+        string? cacheOverride = Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODEL_CACHE");
+        if (!string.IsNullOrEmpty(cacheOverride)) return cacheOverride;
+        // Read via the env var (not a reference to RepoPaths/AudioModelRoot) to respect the
+        // Audio package's dependency direction -- Engine depends on Audio, not the reverse.
+        string? modelsRoot = Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODELS");
+        if (!string.IsNullOrEmpty(modelsRoot)) return Path.Combine(modelsRoot, "audio");
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         return Path.Combine(home, ".cache", "hartsyinference", "models");
     }

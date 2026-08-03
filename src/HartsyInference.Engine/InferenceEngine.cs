@@ -4,6 +4,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -54,6 +55,7 @@ public sealed class InferenceEngine : IInferenceEngine
         _backendSelector = backendSelector;
         _options = options;
         _placement = options?.Placement ?? PlacementConfig.Single;
+        PlacementPlanner.ValidatePlacement(_placement);
         _images = new Lazy<ImagesService>(() => new ImagesService(this));
         _video = new Lazy<VideoService>(() => new VideoService(this));
         _text = new Lazy<TextService>(() => new TextService(this));
@@ -147,6 +149,7 @@ public sealed class InferenceEngine : IInferenceEngine
     public void SetPlacement(PlacementConfig placement)
     {
         ArgumentNullException.ThrowIfNull(placement);
+        PlacementPlanner.ValidatePlacement(placement);
         if (_placement == placement)
         {
             return;
@@ -199,6 +202,7 @@ public sealed class InferenceEngine : IInferenceEngine
             TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
             VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
             CfgParallelBackend = _placement.CfgParallelDevice is null ? null : EnsureBackend(_placement.CfgParallelDevice),
+            DitShardBackend = EnsureDitShardBackend(),
             Components = request?.Components,
             Loras = request?.Loras,
         }));
@@ -348,6 +352,7 @@ public sealed class InferenceEngine : IInferenceEngine
                 TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
                 VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
                 CfgParallelBackend = _placement.CfgParallelDevice is null ? null : EnsureBackend(_placement.CfgParallelDevice),
+                DitShardBackend = EnsureDitShardBackend(),
             }));
         _videoRecipePipelines[key] = pipeline;
         return pipeline;
@@ -414,6 +419,13 @@ public sealed class InferenceEngine : IInferenceEngine
         _placementBackends[canonical] = created;
         return created;
     }
+
+    /// <summary>The second backend for Phase 8 DiT sharding (<see cref="PlacementConfig.EnableDitSharding"/>), or
+    /// null when it's off. <c>ShardDevices[1]</c> is safe to index unchecked — <see cref="PlacementPlanner.ValidatePlacement"/>
+    /// rejects any <see cref="PlacementConfig.EnableDitSharding"/> config without exactly 2 <c>ShardDevices</c>
+    /// at both construction and <see cref="SetPlacement"/>, so an engine can never reach this with fewer.</summary>
+    private IBackend? EnsureDitShardBackend() =>
+        _placement.EnableDitSharding ? EnsureBackend(_placement.ShardDevices[1]) : null;
 
     /// <summary>Canonical device identity for pooling: resolved kind plus ordinal ("cuda:1", "cuda", "cpu"), so
     /// "auto", "cuda:0" and "cuda" on a CUDA box all pool to the same backend.</summary>

@@ -31,6 +31,14 @@ public sealed record RecipeContext
     /// when they can preload onto it.</summary>
     public IBackend? CfgParallelBackend { get; init; }
 
+    /// <summary>Second backend to run the DiT's tail block range on for VRAM-pooling sharding (Phase 8); null
+    /// (the default) means no DiT sharding. Unlike <see cref="CfgParallelBackend"/> (replicated weights, a latency
+    /// win) this SPLITS the block range — the win is pooled VRAM, not latency (sequential pipeline split). Like
+    /// <see cref="CfgParallelBackend"/> there is no "OrDefault": null is meaningful "not configured". Recipes compute
+    /// the actual split point once they know the DiT's block count (see <c>Krea2Recipe</c> /
+    /// <c>PlacementPlanner.DitSplitPlan</c>).</summary>
+    public IBackend? DitShardBackend { get; init; }
+
     /// <summary>The text-encoder backend with the primary fallback applied.</summary>
     public IBackend TextEncoderBackendOrDefault => TextEncoderBackend ?? Backend;
 
@@ -57,6 +65,12 @@ public sealed record RecipeContext
                 && !ReferenceEquals(CfgParallelBackend, TextEncoderBackend) && !ReferenceEquals(CfgParallelBackend, VaeBackend))
             {
                 yield return CfgParallelBackend;
+            }
+            if (DitShardBackend is not null && !ReferenceEquals(DitShardBackend, Backend)
+                && !ReferenceEquals(DitShardBackend, TextEncoderBackend) && !ReferenceEquals(DitShardBackend, VaeBackend)
+                && !ReferenceEquals(DitShardBackend, CfgParallelBackend))
+            {
+                yield return DitShardBackend;
             }
         }
     }

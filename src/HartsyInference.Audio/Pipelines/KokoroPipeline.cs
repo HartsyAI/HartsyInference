@@ -115,7 +115,7 @@ public sealed class KokoroPipeline : IDisposable
         // single-file repack, but if it isn't published/reachable, download the canonical kokoro-v1_0.pth and
         // do the same flatten + inner-`module.`-strip in-engine (cached once), so Kokoro always installs & runs
         // like any other model — no dependency on a separately-hosted repack that may not exist.
-        string configPath = await AudioModelCache.GetAsync("hexgrad/Kokoro-82M", "config.json", ct: ct).ConfigureAwait(false);
+        string configPath = await AudioModelCache.GetAsync("hexgrad/Kokoro-82M", "config.json", category: "tts", ct: ct).ConfigureAwait(false);
         string weightsPath = await EnsureRepackedWeightsAsync(ct).ConfigureAwait(false);
 
         KokoroConfig cfg = KokoroConfig.V1;
@@ -137,7 +137,7 @@ public sealed class KokoroPipeline : IDisposable
         KokoroIStftNetDecoder dec = new(cfg);
         dec.LoadWeights(weights);
 
-        string repoDir = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M");
+        string repoDir = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M", "tts");
         return new KokoroPipeline(cfg, tok, plBert, textEnc, pred, dec, loader, repoDir);
     }
 
@@ -150,14 +150,14 @@ public sealed class KokoroPipeline : IDisposable
     {
         try
         {
-            string repack = await AudioModelCache.GetAsync(RepackRepo, RepackFile, ct: ct).ConfigureAwait(false);
+            string repack = await AudioModelCache.GetAsync(RepackRepo, RepackFile, category: "tts", ct: ct).ConfigureAwait(false);
             if (RepackSha256.Length != 0)
                 AudioModelCache.VerifySha256(repack, RepackSha256);
             return repack;
         }
         catch (Exception ex)
         {
-            string pth = await AudioModelCache.GetAsync("hexgrad/Kokoro-82M", "kokoro-v1_0.pth", ct: ct).ConfigureAwait(false);
+            string pth = await AudioModelCache.GetAsync("hexgrad/Kokoro-82M", "kokoro-v1_0.pth", category: "tts", ct: ct).ConfigureAwait(false);
             string outPath = Path.Combine(Path.GetDirectoryName(pth)!, RepackFile);
             if (!File.Exists(outPath))
             {

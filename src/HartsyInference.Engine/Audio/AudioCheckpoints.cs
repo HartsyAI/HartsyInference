@@ -12,11 +12,11 @@ namespace HartsyInference.Engine.Audio;
 internal static class AudioCheckpoints
 {
     /// <summary>Resolves and loads <paramref name="repo"/>'s weights, downloading them on first use.</summary>
-    internal static async Task<(IReadOnlyDictionary<string, Tensor> Dict, IDisposable[] Loaders)> LoadAsync(string repo, CancellationToken cancel)
+    internal static async Task<(IReadOnlyDictionary<string, Tensor> Dict, IDisposable[] Loaders)> LoadAsync(string repo, string category, CancellationToken cancel)
     {
         try
         {
-            string path = await AudioModelCache.GetAsync(repo, "model.safetensors", ct: cancel).ConfigureAwait(false);
+            string path = await AudioModelCache.GetAsync(repo, "model.safetensors", category, ct: cancel).ConfigureAwait(false);
             SafeTensorsLoader loader = new SafeTensorsLoader();
             loader.Load(path);
             return (loader.GetAllTensors(), [loader]);
@@ -28,13 +28,13 @@ internal static class AudioCheckpoints
 
         try
         {
-            string indexPath = await AudioModelCache.GetAsync(repo, "model.safetensors.index.json", ct: cancel).ConfigureAwait(false);
+            string indexPath = await AudioModelCache.GetAsync(repo, "model.safetensors.index.json", category, ct: cancel).ConfigureAwait(false);
             HashSet<string> shards = ReadShardNames(indexPath);
             Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(StringComparer.Ordinal);
             List<IDisposable> loaders = [];
             foreach (string shard in shards)
             {
-                string shardPath = await AudioModelCache.GetAsync(repo, shard, ct: cancel).ConfigureAwait(false);
+                string shardPath = await AudioModelCache.GetAsync(repo, shard, category, ct: cancel).ConfigureAwait(false);
                 SafeTensorsLoader shardLoader = new SafeTensorsLoader();
                 shardLoader.Load(shardPath);
                 loaders.Add(shardLoader);
@@ -50,7 +50,7 @@ internal static class AudioCheckpoints
             Logs.Debug($"[Audio] '{repo}' has no safetensors shard index ({ex.Message}); falling back to pytorch_model.bin.");
         }
 
-        string binPath = await AudioModelCache.GetAsync(repo, "pytorch_model.bin", ct: cancel).ConfigureAwait(false);
+        string binPath = await AudioModelCache.GetAsync(repo, "pytorch_model.bin", category, ct: cancel).ConfigureAwait(false);
         PytorchPickleLoader pickle = new PytorchPickleLoader();
         pickle.Load(binPath);
         return (pickle.GetAllTensors(), [pickle]);

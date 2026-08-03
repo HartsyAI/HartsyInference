@@ -40,9 +40,9 @@ public class MoonshineStreamingParityTests
         string repoDir;
         try
         {
-            repoDir = AudioModelCache.GetRepoDirectory("UsefulSensors/moonshine-streaming-tiny");
-            await AudioModelCache.GetAsync("UsefulSensors/moonshine-streaming-tiny", "model.safetensors");
-            await AudioModelCache.GetAsync("UsefulSensors/moonshine-streaming-tiny", "tokenizer.json");
+            repoDir = AudioModelCache.GetRepoDirectory("UsefulSensors/moonshine-streaming-tiny", "stt");
+            await AudioModelCache.GetAsync("UsefulSensors/moonshine-streaming-tiny", "model.safetensors", "stt");
+            await AudioModelCache.GetAsync("UsefulSensors/moonshine-streaming-tiny", "tokenizer.json", "stt");
         }
         catch (Exception ex)
         {

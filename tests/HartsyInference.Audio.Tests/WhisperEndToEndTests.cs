@@ -39,7 +39,7 @@ public sealed class WhisperEndToEndTests
     {
         // 1. Resolve the model. If we have network access, the pipeline auto-downloads.
         //    Otherwise we require the cache to already be populated and skip if not.
-        string repoDir = AudioModelCache.GetRepoDirectory("openai/whisper-tiny");
+        string repoDir = AudioModelCache.GetRepoDirectory("openai/whisper-tiny", "stt");
         bool cached = File.Exists(Path.Combine(repoDir, "model.safetensors"))
             && File.Exists(Path.Combine(repoDir, "vocab.json"))
             && File.Exists(Path.Combine(repoDir, "merges.txt"));

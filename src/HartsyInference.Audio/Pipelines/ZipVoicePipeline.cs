@@ -58,9 +58,9 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
     {
         ZipVoiceConfig resolved = cfg ?? ZipVoiceConfig.Default;
 
-        Task<string> modelPath = AudioModelCache.GetAsync("k2-fsa/ZipVoice", "zipvoice/model.safetensors", ct: ct);
-        Task<string> tokensPath = AudioModelCache.GetAsync("k2-fsa/ZipVoice", "zipvoice/tokens.txt", ct: ct);
-        Task<string> vocosPath = AudioModelCache.GetAsync("lucasnewman/vocos-mel-24khz", "model.safetensors", ct: ct);
+        Task<string> modelPath = AudioModelCache.GetAsync("k2-fsa/ZipVoice", "zipvoice/model.safetensors", category: "tts", ct: ct);
+        Task<string> tokensPath = AudioModelCache.GetAsync("k2-fsa/ZipVoice", "zipvoice/tokens.txt", category: "tts", ct: ct);
+        Task<string> vocosPath = AudioModelCache.GetAsync("lucasnewman/vocos-mel-24khz", "model.safetensors", category: "tts", ct: ct);
         await Task.WhenAll(modelPath, tokensPath, vocosPath).ConfigureAwait(false);
 
         SafeTensorsLoader modelLoader = new();

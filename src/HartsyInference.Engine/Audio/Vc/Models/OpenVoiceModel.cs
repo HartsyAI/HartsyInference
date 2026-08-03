@@ -31,7 +31,7 @@ internal static class OpenVoiceModel
         CacheKey = _ => "openvoice-v2",
         LoadAsync = async (_, cancel) =>
         {
-            string checkpoint = await AudioModelCache.GetAsync(Repo, CheckpointFile, ct: cancel).ConfigureAwait(false);
+            string checkpoint = await AudioModelCache.GetAsync(Repo, CheckpointFile, category: "clone", ct: cancel).ConfigureAwait(false);
             PytorchPickleLoader loader = new PytorchPickleLoader();
             loader.Load(checkpoint);
 

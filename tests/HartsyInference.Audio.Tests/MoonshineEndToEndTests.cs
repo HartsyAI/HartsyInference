@@ -26,7 +26,7 @@ public sealed class MoonshineEndToEndTests
     [Trait("Category", "Integration")]
     public async Task Transcribe_Jfk_OnMoonshineBase_MatchesCanonicalText()
     {
-        string repoDir = AudioModelCache.GetRepoDirectory("UsefulSensors/moonshine-base");
+        string repoDir = AudioModelCache.GetRepoDirectory("UsefulSensors/moonshine-base", "stt");
         bool cached = File.Exists(Path.Combine(repoDir, "model.safetensors"))
             && File.Exists(Path.Combine(repoDir, "tokenizer.json"));
         if (!cached && !AllowNetwork) return;
@@ -61,7 +61,7 @@ public sealed class MoonshineEndToEndTests
     [Trait("Category", "Integration")]
     public async Task Transcribe_Jfk_OnMoonshineStreamingTiny_MatchesCanonicalText()
     {
-        string repoDir = AudioModelCache.GetRepoDirectory("UsefulSensors/moonshine-streaming-tiny");
+        string repoDir = AudioModelCache.GetRepoDirectory("UsefulSensors/moonshine-streaming-tiny", "stt");
         bool cached = File.Exists(Path.Combine(repoDir, "model.safetensors"))
             && File.Exists(Path.Combine(repoDir, "tokenizer.json"));
         if (!cached && !AllowNetwork) return;

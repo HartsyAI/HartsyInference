@@ -109,13 +109,13 @@ internal static class SttCatalog
         },
         LoadAsync = async (repo, cancel) =>
         {
-            (IReadOnlyDictionary<string, Tensor> dict, IDisposable[] loaders) = await AudioCheckpoints.LoadAsync(repo, cancel).ConfigureAwait(false);
+            (IReadOnlyDictionary<string, Tensor> dict, IDisposable[] loaders) = await AudioCheckpoints.LoadAsync(repo, "stt", cancel).ConfigureAwait(false);
             bool small = repo.Contains("1b", StringComparison.OrdinalIgnoreCase);
             // The SentencePiece text model is not shipped in the -trfs repos — fetch it from the original repo.
             (string spmRepo, string spmFile) = small
                 ? ("kyutai/stt-1b-en_fr", "tokenizer_en_fr_audio_8000.model")
                 : ("kyutai/stt-2.6b-en", "tokenizer_en_audio_4000.model");
-            string spm = await AudioModelCache.GetAsync(spmRepo, spmFile, ct: cancel).ConfigureAwait(false);
+            string spm = await AudioModelCache.GetAsync(spmRepo, spmFile, category: "stt", ct: cancel).ConfigureAwait(false);
             KyutaiSttConfig config = small ? KyutaiSttConfig.Stt1B : KyutaiSttConfig.Stt2_6B;
             // The -trfs checkpoint namespaces the Mimi codec under "codec_model."; strip it so the engine keys match.
             Dictionary<string, Tensor> mimi = new Dictionary<string, Tensor>(StringComparer.Ordinal);

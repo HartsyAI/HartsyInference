@@ -22,7 +22,7 @@ public sealed class F5CorrectnessTests
     [Fact]
     public async Task GenMatchedInput_SttAndDumpMel()
     {
-        string dit = Path.Combine(AudioModelCache.GetRepoDirectory("SWivid/F5-TTS"), "F5TTS_v1_Base", "model_1250000.safetensors");
+        string dit = Path.Combine(AudioModelCache.GetRepoDirectory("SWivid/F5-TTS", "tts"), "F5TTS_v1_Base", "model_1250000.safetensors");
         string jfk = Environment.GetEnvironmentVariable("F5_REF_WAV") ?? Path.Combine(AudioModelCache.CacheRoot, "test-clips", "jfk.wav");
         if (!File.Exists(dit) || !File.Exists(jfk)) { _out.WriteLine("F5/jfk missing — skip."); return; }
 
@@ -45,7 +45,7 @@ public sealed class F5CorrectnessTests
         _out.WriteLine($"OURS F5: {audio.Length / 24000.0:F2}s | RMS {Math.Sqrt(sumSq / audio.Length):F4} | {outWav}");
 
         // STT
-        string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base");
+        string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base", "stt");
         if (File.Exists(Path.Combine(whisperDir, "model.safetensors")))
         {
             float[] s16 = Resampler.Create(24_000, 16_000).Resample(audio);

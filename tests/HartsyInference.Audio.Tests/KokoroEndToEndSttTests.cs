@@ -21,9 +21,9 @@ public sealed class KokoroEndToEndSttTests
     [Fact]
     public async Task Phonemes_To_Wav_To_Whisper_RecoversWords()
     {
-        string weights = AudioModelCache.GetRepoDirectory("Hartsy/kokoro-82m-safetensors");
-        string voices = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M");
-        string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base");
+        string weights = AudioModelCache.GetRepoDirectory("Hartsy/kokoro-82m-safetensors", "tts");
+        string voices = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M", "tts");
+        string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base", "stt");
         if (!File.Exists(Path.Combine(weights, "kokoro-82m.safetensors"))
             || !File.Exists(Path.Combine(voices, "voices", "af_heart.bin")))
         {

@@ -30,9 +30,9 @@ public sealed class DiaEndToEndTests
     public async Task Text_To_Wav_To_Whisper_RecoversTargetWords()
     {
         string diaPath = Environment.GetEnvironmentVariable("DIA_MODEL_PATH")
-            ?? Path.Combine(AudioModelCache.GetRepoDirectory("nari-labs/Dia-1.6B"), "model.safetensors");
-        string dacPath = Path.Combine(AudioModelCache.GetRepoDirectory("descript/descript-audio-codec"), "weights.pth");
-        string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base");
+            ?? Path.Combine(AudioModelCache.GetRepoDirectory("nari-labs/Dia-1.6B", "tts"), "model.safetensors");
+        string dacPath = Path.Combine(AudioModelCache.GetRepoDirectory("descript/descript-audio-codec", "tts"), "weights.pth");
+        string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base", "stt");
         if (!File.Exists(diaPath) || !File.Exists(dacPath))
         {
             _out.WriteLine($"Dia or DAC weights not cached (dia={File.Exists(diaPath)}, dac={File.Exists(dacPath)}) — skipping.");

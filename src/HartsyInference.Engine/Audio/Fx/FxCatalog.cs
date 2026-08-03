@@ -101,7 +101,7 @@ internal static class FxCatalog
     /// zero-unexpected key check inside <c>LoadWeights</c>.</summary>
     internal static async Task<EnhanceRunner> LoadEnhanceAsync(CancellationToken cancel)
     {
-        string path = await AudioModelCache.GetAsync(EnhanceRepo, EnhanceCheckpointFile, ct: cancel).ConfigureAwait(false);
+        string path = await AudioModelCache.GetAsync(EnhanceRepo, EnhanceCheckpointFile, category: "fx", ct: cancel).ConfigureAwait(false);
         (IReadOnlyDictionary<string, Tensor> weights, IDisposable loader) = DeepSpeedCheckpointConverter.Load(path);
         ResembleEnhancePipeline pipeline = new ResembleEnhancePipeline(ResembleEnhanceConfig.Default, withDenoiserAndVocoder: true);
         pipeline.LoadWeights(weights);

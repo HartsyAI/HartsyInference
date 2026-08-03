@@ -52,11 +52,11 @@ public sealed class TtsToSttLoopTests
 
         public F5Bridge()
         {
-            string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS");
+            string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS", "tts");
             string ditPath = Path.Combine(repoDir, "F5TTS_v1_Base", "model_1250000.safetensors");
             // Match the repo the pipeline actually loads from (F5TtsPipeline.LoadAsync uses
             // lucasnewman/vocos-mel-24khz); probing charactr/ here wrongly skipped the loop.
-            string vocosRepoDir = AudioModelCache.GetRepoDirectory("lucasnewman/vocos-mel-24khz");
+            string vocosRepoDir = AudioModelCache.GetRepoDirectory("lucasnewman/vocos-mel-24khz", "tts");
             string vocosPath = Path.Combine(vocosRepoDir, "model.safetensors");
             IsCached = File.Exists(ditPath) && File.Exists(vocosPath);
             if (IsCached)
@@ -127,7 +127,7 @@ public sealed class TtsToSttLoopTests
             return;
         }
 
-        string whisperRepoDir = AudioModelCache.GetRepoDirectory("openai/whisper-tiny");
+        string whisperRepoDir = AudioModelCache.GetRepoDirectory("openai/whisper-tiny", "stt");
         if (!File.Exists(Path.Combine(whisperRepoDir, "model.safetensors")))
         {
             _out.WriteLine("Whisper-tiny weights not cached — skipping.");
@@ -222,7 +222,7 @@ public sealed class TtsToSttLoopTests
             return;
         }
 
-        string whisperRepoDir = AudioModelCache.GetRepoDirectory("openai/whisper-tiny");
+        string whisperRepoDir = AudioModelCache.GetRepoDirectory("openai/whisper-tiny", "stt");
         if (!File.Exists(Path.Combine(whisperRepoDir, "model.safetensors")))
         {
             _out.WriteLine("Whisper-tiny weights not cached — skipping.");
@@ -332,7 +332,7 @@ public sealed class TtsToSttLoopTests
     public async Task ReferenceClip_To_Whisper_RecoversCanonicalText()
     {
         string clipPath = Path.Combine(AudioModelCache.CacheRoot, "test-clips", "jfk.wav");
-        string whisperRepoDir = AudioModelCache.GetRepoDirectory("openai/whisper-tiny");
+        string whisperRepoDir = AudioModelCache.GetRepoDirectory("openai/whisper-tiny", "stt");
         if (!File.Exists(clipPath) || !File.Exists(Path.Combine(whisperRepoDir, "model.safetensors")))
         {
             _out.WriteLine("Whisper weights or JFK clip not cached — skipping.");

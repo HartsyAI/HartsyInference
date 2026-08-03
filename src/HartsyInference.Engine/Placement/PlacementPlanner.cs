@@ -90,37 +90,7 @@ public static class PlacementPlanner
             total = weights.Length;
         }
 
-        // Largest-remainder assignment with a 1-layer floor per stage.
-        int[] counts = new int[weights.Length];
-        int assigned = 0;
-        for (int i = 0; i < weights.Length; i++)
-        {
-            counts[i] = Math.Max(1, (int)MathF.Floor(layerCount * (weights[i] / total)));
-            assigned += counts[i];
-        }
-        // Distribute the remainder (or claw back overshoot) at the highest-weight stages first.
-        int[] order = [.. Enumerable.Range(0, weights.Length).OrderByDescending(i => weights[i])];
-        int guard = 0;
-        while (assigned != layerCount && guard++ < 4 * layerCount)
-        {
-            foreach (int i in order)
-            {
-                if (assigned < layerCount)
-                {
-                    counts[i]++;
-                    assigned++;
-                }
-                else if (assigned > layerCount && counts[i] > 1)
-                {
-                    counts[i]--;
-                    assigned--;
-                }
-                if (assigned == layerCount)
-                {
-                    break;
-                }
-            }
-        }
+        int[] counts = LargestRemainderCounts(weights, total, layerCount);
 
         List<LlmStagePlan> plan = new(weights.Length);
         int start = 0;
@@ -162,5 +132,95 @@ public static class PlacementPlanner
             return PlacementConfig.Single;
         }
         return new PlacementConfig { TextEncoderDevice = $"cuda:{smallest.Ordinal}" };
+    }
+
+    /// <summary>Splits a DiT's block loop into a 2-way range split (Phase 8) proportional to each backend's free
+    /// VRAM minus the fixed reserve. <paramref name="sharedWeightBytesA"/> (img_in/time-embed/text-fusion/final-layer
+    /// — <c>EnumerateSharedWeights</c>) is charged to backend A's budget since those weights always live there —
+    /// the mirror of <see cref="LlmSplitPlan"/>'s <c>lastStageExtraBytes</c>, but on the FIRST stage: DiT sharding's
+    /// shared weights are a prefix cost, not a suffix one. Returns the split point: blocks <c>[0, result)</c> run
+    /// on A, <c>[result, blockCount)</c> on B. The 1-block floor per stage guarantees the result is in
+    /// <c>[1, blockCount-1]</c>, the range <c>Krea2Transformer.ForwardSharded</c> requires.</summary>
+    public static int DitSplitPlan(long freeBytesA, long freeBytesB, int blockCount, long sharedWeightBytesA)
+    {
+        if (blockCount < 2)
+        {
+            throw new ArgumentException("DiT sharding needs at least 2 blocks to split.", nameof(blockCount));
+        }
+
+        float weightA = Math.Max(0, freeBytesA - PerDeviceReserveBytes - sharedWeightBytesA);
+        float weightB = Math.Max(0, freeBytesB - PerDeviceReserveBytes);
+        float total = weightA + weightB;
+        if (total <= 0)
+        {
+            Logs.Warning("[Placement] No usable VRAM signal for the DiT block split — falling back to an even split.");
+            weightA = weightB = 1;
+            total = 2;
+        }
+
+        int[] counts = LargestRemainderCounts([weightA, weightB], total, blockCount);
+        Logs.Info($"[Placement] DiT block split ({blockCount} blocks): A=[0,{counts[0]}), B=[{counts[0]},{blockCount})");
+        return counts[0];
+    }
+
+    /// <summary>Rejects <see cref="PlacementConfig"/> combinations that were never designed to compose. Called at
+    /// every point a placement takes effect (construction and <c>InferenceEngine.SetPlacement</c>) so an invalid
+    /// config fails fast instead of misbehaving silently at generation time.</summary>
+    public static void ValidatePlacement(PlacementConfig placement)
+    {
+        if (!placement.EnableDitSharding)
+        {
+            return;
+        }
+        if (placement.ShardDevices.Count != 2)
+        {
+            throw new ArgumentException(
+                $"EnableDitSharding requires exactly 2 ShardDevices (the block-range split needs a backendA/backendB "
+                + $"pair — see Krea2Transformer.ForwardSharded), got {placement.ShardDevices.Count}.", nameof(placement));
+        }
+        if (placement.CfgParallelDevice is not null)
+        {
+            throw new ArgumentException(
+                "EnableDitSharding and CfgParallelDevice cannot both be set — they are two different ways to use a "
+                + "second GPU for the same model (VRAM pooling vs weight replication for latency) and were not "
+                + "designed to compose. Configure only one.", nameof(placement));
+        }
+    }
+
+    /// <summary>Largest-remainder assignment of <paramref name="itemCount"/> range-partitionable units (LLM layers,
+    /// DiT blocks) proportional to <paramref name="weights"/>, with a 1-item floor per stage.</summary>
+    private static int[] LargestRemainderCounts(float[] weights, float total, int itemCount)
+    {
+        int[] counts = new int[weights.Length];
+        int assigned = 0;
+        for (int i = 0; i < weights.Length; i++)
+        {
+            counts[i] = Math.Max(1, (int)MathF.Floor(itemCount * (weights[i] / total)));
+            assigned += counts[i];
+        }
+        // Distribute the remainder (or claw back overshoot) at the highest-weight stages first.
+        int[] order = [.. Enumerable.Range(0, weights.Length).OrderByDescending(i => weights[i])];
+        int guard = 0;
+        while (assigned != itemCount && guard++ < 4 * itemCount)
+        {
+            foreach (int i in order)
+            {
+                if (assigned < itemCount)
+                {
+                    counts[i]++;
+                    assigned++;
+                }
+                else if (assigned > itemCount && counts[i] > 1)
+                {
+                    counts[i]--;
+                    assigned--;
+                }
+                if (assigned == itemCount)
+                {
+                    break;
+                }
+            }
+        }
+        return counts;
     }
 }

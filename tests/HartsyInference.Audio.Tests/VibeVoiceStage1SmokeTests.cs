@@ -36,7 +36,7 @@ public sealed class VibeVoiceStage1SmokeTests : IDisposable
     public VibeVoiceStage1SmokeTests(ITestOutputHelper output)
     {
         _out = output;
-        string repoDir = AudioModelCache.GetRepoDirectory("vibevoice/VibeVoice-1.5B");
+        string repoDir = AudioModelCache.GetRepoDirectory("vibevoice/VibeVoice-1.5B", "tts");
         string shard1 = Path.Combine(repoDir, "model-00001-of-00003.safetensors");
         _cacheReady = File.Exists(shard1)
             && File.Exists(Path.Combine(repoDir, "model-00002-of-00003.safetensors"))

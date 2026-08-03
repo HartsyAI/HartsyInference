@@ -47,10 +47,10 @@ public sealed class MoonshineStreamingPipeline : IAudioPipeline, IDisposable
     public static async Task<MoonshineStreamingPipeline> LoadAsync(string hfRepoId, MoonshineConfig? cfg = null, CancellationToken ct = default)
     {
         MoonshineConfig resolved = cfg ?? InferConfig(hfRepoId);
-        string repoDir = AudioModelCache.GetRepoDirectory(hfRepoId);
+        string repoDir = AudioModelCache.GetRepoDirectory(hfRepoId, "stt");
 
-        Task<string> safetensors = AudioModelCache.GetAsync(hfRepoId, "model.safetensors", ct: ct);
-        Task<string> tokenizerJson = AudioModelCache.GetAsync(hfRepoId, "tokenizer.json", ct: ct);
+        Task<string> safetensors = AudioModelCache.GetAsync(hfRepoId, "model.safetensors", category: "stt", ct: ct);
+        Task<string> tokenizerJson = AudioModelCache.GetAsync(hfRepoId, "tokenizer.json", category: "stt", ct: ct);
         await Task.WhenAll(safetensors, tokenizerJson).ConfigureAwait(false);
 
         SafeTensorsLoader loader = new();

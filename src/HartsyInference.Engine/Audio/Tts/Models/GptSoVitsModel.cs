@@ -29,9 +29,9 @@ internal static class GptSoVitsModel
         ResolveRepo = _ => Repo,
         LoadAsync = async (_, cancel) =>
         {
-            string s2Path = await AudioModelCache.GetAsync(Repo, S2File, ct: cancel).ConfigureAwait(false);
-            string s1Path = await AudioModelCache.GetAsync(Repo, S1File, ct: cancel).ConfigureAwait(false);
-            string hubertPath = await AudioModelCache.GetAsync(Repo, HubertFile, ct: cancel).ConfigureAwait(false);
+            string s2Path = await AudioModelCache.GetAsync(Repo, S2File, category: "tts", ct: cancel).ConfigureAwait(false);
+            string s1Path = await AudioModelCache.GetAsync(Repo, S1File, category: "tts", ct: cancel).ConfigureAwait(false);
+            string hubertPath = await AudioModelCache.GetAsync(Repo, HubertFile, category: "tts", ct: cancel).ConfigureAwait(false);
 
             PytorchPickleLoader s2Loader = new PytorchPickleLoader();
             s2Loader.Load(s2Path);

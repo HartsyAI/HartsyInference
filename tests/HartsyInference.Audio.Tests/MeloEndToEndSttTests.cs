@@ -22,13 +22,13 @@ public sealed class MeloEndToEndSttTests
     [Fact]
     public async Task Text_To_Wav_To_Whisper_RecoversWords()
     {
-        string ckpt = Path.Combine(AudioModelCache.GetRepoDirectory("myshell-ai/MeloTTS-English-v3"), "checkpoint.pth");
-        string bertDir = AudioModelCache.GetRepoDirectory("bert-base-uncased");
+        string ckpt = Path.Combine(AudioModelCache.GetRepoDirectory("myshell-ai/MeloTTS-English-v3", "tts"), "checkpoint.pth");
+        string bertDir = AudioModelCache.GetRepoDirectory("bert-base-uncased", "tts");
         // Prefer safetensors: the cached pytorch_model.bin is legacy (pre-1.6, non-zip) pickle the loader can't read.
         string bertSt = Path.Combine(bertDir, "model.safetensors");
         string bert = File.Exists(bertSt) ? bertSt : Path.Combine(bertDir, "pytorch_model.bin");
         string vocab = Path.Combine(bertDir, "vocab.txt");
-        string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base");
+        string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base", "stt");
         if (!File.Exists(ckpt) || !File.Exists(bert) || !File.Exists(vocab))
         {
             _out.WriteLine($"MeloTTS/BERT not cached (ckpt={File.Exists(ckpt)}, bert={File.Exists(bert)}, vocab={File.Exists(vocab)}) — skipping.");

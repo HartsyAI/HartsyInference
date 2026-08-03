@@ -93,7 +93,8 @@ public static class ModelAcquisition
     /// exactly where the generation call will look for it.</remarks>
     private static void EnsureAudioAssetsPresent(CatalogEntry cat, Modality modality)
     {
-        List<ModelAsset> missing = cat.Assets.Where(a => !File.Exists(AudioAssetPath(a))).ToList();
+        string category = AudioCategoryFor(modality);
+        List<ModelAsset> missing = cat.Assets.Where(a => !File.Exists(AudioAssetPath(a, category))).ToList();
         if (missing.Count == 0)
             return;
 
@@ -115,9 +116,9 @@ public static class ModelAcquisition
                         ProgressTask task = ctx.AddTask(Markup.Escape(a.FileName));
                         string baseDescription = Markup.Escape(a.FileName);
                         IProgress<long> progress = new Progress<long>(bytes => task.Description = $"{baseDescription} ({bytes / (1024 * 1024)} MB)");
-                        AudioModelCache.GetAsync(a.Repo, a.RepoPath, progress: progress, ct: CancellationToken.None).GetAwaiter().GetResult();
+                        AudioModelCache.GetAsync(a.Repo, a.RepoPath, category, progress: progress, ct: CancellationToken.None).GetAwaiter().GetResult();
                         if (!string.IsNullOrEmpty(a.Sha256))
-                            AudioModelCache.VerifySha256(AudioAssetPath(a), a.Sha256);
+                            AudioModelCache.VerifySha256(AudioAssetPath(a, category), a.Sha256);
                     }
                 });
         }
@@ -133,5 +134,17 @@ public static class ModelAcquisition
     /// <summary>The real on-disk path for an audio asset: <see cref="AudioModelCache"/>'s directory, not <see cref="ModelDownloader"/>'s.</summary>
     /// <remarks>Audio descriptors call <c>AudioModelCache.GetAsync</c> directly and never read <c>ModelSpec.LocalPath</c>
     /// for HF-backed models, so <c>TargetSubdir</c>/<c>TargetName</c> on these catalog entries are display-only.</remarks>
-    private static string AudioAssetPath(ModelAsset a) => Path.Combine(AudioModelCache.GetRepoDirectory(a.Repo), a.RepoPath);
+    private static string AudioAssetPath(ModelAsset a, string category) => Path.Combine(AudioModelCache.GetRepoDirectory(a.Repo, category), a.RepoPath);
+
+    /// <summary>Maps a CLI modality to the <see cref="AudioModelCache"/> category folder — mirrors
+    /// <c>AudioWeights.CategorySubfolder</c> (SwarmUI extension) for the audio-cache-backed modalities.</summary>
+    private static string AudioCategoryFor(Modality modality) => modality switch
+    {
+        Modality.Speech => "tts",
+        Modality.Transcribe => "stt",
+        Modality.Music => "music",
+        Modality.VoiceConvert => "clone",
+        Modality.Fx => "fx",
+        _ => "misc",
+    };
 }

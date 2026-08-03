@@ -23,11 +23,11 @@ internal static class FishSpeechModel
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : Repo,
         LoadAsync = async (_, cancel) =>
         {
-            string modelPath = await AudioModelCache.GetAsync(Repo, ModelFile, ct: cancel).ConfigureAwait(false);
-            string codecPath = await AudioModelCache.GetAsync(Repo, CodecFile, ct: cancel).ConfigureAwait(false);
+            string modelPath = await AudioModelCache.GetAsync(Repo, ModelFile, category: "tts", ct: cancel).ConfigureAwait(false);
+            string codecPath = await AudioModelCache.GetAsync(Repo, CodecFile, category: "tts", ct: cancel).ConfigureAwait(false);
             // FishSpeechTokenizer.Load auto-finds the special-tokens sidecar in the same cache dir, so fetch both.
-            string tokenizerPath = await AudioModelCache.GetAsync(Repo, TokenizerFile, ct: cancel).ConfigureAwait(false);
-            await AudioModelCache.GetAsync(Repo, SpecialTokensFile, ct: cancel).ConfigureAwait(false);
+            string tokenizerPath = await AudioModelCache.GetAsync(Repo, TokenizerFile, category: "tts", ct: cancel).ConfigureAwait(false);
+            await AudioModelCache.GetAsync(Repo, SpecialTokensFile, category: "tts", ct: cancel).ConfigureAwait(false);
 
             PytorchPickleLoader modelLoader = new PytorchPickleLoader();
             modelLoader.Load(modelPath);

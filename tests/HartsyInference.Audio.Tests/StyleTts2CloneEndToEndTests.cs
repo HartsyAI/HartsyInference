@@ -27,7 +27,7 @@ public sealed class StyleTts2CloneEndToEndTests
     {
         string? ckpt = Environment.GetEnvironmentVariable("STYLE_CKPT");
         string? refWav = Environment.GetEnvironmentVariable("STYLE_REF_WAV");
-        string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base");
+        string whisperDir = AudioModelCache.GetRepoDirectory("openai/whisper-base", "stt");
         if (ckpt is null || !File.Exists(ckpt) || refWav is null || !File.Exists(refWav)
             || !File.Exists(Path.Combine(whisperDir, "model.safetensors")))
         {

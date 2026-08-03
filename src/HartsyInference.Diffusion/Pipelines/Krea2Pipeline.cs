@@ -193,7 +193,25 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // sliding window. Cards with real headroom take the planner's Resident branch and behave exactly as before.
         long phT4 = sw.ElapsedMilliseconds;
         BlockStreamingController? streamer = null;
-        if (Backend.StreamingCache is not null)
+        if (DitShardBackend is not null)
+        {
+            // Phase 8 DiT sharding: asymmetric preload is the whole point — Backend gets the shared weights PLUS
+            // its block range, DitShardBackend gets ONLY its block range. Preloading EnumerateWeights() on both
+            // would replicate the DiT (the CFG-parallel mistake this feature exists to avoid), defeating VRAM
+            // pooling. Not composable with block streaming (BeforeBlockForward IS the split mechanism) — sharding
+            // takes priority even if the backend's LowVram mode would otherwise stream, since sharding already
+            // solves the "doesn't fit on one card" problem this generation is facing.
+            if (Backend.StreamingCache is not null)
+            {
+                Logs.Info("Krea2 DiT sharding active — overriding low-VRAM block streaming " +
+                    "(sharding pools VRAM across both backends instead).");
+            }
+            Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+            Backend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+            _ditResident = true;
+        }
+        else if (Backend.StreamingCache is not null)
         {
             IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
@@ -258,7 +276,12 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         DeviceFeatureCache? uncondCache = null;
         if (stepCacheThreshold > 0f)
         {
-            if (Backend.SupportsDeviceStepCacheGate)
+            if (DitShardBackend is not null)
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but DiT sharding is active — step-cache's block-0-indicator " +
+                    "shape doesn't compose with a fixed block-range boundary (see ForwardPatchedSharded); running uncached.");
+            }
+            else if (Backend.SupportsDeviceStepCacheGate)
             {
                 condCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
                 if (useCfg) uncondCache = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
@@ -277,7 +300,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // NEVER on the streamed path: the transformer refuses to capture while BeforeBlockForward is hooked (a graph
         // bakes weight pointers that streaming re-points every forward), so it returns a fresh eager velocity — and
         // the graph-mode branch below skips disposing it, which would leak one velocity buffer per step.
-        bool graphMode = fastPath && !useCfg && condCache is null && streamer is null
+        bool graphMode = fastPath && !useCfg && condCache is null && streamer is null && DitShardBackend is null
             && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
         Tensor? patchLatent = null;
         if (fastPath)
@@ -310,15 +333,15 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                 Tensor v;
                 if (useCfg)
                 {
-                    Tensor condV = _transformer.ForwardPatched(Backend, patchLatent!, t, condHidden, hPacked, wPacked, stepCondCache);
-                    Tensor uncondV = _transformer.ForwardPatched(Backend, patchLatent!, t, uncondHidden!, hPacked, wPacked, stepUncondCache);
+                    Tensor condV = RunForwardPatched(patchLatent!, t, condHidden, hPacked, wPacked, stepCondCache);
+                    Tensor uncondV = RunForwardPatched(patchLatent!, t, uncondHidden!, hPacked, wPacked, stepUncondCache);
                     v = CfgHelper.ApplyCfgCondAnchored(condV, uncondV, cfgScale);
                     uncondV.Dispose();
                     condV.Dispose();
                 }
                 else
                 {
-                    v = _transformer.ForwardPatched(Backend, patchLatent!, t, condHidden, hPacked, wPacked, stepCondCache);
+                    v = RunForwardPatched(patchLatent!, t, condHidden, hPacked, wPacked, stepCondCache);
                 }
 
                 // On-device IN-PLACE Euler step: patchLatent += v·dt via CfgEulerStep with pos=neg=v (the CFG
@@ -339,8 +362,8 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             Tensor noisePred;
             if (useCfg)
             {
-                Tensor cond = _transformer.Forward(Backend, latent, t, condHidden);
-                Tensor uncond = _transformer.Forward(Backend, latent, t, uncondHidden!);
+                Tensor cond = RunForward(latent, t, condHidden);
+                Tensor uncond = RunForward(latent, t, uncondHidden!);
                 // VALIDATION-PENDING: Krea 2 uses cond-anchored CFG (cond + scale*(cond - uncond)); guidance_scale=4.5 here ≈ 5.5 under the standard uncond-anchored convention. Verify vs reference.
                 noisePred = CfgHelper.ApplyCfgCondAnchored(cond, uncond, cfgScale);
                 uncond.Dispose();
@@ -348,7 +371,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             }
             else
             {
-                noisePred = _transformer.Forward(Backend, latent, t, condHidden);
+                noisePred = RunForward(latent, t, condHidden);
             }
 
             Tensor newLatent = new Tensor(latentShape, DType.F32);
@@ -411,6 +434,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 
         long phT5 = sw.ElapsedMilliseconds;
         Backend.Sync();
+        DitShardBackend?.Sync();
         long phT6 = sw.ElapsedMilliseconds;
         if (streamer is not null)
         {
@@ -427,6 +451,21 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             // re-uploaded every block to fresh addresses. The next resident generation would replay it against
             // freed memory (CUDA 700, context-poisoning). Idempotent and cheap.
             _transformer.InvalidateStepGraph(Backend);
+        }
+        else if (DitShardBackend is not null)
+        {
+            // Mirror of the sharding preload above: Backend frees shared + its block range, DitShardBackend frees
+            // ONLY its block range. Freeing EnumerateWeights() on Backend alone (the unsharded call below) would
+            // ask it to free tensors it never promoted (they're on DitShardBackend) and leave DitShardBackend's
+            // range to accumulate across generations — a per-generation VRAM leak on the shard backend.
+            if (!KeepModelsResident)
+            {
+                Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+                Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+                DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+                _ditResident = false;
+            }
+            // graphMode is always false when sharded (see its computation above), so no step-graph invalidation.
         }
         else if (!KeepModelsResident)
         {
@@ -475,6 +514,31 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         sw.Stop();
         Logs.Info($"Krea 2 {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
         return (rgbData, width, height, seed);
+    }
+
+    /// <summary>Routes one patchified-space denoise step through <see cref="DitShardBackend"/>'s block-range split
+    /// when configured, else the normal single-backend path. Sharding excludes step-cache (see
+    /// <see cref="Krea2Transformer.ForwardPatchedSharded"/>) — <paramref name="stepCache"/> is only honored on the
+    /// unsharded path; callers still pass it unconditionally, matching the existing call sites.</summary>
+    private Tensor RunForwardPatched(Tensor patchLatent, float t, Tensor encoderHidden, int hPacked, int wPacked,
+        DeviceFeatureCache? stepCache)
+    {
+        if (DitShardBackend is not null)
+        {
+            return _transformer.ForwardPatchedSharded(Backend, DitShardBackend, patchLatent, t, encoderHidden,
+                hPacked, wPacked, DitShardSplitBlock);
+        }
+        return _transformer.ForwardPatched(Backend, patchLatent, t, encoderHidden, hPacked, wPacked, stepCache);
+    }
+
+    /// <summary>Pixel-space counterpart of <see cref="RunForwardPatched"/> (img2img / masked-inpaint path).</summary>
+    private Tensor RunForward(Tensor latent, float t, Tensor encoderHidden)
+    {
+        if (DitShardBackend is not null)
+        {
+            return _transformer.ForwardSharded(Backend, DitShardBackend, latent, t, encoderHidden, DitShardSplitBlock);
+        }
+        return _transformer.Forward(Backend, latent, t, encoderHidden);
     }
 
     /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: the source is encoded through the

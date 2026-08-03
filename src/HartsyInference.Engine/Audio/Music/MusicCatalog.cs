@@ -116,11 +116,11 @@ internal static class MusicCatalog
         bool audioCraft = audioGen || repo.Contains("large", StringComparison.OrdinalIgnoreCase);
         if (audioCraft)
         {
-            string decoderPath = await AudioModelCache.GetAsync(repo, "state_dict.bin", ct: cancel).ConfigureAwait(false);
-            string codecPath = await AudioModelCache.GetAsync(repo, "compression_state_dict.bin", ct: cancel).ConfigureAwait(false);
+            string decoderPath = await AudioModelCache.GetAsync(repo, "state_dict.bin", category: "music", ct: cancel).ConfigureAwait(false);
+            string codecPath = await AudioModelCache.GetAsync(repo, "compression_state_dict.bin", category: "music", ct: cancel).ConfigureAwait(false);
             // AudioGen conditions on t5-LARGE (enc_to_dec_proj input = 1024); MusicGen-large uses t5-base.
             string t5Repo = audioGen ? "google-t5/t5-large" : "google-t5/t5-base";
-            string t5Path = await AudioModelCache.GetAsync(t5Repo, "pytorch_model.bin", ct: cancel).ConfigureAwait(false);
+            string t5Path = await AudioModelCache.GetAsync(t5Repo, "pytorch_model.bin", category: "music", ct: cancel).ConfigureAwait(false);
             (decoderWeights, decoderLoader) = MusicGenCheckpointConverter.LoadDecoderAny(decoderPath, castToF32: true);
             (codecWeights, codecLoader) = MusicGenCheckpointConverter.LoadEnCodecAny(codecPath, castToF32: true);
             (textWeights, textLoader) = MusicGenCheckpointConverter.LoadTextEncoderAny(t5Path, castToF32: true);
@@ -196,12 +196,12 @@ internal static class MusicCatalog
     {
         try
         {
-            return await AudioModelCache.GetAsync(repo, "model.safetensors", ct: cancel).ConfigureAwait(false);
+            return await AudioModelCache.GetAsync(repo, "model.safetensors", category: "music", ct: cancel).ConfigureAwait(false);
         }
         catch (FileNotFoundException ex)
         {
             Logs.Debug($"[Audio][MusicGen] '{repo}' has no model.safetensors ({ex.Message}); using pytorch_model.bin.");
-            return await AudioModelCache.GetAsync(repo, "pytorch_model.bin", ct: cancel).ConfigureAwait(false);
+            return await AudioModelCache.GetAsync(repo, "pytorch_model.bin", category: "music", ct: cancel).ConfigureAwait(false);
         }
     }
 

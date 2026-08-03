@@ -293,6 +293,35 @@ video VAE fp16 5.21 GB + audio VAE 0.61 GB = **42.5 GB**, matching Comfy's numbe
 additionally needs NVFP4 support, which is roadmap-only here — the int8 text encoder (27.1 GB) is the
 nearer target once convrot lands.
 
+## NVFP4-AWQ text encoder — decoded conventions (2026-08-03)
+
+The `qwen3vl_32b_minimax_h3_nvfp4_awq` release (15.69 GB vs 51.5 GB bf16) is loadable with the existing
+`Nvfp4Codec`. Descriptor read from the real file: **`{"format": "nvfp4", "full_precision_matrix_mult": true}`**
+— dequantize, then a normal full-precision GEMM. No nvfp4 tensor-core kernel required.
+
+Layout per quantized linear: `X.weight` U8 `[out, in/2]` (nibble-packed FP4), `X.weight_scale` F8_E4M3
+`[out, in/16]` (**block size 16**, matching `Nvfp4Codec`), `X.weight_scale_2` F32 scalar global scale.
+
+**Three conventions that shape alone cannot discriminate** — established numerically against the bf16
+release of the same encoder, so treat these as settled, not guesses:
+
+1. **Block scales are swizzled** (`BlockScaleSwizzle`). Reading them row-major, or applying `W·s` instead
+   of the dequant direction, lands far off. Check: `amax(W/s per 16-element block) / (6·scale)` has median
+   **1.0019**, range [0.943, 1.058] — exactly E4M3's ±6% rounding band.
+2. **`pre_quant_scale` DIVIDES the stored weight**, so the activation must be MULTIPLIED:
+   `x·Wᵀ = (x⊙s)·(W/s)ᵀ`. It exists only on `down_proj` and `o_proj` (50 each).
+3. **AWQ scale migration**: for `q/k/v/gate/up` the scale was folded into the PRECEDING RMSNorm, which is
+   why they carry no explicit `pre_quant_scale`. `input_layernorm` ratio (nvfp4 vs bf16) median **0.49099**
+   matches `q_proj`'s amax ratio **0.4886**. **Consequence: use the nvfp4 file's own norm weights.** Mixing
+   in norms from the bf16 file double-applies the migration and silently corrupts conditioning.
+
+Also: **`model.embed_tokens` is I8, not nvfp4** — `[151936, 5120]` I8 with F32 `weight_scale [151936, 1]`,
+`amax/scale = 127.000` exactly, so `w = i8 · scale[row]`. Dequantize only the referenced rows.
+
+Cost note: transient per-linear dequant (the `GptOssMoeFfn` discipline, ~500 MB peak) means ~24 GB of
+dequant work per encode — correct and memory-bounded, but slow on CPU. A per-layer dequant cache is the
+obvious lever if prompt-encode latency matters.
+
 ## Unknowns — the day-one checklist
 
 When weights land, these are the questions to answer in order. Every one of them currently blocks

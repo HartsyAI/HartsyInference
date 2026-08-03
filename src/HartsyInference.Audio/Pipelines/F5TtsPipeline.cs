@@ -72,12 +72,12 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         F5TtsConfig resolved = cfg ?? F5TtsConfig.V1Base;
 
         // DiT: SWivid/F5-TTS, file F5TTS_v1_Base/model_1250000.safetensors
-        string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS");
-        Task<string> ditPath = AudioModelCache.GetAsync("SWivid/F5-TTS", "F5TTS_v1_Base/model_1250000.safetensors", ct: ct);
-        Task<string> vocabPath = AudioModelCache.GetAsync("SWivid/F5-TTS", "F5TTS_v1_Base/vocab.txt", ct: ct);
+        string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS", "tts");
+        Task<string> ditPath = AudioModelCache.GetAsync("SWivid/F5-TTS", "F5TTS_v1_Base/model_1250000.safetensors", category: "tts", ct: ct);
+        Task<string> vocabPath = AudioModelCache.GetAsync("SWivid/F5-TTS", "F5TTS_v1_Base/vocab.txt", category: "tts", ct: ct);
 
         // Vocos: lucasnewman/vocos-mel-24khz (safetensors)
-        Task<string> vocosPath = AudioModelCache.GetAsync("lucasnewman/vocos-mel-24khz", "model.safetensors", ct: ct);
+        Task<string> vocosPath = AudioModelCache.GetAsync("lucasnewman/vocos-mel-24khz", "model.safetensors", category: "tts", ct: ct);
 
         await Task.WhenAll(ditPath, vocabPath, vocosPath).ConfigureAwait(false);
 
@@ -93,7 +93,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
 
         // The tokenizer expects vocab.txt in a known directory — copy it into the F5-TTS
         // base of the cache so the tokenizer can find it without bypassing the cache layer.
-        string baseCacheDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS");
+        string baseCacheDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS", "tts");
         string vocabDest = Path.Combine(baseCacheDir, "vocab.txt");
         if (!File.Exists(vocabDest)) File.Copy(vocabPath.Result, vocabDest, overwrite: true);
         F5Tokenizer tok = new(baseCacheDir);

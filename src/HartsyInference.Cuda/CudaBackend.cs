@@ -433,6 +433,10 @@ public sealed class CudaBackend : IBackend
         // demand either way.
         bool mempoolKeep = EnvSwitch.IsEnabled("HARTSY_MEMPOOL_KEEP", defaultOn: true);
         DeviceMempoolPolicy.Acquire(_context.DeviceOrdinal, mempoolKeep);
+        // CUDA_VISIBLE_DEVICES defaults to fastest-first ordering, so an ordinal does not identify the card —
+        // log the name or every perf/VRAM number gets attributed to the wrong GPU.
+        HartsyInference.Core.Logging.Logs.Info($"[Cuda] device {deviceOrdinal}: {_context.DeviceName} "
+            + $"(SM {_context.ComputeCapabilityMajor}.{_context.ComputeCapabilityMinor})");
 
         // Perf-flag wiring, two tiers (docs/PERFORMANCE.md). STANDARD PROFILE features default ON via
         // tri-state EnvSwitch (unset → documented default, "0"/"false" is the kill-switch) so every install
