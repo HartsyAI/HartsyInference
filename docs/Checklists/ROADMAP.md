@@ -77,12 +77,30 @@ giants (Kimi-K2, DeepSeek-V3, Mixtral, Qwen3-MoE, Qwen2.5-VL-7B).
   code and confirm the fix. Confirmed independently live TODAY (no CFG-parallel needed) via `ReduxResolver`'s
   process-wide cached SigLIP/projector weights, reachable by two ordinary concurrent one-backend-per-GPU
   generations sharing a style model.
-- [ ] **DiT sharding, experimental** (Flux block-split across GPUs, VRAM-pooling not latency) —
-  investigated 2026-08-02, **paused before writing code**: `FluxTransformer.Forward` threads F16
-  loop-mode casting, ControlNet residual injection, and Kontext ref-token bookkeeping through the same
-  block loops a split would need to isolate — a correct split has to recompose bitwise across all of
-  that, and there's currently no Flux checkpoint on this box to verify against even once CUDA is
-  available. Deferred, not abandoned.
+- [x] **DiT sharding, experimental** (block-range split across GPUs, VRAM-pooling not latency) — Flux
+  investigation 2026-08-02 **paused before writing code**: `FluxTransformer.Forward` threads F16 loop-mode
+  casting, ControlNet residual injection, and Kontext ref-token bookkeeping through the same block loops a
+  split would need to isolate, and no Flux checkpoint was on this box to verify against. **Retargeted to
+  `Krea2Transformer`** (checkpoint already on disk; genuinely simpler — no ControlNet, no Kontext) and
+  shipped 2026-08-02: `ForwardEmbedIn`/`ForwardBlocksRange`/`ForwardHeadOut` extracted from `ForwardCore`;
+  new `ForwardSharded`/`ForwardPatchedSharded` run blocks `[0,splitBlock)` on backend A and
+  `[splitBlock,BlockCount)` on backend B, handing the joint activation + `tembMod` across via `CopyFromPeer`
+  at the boundary and back for the head. New `EnumerateBlockRangeWeights(start,end)` for the ASYMMETRIC
+  preload the VRAM-pooling claim depends on (A: shared + its range; B: its range ONLY — never the full
+  `EnumerateWeights()` on both, which would replicate instead of pool). Always eager: no step-graph route
+  (bakes one context's pointers) and no step-cache (its block-0-indicator shape doesn't compose with a
+  fixed boundary) — same narrowing precedent as excluding block streaming and Wan. Verified two ways: (1)
+  same-GPU bit-parity — 4-block synthetic config, split at block 2, cross-device (ordinal 0+1), compared
+  bit-for-bit against unsharded `Forward` with identically-seeded weights — 0 mismatches (F16/step-graph
+  off ⇒ deterministic F32, exact-equality bar, not tolerance); (2) real Krea2 Turbo fp8 checkpoint (~13 GB),
+  split at block 14 across the 3060+4090, `Context.GetMemoryInfo()` before/after preload —
+  **6.65 GB + 5.69 GB = 12.34 GB resident, neither card holding the whole checkpoint** — real VRAM pooling,
+  not "it ran." Found and fixed along the way (see `FluxRope.cs`): a live thread-safety bug in already-shipped
+  Phase 7 Flux CFG-parallel — `FluxRope`'s GPU cos/sin table cache was a single unkeyed slot shared by both
+  cond/uncond backends; fixed with a per-backend-keyed, locked cache, plus a `condTxtSeqLen == txtSeqLen`
+  guard in `FluxPipeline` closing a signature-mismatch corruption path the lock alone couldn't. Scope:
+  Krea2 only; pipeline-level wiring (`Krea2RecipePipeline`/`PlacementConfig.EnableDitSharding`) not done —
+  this verifies the transformer-level split and VRAM claim, the hard previously-unverified part.
 - [ ] **M2 — tensor parallel:** split individual GEMMs (QKV, MLP, lm_head) across devices; all-reduce on
   the seam. Plan-level only (`NcclApi` design in `MULTI_GPU_PARALLELISM.md`); needs NVLink hardware this
   box doesn't have to pay off.

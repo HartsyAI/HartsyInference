@@ -176,4 +176,48 @@ public unsafe class MiniMaxH3ForwardTests
             video.Dispose(); audio.Dispose(); cos.Dispose(); sin.Dispose();
         }
     }
+
+    [Fact]
+    public void VisionPadRunsInsideTheTextSpanModulateAsVideoNotText()
+    {
+        // The reference splits the text span by per-token tag: vision pads carry the VIDEO modality (0).
+        // Treating text as one uniform run silently mis-modulates every image/video-reference generation.
+        MiniMaxH3Config c = TinyConfig(curves: false);
+        IBackend backend = new CpuBackend();
+        using MiniMaxH3Transformer dit = new MiniMaxH3Transformer(c);
+        dit.LoadWeights(BuildWeights(c));
+
+        const int textLen = 6, latentT = 2, latentH = 4, latentW = 6, audioT = 2;
+        MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(textLen, latentT, latentH, latentW, audioT);
+        using Tensor videoRows = Rand(latentT * (latentH / 2) * (latentW / 2), c.VideoPatchDim);
+        using Tensor audioRows = Rand(audioT * 2, c.AudioLatentsDim);
+        using Tensor text = Rand(textLen, c.TextDim);
+        (Tensor cos, Tensor sin) = MiniMaxH3Rope.BuildTables(
+            layout.PositionIds, MiniMaxH3Rope.DefaultInvFreq(c.RopeInvFreqLen), c.AttentionHeadDim);
+        float[] uniqueT = [0.3f, 0.55f];
+        Dictionary<MiniMaxH3SegmentKind, int> rowOf = new()
+        {
+            [MiniMaxH3SegmentKind.Text] = 0, [MiniMaxH3SegmentKind.Video] = 0,
+            [MiniMaxH3SegmentKind.Cond] = 0, [MiniMaxH3SegmentKind.RefImage] = 0,
+            [MiniMaxH3SegmentKind.Audio] = 1, [MiniMaxH3SegmentKind.RefAudio] = 1,
+        };
+        // Tokens 2..3 are a vision block inside the text span.
+        (int, int, int)[] runs = [(0, 2, 1), (2, 4, 0), (4, 6, 1)];
+
+        (Tensor v0, Tensor a0) = dit.Forward(backend, layout, videoRows, audioRows, text, cos, sin, uniqueT, rowOf);
+        (Tensor v1, Tensor a1) = dit.Forward(backend, layout, videoRows, audioRows, text, cos, sin, uniqueT, rowOf, runs);
+        try
+        {
+            float* p0 = (float*)v0.DataPointer;
+            float* p1 = (float*)v1.DataPointer;
+            bool differs = false;
+            for (long i = 0; i < v0.ElementCount && !differs; i++) differs = Math.Abs(p0[i] - p1[i]) > 1e-6f;
+            Assert.True(differs, "tagged vision pads must modulate differently from uniform text tagging");
+            for (long i = 0; i < v1.ElementCount; i++) Assert.True(float.IsFinite(p1[i]));
+        }
+        finally
+        {
+            v0.Dispose(); a0.Dispose(); v1.Dispose(); a1.Dispose(); cos.Dispose(); sin.Dispose();
+        }
+    }
 }

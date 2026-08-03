@@ -241,6 +241,58 @@ shaders for a rope family + `GluActivate`, which is its own task — tracked in 
 something to discover during H3 bring-up. Until then, H3 on Vulkan will run but slowly, and that is a
 known-and-stated limitation rather than a surprise.
 
+## Comfy's 66% memory reduction — decoded (2026-08-03)
+
+Comfy get 123.6 GB (full precision) down to 42.5 GB via three levers. Two are cheap for us; one is real work.
+
+### 1. Pruned modulation → lookup table — **ALREADY IMPLEMENTED HERE**
+The adaln modulation weights are ~40% of parameters. The pruned release deletes the time embedder and the
+full-width adaln input, replacing them with `adaln_t_table F32 [1025, 8]` — a 1025-point curve sampled over
+t, projected by a **[96768, 8]** adaln linear instead of [96768, 2688]. That is a 336x reduction on the
+adaln input side.
+
+`MiniMaxH3Config.Detect` already reads it (`adaln_curve_grid=1025`, `time_embed_dim=8`), and
+`MiniMaxH3Transformer` already implements both the curve lerp (`BuildTimeEmbedding`) and the SiLU-skip the
+curve form requires (`Adaln`). Verified against the real pruned header. **No work needed.**
+
+### 2. int8 convrot — the missing piece, now fully specified
+Each quantized linear ships three tensors (4 linears x 50 blocks = 200 groups):
+
+| tensor | dtype | shape | meaning |
+|---|---|---|---|
+| `X.weight` | **I8** | [out, in] | quantized weights |
+| `X.weight_scale` | **F32** | **[out, 1]** | per-output-channel scale |
+| `X.comfy_quant` | U8 | [72] | JSON descriptor |
+
+The descriptor decodes to plain JSON:
+`{"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}`
+
+So "convrot" is a **block-diagonal rotation over groups of 256 input channels** — the QuaRot/SpinQuant
+family. Weights are stored rotated (`W' = W R`); at inference you rotate the *activation* by the same R
+(`x W^T = (x R) W'^T`), which spreads outliers so int8 stays accurate. R is orthogonal, so it cancels.
+
+Only `attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, `mlp.fc2` are quantized — norms stay BF16, patch
+projections and `adaln_t_table` stay F32, adaln linears are F16.
+
+**Two implementation phases:**
+- **Phase 1 (correctness, cheap):** at load, dequantize `W = W_i8 * scale[o]` and fold the rotation out
+  (`W_orig = W' R^T`, R orthogonal). Gives a runnable pruned checkpoint with **no** memory win — weights
+  land in F32/BF16. Good for proving the pruned path end to end.
+- **Phase 2 (the actual win):** keep int8 resident and apply the grouped Hadamard to activations at
+  runtime, then an int8 GEMM with per-output-channel dequant. This is where the 66% comes from. Reuse the
+  existing W8A8/SmoothQuant int8 GEMM work rather than starting fresh; the new kernel needed is the
+  size-256 grouped Hadamard on activations.
+
+### 3. Dynamic VRAM offloading
+Comfy's third lever. Our equivalent already exists: `BlockStreamingController` / `IStreamingBlock`, built
+for LTX-2.3's 19 GB fp8 DiT in a ~1.2 GB resident window and reused by Wan. H3's 50 blocks need wiring to
+it — plumbing, not new machinery.
+
+**Footprint math for the smallest variant:** DiT pruned+int8 20.97 GB + text encoder nvfp4_awq 15.69 GB +
+video VAE fp16 5.21 GB + audio VAE 0.61 GB = **42.5 GB**, matching Comfy's number. The nvfp4 text encoder
+additionally needs NVFP4 support, which is roadmap-only here — the int8 text encoder (27.1 GB) is the
+nearer target once convrot lands.
+
 ## Unknowns — the day-one checklist
 
 When weights land, these are the questions to answer in order. Every one of them currently blocks
