@@ -129,9 +129,22 @@ giants (Kimi-K2, DeepSeek-V3, Mixtral, Qwen3-MoE, Qwen2.5-VL-7B).
   silently skipping — a green campaign genuinely means every listed test executed on real weights.
   `CudaOrdinalMapTests` prints the live ordinal→card map first (CUDA enumerates fastest-first; on this box
   ordinal 0 = 4090, 1 = 3060 — REVERSED from nvidia-smi).
+- [x] **Audio-LM layer split (YuE Stage-1)** — added 2026-08-05: the first audio consumer of M1's
+  machinery. `Qwen2Model`/`YueStage1Lm` gained `ForwardStaged`/`EnumerateStageWeights` passthroughs;
+  `MusicService` builds a `MusicLoadContext` (shard backends + quant policy) from the engine
+  `PlacementConfig.ShardDevices`; the load-time Q4_K quantization became a policy
+  (`HARTSY_AUDIO_LM_QUANT=q4k|q8|off`, auto = Q4_K single-device / **un-quantized when sharded**).
+  Verified on real weights (`YueLmShardingEngineTests`, campaign phase A): bf16 7B Stage-1 pooled at
+  8.7 + 4.3 GB across 4090+3060, full 15 s WAV, both cards' VRAM rise asserted in-test. CLI
+  `--lm-shard-gpu`, extension `LmShardGpuId` (ShardDevices without the DiT flag). Still bespoke-runner
+  audio LMs NOT covered: HeartMuLa (CSM-shaped), YuE Stage-2 (1B, no need), MusicGen; and
+  `AudioRuntime`'s eviction strategy remains single-backend-minded (see §1 open items).
 - **Two finished features deliberately still opt-in** (plain-language, for the flip-it-later decision):
   `HARTSY_SAME_GPU_CONCURRENT=1` lets two backends sharing one physical GPU run generations at the same
-  time instead of taking turns — correctness-tested, left off until it has been used day-to-day.
+  time instead of taking turns — **update 2026-08-05: no longer just "left off": the campaign's
+  `SameGpuConcurrentRealWeightTests` is KNOWN RED near VRAM capacity (FreeActivations
+  `cuMemFreeAsync` INVALID_VALUE + Dispose double-free) and is excluded from the green gate; fix the
+  allocator race before any default flip.**
   `HARTSY_KV_F16=1` halves LLM conversation-memory VRAM by storing the KV cache at half precision —
   bit-verified for short generations, can pick different (equally valid) words in very long ones.
   Flipping either default is a one-line change; nothing else in the multi-GPU work depends on them.

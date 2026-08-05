@@ -138,6 +138,10 @@ phase_a() {
     run_class HartsyInference.Diffusion.Tests  FluxDitShardingEngineTests
     run_class HartsyInference.Diffusion.Tests  MiniMaxH3DitShardingTests
     run_class HartsyInference.Diffusion.Tests  MiniMaxH3DitShardingVramTests
+    # Audio-LM layer split (YuE Stage-1 un-quantized bf16 pooled across both cards; weights on this box).
+    # HARTSY_AUDIO_LM_QUANT is process-wide env the second fact mutates → each fact runs filter-isolated.
+    run_class HartsyInference.Diffusion.Tests  YueLmShardingEngineTests.LmSharding_RealEngine_UnquantizedStage1_PooledAcrossGpus_ProducesAudio
+    run_class HartsyInference.Diffusion.Tests  YueLmShardingEngineTests.LmSharding_EnvQuantOverride_WinsOverShardedDefault
 }
 
 # ── Phase B: post-download (hartsy pull chroma qwen-image hunyuan-image wan) ─────────────────────────────
