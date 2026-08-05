@@ -16,9 +16,11 @@ namespace HartsyInference.Diffusion.Models.TextEncoders;
 ///
 /// <para>Every dimension is derived from the checkpoint header rather than a preset, because the 32B tower differs
 /// from the 8B presets already in the repo (LM hidden 5120 vs 4096, 64/8 GQA heads, MLP 25600). Quantized linears
-/// are bound as <see cref="Nvfp4Linear"/> and dequantized one slice at a time inside the forward — eager F32 for the
-/// whole tower is ~100 GB. Plain BF16 releases of the same checkpoint load through the identical path with the
-/// dense branch.</para>
+/// are bound as <see cref="Nvfp4Linear"/> and dequantized one BF16 slice at a time inside the forward: eager F32 for
+/// the whole tower is ~100 GB and even 16-bit it is ~49 GB, so no dequantized weight can stay resident. Every layer
+/// borrows the same <see cref="Nvfp4Linear.CreateDequantScratch">scratch buffer</see> (sized by the widest linear,
+/// ~262 MB), held only for the duration of an encode. Plain BF16 releases of the same checkpoint load through the
+/// identical path with the dense branch.</para>
 ///
 /// <para>Positions use Qwen3-VL's interleaved <b>M-RoPE</b>; for a text-only prompt the three axes collapse to
 /// <c>(s, s, s)</c> and it is ordinary 1D RoPE. Reference images are encoded by <see cref="Qwen3VlVisionEncoder"/>
@@ -53,6 +55,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
     private int _queryHeads;
     private int _kvHeads;
     private int _intermediateSize;
+    private long _dequantScratchElements;
     private int _disposed;
 
     /// <summary>Creates the encoder. The defaults are Qwen3-VL-32B-Instruct's <c>config.json</c> values, which are
@@ -117,6 +120,11 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         if (_blocks.Count == 0)
             throw new InvalidOperationException("No 'model.layers.*' found in the MiniMax-H3 text-encoder checkpoint.");
 
+        long scratchElements = 0;
+        foreach (LanguageBlock b in _blocks)
+            scratchElements = Math.Max(scratchElements, b.DequantScratchElements);
+        _dequantScratchElements = scratchElements;
+
         LanguageBlock first = _blocks[0];
         _headDim = (int)first.QueryNorm.ElementCount;
         _queryHeads = first.Query.OutFeatures / _headDim;
@@ -156,6 +164,10 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         Tensor hidden = LookupEmbeddings(tokenIds);
         Tensor causalMask = BuildCausalMask(seqLen);
         VisionResult[] visionOut = RunVisionTower(backend, presentation, referenceImages);
+        // One buffer for every quantized linear in the tower, instead of a host allocation per projection per layer.
+        Tensor? dequantScratch = _dequantScratchElements > 0
+            ? Nvfp4Linear.CreateDequantScratch(_dequantScratchElements)
+            : null;
         try
         {
             bool[] visualMask = new bool[seqLen];
@@ -167,7 +179,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
 
             for (int i = 0; i < _blocks.Count; i++)
             {
-                Tensor next = _blocks[i].Forward(backend, hidden, causalMask, cos, sin, seqLen, this);
+                Tensor next = _blocks[i].Forward(backend, hidden, causalMask, cos, sin, seqLen, this, dequantScratch);
                 hidden.Dispose();
                 hidden = next;
                 if (visionOut.Length > 0 && i < visionOut[0].Output.DeepstackFeatures.Length)
@@ -181,6 +193,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         }
         finally
         {
+            dequantScratch?.Dispose();
             hidden.Dispose();
             causalMask.Dispose();
             foreach (VisionResult vr in visionOut)
@@ -452,6 +465,18 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
 
         public Tensor QueryNorm => _queryNorm!;
 
+        /// <summary>Widest dequant slice any of this block's linears needs.</summary>
+        public long DequantScratchElements
+        {
+            get
+            {
+                long max = 0;
+                foreach (Nvfp4Linear linear in Linears())
+                    max = Math.Max(max, linear.DequantScratchElements);
+                return max;
+            }
+        }
+
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
         {
             _inputNorm = F32(weights[$"{prefix}.input_layernorm.weight"]);
@@ -479,7 +504,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         }
 
         public Tensor Forward(IBackend backend, Tensor hidden, Tensor causalMask, float[] ropeCos, float[] ropeSin,
-            int seqLen, MiniMaxH3TextEncoder owner)
+            int seqLen, MiniMaxH3TextEncoder owner, Tensor? dequantScratch)
         {
             int hiddenSize = owner._hiddenSize;
             int queryHeads = owner._queryHeads;
@@ -497,9 +522,9 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
             Tensor qFlat = new Tensor(queryShape, DType.F32);
             Tensor kFlat = new Tensor(kvShape, DType.F32);
             Tensor vFlat = new Tensor(kvShape, DType.F32);
-            _query!.Forward(backend, qFlat, preAttn);
-            _key!.Forward(backend, kFlat, preAttn);
-            _value!.Forward(backend, vFlat, preAttn);
+            _query!.Forward(backend, qFlat, preAttn, dequantScratch);
+            _key!.Forward(backend, kFlat, preAttn, dequantScratch);
+            _value!.Forward(backend, vFlat, preAttn, dequantScratch);
             preAttn.Dispose();
 
             Tensor qMh = new Tensor(queryHeadShape, DType.F32);
@@ -547,7 +572,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
             attnOut.Dispose();
 
             Tensor attnProj = new Tensor(hiddenShape, DType.F32);
-            _out!.Forward(backend, attnProj, attnFlat);
+            _out!.Forward(backend, attnProj, attnFlat, dequantScratch);
             attnFlat.Dispose();
 
             Tensor afterAttn = new Tensor(hiddenShape, DType.F32);
@@ -560,8 +585,8 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
             TensorShape mlpShape = new TensorShape(1, seqLen, owner._intermediateSize);
             Tensor gate = new Tensor(mlpShape, DType.F32);
             Tensor up = new Tensor(mlpShape, DType.F32);
-            _gate!.Forward(backend, gate, preMlp);
-            _up!.Forward(backend, up, preMlp);
+            _gate!.Forward(backend, gate, preMlp, dequantScratch);
+            _up!.Forward(backend, up, preMlp, dequantScratch);
             preMlp.Dispose();
 
             Tensor activated = new Tensor(mlpShape, DType.F32);
@@ -573,7 +598,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
             up.Dispose();
 
             Tensor mlpOut = new Tensor(hiddenShape, DType.F32);
-            _down!.Forward(backend, mlpOut, gated);
+            _down!.Forward(backend, mlpOut, gated, dequantScratch);
             gated.Dispose();
 
             Tensor result = new Tensor(hiddenShape, DType.F32);

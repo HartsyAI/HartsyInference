@@ -1,5 +1,7 @@
+using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Nvfp4;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
@@ -21,12 +23,29 @@ namespace HartsyInference.Diffusion.Models.TextEncoders;
 /// <c>amax(W/s per 16-element block) / (6·scale)</c> lands in E4M3's ±6% rounding band, while <c>W·s</c> and the
 /// unswizzled scale reading do not.</para>
 ///
-/// <para>Memory: the 50-layer Qwen3-VL-32B tower is ~100 GB at F32, so nothing is materialized at load. Each forward
-/// dequantizes one <c>[out, in]</c> F32 slice (≤524 MB), runs the GEMM, then drains the stream and drops any device
-/// copy before freeing it — the same discipline <see cref="GptOssMoeFfn"/> established after concurrent reuse of a
-/// transient slice corrupted the CUDA cache bookkeeping.</para></summary>
-public sealed class Nvfp4Linear : IDisposable
+/// <para><b>Memory and transfer.</b> The 50-layer Qwen3-VL-32B tower is ~100 GB at F32 and ~49 GB at 16-bit, so
+/// nothing is materialized at load and no dequantized weight can be cached device-side (the tower must also share a
+/// 24 GB card with a ~19.4 GB DiT). Each forward dequantizes one <c>[out, in]</c> slice, runs the GEMM, then drops
+/// any device copy before releasing it — the discipline <see cref="GptOssMoeFfn"/> established after concurrent
+/// reuse of a transient slice corrupted the CUDA cache bookkeeping. Two things make that transient cheap:
+/// <list type="bullet">
+/// <item>The slice is <b>BF16</b>, not F32 — half the host-to-device bytes (~49 GB instead of ~97 GB per encode) at
+/// a storage error of 2⁻⁹ against E2M1's own ~25% worst-case half-step. BF16 rather than F16 because
+/// <c>ResolveGemmDtype</c> then runs the GEMM in BF16, and F16 overflows on the SwiGLU <c>gated</c> tensor that
+/// <c>down_proj</c> consumes.</item>
+/// <item>The host buffer comes from a caller-owned scratch (see <see cref="CreateDequantScratch"/>) shared by every
+/// layer, so a 50-layer encode allocates one buffer instead of 350. The <see cref="Tensor"/> wrapper is still fresh
+/// per call: reusing a Tensor <i>object</i> whose bytes change is what corrupts the reference-keyed device caches.</item>
+/// </list></para></summary>
+public sealed unsafe class Nvfp4Linear : IDisposable
 {
+    /// <summary>Dtype the packed weight is dequantized to for the GEMM.</summary>
+    public static readonly DType DequantDType = DType.BF16;
+
+    /// <summary>E4M3 byte → float, derived from the shared <see cref="Tensor.CastTo"/> converter because the codec's
+    /// own table is internal to ModelAssets. 256 entries covers every byte, so the decode is a lookup.</summary>
+    private static readonly float[] E4M3Decode = BuildE4M3Decode();
+
     private readonly Tensor? _dense;
     private readonly Tensor? _packed;
     private readonly Tensor? _blockScale;
@@ -56,6 +75,18 @@ public sealed class Nvfp4Linear : IDisposable
 
     /// <summary>True when the weight is nvfp4-packed and dequantized per forward.</summary>
     public bool IsPacked => _packed is not null;
+
+    /// <summary>Elements a shared dequant scratch must hold to serve this layer; zero when the weight is dense.</summary>
+    public long DequantScratchElements => _packed is null ? 0 : (long)_outFeatures * _inFeatures;
+
+    /// <summary>Allocates the scratch <see cref="Forward"/> borrows its dequant slice from, sized by the largest
+    /// <see cref="DequantScratchElements"/> across the layers that will share it.</summary>
+    public static Tensor CreateDequantScratch(long elementCount)
+    {
+        if (elementCount <= 0)
+            throw new ArgumentOutOfRangeException(nameof(elementCount), "Dequant scratch must hold at least one element.");
+        return new Tensor(new TensorShape(elementCount), DequantDType);
+    }
 
     /// <summary>Binds <c>{prefix}.weight</c> and, when it is U8, its nvfp4 scale companions plus any
     /// <c>pre_quant_scale</c>. Throws when the weight is missing or a companion of a packed weight is absent.</summary>
@@ -95,8 +126,10 @@ public sealed class Nvfp4Linear : IDisposable
                 $"nvfp4 '{prefix}.weight_scale' must be [>={outFeatures}, {inFeatures / Nvfp4Codec.GroupSize}]; " +
                 $"got {blockScale.Shape}.");
         }
-        if (globalScale.ElementCount != 1)
-            throw new InvalidOperationException($"nvfp4 '{prefix}.weight_scale_2' must be a scalar; got {globalScale.Shape}.");
+        if (blockScale.DType != DType.F8E4M3)
+            throw new InvalidOperationException($"nvfp4 '{prefix}.weight_scale' must be F8E4M3; got {blockScale.DType}.");
+        if (globalScale.DType != DType.F32 || globalScale.ElementCount != 1)
+            throw new InvalidOperationException($"nvfp4 '{prefix}.weight_scale_2' must be an F32 scalar; got {globalScale.DType} {globalScale.Shape}.");
         ValidatePreQuantScale(preQuantScale, prefix, inFeatures);
 
         return new Nvfp4Linear(null,
@@ -108,7 +141,9 @@ public sealed class Nvfp4Linear : IDisposable
 
     /// <summary>Computes <c>output = input · Wᵀ</c> for <c>input [1, seq, InFeatures]</c> and
     /// <c>output [1, seq, OutFeatures]</c>, applying <c>pre_quant_scale</c> and any transient dequant.</summary>
-    public void Forward(IBackend backend, Tensor output, Tensor input)
+    /// <param name="dequantScratch">Optional shared buffer from <see cref="CreateDequantScratch"/> to dequantize
+    /// into; null allocates (and frees) one per call.</param>
+    public void Forward(IBackend backend, Tensor output, Tensor input, Tensor? dequantScratch = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(output);
@@ -137,16 +172,16 @@ public sealed class Nvfp4Linear : IDisposable
                 return;
             }
 
-            Tensor slice = new Tensor(new TensorShape(_outFeatures, _inFeatures), DType.F32);
+            Tensor slice = BorrowSlice(dequantScratch);
             try
             {
-                Nvfp4Codec.DequantExpertSlice(_packed!, _blockScale!, _globalScale!, 0, slice);
+                DequantBf16(_packed!, _blockScale!, _globalScale!, slice);
                 backend.Linear(output, x, slice, null);
             }
             finally
             {
-                // Drain, then drop any cached device copy keyed by this tensor before its host memory goes away.
-                backend.Sync();
+                // Drops any cached device copy keyed by this tensor, and drains the stream on the way (both the CUDA
+                // and Vulkan helpers wait first), so the scratch bytes are free to be overwritten by the next layer.
                 backend.FreeWeights([slice]);
                 slice.Dispose();
             }
@@ -157,8 +192,9 @@ public sealed class Nvfp4Linear : IDisposable
         }
     }
 
-    /// <summary>Enumerates the resident weight tensors for GPU preloading; the transient dequant slices are not
-    /// included because they only exist inside <see cref="Forward"/>.</summary>
+    /// <summary>Enumerates the resident weight tensors for GPU preloading; the packed bank and its scales are
+    /// excluded because the dequant reads them on the HOST — preloading would put a device-cached tensor in front of
+    /// those reads and evict it on every layer.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         if (_dense is not null) yield return _dense;
@@ -171,6 +207,78 @@ public sealed class Nvfp4Linear : IDisposable
         _packed?.Dispose();
         _blockScale?.Dispose();
         _globalScale?.Dispose();
+    }
+
+    /// <summary>Wraps the scratch in a FRESH tensor object each call — the device caches are reference-keyed, so a
+    /// reused object whose bytes changed would serve the previous layer's weight.</summary>
+    private Tensor BorrowSlice(Tensor? dequantScratch)
+    {
+        TensorShape shape = new TensorShape(_outFeatures, _inFeatures);
+        if (dequantScratch is null)
+            return new Tensor(shape, DequantDType);
+        if (dequantScratch.DType != DequantDType || dequantScratch.ElementCount < shape.ElementCount)
+            throw new ArgumentException(
+                $"Dequant scratch must be {DequantDType} with at least {shape.ElementCount} elements; " +
+                $"got {dequantScratch.DType} with {dequantScratch.ElementCount}.", nameof(dequantScratch));
+        return new Tensor(dequantScratch.DataPointer, shape, DequantDType);
+    }
+
+    /// <summary>Dequantizes the single-expert bank into <paramref name="destination"/> as BF16 <c>[out, in]</c> — the
+    /// <c>[N, K]</c> layout <c>IBackend.Linear</c> consumes. Same arithmetic as
+    /// <see cref="Nvfp4Codec.DequantExpertSlice"/>, which only writes F32; folding the narrowing into the dequant
+    /// avoids a second full-size host pass over the weight (its natural home is an overload on the codec).</summary>
+    private static void DequantBf16(Tensor packed, Tensor blockScale, Tensor globalScale, Tensor destination)
+    {
+        long outDim = packed.Shape[1];
+        long inHalf = packed.Shape[2];
+        if (destination.DType != DequantDType || destination.Shape.Rank != 2 ||
+            destination.Shape[0] != outDim || destination.Shape[1] != inHalf * 2)
+            throw new ArgumentException(
+                $"Destination must be {DequantDType} [{outDim}, {inHalf * 2}]; got {destination.DType} {destination.Shape}.",
+                nameof(destination));
+
+        DequantBf16Core((byte*)packed.DataPointer, (byte*)blockScale.DataPointer,
+            blockScale.Fp8ScaleFactor, ((float*)globalScale.DataPointer)[0],
+            outDim, inHalf, blockScale.Shape[2], (ushort*)destination.DataPointer);
+    }
+
+    /// <summary>Row-major BF16 dequant, parallel over on-disk rows: packed reads and BF16 writes are both
+    /// sequential and the per-16-element block scale is decoded once per group.</summary>
+    private static void DequantBf16Core(byte* w, byte* bs, float scaleFactor, float global,
+        long outDim, long inHalf, long paddedCols, ushort* dst)
+    {
+        float[] lut = Nvfp4Codec.E2M1Lut;
+        float[] e4m3 = E4M3Decode;
+        int bytesPerGroup = Nvfp4Codec.GroupSize / 2;
+        long inDim = inHalf * 2;
+
+        Parallel.For(0, (int)outDim, r =>
+        {
+            byte* wr = w + (long)r * inHalf;
+            ushort* dr = dst + (long)r * inDim;
+            float scale = 0f;
+            for (long k = 0; k < inHalf; k++)
+            {
+                if (k % bytesPerGroup == 0)
+                    scale = e4m3[bs[BlockScaleSwizzle.SwizzledIndex(r, k / bytesPerGroup, paddedCols)]] * scaleFactor * global;
+                byte packed = wr[k];
+                dr[2 * k] = ToBf16(lut[(packed >> 4) & 0x0F] * scale);   // high nibble = even element
+                dr[2 * k + 1] = ToBf16(lut[packed & 0x0F] * scale);      // low nibble = odd element
+            }
+        });
+    }
+
+    /// <summary>Truncating F32→BF16, matching <see cref="Tensor.CastTo"/> bit for bit.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ushort ToBf16(float value) => (ushort)(BitConverter.SingleToUInt32Bits(value) >> 16);
+
+    private static float[] BuildE4M3Decode()
+    {
+        using Tensor bytes = new Tensor(new TensorShape(256), DType.F8E4M3);
+        byte* p = (byte*)bytes.DataPointer;
+        for (int i = 0; i < 256; i++) p[i] = (byte)i;
+        using Tensor decoded = bytes.CastTo(DType.F32);
+        return decoded.AsReadOnlySpan<float>().ToArray();
     }
 
     private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);

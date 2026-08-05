@@ -20,10 +20,13 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
     private readonly MiniMaxH3VideoVaeDecoder _videoVae;
     private readonly MiniMaxH3AudioVaeDecoder? _audioVae;
     private readonly MiniMaxH3Config _config;
+    private readonly bool _preloadTransformer;
 
+    /// <param name="preloadTransformer">False for checkpoints too large to stay device-resident (the bf16 build).</param>
     public MiniMaxH3Pipeline(IBackend backend, MiniMaxH3Transformer transformer, MiniMaxH3VideoVaeDecoder videoVae,
-        MiniMaxH3AudioVaeDecoder? audioVae) : base(backend)
+        MiniMaxH3AudioVaeDecoder? audioVae, bool preloadTransformer = true) : base(backend)
     {
+        _preloadTransformer = preloadTransformer;
         _transformer = transformer;
         _videoVae = videoVae;
         _audioVae = audioVae;
@@ -66,6 +69,10 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         double shiftV = request.SigmaShiftVideo, shiftA = request.SigmaShiftAudio;
         double[] sigmas = MiniMaxH3Schedule.VideoSigmas(request.Steps, shiftV);
 
+        // Park the DiT on device up front. Without this its weights land in the cache lazily per op and get evicted
+        // by whatever else is resident, so every Linear pays a fresh host->device upload. Gated on it actually
+        // fitting: the 66 GB bf16 build is larger than the card and must stay on the per-call streaming path.
+        bool preloaded = TryPreloadTransformer();
         try
         {
             for (int step = 0; step < request.Steps; step++)
@@ -120,6 +127,12 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             Probe("audio latent (final)", audioLat);
             Dump("video_latent_final", videoLat);
             Dump("audio_latent_final", audioLat);
+            // Denoising is done: hand the DiT's ~20 GB back before the VAE needs its own ~5 GB.
+            if (preloaded)
+            {
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+            }
+
             Tensor videoLatent = MiniMaxH3Latents.UnpackVideo(videoLat, latentT, latentH, latentW, _config);
             Tensor rgb;
             try
@@ -207,6 +220,29 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         }
         Logs.Warning($"[h3-probe] {label}: min={mn:F4} max={mx:F4} mean={sum / n:F4} rms={Math.Sqrt(sq / n):F4} nonfinite={bad} n={n}");
         if (!ReferenceEquals(f, t)) f.Dispose();
+    }
+
+    /// <summary>Makes the DiT device-resident when the recipe determined it fits, leaving headroom for activations
+    /// and the VAE decode. When it does not fit (the 66 GB bf16 build) the per-call streaming path stands.</summary>
+    private bool TryPreloadTransformer()
+    {
+        if (!_preloadTransformer)
+        {
+            Logs.Info("[MiniMaxH3] DiT too large to stay resident — streaming per call.");
+            return false;
+        }
+        try
+        {
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+            return true;
+        }
+        catch (HartsyInference.Core.Exceptions.OutOfVramException ex)
+        {
+            // Residency is an optimization, never a requirement: PreloadWeights rolls its batch back on OOM, so the
+            // per-call streaming path is still correct — degrade instead of failing the generation.
+            Logs.Warning($"[MiniMaxH3] DiT preload did not fit ({ex.Message}) — streaming per call.");
+            return false;
+        }
     }
 
     /// <summary>Writes the raw F32 tensor to <c>$HARTSY_H3_DUMP/&lt;name&gt;.bin</c> for reference comparison; no-op

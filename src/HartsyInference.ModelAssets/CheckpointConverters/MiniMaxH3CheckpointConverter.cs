@@ -176,6 +176,14 @@ public sealed class MiniMaxH3CheckpointConverter
                 descriptor = ReadDescriptor(kvp.Value);
         }
         if (quantized.Count == 0) return;
+        // Comfy tags EVERY quantized build with the same companion suffixes; only the descriptor distinguishes them.
+        // The fp8_scaled repack says {"format": "float8_e4m3fn"} and is handled by the shared scale fold — rejecting
+        // on the companions alone locks out the one variant that fits a 24 GB card.
+        if (descriptor is not null && !descriptor.Contains("int8", StringComparison.OrdinalIgnoreCase)
+            && !descriptor.Contains("convrot", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
 
         quantized.Sort(StringComparer.Ordinal);
         throw new NotSupportedException(

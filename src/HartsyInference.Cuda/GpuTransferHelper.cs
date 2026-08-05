@@ -340,6 +340,15 @@ internal static unsafe class GpuTransferHelper
         TrimPool();
     }
 
+    // Diagnostic: HARTSY_H2D_TRACE=1 logs the first big cache misses with shape/dtype so a re-uploaded weight set
+    // is distinguishable from ordinary activation traffic.
+    private static readonly bool _traceBigMisses = Environment.GetEnvironmentVariable("HARTSY_H2D_TRACE") == "1";
+    private static int _bigMissTraceCount;
+
+    /// <summary>How many big misses to log; raise it to see past the text-encode phase into denoise.</summary>
+    private static readonly int _traceBigMissLimit =
+        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_H2D_TRACE_LIMIT"), out int lim) ? lim : 24;
+
     /// <summary>Returns the GPU device pointer for a tensor, using caches to avoid transfers. Priority: weight cache
     /// → activation cache → fresh H2D transfer.</summary>
     public static ulong CopyToDevice(Tensor cpuTensor)
@@ -379,6 +388,12 @@ internal static unsafe class GpuTransferHelper
         // correctness dependency on the copy completing before this returns — only stream order, which holds.
         // HARTSY_PROFILE visibility into miss H2D volume.
         using Profiling.NvtxRange _miss = Profiling.NvtxRange.Push(byteSize > (1u << 20) ? "H2D_MISS_BIG" : "H2D_MISS_SMALL");
+        if (byteSize > (1u << 20) && _traceBigMisses && Interlocked.Increment(ref _bigMissTraceCount) <= _traceBigMissLimit)
+        {
+            string shape = string.Join("x", Enumerable.Range(0, cpuTensor.Shape.Rank).Select(i => cpuTensor.Shape[i]));
+            Logs.Info($"[h2d-trace] MISS [{shape}] {cpuTensor.DType} {byteSize >> 20} MB "
+                + $"cachedWeights={s.WeightCache.Count} hits={s.Hits} misses={s.Misses}");
+        }
         // A miss during graph capture bakes a per-replay H2D memcpy node into the graph — always worth
         // knowing about (HARTSY_GRAPH_DUMP=1 logs the offender so it can be made resident pre-capture).
         if (s.ArenaActive && Environment.GetEnvironmentVariable("HARTSY_GRAPH_DUMP") == "1")

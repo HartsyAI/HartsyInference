@@ -73,4 +73,60 @@ public sealed class EpilogueFusionTests
             outRef.Dispose();
         }
     }
+
+    /// <summary>F32 operands writing a 16-bit output: cuBLASLt cannot produce a D type unrelated to its operand
+    /// type, and the bias epilogue returned ~2.6e38 instead of failing, so the fused path must decline this shape
+    /// the way the plain cuBLAS branch already does (GEMM into an operand-dtype temp, then cast). Checks against a
+    /// host reference, not just fused-vs-unfused — after the fix both take one path, so agreement alone would not
+    /// prove the values are real.</summary>
+    [Theory]
+    [InlineData("BF16")]
+    [InlineData("F16")]
+    public unsafe void EpilogueBiasFusion_F32Operands_SixteenBitOutput_IsNotGarbage(string outDtype)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+
+        const int M = 8, OutDim = 96, InDim = 64;
+        DType outType = outDtype == "F16" ? DType.F16 : DType.BF16;
+        using CudaBackend backend = new CudaBackend(0, ptxDir);
+        using Tensor input = new Tensor(new TensorShape(M, InDim), DType.F32);
+        using Tensor weight = new Tensor(new TensorShape(OutDim, InDim), DType.F32);
+        using Tensor bias = new Tensor(new TensorShape(OutDim), DType.F32);
+        using Tensor output = new Tensor(new TensorShape(M, OutDim), outType);
+
+        Random rng = new Random(7);
+        float* ip = (float*)input.DataPointer;
+        for (long i = 0; i < (long)M * InDim; i++) ip[i] = (float)(rng.NextDouble() * 2.0 - 1.0) * 0.5f;
+        float* wp = (float*)weight.DataPointer;
+        for (long i = 0; i < (long)OutDim * InDim; i++) wp[i] = (float)(rng.NextDouble() * 2.0 - 1.0) * 0.3f;
+        float* bp = (float*)bias.DataPointer;
+        for (long i = 0; i < OutDim; i++) bp[i] = (float)(rng.NextDouble() * 2.0 - 1.0) * 0.2f;
+
+        backend.EnableEpilogueFusion = true;
+        backend.Linear(output, input, weight, bias);
+        backend.Sync();
+
+        double maxErr = 0;
+        long maxIdx = 0;
+        for (int m = 0; m < M; m++)
+        {
+            for (int n = 0; n < OutDim; n++)
+            {
+                double expected = bp[n];
+                for (int k = 0; k < InDim; k++) expected += (double)ip[m * InDim + k] * wp[n * InDim + k];
+                long idx = (long)m * OutDim + n;
+                float actual = outType == DType.F16
+                    ? (float)((Half*)output.DataPointer)[idx]
+                    : BitConverter.Int32BitsToSingle(((ushort*)output.DataPointer)[idx] << 16);
+                double err = Math.Abs(expected - actual);
+                if (err > maxErr) { maxErr = err; maxIdx = idx; }
+            }
+        }
+        _output.WriteLine($"Linear F32→{outDtype} with fused bias: max_err={maxErr:E3} @ {maxIdx}");
+        Assert.True(maxErr < 5e-2, $"Linear F32 operands → {outDtype} output max_err {maxErr:E3} (index {maxIdx}).");
+    }
 }

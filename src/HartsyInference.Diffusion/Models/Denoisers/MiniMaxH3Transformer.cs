@@ -1,5 +1,8 @@
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -23,6 +26,12 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     public MiniMaxH3Transformer(MiniMaxH3Config config) => _config = config;
 
     public MiniMaxH3Config Config => _config;
+
+    /// <summary>Residual-stream dtype: BF16 on a backend whose adaLN/norm ops take 16-bit activations (the reference
+    /// runs the block body at the checkpoint's bf16), F32 elsewhere — CpuBackend is F32-only. The patch projections,
+    /// the time embedder / adaLN curve table and the output heads stay F32 either way; those are the reference's own
+    /// F32 islands and each boundary casts explicitly.</summary>
+    public DType BodyDType { get; init; } = DType.F32;
 
     /// <summary>Takes ownership of the converted weights.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
@@ -65,25 +74,24 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(layout);
-        int hidden = _config.HiddenSize;
         int seq = layout.SequenceLength;
 
-        Tensor h = new Tensor(new TensorShape(seq, hidden), DType.F32);
+        Tensor h = EmbedSegments(backend, layout, videoRows, audioRows, textStates);
         try
         {
-            EmbedSegments(backend, layout, h, videoRows, audioRows, textStates);
             Tensor tEmb = BuildTimeEmbedding(backend, uniqueTimesteps);
+            Tensor modIndex = BuildModulationIndex(layout, seq, timestepRowOf, textTagRuns);
             try
             {
-                List<(int Start, int Stop, int ModRow)> mods = BuildModulationSegments(layout, timestepRowOf, textTagRuns);
                 for (int i = 0; i < _config.NumLayers; i++)
                 {
-                    ForwardBlock(backend, h, tEmb, mods, cos, sin, i);
+                    ForwardBlock(backend, ref h, tEmb, modIndex, cos, sin, i);
                 }
                 return FinalLayer(backend, h, tEmb, layout, timestepRowOf);
             }
             finally
             {
+                modIndex.Dispose();
                 tEmb.Dispose();
             }
         }
@@ -94,14 +102,16 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     }
 
     /// <summary>Assembles the packed stream: text rows go through condition_proj + the token refiner, video and audio
-    /// rows through their patch projections, each written into its segment's slice.</summary>
-    private void EmbedSegments(IBackend backend, MiniMaxH3PackedLayout layout, Tensor h, Tensor videoRows,
+    /// rows through their patch projections, concatenated in segment order. The residual stream is shaped
+    /// <c>[seq, 1, hidden]</c> so the adaLN ops see a broadcast group of one row and modulate per token.</summary>
+    private Tensor EmbedSegments(IBackend backend, MiniMaxH3PackedLayout layout, Tensor videoRows,
         Tensor audioRows, Tensor textStates)
     {
         int hidden = _config.HiddenSize;
-        Tensor videoEmbed = Project(backend, videoRows, "video_patch_proj", hidden);
-        Tensor audioEmbed = Project(backend, audioRows, "audio_patch_proj", hidden);
+        Tensor videoEmbed = ProjectIntoStream(backend, videoRows, "video_patch_proj", hidden);
+        Tensor audioEmbed = ProjectIntoStream(backend, audioRows, "audio_patch_proj", hidden);
         Tensor textEmbed = RefineText(backend, textStates);
+        List<Tensor> pieces = new List<Tensor>(layout.Segments.Count);
         try
         {
             int videoOffset = 0, audioOffset = 0, textOffset = 0;
@@ -113,7 +123,12 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                     MiniMaxH3SegmentKind.Audio or MiniMaxH3SegmentKind.RefAudio => (audioEmbed, audioOffset),
                     _ => (videoEmbed, videoOffset),
                 };
-                CopyRows(h, seg.Start, src, off, seg.Length, hidden);
+                if (seg.Length > 0)
+                {
+                    Tensor piece = new Tensor(new TensorShape(seg.Length, hidden), BodyDType);
+                    pieces.Add(piece);
+                    backend.SliceRows(piece, src, off);
+                }
                 switch (seg.Kind)
                 {
                     case MiniMaxH3SegmentKind.Text: textOffset += seg.Length; break;
@@ -121,21 +136,31 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                     default: videoOffset += seg.Length; break;
                 }
             }
+            Tensor h = new Tensor(new TensorShape(layout.SequenceLength, 1, hidden), BodyDType);
+            backend.Concat(h, CollectionsMarshal.AsSpan(pieces), 0);
+            return h;
         }
         finally
         {
+            foreach (Tensor t in pieces) t.Dispose();
             videoEmbed.Dispose();
             audioEmbed.Dispose();
             textEmbed.Dispose();
         }
     }
 
-    private Tensor Project(IBackend backend, Tensor rows, string prefix, int outDim)
+    private Tensor Project(IBackend backend, Tensor rows, string prefix, int outDim, DType dtype)
     {
-        Tensor outT = new Tensor(new TensorShape(rows.Shape[0], outDim), DType.F32);
+        Tensor outT = new Tensor(new TensorShape(rows.Shape[0], outDim), dtype);
         backend.Linear(outT, rows, Require($"{prefix}.weight"), Optional($"{prefix}.bias"));
         return outT;
     }
+
+    /// <summary>Input projection into the residual stream: the GEMM runs F32 (the reference's patch projections are
+    /// an F32 island) and only its result casts in — a biased Linear whose operands resolve to F32 while its output
+    /// is 16-bit lands on the cuBLASLt bias epilogue's unsupported dtype pair and returns garbage.</summary>
+    private Tensor ProjectIntoStream(IBackend backend, Tensor rows, string prefix, int outDim)
+        => DtypeCastHelper.EnsureDtype(backend, Project(backend, rows, prefix, outDim, DType.F32), BodyDType);
 
     /// <summary>condition_proj to hidden width, then the token refiner's self-attention blocks (no modulation, no rope).</summary>
     private Tensor RefineText(IBackend backend, Tensor textStates)
@@ -143,52 +168,53 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         int hidden = _config.HiddenSize;
         if (textStates.Shape[textStates.Shape.Rank - 1] == hidden)
         {
-            Tensor passthrough = new Tensor(textStates.Shape, DType.F32);
-            Buffer.MemoryCopy((void*)textStates.DataPointer, (void*)passthrough.DataPointer,
-                passthrough.ElementCount * sizeof(float), textStates.ElementCount * sizeof(float));
-            return passthrough;
+            Tensor passthrough = new Tensor(textStates.Shape, textStates.DType);
+            backend.SliceRows(passthrough, textStates, 0);
+            return DtypeCastHelper.EnsureDtype(backend, passthrough, BodyDType);
         }
-        Tensor x = Project(backend, textStates, "condition_proj", hidden);
+        Tensor x = ProjectIntoStream(backend, textStates, "condition_proj", hidden);
         for (int i = 0; i < _config.TokenRefinerNumLayers; i++)
         {
             string p = $"token_refiner.blocks.{i}";
-            Tensor normed = Norm(backend, x, $"{p}.norm1.weight", _config.NormEps);
+            Tensor normed = Norm(backend, x, $"{p}.norm1.weight", _config.NormEps, BodyDType);
             Tensor attn = Attention(backend, normed, $"{p}.attn", cos: null, sin: null);
             normed.Dispose();
-            AddInPlace(x, attn);
-            attn.Dispose();
+            x = Residual(backend, x, attn);
 
-            Tensor normed2 = Norm(backend, x, $"{p}.norm2.weight", _config.NormEps);
+            Tensor normed2 = Norm(backend, x, $"{p}.norm2.weight", _config.NormEps, BodyDType);
             Tensor mlp = Mlp(backend, normed2, $"{p}.mlp");
             normed2.Dispose();
-            AddInPlace(x, mlp);
-            mlp.Dispose();
+            x = Residual(backend, x, mlp);
         }
-        Tensor final = Norm(backend, x, "token_refiner.final_norm.weight", _config.FinalNormEps);
+        Tensor final = Norm(backend, x, "token_refiner.final_norm.weight", _config.FinalNormEps, BodyDType);
         x.Dispose();
         return final;
     }
 
-    private void ForwardBlock(IBackend backend, Tensor h, Tensor tEmb, List<(int Start, int Stop, int ModRow)> mods,
+    private void ForwardBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
         Tensor cos, Tensor sin, int index)
     {
         string p = $"blocks.{index}";
         Tensor[] mod = Adaln(backend, tEmb, $"{p}.adaln_proj", expand: 6, modalities: 3);
         try
         {
-            Tensor normed = Norm(backend, h, $"{p}.norm1.weight", _config.NormEps);
-            ModulateInPlace(backend, normed, mod[0], mod[1], mods);
-            Tensor attn = Attention(backend, normed, $"{p}.attn", cos, sin);
+            Tensor normed = Norm(backend, h, $"{p}.norm1.weight", _config.NormEps, BodyDType);
+            Tensor modulated = Modulate(backend, normed, mod[0], mod[1], modIndex);
             normed.Dispose();
-            GateInPlace(backend, h, attn, mod[2], mods);
+            Tensor attn = Attention(backend, modulated, $"{p}.attn", cos, sin);
+            modulated.Dispose();
+            Tensor gatedAttn = Gate(backend, h, attn, mod[2], modIndex);
             attn.Dispose();
+            Swap(ref h, gatedAttn);
 
-            Tensor normed2 = Norm(backend, h, $"{p}.norm2.weight", _config.NormEps);
-            ModulateInPlace(backend, normed2, mod[3], mod[4], mods);
-            Tensor mlp = Mlp(backend, normed2, $"{p}.mlp");
+            Tensor normed2 = Norm(backend, h, $"{p}.norm2.weight", _config.NormEps, BodyDType);
+            Tensor modulated2 = Modulate(backend, normed2, mod[3], mod[4], modIndex);
             normed2.Dispose();
-            GateInPlace(backend, h, mlp, mod[5], mods);
+            Tensor mlp = Mlp(backend, modulated2, $"{p}.mlp");
+            modulated2.Dispose();
+            Tensor gatedMlp = Gate(backend, h, mlp, mod[5], modIndex);
             mlp.Dispose();
+            Swap(ref h, gatedMlp);
         }
         finally
         {
@@ -196,32 +222,38 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
     }
 
-    /// <summary>qkv projection, per-head q/k RMS norm, partial split-half rope, attention, output projection.</summary>
+    /// <summary>qkv projection, per-head q/k RMS norm, partial split-half rope, attention, output projection.
+    /// q/k/v are allocated as <c>[1, seq, heads, headDim]</c> up front so the per-head norm and the in-place rope
+    /// consume them directly — a borrowed reshape view would strand the result on whichever device wrote it.
+    /// The qkv buffer through to the attention output stays F32: rope and SDPA have no 16-bit path, so a bf16 qkv
+    /// would only add casts around them. Only the projection's input and output ride the bf16 residual stream.</summary>
     private Tensor Attention(IBackend backend, Tensor x, string prefix, Tensor? cos, Tensor? sin)
     {
         int seq = (int)x.Shape[0];
         int heads = _config.NumAttentionHeads, hd = _config.AttentionHeadDim, inner = heads * hd;
+        TensorShape headed = new TensorShape(1, seq, heads, hd);
 
-        Tensor qkv = new Tensor(new TensorShape(seq, inner * 3), DType.F32);
-        backend.Linear(qkv, x, Require($"{prefix}.qkv_proj.weight"), Optional($"{prefix}.qkv_proj.bias"));
-        Tensor q = SplitPart(qkv, 0, seq, inner);
-        Tensor k = SplitPart(qkv, 1, seq, inner);
-        Tensor v = SplitPart(qkv, 2, seq, inner);
-        qkv.Dispose();
-
+        Tensor q = new Tensor(headed, DType.F32);
+        Tensor k = new Tensor(headed, DType.F32);
+        Tensor v = new Tensor(headed, DType.F32);
         try
         {
-            NormHeads(backend, q, $"{prefix}.q_norm.weight", seq, heads, hd);
-            NormHeads(backend, k, $"{prefix}.k_norm.weight", seq, heads, hd);
+            using (Tensor qkv = new Tensor(new TensorShape(seq, inner * 3), DType.F32))
+            using (Tensor qRaw = new Tensor(headed, DType.F32))
+            using (Tensor kRaw = new Tensor(headed, DType.F32))
+            {
+                backend.Linear(qkv, x, Require($"{prefix}.qkv_proj.weight"), Optional($"{prefix}.qkv_proj.bias"));
+                backend.SliceLastDim(qRaw, qkv, 0);
+                backend.SliceLastDim(kRaw, qkv, inner);
+                backend.SliceLastDim(v, qkv, inner * 2);
+                backend.RmsNorm(q, qRaw, Require($"{prefix}.q_norm.weight"), _config.QkNormEps);
+                backend.RmsNorm(k, kRaw, Require($"{prefix}.k_norm.weight"), _config.QkNormEps);
+            }
             if (cos is not null && sin is not null)
             {
                 int rotary = MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen);
-                using Tensor q4 = View(q, 1, seq, heads, hd);
-                using Tensor k4 = View(k, 1, seq, heads, hd);
-                backend.ApplyRopeSingle(q4, cos, sin, rotary);
-                backend.ApplyRopeSingle(k4, cos, sin, rotary);
-                Flush(q4);
-                Flush(k4);
+                backend.ApplyRopeSingle(q, cos, sin, rotary);
+                backend.ApplyRopeSingle(k, cos, sin, rotary);
             }
 
             Tensor qh = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
@@ -237,7 +269,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
 
                 Tensor merged = new Tensor(new TensorShape(seq, inner), DType.F32);
                 backend.Permute0213(merged, attn, heads, seq, hd);
-                Tensor outT = new Tensor(new TensorShape(seq, _config.HiddenSize), DType.F32);
+                Tensor outT = new Tensor(x.Shape, x.DType);
                 backend.Linear(outT, merged, Require($"{prefix}.out_proj.weight"), Optional($"{prefix}.out_proj.bias"));
                 merged.Dispose();
                 return outT;
@@ -253,7 +285,9 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
     }
 
-    /// <summary>Gated MLP: fc1 emits the packed gate/up pair, SwiGLU folds it, fc2 projects back.</summary>
+    /// <summary>Gated MLP: fc1 emits the packed gate/up pair, SwiGLU folds it, fc2 projects back. The gate/up pair
+    /// stays F32 — GluActivate has an F32 and a BF16 kernel but no F16 one — so only fc2's result rejoins the
+    /// stream at the body dtype.</summary>
     private Tensor Mlp(IBackend backend, Tensor x, string prefix)
     {
         int seq = (int)x.Shape[0], ffn = _config.FfnHiddenSize;
@@ -262,7 +296,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         Tensor act = new Tensor(new TensorShape(seq, ffn), DType.F32);
         backend.GluActivate(act, gateUp, ffn, gelu: false);
         gateUp.Dispose();
-        Tensor outT = new Tensor(new TensorShape(seq, _config.HiddenSize), DType.F32);
+        Tensor outT = new Tensor(x.Shape, x.DType);
         backend.Linear(outT, act, Require($"{prefix}.fc2.weight"), Optional($"{prefix}.fc2.bias"));
         act.Dispose();
         return outT;
@@ -281,63 +315,55 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             backend.Silu(silu, tEmb);
             input = silu;
         }
-        Tensor proj = new Tensor(new TensorShape(rows, (long)expand * hidden * modalities), DType.F32);
+        // Linear sizes itself from the weight and the input row count, so shaping its output
+        // [rows*modalities, expand*hidden] is the free reinterpret the chunk split needs.
+        int modRows = rows * modalities;
+        using Tensor proj = new Tensor(new TensorShape(modRows, (long)expand * hidden), DType.F32);
         backend.Linear(proj, input, Require($"{prefix}.linear.weight"), Optional($"{prefix}.linear.bias"));
         silu?.Dispose();
 
-        // [rows, expand*hidden*modalities] is read as [rows*modalities, expand*hidden] then split by chunk.
         Tensor[] parts = new Tensor[expand];
-        int modRows = rows * modalities;
-        float* src = (float*)proj.DataPointer;
         for (int e = 0; e < expand; e++)
         {
             parts[e] = new Tensor(new TensorShape(modRows, hidden), DType.F32);
-            float* dst = (float*)parts[e].DataPointer;
-            for (int r = 0; r < modRows; r++)
-            {
-                long from = (long)r * expand * hidden + (long)e * hidden;
-                Buffer.MemoryCopy(src + from, dst + (long)r * hidden, hidden * sizeof(float), hidden * sizeof(float));
-            }
+            backend.SliceLastDim(parts[e], proj, e * hidden);
         }
-        proj.Dispose();
         return parts;
     }
 
-    /// <summary>Per-segment <c>h = h*(1+scale) + shift</c>; the 1+ is folded on the small modulation tensor.</summary>
-    private void ModulateInPlace(IBackend backend, Tensor h, Tensor shift, Tensor scale, List<(int Start, int Stop, int ModRow)> mods)
+    /// <summary>Per-token <c>out = h*(1+scale) + shift</c>. The modulation table is indexed per token inside the
+    /// kernel, so nothing is materialized at <c>[seq, hidden]</c> and the table stays F32 while the stream is bf16.</summary>
+    private static Tensor Modulate(IBackend backend, Tensor h, Tensor shift, Tensor scale, Tensor modIndex)
     {
-        int hidden = _config.HiddenSize;
-        using Tensor onePlus = new Tensor(scale.Shape, DType.F32);
-        backend.AddScalar(onePlus, scale, 1f);
-        foreach ((int start, int stop, int row) in mods)
-        {
-            using Tensor slice = RowView(h, start, stop - start, hidden);
-            using Tensor s = RowView(onePlus, row, 1, hidden);
-            using Tensor b = RowView(shift, row, 1, hidden);
-            backend.AffineBroadcastLastDim(slice, slice, s, b);
-            Flush(slice);
-        }
+        Tensor outT = new Tensor(h.Shape, h.DType);
+        backend.AffineBroadcastRowIndexed(outT, h, scale, shift, modIndex);
+        return outT;
     }
 
-    /// <summary>Per-segment gated residual <c>h += gate * value</c>.</summary>
-    private void GateInPlace(IBackend backend, Tensor h, Tensor value, Tensor gate, List<(int Start, int Stop, int ModRow)> mods)
+    /// <summary>Per-token gated residual <c>out = h + gate * value</c>; see <see cref="Modulate"/> for the layout.</summary>
+    private static Tensor Gate(IBackend backend, Tensor h, Tensor value, Tensor gate, Tensor modIndex)
     {
-        int hidden = _config.HiddenSize;
-        foreach ((int start, int stop, int row) in mods)
-        {
-            using Tensor hs = RowView(h, start, stop - start, hidden);
-            using Tensor vs = RowView(value, start, stop - start, hidden);
-            using Tensor g = RowView(gate, row, 1, hidden);
-            backend.GatedResidualLastDim(hs, hs, vs, g);
-            Flush(hs);
-        }
+        Tensor outT = new Tensor(h.Shape, h.DType);
+        backend.GatedResidualRowIndexed(outT, h, value, gate, modIndex);
+        return outT;
+    }
+
+    /// <summary>Plain residual add into a fresh tensor (device backends bind an op's result to the tensor it was handed).</summary>
+    private static Tensor Residual(IBackend backend, Tensor x, Tensor addend)
+    {
+        Tensor outT = new Tensor(x.Shape, x.DType);
+        backend.Add(outT, x, addend);
+        x.Dispose();
+        addend.Dispose();
+        return outT;
     }
 
     private (Tensor Video, Tensor Audio) FinalLayer(IBackend backend, Tensor h, Tensor tEmb,
         MiniMaxH3PackedLayout layout, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf)
     {
         Tensor[] mod = Adaln(backend, tEmb, "final_layer.adaln_proj", expand: 2, modalities: 1);
-        Tensor normed = Norm(backend, h, "final_layer.norm.weight", _config.FinalNormEps);
+        // The heads are the checkpoint's F32 island, so the stream leaves bf16 here — one cast for the whole tail.
+        Tensor normed = Norm(backend, h, "final_layer.norm.weight", _config.FinalNormEps, DType.F32);
         try
         {
             MiniMaxH3Segment videoSeg = layout.Segments.Last(s => s.Kind == MiniMaxH3SegmentKind.Video);
@@ -356,31 +382,36 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     private Tensor Head(IBackend backend, Tensor normed, Tensor shift, Tensor scale, MiniMaxH3Segment seg, int row, string prefix)
     {
         int hidden = _config.HiddenSize, n = seg.Length;
-        Tensor slice = new Tensor(new TensorShape(n, hidden), DType.F32);
-        backend.SliceRows(slice, normed, seg.Start);
+        Tensor modulated = new Tensor(new TensorShape(n, hidden), DType.F32);
+        using (Tensor slice = new Tensor(new TensorShape(n, hidden), DType.F32))
         using (Tensor onePlus = new Tensor(new TensorShape(1, hidden), DType.F32))
-        using (Tensor s = RowView(scale, row, 1, hidden))
-        using (Tensor b = RowView(shift, row, 1, hidden))
+        using (Tensor s = new Tensor(new TensorShape(1, hidden), DType.F32))
+        using (Tensor b = new Tensor(new TensorShape(1, hidden), DType.F32))
         {
+            backend.SliceRows(slice, normed, seg.Start);
+            backend.SliceRows(s, scale, row);
+            backend.SliceRows(b, shift, row);
             backend.AddScalar(onePlus, s, 1f);
-            backend.AffineBroadcastLastDim(slice, slice, onePlus, b);
+            backend.AffineBroadcastLastDim(modulated, slice, onePlus, b);
         }
         Tensor weight = Require($"{prefix}.weight");
         Tensor outT = new Tensor(new TensorShape(n, weight.Shape[0]), DType.F32);
-        backend.Linear(outT, slice, weight, Optional($"{prefix}.bias"));
-        slice.Dispose();
+        backend.Linear(outT, modulated, weight, Optional($"{prefix}.bias"));
+        modulated.Dispose();
         return outT;
     }
 
-    /// <summary>One modulation row per contiguous segment: <c>timestepRow*3 + modalityTag</c>. The text span is split
-    /// at tag boundaries when <paramref name="textTagRuns"/> is supplied — vision pad tokens sit inside the text span
-    /// but carry the VIDEO modality, so treating text as one uniform run silently mis-modulates every
-    /// image/video-reference generation.</summary>
-    private static List<(int Start, int Stop, int ModRow)> BuildModulationSegments(MiniMaxH3PackedLayout layout,
+    /// <summary>One modulation row per token — <c>timestepRow*3 + modalityTag</c> — as the I32 gather index the
+    /// adaLN ops expand through. The text span is split at tag boundaries when <paramref name="textTagRuns"/> is
+    /// supplied: vision pad tokens sit inside the text span but carry the VIDEO modality, so treating text as one
+    /// uniform run silently mis-modulates every image/video-reference generation.</summary>
+    private static Tensor BuildModulationIndex(MiniMaxH3PackedLayout layout, int seq,
         IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
         IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns)
     {
-        List<(int, int, int)> mods = new List<(int, int, int)>(layout.Segments.Count);
+        Tensor index = new Tensor(new TensorShape(seq), DType.I32);
+        int* p = (int*)index.DataPointer;
+        for (int i = 0; i < seq; i++) p[i] = -1;
         foreach (MiniMaxH3Segment seg in layout.Segments)
         {
             int rowBase = timestepRowOf[seg.Kind] * 3;
@@ -389,16 +420,22 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 foreach ((int start, int stop, int tag) in textTagRuns)
                 {
                     int a = seg.Start + start, b = Math.Min(seg.Start + stop, seg.Stop);
-                    if (b > a)
-                    {
-                        mods.Add((a, b, rowBase + tag));
-                    }
+                    for (int i = a; i < b; i++) p[i] = rowBase + tag;
                 }
                 continue;
             }
-            mods.Add((seg.Start, seg.Stop, rowBase + ModalityTag(seg.Kind)));
+            for (int i = seg.Start; i < seg.Stop; i++) p[i] = rowBase + ModalityTag(seg.Kind);
         }
-        return mods;
+        for (int i = 0; i < seq; i++)
+        {
+            if (p[i] < 0)
+            {
+                index.Dispose();
+                throw new HartsyInferenceException(
+                    $"MiniMax-H3 packed row {i} of {seq} has no modulation segment; the tag runs do not cover the text span.");
+            }
+        }
+        return index;
     }
 
     /// <summary>Sinusoidal embedding (cos before sin) then proj_in/SiLU/proj_out, or a lerp of the precomputed
@@ -449,60 +486,20 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         return outEmb;
     }
 
-    private Tensor Norm(IBackend backend, Tensor x, string weightKey, float eps)
+    private Tensor Norm(IBackend backend, Tensor x, string weightKey, float eps, DType dtype)
     {
-        Tensor outT = new Tensor(x.Shape, DType.F32);
+        Tensor outT = new Tensor(x.Shape, dtype);
         backend.RmsNorm(outT, x, Require(weightKey), eps);
         return outT;
     }
 
-    /// <summary>RMS norm applied per head over the last dim of a <c>[seq, heads*headDim]</c> buffer.</summary>
-    private void NormHeads(IBackend backend, Tensor x, string weightKey, int seq, int heads, int headDim)
+    /// <summary>Replaces the residual stream, disposing the tensor it displaces.</summary>
+    private static void Swap(ref Tensor current, Tensor replacement)
     {
-        using Tensor view = View(x, seq * heads, headDim);
-        using Tensor tmp = new Tensor(view.Shape, DType.F32);
-        backend.RmsNorm(tmp, view, Require(weightKey), _config.QkNormEps);
-        Buffer.MemoryCopy((void*)tmp.DataPointer, (void*)x.DataPointer,
-            x.ElementCount * sizeof(float), tmp.ElementCount * sizeof(float));
+        Tensor old = current;
+        current = replacement;
+        old.Dispose();
     }
-
-    private static Tensor SplitPart(Tensor qkv, int part, int seq, int inner)
-    {
-        Tensor outT = new Tensor(new TensorShape(seq, inner), DType.F32);
-        float* src = (float*)qkv.DataPointer;
-        float* dst = (float*)outT.DataPointer;
-        for (int r = 0; r < seq; r++)
-        {
-            Buffer.MemoryCopy(src + (long)r * inner * 3 + (long)part * inner, dst + (long)r * inner,
-                inner * sizeof(float), inner * sizeof(float));
-        }
-        return outT;
-    }
-
-    private static void CopyRows(Tensor dst, int dstRow, Tensor src, int srcRow, int count, int width)
-    {
-        float* d = (float*)dst.DataPointer + (long)dstRow * width;
-        float* s = (float*)src.DataPointer + (long)srcRow * width;
-        Buffer.MemoryCopy(s, d, (long)count * width * sizeof(float), (long)count * width * sizeof(float));
-    }
-
-    private static void AddInPlace(Tensor target, Tensor addend)
-    {
-        float* t = (float*)target.DataPointer;
-        float* a = (float*)addend.DataPointer;
-        for (long i = 0; i < target.ElementCount; i++) t[i] += a[i];
-    }
-
-    /// <summary>Pulls an in-place op's result back into the buffer a borrowed view aliases. Device backends bind the
-    /// output to the view object and free it unread on dispose (no device-to-host copy), so without this the write
-    /// never reaches the parent and the op is silently a no-op on GPU while CPU stays correct.</summary>
-    private static void Flush(Tensor view) => _ = view.DataPointer;
-
-    private static Tensor View(Tensor t, params long[] shape) =>
-        new Tensor((void*)t.DataPointer, new TensorShape(shape), t.DType);
-
-    private static Tensor RowView(Tensor t, int row, int count, int width) =>
-        new Tensor((void*)((float*)t.DataPointer + (long)row * width), new TensorShape(count, width), t.DType);
 
     public void Dispose()
     {

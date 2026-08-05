@@ -102,6 +102,50 @@ __global__ void dit_gated_residual_lastdim_f16(
     output[i] = __float2half(__half2float(residual[i]) + gate[pIdx] * __half2float(value[i]));
 }
 
+// ── Row-indexed broadcast affine (gather fused in; F16 activation, F32 table) ─
+// out[r,d] = in[r,d] * (1 + scaleTable[rowIndex[r], d]) + (shiftTable ? shiftTable[rowIndex[r], d] : 0)
+__global__ void dit_affine_broadcast_rowindexed_f16(
+    __half* __restrict__ output,
+    const __half* __restrict__ input,
+    const float* __restrict__ scaleTable,
+    const float* __restrict__ shiftTable,
+    const int* __restrict__ rowIndex,
+    unsigned int dim,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+
+    unsigned int d = (unsigned int)(i % dim);
+    unsigned long long row = i / dim;
+    size_t tIdx = (size_t)rowIndex[row] * dim + d;
+
+    float v = __half2float(input[i]) * (1.0f + scaleTable[tIdx]);
+    if (shiftTable != 0) v += shiftTable[tIdx];
+    output[i] = __float2half(v);
+}
+
+// ── Row-indexed gated residual (gather fused in; F16 activations, F32 table) ─
+// out[r,d] = residual[r,d] + gateTable[rowIndex[r], d] * value[r,d]
+__global__ void dit_gated_residual_rowindexed_f16(
+    __half* __restrict__ output,
+    const __half* __restrict__ residual,
+    const __half* __restrict__ value,
+    const float* __restrict__ gateTable,
+    const int* __restrict__ rowIndex,
+    unsigned int dim,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+
+    unsigned int d = (unsigned int)(i % dim);
+    unsigned long long row = i / dim;
+    size_t tIdx = (size_t)rowIndex[row] * dim + d;
+
+    output[i] = __float2half(__half2float(residual[i]) + gateTable[tIdx] * __half2float(value[i]));
+}
+
 // ── Add scalar (out = in + c) ───────────────────────────────────────────────
 __global__ void dit_add_scalar_f16(
     __half* __restrict__ output,

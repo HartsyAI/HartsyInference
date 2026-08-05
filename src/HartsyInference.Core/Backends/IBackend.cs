@@ -108,6 +108,60 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>Per-token adaLN with the modulation gather fused in: <c>out[r,d] = in[r,d]*(1 + scaleTable[rowIndex[r],d]) + shiftTable[rowIndex[r],d]</c>.</summary>
+    /// <param name="scaleTable">Small <c>[modRows, D]</c> modulation table — the <c>1 +</c> is applied here, so pass the RAW scale (no AddScalar).</param>
+    /// <param name="shiftTable">Small <c>[modRows, D]</c> table, or null for scale-only.</param>
+    /// <param name="rowIndex">I32 <c>[rows]</c> — one table row per token; replaces materializing the gathered <c>[rows, D]</c> scale/shift.</param>
+    unsafe void AffineBroadcastRowIndexed(Tensor output, Tensor input, Tensor scaleTable, Tensor? shiftTable, Tensor rowIndex)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32 || scaleTable.DType != DType.F32 || (shiftTable is not null && shiftTable.DType != DType.F32))
+            throw new NotSupportedException($"AffineBroadcastRowIndexed default fallback only supports F32 — got output={output.DType}, input={input.DType}, scaleTable={scaleTable.DType}, shiftTable={shiftTable?.DType.Name ?? "null"}.");
+        if (rowIndex.DType != DType.I32)
+            throw new NotSupportedException($"AffineBroadcastRowIndexed requires I32 rowIndex, got {rowIndex.DType}.");
+        int dim = (int)input.Shape[input.Shape.Rank - 1];
+        long total = input.ElementCount;
+        if (rowIndex.ElementCount < total / dim)
+            throw new ArgumentException($"AffineBroadcastRowIndexed rowIndex has {rowIndex.ElementCount} entries, need {total / dim}.", nameof(rowIndex));
+        float* pIn = (float*)input.DataPointer;
+        float* pOut = (float*)output.DataPointer;
+        float* pScale = (float*)scaleTable.DataPointer;
+        float* pShift = shiftTable is null ? null : (float*)shiftTable.DataPointer;
+        int* pIdx = (int*)rowIndex.DataPointer;
+        for (long i = 0; i < total; i++)
+        {
+            int d = (int)(i % dim);
+            long tIdx = (long)pIdx[i / dim] * dim + d;
+            float v = pIn[i] * (1f + pScale[tIdx]);
+            if (pShift != null) v += pShift[tIdx];
+            pOut[i] = v;
+        }
+    }
+
+    /// <summary>Per-token gated residual with the gate gather fused in: <c>out[r,d] = residual[r,d] + gateTable[rowIndex[r],d]*value[r,d]</c>.</summary>
+    /// <param name="gateTable">Small <c>[modRows, D]</c> gate table, indexed per token instead of expanded to <c>[rows, D]</c>.</param>
+    unsafe void GatedResidualRowIndexed(Tensor output, Tensor residual, Tensor value, Tensor gateTable, Tensor rowIndex)
+    {
+        if (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32 || gateTable.DType != DType.F32)
+            throw new NotSupportedException($"GatedResidualRowIndexed default fallback only supports F32 — got output={output.DType}, residual={residual.DType}, value={value.DType}, gateTable={gateTable.DType}.");
+        if (rowIndex.DType != DType.I32)
+            throw new NotSupportedException($"GatedResidualRowIndexed requires I32 rowIndex, got {rowIndex.DType}.");
+        int dim = (int)value.Shape[value.Shape.Rank - 1];
+        long total = value.ElementCount;
+        if (rowIndex.ElementCount < total / dim)
+            throw new ArgumentException($"GatedResidualRowIndexed rowIndex has {rowIndex.ElementCount} entries, need {total / dim}.", nameof(rowIndex));
+        float* pRes = (float*)residual.DataPointer;
+        float* pVal = (float*)value.DataPointer;
+        float* pGate = (float*)gateTable.DataPointer;
+        float* pOut = (float*)output.DataPointer;
+        int* pIdx = (int*)rowIndex.DataPointer;
+        for (long i = 0; i < total; i++)
+        {
+            int d = (int)(i % dim);
+            long tIdx = (long)pIdx[i / dim] * dim + d;
+            pOut[i] = pRes[i] + pGate[tIdx] * pVal[i];
+        }
+    }
+
     /// <summary>Fused adaLN modulation for DiT NormModulate: <c>out = (1+scale)·LayerNormNoAffine(in) + shift</c>.</summary>
     unsafe void LayerNormModulate(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
     {

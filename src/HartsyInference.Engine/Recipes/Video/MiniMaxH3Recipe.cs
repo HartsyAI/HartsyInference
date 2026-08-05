@@ -51,16 +51,29 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         {
             if (context.Backend is HartsyInference.Cuda.CudaBackend cudaBackend)
             {
-                // 66 GB bf16 DiT: caching every F16 cast grows without bound and OOMs the host.
-                cudaBackend.CacheWeightCasts = false;
-                Logs.Info("[MiniMaxH3Recipe] CacheWeightCasts disabled (bf16-resident DiT).");
+                // Only the 66 GB bf16 DiT needs this — caching its F16 casts grows without bound and OOMs the host.
+                // The 21 GB fp8 build must keep the cache ON or every GEMM re-uploads its weight.
+                long ditBytes = new FileInfo(assets.Dit).Length;
+                if (ditBytes > 40L << 30)
+                {
+                    cudaBackend.CacheWeightCasts = false;
+                    Logs.Info($"[MiniMaxH3Recipe] CacheWeightCasts disabled ({ditBytes >> 30} GB DiT).");
+                }
             }
-            MiniMaxH3Transformer transformer = LoadTransformer(assets.Dit, loaders, out MiniMaxH3Config config);
+            // F16, not BF16: the native fp8 GEMM guard (CudaBackend.cs:959) accepts fp8/F32/F16 only, so a BF16
+            // stream falls off the tensor-core path and costs more than the halved traffic saves. CPU stays F32.
+            DType bodyDType = context.Backend is HartsyInference.Cuda.CudaBackend ? DType.F16 : DType.F32;
+            MiniMaxH3Transformer transformer =
+                LoadTransformer(assets.Dit, loaders, bodyDType, out MiniMaxH3Config config);
             MiniMaxH3VideoVaeDecoder videoVae = LoadVideoVae(assets.VideoVae, loaders);
             MiniMaxH3AudioVaeDecoder? audioVae = LoadAudioVae(assets.AudioVae, loaders);
 
             MiniMaxH3TextEncoder textEncoder = LoadTextEncoder(assets.TextEncoder, loaders);
-            MiniMaxH3Pipeline pipeline = new MiniMaxH3Pipeline(context.Backend, transformer, videoVae, audioVae);
+            // The 66 GB bf16 build cannot stay device-resident on any consumer card; the 21 GB fp8 build can, and
+            // must, or every GEMM re-uploads its weight.
+            bool fitsResident = new FileInfo(assets.Dit).Length < 40L << 30;
+            MiniMaxH3Pipeline pipeline =
+                new MiniMaxH3Pipeline(context.Backend, transformer, videoVae, audioVae, fitsResident);
             return new MiniMaxH3RecipePipeline(context.Backend, pipeline, config, textEncoder,
                 LoadTokenizer(assets.TokenizerDir), loaders);
         }
@@ -75,7 +88,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     }
 
     private static MiniMaxH3Transformer LoadTransformer(string file, List<SafeTensorsLoader> loaders,
-        out MiniMaxH3Config config)
+        DType bodyDType, out MiniMaxH3Config config)
     {
         SafeTensorsLoader loader = new SafeTensorsLoader();
         loader.Load(file);
@@ -105,7 +118,8 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         config = MiniMaxH3Config.Detect(promotedWeights);
         Logs.Info($"[MiniMaxH3Recipe] DiT: {converted.Transformer.Count} tensors, {config.NumLayers} blocks, "
             + $"hidden {config.HiddenSize}, curves={config.UseAdalnCurves}.");
-        MiniMaxH3Transformer transformer = new MiniMaxH3Transformer(config);
+        // BF16 residual stream matches the reference body dtype; CPU has F32-only kernels.
+        MiniMaxH3Transformer transformer = new MiniMaxH3Transformer(config) { BodyDType = bodyDType };
         transformer.LoadWeights(promotedWeights);
         return transformer;
     }

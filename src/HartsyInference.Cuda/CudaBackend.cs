@@ -1141,6 +1141,11 @@ public sealed class CudaBackend : IBackend
                 }
             }
 
+            // A 16-bit output tensor that isn't the operand dtype can't be written by the GEMM directly (see the
+            // cuBLAS branch below for the full reasoning); it needs a gemmDtype temp plus a cast. That applies to
+            // cuBLASLt too: F32 operands writing BF16/F16 through the fused-bias epilogue returned ~2.6e38.
+            bool outNeedsCast = output.DType != gemmDtype && output.DType != DType.F32;
+
             // Tensor-core HGEMM path (opt-in, validation-pending): F16 operands+output,
             // aligned dims. Produces the GEMM only; bias is added by the block below.
             bool ltBiasFused = false;
@@ -1152,7 +1157,7 @@ public sealed class CudaBackend : IBackend
             }
             // Fused path: fold the bias into the cuBLASLt epilogue, saving a BiasAdd launch
             // plus an output-sized HBM round-trip. Only worthwhile when there is a bias to fuse.
-            else if (EnableEpilogueFusion && bias is not null && LtGemm.IsSupported)
+            else if (EnableEpilogueFusion && bias is not null && LtGemm.IsSupported && !outNeedsCast)
             {
                 LtGemm.Run(
                     weight: weightPtr, input: inputPtr, outPtr: pOutput,
@@ -1173,7 +1178,6 @@ public sealed class CudaBackend : IBackend
                 // MLP) but an F16 output tensor — there is NO BF16→F16 kernel and cuBLAS returns
                 // CUBLAS_STATUS_NOT_SUPPORTED. Run the GEMM into a temp of gemmDtype, then cast to the real
                 // output. (F32 output is always compatible with 16-bit operands, so it skips the temp.)
-                bool outNeedsCast = output.DType != gemmDtype && output.DType != DType.F32;
                 ulong gemmOut = pOutput;
                 int gemmOutType = outputType;
                 ulong pGemmTemp = 0;
@@ -1888,6 +1892,33 @@ public sealed class CudaBackend : IBackend
             return;
         }
 
+        // Native BF16 path (BF16 activation I/O, F32 weight — the DiT BF16 residual-stream recipe). Same reason as
+        // the F16 branch above: the fallback below moves ~20 bytes/element (BF16→F32 cast, F32 norm, F32→BF16 cast)
+        // where this moves 4. RmsNorm runs ~4× per DiT block, so the fallback dominated the BF16 body's norm cost.
+        if (input.DType == DType.BF16 && weight.DType == DType.F32 && output.DType == DType.BF16)
+        {
+            EnsureKernels();
+            ulong pOut = 0, pIn = 0, pWeight = 0;
+            bool cachedOutput = false;
+            try
+            {
+                pIn = GpuTransferHelper.CopyToDevice(input);
+                pWeight = GpuTransferHelper.CopyToDevice(weight);
+                nuint outBytes = GpuTransferHelper.ByteSize(output);
+                pOut = GpuTransferHelper.AllocateDevice(outBytes);
+                _kernels!.LaunchRmsNormBf16(pOut, pIn, pWeight, (int)lastDim, (int)outerSize, eps, _stream.Handle);
+                GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+                cachedOutput = true;
+            }
+            finally
+            {
+                if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+                GpuTransferHelper.FreeDevice(pIn);
+                GpuTransferHelper.FreeDevice(pWeight);
+            }
+            return;
+        }
+
         // GPU path for non-F32 input/weight: cast operands to F32 on-device, run the F32 RMSNorm kernel, cast
         // the result back to the output dtype. This replaces a CPU loop over millions of activation elements
         // per norm (with a blocking D2H sync) that was the dominant cost of the fp8/quant DiT path — dozens of
@@ -1950,12 +1981,13 @@ public sealed class CudaBackend : IBackend
     public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
     {
         using NvtxRange _nvtx = NvtxRange.Push("AffineBroadcast");
-        // F32 activation, or F16 activation with F32 scale/shift (the DiT F16 recipe: activation halved, tiny
-        // per-channel params kept F32 for precision). scale/shift must stay F32 in both cases.
+        // F32 activation, or F16/BF16 activation with F32 scale/shift (the DiT 16-bit recipe: activation
+        // halved, tiny per-channel params kept F32 for precision). scale/shift must stay F32 in every case.
         bool f16 = input.DType == DType.F16 && output.DType == DType.F16;
-        if ((!f16 && (output.DType != DType.F32 || input.DType != DType.F32))
+        bool bf16 = input.DType == DType.BF16 && output.DType == DType.BF16;
+        if ((!f16 && !bf16 && (output.DType != DType.F32 || input.DType != DType.F32))
             || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
-            throw new NotSupportedException("CUDA AffineBroadcastLastDim supports F32, or F16 activation with F32 scale/shift.");
+            throw new NotSupportedException($"CUDA AffineBroadcastLastDim supports F32, or F16/BF16 activation with F32 scale/shift — got output={output.DType}, input={input.DType}, scale={scale.DType}, shift={shift?.DType.Name ?? "null"}.");
         EnterOp();
         EnsureKernels();
         int rank = input.Shape.Rank;
@@ -1973,6 +2005,8 @@ public sealed class CudaBackend : IBackend
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             if (f16)
                 _kernels!.LaunchAffineBroadcastLastDimF16(pOut, pIn, pScale, pShift, seqLen, dim, input.ElementCount, _stream.Handle);
+            else if (bf16)
+                _kernels!.LaunchAffineBroadcastLastDimBf16(pOut, pIn, pScale, pShift, seqLen, dim, input.ElementCount, _stream.Handle);
             else
                 _kernels!.LaunchAffineBroadcastLastDim(pOut, pIn, pScale, pShift, seqLen, dim, input.ElementCount, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -1990,10 +2024,11 @@ public sealed class CudaBackend : IBackend
     public void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
     {
         using NvtxRange _nvtx = NvtxRange.Push("GatedResidual");
-        // F32, or F16 activations (residual/value/output) with an F32 gate — the DiT F16 recipe.
+        // F32, or F16/BF16 activations (residual/value/output) with an F32 gate — the DiT 16-bit recipe.
         bool f16 = residual.DType == DType.F16 && value.DType == DType.F16 && output.DType == DType.F16;
-        if ((!f16 && (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32)) || gate.DType != DType.F32)
-            throw new NotSupportedException("CUDA GatedResidualLastDim supports F32, or F16 activations with an F32 gate.");
+        bool bf16 = residual.DType == DType.BF16 && value.DType == DType.BF16 && output.DType == DType.BF16;
+        if ((!f16 && !bf16 && (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32)) || gate.DType != DType.F32)
+            throw new NotSupportedException($"CUDA GatedResidualLastDim supports F32, or F16/BF16 activations with an F32 gate — got output={output.DType}, residual={residual.DType}, value={value.DType}, gate={gate.DType}.");
         EnterOp();
         EnsureKernels();
         int rank = value.Shape.Rank;
@@ -2011,6 +2046,8 @@ public sealed class CudaBackend : IBackend
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             if (f16)
                 _kernels!.LaunchGatedResidualLastDimF16(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
+            else if (bf16)
+                _kernels!.LaunchGatedResidualLastDimBf16(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
             else
                 _kernels!.LaunchGatedResidualLastDim(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -2023,6 +2060,105 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pVal);
             GpuTransferHelper.FreeDevice(pGate);
         }
+    }
+
+    public void AffineBroadcastRowIndexed(Tensor output, Tensor input, Tensor scaleTable, Tensor? shiftTable, Tensor rowIndex)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("AffineBroadcastRowIndexed");
+        // Activation may be F32/F16/BF16; the modulation table stays F32 (tiny, precision-sensitive) —
+        // same recipe as the lastdim twins above.
+        DType act = ValidateRowIndexedDtypes("AffineBroadcastRowIndexed", output, input, scaleTable, shiftTable, rowIndex);
+        int dim = (int)input.Shape[input.Shape.Rank - 1];
+        long total = input.ElementCount;
+        if (rowIndex.ElementCount < total / dim)
+            throw new ArgumentException($"AffineBroadcastRowIndexed rowIndex has {rowIndex.ElementCount} entries, need {total / dim}.", nameof(rowIndex));
+        EnterOp();
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0, pScale = 0, pShift = 0, pIdx = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pScale = GpuTransferHelper.CopyToDevice(scaleTable);
+            if (shiftTable is not null) pShift = GpuTransferHelper.CopyToDevice(shiftTable);
+            pIdx = GpuTransferHelper.CopyToDevice(rowIndex);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            if (act == DType.F16)
+                _kernels!.LaunchAffineBroadcastRowIndexedF16(pOut, pIn, pScale, pShift, pIdx, dim, total, _stream.Handle);
+            else if (act == DType.BF16)
+                _kernels!.LaunchAffineBroadcastRowIndexedBf16(pOut, pIn, pScale, pShift, pIdx, dim, total, _stream.Handle);
+            else
+                _kernels!.LaunchAffineBroadcastRowIndexed(pOut, pIn, pScale, pShift, pIdx, dim, total, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pScale);
+            if (shiftTable is not null) GpuTransferHelper.FreeDevice(pShift);
+            GpuTransferHelper.FreeDevice(pIdx);
+        }
+    }
+
+    public void GatedResidualRowIndexed(Tensor output, Tensor residual, Tensor value, Tensor gateTable, Tensor rowIndex)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("GatedResidualRowIndexed");
+        DType act = ValidateRowIndexedDtypes("GatedResidualRowIndexed", output, value, gateTable, null, rowIndex);
+        if (residual.DType != act)
+            throw new NotSupportedException($"CUDA GatedResidualRowIndexed needs residual in the activation dtype {act}, got {residual.DType}.");
+        int dim = (int)value.Shape[value.Shape.Rank - 1];
+        long total = value.ElementCount;
+        if (rowIndex.ElementCount < total / dim)
+            throw new ArgumentException($"GatedResidualRowIndexed rowIndex has {rowIndex.ElementCount} entries, need {total / dim}.", nameof(rowIndex));
+        EnterOp();
+        EnsureKernels();
+
+        ulong pOut = 0, pRes = 0, pVal = 0, pGate = 0, pIdx = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pRes = GpuTransferHelper.CopyToDevice(residual);
+            pVal = GpuTransferHelper.CopyToDevice(value);
+            pGate = GpuTransferHelper.CopyToDevice(gateTable);
+            pIdx = GpuTransferHelper.CopyToDevice(rowIndex);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            if (act == DType.F16)
+                _kernels!.LaunchGatedResidualRowIndexedF16(pOut, pRes, pVal, pGate, pIdx, dim, total, _stream.Handle);
+            else if (act == DType.BF16)
+                _kernels!.LaunchGatedResidualRowIndexedBf16(pOut, pRes, pVal, pGate, pIdx, dim, total, _stream.Handle);
+            else
+                _kernels!.LaunchGatedResidualRowIndexed(pOut, pRes, pVal, pGate, pIdx, dim, total, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pRes);
+            GpuTransferHelper.FreeDevice(pVal);
+            GpuTransferHelper.FreeDevice(pGate);
+            GpuTransferHelper.FreeDevice(pIdx);
+        }
+    }
+
+    /// <summary>Returns the activation dtype shared by output/input, having checked the table is F32 and the index I32.</summary>
+    private static DType ValidateRowIndexedDtypes(string op, Tensor output, Tensor input, Tensor table, Tensor? table2, Tensor rowIndex)
+    {
+        DType act = input.DType;
+        if (act != DType.F32 && act != DType.F16 && act != DType.BF16)
+            throw new NotSupportedException($"CUDA {op} supports F32/F16/BF16 activations, got {act}.");
+        if (output.DType != act)
+            throw new NotSupportedException($"CUDA {op} needs a {act} output to match the activation, got {output.DType}.");
+        if (table.DType != DType.F32 || (table2 is not null && table2.DType != DType.F32))
+            throw new NotSupportedException($"CUDA {op} keeps the modulation table F32, got {table.DType}/{table2?.DType.Name ?? "null"}.");
+        if (rowIndex.DType != DType.I32)
+            throw new NotSupportedException($"CUDA {op} requires I32 rowIndex, got {rowIndex.DType}.");
+        return act;
     }
 
     public void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
@@ -3140,8 +3276,9 @@ public sealed class CudaBackend : IBackend
         using NvtxRange _nvtx = NvtxRange.Push("QkvRopeScatter");
         if (devicePos == 0 || qkv.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
         {
-            ((IBackend)this).QkvRopeScatterDecodeStep(qOut, kCache, vCache, qkv, cosTable, sinTable, hq, hkv, headDim, rotaryDim, interleaved, devicePos);
-            return;
+            throw new NotSupportedException(
+                $"CUDA QkvRopeScatterDecodeStep requires a device position buffer and F32 qkv/caches; got devicePos={devicePos}, " +
+                $"qkv={qkv.DType}, kCache={kCache.DType}, vCache={vCache.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -3185,8 +3322,9 @@ public sealed class CudaBackend : IBackend
         using NvtxRange _nvtx = NvtxRange.Push("QkRopeScatterV");
         if (devicePos == 0 || qk.DType != DType.F32 || v.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
         {
-            ((IBackend)this).QkRopeScatterVDecodeStep(qOut, kCache, vCache, qk, v, cosTable, sinTable, hq, hkv, headDim, rotaryDim, interleaved, devicePos);
-            return;
+            throw new NotSupportedException(
+                $"CUDA QkRopeScatterVDecodeStep requires a device position buffer and F32 qk/v/caches; got devicePos={devicePos}, " +
+                $"qk={qk.DType}, v={v.DType}, kCache={kCache.DType}, vCache={vCache.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -3229,8 +3367,9 @@ public sealed class CudaBackend : IBackend
         using NvtxRange _nvtx = NvtxRange.Push("RopeScatterKv");
         if (devicePos == 0 || q.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
         {
-            ((IBackend)this).RopeScatterKvDecodeStep(qOut, kCache, vCache, q, k, v, cosTable, sinTable, hq, hkv, headDim, rotaryDim, interleaved, devicePos);
-            return;
+            throw new NotSupportedException(
+                $"CUDA RopeScatterKvDecodeStep requires a device position buffer and F32 q/caches; got devicePos={devicePos}, " +
+                $"q={q.DType}, kCache={kCache.DType}, vCache={vCache.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -3275,9 +3414,9 @@ public sealed class CudaBackend : IBackend
         using NvtxRange _nvtx = NvtxRange.Push("QkvNormRopeScatter");
         if (devicePos == 0 || qkv.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
         {
-            ((IBackend)this).QkvNormRopeScatterDecodeStep(qOut, kCache, vCache, qkv, qNorm, kNorm, eps,
-                cosTable, sinTable, hq, hkv, headDim, rotaryDim, interleaved, devicePos);
-            return;
+            throw new NotSupportedException(
+                $"CUDA QkvNormRopeScatterDecodeStep requires a device position buffer and F32 qkv/caches; got devicePos={devicePos}, " +
+                $"qkv={qkv.DType}, kCache={kCache.DType}, vCache={vCache.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -3322,9 +3461,9 @@ public sealed class CudaBackend : IBackend
         using NvtxRange _nvtx = NvtxRange.Push("QkNormRopeScatterV");
         if (devicePos == 0 || qk.DType != DType.F32 || v.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
         {
-            ((IBackend)this).QkNormRopeScatterVDecodeStep(qOut, kCache, vCache, qk, v, qNorm, kNorm, eps,
-                cosTable, sinTable, hq, hkv, headDim, rotaryDim, interleaved, devicePos);
-            return;
+            throw new NotSupportedException(
+                $"CUDA QkNormRopeScatterVDecodeStep requires a device position buffer and F32 qk/v/caches; got devicePos={devicePos}, " +
+                $"qk={qk.DType}, v={v.DType}, kCache={kCache.DType}, vCache={vCache.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -3479,9 +3618,11 @@ public sealed class CudaBackend : IBackend
     public void AddRmsNorm(Tensor residOut, Tensor normOut, Tensor a, Tensor b, Tensor weight, float eps)
     {
         using NvtxRange _nvtx = NvtxRange.Push("AddRmsNorm");
+        // Unfused composition for the dtypes the fused kernel lacks; an ((IBackend)this) hop would re-enter here.
         if (residOut.DType != DType.F32 || a.DType != DType.F32 || b.DType != DType.F32 || weight.DType != DType.F32)
         {
-            ((IBackend)this).AddRmsNorm(residOut, normOut, a, b, weight, eps);
+            Add(residOut, a, b);
+            RmsNorm(normOut, residOut, weight, eps);
             return;
         }
         EnterOp();
@@ -3563,7 +3704,10 @@ public sealed class CudaBackend : IBackend
         if (residOut.DType != DType.F32 || a.DType != DType.F32 || b.DType != DType.F32
             || w1.DType != DType.F32 || w2.DType != DType.F32 || (int)w1.ElementCount != normDim)
         {
-            ((IBackend)this).NormAddRmsNormEmitQ8(residOut, normOut, a, b, w1, w2, eps);
+            // Unfused composition for the dtypes the fused kernel lacks; an ((IBackend)this) hop would re-enter here.
+            using Tensor n1 = new Tensor(b.Shape, b.DType);
+            RmsNorm(n1, b, w1, eps);
+            AddRmsNormEmitQ8(residOut, normOut, a, n1, w2, eps);
             return;
         }
         bool sidecar = _quantAtProducer && EnableDp4aGemv && rows == 1 && normDim % 32 == 0;
@@ -3611,7 +3755,10 @@ public sealed class CudaBackend : IBackend
         long rows = a.ElementCount / normDim;
         if (output.DType != DType.F32 || a.DType != DType.F32 || b.DType != DType.F32 || weight.DType != DType.F32)
         {
-            ((IBackend)this).RmsNormAdd(output, a, b, weight, eps);
+            // Unfused composition for the dtypes the fused kernel lacks; an ((IBackend)this) hop would re-enter here.
+            using Tensor n = new Tensor(b.Shape, b.DType);
+            RmsNorm(n, b, weight, eps);
+            Add(output, a, n);
             return;
         }
         using NvtxRange _nvtx = NvtxRange.Push("RmsNormAdd");
@@ -3680,10 +3827,11 @@ public sealed class CudaBackend : IBackend
     public void GluActivate(Tensor output, Tensor gateUp, int ff, bool gelu)
     {
         using NvtxRange _nvtx = NvtxRange.Push("GluActivate");
-        if (output.DType != DType.F32 || gateUp.DType != DType.F32)
+        bool bf16 = output.DType == DType.BF16 && gateUp.DType == DType.BF16;
+        if (!bf16 && (output.DType != DType.F32 || gateUp.DType != DType.F32))
         {
-            ((IBackend)this).GluActivate(output, gateUp, ff, gelu);
-            return;
+            throw new NotSupportedException(
+                $"CUDA GluActivate supports F32 or BF16 (both sides same dtype); got output={output.DType}, gateUp={gateUp.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -3695,7 +3843,10 @@ public sealed class CudaBackend : IBackend
             pIn = GpuTransferHelper.CopyToDevice(gateUp);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchGluAct(pOut, pIn, rows, ff, gelu, _stream.Handle);
+            if (bf16)
+                _kernels!.LaunchGluActBf16(pOut, pIn, rows, ff, gelu, _stream.Handle);
+            else
+                _kernels!.LaunchGluAct(pOut, pIn, rows, ff, gelu, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -6450,8 +6601,8 @@ public sealed class CudaBackend : IBackend
         bool f16Dest = buffer.DType == DType.F16 && newKv.DType == DType.F32;
         if (!f16Dest && (buffer.DType != DType.F32 || newKv.DType != DType.F32))
         {
-            ((IBackend)this).KvCacheAppend(buffer, newKv, offset);
-            return;
+            throw new NotSupportedException(
+                $"CUDA KvCacheAppend supports F32→F32 or F32→F16 storage; got buffer={buffer.DType}, newKv={newKv.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -6487,8 +6638,8 @@ public sealed class CudaBackend : IBackend
     {
         if (output.DType != DType.F32 || input.DType != DType.F32)
         {
-            ((IBackend)this).SliceTimeRange(output, input, start, len);
-            return;
+            throw new NotSupportedException(
+                $"CUDA SliceTimeRange requires F32 output/input; got output={output.DType}, input={input.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -6756,8 +6907,10 @@ public sealed class CudaBackend : IBackend
     {
         if (devicePos == 0 || x.DType != DType.F32 || cosTable.DType != DType.F32 || sinTable.DType != DType.F32)
         {
-            ((IBackend)this).RopeApplyDecodeStep(x, cosTable, sinTable, rotaryDim, interleaved, devicePos);
-            return;
+            // No silent no-op fallback: skipping the rotation would produce plausible-looking wrong tokens.
+            throw new NotSupportedException(
+                $"CUDA RopeApplyDecodeStep requires a device position buffer and F32 operands; got devicePos={devicePos}, " +
+                $"x={x.DType}, cos={cosTable.DType}, sin={sinTable.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -6912,8 +7065,8 @@ public sealed class CudaBackend : IBackend
     {
         if (output.DType != DType.F32 || input.DType != DType.F32)
         {
-            ((IBackend)this).GatherRows(output, input, rowIndices);
-            return;
+            throw new NotSupportedException(
+                $"CUDA GatherRows requires F32 output/input; got output={output.DType}, input={input.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -6943,8 +7096,8 @@ public sealed class CudaBackend : IBackend
     {
         if (input.DType != DType.F32 || indices.DType != DType.I32)
         {
-            ((IBackend)this).ArgMaxLastDim(indices, input);
-            return;
+            throw new NotSupportedException(
+                $"CUDA ArgMaxLastDim requires F32 input and I32 indices; got input={input.DType}, indices={indices.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -6973,8 +7126,8 @@ public sealed class CudaBackend : IBackend
     {
         if (output.DType != DType.F32 || input.DType != DType.F32)
         {
-            ((IBackend)this).ScatterAddWeightedRows(output, input, rowIndices, scales);
-            return;
+            throw new NotSupportedException(
+                $"CUDA ScatterAddWeightedRows requires F32 output/input; got output={output.DType}, input={input.DType}.");
         }
         EnterOp();
         EnsureKernels();

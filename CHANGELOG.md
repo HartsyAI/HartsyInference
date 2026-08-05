@@ -87,12 +87,37 @@ stable release will require. Dates are UTC.
   variants so an unloadable `int8_convrot` file never beats a loadable sibling. Nothing is downloaded: re-fetching
   under the engine's own model directory would duplicate the ~5.8 GB of VAEs Swarm already has. Falls back to the
   embedded Qwen BPE and to `MiniMaxH3VideoVaeConfig.Detect` since the flat repack ships no tokenizer or `config.json`.
-- **MiniMax-H3 fp8-scaled fold wired (untested).** The converter never called the shared
-  `CheckpointConvertUtils.ApplyFp8ScaledDequant`, so a `pruned_fp8_scaled` checkpoint's `.scale_weight` companions
-  were treated as unknown weights. That fold is now applied, which should make Comfy-Org's 21 GB
-  `minimax_h3_*_pruned_fp8_scaled` build — the only variant sized for a 24 GB card — loadable. **Not yet verified on
-  real weights:** every generation to date used the vendor bf16 folder tree, so neither the fp8 path nor the *pruned*
-  checkpoint's `adaln_t_table` curve path (`curves=True`) has executed against a real file.
+- **MiniMax-H3 `pruned_fp8_scaled` checkpoints load, and are ~10x faster than bf16.** Two defects blocked them.
+  (1) `ThrowIfInt8Convrot` rejected on the *presence* of Comfy's quantization companions, but Comfy tags every
+  quantized build with the same `.weight_scale`/`.input_scale`/`.comfy_quant` suffixes — only the `.comfy_quant`
+  descriptor distinguishes them, and the fp8 build says `{"format": "float8_e4m3fn"}`. The guard now reads the
+  descriptor and rejects only genuine int8-convrot (`MiniMaxH3QuantGuardTests`; an absent/unreadable descriptor still
+  rejects conservatively). (2) The converter never called the shared `CheckpointConvertUtils.ApplyFp8ScaledDequant`,
+  so the scale companions were routed as unknown weights. **Verified on the real 21 GB
+  `minimax_h3_fl2va_pruned_fp8_scaled` checkpoint:** 22 frames at 512x288 / 20 steps produces a coherent tracking shot
+  with matched 0.9167 s audio at -21.5 dBFS peak, at **8.6 s/step and 22.5 GB VRAM, fully resident on a 24 GB 4090** —
+  versus ~90 s/step for the 66 GB bf16 build, which cannot stay resident and re-reads most of itself from NVMe every
+  step. This run is also the first exercise of the *pruned* checkpoint's `adaln_t_table` curve path (`curves=True`).
+
+- **MiniMax-H3 is 25.9x faster: 50.2 -> 1.94 s/step** (512x288, 141 frames, RTX 4090; a full 30-step clip went
+  1602 s -> 129 s). ComfyUI does the identical work at 1.67 s/step, so this closes a ~30x gap to ~1.16x.
+  The cause was host round-trips, not weight residency or GEMM selection. `View`/`RowView` were built as
+  `new Tensor((void*)t.DataPointer, ...)`, and `GpuTransferHelper`'s activation cache is keyed by Tensor object
+  reference, so a view can never alias its parent's device buffer — and merely CONSTRUCTING one calls
+  `DataPointer` -> `EnsureCpuData` -> cache-evict + `cuStreamSynchronize` + device-to-host copy. The worst
+  offender was the QKV split, which host-copied a `[seq, 21504]` tensor three times per attention (~473 MB each
+  way per block, ~47 GB/step). Restructured so views are never needed: `SliceLastDim` for the QKV and adaln
+  splits, q/k allocated 4-D up front so `RmsNorm` runs in place and `ApplyRopeSingle` consumes them directly,
+  the residual stream shaped `[seq, 1, hidden]` so `AffineBroadcastLastDim`/`GatedResidualLastDim` modulate the
+  whole packed sequence in a single launch driven by a `RowGather`ed table, and `Concat` for segment assembly.
+  **No new kernels.** Acceptance metric: D2H syncs per forward **74 -> 0** (`IBackend.GetD2hSyncCount`, whose own
+  doc states a fully GPU-resident denoise loop must stay at ~0). Numerics unchanged — parity holds at video
+  relL2 4.752E-004 / audio 6.555E-004.
+- **MiniMax-H3 text encoder: ~2x less PCIe traffic per prompt.** The nvfp4 tower dequantized every layer into a
+  full F32 weight and uploaded it per call (~97 GB per encode). It now narrows to BF16 inside the dequant loop
+  and reuses one shared host scratch buffer instead of ~350 short-lived 200-500 MB allocations, and drops a
+  redundant per-call `Sync()` (`FreeWeights` already syncs). BF16 rather than F16 because F16 overflows on the
+  SwiGLU gated tensor. Qwen3-VL is BF16-trained, so this is closer to the reference than the old F32/TF32 path.
 
 - **MiniMax-H3 geometry was wrong at its own declared defaults.** Three grids were mis-derived: frame counts must
   snap up onto `17k+5`, video latent frames are `(frames-5)/17*5 + 2` rather than `frames/4`, and pixel axes round to

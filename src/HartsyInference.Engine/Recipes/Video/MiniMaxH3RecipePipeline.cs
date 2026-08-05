@@ -71,7 +71,21 @@ public sealed class MiniMaxH3RecipePipeline : IVideoRecipePipeline
 
         try
         {
-            MiniMaxH3TextEncoder.Result encoded = _textEncoder.Encode(_backend, _tokenizer, request.Prompt);
+            // Preload/free around the encode, as every other video recipe does: the encoder and the DiT cannot both
+            // be device-resident on a 24 GB card. (This is hygiene, not the perf fix — measurement showed the
+            // encoder's weights were never the thing occupying VRAM during denoise.)
+            MiniMaxH3TextEncoder.Result encoded;
+            _backend.PreloadWeights(_textEncoder.EnumerateWeights());
+            try
+            {
+                encoded = _textEncoder.Encode(_backend, _tokenizer, request.Prompt);
+                _backend.Sync();
+            }
+            finally
+            {
+                _backend.FreeWeights(_textEncoder.EnumerateWeights());
+            }
+
             MiniMaxH3Pipeline.Result result;
             try
             {

@@ -4,6 +4,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.ModelAssets.BlockScale;
+using HartsyInference.ModelAssets.Nvfp4;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -63,6 +64,101 @@ public sealed unsafe class MiniMaxH3TextEncoderTests
         w[$"{prefix}.weight_scale"] = Filled(new TensorShape(scaleRows, inFeatures / 16), DType.F8E4M3, One);
         w[$"{prefix}.weight_scale_2"] = Scalar(globalScale);
         return w;
+    }
+
+    /// <summary>Builds an nvfp4 linear with varied nibbles and varied (positive, non-NaN) E4M3 block scales, so a
+    /// dequant that drops the mantissa, mis-rounds, or mis-indexes a group cannot pass by symmetry.</summary>
+    private static Dictionary<string, Tensor> RandomBank(string prefix, int outFeatures, int inFeatures,
+        float globalScale, Dictionary<string, Tensor>? into = null)
+    {
+        Dictionary<string, Tensor> w = into ?? new Dictionary<string, Tensor>();
+        int scaleRows = 128 * ((outFeatures + 127) / 128);
+        Tensor packed = new Tensor(new TensorShape(outFeatures, inFeatures / 2), DType.U8);
+        byte* p = (byte*)packed.DataPointer;
+        for (long i = 0; i < packed.ElementCount; i++) p[i] = (byte)(NextUniform() * 256f);
+        Tensor scales = new Tensor(new TensorShape(scaleRows, inFeatures / 16), DType.F8E4M3);
+        byte* s = (byte*)scales.DataPointer;
+        for (long i = 0; i < scales.ElementCount; i++) s[i] = (byte)(0x20 + (int)(NextUniform() * 48f));
+        w[$"{prefix}.weight"] = packed;
+        w[$"{prefix}.weight_scale"] = scales;
+        w[$"{prefix}.weight_scale_2"] = Scalar(globalScale);
+        return w;
+    }
+
+    /// <summary>An identity activation reads the whole weight out of a forward exactly: <c>output[s, o] = W[o, s]</c>
+    /// with a single non-zero product per dot, so no accumulation rounding hides a dequant difference.</summary>
+    private static Tensor IdentityInput(int inFeatures)
+    {
+        Tensor input = new Tensor(new TensorShape(1, inFeatures, inFeatures), DType.F32);
+        float* p = (float*)input.DataPointer;
+        for (int i = 0; i < inFeatures; i++) p[(long)i * inFeatures + i] = 1.0f;
+        return input;
+    }
+
+    [Fact]
+    public void Bf16DequantMatchesTheF32CodecNarrowedToBf16()
+    {
+        // The forward dequantizes straight to BF16 instead of going through Nvfp4Codec's F32 slice; the two must
+        // agree bit for bit, or the fused narrowing has drifted from the codec (E4M3 table, swizzle, or rounding).
+        const int OutFeatures = 128;
+        const int InFeatures = 64;
+        Dictionary<string, Tensor> weights = RandomBank("q", OutFeatures, InFeatures, globalScale: 0.03f);
+
+        Tensor f32 = new Tensor(new TensorShape(OutFeatures, InFeatures), DType.F32);
+        Nvfp4Codec.DequantExpertSlice(
+            weights["q.weight"].Reshape(new TensorShape(1, OutFeatures, InFeatures / 2)),
+            weights["q.weight_scale"].Reshape(new TensorShape(1, weights["q.weight_scale"].Shape[0], InFeatures / 16)),
+            weights["q.weight_scale_2"].Reshape(new TensorShape(1)), 0, f32);
+        using Tensor bf16 = f32.CastTo(DType.BF16);
+        using Tensor expected = bf16.CastTo(DType.F32);
+        f32.Dispose();
+
+        Nvfp4Linear linear = Nvfp4Linear.Load(weights, "q");
+        IBackend backend = new CpuBackend();
+        using Tensor input = IdentityInput(InFeatures);
+        using Tensor output = new Tensor(new TensorShape(1, InFeatures, OutFeatures), DType.F32);
+        linear.Forward(backend, output, input);
+
+        float* e = (float*)expected.DataPointer;
+        float* o = (float*)output.DataPointer;
+        for (int i = 0; i < InFeatures; i++)
+            for (int j = 0; j < OutFeatures; j++)
+                Assert.Equal(e[(long)j * InFeatures + i], o[(long)i * OutFeatures + j]);
+    }
+
+    [Fact]
+    public void SharedDequantScratchServesDifferentlyShapedLayers()
+    {
+        // The scratch is sized by the widest layer and reused by every other one; a narrow layer must see its own
+        // freshly dequantized bytes, not the tail of the wide layer that ran before it.
+        const int WideOut = 256, NarrowOut = 128, InFeatures = 64;
+        Dictionary<string, Tensor> weights = RandomBank("wide", WideOut, InFeatures, globalScale: 0.03f);
+        RandomBank("narrow", NarrowOut, InFeatures, globalScale: 0.07f, into: weights);
+
+        Nvfp4Linear wide = Nvfp4Linear.Load(weights, "wide");
+        Nvfp4Linear narrow = Nvfp4Linear.Load(weights, "narrow");
+        Assert.Equal((long)WideOut * InFeatures, wide.DequantScratchElements);
+
+        IBackend backend = new CpuBackend();
+        using Tensor input = IdentityInput(InFeatures);
+        using Tensor reference = new Tensor(new TensorShape(1, InFeatures, NarrowOut), DType.F32);
+        narrow.Forward(backend, reference, input);
+
+        using Tensor scratch = Nvfp4Linear.CreateDequantScratch(wide.DequantScratchElements);
+        using Tensor wideOut = new Tensor(new TensorShape(1, InFeatures, WideOut), DType.F32);
+        using Tensor narrowOut = new Tensor(new TensorShape(1, InFeatures, NarrowOut), DType.F32);
+        wide.Forward(backend, wideOut, input, scratch);
+        narrow.Forward(backend, narrowOut, input, scratch);
+
+        float* r = (float*)reference.DataPointer;
+        float* n = (float*)narrowOut.DataPointer;
+        for (long i = 0; i < narrowOut.ElementCount; i++) Assert.Equal(r[i], n[i]);
+
+        Assert.Throws<ArgumentException>(() =>
+        {
+            using Tensor tooSmall = Nvfp4Linear.CreateDequantScratch(narrow.DequantScratchElements);
+            wide.Forward(backend, wideOut, input, tooSmall);
+        });
     }
 
     [Fact]

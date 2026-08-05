@@ -203,8 +203,12 @@ public unsafe class MiniMaxH3BackendParityTests
         return Math.Sqrt(s / t.ElementCount);
     }
 
-    [Fact]
-    public void CudaForwardMatchesTheCpuReferencePath()
+    /// <summary>The CPU reference is always F32 (CpuBackend is F32-only), so the bf16 case measures the residual
+    /// stream's own rounding, not backend disagreement.</summary>
+    [Theory]
+    [InlineData(false, 5e-3)]
+    [InlineData(true, 1.5e-2)]
+    public void CudaForwardMatchesTheCpuReferencePath(bool bf16Body, double tolerance)
     {
         if (!Directory.Exists(PtxDir()))
         {
@@ -241,11 +245,14 @@ public unsafe class MiniMaxH3BackendParityTests
         }
 
         Tensor videoGpu, audioGpu;
+        long forwardSyncs;
         using (IBackend gpu = new CudaBackend(deviceOrdinal: 0, ptxDir: PtxDir()))
-        using (MiniMaxH3Transformer dit = new MiniMaxH3Transformer(c))
+        using (MiniMaxH3Transformer dit = new MiniMaxH3Transformer(c) { BodyDType = bf16Body ? DType.BF16 : DType.F32 })
         {
             dit.LoadWeights(CopyWeights(weights));
+            gpu.ResetD2hSyncCount();
             (Tensor v, Tensor a) = dit.Forward(gpu, layout, videoRows, audioRows, text, cos, sin, uniqueT, rowOf, tagRuns);
+            forwardSyncs = gpu.GetD2hSyncCount();
             gpu.Sync();
             // Device activations must be pulled to the host before the backend (and its allocations) go away.
             try
@@ -265,9 +272,14 @@ public unsafe class MiniMaxH3BackendParityTests
             double video = RelL2(videoGpu, videoCpu), audio = RelL2(audioGpu, audioCpu);
             _output.WriteLine($"video relL2={video:E3} (cpu rms={Rms(videoCpu):F5}, gpu rms={Rms(videoGpu):F5})");
             _output.WriteLine($"audio relL2={audio:E3} (cpu rms={Rms(audioCpu):F5}, gpu rms={Rms(audioGpu):F5})");
-            // The floor is the TF32 GEMM difference (~5e-4). A dropped in-place write lands at O(1).
-            Assert.True(video < 5e-3, $"CUDA video head diverged from the CPU reference: relL2 {video:E3}");
-            Assert.True(audio < 5e-3, $"CUDA audio head diverged from the CPU reference: relL2 {audio:E3}");
+            _output.WriteLine($"D2H syncs during the forward: {forwardSyncs}");
+            // Floors: TF32 GEMM difference (~5e-4) at F32, one bf16 rounding (~4e-3) with the bf16 stream.
+            // A dropped in-place write lands at O(1) either way.
+            Assert.True(video < tolerance, $"CUDA video head diverged from the CPU reference: relL2 {video:E3}");
+            Assert.True(audio < tolerance, $"CUDA audio head diverged from the CPU reference: relL2 {audio:E3}");
+            // Each sync is a full stream drain plus a device-to-host copy that also evicts the tensor from the
+            // activation cache; the forward must stay entirely on-device.
+            Assert.True(forwardSyncs == 0, $"MiniMax-H3 forward pulled {forwardSyncs} activations back to the host.");
         }
         finally
         {

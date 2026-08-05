@@ -289,6 +289,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _sparseGatherFromGridF32;
     private readonly nint _rowGatherF32;
     private readonly nint _rowScatterAddF32;
+    private readonly nint _ditAffineBroadcastRowIndexedF32;
+    private readonly nint _ditGatedResidualRowIndexedF32;
 
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
     private readonly CudaModule _ditF16Module;
@@ -307,6 +309,17 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditRepeatKvF16;
     private readonly nint _ditSliceRowsF16;
     private readonly nint _ditChwToHwcU8;
+    private readonly nint _ditAffineBroadcastRowIndexedF16;
+    private readonly nint _ditGatedResidualRowIndexedF16;
+
+    // ── DiT glue function handles (BF16 — DiT BF16 activation path) ────
+    private readonly CudaModule _ditBf16Module;
+    private readonly nint _ditRmsNormBf16;
+    private readonly nint _ditGluActBf16;
+    private readonly nint _ditAffineBroadcastRowIndexedBf16;
+    private readonly nint _ditGatedResidualRowIndexedBf16;
+    private readonly nint _ditAffineBroadcastBf16;
+    private readonly nint _ditGatedResidualBf16;
 
     // ── FP8 Cast Modules + Handles ────────────────────────────────────────
     private readonly CudaModule _castF8Module;
@@ -642,6 +655,8 @@ public sealed class CudaKernels : IDisposable
         _sparseGatherFromGridF32 = _ditF32Module.GetFunction("sparse_gather_from_grid_f32");
         _rowGatherF32 = _ditF32Module.GetFunction("row_gather_f32");
         _rowScatterAddF32 = _ditF32Module.GetFunction("row_scatter_add_f32");
+        _ditAffineBroadcastRowIndexedF32 = _ditF32Module.GetFunction("dit_affine_broadcast_rowindexed_f32");
+        _ditGatedResidualRowIndexedF32 = _ditF32Module.GetFunction("dit_gated_residual_rowindexed_f32");
 
         _mg3ActionModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mg3_action.ptx"));
         _mg3SplitQkvTemporalF32 = _mg3ActionModule.GetFunction("mg3_split_qkv_temporal_f32");
@@ -667,6 +682,17 @@ public sealed class CudaKernels : IDisposable
         _ditRepeatKvF16 = _ditF16Module.GetFunction("dit_repeat_kv_f16");
         _ditSliceRowsF16 = _ditF16Module.GetFunction("dit_slice_rows_f16");
         _ditChwToHwcU8 = _ditF16Module.GetFunction("dit_chw_f32_to_hwc_u8");
+        _ditAffineBroadcastRowIndexedF16 = _ditF16Module.GetFunction("dit_affine_broadcast_rowindexed_f16");
+        _ditGatedResidualRowIndexedF16 = _ditF16Module.GetFunction("dit_gated_residual_rowindexed_f16");
+
+        // ── DiT glue (BF16 I/O, F32 accumulate) — DiT BF16 activation path ─
+        _ditBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dit_bf16.ptx"));
+        _ditRmsNormBf16 = _ditBf16Module.GetFunction("dit_rmsnorm_bf16");
+        _ditGluActBf16 = _ditBf16Module.GetFunction("dit_glu_act_bf16");
+        _ditAffineBroadcastRowIndexedBf16 = _ditBf16Module.GetFunction("dit_affine_broadcast_rowindexed_bf16");
+        _ditGatedResidualRowIndexedBf16 = _ditBf16Module.GetFunction("dit_gated_residual_rowindexed_bf16");
+        _ditAffineBroadcastBf16 = _ditBf16Module.GetFunction("dit_affine_broadcast_lastdim_bf16");
+        _ditGatedResidualBf16 = _ditBf16Module.GetFunction("dit_gated_residual_lastdim_bf16");
 
         // ── Audio conv (codec/TTS Conv1d + ConvTranspose1d, F32) ─────────
         _audioConvF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "conv1d_f32.ptx"));
@@ -1082,6 +1108,50 @@ public sealed class CudaKernels : IDisposable
         args[2] = &scaleArg;
         args[3] = &shiftArg;
         args[4] = &seqArg;
+        args[5] = &dimArg;
+        args[6] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchAffineBroadcastRowIndexedImpl(nint func, ulong output, ulong input, ulong scaleTable,
+        ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
+    {
+        ulong outArg = output, inArg = input, scaleArg = scaleTable, shiftArg = shiftTable, idxArg = rowIndex;
+        uint dimArg = (uint)dim;
+        ulong totalArg = (ulong)total;
+
+        void** args = stackalloc void*[7];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &scaleArg;
+        args[3] = &shiftArg;
+        args[4] = &idxArg;
+        args[5] = &dimArg;
+        args[6] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchGatedResidualRowIndexedImpl(nint func, ulong output, ulong residual, ulong value,
+        ulong gateTable, ulong rowIndex, int dim, long total, nint stream)
+    {
+        ulong outArg = output, resArg = residual, valArg = value, gateArg = gateTable, idxArg = rowIndex;
+        uint dimArg = (uint)dim;
+        ulong totalArg = (ulong)total;
+
+        void** args = stackalloc void*[7];
+        args[0] = &outArg;
+        args[1] = &resArg;
+        args[2] = &valArg;
+        args[3] = &gateArg;
+        args[4] = &idxArg;
         args[5] = &dimArg;
         args[6] = &totalArg;
 
@@ -1943,6 +2013,10 @@ public sealed class CudaKernels : IDisposable
     public void LaunchRmsNormF16(ulong output, ulong input, ulong weight, int normDim, int totalRows, float eps, nint stream)
         => LaunchRmsNormImpl(_ditRmsNormF16, output, input, weight, normDim, totalRows, eps, stream);
 
+    /// <summary>RMSNorm with BF16 I/O (F32 accumulate, F32 weight). Same launch geometry as the F32 kernel.</summary>
+    public void LaunchRmsNormBf16(ulong output, ulong input, ulong weight, int normDim, int totalRows, float eps, nint stream)
+        => LaunchRmsNormImpl(_ditRmsNormBf16, output, input, weight, normDim, totalRows, eps, stream);
+
     /// <summary>Launches broadcast affine over the last dim: out = in*scale + shift (shift optional, pass 0 to skip).</summary>
     public void LaunchAffineBroadcastLastDim(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
         => LaunchAffineBroadcastImpl(_ditAffineBroadcastF32, output, input, scale, shift, seqLen, dim, total, stream);
@@ -1950,6 +2024,22 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Broadcast affine over the last dim, F16 activation I/O (scale/shift stay F32).</summary>
     public void LaunchAffineBroadcastLastDimF16(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
         => LaunchAffineBroadcastImpl(_ditAffineBroadcastF16, output, input, scale, shift, seqLen, dim, total, stream);
+
+    /// <summary>Broadcast affine over the last dim, BF16 activation I/O (scale/shift stay F32).</summary>
+    public void LaunchAffineBroadcastLastDimBf16(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
+        => LaunchAffineBroadcastImpl(_ditAffineBroadcastBf16, output, input, scale, shift, seqLen, dim, total, stream);
+
+    /// <summary>Row-indexed affine with the table gather and the <c>1 +</c> folded in (shift optional, pass 0 to skip).</summary>
+    public void LaunchAffineBroadcastRowIndexed(ulong output, ulong input, ulong scaleTable, ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
+        => LaunchAffineBroadcastRowIndexedImpl(_ditAffineBroadcastRowIndexedF32, output, input, scaleTable, shiftTable, rowIndex, dim, total, stream);
+
+    /// <summary>Row-indexed affine, F16 activation I/O (the modulation table stays F32).</summary>
+    public void LaunchAffineBroadcastRowIndexedF16(ulong output, ulong input, ulong scaleTable, ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
+        => LaunchAffineBroadcastRowIndexedImpl(_ditAffineBroadcastRowIndexedF16, output, input, scaleTable, shiftTable, rowIndex, dim, total, stream);
+
+    /// <summary>Row-indexed affine, BF16 activation I/O (the modulation table stays F32).</summary>
+    public void LaunchAffineBroadcastRowIndexedBf16(ulong output, ulong input, ulong scaleTable, ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
+        => LaunchAffineBroadcastRowIndexedImpl(_ditAffineBroadcastRowIndexedBf16, output, input, scaleTable, shiftTable, rowIndex, dim, total, stream);
 
     /// <summary>Launches GQA K/V head repeat (block pattern): [B,Hkv,L,D] → [B,Hkv*group,L,D].</summary>
     public void LaunchRepeatKv(ulong output, ulong input, int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
@@ -2227,6 +2317,13 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Fused gated-FFN activation epilogue over the concatenated [gate | up] projection output
     /// (act 0 = SiLU, 1 = GELU-tanh): one elementwise pass, no slice/activation/multiply intermediates.</summary>
     public unsafe void LaunchGluAct(ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)
+        => LaunchGluActImpl(_lmGluActF32, comb, gateUp, rows, ff, gelu, stream);
+
+    /// <summary>Gated-FFN activation epilogue with BF16 I/O (F32 compute). Same launch geometry as the F32 kernel.</summary>
+    public unsafe void LaunchGluActBf16(ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)
+        => LaunchGluActImpl(_ditGluActBf16, comb, gateUp, rows, ff, gelu, stream);
+
+    private unsafe void LaunchGluActImpl(nint func, ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)
     {
         ulong combA = comb, guA = gateUp;
         uint rowsA = (uint)rows, ffA = (uint)ff;
@@ -2235,7 +2332,7 @@ public sealed class CudaKernels : IDisposable
         args[0] = &combA; args[1] = &guA; args[2] = &rowsA; args[3] = &ffA; args[4] = &actA;
         long total = (long)rows * ff;
         uint grid = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_lmGluActF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>RMSNorm + Q8_1 sidecar emission in one launch (bit-identical F32 output to the plain
@@ -2471,6 +2568,22 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Gated residual over the last dim, F16 activation I/O (gate stays F32).</summary>
     public void LaunchGatedResidualLastDimF16(ulong output, ulong residual, ulong value, ulong gate, int seqLen, int dim, long total, nint stream)
         => LaunchGatedResidualImpl(_ditGatedResidualF16, output, residual, value, gate, seqLen, dim, total, stream);
+
+    /// <summary>Gated residual over the last dim, BF16 activation I/O (gate stays F32).</summary>
+    public void LaunchGatedResidualLastDimBf16(ulong output, ulong residual, ulong value, ulong gate, int seqLen, int dim, long total, nint stream)
+        => LaunchGatedResidualImpl(_ditGatedResidualBf16, output, residual, value, gate, seqLen, dim, total, stream);
+
+    /// <summary>Row-indexed gated residual with the gate-table gather folded in.</summary>
+    public void LaunchGatedResidualRowIndexed(ulong output, ulong residual, ulong value, ulong gateTable, ulong rowIndex, int dim, long total, nint stream)
+        => LaunchGatedResidualRowIndexedImpl(_ditGatedResidualRowIndexedF32, output, residual, value, gateTable, rowIndex, dim, total, stream);
+
+    /// <summary>Row-indexed gated residual, F16 activation I/O (the gate table stays F32).</summary>
+    public void LaunchGatedResidualRowIndexedF16(ulong output, ulong residual, ulong value, ulong gateTable, ulong rowIndex, int dim, long total, nint stream)
+        => LaunchGatedResidualRowIndexedImpl(_ditGatedResidualRowIndexedF16, output, residual, value, gateTable, rowIndex, dim, total, stream);
+
+    /// <summary>Row-indexed gated residual, BF16 activation I/O (the gate table stays F32).</summary>
+    public void LaunchGatedResidualRowIndexedBf16(ulong output, ulong residual, ulong value, ulong gateTable, ulong rowIndex, int dim, long total, nint stream)
+        => LaunchGatedResidualRowIndexedImpl(_ditGatedResidualRowIndexedBf16, output, residual, value, gateTable, rowIndex, dim, total, stream);
 
     /// <summary>Sigmoid with F16 I/O (F32 exp), for the Krea2 attention output gate.</summary>
     public unsafe void LaunchDitSigmoidF16(ulong output, ulong input, int count, nint stream)
@@ -3683,6 +3796,8 @@ public sealed class CudaKernels : IDisposable
         _groupnormSiluF16Module?.Dispose();
         _castModule?.Dispose();
         _ditF32Module?.Dispose();
+        _ditF16Module?.Dispose();
+        _ditBf16Module?.Dispose();
         _audioConvF32Module?.Dispose();
         _audioActF32Module?.Dispose();
         _audioAdain1dF32Module?.Dispose();

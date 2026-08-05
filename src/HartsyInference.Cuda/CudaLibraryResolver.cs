@@ -103,6 +103,16 @@ public static class CudaLibraryResolver
                 return NativeLibrary.Load("libcuda.so.1");
         }
 
+        // NVTX ships with the toolkit but CUDA 12+ leaves it outside the loader path on some distros, so the
+        // profiler silently degraded to no-ops. Same probe dirs as the rest of the userspace libs.
+        if (libraryName == "libnvToolsExt.so.1" || libraryName == "nvToolsExt64_1")
+        {
+            if (windows)
+                return LoadFirst("nvToolsExt64_1.dll");
+            else if (linux)
+                return LoadFirst("libnvToolsExt.so.1");
+        }
+
         if (libraryName == "cublas")
         {
             // Try newest first, then older toolkits

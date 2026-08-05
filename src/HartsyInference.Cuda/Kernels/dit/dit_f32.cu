@@ -102,6 +102,53 @@ __global__ void dit_gated_residual_lastdim_f32(
     output[i] = residual[i] + gate[pIdx] * value[i];
 }
 
+// ── Row-indexed broadcast affine (gather fused in) ─────────────────────────
+// out[r,d] = in[r,d] * (1 + scaleTable[rowIndex[r], d]) + (shiftTable ? shiftTable[rowIndex[r], d] : 0)
+// The lastdim twin above needs the modulation already expanded to one row per token; this one indexes
+// the SMALL [modRows, dim] table directly, so the caller skips the materialized [seq, dim] gathers.
+// The `1 +` is folded in as well — the unfused path pays a separate AddScalar over the table for it.
+__global__ void dit_affine_broadcast_rowindexed_f32(
+    float* __restrict__ output,
+    const float* __restrict__ input,
+    const float* __restrict__ scaleTable,
+    const float* __restrict__ shiftTable,
+    const int* __restrict__ rowIndex,
+    unsigned int dim,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+
+    unsigned int d = (unsigned int)(i % dim);
+    unsigned long long row = i / dim;
+    size_t tIdx = (size_t)rowIndex[row] * dim + d;
+
+    float v = input[i] * (1.0f + scaleTable[tIdx]);
+    if (shiftTable != 0) v += shiftTable[tIdx];
+    output[i] = v;
+}
+
+// ── Row-indexed gated residual (gather fused in) ───────────────────────────
+// out[r,d] = residual[r,d] + gateTable[rowIndex[r], d] * value[r,d]
+__global__ void dit_gated_residual_rowindexed_f32(
+    float* __restrict__ output,
+    const float* __restrict__ residual,
+    const float* __restrict__ value,
+    const float* __restrict__ gateTable,
+    const int* __restrict__ rowIndex,
+    unsigned int dim,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+
+    unsigned int d = (unsigned int)(i % dim);
+    unsigned long long row = i / dim;
+    size_t tIdx = (size_t)rowIndex[row] * dim + d;
+
+    output[i] = residual[i] + gateTable[tIdx] * value[i];
+}
+
 // ── AdaLN modulation split (scale-only, tanh-gated) ─────────────────────────
 // proj is [B, 4*D] = chunk(scale_msa, gate_msa, scale_mlp, gate_mlp). Writes four [B, D]
 // tensors applying (1 + x) to scales and tanh(x) to gates, matching Ideogram 4's
