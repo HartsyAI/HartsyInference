@@ -320,7 +320,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         if (request is ImageToImageRequest img2img)
         {
             Stopwatch vaeEncSw = Stopwatch.StartNew();
-            Tensor sourceLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
+            Tensor sourceLatent = _vaeEncoder!.Encode(VaeBackend, img2img.SourceImage);  // LOAD-BEARING for VaeDevice: AddNoise below is host-side
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 

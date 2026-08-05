@@ -361,7 +361,51 @@ These schemas are stable for the duration of Phase B. Schema changes require bum
 
 ---
 
-## 15. References
+## 15. Multi-GPU Verification Campaign Conventions
+
+Real-weight multi-GPU tests (component placement, DiT sharding, CFG-parallel) follow their own run
+discipline — a whole-suite `dotnet test` is never valid evidence for them. The conventions:
+
+1. **Run per-class, filter-isolated** — one process per test class:
+   ```bash
+   dotnet test tests/<Project>/<Project>.csproj --filter "FullyQualifiedName~<ClassName>"
+   ```
+   Two reasons: `HartsyInference.Diffusion.Tests` has a known pre-existing nondeterministic native-heap
+   abort in untagged tests, and settings like `HARTSY_KEEP_MODELS` are **static-readonly reads** — a fact
+   that needs `HARTSY_KEEP_MODELS=0` must run in its own process, so some classes are split down to
+   per-fact filters (see the campaign script).
+
+2. **`HARTSY_REQUIRE_REAL_WEIGHTS=1`** — real-weight tests gate on checkpoints via
+   [`RealWeightGate`](../../tests/HartsyInference.Tests.Common/RealWeightGate.cs). Default behavior on a
+   missing file is log `SKIPPED: ...` and return early (safe for CI boxes without weights); with the env
+   var set, a missing file **throws**, so a green campaign exit genuinely means every listed test
+   executed. The campaign runner additionally greps each log for `SKIPPED` and fails the class if any
+   non-checkpoint guard self-skipped.
+
+3. **`[Trait("Category", "RealWeights")]`** — every campaign class carries this trait, so the set is
+   enumerable (`--filter "Category=RealWeights"` to list, never to run — see rule 1).
+
+4. **The runner**: [`tests/run-multigpu-campaign.sh`](../../tests/run-multigpu-campaign.sh)
+   `[phaseA|phaseB|all]` (default phaseA) encodes all of the above plus pre-flight checks (stray-process
+   kill/report, `swarmui.service` warning, per-card free-VRAM gates) and logs to
+   `Output/multigpu-campaign/<stamp>/`. phaseA needs only checkpoints already on the box; phaseB needs
+   the re-downloadable ones (chroma, qwen-image, hunyuan-image, wan).
+
+5. **Ordinal order ≠ nvidia-smi order.** CUDA enumerates devices **fastest-first**, which does NOT match
+   nvidia-smi's PCI-bus order on multi-GPU boxes — on the dev box CUDA ordinal 0 = 4090, 1 = 3060,
+   **reversed** from nvidia-smi. Never write a per-GPU claim from an ordinal without running
+   `CudaOrdinalMapTests` first (it prints the live ordinal → card-name → VRAM map); the campaign runs it
+   as class #1 so every later log can name cards instead of guessing.
+
+6. **VRAM settle lag between classes.** Driver VRAM teardown lags a heavy test process's exit by a few
+   seconds; the NEXT process's backend construction sizes its weight-cache budget from a free-VRAM probe
+   taken during that window and then OOMs with a near-zero budget (observed twice). The runner polls
+   `nvidia-smi` after each class and waits until both cards are back above their gate before continuing —
+   do the same in any manual back-to-back sequence.
+
+---
+
+## 16. References
 
 - NVIDIA Nsight Systems user guide: https://docs.nvidia.com/nsight-systems/UserGuide/
 - NVIDIA Nsight Compute kernel profiling: https://docs.nvidia.com/nsight-compute/NsightCompute/index.html

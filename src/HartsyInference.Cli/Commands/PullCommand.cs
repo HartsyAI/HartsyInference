@@ -28,6 +28,15 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
         using CancellationTokenSource cts = new CancellationTokenSource();
         using IDisposable cancelBinding = CommandRunner.BindCancelKey(cts);
 
+        // Catalog ids first ("chroma", "qwen-image", ...): pull the pinned asset set into the Models tree —
+        // the same flow `hartsy image -m <id>` uses, minus the confirmation prompt (pull IS the confirmation).
+        // Previously these fell through to the raw HF path and died on a 401 for a nonexistent bare repo id.
+        CatalogEntry? catalogEntry = ModelCatalog.Find(settings.Model);
+        if (catalogEntry is not null && catalogEntry.Assets.Count > 0)
+        {
+            return await PullCatalogAsync(catalogEntry, cts.Token).ConfigureAwait(false);
+        }
+
         using ModelRegistry registry = new ModelRegistry();
         ModelCacheStore cache = new ModelCacheStore();
 
@@ -71,6 +80,58 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
         catch (Exception ex)
         {
             Logs.Error($"Pull failed for '{settings.Model}'", ex);
+            AnsiConsole.MarkupLine($"[red]Pull failed:[/] {Markup.Escape(ex.Message)}");
+            return 1;
+        }
+    }
+
+    /// <summary>Downloads a catalog entry's missing assets (transformer + side models) into the Models tree.</summary>
+    private static async Task<int> PullCatalogAsync(CatalogEntry cat, CancellationToken ct)
+    {
+        try
+        {
+            IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(cat);
+            if (missing.Count == 0)
+            {
+                AnsiConsole.MarkupLine($"[green]✓[/] [{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] already present.");
+                string? path = ModelDownloader.PrimaryLocalPath(cat);
+                if (path is not null)
+                    AnsiConsole.MarkupLine($"  [#9aa4af]path:[/] {Markup.Escape(path)}");
+                return 0;
+            }
+
+            AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s):[/]");
+            foreach (ModelAsset a in missing)
+                AnsiConsole.MarkupLine($"  [#9aa4af]{a.Role}:[/] {Markup.Escape(a.Repo)}/{Markup.Escape(a.RepoPath)} [#9aa4af]→ Models/{Markup.Escape(a.TargetSubdir)}/[/]");
+
+            await AnsiConsole.Progress()
+                .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new SpinnerColumn())
+                .StartAsync(async ctx =>
+                {
+                    Dictionary<string, ProgressTask> tasks = new(StringComparer.Ordinal);
+                    foreach (ModelAsset a in missing)
+                        tasks[a.FileName] = ctx.AddTask(Markup.Escape(a.FileName), maxValue: 1.0);
+                    await ModelDownloader.DownloadAsync(missing, (a, fraction) =>
+                    {
+                        if (tasks.TryGetValue(a.FileName, out ProgressTask? task))
+                            task.Value = fraction;
+                    }, ct).ConfigureAwait(false);
+                }).ConfigureAwait(false);
+
+            AnsiConsole.MarkupLine($"[green]✓[/] pulled [{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/]");
+            string? primary = ModelDownloader.PrimaryLocalPath(cat);
+            if (primary is not null)
+                AnsiConsole.MarkupLine($"  [#9aa4af]path:[/] {Markup.Escape(primary)}");
+            return 0;
+        }
+        catch (OperationCanceledException)
+        {
+            AnsiConsole.MarkupLine("[yellow]Pull cancelled.[/]");
+            return 130;
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"Catalog pull failed for '{cat.Id}'", ex);
             AnsiConsole.MarkupLine($"[red]Pull failed:[/] {Markup.Escape(ex.Message)}");
             return 1;
         }

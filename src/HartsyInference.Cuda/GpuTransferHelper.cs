@@ -53,6 +53,10 @@ internal static unsafe class GpuTransferHelper
         /// <summary>Set of GPU pointers that belong to either cache (skip in FreeDevice).</summary>
         public readonly HashSet<ulong> CachedPointers = new();
 
+        /// <summary>Buffers displaced by a <see cref="CacheActivation"/> rebind, awaiting a caller's
+        /// <see cref="FreeDevice"/>; whatever is still here when the next op starts had no owner and is freed.</summary>
+        public readonly HashSet<ulong> PendingOrphans = new();
+
         /// <summary>Graph-capture arenas: while a decode-step graph is being captured
         /// (<see cref="BeginGraphArena"/>), <see cref="AllocateDevice"/> bump-allocates from a per-capture
         /// pre-reserved buffer instead of the stream-ordered pool — so the captured graph contains ZERO
@@ -508,8 +512,43 @@ internal static unsafe class GpuTransferHelper
         State s = Resolve();
         if (gpuPtr != 0 && !s.CachedPointers.Contains(gpuPtr) && !IsArenaPtr(s, gpuPtr))
         {
+            // The caller owns this one after all, so SweepOrphans must not free it a second time.
+            if (s.PendingOrphans.Count != 0) s.PendingOrphans.Remove(gpuPtr);
             CudaMemory.FreeAsync(gpuPtr, s.StreamHandle);
         }
+    }
+
+    /// <summary>Frees buffers displaced by a <see cref="CacheActivation"/> rebind that no caller claimed.</summary>
+    /// <remarks>Called at the start of each op, so every previous op's <c>finally</c> has already run and anything
+    /// still parked provably has no owner. Sweeping here rather than inside CacheActivation is what keeps the
+    /// in-place case (where the displaced buffer is the op's own input) from being double-freed.</remarks>
+    /// <summary><c>HARTSY_ORPHAN_SWEEP=0</c> restores the pre-fix behaviour (displaced buffers leak) — a
+    /// bisect handle for a change that sits on every op's allocation path.</summary>
+    private static readonly bool OrphanSweepEnabled =
+        Environment.GetEnvironmentVariable("HARTSY_ORPHAN_SWEEP") != "0";
+
+    internal static void SweepOrphans()
+    {
+        if (!OrphanSweepEnabled) return;
+        State s = Resolve();
+        if (s.PendingOrphans.Count == 0) return;
+        // cuMemFreeAsync on a buffer allocated BEFORE the capture began is rejected outright
+        // (CUDA_ERROR_INVALID_VALUE, which aborted all three CudaGraphTests). Leave them parked; the first
+        // op after capture ends sweeps them. The probe sits behind the empty-set check on purpose — a driver
+        // call on every EnterOp would cost more than the leak did.
+        if (s.StreamHandle != 0)
+        {
+            CudaDriverApi.cuStreamIsCapturing(s.StreamHandle, out int captureStatus).ThrowOnError();
+            if (captureStatus != 0) return;
+        }
+        foreach (ulong ptr in s.PendingOrphans)
+        {
+            if (!s.CachedPointers.Contains(ptr) && !IsArenaPtr(s, ptr))
+            {
+                CudaMemory.FreeAsync(ptr, s.StreamHandle);
+            }
+        }
+        s.PendingOrphans.Clear();
     }
 
     /// <summary>Registers a Q8_1 sidecar (from a quantize-at-producer kernel) for an activation tensor.
@@ -555,14 +594,21 @@ internal static unsafe class GpuTransferHelper
         // Any rebind of this tensor's device buffer stales a producer-emitted Q8_1 sidecar — drop it.
         RemoveSidecar(s, tensor);
 
-        // In-place op re-caching its own output (e.g. backend.Gelu(x, x) / AffineBroadcastLastDim(x, x, …)): the
-        // tensor already maps to its OLD device buffer. Drop that old pointer from the cached set WITHOUT freeing it
-        // here — the calling op's `finally FreeDevice(pInput)` then frees it exactly once (FreeDevice only skips
-        // pointers still in CachedPointers). Leaving it would orphan the old buffer: no tensor maps to it, so
-        // neither Dispose nor FreeActivations nor GC ever reclaims it → a permanent per-op device-memory leak (this
-        // was the Wan full-res multi-step OOM; latent in every in-place backend op across LLM/Vision/Diffusion).
+        // This tensor already maps to a DIFFERENT device buffer, so that buffer is being displaced. Drop it from
+        // the cached set — but who frees it depends on the op:
+        //   in-place (backend.Gelu(x, x) into a fresh output): the displaced buffer IS the op's pInput, and its
+        //     `finally FreeDevice(pInput)` frees it exactly once (FreeDevice only skips CachedPointers members);
+        //   not in-place (Linear(output, input, weight) reusing `output`): the displaced buffer is nobody's input,
+        //     so nothing ever frees it. Removing it from the cached set and stopping there orphaned it — no tensor
+        //     maps to it, so neither Dispose nor FreeActivations nor GC reclaimed it. Measured: 12 Linear calls at
+        //     a 563 MB output stranded 5942 MB, and it broke unrelated tests sharing the GPU.
+        // So park it instead: FreeDevice claims it if the caller does own it, and SweepOrphans frees whatever is
+        // still unclaimed when the next op begins (by which point the owning op's finally blocks have all run).
         if (gpuPtr != 0 && s.ActivationCache.TryGetValue(tensor, out (ulong gpuPtr, nuint bytes) prev) && prev.gpuPtr != gpuPtr)
+        {
             s.CachedPointers.Remove(prev.gpuPtr);
+            if (!IsArenaPtr(s, prev.gpuPtr)) s.PendingOrphans.Add(prev.gpuPtr);
+        }
 
         // In-place op mutated an auto-promoted weight's device buffer (CopyToDevice returned the cached ptr, the
         // kernel wrote through it). The buffer's contents no longer match host data, so it can't stay a cached
@@ -934,6 +980,8 @@ internal static unsafe class GpuTransferHelper
     {
         State s = Resolve();
         s.Context?.EnsureCurrent();
+        // Called between pipeline stages, never mid-op, so any parked orphan is already ownerless.
+        SweepOrphans();
         // Q8_1 sidecars are per-step transients riding on activations — sweep them all here (pinned
         // survivors included: a consumer that misses the sidecar simply re-quantizes).
         foreach (Tensor t in s.SidecarCache.Keys.ToList())

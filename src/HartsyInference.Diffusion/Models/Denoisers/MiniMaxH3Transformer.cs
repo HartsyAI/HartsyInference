@@ -139,6 +139,78 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
     }
 
+    /// <summary>DiT-sharded forward: blocks <c>[0, splitBlock)</c> on <paramref name="backendA"/> (which also owns
+    /// every shared weight — embeds, token refiner, final layer), <c>[splitBlock, NumLayers)</c> on
+    /// <paramref name="backendB"/>. The residual stream <c>h</c> and the tiny time embedding cross via
+    /// <see cref="IBackend.CopyFromPeer"/>; the host-built modulation index and rope cos/sin tables are consumed
+    /// by both backends directly (each stages its own upload — sequential use, never concurrent). VRAM pooling,
+    /// not latency: this is what makes the ~19.5 GB fp8 build fully resident across a 24+12 GB pair instead of
+    /// streaming ~19 GB of weights per step. H3 has no step-graph/step-cache/block-streaming, so there are no
+    /// exclusions to gate — the fp8-build-only constraint lives in the recipe's existing &lt;40 GB check.</summary>
+    public (Tensor Video, Tensor Audio) ForwardSharded(IBackend backendA, IBackend backendB,
+        MiniMaxH3PackedLayout layout, Tensor videoRows, Tensor audioRows, Tensor textStates, Tensor cos, Tensor sin,
+        float[] uniqueTimesteps, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf, int splitBlock,
+        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null)
+    {
+        ArgumentNullException.ThrowIfNull(backendA);
+        ArgumentNullException.ThrowIfNull(backendB);
+        ArgumentNullException.ThrowIfNull(layout);
+        if (splitBlock <= 0 || splitBlock >= _config.NumLayers)
+            throw new ArgumentOutOfRangeException(nameof(splitBlock),
+                $"splitBlock must be in (0, {_config.NumLayers}) exclusive, got {splitBlock}.");
+        int seq = layout.SequenceLength;
+
+        Tensor h = EmbedSegments(backendA, layout, videoRows, audioRows, textStates);
+        Tensor tEmb = BuildTimeEmbedding(backendA, uniqueTimesteps);
+        Tensor modIndex = BuildModulationIndex(layout, seq, timestepRowOf, textTagRuns);
+        try
+        {
+            for (int i = 0; i < splitBlock; i++)
+            {
+                ForwardBlock(backendA, ref h, tEmb, modIndex, cos, sin, i);
+            }
+
+            // Boundary A→B: the residual stream MOVES; tEmb is only COPIED (the final layer on A reads it after
+            // B's range). The curve-table tEmb variant is host-built, but the sinusoidal variant is device-built
+            // on A — copy unconditionally so both checkpoint families behave identically.
+            Tensor hB = CopyAcross(backendB, backendA, h);
+            h.Dispose();
+            h = hB;
+            Tensor tEmbB = CopyAcross(backendB, backendA, tEmb);
+            try
+            {
+                for (int i = splitBlock; i < _config.NumLayers; i++)
+                {
+                    ForwardBlock(backendB, ref h, tEmbB, modIndex, cos, sin, i);
+                }
+            }
+            finally
+            {
+                tEmbB.Dispose();
+            }
+
+            // Boundary B→A: the final layer's weights live in the shared set on A.
+            Tensor hBack = CopyAcross(backendA, backendB, h);
+            h.Dispose();
+            h = hBack;
+            return FinalLayer(backendA, h, tEmb, layout, timestepRowOf);
+        }
+        finally
+        {
+            modIndex.Dispose();
+            tEmb.Dispose();
+            h.Dispose();
+        }
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device; the source stays live.</summary>
+    private static Tensor CopyAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor copied = new Tensor(source.Shape, source.DType);
+        dst.CopyFromPeer(copied, source, src);
+        return copied;
+    }
+
     /// <summary>Assembles the packed stream: text rows go through condition_proj + the token refiner, video and audio
     /// rows through their patch projections, concatenated in segment order. The residual stream is shaped
     /// <c>[seq, 1, hidden]</c> so the adaLN ops see a broadcast group of one row and modulate per token.</summary>

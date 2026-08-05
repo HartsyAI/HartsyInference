@@ -131,29 +131,33 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         else
         {
             // Cache miss: the DiT cannot share the card with the 7B TE's preload — evict it first.
-            if (_ditResident)
+            // A TE on its OWN device (TextEncoderBackend) never contends with the DiT, so skip the evict
+            // (and the re-upload it forces) entirely when split.
+            if (_ditResident && ReferenceEquals(TextEncoderBackend, Backend))
             {
                 Backend.Sync();
-                Backend.FreeWeights(_transformer.EnumerateWeights());
-                _ditResident = false;
+                DitShardBackend?.Sync();
+                FreeTransformerWeights();
             }
-            Backend.TrimMemoryPool();
+            TextEncoderBackend.TrimMemoryPool();
 
             Logs.Info("Encoding text with Qwen2.5-VL-7B (primary 3584-dim per-token)...");
-            Backend.PreloadWeights(_qwenEncoder.EnumerateWeights());
-            cond = _qwenEncoder.Encode(Backend, promptTokenIdsQwen, promptAttentionMaskQwen);
+            TextEncoderBackend.PreloadWeights(_qwenEncoder.EnumerateWeights());
+            cond = _qwenEncoder.Encode(TextEncoderBackend, promptTokenIdsQwen, promptAttentionMaskQwen);
             uncond = useCfg
-                ? _qwenEncoder.Encode(Backend, negativePromptTokenIdsQwen!, negativeAttentionMaskQwen!)
+                ? _qwenEncoder.Encode(TextEncoderBackend, negativePromptTokenIdsQwen!, negativeAttentionMaskQwen!)
                 : null;
-            Backend.Sync();
-            Backend.FreeWeights(_qwenEncoder.EnumerateWeights());
+            TextEncoderBackend.Sync();
+            TextEncoderBackend.FreeWeights(_qwenEncoder.EnumerateWeights());
 
             // Host-materialize so the cached embeddings survive the activation sweep, then reclaim the
             // encoder's device intermediates before the DiT preload.
+            // LOAD-BEARING for TextEncoderDevice placement: these host reads ARE the cross-device boundary —
+            // the denoiser's backend re-uploads the conditioning from the host copies.
             _ = cond.DataPointer;
             if (uncond is not null) _ = uncond.DataPointer;
-            Backend.FreeActivations();
-            Backend.TrimMemoryPool();
+            TextEncoderBackend.FreeActivations();
+            TextEncoderBackend.TrimMemoryPool();
 
             _cachedCond?.Dispose();
             _cachedCond = cond;
@@ -195,14 +199,24 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         Logs.Info("Encoding text with T5-XXL (legacy per-token context path)...");
         int[][] condTokenBatch = [promptTokenIdsT5];
         int[][]? condMaskBatch = promptAttentionMaskT5 is null ? null : [promptAttentionMaskT5];
-        Tensor cond = _t5Encoder.Encode(Backend, condTokenBatch, condMaskBatch);
+        Tensor cond = _t5Encoder.Encode(TextEncoderBackend, condTokenBatch, condMaskBatch);
 
         Tensor? uncond = null;
         if (useCfg)
         {
             int[][] uncondTokenBatch = [negativePromptTokenIdsT5];
             int[][]? uncondMaskBatch = negativeAttentionMaskT5 is null ? null : [negativeAttentionMaskT5];
-            uncond = _t5Encoder.Encode(Backend, uncondTokenBatch, uncondMaskBatch);
+            uncond = _t5Encoder.Encode(TextEncoderBackend, uncondTokenBatch, uncondMaskBatch);
+        }
+
+        // Split-only hygiene: the single-GPU path never freed here, so keep it byte-identical.
+        if (!ReferenceEquals(TextEncoderBackend, Backend))
+        {
+            TextEncoderBackend.Sync();
+            TextEncoderBackend.FreeWeights(_t5Encoder.EnumerateWeights());
+            _ = cond.DataPointer;                       // LOAD-BEARING for TextEncoderDevice placement
+            if (uncond is not null) _ = uncond.DataPointer;
+            TextEncoderBackend.FreeActivations();
         }
 
         return Denoise(cond, uncond, request, seed, textOwned: true, onProgress);
@@ -255,7 +269,23 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         //     blocks, which is what lets the 17B DiT run on 12 GB instead of OOMing.
         //   - StreamingCache == null (CPU/Vulkan): eager preload, exactly as before.
         BlockStreamingController? streamer = null;
-        if (Backend.StreamingCache is not null)
+        if (DitShardBackend is not null)
+        {
+            // Sharding beats streaming: the pooled two-card VRAM makes both split ranges resident, which is
+            // strictly better than sliding-window re-uploads. Asymmetric preload — shared + [0, split) on the
+            // primary, ONLY [split, BlockCount) on the shard backend; EnumerateWeights() on both would
+            // replicate instead of pool.
+            if (Backend.StreamingCache is not null)
+                Logs.Info("HunyuanImage: DiT sharding overrides low-VRAM block streaming for this generation.");
+            if (!_ditResident)
+            {
+                Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+                Backend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+                DitShardBackend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+            }
+            _ditResident = true;
+        }
+        else if (Backend.StreamingCache is not null)
         {
             IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
@@ -311,13 +341,11 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             // CFG combine + Euler run as ONE in-place device op (CfgEulerStep: z += (neg + gw·(pos−neg))·dt —
             // for gw=cfgScale this IS uncond + cfg·(cond−uncond); gw=1 degenerates to the plain Euler step),
             // keeping the latent tokens device-resident across the whole loop.
-            Tensor condVel = _transformer.Forward(Backend, latentTokens, condText, encoderHidden2: null,
-                t, distilledGuidance, hPacked, wPacked);
+            Tensor condVel = RunForward(latentTokens, condText, t, distilledGuidance, hPacked, wPacked);
             if (useCfg && _config.GuidanceEmbed == false)
             {
                 // Standard CFG path (un-distilled variant).
-                Tensor uncondVel = _transformer.Forward(Backend, latentTokens, uncondText!, encoderHidden2: null,
-                    t, 1.0f, hPacked, wPacked);
+                Tensor uncondVel = RunForward(latentTokens, uncondText!, t, 1.0f, hPacked, wPacked);
                 Backend.CfgEulerStep(latentTokens, condVel, uncondVel, cfgScale, scheduler.Dt(i));
                 uncondVel.Dispose();
             }
@@ -338,6 +366,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         }
 
         Backend.Sync();
+        DitShardBackend?.Sync();
         // Tear down before the unpatchify + 32-channel VAE decode — that decode is what needs the room back.
         _transformer.BeforeBlockForward = null;
         if (streamer is not null)
@@ -352,8 +381,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         }
         else if (!KeepModelsResident)
         {
-            Backend.FreeWeights(_transformer.EnumerateWeights());
-            _ditResident = false;
+            FreeTransformerWeights();
         }
 
         // Device unpatchify (innerChannelFastest: (py, px, c) inner order — matches PatchifyLatent) keeps the
@@ -362,11 +390,19 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         Backend.UnpatchifyTokens(latent, latentTokens, inChannels, hPacked, wPacked, patch, innerChannelFastest: true);
         latentTokens.Dispose();
 
+        if (!ReferenceEquals(VaeBackend, Backend))
+        {
+            // LOAD-BEARING for VaeDevice: force the device-resident latent to host so the VAE backend
+            // uploads a valid copy — one small D2H vs the multi-second decode.
+            Backend.Sync();
+            _ = latent.DataPointer;
+        }
+
         Logs.Info("Decoding latents to image (32-channel VAE)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
         Tensor decoded = _hyVaeDecoder is not null
-            ? _hyVaeDecoder.Decode(Backend, latent)
-            : _vaeDecoder.Decode(Backend, latent);
+            ? _hyVaeDecoder.Decode(VaeBackend, latent)
+            : _vaeDecoder.Decode(VaeBackend, latent);
         latent.Dispose();
         vaeSw.Stop();
 
@@ -377,11 +413,40 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         // memory until GC finalization and shrink the next generation's budget — and under KEEP_MODELS the
         // trimmed pool is what lets a cross-model switch reclaim VRAM beside the resident DiT.
         Backend.FreeActivations();
+        if (!ReferenceEquals(VaeBackend, Backend)) VaeBackend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"Hunyuan Image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgb, width, height, seed);
+    }
+
+    /// <summary>Routes the per-step forward to <see cref="HunyuanImageTransformer.ForwardSharded"/> when DiT
+    /// sharding is configured and the plain <see cref="HunyuanImageTransformer.Forward"/> otherwise, keeping the
+    /// denoise-loop body identical either way. The ByT5 glyph stream is not wired yet, so both paths pass a null
+    /// <c>encoderHidden2</c>.</summary>
+    private Tensor RunForward(Tensor latentTokens, Tensor text, float t, float guidance, int hPacked, int wPacked) =>
+        DitShardBackend is not null
+            ? _transformer.ForwardSharded(Backend, DitShardBackend, latentTokens, text, encoderHidden2: null,
+                t, guidance, hPacked, wPacked, DitShardSplitBlock)
+            : _transformer.Forward(Backend, latentTokens, text, encoderHidden2: null, t, guidance, hPacked, wPacked);
+
+    /// <summary>Frees the DiT weights on whichever backend(s) hold them — the mirror of the sharded asymmetric
+    /// preload. The unsharded <c>FreeWeights(EnumerateWeights())</c> would silently no-op on the shard backend's
+    /// block range (frees are per-backend) and leak it every non-resident generation.</summary>
+    private void FreeTransformerWeights()
+    {
+        if (DitShardBackend is not null)
+        {
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+        }
+        else
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+        }
+        _ditResident = false;
     }
 
     /// <summary>Estimates the peak per-forward activation footprint (bytes) that must stay free beside the DiT

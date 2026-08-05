@@ -137,6 +137,15 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
         if (_projOutBias is not null) yield return _projOutBias;
     }
 
+    /// <summary>Weights of flat blocks <c>[startBlock, endBlock)</c> only — the asymmetric-preload primitive for DiT
+    /// sharding: backend A preloads <see cref="EnumerateSharedWeights"/> + its range, backend B ONLY its range.
+    /// Never preload <see cref="EnumerateWeights"/> on both backends — that replicates instead of pooling.</summary>
+    public IEnumerable<Tensor> EnumerateBlockRangeWeights(int startBlock, int endBlock)
+    {
+        for (int i = startBlock; i < endBlock; i++)
+            foreach (Tensor w in GetBlock(i).EnumerateWeights()) yield return w;
+    }
+
     /// <summary>Number of streamable blocks: the 20 double-stream blocks occupy <c>[0, NumDoubleBlocks)</c>, the 40 single-stream blocks <c>[NumDoubleBlocks, BlockCount)</c>.</summary>
     public int BlockCount => _doubleBlocks.Length + _singleBlocks.Length;
 
@@ -161,6 +170,94 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
     /// <param name="postPatchW">Image grid width (<c>latent_w / patch_size</c>).</param>
     public Tensor Forward(IBackend backend, Tensor patchedLatent, Tensor encoderHidden, Tensor? encoderHidden2,
         float timestep, float guidanceScale, int postPatchH, int postPatchW)
+    {
+        int batch = (int)patchedLatent.Shape[0];
+        int imgSeqLen = (int)patchedLatent.Shape[1];
+
+        (Tensor currentImg, Tensor currentTxt, Tensor temb) = ForwardEmbedIn(
+            backend, patchedLatent, encoderHidden, encoderHidden2, timestep, guidanceScale);
+
+        ForwardBlocksRange(backend, ref currentImg, ref currentTxt, temb, postPatchH, postPatchW, 0, BlockCount);
+
+        currentTxt.Dispose();
+
+        Tensor output = ForwardHeadOut(backend, currentImg, temb, batch, imgSeqLen);
+        temb.Dispose();
+        return output;
+    }
+
+    /// <summary>DiT-sharded forward: flat blocks <c>[0, splitBlock)</c> on <paramref name="backendA"/> (which also
+    /// owns the shared embed/refiner/head weights), <c>[splitBlock, BlockCount)</c> on <paramref name="backendB"/>,
+    /// with the img+txt streams and temb handed across via <see cref="IBackend.CopyFromPeer"/> and the img stream
+    /// handed back for the head. VRAM pooling, not latency — the two backends run sequentially. Both regions carry
+    /// the (img, txt) pair (single blocks concat/split it internally per block), so the handoff is uniform wherever
+    /// the split lands — inside the doubles, inside the singles, or on the region boundary. Any ByT5 tokens were
+    /// concatenated into the txt stream by the embed-in on A, so they ride the txt handoff. Exclusions: no block
+    /// streaming (<see cref="BeforeBlockForward"/> must be null — the sharding preload owns block residency); no
+    /// step-graph exists here; the loop is pinned F32 (this arch never opts into HARTSY_DIT_F16 — see the range
+    /// helper's comment), matching the unsharded forward exactly. Callers preload
+    /// <see cref="EnumerateSharedWeights"/> + <see cref="EnumerateBlockRangeWeights"/>(0, split) on A and
+    /// <see cref="EnumerateBlockRangeWeights"/>(split, BlockCount) on B.</summary>
+    public Tensor ForwardSharded(IBackend backendA, IBackend backendB, Tensor patchedLatent, Tensor encoderHidden,
+        Tensor? encoderHidden2, float timestep, float guidanceScale, int postPatchH, int postPatchW, int splitBlock)
+    {
+        if (splitBlock <= 0 || splitBlock >= BlockCount)
+            throw new ArgumentOutOfRangeException(nameof(splitBlock),
+                $"splitBlock must be in (0, {BlockCount}) exclusive, got {splitBlock}.");
+        if (BeforeBlockForward is not null)
+            throw new InvalidOperationException(
+                "DiT sharding and block streaming don't compose — BeforeBlockForward must be null on the sharded path.");
+
+        int batch = (int)patchedLatent.Shape[0];
+        int imgSeqLen = (int)patchedLatent.Shape[1];
+
+        (Tensor currentImg, Tensor currentTxt, Tensor temb) = ForwardEmbedIn(
+            backendA, patchedLatent, encoderHidden, encoderHidden2, timestep, guidanceScale);
+
+        ForwardBlocksRange(backendA, ref currentImg, ref currentTxt, temb, postPatchH, postPatchW, 0, splitBlock);
+
+        // Boundary A→B: both live streams plus the per-step conditioning every block reads. The streams MOVE
+        // (A's copies are dead), but temb is only COPIED — the head on A still reads it after B's range. The
+        // rope's host cos/sin tables need no copy — they are built host-side and WanRopeInterleaved stages them
+        // on whichever backend runs.
+        Tensor imgB = MoveAcross(backendB, backendA, currentImg);
+        Tensor txtB = MoveAcross(backendB, backendA, currentTxt);
+        Tensor tembB = CopyAcross(backendB, backendA, temb);
+        currentImg = imgB;
+        currentTxt = txtB;
+
+        ForwardBlocksRange(backendB, ref currentImg, ref currentTxt, tembB, postPatchH, postPatchW, splitBlock, BlockCount);
+        currentTxt.Dispose();
+        tembB.Dispose();
+
+        // Boundary B→A: the head (norm_out/proj_out) lives in the shared weights on A.
+        Tensor imgBack = MoveAcross(backendA, backendB, currentImg);
+        currentImg = imgBack;
+
+        Tensor output = ForwardHeadOut(backendA, currentImg, temb, batch, imgSeqLen);
+        temb.Dispose();
+        return output;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device and disposes the source.</summary>
+    private static Tensor MoveAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor moved = CopyAcross(dst, src, source);
+        source.Dispose();
+        return moved;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device; the source stays live.</summary>
+    private static Tensor CopyAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor copied = new Tensor(source.Shape, source.DType);
+        dst.CopyFromPeer(copied, source, src);
+        return copied;
+    }
+
+    /// <summary>The pre-block section of <see cref="Forward"/>: x_embedder Linear, the timestep/guidance embedding, the token-refiner context embed, and the optional ByT5 concat into the txt stream.</summary>
+    private (Tensor ImgTokens, Tensor TxtTokens, Tensor Temb) ForwardEmbedIn(IBackend backend, Tensor patchedLatent,
+        Tensor encoderHidden, Tensor? encoderHidden2, float timestep, float guidanceScale)
     {
         int batch = (int)patchedLatent.Shape[0];
         int imgSeqLen = (int)patchedLatent.Shape[1];
@@ -191,57 +288,60 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
             txt2Tokens.Dispose();
             txtTokens.Dispose();
             txtTokens = combined;
-            txtSeqLen = combinedSeqLen;
         }
 
-        // HunyuanImage does NOT opt into the shared 16-bit hot path (unlike the other DiTs on HARTSY_DIT_F16 — see
-        // DitDtype.CastStreamToAct). Its Qwen2.5-VL text conditioning is fed from an UN-normalized middle-layer
-        // hidden state (hidden_states[-3]), which legitimately carries residual-stream magnitudes in the thousands
-        // (measured ~3000 at context_embedder output for a real prompt, vs O(1-10) for the image stream). That
-        // text stream keeps compounding through the 20 double-stream blocks' residual adds and — for a real
-        // (non-degenerate) prompt specifically — overflows F16's 65504 ceiling by the last double block, producing
-        // an Inf that poisons the very first single-stream block's joint self-attention (every query attends to
-        // the same poisoned text key/value, so one Inf/NaN token contaminates the entire joint softmax) and
-        // cascades to an all-NaN velocity → all-NaN latent → solid-black decoded image. A short negative/empty
-        // prompt (1 text token, small magnitude) never reaches the overflow, which is why CFG's unconditional
-        // branch always looked fine while the conditional branch went black. BF16 (F32's exponent range, smaller
-        // mantissa) would dodge the overflow while keeping a 16-bit activation, but the shared LayerNormNoAffine /
-        // AffineBroadcastLastDim CUDA kernels this arch's NormModulate depends on only accept F32 or F16 today —
-        // adding BF16 support there is real follow-up work (multiple shared kernels, used by every other DiT), not
-        // a small targeted fix. Running this transformer's block loop at F32 is: (a) always numerically safe (no
-        // 16-bit ceiling to hit, matching the diffusers reference's own precision), and (b) fully local to this
-        // file. DitRuntimeFlags.cs's own doc is explicit that opting a model into 16-bit activations requires a
-        // per-arch safety audit — HunyuanImage's text-conditioning range fails that audit, so it stays F32.
-        Tensor currentImg = imgTokens;
-        Tensor currentTxt = txtTokens;
+        return (imgTokens, txtTokens, temb);
+    }
 
-        for (int i = 0; i < _config.NumDoubleBlocks; i++)
+    /// <summary>Runs flat blocks <c>[startBlock, endBlock)</c> (double-stream first, then single-stream — the same global indexing as <see cref="GetBlock"/> and <see cref="BeforeBlockForward"/>), advancing both streams in place.</summary>
+    // HunyuanImage does NOT opt into the shared 16-bit hot path (unlike the other DiTs on HARTSY_DIT_F16 — see
+    // DitDtype.CastStreamToAct). Its Qwen2.5-VL text conditioning is fed from an UN-normalized middle-layer
+    // hidden state (hidden_states[-3]), which legitimately carries residual-stream magnitudes in the thousands
+    // (measured ~3000 at context_embedder output for a real prompt, vs O(1-10) for the image stream). That
+    // text stream keeps compounding through the 20 double-stream blocks' residual adds and — for a real
+    // (non-degenerate) prompt specifically — overflows F16's 65504 ceiling by the last double block, producing
+    // an Inf that poisons the very first single-stream block's joint self-attention (every query attends to
+    // the same poisoned text key/value, so one Inf/NaN token contaminates the entire joint softmax) and
+    // cascades to an all-NaN velocity → all-NaN latent → solid-black decoded image. A short negative/empty
+    // prompt (1 text token, small magnitude) never reaches the overflow, which is why CFG's unconditional
+    // branch always looked fine while the conditional branch went black. BF16 (F32's exponent range, smaller
+    // mantissa) would dodge the overflow while keeping a 16-bit activation, but the shared LayerNormNoAffine /
+    // AffineBroadcastLastDim CUDA kernels this arch's NormModulate depends on only accept F32 or F16 today —
+    // adding BF16 support there is real follow-up work (multiple shared kernels, used by every other DiT), not
+    // a small targeted fix. Running this transformer's block loop at F32 is: (a) always numerically safe (no
+    // 16-bit ceiling to hit, matching the diffusers reference's own precision), and (b) fully local to this
+    // file. DitRuntimeFlags.cs's own doc is explicit that opting a model into 16-bit activations requires a
+    // per-arch safety audit — HunyuanImage's text-conditioning range fails that audit, so it stays F32.
+    private void ForwardBlocksRange(IBackend backend, ref Tensor currentImg, ref Tensor currentTxt,
+        Tensor temb, int postPatchH, int postPatchW, int startBlock, int endBlock)
+    {
+        for (int i = startBlock; i < endBlock; i++)
         {
             BeforeBlockForward?.Invoke(i);
-            (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(
-                backend, currentImg, currentTxt, temb, _rope, postPatchH, postPatchW);
+            (Tensor newImg, Tensor newTxt) = i < _config.NumDoubleBlocks
+                ? _doubleBlocks[i].Forward(
+                    backend, currentImg, currentTxt, temb, _rope, postPatchH, postPatchW)
+                : _singleBlocks[i - _config.NumDoubleBlocks].Forward(
+                    backend, currentImg, currentTxt, temb, _rope, postPatchH, postPatchW);
             currentImg.Dispose();
             currentTxt.Dispose();
             currentImg = newImg;
             currentTxt = newTxt;
-            HunyuanImageDebugDump.Dump($"double_{i}_image", currentImg);
-            HunyuanImageDebugDump.Dump($"double_{i}_text", currentTxt);
+            if (i < _config.NumDoubleBlocks)
+            {
+                HunyuanImageDebugDump.Dump($"double_{i}_image", currentImg);
+                HunyuanImageDebugDump.Dump($"double_{i}_text", currentTxt);
+            }
+            else
+            {
+                HunyuanImageDebugDump.Dump($"single_{i - _config.NumDoubleBlocks}_image", currentImg);
+            }
         }
+    }
 
-        for (int i = 0; i < _config.NumSingleBlocks; i++)
-        {
-            BeforeBlockForward?.Invoke(_config.NumDoubleBlocks + i);
-            (Tensor newImg, Tensor newTxt) = _singleBlocks[i].Forward(
-                backend, currentImg, currentTxt, temb, _rope, postPatchH, postPatchW);
-            currentImg.Dispose();
-            currentTxt.Dispose();
-            currentImg = newImg;
-            currentTxt = newTxt;
-            HunyuanImageDebugDump.Dump($"single_{i}_image", currentImg);
-        }
-
-        currentTxt.Dispose();
-
+    /// <summary>The post-block section of <see cref="Forward"/>: F32 restore, AdaLN-continuous final layer, and the debug dumps. Consumes <paramref name="currentImg"/>; the caller disposes <paramref name="temb"/>.</summary>
+    private Tensor ForwardHeadOut(IBackend backend, Tensor currentImg, Tensor temb, int batch, int imgSeqLen)
+    {
         // Back to F32 for the final AdaLN-continuous norm + proj_out (velocity precision matters across the Euler
         // steps, and ApplyFinalLayer's modulate reads the normed tensor on the host as float*). No-op when F16 is off.
         currentImg = Utilities.DtypeCastHelper.EnsureF32(backend, currentImg);
@@ -249,7 +349,6 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
         Tensor output = ApplyFinalLayer(backend, currentImg, temb, batch, imgSeqLen);
         HunyuanImageDebugDump.Dump("proj_out", output);
         currentImg.Dispose();
-        temb.Dispose();
 
         HunyuanImageDebugDump.DumpOutput(output);
         return output;

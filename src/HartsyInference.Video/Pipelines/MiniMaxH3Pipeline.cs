@@ -97,8 +97,12 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                     Probe("video latent (noise, pre-step)", videoLat);
                     Probe("audio latent (noise, pre-step)", audioLat);
                 }
-                (Tensor vVideo, Tensor vAudio) = _transformer.Forward(
-                    Backend, layout, videoLat, audioLat, textStates, cos, sin, uniqueT, rowOf, textTagRuns);
+                (Tensor vVideo, Tensor vAudio) = DitShardBackend is not null
+                    ? _transformer.ForwardSharded(
+                        Backend, DitShardBackend, layout, videoLat, audioLat, textStates, cos, sin, uniqueT, rowOf,
+                        DitShardSplitBlock, textTagRuns)
+                    : _transformer.Forward(
+                        Backend, layout, videoLat, audioLat, textStates, cos, sin, uniqueT, rowOf, textTagRuns);
                 try
                 {
                     // Both heads return the flow velocity; the audio one is integrated over the video sigma, so it
@@ -118,19 +122,39 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                     vAudio.Dispose();
                 }
                 Backend.Sync();
+                DitShardBackend?.Sync();
                 sw.Stop();
                 Logs.Info($"[minimax-h3] step {step + 1}/{request.Steps}: {sw.ElapsedMilliseconds} ms");
                 onProgress?.Invoke(new GenerationProgress(step + 1, request.Steps, sw.Elapsed.TotalMilliseconds));
+                // Window the op profiler onto the steady-state steps: step 0 carries the weight-residency
+                // warm-up, and everything before the loop is text encode. Both are one-time and vary enough
+                // run to run that differencing two runs to cancel them does not work. No-op when off.
+                if (step == 0)
+                {
+                    Backend.ResetOpProfile();
+                }
             }
+            Backend.DumpOpProfile($"denoise{Math.Max(1, request.Steps - 1)}");
 
             Probe("video latent (final)", videoLat);
             Probe("audio latent (final)", audioLat);
             Dump("video_latent_final", videoLat);
             Dump("audio_latent_final", audioLat);
-            // Denoising is done: hand the DiT's ~20 GB back before the VAE needs its own ~5 GB.
+            // Denoising is done: hand the DiT's ~20 GB back before the VAE needs its own ~5 GB. Sharded, the free
+            // mirrors the asymmetric preload — the whole-set free would silently no-op on the shard backend's
+            // range (frees are per-backend) and leak it; this also returns the second card's share pre-decode.
             if (preloaded)
             {
-                Backend.FreeWeights(_transformer.EnumerateWeights());
+                if (DitShardBackend is not null)
+                {
+                    Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+                    Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+                    DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers));
+                }
+                else
+                {
+                    Backend.FreeWeights(_transformer.EnumerateWeights());
+                }
             }
 
             Tensor videoLatent = MiniMaxH3Latents.UnpackVideo(videoLat, latentT, latentH, latentW, _config);
@@ -226,21 +250,39 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
     /// and the VAE decode. When it does not fit (the 66 GB bf16 build) the per-call streaming path stands.</summary>
     private bool TryPreloadTransformer()
     {
-        if (!_preloadTransformer)
+        if (!_preloadTransformer && DitShardBackend is null)
         {
             Logs.Info("[MiniMaxH3] DiT too large to stay resident — streaming per call.");
             return false;
         }
         try
         {
-            Backend.PreloadWeights(_transformer.EnumerateWeights());
+            if (DitShardBackend is not null)
+            {
+                // Asymmetric split — shared + [0, split) on the primary, ONLY [split, NumLayers) on the shard
+                // backend. EnumerateWeights() on both would replicate instead of pool.
+                Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+                Backend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+                DitShardBackend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers));
+            }
+            else
+            {
+                Backend.PreloadWeights(_transformer.EnumerateWeights());
+            }
             return true;
         }
         catch (HartsyInference.Core.Exceptions.OutOfVramException ex)
         {
             // Residency is an optimization, never a requirement: PreloadWeights rolls its batch back on OOM, so the
-            // per-call streaming path is still correct — degrade instead of failing the generation.
+            // per-call streaming path is still correct — degrade instead of failing the generation. On the sharded
+            // route, drop whatever partial batches landed so neither card is left holding a half-preloaded range.
             Logs.Warning($"[MiniMaxH3] DiT preload did not fit ({ex.Message}) — streaming per call.");
+            if (DitShardBackend is not null)
+            {
+                Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+                Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+                DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers));
+            }
             return false;
         }
     }

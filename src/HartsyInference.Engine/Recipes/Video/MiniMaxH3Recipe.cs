@@ -1,6 +1,8 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Placement;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -73,8 +75,38 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             // The 66 GB bf16 build cannot stay device-resident on any consumer card; the 21 GB fp8 build can, and
             // must, or every GEMM re-uploads its weight.
             bool fitsResident = new FileInfo(assets.Dit).Length < 40L << 30;
+
+            // DiT sharding: fp8 build only — the bf16 blocks alone (~64 GB) exceed any 2-consumer-card pool, so
+            // sharding buys nothing there and the streaming path stands. 50 homogeneous blocks → the
+            // count-proportional plan is byte-accurate.
+            int ditShardSplitBlock = 0;
+            IBackend? ditShardBackend = null;
+            if (context.DitShardBackend is not null && fitsResident)
+            {
+                long sharedWeightBytes = 0;
+                foreach (Tensor t in transformer.EnumerateSharedWeights())
+                {
+                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
+                }
+                (long freeA, _) = context.Backend.GetVramInfo();
+                (long freeB, _) = context.DitShardBackend.GetVramInfo();
+                ditShardSplitBlock = PlacementPlanner.DitSplitPlan(freeA, freeB, config.NumLayers, sharedWeightBytes);
+                ditShardBackend = context.DitShardBackend;
+                Logs.Info($"[MiniMaxH3Recipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
+                    + $"backend, [{ditShardSplitBlock},{config.NumLayers}) on the shard backend.");
+            }
+            else if (context.DitShardBackend is not null)
+            {
+                Logs.Warning("[MiniMaxH3Recipe] DiT sharding requested but this is the bf16 build (>40 GB) — "
+                    + "its blocks exceed any two-consumer-card pool; running the streaming path unsharded.");
+            }
+
             MiniMaxH3Pipeline pipeline =
-                new MiniMaxH3Pipeline(context.Backend, transformer, videoVae, audioVae, fitsResident);
+                new MiniMaxH3Pipeline(context.Backend, transformer, videoVae, audioVae, fitsResident)
+                {
+                    DitShardBackend = ditShardBackend,
+                    DitShardSplitBlock = ditShardSplitBlock,
+                };
             return new MiniMaxH3RecipePipeline(context.Backend, pipeline, config, textEncoder,
                 LoadTokenizer(assets.TokenizerDir), loaders);
         }

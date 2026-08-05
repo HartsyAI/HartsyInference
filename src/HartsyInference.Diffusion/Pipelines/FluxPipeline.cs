@@ -32,6 +32,12 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     /// the post-loop FreeWeights + next-gen re-upload. A prompt-cache MISS frees the DiT before the T5 encode
     /// (the TE cannot always coexist with the resident DiT), then the loop re-preloads.
     /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables); the streaming (low-VRAM) path always evicts.</summary>
+    /// <summary>True when the current residency is the sharded asymmetric layout (shared + [0, split) on
+    /// <see cref="DiffusionPipelineBase.Backend"/>, [split, BlockCount) on
+    /// <see cref="DiffusionPipelineBase.DitShardBackend"/>) rather than the whole DiT on the primary — the free
+    /// path must mirror whichever preload shape actually ran or the shard backend's range leaks.</summary>
+    private bool _ditShardResident;
+
     private static readonly bool KeepModelsResident =
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
@@ -233,9 +239,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // on its OWN device (TextEncoderBackend) never contends with the DiT at all, so skip the evict.
             if (_ditResident && ReferenceEquals(TextEncoderBackend, Backend))
             {
-                _transformer.InvalidateStepGraph(Backend);
-                Backend.FreeWeights(_transformer.EnumerateWeights());
-                _ditResident = false;
+                FreeResidentTransformer();
             }
 
             // Preload T5 weights to GPU as a single batch upload. Without this, every
@@ -384,7 +388,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             ImageToImageRequest fillReq = (ImageToImageRequest)request;
             Stopwatch fillSw = Stopwatch.StartNew();
             Tensor maskedImage = MaskPixelsToNeutral(fillReq.SourceImage, maskPixel!);
-            Tensor maskedLatent = _vaeEncoder!.Encode(Backend, maskedImage);
+            Tensor maskedLatent = _vaeEncoder!.Encode(VaeBackend, maskedImage);  // LOAD-BEARING for VaeDevice: PackLatent below is a host loop
             maskedImage.Dispose();
             Tensor packedMaskedLatent = PackLatent(maskedLatent, latentH, latentW);
             maskedLatent.Dispose();
@@ -407,7 +411,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                     nameof(controlImage));
             }
             Stopwatch ctrlEncSw = Stopwatch.StartNew();
-            Tensor controlLatentUnpacked = _vaeEncoder!.Encode(Backend, controlImage);
+            Tensor controlLatentUnpacked = _vaeEncoder!.Encode(VaeBackend, controlImage);  // LOAD-BEARING for VaeDevice: PackLatent below is a host loop
             ctrlEncSw.Stop();
             Logs.Info($"Flux Tools control VAE encode done in {ctrlEncSw.ElapsedMilliseconds}ms");
             packedControl = PackLatent(controlLatentUnpacked, latentH, latentW);
@@ -453,7 +457,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                         $"Flux ControlNet image {c} shape must be [1, 3, {height}, {width}] (matching request); got {cnImage.Shape}.",
                         nameof(fluxControlNets));
                 }
-                Tensor cnLatent = _vaeEncoder!.Encode(Backend, cnImage);
+                Tensor cnLatent = _vaeEncoder!.Encode(VaeBackend, cnImage);  // LOAD-BEARING for VaeDevice: PackLatent below is a host loop
                 cnPackedControls[c] = PackLatent(cnLatent, latentH, latentW);
                 cnLatent.Dispose();
             }
@@ -480,8 +484,48 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         // correct when it is, honestly narrow when it isn't).
         bool cfgParallelEligible = false;
         LastCfgParallelDecision = null;
+        // Record the no-true-CFG outcome centrally — it holds on EVERY placement branch (resident, streaming,
+        // sharded), so recording it inside one branch would leave the others silent, which is exactly the
+        // observability gap the diagnostic exists to close.
+        if (CfgParallelBackend is not null && !doTrueCfg)
+        {
+            RecordCfgParallelDecision("inapplicable(no-true-cfg)");
+        }
         BlockStreamingController? streamer = null;
-        if (Backend.StreamingCache is not null)
+        // DiT sharding v1: plain path only (the drainFree feature set). Excluded combinations run unsharded on
+        // the primary with a visible log — features take priority over sharding, sharding takes priority over
+        // streaming. CFG-parallel + sharding is rejected at config time by PlacementPlanner.ValidatePlacement.
+        bool ditShardActive = DitShardBackend is not null && !isMaskedInpaint && packedControl is null
+            && packedKontextRef is null && !hasFluxCn && (regionalPlan is null || regionalPlan.Regions.Count == 0)
+            && !StatsEnabled && (reduxExtendedT5 is null || reduxApplyStartFraction <= 0f);
+        if (DitShardBackend is not null && !ditShardActive)
+        {
+            Logs.Warning("Flux DiT sharding configured but this generation uses features outside the sharded v1 "
+                + "surface (ControlNet/Kontext/inpaint/regional/Redux-start/stats) — running unsharded on the primary backend.");
+            if (_ditShardResident)
+            {
+                FreeResidentTransformer();
+            }
+        }
+        if (ditShardActive)
+        {
+            if (Backend.StreamingCache is not null)
+                Logs.Info("Flux: DiT sharding overrides low-VRAM block streaming for this generation.");
+            if (_ditResident && !_ditShardResident)
+            {
+                // A previous unsharded generation left the whole DiT on the primary — start clean.
+                FreeResidentTransformer();
+            }
+            if (!_ditResident)
+            {
+                Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+                Backend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+                DitShardBackend!.PreloadWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+            }
+            _ditResident = true;
+            _ditShardResident = true;
+        }
+        else if (Backend.StreamingCache is not null)
         {
             IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
@@ -568,7 +612,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         bool drainFree = !isMaskedInpaint && packedControl is null && packedKontextRef is null
             && !hasFluxCn && !hasRegions && !StatsEnabled
             && (reduxExtendedT5 is null || reduxApplyStartFraction <= 0f);
-        bool graphRoute = drainFree && !doTrueCfg && packedSourceLatent is null
+        bool graphRoute = drainFree && !doTrueCfg && packedSourceLatent is null && !ditShardActive
             && DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
 
         // Mirrors the per-step dispatch condition (loop-invariant), recorded once per generation so operators
@@ -682,14 +726,12 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                 }
                 else
                 {
-                    velocityPred = _transformer.Forward(
-                        Backend, packedLatent, condStream, sigma,
-                        clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, null, 0, 0, 0);
+                    velocityPred = RunPlainForward(ditShardActive, packedLatent, condStream, sigma,
+                        clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked);
                     if (doTrueCfg)
                     {
-                        Tensor velocityNeg = _transformer.Forward(
-                            Backend, packedLatent, negT5Embeddings!, sigma,
-                            negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked, null, 0, 0, 0);
+                        Tensor velocityNeg = RunPlainForward(ditShardActive, packedLatent, negT5Embeddings!, sigma,
+                            negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked);
                         Backend.CfgEulerStep(packedLatent, velocityPred, velocityNeg, trueCfgScale, scheduler.Dt(i));
                         velocityNeg.Dispose();
                     }
@@ -915,9 +957,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         }
         else if (!KeepModelsResident)
         {
-            _transformer.InvalidateStepGraph(Backend);
-            Backend.FreeWeights(_transformer.EnumerateWeights());
-            _ditResident = false;
+            FreeResidentTransformer();
         }
         else
         {
@@ -1012,14 +1052,40 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     /// to the sequential path with one log line, exactly like the "no CfgParallelBackend configured" case. Called
     /// only from the Resident placement branches; block-streaming and CFG-parallel don't compose (see the call
     /// sites' comment).</summary>
+    /// <summary>Routes a plain-path forward (no attnBias/Kontext/ControlNet, the only calls DiT sharding v1
+    /// supports) to <see cref="FluxTransformer.ForwardSharded"/> when this generation's sharding is active.</summary>
+    private Tensor RunPlainForward(bool ditShardActive, Tensor packedInput, Tensor condStream, float sigma,
+        Tensor pooled, float guidanceScale, int txtLen, int hPacked, int wPacked) =>
+        ditShardActive
+            ? _transformer.ForwardSharded(Backend, DitShardBackend!, packedInput, condStream, sigma,
+                pooled, guidanceScale, txtLen, hPacked, wPacked, DitShardSplitBlock)
+            : _transformer.Forward(Backend, packedInput, condStream, sigma,
+                pooled, guidanceScale, txtLen, hPacked, wPacked, null, 0, 0, 0);
+
+    /// <summary>Frees the resident DiT on whichever backend(s) hold it — the whole set on the primary, or the
+    /// asymmetric sharded split. The unsharded free would silently no-op on the shard backend's range.</summary>
+    private void FreeResidentTransformer()
+    {
+        _transformer.InvalidateStepGraph(Backend);
+        if (_ditShardResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend!.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+            _ditShardResident = false;
+        }
+        else
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+        }
+        _ditResident = false;
+    }
+
     private bool TryPreloadCfgParallel(bool doTrueCfg)
     {
         if (!doTrueCfg || CfgParallelBackend is null)
         {
-            if (CfgParallelBackend is not null)
-            {
-                RecordCfgParallelDecision("inapplicable(no-true-cfg)");
-            }
+            // The no-true-CFG outcome is recorded centrally before the placement branches.
             return false;
         }
         try
@@ -1093,7 +1159,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         if (request is ImageToImageRequest img2img)
         {
             Stopwatch vaeEncSw = Stopwatch.StartNew();
-            Tensor sourceUnpacked = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
+            Tensor sourceUnpacked = _vaeEncoder!.Encode(VaeBackend, img2img.SourceImage);  // LOAD-BEARING for VaeDevice: PackLatent below is a host loop
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 

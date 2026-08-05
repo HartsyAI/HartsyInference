@@ -19,12 +19,16 @@ public static class CommandRunner
         bool quiet,
         string? outputDir,
         string headerLabel,
-        bool showResponseRule)
+        bool showResponseRule,
+        int? gpuOrdinal = null,
+        EngineOptions? engineOptions = null)
     {
         using CancellationTokenSource cts = new CancellationTokenSource();
         using IDisposable cancelBinding = BindCancelKey(cts);
 
-        using InferenceEngine engine = new InferenceEngine(backendSelector);
+        using InferenceEngine engine = gpuOrdinal.HasValue || engineOptions is not null
+            ? new InferenceEngine(backendSelector, gpuOrdinal ?? 0, engineOptions)
+            : new InferenceEngine(backendSelector);
         try
         {
             spec = ModelAcquisition.EnsurePresent(spec);

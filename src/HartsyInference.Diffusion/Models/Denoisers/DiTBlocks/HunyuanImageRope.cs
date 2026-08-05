@@ -10,8 +10,11 @@ public sealed unsafe class HunyuanImageRope
     private readonly int[] _axesDim;
     private readonly float _theta;
     private readonly int _headDim;
-    private int[]? _tableDims;
-    private Tensor? _tableCos, _tableSin;
+    // Cached PER BACKEND (the QwenImageRope/FluxRope precedent): DiT sharding runs blocks [split, BlockCount) on
+    // a second backend, and two backends staging the SAME host tensor through WanRopeInterleaved trips the
+    // transfer helper's binding/pinning state (observed CUDA_ERROR_INVALID_VALUE on the second card at real
+    // table sizes) — each backend gets its own host build, preloaded into that backend's own weight cache.
+    private readonly Dictionary<IBackend, (int[] Dims, Tensor Cos, Tensor Sin)> _tables = new();
 
     /// <summary>Creates a HunyuanImageRope.</summary>
     /// <param name="axesDim">Per-axis dim split. 2 axes <c>(height, width)</c> for image (default <c>[64, 64]</c>);
@@ -87,8 +90,9 @@ public sealed unsafe class HunyuanImageRope
 
     /// <summary>Builds (or returns the cached) duplicated-pair cos/sin tables <c>[S, headDim]</c> for
     /// <paramref name="packedDims"/> — the value for pair <c>i</c> stored at both <c>2i</c> and <c>2i+1</c>, the
-    /// layout <see cref="IBackend.WanRopeInterleaved"/> reads. Preloads them into the backend weight cache so the
-    /// per-block op skips the H2D upload; frees the previous tables when the grid changes.</summary>
+    /// layout <see cref="IBackend.WanRopeInterleaved"/> reads. One table set per backend (see the field note),
+    /// preloaded into that backend's weight cache so the per-block op skips the H2D upload; frees that backend's
+    /// previous tables when the grid changes.</summary>
     private (Tensor cos, Tensor sin, int seqLen) GetTables(IBackend backend, ReadOnlySpan<int> packedDims)
     {
         if (packedDims.Length != _axesDim.Length)
@@ -96,14 +100,15 @@ public sealed unsafe class HunyuanImageRope
         int seqLen = 1;
         for (int i = 0; i < packedDims.Length; i++) seqLen *= packedDims[i];
 
-        if (_tableDims is not null && packedDims.SequenceEqual(_tableDims))
-            return (_tableCos!, _tableSin!, seqLen);
+        bool hasEntry = _tables.TryGetValue(backend, out (int[] Dims, Tensor Cos, Tensor Sin) entry);
+        if (hasEntry && packedDims.SequenceEqual(entry.Dims))
+            return (entry.Cos, entry.Sin, seqLen);
 
-        if (_tableCos is not null)
+        if (hasEntry)
         {
-            backend.FreeWeights([_tableCos, _tableSin!]);
-            _tableCos.Dispose();
-            _tableSin!.Dispose();
+            backend.FreeWeights([entry.Cos, entry.Sin]);
+            entry.Cos.Dispose();
+            entry.Sin.Dispose();
         }
 
         int halfDim = _headDim / 2;
@@ -132,9 +137,7 @@ public sealed unsafe class HunyuanImageRope
         }
 
         backend.PreloadWeights([cos, sin]);
-        _tableDims = packedDims.ToArray();
-        _tableCos = cos;
-        _tableSin = sin;
+        _tables[backend] = (packedDims.ToArray(), cos, sin);
         return (cos, sin, seqLen);
     }
 

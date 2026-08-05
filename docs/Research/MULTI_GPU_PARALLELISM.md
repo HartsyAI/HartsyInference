@@ -337,6 +337,30 @@ via `CudaLibraryResolver`) for milestone 2+ (tensor/expert parallel need real co
 needed only point-to-point copy, which is why it shipped first). The streaming weight cache already has
 the `cuEvent`/`cuStreamWaitEvent` sync milestone 2 would reuse cross-device.
 
+**Diffusion-side status (2026-08-05, hardware-verified on the 4090+3060 box):** the diffusion multi-GPU
+surface built on the milestone-1 machinery is now live in three shapes. (1) **TE/VAE component placement**
+(`PlacementConfig.TextEncoderDevice`/`VaeDevice`, extension `TextEncoderGpuId`/`VaeGpuId`, CLI
+`--te-gpu`/`--vae-gpu`) is wired fleet-wide — verified end-to-end for Wan, Flux
+(`FluxComponentPlacementEngineTests`, SSIM 0.8126 from fp8-T5 cross-SM drift on the mismatched pair;
+matched cards are expected bit-identical) and SDXL (`SdxlComponentPlacementEngineTests`, SSIM 0.9998);
+Qwen-Image, Chroma, HunyuanImage, LTX-1, and LTX-2 (incl. its audio VAE + vocoder) are wired pending
+checkpoint verification. (2) **DiT block-range sharding** (`DitShardGpuId` / `--dit-shard-gpu` — VRAM
+pooling, not latency, i.e. milestone 1's memory-scales contract applied to DiTs) is verified for six
+models: Krea2 (e2e SSIM 0.8787), Qwen-Image 20B (`QwenImageDitSharding{,Vram,Engine}Tests`: 19.6 GB
+pooled 13.4+6.2 at the live 41/60 split, SSIM 0.9734, drift 0.00 GB), MiniMax-H3 fp8
+(`MiniMaxH3DitSharding{,Vram}Tests`: 19.76 GB pooled at 34/50, finite video+audio; the 66 GB bf16 build
+is excluded — it exceeds any 2-consumer-card pool), Flux.1 plain path (same-device split bit-exact over
+262k values, cross-device 30/57 pooling 7.7+3.7 GB, engine SSIM 0.9075; ControlNet/Kontext/inpaint/
+regional fall back unsharded with a log), Chroma (bit-exact both regimes; real fp8 e2e SSIM 0.8797), and
+HunyuanImage (synthetic bit-exact; engine e2e written, awaiting checkpoint). Sharding is mutually
+exclusive with step-graph/step-cache/streaming by design. (3) **CFG-parallel** decisions are observable
+(`DiffusionPipelineBase.LastCfgParallelDecision` + the `[CfgParallel]` log line: active /
+fell-back(reason) / inapplicable(no-true-cfg)), with `FluxCfgParallelFallbackTests` green and Wan's
+preload-OOM→sequential fallback in place. Verification runs through `tests/run-multigpu-campaign.sh`
+(per-class isolation + `HARTSY_REQUIRE_REAL_WEIGHTS=1`; conventions in `PROFILING_METHODOLOGY.md` §15).
+The live tracker stays `ROADMAP.md` §1; the placement pattern's detailed authority is
+`MULTI_GPU_COMPONENT_PLACEMENT.md`.
+
 **Recommended build order (each independently shippable):**
 
 | # | Milestone | What it enables | Collective | Effort | Hardware to verify |

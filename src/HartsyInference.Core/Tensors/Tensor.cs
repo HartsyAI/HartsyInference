@@ -317,6 +317,12 @@ public sealed unsafe class Tensor : IDisposable
     /// call sites so scaling happens for free during matmul.</remarks>
     public float Fp8ScaleFactor { get; set; } = 1.0f;
 
+    /// <summary>Static activation dequant scale shipped alongside an fp8 weight (<c>.input_scale</c>); 0 = absent.</summary>
+    /// <remarks>When present the backend quantizes this Linear's activation with a constant instead of computing a
+    /// per-call absmax, which removes a full activation read and a grid-wide reduction barrier before every GEMM.
+    /// Same units as <see cref="Fp8ScaleFactor"/>: real value = <c>fp8_byte_decoded * scale</c>.</remarks>
+    public float Fp8InputScaleFactor { get; set; }
+
     /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first; otherwise
     /// the owned host buffer is allocated (zeroed) on first access.</summary>
     public void* DataPointer

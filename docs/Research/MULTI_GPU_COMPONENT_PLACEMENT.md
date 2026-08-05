@@ -1,8 +1,14 @@
 # Multi-GPU Component Placement — the recipe pattern
 
-**Status:** Live (first wave: Wan video, Flux.1, SDXL — 2026-08-02). This doc is the recipe for extending
-`PlacementConfig.TextEncoderDevice` / `VaeDevice` support to the remaining pipelines (Qwen-Image, Hunyuan,
-LTX, Chroma, Krea2, Ideogram4, …).
+**Status:** Live. First wave (2026-08-02): Wan video, Flux.1, SDXL. Second wave (2026-08-04): Qwen-Image
+(TE + VAE incl. the edit-reference encode; note the `_cachedPackedRef` pin-owner hazard annotated in the
+pipeline), Chroma (TE + VAE; the cached-conditioning frees STAY on the denoise backend — the step-graph
+warm-up pins them there), HunyuanImage (TE both encoder paths + VAE, including the explicit host bridge for
+its deliberately device-resident latent→VAE chain), LTX-1 (Wan-style ctor threading), LTX-2 (TE incl. the
+Gemma-vs-prefix evict skip — the biggest single win — plus video AND audio VAE/vocoder on `VaeDevice`).
+Flux/SDXL residual img2img/inpaint/control VAE-encode gaps were closed in the same pass. Remaining
+unported: Krea2, Ideogram4, and the smaller single-file families. `VaeDevice` is now settable from the
+SwarmUI extension (`VaeGpuId`) and the CLI (`--vae-gpu`).
 
 ## Why this works with zero copy machinery
 

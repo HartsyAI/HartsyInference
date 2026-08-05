@@ -20,6 +20,7 @@ KERNELS=(
     "dit_f16"
     "dit_bf16"
     "stepcache"
+    "dit_rope"
 )
 
 INSTALL=true

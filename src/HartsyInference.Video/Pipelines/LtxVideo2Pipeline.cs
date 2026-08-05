@@ -152,11 +152,13 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         else
         {
             // Reclaim pool slack from the previous generation before the ~12 GB Gemma upload.
-            Backend.TrimMemoryPool();
+            TextEncoderBackend.TrimMemoryPool();
             // The persistent resident prefix survives cache hits for free, but a MISS needs the Gemma weights
             // on device: keep the prefix only when the encoder actually fits beside it (measured free VRAM),
             // otherwise evict — the denoise section re-uploads at the pinned prefix size after the TE is freed.
-            if (_prefixResident)
+            // With Gemma on its OWN device (TextEncoderBackend) it never contends with the prefix, so the whole
+            // fit-check/evict dance is skipped and the resident DiT prefix survives every prompt miss.
+            if (_prefixResident && ReferenceEquals(TextEncoderBackend, Backend))
             {
                 if (_gemmaWeightBytes < 0)
                 {
@@ -187,17 +189,19 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             // during denoise (the connectors already produced the four cached embeddings). Freeing the connectors
             // is what lets the fp8 DiT (~18 GB) fit ALL 48 blocks resident on 24 GB (no streaming + graph-eligible);
             // a prompt-cache MISS transparently re-uploads them on the next EncodeText.
-            Backend.Sync();
-            Backend.FreeWeights(_gemma.EnumerateWeights());
-            Backend.FreeWeights(_connectors.EnumerateWeights());
+            TextEncoderBackend.Sync();
+            TextEncoderBackend.FreeWeights(_gemma.EnumerateWeights());
+            TextEncoderBackend.FreeWeights(_connectors.EnumerateWeights());
             // Host-materialize the four embeddings so they survive activation sweeps (a never-host-read tensor
             // loses its only copy in FreeActivations), then drop the TE's device activations + pool slack so
             // the resident-prefix sizing below sees the reclaimed VRAM. The transformer's RoPE table cache is
             // host-built, so it survives the sweep too.
+            // LOAD-BEARING for TextEncoderDevice placement: these host reads ARE the cross-device boundary —
+            // the denoiser's backend re-uploads the conditioning from the host copies.
             _ = encVideoPos.DataPointer; _ = encAudioPos.DataPointer;
             _ = encVideoNeg.DataPointer; _ = encAudioNeg.DataPointer;
-            Backend.FreeActivations();
-            Backend.TrimMemoryPool();
+            TextEncoderBackend.FreeActivations();
+            TextEncoderBackend.TrimMemoryPool();
             _cachedVideoPos?.Dispose(); _cachedAudioPos?.Dispose();
             _cachedVideoNeg?.Dispose(); _cachedAudioNeg?.Dispose();
             _cachedVideoPos = encVideoPos; _cachedAudioPos = encAudioPos;
@@ -248,6 +252,8 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             }
             if (_residentPrefixBlocks < 0 || tokenLoad > _prefixSizedTokens)
             {
+                // With the TE on its own device (TextEncoderBackend) the Gemma phase never touched this GPU, so
+                // FreeMemoryBytes naturally reports the full budget here — no placement-specific handling needed.
                 long spendable = Backend.FreeMemoryBytes() - headroomMb * 1024 * 1024;
                 _residentPrefixBlocks = (int)Math.Clamp(spendable / Math.Max(blockBytes, 1), 0, blocks.Length);
                 _prefixSizedTokens = tokenLoad;
@@ -370,9 +376,10 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         }
         // The persistent prefix must never starve the decode: the GPU-ported video VAE peaks at a handful of
         // full-output-grid F32 stages plus conv workspace — if free VRAM is short of that, drop the prefix for
-        // this generation (an OOM is worse than one re-upload).
+        // this generation (an OOM is worse than one re-upload). A VAE on its OWN device (VaeBackend) never
+        // contends with the prefix, so the evict is skipped when split.
         long decodeNeed = Math.Max(3L << 30, (long)numFrames * height * width * 160);
-        if (_prefixResident && Backend.FreeMemoryBytes() < decodeNeed)
+        if (_prefixResident && ReferenceEquals(VaeBackend, Backend) && Backend.FreeMemoryBytes() < decodeNeed)
         {
             Logs.Info($"[ltx2-phase] evicting resident prefix for VAE decode " +
                 $"(free {Backend.FreeMemoryBytes() >> 20} MB < ~{decodeNeed >> 20} MB estimated decode peak).");
@@ -383,14 +390,16 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         // The four text embeddings are NOT disposed — they are the cross-generation prompt cache (tiny,
         // host-materialized; freed on the next cache miss or by the finalizer drain).
 
-        // 3. Decode video.
+        // 3. Decode video. UnpackVideoLatents is a host loop — LOAD-BEARING for VaeDevice placement: it IS the
+        // cross-device boundary, so the (possibly separate) VAE backend uploads from the host copy.
         Tensor videoVaeLatent = UnpackVideoLatents(videoLat, tLat, hLat, wLat, videoChannels);
         videoLat.Dispose();
         Logs.Info($"[ltx2-phase] latent unpack (host): {phase.ElapsedMilliseconds} ms");
         phase.Restart();
         ProbeTensor("pre-decode videoVaeLatent", videoVaeLatent);
-        Tensor rgb = _vae.Decode(Backend, videoVaeLatent);
+        Tensor rgb = _vae.Decode(VaeBackend, videoVaeLatent);
         videoVaeLatent.Dispose();
+        if (!ReferenceEquals(VaeBackend, Backend)) VaeBackend.Sync();
         Backend.Sync();
         Logs.Info($"[ltx2-phase] video VAE decode: {phase.ElapsedMilliseconds} ms");
         phase.Restart();
@@ -432,7 +441,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         int[] layerIndices = new int[GemmaLayers];
         for (int i = 0; i < GemmaLayers; i++) layerIndices[i] = i;       // 0=embeddings, 1..48=post-layer
         Stopwatch sub = Stopwatch.StartNew();
-        Tensor multi = _gemma.EncodeMultiLayer(Backend, [padded], layerIndices);  // [1, seq, 49·3840] layer-outer
+        Tensor multi = _gemma.EncodeMultiLayer(TextEncoderBackend, [padded], layerIndices);  // [1, seq, 49·3840] layer-outer
         Logs.Info($"[ltx2-phase]   gemma encode ({seq} tok): {sub.ElapsedMilliseconds} ms");
         sub.Restart();
 
@@ -453,7 +462,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         Logs.Info($"[ltx2-phase]   gemma relayout (host): {sub.ElapsedMilliseconds} ms");
         sub.Restart();
 
-        (Tensor video, Tensor audio) = _connectors.Forward(Backend, feats, validMask);
+        (Tensor video, Tensor audio) = _connectors.Forward(TextEncoderBackend, feats, validMask);
         feats.Dispose();
         Logs.Info($"[ltx2-phase]   connectors: {sub.ElapsedMilliseconds} ms");
         return (video, audio);
@@ -533,26 +542,29 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     private float[][] DecodeAudio(Tensor audioLat, int audioFrames, out int sampleRate)
     {
         Stopwatch phase = Stopwatch.StartNew();
-        Backend.PreloadWeights(_audioVae!.EnumerateWeights());
+        // Audio VAE + vocoder follow VaeDevice: both handoffs (UnpackAudioLatents in, the PCM copy-out below)
+        // are host loops already, and leaving audio decode on the primary would reintroduce exactly the
+        // decode-phase VRAM pressure the VaeDevice split removes.
+        VaeBackend.PreloadWeights(_audioVae!.EnumerateWeights());
 
         int latentChannels = 8;
         int melLat = _config.AudioInChannels / latentChannels;   // 128 / 8 = 16
         ProbeTensor("audio latent (raw, pre-denorm)", audioLat);
         Tensor unpacked = UnpackAudioLatents(audioLat, audioFrames, latentChannels, melLat);
         ProbeTensor("audio latent (unpacked, post-denorm)", unpacked);
-        Tensor mel = _audioVae.Decode(Backend, unpacked);        // [1, 2, T, 64]
+        Tensor mel = _audioVae.Decode(VaeBackend, unpacked);     // [1, 2, T, 64]
         ProbeTensor("audio VAE out (log-mel)", mel);
         unpacked.Dispose();
-        Backend.Sync();
+        VaeBackend.Sync();
         Logs.Info($"[ltx2-phase]   audio VAE (preload+unpack+decode): {phase.ElapsedMilliseconds} ms");
         phase.Restart();
         // The vocoder manages its own weights (no bulk EnumerateWeights); ops fault them in on demand.
-        Tensor wave = _vocoder!.Forward(Backend, mel);           // [1, channels, samples]
+        Tensor wave = _vocoder!.Forward(VaeBackend, mel);        // [1, channels, samples]
         ProbeTensor("vocoder out (waveform)", wave);
         mel.Dispose();
-        Backend.Sync();
+        VaeBackend.Sync();
         Logs.Info($"[ltx2-phase]   vocoder: {phase.ElapsedMilliseconds} ms");
-        Backend.FreeWeights(_audioVae.EnumerateWeights());
+        VaeBackend.FreeWeights(_audioVae.EnumerateWeights());
 
         int channels = (int)wave.Shape[1], samples = (int)wave.Shape[2];
         float[][] pcm = new float[channels][];

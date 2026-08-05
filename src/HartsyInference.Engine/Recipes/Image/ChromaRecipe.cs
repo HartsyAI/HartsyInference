@@ -9,6 +9,7 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Placement;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Chroma recipe (Lodestone Rock's 8.9B Flux derivative: T5-only, no CLIP/pooled conditioning, joint-attention DiT, same VAE as Flux.1). Lifted from the SwarmUI backend's <c>ChromaLoader</c>; the checkpoint is the DiT, the T5-XXL text encoder and Flux VAE are resolved as side models. Constructs and drives through <see cref="ChromaRecipePipeline"/>.</summary>
@@ -47,6 +48,32 @@ public sealed class ChromaRecipe : IArchitectureRecipe
         ChromaTransformer transformer = new ChromaTransformer(config);
         transformer.LoadWeights(zConv.Transformer);
 
+        // DiT sharding split point — byte-weighted: Chroma's 19 double blocks are ~2× its 38 single blocks,
+        // so a count-proportional split would misallocate by GBs. Computed post-load (needs live free VRAM).
+        int ditShardSplitBlock = 0;
+        if (context.DitShardBackend is not null)
+        {
+            long[] perBlockBytes = new long[transformer.BlockCount];
+            for (int i = 0; i < perBlockBytes.Length; i++)
+            {
+                foreach (Tensor t in transformer.EnumerateBlockRangeWeights(i, i + 1))
+                {
+                    perBlockBytes[i] += t.DType.ComputeByteCount(t.ElementCount);
+                }
+            }
+            long sharedWeightBytes = 0;
+            foreach (Tensor t in transformer.EnumerateSharedWeights())
+            {
+                sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
+            }
+            (long freeA, _) = context.Backend.GetVramInfo();
+            (long freeB, _) = context.DitShardBackend.GetVramInfo();
+            ditShardSplitBlock = PlacementPlanner.DitSplitPlan(freeA, freeB, perBlockBytes, sharedWeightBytes);
+            Logs.Info($"[ChromaRecipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
+                + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend "
+                + "(sequential dual-pass CFG; the step graph is disabled while sharded).");
+        }
+
         // 2. Load T5-XXL + its embedded tokenizer.
         SafeTensorsLoader t5Loader = new SafeTensorsLoader();
         t5Loader.Load(t5Path);
@@ -73,7 +100,13 @@ public sealed class ChromaRecipe : IArchitectureRecipe
         VaeDecoder vae = new VaeDecoder(VaeConfig.Chroma);
         vae.LoadWeights(vaeWeights);
 
-        ChromaPipeline pipeline = new ChromaPipeline(context.Backend, t5, transformer, vae, config);
+        ChromaPipeline pipeline = new ChromaPipeline(context.Backend, t5, transformer, vae, config)
+        {
+            TextEncoderBackend = context.TextEncoderBackendOrDefault,
+            VaeBackend = context.VaeBackendOrDefault,
+            DitShardBackend = context.DitShardBackend,
+            DitShardSplitBlock = ditShardSplitBlock,
+        };
         Logs.Info("[ChromaRecipe] Chroma ready.");
         return new ChromaRecipePipeline(pipeline, tokenizer, zLoader, t5Loader, vaeLoader);
     }

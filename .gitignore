@@ -113,3 +113,4 @@ appsettings.*.json
 
 # CUDA kernel build intermediates — source is *.cu here; the shipped artifacts live in ../Ptx/
 src/HartsyInference.Cuda/Kernels/**/*.ptx
+/benchmarks/results

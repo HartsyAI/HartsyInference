@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -112,6 +113,32 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             FluxTransformer transformer = new FluxTransformer(config);
             transformer.LoadWeights(transformerWeights);
 
+            // DiT sharding split point — byte-weighted: Flux's 19 double blocks are ~2× its 38 single blocks,
+            // so a count-proportional split would misallocate by GBs. Computed post-load (needs live free VRAM).
+            int ditShardSplitBlock = 0;
+            if (context.DitShardBackend is not null)
+            {
+                long[] perBlockBytes = new long[transformer.BlockCount];
+                for (int i = 0; i < perBlockBytes.Length; i++)
+                {
+                    foreach (Tensor t in transformer.EnumerateBlockRangeWeights(i, i + 1))
+                    {
+                        perBlockBytes[i] += t.DType.ComputeByteCount(t.ElementCount);
+                    }
+                }
+                long sharedWeightBytes = 0;
+                foreach (Tensor t in transformer.EnumerateSharedWeights())
+                {
+                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
+                }
+                (long freeA, _) = context.Backend.GetVramInfo();
+                (long freeB, _) = context.DitShardBackend.GetVramInfo();
+                ditShardSplitBlock = PlacementPlanner.DitSplitPlan(freeA, freeB, perBlockBytes, sharedWeightBytes);
+                Logs.Info($"[Flux1Recipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
+                    + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend (v1 plain path; "
+                    + "ControlNet/Kontext/inpaint/regional generations fall back to unsharded).");
+            }
+
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
             clipL.LoadWeights(clipLWeights, prefix: "text_model");
 
@@ -125,6 +152,12 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             {
                 TextEncoderBackend = context.TextEncoderBackendOrDefault,
                 VaeBackend = context.VaeBackendOrDefault,
+                // Was missing until 2026-08-04 — the pipeline's CFG-parallel path existed but the recipe never
+                // forwarded the backend, so a configured CfgParallelDevice silently did nothing for Flux
+                // (caught by FluxCfgParallelFallbackTests asserting a [CfgParallel] decision is always logged).
+                CfgParallelBackend = context.CfgParallelBackend,
+                DitShardBackend = context.DitShardBackend,
+                DitShardSplitBlock = ditShardSplitBlock,
             };
             ClipTokenizer clipTok = new ClipTokenizer();
             T5Tokenizer t5Tok = new T5Tokenizer(maxLength: hasGuidance ? 512 : 256);

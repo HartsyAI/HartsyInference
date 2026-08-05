@@ -9,8 +9,8 @@ namespace HartsyInference.Cli.Commands;
 /// <summary>Generates an image from a prompt with any registered diffusion family, saving a PNG.</summary>
 public sealed class ImageCommand : Command<ImageCommand.Settings>
 {
-    /// <summary>Options for <c>hartsy image</c>.</summary>
-    public sealed class Settings : CommandSettings
+    /// <summary>Options for <c>hartsy image</c> (inherits the shared multi-GPU placement flags).</summary>
+    public sealed class Settings : PlacementCliSettings
     {
         /// <summary>The positive prompt.</summary>
         [CommandArgument(0, "<prompt>")]
@@ -113,7 +113,8 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Image);
         string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath);
 
+        (int? gpu, EngineOptions? engineOptions) = PlacementCli.Build(settings, settings.Backend);
         return CommandRunner.Run(Modality.Image, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
-            settings.Output, label, showResponseRule: false);
+            settings.Output, label, showResponseRule: false, gpu, engineOptions);
     }
 }

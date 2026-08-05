@@ -127,7 +127,11 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
 
             GemmaTokenizer tokenizer = new GemmaTokenizer(LocateGemmaTokenizer(context.CheckpointPath, gemmaSidePath), maxLength: TokenLength);
 
-            LtxVideo2Pipeline pipeline = new LtxVideo2Pipeline(context.Backend, transformer, connectors, vae, gemma, config, audioVae, vocoder, audioMean, audioStd);
+            LtxVideo2Pipeline pipeline = new LtxVideo2Pipeline(context.Backend, transformer, connectors, vae, gemma, config, audioVae, vocoder, audioMean, audioStd)
+            {
+                TextEncoderBackend = context.TextEncoderBackendOrDefault,
+                VaeBackend = context.VaeBackendOrDefault,
+            };
             Logs.Info($"[LtxVideo2Recipe] LTX-2 ready (text-to-video{(vocoder is not null ? "+audio" : "")}).");
             return new LtxVideo2RecipePipeline(pipeline, config, tokenizer, gemma, transformer, connectors, vocoder, loaders);
         }

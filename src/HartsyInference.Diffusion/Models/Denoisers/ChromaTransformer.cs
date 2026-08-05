@@ -181,6 +181,18 @@ public sealed unsafe class ChromaTransformer : IDisposable
         if (_projOutBias is not null) yield return _projOutBias;
     }
 
+    /// <summary>Weights of flat-indexed blocks <c>[startBlock, endBlock)</c> (doubles then singles) — the
+    /// asymmetric-preload primitive for DiT sharding: backend A preloads <see cref="EnumerateSharedWeights"/> +
+    /// its range, backend B ONLY its range. Never preload <see cref="EnumerateWeights"/> on both backends —
+    /// that replicates instead of pooling.</summary>
+    public IEnumerable<Tensor> EnumerateBlockRangeWeights(int startBlock, int endBlock)
+    {
+        for (int i = startBlock; i < endBlock; i++)
+        {
+            foreach (Tensor w in GetBlock(i).EnumerateWeights()) yield return w;
+        }
+    }
+
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
@@ -221,6 +233,172 @@ public sealed unsafe class ChromaTransformer : IDisposable
             txtSeqLen, hPacked, wPacked, attentionMask);
         modTable.Dispose();
         return velocity;
+    }
+
+    /// <summary>DiT-sharded forward, batch-1 classic Chroma only: the FLAT block space is <c>[0, Depth)</c> double
+    /// blocks then <c>[Depth, BlockCount)</c> single blocks; blocks <c>[0, splitBlock)</c> run on
+    /// <paramref name="backendA"/> (which also owns the shared embed/approximator/head weights), the rest on
+    /// <paramref name="backendB"/>. The modulation table is per-step and built on A, so it is COPIED across once
+    /// per pass (A's copy feeds the final-norm rows after B's range); the live streams MOVE. A double-region split
+    /// crosses img+txt; a single-region split crosses the concatenated stream. Runs the same activation dtype as
+    /// <see cref="Forward"/> (F16 under the default-ON HARTSY_DIT_F16, else F32) — required for same-device parity.
+    /// The rope's GPU tables and the SDPA mask are cached per backend (never peer-copied). VRAM pooling, not
+    /// latency — the two backends run sequentially. No step-graph, no step cache, no block streaming
+    /// (<see cref="BeforeBlockForward"/> must be null); the pipeline routes CFG as two sequential passes. Callers
+    /// preload <see cref="EnumerateSharedWeights"/> + <see cref="EnumerateBlockRangeWeights"/>(0, split) on A and
+    /// <see cref="EnumerateBlockRangeWeights"/>(split, BlockCount) on B.</summary>
+    public Tensor ForwardSharded(
+        IBackend backendA,
+        IBackend backendB,
+        Tensor packedLatent,
+        Tensor encoderHidden,
+        float timestep,
+        int txtSeqLen,
+        int hPacked,
+        int wPacked,
+        Tensor? attentionMask,
+        int splitBlock)
+    {
+        if (splitBlock <= 0 || splitBlock >= BlockCount)
+            throw new ArgumentOutOfRangeException(nameof(splitBlock),
+                $"splitBlock must be in (0, {BlockCount}) exclusive, got {splitBlock}.");
+        int batch = (int)packedLatent.Shape[0];
+        if (batch != 1)
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                "Chroma DiT sharding requires batch 1; run CFG as two batch-1 passes.");
+        if (BeforeBlockForward is not null)
+            throw new InvalidOperationException(
+                "DiT sharding and block streaming don't compose — BeforeBlockForward must be null on the sharded path.");
+        if (_xEmbedWeight is null || _projOutWeight is null)
+            throw new InvalidOperationException(
+                "Chroma DiT sharding requires the classic image projections (x_embedder/proj_out) — not available on Radiance backbones.");
+
+        int imgSeqLen = (int)packedLatent.Shape[1];
+        int hidden = _config.HiddenSize;
+        int totalSeqLen = txtSeqLen + imgSeqLen;
+        int numDoubles = _config.Depth;
+        int numSingles = _config.DepthSingleBlocks;
+
+        Tensor modTable = BuildModTable(backendA, timestep, batch);
+
+        Tensor img = new Tensor(new TensorShape(batch, imgSeqLen, hidden), DType.F32);
+        backendA.Linear(img, packedLatent, _xEmbedWeight!, _xEmbedBias);
+        ChromaDebugDump.Dump("img_in", img);
+        Tensor txt = new Tensor(new TensorShape(batch, txtSeqLen, hidden), DType.F32);
+        backendA.Linear(txt, encoderHidden, _contextEmbedWeight!, _contextEmbedBias);
+        ChromaDebugDump.Dump("txt_in", txt);
+
+        // Mirror ForwardCore's F16 hot path exactly (HARTSY_DIT_F16 is default-ON and the load-time weight damp
+        // is baked either way): the sharded loop must run the SAME dtype as the unsharded one or same-device
+        // parity is impossible. F16 also halves the boundary-copy bytes. Classic-only — the streams already ride
+        // at damp scale from the damped embedders, so no Radiance-style pre-cast scale here.
+        if (_f16Mode)
+        {
+            Tensor imgF16 = new Tensor(img.Shape, DType.F16);
+            backendA.CastToF16(imgF16, img);
+            img.Dispose();
+            img = imgF16;
+            Tensor txtF16 = new Tensor(txt.Shape, DType.F16);
+            backendA.CastToF16(txtF16, txt);
+            txt.Dispose();
+            txt = txtF16;
+        }
+        DType act = img.DType;
+
+        // FluxRope keys its GPU cos/sin tables per backend, so one shared instance serves both ranges. The SDPA
+        // mask is likewise cached per backend — each side builds/uploads its own host tensor (peer-copying the
+        // ~85 MB step-invariant mask per step, or staging ONE host tensor through two backends, are both wrong;
+        // see the per-backend cache comment on _sdpaMaskCaches).
+        FluxRope rope = GetRope(txtSeqLen, hPacked, wPacked);
+        Tensor? maskA = attentionMask is not null
+            ? GetOrBuildSdpaMask(backendA, attentionMask, batch, txtSeqLen, imgSeqLen, totalSeqLen)
+            : null;
+        Tensor? maskB = attentionMask is not null
+            ? GetOrBuildSdpaMask(backendB, attentionMask, batch, txtSeqLen, imgSeqLen, totalSeqLen)
+            : null;
+
+        int doubleSplit = Math.Min(splitBlock, numDoubles);
+        int singleSplit = Math.Max(0, splitBlock - numDoubles);
+        Tensor? modTableB = null;
+
+        ForwardDoubleRange(backendA, ref img, ref txt, modTable, rope, maskA, 0, doubleSplit);
+
+        IBackend concatBackend = backendA;
+        if (splitBlock < numDoubles)
+        {
+            // Split inside the double region: BOTH live streams MOVE; the per-step modTable is only COPIED —
+            // the final-norm rows on A are still read after B's range.
+            modTableB = CopyAcross(backendB, backendA, modTable);
+            img = MoveAcross(backendB, backendA, img);
+            txt = MoveAcross(backendB, backendA, txt);
+            ForwardDoubleRange(backendB, ref img, ref txt, modTableB, rope, maskB, doubleSplit, numDoubles);
+            concatBackend = backendB;
+        }
+
+        Tensor combined = new Tensor(new TensorShape(batch, totalSeqLen, hidden), act);
+        concatBackend.Concat(combined, new Tensor[] { txt, img }, dim: 1);
+        img.Dispose();
+        txt.Dispose();
+
+        if (splitBlock < numDoubles)
+        {
+            ForwardSingleRange(backendB, ref combined, modTableB!, rope, maskB, 0, numSingles);
+        }
+        else
+        {
+            ForwardSingleRange(backendA, ref combined, modTable, rope, maskA, 0, singleSplit);
+            // Split inside the single region: one concatenated stream MOVES, the modTable is COPIED.
+            modTableB = CopyAcross(backendB, backendA, modTable);
+            combined = MoveAcross(backendB, backendA, combined);
+            ForwardSingleRange(backendB, ref combined, modTableB, rope, maskB, singleSplit, numSingles);
+        }
+        modTableB?.Dispose();
+
+        // Back to A: the text-prefix strip and the head (final norm + proj_out) live in the shared weights there.
+        combined = MoveAcross(backendA, backendB, combined);
+        Tensor imgOut = new Tensor(new TensorShape(batch, imgSeqLen, hidden), act);
+        backendA.SliceRows(imgOut, combined, txtSeqLen);
+        combined.Dispose();
+        if (imgOut.DType == DType.F16)
+        {
+            // Back to F32 for the final norm + proj_out (velocity precision matters across Euler steps).
+            Tensor imgOutF32 = new Tensor(new TensorShape(batch, imgSeqLen, hidden), DType.F32);
+            backendA.CastToF32(imgOutF32, imgOut);
+            imgOut.Dispose();
+            imgOut = imgOutF32;
+        }
+        ChromaDebugDump.Dump("img_pre_norm_out", imgOut);
+
+        Tensor finalScaleShift = SliceModSlabDevice(backendA, modTable, _config.ModIndexLength - 2, rowCount: 2, hidden);
+        Tensor normedOut = ApplyContinuousNormDevice(backendA, imgOut, finalScaleShift, imgSeqLen, hidden);
+        finalScaleShift.Dispose();
+        imgOut.Dispose();
+        ChromaDebugDump.Dump("img_post_norm_out", normedOut);
+
+        int outDim = (int)_projOutWeight!.Shape[0];
+        Tensor velocity = new Tensor(new TensorShape(batch, imgSeqLen, outDim), DType.F32);
+        backendA.Linear(velocity, normedOut, _projOutWeight!, _projOutBias);
+        normedOut.Dispose();
+        modTable.Dispose();
+
+        ChromaDebugDump.DumpOutput(velocity);
+        return velocity;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device and disposes the source.</summary>
+    private static Tensor MoveAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor moved = CopyAcross(dst, src, source);
+        source.Dispose();
+        return moved;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device; the source stays live.</summary>
+    private static Tensor CopyAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor copied = new Tensor(source.Shape, source.DType);
+        dst.CopyFromPeer(copied, source, src);
+        return copied;
     }
 
     /// <summary>Runs one full denoise step's transformer work: the cond pass and (for CFG) the uncond pass,
@@ -524,35 +702,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
             : null;
 
         // ── Double-stream blocks ──
-        // Modulation table layout (matches transformer_chroma.py:546-557):
-        //   rows [0,           3 * numSingles)            → single block mods (3 each, used later)
-        //   rows [3*numSingles, 3*numSingles + 6*numDoubles) → double-block IMG mods (6 each)
-        //   rows [3*numSingles + 6*numDoubles, 3*numSingles + 12*numDoubles) → double-block TXT mods
-        //   rows [..., -2]                                 → final norm (scale, shift)
-        int imgOffset = 3 * numSingles;
-        int txtOffset = imgOffset + 6 * numDoubles;
-
-        for (int i = 0; i < numDoubles; i++)
-        {
-            int imgRow = imgOffset + 6 * i;
-            int txtRow = txtOffset + 6 * i;
-            Tensor doubleTemb = batch == 1
-                ? BuildDoubleBlockTembDevice(backend, modTable, imgRow, txtRow, hidden)
-                : BuildDoubleBlockTemb(modTable, batch, imgRow, txtRow, hidden);
-            ChromaDebugDump.Dump($"double_{i}_temb", doubleTemb);
-
-            BeforeBlockForward?.Invoke(i);
-            (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, img, txt, doubleTemb, rope, sdpaMask);
-            doubleTemb.Dispose();
-
-            img.Dispose();
-            txt.Dispose();
-            img = newImg;
-            txt = newTxt;
-
-            ChromaDebugDump.Dump($"double_{i}_img_out", img);
-            ChromaDebugDump.Dump($"double_{i}_txt_out", txt);
-        }
+        ForwardDoubleRange(backend, ref img, ref txt, modTable, rope, sdpaMask, 0, numDoubles);
 
         // ── Concatenate [txt, img] for single-stream processing. B=1: device row-concat (the old host
         //    Buffer.MemoryCopy read both streams' DataPointer — a full pipeline drain per forward). ──
@@ -570,22 +720,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
         txt.Dispose();
 
         // ── Single-stream blocks ──
-        for (int i = 0; i < numSingles; i++)
-        {
-            int singleRow = 3 * i;
-            Tensor singleTemb = batch == 1
-                ? SliceModSlabDevice(backend, modTable, singleRow, rowCount: 3, hidden)
-                : SliceModSlab(modTable, batch, singleRow, rowCount: 3, hidden);
-            ChromaDebugDump.Dump($"single_{i}_temb", singleTemb);
-
-            BeforeBlockForward?.Invoke(numDoubles + i);
-            Tensor newCombined = _singleBlocks[i].Forward(backend, combined, singleTemb, rope, sdpaMask);
-            singleTemb.Dispose();
-            combined.Dispose();
-            combined = newCombined;
-
-            ChromaDebugDump.Dump($"single_{i}_out", combined);
-        }
+        ForwardSingleRange(backend, ref combined, modTable, rope, sdpaMask, 0, numSingles);
 
         // sdpaMask is owned by the per-generation cache — NOT disposed here.
 
@@ -613,6 +748,73 @@ public sealed unsafe class ChromaTransformer : IDisposable
         ChromaDebugDump.Dump("img_pre_norm_out", imgOut);
 
         return imgOut;
+    }
+
+    /// <summary>Runs double-stream blocks <c>[startBlock, endBlock)</c>, advancing both streams in place. Each
+    /// block's 12 modulation rows are sliced out of <paramref name="modTable"/> on <paramref name="backend"/> —
+    /// the sharded path passes each range the modTable copy resident on the OWNING backend.
+    /// Modulation table layout (matches transformer_chroma.py:546-557):
+    ///   rows [0,           3 * numSingles)                  → single block mods (3 each),
+    ///   rows [3*numSingles, 3*numSingles + 6*numDoubles)    → double-block IMG mods (6 each),
+    ///   rows [3*numSingles + 6*numDoubles, ... + 12*numDoubles) → double-block TXT mods,
+    ///   rows [..., -2]                                      → final norm (scale, shift).</summary>
+    private void ForwardDoubleRange(IBackend backend, ref Tensor img, ref Tensor txt, Tensor modTable,
+        FluxRope rope, Tensor? sdpaMask, int startBlock, int endBlock)
+    {
+        int batch = (int)img.Shape[0];
+        int hidden = _config.HiddenSize;
+        int imgOffset = 3 * _config.DepthSingleBlocks;
+        int txtOffset = imgOffset + 6 * _config.Depth;
+
+        for (int i = startBlock; i < endBlock; i++)
+        {
+            int imgRow = imgOffset + 6 * i;
+            int txtRow = txtOffset + 6 * i;
+            Tensor doubleTemb = batch == 1
+                ? BuildDoubleBlockTembDevice(backend, modTable, imgRow, txtRow, hidden)
+                : BuildDoubleBlockTemb(modTable, batch, imgRow, txtRow, hidden);
+            ChromaDebugDump.Dump($"double_{i}_temb", doubleTemb);
+
+            BeforeBlockForward?.Invoke(i);
+            (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, img, txt, doubleTemb, rope, sdpaMask);
+            doubleTemb.Dispose();
+
+            img.Dispose();
+            txt.Dispose();
+            img = newImg;
+            txt = newTxt;
+
+            ChromaDebugDump.Dump($"double_{i}_img_out", img);
+            ChromaDebugDump.Dump($"double_{i}_txt_out", txt);
+        }
+    }
+
+    /// <summary>Runs single-stream blocks <c>[startBlock, endBlock)</c> over the concatenated <c>[txt; img]</c>
+    /// stream, advancing it in place; block indices are single-space (the flat streaming index is
+    /// <c>Depth + i</c>). Per-block modulation rows are sliced from <paramref name="modTable"/> on
+    /// <paramref name="backend"/>.</summary>
+    private void ForwardSingleRange(IBackend backend, ref Tensor combined, Tensor modTable,
+        FluxRope rope, Tensor? sdpaMask, int startBlock, int endBlock)
+    {
+        int batch = (int)combined.Shape[0];
+        int hidden = _config.HiddenSize;
+
+        for (int i = startBlock; i < endBlock; i++)
+        {
+            int singleRow = 3 * i;
+            Tensor singleTemb = batch == 1
+                ? SliceModSlabDevice(backend, modTable, singleRow, rowCount: 3, hidden)
+                : SliceModSlab(modTable, batch, singleRow, rowCount: 3, hidden);
+            ChromaDebugDump.Dump($"single_{i}_temb", singleTemb);
+
+            BeforeBlockForward?.Invoke(_config.Depth + i);
+            Tensor newCombined = _singleBlocks[i].Forward(backend, combined, singleTemb, rope, sdpaMask);
+            singleTemb.Dispose();
+            combined.Dispose();
+            combined = newCombined;
+
+            ChromaDebugDump.Dump($"single_{i}_out", combined);
+        }
     }
 
     /// <summary>Convenience pass-through that hooks the static debug dumper for the final latent.</summary>
@@ -695,38 +897,45 @@ public sealed unsafe class ChromaTransformer : IDisposable
         _graphSigCalls = 0;
     }
 
-    // Step-invariant SDPA-mask cache (see the build site). Two slots for the alternating cond/uncond
-    // mask tensors; keyed on the source tensor reference + joint sequence length. Nulled (not disposed)
-    // in Dispose — the tensors may be auto-promoted and their callbacks touch the CudaContext, which
-    // callers routinely tear down first.
-    private readonly Tensor?[] _sdpaMaskCache = new Tensor?[2];
-    private readonly Tensor?[] _sdpaMaskSourceRef = new Tensor?[2];
-    private readonly long[] _sdpaMaskSeqLen = new long[2];
-    private int _sdpaMaskNextSlot;
+    // Step-invariant SDPA-mask cache (see the build site). Two slots PER BACKEND for the alternating
+    // cond/uncond mask tensors; keyed on the source tensor reference + joint sequence length. Per-backend
+    // (the QwenImageRope.GetOrBuildJointTables precedent): DiT sharding runs blocks on a second backend, and
+    // two backends staging the SAME host tensor through the transfer helper trips its binding/pinning state
+    // (observed CUDA_ERROR_INVALID_VALUE on the second card at real table sizes) — and the ~85 MB mask is
+    // step-invariant, so it must never be peer-copied per step either; each backend builds/uploads its own.
+    // Nulled (not disposed) in Dispose — the tensors may be auto-promoted and their callbacks touch the
+    // CudaContext, which callers routinely tear down first.
+    private readonly Dictionary<IBackend, SdpaMaskSlots> _sdpaMaskCaches = new();
 
-    /// <summary>Returns the cached [B,1,S,S] additive SDPA mask for this conditioning tensor, building it on first use.</summary>
+    /// <summary>Returns the cached [B,1,S,S] additive SDPA mask for this conditioning tensor on this backend, building it on first use.</summary>
     private Tensor GetOrBuildSdpaMask(IBackend backend, Tensor attentionMask, int batch, int txtSeqLen, int imgSeqLen, int totalSeqLen)
     {
+        if (!_sdpaMaskCaches.TryGetValue(backend, out SdpaMaskSlots? slots))
+        {
+            slots = new SdpaMaskSlots();
+            _sdpaMaskCaches[backend] = slots;
+        }
         for (int s = 0; s < 2; s++)
         {
-            if (_sdpaMaskCache[s] is not null && ReferenceEquals(_sdpaMaskSourceRef[s], attentionMask)
-                && _sdpaMaskSeqLen[s] == totalSeqLen)
-                return _sdpaMaskCache[s]!;
+            if (slots.Cache[s] is not null && ReferenceEquals(slots.SourceRef[s], attentionMask)
+                && slots.SeqLen[s] == totalSeqLen)
+                return slots.Cache[s]!;
         }
         Tensor joinedMask = ExtendMaskWithImageOnes(attentionMask, batch, txtSeqLen, imgSeqLen);
         Tensor built = BuildSdpaMask(joinedMask, batch, totalSeqLen);
         joinedMask.Dispose();
-        int slot = _sdpaMaskNextSlot;
-        _sdpaMaskNextSlot = 1 - _sdpaMaskNextSlot;
-        if (_sdpaMaskCache[slot] is not null)
+        int slot = slots.NextSlot;
+        slots.NextSlot = 1 - slots.NextSlot;
+        if (slots.Cache[slot] is not null)
         {
-            // The graph warm-up pins cached masks device-resident — un-pin before disposing (no-op otherwise).
-            backend.FreeWeights(new[] { _sdpaMaskCache[slot]! });
-            _sdpaMaskCache[slot]!.Dispose();
+            // The graph warm-up pins cached masks device-resident — un-pin on the OWNING backend before
+            // disposing (no-op otherwise).
+            backend.FreeWeights(new[] { slots.Cache[slot]! });
+            slots.Cache[slot]!.Dispose();
         }
-        _sdpaMaskCache[slot] = built;
-        _sdpaMaskSourceRef[slot] = attentionMask;
-        _sdpaMaskSeqLen[slot] = totalSeqLen;
+        slots.Cache[slot] = built;
+        slots.SourceRef[slot] = attentionMask;
+        slots.SeqLen[slot] = totalSeqLen;
         return built;
     }
 
@@ -971,10 +1180,9 @@ public sealed unsafe class ChromaTransformer : IDisposable
         {
             // Nulled WITHOUT disposing (the weight-field pattern): the cached masks / fixed graph buffers may
             // be auto-promoted and their dispose callbacks touch the CudaContext, which callers tear down first.
+            _sdpaMaskCaches.Clear();
             for (int s = 0; s < 2; s++)
             {
-                _sdpaMaskCache[s] = null;
-                _sdpaMaskSourceRef[s] = null;
                 _ropeSlots[s] = null;
             }
             _latentFixed = null;
@@ -990,5 +1198,14 @@ public sealed unsafe class ChromaTransformer : IDisposable
             _approximator.Dispose();
         }
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>One backend's two-slot SDPA-mask cache (see <see cref="_sdpaMaskCaches"/>).</summary>
+    private sealed class SdpaMaskSlots
+    {
+        public readonly Tensor?[] Cache = new Tensor?[2];
+        public readonly Tensor?[] SourceRef = new Tensor?[2];
+        public readonly long[] SeqLen = new long[2];
+        public int NextSlot;
     }
 }

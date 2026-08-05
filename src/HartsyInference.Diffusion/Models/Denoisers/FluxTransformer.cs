@@ -276,6 +276,158 @@ public sealed unsafe class FluxTransformer : IDisposable
         return velocity;
     }
 
+    /// <summary>DiT-sharded forward, v1 PLAIN PATH ONLY: batch 1, no ControlNet residuals, no Kontext reference
+    /// tokens, no attention bias (regional/Redux). Runs the same activation dtype as <see cref="Forward"/>'s plain
+    /// path (F16 under the default-ON HARTSY_DIT_F16, else F32) — required for same-device parity, and F16 halves
+    /// the boundary-copy bytes. The FLAT block space is <c>[0, Depth)</c> double blocks then <c>[Depth, Depth+DepthSingleBlocks)</c>
+    /// single blocks; blocks <c>[0, splitBlock)</c> run on <paramref name="backendA"/> (which owns the shared
+    /// embed/head weights), the rest on <paramref name="backendB"/>. A double-region split crosses img+txt+temb;
+    /// a single-region split crosses the concatenated x+temb. The pipeline is responsible for routing excluded
+    /// feature combinations to the unsharded path — this method throws on them.</summary>
+    public Tensor ForwardSharded(IBackend backendA, IBackend backendB, Tensor packedLatent, Tensor t5Embeddings,
+        float sigma, Tensor clipPooled, float guidanceScale, int txtSeqLen, int hPacked, int wPacked, int splitBlock)
+    {
+        int totalBlocks = _config.Depth + _config.DepthSingleBlocks;
+        if (splitBlock <= 0 || splitBlock >= totalBlocks)
+            throw new ArgumentOutOfRangeException(nameof(splitBlock),
+                $"splitBlock must be in (0, {totalBlocks}) exclusive, got {splitBlock}.");
+        int batch = (int)packedLatent.Shape[0];
+        if (batch != 1)
+            throw new HartsyInferenceException("Flux DiT sharding v1 requires batch 1.");
+        if (BeforeBlockForward is not null)
+            throw new InvalidOperationException(
+                "DiT sharding and block streaming don't compose — BeforeBlockForward must be null on the sharded path.");
+
+        int imgSeqLen = (int)packedLatent.Shape[1];
+        int totalSeqLen = txtSeqLen + imgSeqLen;
+        int hidden = _config.HiddenSize;
+
+        Tensor temb = ComputeTimestepEmbedding(backendA, sigma, clipPooled, guidanceScale, batch);
+        Tensor img = new Tensor(new TensorShape(batch, imgSeqLen, hidden), DType.F32);
+        backendA.Linear(img, packedLatent, _xEmbedWeight!, _xEmbedBias);
+        Tensor txt = new Tensor(new TensorShape(batch, txtSeqLen, hidden), DType.F32);
+        backendA.Linear(txt, t5Embeddings, _contextEmbedWeight!, _contextEmbedBias);
+        // FluxRope keys its GPU cos/sin tables per backend, so one shared _rope serves both ranges.
+        EnsureRope(txtSeqLen, hPacked, wPacked, 0, 0, 0);
+
+        // Mirror Forward's F16 hot path exactly (HARTSY_DIT_F16 is default-ON, and the load-time weight damp is
+        // baked either way): the sharded loop must run the SAME dtype as the unsharded one or same-device parity
+        // is impossible. F16 also halves the boundary-copy bytes for free.
+        if (_f16Mode)
+        {
+            Tensor imgF16 = new Tensor(img.Shape, DType.F16);
+            backendA.CastToF16(imgF16, img);
+            img.Dispose();
+            img = imgF16;
+            Tensor txtF16 = new Tensor(txt.Shape, DType.F16);
+            backendA.CastToF16(txtF16, txt);
+            txt.Dispose();
+            txt = txtF16;
+        }
+        DType act = img.DType;
+
+        int doubleSplit = Math.Min(splitBlock, _config.Depth);
+        int singleSplit = Math.Max(0, splitBlock - _config.Depth);
+        Tensor? tembB = null;
+
+        for (int i = 0; i < doubleSplit; i++)
+        {
+            (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backendA, img, txt, temb, _rope, null);
+            img.Dispose();
+            txt.Dispose();
+            img = newImg;
+            txt = newTxt;
+        }
+
+        IBackend tailBackend = backendA;
+        if (splitBlock < _config.Depth)
+        {
+            // Split inside the double region: BOTH live streams cross (plus temb, which every block reads).
+            // temb is only COPIED — the head on A reads the original after B finishes.
+            tembB = CopyAcross(backendB, backendA, temb);
+            img = MoveAcross(backendB, backendA, img);
+            txt = MoveAcross(backendB, backendA, txt);
+            tailBackend = backendB;
+            for (int i = doubleSplit; i < _config.Depth; i++)
+            {
+                (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backendB, img, txt, tembB, _rope, null);
+                img.Dispose();
+                txt.Dispose();
+                img = newImg;
+                txt = newTxt;
+            }
+        }
+
+        Tensor x = new Tensor(new TensorShape(batch, totalSeqLen, hidden), act);
+        tailBackend.Concat(x, new Tensor[] { txt, img }, 1);
+        img.Dispose();
+        txt.Dispose();
+
+        for (int i = 0; i < singleSplit; i++)
+        {
+            Tensor newX = _singleBlocks[i].Forward(backendA, x, temb, _rope, null);
+            x.Dispose();
+            x = newX;
+        }
+        if (splitBlock >= _config.Depth)
+        {
+            // Split inside the single region: one concatenated stream crosses.
+            tembB = CopyAcross(backendB, backendA, temb);
+            x = MoveAcross(backendB, backendA, x);
+        }
+        for (int i = singleSplit; i < _config.DepthSingleBlocks; i++)
+        {
+            Tensor newX = _singleBlocks[i].Forward(backendB, x, tembB!, _rope, null);
+            x.Dispose();
+            x = newX;
+        }
+        tembB?.Dispose();
+
+        // Back to A: the head (final norm + proj_out) lives in the shared weights there.
+        x = MoveAcross(backendA, backendB, x);
+        Tensor imgOut = new Tensor(new TensorShape(batch, imgSeqLen, hidden), act);
+        backendA.SliceRows(imgOut, x, txtSeqLen);
+        x.Dispose();
+        if (imgOut.DType == DType.F16)
+        {
+            // Back to F32 for the final norm + proj_out (velocity precision matters across Euler steps).
+            Tensor imgOutF32 = new Tensor(new TensorShape(batch, imgSeqLen, hidden), DType.F32);
+            backendA.CastToF32(imgOutF32, imgOut);
+            imgOut.Dispose();
+            imgOut = imgOutF32;
+        }
+        Tensor output = ApplyFinalLayer(backendA, imgOut, temb, batch, imgSeqLen);
+        imgOut.Dispose();
+        temb.Dispose();
+        return output;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device and disposes the source.</summary>
+    private static Tensor MoveAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor moved = CopyAcross(dst, src, source);
+        source.Dispose();
+        return moved;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device; the source stays live.</summary>
+    private static Tensor CopyAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor copied = new Tensor(source.Shape, source.DType);
+        dst.CopyFromPeer(copied, source, src);
+        return copied;
+    }
+
+    /// <summary>Weights of flat-indexed blocks <c>[startBlock, endBlock)</c> (doubles then singles) — the
+    /// asymmetric-preload primitive for DiT sharding; pair with <see cref="EnumerateSharedWeights"/> on backend A.</summary>
+    public IEnumerable<Tensor> EnumerateBlockRangeWeights(int startBlock, int endBlock)
+    {
+        for (int i = startBlock; i < endBlock; i++)
+        {
+            foreach (Tensor w in GetBlock(i).EnumerateWeights()) yield return w;
+        }
+    }
+
     /// <summary>Forward body with a caller-owned temb (shared by the eager and step-graph paths — the graph
     /// path computes temb inside the capture from fixed device sin buffers). Does NOT dispose temb.</summary>
     private Tensor ForwardWithTemb(IBackend backend, Tensor packedLatent, Tensor t5Embeddings, Tensor temb,

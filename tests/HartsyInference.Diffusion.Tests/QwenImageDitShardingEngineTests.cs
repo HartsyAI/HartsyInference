@@ -100,8 +100,9 @@ public sealed class QwenImageDitShardingEngineTests
         if (!RealWeightGate.Require(_output.WriteLine, checkpoint)) return;
         ModelSpec spec = ModelResolver.Resolve("qwen-image", checkpoint, Modality.Image);
         if (spec.LocalPath is null) { _output.WriteLine("SKIPPED: qwen-image not resolvable with the explicit path."); return; }
+        // Sharded-only (no unsharded baseline here) — each card only needs its split share plus activations.
         (double preFree0, double preFree1) = ProbeFreeGb();
-        if (preFree0 < 20.0 || preFree1 < 9.0) { _output.WriteLine("SKIPPED: insufficient free VRAM."); return; }
+        if (preFree0 < 16.0 || preFree1 < 8.0) { _output.WriteLine("SKIPPED: insufficient free VRAM."); return; }
 
         ImageRequest request = new ImageRequest
         {

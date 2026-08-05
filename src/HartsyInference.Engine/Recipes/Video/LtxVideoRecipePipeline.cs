@@ -21,6 +21,10 @@ namespace HartsyInference.Engine.Recipes.Video;
 public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
 {
     private readonly IBackend _backend;
+    /// <summary>Backend the T5-XXL prompt encoder runs on — separable from <see cref="_backend"/> because the
+    /// embeddings are host-materialized (SliceBatchElementPrefix is a host loop) before the denoiser consumes
+    /// them, so moving the ~5 GB encoder off the denoiser GPU costs nothing.</summary>
+    private readonly IBackend _textBackend;
     private readonly LtxVideoPipeline _pipeline;
     private readonly LtxVideoConfig _config;
     private readonly T5Tokenizer _tokenizer;
@@ -28,11 +32,13 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
     private readonly LtxVideoTransformer _transformer;
     private readonly List<SafeTensorsLoader> _loaders;
 
-    /// <summary>Wraps the constructed LTX-Video pipeline plus its text encoder, taking ownership of every disposable.</summary>
-    public LtxVideoRecipePipeline(IBackend backend, LtxVideoPipeline pipeline, LtxVideoConfig config, T5Tokenizer tokenizer,
+    /// <summary>Wraps the constructed LTX-Video pipeline plus its text encoder, taking ownership of every disposable.
+    /// <paramref name="textBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
+    public LtxVideoRecipePipeline(IBackend backend, IBackend textBackend, LtxVideoPipeline pipeline, LtxVideoConfig config, T5Tokenizer tokenizer,
         T5TextEncoder t5, LtxVideoTransformer transformer, List<SafeTensorsLoader> loaders)
     {
         _backend = backend;
+        _textBackend = textBackend;
         _pipeline = pipeline;
         _config = config;
         _tokenizer = tokenizer;
@@ -57,7 +63,10 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
         int[] negTokens = _tokenizer.Encode(negative);
         int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
         int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
-        Tensor batch = _t5.Encode(_backend, [promptTokens, negTokens], [promptMask, negMask]);
+        // T5 runs on the (possibly separate) text backend; the host-side SliceBatchElementPrefix passes below ARE
+        // the cross-device boundary — they force the embeddings to host, so the denoiser's backend re-uploads from
+        // there. Load-bearing for TextEncoderDevice placement: keep them host-side.
+        Tensor batch = _t5.Encode(_textBackend, [promptTokens, negTokens], [promptMask, negMask]);
         // Drop right-padding: feed cross-attention only the real (non-pad) T5 tokens — attending the pad rows
         // unmasked dilutes the caption (LtxVideoGenerationTests' proven fix; zeroing the pad rows in place, the
         // Engine's earlier approach, still attends them and was NOT the fix that made LTX-Video coherent).
@@ -65,8 +74,8 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
         Tensor promptEmbeds = CfgHelper.SliceBatchElementPrefix(batch, 0, promptTokens.Length, promptLen, _config.CaptionChannels);
         Tensor negEmbeds = CfgHelper.SliceBatchElementPrefix(batch, 1, negTokens.Length, negLen, _config.CaptionChannels);
         batch.Dispose();
-        _backend.Sync();
-        _backend.FreeWeights(_t5.EnumerateWeights());
+        _textBackend.Sync();
+        _textBackend.FreeWeights(_t5.EnumerateWeights());
 
         // TODO(E-IMG-4/5): image-to-video conditioning (InitImage / VideoEndFrame) is not wired for LTX-Video — the
         // extension's loader drives text-to-video only.

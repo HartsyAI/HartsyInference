@@ -4,6 +4,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Gguf;
@@ -70,6 +71,32 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             HunyuanImageTransformer transformer = new HunyuanImageTransformer(config);
             transformer.LoadWeights(converted.Transformer);
 
+            // DiT sharding split point — byte-weighted: HunyuanImage's 20 double blocks are ~2× its 40 single
+            // blocks, so a count-proportional split would misallocate by GBs. Computed post-load (needs live
+            // free VRAM).
+            int ditShardSplitBlock = 0;
+            if (context.DitShardBackend is not null)
+            {
+                long[] perBlockBytes = new long[transformer.BlockCount];
+                for (int i = 0; i < perBlockBytes.Length; i++)
+                {
+                    foreach (Tensor t in transformer.EnumerateBlockRangeWeights(i, i + 1))
+                    {
+                        perBlockBytes[i] += t.DType.ComputeByteCount(t.ElementCount);
+                    }
+                }
+                long sharedWeightBytes = 0;
+                foreach (Tensor t in transformer.EnumerateSharedWeights())
+                {
+                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
+                }
+                (long freeA, _) = context.Backend.GetVramInfo();
+                (long freeB, _) = context.DitShardBackend.GetVramInfo();
+                ditShardSplitBlock = PlacementPlanner.DitSplitPlan(freeA, freeB, perBlockBytes, sharedWeightBytes);
+                Logs.Info($"[HunyuanImageRecipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the "
+                    + $"primary backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
+            }
+
             string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen25Vl7BHunyuan, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
             SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
             qwenLoader.Load(qwenPath);
@@ -85,7 +112,13 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             HunyuanImageVaeDecoder vaeDecoder = new HunyuanImageVaeDecoder(VaeConfig.HunyuanImage);
             vaeDecoder.LoadWeights(RemapVaeKeys(vaeLoader.GetAllTensors()));
 
-            HunyuanImagePipeline pipeline = new HunyuanImagePipeline(context.Backend, qwenEncoder, transformer, vaeDecoder, config);
+            HunyuanImagePipeline pipeline = new HunyuanImagePipeline(context.Backend, qwenEncoder, transformer, vaeDecoder, config)
+            {
+                TextEncoderBackend = context.TextEncoderBackendOrDefault,
+                VaeBackend = context.VaeBackendOrDefault,
+                DitShardBackend = context.DitShardBackend,
+                DitShardSplitBlock = ditShardSplitBlock,
+            };
             Qwen2Tokenizer tokenizer = new Qwen2Tokenizer();
             Logs.Info("[HunyuanImageRecipe] HunyuanImage 2.1 ready.");
             return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, ggufHandle);

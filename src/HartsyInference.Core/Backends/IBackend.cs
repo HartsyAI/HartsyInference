@@ -2520,4 +2520,14 @@ public interface IBackend : IDisposable
 
     /// <summary>Streaming cache overlapping weight uploads with compute; <c>null</c> means fall back to <see cref="PreloadWeights"/>.</summary>
     IStreamingWeightCache? StreamingCache => null;
+
+    /// <summary>Clears the per-op profile accumulator so a later <see cref="DumpOpProfile"/> covers only work after this point.</summary>
+    /// <remarks>Lets a pipeline window the profiler onto its steady-state loop. Without it the table folds in
+    /// one-time setup — text encode, weight residency warm-up — whose cost varies enough run to run that
+    /// differencing two runs to cancel it does not work (measured on MiniMax-H3: a 3-step run spent MORE total
+    /// time in <c>Linear</c> than a 6-step run, purely from differing H2D-miss counts). No-op when profiling is off.</remarks>
+    void ResetOpProfile() { }
+
+    /// <summary>Writes the per-op profile accumulated so far, tagging the output with <paramref name="label"/>. No-op when profiling is off.</summary>
+    void DumpOpProfile(string label) { }
 }

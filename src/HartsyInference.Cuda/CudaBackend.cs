@@ -135,6 +135,30 @@ public sealed class CudaBackend : IBackend
     /// against the F16 fallback.</remarks>
     public bool EnableNativeFp8Gemm { get; set; }
 
+    /// <summary>Use the division-free head-major rope kernel (<c>HARTSY_ROPE_V2=0</c> to fall back). Bit-identical.</summary>
+    public bool EnableRopeHeadMajorV2 { get; set; }
+
+    /// <summary>Quantize fp8 activations with the checkpoint's <c>.input_scale</c> instead of a per-call absmax
+    /// (<c>HARTSY_FP8_STATIC_INPUT_SCALE=0</c> to force the dynamic path). Changes numerics — see the doc comment.</summary>
+    public bool EnableStaticFp8InputScale { get; set; }
+
+    /// <summary>Device-resident copy of a weight's static activation scale, allocated once per weight.</summary>
+    private readonly Dictionary<Tensor, ulong> _fp8InputScaleDev = new();
+
+    /// <summary>Returns the device pointer holding <paramref name="weight"/>'s static input scale, or 0 if it has none.</summary>
+    private unsafe ulong EnsureFp8InputScaleDev(Tensor weight)
+    {
+        float scale = weight.Fp8InputScaleFactor;
+        if (scale <= 0.0f || !float.IsFinite(scale)) return 0;
+        if (_fp8InputScaleDev.TryGetValue(weight, out ulong cached)) return cached;
+        // Persistent, not pool-allocated: it outlives the call and must survive stream-ordered frees. One
+        // synchronous 4-byte upload per weight, once, so it never touches the per-step path.
+        ulong dev = CudaMemory.AllocatePersistent(sizeof(float));
+        CudaMemory.CopyHostToDevice(dev, &scale, sizeof(float));
+        _fp8InputScaleDev[weight] = dev;
+        return dev;
+    }
+
     /// <summary>Low-VRAM lever: when <c>true</c> (default) the per-weight fp8/quant→F16 cast is cached resident, not recomputed each GEMM.</summary>
     /// <remarks>Cached is fastest but keeps BOTH the fp8 weight (~1 byte/param) and its F16 cast (~2 bytes/param) on
     /// the device, ≈3× the fp8 footprint. Set <c>false</c> to force the transient path (one weight cast at a time,
@@ -458,6 +482,8 @@ public sealed class CudaBackend : IBackend
         bool fp8TensorCores = _context.ComputeCapabilityMajor > 8
             || (_context.ComputeCapabilityMajor == 8 && _context.ComputeCapabilityMinor >= 9);
         EnableNativeFp8Gemm = EnvSwitch.IsEnabled("HARTSY_FP8_NATIVE", defaultOn: fp8TensorCores);
+        EnableRopeHeadMajorV2 = EnvSwitch.IsEnabled("HARTSY_ROPE_V2", defaultOn: true);
+        EnableStaticFp8InputScale = EnvSwitch.IsEnabled("HARTSY_FP8_STATIC_INPUT_SCALE", defaultOn: true);
         EnableW8A8 = EnvSwitch.IsEnabled("HARTSY_W8A8", defaultOn: false);
         HighPrecisionGemm = EnvFlag("HARTSY_HIGH_PRECISION_GEMM");
         EnableFp8F16Gemm = EnvFlag("HARTSY_FP8_F16");
@@ -578,6 +604,9 @@ public sealed class CudaBackend : IBackend
         GpuTransferHelper.SetAmbient(_transferState);
         _context.EnsureCurrent();
         Tensor.DrainPendingFinalizerGpuCleanup(_transferState.Key);
+        // The previous op's finally blocks have run by now, so anything a CacheActivation rebind displaced and
+        // nobody claimed is provably ownerless. Reclaiming it here is what makes the non-in-place case safe.
+        GpuTransferHelper.SweepOrphans();
     }
 
     /// <summary>Largest im2col workspace Conv2D will allocate; larger convs run as output-row bands (bit-identical GEMMs, per-band offset).</summary>
@@ -977,20 +1006,38 @@ public sealed class CudaBackend : IBackend
                     // off, the fp8 VRAM recipe) re-casts the whole fp8 weight set to F16 every step (Axis-B).
                     int count = (int)input.ElementCount;
                     pInputFp8 = CudaMemory.Allocate((nuint)count);
-                    // Scratch layout: [0] = dequant scale (amax/448), [1..] = per-block maxes.
-                    pFp8Scratch = CudaMemory.Allocate((nuint)((CudaKernels.Fp8AbsMaxBlockCount(count) + 1) * sizeof(float)));
-                    if (input.DType == DType.F16)
+                    // A checkpoint-supplied static activation scale replaces the absmax pass entirely: two of the
+                    // three launches go away, and with them a full extra read of the activation AND a grid-wide
+                    // reduction the quantize kernel had to wait on before it could start. Measured on MiniMax-H3 at
+                    // ~188 ms/step of quantization tax across 200 Linears. Falls back per-weight, so a Linear whose
+                    // file ships no `.input_scale` (H3's mlp.fc2) still quantizes dynamically.
+                    ulong staticScaleDev = EnableStaticFp8InputScale ? EnsureFp8InputScaleDev(weight) : 0;
+                    if (staticScaleDev != 0)
                     {
-                        _kernels!.LaunchFp8AbsMaxScaleF16(pInput, pFp8Scratch + sizeof(float), pFp8Scratch, count, _stream.Handle);
-                        _kernels!.LaunchFp8QuantF16ToE4M3(pInputFp8, pInput, pFp8Scratch, count, _stream.Handle);
+                        if (input.DType == DType.F16)
+                            _kernels!.LaunchFp8QuantF16ToE4M3(pInputFp8, pInput, staticScaleDev, count, _stream.Handle);
+                        else
+                            _kernels!.LaunchFp8QuantF32ToE4M3(pInputFp8, pInput, staticScaleDev, count, _stream.Handle);
+                        inputFp8Ptr = pInputFp8;
+                        inputScaleDev = staticScaleDev;
                     }
                     else
                     {
-                        _kernels!.LaunchFp8AbsMaxScale(pInput, pFp8Scratch + sizeof(float), pFp8Scratch, count, _stream.Handle);
-                        _kernels!.LaunchFp8QuantF32ToE4M3(pInputFp8, pInput, pFp8Scratch, count, _stream.Handle);
+                        // Scratch layout: [0] = dequant scale (amax/448), [1..] = per-block maxes.
+                        pFp8Scratch = CudaMemory.Allocate((nuint)((CudaKernels.Fp8AbsMaxBlockCount(count) + 1) * sizeof(float)));
+                        if (input.DType == DType.F16)
+                        {
+                            _kernels!.LaunchFp8AbsMaxScaleF16(pInput, pFp8Scratch + sizeof(float), pFp8Scratch, count, _stream.Handle);
+                            _kernels!.LaunchFp8QuantF16ToE4M3(pInputFp8, pInput, pFp8Scratch, count, _stream.Handle);
+                        }
+                        else
+                        {
+                            _kernels!.LaunchFp8AbsMaxScale(pInput, pFp8Scratch + sizeof(float), pFp8Scratch, count, _stream.Handle);
+                            _kernels!.LaunchFp8QuantF32ToE4M3(pInputFp8, pInput, pFp8Scratch, count, _stream.Handle);
+                        }
+                        inputFp8Ptr = pInputFp8;
+                        inputScaleDev = pFp8Scratch;
                     }
-                    inputFp8Ptr = pInputFp8;
-                    inputScaleDev = pFp8Scratch;
                 }
 
                 Fp8Executor.Run(weight: pWeight, input: inputFp8Ptr, outPtr: pOutput, m: m, n: n, k: k,
@@ -3187,6 +3234,7 @@ public sealed class CudaBackend : IBackend
     {
         if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("CUDA ApplyRopeSingle supports F32 only.");
+        using NvtxRange _nvtx = NvtxRange.Push("ApplyRopeSingle");
         EnterOp();
         EnsureKernels();
         int numHeads = (int)x.Shape[2];
@@ -3223,6 +3271,7 @@ public sealed class CudaBackend : IBackend
             throw new NotSupportedException("CUDA ApplyRopeSingleHeadMajor supports F32 only.");
         if (x.Shape.Rank != 4)
             throw new HartsyInferenceException($"ApplyRopeSingleHeadMajor needs x shaped [B,heads,seq,headDim], got {x.Shape}.");
+        using NvtxRange _nvtx = NvtxRange.Push("ApplyRopeHeadMajor");
         EnterOp();
         EnsureKernels();
         int heads = (int)x.Shape[1];
@@ -3239,7 +3288,15 @@ public sealed class CudaBackend : IBackend
             pX = GpuTransferHelper.CopyToDevice(x);
             pCos = GpuTransferHelper.CopyToDevice(cos);
             pSin = GpuTransferHelper.CopyToDevice(sin);
-            _kernels!.LaunchRopeHeadMajor(pX, pCos, pSin, heads, headDim, seq, totalVecs, _stream.Handle, rotaryDim);
+            int batch = (int)x.Shape[0];
+            if (EnableRopeHeadMajorV2 && _kernels!.CanUseRopeHeadMajorV2(heads, headDim, seq, batch, rotaryDim))
+            {
+                _kernels!.LaunchRopeHeadMajorV2(pX, pCos, pSin, heads, headDim, seq, batch, _stream.Handle, rotaryDim);
+            }
+            else
+            {
+                _kernels!.LaunchRopeHeadMajor(pX, pCos, pSin, heads, headDim, seq, totalVecs, _stream.Handle, rotaryDim);
+            }
 
             // In-place: clear stale callbacks before re-caching (pitfall #17).
             x._gpuSyncCallback = null;
@@ -4243,6 +4300,7 @@ public sealed class CudaBackend : IBackend
     public unsafe void RowGather(Tensor output, Tensor input, Tensor indices, int m, int channels)
     {
         if (indices.DType != DType.I32) throw new NotSupportedException("RowGather requires I32 indices.");
+        using NvtxRange _nvtx = NvtxRange.Push("RowGather");
         EnterOp(); EnsureKernels();
         ulong pOut = 0, pIn = 0, pIdx = 0; bool cached = false;
         try
@@ -5233,21 +5291,36 @@ public sealed class CudaBackend : IBackend
             pK8 = GpuTransferHelper.AllocateDevice((nuint)((long)b * h * skv * d));
             pKs = GpuTransferHelper.AllocateDevice((nuint)((long)b * h * skv * sizeof(float)));
 
-            _kernels!.LaunchSageKMean(pKmean, pK, (int)b, (int)h, (int)skv, (int)d, _stream.Handle, srcF16: f16);
+            // Sub-ranges, not one "SDPA" label: four of these five launches are prologue, and the V transpose
+            // alone moves ~14 GB/step on MiniMax-H3 — invisible while the whole call profiled as a single op.
+            using (NvtxRange _rk = NvtxRange.PushFine("Sage.KMean"))
+            {
+                _kernels!.LaunchSageKMean(pKmean, pK, (int)b, (int)h, (int)skv, (int)d, _stream.Handle, srcF16: f16);
+            }
             // log2-domain softmax: fold log2(e) into the Q row scales so the flash kernels exponentiate via
             // native exp2 (one fewer multiply per score element; max/corr/l all commute with the constant).
             const float Log2E = 1.4426950408889634f;
-            _kernels!.LaunchSageQuantQ(pQ8, pQs, pQ, (int)b, (int)h, (int)sq, (int)d, scale * Log2E, _stream.Handle, srcF16: f16);
-            _kernels!.LaunchSageQuantK(pK8, pKs, pK, pKmean, (int)b, (int)h, (int)skv, (int)d, _stream.Handle, srcF16: f16);
+            using (NvtxRange _rq = NvtxRange.PushFine("Sage.QuantQ"))
+            {
+                _kernels!.LaunchSageQuantQ(pQ8, pQs, pQ, (int)b, (int)h, (int)sq, (int)d, scale * Log2E, _stream.Handle, srcF16: f16);
+            }
+            using (NvtxRange _rkq = NvtxRange.PushFine("Sage.QuantK"))
+            {
+                _kernels!.LaunchSageQuantK(pK8, pKs, pK, pKmean, (int)b, (int)h, (int)skv, (int)d, _stream.Handle, srcF16: f16);
+            }
             if (_kernels!.UseSageV1)
             {
+                using NvtxRange _rv = NvtxRange.PushFine("Sage.VF16T");
                 // v1 prologue: one-shot [B,H,Skv,D]→[B,H,D,skvPad] F16 transpose (cp.async-able staging).
                 long skvPad = (skv + 7L) & ~7L;
                 if (skvPad >= 2048 && (skvPad & (skvPad - 1)) == 0) skvPad += 8;   // anti-aliasing pad (see sage_skv_pad)
                 pVt16 = GpuTransferHelper.AllocateDevice((nuint)((long)b * h * d * skvPad * 2));
                 _kernels!.LaunchSageVF16T(pVt16, pV, (int)b, (int)h, (int)skv, (int)d, _stream.Handle, srcF16: f16);
             }
-            _kernels!.LaunchSageAttnInt8(pOut, pQ8, pQs, pK8, pKs, pV, pVt16, (int)b, (int)h, (int)sq, (int)skv, (int)d, _stream.Handle, f16Io: f16);
+            using (NvtxRange _ra = NvtxRange.PushFine("Sage.Flash"))
+            {
+                _kernels!.LaunchSageAttnInt8(pOut, pQ8, pQs, pK8, pKs, pV, pVt16, (int)b, (int)h, (int)sq, (int)skv, (int)d, _stream.Handle, f16Io: f16);
+            }
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -7839,6 +7912,16 @@ public sealed class CudaBackend : IBackend
     {
         EnterOp();
         return CudaMemory.GetMemInfo();
+    }
+
+    /// <inheritdoc/>
+    public void ResetOpProfile() => NvtxRange.ResetProfile();
+
+    /// <inheritdoc/>
+    public void DumpOpProfile(string label)
+    {
+        string basePath = Environment.GetEnvironmentVariable("HARTSY_PROFILE_OUT") ?? "/tmp/hartsy_profile.txt";
+        NvtxRange.DumpProfile($"{basePath}.{label}");
     }
 
     #endregion

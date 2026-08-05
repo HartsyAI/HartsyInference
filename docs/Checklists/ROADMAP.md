@@ -40,11 +40,16 @@ giants (Kimi-K2, DeepSeek-V3, Mixtral, Qwen3-MoE, Qwen2.5-VL-7B).
   Notes section used to list — no longer missing); `IBackend.CopyFromPeer` with a P2P path and a
   host-staged fallback for consumer hardware without P2P (`HARTSY_P2P_DISABLE=1` forces the fallback
   deterministically for testing); `CudaPeerAccess` per-pair probe/enable memo.
-- [x] **Diffusion component placement (TE/VAE on another GPU)** — **done** (2026-08-02): `RecipeContext`
-  gained `TextEncoderBackend`/`VaeBackend`, wired for Wan (umT5) → Flux (T5/CLIP + VAE) → SDXL (CLIP);
-  host-materialization at the existing stage boundary means no peer copy is even needed for this one.
-  Bit-identical output vs single-GPU expected (placement only, math unchanged) — not yet measured on
-  real hardware pending a free GPU window (see CFG-parallel note below).
+- [x] **Diffusion component placement (TE/VAE on another GPU)** — **done** (2026-08-02, extended
+  2026-08-04): `RecipeContext` gained `TextEncoderBackend`/`VaeBackend`, wired for Wan (umT5) → Flux
+  (T5/CLIP + VAE) → SDXL (CLIP), then Qwen-Image, Chroma, HunyuanImage, LTX-1, LTX-2 (audio VAE + vocoder
+  included) — see `MULTI_GPU_COMPONENT_PLACEMENT.md` for the per-pipeline hazards (pin owners, the
+  HunyuanImage device-resident latent bridge, LTX-2's Gemma-evict skip). Host-materialization at the
+  existing stage boundaries means no peer copy is needed. **Measured on real hardware 2026-08-04**:
+  `FluxComponentPlacementEngineTests` (real dev fp8, TE+VAE on the second card, SSIM 0.81 vs baseline —
+  the mismatched-SM fp8 T5 paths legitimately drift; on matched cards the expectation stays bit-identical)
+  through the full `InferenceEngine` path. `VaeDevice` became settable from the extension (`VaeGpuId`)
+  and the CLI (`--vae-gpu`, `--te-gpu`).
 - [x] **CFG-branch parallelism** (Wan first, then Flux true-CFG) — **done** (2026-08-02):
   `Diffusion/Utilities/CfgBranchRunner.cs` (dedicated background `Thread`, not `Task.Run` — a
   seconds-long blocking GPU call must not invite thread-pool injection stalls); `PlacementConfig.CfgParallelDevice`
@@ -63,11 +68,16 @@ giants (Kimi-K2, DeepSeek-V3, Mixtral, Qwen3-MoE, Qwen2.5-VL-7B).
   pressure varies run to run, so this can't be a static config check), falls back to sequential silently
   (one log line, never a throw) if the second backend can't also hold the whole DiT resident. Uses
   `CopyFromPeer` (not `.DataPointer`) for both the latent hand-off and the velocity hand-back, preserving
-  `drainFree`'s whole point (device-resident latent, no per-step D2H). **Gap, honestly recorded**: no
-  synthetic-weight Flux test harness exists in this codebase (unlike Wan) and no real Flux checkpoint is on
-  this box, so the Flux path has no end-to-end bit-parity test — verified instead via its underlying
-  primitives independently (below) plus a careful diff self-review; existing Flux structural/unit suite
-  (63 tests) regression-clean.
+  `drainFree`'s whole point (device-resident latent, no per-step D2H). **Update 2026-08-04**: a real Flux
+  dev fp8 checkpoint now lives at `Models/Stable-Diffusion/BFL/Flux1/` (the earlier "no checkpoint on this
+  box" note is stale) and real-weight Flux verification runs through `FluxDitShardingVramTests`/
+  `FluxComponentPlacementEngineTests`. On this 4090+3060 box the CFG-parallel CONCURRENT path stays
+  untestable for Flux (the ~12 GB fp8 DiT cannot replicate onto the 12 GB card) — the fallback path is what
+  is verified, now observably: every CFG-parallel decision is recorded via
+  `DiffusionPipelineBase.LastCfgParallelDecision` + a `[CfgParallel]` log line (`active`,
+  `fell-back(<reason>)`, `inapplicable(no-true-cfg)`), asserted by `FluxCfgParallelFallbackTests`. Wan's
+  CfgParallel preload additionally gained the missing OOM→sequential fallback (was: a too-small second
+  card killed the generation).
   **Found + fixed along the way** (pre-existing, not scoped to this feature — CFG-parallel is just what
   surfaced it, since it's the first code path to have two threads genuinely touch a shared tensor at the
   same wall-clock time): a real double-free race in `Tensor.EnsureCpuData` (`src/HartsyInference.Core/Tensors/Tensor.cs`)
@@ -98,9 +108,33 @@ giants (Kimi-K2, DeepSeek-V3, Mixtral, Qwen3-MoE, Qwen2.5-VL-7B).
   not "it ran." Found and fixed along the way (see `FluxRope.cs`): a live thread-safety bug in already-shipped
   Phase 7 Flux CFG-parallel — `FluxRope`'s GPU cos/sin table cache was a single unkeyed slot shared by both
   cond/uncond backends; fixed with a per-backend-keyed, locked cache, plus a `condTxtSeqLen == txtSeqLen`
-  guard in `FluxPipeline` closing a signature-mismatch corruption path the lock alone couldn't. Scope:
-  Krea2 only; pipeline-level wiring (`Krea2RecipePipeline`/`PlacementConfig.EnableDitSharding`) not done —
-  this verifies the transformer-level split and VRAM claim, the hard previously-unverified part.
+  guard in `FluxPipeline` closing a signature-mismatch corruption path the lock alone couldn't.
+  **Update 2026-08-04 — sharding is now a fleet feature, wired end-to-end (pipeline + recipe + planner)
+  and hardware-verified per model**: Krea2 (the 2026-08-03 engine e2e), **Qwen-Image** (20B Edit fp8:
+  19.6 GB pooled 13.4+6.2 across 4090+3060 at a live 41/60 split; engine e2e SSIM 0.9734 vs unsharded;
+  same-device split BIT-EXACT on the synthetic config; a per-backend `QwenImageRope` table cache fixed the
+  cross-backend host-tensor staging crash), **MiniMax-H3** (fp8 pruned 19.76 GB pooled 13.9+5.8 at a live
+  34/50 split with finite video+audio output — the headline "cannot fit one card" case; fp8-build-only,
+  bf16 66 GB exceeds any 2-consumer-card pool by design), **Flux v1 plain-path** (real dev fp8: same-device
+  split bit-exact over 262k velocity values on the default F16 hot path; cross-device byte-weighted 30/57
+  split pools 7.7+3.7 GB; engine e2e SSIM 0.9075; ControlNet/Kontext/inpaint/regional generations fall back
+  to unsharded with a logged warning), with Chroma + HunyuanImage in flight on the same template. Planner
+  gained a byte-weighted `DitSplitPlan` overload (heterogeneous double/single block sizes — a count split
+  misallocates by GBs on Flux/Chroma/Hunyuan). Cross-device splits are tolerance-gated, same-device splits
+  bit-exact: cross-SM cuBLAS reduction order legitimately differs (the Krea2 cross-device bit-exact result
+  was tiny-GEMM luck, not a general guarantee).
+- [x] **Multi-GPU verification campaign** — added 2026-08-04: `tests/run-multigpu-campaign.sh` runs every
+  placement/sharding/CFG-parallel real-weight e2e class filter-isolated (never whole suites) under
+  `HARTSY_REQUIRE_REAL_WEIGHTS=1`, where a missing checkpoint FAILS via `RealWeightGate` instead of
+  silently skipping — a green campaign genuinely means every listed test executed on real weights.
+  `CudaOrdinalMapTests` prints the live ordinal→card map first (CUDA enumerates fastest-first; on this box
+  ordinal 0 = 4090, 1 = 3060 — REVERSED from nvidia-smi).
+- **Two finished features deliberately still opt-in** (plain-language, for the flip-it-later decision):
+  `HARTSY_SAME_GPU_CONCURRENT=1` lets two backends sharing one physical GPU run generations at the same
+  time instead of taking turns — correctness-tested, left off until it has been used day-to-day.
+  `HARTSY_KV_F16=1` halves LLM conversation-memory VRAM by storing the KV cache at half precision —
+  bit-verified for short generations, can pick different (equally valid) words in very long ones.
+  Flipping either default is a one-line change; nothing else in the multi-GPU work depends on them.
 - [ ] **M2 — tensor parallel:** split individual GEMMs (QKV, MLP, lm_head) across devices; all-reduce on
   the seam. Plan-level only (`NcclApi` design in `MULTI_GPU_PARALLELISM.md`); needs NVLink hardware this
   box doesn't have to pay off.

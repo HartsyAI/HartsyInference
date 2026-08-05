@@ -315,6 +315,14 @@ public static class TestPaths
         public static string PromptEmbeds => Resolve("OMNIGEN2_PROMPT_EMBEDS",    Path.Combine(ModelsDir, "Stable-Diffusion", "OmniGen2", "TestEmbeddings", "prompt.bin"));
     }
 
+    /// <summary>MiniMax-H3 (50-block joint audio+video DiT). The fp8 pruned build (~19.5 GB) is the DiT-sharding
+    /// target — the bf16 build (~66 GB) exceeds any two-consumer-card pool. Override with MINIMAX_H3_DIT (the same
+    /// variable <c>MiniMaxH3RealCheckpointTests</c> documents).</summary>
+    public static class MiniMaxH3
+    {
+        public static string DitFp8 => Resolve("MINIMAX_H3_DIT", Path.Combine(ModelsDir, "Stable-Diffusion", "MiniMaxH3", "flat", "diffusion_models", "minimax_h3_fl2va_pruned_fp8_scaled.safetensors"));
+    }
+
     /// <summary>SD3.5 paths. Assets are not bundled — tests skip when missing. FP8-bundled single-file checkpoints from Comfy-Org/stable-diffusion-3.5-fp8 are the default; set env vars to override for FP16 / community quants.</summary>
     public static class Sd35
     {

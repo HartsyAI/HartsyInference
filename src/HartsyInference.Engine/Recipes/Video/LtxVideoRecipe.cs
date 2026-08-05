@@ -92,9 +92,10 @@ public sealed class LtxVideoRecipe : IVideoRecipe
             t5.LoadWeights(t5Weights);
             T5Tokenizer tokenizer = new T5Tokenizer(maxLength: TokenLength);
 
+            // VAE deliberately stays on the primary backend (Wan parity) — split further only if profiling shows a win.
             LtxVideoPipeline pipeline = new LtxVideoPipeline(context.Backend, transformer, vae, config);
             Logs.Info("[LtxVideoRecipe] LTX-Video ready (text-to-video).");
-            return new LtxVideoRecipePipeline(context.Backend, pipeline, config, tokenizer, t5, transformer, loaders);
+            return new LtxVideoRecipePipeline(context.Backend, context.TextEncoderBackendOrDefault, pipeline, config, tokenizer, t5, transformer, loaders);
         }
         catch (Exception ex)
         {

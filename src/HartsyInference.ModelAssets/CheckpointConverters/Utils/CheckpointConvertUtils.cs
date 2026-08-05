@@ -283,7 +283,8 @@ public static unsafe class CheckpointConvertUtils
     ///   <item>BFL Mistral / Flux.2 Dev mixed-fp8: <c>.weight_scale</c>/<c>.input_scale</c> (F32 scalar).</item>
     ///   <item>ComfyUI <c>comfy_quant</c>: <c>.comfy_quant</c> (U8 JSON blob like <c>{"format":"float8_e4m3fn"}</c>) — newer format used by Chroma1-HD-fp8mixed and similar. There's no separately-stored scalar; fp8 values are used at identity scale (the model is trained with the natural fp8 dynamic range). The companion is purely a format declaration and must still be dropped or it pollutes the weight dictionary.</item>
     /// </list>
-    /// The input-side scale is dropped — we run F32 activations and use alpha=weight_scale at GEMM time. Marker tensors like <c>scaled_fp8</c> are also dropped.</summary>
+    /// The input-side scale is folded into <see cref="Tensor.Fp8InputScaleFactor"/> so the backend can quantize the
+    /// activation with a constant rather than a per-call absmax; weights without one keep 0 and take the dynamic path. Marker tensors like <c>scaled_fp8</c> are also dropped.</summary>
     /// <param name="source">Raw checkpoint dictionary (mutated; companion keys removed).</param>
     /// <param name="nvfp4ToFp8">When true, NVFP4 weights are dequantized to <b>fp8 (1 byte/param)</b> with the block
     /// scale folded into the value and the global scale carried on <see cref="Tensor.Fp8ScaleFactor"/>, instead of
@@ -298,6 +299,7 @@ public static unsafe class CheckpointConvertUtils
         // ".weight_scale_2".EndsWith(".weight_scale") is FALSE, so the two never collide in the buckets.
         Dictionary<string, Tensor> weightScales = new();
         Dictionary<string, Tensor> weightScale2s = new();
+        Dictionary<string, Tensor> inputScales = new();
         bool sawAnyScale = false;
         foreach (KeyValuePair<string, Tensor> kvp in source)
         {
@@ -317,12 +319,19 @@ public static unsafe class CheckpointConvertUtils
                 weightScale2s[key[..^".weight_scale_2".Length]] = kvp.Value;
                 sawAnyScale = true;
             }
-            else if (key.EndsWith(".scale_input", StringComparison.Ordinal) ||
-                     key.EndsWith(".input_scale", StringComparison.Ordinal) ||
-                     key.EndsWith(".comfy_quant", StringComparison.Ordinal) ||
-                     key == "scaled_fp8")
+            else if (key.EndsWith(".scale_input", StringComparison.Ordinal))
             {
-                sawAnyScale = true; // these are dropped but flag the format as scaled (or as fp8-declared in comfy_quant's case)
+                inputScales[key[..^".scale_input".Length]] = kvp.Value;
+                sawAnyScale = true;
+            }
+            else if (key.EndsWith(".input_scale", StringComparison.Ordinal))
+            {
+                inputScales[key[..^".input_scale".Length]] = kvp.Value;
+                sawAnyScale = true;
+            }
+            else if (key.EndsWith(".comfy_quant", StringComparison.Ordinal) || key == "scaled_fp8")
+            {
+                sawAnyScale = true; // dropped, but flags the format as scaled (or fp8-declared, for comfy_quant)
             }
         }
         if (!sawAnyScale)
@@ -366,6 +375,21 @@ public static unsafe class CheckpointConvertUtils
                     {
                         using Tensor scaleF32 = scaleT.CastTo(DType.F32);
                         kvp.Value.Fp8ScaleFactor = ((float*)scaleF32.DataPointer)[0];
+                    }
+                }
+                // The activation-side scalar, when the file ships one. Carrying it lets the backend quantize with a
+                // constant instead of computing a per-call absmax over the whole activation. Note not every fp8
+                // Linear has one: MiniMax-H3's mlp.fc2 ships none, because its comfy_quant declares
+                // "full_precision_matrix_mult" and its input is never quantized at all.
+                if (inputScales.TryGetValue(baseKey, out Tensor? inScaleT) && inScaleT.Shape.ElementCount == 1
+                    && (inScaleT.DType == DType.F32 || inScaleT.DType == DType.F16 || inScaleT.DType == DType.BF16))
+                {
+                    if (inScaleT.DType == DType.F32)
+                        kvp.Value.Fp8InputScaleFactor = ((float*)inScaleT.DataPointer)[0];
+                    else
+                    {
+                        using Tensor inScaleF32 = inScaleT.CastTo(DType.F32);
+                        kvp.Value.Fp8InputScaleFactor = ((float*)inScaleF32.DataPointer)[0];
                     }
                 }
             }

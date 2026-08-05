@@ -166,30 +166,34 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         else
         {
             Logs.Info("Encoding text with T5-XXL...");
-            if (_ditResident)
+            // A T5 placed on its OWN device never contends with the resident DiT, so the evict (and the DiT
+            // re-upload it forces) is skipped entirely — the placement win. The gate must wrap the whole
+            // block WITHOUT reordering it: the cross-generation step graph bakes the WEIGHT device pointers,
+            // so invalidate-before-free is load-bearing (a later replay after an uninvalidated free is a
+            // CUDA 700).
+            if (_ditResident && ReferenceEquals(TextEncoderBackend, Backend))
             {
                 // The T5 cannot coexist with the resident DiT (HARTSY_KEEP_MODELS); evict for this
-                // new-prompt generation and re-preload below. The cross-generation step graph bakes the
-                // WEIGHT device pointers — invalidate before the free or a later replay is a CUDA 700.
-                _transformer.InvalidateStepGraph(Backend);
+                // new-prompt generation and re-preload below (invalidate-before-free lives inside
+                // FreeTransformerWeights).
                 Backend.Sync();
-                Backend.FreeWeights(_transformer.EnumerateWeights());
-                _ditResident = false;
+                DitShardBackend?.Sync();
+                FreeTransformerWeights();
             }
             // Bulk-upload T5 weights once (~5 GB on T5-XXL) so the encoder's many kernels don't
             // each pay a per-op cache-miss H2D transfer. Paired with FreeWeights below the VAE
             // handoff. No-op on backends without a weight cache.
-            Backend.PreloadWeights(_t5.EnumerateWeights());
+            TextEncoderBackend.PreloadWeights(_t5.EnumerateWeights());
 
             int[][] batchT5 = [promptTokenIdsT5];
             int[][] batchMask = [promptAttentionMaskT5];
-            condContext = _t5.Encode(Backend, batchT5, batchMask);
+            condContext = _t5.Encode(TextEncoderBackend, batchT5, batchMask);
 
             if (useCfg)
             {
                 int[][] negBatchT5 = [negativePromptTokenIdsT5];
                 int[][] negBatchMask = [negativeAttentionMaskT5];
-                uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
+                uncondContext = _t5.Encode(TextEncoderBackend, negBatchT5, negBatchMask);
             }
 
             // Trim the padded context to Chroma's kept tokens instead of masking. Chroma's transformer-side
@@ -212,10 +216,16 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             // The conditioning is host-materialized (the trim reads it) so it survives activation reclaims;
             // cache it. Eviction FreeWeights first: the step-graph warm-up pins the cached contexts
             // device-resident (no-op when they were never pinned — the Z-Image cached-caption pattern).
+            // LOAD-BEARING for TextEncoderDevice placement: TrimContextToKeptTokens + these DataPointer reads
+            // are what let the denoise loop on Backend consume conditioning produced on another GPU.
             _ = condContext.DataPointer;
             if (uncondContext is not null) _ = uncondContext.DataPointer;
             if (_cachedCond is not null)
             {
+                // PIN OWNER = Backend: the step-graph warm-up in ChromaTransformer.Forward pins the cached
+                // context via the DENOISE backend's PreloadWeights, so this free must stay on Backend even
+                // though it sits inside the TE phase — a TextEncoderBackend free would silently no-op and
+                // leak the old pin on the primary forever.
                 Backend.FreeWeights(new[] { _cachedCond });
                 _cachedCond.Dispose();
             }
@@ -227,6 +237,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             {
                 if (_cachedUncond is not null)
                 {
+                    // PIN OWNER = Backend (see _cachedCond above).
                     Backend.FreeWeights(new[] { _cachedUncond });
                     _cachedUncond.Dispose();
                 }
@@ -266,13 +277,25 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // ── 4. Denoising loop ────────────────────────────────────────────
         // Free T5 weights from VRAM before uploading the transformer. T5-XXL is ~5 GB; Chroma is
         // ~9 GB FP8. Without this free, both sit in VRAM together (14 GB) and OOM on a 12 GB card.
-        Backend.FreeWeights(_t5.EnumerateWeights());
-        Backend.Sync();
+        TextEncoderBackend.FreeWeights(_t5.EnumerateWeights());
+        TextEncoderBackend.Sync();
 
         // Bulk-upload transformer weights before the denoise loop. Chroma is Flux-derived
         // (~12 GB at FP16, ~9 GB at FP8) — without preload the first step would pay cache-miss
         // overhead for every block. Paired with FreeWeights below the VAE handoff.
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
+        if (DitShardBackend is not null)
+        {
+            // Sharding pools the two cards' VRAM: asymmetric preload — shared + [0, split) on the primary,
+            // ONLY [split, BlockCount) on the shard backend; EnumerateWeights() on both would replicate
+            // instead of pool.
+            Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+            Backend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+        }
+        else
+        {
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+        }
         _ditResident = true;
 
         Logs.Info("Starting Chroma denoising loop...");
@@ -289,9 +312,15 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // Step-graph mode: route the latent through the transformer's FIXED buffer so the captured graph's
         // baked address stays valid across steps (CfgEulerStep updates it in place at the same address).
         // The fixed tensor is transformer-owned: never disposed here, never DataPointer-read directly —
-        // previews and the final unpack go through SnapshotGraphLatent.
-        bool graphMode = drainFree
+        // previews and the final unpack go through SnapshotGraphLatent. DiT sharding excludes the graph:
+        // ForwardSharded issues work on two backends and never goes through ForwardPaired's capture path.
+        bool graphMode = drainFree && DitShardBackend is null
             && Models.Denoisers.DiTBlocks.DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
+        if (DitShardBackend is not null
+            && Models.Denoisers.DiTBlocks.DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported)
+        {
+            Logs.Info("Chroma DiT sharding disables the step graph — expect eager-path step times.");
+        }
         if (graphMode)
         {
             Tensor routed = _transformer.PrepareGraphLatent(Backend, packedLatent);
@@ -304,7 +333,24 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
 
-            if (drainFree)
+            if (drainFree && DitShardBackend is not null)
+            {
+                // Sharded: NEVER ForwardPaired (its step graph / fixed buffers assume one backend) — two
+                // sequential batch-1 ForwardSharded passes instead, each pooling both cards' VRAM.
+                Tensor condNoise = RunForward(packedLatent, condContext, sigma, hPacked, wPacked, condMask);
+                if (useCfg)
+                {
+                    Tensor uncondNoise = RunForward(packedLatent, uncondContext!, sigma, hPacked, wPacked, uncondMask);
+                    Backend.CfgEulerStep(packedLatent, condNoise, uncondNoise, cfgScale, scheduler.Dt(i));
+                    uncondNoise.Dispose();
+                }
+                else
+                {
+                    Backend.CfgEulerStep(packedLatent, condNoise, condNoise, 1.0f, scheduler.Dt(i));
+                }
+                condNoise.Dispose();
+            }
+            else if (drainFree)
             {
                 (Tensor condNoise, Tensor? uncondNoise, bool callerOwns) = _transformer.ForwardPaired(
                     Backend, packedLatent, condContext, useCfg ? uncondContext : null, sigma,
@@ -335,8 +381,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             }
             else
             {
-                noisePred = _transformer.Forward(Backend, packedLatent, condContext, sigma,
-                    txtSeqLen, hPacked, wPacked, condMask);
+                noisePred = RunForward(packedLatent, condContext, sigma, hPacked, wPacked, condMask);
             }
 
             Tensor newLatent = new Tensor(packedShape, DType.F32);
@@ -421,25 +466,26 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // Under HARTSY_KEEP_MODELS the DiT stays resident (~9 GB fp8; the full-res VAE decode's banded im2col
         // fits beside it, falling back to tiles if not).
         Backend.Sync();
+        DitShardBackend?.Sync();
         if (!KeepModelsResident)
         {
-            _transformer.InvalidateStepGraph(Backend);
-            Backend.FreeWeights(_transformer.EnumerateWeights());
-            _ditResident = false;
+            FreeTransformerWeights();
         }
-        Backend.FreeWeights(_t5.EnumerateWeights());
+        TextEncoderBackend.FreeWeights(_t5.EnumerateWeights());
 
         // ── 5. Unpack latent: [1, seqLen, 64] → [1, 16, latentH, latentW] ──
+        // LOAD-BEARING for VaeDevice placement: UnpackLatent is a host loop, so the latent crosses to the
+        // host before whichever backend runs the decode uploads it.
         Tensor unpackedLatent = UnpackLatent(packedLatent, latentH, latentW);
         packedLatent.Dispose();
 
         // ── 6. VAE decode ────────────────────────────────────────────────
-        Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
+        VaeBackend.PreloadWeights(_vaeDecoder.EnumerateWeights());
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile. Internal fast-path
         // skips tiling when the latent fits in a single tile, so small images pay no overhead.
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(Backend, unpackedLatent);
+        Tensor image = _vaeDecoder.DecodeTiled(VaeBackend, unpackedLatent);
         unpackedLatent.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -481,7 +527,8 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         if (request is ImageToImageRequest img2img)
         {
             Stopwatch vaeEncSw = Stopwatch.StartNew();
-            Tensor sourceUnpacked = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
+            // LOAD-BEARING for VaeDevice placement: PackLatent below is a host loop over the encode output.
+            Tensor sourceUnpacked = _vaeEncoder!.Encode(VaeBackend, img2img.SourceImage);
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
@@ -517,14 +564,9 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         int txtSeqLen, int hPacked, int wPacked, float cfgScale)
     {
         // Note: the negative prompt may have a different sequence length from the positive prompt; the
-        // transformer is fully shape-polymorphic on txtSeqLen so each pass uses its own value.
-        int condTxtLen = (int)condContext.Shape[1];
-        int uncondTxtLen = (int)uncondContext.Shape[1];
-
-        Tensor uncondNoise = _transformer.Forward(Backend, packedLatent, uncondContext, sigma,
-            uncondTxtLen, hPacked, wPacked, uncondMask);
-        Tensor condNoise = _transformer.Forward(Backend, packedLatent, condContext, sigma,
-            condTxtLen, hPacked, wPacked, condMask);
+        // transformer is fully shape-polymorphic on txtSeqLen so RunForward derives each pass's own value.
+        Tensor uncondNoise = RunForward(packedLatent, uncondContext, sigma, hPacked, wPacked, uncondMask);
+        Tensor condNoise = RunForward(packedLatent, condContext, sigma, hPacked, wPacked, condMask);
 
         // Touch txtSeqLen so the field isn't flagged unused (it remains for callers that need to introspect).
         _ = txtSeqLen;
@@ -536,6 +578,40 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         uncondNoise.Dispose();
         condNoise.Dispose();
         return output;
+    }
+
+    /// <summary>Routes one conditioning pass to <see cref="ChromaTransformer.ForwardSharded"/> when DiT sharding
+    /// is configured (blocks [0, split) on <see cref="DiffusionPipelineBase.Backend"/>, the rest on
+    /// <see cref="DiffusionPipelineBase.DitShardBackend"/>) and the plain single-backend
+    /// <see cref="ChromaTransformer.Forward"/> otherwise.</summary>
+    private Tensor RunForward(Tensor packedLatent, Tensor context, float sigma, int hPacked, int wPacked, Tensor? mask)
+    {
+        int txtSeqLen = (int)context.Shape[1];
+        return DitShardBackend is not null
+            ? _transformer.ForwardSharded(Backend, DitShardBackend, packedLatent, context, sigma,
+                txtSeqLen, hPacked, wPacked, mask, DitShardSplitBlock)
+            : _transformer.Forward(Backend, packedLatent, context, sigma,
+                txtSeqLen, hPacked, wPacked, mask);
+    }
+
+    /// <summary>Frees the DiT weights on whichever backend(s) hold them — the mirror of the sharded asymmetric
+    /// preload (an unsharded whole-set free silently no-ops on the shard backend's block range and leaks it).
+    /// Invalidates the step graph BEFORE any free: the captured graph bakes weight device pointers, and a later
+    /// replay after an uninvalidated free is a context-poisoning CUDA 700.</summary>
+    private void FreeTransformerWeights()
+    {
+        _transformer.InvalidateStepGraph(Backend);
+        if (DitShardBackend is not null)
+        {
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+        }
+        else
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+        }
+        _ditResident = false;
     }
 
     /// <summary>Slices the encoded [1, seqLen, hidden] T5 context down to Chroma's kept tokens

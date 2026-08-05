@@ -36,6 +36,10 @@ public readonly ref struct NvtxRange
     internal static readonly bool ProfileSync =
         Environment.GetEnvironmentVariable("HARTSY_PROFILE_SYNC") == "1";
 
+    /// <summary>HARTSY_PROFILE_FINE=1: enable sub-op ranges (see <see cref="PushFine"/>), off by default.</summary>
+    internal static readonly bool ProfileFine =
+        Environment.GetEnvironmentVariable("HARTSY_PROFILE_FINE") == "1";
+
     private static readonly ConcurrentDictionary<string, long[]> _profStats = new();
 
     /// <summary>Writes the accumulated per-op wall-time table (sorted by total) to <paramref name="path"/>.</summary>
@@ -54,6 +58,9 @@ public readonly ref struct NvtxRange
         File.WriteAllText(path, sb.ToString());
     }
 
+    /// <summary>Drops everything accumulated so far, so the next <see cref="DumpProfile"/> covers only later work.</summary>
+    public static void ResetProfile() => _profStats.Clear();
+
     private NvtxRange(bool active)
     {
         _active = active;
@@ -71,6 +78,14 @@ public readonly ref struct NvtxRange
     /// <summary>Returns true once any NVTX call has thrown a DllNotFoundException — subsequent
     /// pushes are skipped. Test hook for unit tests.</summary>
     public static bool IsDisabled => Volatile.Read(ref _disabled) != 0;
+
+    /// <summary>Like <see cref="Push"/> but for sub-op ranges nested inside an op that already pushes one —
+    /// a no-op unless <c>HARTSY_PROFILE_FINE=1</c>.</summary>
+    /// <remarks>A single op can hide several launches (the Sage attention prologue hides four), and attributing
+    /// them needs a range per launch. Those extra pushes are pure overhead in a production run, and this model
+    /// launches enough of them per step to be measurable — so they stay off unless explicitly asked for.</remarks>
+    public static NvtxRange PushFine(string message) =>
+        ProfileFine ? Push(message) : new NvtxRange(active: false);
 
     /// <summary>Pushes an NVTX range with the given label. The range pops on Dispose.
     /// <paramref name="message"/> must be non-null.</summary>

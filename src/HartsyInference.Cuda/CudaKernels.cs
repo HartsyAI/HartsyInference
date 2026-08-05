@@ -86,6 +86,7 @@ public sealed class CudaKernels : IDisposable
 
     // ── DiT glue Modules ─────────────────────────────────────────────────
     private readonly CudaModule _ditF32Module;
+    private readonly CudaModule? _ditRopeModule;
     private readonly CudaModule _mg3ActionModule;
     private readonly nint _mg3SplitQkvTemporalF32, _mg3MergeTemporalF32, _mg3RopeBatchedF32, _mg3KvExpandF32, _mg3MouseMlpConcatF32;
 
@@ -261,6 +262,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditTanhF32;
     private readonly nint _ditRopeF32;
     private readonly nint _ditRopeHeadMajorF32;
+    private readonly nint _ditRopeHeadMajorV2F32;
     private readonly nint _ltx2SplitRopeF32;
     private readonly nint _ditSliceLastDimF32;
     private readonly nint _ditRowScaleF32;
@@ -631,6 +633,15 @@ public sealed class CudaKernels : IDisposable
         _ditTanhF32 = _ditF32Module.GetFunction("dit_tanh_f32");
         _ditRopeF32 = _ditF32Module.GetFunction("dit_rope_f32");
         _ditRopeHeadMajorF32 = _ditF32Module.GetFunction("dit_rope_head_major_f32");
+
+        // Separate module so rebuilding it can't perturb dit_f32.ptx's other 40 kernels. Optional:
+        // absent PTX just leaves the handle 0 and callers fall back to the v1 kernel above.
+        string ropeV2Path = Path.Combine(ptxDir, "dit_rope.ptx");
+        if (File.Exists(ropeV2Path))
+        {
+            _ditRopeModule = CudaModule.LoadFromFile(ropeV2Path);
+            _ditRopeHeadMajorV2F32 = _ditRopeModule.GetFunction("dit_rope_head_major_v2_f32");
+        }
         _ltx2SplitRopeF32 = _ditF32Module.GetFunction("ltx2_split_rope_f32");
         _ditSliceLastDimF32 = _ditF32Module.GetFunction("dit_slice_lastdim_f32");
         _ditRowScaleF32 = _ditF32Module.GetFunction("dit_row_scale_f32");
@@ -2653,6 +2664,56 @@ public sealed class CudaKernels : IDisposable
         => LaunchRopeImpl(_ditRopeF16, x, cos, sin, numHeads, headDim, totalVecs, rotaryDim, stream);
 
     /// <summary>Launches in-place rotary embedding on head-major x [B,heads,seq,headDim]; cos/sin stay [B,seq,headDim].</summary>
+    /// <summary>Whether the division-free head-major rope kernel is available and fits this shape.</summary>
+    /// <remarks>Needs the token count in gridDim.x and (batch,head) in gridDim.y, so it declines shapes that
+    /// would blow the 65535 gridDim.y ceiling or need a block wider than 1024.</remarks>
+    public bool CanUseRopeHeadMajorV2(int heads, int headDim, int seq, int batch, int rotaryDim)
+    {
+        if (_ditRopeHeadMajorV2F32 == 0) return false;
+        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
+        int half = rdim >> 1;
+        if (half <= 0) return false;
+        int padHalf = 1;
+        while (padHalf < half) padHalf <<= 1;
+        return padHalf <= 1024 && (long)batch * heads <= 65535 && seq > 0;
+    }
+
+    /// <summary>Head-major rope with block-indexed tokens; bit-identical to <see cref="LaunchRopeHeadMajor"/>.</summary>
+    public unsafe void LaunchRopeHeadMajorV2(ulong x, ulong cos, ulong sin, int heads, int headDim, int seq,
+        int batch, nint stream, int rotaryDim = 0)
+    {
+        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
+        int half = rdim >> 1;
+        // Scalar, one pair per thread. A float4 variant (four pairs, 128-bit loads) measured SLOWER --
+        // 169 ms/step against this kernel's 124 -- so the kernel is latency-bound on occupancy, not on
+        // access width. Do not re-try it without first raising occupancy.
+        int units = half;
+        int padUnits = 1, padShift = 0;
+        while (padUnits < units) { padUnits <<= 1; padShift++; }
+        int vecsPerBlock = Math.Max(1, 256 / padUnits);
+        int blockDimX = vecsPerBlock * padUnits;
+
+        ulong xArg = x, cosArg = cos, sinArg = sin;
+        uint headDimArg = (uint)headDim, halfArg = (uint)half, seqArg = (uint)seq;
+        uint headsArg = (uint)heads, padShiftArg = (uint)padShift;
+
+        void** args = stackalloc void*[8];
+        args[0] = &xArg;
+        args[1] = &cosArg;
+        args[2] = &sinArg;
+        args[3] = &headDimArg;
+        args[4] = &halfArg;
+        args[5] = &seqArg;
+        args[6] = &headsArg;
+        args[7] = &padShiftArg;
+
+        uint gridX = (uint)((seq + vecsPerBlock - 1) / vecsPerBlock);
+        uint gridY = (uint)(batch * heads);
+        CudaDriverApi.cuLaunchKernel(
+            _ditRopeHeadMajorV2F32, gridX, gridY, 1, (uint)blockDimX, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     public unsafe void LaunchRopeHeadMajor(ulong x, ulong cos, ulong sin, int heads, int headDim, int seq,
         long totalVecs, nint stream, int rotaryDim = 0)
     {
