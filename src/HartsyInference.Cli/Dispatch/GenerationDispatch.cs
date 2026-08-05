@@ -108,6 +108,9 @@ public static class GenerationDispatch
         }
         TextRequest request = new TextRequest
         {
+            // "cuda:0" pins an ordinal; the composite "cuda:0+cuda:1" form requests the LLM layer split
+            // (TextService.LoadSharded) — layers pooled across both cards by free VRAM.
+            Device = parameters.GetStringOrNull("device"),
             Messages = [new TextMessage { Role = TextRole.User, Content = prompt, Images = images.Count > 0 ? images : null }],
             SystemPrompt = parameters.GetStringOrNull("system"),
             MaxTokens = parameters.GetInt("max-tokens", 256),

@@ -29,6 +29,10 @@ public class PlacementCliSettings : CommandSettings
     [CommandOption("--dit-shard-gpu")]
     [Description("Split the denoiser's block loop across the primary GPU and this CUDA ordinal (weights POOLED — a VRAM win for DiTs that don't fit one card, not a latency win). Mutually exclusive with --cfg-parallel-gpu.")]
     public int? DitShardGpu { get; init; }
+
+    [CommandOption("--lm-shard-gpu")]
+    [Description("Split large LMs' layers across the primary GPU and this CUDA ordinal (weights POOLED). Text models layer-split as with --device \"cuda:0+cuda:1\"; big audio LMs (YuE Stage-1) then default to UN-quantized checkpoint precision instead of Q4_K (override with HARTSY_AUDIO_LM_QUANT=q4k|q8|off). Implied by --dit-shard-gpu, which feeds the same shard list.")]
+    public int? LmShardGpu { get; init; }
 }
 
 /// <summary>Builds the engine placement from CLI options with the same eager validation the extension does — a
@@ -43,7 +47,15 @@ public static class PlacementCli
         string? teSelector = SelectorFor(settings.TextEncoderGpu, primary);
         string? vaeSelector = SelectorFor(settings.VaeGpu, primary);
         string? cfgSelector = SelectorFor(settings.CfgParallelGpu, primary);
-        string? shardSelector = SelectorFor(settings.DitShardGpu, primary);
+        string? ditShardSelector = SelectorFor(settings.DitShardGpu, primary);
+        string? lmShardSelector = SelectorFor(settings.LmShardGpu, primary);
+        if (ditShardSelector is not null && lmShardSelector is not null && ditShardSelector != lmShardSelector)
+        {
+            throw new ArgumentException(
+                "--dit-shard-gpu and --lm-shard-gpu point at different ordinals — they share one shard device "
+                + "list, so pass just --dit-shard-gpu (it implies the LM split) or make them match.");
+        }
+        string? shardSelector = ditShardSelector ?? lmShardSelector;
 
         if (teSelector is null && vaeSelector is null && cfgSelector is null && shardSelector is null)
         {
@@ -58,7 +70,7 @@ public static class PlacementCli
             ShardDevices = shardSelector is not null
                 ? new[] { BackendFactory.WithOrdinal(backendSelector, primary), shardSelector }
                 : Array.Empty<string>(),
-            EnableDitSharding = shardSelector is not null,
+            EnableDitSharding = ditShardSelector is not null,
         };
         // Fail fast, mirroring the extension: the engine ctor re-validates via PlacementPlanner.ValidatePlacement
         // (which also rejects --cfg-parallel-gpu + --dit-shard-gpu together with an explanatory message).

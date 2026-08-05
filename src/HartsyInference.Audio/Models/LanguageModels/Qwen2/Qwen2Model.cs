@@ -131,6 +131,26 @@ public sealed class Qwen2Model : IDisposable
     /// <summary>All weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights() => _transformer.EnumerateWeights();
 
+    /// <summary>Token-IDs-in forward across a layer-split placement (VRAM pooling across GPUs): one stage per
+    /// backend, final norm + cache advance only on the last. Logits belong on
+    /// <see cref="LlmPlacement.LastBackend"/>. See <see cref="GenericTransformer.ForwardStaged"/>.</summary>
+    public Tensor ForwardStaged(LlmPlacement placement, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache)
+    {
+        ThrowIfDisposed();
+        return _transformer.ForwardStaged(placement, tokenIds, posStart, cache);
+    }
+
+    /// <summary>One placement stage's weight tensors for asymmetric per-backend preload — never preload
+    /// <see cref="EnumerateWeights"/> on every stage, that replicates instead of pooling. Pass
+    /// <paramref name="includeRedundantSplits"/> false for resident preloads (the canonical set is what forward
+    /// reads; the duplicate fused/split views would inflate VRAM ~40%).</summary>
+    public IEnumerable<Tensor> EnumerateStageWeights(int startLayer, int endLayer, bool isFirstStage, bool isLastStage,
+        bool includeRedundantSplits = true)
+    {
+        ThrowIfDisposed();
+        return _transformer.EnumerateStageWeights(startLayer, endLayer, isFirstStage, isLastStage, includeRedundantSplits);
+    }
+
     // ── CUDA-graph decode pass-throughs (Sesame CSM / HeartMuLa drive the headless body per frame) ─────────────
 
     /// <summary>True when this body is eligible for single-token CUDA-graph decode capture (plain dense GQA/RoPE).

@@ -309,7 +309,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         try
         {
             Tensor normed = Norm(backend, h, $"{p}.norm1.weight", _config.NormEps, BodyDType);
-            Tensor modulated = Modulate(backend, normed, mod[0], mod[1], modIndex);
+            Tensor modulated = Modulate(backend, normed, mod[0], mod[1], modIndex,
+                Optional($"{p}.attn.qkv_proj.weight"));
             normed.Dispose();
             Tensor attn = Attention(backend, modulated, $"{p}.attn", cos, sin);
             modulated.Dispose();
@@ -318,7 +319,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             Swap(ref h, gatedAttn);
 
             Tensor normed2 = Norm(backend, h, $"{p}.norm2.weight", _config.NormEps, BodyDType);
-            Tensor modulated2 = Modulate(backend, normed2, mod[3], mod[4], modIndex);
+            Tensor modulated2 = Modulate(backend, normed2, mod[3], mod[4], modIndex,
+                Optional($"{p}.mlp.fc1.weight"));
             normed2.Dispose();
             Tensor mlp = Mlp(backend, modulated2, $"{p}.mlp");
             modulated2.Dispose();
@@ -370,7 +372,9 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
 
                 Tensor merged = new Tensor(new TensorShape(seq, inner), DType.F32);
                 backend.Permute0213(merged, attn, heads, seq, hd);
-                Tensor outT = new Tensor(x.Shape, x.DType);
+                // Body dtype, not x's: x may be the fp8 form emitted by the fused modulate, and out_proj's
+                // result feeds the residual stream, not another fp8 Linear.
+                Tensor outT = new Tensor(x.Shape, BodyDType);
                 backend.Linear(outT, merged, Require($"{prefix}.out_proj.weight"), Optional($"{prefix}.out_proj.bias"));
                 merged.Dispose();
                 return outT;
@@ -397,7 +401,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         Tensor act = new Tensor(new TensorShape(seq, ffn), DType.F32);
         backend.GluActivate(act, gateUp, ffn, gelu: false);
         gateUp.Dispose();
-        Tensor outT = new Tensor(x.Shape, x.DType);
+        Tensor outT = new Tensor(x.Shape, BodyDType);
         backend.Linear(outT, act, Require($"{prefix}.fc2.weight"), Optional($"{prefix}.fc2.bias"));
         act.Dispose();
         return outT;
@@ -434,8 +438,22 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
 
     /// <summary>Per-token <c>out = h*(1+scale) + shift</c>. The modulation table is indexed per token inside the
     /// kernel, so nothing is materialized at <c>[seq, hidden]</c> and the table stays F32 while the stream is bf16.</summary>
-    private static Tensor Modulate(IBackend backend, Tensor h, Tensor shift, Tensor scale, Tensor modIndex)
+    private static Tensor Modulate(IBackend backend, Tensor h, Tensor shift, Tensor scale, Tensor modIndex,
+        Tensor? consumerWeight = null)
     {
+        // The modulated tensor's only reader is the fp8 Linear right after it, so when that Linear carries a
+        // static activation scale the producer can write e4m3 directly and the F32 form never exists. Saves a
+        // full-width write plus the quantize kernel's full-width read at each site.
+        if (consumerWeight is not null && consumerWeight.DType.IsFp8 && consumerWeight.Fp8InputScaleFactor > 0f
+            && h.DType == DType.F32)
+        {
+            Tensor fp8 = new Tensor(h.Shape, DType.F8E4M3) { Fp8ScaleFactor = consumerWeight.Fp8InputScaleFactor };
+            if (backend.TryAffineBroadcastRowIndexedToFp8(fp8, h, scale, shift, modIndex, consumerWeight))
+            {
+                return fp8;
+            }
+            fp8.Dispose();
+        }
         Tensor outT = new Tensor(h.Shape, h.DType);
         backend.AffineBroadcastRowIndexed(outT, h, scale, shift, modIndex);
         return outT;

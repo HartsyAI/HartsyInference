@@ -9,8 +9,9 @@ namespace HartsyInference.Cli.Commands;
 /// <summary>Generates music from a text prompt with MusicGen, saving a WAV.</summary>
 public sealed class MusicCommand : Command<MusicCommand.Settings>
 {
-    /// <summary>Options for <c>hartsy music</c>.</summary>
-    public sealed class Settings : CommandSettings
+    /// <summary>Options for <c>hartsy music</c>. Inherits the shared placement options so multi-GPU layer
+    /// splits (<c>--lm-shard-gpu</c> — YuE Stage-1 un-quantized across two cards) work from the CLI.</summary>
+    public sealed class Settings : PlacementCliSettings
     {
         /// <summary>The music description.</summary>
         [CommandArgument(0, "<prompt>")]
@@ -69,7 +70,8 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Music);
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
+        (int? gpu, EngineOptions? engineOptions) = PlacementCli.Build(settings, settings.Backend);
         return CommandRunner.Run(Modality.Music, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
-            settings.Output, label, showResponseRule: false);
+            settings.Output, label, showResponseRule: false, gpu, engineOptions);
     }
 }

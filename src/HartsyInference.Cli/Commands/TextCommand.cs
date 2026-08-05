@@ -32,6 +32,11 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [Description("Backend: auto, cpu, cuda, or vulkan.")]
         public string Backend { get; init; } = "auto";
 
+        /// <summary>Device selector for the text service, including the layer-split composite form.</summary>
+        [CommandOption("--device")]
+        [Description("Device for the LLM: 'cuda:0' pins an ordinal; 'cuda:0+cuda:1' splits the layers across both GPUs by free VRAM (VRAM pooling for models that don't fit one card).")]
+        public string? Device { get; init; }
+
         /// <summary>Maximum new tokens to generate.</summary>
         [CommandOption("--max-tokens")]
         [Description("Maximum number of tokens to generate.")]
@@ -146,6 +151,7 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         }
 
         ParamState parameters = new ParamState(Modality.Text) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
+        if (settings.Device is { Length: > 0 } device) parameters.Put("device", device);
         parameters.Put("max-tokens", settings.MaxTokens.ToString(CultureInfo.InvariantCulture));
         parameters.Put("temperature", temperature.ToString(CultureInfo.InvariantCulture));
         parameters.Put("top-p", settings.TopP.ToString(CultureInfo.InvariantCulture));

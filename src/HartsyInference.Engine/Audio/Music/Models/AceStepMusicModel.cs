@@ -38,7 +38,7 @@ internal static class AceStepMusicModel
         LoadAsync = LoadAsync,
     };
 
-    private static async Task<IMusicRunner> LoadAsync(IBackend backend, AudioModelSelector selector, CancellationToken cancel)
+    private static async Task<IMusicRunner> LoadAsync(MusicLoadContext context, AudioModelSelector selector, CancellationToken cancel)
     {
         string variant = (selector.Variant ?? string.Empty).Trim();
         string localPath = MusicCatalog.ResolveLocalCheckpoint(AudioWeightsCatalog.AceStepId, selector);
@@ -96,7 +96,7 @@ internal static class AceStepMusicModel
         qwen.LoadWeights(qwenLoader.GetAllTensors());
         Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
 
-        AceStepPipeline15 pipeline = new AceStepPipeline15(backend, dit, conditionEncoder, vae, config);
+        AceStepPipeline15 pipeline = new AceStepPipeline15(context.Backend, dit, conditionEncoder, vae, config);
         LoadSilenceLatent(pipeline, Path.GetDirectoryName(mainPath));
         // 5 Hz code detokenizer (LM-planner hints → 25 Hz latents); its weights ride in the same checkpoint.
         AceStep15AudioDetokenizer detokenizer = new AceStep15AudioDetokenizer(config);

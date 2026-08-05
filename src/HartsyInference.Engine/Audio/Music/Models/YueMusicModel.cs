@@ -5,7 +5,9 @@ using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Requests;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -23,10 +25,10 @@ internal static class YueMusicModel
     {
         ManagesOwnWeights = false,
         CacheKey = selector => MusicCatalog.ResolveLocalCheckpoint(AudioWeightsCatalog.YueId, selector),
-        LoadAsync = (_, selector, cancel) => LoadAsync(MusicCatalog.ResolveLocalCheckpoint(AudioWeightsCatalog.YueId, selector), cancel),
+        LoadAsync = (context, selector, cancel) => LoadAsync(context, MusicCatalog.ResolveLocalCheckpoint(AudioWeightsCatalog.YueId, selector), cancel),
     };
 
-    private static Task<IMusicRunner> LoadAsync(string folder, CancellationToken cancel)
+    private static Task<IMusicRunner> LoadAsync(MusicLoadContext context, string folder, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         if (!Directory.Exists(folder))
@@ -45,9 +47,13 @@ internal static class YueMusicModel
         YueConfig config = YueConfig.V1;
         YueTokenizer tokenizer = new YueTokenizer(tokenizerPath);
         (Dictionary<string, Tensor> stage1Weights, IDisposable stage1Loader) = YueCheckpointConverter.LoadStage1(folder, castToF32: false);
-        YueCheckpointConverter.QuantizeLmWeights(stage1Weights, DType.Q4_K);   // 14 GB bf16 → ~3.5 GB: resident + fast dp4a GEMV
+        ApplyLmQuant(stage1Weights, context.LmQuant);
         YueStage1Lm stage1 = new YueStage1Lm(config);
         stage1.LoadWeights(stage1Weights, prefix: "model");
+        if (context.IsSharded)
+        {
+            stage1.Placement = BuildStage1Placement(context, stage1, config);
+        }
 
         (Dictionary<string, Tensor> codecWeights, SafeTensorsLoader codecLoader) = YueCheckpointConverter.LoadXCodec(xcodecPath, castToF32: true);
         XCodec xcodec = new XCodec(XCodecConfig.XCodec16kHz);
@@ -60,7 +66,7 @@ internal static class YueMusicModel
         if (stage2Folder is not null)
         {
             (Dictionary<string, Tensor> stage2Weights, IDisposable loader) = YueCheckpointConverter.LoadStage2(stage2Folder, castToF32: false);
-            YueCheckpointConverter.QuantizeLmWeights(stage2Weights, DType.Q4_K);
+            ApplyLmQuant(stage2Weights, context.LmQuant);
             stage2Loader = loader;
             stage2 = new YueStage2Lm(config, tokenizer.Soa, tokenizer.Stage1, tokenizer.Stage2);
             stage2.LoadWeights(stage2Weights, prefix: "model");
@@ -85,7 +91,9 @@ internal static class YueMusicModel
         }
 
         YuePipeline pipeline = new YuePipeline(config, stage1, xcodec, stage2, vocalVocoder, instrumentalVocoder);
-        Logs.Info($"[Audio][YuE] Loaded Stage-1{(stage2 is not null ? " + Stage-2 (full 8-codebook)" : " (vocal-cb0 only — no s2 folder)")}"
+        Logs.Info($"[Audio][YuE] Loaded Stage-1 (quant={context.LmQuant}"
+            + $"{(stage1.Placement is not null ? ", layer-split across " + stage1.Placement.Stages.Count + " GPUs" : "")})"
+            + $"{(stage2 is not null ? " + Stage-2 (full 8-codebook)" : " (vocal-cb0 only — no s2 folder)")}"
             + $"{(vocalVocoder is not null ? " + Vocos vocoders (44.1 kHz)" : " (16 kHz x-codec draft — no vocoders)")} from '{folder}'.");
 
         MusicAudio Synth(IBackend backend, MusicRequest request, CancellationToken ct)
@@ -124,6 +132,47 @@ internal static class YueMusicModel
             disposables.Add(instrumentalLoader);
         }
         return Task.FromResult<IMusicRunner>(new MusicRunner(pipeline.OutputSampleRate, Synth, [.. disposables]));
+    }
+
+    /// <summary>Applies the resolved LM precision policy: Q4_K/Q8_0 quantize the big GEMM weights in place;
+    /// <see cref="AudioLmQuant.Off"/> keeps checkpoint precision (bf16) — the pooled-VRAM quality path.</summary>
+    private static void ApplyLmQuant(Dictionary<string, Tensor> weights, AudioLmQuant quant)
+    {
+        switch (quant)
+        {
+            case AudioLmQuant.Q4K:
+                YueCheckpointConverter.QuantizeLmWeights(weights, DType.Q4_K);
+                break;
+            case AudioLmQuant.Q8:
+                YueCheckpointConverter.QuantizeLmWeights(weights, DType.Q8_0);
+                break;
+            case AudioLmQuant.Off:
+                break;
+        }
+    }
+
+    /// <summary>Plans the Stage-1 layer split across the context's shard devices (explicit ratios win, else
+    /// proportional to live free VRAM) and binds each stage to its resolved backend.</summary>
+    private static LlmPlacement BuildStage1Placement(MusicLoadContext context, YueStage1Lm stage1, YueConfig config)
+    {
+        int layers = config.Stage1.NumHiddenLayers;
+        long totalBytes = 0;
+        foreach (Tensor tensor in stage1.EnumerateWeights())
+        {
+            totalBytes += Tensor.ComputeByteSize(tensor.Shape, tensor.DType);
+        }
+        string[] devices = [.. context.ShardStages!.Select(s => s.Selector)];
+        IReadOnlyList<LlmStagePlan> plan = PlacementPlanner.LlmSplitPlan(
+            devices, context.ShardRatios, layers, totalBytes / Math.Max(1, layers));
+        List<LlmStage> stages = new(plan.Count);
+        foreach (LlmStagePlan stagePlan in plan)
+        {
+            IBackend backend = context.ShardStages!.First(s => s.Selector == stagePlan.Device).Backend;
+            stages.Add(new LlmStage(backend, stagePlan.StartLayer, stagePlan.EndLayer));
+        }
+        Logs.Info($"[Audio][YuE] Stage-1 layer split: "
+            + string.Join(" + ", plan.Select(p => $"{p.Device}[{p.StartLayer},{p.EndLayer})")) + ".");
+        return new LlmPlacement([.. stages]);
     }
 
     /// <summary>Ensures a loadable <c>xcodec.safetensors</c> exists, converting the downloaded X-Codec torch

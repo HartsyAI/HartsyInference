@@ -5,6 +5,7 @@ using HartsyInference.Audio.Models.Music;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Pipelines;
 
@@ -56,11 +57,11 @@ public sealed unsafe class YuePipeline : IDisposable
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
 
-        // Pin the (Q8_0) Stage-1 weights resident up front. The audio stack otherwise relies on lazy auto-promote,
+        // Pin the Stage-1 weights resident up front. The audio stack otherwise relies on lazy auto-promote,
         // whose headroom gate loses to the transient-upload pool for a 7B — the weights never promote and stream
-        // from host EVERY token (~0.6 s/token). A one-shot preload (7 GB Q8_0 fits a 12 GB card) makes decode read
-        // resident weights via the fused quant GEMV. Freed at the Stage-1→Stage-2 boundary below.
-        backend.PreloadWeights(_stage1.EnumerateWeights());
+        // from host EVERY token (~0.6 s/token). A one-shot preload makes decode read resident weights via the
+        // fused quant GEMV (or the dense GEMV when un-quantized). Freed at the Stage-1→Stage-2 boundary below.
+        PreloadStage1(backend);
         // YuE generates with classifier-free guidance by default (infer.py: guidance_scale=1.5). The HF-faithful
         // unconditional context is the prompt's LAST token (the <xcodec> sep) — the negative branch runs with no
         // genre/lyrics conditioning. Auto-build it when the caller supplies none so CFG actually engages (without
@@ -75,7 +76,7 @@ public sealed unsafe class YuePipeline : IDisposable
 
         // Stage-1 (7B) is done — free its resident weights so Stage-2 (1B) + x-codec get full VRAM instead of
         // streaming against the 7B's cache (same phase-boundary free as HeartMuLa's LM→codec handoff).
-        backend.FreeWeights(_stage1.EnumerateWeights());
+        FreeStage1(backend);
         return DecodeAndMix(backend, vocal, accomp, sw);
     }
 
@@ -94,7 +95,7 @@ public sealed unsafe class YuePipeline : IDisposable
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
         if (segmentPrompts.Count == 0) return [];
-        backend.PreloadWeights(_stage1.EnumerateWeights());
+        PreloadStage1(backend);
 
         float cfg = guidanceScale ?? _cfg.GuidanceScale;
         int maxContext = _cfg.Stage1.MaxPositionEmbeddings;
@@ -131,8 +132,47 @@ public sealed unsafe class YuePipeline : IDisposable
 
         Logs.Info($"YuE S1: {allVocal.Count} frames total (vocal+accomp cb0) over {segmentPrompts.Count} segments in {sw.ElapsedMilliseconds}ms.");
         if (allVocal.Count == 0) return [];
-        backend.FreeWeights(_stage1.EnumerateWeights());
+        FreeStage1(backend);
         return DecodeAndMix(backend, allVocal, allAccomp, sw);
+    }
+
+    /// <summary>Preloads Stage-1 resident: per-stage asymmetric sets when a layer-split placement pools VRAM
+    /// (each backend gets ONLY its layer range — preloading the full set on every stage would replicate
+    /// instead of pool), else the whole set on <paramref name="backend"/>.</summary>
+    private void PreloadStage1(IBackend backend)
+    {
+        if (_stage1.Placement is { IsSingle: false } placement)
+        {
+            for (int s = 0; s < placement.Stages.Count; s++)
+            {
+                LlmStage stage = placement.Stages[s];
+                // Canonical set only (no redundant fused/split views): the un-quantized 7B is the tight-fit
+                // case this path exists for, and the duplicates would cost ~40% more resident VRAM.
+                stage.Backend.PreloadWeights(_stage1.EnumerateStageWeights(
+                    stage.StartLayer, stage.EndLayer, s == 0, s == placement.Stages.Count - 1,
+                    includeRedundantSplits: false));
+            }
+            return;
+        }
+        backend.PreloadWeights(_stage1.EnumerateWeights());
+    }
+
+    /// <summary>Frees Stage-1's resident weights from every backend that preloaded them (mirror of
+    /// <see cref="PreloadStage1"/>).</summary>
+    private void FreeStage1(IBackend backend)
+    {
+        if (_stage1.Placement is { IsSingle: false } placement)
+        {
+            for (int s = 0; s < placement.Stages.Count; s++)
+            {
+                LlmStage stage = placement.Stages[s];
+                // Full set (redundant views included): anything auto-promoted during decode must go too.
+                stage.Backend.FreeWeights(_stage1.EnumerateStageWeights(
+                    stage.StartLayer, stage.EndLayer, s == 0, s == placement.Stages.Count - 1));
+            }
+            return;
+        }
+        backend.FreeWeights(_stage1.EnumerateWeights());
     }
 
     /// <summary>Stage-1 cb0 → Stage-2 residual upsample → x-codec/Vocos decode → stem mix. Shared by both

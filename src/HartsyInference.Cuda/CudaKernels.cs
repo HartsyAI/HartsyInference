@@ -87,6 +87,7 @@ public sealed class CudaKernels : IDisposable
     // ── DiT glue Modules ─────────────────────────────────────────────────
     private readonly CudaModule _ditF32Module;
     private readonly CudaModule? _ditRopeModule;
+    private readonly CudaModule? _ditFp8EmitModule;
     private readonly CudaModule _mg3ActionModule;
     private readonly nint _mg3SplitQkvTemporalF32, _mg3MergeTemporalF32, _mg3RopeBatchedF32, _mg3KvExpandF32, _mg3MouseMlpConcatF32;
 
@@ -263,6 +264,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditRopeF32;
     private readonly nint _ditRopeHeadMajorF32;
     private readonly nint _ditRopeHeadMajorV2F32;
+    private readonly nint _ditAffineBroadcastRowIndexedToFp8F32;
     private readonly nint _ltx2SplitRopeF32;
     private readonly nint _ditSliceLastDimF32;
     private readonly nint _ditRowScaleF32;
@@ -641,6 +643,14 @@ public sealed class CudaKernels : IDisposable
         {
             _ditRopeModule = CudaModule.LoadFromFile(ropeV2Path);
             _ditRopeHeadMajorV2F32 = _ditRopeModule.GetFunction("dit_rope_head_major_v2_f32");
+        }
+
+        string fp8EmitPath = Path.Combine(ptxDir, "dit_fp8emit.ptx");
+        if (File.Exists(fp8EmitPath))
+        {
+            _ditFp8EmitModule = CudaModule.LoadFromFile(fp8EmitPath);
+            _ditAffineBroadcastRowIndexedToFp8F32 =
+                _ditFp8EmitModule.GetFunction("dit_affine_broadcast_rowindexed_to_fp8_f32");
         }
         _ltx2SplitRopeF32 = _ditF32Module.GetFunction("ltx2_split_rope_f32");
         _ditSliceLastDimF32 = _ditF32Module.GetFunction("dit_slice_lastdim_f32");
@@ -1155,6 +1165,34 @@ public sealed class CudaKernels : IDisposable
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(
             func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the fused modulate-to-fp8 producer kernel is loaded.</summary>
+    public bool HasAffineBroadcastRowIndexedToFp8 => _ditAffineBroadcastRowIndexedToFp8F32 != 0;
+
+    /// <summary>Row-indexed affine broadcast writing e4m3 directly, so the consuming fp8 Linear needs no quantize pass.</summary>
+    public unsafe void LaunchAffineBroadcastRowIndexedToFp8(ulong outputFp8, ulong input, ulong scaleTable,
+        ulong shiftTable, ulong rowIndex, ulong inputScale, int dim, long total, nint stream)
+    {
+        ulong outArg = outputFp8, inArg = input, scaleArg = scaleTable, shiftArg = shiftTable;
+        ulong idxArg = rowIndex, inScaleArg = inputScale;
+        uint dimArg = (uint)dim;
+        ulong totalArg = (ulong)total;
+
+        void** args = stackalloc void*[8];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &scaleArg;
+        args[3] = &shiftArg;
+        args[4] = &idxArg;
+        args[5] = &inScaleArg;
+        args[6] = &dimArg;
+        args[7] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            _ditAffineBroadcastRowIndexedToFp8F32, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 

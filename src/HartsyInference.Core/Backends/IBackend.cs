@@ -2521,6 +2521,16 @@ public interface IBackend : IDisposable
     /// <summary>Streaming cache overlapping weight uploads with compute; <c>null</c> means fall back to <see cref="PreloadWeights"/>.</summary>
     IStreamingWeightCache? StreamingCache => null;
 
+    /// <summary>Row-indexed affine broadcast writing e4m3 straight into <paramref name="outputFp8"/>, scaled for
+    /// <paramref name="consumerWeight"/>'s Linear. Returns false if the backend cannot fuse, leaving the caller to
+    /// run the ordinary path.</summary>
+    /// <remarks>The modulated activation's only consumer is the fp8 Linear that follows, so materializing it in F32
+    /// costs a full-width write and read to hand the quantize kernel something it compresses 4:1 anyway. Requires a
+    /// static <c>Fp8InputScaleFactor</c> on the weight: with a dynamic absmax the scale is not known until a
+    /// reduction over the finished tensor has retired, so it cannot be applied from registers.</remarks>
+    bool TryAffineBroadcastRowIndexedToFp8(Tensor outputFp8, Tensor input, Tensor scaleTable, Tensor? shiftTable,
+        Tensor rowIndex, Tensor consumerWeight) => false;
+
     /// <summary>Clears the per-op profile accumulator so a later <see cref="DumpOpProfile"/> covers only work after this point.</summary>
     /// <remarks>Lets a pipeline window the profiler onto its steady-state loop. Without it the table folds in
     /// one-time setup — text encode, weight residency warm-up — whose cost varies enough run to run that

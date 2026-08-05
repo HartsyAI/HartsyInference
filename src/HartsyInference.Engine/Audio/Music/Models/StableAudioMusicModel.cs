@@ -31,7 +31,7 @@ internal static class StableAudioMusicModel
         LoadAsync = LoadAsync,
     };
 
-    private static async Task<IMusicRunner> LoadAsync(IBackend backend, AudioModelSelector selector, CancellationToken cancel)
+    private static async Task<IMusicRunner> LoadAsync(MusicLoadContext context, AudioModelSelector selector, CancellationToken cancel)
     {
         Task<string> ditPath = AudioModelCache.GetAsync(Repo, "transformer/diffusion_pytorch_model.safetensors", category: "music", ct: cancel);
         Task<string> vaePath = AudioModelCache.GetAsync(Repo, "vae/diffusion_pytorch_model.safetensors", category: "music", ct: cancel);
@@ -64,7 +64,7 @@ internal static class StableAudioMusicModel
         textEncoder.LoadWeights(t5Loader.GetAllTensors());
         T5Tokenizer tokenizer = new(maxLength: T5MaxTokens);
 
-        StableAudioPipeline pipeline = new(backend, dit, vae, timing, config);
+        StableAudioPipeline pipeline = new(context.Backend, dit, vae, timing, config);
         Logs.Info($"[Audio][Stable Audio] Loaded Open Small (44.1 kHz stereo, up to {config.MaxLatentTokens * (double)config.VaeDownsample / config.SampleRate:0.0}s).");
 
         MusicAudio Synth(IBackend device, MusicRequest request, CancellationToken ct)

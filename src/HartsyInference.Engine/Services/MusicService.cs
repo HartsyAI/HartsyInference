@@ -28,13 +28,14 @@ public sealed class MusicService : IMusicService
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
         ValidateEditingModes(request, selector.Id);
         MusicModelDescriptor descriptor = MusicCatalog.Resolve(selector.Id);
-        string key = descriptor.CacheKey(selector);
         IBackend backend = _engine.Backend;
+        MusicLoadContext loadContext = BuildLoadContext(backend);
+        string key = descriptor.CacheKey(selector) + loadContext.CacheSuffix();
 
         return _engine.AudioRuntime.RunAsync(backend, $"music:{key}", async ct =>
         {
             IMusicRunner runner = await _engine.AudioRuntime.Music
-                .GetOrLoadAsync(key, token => descriptor.LoadAsync(backend, selector, token), ct).ConfigureAwait(false);
+                .GetOrLoadAsync(key, token => descriptor.LoadAsync(loadContext, selector, token), ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             long started = Environment.TickCount64;
             MusicAudio audio = runner.Synthesize(backend, request, ct);
@@ -59,6 +60,31 @@ public sealed class MusicService : IMusicService
                 },
             };
         }, cancel);
+    }
+
+    /// <summary>Builds the load-time context: single-device Q4_K (byte-identical to pre-placement behavior)
+    /// unless the engine placement has ≥2 <c>ShardDevices</c>, in which case the big-LM loaders (YuE) get the
+    /// resolved shard backends and default to un-quantized weights pooled across them.</summary>
+    private MusicLoadContext BuildLoadContext(IBackend primary)
+    {
+        IReadOnlyList<string> shardDevices = _engine.Placement.ShardDevices;
+        bool sharded = shardDevices.Count >= 2;
+        List<(string Selector, IBackend Backend)>? stages = null;
+        if (sharded)
+        {
+            stages = new List<(string, IBackend)>(shardDevices.Count);
+            foreach (string device in shardDevices)
+            {
+                stages.Add((device, _engine.EnsureBackend(device)));
+            }
+        }
+        return new MusicLoadContext
+        {
+            Backend = primary,
+            ShardStages = stages,
+            ShardRatios = sharded ? _engine.Placement.ShardRatios : null,
+            LmQuant = AudioLmQuantPolicy.Resolve(sharded),
+        };
     }
 
     /// <summary>Gates the audio-conditioned editing modes: they are mutually exclusive, and only ACE-Step 1.5 has an

@@ -142,6 +142,9 @@ public sealed class CudaBackend : IBackend
     /// (<c>HARTSY_FP8_STATIC_INPUT_SCALE=0</c> to force the dynamic path). Changes numerics — see the doc comment.</summary>
     public bool EnableStaticFp8InputScale { get; set; }
 
+    /// <summary>Let a modulate producer write e4m3 for its consuming fp8 Linear (<c>HARTSY_MODULATE_EMIT_FP8=0</c> to disable).</summary>
+    public bool EnableModulateEmitFp8 { get; set; }
+
     /// <summary>Device-resident copy of a weight's static activation scale, allocated once per weight.</summary>
     private readonly Dictionary<Tensor, ulong> _fp8InputScaleDev = new();
 
@@ -484,6 +487,7 @@ public sealed class CudaBackend : IBackend
         EnableNativeFp8Gemm = EnvSwitch.IsEnabled("HARTSY_FP8_NATIVE", defaultOn: fp8TensorCores);
         EnableRopeHeadMajorV2 = EnvSwitch.IsEnabled("HARTSY_ROPE_V2", defaultOn: true);
         EnableStaticFp8InputScale = EnvSwitch.IsEnabled("HARTSY_FP8_STATIC_INPUT_SCALE", defaultOn: true);
+        EnableModulateEmitFp8 = EnvSwitch.IsEnabled("HARTSY_MODULATE_EMIT_FP8", defaultOn: true);
         EnableW8A8 = EnvSwitch.IsEnabled("HARTSY_W8A8", defaultOn: false);
         HighPrecisionGemm = EnvFlag("HARTSY_HIGH_PRECISION_GEMM");
         EnableFp8F16Gemm = EnvFlag("HARTSY_FP8_F16");
@@ -1172,8 +1176,8 @@ public sealed class CudaBackend : IBackend
                 weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
             }
 
-            int gemmType = CublasDataType(gemmDtype);
-            int outputType = CublasDataType(output.DType);
+            int gemmType = CublasDataTypeForGemm(gemmDtype, input.DType, weight.DType, output.DType, m, n, k);
+            int outputType = CublasDataTypeForGemm(output.DType, input.DType, weight.DType, output.DType, m, n, k);
 
             // Bias prep shared by the fused-epilogue path and the separate-add fallback:
             // both want one bias value per output channel n, in the output dtype.
@@ -2067,6 +2071,51 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pScale);
             if (shift is not null) GpuTransferHelper.FreeDevice(pShift);
         }
+    }
+
+    /// <inheritdoc/>
+    public unsafe bool TryAffineBroadcastRowIndexedToFp8(Tensor outputFp8, Tensor input, Tensor scaleTable,
+        Tensor? shiftTable, Tensor rowIndex, Tensor consumerWeight)
+    {
+        if (!EnableModulateEmitFp8 || outputFp8.DType != DType.F8E4M3 || input.DType != DType.F32
+            || scaleTable.DType != DType.F32 || rowIndex.DType != DType.I32
+            || (shiftTable is not null && shiftTable.DType != DType.F32))
+        {
+            return false;
+        }
+        EnterOp();
+        EnsureKernels();
+        if (!_kernels!.HasAffineBroadcastRowIndexedToFp8) return false;
+        ulong pInputScale = EnsureFp8InputScaleDev(consumerWeight);
+        if (pInputScale == 0) return false;
+
+        using NvtxRange _nvtx = NvtxRange.Push("AffineBroadcastRowIndexedToFp8");
+        int rank = input.Shape.Rank;
+        int dim = (int)input.Shape[rank - 1];
+        ulong pOut = 0, pIn = 0, pScale = 0, pShift = 0, pIdx = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pScale = GpuTransferHelper.CopyToDevice(scaleTable);
+            pShift = shiftTable is not null ? GpuTransferHelper.CopyToDevice(shiftTable) : 0;
+            pIdx = GpuTransferHelper.CopyToDevice(rowIndex);
+            nuint outBytes = GpuTransferHelper.ByteSize(outputFp8);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchAffineBroadcastRowIndexedToFp8(pOut, pIn, pScale, pShift, pIdx, pInputScale,
+                dim, input.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(outputFp8, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pScale);
+            if (shiftTable is not null) GpuTransferHelper.FreeDevice(pShift);
+            GpuTransferHelper.FreeDevice(pIdx);
+        }
+        return true;
     }
 
     public void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
@@ -6233,6 +6282,13 @@ public sealed class CudaBackend : IBackend
     /// <summary>Maps a HartsyInference dtype to its cuBLAS data-type constant for <c>cublasGemmEx</c> / <c>cublasGemmStridedBatchedEx</c>.</summary>
     /// <remarks>Handles F16, BF16, F32; throws otherwise (FP8 casts to F16/BF16 via <see cref="CastIfNeeded"/> before cuBLAS).</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int CublasDataTypeForGemm(DType dtype, DType input, DType weight, DType output, int m, int n, int k)
+    {
+        if (dtype == DType.F32 || dtype == DType.F16 || dtype == DType.BF16) return CublasDataType(dtype);
+        throw new NotSupportedException(
+            $"cuBLAS GEMM does not support dtype {dtype} (input={input}, weight={weight}, output={output}, M={m}, N={n}, K={k}).");
+    }
+
     private static int CublasDataType(DType dtype)
     {
         if (dtype == DType.F16) return CublasApi.CUDA_R_16F;

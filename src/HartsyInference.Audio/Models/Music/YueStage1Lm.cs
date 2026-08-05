@@ -26,6 +26,11 @@ public sealed unsafe class YueStage1Lm : IDisposable
         _lm = new Qwen2Model(cfg.Stage1);
     }
 
+    /// <summary>Optional layer-split placement for the 7B body — pools VRAM across GPUs so Stage-1 can run at
+    /// checkpoint precision instead of being quantized down to fit one card. Null = single-backend on the
+    /// per-call backend. Logits/sampling follow <see cref="LlmPlacement.LastBackend"/> when set.</summary>
+    public LlmPlacement? Placement { get; set; }
+
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "model")
         => _lm.LoadWeights(w, prefix);
 
@@ -79,9 +84,17 @@ public sealed unsafe class YueStage1Lm : IDisposable
         int vocab = _cfg.Stage1.VocabSize;
         bool wantVocal = true;
 
+        // The layer-split path pools the body across the placement's backends; the head (logits) runs on the
+        // last stage's backend, which owns lm_head + final norm (EnumerateStageWeights' contract).
+        LlmPlacement? placement = Placement is { IsSingle: false } ? Placement : null;
+        IBackend headBackend = placement?.LastBackend ?? backend;
+        Tensor RunBody(ReadOnlySpan<int> tokens, int posStart, IKvCache kv) => placement is null
+            ? _lm.Forward(backend, tokens, 1, posStart, kv)
+            : _lm.ForwardStaged(placement, tokens, posStart, kv);
+
         int[] prompt = contextTokens.ToArray();
-        Tensor hidden = _lm.Forward(backend, prompt, 1, 0, cache);
-        Tensor? uHidden = useCfg ? _lm.Forward(backend, uncondTokenIds.ToArray(), 1, 0, uncondCache!) : null;
+        Tensor hidden = RunBody(prompt, 0, cache);
+        Tensor? uHidden = useCfg ? RunBody(uncondTokenIds.ToArray(), 0, uncondCache!) : null;
 
         try
         {
@@ -89,7 +102,7 @@ public sealed unsafe class YueStage1Lm : IDisposable
             {
                 Tensor last = SliceLast(hidden, _cfg.Stage1.HiddenSize);
                 hidden.Dispose();
-                Tensor logitsT = _lm.ProjectLogits(backend, last, 1, 1);
+                Tensor logitsT = _lm.ProjectLogits(headBackend, last, 1, 1);
                 last.Dispose();
                 Span<float> logits = new((void*)logitsT.DataPointer, vocab);
 
@@ -97,7 +110,7 @@ public sealed unsafe class YueStage1Lm : IDisposable
                 {
                     Tensor uLast = SliceLast(uHidden!, _cfg.Stage1.HiddenSize);
                     uHidden!.Dispose();
-                    Tensor uLogitsT = _lm.ProjectLogits(backend, uLast, 1, 1);
+                    Tensor uLogitsT = _lm.ProjectLogits(headBackend, uLast, 1, 1);
                     uLast.Dispose();
                     float* up = (float*)uLogitsT.DataPointer;
                     for (int v = 0; v < vocab; v++) logits[v] = up[v] + g * (logits[v] - up[v]);
@@ -126,8 +139,8 @@ public sealed unsafe class YueStage1Lm : IDisposable
                 wantVocal = !wantVocal;
 
                 int[] step1 = [next];
-                hidden = _lm.Forward(backend, step1, 1, cache.CurrentLength, cache);
-                if (useCfg) uHidden = _lm.Forward(backend, step1, 1, uncondCache!.CurrentLength, uncondCache);
+                hidden = RunBody(step1, cache.CurrentLength, cache);
+                if (useCfg) uHidden = RunBody(step1, uncondCache!.CurrentLength, uncondCache);
                 if (cache.CurrentLength >= cacheCap - 2) break;
             }
         }
@@ -154,6 +167,11 @@ public sealed unsafe class YueStage1Lm : IDisposable
     }
 
     public IEnumerable<Tensor> EnumerateWeights() => _lm.EnumerateWeights();
+
+    /// <summary>One placement stage's weight tensors (asymmetric preload for the layer-split path).</summary>
+    public IEnumerable<Tensor> EnumerateStageWeights(int startLayer, int endLayer, bool isFirstStage, bool isLastStage,
+        bool includeRedundantSplits = true)
+        => _lm.EnumerateStageWeights(startLayer, endLayer, isFirstStage, isLastStage, includeRedundantSplits);
 
     private Tensor SliceLast(Tensor hidden, int h)
     {

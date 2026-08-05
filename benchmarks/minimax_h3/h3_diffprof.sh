@@ -43,7 +43,11 @@ cd "$REPO"
 # PROFILE_SYNC drains the stream at every range close, so each op's time is TRUE GPU time. It
 # serializes execution, so these wall times are NOT comparable to an h3_bench.sh run.
 # PROFILE_FINE turns on the sub-op ranges (the five Sage attention launches).
-CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_SMI HARTSY_LOG_LEVEL=Info \
+# `env` so H3_BENCH_ENV's KEY=VALUE words are parsed as assignments — a bare prefix would take the
+# expanded text as the command name. Same passthrough as h3_bench.sh, so a profile can be taken under
+# the exact config a benchmark ran (without it this defaulted to Sage attention regardless).
+env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_SMI HARTSY_LOG_LEVEL=Info \
+    ${H3_BENCH_ENV:-} \
     HARTSY_PROFILE=1 HARTSY_PROFILE_SYNC=1 HARTSY_PROFILE_FINE=1 HARTSY_PROFILE_OUT=$OUT/${LABEL}.txt \
     dotnet run --project src/HartsyInference.Cli/HartsyInference.Cli.csproj -f net10.0 --no-build -- \
     video -m minimax-h3 --model-path "$CKPT" --frames 141 --width 512 --height 288 \

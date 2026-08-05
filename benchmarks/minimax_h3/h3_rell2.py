@@ -52,15 +52,21 @@ def main():
     names = ["video_latent_final.bin", "audio_latent_final.bin"]
     print(f"{'tensor':22s} {'relL2':>12s} {'max_abs':>12s} {'n':>10s}  nonfinite")
     worst = 0.0
+    missing = []
     for n in names:
         pa, pb = os.path.join(da, n), os.path.join(db, n)
         if not (os.path.exists(pa) and os.path.exists(pb)):
+            # Must not fall through to the tolerance verdict: a run that crashed before dumping would
+            # otherwise print "within f32 parity tolerance" off an untouched worst=0.0.
             print(f"{n:22s} {'MISSING':>12s}")
+            missing.append(n)
             continue
         a, b = load(pa), load(pb)
         r, m, nf = rel_l2(a, b)
         worst = max(worst, r)
         print(f"{n:22s} {r:12.3e} {m:12.3e} {len(a):10d}  {nf}")
+    if missing:
+        raise SystemExit(f"\nFAILED: {len(missing)} tensor(s) absent from a dump — no verdict possible.")
     print(f"\nworst relL2 {worst:.3e}")
     # Anchors from the repo's own parity tolerances (MiniMaxH3BackendParityTests): f32 5e-3, bf16 1.5e-2.
     print("within f32 parity tolerance (5e-3)" if worst < 5e-3 else
