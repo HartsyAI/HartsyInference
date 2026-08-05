@@ -1,14 +1,6 @@
-namespace HartsyInference.Diffusion.Tests.Helpers;
+namespace HartsyInference.Tests.Common;
 
-/// <summary>
-/// Structural Similarity Index (SSIM) for comparing two RGB images.
-/// Uses an 11×11 Gaussian window with σ=1.5 (the standard configuration from Wang et al. 2004).
-/// Operates per-channel (R, G, B) and returns the mean across channels.
-///
-/// Used by the cross-backend SSIM acceptance gates (Phase 3.5 §5):
-///   • SD1.5 512×512 Vulkan vs CUDA — SSIM > 0.99
-///   • SDXL 1024×1024 Vulkan vs CUDA — SSIM > 0.95
-/// </summary>
+/// <summary>Structural Similarity Index (Wang et al. 2004: 11×11 Gaussian window, σ=1.5) over interleaved RGB, per-channel then averaged. Shared by the Diffusion and Video test projects (their local <c>Helpers.Ssim</c> classes forward here). Acceptance gates in use: SD1.5 512² Vulkan-vs-CUDA &gt; 0.99, SDXL 1024² &gt; 0.95, DiT-sharding e2e &gt; 0.75 (cross-SM fp8 GEMM paths differ).</summary>
 public static class Ssim
 {
     private const float K1 = 0.01f;

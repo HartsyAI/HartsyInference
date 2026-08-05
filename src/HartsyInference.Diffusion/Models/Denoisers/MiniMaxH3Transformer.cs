@@ -48,6 +48,44 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
 
     public IEnumerable<Tensor> EnumerateWeights() => _weights.Values;
 
+    /// <summary>Everything except the per-block weights: patch/condition projections, token refiner (its
+    /// <c>token_refiner.blocks.*</c> keys don't collide — the block prefix match is anchored to the string start),
+    /// time embedder / adaLN curve table, final layer, rope table. All consumed on backend A of a sharded forward.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
+        foreach (KeyValuePair<string, Tensor> kv in _weights)
+        {
+            if (!kv.Key.StartsWith("blocks.", StringComparison.Ordinal))
+            {
+                yield return kv.Value;
+            }
+        }
+    }
+
+    /// <summary>Weights of blocks <c>[startBlock, endBlock)</c> only — the asymmetric-preload primitive for DiT
+    /// sharding: backend A preloads <see cref="EnumerateSharedWeights"/> + its range, backend B ONLY its range.</summary>
+    public IEnumerable<Tensor> EnumerateBlockRangeWeights(int startBlock, int endBlock)
+    {
+        foreach (KeyValuePair<string, Tensor> kv in _weights)
+        {
+            if (TryParseBlockIndex(kv.Key, out int block) && block >= startBlock && block < endBlock)
+            {
+                yield return kv.Value;
+            }
+        }
+    }
+
+    private static bool TryParseBlockIndex(string key, out int block)
+    {
+        block = -1;
+        if (!key.StartsWith("blocks.", StringComparison.Ordinal))
+        {
+            return false;
+        }
+        int dot = key.IndexOf('.', 7);
+        return dot > 7 && int.TryParse(key.AsSpan(7, dot - 7), out block);
+    }
+
     /// <summary>The checkpoint's own rotary base frequencies; synthesising these would shift every position.</summary>
     public float[] RopeInvFreq()
     {
@@ -223,15 +261,15 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     }
 
     /// <summary>qkv projection, per-head q/k RMS norm, partial split-half rope, attention, output projection.
-    /// q/k/v are allocated as <c>[1, seq, heads, headDim]</c> up front so the per-head norm and the in-place rope
-    /// consume them directly — a borrowed reshape view would strand the result on whichever device wrote it.
+    /// q/k/v are allocated head-major <c>[1, heads, seq, headDim]</c> up front so the fused split+norm, the in-place
+    /// rope and SDPA all consume them directly — only the attention output needs a permute back.
     /// The qkv buffer through to the attention output stays F32: rope and SDPA have no 16-bit path, so a bf16 qkv
     /// would only add casts around them. Only the projection's input and output ride the bf16 residual stream.</summary>
     private Tensor Attention(IBackend backend, Tensor x, string prefix, Tensor? cos, Tensor? sin)
     {
         int seq = (int)x.Shape[0];
         int heads = _config.NumAttentionHeads, hd = _config.AttentionHeadDim, inner = heads * hd;
-        TensorShape headed = new TensorShape(1, seq, heads, hd);
+        TensorShape headed = new TensorShape(1, heads, seq, hd);
 
         Tensor q = new Tensor(headed, DType.F32);
         Tensor k = new Tensor(headed, DType.F32);
@@ -239,33 +277,24 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         try
         {
             using (Tensor qkv = new Tensor(new TensorShape(seq, inner * 3), DType.F32))
-            using (Tensor qRaw = new Tensor(headed, DType.F32))
-            using (Tensor kRaw = new Tensor(headed, DType.F32))
             {
                 backend.Linear(qkv, x, Require($"{prefix}.qkv_proj.weight"), Optional($"{prefix}.qkv_proj.bias"));
-                backend.SliceLastDim(qRaw, qkv, 0);
-                backend.SliceLastDim(kRaw, qkv, inner);
-                backend.SliceLastDim(v, qkv, inner * 2);
-                backend.RmsNorm(q, qRaw, Require($"{prefix}.q_norm.weight"), _config.QkNormEps);
-                backend.RmsNorm(k, kRaw, Require($"{prefix}.k_norm.weight"), _config.QkNormEps);
+                // One kernel for the 3-way split plus both per-head norms, emitting head-major so SDPA consumes
+                // q/k/v directly — no permute.
+                backend.QkvSplitNormHeadMajor(q, k, v, qkv, Require($"{prefix}.q_norm.weight"),
+                    Require($"{prefix}.k_norm.weight"), _config.QkNormEps);
             }
             if (cos is not null && sin is not null)
             {
                 int rotary = MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen);
-                backend.ApplyRopeSingle(q, cos, sin, rotary);
-                backend.ApplyRopeSingle(k, cos, sin, rotary);
+                backend.ApplyRopeSingleHeadMajor(q, cos, sin, rotary);
+                backend.ApplyRopeSingleHeadMajor(k, cos, sin, rotary);
             }
 
-            Tensor qh = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
-            Tensor kh = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
-            Tensor vh = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
             Tensor attn = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
             try
             {
-                backend.Permute0213(qh, q, seq, heads, hd);
-                backend.Permute0213(kh, k, seq, heads, hd);
-                backend.Permute0213(vh, v, seq, heads, hd);
-                backend.ScaledDotProductAttention(attn, qh, kh, vh, null, 1f / MathF.Sqrt(hd));
+                backend.ScaledDotProductAttention(attn, q, k, v, null, 1f / MathF.Sqrt(hd));
 
                 Tensor merged = new Tensor(new TensorShape(seq, inner), DType.F32);
                 backend.Permute0213(merged, attn, heads, seq, hd);
@@ -276,7 +305,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             }
             finally
             {
-                qh.Dispose(); kh.Dispose(); vh.Dispose(); attn.Dispose();
+                attn.Dispose();
             }
         }
         finally

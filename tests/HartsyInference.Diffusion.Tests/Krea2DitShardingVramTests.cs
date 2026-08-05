@@ -19,6 +19,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// (11-12 GB free in practice), so a passing run is itself evidence the split is real, not just "it ran."
 /// Skips cleanly if the checkpoint is absent or either card doesn't have enough free VRAM at run time.</summary>
 [Trait("Category", "Integration")]
+[Trait("Category", "RealWeights")]
 public sealed class Krea2DitShardingVramTests
 {
     private readonly ITestOutputHelper _output;
@@ -30,7 +31,7 @@ public sealed class Krea2DitShardingVramTests
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         if (CudaContext.GetDeviceCount() < 2) { _output.WriteLine("SKIPPED: needs 2 physical GPUs."); return; }
         string rootDir = TestPaths.Krea2.TurboDir;
-        if (!Directory.Exists(rootDir)) { _output.WriteLine($"SKIPPED: Krea2 dir not found: {rootDir}"); return; }
+        if (!RealWeightGate.Require(_output.WriteLine, rootDir)) return;
         string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(Krea2DitShardingVramTests).Assembly.Location)!, "Ptx");
         if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
 

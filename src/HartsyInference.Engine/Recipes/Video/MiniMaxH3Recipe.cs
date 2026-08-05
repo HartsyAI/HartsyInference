@@ -49,20 +49,21 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
         try
         {
-            if (context.Backend is HartsyInference.Cuda.CudaBackend cudaBackend)
             {
                 // Only the 66 GB bf16 DiT needs this — caching its F16 casts grows without bound and OOMs the host.
                 // The 21 GB fp8 build must keep the cache ON or every GEMM re-uploads its weight.
                 long ditBytes = new FileInfo(assets.Dit).Length;
                 if (ditBytes > 40L << 30)
                 {
-                    cudaBackend.CacheWeightCasts = false;
-                    Logs.Info($"[MiniMaxH3Recipe] CacheWeightCasts disabled ({ditBytes >> 30} GB DiT).");
+                    RecipeBackendFlags.DisableCacheWeightCasts(context, "MiniMaxH3Recipe");
                 }
             }
-            // F16, not BF16: the native fp8 GEMM guard (CudaBackend.cs:959) accepts fp8/F32/F16 only, so a BF16
-            // stream falls off the tensor-core path and costs more than the halved traffic saves. CPU stays F32.
-            DType bodyDType = context.Backend is HartsyInference.Cuda.CudaBackend ? DType.F16 : DType.F32;
+            // F32, and F16 is not a bug to chase: this DiT's stream genuinely leaves F16 range on real weights —
+            // condition_proj already emits 82740 (2 of 5376 text channels overflow to inf before block 0) and the
+            // residual reaches 2.7e6 by the last block. BF16 holds the range but falls off the native fp8 GEMM
+            // guard (CudaBackend.cs:959 takes fp8/F32/F16 inputs only) for a 46% slowdown. The 2-layer parity
+            // test passes both, so it does not gate this — only a real-weight run does.
+            DType bodyDType = DType.F32;
             MiniMaxH3Transformer transformer =
                 LoadTransformer(assets.Dit, loaders, bodyDType, out MiniMaxH3Config config);
             MiniMaxH3VideoVaeDecoder videoVae = LoadVideoVae(assets.VideoVae, loaders);

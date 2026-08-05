@@ -17,10 +17,11 @@ public sealed unsafe class QwenImageRope
     // pair i lives at index 2i; both slots filled). Position-only, so one host build serves every block of
     // every step — the per-block host ApplyJoint this replaces was a D2H+H2D round trip of joint Q AND K
     // (~50 MB each) per block. Keyed on the full sequence layout; a resolution/prompt-length change rebuilds.
-    private (int ImgH, int ImgW, int Txt, int TxtStart, long RefSig) _jointTableKey =
-        (-1, -1, -1, -1, -1);
-    private Tensor? _jointCos;
-    private Tensor? _jointSin;
+    // Cached PER BACKEND (the FluxRope._gpuTables precedent): DiT sharding runs blocks [split, Depth) on a
+    // second backend, and two backends staging the SAME host tensor through WanRopeInterleaved trips the
+    // transfer helper's binding/pinning state (observed CUDA_ERROR_INVALID_VALUE on the second card at real
+    // table sizes) — each backend gets its own host build instead, a few MB per card.
+    private readonly Dictionary<Core.Backends.IBackend, ((int ImgH, int ImgW, int Txt, int TxtStart, long RefSig) Key, Tensor Cos, Tensor Sin)> _jointTables = new();
 
     public QwenImageRope(int[]? axesDim = null, int theta = 10000, bool ropeText = true)
     {
@@ -151,7 +152,7 @@ public sealed unsafe class QwenImageRope
     /// F32 in the <see cref="Core.Backends.IBackend.WanRopeInterleaved"/> convention (pair i's angle at index
     /// <c>2i</c>). Same position math as <see cref="ApplyJoint"/> — the rotation itself matches the interleaved
     /// kernel exactly (<c>x0·cos−x1·sin, x0·sin+x1·cos</c> on pairs (2i, 2i+1)).</summary>
-    public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(int imgPackedH, int imgPackedW, int txtSeqLen,
+    public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(Core.Backends.IBackend backend, int imgPackedH, int imgPackedW, int txtSeqLen,
         int txtPositionStart, ReadOnlySpan<(int H, int W)> refGrids = default)
     {
         long refSig = 0x51F0;
@@ -162,10 +163,14 @@ public sealed unsafe class QwenImageRope
             refSeqLen += rh * rw;
         }
         (int, int, int, int, long) key = (imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refSig);
-        if (_jointCos is not null && _jointSin is not null && _jointTableKey == key)
-            return (_jointCos, _jointSin);
-        _jointCos?.Dispose();
-        _jointSin?.Dispose();
+        if (_jointTables.TryGetValue(backend, out ((int, int, int, int, long) Key, Tensor Cos, Tensor Sin) entry)
+            && entry.Key == key)
+            return (entry.Cos, entry.Sin);
+        if (entry.Cos is not null)
+        {
+            entry.Cos.Dispose();
+            entry.Sin.Dispose();
+        }
 
         int imgSeqLen = imgPackedH * imgPackedW;
         int totalSeqLen = txtSeqLen + imgSeqLen + refSeqLen;
@@ -191,9 +196,7 @@ public sealed unsafe class QwenImageRope
                 sp[off + 1] = sn;
             }
         }
-        _jointCos = cos;
-        _jointSin = sin;
-        _jointTableKey = key;
+        _jointTables[backend] = (key, cos, sin);
         return (cos, sin);
     }
 

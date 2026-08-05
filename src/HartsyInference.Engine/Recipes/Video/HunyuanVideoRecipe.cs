@@ -80,12 +80,8 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
             HunyuanVideoVaeDecoder vae = new HunyuanVideoVaeDecoder();
             vae.LoadWeights(CastBf16ToF16(HunyuanVideoCheckpointConverter.ConvertVaeDecoder(LoadStandalone(loaders, vaePath))));
 
-            if (context.Backend is HartsyInference.Cuda.CudaBackend cudaBackend)
-            {
-                // bf16-resident, block-streamed DiT — caching F16 casts would roughly double VRAM and OOM a 24 GB card.
-                cudaBackend.CacheWeightCasts = false;
-                Logs.Info("[HunyuanVideoRecipe] CacheWeightCasts disabled (bf16-resident, block-streamed).");
-            }
+            // bf16-resident, block-streamed DiT — caching F16 casts would roughly double VRAM and OOM a 24 GB card.
+            RecipeBackendFlags.DisableCacheWeightCasts(context, "HunyuanVideoRecipe");
 
             string llavaPath = ModelDownloader.EnsureSideModelAsync(SideModels.LlavaLlama3, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
             LlamaStyleEncoder llava = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Llama31_8B);

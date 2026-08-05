@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
@@ -62,6 +63,21 @@ public abstract class DiffusionPipelineBase : IDisposable
     /// <see cref="Backend"/> runs <c>[0, DitShardSplitBlock)</c>, <see cref="DitShardBackend"/> runs
     /// <c>[DitShardSplitBlock, BlockCount)</c>. Meaningless when <see cref="DitShardBackend"/> is null.</summary>
     public int DitShardSplitBlock { get; init; }
+
+    /// <summary>Which path the most recent generation's CFG-parallel dispatch took — <c>"active"</c>,
+    /// <c>"fell-back(&lt;reason&gt;)"</c>, or <c>"inapplicable(&lt;reason&gt;)"</c>; null when
+    /// <see cref="CfgParallelBackend"/> isn't configured or the generation made no decision yet. The fallback is
+    /// deliberately silent at the API level (a generation still succeeds), so this — plus the mirrored
+    /// <c>[CfgParallel]</c> log line — is how operators and tests observe which path actually ran.</summary>
+    public string? LastCfgParallelDecision { get; protected set; }
+
+    /// <summary>Records <see cref="LastCfgParallelDecision"/> and mirrors it to the log with the stable
+    /// <c>[CfgParallel]</c> prefix tests and operators grep for.</summary>
+    protected void RecordCfgParallelDecision(string decision)
+    {
+        LastCfgParallelDecision = decision;
+        Logs.Info($"[CfgParallel] {decision}");
+    }
 
     private int _disposed;
 

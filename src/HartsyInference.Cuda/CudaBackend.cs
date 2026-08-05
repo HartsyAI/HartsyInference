@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -3212,6 +3213,46 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>In-place rotary embedding on a head-major GPU-resident tensor <c>[B, heads, L, headDim]</c>; cos/sin stay <c>[B, L, headDim]</c>.</summary>
+    /// <remarks>Same rotation as <see cref="ApplyRopeSingle"/>; only the token index differs (<c>vec % seq</c> instead
+    /// of <c>vec / numHeads</c>), so q/k written head-major by <see cref="QkvSplitNormHeadMajor"/> can be roped without
+    /// a round-trip through token-major layout.</remarks>
+    public void ApplyRopeSingleHeadMajor(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
+    {
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("CUDA ApplyRopeSingleHeadMajor supports F32 only.");
+        if (x.Shape.Rank != 4)
+            throw new HartsyInferenceException($"ApplyRopeSingleHeadMajor needs x shaped [B,heads,seq,headDim], got {x.Shape}.");
+        EnterOp();
+        EnsureKernels();
+        int heads = (int)x.Shape[1];
+        int seq = (int)x.Shape[2];
+        int headDim = (int)x.Shape[3];
+        // A token-major x is the same element count with heads/seq swapped; only the cos/sin row count catches it.
+        if (cos.ElementCount != x.Shape[0] * seq * headDim)
+            throw new HartsyInferenceException($"ApplyRopeSingleHeadMajor expects cos/sin [B,seq,headDim] for x {x.Shape}, got {cos.Shape}.");
+        long totalVecs = x.ElementCount / headDim;
+
+        ulong pX = 0, pCos = 0, pSin = 0;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);
+            pCos = GpuTransferHelper.CopyToDevice(cos);
+            pSin = GpuTransferHelper.CopyToDevice(sin);
+            _kernels!.LaunchRopeHeadMajor(pX, pCos, pSin, heads, headDim, seq, totalVecs, _stream.Handle, rotaryDim);
+
+            // In-place: clear stale callbacks before re-caching (pitfall #17).
+            x._gpuSyncCallback = null;
+            x._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pCos);
+            GpuTransferHelper.FreeDevice(pSin);
+        }
+    }
+
     /// <summary>In-place interleaved (GPT-J) RoPE on a GPU-resident <c>[B,L,numHeads,headDim]</c> tensor (pairs rotated by frequency i).</summary>
     /// <remarks>cos/sin are <c>[B, L, headDim]</c>. Without this override the shared <see cref="IBackend"/> CPU
     /// fallback would drag q/k off the device every layer (Sesame CSM / HeartMuLa use interleaved RoPE) — the whole
@@ -3828,10 +3869,11 @@ public sealed class CudaBackend : IBackend
     {
         using NvtxRange _nvtx = NvtxRange.Push("GluActivate");
         bool bf16 = output.DType == DType.BF16 && gateUp.DType == DType.BF16;
-        if (!bf16 && (output.DType != DType.F32 || gateUp.DType != DType.F32))
+        bool f16 = output.DType == DType.F16 && gateUp.DType == DType.F16;
+        if (!bf16 && !f16 && (output.DType != DType.F32 || gateUp.DType != DType.F32))
         {
             throw new NotSupportedException(
-                $"CUDA GluActivate supports F32 or BF16 (both sides same dtype); got output={output.DType}, gateUp={gateUp.DType}.");
+                $"CUDA GluActivate supports F32, F16 or BF16 (both sides same dtype); got output={output.DType}, gateUp={gateUp.DType}.");
         }
         EnterOp();
         EnsureKernels();
@@ -3845,6 +3887,8 @@ public sealed class CudaBackend : IBackend
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             if (bf16)
                 _kernels!.LaunchGluActBf16(pOut, pIn, rows, ff, gelu, _stream.Handle);
+            else if (f16)
+                _kernels!.LaunchGluActF16(pOut, pIn, rows, ff, gelu, _stream.Handle);
             else
                 _kernels!.LaunchGluAct(pOut, pIn, rows, ff, gelu, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -4036,6 +4080,52 @@ public sealed class CudaBackend : IBackend
             pk = GpuTransferHelper.AllocateDevice(bytes);
             pv = GpuTransferHelper.AllocateDevice(bytes);
             _kernels!.LaunchQkvSplitNorm(f16, pq, pk, pv, pQkv, pQw, pKw, tokens, heads, headDim, eps, _stream.Handle);
+            GpuTransferHelper.CacheActivation(q, pq, bytes);
+            GpuTransferHelper.CacheActivation(k, pk, bytes);
+            GpuTransferHelper.CacheActivation(v, pv, bytes);
+            cached = true;
+        }
+        finally
+        {
+            if (!cached) { GpuTransferHelper.FreeDevice(pq); GpuTransferHelper.FreeDevice(pk); GpuTransferHelper.FreeDevice(pv); }
+            GpuTransferHelper.FreeDevice(pQkv); GpuTransferHelper.FreeDevice(pQw); GpuTransferHelper.FreeDevice(pKw);
+        }
+    }
+
+    /// <summary>Head-major <see cref="QkvSplitNorm"/> (F32 or F16 activation, F32 weights): q/k/v come out [B, heads, seq, headDim].</summary>
+    /// <remarks>Replaces SliceLastDim×3 + RmsNorm×2 + Permute0213×3 per attention stream — SDPA consumes the result directly.</remarks>
+    public void QkvSplitNormHeadMajor(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("QkvSplitNormHeadMajor");
+        bool f16 = qkv.DType == DType.F16;
+        if (!f16 && qkv.DType != DType.F32)
+            throw new NotSupportedException("CUDA QkvSplitNormHeadMajor supports F32 or F16 activations.");
+        if (q.Shape.Rank != 4)
+            throw new HartsyInferenceException($"QkvSplitNormHeadMajor needs q/k/v shaped [B,heads,seq,headDim], got {q.Shape}.");
+        EnterOp();
+        EnsureKernels();
+        int headDim = (int)qWeight.Shape[qWeight.Shape.Rank - 1];
+        int w = (int)qkv.Shape[qkv.Shape.Rank - 1] / 3;
+        int heads = w / headDim;
+        int tokens = (int)(qkv.ElementCount / (3L * w));
+        int seq = (int)q.Shape[2];
+        // A transposed q/k/v would still be the right element count, so check the layout, not just the size.
+        if (q.Shape[1] != heads || q.Shape[3] != headDim || (long)q.Shape[0] * seq != tokens
+            || !k.Shape.Equals(q.Shape) || !v.Shape.Equals(q.Shape))
+            throw new HartsyInferenceException(
+                $"QkvSplitNormHeadMajor layout mismatch: q {q.Shape} k {k.Shape} v {v.Shape} vs qkv {qkv.Shape} " +
+                $"(heads={heads}, headDim={headDim}, tokens={tokens}).");
+        ulong pq = 0, pk = 0, pv = 0, pQkv = 0, pQw = 0, pKw = 0; bool cached = false;
+        try
+        {
+            pQkv = GpuTransferHelper.CopyToDevice(qkv);
+            pQw = GpuTransferHelper.CopyToDevice(qWeight);
+            pKw = GpuTransferHelper.CopyToDevice(kWeight);
+            nuint bytes = GpuTransferHelper.ByteSize(q);
+            pq = GpuTransferHelper.AllocateDevice(bytes);
+            pk = GpuTransferHelper.AllocateDevice(bytes);
+            pv = GpuTransferHelper.AllocateDevice(bytes);
+            _kernels!.LaunchQkvSplitNormHeadMajor(f16, pq, pk, pv, pQkv, pQw, pKw, tokens, heads, headDim, seq, eps, _stream.Handle);
             GpuTransferHelper.CacheActivation(q, pq, bytes);
             GpuTransferHelper.CacheActivation(k, pk, bytes);
             GpuTransferHelper.CacheActivation(v, pv, bytes);

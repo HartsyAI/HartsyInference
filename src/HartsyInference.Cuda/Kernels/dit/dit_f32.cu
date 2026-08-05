@@ -240,6 +240,36 @@ __global__ void dit_rope_f32(
     x[baseX + i + half] = upper * cos[baseCs + i + half] + lower * sin[baseCs + i + half];
 }
 
+// Head-major twin of dit_rope_f32: x is [B, heads, seq, headDim], so the cos/sin row is (vec / (heads*seq))*seq
+// + vec % seq instead of vec / numHeads. Identical rotation math — only the vec→row map differs.
+__global__ void dit_rope_head_major_f32(
+    float* __restrict__ x,
+    const float* __restrict__ cos,
+    const float* __restrict__ sin,
+    unsigned int heads,
+    unsigned int headDim,
+    unsigned long long totalVecs,
+    unsigned int rotaryDim,
+    unsigned int seq)
+{
+    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
+    unsigned int half = rdim >> 1;
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long total = totalVecs * (unsigned long long)half;
+    if (gid >= total) return;
+
+    unsigned int i = (unsigned int)(gid % half);
+    unsigned long long vec = gid / half;
+    unsigned long long row = (vec / ((unsigned long long)heads * seq)) * seq + vec % seq;
+    size_t baseX = (size_t)vec * headDim;
+    size_t baseCs = (size_t)row * headDim;
+
+    float lower = x[baseX + i];
+    float upper = x[baseX + i + half];
+    x[baseX + i] = lower * cos[baseCs + i] - upper * sin[baseCs + i];
+    x[baseX + i + half] = upper * cos[baseCs + i + half] + lower * sin[baseCs + i + half];
+}
+
 // ── Per-row scalar multiply (token masking) ────────────────────────────────
 // out[row, c] = in[row, c] * rowScale[row]. rowScale has one value per row (rows = total/channels).
 // Used to zero non-role token positions in Ideogram 4's masked text/image embedding.
@@ -910,6 +940,39 @@ __global__ void dit_qkv_split_norm_f32(
     float kv = base[W + (unsigned long long)h * headDim + d];
     sred[d] = kv * kv; __syncthreads();
     for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (d < s) sred[d] += sred[d + s]; __syncthreads(); }
+    float kInv = rsqrtf(sred[0] / (float)headDim + eps);
+
+    q[outOff + d] = qv * qInv * qW[d];
+    k[outOff + d] = kv * kInv * kW[d];
+    v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+}
+
+// Head-major twin of dit_qkv_split_norm_f32: identical math, writes q/k/v as [batch, heads, seq, headDim]
+// instead of [token, head, d], so the attention caller feeds SDPA with no Permute0213. Same grid mapping
+// (one block per (token, head), blockDim = headDim) — only the output address changes.
+__global__ void dit_qkv_split_norm_head_major_f32(
+    float* __restrict__ q, float* __restrict__ k, float* __restrict__ v,
+    const float* __restrict__ qkv, const float* __restrict__ qW, const float* __restrict__ kW,
+    unsigned int tokens, unsigned int heads, unsigned int headDim, unsigned int seq, float eps)
+{
+    extern __shared__ float sred[];
+    unsigned long long g = (unsigned long long)blockIdx.x;   // group = token*heads + head
+    if (g >= (unsigned long long)tokens * heads) return;
+    unsigned int h = (unsigned int)(g % heads);
+    unsigned long long token = g / heads;
+    unsigned int W = heads * headDim, d = threadIdx.x;
+    const float* base = qkv + token * 3ULL * W;
+    unsigned long long b = token / seq, s = token % seq;
+    unsigned long long outOff = ((b * heads + h) * seq + s) * headDim;
+
+    float qv = base[(unsigned long long)h * headDim + d];
+    sred[d] = qv * qv; __syncthreads();
+    for (unsigned int t = blockDim.x >> 1; t > 0; t >>= 1) { if (d < t) sred[d] += sred[d + t]; __syncthreads(); }
+    float qInv = rsqrtf(sred[0] / (float)headDim + eps); __syncthreads();
+
+    float kv = base[W + (unsigned long long)h * headDim + d];
+    sred[d] = kv * kv; __syncthreads();
+    for (unsigned int t = blockDim.x >> 1; t > 0; t >>= 1) { if (d < t) sred[d] += sred[d + t]; __syncthreads(); }
     float kInv = rsqrtf(sred[0] / (float)headDim + eps);
 
     q[outOff + d] = qv * qInv * qW[d];

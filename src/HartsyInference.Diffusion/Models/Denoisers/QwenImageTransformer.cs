@@ -142,6 +142,15 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         if (_projOutBias is not null) yield return _projOutBias;
     }
 
+    /// <summary>Weights of blocks <c>[startBlock, endBlock)</c> only — the asymmetric-preload primitive for DiT
+    /// sharding: backend A preloads <see cref="EnumerateSharedWeights"/> + its range, backend B ONLY its range.
+    /// Never preload <see cref="EnumerateWeights"/> on both backends — that replicates instead of pooling.</summary>
+    public IEnumerable<Tensor> EnumerateBlockRangeWeights(int startBlock, int endBlock)
+    {
+        for (int i = startBlock; i < endBlock; i++)
+            foreach (Tensor w in _blocks[i].EnumerateWeights()) yield return w;
+    }
+
     /// <summary>Yields every weight tensor for GPU preloading via <see cref="IBackend.PreloadWeights"/>.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
@@ -206,19 +215,8 @@ public sealed unsafe class QwenImageTransformer : IDisposable
                 "Reference-latent (edit) tokens require batch size 1; run CFG as two batch-1 passes.");
 
         TensorShape imgTokShape = new TensorShape(batch, imgSeqLen, hidden);
-        Tensor imgTokens = new Tensor(imgTokShape, DType.F32);
-        backend.Linear(imgTokens, packedLatent, _imgInWeight!, _imgInBias);
-        QwenImageDebugDump.Dump("img_in", imgTokens);
-
-        TensorShape txtNormShape = encoderHidden.Shape;
-        Tensor txtNormed = new Tensor(txtNormShape, DType.F32);
-        backend.RmsNorm(txtNormed, encoderHidden, _txtNormWeight!, 1e-6f);
-
         TensorShape txtTokShape = new TensorShape(batch, txtSeqLen, hidden);
-        Tensor txtTokens = new Tensor(txtTokShape, DType.F32);
-        backend.Linear(txtTokens, txtNormed, _txtInWeight!, _txtInBias);
-        txtNormed.Dispose();
-        QwenImageDebugDump.Dump("txt_in", txtTokens);
+        (Tensor imgTokens, Tensor txtTokens) = ForwardEmbedIn(backend, packedLatent, encoderHidden, batch, imgSeqLen, txtSeqLen);
 
         // F16 block loop (HARTSY_DIT_F16, B=1): one cast per stream before the loop — every block
         // activation follows, and all 60 SDPAs run zero-cast cuDNN F16. Streams already ride at
@@ -286,11 +284,141 @@ public sealed unsafe class QwenImageTransformer : IDisposable
             }
         }
 
-        for (int i = startBlock; i < _config.Depth; i++)
+        // A step-cache HIT set startBlock = Depth, so this range is empty and its streaming hook never fires. The
+        // controller simply keeps whatever it had prefetched (bounded by the prefetch window) and the next miss
+        // resumes from there — residency is per-block state, not a position in a sequence.
+        ForwardBlocksRange(backend, ref currentImg, ref currentTxt, temb, tembZero,
+            hPacked, wPacked, txtPositionStart, refGrids, mainSeqLen, startBlock, _config.Depth, cacheAnchor);
+
+        if (cacheAnchor is not null)
         {
-            // A step-cache HIT sets startBlock = Depth, skipping this loop and its streaming hook entirely. The
-            // controller simply keeps whatever it had prefetched (bounded by the prefetch window) and the next miss
-            // resumes from there — residency is per-block state, not a position in a sequence.
+            stepCache!.StoreResidual(backend, cacheAnchor, currentImg);
+            cacheAnchor.Dispose();
+        }
+
+        currentTxt.Dispose();
+
+        Tensor output = ForwardHeadOut(backend, currentImg, temb, batch, imgSeqLen, refSeqLen, mainSeqLen);
+        temb.Dispose();
+        tembZero?.Dispose();
+        return output;
+    }
+
+    /// <summary>DiT-sharded forward: blocks <c>[0, splitBlock)</c> on <paramref name="backendA"/> (which also owns
+    /// the shared embed/head weights), <c>[splitBlock, Depth)</c> on <paramref name="backendB"/>, with the img+txt
+    /// streams, temb, and (edit) tembZero handed across via <see cref="IBackend.CopyFromPeer"/> and the img stream
+    /// handed back for the head. VRAM pooling, not latency — the two backends run sequentially. Exclusions mirror
+    /// Krea2: no step-cache (its block-0-indicator shape doesn't compose with a fixed range boundary), no
+    /// step-graph (none exists here), no block streaming (<see cref="BeforeBlockForward"/> must be null — the
+    /// sharding preload owns block residency), F32 loop only (Qwen's F16 mode is permanently disabled at load).
+    /// Callers preload <see cref="EnumerateSharedWeights"/> + <see cref="EnumerateBlockRangeWeights"/>(0, split)
+    /// on A and <see cref="EnumerateBlockRangeWeights"/>(split, Depth) on B.</summary>
+    public Tensor ForwardSharded(IBackend backendA, IBackend backendB, Tensor packedLatent, Tensor encoderHidden,
+        float timestep, int hPacked, int wPacked, int splitBlock,
+        (int H, int W)[]? refGrids = null, bool refTimestepZero = false)
+    {
+        if (splitBlock <= 0 || splitBlock >= _blocks.Length)
+            throw new ArgumentOutOfRangeException(nameof(splitBlock),
+                $"splitBlock must be in (0, {_blocks.Length}) exclusive, got {splitBlock}.");
+        if (BeforeBlockForward is not null)
+            throw new InvalidOperationException(
+                "DiT sharding and block streaming don't compose — BeforeBlockForward must be null on the sharded path.");
+
+        int batch = (int)packedLatent.Shape[0];
+        int imgSeqLen = (int)packedLatent.Shape[1];
+        int txtSeqLen = (int)encoderHidden.Shape[1];
+        refGrids ??= [];
+        int refSeqLen = 0;
+        foreach ((int rh, int rw) in refGrids) refSeqLen += rh * rw;
+        int mainSeqLen = imgSeqLen - refSeqLen;
+        if (refSeqLen > 0 && mainSeqLen != hPacked * wPacked)
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                $"packedLatent seq {imgSeqLen} must equal main ({hPacked}x{wPacked}) + {refSeqLen} ref tokens.");
+        if (refSeqLen > 0 && batch != 1)
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                "Reference-latent (edit) tokens require batch size 1; run CFG as two batch-1 passes.");
+
+        (Tensor currentImg, Tensor currentTxt) = ForwardEmbedIn(backendA, packedLatent, encoderHidden, batch, imgSeqLen, txtSeqLen);
+        Tensor temb = ComputeTimestepEmbedding(backendA, timestep, batch);
+        Tensor? tembZero = refSeqLen > 0 && refTimestepZero
+            ? ComputeTimestepEmbedding(backendA, 0.0f, batch)
+            : null;
+        int txtPositionStart = QwenImageRope.ComputeTextPositionStart(hPacked, wPacked);
+
+        ForwardBlocksRange(backendA, ref currentImg, ref currentTxt, temb, tembZero,
+            hPacked, wPacked, txtPositionStart, refGrids, mainSeqLen, 0, splitBlock);
+
+        // Boundary A→B: both live streams plus the per-step conditioning every block reads. The streams MOVE
+        // (A's copies are dead), but temb is only COPIED — the head on A still reads it after B's range. The
+        // rope's host cos/sin tables need no copy — WanRopeInterleaved stages them fresh per call on whichever
+        // backend runs.
+        Tensor imgB = MoveAcross(backendB, backendA, currentImg);
+        Tensor txtB = MoveAcross(backendB, backendA, currentTxt);
+        Tensor tembB = CopyAcross(backendB, backendA, temb);
+        Tensor? tembZeroB = tembZero is null ? null : CopyAcross(backendB, backendA, tembZero);
+        currentImg = imgB;
+        currentTxt = txtB;
+
+        ForwardBlocksRange(backendB, ref currentImg, ref currentTxt, tembB, tembZeroB,
+            hPacked, wPacked, txtPositionStart, refGrids, mainSeqLen, splitBlock, _config.Depth);
+        currentTxt.Dispose();
+        tembB.Dispose();
+        tembZeroB?.Dispose();
+
+        // Boundary B→A: the head (norm_out/proj_out) lives in the shared weights on A.
+        Tensor imgBack = MoveAcross(backendA, backendB, currentImg);
+        currentImg = imgBack;
+
+        Tensor output = ForwardHeadOut(backendA, currentImg, temb, batch, imgSeqLen, refSeqLen, mainSeqLen);
+        temb.Dispose();
+        tembZero?.Dispose();
+        return output;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device and disposes the source.</summary>
+    private static Tensor MoveAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor moved = CopyAcross(dst, src, source);
+        source.Dispose();
+        return moved;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device; the source stays live.</summary>
+    private static Tensor CopyAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor copied = new Tensor(source.Shape, source.DType);
+        dst.CopyFromPeer(copied, source, src);
+        return copied;
+    }
+
+    /// <summary>The pre-block section of <see cref="Forward"/>: img_in Linear, txt RMSNorm + txt_in Linear.</summary>
+    private (Tensor ImgTokens, Tensor TxtTokens) ForwardEmbedIn(IBackend backend, Tensor packedLatent,
+        Tensor encoderHidden, int batch, int imgSeqLen, int txtSeqLen)
+    {
+        int hidden = _config.HiddenSize;
+        Tensor imgTokens = new Tensor(new TensorShape(batch, imgSeqLen, hidden), DType.F32);
+        backend.Linear(imgTokens, packedLatent, _imgInWeight!, _imgInBias);
+        QwenImageDebugDump.Dump("img_in", imgTokens);
+
+        Tensor txtNormed = new Tensor(encoderHidden.Shape, DType.F32);
+        backend.RmsNorm(txtNormed, encoderHidden, _txtNormWeight!, 1e-6f);
+
+        Tensor txtTokens = new Tensor(new TensorShape(batch, txtSeqLen, hidden), DType.F32);
+        backend.Linear(txtTokens, txtNormed, _txtInWeight!, _txtInBias);
+        txtNormed.Dispose();
+        QwenImageDebugDump.Dump("txt_in", txtTokens);
+        return (imgTokens, txtTokens);
+    }
+
+    /// <summary>Runs blocks <c>[startBlock, endBlock)</c>, advancing both streams in place. <paramref name="cacheAnchor"/>
+    /// (step-cache anchor, the block-0 output) is exempt from the dispose-and-swap so <see cref="Forward"/> can store
+    /// its residual after the loop; the sharded path passes null.</summary>
+    private void ForwardBlocksRange(IBackend backend, ref Tensor currentImg, ref Tensor currentTxt,
+        Tensor temb, Tensor? tembZero, int hPacked, int wPacked, int txtPositionStart,
+        (int H, int W)[] refGrids, int mainSeqLen, int startBlock, int endBlock, Tensor? cacheAnchor = null)
+    {
+        for (int i = startBlock; i < endBlock; i++)
+        {
             BeforeBlockForward?.Invoke(i);
             (Tensor newImg, Tensor newTxt) = _blocks[i].Forward(
                 backend, currentImg, currentTxt, temb, _rope,
@@ -305,19 +433,17 @@ public sealed unsafe class QwenImageTransformer : IDisposable
             QwenImageDebugDump.Dump($"block_{i}_image", currentImg);
             QwenImageDebugDump.Dump($"block_{i}_text", currentTxt);
         }
+    }
 
-        if (cacheAnchor is not null)
-        {
-            stepCache!.StoreResidual(backend, cacheAnchor, currentImg);
-            cacheAnchor.Dispose();
-        }
-
-        currentTxt.Dispose();
-
+    /// <summary>The post-block section of <see cref="Forward"/>: F16→F32 cast if the loop ran F16, AdaLN-continuous
+    /// final layer, and the edit-mode reference-row drop. Consumes <paramref name="currentImg"/>.</summary>
+    private Tensor ForwardHeadOut(IBackend backend, Tensor currentImg, Tensor temb, int batch, int imgSeqLen,
+        int refSeqLen, int mainSeqLen)
+    {
         if (currentImg.DType == DType.F16)
         {
             // Back to F32 for the final norm + proj_out (velocity precision across Euler steps).
-            Tensor imgF32 = new Tensor(imgTokShape, DType.F32);
+            Tensor imgF32 = new Tensor(new TensorShape(batch, imgSeqLen, _config.HiddenSize), DType.F32);
             backend.CastToF32(imgF32, currentImg);
             currentImg.Dispose();
             currentImg = imgF32;
@@ -326,8 +452,6 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         Tensor output = ApplyFinalLayer(backend, currentImg, temb, batch, imgSeqLen);
         QwenImageDebugDump.Dump("proj_out", output);
         currentImg.Dispose();
-        temb.Dispose();
-        tembZero?.Dispose();
 
         // Qwen-Image-Edit: drop the reference-latent rows — only the main noise tokens carry velocity
         // (upstream `hidden_states[:, :num_embeds]`, applied AFTER norm_out/proj_out; per-token final

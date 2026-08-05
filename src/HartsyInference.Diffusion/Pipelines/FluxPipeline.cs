@@ -479,6 +479,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         // resident, e.g. ~24 GB total for Flux-dev fp8 across two cards — rarely available on consumer pairs;
         // correct when it is, honestly narrow when it isn't).
         bool cfgParallelEligible = false;
+        LastCfgParallelDecision = null;
         BlockStreamingController? streamer = null;
         if (Backend.StreamingCache is not null)
         {
@@ -513,6 +514,10 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             }
             else
             {
+                if (doTrueCfg && CfgParallelBackend is not null)
+                {
+                    RecordCfgParallelDecision("fell-back(block-streaming-active)");
+                }
                 Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
                 int prefetchAhead = ChooseFluxPrefetchAhead(Backend.StreamingCache, blocks, activationReserve);
                 streamer = new BlockStreamingController(
@@ -565,6 +570,25 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             && (reduxExtendedT5 is null || reduxApplyStartFraction <= 0f);
         bool graphRoute = drainFree && !doTrueCfg && packedSourceLatent is null
             && DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
+
+        // Mirrors the per-step dispatch condition (loop-invariant), recorded once per generation so operators
+        // and tests can see which CFG-parallel path this generation actually took. The eligible=false cases
+        // (preload failure, block streaming) were already recorded where they were decided.
+        if (doTrueCfg && cfgParallelEligible)
+        {
+            if (!drainFree)
+            {
+                RecordCfgParallelDecision("fell-back(eager-path-features)");
+            }
+            else if (condTxtSeqLen != txtSeqLen)
+            {
+                RecordCfgParallelDecision("fell-back(rope-signature-mismatch)");
+            }
+            else
+            {
+                RecordCfgParallelDecision("active");
+            }
+        }
 
         // Materialize every tensor that must survive across steps on the host, then reclaim the VAE-encode /
         // packing intermediates (control, Kontext, img2img source). The per-step FreeActivations below frees
@@ -992,6 +1016,10 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     {
         if (!doTrueCfg || CfgParallelBackend is null)
         {
+            if (CfgParallelBackend is not null)
+            {
+                RecordCfgParallelDecision("inapplicable(no-true-cfg)");
+            }
             return false;
         }
         try
@@ -1003,6 +1031,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         {
             Logs.Warning($"Flux CFG-parallel: couldn't preload the DiT onto the second backend (falling back to "
                 + $"sequential true-CFG this generation): {ex.Message}");
+            RecordCfgParallelDecision($"fell-back(preload-failed: {ex.Message})");
             return false;
         }
     }

@@ -14,7 +14,6 @@ using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 using HartsyInference.ModelAssets.Tokenizers;
-using HartsyInference.Diffusion.Tests.Helpers;
 
 namespace HartsyInference.Diffusion.Tests;
 

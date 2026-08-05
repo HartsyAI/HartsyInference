@@ -14,9 +14,15 @@ public static class TestPaths
     /// <summary>Flux family checkpoint paths.</summary>
     public static class Flux
     {
-        public static string Schnell      => Resolve("FLUX_SCHNELL_PATH",      Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-schnell-fp8.safetensors"));
+        /// <summary>First existing of the legacy <c>Flux/</c> layout and the SwarmUI-managed <c>BFL/Flux1/</c> layout. Override with FLUX_SCHNELL_PATH.</summary>
+        public static string Schnell      => FirstExisting("FLUX_SCHNELL_PATH",
+            Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-schnell-fp8.safetensors"),
+            Path.Combine(ModelsDir, "Stable-Diffusion", "BFL", "Flux1", "flux1-schnell-fp8.safetensors"));
         public static string SchnellQ4KS  => Resolve("FLUX_SCHNELL_Q4KS_PATH", Path.Combine(ModelsDir, "unet", "Flux", "flux1-schnell-Q4_K_S.gguf"));
-        public static string Dev          => Resolve("FLUX_DEV_PATH",          Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-dev-fp8.safetensors"));
+        /// <summary>First existing of the legacy <c>Flux/</c> layout and the SwarmUI-managed <c>BFL/Flux1/</c> layout. Override with FLUX_DEV_PATH.</summary>
+        public static string Dev          => FirstExisting("FLUX_DEV_PATH",
+            Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-dev-fp8.safetensors"),
+            Path.Combine(ModelsDir, "Stable-Diffusion", "BFL", "Flux1", "flux1-dev-fp8-1_0-flux-1-dev-basesafetensors.safetensors"));
         public static string KreaFp8      => Resolve("FLUX_KREA_FP8_PATH",     Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-krea-dev_fp8_scaled.safetensors"));
         public static string Kontext      => Resolve("FLUX_KONTEXT_PATH",      Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-dev-kontext_fp8_scaled.safetensors"));
         public static string Canny        => Resolve("FLUX_CANNY_PATH",        Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-canny-dev.safetensors"));
@@ -61,7 +67,10 @@ public static class TestPaths
     /// <summary>SDXL paths. Assets are not bundled — tests skip when missing.</summary>
     public static class Sdxl
     {
-        public static string SingleFile   => Resolve("SDXL_SINGLE_FILE_PATH",  Path.Combine(ModelsDir, "Stable-Diffusion", "SDXL", "Juggernaut_XL_-_Ragnarok_by_RunDiffusion.safetensors"));
+        /// <summary>First existing of the Juggernaut finetune and the SDXL base checkpoint. Override with SDXL_SINGLE_FILE_PATH.</summary>
+        public static string SingleFile   => FirstExisting("SDXL_SINGLE_FILE_PATH",
+            Path.Combine(ModelsDir, "Stable-Diffusion", "SDXL", "Juggernaut_XL_-_Ragnarok_by_RunDiffusion.safetensors"),
+            Path.Combine(ModelsDir, "Stable-Diffusion", "SDXL", "sd_xl_base_1.0.safetensors"));
         public static string DiffusersDir => Resolve("SDXL_MODEL_DIR",         Path.Combine(ModelsDir, "Stable-Diffusion", "SDXL"));
     }
 
@@ -142,7 +151,10 @@ public static class TestPaths
     public static class WanVideo
     {
         public static string Ti2V5B        => Resolve("WAN22_TI2V_5B_PATH",   Path.Combine(ModelsDir, "Stable-Diffusion", "Wan", "wan2.2_ti2v_5B_fp16.safetensors"));
-        public static string VaePath       => Resolve("WAN22_VAE_PATH",       Lance.VaePath);
+        /// <summary>First existing of the Lance-staged copy and the standalone <c>VAE/Wan/</c> file. Override with WAN22_VAE_PATH.</summary>
+        public static string VaePath       => FirstExisting("WAN22_VAE_PATH",
+            Lance.VaePath,
+            Path.Combine(ModelsDir, "VAE", "Wan", "wan2.2_vae.safetensors"));
         public static string Umt5Xxl       => Resolve("UMT5_XXL_PATH",        Path.Combine(ModelsDir, "text_encoders", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"));
         public static string Umt5XxlSpiece => Tokenizers.Umt5XxlSpiece;
         /// <summary>Optional Wan LoRA applied by the generation test when present (kohya/musubi, Comfy diffusion_model, or diffusers-PEFT format).</summary>
@@ -199,6 +211,8 @@ public static class TestPaths
     public static class QwenImageEdit
     {
         public static string Gguf => Resolve("QWEN_IMAGE_EDIT_GGUF", Path.Combine(ModelsDir, "Stable-Diffusion", "QwenImageEdit", "qwen-image-edit-2511-Q5_K_M.gguf"));
+        /// <summary>Edit 2511 fp8mixed single-file (SwarmUI-managed layout). Loads through the standard Qwen-Image T2I path — the recipe defers edit-specific vision conditioning — so it doubles as the real-weight Qwen-Image transformer for sharding/placement tests.</summary>
+        public static string Edit2511Fp8 => Resolve("QWEN_IMAGE_EDIT_FP8_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "Alibaba", "QwenImage", "qwen_image_edit_2511_fp8mixed.safetensors"));
     }
 
     /// <summary>Krea 2 (12.9B single-stream MMDiT). fp8_scaled checkpoints staged as
@@ -445,6 +459,24 @@ public static class TestPaths
 
     private static string Resolve(string envVar, string fallback) =>
         Env(envVar) ?? fallback;
+
+    /// <summary>Env override wins; otherwise the first candidate that exists on disk; otherwise the first candidate (so skip-guard messages name the canonical path).</summary>
+    private static string FirstExisting(string envVar, params string[] candidates)
+    {
+        string? envOverride = Env(envVar);
+        if (envOverride is not null)
+        {
+            return envOverride;
+        }
+        foreach (string candidate in candidates)
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return candidates[0];
+    }
 
     private static string? Env(string name)
     {

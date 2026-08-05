@@ -100,14 +100,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             // same flag or it re-inflates the fp8 encoder there.
             if (HasFp8Weights(transformerWeights) || HasFp8Weights(clipLWeights) || HasFp8Weights(t5Weights))
             {
-                foreach (IBackend b in context.AllBackends)
-                {
-                    if (b is HartsyInference.Cuda.CudaBackend cudaBackend && !cudaBackend.EnableNativeFp8Gemm)
-                    {
-                        cudaBackend.CacheWeightCasts = false;
-                        Logs.Info("[Flux1Recipe] fp8 checkpoint on non-native-FP8 hardware: CacheWeightCasts disabled (fp8-resident, transient per-GEMM dequant).");
-                    }
-                }
+                RecipeBackendFlags.DisableCacheWeightCasts(context, "Flux1Recipe", onlyWithoutNativeFp8Gemm: true);
             }
 
             loraStack = LoraApplier.BuildAndApply(

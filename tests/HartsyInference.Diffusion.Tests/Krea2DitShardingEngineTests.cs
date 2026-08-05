@@ -3,7 +3,6 @@ using Xunit;
 using Xunit.Abstractions;
 using HartsyInference.Core.Backends;
 using HartsyInference.Cuda;
-using HartsyInference.Diffusion.Tests.Helpers;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
@@ -25,6 +24,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// (see <c>Helpers/Ssim.cs</c>), not the exact-equality bar <c>Krea2DitShardingTests</c> uses for its synthetic F32
 /// same-precision config.</para></summary>
 [Trait("Category", "Integration")]
+[Trait("Category", "RealWeights")]
 public sealed class Krea2DitShardingEngineTests
 {
     private readonly ITestOutputHelper _output;
@@ -38,7 +38,7 @@ public sealed class Krea2DitShardingEngineTests
 
         string turboDir = TestPaths.Krea2.TurboDir;
         string transformerFile = Path.Combine(turboDir, "krea2_turbo_fp8_scaled.safetensors");
-        if (!File.Exists(transformerFile)) { _output.WriteLine($"SKIPPED: transformer not found: {transformerFile}"); return; }
+        if (!RealWeightGate.Require(_output.WriteLine, transformerFile)) return;
 
         // Pre-flight VRAM probe on BOTH CUDA ordinals via throwaway backends — per-backend State (Phase 1A) makes
         // these safe to construct and dispose alongside whatever the InferenceEngine builds later; they never touch
@@ -133,7 +133,7 @@ public sealed class Krea2DitShardingEngineTests
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         if (CudaContext.GetDeviceCount() < 2) { _output.WriteLine("SKIPPED: needs 2 physical GPUs."); return; }
         string transformerFile = Path.Combine(TestPaths.Krea2.TurboDir, "krea2_turbo_fp8_scaled.safetensors");
-        if (!File.Exists(transformerFile)) { _output.WriteLine($"SKIPPED: transformer not found: {transformerFile}"); return; }
+        if (!RealWeightGate.Require(_output.WriteLine, transformerFile)) return;
         ModelSpec spec = ModelResolver.Resolve("krea2", modelPathArg: null, Modality.Image);
         if (spec.LocalPath is null) { _output.WriteLine("SKIPPED: krea2 checkpoint not resolvable via the catalog."); return; }
 

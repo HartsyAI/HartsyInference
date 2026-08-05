@@ -72,16 +72,7 @@ public sealed class Krea2Recipe : IArchitectureRecipe
             // that in VRAM (original fp8 + cached activation-dtype copy) and OOMs partway through text encoding —
             // same class of fix as Flux1Recipe/LtxVideoRecipe/HunyuanVideoRecipe above. Keep weights resident in
             // their checkpoint dtype with a transient per-GEMM dequant instead.
-            if (context.Backend is CudaBackend cudaBackend)
-            {
-                cudaBackend.CacheWeightCasts = false;
-                Logs.Info("[Krea2Recipe] CacheWeightCasts disabled (fp8-resident, transient per-GEMM dequant).");
-            }
-            else if (context.Backend is VulkanBackend vulkanBackend)
-            {
-                vulkanBackend.CacheWeightCasts = false;
-                Logs.Info("[Krea2Recipe] CacheWeightCasts disabled (fp8-resident, transient per-GEMM dequant).");
-            }
+            RecipeBackendFlags.DisableCacheWeightCasts(context, "Krea2Recipe");
 
             Logs.Info("[Krea2Recipe] Building Krea 2 models (single-stream MMDiT, 28 blocks, text-fusion stage).");
             Krea2Transformer transformer = new Krea2Transformer(config);

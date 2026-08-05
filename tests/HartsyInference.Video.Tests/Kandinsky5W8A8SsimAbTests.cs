@@ -376,7 +376,7 @@ public sealed unsafe class Kandinsky5W8A8SsimAbTests
     {
         double sum = 0;
         for (int i = 0; i < a.Length; i++)
-            sum += Helpers.Ssim.Compute(a[i], b[i], width, height);
+            sum += global::HartsyInference.Tests.Common.Ssim.Compute(a[i], b[i], width, height);
         return sum / a.Length;
     }
 

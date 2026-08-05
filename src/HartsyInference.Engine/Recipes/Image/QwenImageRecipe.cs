@@ -1,5 +1,6 @@
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Placement;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
@@ -70,6 +71,38 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             // transformer to F32.
             transformer.LoadWeights(converted.Transformer);
 
+            // fp8 single-file checkpoints (the Edit-2511 fp8mixed) on hardware without native FP8 GEMM cast each
+            // fp8 weight to F16 on first use; caching those casts roughly doubles VRAM — fatal for the sharded
+            // 3060 half. Same rule as Flux1Recipe: native-FP8 cards keep the cache. GGUF-quantized checkpoints
+            // (the usual Qwen-Image path) never hit this — quantized GEMM reads blocks directly.
+            bool hasFp8 = false;
+            foreach (Tensor t in converted.Transformer.Values)
+            {
+                if (t.DType.IsFp8) { hasFp8 = true; break; }
+            }
+            if (hasFp8)
+            {
+                RecipeBackendFlags.DisableCacheWeightCasts(context, "QwenImageRecipe", onlyWithoutNativeFp8Gemm: true);
+            }
+
+            // DiT sharding split point — computed here, not in InferenceEngine, because block count and live
+            // free VRAM are only known once the transformer weights are loaded. Qwen's 60 blocks are homogeneous,
+            // so the count-proportional plan is already byte-accurate.
+            int ditShardSplitBlock = 0;
+            if (context.DitShardBackend is not null)
+            {
+                long sharedWeightBytes = 0;
+                foreach (Tensor t in transformer.EnumerateSharedWeights())
+                {
+                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
+                }
+                (long freeA, _) = context.Backend.GetVramInfo();
+                (long freeB, _) = context.DitShardBackend.GetVramInfo();
+                ditShardSplitBlock = PlacementPlanner.DitSplitPlan(freeA, freeB, transformer.BlockCount, sharedWeightBytes);
+                Logs.Info($"[QwenImageRecipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
+                    + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
+            }
+
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_7B);
             if (converted.TextEncoder.Count > 0)
             {
@@ -107,7 +140,13 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
                 Logs.Info("[QwenImageRecipe] Qwen-Image VAE resolved as side model.");
             }
 
-            QwenImagePipeline pipeline = new QwenImagePipeline(context.Backend, textEncoder, transformer, vae, vaeEncoder, config);
+            QwenImagePipeline pipeline = new QwenImagePipeline(context.Backend, textEncoder, transformer, vae, vaeEncoder, config)
+            {
+                TextEncoderBackend = context.TextEncoderBackendOrDefault,
+                VaeBackend = context.VaeBackendOrDefault,
+                DitShardBackend = context.DitShardBackend,
+                DitShardSplitBlock = ditShardSplitBlock,
+            };
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             Logs.Info("[QwenImageRecipe] Qwen-Image ready (Qwen2.5-VL-7B encoder; flow-match Euler, dynamic shift).");
             return new QwenImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, loaders, ggufHandle);

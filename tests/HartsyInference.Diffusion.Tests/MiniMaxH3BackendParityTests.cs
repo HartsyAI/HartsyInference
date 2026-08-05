@@ -203,12 +203,14 @@ public unsafe class MiniMaxH3BackendParityTests
         return Math.Sqrt(s / t.ElementCount);
     }
 
-    /// <summary>The CPU reference is always F32 (CpuBackend is F32-only), so the bf16 case measures the residual
-    /// stream's own rounding, not backend disagreement.</summary>
+    /// <summary>The CPU reference is always F32 (CpuBackend is F32-only), so the 16-bit cases measure the residual
+    /// stream's own rounding, not backend disagreement. F16 is the dtype the CUDA recipe actually ships — the native
+    /// fp8 GEMM guard rejects BF16, so a BF16 stream falls off the tensor-core path.</summary>
     [Theory]
-    [InlineData(false, 5e-3)]
-    [InlineData(true, 1.5e-2)]
-    public void CudaForwardMatchesTheCpuReferencePath(bool bf16Body, double tolerance)
+    [InlineData("f32", 5e-3)]
+    [InlineData("bf16", 1.5e-2)]
+    [InlineData("f16", 1.5e-2)]
+    public void CudaForwardMatchesTheCpuReferencePath(string bodyDType, double tolerance)
     {
         if (!Directory.Exists(PtxDir()))
         {
@@ -247,7 +249,10 @@ public unsafe class MiniMaxH3BackendParityTests
         Tensor videoGpu, audioGpu;
         long forwardSyncs;
         using (IBackend gpu = new CudaBackend(deviceOrdinal: 0, ptxDir: PtxDir()))
-        using (MiniMaxH3Transformer dit = new MiniMaxH3Transformer(c) { BodyDType = bf16Body ? DType.BF16 : DType.F32 })
+        using (MiniMaxH3Transformer dit = new MiniMaxH3Transformer(c)
+        {
+            BodyDType = bodyDType switch { "bf16" => DType.BF16, "f16" => DType.F16, _ => DType.F32 },
+        })
         {
             dit.LoadWeights(CopyWeights(weights));
             gpu.ResetD2hSyncCount();

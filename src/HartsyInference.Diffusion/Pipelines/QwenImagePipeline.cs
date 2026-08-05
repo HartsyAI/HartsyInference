@@ -170,6 +170,13 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         GuidanceInterval cfgInterval = GuidanceInterval.FromEnvironment();
         (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
             StepCacheEnv.Resolve(CalibratedStepCache);
+        if (stepCacheThreshold > 0f && DitShardBackend is not null)
+        {
+            // Same exclusion as Krea2: the step cache's block-0-as-indicator + variable per-step topology
+            // doesn't compose with a fixed block-range boundary.
+            Logs.Warning("Step cache requested but DiT sharding is active — running uncached.");
+            stepCacheThreshold = 0f;
+        }
         DeviceFeatureCache? condCache = null;
         DeviceFeatureCache? uncondCache = null;
         if (stepCacheThreshold > 0f)
@@ -250,10 +257,13 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             // new-prompt generation and re-preload below. The vision tower is staged with the language
             // tower on the vision path (and freed with it below) — the double encode (cond + uncond) would
             // otherwise auto-promote its weights into the resident cache, permanently shrinking the DiT budget.
-            EvictResidentTransformer("text-encode phase");
-            Backend.PreloadWeights(_textEncoder.EnumerateWeights());
+            // With the TE placed on its own GPU the DiT never contends with it — skipping this evict (plus the
+            // re-upload it forces) IS the placement win, not just a receiver rename.
+            if (ReferenceEquals(TextEncoderBackend, Backend))
+                EvictResidentTransformer("text-encode phase");
+            TextEncoderBackend.PreloadWeights(_textEncoder.EnumerateWeights());
             if (visionEncode)
-                Backend.PreloadWeights(_multimodalEncoder!.EnumerateVisionWeights());
+                TextEncoderBackend.PreloadWeights(_multimodalEncoder!.EnumerateVisionWeights());
             List<Tensor> visionFallbacks = new();
             Tensor[] visionImages = [];
             if (visionEncode)
@@ -278,8 +288,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             }
 
             condHidden = visionEncode
-                ? _multimodalEncoder!.Encode(Backend, promptTokenIds, visionImages)
-                : _textEncoder.Encode(Backend, [promptTokenIds]);
+                ? _multimodalEncoder!.Encode(TextEncoderBackend, promptTokenIds, visionImages)
+                : _textEncoder.Encode(TextEncoderBackend, [promptTokenIds]);
             if (promptDropIndex > 0)
             {
                 Tensor trimmed = DropPrefixHiddenStates(condHidden, promptDropIndex);
@@ -292,8 +302,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                 bool negVision = visionEncode
                     && Array.IndexOf(negativeTokenIds, Qwen25VlMultimodalEncoder.ImageTokenId) >= 0;
                 uncondHidden = negVision
-                    ? _multimodalEncoder!.Encode(Backend, negativeTokenIds, visionImages)
-                    : _textEncoder.Encode(Backend, [negativeTokenIds]);
+                    ? _multimodalEncoder!.Encode(TextEncoderBackend, negativeTokenIds, visionImages)
+                    : _textEncoder.Encode(TextEncoderBackend, [negativeTokenIds]);
                 if (negativeDropIndex > 0)
                 {
                     Tensor trimmed = DropPrefixHiddenStates(uncondHidden, negativeDropIndex);
@@ -306,18 +316,20 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
             Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (txt seqLen={condHidden.Shape[1]})");
 
-            Backend.FreeWeights(_textEncoder.EnumerateWeights());
+            TextEncoderBackend.FreeWeights(_textEncoder.EnumerateWeights());
             if (visionEncode)
-                Backend.FreeWeights(_multimodalEncoder!.EnumerateVisionWeights());
+                TextEncoderBackend.FreeWeights(_multimodalEncoder!.EnumerateVisionWeights());
 
             // Materialize the conditioning on the host, then reclaim every encoder intermediate. The Qwen2.5-VL
             // encoder leaves hundreds of device-cached activations that otherwise linger until GC finalization —
             // they'd hold multi-GB into the DiT phase. condHidden/uncondHidden may still be live GPU activations
             // (the drop-index path already copied them on the host, the raw path did not); touching DataPointer
             // forces the D2H sync + cache eviction, making them safe across the FreeActivations calls below.
+            // LOAD-BEARING for TextEncoderDevice placement: this host sweep is what lets the denoise loop on
+            // Backend consume conditioning produced on a different GPU.
             _ = condHidden.DataPointer;
             if (uncondHidden is not null) _ = uncondHidden.DataPointer;
-            Backend.FreeActivations();
+            TextEncoderBackend.FreeActivations();
 
             _cachedCond?.Dispose();
             _cachedCond = condHidden;
@@ -348,7 +360,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // at sigma[startStep]. Masked inpaint keeps the packed source + packed mask for per-step blend.
         // A prompt-cache hit skips the TE phase's DiT eviction, so under KEEP_MODELS the DiT can still be
         // resident here — the source VAE encode cannot run beside it (see EvictResidentTransformer).
-        if (isImg2Img)
+        if (isImg2Img && ReferenceEquals(VaeBackend, Backend))
             EvictResidentTransformer("img2img source VAE encode");
         (Tensor packedLatent, Tensor? packedSourceLatent) =
             BuildInitialPackedLatent(request, scheduler, latentShape, packedShape, latentH, latentW, seed, startStep, keepSourceLatent: isMaskedInpaint);
@@ -382,11 +394,14 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             else
             {
                 // Same-prompt edit re-runs reach here with the DiT still resident (the prompt cache skipped
-                // the TE phase and its eviction); the reference VAE encode cannot run beside it.
-                EvictResidentTransformer("edit-reference VAE encode");
+                // the TE phase and its eviction); the reference VAE encode cannot run beside it — unless the
+                // VAE has its own GPU, in which case the DiT never contends and the evict would only waste a
+                // re-upload.
+                if (ReferenceEquals(VaeBackend, Backend))
+                    EvictResidentTransformer("edit-reference VAE encode");
                 // Stage the encoder weights for the encode only: multi-ref runs the encoder once per image,
                 // and the second pass would auto-promote its weights into the resident cache for good.
-                Backend.PreloadWeights(_vaeEncoder!.EnumerateWeights());
+                VaeBackend.PreloadWeights(_vaeEncoder!.EnumerateWeights());
                 Stopwatch refSw = Stopwatch.StartNew();
                 List<Tensor> packedRefs = new(editRefImages.Count);
                 refGrids = new (int, int)[editRefImages.Count];
@@ -397,7 +412,9 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                     int refLatentH = (int)editRef.Shape[2] / 8;
                     int refLatentW = (int)editRef.Shape[3] / 8;
                     refGrids[r] = (refLatentH / _config.PatchSize, refLatentW / _config.PatchSize);
-                    Tensor refUnpacked = _vaeEncoder!.Encode(Backend, editRef);
+                    // LOAD-BEARING for VaeDevice placement: PackLatent is a host loop over refUnpacked.DataPointer,
+                    // so the encode output crosses to the host before anything on Backend consumes it.
+                    Tensor refUnpacked = _vaeEncoder!.Encode(VaeBackend, editRef);
                     Tensor packedRef = PackLatent(refUnpacked, refLatentH, refLatentW, _config.InChannels, _config.PatchSize);
                     refUnpacked.Dispose();
                     packedRefs.Add(packedRef);
@@ -421,13 +438,15 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                     }
                 }
                 refSw.Stop();
-                Backend.FreeWeights(_vaeEncoder.EnumerateWeights());
+                VaeBackend.FreeWeights(_vaeEncoder.EnumerateWeights());
                 Logs.Info($"Qwen-Image-Edit references encoded in {refSw.ElapsedMilliseconds}ms: " +
                     $"{editRefImages.Count} image(s), {totalRefTokens} ref tokens.");
 
                 // Replace the single-slot cache. Evict the old pin BEFORE disposing: the weight cache is
                 // keyed on the tensor object, and disposing a still-registered pin would leak its device
-                // allocation into every later gen.
+                // allocation into every later gen. PIN OWNER = Backend (the denoise-phase PreloadWeights
+                // below), NOT VaeBackend — this free must stay on Backend even though it sits inside the
+                // VAE-encode block, or a split-VAE run turns it into a silent no-op that leaks the old pin.
                 if (_cachedPackedRef is not null)
                 {
                     Backend.FreeWeights(new[] { _cachedPackedRef });
@@ -455,7 +474,23 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // OOM'd here after uploading 1,675 weights (measured 2026-07-27, card at 0.5% free). Block streaming gives it
         // the same graceful degradation Flux has had.
         BlockStreamingController? streamer = null;
-        if (Backend.StreamingCache is not null)
+        if (DitShardBackend is not null)
+        {
+            // Sharding beats streaming: the pooled two-card VRAM makes both split ranges resident, which is
+            // strictly better than sliding-window re-uploads. Asymmetric preload — shared + [0, split) on the
+            // primary, ONLY [split, BlockCount) on the shard backend; EnumerateWeights() on both would
+            // replicate instead of pool.
+            if (Backend.StreamingCache is not null)
+                Logs.Info("QwenImage: DiT sharding overrides low-VRAM block streaming for this generation.");
+            if (!_ditResident)
+            {
+                Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+                Backend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+                DitShardBackend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+            }
+            _ditResident = true;
+        }
+        else if (Backend.StreamingCache is not null)
         {
             IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
@@ -555,10 +590,10 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
             if (drainFree)
             {
-                Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepCondCache);
+                Tensor condPred = RunForward(transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepCondCache);
                 if (cfgThisStep)
                 {
-                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepUncondCache);
+                    Tensor uncondPred = RunForward(transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepUncondCache);
                     Backend.CfgEulerStep(packedLatent, condPred, uncondPred, cfgScale, scheduler.Dt(i));
                     uncondPred.Dispose();
                 }
@@ -574,15 +609,15 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                 Tensor noisePred;
                 if (cfgThisStep)
                 {
-                    Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepCondCache);
-                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepUncondCache);
+                    Tensor condPred = RunForward(transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepCondCache);
+                    Tensor uncondPred = RunForward(transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepUncondCache);
                     noisePred = CfgHelper.ApplyCfg(uncondPred, condPred, cfgScale);
                     uncondPred.Dispose();
                     condPred.Dispose();
                 }
                 else
                 {
-                    noisePred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepCondCache);
+                    noisePred = RunForward(transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepCondCache);
                 }
                 if (transformerInput != packedLatent) transformerInput.Dispose();
 
@@ -655,6 +690,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         QwenImageTransformer.DumpFinalLatent(packedLatent);
 
         Backend.Sync();
+        DitShardBackend?.Sync();
         if (streamer is not null)
         {
             // Streamed path always tears down regardless of KEEP_MODELS: nothing was fully resident to keep, and the
@@ -668,8 +704,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         }
         else if (!KeepModelsResident)
         {
-            Backend.FreeWeights(_transformer.EnumerateWeights());
-            _ditResident = false;
+            FreeTransformerWeights();
         }
 
         Tensor unpacked = UnpackLatent(packedLatent, latentH, latentW, _config.InChannels, _config.PatchSize);
@@ -687,7 +722,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // the resident DiT leaves less than that, evict it — the next generation's re-upload is strictly
         // cheaper than OOM-ing the decode (a 19 GB fp8 DiT + 1024² decode do NOT fit together on 24 GB).
         // Cards with real headroom keep residency; non-CUDA backends have no streaming cache and skip this.
-        if (_ditResident && Backend.StreamingCache is not null)
+        if (_ditResident && Backend.StreamingCache is not null && ReferenceEquals(VaeBackend, Backend))
         {
             long decodeReserveBytes = (long)width * height * 5120L;
             VramPlanner decodePlanner = new VramPlanner(Backend.StreamingCache, "QwenImage", Backend);
@@ -701,10 +736,12 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // QwenImageVaeDecoder.Decode → UndoScaling, so we pass the unpacked latent directly (no scalar
         // shift/scale here — VaeConfig.QwenImage's scale=1/shift=0 made the old ApplyVaeShiftScale a no-op
         // anyway, and it skipped the real per-channel step).
-        Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
+        // LOAD-BEARING for VaeDevice placement: `unpacked` is host-resident (UnpackLatent is a host loop),
+        // so the decode backend uploads a valid copy wherever it lives.
+        VaeBackend.PreloadWeights(_vaeDecoder.EnumerateWeights());
         Logs.Info("Decoding latents to image (QwenImage 3D-causal VAE)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.Decode(Backend, unpacked);
+        Tensor image = _vaeDecoder.Decode(VaeBackend, unpacked);
         unpacked.Dispose();
         vaeSw.Stop();
         Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -721,7 +758,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
         // Final reclaim: in a long-lived host (SwarmUI), VAE-decode intermediates otherwise sit in device
         // memory until GC finalization and shrink the budget of whatever generation runs next.
-        Backend.FreeActivations();
+        VaeBackend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"Qwen-Image {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
@@ -729,13 +766,41 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
+    /// <summary>Routes the per-step forward to <see cref="QwenImageTransformer.ForwardSharded"/> when DiT sharding
+    /// is configured (which never takes a step cache — the pipeline already suppressed it) and the plain
+    /// <see cref="QwenImageTransformer.Forward"/> otherwise, keeping the denoise-loop body identical either way.</summary>
+    private Tensor RunForward(Tensor input, Tensor hidden, float normalizedT, int hPacked, int wPacked,
+        (int H, int W)[]? refGrids, bool refTimestepZero, DeviceFeatureCache? stepCache) =>
+        DitShardBackend is not null
+            ? _transformer.ForwardSharded(Backend, DitShardBackend, input, hidden, normalizedT, hPacked, wPacked,
+                DitShardSplitBlock, refGrids, refTimestepZero)
+            : _transformer.Forward(Backend, input, hidden, normalizedT, hPacked, wPacked, refGrids, refTimestepZero, stepCache);
+
     /// <summary>Evicts the KEEP_MODELS-resident DiT so a VRAM-heavy phase (TE encode, reference/img2img VAE encode) has headroom; the denoise-loop PreloadWeights restores residency (PreloadWeights/FreeWeights symmetry). No-op when not resident.</summary>
     private void EvictResidentTransformer(string reason)
     {
         if (!_ditResident) return;
         Logs.Debug($"[QwenImage] evicting resident DiT for {reason}");
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
+        DitShardBackend?.Sync();
+        FreeTransformerWeights();
+    }
+
+    /// <summary>Frees the DiT weights on whichever backend(s) hold them — the mirror of the sharded asymmetric
+    /// preload. The unsharded <c>FreeWeights(EnumerateWeights())</c> would silently no-op on the shard backend's
+    /// block range (frees are per-backend) and leak it every non-resident generation.</summary>
+    private void FreeTransformerWeights()
+    {
+        if (DitShardBackend is not null)
+        {
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+        }
+        else
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+        }
         _ditResident = false;
     }
 
@@ -744,6 +809,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     {
         if (_cachedPackedRef is not null)
         {
+            // PIN OWNER = Backend (denoise-phase pin) — keep this free on Backend under VaeDevice placement.
             Backend.FreeWeights(new[] { _cachedPackedRef });
             _cachedPackedRef.Dispose();
             _cachedPackedRef = null;
@@ -773,12 +839,13 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (request is ImageToImageRequest img2img)
         {
             // Stage the encoder weights for this one encode — an unstaged pass auto-promotes them into the
-            // resident weight cache on repeat gens and permanently shrinks the DiT budget.
-            Backend.PreloadWeights(_vaeEncoder!.EnumerateWeights());
+            // resident weight cache on repeat gens and permanently shrinks the DiT budget. LOAD-BEARING for
+            // VaeDevice placement: PackLatent below is a host loop, so the encode output crosses to the host.
+            VaeBackend.PreloadWeights(_vaeEncoder!.EnumerateWeights());
             Stopwatch vaeEncSw = Stopwatch.StartNew();
-            Tensor sourceUnpacked = _vaeEncoder.Encode(Backend, img2img.SourceImage);  // [1, 16, latentH, latentW]
+            Tensor sourceUnpacked = _vaeEncoder.Encode(VaeBackend, img2img.SourceImage);  // [1, 16, latentH, latentW]
             vaeEncSw.Stop();
-            Backend.FreeWeights(_vaeEncoder.EnumerateWeights());
+            VaeBackend.FreeWeights(_vaeEncoder.EnumerateWeights());
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
             Tensor sourcePacked = PackLatent(sourceUnpacked, latentH, latentW, _config.InChannels, _config.PatchSize);

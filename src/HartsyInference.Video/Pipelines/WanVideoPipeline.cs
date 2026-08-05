@@ -213,8 +213,29 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // weight tensors safe (see CfgBranchRunner's doc comment). Only this loop opts in — the CLIP-I2V and
         // video-to-video loops below stay sequential.
         bool cfgParallelEnabled = CfgParallelBackend is not null && _transformer2 is null;
+        LastCfgParallelDecision = null;
+        if (CfgParallelBackend is not null && _transformer2 is not null)
+        {
+            RecordCfgParallelDecision("fell-back(moe-two-expert)");
+        }
         if (_transformer2 is null) Backend.PreloadWeights(_transformer.EnumerateWeights());
-        if (cfgParallelEnabled) CfgParallelBackend!.PreloadWeights(_transformer.EnumerateWeights());
+        if (cfgParallelEnabled)
+        {
+            // Replicating ~the whole DiT on the second card can genuinely not fit (TI2V-5B fp16 needs ~10 GB
+            // per backend); a failed preload must degrade to sequential CFG, not kill the generation.
+            try
+            {
+                CfgParallelBackend!.PreloadWeights(_transformer.EnumerateWeights());
+                RecordCfgParallelDecision("active");
+            }
+            catch (Exception ex)
+            {
+                Logs.Warning($"Wan CFG-parallel: couldn't preload the DiT onto the second backend (falling back "
+                    + $"to sequential CFG this generation): {ex.Message}");
+                RecordCfgParallelDecision($"fell-back(preload-failed: {ex.Message})");
+                cfgParallelEnabled = false;
+            }
+        }
         // MoE (A14B): SwapToExpert in the loop keeps only the active expert resident (2×14 GB won't co-reside in 24 GB).
         // T2V/TI2V denoise in VAE-latent space; the latent channel count is the VAE z, not the (possibly larger,
         // I2V-concat) transformer in_channels.

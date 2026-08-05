@@ -7,7 +7,6 @@ using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Tests.Common;
-using HartsyInference.Diffusion.Tests.Helpers;
 
 namespace HartsyInference.Diffusion.Tests;
 

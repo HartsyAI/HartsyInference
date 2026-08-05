@@ -576,7 +576,7 @@ public sealed class SeedVr2Tests
                     refRgb[i * 3 + c] = (byte)Math.Clamp(MathF.Round(v), 0f, 255f);
                 }
             }
-            double ssim = Helpers.Ssim.Compute(restored[f], refRgb, outW, outH);
+            double ssim = global::HartsyInference.Tests.Common.Ssim.Compute(restored[f], refRgb, outW, outH);
             double mse = 0;
             for (int i = 0; i < refRgb.Length; i++)
             {

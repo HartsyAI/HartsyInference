@@ -163,6 +163,60 @@ public static class PlacementPlanner
         return counts[0];
     }
 
+    /// <summary>Byte-weighted variant of <see cref="DitSplitPlan(long,long,int,long)"/> for heterogeneous-block DiTs
+    /// (Chroma/HunyuanImage/Flux double blocks are ~2× their single blocks — a count-proportional split misallocates
+    /// by GBs there). Picks the split point whose stage-A byte load best matches A's share of usable VRAM via a
+    /// prefix-sum walk over <paramref name="perBlockBytes"/>. Same contract: blocks <c>[0, result)</c> on A,
+    /// <c>[result, count)</c> on B, result guaranteed in <c>[1, count-1]</c>.</summary>
+    public static int DitSplitPlan(long freeBytesA, long freeBytesB, IReadOnlyList<long> perBlockBytes, long sharedWeightBytesA)
+    {
+        ArgumentNullException.ThrowIfNull(perBlockBytes);
+        int blockCount = perBlockBytes.Count;
+        if (blockCount < 2)
+        {
+            throw new ArgumentException("DiT sharding needs at least 2 blocks to split.", nameof(perBlockBytes));
+        }
+
+        double budgetA = Math.Max(0, freeBytesA - PerDeviceReserveBytes - sharedWeightBytesA);
+        double budgetB = Math.Max(0, freeBytesB - PerDeviceReserveBytes);
+        double totalBudget = budgetA + budgetB;
+        long totalBytes = 0;
+        foreach (long bytes in perBlockBytes)
+        {
+            totalBytes += bytes;
+        }
+        if (totalBudget <= 0)
+        {
+            Logs.Warning("[Placement] No usable VRAM signal for the DiT block split — falling back to an even byte split.");
+            budgetA = budgetB = 1;
+            totalBudget = 2;
+        }
+
+        double targetA = totalBytes * (budgetA / totalBudget);
+        int bestSplit = 1;
+        double bestDistance = double.MaxValue;
+        long prefix = 0;
+        for (int split = 1; split <= blockCount - 1; split++)
+        {
+            prefix += perBlockBytes[split - 1];
+            double distance = Math.Abs(prefix - targetA);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestSplit = split;
+            }
+        }
+
+        long bytesA = 0;
+        for (int i = 0; i < bestSplit; i++)
+        {
+            bytesA += perBlockBytes[i];
+        }
+        Logs.Info($"[Placement] DiT block split ({blockCount} blocks, {totalBytes >> 20} MB): "
+            + $"A=[0,{bestSplit}) {bytesA >> 20} MB, B=[{bestSplit},{blockCount}) {(totalBytes - bytesA) >> 20} MB");
+        return bestSplit;
+    }
+
     /// <summary>Rejects <see cref="PlacementConfig"/> combinations that were never designed to compose. Called at
     /// every point a placement takes effect (construction and <c>InferenceEngine.SetPlacement</c>) so an invalid
     /// config fails fast instead of misbehaving silently at generation time.</summary>
@@ -175,8 +229,8 @@ public static class PlacementPlanner
         if (placement.ShardDevices.Count != 2)
         {
             throw new ArgumentException(
-                $"EnableDitSharding requires exactly 2 ShardDevices (the block-range split needs a backendA/backendB "
-                + $"pair — see Krea2Transformer.ForwardSharded), got {placement.ShardDevices.Count}.", nameof(placement));
+                $"EnableDitSharding requires exactly 2 ShardDevices (the transformer's ForwardSharded block-range "
+                + $"split needs a backendA/backendB pair), got {placement.ShardDevices.Count}.", nameof(placement));
         }
         if (placement.CfgParallelDevice is not null)
         {

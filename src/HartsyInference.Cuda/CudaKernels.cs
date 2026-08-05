@@ -260,6 +260,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditUnpatchifyF32;
     private readonly nint _ditTanhF32;
     private readonly nint _ditRopeF32;
+    private readonly nint _ditRopeHeadMajorF32;
     private readonly nint _ltx2SplitRopeF32;
     private readonly nint _ditSliceLastDimF32;
     private readonly nint _ditRowScaleF32;
@@ -283,6 +284,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditConcat2F32;
     private readonly nint _ditLayerNormModulateF32;
     private readonly nint _ditQkvSplitNormF32;
+    private readonly nint _ditQkvSplitNormHeadMajorF32;
     private readonly nint _fourierEmbedF32;
     private readonly nint _conv3dF32;
     private readonly nint _sparseScatterToGridF32;
@@ -306,11 +308,13 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditConcat2F16;
     private readonly nint _ditLayerNormModulateF16;
     private readonly nint _ditQkvSplitNormF16;
+    private readonly nint _ditQkvSplitNormHeadMajorF16;
     private readonly nint _ditRepeatKvF16;
     private readonly nint _ditSliceRowsF16;
     private readonly nint _ditChwToHwcU8;
     private readonly nint _ditAffineBroadcastRowIndexedF16;
     private readonly nint _ditGatedResidualRowIndexedF16;
+    private readonly nint _ditGluActF16;
 
     // ── DiT glue function handles (BF16 — DiT BF16 activation path) ────
     private readonly CudaModule _ditBf16Module;
@@ -626,6 +630,7 @@ public sealed class CudaKernels : IDisposable
         _ditUnpatchifyF32 = _ditF32Module.GetFunction("dit_unpatchify_f32");
         _ditTanhF32 = _ditF32Module.GetFunction("dit_tanh_f32");
         _ditRopeF32 = _ditF32Module.GetFunction("dit_rope_f32");
+        _ditRopeHeadMajorF32 = _ditF32Module.GetFunction("dit_rope_head_major_f32");
         _ltx2SplitRopeF32 = _ditF32Module.GetFunction("ltx2_split_rope_f32");
         _ditSliceLastDimF32 = _ditF32Module.GetFunction("dit_slice_lastdim_f32");
         _ditRowScaleF32 = _ditF32Module.GetFunction("dit_row_scale_f32");
@@ -649,6 +654,7 @@ public sealed class CudaKernels : IDisposable
         _ditConcat2F32 = _ditF32Module.GetFunction("dit_concat2_f32");
         _ditLayerNormModulateF32 = _ditF32Module.GetFunction("dit_layernorm_modulate_f32");
         _ditQkvSplitNormF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_f32");
+        _ditQkvSplitNormHeadMajorF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_head_major_f32");
         _fourierEmbedF32 = _ditF32Module.GetFunction("fourier_embed_f32");
         _conv3dF32 = _ditF32Module.GetFunction("conv3d_f32");
         _sparseScatterToGridF32 = _ditF32Module.GetFunction("sparse_scatter_to_grid_f32");
@@ -679,11 +685,13 @@ public sealed class CudaKernels : IDisposable
         _ditConcat2F16 = _ditF16Module.GetFunction("dit_concat2_f16");
         _ditLayerNormModulateF16 = _ditF16Module.GetFunction("dit_layernorm_modulate_f16");
         _ditQkvSplitNormF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_f16");
+        _ditQkvSplitNormHeadMajorF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_head_major_f16");
         _ditRepeatKvF16 = _ditF16Module.GetFunction("dit_repeat_kv_f16");
         _ditSliceRowsF16 = _ditF16Module.GetFunction("dit_slice_rows_f16");
         _ditChwToHwcU8 = _ditF16Module.GetFunction("dit_chw_f32_to_hwc_u8");
         _ditAffineBroadcastRowIndexedF16 = _ditF16Module.GetFunction("dit_affine_broadcast_rowindexed_f16");
         _ditGatedResidualRowIndexedF16 = _ditF16Module.GetFunction("dit_gated_residual_rowindexed_f16");
+        _ditGluActF16 = _ditF16Module.GetFunction("dit_glu_act_f16");
 
         // ── DiT glue (BF16 I/O, F32 accumulate) — DiT BF16 activation path ─
         _ditBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dit_bf16.ptx"));
@@ -2323,6 +2331,10 @@ public sealed class CudaKernels : IDisposable
     public unsafe void LaunchGluActBf16(ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)
         => LaunchGluActImpl(_ditGluActBf16, comb, gateUp, rows, ff, gelu, stream);
 
+    /// <summary>Gated-FFN activation epilogue with F16 I/O (F32 compute). Same launch geometry as the F32 kernel.</summary>
+    public unsafe void LaunchGluActF16(ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)
+        => LaunchGluActImpl(_ditGluActF16, comb, gateUp, rows, ff, gelu, stream);
+
     private unsafe void LaunchGluActImpl(nint func, ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)
     {
         ulong combA = comb, guA = gateUp;
@@ -2640,6 +2652,32 @@ public sealed class CudaKernels : IDisposable
     public void LaunchRopeF16(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream, int rotaryDim = 0)
         => LaunchRopeImpl(_ditRopeF16, x, cos, sin, numHeads, headDim, totalVecs, rotaryDim, stream);
 
+    /// <summary>Launches in-place rotary embedding on head-major x [B,heads,seq,headDim]; cos/sin stay [B,seq,headDim].</summary>
+    public unsafe void LaunchRopeHeadMajor(ulong x, ulong cos, ulong sin, int heads, int headDim, int seq,
+        long totalVecs, nint stream, int rotaryDim = 0)
+    {
+        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
+        ulong xArg = x, cosArg = cos, sinArg = sin;
+        uint headsArg = (uint)heads, headDimArg = (uint)headDim, rotArg = (uint)rdim, seqArg = (uint)seq;
+        ulong vecsArg = (ulong)totalVecs;
+
+        void** args = stackalloc void*[8];
+        args[0] = &xArg;
+        args[1] = &cosArg;
+        args[2] = &sinArg;
+        args[3] = &headsArg;
+        args[4] = &headDimArg;
+        args[5] = &vecsArg;
+        args[6] = &rotArg;
+        args[7] = &seqArg;
+
+        long threads = totalVecs * (rdim / 2);
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            _ditRopeHeadMajorF32, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Launches in-place interleaved (GPT-J) rotary embedding on x [B,L,numHeads,headDim];
     /// cos/sin [B,L,headDim]. Rotates adjacent pairs (2i,2i+1) by frequency i (not the split-half convention).
     /// <paramref name="rotaryDim"/> 0 (or &gt;=headDim) rotates every pair (full rotary); otherwise only pairs
@@ -2914,6 +2952,21 @@ public sealed class CudaKernels : IDisposable
         uint grid = (uint)((long)tokens * heads);
         uint sharedMem = (uint)headDim * sizeof(float);
         CudaDriverApi.cuLaunchKernel(f16 ? _ditQkvSplitNormF16 : _ditQkvSplitNormF32,
+            grid, 1, 1, (uint)headDim, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Head-major twin of <see cref="LaunchQkvSplitNorm"/>: q/k/v come out as [batch, heads, seq, headDim].</summary>
+    public unsafe void LaunchQkvSplitNormHeadMajor(bool f16, ulong q, ulong k, ulong v, ulong qkv, ulong qW, ulong kW,
+        int tokens, int heads, int headDim, int seq, float eps, nint stream)
+    {
+        ulong qArg = q, kArg = k, vArg = v, qkvArg = qkv, qwArg = qW, kwArg = kW;
+        uint tArg = (uint)tokens, hArg = (uint)heads, hdArg = (uint)headDim, sArg = (uint)seq; float epsArg = eps;
+        void** args = stackalloc void*[11];
+        args[0] = &qArg; args[1] = &kArg; args[2] = &vArg; args[3] = &qkvArg; args[4] = &qwArg; args[5] = &kwArg;
+        args[6] = &tArg; args[7] = &hArg; args[8] = &hdArg; args[9] = &sArg; args[10] = &epsArg;
+        uint grid = (uint)((long)tokens * heads);
+        uint sharedMem = (uint)headDim * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(f16 ? _ditQkvSplitNormHeadMajorF16 : _ditQkvSplitNormHeadMajorF32,
             grid, 1, 1, (uint)headDim, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 

@@ -440,4 +440,65 @@ __global__ void dit_qkv_split_norm_f16(
     v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
 }
 
+// Head-major twin (F16 activation I/O, F32 weights + accumulate). See dit_qkv_split_norm_head_major_f32.
+__global__ void dit_qkv_split_norm_head_major_f16(
+    __half* __restrict__ q, __half* __restrict__ k, __half* __restrict__ v,
+    const __half* __restrict__ qkv, const float* __restrict__ qW, const float* __restrict__ kW,
+    unsigned int tokens, unsigned int heads, unsigned int headDim, unsigned int seq, float eps)
+{
+    extern __shared__ float sred[];
+    unsigned long long g = (unsigned long long)blockIdx.x;
+    if (g >= (unsigned long long)tokens * heads) return;
+    unsigned int h = (unsigned int)(g % heads);
+    unsigned long long token = g / heads;
+    unsigned int W = heads * headDim, d = threadIdx.x;
+    const __half* base = qkv + token * 3ULL * W;
+    unsigned long long b = token / seq, s = token % seq;
+    unsigned long long outOff = ((b * heads + h) * seq + s) * headDim;
+
+    float qv = __half2float(base[(unsigned long long)h * headDim + d]);
+    sred[d] = qv * qv; __syncthreads();
+    for (unsigned int t = blockDim.x >> 1; t > 0; t >>= 1) { if (d < t) sred[d] += sred[d + t]; __syncthreads(); }
+    float qInv = rsqrtf(sred[0] / (float)headDim + eps); __syncthreads();
+
+    float kv = __half2float(base[W + (unsigned long long)h * headDim + d]);
+    sred[d] = kv * kv; __syncthreads();
+    for (unsigned int t = blockDim.x >> 1; t > 0; t >>= 1) { if (d < t) sred[d] += sred[d + t]; __syncthreads(); }
+    float kInv = rsqrtf(sred[0] / (float)headDim + eps);
+
+    q[outOff + d] = __float2half(qv * qInv * qW[d]);
+    k[outOff + d] = __float2half(kv * kInv * kW[d]);
+    v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+}
+
+// ── Gated-FFN activation epilogue (F16 I/O, F32 compute) ───────────────────
+// comb[r*ff+i] = act(gateUp[r, i]) * gateUp[r, ff+i] over the CONCATENATED [gate | up] projection.
+// F16 twin of lm_glu_act_f32 / dit_glu_act_bf16 — same fast-math formulas, same flat-index-to-(row, i)
+// decomposition (the split is on the LAST dim, not the flat midpoint). act 0 = SiLU, 1 = GELU-tanh.
+__global__ void dit_glu_act_f16(
+    __half* __restrict__ comb,
+    const __half* __restrict__ gateUp,
+    unsigned int rows,
+    unsigned int ff,
+    int act)
+{
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long total = (unsigned long long)rows * ff;
+    if (gid >= total) return;
+    unsigned int r = (unsigned int)(gid / ff);
+    unsigned int i = (unsigned int)(gid % ff);
+    unsigned long long rowBase = (unsigned long long)r * 2u * ff;
+    const float g = __half2float(gateUp[rowBase + i]);
+    const float u = __half2float(gateUp[rowBase + ff + i]);
+    float a;
+    if (act == 0) {
+        a = g * __fdividef(1.0f, 1.0f + __expf(-g));                    // SiLU
+    } else {
+        const float inner = 0.7978845608028654f * (g + 0.044715f * g * g * g);
+        const float s = __fdividef(1.0f, 1.0f + __expf(-2.0f * inner)); // tanh(x) = 2·sigmoid(2x) − 1
+        a = 0.5f * g * (1.0f + (2.0f * s - 1.0f));                      // GELU-tanh
+    }
+    comb[gid] = __float2half(a * u);
+}
+
 } // extern "C"

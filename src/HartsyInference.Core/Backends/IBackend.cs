@@ -209,6 +209,36 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>Head-major <see cref="QkvSplitNorm"/>: same split + per-head QK-RMSNorm, but q/k/v come out <c>[B, heads, seq, headDim]</c>.</summary>
+    /// <remarks>Lets the attention caller skip the q/k/v <see cref="Permute0213"/>; RMSNorm is over headDim, the last dim in either layout.</remarks>
+    unsafe void QkvSplitNormHeadMajor(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
+    {
+        if (q.DType != DType.F32 || qkv.DType != DType.F32) throw new NotSupportedException("QkvSplitNormHeadMajor default fallback only supports F32.");
+        if (q.Shape.Rank != 4) throw new ArgumentException($"QkvSplitNormHeadMajor needs q/k/v shaped [B,heads,seq,headDim], got {q.Shape}.", nameof(q));
+        if (!k.Shape.Equals(q.Shape) || !v.Shape.Equals(q.Shape))
+            throw new ArgumentException($"QkvSplitNormHeadMajor needs q/k/v identically shaped, got q {q.Shape} k {k.Shape} v {v.Shape}.", nameof(k));
+        int headDim = (int)qWeight.Shape[qWeight.Shape.Rank - 1];
+        int w = (int)qkv.Shape[qkv.Shape.Rank - 1] / 3;
+        int heads = w / headDim;
+        int seq = (int)q.Shape[2];
+        long tok = qkv.ElementCount / (3L * w);
+        float* pq = (float*)q.DataPointer, pk = (float*)k.DataPointer, pv = (float*)v.DataPointer;
+        float* pqkv = (float*)qkv.DataPointer, pqw = (float*)qWeight.DataPointer, pkw = (float*)kWeight.DataPointer;
+        for (long t = 0; t < tok; t++)
+        {
+            float* baseP = pqkv + t * 3L * w;
+            long b = t / seq, s = t % seq;
+            for (int h = 0; h < heads; h++)
+            {
+                float* qs = baseP + h * headDim; float* ks = baseP + w + h * headDim; float* vs = baseP + 2 * w + h * headDim;
+                long outOff = ((b * heads + h) * seq + s) * headDim;
+                double qss = 0, kss = 0; for (int d = 0; d < headDim; d++) { qss += (double)qs[d] * qs[d]; kss += (double)ks[d] * ks[d]; }
+                float qInv = (float)(1.0 / Math.Sqrt(qss / headDim + eps)), kInv = (float)(1.0 / Math.Sqrt(kss / headDim + eps));
+                for (int d = 0; d < headDim; d++) { pq[outOff + d] = qs[d] * qInv * pqw[d]; pk[outOff + d] = ks[d] * kInv * pkw[d]; pv[outOff + d] = vs[d]; }
+            }
+        }
+    }
+
     /// <summary>FourierEmbedder (freqs 2^i, include_input, no include_pi): writes x, sin, cos per band into a 3·(2·bands+1) row.</summary>
     unsafe void FourierEmbed(Tensor dst, Tensor coords, int count, int bands)
     {
@@ -1223,6 +1253,44 @@ public interface IBackend : IDisposable
                     }
                 }
             }
+    }
+
+    /// <summary>Head-major <see cref="ApplyRopeSingle"/>: in-place rotary on <c>x [B,heads,L,headDim]</c>, cos/sin still <c>[B,L,headDim]</c>.</summary>
+    /// <remarks>Lets q/k from <see cref="QkvSplitNormHeadMajor"/> be roped in place and fed straight to attention.</remarks>
+    unsafe void ApplyRopeSingleHeadMajor(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
+    {
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("ApplyRopeSingleHeadMajor default fallback only supports F32.");
+        if (x.Shape.Rank != 4)
+            throw new ArgumentException($"ApplyRopeSingleHeadMajor needs x shaped [B,heads,seq,headDim], got {x.Shape}.", nameof(x));
+        int batch = (int)x.Shape[0];
+        int numHeads = (int)x.Shape[1];
+        int seqLen = (int)x.Shape[2];
+        int headDim = (int)x.Shape[3];
+        // A token-major x is the same element count with heads/seq swapped; only the cos/sin row count catches it.
+        if (cos.ElementCount != (long)batch * seqLen * headDim)
+            throw new ArgumentException($"ApplyRopeSingleHeadMajor expects cos/sin [B,seq,headDim] for x {x.Shape}, got {cos.Shape}.", nameof(cos));
+        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
+        int half = rdim / 2;
+        float* xPtr = (float*)x.DataPointer;
+        float* cosPtr = (float*)cos.DataPointer;
+        float* sinPtr = (float*)sin.DataPointer;
+        for (int b = 0; b < batch; b++)
+            for (int h = 0; h < numHeads; h++)
+                for (int s = 0; s < seqLen; s++)
+                {
+                    float* vec = xPtr + (((long)b * numHeads + h) * seqLen + s) * headDim;
+                    long freqBase = ((long)b * seqLen + s) * headDim;
+                    float* c = cosPtr + freqBase;
+                    float* si = sinPtr + freqBase;
+                    for (int i = 0; i < half; i++)
+                    {
+                        float lower = vec[i];
+                        float upper = vec[i + half];
+                        vec[i] = lower * c[i] - upper * si[i];
+                        vec[i + half] = upper * c[i + half] + lower * si[i + half];
+                    }
+                }
     }
 
     /// <summary>Fused graph-decode QKV epilogue (t=1, no QK-norm): ropes q into qOut, ropes+appends k into kCache, copies v into vCache.</summary>

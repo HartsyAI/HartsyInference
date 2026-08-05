@@ -280,7 +280,7 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
         if (batch == 1)
         {
             (Tensor ropeCos, Tensor ropeSin) = rope.GetOrBuildJointTables(
-                imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids ?? []);
+                backend, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids ?? []);
             backend.WanRopeInterleaved(jointQf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
             backend.WanRopeInterleaved(jointKf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
         }

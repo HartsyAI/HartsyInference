@@ -87,9 +87,9 @@ public unsafe class QwenImageRopeFusionTests
         TensorShape preShape = new(batch, total, heads, headDim);
         Tensor qPre = new(preShape, DType.F32); Fill(qPre, 11);
         Tensor kPre = new(preShape, DType.F32); Fill(kPre, 12);
-        (Tensor cos, Tensor sin) = rope.GetOrBuildJointTables(hPacked, wPacked, txtSeq, posStart);
         using HartsyInference.Cpu.CpuBackend cpuBackend = new();
         HartsyInference.Core.Backends.IBackend cpu = cpuBackend;   // WanRopeInterleaved is a default interface method
+        (Tensor cos, Tensor sin) = rope.GetOrBuildJointTables(cpu, hPacked, wPacked, txtSeq, posStart);
         cpu.WanRopeInterleaved(qPre, cos, sin, total, heads, headDim);
         cpu.WanRopeInterleaved(kPre, cos, sin, total, heads, headDim);
 

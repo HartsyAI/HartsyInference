@@ -75,10 +75,9 @@ public sealed class LtxVideoRecipe : IVideoRecipe
 
             // 13B fp8 weights stay fp8-resident (~13 GB); caching their F16 casts would roughly double VRAM and OOM a
             // 24 GB card — dequant transiently per GEMM instead (the verified 13B recipe, matching the Wan fp8 path).
-            if (is13B && context.Backend is HartsyInference.Cuda.CudaBackend cudaBackend)
+            if (is13B)
             {
-                cudaBackend.CacheWeightCasts = false;
-                Logs.Info("[LtxVideoRecipe] 13B: CacheWeightCasts disabled (fp8-resident, transient per-GEMM dequant).");
+                RecipeBackendFlags.DisableCacheWeightCasts(context, "LtxVideoRecipe");
             }
 
             SafeTensorsLoader t5Loader = new SafeTensorsLoader();

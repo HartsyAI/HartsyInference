@@ -7,8 +7,9 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>Covers the BF16 activation path a BF16 DiT residual stream drives: the native <c>dit_rmsnorm_bf16</c> /
-/// <c>dit_glu_act_bf16</c> kernels (compared against their already-validated F32 twins), and the dtype guards on the
+/// <summary>Covers the half-precision activation paths a BF16 or F16 DiT residual stream drives: the native
+/// <c>dit_rmsnorm_bf16</c> / <c>dit_glu_act_bf16</c> / <c>dit_glu_act_f16</c> kernels (compared against their
+/// already-validated F32 twins), and the dtype guards on the
 /// ops that used to re-dispatch through <c>((IBackend)this)</c>. That cast resolved straight back to the CudaBackend
 /// method that issued it, so a non-F32 argument recursed until the stack overflowed and killed the test host —
 /// uncatchable in-process, which is why these tests assert on values/exceptions rather than <c>Assert.Throws</c> on
@@ -107,6 +108,34 @@ public sealed unsafe class CudaBf16ActivationPathTests
         AssertClose(o32, oBf, 3e-2f, $"GluActivate BF16(gelu={gelu})");
     }
 
+    /// <summary>F16 gated-FFN epilogue vs the F32 kernel — the dtype the MiniMax-H3 MLP runs at. Multi-row for the
+    /// last-dim split, and a second magnitude band because F16 (unlike BF16) can overflow on the stored product:
+    /// act(g)·u leaves range once both factors reach ~256, long before BF16 would.</summary>
+    [Theory]
+    [InlineData(false, 1f)]
+    [InlineData(true, 1f)]
+    [InlineData(false, 20f)]
+    [InlineData(true, 20f)]
+    public void GluActivateF16_MatchesF32Twin(bool gelu, float mag)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        const int Rows = 5, Ff = 64;
+        using Tensor gateUp = Random(new TensorShape(Rows, 2 * Ff), seed: 21, -mag, mag);
+        using Tensor gateUpF16 = gateUp.CastTo(DType.F16);
+
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        IBackend b = cuda;
+        using Tensor o32 = new Tensor(new TensorShape(Rows, Ff), DType.F32);
+        using Tensor oF16 = new Tensor(new TensorShape(Rows, Ff), DType.F16);
+        b.GluActivate(o32, gateUp, Ff, gelu);
+        b.GluActivate(oF16, gateUpF16, Ff, gelu);
+        cuda.Sync();
+
+        // KERNEL.md's 1e-3 FP16 figure is relative; peak |act(g)·u| here is ~mag², so scale the absolute bound by it.
+        AssertClose(o32, oF16, 1e-3f * mag * mag, $"GluActivate F16(gelu={gelu}, mag={mag})");
+    }
+
     /// <summary>The fused norm ops fall back to their unfused composition for dtypes their kernels don't cover.
     /// Regression for the recursive <c>((IBackend)this)</c> fallback: every call here took that branch.</summary>
     [Fact]
@@ -171,7 +200,9 @@ public sealed unsafe class CudaBf16ActivationPathTests
 
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         IBackend b = cuda;
-        Assert.Throws<NotSupportedException>(() => b.GluActivate(dstF16, srcF16, Hidden / 2, gelu: false));
+        // F32/F16/BF16 all have kernels now; only a MIXED pair is unsupported.
+        Assert.Throws<NotSupportedException>(() => b.GluActivate(dstF16, srcBf, Hidden / 2, gelu: false));
+        Assert.Throws<NotSupportedException>(() => b.GluActivate(dstBf, srcF16, Hidden / 2, gelu: false));
         Assert.Throws<NotSupportedException>(() => b.GatherRows(dstBf, srcBf, [0, 1, 2, 3]));
         Assert.Throws<NotSupportedException>(() => b.ScatterAddWeightedRows(dstBf, srcBf, [0, 1, 2, 3], [1f, 1f, 1f, 1f]));
         Assert.Throws<NotSupportedException>(() => b.ArgMaxLastDim(indices, srcBf));

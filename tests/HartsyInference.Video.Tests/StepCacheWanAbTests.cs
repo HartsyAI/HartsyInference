@@ -14,7 +14,6 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Tests.Common;
 using HartsyInference.Video.Pipelines;
-using HartsyInference.Video.Tests.Helpers;
 
 namespace HartsyInference.Video.Tests;
 
