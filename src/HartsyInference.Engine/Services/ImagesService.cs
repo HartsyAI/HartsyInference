@@ -1,4 +1,5 @@
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 
@@ -27,7 +28,17 @@ public sealed class ImagesService : IImagesService
             {
                 IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request);
                 ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);
-                return _engine.GenerateWithVramCleanup(() => pipeline.Generate(resolved, progress, cancel));
+
+                // Resolved first: the crop is scaled to the resolution the model will actually run at, so it has to see
+                // the defaults-filled request rather than the caller's.
+                InpaintOnlyMasked.Plan? cropPlan = InpaintOnlyMasked.Prepare(resolved);
+                if (cropPlan is null)
+                {
+                    return _engine.GenerateWithVramCleanup(() => pipeline.Generate(resolved, progress, cancel));
+                }
+                ImageRequest cropped = InpaintOnlyMasked.Apply(resolved, cropPlan);
+                ImageResult generated = _engine.GenerateWithVramCleanup(() => pipeline.Generate(cropped, progress, cancel));
+                return InpaintOnlyMasked.Composite(generated, cropPlan);
             },
             cancel);
     }

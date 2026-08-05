@@ -7,6 +7,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Chroma Radiance pipeline driven against the native <see cref="ImageRequest"/>. <see cref="ChromaRadiancePipeline"/> owns the T5-XXL encoder, so this only tokenizes the prompt/negative (plus the tokenizer attention masks the "first padding token unmasked" rule needs) and calls <see cref="ChromaRadiancePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>ChromaRadianceLoader.Generate</c> drive path; the decode is pixel-space, so no VAE is involved.</summary>
@@ -37,23 +39,27 @@ public sealed class ChromaRadianceRecipePipeline : IRecipePipeline
         int steps = request.Steps ?? _config.DefaultSteps;
         float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
 
-        // TODO(E-IMG-4): img2img/inpaint (request.Img2Img/Inpaint) is not yet mapped — text-to-image only.
-
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
         int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
         int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = steps,
-            CfgScale = cfgScale,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        // Radiance is pixel-space, so no VAE encoder is involved — the source pixels are the clean sample. The
+        // pipeline validates against the unpadded request size and pads source and mask alongside the latent itself.
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = request.Width,
+                Height = request.Height,
+                Steps = steps,
+                CfgScale = cfgScale,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

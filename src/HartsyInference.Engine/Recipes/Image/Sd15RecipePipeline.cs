@@ -98,30 +98,14 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
     /// <summary>Builds the inner diffusion request — an <see cref="ImageToImageRequest"/> when the plan resolved an init image, else plain text-to-image with any variation-seed noise injected.</summary>
     private static TextToImageRequest BuildInner(ImageRequest request, string negative, UnetCompositionPlan plan)
     {
-        if (plan.Img2Img is not null)
-        {
-            return new ImageToImageRequest
-            {
-                Prompt = request.Prompt,
-                NegativePrompt = negative,
-                Width = request.Width,
-                Height = request.Height,
-                Steps = request.Steps,
-                CfgScale = request.CfgScale,
-                Seed = RecipeRequestMapper.MapSeed(request.Seed),
-                Scheduler = request.Scheduler,
-                ClipSkip = RecipeRequestMapper.MapClipSkip(request.ClipSkip),
-                SourceImage = plan.Img2Img.SourceTensor,
-                Strength = plan.Img2Img.Strength,
-                Mask = plan.Img2Img.MaskTensor,
-            };
-        }
-        return RecipeRequestMapper.ToTextToImage(request, negative) with
+        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative) with
         {
             Scheduler = request.Scheduler,
             ClipSkip = RecipeRequestMapper.MapClipSkip(request.ClipSkip),
+            // The plan only resolves variation noise on the text-to-image path, so this is null under img2img.
             InitialNoise = plan.TakeVariationNoise(),
         };
+        return RecipeImg2ImgBinder.Apply(inner, plan.Img2Img);
     }
 
     /// <summary>Cached IP-Adapter entry for <paramref name="path"/>, or null when not loaded yet.</summary>

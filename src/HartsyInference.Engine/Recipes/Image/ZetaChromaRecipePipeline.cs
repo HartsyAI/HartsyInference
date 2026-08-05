@@ -10,6 +10,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Zeta-Chroma pipeline driven against the native <see cref="ImageRequest"/>. Owns the Qwen3-4B encoder + tokenizer (the text-encoder forward lives outside <see cref="ZetaChromaPipeline"/>): it encodes the prompt (and, for CFG, the negative) into caption embeddings, then runs <see cref="ZetaChromaPipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>ZetaChromaLoader.Generate</c> drive path, with the Z-Image preload→encode→free staging around the ~8 GB encoder.</summary>
@@ -48,8 +50,6 @@ public sealed unsafe class ZetaChromaRecipePipeline : IRecipePipeline
         float cfg = request.CfgScale ?? _config.DefaultCfgScale;
         int penultimateIdx = _qwen.NumLayers - 1;
 
-        // TODO(E-IMG-4): pixel-space img2img (request.Img2Img) is not yet mapped — text-to-image only.
-
         // Bulk-upload the Qwen3 weights, encode, then free them — the same staging Z-Image uses for this encoder.
         _backend.PreloadWeights(_qwen.EnumerateWeights());
 
@@ -71,15 +71,20 @@ public sealed unsafe class ZetaChromaRecipePipeline : IRecipePipeline
 
         _backend.FreeWeights(_qwen.EnumerateWeights());
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = steps,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        // Pixel-space: no VAE encoder, the source pixels are noised directly at sigma[startStep].
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = request.Width,
+                Height = request.Height,
+                Steps = steps,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         try
         {

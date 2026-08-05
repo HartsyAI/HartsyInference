@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Requests;
@@ -6,6 +7,19 @@ namespace HartsyInference.Diffusion.Requests;
 /// <para>If <see cref="Mask"/> is supplied, the pipeline runs in <b>blend-on-vanilla inpaint</b> mode: any standard checkpoint can inpaint by re-noising the source-derived latent each step and blending it into the unmasked region. This is the same "soft inpainting" path diffusers' <c>StableDiffusionInpaintPipelineLegacy</c> implements; it works without a dedicated 9-channel inpaint UNet.</para></summary>
 public record ImageToImageRequest : TextToImageRequest
 {
+    /// <summary>Creates an empty request; every member is set through an object initializer.</summary>
+    public ImageToImageRequest()
+    {
+    }
+
+    /// <summary>Promotes an existing text-to-image request, carrying over every base field so a caller that only knows about img2img cannot silently drop a scheduler, CLIP skip or seed the family already resolved.</summary>
+    [SetsRequiredMembers]
+    public ImageToImageRequest(TextToImageRequest source, Tensor sourceImage)
+        : base(source ?? throw new ArgumentNullException(nameof(source)))
+    {
+        SourceImage = sourceImage ?? throw new ArgumentNullException(nameof(sourceImage));
+    }
+
     /// <summary>Source image to transform. Shape <c>[1, 3, Height, Width]</c>, F32, values normalized to <c>[-1, 1]</c>. Caller retains ownership and is responsible for disposal.</summary>
     public required Tensor SourceImage { get; init; }
 

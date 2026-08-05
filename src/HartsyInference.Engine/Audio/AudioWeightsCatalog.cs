@@ -57,7 +57,13 @@ public static class AudioWeightsCatalog
         Role = "codec",
     };
 
-    private static readonly Dictionary<string, Dictionary<string, ModelAsset[]>> _registry = new(StringComparer.OrdinalIgnoreCase)
+    // Lazy: YueVariant() below reads _yueSharedQuality, which is declared further down this file. Static field
+    // initializers run in textual order, so building this dictionary eagerly would NRE on _yueSharedQuality
+    // before it's assigned. Deferring the build until first access (after the whole static ctor has run)
+    // sidesteps the ordering hazard for good instead of just for today's field layout.
+    private static readonly Lazy<Dictionary<string, Dictionary<string, ModelAsset[]>>> _registry = new(BuildRegistry);
+
+    private static Dictionary<string, Dictionary<string, ModelAsset[]>> BuildRegistry() => new(StringComparer.OrdinalIgnoreCase)
     {
         [YueId] = new Dictionary<string, ModelAsset[]>(StringComparer.OrdinalIgnoreCase)
         {
@@ -119,7 +125,7 @@ public static class AudioWeightsCatalog
         {
             return [];
         }
-        return _registry.TryGetValue(familyId, out Dictionary<string, ModelAsset[]>? variants)
+        return _registry.Value.TryGetValue(familyId, out Dictionary<string, ModelAsset[]>? variants)
             && variants.TryGetValue(variant.Trim(), out ModelAsset[]? assets)
             ? assets
             : [];
@@ -215,19 +221,60 @@ public static class AudioWeightsCatalog
             "model-00001-of-00003.safetensors", "model-00002-of-00003.safetensors", "model-00003-of-00003.safetensors",
             "model.safetensors.index.json", "config.json", "generation_config.json", "tokenizer.model",
         ];
-        ModelAsset[] assets = new ModelAsset[files.Length + 1];
+        List<ModelAsset> assets = new(files.Length + 1 + _yueSharedQuality.Length);
         for (int i = 0; i < files.Length; i++)
         {
-            assets[i] = new ModelAsset
+            assets.Add(new ModelAsset
             {
                 Repo = $"m-a-p/YuE-s1-7B-anneal-{variant}",
                 RepoPath = files[i],
                 TargetSubdir = YueSubdir,
                 TargetName = $"{variant}/{files[i]}",
                 Role = i == 0 ? "transformer" : "component",
-            };
+            });
         }
-        assets[^1] = YueXCodec;
-        return assets;
+        assets.Add(YueXCodec);
+        assets.AddRange(_yueSharedQuality);
+        return [.. assets];
     }
+
+    // Stage-2 residual upsampler (cb0 → all 8 codebooks) + the per-stem Vocos vocoder torch checkpoints
+    // (YueMusicModel auto-converts the .pth pair to safetensors on first load). Without these, YuE degrades
+    // to the vocal-cb0-only 16 kHz x-codec draft — the "garbled" mode. Shared across variants (parent-level
+    // siblings of the variant folder).
+    private static readonly ModelAsset[] _yueSharedQuality =
+    [
+        new ModelAsset
+        {
+            Repo = "m-a-p/YuE-s2-1B-general",
+            RepoPath = "model.safetensors",
+            TargetSubdir = YueSubdir,
+            TargetName = "s2/model.safetensors",
+            Role = "component",
+        },
+        new ModelAsset
+        {
+            Repo = "m-a-p/YuE-s2-1B-general",
+            RepoPath = "config.json",
+            TargetSubdir = YueSubdir,
+            TargetName = "s2/config.json",
+            Role = "component",
+        },
+        new ModelAsset
+        {
+            Repo = "m-a-p/xcodec_mini_infer",
+            RepoPath = "decoders/decoder_131000.pth",
+            TargetSubdir = YueSubdir,
+            TargetName = "xcodec_vocoder_src/decoder_131000.pth",
+            Role = "component",
+        },
+        new ModelAsset
+        {
+            Repo = "m-a-p/xcodec_mini_infer",
+            RepoPath = "decoders/decoder_151000.pth",
+            TargetSubdir = YueSubdir,
+            TargetName = "xcodec_vocoder_src/decoder_151000.pth",
+            Role = "component",
+        },
+    ];
 }

@@ -9,6 +9,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Qwen-Image pipeline driven against the native <see cref="ImageRequest"/>. <see cref="QwenImagePipeline"/> owns the text-encoder forward, so this only builds the templated Qwen token ids plus the prefix-drop indices and calls <see cref="QwenImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>QwenImageLoader.Generate</c> text-to-image drive path.</summary>
@@ -30,12 +32,12 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
     private readonly LlamaStyleEncoder _textEncoder;
     private readonly QwenImageTransformer _transformer;
     private readonly QwenImageVaeDecoder _vae;
-    private readonly QwenImageVaeEncoder _vaeEncoder;
+    private readonly QwenImageVaeEncoder? _vaeEncoder;
     private readonly List<SafeTensorsLoader> _loaders;
     private readonly IDisposable? _ggufHandle;
 
     /// <summary>Wraps the constructed Qwen-Image pipeline plus its components, taking ownership of every disposable.</summary>
-    public QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, QwenImageTransformer transformer, QwenImageVaeDecoder vae, QwenImageVaeEncoder vaeEncoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle)
+    public QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, QwenImageTransformer transformer, QwenImageVaeDecoder vae, QwenImageVaeEncoder? vaeEncoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle)
     {
         _pipeline = pipeline;
         _tokenizer = tokenizer;
@@ -56,22 +58,27 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
         int steps = request.Steps ?? QwenImageRecipe.FamilyDefaults.Steps;
         float cfg = request.CfgScale ?? QwenImageRecipe.FamilyDefaults.CfgScale;
 
-        // TODO(E-IMG-4/5): img2img / inpaint (ImageToImageRequest + mask), Qwen-Image-Edit reference images
-        // (editRefImages / editRefVisionImages / editRefTimestepZero), LoRA, ControlNet and regional prompting are
-        // deferred — the SwarmUI loader resolved all of those from T2IParamInput. Text-to-image only.
+        // TODO(E-IMG-4/5): Qwen-Image-Edit reference images (editRefImages / editRefVisionImages /
+        // editRefTimestepZero), LoRA, ControlNet and regional prompting are deferred — the SwarmUI loader resolved
+        // those from T2IParamInput too. Classic strength-based img2img/inpaint is wired below; the edit path is a
+        // distinct conditioning mode and stays deferred.
         (int[] promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, prompt);
         (int[] negTokens, int negDrop) = EncodeWithTemplate(_tokenizer, negative);
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = steps,
-            CfgScale = cfg,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = request.Width,
+                Height = request.Height,
+                Steps = steps,
+                CfgScale = cfg,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {
@@ -131,7 +138,7 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
         _textEncoder.Dispose();
         _transformer.Dispose();
         _vae.Dispose();
-        _vaeEncoder.Dispose();
+        _vaeEncoder?.Dispose();
         foreach (SafeTensorsLoader loader in _loaders)
         {
             loader.Dispose();

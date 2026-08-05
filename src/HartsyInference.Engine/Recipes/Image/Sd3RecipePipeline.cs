@@ -6,6 +6,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed SD3 pipeline driven against the native <see cref="ImageRequest"/>. Both CLIPs share one BPE tokenizer (encoded once, reused for L and G); when a T5 encoder is present the prompt is additionally tokenized with the T5 SentencePiece plus its attention mask. Runs <see cref="Sd3Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Sd3Loader.Generate</c> drive path (text-to-image only).</summary>
@@ -50,12 +52,15 @@ public sealed class Sd3RecipePipeline : IRecipePipeline
             negMaskT5 = T5Tokenizer.CreateAttentionMask(negTokensT5);
         }
 
-        // TODO(E-IMG-4/5): img2img / inpaint are not yet mapped — the SwarmUI loader built an
-        // ImageToImageRequest here. Text-to-image only.
-        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative) with
-        {
-            ClipSkip = RecipeRequestMapper.MapClipSkip(request.ClipSkip),
-        };
+        // Sd3Pipeline validates the source against the unsnapped request size, so resolve at exactly that.
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            RecipeRequestMapper.ToTextToImage(request, negative) with
+            {
+                ClipSkip = RecipeRequestMapper.MapClipSkip(request.ClipSkip),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

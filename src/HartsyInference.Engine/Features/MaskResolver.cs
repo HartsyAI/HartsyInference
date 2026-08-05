@@ -8,9 +8,9 @@ namespace HartsyInference.Engine.Features;
 /// inpaint pipelines consume: resize to the target, grow (max-filter dilation), blur. Mask convention matches the host
 /// UX — white (1.0) is inpainted, black (0.0) preserved, gray blends. Caller owns the returned tensor.
 ///
-/// <para><b>Not implemented:</b> <see cref="Inpaint.ShrinkGrow"/> ("inpaint only masked": crop to the mask bbox + grow,
-/// run on the crop, composite back). It's an optimization for tiny details on large canvases; the full-image path
-/// doesn't need it, and the field is silently ignored today.</para></summary>
+/// <para><see cref="Inpaint.ShrinkGrow"/> ("inpaint only masked") is handled a layer up by
+/// <see cref="InpaintOnlyMasked"/>, which crops before generation and composites after; by the time a request reaches
+/// this resolver the field has been cleared, so a non-zero value here is a routing bug rather than a user error.</para></summary>
 public static class MaskResolver
 {
     /// <summary>Builds the mask tensor for <paramref name="inpaint"/>, or null when there is no mask. Caller disposes.</summary>
@@ -32,7 +32,11 @@ public static class MaskResolver
         }
         if (inpaint.ShrinkGrow != 0)
         {
-            Logs.Verbose($"[Features][Mask] ShrinkGrow={inpaint.ShrinkGrow} is not implemented yet; ignoring (full-canvas inpaint).");
+            throw new InvalidOperationException(
+                $"Inpaint.ShrinkGrow ({inpaint.ShrinkGrow}) reached the mask resolver still set. 'Inpaint only masked' is "
+                + $"applied by {nameof(InpaintOnlyMasked)} above the pipeline, which clears the field once it has cropped — "
+                + "seeing it here means a caller drove a recipe pipeline directly and would silently get a full-canvas "
+                + "inpaint instead. Route through IImagesService.GenerateAsync.");
         }
         Tensor mask = FeatureImaging.GrayToMaskTensor(maskBytes, targetWidth, targetHeight);
         Logs.Verbose($"[Features][Mask] enabled: {targetWidth}x{targetHeight}, grow={inpaint.Grow}px, blur={inpaint.Blur}px.");

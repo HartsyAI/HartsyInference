@@ -1,5 +1,6 @@
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -18,6 +19,10 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "qwen-image";
+
+    /// <inheritdoc/>
+    /// <remarks>The Qwen-Image VAE encoder is constructed alongside the decoder; QwenImagePipeline implements the packed-latent masked path.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "qwen-image", StringComparison.OrdinalIgnoreCase);
@@ -118,15 +123,13 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
                 Logs.Info("[QwenImageRecipe] Qwen2.5-VL-7B resolved as side model.");
             }
 
-            // Both VAE halves: the decoder for output, the encoder because it is what img2img / edit would need
-            // (constructing with it keeps the pipeline's img2img overload reachable once E-IMG-4 lands).
-            QwenImageVaeDecoder vae = new QwenImageVaeDecoder(VaeConfig.QwenImage);
-            QwenImageVaeEncoder vaeEncoder = new QwenImageVaeEncoder(VaeConfig.QwenImage);
+            // Both VAE halves: the decoder for output, the encoder because it is what img2img / edit needs. A
+            // decode-only VAE yields a null encoder, which the pipeline turns into a named refusal rather than a
+            // silently text-to-image result.
+            Dictionary<string, Tensor> vaeWeights;
             if (converted.Vae.Count > 0)
             {
-                Dictionary<string, Tensor> vaeWeights = CastToF32(converted.Vae);
-                vae.LoadWeights(vaeWeights);
-                vaeEncoder.LoadWeights(vaeWeights);
+                vaeWeights = CastToF32(converted.Vae);
             }
             else
             {
@@ -134,11 +137,12 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
                 SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
                 vaeLoader.Load(vaePath);
                 loaders.Add(vaeLoader);
-                Dictionary<string, Tensor> vaeWeights = CastToF32(vaeLoader.GetAllTensors());
-                vae.LoadWeights(vaeWeights);
-                vaeEncoder.LoadWeights(vaeWeights);
+                vaeWeights = CastToF32(vaeLoader.GetAllTensors());
                 Logs.Info("[QwenImageRecipe] Qwen-Image VAE resolved as side model.");
             }
+            QwenImageVaeDecoder vae = new QwenImageVaeDecoder(VaeConfig.QwenImage);
+            vae.LoadWeights(vaeWeights);
+            QwenImageVaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildQwenEncoder(VaeConfig.QwenImage, vaeWeights, "QwenImageRecipe");
 
             QwenImagePipeline pipeline = new QwenImagePipeline(context.Backend, textEncoder, transformer, vae, vaeEncoder, config)
             {

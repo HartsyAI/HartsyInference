@@ -18,6 +18,27 @@ public sealed class NativeImageRequest
 
     /// <summary>The native image request, unmodified.</summary>
     public required ImageRequest Request { get; set; }
+
+    /// <summary>Base64 PNG (a <c>data:</c> URI is accepted) to use as the img2img init image. A convenience over
+    /// setting <c>request.img2img.initImage</c> directly, which carries raw RGB24 bytes an HTTP client rarely has;
+    /// when both are supplied this one wins.</summary>
+    public string? InitImageBase64 { get; set; }
+
+    /// <summary>Denoise strength in 0..1 for <see cref="InitImageBase64"/>; unset keeps the request's own value.</summary>
+    public double? Creativity { get; set; }
+
+    /// <summary>Base64 PNG inpaint mask (white = regenerate, black = preserve). Requires an init image.</summary>
+    public string? MaskBase64 { get; set; }
+
+    /// <summary>Grows the mask by this many pixels before use.</summary>
+    public int? MaskGrow { get; set; }
+
+    /// <summary>Blurs the mask by this many pixels for a softer transition.</summary>
+    public int? MaskBlur { get; set; }
+
+    /// <summary>"Inpaint only masked": crop to the mask's bounding box grown by this many pixels, generate there, and
+    /// composite back, so the masked region gets the model's full resolution. 0 disables it.</summary>
+    public int? MaskShrinkGrow { get; set; }
 }
 
 /// <summary>Envelope for <c>/v1/native/text*</c>.</summary>

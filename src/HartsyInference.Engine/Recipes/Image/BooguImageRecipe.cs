@@ -81,8 +81,7 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
 
             VaeDecoder vaeDecoder = new VaeDecoder(VaeConfig.Flux);
             vaeDecoder.LoadWeights(vaeW);
-            VaeEncoder vaeEncoder = new VaeEncoder(VaeConfig.Flux);
-            vaeEncoder.LoadWeights(vaeW);
+            VaeEncoder vaeEncoder = LoaderVaeUtils.BuildEncoder(VaeConfig.Flux, vaeW, "BooguImageRecipe");
 
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 4096);
             BooguImagePipeline pipeline = new BooguImagePipeline(context.Backend, transformer, vaeDecoder, vaeEncoder, config);

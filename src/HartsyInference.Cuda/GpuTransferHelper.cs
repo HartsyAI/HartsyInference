@@ -316,26 +316,50 @@ internal static unsafe class GpuTransferHelper
         // default mempool. No-op if no streaming cache is wired (CPU/Vulkan, tests).
         s.StreamingCache?.DrainAndReleasePool();
         // Same-device escalation: a SIBLING backend's stream-ordered pool reservations can hold the very bytes
-        // this OOM needs (each backend frees onto its own stream). Draining a sibling is only stream syncs +
-        // pool trims — no mutation of its caches — and the per-device generation gate means it is quiescent
-        // while we are mid-allocation, so this cannot stall its in-flight work.
+        // this OOM needs (each backend frees onto its own stream). Draining a sibling touches only its streams
+        // and the shared device pool, never its caches — but CudaStreamingWeightCache.Enter() rebinds the
+        // THREAD AMBIENT to the sibling's State as a side effect (same-device backends share a primary context,
+        // so context identity can't route these calls). Under HARTSY_SAME_GPU_CONCURRENT=1 the sibling is NOT
+        // guaranteed quiescent — that "it cannot stall its in-flight work" assumption only ever held behind
+        // DeviceGate — so a sibling stream/pool call here CAN throw (e.g. the sibling tears down concurrently,
+        // or a transient driver error). A throw here used to skip the ambient restore below, leaving this
+        // thread's ambient stuck on the sibling's State: every GpuTransferHelper call this thread makes
+        // afterwards — including cuMemFreeAsync — would silently target the sibling's cache and stream instead
+        // of ours. That is the FreeActivations CUDA_ERROR_INVALID_VALUE / Dispose double-free this fixes.
+        // try/finally + per-sibling catch make the escalation genuinely best-effort: one sibling failing to
+        // drain must not corrupt our ambient (finally) nor abort the sweep for other siblings (catch+log).
         if (s.Context is not null)
         {
-            foreach (State sibling in StatesOnDevice(s.Context.DeviceOrdinal))
+            try
             {
-                if (ReferenceEquals(sibling, s))
+                foreach (State sibling in StatesOnDevice(s.Context.DeviceOrdinal))
                 {
-                    continue;
+                    if (ReferenceEquals(sibling, s) || sibling.Unregistered)
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        if (sibling.StreamHandle != 0)
+                        {
+                            CudaDriverApi.cuStreamSynchronize(sibling.StreamHandle);
+                        }
+                        sibling.StreamingCache?.DrainAndReleasePool();
+                    }
+                    catch (Exception ex)
+                    {
+                        Logs.Error("[Cuda] same-device sibling drain failed during OOM escalation — " +
+                            "continuing with this backend's own pool trim only.", ex);
+                    }
                 }
-                if (sibling.StreamHandle != 0)
-                {
-                    CudaDriverApi.cuStreamSynchronize(sibling.StreamHandle);
-                }
-                sibling.StreamingCache?.DrainAndReleasePool();
             }
-            // The sibling cache's entry guard re-bound the thread ambient to the sibling — restore OURS, or the
-            // very allocation retry this drain serves would land on the sibling's stream.
-            SetAmbient(s);
+            finally
+            {
+                // Unconditional: a sibling drain rebinds our thread's ambient (CudaStreamingWeightCache.Enter),
+                // success or failure. Restore ours here, or the very allocation retry this call serves — and
+                // anything this thread touches before its next EnterOp — lands on the sibling's stream/state.
+                SetAmbient(s);
+            }
         }
         // Always trim the default pool too: with no streaming cache wired (auto-transfer paths, tests), every
         // cuMemFreeAsync'd transient stays RESERVED in the stream-ordered pool. An OOM retry that never trims

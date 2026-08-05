@@ -16,6 +16,10 @@ public sealed class ZetaChromaRecipe : IArchitectureRecipe
     public string Name => "zeta-chroma";
 
     /// <inheritdoc/>
+    /// <remarks>Zeta-Chroma is pixel-space — the source image IS the clean sample, so no VAE encoder is involved.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "zeta-chroma", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Zeta-Chroma's official sampling settings: 50 steps at guidance 3.0, 1024x1024 (<c>ZetaChromaConfig.DefaultSteps</c>/<c>DefaultCfgScale</c>).</summary>

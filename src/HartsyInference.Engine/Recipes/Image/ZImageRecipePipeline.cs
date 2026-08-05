@@ -9,6 +9,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Z-Image pipeline driven against the native <see cref="ImageRequest"/>. Owns the Qwen3-4B encoder + tokenizer (the text-encoder forward lives outside <see cref="ZImagePipeline"/>): it encodes the prompt (and, for CFG, the negative) into caption embeddings, then runs <see cref="ZImagePipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>ZImageLoader.Generate</c> drive path. Z-Image's non-standard CFG combine and mandatory velocity negation are encoded inside the pipeline; this just calls it with the right cfg + embeddings.</summary>
@@ -49,8 +51,8 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         bool needNegative = cfg > 1.0f;
         int penultimateIdx = _qwen.NumLayers - 1;
 
-        // TODO(E-IMG-4): regional prompting (request.Regional) and img2img/inpaint (request.Img2Img/Inpaint) are not
-        // yet mapped — the SwarmUI loader built a RegionalPlan and an ImageToImageRequest here. Text-to-image only.
+        // TODO(E-IMG-4): regional prompting (request.Regional) is not yet mapped — the SwarmUI loader built a
+        // RegionalPlan here.
 
         // Bulk-upload the Qwen3 weights, encode, then free them — their ~8 GB is the headroom the VAE full-res decode needs.
         _backend.PreloadWeights(_qwen.EnumerateWeights());
@@ -75,15 +77,19 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
 
         _backend.FreeWeights(_qwen.EnumerateWeights());
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = steps,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = request.Width,
+                Height = request.Height,
+                Steps = steps,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         try
         {

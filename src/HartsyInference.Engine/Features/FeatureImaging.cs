@@ -53,6 +53,129 @@ public static class FeatureImaging
         return gray;
     }
 
+    /// <summary>Tightest box containing every mask pixel at or above <paramref name="threshold"/>, expanded by
+    /// <paramref name="grow"/> pixels and clamped to the image. Returns null when the mask is entirely below the
+    /// threshold — there is nothing to inpaint, and the caller must fall back to the full canvas.</summary>
+    public static (int X, int Y, int Width, int Height)? MaskBounds(byte[] mask, int width, int height, int grow, byte threshold)
+    {
+        ArgumentNullException.ThrowIfNull(mask);
+        int minX = width, minY = height, maxX = -1, maxY = -1;
+        for (int y = 0; y < height; y++)
+        {
+            int row = y * width;
+            for (int x = 0; x < width; x++)
+            {
+                if (mask[row + x] < threshold)
+                {
+                    continue;
+                }
+                if (x < minX) { minX = x; }
+                if (x > maxX) { maxX = x; }
+                if (y < minY) { minY = y; }
+                if (y > maxY) { maxY = y; }
+            }
+        }
+        if (maxX < 0)
+        {
+            return null;
+        }
+        minX = Math.Max(0, minX - grow);
+        minY = Math.Max(0, minY - grow);
+        maxX = Math.Min(width - 1, maxX + grow);
+        maxY = Math.Min(height - 1, maxY + grow);
+        return (minX, minY, maxX - minX + 1, maxY - minY + 1);
+    }
+
+    /// <summary>Copies an axis-aligned RGB24 sub-rectangle out of <paramref name="image"/>.</summary>
+    public static ImageData CropRgb24(ImageData image, int x, int y, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        ValidateCrop(image.Width, image.Height, x, y, width, height);
+        byte[] dst = new byte[(long)width * height * 3];
+        for (int row = 0; row < height; row++)
+        {
+            Array.Copy(image.Rgb, ((long)(y + row) * image.Width + x) * 3, dst, (long)row * width * 3, (long)width * 3);
+        }
+        return new ImageData { Rgb = dst, Width = width, Height = height };
+    }
+
+    /// <summary>Copies an axis-aligned sub-rectangle out of a single-channel L8 buffer.</summary>
+    public static byte[] CropGray(byte[] gray, int sourceWidth, int sourceHeight, int x, int y, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(gray);
+        ValidateCrop(sourceWidth, sourceHeight, x, y, width, height);
+        byte[] dst = new byte[(long)width * height];
+        for (int row = 0; row < height; row++)
+        {
+            Array.Copy(gray, (long)(y + row) * sourceWidth + x, dst, (long)row * width, width);
+        }
+        return dst;
+    }
+
+    /// <summary>Alpha-composites <paramref name="patch"/> over <paramref name="canvas"/> at <paramref name="x"/>,
+    /// <paramref name="y"/>, weighted per pixel by <paramref name="mask"/> (255 = take the patch, 0 = keep the canvas).
+    /// Returns a new image; neither input is mutated.</summary>
+    public static ImageData CompositeRgb24(ImageData canvas, ImageData patch, byte[] mask, int x, int y)
+    {
+        ArgumentNullException.ThrowIfNull(canvas);
+        ArgumentNullException.ThrowIfNull(patch);
+        ArgumentNullException.ThrowIfNull(mask);
+        ValidateCrop(canvas.Width, canvas.Height, x, y, patch.Width, patch.Height);
+        if (mask.LongLength < (long)patch.Width * patch.Height)
+        {
+            throw new ArgumentException($"Mask has {mask.LongLength} entries, expected {(long)patch.Width * patch.Height} for {patch.Width}x{patch.Height}.", nameof(mask));
+        }
+        byte[] dst = new byte[canvas.Rgb.LongLength];
+        Array.Copy(canvas.Rgb, dst, canvas.Rgb.LongLength);
+        for (int row = 0; row < patch.Height; row++)
+        {
+            long canvasBase = ((long)(y + row) * canvas.Width + x) * 3;
+            long patchBase = (long)row * patch.Width * 3;
+            long maskBase = (long)row * patch.Width;
+            for (int col = 0; col < patch.Width; col++)
+            {
+                float weight = mask[maskBase + col] / 255f;
+                if (weight <= 0f)
+                {
+                    continue;
+                }
+                for (int channel = 0; channel < 3; channel++)
+                {
+                    long dstIdx = canvasBase + col * 3 + channel;
+                    float blended = patch.Rgb[patchBase + col * 3 + channel] * weight + dst[dstIdx] * (1f - weight);
+                    dst[dstIdx] = (byte)Math.Clamp(MathF.Round(blended), 0f, 255f);
+                }
+            }
+        }
+        return new ImageData { Rgb = dst, Width = canvas.Width, Height = canvas.Height };
+    }
+
+    /// <summary>Zeroes every mask pixel below <paramref name="threshold"/>, so a blurred edge does not bleed the patch
+    /// into pixels the user never selected.</summary>
+    public static void ThresholdInPlace(byte[] mask, byte threshold)
+    {
+        ArgumentNullException.ThrowIfNull(mask);
+        for (int i = 0; i < mask.Length; i++)
+        {
+            if (mask[i] < threshold)
+            {
+                mask[i] = 0;
+            }
+        }
+    }
+
+    private static void ValidateCrop(int sourceWidth, int sourceHeight, int x, int y, int width, int height)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(width), $"Crop size must be positive; got {width}x{height}.");
+        }
+        if (x < 0 || y < 0 || x + width > sourceWidth || y + height > sourceHeight)
+        {
+            throw new ArgumentOutOfRangeException(nameof(x), $"Crop {width}x{height} at ({x},{y}) falls outside {sourceWidth}x{sourceHeight}.");
+        }
+    }
+
     /// <summary>Separable max-filter dilation over a Chebyshev window of <paramref name="radius"/>: two 1-D passes,
     /// O(W·H·R) instead of O(W·H·R²). Approximates a square morphological dilation — close enough for mask edges.</summary>
     public static void DilateInPlace(byte[] mask, int width, int height, int radius)

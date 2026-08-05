@@ -18,6 +18,11 @@
     <ProjectReference Include="..\..\src\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
     <!-- Audio reference decoders (Qwen2Model / Qwen3Model) serve as the parity oracle. -->
     <ProjectReference Include="..\..\src\HartsyInference.Audio\HartsyInference.Audio.csproj" />
+    <!-- Real-checkpoint engine sharding tests (LlmShardingEngineTests) need the full engine + CUDA backend + model asset loaders. -->
+    <ProjectReference Include="..\..\src\HartsyInference.Engine\HartsyInference.Engine.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
+    <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,5 +1,6 @@
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -18,7 +19,7 @@ public static class ImageEndpoints
             ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Image);
             try
             {
-                ImageResult result = await GenerateAsync(engine, queue, spec, req.Request, progress: null, ct);
+                ImageResult result = await GenerateAsync(engine, queue, spec, ApplyImageComposition(req), progress: null, ct);
                 return Results.Ok(ToResponse(result));
             }
             catch (Exception ex)
@@ -37,10 +38,37 @@ public static class ImageEndpoints
                 // would deadlock waiting on the semaphore this frame already holds.
                 Progress<StepPreview> progress = new Progress<StepPreview>(p =>
                     writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
-                ImageResult result = await engine.Images.GenerateAsync(spec, req.Request, progress, ct);
+                ImageResult result = await engine.Images.GenerateAsync(spec, ApplyImageComposition(req), progress, ct);
                 writer.TryWrite(SseHelpers.Event("complete", ToResponse(result), jsonOptions));
             }, ct);
         });
+    }
+
+    /// <summary>Folds the envelope's base64 init image / mask conveniences into the native request. Returns the
+    /// request untouched when none are set, so a client that populates <c>request.img2img</c> with raw RGB24 directly
+    /// keeps working.</summary>
+    public static ImageRequest ApplyImageComposition(NativeImageRequest req)
+    {
+        ImageRequest request = req.Request;
+        if (req.InitImageBase64 is not null)
+        {
+            Img2Img img2img = new Img2Img { InitImage = ImageDataCodec.DecodeBase64(req.InitImageBase64) };
+            request = request with { Img2Img = req.Creativity is null ? img2img : img2img with { Creativity = req.Creativity.Value } };
+        }
+        else if (req.Creativity is not null && request.Img2Img is not null)
+        {
+            request = request with { Img2Img = request.Img2Img with { Creativity = req.Creativity.Value } };
+        }
+
+        if (req.MaskBase64 is not null)
+        {
+            Inpaint inpaint = new Inpaint { Mask = ImageDataCodec.DecodeBase64(req.MaskBase64) };
+            if (req.MaskGrow is not null) { inpaint = inpaint with { Grow = req.MaskGrow.Value }; }
+            if (req.MaskBlur is not null) { inpaint = inpaint with { Blur = req.MaskBlur.Value }; }
+            if (req.MaskShrinkGrow is not null) { inpaint = inpaint with { ShrinkGrow = req.MaskShrinkGrow.Value }; }
+            request = request with { Inpaint = inpaint };
+        }
+        return request;
     }
 
     /// <summary>Queue-gated generation, shared with the OpenAI-compat <c>/v1/images/generations</c> wrapper.</summary>

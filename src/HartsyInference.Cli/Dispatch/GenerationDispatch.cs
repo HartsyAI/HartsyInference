@@ -64,6 +64,8 @@ public static class GenerationDispatch
             Scheduler = parameters.GetStringOrNull("scheduler"),
             SigmaShift = parameters.GetDoubleOrNull("sigma-shift"),
             Seed = parameters.GetInt("seed", -1),
+            Img2Img = BuildImg2Img(parameters),
+            Inpaint = BuildInpaint(parameters),
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("denoise");
@@ -242,6 +244,7 @@ public static class GenerationDispatch
         MusicRequest request = new MusicRequest
         {
             Prompt = prompt,
+            Genre = parameters.Get("genre") ?? "",
             Duration = parameters.GetInt("duration", 10),
             Seed = Math.Max(0, parameters.GetInt("seed", 0)),
         };
@@ -771,6 +774,43 @@ public static class GenerationDispatch
 
     /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
     /// <remarks>Typed requests take pixels, not the file path the CLI accepts.</remarks>
+    /// <summary>The img2img init from <c>--init-image</c> / <c>--creativity</c>, or null for text-to-image. Each knob is
+    /// applied only when the user set it, so an omitted flag keeps the request record's own default.</summary>
+    private static Img2Img? BuildImg2Img(ParamState parameters)
+    {
+        string? initPath = parameters.GetStringOrNull("init-image");
+        if (initPath is null)
+        {
+            return null;
+        }
+        Img2Img img2img = new Img2Img { InitImage = LoadImage(initPath) };
+        double? creativity = parameters.GetDoubleOrNull("creativity");
+        return creativity is null ? img2img : img2img with { Creativity = creativity.Value };
+    }
+
+    /// <summary>The inpaint mask from <c>--mask</c> and its grow/blur knobs, or null when no mask was given.</summary>
+    private static Inpaint? BuildInpaint(ParamState parameters)
+    {
+        string? maskPath = parameters.GetStringOrNull("mask");
+        if (maskPath is null)
+        {
+            return null;
+        }
+        Inpaint inpaint = new Inpaint { Mask = LoadImage(maskPath) };
+        int? grow = parameters.GetIntOrNull("mask-grow");
+        int? blur = parameters.GetIntOrNull("mask-blur");
+        int? shrinkGrow = parameters.GetIntOrNull("mask-shrink-grow");
+        if (grow is not null)
+        {
+            inpaint = inpaint with { Grow = grow.Value };
+        }
+        if (blur is not null)
+        {
+            inpaint = inpaint with { Blur = blur.Value };
+        }
+        return shrinkGrow is null ? inpaint : inpaint with { ShrinkGrow = shrinkGrow.Value };
+    }
+
     private static ImageData LoadImage(string promptPath)
     {
         string path = promptPath.Trim().Trim('"');

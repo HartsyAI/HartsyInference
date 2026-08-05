@@ -18,6 +18,10 @@ public sealed class Sd3Recipe : IArchitectureRecipe
     public string Name => "sd3";
 
     /// <inheritdoc/>
+    /// <remarks>SD3's VAE encoder is constructed alongside the decoder, and Sd3Pipeline implements the blend-on-vanilla masked path.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "sd3", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>SD 3.5's official sampling settings: 28 steps at CFG 7.0, 1024x1024 (diffusers <c>StableDiffusion3Pipeline.__call__</c>, mirrored by <c>GenerationDefaults.Sd35</c>).</summary>
@@ -93,8 +97,7 @@ public sealed class Sd3Recipe : IArchitectureRecipe
 
             VaeDecoder vaeDecoder = new VaeDecoder(VaeConfig.Sd3);
             vaeDecoder.LoadWeights(vaeWeights);
-            VaeEncoder vaeEncoder = new VaeEncoder(VaeConfig.Sd3);
-            vaeEncoder.LoadWeights(vaeWeights);
+            VaeEncoder vaeEncoder = LoaderVaeUtils.BuildEncoder(VaeConfig.Sd3, vaeWeights, "Sd3Recipe");
 
             Sd3Pipeline pipeline = new Sd3Pipeline(context.Backend, clipL, clipG, t5, transformer, vaeDecoder, vaeEncoder);
             Logs.Info("[Sd3Recipe] SD3 ready.");

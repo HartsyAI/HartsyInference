@@ -331,6 +331,24 @@ public static class TestPaths
         public static string LargeTurbo   => Resolve("SD35_LARGE_TURBO_PATH",  Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_large_turbo.safetensors"));
     }
 
+    /// <summary>Local LLM GGUF checkpoints (llama.cpp naming), staged flat under <c>Models/llm/&lt;family&gt;/</c>.
+    /// Used by the layer-split placement engine tests.</summary>
+    public static class Llm
+    {
+        /// <summary>Llama-3.2-1B-Instruct, Q8_0 GGUF (~1.3 GB). Small enough that a 2-GPU layer split is a pure
+        /// placement change — the exact-token-parity oracle vs the same model unsharded.</summary>
+        public static string Llama32_1BQ8 => Resolve("LLAMA32_1B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "llama32-1b", "llama-3.2-1b-instruct-q8_0.gguf"));
+
+        /// <summary>Qwen3-32B, Q4_K_M GGUF (~19.8 GB). Too large for a single 24 GB consumer card once driver
+        /// overhead and KV/activations are counted — the layer-split tok/s oracle.</summary>
+        public static string Qwen3_32BQ4KM => Resolve("QWEN3_32B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen3", "Qwen3-32B-Q4_K_M.gguf"));
+
+        /// <summary>Mamba-2.8B-HF, Q4_K GGUF. An SSM architecture — layer-split isn't offered for it (recurrent
+        /// state has no per-layer-crossing story), so this is the oracle for the composite-shard-key fallback
+        /// path, not the split path itself.</summary>
+        public static string Mamba28BQ4K => Resolve("MAMBA_28B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "mamba", "ggml-mamba-2.8b-hf-q4_k.gguf"));
+    }
+
     /// <summary>Standalone text encoder weights.</summary>
     public static class TextEncoders
     {

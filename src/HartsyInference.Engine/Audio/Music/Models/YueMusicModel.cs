@@ -72,6 +72,8 @@ internal static class YueMusicModel
             stage2.LoadWeights(stage2Weights, prefix: "model");
         }
         // Per-stem Vocos vocoders — YuE's real 44.1 kHz output. Optional: falls back to the 16 kHz x-codec draft.
+        // Auto-converts the upstream torch checkpoints (decoder_131000/151000.pth) on first use, like EnsureXCodec.
+        EnsureVocoders(folder);
         string? vocalVocoderPath = FindSibling(folder, "vocal_vocoder.safetensors");
         string? instrumentalVocoderPath = FindSibling(folder, "inst_vocoder.safetensors");
         VocosDecoder? vocalVocoder = null;
@@ -218,6 +220,63 @@ internal static class YueMusicModel
         SafeTensorsWriter.Save(outputPath, keep);
         Logs.Info($"[Audio][YuE] Wrote {keep.Count} X-Codec acoustic tensors to '{outputPath}'.");
         return outputPath;
+    }
+
+    /// <summary>Converts the upstream xcodec_mini_infer Vocos vocoder checkpoints (<c>decoder_131000.pth</c> =
+    /// vocal, <c>decoder_151000.pth</c> = instrumental) to the safetensors the loader consumes, one time. The
+    /// torch state dicts already use VocosDecoder's exact key layout (backbone.*/head.out), so this is a pure
+    /// format conversion — same self-healing pattern as <see cref="EnsureXCodec"/>. No-op when the converted
+    /// files exist or the sources are absent (16 kHz draft fallback stays available).</summary>
+    private static void EnsureVocoders(string folder)
+    {
+        if (FindSibling(folder, "vocal_vocoder.safetensors") is not null
+            && FindSibling(folder, "inst_vocoder.safetensors") is not null)
+        {
+            return;
+        }
+        string parent = Directory.GetParent(folder)?.FullName ?? folder;
+        ConvertVocoder(folder, parent, "decoder_131000.pth", "vocal_vocoder.safetensors");
+        ConvertVocoder(folder, parent, "decoder_151000.pth", "inst_vocoder.safetensors");
+    }
+
+    private static void ConvertVocoder(string folder, string parent, string sourceName, string targetName)
+    {
+        if (File.Exists(Path.Combine(parent, targetName)) || File.Exists(Path.Combine(folder, targetName)))
+        {
+            return;
+        }
+        string[] candidates =
+        [
+            Path.Combine(parent, "xcodec_vocoder_src", sourceName),
+            Path.Combine(folder, "xcodec_vocoder_src", sourceName),
+            Path.Combine(parent, "decoders", sourceName),
+            Path.Combine(folder, "decoders", sourceName),
+            Path.Combine(parent, sourceName),
+            Path.Combine(folder, sourceName),
+        ];
+        string? checkpoint = candidates.FirstOrDefault(File.Exists);
+        if (checkpoint is null)
+        {
+            return;
+        }
+        try
+        {
+            string outputPath = Path.Combine(parent, targetName);
+            Logs.Info($"[Audio][YuE] Converting Vocos vocoder '{Path.GetFileName(checkpoint)}' → {targetName} (one-time)...");
+            using PytorchPickleLoader loader = new PytorchPickleLoader();
+            loader.Load(checkpoint, recursiveFlatten: true);
+            Dictionary<string, Tensor> tensors = loader.GetAllTensors();
+            if (tensors.Count == 0)
+            {
+                throw new InvalidDataException($"Vocoder checkpoint '{checkpoint}' yielded no tensors.");
+            }
+            SafeTensorsWriter.Save(outputPath, tensors);
+            Logs.Info($"[Audio][YuE] Wrote {tensors.Count} vocoder tensors to '{outputPath}'.");
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[Audio][YuE] Vocoder conversion failed for '{checkpoint}' — continuing with the 16 kHz x-codec draft", ex);
+        }
     }
 
     /// <summary>Finds a file inside the checkpoint folder, then one directory up (so variants can share one copy).</summary>

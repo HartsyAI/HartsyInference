@@ -280,6 +280,11 @@ public sealed unsafe class GenericTransformer : IDisposable
             return ForwardEmbeds(placement.Stages[0].Backend, embeds, t, posStart, cache, tokenIds: tokenIds);
         if (_cfg.PerLayerEmbeddingDim > 0)
             throw new NotSupportedException("Layer-split placement does not support Gemma-4 per-layer embeddings yet.");
+        if (_cfg.CrossAttnLayers.Count > 0)
+            throw new NotSupportedException(
+                "Layer-split placement does not support mllama cross-attention layers yet — a gated "
+                + "cross-attention layer needs the vision features copied to its stage's backend, which the "
+                + "staged path doesn't do. Load this model on a single device for image questions.");
 
         Tensor hidden = embeds;
         bool owns = false;

@@ -9,6 +9,42 @@ stable release will require. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Multi-GPU sharding, placement & parallelism — the full opt-in feature set** (`PlacementConfig` /
+  `EngineOptions.Placement`; all-defaults is byte-identical to single-GPU). Works over plain PCIe with
+  no P2P/NVLink (host-staged boundaries; P2P used when available). User guide: `docs/MULTI_GPU.md`.
+  - **LLM layer split** (`ShardDevices`, or a `"cuda:0+cuda:1"` composite device key / `--device` in the
+    CLI): N-way transformer layer split planned from live free VRAM (or explicit `ShardRatios`), per-stage
+    asymmetric weight preload, KV cache per-layer on its stage's card, logits/sampler on the last stage.
+    Verified: Llama-3.2-1B split = exact token parity vs single-GPU; **Qwen3-32B Q4_K_M (19.8 GB) OOMs a
+    24 GB 4090 alone and runs at ~12.1 tok/s split across 4090+3060**. Exclusions: SSM, Gemma-4 PLE, VLM
+    sidecars (warned + skipped); CUDA-graph/speculative decode disabled while staged.
+  - **DiT block sharding** (`EnableDitSharding`, exactly 2 devices; CLI `--dit-shard-gpu`, extension
+    `DitShardGpuId`): diffusion transformer block-range split with pooled (never replicated) weights.
+    Verified on real weights: Krea2, Qwen-Image 20B, Flux.1 (plain generations; ControlNet/Kontext/
+    inpaint/regional auto-fall-back), Chroma, HunyuanImage 2.1, MiniMax-H3 fp8. Disables step-graph/
+    step-cache/block-streaming while sharded; mutually exclusive with CFG-parallel.
+  - **Audio-LM layer split + precision policy** (CLI `--lm-shard-gpu`, extension `LmShardGpuId`): YuE's
+    7B Stage-1 rides the same layer-split machinery; the load-time Q4_K quantization became a policy
+    (`HARTSY_AUDIO_LM_QUANT=q4k|q8|off`) defaulting to **un-quantized bf16 when sharded** — pooled at
+    8.7 + 4.3 GB across 4090+3060. `MusicLoadContext` carries shard backends + precision to loaders.
+  - **TE/VAE component placement** (`TextEncoderDevice`/`VaeDevice`; CLI `--te-gpu`/`--vae-gpu`): Wan
+    TI2V-5B 43.7 s → 32.7 s with umT5 on the second card; SDXL SSIM 0.9998; Flux/Qwen-Image/Chroma/
+    HunyuanImage/LTX-1/LTX-2 wired. Composes with DiT sharding.
+  - **CFG-branch parallelism** (`CfgParallelDevice`; CLI `--cfg-parallel-gpu`): negative branch runs
+    concurrently on a second card with replicated weights (~1.8-1.9× per-step concurrency; Wan +
+    Flux true-CFG), observably falling back to sequential when the replica doesn't fit.
+  - **Same-GPU dual backends**: two engine instances share one physical GPU with isolated
+    streams/caches/mempools; serialized per-ordinal by default (`HARTSY_SAME_GPU_CONCURRENT=1` opts into
+    concurrent mode, which has a known allocator issue near VRAM capacity — left off).
+  - Verification: `tests/run-multigpu-campaign.sh` (real-weight, fail-on-missing-checkpoint) covering
+    every mode; measured tables in `benchmarks/results/2026-08-05_multigpu_speeds.md`.
+- **YuE full-quality pipeline activated**: Stage-2 (m-a-p/YuE-s2-1B-general, cb0 → all 8 codebooks) and
+  the per-stem 44.1 kHz Vocos vocoders are now weights-catalog entries (auto-download); the vocoder
+  torch checkpoints auto-convert to safetensors on first load (`EnsureVocoders`, same pattern as
+  x-codec). Without them YuE silently degraded to the vocal-cb0-only 16 kHz draft — the "garbled" mode
+  (Whisper transcribes it as nothing; the full pipeline transcribes supplied lyrics near-verbatim).
+  CLI `hartsy music` gained `-g|--genre` (YuE's prompt is the LYRICS — `[verse]`/`[chorus]` markers —
+  and genre carries the style tags).
 - **MiniMax-H3 ("Hailuo 03") — full port, real-weight video + audio verified on a 12 GB RTX 3060.** Single-stream
   packed-token DiT (`[text | cond | audio | video]`, hidden 5376, 50 blocks) denoising 24-channel video and 32-channel
   40 Hz stereo audio jointly, with a ViT3D video VAE, a DAC/BigVGAN audio VAE, and an NVFP4-AWQ Qwen3-VL text encoder.

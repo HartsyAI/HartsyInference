@@ -120,4 +120,21 @@ public sealed unsafe class LlmPlacementTests
         Assert.Throws<ArgumentException>(() => new LlmPlacement([new LlmStage(backend, 1, 4)]));
         Assert.Throws<ArgumentException>(() => new LlmPlacement([]));
     }
+
+    /// <summary>Guards a real bug (Phase 1, fixed 2026-08-05): <see cref="GenericTransformer.ForwardEmbedsStaged"/>
+    /// used to silently take the <c>CopyHidden</c> branch for mllama gated cross-attention layers instead of
+    /// throwing — wrong output, no signal. The doc comment already claimed this was unsupported (same as the
+    /// enforced Gemma-4 per-layer-embedding case just above it), but nothing actually enforced it.</summary>
+    [Fact]
+    public void ForwardEmbedsStaged_RejectsMllamaCrossAttentionLayers()
+    {
+        TransformerConfig cfg = Config() with { CrossAttnLayers = new HashSet<int> { 1 } };
+        using CpuBackend backend = new();
+        using GenericTransformer model = new(cfg);
+        LlmPlacement placement = new([new LlmStage(backend, 0, 2), new LlmStage(backend, 2, 4)]);
+        using KvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim);
+        using Tensor embeds = Embeds(4, cfg.HiddenSize);
+
+        Assert.Throws<NotSupportedException>(() => model.ForwardEmbedsStaged(placement, embeds, 4, 0, cache));
+    }
 }

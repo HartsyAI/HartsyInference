@@ -317,8 +317,6 @@ all_reduce(local[r], bytes):
 - **CUDA-graph capture across devices:** vLLM/SGLang capture per-step graphs; whether our `CudaGraph` can span a multi-device step or must be per-device is unverified.
 - **Optional custom-AR win window:** if we later add a hand-rolled one-shot AR for tiny decode messages, how close to / better than NCCL on our hardware? Narrow window (≤8 MB, ≤8 GPUs, full NVLink). Microbenchmark before investing. Not on the critical path.
 - **Exact MLA + EP interplay** when wiring DeepSeek-V3 routing (slice-verified, Phase 8a) onto real multi-GPU EP — node-limited-routing all-to-all dispatch is non-trivial.
-- **CUDA-graph capture across devices:** vLLM/SGLang capture per-step graphs; whether our `CudaGraph` can span a multi-device step or must be per-device is unverified.
-- **Exact MLA + EP interplay** when we eventually wire DeepSeek-V3 routing (already slice-verified per `MODEL_STATUS_LLM.md` Phase 8a) onto real multi-GPU EP — the all-to-all dispatch of node-limited routing is non-trivial.
 
 ## Implementation Notes for HartsyInference
 
@@ -343,8 +341,11 @@ surface built on the milestone-1 machinery is now live in three shapes. (1) **TE
 `--te-gpu`/`--vae-gpu`) is wired fleet-wide — verified end-to-end for Wan, Flux
 (`FluxComponentPlacementEngineTests`, SSIM 0.8126 from fp8-T5 cross-SM drift on the mismatched pair;
 matched cards are expected bit-identical) and SDXL (`SdxlComponentPlacementEngineTests`, SSIM 0.9998);
-Qwen-Image, Chroma, HunyuanImage, LTX-1, and LTX-2 (incl. its audio VAE + vocoder) are wired pending
-checkpoint verification. (2) **DiT block-range sharding** (`DitShardGpuId` / `--dit-shard-gpu` — VRAM
+Qwen-Image, Chroma, HunyuanImage, LTX-1, and LTX-2 (incl. its audio VAE + vocoder) are wired but
+**UNVERIFIED** — no `ComponentPlacementEngineTests` class exists for any of these five as of
+2026-08-05 (only `WanComponentPlacementEngineTests`/`FluxComponentPlacementEngineTests`/
+`SdxlComponentPlacementEngineTests` exist); do not cite these five as verified until a matching
+engine test lands (tracked in the multi-GPU finish-out plan, Phase 3.4). (2) **DiT block-range sharding** (`DitShardGpuId` / `--dit-shard-gpu` — VRAM
 pooling, not latency, i.e. milestone 1's memory-scales contract applied to DiTs) is verified for six
 models: Krea2 (e2e SSIM 0.8787), Qwen-Image 20B (`QwenImageDitSharding{,Vram,Engine}Tests`: 19.6 GB
 pooled 13.4+6.2 at the live 41/60 split, SSIM 0.9734, drift 0.00 GB), MiniMax-H3 fp8

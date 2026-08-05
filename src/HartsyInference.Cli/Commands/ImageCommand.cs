@@ -77,6 +77,36 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("RNG seed; negative randomizes.")]
         public int Seed { get; init; } = -1;
 
+        /// <summary>Init image for image-to-image; unset runs pure text-to-image.</summary>
+        [CommandOption("--init-image")]
+        [Description("Path to a PNG/BMP init image; turns the run into image-to-image. Only families whose recipe declares img2img accept it.")]
+        public string? InitImage { get; init; }
+
+        /// <summary>Denoise strength over the init image; unset uses the engine's default.</summary>
+        [CommandOption("--creativity")]
+        [Description("How much of the init image to overwrite, 0..1 (0 keeps it, 1 ignores it). Requires --init-image.")]
+        public double? Creativity { get; init; }
+
+        /// <summary>Inpaint mask; white regenerates, black preserves.</summary>
+        [CommandOption("--mask")]
+        [Description("Path to a PNG/BMP inpaint mask (white = regenerate, black = preserve). Requires --init-image.")]
+        public string? Mask { get; init; }
+
+        /// <summary>Mask dilation in pixels.</summary>
+        [CommandOption("--mask-grow")]
+        [Description("Grow the mask by this many pixels before use.")]
+        public int? MaskGrow { get; init; }
+
+        /// <summary>Mask blur in pixels, for a softer inpaint transition.</summary>
+        [CommandOption("--mask-blur")]
+        [Description("Blur the mask by this many pixels for a softer transition.")]
+        public int? MaskBlur { get; init; }
+
+        /// <summary>"Inpaint only masked": generate at full resolution over just the masked region.</summary>
+        [CommandOption("--mask-shrink-grow")]
+        [Description("Inpaint only masked: crop to the mask's bounds grown by this many pixels, generate there at full resolution, and composite back. 0 disables.")]
+        public int? MaskShrinkGrow { get; init; }
+
         /// <summary>Directory to save the image to.</summary>
         [CommandOption("-o|--output")]
         [Description("Directory to save the image (defaults to the output root).")]
@@ -108,6 +138,12 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("sampler", settings.Sampler);
         parameters.PutIfSet("scheduler", settings.Scheduler);
         parameters.PutIfSet("sigma-shift", settings.SigmaShift);
+        parameters.PutIfSet("init-image", settings.InitImage);
+        parameters.PutIfSet("creativity", settings.Creativity);
+        parameters.PutIfSet("mask", settings.Mask);
+        parameters.PutIfSet("mask-grow", settings.MaskGrow);
+        parameters.PutIfSet("mask-blur", settings.MaskBlur);
+        parameters.PutIfSet("mask-shrink-grow", settings.MaskShrinkGrow);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Image);

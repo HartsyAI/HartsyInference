@@ -15,6 +15,7 @@ HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpo
 - [How to Use It (SwarmUI recommended)](#how-to-use-it)
 - [Quick Start (Library)](#quick-start-library)
 - [Quick Start (CLI, developer tool)](#quick-start-cli-developer-tool)
+- [Multi-GPU & Sharding](#multi-gpu--sharding)
 - [Benchmarks](#benchmarks)
 - [Models](#models)
 - [Future Features](#future-features)
@@ -38,6 +39,7 @@ HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpo
 | **Validated** | Every component matches a Python/C++ reference within documented tolerances. |
 | **World models** | Real-time, action-conditioned interactive generation (keyboard / mouse / camera-pose → streamed frames). |
 | **Runs models bigger than your GPU** | VRAM-aware weight streaming: the engine measures free VRAM per generation phase and streams a denoiser's blocks from host RAM only when the model would not otherwise fit. A 12 GB card runs models needing ~20 GB resident. Automatic by default, and switchable off for operators who prefer a hard failure. |
+| **Multi-GPU sharding** | One model **split across GPUs, VRAM pooled** — LLM layer splits (a 32B that OOMs a 24 GB card runs at ~12 tok/s across 4090+3060), DiT block sharding for big image/video models, un-quantized audio LMs pooled instead of crushed to fit, TE/VAE placement, and parallel CFG branches. Works over plain PCIe — **no NVLink/P2P required**. See [Multi-GPU & Sharding](#multi-gpu--sharding). |
 | **Production-grade** | Streaming progress, memory budgeting, VRAM monitoring, model hot-swap. |
 | **SwarmUI-native** | Ships as a first-class [SwarmUI backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend), a pure-C# alternative to the ComfyUI backend. |
 
@@ -85,7 +87,7 @@ dotnet run -c Release --project src/HartsyInference.Cli -- \
 dotnet run -c Release --project src/HartsyInference.Cli -- transcribe speech.wav -m whisper-base
 ```
 
-Commands span every modality — `text`, `image`, `transcribe`, `speak`, `3d`, `vision`, `music`, `video`, `world`, `restore` (SeedVR2 video/image restoration: `hartsy restore old_clip.mp4` → upscaled/deartifacted PNG frames + MP4; also chainable as `hartsy video ... --restore`), `convert` (voice conversion), `fx separate` / `fx enhance` (stem separation / speech enhancement) — plus catalog helpers `list`, `models`, `pull`, and `preview` (inline terminal image display). Common flags: `-b|--backend cpu|cuda|vulkan`, `-m|--model <name>`, `--model-path <path>`. Run `hartsy <command> --help` for a command's full option set.
+Commands span every modality — `text`, `image`, `transcribe`, `speak`, `3d`, `vision`, `music`, `video`, `world`, `restore` (SeedVR2 video/image restoration: `hartsy restore old_clip.mp4` → upscaled/deartifacted PNG frames + MP4; also chainable as `hartsy video ... --restore`), `convert` (voice conversion), `fx separate` / `fx enhance` (stem separation / speech enhancement) — plus catalog helpers `list`, `models`, `pull`, and `preview` (inline terminal image display). Common flags: `-b|--backend cpu|cuda|vulkan`, `-m|--model <name>`, `--model-path <path>`. Multi-GPU placement flags are shared across generation commands — `--dit-shard-gpu`, `--lm-shard-gpu`, `--te-gpu`, `--vae-gpu`, `--cfg-parallel-gpu` (and `--device "cuda:0+cuda:1"` for text) — see [Multi-GPU & Sharding](#multi-gpu--sharding). Run `hartsy <command> --help` for a command's full option set.
 
 > [!TIP]
 > `pull` downloads a model from HuggingFace (or registers a local path) into the cache; `list` and `models` show the catalog and what's already cached. Image checkpoints also resolve from a ComfyUI-style layout under `<repo>/Models`.
@@ -306,6 +308,35 @@ await foreach (VideoFrame frame in session.ReadFramesAsync())
 
 ---
 
+## Multi-GPU & Sharding
+
+HartsyInference can spread **one model across several GPUs with the VRAM pooled** — not just one
+generation per GPU. It works over plain PCIe with **no NVLink and no P2P required** (cross-GPU
+hand-offs host-stage automatically; mismatched consumer cards are the primary tested rig — an
+RTX 4090 + RTX 3060). Everything is opt-in: an unconfigured engine is byte-identical to single-GPU.
+
+| Mode | What it buys you | Example (measured) |
+|---|---|---|
+| **LLM layer split** (`--device "cuda:0+cuda:1"`) | Text models bigger than any one card: layers split proportionally to free VRAM, KV cache follows | **Qwen3-32B** Q4_K_M OOMs a 24 GB 4090 alone → runs at **~12 tok/s** split across 4090+3060 |
+| **DiT block sharding** (`--dit-shard-gpu`) | Big image/video diffusion models fully resident across 2 cards instead of streaming from RAM | **Qwen-Image 20B** resident at 13.4 + 6.2 GB, SSIM 0.9734 vs single-GPU; Krea2, Flux.1, Chroma, HunyuanImage, MiniMax-H3 verified |
+| **Audio-LM split** (`--lm-shard-gpu`) | Big music LMs run **un-quantized** pooled across cards instead of being quantized down to fit one | **YuE's 7B Stage-1** at checkpoint bf16 in 8.7 + 4.3 GB pooled (single-GPU default crushes it to Q4_K) |
+| **TE / VAE placement** (`--te-gpu`, `--vae-gpu`) | Multi-GB text encoders / VAE off the denoiser's card — often a straight wall-clock win | **Wan TI2V-5B: 43.7 s → 32.7 s** with umT5 on the second card |
+| **CFG-parallel** (`--cfg-parallel-gpu`) | Positive + negative prompt branches run **concurrently** on two cards (weights replicated) | ~1.8-1.9× per-step concurrency on Wan / Flux true-CFG; auto-falls-back when the model doesn't fit both |
+| **Same-GPU multi-tenant** | Two independent engine backends share one physical GPU with isolated state | Serialized per-GPU by default; enterprise co-tenancy |
+
+Honest framing: **sharding pools VRAM, it does not add speed** — a pipeline split runs its stages
+sequentially, so per-step time is the same or a few percent slower (boundary copies). The win is that
+models that *couldn't run* now run, and models that had to be quantized or streamed now run resident at
+full precision. Placement and CFG-parallel, by contrast, can be outright faster.
+
+**The full guide — every setting (SwarmUI extension / CLI / `PlacementConfig` library API), mechanics,
+verified-model matrix, and limits: [`docs/MULTI_GPU.md`](docs/MULTI_GPU.md).** Measured tables:
+[`benchmarks/results/2026-08-05_multigpu_speeds.md`](benchmarks/results/2026-08-05_multigpu_speeds.md).
+Every mode is regression-guarded by a real-weight campaign (`tests/run-multigpu-campaign.sh`). Tensor
+parallel (NCCL) and expert parallel are designed but not yet built — see [`ROADMAP.md`](docs/Checklists/ROADMAP.md).
+
+---
+
 ## Benchmarks
 
 We publish real numbers and we are honest about where we stand. HartsyInference is a young pure-C# engine: it is correct across a very wide model set, and on several flagship image models it is now **faster than ComfyUI on the same GPU** — while other models are still mid-optimization. We are closing the remaining gaps in the open. Each modality has one canonical scoreboard table under [`benchmarks/scoreboards/`](benchmarks/scoreboards/) — that's where the numbers, methodology, and sources live now.
@@ -356,6 +387,7 @@ Index of all status docs: [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md). 
 - **Video:** CogVideoX, longer-context temporal generation; **MiniMax-H3** (omni text/image/video/audio → 2K video with native stereo audio — announced 2026-07-31, weights promised but not yet published; the recipe seam and the researched capability contract are in [`MINIMAX_H3.md`](docs/Research/MINIMAX_H3.md)). *(Shipped 2026-07: HunyuanVideo 13B T2V, verified end-to-end through SwarmUI — see [Models](#models) above and [`VIDEO.md`](benchmarks/scoreboards/VIDEO.md).)*
 - **3D:** texture synthesis, multi-view to mesh. *(Gaussian-splat output has an initial pipeline CLI-wired for TRELLIS, but is not yet parity-verified against the reference rasterizer — see [MODEL_STATUS_3D](docs/Checklists/MODEL_STATUS_3D.md).)*
 - **World models:** broader action spaces, longer memory horizons, multiplayer state
+- **Multi-GPU:** tensor parallel (NCCL) for datacenter NVLink boxes, expert parallel for MoE, >2-way DiT sharding, sequence parallel for video. *(Shipped 2026-08: the layer-split / DiT-shard / placement / CFG-parallel feature set — see [Multi-GPU & Sharding](#multi-gpu--sharding).)*
 - **Tooling:** quantized inference (MXFP4 / MXFP8 / NVFP4), expanded CLI subcommands per modality
 
 ---
@@ -423,6 +455,7 @@ Each package is one folder under `src/`; the meta **HartsyInference** package pu
 | Document | Description |
 |---|---|
 | [Benchmark Scoreboards](benchmarks/scoreboards/) | Per-modality HartsyInference-vs-baseline results tables (Image / Video / Audio / LLM / 3D) |
+| [Multi-GPU Guide](docs/MULTI_GPU.md) | Sharding, component placement, CFG-parallel — settings, mechanics, verified models, limits |
 | [Code Style](docs/CODE_STYLE.md) | Mandatory coding conventions (the standards single source of truth) |
 | [Model Status](docs/Checklists/MODEL_STATUS.md) | Per-modality status + remaining work (index) |
 | [Roadmap](docs/Checklists/ROADMAP.md) | Cross-cutting engineering roadmap (multi-GPU, kernel perf, quant, release) |

@@ -63,8 +63,7 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
             vae.LoadWeights(vaeWeights);
             // The encoder half is what the deferred reference-image edit path needs; constructing with it keeps
             // OmniGen2Pipeline.EditFromEmbeddings reachable once E-IMG-4 lands.
-            VaeEncoder vaeEncoder = new VaeEncoder(VaeConfig.Flux);
-            vaeEncoder.LoadWeights(vaeWeights);
+            VaeEncoder vaeEncoder = LoaderVaeUtils.BuildEncoder(VaeConfig.Flux, vaeWeights, "OmniGen2Recipe");
 
             OmniGen2Pipeline pipeline = new OmniGen2Pipeline(context.Backend, transformer, vae, vaeEncoder, config);
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);

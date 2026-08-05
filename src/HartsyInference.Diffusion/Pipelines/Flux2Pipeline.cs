@@ -101,50 +101,15 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         int patW = imgW / 16;
         int imgSeqLen = patH * patW;
 
-        // Img2img: validate source shape + handle strength=0 short-circuit BEFORE any model work.
-        // NOTE: cannot use the shared Img2ImgSetup helper here — Flux.2 rounds image dimensions to
-        // a multiple of 16, so the source-shape validation must compare against the *rounded*
-        // imgH/imgW (not request.Height/Width). Img2ImgSetup hard-checks against the request, which
-        // would reject any input that wasn't already 16-aligned.
-        int startStep = 0;
-        Tensor? maskPixel = null;
-        if (request is ImageToImageRequest img2img)
+        // Validated against the 16-rounded imgH/imgW rather than the raw request size — Prepare compares against the
+        // dimensions it is handed, which is what lets a snapping family share the helper.
+        Img2ImgSetup.Plan img2imgPlan = Img2ImgSetup.Prepare(request, imgH, imgW, steps);
+        int startStep = img2imgPlan.StartStep;
+        Tensor? maskPixel = img2imgPlan.MaskPixel;
+        if (img2imgPlan.PassThrough)
         {
-            Tensor src = img2img.SourceImage;
-            if (src.Shape.Rank != 4 || src.Shape[0] != 1 || src.Shape[1] != 3 ||
-                src.Shape[2] != imgH || src.Shape[3] != imgW)
-            {
-                throw new ArgumentException(
-                    $"SourceImage shape must be [1, 3, {imgH}, {imgW}] (matching the 16-rounded request resolution); got {src.Shape}.",
-                    nameof(request));
-            }
-
-            if (img2img.Mask is not null)
-            {
-                Tensor mk = img2img.Mask;
-                if (mk.Shape.Rank != 4 || mk.Shape[0] != 1 || mk.Shape[1] != 1 ||
-                    mk.Shape[2] != imgH || mk.Shape[3] != imgW)
-                {
-                    throw new ArgumentException(
-                        $"Mask shape must be [1, 1, {imgH}, {imgW}] (matching the 16-rounded source); got {mk.Shape}.",
-                        nameof(request));
-                }
-                if (mk.DType != DType.F32)
-                {
-                    throw new ArgumentException($"Mask must be F32 in [0, 1]; got {mk.DType}.", nameof(request));
-                }
-                maskPixel = mk;
-            }
-
-            float strength = Math.Clamp(img2img.Strength, 0f, 1f);
-            int initTimesteps = (int)MathF.Round(steps * strength);
-            startStep = Math.Max(steps - initTimesteps, 0);
-
-            if (initTimesteps == 0)
-            {
-                Logs.Info("Strength=0; passing source through unchanged");
-                return (ImagePostProcessor.TensorToRgbBytes(src), imgW, imgH, seed);
-            }
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), imgW, imgH, seed);
         }
         bool isMaskedInpaint = maskPixel is not null;
 

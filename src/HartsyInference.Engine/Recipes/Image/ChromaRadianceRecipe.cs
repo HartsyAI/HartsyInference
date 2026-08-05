@@ -16,6 +16,10 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
     public string Name => "chroma-radiance";
 
     /// <inheritdoc/>
+    /// <remarks>Chroma Radiance is pixel-space (NeRF decode head), so img2img noises the source pixels directly with no VAE.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "chroma-radiance", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Chroma Radiance's official sampling settings: 50 steps at guidance 3.5, 1024x1024 (<c>ChromaRadianceConfig.DefaultSteps</c>/<c>DefaultCfgScale</c>).</summary>

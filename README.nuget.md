@@ -80,6 +80,8 @@ Swap `new CpuBackend()` for `new CudaBackend()` or `new VulkanBackend()`; the pi
 
 Checkpoints load directly from `.safetensors` / `.gguf`, including quantized weights (GGUF, MXFP4/8, NVFP4, block-scaled). Low-VRAM weight streaming (`HARTSY_LOWVRAM`) lets large image models fit on smaller cards by sliding weights through a bounded window instead of holding them fully resident.
 
+**Multi-GPU sharding** pools VRAM across cards for one model — LLM layer splits (`PlacementConfig.ShardDevices` or a `"cuda:0+cuda:1"` device key; a 32B GGUF that OOMs a 24 GB card runs split across two consumer cards), DiT block sharding for large image/video models, un-quantized audio LMs pooled instead of quantized to fit, text-encoder/VAE placement on a second GPU, and concurrent CFG branches. No NVLink or P2P required — cross-GPU hand-offs host-stage over plain PCIe. All opt-in via `EngineOptions.Placement`; an unconfigured engine is byte-identical to single-GPU. See the repo's [Multi-GPU guide](https://github.com/HartsyAI/HartsyInference/blob/main/docs/MULTI_GPU.md).
+
 > Coverage is wide because the engine shares a common core (tensors, schedulers, VAEs, text encoders, DSP) across architectures. Per-model numerical validation is ongoing; see the alpha note above.
 
 ---
@@ -96,6 +98,7 @@ HartsyInference is moving fast, and the roadmap is broad. On deck:
 | **3D** | Gaussian-splat output, texture synthesis, multi-view to mesh |
 | **World models** | Matrix-Game 2.0 / 3.0 and Hunyuan-GameCraft (catalogued, checkpoint loaders still landing), broader action spaces, longer memory horizons, multiplayer state |
 | **Performance** | SPIR-V/Vulkan flash-attention parity with the CUDA path, further closing the speed gap vs native runners on non-NVIDIA GPUs |
+| **Multi-GPU** | Tensor parallel (NCCL) for NVLink boxes, expert parallel for MoE, >2-way DiT sharding *(the layer-split / DiT-shard / placement / CFG-parallel set shipped 2026-08)* |
 | **Tooling** | Wider quantized inference (MXFP4 / MXFP8 / NVFP4), broader SwarmUI-extension model coverage |
 
 Track progress and releases on the [GitHub repo](https://github.com/HartsyAI/HartsyInference).

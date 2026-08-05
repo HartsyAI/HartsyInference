@@ -19,6 +19,10 @@ public sealed class ZImageRecipe : IArchitectureRecipe
     public string Name => "zimage";
 
     /// <inheritdoc/>
+    /// <remarks>Z-Image shares the Flux VAE; the encoder is constructed alongside the decoder and ZImagePipeline implements the masked path.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "zimage", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Z-Image Turbo's official sampling settings: 8 steps, guidance-free (CFG 1.0), 1024x1024 (<c>GenerationDefaults.ZImageTurbo</c>).</summary>
@@ -75,8 +79,7 @@ public sealed class ZImageRecipe : IArchitectureRecipe
         vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeights, VaePrecisionHelper.PreferredVaeDtype(context.Backend));
         VaeDecoder vae = new VaeDecoder(VaeConfig.ZImage);
         vae.LoadWeights(vaeWeights);
-        VaeEncoder vaeEncoder = new VaeEncoder(VaeConfig.ZImage);
-        vaeEncoder.LoadWeights(vaeWeights);
+        VaeEncoder vaeEncoder = LoaderVaeUtils.BuildEncoder(VaeConfig.ZImage, vaeWeights, "ZImageRecipe");
 
         ZImagePipeline pipeline = new ZImagePipeline(context.Backend, transformer, vae, vaeEncoder, zConfig);
         Logs.Info("[ZImageRecipe] Z-Image ready.");

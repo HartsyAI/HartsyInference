@@ -33,6 +33,11 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
         [Description("Backend: auto, cpu, cuda, or vulkan.")]
         public string Backend { get; init; } = "auto";
 
+        /// <summary>Genre/style tags, separate from the prompt (which YuE reads as LYRICS).</summary>
+        [CommandOption("-g|--genre")]
+        [Description("Genre/style tags (ACE-Step style prompt; YuE genre tags, e.g. \"uplifting pop female vocal electronic\"). For YuE the PROMPT is the lyrics (use [[verse]]/[[chorus]] markers) and this carries the style.")]
+        public string Genre { get; init; } = "";
+
         /// <summary>Duration in seconds.</summary>
         [CommandOption("-d|--duration")]
         [Description("Duration in seconds.")]
@@ -66,6 +71,7 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
         ParamState parameters = new ParamState(Modality.Music) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("duration", settings.Duration.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
+        parameters.Put("genre", settings.Genre);
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Music);
         string label = CommandRunner.ResolveLabel(spec, settings.Model);

@@ -66,8 +66,7 @@ public sealed class Sd15Recipe : IArchitectureRecipe
         VaeDecoder vaeDecoder = new VaeDecoder(VaeConfig.Sd15);
         vaeDecoder.LoadWeights(converted.Vae);
 
-        VaeEncoder vaeEncoder = new VaeEncoder(VaeConfig.Sd15);
-        vaeEncoder.LoadWeights(converted.Vae);
+        VaeEncoder vaeEncoder = LoaderVaeUtils.BuildEncoder(VaeConfig.Sd15, converted.Vae, "Sd15Recipe");
 
         StableDiffusion15Pipeline pipeline = new StableDiffusion15Pipeline(context.Backend, textEncoder, unet, vaeDecoder, vaeEncoder);
         Logs.Info("[Sd15Recipe] SD1.5 ready.");

@@ -1,7 +1,11 @@
 using System.Diagnostics;
 using Xunit;
 using Xunit.Abstractions;
+using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Models.Whisper;
+using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
+using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
@@ -17,15 +21,29 @@ namespace HartsyInference.Diffusion.Tests;
 /// chain an operator reaches via <c>--lm-shard-gpu</c> / the extension's shard setting: the quant policy
 /// auto-resolves to un-quantized (checkpoint bf16) because pooling makes it affordable, the Stage-1 7B is
 /// layer-split across both cards via <c>PlacementPlanner.LlmSplitPlan</c> + <c>LlmPlacement</c>, the
-/// asymmetric per-stage preload genuinely pools (both cards' VRAM rises), and a coherent WAV comes out.
-/// Lives in Diffusion.Tests with the other engine-level placement tests (the only test project that
-/// references the Engine), same as the video-family MiniMaxH3 classes.</summary>
+/// asymmetric per-stage preload genuinely pools (both cards' VRAM rises), and a coherent WAV comes out — verified
+/// both by the pooling/cache-key assertions below and, for the primary fact, by feeding the WAV through a Whisper
+/// STT content-word-recall gate (see <see cref="AssertLyricsAreIntelligible"/>).
+/// Lives in Diffusion.Tests with the other engine-level placement tests, alongside <c>HartsyInference.LLM.Tests</c>'
+/// own real-checkpoint engine-sharding tests — both test projects reference the Engine.</summary>
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
 public sealed class YueLmShardingEngineTests
 {
     private readonly ITestOutputHelper _output;
     public YueLmShardingEngineTests(ITestOutputHelper output) => _output = output;
+
+    /// <summary>Real distinct content words in <see cref="LyricsPrompt"/>'s [verse]/[chorus] lines — the Whisper
+    /// recall target. Deliberately NOT the genre/style text: an earlier draft of this test fed a style description
+    /// ("uplifting synth pop, catchy chorus") as <see cref="MusicRequest.Prompt"/>, which YuE's tokenizer treats as
+    /// the sung LYRICS (<c>YueTokenizer.SplitLyrics</c> finds no <c>[label]</c> markers in it and falls back to
+    /// singing the raw style text verbatim) — Whisper correctly transcribed that as nothing, which looked like a
+    /// broken pipeline but was actually a broken test.</summary>
+    private static readonly string[] LyricContentWords = ["morning", "ocean", "flying", "burning"];
+
+    /// <summary>Real structured lyrics (<c>[verse]</c>/<c>[chorus]</c> markers YuE's tokenizer splits on) — this is
+    /// what <see cref="MusicRequest.Prompt"/> means for YuE; style/genre goes in <see cref="MusicRequest.Genre"/>.</summary>
+    private const string LyricsPrompt = "[verse]\nGolden morning breaks across the ocean\n[chorus]\nWe keep flying through the burning sky";
 
     [Fact]
     public async Task LmSharding_RealEngine_UnquantizedStage1_PooledAcrossGpus_ProducesAudio()
@@ -56,9 +74,9 @@ public sealed class YueLmShardingEngineTests
         ModelSpec spec = ModelResolver.Resolve("yue", modelPathArg: null, Modality.Music);
         MusicRequest request = new MusicRequest
         {
-            Prompt = "uplifting synth pop, catchy chorus",
-            Genre = "pop",
-            Duration = 4,
+            Prompt = LyricsPrompt,
+            Genre = "uplifting synth pop, catchy chorus",
+            Duration = 8,
             Seed = 7,
         };
 
@@ -109,6 +127,47 @@ public sealed class YueLmShardingEngineTests
         {
             _output.WriteLine("nvidia-smi unavailable — VRAM pooling assertion skipped (audio + cache-key checks still ran).");
         }
+
+        await AssertLyricsAreIntelligible(result, LyricContentWords);
+    }
+
+    /// <summary>Whisper content-word-recall gate mirroring <c>TranscribeWavFileTests</c>' harness (that test lives
+    /// in a sibling test project this one doesn't reference, and exposes no separately-callable helper — its whole
+    /// transcribe+recall logic is inline in its own <c>[Fact]</c> — so this reproduces the minimal piece directly
+    /// against the already-referenced <c>HartsyInference.Audio</c>/<c>HartsyInference.Cpu</c> src packages).
+    /// <c>WhisperPipeline.TranscribeWav</c> resamples internally, so the raw 44.1 kHz vocoder output is fed as-is.
+    /// Requires at least half the content words, not all: sung-vocal ASR is measurably harder than the
+    /// spoken-TTS word-perfect bar other models hit (docs/Checklists/MODEL_STATUS_AUDIO.md calls YuE's own manual
+    /// verification "near-verbatim", not word-perfect), so a >=50% recall is the genuine-intelligibility line
+    /// without being flaky on a single mis-heard word.</summary>
+    private async Task AssertLyricsAreIntelligible(AudioResult result, string[] targetWords)
+    {
+        const string whisperRepo = "openai/whisper-medium";
+        string whisperDir = AudioModelCache.GetRepoDirectory(whisperRepo, "stt");
+        if (!RealWeightGate.Require(_output.WriteLine, Path.Combine(whisperDir, "model.safetensors"))) return;
+
+        string wavPath = Path.Combine(Path.GetTempPath(), $"yue_lm_sharding_{Guid.NewGuid():N}.wav");
+        try
+        {
+            File.WriteAllBytes(wavPath, result.Data);
+            using CpuBackend backend = new();
+            using WhisperPipeline stt = await WhisperPipeline.LoadAsync(whisperRepo);
+            string heard = stt.TranscribeWav(backend, wavPath,
+                new WhisperOptions { Language = "en", Translate = false, WithTimestamps = false }).Trim();
+            _output.WriteLine($"Whisper heard: \"{heard}\"");
+
+            string lower = heard.ToLowerInvariant();
+            string[] hits = [.. targetWords.Where(w => lower.Contains(w.ToLowerInvariant()))];
+            double recall = hits.Length / (double)targetWords.Length;
+            _output.WriteLine($"Content-word recall: {hits.Length}/{targetWords.Length} ({recall:P0}) — {string.Join(",", hits)}");
+            Assert.True(recall >= 0.5,
+                $"Whisper recall {recall:P0} ({hits.Length}/{targetWords.Length}) on \"{heard}\" — sung lyrics are not "
+                + "intelligible; check the Stage-2/vocoder path didn't silently fall back to the cb0-only 16 kHz draft.");
+        }
+        finally
+        {
+            File.Delete(wavPath);
+        }
     }
 
     /// <summary>The explicit env override must beat the sharded auto-default (Off): with
@@ -126,7 +185,13 @@ public sealed class YueLmShardingEngineTests
             if (!RealWeightGate.Require(_output.WriteLine, checkpoint)) return;
 
             ModelSpec spec = ModelResolver.Resolve("yue", modelPathArg: null, Modality.Music);
-            MusicRequest request = new MusicRequest { Prompt = "gentle piano", Genre = "pop", Duration = 3, Seed = 7 };
+            MusicRequest request = new MusicRequest
+            {
+                Prompt = "[verse]\nSoft rain falls on the quiet town",
+                Genre = "gentle piano",
+                Duration = 3,
+                Seed = 7,
+            };
             PlacementConfig placement = new PlacementConfig { ShardDevices = ["cuda:0", "cuda:1"] };
             AudioResult result;
             using (InferenceEngine engine = new InferenceEngine("cuda", 0, new EngineOptions { Placement = placement }))

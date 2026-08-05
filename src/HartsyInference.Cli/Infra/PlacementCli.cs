@@ -23,7 +23,7 @@ public class PlacementCliSettings : CommandSettings
     public int? VaeGpu { get; init; }
 
     [CommandOption("--cfg-parallel-gpu")]
-    [Description("Run CFG's negative branch on this CUDA ordinal concurrently with the positive branch (weights REPLICATED — a latency win when the denoiser fits on both cards; silently falls back to sequential otherwise — check the [CfgParallel] log line). Mutually exclusive with --dit-shard-gpu.")]
+    [Description("Run CFG's negative branch on this CUDA ordinal concurrently with the positive branch (weights REPLICATED — a latency win when the denoiser fits on both cards; silently falls back to sequential otherwise — check the [[CfgParallel]] log line). Mutually exclusive with --dit-shard-gpu.")]
     public int? CfgParallelGpu { get; init; }
 
     [CommandOption("--dit-shard-gpu")]

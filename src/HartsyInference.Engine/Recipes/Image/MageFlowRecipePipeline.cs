@@ -65,15 +65,24 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
         (int[] promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, prompt);
         (int[] negTokens, int negDrop) = EncodeWithTemplate(_tokenizer, negative);
 
-        // Edit: the init image (if any) is VAE-encoded to in-context reference latents. Only engaged when an encoder
-        // was loaded (edit-capable VAE) AND an init image is supplied.
-        Img2ImgResolver.Img2ImgSpec? editSpec = _vaeEncoder is not null
-            ? Img2ImgResolver.Resolve(request.Img2Img, null, width, height) : null;
+        // Whether a checkpoint carries the encoder half is a property of the file, not of the family, so the recipe's
+        // Supports bit (read before construction, to route the request) cannot express it. Refuse loudly here instead:
+        // dropping the init image silently is the one outcome that looks like a working generation but is not.
+        if (request.Img2Img is not null && _vaeEncoder is null)
+        {
+            throw new NotSupportedException(
+                "This Mage-Flow checkpoint carries no VAE encoder weights, so it cannot condition on an init image. "
+                + "Use an edit-capable Mage-Flow checkpoint, or remove the init image.");
+        }
+
+        // Edit: the init image (if any) is VAE-encoded to in-context reference latents. Resolved at the *snapped* size
+        // so the source matches what the pipeline computes. The mask arg is null because Mage-Flow conditions on a
+        // reference image and has no masked-inpaint path — its Supports omits Inpaint, so a mask is refused upstream.
+        using Img2ImgResolver.Img2ImgSpec? editSpec = Img2ImgResolver.Resolve(request.Img2Img, null, width, height);
 
         progress?.Report(new StepPreview { Step = 0, TotalSteps = steps });
         Tensor image = _pipeline.GenerateFromTokens(promptTokens, promptDrop, useCfg ? negTokens : null, negDrop,
             width, height, steps, cfg, seed, editSpec?.SourceTensor);
-        editSpec?.Dispose();
         progress?.Report(new StepPreview { Step = steps, TotalSteps = steps });
 
         byte[] rgb = ToRgbBytes(image, out int outW, out int outH);

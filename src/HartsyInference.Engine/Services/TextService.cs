@@ -257,14 +257,31 @@ public sealed class TextService : ITextService, IDisposable
                 $"'{RepoPaths.ModelsRoot()}').");
         if ((slot.Model is not null || slot.SsmModel is not null) && slot.LoadedPath == path)
             return;
+        string[] shardDevices = ResolveShardDevices(deviceKey);
+        ValidateShardDevices(shardDevices);
         UnloadSlot(slot);
         EnsureRamHeadroomFor(path);
         string architecture0 = PeekArchitecture(path);
-        string[] shardDevices = ResolveShardDevices(deviceKey);
         if (shardDevices.Length >= 2 && !SsmLanguageModel.IsSsmArchitecture(architecture0))
         {
             LoadSharded(slot, deviceKey, path, request, shardDevices);
             return;
+        }
+        if (shardDevices.Length >= 2)
+        {
+            // SSM recurrent state has no per-layer-crossing story, so layer-split isn't offered for it — this
+            // used to fall back with no signal at all that the rest of the device list was being ignored.
+            // A request-level composite key ("cuda:2+cuda:3") additionally hits a real footgun below: plain
+            // CreateBackendFor(deviceKey) naively splits on the FIRST colon, so it reads "2+cuda:3" as the
+            // ordinal, fails to parse, and silently defaults to ordinal 0 — NOT shardDevices[0]. Resolve the
+            // fallback device explicitly (first requested device for a composite key; unchanged otherwise, since
+            // an engine-placement-driven deviceKey here is already a single valid device) and log THAT value,
+            // so the warning always describes where the load actually lands.
+            string fallbackDevice = deviceKey.Contains('+') ? shardDevices[0] : deviceKey;
+            Logs.Warning($"[TextService] '{deviceKey}' requests a {shardDevices.Length}-way split, but "
+                + $"'{architecture0}' is an SSM/recurrent architecture — layer-split isn't supported for it. "
+                + $"Loading on '{fallbackDevice}' only; the rest of the device list is ignored.");
+            deviceKey = fallbackDevice;
         }
         IBackend backend = slot.Backend ??= CreateBackendFor(deviceKey);
         bool isCpu = backend is not CudaBackend;
@@ -322,6 +339,27 @@ public sealed class TextService : ITextService, IDisposable
             return [.. _engine.Placement.ShardDevices];
         }
         return [];
+    }
+
+    /// <summary>Rejects a shard list containing a non-CUDA device. <see cref="LoadSharded"/> always loads the
+    /// GGUF with <c>dequantizeToF32: false</c> (every CUDA backend handles quantized formats directly), so a
+    /// CPU stage would receive quantized tensors a CPU backend can't compute on (CPU requires F32). No-op for
+    /// fewer than 2 devices — single-device loads already pick <c>dequantizeToF32: isCpu</c> correctly.</summary>
+    private static void ValidateShardDevices(string[] shardDevices)
+    {
+        if (shardDevices.Length < 2)
+            return;
+        foreach (string device in shardDevices)
+        {
+            if (!device.StartsWith("cuda", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new HartsyInferenceException(
+                    $"LLM layer-split sharding requires every stage to be a CUDA device — got '{device}' in "
+                    + $"[{string.Join(", ", shardDevices)}]. A CPU stage isn't supported here: the sharded loader "
+                    + "keeps GGUF tensors quantized for CUDA backends, and a CPU backend needs them dequantized "
+                    + "to F32. Use a single CPU-only device (no '+') instead of mixing CPU into a shard list.");
+            }
+        }
     }
 
     /// <summary>Layer-split load: plans layer ranges across <paramref name="shardDevices"/> (explicit engine

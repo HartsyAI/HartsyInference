@@ -115,6 +115,8 @@ phase_a() {
     run_class HartsyInference.API.Tests        PlacementPlannerTests
     run_class HartsyInference.Core.Tests       PlacementConfigTests
     run_class HartsyInference.LLM.Tests        LlmPlacementTests
+    # No checkpoint or GPU needed — rejects a CPU stage mixed into an LLM shard list before any file access.
+    run_class HartsyInference.LLM.Tests        TextServiceShardValidationTests
     run_class HartsyInference.Diffusion.Tests  Krea2DitShardingTests
     run_class HartsyInference.Diffusion.Tests  Krea2DitShardingVramTests
     # HARTSY_KEEP_MODELS is a static-readonly read → each fact of the engine class runs in its own process.
@@ -138,10 +140,24 @@ phase_a() {
     run_class HartsyInference.Diffusion.Tests  FluxDitShardingEngineTests
     run_class HartsyInference.Diffusion.Tests  MiniMaxH3DitShardingTests
     run_class HartsyInference.Diffusion.Tests  MiniMaxH3DitShardingVramTests
+    # Full-engine real-generation variant (the 6th sibling's engine test). Cross-device SSIM for THIS model
+    # is informational only (fp8 dequant on SM 8.6 vs native fp8 on SM 8.9 legitimately drifts hard on this
+    # checkpoint's activation scale — see the benchmarks doc footnote); the test's real gate is same-device
+    # split exactness (SSIM 1.0000) plus VRAM pooling.
+    run_class HartsyInference.Diffusion.Tests  MiniMaxH3DitShardingEngineTests
     # Audio-LM layer split (YuE Stage-1 un-quantized bf16 pooled across both cards; weights on this box).
     # HARTSY_AUDIO_LM_QUANT is process-wide env the second fact mutates → each fact runs filter-isolated.
+    # The primary fact also gates on a Whisper content-word-recall check (real [verse]/[chorus] lyrics).
     run_class HartsyInference.Diffusion.Tests  YueLmShardingEngineTests.LmSharding_RealEngine_UnquantizedStage1_PooledAcrossGpus_ProducesAudio
     run_class HartsyInference.Diffusion.Tests  YueLmShardingEngineTests.LmSharding_EnvQuantOverride_WinsOverShardedDefault
+    # LLM layer-split real-checkpoint parity (Llama-3.2-1B exact-token-match vs unsharded, greedy/fixed-seed).
+    run_class HartsyInference.LLM.Tests        LlmShardingEngineTests.Sharded_TwoGpus_ExactTokenParity_VsUnsharded_GreedyFixedSeed
+    # SLOW + HOST-RAM-GATED: needs ~46 GB free host RAM (2.5x the ~18.4 GB Qwen3-32B Q4_K_M file, per
+    # TextService.EnsureRamHeadroomFor) REGARDLESS of GPU sharding — the gate is on CPU-side dequantization
+    # staging, not final VRAM residency. Will self-skip (→ FAILED under this script's strict gate) whenever
+    # swarmui.service or another heavy process is holding host RAM; stop it first if this line fails only
+    # on a RAM-skip message, not a real regression.
+    run_class HartsyInference.LLM.Tests        LlmShardingEngineTests.Sharded_TwoGpus_Qwen3_32B_DecodeTokPerSec
 }
 
 # ── Phase B: post-download (hartsy pull chroma qwen-image hunyuan-image wan) ─────────────────────────────

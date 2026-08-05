@@ -59,11 +59,6 @@ public sealed class UnetCompositionPlan : IDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(conditioningFactory);
-        if (request.Inpaint is not null && request.Img2Img is null)
-        {
-            throw new InvalidOperationException(
-                "An inpaint mask was supplied without an init image. Inpainting re-paints an existing image — set Img2Img.InitImage too.");
-        }
         (int width, int height) = RecipeRequestMapper.Size(request);
         ControlNetResolver.ResolvedSpec? controlNets = null;
         IpAdapterResolver.ResolvedSpec? ipAdapters = null;
@@ -72,6 +67,9 @@ public sealed class UnetCompositionPlan : IDisposable
         ConditioningSchedule? conditioning = null;
         try
         {
+            // Resolved first so the inpaint-without-init-image guard fires before the IP-Adapter resolver loads a model.
+            img2img = RecipeImg2ImgBinder.Resolve(request, width, height);
+
             controlNets = ControlNetResolver.Resolve(
                 request.ControlNets, unetConfig, width, height,
                 static message => Logs.Info($"[Features][ControlNet] {message}"),
@@ -104,7 +102,6 @@ public sealed class UnetCompositionPlan : IDisposable
                     + "at model construction, so add it to the request's LoRA stack for full FaceID fidelity.");
             }
 
-            img2img = Img2ImgResolver.Resolve(request.Img2Img, request.Inpaint, width, height);
             if (img2img is null)
             {
                 variationNoise = VariationSeedResolver.Resolve(

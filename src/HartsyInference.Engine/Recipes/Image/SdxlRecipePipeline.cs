@@ -105,35 +105,13 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
     /// <summary>Builds the inner diffusion request — an <see cref="ImageToImageRequest"/> when the plan resolved an init image, else plain text-to-image with any variation-seed noise injected.</summary>
     private static TextToImageRequest BuildInner(ImageRequest request, string negative, UnetCompositionPlan plan)
     {
-        if (plan.Img2Img is not null)
+        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative) with
         {
-            return new ImageToImageRequest
-            {
-                Prompt = request.Prompt,
-                NegativePrompt = negative,
-                Width = request.Width,
-                Height = request.Height,
-                Steps = request.Steps,
-                CfgScale = request.CfgScale,
-                Seed = RecipeRequestMapper.MapSeed(request.Seed),
-                Scheduler = request.Scheduler,
-                SourceImage = plan.Img2Img.SourceTensor,
-                Strength = plan.Img2Img.Strength,
-                Mask = plan.Img2Img.MaskTensor,
-            };
-        }
-        return new TextToImageRequest
-        {
-            Prompt = request.Prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = request.Steps,
-            CfgScale = request.CfgScale,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
             Scheduler = request.Scheduler,
+            // The plan only resolves variation noise on the text-to-image path, so this is null under img2img.
             InitialNoise = plan.TakeVariationNoise(),
         };
+        return RecipeImg2ImgBinder.Apply(inner, plan.Img2Img);
     }
 
     /// <summary>Resolves the refiner request into a mid-loop StepSwap config, loading (and caching) the refiner UNet.
