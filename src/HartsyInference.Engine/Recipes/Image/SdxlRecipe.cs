@@ -74,6 +74,7 @@ public sealed class SdxlRecipe : IArchitectureRecipe
             {
                 TextEncoderBackend = context.TextEncoderBackendOrDefault,
                 VaeBackend = context.VaeBackendOrDefault,
+                CfgParallelBackend = context.CfgParallelBackend,
             };
             Logs.Info("[SdxlRecipe] SDXL ready.");
             return new SdxlRecipePipeline(pipeline, context.Backend, clipL, clipG, loraStack);

@@ -334,7 +334,12 @@ public static class TestPaths
     /// <summary>SD3.5 paths. Assets are not bundled — tests skip when missing. FP8-bundled single-file checkpoints from Comfy-Org/stable-diffusion-3.5-fp8 are the default; set env vars to override for FP16 / community quants.</summary>
     public static class Sd35
     {
-        public static string Medium       => Resolve("SD35_MEDIUM_PATH",       Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_medium_incl_clips_t5xxlfp8scaled.safetensors"));
+        /// <summary>First existing of the clips+T5-bundled release and the transformer-only (+VAE, no text
+        /// encoders) release — the latter resolves CLIP-L/CLIP-G/T5-XXL as separate side models via
+        /// <c>Sd3Recipe</c>'s modular component path.</summary>
+        public static string Medium       => FirstExisting("SD35_MEDIUM_PATH",
+            Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_medium_incl_clips_t5xxlfp8scaled.safetensors"),
+            Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_medium.safetensors"));
         public static string Large        => Resolve("SD35_LARGE_PATH",        Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_large_fp8_scaled.safetensors"));
         public static string LargeTurbo   => Resolve("SD35_LARGE_TURBO_PATH",  Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_large_turbo.safetensors"));
     }

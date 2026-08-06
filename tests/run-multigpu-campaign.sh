@@ -126,6 +126,7 @@ phase_a() {
     run_class HartsyInference.Diffusion.Tests  FluxComponentPlacementEngineTests
     run_class HartsyInference.Diffusion.Tests  SdxlComponentPlacementEngineTests
     run_class HartsyInference.Diffusion.Tests  FluxCfgParallelFallbackTests
+    run_class HartsyInference.Diffusion.Tests  SdxlCfgParallelEngineTests
     # FIXED 2026-08-05: two engines co-resident on one ordinal near VRAM capacity forced Flux into
     # block-streaming mode (not enough VRAM to stay resident), which conflicts with step-graph capture —
     # AwaitWeights' cross-stream event wait trips CUDA_ERROR_STREAM_CAPTURE_ISOLATION mid-capture. The abort
@@ -147,9 +148,35 @@ phase_a() {
     run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingTests
     run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingVramTests
     # HARTSY_KEEP_MODELS static-init read → each engine fact runs filter-isolated in its own process.
+    # KNOWN RED as of 2026-08-05 (N-way sharding generalization pass): this SSIM-vs-unsharded gate fails
+    # (~0.176, was documented as 0.9734) for a reason UNRELATED to the N-way generalization — see the
+    # 2026-08-05 benchmark doc "Qwen-Image cross-ordinal fidelity finding" section. Root-caused via a same-
+    # ordinal-two-backend-instances control (bit-exact, err=0/262144) vs a genuinely-cross-ordinal control
+    # (catastrophic at split=41 AND split=59): running this fp8mixed checkpoint's blocks through the 3060's
+    # non-native fp8→BF16 dequant GEMM path diverges sharply from the 4090's native fp8 path — the same class
+    # of drift MiniMaxH3DitShardingEngineTests already documents and gates informationally (SSIM > 0.05, not
+    # a real bar) rather than at 0.75. This test's threshold was NOT changed in this pass (not this task's
+    # call) — flagged for the user to decide whether Qwen-Image's gate should be reclassified the same way.
     run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
+    # NOT RE-EVALUATED in this pass (self-skipped on its own free-VRAM gate — the live swarmui.service was
+    # holding the 4090 at the time). No SSIM gate on this fact (VRAM-drift check only), so it is not expected
+    # to be affected by the finding above, but that is inference, not a measurement — re-run to confirm.
     run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingEngineTests.DitSharding_NonResident_FreesShardBackend_NoAccumulationAcrossGenerations HARTSY_KEEP_MODELS=0
+    # NOT RE-EVALUATED in this pass either (same VRAM contention). Both configs it compares carry the same
+    # cross-ordinal DiT split, so it is EXPECTED to be affected by the same-class finding above — but that is
+    # inference, not a measurement (it compares sharded-vs-sharded, which could plausibly be self-consistent
+    # and pass even if each side individually diverges from an unsharded baseline). Re-run to confirm either way.
     run_class HartsyInference.Diffusion.Tests  QwenImageCombinedPlacementShardingEngineTests
+    # N-way (Phase 8+) generalization landed 2026-08-05, Qwen-Image only (other 5 sharded families stay 2-way —
+    # ROADMAP.md item 7). Mechanism proof: tiny synthetic weights, 3 stages [cuda:0, cuda:1, cuda:0] — TWO
+    # boundary crossings, THREE distinct backend instances, tight tolerance (this box has only 2 physical GPUs,
+    # so stage 0 and stage 2 share ordinal 0 via a second independent CudaBackend instance — NOT a 3-different-
+    # physical-card proof, which stays untested/untestable here).
+    run_class HartsyInference.Diffusion.Tests  QwenImageDitSharding3StageTests
+    # Real-weight VRAM-pooling proof for the same 3-stage shape: no SSIM gate (deliberately — see the fp8
+    # finding above), asserts 3 distinct backend instances hold provably distinct, disjoint block ranges and the
+    # forward completes finite.
+    run_class HartsyInference.Diffusion.Tests  QwenImageDitSharding3StageVramTests
     run_class HartsyInference.Diffusion.Tests  FluxDitShardingVramTests
     run_class HartsyInference.Diffusion.Tests  FluxDitShardingEngineTests
     run_class HartsyInference.Diffusion.Tests  MiniMaxH3DitShardingTests
@@ -165,11 +192,14 @@ phase_a() {
     run_class HartsyInference.Diffusion.Tests  YueLmShardingEngineTests.LmSharding_RealEngine_UnquantizedStage1_PooledAcrossGpus_ProducesAudio
     run_class HartsyInference.Diffusion.Tests  YueLmShardingEngineTests.LmSharding_EnvQuantOverride_WinsOverShardedDefault
     # Audio-LM layer split, second consumer: CosyVoice 2's Qwen2.5-0.5B backbone (tiny — a pure placement/pooling
-    # demonstration, not a can't-fit-one-card case like YuE). Gates on llm.pt/flow.pt/hift.pt (FunAudioLLM/
-    # CosyVoice2-0.5B) + s3gen.safetensors (ResembleAI/chatterbox, frozen S3/CAM++ encoders) + the vendored
-    # jfk.wav reference clip. NOT confirmed present on every box — download via the CosyVoice load path
-    # (`hartsy speak -m cosyvoice ...` once, or fetch llm.pt/flow.pt/hift.pt/s3gen.safetensors by hand) before
-    # running this line if it fails on a SKIPPED message rather than a real regression.
+    # demonstration, not a can't-fit-one-card case like YuE). Real-weight-verified 2026-08-05: 100% Whisper
+    # content-word recall, real VRAM pooling on both cards. Gates on llm.pt/flow.pt/hift.pt (FunAudioLLM/
+    # CosyVoice2-0.5B, pulled via `hartsy pull cosyvoice`) + s3gen.safetensors (ResembleAI/chatterbox, frozen
+    # S3/CAM++ encoders) + the vendored jfk.wav reference clip. If a box is missing the checkpoint, run
+    # `hartsy pull cosyvoice` then hardlink Models/Audio/CosyVoice/{llm.pt,flow.pt,hift.pt} into
+    # Models/audio/tts/FunAudioLLM--CosyVoice2-0.5B/ and s3gen.safetensors into
+    # Models/audio/tts/ResembleAI--chatterbox/ (the CLI pull path and the runtime AudioModelCache layout
+    # differ — same data-layout mismatch YuE hit earlier).
     run_class HartsyInference.Diffusion.Tests  CosyVoiceLmShardingEngineTests
     # Oasis world model: VaeDevice overlaps a finished frame's VAE decode with the next frame's DiT denoise
     # (~3.35 GB checkpoint set, camenduru/oasis-500m mirror .pt->safetensors — see MODEL_STATUS_WORLD.md).
@@ -194,7 +224,19 @@ phase_b() {
     run_class HartsyInference.Diffusion.Tests  HunyuanImageDitShardingEngineTests
     run_class HartsyInference.Video.Tests      CfgBranchParallelWanTests
     run_class HartsyInference.Diffusion.Tests  WanComponentPlacementEngineTests
+    # VaeDevice twin of the TE test above — Wan had zero VAE placement until WanVideoPipeline.VaeBackend landed.
+    run_class HartsyInference.Diffusion.Tests  WanVaeComponentPlacementEngineTests
     run_class HartsyInference.Diffusion.Tests  WanCfgParallelEngineTests
+    # LTX-1 (ltx-video-2b-v0.9.safetensors, ~9.4 GB, Lightricks/LTX-Video) — needed a download on this box.
+    # TE was already wired (LtxVideoRecipePipeline._textBackend); VAE placement is new (LtxVideoPipeline.VaeBackend).
+    run_class HartsyInference.Diffusion.Tests  LtxVideoComponentPlacementEngineTests
+    # LTX-2.3 (~22 GB transformer-only split, Kijai/LTX2.3_comfy + already-cached video/audio VAE + text-projection
+    # side models) — NOT downloaded on this box as of 2026-08-05 (47 GB free, shared with concurrent agents; the
+    # DiT alone is ~22 GB). Both TE and VAE placement were already wired in LtxVideo2Pipeline; this closes the
+    # "wired but UNVERIFIED" gap docs/MULTI_GPU.md flagged once the checkpoint lands. RealWeightGate skips cleanly
+    # until then — `hartsy pull ltx-2` (or download the Kijai split file to
+    # Models/Stable-Diffusion/LtxVideo2/ltx-2.3-22b-dev-fp8.safetensors) before running this line.
+    run_class HartsyInference.Diffusion.Tests  LtxVideo2ComponentPlacementEngineTests
 }
 
 case "${PHASE}" in

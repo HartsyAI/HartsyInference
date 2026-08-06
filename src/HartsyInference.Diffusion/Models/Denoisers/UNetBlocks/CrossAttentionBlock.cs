@@ -212,11 +212,26 @@ internal sealed class TransformerSubBlock
     // Cross-attention K/V cache: the projections of the text conditioning are step-invariant (the
     // context tensor is fixed across the denoise loop), so the k/v Linears + head-split permutes run
     // once per generation instead of once per step (~140 GEMMs + 140 permutes/step on SDXL). Keyed on
-    // the context tensor reference — the fused loop passes the same pre-cast conditioning object every
-    // step; per-step slicing callers (legacy CFG loop) miss every call and behave exactly as before.
-    private Tensor? _crossKvContextRef;
-    private Tensor? _cachedCrossKeyMh;
-    private Tensor? _cachedCrossValueMh;
+    // (backend, context) reference pairs across TWO slots — CFG-branch parallelism (SDXL CFG-parallel)
+    // calls this Forward concurrently from two threads against two different backends and two different
+    // (fixed, step-invariant) context tensors; a single unkeyed slot would race (torn metadata, or one
+    // thread's eviction Dispose freeing a tensor the other thread is mid-SDPA against — this instance is
+    // SHARED across both threads, only the backend argument differs per call). The lock below guards only
+    // the slot lookup/install, never the GPU compute (Linear/Permute0213), so the two branches' actual work
+    // still overlaps. The fused single-GPU loop only ever touches slot 0 (one backend, cache hits every
+    // step after the first). Per-step slicing callers (legacy CFG loop) build a fresh context tensor every
+    // call, so they never hit either slot and behave exactly as before.
+    private readonly object _kvCacheLock = new object();
+    private KvCacheSlot _kvSlot0;
+    private KvCacheSlot _kvSlot1;
+
+    private struct KvCacheSlot
+    {
+        public IBackend? Backend;
+        public Tensor? Context;
+        public Tensor? KeyMh;
+        public Tensor? ValueMh;
+    }
 
     public TransformerSubBlock(int channels, int numHeads, int contextDim)
     {
@@ -292,17 +307,25 @@ internal sealed class TransformerSubBlock
         TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
         TensorShape kvMhShape = new TensorShape(batch, _numHeads, kvSeqLen, _headDim);
 
-        // Cross-attention K/V: step-invariant per generation (see cache fields) — reuse when the same
-        // context tensor comes back; the cache owns the reused tensors' lifetime.
-        bool kvFromCache = !isSelfAttn && ReferenceEquals(_crossKvContextRef, context)
-            && _cachedCrossKeyMh is not null && _cachedCrossValueMh is not null;
-        Tensor keyMh, valueMh;
-        if (kvFromCache)
+        // Cross-attention K/V: step-invariant per generation (see cache fields above) — reuse when the
+        // same (backend, context) pair comes back; the cache owns the reused tensors' lifetime.
+        bool kvFromCache = false;
+        Tensor keyMh = null!, valueMh = null!;
+        if (!isSelfAttn)
         {
-            keyMh = _cachedCrossKeyMh!;
-            valueMh = _cachedCrossValueMh!;
+            lock (_kvCacheLock)
+            {
+                if (ReferenceEquals(_kvSlot0.Backend, backend) && ReferenceEquals(_kvSlot0.Context, context) && _kvSlot0.KeyMh is not null)
+                {
+                    keyMh = _kvSlot0.KeyMh; valueMh = _kvSlot0.ValueMh!; kvFromCache = true;
+                }
+                else if (ReferenceEquals(_kvSlot1.Backend, backend) && ReferenceEquals(_kvSlot1.Context, context) && _kvSlot1.KeyMh is not null)
+                {
+                    keyMh = _kvSlot1.KeyMh; valueMh = _kvSlot1.ValueMh!; kvFromCache = true;
+                }
+            }
         }
-        else
+        if (!kvFromCache)
         {
             TensorShape kvOutShape = new TensorShape(batch, kvSeqLen, _channels);
             Tensor key = new Tensor(kvOutShape, dtype);
@@ -319,11 +342,33 @@ internal sealed class TransformerSubBlock
 
             if (!isSelfAttn)
             {
-                _cachedCrossKeyMh?.Dispose();
-                _cachedCrossValueMh?.Dispose();
-                _cachedCrossKeyMh = keyMh;
-                _cachedCrossValueMh = valueMh;
-                _crossKvContextRef = context;
+                lock (_kvCacheLock)
+                {
+                    // Reuse this backend's own slot when it has one; otherwise claim an empty slot; otherwise
+                    // (a third backend, unsupported today) evict slot 0. Each backend only ever installs into
+                    // its own slot across calls, so the two CFG-parallel threads never contend for the same
+                    // slot's tensors once both have run once.
+                    bool useSlot0 = ReferenceEquals(_kvSlot0.Backend, backend) || _kvSlot0.Backend is null
+                        || (!ReferenceEquals(_kvSlot1.Backend, backend) && _kvSlot1.Backend is not null);
+                    if (useSlot0)
+                    {
+                        _kvSlot0.KeyMh?.Dispose();
+                        _kvSlot0.ValueMh?.Dispose();
+                        _kvSlot0.Backend = backend;
+                        _kvSlot0.Context = context;
+                        _kvSlot0.KeyMh = keyMh;
+                        _kvSlot0.ValueMh = valueMh;
+                    }
+                    else
+                    {
+                        _kvSlot1.KeyMh?.Dispose();
+                        _kvSlot1.ValueMh?.Dispose();
+                        _kvSlot1.Backend = backend;
+                        _kvSlot1.Context = context;
+                        _kvSlot1.KeyMh = keyMh;
+                        _kvSlot1.ValueMh = valueMh;
+                    }
+                }
                 kvFromCache = true;
             }
         }

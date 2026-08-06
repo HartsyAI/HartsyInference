@@ -205,7 +205,19 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         // every step, every block — without preload, the first step would pay cache-miss
         // overhead for every parameter access. FreeWeights below the VAE handoff cycles the
         // VRAM. No-op on backends without a weight cache.
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
+        // DiT sharding: asymmetric preload — Backend gets the shared weights PLUS its block range,
+        // DitShardBackend gets ONLY its block range. Preloading EnumerateWeights() on both would replicate
+        // the MMDiT instead of pooling VRAM across the two cards (the CFG-parallel mistake this exists to avoid).
+        if (DitShardBackend is not null)
+        {
+            Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+            Backend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+        }
+        else
+        {
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+        }
 
         // Materialize every tensor that must survive across steps on the host, then reclaim the VAE-encode
         // intermediates. The per-step FreeActivations below frees device buffers WITHOUT a D2H sync-back, so
@@ -232,7 +244,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             }
             else
             {
-                noisePred = _transformer.Forward(Backend, latent, t, condProjected, condPooled);
+                noisePred = RunForward(latent, t, condProjected, condPooled);
             }
 
             // Scheduler step
@@ -294,7 +306,21 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         // resident. Mirrors PHASE_3_DEVIATIONS #18 (UNet eviction before VAE for SDXL/Flux).
         // Backends without a weight cache (CPU/Vulkan) treat this as a no-op.
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
+        DitShardBackend?.Sync();
+        if (DitShardBackend is not null)
+        {
+            // Mirror of the sharded preload above: Backend frees shared + its block range, DitShardBackend
+            // frees ONLY its block range. Freeing EnumerateWeights() on Backend alone would ask it to free
+            // tensors it never promoted (they're on DitShardBackend) and leak DitShardBackend's range across
+            // generations.
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+        }
+        else
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+        }
         // T5/CLIP are already gone — released at the end of the text-encode phase rather than held across
         // the whole denoise loop.
 
@@ -394,12 +420,23 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         Tensor uncondContext, Tensor uncondPooled,
         float cfgScale)
     {
-        Tensor uncondNoise = _transformer.Forward(Backend, latent, timestep, uncondContext, uncondPooled);
-        Tensor condNoise = _transformer.Forward(Backend, latent, timestep, condContext, condPooled);
+        Tensor uncondNoise = RunForward(latent, timestep, uncondContext, uncondPooled);
+        Tensor condNoise = RunForward(latent, timestep, condContext, condPooled);
         Tensor output = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
         uncondNoise.Dispose();
         condNoise.Dispose();
         return output;
+    }
+
+    /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when
+    /// configured, else the normal single-backend path.</summary>
+    private Tensor RunForward(Tensor latent, float timestep, Tensor context, Tensor pooled)
+    {
+        if (DitShardBackend is not null)
+        {
+            return _transformer.ForwardSharded(Backend, DitShardBackend, latent, timestep, context, pooled, DitShardSplitBlock);
+        }
+        return _transformer.Forward(Backend, latent, timestep, context, pooled);
     }
 
     /// <summary>Concatenates two [B, S1, D] and [B, S2, D] tensors along the sequence dimension → [B, S1+S2, D].</summary>

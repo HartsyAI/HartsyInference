@@ -137,7 +137,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
                 }
                 (long freeA, _) = context.Backend.GetVramInfo();
                 (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan(freeA, freeB, perBlockBytes, sharedWeightBytes);
+                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], perBlockBytes, sharedWeightBytes)[0];
                 Logs.Info($"[Flux1Recipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
                     + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend (v1 plain path; "
                     + "ControlNet/Kontext/inpaint/regional generations fall back to unsharded).");

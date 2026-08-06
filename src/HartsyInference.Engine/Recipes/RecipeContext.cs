@@ -39,6 +39,13 @@ public sealed record RecipeContext
     /// <c>PlacementPlanner.DitSplitPlan</c>).</summary>
     public IBackend? DitShardBackend { get; init; }
 
+    /// <summary>Ordered backends for stages <c>1..N-1</c> of Phase 8+ N-way DiT block-range sharding (stage 0 is
+    /// always <see cref="Backend"/>); null/empty = no N-way sharding. Currently consumed only by
+    /// <c>QwenImageRecipe</c> — the other five sharded families stay on <see cref="DitShardBackend"/>'s 2-way shape
+    /// (<c>ROADMAP.md</c> item 7 tracks generalizing them too). Populated alongside <see cref="DitShardBackend"/>
+    /// from the same <c>PlacementConfig.ShardDevices</c> list, so a 2-device config gives both the same information.</summary>
+    public IReadOnlyList<IBackend>? DitShardBackends { get; init; }
+
     /// <summary>The text-encoder backend with the primary fallback applied.</summary>
     public IBackend TextEncoderBackendOrDefault => TextEncoderBackend ?? Backend;
 
@@ -71,6 +78,18 @@ public sealed record RecipeContext
                 && !ReferenceEquals(DitShardBackend, CfgParallelBackend))
             {
                 yield return DitShardBackend;
+            }
+            if (DitShardBackends is not null)
+            {
+                foreach (IBackend stageBackend in DitShardBackends)
+                {
+                    if (!ReferenceEquals(stageBackend, Backend) && !ReferenceEquals(stageBackend, TextEncoderBackend)
+                        && !ReferenceEquals(stageBackend, VaeBackend) && !ReferenceEquals(stageBackend, CfgParallelBackend)
+                        && !ReferenceEquals(stageBackend, DitShardBackend))
+                    {
+                        yield return stageBackend;
+                    }
+                }
             }
         }
     }

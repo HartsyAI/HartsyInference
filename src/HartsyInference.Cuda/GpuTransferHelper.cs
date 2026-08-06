@@ -432,11 +432,16 @@ internal static unsafe class GpuTransferHelper
             string shape = string.Join(",", Enumerable.Range(0, cpuTensor.Shape.Rank).Select(i => cpuTensor.Shape[i]));
             Logs.Info($"[Cuda] H2D MISS inside graph capture: shape=[{shape}] dtype={cpuTensor.DType} bytes={byteSize}");
         }
+        // Materialize the host data BEFORE allocating. Both caches missed here, so any demote hook this read fires
+        // belongs to ANOTHER backend — and that hook makes the other backend's context current without restoring
+        // ours, so allocating first would put the buffer (and the stream-ordered copy) in the wrong context.
+        void* hostData = cpuTensor.DataPointer;
+        s.Context?.EnsureCurrent();
         ulong dptr = CudaMemory.Allocate(byteSize);
         if (s.StreamHandle != 0)
-            CudaMemory.CopyHostToDeviceAsync(dptr, cpuTensor.DataPointer, byteSize, s.StreamHandle);
+            CudaMemory.CopyHostToDeviceAsync(dptr, hostData, byteSize, s.StreamHandle);
         else
-            CudaMemory.CopyHostToDevice(dptr, cpuTensor.DataPointer, byteSize);
+            CudaMemory.CopyHostToDevice(dptr, hostData, byteSize);
         return dptr;
     }
 
@@ -802,9 +807,15 @@ internal static unsafe class GpuTransferHelper
         {
             return false;
         }
-        // Read DataPointer BEFORE planting the demote callbacks — it triggers EnsureCpuData.
+        // Read DataPointer BEFORE planting the demote callbacks — it triggers EnsureCpuData. When ANOTHER backend
+        // already holds this host tensor, that read runs its demote hook, which makes the OTHER backend's context
+        // current and does not put ours back; allocating then lands in the wrong context and the pointer we cache
+        // is unusable here (CUDA_ERROR_INVALID_VALUE on first use). So materialize the host data first, then
+        // re-assert this backend's context before allocating against it.
+        void* hostData = cpuTensor.DataPointer;
+        s.Context?.EnsureCurrent();
         dptr = CudaMemory.AllocatePersistent(byteSize);
-        CudaMemory.CopyHostToDevice(dptr, cpuTensor.DataPointer, byteSize);
+        CudaMemory.CopyHostToDevice(dptr, hostData, byteSize);
         RegisterCachedWeight(cpuTensor, dptr, byteSize);
         state.Promoted = true;
         // Capture the owning State: demotion must free against this backend's context/stream even if

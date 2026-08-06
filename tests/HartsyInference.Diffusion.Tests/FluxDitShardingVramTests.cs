@@ -109,7 +109,7 @@ public sealed class FluxDitShardingVramTests
                 foreach (Tensor t in transformer.EnumerateBlockRangeWeights(i, i + 1))
                     perBlock[i] += t.DType.ComputeByteCount(t.ElementCount);
             (nuint freeANow, _) = backendA.Context.GetMemoryInfo();
-            int crossSplit = PlacementPlanner.DitSplitPlan((long)freeANow, (long)freeB0, perBlock, sharedBytes);
+            int crossSplit = PlacementPlanner.DitSplitPlan([(long)freeANow, (long)freeB0], perBlock, sharedBytes)[0];
             _output.WriteLine($"[5/6] byte-weighted split at {crossSplit} of {blockCount}.");
 
             List<Tensor> aWeights = new(transformer.EnumerateSharedWeights());

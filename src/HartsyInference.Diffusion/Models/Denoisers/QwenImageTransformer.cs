@@ -320,10 +320,45 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         if (splitBlock <= 0 || splitBlock >= _blocks.Length)
             throw new ArgumentOutOfRangeException(nameof(splitBlock),
                 $"splitBlock must be in (0, {_blocks.Length}) exclusive, got {splitBlock}.");
+
+        return ForwardSharded(
+            [new DitShardStage(backendA, 0, splitBlock), new DitShardStage(backendB, splitBlock, _blocks.Length)],
+            packedLatent, encoderHidden, timestep, hPacked, wPacked, refGrids, refTimestepZero);
+    }
+
+    /// <summary>N-way generalization of <see cref="ForwardSharded(IBackend,IBackend,Tensor,Tensor,float,int,int,int,ValueTuple{int,int}[],bool)"/>:
+    /// an ordered list of <see cref="DitShardStage"/> block ranges, each on its own backend. Stage 0's backend owns
+    /// the shared embed/head weights (mirrors the 2-way overload's backendA); the LAST stage hands the img stream
+    /// back to stage 0 for the head. Every interior boundary peer-copies img+txt+temb(+tembZero) forward via
+    /// <see cref="IBackend.CopyFromPeer"/> — temb/tembZero are copied fresh from stage 0's master copy at each
+    /// boundary (not chained stage-to-stage) since they never change across blocks. A stage sharing its backend
+    /// INSTANCE with stage 0 (e.g. two <c>ShardDevices</c> entries that canonically resolve to the same pooled
+    /// backend) skips the temb copy and reuses the master tensor directly — see <c>InferenceEngine.EnsureDitShardBackends</c>
+    /// for when that happens. The 2-way overload is exactly the N=2 case of this loop, so same-device bit-parity
+    /// (<c>QwenImageDitShardingTests</c>) holds for both.</summary>
+    public Tensor ForwardSharded(IReadOnlyList<DitShardStage> stages, Tensor packedLatent, Tensor encoderHidden,
+        float timestep, int hPacked, int wPacked, (int H, int W)[]? refGrids = null, bool refTimestepZero = false)
+    {
+        ArgumentNullException.ThrowIfNull(stages);
+        if (stages.Count < 2)
+            throw new ArgumentException($"DiT sharding needs at least 2 stages, got {stages.Count}.", nameof(stages));
+        int expected = 0;
+        foreach (DitShardStage stage in stages)
+        {
+            ArgumentNullException.ThrowIfNull(stage.Backend);
+            if (stage.StartBlock != expected || stage.EndBlock <= stage.StartBlock)
+                throw new ArgumentException(
+                    $"Stage ranges must be contiguous ascending starting at 0; got [{stage.StartBlock}, {stage.EndBlock}) after {expected}.",
+                    nameof(stages));
+            expected = stage.EndBlock;
+        }
+        if (expected != _blocks.Length)
+            throw new ArgumentException($"Stage ranges must tile all {_blocks.Length} blocks; got {expected}.", nameof(stages));
         if (BeforeBlockForward is not null)
             throw new InvalidOperationException(
                 "DiT sharding and block streaming don't compose — BeforeBlockForward must be null on the sharded path.");
 
+        IBackend firstBackend = stages[0].Backend;
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
         int txtSeqLen = (int)encoderHidden.Shape[1];
@@ -338,38 +373,50 @@ public sealed unsafe class QwenImageTransformer : IDisposable
             throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
                 "Reference-latent (edit) tokens require batch size 1; run CFG as two batch-1 passes.");
 
-        (Tensor currentImg, Tensor currentTxt) = ForwardEmbedIn(backendA, packedLatent, encoderHidden, batch, imgSeqLen, txtSeqLen);
-        Tensor temb = ComputeTimestepEmbedding(backendA, timestep, batch);
+        (Tensor currentImg, Tensor currentTxt) = ForwardEmbedIn(firstBackend, packedLatent, encoderHidden, batch, imgSeqLen, txtSeqLen);
+        Tensor temb = ComputeTimestepEmbedding(firstBackend, timestep, batch);
         Tensor? tembZero = refSeqLen > 0 && refTimestepZero
-            ? ComputeTimestepEmbedding(backendA, 0.0f, batch)
+            ? ComputeTimestepEmbedding(firstBackend, 0.0f, batch)
             : null;
         int txtPositionStart = QwenImageRope.ComputeTextPositionStart(hPacked, wPacked);
 
-        ForwardBlocksRange(backendA, ref currentImg, ref currentTxt, temb, tembZero,
-            hPacked, wPacked, txtPositionStart, refGrids, mainSeqLen, 0, splitBlock);
+        for (int s = 0; s < stages.Count; s++)
+        {
+            DitShardStage stage = stages[s];
+            bool sameAsFirst = s == 0 || ReferenceEquals(stage.Backend, firstBackend);
+            Tensor stageTemb = sameAsFirst ? temb : CopyAcross(stage.Backend, firstBackend, temb);
+            Tensor? stageTembZero = tembZero is null ? null : sameAsFirst ? tembZero : CopyAcross(stage.Backend, firstBackend, tembZero);
 
-        // Boundary A→B: both live streams plus the per-step conditioning every block reads. The streams MOVE
-        // (A's copies are dead), but temb is only COPIED — the head on A still reads it after B's range. The
-        // rope's host cos/sin tables need no copy — WanRopeInterleaved stages them fresh per call on whichever
-        // backend runs.
-        Tensor imgB = MoveAcross(backendB, backendA, currentImg);
-        Tensor txtB = MoveAcross(backendB, backendA, currentTxt);
-        Tensor tembB = CopyAcross(backendB, backendA, temb);
-        Tensor? tembZeroB = tembZero is null ? null : CopyAcross(backendB, backendA, tembZero);
-        currentImg = imgB;
-        currentTxt = txtB;
+            ForwardBlocksRange(stage.Backend, ref currentImg, ref currentTxt, stageTemb, stageTembZero,
+                hPacked, wPacked, txtPositionStart, refGrids, mainSeqLen, stage.StartBlock, stage.EndBlock);
 
-        ForwardBlocksRange(backendB, ref currentImg, ref currentTxt, tembB, tembZeroB,
-            hPacked, wPacked, txtPositionStart, refGrids, mainSeqLen, splitBlock, _config.Depth);
+            if (!sameAsFirst)
+            {
+                stageTemb.Dispose();
+                stageTembZero?.Dispose();
+            }
+
+            bool isLast = s == stages.Count - 1;
+            if (!isLast)
+            {
+                IBackend next = stages[s + 1].Backend;
+                if (!ReferenceEquals(next, stage.Backend))
+                {
+                    currentImg = MoveAcross(next, stage.Backend, currentImg);
+                    currentTxt = MoveAcross(next, stage.Backend, currentTxt);
+                }
+            }
+        }
         currentTxt.Dispose();
-        tembB.Dispose();
-        tembZeroB?.Dispose();
 
-        // Boundary B→A: the head (norm_out/proj_out) lives in the shared weights on A.
-        Tensor imgBack = MoveAcross(backendA, backendB, currentImg);
-        currentImg = imgBack;
+        // The head (norm_out/proj_out) lives in the shared weights on stage 0's backend.
+        IBackend lastBackend = stages[^1].Backend;
+        if (!ReferenceEquals(lastBackend, firstBackend))
+        {
+            currentImg = MoveAcross(firstBackend, lastBackend, currentImg);
+        }
 
-        Tensor output = ForwardHeadOut(backendA, currentImg, temb, batch, imgSeqLen, refSeqLen, mainSeqLen);
+        Tensor output = ForwardHeadOut(firstBackend, currentImg, temb, batch, imgSeqLen, refSeqLen, mainSeqLen);
         temb.Dispose();
         tembZero?.Dispose();
         return output;

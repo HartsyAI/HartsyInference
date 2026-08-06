@@ -338,14 +338,20 @@ the `cuEvent`/`cuStreamWaitEvent` sync milestone 2 would reuse cross-device.
 **Diffusion-side status (2026-08-05, hardware-verified on the 4090+3060 box):** the diffusion multi-GPU
 surface built on the milestone-1 machinery is now live in three shapes. (1) **TE/VAE component placement**
 (`PlacementConfig.TextEncoderDevice`/`VaeDevice`, extension `TextEncoderGpuId`/`VaeGpuId`, CLI
-`--te-gpu`/`--vae-gpu`) is wired fleet-wide — verified end-to-end for Wan, Flux
-(`FluxComponentPlacementEngineTests`, SSIM 0.8126 from fp8-T5 cross-SM drift on the mismatched pair;
-matched cards are expected bit-identical) and SDXL (`SdxlComponentPlacementEngineTests`, SSIM 0.9998);
-Qwen-Image, Chroma, HunyuanImage, LTX-1, and LTX-2 (incl. its audio VAE + vocoder) are wired but
-**UNVERIFIED** — no `ComponentPlacementEngineTests` class exists for any of these five as of
-2026-08-05 (only `WanComponentPlacementEngineTests`/`FluxComponentPlacementEngineTests`/
-`SdxlComponentPlacementEngineTests` exist); do not cite these five as verified until a matching
-engine test lands (tracked in the multi-GPU finish-out plan, Phase 3.4). (2) **DiT block-range sharding** (`DitShardGpuId` / `--dit-shard-gpu` — VRAM
+`--te-gpu`/`--vae-gpu`) is wired fleet-wide — verified end-to-end for Wan TE (`WanComponentPlacementEngineTests`,
+SSIM 0.7665), Wan VAE (`WanVaeComponentPlacementEngineTests`, SSIM 0.9999 — **Wan had zero VAE placement**
+until this pass wired `WanVideoPipeline.VaeBackend`, which the base class already exposed but no call site
+used), Flux (`FluxComponentPlacementEngineTests`, SSIM 0.8126 from fp8-T5 cross-SM drift on the mismatched
+pair; matched cards are expected bit-identical), SDXL (`SdxlComponentPlacementEngineTests`, SSIM 0.9998),
+and LTX-1 (`LtxVideoComponentPlacementEngineTests`, TE **and** VAE, 16.4 s → 10.2 s, SSIM 0.9943 — TE was
+already wired via `LtxVideoRecipePipeline._textBackend`, but **VAE was not**; both are wired and verified
+now). LTX-2's code was already fully wired (both `TextEncoderBackend` and `VaeBackend`, including the
+separate audio-VAE+vocoder path) before this pass — `LtxVideo2ComponentPlacementEngineTests` now exists but
+has not run for real on this box (the ~22 GB checkpoint split isn't downloaded here; disk-constrained, not a
+code gap). Qwen-Image, Chroma, and HunyuanImage are wired but **UNVERIFIED** — no
+`ComponentPlacementEngineTests` class exists for any of these three as of 2026-08-05; do not cite them as
+verified until a matching engine test lands (tracked in the multi-GPU finish-out plan, Phase 3.4).
+(2) **DiT block-range sharding** (`DitShardGpuId` / `--dit-shard-gpu` — VRAM
 pooling, not latency, i.e. milestone 1's memory-scales contract applied to DiTs) is verified for six
 models: Krea2 (e2e SSIM 0.8787), Qwen-Image 20B (`QwenImageDitSharding{,Vram,Engine}Tests`: 19.6 GB
 pooled 13.4+6.2 at the live 41/60 split, SSIM 0.9734, drift 0.00 GB), MiniMax-H3 fp8

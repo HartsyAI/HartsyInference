@@ -32,6 +32,12 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     /// consumes them. Wan always runs real CFG with a ~T5-XXL-class encoder, so moving it off the denoiser GPU is
     /// the single biggest consumer-tier VRAM win in the video stack.</summary>
     private readonly IBackend _textBackend;
+    /// <summary>Backend the VAE encode/decode runs on — separable from <see cref="_backend"/> for the same reason
+    /// as <see cref="_textBackend"/>. Used directly for the TI2V first-frame encode below, which calls
+    /// <see cref="IWanVaeEncoder.EncodeRgbFrame"/> instead of routing through <see cref="_pipeline"/>'s own
+    /// <see cref="WanVideoPipeline.VaeBackend"/> — this field must stay in sync with that pipeline's VaeBackend
+    /// (both are set from <c>context.VaeBackendOrDefault</c> in <c>WanVideoRecipe</c>).</summary>
+    private readonly IBackend _vaeBackend;
     private readonly WanVideoPipeline _pipeline;
     private readonly WanVideoConfig _config;
     private readonly bool _isClipI2V;
@@ -43,12 +49,14 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     private readonly List<SafeTensorsLoader> _loaders;
 
     /// <summary>Wraps the constructed Wan pipeline plus its encoders, taking ownership of every disposable.
-    /// <paramref name="textBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
-    public WanVideoRecipePipeline(IBackend backend, IBackend textBackend, WanVideoPipeline pipeline, WanVideoConfig config, bool isClipI2V, T5Tokenizer tokenizer,
+    /// <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/>
+    /// (single-device default).</summary>
+    public WanVideoRecipePipeline(IBackend backend, IBackend textBackend, IBackend vaeBackend, WanVideoPipeline pipeline, WanVideoConfig config, bool isClipI2V, T5Tokenizer tokenizer,
         T5TextEncoder umt5, WanVideoTransformer transformer, IWanVaeEncoder vaeEncoder, ClipVisionEncoder? clipVision, List<SafeTensorsLoader> loaders)
     {
         _backend = backend;
         _textBackend = textBackend;
+        _vaeBackend = vaeBackend;
         _pipeline = pipeline;
         _config = config;
         _isClipI2V = isClipI2V;
@@ -148,9 +156,9 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
             if (request.InitImage is not null)
             {
                 byte[] frameRgb = VideoRecipeUtils.ResizeRgb24(request.InitImage, width, height);
-                firstFrameLatent = _vaeEncoder.EncodeRgbFrame(_backend, frameRgb, width, height);
-                _backend.Sync();
-                _backend.FreeWeights(_vaeEncoder.EnumerateWeights());
+                firstFrameLatent = _vaeEncoder.EncodeRgbFrame(_vaeBackend, frameRgb, width, height);
+                _vaeBackend.Sync();
+                _vaeBackend.FreeWeights(_vaeEncoder.EnumerateWeights());
             }
             (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromEmbeddings(promptEmbeds, negEmbeds, inner, numFrames, bridge, firstFrameLatent);
             Logs.Info($"[WanVideoRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH} ({(firstFrameLatent is null ? "T2V" : "I2V")}).");

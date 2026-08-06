@@ -248,12 +248,46 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             && (ipAdapters is null || ipAdapters.Count == 0)
             && conditioningSchedule is null
             && pooledOutput is not null;
+
+        // CFG-branch parallelism (ROADMAP.md item 10, mirrors Flux/Wan): the fused loop's batch=2 single-GPU
+        // forward splits into two batch=1 forwards — cond on Backend, uncond concurrently on CfgParallelBackend
+        // (weights REPLICATED on both, the same latency win as Flux true-CFG / Wan). Eligibility mirrors
+        // fusedLoop's own gate: the host loop (RunDenoiseLoop) carries features — ControlNet/IPA/masked-inpaint/
+        // refiner-swap/per-step conditioning — that were never designed to run split across two backends, so a
+        // generation using them always falls back to whichever loop it would have taken anyway. Decided AFTER
+        // fusedLoop so eligibility can only fire on generations that already qualify for the batched fast path.
+        bool useCfg = CfgHelper.IsGuidanceActive(cfgScale);
+        bool cfgParallelEligible = false;
+        LastCfgParallelDecision = null;
+        if (CfgParallelBackend is not null)
+        {
+            if (!useCfg)
+            {
+                RecordCfgParallelDecision("inapplicable(no-cfg)");
+            }
+            else if (!fusedLoop)
+            {
+                RecordCfgParallelDecision("fell-back(eager-path-features)");
+            }
+            else
+            {
+                cfgParallelEligible = TryPreloadCfgParallel();
+                if (cfgParallelEligible)
+                {
+                    RecordCfgParallelDecision("active");
+                }
+            }
+        }
+
         Stopwatch denoiseSw = Stopwatch.StartNew();
-        latent = fusedLoop
-            ? RunDenoiseLoopFused(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, (EulerDiscreteScheduler)scheduler, useF16, startStep, steps, cfgScale, onProgress)
-            : RunDenoiseLoop(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, scheduler, useF16, startStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, controlNets,
-                refiner, swapStep, clipGForRefiner, refinerSizeConditionPos, refinerSizeConditionNeg, ipAdapters, onProgress, conditioningSchedule);
-        Logs.Verbose($"[sdxl-phase] denoise {denoiseSw.ElapsedMilliseconds}ms ({(fusedLoop ? "fused" : "host")} loop)");
+        latent = cfgParallelEligible
+            ? RunDenoiseLoopCfgParallel(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, (EulerDiscreteScheduler)scheduler, useF16, startStep, steps, cfgScale, onProgress)
+            : fusedLoop
+                ? RunDenoiseLoopFused(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, (EulerDiscreteScheduler)scheduler, useF16, startStep, steps, cfgScale, onProgress)
+                : RunDenoiseLoop(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, scheduler, useF16, startStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, controlNets,
+                    refiner, swapStep, clipGForRefiner, refinerSizeConditionPos, refinerSizeConditionNeg, ipAdapters, onProgress, conditioningSchedule);
+        Logs.Verbose($"[sdxl-phase] denoise {denoiseSw.ElapsedMilliseconds}ms "
+            + $"({(cfgParallelEligible ? "cfg-parallel" : fusedLoop ? "fused" : "host")} loop)");
 
         if (!ReferenceEquals(textEmbeddings, _cachedTextEmb)) textEmbeddings.Dispose();
         if (pooledOutput is not null && !ReferenceEquals(pooledOutput, _cachedPooled)) pooledOutput.Dispose();
@@ -706,6 +740,158 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         Backend.Sync();
         unsafe { _ = (nint)latent.DataPointer; }
         return latent;
+    }
+
+    /// <summary>CFG-branch parallelism: the fused loop's batch=2 single-GPU forward split into two batch=1
+    /// forwards — cond on <see cref="DiffusionPipelineBase.Backend"/>, uncond concurrently on
+    /// <see cref="DiffusionPipelineBase.CfgParallelBackend"/> via <see cref="CfgBranchRunner"/> — combined with
+    /// the same in-place <c>CfgEulerStep</c> the fused loop uses. Weights are preloaded on both backends before
+    /// this runs (see <see cref="TryPreloadCfgParallel"/>), so every in-loop weight read is a per-backend cache
+    /// hit. The shared latent stays resident on <see cref="DiffusionPipelineBase.Backend"/> across the whole
+    /// loop; <see cref="IBackend.CopyFromPeer"/> clones it onto the second backend once per step (device-resident
+    /// hop, no host round trip) — the same hand-off <c>FluxPipeline</c>'s true-CFG concurrent branch uses.</summary>
+    private Tensor RunDenoiseLoopCfgParallel(
+        Tensor latent,
+        TensorShape latentShape,
+        Tensor textEmbeddings,
+        Tensor pooledOutput,
+        float[] sizeCondition,
+        EulerDiscreteScheduler scheduler,
+        bool useF16,
+        int startStep,
+        int totalSteps,
+        float cfgScale,
+        Action<GenerationProgress>? onProgress)
+    {
+        int seqLen = (int)textEmbeddings.Shape[1];
+        int hiddenSize = (int)textEmbeddings.Shape[2];
+        int pooledDim = (int)pooledOutput.Shape[1];
+        DType unetDtype = useF16 ? DType.F16 : DType.F32;
+
+        // Step-invariant conditioning, built once per backend — mirrors the fused loop's single build, just
+        // doubled (one resident copy per backend instead of one batch=2 tensor on Backend alone).
+        Tensor uncondTextSlice = CfgHelper.SliceBatchElement(textEmbeddings, 0, seqLen, hiddenSize);
+        Tensor condTextSlice = CfgHelper.SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
+        Tensor uncondPooledSlice = CfgHelper.SliceBatchElement1D(pooledOutput, 0, pooledDim);
+        Tensor condPooledSlice = CfgHelper.SliceBatchElement1D(pooledOutput, 1, pooledDim);
+
+        Tensor textForUnetCond = DtypeCastHelper.EnsureDtype(Backend, condTextSlice, unetDtype, disposeSourceOnCast: false);
+        Tensor textForUnetUncond = DtypeCastHelper.EnsureDtype(CfgParallelBackend!, uncondTextSlice, unetDtype, disposeSourceOnCast: false);
+        bool ownsTextForCond = !ReferenceEquals(textForUnetCond, condTextSlice);
+        bool ownsTextForUncond = !ReferenceEquals(textForUnetUncond, uncondTextSlice);
+        Tensor? condAdmEmb = _unet.ComputeAdmEmbedding(Backend, condPooledSlice, sizeCondition, batch: 1);
+        Tensor? uncondAdmEmb = _unet.ComputeAdmEmbedding(CfgParallelBackend!, uncondPooledSlice, sizeCondition, batch: 1);
+        condPooledSlice.Dispose();
+        uncondPooledSlice.Dispose();
+
+        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+        Logs.Info("Starting SDXL CFG-parallel denoising loop (uncond branch on second backend)...");
+
+        for (int i = startStep; i < totalSteps; i++)
+        {
+            Stopwatch stepSw = Stopwatch.StartNew();
+            float t = timesteps[i];
+            float inputScale = scheduler.ScaleModelInput(i);
+
+            // Clone the shared latent onto the second backend BEFORE forking — cloning inside the uncond thunk
+            // would still race the main thread's own read of the same source tensor (CfgBranchRunner's doc
+            // comment). Weight tensors are safe to share across threads once both caches are warm (preloaded
+            // above); the per-step latent is the one tensor both branches would otherwise touch.
+            Tensor uncondLatentPeer = new Tensor(latentShape, DType.F32);
+            CfgParallelBackend!.CopyFromPeer(uncondLatentPeer, latent, Backend);
+
+            Tensor velocityCond;
+            Tensor velocityUncondRemote;
+            try
+            {
+                (velocityCond, velocityUncondRemote) = CfgBranchRunner.Run(
+                    () => ForwardCfgParallelBranch(Backend, latent, t, textForUnetCond, condAdmEmb, inputScale, unetDtype),
+                    () => ForwardCfgParallelBranch(CfgParallelBackend!, uncondLatentPeer, t, textForUnetUncond, uncondAdmEmb, inputScale, unetDtype));
+            }
+            finally { uncondLatentPeer.Dispose(); }
+
+            // Cast to F32 on CfgParallelBackend BEFORE crossing the peer boundary — matches the wire format
+            // FluxPipeline's true-CFG hand-off already exercises (an F16 tensor would still cross correctly,
+            // CopyFromPeer sizes the copy from the source's own DType, but there's no reason to carry an
+            // unusual F16 cross-device tensor through downstream ops when the transfer itself is ~256 KB at
+            // 1024² either way).
+            Tensor velocityUncondRemoteF32 = DtypeCastHelper.EnsureF32(CfgParallelBackend!, velocityUncondRemote);
+            Tensor velocityUncondLocal = new Tensor(velocityUncondRemoteF32.Shape, DType.F32);
+            Backend.CopyFromPeer(velocityUncondLocal, velocityUncondRemoteF32, CfgParallelBackend!);
+            velocityUncondRemoteF32.Dispose();
+
+            Tensor condF32 = DtypeCastHelper.EnsureF32(Backend, velocityCond);
+            Backend.CfgEulerStep(latent, condF32, velocityUncondLocal, cfgScale, scheduler.StepDelta(i));
+            condF32.Dispose();
+            velocityUncondLocal.Dispose();
+
+            stepSw.Stop();
+            Logs.Debug($"Step {i + 1}/{totalSteps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
+            bool emitPreview = onProgress is not null && ((i - startStep) % 4 == 3 || i == totalSteps - 1);
+            if (emitPreview)
+            {
+                onProgress!.Invoke(new GenerationProgress(i + 1, totalSteps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = latent,
+                    LatentArch = LatentArchitecture.Sdxl,
+                });
+            }
+            else
+            {
+                onProgress?.Invoke(new GenerationProgress(i + 1, totalSteps, stepSw.Elapsed.TotalMilliseconds));
+            }
+
+            // Backend keeps latent resident across steps (same as the fused loop); CfgParallelBackend's per-step
+            // activations (uncond forward internals) must be swept every step or they accumulate to OOM over the
+            // loop — the same rule Flux's true-CFG branch and Wan's uncond branch follow.
+            CfgParallelBackend!.FreeActivations();
+        }
+
+        if (ownsTextForCond) textForUnetCond.Dispose();
+        condTextSlice.Dispose();
+        if (ownsTextForUncond) textForUnetUncond.Dispose();
+        uncondTextSlice.Dispose();
+        condAdmEmb?.Dispose();
+        uncondAdmEmb?.Dispose();
+
+        // The in-place CfgEulerStep keeps the latent device-resident; touching DataPointer syncs it back so the
+        // tiled-VAE host slicing (and any host consumer) sees the real final state.
+        Backend.Sync();
+        unsafe { _ = (nint)latent.DataPointer; }
+        return latent;
+    }
+
+    /// <summary>Scales the input latent, casts to the UNet's activation dtype, and runs one CFG-parallel branch's
+    /// UNet forward on <paramref name="backend"/> — factored out so <see cref="CfgBranchRunner.Run"/> can invoke
+    /// the cond/uncond branches as independent thunks, each against its own backend.</summary>
+    private Tensor ForwardCfgParallelBranch(IBackend backend, Tensor latent, float timestep, Tensor textForUnet, Tensor? admEmb, float inputScale, DType unetDtype)
+    {
+        Tensor scaled = new Tensor(latent.Shape, DType.F32);
+        backend.Scale(scaled, latent, inputScale);
+        Tensor unetInput = DtypeCastHelper.EnsureDtype(backend, scaled, unetDtype);
+        Tensor noisePred = _unet.Forward(backend, unetInput, timestep, textForUnet, null, default, null, null, null, null, null, null, admEmb);
+        unetInput.Dispose();
+        return noisePred;
+    }
+
+    /// <summary>Attempts to preload the UNet onto <see cref="DiffusionPipelineBase.CfgParallelBackend"/> so the
+    /// uncond branch can run there concurrently with cond on <see cref="DiffusionPipelineBase.Backend"/>. Never
+    /// throws — a second card that can't also hold the UNet resident (~2× a single card's worth of VRAM) falls
+    /// back to the batched fused loop with one log line, exactly like Flux's true-CFG preload.</summary>
+    private bool TryPreloadCfgParallel()
+    {
+        try
+        {
+            CfgParallelBackend!.PreloadWeights(_unet.EnumerateWeights());
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"SDXL CFG-parallel: couldn't preload the UNet onto the second backend (falling back to "
+                + $"the batched fused loop this generation): {ex.Message}");
+            RecordCfgParallelDecision($"fell-back(preload-failed: {ex.Message})");
+            return false;
+        }
     }
 
     /// <summary>Compares two token-id arrays for the prompt-embedding cache key.</summary>

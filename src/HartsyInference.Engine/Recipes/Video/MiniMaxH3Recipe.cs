@@ -31,8 +31,9 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
 
 
     /// <inheritdoc/>
-    /// <remarks>MiniMax-H3 VAE-encodes the start and end images into keyframe conditioning.</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame;
+    /// <remarks>MiniMax-H3 VAE-encodes the start and end images into keyframe conditioning, and is the first video
+    /// family to merge LoRAs — which needs a bf16 build, since a merge cannot rewrite quantized weights.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId)
     {
@@ -101,7 +102,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                 }
                 (long freeA, _) = context.Backend.GetVramInfo();
                 (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan(freeA, freeB, config.NumLayers, sharedWeightBytes);
+                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], config.NumLayers, sharedWeightBytes)[0];
                 ditShardBackend = context.DitShardBackend;
                 Logs.Info($"[MiniMaxH3Recipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
                     + $"backend, [{ditShardSplitBlock},{config.NumLayers}) on the shard backend.");

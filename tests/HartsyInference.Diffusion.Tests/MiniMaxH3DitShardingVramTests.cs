@@ -77,7 +77,7 @@ public sealed unsafe class MiniMaxH3DitShardingVramTests
             long sharedBytes = 0;
             foreach (Tensor t in transformer.EnumerateSharedWeights())
                 sharedBytes += t.DType.ComputeByteCount(t.ElementCount);
-            int splitBlock = PlacementPlanner.DitSplitPlan((long)freeA0, (long)freeB0, config.NumLayers, sharedBytes);
+            int splitBlock = PlacementPlanner.DitSplitPlan([(long)freeA0, (long)freeB0], config.NumLayers, sharedBytes)[0];
             _output.WriteLine($"[3/5] {config.NumLayers} blocks, live-VRAM split at {splitBlock}; shared {sharedBytes >> 20} MB on A.");
 
             List<Tensor> aWeights = new(transformer.EnumerateSharedWeights());

@@ -1,3 +1,5 @@
+using System.Linq;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Features;
@@ -93,22 +95,37 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
                 RecipeBackendFlags.DisableCacheWeightCasts(context, "QwenImageRecipe", onlyWithoutNativeFp8Gemm: true);
             }
 
-            // DiT sharding split point — computed here, not in InferenceEngine, because block count and live
-            // free VRAM are only known once the transformer weights are loaded. Qwen's 60 blocks are homogeneous,
-            // so the count-proportional plan is already byte-accurate.
-            int ditShardSplitBlock = 0;
-            if (context.DitShardBackend is not null)
+            // DiT sharding stages — computed here, not in InferenceEngine, because block count and live free VRAM
+            // are only known once the transformer weights are loaded. Qwen's 60 blocks are homogeneous, so the
+            // count-proportional plan is already byte-accurate. Qwen-Image is the one recipe wired for N-way
+            // sharding (ROADMAP.md item 7); the other five sharded families still resolve a single split point
+            // from context.DitShardBackend.
+            List<DitShardStage>? ditShardStages = null;
+            if (context.DitShardBackends is { Count: > 0 })
             {
                 long sharedWeightBytes = 0;
                 foreach (Tensor t in transformer.EnumerateSharedWeights())
                 {
                     sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
                 }
-                (long freeA, _) = context.Backend.GetVramInfo();
-                (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan(freeA, freeB, transformer.BlockCount, sharedWeightBytes);
-                Logs.Info($"[QwenImageRecipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
-                    + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
+                List<IBackend> stageBackends = new(1 + context.DitShardBackends.Count) { context.Backend };
+                stageBackends.AddRange(context.DitShardBackends);
+                List<long> freeBytesPerStage = new(stageBackends.Count);
+                foreach (IBackend stageBackend in stageBackends)
+                {
+                    (long free, _) = stageBackend.GetVramInfo();
+                    freeBytesPerStage.Add(free);
+                }
+                IReadOnlyList<int> counts = PlacementPlanner.DitSplitPlan(freeBytesPerStage, transformer.BlockCount, sharedWeightBytes);
+                ditShardStages = new List<DitShardStage>(stageBackends.Count);
+                int start = 0;
+                for (int i = 0; i < stageBackends.Count; i++)
+                {
+                    ditShardStages.Add(new DitShardStage(stageBackends[i], start, start + counts[i]));
+                    start += counts[i];
+                }
+                Logs.Info($"[QwenImageRecipe] DiT sharding enabled across {ditShardStages.Count} stages: "
+                    + string.Join(", ", ditShardStages.Select(s => $"[{s.StartBlock},{s.EndBlock})")));
             }
 
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_7B);
@@ -151,8 +168,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             {
                 TextEncoderBackend = context.TextEncoderBackendOrDefault,
                 VaeBackend = context.VaeBackendOrDefault,
-                DitShardBackend = context.DitShardBackend,
-                DitShardSplitBlock = ditShardSplitBlock,
+                DitShardStages = ditShardStages,
             };
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             Logs.Info("[QwenImageRecipe] Qwen-Image ready (Qwen2.5-VL-7B encoder; flow-match Euler, dynamic shift).");

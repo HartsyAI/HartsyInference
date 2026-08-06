@@ -91,6 +91,20 @@ public sealed unsafe class Sd3Transformer : IDisposable
     /// <summary>Yields every weight tensor for GPU preloading via <c>backend.PreloadWeights</c>.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
+        foreach (Tensor w in EnumerateSharedWeights()) yield return w;
+
+        for (int i = 0; i < _blocks.Length; i++)
+            foreach (Tensor w in _blocks[i].EnumerateWeights()) yield return w;
+    }
+
+    /// <summary>The number of streamable <see cref="JointBlock"/>s.</summary>
+    public int BlockCount => _blocks.Length;
+
+    /// <summary>The non-block weights: patch_embed, timestep/pooled-text embedders, context_embedder, and the
+    /// final AdaLN-continuous + proj_out. Always resident on the block-range split's FIRST backend — see
+    /// <see cref="ForwardSharded"/>.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
         if (_timestepLinear1Weight is not null) yield return _timestepLinear1Weight;
         if (_timestepLinear1Bias is not null) yield return _timestepLinear1Bias;
         if (_timestepLinear2Weight is not null) yield return _timestepLinear2Weight;
@@ -104,13 +118,19 @@ public sealed unsafe class Sd3Transformer : IDisposable
 
         foreach (Tensor w in _patchEmbed.EnumerateWeights()) yield return w;
 
-        for (int i = 0; i < _blocks.Length; i++)
-            foreach (Tensor w in _blocks[i].EnumerateWeights()) yield return w;
-
         if (_normOutLinearWeight is not null) yield return _normOutLinearWeight;
         if (_normOutLinearBias is not null) yield return _normOutLinearBias;
         if (_projOutWeight is not null) yield return _projOutWeight;
         if (_projOutBias is not null) yield return _projOutBias;
+    }
+
+    /// <summary>Enumerates only blocks <c>[startBlock, endBlock)</c>'s weights — the asymmetric preload a
+    /// block-range shard needs (see <see cref="ForwardSharded"/>): the SECOND backend must load ONLY its block
+    /// range, not <see cref="EnumerateWeights"/>'s full set, or VRAM pooling degrades into replication.</summary>
+    public IEnumerable<Tensor> EnumerateBlockRangeWeights(int startBlock, int endBlock)
+    {
+        for (int i = startBlock; i < endBlock; i++)
+            foreach (Tensor w in _blocks[i].EnumerateWeights()) yield return w;
     }
 
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
@@ -167,6 +187,92 @@ public sealed unsafe class Sd3Transformer : IDisposable
         Sd3DebugDump.DumpOutput(spatial);
 
         return spatial;
+    }
+
+    /// <summary>Predicts velocity for one denoising step with the <see cref="JointBlock"/> loop split across two
+    /// backends: blocks <c>[0, splitBlock)</c> run on <paramref name="backendA"/>, blocks
+    /// <c>[splitBlock, BlockCount)</c> on <paramref name="backendB"/> — a sequential pipeline split, not
+    /// tensor-parallel, so there is <b>no latency win</b>; the win is VRAM pooling. <paramref name="backendA"/>
+    /// must hold <see cref="EnumerateSharedWeights"/> + <see cref="EnumerateBlockRangeWeights"/><c>(0,
+    /// splitBlock)</c>; <paramref name="backendB"/> must hold ONLY <see cref="EnumerateBlockRangeWeights"/>
+    /// <c>(splitBlock, BlockCount)</c>. <paramref name="context"/>/<paramref name="pooled"/> are caller-owned
+    /// (cached across steps by the pipeline) and are never disposed here, matching <see cref="Forward"/>.</summary>
+    public Tensor ForwardSharded(IBackend backendA, IBackend backendB, Tensor latent, float timestep,
+        Tensor context, Tensor pooled, int splitBlock)
+    {
+        if (splitBlock <= 0 || splitBlock >= _config.Depth)
+            throw new ArgumentOutOfRangeException(nameof(splitBlock),
+                $"splitBlock must be in (0, {_config.Depth}) — 0 or {_config.Depth} would put the whole MMDiT on one backend.");
+
+        int batch = (int)latent.Shape[0];
+        int height = (int)latent.Shape[2];
+        int width = (int)latent.Shape[3];
+
+        Tensor imageTokens = _patchEmbed.Forward(backendA, latent);
+        int imgSeqLen = (int)imageTokens.Shape[1];
+        (int gridH, int gridW) = _patchEmbed.GetGridSize(height, width);
+
+        Tensor temb = ComputeTimestepEmbedding(backendA, timestep, pooled, batch);
+
+        (Tensor imageA, Tensor contextA) = ForwardBlocksRange(backendA, imageTokens, context, temb, 0, splitBlock);
+        // imageTokens is transformer-owned scratch (unlike context/pooled, which the pipeline reuses across
+        // steps) — always superseded by a fresh tensor here (the image stream never has JointBlock's
+        // context_pre_only passthrough), so it is always safe to free once the A-range block loop is done.
+        imageTokens.Dispose();
+
+        // ── hand off to backendB: image + context streams and temb (every block's AdaLN reads temb) ──
+        Tensor imageB = new Tensor(imageA.Shape, imageA.DType);
+        backendB.CopyFromPeer(imageB, imageA, backendA);
+        imageA.Dispose();
+        Tensor contextB = new Tensor(contextA.Shape, contextA.DType);
+        backendB.CopyFromPeer(contextB, contextA, backendA);
+        // contextA is always fresh too — A's range [0, splitBlock) never reaches the final context_pre_only
+        // block (index Depth-1), so it can never alias the caller-owned `context`.
+        contextA.Dispose();
+        Tensor tembB = new Tensor(temb.Shape, temb.DType);
+        backendB.CopyFromPeer(tembB, temb, backendA);
+
+        (Tensor imageFinalB, Tensor contextFinalB) = ForwardBlocksRange(backendB, imageB, contextB, tembB, splitBlock, _config.Depth);
+        imageB.Dispose();
+        tembB.Dispose();
+        // B's range always includes the final context_pre_only block, so contextFinalB may already be the
+        // (disposed) product of ForwardBlocksRange's own internal passthrough guard, or still == contextB —
+        // Dispose is idempotent (Interlocked.Exchange pattern), so both are freed safely either way.
+        contextFinalB.Dispose();
+        if (!ReferenceEquals(contextFinalB, contextB)) contextB.Dispose();
+
+        // ── hand back to backendA: the final-layer weights live there (EnumerateSharedWeights) ──
+        Tensor imageFinal = new Tensor(imageFinalB.Shape, imageFinalB.DType);
+        backendA.CopyFromPeer(imageFinal, imageFinalB, backendB);
+        imageFinalB.Dispose();
+
+        Tensor output = ApplyFinalLayer(backendA, imageFinal, temb, batch, imgSeqLen);
+        imageFinal.Dispose();
+        temb.Dispose();
+
+        Tensor spatial = _unpatchify.Forward(output, batch, gridH, gridW);
+        output.Dispose();
+        return spatial;
+    }
+
+    /// <summary>Runs <see cref="JointBlock"/>s <c>[startBlock, endBlock)</c> in order — the seam a block-range
+    /// shard splits on (see <see cref="ForwardSharded"/>). Mirrors <see cref="Forward"/>'s own loop body exactly,
+    /// windowed: never disposes <paramref name="image"/>/<paramref name="context"/> themselves (the caller owns
+    /// them and decides when they're superseded), only intermediates created strictly within this range.</summary>
+    private (Tensor image, Tensor context) ForwardBlocksRange(IBackend backend, Tensor image, Tensor context,
+        Tensor temb, int startBlock, int endBlock)
+    {
+        Tensor currentImage = image;
+        Tensor currentContext = context;
+        for (int i = startBlock; i < endBlock; i++)
+        {
+            (Tensor newImage, Tensor newContext) = _blocks[i].Forward(backend, currentImage, currentContext, temb);
+            if (!ReferenceEquals(currentImage, image)) currentImage.Dispose();
+            if (!ReferenceEquals(currentContext, context)) currentContext.Dispose();
+            currentImage = newImage;
+            currentContext = newContext;
+        }
+        return (currentImage, currentContext);
     }
 
     /// <summary>Projects the combined context tensor from joint_attention_dim to hidden_size. Run once per prompt before <see cref="Forward"/>.</summary>

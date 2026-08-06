@@ -134,52 +134,94 @@ public static class PlacementPlanner
         return new PlacementConfig { TextEncoderDevice = $"cuda:{smallest.Ordinal}" };
     }
 
-    /// <summary>Splits a DiT's block loop into a 2-way range split (Phase 8) proportional to each backend's free
-    /// VRAM minus the fixed reserve. <paramref name="sharedWeightBytesA"/> (img_in/time-embed/text-fusion/final-layer
-    /// — <c>EnumerateSharedWeights</c>) is charged to backend A's budget since those weights always live there —
-    /// the mirror of <see cref="LlmSplitPlan"/>'s <c>lastStageExtraBytes</c>, but on the FIRST stage: DiT sharding's
-    /// shared weights are a prefix cost, not a suffix one. Returns the split point: blocks <c>[0, result)</c> run
-    /// on A, <c>[result, blockCount)</c> on B. The 1-block floor per stage guarantees the result is in
-    /// <c>[1, blockCount-1]</c>, the range <c>Krea2Transformer.ForwardSharded</c> requires.</summary>
-    public static int DitSplitPlan(long freeBytesA, long freeBytesB, int blockCount, long sharedWeightBytesA)
+    /// <summary>Splits a DiT's block loop into an N-way range split (Phase 8, generalized from the original 2-way
+    /// shape) proportional to each stage backend's free VRAM minus the fixed reserve. <paramref name="sharedWeightBytesFirstStage"/>
+    /// (img_in/time-embed/text-fusion/final-layer — <c>EnumerateSharedWeights</c>) is charged to the FIRST stage's
+    /// budget since those weights always live there — the mirror of <see cref="LlmSplitPlan"/>'s
+    /// <c>lastStageExtraBytes</c>, but as a prefix cost instead of a suffix one. Returns per-stage block counts
+    /// (parallel to <paramref name="freeBytesPerStage"/>) via <see cref="LargestRemainderCounts"/>, which already
+    /// generalizes to N weights — callers turn counts into <c>[start, end)</c> ranges via a running prefix sum. The
+    /// N=2 case (<c>counts[0]</c> as a single split point) is exactly the original 2-way behavior.</summary>
+    public static IReadOnlyList<int> DitSplitPlan(IReadOnlyList<long> freeBytesPerStage, int blockCount, long sharedWeightBytesFirstStage)
     {
-        if (blockCount < 2)
+        ArgumentNullException.ThrowIfNull(freeBytesPerStage);
+        if (freeBytesPerStage.Count < 2)
         {
-            throw new ArgumentException("DiT sharding needs at least 2 blocks to split.", nameof(blockCount));
+            throw new ArgumentException("DiT sharding needs at least 2 stages.", nameof(freeBytesPerStage));
+        }
+        if (blockCount < freeBytesPerStage.Count)
+        {
+            throw new ArgumentException(
+                $"Cannot split {blockCount} blocks across {freeBytesPerStage.Count} stages — fewer blocks than stages.",
+                nameof(blockCount));
         }
 
-        float weightA = Math.Max(0, freeBytesA - PerDeviceReserveBytes - sharedWeightBytesA);
-        float weightB = Math.Max(0, freeBytesB - PerDeviceReserveBytes);
-        float total = weightA + weightB;
+        float[] weights = new float[freeBytesPerStage.Count];
+        for (int i = 0; i < weights.Length; i++)
+        {
+            float w = freeBytesPerStage[i] - PerDeviceReserveBytes;
+            if (i == 0)
+            {
+                w -= sharedWeightBytesFirstStage;
+            }
+            weights[i] = Math.Max(0, w);
+        }
+        float total = 0;
+        foreach (float w in weights)
+        {
+            total += w;
+        }
         if (total <= 0)
         {
             Logs.Warning("[Placement] No usable VRAM signal for the DiT block split — falling back to an even split.");
-            weightA = weightB = 1;
-            total = 2;
+            for (int i = 0; i < weights.Length; i++)
+            {
+                weights[i] = 1;
+            }
+            total = weights.Length;
         }
 
-        int[] counts = LargestRemainderCounts([weightA, weightB], total, blockCount);
-        Logs.Info($"[Placement] DiT block split ({blockCount} blocks): A=[0,{counts[0]}), B=[{counts[0]},{blockCount})");
-        return counts[0];
+        int[] counts = LargestRemainderCounts(weights, total, blockCount);
+        Logs.Info($"[Placement] DiT block split ({blockCount} blocks, {weights.Length} stages): " + DescribeRanges(counts));
+        return counts;
     }
 
-    /// <summary>Byte-weighted variant of <see cref="DitSplitPlan(long,long,int,long)"/> for heterogeneous-block DiTs
-    /// (Chroma/HunyuanImage/Flux double blocks are ~2× their single blocks — a count-proportional split misallocates
-    /// by GBs there). Picks the split point whose stage-A byte load best matches A's share of usable VRAM via a
-    /// prefix-sum walk over <paramref name="perBlockBytes"/>. Same contract: blocks <c>[0, result)</c> on A,
-    /// <c>[result, count)</c> on B, result guaranteed in <c>[1, count-1]</c>.</summary>
-    public static int DitSplitPlan(long freeBytesA, long freeBytesB, IReadOnlyList<long> perBlockBytes, long sharedWeightBytesA)
+    /// <summary>Byte-weighted variant of <see cref="DitSplitPlan(IReadOnlyList{long},int,long)"/> for heterogeneous-block
+    /// DiTs (Chroma/HunyuanImage/Flux double blocks are ~2× their single blocks — a count-proportional split
+    /// misallocates by GBs there). Picks each of the <c>stages-1</c> interior split points independently by walking
+    /// a prefix sum over <paramref name="perBlockBytes"/> to the block index closest to that boundary's cumulative
+    /// VRAM-share target, then converts to per-stage counts. For N=2 this is exactly the original single-cutpoint
+    /// prefix-sum search (same tie-break: first-found minimum, ascending split order), so a 2-stage call reproduces
+    /// the original split point bit-for-bit. Every stage gets at least one block.</summary>
+    public static IReadOnlyList<int> DitSplitPlan(IReadOnlyList<long> freeBytesPerStage, IReadOnlyList<long> perBlockBytes, long sharedWeightBytesFirstStage)
     {
+        ArgumentNullException.ThrowIfNull(freeBytesPerStage);
         ArgumentNullException.ThrowIfNull(perBlockBytes);
-        int blockCount = perBlockBytes.Count;
-        if (blockCount < 2)
+        int stageCount = freeBytesPerStage.Count;
+        if (stageCount < 2)
         {
-            throw new ArgumentException("DiT sharding needs at least 2 blocks to split.", nameof(perBlockBytes));
+            throw new ArgumentException("DiT sharding needs at least 2 stages.", nameof(freeBytesPerStage));
+        }
+        int blockCount = perBlockBytes.Count;
+        if (blockCount < stageCount)
+        {
+            throw new ArgumentException(
+                $"Cannot split {blockCount} blocks across {stageCount} stages — fewer blocks than stages.",
+                nameof(perBlockBytes));
         }
 
-        double budgetA = Math.Max(0, freeBytesA - PerDeviceReserveBytes - sharedWeightBytesA);
-        double budgetB = Math.Max(0, freeBytesB - PerDeviceReserveBytes);
-        double totalBudget = budgetA + budgetB;
+        double[] budget = new double[stageCount];
+        double totalBudget = 0;
+        for (int i = 0; i < stageCount; i++)
+        {
+            double b = freeBytesPerStage[i] - PerDeviceReserveBytes;
+            if (i == 0)
+            {
+                b -= sharedWeightBytesFirstStage;
+            }
+            budget[i] = Math.Max(0, b);
+            totalBudget += budget[i];
+        }
         long totalBytes = 0;
         foreach (long bytes in perBlockBytes)
         {
@@ -188,33 +230,72 @@ public static class PlacementPlanner
         if (totalBudget <= 0)
         {
             Logs.Warning("[Placement] No usable VRAM signal for the DiT block split — falling back to an even byte split.");
-            budgetA = budgetB = 1;
-            totalBudget = 2;
-        }
-
-        double targetA = totalBytes * (budgetA / totalBudget);
-        int bestSplit = 1;
-        double bestDistance = double.MaxValue;
-        long prefix = 0;
-        for (int split = 1; split <= blockCount - 1; split++)
-        {
-            prefix += perBlockBytes[split - 1];
-            double distance = Math.Abs(prefix - targetA);
-            if (distance < bestDistance)
+            for (int i = 0; i < budget.Length; i++)
             {
-                bestDistance = distance;
-                bestSplit = split;
+                budget[i] = 1;
             }
+            totalBudget = stageCount;
         }
 
-        long bytesA = 0;
-        for (int i = 0; i < bestSplit; i++)
+        long[] prefixSums = new long[blockCount + 1];
+        for (int i = 0; i < blockCount; i++)
         {
-            bytesA += perBlockBytes[i];
+            prefixSums[i + 1] = prefixSums[i] + perBlockBytes[i];
         }
-        Logs.Info($"[Placement] DiT block split ({blockCount} blocks, {totalBytes >> 20} MB): "
-            + $"A=[0,{bestSplit}) {bytesA >> 20} MB, B=[{bestSplit},{blockCount}) {(totalBytes - bytesA) >> 20} MB");
-        return bestSplit;
+
+        // Each interior boundary's target is the CUMULATIVE VRAM share up to that stage — searched independently
+        // over the full prefix-sum array, then clamped to keep boundaries ascending with a 1-block floor per stage
+        // (both sides). For stageCount=2 there is exactly one boundary and this degenerates to the original
+        // single-cutpoint search over the same [1, blockCount-1] range with the same strict-less-than tie-break.
+        int[] splits = new int[stageCount - 1];
+        double cumBudget = 0;
+        int prevSplit = 0;
+        for (int s = 0; s < stageCount - 1; s++)
+        {
+            cumBudget += budget[s];
+            double targetCum = totalBytes * (cumBudget / totalBudget);
+            int minSplit = prevSplit + 1;
+            int maxSplit = blockCount - (stageCount - 1 - s);
+            int bestSplit = minSplit;
+            double bestDistance = double.MaxValue;
+            for (int split = minSplit; split <= maxSplit; split++)
+            {
+                double distance = Math.Abs(prefixSums[split] - targetCum);
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    bestSplit = split;
+                }
+            }
+            splits[s] = bestSplit;
+            prevSplit = bestSplit;
+        }
+
+        int[] counts = new int[stageCount];
+        int start = 0;
+        for (int s = 0; s < stageCount - 1; s++)
+        {
+            counts[s] = splits[s] - start;
+            start = splits[s];
+        }
+        counts[stageCount - 1] = blockCount - start;
+
+        Logs.Info($"[Placement] DiT byte-weighted block split ({blockCount} blocks, {totalBytes >> 20} MB, {stageCount} stages): "
+            + DescribeRanges(counts));
+        return counts;
+    }
+
+    /// <summary>Renders per-stage block counts as <c>[start,end)</c> ranges for log lines.</summary>
+    private static string DescribeRanges(IReadOnlyList<int> counts)
+    {
+        List<string> parts = new(counts.Count);
+        int start = 0;
+        for (int i = 0; i < counts.Count; i++)
+        {
+            parts.Add($"stage{i}=[{start},{start + counts[i]})");
+            start += counts[i];
+        }
+        return string.Join(", ", parts);
     }
 
     /// <summary>Rejects <see cref="PlacementConfig"/> combinations that were never designed to compose. Called at
@@ -226,11 +307,13 @@ public static class PlacementPlanner
         {
             return;
         }
-        if (placement.ShardDevices.Count != 2)
+        if (placement.ShardDevices.Count < 2)
         {
             throw new ArgumentException(
-                $"EnableDitSharding requires exactly 2 ShardDevices (the transformer's ForwardSharded block-range "
-                + $"split needs a backendA/backendB pair), got {placement.ShardDevices.Count}.", nameof(placement));
+                $"EnableDitSharding requires at least 2 ShardDevices (the transformer's ForwardSharded block-range "
+                + $"split needs at least a 2-stage pipeline), got {placement.ShardDevices.Count}. N>2 is currently "
+                + $"only consumed by the Qwen-Image recipe — the other sharded families still read only "
+                + $"ShardDevices[0]/[1] (ROADMAP.md item 7).", nameof(placement));
         }
         if (placement.CfgParallelDevice is not null)
         {

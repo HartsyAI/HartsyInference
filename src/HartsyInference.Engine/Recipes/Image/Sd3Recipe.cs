@@ -5,6 +5,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -99,7 +100,32 @@ public sealed class Sd3Recipe : IArchitectureRecipe
             vaeDecoder.LoadWeights(vaeWeights);
             VaeEncoder vaeEncoder = LoaderVaeUtils.BuildEncoder(VaeConfig.Sd3, vaeWeights, "Sd3Recipe");
 
-            Sd3Pipeline pipeline = new Sd3Pipeline(context.Backend, clipL, clipG, t5, transformer, vaeDecoder, vaeEncoder);
+            // Phase 8 DiT sharding (VRAM pooling, not latency — see Sd3Pipeline's use of DitShardBackend): the
+            // split point depends on the transformer's actual block count and free VRAM on the two backends,
+            // both only known here (RecipeContext is built before weights load), so it's computed at
+            // construction time rather than passed in from InferenceEngine. SD3's JointBlocks are homogeneous
+            // (dual-attention layers only add extra params, not extra width), so the count-proportional overload
+            // applies — same as Krea2/MiniMax-H3.
+            int ditShardSplitBlock = 0;
+            if (context.DitShardBackend is not null)
+            {
+                long sharedWeightBytes = 0;
+                foreach (Tensor t in transformer.EnumerateSharedWeights())
+                {
+                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
+                }
+                (long freeA, _) = context.Backend.GetVramInfo();
+                (long freeB, _) = context.DitShardBackend.GetVramInfo();
+                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], transformer.BlockCount, sharedWeightBytes)[0];
+                Logs.Info($"[Sd3Recipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
+                    + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
+            }
+
+            Sd3Pipeline pipeline = new Sd3Pipeline(context.Backend, clipL, clipG, t5, transformer, vaeDecoder, vaeEncoder)
+            {
+                DitShardBackend = context.DitShardBackend,
+                DitShardSplitBlock = ditShardSplitBlock,
+            };
             Logs.Info("[Sd3Recipe] SD3 ready.");
             return new Sd3RecipePipeline(pipeline, new ClipTokenizer(), t5Tokenizer, loaders);
         }

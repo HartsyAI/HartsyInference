@@ -38,6 +38,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         Tensor rgb;
         try { rgb = DecodeLatent(latent, seed); }
         finally { latent.Dispose(); }
+        if (!ReferenceEquals(VaeBackend, Backend)) VaeBackend.Sync();
 
         int f = (int)rgb.Shape[2];
         byte[][] frames = new byte[f][];
@@ -57,6 +58,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         Tensor rgb;
         try { rgb = DecodeLatent(latent, seed); }
         finally { latent.Dispose(); }
+        if (!ReferenceEquals(VaeBackend, Backend)) VaeBackend.Sync();
 
         try
         {
@@ -76,8 +78,11 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
     /// latent at <c>DecodeNoiseScale</c> and decodes at <c>DecodeTimestep</c>.</summary>
     private Tensor DecodeLatent(Tensor latent, int seed)
     {
+        // LOAD-BEARING for VaeDevice: `latent` reaches here via UnpackLatents (a host loop off the stepped token
+        // buffer), so it's already host-current — a VaeBackend on another device just uploads from there.
+        VaeBackend.PreloadWeights(_vae.EnumerateWeights());
         if (!_config.VaeTimestepConditioned)
-            return _vae.Decode(Backend, latent);
+            return _vae.Decode(VaeBackend, latent);
 
         // VALIDATION-PENDING: verify vs diffusers LTXPipeline 0.9.7 — diffusers blends pre-decode:
         //   noise = randn_like(latents)
@@ -94,7 +99,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         noise.Dispose();
 
         Logs.Info($"LTX-Video timestep-conditioned VAE decode (t={_config.DecodeTimestep:F3}, noise_scale={s:F3})");
-        return _vae.Decode(Backend, latent, _config.DecodeTimestep);
+        return _vae.Decode(VaeBackend, latent, _config.DecodeTimestep);
     }
 
     /// <summary>Runs the flow-match denoise loop and returns the VAE-ready latent <c>[1,128,T_lat,H_lat,W_lat]</c>.</summary>

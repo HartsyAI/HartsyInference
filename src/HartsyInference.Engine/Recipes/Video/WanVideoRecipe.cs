@@ -149,10 +149,11 @@ public sealed class WanVideoRecipe : IVideoRecipe
             WanVideoPipeline pipeline = new WanVideoPipeline(context.Backend, transformer, vaeDecoder, config, vaeEncoder)
             {
                 CfgParallelBackend = context.CfgParallelBackend,
+                VaeBackend = context.VaeBackendOrDefault,
             };
             Logs.Info($"[WanVideoRecipe] Wan ready ({mode}).");
-            return new WanVideoRecipePipeline(context.Backend, context.TextEncoderBackendOrDefault, pipeline, config,
-                isClipI2V, tokenizer, umt5, transformer, vaeEncoder, clipVision, loaders);
+            return new WanVideoRecipePipeline(context.Backend, context.TextEncoderBackendOrDefault, context.VaeBackendOrDefault,
+                pipeline, config, isClipI2V, tokenizer, umt5, transformer, vaeEncoder, clipVision, loaders);
         }
         catch (Exception ex)
         {

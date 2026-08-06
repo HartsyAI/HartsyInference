@@ -67,7 +67,7 @@ public sealed class QwenImageDitShardingVramTests
             long sharedBytes = 0;
             foreach (Tensor t in transformer.EnumerateSharedWeights())
                 sharedBytes += t.DType.ComputeByteCount(t.ElementCount);
-            int splitBlock = PlacementPlanner.DitSplitPlan((long)freeA0, (long)freeB0, config.Depth, sharedBytes);
+            int splitBlock = PlacementPlanner.DitSplitPlan([(long)freeA0, (long)freeB0], config.Depth, sharedBytes)[0];
             _output.WriteLine($"[3/5] {config.Depth} blocks, live-VRAM split at {splitBlock} (A: 0-{splitBlock - 1} + shared, B: {splitBlock}-{config.Depth - 1}).");
 
             List<Tensor> aWeights = new(transformer.EnumerateSharedWeights());

@@ -77,9 +77,10 @@ public sealed class PlacementPlannerTests
         for (int i = 0; i < 19; i++) perBlock[i] = 200 * MiB;
         for (int i = 19; i < 57; i++) perBlock[i] = 100 * MiB;
 
-        int split = PlacementPlanner.DitSplitPlan(Reserve + (1L << 30), Reserve + (1L << 30), perBlock, sharedWeightBytesA: 0);
+        IReadOnlyList<int> counts = PlacementPlanner.DitSplitPlan(
+            [Reserve + (1L << 30), Reserve + (1L << 30)], perBlock, sharedWeightBytesFirstStage: 0);
 
-        Assert.Equal(19, split);
+        Assert.Equal(19, counts[0]);
     }
 
     [Fact]
@@ -88,8 +89,10 @@ public sealed class PlacementPlannerTests
         long[] perBlock = new long[10];
         for (int i = 0; i < 10; i++) perBlock[i] = 100 * MiB;
 
-        int withoutShared = PlacementPlanner.DitSplitPlan(Reserve + (2L << 30), Reserve + (1L << 30), perBlock, sharedWeightBytesA: 0);
-        int withShared = PlacementPlanner.DitSplitPlan(Reserve + (2L << 30), Reserve + (1L << 30), perBlock, sharedWeightBytesA: 1L << 30);
+        int withoutShared = PlacementPlanner.DitSplitPlan(
+            [Reserve + (2L << 30), Reserve + (1L << 30)], perBlock, sharedWeightBytesFirstStage: 0)[0];
+        int withShared = PlacementPlanner.DitSplitPlan(
+            [Reserve + (2L << 30), Reserve + (1L << 30)], perBlock, sharedWeightBytesFirstStage: 1L << 30)[0];
 
         Assert.True(withShared < withoutShared,
             $"charging shared bytes to A must shrink A's range ({withShared} !< {withoutShared})");
@@ -102,8 +105,8 @@ public sealed class PlacementPlannerTests
         long[] perBlock = new long[8];
         for (int i = 0; i < 8; i++) perBlock[i] = 100 * MiB;
 
-        Assert.Equal(1, PlacementPlanner.DitSplitPlan(Reserve + 1, Reserve + (10L << 30), perBlock, 0));
-        Assert.Equal(7, PlacementPlanner.DitSplitPlan(Reserve + (10L << 30), Reserve + 1, perBlock, 0));
+        Assert.Equal(1, PlacementPlanner.DitSplitPlan([Reserve + 1, Reserve + (10L << 30)], perBlock, 0)[0]);
+        Assert.Equal(7, PlacementPlanner.DitSplitPlan([Reserve + (10L << 30), Reserve + 1], perBlock, 0)[0]);
     }
 
     [Fact]
@@ -112,12 +115,12 @@ public sealed class PlacementPlannerTests
         long[] perBlock = new long[10];
         for (int i = 0; i < 10; i++) perBlock[i] = 100 * MiB;
 
-        Assert.Equal(5, PlacementPlanner.DitSplitPlan(0, 0, perBlock, 0));
+        Assert.Equal(5, PlacementPlanner.DitSplitPlan([0, 0], perBlock, 0)[0]);
     }
 
     [Fact]
     public void ByteWeightedDitSplit_FewerThanTwoBlocks_Throws()
     {
-        Assert.Throws<ArgumentException>(() => PlacementPlanner.DitSplitPlan(Reserve, Reserve, new long[] { 100 * MiB }, 0));
+        Assert.Throws<ArgumentException>(() => PlacementPlanner.DitSplitPlan([Reserve, Reserve], new long[] { 100 * MiB }, 0));
     }
 }

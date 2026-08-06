@@ -100,7 +100,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
                 }
                 (long freeA, _) = context.Backend.GetVramInfo();
                 (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan(freeA, freeB, perBlockBytes, sharedWeightBytes);
+                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], perBlockBytes, sharedWeightBytes)[0];
                 Logs.Info($"[HunyuanImageRecipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the "
                     + $"primary backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
             }

@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Diffusion.Models.Denoisers;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
@@ -63,6 +64,13 @@ public abstract class DiffusionPipelineBase : IDisposable
     /// <see cref="Backend"/> runs <c>[0, DitShardSplitBlock)</c>, <see cref="DitShardBackend"/> runs
     /// <c>[DitShardSplitBlock, BlockCount)</c>. Meaningless when <see cref="DitShardBackend"/> is null.</summary>
     public int DitShardSplitBlock { get; init; }
+
+    /// <summary>Ordered N-way DiT block-range stages (Phase 8+ generalization); null/empty = not configured. Where
+    /// a pipeline supports this it takes priority over <see cref="DitShardBackend"/>/<see cref="DitShardSplitBlock"/>,
+    /// which is the 2-way shape the other sharded pipelines still use unmodified — see <c>QwenImagePipeline</c> for
+    /// the one consumer today (<c>ROADMAP.md</c> item 7 tracks widening this to the rest). Settable at construction
+    /// only (init).</summary>
+    public IReadOnlyList<DitShardStage>? DitShardStages { get; init; }
 
     /// <summary>Which path the most recent generation's CFG-parallel dispatch took — <c>"active"</c>,
     /// <c>"fell-back(&lt;reason&gt;)"</c>, or <c>"inapplicable(&lt;reason&gt;)"</c>; null when

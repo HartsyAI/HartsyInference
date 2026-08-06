@@ -35,6 +35,12 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
 
+    /// <summary>True when N-way DiT block-range sharding (Phase 8+ generalization) is configured for this pipeline.
+    /// Qwen-Image is the one pipeline that reads <see cref="DiffusionPipelineBase.DitShardStages"/> instead of the
+    /// base class's 2-way <c>DitShardBackend</c>/<c>DitShardSplitBlock</c> — see <c>QwenImageRecipe</c> for how the
+    /// stage list is built from <c>PlacementConfig.ShardDevices</c>.</summary>
+    private bool IsDitSharded => DitShardStages is { Count: > 0 };
+
     /// <summary>Calibrated step-cache ship point (HARTSY_STEP_CACHE=1): the TeaCache-style polynomial gate at
     /// budget 0.20 — 1.20× at SSIM 0.9500 on the 4090 A/B. Fit: 54 pairs, R²=0.966 (results doc
     /// 2026-07-22_accel_stepcache_qwen_4090.md §polynomial).</summary>
@@ -170,7 +176,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         GuidanceInterval cfgInterval = GuidanceInterval.FromEnvironment();
         (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
             StepCacheEnv.Resolve(CalibratedStepCache);
-        if (stepCacheThreshold > 0f && DitShardBackend is not null)
+        if (stepCacheThreshold > 0f && IsDitSharded)
         {
             // Same exclusion as Krea2: the step cache's block-0-as-indicator + variable per-step topology
             // doesn't compose with a fixed block-range boundary.
@@ -474,19 +480,19 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // OOM'd here after uploading 1,675 weights (measured 2026-07-27, card at 0.5% free). Block streaming gives it
         // the same graceful degradation Flux has had.
         BlockStreamingController? streamer = null;
-        if (DitShardBackend is not null)
+        if (IsDitSharded)
         {
-            // Sharding beats streaming: the pooled two-card VRAM makes both split ranges resident, which is
-            // strictly better than sliding-window re-uploads. Asymmetric preload — shared + [0, split) on the
-            // primary, ONLY [split, BlockCount) on the shard backend; EnumerateWeights() on both would
-            // replicate instead of pool.
+            // Sharding beats streaming: the pooled multi-card VRAM makes every stage's range resident, which is
+            // strictly better than sliding-window re-uploads. Asymmetric preload — shared weights on stage 0's
+            // backend, each stage ONLY its own block range; EnumerateWeights() on any of them would replicate
+            // instead of pool.
             if (Backend.StreamingCache is not null)
                 Logs.Info("QwenImage: DiT sharding overrides low-VRAM block streaming for this generation.");
             if (!_ditResident)
             {
                 Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
-                Backend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
-                DitShardBackend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+                foreach (DitShardStage stage in DitShardStages!)
+                    stage.Backend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(stage.StartBlock, stage.EndBlock));
             }
             _ditResident = true;
         }
@@ -690,7 +696,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         QwenImageTransformer.DumpFinalLatent(packedLatent);
 
         Backend.Sync();
-        DitShardBackend?.Sync();
+        SyncDitShardStages();
         if (streamer is not null)
         {
             // Streamed path always tears down regardless of KEEP_MODELS: nothing was fully resident to keep, and the
@@ -766,15 +772,27 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Routes the per-step forward to <see cref="QwenImageTransformer.ForwardSharded"/> when DiT sharding
-    /// is configured (which never takes a step cache — the pipeline already suppressed it) and the plain
-    /// <see cref="QwenImageTransformer.Forward"/> otherwise, keeping the denoise-loop body identical either way.</summary>
+    /// <summary>Routes the per-step forward to <see cref="QwenImageTransformer.ForwardSharded(IReadOnlyList{DitShardStage},Tensor,Tensor,float,int,int,ValueTuple{int,int}[],bool)"/>
+    /// when N-way DiT sharding is configured (which never takes a step cache — the pipeline already suppressed it)
+    /// and the plain <see cref="QwenImageTransformer.Forward"/> otherwise, keeping the denoise-loop body identical
+    /// either way.</summary>
     private Tensor RunForward(Tensor input, Tensor hidden, float normalizedT, int hPacked, int wPacked,
         (int H, int W)[]? refGrids, bool refTimestepZero, DeviceFeatureCache? stepCache) =>
-        DitShardBackend is not null
-            ? _transformer.ForwardSharded(Backend, DitShardBackend, input, hidden, normalizedT, hPacked, wPacked,
-                DitShardSplitBlock, refGrids, refTimestepZero)
+        IsDitSharded
+            ? _transformer.ForwardSharded(DitShardStages!, input, hidden, normalizedT, hPacked, wPacked, refGrids, refTimestepZero)
             : _transformer.Forward(Backend, input, hidden, normalizedT, hPacked, wPacked, refGrids, refTimestepZero, stepCache);
+
+    /// <summary>Syncs every distinct DiT-shard-stage backend beyond the primary (already synced by the caller);
+    /// no-op when sharding is off.</summary>
+    private void SyncDitShardStages()
+    {
+        if (!IsDitSharded) return;
+        foreach (DitShardStage stage in DitShardStages!)
+        {
+            if (!ReferenceEquals(stage.Backend, Backend))
+                stage.Backend.Sync();
+        }
+    }
 
     /// <summary>Evicts the KEEP_MODELS-resident DiT so a VRAM-heavy phase (TE encode, reference/img2img VAE encode) has headroom; the denoise-loop PreloadWeights restores residency (PreloadWeights/FreeWeights symmetry). No-op when not resident.</summary>
     private void EvictResidentTransformer(string reason)
@@ -782,20 +800,20 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (!_ditResident) return;
         Logs.Debug($"[QwenImage] evicting resident DiT for {reason}");
         Backend.Sync();
-        DitShardBackend?.Sync();
+        SyncDitShardStages();
         FreeTransformerWeights();
     }
 
     /// <summary>Frees the DiT weights on whichever backend(s) hold them — the mirror of the sharded asymmetric
-    /// preload. The unsharded <c>FreeWeights(EnumerateWeights())</c> would silently no-op on the shard backend's
+    /// preload. The unsharded <c>FreeWeights(EnumerateWeights())</c> would silently no-op on a shard stage's
     /// block range (frees are per-backend) and leak it every non-resident generation.</summary>
     private void FreeTransformerWeights()
     {
-        if (DitShardBackend is not null)
+        if (IsDitSharded)
         {
             Backend.FreeWeights(_transformer.EnumerateSharedWeights());
-            Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
-            DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+            foreach (DitShardStage stage in DitShardStages!)
+                stage.Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(stage.StartBlock, stage.EndBlock));
         }
         else
         {

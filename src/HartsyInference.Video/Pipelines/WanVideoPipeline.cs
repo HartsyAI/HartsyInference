@@ -99,7 +99,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         ThrowIfDisposed();
         if (_encoder is null)
             throw new InvalidOperationException("RGB-input I2V needs a Wan22VaeEncoder — construct the pipeline with one (it loads from the same VAE weights).");
-        return _encoder.EncodeRgbFrame(Backend, rgb24, width, height);
+        return _encoder.EncodeRgbFrame(VaeBackend, rgb24, width, height);
     }
 
     /// <summary>Generates frames from pre-computed umT5 features <c>[L, textDim]</c>. Returns one interleaved-RGB <c>byte[]</c> per frame.
@@ -113,9 +113,14 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null, Tensor? firstFrameLatent = null)
     {
         Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, onProgress, firstFrameLatent, out int seed);
+        // LOAD-BEARING for VaeDevice: RunDenoise's latents are already host-current (FlowUniPCMultistepScheduler.Step
+        // writes sample.DataPointer host-side every iteration), so no explicit Sync()+DataPointer read is needed
+        // before handing off to a VaeBackend on another device — unlike the device-resident-latent pipelines.
+        VaeBackend.PreloadWeights(_vae.EnumerateWeights());
         Tensor rgb;
-        try { rgb = _vae.Decode(Backend, latent); }
+        try { rgb = _vae.Decode(VaeBackend, latent); }
         finally { latent.Dispose(); }
+        if (!ReferenceEquals(VaeBackend, Backend)) VaeBackend.Sync();
 
         int f = (int)rgb.Shape[2];
         byte[][] frames = new byte[f][];
@@ -136,13 +141,15 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // Preload the VAE decoder weights onto the GPU. Without this every conv/norm in the decode is a weight
         // cache-miss → SyncStream + re-upload, serializing the whole decode (GPU idle ~79%, ~8 min). RunDenoise
         // ended with ReleaseOrKeepTransformer, which guarantees decode headroom (kept the DiT only if it fits).
-        Backend.PreloadWeights(_vae.EnumerateWeights());
+        // Runs on VaeBackend (defaults to Backend): RunDenoise's latents are host-current (see GenerateFromEmbeddings),
+        // so a VaeBackend on another device just uploads from there.
+        VaeBackend.PreloadWeights(_vae.EnumerateWeights());
         if (_vae is Wan22VaeDecoder w22)
         {
             try
             {
                 int idx = 0;
-                foreach (Tensor group in w22.DecodeStreaming(Backend, latent))   // [1,3,groupT,H,W] per latent frame
+                foreach (Tensor group in w22.DecodeStreaming(VaeBackend, latent))   // [1,3,groupT,H,W] per latent frame
                 {
                     int gT = (int)group.Shape[2], h = (int)group.Shape[3], w = (int)group.Shape[4];
                     for (int gi = 0; gi < gT; gi++)
@@ -157,7 +164,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         }
         // Non-streaming VAE (Wan2.1): full decode, then emit each frame.
         Tensor rgb;
-        try { rgb = _vae.Decode(Backend, latent); }
+        try { rgb = _vae.Decode(VaeBackend, latent); }
         finally { latent.Dispose(); }
         try
         {
@@ -455,12 +462,14 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         else
         {
             EnsureVaeEncodeHeadroom(numFrames, width, height);
-            Backend.PreloadWeights(_encoder.EnumerateWeights());
+            // Runs on VaeBackend (defaults to Backend): BuildI2VCondition below host-materializes the result, so
+            // a VaeBackend on another device never contends with the DiT's VRAM on Backend.
+            VaeBackend.PreloadWeights(_encoder.EnumerateWeights());
             Tensor condClip = BuildCondClip(condRgb24, lastRgb24, width, height, numFrames);
-            Tensor condLatent = _encoder.Encode(Backend, condClip);   // [1, z, tLat, hLat, wLat], normalized
+            Tensor condLatent = _encoder.Encode(VaeBackend, condClip);   // [1, z, tLat, hLat, wLat], normalized
             condClip.Dispose();
-            Backend.Sync();
-            Backend.FreeWeights(_encoder.EnumerateWeights());
+            VaeBackend.Sync();
+            VaeBackend.FreeWeights(_encoder.EnumerateWeights());
             WanVideoDebugDump.Dump("i2v_cond_latent", condLatent);
             condition = BuildI2VCondition(condLatent, lastRgb24 is not null, latentCh, tp, tLat, hLat, wLat);   // [1,tp+z,tLat,hLat,wLat]
             condLatent.Dispose();
@@ -527,9 +536,13 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // freed on the next cache miss or in DisposeCore.
 
         phase.Restart();
+        // LOAD-BEARING for VaeDevice: the denoise loop above steps `latents` through the same host-side
+        // scheduler write pattern as GenerateFromEmbeddings, so the final latents are already host-current.
+        VaeBackend.PreloadWeights(_vae.EnumerateWeights());
         Tensor rgb;
-        try { rgb = _vae.Decode(Backend, latents); }
+        try { rgb = _vae.Decode(VaeBackend, latents); }
         finally { latents.Dispose(); }
+        if (!ReferenceEquals(VaeBackend, Backend)) VaeBackend.Sync();
         Logs.Info($"[wan-phase] I2V VAE decode: {phase.ElapsedMilliseconds} ms");
         int f = (int)rgb.Shape[2];
         byte[][] frames = new byte[f][];
@@ -572,10 +585,10 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         Logs.Warning("Wan-Video V2V pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
         EnsureVaeEncodeHeadroom(pixT, pixW, pixH);
-        Backend.PreloadWeights(_encoder.EnumerateWeights());
-        Tensor real = _encoder.Encode(Backend, rgbClip);                 // [1, z, tLat, hLat, wLat]
-        Backend.Sync();
-        Backend.FreeWeights(_encoder.EnumerateWeights());
+        VaeBackend.PreloadWeights(_encoder.EnumerateWeights());
+        Tensor real = _encoder.Encode(VaeBackend, rgbClip);               // [1, z, tLat, hLat, wLat]
+        VaeBackend.Sync();
+        VaeBackend.FreeWeights(_encoder.EnumerateWeights());
 
         // Use the UniPC sigma grid (shift-warped flow sigmas) for the noising start so the V2V init matches the
         // scheduler the denoise loop runs on.
@@ -616,9 +629,13 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         if (_transformer2 is null) Backend.FreeWeights(_transformer.EnumerateWeights());
         else if (_loadedExpert is not null) { Backend.FreeWeights(_loadedExpert.EnumerateWeights()); _loadedExpert = null; }
 
+        // LOAD-BEARING for VaeDevice: the loop above steps `latents` via EulerCfgStep, a host-side unsafe-pointer
+        // loop, so the final latents are already host-current — same guarantee as the other Wan denoise loops.
+        VaeBackend.PreloadWeights(_vae.EnumerateWeights());
         Tensor rgb;
-        try { rgb = _vae.Decode(Backend, latents); }
+        try { rgb = _vae.Decode(VaeBackend, latents); }
         finally { latents.Dispose(); }
+        if (!ReferenceEquals(VaeBackend, Backend)) VaeBackend.Sync();
         int f = (int)rgb.Shape[2];
         byte[][] frames = new byte[f][];
         for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
@@ -710,9 +727,14 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             Buffer.MemoryCopy(cp + ci * frame, lp + (long)ci * t * frame, frame * 4, frame * 4);
     }
 
-    /// <summary>Evicts the (possibly KEEP_MODELS-resident) DiT before a whole-clip VAE encode when measured free VRAM is short of the conv-activation ceiling. Trims the pool first so slack from the previous generation doesn't make the reading pessimistic — that slack, not the DiT, is what the old unconditional path was really evicting for on warm gens.</summary>
+    /// <summary>Evicts the (possibly KEEP_MODELS-resident) DiT before a whole-clip VAE encode when measured free VRAM is short of the conv-activation ceiling. Trims the pool first so slack from the previous generation doesn't make the reading pessimistic — that slack, not the DiT, is what the old unconditional path was really evicting for on warm gens. A VAE encoder on its OWN device (<see cref="DiffusionPipelineBase.VaeBackend"/>) never contends with the DiT's VRAM on <see cref="DiffusionPipelineBase.Backend"/>, so the whole fit-check/evict dance is skipped when split.</summary>
     private void EnsureVaeEncodeHeadroom(int numFrames, int width, int height)
     {
+        if (!ReferenceEquals(VaeBackend, Backend))
+        {
+            Logs.Info("[wan-phase] cond encode: VaeBackend is a separate device — DiT eviction skipped (no contention).");
+            return;
+        }
         // ~160 F32 conv-activation copies/frame: measured 2026-07-11 — a 25f 512×320 encode consumed ≥7.5 GB
         // (~153 copies/frame) and OOM'd beside a resident DiT under the old 24-copies estimate.
         long encodeNeedBytes = (long)numFrames * height * width * 3L * 4 * 160;
@@ -734,7 +756,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Post-denoise DiT residency (the HARTSY_KEEP_MODELS idiom): keeps the single-expert transformer device-resident across generations — the next gen's PreloadWeights becomes a cache-hit no-op — unless measured free VRAM can't cover the VAE decode (grid-scaled estimate; an OOM is worse than one re-upload). MoE experts always free: two 14B experts never co-reside.</summary>
+    /// <summary>Post-denoise DiT residency (the HARTSY_KEEP_MODELS idiom): keeps the single-expert transformer device-resident across generations — the next gen's PreloadWeights becomes a cache-hit no-op — unless measured free VRAM can't cover the VAE decode (grid-scaled estimate; an OOM is worse than one re-upload). MoE experts always free: two 14B experts never co-reside. A VAE on its OWN device (<see cref="DiffusionPipelineBase.VaeBackend"/>) never contends with the DiT's VRAM on <see cref="DiffusionPipelineBase.Backend"/>, so the decode-headroom check is skipped when split — the DiT just stays resident.</summary>
     private void ReleaseOrKeepTransformer(int numFrames, int width, int height)
     {
         if (_transformer2 is not null)
@@ -745,6 +767,11 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         if (!KeepModelsResident)
         {
             Backend.FreeWeights(_transformer.EnumerateWeights());
+            return;
+        }
+        if (!ReferenceEquals(VaeBackend, Backend))
+        {
+            Logs.Info("[wan-phase] DiT kept resident across generations (KEEP_MODELS; VaeBackend is a separate device — no decode contention).");
             return;
         }
         Backend.TrimMemoryPool();

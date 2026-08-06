@@ -203,6 +203,7 @@ public sealed class InferenceEngine : IInferenceEngine
             VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
             CfgParallelBackend = _placement.CfgParallelDevice is null ? null : EnsureBackend(_placement.CfgParallelDevice),
             DitShardBackend = EnsureDitShardBackend(),
+            DitShardBackends = EnsureDitShardBackends(),
             Components = request?.Components,
             Loras = request?.Loras,
         }));
@@ -358,6 +359,7 @@ public sealed class InferenceEngine : IInferenceEngine
                 VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
                 CfgParallelBackend = _placement.CfgParallelDevice is null ? null : EnsureBackend(_placement.CfgParallelDevice),
                 DitShardBackend = EnsureDitShardBackend(),
+                DitShardBackends = EnsureDitShardBackends(),
             }));
         _videoRecipePipelines[key] = pipeline;
         return pipeline;
@@ -427,10 +429,34 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>The second backend for Phase 8 DiT sharding (<see cref="PlacementConfig.EnableDitSharding"/>), or
     /// null when it's off. <c>ShardDevices[1]</c> is safe to index unchecked — <see cref="PlacementPlanner.ValidatePlacement"/>
-    /// rejects any <see cref="PlacementConfig.EnableDitSharding"/> config without exactly 2 <c>ShardDevices</c>
-    /// at both construction and <see cref="SetPlacement"/>, so an engine can never reach this with fewer.</summary>
+    /// rejects any <see cref="PlacementConfig.EnableDitSharding"/> config with fewer than 2 <c>ShardDevices</c>
+    /// at both construction and <see cref="SetPlacement"/>, so an engine can never reach this with fewer. Kept as
+    /// the 2-way shape the five non-Qwen sharded recipes still consume; <see cref="EnsureDitShardBackends"/> is the
+    /// N-way sibling.</summary>
     private IBackend? EnsureDitShardBackend() =>
         _placement.EnableDitSharding ? EnsureBackend(_placement.ShardDevices[1]) : null;
+
+    /// <summary>Every stage-1..N-1 backend for N-way DiT sharding (stage 0 is always <see cref="EnsureBackend()"/>),
+    /// or null when sharding is off. Note <c>EnsureBackend(selector)</c> pools by canonical device identity, so a
+    /// <c>ShardDevices</c> entry that canonically matches an already-resolved stage (e.g. two entries that both
+    /// resolve to "cuda:0") returns the SAME backend instance for both — two logically distinct stages then share
+    /// one physical GPU AND one backend object, which <c>QwenImageTransformer.ForwardSharded</c> must (and does)
+    /// handle as a same-instance no-op copy at that boundary. Getting two INDEPENDENT backend instances on one
+    /// physical GPU (the same-GPU-multi-backend feature) requires two separate engines, not two entries in one
+    /// engine's <c>ShardDevices</c> — see <c>SameGpuConcurrentRealWeightTests</c>.</summary>
+    private IReadOnlyList<IBackend>? EnsureDitShardBackends()
+    {
+        if (!_placement.EnableDitSharding || _placement.ShardDevices.Count < 2)
+        {
+            return null;
+        }
+        List<IBackend> stages = new(_placement.ShardDevices.Count - 1);
+        for (int i = 1; i < _placement.ShardDevices.Count; i++)
+        {
+            stages.Add(EnsureBackend(_placement.ShardDevices[i]));
+        }
+        return stages;
+    }
 
     /// <summary>Canonical device identity for pooling: resolved kind plus ordinal ("cuda:1", "cuda", "cpu"), so
     /// "auto", "cuda:0" and "cuda" on a CUDA box all pool to the same backend.</summary>
