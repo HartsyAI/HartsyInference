@@ -106,6 +106,21 @@ public sealed unsafe class Lumina2Transformer : IDisposable
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
+        foreach (Tensor w in EnumerateSharedWeights()) yield return w;
+        for (int i = 0; i < _layers.Length; i++)
+            foreach (Tensor w in _layers[i].EnumerateWeights()) yield return w;
+    }
+
+    /// <summary>The number of streamable main <see cref="Lumina2Block"/>s (26). The context/noise refiner
+    /// stacks are NOT included — they always run once as a prefix stage on the split's FIRST backend, same as
+    /// Krea2's text-fusion stage.</summary>
+    public int BlockCount => _layers.Length;
+
+    /// <summary>The non-main-layer weights: timestep/caption embedders, x_embedder, norm_out, and BOTH refiner
+    /// stacks (context_refiner + noise_refiner) — always resident on the block-range split's FIRST backend
+    /// (see <see cref="ForwardSharded"/>), since they run once, before the shardable main-layer loop.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
         if (_tEmbLinear1Weight is not null) yield return _tEmbLinear1Weight;
         if (_tEmbLinear1Bias is not null) yield return _tEmbLinear1Bias;
         if (_tEmbLinear2Weight is not null) yield return _tEmbLinear2Weight;
@@ -124,7 +139,13 @@ public sealed unsafe class Lumina2Transformer : IDisposable
             foreach (Tensor w in _contextRefiners[i].EnumerateWeights()) yield return w;
         for (int i = 0; i < _noiseRefiners.Length; i++)
             foreach (Tensor w in _noiseRefiners[i].EnumerateWeights()) yield return w;
-        for (int i = 0; i < _layers.Length; i++)
+    }
+
+    /// <summary>Enumerates only main layers <c>[startBlock, endBlock)</c>'s weights — the asymmetric preload a
+    /// block-range shard needs (see <see cref="ForwardSharded"/>).</summary>
+    public IEnumerable<Tensor> EnumerateBlockRangeWeights(int startBlock, int endBlock)
+    {
+        for (int i = startBlock; i < endBlock; i++)
             foreach (Tensor w in _layers[i].EnumerateWeights()) yield return w;
     }
 
@@ -296,6 +317,171 @@ public sealed unsafe class Lumina2Transformer : IDisposable
 
         Lumina2DebugDump.DumpOutput(velocity);
         return velocity;
+    }
+
+    /// <summary>Predicts velocity for one denoising step with the main <see cref="Lumina2Block"/> loop split
+    /// across two backends: layers <c>[0, splitBlock)</c> run on <paramref name="backendA"/>, layers
+    /// <c>[splitBlock, BlockCount)</c> on <paramref name="backendB"/> — a sequential pipeline split, not
+    /// tensor-parallel, so there is <b>no latency win</b>; the win is VRAM pooling. <paramref name="backendA"/>
+    /// must hold <see cref="EnumerateSharedWeights"/> + <see cref="EnumerateBlockRangeWeights"/><c>(0,
+    /// splitBlock)</c>; <paramref name="backendB"/> must hold ONLY <see cref="EnumerateBlockRangeWeights"/>
+    /// <c>(splitBlock, BlockCount)</c>. The context/noise-refiner prefix always runs on
+    /// <paramref name="backendA"/> (same "prefix stage" shape as Krea2's text-fusion) — unlike <see cref="Forward"/>,
+    /// this does NOT use the prompt-invariant refined-caption cache (<c>_refinedCapA</c>/<c>_refinedCapB</c>):
+    /// sharding already forgoes a latency win, so the cache's cross-step reuse isn't worth the extra bookkeeping
+    /// of tracking cache ownership across two backends. Excludes <see cref="Forward"/>'s across-step caches
+    /// entirely; use <see cref="Forward"/> for those.</summary>
+    public Tensor ForwardSharded(IBackend backendA, IBackend backendB, Tensor latent, Tensor captionEmbeddings,
+        float sigma, int splitBlock)
+    {
+        if (splitBlock <= 0 || splitBlock >= _layers.Length)
+            throw new ArgumentOutOfRangeException(nameof(splitBlock),
+                $"splitBlock must be in (0, {_layers.Length}) — 0 or {_layers.Length} would put the whole NextDiT on one backend.");
+
+        int batch = (int)latent.Shape[0];
+        int inChannels = (int)latent.Shape[1];
+        int latentH = (int)latent.Shape[2];
+        int latentW = (int)latent.Shape[3];
+        int hidden = _config.HiddenSize;
+        int patch = _config.PatchSize;
+
+        if (latentH % patch != 0 || latentW % patch != 0)
+            throw new ArgumentException($"Latent H/W ({latentH}x{latentW}) must be divisible by patch size {patch}.");
+
+        int hPacked = latentH / patch;
+        int wPacked = latentW / patch;
+        int imgLen = hPacked * wPacked;
+        int capLen = (int)captionEmbeddings.Shape[1];
+
+        Tensor tEmb = ComputeTimestepEmbedding(backendA, sigma, batch);
+
+        // ── caption embedding + context_refiner (always fresh — no prompt-invariant cache, see doc above) ──
+        Tensor capProjected = EmbedCaption(backendA, captionEmbeddings, batch, capLen);
+        if (_capRopeSig != capLen)
+        {
+            Tensor capPosIds = BuildCaptionPositionIds(capLen);
+            _captionRopeCached.Precompute(capPosIds);
+            capPosIds.Dispose();
+            _capRopeSig = capLen;
+        }
+        Tensor refinedCaption = capProjected;
+        for (int i = 0; i < _contextRefiners.Length; i++)
+        {
+            Tensor next = _contextRefiners[i].Forward(backendA, refinedCaption, _captionRopeCached);
+            refinedCaption.Dispose();
+            refinedCaption = next;
+        }
+
+        // ── image patchify + embed → noise_refiner stack with timestep modulation ──
+        Tensor packedLatent = Patchify(latent, batch, inChannels, latentH, latentW, patch);
+        Tensor imgEmbedded = new Tensor(new TensorShape(batch, imgLen, hidden), latent.DType);
+        backendA.Linear(imgEmbedded, packedLatent, _xEmbedderWeight!, _xEmbedderBias);
+        packedLatent.Dispose();
+
+        int refinerSig = hPacked << 16 | wPacked;
+        if (_refinerRopeSig != refinerSig)
+        {
+            Tensor refinerPosIds = BuildImagePositionIds(hPacked, wPacked, imageFrameStart: 0);
+            _refinerRopeCached.Precompute(refinerPosIds);
+            refinerPosIds.Dispose();
+            _refinerRopeSig = refinerSig;
+        }
+
+        Tensor refinedImage = imgEmbedded;
+        for (int i = 0; i < _noiseRefiners.Length; i++)
+        {
+            Tensor next = _noiseRefiners[i].Forward(backendA, refinedImage, tEmb, _refinerRopeCached);
+            refinedImage.Dispose();
+            refinedImage = next;
+        }
+
+        // ── concatenate [refined_caption, refined_image] (captions first, mirroring Forward) ──
+        Tensor concat;
+        if (batch == 1)
+        {
+            concat = new Tensor(new TensorShape(1, capLen + imgLen, hidden), refinedImage.DType);
+            backendA.Concat(concat, new Tensor[] { refinedCaption, refinedImage }, 1);
+        }
+        else
+        {
+            concat = ConcatAlongSeqDim(refinedCaption, refinedImage, batch, capLen, imgLen, hidden);
+        }
+        refinedImage.Dispose();
+        refinedCaption.Dispose();
+
+        // ── joint RoPE for the concatenated [caption, image] sequence ──
+        int jointSig = (capLen << 20) ^ (hPacked << 10) ^ wPacked;
+        if (_jointRopeSig != jointSig)
+        {
+            Tensor fullPosIds = BuildJointPositionIds(capLen, hPacked, wPacked);
+            _rope.Precompute(fullPosIds);
+            fullPosIds.Dispose();
+            _jointRopeSig = jointSig;
+        }
+
+        // ── main layers, split across the two backends ──
+        Tensor xA = ForwardLayersRange(backendA, concat, tEmb, 0, splitBlock);
+
+        // ── hand off to backendB: x + tEmb (every layer's AdaLN reads it) ──
+        Tensor xB = new Tensor(xA.Shape, xA.DType);
+        backendB.CopyFromPeer(xB, xA, backendA);
+        xA.Dispose();
+        Tensor tEmbB = new Tensor(tEmb.Shape, tEmb.DType);
+        backendB.CopyFromPeer(tEmbB, tEmb, backendA);
+
+        Tensor xFinalB = ForwardLayersRange(backendB, xB, tEmbB, splitBlock, _layers.Length);
+        tEmbB.Dispose();
+
+        // ── hand back to backendA: norm_out weights live there (EnumerateSharedWeights) ──
+        Tensor x = new Tensor(xFinalB.Shape, xFinalB.DType);
+        backendA.CopyFromPeer(x, xFinalB, backendB);
+        xFinalB.Dispose();
+
+        // ── slice off the image portion (back of the [caption, image] sequence) ──
+        Tensor imageSlice;
+        if (batch == 1)
+        {
+            imageSlice = new Tensor(new TensorShape(1, imgLen, hidden), x.DType);
+            backendA.SliceRows(imageSlice, x, capLen);
+        }
+        else
+        {
+            imageSlice = SliceImageBack(x, batch, capLen, imgLen, hidden);
+        }
+        x.Dispose();
+
+        Tensor finalProj = ApplyNormOut(backendA, imageSlice, tEmb, batch, imgLen);
+        imageSlice.Dispose();
+        tEmb.Dispose();
+
+        Tensor velocity;
+        if (batch == 1)
+        {
+            velocity = new Tensor(new TensorShape(1, inChannels, latentH, latentW), DType.F32);
+            backendA.UnpatchifyTokens(velocity, finalProj, inChannels, hPacked, wPacked, patch, innerChannelFastest: true);
+        }
+        else
+        {
+            velocity = Unpatchify(finalProj, batch, inChannels, hPacked, wPacked, patch);
+        }
+        finalProj.Dispose();
+        return velocity;
+    }
+
+    /// <summary>Runs main <see cref="Lumina2Block"/>s <c>[startBlock, endBlock)</c> in order — the seam a
+    /// block-range shard splits on (see <see cref="ForwardSharded"/>). Unconditional dispose-and-reassign every
+    /// iteration: unlike SD3's dual-stream <c>JointBlock</c>, <see cref="Lumina2Block.Forward"/> has no
+    /// identity-passthrough case, so there is nothing to protect against — matches
+    /// <c>Krea2Transformer.ForwardBlocksRange</c>'s shape exactly.</summary>
+    private Tensor ForwardLayersRange(IBackend backend, Tensor x, Tensor tEmb, int startBlock, int endBlock)
+    {
+        for (int i = startBlock; i < endBlock; i++)
+        {
+            Tensor next = _layers[i].Forward(backend, x, tEmb, _rope);
+            x.Dispose();
+            x = next;
+        }
+        return x;
     }
 
     /// <summary>Computes the timestep embedding [B, adaLNEmbedDim] via sinusoidal -> Linear -> SiLU -> Linear (Lumina 2.0's TimestepEmbedding). Frequency table size matches <c>_tEmbLinear1Weight.Shape[1]</c> (the input dim of linear_1 — typically 256 for the 2304-hidden Lumina 2.0).</summary>

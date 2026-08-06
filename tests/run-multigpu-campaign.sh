@@ -7,7 +7,9 @@
 #
 # Usage: tests/run-multigpu-campaign.sh [phaseA|phaseB|all]   (default: phaseA)
 #   phaseA — needs only checkpoints already on this box (Krea2, Flux1, SDXL, Qwen-Image-Edit, MiniMaxH3 fp8)
-#   phaseB — additionally needs the downloaded checkpoints (chroma, qwen-image, hunyuan-image, wan)
+#   phaseB — additionally needs the downloaded checkpoints (chroma, qwen-image, hunyuan-image, wan,
+#            ltx-video [~9.4 GB, Lightricks/LTX-Video], ltx-2 [~22 GB DiT, Kijai/LTX2.3_comfy split — NOT
+#            pulled on this box as of 2026-08-05, disk-constrained; its test skips cleanly until it is])
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -212,6 +214,23 @@ phase_a() {
     # swarmui.service or another heavy process is holding host RAM; stop it first if this line fails only
     # on a RAM-skip message, not a real regression.
     run_class HartsyInference.LLM.Tests        LlmShardingEngineTests.Sharded_TwoGpus_Qwen3_32B_DecodeTokPerSec
+    # VaeDevice placement for Wan — the checkpoint (wan2.2_ti2v_5B_fp16.safetensors) is already on-disk on
+    # this box, so per this campaign's phaseA/phaseB split rule this belongs here, NOT next to its TE twin
+    # (WanComponentPlacementEngineTests, phase B) — that placement predates this VAE work and was left
+    # as-is rather than reclassified. Wan had zero VAE placement until WanVideoPipeline.VaeBackend landed.
+    run_class HartsyInference.Diffusion.Tests  WanVaeComponentPlacementEngineTests
+    # SD3.5 Medium DiT sharding (JointBlock loop, real checkpoint on this box — transformer + separate CLIP-L/
+    # CLIP-G/T5-XXL side models). Synthetic bit-parity is SAME-GPU by design (cross-SM GEMM/SDPA rounding
+    # differs in the last ULP, unrelated to the split logic — see Sd3DitShardingTests' class doc); the VRAM
+    # and engine tests below are the real cross-device verification (measured SSIM 0.9794).
+    run_class HartsyInference.Diffusion.Tests  Sd3DitShardingTests
+    run_class HartsyInference.Diffusion.Tests  Sd3DitShardingVramTests
+    run_class HartsyInference.Diffusion.Tests  Sd3DitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
+    run_class HartsyInference.Diffusion.Tests  Sd3DitShardingEngineTests.DitSharding_NonResident_FreesShardBackend_NoAccumulationAcrossGenerations HARTSY_KEEP_MODELS=0
+    # Lumina-Image-2.0 DiT sharding — SYNTHETIC ONLY: no checkpoint on this box (Models/Stable-Diffusion/Lumina2
+    # only has config.json + the safetensors INDEX, no actual weight shards; `hartsy pull lumina2` would fetch
+    # them). No VRAM/engine real-weight fact exists yet — add once pulled.
+    run_class HartsyInference.Diffusion.Tests  Lumina2DitShardingTests
 }
 
 # ── Phase B: post-download (hartsy pull chroma qwen-image hunyuan-image wan) ─────────────────────────────
@@ -224,8 +243,6 @@ phase_b() {
     run_class HartsyInference.Diffusion.Tests  HunyuanImageDitShardingEngineTests
     run_class HartsyInference.Video.Tests      CfgBranchParallelWanTests
     run_class HartsyInference.Diffusion.Tests  WanComponentPlacementEngineTests
-    # VaeDevice twin of the TE test above — Wan had zero VAE placement until WanVideoPipeline.VaeBackend landed.
-    run_class HartsyInference.Diffusion.Tests  WanVaeComponentPlacementEngineTests
     run_class HartsyInference.Diffusion.Tests  WanCfgParallelEngineTests
     # LTX-1 (ltx-video-2b-v0.9.safetensors, ~9.4 GB, Lightricks/LTX-Video) — needed a download on this box.
     # TE was already wired (LtxVideoRecipePipeline._textBackend); VAE placement is new (LtxVideoPipeline.VaeBackend).

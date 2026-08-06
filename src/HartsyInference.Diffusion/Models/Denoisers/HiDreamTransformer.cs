@@ -145,6 +145,24 @@ public sealed unsafe class HiDreamTransformer : IDisposable
     /// <summary>Yields every weight tensor for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
+        foreach (Tensor w in EnumerateSharedWeights()) yield return w;
+        for (int i = 0; i < _doubleBlocks.Length; i++)
+            foreach (Tensor w in _doubleBlocks[i].EnumerateWeights()) yield return w;
+        for (int i = 0; i < _singleBlocks.Length; i++)
+            foreach (Tensor w in _singleBlocks[i].EnumerateWeights()) yield return w;
+    }
+
+    /// <summary>The number of streamable blocks, flat-indexed double-then-single: <c>[0, NumLayers)</c> are
+    /// double-stream, <c>[NumLayers, NumLayers+NumSingleLayers)</c> are single-stream. See
+    /// <see cref="ForwardSharded"/> for how a block-range split crosses this boundary.</summary>
+    public int BlockCount => _doubleBlocks.Length + _singleBlocks.Length;
+
+    /// <summary>The non-block weights: x_embedder, t_embedder, p_embedder, ALL <c>caption_projection[]</c>
+    /// entries (every Llama layer + T5 is projected once, up front, before the block loop), and the final
+    /// AdaLN + linear. Always resident on the block-range split's FIRST backend — see
+    /// <see cref="ForwardSharded"/>.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
         if (_xEmbedWeight is not null) yield return _xEmbedWeight;
         if (_xEmbedBias is not null) yield return _xEmbedBias;
 
@@ -162,15 +180,21 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             for (int i = 0; i < _captionProjectionWeights.Length; i++)
                 yield return _captionProjectionWeights[i];
 
-        for (int i = 0; i < _doubleBlocks.Length; i++)
-            foreach (Tensor w in _doubleBlocks[i].EnumerateWeights()) yield return w;
-        for (int i = 0; i < _singleBlocks.Length; i++)
-            foreach (Tensor w in _singleBlocks[i].EnumerateWeights()) yield return w;
-
         if (_finalAdaLnWeight is not null) yield return _finalAdaLnWeight;
         if (_finalAdaLnBias is not null) yield return _finalAdaLnBias;
         if (_finalProjWeight is not null) yield return _finalProjWeight;
         if (_finalProjBias is not null) yield return _finalProjBias;
+    }
+
+    /// <summary>Enumerates only blocks <c>[startBlock, endBlock)</c>'s weights (flat double-then-single index,
+    /// including every routed MoE expert) — the asymmetric preload a block-range shard needs (see
+    /// <see cref="ForwardSharded"/>).</summary>
+    public IEnumerable<Tensor> EnumerateBlockRangeWeights(int startBlock, int endBlock)
+    {
+        for (int i = startBlock; i < Math.Min(endBlock, _doubleBlocks.Length); i++)
+            foreach (Tensor w in _doubleBlocks[i].EnumerateWeights()) yield return w;
+        for (int i = Math.Max(startBlock, _doubleBlocks.Length); i < endBlock; i++)
+            foreach (Tensor w in _singleBlocks[i - _doubleBlocks.Length].EnumerateWeights()) yield return w;
     }
 
     /// <summary>Forward pass for one denoising step. Predicts velocity in patchified-and-projected
@@ -335,6 +359,179 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         projected.Dispose();
         HiDreamDebugDump.DumpOutput(output);
         return output;
+    }
+
+    /// <summary>Predicts velocity for one denoising step with the flat double-then-single block loop split
+    /// across two backends: blocks <c>[0, splitBlock)</c> run on <paramref name="backendA"/>, blocks
+    /// <c>[splitBlock, BlockCount)</c> on <paramref name="backendB"/> — a sequential pipeline split, not
+    /// tensor-parallel, so there is <b>no latency win</b>; the win is VRAM pooling. <paramref name="backendA"/>
+    /// must hold <see cref="EnumerateSharedWeights"/> + <see cref="EnumerateBlockRangeWeights"/><c>(0,
+    /// splitBlock)</c>; <paramref name="backendB"/> must hold ONLY <see cref="EnumerateBlockRangeWeights"/>
+    /// <c>(splitBlock, BlockCount)</c>.
+    /// <para>The double→single transition (concat image+encoder into one joint stream) happens exactly once,
+    /// on whichever backend's range first crosses block index <see cref="HiDreamConfig.NumLayers"/> — see
+    /// <see cref="ForwardBlocksRange"/>. The per-block Llama conditioning (<paramref name="llamaHiddenLayers"/>,
+    /// one entry per block) is projected once up front (backendA, shared weights) and the entries B's range
+    /// needs are peer-copied alongside the activation hand-off — they are activations, not weights, so they
+    /// are NOT covered by <see cref="EnumerateBlockRangeWeights"/>.</para></summary>
+    public Tensor ForwardSharded(IBackend backendA, IBackend backendB, Tensor latent, float timestep,
+        Tensor t5Hidden, IReadOnlyList<Tensor> llamaHiddenLayers, Tensor pooledEmbeds, int splitBlock)
+    {
+        ThrowIfDisposed();
+        int totalBlocks = BlockCount;
+        if (splitBlock <= 0 || splitBlock >= totalBlocks)
+            throw new ArgumentOutOfRangeException(nameof(splitBlock),
+                $"splitBlock must be in (0, {totalBlocks}) — 0 or {totalBlocks} would put the whole transformer on one backend.");
+
+        int batch = (int)latent.Shape[0];
+        int inChannels = (int)latent.Shape[1];
+        int height = (int)latent.Shape[2];
+        int width = (int)latent.Shape[3];
+        int patH = height / _config.PatchSize;
+        int patW = width / _config.PatchSize;
+        int imgSeqLen = patH * patW;
+        int hidden = _config.InnerDim;
+
+        if (llamaHiddenLayers.Count != totalBlocks)
+            throw new InvalidOperationException(
+                $"Expected {totalBlocks} Llama hidden layers (one per block), got {llamaHiddenLayers.Count}.");
+
+        // ── prefix (shared-weight stage, always backendA): patchify+embed, temb, caption projections, rope ──
+        Tensor patched = PatchifyLatent(latent, batch, inChannels, patH, patW, _config.PatchSize);
+        Tensor imgTokens = new Tensor(new TensorShape(batch, imgSeqLen, hidden), DType.F32);
+        backendA.Linear(imgTokens, patched, _xEmbedWeight!, _xEmbedBias);
+        patched.Dispose();
+
+        Tensor temb = ComputeTimestepAndPooledEmbedding(backendA, timestep, pooledEmbeds, batch);
+
+        Tensor[] llamaProj = new Tensor[llamaHiddenLayers.Count];
+        for (int i = 0; i < llamaHiddenLayers.Count; i++)
+            llamaProj[i] = ProjectCaption(backendA, llamaHiddenLayers[i], _captionProjectionWeights![i]);
+        Tensor t5Proj = ProjectCaption(backendA, t5Hidden, _captionProjectionWeights![^1]);
+
+        Tensor lastLlama = llamaProj[^1];
+        Tensor initialEncoder = ConcatSeq(backendA, t5Proj, lastLlama);
+        int initialEncoderSeqLen = (int)initialEncoder.Shape[1];
+        t5Proj.Dispose();
+
+        int perLayerLlamaSeqLen = (int)llamaProj[0].Shape[1];
+        int doubleStreamTotalSeqLen = imgSeqLen + initialEncoderSeqLen + perLayerLlamaSeqLen;
+        int singleStreamBaseSeqLen = imgSeqLen + initialEncoderSeqLen;
+        int singleStreamTotalSeqLen = singleStreamBaseSeqLen + perLayerLlamaSeqLen;
+        EnsureRope(imgSeqLen, patH, patW, initialEncoderSeqLen + perLayerLlamaSeqLen);
+
+        // ── backend A's block range ──
+        (Tensor imgA, Tensor? encA) = ForwardBlocksRange(backendA, imgTokens, initialEncoder, temb, llamaProj,
+            initialEncoderSeqLen, imgSeqLen, doubleStreamTotalSeqLen, singleStreamBaseSeqLen, singleStreamTotalSeqLen,
+            0, splitBlock);
+        imgTokens.Dispose();
+        initialEncoder.Dispose();
+
+        // ── hand off to backendB: img (+encoder if A's range never crossed into single-stream), temb, and the
+        // REMAINING per-block Llama projections B's range reads (activations, not weights) ──
+        Tensor imgB = new Tensor(imgA.Shape, imgA.DType);
+        backendB.CopyFromPeer(imgB, imgA, backendA);
+        imgA.Dispose();
+        Tensor? encB = null;
+        if (encA is not null)
+        {
+            encB = new Tensor(encA.Shape, encA.DType);
+            backendB.CopyFromPeer(encB, encA, backendA);
+            encA.Dispose();
+        }
+        Tensor tembB = new Tensor(temb.Shape, temb.DType);
+        backendB.CopyFromPeer(tembB, temb, backendA);
+        Tensor[] llamaProjB = new Tensor[llamaProj.Length];
+        for (int i = splitBlock; i < llamaProj.Length; i++)
+        {
+            llamaProjB[i] = new Tensor(llamaProj[i].Shape, llamaProj[i].DType);
+            backendB.CopyFromPeer(llamaProjB[i], llamaProj[i], backendA);
+        }
+
+        (Tensor imgFinalB, Tensor? encFinalB) = ForwardBlocksRange(backendB, imgB, encB, tembB, llamaProjB,
+            initialEncoderSeqLen, imgSeqLen, doubleStreamTotalSeqLen, singleStreamBaseSeqLen, singleStreamTotalSeqLen,
+            splitBlock, totalBlocks);
+        imgB.Dispose();
+        encB?.Dispose();
+        tembB.Dispose();
+        for (int i = splitBlock; i < llamaProjB.Length; i++) llamaProjB[i].Dispose();
+        // B's range always ends at totalBlocks (past the last single-stream block), so it always crosses the
+        // double→single transition — encFinalB is always null. Defensive: idempotent Dispose either way.
+        encFinalB?.Dispose();
+
+        for (int i = 0; i < llamaProj.Length; i++) llamaProj[i].Dispose();
+
+        // ── hand back to backendA: caption_projection / final-layer weights live there ──
+        Tensor jointFinal = new Tensor(imgFinalB.Shape, imgFinalB.DType);
+        backendA.CopyFromPeer(jointFinal, imgFinalB, backendB);
+        imgFinalB.Dispose();
+
+        Tensor imgFinal = SliceSeq(backendA, jointFinal, imgSeqLen);
+        jointFinal.Dispose();
+
+        Tensor projected = ApplyFinalLayer(backendA, imgFinal, temb, batch, imgSeqLen);
+        imgFinal.Dispose();
+        temb.Dispose();
+
+        Tensor output = UnpatchifyLatent(projected, batch, _config.OutChannels, patH, patW, _config.PatchSize);
+        projected.Dispose();
+        return output;
+    }
+
+    /// <summary>Runs blocks <c>[startBlock, endBlock)</c> in order — the seam a block-range shard splits on
+    /// (see <see cref="ForwardSharded"/>). State is either a <c>(img, encoder)</c> pair (still double-stream)
+    /// or a single joint tensor (<paramref name="encoder"/> null, already past the transition) — mirrors
+    /// <see cref="Forward"/>'s own double-then-single sequencing exactly, just windowed and with the
+    /// double→single concat happening inline the moment the range crosses block index
+    /// <see cref="HiDreamConfig.NumLayers"/> (never twice: a range that ends exactly at that boundary returns
+    /// the pair form un-transitioned, and the NEXT range does it when IT crosses).</summary>
+    private (Tensor img, Tensor? encoder) ForwardBlocksRange(IBackend backend, Tensor img, Tensor? encoder,
+        Tensor temb, Tensor[] llamaProj, int initialEncoderSeqLen, int imgSeqLen, int doubleStreamTotalSeqLen,
+        int singleStreamBaseSeqLen, int singleStreamTotalSeqLen, int startBlock, int endBlock)
+    {
+        Tensor curImg = img;
+        Tensor? curEncoder = encoder;
+        int i = startBlock;
+
+        for (; i < Math.Min(endBlock, _doubleBlocks.Length); i++)
+        {
+            Tensor curLlama = llamaProj[i];
+            Tensor blockEncoderIn = ConcatSeq(backend, curEncoder!, curLlama);
+            (Tensor newImg, Tensor newEncoderFull) = _doubleBlocks[i].ForwardDouble(
+                backend, curImg, blockEncoderIn, temb, _rope, doubleStreamTotalSeqLen);
+            blockEncoderIn.Dispose();
+            Tensor reslicedEncoder = SliceSeq(backend, newEncoderFull, initialEncoderSeqLen);
+            newEncoderFull.Dispose();
+            curImg.Dispose();
+            curEncoder!.Dispose();
+            curImg = newImg;
+            curEncoder = reslicedEncoder;
+        }
+
+        if (i == _doubleBlocks.Length && curEncoder is not null && endBlock > _doubleBlocks.Length)
+        {
+            Tensor joint = ConcatSeq(backend, curImg, curEncoder);
+            curImg.Dispose();
+            curEncoder.Dispose();
+            curImg = joint;
+            curEncoder = null;
+        }
+
+        for (; i < endBlock; i++)
+        {
+            int singleIdx = i - _doubleBlocks.Length;
+            Tensor curLlama = llamaProj[i];
+            Tensor blockIn = ConcatSeq(backend, curImg, curLlama);
+            Tensor newJointFull = _singleBlocks[singleIdx].ForwardSingle(
+                backend, blockIn, temb, _rope, imgSeqLen, singleStreamTotalSeqLen);
+            blockIn.Dispose();
+            Tensor resliced = SliceSeq(backend, newJointFull, singleStreamBaseSeqLen);
+            newJointFull.Dispose();
+            curImg.Dispose();
+            curImg = resliced;
+        }
+
+        return (curImg, curEncoder);
     }
 
     /// <summary>Pipeline-level debug hook: dumps the post-denoise, pre-VAE latent.</summary>

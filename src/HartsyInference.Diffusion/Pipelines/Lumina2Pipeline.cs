@@ -103,6 +103,17 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
             latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
         }
 
+        // DiT sharding: asymmetric preload — Backend gets the shared weights (embedders + BOTH refiner stacks)
+        // PLUS its main-layer block range, DitShardBackend gets ONLY its block range. The unsharded path relies
+        // entirely on per-op auto-promotion (as before this change) — this bulk upload only fires when sharding
+        // is active, avoiding a per-op cache-miss H2D transfer on the first denoise step of the range split.
+        if (DitShardBackend is not null)
+        {
+            Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+            Backend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+        }
+
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = plan.StartStep; i < steps; i++)
         {
@@ -112,7 +123,7 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
             // Lumina 2.0's diffusers pipeline inverts the timestep before feeding it to the transformer
             // (`current_timestep = 1 - t/num_train_timesteps`). See pipeline_lumina2.py:757.
             float invertedSigma = 1.0f - sigma;
-            Tensor velocity = _transformer.Forward(Backend, latent, captionEmbeddings, invertedSigma);
+            Tensor velocity = RunForward(latent, captionEmbeddings, invertedSigma);
 
             // VALIDATION-PENDING: verify against diffusers Lumina2Pipeline (pipeline_lumina2.py:724-757):
             // do_classifier_free_truncation = (i+1)/num_inference_steps > cfg_trunc_ratio. When truncated, guidance is
@@ -121,7 +132,7 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
             bool doClassifierFreeTruncation = (float)(i + 1) / steps > cfgTruncRatio;
             if (cfgScale > 1.0f && !doClassifierFreeTruncation)
             {
-                Tensor uncondVelocity = _transformer.Forward(Backend, latent, negativeCaptionEmbeddings!, invertedSigma);
+                Tensor uncondVelocity = RunForward(latent, negativeCaptionEmbeddings!, invertedSigma);
                 Tensor combined = cfgNormalization
                     ? CfgHelper.ApplyCfgNormalized(uncondVelocity, velocity, cfgScale)
                     : CfgHelper.ApplyCfg(uncondVelocity, velocity, cfgScale);
@@ -225,6 +236,17 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
             return (scaled, null);
         }
         return (t2iNoise, null);
+    }
+
+    /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when
+    /// configured, else the normal single-backend path.</summary>
+    private Tensor RunForward(Tensor latent, Tensor captionEmbeddings, float invertedSigma)
+    {
+        if (DitShardBackend is not null)
+        {
+            return _transformer.ForwardSharded(Backend, DitShardBackend, latent, captionEmbeddings, invertedSigma, DitShardSplitBlock);
+        }
+        return _transformer.Forward(Backend, latent, captionEmbeddings, invertedSigma);
     }
 
     private static void NegateInPlace(Tensor t)

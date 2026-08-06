@@ -5,6 +5,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.HuggingFace;
+using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -76,8 +77,33 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
             string tokenizerPath = EnsureTokenizer(tevPath);
             GemmaTokenizer tokenizer = new GemmaTokenizer(tokenizerPath, maxLength: 512);
 
-                        VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, vaeWeights, "Lumina2Recipe");
-            Lumina2Pipeline pipeline = new Lumina2Pipeline(context.Backend, transformer, vae, vaeEncoder, config);
+            VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, vaeWeights, "Lumina2Recipe");
+
+            // Phase 8 DiT sharding (VRAM pooling, not latency — see Lumina2Pipeline's use of DitShardBackend):
+            // the split point depends on the transformer's actual block count and free VRAM on the two backends,
+            // both only known here (RecipeContext is built before weights load), so it's computed at
+            // construction time. Lumina2's main NextDiT layers are homogeneous — the count-proportional overload
+            // applies, same as Krea2/MiniMax-H3/SD3.
+            int ditShardSplitBlock = 0;
+            if (context.DitShardBackend is not null)
+            {
+                long sharedWeightBytes = 0;
+                foreach (Tensor t in transformer.EnumerateSharedWeights())
+                {
+                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
+                }
+                (long freeA, _) = context.Backend.GetVramInfo();
+                (long freeB, _) = context.DitShardBackend.GetVramInfo();
+                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], transformer.BlockCount, sharedWeightBytes)[0];
+                Logs.Info($"[Lumina2Recipe] DiT sharding enabled: layers [0,{ditShardSplitBlock}) on the primary "
+                    + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
+            }
+
+            Lumina2Pipeline pipeline = new Lumina2Pipeline(context.Backend, transformer, vae, vaeEncoder, config)
+            {
+                DitShardBackend = context.DitShardBackend,
+                DitShardSplitBlock = ditShardSplitBlock,
+            };
             Logs.Info("[Lumina2Recipe] Lumina-2 ready.");
             return new Lumina2RecipePipeline(pipeline, context.Backend, textEncoder, tokenizer, transformer, SystemPrompt, loaders);
         }
