@@ -841,10 +841,16 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
                 onProgress?.Invoke(new GenerationProgress(i + 1, totalSteps, stepSw.Elapsed.TotalMilliseconds));
             }
 
-            // Backend keeps latent resident across steps (same as the fused loop); CfgParallelBackend's per-step
-            // activations (uncond forward internals) must be swept every step or they accumulate to OOM over the
-            // loop — the same rule Flux's true-CFG branch and Wan's uncond branch follow.
-            CfgParallelBackend!.FreeActivations();
+            // Deliberately NO per-step CfgParallelBackend.FreeActivations() here, unlike Flux's true-CFG branch
+            // and Wan's uncond branch: SDXL's UNet (CrossAttentionBlock/TransformerSubBlock) explicitly disposes
+            // every non-cached intermediate itself (measured flat VRAM across the whole fused single-GPU loop,
+            // which never calls FreeActivations either) — the only tensors that survive a Forward call are the
+            // cross-attention K/V cache entries (TransformerSubBlock's _kvSlot0/_kvSlot1), which are SUPPOSED to
+            // live across the whole loop. A blanket FreeActivations() doesn't know the cache wants to keep
+            // those — it frees their device buffers via cuMemFreeAsync + returns the pool to the driver while
+            // the C# Tensor references in the slots stay non-null, so the next step's "cache hit" reads
+            // freed/reused memory. That was tried here first and produced a silently-wrong image (SSIM 0.72 vs
+            // the sequential baseline) plus a near-OOM-every-step pool churn from the aggressive per-step trim.
         }
 
         if (ownsTextForCond) textForUnetCond.Dispose();
