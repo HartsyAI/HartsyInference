@@ -11,6 +11,8 @@ using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>HunyuanImage 2.1 recipe (Tencent, 17B MMDiT — 20 double + 40 single blocks, 32×/64-channel VAE). The checkpoint is the transformer; the Qwen2.5-VL-7B text stack (<see cref="SideModels.Qwen25Vl7BHunyuan"/>) and the HunyuanImage VAE (<see cref="SideModels.HunyuanImageVae"/>) resolve as side models. Lifted from the SwarmUI backend's <c>HunyuanImageLoader</c>; drives through <see cref="HunyuanImageRecipePipeline"/>.</summary>
@@ -19,6 +21,12 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "hunyuan-image";
 
+
+    /// <inheritdoc/>
+    /// <remarks>Img2img only. HunyuanImage integrates in token space after a one-time patchify, and the shared
+    /// mask-blend helpers have no variant for that packing — a masked path would need a token-space blend that
+    /// does not exist yet, so Inpaint is deliberately not declared.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hunyuan-image", StringComparison.OrdinalIgnoreCase);
 
@@ -109,11 +117,16 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
             vaeLoader.Load(vaePath);
             loaders.Add(vaeLoader);
+            Dictionary<string, Tensor> vaeWeights = RemapVaeKeys(vaeLoader.GetAllTensors());
             HunyuanImageVaeDecoder vaeDecoder = new HunyuanImageVaeDecoder(VaeConfig.HunyuanImage);
-            vaeDecoder.LoadWeights(RemapVaeKeys(vaeLoader.GetAllTensors()));
+            vaeDecoder.LoadWeights(vaeWeights);
+            // The generic VaeEncoder is stage-count-driven, so VaeConfig.HunyuanImage's 6-block list gives the 32x
+            // downscale this family needs — no bespoke encoder class required.
+            VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.HunyuanImage, vaeWeights, "HunyuanImageRecipe");
 
             HunyuanImagePipeline pipeline = new HunyuanImagePipeline(context.Backend, qwenEncoder, transformer, vaeDecoder, config)
             {
+                VaeEncoder = vaeEncoder,
                 TextEncoderBackend = context.TextEncoderBackendOrDefault,
                 VaeBackend = context.VaeBackendOrDefault,
                 DitShardBackend = context.DitShardBackend,

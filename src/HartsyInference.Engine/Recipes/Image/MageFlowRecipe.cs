@@ -27,7 +27,10 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
 
     /// <summary>Mage-Flow-Edit-Turbo rides this recipe: the init image is the edit reference (VAE-encoded to
     /// in-context ref latents). Declared for both variants — the recipe encodes a reference only when one is supplied.</summary>
-    public ImageFeatures Supports => ImageFeatures.Img2Img;
+    /// <remarks>Reference editing, not strength-based img2img: MageFlowPipeline appends the encoded init image as
+    /// in-context reference tokens rather than noising it, so <c>Creativity</c> has nothing to select. Declaring
+    /// <see cref="ImageFeatures.Img2Img"/> here would accept a creativity value the family cannot honour.</remarks>
+    public ImageFeatures Supports => ImageFeatures.RefEdit;
 
     /// <summary>Base Mage-Flow: 30 steps at CFG 5.0, 1024×1024 (model card).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 30, CfgScale = 5.0f, Width = 1024, Height = 1024 };

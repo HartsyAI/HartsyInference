@@ -1618,9 +1618,34 @@ public static class ModelCatalog
             // DV8x16x16 tokenizer + AR backbone). Engine-only; run via the sample invocation in VideoCommand help.
             E("cosmos-predict1-5b-v2w", vid, "Cosmos-Predict1 5B Video2World", "AR discrete-token transformer", vp),
             E("cosmos-predict1-13b-v2w", vid, "Cosmos-Predict1 13B Video2World", "AR discrete-token transformer", vp),
-            // Announced 2026-07-31, weights promised but not published — no Assets to list and not CLI-drivable.
-            // MiniMaxH3Recipe resolves the family and throws with the reason; see docs/Research/MINIMAX_H3.md.
-            E("minimax-h3", vid, "MiniMax-H3 (omni, video + stereo audio)", "H3-Omni Transformer + H3-VAE", st),
+            new CatalogEntry
+            {
+                // The fp8 DiT is the production build: fully resident on a 24 GB card, against ~90 s/step for the
+                // 66 GB bf16. LoRA is the one thing it cannot do — a merge has to rewrite weights in full precision —
+                // so point --model-path at 'minimax_h3_fl2va_pruned_bf16.safetensors' (40 GB, same repo) for that.
+                // Ref2VA is a SEPARATE checkpoint in this repo ('minimax_h3_ref2va_*'), not a mode of this one.
+                Id = "minimax-h3", Modality = vid, DisplayName = "MiniMax-H3 (omni, video + stereo audio)",
+                Architecture = "H3-Omni packed-token DiT + ViT3D video VAE + DAC/BigVGAN audio VAE", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Comfy-Org/MiniMax-H3", RepoPath = "diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/diffusion_models", Role = "transformer",
+                        Sha256 = "12944c1f7791637e7de12208aef04da82bd26b95271b1b47d817364315ade993" },
+                    new() { Repo = "Comfy-Org/MiniMax-H3", RepoPath = "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/text_encoders", Role = "text encoder",
+                        Sha256 = "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6" },
+                    new() { Repo = "Comfy-Org/MiniMax-H3", RepoPath = "vae/minimax_h3_video_vae_fp16.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/vae/MiniMaxH3", Role = "vae",
+                        Sha256 = "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522" },
+                    // Hash from the repo's own LFS metadata, unlike the three above: the copy staged on the dev box is
+                    // the vendor MiniMaxAI original (a byte-different container of the same weights), so this one file
+                    // has not been verified locally end-to-end.
+                    new() { Repo = "Comfy-Org/MiniMax-H3", RepoPath = "vae/minimax_h3_audio_vae_fp32.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/vae/MiniMaxH3", Role = "vae",
+                        Sha256 = "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48" },
+                },
+            },
 
             // 3D
             E("triposr", d3, "TripoSR", "triplane / NeRF", st, cli: true),

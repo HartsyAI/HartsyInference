@@ -29,6 +29,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
     private readonly LlamaStyleEncoder _llama;
     private readonly HiDreamTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly HiDreamConfig _config;
 
     /// <summary>Keeps the 17 GB fp8 DiT GPU-resident across generations (skips the post-loop FreeWeights +
@@ -59,8 +60,21 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         T5TextEncoder t5, LlamaStyleEncoder llama,
         HiDreamTransformer transformer, VaeDecoder vaeDecoder,
         HiDreamConfig config)
+        : this(backend, clipL, clipG, t5, llama, transformer, vaeDecoder, vaeEncoder: null, config)
+    {
+    }
+
+    /// <summary>Creates a HiDream pipeline with both VAE halves loaded — required for img2img / inpaint (pass an
+    /// <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>). Configure the encoder with
+    /// <c>VaeConfig.Flux</c>, the 16-channel autoencoder HiDream shares with Flux.1.</summary>
+    public HiDreamPipeline(IBackend backend,
+        ClipTextEncoder clipL, ClipTextEncoder clipG,
+        T5TextEncoder t5, LlamaStyleEncoder llama,
+        HiDreamTransformer transformer, VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder,
+        HiDreamConfig config)
         : base(backend)
     {
+        _vaeEncoder = vaeEncoder;
         _clipL = clipL;
         _clipG = clipG;
         _t5 = t5;
@@ -68,6 +82,40 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
         _config = config;
+    }
+
+    /// <summary>Builds the initial latent. Text-to-image: noise scaled by the scheduler's initial sigma. Img2img:
+    /// the VAE-encoded source combined with fresh noise through flow-matching <c>AddNoise</c> at
+    /// <c>sigma[startStep]</c>. When <paramref name="keepSourceLatent"/> is set (masked inpaint) the clean source
+    /// latent is returned alongside for per-step blending; the caller disposes both.</summary>
+    private (Tensor latent, Tensor? sourceLatent) BuildInitialLatent(
+        TextToImageRequest request, FlowMatchEulerDiscreteScheduler scheduler, TensorShape latentShape, int seed, int startStep, bool keepSourceLatent)
+    {
+        if (request is ImageToImageRequest img2img)
+        {
+            Tensor sourceLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
+            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor noised = new Tensor(latentShape, DType.F32);
+            scheduler.AddNoise(noised, sourceLatent, noise, startStep);
+            noise.Dispose();
+            if (keepSourceLatent)
+            {
+                return (noised, sourceLatent);
+            }
+            sourceLatent.Dispose();
+            return (noised, null);
+        }
+
+        Tensor t2iNoise = SeedGenerator.CreateNoise(latentShape, seed);
+        float initSigma = scheduler.InitialNoiseSigma;
+        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        {
+            Tensor scaled = new Tensor(latentShape, DType.F32);
+            Backend.Scale(scaled, t2iNoise, initSigma);
+            t2iNoise.Dispose();
+            return (scaled, null);
+        }
+        return (t2iNoise, null);
     }
 
     /// <summary>Generates an image from pre-tokenized inputs for all four text encoders.</summary>
@@ -83,13 +131,30 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
+
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         (int steps, float cfgScale, int width, int height) = GenerationDefaults.HiDreamFull.Resolve(request);
         int latentH = height / 8;
         int latentW = width / 8;
         bool useCfg = cfgScale > 1.0f;
 
-        Logs.Info($"HiDream t2i: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        if (plan.PassThrough)
+        {
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
+        }
+        int startStep = plan.StartStep;
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
+
+        string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                      : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                      : "t2i";
+        Logs.Info($"HiDream {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Encode all four text encoders (positive + optional negative), with a prompt cache ──
@@ -193,16 +258,11 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_config.SchedulerShift);
         scheduler.SetTimesteps(steps);
 
-        // ── 3. Initial noise latent ──
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
-        {
-            Tensor scaled = new Tensor(latentShape, DType.F32);
-            Backend.Scale(scaled, latent, initSigma);
-            latent.Dispose();
-            latent = scaled;
-        }
+        // ── 3. Initial latent (t2i: noise * initSigma; img2img: VAE-encoded source + AddNoise at sigma[startStep]) ──
+        (Tensor latent, Tensor? sourceLatent) = BuildInitialLatent(request, scheduler, latentShape, seed, startStep, keepSourceLatent: isMaskedInpaint);
+        Tensor? latentMask = isMaskedInpaint
+            ? MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW)
+            : null;
 
         // ── 4. Denoising loop ──
         // Bulk-upload transformer weights before the denoise loop (no-op when already resident under
@@ -212,7 +272,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
 
         Logs.Info("Starting HiDream denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
@@ -242,6 +302,27 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
             latent.Dispose();
             latent = newLatent;
 
+            // Masked-inpaint blend: hold the unmasked region on the source's own flow-matching trajectory by
+            // re-noising the source latent at the next step's sigma; the final step blends the clean source.
+            if (latentMask is not null && sourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    noisedSource = new Tensor(latentShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourceLatent, freshNoise, nextStep);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceLatent;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
+                if (noisedSource != sourceLatent) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
@@ -250,6 +331,8 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         // Conditioning tensors are cross-generation cache-owned — NOT disposed here.
 
         HiDreamTransformer.DumpFinalLatent(latent);
+        sourceLatent?.Dispose();
+        latentMask?.Dispose();
 
         // Under HARTSY_KEEP_MODELS the 17 GB fp8 DiT stays resident (the tiled VAE decode fits beside it);
         // otherwise free it before the decode as before. Phase 3 deviations #18.
@@ -277,6 +360,13 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
+        // Pixel-space recomposite: keeps the unmasked region bit-identical to the source rather than carrying
+        // VAE round-trip drift, which would otherwise accumulate across repeated inpaints.
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
@@ -287,7 +377,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
             Backend.TrimMemoryPool();
 
         sw.Stop();
-        Logs.Info($"HiDream t2i complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"HiDream {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
         return (rgbData, width, height, seed);
     }
 

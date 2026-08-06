@@ -32,6 +32,11 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
     private readonly T5TextEncoder? _t5Encoder;
     private readonly HunyuanImageQwenTextEncoder? _qwenEncoder;
     private readonly HunyuanImageTransformer _transformer;
+    /// <summary>Optional encoder half (configure with <c>VaeConfig.HunyuanImage</c> — its 6-stage block list gives the
+    /// 32x downscale this family needs). Required for img2img; an <see cref="ImageToImageRequest"/> without it throws.
+    /// Set through an initializer rather than a fourth constructor overload, matching how the backends are supplied.</summary>
+    public VaeEncoder? VaeEncoder { get; init; }
+
     private readonly VaeDecoder _vaeDecoder;
     private readonly HunyuanImageVaeDecoder? _hyVaeDecoder;
     private readonly HunyuanImageConfig _config;
@@ -243,7 +248,20 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         int hPacked = latentH / patch;
         int wPacked = latentW / patch;
 
-        Logs.Info($"Hunyuan Image 2.1: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && VaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Set the VaeEncoder initializer property (VaeConfig.HunyuanImage).");
+
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        if (plan.PassThrough)
+        {
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
+        }
+        int startStep = plan.StartStep;
+
+        string opMode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "t2i";
+        Logs.Info($"Hunyuan Image 2.1 {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         float distilledGuidance = _config.GuidanceEmbed ? cfgScale : 1.0f;
@@ -253,12 +271,27 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         // Initial noise is created in image space (seed parity with the verified e2e recipe) and patchified
         // ONCE — the loop then integrates in token space, so the old per-step patchify/unpatchify host loops
         // (a full D2H drain of the velocity every step) are gone.
-        Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
-        Tensor latentTokens = PatchifyLatent(noise, inChannels, latentH, latentW, patch);
-        noise.Dispose();
-
         FlowMatchEulerDiscreteScheduler scheduler = new(_config.SamplingShift);
         scheduler.SetTimesteps(steps);
+
+        Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor initialLatent;
+        if (request is ImageToImageRequest img2img)
+        {
+            // Combine in latent space, then patchify once — the same order the text-to-image path uses, so the
+            // token layout the loop integrates in is identical either way.
+            Tensor sourceLatent = VaeEncoder!.Encode(Backend, img2img.SourceImage);
+            initialLatent = new Tensor(latentShape, DType.F32);
+            scheduler.AddNoise(initialLatent, sourceLatent, noise, startStep);
+            sourceLatent.Dispose();
+        }
+        else
+        {
+            initialLatent = noise;
+        }
+        Tensor latentTokens = PatchifyLatent(initialLatent, inChannels, latentH, latentW, patch);
+        if (!ReferenceEquals(initialLatent, noise)) initialLatent.Dispose();
+        noise.Dispose();
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
         // Weight residency for the denoise loop. Two paths, mirroring FluxPipeline:
@@ -333,7 +366,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         }
 
         Logs.Info($"Starting denoise loop ({steps} steps, distilled guidance={distilledGuidance})...");
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];

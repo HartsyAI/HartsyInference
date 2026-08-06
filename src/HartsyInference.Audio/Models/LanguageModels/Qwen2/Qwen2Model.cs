@@ -151,6 +151,15 @@ public sealed class Qwen2Model : IDisposable
         return _transformer.EnumerateStageWeights(startLayer, endLayer, isFirstStage, isLastStage, includeRedundantSplits);
     }
 
+    /// <summary>Embedding-in forward across a layer-split placement — the embeds-in analog of
+    /// <see cref="ForwardStaged"/> (VibeVoice/CosyVoice/Kyutai-shaped models that drive the body via embeds
+    /// rather than token ids). See <see cref="GenericTransformer.ForwardEmbedsStaged"/>.</summary>
+    public Tensor ForwardEmbedsStaged(LlmPlacement placement, Tensor embeds, int t, int posStart, IKvCache cache)
+    {
+        ThrowIfDisposed();
+        return _transformer.ForwardEmbedsStaged(placement, embeds, t, posStart, cache);
+    }
+
     // ── CUDA-graph decode pass-throughs (Sesame CSM / HeartMuLa drive the headless body per frame) ─────────────
 
     /// <summary>True when this body is eligible for single-token CUDA-graph decode capture (plain dense GQA/RoPE).

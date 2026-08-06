@@ -170,6 +170,56 @@ public sealed class RecipeImg2ImgBinderTests
         Assert.Equal(0.6, recipe.Pipeline.Received.Img2Img!.Creativity);
     }
 
+    /// <summary>An edit-only family must accept an init image, even though it declares <see cref="ImageFeatures.RefEdit"/>
+    /// rather than <see cref="ImageFeatures.Img2Img"/> — the gate resolves the mode before checking support.</summary>
+    [Fact]
+    public async Task Generate_InitImageOnAnEditOnlyFamily_IsAccepted()
+    {
+        const string family = "test-binder-refedit";
+        FakeRecipe recipe = new FakeRecipe(family, ImageFeatures.RefEdit);
+        RecipeRegistry.Register(recipe);
+        using InferenceEngine engine = new InferenceEngine("cpu");
+
+        await engine.Images.GenerateAsync(SpecFor(family), RequestWithInit(64, 64));
+
+        Assert.NotNull(recipe.Pipeline.Received?.Img2Img);
+    }
+
+    /// <summary>...and asking that same family for a strength-based denoise is refused by name rather than silently
+    /// served as a reference edit, which would answer a different question at a plausible-looking quality.</summary>
+    [Fact]
+    public async Task Generate_ExplicitDenoiseOnAnEditOnlyFamily_IsRefusedByName()
+    {
+        const string family = "test-binder-refedit-denied";
+        RecipeRegistry.Register(new FakeRecipe(family, ImageFeatures.RefEdit));
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        ImageRequest request = RequestWithInit(64, 64) with
+        {
+            Img2Img = new Img2Img { InitImage = SolidImage(8, 8, 128), Mode = Img2ImgMode.Denoise },
+        };
+
+        NotSupportedException ex = await Assert.ThrowsAsync<NotSupportedException>(
+            () => engine.Images.GenerateAsync(SpecFor(family), request));
+        Assert.Contains(nameof(ImageFeatures.Img2Img), ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The converse: a classic-only family refuses an explicit reference edit.</summary>
+    [Fact]
+    public async Task Generate_ExplicitReferenceOnAClassicOnlyFamily_IsRefusedByName()
+    {
+        const string family = "test-binder-denoise-only";
+        RecipeRegistry.Register(new FakeRecipe(family, ImageFeatures.Img2Img));
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        ImageRequest request = RequestWithInit(64, 64) with
+        {
+            Img2Img = new Img2Img { InitImage = SolidImage(8, 8, 128), Mode = Img2ImgMode.Reference },
+        };
+
+        NotSupportedException ex = await Assert.ThrowsAsync<NotSupportedException>(
+            () => engine.Images.GenerateAsync(SpecFor(family), request));
+        Assert.Contains(nameof(ImageFeatures.RefEdit), ex.Message, StringComparison.Ordinal);
+    }
+
     private static ModelSpec SpecFor(string familyId) => new ModelSpec
     {
         Requested = familyId,

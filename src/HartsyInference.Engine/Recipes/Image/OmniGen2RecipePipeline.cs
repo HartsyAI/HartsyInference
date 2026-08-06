@@ -10,6 +10,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed OmniGen 2 pipeline driven against the native <see cref="ImageRequest"/>. The Qwen2.5-VL-3B forward lives outside <see cref="OmniGen2Pipeline"/>, so this owns the encoder: it live-encodes the ComfyUI chat template (full sequence, no prefix drop, final hidden state after the last RMSNorm), frees the encoder's device weights, then runs <see cref="OmniGen2Pipeline.GenerateFromEmbeddings"/>. Two single-slot embedding caches (positive + negative) let seed-only reruns skip the encoder entirely, as the SwarmUI backend's <c>OmniGen2CacheEntry.GetOrEncode</c> did.</summary>
@@ -56,10 +58,14 @@ public sealed class OmniGen2RecipePipeline : IRecipePipeline
         float cfg = request.CfgScale ?? OmniGen2Recipe.FamilyDefaults.CfgScale;
         bool needNegative = cfg > 1.0f;
 
-        // TODO(E-IMG-4/5): the reference-image edit path (Init Image / Prompt Images → VAE ref latents, dual
-        // text/image guidance, align_res output sizing) and img2img/inpaint, LoRA, ControlNet and regional
-        // prompting are deferred. The pipeline's cfgRange gate is also left at its full-schedule default.
+        // TODO(E-IMG-4/5): Prompt Images as additional references, align_res output sizing, LoRA, ControlNet and
+        // regional prompting are deferred, as is the pipeline's cfgRange gate (left at its full-schedule default).
         EnsureEmbeddings(prompt, needNegative ? negative : null);
+
+        // Reference editing, not img2img: the init image becomes in-context reference latents that condition every
+        // step, so there is no denoise-strength start step and Creativity does not apply.
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? refEdit = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
 
         TextToImageRequest inner = new TextToImageRequest
         {
@@ -78,13 +84,21 @@ public sealed class OmniGen2RecipePipeline : IRecipePipeline
             progress?.Report(new StepPreview { Step = p.Step, TotalSteps = steps });
         };
 
-        (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromEmbeddings(
-            _cachedEmbeds!,
-            inner,
-            cfgScale: cfg,
-            negativeCaptionEmbeddings: needNegative ? _cachedNegEmbeds : null,
-            textGuidanceScale: cfg,
-            onProgress: bridge);
+        (byte[] rgb, int outW, int outH, int usedSeed) = refEdit is null
+            ? _pipeline.GenerateFromEmbeddings(
+                _cachedEmbeds!,
+                inner,
+                cfgScale: cfg,
+                negativeCaptionEmbeddings: needNegative ? _cachedNegEmbeds : null,
+                textGuidanceScale: cfg,
+                onProgress: bridge)
+            : _pipeline.EditFromEmbeddings(
+                _cachedEmbeds!,
+                needNegative ? _cachedNegEmbeds : null,
+                [refEdit.SourceTensor],
+                inner,
+                textGuidanceScale: cfg,
+                onProgress: bridge);
 
         return new ImageResult
         {

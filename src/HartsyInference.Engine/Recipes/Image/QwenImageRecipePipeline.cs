@@ -65,8 +65,12 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
         (int[] promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, prompt);
         (int[] negTokens, int negDrop) = EncodeWithTemplate(_tokenizer, negative);
 
+        // Qwen-Image is the only family offering BOTH modes, so the choice is explicit rather than inferred:
+        // Reference routes the init image to the in-context edit tokens, anything else to the classic noised start.
+        bool refEdit = request.Img2Img?.Mode == Img2ImgMode.Reference;
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
-        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        using Img2ImgResolver.Img2ImgSpec? initImage = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        Img2ImgResolver.Img2ImgSpec? img2img = refEdit ? null : initImage;
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
             {
@@ -88,7 +92,8 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
 
         (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
             promptTokens, negTokens, inner, bridge,
-            promptDropIndex: promptDrop, negativeDropIndex: negDrop);
+            promptDropIndex: promptDrop, negativeDropIndex: negDrop,
+            editRefImages: refEdit && initImage is not null ? [initImage.SourceTensor] : null);
 
         return new ImageResult
         {

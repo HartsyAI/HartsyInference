@@ -21,7 +21,7 @@ internal static class FishSpeechModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : Repo,
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             string modelPath = await AudioModelCache.GetAsync(Repo, ModelFile, category: "tts", ct: cancel).ConfigureAwait(false);
             string codecPath = await AudioModelCache.GetAsync(Repo, CodecFile, category: "tts", ct: cancel).ConfigureAwait(false);

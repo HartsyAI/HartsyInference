@@ -17,6 +17,11 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "hidream";
 
+
+    /// <inheritdoc/>
+    /// <remarks>HiDream shares the Flux.1 VAE, so its encoder half rides the encode-parity gate that already
+    /// covers that config; the img2img path in HiDreamPipeline was built for this.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hidream", StringComparison.OrdinalIgnoreCase);
 
@@ -100,9 +105,10 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             }
 
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
+            Dictionary<string, Tensor> vaeWeights;
             if (converted.Vae.Count > 0)
             {
-                vae.LoadWeights(CastToF32(converted.Vae));
+                vaeWeights = CastToF32(converted.Vae);
             }
             else
             {
@@ -110,10 +116,12 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
                 (Dictionary<string, Tensor> standaloneVae, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
                 loaders.Add(vaeLoader);
                 // The canonical flux ae.safetensors is BFL-native LDM naming; VaeDecoder wants diffusers keys.
-                vae.LoadWeights(standaloneVae);
+                vaeWeights = standaloneVae;
             }
+            vae.LoadWeights(vaeWeights);
+            VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, vaeWeights, "HiDreamRecipe");
 
-            HiDreamPipeline pipeline = new HiDreamPipeline(context.Backend, clipL, clipG, t5, llama, transformer, vae, config);
+            HiDreamPipeline pipeline = new HiDreamPipeline(context.Backend, clipL, clipG, t5, llama, transformer, vae, vaeEncoder, config);
             Logs.Info("[HiDreamRecipe] HiDream ready (4 text encoders; scheduler=flow-match).");
             return new HiDreamRecipePipeline(pipeline, new ClipTokenizer(), new T5Tokenizer(maxLength: 256), new LlamaTokenizer(maxLength: 256), t5, llama, transformer, loaders);
         }

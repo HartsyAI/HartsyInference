@@ -22,7 +22,7 @@ internal static class NeuTtsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : BackboneRepo,
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             (IReadOnlyDictionary<string, Tensor> backbone, IDisposable[] backboneLoaders) =
                 await AudioCheckpoints.LoadAsync(BackboneRepo, "tts", cancel).ConfigureAwait(false);

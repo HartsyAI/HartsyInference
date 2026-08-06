@@ -103,9 +103,23 @@ public static class LensPipelineFactory
 
         VaeDecoder vaeDecoder = new VaeDecoder(VaeConfig.Flux2);
         vaeDecoder.LoadWeights(vaeWeights);
+        // Encoder half from the same dict; null on a decode-only VAE, which the pipeline refuses by name on img2img.
+        VaeEncoder? vaeEncoder = null;
+        if (vaeWeights.ContainsKey("encoder.conv_in.weight"))
+        {
+            vaeEncoder = new VaeEncoder(VaeConfig.Flux2);
+            vaeEncoder.LoadWeights(vaeWeights);
+        }
+        else
+        {
+            Logs.Info("Lens: VAE is decode-only — img2img will be refused for this checkpoint.");
+        }
 
         LensPipeline pipeline = new LensPipeline(
-            backend, transformer, encoder, vaeDecoder, bnMean, bnVar, config, bnEps);
+            backend, transformer, encoder, vaeDecoder, bnMean, bnVar, config, bnEps)
+        {
+            VaeEncoder = vaeEncoder,
+        };
 
         Logs.Info($"Lens pipeline wired: transformer={transformerWeights.Count} keys, " +
                   $"encoder={(withTextEncoder ? textEncoderWeights.Count : 0)} keys, " +

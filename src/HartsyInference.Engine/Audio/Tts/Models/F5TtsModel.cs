@@ -16,7 +16,7 @@ internal static class F5TtsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : Repo,
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             F5TtsPipeline pipeline = await F5TtsPipeline.LoadAsync(ct: cancel).ConfigureAwait(false);
             Logs.Info("[Audio][F5-TTS] Loaded SWivid/F5-TTS v1 Base (DiT + Vocos 24 kHz).");

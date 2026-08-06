@@ -17,6 +17,11 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "omnigen2";
 
+
+    /// <inheritdoc/>
+    /// <remarks>Reference editing only: OmniGen2 conditions on VAE-encoded reference latents with dual
+    /// text/image guidance, so there is no denoise-strength knob to honour.</remarks>
+    public ImageFeatures Supports => ImageFeatures.RefEdit;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "omnigen2", StringComparison.OrdinalIgnoreCase);
 

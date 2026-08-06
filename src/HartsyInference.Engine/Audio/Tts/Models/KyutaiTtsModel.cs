@@ -32,7 +32,7 @@ internal static class KyutaiTtsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             string dsmPath = await AudioModelCache.GetAsync(Repo, BackboneFile, category: "tts", ct: cancel).ConfigureAwait(false);
             string mimiPath = await AudioModelCache.GetAsync(Repo, MimiFile, category: "tts", ct: cancel).ConfigureAwait(false);

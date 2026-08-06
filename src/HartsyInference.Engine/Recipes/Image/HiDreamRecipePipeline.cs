@@ -8,6 +8,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed HiDream-I1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="HiDreamPipeline"/> owns all four encoder forwards, so this only tokenizes: one CLIP BPE pass reused for both CLIP-L and CLIP-G (the reference feeds identical ids to both), a T5 pass with its attention mask, and a Llama-3.1 pass — then calls <see cref="HiDreamPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>HiDreamLoader.Generate</c> drive path.</summary>
@@ -44,7 +46,7 @@ public sealed class HiDreamRecipePipeline : IRecipePipeline
         int steps = request.Steps ?? HiDreamRecipe.FamilyDefaults.Steps;
         float cfg = request.CfgScale ?? HiDreamRecipe.FamilyDefaults.CfgScale;
 
-        // TODO(E-IMG-4/5): img2img/inpaint, LoRA, ControlNet, IP-Adapter, refiner, regional prompting, weighted
+        // TODO(E-IMG-4/5): LoRA, ControlNet, IP-Adapter, refiner, regional prompting, weighted
         // conditioning and ImageRequest.Components overrides are deferred — text-to-image only.
         int[] clipTokens = _clipTokenizer.Encode(prompt);
         int[] negClipTokens = _clipTokenizer.Encode(negative);
@@ -61,16 +63,20 @@ public sealed class HiDreamRecipePipeline : IRecipePipeline
         int[] llamaTokens = _llamaTokenizer.Encode(prompt);
         int[] negLlamaTokens = _llamaTokenizer.Encode(negative);
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = steps,
-            CfgScale = cfg,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = request.Width,
+                Height = request.Height,
+                Steps = steps,
+                CfgScale = cfg,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

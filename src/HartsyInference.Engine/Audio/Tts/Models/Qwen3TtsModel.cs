@@ -24,7 +24,7 @@ internal static class Qwen3TtsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = ResolveRepo,
-        LoadAsync = async (variant, cancel) =>
+        LoadAsync = async (_, variant, cancel) =>
         {
             string repo = ResolveRepo(variant);
             string mode = ResolveMode(variant);

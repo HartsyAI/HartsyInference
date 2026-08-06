@@ -15,7 +15,7 @@ internal static class SparkTtsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             SparkTtsPipeline pipeline = await SparkTtsPipeline.LoadAsync(Repo, ct: cancel).ConfigureAwait(false);
             Logs.Info("[Audio][Spark-TTS] Loaded SparkAudio/Spark-TTS-0.5B (Qwen2.5-0.5B LM + BiCodec, 16 kHz, controllable).");

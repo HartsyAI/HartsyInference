@@ -357,6 +357,16 @@ public static class TestPaths
         public static string Mamba28BQ4K => Resolve("MAMBA_28B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "mamba", "ggml-mamba-2.8b-hf-q4_k.gguf"));
     }
 
+    /// <summary>Oasis-500m (Decart/Etched) world-model paths. The upstream `Etched/oasis-500m` repo is gated;
+    /// weights come from the ungated `camenduru/oasis-500m` mirror as `.pt` pickles, converted once to
+    /// `.safetensors` with a one-off <c>torch.load</c> → <c>safetensors.torch.save_file</c> script (the engine's
+    /// <c>OasisCheckpointConverter</c> only reads safetensors) — see MODEL_STATUS_WORLD.md's `.pt` conversion note.</summary>
+    public static class Oasis
+    {
+        public static string Dit => Resolve("OASIS_DIT_PATH", Path.Combine(ModelsDir, "World", "Oasis", "oasis500m.safetensors"));
+        public static string Vae => Resolve("OASIS_VAE_PATH", Path.Combine(ModelsDir, "World", "Oasis", "vit-l-20.safetensors"));
+    }
+
     /// <summary>Standalone text encoder weights.</summary>
     public static class TextEncoders
     {

@@ -27,7 +27,7 @@ internal static class GptSoVitsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             string s2Path = await AudioModelCache.GetAsync(Repo, S2File, category: "tts", ct: cancel).ConfigureAwait(false);
             string s1Path = await AudioModelCache.GetAsync(Repo, S1File, category: "tts", ct: cancel).ConfigureAwait(false);

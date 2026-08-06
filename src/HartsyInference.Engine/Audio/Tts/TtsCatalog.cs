@@ -72,7 +72,7 @@ internal static class TtsCatalog
     internal static TtsModelDescriptor VibeVoice { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => "microsoft/VibeVoice-1.5B",
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             VibeVoicePipeline pipeline = await VibeVoicePipeline.LoadAsync(cancel).ConfigureAwait(false);
             return new TtsRunner(24_000, (backend, job) =>
@@ -92,7 +92,7 @@ internal static class TtsCatalog
     internal static TtsModelDescriptor Kokoro { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => "hexgrad/Kokoro-82M",
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             string cmudict = AudioModelRoot.SharedFile("cmudict.dict");
             if (!File.Exists(cmudict))
@@ -119,7 +119,7 @@ internal static class TtsCatalog
     internal static TtsModelDescriptor Bark { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => "suno/bark",
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             string vocabPath = await AudioModelCache.GetAsync("google-bert/bert-base-multilingual-cased", "vocab.txt", category: "tts", ct: cancel).ConfigureAwait(false);
             (IReadOnlyDictionary<string, Tensor> dict, IDisposable loader) = await LoadBarkWeightsAsync(cancel).ConfigureAwait(false);
@@ -160,7 +160,7 @@ internal static class TtsCatalog
         // The 0626 release, NOT the original Dia-1.6B: same architecture/keys/shapes, but the original checkpoint's
         // weights degenerate through the engine while 0626 produces the full multi-turn dialogue word-correct.
         ResolveRepo = _ => "nari-labs/Dia-1.6B-0626",
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             string modelPath = await AudioModelCache.GetAsync("nari-labs/Dia-1.6B-0626", "pytorch_model.bin", category: "tts", ct: cancel).ConfigureAwait(false);
             // The canonical descript .pth has the layout the engine expects (the HF safetensors mirrors are reshaped).
@@ -196,7 +196,7 @@ internal static class TtsCatalog
     internal static TtsModelDescriptor Orpheus { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => "unsloth/orpheus-3b-0.1-ft",
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             (IReadOnlyDictionary<string, Tensor> backbone, IDisposable[] backboneLoaders) =
                 await AudioCheckpoints.LoadAsync("unsloth/orpheus-3b-0.1-ft", "tts", cancel).ConfigureAwait(false);
@@ -222,7 +222,7 @@ internal static class TtsCatalog
     internal static TtsModelDescriptor Csm { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => "unsloth/csm-1b",
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             (IReadOnlyDictionary<string, Tensor> modelDict, IDisposable[] modelLoaders) =
                 await AudioCheckpoints.LoadAsync("unsloth/csm-1b", "tts", cancel).ConfigureAwait(false);

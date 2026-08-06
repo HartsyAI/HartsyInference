@@ -23,7 +23,18 @@ public sealed class ImageFeatureDeclarationTests
         "flux2", "ernie-image", "ideogram4",                    // VaeConfig.Flux2
         "auraflow",                                             // VaeConfig.AuraFlow (= Sdxl)
         "lance-image",                                          // Wan22VaeEncoder — img2img only
-        "mage-flow",                                            // reference-edit conditioning, not strength-based
+        // Phase 4 — built from nothing; these three had no img2img at any layer
+        "hidream",                                              // VaeConfig.Flux, full masked path
+        "hunyuan-image", "lens",                                // token-space loops — img2img only, no mask blend
+    ];
+
+    /// <summary>Reference-image editing: the init image becomes in-context reference latents rather than a noised
+    /// start, so <c>Creativity</c> has nothing to select. Deliberately a separate bit — Mage-Flow used to declare
+    /// <see cref="ImageFeatures.Img2Img"/> and would silently accept a creativity value it cannot honour.</summary>
+    private static readonly string[] ExpectedRefEdit =
+    [
+        "mage-flow", "omnigen2", "boogu",
+        "qwen-image",   // the only family offering both modes; Img2Img.Mode selects
     ];
 
     /// <summary>Inpaint additionally requires a masked path in the diffusion pipeline. Mage-Flow has none, and Lance
@@ -36,6 +47,7 @@ public sealed class ImageFeatureDeclarationTests
         "chroma", "flux1", "lumina2", "kandinsky5", "f-lite",
         "flux2", "ernie-image", "ideogram4",
         "auraflow",
+        "hidream",
     ];
 
     private readonly ITestOutputHelper _output;
@@ -48,6 +60,24 @@ public sealed class ImageFeatureDeclarationTests
         string[] actual = DeclaringFamilies(ImageFeatures.Img2Img);
         _output.WriteLine($"img2img: {string.Join(", ", actual)}");
         Assert.Equal([.. ExpectedImg2Img.Order(StringComparer.Ordinal)], actual);
+    }
+
+    [Fact]
+    public void RefEditIsDeclaredByExactlyTheEditModels()
+    {
+        string[] actual = DeclaringFamilies(ImageFeatures.RefEdit);
+        _output.WriteLine($"refedit: {string.Join(", ", actual)}");
+        Assert.Equal([.. ExpectedRefEdit.Order(StringComparer.Ordinal)], actual);
+    }
+
+    /// <summary>An edit model must not also claim strength-based img2img unless it genuinely implements both, because
+    /// the two obey different contracts and <c>Img2ImgMode.Auto</c> resolves ambiguity in favour of the classic path.</summary>
+    [Fact]
+    public void QwenImageIsTheOnlyFamilyDeclaringBothInitImageModes()
+    {
+        string[] both = [.. DeclaringFamilies(ImageFeatures.RefEdit)
+            .Where(f => (Supports(f) & ImageFeatures.Img2Img) != ImageFeatures.None)];
+        Assert.Equal(["qwen-image"], both);
     }
 
     [Fact]
@@ -71,9 +101,16 @@ public sealed class ImageFeatureDeclarationTests
         }
     }
 
+    /// <summary>Test doubles registered by other fixtures share this prefix. <see cref="RecipeRegistry"/> is a static
+    /// list with no removal, and xunit runs the whole assembly in one process, so a fake registered by
+    /// <see cref="RecipeImg2ImgBinderTests"/> is visible here depending on test order — this filter keeps the pin about
+    /// production families only, rather than making it order-dependent.</summary>
+    private const string TestDoublePrefix = "test-";
+
     private static string[] DeclaringFamilies(ImageFeatures feature) =>
         [.. RecipeRegistry.RegisteredNames
             .Distinct(StringComparer.Ordinal)
+            .Where(name => !name.StartsWith(TestDoublePrefix, StringComparison.Ordinal))
             .Where(name => (Supports(name) & feature) != ImageFeatures.None)
             .Order(StringComparer.Ordinal)];
 

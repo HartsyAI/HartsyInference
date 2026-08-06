@@ -22,7 +22,7 @@ internal static class ZonosModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => ModelRepo,
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             string modelPath = await AudioModelCache.GetAsync(ModelRepo, "model.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
             // The engine DAC consumes the canonical descript .pth layout (the HF safetensors mirrors are reshaped).

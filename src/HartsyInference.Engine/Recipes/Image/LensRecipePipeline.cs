@@ -6,6 +6,8 @@ using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Lens pipeline driven against the native <see cref="ImageRequest"/>. Renders the prompt through Lens' Harmony chat template (<see cref="GptOssTokenizer.BuildChatInputs"/>) and calls <see cref="LensPipeline.GenerateFromTokens"/>, which owns the GPT-OSS-20B encoder forward. Mirrors the SwarmUI backend's <c>LensLoader.Generate</c> drive path.</summary>
@@ -35,22 +37,25 @@ public sealed class LensRecipePipeline : IRecipePipeline
         int steps = request.Steps ?? _config.DefaultSteps;
         float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
 
-        // TODO(E-IMG-4): img2img/inpaint (request.Img2Img/Inpaint) is not yet mapped — text-to-image only.
 
         (int[] posTokens, _) = _tokenizer.BuildChatInputs(prompt);
         // Negative tokens only matter when CFG is live; Lens-Turbo (cfg 1) skips the second pass.
         int[]? negTokens = cfgScale > 1f ? _tokenizer.BuildChatInputs(negative).tokenIds : null;
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = steps,
-            CfgScale = cfgScale,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth / 16 * 16, reqHeight / 16 * 16);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = request.Width,
+                Height = request.Height,
+                Steps = steps,
+                CfgScale = cfgScale,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

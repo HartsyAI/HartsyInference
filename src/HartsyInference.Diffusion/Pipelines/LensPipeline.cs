@@ -31,6 +31,10 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
 
     private readonly LensTransformer _transformer;
     private readonly LensGptOssEncoder? _textEncoder;
+    /// <summary>Optional encoder half (configure with <c>VaeConfig.Flux2</c> — Lens reuses that VAE verbatim).
+    /// Required for img2img; supplied through an initializer rather than a third constructor overload.</summary>
+    public VaeEncoder? VaeEncoder { get; init; }
+
     private readonly VaeDecoder _vaeDecoder;
     private readonly LensConfig _config;
     private readonly Tensor _bnMean;
@@ -154,7 +158,21 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         int latH = imgH / 8;
         int latW = imgW / 8;
 
-        Logs.Info($"Lens: {imgW}x{imgH}, {steps} steps, cfg={cfgScale}, seed={seed}");
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && VaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Set the VaeEncoder initializer property (VaeConfig.Flux2).");
+
+        // Validated against the 16-rounded imgH/imgW rather than the raw request, since Lens rounds before use.
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, imgH, imgW, steps);
+        if (plan.PassThrough)
+        {
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), imgW, imgH, seed);
+        }
+        int startStep = plan.StartStep;
+
+        string opMode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "t2i";
+        Logs.Info($"Lens {opMode}: {imgW}x{imgH}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Empirical-mu schedule ──────────────────────────────
@@ -170,6 +188,24 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         // prompt's natural S_txt — mathematically identical to the masked reference.)
         TensorShape packedShape = new TensorShape(1, imgSeqLen, _config.InChannels);
         Tensor packedLatent = SeedGenerator.CreateNoise(packedShape, seed);
+        if (request is ImageToImageRequest img2imgReq)
+        {
+            // Exact inverse of the decode chain below (unpack → BN un-normalize → unpatchify → decode), so the
+            // source enters the loop in the same representation the loop integrates in.
+            Tensor sourceLatent32 = VaeEncoder!.Encode(Backend, img2imgReq.SourceImage);
+            Tensor sourcePatched = PatchifyLatent(sourceLatent32, _config.InChannels, _config.PatchSize);
+            sourceLatent32.Dispose();
+            Tensor sourceBn = ApplyBnNormalize(sourcePatched, _bnMean, _bnVar, _bnEps);
+            sourcePatched.Dispose();
+            Tensor sourcePacked = PackLatent(sourceBn);
+            sourceBn.Dispose();
+
+            Tensor noised = new Tensor(packedShape, DType.F32);
+            scheduler.AddNoise(noised, sourcePacked, packedLatent, startStep);
+            sourcePacked.Dispose();
+            packedLatent.Dispose();
+            packedLatent = noised;
+        }
         Logs.Verbose($"Initial latent: shape={packedLatent.Shape}, init_sigma={scheduler.InitialNoiseSigma:F4}");
 
         // Bulk-upload the DiT before the loop (PreloadWeights/FreeWeights symmetry — the first step otherwise
@@ -178,7 +214,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
 
         // ── 3. Denoising loop ─────────────────────────────────────
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             if (DiagnosticStats) Backend.ResetD2hSyncCount();
@@ -367,6 +403,99 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             if (negatives[i].Shape[1] != n0)
                 throw new ArgumentException($"negativeLayers[{i}] seq_len {negatives[i].Shape[1]} disagrees with negativeLayers[0] seq_len {n0}.");
         }
+    }
+
+    /// <summary>Packs <c>[B, C, H, W]</c> to <c>[B, H*W, C]</c> — the exact inverse of <see cref="UnpackLatent"/>.</summary>
+    private static Tensor PackLatent(Tensor latent)
+    {
+        int batch = (int)latent.Shape[0];
+        int channels = (int)latent.Shape[1];
+        int h = (int)latent.Shape[2];
+        int w = (int)latent.Shape[3];
+        int spatial = h * w;
+        Tensor packed = new Tensor(new TensorShape(batch, spatial, channels), DType.F32);
+        float* src = (float*)latent.DataPointer;
+        float* dst = (float*)packed.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            for (int c = 0; c < channels; c++)
+            {
+                long srcBase = ((long)b * channels + c) * spatial;
+                for (int s = 0; s < spatial; s++)
+                {
+                    dst[((long)b * spatial + s) * channels + c] = src[srcBase + s];
+                }
+            }
+        }
+        return packed;
+    }
+
+    /// <summary>2x2 spatial patchify: <c>[B, C, H*2, W*2] -> [B, C*4, H, W]</c> — the inverse of
+    /// <see cref="UnpatchifyLatent"/>, so a source latent enters the loop in the layout the DiT emits.</summary>
+    private static Tensor PatchifyLatent(Tensor input, int outChannels, int patchSize)
+    {
+        int batch = (int)input.Shape[0];
+        int inChannels = (int)input.Shape[1];
+        int h = (int)input.Shape[2];
+        int w = (int)input.Shape[3];
+        int outH = h / patchSize;
+        int outW = w / patchSize;
+        Tensor output = new Tensor(new TensorShape(batch, outChannels, outH, outW), DType.F32);
+        float* src = (float*)input.DataPointer;
+        float* dst = (float*)output.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            for (int c = 0; c < inChannels; c++)
+            {
+                for (int py = 0; py < patchSize; py++)
+                {
+                    for (int px = 0; px < patchSize; px++)
+                    {
+                        int outC = (c * patchSize + py) * patchSize + px;
+                        for (int y = 0; y < outH; y++)
+                        {
+                            for (int x = 0; x < outW; x++)
+                            {
+                                long si = (((long)b * inChannels + c) * h + (y * patchSize + py)) * w + (x * patchSize + px);
+                                long di = (((long)b * outChannels + outC) * outH + y) * outW + x;
+                                dst[di] = src[si];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return output;
+    }
+
+    /// <summary>BN normalize on the 128-channel patchified latent: <c>z = (z - mean) / sqrt(var + eps)</c> per channel —
+    /// the inverse of <see cref="ApplyBnUnNormalize"/>.</summary>
+    private static Tensor ApplyBnNormalize(Tensor latent, Tensor mean, Tensor var, float eps)
+    {
+        int batch = (int)latent.Shape[0];
+        int channels = (int)latent.Shape[1];
+        int h = (int)latent.Shape[2];
+        int w = (int)latent.Shape[3];
+        int spatial = h * w;
+        Tensor output = new Tensor(latent.Shape, DType.F32);
+        float* src = (float*)latent.DataPointer;
+        float* dst = (float*)output.DataPointer;
+        float* mp = (float*)mean.DataPointer;
+        float* vp = (float*)var.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            for (int c = 0; c < channels; c++)
+            {
+                float invStd = 1.0f / MathF.Sqrt(vp[c] + eps);
+                float m = mp[c];
+                long baseIdx = ((long)b * channels + c) * spatial;
+                for (int i = 0; i < spatial; i++)
+                {
+                    dst[baseIdx + i] = (src[baseIdx + i] - m) * invStd;
+                }
+            }
+        }
+        return output;
     }
 
     /// <summary>Unpacks [B, S, C] to [B, C, H, W] (no spatial reshuffle — packed dim is already row-major H*W).</summary>

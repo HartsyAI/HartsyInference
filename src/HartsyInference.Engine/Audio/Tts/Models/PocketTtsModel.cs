@@ -21,7 +21,7 @@ internal static class PocketTtsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             string weights = await AudioModelCache.GetAsync(Repo, WeightsFile, Revision, ct: cancel).ConfigureAwait(false);
             string spm = await AudioModelCache.GetAsync(Repo, SpmFile, Revision, ct: cancel).ConfigureAwait(false);

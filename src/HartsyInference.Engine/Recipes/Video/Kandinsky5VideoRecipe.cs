@@ -25,6 +25,11 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public string Name => "kandinsky5-video";
 
+
+    /// <inheritdoc/>
+    /// <remarks>Start-frame image-to-video: the first frame is VAE-encoded and pinned as latent frame 0, with
+    /// only frames 1.. denoising. No end-frame conditioning in this family.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "kandinsky5-video", StringComparison.OrdinalIgnoreCase);
 
@@ -36,8 +41,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
-        // TODO(E-IMG-4/5): image-to-video conditioning (EncodeFirstFrame) and a VideoRequest.Components
-        // Qwen2.5-VL/CLIP-L/VAE override are deferred — this is the text-to-video path only.
+        // TODO(E-IMG-4/5): a VideoRequest.Components Qwen2.5-VL / CLIP-L / VAE override is still deferred.
         string transformerDir = ResolveTransformerDir(context.CheckpointPath);
         string vaeDir = Path.Combine(Path.GetDirectoryName(transformerDir.TrimEnd('/', '\\'))!, "vae");
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
@@ -86,7 +90,19 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
             clipL.LoadWeights(Kandinsky5TextEncoding.ConvertClipLFromStandalone(clipLoader.GetAllTensors()), prefix: "text_model");
 
-            Kandinsky5VideoPipeline pipeline = new Kandinsky5VideoPipeline(context.Backend, transformer, vae, config);
+            // Encoder half from the same vae/ shard — this is what turns on the I2V path (EncodeFirstFrame).
+            HunyuanVideoVaeEncoder? vaeEncoder = null;
+            if (vaeWeights.ContainsKey("encoder.conv_in.conv.weight") || vaeWeights.ContainsKey("encoder.conv_in.weight"))
+            {
+                vaeEncoder = new HunyuanVideoVaeEncoder();
+                vaeEncoder.LoadWeights(vaeWeights);
+            }
+            else
+            {
+                Logs.Info("[Kandinsky5VideoRecipe] VAE shard is decode-only — image-to-video will be refused for this checkpoint.");
+            }
+
+            Kandinsky5VideoPipeline pipeline = new Kandinsky5VideoPipeline(context.Backend, transformer, vae, config, vaeEncoder);
             Logs.Info("[Kandinsky5VideoRecipe] Kandinsky 5 T2V-Lite ready (Qwen2.5-VL + CLIP-L live encode).");
             return new Kandinsky5VideoRecipePipeline(pipeline, qwen, clipL, new Qwen2Tokenizer(), new ClipTokenizer(), context.Backend, transformer, loaders);
         }

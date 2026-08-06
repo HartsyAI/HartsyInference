@@ -43,8 +43,24 @@ public sealed class ImagesService : IImagesService
             cancel);
     }
 
-    /// <summary>The features <paramref name="request"/> asks for, one bit per composition object actually set.</summary>
-    private static ImageFeatures RequestedFeatures(ImageRequest request)
+    /// <summary>Which bit an init image asks for, given the caller's <see cref="Img2ImgMode"/> and what the family can
+    /// actually do. Under <see cref="Img2ImgMode.Auto"/> a family that offers only reference editing gets
+    /// <see cref="ImageFeatures.RefEdit"/>, one that offers only classic img2img gets <see cref="ImageFeatures.Img2Img"/>,
+    /// and one offering both prefers classic — an <c>Init Image</c> plus a <c>Creativity</c> value conventionally means
+    /// a strength-based denoise. An explicit mode is honoured as written so the refusal names the mode the caller asked
+    /// for rather than silently doing the other thing.</summary>
+    private static ImageFeatures Img2ImgBit(Img2Img img2img, ImageFeatures supported) => img2img.Mode switch
+    {
+        Img2ImgMode.Denoise => ImageFeatures.Img2Img,
+        Img2ImgMode.Reference => ImageFeatures.RefEdit,
+        _ => (supported & ImageFeatures.Img2Img) != 0 ? ImageFeatures.Img2Img
+            : (supported & ImageFeatures.RefEdit) != 0 ? ImageFeatures.RefEdit
+            : ImageFeatures.Img2Img,
+    };
+
+    /// <summary>The features <paramref name="request"/> asks for, one bit per composition object actually set.
+    /// <paramref name="supported"/> only disambiguates the init-image mode; it never widens what is requested.</summary>
+    private static ImageFeatures RequestedFeatures(ImageRequest request, ImageFeatures supported)
     {
         ImageFeatures features = ImageFeatures.None;
         if (request.Loras is { Entries.Count: > 0 })
@@ -65,7 +81,7 @@ public sealed class ImagesService : IImagesService
         }
         if (request.Img2Img is not null)
         {
-            features |= ImageFeatures.Img2Img;
+            features |= Img2ImgBit(request.Img2Img, supported);
         }
         if (request.Inpaint is not null)
         {
@@ -85,12 +101,13 @@ public sealed class ImagesService : IImagesService
     /// <summary>Throws naming the family and the exact features it cannot apply; features the recipe declares pass through.</summary>
     private void RejectUnsupported(ModelSpec spec, ImageRequest request)
     {
-        ImageFeatures requested = RequestedFeatures(request);
+        ImageFeatures supported = _engine.SupportedFeatures(spec);
+        ImageFeatures requested = RequestedFeatures(request, supported);
         if (requested == ImageFeatures.None)
         {
             return;
         }
-        ImageFeatures missing = requested & ~_engine.SupportedFeatures(spec);
+        ImageFeatures missing = requested & ~supported;
         if (missing != ImageFeatures.None)
         {
             throw new NotSupportedException(

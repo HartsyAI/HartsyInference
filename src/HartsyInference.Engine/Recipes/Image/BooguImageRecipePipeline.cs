@@ -11,6 +11,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Boogu-Image pipeline driven against the native <see cref="ImageRequest"/>. Builds the Qwen3-VL chat-templated instruction tokens, encodes them through the 8B language tower under the loader's TE ⇄ DiT staging (evict the resident DiT, encode, free the encoder weights), and calls <see cref="BooguImagePipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>BooguImageLoader.Generate</c> text-to-image drive path.</summary>
@@ -56,8 +58,10 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
         // Text guidance from CFG scale (Boogu Base works well ~2–5; Turbo = 1). The negative prompt drives the uncond pass.
         float textGuidance = request.CfgScale ?? BooguImageRecipe.FamilyDefaults.CfgScale;
 
-        // TODO(E-IMG-4): reference-image editing (request.Img2Img) needs the Qwen3-VL vision tower + the pipeline's
-        // EditFromEmbeddings path. Text-to-image only.
+        // Reference editing runs at TEXT-ONLY guidance (imageGuidanceScale = 1), which BooguImagePipeline explicitly
+        // supports by skipping the drop-all pass. Full image guidance additionally needs the Qwen3-VL vision tower to
+        // produce a text-and-image-dropped embedding, which is still deferred — so the reference conditions the latent
+        // stream, but its strength is not separately steerable yet.
 
         // Output size must be a multiple of 16 (2×2 patchify × 8× VAE).
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
@@ -79,7 +83,11 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
             Seed = RecipeRequestMapper.MapSeed(request.Seed),
         };
 
-        bool needNeg = textGuidance > 1.0f;
+        // The edit path needs a drop-text embedding unconditionally (EditFromEmbeddings takes it non-null), so an
+        // edit request forces the negative encode even at guidance 1.
+        (int snapW2, int snapH2) = (snappedW, snappedH);
+        using Img2ImgResolver.Img2ImgSpec? refEdit = RecipeImg2ImgBinder.Resolve(request, snapW2, snapH2);
+        bool needNeg = textGuidance > 1.0f || refEdit is not null;
         bool instrHit = _cachedInstr is not null && _cachedInstrKey == prompt;
         bool negHit = !needNeg || (_cachedNeg is not null && _cachedNegKey == negative);
         if (!instrHit || !negHit)
@@ -114,8 +122,12 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
             progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
         };
 
-        (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromEmbeddings(
-            _cachedInstr!, inner, textGuidance, needNeg ? _cachedNeg : null, bridge);
+        (byte[] rgb, int outW, int outH, int usedSeed) = refEdit is null
+            ? _pipeline.GenerateFromEmbeddings(
+                _cachedInstr!, inner, textGuidance, needNeg ? _cachedNeg : null, bridge)
+            : _pipeline.EditFromEmbeddings(
+                _cachedInstr!, _cachedNeg!, dropAllEmbeddings: null, [refEdit.SourceTensor], inner,
+                textGuidanceScale: textGuidance, imageGuidanceScale: 1.0f, onProgress: bridge);
 
         return new ImageResult
         {

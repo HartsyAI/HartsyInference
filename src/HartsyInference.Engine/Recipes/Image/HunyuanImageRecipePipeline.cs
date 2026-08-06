@@ -9,6 +9,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed HunyuanImage 2.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="HunyuanImagePipeline"/> owns the Qwen2.5-VL-7B forward (including its own TE⇄DiT residency swap and embedding cache), so this only produces the padded chat-template token ids + attention masks and calls <see cref="HunyuanImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>HunyuanImageLoader.Generate</c>.</summary>
@@ -69,15 +71,20 @@ public sealed class HunyuanImageRecipePipeline : IRecipePipeline
             (negIds, negMask) = TokenizePadded(_tokenizer, negative);
         }
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            Width = width,
-            Height = height,
-            Steps = steps,
-            CfgScale = cfg,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        // Resolved at the same width/height the inner request carries — HunyuanImage rejects sizes that are not a
+        // multiple of 32 rather than snapping, so these are already the dimensions the pipeline validates against.
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, width, height);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                Width = width,
+                Height = height,
+                Steps = steps,
+                CfgScale = cfg,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

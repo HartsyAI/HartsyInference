@@ -12,7 +12,7 @@ internal static class MeloTtsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => "myshell-ai/MeloTTS-English-v3",
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             MeloTts melo = await MeloTts.LoadAsync(ct: cancel).ConfigureAwait(false);
             Logs.Info("[Audio][MeloTTS] Loaded myshell-ai/MeloTTS-English-v3 (VITS + CMUdict g2p + prosody BERT, 44.1 kHz).");

@@ -26,6 +26,10 @@ public sealed class WanS2VRecipe : IVideoRecipe
     /// <inheritdoc/>
     public string Name => "wan-s2v";
 
+
+    /// <inheritdoc/>
+    /// <remarks>Wan-S2V turns the init image into appended identity reference tokens.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-s2v", StringComparison.OrdinalIgnoreCase);
 

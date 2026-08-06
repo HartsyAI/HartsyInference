@@ -44,6 +44,10 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public string Name => _familyId;
 
+
+    /// <inheritdoc/>
+    /// <remarks>Wan sniffs the checkpoint for the CLIP-I2V / concat-I2V variants and consumes both a start frame and an optional last frame.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
 

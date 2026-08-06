@@ -28,6 +28,10 @@ public sealed class WanVaceRecipe : IVideoRecipe
     /// <inheritdoc/>
     public string Name => _familyId;
 
+
+    /// <inheritdoc/>
+    /// <remarks>VACE requires a control image/video — it throws without one, so the init image is mandatory rather than optional.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
 

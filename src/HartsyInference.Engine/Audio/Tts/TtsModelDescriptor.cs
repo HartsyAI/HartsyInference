@@ -7,6 +7,7 @@ internal sealed class TtsModelDescriptor
     /// <summary>Maps the request's variant hint to a HuggingFace repo id.</summary>
     internal required Func<string, string> ResolveRepo { get; init; }
 
-    /// <summary>Loads the model (downloading on first use) into a uniform runner.</summary>
-    internal required Func<string, CancellationToken, Task<ITtsRunner>> LoadAsync { get; init; }
+    /// <summary>Loads the model (downloading on first use) into a uniform runner. The context carries the primary
+    /// backend plus the shard placement CosyVoice's Qwen2 LM consumes; every other TTS family ignores it.</summary>
+    internal required Func<TtsLoadContext, string, CancellationToken, Task<ITtsRunner>> LoadAsync { get; init; }
 }

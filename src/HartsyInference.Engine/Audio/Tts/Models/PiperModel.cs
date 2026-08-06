@@ -15,7 +15,7 @@ internal static class PiperModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => "rhasspy/piper-voices",
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             PiperPipeline pipeline = await PiperPipeline.LoadAsync(DefaultVoice, ct: cancel).ConfigureAwait(false);
             Logs.Info($"[Audio][Piper] Loaded rhasspy/piper-voices {DefaultVoice} (VITS 22.05 kHz).");

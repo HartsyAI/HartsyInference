@@ -16,7 +16,7 @@ internal static class ZipVoiceModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             ZipVoicePipeline pipeline = await ZipVoicePipeline.LoadAsync(ct: cancel).ConfigureAwait(false);
             Logs.Info("[Audio][ZipVoice] Loaded k2-fsa/ZipVoice (Zipformer flow-matching + Vocos 24 kHz).");

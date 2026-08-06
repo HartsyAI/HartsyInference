@@ -53,6 +53,15 @@ public sealed class Kandinsky5VideoRecipePipeline : IVideoRecipePipeline
         (int width, int height) = VideoRecipeUtils.ResolveResolution(request, multiple: 8);
         int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 121, step: 4);
 
+        // Image-to-video: the start frame is VAE-encoded once and pinned as latent frame 0, so only frames 1..
+        // denoise. Resized to the resolved generation size first, matching the other i2v families.
+        Tensor? firstFrameLatent = null;
+        if (request.InitImage is not null)
+        {
+            byte[] rgb = VideoRecipeUtils.ResizeRgb24(request.InitImage, width, height);
+            firstFrameLatent = _pipeline.EncodeFirstFrame(rgb, width, height);
+        }
+
         Tensor? qwenEmbeds = null;
         Tensor? negQwenEmbeds = null;
         Tensor? clipPooled = null;
@@ -93,7 +102,7 @@ public sealed class Kandinsky5VideoRecipePipeline : IVideoRecipePipeline
             };
 
             (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromEmbeddings(
-                qwenEmbeds, clipPooled, negQwenEmbeds, negClipPooled, inner, numFrames, bridge);
+                qwenEmbeds, clipPooled, negQwenEmbeds, negClipPooled, inner, numFrames, bridge, firstFrameLatent);
             Logs.Info($"[Kandinsky5VideoRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH}.");
             return VideoRecipeUtils.ToResult(frames, outW, outH, request);
         }
@@ -108,6 +117,7 @@ public sealed class Kandinsky5VideoRecipePipeline : IVideoRecipePipeline
             negQwenEmbeds?.Dispose();
             clipPooled?.Dispose();
             negClipPooled?.Dispose();
+            firstFrameLatent?.Dispose();
         }
     }
 

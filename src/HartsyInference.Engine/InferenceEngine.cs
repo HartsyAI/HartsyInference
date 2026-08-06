@@ -307,6 +307,11 @@ public sealed class InferenceEngine : IInferenceEngine
     internal static VideoDefaults VideoDefaultsFor(ModelSpec spec)
         => VideoRecipeRegistry.Resolve(ResolveFamilyId(spec))?.Defaults ?? VideoDefaults.Standard;
 
+    /// <summary>The conditioning the video recipe for <paramref name="spec"/> declares it can apply. Resolved through
+    /// the same registry lookup the construction path uses, so it cannot disagree with the pipeline that will run.</summary>
+    internal static VideoFeatures SupportedVideoFeatures(ModelSpec spec)
+        => VideoRecipeRegistry.Resolve(ResolveFamilyId(spec))?.Supports ?? VideoFeatures.None;
+
     /// <summary>The family id (catalog slug) that <paramref name="spec"/> resolves to, for diagnostics.</summary>
     internal static string FamilyIdFor(ModelSpec spec) => ResolveFamilyId(spec);
 

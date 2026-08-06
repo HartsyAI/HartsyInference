@@ -41,6 +41,11 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
 
     public CosyVoiceConfig Config => _cfg;
 
+    /// <summary>Optional layer-split placement for the Qwen2.5-0.5B backbone — pools VRAM across GPUs. Null =
+    /// single-backend on the per-call backend. The speech-decoder head follows <see cref="LlmPlacement.LastBackend"/>
+    /// when set, mirroring <see cref="HartsyInference.Audio.Models.Music.YueStage1Lm.Placement"/>.</summary>
+    public LlmPlacement? Placement { get; set; }
+
     public CosyVoiceQwenLm(CosyVoiceConfig cfg)
     {
         _cfg = cfg;
@@ -103,8 +108,16 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
         List<int> generated = new(Math.Min(maxTokens, 256));
         SpeechSampler sampler = new(_cfg.Sampling, _eosSpeechToken, seed);
 
+        // The layer-split path pools the body across the placement's backends; the speech-decoder head runs on the
+        // last stage's backend, which owns llm_decoder (EnumerateStageWeights' contract) — same shape as YueStage1Lm.
+        LlmPlacement? placement = Placement is { IsSingle: false } ? Placement : null;
+        IBackend headBackend = placement?.LastBackend ?? backend;
+        Tensor RunBody(Tensor embeds, int t, int posStart, IKvCache kv) => placement is null
+            ? _backbone.ForwardEmbeds(backend, embeds, batch: 1, t: t, posStart: posStart, kv)
+            : _backbone.ForwardEmbedsStaged(placement, embeds, t, posStart, kv);
+
         // Prefill, then sample from the last position.
-        Tensor hidden = _backbone.ForwardEmbeds(backend, promptEmbeds, batch: 1, t: promptLen, posStart: 0, cache);
+        Tensor hidden = RunBody(promptEmbeds, promptLen, 0, cache);
         promptEmbeds.Dispose();
 
         for (int step = 0; step < maxTokens; step++)
@@ -112,7 +125,7 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
             int t = (int)hidden.Shape[1];
             Tensor last = SliceLastFrame(hidden, h);
             hidden.Dispose();
-            Tensor logits = WhisperOps.ProjectLinear(backend, last, _llmDecoderW!, _llmDecoderB, 1, 1, h, _speechVocab);
+            Tensor logits = WhisperOps.ProjectLinear(headBackend, last, _llmDecoderW!, _llmDecoderB, 1, 1, h, _speechVocab);
             last.Dispose();
 
             int next = sampler.Sample(logits, generated);
@@ -124,7 +137,7 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
             // Embed the new speech token and decode one step.
             Tensor stepEmbed = new(new TensorShape(1, 1, h), DType.F32);
             WriteSpeechRow(stepEmbed, 0, next);
-            hidden = _backbone.ForwardEmbeds(backend, stepEmbed, batch: 1, t: 1, posStart: cache.CurrentLength, cache);
+            hidden = RunBody(stepEmbed, 1, cache.CurrentLength, cache);
             stepEmbed.Dispose();
 
             if (cache.CurrentLength >= cacheCap - 2) break;
@@ -140,6 +153,24 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
         if (_llmDecoderW is not null) yield return _llmDecoderW;
         if (_llmDecoderB is not null) yield return _llmDecoderB;
         if (_llmEmbedding is not null) yield return _llmEmbedding;
+    }
+
+    /// <summary>One placement stage's weight tensors (asymmetric preload for the layer-split path): the
+    /// backbone's layer range, plus, on the last stage, the speech-decoder head that
+    /// <see cref="GenerateSpeechTokens"/> projects on <see cref="LlmPlacement.LastBackend"/>.
+    /// <see cref="_speechEmbedding"/>/<see cref="_llmEmbedding"/> are read host-side only (raw
+    /// <see cref="Tensor.DataPointer"/> gathers in <see cref="WriteSpeechRow"/>/<see cref="WriteControlRow"/>,
+    /// never routed through <see cref="IBackend"/>) so they are excluded from every stage's preload set.</summary>
+    public IEnumerable<Tensor> EnumerateStageWeights(int startLayer, int endLayer, bool isFirstStage, bool isLastStage,
+        bool includeRedundantSplits = true)
+    {
+        foreach (Tensor t in _backbone.EnumerateStageWeights(startLayer, endLayer, isFirstStage, isLastStage, includeRedundantSplits))
+            yield return t;
+        if (isLastStage)
+        {
+            if (_llmDecoderW is not null) yield return _llmDecoderW;
+            if (_llmDecoderB is not null) yield return _llmDecoderB;
+        }
     }
 
     // ── Embedding writers (segment → rows of a [1, promptLen, H] buffer) ──

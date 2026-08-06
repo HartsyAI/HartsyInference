@@ -21,8 +21,11 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
     public string Name => "qwen-image";
 
     /// <inheritdoc/>
-    /// <remarks>The Qwen-Image VAE encoder is constructed alongside the decoder; QwenImagePipeline implements the packed-latent masked path.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
+    /// <remarks>The only family offering both init-image modes: classic strength-based img2img/inpaint through the
+    /// packed-latent masked path, and Qwen-Image-Edit reference conditioning. <c>Img2Img.Mode</c> selects; Auto prefers
+    /// classic. Edit fidelity is below the reference implementation until <c>editRefVisionImages</c> is wired — the VL
+    /// branch cannot see the image without it.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.RefEdit;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "qwen-image", StringComparison.OrdinalIgnoreCase);

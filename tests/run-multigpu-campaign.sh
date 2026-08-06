@@ -164,6 +164,16 @@ phase_a() {
     # The primary fact also gates on a Whisper content-word-recall check (real [verse]/[chorus] lyrics).
     run_class HartsyInference.Diffusion.Tests  YueLmShardingEngineTests.LmSharding_RealEngine_UnquantizedStage1_PooledAcrossGpus_ProducesAudio
     run_class HartsyInference.Diffusion.Tests  YueLmShardingEngineTests.LmSharding_EnvQuantOverride_WinsOverShardedDefault
+    # Audio-LM layer split, second consumer: CosyVoice 2's Qwen2.5-0.5B backbone (tiny — a pure placement/pooling
+    # demonstration, not a can't-fit-one-card case like YuE). Gates on llm.pt/flow.pt/hift.pt (FunAudioLLM/
+    # CosyVoice2-0.5B) + s3gen.safetensors (ResembleAI/chatterbox, frozen S3/CAM++ encoders) + the vendored
+    # jfk.wav reference clip. NOT confirmed present on every box — download via the CosyVoice load path
+    # (`hartsy speak -m cosyvoice ...` once, or fetch llm.pt/flow.pt/hift.pt/s3gen.safetensors by hand) before
+    # running this line if it fails on a SKIPPED message rather than a real regression.
+    run_class HartsyInference.Diffusion.Tests  CosyVoiceLmShardingEngineTests
+    # Oasis world model: VaeDevice overlaps a finished frame's VAE decode with the next frame's DiT denoise
+    # (~3.35 GB checkpoint set, camenduru/oasis-500m mirror .pt->safetensors — see MODEL_STATUS_WORLD.md).
+    run_class HartsyInference.World.Tests      OasisVaeDeviceOverlapEngineTests
     # LLM layer-split real-checkpoint parity (Llama-3.2-1B exact-token-match vs unsharded, greedy/fixed-seed).
     run_class HartsyInference.LLM.Tests        LlmShardingEngineTests.Sharded_TwoGpus_ExactTokenParity_VsUnsharded_GreedyFixedSeed
     # SLOW + HOST-RAM-GATED: needs ~46 GB free host RAM (2.5x the ~18.4 GB Qwen3-32B Q4_K_M file, per

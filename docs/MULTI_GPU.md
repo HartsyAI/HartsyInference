@@ -159,8 +159,11 @@ Highlights (RTX 4090 + RTX 3060, PCIe, no P2P — every hand-off host-staged):
   sequential (generation still completes; check the `[CfgParallel]` log line for which path ran).
 - **Same-GPU concurrent mode** (`HARTSY_SAME_GPU_CONCURRENT=1`) has a known allocator double-free near
   VRAM capacity; serialized (default) is solid.
-- **3D and world models don't consume placement yet** (`MeshService`/`WorldService` use the primary
-  backend only). Surveyed and planned: Hunyuan-GameCraft's 12.5 B DiT is the genuine pooling case
+- **3D and world models don't consume placement yet** (`MeshService`/`WorldService` still route every
+  load through the primary backend only). This is a per-field routing gap, not a plumbing one: both
+  services already hold `_engine` and `_engine.Placement`/`_engine.EnsureBackend(selector)` are reachable
+  today (same pattern `MusicService` already uses) — no constructor threading needed to start Phase 2.2/4.
+  Surveyed and planned: Hunyuan-GameCraft's 12.5 B DiT is the genuine pooling case
   (a near-mechanical port of the existing HunyuanImage sharding, blocked on its `.pt` multi-checkpoint
   loader); chunked world models get `VaeDevice` decode-overlap; Hunyuan3D-2's best fit is CFG-parallel,
   not sharding. Frame-paced interactive loops (DIAMOND, Matrix-Game live mode) are latency-critical —

@@ -24,6 +24,10 @@ public sealed class WanAnimateRecipe : IVideoRecipe
     /// <inheritdoc/>
     public string Name => "wan-animate";
 
+
+    /// <inheritdoc/>
+    /// <remarks>Wan-Animate drives from the init image as the pose/motion reference.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate", StringComparison.OrdinalIgnoreCase);
 

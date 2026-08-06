@@ -29,6 +29,10 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     /// <inheritdoc/>
     public string Name => "minimax-h3";
 
+
+    /// <inheritdoc/>
+    /// <remarks>MiniMax-H3 VAE-encodes the start and end images into keyframe conditioning.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame;
     /// <inheritdoc/>
     public bool Matches(string familyId)
     {

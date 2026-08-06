@@ -98,7 +98,12 @@ public sealed class WorldService : IWorldService, IDisposable
             OasisVitVae vae = new OasisVitVae();
             vae.LoadWeights(vaeWeights);
 
-            OasisPipeline pipeline = new OasisPipeline(_engine.Backend, dit, vae);
+            // VaeDevice overlaps a finished frame's VAE decode with the next frame's denoise on the primary —
+            // see OasisPipeline.Generate's overlapDecode path. Unset defaults VaeBackend to Backend (today's behavior).
+            OasisPipeline pipeline = new OasisPipeline(_engine.Backend, dit, vae)
+            {
+                VaeBackend = _engine.EnsureBackend(_engine.Placement.VaeDevice),
+            };
             return new LoadedWorld(pipeline, [ditLoader, vaeLoader], request => new OasisWorldSession(pipeline, request));
         }
         catch (Exception ex)

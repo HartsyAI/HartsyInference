@@ -251,19 +251,68 @@ though the level defect is now traced upstream of them.
       (`Qwen35Model`, `GgufLanguageModel`). The latter two are safe — the VAE views feed `VaeTiling.BlendVertical`,
       a pure host `float*` loop, and the LLM views are read-only GEMM inputs. Re-run the grep when adding a model that
       slices activations rather than weights.
-- [ ] fl2va / ref2va conditioning paths are built but unexercised — `MiniMaxH3Pipeline` hardcodes two timestep rows,
-      while the reference gives cond/ref a third (`max(t_v, 0.999)`). Wiring keyframes without fixing that mis-modulates
-      every conditioning row.
+- [x] **fl2va DONE and controlled-experiment verified 2026-08-05.** The two-timestep hardcode is gone: `MiniMaxH3Pipeline`
+      now derives rows per step via `MiniMaxH3Conditioning.BuildTimestepRows` — the reference's sorted-dedup of
+      `{t_v, t_a}` ∪ `max(t_v, 0.999)` (cond/ref_img) ∪ `max(t_a, 1.0)` (ref_audio) — and splices conditioning rows in
+      fresh each step rather than letting the sampler integrate them. `MiniMaxH3RecipePipeline` VAE-encodes
+      `InitImage`/`VideoEndFrame` into keyframe rows and presents them to Qwen3-VL as `<Picture i>` (matching
+      `minimax.py`'s fl2va path, which uses the *same* presentation as ref images). **Proof, seed-controlled:** the
+      keyframes came from a seed-1 clip, so generation was re-run at seed 7 — T2VA scored 0.2198/0.2358 against them,
+      fl2va scored **0.9920/0.9827**, the conditioning being the only variable. CLI: `--init-image` / `--end-frame`.
+      *Non-obvious:* `FinalLayer` already emits target-rows-only, so the latent state must NOT grow — only the
+      transformer's input does; and ref segments **interleave by kind** (a `video_audio` block emits RefAudio before
+      RefImage), so row assembly must walk `layout.Segments`, never group by kind. Weight-free gates in
+      `MiniMaxH3ConditioningTests`; T2VA stayed bit-identical (`h3_rell2.py` exactly 0.000e+00) across every change.
+- [ ] **ref2va: images + audio DONE, reference VIDEOS blocked.** Reference images and standalone audio are wired
+      end-to-end (typed `VideoRequest.ReferenceImages`/`ReferenceAudios`, CLI `--ref-image`/`--ref-audio`) and a real
+      run produced finite output exercising all four distinct timestep rows. Reference *videos* throw
+      `NotSupportedException`: they present as timestamped **2-frame** vision blocks, but `Qwen3VlImageProcessor.Preprocess`
+      takes a single `[3,H,W]` tensor per block — the DiT/layout side is ready, the vision processor needs a 2-frame path.
+      Also: only the fl2va checkpoint is staged locally, so reference *adherence* is unverified (plumbing only) until the
+      separate `minimax_h3_ref2va_*` build is downloaded. fl2va and ref2va are rejected in combination — the layout
+      restarts its position cursor for ref blocks, so their coordinates would overlap.
+- [x] **Both VAE encoder halves built 2026-08-05**, from weights the checkpoints already shipped (no converter change
+      needed). `MiniMaxH3VideoVaeEncoder` (3D causal CNN; reuses the existing `CausalConv3d`, which already had H3's
+      reflect-spatial + causal-zero-temporal modes, and `VaeTiling`; `SplitTiles` hoisted onto the config so encoder and
+      decoder share one grid) — round-trip correlation **0.9636 untiled / 0.9733 tiled**. `MiniMaxH3AudioVaeEncoder`
+      (DAC stack + causal-attention posterior head pooling 2048→32) — see the stereo item below. H3's encoder group norms
+      take **per-frame** statistics, unlike the clip-wide `GroupNormSilu3d` the other VAEs use. Both gates are GPU-only:
+      on CPU the video encoder is minutes/frame and the audio encoder ran >11 min for 3 s of audio (1 s on CUDA).
 - [ ] int8 `convrot` quantization (Comfy's shipped quant: block-diagonal Hadamard over 256-channel groups, QuaRot/
       SpinQuant family) is detected and rejected by `MiniMaxH3CheckpointConverter.ThrowIfInt8Convrot`, not implemented.
       This is the lever that would take the DiT off the mmap-thrash path — see the perf note in the status row.
 - [ ] Block streaming (`IStreamingBlock`/`BlockStreamingController`, as LTX-2.3 uses) is not wired for H3's 50 blocks.
-- [ ] Stereo audio row packing is verified against upstream Comfy but has never been checked against a real MiniMax
-      reference generation — a channel swap would be inaudible on the mono-ish content generated so far.
+- [x] **Stereo channel identity confirmed 2026-08-05** by encoding a real stereo source rather than inspecting generated
+      audio: left 440 Hz / right 1320 Hz through `MiniMaxH3AudioVaeEncoder` → `MiniMaxH3AudioVaeDecoder` gives left
+      **0.25133 @440 / 0.00012 @1320** and right **0.00005 @440 / 0.23821 @1320** — ~2000:1 separation, and 0.25 is the
+      exact DFT magnitude of the 0.5-amplitude input, so the round trip is quantitatively accurate, not just ordered.
+      This is what the old caveat asked for: a swap is inaudible on generated content but obvious on an encoded reference.
 - [ ] Sampling with very few steps is pathological at shift 12 (a 4-step schedule puts ~80% of the denoising in the
       final jump). Decide whether to clamp the shift for low step counts or just document a floor.
-- [ ] Catalog `Assets` + sha256 wiring is still open.
-- [ ] **int8 `convrot` is the last unsupported variant that matters.** Comfy-Org publishes four DiT builds; the
+- [x] **Catalog `Assets` + sha256 DONE 2026-08-05** — `minimax-h3` is now `ValidationPending` + CLI-drivable with four
+      assets (fp8 DiT, nvfp4 text encoder, video VAE, audio VAE) from `Comfy-Org/MiniMax-H3`. Verified by a
+      catalog-only run (`hartsy video -m minimax-h3`, no `--model-path`): resolved all four, downloaded nothing, and
+      produced frames + audio. **HuggingFace's LFS `oid` is the file sha256** — confirmed by hashing local copies, so
+      `curl .../api/models/<repo>/tree/main/<dir>` sources catalog hashes without downloading (query per directory; the
+      top-level `?full=true` response reports size 0). *Provenance trap:* the audio VAE staged here is a hardlink to the
+      **vendor** `FL2VA/audio_vae/model.safetensors` and is byte-different from the Comfy-Org repack (605,429,308 vs
+      605,254,808) despite the same weights, so that one hash is the published oid, not a locally-verified one; the
+      other three match byte-for-byte. Harmless because `ModelDownloader` returns early on `File.Exists` and verifies
+      only fresh downloads.
+- [x] **LoRA wired 2026-08-05 — H3 is the first video model with LoRA end-to-end.** `MiniMaxH3Recipe.LoadTransformer`
+      now hands back the converted dict so the merge lands before `LoadWeights`; the stack is owned by
+      `MiniMaxH3RecipePipeline` and disposed after the transformer. **No `MiniMaxH3LoraMapper` is needed** —
+      `LoraFormatDetector`'s architecture-agnostic `transformer.blocks.` passthrough already resolves a diffusers-PEFT
+      LoRA onto H3's canonical keys, and the **fused `qkv_proj` merges** because a PEFT export targets it as one Linear
+      (verified against the real bf16 checkpoint: `blocks.0.attn.qkv_proj.weight` `[21504, 5376]` BF16). Only a
+      kohya-*underscored* export would need work (`LoraKeyTransformer`'s allowlist lacks `q_norm`/`k_norm`/`adaln_proj`).
+      **LoRA requires a bf16 build** — `LoraStack.ApplyTo` rejects quantized bases and 200 of the fp8 build's 532 tensors
+      are quantized; the recipe detects this up front and names `minimax_h3_*_pruned_bf16.safetensors` (40 GB) rather
+      than failing opaquely inside the merge. *Landmine:* merged weights are written back at the checkpoint dtype, so a
+      BF16 base resolves only ~0.4% of magnitude — a probe delta below ~1e-3 rounds away entirely.
+- [ ] **int8 `convrot` is the last unsupported variant that matters.** Comfy-Org publishes **five DiT builds per task**
+      (ten total — `bf16`, `int8_convrot`, `pruned_bf16`, `pruned_fp8_scaled`, `pruned_int8_convrot`, for each of fl2va
+      and ref2va), not four; the
       engine loads bf16 (66 GB) and **`pruned_fp8_scaled` (21 GB), both verified on real weights** — the fp8 build
       is the production choice at **8.6 s/step / 22.5 GB fully resident on a 4090 vs ~90 s/step for bf16**, and its
       run is also the only exercise of the pruned `adaln_t_table` curve path (`curves=True`);

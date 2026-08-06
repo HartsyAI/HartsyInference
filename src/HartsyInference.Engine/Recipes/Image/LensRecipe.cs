@@ -16,6 +16,12 @@ public sealed class LensRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "lens";
 
+
+    /// <inheritdoc/>
+    /// <remarks>Lens reuses the Flux.2 VAE, so its encoder rides that config's encode-parity gate. Img2img only:
+    /// the loop integrates in packed token space and the shared mask-blend helpers have no variant for Lens's
+    /// packing, so a masked path would need a blend that does not exist yet.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lens", StringComparison.OrdinalIgnoreCase);
 

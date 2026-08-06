@@ -3,6 +3,7 @@ using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Pipelines;
 
@@ -77,17 +78,39 @@ public sealed class CosyVoicePipeline : IDisposable
 
     /// <summary>Bulk-uploads every component's weights to the device once (idempotent — the GPU weight cache keys by
     /// tensor reference). Without this each Linear/Conv re-uploads its weight per call: the pre-preload profile was
-    /// ~62k <c>H2D_MISS</c> transfers (~3.7 s) dominating the run. No-op on backends without a weight cache.</summary>
+    /// ~62k <c>H2D_MISS</c> transfers (~3.7 s) dominating the run. No-op on backends without a weight cache. The LM
+    /// gets a per-stage asymmetric preload when <see cref="CosyVoiceQwenLm.Placement"/> is a layer-split (mirrors
+    /// <c>YuePipeline.PreloadStage1</c>) — preloading the full set on every stage would replicate instead of pool.</summary>
     private void PreloadWeights(IBackend backend)
     {
         if (_preloaded) return;
-        backend.PreloadWeights(EnumerateWeights());
+        if (_lm.Placement is { IsSingle: false } placement)
+        {
+            for (int s = 0; s < placement.Stages.Count; s++)
+            {
+                LlmStage stage = placement.Stages[s];
+                // Canonical set only (no redundant fused/split views) — matches YuE's resident-preload choice.
+                stage.Backend.PreloadWeights(_lm.EnumerateStageWeights(
+                    stage.StartLayer, stage.EndLayer, s == 0, s == placement.Stages.Count - 1,
+                    includeRedundantSplits: false));
+            }
+            backend.PreloadWeights(EnumerateNonLmWeights());
+        }
+        else
+        {
+            backend.PreloadWeights(EnumerateWeights());
+        }
         _preloaded = true;
     }
 
     private IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (Tensor t in _lm.EnumerateWeights()) yield return t;
+        foreach (Tensor t in EnumerateNonLmWeights()) yield return t;
+    }
+
+    private IEnumerable<Tensor> EnumerateNonLmWeights()
+    {
         foreach (Tensor t in _flow.EnumerateWeights()) yield return t;
         foreach (Tensor t in _vocoder.EnumerateWeights()) yield return t;
         if (_speakerEncoder is not null)

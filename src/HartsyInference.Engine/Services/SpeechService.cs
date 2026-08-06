@@ -32,8 +32,10 @@ public sealed class SpeechService : ISpeechService
         TtsModelDescriptor descriptor = TtsCatalog.Resolve(selector.Id);
         string repo = descriptor.ResolveRepo(selector.Variant);
         IBackend backend = _engine.Backend;
+        TtsLoadContext loadContext = BuildLoadContext(backend);
+        string key = repo + loadContext.CacheSuffix();
 
-        return _engine.AudioRuntime.RunAsync(backend, $"tts:{repo}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, $"tts:{key}", async ct =>
         {
             // Materialize the reference once: mono 24 kHz samples plus a temp WAV for pipelines that take a path.
             float[]? referenceMono = null;
@@ -49,7 +51,7 @@ public sealed class SpeechService : ISpeechService
             {
                 ct.ThrowIfCancellationRequested();
                 ITtsRunner runner = await _engine.AudioRuntime.Tts
-                    .GetOrLoadAsync(repo, token => descriptor.LoadAsync(selector.Variant, token), ct).ConfigureAwait(false);
+                    .GetOrLoadAsync(key, token => descriptor.LoadAsync(loadContext, selector.Variant, token), ct).ConfigureAwait(false);
                 TtsJob job = new TtsJob
                 {
                     Text = request.Text,
@@ -83,7 +85,7 @@ public sealed class SpeechService : ISpeechService
                     SampleRate = runner.SampleRate,
                     Meta = new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["model"] = repo,
+                        ["model"] = key,
                         ["seed"] = request.Seed.ToString(CultureInfo.InvariantCulture),
                     },
                 };
@@ -93,6 +95,31 @@ public sealed class SpeechService : ISpeechService
                 DeleteTempReference(referenceWavPath);
             }
         }, cancel);
+    }
+
+    /// <summary>Builds the load-time context: single-device (byte-identical to pre-placement behavior) unless the
+    /// engine placement has ≥2 <c>ShardDevices</c>, in which case CosyVoice's Qwen2 LM gets the resolved shard
+    /// backends and layer-splits across them; every other TTS family ignores the shard stages. Mirrors
+    /// <c>MusicService.BuildLoadContext</c>.</summary>
+    private TtsLoadContext BuildLoadContext(IBackend primary)
+    {
+        IReadOnlyList<string> shardDevices = _engine.Placement.ShardDevices;
+        bool sharded = shardDevices.Count >= 2;
+        List<(string Selector, IBackend Backend)>? stages = null;
+        if (sharded)
+        {
+            stages = new List<(string, IBackend)>(shardDevices.Count);
+            foreach (string device in shardDevices)
+            {
+                stages.Add((device, _engine.EnsureBackend(device)));
+            }
+        }
+        return new TtsLoadContext
+        {
+            Backend = primary,
+            ShardStages = stages,
+            ShardRatios = sharded ? _engine.Placement.ShardRatios : null,
+        };
     }
 
     private static void DeleteTempReference(string? path)

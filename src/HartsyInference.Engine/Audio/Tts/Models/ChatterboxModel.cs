@@ -23,7 +23,7 @@ internal static class ChatterboxModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
-        LoadAsync = async (_, cancel) =>
+        LoadAsync = async (_, _, cancel) =>
         {
             string t3Path = await AudioModelCache.GetAsync(Repo, "t3_cfg.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
             string s3Path = await AudioModelCache.GetAsync(Repo, "s3gen.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);

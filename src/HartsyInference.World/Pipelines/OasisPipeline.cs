@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -61,16 +62,19 @@ public sealed unsafe class OasisPipeline : DiffusionPipelineBase
         int gh = height / p, gw = width / p;
         int maxFrames = _dit.Config.MaxFrames;
         int c = _dit.Config.InChannels;
+        // Only true when VaeDevice placement is configured — VaeBackend defaults to Backend, so this gates the
+        // interleaved-decode path off (byte-identical trailing-loop behavior) when placement is unused.
+        bool overlapDecode = !ReferenceEquals(VaeBackend, Backend);
 
         Logs.Info($"Oasis: {totalFrames} frames {width}x{height}, {ddimSteps} DDIM steps/frame, stabilization {stabilizationLevel}, seed {actualSeed}");
         Logs.Warning("Oasis pipeline is first-run-validation pending — numerics unverified vs the reference.");
 
         Backend.PreloadWeights(_dit.EnumerateWeights());
-        Backend.PreloadWeights(_vae.EnumerateWeights());
+        VaeBackend.PreloadWeights(_vae.EnumerateWeights());
 
         // Prompt frame → scaled latent.
         Tensor promptRgb = RgbToTensor(promptRgb24, width, height);
-        Tensor promptLatent = _vae.Encode(Backend, promptRgb);
+        Tensor promptLatent = _vae.Encode(VaeBackend, promptRgb);
         promptRgb.Dispose();
         Scale(promptLatent, ScalingFactor);
 
@@ -81,9 +85,54 @@ public sealed unsafe class OasisPipeline : DiffusionPipelineBase
         alignedActions[0] = new float[OasisActionEncoder.ActionDim];
         for (int i = 1; i < totalFrames; i++) alignedActions[i] = actions[i - 1];
 
+        byte[][] frames = new byte[totalFrames][];
+        // One decode in flight at a time: pendingDecode is always joined before the next one starts, so
+        // VaeBackend is never touched by two threads at once (a live worker plus the main thread would violate
+        // the single-ambient-backend-per-thread rule CfgBranchRunner documents).
+        Thread? pendingDecode = null;
+        Exception? decodeException = null;
+
+        void JoinPendingDecode()
+        {
+            pendingDecode?.Join();
+            pendingDecode = null;
+            if (decodeException is not null)
+            {
+                Exception ex = decodeException;
+                decodeException = null;
+                ExceptionDispatchInfo.Capture(ex).Throw();
+            }
+        }
+
+        void KickDecode(int idx)
+        {
+            JoinPendingDecode();
+            Tensor unscaled = ToLatent4d(latents[idx], c, gh, gw);
+            Scale(unscaled, 1f / ScalingFactor);
+            Thread worker = new Thread(() =>
+            {
+                try
+                {
+                    Tensor rgb = _vae.Decode(VaeBackend, unscaled);
+                    unscaled.Dispose();
+                    frames[idx] = RgbToBytes(rgb, width, height);
+                    rgb.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    decodeException = ex;
+                }
+            })
+            { IsBackground = true, Name = $"OasisPipeline.Decode[{idx}]" };
+            pendingDecode = worker;
+            worker.Start();
+        }
+
         int[] noiseRange = _scheduler.BuildNoiseRange(ddimSteps);
         try
         {
+            // The prompt frame's latent is already final — its decode can overlap frame 1's denoise immediately.
+            if (overlapDecode) KickDecode(0);
             for (int i = 1; i < totalFrames; i++)
             {
                 Stopwatch sw = Stopwatch.StartNew();
@@ -115,27 +164,51 @@ public sealed unsafe class OasisPipeline : DiffusionPipelineBase
                 }
                 sw.Stop();
                 onProgress?.Invoke(new GenerationProgress(i, totalFrames - 1, sw.Elapsed.TotalMilliseconds));
+
+                // Frame i's latent is final past this point (never written again) — safe to hand its decode to
+                // the second device concurrently with frame i+1's denoise on Backend.
+                if (overlapDecode) KickDecode(i);
             }
 
-            byte[][] frames = new byte[totalFrames][];
-            for (int i = 0; i < totalFrames; i++)
+            if (overlapDecode)
             {
-                Tensor unscaled = ToLatent4d(latents[i], c, gh, gw);
-                Scale(unscaled, 1f / ScalingFactor);
-                Tensor rgb = _vae.Decode(Backend, unscaled);
-                unscaled.Dispose();
-                frames[i] = RgbToBytes(rgb, width, height);
-                rgb.Dispose();
+                JoinPendingDecode();
+            }
+            else
+            {
+                for (int i = 0; i < totalFrames; i++)
+                {
+                    Tensor unscaled = ToLatent4d(latents[i], c, gh, gw);
+                    Scale(unscaled, 1f / ScalingFactor);
+                    Tensor rgb = _vae.Decode(VaeBackend, unscaled);
+                    unscaled.Dispose();
+                    frames[i] = RgbToBytes(rgb, width, height);
+                    rgb.Dispose();
+                }
             }
             Logs.Info($"Oasis rollout complete ({totalFrames} frames, seed={actualSeed})");
             return (frames, width, height, actualSeed);
         }
         finally
         {
+            // Join before any weight free/dispose below — a live decode worker still reads _vae's weight
+            // tensors and its own private unscaled-latent copy (never the shared `latents` list).
+            try
+            {
+                JoinPendingDecode();
+            }
+            catch (Exception ex)
+            {
+                Logs.Error("Oasis background VAE decode failed.", ex);
+            }
             foreach (Tensor frame in latents) frame.Dispose();
             Backend.Sync();
             Backend.FreeWeights(_dit.EnumerateWeights());
-            Backend.FreeWeights(_vae.EnumerateWeights());
+            if (overlapDecode)
+            {
+                VaeBackend.Sync();
+            }
+            VaeBackend.FreeWeights(_vae.EnumerateWeights());
         }
     }
 
