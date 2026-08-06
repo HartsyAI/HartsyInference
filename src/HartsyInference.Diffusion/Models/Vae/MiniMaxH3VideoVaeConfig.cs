@@ -69,6 +69,27 @@ public sealed record MiniMaxH3VideoVaeConfig
 
     public float[] PixelStd { get; init; } = [0.229f, 0.224f, 0.225f];
 
+    /// <summary>Encoder stem width; each stage scales it by <see cref="EncoderChannelMult"/>.</summary>
+    public int EncoderBaseChannels { get; init; } = 128;
+
+    /// <summary>Per-stage channel multiplier of the 3D CNN encoder.</summary>
+    public int[] EncoderChannelMult { get; init; } = [1, 2, 2, 4, 4, 8];
+
+    /// <summary>Per-stage spatial stride; the product is <see cref="VaeRatio"/>. Strides are invisible in the
+    /// checkpoint (a downsample weight is <c>[C,C,3,3,3]</c> whatever it strides by), so they come from config or here.</summary>
+    public int[] EncoderSpaceDown { get; init; } = [2, 2, 2, 2, 1, 1];
+
+    /// <summary>Per-stage temporal stride; the product is <see cref="VaeRatioT"/>.</summary>
+    public int[] EncoderTimeDown { get; init; } = [1, 2, 2, 1, 1, 1];
+
+    /// <summary>Residual blocks per encoder stage.</summary>
+    public int EncoderResBlocks { get; init; } = 2;
+
+    /// <summary>Groups in the encoder's group norms, whose statistics are taken per frame rather than per clip.</summary>
+    public int EncoderNormGroups { get; init; } = 32;
+
+    public float EncoderNormEps { get; init; } = 1e-6f;
+
     /// <summary>Transformer width.</summary>
     public int Dim => Heads * DimHead;
 
@@ -98,6 +119,61 @@ public sealed record MiniMaxH3VideoVaeConfig
 
     /// <summary>Frames blended between consecutive temporal chunks.</summary>
     public int FrameOverlap => Math.Max(TokenOverlap * VaeRatioT - FramePrePadding, 0);
+
+    /// <summary>Tile starts/lengths/overlaps in PIXEL space, shared by the encoder and decoder so both cut the same
+    /// grid. Overlaps absorb the remainder in <see cref="VaeRatio"/> steps, keeping every boundary on a latent cell.</summary>
+    public (int[] Start, int[] Length, int[] Overlap) SplitTiles(int inputLen)
+    {
+        if (TileSize >= inputLen)
+        {
+            return ([0], [inputLen], []);
+        }
+        int n = (inputLen + TileSize - 1) / TileSize;
+        int[] overlaps;
+        int remaining;
+        while (true)
+        {
+            overlaps = new int[n - 1];
+            Array.Fill(overlaps, TileOverlapMin);
+            int sum = 0;
+            foreach (int o in overlaps)
+            {
+                sum += o;
+            }
+            remaining = TileSize * n - sum - inputLen;
+            if (remaining < 0)
+            {
+                n++;
+            }
+            else
+            {
+                break;
+            }
+        }
+        int units = remaining / VaeRatio;
+        for (int i = 0; i < units; i++)
+        {
+            overlaps[i % (n - 1)] += VaeRatio;
+        }
+        int[] start = new int[n];
+        for (int i = 1; i < n; i++)
+        {
+            start[i] = start[i - 1] + TileSize - overlaps[i - 1];
+        }
+        int[] length = new int[n];
+        Array.Fill(length, TileSize);
+        return (start, length, overlaps);
+    }
+
+    /// <summary>True when <paramref name="weights"/> carries the 3D CNN encoder signature; the encoder half ships in
+    /// the same file as the decoder and is simply unread when only decoding.</summary>
+    public static bool MatchesEncoder(IReadOnlyDictionary<string, Tensor> weights)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        return weights.ContainsKey("encoder.conv_in.weight")
+            && weights.ContainsKey("encoder.conv_out.weight")
+            && weights.ContainsKey("quant_conv.weight");
+    }
 
     /// <summary>True when <paramref name="weights"/> carries the ViT3D decoder signature.</summary>
     public static bool Matches(IReadOnlyDictionary<string, Tensor> weights)

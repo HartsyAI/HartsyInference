@@ -18,6 +18,10 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "kandinsky5";
 
+
+    /// <inheritdoc/>
+    /// <remarks>Kandinsky 5 image-lite reuses the Flux.1 VAE; the encoder half is built alongside the decoder.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "kandinsky5", StringComparison.OrdinalIgnoreCase);
 
@@ -86,7 +90,8 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
             vae.LoadWeights(vaeWeights);
 
             // Scheduler shift 5.0 and the Flux VAE scale/shift are the Lite defaults baked into the ctor.
-            Kandinsky5Pipeline pipeline = new Kandinsky5Pipeline(context.Backend, transformer, vae, config);
+                        VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, vaeWeights, "Kandinsky5Recipe");
+            Kandinsky5Pipeline pipeline = new Kandinsky5Pipeline(context.Backend, transformer, vae, vaeEncoder, config);
             Logs.Info("[Kandinsky5Recipe] Kandinsky 5 T2I-Lite ready (Qwen2.5-VL + CLIP-L live encode).");
             return new Kandinsky5RecipePipeline(pipeline, qwen, clipL, new Qwen2Tokenizer(), new ClipTokenizer(), context.Backend, transformer, loaders);
         }

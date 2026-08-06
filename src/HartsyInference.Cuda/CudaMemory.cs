@@ -185,7 +185,12 @@ public static class CudaMemory
             {
                 lock (s.CaptureAllocs)
                 {
-                    s.CaptureAllocs[dptr] = byteSize;
+                    // Record the allocating stream: only allocations on the CAPTURING stream become graph
+                    // memory nodes (invalidated if the capture aborts). The streaming weight cache uploads on
+                    // a separate, non-capturing upload stream — those are real allocations regardless of
+                    // whether the compute stream happens to be capturing, and PurgeAbortedCaptureAllocs must
+                    // never touch them.
+                    s.CaptureAllocs[dptr] = (byteSize, stream);
                     s.CaptureAllocBytes += (long)byteSize;
                     s.CaptureAllocCount++;
                 }
@@ -246,9 +251,9 @@ public static class CudaMemory
             {
                 lock (s.CaptureAllocs)
                 {
-                    if (s.CaptureAllocs.Remove(dptr, out nuint sz))
+                    if (s.CaptureAllocs.Remove(dptr, out (nuint bytes, nint stream) info))
                     {
-                        s.CaptureFreeBytes += (long)sz;
+                        s.CaptureFreeBytes += (long)info.bytes;
                         s.CaptureFreeCount++;
                     }
                     else

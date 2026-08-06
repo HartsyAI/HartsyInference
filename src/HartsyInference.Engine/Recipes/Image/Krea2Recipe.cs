@@ -13,6 +13,8 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Krea 2 recipe (Krea, 12.9B single-stream MMDiT flow-match T2I). The checkpoint is the transformer in Krea's raw key naming (<c>blocks.N.*</c>, <c>txtfusion.*</c>, <c>tmlp</c>, <c>tproj</c>, <c>last.*</c>), remapped by <see cref="Krea2CheckpointConverter.RemapTransformerKey"/>; the Qwen3-VL-4B text encoder (<see cref="SideModels.Qwen3VL_4B"/>) and the Qwen-Image VAE (<see cref="SideModels.QwenImageVae"/>) resolve as side models. Base vs Turbo is auto-detected from the checkpoint filename. Lifted from the SwarmUI backend's <c>Krea2Loader</c>; drives through <see cref="Krea2RecipePipeline"/>.</summary>
@@ -20,6 +22,11 @@ public sealed class Krea2Recipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "krea2";
+
+    /// <inheritdoc/>
+    /// <remarks>Krea 2 shares the Qwen-Image VAE; its encoder half is built alongside the decoder and
+    /// <see cref="Krea2Pipeline"/> implements the packed-latent masked path.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "krea2", StringComparison.OrdinalIgnoreCase);
@@ -41,8 +48,6 @@ public sealed class Krea2Recipe : IArchitectureRecipe
         // asset as text_encoders/qwen3vl_4b_bf16.safetensors while SideModels.Qwen3VL_4B points at the fp8_scaled
         // file under text_encoders/Krea2/ — same encoder, different quantization/location. The VAE asset
         // (VAE/QwenImage/qwen_image_vae.safetensors) matches SideModels.QwenImageVae exactly.
-        // TODO(E-IMG-4/5): img2img/inpaint (the QwenImageVaeEncoder half) is deferred, so the decoder-only
-        // pipeline overload is used here.
         string fileName = Path.GetFileName(context.CheckpointPath);
         bool isTurbo = IsTurbo(fileName);
         Krea2Config config = isTurbo ? Krea2Config.Turbo : Krea2Config.Base;
@@ -100,17 +105,21 @@ public sealed class Krea2Recipe : IArchitectureRecipe
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_VL_4B);
             textEncoder.LoadWeights(teWeights);
 
+            Dictionary<string, Tensor> vaeF32 = CastToF32(vaeWeights);
             QwenImageVaeDecoder vae = new QwenImageVaeDecoder(VaeConfig.QwenImage);
-            vae.LoadWeights(CastToF32(vaeWeights));
+            vae.LoadWeights(vaeF32);
+            // Encoder half from the same staged dict — null when the checkpoint ships decode-only, which the pipeline
+            // turns into a named refusal rather than a silently text-to-image result.
+            QwenImageVaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildQwenEncoder(VaeConfig.QwenImage, vaeF32, "Krea2Recipe");
 
-            Krea2Pipeline pipeline = new Krea2Pipeline(context.Backend, textEncoder, transformer, vae, config)
+            Krea2Pipeline pipeline = new Krea2Pipeline(context.Backend, textEncoder, transformer, vae, vaeEncoder, config)
             {
                 DitShardBackend = context.DitShardBackend,
                 DitShardSplitBlock = ditShardSplitBlock,
             };
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             Logs.Info("[Krea2Recipe] Krea 2 ready.");
-            return new Krea2RecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, isTurbo, loaders);
+            return new Krea2RecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, isTurbo, loaders);
         }
         catch (Exception ex)
         {

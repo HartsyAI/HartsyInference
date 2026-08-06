@@ -46,6 +46,81 @@ public static unsafe class MiniMaxH3Latents
         return outT;
     }
 
+    /// <summary>The VAE latent <c>[1, C, T, H, W]</c> to packed video rows <c>[t*h*w, C*pt*ph*pw]</c> — the inverse of
+    /// <see cref="UnpackVideo"/>, used to turn an encoded keyframe or reference clip into conditioning rows.</summary>
+    public static Tensor PackVideo(Tensor latent, MiniMaxH3Config config)
+    {
+        ArgumentNullException.ThrowIfNull(latent);
+        ArgumentNullException.ThrowIfNull(config);
+        int c = config.LatentsDim, pt = config.PatchT, ph = config.PatchH, pw = config.PatchW;
+        int latentT = (int)latent.Shape[2] / pt, th = (int)latent.Shape[3] / ph, tw = (int)latent.Shape[4] / pw;
+        if ((int)latent.Shape[1] != c)
+        {
+            throw new ArgumentException(
+                $"MiniMax-H3 latent has {latent.Shape[1]} channels, expected {c}.", nameof(latent));
+        }
+        int rowStride = c * pt * ph * pw;
+        Tensor rows = new Tensor(new TensorShape((long)latentT * th * tw, rowStride), DType.F32);
+        float* src = (float*)latent.DataPointer;
+        float* dst = (float*)rows.DataPointer;
+        long H = (long)th * ph, W = (long)tw * pw, T = (long)latentT * pt;
+        for (int t = 0; t < latentT; t++)
+        {
+            for (int y = 0; y < th; y++)
+            {
+                for (int x = 0; x < tw; x++)
+                {
+                    float* row = dst + ((long)(t * th + y) * tw + x) * rowStride;
+                    for (int ci = 0; ci < c; ci++)
+                    {
+                        for (int rt = 0; rt < pt; rt++)
+                        {
+                            for (int py = 0; py < ph; py++)
+                            {
+                                for (int px = 0; px < pw; px++)
+                                {
+                                    long si = ((((long)ci * T + t * pt + rt) * H) + y * ph + py) * W + x * pw + px;
+                                    row[((ci * pt + rt) * ph + py) * pw + px] = src[si];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>The audio VAE latent <c>[1, C, ch, T]</c> to packed channel-major rows <c>[ch*T, C]</c> — the inverse
+    /// of <see cref="UnpackAudio"/>, used to turn encoded reference audio into conditioning rows.</summary>
+    public static Tensor PackAudio(Tensor latent, MiniMaxH3Config config)
+    {
+        ArgumentNullException.ThrowIfNull(latent);
+        ArgumentNullException.ThrowIfNull(config);
+        int c = config.AudioLatentsDim;
+        int channels = (int)latent.Shape[2], audioT = (int)latent.Shape[3];
+        if ((int)latent.Shape[1] != c)
+        {
+            throw new ArgumentException(
+                $"MiniMax-H3 audio latent has {latent.Shape[1]} channels, expected {c}.", nameof(latent));
+        }
+        Tensor rows = new Tensor(new TensorShape((long)channels * audioT, c), DType.F32);
+        float* src = (float*)latent.DataPointer;
+        float* dst = (float*)rows.DataPointer;
+        for (int ch = 0; ch < channels; ch++)
+        {
+            for (int t = 0; t < audioT; t++)
+            {
+                float* row = dst + ((long)ch * audioT + t) * c;
+                for (int ci = 0; ci < c; ci++)
+                {
+                    row[ci] = src[(((long)ci * channels) + ch) * audioT + t];
+                }
+            }
+        }
+        return rows;
+    }
+
     /// <summary>Packed audio rows <c>[ch*T, C]</c> (channel-major) to the audio VAE latent <c>[1, C, ch, T]</c>.</summary>
     public static Tensor UnpackAudio(Tensor rows, int audioT, MiniMaxH3Config config)
     {

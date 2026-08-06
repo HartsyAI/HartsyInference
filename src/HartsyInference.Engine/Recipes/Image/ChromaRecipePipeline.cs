@@ -6,6 +6,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Chroma pipeline driven against the native <see cref="ImageRequest"/>. <see cref="ChromaPipeline"/> owns the T5-XXL encoder, so this only tokenizes the prompt/negative (plus the tokenizer attention masks Chroma's "first padding token unmasked" rule needs) and calls <see cref="ChromaPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>ChromaLoader.Generate</c> drive path.</summary>
@@ -43,16 +45,20 @@ public sealed class ChromaRecipePipeline : IRecipePipeline
         int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
         int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = steps,
-            CfgScale = cfg,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = request.Width,
+                Height = request.Height,
+                Steps = steps,
+                CfgScale = cfg,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

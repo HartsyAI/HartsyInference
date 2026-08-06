@@ -321,6 +321,14 @@ public static class TestPaths
     public static class MiniMaxH3
     {
         public static string DitFp8 => Resolve("MINIMAX_H3_DIT", Path.Combine(ModelsDir, "Stable-Diffusion", "MiniMaxH3", "flat", "diffusion_models", "minimax_h3_fl2va_pruned_fp8_scaled.safetensors"));
+
+        /// <summary>The video VAE, whose one file carries BOTH the ViT3D decoder and the 3D CNN encoder that supplies
+        /// keyframe and reference latents. Override with MINIMAX_H3_VIDEO_VAE.</summary>
+        public static string VideoVae => Resolve("MINIMAX_H3_VIDEO_VAE", Path.Combine(ModelsDir, "Stable-Diffusion", "MiniMaxH3", "flat", "vae", "MiniMaxH3", "minimax_h3_video_vae_fp16.safetensors"));
+
+        /// <summary>The stereo 32 kHz audio VAE, carrying the DAC-lineage encoder as well as the BigVGAN decoder.
+        /// Override with MINIMAX_H3_AUDIO_VAE.</summary>
+        public static string AudioVae => Resolve("MINIMAX_H3_AUDIO_VAE", Path.Combine(ModelsDir, "Stable-Diffusion", "MiniMaxH3", "flat", "vae", "MiniMaxH3", "minimax_h3_audio_vae_fp32.safetensors"));
     }
 
     /// <summary>SD3.5 paths. Assets are not bundled — tests skip when missing. FP8-bundled single-file checkpoints from Comfy-Org/stable-diffusion-3.5-fp8 are the default; set env vars to override for FP16 / community quants.</summary>

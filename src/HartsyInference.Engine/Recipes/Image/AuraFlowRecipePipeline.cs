@@ -6,6 +6,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed AuraFlow pipeline driven against the native <see cref="ImageRequest"/>. <see cref="AuraFlowPipeline"/> owns the Pile-T5-XL encoder, so this only tokenizes the prompt/negative (plus their T5 attention masks) and calls <see cref="AuraFlowPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>AuraFlowLoader.Generate</c> drive path (text-to-image only).</summary>
@@ -35,7 +37,9 @@ public sealed class AuraFlowRecipePipeline : IRecipePipeline
         int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
         int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
 
-        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative);
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(RecipeRequestMapper.ToTextToImage(request, negative), img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

@@ -61,6 +61,16 @@ public sealed record VideoRequest
     /// <summary>Optional reference audio driving audio-conditioned video (e.g. speech-to-video).</summary>
     public AudioClip? VideoAudioReference { get; init; }
 
+    /// <summary>Reference images a reference-conditioned family should carry identity/style from; null for none.
+    /// Distinct from <see cref="InitImage"/>, which pins an actual frame rather than describing subject matter.</summary>
+    public IReadOnlyList<ImageData>? ReferenceImages { get; init; }
+
+    /// <summary>Reference clips, each with its own optional soundtrack; null for none.</summary>
+    public IReadOnlyList<ReferenceVideo>? ReferenceVideos { get; init; }
+
+    /// <summary>Standalone reference audio clips, not tied to any reference video; null for none.</summary>
+    public IReadOnlyList<AudioClip>? ReferenceAudios { get; init; }
+
     /// <summary>Total frames to generate for text-to-video; null uses the family's native frame count.</summary>
     public int? Frames { get; init; }
 

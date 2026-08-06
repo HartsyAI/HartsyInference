@@ -10,6 +10,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Ideogram 4 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Ideogram4Pipeline"/> owns the Qwen3-VL forward, so this only chat-templates and trims the prompt tokens, snaps the resolution to Ideogram's 16-pixel grid, and maps <see cref="ImageRequest.Steps"/> onto the nearest official sampler preset (the preset carries the per-step asymmetric-CFG guidance schedule, so CfgScale and the negative prompt are ignored by design). Mirrors the SwarmUI backend's <c>Ideogram4Loader.Generate</c> drive path.</summary>
@@ -77,16 +79,20 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
 
         // TODO(E-IMG-4): img2img/inpaint, LoRA, ControlNet, IP-Adapter, refiner, regional prompting and
         // ImageRequest.Components overrides are deferred — text-to-image only.
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = "",
-            Width = snappedW,
-            Height = snappedH,
-            Steps = preset.NumSteps,
-            CfgScale = 7.0f,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        // Resolved at the snapped size the pipeline validates against.
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, snappedW, snappedH);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = "",
+                Width = snappedW,
+                Height = snappedH,
+                Steps = preset.NumSteps,
+                CfgScale = 7.0f,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

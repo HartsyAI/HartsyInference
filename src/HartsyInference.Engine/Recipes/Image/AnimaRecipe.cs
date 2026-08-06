@@ -10,6 +10,8 @@ using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Anima recipe (Cosmos-Predict2-2B lineage): the single-file checkpoint carries BOTH the DiT trunk and the Anima-specific <c>llm_adapter</c> sub-transformer, while the Qwen-3 0.6B text encoder (<see cref="SideModels.Qwen3_0_6B"/>) and the Qwen-Image 3D-causal VAE (<see cref="SideModels.QwenImageVae"/>) resolve as side models. Lifted from the SwarmUI backend's <c>AnimaLoader</c>; constructs the components and drives generation through <see cref="AnimaRecipePipeline"/>.</summary>
@@ -20,6 +22,12 @@ public sealed class AnimaRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public string Name => "anima";
+
+    /// <inheritdoc/>
+    /// <inheritdoc/>
+    /// <remarks>Anima shares the Qwen-Image VAE; its encoder half is built alongside the decoder and
+    /// <see cref="AnimaPipeline"/> implements the latent-mask blend.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "anima", StringComparison.OrdinalIgnoreCase);
@@ -93,8 +101,10 @@ public sealed class AnimaRecipe : IArchitectureRecipe
         }
         QwenImageVaeDecoder vae = new QwenImageVaeDecoder(VaeConfig.QwenImage);
         vae.LoadWeights(vaeWeights);
+        // Encoder half from the same staged dict; null on a decode-only VAE, which the pipeline refuses by name.
+        QwenImageVaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildQwenEncoder(VaeConfig.QwenImage, vaeWeights, "AnimaRecipe");
 
-        AnimaPipeline pipeline = new AnimaPipeline(context.Backend, transformer, llmAdapter, vae, animaConfig);
+        AnimaPipeline pipeline = new AnimaPipeline(context.Backend, transformer, llmAdapter, vae, vaeEncoder, animaConfig);
         Logs.Info("[AnimaRecipe] Anima ready (scheduler=FlowMatchEuler shift=3.0).");
         return new AnimaRecipePipeline(pipeline, qwen, tokenizer, t5Tokenizer, transformer, llmAdapter, context.Backend, animaLoader, qwenLoader, vaeLoader);
     }

@@ -57,14 +57,23 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         int textLen = (int)textStates.Shape[0];
         int seed = request.Seed;
 
-        MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(textLen, latentT, latentH, latentW, audioT);
+        MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(textLen, latentT, latentH, latentW, audioT,
+            request.Keyframes, request.Refs, request.FrameCount);
         int frameRows = (latentH / _config.PatchH) * (latentW / _config.PatchW);
         int videoRowCount = latentT * frameRows;
         int audioRowCount = audioT * 2;
 
+        (int condVideoRows, int condAudioRows) = MiniMaxH3Conditioning.ConditioningRowCounts(layout);
+        RequireConditioningRows(request.CondVideoRows, condVideoRows, _config.VideoPatchDim, "video");
+        RequireConditioningRows(request.CondAudioRows, condAudioRows, _config.AudioLatentsDim, "audio");
+
         Tensor videoLat = SeedGenerator.CreateNoise(new TensorShape(videoRowCount, _config.VideoPatchDim), seed);
         Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioRowCount, _config.AudioLatentsDim), seed ^ 0x5D2B);
         (Tensor cos, Tensor sin) = MiniMaxH3Rope.BuildTables(layout.PositionIds, _transformer.RopeInvFreq(), _config.AttentionHeadDim);
+        // The reference re-derives augmented conditioning from the same seeded stream on every forward, so hoisting it
+        // out of the loop is the same values for a fraction of the work.
+        Tensor? condVideo = NoiseAugment(request.CondVideoRows, request.VisualCondNoiseAug, seed);
+        Tensor? condAudio = NoiseAugment(request.CondAudioRows, request.AudioCondNoiseAug, seed + 1);
 
         double shiftV = request.SigmaShiftVideo, shiftA = request.SigmaShiftAudio;
         double[] sigmas = MiniMaxH3Schedule.VideoSigmas(request.Steps, shiftV);
@@ -81,45 +90,50 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                 double sigma = sigmas[step];
                 double dSigma = sigmas[step + 1] - sigma;
                 (float tVideo, float tAudio) = MiniMaxH3Schedule.Timesteps(sigma, shiftV, shiftA);
-                float[] uniqueT = [tVideo, tAudio];
-                Dictionary<MiniMaxH3SegmentKind, int> rowOf = new Dictionary<MiniMaxH3SegmentKind, int>
-                {
-                    [MiniMaxH3SegmentKind.Text] = 0,
-                    [MiniMaxH3SegmentKind.Video] = 0,
-                    [MiniMaxH3SegmentKind.Cond] = 0,
-                    [MiniMaxH3SegmentKind.RefImage] = 0,
-                    [MiniMaxH3SegmentKind.Audio] = 1,
-                    [MiniMaxH3SegmentKind.RefAudio] = 1,
-                };
+                (float[] uniqueT, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
+                    MiniMaxH3Conditioning.BuildTimestepRows(layout, tVideo, tAudio,
+                        request.VisualCondNoiseAug, request.AudioCondNoiseAug);
 
                 if (step == 0)
                 {
                     Probe("video latent (noise, pre-step)", videoLat);
                     Probe("audio latent (noise, pre-step)", audioLat);
                 }
-                (Tensor vVideo, Tensor vAudio) = DitShardBackend is not null
-                    ? _transformer.ForwardSharded(
-                        Backend, DitShardBackend, layout, videoLat, audioLat, textStates, cos, sin, uniqueT, rowOf,
-                        DitShardSplitBlock, textTagRuns)
-                    : _transformer.Forward(
-                        Backend, layout, videoLat, audioLat, textStates, cos, sin, uniqueT, rowOf, textTagRuns);
+                // Conditioning rows ride every forward at their fixed content and are never integrated, so they are
+                // spliced back in fresh each step rather than living in the state the sampler advances.
+                Tensor videoIn = PackConditioned(condVideo, videoLat);
+                Tensor audioIn = PackConditioned(condAudio, audioLat);
                 try
                 {
-                    // Both heads return the flow velocity; the audio one is integrated over the video sigma, so it
-                    // takes the schedule map's derivative as an extra factor.
-                    float slope = (float)MiniMaxH3Schedule.ShiftSlope(sigma, shiftV, shiftA);
-                    if (step == 0 || step == request.Steps / 2 || step == request.Steps - 1)
+                    (Tensor vVideo, Tensor vAudio) = DitShardBackend is not null
+                        ? _transformer.ForwardSharded(
+                            Backend, DitShardBackend, layout, videoIn, audioIn, textStates, cos, sin, uniqueT, rowOf,
+                            DitShardSplitBlock, textTagRuns)
+                        : _transformer.Forward(
+                            Backend, layout, videoIn, audioIn, textStates, cos, sin, uniqueT, rowOf, textTagRuns);
+                    try
                     {
-                        Probe($"DiT velocity (video, step {step})", vVideo);
-                        Probe($"DiT velocity (audio, step {step}, sigmaV={sigma:F4} tA={tAudio:F4} slope={slope:F4})", vAudio);
+                        // Both heads return the flow velocity; the audio one is integrated over the video sigma, so it
+                        // takes the schedule map's derivative as an extra factor.
+                        float slope = (float)MiniMaxH3Schedule.ShiftSlope(sigma, shiftV, shiftA);
+                        if (step == 0 || step == request.Steps / 2 || step == request.Steps - 1)
+                        {
+                            Probe($"DiT velocity (video, step {step})", vVideo);
+                            Probe($"DiT velocity (audio, step {step}, sigmaV={sigma:F4} tA={tAudio:F4} slope={slope:F4})", vAudio);
+                        }
+                        EulerStep(videoLat, vVideo, (float)-dSigma);
+                        EulerStep(audioLat, vAudio, (float)(-dSigma * slope));
                     }
-                    EulerStep(videoLat, vVideo, (float)-dSigma);
-                    EulerStep(audioLat, vAudio, (float)(-dSigma * slope));
+                    finally
+                    {
+                        vVideo.Dispose();
+                        vAudio.Dispose();
+                    }
                 }
                 finally
                 {
-                    vVideo.Dispose();
-                    vAudio.Dispose();
+                    if (!ReferenceEquals(videoIn, videoLat)) { videoIn.Dispose(); }
+                    if (!ReferenceEquals(audioIn, audioLat)) { audioIn.Dispose(); }
                 }
                 Backend.Sync();
                 DitShardBackend?.Sync();
@@ -218,6 +232,59 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             audioLat.Dispose();
             cos.Dispose();
             sin.Dispose();
+            if (!ReferenceEquals(condVideo, request.CondVideoRows)) { condVideo?.Dispose(); }
+            if (!ReferenceEquals(condAudio, request.CondAudioRows)) { condAudio?.Dispose(); }
+        }
+    }
+
+    /// <summary>The packed input for one stream: conditioning rows then the denoise target. Returns
+    /// <paramref name="target"/> itself when there is no conditioning, so plain t2va allocates and copies nothing.</summary>
+    private Tensor PackConditioned(Tensor? conditioning, Tensor target)
+    {
+        if (conditioning is null)
+        {
+            return target;
+        }
+        Tensor packed = new Tensor(new TensorShape(conditioning.Shape[0] + target.Shape[0], target.Shape[1]), target.DType);
+        Backend.Concat(packed, [conditioning, target], 0);
+        return packed;
+    }
+
+    /// <summary>Blends conditioning rows toward seeded noise by <c>1 - aug</c>, keeping the model from treating them as
+    /// perfectly clean. Returns the input untouched at <c>aug >= 1</c>, so the caller must compare by reference before
+    /// disposing.</summary>
+    private static Tensor? NoiseAugment(Tensor? rows, float aug, int seed)
+    {
+        if (rows is null || aug >= 1f)
+        {
+            return rows;
+        }
+        Tensor augmented = new Tensor(rows.Shape, DType.F32);
+        using Tensor noise = SeedGenerator.CreateNoise(rows.Shape, seed);
+        float* src = (float*)rows.DataPointer;
+        float* np = (float*)noise.DataPointer;
+        float* dst = (float*)augmented.DataPointer;
+        for (long i = 0; i < rows.ElementCount; i++)
+        {
+            dst[i] = aug * src[i] + (1f - aug) * np[i];
+        }
+        return augmented;
+    }
+
+    /// <summary>Fails a mismatch between the layout's conditioning rows and the content supplied for them — a silent
+    /// disagreement here shifts every packed row and decodes to plausible garbage rather than erroring.</summary>
+    private static void RequireConditioningRows(Tensor? rows, int expectedRows, int expectedWidth, string stream)
+    {
+        long actual = rows?.Shape[0] ?? 0;
+        if (actual != expectedRows)
+        {
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                $"MiniMax-H3 layout expects {expectedRows} conditioning {stream} row(s), got {actual}.");
+        }
+        if (rows is not null && rows.Shape[1] != expectedWidth)
+        {
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                $"MiniMax-H3 conditioning {stream} rows are {rows.Shape[1]} wide, expected {expectedWidth}.");
         }
     }
 

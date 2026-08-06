@@ -116,14 +116,17 @@ internal static unsafe class GpuTransferHelper
         /// A residency-health metric: during a fully GPU-resident denoise loop this must stay at ~0.</summary>
         public long D2hSyncs;
 
-        /// <summary>Step-graph capture-window alloc/free tracker (diagnostic — see <see cref="CudaBackend.StepGraphBegin"/>).
-        /// Per-State: this used to be process-wide statics on <see cref="CudaMemory"/>, so a second backend
-        /// beginning its own capture cleared the first backend's in-flight window and folded its own
-        /// non-capturing allocations into the wrong backend's report. Diagnostic-only (guarded by
-        /// <see cref="CaptureAllocs"/>'s lock, never touches memory), but the leak-detection numbers were
-        /// silently wrong under two live backends.</summary>
+        /// <summary>Step-graph capture-window alloc/free tracker. Per-State: this used to be process-wide statics
+        /// on <see cref="CudaMemory"/>, so a second backend beginning its own capture cleared the first backend's
+        /// in-flight window and folded its own non-capturing allocations into the wrong backend's report.
+        /// <para>Not diagnostic-only any more: the recorded stream is what lets <see cref="GpuTransferHelper"/>
+        /// tell a GRAPH-PRIVATE allocation (made on the capturing stream — a virtual address the driver releases
+        /// the instant an aborted capture is discarded) apart from an ordinary allocation that merely happened
+        /// while capture was active (the streaming weight cache's uploads run on a separate, non-capturing
+        /// upload stream and are real regardless of the compute stream's capture outcome). See
+        /// <see cref="PurgeAbortedCaptureAllocs"/>.</para></summary>
         public bool TrackCaptureWindow;
-        public readonly Dictionary<ulong, nuint> CaptureAllocs = new();
+        public readonly Dictionary<ulong, (nuint bytes, nint stream)> CaptureAllocs = new();
         public long CaptureAllocBytes, CaptureFreeBytes;
         public int CaptureAllocCount, CaptureFreeCount;
     }
@@ -992,6 +995,91 @@ internal static unsafe class GpuTransferHelper
     public static void EvictAll()
     {
         FreeAllCached();
+    }
+
+    /// <summary>Purges cache entries left dangling by an ABORTED step-graph capture. Every alloc issued on the
+    /// CAPTURING stream while capture is active becomes a graph memory node; if the capture is aborted before
+    /// the graph is ever instantiated/launched (an exception partway through the captured step), the driver
+    /// releases those virtual addresses as part of discarding the never-launched graph. Anything still mapping
+    /// to one of them in this State's caches (an activation cached mid-capture, a weight dtype-cast computed
+    /// mid-capture, …) is now dangling: the next <see cref="FreeActivations"/>/<c>Dispose</c> that tries to
+    /// actually free one gets <c>CUDA_ERROR_INVALID_VALUE</c> — the pointer is no longer a live stream-ordered
+    /// allocation. Called from <c>CudaBackend.StepGraphReset</c> right after <c>CudaGraph.AbortCapture</c>.
+    /// <para>Scoped to <paramref name="capturingStream"/>: <see cref="State.CaptureAllocs"/> also records
+    /// allocations the streaming weight cache made on its separate upload stream while capture happened to be
+    /// active — those are ordinary allocations untouched by the abort and must be left alone, or a live
+    /// streamed weight would be silently stranded (never freed, no longer tracked by anything).</para></summary>
+    internal static void PurgeAbortedCaptureAllocs(State s, nint capturingStream)
+    {
+        HashSet<ulong>? stale = null;
+        lock (s.CaptureAllocs)
+        {
+            foreach (KeyValuePair<ulong, (nuint bytes, nint stream)> kv in s.CaptureAllocs)
+            {
+                if (kv.Value.stream == capturingStream)
+                {
+                    (stale ??= new HashSet<ulong>()).Add(kv.Key);
+                }
+            }
+            if (stale is not null)
+            {
+                foreach (ulong p in stale) s.CaptureAllocs.Remove(p);
+            }
+        }
+        if (stale is null || stale.Count == 0)
+        {
+            return;
+        }
+
+        List<Tensor>? staleActivations = null;
+        foreach (KeyValuePair<Tensor, (ulong gpuPtr, nuint bytes)> kv in s.ActivationCache)
+            if (stale.Contains(kv.Value.gpuPtr))
+                (staleActivations ??= new List<Tensor>()).Add(kv.Key);
+        if (staleActivations is not null)
+            foreach (Tensor t in staleActivations)
+            {
+                s.ActivationCache.Remove(t);
+                s.PinnedActivations.Remove(t);
+                // The GPU-private buffer is already gone with the discarded graph — clear the binding so a
+                // later Dispose/finalizer of this (now-unreachable) tensor doesn't try to free it again.
+                t.ClearGpuBinding(s.Key);
+            }
+
+        List<Tensor>? staleWeights = null;
+        foreach (KeyValuePair<Tensor, ulong> kv in s.WeightCache)
+            if (stale.Contains(kv.Value))
+                (staleWeights ??= new List<Tensor>()).Add(kv.Key);
+        if (staleWeights is not null)
+            foreach (Tensor t in staleWeights)
+            {
+                s.WeightCache.Remove(t);
+                DetachPromotedTensor(s, t);
+            }
+
+        List<Tensor>? staleCasts = null;
+        foreach (KeyValuePair<Tensor, (ulong castPtr, nuint bytes)> kv in s.WeightCastCache)
+            if (stale.Contains(kv.Value.castPtr))
+                (staleCasts ??= new List<Tensor>()).Add(kv.Key);
+        if (staleCasts is not null)
+            foreach (Tensor t in staleCasts)
+                s.WeightCastCache.Remove(t);
+
+        List<Tensor>? staleSidecars = null;
+        foreach (KeyValuePair<Tensor, (ulong xq, ulong xd, ulong xs, int k)> kv in s.SidecarCache)
+            if (stale.Contains(kv.Value.xq) || stale.Contains(kv.Value.xd) || stale.Contains(kv.Value.xs))
+                (staleSidecars ??= new List<Tensor>()).Add(kv.Key);
+        if (staleSidecars is not null)
+            foreach (Tensor t in staleSidecars)
+                s.SidecarCache.Remove(t);
+
+        foreach (ulong p in stale)
+        {
+            s.CachedPointers.Remove(p);
+            s.PendingOrphans.Remove(p);
+        }
+
+        Logs.Warning($"[Cuda] step-graph capture aborted mid-window — purged {stale.Count} graph-private cache " +
+            "entries that would otherwise dangle (CUDA_ERROR_INVALID_VALUE on the next free).");
     }
 
     /// <summary>Frees only cached ACTIVATION device buffers; preloaded weights and weight-casts are kept. Call

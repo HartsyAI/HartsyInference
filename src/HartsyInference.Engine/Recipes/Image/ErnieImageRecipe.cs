@@ -10,6 +10,8 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>ERNIE-Image recipe (Baidu, ~8B, Apache-2.0): the checkpoint is the single-stream DiT, the Ministral-3-3B text encoder (<see cref="SideModels.Ministral_3_3B"/>) and the Flux.2 128-channel VAE (<see cref="SideModels.Flux2Vae"/>) resolve as side models. Lifted from the SwarmUI backend's <c>ErnieImageLoader</c>, including its sharded-transformer merge and its tokenizer fallback: there is no embedded ERNIE tokenizer, so the Mistral3 byte-level BPE <c>tokenizer.json</c> is fetched once from <c>baidu/ERNIE-Image</c> (the Comfy-Org repackage omits it) and read by <see cref="ErnieTokenizer"/>. Constructs and drives through <see cref="ErnieImageRecipePipeline"/>.</summary>
@@ -24,6 +26,10 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "ernie-image";
 
+
+    /// <inheritdoc/>
+    /// <remarks>ERNIE-Image shares the Flux.2 VAE; the encoder half is built alongside the decoder.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "ernie-image", StringComparison.OrdinalIgnoreCase);
 
@@ -62,6 +68,7 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
 
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux2);
             vae.LoadWeights(vaeWeights);
+            VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux2, vaeWeights, "ErnieImageRecipe");
 
             LlamaStyleEncoder llama = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Ministral3B);
             llama.LoadWeights(teWeights);
@@ -74,7 +81,7 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
             // bn.running_mean/running_var before decode; ErnieImagePipeline takes those as optional ctor args.
             // Left null to match the engine's validated wiring (the stage/shape needs confirming first — the BN
             // element count must match the 128-channel PACKED latent, not the 32-channel one).
-            ErnieImagePipeline pipeline = new ErnieImagePipeline(context.Backend, textEncoder, transformer, vae, config);
+            ErnieImagePipeline pipeline = new ErnieImagePipeline(context.Backend, textEncoder, transformer, vae, config, vaeEncoder: vaeEncoder);
             Logs.Info("[ErnieImageRecipe] ERNIE-Image ready.");
             return new ErnieImageRecipePipeline(pipeline, tokenizer, textEncoder, llama, transformer, loaders);
         }

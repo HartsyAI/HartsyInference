@@ -61,18 +61,30 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
                 request.ControlNets, reqWidth, reqHeight,
                 static message => Logs.Info($"[Features][ControlNet] {message}"));
 
-            Tensor? variationNoise = VariationSeedResolver.Resolve(
-                request.VariationSeed, reqWidth, reqHeight, request.Seed, VariationSeedResolver.FluxLatentChannels);
+            using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
 
-            TextToImageRequest inner = new TextToImageRequest
+            // Variation noise only applies to the text-to-image path — an init latent replaces the seeded noise
+            // outright, and building it anyway would hand the pipeline a tensor it never disposes.
+            Tensor? variationNoise = img2img is null
+                ? VariationSeedResolver.Resolve(
+                    request.VariationSeed, reqWidth, reqHeight, request.Seed, VariationSeedResolver.FluxLatentChannels)
+                : null;
+            if (img2img is not null && request.VariationSeed is not null)
             {
-                Prompt = prompt,
-                Width = request.Width,
-                Height = request.Height,
-                Steps = steps,
-                Seed = RecipeRequestMapper.MapSeed(request.Seed),
-                InitialNoise = variationNoise,
-            };
+                Logs.Warning("[Flux1RecipePipeline] Variation seed is ignored on the img2img path — the init latent replaces the seeded noise.");
+            }
+
+            TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+                new TextToImageRequest
+                {
+                    Prompt = prompt,
+                    Width = request.Width,
+                    Height = request.Height,
+                    Steps = steps,
+                    Seed = RecipeRequestMapper.MapSeed(request.Seed),
+                    InitialNoise = variationNoise,
+                },
+                img2img);
 
             Action<GenerationProgress> bridge = p =>
             {

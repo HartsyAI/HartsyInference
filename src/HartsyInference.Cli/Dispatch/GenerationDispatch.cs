@@ -400,6 +400,12 @@ public static class GenerationDispatch
             Frames = parameters.GetIntOrNull("frames"),
             Fps = parameters.GetIntOrNull("fps"),
             Seed = parameters.GetInt("seed", -1),
+            InitImage = parameters.GetStringOrNull("init-image") is { } initPath ? LoadImage(initPath) : null,
+            VideoEndFrame = parameters.GetStringOrNull("end-frame") is { } endPath ? LoadImage(endPath) : null,
+            ReferenceImages = SplitPaths(parameters.GetStringOrNull("ref-images"))?.Select(LoadImage).ToList(),
+            ReferenceAudios = SplitPaths(parameters.GetStringOrNull("ref-audios"))
+                ?.Select(p => LoadAudioClip(p) ?? throw new FileNotFoundException($"Reference audio not found: {p}"))
+                .ToList(),
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("denoise");
@@ -810,6 +816,10 @@ public static class GenerationDispatch
         }
         return shrinkGrow is null ? inpaint : inpaint with { ShrinkGrow = shrinkGrow.Value };
     }
+
+    /// <summary>Splits a newline-joined repeatable option back into its paths; null when the option was absent.</summary>
+    private static string[]? SplitPaths(string? joined) =>
+        string.IsNullOrWhiteSpace(joined) ? null : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
     private static ImageData LoadImage(string promptPath)
     {

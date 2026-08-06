@@ -45,6 +45,23 @@ public sealed record MiniMaxH3AudioVaeConfig
         1.8318421f, 1.5540637f, 1.9344930f, 1.5991982f, 1.7180460f, 1.6307219f, 1.8661226f, 1.5613768f,
     ];
 
+    /// <summary>DAC encoder stem width; each stage doubles it.</summary>
+    public int EncoderDim { get; init; } = 64;
+
+    /// <summary>Per-stage encoder strides; the product is the hop, so it must mirror <see cref="UpsampleRates"/>.</summary>
+    public int[] EncoderRates { get; init; } = [2, 4, 4, 5, 5];
+
+    /// <summary>Heads in the posterior head's causal attention.</summary>
+    public int AttnHeads { get; init; } = 8;
+
+    /// <summary>Hidden-width multiplier of the posterior head's gated MLP.</summary>
+    public int MlpRatio { get; init; } = 2;
+
+    public float NormEps { get; init; } = 1e-5f;
+
+    /// <summary>Waveform samples consumed per latent frame (∏ <see cref="EncoderRates"/>); the encode-side hop.</summary>
+    public int EncoderHopLength => EncoderRates.Aggregate(1, (a, r) => a * r);
+
     /// <summary>Waveform samples produced per latent frame (∏ <see cref="UpsampleRates"/>).</summary>
     public int SamplesPerLatentFrame => UpsampleRates.Aggregate(1, (a, r) => a * r);
 }

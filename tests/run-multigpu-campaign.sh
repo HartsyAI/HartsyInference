@@ -126,10 +126,24 @@ phase_a() {
     run_class HartsyInference.Diffusion.Tests  FluxComponentPlacementEngineTests
     run_class HartsyInference.Diffusion.Tests  SdxlComponentPlacementEngineTests
     run_class HartsyInference.Diffusion.Tests  FluxCfgParallelFallbackTests
-    # KNOWN RED (2026-08-05, deliberately excluded from the green gate — a real pre-existing bug this test
-    # found and now reproduces): two engines on one ordinal near VRAM capacity → FreeActivations
-    # cuMemFreeAsync INVALID_VALUE + Dispose double-free. See the root-cause task; re-enable when fixed.
-    # run_class HartsyInference.Diffusion.Tests  SameGpuConcurrentRealWeightTests HARTSY_SAME_GPU_CONCURRENT=1
+    # FIXED 2026-08-05: two engines co-resident on one ordinal near VRAM capacity forced Flux into
+    # block-streaming mode (not enough VRAM to stay resident), which conflicts with step-graph capture —
+    # AwaitWeights' cross-stream event wait trips CUDA_ERROR_STREAM_CAPTURE_ISOLATION mid-capture. The abort
+    # path correctly ended the capture but never purged the activations/casts CacheActivation'd during that
+    # now-discarded capture window, so their graph-private VAs (released the instant the never-instantiated
+    # graph was discarded) lingered in GpuTransferHelper's per-backend caches — the next FreeActivations (and,
+    # for anything that survived to teardown, Dispose) tried to free them for real and got
+    # CUDA_ERROR_INVALID_VALUE. Not actually a concurrency race: it reproduced in this test's SERIAL phase,
+    # before either generation ran concurrently — the trigger is VRAM co-residency forcing streaming, not
+    # DeviceGate bypass. Fixed by CudaBackend.StepGraphReset calling the new
+    # GpuTransferHelper.PurgeAbortedCaptureAllocs on abort, which purges only the entries allocated on the
+    # CAPTURING stream (State.CaptureAllocs now records the allocating stream) — the streaming weight cache's
+    # own uploads, made on a separate non-capturing stream, are left untouched since they're real allocations
+    # regardless of the compute stream's capture outcome. Verified: 7 consecutive real passes (bit-identical
+    # concurrent-vs-serial output every time), 2 unrelated environmental interruptions along the way (a
+    # concurrent session's transient build collision in unrelated files, and a concurrent session's transient
+    # VRAM spike), both resolved cleanly on retry. Re-enabled in the green gate.
+    run_class HartsyInference.Diffusion.Tests  SameGpuConcurrentRealWeightTests HARTSY_SAME_GPU_CONCURRENT=1
     run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingTests
     run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingVramTests
     # HARTSY_KEEP_MODELS static-init read → each engine fact runs filter-isolated in its own process.

@@ -10,6 +10,8 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Ideogram 4 recipe (ideogram-oss/ideogram4, 9.3B): a Qwen3-VL-8B language tower (13-layer hidden-state tap) feeding TWO 9.3B single-stream DiTs — the picked checkpoint is the conditional one, its unconditional companion (<see cref="SideModels.Ideogram4Unconditional"/>) runs the asymmetric-CFG branch — decoded by the Flux.2 VAE (<see cref="SideModels.Flux2Vae"/>). Lifted from the SwarmUI backend's <c>Ideogram4Loader</c>, including its free-VRAM gate (both DiTs stay resident for the whole denoise loop). Constructs and drives through <see cref="Ideogram4RecipePipeline"/>. Weights are under a NON-COMMERCIAL license.</summary>
@@ -21,6 +23,10 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "ideogram4";
 
+
+    /// <inheritdoc/>
+    /// <remarks>Ideogram 4 shares the Flux.2 VAE; its packed-latent mask blend uses the channel-inner variant.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "ideogram4", StringComparison.OrdinalIgnoreCase);
 
@@ -105,9 +111,10 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
 
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux2);
             vae.LoadWeights(vaeWeights);
+            VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux2, vaeWeights, "Ideogram4Recipe");
 
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: config.MaxTextTokens);
-            Ideogram4Pipeline pipeline = new Ideogram4Pipeline(context.Backend, textEncoder, conditional, unconditional, vae, config);
+            Ideogram4Pipeline pipeline = new Ideogram4Pipeline(context.Backend, textEncoder, conditional, unconditional, vae, vaeEncoder, config);
             Logs.Info("[Ideogram4Recipe] Ideogram 4 ready.");
             return new Ideogram4RecipePipeline(pipeline, tokenizer, textEncoder, conditional, unconditional, loaders);
         }

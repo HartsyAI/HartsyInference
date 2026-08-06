@@ -8,6 +8,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed ERNIE-Image pipeline driven against the native <see cref="ImageRequest"/>. <see cref="ErnieImagePipeline"/> owns the Ministral-3-3B forward and self-manages its GPU preload/free per generation, so this only tokenizes (raw prompt, no chat template — BOS prepended, EOS appended, no padding; the pipeline assembles the sequence) and calls <see cref="ErnieImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>ErnieImageLoader.Generate</c> drive path.</summary>
@@ -46,16 +48,20 @@ public sealed class ErnieImageRecipePipeline : IRecipePipeline
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = steps,
-            CfgScale = cfg,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = request.Width,
+                Height = request.Height,
+                Steps = steps,
+                CfgScale = cfg,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

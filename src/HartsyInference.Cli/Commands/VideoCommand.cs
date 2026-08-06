@@ -58,6 +58,26 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Denoising steps (default: the model family's recommended count).")]
         public int? Steps { get; init; }
 
+        /// <summary>Start frame for image-to-video; families without keyframe conditioning ignore it.</summary>
+        [CommandOption("--init-image")]
+        [Description("Path to an image the clip starts on (image-to-video).")]
+        public string? InitImage { get; init; }
+
+        /// <summary>End frame; supplying both anchors the clip at each end.</summary>
+        [CommandOption("--end-frame")]
+        [Description("Path to an image the clip ends on. Combine with --init-image for first-and-last-frame control.")]
+        public string? EndFrame { get; init; }
+
+        /// <summary>Reference images for families that carry subject/style from references rather than pinning frames.</summary>
+        [CommandOption("--ref-image")]
+        [Description("Reference image to carry subject or style from; repeat for more (MiniMax-H3 takes up to 9).")]
+        public string[]? ReferenceImages { get; init; }
+
+        /// <summary>Reference audio clips (WAV).</summary>
+        [CommandOption("--ref-audio")]
+        [Description("Reference audio clip (WAV) to condition on; repeat for more (MiniMax-H3 takes up to 3).")]
+        public string[]? ReferenceAudios { get; init; }
+
         /// <summary>Guidance scale; unset uses the family's officially recommended scale.</summary>
         [CommandOption("--cfg")]
         [Description("Guidance scale (default: the model family's recommended scale).")]
@@ -118,6 +138,18 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         parameters.PutIfSet("steps", settings.Steps);
         parameters.PutIfSet("cfg", settings.Cfg);
         parameters.PutIfSet("fps", settings.Fps);
+        parameters.PutIfSet("init-image", settings.InitImage);
+        parameters.PutIfSet("end-frame", settings.EndFrame);
+        // Repeatable options collapse to one newline-joined value: the parameter bag is flat strings, and a path
+        // cannot contain a newline.
+        if (settings.ReferenceImages is { Length: > 0 })
+        {
+            parameters.Put("ref-images", string.Join('\n', settings.ReferenceImages));
+        }
+        if (settings.ReferenceAudios is { Length: > 0 })
+        {
+            parameters.Put("ref-audios", string.Join('\n', settings.ReferenceAudios));
+        }
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
         if (settings.Restore.IsSet)
         {

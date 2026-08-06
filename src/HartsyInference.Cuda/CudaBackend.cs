@@ -2490,6 +2490,11 @@ public sealed class CudaBackend : IBackend
             _stepGraph?.AbortCapture();
             _stepGraphCapturing = false;
             _transferState.TrackCaptureWindow = false;
+            // A capture that never reached StepGraphEndAndLaunch leaves every activation cached mid-window
+            // pointing at a graph-private VA the driver just released along with the discarded (never
+            // instantiated) graph — purge them before anything tries to free one for real (see
+            // GpuTransferHelper.PurgeAbortedCaptureAllocs for the CUDA_ERROR_INVALID_VALUE this prevents).
+            GpuTransferHelper.PurgeAbortedCaptureAllocs(_transferState, _stream.Handle);
         }
         bool hadCapturedGraph = _stepGraph?.IsReady == true;
         _stepGraph?.Reset();

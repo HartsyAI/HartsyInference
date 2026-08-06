@@ -7,6 +7,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Lance image pipeline driven against the native <see cref="ImageRequest"/>. Tokenizes the caption only — the pipeline wraps it in the upstream chat-templated scaffold itself — and calls <see cref="LanceImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>LanceLoader.Generate</c> text-to-image drive path.</summary>
@@ -55,16 +57,20 @@ public sealed class LanceImageRecipePipeline : IRecipePipeline
         int[] promptTokens = _tokenizer.EncodeOrdinary(prompt);
         int[] negativeTokens = string.IsNullOrWhiteSpace(negative) ? Array.Empty<int>() : _tokenizer.EncodeOrdinary(negative);
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = width,
-            Height = height,
-            Steps = steps,
-            CfgScale = cfgScale,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        // Img2img only — a mask is refused upstream because Supports omits Inpaint.
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, width, height);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = width,
+                Height = height,
+                Steps = steps,
+                CfgScale = cfgScale,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

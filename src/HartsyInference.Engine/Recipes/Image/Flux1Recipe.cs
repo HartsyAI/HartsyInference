@@ -22,7 +22,11 @@ public sealed class Flux1Recipe : IArchitectureRecipe
     public string Name => "flux1";
 
     /// <inheritdoc/>
-    public ImageFeatures Supports => ImageFeatures.Lora | ImageFeatures.ControlNet | ImageFeatures.VariationSeed;
+    /// <remarks>Wiring the VAE encoder also makes FLUX.1 Fill reachable: <see cref="FluxPipeline"/> requires a mask for
+    /// checkpoints whose <c>x_embedder</c> is ≥384 channels, which could never arrive while img2img was unmapped.</remarks>
+    public ImageFeatures Supports =>
+        ImageFeatures.Lora | ImageFeatures.ControlNet | ImageFeatures.VariationSeed
+        | ImageFeatures.Img2Img | ImageFeatures.Inpaint;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux1", StringComparison.OrdinalIgnoreCase);
@@ -148,7 +152,8 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
             vae.LoadWeights(vaeWeights);
 
-            FluxPipeline pipeline = new FluxPipeline(context.Backend, clipL, t5, transformer, vae, config)
+                        VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, vaeWeights, "Flux1Recipe");
+            FluxPipeline pipeline = new FluxPipeline(context.Backend, clipL, t5, transformer, vae, vaeEncoder, config)
             {
                 TextEncoderBackend = context.TextEncoderBackendOrDefault,
                 VaeBackend = context.VaeBackendOrDefault,

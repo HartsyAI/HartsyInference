@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
@@ -11,6 +12,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Video.Pipelines;
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -49,6 +51,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         ArgumentNullException.ThrowIfNull(context);
         MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(context.CheckpointPath);
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        MergedLoraStack? loraStack = null;
         try
         {
             {
@@ -66,10 +69,14 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             // guard (CudaBackend.cs:959 takes fp8/F32/F16 inputs only) for a 46% slowdown. The 2-layer parity
             // test passes both, so it does not gate this — only a real-weight run does.
             DType bodyDType = DType.F32;
-            MiniMaxH3Transformer transformer =
-                LoadTransformer(assets.Dit, loaders, bodyDType, out MiniMaxH3Config config);
-            MiniMaxH3VideoVaeDecoder videoVae = LoadVideoVae(assets.VideoVae, loaders);
-            MiniMaxH3AudioVaeDecoder? audioVae = LoadAudioVae(assets.AudioVae, loaders);
+            MiniMaxH3Transformer transformer = LoadTransformer(assets.Dit, loaders, bodyDType,
+                out MiniMaxH3Config config, out Dictionary<string, Tensor> ditWeights);
+            loraStack = ApplyLoras(context, ditWeights);
+            transformer.LoadWeights(ditWeights);
+            (MiniMaxH3VideoVaeDecoder videoVae, MiniMaxH3VideoVaeEncoder? videoVaeEncoder) =
+                LoadVideoVae(assets.VideoVae, loaders);
+            (MiniMaxH3AudioVaeDecoder? audioVae, MiniMaxH3AudioVaeEncoder? audioVaeEncoder) =
+                LoadAudioVae(assets.AudioVae, loaders);
 
             MiniMaxH3TextEncoder textEncoder = LoadTextEncoder(assets.TextEncoder, loaders);
             // The 66 GB bf16 build cannot stay device-resident on any consumer card; the 21 GB fp8 build can, and
@@ -108,10 +115,11 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                     DitShardSplitBlock = ditShardSplitBlock,
                 };
             return new MiniMaxH3RecipePipeline(context.Backend, pipeline, config, textEncoder,
-                LoadTokenizer(assets.TokenizerDir), loaders);
+                LoadTokenizer(assets.TokenizerDir), loaders, videoVaeEncoder, audioVaeEncoder, loraStack);
         }
         catch
         {
+            loraStack?.Dispose();
             foreach (SafeTensorsLoader loader in loaders)
             {
                 loader.Dispose();
@@ -120,8 +128,10 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         }
     }
 
+    /// <summary>Builds the DiT but leaves its weights unloaded, handing back the converted dict so a LoRA merge can
+    /// land on it first — the merge rewrites entries in place, so it has to happen before the transformer reads them.</summary>
     private static MiniMaxH3Transformer LoadTransformer(string file, List<SafeTensorsLoader> loaders,
-        DType bodyDType, out MiniMaxH3Config config)
+        DType bodyDType, out MiniMaxH3Config config, out Dictionary<string, Tensor> transformerWeights)
     {
         SafeTensorsLoader loader = new SafeTensorsLoader();
         loader.Load(file);
@@ -152,12 +162,39 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         Logs.Info($"[MiniMaxH3Recipe] DiT: {converted.Transformer.Count} tensors, {config.NumLayers} blocks, "
             + $"hidden {config.HiddenSize}, curves={config.UseAdalnCurves}.");
         // BF16 residual stream matches the reference body dtype; CPU has F32-only kernels.
-        MiniMaxH3Transformer transformer = new MiniMaxH3Transformer(config) { BodyDType = bodyDType };
-        transformer.LoadWeights(promotedWeights);
-        return transformer;
+        transformerWeights = promotedWeights;
+        return new MiniMaxH3Transformer(config) { BodyDType = bodyDType };
     }
 
-    private static MiniMaxH3VideoVaeDecoder LoadVideoVae(string file, List<SafeTensorsLoader> loaders)
+    /// <summary>Merges the request's LoRA stack into the DiT weights. Every H3 module a LoRA can target is a Linear
+    /// (<c>qkv_proj</c>, <c>out_proj</c>, <c>fc1</c>/<c>fc2</c>, <c>adaln_proj.linear</c>, the patch/condition
+    /// projections), so no convolution path is needed.</summary>
+    private static MergedLoraStack? ApplyLoras(RecipeContext context, Dictionary<string, Tensor> weights)
+    {
+        IReadOnlyList<LoraResolver.LoraSpec> specs = LoraResolver.Resolve(context.Loras);
+        if (specs.Count == 0)
+        {
+            return null;
+        }
+        // Merging rewrites a base weight in place, which a quantized tensor cannot represent — the delta would have to
+        // be re-quantized per tensor. Caught here so the failure names the checkpoint rather than surfacing from
+        // inside the merge as an opaque scale-factor complaint.
+        foreach (KeyValuePair<string, Tensor> kv in weights)
+        {
+            if (kv.Value.DType.IsFp8 || Math.Abs(kv.Value.Fp8ScaleFactor - 1.0f) > 1e-6f)
+            {
+                throw new UnsupportedModelException(
+                    "MiniMax-H3 LoRA needs the bf16 DiT: the pruned fp8 build stores quantized weights, and a LoRA "
+                    + "merge has to rewrite them in full precision. Load 'minimax_h3_*_bf16.safetensors' to use LoRAs.");
+            }
+        }
+        return LoraApplier.BuildAndApply(specs, context.Backend, transformerWeights: weights);
+    }
+
+    /// <summary>The decoder, plus the encoder when the file carries its weights — the vendor VAE ships both halves, but
+    /// a decode-only repack would leave keyframe and reference conditioning unavailable rather than failing to load.</summary>
+    private static (MiniMaxH3VideoVaeDecoder Decoder, MiniMaxH3VideoVaeEncoder? Encoder) LoadVideoVae(
+        string file, List<SafeTensorsLoader> loaders)
     {
         string dir = Path.GetDirectoryName(file)!;
         SafeTensorsLoader loader = new SafeTensorsLoader();
@@ -172,15 +209,25 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             : MiniMaxH3VideoVaeConfig.Detect(weights);
         MiniMaxH3VideoVaeDecoder decoder = new MiniMaxH3VideoVaeDecoder(config);
         decoder.LoadWeights(weights);
-        Logs.Info($"[MiniMaxH3Recipe] Video VAE: {weights.Count} tensors.");
-        return decoder;
+        MiniMaxH3VideoVaeEncoder? encoder = null;
+        if (MiniMaxH3VideoVaeConfig.MatchesEncoder(weights))
+        {
+            encoder = new MiniMaxH3VideoVaeEncoder(config);
+            encoder.LoadWeights(weights);
+        }
+        Logs.Info($"[MiniMaxH3Recipe] Video VAE: {weights.Count} tensors"
+            + (encoder is null ? " (decode only — no keyframe or reference conditioning)." : ", encoder included."));
+        return (decoder, encoder);
     }
 
-    private static MiniMaxH3AudioVaeDecoder? LoadAudioVae(string? file, List<SafeTensorsLoader> loaders)
+    /// <summary>The decoder, plus the encoder when the file carries its half — reference audio needs the encoder, but a
+    /// decode-only build must still generate soundtracks.</summary>
+    private static (MiniMaxH3AudioVaeDecoder? Decoder, MiniMaxH3AudioVaeEncoder? Encoder) LoadAudioVae(
+        string? file, List<SafeTensorsLoader> loaders)
     {
         if (file is null)
         {
-            return null;
+            return (null, null);
         }
         SafeTensorsLoader loader = new SafeTensorsLoader();
         loader.Load(file);
@@ -188,8 +235,15 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>(loader.GetAllTensors());
         MiniMaxH3AudioVaeDecoder decoder = new MiniMaxH3AudioVaeDecoder();
         decoder.LoadWeights(weights);
-        Logs.Info($"[MiniMaxH3Recipe] Audio VAE: {weights.Count} tensors @ {decoder.SampleRate} Hz.");
-        return decoder;
+        MiniMaxH3AudioVaeEncoder? encoder = null;
+        if (MiniMaxH3AudioVaeEncoder.Matches(weights))
+        {
+            encoder = new MiniMaxH3AudioVaeEncoder();
+            encoder.LoadWeights(weights);
+        }
+        Logs.Info($"[MiniMaxH3Recipe] Audio VAE: {weights.Count} tensors @ {decoder.SampleRate} Hz"
+            + (encoder is null ? " (decode only — no reference audio)." : ", encoder included."));
+        return (decoder, encoder);
     }
 
     private static MiniMaxH3TextEncoder LoadTextEncoder(string file, List<SafeTensorsLoader> loaders)

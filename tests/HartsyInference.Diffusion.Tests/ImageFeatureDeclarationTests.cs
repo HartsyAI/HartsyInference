@@ -14,16 +14,28 @@ public sealed class ImageFeatureDeclarationTests
     /// <summary>Families whose recipe pipeline binds <c>request.Img2Img</c> through <c>RecipeImg2ImgBinder</c>.</summary>
     private static readonly string[] ExpectedImg2Img =
     [
-        "sd15", "sdxl",                                             // Phase 0 (pre-existing)
+        "sd15", "sdxl",                                                 // Phase 0 (pre-existing)
         "sd3", "zimage", "qwen-image", "zeta-chroma", "chroma-radiance", // Phase 1
-        "mage-flow",                                                // reference-edit conditioning, not strength-based
+        // Phase 2, grouped by the VAE whose encode-parity gate covers them. These are engine family ids
+        // (IArchitectureRecipe.Name), not SwarmUI compat-class ids — "flux2", not "flux-2".
+        "krea2", "anima",                                       // QwenImageVaeEncoder
+        "chroma", "flux1", "lumina2", "kandinsky5", "f-lite",   // VaeConfig.Flux
+        "flux2", "ernie-image", "ideogram4",                    // VaeConfig.Flux2
+        "auraflow",                                             // VaeConfig.AuraFlow (= Sdxl)
+        "lance-image",                                          // Wan22VaeEncoder — img2img only
+        "mage-flow",                                            // reference-edit conditioning, not strength-based
     ];
 
-    /// <summary>Inpaint additionally requires a masked path in the diffusion pipeline; Mage-Flow has none.</summary>
+    /// <summary>Inpaint additionally requires a masked path in the diffusion pipeline. Mage-Flow has none, and Lance
+    /// deliberately refuses masks — its 16x VAE downscale leaves one mask cell per 16x16-pixel block.</summary>
     private static readonly string[] ExpectedInpaint =
     [
         "sd15", "sdxl",
         "sd3", "zimage", "qwen-image", "zeta-chroma", "chroma-radiance",
+        "krea2", "anima",
+        "chroma", "flux1", "lumina2", "kandinsky5", "f-lite",
+        "flux2", "ernie-image", "ideogram4",
+        "auraflow",
     ];
 
     private readonly ITestOutputHelper _output;

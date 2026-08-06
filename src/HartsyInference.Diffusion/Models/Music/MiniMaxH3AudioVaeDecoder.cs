@@ -172,42 +172,8 @@ public sealed unsafe class MiniMaxH3AudioVaeDecoder : IDisposable
 
     private Tensor FuseOwned(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        Tensor fused = FuseWeightNorm(w, prefix, out bool allocated);
+        Tensor fused = AudioWeightNorm.Fuse(w, prefix, out bool allocated);
         if (allocated) _owned.Add(fused);
-        return fused;
-    }
-
-    /// <summary>Collapses PyTorch <c>weight_norm</c> into one tensor: <c>w[i,…] = g[i] · v[i,…] / ‖v[i,…]‖₂</c>, the
-    /// norm taken over every axis but axis 0 (out-channels for <c>Conv1d</c>, in-channels for <c>ConvTranspose1d</c> —
-    /// <c>weight_norm</c> always reparametrizes along axis 0 of the stored parameter).</summary>
-    private static Tensor FuseWeightNorm(IReadOnlyDictionary<string, Tensor> w, string prefix, out bool allocated)
-    {
-        allocated = false;
-        if (!w.TryGetValue($"{prefix}.weight_g", out Tensor? gSrc))
-            return w[$"{prefix}.weight"];
-        allocated = true;
-        Tensor g = AsF32(gSrc, out bool ownG);
-        Tensor v = AsF32(w[$"{prefix}.weight_v"], out bool ownV);
-        int axis0 = (int)v.Shape[0];
-        long inner = v.ElementCount / axis0;
-        if (g.ElementCount != axis0)
-            throw new ArgumentException($"{prefix}.weight_g has {g.ElementCount} elements, expected {axis0}.");
-
-        Tensor fused = new(v.Shape, DType.F32);
-        float* gp = (float*)g.DataPointer;
-        float* vp = (float*)v.DataPointer;
-        float* fp = (float*)fused.DataPointer;
-        for (int i = 0; i < axis0; i++)
-        {
-            long row = i * inner;
-            double sumSq = 0d;
-            for (long k = 0; k < inner; k++) sumSq += (double)vp[row + k] * vp[row + k];
-            float norm = MathF.Sqrt((float)sumSq);
-            float scale = norm > 0f ? gp[i] / norm : 0f;
-            for (long k = 0; k < inner; k++) fp[row + k] = vp[row + k] * scale;
-        }
-        if (ownG) g.Dispose();
-        if (ownV) v.Dispose();
         return fused;
     }
 

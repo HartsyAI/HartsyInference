@@ -8,6 +8,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Flux.2 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Flux2Pipeline"/> owns the text encoder, so this only produces the token ids — the embedded Qwen3 chat template for Klein, or the spliced Mistral tekken conditioning ids for Dev — and calls <see cref="Flux2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Flux2Loader.Generate</c> text-to-image drive path.</summary>
@@ -56,14 +58,18 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
             ? BuildMistralDevTokenIds(_mistralTokenizer!, prompt)
             : _qwenTokenizer!.EncodeChat(prompt);
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            Width = width,
-            Height = height,
-            Steps = steps,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        // Resolved at the 16-rounded size Flux2Pipeline validates against.
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, width, height);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                Width = width,
+                Height = height,
+                Steps = steps,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

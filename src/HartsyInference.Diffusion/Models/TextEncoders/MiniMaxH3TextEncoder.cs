@@ -139,6 +139,21 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
             $"heads={_queryHeads}/{_kvHeads}x{_headDim}, mlp={_intermediateSize}, vision={(_vision is not null ? "yes" : "no")}");
     }
 
+    /// <summary>Merged vision tokens an image of this size expands to. Callers must reserve exactly this many in the
+    /// presentation before the tower runs, so the block size has to be predictable from the dimensions alone.</summary>
+    public int VisionTokenCount(int height, int width)
+    {
+        if (_visionConfig is null)
+        {
+            throw new InvalidOperationException("The checkpoint has no 'visual.*' tower, so it encodes no images.");
+        }
+        Qwen3VlImageProcessor processor = new Qwen3VlImageProcessor(_visionConfig, MinPixels, MaxPixels,
+            imageMean: NormalizationMean, imageStd: NormalizationStd);
+        (int dstH, int dstW) = processor.SmartResize(height, width);
+        return MiniMaxH3TextEncoding.MergedTokenCount(dstH / _visionConfig.PatchSize, dstW / _visionConfig.PatchSize,
+            _visionConfig.SpatialMergeSize);
+    }
+
     /// <summary>Tokenizes <paramref name="prompt"/> with H3's presentation rules and encodes it.</summary>
     public Result Encode(IBackend backend, Qwen2Tokenizer tokenizer, string prompt,
         IReadOnlyList<MiniMaxH3TextEncoding.Condition>? conditions = null,

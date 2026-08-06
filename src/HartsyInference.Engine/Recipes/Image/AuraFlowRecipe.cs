@@ -17,6 +17,10 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "auraflow";
 
+
+    /// <inheritdoc/>
+    /// <remarks>AuraFlow reuses the SDXL VAE; the encoder half is built alongside the decoder.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "auraflow", StringComparison.OrdinalIgnoreCase);
 
@@ -51,6 +55,7 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
         Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(converted.Vae, vaeDtype);
         VaeDecoder vae = new VaeDecoder(VaeConfig.AuraFlow);
         vae.LoadWeights(vaeWeights);
+        VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.AuraFlow, vaeWeights, "AuraFlowRecipe");
 
         // Pile-T5-XL needs its OWN SentencePiece (same 32128 vocab size as Google T5 v1.1 but different
         // token-ID assignments) — the embedded Google-T5 spiece denoises into a coherent image but not the
@@ -58,7 +63,7 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
         string spiecePath = ModelDownloader.EnsureSideModelAsync(SideModels.PileT5XlSpiece, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         T5Tokenizer tokenizer = new T5Tokenizer(spiecePath, maxLength: 256);
 
-        AuraFlowPipeline pipeline = new AuraFlowPipeline(context.Backend, t5, transformer, vae, config);
+        AuraFlowPipeline pipeline = new AuraFlowPipeline(context.Backend, t5, transformer, vae, vaeEncoder, config);
         Logs.Info("[AuraFlowRecipe] AuraFlow ready.");
         return new AuraFlowRecipePipeline(pipeline, tokenizer, mainLoader);
     }

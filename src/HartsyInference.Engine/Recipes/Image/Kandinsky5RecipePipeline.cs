@@ -10,6 +10,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Kandinsky 5 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Kandinsky5Pipeline"/> takes only pre-computed embeddings, so this owns the dual text stack: it wraps the prompt in Kandinsky's fixed "promt engineer" ChatML template, runs Qwen2.5-VL-7B for the last hidden state and drops the template prefix, frees those weights, then takes the CLIP-L pooled embedding — the two inputs the reference <c>encode_prompt</c> produces. Ported from the diffusers reference, not from a SwarmUI loader (none exists); UNVERIFIED against real weights.</summary>
@@ -71,16 +73,20 @@ public sealed unsafe class Kandinsky5RecipePipeline : IRecipePipeline
                 negClipPooled = Kandinsky5TextEncoding.EncodeClipPooled(_backend, _clipL, _clipTokenizer, negative);
             }
 
-            TextToImageRequest inner = new TextToImageRequest
-            {
-                Prompt = prompt,
-                NegativePrompt = negative,
-                Width = request.Width,
-                Height = request.Height,
-                Steps = steps,
-                CfgScale = cfg,
-                Seed = RecipeRequestMapper.MapSeed(request.Seed),
-            };
+            (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+            using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+            TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+                new TextToImageRequest
+                {
+                    Prompt = prompt,
+                    NegativePrompt = negative,
+                    Width = request.Width,
+                    Height = request.Height,
+                    Steps = steps,
+                    CfgScale = cfg,
+                    Seed = RecipeRequestMapper.MapSeed(request.Seed),
+                },
+                img2img);
 
             Action<GenerationProgress> bridge = p =>
             {

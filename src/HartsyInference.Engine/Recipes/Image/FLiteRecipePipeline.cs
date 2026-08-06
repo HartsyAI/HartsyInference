@@ -6,6 +6,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed F-Lite pipeline driven against the native <see cref="ImageRequest"/>. <see cref="FLitePipeline"/> owns the T5-XXL encoder; this tokenizes the prompt (no attention mask beyond an all-ones window — the fal-ai reference attends the full 512-token pad sea) and passes a null negative when unset (the reference uses a zero context, not an encoded empty string). Runs <see cref="FLitePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>FLiteLoader.Generate</c> drive path (text-to-image only).</summary>
@@ -38,7 +40,9 @@ public sealed class FLiteRecipePipeline : IRecipePipeline
         int[]? negTokens = string.IsNullOrWhiteSpace(negative) ? null : _tokenizer.Encode(negative);
         int[]? negMask = negTokens is null ? null : promptMask;
 
-        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative);
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(RecipeRequestMapper.ToTextToImage(request, negative), img2img);
 
         Action<GenerationProgress> bridge = p =>
         {

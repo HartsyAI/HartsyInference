@@ -28,6 +28,10 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "lumina2";
 
+
+    /// <inheritdoc/>
+    /// <remarks>Lumina 2 reuses the Flux.1 VAE; the encoder half is built alongside the decoder.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lumina2", StringComparison.OrdinalIgnoreCase);
 
@@ -72,7 +76,8 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
             string tokenizerPath = EnsureTokenizer(tevPath);
             GemmaTokenizer tokenizer = new GemmaTokenizer(tokenizerPath, maxLength: 512);
 
-            Lumina2Pipeline pipeline = new Lumina2Pipeline(context.Backend, transformer, vae, config);
+                        VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, vaeWeights, "Lumina2Recipe");
+            Lumina2Pipeline pipeline = new Lumina2Pipeline(context.Backend, transformer, vae, vaeEncoder, config);
             Logs.Info("[Lumina2Recipe] Lumina-2 ready.");
             return new Lumina2RecipePipeline(pipeline, context.Backend, textEncoder, tokenizer, transformer, SystemPrompt, loaders);
         }

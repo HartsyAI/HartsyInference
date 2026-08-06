@@ -10,6 +10,8 @@ using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Flux.2 recipe (BFL; Klein 4B / Klein 9B / Dev). Variant is detected from the converted transformer's hidden size (3072 → Klein 4B, 4096 → Klein 9B, 6144 → Dev). Lifted from the SwarmUI backend's <c>Flux2Loader</c>: the checkpoint is the transformer; the matching text encoder — Qwen3-4B (<see cref="SideModels.Qwen3_4B"/>), Qwen3-8B (<see cref="SideModels.Qwen3_8B_Fp4Mixed"/>), or Mistral-Small-3 (<see cref="SideModels.MistralSmallFlux2"/>) — and the Flux.2 VAE (<see cref="SideModels.Flux2Vae"/>, 32-channel latent + BatchNorm stats) resolve as side models. Constructs and drives through <see cref="Flux2RecipePipeline"/>.</summary>
@@ -22,6 +24,10 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "flux2";
 
+
+    /// <inheritdoc/>
+    /// <remarks>Flux.2's BN-style latent normalization is applied at the pipeline boundary; the encode-side inverse already lives in Flux2Pipeline.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase);
 
@@ -121,6 +127,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             }
             VaeDecoder vaeDecoder = new VaeDecoder(VaeConfig.Flux2);
             vaeDecoder.LoadWeights(vaeWeights);
+            VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux2, vaeWeights, "Flux2Recipe");
 
             // Tokenizer: Klein → embedded Qwen3 vocab/merges; Dev → Mistral tekken (HF tokenizer.json).
             Qwen3Tokenizer? qwenTokenizer = null;
@@ -137,7 +144,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             }
 
             Flux2Pipeline pipeline = new Flux2Pipeline(
-                context.Backend, encoder, transformer, vaeDecoder,
+                context.Backend, encoder, transformer, vaeDecoder, vaeEncoder,
                 bnMean, bnVar, config,
                 hiddenLayers: null,
                 bnEps: 1e-5f);

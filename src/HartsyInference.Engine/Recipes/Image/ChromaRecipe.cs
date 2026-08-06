@@ -18,6 +18,10 @@ public sealed class ChromaRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "chroma";
 
+
+    /// <inheritdoc/>
+    /// <remarks>Chroma reuses the Flux.1 VAE; the encoder half is built alongside the decoder and ChromaPipeline implements the packed-latent masked path.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "chroma", StringComparison.OrdinalIgnoreCase);
 
@@ -100,7 +104,8 @@ public sealed class ChromaRecipe : IArchitectureRecipe
         VaeDecoder vae = new VaeDecoder(VaeConfig.Chroma);
         vae.LoadWeights(vaeWeights);
 
-        ChromaPipeline pipeline = new ChromaPipeline(context.Backend, t5, transformer, vae, config)
+                VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Chroma, vaeWeights, "ChromaRecipe");
+        ChromaPipeline pipeline = new ChromaPipeline(context.Backend, t5, transformer, vae, vaeEncoder, config)
         {
             TextEncoderBackend = context.TextEncoderBackendOrDefault,
             VaeBackend = context.VaeBackendOrDefault,

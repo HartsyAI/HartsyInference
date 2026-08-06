@@ -271,12 +271,20 @@ public sealed class QwenImageDownsample
     public Tensor Forward(IBackend backend, Tensor x)
     {
         int batch = (int)x.Shape[0];
+        int channels = (int)x.Shape[1];
         int h = (int)x.Shape[2];
         int w = (int)x.Shape[3];
-        int outH = (h + 2 * 1 - 3) / 2 + 1;
-        int outW = (w + 2 * 1 - 3) / 2 + 1;
+
+        // The reference stores this stage as nn.Sequential(ZeroPad2d((0,1,0,1)), Conv2d(3, stride=2, padding=0)) —
+        // hence the `.resample.1.` key. Symmetric padding yields the same output size but shifts the stride-2
+        // sampling grid by one pixel, and the encoder stacks three of these, so the error compounds. Same class of
+        // bug as the VaeEncoder downsample fix (MODEL_STATUS_IMAGE.md), which is why this shares its helper.
+        Tensor padded = VaeEncoder.PadRightBottom(backend, x, batch, channels, h, w, DType.F32);
+        int outH = (h + 1 - 3) / 2 + 1;
+        int outW = (w + 1 - 3) / 2 + 1;
         Tensor outT = new Tensor(new TensorShape(batch, _outDim, outH, outW), DType.F32);
-        backend.Conv2D(outT, x, _convWeight!, _convBias, strideH: 2, strideW: 2, padH: 1, padW: 1);
+        backend.Conv2D(outT, padded, _convWeight!, _convBias, strideH: 2, strideW: 2, padH: 0, padW: 0);
+        padded.Dispose();
         return outT;
     }
 }

@@ -10,6 +10,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Krea 2 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Krea2Pipeline"/> owns the Qwen3-VL-4B forward (it taps 12 decoder layers itself), so this only builds the templated token ids — byte-identical to Qwen-Image's template — plus the prefix-drop indices and calls <see cref="Krea2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Krea2Loader.Generate</c>.</summary>
@@ -28,17 +30,19 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
     private readonly LlamaStyleEncoder _textEncoder;
     private readonly Krea2Transformer _transformer;
     private readonly QwenImageVaeDecoder _vae;
+    private readonly QwenImageVaeEncoder? _vaeEncoder;
     private readonly bool _isTurbo;
     private readonly List<SafeTensorsLoader> _loaders;
 
     /// <summary>Wraps the constructed Krea 2 pipeline plus its components, taking ownership of every disposable.</summary>
-    public Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, Krea2Transformer transformer, QwenImageVaeDecoder vae, bool isTurbo, List<SafeTensorsLoader> loaders)
+    public Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, Krea2Transformer transformer, QwenImageVaeDecoder vae, QwenImageVaeEncoder? vaeEncoder, bool isTurbo, List<SafeTensorsLoader> loaders)
     {
         _pipeline = pipeline;
         _tokenizer = tokenizer;
         _textEncoder = textEncoder;
         _transformer = transformer;
         _vae = vae;
+        _vaeEncoder = vaeEncoder;
         _isTurbo = isTurbo;
         _loaders = loaders;
     }
@@ -66,20 +70,25 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
             Logs.Info($"[Krea2RecipePipeline] Snapped {reqWidth}x{reqHeight} → {width}x{height} (multiple of 16, 128–4096).");
         }
 
-        // TODO(E-IMG-4/5): img2img/inpaint, LoRA, ControlNet, IP-Adapter and regional prompting are deferred.
+        // TODO(E-IMG-4/5): LoRA, ControlNet, IP-Adapter and regional prompting are deferred.
         (int[] promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, prompt);
         (int[] negTokens, int negDrop) = EncodeWithTemplate(_tokenizer, negative);
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = width,
-            Height = height,
-            Steps = steps,
-            CfgScale = cfg,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        // Resolved at the *snapped* size: Krea 2 rounds to a multiple of 16 above and the pipeline validates the
+        // source against those same rounded dimensions.
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, width, height);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = width,
+                Height = height,
+                Steps = steps,
+                CfgScale = cfg,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         Action<GenerationProgress> bridge = p =>
         {
@@ -140,6 +149,7 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
         _textEncoder.Dispose();
         _transformer.Dispose();
         _vae.Dispose();
+        _vaeEncoder?.Dispose();
         foreach (SafeTensorsLoader loader in _loaders)
         {
             loader.Dispose();

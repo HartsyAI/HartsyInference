@@ -7,6 +7,8 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>F-Lite recipe (Freepik / Fal.ai lightweight Flux-Schnell derivative). F-Lite ships only in the diffusers folder layout (<c>dit_model/</c> + <c>text_encoder/</c> + <c>vae/</c>) — there is no single-file release. The transformer, T5-XXL encoder, and Flux Schnell VAE all come from that folder; nothing is resolved as a side model. Lifted from the SwarmUI backend's <c>FLiteLoader</c>; constructs and drives through <see cref="FLiteRecipePipeline"/>.</summary>
@@ -15,6 +17,10 @@ public sealed class FLiteRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "f-lite";
 
+
+    /// <inheritdoc/>
+    /// <remarks>F-Lite reuses the Flux.1 VAE; the encoder half is built alongside the decoder.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "f-lite", StringComparison.OrdinalIgnoreCase);
 
@@ -49,7 +55,8 @@ public sealed class FLiteRecipe : IArchitectureRecipe
         VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
         vae.LoadWeights(converted.Vae);
 
-        FLitePipeline pipeline = new FLitePipeline(context.Backend, t5, transformer, vae, config);
+                VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, converted.Vae, "FLiteRecipe");
+        FLitePipeline pipeline = new FLitePipeline(context.Backend, t5, transformer, vae, vaeEncoder, config);
         Logs.Info("[FLiteRecipe] F-Lite ready.");
         return new FLiteRecipePipeline(pipeline, new T5Tokenizer(maxLength: 512), handle);
     }

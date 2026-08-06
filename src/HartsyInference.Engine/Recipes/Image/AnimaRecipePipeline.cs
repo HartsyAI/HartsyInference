@@ -11,6 +11,8 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Anima pipeline driven against the native <see cref="ImageRequest"/>. Owns Anima's dual text stack: the Qwen-3 0.6B hidden states (LlmAdapter cross-attention K/V) plus a T5 SentencePiece tokenization of the same prompt (the adapter's main-stream <c>embed[t5_ids]</c> lookup), then calls <see cref="AnimaPipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>AnimaLoader.Generate</c> drive path. Anima's Cosmos <c>t/1000</c> timestep normalization lives inside the pipeline.</summary>
@@ -56,7 +58,6 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
         int steps = request.Steps ?? AnimaRecipe.FamilyDefaults.Steps;
         float cfg = request.CfgScale ?? AnimaRecipe.FamilyDefaults.CfgScale;
 
-        // TODO(E-IMG-4): img2img/inpaint (request.Img2Img/Inpaint) is not yet mapped — text-to-image only.
 
         // Plain (non-chat) tokenization: Anima's reference workflow uses CLIPLoader type="stable_diffusion", which is
         // Comfy's path for raw Qwen-3 text encoding (no chat template).
@@ -79,15 +80,19 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
             negativeT5Ids = EncodeT5(_t5Tokenizer, negative);
         }
 
-        TextToImageRequest inner = new TextToImageRequest
-        {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = steps,
-            Seed = RecipeRequestMapper.MapSeed(request.Seed),
-        };
+        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = request.Width,
+                Height = request.Height,
+                Steps = steps,
+                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            },
+            img2img);
 
         try
         {

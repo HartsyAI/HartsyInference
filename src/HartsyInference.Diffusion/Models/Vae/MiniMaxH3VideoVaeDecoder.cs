@@ -369,40 +369,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
         return canvas;
     }
 
-    /// <summary>Tile starts/lengths/overlaps in pixel space; overlaps absorb the remainder in <see cref="MiniMaxH3VideoVaeConfig.VaeRatio"/>
-    /// steps so every boundary still lands on a latent cell.</summary>
-    private (int[] Start, int[] Length, int[] Overlap) SplitTiles(int inputLen)
-    {
-        int tile = _config.TileSize;
-        if (tile >= inputLen)
-        {
-            return ([0], [inputLen], []);
-        }
-        int n = (inputLen + tile - 1) / tile;
-        int[] overlaps;
-        int remaining;
-        while (true)
-        {
-            overlaps = new int[n - 1];
-            Array.Fill(overlaps, _config.TileOverlapMin);
-            remaining = tile * n - Sum(overlaps) - inputLen;
-            if (remaining < 0) n++;
-            else break;
-        }
-        int units = remaining / _config.VaeRatio;
-        for (int i = 0; i < units; i++)
-        {
-            overlaps[i % (n - 1)] += _config.VaeRatio;
-        }
-        int[] start = new int[n];
-        for (int i = 1; i < n; i++)
-        {
-            start[i] = start[i - 1] + tile - overlaps[i - 1];
-        }
-        int[] length = new int[n];
-        Array.Fill(length, tile);
-        return (start, length, overlaps);
-    }
+    private (int[] Start, int[] Length, int[] Overlap) SplitTiles(int inputLen) => _config.SplitTiles(inputLen);
 
     // ── ViT3D forward ───────────────────────────────────────────────────
 
