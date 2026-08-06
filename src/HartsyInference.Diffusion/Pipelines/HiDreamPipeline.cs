@@ -267,7 +267,19 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         // ── 4. Denoising loop ──
         // Bulk-upload transformer weights before the denoise loop (no-op when already resident under
         // HARTSY_KEEP_MODELS). Paired with the conditional FreeWeights at the VAE handoff.
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
+        // DiT sharding: asymmetric preload — Backend gets the shared weights (embedders + caption_projection[]
+        // + final layer) PLUS its block range, DitShardBackend gets ONLY its block range. Preloading
+        // EnumerateWeights() on both would replicate the transformer instead of pooling VRAM.
+        if (DitShardBackend is not null)
+        {
+            Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+            Backend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+        }
+        else
+        {
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+        }
         _ditResident = true;
 
         Logs.Info("Starting HiDream denoising loop...");
@@ -280,20 +292,20 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
             Tensor noisePred;
             if (useCfg)
             {
-                Tensor condNoise = _transformer.Forward(Backend, latent, t, condT5, condLlama, condPooled);
+                Tensor condNoise = RunForward(latent, t, condT5, condLlama, condPooled);
                 // Bound the async queue to one forward's transients: with the blocks now fully GPU-resident
                 // (no implicit host-sync throttling), two queued 17B F32-activation forwards overflow the
                 // ~7 GB left beside the resident fp8 weights (measured step-1 OOM at 1024²-CFG). One forward
                 // fits; serialize the pair.
                 Backend.Sync();
-                Tensor uncondNoise = _transformer.Forward(Backend, latent, t, uncondT5!, uncondLlama!, uncondPooled!);
+                Tensor uncondNoise = RunForward(latent, t, uncondT5!, uncondLlama!, uncondPooled!);
                 noisePred = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
                 condNoise.Dispose();
                 uncondNoise.Dispose();
             }
             else
             {
-                noisePred = _transformer.Forward(Backend, latent, t, condT5, condLlama, condPooled);
+                noisePred = RunForward(latent, t, condT5, condLlama, condPooled);
             }
 
             Tensor newLatent = new Tensor(latentShape, DType.F32);
@@ -337,7 +349,20 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         // Under HARTSY_KEEP_MODELS the 17 GB fp8 DiT stays resident (the tiled VAE decode fits beside it);
         // otherwise free it before the decode as before. Phase 3 deviations #18.
         Backend.Sync();
-        if (!KeepModelsResident)
+        DitShardBackend?.Sync();
+        if (DitShardBackend is not null)
+        {
+            // Mirror of the sharded preload above: Backend frees shared + its block range, DitShardBackend
+            // frees ONLY its block range.
+            if (!KeepModelsResident)
+            {
+                Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+                Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+                DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+                _ditResident = false;
+            }
+        }
+        else if (!KeepModelsResident)
         {
             Backend.FreeWeights(_transformer.EnumerateWeights());
             _ditResident = false;
