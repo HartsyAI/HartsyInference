@@ -152,13 +152,12 @@ phase_a() {
     # HARTSY_KEEP_MODELS static-init read → each engine fact runs filter-isolated in its own process.
     # KNOWN RED as of 2026-08-05 (N-way sharding generalization pass): this SSIM-vs-unsharded gate fails
     # (~0.176, was documented as 0.9734) for a reason UNRELATED to the N-way generalization — see the
-    # 2026-08-05 benchmark doc "Qwen-Image cross-ordinal fidelity finding" section. Root-caused via a same-
-    # ordinal-two-backend-instances control (bit-exact, err=0/262144) vs a genuinely-cross-ordinal control
-    # (catastrophic at split=41 AND split=59): running this fp8mixed checkpoint's blocks through the 3060's
-    # non-native fp8→BF16 dequant GEMM path diverges sharply from the 4090's native fp8 path — the same class
-    # of drift MiniMaxH3DitShardingEngineTests already documents and gates informationally (SSIM > 0.05, not
-    # a real bar) rather than at 0.75. This test's threshold was NOT changed in this pass (not this task's
-    # call) — flagged for the user to decide whether Qwen-Image's gate should be reclassified the same way.
+    # 2026-08-05/06 benchmark doc "Qwen-Image cross-ordinal fidelity finding" section. Root-caused
+    # 2026-08-06 (QwenImageFp8PrecisionDiagnosticTests): NOT a sharding defect — forcing both sides of the
+    # comparison onto the same fp8 GEMM regime recovers SSIM 0.9922. The real cause is the STRONG card's fast
+    # native fp8 GEMM path (used by the unsharded baseline too) losing precision on this checkpoint's outlier
+    # activation channels — same class of finding MiniMaxH3DitShardingEngineTests already gates
+    # informationally. RECLASSIFIED to informational (SSIM > 0.05, not a real bar) per user decision 2026-08-06.
     run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
     # NOT RE-EVALUATED in this pass (self-skipped on its own free-VRAM gate — the live swarmui.service was
     # holding the 4090 at the time). No SSIM gate on this fact (VRAM-drift check only), so it is not expected

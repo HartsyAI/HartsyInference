@@ -100,6 +100,25 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             // count-proportional plan is already byte-accurate. Qwen-Image is the one recipe wired for N-way
             // sharding (ROADMAP.md item 7); the other five sharded families still resolve a single split point
             // from context.DitShardBackend.
+            //
+            // KNOWN LIMITATION (2026-08-06, QwenImageFp8PrecisionDiagnosticTests): cross-ordinal DiT sharding on
+            // this checkpoint diverges from the unsharded baseline (SSIM ~0.18, informational-gate candidate, not
+            // yet reclassified — see benchmarks/results/2026-08-05_multigpu_speeds.md's ‡ footnote). Root-caused to
+            // the native fp8 GEMM path's per-TENSOR e4m3 ACTIVATION quantization being lossy at this checkpoint's
+            // massive-activation-outlier-channel scale (relL2 0.80 vs a full-F32 reference at block 59, vs 2e-3 for
+            // the non-native BF16-cast path) — NOT the non-native stage's weight-cast precision, which was the
+            // original hypothesis and is refuted by the same test. The SHARDING ITSELF IS CORRECT: forcing the
+            // whole process (baseline AND sharded engine) onto one regime restored real cross-device SSIM to
+            // 0.9922 — the 0.18 measures the GEMM regime gap between SM 8.9 and SM 8.6, not a sharding defect. A
+            // candidate CODE fix (equalizing only the sharded engine's own stages) was tried and REJECTED: it
+            // leaves the separately-constructed baseline engine on native, so it measured WORSE (0.1017) than
+            // doing nothing. Root cause: this checkpoint's per-block precision error (relL2 0.80 at block 59 alone)
+            // compounds across depth — a whole-model, no-sharding, no-boundary regime change (native vs BF16-cast,
+            // same GPU, same weights, one forward pass) already produces relL2 0.93 between the two velocities.
+            // Matching the regime everywhere (not just across shard stages, which this recipe does not control)
+            // would be required, at a real, model-wide throughput cost (~1.7x slower single-GPU, measured) — not a
+            // decision to make here (same class of finding as MiniMaxH3Recipe's already-accepted cross-device
+            // limitation). No code fix is wired here.
             List<DitShardStage>? ditShardStages = null;
             if (context.DitShardBackends is { Count: > 0 })
             {
