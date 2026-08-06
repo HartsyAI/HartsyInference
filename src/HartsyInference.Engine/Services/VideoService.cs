@@ -61,7 +61,7 @@ public sealed class VideoService : IVideoService
         return await Task.Run(
             () =>
             {
-                IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(spec);
+                IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(spec, request);
                 VideoRequest resolved = InferenceEngine.VideoDefaultsFor(spec).Apply(request);
                 VideoGenerationResult result = pipeline.Generate(resolved, progress, cancel);
                 double seconds = VideoAudioResolver.VideoSeconds(result.Frames.Count, resolved.Fps);

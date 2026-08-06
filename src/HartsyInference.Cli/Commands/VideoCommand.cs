@@ -78,6 +78,16 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Reference audio clip (WAV) to condition on; repeat for more (MiniMax-H3 takes up to 3).")]
         public string[]? ReferenceAudios { get; init; }
 
+        /// <summary>LoRAs to merge into the denoiser; families that don't declare LoRA support refuse them.</summary>
+        [CommandOption("--lora")]
+        [Description("LoRA to merge, by name or path; repeat for more. Needs an unquantized (bf16) checkpoint — a merge cannot rewrite quantized weights.")]
+        public string[]? Loras { get; init; }
+
+        /// <summary>Per-LoRA strengths, positionally matched to --lora; missing entries default to 1.0.</summary>
+        [CommandOption("--lora-weight")]
+        [Description("Strength for the same-position --lora (default 1.0).")]
+        public double[]? LoraWeights { get; init; }
+
         /// <summary>Guidance scale; unset uses the family's officially recommended scale.</summary>
         [CommandOption("--cfg")]
         [Description("Guidance scale (default: the model family's recommended scale).")]
@@ -149,6 +159,13 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         if (settings.ReferenceAudios is { Length: > 0 })
         {
             parameters.Put("ref-audios", string.Join('\n', settings.ReferenceAudios));
+        }
+        if (settings.Loras is { Length: > 0 })
+        {
+            parameters.Put("loras", string.Join('\n', settings.Loras));
+            parameters.Put("lora-weights", string.Join('\n',
+                settings.Loras.Select((_, i) => (settings.LoraWeights is not null && i < settings.LoraWeights.Length
+                    ? settings.LoraWeights[i] : 1.0).ToString(CultureInfo.InvariantCulture))));
         }
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
         if (settings.Restore.IsSet)

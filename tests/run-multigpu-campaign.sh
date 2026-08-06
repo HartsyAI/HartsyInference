@@ -208,6 +208,13 @@ phase_a() {
     run_class HartsyInference.World.Tests      OasisVaeDeviceOverlapEngineTests
     # LLM layer-split real-checkpoint parity (Llama-3.2-1B exact-token-match vs unsharded, greedy/fixed-seed).
     run_class HartsyInference.LLM.Tests        LlmShardingEngineTests.Sharded_TwoGpus_ExactTokenParity_VsUnsharded_GreedyFixedSeed
+    # VLM layer split (Phase 5, 2026-08-05/06): mllama's gated cross-attention states now peer-copy per stage
+    # (GenericTransformer.ForwardEmbedsStaged) and TextService.LoadSharded no longer skips the mmproj sidecar —
+    # exact-text-match vs unsharded, greedy/fixed-seed, real image. Both checkpoints already on this box.
+    run_class HartsyInference.LLM.Tests        VlmShardingEngineTests.Sharded_TwoGpus_Mllama_ExactTextParity_VsUnsharded_GreedyFixedSeed
+    # Splice-style VLM (Qwen2.5-VL-7B): no cross-attention states to copy — the image tokens ride the same
+    # embeds sequence text tokens do, so ForwardEmbedsStaged already handled it once the sidecar loaded.
+    run_class HartsyInference.LLM.Tests        VlmShardingEngineTests.Sharded_TwoGpus_Qwen25Vl_ExactTextParity_VsUnsharded_GreedyFixedSeed
     # SLOW + HOST-RAM-GATED: needs ~46 GB free host RAM (2.5x the ~18.4 GB Qwen3-32B Q4_K_M file, per
     # TextService.EnsureRamHeadroomFor) REGARDLESS of GPU sharding — the gate is on CPU-side dequantization
     # staging, not final VRAM residency. Will self-skip (→ FAILED under this script's strict gate) whenever
@@ -231,6 +238,11 @@ phase_a() {
     # only has config.json + the safetensors INDEX, no actual weight shards; `hartsy pull lumina2` would fetch
     # them). No VRAM/engine real-weight fact exists yet — add once pulled.
     run_class HartsyInference.Diffusion.Tests  Lumina2DitShardingTests
+    # HiDream-I1 DiT sharding — SYNTHETIC ONLY: Models/Stable-Diffusion/HiDream is empty on this box
+    # (`hartsy pull hidream` would fetch it; HiDream also needs the embedded Llama-3.1 tokenizer assets — see
+    # HiDreamRecipe's construction-time check). [Theory] over 5 split points covering every distinct
+    # double/single boundary-crossing shape. No VRAM/engine real-weight fact exists yet — add once pulled.
+    run_class HartsyInference.Diffusion.Tests  HiDreamDitShardingTests
 }
 
 # ── Phase B: post-download (hartsy pull chroma qwen-image hunyuan-image wan) ─────────────────────────────

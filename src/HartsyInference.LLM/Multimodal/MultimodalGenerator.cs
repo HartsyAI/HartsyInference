@@ -30,10 +30,24 @@ public sealed class MultimodalGenerator
     private readonly GgufLanguageModel _text;
     private readonly IVlmImageEncoder _vision;
     private readonly IBackend _backend;
+    private readonly LlmPlacement? _placement;
 
-    public MultimodalGenerator(GgufLanguageModel text, IVlmImageEncoder vision, IBackend backend)
+    /// <summary>True when a genuine multi-stage layer-split placement is active.</summary>
+    private bool Staged => _placement is not null && !_placement.IsSingle;
+
+    /// <summary><paramref name="placement"/> shards the decoder layers across devices (VRAM pooling); null keeps
+    /// the single-backend path byte-identical. Splice-style VLMs need no cross-stage copy beyond what
+    /// <see cref="GenericTransformer.ForwardEmbedsStaged"/> already does for a plain embeds sequence — the image
+    /// tokens are spliced into the SAME sequence text tokens ride, so they cross stage boundaries via the
+    /// existing host-staged hidden handoff, not a dedicated path like mllama's cross-attention states. When
+    /// <paramref name="placement"/> is set, <paramref name="backend"/> must be the placement's LAST stage backend
+    /// (final norm/lm_head/logits live there) — mirrors <see cref="Generation.TextGenerationPipeline"/>'s contract.</summary>
+    public MultimodalGenerator(GgufLanguageModel text, IVlmImageEncoder vision, IBackend backend, LlmPlacement? placement = null)
     {
-        _text = text; _vision = vision; _backend = backend;
+        _text = text; _vision = vision; _placement = placement;
+        _backend = placement is not null ? placement.LastBackend : backend;
+        if (Staged)
+            StagedWeightPreload.Preload(text.Transformer, _placement!);
     }
 
     /// <summary>Builds the family-specific text segments that wrap the image embeddings: tokens before the image
@@ -101,8 +115,11 @@ public sealed class MultimodalGenerator
         GenericTransformer model = _text.Transformer;
         int hidden = _text.Config.HiddenSize;
 
-        // 1. Encode the image → [1, tokensPerImage, hidden].
-        using Tensor imageEmbeds = _vision.Encode(_backend, pixelValues);
+        // 1. Encode the image → [1, tokensPerImage, hidden]. Staged: runs on stage 0's backend — the result is
+        // read back host-side below (imgSrc.DataPointer) and spliced into the host embeds buffer, so which
+        // backend encodes it doesn't matter for correctness, only for where the one-time D2H sync lands.
+        IBackend visionBackend = Staged ? _placement!.Stages[0].Backend : _backend;
+        using Tensor imageEmbeds = _vision.Encode(visionBackend, pixelValues);
         int imgTokens = (int)imageEmbeds.Shape[1];
         bool dbg = Environment.GetEnvironmentVariable("HARTSY_VLM_DEBUG") == "1";
         if (dbg)
@@ -146,7 +163,7 @@ public sealed class MultimodalGenerator
         System.Text.StringBuilder sb = new();
 
         int token;
-        using (Tensor hiddenOut = model.ForwardEmbeds(_backend, embeds, seqLen, 0, cache))
+        using (Tensor hiddenOut = Forward(model, embeds, seqLen, 0, cache))
             token = SampleLast(model, hiddenOut, seqLen, sampler, history);
         if (dbg) Console.Error.WriteLine($"[vlm] seqLen={seqLen} (pre={pre.Length} img={imgTokens} post={post.Length}) firstToken={token} decode=[{_text.Tokenizer.Decode([token])}]");
 
@@ -157,12 +174,20 @@ public sealed class MultimodalGenerator
             history.Add(token);
             using Tensor stepEmb = new(new TensorShape(1, 1, model.Config.HiddenSize), DType.F32);
             model.EmbedLookup(stepEmb, new[] { token });
-            using Tensor h = model.ForwardEmbeds(_backend, stepEmb, 1, pos, cache);
+            using Tensor h = Forward(model, stepEmb, 1, pos, cache);
             pos++;
             token = SampleLast(model, h, 1, sampler, history);
         }
         return sb.ToString();
     }
+
+    /// <summary>The hidden-state forward for one step: staged across the placement (plain embeds handoff, no
+    /// cross-stage copy beyond the existing host-staged boundary) when sharded, else the plain single-backend
+    /// path.</summary>
+    private Tensor Forward(GenericTransformer model, Tensor embeds, int t, int posStart, IKvCache cache) =>
+        Staged
+            ? model.ForwardEmbedsStaged(_placement!, embeds, t, posStart, cache)
+            : model.ForwardEmbeds(_backend, embeds, t, posStart, cache);
 
     /// <summary>Projects the last position's hidden state to logits and selects the next token via the sampler
     /// (greedy when the options request it; otherwise temperature/top-p/repetition-penalty over the history).</summary>

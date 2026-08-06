@@ -11,16 +11,20 @@ public static class RecipeCacheKey
 {
     /// <summary>A stable, order-sensitive description of the construction-affecting parts of <paramref name="request"/>;
     /// the empty string for a null request or one that changes nothing about construction.</summary>
-    public static string Describe(ImageRequest? request)
+    public static string Describe(ImageRequest? request) =>
+        request is null ? "" : Describe(request.Loras, request.Components);
+
+    /// <summary>The video counterpart — video recipes bake LoRAs into the loaded weights exactly as image ones do, so
+    /// their cached pipelines must be keyed by the stack too.</summary>
+    public static string Describe(VideoRequest? request) =>
+        request is null ? "" : Describe(request.Loras, request.Components);
+
+    private static string Describe(LoraStack? loras, ComponentOverrides? components)
     {
-        if (request is null)
-        {
-            return "";
-        }
         StringBuilder builder = new StringBuilder();
-        if (request.Loras is { Entries.Count: > 0 })
+        if (loras is { Entries.Count: > 0 })
         {
-            foreach (LoraEntry entry in request.Loras.Entries)
+            foreach (LoraEntry entry in loras.Entries)
             {
                 builder.Append("lora:").Append(entry.Model).Append('@')
                     .Append(entry.Weight.ToString("R", CultureInfo.InvariantCulture)).Append('/')
@@ -28,7 +32,6 @@ public static class RecipeCacheKey
                     .Append(entry.SectionConfinement ?? "-").Append(';');
             }
         }
-        ComponentOverrides? components = request.Components;
         if (components is not null)
         {
             builder.Append("cmp:")

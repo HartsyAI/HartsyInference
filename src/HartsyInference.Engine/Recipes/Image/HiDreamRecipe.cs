@@ -4,6 +4,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -121,7 +122,42 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             vae.LoadWeights(vaeWeights);
             VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, vaeWeights, "HiDreamRecipe");
 
-            HiDreamPipeline pipeline = new HiDreamPipeline(context.Backend, clipL, clipG, t5, llama, transformer, vae, vaeEncoder, config);
+            // Phase 8 DiT sharding (VRAM pooling, not latency — see HiDreamPipeline's use of DitShardBackend):
+            // the split point depends on the transformer's actual block sizes and free VRAM on the two
+            // backends, both only known here (RecipeContext is built before weights load). HiDream's double
+            // blocks are heavier than its single blocks (extra text-side attention + FFN weights) — a
+            // count-proportional split would misallocate by GBs, so this uses the BYTE-WEIGHTED overload
+            // (same class of heterogeneous-block DiT as Chroma/HunyuanImage/Flux).
+            int ditShardSplitBlock = 0;
+            if (context.DitShardBackend is not null)
+            {
+                long sharedWeightBytes = 0;
+                foreach (Tensor t in transformer.EnumerateSharedWeights())
+                {
+                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
+                }
+                long[] perBlockBytes = new long[transformer.BlockCount];
+                for (int i = 0; i < transformer.BlockCount; i++)
+                {
+                    long bytes = 0;
+                    foreach (Tensor t in transformer.EnumerateBlockRangeWeights(i, i + 1))
+                    {
+                        bytes += t.DType.ComputeByteCount(t.ElementCount);
+                    }
+                    perBlockBytes[i] = bytes;
+                }
+                (long freeA, _) = context.Backend.GetVramInfo();
+                (long freeB, _) = context.DitShardBackend.GetVramInfo();
+                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], perBlockBytes, sharedWeightBytes)[0];
+                Logs.Info($"[HiDreamRecipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
+                    + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
+            }
+
+            HiDreamPipeline pipeline = new HiDreamPipeline(context.Backend, clipL, clipG, t5, llama, transformer, vae, vaeEncoder, config)
+            {
+                DitShardBackend = context.DitShardBackend,
+                DitShardSplitBlock = ditShardSplitBlock,
+            };
             Logs.Info("[HiDreamRecipe] HiDream ready (4 text encoders; scheduler=flow-match).");
             return new HiDreamRecipePipeline(pipeline, new ClipTokenizer(), new T5Tokenizer(maxLength: 256), new LlamaTokenizer(maxLength: 256), t5, llama, transformer, loaders);
         }

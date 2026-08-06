@@ -226,7 +226,7 @@ public sealed class TextService : ITextService, IDisposable
         {
             using Tensor px = VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height,
                 slot.MllamaVision.ImageSize, MllamaMean, MllamaStd);
-            answer = new MllamaGenerator(slot.Model!, slot.MllamaVision, slot.Backend!).Generate(px, question, maxTokens, sampling);
+            answer = new MllamaGenerator(slot.Model!, slot.MllamaVision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
         }
         else
         {
@@ -241,7 +241,7 @@ public sealed class TextService : ITextService, IDisposable
             // GenericTransformer) can't drive — use the dedicated SSM VLM generator.
             answer = slot.SsmModel is not null
                 ? new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!).Generate(px, question, maxTokens, sampling)
-                : new MultimodalGenerator(slot.Model!, vision, slot.Backend!).Generate(px, question, maxTokens, sampling);
+                : new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
         }
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
         int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(answer).Length;
@@ -365,8 +365,11 @@ public sealed class TextService : ITextService, IDisposable
     /// <summary>Layer-split load: plans layer ranges across <paramref name="shardDevices"/> (explicit engine
     /// ratios win, else free-VRAM proportional), builds one backend per stage (slot-owned), and hands the
     /// placement to the pipeline. VRAM pooling — a model larger than any single card runs across them. The
-    /// vision sidecar is deliberately skipped when sharded (the VLM generators drive the FULL model on one
-    /// backend, defeating the split); SSM never reaches here.</summary>
+    /// vision sidecar loads the same as the unsharded path (<see cref="LoadVisionInto"/>): both VLM generators
+    /// (<see cref="MllamaGenerator"/>'s per-stage cross-attention-state peer copy, <see cref="MultimodalGenerator"/>'s
+    /// plain staged embeds handoff) drive <see cref="GenericTransformer.ForwardEmbedsStaged"/> across the full
+    /// placement rather than the single last-stage backend, so the split is preserved for image questions too.
+    /// SSM never reaches here (layer-split isn't offered for recurrent architectures).</summary>
     private void LoadSharded(TextDeviceSlot slot, string deviceKey, string path, TextRequest request, string[] shardDevices)
     {
         // A previous single-device load may have left a backend on this slot (engine-level placement flips
@@ -401,13 +404,10 @@ public sealed class TextService : ITextService, IDisposable
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer,
             placement.LastBackend, slot.Model.Template, placement);
         slot.LoadedPath = path;
-        if (FindMmproj(path) is not null)
-        {
-            Logs.Warning("[TextService] Vision sidecar found but skipped: VLM generation is not layer-split-aware "
-                + "yet — load the model on a single device for image questions.");
-        }
+        LoadVisionInto(slot, path);
         Logs.Info($"[TextService] Loaded GGUF model '{Path.GetFileName(path)}' ({slot.Model.Architecture}) "
-            + $"layer-split across {string.Join(" + ", plan.Select(p => $"{p.Device}[{p.StartLayer},{p.EndLayer})"))}.");
+            + $"layer-split across {string.Join(" + ", plan.Select(p => $"{p.Device}[{p.StartLayer},{p.EndLayer})"))}"
+            + (slot.VisionPath is not null ? $" + vision '{Path.GetFileName(slot.VisionPath)}'." : "."));
     }
 
     /// <summary>Pairs the loaded text model with a sidecar mmproj GGUF (if present) and loads the matching vision

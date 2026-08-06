@@ -17,10 +17,25 @@ public sealed class MllamaGenerator
     private readonly GgufLanguageModel _text;
     private readonly MllamaVisionEncoder _vision;
     private readonly IBackend _backend;
+    private readonly LlmPlacement? _placement;
 
-    public MllamaGenerator(GgufLanguageModel text, MllamaVisionEncoder vision, IBackend backend)
+    /// <summary>True when a genuine multi-stage layer-split placement is active — the cross-attention states
+    /// then need a per-stage peer copy (see <see cref="GenericTransformer.ForwardEmbedsStaged"/>).</summary>
+    private bool Staged => _placement is not null && !_placement.IsSingle;
+
+    /// <summary><paramref name="placement"/> shards the decoder layers across devices (VRAM pooling); null keeps
+    /// the single-backend path byte-identical. When set, <paramref name="backend"/> must be the placement's LAST
+    /// stage backend (final norm/lm_head/logits live there) — mirrors <see cref="Generation.TextGenerationPipeline"/>'s
+    /// contract.</summary>
+    public MllamaGenerator(GgufLanguageModel text, MllamaVisionEncoder vision, IBackend backend, LlmPlacement? placement = null)
     {
-        _text = text; _vision = vision; _backend = backend;
+        _text = text; _vision = vision; _placement = placement;
+        _backend = placement is not null ? placement.LastBackend : backend;
+        if (Staged)
+        {
+            StagedWeightPreload.Preload(text.Transformer, _placement!);
+            return;
+        }
         // Same headroom-guarded weight preload TextGenerationPipeline does at construction: without it,
         // auto-promotion's size floor leaves every small weight (norms, gates) host-side FOREVER, and each
         // eager decode step re-uploads them (measured ~26 ms/generation of pure H2D churn on small models —
@@ -28,7 +43,7 @@ public sealed class MllamaGenerator
         try
         {
             long headroom = 2L << 30;
-            if (backend.FreeMemoryBytes() is long free && free > headroom)
+            if (_backend.FreeMemoryBytes() is long free && free > headroom)
             {
                 List<HartsyInference.Core.Tensors.Tensor> toPreload = [];
                 long budget = free - headroom;
@@ -39,7 +54,7 @@ public sealed class MllamaGenerator
                     budget -= bytes;
                     toPreload.Add(t);
                 }
-                backend.PreloadWeights(toPreload);
+                _backend.PreloadWeights(toPreload);
             }
         }
         catch (Exception ex) { HartsyInference.Core.Logging.Logs.Warning($"mllama weight preload failed (continuing lazy): {ex.Message}"); }
@@ -57,8 +72,11 @@ public sealed class MllamaGenerator
         GenericTransformer model = _text.Transformer;
         int hidden = _text.Config.HiddenSize;
 
-        // 1. Encode the image → cross_attention_states [1, visLen, hidden].
-        using Tensor crossStates = _vision.Encode(_backend, pixelValues);
+        // 1. Encode the image → cross_attention_states [1, visLen, hidden]. Staged: runs on stage 0's backend
+        // (ForwardEmbedsStaged treats it as the master copy and peer-copies it onto every other cross-attention
+        // stage — see StageHasCrossAttn there).
+        IBackend visionBackend = Staged ? _placement!.Stages[0].Backend : _backend;
+        using Tensor crossStates = _vision.Encode(visionBackend, pixelValues);
         int visLen = (int)crossStates.Shape[1];
 
         // 2. Llama-3 chat prompt with a single <|image|> placeholder before the question.
@@ -84,8 +102,7 @@ public sealed class MllamaGenerator
         using (Tensor embeds = new(new TensorShape(1, seqLen, hidden), DType.F32))
         {
             model.EmbedLookup(embeds, ids);
-            using Tensor h = model.ForwardEmbeds(_backend, embeds, seqLen, 0, cache,
-                applyFinalNorm: true, startLayer: 0, endLayer: null, crossStates: crossStates, crossLen: visLen);
+            using Tensor h = Forward(model, embeds, seqLen, 0, cache, crossStates, visLen);
             token = SampleLast(model, h, seqLen, sampler, history);
         }
 
@@ -99,8 +116,7 @@ public sealed class MllamaGenerator
             history.Add(token);
             using Tensor stepEmb = new(new TensorShape(1, 1, hidden), DType.F32);
             model.EmbedLookup(stepEmb, new[] { token });
-            using Tensor h = model.ForwardEmbeds(_backend, stepEmb, 1, pos, cache,
-                applyFinalNorm: true, startLayer: 0, endLayer: null, crossStates: crossStates, crossLen: visLen);
+            using Tensor h = Forward(model, stepEmb, 1, pos, cache, crossStates, visLen);
             pos++;
             token = SampleLast(model, h, 1, sampler, history);
         }
@@ -109,6 +125,16 @@ public sealed class MllamaGenerator
                 $"[mllama] decode: {decoded} tokens in {decodeSw.Elapsed.TotalSeconds:F2}s = {decoded / decodeSw.Elapsed.TotalSeconds:F1} tok/s");
         return sb.ToString();
     }
+
+    /// <summary>The hidden-state forward for one step (prefill or one decode token): staged across the
+    /// placement (cross-attention states peer-copied per stage) when sharded, else the plain single-backend
+    /// cross-attention path.</summary>
+    private Tensor Forward(GenericTransformer model, Tensor embeds, int t, int posStart, IKvCache cache,
+        Tensor crossStates, int visLen) =>
+        Staged
+            ? model.ForwardEmbedsStaged(_placement!, embeds, t, posStart, cache, crossStates: crossStates, crossLen: visLen)
+            : model.ForwardEmbeds(_backend, embeds, t, posStart, cache,
+                applyFinalNorm: true, startLayer: 0, endLayer: null, crossStates: crossStates, crossLen: visLen);
 
     private unsafe int SampleLast(GenericTransformer model, Tensor hidden, int t, SamplerChain sampler, List<int> history)
     {

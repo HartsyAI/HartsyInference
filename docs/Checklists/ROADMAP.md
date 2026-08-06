@@ -26,8 +26,10 @@ giants (Kimi-K2, DeepSeek-V3, Mixtral, Qwen3-MoE, Qwen2.5-VL-7B).
   `GenericTransformer.EnumerateStageWeights`/`ForwardEmbedsStaged`, per-stage VRAM budgeting in
   `TextGenerationPipeline`. Verified on the 4090+3060 dev box: Llama-3.2-1B split 8/8 across both cards
   gives **exact token parity** vs single-GPU with VRAM genuinely pooled (2058 MB on one card → 528 MB +
-  796 MB). v1 gaps (documented, not silent): per-stage CUDA graph decode disabled (eager only), mllama
-  and SSM-family excluded (host-recurrence/cross-state incompatible with staging).
+  796 MB). v1 gaps (documented, not silent): per-stage CUDA graph decode disabled (eager only), SSM-family
+  excluded (host-recurrence incompatible with staging). mllama's gated cross-attention layers were also
+  excluded in v1 — **unblocked 2026-08-06**: `ForwardEmbedsStaged` now peer-copies the vision
+  cross-attention states onto every stage that owns one (see `steady-brass-heron.md` item 5).
 - [x] **Same-GPU multi-backend support** (not in the original M0–M5 taxonomy — a real gap it missed:
   "many small cards" and "one big card, two tenants" are different problems) — **done** (2026-08-02):
   per-backend `State` keyed by a process-unique token (not context handle) so two `CudaBackend` instances

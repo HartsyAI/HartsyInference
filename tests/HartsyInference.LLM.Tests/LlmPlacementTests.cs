@@ -121,20 +121,80 @@ public sealed unsafe class LlmPlacementTests
         Assert.Throws<ArgumentException>(() => new LlmPlacement([]));
     }
 
-    /// <summary>Guards a real bug (Phase 1, fixed 2026-08-05): <see cref="GenericTransformer.ForwardEmbedsStaged"/>
-    /// used to silently take the <c>CopyHidden</c> branch for mllama gated cross-attention layers instead of
-    /// throwing — wrong output, no signal. The doc comment already claimed this was unsupported (same as the
-    /// enforced Gemma-4 per-layer-embedding case just above it), but nothing actually enforced it.</summary>
-    [Fact]
-    public void ForwardEmbedsStaged_RejectsMllamaCrossAttentionLayers()
+    /// <summary>Adds a gated cross-attention layer's weights (mllama) at <paramref name="layerIndex"/> — the
+    /// keys <c>MllamaCrossAttentionLayer.LoadWeights</c> reads, mirroring
+    /// <c>MllamaCrossAttentionTests.Weights</c>. The base <see cref="Weights"/> call already populated (unused)
+    /// self-attn/mlp keys for every layer index, including this one — <c>Layer.LoadWeights</c> checks
+    /// <c>IsCrossAttnLayer</c> first and never reads them for a cross-attention layer, so no cleanup is needed.</summary>
+    private static void AddCrossAttnWeights(Dictionary<string, Tensor> w, TransformerConfig c, int layerIndex)
     {
-        TransformerConfig cfg = Config() with { CrossAttnLayers = new HashSet<int> { 1 } };
-        using CpuBackend backend = new();
-        using GenericTransformer model = new(cfg);
-        LlmPlacement placement = new([new LlmStage(backend, 0, 2), new LlmStage(backend, 2, 4)]);
-        using KvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim);
-        using Tensor embeds = Embeds(4, cfg.HiddenSize);
+        int h = c.HiddenSize, hd = c.HeadDim, hq = c.NumHeads, hkv = c.NumKvHeads;
+        string p = $"model.layers.{layerIndex}";
+        w[$"{p}.cross_attn.q_proj.weight"] = F2(hq * hd, h);
+        w[$"{p}.cross_attn.k_proj.weight"] = F2(hkv * hd, h);
+        w[$"{p}.cross_attn.v_proj.weight"] = F2(hkv * hd, h);
+        w[$"{p}.cross_attn.o_proj.weight"] = F2(h, hq * hd);
+        w[$"{p}.cross_attn.q_norm.weight"] = Ones(hd);
+        w[$"{p}.cross_attn.k_norm.weight"] = Ones(hd);
+        w[$"{p}.cross_attn_attn_gate"] = ScalarT(0.3f);
+        w[$"{p}.cross_attn_mlp_gate"] = ScalarT(-0.2f);
+    }
 
-        Assert.Throws<NotSupportedException>(() => model.ForwardEmbedsStaged(placement, embeds, 4, 0, cache));
+    private static Tensor ScalarT(float v) { Tensor t = new(new TensorShape(1), DType.F32); *(float*)t.DataPointer = v; return t; }
+
+    /// <summary>Real bug this used to guard (Phase 1, fixed 2026-08-05): <see cref="GenericTransformer.ForwardEmbedsStaged"/>
+    /// used to silently take the <c>CopyHidden</c> branch for mllama gated cross-attention layers instead of
+    /// throwing when an image was present — wrong output, no signal. That guard threw unconditionally on ANY
+    /// staged model with cross-attention layers, blocking the feature outright. Now built out for real (Phase 5,
+    /// same day): <see cref="GenericTransformer.ForwardEmbedsStaged"/> takes <c>crossStates</c>/<c>crossLen</c> and
+    /// peer-copies the vision features onto every stage that owns a cross-attention layer via
+    /// <c>IBackend.CopyFromPeer</c> — so the old negative-path guard test is obsolete; this positive-path
+    /// test replaces it, asserting staged bit-parity against the unstaged path across TWO DISTINCT backend
+    /// instances (exercising the actual peer-copy branch, not just the same-instance early-out).</summary>
+    [Fact]
+    public void ForwardEmbedsStaged_MllamaCrossAttention_MatchesUnstaged_AcrossPrefillAndDecode()
+    {
+        TransformerConfig cfg = Config() with { CrossAttnLayers = new HashSet<int> { 1, 3 } };
+        Dictionary<string, Tensor> w = Weights(cfg);
+        AddCrossAttnWeights(w, cfg, 1);
+        AddCrossAttnWeights(w, cfg, 3);
+        using CpuBackend backendA = new();
+        using CpuBackend backendB = new();
+        using GenericTransformer model = new(cfg);
+        model.LoadWeights(w, "model");
+
+        const int visLen = 6;
+        using Tensor crossStates = Fill(new Tensor(new TensorShape(1, visLen, cfg.HiddenSize), DType.F32));
+
+        using KvCache unstagedCache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim);
+        using KvCache stagedCache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim);
+        // Layer 1 lives in stage 0 (same backend as crossStates' home — the reuse branch); layer 3 lives in
+        // stage 1 on a DIFFERENT backend instance — forces the actual CopyFromPeer path.
+        LlmPlacement placement = new([new LlmStage(backendA, 0, 2), new LlmStage(backendB, 2, 4)]);
+
+        int[] steps = [4, 1, 1];
+        int pos = 0;
+        foreach (int t in steps)
+        {
+            using Tensor embeds = Embeds(t, cfg.HiddenSize);
+            using Tensor embedsCopy = new(embeds.Shape, DType.F32);
+            backendA.CopyTo(embedsCopy, embeds);
+
+            using Tensor expected = model.ForwardEmbeds(backendA, embeds, t, pos, unstagedCache, crossStates: crossStates, crossLen: visLen);
+            using Tensor staged = model.ForwardEmbedsStaged(placement, embedsCopy, t, pos, stagedCache, crossStates: crossStates, crossLen: visLen);
+
+            Assert.Equal(expected.Shape, staged.Shape);
+            float* ep = (float*)expected.DataPointer;
+            float* sp = (float*)staged.DataPointer;
+            for (long i = 0; i < expected.ElementCount; i++)
+            {
+                Assert.Equal(ep[i], sp[i], 5);
+            }
+            pos += t;
+            Assert.Equal(unstagedCache.CurrentLength, stagedCache.CurrentLength);
+            Assert.Equal(pos, stagedCache.CurrentLength);
+        }
+
+        foreach (Tensor t in w.Values) t.Dispose();
     }
 }

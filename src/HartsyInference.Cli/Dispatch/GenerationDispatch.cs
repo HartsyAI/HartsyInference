@@ -403,6 +403,7 @@ public static class GenerationDispatch
             InitImage = parameters.GetStringOrNull("init-image") is { } initPath ? LoadImage(initPath) : null,
             VideoEndFrame = parameters.GetStringOrNull("end-frame") is { } endPath ? LoadImage(endPath) : null,
             ReferenceImages = SplitPaths(parameters.GetStringOrNull("ref-images"))?.Select(LoadImage).ToList(),
+            Loras = BuildLoraStack(parameters),
             ReferenceAudios = SplitPaths(parameters.GetStringOrNull("ref-audios"))
                 ?.Select(p => LoadAudioClip(p) ?? throw new FileNotFoundException($"Reference audio not found: {p}"))
                 .ToList(),
@@ -815,6 +816,25 @@ public static class GenerationDispatch
             inpaint = inpaint with { Blur = blur.Value };
         }
         return shrinkGrow is null ? inpaint : inpaint with { ShrinkGrow = shrinkGrow.Value };
+    }
+
+    /// <summary>The LoRA stack from the newline-joined --lora/--lora-weight pair; null when none were given.</summary>
+    private static LoraStack? BuildLoraStack(ParamState parameters)
+    {
+        string[]? names = SplitPaths(parameters.GetStringOrNull("loras"));
+        if (names is null || names.Length == 0)
+        {
+            return null;
+        }
+        string[]? weights = SplitPaths(parameters.GetStringOrNull("lora-weights"));
+        List<LoraEntry> entries = [];
+        for (int i = 0; i < names.Length; i++)
+        {
+            double weight = weights is not null && i < weights.Length
+                && double.TryParse(weights[i], NumberStyles.Float, CultureInfo.InvariantCulture, out double w) ? w : 1.0;
+            entries.Add(new LoraEntry { Model = names[i], Weight = weight });
+        }
+        return new LoraStack { Entries = entries };
     }
 
     /// <summary>Splits a newline-joined repeatable option back into its paths; null when the option was absent.</summary>

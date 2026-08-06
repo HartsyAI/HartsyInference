@@ -75,29 +75,9 @@ public sealed class TextGenerationPipeline
             // transients are protected by the cast cache's budget floor and the OOM cast-eviction retry.
             if (Staged)
             {
-                // Sharded: budget each stage against ITS device and preload that stage's slice. The lazy GGUF
-                // matmul path covers anything skipped — each layer's ops run on its stage backend, so lazy
-                // uploads land on the right device by construction.
-                for (int s = 0; s < _placement!.Stages.Count; s++)
-                {
-                    LlmStage stage = _placement.Stages[s];
-                    long stageHeadroom = s == _placement.Stages.Count - 1 ? headroom : 2L << 30;
-                    long stageFree = stage.Backend.FreeMemoryBytes();
-                    if (stageFree <= stageHeadroom) continue;
-                    long stageBudget = stageFree - stageHeadroom;
-                    List<Tensor> stageLoad = [];
-                    foreach (Tensor t in _model.EnumerateStageWeights(stage.StartLayer, stage.EndLayer,
-                        isFirstStage: s == 0, isLastStage: s == _placement.Stages.Count - 1, includeRedundantSplits: false))
-                    {
-                        long bytes = Tensor.ComputeByteSize(t.Shape, t.DType);
-                        if (stageBudget - bytes < 0) continue;
-                        stageBudget -= bytes;
-                        stageLoad.Add(t);
-                    }
-                    HartsyInference.Core.Logging.Logs.Info(
-                        $"[preload] stage {s} [{stage.StartLayer},{stage.EndLayer}) kept={stageLoad.Count} on its device.");
-                    stage.Backend.PreloadWeights(stageLoad);
-                }
+                // Sharded: budget each stage against ITS device and preload that stage's slice. Shared with
+                // every other staged generation driver — see StagedWeightPreload.
+                StagedWeightPreload.Preload(_model, _placement!, headroom - (2L << 30));
                 return;
             }
             if (_backend.FreeMemoryBytes() is long free && free > headroom)

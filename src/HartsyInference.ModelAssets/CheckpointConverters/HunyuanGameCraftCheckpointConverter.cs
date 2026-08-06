@@ -1,4 +1,7 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.PyTorch;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -45,5 +48,27 @@ public static class HunyuanGameCraftCheckpointConverter
         foreach (string p in prefixes)
             if (key.StartsWith(p, StringComparison.Ordinal)) { dst[key[p.Length..]] = t; return true; }
         return false;
+    }
+
+    /// <summary>Loads a raw tensor dict from a Hunyuan-GameCraft component checkpoint file, sniffing the container
+    /// by extension: <c>.pt</c>/<c>.pth</c> via <see cref="PytorchPickleLoader"/> (the DiT+CameraNet dump ships this
+    /// way — see <c>mp_rank_00_model_states.pt</c>), anything else via <see cref="SafeTensorsLoader"/> (fp8-scaled
+    /// dequantized, matching the Comfy-repacked side-model convention <c>HunyuanVideoRecipe</c> already uses for the
+    /// VAE/Llava/CLIP components). The caller owns and disposes the returned loader — its tensors alias the loader's
+    /// backing memory (see <see cref="PytorchPickleLoader.Dispose"/> / <see cref="SafeTensorsLoader"/>).</summary>
+    public static (Dictionary<string, Tensor> Weights, IDisposable Loader) LoadRaw(string path)
+    {
+        if (!File.Exists(path))
+            throw new FileNotFoundException($"Hunyuan-GameCraft checkpoint not found: '{path}'.");
+        string ext = Path.GetExtension(path);
+        if (string.Equals(ext, ".pt", StringComparison.OrdinalIgnoreCase) || string.Equals(ext, ".pth", StringComparison.OrdinalIgnoreCase))
+        {
+            PytorchPickleLoader ptLoader = new();
+            ptLoader.Load(path);
+            return (ptLoader.GetAllTensors(), ptLoader);
+        }
+        SafeTensorsLoader stLoader = new();
+        stLoader.Load(path);
+        return (CheckpointConvertUtils.ApplyFp8ScaledDequant(stLoader.GetAllTensors()), stLoader);
     }
 }

@@ -334,11 +334,12 @@ public static class TestPaths
     /// <summary>SD3.5 paths. Assets are not bundled — tests skip when missing. FP8-bundled single-file checkpoints from Comfy-Org/stable-diffusion-3.5-fp8 are the default; set env vars to override for FP16 / community quants.</summary>
     public static class Sd35
     {
-        /// <summary>First existing of the clips+T5-bundled release and the transformer-only (+VAE, no text
-        /// encoders) release — the latter resolves CLIP-L/CLIP-G/T5-XXL as separate side models via
-        /// <c>Sd3Recipe</c>'s modular component path.</summary>
-        public static string Medium       => FirstExisting("SD35_MEDIUM_PATH",
-            Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_medium_incl_clips_t5xxlfp8scaled.safetensors"),
+        public static string Medium       => Resolve("SD35_MEDIUM_PATH",       Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_medium_incl_clips_t5xxlfp8scaled.safetensors"));
+        /// <summary>Transformer-only (+ bundled VAE, no text encoders) release — CLIP-L/CLIP-G/T5-XXL resolve
+        /// as separate side models via <c>Sd3Recipe</c>'s modular component path. Distinct from
+        /// <see cref="Medium"/> (which several existing tests load CLIP directly out of, assuming it bundles
+        /// them) — do not merge these into one <c>FirstExisting</c>, it silently breaks that assumption.</summary>
+        public static string MediumTransformerOnly => Resolve("SD35_MEDIUM_TRANSFORMER_ONLY_PATH",
             Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_medium.safetensors"));
         public static string Large        => Resolve("SD35_LARGE_PATH",        Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_large_fp8_scaled.safetensors"));
         public static string LargeTurbo   => Resolve("SD35_LARGE_TURBO_PATH",  Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_large_turbo.safetensors"));
@@ -360,6 +361,17 @@ public static class TestPaths
         /// state has no per-layer-crossing story), so this is the oracle for the composite-shard-key fallback
         /// path, not the split path itself.</summary>
         public static string Mamba28BQ4K => Resolve("MAMBA_28B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "mamba", "ggml-mamba-2.8b-hf-q4_k.gguf"));
+
+        /// <summary>Llama-3.2-11B-Vision-Instruct, Q4_K_M GGUF (~5.6 GB) — mllama's gated-cross-attention VLM.
+        /// The sidecar mmproj is auto-discovered by <c>TextService.FindMmproj</c> from the same directory; no
+        /// separate path constant is needed. The layer-split staged cross-attention oracle.</summary>
+        public static string Llama32VisionQ4KM => Resolve("LLAMA32_VISION_GGUF_PATH",
+            Path.Combine(ModelsDir, "llm", "llama32-vision", "Llama-3.2-11B-Vision-Instruct.Q4_K_M.gguf"));
+
+        /// <summary>Qwen2.5-VL-7B-Instruct, Q4_K_M GGUF (~4.7 GB) — a splice-style VLM (image tokens spliced into
+        /// the text sequence, no gated cross-attention). The layer-split staged splice-embeds oracle.</summary>
+        public static string Qwen25Vl7BQ4KM => Resolve("QWEN25VL_7B_GGUF_PATH",
+            Path.Combine(ModelsDir, "llm", "qwen25-vl", "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"));
     }
 
     /// <summary>Oasis-500m (Decart/Etched) world-model paths. The upstream `Etched/oasis-500m` repo is gated;

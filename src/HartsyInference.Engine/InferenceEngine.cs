@@ -328,7 +328,7 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>Resolves the video recipe for <paramref name="spec"/> and constructs (or returns a cached) pipeline.
     /// Throws when no video recipe is registered for the family yet.</summary>
-    internal IVideoRecipePipeline GetOrConstructVideoRecipe(ModelSpec spec)
+    internal IVideoRecipePipeline GetOrConstructVideoRecipe(ModelSpec spec, VideoRequest? request = null)
     {
         if (spec.LocalPath is null)
         {
@@ -336,7 +336,9 @@ public sealed class InferenceEngine : IInferenceEngine
                 "No checkpoint found for this model. Pass a checkpoint via --model-path or let the catalog fetch it first.");
         }
 
-        string key = $"video-recipe:{spec.LocalPath}{_placement.CacheKey()}";
+        // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity —
+        // the same rule the image path already follows. Without this a LoRA request reuses the un-merged pipeline.
+        string key = $"video-recipe:{spec.LocalPath}|{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
         if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))
             return cached;
 
@@ -360,6 +362,8 @@ public sealed class InferenceEngine : IInferenceEngine
                 CfgParallelBackend = _placement.CfgParallelDevice is null ? null : EnsureBackend(_placement.CfgParallelDevice),
                 DitShardBackend = EnsureDitShardBackend(),
                 DitShardBackends = EnsureDitShardBackends(),
+                Components = request?.Components,
+                Loras = request?.Loras,
             }));
         _videoRecipePipelines[key] = pipeline;
         return pipeline;

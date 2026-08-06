@@ -406,6 +406,17 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
+    /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when
+    /// configured, else the normal single-backend path.</summary>
+    private Tensor RunForward(Tensor latent, float timestep, Tensor t5Hidden, IReadOnlyList<Tensor> llamaHiddenLayers, Tensor pooledEmbeds)
+    {
+        if (DitShardBackend is not null)
+        {
+            return _transformer.ForwardSharded(Backend, DitShardBackend, latent, timestep, t5Hidden, llamaHiddenLayers, pooledEmbeds, DitShardSplitBlock);
+        }
+        return _transformer.Forward(Backend, latent, timestep, t5Hidden, llamaHiddenLayers, pooledEmbeds);
+    }
+
     /// <summary>Disposes the cached positive conditioning (safe mid-session — the context is live at
     /// replacement time; end-of-life teardown nulls via the weight-field pattern instead).</summary>
     private void DisposeCachedCond()

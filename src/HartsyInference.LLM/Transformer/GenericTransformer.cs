@@ -268,33 +268,54 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// handoff between stages (the read fires the producing backend's lazy D2H; the next stage re-uploads —
     /// ~T×hidden F32 per boundary, 16-32 KB at decode). Works on any hardware; a direct
     /// <c>CopyFromPeer</c> boundary is a measured follow-up. Not supported for Gemma-4 PLE (per-layer inputs are
-    /// computed against the full stack) or mllama cross-attention (vision states would need per-stage copies).</summary>
+    /// computed against the full stack). <paramref name="crossStates"/> (mllama gated cross-attention) is
+    /// produced once by the caller — presumed resident/computed on stage 0's backend — and peer-copied fresh
+    /// onto every OTHER stage that owns a cross-attention layer via <see cref="IBackend.CopyFromPeer"/> (mirrors
+    /// <c>QwenImageTransformer.ForwardSharded</c>'s <c>temb</c> handoff: copied fresh from the master at each
+    /// boundary, not chained stage-to-stage, since it never changes within one call). Paid on every call
+    /// (prefill + each decode step) that reaches a cross-attention-owning stage — a persistent per-stage cache is
+    /// a measured follow-up, same status as the host-staged hidden handoff above.</summary>
     public Tensor ForwardEmbedsStaged(LlmPlacement placement, Tensor embeds, int t, int posStart, IKvCache cache,
-        ReadOnlySpan<int> tokenIds = default)
+        ReadOnlySpan<int> tokenIds = default, Tensor? crossStates = null, int crossLen = 0)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(placement);
         if (placement.LayerCount != _layers.Length)
             throw new ArgumentException($"Placement covers {placement.LayerCount} layers; model has {_layers.Length}.");
         if (placement.IsSingle)
-            return ForwardEmbeds(placement.Stages[0].Backend, embeds, t, posStart, cache, tokenIds: tokenIds);
+            return ForwardEmbeds(placement.Stages[0].Backend, embeds, t, posStart, cache,
+                crossStates: crossStates, crossLen: crossLen, tokenIds: tokenIds);
         if (_cfg.PerLayerEmbeddingDim > 0)
             throw new NotSupportedException("Layer-split placement does not support Gemma-4 per-layer embeddings yet.");
-        if (_cfg.CrossAttnLayers.Count > 0)
-            throw new NotSupportedException(
-                "Layer-split placement does not support mllama cross-attention layers yet — a gated "
-                + "cross-attention layer needs the vision features copied to its stage's backend, which the "
-                + "staged path doesn't do. Load this model on a single device for image questions.");
 
+        IBackend crossStatesHome = placement.Stages[0].Backend;
         Tensor hidden = embeds;
         bool owns = false;
         for (int s = 0; s < placement.Stages.Count; s++)
         {
             LlmStage stage = placement.Stages[s];
             bool last = s == placement.Stages.Count - 1;
+
+            Tensor? stageCross = null;
+            bool ownsStageCross = false;
+            if (crossStates is not null && StageHasCrossAttn(stage))
+            {
+                if (ReferenceEquals(stage.Backend, crossStatesHome))
+                {
+                    stageCross = crossStates;
+                }
+                else
+                {
+                    stageCross = new Tensor(crossStates.Shape, crossStates.DType);
+                    stage.Backend.CopyFromPeer(stageCross, crossStates, crossStatesHome);
+                    ownsStageCross = true;
+                }
+            }
+
             Tensor next = ForwardEmbeds(stage.Backend, hidden, t, posStart, cache,
                 applyFinalNorm: last, startLayer: stage.StartLayer, endLayer: stage.EndLayer,
-                tokenIds: tokenIds, advanceCache: last);
+                crossStates: stageCross, crossLen: crossLen, tokenIds: tokenIds, advanceCache: last);
+            if (ownsStageCross) stageCross!.Dispose();
             if (!last)
             {
                 // LOAD-BEARING host materialization: this read IS the stage boundary — it syncs the hidden state
@@ -306,6 +327,18 @@ public sealed unsafe class GenericTransformer : IDisposable
             owns = true;
         }
         return hidden;
+    }
+
+    /// <summary>True when any layer in <paramref name="stage"/>'s range is a gated cross-attention layer
+    /// (mllama) — determines whether <see cref="ForwardEmbedsStaged"/> needs to peer-copy the vision features
+    /// onto that stage's backend.</summary>
+    private bool StageHasCrossAttn(LlmStage stage)
+    {
+        for (int i = stage.StartLayer; i < stage.EndLayer; i++)
+        {
+            if (_cfg.IsCrossAttnLayer(i)) return true;
+        }
+        return false;
     }
 
     /// <summary>Token-IDs-in convenience over <see cref="ForwardEmbedsStaged"/>, mirroring <see cref="Forward"/>.</summary>

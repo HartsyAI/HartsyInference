@@ -27,7 +27,7 @@ public sealed class Sd3DitShardingVramTests
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         if (CudaContext.GetDeviceCount() < 2) { _output.WriteLine("SKIPPED: needs 2 physical GPUs."); return; }
-        string checkpoint = TestPaths.Sd35.Medium;
+        string checkpoint = TestPaths.Sd35.MediumTransformerOnly;
         if (!RealWeightGate.Require(_output.WriteLine, checkpoint)) return;
         string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(Sd3DitShardingVramTests).Assembly.Location)!, "Ptx");
         if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
