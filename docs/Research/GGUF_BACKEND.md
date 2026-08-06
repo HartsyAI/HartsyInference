@@ -189,7 +189,7 @@ Phase F closed the loop: tied the Phase D GPU dequant kernels into the productio
 
 ### Full-pipeline integration (memory-bound on dev box)
 
-[`FluxGgufGenerationTests.Schnell_FromGguf_GeneratesImage`](../../tests/HartsyInference.Diffusion.Tests/FluxGgufGenerationTests.cs) attempts full Flux Schnell pipeline with GGUF transformer + FP8 T5/CLIP/VAE. **Currently OOMs at ~20 GB anon-RSS** during the QKV-split + FP8-load phase, even though wiring is correct. Skips cleanly via `/proc/meminfo` probe when available memory < 25 GB. Cause is environmental — the dotnet process inherits a memcg from the calling shell session that's tighter than the 32 GB system. Per-tensor `Convert` (single-tensor calls in a loop) processes the entire GGUF without OOM, so the codec/split/dequant code is correct; the batch path triggers a memory amplification we haven't isolated.
+The GGUF full-pipeline test (removed in the 2026-08-06 suite cleanup) attempted full Flux Schnell pipeline with GGUF transformer + FP8 T5/CLIP/VAE. **Currently OOMs at ~20 GB anon-RSS** during the QKV-split + FP8-load phase, even though wiring is correct. Skips cleanly via `/proc/meminfo` probe when available memory < 25 GB. Cause is environmental — the dotnet process inherits a memcg from the calling shell session that's tighter than the 32 GB system. Per-tensor `Convert` (single-tensor calls in a loop) processes the entire GGUF without OOM, so the codec/split/dequant code is correct; the batch path triggers a memory amplification we haven't isolated.
 
 To run end-to-end on this hardware: 64 GB host or run outside the constrained cgroup. Phase D + F wiring itself is fully validated by the two tests above.
 

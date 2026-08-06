@@ -65,4 +65,48 @@ public static class MiniMaxH3Geometry
     /// <summary>Rounds a pixel axis onto <see cref="CanvasMultiple"/> without letting it collapse to zero.</summary>
     public static int Round(double pixels) =>
         Math.Max(CanvasMultiple, (int)Math.Round(pixels / CanvasMultiple) * CanvasMultiple);
+
+    /// <summary>Canvas a reference clip is resized onto: <see cref="AdaptCanvas"/>, unless that would enlarge the clip
+    /// — then each axis rounds to its own size instead, so a small reference is never upscaled into a bigger canvas.</summary>
+    public static (int Width, int Height) RefVideoCanvas(int width, int height)
+    {
+        (int canvasWidth, int canvasHeight) = AdaptCanvas(width, height);
+        if ((long)width * height < (long)canvasWidth * canvasHeight)
+        {
+            return (Round(width), Round(height));
+        }
+        return (canvasWidth, canvasHeight);
+    }
+
+    /// <summary>Largest <c>17k + 5</c> frame count not exceeding <paramref name="frames"/>. A reference clip snaps
+    /// <b>down</b> onto the grid, unlike a generation's length, which <see cref="AlignFrameCount"/> snaps up.</summary>
+    public static int SnapFrameCountDown(int frames)
+    {
+        if (frames < 5)
+        {
+            throw new ArgumentOutOfRangeException(nameof(frames), frames,
+                "MiniMax-H3 reference videos need at least 5 frames (~0.2 s at 24 fps).");
+        }
+        int n = frames;
+        while (n % 17 != 5)
+        {
+            n--;
+        }
+        return n;
+    }
+
+    /// <summary>Frame indices the vision tower sees, sampled from the resized clip at 2 fps.</summary>
+    public static IReadOnlyList<int> RefVideoSampleIndices(int frameCount)
+    {
+        if (frameCount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(frameCount), frameCount, "Must be positive.");
+        }
+        List<int> indices = new List<int>();
+        for (int i = 0; i < frameCount; i += Fps / 2)
+        {
+            indices.Add(i);
+        }
+        return indices;
+    }
 }

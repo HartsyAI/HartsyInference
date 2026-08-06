@@ -403,6 +403,7 @@ public static class GenerationDispatch
             InitImage = parameters.GetStringOrNull("init-image") is { } initPath ? LoadImage(initPath) : null,
             VideoEndFrame = parameters.GetStringOrNull("end-frame") is { } endPath ? LoadImage(endPath) : null,
             ReferenceImages = SplitPaths(parameters.GetStringOrNull("ref-images"))?.Select(LoadImage).ToList(),
+            ReferenceVideos = BuildReferenceVideos(parameters),
             Loras = BuildLoraStack(parameters),
             ReferenceAudios = SplitPaths(parameters.GetStringOrNull("ref-audios"))
                 ?.Select(p => LoadAudioClip(p) ?? throw new FileNotFoundException($"Reference audio not found: {p}"))
@@ -835,6 +836,44 @@ public static class GenerationDispatch
             entries.Add(new LoraEntry { Model = names[i], Weight = weight });
         }
         return new LoraStack { Entries = entries };
+    }
+
+    /// <summary>Builds the reference clips, pairing each soundtrack to the same-position clip. A missing entry leaves
+    /// that clip silent rather than shifting the pairing onto the wrong video.</summary>
+    private static List<ReferenceVideo>? BuildReferenceVideos(ParamState parameters)
+    {
+        string[]? paths = SplitPaths(parameters.GetStringOrNull("ref-videos"));
+        if (paths is null)
+        {
+            return null;
+        }
+        string[] soundtracks = SplitPaths(parameters.GetStringOrNull("ref-video-audios")) ?? [];
+        List<ReferenceVideo> videos = new List<ReferenceVideo>(paths.Length);
+        for (int i = 0; i < paths.Length; i++)
+        {
+            videos.Add(new ReferenceVideo
+            {
+                Video = LoadVideoClip(paths[i]),
+                Audio = i < soundtracks.Length ? LoadAudioClip(soundtracks[i]) : null,
+            });
+        }
+        return videos;
+    }
+
+    /// <summary>Reads a video container off disk as the Engine's encoded-video payload.</summary>
+    private static VideoClip LoadVideoClip(string clipPath)
+    {
+        string path = clipPath.Trim().Trim('"');
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"Reference video not found: {path}");
+        }
+        string extension = Path.GetExtension(path).TrimStart('.');
+        return new VideoClip
+        {
+            Data = File.ReadAllBytes(path),
+            Format = extension.Length == 0 ? null : extension.ToLowerInvariant(),
+        };
     }
 
     /// <summary>Splits a newline-joined repeatable option back into its paths; null when the option was absent.</summary>

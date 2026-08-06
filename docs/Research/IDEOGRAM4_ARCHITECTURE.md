@@ -481,8 +481,7 @@ The reference is single-source (`ideogram-oss/ideogram4`). The divergences worth
 | **`Ideogram4Pipeline.cs`** | Medium (~3 days) | Asymmetric CFG (two-length forwards), two-stage guidance, constant latent-norm, Flux.2 decode. |
 | **`Ideogram4CheckpointConverter.cs`** | Low (~1-2 days) | Diffusers-naming passthrough + fused-QKV split + fp8_scaled / nvfp4 folding; route VAE to Flux.2 converter. |
 | **Latent-norm constants** | Low | Copy 128 `LATENT_SHIFT`/`LATENT_SCALE` floats verbatim. |
-| **`Ideogram4DebugDump.cs` + `dump_ideogram4_full_forward.py` + `diff_ideogram4_layers.py` + `Ideogram4DiffTests.cs`** | Medium (~2-3 days) | Layer-by-layer diff harness (SD3.5/Lens template). MRoPE + asymmetric CFG are the likely first-run bug hotspots. |
-| **`Ideogram4GenerationTests.cs`** | Low (~1 day) | End-to-end scaffold; VRAM probe (~14 GB fp8 DiT + ~8 GB Qwen + ~5 GB VAE — needs eviction discipline on 12 GB). |
+| **`Ideogram4DebugDump.cs` + `dump_ideogram4_full_forward.py` + `diff_ideogram4_layers.py`** | Medium (~2-3 days) | Layer-by-layer diff harness (SD3.5/Lens template). MRoPE + asymmetric CFG are the likely first-run bug hotspots. |
 | **Structured-prompt builder** | — | Separate workstream, see [STRUCTURED_PROMPT_BUILDER.md](STRUCTURED_PROMPT_BUILDER.md). |
 
 ### VRAM budget (12 GB target, RTX 3060)

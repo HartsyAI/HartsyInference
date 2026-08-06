@@ -608,8 +608,7 @@ The reference is single-source (microsoft/Lens), but there are a few places wher
 | **`LensGptOssEncoder.cs`** | Medium (~3-5 days) | Subclass `LlamaStyleEncoder` (or write a new `MoeLlamaStyleEncoder`) that captures multi-layer hidden states and exits early after the last selected layer. Reuse GPT-OSS-specific layer math. |
 | **`LensPipeline.cs`** | Low (~2 days) | Standard pipeline once the pieces are wired. Norm-rescaled CFG is one extra op. |
 | **`LensCheckpointConverter.cs`** | Low (~1 day) | Probably diffusers-naming passthrough for the transformer; MXFP4 unpack for the encoder; Flux.2 VAE converter for the VAE. |
-| **`LensGenerationTests.cs`** | Low (~1 day) | Standard test scaffold mirroring `Flux2GenerationTests`. VRAM probe (~12 GB for the DiT at FP16 + MXFP4 encoder; manageable on 12 GB cards with eviction). |
-| **`dump_lens_full_forward.py` + `diff_lens_layers.py` + `LensDiffTests.cs`** | Medium (~2-3 days) | Standard layer-by-layer diff harness following the SD3.5 / Z-Image template. |
+| **`dump_lens_full_forward.py` + `diff_lens_layers.py`** | Medium (~2-3 days) | Standard layer-by-layer diff harness following the SD3.5 / Z-Image template. |
 
 ### VRAM budget on a 12 GB card (RTX 3060 / 4070 / etc.)
 

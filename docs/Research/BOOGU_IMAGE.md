@@ -348,7 +348,7 @@ Implementation notes (the parity-sensitive parts):
 **Built (2026-06-21); vision tower real-weight parity VERIFIED (2026-07-16)** — merged tokens and
 all three deepstack taps match HF `Qwen3VLVisionModel` on the released BF16 `visual.*` weights at
 corr 1.000000 (maxAbs ≤ 2.4e-3), CPU and CUDA backends both (harness:
-`Qwen3VlVisionParityDumpTests` + `tests/python-reference/diff_qwen3vl_vision.py`). The text-only
+`tests/python-reference/diff_qwen3vl_vision.py`). The text-only
 `EncodeEmbedsMrope` path is bit-consistent with the standard `Encode`
 (`Qwen3VlMultimodalConsistencyTests`). Remaining nit: our processor resamples bilinear where HF
 uses bicubic (pixel_values corr 0.996). `Qwen3VlVisionConfig`,

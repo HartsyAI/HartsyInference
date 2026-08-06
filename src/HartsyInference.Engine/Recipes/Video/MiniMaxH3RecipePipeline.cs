@@ -11,6 +11,7 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Video.Encoding;
 using HartsyInference.Video.Pipelines;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
@@ -20,8 +21,9 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// soundtrack with every clip, so the result carries both streams.</summary>
 public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
 {
-    /// <summary>Reference caps the model was trained under.</summary>
-    private const int MaxReferenceImages = 9, MaxReferenceAudios = 3;
+    /// <summary>Reference caps the model was trained under. A reference video's own soundtrack is capped separately
+    /// from the standalone clips, as the reference node does, so both lists may carry three.</summary>
+    private const int MaxReferenceImages = 9, MaxReferenceAudios = 3, MaxReferenceVideos = 3;
 
     /// <summary>Pixels per latent cell on H/W; a reference block's grid is stated in latent cells.</summary>
     private const int VaeSpatialRatio = 16;
@@ -59,15 +61,21 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     private readonly record struct Keyframe(int FrameIndex, Tensor Rows, Tensor Rgb, int VisionTokens);
 
     /// <summary>One ref2va reference resolved for both paths. The rows land in the stream its block kind names, so the
-    /// order these are produced in has to match the order the packed layout emits their segments.</summary>
-    private sealed record Reference(MiniMaxH3RefBlock Block, MiniMaxH3TextEncoding.Condition Condition)
+    /// order these are produced in has to match the order the packed layout emits their segments. A soundtracked video
+    /// carries two conditions — its <c>&lt;Audio j&gt;</c> label then its <c>&lt;Video k&gt;</c> — behind one block.</summary>
+    private sealed record Reference(MiniMaxH3RefBlock Block, IReadOnlyList<MiniMaxH3TextEncoding.Condition> Conditions)
     {
         public Tensor? VideoRows { get; init; }
         public Tensor? AudioRows { get; init; }
 
-        /// <summary>The RGB the vision tower presents; null for an audio reference, which is label-only.</summary>
-        public Tensor? Rgb { get; init; }
+        /// <summary>What the vision tower presents, one entry per spliced block: a <c>[3, H, W]</c> still for an image
+        /// or a <c>[2, 3, H, W]</c> frame stack per video block. Empty for an audio reference, which is label-only.</summary>
+        public IReadOnlyList<Tensor> Rgb { get; init; } = [];
     }
+
+    /// <summary>A reference clip decoded, truncated onto the frame grid, and resized onto its canvas — everything both
+    /// encode passes need, resolved before either VAE is made resident.</summary>
+    private sealed record PreparedVideo(IReadOnlyList<byte[]> Frames, int Width, int Height, AudioClip? Soundtrack);
 
     /// <inheritdoc/>
     public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
@@ -98,7 +106,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         try
         {
             EncodeKeyframes(request, width, height, frames, keyframes);
-            EncodeReferences(request, width, height, references);
+            EncodeReferences(request, width, height, frames, cancel, references);
             if (keyframes.Count > 0 && references.Count > 0)
             {
                 // The layout restarts its position cursor for reference blocks, so keyframe and reference rows would
@@ -131,10 +139,12 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                     CondAudioRows = condAudioRows,
                 };
 
+                // Both lists walk references in presentation order and flatten per reference; grouping by kind here
+                // would silently pair the wrong vision block with the wrong label.
                 List<MiniMaxH3TextEncoding.Condition> conditions =
-                    [.. keyframes.Select(k => ImageCondition(k.VisionTokens)), .. references.Select(r => r.Condition)];
+                    [.. keyframes.Select(k => ImageCondition(k.VisionTokens)), .. references.SelectMany(r => r.Conditions)];
                 List<Tensor> visionInputs =
-                    [.. keyframes.Select(k => k.Rgb), .. references.Where(r => r.Rgb is not null).Select(r => r.Rgb!)];
+                    [.. keyframes.Select(k => k.Rgb), .. references.SelectMany(r => r.Rgb)];
 
                 // Preload/free around the encode, as every other video recipe does: the encoder and the DiT cannot both
                 // be device-resident on a 24 GB card. (This is hygiene, not the perf fix — measurement showed the
@@ -186,28 +196,22 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             }
             foreach (Reference r in references)
             {
-                r.VideoRows?.Dispose();
-                r.AudioRows?.Dispose();
-                r.Rgb?.Dispose();
+                DisposeReference(r);
             }
         }
     }
 
-    /// <summary>Encodes ref2va references in the order the presentation and the packed layout both expect: images
-    /// first, then standalone audio. Each becomes one <see cref="MiniMaxH3RefBlock"/> plus its presentation label.</summary>
-    private void EncodeReferences(VideoRequest request, int width, int height, List<Reference> into)
+    /// <summary>Encodes ref2va references in the order the presentation and the packed layout both expect: images,
+    /// then videos, then standalone audio. Each becomes one <see cref="MiniMaxH3RefBlock"/> plus its presentation
+    /// label(s). The work is phased so each VAE is made resident exactly once even though a soundtracked video needs
+    /// both of them.</summary>
+    private void EncodeReferences(VideoRequest request, int width, int height, int frameCount,
+        CancellationToken cancel, List<Reference> into)
     {
         IReadOnlyList<ImageData> images = request.ReferenceImages ?? [];
+        IReadOnlyList<ReferenceVideo> videos = request.ReferenceVideos ?? [];
         IReadOnlyList<AudioClip> audios = request.ReferenceAudios ?? [];
-        if (request.ReferenceVideos is { Count: > 0 })
-        {
-            // A video reference presents as timestamped 2-frame vision blocks, and the Qwen3-VL processor currently
-            // takes one frame per block — the DiT side is ready, the presentation side is not.
-            throw new NotSupportedException(
-                "MiniMax-H3 reference videos are not supported yet: the vision processor takes a single frame per "
-                + "block, while a video reference presents paired frames. Use reference images or audio.");
-        }
-        if (images.Count == 0 && audios.Count == 0)
+        if (images.Count == 0 && videos.Count == 0 && audios.Count == 0)
         {
             return;
         }
@@ -216,53 +220,205 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             throw new ArgumentException(
                 $"MiniMax-H3 takes at most {MaxReferenceImages} reference images, got {images.Count}.");
         }
+        if (videos.Count > MaxReferenceVideos)
+        {
+            throw new ArgumentException(
+                $"MiniMax-H3 takes at most {MaxReferenceVideos} reference videos, got {videos.Count}.");
+        }
         if (audios.Count > MaxReferenceAudios)
         {
             throw new ArgumentException(
-                $"MiniMax-H3 takes at most {MaxReferenceAudios} reference audio clips, got {audios.Count}.");
+                $"MiniMax-H3 takes at most {MaxReferenceAudios} standalone reference audio clips, got {audios.Count}.");
         }
-        if (images.Count > 0 && _videoVaeEncoder is null)
+        bool needsAudioVae = audios.Count > 0 || videos.Any(v => v.Audio is not null);
+        if ((images.Count > 0 || videos.Count > 0) && _videoVaeEncoder is null)
         {
-            throw new InvalidOperationException("Reference images need a video VAE that carries its encoder half.");
+            throw new InvalidOperationException(
+                "Reference images and videos need a video VAE that carries its encoder half.");
         }
-        if (audios.Count > 0 && _audioVaeEncoder is null)
+        if (needsAudioVae && _audioVaeEncoder is null)
         {
             throw new InvalidOperationException("Reference audio needs an audio VAE that carries its encoder half.");
         }
 
-        if (images.Count > 0)
+        List<PreparedVideo> prepared = new List<PreparedVideo>(videos.Count);
+        foreach (ReferenceVideo video in videos)
         {
-            _backend.PreloadWeights(_videoVaeEncoder!.EnumerateWeights());
-            try
-            {
-                foreach (ImageData image in images)
-                {
-                    into.Add(EncodeReferenceImage(image, width, height));
-                }
-                _backend.Sync();
-            }
-            finally
-            {
-                _backend.FreeWeights(_videoVaeEncoder!.EnumerateWeights());
-            }
+            prepared.Add(PrepareReferenceVideo(video, frameCount, cancel));
         }
-        if (audios.Count > 0)
+
+        // Nothing reaches the caller's list until the whole set is assembled, so every partial result is disposed here
+        // rather than leaking on a mid-phase failure.
+        List<Reference> assembled = new List<Reference>(images.Count + prepared.Count + audios.Count);
+        Tensor?[] videoRows = new Tensor?[prepared.Count];
+        int[] videoLatentT = new int[prepared.Count];
+        Tensor?[] soundtrackRows = new Tensor?[prepared.Count];
+        int[] soundtrackT = new int[prepared.Count];
+        try
         {
-            _backend.PreloadWeights(_audioVaeEncoder!.EnumerateWeights());
-            try
+            if (images.Count > 0 || prepared.Count > 0)
             {
-                foreach (AudioClip clip in audios)
+                _backend.PreloadWeights(_videoVaeEncoder!.EnumerateWeights());
+                try
                 {
-                    into.Add(EncodeReferenceAudio(clip));
+                    foreach (ImageData image in images)
+                    {
+                        assembled.Add(EncodeReferenceImage(image, width, height));
+                    }
+                    for (int i = 0; i < prepared.Count; i++)
+                    {
+                        using Tensor latent = _videoVaeEncoder.EncodeRgbClip(
+                            _backend, prepared[i].Frames, prepared[i].Width, prepared[i].Height);
+                        videoRows[i] = MiniMaxH3Latents.PackVideo(latent, _config);
+                        videoLatentT[i] = (int)latent.Shape[2];
+                    }
+                    _backend.Sync();
                 }
-                _backend.Sync();
+                finally
+                {
+                    _backend.FreeWeights(_videoVaeEncoder!.EnumerateWeights());
+                }
             }
-            finally
+
+            List<Reference> audioRefs = new List<Reference>(audios.Count);
+            if (needsAudioVae)
             {
-                _backend.FreeWeights(_audioVaeEncoder!.EnumerateWeights());
+                _backend.PreloadWeights(_audioVaeEncoder!.EnumerateWeights());
+                try
+                {
+                    for (int i = 0; i < prepared.Count; i++)
+                    {
+                        if (prepared[i].Soundtrack is null)
+                        {
+                            continue;
+                        }
+                        (Tensor rows, int refAudioT) = EncodeAudioRows(prepared[i].Soundtrack!);
+                        soundtrackRows[i] = rows;
+                        soundtrackT[i] = refAudioT;
+                    }
+                    foreach (AudioClip clip in audios)
+                    {
+                        audioRefs.Add(EncodeReferenceAudio(clip));
+                    }
+                    _backend.Sync();
+                }
+                finally
+                {
+                    _backend.FreeWeights(_audioVaeEncoder!.EnumerateWeights());
+                }
             }
+
+            for (int i = 0; i < prepared.Count; i++)
+            {
+                Reference reference = BuildVideoReference(
+                    prepared[i], videoRows[i]!, videoLatentT[i], soundtrackRows[i], soundtrackT[i]);
+                videoRows[i] = null;
+                soundtrackRows[i] = null;
+                assembled.Add(reference);
+            }
+            assembled.AddRange(audioRefs);
         }
-        Logs.Info($"[MiniMaxH3RecipePipeline] ref2va: {images.Count} image(s), {audios.Count} audio clip(s).");
+        catch
+        {
+            foreach (Reference reference in assembled)
+            {
+                DisposeReference(reference);
+            }
+            foreach (Tensor? rows in videoRows)
+            {
+                rows?.Dispose();
+            }
+            foreach (Tensor? rows in soundtrackRows)
+            {
+                rows?.Dispose();
+            }
+            throw;
+        }
+
+        into.AddRange(assembled);
+        Logs.Info($"[MiniMaxH3RecipePipeline] ref2va: {images.Count} image(s), {prepared.Count} video(s), "
+            + $"{audios.Count} standalone audio clip(s).");
+    }
+
+    private static void DisposeReference(Reference reference)
+    {
+        reference.VideoRows?.Dispose();
+        reference.AudioRows?.Dispose();
+        foreach (Tensor rgb in reference.Rgb)
+        {
+            rgb.Dispose();
+        }
+    }
+
+    /// <summary>Decodes a reference clip, truncates it onto the model's frame grid, and resizes it onto its canvas.
+    /// Truncation runs before the resize: the discarded frames would otherwise be resampled for nothing, and a long
+    /// HD clip is gigabytes of them.</summary>
+    private static PreparedVideo PrepareReferenceVideo(ReferenceVideo reference, int frameCount, CancellationToken cancel)
+    {
+        FfmpegProcessDecoder decoder = new FfmpegProcessDecoder();
+        FfmpegProcessDecoder.Result decoded =
+            decoder.DecodeAsync(reference.Video.Data, reference.Video.Format, cancel).GetAwaiter().GetResult();
+        int kept = Math.Min(decoded.Frames.Count, frameCount);
+        if (kept < 5)
+        {
+            throw new ArgumentException(
+                $"A MiniMax-H3 reference video needs at least 5 frames (~0.2 s at 24 fps); got {kept}.");
+        }
+        kept = MiniMaxH3Geometry.SnapFrameCountDown(kept);
+        (int canvasWidth, int canvasHeight) = MiniMaxH3Geometry.RefVideoCanvas(decoded.Width, decoded.Height);
+
+        List<byte[]> resized = new List<byte[]>(kept);
+        for (int i = 0; i < kept; i++)
+        {
+            cancel.ThrowIfCancellationRequested();
+            ImageData frame = new ImageData { Rgb = decoded.Frames[i], Width = decoded.Width, Height = decoded.Height };
+            resized.Add(VideoRecipeUtils.ResizeRgb24(frame, canvasWidth, canvasHeight));
+        }
+        decoded.Frames.Clear();
+        Logs.Info($"[MiniMaxH3RecipePipeline] Reference clip {decoded.Width}x{decoded.Height} -> "
+            + $"{canvasWidth}x{canvasHeight}, {kept} frame(s).");
+        return new PreparedVideo(resized, canvasWidth, canvasHeight, reference.Audio);
+    }
+
+    /// <summary>Assembles a prepared clip into its reference block, presentation labels, and the 2 fps frame stacks the
+    /// vision tower sees. The stack count must equal what <see cref="MiniMaxH3TextEncoding.VideoBlocks"/> produces —
+    /// a mismatch only surfaces as the vision tower's token-count assertion once real weights are loaded.</summary>
+    private Reference BuildVideoReference(PreparedVideo video, Tensor videoRows, int latentT,
+        Tensor? audioRows, int refAudioT)
+    {
+        IReadOnlyList<int> sampled = MiniMaxH3Geometry.RefVideoSampleIndices(video.Frames.Count);
+        int tokensPerBlock = _textEncoder.VisionTokenCount(video.Height, video.Width);
+        List<MiniMaxH3TextEncoding.Condition> conditions = new List<MiniMaxH3TextEncoding.Condition>(2);
+        if (audioRows is not null)
+        {
+            // The soundtrack's <Audio j> label is emitted before its <Video k>, so the audio ordinal increments first.
+            conditions.Add(MiniMaxH3TextEncoding.Audio());
+        }
+        conditions.Add(MiniMaxH3TextEncoding.Video(sampled.Count, tokensPerBlock));
+
+        int padded = sampled.Count + (sampled.Count % 2);
+        List<Tensor> stacks = new List<Tensor>(padded / 2);
+        for (int i = 0; i < padded; i += 2)
+        {
+            byte[] first = video.Frames[sampled[i]];
+            byte[] second = video.Frames[sampled[Math.Min(i + 1, sampled.Count - 1)]];
+            stacks.Add(RgbPairToTensor(first, second, video.Width, video.Height));
+        }
+        return new Reference(
+            new MiniMaxH3RefBlock
+            {
+                Kind = audioRows is not null ? "video_audio" : "video",
+                LatentT = latentT,
+                LatentH = video.Height / VaeSpatialRatio,
+                LatentW = video.Width / VaeSpatialRatio,
+                RefAudioT = refAudioT,
+            },
+            conditions)
+        {
+            VideoRows = videoRows,
+            AudioRows = audioRows,
+            Rgb = stacks,
+        };
     }
 
     /// <summary>Scales a reference down (never up) to the generation's pixel area, keeping its own aspect — the
@@ -278,10 +434,10 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         {
             return new Reference(
                 new MiniMaxH3RefBlock { Kind = "image", LatentH = th / VaeSpatialRatio, LatentW = tw / VaeSpatialRatio },
-                MiniMaxH3TextEncoding.Image(_textEncoder.VisionTokenCount(th, tw)))
+                [MiniMaxH3TextEncoding.Image(_textEncoder.VisionTokenCount(th, tw))])
             {
                 VideoRows = MiniMaxH3Latents.PackVideo(latent, _config),
-                Rgb = RgbToTensor(rgb, tw, th),
+                Rgb = [RgbToTensor(rgb, tw, th)],
             };
         }
         finally
@@ -290,9 +446,9 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         }
     }
 
-    /// <summary>Encodes a reference clip to audio rows. It carries no vision block — the presentation is the
-    /// <c>&lt;Audio j&gt;</c> label alone.</summary>
-    private Reference EncodeReferenceAudio(AudioClip clip)
+    /// <summary>VAE-encodes a clip to packed audio rows plus its latent length. Shared by standalone reference audio
+    /// and by a reference video's soundtrack, which folds into that video's block instead of becoming its own.</summary>
+    private (Tensor Rows, int RefAudioT) EncodeAudioRows(AudioClip clip)
     {
         (float[] left, float[] right) = AudioClipCodec.DecodeStereo(clip, _audioVaeEncoder!.Config.SampleRate);
         using Tensor wave = new Tensor(new TensorShape(1, 2, left.Length), DType.F32);
@@ -303,11 +459,19 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             wp[left.Length + i] = right[i];
         }
         using Tensor latent = _audioVaeEncoder.Encode(_backend, wave);
+        return (MiniMaxH3Latents.PackAudio(latent, _config), (int)latent.Shape[3]);
+    }
+
+    /// <summary>Encodes a standalone reference clip. It carries no vision block — the presentation is the
+    /// <c>&lt;Audio j&gt;</c> label alone.</summary>
+    private Reference EncodeReferenceAudio(AudioClip clip)
+    {
+        (Tensor rows, int refAudioT) = EncodeAudioRows(clip);
         return new Reference(
-            new MiniMaxH3RefBlock { Kind = "audio", RefAudioT = (int)latent.Shape[3] },
-            MiniMaxH3TextEncoding.Audio())
+            new MiniMaxH3RefBlock { Kind = "audio", RefAudioT = refAudioT },
+            [MiniMaxH3TextEncoding.Audio()])
         {
-            AudioRows = MiniMaxH3Latents.PackAudio(latent, _config),
+            AudioRows = rows,
         };
     }
 
@@ -388,6 +552,28 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             for (int c = 0; c < 3; c++)
             {
                 p[c * plane + pix] = rgb[pix * 3 + c] / 255f;
+            }
+        }
+        return outT;
+    }
+
+    /// <summary>Two interleaved-RGB24 frames as the <c>[2, 3, H, W]</c> stack in [0, 1] that fills one temporal patch.</summary>
+    private static unsafe Tensor RgbPairToTensor(byte[] first, byte[] second, int width, int height)
+    {
+        Tensor outT = new Tensor(new TensorShape(2, 3, height, width), DType.F32);
+        float* p = (float*)outT.DataPointer;
+        long plane = (long)width * height;
+        byte[][] pair = [first, second];
+        for (int f = 0; f < pair.Length; f++)
+        {
+            byte[] rgb = pair[f];
+            float* frame = p + f * 3 * plane;
+            for (long pix = 0; pix < plane; pix++)
+            {
+                for (int c = 0; c < 3; c++)
+                {
+                    frame[c * plane + pix] = rgb[pix * 3 + c] / 255f;
+                }
             }
         }
         return outT;

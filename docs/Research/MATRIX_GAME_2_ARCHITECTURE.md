@@ -865,11 +865,12 @@ Q4_K GGUF dumps are not yet available for Matrix-Game 2.0. When `unsloth/Matrix-
 
 ### Test-skipping discipline
 
-Following the project convention (every `*GenerationTests` skips cleanly when env vars or VRAM are missing):
-
-- `MatrixGame2PipelineTests` should require: `MATRIX_GAME_2_PATH` (root of HF repo), plus PTX dir; VRAM probe ≥ 8 GB free.
-- `MatrixGame2StreamingTests` (Phase 10b) should additionally require: real-time-OK environment (skip on shared CI).
-- A `MatrixGame2VaeRoundTripTest` (image-encode → image-decode) only requires the VAE + 2 GB VRAM and is a cheap smoke test.
+> **Superseded 2026-08-06.** The per-model pipeline/generation tests this section specified were
+> removed in the test-suite cleanup, and the rule is now the opposite: **do not add a test that
+> proves a model works end to end** — a model that stops working is visible the moment anyone uses
+> it. Test what breaks quietly instead (kernel numerics, cross-device equivalence, quantization and
+> codec round-trips, padding/tiling geometry, format and key mapping), and put shared-component
+> parity in `tests/<Project>/Parity/` with a `*ParityTests` name. See `docs/CODE_STYLE.md` §Testing.
 
 ### Reuse opportunities
 

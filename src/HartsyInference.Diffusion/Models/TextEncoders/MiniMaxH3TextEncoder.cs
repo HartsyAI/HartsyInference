@@ -33,6 +33,10 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
 
     private const int MaxPixels = 12845056;
 
+    /// <summary>Guard on the dense causal mask, chosen to clear the reference's 3-reference-video cap (~18k tokens)
+    /// while turning a runaway presentation into a message instead of an out-of-memory kill.</summary>
+    private const int MaxMaskSequenceLength = 32768;
+
     /// <summary>Qwen3-VL image normalization used by H3 — plain <c>[0.5, 0.5, 0.5]</c>, not CLIP's statistics.</summary>
     private static readonly float[] NormalizationMean = [0.5f, 0.5f, 0.5f];
 
@@ -163,8 +167,9 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         return Encode(backend, MiniMaxH3TextEncoding.Build(tokenizer, prompt, conditions), referenceImages);
     }
 
-    /// <summary>Encodes an already-built presentation. <paramref name="referenceImages"/> are RGB <c>[3, H, W]</c>
-    /// tensors in <c>[0, 1]</c>, one per spliced vision block, in sequence order.</summary>
+    /// <summary>Encodes an already-built presentation. <paramref name="referenceImages"/> carries one entry per spliced
+    /// vision block in sequence order: an RGB <c>[3, H, W]</c> still, or a <c>[T, 3, H, W]</c> frame stack filling the
+    /// temporal patch. Both are in <c>[0, 1]</c> and expand to the same token count at equal resolution.</summary>
     public Result Encode(IBackend backend, MiniMaxH3TextEncoding.Encoded presentation,
         IReadOnlyList<Tensor>? referenceImages = null)
     {
@@ -296,7 +301,10 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         VisionResult[] outputs = new VisionResult[imageCount];
         for (int i = 0; i < imageCount; i++)
         {
-            (Tensor pix, int gt, int gh, int gw) = processor.Preprocess(referenceImages![i]);
+            Tensor input = referenceImages![i];
+            (Tensor pix, int gt, int gh, int gw) = input.Shape.Rank == 4
+                ? processor.Preprocess(FrameViews(input))
+                : processor.Preprocess(input);
             outputs[i] = new VisionResult(_vision.Forward(backend, pix, gt, gh, gw), gh, gw);
             pix.Dispose();
             if (outputs[i].Output.NumMergedTokens != presentation.VisionBlockTokenCounts[i])
@@ -305,6 +313,24 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
                     $"reserved {presentation.VisionBlockTokenCounts[i]}.");
         }
         return outputs;
+    }
+
+    /// <summary>Borrowed per-frame <c>[3, H, W]</c> views into a <c>[T, 3, H, W]</c> stack. The views own no memory and
+    /// never outlive the caller's loop iteration, which is what keeps the stack itself rooted.</summary>
+    private static Tensor[] FrameViews(Tensor frames)
+    {
+        if (frames.Shape[1] != 3)
+            throw new ArgumentException($"Expected a frame stack [T, 3, H, W], got {frames.Shape}.", nameof(frames));
+        if (frames.DType != DType.F32)
+            throw new ArgumentException($"Frame stacks must be F32, got {frames.DType}.", nameof(frames));
+        int count = (int)frames.Shape[0];
+        TensorShape frameShape = new TensorShape(3, frames.Shape[2], frames.Shape[3]);
+        long stride = frameShape.ElementCount;
+        float* start = (float*)frames.DataPointer;
+        Tensor[] views = new Tensor[count];
+        for (int i = 0; i < count; i++)
+            views[i] = new Tensor(start + i * stride, frameShape, frames.DType, frames.Device);
+        return views;
     }
 
     /// <summary>Looks up <c>[1, seqLen, hidden]</c> F32 embeddings, dequantizing only the rows actually referenced
@@ -339,6 +365,14 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
 
     private static Tensor BuildCausalMask(int seqLen)
     {
+        // Dense [S, S] F32: reference videos push S into the thousands, where the mask alone outgrows host RAM.
+        if (seqLen > MaxMaskSequenceLength)
+        {
+            throw new InvalidOperationException(
+                $"MiniMax-H3 conditioning is {seqLen} tokens; the dense causal mask would need "
+                + $"{(long)seqLen * seqLen * sizeof(float) / (1024 * 1024)} MiB (cap {MaxMaskSequenceLength} tokens). "
+                + "Use fewer or shorter reference videos.");
+        }
         Tensor mask = new Tensor(new TensorShape(seqLen, seqLen), DType.F32);
         float* p = (float*)mask.DataPointer;
         for (int i = 0; i < seqLen; i++)

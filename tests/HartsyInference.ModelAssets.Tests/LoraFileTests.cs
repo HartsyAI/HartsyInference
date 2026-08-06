@@ -535,8 +535,10 @@ public sealed class LoraFileTests : IDisposable
         Assert.Equal(0, merged);
     }
 
+    /// <summary>An fp8 base used to be refused outright; it is now dequantized, merged and requantized, so the entry is
+    /// replaced by a fresh fp8 tensor carrying a recomputed scale rather than throwing.</summary>
     [Fact]
-    public void LoraStack_Apply_RejectsFp8Base()
+    public void LoraStack_Apply_RequantizesFp8Base()
     {
         const int outDim = 4, inDim = 4, rank = 2;
         Dictionary<string, (DType, long[], float[])> tensors = new()
@@ -546,10 +548,10 @@ public sealed class LoraFileTests : IDisposable
         };
         string path = CreateSafeTensorsFile(_tempDir, "fp8_base", tensors);
 
-        Tensor baseW = new Tensor(new TensorShape(outDim, inDim), DType.F32);
+        Tensor baseW = new Tensor(new TensorShape(outDim, inDim), DType.F8E4M3);
         try
         {
-            baseW.Fp8ScaleFactor = 0.001f; // simulate FP8-quantized base
+            baseW.Fp8ScaleFactor = 0.001f;
             Dictionary<string, Tensor> weights = new()
             {
                 ["down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight"] = baseW,
@@ -558,8 +560,10 @@ public sealed class LoraFileTests : IDisposable
             using LoraStack stack = new();
             using CpuBackend backend = new();
             stack.Add(file);
-            Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(
-                () => stack.ApplyTo(weights, LoraTarget.UNet, backend));
+            Assert.Equal(1, stack.ApplyTo(weights, LoraTarget.UNet, backend));
+            Tensor merged = weights["down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight"];
+            Assert.NotSame(baseW, merged);
+            Assert.Equal(DType.F8E4M3, merged.DType);
         }
         finally { baseW.Dispose(); }
     }

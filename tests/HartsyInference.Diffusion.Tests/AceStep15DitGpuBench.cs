@@ -14,6 +14,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <c>HARTSY_ACE15_GPU_BENCH=1</c> and the checkpoint path so a normal run skips it.
 /// <code>HARTSY_ACE15_GPU_BENCH=1 dotnet test tests/HartsyInference.Diffusion.Tests --filter AceStep15DitGpuBench</code>
 /// Env: <c>HARTSY_DIT_F16</c> / <c>HARTSY_DIT_GRAPH</c> toggle the F16 / CUDA-graph paths for A/B timing.</summary>
+[Trait("Category", "GpuIntegration")]
 public unsafe class AceStep15DitGpuBench
 {
     private const string TurboPath = "/home/kalebbroo/Desktop/Projects/SwarmUI/Models/audio/music/AceStep/acestep-v15-turbo.safetensors";

@@ -36,7 +36,7 @@ Numbers are rough; recapture them on your specific GPU before declaring a regres
 ## Procedure
 
 1. Run a ComfyUI workflow with the **same checkpoint, prompt, seed, scheduler, and step count**. Note steady-state it/s from the ComfyUI console.
-2. Run the matching HartsyInference test (e.g. `Sdxl_GenerateImage_Gpu`, `FluxDev_Generates_WithinSsimThreshold`). The pipeline emits per-step timing via the `onProgress` callback used by every test in this repo — see [`FluxGenerationTests`](../../tests/HartsyInference.Diffusion.Tests/FluxGenerationTests.cs) and similar.
+2. Run the matching HartsyInference test (e.g. `Sdxl_GenerateImage_Gpu`, `FluxDev_Generates_WithinSsimThreshold`). The pipeline emits per-step timing via the `onProgress` callback. (The per-model generation tests this step used to point at were removed in the 2026-08-06 suite cleanup; drive the pipeline from a sample CLI or the SwarmUI extension instead.)
 3. Compute it/s = `1000 / avg_step_ms` from steps 5..15.
 4. Record peak VRAM with `nvidia-smi -l 1` running during the HartsyInference run.
 

@@ -703,12 +703,12 @@ Compared to existing HartsyInference infrastructure, Oasis introduces:
 
 ### Test-skipping discipline
 
-`OasisPipelineTests` should follow the project convention:
-
-- Require env vars `OASIS_500M_PATH` (= path to `oasis500m.safetensors`) and `OASIS_VAE_PATH` (= path to `vit-l-20.safetensors`); skip cleanly when either is missing.
-- Optionally require `OASIS_SAMPLE_PROMPT_DIR` (a folder containing `sample_image_0.png` + `sample_actions_0.one_hot_actions.pt`). When absent, fall back to a procedurally generated zero-image prompt with an all-zero action stream — the model will produce a static-ish video but the test still validates end-to-end correctness.
-- VRAM probe ≥ 4 GB free at FP16 (DiT 480 MB + VAE 180 MB + activations for 32-frame window).
-- **Crucial CI test**: generate 4 frames from the sample prompt + sample actions with `torch.manual_seed(0)` and compare byte-exact against an upstream-Python-generated reference video. This is the **pedagogical reference test** — easy to debug because the model is tiny, the loop is short, and discrepancies localise to a single layer.
+> **Superseded 2026-08-06.** The per-model pipeline/generation tests this section specified were
+> removed in the test-suite cleanup, and the rule is now the opposite: **do not add a test that
+> proves a model works end to end** — a model that stops working is visible the moment anyone uses
+> it. Test what breaks quietly instead (kernel numerics, cross-device equivalence, quantization and
+> codec round-trips, padding/tiling geometry, format and key mapping), and put shared-component
+> parity in `tests/<Project>/Parity/` with a `*ParityTests` name. See `docs/CODE_STYLE.md` §Testing.
 
 ### Layered diff harness for porting
 

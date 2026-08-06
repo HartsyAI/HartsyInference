@@ -171,8 +171,9 @@ Mirror the Ideogram4 / Z-Image build pattern. Files under `src/HartsyInference.D
 8. **`CheckpointConverters/Krea2CheckpointConverter.cs`** — diffusers keys (`transformer_blocks.{i}.*`,
    `text_fusion.*`, `img_in`, `time_embed`, `time_mod_proj`, `txt_in`, `final_layer`); fp8 scaled-dequant; the raw
    (non-diffusers) checkpoint key remap if the released single-file uses the short-name keys.
-9. **Tests** — `Krea2TransformerTests` (synthetic tiny-config forward + scheduler shift), `Krea2GenerationTests`
-   (real-weights skip-if-absent), plus `tests/python-reference` parity dumps (RoPE, block, text-fusion, full forward).
+9. **Tests** — `tests/python-reference` parity dumps (RoPE, block, text-fusion, full forward). Per the
+   2026-08-06 cleanup rule, do not add per-model forward or generation tests; a broken model is visible in
+   production. Krea2's sharding/placement coverage lives in the multi-GPU campaign.
 10. **SwarmUI extension** — `Krea2Loader` + compat `"krea-2"` (core `T2IModelClassSorter`: detect by the
     `text_fusion.projector.weight` + `transformer_blocks.0.attn.to_gate.weight` keys; VaeFamily `VaeQwenImage`); side
     models Qwen3-VL-4B + Qwen-Image VAE; cache + dispatch + validation; expose a Base/Turbo step→preset mapping.

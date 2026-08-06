@@ -240,7 +240,8 @@ section below; bring-up debugging notes live in [TROUBLESHOOTING.md](TROUBLESHOO
 > The ✅/🔬 marks below are **numeric-parity** verdicts (corr 1.0 vs a Python reference on random/tap inputs).
 > A real-weight end-to-end pass — generate audio → resample → Whisper-base STT → content-word recall, then
 > a human listen — tells a very different story. Results so far (each writes a WAV to
-> `{TmpPath}/hartsyinference_tts_to_stt/`; tests: `*EndToEndSttTests` + `DiaEndToEndTests` + `TranscribeWavFileTests`):
+> `{TmpPath}/hartsyinference_tts_to_stt/`; the round-trip tests that produced this table were removed in the
+> 2026-08-06 suite cleanup — the results below stand as the recorded outcome):
 >
 > | Model | Doc mark | Whisper heard | Real verdict |
 > |---|---|---|---|
@@ -290,7 +291,7 @@ section below; bring-up debugging notes live in [TROUBLESHOOTING.md](TROUBLESHOO
 
 | Model | Status | Notes |
 |---|---|---|
-| **Whisper** (tiny → large-v3) | ✅ | JFK clip transcribes correct content words (`WhisperEndToEndTests`). **Swarm e2e word-perfect 2026-07-13** on the real JFK clip; fixed the `en-US` default-language crash (locale-code normalization). |
+| **Whisper** (tiny → large-v3) | ✅ | JFK clip transcribes correct content words (verified 2026-07-13; the end-to-end test was removed in the 2026-08-06 suite cleanup). **Swarm e2e word-perfect 2026-07-13** on the real JFK clip; fixed the `en-US` default-language crash (locale-code normalization). |
 | **Whisper streaming** (RealtimeSTT) | ✅ | LocalAgreement-2 + JFK streaming. |
 | **Moonshine** | ✅ | Tests pass. **Swarm e2e word-perfect 2026-07-13** on real (JFK) + synthetic clips; ~2 s for 9 s audio on the 3060. |
 | **Moonshine streaming** (tiny/small/medium) | ✅ | Real-weight parity verified 2026-07-19 (encoder/decoder cosine ~1.0); **Engine-wired 2026-07-20** as `moonshinestreaming` — JFK clip word-perfect end-to-end (CPU). Full-utterance batch only; true chunked/incremental streaming not yet implemented. |

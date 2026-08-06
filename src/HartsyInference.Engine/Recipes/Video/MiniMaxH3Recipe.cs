@@ -1,5 +1,4 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Features;
@@ -32,7 +31,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
 
     /// <inheritdoc/>
     /// <remarks>MiniMax-H3 VAE-encodes the start and end images into keyframe conditioning, and is the first video
-    /// family to merge LoRAs — which needs a bf16 build, since a merge cannot rewrite quantized weights.</remarks>
+    /// family to merge LoRAs — on either build, since an fp8 target is dequantized, merged and requantized.</remarks>
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId)
@@ -76,6 +75,8 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             DType bodyDType = DType.F32;
             MiniMaxH3Transformer transformer = LoadTransformer(assets.Dit, loaders, bodyDType,
                 out MiniMaxH3Config config, out Dictionary<string, Tensor> ditWeights);
+            // Must precede LoadWeights: the merge swaps dictionary entries, and device caches are identity-keyed, so a
+            // tensor already captured by a layer would keep serving its stale device copy.
             loraStack = ApplyLoras(context, ditWeights);
             transformer.LoadWeights(ditWeights);
             (MiniMaxH3VideoVaeDecoder videoVae, MiniMaxH3VideoVaeEncoder? videoVaeEncoder) =
@@ -173,25 +174,14 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
 
     /// <summary>Merges the request's LoRA stack into the DiT weights. Every H3 module a LoRA can target is a Linear
     /// (<c>qkv_proj</c>, <c>out_proj</c>, <c>fc1</c>/<c>fc2</c>, <c>adaln_proj.linear</c>, the patch/condition
-    /// projections), so no convolution path is needed.</summary>
+    /// projections), so no convolution path is needed. Both builds are supported: the fp8 targets are requantized
+    /// per tensor by <see cref="MergedLoraStack"/>, and the int8-convrot build is already rejected at load.</summary>
     private static MergedLoraStack? ApplyLoras(RecipeContext context, Dictionary<string, Tensor> weights)
     {
         IReadOnlyList<LoraResolver.LoraSpec> specs = LoraResolver.Resolve(context.Loras);
         if (specs.Count == 0)
         {
             return null;
-        }
-        // Merging rewrites a base weight in place, which a quantized tensor cannot represent — the delta would have to
-        // be re-quantized per tensor. Caught here so the failure names the checkpoint rather than surfacing from
-        // inside the merge as an opaque scale-factor complaint.
-        foreach (KeyValuePair<string, Tensor> kv in weights)
-        {
-            if (kv.Value.DType.IsFp8 || Math.Abs(kv.Value.Fp8ScaleFactor - 1.0f) > 1e-6f)
-            {
-                throw new UnsupportedModelException(
-                    "MiniMax-H3 LoRA needs the bf16 DiT: the pruned fp8 build stores quantized weights, and a LoRA "
-                    + "merge has to rewrite them in full precision. Load 'minimax_h3_*_bf16.safetensors' to use LoRAs.");
-            }
         }
         return LoraApplier.BuildAndApply(specs, context.Backend, transformerWeights: weights);
     }

@@ -2,10 +2,11 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.ModelAssets.Lora;
 
-/// <summary>Composes one or more LoRAs into a single weight-space delta and merges it into a model's weight dictionary. Use one stack per model component (UNet / Transformer / ClipL / ClipG) — each ApplyTo call walks the stacked LoRAs and produces freshly-allocated owned tensors that replace the borrowed mmap entries in the dictionary. The stack owns those new tensors; dispose the stack only after the model is no longer used.</summary>
+/// <summary>Composes one or more LoRAs into a single weight-space delta and merges it into a model's weight dictionary. Use one stack per model component (UNet / Transformer / ClipL / ClipG) — each ApplyTo call walks the stacked LoRAs and produces freshly-allocated owned tensors that replace the borrowed mmap entries in the dictionary. The stack owns those new tensors; dispose the stack only after the model is no longer used. An fp8 target is dequantized, merged in F32, and requantized back to fp8 with a recomputed scale (ComfyUI's approach) rather than rejected, so the weight stays on the native fp8 GEMM path.</summary>
 public sealed class LoraStack : IDisposable
 {
     private readonly List<Entry> _entries = [];
@@ -76,14 +77,15 @@ public sealed class LoraStack : IDisposable
                 Logs.Warning($"LoRA target '{canonicalKey}' not present in {target} weights; skipping.");
                 continue;
             }
-            if (Math.Abs(baseW.Fp8ScaleFactor - 1.0f) > 1e-6f)
+            DType originalDtype = baseW.DType;
+            if (originalDtype.IsFp8 && baseW.Shape.Rank != 2)
             {
                 throw new HartsyInferenceException(
-                    $"LoRA cannot merge into FP8-quantized weight '{canonicalKey}' (Fp8ScaleFactor={baseW.Fp8ScaleFactor}). " +
-                    "Cast checkpoint weights to F16 before applying LoRA.");
+                    $"LoRA cannot merge into fp8 weight '{canonicalKey}': requantizing against a per-tensor scale needs "
+                    + $"a 2-D Linear weight, got {baseW.Shape} ({originalDtype}).");
             }
 
-            DType originalDtype = baseW.DType;
+            // CastTo folds Fp8ScaleFactor into the values and returns factor 1.0, so the merge below stays quant-unaware.
             Tensor accumF32 = baseW.CastTo(DType.F32); // owned copy, will be mutated in place
             try
             {
@@ -92,7 +94,17 @@ public sealed class LoraStack : IDisposable
                     AccumulateDelta(backend, accumF32, layer, strength);
                 }
 
-                Tensor finalTensor = originalDtype == DType.F32 ? accumF32 : accumF32.CastTo(originalDtype);
+                Tensor finalTensor;
+                if (originalDtype.IsFp8)
+                {
+                    finalTensor = CheckpointConvertUtils.QuantizeF32ToFp8Scaled(accumF32, canonicalKey);
+                    // A weight-side LoRA must not change activation scaling: the input scale is carried, not recomputed.
+                    finalTensor.Fp8InputScaleFactor = baseW.Fp8InputScaleFactor;
+                }
+                else
+                {
+                    finalTensor = originalDtype == DType.F32 ? accumF32 : accumF32.CastTo(originalDtype);
+                }
                 if (!ReferenceEquals(finalTensor, accumF32))
                 {
                     accumF32.Dispose();

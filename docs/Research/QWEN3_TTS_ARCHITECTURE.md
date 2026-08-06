@@ -111,7 +111,7 @@ Real `speaker_encoder.*` is a variant, NOT SpeechBrain-standard. There is no `td
 encode-only `input_proj`s), and a decode runs to finite 24 kHz PCM of length T*1920. EMA codebooks
 (`embedding_sum`/`cluster_usage`) normalized at load; `rvq_first`+`rvq_rest` each lift via their
 `output_proj`; pre_conv → pre_transformer(input_proj, LayerScale layers, norm, output_proj) → 2x ConvNeXt
-upsample → 4 SnakeBeta decoder blocks. Gated test `Qwen3TtsCodecRealWeightsTests` (env `QWEN3TTS_CODEC_PATH`).
+upsample → 4 SnakeBeta decoder blocks. The gated C# codec test was removed in the 2026-08-06 suite cleanup.
 Audio-quality parity vs the Python reference is the remaining follow-up.
 
 ### Codec ENCODER (clone-mode ref audio) — NEEDS REWORK

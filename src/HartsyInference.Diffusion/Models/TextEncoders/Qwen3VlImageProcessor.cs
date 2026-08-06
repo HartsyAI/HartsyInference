@@ -128,6 +128,72 @@ public sealed unsafe class Qwen3VlImageProcessor
         return (pixelValues, 1, gridH, gridW);
     }
 
+    /// <summary>Preprocesses one temporal patch of RGB frames (<c>[3, H, W]</c> each, values in <c>[0, 1]</c>) as a
+    /// single vision block. The frames fill the temporal patch instead of a still image repeating itself, so the grid
+    /// is still <c>t = 1</c> and the block costs exactly what a still image of the same resolution costs.</summary>
+    /// <param name="frames">Exactly <see cref="Qwen3VlVisionConfig.TemporalPatchSize"/> same-sized F32 frames.</param>
+    /// <returns><c>pixelValues [numPatches, patchEmbedInDim]</c> and grid <c>(t, h, w)</c> in patch units.</returns>
+    public (Tensor pixelValues, int gridT, int gridH, int gridW) Preprocess(IReadOnlyList<Tensor> frames)
+    {
+        ArgumentNullException.ThrowIfNull(frames);
+        int temporal = _config.TemporalPatchSize;
+        if (frames.Count != temporal)
+            throw new ArgumentException($"A vision block takes exactly {temporal} frames, got {frames.Count}.", nameof(frames));
+
+        Tensor first = frames[0];
+        if (first.Shape.Rank != 3 || first.Shape[0] != 3)
+            throw new ArgumentException($"Expected RGB [3, H, W], got {first.Shape}.", nameof(frames));
+        for (int i = 0; i < frames.Count; i++)
+        {
+            // One SmartResize covers the whole block, so a mismatched frame would read out of bounds instead of failing.
+            if (frames[i].Shape != first.Shape)
+                throw new ArgumentException($"Frame {i} is {frames[i].Shape}, expected {first.Shape}.", nameof(frames));
+            if (frames[i].DType != DType.F32)
+                throw new ArgumentException($"Frame {i} is {frames[i].DType}, expected F32.", nameof(frames));
+        }
+
+        int srcH = (int)first.Shape[1];
+        int srcW = (int)first.Shape[2];
+        (int dstH, int dstW) = SmartResize(srcH, srcW);
+
+        float[][] imgs = new float[temporal][];
+        for (int i = 0; i < temporal; i++)
+            imgs[i] = ResizeAndNormalize(frames[i], srcH, srcW, dstH, dstW, _mean, _std);
+
+        int patch = _config.PatchSize;
+        int merge = _config.SpatialMergeSize;
+        int channels = _config.InChannels;
+        int gridH = dstH / patch;
+        int gridW = dstW / patch;
+        int hBlocks = gridH / merge;
+        int wBlocks = gridW / merge;
+        int numPatches = gridH * gridW;
+        int featDim = channels * temporal * patch * patch;
+
+        Tensor pixelValues = new Tensor(new TensorShape(numPatches, featDim), DType.F32);
+        float* dst = (float*)pixelValues.DataPointer;
+
+        int token = 0;
+        for (int hb = 0; hb < hBlocks; hb++)
+            for (int wb = 0; wb < wBlocks; wb++)
+                for (int mh = 0; mh < merge; mh++)
+                    for (int mw = 0; mw < merge; mw++)
+                    {
+                        int row0 = (hb * merge + mh) * patch;
+                        int col0 = (wb * merge + mw) * patch;
+                        float* tokenDst = dst + (long)token * featDim;
+                        int idx = 0;
+                        for (int c = 0; c < channels; c++)
+                            for (int tp = 0; tp < temporal; tp++)
+                                for (int ph = 0; ph < patch; ph++)
+                                    for (int pw = 0; pw < patch; pw++)
+                                        tokenDst[idx++] = imgs[tp][(long)c * dstH * dstW + (row0 + ph) * dstW + (col0 + pw)];
+                        token++;
+                    }
+
+        return (pixelValues, 1, gridH, gridW);
+    }
+
     private static float[] ResizeAndNormalize(Tensor rgb, int srcH, int srcW, int dstH, int dstW,
         float[] meanPerChannel, float[] stdPerChannel)
     {

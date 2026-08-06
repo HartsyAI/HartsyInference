@@ -73,6 +73,16 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Reference image to carry subject or style from; repeat for more (MiniMax-H3 takes up to 9).")]
         public string[]? ReferenceImages { get; init; }
 
+        /// <summary>Reference video clips for families that carry subject/motion from reference footage.</summary>
+        [CommandOption("--ref-video")]
+        [Description("Reference video to carry subject or motion from; repeat for more (MiniMax-H3 takes up to 3).")]
+        public string[]? ReferenceVideos { get; init; }
+
+        /// <summary>Soundtracks paired by position to --ref-video.</summary>
+        [CommandOption("--ref-video-audio")]
+        [Description("Soundtrack (WAV) for the same-position --ref-video; repeat to pair more.")]
+        public string[]? ReferenceVideoAudios { get; init; }
+
         /// <summary>Reference audio clips (WAV).</summary>
         [CommandOption("--ref-audio")]
         [Description("Reference audio clip (WAV) to condition on; repeat for more (MiniMax-H3 takes up to 3).")]
@@ -155,6 +165,14 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         if (settings.ReferenceImages is { Length: > 0 })
         {
             parameters.Put("ref-images", string.Join('\n', settings.ReferenceImages));
+        }
+        if (settings.ReferenceVideos is { Length: > 0 })
+        {
+            parameters.Put("ref-videos", string.Join('\n', settings.ReferenceVideos));
+        }
+        if (settings.ReferenceVideoAudios is { Length: > 0 })
+        {
+            parameters.Put("ref-video-audios", string.Join('\n', settings.ReferenceVideoAudios));
         }
         if (settings.ReferenceAudios is { Length: > 0 })
         {

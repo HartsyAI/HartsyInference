@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+using System.Text;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters.Utils;
@@ -465,16 +467,110 @@ public static unsafe class CheckpointConvertUtils
     private static unsafe Tensor QuantizeToFp8Scaled(Tensor w)
     {
         Tensor f32 = w.CastTo(DType.F32);        // BF16/F16 → fresh F32 (source unmodified)
+        Tensor fp8 = QuantizeF32ToFp8Scaled(f32);
+        f32.Dispose();
+        return fp8;
+    }
+
+    /// <summary>The same <c>absmax/448</c> per-tensor scheme as <see cref="QuantizeDitBlocksToFp8"/>, but entered with
+    /// the wide values already in hand: a LoRA merge dequantizes an fp8 weight, adds its delta in F32, and hands the
+    /// accumulator straight back here, so no second quantizer exists. <b>Overwrites <paramref name="f32"/>'s contents</b>
+    /// (scaled in place) but does NOT dispose it — the caller owns it. Emits no <c>.scale_weight</c> companion; the
+    /// scale rides on <see cref="Tensor.Fp8ScaleFactor"/> only, which is what an in-memory weight dict consumes.</summary>
+    /// <param name="stochasticSeedKey">Tensor key seeding stochastic rounding, mirroring ComfyUI's <c>string_to_seed</c>; null keeps the plain round-to-nearest cast.</param>
+    public static unsafe Tensor QuantizeF32ToFp8Scaled(Tensor f32, string? stochasticSeedKey = null)
+    {
+        ArgumentNullException.ThrowIfNull(f32);
+        if (f32.DType != DType.F32)
+            throw new ArgumentException($"An F32 accumulator is required, got {f32.DType}.", nameof(f32));
+
         long n = f32.ElementCount;
         float* p = (float*)f32.DataPointer;
         float absmax = AbsMax(p, n);
         float scale = absmax > 0f ? absmax / 448f : 1f;
-        float inv = 1f / scale;
-        ScaleInPlace(p, n, inv);
+        ScaleInPlace(p, n, 1f / scale);
+        if (stochasticSeedKey is not null)
+        {
+            StochasticPreRoundToFp8Grid(p, n, Crc32(stochasticSeedKey));
+        }
         Tensor fp8 = f32.CastTo(DType.F8E4M3);
-        f32.Dispose();
         fp8.Fp8ScaleFactor = scale;
         return fp8;
+    }
+
+    /// <summary>Snaps each value onto an exactly-representable e4m3 grid point, picking between the two neighbours with
+    /// probability proportional to distance. The engine's F32→F8E4M3 cast is round-to-nearest, which biases a weight
+    /// systematically when many tensors are requantized; ComfyUI rounds stochastically instead
+    /// (<c>comfy/float.py</c> <c>manual_stochastic_round_to_float8</c>), and this reproduces that mantissa-domain
+    /// <c>floor(scaled + U[0,1))</c>. Pre-rounding rather than writing a second encoder keeps the tested cast as the
+    /// only encoder — the values it then sees are already on the grid, so it is lossless.</summary>
+    private static unsafe void StochasticPreRoundToFp8Grid(float* p, long n, uint seed)
+    {
+        if (n < ParallelPassMinElements)
+        {
+            StochasticPreRoundRange(p, n, seed, 0);
+            return;
+        }
+        long chunks = Math.Min(Environment.ProcessorCount, Math.Max(1L, n / ParallelPassChunkElements));
+        long perChunk = (n + chunks - 1) / chunks;
+        nint basePtr = (nint)p;
+        Parallel.For(0, (int)chunks, c =>
+        {
+            long start = c * perChunk;
+            long length = Math.Min(perChunk, n - start);
+            if (length > 0)
+                StochasticPreRoundRange((float*)(basePtr + (nint)(start * sizeof(float))), length, seed, start);
+        });
+    }
+
+    /// <summary>Values are drawn from the global element index, so chunking cannot perturb the result.</summary>
+    private static unsafe void StochasticPreRoundRange(float* p, long n, uint seed, long indexOffset)
+    {
+        for (long i = 0; i < n; i++)
+        {
+            uint bits = BitConverter.SingleToUInt32Bits(p[i]);
+            float absX = BitConverter.UInt32BitsToSingle(bits & 0x7FFFFFFFu);
+            // Zero, NaN and out-of-range already land on a grid point (the cast saturates at ±448).
+            if (!(absX > 0f) || absX > 448f) continue;
+
+            // The float exponent field IS floor(log2|x|), so no transcendental is needed; a subnormal F32 reads
+            // as -127 and clamps into the e4m3 subnormal branch, which is correct.
+            int e = (int)((bits >> 23) & 0xFFu) - 127 + 7;
+            if (e < 0) e = 0;
+            else if (e > 15) e = 15;
+            float pw = BitConverter.UInt32BitsToSingle((uint)((e - 7 + 127) << 23));
+            float mantissa = e != 0 ? (absX / pw - 1f) * 8f : absX * 512f;
+            mantissa = MathF.Floor(mantissa + NextUniform(seed, indexOffset + i));
+            float rounded = e != 0 ? pw * (1f + mantissa * 0.125f) : mantissa * (1f / 512f);
+            if (rounded > 448f) rounded = 448f;
+            p[i] = BitConverter.UInt32BitsToSingle(BitConverter.SingleToUInt32Bits(rounded) | (bits & 0x80000000u));
+        }
+    }
+
+    /// <summary>Uniform in [0,1) from a counter-based splitmix64 mix, so a draw depends only on its element index.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float NextUniform(uint seed, long index)
+    {
+        ulong z = seed + (ulong)index * 0x9E3779B97F4A7C15UL;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBUL;
+        z ^= z >> 31;
+        return (z >> 40) * (1f / 16777216f);
+    }
+
+    /// <summary>ComfyUI's <c>string_to_seed</c> verbatim — CRC-32 (reflected, poly 0xEDB88320) over the key's bytes.</summary>
+    private static uint Crc32(string text)
+    {
+        uint crc = 0xFFFFFFFFu;
+        foreach (byte b in Encoding.UTF8.GetBytes(text))
+        {
+            crc ^= b;
+            for (int bit = 0; bit < 8; bit++)
+            {
+                crc = (crc & 1u) != 0u ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
+            }
+        }
+        return crc ^ 0xFFFFFFFFu;
     }
 
     /// <summary>Element count at or above which the fp8 absmax/scale passes fan out across cores. Once vectorized these

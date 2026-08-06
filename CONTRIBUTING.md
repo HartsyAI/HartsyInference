@@ -21,12 +21,22 @@ dotnet build
 ### Running Tests
 
 ```bash
-# Unit tests (no GPU required)
+# Unit tests (no GPU, no checkpoints) — this is the default lane
 dotnet test
 
 # Integration tests (requires GPU + model files)
 dotnet test --filter "Category=Integration"
+
+# All shared-component parity tests
+dotnet test --filter "FullyQualifiedName~Parity"
 ```
+
+**Before adding a test, read `docs/CODE_STYLE.md` §Testing.** A test earns its place only if its
+failure would be *silent*. Do not add one that proves a model works end to end — a broken model is
+visible the moment anyone uses it. Test what breaks quietly: kernel numerics, cross-device and
+cross-backend equivalence, quantization and codec round-trips, tensor lifetime and concurrency,
+padding/tiling geometry, format and key mapping. Shared-component parity goes in
+`tests/<Project>/Parity/` and must end in `*ParityTests`.
 
 ## Project Structure
 

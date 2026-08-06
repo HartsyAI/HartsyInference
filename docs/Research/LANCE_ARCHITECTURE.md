@@ -10,7 +10,7 @@
 > - **Sequence:** ChatML template (`text_template=true`) with a fixed per-task system prompt; the vision block is `<|vision_start|><|video_pad|>×N<|vision_end|>` (video_pad 151656 even for images!) followed by `<|im_end|>`. The **noise split includes both sentinels** (bidirectional inside, invisible from outside). Uncond = same sequence with the caption tokens (modality 0) removed.
 > - **Sampling (OQ#4/#5 resolved):** 2-way text CFG only for T2I, `cfg_interval=[0.4, 1.0]` (cond-only below t=0.4), `cfg_renorm_type="global"` with `cfg_renorm_min=0` (`v *= clamp(‖v_cond‖/‖v_cfg‖, 0, 1)`); timestep fed to the embedder is the raw shifted t∈[0,1].
 > - **No ViT/connector/task/modality embeds in this checkpoint** — T2I-only release; `lm_head` present but unused by generation.
-> - Engine: `LanceCheckpointConverter`/`LanceTransformer`/`LancePipelineCommon`/`LanceImagePipeline` reconciled; parity via `tests/python-reference/dump_lance_reference.py` + `LanceRealWeightParityTests` + `diff_lance_layers.py`.
+> - Engine: `LanceCheckpointConverter`/`LanceTransformer`/`LancePipelineCommon`/`LanceImagePipeline` reconciled; parity via `tests/python-reference/dump_lance_reference.py` + `diff_lance_layers.py` (the C# parity test was removed 2026-08-06).
 >
 > **BUILD STATUS (2026-06-08):** Lance image T2I is built and runs end-to-end (see PHASE_4 § Lance). Several open questions below were resolved while building from the verbatim upstream source (pulled raw):
 > - **OQ#2 (MaPE offsets):** NOT in `get_rope_index` (that's stock Qwen2.5-VL M-RoPE). They live in `data/common.py` `shift_position_ids` — `pos_shift=1000`; modality type-4 (gen/noisy) temporal rebased to the 1000 range, type-3 (clean-VAE) to 2000. Spatial axes unchanged.
@@ -649,10 +649,12 @@ Q4_K GGUF dumps are not yet available for Lance (model just released). When `uns
 
 ### Test-skipping discipline
 
-Following the project convention (every `*GenerationTests` skips cleanly when env vars or VRAM are missing):
-
-- `LanceImagePipelineTests` should require: `LANCE_3B_PATH`, `LANCE_VIT_PATH`, `LANCE_VAE_PATH`, plus PTX dir; VRAM probe ≥ 8 GB free for FP8 / ≥ 16 GB for FP16.
-- `LanceVideoPipelineTests` (Phase 9) should additionally require: `LANCE_3B_VIDEO_PATH`; VRAM probe ≥ 24 GB for short-clip FP8; skip cleanly when frame count would exceed memory.
+> **Superseded 2026-08-06.** The per-model pipeline/generation tests this section specified were
+> removed in the test-suite cleanup, and the rule is now the opposite: **do not add a test that
+> proves a model works end to end** — a model that stops working is visible the moment anyone uses
+> it. Test what breaks quietly instead (kernel numerics, cross-device equivalence, quantization and
+> codec round-trips, padding/tiling geometry, format and key mapping), and put shared-component
+> parity in `tests/<Project>/Parity/` with a `*ParityTests` name. See `docs/CODE_STYLE.md` §Testing.
 
 ### Reuse opportunities
 

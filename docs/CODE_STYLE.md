@@ -476,11 +476,27 @@ public long ElementCount => Shape.ElementCount;
 
 ### Test tiers — every test declares which lane it belongs to
 
-CI on the hosted GitHub runner (`ci-cpu.yml`) gates `main` on the **Unit** tier only: fast,
-deterministic, no GPU, no checkpoints. Everything heavier is opted OUT of that gate with a
-`[Trait("Category", ...)]` (or `[Trait("Network", "Real")]`) so it runs on the self-hosted GPU
-lane / nightly / manually instead. The CI filter excludes by trait, so an untagged test is a
+The **Unit** tier is the default lane: fast, deterministic, no GPU, no checkpoints. Everything
+heavier is opted OUT of it with a `[Trait("Category", ...)]` (or `[Trait("Network", "Real")]`) so it
+runs on the GPU lane / nightly / manually instead. Selection is by trait, so an untagged test is a
 Unit test and **must pass on any machine with no GPU and no weights.**
+
+> **No CI enforces this.** `ci-cpu.yml` / `ci-gpu.yml` were deleted in `dd97e88a` and are not coming
+> back by decision; `.github/workflows/` holds only `publish-nuget.yml`. The tiers are a manual
+> convention — run the Unit lane with `dotnet test` (no filter). `TestTierLintTests` still checks
+> that untagged tests neither instantiate a GPU backend nor read gitignored `python-reference`
+> fixtures unguarded, but it only runs when you run it.
+
+**A test earns its place only if its failure would be silent.** Do not add a test that proves a
+model works end to end — a model that stops working is visible the moment anyone uses it. Test the
+things that break quietly: kernel numerics, cross-device and cross-backend equivalence, quantization
+and codec round-trips, tensor lifetime and concurrency, padding/tiling geometry, format and key
+mapping. The suite was cut from 121,376 to 68,112 lines on 2026-08-06 applying exactly this rule; see the
+note at the top of `docs/Checklists/PARITY_VERIFICATION.md`.
+
+**Parity tests live in `Parity/`** inside their own test project (`tests/<Project>/Parity/`) and end
+in `*ParityTests`. Keep both conventions — `--filter "FullyQualifiedName~Parity"` is how the whole
+parity set gets selected, and a file that drifts out of the naming is silently excluded from it.
 
 | Tier | Attribute | Runs where | What belongs here |
 |---|---|---|---|
