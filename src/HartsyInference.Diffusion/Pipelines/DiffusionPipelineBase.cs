@@ -72,6 +72,24 @@ public abstract class DiffusionPipelineBase : IDisposable
     /// only (init).</summary>
     public IReadOnlyList<DitShardStage>? DitShardStages { get; init; }
 
+    /// <summary>Ordered context-parallel rank backends (the video DiT's token-sequence split with REPLICATED
+    /// weights — a latency feature); entry 0 must be <see cref="Backend"/>. Null/empty = off, the byte-identical
+    /// single-backend denoise. Settable at construction only (init); consumed by the Wan video pipeline.</summary>
+    public IReadOnlyList<IBackend>? CpBackends { get; init; }
+
+    /// <summary>Which path the most recent generation's context-parallel dispatch took — <c>"active"</c> or
+    /// <c>"fell-back(&lt;reason&gt;)"</c>; null when <see cref="CpBackends"/> isn't configured or the generation made
+    /// no decision yet. Same observability contract as <see cref="LastCfgParallelDecision"/>.</summary>
+    public string? LastCpDecision { get; protected set; }
+
+    /// <summary>Records <see cref="LastCpDecision"/> and mirrors it to the log with the stable
+    /// <c>[ContextParallel]</c> prefix tests and operators grep for.</summary>
+    protected void RecordCpDecision(string decision)
+    {
+        LastCpDecision = decision;
+        Logs.Info($"[ContextParallel] {decision}");
+    }
+
     /// <summary>Which path the most recent generation's CFG-parallel dispatch took — <c>"active"</c>,
     /// <c>"fell-back(&lt;reason&gt;)"</c>, or <c>"inapplicable(&lt;reason&gt;)"</c>; null when
     /// <see cref="CfgParallelBackend"/> isn't configured or the generation made no decision yet. The fallback is

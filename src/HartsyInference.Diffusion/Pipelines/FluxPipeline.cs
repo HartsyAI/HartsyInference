@@ -630,6 +630,11 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             }
             else
             {
+                // Worker threads must never be the first reader of a promoted host tensor: a prior
+                // sequential-CFG generation can auto-promote the cached negatives into the primary's weight
+                // cache, and the demote hook must fire HERE, not from the worker mid-cond-forward.
+                _ = negT5Embeddings!.DataPointer;
+                _ = negClipPooled!.DataPointer;
                 RecordCfgParallelDecision("active");
             }
         }
@@ -1079,6 +1084,21 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             Backend.FreeWeights(_transformer.EnumerateWeights());
         }
         _ditResident = false;
+    }
+
+    /// <summary>Releases the prompt-embedding cache (pipeline-internal state; see DiffusionPipelineBase).</summary>
+    protected override void DisposeCore()
+    {
+        _cachedClipPooled?.Dispose();
+        _cachedClipPooled = null;
+        _cachedT5?.Dispose();
+        _cachedT5 = null;
+        _cachedCondKey = null;
+        _cachedNegClipPooled?.Dispose();
+        _cachedNegClipPooled = null;
+        _cachedNegT5?.Dispose();
+        _cachedNegT5 = null;
+        _cachedNegKey = null;
     }
 
     private bool TryPreloadCfgParallel(bool doTrueCfg)

@@ -10,7 +10,8 @@ public sealed record PlacementConfig
     public static readonly PlacementConfig Single = new();
 
     /// <summary>Ordered pipeline-stage devices for sharded execution (LLM layer split / DiT block split),
-    /// e.g. <c>["cuda:0","cuda:1"]</c>. Empty = no sharding.</summary>
+    /// e.g. <c>["cuda:0","cuda:1"]</c>. Empty = no sharding. When <see cref="TensorParallelDegree"/> &gt; 1
+    /// these are instead the TP rank devices (count must equal the degree) and the layer split is off.</summary>
     public IReadOnlyList<string> ShardDevices { get; init; } = [];
 
     /// <summary>Explicit proportional layer split across <see cref="ShardDevices"/> (the llama.cpp
@@ -32,7 +33,17 @@ public sealed record PlacementConfig
     /// denoiser). Off = ShardDevices only affects LLMs.</summary>
     public bool EnableDitSharding { get; init; }
 
-    /// <summary>Future tensor-parallel degree (NCCL milestone); 1 = off.</summary>
+    /// <summary>Ordered devices for context parallelism: the video DiT's token sequence is split across them with
+    /// weights REPLICATED on each (a latency feature, not VRAM pooling). ≥2 entries enable it; entry 0 must resolve
+    /// to the primary backend. Empty = off. Mutually exclusive with <see cref="EnableDitSharding"/> and
+    /// <see cref="CfgParallelDevice"/>.</summary>
+    public IReadOnlyList<string> ContextParallelDevices { get; init; } = [];
+
+    /// <summary>LLM tensor-parallel rank count (Megatron-style: each rank owns a slice of every layer's Q/KV
+    /// heads and FFN columns, with two AllReduce seams per layer); 1 = off. When &gt; 1,
+    /// <see cref="ShardDevices"/> lists the rank devices (count == degree) and does NOT mean a layer split;
+    /// mutually exclusive with <see cref="ShardRatios"/>, <see cref="EnableDitSharding"/>,
+    /// <see cref="CfgParallelDevice"/>, and <see cref="ContextParallelDevices"/>.</summary>
     public int TensorParallelDegree { get; init; } = 1;
 
     /// <summary>True when every member is at its default — the engine must then behave byte-identically to a
@@ -44,6 +55,7 @@ public sealed record PlacementConfig
         && VaeDevice is null
         && CfgParallelDevice is null
         && !EnableDitSharding
+        && ContextParallelDevices.Count == 0
         && TensorParallelDegree == 1;
 
     /// <summary>Stable, order-sensitive identity for pipeline cache keys. Empty for <see cref="IsSingle"/> so
@@ -58,6 +70,6 @@ public sealed record PlacementConfig
             ? ""
             : string.Join(",", ShardDevices) + (ShardRatios is null ? "" : "@" + string.Join(",", ShardRatios));
         return $"|placement:shard={shard};te={TextEncoderDevice};vae={VaeDevice};cfg={CfgParallelDevice};" +
-            $"dit={(EnableDitSharding ? 1 : 0)};tp={TensorParallelDegree}";
+            $"dit={(EnableDitSharding ? 1 : 0)};cp={string.Join(",", ContextParallelDevices)};tp={TensorParallelDegree}";
     }
 }

@@ -129,11 +129,23 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
                 }
                 List<IBackend> stageBackends = new(1 + context.DitShardBackends.Count) { context.Backend };
                 stageBackends.AddRange(context.DitShardBackends);
+                // Stage entries can pool to one backend instance (EnsureBackend canonicalizes devices):
+                // probe each distinct backend once and split its free bytes among the entries sharing it,
+                // or a shared card's VRAM is double-counted.
+                Dictionary<IBackend, long> freeByBackend = new(ReferenceEqualityComparer.Instance);
+                foreach (IBackend stageBackend in stageBackends)
+                {
+                    if (!freeByBackend.ContainsKey(stageBackend))
+                    {
+                        (long free, _) = stageBackend.GetVramInfo();
+                        freeByBackend[stageBackend] = free;
+                    }
+                }
                 List<long> freeBytesPerStage = new(stageBackends.Count);
                 foreach (IBackend stageBackend in stageBackends)
                 {
-                    (long free, _) = stageBackend.GetVramInfo();
-                    freeBytesPerStage.Add(free);
+                    int shares = stageBackends.Count(b => ReferenceEquals(b, stageBackend));
+                    freeBytesPerStage.Add(freeByBackend[stageBackend] / shares);
                 }
                 IReadOnlyList<int> counts = PlacementPlanner.DitSplitPlan(freeBytesPerStage, transformer.BlockCount, sharedWeightBytes);
                 ditShardStages = new List<DitShardStage>(stageBackends.Count);
@@ -188,6 +200,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
                 TextEncoderBackend = context.TextEncoderBackendOrDefault,
                 VaeBackend = context.VaeBackendOrDefault,
                 DitShardStages = ditShardStages,
+                CpBackends = context.CpBackends,
             };
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             Logs.Info("[QwenImageRecipe] Qwen-Image ready (Qwen2.5-VL-7B encoder; flow-match Euler, dynamic shift).");

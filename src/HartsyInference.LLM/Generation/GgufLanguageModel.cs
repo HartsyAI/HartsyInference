@@ -150,10 +150,85 @@ public sealed class GgufLanguageModel : IDisposable
     /// compressed on-device (low VRAM, slower decode) instead of caching dequantized F16 weights. Set
     /// <paramref name="dequantizeToF32"/> for the CPU backend, which is F32-only and cannot consume the quantized
     /// projection weights the CUDA path keeps compressed — every quantized/half tensor is widened to F32 at load.</summary>
+    /// <summary>Checkpoint loaded for TENSOR-PARALLEL construction: the raw (relabeled/split) weight dict plus
+    /// config/tokenizer/template, with NO <see cref="GenericTransformer"/>. <c>TensorParallelTransformer.LoadWeights</c>
+    /// copies per-rank slices out of <see cref="Weights"/>; dict tensors keep borrowing this object's GGUF mmap,
+    /// so it must stay alive as long as the TP transformer does (host page-cache residency — cheap).</summary>
+    public sealed class TpCheckpoint : IDisposable
+    {
+        private readonly GgufModelLoader.LoadedGgufModel _handle;
+        private int _disposed;
+
+        internal TpCheckpoint(GgufModelLoader.LoadedGgufModel handle, Dictionary<string, Tensor> weights,
+            TransformerConfig config, ILlmTokenizer tokenizer, IChatTemplate template)
+        {
+            _handle = handle;
+            Weights = weights;
+            Config = config;
+            Tokenizer = tokenizer;
+            Template = template;
+        }
+
+        public IReadOnlyDictionary<string, Tensor> Weights { get; }
+        public TransformerConfig Config { get; }
+        public ILlmTokenizer Tokenizer { get; }
+        public IChatTemplate Template { get; }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            // Mirrors GenericTransformer's weight ownership: dict values are mmap-borrowed views or owned
+            // dequant/split copies — Tensor.Dispose is safe for both.
+            foreach (Tensor t in Weights.Values) t.Dispose();
+            _handle.Dispose();
+        }
+    }
+
+    /// <summary>Loads the checkpoint for tensor-parallel use — same relabel/dequant/fused-split pipeline as
+    /// <see cref="Load"/>, stopping before <see cref="GenericTransformer"/> construction.</summary>
+    public static TpCheckpoint LoadForTensorParallel(string path, bool lowVramQuant = false)
+    {
+        GgufModelLoader.LoadedGgufModel handle = GgufModelLoader.Load(path);
+        try
+        {
+            (Dictionary<string, Tensor> weights, TransformerConfig config) = PrepareWeights(handle, lowVramQuant, dequantizeToF32: false);
+            ILlmTokenizer tokenizer = BuildTokenizer(handle.Metadata);
+            IChatTemplate template = BuildTemplate(handle.Metadata, tokenizer);
+            return new TpCheckpoint(handle, weights, config, tokenizer, template);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
     public static GgufLanguageModel Load(string path, bool lowVramQuant = false, bool dequantizeToF32 = false)
     {
         GgufModelLoader.LoadedGgufModel handle = GgufModelLoader.Load(path);
         try
+        {
+            (Dictionary<string, Tensor> weights, TransformerConfig config) = PrepareWeights(handle, lowVramQuant, dequantizeToF32);
+            GenericTransformer transformer = new(config);
+            transformer.LoadWeights(weights, "model");
+
+            ILlmTokenizer tokenizer = BuildTokenizer(handle.Metadata);
+            IChatTemplate template = BuildTemplate(handle.Metadata, tokenizer);
+
+            return new GgufLanguageModel(handle, config, transformer, tokenizer, template);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The shared load core: relabel GGUF dims → dequant unsupported formats → split fused tensors →
+    /// infer config. Everything up to (but excluding) transformer construction.</summary>
+    private static (Dictionary<string, Tensor> Weights, TransformerConfig Config) PrepareWeights(
+        GgufModelLoader.LoadedGgufModel handle, bool lowVramQuant, bool dequantizeToF32)
+    {
         {
             if (SsmArchitectures.Contains(handle.Architecture))
                 throw new NotSupportedException($"'{handle.Architecture}' is a state-space (non-transformer) architecture — load it via HartsyInference.LLM.Ssm.SsmLanguageModel, not GgufLanguageModel.");
@@ -192,18 +267,7 @@ public sealed class GgufLanguageModel : IDisposable
             // MoE: GGUF stacks all experts into one 3D tensor per projection; split them into the per-expert 2D
             // weights the MoE block loads (reshape to 2D + contiguous row-byte slice, dtype-preserving).
             if (config.Moe is not null) SplitStackedExperts(weights, config);
-            GenericTransformer transformer = new(config);
-            transformer.LoadWeights(weights, "model");
-
-            ILlmTokenizer tokenizer = BuildTokenizer(handle.Metadata);
-            IChatTemplate template = BuildTemplate(handle.Metadata, tokenizer);
-
-            return new GgufLanguageModel(handle, config, transformer, tokenizer, template);
-        }
-        catch
-        {
-            handle.Dispose();
-            throw;
+            return (weights, config);
         }
     }
 

@@ -94,7 +94,7 @@ public sealed class SpeechService : ISpeechService
             {
                 DeleteTempReference(referenceWavPath);
             }
-        }, cancel);
+        }, cancel, stageBackends: loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null);
     }
 
     /// <summary>Builds the load-time context: single-device (byte-identical to pre-placement behavior) unless the

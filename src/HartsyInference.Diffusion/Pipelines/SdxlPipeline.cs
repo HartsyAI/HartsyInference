@@ -957,4 +957,15 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         }
         return "";
     }
+
+    /// <summary>Releases the prompt-embedding cache (pipeline-internal state; see DiffusionPipelineBase).</summary>
+    protected override void DisposeCore()
+    {
+        _cachedTextEmb?.Dispose();
+        _cachedTextEmb = null;
+        _cachedPooled?.Dispose();
+        _cachedPooled = null;
+        _teKeyL = _teKeyLNeg = _teKeyG = _teKeyGNeg = null;
+        _teKeyEosG = _teKeyNegEosG = _teKeyClipSkip = -1;
+    }
 }

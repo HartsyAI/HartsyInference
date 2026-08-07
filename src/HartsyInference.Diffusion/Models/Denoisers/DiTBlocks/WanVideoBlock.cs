@@ -80,7 +80,7 @@ public sealed unsafe class WanVideoBlock
     /// to <c>[1, heads, S, S]</c> — Matrix-Game 2's block-causal + local-window attention.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, WanRope rope, Tensor cos, Tensor sin, int tokensPerGroup,
         Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0, string? dbg = null,
-        Action<Tensor>? postSelfAttnHook = null)
+        Action<Tensor>? postSelfAttnHook = null, Func<Tensor, Tensor, (Tensor K, Tensor V)>? selfAttnKvExchange = null)
     {
         int s = (int)hidden.Shape[0];
         (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor cShift, Tensor cScale, Tensor cGate) = Modulation(backend, temb);
@@ -89,7 +89,7 @@ public sealed unsafe class WanVideoBlock
         // 1. self-attn
         Tensor n1 = ApplyShiftScale(backend, LayerNorm(backend, hidden, null, null, s), scaleMsa, shiftMsa, s, tokensPerGroup);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_n1", n1);
-        Tensor attn1 = Attention(backend, n1, n1, 0, applyRope: true, rope, cos, sin, s, s, selfAttnMask);
+        Tensor attn1 = Attention(backend, n1, n1, 0, applyRope: true, rope, cos, sin, s, s, selfAttnMask, selfAttnKvExchange);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn1", attn1);
         n1.Dispose();
         Tensor h1 = GatedAdd(backend, hidden, attn1, gateMsa, s, tokensPerGroup);
@@ -127,7 +127,8 @@ public sealed unsafe class WanVideoBlock
     }
 
     private Tensor Attention(IBackend backend, Tensor qInput, Tensor kvInput, int idx, bool applyRope,
-        WanRope rope, Tensor cos, Tensor sin, int sq, int sk, Tensor? mask = null)
+        WanRope rope, Tensor cos, Tensor sin, int sq, int sk, Tensor? mask = null,
+        Func<Tensor, Tensor, (Tensor K, Tensor V)>? kvExchange = null)
     {
         Tensor q = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(q, qInput, _q[idx]!, _qB[idx]);
         Tensor k = new Tensor(new TensorShape(sk, _dim), DType.F32); backend.Linear(k, kvInput, _k[idx]!, _kB[idx]);
@@ -152,6 +153,12 @@ public sealed unsafe class WanVideoBlock
                 backend.WanRopeInterleavedPerHead(qn, cos, sin, sq, _heads, _headDim);
                 backend.WanRopeInterleavedPerHead(kn, cos, sin, sk, _heads, _headDim);
             }
+        }
+
+        if (kvExchange is not null)   // context parallel: trade local post-RoPE K/V for the full sequence's
+        {
+            (kn, v) = kvExchange(kn, v);   // consumes the locals; returns [S, dim]
+            sk = (int)kn.Shape[0];
         }
 
         Tensor qMh = ToBhsd(backend, qn, sq); qn.Dispose();
@@ -431,15 +438,17 @@ public sealed unsafe class WanVideoBlock
     }
 
     // Cached [1, dim] ones row so plain elementwise add (backend.Add has no CUDA kernel) can run as a GPU
-    // GatedResidualLastDim: out = a + 1·b. Built once on first use.
+    // GatedResidualLastDim: out = a + 1·b. Built once on first use; fill-before-publish + CAS because two
+    // branch/rank threads (CFG-parallel, context-parallel) share the block and race the first touch.
     private Tensor? _ones;
     private Tensor Ones()
     {
         if (_ones is null)
         {
-            _ones = new Tensor(new TensorShape(1, _dim), DType.F32);
-            float* p = (float*)_ones.DataPointer;
+            Tensor ones = new Tensor(new TensorShape(1, _dim), DType.F32);
+            float* p = (float*)ones.DataPointer;
             for (int i = 0; i < _dim; i++) p[i] = 1f;
+            if (Interlocked.CompareExchange(ref _ones, ones, null) is not null) ones.Dispose();
         }
         return _ones;
     }

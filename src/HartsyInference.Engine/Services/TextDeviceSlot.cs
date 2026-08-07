@@ -31,6 +31,18 @@ internal sealed class TextDeviceSlot
     /// <summary>The generation pipeline built for <see cref="Model"/> on <see cref="Backend"/>.</summary>
     public TextGenerationPipeline? Pipeline { get; set; }
 
+    /// <summary>Tensor-parallel transformer (<c>TensorParallelDegree</c> &gt; 1), or null. Rank backends reuse
+    /// the layer-split fields: <see cref="Backend"/> = rank 0 (logits/sampling), <see cref="ExtraStageBackends"/>
+    /// = ranks 1.. — so every existing slot-backend disposal path covers TP unchanged.</summary>
+    public TensorParallelTransformer? TpTransformer { get; set; }
+
+    /// <summary>The TP collective communicator (owned; disposed with the slot's model).</summary>
+    public ICollectiveComm? TpComm { get; set; }
+
+    /// <summary>The TP checkpoint (weight dict + mmap + tokenizer/template) — must outlive
+    /// <see cref="TpTransformer"/>, whose rank slices were copied from (and whose embed gathers read) it.</summary>
+    public GgufLanguageModel.TpCheckpoint? TpCheckpoint { get; set; }
+
     /// <summary>The loaded GGUF state-space model (mamba/mamba2/rwkv6/rwkv7), or null for a transformer.</summary>
     public SsmLanguageModel? SsmModel { get; set; }
 

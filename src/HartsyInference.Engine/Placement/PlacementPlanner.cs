@@ -303,6 +303,73 @@ public static class PlacementPlanner
     /// config fails fast instead of misbehaving silently at generation time.</summary>
     public static void ValidatePlacement(PlacementConfig placement)
     {
+        if (placement.TensorParallelDegree < 1)
+        {
+            throw new ArgumentException(
+                $"TensorParallelDegree must be >= 1 (1 = off), got {placement.TensorParallelDegree}.", nameof(placement));
+        }
+        if (placement.TensorParallelDegree > 1)
+        {
+            if (placement.ShardDevices.Count != placement.TensorParallelDegree)
+            {
+                throw new ArgumentException(
+                    $"TensorParallelDegree={placement.TensorParallelDegree} requires exactly that many ShardDevices "
+                    + $"(the TP rank devices), got {placement.ShardDevices.Count}. Under tensor parallelism "
+                    + "ShardDevices lists the ranks and the layer split is off.", nameof(placement));
+            }
+            if (placement.ShardRatios is not null)
+            {
+                throw new ArgumentException(
+                    "ShardRatios cannot be set with TensorParallelDegree > 1 — ratios steer the LAYER split, which "
+                    + "is off under tensor parallelism (every rank holds the full layer stack; there is nothing to "
+                    + "ratio). Leave it null.", nameof(placement));
+            }
+            if (placement.EnableDitSharding)
+            {
+                throw new ArgumentException(
+                    "TensorParallelDegree > 1 and EnableDitSharding cannot both be set — TP claims ShardDevices as "
+                    + "its rank list, while DiT sharding claims it as a block-range pipeline; they were not designed "
+                    + "to compose. Configure only one.", nameof(placement));
+            }
+            if (placement.CfgParallelDevice is not null)
+            {
+                throw new ArgumentException(
+                    "TensorParallelDegree > 1 and CfgParallelDevice cannot both be set — they are two different ways "
+                    + "to spend extra GPUs on one model (intra-layer weight split vs concurrent CFG branch) and were "
+                    + "not designed to compose. Configure only one.", nameof(placement));
+            }
+            if (placement.ContextParallelDevices.Count > 0)
+            {
+                throw new ArgumentException(
+                    "TensorParallelDegree > 1 and ContextParallelDevices cannot both be set — TP splits weights "
+                    + "across ranks, context parallelism splits the token sequence with replicated weights; they "
+                    + "were not designed to compose. Configure only one.", nameof(placement));
+            }
+        }
+        if (placement.ContextParallelDevices.Count == 1)
+        {
+            throw new ArgumentException(
+                "ContextParallelDevices needs at least 2 entries when set — context parallelism splits the token "
+                + "sequence across ranks, and a single rank is just the primary backend. Leave it empty to disable.",
+                nameof(placement));
+        }
+        if (placement.ContextParallelDevices.Count >= 2)
+        {
+            if (placement.EnableDitSharding)
+            {
+                throw new ArgumentException(
+                    "ContextParallelDevices and EnableDitSharding cannot both be set — context parallelism replicates "
+                    + "the DiT's weights on every rank for latency, while DiT sharding splits the block range for "
+                    + "pooled VRAM; they were not designed to compose. Configure only one.", nameof(placement));
+            }
+            if (placement.CfgParallelDevice is not null)
+            {
+                throw new ArgumentException(
+                    "ContextParallelDevices and CfgParallelDevice cannot both be set — they are two different ways "
+                    + "to spend a second GPU on the same denoiser forward (sequence split vs concurrent CFG branch) "
+                    + "and were not designed to compose. Configure only one.", nameof(placement));
+            }
+        }
         if (!placement.EnableDitSharding)
         {
             return;

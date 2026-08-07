@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -197,15 +198,23 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
     /// ComfyUI <c>qwen_image/model.py</c> <c>_modulate/_apply_gate</c> with <c>timestep_zero_index</c>. The text
     /// stream always uses the real-timestep modulation (upstream chunks temb back to row 0 for txt_mod).</param>
     /// <param name="timestepZeroIndex">First image-stream row of the reference tokens (= main noise token count).</param>
+    /// <param name="cp">Context-parallel rank context: <paramref name="image"/> carries only this rank's rows of
+    /// the img stream (the txt stream is replicated), the rope table is the rank's global-position slice, and the
+    /// post-RoPE joint K/V is traded through <see cref="CpKvExchange"/> (txt prefix replicated, img rows exchanged)
+    /// so the local queries attend over the FULL sequence. Null = the byte-identical single-backend path.</param>
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
         QwenImageRope rope, int imgPackedH, int imgPackedW, int txtPositionStart,
-        (int H, int W)[]? refGrids = null, Tensor? tembZero = null, int timestepZeroIndex = 0)
+        (int H, int W)[]? refGrids = null, Tensor? tembZero = null, int timestepZeroIndex = 0,
+        CpForwardContext? cp = null)
     {
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
         int txtSeqLen = (int)text.Shape[1];
         int totalSeqLen = imgSeqLen + txtSeqLen;
         float scale = 1.0f / MathF.Sqrt(_headDim);
+        if (cp is not null && (batch != 1 || refGrids is { Length: > 0 } || tembZero is not null || image.DType != DType.F32))
+            throw new InvalidOperationException(
+                "Context parallelism requires batch 1, F32 activations, and no edit-reference conditioning — the pipeline must gate these off.");
 
         // Modulation params: img_mod / txt_mod each → [shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp].
         // .Forward runs Silu+Linear on the GPU; the per-row split it returns is tiny ([B, hidden] each) — negligible.
@@ -279,21 +288,36 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
         // the host ApplyJoint remains as the batch>1 fallback and the tests' numerical reference. ──
         if (batch == 1)
         {
-            (Tensor ropeCos, Tensor ropeSin) = rope.GetOrBuildJointTables(
-                backend, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids ?? []);
+            // CP: the rank's table slice carries the GLOBAL grid positions for its rows, so roping the local
+            // joint tensor is bit-identical to slicing a full-sequence rope (RoPE is per-row independent).
+            (Tensor ropeCos, Tensor ropeSin) = cp is null
+                ? rope.GetOrBuildJointTables(backend, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids ?? [])
+                : rope.GetOrBuildJointTables(backend, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, [],
+                    cp.Plan.Ranks[cp.Rank].TokenStart, imgSeqLen);
             backend.WanRopeInterleaved(jointQf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
             backend.WanRopeInterleaved(jointKf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
         }
 
+        // ── 5b. Context-parallel K/V rendezvous: trade the local [txt ∥ img_rank] K/V for [txt ∥ img_FULL]
+        // (txt prefix comes from this rank's own deterministic replica; only img rows cross ranks). Queries stay
+        // local, so SDPA below is [Sq_local × Sk_full] — every local token attends over the whole sequence. ──
+        int kvSeqLen = totalSeqLen;
+        if (cp is not null)
+        {
+            (jointKf, jointVf) = cp.Exchange.Exchange(cp.Rank, jointKf, jointVf, replicatedPrefixRows: txtSeqLen);
+            kvSeqLen = txtSeqLen + cp.Plan.TotalTokens;
+        }
+
         // ── 6. Permute [B, S, H, D] → [B, H, S, D] for SDPA ──
+        TensorShape kvMh = kvSeqLen == totalSeqLen ? jointMh : new TensorShape(batch, _numHeads, kvSeqLen, _headDim);
         Tensor jointQ = new Tensor(jointMh, act);
         backend.Permute0213(jointQ, jointQf, totalSeqLen, _numHeads, _headDim);
         jointQf.Dispose();
-        Tensor jointK = new Tensor(jointMh, act);
-        backend.Permute0213(jointK, jointKf, totalSeqLen, _numHeads, _headDim);
+        Tensor jointK = new Tensor(kvMh, act);
+        backend.Permute0213(jointK, jointKf, kvSeqLen, _numHeads, _headDim);
         jointKf.Dispose();
-        Tensor jointV = new Tensor(jointMh, act);
-        backend.Permute0213(jointV, jointVf, totalSeqLen, _numHeads, _headDim);
+        Tensor jointV = new Tensor(kvMh, act);
+        backend.Permute0213(jointV, jointVf, kvSeqLen, _numHeads, _headDim);
         jointVf.Dispose();
 
         if (batch != 1)

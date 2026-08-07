@@ -28,7 +28,8 @@ public static class CfgBranchRunner
     /// calling thread, then joins. If <paramref name="cond"/> throws, the worker's outcome is still observed
     /// (so a faulted thread doesn't leak an unhandled exception) but <paramref name="cond"/>'s exception is what
     /// propagates, matching the sequential code path's exception ordering. If only <paramref name="uncond"/>
-    /// throws, that exception propagates after <paramref name="cond"/> completes.</summary>
+    /// throws, that exception propagates after <paramref name="cond"/> completes. On either error path the
+    /// surviving branch's result tensor is disposed here before the rethrow.</summary>
     public static (Tensor Cond, Tensor Uncond) Run(Func<Tensor> cond, Func<Tensor> uncond)
     {
         ArgumentNullException.ThrowIfNull(cond);
@@ -60,13 +61,16 @@ public static class CfgBranchRunner
         }
         catch
         {
+            // Join before any dispose — the worker may still be writing uncondResult.
             worker.Join();
+            uncondResult?.Dispose();
             throw;
         }
 
         worker.Join();
         if (uncondException is not null)
         {
+            condResult.Dispose();
             ExceptionDispatchInfo.Capture(uncondException).Throw();
         }
         return (condResult, uncondResult!);

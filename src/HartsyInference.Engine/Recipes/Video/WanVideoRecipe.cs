@@ -149,6 +149,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
             WanVideoPipeline pipeline = new WanVideoPipeline(context.Backend, transformer, vaeDecoder, config, vaeEncoder)
             {
                 CfgParallelBackend = context.CfgParallelBackend,
+                CpBackends = context.CpBackends,
                 VaeBackend = context.VaeBackendOrDefault,
             };
             Logs.Info($"[WanVideoRecipe] Wan ready ({mode}).");

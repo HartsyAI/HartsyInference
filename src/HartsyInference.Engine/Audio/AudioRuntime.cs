@@ -96,13 +96,17 @@ internal sealed class AudioRuntime
     /// <summary>Runs one audio job under this engine's generation lock: evicts other models first when memory is
     /// tight, then frees leftover activations and trims the pool afterwards so a finished generation leaves nothing
     /// behind.</summary>
-    internal async Task<T> RunAsync<T>(IBackend backend, string modelKey, Func<CancellationToken, Task<T>> work, CancellationToken cancel)
+    internal async Task<T> RunAsync<T>(IBackend backend, string modelKey, Func<CancellationToken, Task<T>> work, CancellationToken cancel,
+        IReadOnlyList<IBackend>? stageBackends = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(work);
         await _genLock.WaitAsync(cancel).ConfigureAwait(false);
         // Device gate INSIDE the engine's audio lock (gate is always innermost, process-wide lock order).
-        IDisposable gate = await DeviceGate.AcquireAsync(backend, cancel).ConfigureAwait(false);
+        // A layer-split job passes its stage backends so EVERY stage device is gated, not just the primary.
+        IDisposable gate = stageBackends is { Count: > 0 }
+            ? await DeviceGate.AcquireAllAsync([backend, .. stageBackends], cancel).ConfigureAwait(false)
+            : await DeviceGate.AcquireAsync(backend, cancel).ConfigureAwait(false);
         try
         {
             EvictOthersUnderMemoryPressure(backend, modelKey);

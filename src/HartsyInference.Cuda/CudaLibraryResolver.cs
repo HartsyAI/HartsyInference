@@ -44,6 +44,10 @@ public static class CudaLibraryResolver
         // File.Exists filters), and a 'cudnn' folder beside the assembly. See CudnnRuntime.
         string? cudnnDir = Environment.GetEnvironmentVariable("HARTSY_CUDNN_DIR");
         if (!string.IsNullOrEmpty(cudnnDir)) dirs.Add(cudnnDir);
+        // NCCL commonly lives inside a torch venv (site-packages/nvidia/nccl/lib) rather than the loader
+        // path; this override (or a copy/hardlink in any dir above) makes it resolvable without apt.
+        string? ncclDir = Environment.GetEnvironmentVariable("HARTSY_NCCL_DIR");
+        if (!string.IsNullOrEmpty(ncclDir)) dirs.Add(ncclDir);
         foreach (int major in new[] { 13, 12, 11 }) dirs.Add(CudnnRuntime.CacheLibDir(major));
         dirs.Add(CudnnRuntime.BundledDir());
         return dirs.ToArray();
@@ -143,6 +147,17 @@ public static class CudaLibraryResolver
                 return LoadFirst("cublasLt64_13.dll", "cublasLt64_12.dll", "cublasLt64_11.dll");
             else if (linux)
                 return LoadFirst("libcublasLt.so.13", "libcublasLt.so.12", "libcublasLt.so.11");
+        }
+
+        // NCCL (collective transport — context/tensor parallelism). Versioned soname only, no unversioned
+        // alias; availability is optional by design (NcclApi.IsLoadable gates, the peer-copy transport is
+        // the fallback), so resolution failure here surfaces as a caught DllNotFoundException, not a crash.
+        if (libraryName == "nccl")
+        {
+            if (windows)
+                return LoadFirst("nccl64_2.dll");
+            else if (linux)
+                return LoadFirst("libnccl.so.2");
         }
 
         return 0;

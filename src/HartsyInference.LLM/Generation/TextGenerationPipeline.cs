@@ -13,11 +13,15 @@ namespace HartsyInference.LLM.Generation;
 /// <see cref="IBackend"/>. Stop tokens come from the tokenizer. The pipeline does not own the model/tokenizer.</summary>
 public sealed class TextGenerationPipeline
 {
-    private readonly GenericTransformer _model;
+    private readonly GenericTransformer? _model;
     private readonly ILlmTokenizer _tokenizer;
     private readonly IChatTemplate _template;
     private readonly IBackend _backend;
     private readonly HashSet<int> _stopIds;
+
+    /// <summary>Tensor-parallel transformer when this pipeline runs TP; null otherwise. Mutually exclusive
+    /// with <see cref="_model"/> — TP has its own forward/logits and no graph/speculative/staged paths.</summary>
+    private readonly TensorParallelTransformer? _tp;
 
     /// <summary>Layer-split plan when this pipeline runs sharded across devices; null = single-backend. When
     /// set, <see cref="_backend"/> is the LAST stage's backend (final norm, logits, sampling live there).</summary>
@@ -47,12 +51,26 @@ public sealed class TextGenerationPipeline
         PreloadDecodeWeights();
     }
 
+    /// <summary>Tensor-parallel pipeline: prefill + eager greedy/sampled decode via
+    /// <see cref="TensorParallelTransformer.ForwardTp"/>. Graph/speculative decode and layer-split staging are
+    /// structurally unreachable in this mode. The caller preloads per-rank weights (it owns the rank backends);
+    /// <paramref name="rankZeroBackend"/> is where logits/sampling rows are read.</summary>
+    public TextGenerationPipeline(TensorParallelTransformer tp, ILlmTokenizer tokenizer, IBackend rankZeroBackend,
+        IChatTemplate? template = null)
+    {
+        _tp = tp;
+        _tokenizer = tokenizer;
+        _backend = rankZeroBackend;
+        _template = template ?? new ChatMlTemplate();
+        _stopIds = [.. tokenizer.StopIds];
+    }
+
     /// <summary>The hidden-state forward for one step: staged across the placement when sharded, else the
     /// plain single-backend path.</summary>
     private Tensor ForwardTokens(ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache) =>
         Staged
-            ? _model.ForwardStaged(_placement!, tokenIds, posStart, cache)
-            : _model.Forward(_backend, tokenIds, posStart, cache);
+            ? _model!.ForwardStaged(_placement!, tokenIds, posStart, cache)
+            : _model!.Forward(_backend, tokenIds, posStart, cache);
 
     /// <summary>Headroom-guarded weight preload: uploads every transformer weight that fits while leaving
     /// 2 GB of VRAM free (large stragglers stay lazy). Idempotent — already-cached tensors are skipped.</summary>
@@ -64,9 +82,9 @@ public sealed class TextGenerationPipeline
             // 151k×4096 — packing the preload without reserving it OOMed GLM's graph setup) — but ONLY for
             // graph-eligible models: reserving it for graph-EXCLUDED ones (gemma-4 pre-bring-up) starved
             // their eager preload budget and halved eager decode (91.7 → 48.8 tok/s, 2026-07-23).
-            TransformerConfig cfg = _model.Config;
+            TransformerConfig cfg = _model!.Config;
             long headroom = 2L << 30;
-            if (_model.SupportsGraphDecode(_backend))
+            if (_model!.SupportsGraphDecode(_backend))
                 headroom += (long)cfg.VocabSize * cfg.HiddenSize * sizeof(float);
             // NOTE: an extra +2 GB low-VRAM slack lived here briefly (prefill-transient protection) and
             // was REMOVED: it pushed ~0.8 GB of GLM's weights out of the preload budget, and unresident
@@ -84,7 +102,7 @@ public sealed class TextGenerationPipeline
             {
                 List<Tensor> toPreload = [];
                 long budget = free - headroom;
-                foreach (Tensor t in _model.EnumerateWeights(includeRedundantSplits: false))
+                foreach (Tensor t in _model!.EnumerateWeights(includeRedundantSplits: false))
                 {
                     long bytes = Tensor.ComputeByteSize(t.Shape, t.DType);
                     if (budget - bytes < 0) continue;
@@ -92,7 +110,7 @@ public sealed class TextGenerationPipeline
                     toPreload.Add(t);
                 }
                 long skipped = 0; int skippedCount = 0;
-                foreach (Tensor t in _model.EnumerateWeights(includeRedundantSplits: false))
+                foreach (Tensor t in _model!.EnumerateWeights(includeRedundantSplits: false))
                 {
                     long b = Tensor.ComputeByteSize(t.Shape, t.DType);
                     if (!toPreload.Contains(t)) { skipped += b; skippedCount++; }
@@ -117,11 +135,16 @@ public sealed class TextGenerationPipeline
         int[] promptIds = BuildPromptIds(request);
         if (promptIds.Length == 0) throw new ArgumentException("Prompt produced zero tokens.", nameof(request));
 
-        TransformerConfig cfg = _model.Config;
+        TransformerConfig cfg = _tp?.Config ?? _model!.Config;
         SamplerChain sampler = SamplerChain.FromOptions(request.Sampling, _tokenizer, cfg.VocabSize);
         List<int> generated = new(request.MaxTokens);
         HashSet<int> stops = _stopIds;
         if (request.StopTokenIds is not null) { stops = [.. _stopIds]; foreach (int s in request.StopTokenIds) stops.Add(s); }
+
+        if (_tp is not null)
+        {
+            return GenerateTp(request, promptIds, sampler, stops, onToken, ct);
+        }
 
         // Fixed-capacity KV (O(n) appends, bounded VRAM) sized for the prompt + the requested generation.
         int maxSeq = promptIds.Length + request.MaxTokens + 1;
@@ -151,7 +174,7 @@ public sealed class TextGenerationPipeline
             {
                 lastHidden = hidden;
             }
-            using (Tensor logits = _model.ProjectLogits(_backend, lastHidden, 1))
+            using (Tensor logits = _model!.ProjectLogits(_backend, lastHidden, 1))
             {
                 Span<float> lastRow = LastRow(logits, 1, cfg.VocabSize);
                 next = sampler.Next(lastRow, generated);
@@ -176,7 +199,7 @@ public sealed class TextGenerationPipeline
             && !request.Sampling.HasJsonConstraint
             && graphDecodeRequested
             && !Staged
-            && _model.SupportsGraphDecode(_backend);
+            && _model!.SupportsGraphDecode(_backend);
 
         // Prompt-lookup speculative decoding: batches a verify pass across several drafted tokens instead of
         // one plain decode step apiece. Mutually exclusive with graph decode (graph decode wins when both are
@@ -207,7 +230,7 @@ public sealed class TextGenerationPipeline
                 onToken?.Invoke(next);
 
                 using Tensor hidden = ForwardTokens([next], cache.CurrentLength, cache);
-                using Tensor logits = _model.ProjectLogits(_backend, hidden, 1);
+                using Tensor logits = _model!.ProjectLogits(_backend, hidden, 1);
                 Span<float> row = LastRow(logits, 1, cfg.VocabSize);
                 next = sampler.Next(row, generated);
             }
@@ -220,6 +243,50 @@ public sealed class TextGenerationPipeline
             PromptTokens = promptIds.Length,
             StoppedOnStopToken = stopped,
         };
+    }
+
+    /// <summary>Tensor-parallel generation: prefill + eager decode over the per-rank KV caches. No graph or
+    /// speculative decode (structurally unreachable — <c>ForwardTp</c> is the only forward), no last-row
+    /// gather optimization in v1 (the prefill projects all rows; correctness-first, noted follow-up).</summary>
+    private GenerationResult GenerateTp(GenerationRequest request, int[] promptIds, SamplerChain sampler,
+        HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
+    {
+        TransformerConfig cfg = _tp!.Config;
+        List<int> generated = new(request.MaxTokens);
+        KvCache[] caches = _tp.CreateKvCaches();
+        try
+        {
+            bool stopped = false;
+            int next;
+            using (Tensor hidden = _tp.ForwardTp(promptIds, 0, caches))
+            using (Tensor logits = _tp.ProjectLogits(hidden, promptIds.Length))
+            {
+                Span<float> lastRow = LastRow(logits, promptIds.Length, cfg.VocabSize);
+                next = sampler.Next(lastRow, generated);
+            }
+            for (int step = 0; step < request.MaxTokens; step++)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (stops.Contains(next)) { stopped = true; break; }
+                generated.Add(next);
+                onToken?.Invoke(next);
+
+                using Tensor hidden = _tp.ForwardTp([next], caches[0].CurrentLength, caches);
+                using Tensor logits = _tp.ProjectLogits(hidden, 1);
+                next = sampler.Next(LastRow(logits, 1, cfg.VocabSize), generated);
+            }
+            return new GenerationResult
+            {
+                TokenIds = generated,
+                Text = _tokenizer.Decode(generated),
+                PromptTokens = promptIds.Length,
+                StoppedOnStopToken = stopped,
+            };
+        }
+        finally
+        {
+            foreach (KvCache cache in caches) cache.Dispose();
+        }
     }
 
     /// <summary>Greedy decode via one captured CUDA graph, replayed once per token. <paramref name="firstToken"/>
@@ -236,7 +303,7 @@ public sealed class TextGenerationPipeline
     private bool GenerateGraphDecode(GenerationRequest request, FixedKvCache cache, int promptLen, int firstToken,
         List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
     {
-        TransformerConfig cfg = _model.Config;
+        TransformerConfig cfg = _model!.Config;
 
         // A genuinely cold model's first-ever graph capture can fail with CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED:
         // prefill's multi-token GEMM shape and a single-token GEMV-shaped forward pass apparently promote a
@@ -250,7 +317,7 @@ public sealed class TextGenerationPipeline
         using (FixedKvCache warmup = new(cfg.NumLayers, 1, cfg.NumKvHeads, GraphDecodeWarmupHeadDims(cfg), maxSequenceLength: 2))
         {
             using Tensor warmupHidden = _model.Forward(_backend, [firstToken], 0, warmup);
-            _model.ProjectLogits(_backend, warmupHidden, 1).Dispose();
+            _model!.ProjectLogits(_backend, warmupHidden, 1).Dispose();
         }
 
         // Force EVERY decode weight device-resident before capture. Lazy auto-promotion leaves stragglers
@@ -279,7 +346,7 @@ public sealed class TextGenerationPipeline
             _backend.WriteDevicePos(devicePos, pos + 1, pos);
             _backend.WriteDeviceCounter(historyCount, 0);
             graph = _backend.CaptureGraph(() =>
-                _model.ForwardGraphDecodeStep(_backend, embedTable, cache, cosTable, sinTable, devicePos, deviceTokenId,
+                _model!.ForwardGraphDecodeStep(_backend, embedTable, cache, cosTable, sinTable, devicePos, deviceTokenId,
                     history, historyCount, repetitionPenalty));
 
             int next = firstToken;
@@ -336,7 +403,7 @@ public sealed class TextGenerationPipeline
     private bool GenerateSpeculative(GenerationRequest request, FixedKvCache cache, int[] promptIds, SamplerChain sampler,
         int firstToken, List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
     {
-        TransformerConfig cfg = _model.Config;
+        TransformerConfig cfg = _model!.Config;
         int next = firstToken;
 
         while (generated.Count < request.MaxTokens)
@@ -358,7 +425,7 @@ public sealed class TextGenerationPipeline
             Array.Copy(draft, 0, input, 1, k);
 
             using Tensor hidden = _model.Forward(_backend, input, cachePos, cache);
-            using Tensor logits = _model.ProjectLogits(_backend, hidden, k + 1);
+            using Tensor logits = _model!.ProjectLogits(_backend, hidden, k + 1);
 
             int accepted = 0;
             int? mismatchNext = null;

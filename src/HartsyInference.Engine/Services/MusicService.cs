@@ -59,7 +59,7 @@ public sealed class MusicService : IMusicService
                     ["channels"] = audio.Right is null ? "1" : "2",
                 },
             };
-        }, cancel);
+        }, cancel, stageBackends: loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null);
     }
 
     /// <summary>Builds the load-time context: single-device Q4_K (byte-identical to pre-placement behavior)

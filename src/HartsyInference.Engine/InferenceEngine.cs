@@ -201,9 +201,10 @@ public sealed class InferenceEngine : IInferenceEngine
             Backend = backend,
             TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
             VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
-            CfgParallelBackend = _placement.CfgParallelDevice is null ? null : EnsureBackend(_placement.CfgParallelDevice),
+            CfgParallelBackend = EnsureCfgParallelBackend(),
             DitShardBackend = EnsureDitShardBackend(),
             DitShardBackends = EnsureDitShardBackends(),
+            CpBackends = EnsureCpBackends(),
             Components = request?.Components,
             Loras = request?.Loras,
         }));
@@ -223,7 +224,9 @@ public sealed class InferenceEngine : IInferenceEngine
     {
         // Per-device serialization: with two backends sharing one GPU (two SwarmUI backends, or image + LLM
         // slots), state is isolated per backend but concurrent same-device execution is not yet in contract.
-        using IDisposable gate = DeviceGate.Acquire(EnsureBackend());
+        // ALL placement devices are gated (CFG-parallel/TE/VAE/shard stages), not just the primary — a sibling
+        // engine gated on one of THOSE ordinals must not run concurrently with the branch/stage work there.
+        using IDisposable gate = DeviceGate.AcquireAll(GateBackends());
         try
         {
             return generate();
@@ -263,12 +266,13 @@ public sealed class InferenceEngine : IInferenceEngine
     /// narrow precisely because its pipeline stays cached and reachable, making a non-capacity failure cost nothing.
     /// Only 16 of 47 image recipes have any exception handling of their own, so this belongs at the single shared
     /// boundary rather than per recipe.</para></remarks>
-    private static T ConstructWithVramCleanup<T>(IBackend backend, ModelSpec spec, Func<T> construct)
+    private T ConstructWithVramCleanup<T>(IBackend backend, ModelSpec spec, Func<T> construct)
     {
         // Construction uploads multi-GB weight sets — serialize it against a same-device sibling's generation
         // exactly like the generate path (callers run construct and generate sequentially, never nested, so the
-        // non-reentrant gate cannot self-deadlock).
-        using IDisposable gate = DeviceGate.Acquire(backend);
+        // non-reentrant gate cannot self-deadlock). Gate every placement device: construction resolves TE/VAE/
+        // CFG/shard backends inside the construct() lambda and uploads to them too.
+        using IDisposable gate = DeviceGate.AcquireAll(GateBackends());
         try
         {
             return construct();
@@ -359,9 +363,10 @@ public sealed class InferenceEngine : IInferenceEngine
                 Backend = backend,
                 TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
                 VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
-                CfgParallelBackend = _placement.CfgParallelDevice is null ? null : EnsureBackend(_placement.CfgParallelDevice),
+                CfgParallelBackend = EnsureCfgParallelBackend(),
                 DitShardBackend = EnsureDitShardBackend(),
                 DitShardBackends = EnsureDitShardBackends(),
+                CpBackends = EnsureCpBackends(),
                 Components = request?.Components,
                 Loras = request?.Loras,
             }));
@@ -431,6 +436,62 @@ public sealed class InferenceEngine : IInferenceEngine
         return created;
     }
 
+    /// <summary>Every backend a generation under the current placement can touch — the primary plus each
+    /// configured placement device, resolved (and therefore constructed) eagerly so the gate covers them even
+    /// before the pipeline's first use creates them. Pooled by canonical selector, so repeats dedupe to the
+    /// same instance and <see cref="DeviceGate.AcquireAll"/> dedupes the ordinals.</summary>
+    private IEnumerable<IBackend?> GateBackends()
+    {
+        yield return EnsureBackend();
+        if (_placement.TextEncoderDevice is not null)
+        {
+            yield return EnsureBackend(_placement.TextEncoderDevice);
+        }
+        if (_placement.VaeDevice is not null)
+        {
+            yield return EnsureBackend(_placement.VaeDevice);
+        }
+        if (_placement.CfgParallelDevice is not null)
+        {
+            yield return EnsureBackend(_placement.CfgParallelDevice);
+        }
+        if (_placement.EnableDitSharding)
+        {
+            foreach (string device in _placement.ShardDevices)
+            {
+                yield return EnsureBackend(device);
+            }
+        }
+        if (_placement.ContextParallelDevices.Count >= 2)
+        {
+            foreach (string device in _placement.ContextParallelDevices)
+            {
+                yield return EnsureBackend(device);
+            }
+        }
+    }
+
+    /// <summary>The CFG-branch-parallel backend, or null when unset OR when the selector resolves to the primary
+    /// instance. The null-out is load-bearing: <c>CfgBranchRunner</c> drives the cond and uncond branches from two
+    /// threads, and a same-device selector would hand both threads ONE backend whose per-<c>State</c> caches are
+    /// plain unlocked dictionaries — pipelines gate only on <c>CfgParallelBackend is not null</c>, so this is the
+    /// single choke point that keeps that config from ever reaching them.</summary>
+    private IBackend? EnsureCfgParallelBackend()
+    {
+        if (_placement.CfgParallelDevice is null)
+        {
+            return null;
+        }
+        IBackend resolved = EnsureBackend(_placement.CfgParallelDevice);
+        if (ReferenceEquals(resolved, EnsureBackend()))
+        {
+            Logs.Warning($"[Engine] CfgParallelDevice '{_placement.CfgParallelDevice}' resolves to the primary "
+                + "backend — CFG-branch parallelism disabled (two branch threads must not share one backend).");
+            return null;
+        }
+        return resolved;
+    }
+
     /// <summary>The second backend for Phase 8 DiT sharding (<see cref="PlacementConfig.EnableDitSharding"/>), or
     /// null when it's off. <c>ShardDevices[1]</c> is safe to index unchecked — <see cref="PlacementPlanner.ValidatePlacement"/>
     /// rejects any <see cref="PlacementConfig.EnableDitSharding"/> config with fewer than 2 <c>ShardDevices</c>
@@ -460,6 +521,43 @@ public sealed class InferenceEngine : IInferenceEngine
             stages.Add(EnsureBackend(_placement.ShardDevices[i]));
         }
         return stages;
+    }
+
+    /// <summary>The ordered context-parallel rank backends, or null when unset OR when the list is unusable: rank 0
+    /// must resolve to the primary instance (the pipeline runs rank 0 on <see cref="RecipeContext.Backend"/>), and no
+    /// two entries may resolve to ONE backend instance — two rank threads driving one backend's plain unlocked
+    /// per-<c>State</c> caches is the same hazard <see cref="EnsureCfgParallelBackend"/> nulls out. Pipelines gate
+    /// only on <c>CpBackends is not null</c>, so this is the single choke point.</summary>
+    private IReadOnlyList<IBackend>? EnsureCpBackends()
+    {
+        if (_placement.ContextParallelDevices.Count < 2)
+        {
+            return null;
+        }
+        List<IBackend> ranks = new(_placement.ContextParallelDevices.Count);
+        foreach (string device in _placement.ContextParallelDevices)
+        {
+            ranks.Add(EnsureBackend(device));
+        }
+        if (!ReferenceEquals(ranks[0], EnsureBackend()))
+        {
+            Logs.Warning($"[Engine] ContextParallelDevices[0] '{_placement.ContextParallelDevices[0]}' does not "
+                + "resolve to the primary backend — context parallelism disabled (rank 0 must be the primary).");
+            return null;
+        }
+        for (int i = 0; i < ranks.Count; i++)
+        {
+            for (int j = i + 1; j < ranks.Count; j++)
+            {
+                if (ReferenceEquals(ranks[i], ranks[j]))
+                {
+                    Logs.Warning($"[Engine] ContextParallelDevices entries {i} and {j} resolve to the same backend "
+                        + "instance — context parallelism disabled (two rank threads must not share one backend).");
+                    return null;
+                }
+            }
+        }
+        return ranks;
     }
 
     /// <summary>Canonical device identity for pooling: resolved kind plus ordinal ("cuda:1", "cuda", "cpu"), so
@@ -519,6 +617,26 @@ public sealed class InferenceEngine : IInferenceEngine
         catch (Exception ex)
         {
             Logs.Warning($"[Engine] Device release after model-switch eviction failed: {ex.Message}");
+        }
+        // The victims' weights also live on any placement backends they used (CFG-parallel replica, TE/VAE,
+        // shard stages) — without this sweep each model switch stacked another full replica on the second GPU.
+        foreach (IBackend extra in _placementBackends.Values)
+        {
+            try
+            {
+                if (_recipePipelines.Count == 0 && _videoRecipePipelines.Count == 0)
+                {
+                    extra.FreeAllDeviceMemory();
+                }
+                else
+                {
+                    extra.TrimMemoryPool();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logs.Warning($"[Engine] Placement-backend release after model-switch eviction failed: {ex.Message}");
+            }
         }
         Logs.Info($"[Engine] Model switch: evicted {imageVictims.Count + videoVictims.Count} resident pipeline(s) for other checkpoints.");
     }

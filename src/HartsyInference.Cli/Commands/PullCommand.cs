@@ -90,6 +90,16 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
     {
         try
         {
+            // Audio-cache-backed entries load via AudioModelCache at runtime — pulling them into the
+            // Models tree would double-download. Same branch EnsurePresent takes, minus the confirm.
+            if (ModelAcquisition.UsesAudioCache(cat, cat.Modality))
+            {
+                if (!ModelAcquisition.EnsureAudioAssetsPresent(cat, cat.Modality, confirm: false, ct))
+                    return 1;
+                AnsiConsole.MarkupLine($"[green]✓[/] pulled [{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/]");
+                return 0;
+            }
+
             IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(cat);
             if (missing.Count == 0)
             {

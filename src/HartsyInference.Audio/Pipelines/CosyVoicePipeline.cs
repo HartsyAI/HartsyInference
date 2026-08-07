@@ -65,15 +65,31 @@ public sealed class CosyVoicePipeline : IDisposable
         // Full-F32 GEMM across the whole pipeline. The Qwen speech-token LM is autoregressive, and TF32's ~1e-3
         // per-forward error accumulates over the decode loop and flips sampled argmaxes (verified on Zonos: TF32 →
         // babble, F32 → reference parity). Save/restore so we don't disturb the caller's backend state.
-        bool prevHighPrec = backend.HighPrecisionGemm;
+        // A layer-split LM runs each stage on its own backend, so every placement stage backend needs it too.
+        List<(IBackend Backend, bool Prev)> saved = new(4) { (backend, backend.HighPrecisionGemm) };
         backend.HighPrecisionGemm = true;
+        if (_lm.Placement is { IsSingle: false } lmPlacement)
+        {
+            foreach (LlmStage stage in lmPlacement.Stages)
+            {
+                IBackend sb = stage.Backend;
+                bool seen = false;
+                for (int i = 0; i < saved.Count && !seen; i++) seen = ReferenceEquals(saved[i].Backend, sb);
+                if (seen) continue;
+                saved.Add((sb, sb.HighPrecisionGemm));
+                sb.HighPrecisionGemm = true;
+            }
+        }
         try
         {
             PreloadWeights(backend);
             return SynthesizeCore(backend, textTokenIds, speakerEmbed, referenceAudio, referenceSampleRate,
                 referenceTextTokens, seed, sw);
         }
-        finally { backend.HighPrecisionGemm = prevHighPrec; }
+        finally
+        {
+            for (int i = saved.Count - 1; i >= 0; i--) saved[i].Backend.HighPrecisionGemm = saved[i].Prev;
+        }
     }
 
     /// <summary>Bulk-uploads every component's weights to the device once (idempotent — the GPU weight cache keys by

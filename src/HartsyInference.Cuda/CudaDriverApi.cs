@@ -149,6 +149,11 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuDeviceCanAccessPeer(out int canAccessPeer, int dev, int peerDev);
 
+    /// <summary>Queries a CU_DEVICE_P2P_ATTRIBUTE_* value for the directed pair src→dst. Query-only — never
+    /// changes context state.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuDeviceGetP2PAttribute(out int value, int attrib, int srcDevice, int dstDevice);
+
     /// <summary>Grants the CURRENT context direct access to <paramref name="peerContext"/>'s memory. Flags must be 0.
     /// Returns CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED (=704) on repeat — treat as success.</summary>
     [LibraryImport(LibName)]
@@ -367,6 +372,12 @@ internal static partial class CudaDriverApi
     internal const int CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75;
     internal const int CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76;
     internal const int CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR = 81;
+
+    // ── P2P Attribute Constants (cuDeviceGetP2PAttribute) ───────────────
+
+    internal const int CU_DEVICE_P2P_ATTRIBUTE_PERFORMANCE_RANK = 1;
+    internal const int CU_DEVICE_P2P_ATTRIBUTE_ACCESS_SUPPORTED = 2;
+    internal const int CU_DEVICE_P2P_ATTRIBUTE_NATIVE_ATOMIC_SUPPORTED = 3;
 
     // ── Stream Flags ────────────────────────────────────────────────────
 

@@ -69,8 +69,9 @@ public sealed unsafe class WanVideoTransformer : IDisposable
     }
 
     /// <summary>Velocity prediction. <paramref name="latent"/> is <c>[1, inChannels, T, H, W]</c>; <paramref name="encoder"/> is raw umT5 features <c>[L, textDim]</c>. Returns <c>[1, outChannels, T, H, W]</c>.</summary>
-    public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float timestep, DeviceFeatureCache? stepCache = null) =>
-        Forward(backend, latent, encoder, [timestep], stepCache);
+    public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float timestep, DeviceFeatureCache? stepCache = null,
+        CpForwardContext? cp = null) =>
+        Forward(backend, latent, encoder, [timestep], stepCache, cp);
 
     /// <summary>I2V velocity prediction with CLIP image conditioning. <paramref name="imageEmbeds"/> is the CLIP
     /// penultimate hidden state <c>[seqImg, imageDim]</c>; it is projected by the image embedder and cross-attended in
@@ -81,12 +82,17 @@ public sealed unsafe class WanVideoTransformer : IDisposable
     /// <summary>Velocity prediction with per-latent-frame timesteps (the diffusers <c>expand_timesteps</c> TI2V path —
     /// I2V conditions the first latent frame at timestep 0 while the rest denoise). <paramref name="timesteps"/> is
     /// either one shared value or one value per latent frame group (<c>T / patch_t</c>); each frame's tokens get that
-    /// frame's AdaLN modulation in every block and in the final layer.</summary>
-    public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float[] timesteps, DeviceFeatureCache? stepCache = null) =>
-        ForwardCore(backend, latent, encoder, timesteps, null, stepCache);
+    /// frame's AdaLN modulation in every block and in the final layer.
+    /// <para><paramref name="cp"/> switches to the context-parallel rank path: the token sequence is sliced to the
+    /// rank's frame-aligned range, per-block self-attention K/V are exchanged with the peer rank via
+    /// <see cref="CpKvExchange"/>, and the return value is the LOCAL projected rows <c>[Sr, outVec]</c> — the caller
+    /// gathers ranks and unpatchifies. Null keeps the single-backend path byte-identical.</para></summary>
+    public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float[] timesteps, DeviceFeatureCache? stepCache = null,
+        CpForwardContext? cp = null) =>
+        ForwardCore(backend, latent, encoder, timesteps, null, stepCache, cp);
 
     private Tensor ForwardCore(IBackend backend, Tensor latent, Tensor encoder, float[] timesteps, Tensor? imageEmbeds,
-        DeviceFeatureCache? stepCache = null)
+        DeviceFeatureCache? stepCache = null, CpForwardContext? cp = null)
     {
         int t = (int)latent.Shape[2], hh = (int)latent.Shape[3], ww = (int)latent.Shape[4];
         (int pt, int ph, int pw) = _config.PatchSize;
@@ -97,13 +103,15 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         if (g != 1 && g != gt)
             throw new ArgumentException($"timesteps must have 1 or {gt} (latent frame groups) entries; got {g}.", nameof(timesteps));
         int tokensPerGroup = s / g;
-
-        if (_ropeKey != (gt, gh, gw))
+        if (cp is not null)
         {
-            _cosC?.Dispose(); _sinC?.Dispose();
-            (_cosC, _sinC) = _rope.BuildCosSin(gt, gh, gw);
-            _ropeKey = (gt, gh, gw);
+            if (stepCache is not null)
+                throw new InvalidOperationException("Context parallelism excludes the step cache — the pipeline must gate it off.");
+            if (cp.Plan.TotalTokens != s || cp.Plan.Frames != gt)
+                throw new ArgumentException($"CP plan ({cp.Plan.Frames}f × {cp.Plan.TokensPerFrame}) does not match the latent grid ({gt}×{gh}×{gw}).", nameof(cp));
         }
+
+        BuildRopeCache(gt, gh, gw);
         (Tensor cos, Tensor sin) = (_cosC!, _sinC!);
 
         WanVideoDebugDump.Dump("latent_in", latent);   // raw transformer input, so the Python reference recomputes every stage
@@ -116,56 +124,41 @@ public sealed unsafe class WanVideoTransformer : IDisposable
             if (imageEmbeds is not null) WanVideoDebugDump.Dump("clip_embeds", imageEmbeds);
         }
 
-        (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, timesteps, _config.FreqDim, dim,
+        // Context parallel: this rank keeps only its frame-aligned token range. Hidden rows slice on-device;
+        // cos/sin slice host-side (they are host-authoritative absolute-position rows, so a rank slice keeps the
+        // global positions). G>1 per-frame timesteps slice to the rank's frame range — the frame-aligned split
+        // means group boundaries never straddle ranks, so per-group modulation stays exact with the GLOBAL
+        // tokensPerGroup.
+        int sEff = s;
+        Tensor? cosLocal = null, sinLocal = null;
+        float[] tsEff = timesteps;
+        if (cp is not null)
+        {
+            CpRankRange range = cp.Plan.Ranks[cp.Rank];
+            sEff = range.TokenCount;
+            Tensor local = new Tensor(new TensorShape(sEff, dim), DType.F32);
+            backend.SliceRows(local, hidden, range.TokenStart);
+            hidden.Dispose();
+            hidden = local;
+            cosLocal = SliceHostRows(cos, range.TokenStart, sEff);
+            sinLocal = SliceHostRows(sin, range.TokenStart, sEff);
+            (cos, sin) = (cosLocal, sinLocal);
+            if (g != 1) tsEff = timesteps[range.FrameStart..(range.FrameStart + range.FrameCount)];
+        }
+
+        (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, tsEff, _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);   // [G, dim], [G, 6, dim]
         WanVideoDebugDump.Dump("cond_temb", temb);
         WanVideoDebugDump.Dump("cond_timestepProj", timestepProj);
         WanVideoDebugDump.Dump("cond_cos", cos);
         WanVideoDebugDump.Dump("cond_sin", sin);
-        // The projected text(+image) context is timestep-independent — cache it per encoder tensor identity (with
-        // the image-embeds identity validated on hit for I2V, where the context also folds in the CLIP image and a
-        // HOST ConcatRows) so the projections + gelu + concat run once per generation instead of 2×/step. The
-        // cached tensor is host-materialized below, so it survives the pipeline's per-step FreeActivations (device
-        // copy re-uploads on demand; the host data stays authoritative).
-        int imageContextLen = 0;
-        Tensor encoderProj;
-        if (_ctxCache.TryGetValue(encoder, out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) cached)
-            && ReferenceEquals(cached.ImgKey, imageEmbeds))
-        {
-            encoderProj = cached.Ctx;
-            imageContextLen = cached.ImageContextLen;
-        }
-        else
-        {
-            Tensor textProj = WanDitOps.TextEmbed(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
-            WanVideoDebugDump.Dump("cond_textProj", textProj);
-
-            // I2V: project the CLIP image embeds and prepend them to the text context; the blocks split at imageContextLen.
-            encoderProj = textProj;
-            if (imageEmbeds is not null && _imgEmbedder.IsLoaded)
-            {
-                Tensor imgProj = _imgEmbedder.Forward(backend, imageEmbeds, dim);
-                WanVideoDebugDump.Dump("cond_imgProj", imgProj);
-                imageContextLen = (int)imgProj.Shape[0];
-                encoderProj = WanDitOps.ConcatRows(imgProj, textProj, dim);
-                imgProj.Dispose();
-                textProj.Dispose();
-            }
-            WanVideoDebugDump.Dump("cond_encoderProj", encoderProj);
-            _ = (nint)encoderProj.DataPointer;   // host-materialize (see cache note above)
-            if (_ctxCache.Count >= 4)   // cap: prompts/images changed across gens; drop the stale contexts
-            {
-                foreach ((Tensor ctx, _, _) in _ctxCache.Values) ctx.Dispose();
-                _ctxCache.Clear();
-            }
-            // Same-encoder re-entry with a different image replaces the stale entry (dispose the old context).
-            if (_ctxCache.Remove(encoder, out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) stale)) stale.Ctx.Dispose();
-            _ctxCache[encoder] = (encoderProj, imageContextLen, imageEmbeds);
-        }
+        (Tensor encoderProj, int imageContextLen) = GetOrBuildContext(backend, encoder, imageEmbeds, dim);
 
         Tensor cur = hidden;
         _fwdCounter++;
         string? vramLog = Environment.GetEnvironmentVariable("HARTSY_WAN_VRAM");
+        Func<Tensor, Tensor, (Tensor K, Tensor V)>? kvExchange =
+            cp is null ? null : (k, v) => cp.Exchange.Exchange(cp.Rank, k, v);
 
         // Across-step First-Block cache (single-stream FBC; QwenImageTransformer holds the dual-stream
         // reference wiring): block 0 always runs and its output is the gate indicator. Hit ⇒ blocks 1..N−1
@@ -201,7 +194,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable
             if (vramLog is not null)
                 System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block {i}: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
-                imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null);
+                imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null, selfAttnKvExchange: kvExchange);
             if (!ReferenceEquals(cur, cacheAnchor)) cur.Dispose();
             cur = next;
             WanVideoDebugDump.Dump($"blocks.{i}", cur);
@@ -214,13 +207,87 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         }
         timestepProj.Dispose();   // cos/sin/encoderProj live in the per-generation caches — not per-forward temporaries
 
-        Tensor projected = WanDitOps.FinalLayer(backend, cur, temb, _finalScaleShift!, _projOutW!, _projOutB, s, dim, _config.Eps, tokensPerGroup);
+        Tensor projected = WanDitOps.FinalLayer(backend, cur, temb, _finalScaleShift!, _projOutW!, _projOutB, sEff, dim, _config.Eps, tokensPerGroup);
         cur.Dispose();
         temb.Dispose();
+        if (cp is not null)
+        {
+            cosLocal!.Dispose();
+            sinLocal!.Dispose();
+            return projected;   // local [Sr, outVec] rows — the pipeline gathers ranks + unpatchifies
+        }
         Tensor outVel = WanDitOps.Unpatchify(projected, _config.OutChannels, gt, gh, gw, _config.PatchSize);
         projected.Dispose();
         WanVideoDebugDump.DumpOutput(outVel);
         return outVel;
+    }
+
+    private void BuildRopeCache(int gt, int gh, int gw)
+    {
+        if (_ropeKey == (gt, gh, gw)) return;
+        _cosC?.Dispose(); _sinC?.Dispose();
+        (_cosC, _sinC) = _rope.BuildCosSin(gt, gh, gw);
+        _ropeKey = (gt, gh, gw);
+    }
+
+    /// <summary>The projected text(+image) context is timestep-independent — cache it per encoder tensor identity
+    /// (with the image-embeds identity validated on hit for I2V, where the context also folds in the CLIP image and
+    /// a HOST ConcatRows) so the projections + gelu + concat run once per generation instead of 2×/step. The cached
+    /// tensor is host-materialized here, so it survives the pipeline's per-step FreeActivations (device copy
+    /// re-uploads on demand; the host data stays authoritative).</summary>
+    private (Tensor Ctx, int ImageContextLen) GetOrBuildContext(IBackend backend, Tensor encoder, Tensor? imageEmbeds, int dim)
+    {
+        if (_ctxCache.TryGetValue(encoder, out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) cached)
+            && ReferenceEquals(cached.ImgKey, imageEmbeds))
+        {
+            return (cached.Ctx, cached.ImageContextLen);
+        }
+        Tensor textProj = WanDitOps.TextEmbed(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
+        WanVideoDebugDump.Dump("cond_textProj", textProj);
+
+        // I2V: project the CLIP image embeds and prepend them to the text context; the blocks split at imageContextLen.
+        int imageContextLen = 0;
+        Tensor encoderProj = textProj;
+        if (imageEmbeds is not null && _imgEmbedder.IsLoaded)
+        {
+            Tensor imgProj = _imgEmbedder.Forward(backend, imageEmbeds, dim);
+            WanVideoDebugDump.Dump("cond_imgProj", imgProj);
+            imageContextLen = (int)imgProj.Shape[0];
+            encoderProj = WanDitOps.ConcatRows(imgProj, textProj, dim);
+            imgProj.Dispose();
+            textProj.Dispose();
+        }
+        WanVideoDebugDump.Dump("cond_encoderProj", encoderProj);
+        _ = (nint)encoderProj.DataPointer;   // host-materialize (see cache note above)
+        if (_ctxCache.Count >= 4)   // cap: prompts/images changed across gens; drop the stale contexts
+        {
+            foreach ((Tensor ctx, _, _) in _ctxCache.Values) ctx.Dispose();
+            _ctxCache.Clear();
+        }
+        // Same-encoder re-entry with a different image replaces the stale entry (dispose the old context).
+        if (_ctxCache.Remove(encoder, out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) stale)) stale.Ctx.Dispose();
+        _ctxCache[encoder] = (encoderProj, imageContextLen, imageEmbeds);
+        return (encoderProj, imageContextLen);
+    }
+
+    /// <summary>Builds the per-generation rope + text-context caches on the CALLING thread — load-bearing before
+    /// context-parallel forks: two rank threads must never race the first-touch builds of the shared
+    /// <c>_cosC</c>/<c>_sinC</c>/<c>_ctxCache</c> state (after this, in-forward access is read-only cache hits).</summary>
+    public void PrewarmSequenceCaches(IBackend backend, int gridT, int gridH, int gridW, params Tensor[] encoders)
+    {
+        BuildRopeCache(gridT, gridH, gridW);
+        foreach (Tensor encoder in encoders) GetOrBuildContext(backend, encoder, null, _config.InnerDim);
+    }
+
+    /// <summary>Host row slice of a host-authoritative <c>[rows, cols]</c> tensor (the rope cos/sin tables) — no
+    /// backend involvement, safe from concurrent rank threads.</summary>
+    private static Tensor SliceHostRows(Tensor src, int rowStart, int rowCount)
+    {
+        int cols = (int)src.Shape[1];
+        Tensor o = new Tensor(new TensorShape(rowCount, cols), DType.F32);
+        long bytes = (long)rowCount * cols * 4;
+        Buffer.MemoryCopy((float*)src.DataPointer + (long)rowStart * cols, (float*)o.DataPointer, bytes, bytes);
+        return o;
     }
 
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }

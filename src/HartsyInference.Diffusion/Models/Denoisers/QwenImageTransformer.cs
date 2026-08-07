@@ -1,6 +1,5 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
-using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Utilities;
@@ -14,16 +13,6 @@ public sealed unsafe class QwenImageTransformer : IDisposable
     private readonly QwenImageBlock[] _blocks;
     private readonly QwenImageRope _rope;
 
-    /// <summary>True when this instance runs the audited F16 block loop (HARTSY_DIT_F16) with the exact
-    /// <see cref="ChromaF16.ResidualDamp"/> residual damp — the Chroma/Flux recipe: every branch input passes
-    /// a no-affine LayerNorm and the final AdaLN-continuous norm cancels the factor before proj_out.</summary>
-    private bool _f16Mode;
-
-    /// <summary>Qwen-Image's residual stream is an outlier among DiTs: massive-activation channels push it to
-    /// ±10M by mid-depth (measured block-input absmax, 60-block V1) — Flux/Chroma stay under ~65k, which is why
-    /// their shared <see cref="ChromaF16.ResidualDamp"/> (1/32) overflowed F16 here after ONE block. 1/512
-    /// (2^-9, exact) parks the plateau at ~±20k with headroom; the no-affine LayerNorms still cancel it.</summary>
-    private const float QwenResidualDamp = 1.0f / 8192.0f;
     private int _disposed;
 
     private Tensor? _imgInWeight, _imgInBias;
@@ -61,16 +50,9 @@ public sealed unsafe class QwenImageTransformer : IDisposable
     /// <summary>Loads all transformer weights from named tensors using diffusers naming.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
-        // F16 opt-in DISABLED for Qwen-Image (2026-07-10 finding): the residual stream's massive-activation
-        // channels (±10M plateau — 150× past F16 even before growth) forced a 1/2048 damp, which exposed a
-        // second bug (LayerNorm eps breaks damp scale-invariance; fixed below via eps·damp²) — but even with
-        // both fixes and single-forward exactness (corr 0.99998), the SECOND denoise step's forward NaNs
-        // deterministically (not a race — reproduces under CUDA_LAUNCH_BLOCKING). The reference stacks run
-        // this model in BF16 for exactly this range reason; a BF16 activation path is the correct future
-        // lever. Until then Qwen stays F32 (still beats ComfyUI on t2i; edit ~1.05× of Comfy).
-        _f16Mode = false;
-        float branchDamp = _f16Mode ? QwenResidualDamp : 1.0f;
-
+        // F32 activations only: this model's massive-activation channels push the residual stream to ±10M by
+        // mid-depth (measured block-input absmax) — 150× past F16 range, which is why reference stacks run it
+        // in BF16. A damped F16 loop was tried and removed: the second denoise step NaN'd deterministically.
         _imgInWeight = weights["img_in.weight"];
         _imgInBias = weights["img_in.bias"];
 
@@ -78,17 +60,6 @@ public sealed unsafe class QwenImageTransformer : IDisposable
 
         _txtInWeight = weights["txt_in.weight"];
         _txtInBias = weights["txt_in.bias"];
-        if (_f16Mode)
-        {
-            // Enter the damped-residual regime at the embedders (see ChromaF16): both token streams start at
-            // damp scale; the block-output damping keeps them there; the final no-affine LayerNorm cancels
-            // the factor exactly. Weight damp rides the GEMM alpha (dequantized-GGUF cuBLAS path included).
-            _imgInWeight.Fp8ScaleFactor *= QwenResidualDamp;
-            _imgInBias = ChromaF16.DampBias(_imgInBias!, QwenResidualDamp);
-            _txtInWeight.Fp8ScaleFactor *= QwenResidualDamp;
-            _txtInBias = ChromaF16.DampBias(_txtInBias!, QwenResidualDamp);
-            Logs.Info($"[QwenImage] F16 block loop active (residual damp 1/{1.0f / QwenResidualDamp:F0})");
-        }
 
         _timestepLinear1Weight = weights["time_text_embed.timestep_embedder.linear_1.weight"];
         _timestepLinear1Bias = weights["time_text_embed.timestep_embedder.linear_1.bias"];
@@ -96,7 +67,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         _timestepLinear2Bias = weights["time_text_embed.timestep_embedder.linear_2.bias"];
 
         for (int i = 0; i < _config.Depth; i++)
-            _blocks[i].LoadWeights(weights, $"transformer_blocks.{i}", branchDamp);
+            _blocks[i].LoadWeights(weights, $"transformer_blocks.{i}");
 
         _normOutLinearWeight = weights["norm_out.linear.weight"];
         _normOutLinearBias = weights["norm_out.linear.bias"];
@@ -194,14 +165,19 @@ public sealed unsafe class QwenImageTransformer : IDisposable
     /// <param name="stepCache">Optional across-step First-Block cache (one instance PER CFG stream). Block 0
     /// always runs; on a gate hit blocks 1..N−1 are reconstructed from the previous step's residual instead of
     /// computed. Null (the default) is byte-identical to the uncached forward.</param>
+    /// <param name="cp">Context-parallel rank context: the img token sequence is sliced to this rank's row range
+    /// (the txt stream stays fully replicated — both ranks compute it deterministically), per-block joint-attention
+    /// K/V is traded through <see cref="Utilities.CpKvExchange"/>, and the return value is the LOCAL packed velocity
+    /// rows <c>[1, Sr, patch²·out]</c> — the caller gathers ranks in global token order. Excludes the step cache,
+    /// block streaming, and edit-reference conditioning (the pipeline gates those off). Null keeps the
+    /// single-backend path byte-identical.</param>
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor encoderHidden, float timestep,
         int hPacked, int wPacked, (int H, int W)[]? refGrids = null, bool refTimestepZero = false,
-        DeviceFeatureCache? stepCache = null)
+        DeviceFeatureCache? stepCache = null, CpForwardContext? cp = null)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
         int txtSeqLen = (int)encoderHidden.Shape[1];
-        int hidden = _config.HiddenSize;
         refGrids ??= [];
         int refSeqLen = 0;
         foreach ((int rh, int rw) in refGrids) refSeqLen += rh * rw;
@@ -213,27 +189,34 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         if (refSeqLen > 0 && batch != 1)
             throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
                 "Reference-latent (edit) tokens require batch size 1; run CFG as two batch-1 passes.");
-
-        TensorShape imgTokShape = new TensorShape(batch, imgSeqLen, hidden);
-        TensorShape txtTokShape = new TensorShape(batch, txtSeqLen, hidden);
-        (Tensor imgTokens, Tensor txtTokens) = ForwardEmbedIn(backend, packedLatent, encoderHidden, batch, imgSeqLen, txtSeqLen);
-
-        // F16 block loop (HARTSY_DIT_F16, B=1): one cast per stream before the loop — every block
-        // activation follows, and all 60 SDPAs run zero-cast cuDNN F16. Streams already ride at
-        // ResidualDamp scale from the damped embedders. Cast back to F32 after the loop for the final
-        // norm (which cancels the damp) + proj_out.
-        bool f16Loop = _f16Mode && batch == 1;
-        if (f16Loop)
+        if (cp is not null)
         {
-            Tensor imgF16 = new Tensor(imgTokShape, DType.F16);
-            backend.CastToF16(imgF16, imgTokens);
-            imgTokens.Dispose();
-            imgTokens = imgF16;
-            Tensor txtF16 = new Tensor(txtTokShape, DType.F16);
-            backend.CastToF16(txtF16, txtTokens);
-            txtTokens.Dispose();
-            txtTokens = txtF16;
+            if (stepCache is not null)
+                throw new InvalidOperationException("Context parallelism excludes the step cache — the pipeline must gate it off.");
+            if (BeforeBlockForward is not null)
+                throw new InvalidOperationException("Context parallelism and block streaming don't compose — BeforeBlockForward must be null.");
+            if (refSeqLen > 0 || batch != 1)
+                throw new InvalidOperationException("Context parallelism requires batch 1 and no edit-reference tokens — the pipeline must gate these off.");
+            if (cp.Plan.TotalTokens != imgSeqLen || cp.Plan.TokensPerFrame != wPacked)
+                throw new ArgumentException(
+                    $"CP plan ({cp.Plan.Frames} rows × {cp.Plan.TokensPerFrame}) does not match the packed grid ({hPacked}×{wPacked}).", nameof(cp));
         }
+
+        // Context parallel: this rank embeds and denoises only its row-aligned img token range (img_in is
+        // per-token, so slicing the packed input first is exact); the txt stream runs full-length on every rank.
+        Tensor embedSource = packedLatent;
+        Tensor? localPacked = null;
+        if (cp is not null)
+        {
+            CpRankRange range = cp.Plan.Ranks[cp.Rank];
+            localPacked = new Tensor(new TensorShape(batch, range.TokenCount, packedLatent.Shape[2]), DType.F32);
+            backend.SliceRows(localPacked, packedLatent, range.TokenStart);
+            embedSource = localPacked;
+            imgSeqLen = range.TokenCount;
+        }
+
+        (Tensor imgTokens, Tensor txtTokens) = ForwardEmbedIn(backend, embedSource, encoderHidden, batch, imgSeqLen, txtSeqLen);
+        localPacked?.Dispose();
 
         Tensor temb = ComputeTimestepEmbedding(backend, timestep, batch);
         QwenImageDebugDump.Dump("time_text_embed", temb);
@@ -288,7 +271,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         // controller simply keeps whatever it had prefetched (bounded by the prefetch window) and the next miss
         // resumes from there — residency is per-block state, not a position in a sequence.
         ForwardBlocksRange(backend, ref currentImg, ref currentTxt, temb, tembZero,
-            hPacked, wPacked, txtPositionStart, refGrids, mainSeqLen, startBlock, _config.Depth, cacheAnchor);
+            hPacked, wPacked, txtPositionStart, refGrids, mainSeqLen, startBlock, _config.Depth, cacheAnchor, cp);
 
         if (cacheAnchor is not null)
         {
@@ -310,7 +293,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
     /// handed back for the head. VRAM pooling, not latency — the two backends run sequentially. Exclusions mirror
     /// Krea2: no step-cache (its block-0-indicator shape doesn't compose with a fixed range boundary), no
     /// step-graph (none exists here), no block streaming (<see cref="BeforeBlockForward"/> must be null — the
-    /// sharding preload owns block residency), F32 loop only (Qwen's F16 mode is permanently disabled at load).
+    /// sharding preload owns block residency).
     /// Callers preload <see cref="EnumerateSharedWeights"/> + <see cref="EnumerateBlockRangeWeights"/>(0, split)
     /// on A and <see cref="EnumerateBlockRangeWeights"/>(split, Depth) on B.</summary>
     public Tensor ForwardSharded(IBackend backendA, IBackend backendB, Tensor packedLatent, Tensor encoderHidden,
@@ -462,14 +445,15 @@ public sealed unsafe class QwenImageTransformer : IDisposable
     /// its residual after the loop; the sharded path passes null.</summary>
     private void ForwardBlocksRange(IBackend backend, ref Tensor currentImg, ref Tensor currentTxt,
         Tensor temb, Tensor? tembZero, int hPacked, int wPacked, int txtPositionStart,
-        (int H, int W)[] refGrids, int mainSeqLen, int startBlock, int endBlock, Tensor? cacheAnchor = null)
+        (int H, int W)[] refGrids, int mainSeqLen, int startBlock, int endBlock, Tensor? cacheAnchor = null,
+        CpForwardContext? cp = null)
     {
         for (int i = startBlock; i < endBlock; i++)
         {
             BeforeBlockForward?.Invoke(i);
             (Tensor newImg, Tensor newTxt) = _blocks[i].Forward(
                 backend, currentImg, currentTxt, temb, _rope,
-                hPacked, wPacked, txtPositionStart, refGrids, tembZero, mainSeqLen);
+                hPacked, wPacked, txtPositionStart, refGrids, tembZero, mainSeqLen, cp);
 
             if (currentImg != cacheAnchor) currentImg.Dispose();
             currentTxt.Dispose();
@@ -482,20 +466,11 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         }
     }
 
-    /// <summary>The post-block section of <see cref="Forward"/>: F16→F32 cast if the loop ran F16, AdaLN-continuous
-    /// final layer, and the edit-mode reference-row drop. Consumes <paramref name="currentImg"/>.</summary>
+    /// <summary>The post-block section of <see cref="Forward"/>: AdaLN-continuous final layer and the edit-mode
+    /// reference-row drop. Consumes <paramref name="currentImg"/>.</summary>
     private Tensor ForwardHeadOut(IBackend backend, Tensor currentImg, Tensor temb, int batch, int imgSeqLen,
         int refSeqLen, int mainSeqLen)
     {
-        if (currentImg.DType == DType.F16)
-        {
-            // Back to F32 for the final norm + proj_out (velocity precision across Euler steps).
-            Tensor imgF32 = new Tensor(new TensorShape(batch, imgSeqLen, _config.HiddenSize), DType.F32);
-            backend.CastToF32(imgF32, currentImg);
-            currentImg.Dispose();
-            currentImg = imgF32;
-        }
-
         Tensor output = ApplyFinalLayer(backend, currentImg, temb, batch, imgSeqLen);
         QwenImageDebugDump.Dump("proj_out", output);
         currentImg.Dispose();

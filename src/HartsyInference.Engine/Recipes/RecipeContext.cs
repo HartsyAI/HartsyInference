@@ -46,6 +46,12 @@ public sealed record RecipeContext
     /// from the same <c>PlacementConfig.ShardDevices</c> list, so a 2-device config gives both the same information.</summary>
     public IReadOnlyList<IBackend>? DitShardBackends { get; init; }
 
+    /// <summary>Ordered rank backends for context parallelism (the video DiT's token-sequence split); rank 0 is
+    /// always <see cref="Backend"/>. Null/empty = no context parallelism. Like <see cref="CfgParallelBackend"/> the
+    /// weights are REPLICATED on every rank (latency, not VRAM pooling) and null is a meaningful "not configured".
+    /// Currently consumed only by the Wan video recipe.</summary>
+    public IReadOnlyList<IBackend>? CpBackends { get; init; }
+
     /// <summary>The text-encoder backend with the primary fallback applied.</summary>
     public IBackend TextEncoderBackendOrDefault => TextEncoderBackend ?? Backend;
 
@@ -88,6 +94,18 @@ public sealed record RecipeContext
                         && !ReferenceEquals(stageBackend, DitShardBackend))
                     {
                         yield return stageBackend;
+                    }
+                }
+            }
+            if (CpBackends is not null)
+            {
+                foreach (IBackend rankBackend in CpBackends)
+                {
+                    if (!ReferenceEquals(rankBackend, Backend) && !ReferenceEquals(rankBackend, TextEncoderBackend)
+                        && !ReferenceEquals(rankBackend, VaeBackend) && !ReferenceEquals(rankBackend, CfgParallelBackend)
+                        && !ReferenceEquals(rankBackend, DitShardBackend))
+                    {
+                        yield return rankBackend;
                     }
                 }
             }

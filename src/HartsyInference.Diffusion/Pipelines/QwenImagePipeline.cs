@@ -176,11 +176,13 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         GuidanceInterval cfgInterval = GuidanceInterval.FromEnvironment();
         (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
             StepCacheEnv.Resolve(CalibratedStepCache);
-        if (stepCacheThreshold > 0f && IsDitSharded)
+        bool cpConfigured = CpBackends is { Count: >= 2 };
+        if (stepCacheThreshold > 0f && (IsDitSharded || cpConfigured))
         {
             // Same exclusion as Krea2: the step cache's block-0-as-indicator + variable per-step topology
-            // doesn't compose with a fixed block-range boundary.
-            Logs.Warning("Step cache requested but DiT sharding is active — running uncached.");
+            // doesn't compose with a fixed block-range boundary — nor with CP's split sequence (the residual is
+            // per-rank rows and the gate indicator would differ per rank).
+            Logs.Warning($"Step cache requested but {(IsDitSharded ? "DiT sharding" : "context parallelism")} is configured — running uncached.");
             stepCacheThreshold = 0f;
         }
         DeviceFeatureCache? condCache = null;
@@ -475,12 +477,90 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (packedEditRef is not null) _ = packedEditRef.DataPointer;
         Backend.FreeActivations();
 
+        // Context parallelism (row split of the img token sequence, weights REPLICATED on both ranks, txt stream
+        // replicated per rank, per-block joint-attention K/V exchanged via CpKvExchange): each forward forks into
+        // rank 0 (this thread, Backend) + rank 1 (worker, CpBackends[1]). v1 scope mirrors Wan: 2 ranks only,
+        // no step cache (force-disabled above), no edit-reference conditioning, no block streaming, never composed
+        // with DiT sharding or CFG-parallel (ValidatePlacement rejects those configs — the guards here are
+        // belt-and-braces for direct pipeline construction).
+        LastCpDecision = null;
+        bool cpEnabled = false;
+        if (cpConfigured)
+        {
+            if (!ReferenceEquals(CpBackends![0], Backend)) RecordCpDecision("fell-back(rank0-not-primary)");
+            else if (CpBackends.Count != 2) RecordCpDecision($"fell-back({CpBackends.Count}-ranks-unsupported)");
+            else if (IsDitSharded) RecordCpDecision("fell-back(dit-sharding-configured)");
+            else if (CfgParallelBackend is not null) RecordCpDecision("fell-back(cfg-parallel-configured)");
+            else if (hasEditRefs) RecordCpDecision("fell-back(edit-reference-conditioning)");
+            else if (hPacked < 2) RecordCpDecision("fell-back(single-packed-row)");
+            else cpEnabled = true;
+        }
+        if (cpEnabled)
+        {
+            // Replicating the whole ~19 GB DiT on rank 1 can genuinely not fit (12 GB cards); degrade to the
+            // normal single-GPU chain below (which may block-stream), not a dead generation.
+            if (Backend.StreamingCache is not null)
+                Logs.Info("QwenImage: context parallelism overrides low-VRAM block streaming for this generation.");
+            try
+            {
+                if (!_ditResident) Backend.PreloadWeights(_transformer.EnumerateWeights());
+                _ditResident = true;
+            }
+            catch (Exception ex)
+            {
+                Logs.Warning($"QwenImage context-parallel: rank 0 preload failed (falling back to the standard "
+                    + $"single-GPU path this generation): {ex.Message}");
+                RecordCpDecision($"fell-back(preload-failed: {ex.Message})");
+                cpEnabled = false;
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                Backend.TrimMemoryPool();
+                _ditResident = false;
+            }
+            if (cpEnabled)
+            {
+                try
+                {
+                    CpBackends![1].PreloadWeights(_transformer.EnumerateWeights());
+                }
+                catch (Exception ex)
+                {
+                    Logs.Warning($"QwenImage context-parallel: couldn't preload the DiT replica onto rank 1 "
+                        + $"(falling back to single-GPU this generation): {ex.Message}");
+                    RecordCpDecision($"fell-back(preload-failed: {ex.Message})");
+                    cpEnabled = false;
+                }
+            }
+        }
+        CpSequencePlan? cpPlan = null;
+        CpKvExchange? cpExchange = null;
+        Tensor? condHiddenRank1 = null;
+        Tensor? uncondHiddenRank1 = null;
+        if (cpEnabled)
+        {
+            // Row split proportional to post-preload free VRAM (activations and exchange traffic scale with the
+            // rank's token count). Rank 1 gets its OWN host copy of the conditioning: two backends concurrently
+            // staging the SAME host tensor trips the transfer helper's binding state (the QwenImageRope
+            // per-backend-table lesson) — weights are exempt only because both caches are warm from the preloads.
+            (long free0, _) = Backend.GetVramInfo();
+            (long free1, _) = CpBackends![1].GetVramInfo();
+            cpPlan = CpSequencePlan.Create(hPacked, wPacked, [free0, free1]);
+            cpExchange = new CpKvExchange(cpPlan);
+            condHiddenRank1 = HostCloneTensor(condHidden);
+            if (useCfg) uncondHiddenRank1 = HostCloneTensor(uncondHidden!);
+            RecordCpDecision($"active(rows {cpPlan.Ranks[0].FrameCount}+{cpPlan.Ranks[1].FrameCount})");
+        }
+
         // Qwen-Image is a 20B MMDiT (Q4_K GGUF, ~12 GB of blocks). Until now this pipeline used the streaming cache
         // ONLY as a VAE-decode eviction gate — the denoise loop itself was all-or-nothing, which is why a 12 GB card
         // OOM'd here after uploading 1,675 weights (measured 2026-07-27, card at 0.5% free). Block streaming gives it
         // the same graceful degradation Flux has had.
         BlockStreamingController? streamer = null;
-        if (IsDitSharded)
+        if (cpEnabled)
+        {
+            // CP already preloaded both ranks above; the chain below must not re-plan (streaming would detach
+            // the full-DiT residency CP depends on).
+        }
+        else if (IsDitSharded)
         {
             // Sharding beats streaming: the pooled multi-card VRAM makes every stage's range resident, which is
             // strictly better than sliding-window re-uploads. Asymmetric preload — shared weights on stage 0's
@@ -545,6 +625,13 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (packedEditRef is not null)
             Backend.PreloadWeights(new List<Tensor> { packedEditRef });
 
+        // CP dispatch: the loop body below stays identical either way — a CP step forks rank 1 onto a worker
+        // (CfgBranchRunner), runs rank 0 here, and gathers both ranks' packed velocity rows in global order.
+        Tensor Predict(Tensor input, Tensor hidden, Tensor? hiddenRank1, float normalizedT, DeviceFeatureCache? cache) =>
+            cpEnabled
+                ? RunForwardContextParallel(input, hidden, hiddenRank1!, normalizedT, hPacked, wPacked, cpPlan!, cpExchange!)
+                : RunForward(input, hidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, cache);
+
         Logs.Info("Starting Qwen-Image denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -596,10 +683,10 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
             if (drainFree)
             {
-                Tensor condPred = RunForward(transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepCondCache);
+                Tensor condPred = Predict(transformerInput, condHidden, condHiddenRank1, normalizedT, stepCondCache);
                 if (cfgThisStep)
                 {
-                    Tensor uncondPred = RunForward(transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepUncondCache);
+                    Tensor uncondPred = Predict(transformerInput, uncondHidden!, uncondHiddenRank1, normalizedT, stepUncondCache);
                     Backend.CfgEulerStep(packedLatent, condPred, uncondPred, cfgScale, scheduler.Dt(i));
                     uncondPred.Dispose();
                 }
@@ -615,15 +702,15 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                 Tensor noisePred;
                 if (cfgThisStep)
                 {
-                    Tensor condPred = RunForward(transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepCondCache);
-                    Tensor uncondPred = RunForward(transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepUncondCache);
+                    Tensor condPred = Predict(transformerInput, condHidden, condHiddenRank1, normalizedT, stepCondCache);
+                    Tensor uncondPred = Predict(transformerInput, uncondHidden!, uncondHiddenRank1, normalizedT, stepUncondCache);
                     noisePred = CfgHelper.ApplyCfg(uncondPred, condPred, cfgScale);
                     uncondPred.Dispose();
                     condPred.Dispose();
                 }
                 else
                 {
-                    noisePred = RunForward(transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, stepCondCache);
+                    noisePred = Predict(transformerInput, condHidden, condHiddenRank1, normalizedT, stepCondCache);
                 }
                 if (transformerInput != packedLatent) transformerInput.Dispose();
 
@@ -697,6 +784,16 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
         Backend.Sync();
         SyncDitShardStages();
+        if (cpExchange is not null)
+        {
+            // Rank 1's replica stays weight-cached across generations (the KEEP_MODELS shape; DisposeCore frees
+            // it), but its per-forward activation pool must not outlive the loop.
+            CpBackends![1].Sync();
+            CpBackends[1].FreeActivations();
+            cpExchange.Dispose();
+        }
+        condHiddenRank1?.Dispose();
+        uncondHiddenRank1?.Dispose();
         if (streamer is not null)
         {
             // Streamed path always tears down regardless of KEEP_MODELS: nothing was fully resident to keep, and the
@@ -782,6 +879,60 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             ? _transformer.ForwardSharded(DitShardStages!, input, hidden, normalizedT, hPacked, wPacked, refGrids, refTimestepZero)
             : _transformer.Forward(Backend, input, hidden, normalizedT, hPacked, wPacked, refGrids, refTimestepZero, stepCache);
 
+    /// <summary>One context-parallel forward: fork rank 1 onto a worker (CfgBranchRunner's dedicated-thread
+    /// ambient-binding shape), run rank 0 on the calling thread, then gather both ranks' packed velocity rows in
+    /// global token order (host concat — the rank thunks host-materialize their outputs). Rank 1 gets its own host
+    /// clones of the mutable input (and, upstream, the conditioning) — two rank threads must never share a
+    /// non-weight tensor across backends.</summary>
+    private Tensor RunForwardContextParallel(Tensor input, Tensor hidden, Tensor hiddenRank1, float normalizedT,
+        int hPacked, int wPacked, CpSequencePlan plan, CpKvExchange exchange)
+    {
+        Tensor rank1Input = HostCloneTensor(input);
+        Tensor local0, local1;
+        try
+        {
+            (local0, local1) = CfgBranchRunner.Run(
+                () => CpRankForward(0, Backend, input, hidden, normalizedT, hPacked, wPacked, plan, exchange),
+                () => CpRankForward(1, CpBackends![1], rank1Input, hiddenRank1, normalizedT, hPacked, wPacked, plan, exchange));
+        }
+        finally { rank1Input.Dispose(); }
+        Tensor full = ConcatPackedSeqDim(local0, local1);
+        local0.Dispose();
+        local1.Dispose();
+        return full;
+    }
+
+    /// <summary>One rank's forward: local packed velocity rows <c>[1, Sr, patch²·out]</c>, host-materialized on the
+    /// owning thread. ANY rank failure aborts the exchange FIRST — the peer may be blocked at a K/V barrier and
+    /// must throw, not deadlock.</summary>
+    private Tensor CpRankForward(int rank, IBackend backend, Tensor input, Tensor hidden, float normalizedT,
+        int hPacked, int wPacked, CpSequencePlan plan, CpKvExchange exchange)
+    {
+        try
+        {
+            CpForwardContext ctx = new() { Rank = rank, Plan = plan, Exchange = exchange };
+            Tensor local = _transformer.Forward(backend, input, hidden, normalizedT, hPacked, wPacked,
+                refGrids: null, refTimestepZero: false, stepCache: null, cp: ctx);
+            _ = local.DataPointer;
+            return local;
+        }
+        catch
+        {
+            exchange.Abort();
+            throw;
+        }
+    }
+
+    /// <summary>Host-side deep copy (forces the source's D2H sync first) — the per-rank clone primitive for
+    /// context parallelism.</summary>
+    private static Tensor HostCloneTensor(Tensor src)
+    {
+        Tensor clone = new Tensor(src.Shape, src.DType);
+        long bytes = src.DType.ComputeByteCount(src.ElementCount);
+        Buffer.MemoryCopy((void*)src.DataPointer, (void*)clone.DataPointer, bytes, bytes);
+        return clone;
+    }
+
     /// <summary>Syncs every distinct DiT-shard-stage backend beyond the primary (already synced by the caller);
     /// no-op when sharding is off.</summary>
     private void SyncDitShardStages()
@@ -825,6 +976,16 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     /// <summary>Releases the cross-generation caches: the prompt-embedding tensors and the pinned edit-reference latent (device pin evicted before dispose — the weight cache is keyed on the tensor object).</summary>
     protected override void DisposeCore()
     {
+        // Context-parallel rank replicas: rank 1+'s weight-cache copy would otherwise outlive the pipeline (the
+        // Chroma→Krea2 stranded-VRAM lesson — device copies stay alive past the pipeline unless freed here).
+        if (CpBackends is { Count: >= 2 })
+        {
+            for (int r = 1; r < CpBackends.Count; r++)
+            {
+                CpBackends[r].FreeWeights(_transformer.EnumerateWeights());
+                CpBackends[r].TrimMemoryPool();
+            }
+        }
         if (_cachedPackedRef is not null)
         {
             // PIN OWNER = Backend (denoise-phase pin) — keep this free on Backend under VaeDevice placement.

@@ -20,8 +20,10 @@ public sealed unsafe class QwenImageRope
     // Cached PER BACKEND (the FluxRope._gpuTables precedent): DiT sharding runs blocks [split, Depth) on a
     // second backend, and two backends staging the SAME host tensor through WanRopeInterleaved trips the
     // transfer helper's binding/pinning state (observed CUDA_ERROR_INVALID_VALUE on the second card at real
-    // table sizes) — each backend gets its own host build instead, a few MB per card.
-    private readonly Dictionary<Core.Backends.IBackend, ((int ImgH, int ImgW, int Txt, int TxtStart, long RefSig) Key, Tensor Cos, Tensor Sin)> _jointTables = new();
+    // table sizes) — each backend gets its own host build instead, a few MB per card. Guarded by a lock:
+    // context-parallel rank threads (one per backend) hit this concurrently, and a rebuild (cond/uncond txt
+    // lengths alternate the key) is a dictionary WRITE.
+    private readonly Dictionary<Core.Backends.IBackend, ((int ImgH, int ImgW, int Txt, int TxtStart, long RefSig, int ImgStart, int ImgCount) Key, Tensor Cos, Tensor Sin)> _jointTables = new();
 
     public QwenImageRope(int[]? axesDim = null, int theta = 10000, bool ropeText = true)
     {
@@ -111,9 +113,12 @@ public sealed unsafe class QwenImageRope
     /// <summary>Fills the joint-layout frequency tables: text rows (positions <c>txtPositionStart + s</c>),
     /// centered main-image rows (frame 0), then each reference grid in order with frame axis <c>i + 1</c>
     /// (ComfyUI ref_latents "index"/"index_timestep_zero" methods increment the frame per ref) and spatial
-    /// positions centered on that reference's own grid.</summary>
+    /// positions centered on that reference's own grid. <paramref name="imgTokenStart"/>/<paramref name="imgTokenCount"/>
+    /// restrict the image section to a global token sub-range (a context-parallel rank's rows — positions stay the
+    /// GLOBAL grid positions, only the emitted rows shrink); the default covers the whole grid.</summary>
     private void FillJointFreqs(Span<float> cosTable, Span<float> sinTable,
-        int imgPackedH, int imgPackedW, int txtSeqLen, int txtPositionStart, ReadOnlySpan<(int H, int W)> refGrids)
+        int imgPackedH, int imgPackedW, int txtSeqLen, int txtPositionStart, ReadOnlySpan<(int H, int W)> refGrids,
+        int imgTokenStart = 0, int imgTokenCount = -1)
     {
         for (int s = 0; s < txtSeqLen; s++)
         {
@@ -121,14 +126,15 @@ public sealed unsafe class QwenImageRope
             int pos = _ropeText ? txtPositionStart + s : 0;
             FillTokenFreqs(cosTable, sinTable, s, frame: pos, height: pos, width: pos);
         }
-        int imgSeqLen = imgPackedH * imgPackedW;
+        int imgSeqLen = imgTokenCount < 0 ? imgPackedH * imgPackedW : imgTokenCount;
         int hCenter = imgPackedH - imgPackedH / 2;
         int wCenter = imgPackedW - imgPackedW / 2;
-        for (int si = 0; si < imgSeqLen; si++)
+        for (int i = 0; i < imgSeqLen; i++)
         {
+            int si = imgTokenStart + i;
             int row = si / imgPackedW;
             int col = si - row * imgPackedW;
-            FillTokenFreqs(cosTable, sinTable, txtSeqLen + si, frame: 0, height: row - hCenter, width: col - wCenter);
+            FillTokenFreqs(cosTable, sinTable, txtSeqLen + i, frame: 0, height: row - hCenter, width: col - wCenter);
         }
         int rowBase = txtSeqLen + imgSeqLen;
         for (int r = 0; r < refGrids.Length; r++)
@@ -151,9 +157,12 @@ public sealed unsafe class QwenImageRope
     /// <summary>Builds (or returns the cached) joint cos/sin tables for the device rope path, <c>[S, headDim]</c>
     /// F32 in the <see cref="Core.Backends.IBackend.WanRopeInterleaved"/> convention (pair i's angle at index
     /// <c>2i</c>). Same position math as <see cref="ApplyJoint"/> — the rotation itself matches the interleaved
-    /// kernel exactly (<c>x0·cos−x1·sin, x0·sin+x1·cos</c> on pairs (2i, 2i+1)).</summary>
+    /// kernel exactly (<c>x0·cos−x1·sin, x0·sin+x1·cos</c> on pairs (2i, 2i+1)).
+    /// <para><paramref name="imgTokenStart"/>/<paramref name="imgTokenCount"/> restrict the image section to a
+    /// context-parallel rank's global token sub-range (GLOBAL grid positions, fewer rows); incompatible with
+    /// reference grids — the pipeline gates edit conditioning off under CP.</para></summary>
     public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(Core.Backends.IBackend backend, int imgPackedH, int imgPackedW, int txtSeqLen,
-        int txtPositionStart, ReadOnlySpan<(int H, int W)> refGrids = default)
+        int txtPositionStart, ReadOnlySpan<(int H, int W)> refGrids = default, int imgTokenStart = 0, int imgTokenCount = -1)
     {
         long refSig = 0x51F0;
         int refSeqLen = 0;
@@ -162,42 +171,48 @@ public sealed unsafe class QwenImageRope
             refSig = refSig * 1000003L ^ ((long)rh << 20 | (uint)rw);
             refSeqLen += rh * rw;
         }
-        (int, int, int, int, long) key = (imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refSig);
-        if (_jointTables.TryGetValue(backend, out ((int, int, int, int, long) Key, Tensor Cos, Tensor Sin) entry)
-            && entry.Key == key)
-            return (entry.Cos, entry.Sin);
-        if (entry.Cos is not null)
+        if (imgTokenCount >= 0 && refSeqLen > 0)
+            throw new ArgumentException("A rank-restricted image range cannot be combined with reference grids.", nameof(imgTokenCount));
+        (int, int, int, int, long, int, int) key = (imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refSig, imgTokenStart, imgTokenCount);
+        lock (_jointTables)
         {
-            entry.Cos.Dispose();
-            entry.Sin.Dispose();
-        }
-
-        int imgSeqLen = imgPackedH * imgPackedW;
-        int totalSeqLen = txtSeqLen + imgSeqLen + refSeqLen;
-        int halfDim = _headDim / 2;
-        float[] cosTable = new float[totalSeqLen * halfDim];
-        float[] sinTable = new float[totalSeqLen * halfDim];
-        FillJointFreqs(cosTable, sinTable, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids);
-
-        Tensor cos = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
-        Tensor sin = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
-        float* cp = (float*)cos.DataPointer;
-        float* sp = (float*)sin.DataPointer;
-        for (int s = 0; s < totalSeqLen; s++)
-        {
-            for (int i = 0; i < halfDim; i++)
+            if (_jointTables.TryGetValue(backend, out ((int, int, int, int, long, int, int) Key, Tensor Cos, Tensor Sin) entry)
+                && entry.Key == key)
+                return (entry.Cos, entry.Sin);
+            if (entry.Cos is not null)
             {
-                float c = cosTable[s * halfDim + i];
-                float sn = sinTable[s * halfDim + i];
-                long off = (long)s * _headDim + 2 * i;
-                cp[off] = c;
-                cp[off + 1] = c;
-                sp[off] = sn;
-                sp[off + 1] = sn;
+                entry.Cos.Dispose();
+                entry.Sin.Dispose();
             }
+
+            int imgSeqLen = imgTokenCount < 0 ? imgPackedH * imgPackedW : imgTokenCount;
+            int totalSeqLen = txtSeqLen + imgSeqLen + refSeqLen;
+            int halfDim = _headDim / 2;
+            float[] cosTable = new float[totalSeqLen * halfDim];
+            float[] sinTable = new float[totalSeqLen * halfDim];
+            FillJointFreqs(cosTable, sinTable, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids,
+                imgTokenStart, imgTokenCount);
+
+            Tensor cos = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
+            Tensor sin = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
+            float* cp = (float*)cos.DataPointer;
+            float* sp = (float*)sin.DataPointer;
+            for (int s = 0; s < totalSeqLen; s++)
+            {
+                for (int i = 0; i < halfDim; i++)
+                {
+                    float c = cosTable[s * halfDim + i];
+                    float sn = sinTable[s * halfDim + i];
+                    long off = (long)s * _headDim + 2 * i;
+                    cp[off] = c;
+                    cp[off + 1] = c;
+                    sp[off] = sn;
+                    sp[off + 1] = sn;
+                }
+            }
+            _jointTables[backend] = (key, cos, sin);
+            return (cos, sin);
         }
-        _jointTables[backend] = (key, cos, sin);
-        return (cos, sin);
     }
 
     /// <summary>Computes the position offset to use when calling <see cref="ApplyText"/>. Matches diffusers'

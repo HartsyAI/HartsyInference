@@ -166,7 +166,7 @@ public sealed class TextService : ITextService, IDisposable
         // have to construct a throwaway backend just to name its device.
         // Device gate INSIDE slot.Lock (gate is always innermost): an LLM slot and an image generation on the
         // same GPU are two backends on one device — state-isolated, but not yet audited for concurrent execution.
-        using IDisposable gate = DeviceGate.AcquireForCudaOrdinal(GateOrdinalFor(deviceKey), cancel);
+        using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
         LoadInto(slot, deviceKey, spec, request);
         try
         {
@@ -184,8 +184,10 @@ public sealed class TextService : ITextService, IDisposable
 
     private static GenOutcome RunText(TextDeviceSlot slot, TextRequest request, Action<TextChunk>? sink, CancellationToken cancel)
     {
-        ILlmTokenizer tokenizer = slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Model!.Tokenizer;
-        IChatTemplate template = slot.SsmModel is not null ? slot.SsmModel.Template : slot.Model!.Template;
+        ILlmTokenizer tokenizer = slot.SsmModel is not null ? slot.SsmModel.Tokenizer
+            : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Tokenizer : slot.Model!.Tokenizer;
+        IChatTemplate template = slot.SsmModel is not null ? slot.SsmModel.Template
+            : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Template : slot.Model!.Template;
         bool rawCompletion = NeedsRawCompletion(template, tokenizer);
         GenerationRequest genRequest = BuildRequest(request, rawCompletion, tokenizer);
 
@@ -255,14 +257,25 @@ public sealed class TextService : ITextService, IDisposable
             throw new HartsyInferenceException(
                 "Text model has no local path. Pass a .gguf file via the model spec (looked under " +
                 $"'{RepoPaths.ModelsRoot()}').");
-        if ((slot.Model is not null || slot.SsmModel is not null) && slot.LoadedPath == path)
+        if ((slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null) && slot.LoadedPath == path)
             return;
         string[] shardDevices = ResolveShardDevices(deviceKey);
         ValidateShardDevices(shardDevices);
         UnloadSlot(slot);
         EnsureRamHeadroomFor(path);
         string architecture0 = PeekArchitecture(path);
-        if (shardDevices.Length >= 2 && !SsmLanguageModel.IsSsmArchitecture(architecture0))
+        // TP claims ShardDevices as its rank list (ValidatePlacement enforces Count == degree and excludes
+        // every other multi-device mode). This branch MUST come before the layer-split one — without it a
+        // TP config would silently layer-split, pass token parity AND the both-cards VRAM check, and read
+        // as green while testing nothing (the DiT-mosaic lesson).
+        int tpDegree = _engine.Placement.TensorParallelDegree;
+        if (tpDegree > 1 && !deviceKey.Contains('+') && shardDevices.Length == tpDegree
+            && !SsmLanguageModel.IsSsmArchitecture(architecture0))
+        {
+            LoadTensorParallel(slot, path, request, shardDevices);
+            return;
+        }
+        if (shardDevices.Length >= 2 && tpDegree <= 1 && !SsmLanguageModel.IsSsmArchitecture(architecture0))
         {
             LoadSharded(slot, deviceKey, path, request, shardDevices);
             return;
@@ -309,9 +322,29 @@ public sealed class TextService : ITextService, IDisposable
             + (slot.VisionPath is not null ? $" + vision '{Path.GetFileName(slot.VisionPath)}'." : "."));
     }
 
-    /// <summary>The CUDA ordinal this slot's generation gate keys on; -1 for CPU (ungated). For a layer-split
-    /// key the LAST stage's device is used — that stage owns the logits and is the slot's <c>Backend</c>, and
-    /// taking exactly one gate keeps the ordering deadlock-free.</summary>
+    /// <summary>Every CUDA ordinal a load+generate on <paramref name="deviceKey"/> can touch: each stage device
+    /// of a layer-split (request-level composite key or engine-placement <c>ShardDevices</c>), else the single
+    /// device. Gating only the logits stage left the other stage devices open to same-device siblings;
+    /// <see cref="DeviceGate.AcquireAllOrdinals"/> acquires ascending, so multi-gate stays deadlock-free.</summary>
+    private IEnumerable<int> GateOrdinalsFor(string deviceKey)
+    {
+        string[] shard = ResolveShardDevices(deviceKey);
+        if (shard.Length >= 2)
+        {
+            foreach (string device in shard)
+            {
+                yield return GateOrdinalFor(device);
+            }
+        }
+        else
+        {
+            yield return GateOrdinalFor(deviceKey);
+        }
+    }
+
+    /// <summary>The CUDA ordinal <paramref name="deviceKey"/> gates on; -1 for CPU (ungated). For a composite
+    /// layer-split key the LAST stage's device is returned — single-selector callers get that selector's own
+    /// ordinal (multi-gate callers use <see cref="GateOrdinalsFor"/>).</summary>
     private static int GateOrdinalFor(string deviceKey)
     {
         string last = deviceKey.Contains('+')
@@ -372,9 +405,20 @@ public sealed class TextService : ITextService, IDisposable
     /// SSM never reaches here (layer-split isn't offered for recurrent architectures).</summary>
     private void LoadSharded(TextDeviceSlot slot, string deviceKey, string path, TextRequest request, string[] shardDevices)
     {
-        // A previous single-device load may have left a backend on this slot (engine-level placement flips
-        // rebuild slots, but a request-level composite key can only collide with itself).
-        if (slot.Backend is not null && slot.Placement is null)
+        // A previous load left this slot's backends alive (UnloadSlot keeps contexts for a same-config reload),
+        // but the shard path builds fresh stage backends below — anything kept here would leak its CUDA context.
+        // A previous SHARDED load parks its non-last stages in ExtraStageBackends; dispose those too, not just
+        // the last-stage backend, or every sharded model switch leaks one context per stage.
+        if (slot.ExtraStageBackends is not null)
+        {
+            foreach (IBackend stage in slot.ExtraStageBackends)
+            {
+                try { stage.Dispose(); }
+                catch (Exception ex) { Logs.Debug($"[TextService] Disposing pre-shard stage backend failed: {ex.Message}"); }
+            }
+            slot.ExtraStageBackends = null;
+        }
+        if (slot.Backend is not null)
         {
             try { slot.Backend.Dispose(); }
             catch (Exception ex) { Logs.Debug($"[TextService] Disposing pre-shard backend failed: {ex.Message}"); }
@@ -408,6 +452,57 @@ public sealed class TextService : ITextService, IDisposable
         Logs.Info($"[TextService] Loaded GGUF model '{Path.GetFileName(path)}' ({slot.Model.Architecture}) "
             + $"layer-split across {string.Join(" + ", plan.Select(p => $"{p.Device}[{p.StartLayer},{p.EndLayer})"))}"
             + (slot.VisionPath is not null ? $" + vision '{Path.GetFileName(slot.VisionPath)}'." : "."));
+    }
+
+    /// <summary>Tensor-parallel load (<c>TensorParallelDegree</c> ≥ 2): every rank device gets a weight SHARD
+    /// (column/row-split per layer, embed/head on rank 0) and the forward all-reduces at the two per-layer seams.
+    /// Latency-oriented sibling of <see cref="LoadSharded"/> (which pools VRAM by layer range) — the two are
+    /// mutually exclusive by validation. Vision sidecars are not supported under TP v1 (logged, not loaded).</summary>
+    private void LoadTensorParallel(TextDeviceSlot slot, string path, TextRequest request, string[] rankDevices)
+    {
+        // Same stale-backend cleanup as LoadSharded: fresh rank backends are built below, so anything the
+        // slot kept alive (single-device backend OR a previous shard/TP load's stages) would leak its context.
+        if (slot.ExtraStageBackends is not null)
+        {
+            foreach (IBackend stage in slot.ExtraStageBackends)
+            {
+                try { stage.Dispose(); }
+                catch (Exception ex) { Logs.Debug($"[TextService] Disposing pre-TP stage backend failed: {ex.Message}"); }
+            }
+            slot.ExtraStageBackends = null;
+        }
+        if (slot.Backend is not null)
+        {
+            try { slot.Backend.Dispose(); }
+            catch (Exception ex) { Logs.Debug($"[TextService] Disposing pre-TP backend failed: {ex.Message}"); }
+            slot.Backend = null;
+        }
+        bool lowVram = !string.IsNullOrEmpty(request.LowVramQuant);
+        GgufLanguageModel.TpCheckpoint checkpoint = GgufLanguageModel.LoadForTensorParallel(path, lowVram);
+        List<IBackend> backends = [.. rankDevices.Select(CreateBackendFor)];
+        ICollectiveComm comm = CollectiveComm.Create(backends);
+        TensorParallelTransformer tp = new(checkpoint.Config, new TpPlacement(backends, comm));
+        tp.LoadWeights(checkpoint.Weights, "model");
+        for (int rank = 0; rank < backends.Count; rank++)
+        {
+            if (backends[rank] is CudaBackend)
+            {
+                backends[rank].PreloadWeights(tp.EnumerateRankWeights(rank));
+            }
+        }
+        slot.TpCheckpoint = checkpoint;
+        slot.TpTransformer = tp;
+        slot.TpComm = comm;
+        slot.Backend = backends[0];
+        slot.ExtraStageBackends = [.. backends.Skip(1)];
+        slot.Pipeline = new TextGenerationPipeline(tp, checkpoint.Tokenizer, backends[0], checkpoint.Template);
+        slot.LoadedPath = path;
+        if (FindMmproj(path) is not null)
+        {
+            Logs.Warning($"[TextService] '{Path.GetFileName(path)}' ships a vision sidecar — NOT loaded: vision is unsupported under tensor parallelism v1 (text-only).");
+        }
+        Logs.Info($"[TensorParallel] active degree={rankDevices.Length} devices=[{string.Join(", ", rankDevices)}] "
+            + $"comm={comm.Transport} for '{Path.GetFileName(path)}' (column/row-split per layer, 2 all-reduces/layer).");
     }
 
     /// <summary>Pairs the loaded text model with a sidecar mmproj GGUF (if present) and loads the matching vision
@@ -511,7 +606,7 @@ public sealed class TextService : ITextService, IDisposable
         slot.MllamaVision?.Dispose();
         slot.MllamaVision = null;
         slot.VisionPath = null;
-        if (slot.Model is not null || slot.SsmModel is not null)
+        if (slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null)
         {
             if (slot.Backend is CudaBackend cuda)
             {
@@ -530,6 +625,12 @@ public sealed class TextService : ITextService, IDisposable
         }
         slot.Placement = null;
         slot.Pipeline = null;
+        slot.TpTransformer?.Dispose();
+        slot.TpTransformer = null;
+        slot.TpComm?.Dispose();
+        slot.TpComm = null;
+        slot.TpCheckpoint?.Dispose();
+        slot.TpCheckpoint = null;
         slot.Model?.Dispose();
         slot.Model = null;
         slot.SsmPipeline = null;

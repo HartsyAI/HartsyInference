@@ -603,6 +603,11 @@ public sealed class CudaBackend : IBackend
     /// <c>_context.EnsureCurrent()</c> at every op entry — context identity alone cannot name the owning backend
     /// when two backends share a device's primary context, and the cleanup buckets are keyed per backend.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    /// <summary>Binds this backend as the calling thread's ambient op target. For collective transports
+    /// (<see cref="NcclComm"/>), which stage uploads through the ambient-based transfer helper without going
+    /// through a public tensor op.</summary>
+    internal void BindAmbient() => EnterOp();
+
     private void EnterOp()
     {
         GpuTransferHelper.SetAmbient(_transferState);
@@ -1107,6 +1112,17 @@ public sealed class CudaBackend : IBackend
                 GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                 cachedOutput = true;
                 return;
+            }
+
+            // A pre-quantized fp8 caller input (Modulate-emitted e4m3, stored value = real/scale) is dequantized
+            // SCALE-BLIND by CastIfNeeded below — fold its per-tensor scale into alpha exactly like the native
+            // fp8 branch above (and Conv2D) do. Without this, every GEMM consuming such an input is off by that
+            // factor on any card that can't take the native path (SM < 8.9) — the root cause of the MiniMax-H3
+            // cross-device sharded mosaic (3060 tail blocks; confirmed by experiment 2026-08-06: disabling the
+            // fp8 emit raised sharded SSIM 0.17 → 0.98).
+            if (input.DType.IsFp8)
+            {
+                alpha *= input.Fp8ScaleFactor;
             }
 
             // Joint resolution: when fp8 is in play we run the whole GEMM in F16, casting the
@@ -2439,6 +2455,9 @@ public sealed class CudaBackend : IBackend
     public void StepGraphBegin()
     {
         EnterOp();
+        // A still-open capture must abort+purge BEFORE the tracker clear below wipes its alloc records.
+        if (_stepGraphCapturing)
+            StepGraphReset();
         _stepGraph ??= new CudaGraph(_stream.Handle, autoFreeAllocationsOnRelaunch: true);
         _stepGraph.Reset();
         lock (_transferState.CaptureAllocs)
@@ -7668,12 +7687,19 @@ public sealed class CudaBackend : IBackend
     /// tensor's demote hooks and evict it from the source backend.</summary>
     public unsafe void CopyFromPeer(Tensor destination, Tensor source, IBackend sourceBackend)
     {
-        nuint byteSize = (nuint)(source.ElementCount * source.DType.SizeInBytes);
-        if ((nuint)(destination.ElementCount * destination.DType.SizeInBytes) != byteSize)
+        // Raw memcpy both ways below — a dtype mismatch would bit-reinterpret silently.
+        if (destination.DType != source.DType)
+        {
+            throw new ArgumentException(
+                $"CopyFromPeer dtype mismatch: source {source.DType} vs destination {destination.DType}.");
+        }
+        // ByteSize, not ElementCount*SizeInBytes: block-quantized dtypes have SizeInBytes==0.
+        nuint byteSize = GpuTransferHelper.ByteSize(source);
+        if (GpuTransferHelper.ByteSize(destination) != byteSize)
         {
             throw new ArgumentException(
                 $"CopyFromPeer size mismatch: source {byteSize} bytes vs destination " +
-                $"{destination.ElementCount * destination.DType.SizeInBytes} bytes.");
+                $"{GpuTransferHelper.ByteSize(destination)} bytes.");
         }
         if (sourceBackend is not CudaBackend srcCuda || ReferenceEquals(srcCuda, this))
         {

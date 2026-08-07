@@ -69,7 +69,9 @@ public sealed unsafe class GenericTransformer : IDisposable
         else backend.Linear(output, input, weight, bias);
     }
 
-    private static Tensor EnsureF32(Tensor t)
+    /// <summary>F32 view-or-copy: dequantizes quantized tensors, casts 16-bit floats, returns the SAME
+    /// reference when already F32 (callers check <c>ReferenceEquals</c> before disposing).</summary>
+    internal static Tensor EnsureF32(Tensor t)
     {
         if (t.DType == DType.F32) return t;
         if (t.DType.IsQuantized) return HartsyInference.ModelAssets.Gguf.GgufDequantizer.Dequantize(t, DType.F32);
@@ -387,7 +389,11 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         // Absolute position embeddings (GPT-2/StarCoder): add posEmbed[posStart+s] to each token embedding,
         // host-side (the embeds buffer is host F32 on the token path). These models use no RoPE.
-        if (_posEmbed is not null)
+        // startLayer gate: on a staged (layer-split) run only the FIRST stage sees token embeddings — for
+        // stages > 0 `embeds` is the previous stage's hidden state, and re-adding position rows there would
+        // silently corrupt the output once per extra stage (EnumerateStageWeights already tiles _posEmbed
+        // and _embedNorm to the first stage only; this makes the forward match that contract).
+        if (_posEmbed is not null && startLayer == 0)
         {
             int h = _cfg.HiddenSize;
             float* ep = (float*)embeds.DataPointer;
@@ -420,10 +426,11 @@ public sealed unsafe class GenericTransformer : IDisposable
             BuildRope(cosLocal, sinLocal, t, posStart, dLocal, rotaryLocal, _cfg.RopeLocalTheta, _cfg.RopeScaling);
         }
 
-        // BLOOM applies a LayerNorm to the token embeddings before the first block.
+        // BLOOM applies a LayerNorm to the token embeddings before the first block (same startLayer gate as
+        // _posEmbed above — first stage only).
         Tensor work = embeds;
         bool ownsWork = false;
-        if (_embedNorm is not null)
+        if (_embedNorm is not null && startLayer == 0)
         {
             work = new(embeds.Shape, DType.F32);
             backend.LayerNorm(work, embeds, _embedNorm, _embedNormBias!, _cfg.RmsNormEps);
@@ -967,7 +974,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>,
     /// <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of
     /// <see cref="IBackend.ApplyRopeSingle"/> (shared by Qwen2 / Qwen3 / Llama).</summary>
-    private static void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, int rotaryDim, float theta, RopeScaling scaling)
+    internal static void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, int rotaryDim, float theta, RopeScaling scaling)
     {
         // Partial rotary: build the table for the first rotaryDim dims (half = rotaryDim/2 duplicated), leaving the
         // rest of each headDim-strided row untouched (the kernel never reads it). 0/full → the whole head.

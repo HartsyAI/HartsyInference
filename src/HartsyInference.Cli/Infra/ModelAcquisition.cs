@@ -33,7 +33,7 @@ public static class ModelAcquisition
         if (spec.Catalog is not { } cat || cat.Assets.Count == 0)
             return spec;
 
-        if (AudioCacheModalities.Contains(spec.Modality) && !StandardDownloadMusicIds.Contains(cat.Id))
+        if (UsesAudioCache(cat, spec.Modality))
         {
             EnsureAudioAssetsPresent(cat, spec.Modality);
             return spec;
@@ -86,24 +86,30 @@ public static class ModelAcquisition
         return primary is not null ? spec with { LocalPath = primary } : spec;
     }
 
+    /// <summary>True when this catalog entry's files live under <see cref="AudioModelCache"/> rather than the
+    /// <c>Models/&lt;subdir&gt;</c> tree — these must never be pulled via <see cref="ModelDownloader"/>.</summary>
+    internal static bool UsesAudioCache(CatalogEntry cat, Modality modality)
+        => AudioCacheModalities.Contains(modality) && !StandardDownloadMusicIds.Contains(cat.Id);
+
     /// <summary>Present-check + confirm + download for the audio-cache-backed modalities (TTS/STT/Music/VoiceConvert/Fx).</summary>
     /// <remarks>Resolves each asset's real location under <see cref="AudioModelCache"/> (not <see cref="ModelDownloader"/>'s
     /// SwarmUI-style <c>Models/&lt;subdir&gt;</c> tree, which these models never read from) and fetches anything missing via
     /// the same <see cref="AudioModelCache.GetAsync"/> the Engine's own descriptors call internally, so the file lands
     /// exactly where the generation call will look for it.</remarks>
-    private static void EnsureAudioAssetsPresent(CatalogEntry cat, Modality modality)
+    /// <returns>True when all assets are present (or were downloaded); false on decline or failure.</returns>
+    internal static bool EnsureAudioAssetsPresent(CatalogEntry cat, Modality modality, bool confirm = true, CancellationToken ct = default)
     {
         string category = AudioCategoryFor(modality);
         List<ModelAsset> missing = cat.Assets.Where(a => !File.Exists(AudioAssetPath(a, category))).ToList();
         if (missing.Count == 0)
-            return;
+            return true;
 
         AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s) not on disk:[/]");
         foreach (ModelAsset a in missing)
             AnsiConsole.MarkupLine($"  [#9aa4af]{a.Role}:[/] {Markup.Escape(a.Repo)}/{Markup.Escape(a.RepoPath)}");
 
-        if (!InteractivePrompt.Confirm("Download these now?", defaultYes: false))
-            return;
+        if (confirm && !InteractivePrompt.Confirm("Download these now?", defaultYes: false))
+            return false;
 
         try
         {
@@ -116,19 +122,24 @@ public static class ModelAcquisition
                         ProgressTask task = ctx.AddTask(Markup.Escape(a.FileName));
                         string baseDescription = Markup.Escape(a.FileName);
                         IProgress<long> progress = new Progress<long>(bytes => task.Description = $"{baseDescription} ({bytes / (1024 * 1024)} MB)");
-                        AudioModelCache.GetAsync(a.Repo, a.RepoPath, category, progress: progress, ct: CancellationToken.None).GetAwaiter().GetResult();
+                        AudioModelCache.GetAsync(a.Repo, a.RepoPath, category, progress: progress, ct: ct).GetAwaiter().GetResult();
                         if (!string.IsNullOrEmpty(a.Sha256))
                             AudioModelCache.VerifySha256(AudioAssetPath(a, category), a.Sha256);
                     }
                 });
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             CliErrors.Report(ex, modality);
-            return;
+            return false;
         }
 
         AnsiConsole.MarkupLine("[green]✓ model files ready.[/]");
+        return true;
     }
 
     /// <summary>The real on-disk path for an audio asset: <see cref="AudioModelCache"/>'s directory, not <see cref="ModelDownloader"/>'s.</summary>

@@ -4,6 +4,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
@@ -280,6 +281,99 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         }
         if (!cfgInterval.IsAlways)
             Logs.Info($"CFG interval ON: guidance applies at normalized t in [{cfgInterval.Start}, {cfgInterval.End}]");
+
+        // Context parallelism (sequence split, weights replicated on both ranks): cond and uncond stay sequential,
+        // but each forward forks into rank 0 (this thread, Backend) + rank 1 (worker, CpBackends[1]) over
+        // frame-aligned token ranges, with per-block self-attn K/V exchanged via CpKvExchange. v1 scope: 2 ranks,
+        // single-expert (MoE swap can't be mirrored under VRAM pressure), no step cache (residuals are
+        // full-sequence), and never composed with CFG-parallel (ValidatePlacement rejects the config — the guard
+        // here is belt-and-braces for direct pipeline construction).
+        LastCpDecision = null;
+        bool cpEnabled = false;
+        if (CpBackends is { Count: >= 2 })
+        {
+            if (!ReferenceEquals(CpBackends[0], Backend)) RecordCpDecision("fell-back(rank0-not-primary)");
+            else if (CpBackends.Count != 2) RecordCpDecision($"fell-back({CpBackends.Count}-ranks-unsupported)");
+            else if (_transformer2 is not null) RecordCpDecision("fell-back(moe-two-expert)");
+            else if (cfgParallelEnabled) RecordCpDecision("fell-back(cfg-parallel-configured)");
+            else if (condCache is not null) RecordCpDecision("fell-back(step-cache)");
+            else if (tLat / _config.PatchSize.T < 2) RecordCpDecision("fell-back(single-latent-frame)");
+            else cpEnabled = true;
+        }
+        if (cpEnabled)
+        {
+            // Replicating the whole DiT on rank 1 can genuinely not fit; degrade to single-GPU, not a dead generation.
+            try
+            {
+                CpBackends![1].PreloadWeights(_transformer.EnumerateWeights());
+            }
+            catch (Exception ex)
+            {
+                Logs.Warning($"Wan context-parallel: couldn't preload the DiT onto rank 1 (falling back to "
+                    + $"single-GPU this generation): {ex.Message}");
+                RecordCpDecision($"fell-back(preload-failed: {ex.Message})");
+                cpEnabled = false;
+            }
+        }
+        CpSequencePlan? cpPlan = null;
+        CpKvExchange? cpExchange = null;
+        if (cpEnabled)
+        {
+            (int cpt, int cph, int cpw) = _config.PatchSize;
+            int gt = tLat / cpt, gh = hLat / cph, gw = wLat / cpw;
+            // Frame split proportional to post-preload free VRAM (activations scale with the rank's token count).
+            (long free0, _) = Backend.GetVramInfo();
+            (long free1, _) = CpBackends![1].GetVramInfo();
+            cpPlan = CpSequencePlan.Create(gt, gh * gw, [free0, free1]);
+            cpExchange = new CpKvExchange(cpPlan);
+            // First-touch of the shared rope/context caches must happen before the rank threads fork.
+            _transformer.PrewarmSequenceCaches(Backend, gt, gh, gw, promptEmbeds, negativeEmbeds);
+            RecordCpDecision($"active(frames {cpPlan.Ranks[0].FrameCount}+{cpPlan.Ranks[1].FrameCount})");
+        }
+
+        // One rank's forward: local [Sr, outVec] rows, host-materialized on the owning thread. ANY rank failure
+        // aborts the exchange first — the peer may be blocked at a K/V barrier and must throw, not deadlock.
+        Tensor CpRankForward(int rank, IBackend rankBackend, Tensor input, Tensor embeds, float[]? fts, float tE)
+        {
+            try
+            {
+                CpForwardContext ctx = new() { Rank = rank, Plan = cpPlan!, Exchange = cpExchange! };
+                Tensor local = fts is null
+                    ? _transformer.Forward(rankBackend, input, embeds, tE, null, ctx)
+                    : _transformer.Forward(rankBackend, input, embeds, fts, null, ctx);
+                _ = local.DataPointer;
+                return local;
+            }
+            catch
+            {
+                cpExchange!.Abort();
+                throw;
+            }
+        }
+
+        // Full CP forward: fork rank 1 onto a worker (CfgBranchRunner's dedicated-thread ambient-binding shape),
+        // run rank 0 here, then gather rows in global token order and unpatchify — the callers' host-side
+        // scheduler/CFG path continues unchanged.
+        Tensor CpForkedForward(Tensor input, Tensor embeds, float[]? fts, float tE)
+        {
+            Tensor rank1Input = CloneLatents(input);   // never share the mutable input tensor across rank threads
+            Tensor local0, local1;
+            try
+            {
+                (local0, local1) = CfgBranchRunner.Run(
+                    () => CpRankForward(0, Backend, input, embeds, fts, tE),
+                    () => CpRankForward(1, CpBackends![1], rank1Input, embeds, fts, tE));
+            }
+            finally { rank1Input.Dispose(); }
+            (int cpt, int cph, int cpw) = _config.PatchSize;
+            Tensor full = WanDitOps.ConcatRows(local0, local1, _config.OutChannels * cpt * cph * cpw);
+            local0.Dispose();
+            local1.Dispose();
+            Tensor v = WanDitOps.Unpatchify(full, _config.OutChannels, tLat / cpt, hLat / cph, wLat / cpw, _config.PatchSize);
+            full.Dispose();
+            return v;
+        }
+
         int cfgSkippedSteps = 0;
         int cacheComputes = 0, cacheReuses = 0, uncondComputes = 0, uncondReuses = 0;
         WanVideoTransformer? cacheExpert = null;   // A14B MoE: residuals are expert-specific — reset on swap
@@ -315,7 +409,12 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             bool cfgParallel = cfgThisStep && cfgParallelEnabled;
             if (firstFrameLatent is null)
             {
-                if (cfgParallel)
+                if (cpEnabled)
+                {
+                    vCond = CpForkedForward(latents, promptEmbeds, null, tEmb);
+                    if (cfgThisStep) vUncond = CpForkedForward(latents, negativeEmbeds, null, tEmb);
+                }
+                else if (cfgParallel)
                 {
                     Tensor uncondLatents = CloneLatents(latents);
                     try
@@ -339,7 +438,12 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 WriteFirstFrame(modelInput, firstFrameLatent);
                 frameTs![0] = 0f;
                 for (int f = 1; f < tLat; f++) frameTs[f] = tEmb;
-                if (cfgParallel)
+                if (cpEnabled)
+                {
+                    vCond = CpForkedForward(modelInput, promptEmbeds, frameTs, tEmb);
+                    if (cfgThisStep) vUncond = CpForkedForward(modelInput, negativeEmbeds, frameTs, tEmb);
+                }
+                else if (cfgParallel)
                 {
                     Tensor uncondModelInput = CloneLatents(modelInput);
                     try
@@ -379,7 +483,9 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             // own activations on CfgParallelBackend — free both, or the second card OOMs a few steps in.
             Backend.FreeActivations();
             if (cfgParallelEnabled) CfgParallelBackend!.FreeActivations();
+            if (cpEnabled) CpBackends![1].FreeActivations();
         }
+        cpExchange?.Dispose();
 
         if (firstFrameLatent is not null) WriteFirstFrame(latents, firstFrameLatent);
 
