@@ -1,6 +1,8 @@
 # Structured Prompt Builder — Research & Design Notes
 
-> **Status:** Design complete (no code yet) | **Last Updated:** 2026-06-07 | **Needed Before:** `Ideogram4Pipeline` usability; reused by future regional-prompting models
+> **Status:** built — the design below shipped as `src/HartsyInference.Diffusion/Prompting/`
+> (`StructuredPrompt`, `StructuredPromptBuilder`, `IPromptDialect` + `Dialects/`, `MagicPrompt/`, plus
+> regional-conditioning and prompt-scheduling types). Kept as the design rationale. | Designed 2026-06-07
 >
 > **Motivation:** Ideogram 4 (and a growing set of layout-controllable models) is trained on **structured captions** — a scene summary, a style block, and per-object descriptions with bounding boxes and hex color palettes — not free text. Community feedback (ComfyUI tutorials, forum threads) is that "you have to LLM-prompt each region," and people hand-roll JSON per model and get it subtly wrong (key order, hex casing, coordinate convention). This document designs **one model-agnostic structured-prompt data model** with **per-model serializer dialects**, so a user (or our SwarmUI extension) builds the prompt once and we emit the exact format each model wants — plus an optional pluggable LLM "magic prompt" expander.
 >
@@ -8,6 +10,12 @@
 > - `ideogram-oss/ideogram4` `docs/prompting.md` + `src/ideogram4/magic_prompt.py` + `magic_prompt_system_prompts/`
 > - [IDEOGRAM4_ARCHITECTURE.md](IDEOGRAM4_ARCHITECTURE.md) (the consumer)
 > - Existing regional-prompting conventions (attention-coupled region masks) used by SD/Flux community tooling — relevant to the non-JSON dialects.
+
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
 
 ## Summary
 
@@ -170,13 +178,6 @@ The `Ideogram4Pipeline` accepts **either** a raw conditioning string **or** a `S
   - Validator rejects: lowercase hex, `#abc` shorthand, >16/>5 palette, both photo+art_style, missing background, bbox out of `[0,1000]`, `min≥max`.
   - `NaturalLanguageDialect` produces non-empty prose with all element descriptions present.
   - `RegionalAttentionDialect` maps a 0–1000 bbox to the correct pixel rect at 1024×768.
-
-## Open Questions
-
-- **Exact field set in the official `magic_prompt_system_prompts/`** — port the precise schema text so our default expander matches Ideogram's training prompt. (Read the directory contents.)
-- **Are `aesthetics`/`lighting`/`medium` strictly required when `style_description` is present**, or tolerated-if-missing? `prompting.md` says required-when-present; confirm against examples.
-- **Coordinate origin** — confirm `[y_min, x_min, y_max, x_max]` (row-major, y first). `prompting.md` states this order; double-check against a rendered example before trusting it for region masks.
-- **Regional-attention coupling mechanism** for non-Ideogram models is out of scope here (data path only). When we build it, decide: per-region cross-attention bias vs latent-couple (e.g. "Attention Couple" style). Separate research doc when that lands.
 
 ## Implementation Notes
 

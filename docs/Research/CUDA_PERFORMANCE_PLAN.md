@@ -5,7 +5,12 @@
 > **Output**: a peer-reviewable systems paper (target: MLSys / EuroSys / SC) describing the methodology, kernels, and measurement framework.
 > **Constraint**: every claim is grounded in a CSV under [`benchmarks/results/`](../../benchmarks/results/). No marketing numbers.
 
-This is the master tracking document for Phase B. It supersedes the optimization roadmap in [`CUDA_PERFORMANCE.md`](CUDA_PERFORMANCE.md) (the older doc remains as the historical Phase 0–2 record). Companion docs:
+> **Historical.** Phase B is over and the live cross-cutting perf backlog is
+> [`ROADMAP.md`](../Checklists/ROADMAP.md) §2; measured results are in
+> [`benchmarks/scoreboards/`](../../benchmarks/scoreboards/). This doc is kept for its hypothesis list
+> and technique survey. [`CUDA_PERFORMANCE.md`](CUDA_PERFORMANCE.md) is the older Phase 0–2 record.
+
+Companion docs:
 
 - [`PROFILING_METHODOLOGY.md`](PROFILING_METHODOLOGY.md) — how to profile (Nsight Systems / Compute, NVTX, cuBLAS log)
 - [`../Checklists/ROADMAP.md`](../Checklists/ROADMAP.md) — checkbox tracking

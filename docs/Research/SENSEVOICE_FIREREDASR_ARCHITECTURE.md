@@ -2,6 +2,12 @@
 
 > Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (SenseVoice + FireRedASR pipelines)
 
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+
 ## Summary
 
 This document covers two strong Chinese / multilingual STT model families that we plan to wrap as pure-C# pipelines under `HartsyInference.Audio`:
@@ -15,9 +21,7 @@ Sources:
 - SenseVoice: [GitHub FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice), [model.py](https://github.com/FunAudioLLM/SenseVoice/blob/main/model.py), [HuggingFace FunAudioLLM/SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall), [FunAudioLLM paper arXiv:2407.04051](https://arxiv.org/abs/2407.04051), [SenseVoice.cpp port](https://github.com/lovemefan/SenseVoice.cpp), [DeepWiki FunASR SenseVoice page](https://deepwiki.com/modelscope/FunASR/5.2-sensevoice), [sherpa-onnx SenseVoice docs](https://k2-fsa.github.io/sherpa/onnx/sense-voice/index.html)
 - FireRedASR: [GitHub FireRedTeam/FireRedASR](https://github.com/FireRedTeam/FireRedASR), [FireRedASR paper arXiv:2501.14350](https://arxiv.org/abs/2501.14350), [HuggingFace FireRedASR-AED-L](https://huggingface.co/FireRedTeam/FireRedASR-AED-L), [HuggingFace FireRedASR-LLM-L](https://huggingface.co/FireRedTeam/FireRedASR-LLM-L), [literature review (themoonlight.io)](https://www.themoonlight.io/en/review/fireredasr-open-source-industrial-grade-mandarin-speech-recognition-models-from-encoder-decoder-to-llm-integration), [FireRedASR2 (follow-up) arXiv:2603.10420](https://arxiv.org/abs/2603.10420)
 
-## Detailed Findings
-
-### 1. Variants Tables
+## Variants Tables
 
 #### 1.1 SenseVoice variants
 
@@ -56,148 +60,7 @@ Exact per-layer dims for AED-L and the LLM-L encoder are not enumerated in the p
 - LLM adapter output dim must equal Qwen2-7B hidden = **3 584**.
 - LoRA on Qwen2 (when enabled during fine-tune): r=64, α=16.
 
-### 2. Architecture
-
-#### 2.1 SenseVoice-Small (encoder-only, CTC)
-
-```
-[waveform 16 kHz mono]
-    │
-    ▼ kaldi-native-fbank: n_mels=80, frame_length=25 ms, frame_shift=10 ms, Hamming, dither=1.0
-[T × 80 fbank]
-    │
-    ▼ LFR stacking (lfr_m=7, lfr_n=6) → frames concatenated, then strided
-[T' × 560]                                where T' ≈ T/6
-    │
-    ▼ optional global CMVN (loaded from am.mvn) — per-feature mean / scale
-[T' × 560]
-    │
-    ▼ prepend 4 learned query embeddings:  [LID] [SER/Emotion] [AED/Event] [ITN]
-[(T' + 4) × 560]   ──►  encoders0 (Linear 560→512 + SANM block)  ──►  [(T'+4) × 512]
-    │
-    ▼ SinusoidalPositionEncoder (scales input by √d_model then adds sinusoidal PE)
-    │
-    ▼ 49 × EncoderLayerSANM            (the "encoders" stack)
-    │
-    ▼ 0  × EncoderLayerSANM            (the "tp_encoders" stack — empty in release)
-[(T' + 4) × 512]
-    │
-    ▼ final LayerNorm
-    │
-    ▼ Linear ctc_lo: 512 → 25 055      (CTC head)
-[(T' + 4) × 25 055]   ◄── softmax + argmax over time
-    │
-    ▼ greedy CTC decode: collapse-consecutive + remove blank(0)
-[token ids ...]
-    │
-    ▼ split prefix: first 4 tokens = <lid> <emo> <event> <itn>;  rest = text BPE
-[(lang, emotion, event, itn-flag, text)]
-```
-
-`EncoderLayerSANM` (pre-norm, GLU-free — this is **not** a Conformer block, contrary to some third-party blog posts):
-
-```
-x → LayerNorm → MultiHeadedAttentionSANM(n_head=4, n_feat=512, kernel_size=11) → +x (residual)
-  → LayerNorm → PositionwiseFeedForward(512 → 2048 → 512, ReLU)                → +x (residual)
-```
-
-`MultiHeadedAttentionSANM` is the SAN-M block. It is **standard scaled-dot-product MHA augmented with an FSMN memory branch** that runs in parallel:
-
-```
-SAN-M(x):
-    # FSMN memory branch (depthwise 1-D conv along time)
-    mem = DepthwiseConv1D(channels=d_model, kernel=11, padding=center, groups=d_model)(x)
-    mem = mem  # the "memory" — captures local temporal context cheaply
-
-    # Standard multi-head self-attention
-    q, k, v = Linear(x), Linear(x), Linear(x)   # one fused Linear in the impl
-    a = softmax((q @ kᵀ) / √d_k + mask) @ v
-    a = Linear(a)
-
-    return a + mem        # additive fusion of attention output and FSMN memory
-```
-
-The FSMN branch lets SenseVoice trade some softmax depth for cheap depthwise convs, which is part of why the 50-layer encoder is fast despite the depth. The encoder is **non-streaming** in the released config (the `forward_chunk` / KV-cache path exists in code but is not used by default).
-
-**Special-token prepending.** Four learned query embeddings — language ID hint, emotion query, audio-event query, ITN (inverse text normalization) flag — are concatenated **before** the encoder. After the forward pass the first 4 frame logits are interpreted as classifications over `{lang ids}`, `{emotion ids}`, `{event ids}`, `{itn ids}` respectively. The remaining frames go through standard CTC decoding for the transcript. During training: cross-entropy on the first 4 positions, CTC loss on the rest.
-
-#### 2.2 FireRedASR-AED-L (Conformer encoder + Transformer decoder)
-
-```
-[waveform 16 kHz mono, up to 60 s]
-    │
-    ▼ kaldi-native-fbank: n_mels=80, frame=25 ms, hop=10 ms, Hamming + global CMVN (cmvn.ark)
-[T × 80]
-    │
-    ▼ Conv2dSubsampling: 2× (Conv2d k=3,s=2 + ReLU)   → 4× downsample, 80 → d_model
-[T/4 × d_model]                                       (frame rate: 40 ms)
-    │
-    ▼ Relative-positional encoding (max_len=5000)
-    │
-    ▼ N_enc × ConformerBlock
-[T/4 × d_model]
-    │   ┌── encoder output ────────────────────────────────────────────┐
-    │                                                                  │
-    ▼   start AR decode from [<sos>]                                   │
-[B × t × d_model]                                                      │
-    │                                                                  │
-    ▼ N_dec × TransformerDecoderBlock                                  │
-    │       (self-attn pre-norm, cross-attn into encoder output, FFN 4×d_model) ◄┘
-    │
-    ▼ Linear d_model → vocab(7832)
-    │
-    ▼ beam search (default beam=3, with length penalty + repetition penalty + softmax temperature)
-[token ids ...]
-    │
-    ▼ ChineseCharEnglishSpmTokenizer.decode  (joins Chinese chars directly, BPE-merges English)
-[transcript]
-```
-
-`ConformerBlock` (Macaron-FF + MHSA + ConvModule + Macaron-FF, all residual + pre-norm):
-
-```
-x → ½·FFN1(x)                                              + x
-  → MultiHeadSelfAttention(rel-pos)                         + x
-  → ConvModule { PointwiseConv → GLU → DepthwiseConv1D(k=33) → BatchNorm → Swish → PointwiseConv } + x
-  → ½·FFN2(x)                                               + x
-  → LayerNorm
-```
-
-#### 2.3 FireRedASR-LLM-L (Conformer encoder + Adapter + Qwen2-7B decoder)
-
-```
-[waveform 16 kHz mono, up to 30 s]
-    │
-    ▼ same fbank + CMVN as AED-L
-[T × 80]
-    │
-    ▼ same Conv2dSubsampling + N_enc × ConformerBlock as AED-L (encoder weights start from AED-L)
-[T/4 × d_enc]                            (40 ms frames)
-    │
-    ▼ Adapter:
-    │     frame_splice(×2)            → [T/8 × 2·d_enc]   (80 ms frames; cuts seq len in half)
-    │     Linear(2·d_enc → 768) → ReLU → Linear(768 → 3584)
-[T/8 × 3584]   = "speech embeddings"
-    │
-    ▼ merge with text token embeddings produced by Qwen2 tokenizer
-    │     prompt template: "<|im_start|>user\n<SPEECH PLACEHOLDERS>\n请转写音频内容<|im_end|>\n<|im_start|>assistant\n"
-    │     _merge_input_ids_with_speech_features() splices speech embeddings in place of placeholder tokens
-[(prompt_text_emb || speech_emb || suffix_emb) × 3584]
-    │
-    ▼ Qwen2-7B-Instruct (28 layers, hidden=3584, heads=28, kv_heads=4, FFN=18944, RoPE, SwiGLU)
-    │   — autoregressive AR decode with KV cache, beam or greedy
-[generated token ids ...]
-    │
-    ▼ Qwen2 tokenizer decode (BPE)
-[transcript]
-```
-
-Key facts for the LLM variant:
-- Encoder hidden dim **must be projected** through `2·d_enc → 768 → 3584` to land in Qwen2's embedding space (`hidden_size = 3584`).
-- The "frame splicing" inside the adapter halves the speech token count from ~750 (30 s @ 40 ms) to ~375 (30 s @ 80 ms) — important to keep prompt length manageable.
-- Special tokens used from Qwen2: `<|endoftext|>`, `<|im_start|>`, `<|im_end|>`. No new special tokens are added; speech is injected as embeddings, not token IDs.
-
-### 3. Multilingual / Output Format / Supported Tags
+## Multilingual / Output Format / Supported Tags
 
 #### 3.1 SenseVoice output format and tag inventory
 
@@ -229,44 +92,7 @@ Output is rendered (when text-formatted) as `<|lang|><|emotion|><|event|><|itn-f
 - **Singing lyrics** — notable strength; 50–67 % CER reduction vs industrial baselines on lyrics-from-singing audio (FireRedASR2-LLM reaches 1.12 % CER on opencpop).
 - No emotion / event side outputs — pure ASR.
 
-### 4. Mel Preprocessing
-
-#### 4.1 SenseVoice frontend (FunASR `WavFrontend`)
-
-| Param | Value |
-|-------|-------|
-| sample_rate | 16 000 Hz |
-| n_mels | 80 |
-| frame_length | 25 ms (= 400 samples) |
-| frame_shift | 10 ms (= 160 samples) |
-| window | Hamming |
-| dither | 1.0 (Kaldi-style additive uniform noise) |
-| energy_floor | 0 |
-| snip_edges | True |
-| pre-emphasis | none (kaldi default) |
-| **LFR (Low Frame Rate)** | `lfr_m = 7`, `lfr_n = 6` — concatenate 7 consecutive frames, step 6 → input dim 560, time-stride 60 ms |
-| CMVN | loaded from `am.mvn` — global per-feature mean + 1/std rescale; applied **after** LFR |
-| Final input shape | `[T/6, 560]` |
-
-Implementation note: SenseVoice computes log-mel via the **kaldi-native-fbank** layout (log-power-spectrum → mel filterbank → log, with Kaldi-specific dither + snip-edges + window function). It is **not** byte-compatible with Whisper's STFT/torch-audio mel implementation — features differ by ≈ 1 e-2 typical magnitude. Don't try to reuse the Whisper mel path; build a Kaldi-fbank module.
-
-#### 4.2 FireRedASR frontend (`ASRFeatExtractor`)
-
-| Param | Value |
-|-------|-------|
-| sample_rate | 16 000 Hz |
-| n_mels | 80 |
-| frame_length | 25 ms |
-| frame_shift | 10 ms |
-| window | Hamming (kaldi-native-fbank) |
-| dither / snip_edges | kaldi defaults |
-| LFR | **not used** (lfr_m=1, lfr_n=1 effectively) |
-| CMVN | loaded from `cmvn.ark` — global per-feature mean+var |
-| Final input shape | `[T, 80]` |
-
-Downsampling happens inside the encoder via a Conv2dSubsampling (2× stride-2 conv layers → 4×), not in the frontend. FireRedASR-LLM adds another 2× via `frame_splice` in the adapter → 8× total downsampling end-to-end.
-
-### 5. Tokenizer
+## Tokenizer
 
 #### 5.1 SenseVoice tokenizer
 
@@ -286,78 +112,7 @@ Downsampling happens inside the encoder via a Conv2dSubsampling (2× stride-2 co
 
 - Uses Qwen2's own tokenizer (Qwen2 BPE, ~151 k vocab). Speech is **not** tokenized — it enters as embeddings.
 
-### 6. Inference Loop
-
-#### 6.1 SenseVoice-Small inference
-
-```
-1. Load waveform, resample to 16 kHz mono.
-2. Compute kaldi-fbank 80-dim → apply LFR (m=7, n=6) → stack to 560-dim.
-3. Apply CMVN: feat = (feat - mean) * scale.    # vectors of length 560
-4. Build input: prepend 4 learned query embeddings → shape [T'+4, 512] after encoder input projection.
-5. Forward through SenseVoiceEncoderSmall (50 SANM blocks).
-6. ctc_logits = ctc_lo(encoder_out)              # [T'+4, 25055]
-7. Take first 4 frames → argmax → (lang_id, emo_id, event_id, itn_id).  Decode via reserved-ID tables.
-8. CTC greedy decode on frames [4:]:
-       ids = argmax(ctc_logits[4:], dim=-1)
-       ids = unique_consecutive(ids)             # collapse runs
-       ids = [i for i in ids if i != 0]          # remove blanks
-9. text = sentencepiece.decode(ids)
-10. Render output: f"<|{lang}|><|{emo}|><|{event}|><|{itn}|>{text}"
-```
-
-No KV cache, no beam search, no autoregressive loop — **single forward pass per utterance**. This is the source of the 15× speedup over Whisper.
-
-#### 6.2 FireRedASR-AED-L inference
-
-Whisper-style encoder-decoder AR:
-
-```
-1. Load + resample.  Compute fbank 80-dim.  Apply CMVN.
-2. encoder_out = ConformerEncoder(feat)             # [T/4, d_model]
-3. tokens = [<sos>]
-4. kv_cache = empty
-5. while tokens[-1] != <eos> and len(tokens) < max_len:
-       y = decoder(tokens, encoder_out, kv_cache)    # cross-attn into encoder_out each layer
-       next_token = beam_search_step(y, beam=3,
-                                     length_penalty=0.6,
-                                     repetition_penalty=3.0,
-                                     temperature=1.0)
-       tokens.append(next_token)
-6. transcript = tokenizer.decode(tokens[1:-1])
-```
-
-Beam search uses standard length penalty and a repetition penalty (FireRedASR's chosen anti-repeat trick — same idea as Hugging Face's `repetition_penalty`, applied to logits before softmax).
-
-#### 6.3 FireRedASR-LLM-L inference
-
-```
-1. Load + resample. Compute fbank 80-dim. Apply CMVN.
-2. enc = ConformerEncoder(feat)                                    # [T/4, d_enc]
-3. spliced = frame_splice(enc, factor=2)                           # [T/8, 2·d_enc]
-4. speech_emb = Linear(768→3584) ∘ ReLU ∘ Linear(2·d_enc→768)(spliced)   # [T/8, 3584]
-5. Build Qwen2 chat prompt with N placeholder tokens (N = T/8).
-6. prompt_ids = qwen_tokenizer(prompt_text)
-7. inputs_embeds = Qwen2.embed_tokens(prompt_ids)
-8. inputs_embeds = _merge_input_ids_with_speech_features(inputs_embeds, speech_emb)
-9. Run Qwen2-7B-Instruct generate() with KV cache, beam or greedy:
-       generation_config: max_new_tokens=..., repetition_penalty=3.0, length_penalty=0.6
-10. transcript = qwen_tokenizer.decode(generated_ids, skip_special_tokens=True)
-```
-
-The Qwen2 forward path is exactly the standard Qwen2-7B forward — `HartsyInference.Audio` should hand this off to `HartsyInference.LLM`'s Qwen2 implementation rather than reimplement it.
-
-### 7. Streaming
-
-**SenseVoice** is fundamentally **non-streaming**: the CTC head sees the full encoder output and emits all tokens in parallel. The `forward_chunk` / KV-cache code path in `MultiHeadedAttentionSANM` exists but is unused by the public checkpoint. Practical streaming is done VAD-segmented or "pseudo-streaming" Whisper-style: chunk audio into ~10–30 s windows (FunASR pairs it with `fsmn-vad`, `max_single_segment_time=30000 ms`), run the full encoder per chunk, and merge transcripts.
-
-**FireRedASR-AED-L** is non-streaming by design (60 s max utterance, full encoder forward, full AR decode). Same VAD-chunking approach applies.
-
-**FireRedASR-LLM-L** is non-streaming and also has a hard **30 s** input limit because the speech embeddings have to fit into the Qwen2 prompt at the chosen frame rate (`30 s / 80 ms = 375 speech tokens`).
-
-For all three, a real-time pipeline = `VAD → chunk → SenseVoice/FireRedASR encode+decode → concatenate`. None of them give true token-level streaming.
-
-### 8. Benchmarks / Comparison
+## Benchmarks / Comparison
 
 #### 8.1 SenseVoice-Small vs Whisper
 
@@ -401,7 +156,7 @@ Notes:
 - On the 19-set internal dialect benchmark: ~11.55 % (LLM) / 11.67 % (AED) avg CER.
 - On singing lyrics: 50–67 % relative CERR vs industrial baselines.
 
-### 9. C# Implementation Notes (HartsyInference.Audio)
+## C# Implementation Notes (HartsyInference.Audio)
 
 #### 9.1 Shared infrastructure to build first
 

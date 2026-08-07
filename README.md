@@ -99,7 +99,7 @@ Commands span every modality — `text`, `image`, `transcribe`, `speak`, `3d`, `
 Each modality is its own NuGet package. Expand a section below for the install reference and a minimal end-to-end example.
 
 > [!NOTE]
-> `PipelineFactory.DetectArchitecture(path)` and `PipelineFactory.LoadAuto(path, backend)` give a one-line auto-loader today for **SDXL**; other detected families throw a clear `NotSupportedException` naming the architecture, so those pipelines are still constructed explicitly from pre-loaded components. The bundled CLIs under [`samples/`](samples/) and [`src/HartsyInference.Cli`](src/HartsyInference.Cli) are the authoritative, compile-tested usage references for the explicit path.
+> `PipelineFactory.DetectArchitecture(path)` and `PipelineFactory.LoadAuto(path, backend)` give a one-line auto-loader today for **SDXL**; other detected families throw a clear `NotSupportedException` naming the architecture, so those pipelines are still constructed explicitly from pre-loaded components. The bundled CLI under [`src/HartsyInference.Cli`](src/HartsyInference.Cli) is the authoritative, compile-tested usage reference for the explicit path.
 
 <details>
 <summary><b>Image Generation</b>: diffusion text-to-image (SD1.5)</summary>
@@ -215,7 +215,7 @@ Console.WriteLine(result.Text);
 
 > For an F32/bf16 **safetensors** checkpoint (no GGUF), build a `GenericTransformer` from a `TransformerConfig`
 > preset, call `LoadWeights`, and pair it with a `Qwen2Tokenizer(vocabPath, mergesPath)` — see
-> [`samples/HartsyInference.TextGen.Cli`](samples/HartsyInference.TextGen.Cli) for the exact, compile-tested flow.
+> [`src/HartsyInference.Cli`](src/HartsyInference.Cli) (`text` command) for the exact, compile-tested flow.
 > On the CPU backend, cast weights to F32 first (the CPU kernels are F32-only).
 
 </details>
@@ -355,7 +355,7 @@ These times require **zero configuration**: the engine's standard performance pr
 
 **Image conditioning features (all verified end-to-end through SwarmUI, 2026-07-16/17):** FLUX.1 Kontext instruction editing, FLUX.1 Fill inpaint/outpaint, FLUX.1 Canny / Depth (with an in-engine Depth-Anything-V2 annotator, parity 2.9e-7 vs the official implementation; the FLUX-Depth conditioning map is numerically exact to BFL's own `DepthImageEncoder`, corr 1.000000), FLUX.1 Redux image variation (SigLIP + projection numerically A/B'd vs `FluxPriorReduxPipeline`, tokens corr 1.000000), and FLUX DiT ControlNet (union + single-mode, parity 3.7e-9 vs diffusers). SDXL + SD1.5 ControlNet with a full in-engine preprocessor set (canny / depth / openpose / lineart / softedge / scribble / normal / **segmentation** — UperNet-ConvNeXt ADE20K, 100% class parity), multi-net stacking, start/end step windows, both diffusers and original LDM checkpoint layouts, plus **union-type SDXL ControlNet** (xinsir controlnet-union ProMax, all residuals corr ≥0.9999998). IP-Adapter across SDXL standard / Plus / Plus-Face, SD1.5, **FaceID** (ArcFace IR-50, cosine 1.000000) and **FaceID-Plus / FaceID-PlusV2** (SD1.5 + SDXL, projection corr 1.000000). Instruction-edit models: OmniGen2, Boogu-Edit, Qwen-Image-Edit 2511. See [`docs/Checklists/MODEL_STATUS_IMAGE.md`](docs/Checklists/MODEL_STATUS_IMAGE.md).
 
-The server (`HartsyInference.API`) additionally supports **continuous batching** for LLMs — concurrently-submitted requests against the same model share decode rounds instead of running one at a time — and a **paged KV cache**, both independent of graph decode. LLM details: [`ROADMAP.md`](docs/Checklists/ROADMAP.md) + [`ROADMAP.md`](docs/Checklists/ROADMAP.md). Audio full-fleet verification methodology and per-model bug writeups: [`ROADMAP.md`](docs/Checklists/ROADMAP.md). GPU op microbenchmarks (MatMul / Conv2D / norm / SDPA / elementwise vs PyTorch) reproduce via [`benchmarks/README.md`](benchmarks/README.md).
+The server (`HartsyInference.API`) additionally supports **continuous batching** for LLMs — concurrently-submitted requests against the same model share decode rounds instead of running one at a time — and a **paged KV cache**, both independent of graph decode. LLM details, and the audio full-fleet verification methodology with per-model bug writeups: [`ROADMAP.md`](docs/Checklists/ROADMAP.md). GPU op microbenchmarks (MatMul / Conv2D / norm / SDPA / elementwise vs PyTorch) reproduce via [`benchmarks/README.md`](benchmarks/README.md).
 
 ---
 
@@ -384,7 +384,7 @@ Index of all status docs: [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md). 
 
 - **Image:** LCM/Turbo distillation across more architectures; ControlNet tile / inpaint modes; union-type segment / tile / repaint control types (raw-map pass-through wired, dedicated preprocessing pending). *(Shipped 2026-07: IP-Adapter FaceID + FaceID-Plus/PlusV2, Flux-DiT ControlNet, union-type SDXL ControlNet, and the lineart / softedge / normal / segmentation preprocessors — see the image conditioning list above.)*
 - **Vision:** YOLO-World, OWLv2, Florence-2, pose estimation, OCR, tracking. *(Shipped 2026-07: Grounding DINO open-vocab detection, RT-DETR, and Depth-Anything-V2 depth estimation, all real-weight verified end-to-end — see [MODEL_STATUS_VISION](docs/Checklists/MODEL_STATUS_VISION.md).)*
-- **Video:** CogVideoX, longer-context temporal generation; **MiniMax-H3** (omni text/image/video/audio → 2K video with native stereo audio — announced 2026-07-31, weights promised but not yet published; the recipe seam and the researched capability contract are in [`MINIMAX_H3.md`](docs/Research/MINIMAX_H3.md)). *(Shipped 2026-07: HunyuanVideo 13B T2V, verified end-to-end through SwarmUI — see [Models](#models) above and [`VIDEO.md`](benchmarks/scoreboards/VIDEO.md).)*
+- **Video:** CogVideoX, longer-context temporal generation. *(Shipped 2026-08: **MiniMax-H3** — omni text/image/video/audio → video with jointly generated stereo audio, verified end-to-end on a 12 GB RTX 3060. Shipped 2026-07: HunyuanVideo 13B T2V, verified end-to-end through SwarmUI — see [Models](#models) and [`VIDEO.md`](benchmarks/scoreboards/VIDEO.md).)*
 - **3D:** texture synthesis, multi-view to mesh. *(Gaussian-splat output has an initial pipeline CLI-wired for TRELLIS, but is not yet parity-verified against the reference rasterizer — see [MODEL_STATUS_3D](docs/Checklists/MODEL_STATUS_3D.md).)*
 - **World models:** broader action spaces, longer memory horizons, multiplayer state
 - **Multi-GPU:** tensor parallel (NCCL) for datacenter NVLink boxes, expert parallel for MoE, >2-way DiT sharding, sequence parallel for video. *(Shipped 2026-08: the layer-split / DiT-shard / placement / CFG-parallel feature set — see [Multi-GPU & Sharding](#multi-gpu--sharding).)*
@@ -466,6 +466,8 @@ Each package is one folder under `src/`; the meta **HartsyInference** package pu
 
 **Model status & parity:** the [Models](#models) section links the per-modality status docs (indexed in [`MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md)); the cross-modality real-weight parity authority is [`PARITY_VERIFICATION.md`](docs/Checklists/PARITY_VERIFICATION.md).
 
+**Docs map:** [`docs/README.md`](docs/README.md) explains what each folder holds and what belongs in it.
+
 **Research & Checklists:** technical research notes live in [`docs/Research/`](docs/Research/) (model formats, GPU/compute, diffusion architectures, text encoders, audio, vision). Phase-by-phase progress is tracked in [`docs/Checklists/`](docs/Checklists/). AI coding-agent instruction files are in [`docs/Agents/`](docs/Agents/); see [CLAUDE.md](CLAUDE.md) for the dispatcher.
 
 ---
@@ -481,7 +483,6 @@ HartsyInference/
 ├── README.md                  ← You are here
 ├── src/                       Source code (one folder per NuGet package; GPU kernel sources in HartsyInference.Cuda/Kernels + HartsyInference.Vulkan/Shaders)
 ├── tests/                     Test projects
-├── samples/                   Example applications
 ├── benchmarks/                Performance benchmarks
 └── docs/
     ├── Research/              Technical research notes
@@ -497,10 +498,10 @@ See the `src/` tree — one folder per NuGet package — for the complete layout
 
 ## License
 
-TBD
+[MIT](LICENSE).
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) (coming soon).
+See [CONTRIBUTING.md](CONTRIBUTING.md).

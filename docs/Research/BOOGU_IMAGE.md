@@ -1,38 +1,19 @@
 # Boogu-Image-0.1 — Research & Implementation Notes
 
-> Status: research complete; implementation in progress. This document is the single source of
-> truth for the Boogu-Image port. All numbers were verified against the released checkpoints
+> Status: **built and verified.** Boogu-Image 0.1 Base and Turbo are verified end-to-end; the Edit
+> variant is built and pending an e2e run (see `docs/Checklists/MODEL_STATUS_IMAGE.md`). All numbers were verified against the released checkpoints
 > (`Boogu/Boogu-Image-0.1-Base`, `-Edit`, `-Turbo`) and the canonical Python source at
 > `github.com/boogu-project/Boogu-Image` (`boogu/models/transformers/transformer_boogu.py`,
 > `block_lumina2.py`, `rope.py`, `attention_processor.py`, the flow-match scheduler, and
 > `pipeline_boogu.py`).
 
-## 1. Overview
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
 
-Boogu-Image-0.1 (released 2026-06-16, Apache-2.0) is a **10B unified image generation + editing**
-model family:
-
-| Variant | Task | Steps | Guidance |
-|---|---|---|---|
-| `Base` | text-to-image (T2I) | 25–50 | `text_guidance_scale` 2.0–5.0 (single CFG) |
-| `Edit` | text+image-to-image (TI2I) | 25–50 | double guidance: `text_guidance_scale` + `image_guidance_scale` |
-| `Turbo` | distilled T2I | 4 | `text_guidance_scale = 1.0` (no CFG) |
-| `*-fp8` | quantized weights | — | same; fp8 scaled dequant |
-
-It is an **OmniGen2 / Lumina-Image-2.0 lineage** diffusion transformer (the upstream `rope.py`
-credits the OmniGen2 team) with three things layered on top of the OmniGen2 architecture we already
-have in the engine:
-
-1. an **8-block double-stream (dual-stream) stage** before the single-stream stack,
-2. a **reference-image edit path** (`ref_image_patch_embedder` + `ref_image_refiner` +
-   `image_index_embedding`), and
-3. a **Qwen3-VL-8B multimodal** text encoder (vision tower *is* used for editing).
-
-Text encoder: **full Qwen3-VL-8B** (not just the language tower). VAE: the **FLUX.1-dev VAE**
-(16 latent channels, `scaling_factor = 0.3611`, `shift_factor = 0.1159`, no quant convs) —
-identical to what Flux/OmniGen2 already use.
-
-## 2. Transformer architecture (`BooguImageTransformer2DModel`)
+## 1. Transformer architecture (`BooguImageTransformer2DModel`)
 
 `transformer/config.json` (identical across Base and Edit):
 
@@ -204,7 +185,7 @@ concatenated; adjacent-pair complex rotation). Position ids per token:
 For pure **T2I (no ref images)** this collapses to: text `(i,i,i)`, image `(cap_len, row, col)` —
 **identical to our `OmniGen2Rope`** image mode (`timeOffset = cap_len`) and joint mode.
 
-## 3. Scheduler (`FlowMatchEulerDiscreteScheduler`, time-shifting)
+## 2. Scheduler (`FlowMatchEulerDiscreteScheduler`, time-shifting)
 
 `scheduler/scheduler_config.json`: `do_shift true, dynamic_time_shift false, time_shift_version
 "v1", seq_len 4096, num_train_timesteps 1000`.
@@ -227,7 +208,7 @@ line, then the `1 - exp(mu)/(exp(mu)+(1/(1-t)-1))` map).
 
 The Turbo variant uses 4 steps and the same scheduler family with `text_guidance_scale = 1.0`.
 
-## 4. Guidance
+## 3. Guidance
 
 * **T2I (Base/Turbo)** — single CFG. `model_pred(cond)` vs `model_pred(neg)`:
   `pred = pred_cond + (text_guidance_scale − 1)·(pred_cond − pred_neg)`.
@@ -243,7 +224,7 @@ The Turbo variant uses 4 steps and the same scheduler family with `text_guidance
   (text-only guidance with the reference kept). `empty_instruction_guidance_scale` and boosted
   orthogonal guidance are optional extras (deferred).
 
-## 5. Text encoder — Qwen3-VL-8B (multimodal)
+## 4. Text encoder — Qwen3-VL-8B (multimodal)
 
 The MLLM encodes a chat-templated instruction (plus reference images for edit) and the transformer
 consumes its hidden states:
@@ -284,7 +265,7 @@ latents), and the drop-all pass is skipped at `image_guidance_scale == 1` (the d
 VAE latent scaling (FLUX): encode `z = (vae.encode(x).mean − 0.1159) · 0.3611`; decode
 `x = vae.decode(z / 0.3611 + 0.1159)`.
 
-## 6. Reuse map (what we build vs. what already exists)
+## 5. Reuse map (what we build vs. what already exists)
 
 | Component | Plan |
 |---|---|
@@ -301,7 +282,7 @@ VAE latent scaling (FLUX): encode `z = (vae.encode(x).mean − 0.1159) · 0.3611
 | **Qwen3-VL vision tower** | **new** reusable `HartsyInference.Vision`/text-encoder subsystem (also unblocks Lance/OmniGen2 edit) |
 | Config, converter, pipelines (T2I + Edit + Turbo), tests | **new** Boogu-specific |
 
-## 7. Qwen3-VL vision tower (new subsystem)
+## 6. Qwen3-VL vision tower (new subsystem)
 
 No Qwen-VL vision tower existed in the engine (an acknowledged "deferred" gap referenced by Lance and
 OmniGen2). Building it here is reusable across those models. Required pieces:
@@ -370,7 +351,7 @@ buckets the `visual.*` weights. This is a reusable subsystem (also unblocks Lanc
 The DiT-side edit path (reference image via the VAE latent stream: `ref_image_patch_embedder` →
 `ref_image_refiner` → concat) is independent and also implemented + tested.
 
-## 8. Pipeline surface
+## 7. Pipeline surface
 
 `BooguImagePipeline : DiffusionPipelineBase` exposing synchronous methods returning
 `(byte[] rgbData, int width, int height, int seed)` with `Action<GenerationProgress>?` callbacks
@@ -385,7 +366,7 @@ Resolution: output H/W aligned to multiples of 16; native generation resolution 
 size at the end. `seq_len` for the scheduler shift is the packed image token count
 (`(H/8/2)·(W/8/2)`); the released config pins it at 4096 (≈1024²).
 
-## 9. Open items / deferred
+## 8. Open items / deferred
 
 * Prompt rewriting / "instruction reasoner" (the released pipeline can rewrite prompts via the same
   Qwen3-VL or DashScope) — deferred; we encode the user instruction directly.
@@ -394,7 +375,7 @@ size at the end. `seq_len` for the scheduler shift is the packed image token cou
 * Boosted orthogonal guidance and `empty_instruction_guidance_scale` — deferred.
 * fp8 checkpoints — handled by the existing fp8 scaled-dequant path in the converter.
 
-## 10. Validation plan
+## 9. Validation plan
 
 Per-component CPU-vs-reference parity (tolerance ~1e-4 f32) via `tests/python-reference` dumps,
 following the Ideogram4/OmniGen2 pattern:

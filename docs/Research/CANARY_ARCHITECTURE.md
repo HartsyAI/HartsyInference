@@ -2,6 +2,12 @@
 
 > Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Canary pipeline)
 
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+
 ## Summary
 
 NVIDIA Canary is a family of encoder-decoder multitask speech models — automatic speech recognition (ASR) and automatic speech translation (AST) — built by NVIDIA NeMo. Architecturally each model pairs a **FastConformer encoder** (same family used by Parakeet — see [PARAKEET_ARCHITECTURE.md](PARAKEET_ARCHITECTURE.md)) with an **autoregressive Transformer decoder** (very similar to Whisper's decoder — see [WHISPER_ARCHITECTURE.md](WHISPER_ARCHITECTURE.md)). The encoder consumes 16 kHz log-mel features (128 mel bins) and downsamples by 8x via depthwise-striding subsampling; the decoder is prompted with a sequence of special tokens (start, source-lang, target-lang, task, PnC toggle, timestamp toggle, …) Whisper-style and generates output tokens token-by-token with cross-attention into the encoder.
@@ -12,9 +18,7 @@ Audio preprocessing is identical to Parakeet (NeMo FilterbankFeatures) — see [
 
 Sources: [Canary-1B HF](https://huggingface.co/nvidia/canary-1b), [Canary-1B-Flash HF](https://huggingface.co/nvidia/canary-1b-flash), [Canary-180M-Flash HF](https://huggingface.co/nvidia/canary-180m-flash), [Canary-1B-v2 HF](https://huggingface.co/nvidia/canary-1b-v2), [Less is More: Canary paper (arXiv 2406.19674)](https://arxiv.org/abs/2406.19674), [Canary-v2 + Parakeet-v3 paper (arXiv 2509.14128)](https://arxiv.org/abs/2509.14128), [Training and Inference Efficiency paper (arXiv 2503.05931)](https://arxiv.org/abs/2503.05931), [NeMo fast-conformer_aed.yaml](https://github.com/NVIDIA/NeMo/blob/main/examples/asr/conf/speech_multitask/fast-conformer_aed.yaml), [NVIDIA Canary blog](https://developer.nvidia.com/blog/new-standard-for-speech-recognition-and-translation-from-the-nvidia-nemo-canary-model/), [NeMo Canary tutorial](https://github.com/NVIDIA/NeMo/blob/main/tutorials/asr/Canary_Multitask_Speech_Model.ipynb)
 
-## Detailed Findings
-
-### 1. Variants
+## Variants
 
 All Canary variants are encoder-decoder FastConformer-AED ("Attention Encoder-Decoder") models. Differences are encoder/decoder depth, tokenizer, language coverage, training data, and the addition of optional tags (timestamps, ITN, diarization). All run at 16 kHz mono, 128 mel bins, max ~40 s per utterance (longer audio is chunked with overlap).
 
@@ -99,101 +103,7 @@ Canary-1B-v2 (24-language rollups):
 
 Flash variants are >5x faster than Canary-1B v1 because most inference time in encoder-decoder ASR is autoregressive decoding, and decoder layers go from 24 → 4.
 
-### 2. Architecture
-
-#### 2.1 Encoder — FastConformer
-
-Identical architecture family to Parakeet; see [PARAKEET_ARCHITECTURE.md](PARAKEET_ARCHITECTURE.md) for the FastConformer block diagram (subsampling → N × {feed-forward macaron-net, multi-head self-attention with relative positional encoding, depthwise-separable convolution, feed-forward macaron-net, layer-norm}). Canary's encoder differs from Parakeet only in **depth** and **lack of a CTC/RNNT head** (no auxiliary loss; the encoder is purely a feature extractor whose output is consumed by the Transformer decoder via cross-attention).
-
-Canary-1B (v1) — FastConformer XL:
-- `n_layers`: 24
-- `d_model`: 1024
-- `n_heads`: 8 (head dim = 128)
-- `ff_expansion_factor`: 4 → FFN inner = 4096
-- `conv_kernel_size`: 9
-- `subsampling`: `dw_striding`, factor 8x → frame rate = 12.5 Hz (one feature per 80 ms)
-- `subsampling_conv_channels`: 256
-- `self_attention_model`: `rel_pos` (Transformer-XL-style relative positional bias)
-- `dropout`: 0.1
-
-Canary-1B-Flash / Canary-1B-v2 — FastConformer L (deeper, same width):
-- `n_layers`: 32
-- Other dims identical to XL.
-
-Canary-180M-Flash:
-- `n_layers`: 17
-- Width is reduced (likely d_model 512, FFN 2048, 8 heads), but verify from the unpacked `.nemo` config — NVIDIA's README doesn't publish it.
-
-The encoder emits a sequence of `[T/8, d_model]` features that the decoder cross-attends to. Same `forward(x, x_lens) → (enc_out, enc_out_lens)` API as Parakeet.
-
-#### 2.2 Decoder — Autoregressive Transformer
-
-A standard pre-LN Transformer decoder, very close to Whisper's. Per-layer block: self-attention (causal) → cross-attention (decoder Q × encoder K/V) → FFN.
-
-| Variant | Layers | Hidden | Heads | FFN inner | Max seq |
-|---------|------:|------:|-----:|----------:|--------:|
-| Canary-1B (v1) | 24 | 1024 | 8 | 4096 | 512 |
-| Canary-1B-Flash | 4 | 1024 | 8 | 4096 | 512 |
-| Canary-180M-Flash | 4 | 512 (likely) | 8 | 2048 (likely) | 512 |
-| Canary-1B-v2 | 8 | 1024 | 8 | 4096 | 512 |
-
-NeMo config keys (`fast-conformer_aed.yaml`):
-```yaml
-transf_decoder:
-  num_layers: 24
-  hidden_size: 1024
-  inner_size: 4096
-  num_attention_heads: 8
-  ffn_dropout: 0.1
-  attn_score_dropout: 0.1
-  attn_layer_dropout: 0.1
-  mask_future: False         # cross-attn is unmasked
-  pre_ln: true               # pre-LayerNorm, like GPT
-  max_sequence_length: 512
-```
-
-Key differences from Whisper's decoder:
-- **Pre-LN** (Whisper is also pre-LN — same).
-- **Learned absolute positional embeddings** on the decoder side (Whisper: same), with `max_sequence_length` = 512 (Whisper: 448).
-- **Tied embedding / output projection**: yes (verify in checkpoint — typical NeMo pattern).
-- **No prefix tokens for "no-speech" probability**: Canary has `<|nospeech|>` but uses it differently from Whisper's separate no-speech prob output.
-
-Practical implication: a HartsyInference `TransformerDecoder` class built for Whisper can be reused with minor parameter changes (different vocab size, different max seq, different special-token IDs). The forward graph (self-attn → cross-attn → FFN, pre-LN) and the KV cache shape are identical.
-
-#### 2.3 Tokenizer
-
-**Canary v1 family (canary-1b, canary-1b-flash, canary-180m-flash) — Concatenated SentencePiece** (called "AggregateTokenizer" or `type=agg` in NeMo, but this is **not** the unified-aggregate from academic literature — it's a *concatenation* of per-language tokenizers with shared special tokens):
-
-- One independent SentencePiece BPE model per language. Each is 1024 tokens.
-- Per-language vocabularies are stacked with offsets:
-  - `[0 … 1023]`: English BPE
-  - `[1024 … 2047]`: German BPE
-  - `[2048 … 3071]`: Spanish BPE
-  - `[3072 … 4095]`: French BPE
-- Plus a small block of shared **special tokens** (see §3): `<|startoftranscript|>`, `<|endoftranscript|>`, `<|transcribe|>`, `<|translate|>`, `<|nospeech|>`, `<|en|>`, `<|de|>`, `<|es|>`, `<|fr|>`, `<|pnc|>`, `<|nopnc|>`, etc.
-
-Total vocab is on the order of 5,120 (4×1024 + ~24 specials). The Flash variants add timestamp special tokens (`<|timestamps|>`, `<|notimestamps|>`).
-
-When encoding, NeMo picks the SentencePiece model for the active language and emits IDs in that language's range. When decoding the model output, the token ID range determines which sub-tokenizer to decode with.
-
-**For our C# implementation** the cleanest approach is:
-1. Extract all 4 SentencePiece `.model` files from the `.nemo` tar.
-2. At runtime, build an IdRange → SubTokenizer dispatcher.
-3. Encoding: route by current language, add the offset.
-4. Decoding: subtract offset, route to per-language SentencePiece decoder.
-
-We need a pure-C# SentencePiece reader (no native `sentencepiece` library). This is shared with several other components — see [TOKENIZERS.md](TOKENIZERS.md).
-
-**Canary v2 — Unified SentencePiece BPE**:
-- Single SentencePiece model with **16,384** tokens.
-- Trained jointly over all 25 languages' transcripts.
-- Plus **1,162 special tokens** specific to Canary2 prompts (task tokens, language IDs for 25 langs, timestamp / PnC / ITN / diarization / emotion / foreign-word flags, placeholder slots for future tasks).
-- The paper experimented with 4K / 8K / 16K vocab sizes; larger consistently won on both ASR and AST.
-- Tokenizer `.model` file is named like `<hash>_tokenizer.model` inside the `.nemo` tar (e.g., `cc5d48e83aad4be48aa9fa264b727c4b_tokenizer.model`).
-
-For v2 our pipeline is simpler: a single SentencePiece BPE model + a known fixed list of special tokens. No per-language dispatching.
-
-### 3. Prompt Format
+## Prompt Format
 
 The decoder is **prompted** in a way deliberately parallel to Whisper. The training objective is: given an encoded audio sequence and a special-token prefix, autoregressively generate the answer (transcription or translation) followed by `<|endoftranscript|>`. The prefix encodes the task.
 
@@ -250,63 +160,7 @@ Whisper's prefix is: `<|startoftranscript|> <|lang|> <|task|> [<|notimestamps|>]
 
 For C#, model both as a `CanaryPrompt` builder struct that takes options (`SrcLang`, `TgtLang`, `Task`, `Pnc`, `Timestamps`, optional `ContextText` for v2) and emits the token-ID prefix array. Each model variant ships its own prompt builder because the special-token IDs change.
 
-### 4. Mel Preprocessing
-
-Identical to Parakeet — NeMo `FilterbankFeatures`. See [MEL_SPECTROGRAM.md](MEL_SPECTROGRAM.md) for the canonical pipeline and [PARAKEET_ARCHITECTURE.md](PARAKEET_ARCHITECTURE.md) for the reference fixture.
-
-From `fast-conformer_aed.yaml`:
-
-| Param | Value |
-|-------|-------|
-| `sample_rate` | 16000 |
-| `n_fft` | 512 |
-| `features` (n_mels) | **128** |
-| `window_size` | 0.025 s (= 400 samples) |
-| `window_stride` | 0.010 s (= 160 samples → 100 fps before encoder subsampling) |
-| `window` | `hann` |
-| `normalize` | `per_feature` (per-mel-bin mean/var normalization over the utterance) |
-| `dither` | 1e-5 |
-| `pad_to` | 0 (no padding; lengths are tracked) |
-| `log` | true (log mel) |
-| `frame_splicing` | 1 |
-
-After the 8x encoder subsampling, effective frame rate is 12.5 Hz (80 ms / encoder frame). Whisper, for comparison, runs at 50 Hz (20 ms / encoder frame); Canary's encoder is coarser but has the deeper FastConformer block to compensate.
-
-**Important**: `per_feature` normalization needs the *full* feature sequence in memory to compute mean/std. For streaming, NeMo uses a "cache-aware" path with running stats — but the published Canary models are full-utterance only (use the chunked 40 s sliding window for long audio).
-
-### 5. Decoding
-
-#### 5.1 Algorithm
-
-Autoregressive generation, exactly as Whisper:
-1. Encode audio → `enc_out` of shape `[1, T/8, 1024]`.
-2. Build prompt prefix tokens (see §3).
-3. Feed prefix through decoder once with full causal mask, populating the **self-attention KV cache**.
-4. For each cross-attention layer, compute encoder K/V projections **once** and cache them (the **cross-attention KV cache**) — they never change during generation.
-5. Loop: feed last predicted token → decoder runs one step using cached self-attn KV + cached cross-attn K/V → output logits → sample/greedy → append → break on `<|endoftranscript|>` or max length.
-
-#### 5.2 Beam search
-
-Default published config: `beam_size = 5`, `length_penalty = 1.0`. Greedy (`beam_size = 1`) is the recommended setting for Flash inference and is what the published RTFx numbers assume — beam-5 is ~5x slower.
-
-NeMo class: `BeamSearchSequenceGeneratorWithLanguageModel` (an external LM is *not* used by default in Canary; the class supports it but the published checkpoints don't ship an LM).
-
-#### 5.3 KV caches
-
-- **Self-attention cache**: per-layer `[B, n_heads, seq_so_far, head_dim]` for K and V. Grows by 1 step per token. Same shape behavior as Whisper.
-- **Cross-attention cache**: per-layer `[B, n_heads, T/8, head_dim]` for K and V — computed once after encode and *never* updated. This is the single biggest perf win and **must** be implemented (otherwise the encoder K/V projections run every decoder step).
-
-For C# (CUDA via PTX, pinned unmanaged memory), pre-allocate both caches at max length and grow `seq_so_far` by index rather than reallocating.
-
-#### 5.4 Chunked / streaming long-form decoding
-
-Max audio per forward = 40 s (= 4000 mel frames pre-subsampling, ≈ 500 encoder frames post-subsampling). For longer audio, NeMo provides **AlignAtt** chunked decoding (`Canary Chunked and Streaming Decoding`):
-- Cross-attention scores are inspected on the second-to-last decoder layer (`xatt_layer = -2`).
-- A token is committed only if its peak cross-attention is sufficiently far from the right edge of the encoded chunk (`cross_attention_threshold`, default 8 frames). Otherwise the chunk advances and the token is re-decoded.
-
-This is more complex than chunked Whisper. For first-pass C# implementation: do **40 s sliding window with overlap** (1 s overlap; merge text via dedup) and skip AlignAtt initially. Add AlignAtt later if streaming/long-form quality matters.
-
-### 6. Canary-1B-Flash — What Changes vs Canary-1B
+## Canary-1B-Flash — What Changes vs Canary-1B
 
 Both are 1B-class encoder-decoder ASR/AST models, four languages, same prompt format ("canary"), same training data scale (85k hours). What changed:
 
@@ -327,53 +181,7 @@ The pattern matches **Whisper-large-v3-turbo** and **Distil-Whisper**: cut decod
 
 **Implementation impact**: same decoder class as v1 with `num_layers = 4`. No special distillation handling.
 
-### 7. Translation Pairs Supported
-
-#### Canary v1 / Flash (4 languages):
-- ASR: `en → en`, `de → de`, `es → es`, `fr → fr`
-- AST En→X: `en → de`, `en → es`, `en → fr`
-- AST X→En: `de → en`, `es → en`, `fr → en`
-- **Not supported**: X→X (e.g., `de → fr` is not in training).
-
-Total: 4 ASR + 6 AST = 10 directed task pairs.
-
-#### Canary v2 (25 languages):
-Languages: `bg, hr, cs, da, nl, en, et, fi, fr, de, el, hu, it, lv, lt, mt, pl, pt, ro, sk, sl, es, sv, ru, uk`.
-
-- ASR: 25 self-pairs.
-- AST En→X: 24 (English → each of the other 24).
-- AST X→En: 24 (each of the other 24 → English).
-- **Not supported**: X→X among non-English pairs.
-
-Total: 25 ASR + 48 AST = 73 directed task pairs.
-
-### 8. Timestamps
-
-Two distinct mechanisms across the Canary family. Don't confuse them.
-
-#### 8.1 Canary-Flash family — Whisper-style timestamp tokens
-
-The vocabulary includes `<|timestamps|>` and `<|notimestamps|>` toggle tokens (in the prompt prefix), plus a block of **timestamp tokens** interleaved with text (similar to Whisper's `<|0.00|>` … `<|30.00|>` tokens at 20 ms or 80 ms resolution).
-
-When `<|timestamps|>` is in the prefix, the decoder emits sequences like:
-```
-<|ts_0.00|> Hello <|ts_0.45|> <|ts_0.45|> world <|ts_0.80|> ...
-```
-Pairs of timestamp tokens bracket each word/segment. The pipeline reads them out to produce word-level and segment-level start/end times. Reported accuracy: F1 @ 200 ms collar = **95.5%** on LibriSpeech test-clean (Canary-1B-Flash).
-
-This is "experimental" in NVIDIA's words — quality matches reasonable forced-aligner output but is not perfect on noisy or fast speech. The exact token granularity (number of timestamp tokens, time-per-step) is not in the README — extract from the `.nemo` vocab or NeMo source.
-
-#### 8.2 Canary-1B-v2 — NeMo Forced Aligner (NFA) + auxiliary CTC
-
-v2 takes a different approach: instead of token-based timestamps, it runs the **NeMo Forced Aligner** with an **auxiliary CTC head** to produce segment-level timestamps. The main decoder generates plain text; CTC alignment is computed in a second pass over the same encoder features. This is more reliable but requires the CTC head weights (shipped in the `.nemo`).
-
-The CTC head is a small linear projection over the encoder output. Implementation: roughly 100 lines of straight Viterbi over `log_softmax(encoder_out @ ctc_weight)`.
-
-#### 8.3 Canary-1B (v1) — no timestamps
-
-Doesn't support timestamps at all. If a user needs them with v1, run a separate aligner.
-
-### 9. Memory and Performance
+## Memory and Performance
 
 #### VRAM (full FP16/BF16 inference, batch=1, 40 s audio)
 
@@ -394,7 +202,7 @@ Encoder cost is dominant for short audio; for long audio (40 s) on the Flash var
 
 For C# / CUDA: the encoder FastConformer maps to ~10 PTX kernels per layer (FFN, attention, conv) — same as Parakeet. The decoder maps to ~8 PTX kernels per layer (self-attn, cross-attn, FFN) — same as Whisper. **No new kernels needed** if both Parakeet and Whisper are already implemented.
 
-### 10. C# Implementation Notes
+## C# Implementation Notes
 
 #### Reuse strategy
 - **Encoder**: 100% reuse the FastConformer encoder built for Parakeet (`HartsyInference.Audio.FastConformer`). Only parameters differ (layer count and possibly d_model for 180M). Construct with config struct.
@@ -461,11 +269,3 @@ Canary v2 has **1,162 special tokens total** (most are timestamp grid + placehol
 - LibriSpeech test-clean WER: 1.48% (Canary-1B-Flash), 1.87% (180M-Flash), 2.18% (v2).
 - FLEURS En→Fr BLEU: ~41 (Canary-1B-Flash).
 - Tolerance: WER within ±0.05% absolute, BLEU within ±0.3 absolute. Anything wider indicates a numeric/preprocessing/tokenizer bug.
-
-## Open Questions
-
-- **Canary-180M-Flash exact d_model / FFN / heads** — not published; extract from `.nemo`.
-- **Exact timestamp-token grid** — 20 ms (Whisper) vs 80 ms (matches encoder frame rate)? Suspect 80 ms — but verify from extracted vocab.
-- **Tied vs untied output projection** in the decoder — assume tied (standard NeMo); confirm from `model_weights.ckpt`.
-- **Whether v2's auxiliary CTC head can be used for VAD** — likely yes, similar to Parakeet CTC. Would let us skip the encoder pass when no speech is detected.
-- **Pickle reader** vs Python conversion script — decide which approach we want for first release. Conversion script is simpler short-term but adds a Python dependency for users.

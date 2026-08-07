@@ -54,7 +54,6 @@ serialization boundary (no reflection JSON).
 
 ## Don't forget
 
-- Keep `src/HartsyInference.Cli` and `samples/` compiling — they double as the usage examples for the API
-  you just changed.
+- Keep `src/HartsyInference.Cli` compiling — it doubles as the usage example for the API you just changed.
 - Memory discipline holds here too: `NativeMemory.AlignedAlloc(bytes, 64)` / `TensorPool` for temporaries,
   `.ThrowOnError()` on every native call, `Environment.FailFast` in compute workers. (See CODE_STYLE.md.)

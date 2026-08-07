@@ -39,6 +39,6 @@ nfe 64 (hparam) / 32 (API), solver midpoint, lambd 0.5, tau 0.5, 30 s chunks + 1
 
 ## C# build status (`Models/ResembleEnhance/`)
 - [x] [`ResembleWnEstimator`](../../src/HartsyInference.Audio/Models/ResembleEnhance/ResembleWnEstimator.cs) — the WN CFM velocity net (30 dilated gated layers, InstanceNorm local cond, sinusoidal time global), `ICfmEstimator`. Synthetic-forward verified.
-- [x] [`ResembleIrmaeDecoder`](../../src/HartsyInference.Audio/Models/ResembleEnhance/ResembleIrmaeDecoder.cs) — latent→mel (res-stacks + head). Synthetic-forward verified.
+- [x] [`ResembleIrmaeDecoder`](../../src/HartsyInference.Audio/Models/ResembleEnhance/ResembleIrmae.cs) — latent→mel (res-stacks + head). Synthetic-forward verified.
 - [x] [`ResembleEnhancePipeline`](../../src/HartsyInference.Audio/Pipelines/ResembleEnhancePipeline.cs) — **reuses `ConditionalCfm`** (CFG off) to solve the latent CFM → IRMAE decode → enhanced mel. Synthetic-forward verified (mel → mel).
 - [ ] **Staged:** the 2D-STFT **denoiser** UNet (mel pre-conditioner / denoise-only), the **UnivNet** LVCNet vocoder (mel → 44.1 kHz waveform), the slaney-dB mel front-end, midpoint/rk4 + exponential time-mapping (currently euler), τ-scaled prior, the mel `Normalizer`, and the DeepSpeed `.pt` loader.

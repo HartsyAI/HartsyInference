@@ -3,7 +3,7 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N` (the scheme moved
 up from `1.0.0-alpha.N`; entries below that pre-date the change and keep their original numbers). The single
 source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props` — see
-[`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what a
+[`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
 ## [Unreleased]
@@ -327,7 +327,7 @@ Low-VRAM generation, a GPU-memory leak fix, and selectable devices.
 
 Production-readiness push: closes the throughput gap toward python inference stacks (vLLM/TGI-class) and
 adds the serving infrastructure a real deployment needs. Full technical detail in
-[`docs/Checklists/LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md)'s dated status
+[`docs/Checklists/LLM_DECODE_PERF_GRIND.md`](docs/Checklists/ROADMAP.md)'s dated status
 updates; this is the release-notes-level summary.
 
 ### Added

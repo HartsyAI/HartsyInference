@@ -4,6 +4,12 @@
 > **License:** CreativeML OpenRAIL-M (Apache-compatible for inference).
 > **Variants:** F-Lite (10B), F-Lite-7B (distilled), F-Lite-Texture.
 
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+
 ## TL;DR
 
 F-Lite is a single-stream cross-attention DiT — closer to a vanilla DiT-XL than to Flux. 40 layers, hidden=3072, 12 heads (head_dim=256), patch_size=2 over a 16-channel Flux-VAE latent. Text encoder is T5-XXL with hidden states pulled from layer 17 (re-passed through final_layer_norm + dropout). 16 learnable register tokens are prepended to image tokens. AdaLN-Zero modulation produces 9 outputs per block (shift/scale/gate × {self-attn, cross-attn, MLP}). RoPE is 2D rotary precomputed on a 512×512 grid; the per-axis dim is `head_dim/2 = 128`. A V-residual mechanism (`lambda * v + (1-lambda) * v_0`) carries V from block 0 forward as a residual into every subsequent self-attn V.
@@ -171,11 +177,3 @@ For F-Lite-10B with `train_bias_and_rms=false`, the norms have no `.weight` keys
 - **CFG via batch-of-2 forward** — simpler than Flux/SD3 dual-pass; pack `[neg, pos]` into one batch and chunk after. Saves a forward pass at the cost of 2× peak activation memory (acceptable on 12 GB at 1024×1024 if FP8).
 - **Scheduler is inline** — F-Lite doesn't use a diffusers `Scheduler` class, just a simple `t = t * α / (1 + (α-1) * t)` integrator in the pipeline. Implement directly in `FLitePipeline.GenerateFromTokens` rather than through `IScheduler` (avoids a 3-line scheduler shell).
 - **Final layer is zero-init** at training; for inference this is irrelevant — load the trained weights as-is.
-
-## Open questions for first-run
-
-(All to be answered when the actual safetensors lands locally.)
-
-1. Are the qk_norm scales actually present in the checkpoint? Flux ships with them despite `qkv_bias=False` for the linears. F-Lite source says "trainable=qkv_bias" which means **same** as the linear bias flag. Need to grep the safetensors header.
-2. Is the `register_tokens` parameter present, or initialized fresh each load? It's a `nn.Parameter` so it's saved.
-3. T5 layer index — `return_index=-8` of 24 = layer 17. With T5-XXL having `num_layers=24`, this is `hidden_states[16]` (0-indexed) since `hidden_states[0]` is the embedding output. Need to verify against our `T5TextEncoder.EncodeMultiLayer` indexing.

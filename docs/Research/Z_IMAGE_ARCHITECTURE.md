@@ -1,7 +1,12 @@
 # Z-Image Architecture
 
-> **Status:** Research / spec for implementation. Apache 2.0. By Tongyi Lab (Alibaba).
+> **Status:** built and verified — Z-Image Turbo and Base are both verified end-to-end (see
+> `docs/Checklists/MODEL_STATUS_IMAGE.md`). Apache 2.0. By Tongyi Lab (Alibaba).
 > **Related:** [FLUX_ARCHITECTURE.md](FLUX_ARCHITECTURE.md), [TEXT_ENCODERS.md](TEXT_ENCODERS.md), [DIFFUSION_SCHEDULERS.md](DIFFUSION_SCHEDULERS.md), [VAE_ARCHITECTURE.md](VAE_ARCHITECTURE.md).
+
+> **Stub.** The narrative walkthrough and restated pseudocode were removed on 2026-08-06 — this model
+> is built and verified, so the C# is the source of truth for *how it works*. What remains is what the
+> code cannot tell you: upstream provenance, reference constants, and bring-up traps. History is in git.
 
 ## Important correction up front
 
@@ -171,38 +176,6 @@ layers.{0..29}.{ffn_norm1,ffn_norm2}.weight
 5. **Scheduler** — extend flow-match Euler with static `shift=3.0`. No dynamic shifting branch.
 6. **`ZImageCheckpointConverter.cs`** — passthrough naming for diffusers/single-file format. Detect FP8Mix by dtype-inspecting `layers.0.attention.to_q.weight`.
 7. **`ZImagePipeline.cs`** — encode prompt with Qwen3-4B (last hidden state, full sequence) → pad to multiple of 32 with `cap_pad_token` → 2× `context_refiner` → patchify+embed image latents → 2× `noise_refiner` (with t-modulation) → concat `[caption, image]` → 30× main `layers` → final layer → unpatchify → VAE decode.
-
-## Forward pass diagram
-
-```
-prompt
-  ↓ (Z-Image system prompt + chat template)
-Qwen3-4B tokenize + forward → last_hidden_state [B, L, 2560]
-  ↓ cap_embedder (RMSNorm scale + Linear 2560→3840)
-caption_tokens [B, L, 3840]
-  ↓ pad to multiple of 32 with cap_pad_token
-  ↓ 2× context_refiner (no AdaLN)
-refined_caption [B, L_pad, 3840]
-
-noise latent [B, 16, H, W]
-  ↓ all_x_embedder (patchify 2×2 → Linear)
-image_tokens [B, H/2 * W/2, 3840]
-  ↓ pad to multiple of 32 with x_pad_token
-  ↓ 2× noise_refiner (with t-modulation, AdaLN)
-refined_image [B, S_pad, 3840]
-
-t (sigma)
-  ↓ t_embedder (sinusoidal × t_scale=1000 → MLP)
-t_emb [B, 256]                    (note: 256, not 3840 — AdaLN_EMBED_DIM)
-
-concat [refined_caption, refined_image] along sequence axis
-  ↓ 30× ZImageBlock (RMSNorm → QK-norm MHA with multi-axis RoPE → AdaLN(t_emb, 4 outputs) → SwiGLU FFN)
-  ↓ all_final_layer (AdaLN(t_emb, 2 outputs) → RMSNorm → Linear 3840 → patch_dim)
-
-slice off image-token portion → unpatchify → latent [B, 16, H, W]
-  ↓ Flux VAE decode (scale=0.3611, shift=0.1159)
-image
-```
 
 ## Key references
 

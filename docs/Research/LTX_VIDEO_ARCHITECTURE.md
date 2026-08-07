@@ -4,6 +4,12 @@
 >
 > **Sources (verbatim, pulled raw):** diffusers `src/diffusers/models/transformers/transformer_ltx.py` (601 L), `models/autoencoders/autoencoder_kl_ltx.py` (1552 L), `pipelines/ltx/pipeline_ltx.py`. Weights: [`Lightricks/LTX-Video`](https://huggingface.co/Lightricks/LTX-Video). License: Apache-2.0 (OpenRAIL-M variant on some checkpoints — verify per weight).
 
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+
 ## Summary
 
 LTX-Video (Lightricks) is a fast DiT text-to-video model. A **28-layer single-stream DiT** (inner 2048 = 32 heads × 64) operates on VAE-latent tokens with **self-attention + 3D RoPE**, **cross-attention to a frozen T5-XXL** (caption_channels 4096), **AdaLN-Single** timestep conditioning, and gelu-approximate FFN. The latent comes from a high-compression **3D causal VAE** (~32× spatial, 8× temporal, 128 latent channels) whose **decoder is timestep-conditioned** (a denoising decoder, unusual). Sampling is rectified-flow Euler.
@@ -86,12 +92,3 @@ T5-XXL encode (prompt + negative) → flow-match (rectified) Euler over ~`num_in
 1. **Transformer** (this subsystem): `LtxVideoConfig`, `LtxRope`, `LtxVideoBlock`, `LtxVideoTransformer` (reuse T5/RMSNorm/SDPA). Validate RoPE invariants + tiny-config forward.
 2. **VAE decoder**: port `LTXVideoResnetBlock3d` (+ timestep cond), up-samplers, decoder assembly on `CausalConv3d`. Validate shape/finite + streaming.
 3. **Pipeline** + checkpoint converter + frame-streaming entry. Then first-run numeric validation (checkpoint-gated).
-
-## Open questions (validation-gated)
-
-- `PixArtAlphaTextProjection` exact activation (gelu-tanh assumed) — confirm against diffusers.
-- `rope_interpolation_scale` defaults per LTX version (0.9.x vs 0.9.5/1.0) — read the pipeline.
-- VAE `timestep_conditioning` decode timestep value + injected-noise schedule — read `pipeline_ltx.py` decode call.
-- Exact `latents_mean`/`latents_std` (128 each) — from the VAE checkpoint config on download.
-- Distilled vs full checkpoints differ in steps/shift/guidance — capture per variant.
-</content>

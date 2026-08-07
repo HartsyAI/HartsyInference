@@ -2,6 +2,12 @@
 
 > Status: Complete | Last Updated: 2026-05-20 | Needed Before: HartsyInference.Audio (VibeVoice pipeline)
 
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+
 ## Summary
 
 VibeVoice (Microsoft Research, 2025; community-maintained fork since the official repo was taken down) is a **long-form, multi-speaker, expressive conversational TTS** based on a **next-token diffusion** framework. The text+voice prompt is fed into a Qwen2.5 LM that autoregresses over a **tiny constrained vocabulary** (`speech_start`, `speech_end`, `speech_diffusion`, `eos`) at the token level. Whenever the LM emits a `speech_diffusion` token, a small **4-layer DDPM head** runs a 20-step denoise (cosine schedule, v-prediction, CFG) over a single **64-d continuous latent**, which is decoded by a **causal 1D-ConvNeXt acoustic VAE** at **7.5 Hz** (3200× downsample over 24 kHz audio = one latent every 133 ms ≈ one waveform chunk of 3200 samples). The decoded audio is then **re-encoded** by a separate **semantic VAE** (128-d) and both embeddings are fed back into the LM as the next-step embedding. The semantic↔acoustic dual feedback loop is what gives VibeVoice its prosody and turn-taking quality.
@@ -16,9 +22,7 @@ This file covers the model architecture, scheduler, and inference pipeline for t
 - Weights: [vibevoice (HF org)](https://huggingface.co/vibevoice) — `VibeVoice-1.5B`, `VibeVoice-7B` (alias "Large"), `VibeVoice-Streaming-0.5B`
 - Companion paper for next-token diffusion: [arXiv:2412.08635](https://arxiv.org/abs/2412.08635)
 
-## Detailed Findings
-
-### 1. Model Variants
+## Model Variants
 
 All three official checkpoints share the same VAE topology (encoder ratios `[8,5,5,4,2,2]` → 3200× downsample, 7.5 Hz on 24 kHz audio) and the same 4-layer diffusion head — they differ in the Qwen2.5 LM size, context length, and (for streaming) presence of the semantic VAE.
 
@@ -43,44 +47,7 @@ Param-count breakdown (1.5B variant, approximate):
 - SpeechConnector × 2 (acoustic 64→1536, semantic 128→1536): ~5 M total
 - **Total ~1.66 B params**
 
-### 2. Architecture — Top-Level Composition
-
-The Python class hierarchy (from `vibevoice/modular/modeling_vibevoice.py`):
-
-```
-VibeVoiceForConditionalGeneration            # outer wrapper
-├── model: VibeVoiceModel
-│   ├── language_model: Qwen2Model           # AutoModel.from_config(decoder_config)
-│   ├── acoustic_tokenizer: VibeVoiceAcousticTokenizerModel
-│   │   ├── encoder: TokenizerEncoder        # 1D ConvNeXt, 6 downsample stages
-│   │   └── decoder: TokenizerDecoder        # 1D ConvNeXt-transpose, 6 upsample stages
-│   ├── semantic_tokenizer: VibeVoiceSemanticTokenizerModel
-│   │   └── encoder: TokenizerEncoder        # same arch as acoustic encoder, vae_dim=128
-│   ├── acoustic_connector: SpeechConnector  # 64 → lm_hidden (Linear + RMSNorm + Linear)
-│   ├── semantic_connector: SpeechConnector  # 128 → lm_hidden
-│   ├── prediction_head: VibeVoiceDiffusionHead  # 4-layer AdaLN-FFN denoiser
-│   ├── noise_scheduler: DPMSolverMultistepScheduler  # used at inference (20 steps)
-│   ├── speech_scaling_factor: nn.Buffer(scalar)   # latent normalization, learned during training
-│   └── speech_bias_factor: nn.Buffer(scalar)
-└── lm_head: nn.Linear(lm_hidden → vocab_size)     # tied to embed_tokens for 1.5B (not 7B)
-```
-
-The streaming-0.5B variant replaces this with:
-
-```
-VibeVoiceStreamingForConditionalGenerationInference
-├── model: VibeVoiceStreamingModel
-│   ├── language_model: Qwen2Model      # LOWER 4 layers; final norm replaced with nn.Identity()
-│   ├── tts_language_model: Qwen2Model  # UPPER 20 layers (embed_tokens unused, only transformer layers used)
-│   ├── tts_input_types: nn.Embedding(2, lm_hidden)  # marks position as text(1) or speech(0)
-│   ├── acoustic_tokenizer + acoustic_connector + prediction_head + noise_scheduler
-│   └── (NO semantic_tokenizer / semantic_connector)
-└── tts_eos_classifier: BinaryClassifier(lm_hidden → 1)   # 2-layer MLP for end-of-speech detection
-```
-
-The streaming variant has **no `lm_head`** and **no LM-vocab token sampling at all** — speech generation is driven entirely by the diffusion head, and EOS is decided by the binary classifier on the TTS-LM's last hidden state.
-
-### 3. Acoustic Tokenizer (Causal 1D-ConvNeXt VAE)
+## Acoustic Tokenizer (Causal 1D-ConvNeXt VAE)
 
 Implemented in `modular_vibevoice_tokenizer.py`. The full encoder takes a `(B, 1, T)` waveform at 24 kHz and emits a `(B, T/3200, 64)` latent sequence (after permute). The decoder is the mirror.
 
@@ -159,7 +126,7 @@ scaled_latent = (latent / speech_scaling_factor) - speech_bias_factor   # un-nor
 audio_chunk = acoustic_tokenizer.decode(scaled_latent)
 ```
 
-### 4. Semantic Tokenizer (Encoder-Only, 128-d)
+## Semantic Tokenizer (Encoder-Only, 128-d)
 
 Identical arch to the acoustic encoder but with `vae_dim = 128`, `fix_std = 0`, and `std_dist_type = "none"`. There is **no decoder** — the semantic VAE only produces conditioning embeddings for the LM.
 
@@ -169,151 +136,7 @@ It is used in **two places** at inference:
 
 The semantic-feedback loop is the key insight: it gives the LM access to *what the audio actually sounds like phonetically* after the diffusion head fills in acoustic detail. Without it, prosody and turn-taking would drift.
 
-### 5. SpeechConnector
-
-Tiny MLP at `modular_vibevoice_*.py`:
-
-```
-SpeechConnector(input_dim, output_dim):
-    fc1: Linear(input_dim, output_dim, bias=True)
-    norm: LlamaRMSNorm(output_dim, eps=1e-6)
-    fc2: Linear(output_dim, output_dim, bias=True)
-```
-
-Two instances exist on the non-streaming model:
-- `acoustic_connector`: 64 → lm_hidden
-- `semantic_connector`: 128 → lm_hidden
-
-Streaming-0.5B has only `acoustic_connector` (64 → 896).
-
-### 6. Diffusion Head
-
-Implemented in `modular_vibevoice_diffusion_head.py`. Lightweight 4-layer FFN-only transformer (no self-attention) that denoises a single 64-d latent vector per step using the LM's hidden state as cross-step conditioning.
-
-#### 6.1 Topology (1.5B variant: hidden_size=1536, ffn=4608)
-
-```
-VibeVoiceDiffusionHead:
-  noisy_images_proj: Linear(64 → 1536, bias=False)
-  cond_proj:         Linear(1536 → 1536, bias=False)        # projects LM hidden_state
-  t_embedder: TimestepEmbedder
-    timestep_embedding(t, dim=256)        # sinusoidal (max_period=10000)
-    Linear(256 → 1536, bias=False) → SiLU → Linear(1536 → 1536, bias=False)
-  layers: 4 × HeadLayer:
-    HeadLayer(embed_dim=1536, ffn_dim=4608, cond_dim=1536, eps=1e-5):
-      norm: RMSNorm(1536, eps=1e-5)
-      adaLN_modulation: Sequential(SiLU, Linear(1536 → 3*1536, bias=False))  # → shift_ffn, scale_ffn, gate_ffn
-      ffn: SwiGLU(1536, 4608)        # gate_proj, up_proj, down_proj, all bias=False
-        # SwiGLU = down_proj(silu(gate_proj(x)) * up_proj(x))
-  final_layer: FinalLayer:
-    norm_final: RMSNorm(1536, eps=1e-5, elementwise_affine=False)
-    adaLN_modulation: Sequential(SiLU, Linear(1536 → 2*1536, bias=False))   # → shift, scale
-    linear: Linear(1536 → 64, bias=False)
-```
-
-Per-layer forward (DiT-style AdaLN-Zero applied **only to FFN**, no self-attention):
-
-```
-shift_ffn, scale_ffn, gate_ffn = adaLN_modulation(c).chunk(3)
-x = x + gate_ffn * ffn(modulate(norm(x), shift_ffn, scale_ffn))
-```
-
-`modulate(x, shift, scale) = x * (1 + scale) + shift` (standard DiT modulation).
-
-Final layer:
-
-```
-shift, scale = adaLN_modulation(c).chunk(2)
-x = linear(modulate(norm_final(x), shift, scale))
-```
-
-#### 6.2 Conditioning
-
-`c = cond_proj(lm_hidden_state) + t_embedder(timestep)` — a single 1536-d vector per diffusion step, used by **all 4 layers and the final layer** (no per-layer cond fan-out, unlike Flux/SD3). For CFG, two parallel streams are batched: one with positive condition, one with the negative-prompt condition.
-
-#### 6.3 Init policy (zero-init AdaLN-Zero)
-
-- All `adaLN_modulation[-1].weight` initialized to **zero** (zero-init AdaLN-Zero)
-- `final_layer.linear.weight` initialized to **zero**
-- `t_embedder.mlp[0].weight` and `t_embedder.mlp[2].weight` initialized to `N(0, 0.02)`
-
-This means the diffusion head starts as an identity-like function and learns to add corrections during training. The HartsyInference port doesn't need to reproduce the init — just load the trained weights — but the math invariant matters for unit tests (random-init output must equal the identity branch).
-
-### 7. Inference Loop (Multi-Speaker, 1.5B / 7B)
-
-From `vibevoice/modular/modeling_vibevoice_inference.py`. The loop is autoregressive at the LM-token level, with a diffusion sub-loop firing on `speech_diffusion` tokens.
-
-#### 7.1 Prefill phase
-
-1. **Build prompt** (via `VibeVoiceProcessor`): `system_prompt + voice_input_tokens + text_input_tokens + speech_output_tokens` (see §8 below for the exact format).
-2. **Forward through LM** with `inputs_embeds` after running the voice-prompt audio through `acoustic_tokenizer.encode()` → `acoustic_features` → `acoustic_connector` → **insert at `speech_input_mask=True` positions**. The semantic VAE is NOT applied to voice prompts in the current inference code path.
-3. Populates `past_key_values` for the **positive stream** and a separate **negative stream** initialized with a single `speech_start` token.
-
-#### 7.2 Generation loop
-
-Per step (capped at `max_steps = min(max_length - prompt_len, max_length_times * prompt_len)`, default `max_length_times = 2`):
-
-1. **LM forward** on the last token, get logits for the next token.
-2. **Logit constraint**: only `{speech_start_id, speech_end_id, speech_diffusion_id, eos_token_id, bos_token_id}` are allowed (other logits set to -inf via `VibeVoiceTokenConstraintProcessor`).
-3. **Sample next token** (multinomial or argmax).
-4. Branch on the token:
-   - **`eos`**: mark sample finished.
-   - **`speech_end`**: zero out per-sample acoustic + semantic streaming caches.
-   - **`speech_start`**: rotate negative-stream KV cache (move first key/value to last position to keep negative cond aligned).
-   - **`speech_diffusion`**: this is where audio is generated. (Sub-loop below.)
-5. **Build next-step embedding**:
-   - For non-diffusion tokens: `next_inputs_embed = embed_tokens(next_token)`.
-   - For diffusion tokens: `next_inputs_embed = acoustic_connector(speech_latent) + semantic_connector(semantic_features)`.
-
-#### 7.3 Diffusion sub-loop (per `speech_diffusion` token)
-
-Triggered by `sample_speech_tokens(condition, neg_condition, cfg_scale)`:
-
-```
-scheduler.set_timesteps(20)                              # 20 DDPM steps with cosine beta
-condition_pair = cat([positive_cond, negative_cond])    # (2, 1536)
-speech = N(0, I) ∈ R^(2, 64)                            # noise init
-for t in scheduler.timesteps:                            # 20 iterations
-    half = speech[:1]
-    combined = cat([half, half])                         # (2, 64), same latent both sides
-    eps = prediction_head(combined, t.expand(2), condition_pair)   # (2, 64)
-    cond_eps, uncond_eps = split(eps)
-    half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)    # CFG
-    eps = cat([half_eps, half_eps])
-    speech = scheduler.step(eps, t, speech).prev_sample
-return speech[:1]                                        # (1, 64)
-```
-
-Then:
-
-```
-scaled_latent = speech_latent / speech_scaling_factor - speech_bias_factor  # un-normalize
-audio_chunk = acoustic_tokenizer.decode(scaled_latent, cache=acoustic_cache, use_cache=True)
-# audio_chunk has shape (B, 1, 3200) — one 7.5 Hz frame = 3200 samples at 24 kHz
-semantic_features = semantic_tokenizer.encode(audio_chunk, cache=semantic_cache, use_cache=True).mean
-acoustic_embed = acoustic_connector(speech_latent)
-semantic_embed = semantic_connector(semantic_features)
-next_embed = acoustic_embed + semantic_embed
-audio_chunks[sample].append(audio_chunk)
-```
-
-#### 7.4 Negative-stream maintenance
-
-The negative branch (uncond CFG side) runs **in parallel with the positive branch on every step**, with its own `past_key_values`. Two subtle bits:
-
-- On `speech_start`, the negative attention mask is zeroed except the last position, and its KV-cache last-position is overwritten with its first-position content. This re-anchors the negative branch on the diffusion event.
-- On non-diffusion tokens following a diffusion event, the negative KV cache is "shifted" to keep the negative branch tracking the positive branch's logical position (via `correct_cnt` bookkeeping).
-
-This bookkeeping is fiddly but mechanical — it's what makes per-token CFG work efficiently on a single negative prompt.
-
-#### 7.5 Default sampler parameters
-
-- `cfg_scale = 1.3` (most common in demo scripts; the `generate()` default is 1.0)
-- `do_sample = True`, `temperature = 0.95`, `top_p = 0.95`
-- `ddpm_inference_steps = 20` (config default — overrideable via `set_ddpm_inference_steps`)
-- `max_length_times = 2` (per-sample length cap is `min(max_length - prompt, 2*prompt)`)
-
-### 8. Multi-Speaker Prompt Format
+## Multi-Speaker Prompt Format
 
 From `vibevoice/processor/vibevoice_processor.py`. The processor builds a Qwen-tokenized prompt that looks like:
 
@@ -368,7 +191,7 @@ audio = audio * (target_rms / (rms + eps))
 
 This applies to reference audio before encoding. Output audio is **not** normalized by the model — the user can apply their own loudness curve.
 
-### 9. Streaming-0.5B Variant — Differences
+## Streaming-0.5B Variant — Differences
 
 The streaming model is a meaningfully different architecture, not just a smaller LM. From `vibevoice/modular/configuration_vibevoice_streaming.py` and `modeling_vibevoice_streaming_inference.py`:
 
@@ -395,92 +218,7 @@ The streaming model has **only the acoustic VAE** — no semantic encoder, no `s
 
 For CFG, the streaming variant uses `<|image_pad|>` (Qwen2 vision token, not used by VibeVoice for anything else) as the negative-prompt sentinel — distinct from the multi-speaker variant which uses `<|vision_start|>`.
 
-### 10. DPM-Solver Scheduler
-
-`vibevoice/schedule/dpm_solver.py` is a 1064-line port of HuggingFace `diffusers`' `DPMSolverMultistepScheduler` with the following config at inference:
-
-- `num_train_timesteps = 1000`
-- `beta_schedule = "cosine"` (Nichol-Dhariwal cosine)
-- `prediction_type = "v_prediction"`
-- `algorithm_type = "dpmsolver++"` (default; the file also supports "sde-dpmsolver++" and "deis")
-- `solver_order = 2` (multistep)
-- `num_inference_steps = 20`
-
-`HartsyInference.Diffusion` already has `DpmppMultiStepScheduler` with v-prediction support — we should verify the cosine beta schedule and exact alpha bar formula match, then **reuse the existing scheduler** rather than porting the file.
-
-Cosine schedule reference (Nichol-Dhariwal):
-```
-alpha_bar(t) = cos^2((t/T + s) / (1 + s) * pi/2),  s = 0.008
-betas[t] = clamp(1 - alpha_bar(t) / alpha_bar(t-1), 0, 0.999)
-```
-
-This must match exactly — a small drift in `s` or the clip bound changes the inference trajectory enough to be audible.
-
-### 11. License & Commercial Use
-
-**MIT** — fully commercial-friendly. The community fork preserves the original license terms after Microsoft removed the official repo. Voice samples in `demo/` are CC-BY-4.0 from Common Voice + LibriSpeech (cleared for redistribution). Model weights on HF are MIT.
-
-### 12. Mapping to HartsyInference
-
-Tasks split between "reuse" (existing HartsyInference / HartsyInference.LLM code) and "new":
-
-| Component | Reuse | New |
-|---|---|---|
-| Qwen2.5-0.5B / 1.5B / 7B LM | **HartsyInference.LLM** (full Qwen2 forward + KV cache + RoPE + tied embeddings) | None — HartsyInference.LLM dependency check only |
-| Qwen2 tokenizer (BPE) | **HartsyInference.LLM** tokenizer | Subclass to expose `speech_start_id`, `speech_end_id`, `speech_diffusion_id` from `<|vision_start/end/pad|>` |
-| `<|vision_pad|>` constraint logits processor | — | New: small constrained-vocab logit mask (~30 lines) |
-| Cosine beta schedule, v-prediction, DPM++ multistep | `HartsyInference.Diffusion/Schedulers/DpmppMultiStepScheduler` (verify cosine match) | Likely no new code; one validation test |
-| Acoustic VAE encoder + decoder | — | **New** `VibeVoiceAcousticTokenizer.cs` (1D causal ConvNeXt + streaming cache). Patterns from F5-TTS Vocos but causal and depthwise-conv. |
-| Semantic VAE encoder | — | **New** `VibeVoiceSemanticTokenizer.cs` (encoder only; shares `Block1D` with acoustic) |
-| `SpeechConnector` | — | **New** trivial 3-line MLP |
-| Diffusion head (4-layer AdaLN+FFN) | AdaLN-Zero patterns from `Flux/SD3` DiT blocks | **New** `VibeVoiceDiffusionHead.cs` — strip out attention, keep only FFN + AdaLN modulation |
-| Multi-speaker prompt format | — | **New** `VibeVoiceProcessor.cs` — script parser + voice-prompt builder + audio dB-FS normalizer |
-| Streaming cache for SConv1d / SConvTranspose1d | — | **New** `VibeVoiceTokenizerStreamingCache` — per-sample, per-layer ring of last `(k-1)*d - (s-1)` samples |
-| Streaming-0.5B split-LM forward | HartsyInference.LLM Qwen2 (per-layer hooks needed — see deviation below) | **New** wrapper that runs lower-N layers, then upper-(N-K) layers as a separate forward with `tts_input_types` embedding injected |
-| Binary EOS classifier | — | **New** trivial 2-layer MLP |
-| Audio I/O (24 kHz PCM) | `HartsyInference.Audio/Io` | None |
-
-#### 12.1 Deviation risk: HartsyInference.LLM Qwen2 must expose per-layer outputs
-
-The streaming-0.5B variant needs to run the **lower 4 Qwen2 layers**, then independently run the **upper 20 layers** with modified inputs. HartsyInference.LLM's Qwen2Model normally returns only the final hidden state. Two options:
-
-1. **Add a "stop at layer N" parameter** to HartsyInference.LLM's Qwen2 forward (preferred — minimal API surface).
-2. **Construct two independent Qwen2Model instances** with overlapping but disjoint layer slices, sharing the same embedding table.
-
-The first is cleaner and matches what `VibeVoiceStreamingModel` does in Python (it instantiates two `Qwen2Model`s but unused embed_tokens on the second). Since `HartsyInference.LLM` is first-party, add the "stop at layer N" hook there directly when building the Qwen2 forward.
-
-#### 12.2 GPU kernels required
-
-All ops needed already exist in `HartsyInference.Core`/`HartsyInference.Diffusion`:
-- `Conv1d` (causal padding + dilation) — already exists for F5-TTS Vocos
-- `ConvTranspose1d` (causal + trim_right) — already exists for HiFiGAN/Vocos vocoders
-- `RMSNorm`, `LayerNorm`, `SiLU`, `GELU` — all in `Core`
-- `Linear` (no bias) — in `Core`
-- `nn.functional.pad` (constant zero-pad mode) — in `Core`
-- Permute / reshape — in `Core`
-
-No new PTX kernels needed.
-
-#### 12.3 Package boundaries
-
-- `HartsyInference.Audio.Models.VibeVoice/` — all new model code
-- `HartsyInference.Audio.Pipelines.VibeVoicePipeline.cs` — orchestration
-- **HartsyInference.LLM** dependency: Qwen2.5 LM only (existing). VibeVoice should reference only the `HartsyInference.LLM` package (Qwen2.5 LM), not the CLI or sample projects, beyond what F5-TTS already uses (if any). (Package placement: one folder per package under `src/`.)
-
-### 13. Open Questions / Pre-Implementation Verification
-
-These need to be resolved during the planning phase, not during research:
-
-1. **Cosine beta exact form**: does our existing `DpmppMultiStepScheduler` use the same `s=0.008` cosine? Run a 20-step diff against `vibevoice/schedule/dpm_solver.py::DPMSolverMultistepScheduler(beta_schedule="cosine")` on identical seeds → match to 1e-6.
-2. **`speech_scaling_factor` / `speech_bias_factor` provenance**: confirm these are present in the safetensors file (registered as buffers — should serialize). If not, we need a fallback.
-3. **`std_dist_type = 'gaussian'`**: in inference, do we actually need the random std multiplier, or is the deterministic `mean` good enough? Demo scripts always use `gaussian` — match the upstream behavior to avoid quality regression.
-4. **Streaming cache key**: Python uses `id(self)` as part of the cache key, which doesn't transfer to a C# port. We need a deterministic per-layer ID assigned at construction time. Use `layer_index` + `block_index` + role (`"enc"|"dec"`).
-5. **HartsyInference.LLM Qwen2 per-layer interrupt**: confirm we can stop forward at layer N or do we need to refactor. (See §12.1.)
-6. **bf16 on GPU**: all official ckpts are bf16. Our existing diffusion DiT pipelines already run bf16 — confirm `Tensor.CastTo` covers this path and bf16 matmul kernels are in place. (Should be — Flux/SD3/Z-Image all use bf16.)
-7. **CFG-Zero* / APG**: the upstream code uses **vanilla CFG only** (`x = uncond + scale*(cond - uncond)`). Do not enable APG / CFG-Zero* until separately validated — they're not used by VibeVoice.
-8. **Long-form stability**: 90-min outputs need a 65k-token context (1.5B variant has `max_position_embeddings = 65536`). Confirm HartsyInference.LLM's KV cache scales to this without precision loss. RoPE theta is 1e6 (long-context preset).
-
-### 14. Validation Checklist (for the implementation phase)
+## Validation Checklist (for the implementation phase)
 
 - [ ] Acoustic VAE encoder forward on a 24 kHz 1s clip matches Python within 1e-3 (bf16) / 1e-5 (f32)
 - [ ] Acoustic VAE decoder forward on a known 64-d latent matches Python within 1e-3

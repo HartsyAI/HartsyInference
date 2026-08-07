@@ -26,8 +26,7 @@ reference within a tolerance.
 
 - Live corpus: `docs/Research/{SIMD_INTRINSICS_DOTNET,CUDA_AND_PTX,CONV2D_CUDA,CUDA_PERFORMANCE,
   VULKAN_COMPUTE_API,SPIRV_COMPUTE_SHADERS,VULKAN_MEMORY_MANAGEMENT,SAFETENSORS_FORMAT,GGUF_FORMAT,
-  QUANTIZATION_DIFFUSION}.md`. `DOTLLM_ARCHITECTURE.md` is a **historical study** that informed the engine's
-  native patterns — not a live dependency; never treat dotLLM as something to link against.
+  QUANTIZATION_DIFFUSION}.md`.
 - Authorities to reconcile against: `docs/Checklists/PARITY_VERIFICATION.md` (what's already proven correct),
   `MODEL_STATUS.md` (status index), `TROUBLESHOOTING.md` (bugs a prior port already hit — read before
   proposing a plan, so you don't re-discover a solved trap).

@@ -4,7 +4,7 @@
 > Source of truth: HF `kandinskylab/Kandinsky-5.0-T2V-Lite-*-Diffusers` (`transformer/config.json`, `vae/config.json`, `scheduler/scheduler_config.json`) + diffusers source verified verbatim against the local reference venv:
 > `diffusers/models/transformers/transformer_kandinsky.py`, `diffusers/pipelines/kandinsky5/pipeline_kandinsky.py` (T2V), `pipeline_kandinsky_i2v.py`, `diffusers/models/autoencoders/autoencoder_kl_hunyuan_video.py`.
 > License: Apache 2.0 (ai-forever / kandinskylab)
-> Related: `Kandinsky5Transformer` / `Kandinsky5Config` / `Kandinsky5Rope` (T2I image variant already built), [`LTX_VIDEO_ARCHITECTURE.md`](LTX_VIDEO_ARCHITECTURE.md), [`WAN_ARCHITECTURE.md`](WAN_ARCHITECTURE.md) (sibling video pipelines), and the diffusion-pipeline conventions in `docs/Agents/AGENTS.md`.
+> Related: `Kandinsky5Transformer` / `Kandinsky5Config` / `Kandinsky5Rope` (T2I image variant already built), [`LTX_VIDEO_ARCHITECTURE.md`](LTX_VIDEO_ARCHITECTURE.md), [`WAN_ARCHITECTURE.md`](WAN_VIDEO_ARCHITECTURE.md) (sibling video pipelines), and the diffusion-pipeline conventions in `docs/Agents/AGENTS.md`.
 
 ## Summary
 

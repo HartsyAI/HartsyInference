@@ -12,7 +12,7 @@ TI2V-5B step-cache).
 **Methodology:** end-to-end wall-clock through the **SwarmUI API** — the identical generation request
 routed to the ComfyUI backend, then to the HartsyInference backend, on the same GPU, same request, warm
 (model resident). This is the user-perceived latency gap, not an isolated kernel/pipeline timing. See
-[`../../docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) for the engine's default performance profile and
+[`README.md`](README.md) for the engine's default performance profile and
 how to reproduce these numbers. Standard workload (unless noted): 25 frames, 512×320, h264-mp4,
 `videoresolution=Image`, seed randomized per gen to defeat SwarmUI's identical-params result cache.
 
@@ -68,7 +68,7 @@ are enumerated in `MODEL_STATUS_VIDEO.md` §SeedVR2 follow-ups. Matrix-scale num
   benchmark's own verdict is negative for the pinned gate: no threshold holds SSIM ≥ 0.95 (best case 0.88
   at 1.18×), because Wan's 50-step UniPC trajectory is chaotically sensitive to any reuse — outputs stay
   coherent and prompt-faithful but diverge from the un-cached seed. The engine ships this **default OFF**
-  as a "fast non-reproducible sampling" opt-in, not a transparent accelerator; `docs/PERFORMANCE.md` §1's
+  as a "fast non-reproducible sampling" opt-in, not a transparent accelerator; `PERFORMANCE.md` (retired) §1's
   default-on feature table and §6 experimental-switch table both omit `HARTSY_STEP_CACHE` entirely,
   confirming it is not part of the standard profile.
 - **HunyuanVideo 13B and Kandinsky-5.0 T2V Lite have no ComfyUI baseline yet** — per the 07-11 scoreboard

@@ -2,12 +2,13 @@
 
 ## Project Overview
 
-HartsyInference is a pure C#/.NET AI inference engine (targets net8.0 and net10.0) covering LLM text generation, image generation (diffusion), speech-to-text, text-to-speech, voice conversion, music, vision, object detection, video generation, 3D mesh, and interactive world models. LLM inference is native in the `HartsyInference.LLM` package (dotLLM is no longer a dependency). The recommended way to run the engine is the SwarmUI backend extension (https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend); it is also consumed as NuGet libraries and via the sample CLIs.
+HartsyInference is a pure C#/.NET AI inference engine (targets net8.0 and net10.0) covering LLM text generation, image generation (diffusion), speech-to-text, text-to-speech, voice conversion, music, vision, object detection, video generation, 3D mesh, and interactive world models. LLM inference is native in the `HartsyInference.LLM` package (dotLLM is no longer a dependency). The recommended way to run the engine is the SwarmUI backend extension (https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend); it is also consumed as NuGet libraries and via the `hartsy` sample CLI (`src/HartsyInference.Cli`).
 
 **`HartsyInference.Engine` is the service layer / single source of truth** for "load a model + generate": it owns model lifecycle (registry, HF download, cache), the `InferenceEngine` facade + per-modality dispatch/handlers, the backend factory, and native request/result DTOs. The CLI, the HTTP server, and the SwarmUI extension are thin wrappers over it — do not re-implement load/generate orchestration in a consumer.
 
 ## Before Any Task
 
+0. Read `docs/README.md` — what each docs folder is for and the rule for adding to it
 1. Read `docs/CODE_STYLE.md` — **MANDATORY** code style (read first, follow always)
 2. Read `docs/Agents/AGENTS.md` — shared design rules, core engine patterns, and task routing table
 3. Read the specialized agent file matching your task (routing table is in `AGENTS.md`)
@@ -38,12 +39,12 @@ the architecture single source of truth) and the `src/` tree, which has one fold
 HartsyInference/
 ├── CLAUDE.md                          ← You are here
 ├── docs/
+│   ├── README.md                      Docs map + the rule for adding a doc
 │   ├── CODE_STYLE.md                  Mandatory code style
 │   ├── Research/                      Research notes (read before implementing)
 │   ├── Checklists/                    Model status, roadmap & troubleshooting
 │   └── Agents/                        AGENTS.md (core) + specialized agent files
 ├── src/                               Source code (one folder per NuGet package; GPU kernel sources in HartsyInference.Cuda/Kernels + HartsyInference.Vulkan/Shaders)
 ├── tests/                             Test projects
-├── samples/                           Example applications
 └── benchmarks/                        Performance benchmarks
 ```

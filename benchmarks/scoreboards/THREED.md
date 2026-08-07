@@ -2,7 +2,7 @@
 
 Warm end-to-end image → mesh seconds, HartsyInference vs the upstream Python reference implementation, on a
 single RTX 4090. Baseline = Python reference packages `tsr` (TripoSR, F32) and `hy3dgen` (Hunyuan3D-2, fp16),
-same GPU. See [`../../docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) for methodology. This table replaces
+same GPU. See [`README.md`](README.md) for methodology. This table replaces
 the prior `benchmarks/results/threed_genperf_2026-07-15.md` write-up (phase splits, kernel-level fixes,
 parity gates) and the README's duplicate copy — that source file has been retired now that its numbers
 live here.

@@ -4,6 +4,12 @@
 >
 > **Sources (verbatim):** diffusers `models/transformers/transformer_wan.py`, `pipelines/wan/pipeline_wan.py`. Config: [`Wan-AI/Wan2.2-TI2V-5B-Diffusers`](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers). License: Apache-2.0.
 
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+
 ## Why TI2V-5B = maximum reuse
 
 Wan2.2 TI2V-5B's VAE is **`AutoencoderKLWan`, z_dim 48, scale_factor_spatial 16, scale_factor_temporal 4** — i.e. the **exact Wan2.2 VAE already built as `Wan22VaeDecoder`** (built for Lance: z=48, 16× spatial, 4× temporal, streaming). So a Wan2.2 T2V model reuses that VAE + streaming decode directly. The transformer `in_channels = out_channels = 48` matches the VAE latent. Only the Wan DiT + pipeline are new.
@@ -54,21 +60,6 @@ umT5 encode (text_dim 4096, max_seq 512) → flow-match (UniPC/FlowMatchEuler, *
 - `WanPatchEmbed` — Conv3d-as-linear (1,2,2) patchify + the matching unpatchify.
 - `WanVideoBlock` / `WanVideoTransformer` — FP32LayerNorm DiT, 6-param AdaLN, cross-attn to T5.
 - `WanVideoPipeline` — flow-match + 2-way CFG, reusing the Wan2.2 VAE.
-
-## Open questions (validation-gated)
-
-- Exact scheduler (UniPCMultistep vs FlowMatchEuler) + the timestep value fed to the DiT (sigma·1000?).
-- `get_1d_rotary_pos_embed` exact freq formula (standard `θ^(−2i/dim)`) — confirm vs diffusers.
-- umT5 vs T5 tokenizer/encoder specifics (Wan uses umT5-XXL).
-- flow_shift per resolution (5.0/3.0) + guidance default.
-
----
-
-# Wan2.2-S2V (Speech-to-Video) — Research
-
-> **Status:** Phases S0–S3 + reference/multi-chunk BUILT (structural, CPU-tested, validation-pending): `Wav2Vec2Encoder` (S0 front-end, all-layer harvest), `WanS2VAudioEncoder` (S1), `WanS2VTransformer` (S2, audio injector reusing the `WanAnimateFaceBlock` pattern), `WanS2VPipeline` (S3 — `GenerateFromAudioFeatures` single-clip, `GenerateFromWaveform` raw-audio→frames via Wav2Vec2+resample, **`GenerateChunked`** reference-concat + motion-frame autoregressive long video). **Remaining: converter S2V keys + SwarmUI loader; confirm all provisional values vs the real checkpoint.** | **Added:** 2026-06-19 / built 2026-06-20 | **Target:** `Wan-AI/Wan2.2-S2V-14B` (audio-driven cinematic video).
->
-> **⚠️ Source caveat:** Wan2.2-S2V is **NOT in the vendored diffusers** (`tests/python-reference/.venv/.../diffusers/` has `transformer_wan{,_vace,_animate}.py` but **no S2V**). This section is **reconstructed from the original Wan repo** ([github.com/Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2), modules under `wan/modules/s2v/` — `model_s2v.py`, `audio_encoder.py`, `motioner.py`) and the model card. **Every config value / layer index below is provisional and must be confirmed against the real repo + the `Wan-AI/Wan2.2-S2V-14B` checkpoint header before/while implementing.** Treat this as a map, not gospel.
 
 ## What it is
 

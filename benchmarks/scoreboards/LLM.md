@@ -2,8 +2,8 @@
 
 Canonical, single-source-of-truth scoreboard for LLM token-generation (decode) throughput.
 Consolidates the round-by-round tables in
-[`docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) and
-[`docs/Checklists/LLM_DECODE_PERF_GRIND.md`](../../docs/Checklists/LLM_DECODE_PERF_GRIND.md) into one
+[`docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) and
+[`docs/Checklists/LLM_DECODE_PERF_GRIND.md`](../../docs/Checklists/ROADMAP.md) into one
 table. Where the same model was re-measured across multiple rounds, **the freshest dated result wins**
 (rounds are dated inline in both source docs); see Notes for the couple of cases where an older number
 is the only one that exists.
@@ -27,8 +27,8 @@ models it shares with the table (Llama-3.2-1B Q8_0 and gemma-3-1b Q4_K_M), raw `
 196.8 for gemma-3-1b) — the same gap the source doc itself already anchored and explained (a fresh
 llama-cpp-python run landing "in the same ballpark, same tool family" as the documented llama-bench
 number, `LLM_THROUGHPUT_BENCHMARK.md` lines 106-109), not a discrepancy in this reconciliation. See
-[`../../docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) for the engine's default performance profile
-and [`../../docs/Checklists/LLM_DECODE_PERF_GRIND.md`](../../docs/Checklists/LLM_DECODE_PERF_GRIND.md)
+[`README.md`](README.md) for the engine's default performance profile
+and [`../../docs/Checklists/LLM_DECODE_PERF_GRIND.md`](../../docs/Checklists/ROADMAP.md)
 for full optimization history/methodology.
 
 **pp512 (prefill) is not in this table** — the engine has no direct prefill-throughput comparison vs
@@ -40,21 +40,21 @@ HartsyInference counterpart) are in `LLM_THROUGHPUT_BENCHMARK.md`'s Phase 0 base
 
 | Model | Quant | GPU | Metric | HartsyInference (tok/s) | llama.cpp (tok/s) | Ratio | Date | Source |
 |---|---|---|---|---:|---:|---:|---|---|
-| qwen2.5-0.5b-instruct | Q4_K_M | RTX 3060 | tg128 | **435.6** | 328.9 | 1.32× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) rounds 12-13 close-out |
-| gemma-3-1b-it | Q4_K_M | RTX 3060 | tg128 | **251.3** | 196.8 | 1.28× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) rounds 12-13 close-out |
-| DeepSeek-R1-Distill-Qwen-1.5B | Q4_K_M | RTX 3060 | tg128 | **224.5** | 183.4 | 1.22× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) rounds 12-13 close-out |
-| stablelm-2-1.6b-chat | Q4_K_M | RTX 3060 | tg128 | **232.27** | 202.26 | 1.15× faster | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) round 12 |
-| gemma-2-2b-it | Q4_K_M | RTX 3060 | tg128 | **141.8** | 123.8 | 1.15× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) rounds 12-13 close-out |
-| Qwen3-4B | Q4_K_M | RTX 3060 | tg128 | **100.7** | 89.0 | 1.13× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) rounds 12-13 close-out |
-| granite-3.0-2b-instruct | Q4_K_M | RTX 3060 | tg128 | **131.54** | 117.36 | 1.12× faster | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) round 12 |
-| Llama-3.2-1B-Instruct | Q8_0 | RTX 3060 | tg128 | **213.7** | 192.0 | 1.11× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) rounds 12-13 close-out |
-| gemma-4-E2B-it | Q4_K_M | RTX 3060 | tg128 | **137.8** | 124.7 | 1.11× faster | 2026-07-24 | [LLM_DECODE_PERF_GRIND.md](../../docs/Checklists/LLM_DECODE_PERF_GRIND.md) rounds 12-13 (graph bring-up) |
-| gemma-3-4b-it | Q4_K_M | RTX 3060 | tg128 | **96.16** | 87.54 | 1.10× faster | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) round 12 |
-| SmolVLM2-2.2B-Instruct | Q4_K_M | RTX 3060 | tg128 | **216.21** | 197.19 | 1.10× faster | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) round 12 |
-| Qwen3.5-0.8B (Gated DeltaNet / SSM) | Q4_K_M | RTX 3060 | tg128 | **254.5** | 232.8 | 1.09× faster | 2026-07-24 | [LLM_DECODE_PERF_GRIND.md](../../docs/Checklists/LLM_DECODE_PERF_GRIND.md) "FINAL 2026-07-24" (Qwen3.5 SSM campaign) |
-| Mistral-7B-Instruct-v0.3 | Q4_K_M | RTX 3060 | tg128 | **57.61** | 53.15 | 1.08× faster | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) round 12 |
-| GLM-4-9B-0414 | Q4_K_M | RTX 3060 | tg128 | 47.07 | **48.13** | 0.98× — effective parity | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) rounds 12-13 close-out |
-| Phi-3-mini-4k-instruct | Q4_K_M | RTX 3060 | tg128 | 76.80 (graph-off; not graph-eligible) | **93.93** | 0.82× — 18% slower | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) round 12 |
+| qwen2.5-0.5b-instruct | Q4_K_M | RTX 3060 | tg128 | **435.6** | 328.9 | 1.32× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) rounds 12-13 close-out |
+| gemma-3-1b-it | Q4_K_M | RTX 3060 | tg128 | **251.3** | 196.8 | 1.28× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) rounds 12-13 close-out |
+| DeepSeek-R1-Distill-Qwen-1.5B | Q4_K_M | RTX 3060 | tg128 | **224.5** | 183.4 | 1.22× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) rounds 12-13 close-out |
+| stablelm-2-1.6b-chat | Q4_K_M | RTX 3060 | tg128 | **232.27** | 202.26 | 1.15× faster | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) round 12 |
+| gemma-2-2b-it | Q4_K_M | RTX 3060 | tg128 | **141.8** | 123.8 | 1.15× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) rounds 12-13 close-out |
+| Qwen3-4B | Q4_K_M | RTX 3060 | tg128 | **100.7** | 89.0 | 1.13× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) rounds 12-13 close-out |
+| granite-3.0-2b-instruct | Q4_K_M | RTX 3060 | tg128 | **131.54** | 117.36 | 1.12× faster | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) round 12 |
+| Llama-3.2-1B-Instruct | Q8_0 | RTX 3060 | tg128 | **213.7** | 192.0 | 1.11× faster | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) rounds 12-13 close-out |
+| gemma-4-E2B-it | Q4_K_M | RTX 3060 | tg128 | **137.8** | 124.7 | 1.11× faster | 2026-07-24 | [LLM_DECODE_PERF_GRIND.md](../../docs/Checklists/ROADMAP.md) rounds 12-13 (graph bring-up) |
+| gemma-3-4b-it | Q4_K_M | RTX 3060 | tg128 | **96.16** | 87.54 | 1.10× faster | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) round 12 |
+| SmolVLM2-2.2B-Instruct | Q4_K_M | RTX 3060 | tg128 | **216.21** | 197.19 | 1.10× faster | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) round 12 |
+| Qwen3.5-0.8B (Gated DeltaNet / SSM) | Q4_K_M | RTX 3060 | tg128 | **254.5** | 232.8 | 1.09× faster | 2026-07-24 | [LLM_DECODE_PERF_GRIND.md](../../docs/Checklists/ROADMAP.md) "FINAL 2026-07-24" (Qwen3.5 SSM campaign) |
+| Mistral-7B-Instruct-v0.3 | Q4_K_M | RTX 3060 | tg128 | **57.61** | 53.15 | 1.08× faster | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) round 12 |
+| GLM-4-9B-0414 | Q4_K_M | RTX 3060 | tg128 | 47.07 | **48.13** | 0.98× — effective parity | 2026-07-24 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) rounds 12-13 close-out |
+| Phi-3-mini-4k-instruct | Q4_K_M | RTX 3060 | tg128 | 76.80 (graph-off; not graph-eligible) | **93.93** | 0.82× — 18% slower | 2026-07-23 | [LLM_THROUGHPUT_BENCHMARK.md](../../docs/Checklists/ROADMAP.md) round 12 |
 | Qwen3-0.6B | Q4_K_M | RTX 3060 | tg128 | 190.8 | **337.6** | 0.57× — 1.77× slower | 2026-07-10 | [README.md](../../README.md) "LLM decode vs llama.cpp" (pre-dp4a, oldest number still in use — not re-benchmarked since) |
 
 Row count: 16, sorted by Ratio descending.

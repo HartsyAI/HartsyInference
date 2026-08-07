@@ -2,6 +2,12 @@
 
 > Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (F5-TTS pipeline)
 
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+
 ## Summary
 
 F5-TTS (Shanghai Jiao Tong University X-LANCE Lab / SWivid, 2024) is a **fully non-autoregressive, zero-shot voice-cloning TTS** built on **Conditional Flow Matching (CFM)** over mel spectrograms. It takes a short reference audio clip (3-15 s, 12 s hard cap) plus its transcript and a target text, and produces target speech in the reference speaker's voice. The whole utterance is generated **jointly** in a single forward integration pass — not autoregressively — which is what distinguishes it from XTTS/Bark/Sesame-style decoder TTS. At ~336 M params (DiT) + ~14 M (Vocos) it is currently the leading open-weight zero-shot voice cloning model for English and Mandarin Chinese; community fine-tunes cover ~10 additional languages.
@@ -17,9 +23,7 @@ This file covers the model architecture and inference pipeline. The Sway-Samplin
 - Vocoder: [charactr/vocos-mel-24khz](https://huggingface.co/charactr/vocos-mel-24khz)
 - Community variants index: [`src/f5_tts/infer/SHARED.md`](https://github.com/SWivid/F5-TTS/blob/main/src/f5_tts/infer/SHARED.md)
 
-## Detailed Findings
-
-### 1. Model Variants
+## Model Variants
 
 All official models share the same DiT shape (`dim=1024, depth=22, heads=16, ff_mult=2, conv_layers=4`) — they differ only in training data, training steps, vocab, and zero-init policy.
 
@@ -54,161 +58,7 @@ There is also **Cross-Lingual F5-TTS** ([arXiv:2509.14579](https://arxiv.org/abs
 
 The **"F5-TTS-Small"** topology (used by Arabic, Hindi) is approximately `dim=768, depth=18, heads=12, ff_mult=2, conv_layers=4` (~155 M params). The official repo carries the YAML; planned variants in the HartsyInference loader must read `dim/depth/heads/ff_mult/conv_layers/text_dim/text_num_embeds` from the YAML next to the safetensors and dispatch accordingly.
 
-### 2. Architecture
-
-#### 2.1 Text encoder — character-level, NO G2P
-
-F5-TTS replaces phoneme conditioning with **raw character conditioning**. There are three supported tokenization modes (`get_tokenizer()` in `src/f5_tts/model/utils.py`):
-
-1. **`byte`** — UTF-8 byte values, vocab size = 256, zero G2P needed. Index 0 is reserved for "unknown / pad". This is the simplest mode and is the **recommended one for HartsyInference's first cut**.
-2. **`char`** — load `vocab.txt` next to the checkpoint, one symbol per line, look each character up. The shipped `F5TTS_v1_Base/vocab.txt` (EN+ZH model) contains ASCII printables + pinyin syllables + ZH punctuation; vocab size ≈ 2545.
-3. **`pinyin`** *(used by all official EN+ZH checkpoints)* — Chinese characters are first segmented with `rjieba` and converted to **TONE3-style pinyin** ("ni3 hao3 ma5"), then looked up in `vocab.txt`. ASCII text is passed through character-by-character. **Spaces separate syllables.**
-
-For the official EN+ZH model the inference flow is:
-```
-"你好, world" → segment+pinyin → "ni3 hao3 , w o r l d" → idx via vocab.txt
-```
-
-The tokenizer must satisfy: **"space character is at index 0 in vocab.txt because 0 is also the unknown-char index"** (assert in `get_tokenizer`).
-
-The **embedding layer** has `text_num_embeds + 1` rows (the +1 is a "filler" token at the last index used to pad the text to the audio length). For v1 base with pinyin vocab that is `(2545 + 1, 512)`.
-
-After embedding, the character sequence is **padded with the filler token to the mel frame count** (so text and mel have the same length T_mel before they enter the DiT). Then it goes through **rotary positional embedding + 4 ConvNeXt V2 blocks** (the "text stem") to produce a `(B, T_mel, 512)` text condition. `precompute_max_pos = 8192` mel frames ≈ 87 s of audio at 24 kHz / hop 256.
-
-#### 2.2 Audio encoder — mel spectrogram
-
-The reference audio is converted to mel features with the following **exact** parameters (from `F5TTS_v1_Base.yaml` and reproduced in `MEL_SPECTROGRAM.md`):
-
-| Parameter | Value |
-|---|---|
-| `target_sample_rate` | **24 000 Hz** |
-| `n_mel_channels` | **100** |
-| `n_fft` | **1024** |
-| `win_length` | **1024** |
-| `hop_length` | **256** |
-| Windowing | Hann |
-| Mel filter range | 0 Hz – 12 000 Hz (full Nyquist; no f_min/f_max clip) |
-| Mel scale | HTK slaney mel (matches torchaudio default `MelSpectrogram(power=1)`) |
-| Log compression | `log(clamp(mel, min=1e-5))` (log, **not** log10, **not** dB) |
-| RMS normalization | `target_rms = 0.1` applied to ref audio before mel |
-
-Frame rate is 24 000 / 256 = **93.75 mel frames per second**. Mel input to the DiT is shape `(B, T_mel, 100)`.
-
-Reference audio is **clipped to ≤ 12 s** by progressive silence detection (1000 ms threshold first, then 100 ms) inside `preprocess_ref_audio_text`. Longer text input is **chunked**: each chunk targets ≤ 135 UTF-8 bytes by default (dynamically rescaled by ref-audio duration), and chunks are stitched with a **0.15 s linear crossfade**.
-
-#### 2.3 DiT (Diffusion Transformer)
-
-| Hyperparameter | F5TTS_v1_Base |
-|---|---|
-| `dim` (model hidden) | **1024** |
-| `depth` (transformer blocks) | **22** |
-| `heads` | **16** |
-| `dim_head` | **64** (= 1024 / 16) |
-| `ff_mult` | **2** (FFN intermediate = 2048) |
-| `text_dim` | **512** |
-| `text_num_embeds` | 256 (byte) or vocab size (char/pinyin) |
-| `conv_layers` (ConvNeXt text stem depth) | **4** |
-| `mel_dim` | **100** (input/output channel count) |
-| Positional encoding | **Rotary (RoPE)** on Q/K, computed by `RotaryEmbedding(dim_head=64)` |
-| `qk_norm` | Optional RMSNorm on Q/K (config flag, **off** in base) |
-| Attention backend | `torch` (eager) or `flash_attn`; HartsyInference target = own kernel |
-| Long skip connection | Optional symmetric U-net-style skip (off in base) |
-| FFN | GeGLU? **No** — plain Linear → GELU → Linear (`FeedForward` in `modules.py`) |
-| Final norm | `AdaLayerNorm_Final` (zero-init) → `Linear(dim → mel_dim)` |
-
-**Block layout** (one of 22 identical blocks):
-```
-x, c = block_input
-shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp =
-    AdaLNZero(time_emb).chunk(6, dim=-1)
-y = LayerNorm(x) * (1 + scale_msa) + shift_msa
-y = Attention_RoPE(y)                # MHA with rotary on Q,K
-x = x + gate_msa * y
-y = LayerNorm(x) * (1 + scale_mlp) + shift_mlp
-y = FeedForward(y)                   # Linear(d,2d) -> GELU -> Linear(2d,d)
-x = x + gate_mlp * y
-```
-
-The **input to the DiT** is built by `CFM.forward` like this:
-```
-noisy_mel    : (B, T_mel, 100)   # x_t = (1-t)*x0 + t*epsilon
-cond_mel     : (B, T_mel, 100)   # ref-audio mel zero-padded over target region
-text_emb     : (B, T_mel, 512)   # ConvNeXt-stem output, filler-padded
-time_emb     : (B, dim)          # sinusoidal+MLP, see 2.5
-
-input        = concat([noisy_mel, cond_mel], dim=-1)   # (B, T_mel, 200)
-input        = Linear(200 → dim)(input)                # (B, T_mel, 1024)
-input        = input + Linear(text_dim → dim)(text_emb) # add text condition
-output       = DiT_blocks(input, time_emb)              # (B, T_mel, 1024)
-velocity     = Linear(dim → 100)(AdaLNFinal(output, time_emb))  # (B, T_mel, 100)
-```
-
-That output `velocity` is the **predicted velocity field** `v_theta(x_t, t, cond, text)` consumed by the flow-matching ODE solver.
-
-#### 2.4 ConvNeXt V2 text stem (the "ConvNeXt" in the paper title)
-
-Four blocks, each:
-```
-y = depthwise_Conv1d(dim=512, kernel=7, padding=3, groups=512)(x)   # depthwise temporal
-y = LayerNorm(y)
-y = Linear(512 → 1024)(y)        # pointwise expand (intermediate_dim=1024)
-y = GELU(y)                      # paper uses GELU; modules.py uses Mish/GELU variant
-y = GRN(y)                       # Global Response Normalization (the V2 in ConvNeXt V2)
-y = Linear(1024 → 512)(y)        # pointwise contract
-x = x + y                        # residual
-```
-
-**GRN** (Global Response Normalization, from ConvNeXt V2):
-```
-Gx = ||x||_2 along token dim         # (B, 1, C)
-Nx = Gx / (mean(Gx, dim=C) + 1e-6)   # (B, 1, C)
-out = gamma * (x * Nx) + beta + x    # gamma, beta learnable (init 0)
-```
-
-This stem is **only** applied to the embedded character sequence (text path), **not** to the audio. RoPE is also applied inside the text-stem blocks. After 4 blocks, output goes into the DiT as the text condition.
-
-#### 2.5 Time embedding
-
-```
-freqs = SinusoidalPositionEmbedding(dim=256)(t)   # t in [0,1]
-       # i.e.  emb_i = log(10000)/(half_dim-1);  e = exp(-i*emb) ; t*e -> sin,cos concat
-time  = Linear(256 → 1024) → SiLU → Linear(1024 → 1024)(freqs)
-```
-
-The final `(B, 1024)` time embedding feeds the AdaLN-Zero modulation in every DiT block and in `AdaLayerNorm_Final`. No condition dropout on the time embedding; CFG is realized by zeroing both `cond_mel` and `text_emb` on the unconditional branch.
-
-#### 2.6 Vocoder — Vocos (charactr/vocos-mel-24khz)
-
-F5-TTS uses **Vocos** to invert the predicted mel back to a 24 kHz waveform. The published F5-TTS pipeline expects **100-bin mel** input (matching the DiT output), which corresponds to the `charactr/vocos-mel-24khz` checkpoint as configured for F5-TTS (`n_fft=1024, hop=256, win=1024, 100 mel bins, sr=24 kHz`).
-
-Vocos architecture (full design in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md) → "Vocos Architecture (Alternative)"):
-- Mel input → 1D Conv embed → **8 ConvNeXt blocks** (no temporal upsampling)
-- Final Linear projects to `(n_fft/2 + 1) * 2 = 1026` channels = predicted **magnitude + phase** of the STFT
-- A single **inverse STFT** synthesizes the waveform — no transposed convs, no upsampling tower
-- ~13.5 M params, 13× faster than HiFiGAN-V1 at higher quality
-
-For BigVGAN-trained checkpoints (e.g. `F5TTS_Base_bigvgan`), substitute the `nvidia/bigvgan_v2_24khz_100band_256x` vocoder. HartsyInference will target Vocos first (smaller, simpler, matches the default v1 checkpoint).
-
-### 3. In-context inference pattern (the key idea)
-
-F5-TTS treats voice cloning as **infilling**, not generation. The model never "starts from a speaker embedding"; it sees the entire utterance and predicts only the masked tail.
-
-```
-Reference audio:   [-----ref mel (N_ref frames)-----]
-Target audio:                                       [-----noise/mask (N_tgt frames)-----]
-
-Conditioning mel:  [-----ref mel (N_ref frames)-----][-----zeros (N_tgt frames)-----]
-Noisy mel x_t:     [-----random noise (whole T)----- ----- whole T -----]
-Text:              [ref_chars + target_chars padded with filler to T frames]
-```
-
-At each Euler step the DiT predicts velocity over the full `T = N_ref + N_tgt` sequence. The reference-region predictions are **discarded** — the loop overwrites that region with the original `cond_mel` at every step (this is how the model is "anchored" to the reference voice). Only the target-region samples accumulate. After NFE steps the target region is the final mel and is sent to Vocos.
-
-Why this works: training masks a random suffix of every utterance and asks the model to reconstruct it from the prefix + full text. At inference, "prefix + full text" is exactly the reference clip + concatenated transcript, so zero-shot voice cloning falls out for free. **No speaker embedding, no learned style encoder, no fine-tuning required.**
-
-This is fundamentally different from autoregressive TTS (Bark, XTTS, Tortoise, Sesame): F5-TTS processes the whole utterance jointly, in parallel, in 32 forward passes total — not one decoder step per token.
-
-### 4. Flow matching — Sway Sampling
+## Flow matching — Sway Sampling
 
 F5-TTS uses **rectified flow / Conditional Flow Matching** with **Euler integration** in time `t: 0 → 1` (data at `t=0`, noise at `t=1` — opposite sign convention from SD3 sigmas, but the per-step update is identical).
 
@@ -247,121 +97,7 @@ x_{t-dt} = x_t - v * dt          # Euler step (negative because we integrate 1�
 
 E2-TTS (predecessor) is mathematically the same model with no ConvNeXt text stem and `sway_sampling_coef = 0`. For HartsyInference: **E2-TTS = F5-TTS scheduler with sway off, plus drop the ConvNeXt blocks from the text path.**
 
-### 5. Duration prediction — closed-form heuristic, no learned predictor
-
-F5-TTS has **no neural duration model**. The target mel length is computed by simple ratio (from `_infer_basic` in `utils_infer.py`):
-
-```python
-ref_audio_len = audio.shape[-1] // hop_length          # ref mel frames
-duration = ref_audio_len + int(
-    ref_audio_len / ref_text_len * gen_text_len / local_speed
-)
-```
-
-Or, written algebraically:
-
-```
-N_tgt = round( N_ref * (len(target_text) / len(ref_text)) / speed )
-T     = N_ref + N_tgt                                  # total DiT sequence length
-```
-
-`ref_text_len` and `gen_text_len` are **character counts after tokenization** (so for the pinyin EN+ZH model they are the post-pinyin lengths — that is the key to keep ZH and EN proportional). The CFM sample loop additionally enforces `duration >= max(text_len, ref_audio_len) + 1` (see `cfm.sample()`):
-
-```python
-duration = torch.maximum(
-    torch.maximum((text != -1).sum(dim=-1), lens) + 1, duration
-)
-```
-
-`speed > 1.0` → faster (shorter target). The lack of a learned duration predictor is intentional — the paper argues that the joint DiT itself implicitly handles fine-grained alignment, and a global length estimate is all the conditioning needs.
-
-### 6. Multilingual handling
-
-The official models use **pinyin for Chinese, raw characters for everything else** (segmentation by `rjieba`, pinyin by `pypinyin.lazy_pinyin(style=TONE3)`, spaces inserted at language boundaries — `convert_char_to_pinyin` in `src/f5_tts/model/utils.py`).
-
-Community fine-tunes typically just **extend `vocab.txt`** with the script's characters (Cyrillic, Devanagari, Arabic, kana/kanji, etc.) and re-init the embedding rows for new tokens. The DiT itself is script-agnostic.
-
-For HartsyInference, the **`byte` tokenization mode is the easiest first cut** — works for any UTF-8 input, no vocab file needed, vocab size = 257. Quality will be slightly lower than the pinyin path on Chinese (no syllable structure) but is fully general. Pinyin support can be added later as a separate Tokenizer implementation behind an interface.
-
-### 7. Voice cloning quality
-
-Widely regarded as the **SOTA open-weight zero-shot voice cloning model for EN/ZH at the < 500 M-param scale** as of late 2024 / early 2025. Reported on LibriSpeech-PC (paper Table 3):
-
-| Model | WER ↓ | SIM-O ↑ |
-|---|---|---|
-| VALL-E 2 | 2.6 | 0.643 |
-| NaturalSpeech 3 | 1.94 | 0.67 |
-| **E2-TTS** (NFE=32) | 2.19 | **0.71** |
-| **F5-TTS** (NFE=32, Sway=-1.0) | **1.83** | 0.66 |
-
-Subjective community consensus: F5-TTS clones English/Mandarin voices convincingly from **5–10 s** of clean reference. Common failure modes: poor performance on heavy accents not in Emilia, very emotive/whispered/shouted speech, and prosody is occasionally flat because there is no explicit prosody model. Out-of-distribution languages need a community fine-tune.
-
-### 8. Inference pipeline pseudocode (exact tensor shapes)
-
-For `ref_audio_path` (wav), `ref_text` ("Hello world."), `target_text` ("This is the cloned voice.") on the `F5TTS_v1_Base` checkpoint:
-
-```
-# ---------- 0. Preprocess ref audio ----------
-wav, sr = load(ref_audio_path)
-wav = resample(wav, sr → 24000)
-wav = clip_to_max_silence(wav, max_dur=12.0)
-wav = wav * (target_rms / rms(wav))          # normalize to RMS 0.1
-ref_mel = mel_spec(wav,
-                   n_fft=1024, hop=256, win=1024,
-                   n_mels=100, sr=24000,
-                   log=True, clamp_min=1e-5)
-ref_mel : (T_ref, 100)         # T_ref = len(wav) // 256
-
-# ---------- 1. Tokenize text ----------
-# byte mode (simplest):
-ref_ids    = list(ref_text.encode('utf-8'))            # ints in [0,255]
-target_ids = list(target_text.encode('utf-8'))
-text_ids   = ref_ids + target_ids                      # concatenated
-# pinyin mode (official EN+ZH model): apply convert_char_to_pinyin first.
-
-# ---------- 2. Compute target duration ----------
-N_ref = T_ref
-N_tgt = round( N_ref * (len(target_ids) / len(ref_ids)) / speed )
-T     = N_ref + N_tgt
-T     = max(T, len(text_ids) + 1)                      # safety lower bound
-
-# ---------- 3. Build inputs ----------
-text_padded = pad_with_filler(text_ids, length=T)      # filler = text_num_embeds
-text_padded : (1, T) int
-text_emb    = Embedding(text_padded)                   # (1, T, 512)
-text_emb    = ConvNeXt_stem_4_blocks(text_emb)         # (1, T, 512)
-
-cond_mel = zeros(1, T, 100)
-cond_mel[:, :T_ref, :] = ref_mel                       # zero-pad target region
-
-x_t = randn(1, T, 100)                                 # init at t=1 (pure noise)
-
-# ---------- 4. Sway-sampled Euler integration ----------
-t_grid = linspace(0, 1, steps=33)                      # 32 NFE = 33 nodes
-t_grid = t_grid + (-1.0) * (cos(pi/2 * t_grid) - 1 + t_grid)   # Sway s=-1.0
-
-for i in range(32, 0, -1):                             # integrate noise→data
-    t  = t_grid[i]
-    dt = t_grid[i] - t_grid[i-1]
-    time_emb = TimeMLP(SinusoidalEmbed(t))             # (1, 1024)
-    v_cond   = DiT(x_t, cond_mel,        text_emb,   time_emb)
-    v_uncond = DiT(x_t, zeros_like(cond_mel), zeros_like(text_emb), time_emb)
-    v = v_uncond + 2.0 * (v_cond - v_uncond)           # CFG 2.0
-    x_t = x_t - v * dt                                 # Euler
-    x_t[:, :T_ref, :] = ref_mel                        # anchor ref region
-
-generated_mel = x_t[:, T_ref:, :]                      # (1, N_tgt, 100)
-
-# ---------- 5. Vocoder ----------
-generated_mel = generated_mel.transpose(1, 2)          # (1, 100, N_tgt)
-waveform = Vocos.decode(generated_mel)                 # (1, N_tgt * 256) at 24 kHz
-waveform = waveform * (rms(orig_wav) / target_rms)     # restore original loudness
-return waveform
-```
-
-For multi-chunk generation (target text > ~135 UTF-8 bytes): split target into chunks at sentence boundaries, run the loop above per chunk, **0.15 s linear crossfade** the resulting waveforms together.
-
-### 9. Memory and performance
+## Memory and performance
 
 | Resource | F5TTS_v1_Base |
 |---|---|
@@ -378,7 +114,7 @@ For multi-chunk generation (target text > ~135 UTF-8 bytes): split target into c
 
 The bottleneck is the **DiT** (22 layers × 32 NFE × 2 CFG branches × ~T forward passes), specifically attention over `T` tokens where `T ≈ 94 * audio_seconds`. For a 10 s output `T ≈ 940`, so the attention is well-suited to flash-attention / our own fused-attention kernel; this is where the bulk of optimization payoff lives. Vocos is negligible cost (one feed-forward conv stack + one iSTFT per call).
 
-### 10. C# implementation notes (HartsyInference)
+## C# implementation notes (HartsyInference)
 
 | Component | Reuse / new | Source of truth |
 |---|---|---|
@@ -406,13 +142,6 @@ The bottleneck is the **DiT** (22 layers × 32 NFE × 2 CFG branches × ~T forwa
 7. End-to-end test: `(reference 5 s wav, ref text, target text) → 24 kHz wav`, compare against Python F5-TTS output on the same inputs at same seed/NFE/CFG/Sway; SIM-O should match within 0.005, WER within 1 %.
 
 **Reference fidelity targets**: validate the DiT block-by-block (mel → first block output, then mid-network, then final velocity) against the Python reference with all stochasticity removed (fixed noise tensor, NFE=32, deterministic). Tolerances: 1e-3 atol FP16, 1e-5 atol FP32, both relative to torch reference.
-
-## Open Questions
-
-- [ ] Should we support `pinyin` tokenization in v1, or ship `byte` only and require fine-tuned weights for ZH quality? (Pinyin pulls in a 200 KB+ Chinese segmentation table.)
-- [ ] Which size class should "F5-TTS-Small" community fine-tunes use as their default — confirm by inspecting their YAML configs in each HF repo.
-- [ ] BigVGAN vs Vocos for the BigVGAN-trained variant — defer BigVGAN until Vocos works end-to-end; BigVGAN is ~3× larger and slower.
-- [ ] Streaming output: can the in-context infilling be chunk-streamed (i.e., emit waveform as the DiT integrates)? Probably not natively — the whole T_mel is needed for each step. Streaming would require chunked text + crossfade like the Python infer loop already does.
 
 ## Cross-References
 

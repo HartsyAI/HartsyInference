@@ -2,11 +2,11 @@
 
 Canonical, single-source scoreboard for HartsyInference's image-generation models vs their reference
 baseline. This replaces three previously-diverging copies of the same table (`README.md`,
-`docs/PERFORMANCE.md` §5, `docs/Checklists/MODEL_STATUS_IMAGE.md`) and retires the narrower one-off
+`PERFORMANCE.md` (retired) §5, `docs/Checklists/MODEL_STATUS_IMAGE.md`) and retires the narrower one-off
 `benchmarks/results/*.md` write-ups those numbers were originally transcribed from — this file is now the
 only place the headline figures live; the Source column names the run/date each number came from for
 provenance, not a live link. Full methodology (hardware baseline, the standard performance profile
-and its kill-switches, how to reproduce a run) lives in **[`../../docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md)**.
+and its kill-switches, how to reproduce a run) lives in **[`README.md`](README.md)**.
 
 **GPUs.** Most rows are **RTX 4090 24GB**. A handful of models also have a genuine **RTX 3060 12GB**
 row — either because they fit resident on 12GB, or (as of 2026-07-27) because the engine's new low-VRAM
@@ -21,7 +21,7 @@ memory-bound comparison, not a straight compute one). **ChromaRadiance**'s basel
 fp8 path (`--fp8_e4m3fn-unet --fast fp8_matrix_mult`), for an apples-to-apples fp8-vs-fp8 read.
 
 **Ratio** = HartsyInference ÷ baseline. **<1.0× means Hartsy is faster** (the faster time is bolded in its
-column) — this matches the convention already used in `docs/PERFORMANCE.md` and
+column) — this matches the convention already used in `PERFORMANCE.md` (retired) and
 `image_python_baselines_2026-07-18.md`. A ratio is only computed when both sides of a row were measured
 together in the same run; where that wasn't possible (e.g. a Debug-build Hartsy number against a
 Release-build ComfyUI number) the cell is left as `—` and the caveat is called out.
@@ -37,26 +37,26 @@ per-model as footnotes, not used to replace the baseline row.
 | Model | GPU | HartsyInference | ComfyUI / Python | Ratio | Date | Source |
 |---|---|---:|---:|---:|---|---|
 | Flux-Schnell (4 st) | 4090 | **2.4 s** | 3.8 s | **0.63×** | 2026-07-26 | 2026-07-26 sweep |
-| Flux.2 Klein 4B (4 st) | 4090 | **2.36 s** | 1.85 s | 1.28× | 2026-07-11 | [PERFORMANCE.md §5](../../docs/PERFORMANCE.md) |
+| Flux.2 Klein 4B (4 st) | 4090 | **2.36 s** | 1.85 s | 1.28× | 2026-07-11 | PERFORMANCE.md §5 (retired) |
 | Krea2-Turbo (8 st) | 4090 | **4.5 s** | 6.5 s | **0.69×** | 2026-07-26 | 2026-07-26 sweep |
 | Z-Image-Turbo (8 st) | 4090 | 4.2 s | **3.1 s** | 1.35× | 2026-07-26 | 2026-07-26 sweep¹ |
-| Boogu-Turbo (4 st) | 4090 | 3.26 s | **2.54 s** | 1.28× | 2026-07-11 | [PERFORMANCE.md §5](../../docs/PERFORMANCE.md) |
-| AuraFlow-0.3 (20 st) | 4090 | **13.93 s** | 14.0 s | ~1.0× (tied) | 2026-07-11 | [PERFORMANCE.md §5](../../docs/PERFORMANCE.md) |
-| ERNIE-Image (20 st) | 4090 | **20.0 s** | 23.9 s | **0.84×** | 2026-07-11 | [PERFORMANCE.md §5](../../docs/PERFORMANCE.md) |
+| Boogu-Turbo (4 st) | 4090 | 3.26 s | **2.54 s** | 1.28× | 2026-07-11 | PERFORMANCE.md §5 (retired) |
+| AuraFlow-0.3 (20 st) | 4090 | **13.93 s** | 14.0 s | ~1.0× (tied) | 2026-07-11 | PERFORMANCE.md §5 (retired) |
+| ERNIE-Image (20 st) | 4090 | **20.0 s** | 23.9 s | **0.84×** | 2026-07-11 | PERFORMANCE.md §5 (retired) |
 | Lance-3B (30 st) | 4090 | 9.6 s | unsupported (no ComfyUI arch) | — | 2026-07-26 | 2026-07-26 sweep |
 | Chroma1-Radiance (fp8, 20 st) | 4090 | **21.46 s** | 21.07 s (fp8) | 1.02× | 2026-07-18 | python baselines |
 | Krea2-Base (28 st) | 4090 | **30.3 s** | 41.5 s | **0.73×** | 2026-07-26 | 2026-07-26 sweep |
 | Flux2-Dev 32B (Q4_K_S GGUF, 20 st) | 4090 | **39.6 s** | 54.0 s | **0.73×** | 2026-07-26 | 2026-07-26 sweep |
 | Qwen-Image (20 st) | 4090 | **40.6 s** | 58.2 s | **0.70×** | 2026-07-26 | 2026-07-26 sweep |
-| HiDream-i1 17B (25 st, cfg 5) | 4090 | 44.0 s | **35.2 s** | 1.25× | 2026-07-11 | [PERFORMANCE.md §5](../../docs/PERFORMANCE.md) |
+| HiDream-i1 17B (25 st, cfg 5) | 4090 | 44.0 s | **35.2 s** | 1.25× | 2026-07-11 | PERFORMANCE.md §5 (retired) |
 | Chroma1-HD (30 st, cfg 7)² | 4090 | **24.6 s** | 32.6 s | **0.75×** | 2026-07-26 | 2026-07-26 sweep |
-| Boogu-Base (20 st) | 4090 | 26.5 s | **17.8 s** | 1.49× | 2026-07-11 | [PERFORMANCE.md §5](../../docs/PERFORMANCE.md) |
+| Boogu-Base (20 st) | 4090 | 26.5 s | **17.8 s** | 1.49× | 2026-07-11 | PERFORMANCE.md §5 (retired) |
 | Ideogram4 (20 st) | 4090 | 19.5 s | **18.0 s** | 1.08× | 2026-07-26 | 2026-07-26 sweep |
 | OmniGen2 (20 st) | 4090 | 15.1 s | **13.0 s** | 1.16× | 2026-07-26 | 2026-07-26 sweep |
 | Flux-Dev (20 st) | 4090 | **9.5 s** | 12.5 s | **0.76×** | 2026-07-26 | 2026-07-26 sweep |
 | SDXL (20 st)³ | 4090 | 10.9 s | **7.5 s** | 1.45× | 2026-07-26 | 2026-07-26 sweep |
 | HunyuanImage 2.1 17B (Q4_K_M GGUF, 2048², 20 st) | 4090 | 48.3 s | **47.1 s** | 1.03× (matched) | 2026-07-26 | 2026-07-26 sweep |
-| Qwen-Image-Edit 2511 (20 st + ref, edit) | 4090 | 93 s | **87.8 s** | 1.06× | 2026-07-11 | [PERFORMANCE.md §5](../../docs/PERFORMANCE.md) |
+| Qwen-Image-Edit 2511 (20 st + ref, edit) | 4090 | 93 s | **87.8 s** | 1.06× | 2026-07-11 | PERFORMANCE.md §5 (retired) |
 | Lumina-Image 2.0 (25 st, cfg 4)⁴ | 4090 | 17.7 s | **10.05 s** | 1.76× | 2026-07-18 | python baselines |
 | F-Lite 10B (30 st, cfg 6)⁵ | 4090 | **61.5 s** | 122.98 s (Python/diffusers) | **0.50×** | 2026-07-18 | python baselines |
 | Anima (Cosmos-Predict2 2B, 20 st)⁶ | 4090 | 160.0 s | **2.4 s** | 66.7× | 2026-07-26 | 2026-07-26 sweep |
@@ -84,7 +84,7 @@ Release number beside it — no ratio is reported. Retires the `OOM²` cell from
   number silently fails a bar that was passing days before. Worth a re-run before trusting 4.2 s as durable.
 - **SDXL.** The 2026-07-26 sweep downloaded SDXL fresh (`stabilityai/stable-diffusion-xl-base-1.0`,
   6.94 GB, byte-exact) rather than reusing whatever checkpoint produced the older **2.93 s / 3.7 s**
-  ("faster than ComfyUI") figure from `docs/PERFORMANCE.md`'s 07-11 snapshot. ComfyUI's own time moved too
+  ("faster than ComfyUI") figure from `PERFORMANCE.md` (retired)'s 07-11 snapshot. ComfyUI's own time moved too
   (3.7 s → 7.5 s) on the same swap, which is the tell that this is a different checkpoint/config, not an
   engine-side regression. `2026-07-27_lowvram_leak_fix.md` §3
   separately shows SDXL's peak VRAM is dominated by an elastic full-resolution VAE decode workspace, not
@@ -107,7 +107,7 @@ Release number beside it — no ratio is reported. Retires the `OOM²` cell from
   be updated; until then the 66.7×/20.3× gap is known-stale, not current.
 - **Lens (Turbo / RL-tuned) excluded from the table.** Both variants produced solid-black output via the
   SwarmUI API in the 2026-07-26 sweep (16/16 failures) — a fast broken kernel is not a result, per
-  `docs/PERFORMANCE.md`'s own methodology. Root-caused and fixed 2026-07-27 (SageAttention's INT8 path
+  `PERFORMANCE.md` (retired)'s own methodology. Root-caused and fixed 2026-07-27 (SageAttention's INT8 path
   casts V to F16 and Lens's un-normalized V overflows F16 range by block 45); see
   `2026-07-27_lowvram_leak_fix.md` §5d. Output is verified
   correct post-fix but **no timing was re-captured**, so there's no number to put in this table yet.

@@ -4,13 +4,8 @@ Thanks for your interest in contributing to HartsyInference.
 
 ## Getting Started
 
-### Prerequisites
-
-- [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- NVIDIA GPU with CUDA 12.x (optional — CPU backend works without it)
-- Git
-
-### Building
+You need the [.NET 10 SDK](https://dotnet.microsoft.com/download) and git. An NVIDIA GPU with CUDA 12.x
+or 13.x is optional — the CPU and Vulkan backends work without one.
 
 ```bash
 git clone https://github.com/your-org/HartsyInference.git
@@ -18,86 +13,73 @@ cd HartsyInference
 dotnet build
 ```
 
-### Running Tests
+## Running Tests
 
 ```bash
-# Unit tests (no GPU, no checkpoints) — this is the default lane
-dotnet test
-
-# Integration tests (requires GPU + model files)
-dotnet test --filter "Category=Integration"
-
-# All shared-component parity tests
-dotnet test --filter "FullyQualifiedName~Parity"
+dotnet test                                        # unit lane — no GPU, no checkpoints (the default)
+dotnet test --filter "Category=Integration"        # requires GPU + model files
+dotnet test --filter "FullyQualifiedName~Parity"   # all shared-component parity tests
 ```
 
-**Before adding a test, read `docs/CODE_STYLE.md` §Testing.** A test earns its place only if its
-failure would be *silent*. Do not add one that proves a model works end to end — a broken model is
-visible the moment anyone uses it. Test what breaks quietly: kernel numerics, cross-device and
+**Before adding a test, read [`docs/CODE_STYLE.md`](docs/CODE_STYLE.md) §Testing.** A test earns its place
+only if its failure would be *silent*. Do not add one that proves a model works end to end — a broken model
+is visible the moment anyone uses it. Test what breaks quietly: kernel numerics, cross-device and
 cross-backend equivalence, quantization and codec round-trips, tensor lifetime and concurrency,
-padding/tiling geometry, format and key mapping. Shared-component parity goes in
-`tests/<Project>/Parity/` and must end in `*ParityTests`.
+padding/tiling geometry, format and key mapping. Shared-component parity goes in `tests/<Project>/Parity/`
+and must end in `*ParityTests`.
 
 ## Project Structure
 
-See [File Structure](docs/Design/FILE_STRUCTURE.md) for the full layout.
+One folder per NuGet package under `src/`, with a matching test project under `tests/`. The dependency
+direction is one-way: `Core` ← modality packages ← `Engine` ← CLI/API/extension. Code should stay inside
+its package's responsibility, and CPU-only packages must never take a dependency on CUDA or Vulkan — GPU
+code lives behind `IBackend` in the backend packages.
 
-Each NuGet package lives in its own folder under `src/`. Tests are in `tests/` with a matching project name. See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for package boundaries — code should stay within its package's responsibility.
+`HartsyInference.Engine` owns "load a model + generate". The CLI, the HTTP API, and the SwarmUI extension
+are thin wrappers over it; don't re-implement load/generate orchestration in a consumer.
 
-## How to Contribute
+## Submitting Changes
 
-### Reporting Issues
+Fork, branch from `main`, make your change, keep the tests passing, and open a pull request with a clear
+description. Include your .NET version, GPU model, CUDA version, and OS on any issue report, plus a minimal
+reproduction where you can.
 
-- Use GitHub Issues
-- Include .NET version, GPU model, CUDA version, and OS
-- Include a minimal reproduction if possible
+## Coding Standards
 
-### Submitting Changes
-
-1. Fork the repository
-2. Create a feature branch from `main`
-3. Make your changes following the coding standards below
-4. Write or update tests
-5. Ensure all tests pass
-6. Submit a pull request with a clear description
-
-### Coding Standards
+[`docs/CODE_STYLE.md`](docs/CODE_STYLE.md) is the mandatory, authoritative reference — read it before your
+first change. The rules that catch people out most often:
 
 - **Pure C#** — no native shared libraries, no Python, no C++ wrappers
 - **Unmanaged memory** for tensor data — `NativeMemory.AlignedAlloc`, never managed arrays on hot paths
-- **IDisposable** on anything holding unmanaged resources
-- **IBackend abstraction** — model code never calls CPU or CUDA kernels directly
-- **File-scoped namespaces**, `sealed` classes by default, `readonly` where possible
+- **`IDisposable`** on anything holding unmanaged resources
+- **`IBackend` abstraction** — model code never calls CPU, CUDA, or Vulkan kernels directly
+- **File-scoped namespaces**, `sealed` by default, `readonly` where possible
 - **XML doc comments** on all public APIs
-- **No warnings** — `TreatWarningsAsErrors` is enabled
+- **No warnings** — `TreatWarningsAsErrors` is on
 
-See [Builder Agent](docs/Agents/BUILDER.md) for the full coding standards reference.
+Public signatures are effectively append-only: the SwarmUI backend extension pins a *published* engine
+version, so a renamed or changed public signature stays invisible until it is republished and re-pinned.
+Add an overload instead.
 
-### Kernel Contributions
+### Kernels
 
-SIMD CPU kernels and PTX GPU kernels have additional requirements:
+Every kernel needs a scalar fallback, FP32 accumulation even for FP16 inputs, and validation against a
+reference implementation before it ships. AVX2 is the baseline SIMD target and AVX-512 is optional; PTX
+targets `sm_80` minimum. `.cu` and `.comp.glsl` sources are the source of truth — the committed `.ptx` and
+`.spv` files are build artifacts, never hand-edited.
 
-- Every kernel must have a scalar fallback
-- AVX2 is the baseline SIMD target; AVX-512 is optional
-- PTX targets `sm_80` minimum (Ampere+)
-- Every kernel must be validated against a reference implementation
+See [`docs/Agents/KERNEL.md`](docs/Agents/KERNEL.md) for the full kernel reference, including the launch
+pattern, the toolchain gotchas, and the validation tolerances.
 
-See [Kernel Agent](docs/Agents/KERNEL.md) for the full kernel standards reference.
+## Architecture and Background
 
-### Testing Requirements
-
-- Every public API method needs at least one test
-- Every kernel needs a correctness test against reference values
-- Pipeline changes need integration tests with fixed seeds
-- See [Validation Strategy](docs/Design/VALIDATION_STRATEGY.md) for reference implementations and tolerances
-
-## Architecture Decisions
-
-Before proposing architectural changes, read:
-
-- [Core Design](docs/Design/CORE_DESIGN.md) — design pillars and key decisions
-- [Implementation Details](docs/Design/IMPLEMENTATION_DETAILS.md) — why things are built the way they are
-- [Build Order](docs/Design/BUILD_ORDER.md) — phase dependencies
+- [`docs/README.md`](docs/README.md) — the docs map: what each folder is for, and the rule for adding to it
+- [`docs/Agents/AGENTS.md`](docs/Agents/AGENTS.md) — shared design rules and core engine patterns (the
+  architecture single source of truth)
+- [`docs/Checklists/TROUBLESHOOTING.md`](docs/Checklists/TROUBLESHOOTING.md) — bring-up debugging reference;
+  read it first when a model is wrong, crashes, or is slow
+- [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) — cross-cutting open work
+- [`docs/Research/`](docs/Research/) — per-model and per-technique research notes
 
 ## License
 

@@ -2,7 +2,7 @@
 
 One canonical Markdown table per model type, each comparing HartsyInference against the relevant
 reference engine on the same GPU, same request. These files replace the multiple diverging copies of the
-same numbers that used to live scattered across `README.md`, `docs/PERFORMANCE.md`, per-modality
+same numbers that used to live scattered across `README.md`, `PERFORMANCE.md` (retired), per-modality
 `docs/Checklists/MODEL_STATUS_*.md` files, and ~40 dated one-off write-ups in `benchmarks/results/`. If
 you're looking for a performance number, start here — not in the README, not in `PERFORMANCE.md`.
 
@@ -24,7 +24,7 @@ pass — no data exists for them yet; don't cite them as "supported hardware" un
 it up.
 
 **Methodology, the standard performance profile (which optimizations are on by default), and how to
-reproduce a number** all live in [`../../docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) — these
+reproduce a number** all live in [`README.md`](README.md) — these
 scoreboard files hold the results, that file holds the how/why.
 
 **Model list.** For "what models exist and what's their build/verification status" (as opposed to "how

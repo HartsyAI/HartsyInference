@@ -48,7 +48,7 @@ These apply to ALL agents. Specialized files only add task-specific rules.
 
 ## Core Engine Patterns (Single Source of Truth)
 
-These are the engine's own established patterns for tensors, CUDA launches, config, and disposal. They originated from a study of the dotLLM codebase (`docs/Research/DOTLLM_ARCHITECTURE.md`, kept as historical background), but they are now native to HartsyInference and are not a dependency on any external framework. LLM text generation itself is native too, in the `HartsyInference.LLM` package (config-driven generic decoder transformer: Qwen2/Qwen3/Llama/Mistral, GGUF quantized inference, device-resident KV cache, sampler chain, chat templates); route LLM work there, not at dotLLM. See `docs/CODE_STYLE.md` for full P/Invoke and disposal patterns.
+These are the engine's own established patterns for tensors, CUDA launches, config, and disposal. They are native to HartsyInference and are not a dependency on any external framework. LLM text generation itself is native too, in the `HartsyInference.LLM` package (config-driven generic decoder transformer: Qwen2/Qwen3/Llama/Mistral, GGUF quantized inference, device-resident KV cache, sampler chain, chat templates). See `docs/CODE_STYLE.md` for full P/Invoke and disposal patterns.
 
 ### Tensor Type System
 
@@ -101,7 +101,8 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 - Model code must NEVER access `weight.DataPointer` directly — always route through `IBackend` ops
 - At pipeline stage transitions (e.g., UNet → VAE), call `backend.Sync()` + `backend.FreeWeights(model.EnumerateWeights())` to reclaim VRAM
 - **Pair `PreloadWeights` with `FreeWeights` symmetrically.** If you `FreeWeights` a component at the end of a phase, also `PreloadWeights` it before the first heavy use — otherwise the first kernel pays a per-op cache-miss H2D transfer that defeats the bulk-upload optimization. Every diffusion pipeline follows this pattern; see `FluxPipeline` or `Sd3Pipeline` for the canonical placement (preload before text-encode, then again before the denoise loop). No-op on backends without a weight cache (CPU, Vulkan).
-- See `docs/Research/CUDA_PERFORMANCE.md` for the full optimization roadmap
+- Open kernel/perf work is `docs/Checklists/ROADMAP.md` §2; `docs/Research/CUDA_PERFORMANCE.md` and
+  `CUDA_PERFORMANCE_PLAN.md` are the historical optimization record and technique reference
 
 ### Diffusion Pipeline Conventions
 - All pipelines inherit `HartsyInference.Diffusion.Pipelines.DiffusionPipelineBase` — provides `Backend` property, idempotent `Dispose` + `ThrowIfDisposed`, `DisposeCore()` hook for subclass cleanup.

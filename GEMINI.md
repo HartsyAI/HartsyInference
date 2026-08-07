@@ -1,49 +1,22 @@
 # HartsyInference — Gemini Agent Instructions
 
-## Project Overview
+HartsyInference is a pure C#/.NET AI inference engine (net8.0 + net10.0) covering LLM text generation,
+image generation, speech-to-text, text-to-speech, voice conversion, music, vision, object detection, video
+generation, 3D mesh, and interactive world models.
 
-HartsyInference is a pure C#/.NET AI inference engine (targets net8.0 and net10.0) covering LLM text generation, image generation (diffusion), speech-to-text, text-to-speech, voice conversion, music, vision, object detection, video generation, 3D mesh, and interactive world models. LLM inference is native in the `HartsyInference.LLM` package (dotLLM is no longer a dependency). The recommended way to run the engine is the SwarmUI backend extension (https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend); it is also consumed as NuGet libraries and via the sample CLIs.
+**The instructions for every coding agent are the same, and they live in one place. Read
+[`docs/Agents/AGENTS.md`](docs/Agents/AGENTS.md) first** — it carries the shared design rules, the core
+engine patterns, and a routing table pointing at the specialized agent file for your task
+(add a model, build a feature, audit, kernels, research, cleanup).
 
-**Before doing anything, read these files to understand the project:**
+Then read [`docs/CODE_STYLE.md`](docs/CODE_STYLE.md), which is mandatory and non-negotiable, and
+[`docs/README.md`](docs/README.md) for what each docs folder holds.
 
-1. `docs/Design/CORE_DESIGN.md` — architecture overview, design pillars, key decisions
-2. `docs/Design/BUILD_ORDER.md` — phase dependencies and sequencing
-3. `docs/Design/FILE_STRUCTURE.md` — where everything lives
-4. `docs/Design/NUGET_PACKAGE_DESIGN.md` — package boundaries and dependencies
+For current state: per-model status is indexed in
+[`docs/Checklists/MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md), open cross-cutting work is in
+[`ROADMAP.md`](docs/Checklists/ROADMAP.md), and
+[`TROUBLESHOOTING.md`](docs/Checklists/TROUBLESHOOTING.md) is the bring-up debugging reference — read it
+before debugging a model that is wrong, crashes, or is slow.
 
-## How to Work on This Project
-
-Identify the task you've been given, then read the matching agent instruction file from `docs/Agents/`:
-
-| Task | Agent File |
-|---|---|
-| Research a topic | `docs/Agents/RESEARCH.md` |
-| Plan an implementation | `docs/Agents/ARCHITECT.md` |
-| Write code | `docs/Agents/BUILDER.md` |
-| Write SIMD/PTX kernels | `docs/Agents/KERNEL.md` |
-| Write or run tests | `docs/Agents/TESTER.md` |
-| Review code | `docs/Agents/REVIEWER.md` |
-| Update documentation | `docs/Agents/DOCS.md` |
-| Track progress | `docs/Agents/CHECKLIST.md` |
-| Benchmark performance | `docs/Agents/BENCHMARK.md` |
-| Convert model formats | `docs/Agents/CONVERT.md` |
-| Package for NuGet | `docs/Agents/DEPLOY.md` |
-| Debug failures | `docs/Agents/DEBUG.md` |
-| Refactor/optimize | `docs/Agents/REFACTOR.md` |
-| Build API endpoints | `docs/Agents/API.md` |
-| Cross-package wiring | `docs/Agents/INTEGRATION.md` |
-
-Follow the agent instructions. They contain what to read, the workflow, and quality standards.
-
-## Key Rules
-
-- **Pure C#** — no native shared libraries, no Python, no C++ wrappers
-- **CUDA via PTX** — embedded as resources, JIT-compiled via CUDA Driver API P/Invoke
-- **Eager execution** — no computation graphs
-- **Unmanaged memory** — `NativeMemory.AlignedAlloc` or mmap for tensors, never managed arrays on hot paths
-- **Validate against references** — every component must match Python/C++ reference within tolerances
-- **Respect package boundaries** — see `docs/Design/NUGET_PACKAGE_DESIGN.md`
-
-## Current Phase
-
-Check `docs/Checklists/` to determine which phase is active. Start with the earliest phase that has unchecked items.
+[`CLAUDE.md`](CLAUDE.md) contains the same orientation in Claude Code's format; the two files are
+interchangeable.

@@ -1,5 +1,9 @@
 # Stable Diffusion Architectures — Research Notes
 
+> **Stub.** The narrative walkthrough and restated pseudocode were removed on 2026-08-06 — this model
+> is built and verified, so the C# is the source of truth for *how it works*. What remains is what the
+> code cannot tell you: upstream provenance, reference constants, and bring-up traps. History is in git.
+
 ## SD 1.5
 
 ### Summary
@@ -50,124 +54,6 @@ From the diffusers config.json ([source](https://huggingface.co/runwayml/stable-
 
 **NOTE on attention_head_dim**: In diffusers, `attention_head_dim: 8` caused naming confusion ([Issue #2011](https://github.com/huggingface/diffusers/issues/2011)). The CompVis source is authoritative: **8 attention heads** at every level, with `dim_head = channels / num_heads`.
 
-### Channel Dimensions
-
-| Level | Channels | Channel Mult | Spatial (512x512 input) |
-|-------|----------|-------------|------------------------|
-| 0 | 320 | 1 | 64 x 64 |
-| 1 | 640 | 2 | 32 x 32 |
-| 2 | 1280 | 4 | 16 x 16 |
-| 3 | 1280 | 4 | 8 x 8 |
-
-### Exact UNet Block Structure
-
-#### Input Convolution
-- Conv2d(4, 320, kernel_size=3, stride=1, padding=1) converts latent channels to model channels
-
-#### Down Path (4 down-blocks)
-
-**Down Block 0: CrossAttnDownBlock2D (320 ch, 64x64)**
-- ResNetBlock2D(320 to 320) + Transformer2DModel(320, heads=8, dim_head=40, context=768)
-- ResNetBlock2D(320 to 320) + Transformer2DModel(320, heads=8, dim_head=40, context=768)
-- Downsample2D(320, Conv2d stride=2)
-- Skip connections: 3 tensors at (B,320,64,64), (B,320,64,64), (B,320,32,32)
-
-**Down Block 1: CrossAttnDownBlock2D (640 ch, 32x32)**
-- ResNetBlock2D(320 to 640) + Transformer2DModel(640, heads=8, dim_head=80, context=768)
-- ResNetBlock2D(640 to 640) + Transformer2DModel(640, heads=8, dim_head=80, context=768)
-- Downsample2D(640, Conv2d stride=2)
-- Skip connections: 3 tensors at (B,640,32,32), (B,640,32,32), (B,640,16,16)
-
-**Down Block 2: CrossAttnDownBlock2D (1280 ch, 16x16)**
-- ResNetBlock2D(640 to 1280) + Transformer2DModel(1280, heads=8, dim_head=160, context=768)
-- ResNetBlock2D(1280 to 1280) + Transformer2DModel(1280, heads=8, dim_head=160, context=768)
-- Downsample2D(1280, Conv2d stride=2)
-- Skip connections: 3 tensors at (B,1280,16,16), (B,1280,16,16), (B,1280,8,8)
-
-**Down Block 3: DownBlock2D (1280 ch, 8x8) NO ATTENTION**
-- ResNetBlock2D(1280 to 1280)
-- ResNetBlock2D(1280 to 1280)
-- No downsample
-- Skip connections: 2 tensors at (B,1280,8,8), (B,1280,8,8)
-
-**Total skip connections: 3+3+3+2 = 11** (plus 1 from conv_in = 12 total)
-
-#### Middle Block: UNetMidBlock2DCrossAttn (1280 ch, 8x8)
-- ResNetBlock2D(1280 to 1280)
-- Transformer2DModel(1280, heads=8, dim_head=160, context=768)
-- ResNetBlock2D(1280 to 1280)
-
-#### Up Path (4 up-blocks)
-
-Each up block pops layers_per_block + 1 skip connections. Skip tensors are concatenated along channel dim before each ResNet block.
-
-**Up Block 0: UpBlock2D (1280 ch, 8x8) NO ATTENTION**
-- ResNetBlock2D(2560 to 1280), ResNetBlock2D(2560 to 1280), ResNetBlock2D(2560 to 1280)
-- Upsample2D(1280, nearest interp + Conv2d 3x3)
-
-**Up Block 1: CrossAttnUpBlock2D (1280 ch, 16x16)**
-- ResNetBlock2D(2560 to 1280) + Transformer2DModel(1280, 8h, 160d, 768ctx)
-- ResNetBlock2D(2560 to 1280) + Transformer2DModel(...)
-- ResNetBlock2D(1920 to 1280) + Transformer2DModel(...)
-- Upsample2D(1280)
-
-**Up Block 2: CrossAttnUpBlock2D (640 ch, 32x32)**
-- ResNetBlock2D(1920 to 640) + Transformer2DModel(640, 8h, 80d, 768ctx)
-- ResNetBlock2D(1280 to 640) + Transformer2DModel(...)
-- ResNetBlock2D(960 to 640) + Transformer2DModel(...)
-- Upsample2D(640)
-
-**Up Block 3: CrossAttnUpBlock2D (320 ch, 64x64)**
-- ResNetBlock2D(960 to 320) + Transformer2DModel(320, 8h, 40d, 768ctx)
-- ResNetBlock2D(640 to 320) + Transformer2DModel(...)
-- ResNetBlock2D(640 to 320) + Transformer2DModel(...)
-- No upsample
-
-#### Final Output
-- GroupNorm(32, 320, eps=1e-5) then SiLU then Conv2d(320, 4, 3, 1, 1)
-- Output: (B, 4, 64, 64)
-
-### Attention Configuration
-
-| Level | Channels | Heads | Dim/Head | Cross-Attention |
-|-------|----------|-------|----------|----------------|
-| 0 | 320 | 8 | 40 | YES |
-| 1 | 640 | 8 | 80 | YES |
-| 2 | 1280 | 8 | 160 | YES |
-| 3 | 1280 | - | - | NO |
-| Mid | 1280 | 8 | 160 | YES |
-
-### BasicTransformerBlock (inside Transformer2DModel)
-
-Each Transformer2DModel contains 1 BasicTransformerBlock (transformer_depth=1) with:
-
-1. LayerNorm then Self-Attention (Q,K,V from image features, bias=False for QKV projections)
-2. LayerNorm then Cross-Attention (Q from image, K/V from CLIP text encoder 768-dim)
-3. LayerNorm then FeedForward (GeGLU: channels to 4x channels with gating)
-
-All with residual connections. The Transformer2DModel wraps this with GroupNorm + proj_in (Conv2d 1x1 or Linear) + [block] + proj_out + residual.
-
-### ResNetBlock2D Structure
-
-```
-norm1(GroupNorm 32) -> SiLU -> conv1(3x3)
--> temb_proj(Linear 1280->out_ch) broadcast-add
--> norm2(GroupNorm 32) -> SiLU -> dropout(0.0) -> conv2(3x3)
--> + skip(input)
-```
-
-Skip = identity if channels match, else Conv2d(1x1).
-
-### Timestep Embedding
-
-- Sinusoidal: half_dim=160, frequencies=exp(-log(10000)*arange(160)/160), cos-first (flip_sin_to_cos=true), shape (B, 320)
-- MLP: Linear(320,1280) then SiLU then Linear(1280,1280), output (B, 1280)
-- Each ResNet block projects via Linear(1280, out_channels) and broadcast-adds
-
-### v-prediction vs eps-prediction
-
-SD 1.5 uses **epsilon-prediction** by default. Architecture is identical for both; difference is in scheduler math only. prediction_type is in the scheduler config, not the UNet config.
-
 ### Key Numbers / Constants
 
 | Parameter | Value |
@@ -206,16 +92,6 @@ Major weight tensor shapes at 1280ch (largest):
 - conv_shortcut in up-path: (1280, 2560, 1, 1)
 
 Block counts: 22 ResNetBlock2D total (8 down + 2 mid + 12 up), 16 Transformer2DModel (6 down + 1 mid + 9 up), 3 Downsample, 3 Upsample.
-
-### Algorithm Steps
-
-1. conv_in(latent) produces (B, 320, 64, 64), store as skip[0]
-2. Sinusoidal(t) then MLP produces (B, 1280) timestep embedding
-3. CLIP encode produces (B, 77, 768) text conditioning
-4. Down path: ResNet+Attn per block, store skips, downsample
-5. Mid block: ResNet then CrossAttn then ResNet
-6. Up path: pop skips, concat, ResNet+Attn, upsample
-7. GroupNorm then SiLU then conv_out produces (B, 4, 64, 64)
 
 ### Differences Between Implementations
 
@@ -256,163 +132,6 @@ Stable Diffusion XL (SDXL) is a latent diffusion model that significantly extend
 - `use_linear_projection: true` (linear layers instead of 1x1 conv for attention projections)
 - ADM micro-conditioning via timestep embedding path (not present in SD1.5)
 - VAE scaling factor 0.13025 (vs 0.18215 for SD1.5)
-
-### UNet Architecture -- Base Model
-
-| Level | Resolution (1024x1024 input) | Channels | Transformer Blocks | Cross-Attention | Down Block Type |
-|-------|------------------------------|----------|--------------------|-----------------|-----------------|
-| 0     | 128x128 (latent)             | 320      | 0                  | No              | DownBlock2D     |
-| 1     | 64x64                        | 640      | 2                  | Yes             | CrossAttnDownBlock2D |
-| 2     | 32x32                        | 1280     | 10                 | Yes             | CrossAttnDownBlock2D |
-| Mid   | 32x32                        | 1280     | 10                 | Yes             | UNetMidBlock2DCrossAttn |
-
-The up path mirrors the down path symmetrically:
-
-| Level | Channels | Transformer Blocks | Up Block Type |
-|-------|----------|--------------------|---------------|
-| 0     | 1280     | 10                 | CrossAttnUpBlock2D |
-| 1     | 640      | 2                  | CrossAttnUpBlock2D |
-| 2     | 320      | 0                  | UpBlock2D     |
-
-Each level has `layers_per_block = 2`. The heterogeneous transformer depth [1, 2, 10] concentrates attention capacity at the lowest spatial resolution, where semantic understanding matters most.
-
-**Attention head configuration:**
-- `attention_head_dim` (diffusers naming) = [5, 10, 20] -- these are actually the **number of heads** per level
-- Each head has dimension 64 uniformly: 320/5=64, 640/10=64, 1280/20=64
-- Stability AI config: `num_head_channels: 64`
-- Cross-attention uses the same head structure, with keys/values projected from the 2048-dim text context
-
-**Other UNet parameters:**
-- in_channels / out_channels: 4
-- sample_size: 128 (for 1024x1024 images with 8x VAE downsampling)
-- act_fn: silu, norm_num_groups: 32, norm_eps: 1e-5
-- flip_sin_to_cos: true, freq_shift: 0
-
-### Dual CLIP Text Encoders
-
-SDXL uses two text encoders processed in parallel:
-
-| Encoder | Model | Hidden Size | Output Used | Max Tokens |
-|---------|-------|-------------|-------------|------------|
-| text_encoder_1 | OpenAI CLIP ViT-L/14 | 768 | Penultimate hidden state (clip_skip=2) | 77 |
-| text_encoder_2 | OpenCLIP ViT-bigG/14 | 1280 | Penultimate hidden state + pooled output | 77 |
-
-**Text conditioning construction:**
-
-1. Both encoders process the same tokenized prompt (77 tokens each, padded/truncated independently)
-2. The penultimate hidden states are extracted (layer -2, before the final layer norm)
-3. The outputs are **concatenated along the channel/feature dimension**: [batch, 77, 768] + [batch, 77, 1280] = **[batch, 77, 2048]**
-4. This 2048-dim context is used as the cross-attention key/value input (`cross_attention_dim: 2048`)
-5. The **pooled output** from text_encoder_2 (CLIP-G) is extracted at the EOS token position: **[batch, 1280]**
-6. The pooled output is used as part of the ADM conditioning vector
-
-**Parameter counts:**
-- CLIP-L/14: ~123.65M (~250 MB fp16)
-- OpenCLIP ViT-bigG/14: ~694.7M (~680 MB fp16)
-
-### Micro-Conditioning (ADM Vector)
-
-SDXL introduces "micro-conditioning" that encodes image metadata as additional conditioning signals injected into the UNet via the timestep embedding path (`addition_embed_type: "text_time"`).
-
-**Six scalar conditioning parameters (base model):**
-
-| Parameter | Description | Typical Value |
-|-----------|-------------|---------------|
-| `orig_height` | Original training image height | 1024 |
-| `orig_width` | Original training image width | 1024 |
-| `crop_top` | Top crop coordinate (pixels) | 0 |
-| `crop_left` | Left crop coordinate (pixels) | 0 |
-| `target_height` | Target generation height | 1024 |
-| `target_width` | Target generation width | 1024 |
-
-**Embedding pipeline:**
-
-1. Each of the 6 scalar values is independently embedded using sinusoidal/Fourier positional encoding (same function as timestep embedding) to `addition_time_embed_dim = 256` dimensions
-2. The 6 embeddings are concatenated: 6 x 256 = **1536 dimensions**
-3. The pooled text embedding (1280-dim from CLIP-G) is concatenated: 1280 + 1536 = **2816 dimensions**
-4. This 2816-dim vector is the `projection_class_embeddings_input_dim`
-5. A linear projection maps 2816 -> 1280 (the time embedding dimension = 4 * model_channels = 4 * 320 = 1280)
-6. The result is **added to the timestep embedding** and injected into the UNet via FiLM conditioning
-
-Stability AI config: `adm_in_channels: 2816`
-
-**Sinusoidal size embedding (per scalar):**
-```
-function embed_scalar(value, dim=256):
-  half_dim = dim / 2  # 128
-  freqs = exp(-ln(10000) * [0, 1, ..., half_dim-1] / half_dim)
-  args = value * freqs
-  return concat(cos(args), sin(args))  # [256]
-```
-
-### Timestep Embedding (SDXL Differences)
-
-Same pattern as SD1.5 (sinusoidal 320-dim -> MLP -> 1280-dim) but with the ADM conditioning vector **added** to the 1280-dim result before injection into ResNet blocks.
-
-### Refiner Model Architecture
-
-The SDXL refiner is a second, separate UNet designed to operate on partially-denoised latents from the base model ("ensemble of expert denoisers").
-
-**Key architectural differences from base:**
-
-| Parameter | Base | Refiner |
-|-----------|------|---------|
-| model_channels | 320 | 384 |
-| channel_mult | [1, 2, 4] | [1, 2, 4, 4] |
-| block_out_channels | [320, 640, 1280] | [384, 768, 1536, 1536] |
-| transformer_depth | [1, 2, 10] | 4 (uniform) |
-| context_dim (cross_attention) | 2048 | 1280 |
-| text_encoders | CLIP-L + CLIP-G | CLIP-G only |
-| adm_in_channels | 2816 | 2560 |
-| attention_head_dim (num_heads) | [5, 10, 20] | [6, 12, 24, 24] |
-| head_dim | 64 | 64 |
-| down_block_types | DB, CADB, CADB | DB, CADB, CADB, DB |
-| up_block_types | CAUB, CAUB, UB | UB, CAUB, CAUB, UB |
-
-The refiner has **4 downsampling levels** (like SD1.5) instead of the base's 3, but uses larger channel counts. Cross-attention occurs only at levels 1 and 2.
-
-**Refiner ADM conditioning (2560-dim):**
-- Pooled text embedding from CLIP-G: 1280
-- orig_height, orig_width: 2 x 256 = 512
-- crop_top, crop_left: 2 x 256 = 512
-- aesthetic_score: 1 x 256 = 256
-- Total: 1280 + 512 + 512 + 256 = **2560**
-
-The refiner replaces target_size conditioning with a single **aesthetic_score** scalar. Default positive aesthetic score: 6.0. Default negative aesthetic score: 2.5 (some implementations use 7.5/2.0).
-
-### Base-to-Refiner Handoff
-
-The refiner is specialized on the first 200 discrete noise scales (out of 1000 total):
-
-1. The base model denoises from timestep 999 down to some cutoff (e.g., timestep 200)
-2. The refiner takes the partially-denoised latent and continues denoising from that point to timestep 0
-3. In practice, controlled by `high_noise_frac` (default ~0.8): base handles 80% of denoising, refiner handles last 20%
-4. The refiner operates via SDEdit (img2img) on the base model's output latents
-5. Both models operate in the **same latent space** (same VAE)
-
-### VAE (AutoencoderKL)
-
-SDXL uses the same VAE architecture as SD1.5 but with different training and scaling factor.
-
-| Parameter | SD 1.5 | SDXL |
-|-----------|--------|------|
-| scaling_factor | 0.18215 | **0.13025** |
-| latent_channels | 4 | 4 |
-| in/out channels | 3 (RGB) | 3 (RGB) |
-| block_out_channels | [128, 256, 512, 512] | [128, 256, 512, 512] |
-| layers_per_block | 2 | 2 |
-| spatial_downscale_factor | 8 | 8 |
-| sample_size | 512 | 1024 |
-
-The SDXL VAE was retrained with a larger batch size (256 vs 9) and EMA weight tracking, resulting in better reconstruction quality.
-
-```
-encode: pixel_image [B, 3, H, W] -> latent [B, 4, H/8, W/8]
-  latent = encoder(image) * 0.13025
-
-decode: latent [B, 4, H/8, W/8] -> pixel_image [B, 3, H, W]
-  image = decoder(latent / 0.13025)
-```
 
 ### Key Numbers / Constants
 
@@ -510,33 +229,6 @@ Up path (concatenates matching skip connection):
 Output: GroupNorm -> SiLU -> Conv2D(320, 4) -> [B, 4, 128, 128]
 ```
 
-### Algorithm Steps (Full SDXL Pipeline, Base + Refiner)
-
-```
-1. Tokenize prompt with both CLIP-L and CLIP-G tokenizers (max 77 tokens each)
-2. Encode tokens through both text encoders:
-   a. CLIP-L: extract penultimate hidden state [B, 77, 768]
-   b. CLIP-G: extract penultimate hidden state [B, 77, 1280] + pooled [B, 1280]
-3. Concatenate hidden states: [B, 77, 768] ++ [B, 77, 1280] = [B, 77, 2048]
-4. Build ADM vector:
-   a. Embed each of 6 size scalars with sinusoidal encoding (256-dim each)
-   b. Concatenate: pooled_text(1280) ++ size_embeds(1536) = [B, 2816]
-5. Initialize random latent noise: [B, 4, 128, 128] (for 1024x1024)
-6. For each timestep t from T_max down to T_switch (e.g., 999 to 200):
-   a. Compute timestep embedding + ADM conditioning
-   b. Run base UNet: noise_pred = UNet(latent, t, context_2048, adm_2816)
-   c. Apply CFG: noise_pred = uncond + scale * (cond - uncond)
-   d. Scheduler step: latent = scheduler.step(noise_pred, t, latent)
-7. (Optional) Switch to refiner:
-   a. Re-encode prompt with CLIP-G only -> context [B, 77, 1280], pooled [B, 1280]
-   b. Build refiner ADM: pooled(1280) ++ size_embeds(1024) ++ aesthetic(256) = [B, 2560]
-   c. For each timestep t from T_switch down to 0:
-      - Run refiner UNet: noise_pred = RefinerUNet(latent, t, context_1280, adm_2560)
-      - Apply CFG and scheduler step
-8. Decode final latent: image = VAE.decode(latent / 0.13025)
-9. Clip to [0, 1] and convert to uint8
-```
-
 ### Differences Between Implementations
 
 | Aspect | Stability AI (sgm) | HuggingFace diffusers | ComfyUI |
@@ -563,13 +255,6 @@ Output: GroupNorm -> SiLU -> Conv2D(320, 4) -> [B, 4, 128, 128]
 8. **Heterogeneous transformer depth**: The [1, 2, 10] distribution means most compute is at 32x32 resolution. This has implications for tiling/chunking strategies and memory planning.
 9. **Linear projection**: SDXL uses `use_linear_projection: true`, meaning attention Q/K/V projections use nn.Linear instead of 1x1 Conv2d. Functionally identical but may affect weight loading from different formats.
 10. **GEGLU activation**: The transformer feedforward blocks use GEGLU. If the feedforward hidden dim is 4*1280=5120 for level 2, the actual linear layer outputs 2*5120=10240 which is split into two halves for GEGLU.
-
-### Open Questions
-
-- [ ] SDXL LoRA weight naming conventions vs SD1.5 -- differs due to different block structure and naming; needs separate research
-- [ ] Exact behavior of `clip_skip` when using dual encoders -- both encoders use penultimate layer by default; does clip_skip apply to both?
-- [ ] Whether the refiner's 4-level architecture with uniform transformer_depth=4 was chosen for quality or compatibility reasons
-- [ ] Performance impact of removing the 4th downsampling level in the base model
 
 ### Reference Implementations
 

@@ -1,32 +1,17 @@
 # Krea 2 — Research & Implementation Plan
 
-> Status: **research complete, implementation not started.** This document is the architecture +
-> build plan for Krea 2. Verified against the released checkpoints (`krea/Krea-2-Turbo`,
+> Status: **built and verified.** Krea 2 Turbo is verified end-to-end (see
+> `docs/Checklists/MODEL_STATUS_IMAGE.md`). This document is the architecture reference. Verified against the released checkpoints (`krea/Krea-2-Turbo`,
 > `CalamitousFelicitousness/Krea-2-Base-Diffusers`) and the canonical diffusers source
 > (`Krea2Transformer2DModel` / `Krea2Pipeline` in `huggingface/diffusers`, plus the Krea 2 technical report).
 
-## 1. Overview
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
 
-Krea 2 ("K2", released open-weights under the Krea 2 Community License) is a **12.9B (officially "12B")
-single-stream MMDiT flow-matching text-to-image** model. Two checkpoints share one architecture:
-
-| Variant | `is_distilled` | Steps | Guidance |
-|---|---|---|---|
-| **Base** (midtrain) | false | 28 | CFG 4.5 (standard dual-pass) |
-| **Turbo / TDM** (distilled) | true | 8 (min 4) | guidance off (CFG 0–1, single pass) |
-
-A Turbo **LoRA** is also published (converts Base → few-step). Supported resolution 128–4096.
-
-Components (`model_index.json`):
-* transformer — `Krea2Transformer2DModel` (diffusers)
-* text encoder — **Qwen3-VL-4B** (`Qwen3VLModel`, hidden 2560), tokenizer `Qwen2Tokenizer`
-* VAE — **Qwen-Image VAE** (`AutoencoderKLQwenImage`, 16 latent channels, f8, per-channel `latents_mean/std`)
-* scheduler — `FlowMatchEulerDiscreteScheduler` with resolution-dependent exponential shift
-
-SwarmUI compat note: SwarmUI auto-downloads Qwen3-VL-4B + the Qwen-Image VAE; the user picks the diffusion
-model (fp8 / nv4 / bf16). VAE family = `VaeQwenImage`. Built-in soft content filtering (prompt-level).
-
-## 2. Transformer (`Krea2Transformer2DModel`)
+## 1. Transformer (`Krea2Transformer2DModel`)
 
 Diffusers config (defaults match the released Base checkpoint; the raw checkpoint config uses the short
 names in parentheses):
@@ -97,7 +82,7 @@ velocity = unpatchify(out)                        # [B, 16, H, W]
 
 `final_layer` uses `temb` (not `temb_mod`). Flow-matching **v-prediction**, t∈[0,1] (1 = noise, 0 = data).
 
-## 3. Text encoder (Qwen3-VL-4B)
+## 2. Text encoder (Qwen3-VL-4B)
 
 Qwen3-VL-4B **language tower** (hidden 2560, 36 layers; vision unused — Krea 2 is T2I). Tokenizer `Qwen2Tokenizer`.
 
@@ -111,13 +96,13 @@ Encoder runs with `output_hidden_states=True`; **stack** the 12 selected layers
 `(2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35)` (HF `hidden_states` indices, 0 = embeddings) along a new layer
 axis → `[B, txt_seq, 12, 2560]`. Encoder M-RoPE positions = cumulative valid-token count (T/H/W equal for text).
 
-## 4. VAE — Qwen-Image (`AutoencoderKLQwenImage`)
+## 3. VAE — Qwen-Image (`AutoencoderKLQwenImage`)
 
 16-channel f8 autoencoder. Decode un-normalizes per channel: `latent = latent / latents_std + latents_mean`
 (`z_dim = 16`, per-channel `latents_mean`/`latents_std` from the VAE config). Identical to the VAE Qwen-Image
 and Anima already use.
 
-## 5. Scheduler
+## 4. Scheduler
 
 `FlowMatchEulerDiscreteScheduler`, **resolution-aware exponential shift** (Flux `calculate_shift`):
 `mu = m·image_seq_len + b` over the line `(base_image_seq_len 256 → base_shift 0.5) … (max_image_seq_len 6400 → max_shift 1.15)`,
@@ -125,13 +110,13 @@ and Anima already use.
 → the engine's existing `FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imageSeqLen, baseSeqLen:256,
 maxSeqLen:6400, baseShift:0.5f, maxShift:1.15f)`.
 
-## 6. Guidance
+## 5. Guidance
 
 * **Base**: standard CFG, dual pass (cond / uncond from negative prompt), `guidance_scale 4.5`,
   `pred = uncond + 4.5·(cond − uncond)`.
 * **Turbo/TDM**: single pass, no CFG (`guidance_scale 0`), 8 steps.
 
-## 7. Reuse map (HartsyInference)
+## 6. Reuse map (HartsyInference)
 
 | Component | Plan |
 |---|---|
@@ -148,7 +133,7 @@ maxSeqLen:6400, baseShift:0.5f, maxShift:1.15f)`.
 | Text-fusion stage (layerwise + projector + refiner) | **new** small transformer (`Krea2TextFusion`) |
 | Config, converter, pipeline, tests | **new** Krea2-specific |
 
-## 8. Build plan
+## 7. Build plan
 
 Mirror the Ideogram4 / Z-Image build pattern. Files under `src/HartsyInference.Diffusion/`:
 
@@ -181,7 +166,7 @@ Mirror the Ideogram4 / Z-Image build pattern. Files under `src/HartsyInference.D
 Estimated net-new surface: ~1 transformer + 2 block files + 1 pipeline + 1 converter + 1 config + tests, with the
 encoder / VAE / scheduler / RoPE / SwiGLU all reused. Comparable in size to the Z-Image build.
 
-## 9. Open items / to confirm at implementation time
+## 8. Open items / to confirm at implementation time
 
 * Exact released single-file key naming (Comfy fp8/nv4) vs the diffusers folder keys — the converter must handle both
   (`features`/`heads`/… short config vs diffusers `Krea2Transformer2DModel`).

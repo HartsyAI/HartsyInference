@@ -143,22 +143,55 @@ giants (Kimi-K2, DeepSeek-V3, Mixtral, Qwen3-MoE, Qwen2.5-VL-7B).
   `AudioRuntime`'s eviction strategy remains single-backend-minded (see §1 open items).
 - **Two finished features deliberately still opt-in** (plain-language, for the flip-it-later decision):
   `HARTSY_SAME_GPU_CONCURRENT=1` lets two backends sharing one physical GPU run generations at the same
-  time instead of taking turns — **update 2026-08-05: no longer just "left off": the campaign's
-  `SameGpuConcurrentRealWeightTests` is KNOWN RED near VRAM capacity (FreeActivations
-  `cuMemFreeAsync` INVALID_VALUE + Dispose double-free) and is excluded from the green gate; fix the
-  allocator race before any default flip.**
+  time instead of taking turns — **update 2026-08-06: the VRAM-capacity failure was root-caused (a
+  step-graph-capture-abort virtual-address leak, NOT a concurrency race), fixed via
+  `GpuTransferHelper.PurgeAbortedCaptureAllocs`, and `SameGpuConcurrentRealWeightTests` is back in the
+  campaign green gate. Still opt-in pending longer soak.**
   `HARTSY_KV_F16=1` halves LLM conversation-memory VRAM by storing the KV cache at half precision —
   bit-verified for short generations, can pick different (equally valid) words in very long ones.
   Flipping either default is a one-line change; nothing else in the multi-GPU work depends on them.
+- [x] **Phase 0 hardening (2026-08-06):** a 6-agent full-code audit of the multi-GPU implementation
+  confirmed the core mechanisms sound and surfaced 7 P1 defects, all fixed + verified same day:
+  same-device `CfgParallelDevice` now nulls out loudly (two branch threads must never share a backend);
+  sharded-LLM reload no longer leaks per-stage CUDA contexts; staged GPT-2/StarCoder/BLOOM embedding
+  preamble now first-stage-only (pinned by `LlmPlacementTests`); model-switch eviction sweeps placement
+  backends (was stacking full DiT replicas on GPU B per switch); CosyVoice sets `HighPrecisionGemm` on
+  every shard stage; `DeviceGate` now gates EVERY placement ordinal (ascending-order multi-acquire);
+  Flux CFG-parallel cached negatives host-materialize on the TE-cache-hit path too. Test gates
+  hardened: Qwen-Image regained GATED tiers (same-device split SSIM 1.0000 > 0.99; matched-fp8-regime
+  cross-device 0.9929 > 0.95); LLM/VLM/CosyVoice VRAM-pooling floors raised from context-noise level to
+  model-share-derived bounds. See `benchmarks/results/2026-08-05_multigpu_speeds.md` (2026-08-06
+  sections).
+  **Documented-deferred from the same audit** (recorded here so nobody re-finds them): GameCraft loader
+  lacks the BF16-cast/`DisableCacheWeightCasts` handling `HunyuanVideoRecipe` documents as load-bearing
+  (unverifiable until the ~51 GB checkpoint is pulled); `CrossAttentionBlock` two-slot K/V cache has no
+  pinning/teardown (safe under current per-pipeline construction; becomes real work if components are
+  ever shared or mid-loop `FreeActivations` added); mllama staged decode re-peer-copies vision features
+  every token (~100 MB/token cross-stage — a persistent per-stage cache is a measured follow-up);
+  CosyVoice's tied Qwen embed table (~544 MB) uploads to the last shard stage for a head that never
+  runs (needs a "headless driver" flag); `LlmSplitPlan` never charges lm_head bytes to the last stage
+  (`lastStageExtraBytes` exists but isn't passed); ~800 lines of near-duplicate `*ShardingEngineTests`
+  could parameterize.
 - [ ] **M2 — tensor parallel:** split individual GEMMs (QKV, MLP, lm_head) across devices; all-reduce on
   the seam. Plan-level only (`NcclApi` design in `MULTI_GPU_PARALLELISM.md`); needs NVLink hardware this
   box doesn't have to pay off.
 - [ ] **M3 — expert parallel (MoE):** route experts to devices; ties to on-device MoE routing (§4).
-- [ ] **M4 — DP-attention / sequence parallel:** for long context and video (Ulysses-style seq-parallel,
-  see §2 D3).
+- [~] **M4 — sequence/context parallel (Phase 2, 2026-08-06): Wan v1 LANDED.**
+  `PlacementConfig.ContextParallelDevices` → frame-aligned proportional token split, per-block
+  self-attention K/V exchange (2-rank two-phase barrier, host-assembled), weights replicated. Mechanism
+  byte-exact (synthetic `ContextParallelWanTests`); real-weight cross-device SSIM 0.9616 gated > 0.90
+  (cross-ARCH drift ceiling on this 4090+3060 pair measured 0.7774 via `WanCrossGpuRegimeDiagnosticTests`
+  — regime flags can't equalize architectures, so 0.99 is unreachable on heterogeneous cards by physics,
+  not by defect). HONEST perf: slower at the 675-token test geometry (exchange/imbalance-bound); the win
+  case is long sequences on balanced links — large-geometry perf point deferred to CLI wiring / bigger
+  hardware. Not yet: Qwen-Image CP, >2 ranks, NCCL-backed exchange, Ulysses head-parallel variant,
+  CP×CFG-parallel composition.
 - [ ] **M5 — disaggregated serving:** separate prefill and decode pools.
-- [ ] **Collectives:** NCCL (NVIDIA) via Driver-API P/Invoke; **RCCL** for the AMD/ROCm path (§3). Not
-  started — M1's layer-split needed only point-to-point copy, not a collective library.
+- [x] **Collectives (Phase 1, 2026-08-06):** `NcclApi` P/Invoke (runtime-resolved libnccl.so.2, no system
+  install — torch-venv copy hardlinked into the probe dir), `ICollectiveComm` with `NcclComm` +
+  `HostStagedComm` fallback and a logged factory decision, `CudaTopology.ProbeLinks()` P2P/NVLink matrix.
+  Verified on real GPUs: cross-device AllReduce BIT-exact, 256 MB AllGather 4.79 GB/s (SHM transport,
+  no-P2P box). RCCL stays a library-swap possibility (symbol-compatible), untested — no AMD hardware.
 - [~] **Tiers to validate:** consumer (4090+3060, no P2P) verified for M0/M1/same-GPU above; enterprise
   (multi-datacenter-GPU, P2P/NVLink) still unvalidated — no such hardware available to this session.
 - [ ] **Diffusion D1–D3:** cross-device latent/sequence parallel for video (Wan/LTX) once M4 lands.

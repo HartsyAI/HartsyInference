@@ -1,5 +1,10 @@
 # Benchmarking HartsyInference vs ComfyUI
 
+> **Superseded for results.** Every measured number now lives in
+> [`benchmarks/scoreboards/`](../../benchmarks/scoreboards/) — one canonical table per modality, with GPU,
+> date and source. The figures quoted below are the 2026-07-03 snapshot and are kept only as the record of
+> how the comparison was first set up. The methodology sections are still current.
+
 > **Goal:** HartsyInference within 2× of ComfyUI on the same hardware running the same model + same noise + same scheduler config.
 > **Status:** first paired video dual-run collected 2026-07-03 on RTX 4090 via SwarmUI — see
 > `../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md`.

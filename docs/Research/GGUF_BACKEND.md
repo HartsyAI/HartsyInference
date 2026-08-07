@@ -111,7 +111,7 @@ Offline utility that quantizes a HartsyInference model to a GGUF file. Mirrors l
   - `Q6_K` — uniform Q6_K, F16 norms (~44% of F16, near-lossless)
 - Reverse codec direction (`QuantizeFromF32`) implemented for **Q8_0, Q4_K, Q5_K, Q6_K** — covers every dtype the policies use. Uses simplified `MakeQkx2Quants` (initial pass, no iterative refinement; ~5% PPL gap to canonical ggml output).
 - Shared K-quant helpers in [`Codecs/QkxQuantizer.cs`](../../src/HartsyInference.ModelAssets/Gguf/Codecs/QkxQuantizer.cs): `MakeQkx2Quants`, `MakeSymmetricScale`, `PackScaleMinK4` (inverse of `GetScaleMinK4`).
-- CLI: [`samples/ConvertSafetensorsToGguf/Program.cs`](../../samples/ConvertSafetensorsToGguf/Program.cs). Usage: `convert-safetensors-to-gguf input.safetensors output.gguf q4_k_m flux`.
+- API: `GgufQuantizer` in `src/HartsyInference.ModelAssets/Gguf/`. (The `samples/ConvertSafetensorsToGguf` CLI wrapper that used to front it no longer exists — call the quantizer directly.)
 - Round-trip tests in [`GgufQuantizerTests.cs`](../../tests/HartsyInference.ModelAssets.Tests/GgufQuantizerTests.cs) — 5 tests covering Q8_0 / Q4_K_M / Q5_K_M end-to-end (dict → GGUF → loader → dequantize) with RMSE budgets verified against llama.cpp's documented quality deltas.
 
 ### Bug fix surfaced during Phase C

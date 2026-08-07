@@ -2,7 +2,7 @@
 
 Consolidates the audio-modality benchmark data scattered across `README.md`, `docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md`,
 `benchmarks/results/audio_tts_stt_2026-07-12.md`, and 14 dated per-model result files into one place. For methodology
-(warm/cold definition, GPU pinning, profiler flags) see [`../../docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md).
+(warm/cold definition, GPU pinning, profiler flags) see [`README.md`](README.md).
 
 **GPUs.** RTX 3060 (primary; audio is usually pinned here via `HARTSY_AUDIO_CUDA_DEVICE=1`) and RTX 4090 where noted.
 A couple of CPU baselines exist (Kyutai TTS). Most rows have only one GPU measured, not both.
@@ -49,32 +49,32 @@ day range. Both numbers are real; they measure different things.
 | Kyutai TTS (DSM, tts-1.6b) | TTS | 3060 / 4090 | **1.09× / 1.47×** | `moshi` (Python, bf16+CUDA graph): 2.25× (3060) | **0.48×** of moshi (moshi still ~2.1× faster) | 2026-07-18 | engine-only | `kyutai_tts_perf_2026-07-18.md` (supersedes `kyutai_tts_2026-07-16.md`'s 0.51×) |
 | NeuTTS Air | TTS (clone) | 3060 | **0.52×** decode (7.52s/3.92s); encode (one-time/ref) **0.67×** | self-comparison, verification only (no perf pass run) | — | 2026-07-18 | standalone harness | `neutts_tts_2026-07-18.md` |
 | Fish-Speech 1.5 | TTS | 3060 | **~0.95×** (near real-time; 3.56s/3.44s, 6.86s/6.55s) | self-comparison, verification only (no perf pass needed) | — | 2026-07-18 | standalone harness | `fishspeech_tts_2026-07-18.md` |
-| Spark-TTS-0.5B | TTS | 4090 | **0.167×** (22.3s/~3.7s) | none | — | 2026-07-25 | Swarm (Tier 3, incl. cold-load) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
-| GPT-SoVITS v2 | TTS (clone) | 4090 | **0.146×** (39.54s/~5.76s) | none | — | 2026-07-24 (Tier 2, stale) | Swarm (legacy `ProcessTTS`) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
-| Orpheus | TTS | 4090 | **0.314×** (11.4s/~3.6s) | self-comparison ("6.5× speedup vs baseline", 2026-07-14, no absolute numbers given) | 6.5× (self, unverified detail) | 2026-07-25 | Swarm (Tier 3, incl. cold-load) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
-| ZipVoice | TTS | 4090 | **0.055×** (99.1s/~5.4s) | none — known-slow, unoptimized (~11 min/10s clip documented elsewhere) | — | 2026-07-25 | Swarm (Tier 3, incl. cold-load) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
-| Dia 1.6B | TTS | 4090 | **0.142×** (44.3s/6.3s, warm, seed=42) | self before→after (350–800s+ / non-terminating → 44.3s) | large (self, not a clean multiplier — old baseline was inconsistent-seed) | 2026-07-26 | Swarm | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) (07-26 SDPA-batching entry; supersedes the 07-12 RTF 0.036× and the Tier-3 "hang") |
-| CSM-1B (Sesame) | TTS | 4090 | **0.024×** (173.72s/~4.2s) | none — first-load-dominated, near 180s timeout | — | 2026-07-24 (Tier 2, stale/not a clean number) | Swarm (legacy) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
-| Moonshine-streaming | STT | 4090 | **13.7×** (0.81s/11.1s) | none | — | 2026-07-25 | Swarm (Tier 3) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
+| Spark-TTS-0.5B | TTS | 4090 | **0.167×** (22.3s/~3.7s) | none | — | 2026-07-25 | Swarm (Tier 3, incl. cold-load) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
+| GPT-SoVITS v2 | TTS (clone) | 4090 | **0.146×** (39.54s/~5.76s) | none | — | 2026-07-24 (Tier 2, stale) | Swarm (legacy `ProcessTTS`) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
+| Orpheus | TTS | 4090 | **0.314×** (11.4s/~3.6s) | self-comparison ("6.5× speedup vs baseline", 2026-07-14, no absolute numbers given) | 6.5× (self, unverified detail) | 2026-07-25 | Swarm (Tier 3, incl. cold-load) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
+| ZipVoice | TTS | 4090 | **0.055×** (99.1s/~5.4s) | none — known-slow, unoptimized (~11 min/10s clip documented elsewhere) | — | 2026-07-25 | Swarm (Tier 3, incl. cold-load) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
+| Dia 1.6B | TTS | 4090 | **0.142×** (44.3s/6.3s, warm, seed=42) | self before→after (350–800s+ / non-terminating → 44.3s) | large (self, not a clean multiplier — old baseline was inconsistent-seed) | 2026-07-26 | Swarm | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) (07-26 SDPA-batching entry; supersedes the 07-12 RTF 0.036× and the Tier-3 "hang") |
+| CSM-1B (Sesame) | TTS | 4090 | **0.024×** (173.72s/~4.2s) | none — first-load-dominated, near 180s timeout | — | 2026-07-24 (Tier 2, stale/not a clean number) | Swarm (legacy) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
+| Moonshine-streaming | STT | 4090 | **13.7×** (0.81s/11.1s) | none | — | 2026-07-25 | Swarm (Tier 3) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
 | Moonshine | STT | 3060 / 4090 | **6.5× / 6.5×** | self-comparison (word-perfect on real speech) | — | 2026-07-12/13 | Swarm | `audio_tts_stt_2026-07-12.md` |
 | Whisper (base) | STT | 3060 / 4090 | **~10× / 5.4×** — 3060 number is fresher (07-18) than the 4090 one (07-12); not re-measured together, flagged not directly conflicting but not confirmed either | self-comparison | — | 2026-07-18 (3060) / 2026-07-12 (4090) | Swarm | `stt_profiling_2026-07-18.md`, `audio_tts_stt_2026-07-12.md` |
-| Whisper Streaming | STT | 4090 | **10.2×** (1.08s/11.0s) | none | — | 2026-07-25 | Swarm (Tier 3) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
+| Whisper Streaming | STT | 4090 | **10.2×** (1.08s/11.0s) | none | — | 2026-07-25 | Swarm (Tier 3) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
 | Distil-Whisper | STT | 3060 / 4090 | **3.28× / 2.79×** | self-comparison | — | 2026-07-18 | Swarm | `stt_profiling_2026-07-18.md` (supersedes the 2.27×-equivalent same-day number in `stt_gaps_2026-07-18.md`) |
 | Kyutai STT (1B) | STT | 3060 / 4090 | **6.6× / 10.1×** | self before→after (1.24×/1.37× → 6.6×/10.1×) | 5.3×/7.4× (self) | 2026-07-18 | engine-only | `kyutai_stt_perf_2026-07-18.md` |
-| Stable Audio Open Small | Music | 4090 | **2.18×** (4.58s/10.0s) | none | — | 2026-07-25 | Swarm (Tier 3) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
-| MusicGen | Music | 4090 | **0.70×** (28.4s/20.0s, warm, seed=42) | self-comparison (cold 273s dominated by load, not steady-state) | — | 2026-07-26 | Swarm | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
-| AudioGen | SFX | 4090 | **0.64×** (46.7s/30.0s produced) | self-comparison | — | 2026-07-26 | Swarm | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) — duration-cap bug: 45s requested reproducibly yields only 30.0s |
-| ACE-Step turbo | Music | 4090 | **6.45×** (3.1s/20.0s) | none | — | 2026-07-26 | Swarm | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) — vocals confirmed unintelligible (by design, 8-step no-CFG distillation) |
+| Stable Audio Open Small | Music | 4090 | **2.18×** (4.58s/10.0s) | none | — | 2026-07-25 | Swarm (Tier 3) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
+| MusicGen | Music | 4090 | **0.70×** (28.4s/20.0s, warm, seed=42) | self-comparison (cold 273s dominated by load, not steady-state) | — | 2026-07-26 | Swarm | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
+| AudioGen | SFX | 4090 | **0.64×** (46.7s/30.0s produced) | self-comparison | — | 2026-07-26 | Swarm | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) — duration-cap bug: 45s requested reproducibly yields only 30.0s |
+| ACE-Step turbo | Music | 4090 | **6.45×** (3.1s/20.0s) | none | — | 2026-07-26 | Swarm | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) — vocals confirmed unintelligible (by design, 8-step no-CFG distillation) |
 | ACE-Step sft | Music | 4090 | **4.44×** (4.5s/20.0s) | none | — | 2026-07-26 | Swarm | same — vocals confirmed intelligible |
 | ACE-Step xl-turbo | Music | 4090 | **1.49×** (13.4s/20.0s) | none | — | 2026-07-26 | Swarm | same |
 | ACE-Step xl-sft | Music | 4090 | **1.20×** (16.6s/20.0s) | none | — | 2026-07-26 | Swarm | same |
 | ACE-Step xl-base | Music | 4090 | **1.47×** (13.6s/20.0s) | none | — | 2026-07-26 | Swarm | same — was a hard timeout pre-fix (case-sensitive dir bug) |
-| YuE | Music | 4090 | **0.108×** (92.38s/~10s) | none | — | 2026-07-25 | Swarm (Tier 3) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) — real sung vocals confirmed (Issue #E fixed) |
-| HeartMuLa (3b-base) | Music | 4090 | **0.059×** full Swarm e2e (169.98s/~10s, includes load) | see AR-decode table below for the clean steady-state number | — | 2026-07-25 | Swarm (Tier 3, incl. cold-load) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
-| OpenVoice V2 | VC | 4090 | **2.75×** (3.99s/~11s) | none | — | 2026-07-25 | Swarm (legacy `ProcessAudio`) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
-| Demucs (stem separation) | Fx | 4090 | n/a (225.3s wall, not a duration ratio) | none | — | 2026-07-25 | Swarm (legacy, CPU-forced backend) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
-| RVC v2 | VC | — | n/a — no trained voice checkpoint exists on this box (not a bug) | — | — | — | — | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
-| Resemble-Enhance | Fx | — | n/a — blocked, weight file 404s / architecture mismatch (Issue #G, open) | — | — | — | — | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) |
+| YuE | Music | 4090 | **0.108×** (92.38s/~10s) | none | — | 2026-07-25 | Swarm (Tier 3) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) — real sung vocals confirmed (Issue #E fixed) |
+| HeartMuLa (3b-base) | Music | 4090 | **0.059×** full Swarm e2e (169.98s/~10s, includes load) | see AR-decode table below for the clean steady-state number | — | 2026-07-25 | Swarm (Tier 3, incl. cold-load) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
+| OpenVoice V2 | VC | 4090 | **2.75×** (3.99s/~11s) | none | — | 2026-07-25 | Swarm (legacy `ProcessAudio`) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
+| Demucs (stem separation) | Fx | 4090 | n/a (225.3s wall, not a duration ratio) | none | — | 2026-07-25 | Swarm (legacy, CPU-forced backend) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
+| RVC v2 | VC | — | n/a — no trained voice checkpoint exists on this box (not a bug) | — | — | — | — | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
+| Resemble-Enhance | Fx | — | n/a — blocked, weight file 404s / architecture mismatch (Issue #G, open) | — | — | — | — | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
 
 ---
 
@@ -82,15 +82,15 @@ day range. Both numbers are real; they measure different things.
 
 HeartMuLa and Zonos decode codec frames one at a time; the meaningful unit is **milliseconds per frame**
 (lower is better), not a clip-level RTF. Mirrors the two tables already in
-[`../../docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md).
+[`README.md`](README.md).
 
 | Model | GPU | Config | ms/frame | Ratio vs baseline | Date | Source |
 |---|---|---|---:|---:|---|---|
-| HeartMuLa-oss-3B | RTX 3060 | bf16 eager (baseline) | 91.5 | 1.0× | — | [`docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) |
-| HeartMuLa-oss-3B | RTX 3060 | + CUDA-graph decode (default on) | ~85–90 | ~1.05× | — | [`docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) |
-| HeartMuLa-oss-3B | RTX 3060 | Q8_0 disk-quant | **64.8** | **1.41×** | — | [`docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) |
-| HeartMuLa-oss-3B | RTX 4090 | dual-stream B=2 graph decode (round 3, marginal) | **~17.6** (0.220 s/audio-s) | **5.2×** vs Python `heartlib` (1.14 s/audio-s marginal); d=60 e2e 34.1s vs 82.2s = 2.4× | 2026-07-25 | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/AUDIO_THROUGHPUT_BENCHMARK.md) round-3 entry (freshest — supersedes both `heartmula_music_e2e_2026-07-11.md` and PERFORMANCE.md's 3060 table on this exact number; different GPU, not a direct conflict) |
-| Zonos-v0.1 (transformer) | RTX 4090 | host-glue decode (baseline) | 203 | 1.0× | 2026-07-17 | `zonos_tts_2026-07-17.md`, [`docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) |
+| HeartMuLa-oss-3B | RTX 3060 | bf16 eager (baseline) | 91.5 | 1.0× | — | `PERFORMANCE.md` (retired) |
+| HeartMuLa-oss-3B | RTX 3060 | + CUDA-graph decode (default on) | ~85–90 | ~1.05× | — | `PERFORMANCE.md` (retired) |
+| HeartMuLa-oss-3B | RTX 3060 | Q8_0 disk-quant | **64.8** | **1.41×** | — | `PERFORMANCE.md` (retired) |
+| HeartMuLa-oss-3B | RTX 4090 | dual-stream B=2 graph decode (round 3, marginal) | **~17.6** (0.220 s/audio-s) | **5.2×** vs Python `heartlib` (1.14 s/audio-s marginal); d=60 e2e 34.1s vs 82.2s = 2.4× | 2026-07-25 | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) round-3 entry (freshest — supersedes both `heartmula_music_e2e_2026-07-11.md` and `PERFORMANCE.md` (retired) own 3060 table on this exact number; different GPU, not a direct conflict) |
+| Zonos-v0.1 (transformer) | RTX 4090 | host-glue decode (baseline) | 203 | 1.0× | 2026-07-17 | `zonos_tts_2026-07-17.md`, `PERFORMANCE.md` (retired) |
 | Zonos-v0.1 (transformer) | RTX 4090 | GPU-resident decode (`FixedKvCache` + GQA FlashAttention) | **32** | **~6.3×**; still ~2.9× *slower* than real-time (real-time = 11.6 ms/frame) | 2026-07-17 | same |
 
 ---

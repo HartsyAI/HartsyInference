@@ -2,6 +2,12 @@
 
 > Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (YuE pipeline)
 
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+
 ## Summary
 
 **YuE** (乐, "music/joy") is an open-source full-song music-generation foundation model from HKUST + M-A-P (Multimodal Art Projection), released January 2025 with the full technical report published in March 2025 ([arXiv:2503.08638](https://arxiv.org/abs/2503.08638)). It is the open-source answer to Suno/Udio: given **lyrics + a free-form style/genre tag** (and optionally a reference audio prompt), it generates a **multi-minute full song** with separately-modeled **vocal and accompaniment** tracks, in English, Mandarin, Cantonese, Japanese, or Korean.
@@ -14,13 +20,11 @@ Architecturally YuE is a **two-stage LLaMA-based autoregressive pipeline**:
 
 YuE's key innovations are (a) **track-decoupled next-token prediction (Dual-NTP)** — vocal and accompaniment tokens are interleaved at each frame so the model never has to disentangle mixed signals; (b) **structural progressive conditioning** — lyrics are presented section-by-section with `[verse]/[chorus]/[bridge]` tags so the LM can maintain long-context lyrical alignment; (c) **CoT vs ICL recipes** — Chain-of-Thought variants emit explicit per-section structure plans before audio tokens, while In-Context Learning variants take an audio "demonstration" as the seed for style transfer and continuation.
 
-This file covers the **YuE model architecture and pipeline**. The X-Codec audio tokenizer config is cross-referenced in [AUDIO_CODECS.md](AUDIO_CODECS.md). The LLaMA decoder reuse pattern is in [DOTLLM_ARCHITECTURE.md](DOTLLM_ARCHITECTURE.md). The Vocos super-resolution vocoder shares ideas with [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md).
+This file covers the **YuE model architecture and pipeline**. The X-Codec audio tokenizer config is cross-referenced in [AUDIO_CODECS.md](AUDIO_CODECS.md). The LLaMA decoder is reused from the native `HartsyInference.LLM` package. The Vocos super-resolution vocoder shares ideas with [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md).
 
 Sources: [YuE paper (arXiv:2503.08638)](https://arxiv.org/abs/2503.08638), [YuE GitHub](https://github.com/multimodal-art-projection/YuE), [YuE demo page](https://map-yue.github.io/), [HKUSTAudio HF collection](https://huggingface.co/collections/HKUSTAudio/yue-679a2dedc6bce3aaef2953e1), [m-a-p/YuE-s1-7B-anneal-en-cot](https://huggingface.co/m-a-p/YuE-s1-7B-anneal-en-cot), [m-a-p/YuE-s2-1B-general](https://huggingface.co/m-a-p/YuE-s2-1B-general), [m-a-p/xcodec_mini_infer](https://huggingface.co/m-a-p/xcodec_mini_infer), [x-codec (Codec Does Matter, AAAI 2025)](https://github.com/zhenye234/xcodec), [X-Codec project page](https://x-codec-audio.github.io/), [Spheron deployment guide](https://www.spheron.network/blog/deploy-open-source-ai-music-generation-gpu-cloud-2026/), [WhiteFiber YuE write-up](https://www.whitefiber.com/blog/yue-ai-music-generator), [YuEGP (deepbeepmeep)](https://github.com/deepbeepmeep/YuEGP), [YuE-exllamav2](https://github.com/sgsdxzy/YuE-exllamav2), [YuE-extend (Mozer)](https://github.com/Mozer/YuE-extend), [ACE-Step paper](https://arxiv.org/html/2506.00045v1).
 
-## Detailed Findings
-
-### 1. Model Variants
+## Model Variants
 
 All released YuE checkpoints are mirrored under both the `m-a-p/*` and `HKUSTAudio/*` HuggingFace organizations (identical weights, different namespace). All weights are **bf16 safetensors** under Apache 2.0.
 
@@ -40,134 +44,7 @@ All released YuE checkpoints are mirrored under both the `m-a-p/*` and `HKUSTAud
 
 There is a unified Hugging Face Space ([Nymbo/YuE](https://huggingface.co/spaces/Nymbo/YuE/blob/main/inference/infer.py)) and several third-party redistributions (GGUF quantizations, ExLlamaV2 8-bit, YuEGP, YuE-for-windows, ComfyUI_YuE), but the canonical weights remain the `m-a-p/HKUSTAudio` bf16 safetensors.
 
-### 2. Architecture Overview
-
-#### 2.1 Four-component framework
-
-From the paper (§3): *"YuE comprises four main components: an audio tokenizer (with a lightweight upsampler), a text tokenizer, and two language models."*
-
-```
-                ┌──────────────────────────────────────────────────────────┐
-                │  Lyrics text  +  genre/style tag  +  (opt) ref-audio    │
-                └───────────────────────────┬──────────────────────────────┘
-                                            │  BPE / X-Codec tokenize
-                                            ▼
-       ┌─────────────────────────────────────────────────────────────────┐
-       │  Stage-1 LM  (LLaMA-2 7B decoder, track-decoupled)             │
-       │  Emits interleaved [vocal_cb0, accomp_cb0]  @ 50 Hz             │
-       └───────────────────────────┬─────────────────────────────────────┘
-                                   │  codebook-0 tokens (semantic level)
-                                   ▼
-       ┌─────────────────────────────────────────────────────────────────┐
-       │  Stage-2 LM  (LLaMA 1.5B decoder)                              │
-       │  Takes cb0; emits residual codebooks 1..7 for each frame       │
-       │  Operates in ~30-second windowed chunks (stage2_batch_size N)  │
-       └───────────────────────────┬─────────────────────────────────────┘
-                                   │  full 8-codebook stream  @ 50 Hz
-                                   ▼
-       ┌─────────────────────────────────────────────────────────────────┐
-       │  X-Codec decoder  →  16 kHz vocal wav  +  16 kHz accomp wav     │
-       │  Mix (or keep separate)                                         │
-       └───────────────────────────┬─────────────────────────────────────┘
-                                   │
-                                   ▼
-       ┌─────────────────────────────────────────────────────────────────┐
-       │  YuE-upsampler (Vocos)  →  44.1 kHz stereo song wav             │
-       └─────────────────────────────────────────────────────────────────┘
-```
-
-#### 2.2 LLaMA base
-
-Per the paper (§3 and Appendix), both stages start from a **LLaMA-2 architecture backbone** — same MLP, same RMSNorm, same RoPE, same GQA — re-initialized for music. S1 is the standard LLaMA-2-7B shape; S2 is a smaller LLaMA-shaped decoder (the paper calls it "a smaller LM"). Concrete shape parameters (verify in `config.json` at load time):
-
-| Component | S1 (≈7B) | S2 (≈1.5B) |
-|---|---|---|
-| Hidden size | 4096 | ≈2048 |
-| Layers | 32 | ≈24 |
-| Attention heads | 32 | ≈16 |
-| KV heads (GQA) | 32 (MHA, LLaMA-2 7B style) | ≈16 |
-| FFN dim (SwiGLU) | 11008 | ≈5504 |
-| RoPE base θ | 10000 (with LongRoPE-style scaling for >4 K context) | 10000 |
-| Tied embeddings | no | no |
-| Activation | SiLU/SwiGLU | SiLU/SwiGLU |
-
-**Vocabulary expansion.** S1 starts from LLaMA-2's **32 000 BPE** tokens and **expands the vocabulary to include audio tokens and structural markers**. Concretely:
-
-* Text BPE: 32 000 tokens (LLaMA tokenizer is reused unchanged).
-* Audio tokens for codebook-0: **1024 entries**, added as 1024 new vocabulary IDs (the dual-track scheme uses the same 1024-entry set for vocal and accompaniment; the *position* in the interleave determines which track).
-* Structural / control tokens: `[verse]`, `[chorus]`, `[bridge]`, `[intro]`, `[outro]`, `[start_of_segment]`, `[end_of_segment]`, plus dual-track markers `<SOA>` (start-of-accompaniment) and `<EOA>` (end-of-accompaniment), and the CoT-mode structure markers.
-
-After expansion the effective S1 vocab is roughly **32 000 + 1024 + ≈64 control = ~33 100 entries** (verify exact count from `tokenizer.json` at load).
-
-**Context length.** S1 is trained / annealed at **8K – 16K tokens**, with RoPE-scaled inference up to ~30 K tokens for ~5-minute generations (one minute ≈ 50 Hz × 60 s × 2 tracks = 6000 audio tokens plus lyrics/structure overhead). The official inference script chunks the song into ~30-second segments to stay within S1's effective context.
-
-S2 has a much shorter operating context — it is run in **~30-second windowed chunks** (configurable via `--stage2_batch_size`) over the S1 output stream, not over the whole song at once.
-
-#### 2.3 Audio tokenizer (X-Codec)
-
-YuE uses **X-Codec** ([AAAI 2025, "Codec Does Matter"](https://github.com/zhenye234/xcodec)) via the `xcodec_mini_infer` HF repository. X-Codec is a semantic-aware neural audio codec: it concatenates **acoustic** features (from a DAC-style encoder) with **semantic** features (from a self-supervised audio encoder, e.g. HuBERT) **before** the Residual VQ stage, and adds a **semantic reconstruction loss after** the RVQ. The result: codebook-0 carries semantically-meaningful content (phonetic/melodic), the higher codebooks carry fine acoustic detail.
-
-YuE's X-Codec config (per the paper §3.1 and `xcodec_mini_infer`):
-
-| Property | Value |
-|---|---|
-| Sample rate | **16 kHz** |
-| Frame rate | **50 Hz** (one frame per 20 ms = 320 samples per frame) |
-| Number of RVQ codebooks | **8** (`n_q = 8`) — paper trains with up to 12, but YuE uses 8 at inference |
-| Codebook size | **1024** entries per codebook (10-bit each) |
-| Bandwidth | ≈ **4.0 kbps** (50 Hz × 8 codebooks × 10 bits) |
-| Training data | ~200 K hours, music : speech : SFX ≈ 1 : 1 : 0.05 |
-| Codebook-0 role | Semantic anchor; consumed by S1 only |
-| Codebooks 1–7 role | Acoustic residuals; predicted by S2 |
-| Streams | Two parallel encoders run — one for the vocal stem, one for the accompaniment stem |
-
-Cross-ref: deeper codec mechanics live in [AUDIO_CODECS.md](AUDIO_CODECS.md). For C# we need (a) the X-Codec **decoder** (RVQ table lookup + transposed-conv neural vocoder) and (b) optionally the **encoder** if we support `--use_audio_prompt` ICL mode.
-
-#### 2.4 Lightweight upsampler (`YuE-upsampler`)
-
-The codec only outputs **16 kHz** audio. The optional `m-a-p/YuE-upsampler` post-processor is a **Vocos-style** spectral super-resolution model that lifts 16 kHz → **44.1 kHz** by predicting the high-frequency components. It is not strictly required (16 kHz output is musically usable) but is what the reference pipeline runs by default for the released demo songs. Architecturally it is a ConvNeXt encoder + ISTFT head, similar in spirit to the Kokoro iSTFTNet decoder (see [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md)).
-
-### 3. Dual-Track Decoding (Track-Decoupled Next-Token Prediction)
-
-The headline architectural choice. Most prior music LMs (MusicGen, MusicLM) generate a single **mixed** audio stream — the model is asked to emit codebook-0 tokens whose decoded waveform contains both voice and accompaniment simultaneously. This collapses on hard cases (e.g. low vocal-to-accompaniment ratio in metal), and prevents track-level editing.
-
-YuE's solution: **at each codec frame `t`, emit two tokens — one for the vocal stream and one for the accompaniment stream — in a fixed interleaved order.**
-
-**Stage-1 stream layout** (single-track ICL or CoT mode):
-
-```
-[prompt tokens]  v_0  a_0  v_1  a_1  v_2  a_2  …  v_{T-1}  a_{T-1}  [EOS]
-                 └─ vocal cb0 ─┘└─ accomp cb0 ─┘
-                 (frame 0 = 20 ms)
-```
-
-Per the paper: *"At each time step t, the model outputs two tokens: a vocal token (v_t) and an accompaniment token (a_t)."* The vocal token always precedes the accompaniment token at each frame, and Stage-1 only ever emits **codebook-0** values for both tracks (the higher codebooks are filled in by S2).
-
-**Stage-2 stream layout** (per ~30-second chunk):
-
-S2's training packing puts **all of the codebook-0 tokens first** (the semantic backbone from S1), then emits per-frame blocks of the remaining codebooks. The paper notes: *"By placing all codebook-0 tokens at the beginning, the model is guaranteed to 'see' the entire semantic structure before it encounters any mixed (0–7) blocks. This allows the model to plan the later residuals by attending to a complete semantic outline from Stage-1."*
-
-A simplified S2 chunk:
-
-```
-chunk = [cb0_v_0, cb0_a_0, cb0_v_1, cb0_a_1, … cb0_v_{N-1}, cb0_a_{N-1}]   # ~1500 tokens (30s × 50Hz × 2)
-       + [<SOA>]                                                            # boundary marker
-       + per-frame interleave of cb1..cb7 for vocal & accompaniment
-       + [<EOA>]
-```
-
-**Special tokens summary (S1 and S2 combined):**
-
-| Token | Purpose |
-|---|---|
-| `[verse]`, `[chorus]`, `[bridge]`, `[intro]`, `[outro]` | Section-structure markers in the lyrics |
-| `[start_of_segment]`, `[end_of_segment]` | Chunk boundaries for progressive long-form generation |
-| `<SOA>` (start-of-accompaniment) | Marks the transition in S2's stream from semantic-only block to mixed-codebook block |
-| `<EOA>` (end-of-accompaniment) | Closes the mixed block |
-| `<|im_start|>`, `<|im_end|>` | LLaMA-style turn markers used in the chat-formatted prompt |
-| Per-codebook offset | Each codebook k has its 1024 entries placed at a distinct offset in the joint vocab to avoid collision |
-
-### 4. Lyrics Format
+## Lyrics Format
 
 YuE expects a single text file containing **section-tagged lyrics**, paired with a separate **genre/style tag** file. The reference example files are at [`prompt_egs/lyrics.txt`](https://github.com/multimodal-art-projection/YuE/tree/main/prompt_egs) and `prompt_egs/genre.txt`.
 
@@ -228,7 +105,7 @@ Rules from the README:
 * `--run_n_segments N` tells the inference script how many sections to actually render (so a 6-section lyrics file with `--run_n_segments 2` will only render the first two).
 * Language must match the chosen S1 checkpoint (use `en-cot/en-icl` for English lyrics, `zh-*` for Chinese, `jp-kr-*` for Japanese or Korean).
 
-### 5. CoT vs ICL Variants
+## CoT vs ICL Variants
 
 The "anneal" suffix on every S1 checkpoint indicates that these are the **annealing-stage** weights (the final, fine-tuned policy). Each language ships in two flavors:
 
@@ -254,7 +131,7 @@ So **ICL + CFG is the recommended mode** for best output quality. CFG here is th
 
 ICL also unlocks **music continuation** — feed an existing 30 s clip and let YuE extend it, and **voice cloning / style transfer** — feed an a-capella vocal as the prompt.
 
-### 6. Sampling
+## Sampling
 
 Defaults from the reference `infer.py` (per the YuE GitHub quick-start and Hugging Face Space mirror):
 
@@ -273,179 +150,7 @@ The reference `infer.py` does **not** expose temperature/top_p/top_k as CLI flag
 
 **Stop conditions.** Generation stops on either (a) `[end_of_segment]` token, (b) `--max_new_tokens` reached, or (c) the LLaMA EOS token. For long-form (multi-section) generation, the script invokes S1 once per section in a loop, carrying the previous session's audio tokens as context.
 
-### 7. Long Generation (5+ minute songs)
-
-YuE handles long-form by **explicit section-by-section chunking**, not by a single 5-minute autoregressive pass. The mechanism is what the paper calls **structural progressive conditioning**:
-
-1. **Parse lyrics** into sections separated by `\n\n`. Each section is one autoregressive "session" of ~30 s.
-2. **Session 0** (typically the first `[verse]`):
-   * Prompt = `<|im_start|> system + genre tag + lyrics_for_section_0 [start_of_segment]`
-   * S1 generates up to `max_new_tokens=3000` interleaved vocal+accompaniment cb0 tokens.
-   * Stop at `[end_of_segment]`.
-3. **Session N** (subsequent sections):
-   * Prompt = `<|im_start|> system + genre + ALL prior lyrics + ALL prior audio cb0 tokens (or a sliding window of them) + lyrics_for_section_N [start_of_segment]`
-   * Continue autoregressively.
-   * Context grows linearly with section count; once total context approaches ~16 K tokens, the prior audio context is **windowed** (keep the most recent ~10 s of audio tokens + all lyric tags).
-4. **After all S1 sessions finish:** concatenate the full cb0 stream. Pass it through S2 in batched ~30 s chunks (S2 only attends within its chunk, so this parallelizes well — hence `--stage2_batch_size 4`).
-5. **Codec decode** the full 8-codebook stream to two 16 kHz waveforms (vocal + accompaniment).
-6. **Mix** to a single 16 kHz waveform (a simple weighted sum; the README recommends 0.7 × vocal + 1.0 × accompaniment for the typical case).
-7. **Upsample** to 44.1 kHz via `YuE-upsampler`.
-
-Notes:
-
-* The third-party **YuE-extend** project ([Mozer/YuE-extend](https://github.com/Mozer/YuE-extend)) explicitly implements "music continuation" — feeding a generated song's tail back as ICL prompt to extend beyond the natural 5-minute ceiling.
-* The official paper claims generation up to **five minutes** of coherent music; community reports of 6–7 minute generations exist but with structural drift.
-* No sliding-window attention is used inside the transformer — long context is handled by **RoPE scaling at inference** plus the explicit sectional re-prompting above.
-
-### 8. Inference Pipeline Pseudocode
-
-The full lyrics-to-song pipeline as it should be implemented in C#:
-
-```csharp
-// HartsyInference.Audio.YuE — pseudocode (pure C#)
-
-public sealed class YuEPipeline : IDisposable
-{
-    private readonly LlamaModel _stage1;          // HartsyInference.Models.LlamaModel (dotLLM-style)
-    private readonly LlamaModel _stage2;
-    private readonly XCodecDecoder _codec;        // 8-codebook → 16 kHz waveform
-    private readonly XCodecEncoder? _codecEnc;    // only if ICL with audio prompt
-    private readonly VocosUpsampler? _upsampler;  // optional 16 kHz → 44.1 kHz
-    private readonly LlamaTokenizer _textTokenizer;
-
-    public byte[] Generate(YuEOptions opts)
-    {
-        // 1. Parse lyrics into sections
-        var sections = ParseSections(opts.LyricsText);          // List<(string tag, string body)>
-        var genreTag = opts.GenreText.Trim();
-
-        // 2. (Optional ICL) tokenize audio prompt with X-Codec encoder
-        AudioTokens? audioPrompt = null;
-        if (opts.AudioPromptPath is not null)
-        {
-            using var wav = AudioLoader.LoadResampled(opts.AudioPromptPath, 16_000);
-            var slice = wav.Slice(opts.PromptStartSec, opts.PromptEndSec);
-            audioPrompt = _codecEnc!.Encode(slice);             // (8, T) int codes
-        }
-
-        // 3. Stage-1: generate codebook-0 tokens, section-by-section
-        var allCb0 = new List<int>();                            // interleaved [v0,a0,v1,a1,...]
-        using var s1Cache = _stage1.AllocateKvCache(maxLen: 16_384);
-
-        var systemPrompt = BuildSystemPrompt(opts.Mode, genreTag);
-        var systemIds = _textTokenizer.Encode(systemPrompt);
-        _stage1.PrefillContext(systemIds, s1Cache);
-
-        if (audioPrompt is not null)
-        {
-            // ICL: inject the demo audio tokens as cb0-only interleave
-            var demoCb0 = audioPrompt.Codebook0AsInterleaved();
-            _stage1.PrefillContext(demoCb0.Select(c => c + Constants.AudioTokenOffset), s1Cache);
-        }
-
-        for (int s = 0; s < Math.Min(sections.Count, opts.RunNSegments); s++)
-        {
-            // Append next section's lyric tokens
-            var sectionText = $"\n\n[{sections[s].tag}]\n{sections[s].body}\n[start_of_segment]";
-            var sectionIds = _textTokenizer.Encode(sectionText);
-            _stage1.PrefillContext(sectionIds, s1Cache);
-
-            // Sample up to max_new_tokens cb0 audio tokens for this section
-            var generated = _stage1.SampleUntil(
-                stopToken: Constants.EndOfSegment,
-                maxNew: opts.MaxNewTokens,                       // default 3000
-                temperature: opts.Temperature,                   // default from generation_config.json
-                topP: opts.TopP,
-                topK: opts.TopK,
-                repetitionPenalty: opts.RepetitionPenalty,       // default 1.1
-                cfgScale: opts.CfgScale,                          // optional, ICL only
-                cache: s1Cache);
-
-            // Strip control tokens, decode audio-ID offsets back to 0..1023
-            allCb0.AddRange(generated
-                .Where(t => t >= Constants.AudioTokenOffset && t < Constants.AudioTokenOffset + 1024)
-                .Select(t => t - Constants.AudioTokenOffset));
-
-            // Context-window management: if cache nearing limit, evict oldest audio tokens
-            if (s1Cache.UsedLen > 14_000)
-                s1Cache.WindowAudioTokens(keepLastSeconds: 10);
-        }
-
-        // 4. Stage-2: predict residual codebooks 1..7 in ~30 s chunks, batched
-        //    cb0 stream length T  ⇒  about T / (50*2) seconds per track
-        const int framesPer30s = 30 * 50;                        // 1500 frames
-        const int tokensPerChunk = framesPer30s * 2;             // 3000 cb0 tokens
-        var fullStream = new int[allCb0.Count / 2, 8];           // 8 codebooks × frames
-
-        // Lay cb0 directly into final array (it's already what S1 produced)
-        WriteCb0Frames(fullStream, allCb0);
-
-        // S2 chunked decoding
-        for (int chunkStart = 0; chunkStart < allCb0.Count; chunkStart += tokensPerChunk)
-        {
-            var cb0Chunk = allCb0.GetRange(chunkStart, Math.Min(tokensPerChunk, allCb0.Count - chunkStart));
-            var residual = _stage2.GenerateResiduals(
-                cb0Chunk,
-                batchSize: opts.Stage2BatchSize,                  // default 4
-                repetitionPenalty: opts.RepetitionPenalty);
-            WriteResidualFrames(fullStream, residual, frameOffset: chunkStart / 2);
-        }
-
-        // 5. Codec decode  → two 16 kHz mono waveforms (vocal, accompaniment)
-        var vocalCodes  = SliceTrack(fullStream, track: 0);      // (8, T)
-        var accompCodes = SliceTrack(fullStream, track: 1);
-        var vocalWav    = _codec.Decode(vocalCodes);             // float[] @ 16kHz
-        var accompWav   = _codec.Decode(accompCodes);
-
-        // 6. Mix
-        var mixed = Mix(vocalWav, accompWav, vocalGain: 0.7f, accompGain: 1.0f);
-
-        // 7. (Optional) Upsample 16 → 44.1 kHz
-        var finalWav = _upsampler is not null
-            ? _upsampler.Upsample(mixed)                          // float[] @ 44.1kHz
-            : mixed;
-
-        return WavWriter.ToBytes(finalWav, sampleRate: _upsampler is not null ? 44_100 : 16_000);
-    }
-}
-```
-
-The hot loops are (a) S1's per-token sample, which dominates wall-clock (it generates 100–6000 tokens depending on song length), and (b) S2's per-token sample, also non-trivial but batchable. Codec decode and upsampling are cheap by comparison.
-
-### 9. VRAM and Performance
-
-**Memory** (FP16 weights + KV cache, both stages co-resident):
-
-| Component | bf16 weight memory | Notes |
-|---|---|---|
-| S1 (~7B) | ~14 GB | LLaMA-2 7B in bf16 |
-| S2 (~1.5B) | ~3 GB | LLaMA decoder |
-| X-Codec encoder + decoder | ~0.6 GB | |
-| YuE-upsampler (Vocos) | ~0.3 GB | Optional |
-| S1 KV cache (16K context, MHA 32×32×128) | ~2 GB | Grows linearly with sequence length |
-| S2 KV cache (per chunk, ~1500 tok) | ~0.3 GB | Small because of chunking |
-| **Total (bf16, full pipeline)** | **~20 GB** | Fits an A100-40G, H100, or 3090/4090 with headroom (just barely on 24 GB) |
-
-**Quantized variants** (community, not official):
-
-* **8-bit (GGUF Q8_0 / EXL2 8.0bpw)** — `tensorblock/YuE-s1-7B-anneal-en-cot-GGUF`, `sgsdxzy/YuE-exllamav2` — drops S1 to ~7 GB, total pipeline ~12 GB. Quality essentially indistinguishable.
-* **4-bit (GGUF Q4_K_M / EXL2 4.0bpw)** — S1 ≈ 4 GB, full pipeline ~8 GB; fits a 12 GB card. Some loss of vocal articulation reported.
-* **YuEGP (deepbeepmeep/YuEGP)** — CPU+GPU offloading flavor; runs on **6 GB** GPUs at the cost of speed.
-
-**Speed** (observed, single-stream, official reference Python pipeline):
-
-| GPU | Audio generated | Wall-clock | Real-time factor |
-|---|---|---|---|
-| H800 (80 GB) | 30 s | ~150 s | ~5× slower than realtime |
-| A100 80 GB | 30 s | ~180 s | ~6× slower |
-| RTX 4090 | 30 s | ~360 s | ~12× slower |
-| RTX 4090 (YuEGP-optimized) | 60 s | ~240 s | ~4× slower |
-| RTX 4090 (ExLlamaV2 8-bit) | 30 s | ~120 s | ~4× slower |
-| L40S (community) | 180 s (3-min track) | ~300 s | ~1.7× slower |
-
-A full **5-minute song** with the reference pipeline therefore takes ~25–35 min on a 4090, ~12–15 min on an A100, and ~2–3 min on an H100 cluster with 8-bit quant and batching. **There is no realtime path for a 7B autoregressive song model on a single consumer GPU** — this is the fundamental cost of the autoregressive design.
-
-### 10. Comparison to ACE-Step
+## Comparison to ACE-Step
 
 | Dimension | **YuE** | **ACE-Step** |
 |---|---|---|
@@ -467,11 +172,11 @@ A full **5-minute song** with the reference pipeline therefore takes ~25–35 mi
 
 In HartsyInference, both pipelines should coexist in `HartsyInference.Audio.Music` with a shared `IMusicGenerator` interface — they share the codec-decode → vocoder back-end but differ in the LM core.
 
-### 11. C# Implementation Notes (HartsyInference)
+## C# Implementation Notes (HartsyInference)
 
 This section is the implementer's bridge.
 
-**Reuse the native `HartsyInference.LLM` patterns aggressively.** Both S1 and S2 are stock LLaMA-2 decoder architectures with vocab/RoPE-scaling tweaks. The native `HartsyInference.LLM` package already implements LLaMA (its design drew on the historical [DOTLLM_ARCHITECTURE.md](DOTLLM_ARCHITECTURE.md) study). The right plan is:
+**Reuse the native `HartsyInference.LLM` patterns aggressively.** Both S1 and S2 are stock LLaMA-2 decoder architectures with vocab/RoPE-scaling tweaks. The native `HartsyInference.LLM` package already implements LLaMA. The right plan is:
 
 1. **`HartsyInference.Models.Llama`** — already needed for the native LLM modality. Build it once, parameterize for: hidden size, layers, heads, KV heads (GQA), FFN dim, RoPE base + scaling factor, vocab size.
 2. **`HartsyInference.Audio.YuE.YuETokenizer`** — wraps the LLaMA BPE tokenizer plus the 1024 audio-cb0 IDs and ~64 control tokens. The audio IDs are pure integer offsets — no embedding fancy footwork; LLaMA's input-embedding table just has to be sized to the expanded vocab.

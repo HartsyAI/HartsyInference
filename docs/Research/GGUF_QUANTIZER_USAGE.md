@@ -4,27 +4,10 @@
 
 ## Quick start
 
-### CLI (most users)
+### CLI
 
-```bash
-# Build the converter once
-cd /path/to/HartsyInference
-dotnet build samples/ConvertSafetensorsToGguf/ConvertSafetensorsToGguf.csproj -c Release
-
-# Convert any safetensors to GGUF (architecture is required so loaders pick the right key mapper)
-samples/ConvertSafetensorsToGguf/bin/Release/net10.0/convert-safetensors-to-gguf \
-    flux1-schnell.safetensors  flux1-schnell-Q4_K_M.gguf  q4_k_m  flux
-
-# Output:
-# [convert-safetensors-to-gguf] flux1-schnell.safetensors → flux1-schnell-Q4_K_M.gguf [Q4_K_M] arch=flux
-#   passthrough: 12
-#   cast (→ F16/F32): 468
-#   quantized: 304
-#     Q4_K: 228 tensors
-#     Q6_K: 76 tensors
-#   output: 7138 MB
-#   elapsed: 142.3s
-```
+There is no longer a CLI wrapper — the `samples/ConvertSafetensorsToGguf` project was removed along with
+the rest of `samples/`. Call `GgufQuantizer` directly; see the C# API below.
 
 ### C# API (programmatic)
 

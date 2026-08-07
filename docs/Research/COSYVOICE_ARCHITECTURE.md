@@ -2,6 +2,12 @@
 
 > Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (CosyVoice pipeline)
 
+> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
+> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
+> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
+> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
+> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+
 ## Summary
 
 CosyVoice is Alibaba FunAudioLLM's multilingual, zero-shot, voice-cloning TTS family. The architecture is a four-stage pipeline shared by both versions: **(1) text tokenizer** → **(2) text-to-speech-token LM** → **(3) speech-token-to-mel conditional flow matching** → **(4) HiFiGAN/HiFTNet vocoder**. Speaker identity is injected via a CAM++ 192-dim embedding extracted from a reference clip; the LM models semantics + prosody while the flow matching module fills in timbre and acoustic environment.
@@ -10,15 +16,13 @@ CosyVoice is Alibaba FunAudioLLM's multilingual, zero-shot, voice-cloning TTS fa
 
 **CosyVoice 2** (December 2024, [arXiv:2412.10117](https://arxiv.org/abs/2412.10117)) replaces the from-scratch LM with the off-the-shelf **Qwen2.5-0.5B** decoder transformer (no separate text encoder, no speaker embedding fed to the LM), and replaces VQ with **Finite Scalar Quantization (FSQ)** — a deterministic per-channel scalar quantizer giving 6,561 codes at 100% utilization. Flow matching gains a **chunk-aware causal** training regime supporting both streaming and non-streaming inference inside one model, with first-packet latency of ~150 ms.
 
-This file covers CosyVoice 1 + 2 architecture only. Flow matching math is in [FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md). Vocoder (HiFiGAN / HiFTNet) is in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md). Streaming pipeline design is in [STREAMING_AUDIO_INFERENCE.md](STREAMING_AUDIO_INFERENCE.md). Mel preprocessor in [MEL_SPECTROGRAM.md](MEL_SPECTROGRAM.md). Qwen tokenizer reuse is in [TOKENIZERS.md](TOKENIZERS.md) and [DOTLLM_ARCHITECTURE.md](DOTLLM_ARCHITECTURE.md).
+This file covers CosyVoice 1 + 2 architecture only. Flow matching math is in [FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md). Vocoder (HiFiGAN / HiFTNet) is in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md). Streaming pipeline design is in [STREAMING_AUDIO_INFERENCE.md](STREAMING_AUDIO_INFERENCE.md). Mel preprocessor in [MEL_SPECTROGRAM.md](MEL_SPECTROGRAM.md). Qwen tokenizer reuse is in [TOKENIZERS.md](TOKENIZERS.md).
 
 Sources: [FunAudioLLM/CosyVoice repo](https://github.com/FunAudioLLM/CosyVoice), [CosyVoice 1 paper](https://arxiv.org/abs/2407.05407), [CosyVoice 2 paper](https://arxiv.org/abs/2412.10117), [CosyVoice 2 HTML v2](https://arxiv.org/html/2412.10117v2), [CosyVoice 2 PDF](https://funaudiollm.github.io/pdf/CosyVoice_2.pdf), [CosyVoice 2 demo page](https://funaudiollm.github.io/cosyvoice2/), [DeepWiki: FunAudioLLM/CosyVoice](https://deepwiki.com/FunAudioLLM/CosyVoice), [HF CosyVoice2-0.5B](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B), [HF CosyVoice-300M](https://huggingface.co/FunAudioLLM/CosyVoice-300M), [HF CosyVoice-300M-SFT](https://huggingface.co/FunAudioLLM/CosyVoice-300M-SFT), [HF CosyVoice-300M-Instruct](https://huggingface.co/FunAudioLLM/CosyVoice-300M-Instruct), [S3Tokenizer (xingchensong)](https://github.com/xingchensong/S3Tokenizer), [HiFTNet paper](https://arxiv.org/abs/2309.09493), [CAM++ paper](https://arxiv.org/abs/2303.00332), [CosyVoice 3 paper (context)](https://arxiv.org/abs/2505.17589).
 
 ---
 
-## Detailed Findings
-
-### 1. Variants
+## Variants
 
 | Variant                       | Total Params | LM Backbone                | Speech Tokenizer       | Languages / Coverage                                                            | HF Path                                                                                                       | Repo Size |
 |-------------------------------|--------------|----------------------------|------------------------|---------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|-----------|
@@ -33,35 +37,7 @@ Sources: [FunAudioLLM/CosyVoice repo](https://github.com/FunAudioLLM/CosyVoice),
 
 **HuggingFace mirrors that may also be useful** for HartsyInference users: `model-scope/CosyVoice-300M` (identical content, ModelScope mirror), `gpustack/CosyVoice-300M-Instruct` (with `.onnx` exports for the speaker encoder), `ayousanz/cosy-voice3-onnx` (full ONNX export of CV3).
 
-### 2. End-to-End Architecture
-
-Pipeline (text → audio) for either version:
-
-```
-text string
-  │  (text tokenizer)
-  ▼
-[BOS, text_tok_0..text_tok_N, EOS]
-  │  + speaker_embedding (CV1 only)
-  │  + (optionally) reference_speech_tokens (zero-shot prompt mode)
-  │  + (optionally) instruct_prompt_tokens (Instruct mode)
-  ▼
-LM (text-to-speech-token autoregressive)
-  │  emits speech_tok_0, speech_tok_1, ... at 25 Hz (CV2; 50 Hz CV1 base, 25 Hz CV1-25Hz)
-  ▼
-[speech_tok stream] + speaker_embedding + (optionally) reference_mel
-  │
-  ▼
-Conditional Flow Matching (UNet1D in CV1, chunk-aware causal DiT in CV2)
-  │  10 NFE Euler ODE → mel spectrogram (80-bin, 50 Hz frame rate)
-  ▼
-HiFiGAN (CV1) / HiFTNet-style (CV2)
-  │  mel → waveform
-  ▼
-22.05 kHz waveform (CV1) / 24 kHz waveform (CV2)
-```
-
-### 3. Text Tokenizer
+## Text Tokenizer
 
 #### CosyVoice 1
 - Custom **multilingual BPE** trained alongside the model; tokens for zh / en / ja / ko / Cantonese.
@@ -76,7 +52,7 @@ HiFiGAN (CV1) / HiFTNet-style (CV2)
   - Speech-token IDs `<|s_0|> .. <|s_6560|>` — appended to the Qwen vocabulary so that the same Qwen2 transformer can emit both text and speech tokens through a single softmax (an "unembedding-extended" LM head). The total LM vocab is therefore **151,643 + N_special + 6,561**.
 - Paralinguistic tags `[laughter]`, `[breath]`, `<strong>...</strong>` are *not* their own special IDs in CV2; they are written as plain UTF-8 text and rely on the Qwen BPE merges + post-training data to evoke the right speech behavior.
 
-### 4. Speech Tokenizer (S3Tokenizer)
+## Speech Tokenizer (S3Tokenizer)
 
 #### Common architecture (CV1 + CV2)
 - Built by **inserting a quantization layer inside the encoder of a SenseVoice-Large / Whisper-Large-v3-class supervised ASR model**. This makes the resulting codes **semantically aligned** (a token corresponds to a phonetic/prosodic event, not an arbitrary acoustic cluster), which is the central design claim of the paper.
@@ -133,146 +109,7 @@ Notes:
 
 The 25 Hz token rate is critical for the rest of the pipeline: **25 speech tokens ≈ 1 second of audio**. With ~80 mel frames/second from the flow matching module (16 ms hop at 22.05 / 24 kHz), the flow matching module is upsampling token timing by ~3.2× during synthesis.
 
-### 5. Text-to-Speech-Token LM
-
-#### CosyVoice 1 — Custom TransformerLM
-ESPnet-style decoder-only transformer with a separate text encoder.
-
-| Field                       | Value                              |
-|-----------------------------|------------------------------------|
-| `llm_input_size` / `llm_output_size` | 1024                       |
-| Layers                      | 14 (decoder)                       |
-| Heads                       | 16                                 |
-| Head dim                    | 64                                 |
-| FFN dim                     | 4096                               |
-| Activation                  | SwiGLU                             |
-| Pos enc                     | RoPE                               |
-| Speech token vocab          | 4,096 + 3 special (BOS/EOS/PAD)    |
-| Text encoder                | Conformer, 6 blocks, 512 dim       |
-| Speaker conditioning        | x-vector (192-dim CAM++) concatenated at sequence start |
-| Param count                 | ~300M total                        |
-
-Generation: standard autoregressive decoding with KV cache. Top-k = 25, top-p = 0.8, temperature = 1.0 are the defaults in `inference.py`. EOS triggers when a `<|eos|>` speech-token ID is emitted.
-
-#### CosyVoice 2 — Qwen2.5-0.5B
-Pre-trained Qwen2.5-0.5B is loaded *as-is* (via HF Transformers `Qwen2ForCausalLM`) and fine-tuned end-to-end on the unified text+speech sequence task.
-
-| Field                       | Value                              |
-|-----------------------------|------------------------------------|
-| Backbone                    | `Qwen/Qwen2.5-0.5B`                |
-| Layers                      | 24                                 |
-| Hidden                      | 896                                |
-| Heads                       | 14 (q) / 2 (kv) — **GQA**          |
-| Head dim                    | 64                                 |
-| FFN dim                     | 4864 (SwiGLU)                      |
-| Pos enc                     | RoPE, base 1,000,000               |
-| Norm                        | RMSNorm                            |
-| Vocab                       | 151,643 (Qwen) + N speech (6,561) + a handful of new specials |
-| Param count                 | ~500M (Qwen base) + tiny embedding extension |
-| Text encoder                | **None — removed**                 |
-| Speaker embed fed to LM     | **None — removed**                 |
-
-The "remove text encoder + remove speaker embedding from the LM" change is the architectural punch line of CV2: the LM now models a **unified single-stream sequence** of text + speech tokens. All speaker conditioning is shifted into the flow-matching stage (see §6).
-
-**Unified streaming/non-streaming training**: the LM is trained simultaneously on two interleaving formats so a single set of weights handles both modes:
-
-Non-streaming format:
-```
-S, text_0, text_1, ..., text_N, T, speech_0, speech_1, ..., speech_M, E
-```
-where `S` = start-of-sequence, `T` = "turn of speech" marker, `E` = end-of-sequence. The LM sees all text first, then autoregresses all speech.
-
-Streaming format (ratio `N:M = 5:15`, i.e., 5 text tokens then 15 speech tokens, repeated):
-```
-S, text_0..text_4, speech_0..speech_14,
-   text_5..text_9, speech_15..speech_29,
-   ..., T, speech_residual..., E
-```
-At inference time, the chosen format simply determines the position of the `T` token: emit it immediately (streaming) or wait until all text is provided (non-streaming).
-
-Sampling defaults: top-p 0.8, top-k 25, temperature 0.8, repetition penalty 1.1. A "RAS" (Repetition-Aware Sampling) trick is also implemented in `cosyvoice/llm/llm.py` — if the model gets stuck in a repetition loop the sampler switches to a different distribution.
-
-### 6. Conditional Flow Matching (Speech-Token → Mel)
-
-Both CV1 and CV2 use **Optimal-Transport Conditional Flow Matching (OT-CFM)** with first-order Euler integration; see [FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md) for the underlying math (`x_t = (1-t)·x_0 + t·x_1`, velocity regression, Sway-Sampling, etc.). CosyVoice does *not* use Sway-Sampling or omega mean-shift — vanilla Euler is fine because the operating dim (mel) is small.
-
-#### Common conditioning
-The CFM module is conditioned on:
-1. **Speech-token sequence** from the LM — projected and upsampled in time so that 1 speech token spans ~3 mel frames.
-2. **Speaker embedding** — CAM++ 192-dim (see §7), `Linear(192, 80)` projected to mel dim and added to the noise input.
-3. **Reference mel** (zero-shot mode) — a partial mel prefix from the prompt clip; the CFM is conditioned to *extend* this prefix into the target voice while preserving the timbre / room acoustics.
-
-Output is an 80-bin log-mel at the model's frame rate (50 Hz for CV1, 50 Hz for CV2).
-
-#### CosyVoice 1 — ConditionalDecoder
-From `cosyvoice/flow/flow.py` and `cosyvoice/flow/decoder.py`:
-
-| Field                 | Value             |
-|-----------------------|-------------------|
-| Backbone              | U-Net 1-D (Matcha-TTS style) |
-| Channels              | [256, 256]        |
-| `attention_head_dim`  | 64                |
-| `n_blocks` per level  | 4                 |
-| `num_mid_blocks`      | 12                |
-| `num_heads`           | 8                 |
-| Activation            | GELU              |
-| Param count           | ~150M (`flow.pt` is 420 MB FP32 incl. encoder + ResNet) |
-| NFE @ inference       | 10 Euler steps    |
-| Classifier-free guidance | Yes, w = 0.7 (`cfm_params.inference_cfg_rate`) |
-
-#### CosyVoice 2 — Chunk-Aware Causal Flow Matching
-The same UNet1D backbone is wrapped in a **chunk-aware causal transformer encoder** that handles the speech-token → conditioning-vector path with chunkable attention masks. The estimator network is identical in shape; what changes is the attention masking:
-
-| Masking mode      | Lookahead | When used                                  |
-|-------------------|-----------|--------------------------------------------|
-| Non-causal        | full      | Offline / non-streaming, highest quality   |
-| Full-causal       | 0         | Worst-case low-latency streaming           |
-| Chunk-M           | M tokens  | Streaming with M-token lookahead           |
-| Chunk-2M          | 2M tokens | Streaming with 2M-token lookahead (better) |
-
-All four are sampled during training (random per batch). The paper calls this **multi-mask training as implicit self-distillation** — the model sees the same target with varying context, so chunk-causal contexts learn to match full-context predictions.
-
-There is also a **look-ahead 1-D convolution** placed before upsampling that uses *right-padding* to give the causal stack a small, fixed amount of future information without breaking causality on the streamed boundary. This is the standard streaming-conformer trick.
-
-The exported ONNX (`flow.decoder.estimator.fp32.onnx`, 286 MB in CV2) corresponds only to the velocity estimator network (the `v_theta` we call inside Euler); the chunk-aware transformer encoder and the mel-prediction wrapper stay in PyTorch / our C# port.
-
-NFE @ inference: 10 Euler steps. CFG weight 0.7.
-
-### 7. Speaker Encoder — CAM++
-
-Both versions use the same **CAM++** ([Wang et al. 2023, arXiv:2303.00332](https://arxiv.org/abs/2303.00332)) speaker verification network as a frozen feature extractor (no fine-tuning) to produce a fixed-length **192-dim speaker embedding** from a reference clip.
-
-Architecture (from CAM++ paper):
-- **D-TDNN** (Densely-connected Time-Delay Neural Network) backbone with **Context-Aware Masking (CAM)** at each block — a lightweight, fast alternative to ECAPA-TDNN.
-- 7 D-TDNN blocks; pooling → stats pooling → FC(192) → BN.
-- Input: 80-bin log-mel @ 100 Hz, segment ≥ 3 s.
-- Output: L2-normalized 192-dim vector, ~7M parameters.
-- Distributed as `campplus.onnx` (~28 MB) in every CosyVoice HF repo — ready for our `OnnxRuntime` fallback path, but trivially small for a hand port.
-
-Usage:
-- **CV1**: x-vector is concatenated to the start of the LM input sequence (after a projection to 1024-dim) **and** is added to the CFM input via `Linear(192, 80)`.
-- **CV2**: x-vector is **only** used by the CFM — never seen by the LM. This is a deliberate decoupling: speaker timbre lives in the flow matching stage.
-
-### 8. Vocoder
-
-Documented in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md) under the appropriate sub-section. Summary here for completeness:
-
-#### CosyVoice 1
-- Modified HiFiGAN with source-filter (F0-driven) input, similar in spirit to HiFTNet / NSF-HiFiGAN.
-- Mel input: 80 bins, 50 Hz.
-- Output sample rate: **22,050 Hz**.
-- File: `hift.pt`, ~83 MB FP32.
-
-#### CosyVoice 2
-- HiFTNet-style ([arXiv:2309.09493](https://arxiv.org/abs/2309.09493)) vocoder: harmonic-plus-noise source filter + iSTFT-based output stage instead of a full waveform transposed-conv stack.
-- Mel input: 80 bins, 50 Hz.
-- Output sample rate: **24,000 Hz**.
-- F0 estimation: an internal small F0 predictor inside the vocoder graph supplies the sinusoidal source.
-- File: `hift.pt`, ~83 MB FP32.
-
-Both vocoders are **streamable** by feeding mel one chunk at a time with a small overlap (the receptive field is bounded by the ConvTranspose dilations).
-
-### 9. Instruction Modes (CosyVoice-Instruct & CosyVoice 2 native)
+## Instruction Modes (CosyVoice-Instruct & CosyVoice 2 native)
 
 In **CosyVoice 1-Instruct**, the model is fine-tuned with an additional natural-language instruction prefixed to the synthesis text and terminated by `<|endofprompt|>`. In **CosyVoice 2** the same mechanism is supported natively because the Qwen2.5 backbone already speaks fluent natural language.
 
@@ -300,7 +137,7 @@ Inline tags inside the synthesis text:
 - `<strong>word</strong>` — emphasizes the wrapped word(s).
 - `<|spkid_*|>` (CV1-SFT) — selects one of 7 preset speakers in the SFT model.
 
-### 10. CosyVoice 2 vs CosyVoice 1 — Concrete Differences
+## CosyVoice 2 vs CosyVoice 1 — Concrete Differences
 
 | Axis                          | CV1                              | CV2                                          |
 |-------------------------------|----------------------------------|----------------------------------------------|
@@ -317,26 +154,7 @@ Inline tags inside the synthesis text:
 | Instruction control           | Separate `Instruct` checkpoint   | **Native (no separate checkpoint)**          |
 | Total package size            | ~2.3 GB                          | ~4.4 GB                                      |
 
-### 11. Streaming Inference
-
-CosyVoice 2 is the streaming-first design. The pipeline below assumes streaming mode; non-streaming is just the special case where chunk size = full sequence.
-
-**End-to-end streaming flow** (see [STREAMING_AUDIO_INFERENCE.md](STREAMING_AUDIO_INFERENCE.md) for the C# `IAsyncEnumerable` patterns):
-
-1. **Text chunking**: text is split into 5-token (Qwen-tokens) chunks; chunks are pushed into the LM context.
-2. **LM speech-token generation**: after each 5 text tokens, the LM emits 15 speech tokens (the 5:15 ratio from training). This is the core streaming primitive — **the LM emits 15 speech tokens = 600 ms of audio per chunk**.
-3. **CFM chunk processing**: each new 15-token (= 600 ms) batch enters the chunk-aware causal CFM along with a small left-context of previous tokens and a right look-ahead. The CFM produces ~48 new mel frames (600 ms × 80 frames/s) per chunk via 10 Euler steps.
-4. **Vocoder streaming**: each mel chunk goes into HiFTNet which emits a corresponding 24 kHz audio chunk (with a small ring-buffer overlap for the boundary).
-5. **First-packet latency** = (first-chunk text encode) + (LM emit first 15 speech tokens) + (CFM 10 Euler steps on 1 chunk) + (vocoder one chunk) ≈ **150 ms** on an RTX 4090 per the paper. Steady-state RTF ≈ 0.15 (i.e., synthesis runs ~7× real-time) which is what makes the streaming pipeline have headroom for jitter.
-
-The "chunk-M / chunk-2M" choice from §6 selects the trade-off: higher M = better quality but longer first-packet delay because the CFM needs more lookahead before it can flush its first mel chunk.
-
-**Chunk boundary state** to thread through `IAsyncEnumerable` for each component:
-- LM: KV cache (Qwen2 GQA-style cache; 2 KV heads × 24 layers × 64 dim per token).
-- CFM: previous `prev_chunk_size` token embeddings + previous mel frames (for the causal attention left-context); the Euler ODE state itself does **not** persist across chunks — each chunk does a full 10-step solve from `x_1 ~ N(0,I)`.
-- Vocoder: trailing ConvTranspose state ≈ a few hundred samples; standard HiFiGAN streaming buffer.
-
-### 12. Sampling
+## Sampling
 
 #### LM (autoregressive speech token generation)
 | Knob               | Default            | Effect                                                                  |
@@ -358,7 +176,7 @@ The "chunk-M / chunk-2M" choice from §6 selects the trade-off: higher M = bette
 #### Vocoder
 Deterministic — no sampling knobs.
 
-### 13. HuggingFace File Listings
+## HuggingFace File Listings
 
 #### `FunAudioLLM/CosyVoice2-0.5B` (~4.36 GB total)
 
@@ -391,7 +209,7 @@ Deterministic — no sampling knobs.
 
 For both versions the tokenizer's vocab/merges are stored as standard HuggingFace tokenizer files — directly readable by `Tokenizers.NET` and our existing HartsyInference Qwen tokenizer loader.
 
-### 14. Memory and Performance
+## Memory and Performance
 
 #### VRAM (FP16, sole occupant on the GPU)
 | Component                        | CV1-300M  | CV2-0.5B  |
@@ -417,7 +235,7 @@ Single-GPU 4 GB is comfortable for CV2 in FP16; 6 GB needed for stable batch=2.
 
 CV2 first-packet latency on RTX 4090: ~150 ms with chunk-2M, ~95 ms with chunk-M (per paper §4.3).
 
-### 15. C# Implementation Notes
+## C# Implementation Notes
 
 Notes for the implementer of `HartsyInference.Audio` CosyVoice pipeline.
 
