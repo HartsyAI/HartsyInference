@@ -7,6 +7,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Audio.Pipelines;
 
@@ -198,6 +199,10 @@ public sealed unsafe class YuePipeline : IDisposable
             // vocal stem (quiet/rough); the Vocos vocal decoder fixes both the level and the fidelity.
             float[] vocalWav = DecodeStem(backend, vocalCodes, _vocalVocoder);
             float[] accompWav = DecodeStem(backend, accompCodes, _instVocoder);
+            // Per-stem levels before the sum: the only way to tell a mix-stage headroom problem (stems fine, sum
+            // clips) from a decode gain bug (a stem is already blown out).
+            Logs.Info($"YuE stems pre-mix: vocal peak={Peak(vocalWav):F3} rms={Rms(vocalWav):F3}, "
+                + $"inst peak={Peak(accompWav):F3} rms={Rms(accompWav):F3}.");
             audio = MixSum(vocalWav, accompWav);
             if (HasVocoders)
             {
@@ -206,9 +211,16 @@ public sealed unsafe class YuePipeline : IDisposable
                 // and takes everything below 5.5 kHz from the 16 kHz x-codec reconstruction. Vocos is a
                 // super-resolution decoder — its own low band is smeared (audibly "echoey"), and the energy match
                 // also pulls the level back down, which is what stops the sum from slamming into the clamp.
-                float[] draftMix = MixSum(DecodeFull(backend, vocalCodes), DecodeFull(backend, accompCodes));
-                audio = ReplaceLowFreqEnergyMatched(draftMix, _cfg.SampleRate, audio, VocosDecoder.SampleRate);
+                float[] vocalDraft = DecodeFull(backend, vocalCodes);
+                float[] instDraft = DecodeFull(backend, accompCodes);
+                Logs.Info($"YuE x-codec 16k stems: vocal peak={Peak(vocalDraft):F3} rms={Rms(vocalDraft):F3}, "
+                    + $"inst peak={Peak(instDraft):F3} rms={Rms(instDraft):F3}.");
+                float[] draftMix = MixSum(vocalDraft, instDraft);
+                float[] vocoderMix = audio;
+                _draftStems = (vocalDraft, instDraft);
+                audio = ReplaceLowFreqEnergyMatched(draftMix, _cfg.SampleRate, vocoderMix, VocosDecoder.SampleRate);
                 Logs.Info($"YuE post-process: low band < {CrossoverHz} Hz from the x-codec recon, energy-matched.");
+                DumpParityArtifacts(backend, vocalCodes, accompCodes, vocalWav, accompWav, vocoderMix, draftMix, audio);
             }
         }
         else
@@ -277,6 +289,90 @@ public sealed unsafe class YuePipeline : IDisposable
 
     /// <summary>Crossover between the x-codec recon and the Vocos output, per upstream's post-process.</summary>
     private const double CrossoverHz = 5500d;
+
+    /// <summary>The 16 kHz x-codec stem decodes, held only so the parity dump can record them.</summary>
+    private (float[] Vocal, float[] Inst)? _draftStems;
+
+    /// <summary>Peak absolute sample.</summary>
+    private static float Peak(float[] x)
+    {
+        float peak = 0f;
+        for (int i = 0; i < x.Length; i++) peak = Math.Max(peak, Math.Abs(x[i]));
+        return peak;
+    }
+
+    /// <summary>Writes every decode-stage intermediate to <c>$HARTSY_YUE_DUMP/yue_dump.safetensors</c> so the Python
+    /// reference can be run on the SAME codes. Opt-in and off by default — this is a diagnostic, not a product path.</summary>
+    private void DumpParityArtifacts(IBackend backend, int[][] vocalCodes, int[][] accompCodes,
+        float[] vocalWav, float[] instWav, float[] vocoderMix, float[] draftMix, float[] final)
+    {
+        string? directory = Environment.GetEnvironmentVariable("HARTSY_YUE_DUMP");
+        if (string.IsNullOrWhiteSpace(directory)) return;
+        try
+        {
+            Directory.CreateDirectory(directory);
+            Dictionary<string, Tensor> dump = new(StringComparer.Ordinal)
+            {
+                ["vocal_codes"] = CodesTensor(vocalCodes),
+                ["accomp_codes"] = CodesTensor(accompCodes),
+                ["vocal_44k"] = WaveTensor(vocalWav),
+                ["inst_44k"] = WaveTensor(instWav),
+                ["vocoder_mix"] = WaveTensor(vocoderMix),
+                ["draft_16k"] = WaveTensor(draftMix),
+                ["final_44k"] = WaveTensor(final),
+            };
+            if (_draftStems is { } stems)
+            {
+                dump["vocal_16k"] = WaveTensor(stems.Vocal);
+                dump["inst_16k"] = WaveTensor(stems.Inst);
+            }
+            // The Vocos input, so the vocoder can be checked in isolation from the x-codec RVQ that feeds it.
+            dump["vocal_latent"] = LatentTensor(backend, vocalCodes);
+            dump["accomp_latent"] = LatentTensor(backend, accompCodes);
+            string path = Path.Combine(directory, "yue_dump.safetensors");
+            SafeTensorsWriter.Save(path, dump);
+            foreach (Tensor tensor in dump.Values) tensor.Dispose();
+            Logs.Info($"[Audio][YuE] Wrote parity dump to '{path}'.");
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("[Audio][YuE] Parity dump failed — generation is unaffected", ex);
+        }
+    }
+
+    private static Tensor CodesTensor(int[][] codes)
+    {
+        int nq = codes.Length, t = codes[0].Length;
+        Tensor tensor = new(new TensorShape(nq, t), DType.I32);
+        int* p = (int*)tensor.DataPointer;
+        for (int q = 0; q < nq; q++)
+        {
+            for (int i = 0; i < t; i++) p[q * t + i] = codes[q][i];
+        }
+        return tensor;
+    }
+
+    private static Tensor WaveTensor(float[] wave)
+    {
+        Tensor tensor = new(new TensorShape(wave.Length), DType.F32);
+        float* p = (float*)tensor.DataPointer;
+        for (int i = 0; i < wave.Length; i++) p[i] = wave[i];
+        return tensor;
+    }
+
+    private Tensor LatentTensor(IBackend backend, int[][] codes)
+    {
+        int nq = codes.Length, t = codes[0].Length;
+        Tensor grid = new(new TensorShape(nq, 1, t), DType.I32);
+        int* gp = (int*)grid.DataPointer;
+        for (int q = 0; q < nq; q++)
+        {
+            for (int i = 0; i < t; i++) gp[q * t + i] = codes[q][i];
+        }
+        Tensor latent = _xcodec.DecodeToLatent(backend, grid, batch: 1, tFrames: t);
+        grid.Dispose();
+        return latent;
+    }
 
     /// <summary>Upstream <c>replace_low_freq_with_energy_matched</c>: resample the 16 kHz x-codec mix up to the
     /// vocoder rate, low-pass both at <see cref="CrossoverHz"/>, scale the recon's low band so its RMS matches the

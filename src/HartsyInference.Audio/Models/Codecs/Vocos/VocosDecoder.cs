@@ -108,7 +108,8 @@ public sealed unsafe class VocosDecoder
             Tensor up = WhisperOps.ProjectLinear(backend, normed, _fc1W[i]!, _fc1B[i], batch, tDw, Dim, IntermediateDim);
             normed.Dispose();
             Tensor act = new(up.Shape, DType.F32);
-            backend.Gelu(act, up);
+            // Vocos uses nn.GELU() — the exact erf form, not the tanh approximation.
+            backend.GeluErf(act, up);
             up.Dispose();
             Tensor down = WhisperOps.ProjectLinear(backend, act, _fc2W[i]!, _fc2B[i], batch, tDw, IntermediateDim, Dim);
             act.Dispose();
@@ -169,10 +170,14 @@ public sealed unsafe class VocosDecoder
     }
 
     /// <summary>Vocos ISTFTHead: <c>mag = exp(out[:n_bins])</c> (clipped), <c>phase = out[n_bins:]</c>, complex
-    /// spectrogram → iSTFT (Hann, center=True) overlap-add. Matches <see cref="WavTokenizer.WavTokenizerHead"/>.</summary>
+    /// spectrogram → iSTFT overlap-add with the head's <c>padding="same"</c> (per the shipped config.yaml), which
+    /// trims <c>(n_fft - hop)/2</c> per end and yields <c>frames · hop</c> samples.</summary>
     private Tensor ApplyIStft(Tensor magPhase, int batch, int tFrames)
     {
-        int outLen = (tFrames - 1) * HopLength;
+        // "same", NOT center: trimming n_fft/2 instead would start the waveform 441 samples late and drop 882 —
+        // and since the x-codec band the post-process crosses this against is correctly timed, that offset combs.
+        int edgePad = (NFft - HopLength) / 2;
+        int outLen = tFrames * HopLength;
         Tensor pcm = new(new TensorShape(batch, 1, outLen), DType.F32);
         float* dp = (float*)pcm.DataPointer;
         float* mp = (float*)magPhase.DataPointer;
@@ -185,13 +190,15 @@ public sealed unsafe class VocosDecoder
                 int srcBase = (b * tFrames + t) * (_nBins * 2);
                 for (int k = 0; k < _nBins; k++)
                 {
-                    float mag = MathF.Exp(MathF.Min(mp[srcBase + k], 100f));   // Vocos clips mag to 1e2
+                    // Vocos clips the MAGNITUDE at 1e2, not the log-magnitude: torch.clip(torch.exp(x), max=1e2).
+                    // Clipping before the exp lets mag reach e^100 and disables the safeguard entirely.
+                    float mag = MathF.Min(MathF.Exp(mp[srcBase + k]), 100f);
                     float phase = mp[srcBase + _nBins + k];
                     re[t * _nBins + k] = mag * MathF.Cos(phase);
                     im[t * _nBins + k] = mag * MathF.Sin(phase);
                 }
             }
-            float[] wav = IStft.Apply(re, im, tFrames, NFft, HopLength);
+            float[] wav = IStft.Apply(re, im, tFrames, NFft, HopLength, edgePad);
             int copy = Math.Min(wav.Length, outLen);
             for (int j = 0; j < copy; j++) dp[b * outLen + j] = wav[j];
             for (int j = copy; j < outLen; j++) dp[b * outLen + j] = 0f;
