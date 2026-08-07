@@ -167,6 +167,17 @@ pending longer soak.
 
 ---
 
+## Auto-selection (`--parallel auto`, shipped 2026-08-07)
+
+`ParallelPlanner.Suggest` (Engine) probes the topology (SM balance, NVLink/P2P matrix, model size
+when known) and picks a placement from the MEASURED verdicts above — conservative by design: fit
+strategies only when the model exceeds the primary card, latency strategies only on balanced
+NVLink-class fabric (this dev pair's measured losses are the justification), CFG-parallel auto only
+for video with strict secondary-fit margin (the SDXL trap), single otherwise. Every decision logs a
+greppable `[ParallelPlan]` line with the reason. CLI: `--parallel auto` on image/video/music
+commands (explicit placement flags always win). Pinned by `ParallelPlannerTests` (11 synthetic
+topologies, CPU-only).
+
 ## Quick reference: feature → config → test
 
 | Feature | Library config | CLI | Extension | Verification class |

@@ -76,7 +76,8 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Music);
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
-        (int? gpu, EngineOptions? engineOptions) = PlacementCli.Build(settings, settings.Backend);
+        (int? gpu, EngineOptions? engineOptions) = PlacementCli.Build(settings, settings.Backend,
+            HartsyInference.Engine.Modality.Music, PlacementCli.TryModelBytes(settings.Model));
         return CommandRunner.Run(Modality.Music, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false, gpu, engineOptions);
     }

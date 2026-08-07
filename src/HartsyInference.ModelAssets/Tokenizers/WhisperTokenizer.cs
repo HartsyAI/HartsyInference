@@ -27,20 +27,25 @@ public sealed class WhisperTokenizer : IDisposable
     /// <summary>Start-of-transcript token. ID 50258.</summary>
     public const int StartOfTranscriptId = 50_258;
 
-    /// <summary>Translate-task token. ID 50358.</summary>
+    /// <summary>Translate-task token in the &lt;=v2 layout. ID 50358. large-v3 added a 100th language
+    /// (<c>&lt;|yue|&gt;</c>), which shifts this and every later special up by one — prefer the instance
+    /// <see cref="TranslateId"/>, which reads the checkpoint's own <c>added_tokens.json</c>.</summary>
     public const int TranslateTokenId = 50_358;
 
-    /// <summary>Transcribe-task token. ID 50359.</summary>
+    /// <summary>Transcribe-task token in the &lt;=v2 layout. ID 50359. See <see cref="TranscribeId"/>.</summary>
     public const int TranscribeTokenId = 50_359;
 
-    /// <summary>No-speech token (emitted when audio has no speech). ID 50362.</summary>
+    /// <summary>No-speech token in the &lt;=v2 layout. ID 50362. See <see cref="NoSpeechId"/>.</summary>
     public const int NoSpeechTokenId = 50_362;
 
-    /// <summary>No-timestamps token; suppresses the 1501 timestamp tokens. ID 50363.</summary>
+    /// <summary>No-timestamps token in the &lt;=v2 layout. ID 50363. See <see cref="NoTimestampsId"/>.</summary>
     public const int NoTimestampsTokenId = 50_363;
 
-    /// <summary>First timestamp token (0.00 s). Timestamps span 50364..51864 in 0.02 s steps.</summary>
+    /// <summary>First timestamp token (0.00 s) in the &lt;=v2 layout. ID 50364. See <see cref="FirstTimestampId"/>.</summary>
     public const int TimestampStartId = 50_364;
+
+    /// <summary>Number of timestamp tokens: 0.00 s to 30.00 s inclusive in 0.02 s steps.</summary>
+    private const int TimestampCount = 1_501;
 
     // GPT-2 pre-tokenization regex (verbatim from HuggingFace whisper tokenizer.json
     // "pre_tokenizer" section). Splits on contractions, letter runs, digit runs,
@@ -71,6 +76,31 @@ public sealed class WhisperTokenizer : IDisposable
 
     /// <summary>Total vocab size including special tokens. Use this to size embedding matrices.</summary>
     public int VocabSize => _vocabSize;
+
+    /// <summary>Translate-task token for THIS checkpoint, read from its <c>added_tokens.json</c>.</summary>
+    public int TranslateId { get; }
+
+    /// <summary>Transcribe-task token for THIS checkpoint.</summary>
+    public int TranscribeId { get; }
+
+    /// <summary>No-speech token for THIS checkpoint.</summary>
+    public int NoSpeechId { get; }
+
+    /// <summary>No-timestamps token for THIS checkpoint. Feeding the &lt;=v2 constant to a v3 checkpoint lands on
+    /// <c>&lt;|nospeech|&gt;</c> instead, and the decoder answers with an immediate EOT — an empty transcript.</summary>
+    public int NoTimestampsId { get; }
+
+    /// <summary>First timestamp token (0.00 s) for THIS checkpoint.</summary>
+    public int FirstTimestampId { get; }
+
+    /// <summary>Last timestamp token (30.00 s) for THIS checkpoint, inclusive.</summary>
+    public int LastTimestampId => FirstTimestampId + TimestampCount - 1;
+
+    /// <summary>Whether <paramref name="id"/> is one of this checkpoint's timestamp tokens.</summary>
+    public bool IsTimestampId(int id) => id >= FirstTimestampId && id <= LastTimestampId;
+
+    /// <summary>Seconds encoded by one of this checkpoint's timestamp tokens (0.02 s per step).</summary>
+    public double SecondsForTimestamp(int id) => (id - FirstTimestampId) * 0.02;
 
     /// <summary>Creates a Whisper tokenizer from HuggingFace-format files. Pass the
     /// directory holding <c>vocab.json</c>, <c>merges.txt</c>, and (optionally)
@@ -104,7 +134,20 @@ public sealed class WhisperTokenizer : IDisposable
         _vocabSize = ComputeVocabSize(vocabPath);
         _specialTokensReverse = new Dictionary<int, string>(_specialTokens.Count);
         foreach ((string tok, int id) in _specialTokens) _specialTokensReverse[id] = tok;
+
+        // Resolve the post-language specials from the checkpoint itself rather than assuming a layout: v3 added a
+        // 100th language token and pushed all of these up by one. English-only checkpoints ship no added_tokens.json,
+        // so fall back to the <=v2 constants, which is the layout they use.
+        TranslateId = SpecialId("<|translate|>", TranslateTokenId);
+        TranscribeId = SpecialId("<|transcribe|>", TranscribeTokenId);
+        NoSpeechId = SpecialId("<|nospeech|>", NoSpeechTokenId);
+        NoTimestampsId = SpecialId("<|notimestamps|>", NoTimestampsTokenId);
+        FirstTimestampId = SpecialId("<|0.00|>", NoTimestampsId + 1);
     }
+
+    /// <summary>The checkpoint's id for a special token, or <paramref name="fallback"/> when it declares none.</summary>
+    private int SpecialId(string token, int fallback)
+        => _specialTokens.TryGetValue(token, out int id) ? id : fallback;
 
     /// <summary>Tokenizes plain text into raw BPE token IDs (no special prefix / suffix).
     /// Use <see cref="BuildPromptIds"/> to assemble the full Whisper decoder prompt with
@@ -131,8 +174,8 @@ public sealed class WhisperTokenizer : IDisposable
             int langId = LanguageToTokenId(language);
             ids.Add(langId);
         }
-        ids.Add(translate ? TranslateTokenId : TranscribeTokenId);
-        if (!withTimestamps) ids.Add(NoTimestampsTokenId);
+        ids.Add(translate ? TranslateId : TranscribeId);
+        if (!withTimestamps) ids.Add(NoTimestampsId);
         return ids.ToArray();
     }
 

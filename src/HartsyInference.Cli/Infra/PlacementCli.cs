@@ -40,6 +40,10 @@ public class PlacementCliSettings : CommandSettings
     [CommandOption("--lm-shard-gpu")]
     [Description("Split large LMs' layers across the primary GPU and this CUDA ordinal (weights POOLED). Text models layer-split as with --device \"cuda:0+cuda:1\"; big audio LMs (YuE Stage-1) then default to UN-quantized checkpoint precision instead of Q4_K (override with HARTSY_AUDIO_LM_QUANT=q4k|q8|off). Implied by --dit-shard-gpu, which feeds the same shard list.")]
     public int? LmShardGpu { get; init; }
+
+    [CommandOption("--parallel")]
+    [Description("'auto' probes the GPU topology (SM balance, NVLink/P2P, model size when the checkpoint is on disk) and picks a placement per the measured verdicts in docs/PARALLELISM_GUIDE.md — the [[ParallelPlan]] log line states the choice and why. Ignored when any explicit placement flag is passed (explicit always wins).")]
+    public string? Parallel { get; init; }
 }
 
 /// <summary>Builds the engine placement from CLI options with the same eager validation the extension does — a
@@ -48,9 +52,15 @@ public static class PlacementCli
 {
     /// <summary>Resolves (primary ordinal, EngineOptions) from placement settings; both null when no
     /// placement flag was passed (byte-identical single-GPU default path).</summary>
-    public static (int? Gpu, EngineOptions? Options) Build(PlacementCliSettings settings, string backendSelector)
+    public static (int? Gpu, EngineOptions? Options) Build(PlacementCliSettings settings, string backendSelector,
+        HartsyInference.Engine.Modality? modality = null, long modelBytes = 0)
     {
         int primary = settings.Gpu ?? 0;
+        bool autoRequested = string.Equals(settings.Parallel, "auto", StringComparison.OrdinalIgnoreCase);
+        if (settings.Parallel is not null && !autoRequested)
+        {
+            throw new ArgumentException($"--parallel only understands 'auto', got '{settings.Parallel}'.");
+        }
         string? teSelector = SelectorFor(settings.TextEncoderGpu, primary);
         string? vaeSelector = SelectorFor(settings.VaeGpu, primary);
         string? cfgSelector = SelectorFor(settings.CfgParallelGpu, primary);
@@ -65,8 +75,31 @@ public static class PlacementCli
         string? shardSelector = ditShardSelector ?? lmShardSelector;
         IReadOnlyList<string> cpDevices = ContextParallelDevicesFor(settings.ContextParallelGpus, primary, backendSelector);
 
-        if (teSelector is null && vaeSelector is null && cfgSelector is null && shardSelector is null && cpDevices.Count == 0)
+        bool anyExplicit = teSelector is not null || vaeSelector is not null || cfgSelector is not null
+            || shardSelector is not null || cpDevices.Count > 0;
+        if (autoRequested && anyExplicit)
         {
+            Logs.Warning("--parallel auto ignored: explicit placement flags were passed and always win.");
+        }
+        if (!anyExplicit)
+        {
+            if (autoRequested && modality is HartsyInference.Engine.Modality m)
+            {
+                // The planner probes fastest-first and builds its own device list; --gpu is not consulted in
+                // auto mode (pass explicit flags to pin devices). Suggest() logs the [ParallelPlan] decision.
+                HartsyInference.Engine.Placement.ParallelPlan plan = HartsyInference.Engine.Placement.ParallelPlanner.Suggest(
+                    new HartsyInference.Engine.Placement.ParallelPlanRequest
+                    {
+                        Modality = m,
+                        ModelBytes = modelBytes,
+                        Gpus = HartsyInference.Cuda.CudaTopology.Probe(),
+                        Links = HartsyInference.Cuda.CudaTopology.ProbeLinks(),
+                    });
+                if (!plan.Placement.IsSingle)
+                {
+                    return (settings.Gpu, new EngineOptions { Placement = plan.Placement });
+                }
+            }
             return (settings.Gpu, null);
         }
 
@@ -94,6 +127,25 @@ public static class PlacementCli
         // with the planner's explanatory message, instead of after the engine spins up.
         PlacementPlanner.ValidatePlacement(placement);
         return (primary, new EngineOptions { Placement = placement });
+    }
+
+    /// <summary>Best-effort model size for the auto planner: the file's length when the -m argument is an
+    /// on-disk path, else 0 (catalog ids resolve later in the engine — unknown size makes the planner assume
+    /// the model fits and consider only latency strategies, the safe direction).</summary>
+    public static long TryModelBytes(string? model)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(model) && File.Exists(model))
+            {
+                return new FileInfo(model).Length;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"--parallel auto: model size probe failed ({ex.Message}); planning with unknown size.");
+        }
+        return 0;
     }
 
     private static string? SelectorFor(int? ordinal, int primary) =>

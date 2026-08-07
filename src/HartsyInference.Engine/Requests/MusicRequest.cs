@@ -32,6 +32,13 @@ public sealed record MusicRequest
     /// <summary>Top-K sampling cutoff (HeartMuLa); null uses the pipeline default.</summary>
     public int? TopK { get; init; }
 
+    /// <summary>Nucleus sampling threshold (YuE); null uses the pipeline default.</summary>
+    public double? TopP { get; init; }
+
+    /// <summary>Repetition penalty (YuE); null uses the pipeline default. Below 1 it would reward repetition —
+    /// YuE loops into instrumental phrases without it, so the loader floors it at 1.</summary>
+    public double? RepetitionPenalty { get; init; }
+
     /// <summary>BPM meta (ACE-Step prompt template); null = "N/A".</summary>
     public int? Bpm { get; init; }
 

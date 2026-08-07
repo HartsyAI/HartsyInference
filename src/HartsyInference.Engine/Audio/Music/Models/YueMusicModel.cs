@@ -117,7 +117,14 @@ internal static class YueMusicModel
             }
             int maxFrames = (int)(Math.Clamp(request.Duration, 5d, 300d) * config.FrameRateHz);
             int perSegment = Math.Max(config.FrameRateHz, maxFrames / segmentPrompts.Count);
-            return MusicAudio.Mono(pipeline.Synthesize(backend, headIds, segmentPrompts, maxFramesPerSegment: perSegment, seed: request.Seed));
+            return MusicAudio.Mono(pipeline.Synthesize(backend, headIds, segmentPrompts, maxFramesPerSegment: perSegment,
+                seed: request.Seed,
+                temperature: (float?)request.Temperature,
+                topK: request.TopK,
+                topP: (float?)request.TopP,
+                // < 1 rewards repetition and collapses Stage-1 into a loop; the config default is the reference 1.1.
+                repetitionPenalty: request.RepetitionPenalty is { } penalty ? (float)Math.Max(1d, penalty) : null,
+                guidanceScale: (float?)request.CfgScale));
         }
 
         List<IDisposable?> disposables = [pipeline, stage1Loader, codecLoader, tokenizer];
@@ -281,25 +288,64 @@ internal static class YueMusicModel
 
     /// <summary>Finds a file inside the checkpoint folder, then one directory up (so variants can share one copy).</summary>
     private static string? FindSibling(string folder, string fileName)
-    {
-        string inside = Path.Combine(folder, fileName);
-        if (File.Exists(inside))
-        {
-            return inside;
-        }
-        string parent = Path.Combine(Directory.GetParent(folder)?.FullName ?? folder, fileName);
-        return File.Exists(parent) ? parent : null;
-    }
+        => Probe(folder, fileName, File.Exists);
 
     /// <summary>Directory analog of <see cref="FindSibling"/>: a subfolder of the checkpoint, then one level up.</summary>
     private static string? FindSiblingFolder(string folder, string name)
+        => Probe(folder, name, Directory.Exists);
+
+    /// <summary>Looks for <paramref name="name"/> under the checkpoint folder, its parent, and any case-variant
+    /// of that parent — consumers disagree on the family root's casing (the engine resolves <c>music/yue</c> from
+    /// the family id, AudioLab builds <c>music/YuE</c> from the provider's display prefix), and on a case-sensitive
+    /// filesystem those are two trees. Without this, sidecars dropped in one are invisible from the other and the
+    /// pipeline silently degrades to the cb0-only 16 kHz draft. Each level is matched case-insensitively too.</summary>
+    private static string? Probe(string folder, string name, Func<string, bool> exists)
     {
-        string inside = Path.Combine(folder, name);
-        if (Directory.Exists(inside))
+        string? parent = Directory.GetParent(folder)?.FullName;
+        foreach (string root in Roots(folder, parent))
         {
-            return inside;
+            string exact = Path.Combine(root, name);
+            if (exists(exact))
+            {
+                return exact;
+            }
+            if (!Directory.Exists(root))
+            {
+                continue;
+            }
+            string? match = Directory.EnumerateFileSystemEntries(root)
+                .FirstOrDefault(e => string.Equals(Path.GetFileName(e), name, StringComparison.OrdinalIgnoreCase) && exists(e));
+            if (match is not null)
+            {
+                return match;
+            }
         }
-        string parent = Path.Combine(Directory.GetParent(folder)?.FullName ?? folder, name);
-        return Directory.Exists(parent) ? parent : null;
+        return null;
+    }
+
+    /// <summary>Search roots in priority order: the checkpoint folder, its parent, then the parent's case-variant
+    /// siblings (the split-family-root case).</summary>
+    private static IEnumerable<string> Roots(string folder, string? parent)
+    {
+        yield return folder;
+        if (parent is null)
+        {
+            yield break;
+        }
+        yield return parent;
+        string? grandparent = Directory.GetParent(parent)?.FullName;
+        if (grandparent is null)
+        {
+            yield break;
+        }
+        string parentName = Path.GetFileName(parent);
+        foreach (string sibling in Directory.EnumerateDirectories(grandparent))
+        {
+            if (!string.Equals(sibling, parent, StringComparison.Ordinal)
+                && string.Equals(Path.GetFileName(sibling), parentName, StringComparison.OrdinalIgnoreCase))
+            {
+                yield return sibling;
+            }
+        }
     }
 }

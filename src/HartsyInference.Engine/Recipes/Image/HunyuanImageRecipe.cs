@@ -120,9 +120,23 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             Dictionary<string, Tensor> vaeWeights = RemapVaeKeys(vaeLoader.GetAllTensors());
             HunyuanImageVaeDecoder vaeDecoder = new HunyuanImageVaeDecoder(VaeConfig.HunyuanImage);
             vaeDecoder.LoadWeights(vaeWeights);
-            // The generic VaeEncoder is stage-count-driven, so VaeConfig.HunyuanImage's 6-block list gives the 32x
-            // downscale this family needs — no bespoke encoder class required.
-            VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.HunyuanImage, vaeWeights, "HunyuanImageRecipe");
+            // This VAE's ENCODER half doesn't fit the generic VaeEncoder: it changes channels in the
+            // downsample convs BETWEEN levels (every resnet is same-channel, zero conv_shortcut keys in the
+            // file), while the generic encoder assumes diffusers-style channel-changing first-resnets — so
+            // the load throws on a key that architecturally cannot exist. Degrade to encoder-null (img2img
+            // refused by name, the TryBuildEncoder contract) instead of failing t2i construction for a
+            // component t2i never runs. A bespoke 2.1 encoder is the img2img unlock, not this call.
+            VaeEncoder? vaeEncoder;
+            try
+            {
+                vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.HunyuanImage, vaeWeights, "HunyuanImageRecipe");
+            }
+            catch (KeyNotFoundException)
+            {
+                Logs.Warning("[HunyuanImageRecipe] The 2.1 VAE's encoder half uses a between-level channel scheme "
+                    + "the generic VaeEncoder can't model — img2img/inpaint disabled for this family; t2i unaffected.");
+                vaeEncoder = null;
+            }
 
             HunyuanImagePipeline pipeline = new HunyuanImagePipeline(context.Backend, qwenEncoder, transformer, vaeDecoder, config)
             {

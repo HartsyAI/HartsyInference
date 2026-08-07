@@ -6,7 +6,7 @@
 # RealWeightGate instead of silently skipping, so a green exit genuinely means every listed test executed.
 #
 # Usage: tests/run-multigpu-campaign.sh [phaseA|phaseB|all]   (default: phaseA)
-#   phaseA — needs only checkpoints already on this box (Krea2, Flux1, SDXL, Qwen-Image-Edit, MiniMaxH3 fp8;
+#   phaseA — needs only checkpoints already on this box (Krea2, SDXL, Qwen-Image-Edit, MiniMaxH3 fp8;
 #            plus Wan TI2V-5B, Chroma HD, and HunyuanImage 2.1 — verified on disk 2026-08-06 and
 #            reclassified here from phase B)
 #   phaseB — additionally needs the downloaded checkpoints (ltx-video [~9.4 GB, Lightricks/LTX-Video — on
@@ -123,6 +123,8 @@ phase_a() {
     # data (no checkpoint) but REAL 2-GPU NCCL communication — libnccl resolves from the standard probe dirs.
     run_class HartsyInference.Cuda.Tests       CollectiveCommTests
     run_class HartsyInference.API.Tests        PlacementPlannerTests
+    # Phase 4 auto-strategy planner (2026-08-07): measured-fact rules on synthetic topologies (CPU-only).
+    run_class HartsyInference.API.Tests        ParallelPlannerTests
     run_class HartsyInference.Core.Tests       PlacementConfigTests
     run_class HartsyInference.LLM.Tests        LlmPlacementTests
     # Phase 3 tensor parallelism (2026-08-07): CPU synthetic parity (degree-2 vs unstaged, prefill+decode,
@@ -137,9 +139,7 @@ phase_a() {
     run_class HartsyInference.Diffusion.Tests  Krea2DitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
     run_class HartsyInference.Diffusion.Tests  Krea2DitShardingEngineTests.DitSharding_NonResident_FreesShardBackend_NoAccumulationAcrossGenerations HARTSY_KEEP_MODELS=0
     # New Phase A classes land with their implementation parts:
-    run_class HartsyInference.Diffusion.Tests  FluxComponentPlacementEngineTests
     run_class HartsyInference.Diffusion.Tests  SdxlComponentPlacementEngineTests
-    run_class HartsyInference.Diffusion.Tests  FluxCfgParallelFallbackTests
     run_class HartsyInference.Diffusion.Tests  SdxlCfgParallelEngineTests
     # FIXED 2026-08-05: two engines co-resident on one ordinal near VRAM capacity forced Flux into
     # block-streaming mode (not enough VRAM to stay resident), which conflicts with step-graph capture —
@@ -194,8 +194,6 @@ phase_a() {
     # finding above), asserts 3 distinct backend instances hold provably distinct, disjoint block ranges and the
     # forward completes finite.
     run_class HartsyInference.Diffusion.Tests  QwenImageDitSharding3StageVramTests
-    run_class HartsyInference.Diffusion.Tests  FluxDitShardingVramTests
-    run_class HartsyInference.Diffusion.Tests  FluxDitShardingEngineTests
     run_class HartsyInference.Diffusion.Tests  MiniMaxH3DitShardingTests
     run_class HartsyInference.Diffusion.Tests  MiniMaxH3DitShardingVramTests
     # Full-engine real-generation variant (the 6th sibling's engine test). 2026-08-06: the cross-device
@@ -299,6 +297,14 @@ phase_a() {
 # ── Phase B: LTX family (Chroma/HunyuanImage/Wan moved to phase A 2026-08-06 — checkpoints on disk) ──────
 
 phase_b() {
+    # Flux classes MOVED here from phase A 2026-08-07: flux1-dev-fp8.safetensors was DELETED from disk
+    # (drive at 98%; ~17 GB re-pull doesn't fit the 24 GB free) — same on-disk-reality policy as LTX-2.3;
+    # these FAIL LOUDLY under strict mode until the checkpoint is re-pulled. Historical results remain
+    # valid in the benchmark doc (all four were green on the 2026-08-05 campaign while the file existed).
+    run_class HartsyInference.Diffusion.Tests  FluxComponentPlacementEngineTests
+    run_class HartsyInference.Diffusion.Tests  FluxCfgParallelFallbackTests
+    run_class HartsyInference.Diffusion.Tests  FluxDitShardingVramTests
+    run_class HartsyInference.Diffusion.Tests  FluxDitShardingEngineTests
     # LTX-1 (ltx-video-2b-v0.9.safetensors, ~9.4 GB, Lightricks/LTX-Video) — needed a download on this box.
     # TE was already wired (LtxVideoRecipePipeline._textBackend); VAE placement is new (LtxVideoPipeline.VaeBackend).
     run_class HartsyInference.Diffusion.Tests  LtxVideoComponentPlacementEngineTests

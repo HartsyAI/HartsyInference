@@ -199,12 +199,12 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         double? start = null;
         foreach (int id in tokens)
         {
-            if (!WhisperTokenizer.IsTimestamp(id))
+            if (!_tokenizer.IsTimestampId(id))
             {
                 buffer.Add(id);
                 continue;
             }
-            double at = WhisperTokenizer.TimestampToSeconds(id);
+            double at = _tokenizer.SecondsForTimestamp(id);
             if (start is not null && buffer.Count > 0)
             {
                 Emit(segments, buffer, start.Value, at);
@@ -237,20 +237,20 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         // Run the prompt through the decoder in a single pass — the logits at the last
         // prompt position are the distribution we sample our first text token from.
         Tensor logits = _decoder.DecodeStep(backend, prompt, state);
-        int nextToken = ArgMaxIgnoringSpecial(logits, _cfg);
+        int nextToken = ArgMaxIgnoringSpecial(logits, _tokenizer);
         logits.Dispose();
 
         List<int> generated = new(opts.MaxNewTokens);
         int[] singleBuf = new int[1];
         for (int step = 0; step < opts.MaxNewTokens; step++)
         {
-            if (nextToken == _cfg.EndOfTextTokenId) break;
+            if (nextToken == WhisperTokenizer.EndOfTextId) break;
             generated.Add(nextToken);
 
             // Feed only the new token forward; the cache holds everything prior.
             singleBuf[0] = nextToken;
             Tensor stepLogits = _decoder.DecodeStep(backend, singleBuf, state);
-            nextToken = ArgMaxIgnoringSpecial(stepLogits, _cfg);
+            nextToken = ArgMaxIgnoringSpecial(stepLogits, _tokenizer);
             stepLogits.Dispose();
         }
 
@@ -262,17 +262,18 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     /// no-speech) so they can't be emitted mid-stream; otherwise the model often
     /// re-emits its own start tokens and freezes the decode. The full OpenAI suppress
     /// list (~99 entries including punctuation heuristics) lands with temperature
-    /// fallback later.</summary>
-    private static unsafe int ArgMaxIgnoringSpecial(Tensor logits, WhisperConfig cfg)
+    /// fallback later. Ids come from the tokenizer, not the config — only it knows
+    /// whether this checkpoint uses the v3 (100-language) layout.</summary>
+    private static unsafe int ArgMaxIgnoringSpecial(Tensor logits, WhisperTokenizer tokenizer)
     {
         int vocab = (int)logits.Shape[logits.Shape.Rank - 1];
         float* p = (float*)logits.DataPointer;
 
-        // Suppress prompt-only tokens.
-        for (int id = cfg.StartOfTranscriptTokenId; id <= cfg.TranscribeTokenId; id++)
+        // Suppress prompt-only tokens: SOT, every language tag, and both task tokens.
+        for (int id = WhisperTokenizer.StartOfTranscriptId; id <= tokenizer.TranscribeId; id++)
             if (id < vocab) p[id] = float.NegativeInfinity;
-        if (cfg.NoSpeechTokenId < vocab) p[cfg.NoSpeechTokenId] = float.NegativeInfinity;
-        if (cfg.NoTimestampsTokenId < vocab) p[cfg.NoTimestampsTokenId] = float.NegativeInfinity;
+        if (tokenizer.NoSpeechId < vocab) p[tokenizer.NoSpeechId] = float.NegativeInfinity;
+        if (tokenizer.NoTimestampsId < vocab) p[tokenizer.NoTimestampsId] = float.NegativeInfinity;
 
         int best = 0;
         float bestV = float.NegativeInfinity;

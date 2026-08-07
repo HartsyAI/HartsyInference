@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Audio.Models.Codecs.Vocos;
 using HartsyInference.Audio.Models.Codecs.XCodec;
+using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Music;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -198,6 +199,17 @@ public sealed unsafe class YuePipeline : IDisposable
             float[] vocalWav = DecodeStem(backend, vocalCodes, _vocalVocoder);
             float[] accompWav = DecodeStem(backend, accompCodes, _instVocoder);
             audio = MixSum(vocalWav, accompWav);
+            if (HasVocoders)
+            {
+                // The Vocos mix is upstream's INTERMEDIATE, not its output: infer.py ends in
+                // post_process_audio.replace_low_freq_with_energy_matched, which keeps only the vocoder's HIGH band
+                // and takes everything below 5.5 kHz from the 16 kHz x-codec reconstruction. Vocos is a
+                // super-resolution decoder — its own low band is smeared (audibly "echoey"), and the energy match
+                // also pulls the level back down, which is what stops the sum from slamming into the clamp.
+                float[] draftMix = MixSum(DecodeFull(backend, vocalCodes), DecodeFull(backend, accompCodes));
+                audio = ReplaceLowFreqEnergyMatched(draftMix, _cfg.SampleRate, audio, VocosDecoder.SampleRate);
+                Logs.Info($"YuE post-process: low band < {CrossoverHz} Hz from the x-codec recon, energy-matched.");
+            }
         }
         else
         {
@@ -261,6 +273,80 @@ public sealed unsafe class YuePipeline : IDisposable
         Buffer.MemoryCopy((void*)pcm.DataPointer, System.Runtime.CompilerServices.Unsafe.AsPointer(ref wav[0]), n * 4, n * 4);
         pcm.Dispose();
         return wav;
+    }
+
+    /// <summary>Crossover between the x-codec recon and the Vocos output, per upstream's post-process.</summary>
+    private const double CrossoverHz = 5500d;
+
+    /// <summary>Upstream <c>replace_low_freq_with_energy_matched</c>: resample the 16 kHz x-codec mix up to the
+    /// vocoder rate, low-pass both at <see cref="CrossoverHz"/>, scale the recon's low band so its RMS matches the
+    /// vocoder's low band, and add it to the vocoder's high-passed band. Filters are single-pass RBJ biquads at
+    /// Q = 1/√2, matching torchaudio's <c>lowpass_biquad</c>/<c>highpass_biquad</c> + causal <c>lfilter</c>.</summary>
+    private static float[] ReplaceLowFreqEnergyMatched(float[] recon, int reconRate, float[] vocoded, int vocodedRate)
+    {
+        float[] reconUp = reconRate == vocodedRate ? recon : Resampler.Create(reconRate, vocodedRate).Resample(recon);
+        float[] reconLow = LowPass(reconUp, vocodedRate, CrossoverHz);
+        float[] vocodedLow = LowPass(vocoded, vocodedRate, CrossoverHz);
+        const double eps = 1e-10;
+        double scale = (Rms(vocodedLow) + eps) / (Rms(reconLow) + eps);
+        float[] vocodedHigh = HighPass(vocoded, vocodedRate, CrossoverHz);
+        // Upstream truncates to the shorter of the two rather than padding.
+        int n = Math.Min(reconLow.Length, vocodedHigh.Length);
+        float[] mix = new float[n];
+        for (int i = 0; i < n; i++)
+        {
+            float v = (float)(reconLow[i] * scale) + vocodedHigh[i];
+            mix[i] = v > 0.99f ? 0.99f : (v < -0.99f ? -0.99f : v);
+        }
+        return mix;
+    }
+
+    /// <summary>Root-mean-square over the whole buffer (upstream's global, not per-channel, RMS).</summary>
+    private static double Rms(float[] x)
+    {
+        if (x.Length == 0) return 0d;
+        double sum = 0d;
+        for (int i = 0; i < x.Length; i++) sum += (double)x[i] * x[i];
+        return Math.Sqrt(sum / x.Length);
+    }
+
+    /// <summary>RBJ low-pass biquad (Q = 1/√2), applied causally like torchaudio's <c>lfilter</c>.</summary>
+    private static float[] LowPass(float[] x, int sampleRate, double cutoff)
+    {
+        (double w0, double alpha, double cosW0) = BiquadTerms(sampleRate, cutoff);
+        double b1 = 1d - cosW0;
+        return Biquad(x, b1 / 2d, b1, b1 / 2d, 1d + alpha, -2d * cosW0, 1d - alpha);
+    }
+
+    /// <summary>RBJ high-pass biquad (Q = 1/√2), applied causally like torchaudio's <c>lfilter</c>.</summary>
+    private static float[] HighPass(float[] x, int sampleRate, double cutoff)
+    {
+        (double w0, double alpha, double cosW0) = BiquadTerms(sampleRate, cutoff);
+        double b0 = (1d + cosW0) / 2d;
+        return Biquad(x, b0, -(1d + cosW0), b0, 1d + alpha, -2d * cosW0, 1d - alpha);
+    }
+
+    private static (double W0, double Alpha, double CosW0) BiquadTerms(int sampleRate, double cutoff)
+    {
+        const double q = 0.707106781186547524401d;   // 1/√2, torchaudio's default Q
+        double w0 = 2d * Math.PI * cutoff / sampleRate;
+        return (w0, Math.Sin(w0) / (2d * q), Math.Cos(w0));
+    }
+
+    /// <summary>Direct-form-I biquad with zero initial state.</summary>
+    private static float[] Biquad(float[] x, double b0, double b1, double b2, double a0, double a1, double a2)
+    {
+        b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
+        float[] y = new float[x.Length];
+        double x1 = 0d, x2 = 0d, y1 = 0d, y2 = 0d;
+        for (int i = 0; i < x.Length; i++)
+        {
+            double xi = x[i];
+            double yi = b0 * xi + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+            x2 = x1; x1 = xi; y2 = y1; y1 = yi;
+            y[i] = (float)yi;
+        }
+        return y;
     }
 
     /// <summary>Mixes two stems by equal-gain sum (upstream <c>infer.py</c>: <c>(vocal + inst) / 1</c>),

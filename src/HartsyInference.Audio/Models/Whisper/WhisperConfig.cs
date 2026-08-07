@@ -47,24 +47,29 @@ public sealed record WhisperConfig
     /// <summary>Convenience: head dimension. Always 64.</summary>
     public int HeadDim => HiddenSize / NumHeads;
 
-    // ── Special token IDs (constant across all sizes) ──────────────────────────
+    /// <summary>Number of language tokens. 99 through v2; large-v3 added Cantonese (<c>&lt;|yue|&gt;</c>) for 100,
+    /// which shifts every special token after the language block up by one.</summary>
+    public int LanguageCount { get; init; } = 99;
+
+    // ── Special token IDs (the block before the languages is fixed; everything after shifts with LanguageCount) ──
     /// <summary>End-of-text / pad token. 50257.</summary>
     public int EndOfTextTokenId => 50_257;
     /// <summary>Start-of-transcript token. 50258.</summary>
     public int StartOfTranscriptTokenId => 50_258;
     /// <summary>First language token (English). 50259.</summary>
     public int LanguageTokenStart => 50_259;
-    /// <summary>Translate task token. 50358.</summary>
-    public int TranslateTokenId => 50_358;
-    /// <summary>Transcribe task token. 50359.</summary>
-    public int TranscribeTokenId => 50_359;
-    /// <summary>No-speech token. 50362.</summary>
-    public int NoSpeechTokenId => 50_362;
-    /// <summary>No-timestamps token. 50363.</summary>
-    public int NoTimestampsTokenId => 50_363;
-    /// <summary>First timestamp token (corresponds to 0.00s). 50364. Timestamps run
-    /// 50364..51864 in 0.02s steps (1501 tokens, covering 0..30s).</summary>
-    public int TimestampTokenStart => 50_364;
+    /// <summary>Translate task token. 50358 (&lt;=v2) / 50359 (v3).</summary>
+    public int TranslateTokenId => LanguageTokenStart + LanguageCount;
+    /// <summary>Transcribe task token. 50359 (&lt;=v2) / 50360 (v3).</summary>
+    public int TranscribeTokenId => TranslateTokenId + 1;
+    /// <summary>No-speech token. 50362 (&lt;=v2) / 50363 (v3); the two ids between it and the transcribe
+    /// token are <c>&lt;|startoflm|&gt;</c> and <c>&lt;|startofprev|&gt;</c>.</summary>
+    public int NoSpeechTokenId => TranscribeTokenId + 3;
+    /// <summary>No-timestamps token. 50363 (&lt;=v2) / 50364 (v3).</summary>
+    public int NoTimestampsTokenId => NoSpeechTokenId + 1;
+    /// <summary>First timestamp token (corresponds to 0.00s). 50364 (&lt;=v2) / 50365 (v3); timestamps run
+    /// 1501 tokens in 0.02s steps, covering 0..30s.</summary>
+    public int TimestampTokenStart => NoTimestampsTokenId + 1;
 
     // ── Presets (per OpenAI / HuggingFace config.json) ─────────────────────────
 
@@ -134,6 +139,7 @@ public sealed record WhisperConfig
         VocabSize = 51_866,
         NumMelBins = 128,
         PadTokenId = 50_256,
+        LanguageCount = 100,
     };
 
     /// <summary>large-v3-turbo — distilled to 4 decoder layers; otherwise identical to v3.</summary>

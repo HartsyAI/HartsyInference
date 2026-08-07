@@ -196,7 +196,8 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Video);
         string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath);
 
-        (int? gpu, EngineOptions? engineOptions) = PlacementCli.Build(settings, settings.Backend);
+        (int? gpu, EngineOptions? engineOptions) = PlacementCli.Build(settings, settings.Backend,
+            HartsyInference.Engine.Modality.Video, PlacementCli.TryModelBytes(settings.Model));
         return CommandRunner.Run(Modality.Video, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false, gpu, engineOptions);
     }
