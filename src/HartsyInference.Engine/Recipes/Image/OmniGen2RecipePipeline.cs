@@ -98,6 +98,7 @@ public sealed class OmniGen2RecipePipeline : IRecipePipeline
                 [refEdit.SourceTensor],
                 inner,
                 textGuidanceScale: cfg,
+                imageGuidanceScale: (float)(request.InstructPix2PixCfg ?? 2.0),
                 onProgress: bridge);
 
         return new ImageResult

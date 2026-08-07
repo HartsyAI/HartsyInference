@@ -10,6 +10,10 @@ public sealed record VideoGenerationResult
     /// <summary>The audio to mux alongside <see cref="Frames"/>; null for a silent generation.</summary>
     public AudioBuffer? Audio { get; init; }
 
+    /// <summary>Playback rate the pipeline pinned (e.g. matched to a decoded driving clip); null defers to the
+    /// request's fps / family default. <see cref="Services.VideoService"/> resolves the final value onto this property.</summary>
+    public int? Fps { get; init; }
+
     /// <summary>Wraps a frame-only generation.</summary>
     public static VideoGenerationResult FromFrames(IReadOnlyList<VideoFrame> frames) =>
         new VideoGenerationResult { Frames = frames };

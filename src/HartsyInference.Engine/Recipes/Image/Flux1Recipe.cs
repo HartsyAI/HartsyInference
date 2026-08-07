@@ -23,10 +23,12 @@ public sealed class Flux1Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Wiring the VAE encoder also makes FLUX.1 Fill reachable: <see cref="FluxPipeline"/> requires a mask for
-    /// checkpoints whose <c>x_embedder</c> is ≥384 channels, which could never arrive while img2img was unmapped.</remarks>
+    /// checkpoints whose <c>x_embedder</c> is ≥384 channels, which could never arrive while img2img was unmapped.
+    /// IpAdapter here means the image-PROMPT slot (FLUX.1 Redux via <c>redux.stylemodel</c>) — a real IP-Adapter
+    /// checkpoint (<c>ipadapter.model</c>) stays SD15/SDXL-only and is refused in the recipe pipeline.</remarks>
     public ImageFeatures Supports =>
         ImageFeatures.Lora | ImageFeatures.ControlNet | ImageFeatures.VariationSeed
-        | ImageFeatures.Img2Img | ImageFeatures.Inpaint;
+        | ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.IpAdapter;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux1", StringComparison.OrdinalIgnoreCase);
@@ -167,7 +169,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             ClipTokenizer clipTok = new ClipTokenizer();
             T5Tokenizer t5Tok = new T5Tokenizer(maxLength: hasGuidance ? 512 : 256);
             Logs.Info($"[Flux1Recipe] Flux.1 ready (Dev={hasGuidance}).");
-            return new Flux1RecipePipeline(pipeline, clipTok, t5Tok, hasGuidance, loaders, loraStack);
+            return new Flux1RecipePipeline(pipeline, clipTok, t5Tok, hasGuidance, loaders, loraStack, context.Backend);
         }
         catch (Exception ex)
         {

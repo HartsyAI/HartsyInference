@@ -313,9 +313,19 @@ public sealed class InferenceEngine : IInferenceEngine
         => VideoRecipeRegistry.Resolve(ResolveFamilyId(spec))?.Defaults ?? VideoDefaults.Standard;
 
     /// <summary>The conditioning the video recipe for <paramref name="spec"/> declares it can apply. Resolved through
-    /// the same registry lookup the construction path uses, so it cannot disagree with the pipeline that will run.</summary>
+    /// the same registry lookup the construction path uses, so it cannot disagree with the pipeline that will run.
+    /// Wan is checkpoint-aware: its conditioning variants share the family's compat classes and are detected by
+    /// header sniff, exactly like the construction-time delegation.</summary>
     internal static VideoFeatures SupportedVideoFeatures(ModelSpec spec)
-        => VideoRecipeRegistry.Resolve(ResolveFamilyId(spec))?.Supports ?? VideoFeatures.None;
+    {
+        IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveFamilyId(spec));
+        return recipe switch
+        {
+            null => VideoFeatures.None,
+            Recipes.Video.WanVideoRecipe wan => wan.SupportsFor(spec.LocalPath),
+            _ => recipe.Supports,
+        };
+    }
 
     /// <summary>The family id (catalog slug) that <paramref name="spec"/> resolves to, for diagnostics.</summary>
     internal static string FamilyIdFor(ModelSpec spec) => ResolveFamilyId(spec);
@@ -369,6 +379,8 @@ public sealed class InferenceEngine : IInferenceEngine
                 CpBackends = EnsureCpBackends(),
                 Components = request?.Components,
                 Loras = request?.Loras,
+                VideoSwapModelPath = string.IsNullOrWhiteSpace(request?.VideoSwapModel) ? null : request!.VideoSwapModel,
+                VideoSwapPercent = request?.VideoSwapPercent,
             }));
         _videoRecipePipelines[key] = pipeline;
         return pipeline;

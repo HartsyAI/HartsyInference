@@ -9,8 +9,9 @@ namespace HartsyInference.Engine.Features;
 /// <c>ipadapter.model</c> (string, adapter id/path — absent disables IP-Adapter);
 /// <c>ipadapter.clipvision</c> (string, CLIP-Vision override); <c>ipadapter.weight</c> (number, default 1.0);
 /// <c>ipadapter.start</c> (number, default 0.0); <c>ipadapter.end</c> (number, default 1.0);
-/// <c>ipadapter.weight_type</c> (string, default "standard"); <c>redux.multiply</c> (number, default 1.0);
-/// <c>redux.merge</c> (string, default "Full"); <c>redux.apply_start</c> (number, default 0.0).</para></summary>
+/// <c>ipadapter.weight_type</c> (string, default "standard"); <c>redux.stylemodel</c> (string, projector id/path —
+/// absent disables Redux); <c>redux.multiply</c> (number, default 1.0); <c>redux.merge</c> (number 0..1, default 1.0);
+/// <c>redux.apply_start</c> (number, default 0.0).</para></summary>
 public static class RequestExtras
 {
     /// <summary>Per-slot ControlNet union control type key, e.g. <c>controlnet.union_type.0</c>.</summary>
@@ -34,10 +35,13 @@ public static class RequestExtras
     /// <summary>IP-Adapter per-layer weight ramp name.</summary>
     public const string IpAdapterWeightType = "ipadapter.weight_type";
 
+    /// <summary>Redux style-model (projector) id or path; absent/blank means Redux stays off.</summary>
+    public const string ReduxStyleModel = "redux.stylemodel";
+
     /// <summary>Redux embedding multiplier.</summary>
     public const string ReduxMultiply = "redux.multiply";
 
-    /// <summary>Redux merge mode name.</summary>
+    /// <summary>Redux merge strength 0..1 (ConditioningAverage weight; reduces to a scalar on the redux tokens).</summary>
     public const string ReduxMerge = "redux.merge";
 
     /// <summary>Fraction of the schedule at which Redux conditioning starts applying.</summary>

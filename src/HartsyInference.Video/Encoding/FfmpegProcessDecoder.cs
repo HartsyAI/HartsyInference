@@ -22,13 +22,19 @@ public sealed class FfmpegProcessDecoder
     public sealed record Result(List<byte[]> Frames, int Width, int Height, double Fps);
 
     /// <summary>Decodes container bytes (written to a temp file — many containers need seekable input).</summary>
-    public async Task<Result> DecodeAsync(byte[] container, string? formatHint, CancellationToken cancel = default)
+    public Task<Result> DecodeAsync(byte[] container, string? formatHint, CancellationToken cancel = default) =>
+        DecodeAsync(container, formatHint, maxFrames: null, scaleWidth: null, scaleHeight: null, cancel);
+
+    /// <summary>Container-bytes variant of <see cref="DecodeFileAsync(string, int?, int?, int?, CancellationToken)"/>:
+    /// the frame cap and ffmpeg-side scale run before frames cross the pipe, so a long HD clip never materializes.</summary>
+    public async Task<Result> DecodeAsync(byte[] container, string? formatHint, int? maxFrames, int? scaleWidth,
+        int? scaleHeight, CancellationToken cancel = default)
     {
         string temp = Path.Combine(Path.GetTempPath(), $"hartsy-dec-{Guid.NewGuid():N}.{formatHint ?? "bin"}");
         await File.WriteAllBytesAsync(temp, container, cancel).ConfigureAwait(false);
         try
         {
-            return await DecodeFileAsync(temp, cancel).ConfigureAwait(false);
+            return await DecodeFileAsync(temp, maxFrames, scaleWidth, scaleHeight, cancel).ConfigureAwait(false);
         }
         finally
         {
@@ -37,21 +43,36 @@ public sealed class FfmpegProcessDecoder
     }
 
     /// <summary>Decodes a video file on disk.</summary>
-    public async Task<Result> DecodeFileAsync(string path, CancellationToken cancel = default)
+    public Task<Result> DecodeFileAsync(string path, CancellationToken cancel = default) =>
+        DecodeFileAsync(path, maxFrames: null, scaleWidth: null, scaleHeight: null, cancel);
+
+    /// <summary>Decodes a video file on disk, optionally capped to <paramref name="maxFrames"/> (<c>-frames:v</c>) and
+    /// resampled ffmpeg-side to <paramref name="scaleWidth"/>×<paramref name="scaleHeight"/> (<c>-vf scale</c>); a null
+    /// scale dimension keeps the probed source size.</summary>
+    public async Task<Result> DecodeFileAsync(string path, int? maxFrames, int? scaleWidth, int? scaleHeight,
+        CancellationToken cancel = default)
     {
+        if (maxFrames is <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxFrames), $"maxFrames must be positive; got {maxFrames}.");
+        if (scaleWidth is <= 0 || scaleHeight is <= 0)
+            throw new ArgumentOutOfRangeException(nameof(scaleWidth), $"Scale dimensions must be positive; got {scaleWidth}x{scaleHeight}.");
         (int width, int height, double fps) = await ProbeAsync(path, cancel).ConfigureAwait(false);
+        int outWidth = scaleWidth ?? width;
+        int outHeight = scaleHeight ?? height;
+        string scaleArg = scaleWidth is null && scaleHeight is null ? "" : $" -vf \"scale={outWidth}:{outHeight}\"";
+        string capArg = maxFrames is null ? "" : $" -frames:v {maxFrames.Value}";
 
         ProcessStartInfo psi = new()
         {
             FileName = _ffmpegPath,
-            Arguments = $"-v error -i \"{path}\" -f rawvideo -pix_fmt rgb24 -",
+            Arguments = $"-v error -i \"{path}\"{scaleArg}{capArg} -f rawvideo -pix_fmt rgb24 -",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
         };
         using Process proc = Start(psi, _ffmpegPath);
 
-        int frameBytes = width * height * 3;
+        int frameBytes = outWidth * outHeight * 3;
         List<byte[]> frames = new();
         byte[] buffer = new byte[frameBytes];
         int filled = 0;
@@ -74,8 +95,8 @@ public sealed class FfmpegProcessDecoder
         if (proc.ExitCode != 0)
             throw new InvalidOperationException($"ffmpeg decode exited {proc.ExitCode}: {await stderrTask.ConfigureAwait(false)}");
         if (frames.Count == 0)
-            throw new InvalidOperationException($"ffmpeg produced no frames for '{path}' ({width}x{height}).");
-        return new Result(frames, width, height, fps);
+            throw new InvalidOperationException($"ffmpeg produced no frames for '{path}' ({outWidth}x{outHeight}).");
+        return new Result(frames, outWidth, outHeight, fps);
     }
 
     private async Task<(int Width, int Height, double Fps)> ProbeAsync(string path, CancellationToken cancel)

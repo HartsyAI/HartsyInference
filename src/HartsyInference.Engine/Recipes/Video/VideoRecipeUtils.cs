@@ -68,9 +68,11 @@ internal static class VideoRecipeUtils
         return (SnapToMultiple(fitW, multiple), SnapToMultiple(fitH, multiple));
     }
 
-    /// <summary>Frame-edited result for a silent family; <paramref name="audio"/> attaches a soundtrack meant to be heard.</summary>
-    internal static VideoGenerationResult ToResult(byte[][] frames, int width, int height, VideoRequest request, AudioBuffer? audio = null) =>
-        new VideoGenerationResult { Frames = ToVideoFrames(frames, width, height, request), Audio = audio };
+    /// <summary>Frame-edited result for a silent family; <paramref name="audio"/> attaches a soundtrack meant to be heard,
+    /// <paramref name="fps"/> pins a pipeline-determined playback rate (e.g. a decoded driving clip's).</summary>
+    internal static VideoGenerationResult ToResult(byte[][] frames, int width, int height, VideoRequest request,
+        AudioBuffer? audio = null, int? fps = null) =>
+        new VideoGenerationResult { Frames = ToVideoFrames(frames, width, height, request), Audio = audio, Fps = fps };
 
     /// <summary>Applies the request's trim + boomerang frame edits and wraps the raw interleaved-RGB frames as the
     /// Engine's <see cref="VideoFrame"/> contract (mirrors the extension's <c>VideoOutputEncoder.ApplyFrameEdits</c>).</summary>
@@ -154,18 +156,43 @@ internal static class VideoRecipeUtils
 
     /// <summary>Tiles one interleaved-RGB24 still into the <c>[1, 3, T, H, W]</c> clip tensor in [-1, 1] the Wan
     /// control/driving entry points take (the still branch of the extension's <c>ControlVideoDecoder</c>).</summary>
-    internal static unsafe Tensor TileRgbToClip(byte[] rgb24, int width, int height, int numFrames)
+    internal static Tensor TileRgbToClip(byte[] rgb24, int width, int height, int numFrames)
     {
-        Tensor clip = new Tensor(new TensorShape([1L, 3, numFrames, height, width]), DType.F32);
-        float* p = (float*)clip.DataPointer;
-        long perFrame = (long)height * width;
+        byte[][] frames = new byte[numFrames][];
         for (int f = 0; f < numFrames; f++)
         {
+            frames[f] = rgb24;
+        }
+        return PackRgbFramesToClip(frames, width, height);
+    }
+
+    /// <summary>Packs interleaved-RGB24 frames into the <c>[1, 3, T, H, W]</c> clip tensor in [-1, 1] (the video branch
+    /// of the extension's <c>ControlVideoDecoder.DecodeControlClip</c>).</summary>
+    internal static unsafe Tensor PackRgbFramesToClip(IReadOnlyList<byte[]> frames, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(frames);
+        int numFrames = frames.Count;
+        if (numFrames < 1)
+        {
+            throw new ArgumentException("At least one frame is required.", nameof(frames));
+        }
+        long perFrame = (long)height * width;
+        Tensor clip = new Tensor(new TensorShape([1L, 3, numFrames, height, width]), DType.F32);
+        float* p = (float*)clip.DataPointer;
+        for (int f = 0; f < numFrames; f++)
+        {
+            byte[] src = frames[f];
+            if (src.Length != perFrame * 3)
+            {
+                clip.Dispose();
+                throw new InvalidOperationException(
+                    $"Clip frame {f} has {src.Length} bytes, expected {perFrame * 3} for {width}x{height}.");
+            }
             for (long pix = 0; pix < perFrame; pix++)
             {
                 for (int c = 0; c < 3; c++)
                 {
-                    p[((long)c * numFrames + f) * perFrame + pix] = rgb24[pix * 3 + c] / 127.5f - 1f;
+                    p[((long)c * numFrames + f) * perFrame + pix] = src[pix * 3 + c] / 127.5f - 1f;
                 }
             }
         }

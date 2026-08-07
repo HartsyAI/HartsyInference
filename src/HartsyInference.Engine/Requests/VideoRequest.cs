@@ -31,14 +31,11 @@ public sealed record VideoRequest
     /// <summary>Primary video model id or local path; null uses the loaded model.</summary>
     public string? VideoModel { get; init; }
 
-    /// <summary>Model used for a mid-sequence swap pass; null for none.</summary>
+    /// <summary>Second (low-noise) expert model for dual-expert families (Wan 2.2 A14B); null for none.</summary>
     public string? VideoSwapModel { get; init; }
 
-    /// <summary>Fraction (0..1) of the sequence at which the swap model takes over.</summary>
+    /// <summary>Fraction (0..1) of steps run by the swap model (schedule tail); null uses the family's official boundary.</summary>
     public double? VideoSwapPercent { get; init; }
-
-    /// <summary>Model used to extend an existing clip; null for none.</summary>
-    public string? VideoExtendModel { get; init; }
 
     /// <summary>Target output resolution label (e.g. "720p"); null uses width/height.</summary>
     public string? VideoResolution { get; init; }
@@ -70,6 +67,20 @@ public sealed record VideoRequest
 
     /// <summary>Standalone reference audio clips, not tied to any reference video; null for none.</summary>
     public IReadOnlyList<AudioClip>? ReferenceAudios { get; init; }
+
+    /// <summary>Driving motion video for character-animation families (Wan-Animate); null falls back to tiling
+    /// <see cref="InitImage"/> across frames.</summary>
+    public VideoClip? DrivingVideo { get; init; }
+
+    /// <summary>Pre-rendered pose/skeleton driving video; overrides auto-preprocessing for the pose branch.</summary>
+    public VideoClip? DrivingPoseVideo { get; init; }
+
+    /// <summary>Pre-cropped face-square driving video; overrides auto-preprocessing for the face branch.</summary>
+    public VideoClip? DrivingFaceVideo { get; init; }
+
+    /// <summary>Auto-derive the pose skeleton and face crop from <see cref="DrivingVideo"/> (the format the
+    /// checkpoint was trained on); off passes the raw clip to both branches.</summary>
+    public bool DrivingAutoPreprocess { get; init; } = true;
 
     /// <summary>Total frames to generate for text-to-video; null uses the family's native frame count.</summary>
     public int? Frames { get; init; }

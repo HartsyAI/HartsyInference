@@ -41,8 +41,9 @@ public static class IpAdapterResolver
     /// <summary>Models-root-relative folders searched for IP-Adapter checkpoints.</summary>
     private static readonly string[] _ipaFolders = ["ipadapter", "IpAdapter", "IPAdapter", "ip_adapter"];
 
-    /// <summary>Models-root-relative folders searched for the pose / face detector checkpoints.</summary>
-    private static readonly string[] _detectorFolders = ["facedetection", "yolov8-face", "face", "ipadapter", "text_encoders", "clip_vision"];
+    /// <summary>Models-root-relative folders searched for the pose / face detector checkpoints (shared with the
+    /// Wan-Animate driving-clip auto-preprocess, which reuses the same YOLO11-pose weights).</summary>
+    internal static readonly string[] DetectorFolders = ["facedetection", "yolov8-face", "face", "ipadapter", "text_encoders", "clip_vision"];
 
     /// <summary>A known FaceID checkpoint plus its companion UNet-LoRA half, both from <c>h94/IP-Adapter-FaceID</c>.</summary>
     private sealed record FaceIdDownload(string BinFile, string BinSha, string LoraFile, string LoraSha)
@@ -601,7 +602,7 @@ public static class IpAdapterResolver
                 arcFace.LoadWeights(arcFaceLoader.GetAllTensors());
                 log($"  ArcFace: {Path.GetFileName(arcFacePath)}");
 
-                string posePath = ModelFileLocator.Find(PoseWeightsFile, _detectorFolders)
+                string posePath = ModelFileLocator.Find(PoseWeightsFile, DetectorFolders)
                     ?? throw new InvalidOperationException(
                         $"IP-Adapter FaceID needs the folded YOLO11n-pose weights ('{PoseWeightsFile}') under the models root. "
                         + "Convert Ultralytics 'yolo11n-pose.pt' with tests/python-reference/convert_yolov8_pt_to_safetensors.py.");
@@ -685,7 +686,7 @@ public static class IpAdapterResolver
     private static string? ResolveFaceDetectorWeights()
     {
         string root = RepoPaths.ModelsRoot();
-        foreach (string sub in _detectorFolders)
+        foreach (string sub in DetectorFolders)
         {
             string dir = Path.Combine(root, sub);
             if (!Directory.Exists(dir))

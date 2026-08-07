@@ -32,7 +32,8 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     /// <inheritdoc/>
     /// <remarks>MiniMax-H3 VAE-encodes the start and end images into keyframe conditioning, and is the first video
     /// family to merge LoRAs — on either build, since an fp8 target is dequantized, merged and requantized.</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora;
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora
+        | VideoFeatures.ReferenceImages | VideoFeatures.ReferenceVideos | VideoFeatures.ReferenceAudios;
     /// <inheritdoc/>
     public bool Matches(string familyId)
     {

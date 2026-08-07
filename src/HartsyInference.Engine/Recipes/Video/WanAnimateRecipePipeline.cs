@@ -16,9 +16,11 @@ using HartsyInference.Vision.Clip;
 namespace HartsyInference.Engine.Recipes.Video;
 
 /// <summary>A constructed Wan-Animate pipeline driven against the native <see cref="VideoRequest"/>:
-/// <see cref="VideoRequest.InitImage"/> is the driving pose/motion input and <c>Extra["AnimateReferenceImage"]</c>
-/// carries the character identity image, which is VAE-encoded to the reference latent and (when the checkpoint ships
-/// the i2v embedder) CLIP-ViT-H context. Mirrors the SwarmUI backend's <c>WanAnimateLoader.Generate</c>.</summary>
+/// <see cref="VideoRequest.DrivingVideo"/> (else a tiled <see cref="VideoRequest.InitImage"/>) is the driving
+/// pose/motion input, resolved into the pose/face clips by <see cref="WanAnimateDrivingResolver"/>, and
+/// <c>Extra["AnimateReferenceImage"]</c> carries the character identity image, which is VAE-encoded to the reference
+/// latent and (when the checkpoint ships the i2v embedder) CLIP-ViT-H context. Mirrors the SwarmUI backend's
+/// <c>WanAnimateLoader.Generate</c>.</summary>
 public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
 {
     /// <summary>Request <see cref="VideoRequest.Extra"/> key carrying the character identity image.</summary>
@@ -59,14 +61,13 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
     public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
-        // TODO(E-IMG-4/5): the driving POSE and FACE clips come from extension-side preprocessors (YOLO11-pose skeleton
-        // render + face crop) over a real driving VIDEO; the native contract carries a single frame and no preprocessor
-        // seam, so the driving still is tiled to the pose clip and resampled to the motion-encoder square for the face
-        // clip — the extension's own "pre-rendered driving input" mode. Background/replace conditioning and
-        // continue_motion chunked extension are not modeled.
-        ImageData driving = request.InitImage
-            ?? throw new InvalidOperationException(
-                "Wan-Animate needs a driving pose/motion input in VideoRequest.InitImage.");
+        // TODO(E-IMG-4/5): background/replace conditioning and continue_motion chunked extension are not modeled.
+        if (request.DrivingVideo is null && request.InitImage is null)
+        {
+            throw new InvalidOperationException(
+                "Wan-Animate needs a driving motion input: set VideoRequest.DrivingVideo (a driving video whose pose "
+                + "skeleton and face crop are auto-derived) or VideoRequest.InitImage (a still tiled across frames).");
+        }
         ImageData reference = ResolveReference(request)
             ?? throw new InvalidOperationException(
                 $"Wan-Animate needs a character identity image in VideoRequest.Extra[\"{ReferenceImageKey}\"] (an ImageData) — "
@@ -99,6 +100,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         Tensor? poseClip = null;
         Tensor? faceClip = null;
         Tensor? referenceRgb = null;
+        int? drivingFps = null;
         WanAnimateConditioning? conditioning = null;
         try
         {
@@ -117,9 +119,12 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 dropped.Dispose();
             }
 
-            poseClip = VideoRecipeUtils.TileRgbToClip(VideoRecipeUtils.ResizeRgb24(driving, width, height), width, height, numFrames);
-            faceClip = VideoRecipeUtils.TileRgbToClip(
-                VideoRecipeUtils.ResizeRgb24(driving, MotionEncoderSize, MotionEncoderSize), MotionEncoderSize, MotionEncoderSize, numFrames - 1);
+            WanAnimateDrivingResolver.ResolvedClips clips = WanAnimateDrivingResolver.Resolve(
+                _backend, request, width, height, numFrames, _config.VaeTemporalCompression, MotionEncoderSize, cancel);
+            poseClip = clips.PoseClip;
+            faceClip = clips.FaceClip;
+            numFrames = clips.FrameCount;
+            drivingFps = clips.DrivingFps;
             referenceRgb = VideoRecipeUtils.RgbToReferenceTensor(VideoRecipeUtils.ResizeRgb24(reference, width, height), width, height);
 
             VideoGenerationRequest inner = new VideoGenerationRequest
@@ -144,7 +149,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 promptEmbeds, negEmbeds, referenceRgb, poseClip, faceClip, inner, clipImageEmbeds: clipEmbeds, cachedConditioning: null, onProgress: bridge);
             conditioning = used;
             Logs.Info($"[WanAnimateRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH} ({numFrames}f pose / {numFrames - 1}f face).");
-            return VideoRecipeUtils.ToResult(frames, outW, outH, request);
+            return VideoRecipeUtils.ToResult(frames, outW, outH, request, fps: drivingFps);
         }
         catch (Exception ex)
         {

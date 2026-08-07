@@ -122,12 +122,16 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
             progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
         };
 
+        // IP2P image guidance: drop-text and drop-all share the same "no text" embedding with the text-only
+        // encoder; the image drop happens transformer-side via refLatents: null on the drop-all forward.
+        float imageGuidance = (float)(request.InstructPix2PixCfg ?? 1.0);
         (byte[] rgb, int outW, int outH, int usedSeed) = refEdit is null
             ? _pipeline.GenerateFromEmbeddings(
                 _cachedInstr!, inner, textGuidance, needNeg ? _cachedNeg : null, bridge)
             : _pipeline.EditFromEmbeddings(
-                _cachedInstr!, _cachedNeg!, dropAllEmbeddings: null, [refEdit.SourceTensor], inner,
-                textGuidanceScale: textGuidance, imageGuidanceScale: 1.0f, onProgress: bridge);
+                _cachedInstr!, _cachedNeg!, dropAllEmbeddings: imageGuidance > 1f ? _cachedNeg : null,
+                [refEdit.SourceTensor], inner,
+                textGuidanceScale: textGuidance, imageGuidanceScale: imageGuidance, onProgress: bridge);
 
         return new ImageResult
         {

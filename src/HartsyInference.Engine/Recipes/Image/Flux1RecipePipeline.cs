@@ -1,4 +1,5 @@
 using System.Globalization;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Pipelines;
@@ -21,9 +22,10 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
     private readonly bool _isDev;
     private readonly List<SafeTensorsLoader> _loaders;
     private readonly MergedLoraStack? _loraStack;
+    private readonly IBackend _backend;
 
     /// <summary>Wraps the constructed Flux.1 pipeline plus its tokenizers and merged LoRA stack, taking ownership of every disposable. <paramref name="isDev"/> selects the step fallback and whether the embedded distilled guidance is applied.</summary>
-    public Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, bool isDev, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack)
+    public Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, bool isDev, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack, IBackend backend)
     {
         _pipeline = pipeline;
         _clipTokenizer = clipTokenizer;
@@ -31,6 +33,7 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
         _isDev = isDev;
         _loaders = loaders;
         _loraStack = loraStack;
+        _backend = backend;
     }
 
     /// <summary>A Schnell checkpoint (no guidance embedding) is a 4-step distilled model, so it resolves against <see cref="Flux1Recipe.SchnellDefaults"/> rather than Dev's 28 steps.</summary>
@@ -45,9 +48,25 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
 
         // TODO(E-IMG-4/5): Flux guidance came from the FluxGuidanceScale T2IParam (default 3.5 for Dev, ignored by
-        // Schnell) — defaulted here. True-CFG (trueCfgScale + negative prompt), img2img/inpaint, Tools/Kontext/Redux/
-        // ControlNet are deferred, so NegativePrompt / CfgScale are not mapped for the base path.
+        // Schnell) — defaulted here. True-CFG (trueCfgScale + negative prompt) and Tools/Kontext are deferred, so
+        // NegativePrompt / CfgScale are not mapped for the base path.
         float guidance = _isDev ? 3.5f : 0f;
+
+        // Prompt images on Flux mean Redux (redux.stylemodel); a real IP-Adapter checkpoint is SD15/SDXL-only, and
+        // prompt images with NEITHER selected must refuse rather than silently drop.
+        string? styleModel = RequestExtras.String(request.Extra, RequestExtras.ReduxStyleModel);
+        if (RequestExtras.String(request.Extra, RequestExtras.IpAdapterModel) is not null)
+        {
+            throw new NotSupportedException(
+                "IP-Adapter checkpoints are not supported on Flux — the image-prompt slot on Flux drives FLUX.1 Redux. "
+                + "Select a Redux style model instead, or use an SD15/SDXL model for IP-Adapter.");
+        }
+        if (styleModel is null && request.IpAdapter?.PromptImages is { Count: > 0 })
+        {
+            throw new NotSupportedException(
+                "Prompt images on Flux require a FLUX.1 Redux style model (redux.stylemodel) — none was selected, "
+                + "and silently ignoring the images would misrepresent the output.");
+        }
 
         int[] clipTokens = _clipTokenizer.Encode(prompt);
         int eosPos = ClipTokenizer.FindEosPosition(clipTokens);
@@ -60,6 +79,19 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
             controlNets = FluxControlNetResolver.Resolve(
                 request.ControlNets, reqWidth, reqHeight,
                 static message => Logs.Info($"[Features][ControlNet] {message}"));
+
+            // Redux runs before the DiT preload; the resolver frees its encoder weights afterward. Sharding excludes
+            // redux only when applyStart > 0 (logged unsharded fallback pipeline-side); applyStart == 0 composes.
+            using ReduxResolver.ReduxSpec? redux = ReduxResolver.ResolveAsync(
+                request.IpAdapter,
+                styleModel,
+                request.Components?.ClipVision,
+                RequestExtras.Number(request.Extra, RequestExtras.ReduxMultiply, 1.0),
+                RequestExtras.Number(request.Extra, RequestExtras.ReduxMerge, 1.0),
+                RequestExtras.Number(request.Extra, RequestExtras.ReduxApplyStart, 0.0),
+                _backend,
+                static message => Logs.Info($"[Features][Redux] {message}"),
+                cancel).GetAwaiter().GetResult();
 
             using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
 
@@ -96,7 +128,9 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
                 clipTokens, eosPos, t5Tokens, t5Mask, inner,
                 guidanceScale: guidance,
                 onProgress: bridge,
-                fluxControlNets: controlNets?.Conditionings);
+                fluxControlNets: controlNets?.Conditionings,
+                reduxImageEmbeds: redux?.Embeds,
+                reduxApplyStartFraction: redux?.ApplyStart ?? 0f);
 
             return new ImageResult
             {

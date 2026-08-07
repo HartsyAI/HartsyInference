@@ -8,7 +8,28 @@ stable release will require. Dates are UTC.
 
 ## [Unreleased]
 
+### Removed
+- **`VideoRequest.VideoExtendModel`** — never consumed by any recipe on either side of the contract since the
+  DTO's introduction (video extension was explicitly out of scope in the extension's own plan). Breaking
+  record-shape change for transports that set it; the SwarmUI extension's mapping was removed in the same pass.
+
 ### Added
+- **Wan 2.2 A14B dual-expert swap through the native contract** (regression restore): `VideoRequest.VideoSwapModel`
+  + `VideoSwapPercent` (fraction of steps for the low-noise expert; null = official 0.875/0.9 boundary) →
+  `WanVideoRecipe` loads the second DiT and warps the fraction through the flow shift
+  (`boundary = s·p/(1+(s−1)·p)`); swap-aware pipeline cache key; CLI `--swap-model`/`--swap-percent`.
+- **FLUX.1 Redux through the native contract** (regression restore): `redux.stylemodel`/`redux.multiply`/
+  `redux.merge` (number 0..1)/`redux.apply_start` Extra keys drive `ReduxResolver` from `Flux1RecipePipeline`;
+  prompt images ride `IpAdapter.PromptImages`; Flux declares `ImageFeatures.IpAdapter` (Redux only — real
+  IP-Adapter checkpoints are refused with a clear message). CLI `--style-model` + redux knobs.
+- **Wan-Animate driving video**: `VideoRequest.DrivingVideo`/`DrivingPoseVideo`/`DrivingFaceVideo`/
+  `DrivingAutoPreprocess` with in-engine YOLO11-pose skeleton render + face crop (ported from the extension's
+  dead preprocessors); single-still tiling kept as fallback. CLI `--driving-video`/`--pose-video`/`--face-video`/
+  `--no-auto-preprocess`.
+- **`VideoFeatures.ReferenceImages/ReferenceVideos/ReferenceAudios/DrivingVideo`** gating bits — closes the
+  silent drop of reference conditioning on families that never consumed it.
+- **`ImageRequest.InstructPix2PixCfg` wired** to OmniGen2 (default 2.0) and Boogu (default 1.0) dual-CFG edit
+  paths; CLI `--ip2p-cfg`.
 - **Multi-GPU sharding, placement & parallelism — the full opt-in feature set** (`PlacementConfig` /
   `EngineOptions.Placement`; all-defaults is byte-identical to single-GPU). Works over plain PCIe with
   no P2P/NVLink (host-staged boundaries; P2P used when available). User guide: `docs/MULTI_GPU.md`.

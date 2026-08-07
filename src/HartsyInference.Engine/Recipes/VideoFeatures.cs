@@ -20,4 +20,16 @@ public enum VideoFeatures
 
     /// <summary>LoRA stacks merged into the loaded weights.</summary>
     Lora = 4,
+
+    /// <summary>Reference identity images conditioning the clip (MiniMax-H3 ref2va).</summary>
+    ReferenceImages = 8,
+
+    /// <summary>Reference video clips (optionally soundtracked) conditioning the clip (MiniMax-H3 ref2va).</summary>
+    ReferenceVideos = 16,
+
+    /// <summary>Standalone reference audio clips conditioning the soundtrack (MiniMax-H3 ref2va).</summary>
+    ReferenceAudios = 32,
+
+    /// <summary>A driving motion video (or pose/face override clips) the output animation follows (Wan-Animate).</summary>
+    DrivingVideo = 64,
 }

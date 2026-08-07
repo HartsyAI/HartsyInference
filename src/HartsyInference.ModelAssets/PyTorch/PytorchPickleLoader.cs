@@ -268,6 +268,12 @@ public sealed class PytorchPickleLoader : IDisposable
     /// (e.g. a <c>{"module": {...}}</c> or <c>{"state_dict": {...}}</c> envelope) if the top level holds no tensors.</summary>
     private static void FlattenStateDict(object? root, Dictionary<string, PickleTensor> outMap)
     {
+        // torch.save(tensor) writes the tensor as the root object, with no dict wrapper (ACE-Step's silence_latent.pt).
+        if (root is PickleTensor bare)
+        {
+            outMap["data"] = bare;
+            return;
+        }
         if (root is not Dictionary<string, object?> dict)
             throw new InvalidOperationException("Checkpoint root is not a dict/state_dict.");
 

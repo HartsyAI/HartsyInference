@@ -48,6 +48,33 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     /// <remarks>Wan sniffs the checkpoint for the CLIP-I2V / concat-I2V variants and consumes both a start frame and an optional last frame.</remarks>
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame;
+
+    /// <summary>The features for a CONCRETE checkpoint: VACE/Animate/S2V share Wan's compat classes and are only
+    /// detected by sniffing the header, so the family-level <see cref="Supports"/> alone would wrongly refuse (e.g.)
+    /// a driving video on an Animate checkpoint loaded under <c>wan-21-14b</c>. Falls back to the family answer when
+    /// the file cannot be peeked.</summary>
+    public VideoFeatures SupportsFor(string? checkpointPath)
+    {
+        if (string.IsNullOrWhiteSpace(checkpointPath))
+        {
+            return Supports;
+        }
+        try
+        {
+            return DetectVariant(checkpointPath) switch
+            {
+                WanVariant.Vace => new WanVaceRecipe(_familyId).Supports,
+                WanVariant.Animate => new WanAnimateRecipe().Supports,
+                WanVariant.S2V => new WanS2VRecipe().Supports,
+                _ => Supports,
+            };
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            Logs.Warning($"[WanVideoRecipe] Could not peek '{checkpointPath}' for variant-aware features; using family defaults. {ex.Message}");
+            return Supports;
+        }
+    }
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
 
@@ -59,13 +86,16 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
-        // TODO(E-IMG-4/5): LoRA (the extension's GenerateWithLoras merges the stack into BOTH MoE experts), the
-        // Wan2.2 A14B low-noise expert pair (Refiner Model / Video Swap Model slots + the boundary warp), and
-        // VideoRequest.Components overrides for the umT5 / VAE / CLIP-Vision picks are deferred — this is the
-        // single-expert, canonical-side-model path.
+        // TODO(E-IMG-4/5): LoRA (the extension's GenerateWithLoras merged the stack into BOTH MoE experts) and
+        // VideoRequest.Components overrides for the umT5 / VAE / CLIP-Vision picks are deferred.
         WanVariant variant = DetectVariant(context.CheckpointPath);
         if (variant != WanVariant.Base)
         {
+            if (context.VideoSwapModelPath is not null)
+            {
+                throw new NotSupportedException(
+                    $"Video Swap Model is only supported on plain Wan T2V/I2V checkpoints — the loaded checkpoint is a Wan '{variant}' variant.");
+            }
             Logs.Info($"[WanVideoRecipe] Checkpoint is a Wan '{variant}' variant — delegating to its recipe.");
             return variant switch
             {
@@ -98,8 +128,47 @@ public sealed class WanVideoRecipe : IVideoRecipe
             string mode = isClipI2V ? "CLIP-I2V" : config.InChannels > config.VaeLatentChannels ? "concat-I2V" : "T2V/TI2V";
             Logs.Info($"[WanVideoRecipe] Converted {conv.Transformer.Count} transformer keys ({mode}, in {inChannels}, inner {config.InnerDim}).");
 
+            // Wan 2.2 A14B dual-expert pair: the boundary is resolved BEFORE the transformers are built (both share
+            // the config). WanVideoPipeline.SwapToExpert keeps GPU residency sequential — one expert on-device at a
+            // time — and already declares CFG-parallel incompatible with a logged fallback.
+            WanVideoTransformer? transformer2 = null;
+            if (context.VideoSwapModelPath is not null)
+            {
+                bool isConcatI2V = !isClipI2V && config.InChannels > config.VaeLatentChannels;
+                config = config with { BoundaryRatio = ResolveBoundary(context.VideoSwapPercent, config, isConcatI2V) };
+            }
+
             WanVideoTransformer transformer = new WanVideoTransformer(config);
             transformer.LoadWeights(conv.Transformer);
+
+            if (context.VideoSwapModelPath is not null)
+            {
+                string swapPath = File.Exists(context.VideoSwapModelPath)
+                    ? context.VideoSwapModelPath
+                    : ModelFileLocator.Require(context.VideoSwapModelPath, "Video swap model", "Stable-Diffusion", "diffusion_models", "unet");
+                if (DetectVariant(swapPath) != WanVariant.Base)
+                {
+                    throw new NotSupportedException(
+                        $"Wan low-noise expert '{swapPath}' is a VACE/Animate/S2V variant — the Wan 2.2 expert pair needs plain T2V/I2V checkpoints.");
+                }
+                Logs.Info($"[WanVideoRecipe] Loading Wan low-noise expert: {swapPath} (boundary {config.BoundaryRatio:0.###}).");
+                (WanVideoCheckpointConverter.ConvertedWeights convLow, SafeTensorsLoader lowLoader) = WanVideoCheckpointConverter.LoadAndConvert(swapPath);
+                loaders.Add(lowLoader);
+                if (convLow.Transformer.Count == 0)
+                {
+                    throw new InvalidOperationException($"Wan low-noise expert '{swapPath}' has no recognized transformer weights after conversion.");
+                }
+                WanVideoConfig lowConfig = WanConfigDetector.Detect(convLow.Transformer);
+                if (lowConfig.InnerDim != config.InnerDim || lowConfig.NumLayers != config.NumLayers)
+                {
+                    throw new InvalidOperationException(
+                        $"Wan low-noise expert '{swapPath}' does not architecturally match the base checkpoint "
+                        + $"(inner {lowConfig.InnerDim} vs {config.InnerDim}, layers {lowConfig.NumLayers} vs {config.NumLayers}) — "
+                        + "an A14B expert pair must be two builds of the same architecture.");
+                }
+                transformer2 = new WanVideoTransformer(config);
+                transformer2.LoadWeights(convLow.Transformer);
+            }
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(isWan21 ? SideModels.Wan21Vae : SideModels.Wan22Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
             (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
@@ -146,15 +215,15 @@ public sealed class WanVideoRecipe : IVideoRecipe
             umt5.LoadWeights(umt5Weights);
             T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: TokenLength);
 
-            WanVideoPipeline pipeline = new WanVideoPipeline(context.Backend, transformer, vaeDecoder, config, vaeEncoder)
+            WanVideoPipeline pipeline = new WanVideoPipeline(context.Backend, transformer, vaeDecoder, config, vaeEncoder, transformer2)
             {
                 CfgParallelBackend = context.CfgParallelBackend,
                 CpBackends = context.CpBackends,
                 VaeBackend = context.VaeBackendOrDefault,
             };
-            Logs.Info($"[WanVideoRecipe] Wan ready ({mode}).");
+            Logs.Info($"[WanVideoRecipe] Wan ready ({mode}{(transformer2 is not null ? ", MoE expert pair" : "")}).");
             return new WanVideoRecipePipeline(context.Backend, context.TextEncoderBackendOrDefault, context.VaeBackendOrDefault,
-                pipeline, config, isClipI2V, tokenizer, umt5, transformer, vaeEncoder, clipVision, loaders);
+                pipeline, config, isClipI2V, tokenizer, umt5, transformer, vaeEncoder, clipVision, loaders, transformer2);
         }
         catch (Exception ex)
         {
@@ -165,6 +234,22 @@ public sealed class WanVideoRecipe : IVideoRecipe
             }
             throw;
         }
+    }
+
+    /// <summary>Resolves the MoE timestep boundary. Null <paramref name="percent"/> → the preset's own boundary when
+    /// it has one, else Wan 2.2's official 0.875 (T2V) / 0.9 (I2V). An explicit p — the fraction of steps given to the
+    /// low-noise expert — warps through the shifted flow schedule (<c>boundary = s·p/(1+(s−1)·p)</c>, the same warp the
+    /// UniPC sigmas use; p=0.5 at shift 8 ≈ 0.889). The warp needs <see cref="WanVideoConfig.FlowShift"/>, which only
+    /// the engine knows — transports must pass the raw fraction, never a pre-warped boundary.</summary>
+    internal static float ResolveBoundary(double? percent, WanVideoConfig config, bool isConcatI2V)
+    {
+        if (percent is null)
+        {
+            return config.BoundaryRatio > 0f ? config.BoundaryRatio : isConcatI2V ? 0.9f : 0.875f;
+        }
+        float shift = config.FlowShift > 0f ? config.FlowShift : 8f;
+        float frac = Math.Clamp((float)percent.Value, 0.01f, 0.99f);
+        return shift * frac / (1f + (shift - 1f) * frac);
     }
 
     /// <summary>Maps a Wan compat class (+ the DiT's CLIP-image-embedder presence and patch-embed in_channels) to the

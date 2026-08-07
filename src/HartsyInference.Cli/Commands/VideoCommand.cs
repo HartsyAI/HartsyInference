@@ -68,6 +68,36 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Path to an image the clip ends on. Combine with --init-image for first-and-last-frame control.")]
         public string? EndFrame { get; init; }
 
+        /// <summary>Driving motion video for character-animation families (Wan-Animate).</summary>
+        [CommandOption("--driving-video")]
+        [Description("Path to the driving motion video (Wan-Animate); its pose skeleton and face crop are auto-derived unless overridden.")]
+        public string? DrivingVideo { get; init; }
+
+        /// <summary>Pre-rendered pose/skeleton video overriding the pose branch's auto-preprocess.</summary>
+        [CommandOption("--pose-video")]
+        [Description("Path to a pre-rendered pose/skeleton video for the pose branch (overrides auto-preprocessing).")]
+        public string? PoseVideo { get; init; }
+
+        /// <summary>Pre-cropped face-square video overriding the face branch's auto-preprocess.</summary>
+        [CommandOption("--face-video")]
+        [Description("Path to a pre-cropped face-square video for the face branch (overrides auto-preprocessing).")]
+        public string? FaceVideo { get; init; }
+
+        /// <summary>Feed the raw driving clip to both branches instead of deriving pose skeleton + face crop.</summary>
+        [CommandOption("--no-auto-preprocess")]
+        [Description("Pass the raw driving video to the pose/face branches instead of auto-deriving the skeleton and face crop.")]
+        public bool NoAutoPreprocess { get; init; }
+
+        /// <summary>Second (low-noise) expert checkpoint for the Wan 2.2 A14B dual-expert pair.</summary>
+        [CommandOption("--swap-model")]
+        [Description("Path or model name of the Wan 2.2 low-noise expert; enables the dual-expert (MoE) schedule split.")]
+        public string? SwapModel { get; init; }
+
+        /// <summary>Fraction of steps given to the swap (low-noise) expert; unset uses the official boundary.</summary>
+        [CommandOption("--swap-percent")]
+        [Description("Fraction (0..1) of steps run by the swap model (warped through the flow shift); unset uses Wan 2.2's official boundary (0.875 T2V / 0.9 I2V).")]
+        public double? SwapPercent { get; init; }
+
         /// <summary>Reference images for families that carry subject/style from references rather than pinning frames.</summary>
         [CommandOption("--ref-image")]
         [Description("Reference image to carry subject or style from; repeat for more (MiniMax-H3 takes up to 9).")]
@@ -160,6 +190,15 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         parameters.PutIfSet("fps", settings.Fps);
         parameters.PutIfSet("init-image", settings.InitImage);
         parameters.PutIfSet("end-frame", settings.EndFrame);
+        parameters.PutIfSet("driving-video", settings.DrivingVideo);
+        parameters.PutIfSet("pose-video", settings.PoseVideo);
+        parameters.PutIfSet("face-video", settings.FaceVideo);
+        if (settings.NoAutoPreprocess)
+        {
+            parameters.Put("no-auto-preprocess", "true");
+        }
+        parameters.PutIfSet("swap-model", settings.SwapModel);
+        parameters.PutIfSet("swap-percent", settings.SwapPercent);
         // Repeatable options collapse to one newline-joined value: the parameter bag is flat strings, and a path
         // cannot contain a newline.
         if (settings.ReferenceImages is { Length: > 0 })

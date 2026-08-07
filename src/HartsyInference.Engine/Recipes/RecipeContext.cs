@@ -118,4 +118,11 @@ public sealed record RecipeContext
     /// <summary>LoRA stack to merge into the loaded weights at construction; null for none. LoRA is baked into the
     /// weights, so the constructed pipeline is cached under a key that includes this stack.</summary>
     public LoraStack? Loras { get; init; }
+
+    /// <summary>Second (low-noise) expert checkpoint for dual-expert families (Wan 2.2 A14B); null for none.
+    /// Construction-affecting, so it is part of the pipeline cache key.</summary>
+    public string? VideoSwapModelPath { get; init; }
+
+    /// <summary>Fraction (0..1) of steps run by the swap model; null uses the family's official boundary.</summary>
+    public double? VideoSwapPercent { get; init; }
 }

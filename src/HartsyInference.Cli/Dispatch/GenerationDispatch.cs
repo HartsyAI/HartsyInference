@@ -64,8 +64,13 @@ public static class GenerationDispatch
             Scheduler = parameters.GetStringOrNull("scheduler"),
             SigmaShift = parameters.GetDoubleOrNull("sigma-shift"),
             Seed = parameters.GetInt("seed", -1),
+            InstructPix2PixCfg = parameters.GetDoubleOrNull("ip2p-cfg"),
             Img2Img = BuildImg2Img(parameters),
             Inpaint = BuildInpaint(parameters),
+            IpAdapter = SplitPaths(parameters.GetStringOrNull("prompt-images")) is { Length: > 0 } promptPaths
+                ? new IpAdapter { PromptImages = [.. promptPaths.Select(LoadImage)] }
+                : null,
+            Extra = BuildImageExtra(parameters),
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("denoise");
@@ -402,6 +407,12 @@ public static class GenerationDispatch
             Seed = parameters.GetInt("seed", -1),
             InitImage = parameters.GetStringOrNull("init-image") is { } initPath ? LoadImage(initPath) : null,
             VideoEndFrame = parameters.GetStringOrNull("end-frame") is { } endPath ? LoadImage(endPath) : null,
+            DrivingVideo = parameters.GetStringOrNull("driving-video") is { } drivingPath ? LoadVideoClip(drivingPath) : null,
+            DrivingPoseVideo = parameters.GetStringOrNull("pose-video") is { } posePath ? LoadVideoClip(posePath) : null,
+            DrivingFaceVideo = parameters.GetStringOrNull("face-video") is { } facePath ? LoadVideoClip(facePath) : null,
+            DrivingAutoPreprocess = !parameters.GetBool("no-auto-preprocess", false),
+            VideoSwapModel = parameters.GetStringOrNull("swap-model"),
+            VideoSwapPercent = parameters.GetDoubleOrNull("swap-percent"),
             ReferenceImages = SplitPaths(parameters.GetStringOrNull("ref-images"))?.Select(LoadImage).ToList(),
             ReferenceVideos = BuildReferenceVideos(parameters),
             Loras = BuildLoraStack(parameters),
@@ -796,6 +807,29 @@ public static class GenerationDispatch
         return creativity is null ? img2img : img2img with { Creativity = creativity.Value };
     }
 
+    /// <summary>The Redux Extra keys from <c>--style-model</c> and its strength knobs; empty when Redux is off.</summary>
+    private static IReadOnlyDictionary<string, object> BuildImageExtra(ParamState parameters)
+    {
+        Dictionary<string, object> extra = new Dictionary<string, object>(StringComparer.Ordinal);
+        if (parameters.GetStringOrNull("style-model") is { Length: > 0 } styleModel)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReduxStyleModel] = styleModel;
+        }
+        if (parameters.GetDoubleOrNull("redux-multiply") is { } reduxMultiply)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReduxMultiply] = reduxMultiply;
+        }
+        if (parameters.GetDoubleOrNull("redux-merge") is { } reduxMerge)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReduxMerge] = reduxMerge;
+        }
+        if (parameters.GetDoubleOrNull("redux-apply-start") is { } reduxApplyStart)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReduxApplyStart] = reduxApplyStart;
+        }
+        return extra;
+    }
+
     /// <summary>The inpaint mask from <c>--mask</c> and its grow/blur knobs, or null when no mask was given.</summary>
     private static Inpaint? BuildInpaint(ParamState parameters)
     {
@@ -866,7 +900,7 @@ public static class GenerationDispatch
         string path = clipPath.Trim().Trim('"');
         if (!File.Exists(path))
         {
-            throw new FileNotFoundException($"Reference video not found: {path}");
+            throw new FileNotFoundException($"Video file not found: {path}");
         }
         string extension = Path.GetExtension(path).TrimStart('.');
         return new VideoClip

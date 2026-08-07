@@ -87,6 +87,11 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("How much of the init image to overwrite, 0..1 (0 keeps it, 1 ignores it). Requires --init-image.")]
         public double? Creativity { get; init; }
 
+        /// <summary>Image-guidance (InstructPix2Pix) scale for dual-CFG edit models; unset uses the family default.</summary>
+        [CommandOption("--ip2p-cfg")]
+        [Description("Image-guidance scale for dual-CFG edit models (OmniGen2 default 2.0, Boogu default 1.0). Requires --init-image on an edit family.")]
+        public double? Ip2pCfg { get; init; }
+
         /// <summary>Inpaint mask; white regenerates, black preserves.</summary>
         [CommandOption("--mask")]
         [Description("Path to a PNG/BMP inpaint mask (white = regenerate, black = preserve). Requires --init-image.")]
@@ -106,6 +111,31 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [CommandOption("--mask-shrink-grow")]
         [Description("Inpaint only masked: crop to the mask's bounds grown by this many pixels, generate there at full resolution, and composite back. 0 disables.")]
         public int? MaskShrinkGrow { get; init; }
+
+        /// <summary>FLUX.1 Redux style model (projector) id or path; requires --prompt-image.</summary>
+        [CommandOption("--style-model")]
+        [Description("FLUX.1 Redux style model id or path (searched under style_models); requires --prompt-image. Flux only.")]
+        public string? StyleModel { get; init; }
+
+        /// <summary>Style reference image for the Redux image-prompt slot.</summary>
+        [CommandOption("--prompt-image")]
+        [Description("Path to the style reference image consumed by --style-model (first image is encoded, matching ComfyUI).")]
+        public string[]? PromptImages { get; init; }
+
+        /// <summary>Redux token multiplier.</summary>
+        [CommandOption("--redux-multiply")]
+        [Description("Redux style-token multiplier (default 1.0).")]
+        public double? ReduxMultiply { get; init; }
+
+        /// <summary>Redux merge strength 0..1.</summary>
+        [CommandOption("--redux-merge")]
+        [Description("Redux merge strength 0..1 (default 1.0; low values like 0.1 recommended).")]
+        public double? ReduxMerge { get; init; }
+
+        /// <summary>Schedule fraction at which Redux starts applying.</summary>
+        [CommandOption("--redux-apply-start")]
+        [Description("Fraction of the schedule before which Redux is not applied (default 0).")]
+        public double? ReduxApplyStart { get; init; }
 
         /// <summary>Directory to save the image to.</summary>
         [CommandOption("-o|--output")]
@@ -140,10 +170,19 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("sigma-shift", settings.SigmaShift);
         parameters.PutIfSet("init-image", settings.InitImage);
         parameters.PutIfSet("creativity", settings.Creativity);
+        parameters.PutIfSet("ip2p-cfg", settings.Ip2pCfg);
         parameters.PutIfSet("mask", settings.Mask);
         parameters.PutIfSet("mask-grow", settings.MaskGrow);
         parameters.PutIfSet("mask-blur", settings.MaskBlur);
         parameters.PutIfSet("mask-shrink-grow", settings.MaskShrinkGrow);
+        parameters.PutIfSet("style-model", settings.StyleModel);
+        if (settings.PromptImages is { Length: > 0 })
+        {
+            parameters.Put("prompt-images", string.Join('\n', settings.PromptImages));
+        }
+        parameters.PutIfSet("redux-multiply", settings.ReduxMultiply);
+        parameters.PutIfSet("redux-merge", settings.ReduxMerge);
+        parameters.PutIfSet("redux-apply-start", settings.ReduxApplyStart);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Image);

@@ -827,6 +827,11 @@ grinds).
 
 ## 9. CLI / API
 
+- [ ] **`VideoAudioReference` / `VideoAudioInput` feature gating:** both are typed video-request conditioning with no
+  `VideoFeatures` bit — a family that ignores them silently drops the audio (the exact bug class the 2026-08-07
+  `ReferenceImages`/`ReferenceVideos`/`ReferenceAudios`/`DrivingVideo` bits closed for the other inputs). Same pattern:
+  add bits, wire `VideoService.RequestedFeatures`, declare on WanS2V/H3.
+
 - [ ] **HTTP public API reference doc** + API stability freeze (release gate).
 - [ ] Wire the **T5/seq2seq generation loop** in `TextService` (currently unwired).
 - [ ] Finish CLI catalog coverage + real-hardware verification runs (LLM ~26 entries, video recipes:

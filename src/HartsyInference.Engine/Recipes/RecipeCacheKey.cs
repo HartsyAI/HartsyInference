@@ -15,9 +15,21 @@ public static class RecipeCacheKey
         request is null ? "" : Describe(request.Loras, request.Components);
 
     /// <summary>The video counterpart — video recipes bake LoRAs into the loaded weights exactly as image ones do, so
-    /// their cached pipelines must be keyed by the stack too.</summary>
-    public static string Describe(VideoRequest? request) =>
-        request is null ? "" : Describe(request.Loras, request.Components);
+    /// their cached pipelines must be keyed by the stack too. The Wan 2.2 expert pair is construction-affecting the
+    /// same way: without the swap suffix a swap request would silently reuse a cached single-expert pipeline.</summary>
+    public static string Describe(VideoRequest? request)
+    {
+        if (request is null)
+        {
+            return "";
+        }
+        string key = Describe(request.Loras, request.Components);
+        if (!string.IsNullOrWhiteSpace(request.VideoSwapModel))
+        {
+            key += $"swap:{request.VideoSwapModel}@{(request.VideoSwapPercent?.ToString("R", CultureInfo.InvariantCulture) ?? "auto")};";
+        }
+        return key;
+    }
 
     private static string Describe(LoraStack? loras, ComponentOverrides? components)
     {

@@ -29,6 +29,12 @@ public sealed class VideoFeatureDeclarationTests
         "minimax-h3",
     ];
 
+    /// <summary>Reference images / videos / audios are consumed only by MiniMax-H3's ref2va path.</summary>
+    private static readonly string[] ExpectedReferences = ["minimax-h3"];
+
+    /// <summary>A driving motion video is Wan-Animate's core conditioning.</summary>
+    private static readonly string[] ExpectedDrivingVideo = ["wan-animate"];
+
     private readonly ITestOutputHelper _output;
 
     public VideoFeatureDeclarationTests(ITestOutputHelper output) => _output = output;
@@ -47,6 +53,25 @@ public sealed class VideoFeatureDeclarationTests
         string[] actual = DeclaringFamilies(VideoFeatures.EndFrame);
         _output.WriteLine($"end-frame: {string.Join(", ", actual)}");
         Assert.Equal([.. ExpectedEndFrame.Order(StringComparer.Ordinal)], actual);
+    }
+
+    [Fact]
+    public void ReferenceConditioningIsDeclaredOnlyByMiniMaxH3()
+    {
+        foreach (VideoFeatures feature in new[] { VideoFeatures.ReferenceImages, VideoFeatures.ReferenceVideos, VideoFeatures.ReferenceAudios })
+        {
+            string[] actual = DeclaringFamilies(feature);
+            _output.WriteLine($"{feature}: {string.Join(", ", actual)}");
+            Assert.Equal([.. ExpectedReferences.Order(StringComparer.Ordinal)], actual);
+        }
+    }
+
+    [Fact]
+    public void DrivingVideoIsDeclaredOnlyByWanAnimate()
+    {
+        string[] actual = DeclaringFamilies(VideoFeatures.DrivingVideo);
+        _output.WriteLine($"driving-video: {string.Join(", ", actual)}");
+        Assert.Equal([.. ExpectedDrivingVideo.Order(StringComparer.Ordinal)], actual);
     }
 
     /// <summary>An end frame is generated *toward* from a start frame, so declaring it alone is incoherent.</summary>

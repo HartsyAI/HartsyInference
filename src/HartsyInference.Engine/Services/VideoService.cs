@@ -17,7 +17,7 @@ public sealed class VideoService : IVideoService
     internal VideoService(InferenceEngine engine) => _engine = engine;
 
     /// <summary>The conditioning <paramref name="request"/> asks for, one bit per object actually set.</summary>
-    private static VideoFeatures RequestedFeatures(VideoRequest request)
+    internal static VideoFeatures RequestedFeatures(VideoRequest request)
     {
         VideoFeatures features = VideoFeatures.None;
         if (request.InitImage is not null)
@@ -32,12 +32,28 @@ public sealed class VideoService : IVideoService
         {
             features |= VideoFeatures.Lora;
         }
+        if (request.ReferenceImages is { Count: > 0 })
+        {
+            features |= VideoFeatures.ReferenceImages;
+        }
+        if (request.ReferenceVideos is { Count: > 0 })
+        {
+            features |= VideoFeatures.ReferenceVideos;
+        }
+        if (request.ReferenceAudios is { Count: > 0 })
+        {
+            features |= VideoFeatures.ReferenceAudios;
+        }
+        if (request.DrivingVideo is not null || request.DrivingPoseVideo is not null || request.DrivingFaceVideo is not null)
+        {
+            features |= VideoFeatures.DrivingVideo;
+        }
         return features;
     }
 
     /// <summary>Throws naming the family and the exact conditioning it cannot apply. Before this existed a video family
     /// that ignored <c>InitImage</c> returned a text-to-video clip with nothing to indicate the image was discarded.</summary>
-    private void RejectUnsupported(ModelSpec spec, VideoRequest request)
+    internal static void RejectUnsupported(ModelSpec spec, VideoRequest request)
     {
         VideoFeatures requested = RequestedFeatures(request);
         if (requested == VideoFeatures.None)
@@ -64,7 +80,14 @@ public sealed class VideoService : IVideoService
                 IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(spec, request);
                 VideoRequest resolved = InferenceEngine.VideoDefaultsFor(spec).Apply(request);
                 VideoGenerationResult result = pipeline.Generate(resolved, progress, cancel);
-                double seconds = VideoAudioResolver.VideoSeconds(result.Frames.Count, resolved.Fps);
+                // An explicit request fps always wins; else a pipeline-pinned rate (e.g. a decoded driving clip's,
+                // so motion speed matches the driving video); else the family default the resolver applied.
+                int? fps = request.Fps ?? result.Fps ?? resolved.Fps;
+                if (result.Fps != fps)
+                {
+                    result = result with { Fps = fps };
+                }
+                double seconds = VideoAudioResolver.VideoSeconds(result.Frames.Count, fps);
                 return VideoAudioResolver.Resolve(result, resolved, seconds);
             },
             cancel).ConfigureAwait(false);

@@ -44,6 +44,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     private readonly T5Tokenizer _tokenizer;
     private readonly T5TextEncoder _umt5;
     private readonly WanVideoTransformer _transformer;
+    private readonly WanVideoTransformer? _transformer2;
     private readonly IWanVaeEncoder _vaeEncoder;
     private readonly ClipVisionEncoder? _clipVision;
     private readonly List<SafeTensorsLoader> _loaders;
@@ -52,8 +53,10 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     /// <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/>
     /// (single-device default).</summary>
     public WanVideoRecipePipeline(IBackend backend, IBackend textBackend, IBackend vaeBackend, WanVideoPipeline pipeline, WanVideoConfig config, bool isClipI2V, T5Tokenizer tokenizer,
-        T5TextEncoder umt5, WanVideoTransformer transformer, IWanVaeEncoder vaeEncoder, ClipVisionEncoder? clipVision, List<SafeTensorsLoader> loaders)
+        T5TextEncoder umt5, WanVideoTransformer transformer, IWanVaeEncoder vaeEncoder, ClipVisionEncoder? clipVision, List<SafeTensorsLoader> loaders,
+        WanVideoTransformer? transformer2 = null)
     {
+        _transformer2 = transformer2;
         _backend = backend;
         _textBackend = textBackend;
         _vaeBackend = vaeBackend;
@@ -185,6 +188,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
         _tokenizer.Dispose();
         _umt5.Dispose();
         _transformer.Dispose();
+        _transformer2?.Dispose();
         (_vaeEncoder as IDisposable)?.Dispose();
         foreach (SafeTensorsLoader loader in _loaders)
         {
