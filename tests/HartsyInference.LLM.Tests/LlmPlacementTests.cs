@@ -91,6 +91,51 @@ public sealed unsafe class LlmPlacementTests
         foreach (Tensor t in w.Values) t.Dispose();
     }
 
+    /// <summary>Regression (Phase 0, fixed 2026-08-06): the embedding preamble — absolute position embeddings
+    /// (GPT-2/StarCoder) and the BLOOM word-embedding LayerNorm — used to run unconditionally at the top of
+    /// <c>ForwardEmbeds</c>, so a staged run re-applied both once per stage to what was by then a HIDDEN state,
+    /// silently corrupting output for those lineages (weight tiling already assumed first-stage-only). Same
+    /// staged-vs-unstaged parity harness as the base test, with both preamble features enabled.</summary>
+    [Fact]
+    public void ForwardEmbedsStaged_PosEmbedAndEmbedNorm_AppliedFirstStageOnly()
+    {
+        TransformerConfig cfg = Config() with { AbsolutePositionEmbeddings = true, EmbeddingLayerNorm = true };
+        Dictionary<string, Tensor> w = Weights(cfg);
+        w["model.embed_positions.weight"] = F2(cfg.MaxPositionEmbeddings, cfg.HiddenSize);
+        w["model.embed_norm.weight"] = Ones(cfg.HiddenSize);
+        w["model.embed_norm.bias"] = Fill(new Tensor(new TensorShape(cfg.HiddenSize), DType.F32));
+        using CpuBackend backend = new();
+        using GenericTransformer model = new(cfg);
+        model.LoadWeights(w, "model");
+
+        using KvCache unstagedCache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim);
+        using KvCache stagedCache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim);
+        LlmPlacement placement = new([new LlmStage(backend, 0, 2), new LlmStage(backend, 2, 4)]);
+
+        int[] steps = [4, 1, 1];
+        int pos = 0;
+        foreach (int t in steps)
+        {
+            using Tensor embeds = Embeds(t, cfg.HiddenSize);
+            using Tensor embedsCopy = new(embeds.Shape, DType.F32);
+            backend.CopyTo(embedsCopy, embeds);
+
+            using Tensor expected = model.ForwardEmbeds(backend, embeds, t, pos, unstagedCache);
+            using Tensor staged = model.ForwardEmbedsStaged(placement, embedsCopy, t, pos, stagedCache);
+
+            Assert.Equal(expected.Shape, staged.Shape);
+            float* ep = (float*)expected.DataPointer;
+            float* sp = (float*)staged.DataPointer;
+            for (long i = 0; i < expected.ElementCount; i++)
+            {
+                Assert.Equal(ep[i], sp[i], 5);
+            }
+            pos += t;
+        }
+
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
     [Fact]
     public void EnumerateStageWeights_FullTiling_EqualsEnumerateWeights()
     {

@@ -67,11 +67,15 @@ public sealed class CosyVoiceLmShardingEngineTests
         if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
         // The Qwen2.5-0.5B backbone is tiny — this gate is just "the box has a working, non-starved CUDA context
         // on both cards", not a tight-fit VRAM budget like YuE's 7B bf16 test.
+        long total0;
+        long total1;
         using (CudaBackend probe0 = new(deviceOrdinal: 0, ptxDir: ptxDir))
         using (CudaBackend probe1 = new(deviceOrdinal: 1, ptxDir: ptxDir))
         {
-            (nuint free0, _) = probe0.Context.GetMemoryInfo();
-            (nuint free1, _) = probe1.Context.GetMemoryInfo();
+            (nuint free0, nuint totalBytes0) = probe0.Context.GetMemoryInfo();
+            (nuint free1, nuint totalBytes1) = probe1.Context.GetMemoryInfo();
+            total0 = (long)totalBytes0;
+            total1 = (long)totalBytes1;
             double freeGb0 = free0 / (1024.0 * 1024.0 * 1024.0), freeGb1 = free1 / (1024.0 * 1024.0 * 1024.0);
             _output.WriteLine($"Free VRAM: ordinal 0 = {freeGb0:F2} GB, ordinal 1 = {freeGb1:F2} GB.");
             if (freeGb0 < 2.0 || freeGb1 < 2.0)
@@ -127,12 +131,14 @@ public sealed class CosyVoiceLmShardingEngineTests
 
         if (baselineMib.Length >= 2)
         {
-            long rise0 = peakMib[0] - baselineMib[0], rise1 = peakMib[1] - baselineMib[1];
-            _output.WriteLine($"Peak VRAM rise during generation: card0 +{rise0} MiB, card1 +{rise1} MiB.");
-            // A tiny threshold (not YuE's 1000 MiB): the 0.5B backbone's per-stage slice plus KV cache and
-            // CUDA context overhead is enough to move the needle on both cards, but nowhere near YuE's scale.
-            Assert.True(Math.Min(rise0, rise1) > 20,
-                $"expected BOTH cards to hold part of the Qwen2.5-0.5B backbone (pooling), got rises {rise0}/{rise1} MiB — " +
+            (int smi0, int smi1) = MapSmiRowsToOrdinals(total0, total1, baselineMib.Length);
+            long rise0 = peakMib[smi0] - baselineMib[smi0], rise1 = peakMib[smi1] - baselineMib[smi1];
+            _output.WriteLine($"Peak VRAM rise during generation: ordinal 0 +{rise0} MiB, ordinal 1 +{rise1} MiB.");
+            // Floor: the smaller stage is 7/24 of the ~1 GB bf16 backbone (~290 MiB) plus a fresh CUDA context and
+            // KV — real run measured +1040/+2270 MiB (2026-08-05 benchmark doc); a bare context alone
+            // (~200-500 MiB, i.e. a silent one-card fallback) cannot reach 600.
+            Assert.True(Math.Min(rise0, rise1) > 600,
+                $"expected BOTH cards to hold part of the Qwen2.5-0.5B backbone (pooling), got rises {rise0}/{rise1} MiB (ordinal 0/1) — " +
                 "check the per-stage asymmetric preload in CosyVoicePipeline.PreloadWeights.");
         }
         else
@@ -145,9 +151,10 @@ public sealed class CosyVoiceLmShardingEngineTests
 
     /// <summary>Whisper content-word-recall gate, same harness shape as
     /// <c>YueLmShardingEngineTests.AssertLyricsAreIntelligible</c>. Spoken zero-shot TTS is measurably easier ASR
-    /// than sung vocals, so the bar here is intentionally higher than YuE's 50% sung-lyrics line — but this
-    /// specific number has not been tuned against a real run on this box (the checkpoint was not on disk when this
-    /// test was written; see the plan doc). Loosen it if a genuine real-weight run legitimately lands lower.</summary>
+    /// than sung vocals, so the bar here is intentionally higher than YuE's 50% sung-lyrics line — validated by a
+    /// real run on this box (2026-08-05, <c>benchmarks/results/2026-08-05_multigpu_speeds.md</c>: Whisper heard the
+    /// target sentence verbatim, 4/4 content-word recall). Loosen it only if a genuine real-weight run legitimately
+    /// lands lower.</summary>
     private async Task AssertSpeechIsIntelligible(AudioResult result, string[] targetWords)
     {
         const string whisperRepo = "openai/whisper-medium";
@@ -180,12 +187,16 @@ public sealed class CosyVoiceLmShardingEngineTests
     }
 
     /// <summary>Per-card used VRAM in MiB from nvidia-smi, or empty when unavailable.</summary>
-    private static long[] QueryUsedMib()
+    private static long[] QueryUsedMib() => QueryMib("--query-gpu=memory.used");
+
+    /// <summary>Per-card total VRAM in MiB from nvidia-smi, or empty when unavailable.</summary>
+    private static long[] QueryTotalMib() => QueryMib("--query-gpu=memory.total");
+
+    private static long[] QueryMib(string query)
     {
         try
         {
-            using Process p = Process.Start(new ProcessStartInfo("nvidia-smi",
-                "--query-gpu=memory.used --format=csv,noheader,nounits")
+            using Process p = Process.Start(new ProcessStartInfo("nvidia-smi", $"{query} --format=csv,noheader,nounits")
             { RedirectStandardOutput = true, UseShellExecute = false })!;
             string output = p.StandardOutput.ReadToEnd();
             p.WaitForExit(5000);
@@ -196,5 +207,40 @@ public sealed class CosyVoiceLmShardingEngineTests
         {
             return [];
         }
+    }
+
+    /// <summary>Maps CUDA ordinals 0/1 to nvidia-smi row indexes by closest total capacity — nvidia-smi's row order
+    /// is its own device index, NOT the CUDA ordinal (they are swapped on this box) — falling back to row order when
+    /// nvidia-smi is unavailable or the cards are indistinguishable (same shape as
+    /// <c>MiniMaxH3DitShardingEngineTests</c>).</summary>
+    private static (int smi0, int smi1) MapSmiRowsToOrdinals(long total0Bytes, long total1Bytes, int rowCount)
+    {
+        long[] totalMib = QueryTotalMib();
+        int smi0 = ClosestByTotal(totalMib, total0Bytes);
+        int smi1 = ClosestByTotal(totalMib, total1Bytes);
+        return smi0 < 0 || smi1 < 0 || smi0 == smi1 || smi0 >= rowCount || smi1 >= rowCount ? (0, 1) : (smi0, smi1);
+    }
+
+    /// <summary>Index into the nvidia-smi row list whose reported total capacity is closest to
+    /// <paramref name="cudaTotalBytes"/>, or -1 when nvidia-smi is unavailable.</summary>
+    private static int ClosestByTotal(long[] nvidiaSmiTotalMib, long cudaTotalBytes)
+    {
+        if (nvidiaSmiTotalMib.Length == 0)
+        {
+            return -1;
+        }
+        long cudaTotalMib = cudaTotalBytes / (1024 * 1024);
+        int best = 0;
+        long bestDiff = long.MaxValue;
+        for (int i = 0; i < nvidiaSmiTotalMib.Length; i++)
+        {
+            long diff = Math.Abs(nvidiaSmiTotalMib[i] - cudaTotalMib);
+            if (diff < bestDiff)
+            {
+                bestDiff = diff;
+                best = i;
+            }
+        }
+        return best;
     }
 }

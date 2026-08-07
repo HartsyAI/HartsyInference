@@ -63,7 +63,7 @@ public sealed class VlmShardingEngineTests
         string mmproj = Path.Combine(Path.GetDirectoryName(checkpoint)!, "Llama-3.2-11B-Vision-Instruct-mmproj.f16.gguf");
         if (!RealWeightGate.Require(_output.WriteLine, checkpoint, mmproj)) return;
 
-        (double free0, double free1) = ProbeFreeGb();
+        (double free0, long total0, double free1, long total1) = ProbeFreeGb();
         _output.WriteLine($"Free VRAM — ordinal 0: {free0:F2} GB, ordinal 1: {free1:F2} GB.");
         // ~5.6 GB text + ~1.8 GB vision + KV/activations for the unsharded baseline on ordinal 0 alone.
         if (free0 < 9.0) { _output.WriteLine("SKIPPED: insufficient free VRAM on ordinal 0 for the unsharded baseline (~7.4 GB weights)."); return; }
@@ -119,10 +119,13 @@ public sealed class VlmShardingEngineTests
 
         if (baselineMib.Length >= 2)
         {
-            long rise0 = peakMib[0] - baselineMib[0], rise1 = peakMib[1] - baselineMib[1];
-            _output.WriteLine($"Peak VRAM rise during sharded generation: card0 +{rise0} MiB, card1 +{rise1} MiB.");
-            Assert.True(Math.Min(rise0, rise1) > 50,
-                $"expected BOTH cards to hold a layer range (pooling), got rises {rise0}/{rise1} MiB — " +
+            (int smi0, int smi1) = MapSmiRowsToOrdinals(total0, total1, baselineMib.Length);
+            long rise0 = peakMib[smi0] - baselineMib[smi0], rise1 = peakMib[smi1] - baselineMib[smi1];
+            _output.WriteLine($"Peak VRAM rise during sharded generation: ordinal 0 +{rise0} MiB, ordinal 1 +{rise1} MiB.");
+            // Floor: the smaller card's split share alone is ~12/40 of the 5.6 GB Q4 text weights (~1.7 GB); the real
+            // run measured +7500/+15534 MiB (2026-08-05 benchmark doc) — 1000 is half that share, 2x any bare context.
+            Assert.True(Math.Min(rise0, rise1) > 1000,
+                $"expected BOTH cards to hold a layer range (pooling), got rises {rise0}/{rise1} MiB (ordinal 0/1) — " +
                 "check whether TextService.LoadSharded actually loaded the vision sidecar and reached the staged VLM path.");
         }
         else
@@ -140,7 +143,7 @@ public sealed class VlmShardingEngineTests
         string mmproj = Path.Combine(Path.GetDirectoryName(checkpoint)!, "mmproj-F16.gguf");
         if (!RealWeightGate.Require(_output.WriteLine, checkpoint, mmproj)) return;
 
-        (double free0, double free1) = ProbeFreeGb();
+        (double free0, long total0, double free1, long total1) = ProbeFreeGb();
         _output.WriteLine($"Free VRAM — ordinal 0: {free0:F2} GB, ordinal 1: {free1:F2} GB.");
         // ~4.7 GB text + ~1.35 GB vision + KV/activations for the unsharded baseline on ordinal 0 alone.
         if (free0 < 7.5) { _output.WriteLine("SKIPPED: insufficient free VRAM on ordinal 0 for the unsharded baseline (~6.1 GB weights)."); return; }
@@ -196,10 +199,13 @@ public sealed class VlmShardingEngineTests
 
         if (baselineMib.Length >= 2)
         {
-            long rise0 = peakMib[0] - baselineMib[0], rise1 = peakMib[1] - baselineMib[1];
-            _output.WriteLine($"Peak VRAM rise during sharded generation: card0 +{rise0} MiB, card1 +{rise1} MiB.");
-            Assert.True(Math.Min(rise0, rise1) > 50,
-                $"expected BOTH cards to hold a layer range (pooling), got rises {rise0}/{rise1} MiB — " +
+            (int smi0, int smi1) = MapSmiRowsToOrdinals(total0, total1, baselineMib.Length);
+            long rise0 = peakMib[smi0] - baselineMib[smi0], rise1 = peakMib[smi1] - baselineMib[smi1];
+            _output.WriteLine($"Peak VRAM rise during sharded generation: ordinal 0 +{rise0} MiB, ordinal 1 +{rise1} MiB.");
+            // Floor: the smaller card's split share alone is ~8/28 of the 4.7 GB Q4 text weights (~1.35 GB); the real
+            // run measured +5864/+13014 MiB (2026-08-05 benchmark doc) — 700 is half that share, above any bare context.
+            Assert.True(Math.Min(rise0, rise1) > 700,
+                $"expected BOTH cards to hold a layer range (pooling), got rises {rise0}/{rise1} MiB (ordinal 0/1) — " +
                 "check whether TextService.LoadSharded actually loaded the vision sidecar and reached the staged VLM path.");
         }
         else
@@ -209,12 +215,16 @@ public sealed class VlmShardingEngineTests
     }
 
     /// <summary>Per-card used VRAM in MiB from nvidia-smi, or empty when unavailable.</summary>
-    private static long[] QueryUsedMib()
+    private static long[] QueryUsedMib() => QueryMib("--query-gpu=memory.used");
+
+    /// <summary>Per-card total VRAM in MiB from nvidia-smi, or empty when unavailable.</summary>
+    private static long[] QueryTotalMib() => QueryMib("--query-gpu=memory.total");
+
+    private static long[] QueryMib(string query)
     {
         try
         {
-            using Process p = Process.Start(new ProcessStartInfo("nvidia-smi",
-                "--query-gpu=memory.used --format=csv,noheader,nounits")
+            using Process p = Process.Start(new ProcessStartInfo("nvidia-smi", $"{query} --format=csv,noheader,nounits")
             { RedirectStandardOutput = true, UseShellExecute = false })!;
             string output = p.StandardOutput.ReadToEnd();
             p.WaitForExit(5000);
@@ -227,13 +237,48 @@ public sealed class VlmShardingEngineTests
         }
     }
 
-    private static (double free0Gb, double free1Gb) ProbeFreeGb()
+    /// <summary>Maps CUDA ordinals 0/1 to nvidia-smi row indexes by closest total capacity — nvidia-smi's row order
+    /// is its own device index, NOT the CUDA ordinal (they are swapped on this box) — falling back to row order when
+    /// nvidia-smi is unavailable or the cards are indistinguishable (same shape as
+    /// <c>MiniMaxH3DitShardingEngineTests</c>).</summary>
+    private static (int smi0, int smi1) MapSmiRowsToOrdinals(long total0Bytes, long total1Bytes, int rowCount)
+    {
+        long[] totalMib = QueryTotalMib();
+        int smi0 = ClosestByTotal(totalMib, total0Bytes);
+        int smi1 = ClosestByTotal(totalMib, total1Bytes);
+        return smi0 < 0 || smi1 < 0 || smi0 == smi1 || smi0 >= rowCount || smi1 >= rowCount ? (0, 1) : (smi0, smi1);
+    }
+
+    /// <summary>Index into the nvidia-smi row list whose reported total capacity is closest to
+    /// <paramref name="cudaTotalBytes"/>, or -1 when nvidia-smi is unavailable.</summary>
+    private static int ClosestByTotal(long[] nvidiaSmiTotalMib, long cudaTotalBytes)
+    {
+        if (nvidiaSmiTotalMib.Length == 0)
+        {
+            return -1;
+        }
+        long cudaTotalMib = cudaTotalBytes / (1024 * 1024);
+        int best = 0;
+        long bestDiff = long.MaxValue;
+        for (int i = 0; i < nvidiaSmiTotalMib.Length; i++)
+        {
+            long diff = Math.Abs(nvidiaSmiTotalMib[i] - cudaTotalMib);
+            if (diff < bestDiff)
+            {
+                bestDiff = diff;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    private static (double free0Gb, long total0Bytes, double free1Gb, long total1Bytes) ProbeFreeGb()
     {
         string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(VlmShardingEngineTests).Assembly.Location)!, "Ptx");
         using CudaBackend probe0 = new(deviceOrdinal: 0, ptxDir: ptxDir);
         using CudaBackend probe1 = new(deviceOrdinal: 1, ptxDir: ptxDir);
-        (nuint free0, _) = probe0.Context.GetMemoryInfo();
-        (nuint free1, _) = probe1.Context.GetMemoryInfo();
-        return (free0 / (1024.0 * 1024.0 * 1024.0), free1 / (1024.0 * 1024.0 * 1024.0));
+        (nuint free0, nuint total0) = probe0.Context.GetMemoryInfo();
+        (nuint free1, nuint total1) = probe1.Context.GetMemoryInfo();
+        return (free0 / (1024.0 * 1024.0 * 1024.0), (long)total0, free1 / (1024.0 * 1024.0 * 1024.0), (long)total1);
     }
 }

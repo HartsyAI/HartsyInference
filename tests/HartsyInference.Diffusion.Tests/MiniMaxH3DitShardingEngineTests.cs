@@ -19,19 +19,20 @@ namespace HartsyInference.Diffusion.Tests;
 /// encoder are never co-resident (<c>MiniMaxH3RecipePipeline</c> frees the encoder before the DiT denoise loop
 /// runs), and the DiT alone preloads resident on the 4090 (measured ~50 ms/step, not the multi-second-per-step
 /// signature of block-streaming).</para>
-/// <para><b>The sibling models' "SSIM > 0.75 vs baseline" gate does NOT apply to MiniMax-H3 and is deliberately not
-/// used here — two control experiments proved why.</b> (1) Splitting <c>ForwardSharded</c> across two backends that
-/// are BOTH ordinal 0 (no physical cross-device boundary at all) reproduces the baseline at SSIM 1.0000 — the
-/// block-range split math is exact. (2) Running the model with NO sharding whatsoever, once entirely on ordinal 0
-/// (native fp8 GEMM, SM 8.9) and once entirely on ordinal 1 (fp8 dequant path, SM 8.6), gives SSIM ≈ 0.14 —
-/// matching the ~0.17 this test's real cross-device SHARDED run produces almost exactly. MiniMax-H3's fp8 pruned
-/// checkpoint runs residual magnitudes into the millions (documented in <c>MiniMaxH3Recipe</c>: <c>condition_proj</c>
-/// overflows 2 of 5376 channels to inf pre-block-0, the residual reaches ~2.7e6 by the last block), and the SM
-/// 8.6 dequant GEMM's different rounding/accumulation order gets amplified into a materially different image —
-/// a property of this checkpoint's numerics on non-native-fp8 hardware, present with or without sharding. This is
-/// therefore gated in two tiers: a tight same-device parity check (proves the sharding math), and a
-/// coherence + VRAM-pooling check for the real cross-device run (proves the practical pooling win), with the
-/// cross-device SSIM only logged, not asserted tight.</para></remarks>
+/// <para><b>History of the cross-device gate (rewritten 2026-08-06 — the original causal story was wrong).</b>
+/// The cross-device run used to score SSIM ~0.17 (a regular-grid mosaic), and both it AND its justifying control
+/// (whole model unsharded on ordinal 1 → SSIM ≈ 0.14) were blamed on SM 8.6 fp8-dequant rounding amplified by
+/// this checkpoint's huge residuals. The REAL cause of both numbers was a bug: <c>Modulate</c> emits e4m3
+/// activations (stored value = real/input_scale) with the fp8-emit flag on regardless of SM, but only the
+/// native-fp8 GEMM branch folded <c>input.Fp8ScaleFactor</c> back into alpha — the SM 8.6 fallback dequantized
+/// scale-blind, so every tail-block <c>qkv</c>/<c>fc1</c> output on the 3060 was off by its input-scale factor.
+/// Confirmed by experiment (2026-08-06): disabling the emit (<c>HARTSY_MODULATE_EMIT_FP8=0</c>) raised
+/// cross-device SSIM 0.17 → 0.9795; after folding the scale in <c>CudaBackend.LinearImpl</c>'s fallback,
+/// defaults measure <b>0.9597</b> (emission on, its perf kept). The residual gap from 1.0 IS the genuine SM 8.6
+/// story: BF16/F16-fallback GEMMs at residual magnitudes ~2.7e6 (see <c>MiniMaxH3Recipe</c>), plus e4m3
+/// re-quantization of modulated activations. Gates: same-device split SSIM > 0.99 (sharding math exact —
+/// measured 1.0000), cross-device SSIM > 0.90 (real bar again; measured 0.9597 default / 0.9795 emit-off),
+/// plus coherence + two-card VRAM-pooling bounds.</para></remarks>
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
 public sealed class MiniMaxH3DitShardingEngineTests
@@ -162,15 +163,16 @@ public sealed class MiniMaxH3DitShardingEngineTests
             _output.WriteLine("nvidia-smi unavailable — VRAM pooling assertion skipped (coherence + audio checks still ran).");
         }
 
-        // Informational only, deliberately not gated at the sibling models' 0.75: the cross-device fp8 dequant path
-        // legitimately produces a materially different image for THIS checkpoint (see class remarks) — a >0.75 bar
-        // here would either be unreachable for a correct implementation or would mask nothing if lowered blindly.
-        // A loose floor still catches true garbage (a black frame, a NaN cascade that decoded to noise, etc.).
+        // REAL gate again as of 2026-08-06 (was an informational 0.05 floor while the mosaic bug lived): the
+        // fp8 input-scale fold fix in CudaBackend.LinearImpl's fallback measured 0.9597 here at defaults.
+        // Remaining divergence is the genuine SM 8.6 non-native-fp8 regime (see class remarks); 0.90 leaves
+        // margin for that while catching any regression of the scale fold or the boundary hand-off.
         Assert.Equal(baseline.Frames.Count, crossDeviceSharded.Frames.Count);
         double crossDeviceSsim = MeanSsim(baseline.Frames, crossDeviceSharded.Frames);
-        _output.WriteLine($"  mean SSIM(baseline, cross-device sharded) = {crossDeviceSsim:F4} (informational — see class remarks)");
-        Assert.True(crossDeviceSsim > 0.05, $"cross-device sharded output is not just fp8-divergent but incoherent " +
-            $"(SSIM={crossDeviceSsim:F4}) — this is below even the fp8-dequant-path control band (~0.14).");
+        _output.WriteLine($"  mean SSIM(baseline, cross-device sharded) = {crossDeviceSsim:F4} (GATED > 0.90; measured 0.9597 at defaults)");
+        Assert.True(crossDeviceSsim > 0.90, $"cross-device sharded output regressed (SSIM={crossDeviceSsim:F4}, " +
+            "measured 0.9597 when this gate was restored) — check the LinearImpl fp8 input-scale fold " +
+            "(the 2026-08-06 mosaic root cause) and the block-range hand-off.");
     }
 
     private static void AssertCoherent(VideoGenerationResult result, string label)

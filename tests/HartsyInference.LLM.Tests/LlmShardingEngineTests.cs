@@ -35,7 +35,7 @@ public sealed class LlmShardingEngineTests
         string checkpoint = TestPaths.Llm.Llama32_1BQ8;
         if (!RealWeightGate.Require(_output.WriteLine, checkpoint)) return;
 
-        (double free0, double free1) = ProbeFreeGb();
+        (double free0, long total0, double free1, long total1) = ProbeFreeGb();
         _output.WriteLine($"Free VRAM — ordinal 0: {free0:F2} GB, ordinal 1: {free1:F2} GB.");
         if (free0 < 1.5 || free1 < 1.5)
         {
@@ -102,10 +102,14 @@ public sealed class LlmShardingEngineTests
 
         if (baselineMib.Length >= 2)
         {
-            long rise0 = peakMib[0] - baselineMib[0], rise1 = peakMib[1] - baselineMib[1];
-            _output.WriteLine($"Peak VRAM rise during sharded generation: card0 +{rise0} MiB, card1 +{rise1} MiB.");
-            Assert.True(Math.Min(rise0, rise1) > 50,
-                $"expected BOTH cards to hold a layer range (pooling), got rises {rise0}/{rise1} MiB — " +
+            (int smi0, int smi1) = MapSmiRowsToOrdinals(total0, total1, baselineMib.Length);
+            long rise0 = peakMib[smi0] - baselineMib[smi0], rise1 = peakMib[smi1] - baselineMib[smi1];
+            _output.WriteLine($"Peak VRAM rise during sharded generation: ordinal 0 +{rise0} MiB, ordinal 1 +{rise1} MiB.");
+            // Floor: the smaller card's byte-weighted share of the ~1.3 GB Q8 weights is ~0.45-0.5 GB, plus a fresh
+            // CUDA context — a bare context alone (~200-500 MiB, i.e. a silent one-card fallback) cannot reach 550.
+            // Measured real min rise on this box: 608 MiB (2026-08-06) — 550 keeps margin on both sides.
+            Assert.True(Math.Min(rise0, rise1) > 550,
+                $"expected BOTH cards to hold a layer range (pooling), got rises {rise0}/{rise1} MiB (ordinal 0/1) — " +
                 "check whether TextService.ResolveShardDevices actually took the LoadSharded branch.");
         }
         else
@@ -115,12 +119,16 @@ public sealed class LlmShardingEngineTests
     }
 
     /// <summary>Per-card used VRAM in MiB from nvidia-smi, or empty when unavailable.</summary>
-    private static long[] QueryUsedMib()
+    private static long[] QueryUsedMib() => QueryMib("--query-gpu=memory.used");
+
+    /// <summary>Per-card total VRAM in MiB from nvidia-smi, or empty when unavailable.</summary>
+    private static long[] QueryTotalMib() => QueryMib("--query-gpu=memory.total");
+
+    private static long[] QueryMib(string query)
     {
         try
         {
-            using Process p = Process.Start(new ProcessStartInfo("nvidia-smi",
-                "--query-gpu=memory.used --format=csv,noheader,nounits")
+            using Process p = Process.Start(new ProcessStartInfo("nvidia-smi", $"{query} --format=csv,noheader,nounits")
             { RedirectStandardOutput = true, UseShellExecute = false })!;
             string output = p.StandardOutput.ReadToEnd();
             p.WaitForExit(5000);
@@ -131,6 +139,41 @@ public sealed class LlmShardingEngineTests
         {
             return [];
         }
+    }
+
+    /// <summary>Maps CUDA ordinals 0/1 to nvidia-smi row indexes by closest total capacity — nvidia-smi's row order
+    /// is its own device index, NOT the CUDA ordinal (they are swapped on this box) — falling back to row order when
+    /// nvidia-smi is unavailable or the cards are indistinguishable (same shape as
+    /// <c>MiniMaxH3DitShardingEngineTests</c>).</summary>
+    private static (int smi0, int smi1) MapSmiRowsToOrdinals(long total0Bytes, long total1Bytes, int rowCount)
+    {
+        long[] totalMib = QueryTotalMib();
+        int smi0 = ClosestByTotal(totalMib, total0Bytes);
+        int smi1 = ClosestByTotal(totalMib, total1Bytes);
+        return smi0 < 0 || smi1 < 0 || smi0 == smi1 || smi0 >= rowCount || smi1 >= rowCount ? (0, 1) : (smi0, smi1);
+    }
+
+    /// <summary>Index into the nvidia-smi row list whose reported total capacity is closest to
+    /// <paramref name="cudaTotalBytes"/>, or -1 when nvidia-smi is unavailable.</summary>
+    private static int ClosestByTotal(long[] nvidiaSmiTotalMib, long cudaTotalBytes)
+    {
+        if (nvidiaSmiTotalMib.Length == 0)
+        {
+            return -1;
+        }
+        long cudaTotalMib = cudaTotalBytes / (1024 * 1024);
+        int best = 0;
+        long bestDiff = long.MaxValue;
+        for (int i = 0; i < nvidiaSmiTotalMib.Length; i++)
+        {
+            long diff = Math.Abs(nvidiaSmiTotalMib[i] - cudaTotalMib);
+            if (diff < bestDiff)
+            {
+                bestDiff = diff;
+                best = i;
+            }
+        }
+        return best;
     }
 
     /// <summary>Real decode tok/s under a 2-GPU layer split, using the delta method documented in
@@ -149,7 +192,7 @@ public sealed class LlmShardingEngineTests
         string checkpoint = TestPaths.Llm.Qwen3_32BQ4KM;
         if (!RealWeightGate.Require(_output.WriteLine, checkpoint)) return;
 
-        (double free0, double free1) = ProbeFreeGb();
+        (double free0, _, double free1, _) = ProbeFreeGb();
         _output.WriteLine($"Free VRAM — ordinal 0: {free0:F2} GB, ordinal 1: {free1:F2} GB.");
         if (free0 + free1 < 27.0 || Math.Min(free0, free1) < 9.0)
         {
@@ -233,13 +276,13 @@ public sealed class LlmShardingEngineTests
         return -1;
     }
 
-    private static (double free0Gb, double free1Gb) ProbeFreeGb()
+    private static (double free0Gb, long total0Bytes, double free1Gb, long total1Bytes) ProbeFreeGb()
     {
         string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(LlmShardingEngineTests).Assembly.Location)!, "Ptx");
         using CudaBackend probe0 = new(deviceOrdinal: 0, ptxDir: ptxDir);
         using CudaBackend probe1 = new(deviceOrdinal: 1, ptxDir: ptxDir);
-        (nuint free0, _) = probe0.Context.GetMemoryInfo();
-        (nuint free1, _) = probe1.Context.GetMemoryInfo();
-        return (free0 / (1024.0 * 1024.0 * 1024.0), free1 / (1024.0 * 1024.0 * 1024.0));
+        (nuint free0, nuint total0) = probe0.Context.GetMemoryInfo();
+        (nuint free1, nuint total1) = probe1.Context.GetMemoryInfo();
+        return (free0 / (1024.0 * 1024.0 * 1024.0), (long)total0, free1 / (1024.0 * 1024.0 * 1024.0), (long)total1);
     }
 }

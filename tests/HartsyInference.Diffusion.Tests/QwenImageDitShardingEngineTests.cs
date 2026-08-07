@@ -29,7 +29,12 @@ namespace HartsyInference.Diffusion.Tests;
 /// channels - a property of this checkpoint's precision regime on Ada+ hardware, present with or without
 /// sharding, not a sharding defect. Disabling native fp8 to "fix" the gate would cost real slowdown on
 /// every Qwen-Image generation, single-GPU included, so it stays opt-in. Same mechanism class as
-/// <c>MiniMaxH3DitShardingEngineTests</c>' already-accepted informational gate.</para></summary>
+/// <c>MiniMaxH3DitShardingEngineTests</c>' already-accepted informational gate.</para>
+///
+/// <para>Following the H3 precedent, the informational floor is paired with two GATED regression tiers that a
+/// regime gap cannot excuse: a same-device split (both shards on ordinal 0 — one GEMM regime, SSIM &gt; 0.99)
+/// and a regime-matched cross-device run (<c>HARTSY_FP8_NATIVE=0</c> on both sides — measured 0.9922, gated
+/// &gt; 0.95).</para></summary>
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
 public sealed class QwenImageDitShardingEngineTests
@@ -99,6 +104,146 @@ public sealed class QwenImageDitShardingEngineTests
             "check the block-range hand-off (img/txt/temb CopyFromPeer), this is below the known native-fp8 floor.");
     }
 
+    /// <summary>GATED same-device tier (the regression bar the informational cross-device floor can't provide —
+    /// H3 precedent: <see cref="MiniMaxH3DitShardingEngineTests"/>). Both shard backends resolve to ordinal 0, so
+    /// every GEMM on both sides of the comparison runs the SAME fp8 regime and any divergence from the unsharded
+    /// baseline IS a sharding defect — boundary hand-off, asymmetric preload/free, or block-range routing — with
+    /// no precision-regime gap to blame. Gated tight at SSIM &gt; 0.99. Single-card fact: needs no second GPU,
+    /// only ~20 GB free on ordinal 0 (baseline then both split shares of the ~19 GB DiT, sequential runs).</summary>
+    [Fact]
+    public async Task DitSharding_RealEngine_SameDeviceSplit_MatchesUnshardedBaseline()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string checkpoint = TestPaths.QwenImageEdit.Edit2511Fp8;
+        if (!RealWeightGate.Require(_output.WriteLine, checkpoint)) return;
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(QwenImageDitShardingEngineTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
+
+        double free0 = ProbeFreeGb0();
+        _output.WriteLine($"Free VRAM — ordinal 0: {free0:F2} GB.");
+        if (free0 < 20.0)
+        {
+            _output.WriteLine("SKIPPED: no sufficient GPU — the ~19 GB DiT (baseline, then both split shares) needs ~20 GB free on ordinal 0.");
+            return;
+        }
+
+        ModelSpec spec = ModelResolver.Resolve("qwen-image", checkpoint, Modality.Image);
+        if (spec.LocalPath is null) { _output.WriteLine("SKIPPED: qwen-image not resolvable with the explicit path."); return; }
+
+        // Same seed/settings as the cross-device fact; Steps=4 keeps runtime sane (regime identity, not
+        // trajectory convergence, is what is under test — the H3 twin measured SSIM invariant to step count).
+        ImageRequest request = new ImageRequest
+        {
+            Prompt = "a photograph of an astronaut riding a horse",
+            Width = 1024,
+            Height = 1024,
+            Steps = 4,
+            CfgScale = 1.0f,
+            Seed = 42,
+        };
+
+        Stopwatch sw = Stopwatch.StartNew();
+        _output.WriteLine("[1/2] UNSHARDED baseline (single GPU, ordinal 0)...");
+        ImageResult baseline;
+        using (InferenceEngine unshardedEngine = new InferenceEngine("cuda", 0))
+        {
+            baseline = await unshardedEngine.Images.GenerateAsync(spec, request);
+        }
+        _output.WriteLine($"  baseline: {baseline.Width}x{baseline.Height}, seed={baseline.Seed}, {sw.Elapsed.TotalSeconds:F1}s");
+        AssertCoherent(baseline.Rgb, "baseline");
+
+        sw.Restart();
+        _output.WriteLine("[2/2] SAME-DEVICE split (both shard backends resolve to ordinal 0 — no physical boundary, one GEMM regime)...");
+        PlacementConfig placement = new PlacementConfig { ShardDevices = ["cuda:0", "cuda:0"], EnableDitSharding = true };
+        ImageResult sharded;
+        using (InferenceEngine shardedEngine = new InferenceEngine("cuda", 0, new EngineOptions { Placement = placement }))
+        {
+            sharded = await shardedEngine.Images.GenerateAsync(spec, request);
+        }
+        _output.WriteLine($"  same-device sharded: {sharded.Width}x{sharded.Height}, seed={sharded.Seed}, {sw.Elapsed.TotalSeconds:F1}s");
+        AssertCoherent(sharded.Rgb, "same-device sharded");
+
+        Assert.Equal(baseline.Width, sharded.Width);
+        Assert.Equal(baseline.Height, sharded.Height);
+        double ssim = Ssim.Compute(baseline.Rgb, sharded.Rgb, sharded.Width, sharded.Height);
+        _output.WriteLine($"SSIM(baseline, same-device sharded) = {ssim:F4} (GATED > 0.99)");
+        Assert.True(ssim > 0.99, $"same-device split diverged from the unsharded baseline (SSIM={ssim:F4}) — this case " +
+            "has no fp8-regime difference to blame, so this IS a sharding defect: check the block-range hand-off " +
+            "(img/txt/temb CopyFromPeer), the asymmetric preload/free, or the ForwardSharded block routing.");
+    }
+
+    /// <summary>GATED cross-device tier the informational floor in
+    /// <see cref="DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded"/> can't provide:
+    /// identical run, but <c>HARTSY_FP8_NATIVE=0</c> forces BOTH the unsharded baseline and the sharded run onto
+    /// the same (non-native) fp8 GEMM regime, removing the SM 8.9 native-fp8 quantization gap that made the
+    /// default-regime SSIM informational. The 2026-08-06 investigation measured SSIM 0.9922 in exactly this
+    /// configuration, so &gt; 0.95 is a real regression bar with margin. <c>CudaBackend</c> reads
+    /// <c>HARTSY_FP8_NATIVE</c> once at construction, so it is set at the very top, before ANY backend (the VRAM
+    /// probes included) is constructed — same static-init caveat as the <c>HARTSY_KEEP_MODELS</c> fact below:
+    /// run this fact filter-isolated in its own process.</summary>
+    [Fact]
+    public async Task DitSharding_RealEngine_CrossDevice_MatchedFp8Regime_WithinGatedToleranceOfUnsharded()
+    {
+        Environment.SetEnvironmentVariable("HARTSY_FP8_NATIVE", "0");
+
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        if (CudaContext.GetDeviceCount() < 2) { _output.WriteLine("SKIPPED: needs 2 physical GPUs."); return; }
+        string checkpoint = TestPaths.QwenImageEdit.Edit2511Fp8;
+        if (!RealWeightGate.Require(_output.WriteLine, checkpoint)) return;
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(QwenImageDitShardingEngineTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
+
+        (double free0, double free1) = ProbeFreeGb();
+        _output.WriteLine($"Free VRAM — ordinal 0: {free0:F2} GB, ordinal 1: {free1:F2} GB.");
+        if (free0 < 20.0 || free1 < 9.0)
+        {
+            _output.WriteLine("SKIPPED: the ~19 GB DiT needs most of both cards free (baseline may stream, sharded needs both shares resident).");
+            return;
+        }
+
+        ModelSpec spec = ModelResolver.Resolve("qwen-image", checkpoint, Modality.Image);
+        if (spec.LocalPath is null) { _output.WriteLine("SKIPPED: qwen-image not resolvable with the explicit path."); return; }
+
+        ImageRequest request = new ImageRequest
+        {
+            Prompt = "a photograph of an astronaut riding a horse",
+            Width = 1024,
+            Height = 1024,
+            Steps = 8,
+            CfgScale = 1.0f,
+            Seed = 42,
+        };
+
+        Stopwatch sw = Stopwatch.StartNew();
+        _output.WriteLine("[1/2] UNSHARDED baseline (single GPU, ordinal 0, HARTSY_FP8_NATIVE=0)...");
+        ImageResult baseline;
+        using (InferenceEngine unshardedEngine = new InferenceEngine("cuda", 0))
+        {
+            baseline = await unshardedEngine.Images.GenerateAsync(spec, request);
+        }
+        _output.WriteLine($"  baseline: {baseline.Width}x{baseline.Height}, seed={baseline.Seed}, {sw.Elapsed.TotalSeconds:F1}s");
+        AssertCoherent(baseline.Rgb, "baseline");
+
+        sw.Restart();
+        _output.WriteLine("[2/2] SHARDED (60-block loop split cuda:0 + cuda:1, both on the matched regime)...");
+        PlacementConfig placement = new PlacementConfig { ShardDevices = ["cuda:0", "cuda:1"], EnableDitSharding = true };
+        ImageResult sharded;
+        using (InferenceEngine shardedEngine = new InferenceEngine("cuda", 0, new EngineOptions { Placement = placement }))
+        {
+            sharded = await shardedEngine.Images.GenerateAsync(spec, request);
+        }
+        _output.WriteLine($"  sharded: {sharded.Width}x{sharded.Height}, seed={sharded.Seed}, {sw.Elapsed.TotalSeconds:F1}s");
+        AssertCoherent(sharded.Rgb, "sharded");
+
+        Assert.Equal(baseline.Width, sharded.Width);
+        Assert.Equal(baseline.Height, sharded.Height);
+        double ssim = Ssim.Compute(baseline.Rgb, sharded.Rgb, sharded.Width, sharded.Height);
+        _output.WriteLine($"SSIM(baseline, sharded, matched fp8 regime) = {ssim:F4} (GATED > 0.95; measured 0.9922)");
+        Assert.True(ssim > 0.95, $"regime-matched cross-device sharding regressed (SSIM={ssim:F4}, measured 0.9922 " +
+            "when this tier was established) — with HARTSY_FP8_NATIVE=0 on both sides the fp8-regime gap is gone, " +
+            "so this is a real cross-device sharding defect (boundary hand-off, preload/free, or block routing).");
+    }
+
     /// <summary>Teardown-symmetry regression: with <c>HARTSY_KEEP_MODELS=0</c> two consecutive sharded generations
     /// must not accumulate VRAM on either ordinal — the shard backend's block range is freed by the asymmetric
     /// <c>FreeTransformerWeights</c>, not the unsharded whole-DiT free that would silently no-op there. Same
@@ -153,6 +298,15 @@ public sealed class QwenImageDitShardingEngineTests
         int nonZero = rgb.Count(b => b != 0), nonFF = rgb.Count(b => b != 255);
         Assert.True(nonZero > rgb.Length * 0.1, $"{label}: image is all black");
         Assert.True(nonFF > rgb.Length * 0.1, $"{label}: image is all white");
+    }
+
+    /// <summary>Ordinal-0-only probe for the same-device fact — never touches ordinal 1, so it works on a 1-GPU box.</summary>
+    private static double ProbeFreeGb0()
+    {
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(QwenImageDitShardingEngineTests).Assembly.Location)!, "Ptx");
+        using CudaBackend probe0 = new(deviceOrdinal: 0, ptxDir: ptxDir);
+        (nuint free0, _) = probe0.Context.GetMemoryInfo();
+        return free0 / (1024.0 * 1024.0 * 1024.0);
     }
 
     private static (double free0Gb, double free1Gb) ProbeFreeGb()
