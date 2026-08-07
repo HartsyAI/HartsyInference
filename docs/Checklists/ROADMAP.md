@@ -176,6 +176,14 @@ giants (Kimi-K2, DeepSeek-V3, Mixtral, Qwen3-MoE, Qwen2.5-VL-7B).
   the seam. Plan-level only (`NcclApi` design in `MULTI_GPU_PARALLELISM.md`); needs NVLink hardware this
   box doesn't have to pay off.
 - [ ] **M3 — expert parallel (MoE):** route experts to devices; ties to on-device MoE routing (§4).
+- [~] **M2 — tensor parallel v1 SHIPPED (Phase 3, 2026-08-07):** `TensorParallelDegree` consumed for
+  real — Megatron-style column/row split (quant-block-aligned), 2 NCCL all-reduces/layer via the Phase 1
+  collectives, per-rank KV head slices, TextService branch with the asserted `[TensorParallel] active`
+  marker (precedes layer-split so a TP config can never silently layer-split). Verified: 17/17 CPU
+  synthetic parity + real-GGUF degree-2 EXACT token parity on 4090+3060 (+3,511/+1,730 MiB shards).
+  v1 bounds: dense Llama/Qwen2/Qwen3 only (loud refusals), single driving thread, no graph/spec decode —
+  perf on PCIe is pre-declared honest (correctness + harness, not a speed claim). Follow-ups: threaded
+  RankRunner driver, per-token comm profiling, more architectures.
 - [~] **M4 — sequence/context parallel (Phase 2, 2026-08-06): Wan v1 LANDED.**
   `PlacementConfig.ContextParallelDevices` → frame-aligned proportional token split, per-block
   self-attention K/V exchange (2-rank two-phase barrier, host-assembled), weights replicated. Mechanism
@@ -183,9 +191,14 @@ giants (Kimi-K2, DeepSeek-V3, Mixtral, Qwen3-MoE, Qwen2.5-VL-7B).
   (cross-ARCH drift ceiling on this 4090+3060 pair measured 0.7774 via `WanCrossGpuRegimeDiagnosticTests`
   — regime flags can't equalize architectures, so 0.99 is unreachable on heterogeneous cards by physics,
   not by defect). HONEST perf: slower at the 675-token test geometry (exchange/imbalance-bound); the win
-  case is long sequences on balanced links — large-geometry perf point deferred to CLI wiring / bigger
-  hardware. Not yet: Qwen-Image CP, >2 ranks, NCCL-backed exchange, Ulysses head-parallel variant,
-  CP×CFG-parallel composition.
+  case is long sequences on balanced links. **Update 2026-08-07:** Qwen-Image CP shipped (img-row split,
+  replicated txt stream; on this box the 19 GB replica can't fit the 3060 → the verified behavior is the
+  observable preload-OOM fallback, single-GPU completion, SSIM 1.0000; active CP needs a same-VRAM pair);
+  CLI `--cp-gpu` shipped; the large-geometry perf point was MEASURED via CLI (832×480×25f: CP 3.5× slower
+  than single-GPU — on a no-P2P heterogeneous pair Wan CP loses at every geometry; mechanism correct,
+  the latency win needs NVLink-class links + balanced GPUs); data-parallel serving pattern pinned by
+  `DataParallelServingEngineTests` (1.71× for 4 concurrent requests). Not yet: >2 ranks, NCCL-backed
+  exchange, Ulysses head-parallel variant, CP×CFG-parallel composition, threaded TP driver.
 - [ ] **M5 — disaggregated serving:** separate prefill and decode pools.
 - [x] **Collectives (Phase 1, 2026-08-06):** `NcclApi` P/Invoke (runtime-resolved libnccl.so.2, no system
   install — torch-venv copy hardlinked into the probe dir), `ICollectiveComm` with `NcclComm` +

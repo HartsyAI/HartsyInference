@@ -24,7 +24,7 @@ Conflicts are enforced, not conventions: `EnableDitSharding`, `CfgParallelDevice
 | | **Single GPU** | **Heterogeneous pair, no P2P** (e.g. 4090+3060 — the tested rig) | **Homogeneous pair, P2P/NVLink** (datacenter-class) |
 |---|---|---|---|
 | **FIT** | Quantize (GGUF/fp8) or block-streaming; sharding needs ≥2 devices. Same-GPU dual *backends* is multi-tenancy, not fit. | **The headline case — use sharding.** LLM/VLM/audio-LM layer split or DiT block sharding pools VRAM; byte-weighted planner puts the bigger range on the bigger card automatically. Expect same-or-few-% slower steps, plus the fp8 cross-arch fidelity caveat below. | Same mechanisms, minus the caveats: matched SMs give one GEMM regime (same-device splits measured bit-exact), and P2P skips the host round-trip on boundary copies. |
-| **LATENCY** | Nothing here helps — these features all spend a second device. See the single-GPU perf docs instead. | **Case-by-case; check the measured verdicts below.** TE/VAE placement is the safest win (Wan 43.7→32.7 s, LTX-1 16.4→10.2 s). CFG-parallel wins when the replica genuinely fits with headroom (Wan ~1.8-1.9×/step) and *loses* when it doesn't (SDXL 2.6× slower). Context parallelism is verified-correct but **slower at small geometry** on this rig. | The design target for CFG-parallel, context parallelism, and (landing) tensor parallelism: matched per-token speed removes the barrier-waits-on-slow-rank problem, and NVLink/P2P removes the host-staged exchange cost that dominates on PCIe. Unvalidated tier — no such hardware on the dev rig (ROADMAP §1 "Tiers to validate"). |
+| **LATENCY** | Nothing here helps — these features all spend a second device. See the single-GPU perf docs instead. | **Case-by-case; check the measured verdicts below.** TE/VAE placement is the safest win (Wan 43.7→32.7 s, LTX-1 16.4→10.2 s). CFG-parallel wins when the replica genuinely fits with headroom (Wan ~1.8-1.9×/step) and *loses* when it doesn't (SDXL 2.6× slower). Context parallelism is verified-correct but **slower at small geometry** on this rig. | The design target for CFG-parallel, context parallelism, and tensor parallelism: matched per-token speed removes the barrier-waits-on-slow-rank problem, and NVLink/P2P removes the host-staged exchange cost that dominates on PCIe. Unvalidated tier — no such hardware on the dev rig (ROADMAP §1 "Tiers to validate"). |
 | **THROUGHPUT** | Two backends on one card (`HARTSY_SAME_GPU_CONCURRENT=1` for true concurrency — opt-in pending soak; serialized default is solid). | **One `InferenceEngine` per GPU, requests split behind a queue** — each request runs the exact single-GPU path, zero cross-GPU traffic. Cards can serve different models, sidestepping the speed mismatch entirely. | Same pattern, plus disaggregated prefill/decode pools as the roadmap item (M5, not built). |
 
 ---
@@ -107,7 +107,7 @@ the moved component was never the bottleneck (Wan VAE-only: 42.0→43.3 s, the w
 ### Context parallelism (Wan v1)
 
 - **Config**: `PlacementConfig.ContextParallelDevices = ["cuda:0","cuda:1"]` (entry 0 = primary);
-  CLI `--cp-gpu` is landing. Weights REPLICATED per rank; only per-block self-attention K/V is
+  CLI `--cp-gpu` (shipped 2026-08-07). Weights REPLICATED per rank; only per-block self-attention K/V is
   exchanged. Observable `[ContextParallel]` decision; v1 gates: 2 ranks, no MoE dual-expert,
   no step-cache.
 - **Verified by**: `ContextParallelWanTests` (mechanism byte-exact), `WanContextParallelEngineTests`
@@ -126,7 +126,7 @@ the moved component was never the bottleneck (Wan VAE-only: 42.0→43.3 s, the w
 `VaeDevice` on Oasis overlaps frame N's VAE decode with frame N+1's denoise: warm 5.20→**3.85 s**,
 SSIM 0.9999, unset = byte-identical original path. Verified by `OasisVaeDeviceOverlapEngineTests`.
 
-### Tensor parallelism (landing) + collectives (shipped)
+### Tensor parallelism (shipped 2026-08-07, correctness-first v1) + collectives (shipped)
 
 The transport is built and verified: `NcclApi`/`ICollectiveComm`/`CollectiveComm.Create` with a
 host-staged universal fallback and `CudaTopology.ProbeLinks()` topology probing — AllReduce

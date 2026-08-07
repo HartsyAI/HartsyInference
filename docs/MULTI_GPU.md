@@ -79,15 +79,22 @@ for wall-clock. Each has honestly measured cases where it loses on this box; rea
 | Feature | What it does | Win | Enable via | Verified on |
 |---|---|---|---|---|
 | **CFG-branch parallel** | Runs the negative-prompt branch on a second GPU **concurrently** with the positive branch (weights **replicated**, needs the model to fit both cards). Falls back to sequential automatically (and observably, via a `[CfgParallel]` log line) when it can't. | **Latency** (~1.8-1.9× per step) | CLI `--cfg-parallel-gpu N`; extension `CfgParallelGpuId`; library `CfgParallelDevice` | Wan T2V/TI2V, Flux true-CFG, SDXL. **SDXL is the honest counterexample**: correct output (SSIM 0.9984) but 2.6× *slower* denoise on this box — `SdxlRecipe` stages the UNet as F32 (~10 GB), leaving the 12 GB second card at 28.8 MB free and OOM-retry-thrashing every step (`SdxlCfgParallelEngineTests`, benchmark doc). Wan at 6 steps: the ~10 GB double-preload eats the per-step win; longer schedules amortize it. Mutually exclusive with DiT sharding and context parallelism by design. |
-| **Context parallelism (Wan, v1)** | Splits the video DiT's token sequence across 2 GPUs at latent-frame granularity; each rank runs ALL blocks on its token range with **weights replicated**, exchanging only per-block self-attention K/V (two-phase barrier, host-assembled). Observable `[ContextParallel] active/fell-back(...)` decision. | **Latency** (long sequences) | Library `PlacementConfig.ContextParallelDevices` (≥2 entries; entry 0 = primary). CLI `--cp-gpu` is landing. Mutually exclusive with DiT sharding and CFG-parallel. | Mechanism **byte-exact** on synthetic dual-backend runs (`ContextParallelWanTests`); real-weight Wan TI2V-5B cross-device SSIM **0.9616** gated > 0.90 against the measured cross-ARCH drift ceiling 0.7774 (`WanContextParallelEngineTests` + `WanCrossGpuRegimeDiagnosticTests`). **HONESTLY slower at the tiny 675-token test geometry** (35.7 s vs 22.4 s — exchange/imbalance-bound on a no-P2P heterogeneous pair); the win case is long sequences (≥ ~2.7k tokens; 720p-class is 27k) on balanced links. |
+| **Context parallelism (Wan, v1)** | Splits the video DiT's token sequence across 2 GPUs at latent-frame granularity; each rank runs ALL blocks on its token range with **weights replicated**, exchanging only per-block self-attention K/V (two-phase barrier, host-assembled). Observable `[ContextParallel] active/fell-back(...)` decision. | **Latency** (long sequences) | Library `PlacementConfig.ContextParallelDevices` (≥2 entries; entry 0 = primary). CLI `--cp-gpu` (shipped). Mutually exclusive with DiT sharding and CFG-parallel. | Mechanism **byte-exact** on synthetic dual-backend runs (`ContextParallelWanTests`); real-weight Wan TI2V-5B cross-device SSIM **0.9616** gated > 0.90 against the measured cross-ARCH drift ceiling 0.7774 (`WanContextParallelEngineTests` + `WanCrossGpuRegimeDiagnosticTests`). **HONESTLY slower at the tiny 675-token test geometry** (35.7 s vs 22.4 s — exchange/imbalance-bound on a no-P2P heterogeneous pair); the win case is long sequences (≥ ~2.7k tokens; 720p-class is 27k) on balanced links. |
 | **TE / VAE placement (latency mode)** | Same knob as §1's row: moving a multi-GB text encoder off the denoiser's card removes the per-prompt evict/re-upload cycle. | **Latency** | `--te-gpu` / `--vae-gpu` etc. (§1) | Wan TI2V-5B **43.7 → 32.7 s**; LTX-1 **16.4 → 10.2 s** (T5-XXL dominates at small geometry). Wan VAE-only placement is a wash on wall time at 9 frames (the win there is headroom, not latency). |
 | **World-model VAE/denoise overlap** | With `VaeDevice` set, Oasis decodes a finished frame's latent on the VAE card **concurrently** with the next frame's denoise on the primary (dedicated background thread; unset = byte-identical original path). | **Latency** | Library `PlacementConfig.VaeDevice`; CLI `--vae-gpu` | Oasis-500m: warm baseline 5.20 s → **3.85 s** (~26% faster), SSIM 0.9999, dual-GPU utilization trace confirming genuine overlap (`OasisVaeDeviceOverlapEngineTests`, benchmark doc). |
 | **Collective transport (foundation)** | `NcclApi` (runtime-resolved libnccl.so.2), `ICollectiveComm` with `NcclComm` + `HostStagedComm` universal fallback, `CollectiveComm.Create` factory with a logged `[Collective]` decision; `CudaTopology.ProbeLinks()` P2P/NVLink matrix for strategy planning. | Enables tensor/context parallelism | Automatic (transport choice is logged; missing libnccl is a fallback, never a crash); `HARTSY_NCCL_DIR` override | Cross-device AllReduce **bit-exact** (0/1,048,576 mismatches); AllGather 256 MB/rank at **4.79 GB/s** — the honest no-P2P PCIe number for this box; the same code path auto-uses NVLink/P2P where present (`CollectiveCommTests`). |
 
-**Landing now (in progress, not yet verified — do not treat these as shipped):** Qwen-Image context
-parallelism, LLM tensor parallelism v1 (splitting individual GEMMs with all-reduce on the seam,
-consuming the collectives layer above), and the CLI `--cp-gpu` flag. This doc will gain their
-measured rows when their real-weight gates land in the benchmark doc.
+**Shipped 2026-08-07 (verified — measured rows in the benchmark doc's dated end sections):**
+Qwen-Image context parallelism (img rows split, txt stream replicated; synthetic single-head fact
+byte-exact; on this box the ~19 GB replica can't fit the 3060, so the VERIFIED behavior here is the
+observable `fell-back(preload-failed…)` decision with single-GPU completion at SSIM 1.0000 — active
+cross-device Qwen CP needs a same-VRAM pair); LLM tensor parallelism v1 (Megatron-style split, 2
+NCCL all-reduces/layer, exact token parity vs single GPU with the asserted `[TensorParallel] active`
+marker, +3,511/+1,730 MiB shard rises — correctness-first, not a perf claim); the CLI `--cp-gpu`
+flag (used for the large-geometry CP measurement: 832×480×25f, CP 4 m 09 s vs 1 m 12 s single-GPU —
+3.5× SLOWER on this no-P2P pair, the honest at-scale confirmation of the exchange-bound verdict);
+and the data-parallel serving pattern (`DataParallelServingEngineTests`: **1.71×** for 4 concurrent
+requests across two engines — the first positive multi-GPU speed number on this box).
 
 ---
 
@@ -142,7 +149,7 @@ which physical card an ordinal is.
 
 `DitShardGpuId` and `CfgParallelGpuId` are mutually exclusive (two different uses of a second card);
 the backend refuses to start with both set. Context parallelism has no extension setting yet (config
-+ landing CLI flag only).
++ the shipped `--cp-gpu` CLI flag).
 
 ### CLI
 
@@ -165,7 +172,7 @@ hartsy video "..." -m wan --te-gpu 1
 hartsy video "..." -m wan --cfg-parallel-gpu 1
 ```
 
-`--cp-gpu` (context parallelism) is landing; until it ships, CP is library-config only.
+`--cp-gpu <ordinal>` (context parallelism, repeatable) shipped 2026-08-07 on image/video/music commands.
 
 ### Library
 
@@ -249,7 +256,7 @@ Highlights (RTX 4090 + RTX 3060, PCIe, no P2P — every hand-off host-staged):
   headroom check is a documented follow-up.
 - **Context parallelism v1 is Wan-only, 2 ranks, no MoE dual-expert, no step-cache**, and is
   exchange-bound at small geometry (measured slower at 675 tokens). Qwen-Image CP and NCCL-backed
-  exchange are landing.
+  exchange shipped 2026-08-07 (see the benchmark doc's dated sections).
 - **Same-GPU concurrent mode** (`HARTSY_SAME_GPU_CONCURRENT=1`): capacity failure root-caused + fixed
   (capture-abort VA leak); back in the campaign gate, still opt-in pending longer soak. Serialized
   (default) remains solid.
@@ -259,7 +266,7 @@ Highlights (RTX 4090 + RTX 3060, PCIe, no P2P — every hand-off host-staged):
   fit is CFG-parallel, not sharding). Frame-paced interactive loops (DIAMOND, Matrix-Game live mode)
   are latency-critical — block sharding's per-step boundary copies don't fit a 25-30 ms/frame budget,
   so sharding there is deliberately out of scope.
-- **Tensor parallel is landing (v1 in progress on top of the shipped collectives layer); expert
+- **Tensor parallel v1 SHIPPED 2026-08-07 (exact-parity-verified on top of the collectives layer); expert
   parallel is not built.** The collective transport itself (NCCL + host-staged fallback + topology
   probe) **is** built and verified — see §2. Design notes:
   [`docs/Research/MULTI_GPU_PARALLELISM.md`](Research/MULTI_GPU_PARALLELISM.md).

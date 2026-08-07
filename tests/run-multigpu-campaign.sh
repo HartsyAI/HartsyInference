@@ -259,6 +259,19 @@ phase_a() {
     run_class HartsyInference.Video.Tests      ContextParallelWanTests
     run_class HartsyInference.Diffusion.Tests  WanContextParallelEngineTests
     run_class HartsyInference.Diffusion.Tests  WanCrossGpuRegimeDiagnosticTests
+    # 2026-08-07: Qwen-Image context parallelism (img-row split, replicated weights + replicated txt stream,
+    # per-block joint K/V exchange). Synthetic parity is same-GPU dual-backend: single-head fact byte-exact
+    # (the mechanics gate); multi-head carries a relative bar for SDPA tiling drift (see class remarks). The
+    # engine default-regime SSIM is INFORMATIONAL (fp8 seam: whole-model-on-3060 ~0.14) and active CP is
+    # expected UNREACHABLE here (~19 GB replica vs the 3060's 12 GB) — the observable preload-OOM fallback is
+    # what gets verified; the matched-regime fact is the gate (filter-isolated: env read once at backend ctor).
+    run_class HartsyInference.Diffusion.Tests  ContextParallelQwenImageTests
+    run_class HartsyInference.Diffusion.Tests  QwenImageContextParallelEngineTests.ContextParallel_RealEngine_EitherOutcome_ObservableAndCoherent
+    run_class HartsyInference.Diffusion.Tests  QwenImageContextParallelEngineTests.ContextParallel_RealEngine_MatchedFp8Regime HARTSY_FP8_NATIVE=0
+    # Data-parallel serving (throughput): one engine per GPU, same model replicated, concurrent requests via
+    # Task.WhenAll — the "serve MORE requests" pattern. Llama-3.2-1B (image DP honestly not demonstrable here:
+    # SDXL's F32 replica OOMs the 3060 even at 512^2 — see the test's class doc). Measured 1.71x (2026-08-07).
+    run_class HartsyInference.Diffusion.Tests  DataParallelServingEngineTests
     run_class HartsyInference.Diffusion.Tests  ChromaDitShardingTests
     run_class HartsyInference.Diffusion.Tests  ChromaDitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
     run_class HartsyInference.Diffusion.Tests  ChromaDitShardingEngineTests.DitSharding_NonResident HARTSY_KEEP_MODELS=0
