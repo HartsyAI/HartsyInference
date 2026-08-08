@@ -84,6 +84,30 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
     /// <summary>Waveform samples produced per input frame (product of the upsample factors).</summary>
     public int TotalUpsample => _upsampleFactors.Aggregate(1, (a, r) => a * r);
 
+    /// <summary>Every loaded weight tensor, for <see cref="IBackend.PreloadWeights"/>/<see cref="IBackend.FreeWeights"/>.
+    /// Excludes the anti-alias lowpass filters — those are computed constants, not checkpoint buffers, and are only
+    /// lazily materialized on first <see cref="Forward"/>, so nothing useful exists to enumerate before then.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor? t in new[] { _convInW, _convInB, _convOutW, _convOutB })
+        {
+            if (t is not null) yield return t;
+        }
+        foreach ((Tensor w, Tensor? b) in _ups)
+        {
+            yield return w;
+            if (b is not null) yield return b;
+        }
+        foreach (ResBlock rb in _resnets)
+        {
+            foreach (Tensor t in rb.EnumerateWeights()) yield return t;
+        }
+        if (_actOut is not null)
+        {
+            foreach (Tensor t in _actOut.EnumerateWeights()) yield return t;
+        }
+    }
+
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         _convInW = w[$"{prefix}.conv_pre.weight"];
@@ -235,6 +259,28 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
             }
         }
 
+        public IEnumerable<Tensor> EnumerateWeights()
+        {
+            foreach ((Tensor w, Tensor? b) in _convs1)
+            {
+                yield return w;
+                if (b is not null) yield return b;
+            }
+            foreach ((Tensor w, Tensor? b) in _convs2)
+            {
+                yield return w;
+                if (b is not null) yield return b;
+            }
+            foreach (AntiAliasAct a in _acts1)
+            {
+                foreach (Tensor t in a.EnumerateWeights()) yield return t;
+            }
+            foreach (AntiAliasAct a in _acts2)
+            {
+                foreach (Tensor t in a.EnumerateWeights()) yield return t;
+            }
+        }
+
         public Tensor Forward(IBackend backend, Tensor x)
         {
             // The residual chain accumulates on device; `x` is only borrowed (dilations.Length ≥ 1, so the
@@ -282,6 +328,12 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
             _betaExp = ExpLoad(w[$"{p}.act.beta"]);
             owned.Add(_alphaExp);
             owned.Add(_betaExp);
+        }
+
+        public IEnumerable<Tensor> EnumerateWeights()
+        {
+            yield return _alphaExp;
+            yield return _betaExp;
         }
 
         public Tensor Forward(IBackend backend, Tensor x)

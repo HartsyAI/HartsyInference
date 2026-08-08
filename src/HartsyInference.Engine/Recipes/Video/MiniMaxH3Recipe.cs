@@ -54,6 +54,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
+        WarnIfPlacementIgnored(context);
         MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(context.CheckpointPath);
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
         MergedLoraStack? loraStack = null;
@@ -132,6 +133,24 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                 loader.Dispose();
             }
             throw;
+        }
+    }
+
+    /// <summary>Warns when placement knobs are configured that H3 cannot use, so the operator learns why they saw
+    /// no effect instead of silently paying for an unused second CUDA context (<see cref="RecipeContext.AllBackends"/>
+    /// still constructs and gates on every configured backend regardless of whether a recipe consumes it).</summary>
+    private static void WarnIfPlacementIgnored(RecipeContext context)
+    {
+        if (context.CpBackends is { Count: > 0 })
+        {
+            Logs.Warning("[MiniMaxH3Recipe] Context parallelism is configured but not wired for MiniMax-H3, and is "
+                + "also hardware-blocked on an asymmetric pair here — the ~21 GB fp8 DiT replica does not fit a "
+                + "12 GB card. This generation runs single-GPU.");
+        }
+        if (context.CfgParallelBackend is not null)
+        {
+            Logs.Warning("[MiniMaxH3Recipe] CFG-parallel is configured but structurally inapplicable to MiniMax-H3 — "
+                + "it runs CfgScale=1.0 as a single forward pass with no unconditional branch to parallelize.");
         }
     }
 

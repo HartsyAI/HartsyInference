@@ -4489,6 +4489,39 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Dtype-agnostic contiguous row-block slice — a raw byte-range D2D copy, so it needs no per-width
+    /// kernel and works for any non-quantized dtype including fp8, unlike <see cref="SliceRows"/>'s F32/F16/BF16
+    /// guard. Carries <see cref="Tensor.Fp8ScaleFactor"/> onto the sliced chunk.</summary>
+    public void SliceRowsGeneric(Tensor output, Tensor input, int rowOffset)
+    {
+        if (output.DType != input.DType)
+            throw new ArgumentException($"CUDA SliceRowsGeneric requires matching dtypes, got output {output.DType} vs input {input.DType}.");
+        if (output.DType.IsQuantized)
+            throw new NotSupportedException("CUDA SliceRowsGeneric does not support block-quantized dtypes.");
+        EnterOp();
+        int dim = (int)output.Shape[output.Shape.Rank - 1];
+        long rowBytes = output.DType.ComputeByteCount(dim);
+        long byteOffset = (long)rowOffset * rowBytes;
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            CudaMemory.CopyDeviceToDeviceAsync(pOut, pIn + (ulong)byteOffset, outBytes, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+        output.Fp8ScaleFactor = input.Fp8ScaleFactor;
+    }
+
     public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
     {
         if (input.DType != DType.F32 || gamma.DType != DType.F32 || beta.DType != DType.F32)

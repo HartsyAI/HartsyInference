@@ -173,6 +173,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
 
             Tensor videoLatent = MiniMaxH3Latents.UnpackVideo(videoLat, latentT, latentH, latentW, _config);
             Tensor rgb;
+            bool videoVaePreloaded = TryPreloadWeights(Backend, "video VAE decoder", _videoVae.EnumerateWeights());
             try
             {
                 rgb = _videoVae.Decode(Backend, videoLatent);
@@ -180,6 +181,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             finally
             {
                 videoLatent.Dispose();
+                if (videoVaePreloaded) Backend.FreeWeights(_videoVae.EnumerateWeights());
             }
 
             byte[][] frames;
@@ -205,6 +207,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             if (_audioVae is not null)
             {
                 Tensor audioLatent = MiniMaxH3Latents.UnpackAudio(audioLat, audioT, _config);
+                bool audioVaePreloaded = TryPreloadWeights(Backend, "audio VAE decoder", _audioVae.EnumerateWeights());
                 Tensor wave = _audioVae.Decode(Backend, audioLatent);
                 try
                 {
@@ -222,6 +225,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                 {
                     audioLatent.Dispose();
                     wave.Dispose();
+                    if (audioVaePreloaded) Backend.FreeWeights(_audioVae.EnumerateWeights());
                 }
             }
             return new Result(frames, outW, outH, seed, audio, sampleRate);
@@ -350,6 +354,24 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                 Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
                 DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers));
             }
+            return false;
+        }
+    }
+
+    /// <summary>Best-effort weight residency for a phase-scoped component (the VAE decoders, called once at the end
+    /// of a generation) — mirrors <see cref="TryPreloadTransformer"/>'s degrade-not-fail contract: an
+    /// <see cref="HartsyInference.Core.Exceptions.OutOfVramException"/> during preload just means the phase falls
+    /// back to the existing lazy per-op streaming path, never a failed generation.</summary>
+    private static bool TryPreloadWeights(IBackend backend, string label, IEnumerable<Tensor> weights)
+    {
+        try
+        {
+            backend.PreloadWeights(weights);
+            return true;
+        }
+        catch (HartsyInference.Core.Exceptions.OutOfVramException ex)
+        {
+            Logs.Warning($"[MiniMaxH3] {label} preload did not fit ({ex.Message}) — streaming per call.");
             return false;
         }
     }

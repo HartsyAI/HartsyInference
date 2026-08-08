@@ -60,6 +60,14 @@ public sealed unsafe class MiniMaxH3AudioVaeDecoder : IDisposable
         _generator.LoadWeights(Remap(w), prefix: "decoder");
     }
 
+    /// <summary>Every loaded weight tensor, for <see cref="IBackend.PreloadWeights"/>/<see cref="IBackend.FreeWeights"/>.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_decInW is not null) yield return _decInW;
+        if (_decInB is not null) yield return _decInB;
+        foreach (Tensor t in _generator.EnumerateWeights()) yield return t;
+    }
+
     /// <summary>Decode latents <c>[1, LatentChannels, S, T]</c> into a waveform <c>[1, S, T · 800]</c> in [-1, 1] at
     /// <see cref="SampleRate"/> (S = 2 for the stereo H3 soundtrack). Caller owns the returned tensor.</summary>
     public Tensor Decode(IBackend backend, Tensor latent)

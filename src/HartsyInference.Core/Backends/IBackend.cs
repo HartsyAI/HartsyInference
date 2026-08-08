@@ -1645,6 +1645,24 @@ public interface IBackend : IDisposable
         for (long i = 0; i < total; i++) pOut[i] = pIn[elemOffset + i];
     }
 
+    /// <summary>Contiguous row-block slice, dtype-agnostic (a pure byte-range copy — used where <see cref="SliceRows"/>'s
+    /// F32/F16/BF16 guard is too narrow, e.g. slicing an fp8 activation for chunked attention/MLP). Copies
+    /// <see cref="Tensor.Fp8ScaleFactor"/> onto <paramref name="output"/> so a sliced fp8 chunk still carries its
+    /// parent's per-tensor dequant scale into a downstream fp8 GEMM.</summary>
+    unsafe void SliceRowsGeneric(Tensor output, Tensor input, int rowOffset)
+    {
+        if (output.DType != input.DType)
+            throw new ArgumentException($"SliceRowsGeneric requires matching dtypes, got output {output.DType} vs input {input.DType}.");
+        if (output.DType.IsQuantized)
+            throw new NotSupportedException("SliceRowsGeneric does not support block-quantized dtypes.");
+        int dim = (int)output.Shape[output.Shape.Rank - 1];
+        long rowBytes = output.DType.ComputeByteCount(dim);
+        long byteOffset = (long)rowOffset * rowBytes;
+        long totalBytes = output.DType.ComputeByteCount(output.ElementCount);
+        Buffer.MemoryCopy((byte*)input.DataPointer + byteOffset, output.DataPointer, totalBytes, totalBytes);
+        output.Fp8ScaleFactor = input.Fp8ScaleFactor;
+    }
+
     /// <summary>Fused quantized matmul: <c>output = input @ quantWeight^T (+ bias)</c>, dequantized in-kernel (Q8_0/Q4_K/Q5_K/Q6_K).</summary>
     void QuantizedMatMul(Tensor output, Tensor input, Tensor quantWeight, Tensor? bias)
         => throw new NotSupportedException(

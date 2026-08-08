@@ -352,6 +352,66 @@ public sealed unsafe class DitGlueKernelTests
         AssertClose(z, slCuda, 1e-6f, "SliceRows-recovers-z");
     }
 
+    /// <summary>SliceRowsGeneric on F32 must agree with SliceRows (same result, different implementation path).</summary>
+    [Fact]
+    public void SliceRowsGeneric_F32_Cpu_Vs_Cuda_MatchesSliceRows()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int rows = 12, offset = 5, keep = 4, dim = 8;
+        using Tensor src = Random(new TensorShape(rows, dim), seed: 202);
+
+        using Tensor refCpu = new Tensor(new TensorShape(keep, dim), DType.F32);
+        IBackend cpu = new CpuBackend();
+        cpu.SliceRows(refCpu, src, offset);
+        cpu.Dispose();
+
+        using Tensor genCpu = new Tensor(new TensorShape(keep, dim), DType.F32);
+        IBackend cpu2 = new CpuBackend();
+        cpu2.SliceRowsGeneric(genCpu, src, offset);
+        cpu2.Dispose();
+        AssertClose(refCpu, genCpu, 1e-6f, "SliceRowsGeneric-vs-SliceRows-cpu");
+
+        using Tensor genCuda = new Tensor(new TensorShape(keep, dim), DType.F32);
+        RunCuda(g => g.SliceRowsGeneric(genCuda, src, offset), genCuda);
+        AssertClose(refCpu, genCuda, 1e-6f, "SliceRowsGeneric-cuda");
+    }
+
+    /// <summary>The trap: a sliced fp8 chunk that loses its parent's per-tensor <see cref="Tensor.Fp8ScaleFactor"/>
+    /// silently mis-scales every downstream fp8 GEMM with correct-looking output and no failing test elsewhere —
+    /// so this asserts the scale survives explicitly, on both backends, in addition to the sliced bytes.</summary>
+    [Fact]
+    public unsafe void SliceRowsGeneric_Fp8_CarriesScaleFactor_Cpu_Vs_Cuda()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int rows = 6, offset = 2, keep = 3, dim = 4;
+        const float scale = 2.5f;
+        using Tensor srcF32 = Random(new TensorShape(rows, dim), seed: 303, lo: -4f, hi: 4f);
+        using Tensor srcFp8 = srcF32.CastTo(DType.F8E4M3);
+        srcFp8.Fp8ScaleFactor = scale;
+
+        using Tensor cpuOut = new Tensor(new TensorShape(keep, dim), DType.F8E4M3);
+        IBackend cpu = new CpuBackend();
+        cpu.SliceRowsGeneric(cpuOut, srcFp8, offset);
+        cpu.Dispose();
+        Assert.Equal(scale, cpuOut.Fp8ScaleFactor);
+
+        using Tensor cudaOut = new Tensor(new TensorShape(keep, dim), DType.F8E4M3);
+        using CudaBackend gpu = new CudaBackend(0, PtxDir());
+        gpu.SliceRowsGeneric(cudaOut, srcFp8, offset);
+        gpu.Sync();
+        Assert.Equal(scale, cudaOut.Fp8ScaleFactor);
+
+        byte* pSrc = (byte*)srcFp8.DataPointer;
+        byte* pCpu = (byte*)cpuOut.DataPointer;
+        byte* pCuda = (byte*)cudaOut.DataPointer;
+        long byteOffset = (long)offset * dim;
+        for (long i = 0; i < keep * dim; i++)
+        {
+            Assert.Equal(pSrc[byteOffset + i], pCpu[i]);
+            Assert.Equal(pSrc[byteOffset + i], pCuda[i]);
+        }
+    }
+
     [Fact]
     public void ArgMaxLastDim_Cpu_Vs_Cuda()
     {

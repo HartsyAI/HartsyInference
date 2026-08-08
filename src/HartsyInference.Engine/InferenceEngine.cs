@@ -586,11 +586,11 @@ public sealed class InferenceEngine : IInferenceEngine
     private void EvictOtherCheckpointPipelines(string keepPath)
     {
         string keepImagePrefix = $"recipe:{keepPath}|";
-        string keepVideoKey = $"video-recipe:{keepPath}";
+        string keepVideoPrefix = $"video-recipe:{keepPath}|";
         List<string> imageVictims = _recipePipelines.Keys
             .Where(k => !k.StartsWith(keepImagePrefix, StringComparison.OrdinalIgnoreCase)).ToList();
         List<string> videoVictims = _videoRecipePipelines.Keys
-            .Where(k => !k.Equals(keepVideoKey, StringComparison.OrdinalIgnoreCase)).ToList();
+            .Where(k => !k.StartsWith(keepVideoPrefix, StringComparison.OrdinalIgnoreCase)).ToList();
         if (imageVictims.Count == 0 && videoVictims.Count == 0)
         {
             return;

@@ -81,7 +81,15 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
-        int fps = request.Fps ?? MiniMaxH3Geometry.Fps;
+        if (request.Fps is int requestedFps && requestedFps != MiniMaxH3Geometry.Fps)
+        {
+            // The model always denoises at MiniMaxH3Geometry.Fps — VideoService.GenerateAsync resolves the final
+            // container fps as request.Fps ?? result.Fps ?? resolved.Fps, so a differing request value only changes
+            // the muxed playback rate (slow/fast motion over the same generated frames), never the model's cadence.
+            Logs.Warning($"[MiniMaxH3RecipePipeline] Requested fps {requestedFps} differs from H3's native "
+                + $"{MiniMaxH3Geometry.Fps} — the video generates at {MiniMaxH3Geometry.Fps} fps and is muxed at "
+                + $"{requestedFps} fps (slow/fast motion), not resampled.");
+        }
         int requestedFrames = request.Frames ?? 124;
         // H3's grids are coarse and non-obvious: frames snap to 17k+5, latent frames are NOT frames/4, and each pixel
         // axis rounds to 32 (a multiple of 16 alone leaves an odd latent axis and the 2x2 patchifier drops its last

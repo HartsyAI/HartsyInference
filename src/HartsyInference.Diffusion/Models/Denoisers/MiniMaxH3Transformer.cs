@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
 
@@ -113,6 +114,16 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(layout);
         int seq = layout.SequenceLength;
+        // Resolved once per forward, not per block: free VRAM only needs a cheap driver query (no stream sync, so
+        // this cannot affect the GPU-resident-loop D2H-sync count), but re-querying inside the block loop would let
+        // the chunk size drift mid-generation as VRAM usage elsewhere changes — non-deterministic and hostile to
+        // future CUDA-graph capture of this loop.
+        (long freeBytes, _) = backend.GetVramInfo();
+        int chunkRows = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeBytes);
+        if (chunkRows != int.MaxValue)
+        {
+            Logs.Info($"[MiniMaxH3] chunked attention/MLP: seq={seq} chunkRows={chunkRows} freeBytes={freeBytes}.");
+        }
 
         Tensor h = EmbedSegments(backend, layout, videoRows, audioRows, textStates);
         try
@@ -123,7 +134,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             {
                 for (int i = 0; i < _config.NumLayers; i++)
                 {
-                    ForwardBlock(backend, ref h, tEmb, modIndex, cos, sin, i);
+                    ForwardBlock(backend, ref h, tEmb, modIndex, cos, sin, i, chunkRows);
                 }
                 return FinalLayer(backend, h, tEmb, layout, timestepRowOf);
             }
@@ -159,6 +170,17 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             throw new ArgumentOutOfRangeException(nameof(splitBlock),
                 $"splitBlock must be in (0, {_config.NumLayers}) exclusive, got {splitBlock}.");
         int seq = layout.SequenceLength;
+        // Per-backend: the shard's smaller card needs a smaller chunk than the primary. See Forward's identical
+        // comment on why this is resolved once per forward rather than per block.
+        (long freeA, _) = backendA.GetVramInfo();
+        (long freeB, _) = backendB.GetVramInfo();
+        int chunkRowsA = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeA);
+        int chunkRowsB = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeB);
+        if (chunkRowsA != int.MaxValue || chunkRowsB != int.MaxValue)
+        {
+            Logs.Info($"[MiniMaxH3] chunked attention/MLP (sharded): seq={seq} chunkRowsA={chunkRowsA} "
+                + $"freeBytesA={freeA} chunkRowsB={chunkRowsB} freeBytesB={freeB}.");
+        }
 
         Tensor h = EmbedSegments(backendA, layout, videoRows, audioRows, textStates);
         Tensor tEmb = BuildTimeEmbedding(backendA, uniqueTimesteps);
@@ -167,7 +189,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         {
             for (int i = 0; i < splitBlock; i++)
             {
-                ForwardBlock(backendA, ref h, tEmb, modIndex, cos, sin, i);
+                ForwardBlock(backendA, ref h, tEmb, modIndex, cos, sin, i, chunkRowsA);
             }
 
             // Boundary A→B: the residual stream MOVES; tEmb is only COPIED (the final layer on A reads it after
@@ -181,7 +203,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             {
                 for (int i = splitBlock; i < _config.NumLayers; i++)
                 {
-                    ForwardBlock(backendB, ref h, tEmbB, modIndex, cos, sin, i);
+                    ForwardBlock(backendB, ref h, tEmbB, modIndex, cos, sin, i, chunkRowsB);
                 }
             }
             finally
@@ -302,9 +324,10 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     }
 
     private void ForwardBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
-        Tensor cos, Tensor sin, int index)
+        Tensor cos, Tensor sin, int index, int chunkRows)
     {
         string p = $"blocks.{index}";
+        int seq = (int)h.Shape[0];
         Tensor[] mod = Adaln(backend, tEmb, $"{p}.adaln_proj", expand: 6, modalities: 3);
         try
         {
@@ -312,7 +335,9 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             Tensor modulated = Modulate(backend, normed, mod[0], mod[1], modIndex,
                 Optional($"{p}.attn.qkv_proj.weight"));
             normed.Dispose();
-            Tensor attn = Attention(backend, modulated, $"{p}.attn", cos, sin);
+            Tensor attn = seq > chunkRows
+                ? AttentionChunked(backend, modulated, $"{p}.attn", cos, sin, chunkRows)
+                : Attention(backend, modulated, $"{p}.attn", cos, sin);
             modulated.Dispose();
             Tensor gatedAttn = Gate(backend, h, attn, mod[2], modIndex);
             attn.Dispose();
@@ -322,7 +347,9 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             Tensor modulated2 = Modulate(backend, normed2, mod[3], mod[4], modIndex,
                 Optional($"{p}.mlp.fc1.weight"));
             normed2.Dispose();
-            Tensor mlp = Mlp(backend, modulated2, $"{p}.mlp");
+            Tensor mlp = seq > chunkRows
+                ? MlpChunked(backend, modulated2, $"{p}.mlp", chunkRows)
+                : Mlp(backend, modulated2, $"{p}.mlp");
             modulated2.Dispose();
             Tensor gatedMlp = Gate(backend, h, mlp, mod[5], modIndex);
             mlp.Dispose();
@@ -390,6 +417,109 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
     }
 
+    /// <summary>Row-chunked equivalent of <see cref="Attention"/> for a long sequence: the packed <c>qkv</c> buffer
+    /// (<c>[seq, inner*3]</c>) and the full head-major <c>q/k/v</c> would otherwise be simultaneously live at
+    /// ~20 GiB combined at H3's largest requested geometries. Two passes instead: (1) project + split + RoPE one
+    /// chunk of queries/keys/values at a time, concatenating <c>k</c>/<c>v</c> into full tensors (every query must
+    /// see every key — this part is irreducible) while keeping each chunk's <c>q</c> in a list for pass 2; (2) run
+    /// SDPA per query chunk against the full <c>k</c>/<c>v</c> (SDPA already supports Sq≠Skv — this is not a new
+    /// capability, just an external call shape it was never driven at) so the full-size <c>attn</c> output is never
+    /// materialized either, then permute+project+concat each chunk's output. Never called directly — see
+    /// <see cref="ForwardBlock"/>'s dispatch, which sends anything under <c>chunkRows</c> to the exact original
+    /// <see cref="Attention"/> path so small/legacy-path calls stay bit-identical (chunked GEMMs pick different
+    /// cuBLASLt algorithms and are not bitwise equal to a single full-width GEMM).</summary>
+    private Tensor AttentionChunked(IBackend backend, Tensor x, string prefix, Tensor? cos, Tensor? sin, int chunkRows)
+    {
+        int seq = (int)x.Shape[0];
+        int heads = _config.NumAttentionHeads, hd = _config.AttentionHeadDim, inner = heads * hd;
+        Tensor qkvW = Require($"{prefix}.qkv_proj.weight");
+        Tensor qNormW = Require($"{prefix}.q_norm.weight");
+        Tensor kNormW = Require($"{prefix}.k_norm.weight");
+        Tensor? qkvB = Optional($"{prefix}.qkv_proj.bias");
+        int? rotary = cos is not null && sin is not null ? MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen) : null;
+
+        List<Tensor> qChunks = new List<Tensor>();
+        List<Tensor> kChunks = new List<Tensor>();
+        List<Tensor> vChunks = new List<Tensor>();
+        try
+        {
+            for (int r0 = 0; r0 < seq; r0 += chunkRows)
+            {
+                int c = Math.Min(chunkRows, seq - r0);
+                using Tensor xChunk = new Tensor(WithFirstDim(x.Shape, c), x.DType) { Fp8ScaleFactor = x.Fp8ScaleFactor };
+                backend.SliceRowsGeneric(xChunk, x, r0);
+                Tensor qc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
+                Tensor kc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
+                Tensor vc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
+                using (Tensor qkvChunk = new Tensor(new TensorShape(c, inner * 3), DType.F32))
+                {
+                    backend.Linear(qkvChunk, xChunk, qkvW, qkvB);
+                    backend.QkvSplitNormHeadMajor(qc, kc, vc, qkvChunk, qNormW, kNormW, _config.QkNormEps);
+                }
+                if (rotary is int rot)
+                {
+                    using Tensor cosChunk = new Tensor(new TensorShape(c, cos!.Shape[cos.Shape.Rank - 1]), DType.F32);
+                    using Tensor sinChunk = new Tensor(new TensorShape(c, sin!.Shape[sin.Shape.Rank - 1]), DType.F32);
+                    backend.SliceRows(cosChunk, cos, r0);
+                    backend.SliceRows(sinChunk, sin, r0);
+                    backend.ApplyRopeSingleHeadMajor(qc, cosChunk, sinChunk, rot);
+                    backend.ApplyRopeSingleHeadMajor(kc, cosChunk, sinChunk, rot);
+                }
+                qChunks.Add(qc);
+                kChunks.Add(kc);
+                vChunks.Add(vc);
+            }
+
+            Tensor kFull = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
+            Tensor vFull = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
+            backend.Concat(kFull, CollectionsMarshal.AsSpan(kChunks), 2);
+            backend.Concat(vFull, CollectionsMarshal.AsSpan(vChunks), 2);
+            foreach (Tensor t in kChunks) t.Dispose();
+            foreach (Tensor t in vChunks) t.Dispose();
+            kChunks.Clear();
+            vChunks.Clear();
+
+            try
+            {
+                List<Tensor> outChunks = new List<Tensor>(qChunks.Count);
+                try
+                {
+                    for (int i = 0; i < qChunks.Count; i++)
+                    {
+                        int c = (int)qChunks[i].Shape[2];
+                        using Tensor attnChunk = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
+                        backend.ScaledDotProductAttention(attnChunk, qChunks[i], kFull, vFull, null, 1f / MathF.Sqrt(hd));
+                        qChunks[i].Dispose();
+                        using Tensor merged = new Tensor(new TensorShape(c, inner), DType.F32);
+                        backend.Permute0213(merged, attnChunk, heads, c, hd);
+                        Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
+                        backend.Linear(outChunk, merged, Require($"{prefix}.out_proj.weight"), Optional($"{prefix}.out_proj.bias"));
+                        outChunks.Add(outChunk);
+                    }
+                    qChunks.Clear();
+                    Tensor outT = new Tensor(x.Shape, BodyDType);
+                    backend.Concat(outT, CollectionsMarshal.AsSpan(outChunks), 0);
+                    return outT;
+                }
+                finally
+                {
+                    foreach (Tensor t in outChunks) t.Dispose();
+                }
+            }
+            finally
+            {
+                kFull.Dispose();
+                vFull.Dispose();
+            }
+        }
+        finally
+        {
+            foreach (Tensor t in qChunks) t.Dispose();
+            foreach (Tensor t in kChunks) t.Dispose();
+            foreach (Tensor t in vChunks) t.Dispose();
+        }
+    }
+
     /// <summary>Gated MLP: fc1 emits the packed gate/up pair, SwiGLU folds it, fc2 projects back. The gate/up pair
     /// stays F32 — GluActivate has an F32 and a BF16 kernel but no F16 one — so only fc2's result rejoins the
     /// stream at the body dtype.</summary>
@@ -405,6 +535,46 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         backend.Linear(outT, act, Require($"{prefix}.fc2.weight"), Optional($"{prefix}.fc2.bias"));
         act.Dispose();
         return outT;
+    }
+
+    /// <summary>Row-chunked equivalent of <see cref="Mlp"/>: <c>gateUp [seq, ffn*2]</c> and <c>act [seq, ffn]</c>
+    /// have no cross-token dependency at all (a plain per-row FFN), so chunking is a direct per-chunk repeat of the
+    /// same three ops with no reassembly step beyond the final <see cref="IBackend.Concat"/> — unlike attention,
+    /// there is no full-size intermediate this needs to keep resident. Never called directly — see
+    /// <see cref="ForwardBlock"/>'s <c>chunkRows</c> dispatch and <see cref="AttentionChunked"/>'s doc for why the
+    /// unchunked <see cref="Mlp"/> path must stay untouched for bit-exactness on small/legacy-path calls.</summary>
+    private Tensor MlpChunked(IBackend backend, Tensor x, string prefix, int chunkRows)
+    {
+        int seq = (int)x.Shape[0], ffn = _config.FfnHiddenSize;
+        Tensor fc1W = Require($"{prefix}.fc1.weight");
+        Tensor? fc1B = Optional($"{prefix}.fc1.bias");
+        Tensor fc2W = Require($"{prefix}.fc2.weight");
+        Tensor? fc2B = Optional($"{prefix}.fc2.bias");
+
+        List<Tensor> outChunks = new List<Tensor>();
+        try
+        {
+            for (int r0 = 0; r0 < seq; r0 += chunkRows)
+            {
+                int c = Math.Min(chunkRows, seq - r0);
+                using Tensor xChunk = new Tensor(WithFirstDim(x.Shape, c), x.DType) { Fp8ScaleFactor = x.Fp8ScaleFactor };
+                backend.SliceRowsGeneric(xChunk, x, r0);
+                using Tensor gateUpChunk = new Tensor(new TensorShape(c, ffn * 2), DType.F32);
+                backend.Linear(gateUpChunk, xChunk, fc1W, fc1B);
+                using Tensor actChunk = new Tensor(new TensorShape(c, ffn), DType.F32);
+                backend.GluActivate(actChunk, gateUpChunk, ffn, gelu: false);
+                Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
+                backend.Linear(outChunk, actChunk, fc2W, fc2B);
+                outChunks.Add(outChunk);
+            }
+            Tensor outT = new Tensor(x.Shape, BodyDType);
+            backend.Concat(outT, CollectionsMarshal.AsSpan(outChunks), 0);
+            return outT;
+        }
+        finally
+        {
+            foreach (Tensor t in outChunks) t.Dispose();
+        }
     }
 
     /// <summary>adaln projection: optional SiLU (dropped by the curve-basis checkpoints), one linear, split into
@@ -465,6 +635,17 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         Tensor outT = new Tensor(h.Shape, h.DType);
         backend.GatedResidualRowIndexed(outT, h, value, gate, modIndex);
         return outT;
+    }
+
+    /// <summary>Copies <paramref name="shape"/> with its first dimension replaced by <paramref name="d0"/> — the
+    /// chunk loops' shape builder, so a chunk tensor matches its parent's rank exactly (the residual stream carries
+    /// a harmless singleton middle dim, <c>[seq, 1, hidden]</c>, that every op already treats as part of the row).</summary>
+    private static TensorShape WithFirstDim(TensorShape shape, long d0)
+    {
+        Span<long> dims = stackalloc long[shape.Rank];
+        for (int i = 0; i < shape.Rank; i++) dims[i] = shape[i];
+        dims[0] = d0;
+        return new TensorShape(dims);
     }
 
     /// <summary>Plain residual add into a fresh tensor (device backends bind an op's result to the tensor it was handed).</summary>
