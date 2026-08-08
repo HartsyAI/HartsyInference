@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -113,6 +114,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         List<Reference> references = [];
         try
         {
+            CheckVramFeasibility(width, height, frames);
             EncodeKeyframes(request, width, height, frames, keyframes);
             EncodeReferences(request, width, height, frames, cancel, references);
             if (keyframes.Count > 0 && references.Count > 0)
@@ -208,6 +210,62 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             }
         }
     }
+
+    /// <summary>Refuses instantly, before any encode/allocate work, when the requested geometry's activation floor
+    /// cannot fit even with the DiT streamed per-op and nothing else resident — turning the mid-generation OOM a
+    /// 481-frame/1280x704 request hit into an immediate, actionable error instead. Chunking
+    /// (<see cref="MiniMaxH3ChunkPolicy"/>) cannot rescue a request past this floor, so it is checked ahead of any
+    /// allocation rather than left to surface as an <see cref="OutOfVramException"/> mid-denoise; see
+    /// <see cref="MiniMaxH3ActivationEstimate"/> for what the floor accounts for. When DiT sharding is active, the
+    /// shard backend runs the exact same full-sequence forward for its own block range (only the WEIGHT range
+    /// splits, not the sequence), so it needs the identical floor and is checked too — a split that leaves the
+    /// smaller card's share too thin would otherwise only surface as a mid-denoise OOM on that backend.</summary>
+    private void CheckVramFeasibility(int width, int height, int frames)
+    {
+        int videoLatentFrames = MiniMaxH3Geometry.VideoLatentFrames(frames);
+        int audioLatentFrames = MiniMaxH3Geometry.AudioLatentFrames(frames);
+        int latentH = height / VaeSpatialRatio, latentW = width / VaeSpatialRatio;
+        int videoRows = videoLatentFrames * (latentH / 2) * (latentW / 2);
+        int audioRows = audioLatentFrames * 2;
+        // Text/reference rows are only known after encoding, but they're a small, bounded addition next to a
+        // geometry large enough to be at risk here — a fixed conservative estimate keeps this check allocation-free.
+        const int approxNonVideoRows = 512;
+        int seq = approxNonVideoRows + videoRows + audioRows;
+        long floorBytes = MiniMaxH3ActivationEstimate.EstimateFloorBytes(seq, _config, DType.F32);
+
+        CheckOneBackend(_backend, "primary", floorBytes, _pipeline.EstimateResidentWeightBytes(), frames, width, height, seq);
+        if (_pipeline.DitShardBackend is not null)
+        {
+            CheckOneBackend(_pipeline.DitShardBackend, "shard", floorBytes,
+                _pipeline.EstimateShardResidentWeightBytes(), frames, width, height, seq);
+        }
+    }
+
+    private static void CheckOneBackend(IBackend backend, string label, long floorBytes, long residentWeightBytes,
+        int frames, int width, int height, int seq)
+    {
+        // Pooled cuMemFreeAsync reservations don't return to cuMemGetInfo's free count until trimmed — the same
+        // staleness VramPlanner.TrimBeforeQuery exists to counteract for other families' checks.
+        backend.TrimMemoryPool();
+        (long freeBytes, _) = backend.GetVramInfo();
+        if (freeBytes <= 0)
+        {
+            // GetVramInfo() defaults to (0, 0) on backends that don't report live VRAM (e.g. CPU) — nothing to check.
+            return;
+        }
+        long availableForActivations = freeBytes - residentWeightBytes;
+        if (floorBytes > availableForActivations)
+        {
+            throw new OutOfVramException(
+                $"MiniMax-H3/{frames}f@{width}x{height} (seq~{seq}) cannot run on this device's {label} backend: it "
+                + $"needs at least {Mb(floorBytes)} of activations and workspace on top of {Mb(residentWeightBytes)} "
+                + $"of resident DiT weights, but only {Mb(freeBytes)} is free. Weight streaming cannot reduce this "
+                + "— lower the resolution or frame count, use a device with more VRAM, or adjust the DiT shard "
+                + "split.");
+        }
+    }
+
+    private static string Mb(long bytes) => $"{bytes / (1024 * 1024)} MB";
 
     /// <summary>Encodes ref2va references in the order the presentation and the packed layout both expect: images,
     /// then videos, then standalone audio. Each becomes one <see cref="MiniMaxH3RefBlock"/> plus its presentation

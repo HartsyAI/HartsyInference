@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -36,6 +37,33 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
     /// <summary>Decoded output: RGB frames plus the jointly generated stereo soundtrack.</summary>
     public readonly record struct Result(byte[][] Frames, int Width, int Height, int Seed,
         float[][]? Audio, int AudioSampleRate);
+
+    /// <summary>Bytes the primary backend will hold resident once <see cref="Generate"/> preloads: the full DiT when
+    /// unsharded, or only the shared weights plus its own <c>[0, DitShardSplitBlock)</c> block range when
+    /// <see cref="DiffusionPipelineBase.DitShardBackend"/> is set — the shard backend holds the remaining blocks (see
+    /// <see cref="EstimateShardResidentWeightBytes"/>), so counting the whole set here would double-charge it. Zero
+    /// when unsharded and this checkpoint doesn't fit resident (the bf16 build), since it then streams per op
+    /// instead. A pre-flight VRAM check run before <see cref="Generate"/> needs this to know how much of current
+    /// free VRAM the DiT is about to claim, on top of the activation floor it also needs.</summary>
+    public long EstimateResidentWeightBytes()
+    {
+        if (DitShardBackend is not null)
+        {
+            return SumBytes(_transformer.EnumerateSharedWeights())
+                + SumBytes(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+        }
+        return _preloadTransformer ? SumBytes(_transformer.EnumerateWeights()) : 0;
+    }
+
+    /// <summary>Bytes the shard backend will hold resident — its own <c>[DitShardSplitBlock, NumLayers)</c> block
+    /// range only, since shared weights (patch/time-embed/final-layer projections) always live on the primary
+    /// backend. Zero when <see cref="DiffusionPipelineBase.DitShardBackend"/> is not set.</summary>
+    public long EstimateShardResidentWeightBytes() => DitShardBackend is not null
+        ? SumBytes(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers))
+        : 0;
+
+    private static long SumBytes(IEnumerable<Tensor> weights) =>
+        weights.Sum(t => t.DType.ComputeByteCount(t.ElementCount));
 
     /// <summary>Runs the denoise loop and both decodes. <paramref name="textStates"/> is the Qwen3-VL hidden state;
     /// <paramref name="textTagRuns"/> carries the per-token modality tags so vision pads inside the text span
@@ -84,90 +112,99 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         bool preloaded = TryPreloadTransformer();
         try
         {
-            for (int step = 0; step < request.Steps; step++)
+            try
             {
-                Stopwatch sw = Stopwatch.StartNew();
-                double sigma = sigmas[step];
-                double dSigma = sigmas[step + 1] - sigma;
-                (float tVideo, float tAudio) = MiniMaxH3Schedule.Timesteps(sigma, shiftV, shiftA);
-                (float[] uniqueT, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
-                    MiniMaxH3Conditioning.BuildTimestepRows(layout, tVideo, tAudio,
-                        request.VisualCondNoiseAug, request.AudioCondNoiseAug);
+                for (int step = 0; step < request.Steps; step++)
+                {
+                    Stopwatch sw = Stopwatch.StartNew();
+                    double sigma = sigmas[step];
+                    double dSigma = sigmas[step + 1] - sigma;
+                    (float tVideo, float tAudio) = MiniMaxH3Schedule.Timesteps(sigma, shiftV, shiftA);
+                    (float[] uniqueT, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
+                        MiniMaxH3Conditioning.BuildTimestepRows(layout, tVideo, tAudio,
+                            request.VisualCondNoiseAug, request.AudioCondNoiseAug);
 
-                if (step == 0)
-                {
-                    Probe("video latent (noise, pre-step)", videoLat);
-                    Probe("audio latent (noise, pre-step)", audioLat);
-                }
-                // Conditioning rows ride every forward at their fixed content and are never integrated, so they are
-                // spliced back in fresh each step rather than living in the state the sampler advances.
-                Tensor videoIn = PackConditioned(condVideo, videoLat);
-                Tensor audioIn = PackConditioned(condAudio, audioLat);
-                try
-                {
-                    (Tensor vVideo, Tensor vAudio) = DitShardBackend is not null
-                        ? _transformer.ForwardSharded(
-                            Backend, DitShardBackend, layout, videoIn, audioIn, textStates, cos, sin, uniqueT, rowOf,
-                            DitShardSplitBlock, textTagRuns)
-                        : _transformer.Forward(
-                            Backend, layout, videoIn, audioIn, textStates, cos, sin, uniqueT, rowOf, textTagRuns);
+                    if (step == 0)
+                    {
+                        Probe("video latent (noise, pre-step)", videoLat);
+                        Probe("audio latent (noise, pre-step)", audioLat);
+                    }
+                    // Conditioning rows ride every forward at their fixed content and are never integrated, so they are
+                    // spliced back in fresh each step rather than living in the state the sampler advances.
+                    Tensor videoIn = PackConditioned(condVideo, videoLat);
+                    Tensor audioIn = PackConditioned(condAudio, audioLat);
                     try
                     {
-                        // Both heads return the flow velocity; the audio one is integrated over the video sigma, so it
-                        // takes the schedule map's derivative as an extra factor.
-                        float slope = (float)MiniMaxH3Schedule.ShiftSlope(sigma, shiftV, shiftA);
-                        if (step == 0 || step == request.Steps / 2 || step == request.Steps - 1)
+                        (Tensor vVideo, Tensor vAudio) = DitShardBackend is not null
+                            ? _transformer.ForwardSharded(
+                                Backend, DitShardBackend, layout, videoIn, audioIn, textStates, cos, sin, uniqueT, rowOf,
+                                DitShardSplitBlock, textTagRuns)
+                            : _transformer.Forward(
+                                Backend, layout, videoIn, audioIn, textStates, cos, sin, uniqueT, rowOf, textTagRuns);
+                        try
                         {
-                            Probe($"DiT velocity (video, step {step})", vVideo);
-                            Probe($"DiT velocity (audio, step {step}, sigmaV={sigma:F4} tA={tAudio:F4} slope={slope:F4})", vAudio);
+                            // Both heads return the flow velocity; the audio one is integrated over the video sigma, so it
+                            // takes the schedule map's derivative as an extra factor.
+                            float slope = (float)MiniMaxH3Schedule.ShiftSlope(sigma, shiftV, shiftA);
+                            if (step == 0 || step == request.Steps / 2 || step == request.Steps - 1)
+                            {
+                                Probe($"DiT velocity (video, step {step})", vVideo);
+                                Probe($"DiT velocity (audio, step {step}, sigmaV={sigma:F4} tA={tAudio:F4} slope={slope:F4})", vAudio);
+                            }
+                            EulerStep(videoLat, vVideo, (float)-dSigma);
+                            EulerStep(audioLat, vAudio, (float)(-dSigma * slope));
                         }
-                        EulerStep(videoLat, vVideo, (float)-dSigma);
-                        EulerStep(audioLat, vAudio, (float)(-dSigma * slope));
+                        finally
+                        {
+                            vVideo.Dispose();
+                            vAudio.Dispose();
+                        }
                     }
                     finally
                     {
-                        vVideo.Dispose();
-                        vAudio.Dispose();
+                        if (!ReferenceEquals(videoIn, videoLat)) { videoIn.Dispose(); }
+                        if (!ReferenceEquals(audioIn, audioLat)) { audioIn.Dispose(); }
+                    }
+                    Backend.Sync();
+                    DitShardBackend?.Sync();
+                    sw.Stop();
+                    Logs.Info($"[minimax-h3] step {step + 1}/{request.Steps}: {sw.ElapsedMilliseconds} ms");
+                    onProgress?.Invoke(new GenerationProgress(step + 1, request.Steps, sw.Elapsed.TotalMilliseconds));
+                    // Window the op profiler onto the steady-state steps: step 0 carries the weight-residency
+                    // warm-up, and everything before the loop is text encode. Both are one-time and vary enough
+                    // run to run that differencing two runs to cancel them does not work. No-op when off.
+                    if (step == 0)
+                    {
+                        Backend.ResetOpProfile();
                     }
                 }
-                finally
-                {
-                    if (!ReferenceEquals(videoIn, videoLat)) { videoIn.Dispose(); }
-                    if (!ReferenceEquals(audioIn, audioLat)) { audioIn.Dispose(); }
-                }
-                Backend.Sync();
-                DitShardBackend?.Sync();
-                sw.Stop();
-                Logs.Info($"[minimax-h3] step {step + 1}/{request.Steps}: {sw.ElapsedMilliseconds} ms");
-                onProgress?.Invoke(new GenerationProgress(step + 1, request.Steps, sw.Elapsed.TotalMilliseconds));
-                // Window the op profiler onto the steady-state steps: step 0 carries the weight-residency
-                // warm-up, and everything before the loop is text encode. Both are one-time and vary enough
-                // run to run that differencing two runs to cancel them does not work. No-op when off.
-                if (step == 0)
-                {
-                    Backend.ResetOpProfile();
-                }
-            }
-            Backend.DumpOpProfile($"denoise{Math.Max(1, request.Steps - 1)}");
+                Backend.DumpOpProfile($"denoise{Math.Max(1, request.Steps - 1)}");
 
-            Probe("video latent (final)", videoLat);
-            Probe("audio latent (final)", audioLat);
-            Dump("video_latent_final", videoLat);
-            Dump("audio_latent_final", audioLat);
-            // Denoising is done: hand the DiT's ~20 GB back before the VAE needs its own ~5 GB. Sharded, the free
-            // mirrors the asymmetric preload — the whole-set free would silently no-op on the shard backend's
-            // range (frees are per-backend) and leak it; this also returns the second card's share pre-decode.
-            if (preloaded)
+                Probe("video latent (final)", videoLat);
+                Probe("audio latent (final)", audioLat);
+                Dump("video_latent_final", videoLat);
+                Dump("audio_latent_final", audioLat);
+            }
+            finally
             {
-                if (DitShardBackend is not null)
+                // Denoising is done (or failed): hand the DiT's ~20 GB back before the VAE needs its own ~5 GB, and
+                // so a failed generation doesn't leak it resident for every later request on this cached pipeline —
+                // load-bearing for CheckVramFeasibility, which assumes weights are resident only while a Generate
+                // call is actually using them. Sharded, the free mirrors the asymmetric preload — the whole-set free
+                // would silently no-op on the shard backend's range (frees are per-backend) and leak it; this also
+                // returns the second card's share pre-decode.
+                if (preloaded)
                 {
-                    Backend.FreeWeights(_transformer.EnumerateSharedWeights());
-                    Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
-                    DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers));
-                }
-                else
-                {
-                    Backend.FreeWeights(_transformer.EnumerateWeights());
+                    if (DitShardBackend is not null)
+                    {
+                        Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+                        Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+                        DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers));
+                    }
+                    else
+                    {
+                        Backend.FreeWeights(_transformer.EnumerateWeights());
+                    }
                 }
             }
 

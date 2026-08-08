@@ -60,14 +60,16 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         MergedLoraStack? loraStack = null;
         try
         {
+            // The 66 GB bf16 build cannot stay device-resident on any consumer card, alone or sharded across two —
+            // this is a fixed structural fact of the build, not something live free VRAM changes. The 21 GB fp8
+            // build CAN fit resident, but whether it actually should on THIS box right now is a separate, live
+            // question — see fitsResidentSingleBackend below.
+            bool ditIsHugeBf16Build = new FileInfo(assets.Dit).Length >= 40L << 30;
+            if (ditIsHugeBf16Build)
             {
-                // Only the 66 GB bf16 DiT needs this — caching its F16 casts grows without bound and OOMs the host.
-                // The 21 GB fp8 build must keep the cache ON or every GEMM re-uploads its weight.
-                long ditBytes = new FileInfo(assets.Dit).Length;
-                if (ditBytes > 40L << 30)
-                {
-                    RecipeBackendFlags.DisableCacheWeightCasts(context, "MiniMaxH3Recipe");
-                }
+                // Caching its F16 casts grows without bound and OOMs the host; the fp8 build must keep the cache ON
+                // or every GEMM re-uploads its weight.
+                RecipeBackendFlags.DisableCacheWeightCasts(context, "MiniMaxH3Recipe");
             }
             // F32, and F16 is not a bug to chase: this DiT's stream genuinely leaves F16 range on real weights —
             // condition_proj already emits 82740 (2 of 5376 text channels overflow to inf before block 0) and the
@@ -87,16 +89,31 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                 LoadAudioVae(assets.AudioVae, loaders);
 
             MiniMaxH3TextEncoder textEncoder = LoadTextEncoder(assets.TextEncoder, loaders);
-            // The 66 GB bf16 build cannot stay device-resident on any consumer card; the 21 GB fp8 build can, and
-            // must, or every GEMM re-uploads its weight.
-            bool fitsResident = new FileInfo(assets.Dit).Length < 40L << 30;
+
+            // A real check, not the file-size proxy: the fp8 build normally fits, but a box that's already tight on
+            // this card (another tenant, a prior leaked allocation) should stream rather than have PreloadWeights
+            // fail and fall back anyway — this just makes that outcome the first attempt instead of a caught
+            // exception. VramPlanner's cache-based Resident/Streamed decision doesn't fit here: it returns Resident
+            // whenever there's no IStreamingWeightCache, and H3 has none — its "streaming" is a per-call
+            // PreloadWeights/FreeWeights toggle, not a windowed cache — so this is a direct comparison of the same
+            // weight-bytes-vs-free-VRAM shape rather than a VramPlanner.PlanPhase call. Only gates the SINGLE-backend
+            // preload flag below; sharding eligibility is a different, build-size question (see ditIsHugeBf16Build).
+            long ditWeightBytes = 0;
+            foreach (Tensor t in transformer.EnumerateWeights())
+            {
+                ditWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
+            }
+            (long primaryFreeBytes, _) = context.Backend.GetVramInfo();
+            bool fitsResidentSingleBackend = !ditIsHugeBf16Build && (primaryFreeBytes <= 0
+                || primaryFreeBytes >= ditWeightBytes + MinimumActivationReserveBytes(config));
 
             // DiT sharding: fp8 build only — the bf16 blocks alone (~64 GB) exceed any 2-consumer-card pool, so
             // sharding buys nothing there and the streaming path stands. 50 homogeneous blocks → the
-            // count-proportional plan is byte-accurate.
+            // count-proportional plan is byte-accurate. Gated on the build-size class, not
+            // fitsResidentSingleBackend — sharding is precisely for when the DiT does NOT fit on one card alone.
             int ditShardSplitBlock = 0;
             IBackend? ditShardBackend = null;
-            if (context.DitShardBackend is not null && fitsResident)
+            if (context.DitShardBackend is not null && !ditIsHugeBf16Build)
             {
                 long sharedWeightBytes = 0;
                 foreach (Tensor t in transformer.EnumerateSharedWeights())
@@ -117,7 +134,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             }
 
             MiniMaxH3Pipeline pipeline =
-                new MiniMaxH3Pipeline(context.Backend, transformer, videoVae, audioVae, fitsResident)
+                new MiniMaxH3Pipeline(context.Backend, transformer, videoVae, audioVae, fitsResidentSingleBackend)
                 {
                     DitShardBackend = ditShardBackend,
                     DitShardSplitBlock = ditShardSplitBlock,
@@ -134,6 +151,21 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             }
             throw;
         }
+    }
+
+    /// <summary>Conservative reserve any H3 forward needs beyond its resident weights, independent of the actual
+    /// request's sequence length — the smallest chunk's own transient scratch plus the fixed cuBLAS/RoPE fudge
+    /// tail (matches <see cref="MiniMaxH3ActivationEstimate"/>'s seq-independent terms). The seq-scaled cost is a
+    /// separate, per-request question that <c>MiniMaxH3RecipePipeline.CheckVramFeasibility</c> checks against live
+    /// free VRAM before every generation; this only needs to keep the one-time PRELOAD decision honest.</summary>
+    private static long MinimumActivationReserveBytes(MiniMaxH3Config config)
+    {
+        int inner = config.NumAttentionHeads * config.AttentionHeadDim;
+        int ffn = config.FfnHiddenSize;
+        int chunkRows = MiniMaxH3ChunkPolicy.DefaultChunkRows;
+        long attnChunkBytes = (long)chunkRows * inner * 6L * DType.F32.SizeInBytes;
+        long mlpChunkBytes = (long)chunkRows * ffn * 3L * DType.F32.SizeInBytes;
+        return Math.Max(attnChunkBytes, mlpChunkBytes) + MiniMaxH3ActivationEstimate.FudgeBytes;
     }
 
     /// <summary>Warns when placement knobs are configured that H3 cannot use, so the operator learns why they saw
