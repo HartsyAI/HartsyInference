@@ -366,6 +366,38 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     /// rope and SDPA all consume them directly — only the attention output needs a permute back.
     /// The qkv buffer through to the attention output stays F32: rope and SDPA have no 16-bit path, so a bf16 qkv
     /// would only add casts around them. Only the projection's input and output ride the bf16 residual stream.</summary>
+    /// <summary>Diagnostic only, off unless <c>HARTSY_H3_VPROBE=1</c>: reports <c>max|V|</c> per block against F16's
+    /// 65504 ceiling. SDPA's default INT8 SageAttention path quantizes Q/K but materializes V as an F16 transpose, so
+    /// a V element past that range becomes INF and softmax·V smears it over every query row — one bad element per
+    /// token, no error raised (see the HAZARD note in <c>CudaBackend.ScaledDotProductAttention</c>; this is what bit
+    /// Lens at its block 45). It samples EVERY block rather than block 0 because the residual — and with it V — grows
+    /// with depth, so block 0 is the safest block in the stack and measuring only it would prove nothing. Host-side
+    /// and synchronizing, hence the gate: it is a measurement tool, not something the forward path pays for.</summary>
+    private static readonly bool VProbeEnabled = Environment.GetEnvironmentVariable("HARTSY_H3_VPROBE") == "1";
+
+    /// <summary>F16's largest finite magnitude — the ceiling <see cref="VProbeEnabled"/> measures against.</summary>
+    private const float F16Max = 65504f;
+
+    private static void ProbeV(Tensor v, string prefix)
+    {
+        if (!VProbeEnabled)
+        {
+            return;
+        }
+        float* p = (float*)v.DataPointer;
+        long n = v.ElementCount;
+        float mx = 0;
+        long bad = 0;
+        for (long i = 0; i < n; i++)
+        {
+            float a = Math.Abs(p[i]);
+            if (!float.IsFinite(a)) { bad++; continue; }
+            if (a > mx) { mx = a; }
+        }
+        string verdict = mx > F16Max ? "OVERFLOWS F16 — Sage will INF this block" : $"{100.0 * mx / F16Max:F2}% of F16 max";
+        Logs.Warning($"[h3-vprobe] {prefix}: max|V|={mx:G6} ({verdict}), nonfinite={bad}, n={n}");
+    }
+
     private Tensor Attention(IBackend backend, Tensor x, string prefix, Tensor? cos, Tensor? sin)
     {
         int seq = (int)x.Shape[0];
@@ -392,6 +424,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 backend.ApplyRopeSingleHeadMajor(k, cos, sin, rotary);
             }
 
+            ProbeV(v, prefix);
             Tensor attn = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
             try
             {
@@ -473,6 +506,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 backend.ScatterSeqHeadMajor(vFull, vc, r0);
                 qChunks.Add(qc);
             }
+            ProbeV(vFull, prefix);
 
             List<Tensor> outChunks = new List<Tensor>(qChunks.Count);
             try

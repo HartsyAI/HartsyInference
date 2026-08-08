@@ -381,6 +381,26 @@ optional `AudioBuffer`), `VideoAudioResolver` picks and trims the track, and the
 ffmpeg mux is reconnected. An H3 pipeline that produces a stereo waveform just attaches it to its
 result and the mux happens for free.
 
+**SageAttention F16-V overflow — MEASURED CLEAR, 2026-08-08.** H3's SDPA calls take the default INT8
+SageAttention path (F32 in, no mask, `d=128`, `Skv >= 2048` — every real geometry qualifies). That path
+quantizes Q/K but materializes V as an F16 transpose, so any `|V| > 65504` becomes INF and the softmax
+smears it across every query row with no error raised — the failure that bit Lens at its block 45. H3's
+documented ~2.7e6 residual made this worth checking directly.
+
+It is not a problem, and the reason is structural: `norm1` precedes the qkv projection, so **V is a
+projection of a normalized tensor, never of the raw residual stream**. Measured with `HARTSY_H3_VPROBE=1`
+over a full 30-step generation (141f@512x288, 1500 block-probes, zero non-finite):
+
+| | max\|V\| | % of F16 max |
+|---|---|---|
+| block 0 | 81 | 0.12% |
+| block 48 (hottest) | ~1200 | 1.83% |
+| peak over all blocks/steps | **1201** | **1.83% (55x margin)** |
+
+It grows with depth but oscillates in a band across steps rather than compounding the way Lens did — so
+**probe every block, not block 0**: block 0 reads 15x lower than the real peak and would falsely reassure.
+No V-damping actuator is needed; the probe stays env-gated off (it is a host-side synchronizing scan).
+
 **Precedents worth reading first.** LTX-2.3 (`LtxVideo2Pipeline`, `Ltx2Result`) is the closest
 existing architecture: dual-stream video+audio DiT with separate video and audio VAEs and a BigVGAN
 vocoder. Whatever H3 turns out to be, that pipeline is the nearest template and its

@@ -4938,6 +4938,12 @@ public sealed class CudaBackend : IBackend
             // softmax). Check max|V| per block against 65504. Lens hit this at block 45 with max|V| growing
             // 18940 → 31281 → 71583 across forwards; its fix (LensTransformerBlock) scales V by 1/256 before
             // SDPA and back after — exact, since attention is linear in V, and power-of-two so exponent-only.
+            //
+            // MiniMax-H3 was measured against this and is CLEAR: peak max|V| = 1201 (1.83% of 65504, a 55x margin)
+            // over a full 30-step generation, 1500 block-probes, zero non-finite (HARTSY_H3_VPROBE=1, 2026-08-08).
+            // It grows with depth (81 at block 0 to ~1200 at block 48) but oscillates in a band across steps rather
+            // than compounding like Lens did. Its documented ~2.7e6 residual never reaches V: norm1 precedes the
+            // qkv projection, so V is a projection of a NORMALIZED tensor, not of the raw residual stream.
             // A model-agnostic fix belongs inside SageAttentionInt8, not here: a blanket V damp would push small
             // values toward F16 subnormals, so it needs its own range analysis.
             // ──────────────────────────────────────────────────────────────────────────────────────────────
