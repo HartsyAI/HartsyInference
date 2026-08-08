@@ -15,12 +15,12 @@ public static class MiniMaxH3ActivationEstimate
     /// <summary>The floor: activation bytes a forward needs no matter how small a chunk
     /// <see cref="MiniMaxH3ChunkPolicy"/> picks, calibrated to the actual tensor lifetimes in
     /// <see cref="MiniMaxH3Transformer.AttentionChunked"/> and <see cref="MiniMaxH3Transformer.MlpChunked"/> (not
-    /// the simpler "everything full-size" over-approximation the two-pass design description suggests): chunked
-    /// attention keeps <c>q</c> chunk-sized throughout (disposed right after its own SDPA call) and only
-    /// concatenates <c>k</c>/<c>v</c> to full size, and both chunked methods accumulate their per-chunk outputs in
-    /// an undisposed list until the final <c>Concat</c> — so a second full-size, hidden-width buffer is briefly
-    /// live alongside the residual stream even though no single "attention output" tensor is ever allocated at full
-    /// size directly. None of this shrinks with a smaller chunk, so it cannot be rescued by any chunk size or by
+    /// the simpler "everything full-size" over-approximation the two-pass design description suggests): the two
+    /// passes peak on different buffers at different times, so the floor takes the worse of them rather than their
+    /// sum, and both chunked methods accumulate their per-chunk outputs in an undisposed list until the final
+    /// <c>Concat</c> — so a second full-size, hidden-width buffer is briefly live alongside the residual stream even
+    /// though no single "attention output" tensor is ever allocated at full size directly. None of this shrinks with
+    /// a smaller chunk, so it cannot be rescued by any chunk size or by
     /// weight streaming (weights are not part of this number at all) — the right number for
     /// <see cref="Core.Exceptions.OutOfVramException"/>-style pre-flight refusals.</summary>
     public static long EstimateFloorBytes(int seq, MiniMaxH3Config config, DType bodyDType)
@@ -33,13 +33,7 @@ public static class MiniMaxH3ActivationEstimate
         // h: the block's residual stream, [seq, 1, hidden], always fully resident.
         long residualBytes = (long)seq * hidden * bodyBytes;
 
-        // Each chunked method's outChunks list is never trimmed until the final Concat, so by the last iteration it
-        // holds a full [seq, hidden] worth of chunk tensors — a second residual-sized buffer, live alongside h.
-        long accumulatedOutputBytes = (long)seq * hidden * bodyBytes;
-
-        // kFull and vFull ([1, H, seq, hd] F32) are the only attention buffers AttentionChunked ever concatenates to
-        // full size — q stays chunk-sized and is disposed immediately after its own SDPA call.
-        long fullKvBytes = (long)seq * inner * 2L * DType.F32.SizeInBytes;
+        long fullSeqInnerBytes = (long)seq * inner * DType.F32.SizeInBytes;
 
         // One chunk's own transient scratch: either the packed qkv chunk (inner*3 wide) alongside its chunk-sized
         // q/k/v (another inner*3), or the MLP's gateUp+act chunk — the two never run concurrently within a block,
@@ -49,6 +43,19 @@ public static class MiniMaxH3ActivationEstimate
         long mlpChunkBytes = (long)chunkRows * ffn * 3L * DType.F32.SizeInBytes;
         long chunkScratchBytes = Math.Max(attnChunkBytes, mlpChunkBytes);
 
-        return residualBytes + accumulatedOutputBytes + fullKvBytes + chunkScratchBytes + FudgeBytes;
+        // AttentionChunked's two passes peak at different things and are separated in time, so the floor is the worse
+        // of the two rather than their sum — summing them false-refused a 39-frame geometry that had already been
+        // proven to complete on real hardware (see MiniMaxH3ActivationEstimateTests' measured calibration).
+        // Pass 1 ends holding kFull + vFull + every q chunk, three full [1, H, seq, hd] F32 buffers at once, plus the
+        // chunk in flight. This is the dominant term at long sequences and the one that OOMed a 141-frame sharded run
+        // on the 12 GB card: at seq=38325 each buffer is 1047.9 MB, and the failing allocation was exactly that size.
+        long passOneBytes = 3L * fullSeqInnerBytes + chunkScratchBytes;
+
+        // Pass 2 has released the q chunks it consumes but still holds kFull + vFull for every SDPA call, and its own
+        // outChunks list is never trimmed until the final Concat — so a full [seq, hidden] of chunks is live
+        // alongside the concatenated result it is about to produce.
+        long passTwoBytes = 2L * fullSeqInnerBytes + 2L * (long)seq * hidden * bodyBytes;
+
+        return residualBytes + Math.Max(passOneBytes, passTwoBytes) + FudgeBytes;
     }
 }

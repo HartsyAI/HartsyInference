@@ -71,6 +71,14 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                 // or every GEMM re-uploads its weight.
                 RecipeBackendFlags.DisableCacheWeightCasts(context, "MiniMaxH3Recipe");
             }
+            else
+            {
+                // A card without native fp8 GEMM dequants every fp8 weight per call, and the cache keeps those F16
+                // copies resident until only its own headroom floor (2 GB) is left — but H3's per-block transients
+                // need ~5 GB at long geometries, so the cache silently eats the activation budget and OOMs
+                // mid-forward with no pre-flight signal. Native-fp8 cards never cast at all, so they keep it on.
+                RecipeBackendFlags.DisableCacheWeightCasts(context, "MiniMaxH3Recipe", onlyWithoutNativeFp8Gemm: true);
+            }
             // F32, and F16 is not a bug to chase: this DiT's stream genuinely leaves F16 range on real weights —
             // condition_proj already emits 82740 (2 of 5376 text channels overflow to inf before block 0) and the
             // residual reaches 2.7e6 by the last block. BF16 holds the range but falls off the native fp8 GEMM
@@ -138,9 +146,11 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                 {
                     DitShardBackend = ditShardBackend,
                     DitShardSplitBlock = ditShardSplitBlock,
+                    VaeBackend = context.VaeBackendOrDefault,
                 };
             return new MiniMaxH3RecipePipeline(context.Backend, pipeline, config, textEncoder,
-                LoadTokenizer(assets.TokenizerDir), loaders, videoVaeEncoder, audioVaeEncoder, loraStack);
+                LoadTokenizer(assets.TokenizerDir), loaders, videoVaeEncoder, audioVaeEncoder, loraStack,
+                context.TextEncoderBackendOrDefault, context.VaeBackendOrDefault);
         }
         catch
         {
@@ -183,6 +193,16 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         {
             Logs.Warning("[MiniMaxH3Recipe] CFG-parallel is configured but structurally inapplicable to MiniMax-H3 — "
                 + "it runs CfgScale=1.0 as a single forward pass with no unconditional branch to parallelize.");
+        }
+        if (context.TextEncoderBackend is not null && !ReferenceEquals(context.TextEncoderBackend, context.Backend))
+        {
+            Logs.Info("[MiniMaxH3Recipe] Text encoder placed off the primary backend — its weights stay resident "
+                + "between generations, since nothing on that device competes with the DiT for the space.");
+        }
+        if (context.VaeBackend is not null && !ReferenceEquals(context.VaeBackend, context.Backend))
+        {
+            Logs.Info("[MiniMaxH3Recipe] VAE encode/decode placed off the primary backend — its weights stay "
+                + "resident between generations, since nothing on that device competes with the DiT for the space.");
         }
     }
 

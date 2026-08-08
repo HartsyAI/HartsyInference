@@ -32,6 +32,11 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     private readonly MiniMaxH3Pipeline _pipeline;
     private readonly MiniMaxH3Config _config;
     private readonly IBackend _backend;
+    /// <summary>Where the Qwen3-VL encode runs; equal to <see cref="_backend"/> unless placement moved it.</summary>
+    private readonly IBackend _textEncoderBackend;
+    /// <summary>Where every VAE ENCODE runs (keyframes, references). The decodes are the pipeline's own
+    /// <c>VaeBackend</c>, set from the same placement so both halves of the VAE land on one device.</summary>
+    private readonly IBackend _vaeBackend;
     private readonly MiniMaxH3TextEncoder _textEncoder;
     private readonly Qwen2Tokenizer _tokenizer;
     private readonly List<SafeTensorsLoader> _loaders;
@@ -44,9 +49,11 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     public MiniMaxH3RecipePipeline(IBackend backend, MiniMaxH3Pipeline pipeline, MiniMaxH3Config config,
         MiniMaxH3TextEncoder textEncoder, Qwen2Tokenizer tokenizer, List<SafeTensorsLoader> loaders,
         MiniMaxH3VideoVaeEncoder? videoVaeEncoder = null, MiniMaxH3AudioVaeEncoder? audioVaeEncoder = null,
-        MergedLoraStack? loraStack = null)
+        MergedLoraStack? loraStack = null, IBackend? textEncoderBackend = null, IBackend? vaeBackend = null)
     {
         _backend = backend;
+        _textEncoderBackend = textEncoderBackend ?? backend;
+        _vaeBackend = vaeBackend ?? backend;
         _pipeline = pipeline;
         _config = config;
         _textEncoder = textEncoder;
@@ -96,12 +103,28 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         // axis rounds to 32 (a multiple of 16 alone leaves an odd latent axis and the 2x2 patchifier drops its last
         // row/column). Audio length follows the ALIGNED frame count so the two streams end together.
         int frames = MiniMaxH3Geometry.AlignFrameCount(requestedFrames);
-        int width = MiniMaxH3Geometry.Round(request.Width ?? 1344);
-        int height = MiniMaxH3Geometry.Round(request.Height ?? 768);
-        if (frames != requestedFrames || width != (request.Width ?? 1344) || height != (request.Height ?? 768))
+        int requestedWidth = request.Width ?? 1344;
+        int requestedHeight = request.Height ?? 768;
+        (int width, int height) = MiniMaxH3Geometry.ClampToMaxArea(requestedWidth, requestedHeight);
+        if (frames != requestedFrames || width != requestedWidth || height != requestedHeight)
         {
             Logs.Info($"[MiniMaxH3RecipePipeline] Geometry snapped to H3's grid: "
-                + $"{request.Width}x{request.Height}x{requestedFrames}f -> {width}x{height}x{frames}f.");
+                + $"{requestedWidth}x{requestedHeight}x{requestedFrames}f -> {width}x{height}x{frames}f.");
+        }
+        if ((long)requestedWidth * requestedHeight > MiniMaxH3Geometry.MaxPixels)
+        {
+            // Denoising above the trained area costs proportionally more compute for no quality gain, so the clamp
+            // is a correctness fix rather than a memory one — the memory question is CheckVramFeasibility's.
+            Logs.Warning($"[MiniMaxH3RecipePipeline] {requestedWidth}x{requestedHeight} is "
+                + $"{(long)requestedWidth * requestedHeight / 1000}k pixels, above MiniMax-H3's trained area of "
+                + $"{MiniMaxH3Geometry.MaxPixels / 1000}k — scaled to {width}x{height} preserving aspect.");
+        }
+        if (frames > MiniMaxH3Geometry.TrainedFrameEnvelope)
+        {
+            Logs.Warning($"[MiniMaxH3RecipePipeline] {frames} frames is "
+                + $"{(double)frames / MiniMaxH3Geometry.Fps:F1} s, past MiniMax-H3's trained envelope of "
+                + $"{MiniMaxH3Geometry.TrainedFrameEnvelope} frames (~{(double)MiniMaxH3Geometry.TrainedFrameEnvelope / MiniMaxH3Geometry.Fps:F0} s) "
+                + "— generating anyway; motion coherence and audio sync may drift past that length.");
         }
 
         Action<GenerationProgress> bridge = p =>
@@ -160,19 +183,21 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 // be device-resident on a 24 GB card. (This is hygiene, not the perf fix — measurement showed the
                 // encoder's weights were never the thing occupying VRAM during denoise.)
                 MiniMaxH3TextEncoder.Result encoded;
-                _backend.PreloadWeights(_textEncoder.EnumerateWeights());
+                _textEncoderBackend.PreloadWeights(_textEncoder.EnumerateWeights());
                 try
                 {
                     // Keyframes are presented to the vision tower exactly as reference images are — the reference
                     // labels them <Picture 1>/<Picture 2> ahead of the prompt — so the two conditioning paths agree.
-                    encoded = _textEncoder.Encode(_backend, _tokenizer, request.Prompt,
+                    encoded = _textEncoder.Encode(_textEncoderBackend, _tokenizer, request.Prompt,
                         conditions.Count == 0 ? null : conditions,
                         visionInputs.Count == 0 ? null : visionInputs);
-                    _backend.Sync();
+                    // Load-bearing when the encoder sits on another device: the DiT's first read of these hidden
+                    // states faults them back from here, and a fault does not await this device's stream.
+                    _textEncoderBackend.Sync();
                 }
                 finally
                 {
-                    _backend.FreeWeights(_textEncoder.EnumerateWeights());
+                    ReleaseComponentWeights(_textEncoderBackend, _textEncoder.EnumerateWeights());
                 }
 
                 MiniMaxH3Pipeline.Result result;
@@ -233,17 +258,36 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         int seq = approxNonVideoRows + videoRows + audioRows;
         long floorBytes = MiniMaxH3ActivationEstimate.EstimateFloorBytes(seq, _config, DType.F32);
 
-        CheckOneBackend(_backend, "primary", floorBytes, _pipeline.EstimateResidentWeightBytes(), frames, width, height, seq);
+        // Every backend running block ranges needs the same per-block floor, so when sharding is on, BOTH have to
+        // clear it. Report whichever is furthest short rather than whichever is checked first: the tightest one is
+        // what the user actually has to fix, and on this box that is usually the smaller shard card.
+        List<(IBackend Backend, string Label, long Weights)> stages =
+            [(_backend, "primary", _pipeline.EstimateResidentWeightBytes())];
         if (_pipeline.DitShardBackend is not null)
         {
-            CheckOneBackend(_pipeline.DitShardBackend, "shard", floorBytes,
-                _pipeline.EstimateShardResidentWeightBytes(), frames, width, height, seq);
+            stages.Add((_pipeline.DitShardBackend, "shard", _pipeline.EstimateShardResidentWeightBytes()));
+        }
+        OutOfVramException? worst = null;
+        long worstDeficit = 0;
+        foreach ((IBackend backend, string label, long weights) in stages)
+        {
+            if (CheckOneBackend(backend, label, floorBytes, weights, frames, width, height, seq, out long deficit)
+                is OutOfVramException failure && deficit > worstDeficit)
+            {
+                worst = failure;
+                worstDeficit = deficit;
+            }
+        }
+        if (worst is not null)
+        {
+            throw worst;
         }
     }
 
-    private static void CheckOneBackend(IBackend backend, string label, long floorBytes, long residentWeightBytes,
-        int frames, int width, int height, int seq)
+    private static OutOfVramException? CheckOneBackend(IBackend backend, string label, long floorBytes,
+        long residentWeightBytes, int frames, int width, int height, int seq, out long deficit)
     {
+        deficit = 0;
         // Pooled cuMemFreeAsync reservations don't return to cuMemGetInfo's free count until trimmed — the same
         // staleness VramPlanner.TrimBeforeQuery exists to counteract for other families' checks.
         backend.TrimMemoryPool();
@@ -251,21 +295,37 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         if (freeBytes <= 0)
         {
             // GetVramInfo() defaults to (0, 0) on backends that don't report live VRAM (e.g. CPU) — nothing to check.
-            return;
+            return null;
         }
         long availableForActivations = freeBytes - residentWeightBytes;
-        if (floorBytes > availableForActivations)
+        if (floorBytes <= availableForActivations)
         {
-            throw new OutOfVramException(
-                $"MiniMax-H3/{frames}f@{width}x{height} (seq~{seq}) cannot run on this device's {label} backend: it "
-                + $"needs at least {Mb(floorBytes)} of activations and workspace on top of {Mb(residentWeightBytes)} "
-                + $"of resident DiT weights, but only {Mb(freeBytes)} is free. Weight streaming cannot reduce this "
-                + "— lower the resolution or frame count, use a device with more VRAM, or adjust the DiT shard "
-                + "split.");
+            return null;
         }
+        deficit = floorBytes - availableForActivations;
+        return new OutOfVramException(
+            $"MiniMax-H3/{frames}f@{width}x{height} (seq~{seq}) cannot run on this device's {label} backend: it "
+            + $"needs at least {Mb(floorBytes)} of activations and workspace on top of {Mb(residentWeightBytes)} "
+            + $"of resident DiT weights, but only {Mb(freeBytes)} is free ({Mb(deficit)} short). Weight streaming "
+            + "cannot reduce this — lower the resolution or frame count, use a device with more VRAM, or adjust the "
+            + "DiT shard split.");
     }
 
     private static string Mb(long bytes) => $"{bytes / (1024 * 1024)} MB";
+
+    /// <summary>Frees a component's weights after use — unless placement put that component on a device the DiT does
+    /// not use, in which case they stay resident so the next generation skips the re-upload. The opt-in is the
+    /// placement itself: on the primary the free is load-bearing (the DiT needs that room back), and off it there is
+    /// nothing competing for the space. Warm weights still go on <c>FreeMemory()</c>, model switch, and disposal,
+    /// which release every backend's weight set regardless. Only WEIGHTS are held — activations are freed normally,
+    /// so nothing a later generation faults back to host is kept alive by this.</summary>
+    private void ReleaseComponentWeights(IBackend backend, IEnumerable<Tensor> weights)
+    {
+        if (ReferenceEquals(backend, _backend))
+        {
+            backend.FreeWeights(weights);
+        }
+    }
 
     /// <summary>Encodes ref2va references in the order the presentation and the packed layout both expect: images,
     /// then videos, then standalone audio. Each becomes one <see cref="MiniMaxH3RefBlock"/> plus its presentation
@@ -324,7 +384,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         {
             if (images.Count > 0 || prepared.Count > 0)
             {
-                _backend.PreloadWeights(_videoVaeEncoder!.EnumerateWeights());
+                _vaeBackend.PreloadWeights(_videoVaeEncoder!.EnumerateWeights());
                 try
                 {
                     foreach (ImageData image in images)
@@ -334,22 +394,22 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                     for (int i = 0; i < prepared.Count; i++)
                     {
                         using Tensor latent = _videoVaeEncoder.EncodeRgbClip(
-                            _backend, prepared[i].Frames, prepared[i].Width, prepared[i].Height);
+                            _vaeBackend, prepared[i].Frames, prepared[i].Width, prepared[i].Height);
                         videoRows[i] = MiniMaxH3Latents.PackVideo(latent, _config);
                         videoLatentT[i] = (int)latent.Shape[2];
                     }
-                    _backend.Sync();
+                    _vaeBackend.Sync();
                 }
                 finally
                 {
-                    _backend.FreeWeights(_videoVaeEncoder!.EnumerateWeights());
+                    ReleaseComponentWeights(_vaeBackend, _videoVaeEncoder!.EnumerateWeights());
                 }
             }
 
             List<Reference> audioRefs = new List<Reference>(audios.Count);
             if (needsAudioVae)
             {
-                _backend.PreloadWeights(_audioVaeEncoder!.EnumerateWeights());
+                _vaeBackend.PreloadWeights(_audioVaeEncoder!.EnumerateWeights());
                 try
                 {
                     for (int i = 0; i < prepared.Count; i++)
@@ -366,11 +426,11 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                     {
                         audioRefs.Add(EncodeReferenceAudio(clip));
                     }
-                    _backend.Sync();
+                    _vaeBackend.Sync();
                 }
                 finally
                 {
-                    _backend.FreeWeights(_audioVaeEncoder!.EnumerateWeights());
+                    ReleaseComponentWeights(_vaeBackend, _audioVaeEncoder!.EnumerateWeights());
                 }
             }
 
@@ -495,7 +555,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         int tw = MiniMaxH3Geometry.Round((int)Math.Round(image.Width * scale));
         int th = MiniMaxH3Geometry.Round((int)Math.Round(image.Height * scale));
         byte[] rgb = VideoRecipeUtils.ResizeRgb24(image, tw, th);
-        Tensor latent = _videoVaeEncoder!.EncodeRgbFrame(_backend, rgb, tw, th);
+        Tensor latent = _videoVaeEncoder!.EncodeRgbFrame(_vaeBackend, rgb, tw, th);
         try
         {
             return new Reference(
@@ -524,7 +584,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             wp[i] = left[i];
             wp[left.Length + i] = right[i];
         }
-        using Tensor latent = _audioVaeEncoder.Encode(_backend, wave);
+        using Tensor latent = _audioVaeEncoder.Encode(_vaeBackend, wave);
         return (MiniMaxH3Latents.PackAudio(latent, _config), (int)latent.Shape[3]);
     }
 
@@ -571,7 +631,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 + "generating from the prompt alone.");
             return;
         }
-        _backend.PreloadWeights(_videoVaeEncoder.EnumerateWeights());
+        _vaeBackend.PreloadWeights(_videoVaeEncoder.EnumerateWeights());
         try
         {
             if (request.InitImage is not null)
@@ -582,11 +642,11 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             {
                 into.Add(EncodeKeyframe(request.VideoEndFrame, width, height, frames - 1));
             }
-            _backend.Sync();
+            _vaeBackend.Sync();
         }
         finally
         {
-            _backend.FreeWeights(_videoVaeEncoder.EnumerateWeights());
+            ReleaseComponentWeights(_vaeBackend, _videoVaeEncoder.EnumerateWeights());
         }
         Logs.Info($"[MiniMaxH3RecipePipeline] fl2va: {into.Count} keyframe(s) at frame "
             + string.Join(", ", into.Select(k => k.FrameIndex)) + ".");
@@ -595,7 +655,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     private Keyframe EncodeKeyframe(ImageData image, int width, int height, int frameIndex)
     {
         byte[] rgb = VideoRecipeUtils.ResizeRgb24(image, width, height);
-        Tensor latent = _videoVaeEncoder!.EncodeRgbFrame(_backend, rgb, width, height);
+        Tensor latent = _videoVaeEncoder!.EncodeRgbFrame(_vaeBackend, rgb, width, height);
         try
         {
             return new Keyframe(frameIndex, MiniMaxH3Latents.PackVideo(latent, _config),
@@ -667,6 +727,22 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     /// <inheritdoc/>
     public void Dispose()
     {
+        // Warm-placed components skip the per-generation free, so this is the ONLY thing that hands their device
+        // weights back. Before the host tensors are disposed, since those tensors are the device cache's keys.
+        if (!ReferenceEquals(_textEncoderBackend, _backend))
+        {
+            _textEncoderBackend.FreeWeights(_textEncoder.EnumerateWeights());
+        }
+        if (!ReferenceEquals(_vaeBackend, _backend))
+        {
+            if (_videoVaeEncoder is not null) { _vaeBackend.FreeWeights(_videoVaeEncoder.EnumerateWeights()); }
+            if (_audioVaeEncoder is not null) { _vaeBackend.FreeWeights(_audioVaeEncoder.EnumerateWeights()); }
+        }
+        if (!ReferenceEquals(_textEncoderBackend, _backend) || !ReferenceEquals(_vaeBackend, _backend))
+        {
+            Logs.Info("[MiniMaxH3RecipePipeline] Released warm-placed component weights from their placement "
+                + "backends — those devices are back to baseline.");
+        }
         _pipeline.Dispose();
         _textEncoder.Dispose();
         // After the transformer that reads them: the merged tensors are the DiT's weights, not copies.

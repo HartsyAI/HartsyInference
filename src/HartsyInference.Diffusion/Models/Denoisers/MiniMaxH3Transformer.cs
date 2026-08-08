@@ -420,8 +420,9 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     /// <summary>Row-chunked equivalent of <see cref="Attention"/> for a long sequence: the packed <c>qkv</c> buffer
     /// (<c>[seq, inner*3]</c>) and the full head-major <c>q/k/v</c> would otherwise be simultaneously live at
     /// ~20 GiB combined at H3's largest requested geometries. Two passes instead: (1) project + split + RoPE one
-    /// chunk of queries/keys/values at a time, concatenating <c>k</c>/<c>v</c> into full tensors (every query must
-    /// see every key — this part is irreducible) while keeping each chunk's <c>q</c> in a list for pass 2; (2) run
+    /// chunk of queries/keys/values at a time, scattering <c>k</c>/<c>v</c> straight into their full tensors (every
+    /// query must see every key — this part is irreducible) while keeping each chunk's <c>q</c> in a list for pass 2;
+    /// (2) run
     /// SDPA per query chunk against the full <c>k</c>/<c>v</c> (SDPA already supports Sq≠Skv — this is not a new
     /// capability, just an external call shape it was never driven at) so the full-size <c>attn</c> output is never
     /// materialized either, then permute+project+concat each chunk's output. Never called directly — see
@@ -439,8 +440,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         int? rotary = cos is not null && sin is not null ? MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen) : null;
 
         List<Tensor> qChunks = new List<Tensor>();
-        List<Tensor> kChunks = new List<Tensor>();
-        List<Tensor> vChunks = new List<Tensor>();
+        Tensor kFull = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
+        Tensor vFull = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
         try
         {
             for (int r0 = 0; r0 < seq; r0 += chunkRows)
@@ -449,8 +450,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 using Tensor xChunk = new Tensor(WithFirstDim(x.Shape, c), x.DType) { Fp8ScaleFactor = x.Fp8ScaleFactor };
                 backend.SliceRowsGeneric(xChunk, x, r0);
                 Tensor qc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
-                Tensor kc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
-                Tensor vc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
+                using Tensor kc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
+                using Tensor vc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
                 using (Tensor qkvChunk = new Tensor(new TensorShape(c, inner * 3), DType.F32))
                 {
                     backend.Linear(qkvChunk, xChunk, qkvW, qkvB);
@@ -465,58 +466,44 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                     backend.ApplyRopeSingleHeadMajor(qc, cosChunk, sinChunk, rot);
                     backend.ApplyRopeSingleHeadMajor(kc, cosChunk, sinChunk, rot);
                 }
+                // k/v land straight in their full buffers and the chunk dies here; holding them in lists to Concat
+                // afterwards kept a SECOND full-size copy of each alive at the pass boundary (peak 5x seq*inner*F32
+                // instead of 3x — the 2 GB that OOMed a 141-frame sharded run on the 12 GB card).
+                backend.ScatterSeqHeadMajor(kFull, kc, r0);
+                backend.ScatterSeqHeadMajor(vFull, vc, r0);
                 qChunks.Add(qc);
-                kChunks.Add(kc);
-                vChunks.Add(vc);
             }
 
-            Tensor kFull = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
-            Tensor vFull = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
-            backend.Concat(kFull, CollectionsMarshal.AsSpan(kChunks), 2);
-            backend.Concat(vFull, CollectionsMarshal.AsSpan(vChunks), 2);
-            foreach (Tensor t in kChunks) t.Dispose();
-            foreach (Tensor t in vChunks) t.Dispose();
-            kChunks.Clear();
-            vChunks.Clear();
-
+            List<Tensor> outChunks = new List<Tensor>(qChunks.Count);
             try
             {
-                List<Tensor> outChunks = new List<Tensor>(qChunks.Count);
-                try
+                for (int i = 0; i < qChunks.Count; i++)
                 {
-                    for (int i = 0; i < qChunks.Count; i++)
-                    {
-                        int c = (int)qChunks[i].Shape[2];
-                        using Tensor attnChunk = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
-                        backend.ScaledDotProductAttention(attnChunk, qChunks[i], kFull, vFull, null, 1f / MathF.Sqrt(hd));
-                        qChunks[i].Dispose();
-                        using Tensor merged = new Tensor(new TensorShape(c, inner), DType.F32);
-                        backend.Permute0213(merged, attnChunk, heads, c, hd);
-                        Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
-                        backend.Linear(outChunk, merged, Require($"{prefix}.out_proj.weight"), Optional($"{prefix}.out_proj.bias"));
-                        outChunks.Add(outChunk);
-                    }
-                    qChunks.Clear();
-                    Tensor outT = new Tensor(x.Shape, BodyDType);
-                    backend.Concat(outT, CollectionsMarshal.AsSpan(outChunks), 0);
-                    return outT;
+                    int c = (int)qChunks[i].Shape[2];
+                    using Tensor attnChunk = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
+                    backend.ScaledDotProductAttention(attnChunk, qChunks[i], kFull, vFull, null, 1f / MathF.Sqrt(hd));
+                    qChunks[i].Dispose();
+                    using Tensor merged = new Tensor(new TensorShape(c, inner), DType.F32);
+                    backend.Permute0213(merged, attnChunk, heads, c, hd);
+                    Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
+                    backend.Linear(outChunk, merged, Require($"{prefix}.out_proj.weight"), Optional($"{prefix}.out_proj.bias"));
+                    outChunks.Add(outChunk);
                 }
-                finally
-                {
-                    foreach (Tensor t in outChunks) t.Dispose();
-                }
+                qChunks.Clear();
+                Tensor outT = new Tensor(x.Shape, BodyDType);
+                backend.Concat(outT, CollectionsMarshal.AsSpan(outChunks), 0);
+                return outT;
             }
             finally
             {
-                kFull.Dispose();
-                vFull.Dispose();
+                foreach (Tensor t in outChunks) t.Dispose();
             }
         }
         finally
         {
             foreach (Tensor t in qChunks) t.Dispose();
-            foreach (Tensor t in kChunks) t.Dispose();
-            foreach (Tensor t in vChunks) t.Dispose();
+            kFull.Dispose();
+            vFull.Dispose();
         }
     }
 

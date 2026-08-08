@@ -34,6 +34,13 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         _config = transformer.Config;
     }
 
+    /// <summary>Whether <see cref="DiffusionPipelineBase.VaeBackend"/> is a device the DiT does not use — the operator
+    /// placed it there deliberately, so the decoders' weights stay resident between generations rather than being
+    /// freed for a DiT that isn't competing for that space. Pointing the decodes at another device needs no peer-copy
+    /// machinery: <see cref="MiniMaxH3Latents"/>' unpack step is a host loop into a fresh tensor, so the latent
+    /// reaches the decoder with no device association to carry across.</summary>
+    private bool VaeIsWarmPlaced => !ReferenceEquals(VaeBackend, Backend);
+
     /// <summary>Decoded output: RGB frames plus the jointly generated stereo soundtrack.</summary>
     public readonly record struct Result(byte[][] Frames, int Width, int Height, int Seed,
         float[][]? Audio, int AudioSampleRate);
@@ -208,17 +215,20 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                 }
             }
 
+            IBackend vaeBackend = VaeBackend;
             Tensor videoLatent = MiniMaxH3Latents.UnpackVideo(videoLat, latentT, latentH, latentW, _config);
             Tensor rgb;
-            bool videoVaePreloaded = TryPreloadWeights(Backend, "video VAE decoder", _videoVae.EnumerateWeights());
+            bool videoVaePreloaded = TryPreloadWeights(vaeBackend, "video VAE decoder", _videoVae.EnumerateWeights());
             try
             {
-                rgb = _videoVae.Decode(Backend, videoLatent);
+                rgb = _videoVae.Decode(vaeBackend, videoLatent);
             }
             finally
             {
                 videoLatent.Dispose();
-                if (videoVaePreloaded) Backend.FreeWeights(_videoVae.EnumerateWeights());
+                // The preload flag still gates the free — it is false when PreloadWeights rolled back on OOM and the
+                // lazy per-op path ran instead, where there is nothing resident to free.
+                if (videoVaePreloaded && !VaeIsWarmPlaced) vaeBackend.FreeWeights(_videoVae.EnumerateWeights());
             }
 
             byte[][] frames;
@@ -244,8 +254,8 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             if (_audioVae is not null)
             {
                 Tensor audioLatent = MiniMaxH3Latents.UnpackAudio(audioLat, audioT, _config);
-                bool audioVaePreloaded = TryPreloadWeights(Backend, "audio VAE decoder", _audioVae.EnumerateWeights());
-                Tensor wave = _audioVae.Decode(Backend, audioLatent);
+                bool audioVaePreloaded = TryPreloadWeights(vaeBackend, "audio VAE decoder", _audioVae.EnumerateWeights());
+                Tensor wave = _audioVae.Decode(vaeBackend, audioLatent);
                 try
                 {
                     sampleRate = _audioVae.SampleRate;
@@ -262,7 +272,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                 {
                     audioLatent.Dispose();
                     wave.Dispose();
-                    if (audioVaePreloaded) Backend.FreeWeights(_audioVae.EnumerateWeights());
+                    if (audioVaePreloaded && !VaeIsWarmPlaced) vaeBackend.FreeWeights(_audioVae.EnumerateWeights());
                 }
             }
             return new Result(frames, outW, outH, seed, audio, sampleRate);
@@ -440,6 +450,13 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
 
     protected override void DisposeCore()
     {
+        // The decoders keep their weights resident across generations when warm-placed, so disposal is the only
+        // point that releases them — otherwise a model switch strands them on the placement card.
+        if (VaeIsWarmPlaced)
+        {
+            VaeBackend.FreeWeights(_videoVae.EnumerateWeights());
+            if (_audioVae is not null) { VaeBackend.FreeWeights(_audioVae.EnumerateWeights()); }
+        }
         _transformer.Dispose();
     }
 }

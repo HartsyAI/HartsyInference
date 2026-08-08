@@ -21,6 +21,11 @@ public static class MiniMaxH3Geometry
 
     public const int AudioLatentFps = 40;
 
+    /// <summary>Longest clip the model was trained on (~15 s at <see cref="Fps"/>), on the 17k+5 grid. Not a limit —
+    /// past it is allowed and only warned about, since whether a length FITS is the pre-flight VRAM estimate's
+    /// question (<see cref="MiniMaxH3ActivationEstimate"/>) and this constant is purely a quality signal.</summary>
+    public const int TrainedFrameEnvelope = 362;
+
     /// <summary>Frame counts live on the <c>17k + 5</c> grid; anything else is rounded up onto it.</summary>
     public static int AlignFrameCount(int frames)
     {
@@ -61,6 +66,44 @@ public static class MiniMaxH3Geometry
         }
         return (Round(w), Round(h));
     }
+
+    /// <summary>The requested canvas honoured as asked, except that an area above <see cref="MaxPixels"/> is scaled
+    /// down to it preserving aspect, each axis rounded to <see cref="CanvasMultiple"/>. Unlike
+    /// <see cref="AdaptCanvas"/> this never renormalises the short edge to <see cref="BaseShortEdge"/> — a generation
+    /// keeps the size the caller chose, so this is what the main path uses and <see cref="AdaptCanvas"/> stays the
+    /// reference-clip rule.</summary>
+    public static (int Width, int Height) ClampToMaxArea(int width, int height)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(width), "MiniMax-H3 needs a positive canvas.");
+        }
+        double s = (long)width * height > MaxPixels
+            ? Math.Sqrt((double)MaxPixels / ((double)width * height))
+            : 1.0;
+        int w = Round(width * s), h = Round(height * s);
+        if ((long)w * h <= MaxPixels)
+        {
+            return (w, h);
+        }
+        // Rounding to nearest keeps the aspect closest but can round BOTH axes up and land back above the cap — a
+        // request just under it can too (1300x790 rounds to 1312x800). Re-round downward, which cannot exceed the
+        // cap because each axis is then at most its exact aspect-preserving value.
+        w = Floor(width * s);
+        h = Floor(height * s);
+        // ...unless an axis bottomed out at the grid minimum, which no longer tracks the aspect at all. Only the
+        // other axis can move, so there is no "which one" choice to make here.
+        while ((long)w * h > MaxPixels && (w > CanvasMultiple || h > CanvasMultiple))
+        {
+            if (w > CanvasMultiple) { w -= CanvasMultiple; }
+            else { h -= CanvasMultiple; }
+        }
+        return (w, h);
+    }
+
+    /// <summary>Rounds a pixel axis DOWN onto <see cref="CanvasMultiple"/> without letting it collapse to zero.</summary>
+    public static int Floor(double pixels) =>
+        Math.Max(CanvasMultiple, (int)(pixels / CanvasMultiple) * CanvasMultiple);
 
     /// <summary>Rounds a pixel axis onto <see cref="CanvasMultiple"/> without letting it collapse to zero.</summary>
     public static int Round(double pixels) =>

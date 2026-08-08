@@ -6,9 +6,12 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Calibrates <see cref="MiniMaxH3ActivationEstimate.EstimateFloorBytes"/> against real-CUDA runs of the
 /// actual fp8 checkpoint on this box (RTX 4090, 24 GiB), captured directly from CLI output rather than derived by
-/// hand — an earlier version of this estimator (4x q/k/v/attn-output, no accumulated-output term) passed a similar
-/// arithmetic check yet still false-refused a geometry that had already been proven to complete on real hardware;
-/// see the class remarks on <see cref="MiniMaxH3ActivationEstimate"/> for why. Three CLI runs, same session,
+/// hand. Two earlier versions of this estimator each passed a similar arithmetic check and were still wrong in
+/// opposite directions: a 4x q/k/v/attn-output form false-refused a geometry already proven to complete, and its
+/// replacement UNDER-counted <see cref="MiniMaxH3Transformer.AttentionChunked"/>'s pass-1 peak badly enough that a
+/// 141-frame sharded request cleared pre-flight and then OOMed mid-forward on the 12 GiB card. Both are why these
+/// numbers are measured rather than reasoned about; see the class remarks on
+/// <see cref="MiniMaxH3ActivationEstimate"/> for the shape the floor actually takes. Three CLI runs, same session,
 /// resident DiT ~20,959,250,528 bytes, free VRAM 24.0-24.03 GB (a small natural drift between runs):
 /// <list type="bullet">
 /// <item>39f@960x960 (seq 11,442 by this class's own conservative formula) — <c>floor=2,926,612,480</c>,

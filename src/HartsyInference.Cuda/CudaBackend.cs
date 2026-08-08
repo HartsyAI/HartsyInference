@@ -4458,6 +4458,42 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    public void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("CUDA ScatterSeqHeadMajor supports F32 only.");
+        EnterOp();
+        int heads = (int)output.Shape[1], seq = (int)output.Shape[2], hd = (int)output.Shape[3];
+        int c = (int)input.Shape[2];
+        int elemSize = DType.F32.SizeInBytes;
+        ulong pIn = 0;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            // The destination persists across calls — the FIRST chunk allocates it and every later one writes into
+            // the same buffer, which is the whole point (a per-call allocate-and-recache would be a Concat again).
+            if (!GpuTransferHelper.IsActivationCached(output))
+            {
+                nuint outBytes = GpuTransferHelper.ByteSize(output);
+                GpuTransferHelper.CacheActivation(output, GpuTransferHelper.AllocateDevice(outBytes), outBytes);
+            }
+            ulong pOut = GpuTransferHelper.CopyToDevice(output);
+            // One stream-ordered DtoD per head: a head's chunk rows are contiguous, heads are not (dst stride is the
+            // full seq, src stride the chunk) — the same per-slice shape Concat's dim>0 path issues, same launch count.
+            nuint sliceBytes = (nuint)((long)c * hd * elemSize);
+            for (int h = 0; h < heads; h++)
+            {
+                ulong dst = pOut + (ulong)((((long)h * seq + seqOffset) * hd) * elemSize);
+                ulong src = pIn + (ulong)(((long)h * c * hd) * elemSize);
+                CudaMemory.CopyDeviceToDeviceAsync(dst, src, sliceBytes, _stream.Handle);
+            }
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
     public void SliceRows(Tensor output, Tensor input, int rowOffset)
     {
         if (input.DType != output.DType || (output.DType != DType.F32 && output.DType != DType.F16 && output.DType != DType.BF16))
