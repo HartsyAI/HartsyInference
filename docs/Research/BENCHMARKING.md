@@ -12,7 +12,7 @@
 > Root cause was NOT F16/compute: the shared `GpuTransferHelper.CopyToDevice` miss path did a full
 > `cuStreamSynchronize` before every host-tensor H2D, draining the async pipeline ~30k times/gen (Wan DiT misses
 > ~14 tiny scratch tensors per block-forward). **Fixed in alpha.43.17-local** (stream-ordered `cuMemcpyHtoDAsync`,
-> no drain) + on-device Wan modulation: **Wan-1.3B 67.6 s → 28.1 s (2.4×), gap 10.8× → 4.5×**; now compute-bound so
+> no drain) + on-device Wan modulation: **Wan-1.3B 28.1 s, 4.5× off ComfyUI**; now compute-bound so
 > F16 is the next lever. Fix is arch-agnostic (in the shared helper) — image archs benefit too (needs its own
 > dual-run to quantify). 14B fp8 also GPU-bound on redundant per-step re-casts (`CacheWeightCasts=off`). LTX-2.3 22B
 > is block-swap-bound (streams the 19 GB DiT every forward on 24 GB) — fine for short clips, impractical for

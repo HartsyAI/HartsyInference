@@ -27,7 +27,7 @@ This document tracks GPU performance findings, bottlenecks, and the optimization
 |---|---|---|---|
 | 1024x1024 | 20 | ~60s | ~3s |
 
-**Gap: ~18x slower than ComfyUI for 1024x1024 SDXL** (down from ~33x at Phase 0).
+**Gap: ~18x slower than ComfyUI for 1024x1024 SDXL.**
 
 ### Phase 2 Changes Summary
 
@@ -70,7 +70,7 @@ When subsequent ops consume the output tensor, `CopyToDevice` finds it in the ac
 1. **Auto-transfer (initial)**: Every op copies H2D → kernel → D2H. Correct but slow.
 2. **Weight cache (Phase 0)**: Weights preloaded to GPU. Eliminates ~3,360 weight H2D per step.
 3. **Activation cache (Phase 1)**: Op outputs stay on GPU between consecutive ops. Eliminates ~2,372 activation H2D+D2H per step. But ~1,673 misses remain from CPU-side operations.
-4. **GPU kernels + async exec (Phase 2, current)**: Removed per-op Sync, added GPU reshape/GEGLU/BroadcastAdd kernels, FreeAsync for memory cleanup. Eliminates most CPU-side round-trips. 82.6% cache hit rate, ~53s/step (down from ~93s).
+4. **GPU kernels + async exec (Phase 2, current)**: Removed per-op Sync, added GPU reshape/GEGLU/BroadcastAdd kernels, FreeAsync for memory cleanup. Eliminates most CPU-side round-trips. 82.6% cache hit rate, ~53s/step.
 
 ### GPU Weight Cache
 

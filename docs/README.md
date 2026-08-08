@@ -48,6 +48,14 @@ baseline and source. Do not restate a number in a README. This rule exists becau
 `benchmarks/README.md` reported Llama-3.2-1B at ~111.5 tok/s (1.94× *behind* llama.cpp) for a month after
 `scoreboards/LLM.md` had it at 213.7 tok/s (1.11× *ahead*). Link to the scoreboard instead.
 
+**Never quote a speedup against our own past.** "30× faster than where the port started", "was 451 s",
+"650s → 17.7s (37×)" — all of that is useless to a reader. It says nothing about whether the engine is
+good, only that it was worse before. Quote the **absolute number** and the **external baseline**:
+"1.671 s/step against ComfyUI's 1.660", "9.2 s, 1.6× off the Python reference". Where the delta *is* the
+finding — a bug that made one op 65× slower than it should be — write it as the symptom, not as an
+achievement. `(was <wrong behavior>)` notes are fine and worth keeping: they record what a bug did, which
+is diagnostic. `(was <slower number>)` is not.
+
 **Write the References section as if it's the only part that survives** — because for a model that ships,
 it is. Same for *Differences Between Implementations*: "diffusers does X, the official repo does Y, we
 follow Y because Z" is unrecoverable from our code, which only records the choice, never the alternative.

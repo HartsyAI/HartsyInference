@@ -76,7 +76,7 @@ Row count: 16, sorted by Ratio descending.
 
 - **9 "core fleet" text models, 8 of 9 at-or-ahead of llama.cpp as of 2026-07-24** (qwen2.5-0.5b,
   gemma-3-1b, DeepSeek-1.5B, Llama-3.2-1B, gemma-2-2b, gemma-4-E2B, Qwen3-4B, Qwen3.5-0.8B all beat
-  llama.cpp by 9–32%; GLM-4-9B is the only non-win at 0.98× — effective parity, up from 0.82× at the
+  llama.cpp by 9–32%; GLM-4-9B is the only non-win at 0.98× — effective parity, at the
   start of the optimization campaign). Counting GLM's parity as "at-or-ahead," that's 9/9.
 - The round-12 catalog expansion (Mistral-7B, gemma-3-4b, stablelm-2-1.6b, granite-3.0-2b,
   SmolVLM2-2.2B, Phi-3-mini) adds 6 more dense/VLM models with clean numbers: 5 of 6 beat llama.cpp
@@ -92,7 +92,7 @@ Row count: 16, sorted by Ratio descending.
   row here (0.57×, i.e. 1.77× slower) is almost certainly stale/pessimistic relative to the engine's
   current state — flagged, not re-measured, per the no-fabrication rule.
 - **Prefill/TTFT is the current known weak point**, not decode: time-to-first-token trails llama.cpp by
-  roughly 2–6× after three rounds of fixes (was 16–29× pre-fix), worst on GLM-4-9B (595 ms vs
+  roughly 2–6×, worst on GLM-4-9B (595 ms vs
   llama.cpp's 22 ms — parked pending MMQ-class quantized-GEMM prefill kernels). Decode throughput
   (the table above) is unaffected by this gap.
 - **MoE models (olmoe, granite-moe) and three crash-prone architectures (llava, gpt2, starcoder2)**

@@ -54,7 +54,7 @@ are enumerated in `MODEL_STATUS_VIDEO.md` §SeedVR2 follow-ups. Matrix-scale num
 ## Notes
 
 - **Wan 2.1 T2V 14B is the only video model at parity with ComfyUI** (30.58 s vs 30.62 s) — first video
-  model to catch Comfy, up from 5.9× behind on 2026-07-03. Per the campaign write-up it has reached its
+  model to catch Comfy. Per the campaign write-up it has reached its
   fp8 compute floor (CUDA-graph and batched-CFG closed out as dead ends with evidence), so parity is
   where it is expected to stay absent a fundamentally faster fp8 GEMM.
 - **ComfyUI column is carried forward from the 2026-07-03 head-to-head** for every model that has one —
@@ -75,7 +75,7 @@ are enumerated in `MODEL_STATUS_VIDEO.md` §SeedVR2 follow-ups. Matrix-scale num
   these are still open rows pending a Comfy Hunyuan T2V workflow and in-engine text-encoder wiring
   (Kandinsky-5) respectively. The numbers shown are engine-side e2e wall-clock only, from their
   2026-07-02 bring-up benchmarks (not re-measured on a later engine build in these sources).
-  HunyuanVideo's per-step number came down from ~75 s/step (bf16, block-swapped) to ~2.15 s/step via
+  HunyuanVideo runs at ~2.15 s/step via
   fp8-resident weights + GPU RoPE + `HARTSY_FP8_NATIVE`.
 - **LTX-2.3 22B has no comparable Comfy workflow on this box**, so its row is internal-progress-only:
   451 s (2026-07-03) → 95.5 s (07-08) → 42.3 s (07-11), a 10.7× cumulative improvement, block-swap-bound

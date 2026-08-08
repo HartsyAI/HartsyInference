@@ -1,6 +1,7 @@
 # HartsyInference
 
-**Run Flux, Qwen-Image, Wan, Whisper, Llama and 100+ other models from C#. No Python. No ComfyUI. No venv.**
+**Run Krea 2, MiniMax-H3, Flux, Qwen-Image, Wan, Whisper, Llama and 100+ other models from C#.
+No Python. No ComfyUI. No venv.**
 
 HartsyInference is a complete AI inference engine written entirely in C#. It loads `.safetensors`,
 `.gguf` and PyTorch checkpoints directly and runs them on **CUDA**, **Vulkan** or **CPU** — as NuGet
@@ -13,7 +14,29 @@ audio, LLM, vision, 3D and interactive world models.
 
 ---
 
-## It is faster than ComfyUI on the models most people run
+## The newest models, running fastest
+
+### Krea 2 — faster than ComfyUI, both variants
+
+| RTX 4090 | HartsyInference | ComfyUI | |
+|---|---:|---:|---|
+| **Krea 2 Turbo**, 8 steps | **4.5 s** | 6.5 s | **1.4× faster** |
+| **Krea 2 Base**, 28 steps | **30.3 s** | 41.5 s | **1.4× faster** |
+
+### MiniMax-H3 — omni video *with* jointly generated stereo audio
+
+Text, image, video **and** audio in, video with a synchronized stereo soundtrack out. Ported and verified
+end-to-end within days of the weights landing.
+
+- **1.671 s/step** at 141 frames @ 512×288, 30 steps, fp8 on an RTX 4090 — against ComfyUI's **1.660
+  s/step** measured interleaved in the same session. That is 0.7% behind with overlapping ranges: parity
+  within measurement resolution, and we won't claim more than that.
+- **Runs on a 12 GB RTX 3060.** The 66 GB bf16 DiT is memory-mapped, so it loads at 943 MB RSS and the
+  whole generation fits in 10.3 GB.
+
+Method and the full A/B ladder: [`benchmarks/results/h3/PHASE0_BASELINE.md`](benchmarks/results/h3/PHASE0_BASELINE.md).
+
+### And the rest of the fleet
 
 Same GPU, same checkpoint, same scheduler, same step count. Full tables with methodology, dates and
 sources: **[`benchmarks/scoreboards/`](benchmarks/scoreboards/)**.
@@ -21,7 +44,6 @@ sources: **[`benchmarks/scoreboards/`](benchmarks/scoreboards/)**.
 | Image model (RTX 4090) | HartsyInference | ComfyUI | |
 |---|---:|---:|---|
 | Flux-Schnell, 4 steps | **2.4 s** | 3.8 s | **1.6× faster** |
-| Krea2-Turbo, 8 steps | **4.5 s** | 6.5 s | **1.4× faster** |
 | Qwen-Image 20B, 20 steps | **40.6 s** | 58.2 s | **1.4× faster** |
 | Flux.2-Dev 32B (Q4 GGUF), 20 steps | **39.6 s** | 54.0 s | **1.4× faster** |
 | Flux-Dev, 20 steps | **9.5 s** | 12.5 s | **1.3× faster** |
@@ -40,9 +62,8 @@ no opt-in step-caching or CFG-interval tricks are folded in to flatter the resul
 
 ## It runs models your GPU cannot hold
 
-**A 66 GB model on a 12 GB card.** MiniMax-H3 — omni text/image/video/audio → video with *jointly
-generated stereo audio* — is verified end-to-end on a **12 GB RTX 3060**. Weights are memory-mapped, so
-the 66 GB bf16 DiT loads at 943 MB RSS and the whole generation fits in 10.3 GB.
+Weights are memory-mapped, so a checkpoint far larger than VRAM still runs — that is how MiniMax-H3's
+**66 GB** DiT fits on a **12 GB** RTX 3060, as above.
 
 **Or split one model across several GPUs with the VRAM pooled.** Over plain PCIe — **no NVLink and no P2P
 required** — because mismatched consumer cards are the primary target, not datacenter boxes. The dev rig
@@ -69,8 +90,8 @@ Full guide: **[`docs/MULTI_GPU.md`](docs/MULTI_GPU.md)**.
 
 | | Models |
 |---|---|
-| **Image** | SD1.5, SDXL, Flux.1/.2, SD3.5, Qwen-Image (+Edit), Chroma, Krea 2, Z-Image, HiDream, AuraFlow, Lumina 2, ERNIE, Kandinsky 5, OmniGen 2, Ideogram 4 |
-| **Video** | Wan 2.1/2.2, HunyuanVideo 13B, LTX-Video + LTX-2.3, MiniMax-H3, Kandinsky 5, Lance — plus **SeedVR2** video/image restoration |
+| **Image** | **Krea 2** (Turbo + Base), Flux.1/.2, Qwen-Image (+Edit), Z-Image, Chroma, SD1.5, SDXL, SD3.5, HiDream, AuraFlow, Lumina 2, ERNIE, Kandinsky 5, OmniGen 2, Ideogram 4 |
+| **Video** | **MiniMax-H3** (video + native stereo audio), Wan 2.1/2.2, HunyuanVideo 13B, LTX-Video + LTX-2.3, Kandinsky 5, Lance — plus **SeedVR2** video/image restoration |
 | **LLM** | Llama, Qwen2/3, Gemma 2/3/4, Phi, Mistral, MoE giants (Mixtral, DeepSeek-V3, Kimi-K2, GPT-OSS), Mamba/RWKV, VLMs, embeddings and rerankers — GGUF quantized throughout |
 | **Audio** | Whisper + Moonshine (STT); Kokoro, Piper, StyleTTS2, F5-TTS, CosyVoice, VibeVoice, Spark-TTS, Bark (TTS); ACE-Step, MusicGen, YuE, HeartMuLa (music); 9 neural codecs; voice conversion, stem separation, speech enhancement |
 | **Vision** | CLIP / SigLIP / DINOv2 embeddings, YOLOv8/11, RT-DETR, Grounding DINO, SAM 2, Depth-Anything-V2, face detection |

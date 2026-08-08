@@ -1,6 +1,7 @@
 # HartsyInference
 
-**Run Flux, Qwen-Image, Wan, Whisper, Llama and 100+ other models from C#. No Python. No venv. No subprocess.**
+**Run Krea 2, MiniMax-H3, Flux, Qwen-Image, Wan, Whisper, Llama and 100+ other models from C#.
+No Python. No venv. No subprocess.**
 
 A complete AI inference engine written entirely in C#. It loads `.safetensors`, `.gguf` and PyTorch
 checkpoints directly and runs them on **CUDA**, **Vulkan** or **CPU** — as NuGet packages you reference
@@ -60,8 +61,15 @@ Every modality follows the same shape: `engine.Images`, `engine.Text`, `engine.V
 
 ## Performance
 
-Faster than ComfyUI on the models most people run — same GPU, same checkpoint, same steps (RTX 4090):
-Flux-Schnell **2.4 s** vs 3.8 s, Krea2-Turbo **4.5 s** vs 6.5 s, Qwen-Image 20B **40.6 s** vs 58.2 s,
+**Krea 2 — faster than ComfyUI on both variants** (RTX 4090, same checkpoint and steps): Turbo **4.5 s**
+vs 6.5 s, Base **30.3 s** vs 41.5 s — 1.4× on each.
+
+**MiniMax-H3 — omni video with jointly generated stereo audio.** **1.671 s/step** (141 frames @ 512×288,
+30 steps, fp8, RTX 4090) against ComfyUI's **1.660** measured interleaved in the same session — parity
+within measurement resolution, not a win. It also runs on a **12 GB RTX 3060**: the 66 GB bf16 DiT is
+memory-mapped, loads at 943 MB RSS, and the generation fits in 10.3 GB.
+
+Across the rest of the fleet: Flux-Schnell **2.4 s** vs 3.8 s, Qwen-Image 20B **40.6 s** vs 58.2 s,
 Flux-Dev **9.5 s** vs 12.5 s. SDXL and Lumina 2 still trail; most video DiTs still trail.
 
 Text decode beats llama.cpp at matched GGUF and quant on a 12 GB RTX 3060: Qwen2.5-0.5B **435.6** vs
@@ -71,11 +79,11 @@ Full tables, including the losses, are in the repo under `benchmarks/scoreboards
 
 ## What it can run
 
-- **Image** — SD1.5, SDXL, Flux.1/.2, SD3.5, Qwen-Image (+Edit), Chroma, Krea 2, Z-Image, HiDream,
-  AuraFlow, Lumina 2, Kandinsky 5, OmniGen 2, Ideogram 4. ControlNet, IP-Adapter (incl. FaceID), LoRA,
-  img2img and inpaint.
-- **Video** — Wan 2.1/2.2, HunyuanVideo 13B, LTX-Video + LTX-2.3, MiniMax-H3, Kandinsky 5, plus SeedVR2
-  video/image restoration.
+- **Image** — **Krea 2** (Turbo + Base), Flux.1/.2, Qwen-Image (+Edit), Z-Image, Chroma, SD1.5, SDXL,
+  SD3.5, HiDream, AuraFlow, Lumina 2, Kandinsky 5, OmniGen 2, Ideogram 4. ControlNet, IP-Adapter (incl.
+  FaceID), LoRA, img2img and inpaint.
+- **Video** — **MiniMax-H3** (video + native stereo audio), Wan 2.1/2.2, HunyuanVideo 13B, LTX-Video +
+  LTX-2.3, Kandinsky 5, plus SeedVR2 video/image restoration.
 - **LLM** — Llama, Qwen2/3, Gemma 2/3/4, Phi, Mistral, MoE giants, Mamba/RWKV, VLMs, embeddings and
   rerankers. GGUF quantized throughout, device-resident KV cache, chat templates.
 - **Audio** — Whisper and Moonshine (STT); Kokoro, Piper, StyleTTS2, F5-TTS, CosyVoice, VibeVoice, Bark
@@ -86,10 +94,10 @@ Full tables, including the losses, are in the repo under `benchmarks/scoreboards
 
 ## Beyond one GPU
 
-Memory-mapped weights run models far larger than VRAM — MiniMax-H3's **66 GB** bf16 DiT is verified
-end-to-end on a **12 GB RTX 3060**, loading at 943 MB RSS. One model can also be **split across several
-GPUs with the VRAM pooled**, over plain PCIe with no NVLink or P2P required: LLM layer splits, DiT block
-sharding, text-encoder/VAE placement, and CFG-parallel branches.
+Memory-mapped weights run models far larger than VRAM — that is how MiniMax-H3's **66 GB** DiT fits on a
+**12 GB** card, as above. One model can also be **split across several GPUs with the VRAM pooled**, over
+plain PCIe with no NVLink or P2P required: LLM layer splits, DiT block sharding, text-encoder/VAE
+placement, and CFG-parallel branches.
 
 ## Packages
 

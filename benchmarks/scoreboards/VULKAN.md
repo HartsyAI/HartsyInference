@@ -247,7 +247,7 @@ noted:
    cost is GPU kernel time, not host dispatch/submit overhead — graph capture's ceiling here is small,
    correctly deprioritizing the weight-cast bump-arena needed to make capture fit Krea2's VRAM budget.
 
-2. **VAE decode: 33.0s → 0.50s (~65×).** `WanRmsNormChannel` had no `VulkanBackend` override — every call
+2. **VAE decode: 0.50s.** It had been 33.0s because `WanRmsNormChannel` had no `VulkanBackend` override — every call
    fell through to `IBackend`'s CPU-loop default (full D2H sync + single-threaded host reduction + H2D
    re-upload) at the decoder's largest tensor shape (`[1,96,1024,1024]`, the final head norm). Fixed with a
    real GLSL kernel (`wan_rms_norm_channel.comp.glsl`) mirroring `CudaBackend`'s existing CUDA kernel for the
