@@ -1632,6 +1632,26 @@ public interface IBackend : IDisposable
             pOut[i] = i < headElems ? 0f : pIn[i - headElems];
     }
 
+    /// <summary>Writes a <c>[1, heads, c, hd]</c> chunk into sequence rows <c>[seqOffset, seqOffset + c)</c> of a
+    /// <c>[1, heads, seq, hd]</c> head-major tensor, in place and accumulating across calls. Same bytes to the same
+    /// offsets as concatenating every chunk along dim 2, but without holding the whole chunk list alive alongside the
+    /// result — which is what makes long-sequence chunked attention fit (see <c>MiniMaxH3Transformer</c>).</summary>
+    unsafe void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("ScatterSeqHeadMajor default fallback only supports F32.");
+        int heads = (int)output.Shape[1], seq = (int)output.Shape[2], hd = (int)output.Shape[3];
+        int c = (int)input.Shape[2];
+        float* pOut = (float*)output.DataPointer;
+        float* pIn = (float*)input.DataPointer;
+        for (int h = 0; h < heads; h++)
+        {
+            long dst = ((long)h * seq + seqOffset) * hd;
+            long src = (long)h * c * hd;
+            for (long i = 0; i < (long)c * hd; i++) pOut[dst + i] = pIn[src + i];
+        }
+    }
+
     /// <summary>Contiguous row-block slice: copies <c>output.ElementCount</c> elements starting at row rowOffset of input into output.</summary>
     unsafe void SliceRows(Tensor output, Tensor input, int rowOffset)
     {

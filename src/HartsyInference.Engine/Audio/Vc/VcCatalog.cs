@@ -123,19 +123,8 @@ internal static class VcCatalog
         }
         Logs.Info($"[Audio][RVC] ContentVec encoder missing — fetching {ContentVecRepo} and converting to {ContentVecFile}...");
         string binPath = await AudioModelCache.GetAsync(ContentVecRepo, ContentVecSourceFile, category: "clone", ct: cancel).ConfigureAwait(false);
-        PytorchPickleLoader loader = new PytorchPickleLoader();
-        try
-        {
-            loader.Load(binPath);
-            Directory.CreateDirectory(Path.GetDirectoryName(contentVecPath)!);
-            string tempPath = contentVecPath + ".tmp";
-            SafeTensorsWriter.Save(tempPath, loader.GetAllTensors());
-            File.Move(tempPath, contentVecPath, overwrite: true);
-        }
-        finally
-        {
-            loader.Dispose();
-        }
+        // Straight passthrough — ContentVec's keys already match the engine's Hubert layout.
+        PickleCheckpointRepacker.Repack(binPath, contentVecPath);
         Logs.Info($"[Audio][RVC] {ContentVecFile} ready.");
     }
 

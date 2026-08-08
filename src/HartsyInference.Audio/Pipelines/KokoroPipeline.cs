@@ -163,14 +163,8 @@ public sealed class KokoroPipeline : IDisposable
             {
                 HartsyInference.Core.Logging.Logs.Info(
                     $"[Kokoro] Repack '{RepackRepo}/{RepackFile}' unavailable ({ex.Message}); converting canonical kokoro-v1_0.pth → {RepackFile} (one-time).");
-                using PytorchPickleLoader pl = new();
-                pl.Load(pth, recursiveFlatten: true);
-                Dictionary<string, Tensor> flat = new(StringComparer.Ordinal);
-                foreach ((string k, Tensor v) in pl.GetAllTensors())
-                {
-                    flat[k.Replace(".module.", ".")] = v;
-                }
-                SafeTensorsWriter.Save(outPath, flat);
+                // Strip the nn.DataParallel `module.` wrapper — the exact transform tools/repack bakes offline.
+                PickleCheckpointRepacker.Repack(pth, outPath, k => k.Replace(".module.", "."), recursiveFlatten: true);
             }
             return outPath;
         }

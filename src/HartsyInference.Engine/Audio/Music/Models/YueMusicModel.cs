@@ -209,23 +209,11 @@ internal static class YueMusicModel
         }
         string outputPath = Path.Combine(parent, "xcodec.safetensors");
         Logs.Info($"[Audio][YuE] Converting X-Codec '{Path.GetFileName(checkpoint)}' → xcodec.safetensors (one-time)...");
-        using PytorchPickleLoader loader = new PytorchPickleLoader();
-        loader.Load(checkpoint, recursiveFlatten: true);
-        Dictionary<string, Tensor> raw = loader.GetAllTensors();
-        Dictionary<string, Tensor> keep = new Dictionary<string, Tensor>(StringComparer.Ordinal);
-        foreach ((string key, Tensor tensor) in raw)
-        {
-            if (YueCheckpointConverter.MapXCodecKey(key) is not null)
-            {
-                keep[key] = tensor;
-            }
-        }
-        if (keep.Count == 0)
-        {
-            throw new InvalidDataException($"X-Codec checkpoint '{checkpoint}' yielded no usable acoustic tensors — unexpected key layout.");
-        }
-        SafeTensorsWriter.Save(outputPath, keep);
-        Logs.Info($"[Audio][YuE] Wrote {keep.Count} X-Codec acoustic tensors to '{outputPath}'.");
+        // Keeps only the tensors the X-Codec loader maps, under their original keys, so the normal load path
+        // re-maps them identically.
+        PickleCheckpointRepacker.Repack(checkpoint, outputPath,
+            key => YueCheckpointConverter.MapXCodecKey(key) is not null ? key : null,
+            recursiveFlatten: true);
         return outputPath;
     }
 
@@ -270,15 +258,8 @@ internal static class YueMusicModel
         {
             string outputPath = Path.Combine(parent, targetName);
             Logs.Info($"[Audio][YuE] Converting Vocos vocoder '{Path.GetFileName(checkpoint)}' → {targetName} (one-time)...");
-            using PytorchPickleLoader loader = new PytorchPickleLoader();
-            loader.Load(checkpoint, recursiveFlatten: true);
-            Dictionary<string, Tensor> tensors = loader.GetAllTensors();
-            if (tensors.Count == 0)
-            {
-                throw new InvalidDataException($"Vocoder checkpoint '{checkpoint}' yielded no tensors.");
-            }
-            SafeTensorsWriter.Save(outputPath, tensors);
-            Logs.Info($"[Audio][YuE] Wrote {tensors.Count} vocoder tensors to '{outputPath}'.");
+            // Torch keys already match VocosDecoder's layout, so this is a pure format conversion.
+            PickleCheckpointRepacker.Repack(checkpoint, outputPath, recursiveFlatten: true);
         }
         catch (Exception ex)
         {
