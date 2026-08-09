@@ -30,10 +30,16 @@ public sealed class SpeechService : ISpeechService
         }
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
         TtsModelDescriptor descriptor = TtsCatalog.Resolve(selector.Id);
-        string repo = descriptor.ResolveRepo(selector.Variant);
+        // A descriptor whose weights ARE the voice (Piper ships one .onnx per voice) needs the voice in the
+        // variant, or every voice would share the first-loaded pipeline.
+        string variant = descriptor.VoiceSelectsWeights && !string.IsNullOrWhiteSpace(request.Voice)
+            && !request.Voice.Equals("default", StringComparison.OrdinalIgnoreCase)
+            ? request.Voice
+            : selector.Variant;
+        string repo = descriptor.ResolveRepo(variant);
         IBackend backend = _engine.Backend;
         TtsLoadContext loadContext = BuildLoadContext(backend);
-        string key = repo + loadContext.CacheSuffix();
+        string key = repo + (descriptor.VoiceSelectsWeights ? "|" + variant : "") + loadContext.CacheSuffix();
 
         return _engine.AudioRuntime.RunAsync(backend, $"tts:{key}", async ct =>
         {
@@ -51,7 +57,7 @@ public sealed class SpeechService : ISpeechService
             {
                 ct.ThrowIfCancellationRequested();
                 ITtsRunner runner = await _engine.AudioRuntime.Tts
-                    .GetOrLoadAsync(key, token => descriptor.LoadAsync(loadContext, selector.Variant, token), ct).ConfigureAwait(false);
+                    .GetOrLoadAsync(key, token => descriptor.LoadAsync(loadContext, variant, token), ct).ConfigureAwait(false);
                 TtsJob job = new TtsJob
                 {
                     Text = request.Text,
@@ -67,6 +73,16 @@ public sealed class SpeechService : ISpeechService
                     Exaggeration = request.Exaggeration,
                     NfeStep = request.NfeStep,
                     CfgScale = request.CfgScale,
+                    SpeakerId = request.SpeakerId,
+                    NormalizeLoudness = request.NormalizeLoudness,
+                    Temperature = request.Temperature,
+                    WaveformTemperature = request.WaveformTemperature,
+                    TopP = request.TopP,
+                    TopK = request.TopK,
+                    MaxTokens = request.MaxTokens,
+                    Emotion = request.Emotion,
+                    SpeakingRate = request.SpeakingRate,
+                    PitchStd = request.PitchStd,
                     Seed = request.Seed,
                 };
                 long started = Environment.TickCount64;

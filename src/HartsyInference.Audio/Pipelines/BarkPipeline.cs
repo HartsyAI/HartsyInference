@@ -37,12 +37,25 @@ public sealed unsafe class BarkPipeline : IDisposable
     /// prefix is appended here.</summary>
     public float[] Synthesize(IBackend backend, int[] textTokenIds, int seed = 0,
         int maxSemantic = 768)
+        => Synthesize(backend, textTokenIds, seed, maxSemantic, null, null);
+
+    /// <summary>As above, overriding Bark's two sampling temperatures. Upstream <c>generate_audio</c>
+    /// defaults both to 0.7 (<c>text_temp</c> = semantic stage, <c>waveform_temp</c> = coarse stage);
+    /// null keeps the config value. The stages take the config per call, so a modified copy is enough —
+    /// the weights live in the stage objects, not the config.</summary>
+    public float[] Synthesize(IBackend backend, int[] textTokenIds, int seed, int maxSemantic,
+        double? textTemp, double? waveformTemp)
     {
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Semantic stage: merged 256-text/256-history context + infer, min_eos_p early stop ──
-        List<int> semantic = _semantic.GenerateSemantic(backend, textTokenIds, _cfg, seed, maxSemantic);
+        BarkConfig runCfg = _cfg with
+        {
+            SemanticTemperature = textTemp is > 0 ? (float)textTemp.Value : _cfg.SemanticTemperature,
+            CoarseTemperature = waveformTemp is > 0 ? (float)waveformTemp.Value : _cfg.CoarseTemperature,
+        };
+        List<int> semantic = _semantic.GenerateSemantic(backend, textTokenIds, runCfg, seed, maxSemantic);
         if (semantic.Count == 0)
         {
             throw new InvalidOperationException("Bark semantic stage produced no tokens (immediate EOS).");
@@ -50,7 +63,7 @@ public sealed unsafe class BarkPipeline : IDisposable
         Logs.Info($"Bark: {semantic.Count} semantic tokens.");
 
         // ── 2. Coarse stage: ratio-derived step count, 60-step sliding windows, per-book constrained sampling ──
-        int[,] coarse = _coarse.GenerateCoarse(backend, semantic, _cfg, seed + 1);
+        int[,] coarse = _coarse.GenerateCoarse(backend, semantic, runCfg, seed + 1);
         int t = coarse.GetLength(1);
         Logs.Info($"Bark: {t} coarse frames.");
 

@@ -55,7 +55,10 @@ internal static class FishSpeechModel
                     + $"{FishSpeechTokenizer.ImStart}user\n{job.Text}{FishSpeechTokenizer.ImEnd}"
                     + $"{FishSpeechTokenizer.ImStart}assistant\n{FishSpeechTokenizer.Voice}";
                 int[] tokens = tokenizer.Encode(prompt);
-                return pipeline.Synthesize(backend, tokens, endToken: tokenizer.ImEndId, seed: job.Seed);
+                // Upstream's inference default for max_new_tokens is 0 (= run to the stop token).
+                return pipeline.Synthesize(backend, tokens, endToken: tokenizer.ImEndId,
+                    maxFrames: job.MaxTokens is > 0 ? job.MaxTokens.Value : 0, seed: job.Seed,
+                    normalizeLoudness: job.NormalizeLoudness ?? true);
             }, pipeline, modelLoader, codecLoader);
         },
     };

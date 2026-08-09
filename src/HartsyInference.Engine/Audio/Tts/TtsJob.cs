@@ -37,6 +37,36 @@ internal sealed record TtsJob
     /// <summary>Classifier-free guidance strength; null is the model default.</summary>
     internal double? CfgScale { get; init; }
 
+    /// <summary>Loudness-normalize the output (Fish-Speech). Null uses the model default.</summary>
+    internal bool? NormalizeLoudness { get; init; }
+
+    /// <summary>Speaker identity for models that take a numeric speaker slot (CSM's <c>speaker</c>).</summary>
+    internal int? SpeakerId { get; init; }
+
+    /// <summary>Sampling temperature; null is the model default.</summary>
+    internal double? Temperature { get; init; }
+
+    /// <summary>Bark's coarse/waveform temperature; null is the model default.</summary>
+    internal double? WaveformTemperature { get; init; }
+
+    /// <summary>Nucleus sampling threshold; null is the model default.</summary>
+    internal double? TopP { get; init; }
+
+    /// <summary>Top-K cutoff (Dia: cfg_filter_top_k); null is the model default.</summary>
+    internal int? TopK { get; init; }
+
+    /// <summary>Max tokens to generate; null is the model default.</summary>
+    internal int? MaxTokens { get; init; }
+
+    /// <summary>Zonos 8-way emotion vector; null is the model default.</summary>
+    internal IReadOnlyList<double>? Emotion { get; init; }
+
+    /// <summary>Zonos speaking rate in phonemes per second; null is the model default.</summary>
+    internal double? SpeakingRate { get; init; }
+
+    /// <summary>Zonos pitch standard deviation; null is the model default.</summary>
+    internal double? PitchStd { get; init; }
+
     /// <summary>Sampling seed; 0 leaves it unset.</summary>
     internal int Seed { get; init; }
 }

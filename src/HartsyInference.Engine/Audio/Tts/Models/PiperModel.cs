@@ -15,10 +15,15 @@ internal static class PiperModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => "rhasspy/piper-voices",
-        LoadAsync = async (_, _, cancel) =>
+        VoiceSelectsWeights = true,
+        LoadAsync = async (_, variant, cancel) =>
         {
-            PiperPipeline pipeline = await PiperPipeline.LoadAsync(DefaultVoice, ct: cancel).ConfigureAwait(false);
-            Logs.Info($"[Audio][Piper] Loaded rhasspy/piper-voices {DefaultVoice} (VITS 22.05 kHz).");
+            // The variant IS the voice here (VoiceSelectsWeights) — each voice is its own .onnx download.
+            string voice = string.IsNullOrWhiteSpace(variant) || variant.Equals("default", StringComparison.OrdinalIgnoreCase)
+                ? DefaultVoice
+                : variant;
+            PiperPipeline pipeline = await PiperPipeline.LoadAsync(voice, ct: cancel).ConfigureAwait(false);
+            Logs.Info($"[Audio][Piper] Loaded rhasspy/piper-voices {voice} (VITS 22.05 kHz).");
             return new TtsRunner(pipeline.SampleRate,
                 (backend, job) => pipeline.SynthesizeText(backend, job.Text, seed: job.Seed),
                 pipeline);

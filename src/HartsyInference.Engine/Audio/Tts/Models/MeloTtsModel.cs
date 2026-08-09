@@ -17,7 +17,12 @@ internal static class MeloTtsModel
             MeloTts melo = await MeloTts.LoadAsync(ct: cancel).ConfigureAwait(false);
             Logs.Info("[Audio][MeloTTS] Loaded myshell-ai/MeloTTS-English-v3 (VITS + CMUdict g2p + prosody BERT, 44.1 kHz).");
             return new TtsRunner(melo.SampleRate,
-                (backend, job) => melo.SynthesizeText(backend, job.Text, seed: job.Seed),
+                // MeloTTS speaker slots come from the checkpoint's spk2id (EN-US 0, EN-BR 1, EN_INDIA 2,
+                // EN-AU 3, EN-Default 4). VITS length_scale is the inverse of speed.
+                (backend, job) => melo.SynthesizeText(backend, job.Text,
+                    speakerId: job.SpeakerId ?? 0,
+                    lengthScale: job.Speed is > 0 ? (float)(1.0 / job.Speed.Value) : null,
+                    seed: job.Seed),
                 melo);
         },
     };

@@ -55,10 +55,15 @@ internal static class ZonosModel
                     throw new NotSupportedException("Zonos clones its speaker — supply a voice-reference clip (there is no random voice).");
                 }
                 float[] reference16k = to16k.Resample(job.ReferenceMono24k);
+                ZonosControls defaults = new ZonosControls();
                 ZonosControls controls = new ZonosControls
                 {
                     LanguageId = ZonosLanguages.Resolve(EspeakLanguage),
                     CfgScale = job.CfgScale is > 0 ? (float)job.CfgScale.Value : 2.0f,
+                    // Reference make_cond_dict ranges: rate 0-40 phonemes/s, pitch_std 0-400.
+                    SpeakingRate = job.SpeakingRate is >= 0 and <= 40 ? (float)job.SpeakingRate.Value : defaults.SpeakingRate,
+                    PitchStd = job.PitchStd is >= 0 and <= 400 ? (float)job.PitchStd.Value : defaults.PitchStd,
+                    Emotion = job.Emotion is { Count: 8 } e ? [.. e.Select(v => (float)v)] : defaults.Emotion,
                 };
                 return tts.Synthesize(backend, job.Text, reference16k, controls, job.Seed);
             }, tts, modelLoader, dacLoader, speakerLoader, ldaLoader);

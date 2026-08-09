@@ -323,9 +323,10 @@ public sealed record VibeVoiceDiffusionHeadConfig
     /// <summary>Discretized timesteps used at training. 1000.</summary>
     public int DdpmNumSteps { get; init; } = 1_000;
 
-    /// <summary>DDPM steps consumed at inference (DPM-Solver-multistep walks through
-    /// these). 20 per the published configs — overrideable.</summary>
-    public int DdpmNumInferenceSteps { get; init; } = 20;
+    /// <summary>DDPM steps consumed at inference (DPM-Solver-multistep walks through these). Upstream's
+    /// own inference sets <c>set_ddpm_inference_steps(num_steps=10)</c>, so 10 is the documented default;
+    /// 5 is reported to degrade quality. Overrideable per request.</summary>
+    public int DdpmNumInferenceSteps { get; init; } = 10;
 
     /// <summary>Noise schedule shape. <c>"cosine"</c> (Nichol-Dhariwal) for VibeVoice.</summary>
     public string DdpmBetaSchedule { get; init; } = "cosine";

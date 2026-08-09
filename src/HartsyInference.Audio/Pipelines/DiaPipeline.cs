@@ -21,6 +21,12 @@ namespace HartsyInference.Audio.Pipelines;
 public sealed unsafe class DiaPipeline : IDisposable
 {
     private readonly DiaConfig _cfg;
+    // Per-call sampler overrides, set at the top of Generate. The pipeline instance is cached and reused,
+    // so these must be assigned every run rather than baked into the config.
+    private float _runCfgScale;
+    private int _runTopK;
+    private float _runTemperature;
+    private float _runTopP;
     private readonly DiaEncoder _encoder;
     private readonly DiaDecoder _decCond;
     private readonly DiaDecoder _decUncond;
@@ -89,7 +95,18 @@ public sealed unsafe class DiaPipeline : IDisposable
     /// literal <c>[S1]</c>/<c>[S2]</c> byte runs are folded to 0x01/0x02 like upstream <c>_encode_text</c>).</summary>
     public float[] Generate(IBackend backend, ReadOnlySpan<int> textBytes, int maxTokens = 1720, int seed = 0,
         Action<GenerationProgress>? progress = null)
+        => Generate(backend, textBytes, maxTokens, seed, progress, null, null, null, null);
+
+    /// <summary>As above, overriding the sampler settings. Upstream <c>Dia.generate</c> defaults are
+    /// <c>cfg_scale=3.0</c>, <c>temperature=1.2</c>, <c>top_p=0.95</c>, <c>cfg_filter_top_k=45</c>; null keeps
+    /// the checkpoint config's value.</summary>
+    public float[] Generate(IBackend backend, ReadOnlySpan<int> textBytes, int maxTokens, int seed,
+        Action<GenerationProgress>? progress, double? cfgScale, int? cfgFilterTopK, double? temperature, double? topP)
     {
+        _runCfgScale = cfgScale is > 0 ? (float)cfgScale.Value : _cfg.CfgScale;
+        _runTopK = cfgFilterTopK is > 0 ? cfgFilterTopK.Value : _cfg.TopK;
+        _runTemperature = temperature is > 0 ? (float)temperature.Value : _cfg.Temperature;
+        _runTopP = topP is > 0 ? (float)topP.Value : _cfg.TopP;
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
         int ch = _cfg.Channels;
@@ -201,7 +218,7 @@ public sealed unsafe class DiaPipeline : IDisposable
         float* pc = (float*)lc.DataPointer;
         float* pu = (float*)lu.DataPointer;
         int v = _cfg.AudioVocab;
-        float g = _cfg.CfgScale;
+        float g = _runCfgScale;
         float[][] condL = new float[_cfg.Channels][];
         float[][] guidedL = new float[_cfg.Channels][];
         for (int c = 0; c < _cfg.Channels; c++)
@@ -223,16 +240,21 @@ public sealed unsafe class DiaPipeline : IDisposable
     }
 
     private int SampleChannel(float[] cond, float[] guided, int channel, ref uint rng)
-        => SampleDiaChannel(cond, guided, channel, _cfg, ref rng);
+        => SampleDiaChannel(cond, guided, channel, _cfg, ref rng, _runTopK, _runTemperature, _runTopP);
 
     /// <summary>Faithful Dia sampling (model.py:440-464 + _sample_next_token): the candidate set is the
     /// top-<c>TopK</c> of the CFG-combined logits, but the distribution sampled is the CONDITIONAL logits
     /// restricted to it; PAD/BOS/1027 are masked for all channels and EOS for channels &gt; 0; EOS is masked
     /// unless it is the argmax, in which case it is forced.</summary>
     internal static int SampleDiaChannel(float[] cond, float[] guided, int channel, DiaConfig cfg, ref uint rng)
+        => SampleDiaChannel(cond, guided, channel, cfg, ref rng, cfg.TopK, cfg.Temperature, cfg.TopP);
+
+    /// <inheritdoc cref="SampleDiaChannel(float[], float[], int, DiaConfig, ref uint)"/>
+    internal static int SampleDiaChannel(float[] cond, float[] guided, int channel, DiaConfig cfg, ref uint rng,
+        int topK, float temperature, float topP)
     {
         int v = cfg.AudioVocab;
-        int k = Math.Min(cfg.TopK, v);
+        int k = Math.Min(topK, v);
         int[] order = new int[v];
         for (int i = 0; i < v; i++) order[i] = i;
         Array.Sort(order, (a, b) => guided[b].CompareTo(guided[a]));
@@ -271,7 +293,7 @@ public sealed unsafe class DiaPipeline : IDisposable
         {
             arr[cfg.AudioEos] = float.NegativeInfinity;   // EOS only when it is the argmax
         }
-        return NucleusSampler.Draw(arr, v, cfg.Temperature, 0, cfg.TopP, ref rng);
+        return NucleusSampler.Draw(arr, v, temperature, 0, topP, ref rng);
     }
 
     /// <summary>Replaces literal <c>[S1]</c>/<c>[S2]</c> byte runs with 0x01/0x02 (upstream _encode_text)

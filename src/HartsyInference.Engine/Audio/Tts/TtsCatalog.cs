@@ -82,7 +82,9 @@ internal static class TtsCatalog
                     throw new InvalidOperationException(
                         "VibeVoice needs a voice reference — supply a short WAV clip as the request's reference.");
                 }
-                return pipeline.Synthesize(backend, [job.Text], [job.ReferenceWavPath], maxNewTokens: 1024);
+                return pipeline.Synthesize(backend, [job.Text], [job.ReferenceWavPath], maxNewTokens: 1024,
+                    progress: null, temperature: 0.95f, topP: 0.95f, seed: job.Seed,
+                    cfgScale: job.CfgScale, diffusionSteps: job.NfeStep);
             }, pipeline);
         },
     };
@@ -149,7 +151,8 @@ internal static class TtsCatalog
 
             // Loader kept alive: the F32 stage weights reference its tensors.
             return new TtsRunner(config.SampleRate,
-                (backend, job) => pipeline.Synthesize(backend, AudioTextFrontend.BarkText(bert, job.Text, config.TextEncodingOffset), job.Seed),
+                (backend, job) => pipeline.Synthesize(backend, AudioTextFrontend.BarkText(bert, job.Text, config.TextEncodingOffset),
+                    job.Seed, 768, job.Temperature, job.WaveformTemperature),
                 pipeline, loader);
         },
     };
@@ -186,7 +189,9 @@ internal static class TtsCatalog
                         Logs.Warning($"[Audio][Dia] Prompt is very short ({text.Length} chars) — Dia-1.6B tends to produce "
                             + "silence below ~2 sentences (upstream behaves the same). Use longer dialogue-style text.");
                     }
-                    return pipeline.Generate(backend, AudioTextFrontend.DiaBytes(text), seed: job.Seed);
+                    return pipeline.Generate(backend, AudioTextFrontend.DiaBytes(text),
+                        job.MaxTokens is > 0 ? job.MaxTokens.Value : 1720, job.Seed, null,
+                        job.CfgScale, job.TopK, job.Temperature, job.TopP);
                 },
                 pipeline, modelLoader, dacLoader);
         },
@@ -234,7 +239,8 @@ internal static class TtsCatalog
             Logs.Info("[Audio][CSM] Loaded unsloth/csm-1b (dual-transformer + bundled Mimi, 32 codebooks, 24 kHz).");
             IDisposable?[] keep = [pipeline, .. modelLoaders];
             return new TtsRunner(24_000,
-                (backend, job) => pipeline.Synthesize(backend, AudioTextFrontend.CsmText(job.Text), seed: job.Seed), keep);
+                (backend, job) => pipeline.Synthesize(backend,
+                    AudioTextFrontend.CsmText(job.Text, job.SpeakerId ?? 0), seed: job.Seed), keep);
         },
     };
 

@@ -54,7 +54,8 @@ internal static class Qwen3TtsModel
                 int[] textTokens = [.. tokenizer.EncodeRaw(job.Text)];
                 return mode switch
                 {
-                    "custom_voice" => pipeline.SynthesizeCustomVoice(backend, textTokens, EnglishSpeakerToken, seed: job.Seed),
+                    "custom_voice" => pipeline.SynthesizeCustomVoice(backend, textTokens,
+                        ResolveSpeakerToken(job.Voice), seed: job.Seed),
                     "voice_design" => pipeline.SynthesizeVoiceDesign(backend, textTokens, seed: job.Seed),
                     "voice_clone" => job.ReferenceMono24k is { Length: > 0 }
                         ? pipeline.SynthesizeVoiceClone(backend, textTokens, job.ReferenceMono24k, languageId: EnglishLanguageId, seed: job.Seed)
@@ -64,6 +65,26 @@ internal static class Qwen3TtsModel
             }, keep);
         },
     };
+
+    /// <summary>Maps a CustomVoice speaker NAME to its codec-space token. Only four ids are verified against
+    /// the checkpoint (Ryan, Serena, Ono_Anna, Sohee); the other five documented voices have unverified
+    /// placeholder ids in the config, so an unrecognized or unverified name falls back to the default rather
+    /// than emitting a token that would synthesize the wrong voice.</summary>
+    private static int ResolveSpeakerToken(string? speaker) => (speaker ?? string.Empty).Trim() switch
+    {
+        "Ryan" => 3_061,
+        "Serena" => 3_066,
+        "Ono_Anna" => 2_873,
+        "Sohee" => 2_864,
+        "" => EnglishSpeakerToken,
+        _ => LogUnverified(speaker!),
+    };
+
+    private static int LogUnverified(string speaker)
+    {
+        Logs.Warning($"[Audio][Qwen3-TTS] Speaker '{speaker}' has no verified codec token yet — using the default voice. Verified: Ryan, Serena, Ono_Anna, Sohee.");
+        return EnglishSpeakerToken;
+    }
 
     /// <summary>Maps the variant hint (e.g. <c>1.7B-CustomVoice</c>) to the HuggingFace repo.</summary>
     private static string ResolveRepo(string variant)

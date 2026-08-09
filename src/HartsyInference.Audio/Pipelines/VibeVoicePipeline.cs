@@ -34,6 +34,9 @@ namespace HartsyInference.Audio.Pipelines;
 public sealed class VibeVoicePipeline : IDisposable
 {
     private readonly VibeVoiceConfig _cfg;
+    // Per-call overrides; the pipeline instance is cached and reused across requests.
+    private float _runCfgScale;
+    private int _runSteps;
     private readonly Qwen2Config _lmCfg;
     private readonly VibeVoiceTokenizer _tokenizer;
     private readonly VibeVoiceProcessor _processor;
@@ -134,9 +137,12 @@ public sealed class VibeVoicePipeline : IDisposable
     /// <paramref name="maxNewTokens"/> caps the AR loop length.</summary>
     public unsafe float[] Synthesize(IBackend backend, IReadOnlyList<string> lines,
         IReadOnlyList<string> voiceWavPaths, int maxNewTokens = 256, IProgress<int>? progress = null,
-        float temperature = 0.95f, float topP = 0.95f, int seed = 0)
+        float temperature = 0.95f, float topP = 0.95f, int seed = 0,
+        double? cfgScale = null, int? diffusionSteps = null)
     {
         ThrowIfDisposed();
+        _runCfgScale = cfgScale is > 0 ? (float)cfgScale.Value : _cfg.CfgScale;
+        _runSteps = diffusionSteps is > 0 ? diffusionSteps.Value : _cfg.DiffusionHead.DdpmNumInferenceSteps;
         PreloadWeights(backend);
         uint rng = HartsyInference.Audio.Dsp.DeterministicRng.Seed(seed);
         uint noiseRng = HartsyInference.Audio.Dsp.DeterministicRng.Seed(seed ^ 0x51ED270B);   // separate stream for per-frame diffusion noise
@@ -153,7 +159,7 @@ public sealed class VibeVoicePipeline : IDisposable
         // embeds of the current speech segment (reset at each speech_start). At every diffusion
         // token both streams' last hidden states condition the denoiser (see DenoiseLatent).
         // Only allocated when CFG is active (cfg_scale != 1).
-        bool cfgActive = MathF.Abs(_cfg.CfgScale - 1f) > 1e-6f;
+        bool cfgActive = MathF.Abs(_runCfgScale - 1f) > 1e-6f;
         using IKvCache? negKvCache = cfgActive ? _lm.CreateDecodeCache(cacheCap) : null;
 
         // ── Prefill ─────────────────────────────────────────────────────────
@@ -435,9 +441,9 @@ public sealed class VibeVoicePipeline : IDisposable
     private Tensor DenoiseLatent(IBackend backend, Tensor noiseLatent, Tensor cond, Tensor? negCond)
     {
         using VibeVoiceCosineDpmSolver scheduler = new();
-        scheduler.SetTimesteps(_cfg.DiffusionHead.DdpmNumInferenceSteps);
+        scheduler.SetTimesteps(_runSteps);
 
-        float cfg = _cfg.CfgScale;
+        float cfg = _runCfgScale;
         bool useCfg = negCond is not null && MathF.Abs(cfg - 1f) > 1e-6f;
 
         Tensor speech = noiseLatent;
