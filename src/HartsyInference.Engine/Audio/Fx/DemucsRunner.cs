@@ -12,9 +12,10 @@ internal sealed class DemucsRunner(DemucsPipeline pipeline, IDisposable loader) 
     /// <summary>The stem names this checkpoint produces, in output order.</summary>
     internal IReadOnlyList<string> Sources => pipeline.Sources;
 
-    /// <summary>Separates a stereo mix into its stems.</summary>
-    internal (float[] Left, float[] Right)[] Separate(IBackend backend, float[] left, float[] right) =>
-        pipeline.Separate(backend, left, right);
+    /// <summary>Separates a stereo mix into its stems, with demucs's apply_model knobs.</summary>
+    internal (float[] Left, float[] Right)[] Separate(IBackend backend, float[] left, float[] right,
+        int shifts = 0, double? overlap = null, double? segmentSeconds = null, int seed = 0) =>
+        pipeline.Separate(backend, left, right, shifts, overlap, segmentSeconds, seed);
 
     /// <inheritdoc/>
     public void Dispose()

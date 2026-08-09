@@ -90,6 +90,12 @@ public sealed unsafe class ResembleEnhancePipeline : IDisposable
     /// the conditioning, <paramref name="tau"/> is the CFM prior temperature. Requires
     /// <c>withDenoiserAndVocoder: true</c>.</summary>
     public float[] Enhance(IBackend backend, float[] noisyPcm44k, float lambd, float tau, int seed = 0)
+        => Enhance(backend, noisyPcm44k, lambd, tau, seed, nfe: null, solver: null);
+
+    /// <summary>As above, overriding the CFM solver settings. <paramref name="nfe"/> is the function-evaluation
+    /// budget (upstream's Gradio app exposes 1–128, default 64) and <paramref name="solver"/> is one of
+    /// <c>euler</c>/<c>midpoint</c>/<c>rk4</c>. Null keeps the configured value.</summary>
+    public float[] Enhance(IBackend backend, float[] noisyPcm44k, float lambd, float tau, int seed, int? nfe, string? solver)
     {
         ThrowIfDisposed();
         if (_denoiser is null || _vocoder is null)
@@ -157,7 +163,7 @@ public sealed unsafe class ResembleEnhancePipeline : IDisposable
             zp[i] = tau * DeterministicRng.NextGaussian(ref rng) + (1f - tau) * (_cfg.LatentScale * zp[i]);
         }
 
-        Tensor psi1 = Solve(backend, cond, z0);
+        Tensor psi1 = Solve(backend, cond, z0, nfe, solver);
         cond.Dispose();
 
         // Unscale the latent, decode to 160-channel features, vocode.
@@ -196,7 +202,7 @@ public sealed unsafe class ResembleEnhancePipeline : IDisposable
         {
             p0[i] = DeterministicRng.NextGaussian(ref rng);
         }
-        Tensor psi1 = Solve(backend, condMel, psi0);
+        Tensor psi1 = Solve(backend, condMel, psi0, null, null);
         float* pp = (float*)psi1.DataPointer;
         float invScale = 1f / _cfg.LatentScale;
         for (long i = 0; i < psi1.ElementCount; i++)
@@ -220,9 +226,11 @@ public sealed unsafe class ResembleEnhancePipeline : IDisposable
     /// <summary>Integrates the OT-CFM ODE from <paramref name="psi0"/> (consumed and returned as ψ1) with
     /// upstream's solver: the time grid maps <c>u ∈ linspace(0,1)</c> through <c>(a^u − 1)/(a − 1)</c> where
     /// <c>a</c> solves <c>h(1/divisor) = 0.5</c> (steps cluster near t=0), stepped by euler/midpoint/rk4.</summary>
-    private Tensor Solve(IBackend backend, Tensor cond, Tensor psi0)
+    private Tensor Solve(IBackend backend, Tensor cond, Tensor psi0, int? nfeOverride, string? solverOverride)
     {
-        int steps = _cfg.Solver == "midpoint" ? _cfg.Nfe / 2 : _cfg.Solver == "rk4" ? _cfg.Nfe / 4 : _cfg.Nfe;
+        int nfe = nfeOverride is > 0 ? nfeOverride.Value : _cfg.Nfe;
+        string solver = string.IsNullOrWhiteSpace(solverOverride) ? _cfg.Solver : solverOverride.Trim().ToLowerInvariant();
+        int steps = solver == "midpoint" ? nfe / 2 : solver == "rk4" ? nfe / 4 : nfe;
         if (steps < 1) steps = 1;
         float[] ts = TimeGrid(steps, _cfg.TimeMappingDivisor);
 
@@ -234,7 +242,7 @@ public sealed unsafe class ResembleEnhancePipeline : IDisposable
             float t0 = ts[step];
             float dt = ts[step + 1] - t0;
 
-            if (_cfg.Solver == "rk4")
+            if (solver == "rk4")
             {
                 Tensor k1 = _wn.Estimate(backend, x, cond, t0);
                 Tensor x2 = AxpyClone(x, k1, dt * 0.5f);
@@ -257,7 +265,7 @@ public sealed unsafe class ResembleEnhancePipeline : IDisposable
                 }
                 k1.Dispose(); k2.Dispose(); k3.Dispose(); k4.Dispose();
             }
-            else if (_cfg.Solver == "midpoint")
+            else if (solver == "midpoint")
             {
                 Tensor k1 = _wn.Estimate(backend, x, cond, t0);
                 Tensor xm = AxpyClone(x, k1, dt * 0.5f);

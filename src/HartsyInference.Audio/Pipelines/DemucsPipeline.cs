@@ -34,6 +34,16 @@ public sealed unsafe class DemucsPipeline : IDisposable
     /// <paramref name="stereoRight"/> must be equal length; returns one <c>(Left, Right)</c> pair per stem in the
     /// <see cref="Sources"/> order.</summary>
     public (float[] Left, float[] Right)[] Separate(IBackend backend, float[] stereoLeft, float[] stereoRight)
+        => Separate(backend, stereoLeft, stereoRight, shifts: 0, overlap: null, segmentSeconds: null, seed: 0);
+
+    /// <summary>Separates a stereo signal, overriding the checkpoint's apply_model settings.
+    /// <para><paramref name="shifts"/> is demucs's "shift trick": the input is shifted by a random offset,
+    /// separated, shifted back, and the results averaged. Upstream documents it as worth up to 0.2 SDR and
+    /// exactly <c>shifts</c>× slower. <paramref name="overlap"/> is the fractional segment overlap (upstream
+    /// default 0.25). <paramref name="segmentSeconds"/> lowers peak memory; it is CLAMPED to the checkpoint's
+    /// trained segment because Hybrid Transformer models support no more than that (7.8 s for htdemucs).</para></summary>
+    public (float[] Left, float[] Right)[] Separate(IBackend backend, float[] stereoLeft, float[] stereoRight,
+        int shifts, double? overlap, double? segmentSeconds, int seed)
     {
         ThrowIfDisposed();
         if (backend is null) throw new ArgumentNullException(nameof(backend));
@@ -41,14 +51,20 @@ public sealed unsafe class DemucsPipeline : IDisposable
         if (stereoLeft.Length != stereoRight.Length)
             throw new ArgumentException($"Stereo channel lengths must match: {stereoLeft.Length} != {stereoRight.Length}.");
 
+        if (shifts > 0)
+        {
+            return SeparateShifted(backend, stereoLeft, stereoRight, shifts, overlap, segmentSeconds, seed);
+        }
         int length = stereoLeft.Length;
         int channels = _cfg.AudioChannels;
         int srcs = _cfg.NumSources;
 
         // apply_model: split into `segment`-length chunks with `overlap`, run each (the model pads short chunks up
         // to the training segment via use_train_segment), and triangular-weighted overlap-add across chunks.
-        int seg = _cfg.SegmentSamples;
-        int stride = Math.Max(1, (int)((1.0 - _cfg.Overlap) * seg));
+        double segSec = segmentSeconds is > 0 ? Math.Min(segmentSeconds.Value, _cfg.Segment) : _cfg.Segment;
+        int seg = Math.Max(1, (int)(segSec * _cfg.SampleRate));
+        double ov = overlap is >= 0 and < 1 ? overlap.Value : _cfg.Overlap;
+        int stride = Math.Max(1, (int)((1.0 - ov) * seg));
         float[] weight = BuildTransitionWeight(seg);
 
         float[][] acc = new float[srcs * channels][];
@@ -86,6 +102,55 @@ public sealed unsafe class DemucsPipeline : IDisposable
                 right[j] = ar[j] / ws;
             }
             result[s] = (left, right);
+        }
+        return result;
+    }
+
+    /// <summary>Demucs's shift trick: for each repetition, drop a random 0..max_shift prefix, separate the
+    /// remainder, then realign and average. Upstream uses a half-second maximum shift.</summary>
+    private (float[] Left, float[] Right)[] SeparateShifted(IBackend backend, float[] left, float[] right,
+        int shifts, double? overlap, double? segmentSeconds, int seed)
+    {
+        int length = left.Length;
+        int maxShift = Math.Max(1, _cfg.SampleRate / 2);
+        int srcs = _cfg.NumSources;
+        double[][] accL = new double[srcs][];
+        double[][] accR = new double[srcs][];
+        for (int s = 0; s < srcs; s++) { accL[s] = new double[length]; accR[s] = new double[length]; }
+
+        // Seeded so a given request reproduces exactly; demucs itself uses an unseeded random offset.
+        Random rng = new(seed == 0 ? 1234 : seed);
+        for (int r = 0; r < shifts; r++)
+        {
+            int off = rng.Next(0, maxShift + 1);
+            int shiftedLen = length - off;
+            if (shiftedLen <= 0) { continue; }
+            float[] sl = new float[shiftedLen];
+            float[] sr = new float[shiftedLen];
+            Array.Copy(left, off, sl, 0, shiftedLen);
+            Array.Copy(right, off, sr, 0, shiftedLen);
+            (float[] Left, float[] Right)[] part = Separate(backend, sl, sr, 0, overlap, segmentSeconds, seed);
+            for (int s = 0; s < srcs; s++)
+            {
+                for (int j = 0; j < shiftedLen; j++)
+                {
+                    accL[s][off + j] += part[s].Left[j];
+                    accR[s][off + j] += part[s].Right[j];
+                }
+            }
+        }
+
+        (float[] Left, float[] Right)[] result = new (float[], float[])[srcs];
+        for (int s = 0; s < srcs; s++)
+        {
+            float[] l = new float[length];
+            float[] rr = new float[length];
+            for (int j = 0; j < length; j++)
+            {
+                l[j] = (float)(accL[s][j] / shifts);
+                rr[j] = (float)(accR[s][j] / shifts);
+            }
+            result[s] = (l, rr);
         }
         return result;
     }

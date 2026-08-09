@@ -10,8 +10,9 @@ internal sealed class EnhanceRunner(ResembleEnhancePipeline pipeline, IDisposabl
     internal int SampleRate => 44_100;
 
     /// <summary>Denoises and enhances a mono 44.1 kHz clip.</summary>
-    internal float[] Enhance(IBackend backend, float[] mono44k, float lambd, float tau, int seed) =>
-        pipeline.Enhance(backend, mono44k, lambd: lambd, tau: tau, seed: seed);
+    internal float[] Enhance(IBackend backend, float[] mono44k, float lambd, float tau, int seed,
+        int? nfe = null, string? solver = null) =>
+        pipeline.Enhance(backend, mono44k, lambd, tau, seed, nfe, solver);
 
     /// <inheritdoc/>
     public void Dispose()

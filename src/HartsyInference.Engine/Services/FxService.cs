@@ -43,7 +43,8 @@ public sealed class FxService : IFxService
             DemucsRunner runner = await _engine.AudioRuntime.Demucs
                 .GetOrLoadAsync(path, _ => Task.FromResult(FxCatalog.LoadDemucs(path, modelName)), ct).ConfigureAwait(false);
             long started = Environment.TickCount64;
-            (float[] Left, float[] Right)[] stems = runner.Separate(backend, left, right);
+            (float[] Left, float[] Right)[] stems = runner.Separate(backend, left, right,
+                request.Shifts, request.Overlap, request.Segment, request.Seed);
             IReadOnlyList<string> names = runner.Sources;
             Dictionary<string, byte[]> encoded = new Dictionary<string, byte[]>(stems.Length, StringComparer.Ordinal);
             for (int i = 0; i < stems.Length; i++)
@@ -84,7 +85,8 @@ public sealed class FxService : IFxService
             // not take an LCFM step count or solver yet, so those knobs have no counterpart here.
             float lambd = (float)(request.Lambd ?? 0.5);
             float tau = (float)(request.Tau ?? 0.5);
-            float[] enhanced = runner.Enhance(backend, mono, lambd, tau, request.Seed < 0 ? 0 : request.Seed);
+            float[] enhanced = runner.Enhance(backend, mono, lambd, tau, request.Seed < 0 ? 0 : request.Seed,
+                request.Nfe, request.Solver);
             double seconds = AudioClipCodec.Seconds(enhanced.Length, runner.SampleRate);
             Logs.Verbose($"[Audio][Resemble-Enhance] Enhanced {AudioClipCodec.Seconds(mono.Length, FxCatalog.EnhanceSampleRate):0.0}s "
                 + $"in {Environment.TickCount64 - started}ms.");
