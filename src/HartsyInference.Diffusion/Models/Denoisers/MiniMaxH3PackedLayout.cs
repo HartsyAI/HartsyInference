@@ -1,39 +1,5 @@
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>What a packed-sequence segment carries. The packed order is text, then any conditioning/reference blocks,
-/// then the target audio and target video — which are always the last two segments.</summary>
-public enum MiniMaxH3SegmentKind
-{
-    Text,
-    Cond,
-    RefImage,
-    RefAudio,
-    Audio,
-    Video,
-}
-
-/// <summary>One contiguous run of rows in the packed sequence.</summary>
-public readonly record struct MiniMaxH3Segment(int Start, int Stop, MiniMaxH3SegmentKind Kind)
-{
-    public int Length => Stop - Start;
-}
-
-/// <summary>A reference block for ref2va conditioning.</summary>
-public sealed record MiniMaxH3RefBlock
-{
-    public required string Kind { get; init; }   // "image" | "audio" | "video" | "video_audio"
-    public int LatentT { get; init; }
-    public int LatentH { get; init; }
-    public int LatentW { get; init; }
-    public int RefAudioT { get; init; }
-}
-
-/// <summary>A first/last-frame keyframe anchor for fl2va.</summary>
-public sealed record MiniMaxH3Keyframe
-{
-    public required int ResolvedFrameIndex { get; init; }
-}
-
 /// <summary>The static packed-sequence structure for one shape + conditioning signature: segment table, per-row
 /// (t, h, w) position ids, and the masks marking which video/audio rows are the denoised targets rather than
 /// conditioning. Positions are built in double precision and only narrowed when RoPE angles are formed.</summary>

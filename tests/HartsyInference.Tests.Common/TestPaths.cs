@@ -329,6 +329,10 @@ public static class TestPaths
         /// <summary>The stereo 32 kHz audio VAE, carrying the DAC-lineage encoder as well as the BigVGAN decoder.
         /// Override with MINIMAX_H3_AUDIO_VAE.</summary>
         public static string AudioVae => Resolve("MINIMAX_H3_AUDIO_VAE", Path.Combine(ModelsDir, "Stable-Diffusion", "MiniMaxH3", "flat", "vae", "MiniMaxH3", "minimax_h3_audio_vae_fp32.safetensors"));
+
+        /// <summary>The published step-distillation LoRA (larryvrh/MiniMax-H3-Turbo-Lora) — the only real-world H3
+        /// LoRA, and the one that proved the bare-key format was unsupported. Override with MINIMAX_H3_TURBO_LORA.</summary>
+        public static string TurboLora => Resolve("MINIMAX_H3_TURBO_LORA", Path.Combine(ModelsDir, "Lora", "minimax_h3_turbo_v4_step600_ema.safetensors"));
     }
 
     /// <summary>SD3.5 paths. Assets are not bundled — tests skip when missing. FP8-bundled single-file checkpoints from Comfy-Org/stable-diffusion-3.5-fp8 are the default; set env vars to override for FP16 / community quants.</summary>

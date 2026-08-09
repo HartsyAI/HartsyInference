@@ -306,15 +306,23 @@ though the level defect is now traced upstream of them.
       only fresh downloads.
 - [x] **LoRA wired 2026-08-05 — H3 is the first video model with LoRA end-to-end.** `MiniMaxH3Recipe.LoadTransformer`
       now hands back the converted dict so the merge lands before `LoadWeights`; the stack is owned by
-      `MiniMaxH3RecipePipeline` and disposed after the transformer. **No `MiniMaxH3LoraMapper` is needed** —
-      `LoraFormatDetector`'s architecture-agnostic `transformer.blocks.` passthrough already resolves a diffusers-PEFT
-      LoRA onto H3's canonical keys, and the **fused `qkv_proj` merges** because a PEFT export targets it as one Linear
+      `MiniMaxH3RecipePipeline` and disposed after the transformer. **Corrected 2026-08-08 against the real published
+      LoRA** (`larryvrh/MiniMax-H3-Turbo-Lora`): the `transformer.blocks.` passthrough below was only ever exercised by
+      a hand-built LoRA carrying that prefix. The actual H3 LoRA has **no wrapper prefix at all** — its roots are the
+      checkpoint's own keys (`blocks.0.attn.qkv_proj.lora_A.weight`) — so it hit `LoraFormat.Unknown` and was rejected
+      at load. Fixed by a `DiffusersBareDit` detection arm (last in precedence, so a prefixed file never falls into it).
+      **It also targets the UNPRUNED adaln projection** `[96768, 2688]` while every pruned build stores the curve-table
+      form `[96768, 8]`, so 51 of its 259 modules (50 block adaln + `final_layer`) cannot merge on a pruned checkpoint:
+      measured **208 of 259 merged, 51 skipped**. `LoraStack` now shape-checks each delta and names the skip rather
+      than handing a mismatched delta to `backend.Add`. Still true: the **fused `qkv_proj` merges** because a PEFT
+      export targets it as one Linear
       (verified against the real bf16 checkpoint: `blocks.0.attn.qkv_proj.weight` `[21504, 5376]` BF16). Only a
       kohya-*underscored* export would need work (`LoraKeyTransformer`'s allowlist lacks `q_norm`/`k_norm`/`adaln_proj`).
-      **LoRA requires a bf16 build** — `LoraStack.ApplyTo` rejects quantized bases and 200 of the fp8 build's 532 tensors
-      are quantized; the recipe detects this up front and names `minimax_h3_*_pruned_bf16.safetensors` (40 GB) rather
-      than failing opaquely inside the merge. *Landmine:* merged weights are written back at the checkpoint dtype, so a
-      BF16 base resolves only ~0.4% of magnitude — a probe delta below ~1e-3 rounds away entirely.
+      **LoRA works on EITHER build** — an fp8 target is dequantized, merged in F32, and requantized back to fp8 with a
+      recomputed scale (ComfyUI's approach), so the weight stays on the native fp8 GEMM path instead of being rejected.
+      *Landmine:* `Fp8InputScaleFactor` must be carried onto the merged tensor or the weight silently drops off the
+      static-input-scale fast path (~188 ms/step). *Landmine:* merged weights are written back at the checkpoint dtype,
+      so a BF16 base resolves only ~0.4% of magnitude — a probe delta below ~1e-3 rounds away entirely.
 - [ ] **int8 `convrot` is the last unsupported variant that matters.** Comfy-Org publishes **five DiT builds per task**
       (ten total — `bf16`, `int8_convrot`, `pruned_bf16`, `pruned_fp8_scaled`, `pruned_int8_convrot`, for each of fl2va
       and ref2va), not four; the

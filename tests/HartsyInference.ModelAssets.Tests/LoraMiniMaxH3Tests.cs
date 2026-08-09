@@ -95,6 +95,68 @@ public sealed class LoraMiniMaxH3Tests : IDisposable
         Assert.Equal(0, stack.ApplyTo(weights, LoraTarget.Transformer, backend));
     }
 
+    /// <summary>The published H3 LoRA (larryvrh/MiniMax-H3-Turbo-Lora) carries NO wrapper prefix — its roots are
+    /// already the checkpoint's own keys. That reached <see cref="LoraFormat.Unknown"/> and was rejected at load, so
+    /// the only real-world H3 LoRA did not work at all despite the passthrough above; this pins the bare-root arm.</summary>
+    [Fact]
+    public void BareCheckpointKeysWithNoPrefixAreDetectedAndMapped()
+    {
+        const int hidden = 32, inner = 3 * 16, rank = 4;
+        string path = CreateSafeTensors("h3bare", new Dictionary<string, (long[] shape, float[] data)>
+        {
+            ["blocks.0.attn.qkv_proj.lora_A.weight"] = ([rank, hidden], Filled(rank * hidden, 0.1f)),
+            ["blocks.0.attn.qkv_proj.lora_B.weight"] = ([inner, rank], Filled(inner * rank, 0.2f)),
+            ["token_refiner.blocks.0.mlp.fc1.lora_A.weight"] = ([rank, hidden], Filled(rank * hidden, 0.1f)),
+            ["token_refiner.blocks.0.mlp.fc1.lora_B.weight"] = ([hidden, rank], Filled(hidden * rank, 0.3f)),
+        });
+
+        using LoraFile file = LoraFile.Load(path);
+        Assert.Equal(LoraFormat.DiffusersBareDit, file.Format);
+        List<string> targets = [.. file.Layers.Select(l => l.TargetKey).OrderBy(k => k, StringComparer.Ordinal)];
+        Assert.Equal(["blocks.0.attn.qkv_proj.weight", "token_refiner.blocks.0.mlp.fc1.weight"], targets);
+    }
+
+    /// <summary>A prefixed file must never fall into the bare-root arm — <c>blocks.</c> is a weak marker, so the
+    /// bare rule is last in precedence and this pins that ordering.</summary>
+    [Fact]
+    public void PrefixedKeysStillWinOverTheBareRootArm()
+    {
+        const int hidden = 32, rank = 4;
+        string path = CreateSafeTensors("h3both", new Dictionary<string, (long[] shape, float[] data)>
+        {
+            ["transformer.blocks.0.attn.qkv_proj.lora_A.weight"] = ([rank, hidden], Filled(rank * hidden, 0.1f)),
+            ["transformer.blocks.0.attn.qkv_proj.lora_B.weight"] = ([hidden, rank], Filled(hidden * rank, 0.2f)),
+        });
+        using LoraFile file = LoraFile.Load(path);
+        Assert.Equal(LoraFormat.DiffusersFlux, file.Format);
+    }
+
+    /// <summary>The Turbo LoRA targets the UNPRUNED adaln projection (<c>[96768, 2688]</c>) while every pruned build
+    /// stores the curve-table form (<c>[96768, 8]</c>). Without this guard the delta went straight to
+    /// <c>backend.Add</c> against a smaller destination; it must skip that weight and still merge the rest.</summary>
+    [Fact]
+    public void DeltaWhoseShapeDoesNotMatchTheCheckpointIsSkippedNotApplied()
+    {
+        const int hidden = 32, rank = 4;
+        string path = CreateSafeTensors("h3shape", new Dictionary<string, (long[] shape, float[] data)>
+        {
+            // Right key, wrong build: the delta is [hidden, hidden] but the weight below is [hidden, 8].
+            ["blocks.0.adaln_proj.linear.lora_A.weight"] = ([rank, hidden], Filled(rank * hidden, 0.1f)),
+            ["blocks.0.adaln_proj.linear.lora_B.weight"] = ([hidden, rank], Filled(hidden * rank, 0.2f)),
+            ["blocks.0.mlp.fc2.lora_A.weight"] = ([rank, hidden], Filled(rank * hidden, 0.1f)),
+            ["blocks.0.mlp.fc2.lora_B.weight"] = ([hidden, rank], Filled(hidden * rank, 0.3f)),
+        });
+        Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>
+        {
+            ["blocks.0.adaln_proj.linear.weight"] = Zeros(hidden, 8),
+            ["blocks.0.mlp.fc2.weight"] = Zeros(hidden, hidden),
+        };
+        IBackend backend = new CpuBackend();
+        using LoraStack stack = new LoraStack();
+        stack.AddFromPath(path, strength: 1.0f);
+        Assert.Equal(1, stack.ApplyTo(weights, LoraTarget.Transformer, backend));
+    }
+
     private static float[] Filled(int count, float value)
     {
         float[] data = new float[count];

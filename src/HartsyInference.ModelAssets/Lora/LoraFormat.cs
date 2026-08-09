@@ -26,4 +26,7 @@ public enum LoraFormat
 
     /// <summary>ComfyUI-style Wan format: diffusion_model.blocks.* dotted keys in original Wan module naming, with either PEFT (.lora_A/.lora_B) or kohya (.lora_down/.lora_up) suffixes.</summary>
     DiffusersWan,
+
+    /// <summary>PEFT suffixes on BARE checkpoint keys — no transformer./diffusion_model. wrapper at all, so the root is already the canonical weight name (MiniMax-H3's Turbo LoRA: blocks.0.attn.qkv_proj.lora_A.weight). Detected last, so a file carrying any recognized prefix never lands here.</summary>
+    DiffusersBareDit,
 }

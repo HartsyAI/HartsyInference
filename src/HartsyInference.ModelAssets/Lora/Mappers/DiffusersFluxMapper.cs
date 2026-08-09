@@ -12,7 +12,12 @@ public static class DiffusersFluxMapper
     private const string AlphaSuffix = ".alpha";
 
     /// <summary>Parses every LoRA layer in the file.</summary>
-    public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader)
+    public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader) => ParseLayers(loader, bareRoots: false);
+
+    /// <summary>Same parse, but <paramref name="bareRoots"/> accepts a root with NO wrapper prefix as a transformer
+    /// target — the root is then already the canonical weight name. Shares this parser rather than getting its own
+    /// because the two formats differ only in that one rule.</summary>
+    public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader, bool bareRoots)
     {
         Dictionary<(LoraTarget, string), GroupBuffer> groups = [];
 
@@ -51,6 +56,11 @@ public static class DiffusersFluxMapper
             {
                 body = root["text_encoder.".Length..];
                 target = LoraTarget.ClipL;
+            }
+            else if (bareRoots)
+            {
+                body = root;
+                target = LoraTarget.Transformer;
             }
             else
             {

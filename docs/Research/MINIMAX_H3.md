@@ -1,11 +1,15 @@
-# MiniMax-H3 — pre-release research
+# MiniMax-H3 — research notes
 
-> **Status 2026-08-02: weights still NOT released, but the ARCHITECTURE IS NOW PUBLIC.** Kijai's open
-> ComfyUI PR **#15224** is a complete native implementation (DiT + both VAEs + text encoder + nodes) —
-> see [that section](#the-architecture-is-public--kijais-comfyui-pr-15224-2026-08-02), which supersedes
-> the marketing-level "Architecture" section below and most of the unknowns checklist. A port can start
-> now; only real-weight testing is still blocked. The engine seam is wired (`MiniMaxH3Recipe`) and fails
-> loudly when handed a checkpoint.
+> **Status 2026-08-08: SHIPPED AND VERIFIED ON REAL WEIGHTS.** H3 generates video plus its jointly
+> generated stereo soundtrack end to end on the fp8 build, including fl2va keyframes, ref2va references,
+> LoRA merge, and DiT sharding across two GPUs. Everything below the "Release status" heading is
+> **historical provenance** — it records what was known before the weights dropped and how the port was
+> derived from Kijai's ComfyUI PR **#15224**. Where this doc and the code disagree, the code is right.
+>
+> For current state, read these instead: `docs/Checklists/MODEL_STATUS_VIDEO.md` (what works),
+> `docs/Checklists/PARITY_VERIFICATION.md` (real-weight parity), and the recipe/pipeline sources
+> themselves. Still-live findings kept here: the NVFP4-AWQ text-encoder conventions, and the
+> SageAttention F16-V measurement in "Bring-up notes".
 
 ## What H3 is
 
@@ -342,27 +346,18 @@ writing a single line of forward pass.
 - [ ] **License** — MiniMax say "subject to applicable laws and regulations," which is not a license
       name. Confirm before shipping catalog assets.
 
-## Engine state
+## Engine state (HISTORICAL — this section described the pre-weights seam)
 
-What is wired today, and — measured, not assumed — what a user actually sees:
+Everything this section used to say is obsolete: `Construct()` no longer throws `UnsupportedModelException`,
+the catalog entry is no longer `Structural`, and `VideoDefaults` are no longer placeholders. `MiniMaxH3Recipe`
+is still registered in `VideoRecipeRegistry` under `minimax-h3`, `minimax-hailuo-03`, `hailuo-03`, `hailuo03`,
+and now builds a real pipeline.
 
-- `MiniMaxH3Recipe` (`src/HartsyInference.Engine/Recipes/Video/`) is registered in `VideoRecipeRegistry`
-  and matches `minimax-h3`, `minimax-hailuo-03`, `hailuo-03`, `hailuo03`. `Construct()` always throws
-  `UnsupportedModelException` with the release status plus a pointer to this doc.
-- Short-form catalog entry `minimax-h3` — `ModelStatus.Structural`, not CLI-drivable, no `Assets`.
-- **Verified on the CLI (net10.0, 2026-08-01):**
-  `hartsy video -m minimax-h3 --model-path <any file> "…"` reaches `Construct` and prints the full
-  explanation. Plain `hartsy video -m minimax-h3 "…"` does **not** — checkpoint resolution runs before
-  recipe construction, so it stops at the generic *"No checkpoint found for this model"*, byte-identical
-  to what an unregistered model id produces. The seam helps whoever supplies an H3 checkpoint; it does
-  not improve the bare-model-id probe.
-- No `ModelSupport` compat-class entry was added. That list is keyed on SwarmUI `T2IModelClassSorter`
-  strings, and H3's class string will not exist until weights ship — a guessed entry would be dead code.
+The one impedance mismatch noted here did survive and is worth keeping: **H3's cloud API takes duration in
+integer seconds (5–15) while `VideoRequest` carries a frame count.** The engine works in frames, snapping
+onto the `17k + 5` grid (`MiniMaxH3Geometry.AlignFrameCount`), with 124 frames the native default.
 
-`VideoDefaults` on the recipe are **placeholders except `Fps = 24`**: MiniMax's API exposes the opaque
-string `"2K"` plus an aspect ratio and never states pixel dimensions, steps/CFG depend on an undisclosed
-sampler, and `Frames` is 5 s × 24 fps arithmetic. One concrete impedance mismatch for the implementer:
-H3's API takes **duration in integer seconds (5–15)** while `VideoRequest` carries a **frame count**.
+For what actually works today, see `docs/Checklists/MODEL_STATUS_VIDEO.md`.
 
 ## Bring-up notes to save the next session time
 

@@ -15,9 +15,22 @@ public static class LoraFormatDetector
         bool hasKohyaWan = false;
         bool hasDiffusersWan = false;
         bool hasTe2 = false;
+        bool hasBareDit = false;
 
         foreach (string key in descriptors.Keys)
         {
+            // No wrapper prefix at all — the root IS the checkpoint's own key (MiniMax-H3's published Turbo LoRA:
+            // `blocks.0.attn.qkv_proj.lora_A.weight`, `token_refiner.blocks.0.mlp.fc1.lora_B.weight`). Recorded
+            // rather than returned so it stays LAST in the precedence list below: `blocks.` is a weak marker and
+            // must never win over a file that also carries a real prefix.
+            if ((key.StartsWith("blocks.", StringComparison.Ordinal)
+                    || key.StartsWith("token_refiner.", StringComparison.Ordinal)
+                    || key.StartsWith("final_layer.", StringComparison.Ordinal))
+                && (key.EndsWith(".lora_A.weight", StringComparison.Ordinal)
+                    || key.EndsWith(".lora_B.weight", StringComparison.Ordinal)))
+            {
+                hasBareDit = true;
+            }
             // HuggingFace PEFT diffusers format. The mapper is architecture-agnostic — it strips the
             // `transformer.` prefix and passes the body through as the canonical key — so the same arm
             // covers Flux (`transformer_blocks` / `single_transformer_blocks`) AND single-stream DiTs that
@@ -71,6 +84,7 @@ public static class LoraFormatDetector
         if (hasKohyaFluxBlocks) return LoraFormat.KohyaFlux;
         if (hasKohyaUnetBlocks && hasTe2) return LoraFormat.KohyaSdxl;
         if (hasKohyaUnetBlocks) return LoraFormat.KohyaSd15;
+        if (hasBareDit) return LoraFormat.DiffusersBareDit;
 
         return LoraFormat.Unknown;
     }

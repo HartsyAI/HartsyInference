@@ -28,10 +28,13 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
 
     public MiniMaxH3Config Config => _config;
 
-    /// <summary>Residual-stream dtype: BF16 on a backend whose adaLN/norm ops take 16-bit activations (the reference
-    /// runs the block body at the checkpoint's bf16), F32 elsewhere — CpuBackend is F32-only. The patch projections,
-    /// the time embedder / adaLN curve table and the output heads stay F32 either way; those are the reference's own
-    /// F32 islands and each boundary casts explicitly.</summary>
+    /// <summary>Residual-stream dtype. F32 by default and <b>F32 is what ships</b> — <c>MiniMaxH3Recipe</c> pins it
+    /// there because this DiT's stream genuinely leaves 16-bit range on real weights (the residual reaches ~2.7e6 by
+    /// the last block), and BF16, while it holds that range, falls off the native fp8 GEMM guard for a large
+    /// slowdown. BF16 remains selectable for a backend whose adaLN/norm ops take 16-bit activations, matching the
+    /// reference's own block body; CpuBackend is F32-only. The patch projections, the time embedder / adaLN curve
+    /// table and the output heads stay F32 either way — the reference's own F32 islands, each boundary casting
+    /// explicitly.</summary>
     public DType BodyDType { get; init; } = DType.F32;
 
     /// <summary>Takes ownership of the converted weights.</summary>
@@ -365,7 +368,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     /// q/k/v are allocated head-major <c>[1, heads, seq, headDim]</c> up front so the fused split+norm, the in-place
     /// rope and SDPA all consume them directly — only the attention output needs a permute back.
     /// The qkv buffer through to the attention output stays F32: rope and SDPA have no 16-bit path, so a bf16 qkv
-    /// would only add casts around them. Only the projection's input and output ride the bf16 residual stream.</summary>
+    /// would only add casts around them. Only the projection's input and output ride the body-dtype residual stream.</summary>
     /// <summary>Diagnostic only, off unless <c>HARTSY_H3_VPROBE=1</c>: reports <c>max|V|</c> per block against F16's
     /// 65504 ceiling. SDPA's default INT8 SageAttention path quantizes Q/K but materializes V as an F16 transpose, so
     /// a V element past that range becomes INF and softmax·V smears it over every query row — one bad element per
@@ -425,7 +428,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             }
 
             ProbeV(v, prefix);
-            Tensor attn = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
+            Tensor attn = new Tensor(headed, DType.F32);
             try
             {
                 backend.ScaledDotProductAttention(attn, q, k, v, null, 1f / MathF.Sqrt(hd));
@@ -628,7 +631,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     }
 
     /// <summary>Per-token <c>out = h*(1+scale) + shift</c>. The modulation table is indexed per token inside the
-    /// kernel, so nothing is materialized at <c>[seq, hidden]</c> and the table stays F32 while the stream is bf16.</summary>
+    /// kernel, so nothing is materialized at <c>[seq, hidden]</c> and the table stays F32 whatever the stream's dtype.</summary>
     private static Tensor Modulate(IBackend backend, Tensor h, Tensor shift, Tensor scale, Tensor modIndex,
         Tensor? consumerWeight = null)
     {
@@ -683,7 +686,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         MiniMaxH3PackedLayout layout, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf)
     {
         Tensor[] mod = Adaln(backend, tEmb, "final_layer.adaln_proj", expand: 2, modalities: 1);
-        // The heads are the checkpoint's F32 island, so the stream leaves bf16 here — one cast for the whole tail.
+        // The heads are the checkpoint's F32 island, so the stream leaves the body dtype here — one cast for the tail.
         Tensor normed = Norm(backend, h, "final_layer.norm.weight", _config.FinalNormEps, DType.F32);
         try
         {

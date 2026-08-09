@@ -69,7 +69,7 @@ public sealed class LoraStack : IDisposable
             }
         }
 
-        int merged = 0;
+        int merged = 0, skippedShape = 0;
         foreach ((string canonicalKey, List<(LoraLayer layer, float strength)> deltas) in grouped)
         {
             if (!weights.TryGetValue(canonicalKey, out Tensor? baseW))
@@ -83,6 +83,20 @@ public sealed class LoraStack : IDisposable
                 throw new HartsyInferenceException(
                     $"LoRA cannot merge into fp8 weight '{canonicalKey}': requantizing against a per-tensor scale needs "
                     + $"a 2-D Linear weight, got {baseW.Shape} ({originalDtype}).");
+            }
+            // A LoRA trained against a DIFFERENT build of the same architecture reaches here with the right key and
+            // the wrong shape — MiniMax-H3's Turbo LoRA carries the unpruned [96768, 2688] adaln projection while a
+            // pruned build stores the [96768, 8] curve-table form. AccumulateDelta would hand that straight to
+            // backend.Add against a smaller destination, so the mismatch has to be caught here.
+            (LoraLayer badLayer, float _) = deltas.Find(d => !DeltaShapeMatches(d.layer, baseW));
+            if (badLayer is not null)
+            {
+                Logs.Warning($"LoRA delta for '{canonicalKey}' is "
+                    + $"[{badLayer.LoraUp.Shape[0]}, {badLayer.LoraDown.Shape[1]}] but the checkpoint's weight is "
+                    + $"{baseW.Shape} — this LoRA was trained against a different build of this architecture; "
+                    + "skipping this weight.");
+                skippedShape++;
+                continue;
             }
 
             // CastTo folds Fp8ScaleFactor into the values and returns factor 1.0, so the merge below stays quant-unaware.
@@ -120,12 +134,21 @@ public sealed class LoraStack : IDisposable
             }
         }
 
-        if (merged > 0)
+        if (merged > 0 || skippedShape > 0)
         {
-            Logs.Info($"Merged {merged} LoRA-targeted weights into {target}.");
+            // The skipped count is load-bearing, not decoration: a partially applied LoRA still generates, so a
+            // silent skip reads as success while the LoRA does only part of its job.
+            string skipped = skippedShape > 0 ? $" ({skippedShape} skipped on shape mismatch)" : "";
+            Logs.Info($"Merged {merged} of {grouped.Count} LoRA-targeted weights into {target}{skipped}.");
         }
         return merged;
     }
+
+    /// <summary>Whether this layer's <c>up @ down</c> product is the shape of the weight it would be added to.</summary>
+    private static bool DeltaShapeMatches(LoraLayer layer, Tensor baseW) =>
+        baseW.Shape.Rank == 2
+        && layer.LoraUp.Shape[0] == baseW.Shape[0]
+        && layer.LoraDown.Shape[1] == baseW.Shape[1];
 
     private static void AccumulateDelta(IBackend backend, Tensor accumF32, LoraLayer layer, float strength)
     {

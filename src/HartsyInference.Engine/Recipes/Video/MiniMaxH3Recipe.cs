@@ -28,7 +28,6 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     /// <inheritdoc/>
     public string Name => "minimax-h3";
 
-
     /// <inheritdoc/>
     /// <remarks>MiniMax-H3 VAE-encodes the start and end images into keyframe conditioning, and is the first video
     /// family to merge LoRAs — on either build, since an fp8 target is dequantized, merged and requantized.</remarks>
@@ -82,7 +81,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             // F32, and F16 is not a bug to chase: this DiT's stream genuinely leaves F16 range on real weights —
             // condition_proj already emits 82740 (2 of 5376 text channels overflow to inf before block 0) and the
             // residual reaches 2.7e6 by the last block. BF16 holds the range but falls off the native fp8 GEMM
-            // guard (CudaBackend.cs:959 takes fp8/F32/F16 inputs only) for a 46% slowdown. The 2-layer parity
+            // guard (its native-fp8 branch takes fp8/F32/F16 inputs only) for a 46% slowdown. The 2-layer parity
             // test passes both, so it does not gate this — only a real-weight run does.
             DType bodyDType = DType.F32;
             MiniMaxH3Transformer transformer = LoadTransformer(assets.Dit, loaders, bodyDType,

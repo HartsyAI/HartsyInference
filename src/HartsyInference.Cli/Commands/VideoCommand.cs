@@ -120,7 +120,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
 
         /// <summary>LoRAs to merge into the denoiser; families that don't declare LoRA support refuse them.</summary>
         [CommandOption("--lora")]
-        [Description("LoRA to merge, by name or path; repeat for more. Needs an unquantized (bf16) checkpoint — a merge cannot rewrite quantized weights.")]
+        [Description("LoRA to merge, by name or path; repeat for more. Merges into fp8 checkpoints too — the target weight is dequantized, merged, and requantized.")]
         public string[]? Loras { get; init; }
 
         /// <summary>Per-LoRA strengths, positionally matched to --lora; missing entries default to 1.0.</summary>

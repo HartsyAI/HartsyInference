@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Linq;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -329,20 +330,27 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         long actual = rows?.Shape[0] ?? 0;
         if (actual != expectedRows)
         {
-            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+            throw new HartsyInferenceException(
                 $"MiniMax-H3 layout expects {expectedRows} conditioning {stream} row(s), got {actual}.");
         }
         if (rows is not null && rows.Shape[1] != expectedWidth)
         {
-            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+            throw new HartsyInferenceException(
                 $"MiniMax-H3 conditioning {stream} rows are {rows.Shape[1]} wide, expected {expectedWidth}.");
         }
     }
 
     /// <summary>Logs min/max/mean/rms under <c>HARTSY_H3_PROBE=1</c>; no-op otherwise.</summary>
+    /// <summary>Debug switches, read once at type init rather than per tensor: <see cref="Probe"/> and
+    /// <see cref="Dump"/> are called several times per denoise STEP, so an environment lookup each time is a
+    /// per-generation cost paid to answer a question that cannot change while the process runs.</summary>
+    private static readonly bool ProbeEnabled = Environment.GetEnvironmentVariable("HARTSY_H3_PROBE") == "1";
+
+    private static readonly string? DumpDir = Environment.GetEnvironmentVariable("HARTSY_H3_DUMP");
+
     private static void Probe(string label, Tensor t)
     {
-        if (Environment.GetEnvironmentVariable("HARTSY_H3_PROBE") != "1")
+        if (!ProbeEnabled)
         {
             return;
         }
@@ -389,7 +397,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             }
             return true;
         }
-        catch (HartsyInference.Core.Exceptions.OutOfVramException ex)
+        catch (OutOfVramException ex)
         {
             // Residency is an optimization, never a requirement: PreloadWeights rolls its batch back on OOM, so the
             // per-call streaming path is still correct — degrade instead of failing the generation. On the sharded
@@ -407,7 +415,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
 
     /// <summary>Best-effort weight residency for a phase-scoped component (the VAE decoders, called once at the end
     /// of a generation) — mirrors <see cref="TryPreloadTransformer"/>'s degrade-not-fail contract: an
-    /// <see cref="HartsyInference.Core.Exceptions.OutOfVramException"/> during preload just means the phase falls
+    /// <see cref="OutOfVramException"/> during preload just means the phase falls
     /// back to the existing lazy per-op streaming path, never a failed generation.</summary>
     private static bool TryPreloadWeights(IBackend backend, string label, IEnumerable<Tensor> weights)
     {
@@ -416,7 +424,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             backend.PreloadWeights(weights);
             return true;
         }
-        catch (HartsyInference.Core.Exceptions.OutOfVramException ex)
+        catch (OutOfVramException ex)
         {
             Logs.Warning($"[MiniMaxH3] {label} preload did not fit ({ex.Message}) — streaming per call.");
             return false;
@@ -427,7 +435,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
     /// when the variable is unset.</summary>
     private static void Dump(string name, Tensor t)
     {
-        string? dir = Environment.GetEnvironmentVariable("HARTSY_H3_DUMP");
+        string? dir = DumpDir;
         if (string.IsNullOrEmpty(dir))
         {
             return;
