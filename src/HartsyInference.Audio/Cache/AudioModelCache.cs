@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Audio.Cache;
 
@@ -182,22 +183,127 @@ public static class AudioModelCache
         long? total = response.Content.Headers.ContentLength;
         long downloaded = 0;
 
-        await using (Stream src = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false))
-        await using (FileStream dst = new(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 1 << 16, useAsync: true))
+        // Refuse a download that cannot fit rather than filling the disk and taking the whole process
+        // (and every other write on the box) down with it.
+        EnsureRoomFor(localPath, total);
+
+        string sizeText = total.HasValue ? $"{total.Value / 1048576.0:0.#} MB" : "unknown size";
+        Logs.Info($"[AudioCache] Downloading {hfRepoId}/{filename} ({sizeText})...");
+        long nextLogBytes = ProgressLogInterval;
+        DateTime started = DateTime.UtcNow;
+        try
         {
-            byte[] buffer = new byte[1 << 16];
-            int read;
-            while ((read = await src.ReadAsync(buffer.AsMemory(), ct).ConfigureAwait(false)) > 0)
+            // The client's overall timeout has to stay generous for multi-GB files, which means a CONNECTION
+            // THAT SIMPLY STOPS DELIVERING looks identical to a slow download for an hour. Bound the gap
+            // between reads instead, and reset it whenever bytes actually arrive.
+            using CancellationTokenSource stallCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            stallCts.CancelAfter(StallTimeout);
+            await using (Stream src = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false))
+            await using (FileStream dst = new(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 1 << 16, useAsync: true))
             {
-                await dst.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
-                downloaded += read;
-                progress?.Report(downloaded);
+                byte[] buffer = new byte[1 << 16];
+                int read;
+                while ((read = await ReadWithStallGuard(src, buffer, stallCts, ct, hfRepoId, filename).ConfigureAwait(false)) > 0)
+                {
+                    stallCts.CancelAfter(StallTimeout);
+                    await dst.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                    downloaded += read;
+                    progress?.Report(downloaded);
+                    // Without this a multi-GB first load looks like a frozen UI for minutes on end.
+                    if (downloaded >= nextLogBytes)
+                    {
+                        nextLogBytes = downloaded + ProgressLogInterval;
+                        double mb = downloaded / 1048576.0;
+                        double secs = Math.Max(0.001, (DateTime.UtcNow - started).TotalSeconds);
+                        string pct = total is > 0 ? $"{downloaded * 100.0 / total.Value:0.0}% of {total.Value / 1048576.0:0.#} MB" : $"{mb:0.#} MB";
+                        Logs.Info($"[AudioCache] {filename}: {pct} ({mb / secs:0.#} MB/s)");
+                    }
+                }
             }
+        }
+        catch
+        {
+            // A half-written .partial is dead weight that survives the failure and eats the disk until
+            // someone notices — the exact shape that filled the root filesystem on 2026-08-08.
+            TryDelete(tempPath);
+            throw;
         }
 
         File.Move(tempPath, localPath, overwrite: true);
-        _ = total; // suppress unused-warning; useful for future progress%
+        Logs.Info($"[AudioCache] {filename} ready ({downloaded / 1048576.0:0.#} MB).");
         return localPath;
+    }
+
+    /// <summary>How long the transfer may go without receiving a single byte before it is declared stalled.</summary>
+    private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(120);
+
+    /// <summary>One read, translating a stall-timeout cancellation into a clear error. A caller-requested
+    /// cancellation still propagates as cancellation.</summary>
+    private static async Task<int> ReadWithStallGuard(Stream src, byte[] buffer, CancellationTokenSource stallCts,
+        CancellationToken callerToken, string hfRepoId, string filename)
+    {
+        try
+        {
+            return await src.ReadAsync(buffer.AsMemory(), stallCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Download of {hfRepoId}/{filename} stalled — no data for {StallTimeout.TotalSeconds:0} seconds. " +
+                "Check the network connection and retry; the partial file has been removed.");
+        }
+    }
+
+    /// <summary>How much must download between progress log lines.</summary>
+    private const long ProgressLogInterval = 128L * 1024 * 1024;
+
+    /// <summary>Free bytes to leave unused after a download, so filling the cache never wedges the machine.</summary>
+    private const long DiskHeadroomBytes = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>Throws when <paramref name="needed"/> would not fit on the target volume with headroom to spare.
+    /// A clear up-front failure beats an ENOSPC part-way through a multi-GB transfer, which leaves a large
+    /// .partial behind and can take the rest of the system down with it.</summary>
+    private static void EnsureRoomFor(string localPath, long? needed)
+    {
+        if (needed is not > 0)
+        {
+            return;
+        }
+        try
+        {
+            string? root = Path.GetPathRoot(Path.GetFullPath(localPath));
+            if (string.IsNullOrEmpty(root))
+            {
+                return;
+            }
+            long free = new DriveInfo(root).AvailableFreeSpace;
+            if (free < needed.Value + DiskHeadroomBytes)
+            {
+                throw new IOException(
+                    $"Not enough disk space: {needed.Value / 1073741824.0:0.##} GB needed (plus " +
+                    $"{DiskHeadroomBytes / 1073741824.0:0.#} GB headroom) but only {free / 1073741824.0:0.##} GB free on '{root}'. " +
+                    "Free up space or move the model cache with HARTSYINFERENCE_MODEL_CACHE.");
+            }
+        }
+        catch (Exception ex) when (ex is not IOException)
+        {
+            // Can't determine free space (unusual mount, permissions) — don't block the download over it.
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup; the original failure is what matters.
+        }
     }
 
     private static string ResolveCacheRoot()

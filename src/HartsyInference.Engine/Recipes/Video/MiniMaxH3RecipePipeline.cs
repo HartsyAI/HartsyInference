@@ -247,15 +247,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     /// smaller card's share too thin would otherwise only surface as a mid-denoise OOM on that backend.</summary>
     private void CheckVramFeasibility(int width, int height, int frames)
     {
-        int videoLatentFrames = MiniMaxH3Geometry.VideoLatentFrames(frames);
-        int audioLatentFrames = MiniMaxH3Geometry.AudioLatentFrames(frames);
-        int latentH = height / VaeSpatialRatio, latentW = width / VaeSpatialRatio;
-        int videoRows = videoLatentFrames * (latentH / 2) * (latentW / 2);
-        int audioRows = audioLatentFrames * 2;
-        // Text/reference rows are only known after encoding, but they're a small, bounded addition next to a
-        // geometry large enough to be at risk here — a fixed conservative estimate keeps this check allocation-free.
-        const int approxNonVideoRows = 512;
-        int seq = approxNonVideoRows + videoRows + audioRows;
+        int seq = SequenceLengthFor(width, height, frames);
         long floorBytes = MiniMaxH3ActivationEstimate.EstimateFloorBytes(seq, _config, DType.F32);
 
         // Every backend running block ranges needs the same per-block floor, so when sharding is on, BOTH have to
@@ -268,26 +260,36 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             stages.Add((_pipeline.DitShardBackend, "shard", _pipeline.EstimateShardResidentWeightBytes()));
         }
         OutOfVramException? worst = null;
-        long worstDeficit = 0;
+        long worstDeficit = 0, worstBudget = 0;
         foreach ((IBackend backend, string label, long weights) in stages)
         {
-            if (CheckOneBackend(backend, label, floorBytes, weights, frames, width, height, seq, out long deficit)
-                is OutOfVramException failure && deficit > worstDeficit)
+            if (CheckOneBackend(backend, label, floorBytes, weights, frames, width, height, seq,
+                    out long deficit, out long budget) is OutOfVramException failure && deficit > worstDeficit)
             {
                 worst = failure;
                 worstDeficit = deficit;
+                worstBudget = budget;
             }
         }
         if (worst is not null)
         {
-            throw worst;
+            // Name a length that WOULD work. "Lower the frame count" without a number leaves the user bisecting by
+            // hand against a check that only answers yes/no.
+            int feasible = LargestFeasibleFrameCount(width, height, frames, worstBudget);
+            string advice = feasible > 0
+                ? $" At {width}x{height} the longest clip that fits is {feasible} frames "
+                    + $"({(double)feasible / MiniMaxH3Geometry.Fps:F1} s)."
+                : $" Not even the shortest clip fits at {width}x{height} — the resolution is the limit here, "
+                    + "not the length.";
+            throw new OutOfVramException(worst.Message + advice);
         }
     }
 
     private static OutOfVramException? CheckOneBackend(IBackend backend, string label, long floorBytes,
-        long residentWeightBytes, int frames, int width, int height, int seq, out long deficit)
+        long residentWeightBytes, int frames, int width, int height, int seq, out long deficit, out long budget)
     {
         deficit = 0;
+        budget = 0;
         // Pooled cuMemFreeAsync reservations don't return to cuMemGetInfo's free count until trimmed — the same
         // staleness VramPlanner.TrimBeforeQuery exists to counteract for other families' checks.
         backend.TrimMemoryPool();
@@ -298,6 +300,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             return null;
         }
         long availableForActivations = freeBytes - residentWeightBytes;
+        budget = availableForActivations;
         if (floorBytes <= availableForActivations)
         {
             return null;
@@ -309,6 +312,36 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             + $"of resident DiT weights, but only {Mb(freeBytes)} is free ({Mb(deficit)} short). Weight streaming "
             + "cannot reduce this — lower the resolution or frame count, use a device with more VRAM, or adjust the "
             + "DiT shard split.");
+    }
+
+    /// <summary>Packed sequence length for a geometry, without allocating anything. Text/reference rows are only
+    /// known after encoding, but they are a small bounded addition next to a geometry large enough to be at risk
+    /// here, so a fixed conservative allowance keeps this usable as a pre-flight.</summary>
+    private int SequenceLengthFor(int width, int height, int frames)
+    {
+        int latentH = height / VaeSpatialRatio, latentW = width / VaeSpatialRatio;
+        int videoRows = MiniMaxH3Geometry.VideoLatentFrames(frames) * (latentH / 2) * (latentW / 2);
+        int audioRows = MiniMaxH3Geometry.AudioLatentFrames(frames) * 2;
+        const int approxNonVideoRows = 512;
+        return approxNonVideoRows + videoRows + audioRows;
+    }
+
+    /// <summary>The longest clip that WOULD fit at this resolution, so the refusal can name a length that works
+    /// instead of only the one that doesn't. Walks the 17k+5 grid down from the request rather than solving: the
+    /// floor is not linear in frames (video and audio rows advance on different grids) and the search is at most a
+    /// few dozen arithmetic steps with no allocation. Returns 0 when even the shortest clip doesn't fit, which means
+    /// the resolution is the problem, not the length.</summary>
+    private int LargestFeasibleFrameCount(int width, int height, int frames, long budgetBytes)
+    {
+        for (int candidate = frames - 17; candidate >= 5; candidate -= 17)
+        {
+            if (MiniMaxH3ActivationEstimate.EstimateFloorBytes(
+                SequenceLengthFor(width, height, candidate), _config, DType.F32) <= budgetBytes)
+            {
+                return candidate;
+            }
+        }
+        return 0;
     }
 
     private static string Mb(long bytes) => $"{bytes / (1024 * 1024)} MB";
