@@ -86,6 +86,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         (int steps, float cfgScale, int width, int height) = GenerationDefaults.Sdxl.Resolve(request);
+        float cfgRescale = Math.Clamp(request.CfgRescale ?? 0f, 0f, 1f);
         int latentH = height / 8;
         int latentW = width / 8;
         TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);
@@ -241,12 +242,15 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         // update. Applies to the plain t2i/img2img case on an epsilon-prediction Euler schedule; every
         // conditional feature (masked inpaint, ControlNet, IP-Adapter, refiner StepSwap, per-step
         // conditioning schedules, other schedulers) keeps the reference host loop.
+        // cfgRescale > 0 also falls back to the eager host loop: the fused loop's CFG-Euler combine is a
+        // single in-place device kernel with no intermediate host-visible F32 tensor to renormalize against.
         bool fusedLoop = scheduler is EulerDiscreteScheduler fusedScheduler && fusedScheduler.FusedEulerCompatible
             && !isMaskedInpaint
             && !useStepSwap
             && (controlNets is null || controlNets.Count == 0)
             && (ipAdapters is null || ipAdapters.Count == 0)
             && conditioningSchedule is null
+            && cfgRescale <= 0f
             && pooledOutput is not null;
 
         // CFG-branch parallelism (ROADMAP.md item 10, mirrors Flux/Wan): the fused loop's batch=2 single-GPU
@@ -284,7 +288,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             ? RunDenoiseLoopCfgParallel(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, (EulerDiscreteScheduler)scheduler, useF16, startStep, steps, cfgScale, onProgress)
             : fusedLoop
                 ? RunDenoiseLoopFused(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, (EulerDiscreteScheduler)scheduler, useF16, startStep, steps, cfgScale, onProgress)
-                : RunDenoiseLoop(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, scheduler, useF16, startStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, controlNets,
+                : RunDenoiseLoop(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, scheduler, useF16, startStep, totalSteps: steps, cfgScale, cfgRescale, sourceLatent, latentMask, seed, controlNets,
                     refiner, swapStep, clipGForRefiner, refinerSizeConditionPos, refinerSizeConditionNeg, ipAdapters, onProgress, conditioningSchedule);
         Logs.Verbose($"[sdxl-phase] denoise {denoiseSw.ElapsedMilliseconds}ms "
             + $"({(cfgParallelEligible ? "cfg-parallel" : fusedLoop ? "fused" : "host")} loop)");
@@ -411,6 +415,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         int startStep,
         int totalSteps,
         float cfgScale,
+        float cfgRescale,
         Tensor? sourceLatent,
         Tensor? latentMask,
         int seed,
@@ -551,7 +556,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             Tensor noisePred;
             if (cfgScale > 1.0f)
             {
-                noisePred = ClassifierFreeGuidanceStep(unetInput, t, activeTextEmb, pooledOutput, activeSizeCond, cfgScale, cnDownRes, cnMidRes,
+                noisePred = ClassifierFreeGuidanceStep(unetInput, t, activeTextEmb, pooledOutput, activeSizeCond, cfgScale, cfgRescale, cnDownRes, cnMidRes,
                     overrideUnet: inRefinerPhase ? activeUnet : null,
                     sizeConditionUncond: activeSizeCondUncond,
                     ipaImageTokens: activeIpaTokens, ipaToKIpAll: activeIpaK, ipaToVIpAll: activeIpaV, ipaScalePerLayer: activeIpaScales);
@@ -910,9 +915,9 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
     private static bool TokensEqual(int[]? cached, int[] incoming)
         => cached is not null && cached.AsSpan().SequenceEqual(incoming);
 
-    /// <summary>Runs classifier-free guidance for SDXL: noise_pred = uncond + cfg_scale * (cond - uncond). When ControlNet residuals are supplied they're applied to both UNet branches (single CN pass per step, residuals shared — matches diffusers' guess_mode=True; strict per-branch CN passes are a future optimization).
+    /// <summary>Runs classifier-free guidance for SDXL: noise_pred = uncond + cfg_scale * (cond - uncond), then optionally CFG-Rescale (<see cref="CfgHelper.ApplyCfgRescale"/>) when <paramref name="cfgRescale"/> > 0. When ControlNet residuals are supplied they're applied to both UNet branches (single CN pass per step, residuals shared — matches diffusers' guess_mode=True; strict per-branch CN passes are a future optimization).
     /// <para>The optional <paramref name="overrideUnet"/> + <paramref name="sizeConditionUncond"/> parameters drive refiner StepSwap mode: during the refiner phase the loop calls this with the refiner UNet and a separate uncond ADM array (so the cond/uncond branches use different aesthetic_score values, matching the refiner's training).</para></summary>
-    private Tensor ClassifierFreeGuidanceStep(Tensor latent, float timestep, Tensor textEmbeddings, Tensor pooledOutput, float[] sizeCondition, float cfgScale,
+    private Tensor ClassifierFreeGuidanceStep(Tensor latent, float timestep, Tensor textEmbeddings, Tensor pooledOutput, float[] sizeCondition, float cfgScale, float cfgRescale = 0f,
         IReadOnlyList<Tensor>? cnDownRes = null, Tensor? cnMidRes = null,
         UNet? overrideUnet = null, float[]? sizeConditionUncond = null,
         Tensor? ipaImageTokens = null, IReadOnlyList<Tensor>? ipaToKIpAll = null, IReadOnlyList<Tensor>? ipaToVIpAll = null, IReadOnlyList<float>? ipaScalePerLayer = null)
@@ -947,6 +952,12 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         Tensor uncondF32 = DtypeCastHelper.EnsureF32(Backend, uncondNoise);
         Tensor condF32 = DtypeCastHelper.EnsureF32(Backend, condNoise);
         Tensor output = CfgHelper.ApplyCfg(uncondF32, condF32, cfgScale);
+        if (cfgRescale > 0f)
+        {
+            Tensor rescaled = CfgHelper.ApplyCfgRescale(output, condF32, cfgRescale);
+            output.Dispose();
+            output = rescaled;
+        }
         uncondF32.Dispose();
         condF32.Dispose();
         return output;

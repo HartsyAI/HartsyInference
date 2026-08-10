@@ -31,6 +31,7 @@ internal static class RecipeRequestMapper
             Height = request.Height,
             Steps = request.Steps,
             CfgScale = request.CfgScale,
+            CfgRescale = request.CfgRescale,
             Seed = MapSeed(request.Seed),
         };
     }

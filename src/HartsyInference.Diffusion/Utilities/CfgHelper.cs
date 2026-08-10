@@ -128,6 +128,63 @@ public static unsafe class CfgHelper
         return output;
     }
 
+    /// <summary>CFG-Rescale (Hartsy's "hartsyinference"-flagged param — see <c>docs/07-Parameters-And-Feature-Flags.md</c>
+    /// on the extension side for why this duplicates rather than reads a Comfy-side param): rescales an already
+    /// CFG-combined <paramref name="guided"/> prediction back toward the conditional prediction's per-token L2
+    /// dispersion, blended by <paramref name="rescaleWeight"/>. High CFG scales inflate the guided prediction's
+    /// magnitude relative to the conditional's, which is what drives the oversaturation/burnt-highlights look —
+    /// this pulls it back down. At <paramref name="rescaleWeight"/> = 0 this is a no-op (returns a copy of
+    /// <paramref name="guided"/>); at 1.0 it's a full renormalize to <c>‖cond‖</c> (this is the same per-token
+    /// last-dim L2 reduction <see cref="ApplyCfgNormalized"/> uses for Lumina2's <c>cfg_normalization</c>, kept as
+    /// a separate method rather than refactored into this one to avoid risking that pipeline's already-validated
+    /// numerics). Not the same operation as ComfyUI's RescaleCFG node (which reduces std over all non-batch dims,
+    /// not L2 over the last dim per token) — this is Hartsy's own formulation, values are not directly comparable.
+    /// Both inputs must be F32 with identical shape; output is a new F32 tensor. Inputs are NOT disposed — caller
+    /// owns the lifetime.</summary>
+    public static Tensor ApplyCfgRescale(Tensor guided, Tensor cond, float rescaleWeight, float eps = 1e-12f)
+    {
+        if (guided.DType != DType.F32 || cond.DType != DType.F32)
+            throw new ArgumentException($"ApplyCfgRescale requires F32 inputs; got guided={guided.DType}, cond={cond.DType}. Cast via DtypeCastHelper.EnsureF32 first.");
+        if (!guided.Shape.Equals(cond.Shape))
+            throw new ArgumentException($"ApplyCfgRescale shape mismatch: guided={guided.Shape}, cond={cond.Shape}.");
+
+        Tensor output = new Tensor(guided.Shape, DType.F32);
+        float* guiPtr = (float*)guided.DataPointer;
+        float* conPtr = (float*)cond.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+
+        if (rescaleWeight <= 0f)
+        {
+            long total = guided.ElementCount;
+            for (long i = 0; i < total; i++) outPtr[i] = guiPtr[i];
+            return output;
+        }
+
+        int lastDim = (int)guided.Shape[guided.Shape.Rank - 1];
+        long tokens = guided.ElementCount / lastDim;
+
+        for (long tok = 0; tok < tokens; tok++)
+        {
+            long baseOffset = tok * lastDim;
+            double condSq = 0.0;
+            double guidedSq = 0.0;
+            for (int d = 0; d < lastDim; d++)
+            {
+                long idx = baseOffset + d;
+                condSq += (double)conPtr[idx] * conPtr[idx];
+                guidedSq += (double)guiPtr[idx] * guiPtr[idx];
+            }
+            float ratio = (float)(Math.Sqrt(condSq) / (Math.Sqrt(guidedSq) + eps));
+            for (int d = 0; d < lastDim; d++)
+            {
+                long idx = baseOffset + d;
+                float rescaled = guiPtr[idx] * ratio;
+                outPtr[idx] = rescaleWeight * rescaled + (1f - rescaleWeight) * guiPtr[idx];
+            }
+        }
+        return output;
+    }
+
     /// <summary>Dual (text + image) classifier-free guidance for reference-image edit pipelines:
     /// <c>output = uncond + imageScale·(imageCond − uncond) + textScale·(cond − imageCond)</c>, elementwise.
     /// This is the OmniGen2 triple-pass combine (<c>pipeline_omnigen2.py</c>:
