@@ -79,12 +79,14 @@ public sealed class Snac
     }
 
     /// <summary>Decodes hierarchical codes to PCM. <paramref name="codes"/> must have
-    /// length <see cref="NCodebooks"/>; entry <c>i</c> shape <c>[B, T_frames / VqStrides[i]]</c>.</summary>
-    public Tensor Decode(IBackend backend, IReadOnlyList<Tensor> codes, int batch)
+    /// length <see cref="NCodebooks"/>; entry <c>i</c> shape <c>[B, T_frames / VqStrides[i]]</c>.
+    /// <paramref name="callSeed"/> — see <see cref="SnacDecoder.Forward"/>; only matters for the
+    /// windowed-decode streaming path, default preserves today's monolithic-decode output exactly.</summary>
+    public Tensor Decode(IBackend backend, IReadOnlyList<Tensor> codes, int batch, int callSeed = 0)
     {
         Tensor latent = _quantizer.Decode(backend, codes, batch);
         int tFrames = (int)latent.Shape[2];
-        Tensor pcm = _decoder.Forward(backend, latent, batch, tFrames);
+        Tensor pcm = _decoder.Forward(backend, latent, batch, tFrames, callSeed);
         latent.Dispose();
         return pcm;
     }

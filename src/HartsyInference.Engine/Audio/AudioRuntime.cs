@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 
@@ -127,6 +128,48 @@ internal sealed class AudioRuntime
             // Post-generation device hygiene: drop leftover GPU activations and return pool-reserved-but-free blocks
             // to the driver. Cached (promoted) weights stay resident, so warm latency is unaffected — without this,
             // finished generations left multi-GB of dead activations + pool reservations on the card.
+            try
+            {
+                backend.FreeActivations();
+                backend.TrimMemoryPool();
+            }
+            catch (Exception ex)
+            {
+                Logs.Warning($"[Audio] Post-generation device cleanup failed: {ex.Message}");
+            }
+            gate.Dispose();
+            _genLock.Release();
+        }
+    }
+
+    /// <summary>Streaming counterpart to <see cref="RunAsync{T}"/>: holds this engine's generation lock and device
+    /// gate for the ENTIRE consumption of the returned stream, not just until <paramref name="work"/> returns —
+    /// the underlying generation loop keeps running on the device until every item has been yielded. Releases
+    /// when the consumer finishes draining, breaks early, or cancels; the async-iterator's <c>finally</c> below
+    /// runs exactly once either way. (C# forbids <c>yield return</c> inside a <c>try</c> with a <c>catch</c>
+    /// clause, so unlike <see cref="RunAsync{T}"/> this does not itself log-and-rethrow — exceptions still
+    /// propagate to the caller, they just aren't logged at this layer.)</summary>
+    internal async IAsyncEnumerable<T> RunStreamAsync<T>(IBackend backend, string modelKey,
+        Func<CancellationToken, IAsyncEnumerable<T>> work, [EnumeratorCancellation] CancellationToken cancel,
+        IReadOnlyList<IBackend>? stageBackends = null)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(work);
+        await _genLock.WaitAsync(cancel).ConfigureAwait(false);
+        IDisposable gate = stageBackends is { Count: > 0 }
+            ? await DeviceGate.AcquireAllAsync([backend, .. stageBackends], cancel).ConfigureAwait(false)
+            : await DeviceGate.AcquireAsync(backend, cancel).ConfigureAwait(false);
+        try
+        {
+            EvictOthersUnderMemoryPressure(backend, modelKey);
+            await foreach (T item in work(cancel).WithCancellation(cancel).ConfigureAwait(false))
+            {
+                yield return item;
+            }
+        }
+        finally
+        {
+            // Same post-generation device hygiene as RunAsync — see its comment for why this matters.
             try
             {
                 backend.FreeActivations();

@@ -130,10 +130,15 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
     /// cfg <paramref name="cfgCoef"/>=1.0 only (single forward). O(n) streaming: cross K/V are precomputed once
     /// and self-attention runs through a <see cref="FixedKvCache"/>, so each frame is a single-token backbone
     /// step rather than a full-prefix re-run.</summary>
+    /// <param name="onValidFrame">Optional callback invoked with each frame as soon as it's emitted, starting
+    /// from the same first valid (non-warmup) frame the post-loop trim below would keep — lets a caller stream
+    /// audio incrementally instead of waiting for the whole utterance. Receives the exact same <c>int[32]</c>
+    /// arrays that end up in the returned array; null (the default) preserves the original non-streaming
+    /// behavior byte-for-byte.</param>
     public int[,] Generate(IBackend backend, KyutaiTextScheduler scheduler, IEnumerable<KyutaiTextScheduler.Entry> entries,
         Tensor cross, Tensor sumCond, int maxFrames = 250, int delaySteps = 16, int finalPadding = 4,
         float audioTemp = 0.6f, int audioTopK = 250, float textTemp = 0.6f, int textTopK = 25, int seed = 0,
-        IBackend? depBackend = null)
+        IBackend? depBackend = null, Action<int[]>? onValidFrame = null)
     {
         // The depformer works on tiny (1-token, ≤32-step) tensors whose head-split / KV-cache management runs on
         // host pointers; on a GPU backend that forces a D2H drain per op (~500 syncs/frame). Running the whole
@@ -158,6 +163,7 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
 
         KyutaiTextScheduler.State state = scheduler.NewState(entries);
         List<int[]> emitted = new();
+        bool seenValidFrame = false;   // tracks the SAME leading-invalid-run skip the post-loop trim applies below
         using MoshiTransformer.CrossKvCache crossKv = Backbone.PrecomputeCrossKv(backend, cross);
         using FixedKvCache selfCache = new(numLayers: 16, batch: 1,
             numKvHeads: MoshiTransformer.Heads, headDim: MoshiTransformer.HeadDim, maxSequenceLength: maxFrames + 1);
@@ -198,6 +204,11 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
                     for (int k = 0; k < NumCodebooks; k++)
                         frame[k] = cache[1 + k, ((offset + 1 - maxDelay + delays[1 + k]) % ct + ct) % ct];
                     emitted.Add(frame);
+                    if (onValidFrame is not null)
+                    {
+                        if (!seenValidFrame && IsValidFrame(frame)) seenValidFrame = true;
+                        if (seenValidFrame) onValidFrame(frame);
+                    }
                 }
 
                 if (state.EndStep is int es && offset >= es + delaySteps + finalPadding) break;

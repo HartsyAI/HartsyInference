@@ -102,6 +102,17 @@ public sealed unsafe class DiaPipeline : IDisposable
     /// the checkpoint config's value.</summary>
     public float[] Generate(IBackend backend, ReadOnlySpan<int> textBytes, int maxTokens, int seed,
         Action<GenerationProgress>? progress, double? cfgScale, int? cfgFilterTopK, double? temperature, double? topP)
+        => Generate(backend, textBytes, maxTokens, seed, progress, cfgScale, cfgFilterTopK, temperature, topP, null);
+
+    /// <param name="onSettledFrame">Invoked once per REAL (already delay-reverted) audio frame's channel array,
+    /// as soon as it becomes fully determined — i.e. every channel's delayed write for that frame position has
+    /// happened. A channel's delay means frame <c>j</c> isn't settled until AR step <c>j + maxDelay</c>, so this
+    /// fires with a lag behind the raw per-step loop, not per-step itself; nothing fires for frames the EOS flush
+    /// ultimately truncates away (mirrors <c>tReal</c>'s own EOS-aware truncation exactly, computed incrementally
+    /// instead of after the fact). Passing null (the default) changes nothing about this method's behavior.</param>
+    public float[] Generate(IBackend backend, ReadOnlySpan<int> textBytes, int maxTokens, int seed,
+        Action<GenerationProgress>? progress, double? cfgScale, int? cfgFilterTopK, double? temperature, double? topP,
+        Action<int[]>? onSettledFrame)
     {
         _runCfgScale = cfgScale is > 0 ? (float)cfgScale.Value : _cfg.CfgScale;
         _runTopK = cfgFilterTopK is > 0 ? cfgFilterTopK.Value : _cfg.TopK;
@@ -140,6 +151,7 @@ public sealed unsafe class DiaPipeline : IDisposable
         for (int c = 0; c < ch; c++) grid[0, c] = _cfg.AudioBos;
 
         int eosStep = -1, lastStep = cap - 1;
+        int nextSettled = 0; // next real (delay-reverted) frame index not yet reported via onSettledFrame.
         // DEBUG: dump per-step channel-0 tokens to localize the repetition loop (DIA_DEBUG_TOKENS=path).
         string? dbgPath = Environment.GetEnvironmentVariable("DIA_DEBUG_TOKENS");
         System.Text.StringBuilder? dbg = dbgPath is null ? null : new();
@@ -169,6 +181,24 @@ public sealed unsafe class DiaPipeline : IDisposable
             if (eosStep < 0 && grid[target, 0] == _cfg.AudioEos) eosStep = target;
             // Near the cap, force the flush so every channel closes cleanly (model.py:721 is_max_len).
             if (eosStep < 0 && target >= cap - 1 - maxDelay) { eosStep = target; grid[target, 0] = _cfg.AudioEos; }
+
+            // Real frame j is fully determined once every channel's delayed write for it has happened, i.e. once
+            // `target` reaches j + maxDelay. Stop at tRealSoFar (= eosStep - 1 once eosStep is known, matching
+            // the final truncation below exactly) so frames the EOS flush will discard are never reported.
+            if (onSettledFrame is not null)
+            {
+                int tRealSoFar = eosStep >= 0 ? eosStep - 1 : int.MaxValue;
+                // grid[0] is the BOS prefill row the non-streaming path drops (real[j,c] = delayed[j+delay[c],c] =
+                // grid[j+delay[c]+1,c]); frame j is fully settled once target reaches j+maxDelay+1.
+                while (nextSettled <= target - maxDelay - 1 && nextSettled < tRealSoFar)
+                {
+                    int[] realFrame = new int[ch];
+                    for (int c = 0; c < ch; c++) realFrame[c] = grid[nextSettled + delay[c] + 1, c];
+                    onSettledFrame(realFrame);
+                    nextSettled++;
+                }
+            }
+
             if (eosStep >= 0 && target >= eosStep + maxDelay) { lastStep = target; break; }
             if (progress != null && (s & 63) == 0) progress(new(s, cap, sw.Elapsed.TotalMilliseconds));
             // Two CFG streams double per-step device pressure; trim the pool periodically on long runs.
@@ -207,6 +237,42 @@ public sealed unsafe class DiaPipeline : IDisposable
         return audio;
         }
         finally { backend.FreeWeights(EnumerateWeights()); }
+    }
+
+    /// <summary>Decodes ALL settled real frames accumulated so far (from <paramref name="onSettledFrame"/>) and
+    /// returns only the NEW trailing samples beyond <paramref name="alreadyEmittedSamples"/> — i.e. a full
+    /// re-decode of the whole utterance-so-far every call, not an incremental append. This mirrors nari-labs'
+    /// OWN streaming attempt for Dia (<c>generate_streaming()</c>, upstream PR #262): their author found that
+    /// feeding only the new tokens to DAC's vocoder produces audible boundary artifacts (DAC's decoder uses
+    /// symmetric/non-causal padding throughout — verified against the real weights, no causal variant exists —
+    /// so it genuinely needs both past AND future code-frame context, unlike Mimi/Firefly), and worked around it
+    /// with exactly this full-recompute approach rather than a proper windowed fix. Their successor model
+    /// (Dia2) replaced DAC with Kyutai's Mimi codec specifically to get real streaming instead of solving this.
+    /// Cost grows O(n²) in the number of chunks for a given utterance — acceptable for realistic TTS utterance
+    /// lengths (a few hundred frames), the same tradeoff nari-labs' own reference client accepted.</summary>
+    public float[] DecodeSettledFramesTail(IBackend backend, IReadOnlyList<int[]> allSettledFrames, int alreadyEmittedSamples)
+    {
+        int ch = _cfg.Channels;
+        int tReal = allSettledFrames.Count;
+        Tensor codes = new(new TensorShape(ch, 1, tReal), DType.I32);
+        int* cp = (int*)codes.DataPointer;
+        for (int c = 0; c < ch; c++)
+            for (int j = 0; j < tReal; j++)
+                cp[(long)c * tReal + j] = (uint)allSettledFrames[j][c] > 1023u ? 0 : allSettledFrames[j][c];
+        Tensor audioT = _dac.Decode(backend, codes, batch: 1, tFrames: tReal);
+        codes.Dispose();
+
+        int n = (int)audioT.Shape[audioT.Shape.Rank - 1];
+        int tailLen = Math.Max(0, n - alreadyEmittedSamples);
+        float[] tail = new float[tailLen];
+        if (tailLen > 0)
+        {
+            float* ap = (float*)audioT.DataPointer;
+            Buffer.MemoryCopy(ap + alreadyEmittedSamples, System.Runtime.CompilerServices.Unsafe.AsPointer(ref tail[0]),
+                tailLen * 4L, tailLen * 4L);
+        }
+        audioT.Dispose();
+        return tail;
     }
 
     /// <summary>Steps both CFG branches and returns per-channel (conditional, CFG-combined) logits.</summary>

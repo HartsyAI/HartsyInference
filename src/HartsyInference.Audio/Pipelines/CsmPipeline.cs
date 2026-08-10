@@ -26,8 +26,13 @@ public sealed unsafe class CsmPipeline : IDisposable
         _mimi = mimi;
     }
 
-    /// <summary>Synthesizes 24 kHz audio for the Llama-tokenized <paramref name="textTokenIds"/>.</summary>
-    public float[] Synthesize(IBackend backend, int[] textTokenIds, int maxFrames = 1024, int seed = 0)
+    /// <summary>Synthesizes 24 kHz audio for the Llama-tokenized <paramref name="textTokenIds"/>. When
+    /// <paramref name="onFrame"/> is supplied, it is invoked with each genuine (non-EOS-sentinel) frame right
+    /// after it's added — the same shape as <c>MoshiTtsGenerator.Generate</c>'s <c>onValidFrame</c> — so a
+    /// streaming caller can batch frames into <see cref="Mimi.DecodeStreaming"/> calls as they're produced
+    /// instead of waiting for the whole utterance. Passing null (the default) changes nothing about this method's
+    /// behavior.</summary>
+    public float[] Synthesize(IBackend backend, int[] textTokenIds, int maxFrames = 1024, int seed = 0, Action<int[]>? onFrame = null)
     {
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
@@ -53,6 +58,7 @@ public sealed unsafe class CsmPipeline : IDisposable
                 if (frame[cb] != _cfg.CodebookEosToken) { isEos = false; break; }
             if (isEos) break;
             frames.Add(frame);
+            onFrame?.Invoke(frame);
         }
         Logs.Info($"CSM: generated {frames.Count} frames ({frames.Count * _cfg.FrameSamples / (double)_cfg.SampleRate:F2}s) in {sw.ElapsedMilliseconds}ms.");
 

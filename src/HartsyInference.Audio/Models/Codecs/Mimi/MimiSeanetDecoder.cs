@@ -66,6 +66,95 @@ internal sealed unsafe class MimiSeanetDecoder
         return pcm;
     }
 
+    /// <summary>Streaming counterpart to <see cref="Forward"/>: same computation, restructured so each causal
+    /// conv's left context is <paramref name="state"/>'s carried real-audio tail instead of implicit zero-padding,
+    /// and each upsample stage's overlap-add tail carries across calls instead of being silently cropped away —
+    /// verified equivalent (to float rounding) to a single monolithic <see cref="Forward"/> call over the whole
+    /// utterance by <c>MimiStreamParityTests</c>. z <c>[B, latentDim, t]</c> -> pcm <c>[B, 1, t*960]</c> for THIS
+    /// chunk only.</summary>
+    public Tensor ForwardStreaming(IBackend backend, Tensor z, int batch, int t, MimiSeanetDecoderStreamState state)
+    {
+        int mult = 1 << Ratios.Length;
+        int dim = mult * NFilters;
+        Tensor x = CausalConvStreaming(backend, state, slot: 0, z, _inW!, _inB!, batch, _latentDim, dim, t, 7);
+        int curT = t;
+        for (int s = 0; s < Ratios.Length; s++)
+        {
+            int inCh = dim, outCh = dim / 2, ratio = Ratios[s];
+            Tensor e = new(x.Shape, DType.F32); backend.Elu(e, x, 1.0f); x.Dispose(); x = e;
+            int tUp = curT * ratio;
+            int overlap = ratio; // kernel(2r) - stride(r)
+            Tensor rawFull = new(new TensorShape(batch, outCh, tUp + overlap), DType.F32);
+            // bias: null here (not _upB[s]) — ConvTranspose1d's kernel broadcasts bias into EVERY output
+            // position before the scatter-accumulate, so a biased rawFull's overlap region would carry bias
+            // from BOTH the chunk that first produced it and the chunk it gets added into on the next call,
+            // double-counting it there. Overlap-add on bias-free values instead, then add bias once to the
+            // whole emitted chunk below — that matches what a single monolithic call produces exactly.
+            backend.ConvTranspose1d(rawFull, x, _upW[s]!, null, stride: ratio, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+            x.Dispose();
+            x = state.SplitTransposeOutput(s, rawFull, outCh, tUp, overlap, batch);
+            AddBiasInPlace(x, _upB[s]!, batch, outCh, tUp);
+            curT = tUp;
+            x = ResnetBlockStreaming(backend, state, slot: 1 + s, x, _r1W[s]!, _r1B[s]!, _r2W[s]!, _r2B[s]!, outCh, curT, batch);
+            dim = outCh;
+        }
+        Tensor ef = new(x.Shape, DType.F32); backend.Elu(ef, x, 1.0f); x.Dispose(); x = ef;
+        Tensor pcm = CausalConvStreaming(backend, state, slot: 5, x, _outW!, _outB!, batch, NFilters, 1, curT, 3);
+        x.Dispose();
+        return pcm;
+    }
+
+    private static Tensor ResnetBlockStreaming(IBackend backend, MimiSeanetDecoderStreamState state, int slot,
+        Tensor x, Tensor c1w, Tensor c1b, Tensor c2w, Tensor c2b, int dim, int t, int batch)
+    {
+        int hidden = dim / 2;
+        Tensor e1 = new(x.Shape, DType.F32); backend.Elu(e1, x, 1.0f);
+        // History is e1's tail (this layer's real input), per the class doc — NOT x's tail and NOT the block's
+        // residual output; getting this off by one layer would produce plausible-but-wrong audio.
+        Tensor mid = CausalConvStreaming(backend, state, slot, e1, c1w, c1b, batch, dim, hidden, t, 3);
+        e1.Dispose();
+        Tensor e2 = new(mid.Shape, DType.F32); backend.Elu(e2, mid, 1.0f); mid.Dispose();
+        // c2 is kernel=1 -> padLeft=0 already, genuinely stateless; CausalConv (not CausalConvStreaming) is
+        // correct here unchanged, no history slot consumed.
+        Tensor proj = CausalConv(backend, e2, c2w, c2b, batch, hidden, dim, t, 1);
+        e2.Dispose();
+        Tensor outp = new(x.Shape, DType.F32);
+        backend.Add(outp, x, proj);
+        proj.Dispose(); x.Dispose();
+        return outp;
+    }
+
+    /// <summary>Left-pads with <paramref name="state"/>'s carried real tail (zero, i.e. today's implicit
+    /// zero-padding, on the first chunk of an utterance) instead of the non-streaming path's virtual zero-pad.</summary>
+    private static Tensor CausalConvStreaming(IBackend backend, MimiSeanetDecoderStreamState state, int slot,
+        Tensor x, Tensor wt, Tensor b, int batch, int inDim, int outDim, int t, int kernel)
+    {
+        Tensor augmented = state.Augment(slot, x, inDim, t, kernel, batch);
+        Tensor o = new(new TensorShape(batch, outDim, t), DType.F32);
+        backend.Conv1d(o, augmented, wt, b, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+        if (!ReferenceEquals(augmented, x)) augmented.Dispose();   // kernel=1 path returns x itself, caller owns x
+        return o;
+    }
+
+    /// <summary>Adds per-output-channel <paramref name="bias"/> to every sample of <paramref name="t"/>
+    /// <c>[B,C,T]</c> in place. Companion to the bias-free streaming <c>ConvTranspose1d</c> call above — see the
+    /// comment at its call site for why bias is added here instead of inside the overlap-add.</summary>
+    private static void AddBiasInPlace(Tensor t, Tensor bias, int batch, int channels, int len)
+    {
+        float* tp = (float*)t.DataPointer;
+        float* bp = (float*)bias.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            long batchBase = (long)b * channels * len;
+            for (int c = 0; c < channels; c++)
+            {
+                float bv = bp[c];
+                long rowBase = batchBase + (long)c * len;
+                for (int i = 0; i < len; i++) tp[rowBase + i] += bv;
+            }
+        }
+    }
+
     private static Tensor ResnetBlock(IBackend backend, Tensor x, Tensor c1w, Tensor c1b, Tensor c2w, Tensor c2b, int dim, int t, int batch)
     {
         int hidden = dim / 2;   // compress = 2

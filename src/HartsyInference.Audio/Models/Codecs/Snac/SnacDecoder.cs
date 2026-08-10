@@ -125,7 +125,14 @@ internal sealed unsafe class SnacDecoder
         _finalConvB = WhisperOps.EnsureF32(w[$"{_prefix}.model.{finalSnakeIdx + 1}.bias"]);
     }
 
-    public Tensor Forward(IBackend backend, Tensor latent, int batch, int tFrames)
+    /// <param name="callSeed">Distinguishes separate <see cref="Forward"/> calls that decode overlapping
+    /// windows of the same utterance (Orpheus's streaming path — see <see cref="Pipelines.OrpheusPipeline"/>) so
+    /// each window's <see cref="ApplyNoiseBlock"/> draws different noise. A single monolithic decode (the default,
+    /// <c>callSeed=0</c>) is unaffected — it reduces to the exact same fixed-seed sequence this method always
+    /// used, so non-streaming callers see byte-identical output. Without this, every window would replay the
+    /// identical Gaussian sequence at the same relative offset, producing an audible periodic artifact that never
+    /// shows up in a single whole-utterance decode.</param>
+    public Tensor Forward(IBackend backend, Tensor latent, int batch, int tFrames, int callSeed = 0)
     {
         if (_cfg.AttnWindowSize is not null)
             throw new NotSupportedException("SNAC LocalMHA (attn_window_size) decode is not wired yet (Phase 4 PARITY-TODO).");
@@ -178,7 +185,7 @@ internal sealed unsafe class SnacDecoder
             t = tUp;
             dim = dimOut;
 
-            if (_noise && _cfg.NoiseScale != 0f) ApplyNoiseBlock(backend, x, _noiseW[i]!, batch, dim, t, stageSeed: i);
+            if (_noise && _cfg.NoiseScale != 0f) ApplyNoiseBlock(backend, x, _noiseW[i]!, batch, dim, t, stageSeed: i, callSeed);
 
             foreach (SnacResidualUnit unit in _stageUnits[i])
             {
@@ -209,12 +216,12 @@ internal sealed unsafe class SnacDecoder
 
     /// <summary>NoiseBlock: h = conv1x1(x); x += randn[B,1,T] * h (noise broadcast across channels).
     /// Reference uses torch.randn; we use a fixed-seed Gaussian so decode is reproducible (PARITY-TODO).</summary>
-    private void ApplyNoiseBlock(IBackend backend, Tensor x, Tensor linearW, int batch, int dim, int t, int stageSeed)
+    private void ApplyNoiseBlock(IBackend backend, Tensor x, Tensor linearW, int batch, int dim, int t, int stageSeed, int callSeed)
     {
         Tensor h = new(new TensorShape(batch, dim, t), DType.F32);
         backend.Conv1d(h, x, linearW, null, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
 
-        Random rng = new(1234 + stageSeed);
+        Random rng = new(1234 + stageSeed + callSeed * 97);
         float scale = _cfg.NoiseScale;
         float* xp = (float*)x.DataPointer;
         float* hp = (float*)h.DataPointer;

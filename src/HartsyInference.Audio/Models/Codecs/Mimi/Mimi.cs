@@ -97,6 +97,42 @@ public sealed unsafe class Mimi
         return pcm;
     }
 
+    /// <summary>Streaming counterpart to <see cref="Decode"/>: decodes one chunk of <c>[B,K,t]</c> codes, carrying
+    /// <paramref name="state"/> across successive calls for the same utterance so the result reconstructs (to
+    /// float rounding) what a single monolithic <see cref="Decode"/> call over the whole utterance would have
+    /// produced — verified by <c>MimiStreamParityTests</c>. Batch must be 1 (the streaming state carries no batch
+    /// dimension bookkeeping; Mimi decode in this engine is always single-sequence in practice).</summary>
+    public Tensor DecodeStreaming(IBackend backend, Tensor codes, int batch, int tFrames, MimiDecoderStreamState state)
+    {
+        if (_upsampleW is null) throw new InvalidOperationException("Mimi weights not loaded.");
+        if (batch != 1) throw new NotSupportedException("Mimi.DecodeStreaming supports batch=1 only.");
+
+        Tensor emb = _rvq.Decode(backend, codes, batch, tFrames);
+        int latent = Config.LatentDim;
+
+        int tUp = tFrames * UpStride;
+        int upOverlap = UpKernel - UpStride;
+        Tensor upRawFull = new(new TensorShape(batch, latent, tUp + upOverlap), DType.F32);
+        backend.ConvTranspose1d(upRawFull, emb, _upsampleW!, null, stride: UpStride, padLeft: 0, padRight: 0, dilation: 1, groups: latent);
+        emb.Dispose();
+        // Same crop-and-discard tail problem as the 4 SEANet decoder upsample stages below — carried the same
+        // way (slot 4 of the shared decoder state) rather than being silently dropped every chunk boundary.
+        Tensor up = state.Decoder.SplitTransposeOutput(4, upRawFull, latent, tUp, upOverlap, batch);
+
+        Tensor cl = new(new TensorShape(batch, tUp, latent), DType.F32);
+        backend.Transpose2D(cl, up, latent, tUp);
+        up.Dispose();
+        Tensor ctx = _decoderTransformer.ForwardStreaming(backend, cl, tUp, state.Transformer);
+        cl.Dispose();
+        Tensor ctxCf = new(new TensorShape(batch, latent, tUp), DType.F32);
+        backend.Transpose2D(ctxCf, ctx, tUp, latent);
+        ctx.Dispose();
+
+        Tensor pcm = _decoder.ForwardStreaming(backend, ctxCf, batch, tUp, state.Decoder);
+        ctxCf.Dispose();
+        return pcm;
+    }
+
     /// <summary>Encodes PCM <c>[B, 1, tPcm]</c> to codes <c>[B, K, T]</c> (Int32, K = total codebooks). Mirror of
     /// <see cref="Decode"/> / HF <c>MimiModel._encode_frame</c>: SEANet encoder → encoder transformer → strided
     /// downsample conv → split-RVQ nearest-neighbour encode. <paramref name="tPcm"/> should be a multiple of the

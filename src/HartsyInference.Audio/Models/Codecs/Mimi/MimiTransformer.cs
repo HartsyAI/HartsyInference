@@ -147,6 +147,84 @@ internal sealed unsafe class MimiTransformer
         return cur;
     }
 
+    /// <summary>x channels-last <c>[1,t,dim]</c> -> <c>[1,t,dim]</c>, attending against <paramref name="cache"/>'s
+    /// carried prefix instead of only the frames in this call. Batch must be 1 (Mimi decode is always
+    /// single-sequence in this engine; the cache carries no batch dimension bookkeeping). Equivalent (to float
+    /// rounding) to <see cref="Forward"/> run once over the full concatenated sequence — verified by
+    /// <c>MimiStreamParityTests</c>: this is NOT an approximation, it's the same computation restructured to
+    /// avoid recomputing the whole prefix every call.</summary>
+    public Tensor ForwardStreaming(IBackend backend, Tensor x, int t, MimiTransformerCache cache)
+    {
+        if (x.Shape[0] != 1) throw new NotSupportedException("MimiTransformer.ForwardStreaming supports batch=1 only.");
+        cache.EnsureLayers(_layers);
+        int priorLen = cache.Length;
+
+        Tensor cur = new(x.Shape, DType.F32);
+        long n = x.Shape.ElementCount;
+        Buffer.MemoryCopy((void*)x.DataPointer, (void*)cur.DataPointer, n * 4, n * 4);
+
+        Tensor mask = BuildWindowedMask(t, priorLen, _cfg.TransformerContext);
+        for (int i = 0; i < _layers; i++)
+        {
+            Tensor normed = new(cur.Shape, DType.F32);
+            backend.LayerNorm(normed, cur, _n1W[i]!, _n1B[i]!, LnEps);
+            Tensor q = WhisperOps.ProjectLinear(backend, normed, _qW[i]!, null, 1, t, _dim, _dim);
+            Tensor kNew = WhisperOps.ProjectLinear(backend, normed, _kW[i]!, null, 1, t, _dim, _dim);
+            Tensor vNew = WhisperOps.ProjectLinear(backend, normed, _vW[i]!, null, 1, t, _dim, _dim);
+            normed.Dispose();
+
+            Tensor qMh = new(new TensorShape(1, _heads, t, _headDim), DType.F32);
+            Tensor kNewMh = new(new TensorShape(1, _heads, t, _headDim), DType.F32);
+            Tensor vNewMh = new(new TensorShape(1, _heads, t, _headDim), DType.F32);
+            WhisperOps.ReshapeToMultiHead4D(qMh, q, 1, t, _heads, _headDim);
+            WhisperOps.ReshapeToMultiHead4D(kNewMh, kNew, 1, t, _heads, _headDim);
+            WhisperOps.ReshapeToMultiHead4D(vNewMh, vNew, 1, t, _heads, _headDim);
+            q.Dispose(); kNew.Dispose(); vNew.Dispose();
+
+            // RoPE at ABSOLUTE positions: the new frames start at priorLen, not 0 — this is the easiest thing to
+            // get wrong in this change (right mask, wrong RoPE still produces plausible-but-wrong audio with no
+            // seam signature to catch it, which is exactly why the parity test compares against a real monolithic
+            // decode rather than just checking for boundary clicks).
+            ApplyRoPE(qMh, 1, _heads, t, _headDim, _cfg.TransformerRopeTheta, _interleavedRope, posOffset: priorLen);
+            ApplyRoPE(kNewMh, 1, _heads, t, _headDim, _cfg.TransformerRopeTheta, _interleavedRope, posOffset: priorLen);
+
+            (Tensor kAll, Tensor vAll) = cache.AppendAndGet(i, kNewMh, vNewMh, t);
+            kNewMh.Dispose(); vNewMh.Dispose();
+            int totalKv = priorLen + t;
+
+            Tensor attn = new(qMh.Shape, DType.F32);
+            backend.ScaledDotProductAttention(attn, qMh, kAll, vAll, mask, 1f / MathF.Sqrt(_headDim));
+            qMh.Dispose();
+            // kAll/vAll are owned by the cache now (it returns its own stored tensors) — do not dispose here.
+            _ = totalKv;
+
+            Tensor flat = new(new TensorShape(1, t, _dim), DType.F32);
+            float* ap = (float*)attn.DataPointer; float* fp = (float*)flat.DataPointer;
+            for (int ti = 0; ti < t; ti++)
+                for (int h = 0; h < _heads; h++)
+                    for (int d = 0; d < _headDim; d++)
+                        fp[(long)ti * _dim + h * _headDim + d] = ap[((long)h * t + ti) * _headDim + d];
+            attn.Dispose();
+            Tensor outp = WhisperOps.ProjectLinear(backend, flat, _oW[i]!, null, 1, t, _dim, _dim);
+            flat.Dispose();
+            AddScaled(cur, outp, _ls1[i]!, 1, t);
+            outp.Dispose();
+
+            Tensor normed2 = new(cur.Shape, DType.F32);
+            backend.LayerNorm(normed2, cur, _n2W[i]!, _n2B[i]!, LnEps);
+            Tensor up = WhisperOps.ProjectLinear(backend, normed2, _fc1W[i]!, null, 1, t, _dim, _ffn);
+            normed2.Dispose();
+            Activations.ErfGelu(up);
+            Tensor down = WhisperOps.ProjectLinear(backend, up, _fc2W[i]!, null, 1, t, _ffn, _dim);
+            up.Dispose();
+            AddScaled(cur, down, _ls2[i]!, 1, t);
+            down.Dispose();
+        }
+        mask.Dispose();
+        cache.Length += t;
+        return cur;
+    }
+
     private void AddScaled(Tensor cur, Tensor upd, Tensor scale, int batch, int t)
     {
         float* cp = (float*)cur.DataPointer, up = (float*)upd.DataPointer, sp = (float*)scale.DataPointer;
@@ -182,10 +260,31 @@ internal sealed unsafe class MimiTransformer
         return mask;
     }
 
+    /// <summary>Same sliding-window causal rule as <see cref="BuildMask"/>, generalized to a query block that
+    /// starts at absolute position <paramref name="priorLen"/> and a key axis spanning the full cached prefix
+    /// (<c>0..priorLen+t-1</c>) instead of assuming query and key both start at 0.</summary>
+    private static Tensor BuildWindowedMask(int t, int priorLen, int? context)
+    {
+        int totalKv = priorLen + t;
+        Tensor mask = new(new TensorShape(t, totalKv), DType.F32);
+        float* mp = (float*)mask.DataPointer;
+        for (int qi = 0; qi < t; qi++)
+        {
+            int absQ = priorLen + qi;
+            for (int kk = 0; kk < totalKv; kk++)
+            {
+                int delta = absQ - kk;
+                bool ok = delta >= 0 && (context is null || delta < context.Value);
+                mp[(long)qi * totalKv + kk] = ok ? 0f : float.NegativeInfinity;
+            }
+        }
+        return mask;
+    }
+
     // RoPE on [B,H,T,D]. HF `transformers` Mimi permutes q/k so a split-half (rotate_half) rotation applies
     // (pairs (i, i+D/2)); the moshi/DSM checkpoint keeps the native interleaved layout (pairs (2p, 2p+1)). Both
     // share the frequency schedule freq_p = theta^(-2p/D).
-    private static void ApplyRoPE(Tensor x, int batch, int heads, int t, int headDim, float theta, bool interleave)
+    private static void ApplyRoPE(Tensor x, int batch, int heads, int t, int headDim, float theta, bool interleave, int posOffset = 0)
     {
         float* xp = (float*)x.DataPointer;
         int half = headDim / 2;
@@ -194,10 +293,11 @@ internal sealed unsafe class MimiTransformer
                 for (int ti = 0; ti < t; ti++)
                 {
                     long rb = (((long)b * heads + h) * t + ti) * headDim;
+                    int absPos = posOffset + ti;
                     for (int p = 0; p < half; p++)
                     {
                         float freq = MathF.Pow(theta, -2f * p / headDim);
-                        float ang = ti * freq, cs = MathF.Cos(ang), sn = MathF.Sin(ang);
+                        float ang = absPos * freq, cs = MathF.Cos(ang), sn = MathF.Sin(ang);
                         int i0 = interleave ? 2 * p : p;
                         int i1 = interleave ? 2 * p + 1 : half + p;
                         float x0 = xp[rb + i0], x1 = xp[rb + i1];

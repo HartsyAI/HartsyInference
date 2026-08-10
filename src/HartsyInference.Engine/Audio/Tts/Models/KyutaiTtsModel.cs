@@ -1,6 +1,9 @@
+using System.Runtime.CompilerServices;
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Models.Codecs;
 using HartsyInference.Audio.Models.Codecs.Mimi;
 using HartsyInference.Audio.Models.Kyutai;
+using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -41,7 +44,7 @@ internal static class KyutaiTtsModel
 
             Session session = Session.Load(dsmPath, mimiPath, spmPath);
             Logs.Info("[Audio][Kyutai-TTS] Loaded kyutai/tts-1.6b-en_fr (Helium backbone + Mimi DSM, 24 kHz).");
-            return new TtsRunner(session.SampleRate, session.Synthesize, session);
+            return new StreamingTtsRunner(session.SampleRate, session.Synthesize, session.SynthesizeStream, session);
         },
     };
 
@@ -91,11 +94,18 @@ internal static class KyutaiTtsModel
             return new Session(generator, codec, tokenizer, [dsm, mimi]);
         }
 
-        public float[] Synthesize(IBackend backend, TtsJob job)
+        /// <summary>Everything <see cref="Synthesize"/> and <see cref="SynthesizeStream"/> need before the actual
+        /// generation loop runs — text tokenization/scheduling and the two conditioning tensors. Factored out so
+        /// the two entry points can never drift apart on how a job maps to a generation call; the caller owns
+        /// disposing <see cref="Cross"/>/<see cref="SumCond"/>.</summary>
+        private readonly record struct GenerationPrep(Tensor Cross, Tensor SumCond, List<KyutaiTextScheduler.Entry> Entries,
+            int MaxFrames, KyutaiTextScheduler Scheduler);
+
+        private GenerationPrep? Prepare(IBackend backend, TtsJob job)
         {
             if (string.IsNullOrWhiteSpace(job.Text))
             {
-                return [];
+                return null;
             }
             Tensor voice = GetVoice(string.IsNullOrEmpty(job.Voice) ? DefaultVoice : job.Voice);
 
@@ -121,7 +131,7 @@ internal static class KyutaiTtsModel
             }
             if (entries.Count == 0)
             {
-                return [];
+                return null;
             }
 
             // Frame budget: the 16-frame text lead + per-word tokens/padding + tail, capped at the 500-position budget.
@@ -132,14 +142,25 @@ internal static class KyutaiTtsModel
             }
             maxFrames = Math.Min(499, maxFrames);
 
-            using Tensor cross = _generator.Conditioner.ComputeCross(backend, voice);
+            Tensor cross = _generator.Conditioner.ComputeCross(backend, voice);
             // CFG-distilled model: guidance is a conditioning input and moshi's TTS default is 2.0. A coefficient of
             // 1.0 means no guidance, so the text is not enforced.
-            using Tensor sumCond = _generator.Conditioner.ComputeSum(backend, MoshiConditioner.CfgBin(2.0f));
-
+            Tensor sumCond = _generator.Conditioner.ComputeSum(backend, MoshiConditioner.CfgBin(2.0f));
             KyutaiTextScheduler scheduler = new KyutaiTextScheduler(secondStreamAhead: 2, maxPadding: 8, initialPadding: 2);
-            int[,] codes = _generator.Generate(backend, scheduler, entries, cross, sumCond,
-                maxFrames: maxFrames, audioTemp: 0.6f, seed: job.Seed);
+            return new GenerationPrep(cross, sumCond, entries, maxFrames, scheduler);
+        }
+
+        public float[] Synthesize(IBackend backend, TtsJob job)
+        {
+            if (Prepare(backend, job) is not { } prep)
+            {
+                return [];
+            }
+            using Tensor cross = prep.Cross;
+            using Tensor sumCond = prep.SumCond;
+
+            int[,] codes = _generator.Generate(backend, prep.Scheduler, prep.Entries, cross, sumCond,
+                maxFrames: prep.MaxFrames, audioTemp: 0.6f, seed: job.Seed);
             int frames = codes.GetLength(1);
             if (frames == 0)
             {
@@ -165,8 +186,107 @@ internal static class KyutaiTtsModel
             {
                 Buffer.MemoryCopy((void*)audioTensor.DataPointer, destination, (long)samples * 4, (long)samples * 4);
             }
-            Logs.Info($"[Audio][Kyutai-TTS] {entries.Count} words → {frames} frames → {samples / (double)SampleRate:0.0}s.");
+            Logs.Info($"[Audio][Kyutai-TTS] {prep.Entries.Count} words → {frames} frames → {samples / (double)SampleRate:0.0}s.");
             return audio;
+        }
+
+        /// <summary>Streaming counterpart to <see cref="Synthesize"/>: runs the same generation loop on a
+        /// background thread and decodes+emits audio every <c>FramesPerChunk</c> frames instead of once at the
+        /// end. Decodes via <see cref="Mimi.DecodeStreaming"/> with one <see cref="MimiDecoderStreamState"/> shared
+        /// across every chunk of this call (created fresh per utterance, disposed with the decoder below), which
+        /// carries the codec's causal-conv/transformer-KV/transpose-conv-overlap state across chunk boundaries —
+        /// this reconstructs (to float rounding) what a single monolithic <c>Decode</c> over the whole utterance
+        /// would have produced, verified by <c>MimiStreamParityTests</c> at chunk sizes down to 1 frame. 6 frames
+        /// @ 12.5 Hz = 480 ms; tune after a real listen test (plan Phase 1 acceptance criteria) rather than by
+        /// further guessing — state-carrying removed the boundary-quality floor that motivated a larger chunk.</summary>
+        public async IAsyncEnumerable<AudioChunk> SynthesizeStream(IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
+        {
+            const int FramesPerChunk = 6;
+            if (Prepare(backend, job) is not { } prep)
+            {
+                yield break;
+            }
+            using Tensor cross = prep.Cross;
+            using Tensor sumCond = prep.SumCond;
+            using MimiDecoderStreamState decodeState = new();
+            using StreamingCodecDecoder<Mimi> decoder = new(_codec, backend,
+                (codec, be, codes, batch, tFrames) => codec.DecodeStreaming(be, codes, batch, tFrames, decodeState), SampleRate);
+
+            // No catch here on purpose: letting Generate's exception fault the Task and rethrow from
+            // `await producer` below is simpler and safer than a side-channel field written on this thread and
+            // read on the consumer's — and unlike a field, `await producer` still surfaces it even when the
+            // consumer tears the enumeration down early (cancellation, a disconnect) rather than draining to
+            // completion, since that path runs through the `finally` below too, not just the happy path.
+            Task producer = Task.Run(() =>
+            {
+                List<int[]> pending = new(FramesPerChunk);
+                try
+                {
+                    _generator.Generate(backend, prep.Scheduler, prep.Entries, cross, sumCond,
+                        maxFrames: prep.MaxFrames, audioTemp: 0.6f, seed: job.Seed,
+                        onValidFrame: frame =>
+                        {
+                            pending.Add(frame);
+                            if (pending.Count < FramesPerChunk)
+                            {
+                                return;
+                            }
+                            SubmitPending(decoder, pending, cancel);
+                            pending.Clear();
+                        });
+                    if (pending.Count > 0)
+                    {
+                        SubmitPending(decoder, pending, cancel);
+                    }
+                }
+                finally
+                {
+                    // Always unblocks ReadAllAsync below, whether Generate finished, threw, or was cancelled —
+                    // otherwise a faulted producer would leave the consumer awaiting chunks that never arrive.
+                    decoder.Complete();
+                }
+            }, cancel);
+
+            try
+            {
+                await foreach (AudioChunk chunk in decoder.ReadAllAsync(cancel).ConfigureAwait(false))
+                {
+                    yield return chunk;
+                }
+            }
+            finally
+            {
+                // Runs on normal completion AND on early teardown (consumer cancels / stops enumerating), so a
+                // faulted producer is never silently dropped and generation never outlives this method un-awaited.
+                await producer.ConfigureAwait(false);
+            }
+            Logs.Info($"[Audio][Kyutai-TTS] {prep.Entries.Count} words → streamed.");
+        }
+
+        /// <summary>Packs one accumulated batch of generator frames into the <c>[1,NumCodebooks,n]</c> layout
+        /// <see cref="Mimi.Decode"/> expects and submits it — blocking (this always runs on the background
+        /// producer thread from <see cref="SynthesizeStream"/>, never a request thread) so the bounded channel's
+        /// backpressure genuinely paces generation against how fast the consumer drains chunks.</summary>
+        private static void SubmitPending(StreamingCodecDecoder<Mimi> decoder, List<int[]> frames, CancellationToken cancel)
+        {
+            int n = frames.Count;
+            Tensor codeTensor = new(new TensorShape(1, MoshiTtsGenerator.NumCodebooks, n), DType.I32);
+            int* codePtr = (int*)codeTensor.DataPointer;
+            for (int k = 0; k < MoshiTtsGenerator.NumCodebooks; k++)
+            {
+                for (int f = 0; f < n; f++)
+                {
+                    codePtr[(long)k * n + f] = frames[f][k];
+                }
+            }
+            try
+            {
+                decoder.SubmitChunkAsync(codeTensor, n, cancel).AsTask().GetAwaiter().GetResult();
+            }
+            finally
+            {
+                codeTensor.Dispose();
+            }
         }
 
         /// <summary>Loads (and caches) a voice embedding transposed to the conditioner's [1,T,512] layout; the

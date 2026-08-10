@@ -47,10 +47,10 @@ internal static class TtsCatalog
     {
         ["vibevoice"] = VibeVoice,
         ["kokoro"] = Kokoro,
-        ["bark"] = Bark,
-        ["dia"] = Dia,
-        ["orpheus"] = Orpheus,
-        ["csm"] = Csm,
+        ["bark"] = BarkTtsModel.Descriptor,
+        ["dia"] = DiaTtsModel.Descriptor,
+        ["orpheus"] = OrpheusTtsModel.Descriptor,
+        ["csm"] = CsmTtsModel.Descriptor,
         ["neutts"] = NeuTtsModel.Descriptor,
         ["fishspeech"] = FishSpeechModel.Descriptor,
         ["cosyvoice"] = CosyVoiceModel.Descriptor,
@@ -116,134 +116,6 @@ internal static class TtsCatalog
         },
     };
 
-    /// <summary>Bark (suno/bark) — 3-stage GPT cascade + EnCodec 24 kHz, text via the multilingual BERT WordPiece
-    /// tokenizer plus Bark's text-encoding offset.</summary>
-    internal static TtsModelDescriptor Bark { get; } = new TtsModelDescriptor
-    {
-        ResolveRepo = _ => "suno/bark",
-        LoadAsync = async (_, _, cancel) =>
-        {
-            string vocabPath = await AudioModelCache.GetAsync("google-bert/bert-base-multilingual-cased", "vocab.txt", category: "tts", ct: cancel).ConfigureAwait(false);
-            (IReadOnlyDictionary<string, Tensor> dict, IDisposable loader) = await LoadBarkWeightsAsync(cancel).ConfigureAwait(false);
-
-            BarkConfig config = BarkConfig.Full;
-            BarkCausalStage semantic = new BarkCausalStage(config.Stage, config.SemanticInputVocab, config.SemanticOutputVocab);
-            semantic.LoadWeights(dict, "semantic");
-            BarkCausalStage coarse = new BarkCausalStage(config.Stage, config.CoarseVocab, config.CoarseVocab);
-            coarse.LoadWeights(dict, "coarse_acoustics");
-            BarkFineModel fine = new BarkFineModel(config);
-            fine.LoadWeights(dict, "fine_acoustics");
-
-            Dictionary<string, Tensor> codecRaw = new Dictionary<string, Tensor>(StringComparer.Ordinal);
-            foreach (KeyValuePair<string, Tensor> entry in dict)
-            {
-                if (entry.Key.StartsWith("codec_model.", StringComparison.Ordinal))
-                {
-                    codecRaw[entry.Key["codec_model.".Length..]] = entry.Value;
-                }
-            }
-            EnCodec encodec = new EnCodec(EnCodecConfig.EnCodec24kHz);
-            encodec.LoadWeights(MusicGenCheckpointConverter.ConvertEnCodec(codecRaw));
-
-            BarkPipeline pipeline = new BarkPipeline(config, semantic, coarse, fine, encodec);
-            BertWordPieceTokenizer bert = new BertWordPieceTokenizer(vocabPath, lowerCase: false);
-            Logs.Info("[Audio][Bark] Loaded suno/bark (3-stage GPT + EnCodec 24 kHz).");
-
-            // Loader kept alive: the F32 stage weights reference its tensors.
-            return new TtsRunner(config.SampleRate,
-                (backend, job) => pipeline.Synthesize(backend, AudioTextFrontend.BarkText(bert, job.Text, config.TextEncodingOffset),
-                    job.Seed, 768, job.Temperature, job.WaveformTemperature),
-                pipeline, loader);
-        },
-    };
-
-    /// <summary>Dia-1.6B (0626 release) — byte-level two-speaker dialogue TTS at 44.1 kHz with the Descript DAC codec.</summary>
-    internal static TtsModelDescriptor Dia { get; } = new TtsModelDescriptor
-    {
-        // The 0626 release, NOT the original Dia-1.6B: same architecture/keys/shapes, but the original checkpoint's
-        // weights degenerate through the engine while 0626 produces the full multi-turn dialogue word-correct.
-        ResolveRepo = _ => "nari-labs/Dia-1.6B-0626",
-        LoadAsync = async (_, _, cancel) =>
-        {
-            string modelPath = await AudioModelCache.GetAsync("nari-labs/Dia-1.6B-0626", "pytorch_model.bin", category: "tts", ct: cancel).ConfigureAwait(false);
-            // The canonical descript .pth has the layout the engine expects (the HF safetensors mirrors are reshaped).
-            string dacPath = await AudioModelCache.GetAsync("descript/descript-audio-codec", "weights.pth", category: "tts", ct: cancel).ConfigureAwait(false);
-            // 0626 is a flat pickle state_dict; non-recursive flatten keeps the encoder./decoder. prefixes intact.
-            PytorchPickleLoader modelLoader = new PytorchPickleLoader();
-            modelLoader.Load(modelPath, recursiveFlatten: false);
-            PytorchPickleLoader dacLoader = new PytorchPickleLoader();
-            dacLoader.Load(dacPath);
-
-            DiaPipeline pipeline = new DiaPipeline(DiaConfig.Dia1_6B);
-            pipeline.LoadWeights(modelLoader.GetAllTensors(), dacLoader.GetAllTensors());
-            Logs.Info("[Audio][Dia] Loaded nari-labs/Dia-1.6B-0626 (byte-level dialogue TTS, 44.1 kHz).");
-
-            return new TtsRunner(44_100,
-                (backend, job) =>
-                {
-                    // Dia was trained on [S1]/[S2]-tagged dialogue; untagged text degenerates into repetition loops.
-                    string text = job.Text.Contains("[S", StringComparison.Ordinal) ? job.Text : $"[S1] {job.Text}";
-                    // The checkpoint degenerates to silence on short prompts (upstream behaves the same).
-                    if (text.Length < 120)
-                    {
-                        Logs.Warning($"[Audio][Dia] Prompt is very short ({text.Length} chars) — Dia-1.6B tends to produce "
-                            + "silence below ~2 sentences (upstream behaves the same). Use longer dialogue-style text.");
-                    }
-                    return pipeline.Generate(backend, AudioTextFrontend.DiaBytes(text),
-                        job.MaxTokens is > 0 ? job.MaxTokens.Value : 1720, job.Seed, null,
-                        job.CfgScale, job.TopK, job.Temperature, job.TopP);
-                },
-                pipeline, modelLoader, dacLoader);
-        },
-    };
-
-    /// <summary>Orpheus TTS — Llama-3.2-3B LM + SNAC 24 kHz, from a non-gated mirror of the license-gated release.</summary>
-    internal static TtsModelDescriptor Orpheus { get; } = new TtsModelDescriptor
-    {
-        ResolveRepo = _ => "unsloth/orpheus-3b-0.1-ft",
-        LoadAsync = async (_, _, cancel) =>
-        {
-            (IReadOnlyDictionary<string, Tensor> backbone, IDisposable[] backboneLoaders) =
-                await AudioCheckpoints.LoadAsync("unsloth/orpheus-3b-0.1-ft", "tts", cancel).ConfigureAwait(false);
-            (IReadOnlyDictionary<string, Tensor> snac, IDisposable[] snacLoaders) =
-                await AudioCheckpoints.LoadAsync("hubertsiuzdak/snac_24khz", "tts", cancel).ConfigureAwait(false);
-            OrpheusPipeline pipeline = new OrpheusPipeline(OrpheusConfig.Orpheus3B);
-            pipeline.LoadWeights(backbone, snac);
-            Logs.Info("[Audio][Orpheus] Loaded unsloth/orpheus-3b-0.1-ft (Llama-3.2-3B + SNAC 24 kHz).");
-            IDisposable?[] keep = [pipeline, .. backboneLoaders, .. snacLoaders];
-            return new TtsRunner(pipeline.SampleRate,
-                (backend, job) => pipeline.Synthesize(backend, AudioTextFrontend.OrpheusText(job.Text), seed: job.Seed), keep);
-        },
-    };
-
-    /// <summary>Sesame CSM-1B — dual-transformer conversational TTS + Mimi 24 kHz, from a non-gated mirror of the
-    /// HF <c>transformers</c> re-export (<c>unsloth/csm-1b</c>). Its keys are the engine's standard Llama layout
-    /// under <c>backbone_model.</c>/<c>depth_decoder.model.</c> prefixes, plus two combined tensors (the audio
-    /// embed table and the stacked codebook heads) that <see cref="CsmWeightRemap"/> splits per-codebook. The
-    /// checkpoint also bundles its own 32-codebook Mimi under a <c>codec_model.</c> prefix — used instead of the
-    /// separately-published <c>kyutai/mimi</c> (8 codebooks: a mismatch against CSM's 32-codebook depth decoder).
-    /// (A prior mirror choice, <c>nielsr/csm-1b</c>, ships the original torchtune-style keys — <c>attn.q_proj</c>,
-    /// <c>sa_norm.scale</c> — which don't match this loader at all; see <see cref="CsmWeightRemap"/>.)</summary>
-    internal static TtsModelDescriptor Csm { get; } = new TtsModelDescriptor
-    {
-        ResolveRepo = _ => "unsloth/csm-1b",
-        LoadAsync = async (_, _, cancel) =>
-        {
-            (IReadOnlyDictionary<string, Tensor> modelDict, IDisposable[] modelLoaders) =
-                await AudioCheckpoints.LoadAsync("unsloth/csm-1b", "tts", cancel).ConfigureAwait(false);
-            CsmModel model = new CsmModel(CsmConfig.V1B);
-            model.LoadWeights(CsmWeightRemap.Remap(modelDict));
-            Mimi mimi = new Mimi(MimiConfig.Mimi24kHzDsm);
-            mimi.LoadWeights(CsmWeightRemap.ExtractMimiWeights(modelDict));
-            CsmPipeline pipeline = new CsmPipeline(CsmConfig.V1B, model, mimi);
-            Logs.Info("[Audio][CSM] Loaded unsloth/csm-1b (dual-transformer + bundled Mimi, 32 codebooks, 24 kHz).");
-            IDisposable?[] keep = [pipeline, .. modelLoaders];
-            return new TtsRunner(24_000,
-                (backend, job) => pipeline.Synthesize(backend,
-                    AudioTextFrontend.CsmText(job.Text, job.SpeakerId ?? 0), seed: job.Seed), keep);
-        },
-    };
-
     /// <summary>Ensures a Kokoro voice pack exists as the raw-float32 <c>.bin</c> the engine reads. The HF repo ships
     /// each voice as a torch-saved <c>.pt</c> whose single contiguous f32 storage at <c>*/data/0</c> is that payload.</summary>
     private static async Task EnsureKokoroVoiceAsync(string voiceName, CancellationToken cancel)
@@ -268,25 +140,5 @@ internal static class TtsCatalog
         }
         File.Move(tempPath, binPath, overwrite: true);
         Logs.Info($"[Audio][Kokoro] Voice pack '{voiceName}' ready.");
-    }
-
-    /// <summary>Loads the Bark transformers checkpoint — safetensors preferred, pickle fallback.</summary>
-    private static async Task<(IReadOnlyDictionary<string, Tensor> Dict, IDisposable Loader)> LoadBarkWeightsAsync(CancellationToken cancel)
-    {
-        try
-        {
-            string path = await AudioModelCache.GetAsync("suno/bark", "model.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
-            SafeTensorsLoader loader = new SafeTensorsLoader();
-            loader.Load(path);
-            return (loader.GetAllTensors(), loader);
-        }
-        catch (FileNotFoundException ex)
-        {
-            Logs.Debug($"[Audio][Bark] No model.safetensors ({ex.Message}); loading pytorch_model.bin.");
-            string path = await AudioModelCache.GetAsync("suno/bark", "pytorch_model.bin", category: "tts", ct: cancel).ConfigureAwait(false);
-            PytorchPickleLoader loader = new PytorchPickleLoader();
-            loader.Load(path);
-            return (loader.GetAllTensors(), loader);
-        }
     }
 }

@@ -92,6 +92,73 @@ public sealed unsafe class BarkPipeline : IDisposable
         return audio;
     }
 
+    /// <summary>Streaming counterpart to <see cref="Synthesize"/>. Bark's fine stage is NOT autoregressive — it's
+    /// an iterative full-context refinement over the whole coarse-stage output (<see cref="BarkFineModel.Refine"/>
+    /// needs every coarse frame before it can start), so unlike Kyutai/CSM/Orpheus there is no way to start
+    /// emitting audio while generation is still running: all three stages (semantic → coarse → fine) must finish
+    /// first, exactly as in <see cref="Synthesize"/>. The streaming value here is narrower and specific to the
+    /// FINAL step — chunking the EnCodec decode itself so a long utterance's audio starts arriving before the
+    /// entire decode finishes, instead of waiting for one monolithic <c>_encodec.Decode</c> call.
+    ///
+    /// <para>EnCodec's decoder has a genuinely stateless LSTM bottleneck in every known reference implementation
+    /// (Meta's two repos and HF transformers all zero-init the hidden state per call — confirmed during research,
+    /// not assumed) — no fork solves this, so this uses the same chunked-independent-decode approach real-world
+    /// long-form Bark generation uses (regenerate/redecode per chunk, accept a boundary transient), just applied
+    /// to the codec's OWN frame axis rather than re-running all three stages per text chunk. Chunk size is
+    /// deliberately coarse (~1s of audio) rather than Kyutai's ~480ms — bigger chunks mean fewer LSTM-restart
+    /// boundaries for a given utterance length, which matters more here since each boundary is a real (if usually
+    /// small) discontinuity, not an exact reconstruction seam.</para></summary>
+    public IEnumerable<float[]> SynthesizeStreamChunks(IBackend backend, int[] textTokenIds, int seed = 0,
+        int maxSemantic = 768, double? textTemp = null, double? waveformTemp = null)
+    {
+        ThrowIfDisposed();
+        BarkConfig runCfg = _cfg with
+        {
+            SemanticTemperature = textTemp is > 0 ? (float)textTemp.Value : _cfg.SemanticTemperature,
+            CoarseTemperature = waveformTemp is > 0 ? (float)waveformTemp.Value : _cfg.CoarseTemperature,
+        };
+        List<int> semantic = _semantic.GenerateSemantic(backend, textTokenIds, runCfg, seed, maxSemantic);
+        if (semantic.Count == 0)
+        {
+            throw new InvalidOperationException("Bark semantic stage produced no tokens (immediate EOS).");
+        }
+        int[,] coarse = _coarse.GenerateCoarse(backend, semantic, runCfg, seed + 1);
+        int[,] codes = _fine.Refine(backend, coarse, seed + 2);
+        int totalFrames = codes.GetLength(1);
+
+        const int framesPerChunk = 75; // ~1s @ EnCodec 24kHz's ~75 Hz frame rate.
+        for (int start = 0; start < totalFrames; start += framesPerChunk)
+        {
+            int n = Math.Min(framesPerChunk, totalFrames - start);
+            yield return DecodeChunk(backend, codes, start, n);
+        }
+    }
+
+    /// <summary>Decodes one frame-range of the fine-stage code grid to PCM. A separate (non-iterator) method,
+    /// not inlined into <see cref="SynthesizeStreamChunks"/> — C# disallows unsafe/pointer code directly inside
+    /// an iterator method's body even though this class is declared <c>unsafe</c> overall.</summary>
+    private Tensor DecodeChunkTensor(IBackend backend, int[,] codes, int start, int n)
+    {
+        Tensor codesT = new(new TensorShape(_cfg.NumCodebooks, 1, n), DType.I32);
+        int* cp = (int*)codesT.DataPointer;
+        for (int cb = 0; cb < _cfg.NumCodebooks; cb++)
+            for (int j = 0; j < n; j++) cp[(long)cb * n + j] = codes[cb, start + j];
+        Tensor audioT = _encodec.Decode(backend, codesT, batch: 1, tFrames: n);
+        codesT.Dispose();
+        return audioT;
+    }
+
+    private float[] DecodeChunk(IBackend backend, int[,] codes, int start, int n)
+    {
+        Tensor audioT = DecodeChunkTensor(backend, codes, start, n);
+        int samples = (int)audioT.Shape[audioT.Shape.Rank - 1];
+        float[] chunk = new float[samples];
+        float* ap = (float*)audioT.DataPointer;
+        for (int i = 0; i < samples; i++) chunk[i] = ap[i];
+        audioT.Dispose();
+        return chunk;
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
