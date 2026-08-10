@@ -13,10 +13,10 @@ public sealed class FxService : IFxService
 {
     private readonly InferenceEngine _engine;
 
-    // Both FX pipelines are STFT/ISTFT-centric and the GPU backends do not implement Stft (CudaBackend
-    // throws "CUDA STFT not supported - use CPU backend for audio"). The CLI's fx commands hard-force
-    // CPU for exactly this reason; server/SwarmUI requests come through here instead, so the override
-    // must live in the service or every non-CLI Demucs/Enhance run on a CUDA host fails at first STFT.
+    // Demucs (DemucsSpec.cs) calls IBackend.Stft directly, which GPU backends do not implement (CudaBackend
+    // throws "CUDA STFT not supported - use CPU backend for audio") — the CLI's fx commands hard-force CPU
+    // for exactly this reason, and server/SwarmUI requests must too or every non-CLI Demucs run on a CUDA
+    // host fails at first STFT. Resemble-Enhance does NOT share this constraint (see EnhanceAsync).
     private static readonly Lazy<IBackend> _cpuBackend = new(() => BackendFactory.Create("cpu"));
 
     /// <summary>Creates the service bound to its owning engine.</summary>
@@ -67,7 +67,14 @@ public sealed class FxService : IFxService
     public Task<AudioResult> EnhanceAsync(ModelSpec spec, FxEnhanceRequest request, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        IBackend backend = _cpuBackend.Value;
+        // Unlike Demucs, Resemble-Enhance's STFT (ResembleDenoiser.cs / ResembleEnhancePipeline.cs, both call
+        // Fft.RealTransform directly) never touches IBackend.Stft — only its neural compute (UNet/WN/UnivNet)
+        // goes through backend, using ops CUDA already implements — so it can run on the engine's real backend.
+        // Verified 2026-08-09: this does NOT fix the known >10min stall on a short clip — a single host thread
+        // pins at 100% CPU with near-zero GPU utilization throughout, meaning the bottleneck is host-side DSP
+        // (very likely the hand-rolled Fft.RealTransform loop itself, or per-frame NSF/harmonic-source work,
+        // none of which this change touches), not the neural compute this moves to GPU. Root cause still open.
+        IBackend backend = _engine.Backend;
 
         return _engine.AudioRuntime.RunAsync(backend, $"fx:enhance:{FxCatalog.EnhanceRepo}", async ct =>
         {

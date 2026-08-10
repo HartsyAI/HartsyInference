@@ -5,6 +5,7 @@ using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 using HartsyInference.Engine.Features;
 
@@ -17,14 +18,16 @@ public sealed class Sd3RecipePipeline : IRecipePipeline
     private readonly ClipTokenizer _clipTokenizer;
     private readonly T5Tokenizer? _t5Tokenizer;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed SD3 pipeline plus its tokenizers, taking ownership of every disposable. <paramref name="loaders"/> holds the checkpoint plus one loader per component resolved as a separate file, and must outlive the weights it mmaps.</summary>
-    public Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer? t5Tokenizer, List<SafeTensorsLoader> loaders)
+    public Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer? t5Tokenizer, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
         _pipeline = pipeline;
         _clipTokenizer = clipTokenizer;
         _t5Tokenizer = t5Tokenizer;
         _loaders = loaders;
+        _loraStack = loraStack;
     }
 
     /// <inheritdoc/>
@@ -99,6 +102,9 @@ public sealed class Sd3RecipePipeline : IRecipePipeline
         _pipeline.Dispose();
         _clipTokenizer.Dispose();
         _t5Tokenizer?.Dispose();
+        // The LoRA stack owns the merged tensors the transformer/CLIP encoders reference, so it outlives them
+        // by exactly this much (same pattern as Flux1RecipePipeline/SdxlRecipePipeline).
+        _loraStack?.Dispose();
         foreach (SafeTensorsLoader loader in _loaders)
         {
             loader.Dispose();

@@ -137,6 +137,28 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 
 ### Pipeline / plumbing
 - [ ] Quality-preset per-pipeline constructor wiring.
+- [ ] **Regional/bbox-prompting plumbing on Flux.2 and Krea2** — neither `Flux2Transformer.Forward` nor
+  `Krea2Transformer.Forward` accepts any generic attention-bias tensor at all (unlike `FluxTransformer.Forward`'s
+  `attnBias`, which regional prompting, Redux, and other conditioning already share). Needs a bias parameter
+  added to both transformers' forward pass and threaded through `Flux2Pipeline`/`Krea2Pipeline`'s
+  `GenerateFromTokens` before the recipe-layer wiring (Flux.1/Z-Image/Ideogram 4) can be replicated here.
+- [ ] **Recipe/pipeline embedding-delegate boundary** (blocks regional/bbox prompting on Flux.1, Z-Image,
+  Ideogram 4 even though all three pipelines already have the attention-bias hook and
+  `RegionalPromptResolver.Resolve` exists and is tested) — recipes own the tokenizer, pipelines own the text
+  encoder and compute the base-prompt conditioning tensor internally, and `Resolve` needs both. No current
+  recipe/pipeline API shares a base-prompt embedding tensor or an arbitrary-text-encode delegate across that
+  boundary. Needs a design decision on the restructure before this is wiring work rather than architecture work.
+
+### SDXL — open items found during the tiled-VAE-encoder / textual-inversion work (2026-08-09)
+- [ ] **F16 VAE "black output" bug also affects SDXL**, not just Flux Schnell as previously documented —
+  confirmed via A/B (identical failure with and without an unrelated in-flight code change) at 1536x1536
+  with the checkpoint's native F16 VAE weights; forcing F32 VAE weights sidesteps it. Root cause not yet
+  investigated for the SDXL case specifically.
+- [ ] **ClipSkip is ignored whenever SDXL's dual-CLIP conditioning goes through a `conditioningSchedule`
+  override** (weighted-prompt `(word:1.2)` syntax or a textual-inversion embed both build one) —
+  `SdxlRecipePipeline` hardcodes `SdxlLayersFromEnd` (2) on that path regardless of `request.ClipSkip`; the
+  plain no-override path does honor it correctly. Only visible when a request combines a non-default
+  ClipSkip with either feature.
 
 ### Deferred deviation follow-ups
 - [ ] Gemma-2 attention logit soft-capping @50 + alternating local/global sliding-window + per-query sqrt(head_dim) scalar.

@@ -8,6 +8,7 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 using HartsyInference.Engine.Features;
 
@@ -55,9 +56,9 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// (T2V vs. concat-I2V is a checkpoint property — see <see cref="SupportsFor"/>) and keeps claiming both;
     /// the generic "wan" catalog slug (weight-derived config, no compat class) does too, for the same reason.</remarks>
     public VideoFeatures Supports =>
-        _familyId is Wan22_5BCompatClassId or Wan21_1_3BCompatClassId
+        (_familyId is Wan22_5BCompatClassId or Wan21_1_3BCompatClassId
             ? VideoFeatures.InitImage
-            : VideoFeatures.InitImage | VideoFeatures.EndFrame;
+            : VideoFeatures.InitImage | VideoFeatures.EndFrame) | VideoFeatures.Lora;
 
     /// <summary>The features for a CONCRETE checkpoint: VACE/Animate/S2V share Wan's compat classes and are only
     /// detected by sniffing the header, so the family-level <see cref="Supports"/> alone would wrongly refuse (e.g.)
@@ -104,8 +105,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
-        // TODO(E-IMG-4/5): LoRA (the extension's GenerateWithLoras merged the stack into BOTH MoE experts) and
-        // VideoRequest.Components overrides for the umT5 / VAE / CLIP-Vision picks are deferred.
+        // TODO(E-IMG-4/5): VideoRequest.Components overrides for the umT5 / VAE / CLIP-Vision picks are deferred.
         WanVariant variant = DetectVariant(context.CheckpointPath);
         if (variant != WanVariant.Base)
         {
@@ -133,6 +133,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
         string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         (WanVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(context.CheckpointPath);
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { ditLoader };
+        MergedLoraStack? loraStack = null;
         try
         {
             if (conv.Transformer.Count == 0)
@@ -155,6 +156,16 @@ public sealed class WanVideoRecipe : IVideoRecipe
                 bool isConcatI2V = !isClipI2V && config.InChannels > config.VaeLatentChannels;
                 config = config with { BoundaryRatio = ResolveBoundary(context.VideoSwapPercent, config, isConcatI2V) };
             }
+
+            // Merge BEFORE LoadWeights, not after: the merge swaps dictionary entries, and device caches are
+            // identity-keyed, so a tensor already captured by a layer would keep serving its stale copy
+            // (same ordering constraint as MiniMaxH3Recipe/Sd3Recipe's LoRA merges). One resolved stack is reused
+            // for the low-noise expert below (when a MoE pair is configured) rather than re-loading the LoRA file
+            // a second time — Wan 2.2's dual-expert split shares one LoRA selection across both experts.
+            loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras),
+                context.Backend,
+                transformerWeights: conv.Transformer);
 
             WanVideoTransformer transformer = new WanVideoTransformer(config);
             transformer.LoadWeights(conv.Transformer);
@@ -184,6 +195,10 @@ public sealed class WanVideoRecipe : IVideoRecipe
                         + $"(inner {lowConfig.InnerDim} vs {config.InnerDim}, layers {lowConfig.NumLayers} vs {config.NumLayers}) — "
                         + "an A14B expert pair must be two builds of the same architecture.");
                 }
+                // Same LoRA selection, merged into the low-noise expert's own weight dict — same pre-LoadWeights
+                // ordering constraint as the primary expert above.
+                loraStack?.ApplyTo(convLow.Transformer, HartsyInference.ModelAssets.Lora.LoraTarget.Transformer, context.Backend);
+
                 transformer2 = new WanVideoTransformer(config);
                 transformer2.LoadWeights(convLow.Transformer);
             }
@@ -241,11 +256,12 @@ public sealed class WanVideoRecipe : IVideoRecipe
             };
             Logs.Info($"[WanVideoRecipe] Wan ready ({mode}{(transformer2 is not null ? ", MoE expert pair" : "")}).");
             return new WanVideoRecipePipeline(context.Backend, context.TextEncoderBackendOrDefault, context.VaeBackendOrDefault,
-                pipeline, config, isClipI2V, tokenizer, umt5, transformer, vaeEncoder, clipVision, loaders, transformer2);
+                pipeline, config, isClipI2V, tokenizer, umt5, transformer, vaeEncoder, clipVision, loaders, transformer2, loraStack);
         }
         catch (Exception ex)
         {
             Logs.Error("[WanVideoRecipe] Construction failed.", ex);
+            loraStack?.Dispose();
             foreach (SafeTensorsLoader loader in loaders)
             {
                 loader.Dispose();

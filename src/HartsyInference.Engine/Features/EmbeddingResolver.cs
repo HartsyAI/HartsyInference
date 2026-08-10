@@ -70,8 +70,12 @@ public static class EmbeddingResolver
 
     /// <summary>Builds the embed plan for <paramref name="prompt"/>, or null when it has no embed markers.
     /// <paramref name="hiddenSizes"/> are the encoder hidden sizes to load per embed ([768] for SD1.5, [768, 1280] for
-    /// SDXL). Unresolvable or partially-loadable embeds are skipped.</summary>
-    public static Plan? Resolve(string? prompt, ClipTokenizer tokenizer, int[] hiddenSizes)
+    /// SDXL). Unresolvable or partially-loadable embeds are skipped. <paramref name="startPlaceholderId"/> defaults to
+    /// just past the real vocab; callers resolving BOTH a positive and a negative prompt into the same batched
+    /// <c>EncodePenultimate</c> call (see <see cref="BuildDualClipSchedule"/>) must give the negative plan a disjoint
+    /// range — <c>inlineEmbeddings</c> is one dictionary shared across every row, so two different embeds landing on
+    /// the same placeholder id would silently pick whichever one the dictionary happened to keep.</summary>
+    public static Plan? Resolve(string? prompt, ClipTokenizer tokenizer, int[] hiddenSizes, int startPlaceholderId = ClipTokenizer.VocabSize)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
         ArgumentNullException.ThrowIfNull(hiddenSizes);
@@ -87,7 +91,7 @@ public static class EmbeddingResolver
 
         Plan plan = new Plan();
         List<int> tokens = new List<int>(ClipTokenizer.MaxLength) { ClipTokenizer.StartOfTextId };
-        int nextPlaceholder = ClipTokenizer.VocabSize; // 49408+, past the real vocab
+        int nextPlaceholder = startPlaceholderId; // defaults to 49408+, past the real vocab
         int cursor = 0;
         foreach (Match m in matches)
         {
@@ -160,22 +164,39 @@ public static class EmbeddingResolver
 
     /// <summary>Builds an SDXL dual-CLIP <c>[2, S, 2048]</c> conditioning schedule (uncond, cond) from an embed plan:
     /// penultimate CLIP-L (768) + CLIP-G (1280), each encoded with its inline-embedding map so the learned vectors occupy
-    /// the placeholder positions. The negative is encoded plainly. Matches the SDXL pipeline's plain textEmbeddings shape,
-    /// so it is passed as a conditioning-schedule override while the pooled vector stays on the pipeline's plain path.</summary>
+    /// the placeholder positions. Matches the SDXL pipeline's plain textEmbeddings shape, so it is passed as a
+    /// conditioning-schedule override while the pooled vector stays on the pipeline's plain path.
+    /// <para><paramref name="negativePlan"/> resolves embed markers in the negative prompt too — the common real-world
+    /// shape for a "bad-hands"/"easynegative"-style embed. It must have been <see cref="Resolve"/>d with a
+    /// <c>startPlaceholderId</c> disjoint from <paramref name="plan"/>'s (both maps below get merged into one
+    /// dictionary shared across the whole batch). Either plan may be null — a null one falls back to that row's
+    /// plain-encoded prompt, so a caller with an embed on only one side still gets the other side resolved.</para></summary>
     public static ConditioningSchedule BuildDualClipSchedule(
         IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG, ClipTokenizer tokenizer,
-        Plan plan, string? negative, int layersFromEnd)
+        Plan? plan, string? positive, string? negative, int layersFromEnd, Plan? negativePlan = null)
     {
         ArgumentNullException.ThrowIfNull(clipL);
         ArgumentNullException.ThrowIfNull(clipG);
         ArgumentNullException.ThrowIfNull(tokenizer);
-        ArgumentNullException.ThrowIfNull(plan);
-        int[] negTokens = tokenizer.Encode(negative ?? "");
-        int[][] batch = [negTokens, plan.TokenIds];
-        int[] eos = [ClipTokenizer.FindEosPosition(negTokens), plan.EosPosition];
+        if (plan is null && negativePlan is null)
+        {
+            throw new ArgumentException($"{nameof(BuildDualClipSchedule)} requires at least one of {nameof(plan)}/{nameof(negativePlan)} to be non-null.");
+        }
 
-        Dictionary<int, Tensor> mapL = plan.InlineMap(768);
-        Dictionary<int, Tensor> mapG = plan.InlineMap(1280);
+        int[] negTokens = negativePlan?.TokenIds ?? tokenizer.Encode(negative ?? "");
+        int negEos = negativePlan?.EosPosition ?? ClipTokenizer.FindEosPosition(negTokens);
+        int[] posTokens = plan?.TokenIds ?? tokenizer.Encode(positive ?? "");
+        int posEos = plan?.EosPosition ?? ClipTokenizer.FindEosPosition(posTokens);
+        int[][] batch = [negTokens, posTokens];
+        int[] eos = [negEos, posEos];
+
+        Dictionary<int, Tensor> mapL = plan?.InlineMap(768) ?? [];
+        Dictionary<int, Tensor> mapG = plan?.InlineMap(1280) ?? [];
+        if (negativePlan is not null)
+        {
+            foreach (KeyValuePair<int, Tensor> kv in negativePlan.InlineMap(768)) mapL[kv.Key] = kv.Value;
+            foreach (KeyValuePair<int, Tensor> kv in negativePlan.InlineMap(1280)) mapG[kv.Key] = kv.Value;
+        }
 
         (Tensor lHidden, Tensor? lPooled) = clipL.EncodePenultimate(backend, batch, eos, layersFromEnd, mapL);
         lPooled?.Dispose();

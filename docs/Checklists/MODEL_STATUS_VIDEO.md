@@ -59,6 +59,20 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 ### Numeric validation
 - [ ] All models are built structurally; numeric parity vs a Python reference is pending for every one not already ✅ (LTX 0.9 / 0.9.5 / 13B and LTX-2 22B are verified e2e).
 
+### Wan / LTX open items
+- [ ] **Wan `EndFrame` real wiring on the non-concat path** — `wan-22-5b` (TI2V-5B) and `wan-21-1_3b` had
+  their `Supports`/`SupportsFor` narrowed 2026-08-09 to stop claiming `VideoFeatures.EndFrame` (it was
+  silently no-op'd there, not refused). `GenerateFromEmbeddings`/`GenerateFramesAsync`/the internal
+  `RunDenoise` still have no `lastFrameLatent` parameter on that path at all — needs one, mirroring
+  `MiniMaxH3RecipePipeline`'s symmetric `EncodeKeyframes` (encodes both `InitImage` and `VideoEndFrame`),
+  threaded through the TI2V `expand_timesteps` conditioning path. Once wired, revert the 2026-08-09
+  narrowing for the paths this covers.
+- [ ] **LTX has no VAE encoder at all** (confirmed — only decoders exist for both LTX-Video and LTX-2), no
+  image-conditioning parameter anywhere in `LtxVideoTransformer`, no image argument on `LtxVideoPipeline`'s
+  methods. LTX image-to-video needs a new VAE encoder class, a transformer-side conditioning input, and
+  pipeline plumbing — genuinely new machinery, use Wan's `Wan22VaeEncoder.EncodeRgbFrame` →
+  `firstFrameLatent` → `GenerateFromEmbeddings` shape as the template, not a shortcut.
+
 ### SeedVR2 restoration follow-ups
 - [x] ~~fp32 whole-clip VAE activation ceiling~~ **BF16 VAE activations landed (2026-08-02)** — reference
       precision, CUDA default, `HARTSY_SEEDVR2_VAE_F32=1` reverts; pixel/latent boundaries stay F32 and the

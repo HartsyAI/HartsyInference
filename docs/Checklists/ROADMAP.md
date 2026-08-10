@@ -809,10 +809,41 @@ grinds).
 
 ## 6. Diffusion / accel-grind open levers
 
-- [ ] Step-cache replicate to Chroma / HiDream (🔒 no weights); CFG-interval late-band replicate to
-  HiDream / Wan.
+- [ ] **Step-cache port to Sdxl/Flux/StableDiffusion15/Sd3/Chroma/HiDream pipelines** — not a checkpoint
+  gap, corrected 2026-08-10: the blocker is transformer-side plumbing, not missing weights. The reference
+  wiring (`ZImagePipeline`/`ZImageTransformer`) threads a `DeviceFeatureCache` into a packed-token forward
+  entry point (`ForwardPacked`/`PackedCore`) that gates block-level compute per step and is mutually
+  exclusive with CUDA-graph capture. None of the six pipelines above have an equivalent cache-consuming
+  forward path today — this needs a design pass sized like a Tier-3 item (add the hook, then call it),
+  not a port of an existing call site; CFG-interval late-band replicate to HiDream / Wan.
 - [ ] F16-ingest / F16-out Sage attention kernel (designed, build next).
 - [ ] Wan2.2-Lightning / LTX-distilled loadable accelerators.
+- [ ] **TensorRT compile support** — zero TRT code anywhere in the engine today; no design started.
+- [ ] **LoRA extraction / checkpoint-diff utility** — zero checkpoint-diff/extraction code anywhere;
+  no design started.
+- [ ] **Seamless tiling / circular conv padding** — neither cuDNN's convolution graph API nor the im2col
+  fallback kernel support anything but zero padding, engine-wide (not per-model). Needs a tensor-level
+  wrap-pad utility that copies wrapped edge rows/columns into an explicit padded buffer before calling the
+  existing conv paths with zero additional padding requested.
+- [ ] **CPU-offloaded activations** — weight offload works because the host `Tensor` is always the
+  authoritative copy (`PreloadWeights`/`FreeWeights` just add/drop a GPU-side cache entry); activations have
+  no host-authoritative copy today (`FreeActivations` discards the device buffer outright, no D2H anywhere
+  in that path). Needs a genuine materialize-to-host-then-reload path, plus interaction with the CUDA
+  step-graph invalidation that already exists for the weight-free case (`StepGraphInvalidateForActivationFree`)
+  — a captured graph bakes activation pointers, so offloading mid-graph needs the same invalidation treatment.
+- [ ] **PAG / SAG attention-hook infrastructure** — no self-attention substitution/introspection mechanism
+  exists anywhere (confirmed zero hits for any `AttentionHook`-shaped primitive); `FluxTransformer`'s
+  ControlNet residual-injection points are an external-adapter residual-add, not reusable as-is for a
+  perturbed/identity-attention branch. Needs its own design pass (where to fork the branch, how to blend it
+  back, which pipelines get it first) before implementation — cross-cutting quality infra, not one model's gap.
+- [~] **`VaeTiledEncoder`/`VaeTiling`** (pixel-space-tiled VAE encode, for large img2img/inpaint inputs that
+  today go through the encoder untiled) — dtype-safety fixed 2026-08-09 (was F32-hardcoded, silently
+  corrupts against BF16 weights) and unit-tested, but wiring it into a real pipeline (`SdxlPipeline`'s
+  img2img encode path was the first attempt) reproducibly **segfaults inside `libcuda.so`** the moment the
+  BF16 cuDNN conv fast path first engages for the VAE encoder's downsample convs (100% reproducible at
+  1536x1536 SDXL img2img; crash site is the driver itself, not managed code — this dtype-correctness fix is
+  the first caller to ever feed the encoder a dtype-matched, BF16, tile). The wiring was reverted pending a
+  dedicated CUDA-driver-level investigation; the class itself has zero production callers today.
 
 ## 7. Robotics models (new modality — greenfield)
 

@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
@@ -82,6 +83,7 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
             : FeatureImaging.RgbToTensorMinusOneOne(FeatureImaging.ResizeRgb24(toolsControlImageData, reqWidth, reqHeight), reqWidth, reqHeight);
 
         FluxControlNetResolver.ResolvedSpec? controlNets = null;
+        RegionalPlan? regionalPlan = null;
         try
         {
             controlNets = FluxControlNetResolver.Resolve(
@@ -132,11 +134,14 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
                 progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
             };
 
+            regionalPlan = BuildRegionalPlan(prompt, reqWidth, reqHeight, steps);
+
             (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromTokens(
                 clipTokens, eosPos, t5Tokens, t5Mask, inner,
                 guidanceScale: guidance,
                 onProgress: bridge,
                 controlImage: controlImage,
+                regionalPlan: regionalPlan,
                 fluxControlNets: controlNets?.Conditionings,
                 reduxImageEmbeds: redux?.Embeds,
                 reduxApplyStartFraction: redux?.ApplyStart ?? 0f);
@@ -158,9 +163,30 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
         }
         finally
         {
+            RegionalPromptResolver.DisposeRegions(regionalPlan);
             controlNets?.Dispose();
             controlImage?.Dispose();
         }
+    }
+
+    /// <summary>Builds a regional-conditioning plan when the prompt carries <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c>
+    /// parts, null otherwise. <see cref="RegionalPlan.BaseCond"/> is a required field on the resolver's signature but
+    /// is never read by <see cref="FluxPipeline.GenerateFromTokens"/>'s regional path (confirmed by inspection: the
+    /// pipeline builds its actual background stream from its own internally-computed T5 embeddings, not this field)
+    /// — a throwaway placeholder, disposed immediately rather than kept alive for the plan's lifetime.</summary>
+    private RegionalPlan? BuildRegionalPlan(string prompt, int width, int height, int steps)
+    {
+        if (!RegionalPromptResolver.HasRegionParts(prompt))
+        {
+            return null;
+        }
+        using Tensor baseCondPlaceholder = new Tensor(new TensorShape(1), DType.F32);
+        return RegionalPromptResolver.Resolve(prompt, baseCondPlaceholder, width, height, steps, encodeRegion: text =>
+        {
+            int[] tokens = _t5Tokenizer.Encode(text);
+            int[] mask = T5Tokenizer.CreateAttentionMask(tokens);
+            return _pipeline.EncodeRegionText(tokens, mask);
+        });
     }
 
     /// <inheritdoc/>

@@ -78,6 +78,16 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         _config = config;
     }
 
+    /// <summary>Encodes arbitrary text through this pipeline's own T5-XXL encoder — the same encoder instance and
+    /// backend the base prompt uses, so a region's caption lands in the identical embedding space. For
+    /// regional/object prompt conditioning built by the caller (<see cref="Prompting.RegionalPromptResolver"/>'s
+    /// <c>encodeRegion</c> delegate); the recipe pipeline owns the T5 tokenizer, this owns the T5 encoder, so
+    /// neither side alone can do this. Returns a <c>[1, L, hidden]</c> tensor; disposal is the caller's
+    /// responsibility (<see cref="Prompting.RegionalPromptResolver.DisposeRegions"/> covers it once the region is
+    /// attached to a <see cref="Prompting.RegionalPlan"/>).</summary>
+    public Tensor EncodeRegionText(int[] tokenIds, int[]? attentionMask = null) =>
+        _t5.Encode(TextEncoderBackend, [tokenIds], attentionMask is null ? null : [attentionMask]);
+
     /// <summary>Generates an image from pre-tokenized input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
     /// <list type="bullet">
     /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image (initial packed latent = noise scaled by initSigma; denoise from step 0).</item>

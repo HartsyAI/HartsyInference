@@ -57,10 +57,25 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string negative = request.NegativePrompt ?? "";
 
-        int[] tokensL = _tokenizer.Encode(request.Prompt);
-        int[] negL = _tokenizer.Encode(negative);
-        int[] tokensG = _tokenizer.Encode(request.Prompt);
-        int[] negG = _tokenizer.Encode(negative);
+        // Textual-inversion embed markers (\0swarmembed:NAME\0end — SwarmUI core's own rewrite of <embed:name>,
+        // arriving on request.Prompt/NegativePrompt before this recipe ever sees them) resolve to a token plan with
+        // placeholder ids past the CLIP vocab, encoded via the InlineMap ClipTextEncoder.Encode/EncodePenultimate
+        // already accept. Null when a prompt carries no markers, so the plain path below is unchanged for every
+        // other request. The negative plan's placeholder ids are offset well past the positive plan's range — both
+        // maps get merged into one dictionary shared across the whole 2-row batch (BuildDualClipSchedule), so a
+        // "bad-hands"-style embed in the negative prompt and a style embed in the positive one must not collide.
+        // The plain tokensL/tokensG/eosG below always use the STRIPPED prompt: they still feed the pooled vector
+        // (SdxlPipeline computes it internally regardless of conditioningSchedule — see EmbeddingResolver's doc),
+        // and encoding the raw \0swarmembed control characters through the normal tokenizer would be garbage BPE.
+        string strippedPrompt = EmbeddingResolver.StripMarkers(request.Prompt) ?? request.Prompt;
+        string strippedNegative = EmbeddingResolver.StripMarkers(negative) ?? negative;
+        using EmbeddingResolver.Plan? embedPlan = EmbeddingResolver.Resolve(request.Prompt, _tokenizer, [768, 1280]);
+        using EmbeddingResolver.Plan? negEmbedPlan = EmbeddingResolver.Resolve(negative, _tokenizer, [768, 1280], startPlaceholderId: ClipTokenizer.VocabSize + 1_000_000);
+
+        int[] tokensL = _tokenizer.Encode(strippedPrompt);
+        int[] negL = _tokenizer.Encode(strippedNegative);
+        int[] tokensG = _tokenizer.Encode(strippedPrompt);
+        int[] negG = _tokenizer.Encode(strippedNegative);
         int eosG = ClipTokenizer.FindEosPosition(tokensG);
         int negEosG = ClipTokenizer.FindEosPosition(negG);
 
@@ -69,7 +84,12 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
             _backend,
             UNetConfig.SdxlBase,
             IpAdapterBaseModel.Sdxl,
-            () => WeightedConditioning.BuildDualClip(_textBackend, _clipL, _clipG, _tokenizer, request.Prompt, negative, SdxlLayersFromEnd),
+            embedPlan is not null || negEmbedPlan is not null
+                // Embeds and weighted-prompt syntax ((word:1.2)) both build the same dual-CLIP conditioning
+                // schedule slot; combining them would need weight parsing to skip over embed placeholder runs,
+                // which WeightedConditioning doesn't do — an embed-bearing prompt wins outright for now.
+                ? () => EmbeddingResolver.BuildDualClipSchedule(_textBackend, _clipL, _clipG, _tokenizer, embedPlan, strippedPrompt, strippedNegative, SdxlLayersFromEnd, negEmbedPlan)
+                : () => WeightedConditioning.BuildDualClip(_textBackend, _clipL, _clipG, _tokenizer, strippedPrompt, negative, SdxlLayersFromEnd),
             LookupIpAdapter,
             CacheIpAdapter,
             cancel);

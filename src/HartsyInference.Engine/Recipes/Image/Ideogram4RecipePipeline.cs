@@ -1,8 +1,10 @@
 using System.Globalization;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Engine.Requests;
@@ -77,8 +79,20 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
         int[] padded = _tokenizer.EncodeChat(prompt, includeThinkBlock: false);
         int[] promptTokens = TrimRightPad(padded, Qwen3Tokenizer.BosTokenId);
 
-        // TODO(E-IMG-4): img2img/inpaint, LoRA, ControlNet, IP-Adapter, refiner, regional prompting and
-        // ImageRequest.Components overrides are deferred — text-to-image only.
+        // Regional/object prompt parts, chat-templated + encoded via the SAME Qwen3-VL multi-layer tap
+        // configuration as the base prompt above (Ideogram4Pipeline.EncodeRegionText).
+        using Tensor? baseCondPlaceholder = RegionalPromptResolver.HasRegionParts(prompt) ? new Tensor(new TensorShape(1), DType.F32) : null;
+        RegionalPlan? regionalPlan = baseCondPlaceholder is null
+            ? null
+            : RegionalPromptResolver.Resolve(prompt, baseCondPlaceholder, snappedW, snappedH, preset.NumSteps, encodeRegion: text =>
+            {
+                int[] regionPadded = _tokenizer.EncodeChat(text, includeThinkBlock: false);
+                int[] regionTokens = TrimRightPad(regionPadded, Qwen3Tokenizer.BosTokenId);
+                return _pipeline.EncodeRegionText(regionTokens);
+            });
+
+        // TODO(E-IMG-4): img2img/inpaint, LoRA, ControlNet, IP-Adapter, refiner and ImageRequest.Components
+        // overrides are deferred — text-to-image (+ regional prompting, above) only.
         // Resolved at the snapped size the pipeline validates against.
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, snappedW, snappedH);
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
@@ -100,7 +114,15 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
             progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
         };
 
-        (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(promptTokens, inner, preset, bridge);
+        byte[] rgb; int outW, outH, usedSeed;
+        try
+        {
+            (rgb, outW, outH, usedSeed) = _pipeline.GenerateFromTokens(promptTokens, inner, preset, bridge, regionalPlan: regionalPlan);
+        }
+        finally
+        {
+            RegionalPromptResolver.DisposeRegions(regionalPlan);
+        }
 
         return new ImageResult
         {

@@ -9,6 +9,7 @@ using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -20,7 +21,7 @@ public sealed class Sd3Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>SD3's VAE encoder is constructed alongside the decoder, and Sd3Pipeline implements the blend-on-vanilla masked path.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Lora;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "sd3", StringComparison.OrdinalIgnoreCase);
@@ -46,6 +47,7 @@ public sealed class Sd3Recipe : IArchitectureRecipe
         }
 
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { mainLoader };
+        MergedLoraStack? loraStack = null;
         try
         {
             Dictionary<string, Tensor> clipLWeights = converted.ClipL;
@@ -79,6 +81,16 @@ public sealed class Sd3Recipe : IArchitectureRecipe
                 vaeWeights = RequireWeights(staged, "VAE", path);
                 Logs.Info($"[Sd3Recipe] VAE resolved as a separate file: {path}.");
             }
+
+            // Merge BEFORE LoadWeights, not after: the merge swaps dictionary entries, and device caches are
+            // identity-keyed, so a tensor already captured by a layer would keep serving its stale copy
+            // (same ordering constraint as MiniMaxH3Recipe/WanVideoRecipe's LoRA merges).
+            loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras),
+                context.Backend,
+                transformerWeights: converted.Transformer,
+                clipLWeights: clipLWeights,
+                clipGWeights: clipGWeights);
 
             int patchEmbedOutChannels = DetectPatchEmbedOutChannels(converted.Transformer);
             Sd3Config sd3Config = Sd3Config.FromWeightShape(patchEmbedOutChannels);
@@ -130,11 +142,12 @@ public sealed class Sd3Recipe : IArchitectureRecipe
                 DitShardSplitBlock = ditShardSplitBlock,
             };
             Logs.Info("[Sd3Recipe] SD3 ready.");
-            return new Sd3RecipePipeline(pipeline, new ClipTokenizer(), t5Tokenizer, loaders);
+            return new Sd3RecipePipeline(pipeline, new ClipTokenizer(), t5Tokenizer, loaders, loraStack);
         }
         catch (Exception ex)
         {
             Logs.Error("[Sd3Recipe] Construction failed.", ex);
+            loraStack?.Dispose();
             foreach (SafeTensorsLoader loader in loaders)
             {
                 loader.Dispose();

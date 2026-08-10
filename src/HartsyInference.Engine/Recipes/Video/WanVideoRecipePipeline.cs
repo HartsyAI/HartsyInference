@@ -12,6 +12,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 using HartsyInference.Vision.Clip;
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -48,13 +49,14 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     private readonly IWanVaeEncoder _vaeEncoder;
     private readonly ClipVisionEncoder? _clipVision;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed Wan pipeline plus its encoders, taking ownership of every disposable.
     /// <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/>
     /// (single-device default).</summary>
     public WanVideoRecipePipeline(IBackend backend, IBackend textBackend, IBackend vaeBackend, WanVideoPipeline pipeline, WanVideoConfig config, bool isClipI2V, T5Tokenizer tokenizer,
         T5TextEncoder umt5, WanVideoTransformer transformer, IWanVaeEncoder vaeEncoder, ClipVisionEncoder? clipVision, List<SafeTensorsLoader> loaders,
-        WanVideoTransformer? transformer2 = null)
+        WanVideoTransformer? transformer2 = null, MergedLoraStack? loraStack = null)
     {
         _transformer2 = transformer2;
         _backend = backend;
@@ -69,6 +71,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
         _vaeEncoder = vaeEncoder;
         _clipVision = clipVision;
         _loaders = loaders;
+        _loraStack = loraStack;
     }
 
     /// <inheritdoc/>
@@ -190,6 +193,9 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
         _transformer.Dispose();
         _transformer2?.Dispose();
         (_vaeEncoder as IDisposable)?.Dispose();
+        // The LoRA stack owns the merged tensors both transformers reference, so it outlives them by exactly
+        // this much (same pattern as Sd3RecipePipeline/Flux1RecipePipeline/SdxlRecipePipeline).
+        _loraStack?.Dispose();
         foreach (SafeTensorsLoader loader in _loaders)
         {
             loader.Dispose();

@@ -93,6 +93,17 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         _config = config;
     }
 
+    /// <summary>Encodes arbitrary chat-templated text through this pipeline's own Qwen3-VL encoder — the identical
+    /// multi-layer, interleaved tap-layer configuration (<see cref="Ideogram4Config.QwenActivationLayersHf"/>) the
+    /// base prompt uses in <see cref="GenerateFromTokens"/>, so the feature dimension and layout match exactly. For
+    /// regional/object prompt conditioning built by the caller (<see cref="Prompting.RegionalPromptResolver"/>'s
+    /// <c>encodeRegion</c> delegate) — runs outside this method's own preload/free bracket around
+    /// <see cref="_textEncoder"/>, so the caller pays a cold-weight touch if the encoder isn't already resident;
+    /// correctness-only for this first pass, not a residency optimization. Returns a
+    /// <c>[1, L, LlmFeaturesDim]</c> tensor; disposal is the caller's responsibility.</summary>
+    public Tensor EncodeRegionText(int[] tokenIds) =>
+        _textEncoder.EncodeMultiLayer(Backend, [tokenIds], Ideogram4Config.QwenActivationLayersHf, interleavedLayout: true);
+
     /// <summary>Generates an image from chat-templated prompt token ids (the Qwen3 chat template must already be applied). The negative branch needs no tokens — Ideogram's CFG zeroes the text features.
     /// <para>An <see cref="ImageToImageRequest"/> selects img2img: the source goes VAE-encode (32-ch latent) → 2×2
     /// token patchify (<c>[1, nImg, 128]</c>) → inverse fixed-constant latent norm → mix with fresh noise at the

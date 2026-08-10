@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -51,9 +52,6 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         bool needNegative = cfg > 1.0f;
         int penultimateIdx = _qwen.NumLayers - 1;
 
-        // TODO(E-IMG-4): regional prompting (request.Regional) is not yet mapped — the SwarmUI loader built a
-        // RegionalPlan here.
-
         // Bulk-upload the Qwen3 weights, encode, then free them — their ~8 GB is the headroom the VAE full-res decode needs.
         _backend.PreloadWeights(_qwen.EnumerateWeights());
 
@@ -74,6 +72,21 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
             negativeEmbeddings = SliceFirstSeqF32(negEncodedFull, negRealLen);
             negEncodedFull.Dispose();
         }
+
+        // Regional/object prompt parts, encoded via the SAME Qwen3 encoder + penultimate layer as the base
+        // prompt above — must happen before FreeWeights below, while the encoder is still resident.
+        (int reqW, int reqH) = RecipeRequestMapper.Size(request);
+        RegionalPlan? regionalPlan = RegionalPromptResolver.HasRegionParts(prompt)
+            ? RegionalPromptResolver.Resolve(prompt, positiveEmbeddings, reqW, reqH, steps, encodeRegion: text =>
+            {
+                int[] regionTokens = _tokenizer.EncodeChat(text);
+                int regionRealLen = ComputeRealLength(regionTokens);
+                Tensor regionEncodedFull = _qwen.EncodeMultiLayer(_backend, new[] { regionTokens }, new[] { penultimateIdx });
+                Tensor regionEmbeddings = SliceFirstSeqF32(regionEncodedFull, regionRealLen);
+                regionEncodedFull.Dispose();
+                return regionEmbeddings;
+            })
+            : null;
 
         _backend.FreeWeights(_qwen.EnumerateWeights());
 
@@ -104,7 +117,8 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
                 inner,
                 cfgScale: cfg,
                 negativeCaptionEmbeddings: negativeEmbeddings,
-                onProgress: bridge);
+                onProgress: bridge,
+                regionalPlan: regionalPlan);
 
             return new ImageResult
             {
@@ -124,6 +138,7 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         }
         finally
         {
+            RegionalPromptResolver.DisposeRegions(regionalPlan);
             positiveEmbeddings.Dispose();
             negativeEmbeddings?.Dispose();
         }
