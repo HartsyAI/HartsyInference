@@ -56,7 +56,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
             }
 
             // BF16 -> F16 (native F16 GEMM), matching the T2I recipe and Kandinsky5VideoGenerationTests.
-            Kandinsky5Config config = Kandinsky5Config.VideoLite2B;
+            Kandinsky5Config config = DetectConfig(converted.Transformer);
             Dictionary<string, Tensor> transformerWeights = new Dictionary<string, Tensor>(converted.Transformer.Count);
             foreach (KeyValuePair<string, Tensor> kv in converted.Transformer)
             {
@@ -115,6 +115,34 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
             }
             throw;
         }
+    }
+
+    /// <summary>Picks the Lite-2B vs. Pro-19B preset from the loaded weights, mirroring the weight-derived
+    /// detection <c>WanConfigDetector</c> uses for Wan's variants. <c>text_embeddings.in_layer.weight</c> is a
+    /// Linear projection from the shared 3584-wide Qwen2.5-VL input to <see cref="Kandinsky5Config.ModelDim"/>
+    /// (1792 Lite / 4096 Pro) — its output dim (<c>Shape[0]</c>, PyTorch's <c>[out_features, in_features]</c>
+    /// convention) is decisive without needing any other tensor. Falls back to Lite with a warning for an
+    /// unrecognized dim rather than throwing — Lite is the only preset with real-weight validation
+    /// (<see cref="Kandinsky5Config.VideoPro19B"/>'s doc: "weights untested in this engine"), so silently
+    /// mis-selecting it for a genuinely novel checkpoint is the same risk either preset carries.</summary>
+    internal static Kandinsky5Config DetectConfig(IReadOnlyDictionary<string, Tensor> transformerWeights)
+    {
+        if (!transformerWeights.TryGetValue("text_embeddings.in_layer.weight", out Tensor? textProj))
+        {
+            Logs.Warning("[Kandinsky5VideoRecipe] 'text_embeddings.in_layer.weight' missing — cannot detect Lite vs. Pro; defaulting to Lite-2B.");
+            return Kandinsky5Config.VideoLite2B;
+        }
+        int modelDim = (int)textProj.Shape[0];
+        if (modelDim == Kandinsky5Config.VideoPro19B.ModelDim)
+        {
+            Logs.Info($"[Kandinsky5VideoRecipe] Detected Pro-19B (model_dim={modelDim}).");
+            return Kandinsky5Config.VideoPro19B;
+        }
+        if (modelDim != Kandinsky5Config.VideoLite2B.ModelDim)
+        {
+            Logs.Warning($"[Kandinsky5VideoRecipe] Unrecognized model_dim={modelDim} (expected {Kandinsky5Config.VideoLite2B.ModelDim} Lite or {Kandinsky5Config.VideoPro19B.ModelDim} Pro) — defaulting to Lite-2B.");
+        }
+        return Kandinsky5Config.VideoLite2B;
     }
 
     /// <summary>Maps the resolved checkpoint path to the diffusers <c>transformer/</c> directory

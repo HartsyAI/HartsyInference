@@ -354,6 +354,12 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         if (request is ImageToImageRequest img2img)
         {
             Stopwatch vaeEncSw = Stopwatch.StartNew();
+            // NOT yet routed through VaeTiledEncoder: doing so reproducibly segfaults inside libcuda.so at the
+            // moment the BF16 cuDNN conv fast-path first engages for the VAE encoder's downsample convs (2026-08-09,
+            // 1536x1536 SDXL img2img — 100% reproducible, crash site is the driver itself, not managed code). This
+            // is a real bug the dtype-correctness fix in VaeTiledEncoder exposed by being the first caller to ever
+            // feed the encoder a dtype-matched (BF16) tile — needs its own investigation before this call site
+            // switches over. See docs/Checklists/ROADMAP.md.
             Tensor sourceLatent = _vaeEncoder!.Encode(VaeBackend, img2img.SourceImage);  // LOAD-BEARING for VaeDevice: AddNoise below is host-side
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");

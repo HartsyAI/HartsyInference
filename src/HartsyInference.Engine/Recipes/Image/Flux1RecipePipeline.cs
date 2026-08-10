@@ -73,6 +73,14 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
         int[] t5Tokens = _t5Tokenizer.Encode(prompt);
         int[] t5Mask = T5Tokenizer.CreateAttentionMask(t5Tokens);
 
+        // FLUX.1 Canny/Depth: the host already ran the edge/depth annotator (it needs host-app image types this
+        // package can't reference) and handed back the finished map under this key. Absent on a genuine Tools
+        // checkpoint surfaces as GenerateFromTokens' own "requires a control image" error, not a silent fallback.
+        ImageData? toolsControlImageData = RequestExtras.Image(request.Extra, RequestExtras.FluxToolsControlImage);
+        Tensor? controlImage = toolsControlImageData is null
+            ? null
+            : FeatureImaging.RgbToTensorMinusOneOne(FeatureImaging.ResizeRgb24(toolsControlImageData, reqWidth, reqHeight), reqWidth, reqHeight);
+
         FluxControlNetResolver.ResolvedSpec? controlNets = null;
         try
         {
@@ -128,6 +136,7 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
                 clipTokens, eosPos, t5Tokens, t5Mask, inner,
                 guidanceScale: guidance,
                 onProgress: bridge,
+                controlImage: controlImage,
                 fluxControlNets: controlNets?.Conditionings,
                 reduxImageEmbeds: redux?.Embeds,
                 reduxApplyStartFraction: redux?.ApplyStart ?? 0f);
@@ -150,6 +159,7 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
         finally
         {
             controlNets?.Dispose();
+            controlImage?.Dispose();
         }
     }
 

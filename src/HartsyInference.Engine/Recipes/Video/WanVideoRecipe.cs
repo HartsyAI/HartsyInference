@@ -46,13 +46,31 @@ public sealed class WanVideoRecipe : IVideoRecipe
 
 
     /// <inheritdoc/>
-    /// <remarks>Wan sniffs the checkpoint for the CLIP-I2V / concat-I2V variants and consumes both a start frame and an optional last frame.</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame;
+    /// <remarks><c>wan-22-5b</c> (TI2V-5B) and <c>wan-21-1_3b</c> are always driven by
+    /// <see cref="WanVideoRecipePipeline"/>'s non-concat path (a VAE-encoded <c>firstFrameLatent</c>, consuming
+    /// only <see cref="VideoRequest.InitImage"/>) — neither compat class ever resolves to a concat-I2V config
+    /// (<see cref="ResolveConfig"/> maps them unconditionally to <c>Ti2V5B</c> / <c>T2V_1_3B</c>), so claiming
+    /// <see cref="VideoFeatures.EndFrame"/> for either would be a lie the pipeline can't back: an end frame
+    /// silently never reaches the denoiser on that path. <c>wan-21-14b</c> stays ambiguous at the family level
+    /// (T2V vs. concat-I2V is a checkpoint property — see <see cref="SupportsFor"/>) and keeps claiming both;
+    /// the generic "wan" catalog slug (weight-derived config, no compat class) does too, for the same reason.</remarks>
+    public VideoFeatures Supports =>
+        _familyId is Wan22_5BCompatClassId or Wan21_1_3BCompatClassId
+            ? VideoFeatures.InitImage
+            : VideoFeatures.InitImage | VideoFeatures.EndFrame;
 
     /// <summary>The features for a CONCRETE checkpoint: VACE/Animate/S2V share Wan's compat classes and are only
     /// detected by sniffing the header, so the family-level <see cref="Supports"/> alone would wrongly refuse (e.g.)
     /// a driving video on an Animate checkpoint loaded under <c>wan-21-14b</c>. Falls back to the family answer when
-    /// the file cannot be peeked.</summary>
+    /// the file cannot be peeked.
+    /// <para>Does NOT yet narrow the <c>wan-21-14b</c> T2V-vs-concat-I2V ambiguity — that needs the in-channels of
+    /// <c>patch_embedding.weight</c>, which <see cref="ConstructBase"/> reads off the CONVERTED weight dict (post
+    /// <see cref="WanVideoCheckpointConverter.LoadAndConvert"/>), not the raw checkpoint's own key names. Wan ships
+    /// both single-file and diffusers-shard layouts with different raw prefixes, so a cheap raw-header peek here
+    /// (mirroring <see cref="VideoRecipeUtils.PeekSafeTensorKeys"/>) risks silently misclassifying a checkpoint
+    /// whose prefix the peek doesn't recognize — worse than the current over-claim, which at least fails loudly as
+    /// a silent no-op the caller can be told about rather than a wrong refusal. Left for the real end-frame wiring
+    /// (tracked in the extension's TODO backlog), which needs the converted weights loaded anyway.</para></summary>
     public VideoFeatures SupportsFor(string? checkpointPath)
     {
         if (string.IsNullOrWhiteSpace(checkpointPath))

@@ -151,6 +151,9 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.Xxl);
             t5.LoadWeights(t5Weights);
 
+            // BF16 on Ampere+ (F32-equivalent range, halves the full-res decode workspace), F32 otherwise —
+            // the SDXL-VAE precision policy; LoadFluxVaeF32 force-upcasts to F32, this recovers BF16 where safe.
+            vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeights, VaePrecisionHelper.PreferredVaeDtype(context.Backend));
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
             vae.LoadWeights(vaeWeights);
 

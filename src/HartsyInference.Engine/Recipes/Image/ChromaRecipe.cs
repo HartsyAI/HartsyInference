@@ -101,6 +101,9 @@ public sealed class ChromaRecipe : IArchitectureRecipe
             zLoader.Dispose();
             throw new InvalidOperationException($"VAE file '{vaePath}' has no usable VAE tensors.");
         }
+        // BF16 on Ampere+ (F32-equivalent range, halves the full-res decode workspace), F32 otherwise —
+        // the SDXL-VAE precision policy; LoadFluxVaeF32 force-upcasts to F32, this recovers BF16 where safe.
+        vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeights, VaePrecisionHelper.PreferredVaeDtype(context.Backend));
         VaeDecoder vae = new VaeDecoder(VaeConfig.Chroma);
         vae.LoadWeights(vaeWeights);
 

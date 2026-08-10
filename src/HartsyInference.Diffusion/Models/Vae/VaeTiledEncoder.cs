@@ -1,5 +1,7 @@
+using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
@@ -47,10 +49,20 @@ public sealed class VaeTiledEncoder
         int pixelTileSize = tileLatentSize * SpatialCompressionFactor;
         int pixelOverlapStep = latentOverlapStep * SpatialCompressionFactor;
 
+        // The VAE weights are loaded at a specific dtype (BF16 on Ampere+ for the SDXL-shaped VAE family, F32
+        // elsewhere — VaePrecisionHelper's policy). Encode's internal dtype tracks the INPUT tensor's dtype, not
+        // the weights', so an F32 pixel tile against BF16 weights would both miss cuDNN's same-dtype fast conv
+        // path and (per DecodeTiled's analogous fix) risk a kernel reading the weights at the wrong width. Cast
+        // into the encoder call and back to F32 on the way out — mirrors DecodeTiled's per-tile treatment.
+        DType weightDtype = _encoder.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32;
+
         // If the image fits in a single tile, encode directly (exact, no blending).
         if (imageH <= pixelTileSize && imageW <= pixelTileSize)
         {
-            return _encoder.Encode(backend, image);
+            Tensor castImage = DtypeCastHelper.EnsureDtype(backend, image, weightDtype, disposeSourceOnCast: false);
+            Tensor singleShot = _encoder.Encode(backend, castImage);
+            if (!ReferenceEquals(castImage, image)) castImage.Dispose();
+            return DtypeCastHelper.EnsureF32(backend, singleShot);
         }
 
         int latentCh = config.LatentChannels;
@@ -91,9 +103,14 @@ public sealed class VaeTiledEncoder
                     paddedTile = tile;
                 }
 
-                // Encode this tile → latent [B, latentCh, tileLatentSize, tileLatentSize].
-                Tensor encoded = _encoder.Encode(backend, paddedTile);
+                // Encode this tile → latent [B, latentCh, tileLatentSize, tileLatentSize]. Cast to the VAE's own
+                // weight dtype going in (fast cuDNN path + correct kernel dispatch — see the class-level comment
+                // above), then straight back to F32 so VaeTiling's crop/blend/concat (F32-only) stay untouched.
+                Tensor castTile = DtypeCastHelper.EnsureDtype(backend, paddedTile, weightDtype, disposeSourceOnCast: false);
+                Tensor encodedRaw = _encoder.Encode(backend, castTile);
+                if (!ReferenceEquals(castTile, paddedTile)) castTile.Dispose();
                 paddedTile.Dispose();
+                Tensor encoded = DtypeCastHelper.EnsureF32(backend, encodedRaw);
 
                 // Crop the latent back to the un-padded extent.
                 int latentTileH = tilePixH / SpatialCompressionFactor;

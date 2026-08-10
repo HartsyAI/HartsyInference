@@ -76,6 +76,9 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
             // and passes already-diffusers keys through unchanged (a raw load throws on mid_block.resnets.0).
             (Dictionary<string, Tensor> vaeW, SafeTensorsLoader vaeL) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
             loaders.Add(vaeL);
+            // BF16 on Ampere+ (F32-equivalent range, halves the full-res decode workspace), F32 otherwise —
+            // the SDXL-VAE precision policy; LoadFluxVaeF32 force-upcasts to F32, this recovers BF16 where safe.
+            vaeW = VaePrecisionHelper.CastVaeWeights(vaeW, VaePrecisionHelper.PreferredVaeDtype(context.Backend));
 
             BooguImageConfig config = BooguImageConfig.V01;
             BooguImageTransformer transformer = new BooguImageTransformer(config);

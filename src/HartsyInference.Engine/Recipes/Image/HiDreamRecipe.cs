@@ -119,6 +119,9 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
                 // The canonical flux ae.safetensors is BFL-native LDM naming; VaeDecoder wants diffusers keys.
                 vaeWeights = standaloneVae;
             }
+            // BF16 on Ampere+ (F32-equivalent range, halves the full-res decode workspace), F32 otherwise —
+            // the SDXL-VAE precision policy; both branches above force F32, this recovers BF16 where safe.
+            vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeights, VaePrecisionHelper.PreferredVaeDtype(context.Backend));
             vae.LoadWeights(vaeWeights);
             VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, vaeWeights, "HiDreamRecipe");
 

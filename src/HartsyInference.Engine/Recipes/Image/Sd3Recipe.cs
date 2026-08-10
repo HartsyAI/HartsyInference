@@ -96,6 +96,9 @@ public sealed class Sd3Recipe : IArchitectureRecipe
             t5.LoadWeights(t5Weights);
             T5Tokenizer t5Tokenizer = new T5Tokenizer(maxLength: 256);
 
+            // BF16 on Ampere+ (F32-equivalent range, halves the full-res decode workspace), F32 otherwise —
+            // the SDXL-VAE precision policy; LoadFluxVaeF32 force-upcasts to F32, this recovers BF16 where safe.
+            vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeights, VaePrecisionHelper.PreferredVaeDtype(context.Backend));
             VaeDecoder vaeDecoder = new VaeDecoder(VaeConfig.Sd3);
             vaeDecoder.LoadWeights(vaeWeights);
             VaeEncoder vaeEncoder = LoaderVaeUtils.BuildEncoder(VaeConfig.Sd3, vaeWeights, "Sd3Recipe");

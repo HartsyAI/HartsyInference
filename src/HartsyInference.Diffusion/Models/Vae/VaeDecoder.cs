@@ -494,6 +494,19 @@ public sealed class VaeDecoder
                     Logs.Info($"[TILEDBG] tileInput(0,0) [{vaeDtype.Name}] min={dbgMin} max={dbgMax} mean={dbgSum / tileInputF32.ElementCount} nan={dbgNan} elems={tileInputF32.ElementCount}");
                     if (!ReferenceEquals(tileInputF32, tileInput)) tileInputF32.Dispose();
                 }
+                // Pre-flight: estimate THIS tile's im2col workspace and trim the pool proactively when it's
+                // close to the edge, rather than letting the allocator discover it's short mid-decode and pay
+                // the OOM-retry sync (~470ms, see the full-res gate above for the same tradeoff at latent scale).
+                // Tile-scale headroom is much smaller than the full-res gate's 1.5GB — a single tile's own
+                // workspace is the dominant term here, not neighboring-layer activation slop.
+                long tileWorkspace = EstimateDecodeWorkspaceBytes(actualTileH, actualTileW, gemmElemSize);
+                if (backend.Capabilities.BandsIm2Col && backend.Capabilities.Im2ColWorkspaceCapBytes > 0)
+                    tileWorkspace = Math.Min(tileWorkspace, backend.Capabilities.Im2ColWorkspaceCapBytes);
+                const long TileHeadroomBytes = 1L << 27;   // 128 MB
+                if (backend.FreeMemoryBytes() < tileWorkspace + TileHeadroomBytes)
+                {
+                    backend.TrimMemoryPool();
+                }
                 Tensor rgbTile = Decode(backend, tileInput);
                 tileInput.Dispose();
                 if (VaeStatsEnabled && ty == 0 && tx == 0)
