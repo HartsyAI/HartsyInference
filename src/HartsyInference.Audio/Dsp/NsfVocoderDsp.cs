@@ -23,18 +23,38 @@ public static unsafe class NsfVocoderDsp
         float voicedThreshold = 10f, int noiseSeed = 0)
     {
         int t0 = (int)f0.Shape[2];
-        int audioLen = t0 * scale;
         float* fp = (float*)f0.DataPointer;
-        float* mW = (float*)mergeW.DataPointer;
-        float mB = ((float*)mergeB.DataPointer)[0];
+        float[] f0Array = new float[t0];
+        for (int i = 0; i < t0; i++) f0Array[i] = fp[i];
+
         double[] cum = new double[harmonics];
-        float[] merged = new float[audioLen];
         // noiseSeed < 0 → deterministic (no NSF noise), used by the parity harness; otherwise stochastic.
         bool addNoise = noiseSeed >= 0;
         uint rng = noiseSeed == 0 ? 0x9E3779B9u : DeterministicRng.Seed(Math.Abs(noiseSeed));
-        for (int i = 0; i < t0; i++)
+        return GenerateHarmonicSourceChunk(f0Array, cum, ref rng, scale, sampleRate, harmonics, mergeW, mergeB,
+            sineAmp, noiseStd, voicedThreshold, addNoise);
+    }
+
+    /// <summary>Incremental counterpart to <see cref="GenerateHarmonicSource"/>: advances the SAME phase
+    /// accumulators (<paramref name="phase"/>, one running sum per harmonic, mutated in place) and noise RNG
+    /// state (<paramref name="rngState"/>) forward using only the NEW F0 values in <paramref name="f0Chunk"/> —
+    /// never re-derives phase/noise for previously-consumed F0. Both are pure running sequences (phase is a
+    /// cumulative sum, the RNG is a deterministic sequential walk), so threading them through successive calls
+    /// with successive F0 chunks reproduces bit-identical results to one monolithic
+    /// <see cref="GenerateHarmonicSource"/> call over the concatenation of all chunks — this is what makes the
+    /// NSF source safe to stream (see <c>CosyVoice.HiFTStreamState</c>'s doc comment for why recompute-with-margin
+    /// alone is NOT safe for this specific piece of the vocoder).</summary>
+    public static float[] GenerateHarmonicSourceChunk(float[] f0Chunk, double[] phase, ref uint rngState,
+        int scale, int sampleRate, int harmonics, Tensor mergeW, Tensor mergeB, float sineAmp, float noiseStd,
+        float voicedThreshold, bool addNoise)
+    {
+        float* mW = (float*)mergeW.DataPointer;
+        float mB = ((float*)mergeB.DataPointer)[0];
+        float[] merged = new float[f0Chunk.Length * scale];
+        uint rng = rngState;
+        for (int i = 0; i < f0Chunk.Length; i++)
         {
-            float hz = fp[i];
+            float hz = f0Chunk[i];
             float uv = hz > voicedThreshold ? 1f : 0f;
             float noiseAmp = uv * noiseStd + (1f - uv) * (sineAmp / 3f);
             for (int rep = 0; rep < scale; rep++)
@@ -42,15 +62,16 @@ public static unsafe class NsfVocoderDsp
                 float lin = mB;
                 for (int h = 0; h < harmonics; h++)
                 {
-                    cum[h] += (double)hz * (h + 1) / sampleRate;
-                    cum[h] -= Math.Floor(cum[h]);
-                    float sine = (float)Math.Sin(2.0 * Math.PI * cum[h]) * sineAmp;
+                    phase[h] += (double)hz * (h + 1) / sampleRate;
+                    phase[h] -= Math.Floor(phase[h]);
+                    float sine = (float)Math.Sin(2.0 * Math.PI * phase[h]) * sineAmp;
                     float noise = addNoise ? noiseAmp * DeterministicRng.NextGaussian(ref rng) : 0f;
                     lin += mW[h] * (sine * uv + noise);
                 }
                 merged[i * scale + rep] = MathF.Tanh(lin);
             }
         }
+        rngState = rng;
         return merged;
     }
 
