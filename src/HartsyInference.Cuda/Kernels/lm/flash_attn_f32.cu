@@ -1,9 +1,9 @@
 // FlashAttention (decode + prefill), FP32, grouped-query aware.
 //
 // Online-softmax attention that never materializes the [Tq x Lk] score matrix and reads K/V grouped-query
-// directly (no replicated K/V heads). One CUDA block per (batch, query-head, query-row); blockDim.x = head_dim
-// threads (must be a power of two, <= 1024 — true for the 64/128 head dims we run). Each thread owns one output
-// dimension; the per-key Q·K dot is a shared-memory tree reduction.
+// directly (no replicated K/V heads). One CUDA block per (batch, query-head, query-row); blockDim.x is the next
+// power of two at least 32 and at least head_dim (up to 1024). Each active thread owns one output dimension;
+// the per-key Q·K dot is a shared-memory tree reduction.
 //
 // Q:   [B, Hq, Tq, D]   K/V buffer: [B, Hkv, Lk, D] (Lk is the buffer's seq STRIDE; only the first kvLen
 // positions are valid, so a fixed-capacity KV buffer can be read in place). out: [B, Hq, Tq, D].
@@ -42,8 +42,8 @@ extern "C" __global__ void lm_flash_attn_f32(
     // use the host-passed kvLen/qOffset (eager path, cross-attention, and all LLM callers).
     if (dPos != nullptr) { kvLen = (unsigned int)dPos[0]; qOffset = dPos[1]; }
 
-    // blockDim.x is the next power of two >= D (set by the launcher), so the tree reduction below is always
-    // power-of-two; threads tid in [D, blockDim.x) are padding (contribute 0, write no output). This lets the
+    // blockDim.x is a power of two >= max(D, 32), so the tree reduction always has a complete final warp;
+    // threads tid in [D, blockDim.x) are padding (contribute 0, write no output). This lets the
     // kernel handle non-power-of-two head dims (e.g. Phi-3's D=96), not just the 64/128 cases.
     extern __shared__ float sdata[];
     size_t qBase = (((size_t)b * Hq + h) * Tq + r) * D;
@@ -70,9 +70,8 @@ extern "C" __global__ void lm_flash_attn_f32(
         }
         // Final 32→1 within warp 0 via register shuffle — lanes of a warp are implicitly synchronized,
         // so this needs NO __syncthreads, removing ~5 of the ~8 per-key barriers (the dominant cost in
-        // the decode loop). blockDim.x is a power of two ≥ 64 for every head dim we run (next-pow2 ≥ D,
-        // D ∈ {64,72,80,96,128,256}), so after the loop warp 0 holds 32 valid partial sums (padding
-        // lanes were seeded to 0 above) and a full-mask shuffle is safe.
+        // the decode loop). blockDim.x is a power of two ≥ 32, so after the loop warp 0 holds 32 partial sums;
+        // padding lanes were seeded to zero, making the full-mask shuffle safe.
         if (tid < 32)
         {
             float v = sdata[tid];

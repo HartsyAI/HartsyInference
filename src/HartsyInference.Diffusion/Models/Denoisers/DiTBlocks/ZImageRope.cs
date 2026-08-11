@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -162,38 +163,98 @@ public sealed unsafe class ZImageRope
         if (!_gpuTablesDirty)
             return (_gpuCos!, _gpuSin!);
 
-        if (_gpuCos is not null)
-        {
-            backend.FreeWeights([_gpuCos, _gpuSin!]);
-            _gpuCos.Dispose();
-            _gpuSin!.Dispose();
-        }
+        ReleaseGpuTables(backend);
 
-        int halfDim = _headDim / 2;
-        Tensor cos = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
-        Tensor sin = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
-        float* cp = (float*)cos.DataPointer;
-        float* sp = (float*)sin.DataPointer;
-        fixed (float* ch = _cosCache, sh = _sinCache)
+        Tensor? cos = null;
+        Tensor? sin = null;
+        try
         {
-            for (int s = 0; s < _cachedSeqLen; s++)
+            int halfDim = _headDim / 2;
+            cos = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
+            sin = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
+            float* cp = (float*)cos.DataPointer;
+            float* sp = (float*)sin.DataPointer;
+            fixed (float* ch = _cosCache, sh = _sinCache)
             {
-                long src = (long)s * halfDim;
-                long dst = (long)s * _headDim;
-                for (int i = 0; i < halfDim; i++)
+                for (int s = 0; s < _cachedSeqLen; s++)
                 {
-                    cp[dst + 2 * i] = ch[src + i];
-                    sp[dst + 2 * i] = sh[src + i];
-                    cp[dst + 2 * i + 1] = 0f;   // unused by the kernel
-                    sp[dst + 2 * i + 1] = 0f;
+                    long src = (long)s * halfDim;
+                    long dst = (long)s * _headDim;
+                    for (int i = 0; i < halfDim; i++)
+                    {
+                        cp[dst + 2 * i] = ch[src + i];
+                        sp[dst + 2 * i] = sh[src + i];
+                        cp[dst + 2 * i + 1] = 0f;   // unused by the kernel
+                        sp[dst + 2 * i + 1] = 0f;
+                    }
                 }
             }
+            backend.PreloadWeights([cos, sin]);
+            _gpuCos = cos;
+            _gpuSin = sin;
+            _gpuTablesDirty = false;
+            return (cos, sin);
         }
-        backend.PreloadWeights([cos, sin]);
-        _gpuCos = cos;
-        _gpuSin = sin;
-        _gpuTablesDirty = false;
-        return (cos, sin);
+        catch
+        {
+            // PreloadWeights may have uploaded only the first table before failing. Attempt every rollback action,
+            // but never replace the allocation/preload exception that explains why table construction failed.
+            try
+            {
+                if (cos is not null)
+                    backend.FreeWeights(sin is null ? [cos] : [cos, sin]);
+            }
+            catch (Exception cleanupError)
+            {
+                Logs.Warning($"[Z-Image RoPE] Failed to roll back partially uploaded tables: {cleanupError.Message}");
+            }
+            try { cos?.Dispose(); }
+            catch (Exception cleanupError) { Logs.Warning($"[Z-Image RoPE] Failed to dispose cos table: {cleanupError.Message}"); }
+            try { sin?.Dispose(); }
+            catch (Exception cleanupError) { Logs.Warning($"[Z-Image RoPE] Failed to dispose sin table: {cleanupError.Message}"); }
+            throw;
+        }
+    }
+
+    /// <summary>Releases the device-resident table copies while preserving the CPU precompute. The next GPU
+    /// application re-uploads the current tables. This is required at a model-phase boundary because the tables
+    /// are explicitly preloaded weights and therefore are not part of the transformer's checkpoint enumeration.</summary>
+    public void ReleaseGpuTables(IBackend backend)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        Tensor? cos = _gpuCos;
+        Tensor? sin = _gpuSin;
+        if (cos is null)
+        {
+            _gpuTablesDirty = true;
+            return;
+        }
+
+        // Keep the handles published if the backend free fails so the caller can retry instead of losing the only
+        // strong references to live device allocations.
+        backend.FreeWeights(sin is null ? [cos] : [cos, sin]);
+        Exception? disposeError = null;
+        try
+        {
+            cos.Dispose();
+        }
+        catch (Exception ex)
+        {
+            disposeError = ex;
+        }
+        try
+        {
+            sin?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            disposeError ??= ex;
+        }
+        _gpuCos = null;
+        _gpuSin = null;
+        _gpuTablesDirty = true;
+        if (disposeError is not null)
+            throw new InvalidOperationException("Z-Image RoPE device tables were evicted but their host owners could not be released.", disposeError);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

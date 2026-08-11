@@ -150,6 +150,29 @@ __global__ void dit_gated_residual_lastdim_bf16(
     output[i] = __float2bfloat16(__bfloat162float(residual[i]) + gate[pIdx] * __bfloat162float(value[i]));
 }
 
+// ── GEGLU (BF16 I/O, FP32 compute) ──────────────────────────────────────────
+// input is [..., 2*innerDim] with [value | gate] in each logical row. The split must remain on
+// the last dimension; treating the flat allocation as two halves is only correct for a single row.
+__global__ void dit_geglu_bf16(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ input,
+    unsigned int innerDim,
+    unsigned int outputElements)
+{
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= outputElements) return;
+
+    unsigned int outer = i / innerDim;
+    unsigned int d = i % innerDim;
+    size_t inputIndex = (size_t)outer * (2u * innerDim) + d;
+    float value = __bfloat162float(input[inputIndex]);
+    float gate = __bfloat162float(input[inputIndex + innerDim]);
+    float inner = 0.7978845608028654f * (gate + 0.044715f * gate * gate * gate);
+    float sigmoid = __fdividef(1.0f, 1.0f + __expf(-2.0f * inner));
+    float gelu = 0.5f * gate * (1.0f + (2.0f * sigmoid - 1.0f));
+    output[i] = __float2bfloat16(value * gelu);
+}
+
 // ── Gated-FFN activation epilogue (BF16 I/O, F32 compute) ──────────────────
 // comb[r*ff+i] = act(gateUp[r, i]) * gateUp[r, ff+i] over the CONCATENATED [gate | up] projection.
 // BF16 twin of lm_glu_act_f32 — same fast-math formulas, same flat-index-to-(row, i) decomposition

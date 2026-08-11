@@ -11,6 +11,7 @@ public sealed unsafe class ZImageContextRefinerBlock
     private readonly int _headDim;
     private readonly int _ffnDim;
     private readonly float _eps;
+    private readonly bool _allowF16Attention;
 
     private readonly QkNorm _normQ;
     private readonly QkNorm _normK;
@@ -26,13 +27,15 @@ public sealed unsafe class ZImageContextRefinerBlock
 
     private Tensor? _w1Weight, _w2Weight, _w3Weight;
 
-    public ZImageContextRefinerBlock(int hiddenSize, int numHeads, int ffnDim, float eps = 1e-5f)
+    public ZImageContextRefinerBlock(int hiddenSize, int numHeads, int ffnDim, float eps = 1e-5f,
+        bool allowF16Attention = true)
     {
         _hiddenSize = hiddenSize;
         _numHeads = numHeads;
         _headDim = hiddenSize / numHeads;
         _ffnDim = ffnDim;
         _eps = eps;
+        _allowF16Attention = allowF16Attention;
 
         _normQ = new QkNorm(_headDim, eps);
         _normK = new QkNorm(_headDim, eps);
@@ -130,10 +133,12 @@ public sealed unsafe class ZImageContextRefinerBlock
             rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
         }
 
-        // allowF16: Q/K RMS-normed above → bounded scores → the F16/cuDNN fused SDPA path is safe.
+        // Q/K normalization bounds scores but not V. Base disables internal F16 narrowing for every attention
+        // site; Turbo retains its validated fused path.
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale, allowF16: true);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale,
+            allowF16: _allowF16Attention);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();

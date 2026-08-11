@@ -13,17 +13,19 @@ public sealed unsafe class ZImageTransformer : IDisposable
     private readonly ZImageBlock[] _noiseRefiners;
     private readonly ZImageBlock[] _layers;
     private readonly ZImageRope _rope;
+    private readonly DType _packedActivationDtype;
     private int _disposed;
 
     // ── Per-generation caches (the Krea2 pattern) ──────────────────────────────────────────────────────────
     // The caption path (cap_embedder → pad → context_refiners) and all three RoPE precomputes are
     // timestep-INDEPENDENT, yet were recomputed every denoise step (~14 wasted block-forwards + 3 host
-    // cos/sin table builds per step). Cache the refined caption keyed on the encoder-output reference (a new
-    // prompt is a new tensor → evicts) and the rope tables keyed on shape signatures. Regional conditioning
-    // bypasses the caption cache (its caption stream is plan/step-dependent).
-    private Tensor? _cachedRefinedCaption;
-    private object? _cachedCaptionKey;
-    private int _cachedCapPaddedLen = -1;
+    // cos/sin table builds per step). Two bounded entries are required: Z-Image-Base alternates positive and
+    // negative captions for CFG, so a single-entry cache deterministically evicts itself on every forward.
+    // Entries are keyed on encoder-output identity and padded length; regional conditioning bypasses the cache
+    // because its caption stream is plan/step-dependent.
+    private readonly RefinedCaptionCacheEntry[] _refinedCaptionCache =
+        [new RefinedCaptionCacheEntry(), new RefinedCaptionCacheEntry()];
+    private long _refinedCaptionUseClock;
     private ZImageRope? _captionRope;
     private ZImageRope? _refinerRope;
     private long _refinerRopeSig = long.MinValue;
@@ -65,26 +67,34 @@ public sealed unsafe class ZImageTransformer : IDisposable
     public ZImageTransformer(ZImageConfig config)
     {
         _config = config;
+        // Turbo's F16 block stream and sandwich damping are validated against its distilled weights. Base has a
+        // materially wider value-projection range (observed >83k), so both its stream and SDPA must remain F32;
+        // otherwise the F16 V narrowing produces Inf even though the RMS-normalized Q/K scores are bounded.
+        _packedActivationDtype = config.IsBase ? DType.F32 : DiTBlocks.DitDtype.Act;
+        bool useF16SandwichDamp = _packedActivationDtype == DType.F16;
+        bool allowF16Attention = !config.IsBase;
 
         _contextRefiners = new ZImageContextRefinerBlock[config.NumRefinerLayers];
         for (int i = 0; i < config.NumRefinerLayers; i++)
         {
             _contextRefiners[i] = new ZImageContextRefinerBlock(
-                config.HiddenSize, config.NumHeads, config.FfnDim, config.NormEps);
+                config.HiddenSize, config.NumHeads, config.FfnDim, config.NormEps, allowF16Attention);
         }
 
         _noiseRefiners = new ZImageBlock[config.NumRefinerLayers];
         for (int i = 0; i < config.NumRefinerLayers; i++)
         {
             _noiseRefiners[i] = new ZImageBlock(
-                config.HiddenSize, config.NumHeads, config.FfnDim, config.NormEps);
+                config.HiddenSize, config.NumHeads, config.FfnDim, config.NormEps,
+                useF16SandwichDamp, allowF16Attention);
         }
 
         _layers = new ZImageBlock[config.NumLayers];
         for (int i = 0; i < config.NumLayers; i++)
         {
             _layers[i] = new ZImageBlock(
-                config.HiddenSize, config.NumHeads, config.FfnDim, config.NormEps);
+                config.HiddenSize, config.NumHeads, config.FfnDim, config.NormEps,
+                useF16SandwichDamp, allowF16Attention);
         }
 
         _rope = new ZImageRope(config.AxesDims, config.RopeTheta);
@@ -205,11 +215,44 @@ public sealed unsafe class ZImageTransformer : IDisposable
     }
 
     /// <summary>Patchifies a pixel latent <c>[B, C, H, W]</c> → the <c>[B, (H/p)(W/p), C·p²]</c> token grid the
-    /// packed fast path operates on. Host op; call once per generation.</summary>
+    /// packed fast path operates on. This compatibility overload performs the byte-preserving host shuffle.</summary>
     public Tensor PatchifyLatent(Tensor latent)
     {
         int patch = _config.PatchSize;
         return Patchify(latent, (int)latent.Shape[0], (int)latent.Shape[1], (int)latent.Shape[2], (int)latent.Shape[3], patch);
+    }
+
+    /// <summary>Backend-resident patchify used by the sampling loop. The output preserves Z-Image's
+    /// <c>(patch-row, patch-column, channel)</c> inner ordering exactly.</summary>
+    public Tensor PatchifyLatent(IBackend backend, Tensor latent)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(latent);
+        if (latent.Shape.Rank != 4)
+            throw new ArgumentException($"latent must be [B,C,H,W], got {latent.Shape}.", nameof(latent));
+
+        int patch = _config.PatchSize;
+        long batch = latent.Shape[0];
+        long channels = latent.Shape[1];
+        long height = latent.Shape[2];
+        long width = latent.Shape[3];
+        if (height % patch != 0 || width % patch != 0)
+            throw new ArgumentException(
+                $"Latent H/W ({height}x{width}) must be divisible by patch size {patch}.", nameof(latent));
+
+        Tensor output = new(
+            new TensorShape(batch, (height / patch) * (width / patch), channels * patch * patch),
+            latent.DType);
+        try
+        {
+            backend.PatchifyTokens(output, latent, patch, innerChannelFastest: true);
+            return output;
+        }
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Unpatchifies the packed token grid back to a pixel latent <c>[B, C, H, W]</c>. Host op; call once
@@ -239,9 +282,9 @@ public sealed unsafe class ZImageTransformer : IDisposable
         int imgPaddedLen = PadUpTo(imgRealLen, _config.SeqMultiOf);
         int capRealLen = (int)captionEmbeddings.Shape[1];
         int capPaddedLen = PadUpTo(capRealLen, _config.SeqMultiOf);
-        // F16 hot path (HARTSY_DIT_F16): the packed loop is the audited opt-in surface — the classic path
-        // (CFG / regional / img2img) stays F32.
-        DType act = DiTBlocks.DitDtype.Act;
+        // Turbo uses the audited F16 hot path when enabled. Base remains F32 because its unnormalized attention V
+        // range exceeds F16; see the matching Base-specific SDPA policy in ZImageBlock.
+        DType act = _packedActivationDtype;
 
         Tensor tEmb = ComputeTimestepEmbedding(backend, sigma, 1);
         Tensor refinedCaption = EnsureRefinedCaption(backend, captionEmbeddings, 1, capRealLen, capPaddedLen, act);
@@ -450,6 +493,32 @@ public sealed unsafe class ZImageTransformer : IDisposable
             backend.StepGraphOwner = null;
         _graphSig = long.MinValue;   // MinValue = "no sig": the next call resets WITHOUT counting a CFG flip
         _graphSigCalls = 0;
+    }
+
+    /// <summary>Releases device-resident tensors that are created lazily and therefore are not returned by
+    /// <see cref="EnumerateWeights"/>. Host-side caption/RoPE caches remain valid and are uploaded again on demand.</summary>
+    public void ReleaseDeviceCache(IBackend backend)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        Exception? firstError = null;
+        foreach (RefinedCaptionCacheEntry entry in _refinedCaptionCache)
+        {
+            if (entry.Value is not null)
+                Try(() => backend.FreeWeights([entry.Value]));
+        }
+        Try(() => _rope.ReleaseGpuTables(backend));
+        if (_captionRope is not null)
+            Try(() => _captionRope.ReleaseGpuTables(backend));
+        if (_refinerRope is not null)
+            Try(() => _refinerRope.ReleaseGpuTables(backend));
+        if (firstError is not null)
+            throw new InvalidOperationException("One or more Z-Image transformer device caches failed to release.", firstError);
+
+        void Try(Action cleanup)
+        {
+            try { cleanup(); }
+            catch (Exception error) { firstError ??= error; }
+        }
     }
 
     /// <summary>Routes a fresh packed latent into the step-graph's FIXED latent buffer (the address the captured
@@ -678,37 +747,98 @@ public sealed unsafe class ZImageTransformer : IDisposable
         return tEmb;
     }
 
-    /// <summary>Returns the refined caption stream from the per-generation cache, recomputing on a key /
-    /// padded-length / dtype miss. Keyed on the encoder-output reference (a new prompt is a new tensor →
-    /// evicts). The cached tensor is host-materialized so it survives cross-step activation frees; graph mode
-    /// additionally pins it device-resident (see ForwardPacked), so eviction must FreeWeights before Dispose.</summary>
+    /// <summary>Returns a refined caption stream from the bounded two-entry cache, recomputing on a key /
+    /// padded-length / dtype miss. Two entries keep Z-Image-Base's alternating positive and negative captions
+    /// hot. Cached tensors are host-materialized so they survive activation sweeps; graph mode may additionally
+    /// pin an entry device-resident, so eviction must FreeWeights before Dispose.</summary>
     private Tensor EnsureRefinedCaption(IBackend backend, Tensor captionEmbeddings, int batch, int capRealLen,
         int capPaddedLen, DType act)
     {
-        bool hit = ReferenceEquals(_cachedCaptionKey, captionEmbeddings) && _cachedCapPaddedLen == capPaddedLen
-            && _cachedRefinedCaption is not null && _cachedRefinedCaption.DType == act;
-        if (hit)
-            return _cachedRefinedCaption!;
+        foreach (RefinedCaptionCacheEntry entry in _refinedCaptionCache)
+        {
+            if (ReferenceEquals(entry.Key, captionEmbeddings) && entry.PaddedLength == capPaddedLen
+                && entry.Value is not null && entry.Value.DType == act)
+            {
+                entry.LastUse = ++_refinedCaptionUseClock;
+                return entry.Value;
+            }
+        }
 
         Tensor refined = ComputeRefinedCaption(backend, captionEmbeddings, batch, capRealLen, capPaddedLen);
-        if (act == DType.F16 && refined.DType != DType.F16)
+        bool installed = false;
+        try
         {
-            // Cache in the block-loop dtype so the per-step concat needs no cast (the F16 packed path).
-            Tensor refinedF16 = new Tensor(refined.Shape, DType.F16);
-            backend.CastToF16(refinedF16, refined);
-            refined.Dispose();
-            refined = refinedF16;
+            if (act == DType.F16 && refined.DType != DType.F16)
+            {
+                // Cache in the block-loop dtype so the per-step concat needs no cast (the F16 packed path).
+                Tensor refinedF16 = new Tensor(refined.Shape, DType.F16);
+                try
+                {
+                    backend.CastToF16(refinedF16, refined);
+                }
+                catch
+                {
+                    refinedF16.Dispose();
+                    throw;
+                }
+                refined.Dispose();
+                refined = refinedF16;
+            }
+            _ = refined.DataPointer;   // materialize to host so it survives across steps
+
+            RefinedCaptionCacheEntry target = _refinedCaptionCache[0].Value is null
+                ? _refinedCaptionCache[0]
+                : _refinedCaptionCache[1].Value is null
+                    ? _refinedCaptionCache[1]
+                    : _refinedCaptionCache[0].LastUse <= _refinedCaptionCache[1].LastUse
+                        ? _refinedCaptionCache[0]
+                        : _refinedCaptionCache[1];
+            if (target.Value is not null)
+            {
+                Tensor evicted = target.Value;
+                // Clear lookup state before either cleanup. FreeWeights can partially release a backend cache and
+                // then throw, while Tensor.Dispose can mark the host object disposed before its callback throws;
+                // neither failure may leave a later lookup able to return this entry. Attempt both independently.
+                target.Clear();
+                Exception? freeError = null;
+                Exception? disposeError = null;
+                try { backend.FreeWeights([evicted]); }   // no-op unless graph mode pinned it
+                catch (Exception error) { freeError = error; }
+                try { evicted.Dispose(); }
+                catch (Exception error) { disposeError = error; }
+                if (freeError is not null && disposeError is not null)
+                    throw new AggregateException("Refined-caption eviction failed to release both device and host state.",
+                        freeError, disposeError);
+                if (freeError is not null)
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(freeError).Throw();
+                if (disposeError is not null)
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(disposeError).Throw();
+            }
+            target.Value = refined;
+            target.Key = captionEmbeddings;
+            target.PaddedLength = capPaddedLen;
+            target.LastUse = ++_refinedCaptionUseClock;
+            installed = true;
+            return refined;
         }
-        _ = refined.DataPointer;   // materialize to host so it survives across steps
-        if (_cachedRefinedCaption is not null)
+        catch (Exception cacheError)
         {
-            backend.FreeWeights(new[] { _cachedRefinedCaption });   // no-op unless graph mode pinned it
-            _cachedRefinedCaption.Dispose();
+            if (!installed)
+            {
+                try
+                {
+                    refined.Dispose();
+                }
+                catch (Exception cleanupError)
+                {
+                    throw new AggregateException(
+                        "Refined-caption cache update and candidate cleanup both failed.",
+                        cacheError, cleanupError);
+                }
+            }
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cacheError).Throw();
+            throw;
         }
-        _cachedRefinedCaption = refined;
-        _cachedCaptionKey = captionEmbeddings;
-        _cachedCapPaddedLen = capPaddedLen;
-        return refined;
     }
 
     /// <summary>cap_embedder → pad → caption-RoPE → context_refiner stack. Timestep-independent; the caller
@@ -1053,19 +1183,46 @@ public sealed unsafe class ZImageTransformer : IDisposable
         return rem == 0 ? n : n + (multiple - rem);
     }
 
+    private sealed class RefinedCaptionCacheEntry
+    {
+        public object? Key;
+        public Tensor? Value;
+        public int PaddedLength = -1;
+        public long LastUse;
+
+        public void Clear()
+        {
+            Key = null;
+            Value = null;
+            PaddedLength = -1;
+            LastUse = 0;
+        }
+    }
+
     public void Dispose()
     {
+        Exception? firstError = null;
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            _cachedRefinedCaption?.Dispose();
-            _cachedRefinedCaption = null;
-            _cachedCaptionKey = null;
-            _latentFixed?.Dispose();
+            foreach (RefinedCaptionCacheEntry entry in _refinedCaptionCache)
+            {
+                Tensor? value = entry.Value;
+                entry.Clear();
+                if (value is not null)
+                    TryDispose(value);
+            }
+            Tensor? latentFixed = _latentFixed;
             _latentFixed = null;
-            _tEmbFixed?.Dispose();
+            if (latentFixed is not null)
+                TryDispose(latentFixed);
+            Tensor? tEmbFixed = _tEmbFixed;
             _tEmbFixed = null;
-            _graphVelocity?.Dispose();
+            if (tEmbFixed is not null)
+                TryDispose(tEmbFixed);
+            Tensor? graphVelocity = _graphVelocity;
             _graphVelocity = null;
+            if (graphVelocity is not null)
+                TryDispose(graphVelocity);
             _tEmbLinear1Weight = null;
             _tEmbLinear1Bias = null;
             _tEmbLinear2Weight = null;
@@ -1081,7 +1238,16 @@ public sealed unsafe class ZImageTransformer : IDisposable
             _finalLinearBias = null;
             _capPadToken = null;
             _xPadToken = null;
+
+            void TryDispose(Tensor tensor)
+            {
+                try { tensor.Dispose(); }
+                catch (Exception error) { firstError ??= error; }
+            }
         }
         GC.SuppressFinalize(this);
+        if (firstError is not null)
+            throw new InvalidOperationException(
+                "One or more Z-Image transformer-owned tensors failed to dispose.", firstError);
     }
 }

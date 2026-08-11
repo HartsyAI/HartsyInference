@@ -570,11 +570,24 @@ public interface IBackend : IDisposable
         }
     }
 
-    /// <summary>CFG combine + Euler step, in-place on <paramref name="z"/>: <c>v = guidance*pos + (1-guidance)*neg; z += v*delta</c>.</summary>
+    /// <summary>CFG combine + Euler step, in-place on <paramref name="z"/>:
+    /// <c>v = guidance*pos + (1-guidance)*neg; z += v*delta</c>. <paramref name="pos"/> and
+    /// <paramref name="neg"/> may be the same tensor; neither may alias the mutated <paramref name="z"/>.</summary>
     unsafe void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
     {
         if (z.DType != DType.F32 || pos.DType != DType.F32 || neg.DType != DType.F32)
             throw new NotSupportedException("CfgEulerStep default fallback only supports F32.");
+        if (!z.Shape.Equals(pos.Shape) || !z.Shape.Equals(neg.Shape))
+            throw new ArgumentException(
+                $"CfgEulerStep requires identical shapes; got z={z.Shape}, pos={pos.Shape}, neg={neg.Shape}.");
+        if (z.ElementCount <= 0)
+            throw new ArgumentException("CfgEulerStep requires nonempty tensors.", nameof(z));
+        if (z.HasOverlappingHostStorageWithoutSync(pos) || z.HasOverlappingHostStorageWithoutSync(neg))
+            throw new ArgumentException("CfgEulerStep inputs may alias each other, but neither may alias the in-place z tensor.");
+        if (!float.IsFinite(guidance))
+            throw new ArgumentOutOfRangeException(nameof(guidance), "Guidance must be finite.");
+        if (!float.IsFinite(delta))
+            throw new ArgumentOutOfRangeException(nameof(delta), "Euler delta must be finite.");
         long count = z.ElementCount;
         float* pZ = (float*)z.DataPointer;
         float* pPos = (float*)pos.DataPointer;
@@ -583,6 +596,197 @@ public interface IBackend : IDisposable
         {
             float v = guidance * pPos[i] + (1.0f - guidance) * pNeg[i];
             pZ[i] = pZ[i] + v * delta;
+        }
+    }
+
+    /// <summary>
+    /// Elementwise affine mix: <c>output = xScale·x + yScale·y</c>. Inputs may alias each other, but neither
+    /// input storage may overlap <paramref name="output"/>. All tensors are F32, nonempty, and identically shaped.
+    /// </summary>
+    unsafe void AffineMix(Tensor output, Tensor x, Tensor y, float xScale, float yScale)
+    {
+        long count = MixContract.ValidateAffineMix(output, x, y, xScale, yScale);
+        float* outputPointer = (float*)output.DataPointer;
+        float* xPointer = (float*)x.DataPointer;
+        float* yPointer = (float*)y.DataPointer;
+        for (long i = 0; i < count; i++)
+            outputPointer[i] = xScale * xPointer[i] + yScale * yPointer[i];
+        GC.KeepAlive(output);
+        GC.KeepAlive(x);
+        GC.KeepAlive(y);
+    }
+
+    /// <summary>
+    /// In-place masked affine replacement:
+    /// <c>target = mask·target + (1−mask)·(sourceScale·source + noiseScale·noise)</c>. When
+    /// <paramref name="noiseScale"/> is zero, <paramref name="noise"/> must be null and the noise term is omitted.
+    /// Mask values are consumed exactly as supplied (never clamped). Source, noise, and mask remain unchanged.
+    /// </summary>
+    unsafe void MaskedAffineMixInPlace(
+        Tensor target,
+        Tensor source,
+        Tensor? noise,
+        Tensor mask,
+        float sourceScale,
+        float noiseScale,
+        MaskBroadcastLayout layout)
+    {
+        MaskedMixGeometry geometry = MixContract.ValidateMaskedAffineMix(
+            target, source, noise, mask, sourceScale, noiseScale, layout);
+        float* targetPointer = (float*)target.DataPointer;
+        float* sourcePointer = (float*)source.DataPointer;
+        float* noisePointer = noise is null ? null : (float*)noise.DataPointer;
+        float* maskPointer = (float*)mask.DataPointer;
+
+        if (layout == MaskBroadcastLayout.DenseNchwBroadcast)
+        {
+            long batchPlane = checked(geometry.Channels * geometry.Spatial);
+            for (long i = 0; i < geometry.ElementCount; i++)
+            {
+                long batch = i / batchPlane;
+                long maskIndex = batch * geometry.Spatial + i % geometry.Spatial;
+                MixAt(i, maskIndex);
+            }
+        }
+        else
+        {
+            long channels = geometry.FeatureDimension / geometry.PatchArea;
+            for (long i = 0; i < geometry.ElementCount; i++)
+            {
+                long feature = i % geometry.FeatureDimension;
+                long token = i / geometry.FeatureDimension;
+                long patchIndex = layout == MaskBroadcastLayout.PackedChannelOuter
+                    ? feature % geometry.PatchArea
+                    : feature / channels;
+                MixAt(i, token * geometry.PatchArea + patchIndex);
+            }
+        }
+
+        GC.KeepAlive(target);
+        GC.KeepAlive(source);
+        GC.KeepAlive(noise);
+        GC.KeepAlive(mask);
+
+        void MixAt(long elementIndex, long maskIndex)
+        {
+            float replacement = sourceScale * sourcePointer[elementIndex];
+            if (noisePointer is not null)
+                replacement += noiseScale * noisePointer[elementIndex];
+            float maskValue = maskPointer[maskIndex];
+            targetPointer[elementIndex] =
+                targetPointer[elementIndex] * maskValue + replacement * (1f - maskValue);
+        }
+    }
+
+    /// <summary>
+    /// Global-renormalized CFG plus Euler update, in-place on <paramref name="z"/> while leaving
+    /// <paramref name="cond"/> and <paramref name="uncond"/> unchanged:
+    /// <c>guided = uncond + guidance·(cond−uncond)</c>,
+    /// <c>scale = clamp(‖cond‖₂/(‖guided‖₂+1e-8), renormMin, 1)</c>,
+    /// <c>z += delta·scale·guided</c>. The two prediction inputs may alias each other; neither may alias
+    /// the mutated <paramref name="z"/>.
+    /// </summary>
+    unsafe void CfgRenormEulerStep(
+        Tensor z, Tensor cond, Tensor uncond, float guidance, float delta, float renormMin)
+    {
+        if (z.DType != DType.F32 || cond.DType != DType.F32 || uncond.DType != DType.F32)
+            throw new NotSupportedException("CfgRenormEulerStep default fallback only supports F32.");
+        if (!z.Shape.Equals(cond.Shape) || !z.Shape.Equals(uncond.Shape))
+            throw new ArgumentException(
+                $"CfgRenormEulerStep requires identical shapes; got z={z.Shape}, cond={cond.Shape}, uncond={uncond.Shape}.");
+        if (z.ElementCount <= 0)
+            throw new ArgumentException("CfgRenormEulerStep requires nonempty tensors.", nameof(z));
+        if (z.HasOverlappingHostStorageWithoutSync(cond) || z.HasOverlappingHostStorageWithoutSync(uncond))
+            throw new ArgumentException(
+                "CfgRenormEulerStep inputs may alias each other, but neither may alias the in-place z tensor.");
+        if (!float.IsFinite(guidance))
+            throw new ArgumentOutOfRangeException(nameof(guidance), "Guidance must be finite.");
+        if (!float.IsFinite(delta))
+            throw new ArgumentOutOfRangeException(nameof(delta), "Euler delta must be finite.");
+        if (!float.IsFinite(renormMin) || renormMin < 0f || renormMin > 1f)
+            throw new ArgumentOutOfRangeException(nameof(renormMin), "Renorm minimum must be finite and in [0,1].");
+
+        long count = z.ElementCount;
+        if (delta == 0f) return;
+
+        float* pZ = (float*)z.DataPointer;
+        float* pCond = (float*)cond.DataPointer;
+        float* pUncond = (float*)uncond.DataPointer;
+        double normCondSq = 0.0;
+        double normGuidedSq = 0.0;
+        for (long i = 0; i < count; i++)
+        {
+            float c = pCond[i];
+            float guided = pUncond[i] + guidance * (c - pUncond[i]);
+            normCondSq += (double)c * c;
+            normGuidedSq += (double)guided * guided;
+        }
+
+        double ratio = Math.Sqrt(normCondSq) / (Math.Sqrt(normGuidedSq) + 1e-8);
+        float scale = (float)Math.Clamp(ratio, renormMin, 1.0);
+        for (long i = 0; i < count; i++)
+        {
+            float guided = pUncond[i] + guidance * (pCond[i] - pUncond[i]);
+            guided *= scale;
+            pZ[i] += guided * delta;
+        }
+    }
+
+    /// <summary>
+    /// Last-dimension-normalized CFG plus Euler update, in-place on <paramref name="z"/> while leaving
+    /// <paramref name="cond"/> and <paramref name="uncond"/> unchanged. For every row formed by flattening
+    /// all dimensions except the last:
+    /// <c>guided = uncond + guidance·(cond−uncond)</c>,
+    /// <c>guided *= ‖cond‖₂/(‖guided‖₂+eps)</c>, and <c>z += delta·guided</c>.
+    /// The two prediction inputs may alias each other; neither may alias the mutated <paramref name="z"/>.
+    /// </summary>
+    unsafe void CfgNormalizedEulerStep(
+        Tensor z, Tensor cond, Tensor uncond, float guidance, float delta, float eps = 1e-12f)
+    {
+        if (z.DType != DType.F32 || cond.DType != DType.F32 || uncond.DType != DType.F32)
+            throw new NotSupportedException("CfgNormalizedEulerStep default fallback only supports F32.");
+        if (!z.Shape.Equals(cond.Shape) || !z.Shape.Equals(uncond.Shape))
+            throw new ArgumentException(
+                $"CfgNormalizedEulerStep requires identical shapes; got z={z.Shape}, cond={cond.Shape}, uncond={uncond.Shape}.");
+        if (z.Shape.Rank < 1 || z.ElementCount <= 0 || z.Shape[z.Shape.Rank - 1] <= 0)
+            throw new ArgumentException("CfgNormalizedEulerStep requires a nonempty tensor with a positive last dimension.", nameof(z));
+        if (z.HasOverlappingHostStorageWithoutSync(cond) || z.HasOverlappingHostStorageWithoutSync(uncond))
+            throw new ArgumentException(
+                "CfgNormalizedEulerStep inputs may alias each other, but neither may alias the in-place z tensor.");
+        if (!float.IsFinite(guidance))
+            throw new ArgumentOutOfRangeException(nameof(guidance), "Guidance must be finite.");
+        if (!float.IsFinite(delta))
+            throw new ArgumentOutOfRangeException(nameof(delta), "Euler delta must be finite.");
+        if (!float.IsFinite(eps) || eps < 0f)
+            throw new ArgumentOutOfRangeException(nameof(eps), "Normalization epsilon must be finite and nonnegative.");
+        if (delta == 0f) return;
+
+        long lastDim = z.Shape[z.Shape.Rank - 1];
+        long rows = z.ElementCount / lastDim;
+        float* pZ = (float*)z.DataPointer;
+        float* pCond = (float*)cond.DataPointer;
+        float* pUncond = (float*)uncond.DataPointer;
+        for (long row = 0; row < rows; row++)
+        {
+            long rowOffset = row * lastDim;
+            double condSq = 0.0;
+            double guidedSq = 0.0;
+            for (long d = 0; d < lastDim; d++)
+            {
+                long i = rowOffset + d;
+                float c = pCond[i];
+                float guided = pUncond[i] + guidance * (c - pUncond[i]);
+                condSq += (double)c * c;
+                guidedSq += (double)guided * guided;
+            }
+
+            float ratio = (float)(Math.Sqrt(condSq) / (Math.Sqrt(guidedSq) + eps));
+            for (long d = 0; d < lastDim; d++)
+            {
+                long i = rowOffset + d;
+                float guided = pUncond[i] + guidance * (pCond[i] - pUncond[i]);
+                pZ[i] += delta * (guided * ratio);
+            }
         }
     }
 
@@ -1153,28 +1357,25 @@ public interface IBackend : IDisposable
         }
     }
 
-    /// <summary>DiT token-grid unpatchify: <c>[1, hP·wP, C·p²]</c> → <c>[1, C, hP·p, wP·p]</c> (F32, B=1).</summary>
+    /// <summary>
+    /// DiT token-grid patchify: <c>[B,C,H,W]</c> → <c>[B,(H/p)·(W/p),p²·C]</c>.
+    /// This byte-preserving shuffle supports F32, F16, and BF16.
+    /// </summary>
+    /// <param name="innerChannelFastest">Token order: true=(ph,pw,c) (Z-Image/Lumina2), false=channel-outer (Krea2/diffusers).</param>
+    unsafe void PatchifyTokens(Tensor output, Tensor input, int patch, bool innerChannelFastest)
+    {
+        PatchTokenGeometry geometry = PatchTokenContract.ValidatePatchify(output, input, patch);
+        PatchTokenHostShuffle.Patchify(output, input, geometry, patch, innerChannelFastest);
+    }
+
+    /// <summary>DiT token-grid unpatchify: <c>[B,hP·wP,C·p²]</c> → <c>[B,C,hP·p,wP·p]</c> (F32/F16/BF16).</summary>
     /// <param name="innerChannelFastest">Token order: true=(ph,pw,c) (Z-Image/Lumina2), false=channel-outer (Krea2/diffusers).</param>
     unsafe void UnpatchifyTokens(Tensor output, Tensor tokens, int channels, int hPacked, int wPacked, int patch,
         bool innerChannelFastest)
     {
-        int h = hPacked * patch, w = wPacked * patch;
-        int patchVol = channels * patch * patch;
-        float* src = (float*)tokens.DataPointer;
-        float* dst = (float*)output.DataPointer;
-        long hw = (long)h * w;
-        for (int c = 0; c < channels; c++)
-            for (int y = 0; y < h; y++)
-                for (int x = 0; x < w; x++)
-                {
-                    int hp = y / patch, ph = y % patch;
-                    int wp = x / patch, pw = x % patch;
-                    long seq = (long)hp * wPacked + wp;
-                    long inner = innerChannelFastest
-                        ? ((long)(ph * patch + pw) * channels + c)
-                        : (((long)c * patch + ph) * patch + pw);
-                    dst[c * hw + (long)y * w + x] = src[seq * patchVol + inner];
-                }
+        PatchTokenGeometry geometry = PatchTokenContract.ValidateUnpatchify(
+            output, tokens, channels, hPacked, wPacked, patch);
+        PatchTokenHostShuffle.Unpatchify(output, tokens, geometry, patch, innerChannelFastest);
     }
 
     /// <summary>Wan2.2 VAE unpatchify: <c>[b, c·p², t, h, w] → [b, c, t, h·p, w·p]</c>, unpack <c>oc = ci·p² + r·p + q</c>.</summary>
@@ -1277,8 +1478,11 @@ public interface IBackend : IDisposable
         int seqLen = (int)x.Shape[2];
         int headDim = (int)x.Shape[3];
         // A token-major x is the same element count with heads/seq swapped; only the cos/sin row count catches it.
-        if (cos.ElementCount != (long)batch * seqLen * headDim)
-            throw new ArgumentException($"ApplyRopeSingleHeadMajor expects cos/sin [B,seq,headDim] for x {x.Shape}, got {cos.Shape}.", nameof(cos));
+        long tableElements = (long)batch * seqLen * headDim;
+        if (cos.ElementCount != tableElements || sin.ElementCount != tableElements)
+            throw new ArgumentException(
+                $"ApplyRopeSingleHeadMajor expects cos/sin [B,seq,headDim] for x {x.Shape}; got cos={cos.Shape}, sin={sin.Shape}.",
+                cos.ElementCount != tableElements ? nameof(cos) : nameof(sin));
         int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
         int half = rdim / 2;
         float* xPtr = (float*)x.DataPointer;
@@ -1717,7 +1921,10 @@ public interface IBackend : IDisposable
     /// <summary>Removes a <see cref="PinActivation"/> mark. No-op on host backends.</summary>
     void UnpinActivation(Tensor tensor) { }
 
-    /// <summary>Relative-L1 distance <c>Σ|a−b| / Σ|b|</c> — the feature-cache gate metric (TeaCache/FBCache); 0 when b is all-zero.</summary>
+    /// <summary>
+    /// Relative-L1 distance <c>Σ|a−b| / Σ|b|</c>; zero when both tensors are zero, positive infinity
+    /// when only the reference is zero, and NaN when an operand or an accumulated sum is non-finite.
+    /// </summary>
     unsafe float RelativeL1Distance(Tensor a, Tensor b)
     {
         if (!a.Shape.Equals(b.Shape))
@@ -1752,7 +1959,12 @@ public interface IBackend : IDisposable
         {
             throw new NotSupportedException($"RelativeL1Distance supports F32/F16; got {a.DType}.");
         }
-        return denom > 0.0 ? (float)(diff / denom) : 0.0f;
+        if (!double.IsFinite(diff) || !double.IsFinite(denom))
+            return float.NaN;
+        if (denom > 0.0)
+            return (float)(diff / denom);
+
+        return diff > 0.0 ? float.PositiveInfinity : 0.0f;
     }
 
     /// <summary>True when the backend has the GPU-resident decode toolkit, so autoregressive decoders (e.g. Zonos) can run fully on-device.</summary>
@@ -1770,9 +1982,28 @@ public interface IBackend : IDisposable
     /// <summary>Gathers rows: <c>output[m] = input[rowIndices[m]]</c> — used for MoE expert dispatch (collects routed tokens).</summary>
     unsafe void GatherRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices)
     {
+        if (ReferenceEquals(output, input))
+            throw new ArgumentException("GatherRows does not support an in-place output.", nameof(output));
         if (output.DType != DType.F32 || input.DType != DType.F32)
             throw new NotSupportedException("GatherRows default fallback only supports F32.");
-        int k = (int)input.Shape[input.Shape.Rank - 1];
+        if (input.Shape.Rank < 1)
+            throw new ArgumentException("GatherRows input must have at least one dimension.", nameof(input));
+        long width = input.Shape[input.Shape.Rank - 1];
+        if (width <= 0 || width > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(input), $"GatherRows row width must be in [1,{int.MaxValue}]; got {width}.");
+        long inputRows = input.ElementCount / width;
+        long requiredOutputElements = checked((long)rowIndices.Length * width);
+        if (output.ElementCount != requiredOutputElements)
+            throw new ArgumentException(
+                $"GatherRows output has {output.ElementCount} elements; {rowIndices.Length} rows of width {width} require {requiredOutputElements}.",
+                nameof(output));
+        for (int i = 0; i < rowIndices.Length; i++)
+        {
+            if (rowIndices[i] < 0 || (long)rowIndices[i] >= inputRows)
+                throw new ArgumentOutOfRangeException(
+                    nameof(rowIndices), rowIndices[i], $"Row index at position {i} is outside [0,{inputRows}).");
+        }
+        int k = (int)width;
         int m = rowIndices.Length;
         float* pOut = (float*)output.DataPointer;
         float* pIn = (float*)input.DataPointer;
@@ -1783,6 +2014,12 @@ public interface IBackend : IDisposable
             Buffer.MemoryCopy(pIn + src, pOut + dst, (long)k * 4, (long)k * 4);
         }
     }
+
+    /// <summary>Attempts a device-native row gather only when <paramref name="input"/> is already resident.
+    /// Returns <c>false</c> without uploading or modifying <paramref name="output"/> when that fast path is not
+    /// available. This prevents a small embedding lookup from pulling a multi-gigabyte vocabulary table onto a
+    /// memory-constrained device merely to collect a handful of rows.</summary>
+    bool TryGatherRowsResident(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices) => false;
 
     /// <summary>Scatter-add with per-row scale: <c>output[rowIndices[m]] += scales[m]*input[m]</c> — combines an MoE expert's output.</summary>
     unsafe void ScatterAddWeightedRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices, ReadOnlySpan<float> scales)
@@ -1823,7 +2060,7 @@ public interface IBackend : IDisposable
 
     // ── Activations ─────────────────────────────────────────────────────
 
-    /// <summary>GELU activation (exact).</summary>
+    /// <summary>GELU activation using the standard tanh approximation; use <see cref="GeluErf"/> for the exact erf form.</summary>
     void Gelu(Tensor output, Tensor input);
 
     /// <summary>SiLU activation (x * sigmoid(x)).</summary>
@@ -2331,6 +2568,7 @@ public interface IBackend : IDisposable
                     {
                         int ix0 = ox * strideW - padW;
                         float maxVal = float.NegativeInfinity;
+                        bool hasValue = false;
                         for (int ky = 0; ky < kernelH; ky++)
                         {
                             int iy = iy0 + ky;
@@ -2339,14 +2577,13 @@ public interface IBackend : IDisposable
                             {
                                 int ix = ix0 + kx;
                                 if (ix < 0 || ix >= iW) continue;
+                                hasValue = true;
                                 float v = srcPlane[iy * iW + ix];
                                 if (v > maxVal) maxVal = v;
                             }
                         }
-                        // If the entire receptive field was out-of-bounds (impossible for k=5,s=1,p=2
-                        // but defensible for arbitrary configs), fall back to 0 instead of -inf to
-                        // avoid poisoning downstream layers. Won't trigger in any YOLO config.
-                        dstPlane[oy * oW + ox] = float.IsNegativeInfinity(maxVal) ? 0f : maxVal;
+                        // An empty padded window emits zero. A valid -infinity input remains -infinity.
+                        dstPlane[oy * oW + ox] = hasValue ? maxVal : 0f;
                     }
                 }
             }
@@ -2555,6 +2792,12 @@ public interface IBackend : IDisposable
 
     /// <summary>Returns pool-reserved-but-free device memory to the driver WITHOUT clearing the activation cache — safe mid-computation.</summary>
     void TrimMemoryPool() { }
+
+    /// <summary>Synchronizes pending attention work and discards only backend-library attention execution plans
+    /// and their persistent workspaces. Model weights, activation buffers, convolution plans, retry diagnostics,
+    /// and cumulative dispatch counters are preserved. Use at a model-phase boundary when a large text encoder
+    /// needs the memory held by fused-attention plans without paying for a full device-cache eviction.</summary>
+    void ReleaseAttentionExecutionCache() { }
 
     /// <summary>Frees EVERY cached device allocation for a clean VRAM slate; do NOT call while any model is still in use.</summary>
     void FreeAllDeviceMemory() { }

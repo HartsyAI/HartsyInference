@@ -18,12 +18,21 @@ public sealed unsafe class CudnnSdpaTests
     private static float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return (_rng & 0xFFFF) / 65535f - 0.5f; }
     private static Tensor Rnd(int a, int b, int c, int d) { Tensor t = new(new TensorShape(a, b, c, d), DType.F32); float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
 
+    private bool HasRequiredCudnn()
+    {
+        CudnnRuntime.EnsureProbed();
+        if (CudnnRuntime.SupportsSdpa) return true;
+        _output.WriteLine($"SKIPPED: {CudnnRuntime.Reason}");
+        return false;
+    }
+
     [Theory]
     [InlineData(64)]
     [InlineData(128)]
     public void CudnnSdpa_MatchesCpuReference(int d)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        if (!HasRequiredCudnn()) return;
         string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
         if (!Directory.Exists(ptxDir))
             ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
@@ -76,6 +85,7 @@ public sealed unsafe class CudnnSdpaTests
             }
             _output.WriteLine($"d={d}: max |CPU ref - cuDNN SDPA| = {maxDiff:E3}  engaged={backend.CudnnSdpaEngaged}");
             Assert.True(backend.CudnnSdpaEngaged, $"cuDNN SDPA fast path did NOT engage (d={d}) — it fell back to the materialized path");
+            Assert.Equal(1, backend.CudnnSdpaExecutionCount);
             Assert.True(maxDiff <= 3e-2f, $"cuDNN SDPA (d={d}) diverges from CPU reference by {maxDiff:E3}");
         }
         finally
@@ -94,6 +104,7 @@ public sealed unsafe class CudnnSdpaTests
     public void CudnnSdpa_Masked_MatchesCpuReference(int d)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        if (!HasRequiredCudnn()) return;
         string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
         if (!Directory.Exists(ptxDir))
             ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
@@ -155,11 +166,74 @@ public sealed unsafe class CudnnSdpaTests
             }
             _output.WriteLine($"d={d} masked: max |CPU ref - cuDNN SDPA| = {maxDiff:E3}  engaged={backend.CudnnSdpaEngaged}");
             Assert.True(backend.CudnnSdpaEngaged, $"masked cuDNN SDPA did NOT engage (d={d}) — it fell back to the materialized path");
+            Assert.Equal(1, backend.CudnnSdpaExecutionCount);
             Assert.True(maxDiff <= 3e-2f, $"masked cuDNN SDPA (d={d}) diverges from CPU reference by {maxDiff:E3}");
         }
         finally
         {
             Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", prev);
         }
+    }
+
+    /// <summary>Plans with identical shapes but different scales must not share the device scale scalar.</summary>
+    [Fact]
+    public void CudnnSdpa_SameShapeDifferentScale_MatchesEachReference()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        if (!HasRequiredCudnn()) return;
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+
+        const int Heads = 4, S = 256, D = 64;
+        const float ScaleA = 0.125f;
+        const float ScaleB = 4.0f;
+        using Tensor q = Rnd(1, Heads, S, D);
+        using Tensor k = Rnd(1, Heads, S, D);
+        using Tensor v = Rnd(1, Heads, S, D);
+        using Tensor expectedA = new Tensor(q.Shape, DType.F32);
+        using Tensor expectedB = new Tensor(q.Shape, DType.F32);
+        using Tensor actualA = new Tensor(q.Shape, DType.F32);
+        using Tensor actualB = new Tensor(q.Shape, DType.F32);
+        AttentionReference.FlashAttention(expectedA, q, k, v, S, 1, causal: false, qOffset: 0, ScaleA);
+        AttentionReference.FlashAttention(expectedB, q, k, v, S, 1, causal: false, qOffset: 0, ScaleB);
+
+        string? previous = Environment.GetEnvironmentVariable("HARTSY_SDPA_CUDNN");
+        Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", "1");
+        try
+        {
+            using CudaBackend backend = new CudaBackend(0, ptxDir);
+            backend.ScaledDotProductAttention(actualA, q, k, v, null, ScaleA, allowF16: true);
+            backend.Sync();
+            _ = *(float*)actualA.DataPointer;
+            backend.ScaledDotProductAttention(actualB, q, k, v, null, ScaleB, allowF16: true);
+            backend.Sync();
+            Assert.True(backend.CudnnSdpaEngaged, "cuDNN SDPA did not engage for the scale-cache test.");
+            Assert.Equal(2, backend.CudnnSdpaExecutionCount);
+            _ = *(float*)actualB.DataPointer;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", previous);
+        }
+
+        static float MaxDifference(Tensor expected, Tensor actual)
+        {
+            float* ep = (float*)expected.DataPointer;
+            float* ap = (float*)actual.DataPointer;
+            float max = 0f;
+            for (long i = 0; i < actual.ElementCount; i++)
+            {
+                Assert.True(float.IsFinite(ap[i]), $"cuDNN SDPA produced a non-finite value at {i}: {ap[i]}");
+                max = MathF.Max(max, MathF.Abs(ep[i] - ap[i]));
+            }
+            return max;
+        }
+
+        float maxA = MaxDifference(expectedA, actualA);
+        float maxB = MaxDifference(expectedB, actualB);
+        _output.WriteLine($"scale A max diff={maxA:E3}; scale B max diff={maxB:E3}");
+        Assert.True(maxA <= 3e-2f, $"cuDNN SDPA scale A diverges by {maxA:E3}.");
+        Assert.True(maxB <= 3e-2f, $"cuDNN SDPA scale B diverges by {maxB:E3}.");
     }
 }

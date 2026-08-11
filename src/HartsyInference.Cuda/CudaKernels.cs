@@ -259,7 +259,18 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditGatedResidualF32;
     private readonly nint _ditModulation4F32;
     private readonly nint _ditCfgEulerF32;
+    private readonly nint _ditCfgRenormReduceF32;
+    private readonly nint _ditCfgRenormFinalizeF32;
+    private readonly nint _ditCfgRenormEulerF32;
+    private readonly nint _ditCfgNormalizedEulerF32;
+    private readonly nint _ditAffineMixF32;
+    private readonly nint _ditMaskedAffineMixDenseF32;
+    private readonly nint _ditMaskedAffineMixPackedOuterF32;
+    private readonly nint _ditMaskedAffineMixPackedInnerF32;
+    private readonly nint _ditPatchifyF32;
+    private readonly nint _ditPatchifyU16;
     private readonly nint _ditUnpatchifyF32;
+    private readonly nint _ditUnpatchifyU16;
     private readonly nint _ditTanhF32;
     private readonly nint _ditRopeF32;
     private readonly nint _ditRopeHeadMajorF32;
@@ -324,6 +335,7 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _ditBf16Module;
     private readonly nint _ditRmsNormBf16;
     private readonly nint _ditGluActBf16;
+    private readonly nint _ditGeGluBf16;
     private readonly nint _ditAffineBroadcastRowIndexedBf16;
     private readonly nint _ditGatedResidualRowIndexedBf16;
     private readonly nint _ditAffineBroadcastBf16;
@@ -631,7 +643,18 @@ public sealed class CudaKernels : IDisposable
         _ditGatedResidualF32 = _ditF32Module.GetFunction("dit_gated_residual_lastdim_f32");
         _ditModulation4F32 = _ditF32Module.GetFunction("dit_modulation4_f32");
         _ditCfgEulerF32 = _ditF32Module.GetFunction("dit_cfg_euler_f32");
+        _ditCfgRenormReduceF32 = _ditF32Module.GetFunction("dit_cfg_renorm_reduce_f32");
+        _ditCfgRenormFinalizeF32 = _ditF32Module.GetFunction("dit_cfg_renorm_finalize_f32");
+        _ditCfgRenormEulerF32 = _ditF32Module.GetFunction("dit_cfg_renorm_euler_f32");
+        _ditCfgNormalizedEulerF32 = _ditF32Module.GetFunction("dit_cfg_normalized_euler_f32");
+        _ditAffineMixF32 = _ditF32Module.GetFunction("dit_affine_mix_f32");
+        _ditMaskedAffineMixDenseF32 = _ditF32Module.GetFunction("dit_masked_affine_mix_dense_f32");
+        _ditMaskedAffineMixPackedOuterF32 = _ditF32Module.GetFunction("dit_masked_affine_mix_packed_outer_f32");
+        _ditMaskedAffineMixPackedInnerF32 = _ditF32Module.GetFunction("dit_masked_affine_mix_packed_inner_f32");
+        _ditPatchifyF32 = _ditF32Module.GetFunction("dit_patchify_f32");
+        _ditPatchifyU16 = _ditF32Module.GetFunction("dit_patchify_u16");
         _ditUnpatchifyF32 = _ditF32Module.GetFunction("dit_unpatchify_f32");
+        _ditUnpatchifyU16 = _ditF32Module.GetFunction("dit_unpatchify_u16");
         _ditTanhF32 = _ditF32Module.GetFunction("dit_tanh_f32");
         _ditRopeF32 = _ditF32Module.GetFunction("dit_rope_f32");
         _ditRopeHeadMajorF32 = _ditF32Module.GetFunction("dit_rope_head_major_f32");
@@ -718,6 +741,7 @@ public sealed class CudaKernels : IDisposable
         _ditBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dit_bf16.ptx"));
         _ditRmsNormBf16 = _ditBf16Module.GetFunction("dit_rmsnorm_bf16");
         _ditGluActBf16 = _ditBf16Module.GetFunction("dit_glu_act_bf16");
+        _ditGeGluBf16 = _ditBf16Module.GetFunction("dit_geglu_bf16");
         _ditAffineBroadcastRowIndexedBf16 = _ditBf16Module.GetFunction("dit_affine_broadcast_rowindexed_bf16");
         _ditGatedResidualRowIndexedBf16 = _ditBf16Module.GetFunction("dit_gated_residual_rowindexed_bf16");
         _ditAffineBroadcastBf16 = _ditBf16Module.GetFunction("dit_affine_broadcast_lastdim_bf16");
@@ -2106,15 +2130,26 @@ public sealed class CudaKernels : IDisposable
     public void LaunchRepeatKvF16(ulong output, ulong input, int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
         => LaunchRepeatKvImpl(_ditRepeatKvF16, output, input, kvHeads, group, seqLen, headDim, total, stream);
 
-    /// <summary>Launches FlashAttention (one block per (b, q-head, q-row); blockDim = headDim; shared mem =
-    /// headDim floats). <paramref name="lk"/> is the K/V buffer seq stride; <paramref name="kvLen"/> the valid
-    /// key count.</summary>
+    /// <summary>GQA K/V head repeat with BF16 I/O; reuses the 16-bit bit-copy kernel without numeric conversion.</summary>
+    public void LaunchRepeatKvBf16(ulong output, ulong input, int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
+        => LaunchRepeatKvImpl(_ditRepeatKvF16, output, input, kvHeads, group, seqLen, headDim, total, stream);
+
+    private static void ValidateFlashAttentionHeadDim(int headDim)
+    {
+        if (headDim <= 0 || headDim > 1024)
+            throw new ArgumentOutOfRangeException(nameof(headDim), "FlashAttention requires headDim in [1, 1024].");
+    }
+
+    /// <summary>Launches FlashAttention (one block per (b, q-head, q-row); blockDim is the next power of two at
+    /// least 32 and at least headDim; shared memory matches blockDim floats). <paramref name="lk"/> is the K/V
+    /// buffer seq stride; <paramref name="kvLen"/> the valid key count.</summary>
     public unsafe void LaunchFlashAttention(
         ulong outPtr, ulong q, ulong k, ulong v,
         int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen, int kvGroup,
         bool causal, int qOffset, float scale, float softcap, ulong sink, int slidingWindow,
         ulong alibiSlopes, nint stream, ulong dPos = 0)
     {
+        ValidateFlashAttentionHeadDim(headDim);
         ulong outArg = outPtr, qArg = q, kArg = k, vArg = v, sinkArg = sink, alibiArg = alibiSlopes, dPosArg = dPos;
         uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
         uint hkvArg = (uint)hkv, lkArg = (uint)lk, kvLenArg = (uint)kvLen, grpArg = (uint)kvGroup;
@@ -2128,9 +2163,8 @@ public sealed class CudaKernels : IDisposable
         args[12] = &causalArg; args[13] = &offArg; args[14] = &scaleArg; args[15] = &softcapArg;
         args[16] = &sinkArg; args[17] = &swArg; args[18] = &alibiArg; args[19] = &dPosArg;
 
-        // Block threads = next power of two >= headDim, so the kernel's tree reduction is always power-of-two
-        // and non-pow2 head dims (e.g. Phi-3's 96) work; padding threads contribute 0.
-        uint blockThreads = 1;
+        // At least one full warp is required by the full-mask shuffle. Padding lanes contribute zero.
+        uint blockThreads = 32;
         while (blockThreads < (uint)headDim) blockThreads <<= 1;
         uint gridDim = (uint)((long)batch * hq * tq);
         uint sharedBytes = blockThreads * sizeof(float);
@@ -2149,6 +2183,7 @@ public sealed class CudaKernels : IDisposable
         bool causal, int qOffset, float scale, float softcap, ulong sink, int slidingWindow,
         ulong alibiSlopes, nint stream, ulong dPos = 0)
     {
+        ValidateFlashAttentionHeadDim(headDim);
         ulong outArg = outPtr, qArg = q, kArg = k, vArg = v, sinkArg = sink, alibiArg = alibiSlopes, dPosArg = dPos;
         uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
         uint hkvArg = (uint)hkv, lkArg = (uint)lk, kvLenArg = (uint)kvLen, grpArg = (uint)kvGroup;
@@ -2162,7 +2197,7 @@ public sealed class CudaKernels : IDisposable
         args[12] = &causalArg; args[13] = &offArg; args[14] = &scaleArg; args[15] = &softcapArg;
         args[16] = &sinkArg; args[17] = &swArg; args[18] = &alibiArg; args[19] = &dPosArg;
 
-        uint blockThreads = 1;
+        uint blockThreads = 32;
         while (blockThreads < (uint)headDim) blockThreads <<= 1;
         uint gridDim = (uint)((long)batch * hq * tq);
         uint sharedBytes = blockThreads * sizeof(float);
@@ -2172,18 +2207,34 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Fused FlashAttention-2, TF32 tensor cores, F32 accumulate — no-mask MHA, D∈{64,128}, Hkv==Hq.
-    /// Q/out [B,Hq,Sq,D], K/V [B,Hq,Skv,D]. Grid (ceil(Sq/64), Hq, B); block 128 (4 warps); BR=64/BC=32 tiles.</summary>
+    /// Q/out [B,Hq,Sq,D], K/V [B,Hq,Skv,D]. Sq must contain complete 32-row tiles. Grid (Sq/32,Hq,B);
+    /// block 64 (2 warps); BR=32/BC=16 tiles.</summary>
     public unsafe void LaunchFlashAttentionV2Tf32(ulong outPtr, ulong q, ulong k, ulong v,
         int b, int hq, int sq, int skv, int d, float scale, nint stream)
     {
+        const int BR = 32, BC = 16;   // must match flash_attn_v2_tf32.cu #defines
+        if (outPtr == 0 || q == 0 || k == 0 || v == 0)
+            throw new ArgumentException("FlashAttention-v2 requires non-null device pointers.");
+        if (b <= 0 || hq <= 0 || skv <= 0)
+            throw new ArgumentOutOfRangeException(nameof(b), "FlashAttention-v2 dimensions must be positive.");
+        if (b > 65_535)
+            throw new ArgumentOutOfRangeException(nameof(b), "FlashAttention-v2 batch count must fit CUDA grid Z (maximum 65535).");
+        if (hq > 65_535)
+            throw new ArgumentOutOfRangeException(nameof(hq), "FlashAttention-v2 head count must fit CUDA grid Y (maximum 65535).");
+        if (sq <= 0 || sq % BR != 0)
+            throw new ArgumentOutOfRangeException(nameof(sq), "FlashAttention-v2 requires complete 32-row query tiles.");
+        if (d != 64 && d != 128)
+            throw new ArgumentOutOfRangeException(nameof(d), "FlashAttention-v2 supports head dimensions 64 and 128 only.");
+        if (!float.IsFinite(scale))
+            throw new ArgumentOutOfRangeException(nameof(scale), "FlashAttention-v2 scale must be finite.");
+
         ulong oArg = outPtr, qArg = q, kArg = k, vArg = v;
         uint bA = (uint)b, hA = (uint)hq, sqA = (uint)sq, skvA = (uint)skv, dA = (uint)d;
         float scA = scale;
         void** args = stackalloc void*[10];
         args[0] = &oArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
         args[4] = &bA; args[5] = &hA; args[6] = &sqA; args[7] = &skvA; args[8] = &dA; args[9] = &scA;
-        const int BR = 32, BC = 16;   // must match flash_attn_v2_tf32.cu #defines (M2: 34KB smem → 2 blocks/SM)
-        uint grid = (uint)((sq + BR - 1) / BR);
+        uint grid = (uint)(sq / BR);
         uint smem = (uint)((BC * d + BC * d + BR * BC + BR * d) * sizeof(float));
         CudaDriverApi.cuLaunchKernel(_flashV2Tf32, grid, (uint)hq, (uint)b, 64, 1, 1,
             smem, stream, (nint)args, 0).ThrowOnError();
@@ -2197,6 +2248,7 @@ public sealed class CudaKernels : IDisposable
         int kvGroup, bool causal, int qOffset, float scale, int splits, int chunk, nint stream, ulong dPos = 0,
         float softcap = 0f, int slidingWindow = 0)
     {
+        ValidateFlashAttentionHeadDim(headDim);
         ulong pmArg = partialM, plArg = partialL, paArg = partialAcc, qArg = q, kArg = k, vArg = v, dPosArg = dPos;
         uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
         uint hkvArg = (uint)hkv, lkArg = (uint)lk, kvLenArg = (uint)kvLen, grpArg = (uint)kvGroup;
@@ -2212,7 +2264,7 @@ public sealed class CudaKernels : IDisposable
         args[14] = &causalArg; args[15] = &offArg; args[16] = &scaleArg; args[17] = &softcapArg; args[18] = &windowArg;
         args[19] = &gArg; args[20] = &chunkArg; args[21] = &dPosArg;
 
-        uint blockThreads = 1;
+        uint blockThreads = 32;
         while (blockThreads < (uint)headDim) blockThreads <<= 1;
         uint gridDim = (uint)((long)batch * hq * tq * splits);
         uint sharedBytes = blockThreads * sizeof(float);
@@ -2226,6 +2278,7 @@ public sealed class CudaKernels : IDisposable
     public unsafe void LaunchFlashAttentionCombine(ulong outPtr, ulong partialM, ulong partialL,
         ulong partialAcc, int batch, int hq, int tq, int headDim, int splits, nint stream)
     {
+        ValidateFlashAttentionHeadDim(headDim);
         ulong outArg = outPtr, pmArg = partialM, plArg = partialL, paArg = partialAcc;
         uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim, gArg = (uint)splits;
 
@@ -2233,7 +2286,7 @@ public sealed class CudaKernels : IDisposable
         args[0] = &outArg; args[1] = &pmArg; args[2] = &plArg; args[3] = &paArg;
         args[4] = &bArg; args[5] = &hqArg; args[6] = &tqArg; args[7] = &dArg; args[8] = &gArg;
 
-        uint blockThreads = 1;
+        uint blockThreads = 32;
         while (blockThreads < (uint)headDim) blockThreads <<= 1;
         uint gridDim = (uint)((long)batch * hq * tq);
         CudaDriverApi.cuLaunchKernel(
@@ -2665,15 +2718,209 @@ public sealed class CudaKernels : IDisposable
     public void LaunchCfgEuler(ulong z, ulong pos, ulong neg, float guidance, float delta, int count, nint stream)
         => LaunchCfgEulerImpl(_ditCfgEulerF32, z, pos, neg, guidance, delta, count, stream);
 
-    /// <summary>Launches unpatchify: token grid [hP·wP, C·p²] → pixel latent [C, H, W] (B=1, F32).
-    /// <paramref name="innerChannelFastest"/>: token inner order (ph, pw, c) when true (Z-Image), (c, ph, pw) when false (Krea2).</summary>
-    public unsafe void LaunchDitUnpatchify(ulong output, ulong input, int channels, int hPacked, int wPacked,
+    /// <summary>Elementwise affine mix: output = xScale*x + yScale*y.</summary>
+    public unsafe void LaunchAffineMix(
+        ulong output, ulong x, ulong y, float xScale, float yScale, long count, nint stream)
+    {
+        ulong outputArg = output, xArg = x, yArg = y, countArg = (ulong)count;
+        float xScaleArg = xScale, yScaleArg = yScale;
+        void** args = stackalloc void*[6];
+        args[0] = &outputArg;
+        args[1] = &xArg;
+        args[2] = &yArg;
+        args[3] = &xScaleArg;
+        args[4] = &yScaleArg;
+        args[5] = &countArg;
+        uint gridDim = (uint)Math.Min((countArg + BlockSize - 1) / BlockSize, 65_535UL);
+        CudaDriverApi.cuLaunchKernel(
+            _ditAffineMixF32, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>NCHW mask-broadcast affine replacement, in-place on target.</summary>
+    public unsafe void LaunchMaskedAffineMixDense(
+        ulong target, ulong source, ulong noise, ulong mask, float sourceScale, float noiseScale,
+        long batch, long channels, long spatial, nint stream)
+    {
+        ulong targetArg = target, sourceArg = source, noiseArg = noise, maskArg = mask;
+        ulong batchArg = (ulong)batch, channelsArg = (ulong)channels, spatialArg = (ulong)spatial;
+        float sourceScaleArg = sourceScale, noiseScaleArg = noiseScale;
+        void** args = stackalloc void*[9];
+        args[0] = &targetArg;
+        args[1] = &sourceArg;
+        args[2] = &noiseArg;
+        args[3] = &maskArg;
+        args[4] = &sourceScaleArg;
+        args[5] = &noiseScaleArg;
+        args[6] = &batchArg;
+        args[7] = &channelsArg;
+        args[8] = &spatialArg;
+        uint gridX = (uint)Math.Min((spatialArg + BlockSize - 1) / BlockSize, 65_535UL);
+        uint gridY = (uint)Math.Min(batchArg, 65_535UL);
+        CudaDriverApi.cuLaunchKernel(
+            _ditMaskedAffineMixDenseF32, gridX, gridY, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Packed [B,S,F] mask-broadcast affine replacement, in-place on target.</summary>
+    public unsafe void LaunchMaskedAffineMixPacked(
+        ulong target, ulong source, ulong noise, ulong mask, float sourceScale, float noiseScale,
+        long tokens, long featureDimension, long patchArea, bool channelInner, nint stream)
+    {
+        ulong targetArg = target, sourceArg = source, noiseArg = noise, maskArg = mask;
+        ulong tokensArg = (ulong)tokens, featureArg = (ulong)featureDimension, patchArg = (ulong)patchArea;
+        float sourceScaleArg = sourceScale, noiseScaleArg = noiseScale;
+        void** args = stackalloc void*[9];
+        args[0] = &targetArg;
+        args[1] = &sourceArg;
+        args[2] = &noiseArg;
+        args[3] = &maskArg;
+        args[4] = &sourceScaleArg;
+        args[5] = &noiseScaleArg;
+        args[6] = &tokensArg;
+        args[7] = &featureArg;
+        args[8] = &patchArg;
+        uint gridDim = (uint)Math.Min(tokensArg, 65_535UL);
+        nint kernel = channelInner ? _ditMaskedAffineMixPackedInnerF32 : _ditMaskedAffineMixPackedOuterF32;
+        CudaDriverApi.cuLaunchKernel(
+            kernel, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Global-renormalized CFG plus Euler update. Scratch layout is two double partial arrays followed
+    /// by one float scale; all three stages are ordered on <paramref name="stream"/> and inputs remain unchanged.</summary>
+    public unsafe void LaunchCfgRenormEuler(
+        ulong z, ulong cond, ulong uncond, ulong scratch, int partialCount,
+        float guidance, float delta, float renormMin, long count, nint stream)
+    {
+        ulong condPartials = scratch;
+        ulong guidedPartials = scratch + (ulong)partialCount * sizeof(double);
+        ulong scale = guidedPartials + (ulong)partialCount * sizeof(double);
+
+        ulong condArg = cond, uncondArg = uncond, condPartialsArg = condPartials;
+        ulong guidedPartialsArg = guidedPartials, countArg = (ulong)count;
+        float guidanceArg = guidance;
+        void** reduceArgs = stackalloc void*[6];
+        reduceArgs[0] = &condArg;
+        reduceArgs[1] = &uncondArg;
+        reduceArgs[2] = &condPartialsArg;
+        reduceArgs[3] = &guidedPartialsArg;
+        reduceArgs[4] = &guidanceArg;
+        reduceArgs[5] = &countArg;
+        CudaDriverApi.cuLaunchKernel(
+            _ditCfgRenormReduceF32, (uint)partialCount, 1, 1, BlockSize, 1, 1,
+            2 * BlockSize * sizeof(double), stream, (nint)reduceArgs, 0).ThrowOnError();
+
+        ulong scaleArg = scale;
+        uint partialCountArg = (uint)partialCount;
+        float renormMinArg = renormMin;
+        void** finalizeArgs = stackalloc void*[5];
+        finalizeArgs[0] = &scaleArg;
+        finalizeArgs[1] = &condPartialsArg;
+        finalizeArgs[2] = &guidedPartialsArg;
+        finalizeArgs[3] = &partialCountArg;
+        finalizeArgs[4] = &renormMinArg;
+        CudaDriverApi.cuLaunchKernel(
+            _ditCfgRenormFinalizeF32, 1, 1, 1, BlockSize, 1, 1,
+            2 * BlockSize * sizeof(double), stream, (nint)finalizeArgs, 0).ThrowOnError();
+
+        ulong zArg = z;
+        float deltaArg = delta;
+        void** updateArgs = stackalloc void*[7];
+        updateArgs[0] = &zArg;
+        updateArgs[1] = &condArg;
+        updateArgs[2] = &uncondArg;
+        updateArgs[3] = &scaleArg;
+        updateArgs[4] = &guidanceArg;
+        updateArgs[5] = &deltaArg;
+        updateArgs[6] = &countArg;
+        CudaDriverApi.cuLaunchKernel(
+            _ditCfgRenormEulerF32, (uint)partialCount, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)updateArgs, 0).ThrowOnError();
+    }
+
+    /// <summary>Last-dimension-normalized CFG plus Euler update. Each block cooperatively reduces one
+    /// logical row and applies its broadcast norm ratio to the in-place latent update.</summary>
+    public unsafe void LaunchCfgNormalizedEuler(
+        ulong z, ulong cond, ulong uncond, float guidance, float delta, float eps,
+        long rows, long lastDim, nint stream)
+    {
+        ulong zArg = z, condArg = cond, uncondArg = uncond;
+        float guidanceArg = guidance, deltaArg = delta, epsArg = eps;
+        ulong rowsArg = (ulong)rows, lastDimArg = (ulong)lastDim;
+        void** args = stackalloc void*[8];
+        args[0] = &zArg;
+        args[1] = &condArg;
+        args[2] = &uncondArg;
+        args[3] = &guidanceArg;
+        args[4] = &deltaArg;
+        args[5] = &epsArg;
+        args[6] = &rowsArg;
+        args[7] = &lastDimArg;
+        uint threads = 32;
+        while (threads < (ulong)lastDim && threads < BlockSize) threads <<= 1;
+        uint gridDim = (uint)Math.Min(rows, 65_535L);
+        CudaDriverApi.cuLaunchKernel(
+            _ditCfgNormalizedEulerF32, gridDim, 1, 1, threads, 1, 1,
+            2 * threads * sizeof(double), stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches patchify: NCHW <c>[B,C,H,W]</c> → token grid <c>[B,(H/p)·(W/p),C·p²]</c> (F32).
+    /// <paramref name="innerChannelFastest"/> selects (ph,pw,c) when true and (c,ph,pw) when false.</summary>
+    public unsafe void LaunchDitPatchify(ulong output, ulong input, int batch, int channels, int height, int width,
         int patch, bool innerChannelFastest, nint stream)
+        => LaunchDitPatchifyImpl(
+            _ditPatchifyF32, output, input, batch, channels, height, width, patch, innerChannelFastest, stream);
+
+    /// <summary>16-bit payload variant shared by F16 and BF16; performs no floating-point conversion.</summary>
+    public unsafe void LaunchDitPatchifyU16(ulong output, ulong input, int batch, int channels, int height, int width,
+        int patch, bool innerChannelFastest, nint stream)
+        => LaunchDitPatchifyImpl(
+            _ditPatchifyU16, output, input, batch, channels, height, width, patch, innerChannelFastest, stream);
+
+    private unsafe void LaunchDitPatchifyImpl(nint kernel, ulong output, ulong input, int batch, int channels,
+        int height, int width, int patch, bool innerChannelFastest, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint chArg = (uint)channels, hArg = (uint)height, wArg = (uint)width, pArg = (uint)patch;
+        uint innerArg = innerChannelFastest ? 1u : 0u;
+        ulong totalArg = (ulong)batch * (ulong)channels * (ulong)height * (ulong)width;
+        void** args = stackalloc void*[8];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &chArg;
+        args[3] = &hArg;
+        args[4] = &wArg;
+        args[5] = &pArg;
+        args[6] = &innerArg;
+        args[7] = &totalArg;
+        uint gridDim = (uint)Math.Min((totalArg + BlockSize - 1) / BlockSize, 65_535UL);
+        CudaDriverApi.cuLaunchKernel(
+            kernel, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches unpatchify: token grid [B,hP·wP,C·p²] → pixel latent [B,C,H,W] (F32).
+    /// <paramref name="innerChannelFastest"/>: token inner order (ph, pw, c) when true (Z-Image), (c, ph, pw) when false (Krea2).</summary>
+    public unsafe void LaunchDitUnpatchify(ulong output, ulong input, int batch, int channels, int hPacked,
+        int wPacked, int patch, bool innerChannelFastest, nint stream)
+        => LaunchDitUnpatchifyImpl(
+            _ditUnpatchifyF32, output, input, batch, channels, hPacked, wPacked, patch, innerChannelFastest, stream);
+
+    /// <summary>16-bit payload variant shared by F16 and BF16; performs no floating-point conversion.</summary>
+    public unsafe void LaunchDitUnpatchifyU16(ulong output, ulong input, int batch, int channels, int hPacked,
+        int wPacked, int patch, bool innerChannelFastest, nint stream)
+        => LaunchDitUnpatchifyImpl(
+            _ditUnpatchifyU16, output, input, batch, channels, hPacked, wPacked, patch, innerChannelFastest, stream);
+
+    private unsafe void LaunchDitUnpatchifyImpl(nint kernel, ulong output, ulong input, int batch, int channels,
+        int hPacked, int wPacked, int patch, bool innerChannelFastest, nint stream)
     {
         ulong outArg = output, inArg = input;
         uint chArg = (uint)channels, hpArg = (uint)hPacked, wpArg = (uint)wPacked, pArg = (uint)patch;
         uint innerArg = innerChannelFastest ? 1u : 0u;
-        ulong totalArg = (ulong)channels * (ulong)hPacked * (ulong)wPacked * (ulong)(patch * patch);
+        ulong totalArg = (ulong)batch * (ulong)channels * (ulong)hPacked * (ulong)wPacked
+            * (ulong)patch * (ulong)patch;
         void** args = stackalloc void*[8];
         args[0] = &outArg;
         args[1] = &inArg;
@@ -2683,9 +2930,9 @@ public sealed class CudaKernels : IDisposable
         args[5] = &pArg;
         args[6] = &innerArg;
         args[7] = &totalArg;
-        uint gridDim = (uint)((totalArg + BlockSize - 1) / BlockSize);
+        uint gridDim = (uint)Math.Min((totalArg + BlockSize - 1) / BlockSize, 65_535UL);
         CudaDriverApi.cuLaunchKernel(
-            _ditUnpatchifyF32, gridDim, 1, 1, BlockSize, 1, 1,
+            kernel, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
@@ -3039,7 +3286,15 @@ public sealed class CudaKernels : IDisposable
             (uint)totalRows, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Fused QKV split + per-head QK-RMSNorm (one block per (token, head); blockDim = headDim).</summary>
+    private static uint QkvNormBlockSize(int headDim)
+    {
+        uint threads = 32;
+        while (threads < (uint)headDim && threads < BlockSize)
+            threads <<= 1;
+        return threads;
+    }
+
+    /// <summary>Fused QKV split + per-head QK-RMSNorm with arbitrary positive head dimensions.</summary>
     public unsafe void LaunchQkvSplitNorm(bool f16, ulong q, ulong k, ulong v, ulong qkv, ulong qW, ulong kW,
         int tokens, int heads, int headDim, float eps, nint stream)
     {
@@ -3049,9 +3304,10 @@ public sealed class CudaKernels : IDisposable
         args[0] = &qArg; args[1] = &kArg; args[2] = &vArg; args[3] = &qkvArg; args[4] = &qwArg; args[5] = &kwArg;
         args[6] = &tArg; args[7] = &hArg; args[8] = &hdArg; args[9] = &epsArg;
         uint grid = (uint)((long)tokens * heads);
-        uint sharedMem = (uint)headDim * sizeof(float);
+        uint block = QkvNormBlockSize(headDim);
+        uint sharedMem = 2u * block * sizeof(float);
         CudaDriverApi.cuLaunchKernel(f16 ? _ditQkvSplitNormF16 : _ditQkvSplitNormF32,
-            grid, 1, 1, (uint)headDim, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
+            grid, 1, 1, block, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Head-major twin of <see cref="LaunchQkvSplitNorm"/>: q/k/v come out as [batch, heads, seq, headDim].</summary>
@@ -3064,9 +3320,10 @@ public sealed class CudaKernels : IDisposable
         args[0] = &qArg; args[1] = &kArg; args[2] = &vArg; args[3] = &qkvArg; args[4] = &qwArg; args[5] = &kwArg;
         args[6] = &tArg; args[7] = &hArg; args[8] = &hdArg; args[9] = &sArg; args[10] = &epsArg;
         uint grid = (uint)((long)tokens * heads);
-        uint sharedMem = (uint)headDim * sizeof(float);
+        uint block = QkvNormBlockSize(headDim);
+        uint sharedMem = 2u * block * sizeof(float);
         CudaDriverApi.cuLaunchKernel(f16 ? _ditQkvSplitNormHeadMajorF16 : _ditQkvSplitNormHeadMajorF32,
-            grid, 1, 1, (uint)headDim, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
+            grid, 1, 1, block, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>FourierEmbedder over device coords [count,3] → dst [count, 3·(2·bands+1)] (one thread per point·coord).</summary>
@@ -3546,6 +3803,10 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches GEGLU with F16 I/O, F32 internal compute.</summary>
     public void LaunchGeGluF16(ulong output, ulong input, int innerDim, int outputElements, nint stream)
         => LaunchGeGluImpl(_gegluF16, output, input, innerDim, outputElements, stream);
+
+    /// <summary>Launches GEGLU with BF16 I/O and F32 internal compute.</summary>
+    public void LaunchGeGluBf16(ulong output, ulong input, int innerDim, int outputElements, nint stream)
+        => LaunchGeGluImpl(_ditGeGluBf16, output, input, innerDim, outputElements, stream);
 
     // ── BroadcastAdd Launches ───────────────────────────────────────────
 

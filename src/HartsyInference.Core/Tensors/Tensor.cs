@@ -63,26 +63,37 @@ public sealed unsafe class Tensor : IDisposable
     /// overwriting; a repeat plant by the same owner replaces its own entry (the pre-existing semantics).</summary>
     internal void SetGpuBinding(nint key, Action sync, Action dispose)
     {
+        bool disposeImmediately = false;
         lock (this)
         {
-            if ((_gpuSyncCallback is null && _gpuDisposeCallback is null) || _gpuCleanupContext == key)
+            if (_disposed)
+            {
+                disposeImmediately = true;
+            }
+            else if ((_gpuSyncCallback is null && _gpuDisposeCallback is null) || _gpuCleanupContext == key)
             {
                 _gpuCleanupContext = key;
                 _gpuSyncCallback = sync;
                 _gpuDisposeCallback = dispose;
-                return;
             }
-            List<GpuBinding> extras = _extraGpuBindings ??= [];
-            for (int i = 0; i < extras.Count; i++)
+            else
             {
-                if (extras[i].Key == key)
+                List<GpuBinding> extras = _extraGpuBindings ??= [];
+                for (int i = 0; i < extras.Count; i++)
                 {
-                    extras[i] = new GpuBinding(key, sync, dispose);
-                    return;
+                    if (extras[i].Key == key)
+                    {
+                        extras[i] = new GpuBinding(key, sync, dispose);
+                        return;
+                    }
                 }
+                extras.Add(new GpuBinding(key, sync, dispose));
             }
-            extras.Add(new GpuBinding(key, sync, dispose));
         }
+        // Backends publish their cache entry before planting this binding. If disposal won the race, invoke the
+        // supplied rollback outside the tensor lock instead of throwing and stranding that new device allocation.
+        if (disposeImmediately)
+            dispose();
     }
 
     /// <summary>Removes ONLY <paramref name="key"/>'s binding, leaving other backends' bindings intact — a bulk
@@ -276,6 +287,36 @@ public sealed unsafe class Tensor : IDisposable
 
     /// <summary>The owner object (if any) kept alive for this tensor's lifetime. See <see cref="SetKeepAlive"/>.</summary>
     internal object? KeepAliveOwner => _keepAlive;
+
+    /// <summary>
+    /// Returns whether this tensor and <paramref name="other"/> have overlapping materialized host-storage
+    /// ranges, without allocating a host buffer or invoking either tensor's GPU sync callback. Object identity is
+    /// always an alias; two distinct lazy GPU-only tensors are not, because backends cache their device storage by
+    /// tensor identity. Reshapes and borrowed subranges already have host pointers, so their overlap is detected.
+    /// </summary>
+    /// <remarks>
+    /// Callers must validate both byte counts before using this helper. Keeping the check here is important: no
+    /// backend contract should read <see cref="DataPointer"/> merely to validate aliasing, since that would turn a
+    /// device-resident in-place operation into an accidental D2H synchronization.
+    /// </remarks>
+    internal bool HasOverlappingHostStorageWithoutSync(Tensor other)
+    {
+        if (ReferenceEquals(this, other))
+            return true;
+
+        nint thisPointer = Volatile.Read(ref _dataPointer);
+        nint otherPointer = Volatile.Read(ref other._dataPointer);
+        if (thisPointer == 0 || otherPointer == 0 || _byteSize <= 0 || other._byteSize <= 0)
+            return false;
+
+        nuint thisStart = (nuint)thisPointer;
+        nuint otherStart = (nuint)otherPointer;
+        nuint thisLength = checked((nuint)_byteSize);
+        nuint otherLength = checked((nuint)other._byteSize);
+        return thisStart <= otherStart
+            ? otherStart - thisStart < thisLength
+            : thisStart - otherStart < otherLength;
+    }
 
     /// <summary>Shape and strides of this tensor.</summary>
     public TensorShape Shape { get; }
@@ -775,35 +816,62 @@ public sealed unsafe class Tensor : IDisposable
     }
 
     /// <summary>Frees owned memory via atomic pointer exchange; frees cached GPU data (on every owning backend)
-    /// without D2H copy. Borrowed tensors are no-ops.</summary>
+    /// without D2H copy. Borrowed tensors are no-ops. Every independent owner is attempted even if an earlier
+    /// backend callback fails; the first cleanup error is rethrown only after the host buffer is released.</summary>
     public void Dispose()
     {
-        _disposed = true;
-        nint ptr = Interlocked.Exchange(ref _dataPointer, 0);
-        Action? gpuDispose = Interlocked.Exchange(ref _gpuDisposeCallback, null);
-        Interlocked.Exchange(ref _gpuSyncCallback, null);
-        gpuDispose?.Invoke();
-        GpuBinding[]? extras = TakeExtraBindings();
+        Action? gpuDispose;
+        GpuBinding[]? extras;
+        lock (this)
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            gpuDispose = _gpuDisposeCallback;
+            _gpuDisposeCallback = null;
+            _gpuSyncCallback = null;
+            _gpuCleanupContext = 0;
+            if (_extraGpuBindings is { Count: > 0 } bindings)
+            {
+                extras = [.. bindings];
+                bindings.Clear();
+            }
+            else
+            {
+                extras = null;
+            }
+        }
+        Interlocked.Exchange(ref _dataPointer, 0);
+        Exception? firstError = null;
+        if (gpuDispose is not null)
+        {
+            try { gpuDispose(); }
+            catch (Exception error) { firstError = error; }
+        }
         if (extras is not null)
         {
             foreach (GpuBinding binding in extras)
             {
-                binding.Dispose();
+                try { binding.Dispose(); }
+                catch (Exception error) { firstError ??= error; }
             }
         }
         NativeBuffer? buffer = Interlocked.Exchange(ref _ownedBuffer, null);
-        if (ptr != 0 && buffer is not null)
+        if (buffer is not null)
         {
-            buffer.Dispose();
+            try { buffer.Dispose(); }
+            catch (Exception error) { firstError ??= error; }
         }
         _keepAlive = null;
         GC.SuppressFinalize(this);
+        if (firstError is not null)
+            ExceptionDispatchInfo.Capture(firstError).Throw();
     }
 
     ~Tensor()
     {
         _disposed = true;
-        nint ptr = Interlocked.Exchange(ref _dataPointer, 0);
+        Interlocked.Exchange(ref _dataPointer, 0);
         Action? gpuDispose = Interlocked.Exchange(ref _gpuDisposeCallback, null);
         Interlocked.Exchange(ref _gpuSyncCallback, null);
         // Never invoke a CUDA-touching callback from the finalizer thread directly — queue it under the owning
@@ -822,7 +890,7 @@ public sealed unsafe class Tensor : IDisposable
             }
         }
         NativeBuffer? buffer = Interlocked.Exchange(ref _ownedBuffer, null);
-        if (ptr != 0 && buffer is not null)
+        if (buffer is not null)
         {
             buffer.Dispose();
         }

@@ -18,9 +18,13 @@ namespace HartsyInference.Cuda;
 /// mid-inference.</para></summary>
 public static class CudnnRuntime
 {
-    /// <summary>True when a version-matched cuDNN loaded and passed the CUDA-major guard. The conv/SDPA fast paths
-    /// gate on this; false means the engine uses its own im2col+cuBLAS / custom-flash fallbacks (correct, slower).</summary>
+    /// <summary>True when a version-matched cuDNN loaded and passed the CUDA-major guard.</summary>
     public static bool Available { get; private set; }
+
+    /// <summary>True when the loaded runtime exposes the public softmax operation used by the custom SDPA graph.</summary>
+    internal static bool SupportsSdpa => Available && IsSdpaVersionSupported(Version);
+
+    internal static bool IsSdpaVersionSupported(long version) => version >= 92100;
 
     /// <summary>Human-readable status for the startup diagnostic (why cuDNN is / isn't active).</summary>
     public static string Reason { get; private set; } = "not yet probed";
@@ -104,8 +108,11 @@ public static class CudnnRuntime
 
         Version = (long)CudnnApi.cudnnGetVersion();
         Available = true;
+        string attentionStatus = SupportsSdpa
+            ? "convolution + fused-attention fast paths ENABLED"
+            : "convolution ENABLED; fused attention requires cuDNN 9.21 or newer";
         Reason = $"cuDNN {Version / 10000}.{Version / 100 % 100}.{Version % 100} (built for CUDA {cudnnCudaMajor}) " +
-                 $"from {(LibDir ?? "the OS library path")} — conv + fused-attention fast paths ENABLED.";
+                 $"from {(LibDir ?? "the OS library path")} — {attentionStatus}.";
     }
 
     /// <summary>Emits the startup diagnostic. Called once from the backend init so slow-perf reports are one line.</summary>
@@ -153,9 +160,9 @@ public static class CudnnRuntime
             if (string.IsNullOrEmpty(url))
             {
                 // NVIDIA redist. Version is pinned but overridable; the redist layout is stable per major.
-                // NOTE: the pin MUST have a build for the running CUDA major — 9.6.0.74 shipped only cuda11/12,
-                // so a CUDA-13 box needs >= 9.12 (first cuda13 redist). 9.13.0.50 = newest with a clean cuda13 index.
-                string ver = Environment.GetEnvironmentVariable("HARTSY_CUDNN_VERSION") ?? "9.13.0.50";
+                // The custom SDPA graph uses the public softmax operation added in cuDNN 9.21, so older
+                // CUDA-13 redistributables can run convolution but cannot construct this attention graph.
+                string ver = Environment.GetEnvironmentVariable("HARTSY_CUDNN_VERSION") ?? "9.21.0.82";
                 string ext = win ? "zip" : "tar.xz";
                 url = $"https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/{plat}/" +
                       $"cudnn-{plat}-{ver}_cuda{cudaMajor}-archive.{ext}";

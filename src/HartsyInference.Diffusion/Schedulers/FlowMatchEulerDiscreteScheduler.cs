@@ -84,6 +84,17 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
     /// latent GPU-resident across the sampling loop.</summary>
     public float Dt(int stepIndex) => _sigmas[stepIndex + 1] - _sigmas[stepIndex];
 
+    /// <summary>Exact schedule sigma at an inference-step boundary, including the terminal index
+    /// <c>NumInferenceSteps</c> whose value is zero. Internal pipeline glue uses this instead of round-tripping
+    /// <see cref="Timesteps"/> through the public 0-1000 conditioning scale.</summary>
+    internal float SigmaAt(int stepIndex)
+    {
+        if ((uint)stepIndex >= (uint)_sigmas.Length)
+            throw new ArgumentOutOfRangeException(nameof(stepIndex), stepIndex,
+                $"Sigma index must be in [0,{_sigmas.Length - 1}].");
+        return _sigmas[stepIndex];
+    }
+
     /// <summary>Performs one flow-match Euler step: x_next = x + model_output * (sigma_next - sigma).</summary>
     public unsafe void Step(Tensor output, Tensor modelOutput, Tensor sample, int stepIndex)
     {

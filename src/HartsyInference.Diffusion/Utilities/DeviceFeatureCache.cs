@@ -48,11 +48,14 @@ public sealed class DeviceFeatureCache : IDisposable
     public DeviceFeatureCache(float threshold = 0.10f, int maxConsecutiveReuse = 3,
         float[]? polyCoeffs = null, string? calibFile = null)
     {
-        if (threshold <= 0.0f) throw new ArgumentOutOfRangeException(nameof(threshold), "Threshold must be positive.");
+        if (!float.IsFinite(threshold) || threshold <= 0.0f)
+            throw new ArgumentOutOfRangeException(nameof(threshold), "Threshold must be finite and positive.");
         if (maxConsecutiveReuse < 1) throw new ArgumentOutOfRangeException(nameof(maxConsecutiveReuse));
+        if (polyCoeffs is not null && Array.Exists(polyCoeffs, coefficient => !float.IsFinite(coefficient)))
+            throw new ArgumentException("Calibration polynomial coefficients must be finite.", nameof(polyCoeffs));
         _threshold = threshold;
         _maxConsecutiveReuse = maxConsecutiveReuse;
-        _polyCoeffs = polyCoeffs;
+        _polyCoeffs = polyCoeffs is null ? null : (float[])polyCoeffs.Clone();
         _calibFile = calibFile;
     }
 
@@ -84,10 +87,23 @@ public sealed class DeviceFeatureCache : IDisposable
 
         float rel = backend.RelativeL1Distance(indicator, _prevIndicator);
         _lastIndicatorRel = rel;
-        _accumulatedDistance += MapDrift(rel);
         SnapshotIndicator(backend, indicator);
 
-        if (_accumulatedDistance >= _threshold || _consecutiveReuse >= _maxConsecutiveReuse)
+        // A nonzero tensor relative to an all-zero snapshot has infinite relative drift. Polynomial
+        // evaluation can turn that into NaN through mixed-sign terms; either case must invalidate the cache.
+        if (!float.IsFinite(rel))
+        {
+            _lastIndicatorRel = -1f;
+            return MarkCompute();
+        }
+
+        float drift = MapDrift(rel);
+        if (!float.IsFinite(drift))
+            return MarkCompute();
+        _accumulatedDistance += drift;
+
+        if (!float.IsFinite(_accumulatedDistance) || _accumulatedDistance >= _threshold
+            || _consecutiveReuse >= _maxConsecutiveReuse)
         {
             return MarkCompute();
         }

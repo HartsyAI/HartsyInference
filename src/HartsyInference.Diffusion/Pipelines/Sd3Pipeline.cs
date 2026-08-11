@@ -172,14 +172,18 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
-            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            using Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
             latent = new Tensor(latentShape, DType.F32);
-            scheduler.AddNoise(latent, sourceLatent, noise, startStep);
-            noise.Dispose();
+            AddFlowMatchNoise(Backend, scheduler, latent, sourceLatent, noise, startStep);
 
             if (isMaskedInpaint)
             {
-                latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
+                // Downsampling is setup-only host work. Stage its result through a backend op once so the same
+                // device mask can be pinned and reused by every denoise step without repeated H2D uploads.
+                using Tensor hostLatentMask =
+                    MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
+                latentMask = new Tensor(hostLatentMask.Shape, DType.F32);
+                Backend.Scale(latentMask, hostLatentMask, 1.0f);
             }
             else
             {
@@ -219,15 +223,6 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             Backend.PreloadWeights(_transformer.EnumerateWeights());
         }
 
-        // Materialize every tensor that must survive across steps on the host, then reclaim the VAE-encode
-        // intermediates. The per-step FreeActivations below frees device buffers WITHOUT a D2H sync-back, so
-        // anything still device-only here would be silently lost — the t2i initSigma path leaves `latent` as
-        // a live Backend.Scale output on the GPU.
-        _ = latent.DataPointer;
-        if (sourceLatent is not null) _ = sourceLatent.DataPointer;
-        if (latentMask is not null) _ = latentMask.DataPointer;
-        Backend.FreeActivations();
-
         // Across-step First-Block cache (docs/Research/STEP_ACCELERATION.md §2; same knobs as ZImagePipeline).
         // Excluded from img2img/inpaint (block-0 indicator drift semantics haven't been validated against a
         // partially-noised init latent) and DiT sharding (ForwardSharded has no cache-consuming entry point —
@@ -258,69 +253,116 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         Logs.Info("Starting SD3 denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
-        for (int i = startStep; i < steps; i++)
+        long denoiseD2hStart = Backend.GetD2hSyncCount();
+        bool latentPinned = false;
+        bool sourcePinned = false;
+        bool maskPinned = false;
+        try
         {
-            Stopwatch stepSw = Stopwatch.StartNew();
-            float t = timesteps[i];
-
-            // Late-window gate: reuse eligible only in the schedule tail (mirrors ZImagePipeline).
-            bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
-
-            Tensor noisePred;
-            if (useCfg)
+            // Preserve all loop-carried state on device while reclaiming VAE-encode intermediates. Pinning a host
+            // tensor is harmless on CPU and also covers t2i's initially-host noise: once its first device buffer is
+            // planted, the pre-existing pin protects it. Img2img latent/source and the staged mask are resident now.
+            Backend.PinActivation(latent);
+            latentPinned = true;
+            if (sourceLatent is not null)
             {
-                noisePred = ClassifierFreeGuidanceStep(
-                    latent, t, condProjected, condPooled, uncondProjected!, uncondPooled!, cfgScale,
-                    cacheEligible ? stepCacheCond : null, cacheEligible ? stepCacheUncond : null);
+                Backend.PinActivation(sourceLatent);
+                sourcePinned = true;
             }
-            else
+            if (latentMask is not null)
             {
-                noisePred = RunForward(latent, t, condProjected, condPooled, cacheEligible ? stepCacheCond : null);
+                Backend.PinActivation(latentMask);
+                maskPinned = true;
             }
+            Backend.FreeActivations();
 
-            // Scheduler step
-            Tensor newLatent = new Tensor(latentShape, DType.F32);
-            scheduler.Step(newLatent, noisePred, latent, i);
-            noisePred.Dispose();
-            latent.Dispose();
-            latent = newLatent;
-
-            // Masked-inpaint blend: replace unmasked region with re-noised source at the
-            // next step's sigma. Same formulation as SDXL — only the channel count differs.
-            if (latentMask is not null && sourceLatent is not null)
+            for (int i = startStep; i < steps; i++)
             {
-                int nextStep = i + 1;
-                Tensor noisedSource;
-                if (nextStep < steps)
+                Stopwatch stepSw = Stopwatch.StartNew();
+                float t = timesteps[i];
+
+                // Late-window gate: reuse eligible only in the schedule tail (mirrors ZImagePipeline).
+                bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
+
+                // Flow-match Euler is exactly z += dt * velocity. Fold standard CFG and the Euler update into
+                // one in-place backend op. Final modulation and unpatchify now keep both predictions and latent
+                // device-resident. A progress consumer may intentionally read the latent; otherwise both ordinary
+                // and masked-inpaint loops remain device-resident.
+                if (useCfg)
                 {
-                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
-                    noisedSource = new Tensor(latentShape, DType.F32);
-                    scheduler.AddNoise(noisedSource, sourceLatent, freshNoise, nextStep);
-                    freshNoise.Dispose();
+                    Tensor? uncondNoise = null;
+                    Tensor? condNoise = null;
+                    try
+                    {
+                        // Preserve the established branch order: the transformer can own request-local caches.
+                        uncondNoise = RunForward(
+                            latent, t, uncondProjected!, uncondPooled!,
+                            cacheEligible ? stepCacheUncond : null);
+                        condNoise = RunForward(
+                            latent, t, condProjected, condPooled,
+                            cacheEligible ? stepCacheCond : null);
+                        Backend.CfgEulerStep(latent, condNoise, uncondNoise, cfgScale, scheduler.Dt(i));
+                    }
+                    finally
+                    {
+                        condNoise?.Dispose();
+                        uncondNoise?.Dispose();
+                    }
                 }
                 else
                 {
-                    noisedSource = sourceLatent;
+                    Tensor noisePred = RunForward(
+                        latent, t, condProjected, condPooled,
+                        cacheEligible ? stepCacheCond : null);
+                    try
+                    {
+                        Backend.CfgEulerStep(latent, noisePred, noisePred, 1.0f, scheduler.Dt(i));
+                    }
+                    finally
+                    {
+                        noisePred.Dispose();
+                    }
                 }
-                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
-                if (noisedSource != sourceLatent) noisedSource.Dispose();
+
+                // A preview consumer may intentionally read the latent and thereby remove its pin. Re-asserting
+                // the pin after every device update makes the ordinary no-preview path survive FreeActivations;
+                // a deliberate read remains correct because it first materializes the current device contents.
+                Backend.PinActivation(latent);
+
+                // Masked-inpaint blend: replace the unmasked region with the source's trajectory at next sigma.
+                // The backend fuses source re-noising and dense channel-broadcast blending into this one in-place
+                // launch. The final step supplies noise=null and sigma=0, selecting the clean source exactly.
+                if (latentMask is not null && sourceLatent is not null)
+                {
+                    BlendMaskedSourceTrajectory(
+                        Backend, scheduler, latent, sourceLatent, latentMask, seed, i + 1);
+                }
+
+                stepSw.Stop();
+                Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
+                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = latent,
+                    LatentArch = LatentArchitecture.Sd3,
+                });
+
+                // Deterministically reclaim dead MMDiT intermediates without discarding the pinned latent.
+                // Keep the async pool reservation hot across steps; the final phase sweep trims it once.
+                Backend.FreeActivations(trimPool: false);
             }
-
-            stepSw.Stop();
-            Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
-            {
-                Latent = latent,
-                LatentArch = LatentArchitecture.Sd3,
-            });
-
-            // Reclaim GPU-resident activation buffers between steps: the MMDiT keeps intermediates on-device
-            // and any not read-back/disposed linger until GC, accumulating to OOM over the schedule (same fix
-            // as Flux / the video pipelines). Safe: scheduler.Step runs on the host, so `latent` — the only
-            // tensor the next step needs — is host-resident, and everything else persistent was materialized
-            // above the loop.
-            Backend.FreeActivations();
         }
+        finally
+        {
+            if (maskPinned) Backend.UnpinActivation(latentMask!);
+            if (sourcePinned) Backend.UnpinActivation(sourceLatent!);
+            if (latentPinned) Backend.UnpinActivation(latent);
+        }
+        Logs.Debug($"SD3 denoise-loop D2H syncs: {Backend.GetD2hSyncCount() - denoiseD2hStart}.");
+
+        // DecodeTiled may attempt a full-frame decode, sweep activation memory after an OOM, then fall back to
+        // host-sliced tiles. Materialize the one final latent here so that recovery sweep cannot discard the
+        // only authoritative (device) copy and make the fallback decode stale pre-denoise host data.
+        _ = latent.DataPointer;
 
         if (stepCacheCond is not null)
         {
@@ -378,7 +420,8 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         // ── 6. Pixel-space recomposite for masked inpaint ──────────────
         if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
         {
-            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+            RecomposeMaskedImage(
+                Backend, image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
         }
 
         // ── 7. Convert to RGB bytes ─────────────────────────────────────
@@ -393,6 +436,61 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         Logs.Info($"SD3 {mode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, width, height, seed);
+    }
+
+    /// <summary>Device-routable equivalent of <see cref="FlowMatchEulerDiscreteScheduler.AddNoise"/>.</summary>
+    internal static void AddFlowMatchNoise(
+        IBackend backend,
+        FlowMatchEulerDiscreteScheduler scheduler,
+        Tensor output,
+        Tensor source,
+        Tensor noise,
+        int stepIndex)
+    {
+        float sigma = scheduler.SigmaAt(stepIndex);
+        backend.AffineMix(output, source, noise, 1.0f - sigma, sigma);
+    }
+
+    /// <summary>
+    /// Keeps an SD3 inpaint latent's unmasked region on the source trajectory at <paramref name="nextStep"/>.
+    /// Nonterminal steps reproduce the established <c>seed + nextStep</c> fresh-noise sequence; the terminal step
+    /// passes a null noise tensor with zero noise scale and therefore blends the clean source.
+    /// </summary>
+    internal static void BlendMaskedSourceTrajectory(
+        IBackend backend,
+        FlowMatchEulerDiscreteScheduler scheduler,
+        Tensor target,
+        Tensor source,
+        Tensor mask,
+        int seed,
+        int nextStep)
+    {
+        float sigma = scheduler.SigmaAt(nextStep);
+        Tensor? freshNoise = null;
+        try
+        {
+            if (nextStep < scheduler.NumInferenceSteps)
+                freshNoise = SeedGenerator.CreateNoise(target.Shape, seed + nextStep);
+            backend.MaskedAffineMixInPlace(
+                target, source, freshNoise, mask,
+                sourceScale: 1.0f - sigma,
+                noiseScale: sigma,
+                layout: MaskBroadcastLayout.DenseNchwBroadcast);
+        }
+        finally
+        {
+            freshNoise?.Dispose();
+        }
+    }
+
+    /// <summary>Device-routable final pixel recomposite; mask=1 selects the decoded image.</summary>
+    internal static void RecomposeMaskedImage(IBackend backend, Tensor image, Tensor sourceImage, Tensor pixelMask)
+    {
+        backend.MaskedAffineMixInPlace(
+            image, sourceImage, noise: null, mask: pixelMask,
+            sourceScale: 1.0f,
+            noiseScale: 0.0f,
+            layout: MaskBroadcastLayout.DenseNchwBroadcast);
     }
 
     /// <summary>Encodes a single prompt through all three text encoders and combines the results.</summary>
@@ -452,22 +550,6 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         t5Hidden.Dispose();
 
         return (context, pooled);
-    }
-
-    /// <summary>Runs classifier-free guidance: noise_pred = uncond + cfg_scale * (cond - uncond). <paramref name="stepCacheCond"/>/<paramref name="stepCacheUncond"/> are independent — each CFG stream's hidden states differ, so they must not share one cache instance.</summary>
-    private Tensor ClassifierFreeGuidanceStep(
-        Tensor latent, float timestep,
-        Tensor condContext, Tensor condPooled,
-        Tensor uncondContext, Tensor uncondPooled,
-        float cfgScale,
-        Utilities.DeviceFeatureCache? stepCacheCond = null, Utilities.DeviceFeatureCache? stepCacheUncond = null)
-    {
-        Tensor uncondNoise = RunForward(latent, timestep, uncondContext, uncondPooled, stepCacheUncond);
-        Tensor condNoise = RunForward(latent, timestep, condContext, condPooled, stepCacheCond);
-        Tensor output = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
-        uncondNoise.Dispose();
-        condNoise.Dispose();
-        return output;
     }
 
     /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when
