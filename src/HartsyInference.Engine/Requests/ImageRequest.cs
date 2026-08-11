@@ -29,6 +29,12 @@ public sealed record ImageRequest
     /// in (SDXL as of 2026-08-10); ignored elsewhere.</summary>
     public float? CfgRescale { get; init; }
 
+    /// <summary>TCFG (Tangential Damping CFG) toggle; null/false = off. Filters the tangential component out of
+    /// the unconditional prediction before the CFG combine (https://huggingface.co/papers/2503.18137). Composes
+    /// with <see cref="CfgRescale"/>. Only consumed by recipes that wire it in (SDXL as of 2026-08-11); ignored
+    /// elsewhere.</summary>
+    public bool? Tcfg { get; init; }
+
     /// <summary>RNG seed; negative means a random seed is chosen per request.</summary>
     public long Seed { get; init; } = -1;
 

@@ -32,6 +32,7 @@ internal static class RecipeRequestMapper
             Steps = request.Steps,
             CfgScale = request.CfgScale,
             CfgRescale = request.CfgRescale,
+            Tcfg = request.Tcfg,
             Seed = MapSeed(request.Seed),
         };
     }

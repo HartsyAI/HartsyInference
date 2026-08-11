@@ -38,6 +38,11 @@ public record TextToImageRequest
     /// Only consumed by pipelines that wire it in (SDXL as of 2026-08-10); ignored elsewhere.</summary>
     public float? CfgRescale { get; init; }
 
+    /// <summary>TCFG (Tangential Damping CFG) toggle. False/null (default) = off. See <see cref="Utilities.CfgHelper.ApplyTcfg"/>.
+    /// Composes with <see cref="CfgRescale"/> (TCFG combine runs first, rescale applies to its output).
+    /// Only consumed by pipelines that wire it in (SDXL as of 2026-08-11); ignored elsewhere.</summary>
+    public bool? Tcfg { get; init; }
+
     /// <summary>Optional pre-built initial noise tensor. When non-null, overrides the seed-based noise generator — used for cross-runtime parity tests where the same noise tensor must flow into both PyTorch and HartsyInference (PyTorch's <c>torch.Generator.manual_seed</c> and HartsyInference's <c>SeedGenerator</c> use different RNGs and don't agree bit-for-bit on the same seed). Pipeline takes ownership and disposes after use. Shape must match the pipeline's expected initial latent shape (txt2img path; for img2img use <see cref="ImageToImageRequest.SourceImage"/>).</summary>
     public Tensor? InitialNoise { get; init; }
 }

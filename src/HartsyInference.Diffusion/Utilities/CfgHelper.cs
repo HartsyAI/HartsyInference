@@ -214,6 +214,105 @@ public static unsafe class CfgHelper
         return output;
     }
 
+    /// <summary>TCFG (Tangential Damping Classifier-free Guidance, https://huggingface.co/papers/2503.18137 —
+    /// Hartsy's "hartsyinference"-flagged param, see the same duplication-vs-Comfy-flag rationale documented on
+    /// <see cref="ApplyCfgRescale"/>): before the standard CFG combine, drops the component of the unconditional
+    /// prediction that is "tangential" to (orthogonal from, in the row-space sense below) the conditional
+    /// prediction, then combines as usual: <c>output = uncondFiltered + scale·(cond − uncondFiltered)</c>.
+    /// <para>Reference impl (diffusers <c>TangentialClassifierFreeGuidance</c>) stacks <c>[cond, uncond]</c> into a
+    /// per-batch-item 2×N matrix (N = flattened non-batch size), SVDs it, zeroes the second right-singular vector,
+    /// and reprojects <c>uncond</c> through the remaining one. For a 2-row matrix this SVD has a closed form: the
+    /// right singular vectors come from eigendecomposing the 2×2 Gram matrix <c>G = [[cond·cond, cond·uncond],
+    /// [cond·uncond, uncond·uncond]]</c>, and reprojecting through only the dominant one collapses algebraically to
+    /// <c>uncondFiltered = alpha·cond + beta·uncond</c> for two per-batch-item scalars — so this is implemented as
+    /// two dot-product reduction passes plus a scalar 2×2 eigensolve, not a general SVD routine. Verified
+    /// bit-exact (max abs err ~1e-14) against <c>numpy.linalg.svd</c> on random vectors before this was trusted —
+    /// see <c>SdxlTcfgRealWeightTests</c>'s class doc for the derivation-check summary and the real-checkpoint
+    /// calibration finding (TCFG is a genuine trajectory steer, not a subtle nudge — large pixel diff at real
+    /// generation isn't itself a correctness red flag the way it is for step-cache).</para>
+    /// Both inputs must be F32 with identical shape; output is a new F32 tensor with that shape. Inputs are NOT
+    /// disposed — caller owns the lifetime. Composes with <see cref="ApplyCfgRescale"/> the same way the reference
+    /// does (TCFG combine first, rescale applied to its output) — callers wanting both should call this, then feed
+    /// the result into <see cref="ApplyCfgRescale"/>.</summary>
+    public static Tensor ApplyTcfg(Tensor cond, Tensor uncond, float scale, float eps = 1e-8f)
+    {
+        if (uncond.DType != DType.F32 || cond.DType != DType.F32)
+            throw new ArgumentException($"ApplyTcfg requires F32 inputs; got cond={cond.DType}, uncond={uncond.DType}. Cast via DtypeCastHelper.EnsureF32 first.");
+        if (!uncond.Shape.Equals(cond.Shape))
+            throw new ArgumentException($"ApplyTcfg shape mismatch: cond={cond.Shape}, uncond={uncond.Shape}.");
+
+        Tensor output = new Tensor(uncond.Shape, DType.F32);
+        float* conPtr = (float*)cond.DataPointer;
+        float* uncPtr = (float*)uncond.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+
+        int batch = (int)uncond.Shape[0];
+        long perBatch = uncond.ElementCount / batch;
+
+        for (int b = 0; b < batch; b++)
+        {
+            long baseOffset = (long)b * perBatch;
+
+            // Gram matrix of the 2-row [cond; uncond] matrix over this batch item's flattened elements.
+            double a = 0.0, g = 0.0, d = 0.0;
+            for (long i = 0; i < perBatch; i++)
+            {
+                long idx = baseOffset + i;
+                double c = conPtr[idx];
+                double u = uncPtr[idx];
+                a += c * c;
+                g += c * u;
+                d += u * u;
+            }
+
+            // Closed-form eigendecomposition of the symmetric 2x2 Gram matrix [[a, g], [g, d]]; (u0, u1) is the
+            // unit eigenvector for the larger eigenvalue lambda0 (the dominant right-singular direction).
+            double trace = a + d;
+            double disc = Math.Sqrt(Math.Max(0.0, (trace * 0.5) * (trace * 0.5) - (a * d - g * g)));
+            double lambda0 = trace * 0.5 + disc;
+            double u0, u1;
+            if (Math.Abs(g) > 1e-20)
+            {
+                u0 = g;
+                u1 = lambda0 - a;
+            }
+            else
+            {
+                u0 = a >= d ? 1.0 : 0.0;
+                u1 = a >= d ? 0.0 : 1.0;
+            }
+            double norm = Math.Sqrt(u0 * u0 + u1 * u1);
+            if (norm > 1e-20) { u0 /= norm; u1 /= norm; } else { u0 = 1.0; u1 = 0.0; }
+
+            // uncondFiltered = alpha*cond + beta*uncond — the algebraic collapse of "project uncond onto the
+            // dominant singular direction, drop the rest" (see doc comment above for the derivation).
+            double alpha, beta;
+            if (lambda0 > eps)
+            {
+                double k = (u0 * g + u1 * d) / lambda0;
+                alpha = u0 * k;
+                beta = u1 * k;
+            }
+            else
+            {
+                // Degenerate (near-zero-energy) batch item — fall back to unfiltered uncond rather than divide
+                // by ~0; real diffusion predictions never hit this in practice.
+                alpha = 0.0;
+                beta = 1.0;
+            }
+
+            for (long i = 0; i < perBatch; i++)
+            {
+                long idx = baseOffset + i;
+                double c = conPtr[idx];
+                double u = uncPtr[idx];
+                double uncondFiltered = alpha * c + beta * u;
+                outPtr[idx] = (float)(uncondFiltered + scale * (c - uncondFiltered));
+            }
+        }
+        return output;
+    }
+
     /// <summary>Concatenates two [B, seqLen, dimA] and [B, seqLen, dimB] tensors along the last dimension → [B, seqLen, dimA + dimB]. Used by SDXL-family pipelines to stitch CLIP-L and CLIP-G hidden states into the 2048-wide text embedding the UNet expects. F32 only.</summary>
     public static Tensor ConcatLastDim(Tensor a, Tensor b)
     {
