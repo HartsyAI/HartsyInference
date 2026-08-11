@@ -103,7 +103,7 @@ public sealed unsafe class PocketTtsFlowHead : ICfmEstimator
     /// <summary>OT-CFM <see cref="ICfmEstimator"/> entry: returns <c>v_θ(x, t | cond)</c>. The Pocket-TTS head
     /// only conditions on the LM hidden (<paramref name="mu"/>); <paramref name="spk"/> / <paramref name="cond"/>
     /// are unused (kept for interface compatibility so the shared <c>ConditionalCfm</c> solver can drive it too).</summary>
-    public Tensor Estimate(IBackend backend, Tensor x, Tensor mu, float t, Tensor spk, Tensor cond)
+    public Tensor Estimate(IBackend backend, Tensor x, Tensor mu, float t, Tensor spk, Tensor cond, Tensor? attnMask = null)
     {
         EnsureLoaded();
         if (x.ElementCount != _latentDim)

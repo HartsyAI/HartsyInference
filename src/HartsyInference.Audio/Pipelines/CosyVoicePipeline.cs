@@ -57,7 +57,8 @@ public sealed class CosyVoicePipeline : IDisposable
         ReadOnlySpan<float> referenceAudio = default,
         int referenceSampleRate = 0,
         int[]? referenceTextTokens = null,
-        int seed = 0)
+        int seed = 0,
+        int? chunkCausalSize = null)
     {
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
@@ -84,7 +85,7 @@ public sealed class CosyVoicePipeline : IDisposable
         {
             PreloadWeights(backend);
             return SynthesizeCore(backend, textTokenIds, speakerEmbed, referenceAudio, referenceSampleRate,
-                referenceTextTokens, seed, sw);
+                referenceTextTokens, seed, sw, chunkCausalSize);
         }
         finally
         {
@@ -142,7 +143,8 @@ public sealed class CosyVoicePipeline : IDisposable
         int referenceSampleRate,
         int[]? referenceTextTokens,
         int seed,
-        Stopwatch sw)
+        Stopwatch sw,
+        int? chunkCausalSize = null)
     {
         int[] promptSpeechTokens = [];
         Tensor? promptMel = null;
@@ -180,7 +182,7 @@ public sealed class CosyVoicePipeline : IDisposable
         List<int> speechTokens = _lm.GenerateSpeechTokens(backend, textTokenIds, refText, promptSpeechTokens, seed: seed);
         Logs.Info($"CosyVoice: LM emitted {speechTokens.Count} speech tokens in {sw.ElapsedMilliseconds}ms.");
 
-        Tensor mel = _flow.Inference(backend, speechTokens.ToArray(), promptSpeechTokens, promptMel, spk, seed);
+        Tensor mel = _flow.Inference(backend, speechTokens.ToArray(), promptSpeechTokens, promptMel, spk, seed, chunkCausalSize);
         if (ownsSpk) spk.Dispose();
         promptMel?.Dispose();
 

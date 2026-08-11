@@ -11,5 +11,7 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// guidance is applied by the solver, which calls this twice (conditional + zeroed-conditioning).</summary>
 public interface ICfmEstimator
 {
-    Tensor Estimate(IBackend backend, Tensor x, Tensor mu, float t, Tensor spk, Tensor cond);
+    /// <summary><paramref name="attnMask"/> null = the estimator's own default (full attention for the
+    /// non-streaming path); a real mask opts a chunk-aware-trained estimator into that mode.</summary>
+    Tensor Estimate(IBackend backend, Tensor x, Tensor mu, float t, Tensor spk, Tensor cond, Tensor? attnMask = null);
 }

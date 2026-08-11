@@ -26,6 +26,7 @@ internal sealed unsafe class VibeVoiceAcousticTokenizerModel
     private readonly VibeVoiceTokenizerConfig _config;
     private readonly VibeVoiceTokenizerEncoder _encoder;
     private readonly VibeVoiceTokenizerDecoder _decoder;
+    private bool _hasEncoder;
 
     public VibeVoiceTokenizerConfig Config => _config;
     public float FixStd => _config.FixStd;
@@ -38,9 +39,13 @@ internal sealed unsafe class VibeVoiceAcousticTokenizerModel
         _decoder = new VibeVoiceTokenizerDecoder(config, $"{prefix}.decoder");
     }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
+    /// <summary><paramref name="decodeOnly"/> skips the encoder — for a checkpoint that genuinely ships no
+    /// encoder weights at all (VibeVoice-Realtime-0.5B: only ever decodes precomputed/cached latents, never
+    /// encodes a live reference clip). <see cref="Encode"/> throws if called on an instance loaded this way.</summary>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, bool decodeOnly = false)
     {
-        _encoder.LoadWeights(w);
+        if (!decodeOnly) _encoder.LoadWeights(w);
+        _hasEncoder = !decodeOnly;
         _decoder.LoadWeights(w);
     }
 
@@ -50,6 +55,9 @@ internal sealed unsafe class VibeVoiceAcousticTokenizerModel
     public Tensor Encode(IBackend backend, Tensor pcm, int batch, int tPcm,
         VibeVoiceTokenizerStreamingCache? cache = null, ReadOnlySpan<int> sampleIndices = default)
     {
+        if (!_hasEncoder)
+            throw new InvalidOperationException(
+                "This acoustic tokenizer was loaded decode-only — its checkpoint ships no encoder weights.");
         // Encoder runs in channels-first and returns [batch, vae_dim, T_latent].
         Tensor latentCf = _encoder.Forward(backend, pcm, batch, tPcm, cache, sampleIndices);
         int tLatent = (int)latentCf.Shape[2];

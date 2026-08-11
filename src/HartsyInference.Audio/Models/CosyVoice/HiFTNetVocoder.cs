@@ -177,6 +177,87 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
         return audio;
     }
 
+    // Upper bound on HIFT's total receptive field translated to 24 kHz audio samples (F0 predictor mel-domain
+    // margin + per-level MRF/source-resblock dilated convs [1,3,5] compounding sequentially within each
+    // SnakeResBlock, propagated back up through 3 upsample stages [8,5,3] and the final iSTFT hop=4). Only
+    // needs to be AT LEAST the true receptive field for emitted samples to be exact (see HiFTStreamState's doc
+    // comment) — empirically calibrated against real `hift.pt` weights via HiftStreamParityTests: the true
+    // requirement is ~38-42k samples (maxAbs crosses below 1e-3 there), but that boundary is noisy — jitters
+    // non-monotonically with margin size, consistent with cuDNN conv-algorithm selection varying by tensor
+    // shape rather than genuine unsettled content — so 48k is picked with real margin below that noise floor
+    // (measured maxAbs 1.6-2.9e-4 across chunk sizes 1/2/6/12, an order of magnitude under the 1e-3 gate).
+    // HARTSY_HIFT_STREAM_MARGIN overrides it for recalibrating without a rebuild.
+    private static readonly int StreamMarginSamples = ReadMarginOverride() ?? 48_000;
+
+    private static int? ReadMarginOverride() =>
+        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_HIFT_STREAM_MARGIN"), out int v) ? v : null;
+
+    /// <summary>Streaming counterpart to <see cref="Forward"/>: feed successive mel chunks of one utterance
+    /// (via <paramref name="state"/>), get back only the audio newly settled by this chunk. Set
+    /// <paramref name="isFinal"/> on the last chunk of an utterance to flush the remaining
+    /// <see cref="StreamMarginSamples"/>-sample tail unconditionally (mirrors <see cref="Forward"/>'s own
+    /// natural end-of-utterance behavior — there's no more future mel coming, so nothing is held back).
+    /// See <see cref="HiFTStreamState"/> for why this reuses <see cref="Forward"/> verbatim instead of a
+    /// separate causal implementation.
+    ///
+    /// <para><b>NOT PRODUCTION-READY — do not wire into <see cref="Pipelines.CosyVoicePipeline"/> or deploy
+    /// yet.</b> The recompute-with-margin design is exact for the local/convolutional parts of the network
+    /// but NOT for the NSF harmonic source's unbounded phase accumulator (see
+    /// <see cref="Dsp.NsfVocoderDsp.GenerateHarmonicSource"/>'s <c>cum</c> array): tiny per-call numeric
+    /// differences at otherwise-settled positions integrate through that running sum and, inside a
+    /// <c>sin()</c>, grow with utterance length instead of decaying with distance from the current edge.
+    /// Verified 2026-08-10 (see <c>HiftStreamParityTests</c>'s doc comment for the exact measurements): fine
+    /// for short clips, relL2≈0.6-0.7 by ~10s regardless of chunk size or margin generosity, matching the
+    /// original plan's own risk call that this component needs real carried phase state, not recompute.</para>
+    /// </summary>
+    public float[] ForwardStreaming(IBackend backend, Tensor melChunk, HiFTStreamState state, bool isFinal = false)
+    {
+        Tensor melSoFar = state.MelHistory is null ? CopyMel(melChunk) : ConcatMelTime(state.MelHistory, melChunk);
+        state.MelHistory?.Dispose();
+        state.MelHistory = melSoFar;
+
+        // Forward() runs melSoFar through a GPU backend, which can leave a device-side cache/binding on the
+        // Tensor object; a later plain host read of that SAME tensor's DataPointer (next call's ConcatMelTime,
+        // reading state.MelHistory) can then sync back stale/reused device memory instead of the real host
+        // content. So state.MelHistory itself must never be handed to a backend op — feed Forward() a
+        // throwaway copy instead, which is discarded (never read again) right after this call returns.
+        Tensor forwardInput = CopyMel(melSoFar);
+        float[] audio = Forward(backend, forwardInput);
+        forwardInput.Dispose();
+        int emitEnd = isFinal ? audio.Length : Math.Max(state.EmittedSamples, audio.Length - StreamMarginSamples);
+        emitEnd = Math.Min(emitEnd, audio.Length);
+        int start = Math.Min(state.EmittedSamples, emitEnd);
+        float[] chunk = audio[start..emitEnd];
+        state.EmittedSamples = emitEnd;
+        return chunk;
+    }
+
+    private static unsafe Tensor CopyMel(Tensor mel)
+    {
+        Tensor copy = new(mel.Shape, DType.F32);
+        Buffer.MemoryCopy((void*)mel.DataPointer, (void*)copy.DataPointer, mel.ElementCount * 4, mel.ElementCount * 4);
+        return copy;
+    }
+
+    /// <summary>Concatenates two channels-first <c>[1, C, T]</c> mel tensors along the time axis.</summary>
+    private static unsafe Tensor ConcatMelTime(Tensor prev, Tensor next)
+    {
+        int c = (int)prev.Shape[1];
+        int tPrev = (int)prev.Shape[2];
+        int tNext = (int)next.Shape[2];
+        Tensor outT = new(new TensorShape(1, c, tPrev + tNext), DType.F32);
+        float* pp = (float*)prev.DataPointer;
+        float* np = (float*)next.DataPointer;
+        float* op = (float*)outT.DataPointer;
+        for (int cc = 0; cc < c; cc++)
+        {
+            long dst = (long)cc * (tPrev + tNext);
+            Buffer.MemoryCopy(pp + (long)cc * tPrev, op + dst, (long)tPrev * 4, (long)tPrev * 4);
+            Buffer.MemoryCopy(np + (long)cc * tNext, op + dst + tPrev, (long)tNext * 4, (long)tNext * 4);
+        }
+        return outT;
+    }
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
         Tensor?[] core = [_convPreW, _convPreB, _convPostW, _convPostB, _mSourceW, _mSourceB];

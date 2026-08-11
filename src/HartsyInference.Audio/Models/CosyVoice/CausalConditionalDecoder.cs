@@ -11,8 +11,13 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// <see cref="CausalResnet1D"/> (timestep-injected) followed by <see cref="MatchaTransformerBlock"/>×NumBlocks.
 ///
 /// <para><b>Causal</b>: every conv is left-padded only (<c>(k-1, 0)</c>); the per-frame norm inside a block is
-/// a LayerNorm over channels (not GroupNorm), activation is Mish. Self-attention is full over valid frames
-/// (no causal attention mask for the non-streaming path). Verified ~1e-5 against the PyTorch reference.</para></summary>
+/// a LayerNorm over channels (not GroupNorm), activation is Mish. Self-attention defaults to full over valid
+/// frames (<c>attnMask: null</c> — the non-streaming path, verified ~1e-5 against the PyTorch reference).
+/// An optional chunk-causal <paramref name="attnMask"/> (<see cref="MaskBuilder.BuildChunkCausalMask"/>) opts
+/// into one of the other masks this checkpoint was actually trained on — CosyVoice2's flow model samples a
+/// mask (non-causal / full-causal / chunk-M / chunk-2M) per training batch specifically so a single trained
+/// checkpoint supports all of them at inference; this is exercising a real training-time mode, not an
+/// ad-hoc mask bolted onto an unmasked checkpoint.</para></summary>
 public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
 {
     private readonly CosyVoiceFlowConfig _cfg;
@@ -99,7 +104,7 @@ public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
     // data via host `(float*)DataPointer`, which forces a device→host sync on CUDA and breaks GPU residency
     // (same anti-pattern that made Ideogram4 slow before its dit_f32.ptx kernels). To go fully GPU-resident,
     // port these element-wise/reshape ops to PTX kernels / backend ops so the whole estimator stays on-device.
-    public Tensor Estimate(IBackend backend, Tensor x, Tensor mu, float t, Tensor spk, Tensor cond)
+    public Tensor Estimate(IBackend backend, Tensor x, Tensor mu, float t, Tensor spk, Tensor cond, Tensor? attnMask = null)
     {
         int tt = (int)x.Shape[2];
         Tensor timeEmb = TimeEmbedding(backend, t);          // [1, 1, time_embed_dim]
@@ -109,7 +114,7 @@ public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
 
         // Down block: resnet → 4 transformers → save skip → causal-conv downsample.
         Tensor d = _downResnet.Forward(backend, h, timeEmb); h.Dispose();
-        d = RunAttn(backend, _downAttn, d, tt);
+        d = RunAttn(backend, _downAttn, d, tt, attnMask);
         Tensor skip = new(d.Shape, DType.F32); backend.CopyTo(skip, d);
         Tensor downSampled = CausalConv(backend, d, _downSampleW!, _downSampleB!, _ch, _ch, tt); d.Dispose();
         Tensor cur = downSampled;
@@ -118,13 +123,13 @@ public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
         for (int i = 0; i < _midResnet.Length; i++)
         {
             Tensor r = _midResnet[i].Forward(backend, cur, timeEmb); cur.Dispose();
-            cur = RunAttn(backend, _midAttn[i], r, tt);
+            cur = RunAttn(backend, _midAttn[i], r, tt, attnMask);
         }
 
         // Up block: concat([cur, skip]) on channels → resnet → 4 transformers → causal-conv upsample.
         Tensor catted = ConcatChannels(backend, cur, skip, _ch, _ch, tt); cur.Dispose(); skip.Dispose();
         Tensor u = _upResnet.Forward(backend, catted, timeEmb); catted.Dispose();
-        u = RunAttn(backend, _upAttn, u, tt);
+        u = RunAttn(backend, _upAttn, u, tt, attnMask);
         Tensor upSampled = CausalConv(backend, u, _upSampleW!, _upSampleB!, _ch, _ch, tt); u.Dispose();
         timeEmb.Dispose();
 
@@ -137,7 +142,7 @@ public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
         return outT;
     }
 
-    private Tensor RunAttn(IBackend backend, MatchaTransformerBlock[] blocks, Tensor chFirst, int t)
+    private Tensor RunAttn(IBackend backend, MatchaTransformerBlock[] blocks, Tensor chFirst, int t, Tensor? attnMask = null)
     {
         // [1, C, T] → [1, T, C] → blocks → back.
         Tensor seq = new(new TensorShape(1, t, _ch), DType.F32);
@@ -145,7 +150,7 @@ public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
         chFirst.Dispose();
         for (int i = 0; i < blocks.Length; i++)
         {
-            Tensor next = blocks[i].Forward(backend, seq, t);
+            Tensor next = blocks[i].Forward(backend, seq, t, attnMask);
             seq.Dispose();
             seq = next;
         }
@@ -336,7 +341,7 @@ internal sealed unsafe class MatchaTransformerBlock
         _ff2B = WhisperOps.EnsureF32(w[$"{prefix}.ff.net.2.bias"]);
     }
 
-    public Tensor Forward(IBackend backend, Tensor seq, int t)
+    public Tensor Forward(IBackend backend, Tensor seq, int t, Tensor? attnMask = null)
     {
         int c = _ch;
         // Self-attention sub-layer.
@@ -353,7 +358,9 @@ internal sealed unsafe class MatchaTransformerBlock
         Tensor vH = new(new TensorShape(1, _heads, t, _headDim), DType.F32); backend.Permute0213(vH, v, t, _heads, _headDim);
         q.Dispose(); k.Dispose(); v.Dispose();
         Tensor attn = new(new TensorShape(1, _heads, t, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qH, kH, vH, mask: null, 1f / MathF.Sqrt(_headDim));
+        // attnMask null = today's exact non-streaming behavior (full, unmasked attention) — additive, not a
+        // rewrite; a real mask (MaskBuilder.BuildChunkCausalMask) opts into the chunk-causal training mode.
+        backend.ScaledDotProductAttention(attn, qH, kH, vH, attnMask, 1f / MathF.Sqrt(_headDim));
         qH.Dispose(); kH.Dispose(); vH.Dispose();
         Tensor merged = new(new TensorShape(1, t, _inner), DType.F32);   // [1, H, T, d] → [1, T, inner]
         backend.Permute0213(merged, attn, _heads, t, _headDim);

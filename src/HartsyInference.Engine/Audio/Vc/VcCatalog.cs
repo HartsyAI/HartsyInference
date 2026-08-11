@@ -27,6 +27,12 @@ internal static class VcCatalog
     private const string ContentVecRepo = "lengyue233/content-vec-best";
     private const string ContentVecSourceFile = "pytorch_model.bin";
 
+    private const string RmvpeFile = "rmvpe.safetensors";
+    // RVC-WebUI's own model host; rmvpe.pt is a flat (or single-envelope-wrapped) state dict whose keys already
+    // match RvcRmvpe.LoadWeights's layout, so this is a passthrough repack too.
+    private const string RmvpeRepo = "lj1995/VoiceConversionWebUI";
+    private const string RmvpeSourceFile = "rmvpe.pt";
+
     // RVC voice models ship as native PyTorch .pth (the training output); a .safetensors a power user dropped in is
     // also accepted. Search order per variant name.
     private static readonly string[] RvcExtensions = ["", ".safetensors", ".pth", ".pt"];
@@ -93,23 +99,30 @@ internal static class VcCatalog
         }
         string contentVec = AudioModelRoot.SharedFile(ContentVecFile);
         await EnsureContentVecAsync(contentVec, cancel).ConfigureAwait(false);
+        string rmvpePath = AudioModelRoot.SharedFile(RmvpeFile);
+        await EnsureRmvpeAsync(rmvpePath, cancel).ConfigureAwait(false);
 
         Hubert hubert = new Hubert(HubertConfig.ChineseHubertBase);
         SafeTensorsLoader hubertLoader = new SafeTensorsLoader();
         hubertLoader.Load(contentVec);
         hubert.LoadWeights(hubertLoader.GetAllTensors());
 
+        RvcRmvpe rmvpe = new RvcRmvpe(RvcRmvpeConfig.Default);
+        SafeTensorsLoader rmvpeLoader = new SafeTensorsLoader();
+        rmvpeLoader.Load(rmvpePath);
+        rmvpe.LoadWeights(rmvpeLoader.GetAllTensors());
+
         (IReadOnlyDictionary<string, Tensor> rvcTensors, IDisposable rvcLoader) = AudioCheckpoints.LoadFile(rvcModelPath);
         RvcConfig config = DetectRvcConfig(rvcTensors);
         RvcPipeline rvc = new RvcPipeline(config);
         rvc.LoadWeights(rvcTensors);
 
-        Logs.Info($"[Audio][RVC] Loaded voice '{Path.GetFileName(rvcModelPath)}' ({rvc.SampleRate} Hz; ContentVec + YIN F0).");
+        Logs.Info($"[Audio][RVC] Loaded voice '{Path.GetFileName(rvcModelPath)}' ({rvc.SampleRate} Hz; ContentVec + RMVPE/YIN F0).");
         // Loaders stay alive for the runner's lifetime (the model tensors reference them). RVC carries the target
         // voice in its trained weights, so the target argument is unused.
         return new VcRunner(rvc.SampleRate,
-            (backend, source, _, request) => ConvertRvc(backend, hubert, rvc, source, request.PitchShift),
-            hubertLoader, rvcLoader, rvc);
+            (backend, source, _, request) => ConvertRvc(backend, hubert, rmvpe, rvc, source, request.PitchShift, request.F0Method),
+            hubertLoader, rvcLoader, rmvpeLoader, rvc, rmvpe);
     }
 
     /// <summary>Ensures the shared ContentVec encoder exists as <c>contentvec.safetensors</c>: on first use the
@@ -128,6 +141,21 @@ internal static class VcCatalog
         Logs.Info($"[Audio][RVC] {ContentVecFile} ready.");
     }
 
+    /// <summary>Ensures the shared RMVPE pitch extractor exists as <c>rmvpe.safetensors</c>: on first use the
+    /// RVC-WebUI pickle is fetched and re-saved as safetensors (a straight passthrough — its keys already match
+    /// <see cref="RvcRmvpe"/>'s layout).</summary>
+    private static async Task EnsureRmvpeAsync(string rmvpePath, CancellationToken cancel)
+    {
+        if (File.Exists(rmvpePath))
+        {
+            return;
+        }
+        Logs.Info($"[Audio][RVC] RMVPE pitch extractor missing — fetching {RmvpeRepo} and converting to {RmvpeFile}...");
+        string ptPath = await AudioModelCache.GetAsync(RmvpeRepo, RmvpeSourceFile, category: "clone", ct: cancel).ConfigureAwait(false);
+        PickleCheckpointRepacker.Repack(ptPath, rmvpePath);
+        Logs.Info($"[Audio][RVC] {RmvpeFile} ready.");
+    }
+
     /// <summary>Picks the RVC config from the first upsample-kernel width: the ConvTranspose1d kernel is 24 for
     /// 48 kHz and 16 for 40 kHz. weight-norm models store <c>weight_v</c>; pre-fused models store <c>weight</c>.</summary>
     private static RvcConfig DetectRvcConfig(IReadOnlyDictionary<string, Tensor> weights)
@@ -138,7 +166,8 @@ internal static class VcCatalog
         return kernel >= 20 ? RvcConfig.V2_48k : RvcConfig.V2_40k;
     }
 
-    private static float[] ConvertRvc(IBackend backend, Hubert hubert, RvcPipeline rvc, float[] source16k, double pitchSemitones)
+    private static float[] ConvertRvc(IBackend backend, Hubert hubert, RvcRmvpe rmvpe, RvcPipeline rvc,
+        float[] source16k, double pitchSemitones, string? f0Method)
     {
         int pcmLength = source16k.Length;
         Tensor pcm = new Tensor(new TensorShape(1, 1, pcmLength), DType.F32);
@@ -152,7 +181,10 @@ internal static class VcCatalog
         try
         {
             int contentFrames = (int)content2x.Shape[2];
-            float[] f0 = F0Estimator.EstimateYin(source16k, 16_000, hopSize: 160);
+            // Both estimators run at hop 160 (100 Hz on 16 kHz audio), matching content2x's grid.
+            float[] f0 = string.Equals(f0Method, "yin", StringComparison.OrdinalIgnoreCase)
+                ? F0Estimator.EstimateYin(source16k, 16_000, hopSize: 160)
+                : rmvpe.ExtractF0(backend, source16k);
             if (pitchSemitones != 0d)
             {
                 f0 = RvcPitch.Shift(f0, (float)pitchSemitones);

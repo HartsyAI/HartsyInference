@@ -94,7 +94,10 @@ public sealed record VibeVoiceConfig
         AcousticTokenizer = VibeVoiceTokenizerConfig.AcousticDefault,
         SemanticTokenizer = null,
         Decoder = VibeVoiceDecoderConfig.Qwen25_0_5B,
-        DiffusionHead = VibeVoiceDiffusionHeadConfig.Default with { HiddenSize = 896 },
+        // 20, not the Default's 10 — the real diffusion_head_config.ddpm_num_inference_steps in this
+        // checkpoint's config.json (confirmed 2026-08-10 against the actual microsoft/VibeVoice-Realtime-0.5B
+        // config; the 1.5B/7B variants' own inference script default of 10 does not apply here).
+        DiffusionHead = VibeVoiceDiffusionHeadConfig.Default with { HiddenSize = 896, DdpmNumInferenceSteps = 20 },
         TtsBackboneNumHiddenLayers = 20,
     };
 }

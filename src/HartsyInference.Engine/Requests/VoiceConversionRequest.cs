@@ -12,4 +12,7 @@ public sealed record VoiceConversionRequest
 
     /// <summary>Pitch shift in semitones (RVC); 0 = no shift.</summary>
     public double PitchShift { get; init; }
+
+    /// <summary>F0 estimator for RVC (<c>"rmvpe"</c> or <c>"yin"</c>); null defaults to RMVPE.</summary>
+    public string? F0Method { get; init; }
 }

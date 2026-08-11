@@ -1,6 +1,9 @@
+using System.Runtime.CompilerServices;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.VibeVoice;
+using static HartsyInference.Audio.Models.VibeVoice.VibeVoiceOps;
+using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Tensors;
@@ -33,6 +36,9 @@ namespace HartsyInference.Audio.Pipelines;
 /// loop are implemented. Setting <c>CfgScale = 1</c> reverts to the single-stream path.</para></summary>
 public sealed class VibeVoicePipeline : IDisposable
 {
+    /// <summary>Output sample rate — every VibeVoice variant this pipeline loads decodes to 24 kHz.</summary>
+    public const int SampleRate = 24_000;
+
     private readonly VibeVoiceConfig _cfg;
     // Per-call overrides; the pipeline instance is cached and reused across requests.
     private float _runCfgScale;
@@ -135,10 +141,87 @@ public sealed class VibeVoicePipeline : IDisposable
     /// or raw text (round-robin speaker assignment).
     /// <paramref name="voiceWavPaths"/> is one 24 kHz reference WAV per speaker.
     /// <paramref name="maxNewTokens"/> caps the AR loop length.</summary>
-    public unsafe float[] Synthesize(IBackend backend, IReadOnlyList<string> lines,
+    public float[] Synthesize(IBackend backend, IReadOnlyList<string> lines,
         IReadOnlyList<string> voiceWavPaths, int maxNewTokens = 256, IProgress<int>? progress = null,
         float temperature = 0.95f, float topP = 0.95f, int seed = 0,
         double? cfgScale = null, int? diffusionSteps = null)
+    {
+        List<float[]> audioChunks = new();
+        SynthesizeCore(backend, lines, voiceWavPaths, maxNewTokens, progress, temperature, topP, seed,
+            cfgScale, diffusionSteps, audioChunks.Add);
+
+        int totalSamples = 0;
+        foreach (float[] c in audioChunks) totalSamples += c.Length;
+        float[] audio = new float[totalSamples];
+        int offset = 0;
+        foreach (float[] c in audioChunks)
+        {
+            Array.Copy(c, 0, audio, offset, c.Length);
+            offset += c.Length;
+        }
+        return audio;
+    }
+
+    /// <summary>Streaming counterpart to <see cref="Synthesize"/>: runs the identical generation loop (same
+    /// <see cref="SynthesizeCore"/>, same numerics) on a background thread, but hands each decoded chunk to
+    /// the caller as soon as it's produced instead of buffering to the end — the acoustic VAE already decodes
+    /// one real, complete ~3200-sample chunk per AR step (<see cref="SynthesizeCore"/>'s diffusion branch),
+    /// this just changes when that chunk is handed off. Mirrors <c>KyutaiTtsModel.Session.SynthesizeStream</c>'s
+    /// shape: producer on <see cref="Task.Run(Action)"/>, consumer drains an <see cref="AudioStreamer"/>, the
+    /// producer <see cref="Task"/> is awaited in a <c>finally</c> so a fault always surfaces to the caller.</summary>
+    public async IAsyncEnumerable<AudioChunk> SynthesizeStream(IBackend backend, IReadOnlyList<string> lines,
+        IReadOnlyList<string> voiceWavPaths, int maxNewTokens, IProgress<int>? progress,
+        float temperature, float topP, int seed, double? cfgScale, int? diffusionSteps,
+        [EnumeratorCancellation] CancellationToken cancel = default)
+    {
+        using AudioStreamer streamer = new();
+        long sampleOffset = 0;
+
+        // No catch here on purpose — the same reasoning as Kyutai's SynthesizeStream: letting SynthesizeCore's
+        // exception fault this Task and rethrow from `await producer` below surfaces it even on early teardown
+        // (consumer cancels / stops enumerating), which a side-channel field written here wouldn't.
+        Task producer = Task.Run(() =>
+        {
+            try
+            {
+                SynthesizeCore(backend, lines, voiceWavPaths, maxNewTokens, progress, temperature, topP, seed,
+                    cfgScale, diffusionSteps, onChunk: chunk =>
+                    {
+                        // Blocking wait, not fire-and-forget: this always runs on the background producer
+                        // thread, never a request thread, so the bounded channel's backpressure genuinely
+                        // paces generation against how fast the consumer drains chunks (mirrors Kyutai's
+                        // SubmitPending).
+                        streamer.Put(new AudioChunk(chunk, SampleRate, 1, sampleOffset), cancel).AsTask().GetAwaiter().GetResult();
+                        sampleOffset += chunk.Length;
+                    });
+            }
+            finally
+            {
+                // Always unblocks ReadAllAsync below, whether SynthesizeCore finished, threw, or was cancelled.
+                streamer.Complete();
+            }
+        }, cancel);
+
+        try
+        {
+            await foreach (AudioChunk chunk in streamer.ReadAllAsync(cancel).ConfigureAwait(false))
+            {
+                yield return chunk;
+            }
+        }
+        finally
+        {
+            await producer.ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The shared generation loop behind both <see cref="Synthesize"/> and
+    /// <see cref="SynthesizeStream"/> — identical numerics either way; <paramref name="onChunk"/> is called
+    /// synchronously as each ~3200-sample chunk is decoded (immediately for streaming, or buffered by the
+    /// caller for the accumulate-to-end non-streaming path).</summary>
+    private unsafe void SynthesizeCore(IBackend backend, IReadOnlyList<string> lines,
+        IReadOnlyList<string> voiceWavPaths, int maxNewTokens, IProgress<int>? progress,
+        float temperature, float topP, int seed, double? cfgScale, int? diffusionSteps, Action<float[]> onChunk)
     {
         ThrowIfDisposed();
         _runCfgScale = cfgScale is > 0 ? (float)cfgScale.Value : _cfg.CfgScale;
@@ -184,8 +267,6 @@ public sealed class VibeVoicePipeline : IDisposable
         // used to condition the first diffusion step.
 
         // ── AR loop ─────────────────────────────────────────────────────────
-        List<float[]> audioChunks = new();
-
         // Persistent streaming caches for the acoustic decoder and semantic encoder. These
         // thread the causal conv/transpose receptive-field state through every AR step,
         // mirroring upstream's `acoustic_tokenizer.decode(..., cache=acoustic_cache,
@@ -262,7 +343,8 @@ public sealed class VibeVoicePipeline : IDisposable
 
                     // Run 20 DDPM steps, v-prediction, cosine, CFG-combined cond/uncond.
                     Tensor noiseLatent = SampleNoise(_cfg.AcousticVaeDim, ref noiseRng);
-                    Tensor denoised = DenoiseLatent(backend, noiseLatent, cond, negCond);
+                    Tensor denoised = DenoiseLatent(backend, _diffusionHead, _runSteps, _runCfgScale, noiseLatent,
+                        cond, negCond, _cfg.AcousticVaeDim, _lmCfg.HiddenSize);
                     negCond?.Dispose();
                     noiseLatent.Dispose();
 
@@ -274,7 +356,7 @@ public sealed class VibeVoicePipeline : IDisposable
                     // sees the prior frames' receptive-field tail.
                     using Tensor frameAudio = _acoustic.Decode(backend, denoised, batch: 1, acousticCache, sampleIndices);
                     float[] chunk = TensorToPcm(frameAudio);
-                    audioChunks.Add(chunk);
+                    onChunk(chunk);
 
                     // Build next-step embed: acoustic_connector(latent) + semantic_connector(sem_features).
                     Tensor latentNormalized = ReNormalizeLatent(denoised, _speechScalingFactor, _speechBiasFactor);
@@ -334,18 +416,6 @@ public sealed class VibeVoicePipeline : IDisposable
             lastHidden?.Dispose();
             negLastHidden?.Dispose();
         }
-
-        // ── Assembly ─────────────────────────────────────────────────────────
-        int totalSamples = 0;
-        foreach (float[] c in audioChunks) totalSamples += c.Length;
-        float[] audio = new float[totalSamples];
-        int offset = 0;
-        foreach (float[] c in audioChunks)
-        {
-            Array.Copy(c, 0, audio, offset, c.Length);
-            offset += c.Length;
-        }
-        return audio;
     }
 
     /// <summary>Bulk-uploads every component's weights to the backend once (idempotent). Without
@@ -438,70 +508,6 @@ public sealed class VibeVoicePipeline : IDisposable
         }
     }
 
-    private Tensor DenoiseLatent(IBackend backend, Tensor noiseLatent, Tensor cond, Tensor? negCond)
-    {
-        using VibeVoiceCosineDpmSolver scheduler = new();
-        scheduler.SetTimesteps(_runSteps);
-
-        float cfg = _runCfgScale;
-        bool useCfg = negCond is not null && MathF.Abs(cfg - 1f) > 1e-6f;
-
-        Tensor speech = noiseLatent;
-        bool ownsSpeech = false;
-        int latent = _cfg.AcousticVaeDim;
-        int hidden = _lmCfg.HiddenSize;
-        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-
-        // Batched CFG: upstream feeds the SAME noisy latent to the conditional and unconditional halves, so
-        // instead of two N=1 head forwards we stack them into ONE N=2 forward (row 0 = cond, row 1 = uncond) —
-        // the head is FFN-only with no cross-frame mixing, so each row is exactly its own pass. Halves the
-        // head's tiny-GEMV launch count. condB is fixed across a token's 20 steps → built once here.
-        // Combine: eps = uncond + cfg·(cond−uncond).
-        // (CUDA-graph capture of the N=2 head step was tried and reverted: after the host-glue→GPU port the
-        //  step is GPU-compute-bound, so the graph was wall-neutral — and capture/replay perturbed the
-        //  TF32-sensitive AR feedback enough to diverge the generation. Not worth it.)
-        Tensor? condB = null;
-        if (useCfg)
-        {
-            condB = new(new TensorShape(1, 2, hidden), DType.F32);
-            backend.Concat(condB, [cond, negCond!], dim: 1);
-        }
-        for (int step = 0; step < timesteps.Length; step++)
-        {
-            Tensor vPred;
-            if (useCfg)
-            {
-                Tensor speechB = new(new TensorShape(1, 2, latent), DType.F32);
-                backend.Concat(speechB, [speech, speech], dim: 1);
-                float[] tBatch2 = [timesteps[step], timesteps[step]];
-                Tensor vB = _diffusionHead.Forward(backend, speechB, tBatch2, condB!);
-                vPred = CombineCfgBatched(vB, cfg, latent);
-                speechB.Dispose();
-                vB.Dispose();
-            }
-            else
-            {
-                float[] tBatch = [timesteps[step]];
-                vPred = _diffusionHead.Forward(backend, speech, tBatch, cond);
-            }
-            Tensor next = scheduler.Step(vPred, speech, step);
-            vPred.Dispose();
-            if (ownsSpeech) speech.Dispose();
-            speech = next;
-            ownsSpeech = true;
-        }
-        condB?.Dispose();
-
-        if (!ownsSpeech)
-        {
-            // No steps ran somehow — defensive clone.
-            Tensor clone = new(speech.Shape, DType.F32);
-            unsafe { Buffer.MemoryCopy((void*)speech.DataPointer, (void*)clone.DataPointer, speech.ElementCount * 4, speech.ElementCount * 4); }
-            return clone;
-        }
-        return speech;
-    }
-
     /// <summary>Samples one of the allowed VibeVoice control tokens with temperature + top-p (matching the
     /// official inference). Greedy argmax deadlocks on short prompts: if <c>speech_diffusion</c> edges out
     /// <c>speech_end</c>/<c>eos</c> by any margin it never stops until the token cap, which is exactly the
@@ -556,126 +562,6 @@ public sealed class VibeVoicePipeline : IDisposable
             if (draw <= acc) return allowed[order[r]];
         }
         return allowed[order[keep - 1]];
-    }
-
-    // CFG combine from a batched [1, 2, latent] head output (row 0 = cond, row 1 = uncond):
-    //   eps = uncond + cfg_scale * (cond - uncond). Latents are tiny (latent=64) so the tail stays host.
-    private static unsafe Tensor CombineCfgBatched(Tensor vBatched, float cfg, int latent)
-    {
-        Tensor result = new(new TensorShape(1, 1, latent), DType.F32);
-        float* v = (float*)vBatched.DataPointer;
-        float* r = (float*)result.DataPointer;
-        for (int i = 0; i < latent; i++) r[i] = v[latent + i] + cfg * (v[i] - v[latent + i]);
-        return result;
-    }
-
-    private static unsafe Tensor SliceLastFrame(Tensor hidden, int dim)
-    {
-        // [B, T, dim] → [B, 1, dim] of the last T position.
-        int batch = (int)hidden.Shape[0];
-        int t = (int)hidden.Shape[1];
-        Tensor result = new(new TensorShape(batch, 1, dim), DType.F32);
-        float* sp = (float*)hidden.DataPointer;
-        float* dp = (float*)result.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            long srcOff = ((long)b * t + (t - 1)) * dim;
-            long dstOff = (long)b * dim;
-            Buffer.MemoryCopy(sp + srcOff, dp + dstOff, dim * 4, dim * 4);
-        }
-        return result;
-    }
-
-    private static unsafe Tensor ExpandTo3D(Tensor x, int dim)
-    {
-        // Ensure shape is [1, 1, dim]; clone if already so.
-        if (x.Shape.Rank == 3 && (int)x.Shape[1] == 1) return CopyOf(x);
-        if (x.Shape.Rank == 2)
-        {
-            Tensor t = new(new TensorShape(1, 1, dim), DType.F32);
-            Buffer.MemoryCopy((void*)x.DataPointer, (void*)t.DataPointer, x.ElementCount * 4, x.ElementCount * 4);
-            return t;
-        }
-        return CopyOf(x);
-    }
-
-    private static unsafe Tensor CopyOf(Tensor src)
-    {
-        Tensor copy = new(src.Shape, DType.F32);
-        Buffer.MemoryCopy((void*)src.DataPointer, (void*)copy.DataPointer, src.ElementCount * 4, src.ElementCount * 4);
-        return copy;
-    }
-
-    // Draws fresh decorrelated Gaussian noise from one persistent stream (matching torch.randn per frame). The old
-    // per-frame `new Random(step+1)` gave adjacent frames near-identical first draws (correlated seeds) — near-duplicate
-    // latents that garble short utterances — and ignored the user seed.
-    private static unsafe Tensor SampleNoise(int dim, ref uint rng)
-    {
-        Tensor t = new(new TensorShape(1, 1, dim), DType.F32);
-        float* p = (float*)t.DataPointer;
-        for (int i = 0; i < dim; i++)
-            p[i] = HartsyInference.Audio.Dsp.DeterministicRng.NextGaussian(ref rng);
-        return t;
-    }
-
-    private static unsafe Tensor AddEmbeds(Tensor a, Tensor? b)
-    {
-        Tensor result = CopyOf(a);
-        if (b is null) return result;
-        long n = result.ElementCount;
-        float* rp = (float*)result.DataPointer;
-        float* bp = (float*)b.DataPointer;
-        for (long i = 0; i < n; i++) rp[i] += bp[i];
-        return result;
-    }
-
-    private static unsafe void NormalizeLatentInPlace(Tensor latent, float scale, float bias)
-    {
-        long n = latent.ElementCount;
-        float* p = (float*)latent.DataPointer;
-        for (long i = 0; i < n; i++) p[i] = (p[i] + bias) * scale;
-    }
-
-    private static unsafe void UnnormalizeLatentInPlace(Tensor latent, float scale, float bias)
-    {
-        long n = latent.ElementCount;
-        float* p = (float*)latent.DataPointer;
-        float invScale = 1f / scale;
-        for (long i = 0; i < n; i++) p[i] = p[i] * invScale - bias;
-    }
-
-    private static unsafe Tensor ReNormalizeLatent(Tensor latent, float scale, float bias)
-    {
-        Tensor copy = CopyOf(latent);
-        long n = copy.ElementCount;
-        float* p = (float*)copy.DataPointer;
-        for (long i = 0; i < n; i++) p[i] = (p[i] + bias) * scale;
-        return copy;
-    }
-
-    private static unsafe float[] TensorToPcm(Tensor frame)
-    {
-        // [1, 1, T] → float[T]
-        int t = (int)frame.Shape[2];
-        float[] result = new float[t];
-        float* p = (float*)frame.DataPointer;
-        fixed (float* dst = result) Buffer.MemoryCopy(p, dst, t * 4, t * 4);
-        return result;
-    }
-
-    private static unsafe Tensor PcmToTensor(float[] pcm)
-    {
-        Tensor t = new(new TensorShape(1, 1, pcm.Length), DType.F32);
-        fixed (float* src = pcm) Buffer.MemoryCopy(src, (void*)t.DataPointer, pcm.Length * 4, pcm.Length * 4);
-        return t;
-    }
-
-    private static unsafe float ReadScalar(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        if (!w.TryGetValue(key, out Tensor? t)) return 1.0f;
-        if (t.DType == DType.F32) return *(float*)t.DataPointer;
-        using Tensor f = t.CastTo(DType.F32);     // checkpoint stores these as bf16 scalars
-        return *(float*)f.DataPointer;
     }
 
     private void ThrowIfDisposed()

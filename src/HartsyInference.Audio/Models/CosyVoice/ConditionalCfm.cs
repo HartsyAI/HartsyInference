@@ -38,7 +38,7 @@ public sealed unsafe class ConditionalCfm
     /// speaker vector broadcast over time; <paramref name="cond"/> is the reference-mel prefix (zeros
     /// outside the prompt region). Pass <c>cfgRate ≤ 0</c> to disable CFG.</summary>
     public Tensor Solve(IBackend backend, Tensor mu, Tensor spk, Tensor cond,
-        int numSteps, float cfgRate, int seed)
+        int numSteps, float cfgRate, int seed, Tensor? attnMask = null)
     {
         int t = (int)mu.Shape[2];
         Tensor x = RandNormal(_melBins, t, seed);
@@ -56,10 +56,10 @@ public sealed unsafe class ConditionalCfm
         for (int step = 0; step < numSteps; step++)
         {
             float tNow = step * dt;
-            Tensor v = _estimator.Estimate(backend, x, mu, tNow, spk, cond);
+            Tensor v = _estimator.Estimate(backend, x, mu, tNow, spk, cond, attnMask);
             if (cfgRate > 0f)
             {
-                Tensor v0 = _estimator.Estimate(backend, x, zMu!, tNow, zSpk!, zCond!);
+                Tensor v0 = _estimator.Estimate(backend, x, zMu!, tNow, zSpk!, zCond!, attnMask);
                 CombineCfg(v, v0, cfgRate);     // v ← (1+cfg)·v − cfg·v0 (in place)
                 v0.Dispose();
             }

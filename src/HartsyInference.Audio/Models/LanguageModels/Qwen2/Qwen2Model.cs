@@ -72,6 +72,23 @@ public sealed class Qwen2Model : IDisposable
         _transformer.LoadWeightsHeadless(w, prefix);
     }
 
+    /// <summary>Loads <c>embed_tokens</c> + layers only, no final norm / <c>lm_head</c> — for a sub-stack
+    /// genuinely trained without one (VibeVoice-Realtime's 4-layer text encoder). Always forward with
+    /// <c>applyFinalNorm: false</c> on an instance loaded this way.</summary>
+    public void LoadWeightsNoFinalNorm(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        ThrowIfDisposed();
+        _transformer.LoadWeightsNoFinalNorm(w, prefix);
+    }
+
+    /// <summary>Loads <c>embed_tokens</c> + layers + final norm, no <c>lm_head</c> — for a sub-stack whose
+    /// output feeds something other than a vocabulary projection (VibeVoice-Realtime's 20-layer TTS backbone).</summary>
+    public void LoadWeightsNoLmHead(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        ThrowIfDisposed();
+        _transformer.LoadWeightsNoLmHead(w, prefix);
+    }
+
     /// <summary>Token-IDs-in path: embedding lookup then the decoder stack. Returns the final
     /// <c>[1, T, hidden]</c> hidden state (post final RMSNorm).</summary>
     public Tensor Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int batch, int posStart, IKvCache cache)

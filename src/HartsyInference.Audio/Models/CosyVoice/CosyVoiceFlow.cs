@@ -51,12 +51,17 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
     /// <paramref name="promptSpeechTokens"/> + <paramref name="promptMel"/> are the reference clip's
     /// tokens + mel (empty for preset-voice modes); <paramref name="speakerEmbed"/> is the CAM++
     /// 192-d vector.</summary>
+    /// <param name="chunkCausalSize">When set, solves with a block-diagonal-causal attention mask
+    /// (<see cref="MaskBuilder.BuildChunkCausalMask"/>) over the whole <c>tMel</c> span instead of the
+    /// default full-attention mask — the Phase-5.0 quality probe: exercises the chunk-causal training mode
+    /// in one monolithic call, no actual chunking/state-carry yet. Null preserves today's exact output.</param>
     public Tensor Inference(IBackend backend,
         ReadOnlySpan<int> speechTokens,
         ReadOnlySpan<int> promptSpeechTokens,
         Tensor? promptMel,
         Tensor speakerEmbed,
-        int seed = 0)
+        int seed = 0,
+        int? chunkCausalSize = null)
     {
         if (_inputEmbedding is null) throw new InvalidOperationException("CosyVoiceFlow weights not loaded.");
         int inputSize = _cfg.Flow.InputSize;
@@ -95,7 +100,9 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         Tensor cond = new(new TensorShape(1, mel, tMel), DType.F32);
         if (promptMel is not null) WritePromptCond(cond, promptMel, mel, tMel);
 
-        Tensor outMel = _cfm.Solve(backend, mu, spkChan, cond, _cfg.Flow.NumEulerSteps, _cfg.Flow.CfgRate, seed);
+        Tensor? attnMask = chunkCausalSize is > 0 ? MaskBuilder.BuildChunkCausalMask(tMel, chunkCausalSize.Value) : null;
+        Tensor outMel = _cfm.Solve(backend, mu, spkChan, cond, _cfg.Flow.NumEulerSteps, _cfg.Flow.CfgRate, seed, attnMask);
+        attnMask?.Dispose();
         mu.Dispose();
         spk.Dispose();
         cond.Dispose();

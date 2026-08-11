@@ -82,13 +82,14 @@ internal static class ChatterboxModel
             {
                 int[] textTokens = tokenizer.EncodeWithStartStop(job.Text);
                 float exaggeration = job.Exaggeration.HasValue ? (float)job.Exaggeration.Value : config.Exaggeration;
+                float cfgWeight = job.CfgScale.HasValue ? (float)job.CfgScale.Value : config.CfgWeight;
                 if (job.ReferenceMono24k is not null && job.ReferenceMono24k.Length > 0)
                 {
                     return pipeline.Synthesize(backend, textTokens, refSpeakerEmbed: null, exaggeration, job.Seed,
-                        referenceAudio: job.ReferenceMono24k, referenceSampleRate: 24_000);
+                        referenceAudio: job.ReferenceMono24k, referenceSampleRate: 24_000, cfgWeight: cfgWeight);
                 }
                 return pipeline.Synthesize(backend, textTokens, referenceSpeaker, exaggeration, job.Seed,
-                    flowSpeakerEmbed: flowSpeaker, t3PromptSpeechTokens: promptSpeechTokens);
+                    flowSpeakerEmbed: flowSpeaker, t3PromptSpeechTokens: promptSpeechTokens, cfgWeight: cfgWeight);
             }, keep);
         },
     };

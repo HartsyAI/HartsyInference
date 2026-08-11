@@ -67,7 +67,8 @@ public sealed class ChatterboxPipeline : IDisposable
         ReadOnlySpan<float> referenceAudio = default,
         int referenceSampleRate = 0,
         Action<GenerationProgress>? progress = null,
-        ReadOnlySpan<int> t3PromptSpeechTokens = default)
+        ReadOnlySpan<int> t3PromptSpeechTokens = default,
+        float cfgWeight = 0f)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(backend);
@@ -129,7 +130,7 @@ public sealed class ChatterboxPipeline : IDisposable
         // Stage 1: T3 — text tokens + voice-encoder embedding (+ optional perceiver-resampled cond-prompt
         // speech tokens) → S3 speech tokens.
         List<int> speechTokens = _t3.GenerateSpeechTokens(backend, textTokens, veEmbed,
-            exaggeration, _cfg.MaxNewTokens, seed, t3Prompt);
+            exaggeration, _cfg.MaxNewTokens, seed, t3Prompt, cfgWeight);
         if (ownsVe) veEmbed.Dispose();
         Logs.Info($"Chatterbox: T3 emitted {speechTokens.Count} speech tokens in {sw.ElapsedMilliseconds}ms.");
         progress?.Invoke(new GenerationProgress(1, 3, sw.Elapsed.TotalMilliseconds));

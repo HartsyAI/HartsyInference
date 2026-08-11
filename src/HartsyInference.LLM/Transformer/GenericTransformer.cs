@@ -212,6 +212,35 @@ public sealed unsafe class GenericTransformer : IDisposable
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
     }
 
+    /// <summary>Loads <c>embed_tokens</c> + decoder layers + final norm — no <c>lm_head</c>. For a sub-stack
+    /// whose output is consumed by something other than a vocabulary projection (VibeVoice-Realtime's
+    /// 20-layer TTS backbone: its last hidden state feeds a diffusion head and a binary EOS classifier, never
+    /// a <c>lm_head</c> — the checkpoint has none). Same idea as <see cref="LoadWeightsNoFinalNorm"/> one
+    /// tensor over.</summary>
+    public void LoadWeightsNoLmHead(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        ThrowIfDisposed();
+        Tensor embedRaw = w[$"{prefix}.embed_tokens.weight"];
+        _embed = EnsureF32(embedRaw);
+        _finalNorm = LoadNorm(w[$"{prefix}.norm.weight"], _cfg.RmsNormAddOne);
+        if (_cfg.UseLayerNorm) _finalNormBias = LoadBiasOrZero(w, $"{prefix}.norm.bias", _cfg.HiddenSize);
+        for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
+    }
+
+    /// <summary>Loads <c>embed_tokens</c> + decoder layers only — no final norm, no <c>lm_head</c>. For a
+    /// sub-stack genuinely trained without a final norm (VibeVoice-Realtime's 4-layer text encoder, whose
+    /// checkpoint has no <c>norm.weight</c> key at all — its own reference implementation runs it through
+    /// <c>nn.Identity()</c>). Always call <see cref="ForwardEmbeds"/> with <c>applyFinalNorm: false</c> on an
+    /// instance loaded this way — <see cref="_finalNorm"/> stays null, which is safe only because
+    /// <c>ForwardEmbeds</c> never reads it when <c>applyFinalNorm</c> is false.</summary>
+    public void LoadWeightsNoFinalNorm(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        ThrowIfDisposed();
+        Tensor embedRaw = w[$"{prefix}.embed_tokens.weight"];
+        _embed = EnsureF32(embedRaw);
+        for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
+    }
+
     /// <summary>All weight tensors (stable references) for <see cref="IBackend.PreloadWeights"/> /
     /// <see cref="IBackend.FreeWeights"/>.</summary>
     public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits = true)

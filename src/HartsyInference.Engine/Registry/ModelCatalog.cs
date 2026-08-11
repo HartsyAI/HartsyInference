@@ -1058,6 +1058,20 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                Id = "vibevoice:realtime", Modality = tts, DisplayName = "VibeVoice-Realtime-0.5B", Architecture = "split-LM diffusion TTS", Status = ok,
+                CliDrivable = true, // `hartsy speak -m vibevoice:realtime --reference <wav>` — single-speaker, low-latency
+                // streaming variant, architecturally distinct from VibeVoice 1.5B/7B (split 4-layer text encoder +
+                // 20-layer TTS backbone, binary EOS classifier, no lm_head at all). Zero-shot voice cloning from a
+                // reference clip is a HartsyInference-side adaptation, not upstream's own mechanism — see
+                // VibeVoiceStreamingPipeline's class doc.
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "microsoft/VibeVoice-Realtime-0.5B", RepoPath = "model.safetensors", TargetSubdir = "Audio/VibeVoiceRealtime", Role = "transformer" },
+                    new() { Repo = "microsoft/VibeVoice-Realtime-0.5B", RepoPath = "config.json", TargetSubdir = "Audio/VibeVoiceRealtime", Role = "config" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "fishspeech", Modality = tts, DisplayName = "Fish-Speech 1.5", Architecture = "DualAR + tiktoken", Status = ok,
                 CliDrivable = true, // `hartsy speak -m fishspeech` — TtsCatalog key is "fishspeech" (no hyphen); was "fish-speech" here before, which never resolved
                 Assets = new ModelAsset[]

@@ -87,40 +87,70 @@ public sealed unsafe class ChatterboxT3 : IDisposable
         return cond;
     }
 
-    /// <summary>Autoregressively generates S3 speech tokens from text token ids + a speaker embedding.</summary>
+    /// <summary>Autoregressively generates S3 speech tokens from text token ids + a speaker embedding. When
+    /// <paramref name="cfgWeight"/> is positive, runs Chatterbox's real dual-stream CFG — a second forward
+    /// pass over a parallel KV cache with the text embedding zeroed (speaker/emotion/prompt/speech-start
+    /// conditioning stays shared with the conditional stream, matching upstream <c>t3.py</c>'s
+    /// <c>text_emb[1].zero_()</c>), combined per step as <c>cond + cfgWeight * (cond - uncond)</c> — note
+    /// this is Chatterbox's own formula, not CSM's <c>uncond + g*(cond-uncond)</c> convention.
+    /// <see cref="LLM.Transformer.GenericTransformer.ForwardEmbeds"/> is batch=1 only, so the uncond stream
+    /// runs as an independent forward over its own cache rather than a batched call — mathematically
+    /// equivalent to a real batch=2 forward since causal self-attention has no cross-batch term.</summary>
     public List<int> GenerateSpeechTokens(IBackend backend, ReadOnlySpan<int> textTokens, Tensor speakerEmbed,
-        float exaggeration, int maxNew, int seed = 0, ReadOnlySpan<int> promptSpeechTokens = default)
+        float exaggeration, int maxNew, int seed = 0, ReadOnlySpan<int> promptSpeechTokens = default, float cfgWeight = 0f)
     {
         if (_textEmb is null) throw new InvalidOperationException("ChatterboxT3 not loaded.");
         int h = _cfg.T3.HiddenSize;
+        bool useCfg = cfgWeight > 0f;
         Tensor cond = BuildCond(backend, speakerEmbed, exaggeration, promptSpeechTokens);
         int condLen = (int)cond.Shape[1];
         int tt = textTokens.Length;
 
-        // Prefill embeds = [cond] ++ [text+pos] ++ [speechStart+pos0].
+        // Prefill embeds = [cond] ++ [text+pos] ++ [speechStart+pos0]. The uncond stream is byte-identical
+        // except the text region keeps its position embedding but zeroes the token embedding.
         int prefill = condLen + tt + 1;
         Tensor embeds = new(new TensorShape(1, prefill, h), DType.F32);
+        Tensor? embedsUncond = useCfg ? new Tensor(new TensorShape(1, prefill, h), DType.F32) : null;
         float* ep = (float*)embeds.DataPointer;
+        float* eup = useCfg ? (float*)embedsUncond!.DataPointer : null;
         Buffer.MemoryCopy((void*)cond.DataPointer, ep, (long)condLen * h * 4, (long)condLen * h * 4);
+        if (useCfg) Buffer.MemoryCopy((void*)cond.DataPointer, eup, (long)condLen * h * 4, (long)condLen * h * 4);
         cond.Dispose();
         for (int i = 0; i < tt; i++)
+        {
             AddEmbPlusPos(ep + (long)(condLen + i) * h, _textEmb!, textTokens[i], _textPos!, i, h);
+            if (useCfg) AddPosOnly(eup + (long)(condLen + i) * h, _textPos!, i, h);
+        }
         AddEmbPlusPos(ep + (long)(condLen + tt) * h, _speechEmb!, _cfg.StartSpeechToken, _speechPos!, 0, h);
+        if (useCfg) AddEmbPlusPos(eup + (long)(condLen + tt) * h, _speechEmb!, _cfg.StartSpeechToken, _speechPos!, 0, h);
 
         int cacheCap = Math.Min(_cfg.T3.MaxPositionEmbeddings, prefill + maxNew + 4);
         using IKvCache cache = _backbone.CreateDecodeCache(cacheCap);
+        using IKvCache? cacheUncond = useCfg ? _backbone.CreateDecodeCache(cacheCap) : null;
         uint rng = DeterministicRng.Seed(seed);
         List<int> tokens = new(maxNew);
         HashSet<int> seen = new();
 
         Tensor hidden = _backbone.ForwardEmbeds(backend, embeds, 1, prefill, 0, cache);
         embeds.Dispose();
+        Tensor? hiddenUncond = useCfg ? _backbone.ForwardEmbeds(backend, embedsUncond!, 1, prefill, 0, cacheUncond!) : null;
+        embedsUncond?.Dispose();
         for (int step = 0; step < maxNew; step++)
         {
             Tensor last = SliceLast(hidden, h); hidden.Dispose();
             Tensor logitsT = WhisperOps.ProjectLinear(backend, last, _speechHead!, null, 1, 1, h, _cfg.SpeechVocab);
             last.Dispose();
             Span<float> logits = new((void*)logitsT.DataPointer, _cfg.SpeechVocab);
+            if (useCfg)
+            {
+                Tensor lastU = SliceLast(hiddenUncond!, h); hiddenUncond!.Dispose();
+                Tensor logitsUncondT = WhisperOps.ProjectLinear(backend, lastU, _speechHead!, null, 1, 1, h, _cfg.SpeechVocab);
+                lastU.Dispose();
+                Span<float> logitsUncond = new((void*)logitsUncondT.DataPointer, _cfg.SpeechVocab);
+                for (int v = 0; v < _cfg.SpeechVocab; v++)
+                    logits[v] += cfgWeight * (logits[v] - logitsUncond[v]);
+                logitsUncondT.Dispose();
+            }
             if (_cfg.RepetitionPenalty != 1f)
                 foreach (int tok in seen)
                     logits[tok] = logits[tok] > 0 ? logits[tok] / _cfg.RepetitionPenalty : logits[tok] * _cfg.RepetitionPenalty;
@@ -133,10 +163,13 @@ public sealed unsafe class ChatterboxT3 : IDisposable
             Tensor step1 = new(new TensorShape(1, 1, h), DType.F32);
             AddEmbPlusPos((float*)step1.DataPointer, _speechEmb!, next, _speechPos!, tokens.Count, h);
             hidden = _backbone.ForwardEmbeds(backend, step1, 1, 1, cache.CurrentLength, cache);
+            if (useCfg)
+                hiddenUncond = _backbone.ForwardEmbeds(backend, step1, 1, 1, cacheUncond!.CurrentLength, cacheUncond);
             step1.Dispose();
             if (cache.CurrentLength >= cacheCap - 2) break;
         }
         hidden.Dispose();
+        hiddenUncond?.Dispose();
         return tokens;
     }
 
@@ -152,6 +185,14 @@ public sealed unsafe class ChatterboxT3 : IDisposable
         float* er = (float*)emb.DataPointer + (long)token * h;
         float* pr = (float*)pos.DataPointer + (long)posIdx * h;
         for (int i = 0; i < h; i++) dst[i] = er[i] + pr[i];
+    }
+
+    /// <summary>CFG's uncond text region: position embedding only, zero token embedding (upstream's
+    /// <c>text_emb[1].zero_()</c>).</summary>
+    private static void AddPosOnly(float* dst, Tensor pos, int posIdx, int h)
+    {
+        float* pr = (float*)pos.DataPointer + (long)posIdx * h;
+        for (int i = 0; i < h; i++) dst[i] = pr[i];
     }
 
     private static Tensor SliceLast(Tensor hidden, int h)
