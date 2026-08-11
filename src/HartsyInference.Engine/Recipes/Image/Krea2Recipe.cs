@@ -25,8 +25,16 @@ public sealed class Krea2Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Krea 2 shares the Qwen-Image VAE; its encoder half is built alongside the decoder and
-    /// <see cref="Krea2Pipeline"/> implements the packed-latent masked path.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
+    /// <see cref="Krea2Pipeline"/> implements the packed-latent masked path.
+    /// <para><see cref="ImageFeatures.Regional"/> added 2026-08-11 (Tier 3.7): <see cref="Krea2Attention"/> gained
+    /// an <c>attnBias</c> slot (the GQA K/V repeat happens BEFORE the SDPA call, so the bias broadcasts the same
+    /// way it does for non-GQA architectures — no special-casing needed), threaded through <see cref="Krea2Block"/>
+    /// and <see cref="Krea2Transformer"/>'s eager forward path, wired via <see cref="Krea2Pipeline.GenerateFromTokens"/>
+    /// and <see cref="Krea2RecipePipeline.BuildRegionalPlan"/> — real-weight verified with a two-region prompt.
+    /// DiT sharding (<see cref="Krea2Transformer.ForwardPatchedSharded"/>) has no bias parameter, so a regional
+    /// request forces the unsharded path for that generation with a logged warning, same precedent as Flux.1's
+    /// own DiT-sharding exclusion for regional plans.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "krea2", StringComparison.OrdinalIgnoreCase);

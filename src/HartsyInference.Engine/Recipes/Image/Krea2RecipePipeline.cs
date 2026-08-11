@@ -1,9 +1,11 @@
 using System.Globalization;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -70,7 +72,7 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
             Logs.Info($"[Krea2RecipePipeline] Snapped {reqWidth}x{reqHeight} → {width}x{height} (multiple of 16, 128–4096).");
         }
 
-        // TODO(E-IMG-4/5): LoRA, ControlNet, IP-Adapter and regional prompting are deferred.
+        // TODO(E-IMG-4/5): LoRA, ControlNet, IP-Adapter are deferred.
         (int[] promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, prompt);
         (int[] negTokens, int negDrop) = EncodeWithTemplate(_tokenizer, negative);
 
@@ -96,26 +98,56 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
             progress?.Report(new StepPreview { Step = p.Step, TotalSteps = steps });
         };
 
-        (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
-            promptTokens, useCfg ? negTokens : null, inner, bridge,
-            promptDropIndex: promptDrop, negativeDropIndex: negDrop);
-
-        return new ImageResult
+        RegionalPlan? regionalPlan = null;
+        try
         {
-            Rgb = rgb,
-            Width = outW,
-            Height = outH,
-            Seed = usedSeed,
-            Meta = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            regionalPlan = BuildRegionalPlan(prompt, width, height, steps);
+
+            (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
+                promptTokens, useCfg ? negTokens : null, inner, bridge,
+                promptDropIndex: promptDrop, negativeDropIndex: negDrop, regionalPlan: regionalPlan);
+
+            return new ImageResult
             {
-                ["arch"] = "krea2",
-                ["variant"] = _isTurbo ? "turbo" : "base",
-                ["size"] = $"{outW}x{outH}",
-                ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
-                ["steps"] = steps.ToString(CultureInfo.InvariantCulture),
-                ["cfg"] = cfg.ToString(CultureInfo.InvariantCulture),
-            },
-        };
+                Rgb = rgb,
+                Width = outW,
+                Height = outH,
+                Seed = usedSeed,
+                Meta = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["arch"] = "krea2",
+                    ["variant"] = _isTurbo ? "turbo" : "base",
+                    ["size"] = $"{outW}x{outH}",
+                    ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
+                    ["steps"] = steps.ToString(CultureInfo.InvariantCulture),
+                    ["cfg"] = cfg.ToString(CultureInfo.InvariantCulture),
+                },
+            };
+        }
+        finally
+        {
+            RegionalPromptResolver.DisposeRegions(regionalPlan);
+        }
+    }
+
+    /// <summary>Builds a regional-conditioning plan when the prompt carries <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c>
+    /// parts, null otherwise (Tier 3.7). Each region's text is templated + drop-indexed the SAME way the base
+    /// prompt is (<see cref="EncodeWithTemplate"/>) and encoded through <see cref="Krea2Pipeline.EncodeRegionText"/>
+    /// — the same tapped-layer text encoder the base prompt uses. <see cref="RegionalPlan.BaseCond"/> is a required
+    /// field on the resolver's signature that <see cref="Krea2Pipeline.GenerateFromTokens"/>'s regional path never
+    /// reads (same as Flux.1/Flux.2 — confirmed by inspection) — a throwaway placeholder satisfies it.</summary>
+    private RegionalPlan? BuildRegionalPlan(string prompt, int width, int height, int steps)
+    {
+        if (!RegionalPromptResolver.HasRegionParts(prompt))
+        {
+            return null;
+        }
+        using Tensor baseCondPlaceholder = new Tensor(new TensorShape(1), DType.F32);
+        return RegionalPromptResolver.Resolve(prompt, baseCondPlaceholder, width, height, steps, encodeRegion: text =>
+        {
+            (int[] regionTokens, int regionDrop) = EncodeWithTemplate(_tokenizer, text);
+            return _pipeline.EncodeRegionText(regionTokens, regionDrop);
+        });
     }
 
     /// <summary>Builds the Krea 2 templated token sequence plus the prefix-drop index (the leading system-block + user-header positions whose hidden states the pipeline discards — Krea 2's <c>prompt_template_encode_start_idx</c>).</summary>

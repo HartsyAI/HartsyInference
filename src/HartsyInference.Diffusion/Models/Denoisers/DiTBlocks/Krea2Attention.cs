@@ -67,7 +67,7 @@ public sealed unsafe class Krea2Attention
     // FluxRope.ApplyGpuGqa — WanRopeInterleaved is single-tensor with an explicit head count, so GQA
     // (numHeads != numKvHeads) rotates Q and K with their own counts on the pre-permute [B, S, H, D] layout,
     // bit-identical to the host ForwardSingle. B>1 keeps the host ForwardSingle fallback (post-permute).
-    public Tensor Forward(IBackend backend, Tensor x, FluxRope? rope, int batch, int seqLen)
+    public Tensor Forward(IBackend backend, Tensor x, FluxRope? rope, int batch, int seqLen, Tensor? attnBias = null)
     {
         TensorShape qHeads = new TensorShape(batch, seqLen, _numHeads, _headDim);
         TensorShape kvHeads = new TensorShape(batch, seqLen, _numKvHeads, _headDim);
@@ -147,7 +147,7 @@ public sealed unsafe class Krea2Attention
         // allowF16: Krea2 applies zero-centered RMSNorm to Q and K (per-head, over headDim) before attention, so
         // pre-softmax scores are bounded and the F16 SDPA path (half the score-matrix HBM traffic + F16 tensor
         // cores) is numerically safe — same condition Wan/LTX use. SDPA is ~55% of Krea2 GPU time (sync-profiled).
-        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale, allowF16: true);
+        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, attnBias, scale, allowF16: true);   // bias broadcasts [1,1,S,S] against the post-GQA-repeat head count — computed the same as non-GQA SDPA
         qMh.Dispose();
         kRep.Dispose();   // when _kvGroup == 1, kRep/vRep alias kMh/vMh — disposed exactly once here.
         vRep.Dispose();

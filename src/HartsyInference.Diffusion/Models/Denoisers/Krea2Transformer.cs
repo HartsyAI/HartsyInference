@@ -305,7 +305,7 @@ public sealed unsafe class Krea2Transformer : IDisposable
     /// tensor's <c>DataPointer</c> and the host can queue all steps without the per-step D2H pipeline drain that
     /// otherwise serialized host dispatch against GPU execution.</summary>
     public Tensor ForwardPatched(IBackend backend, Tensor patchLatent, float timestep, Tensor encoderHidden,
-        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null)
+        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null, Tensor? attnBias = null)
     {
         ThrowIfDisposed();
         const int batch = 1;
@@ -363,12 +363,12 @@ public sealed unsafe class Krea2Transformer : IDisposable
         // FULLY RESIDENT only (BeforeBlockForward null): block streaming re-points every block's weights each
         // forward, so a graph that baked their device pointers would replay against freed memory — a CUDA 700 that
         // poisons the whole context. Same guard as HunyuanVideoDit / LtxVideo2Transformer.
-        bool graphMode = stepCache is null && BeforeBlockForward is null
+        bool graphMode = stepCache is null && attnBias is null && BeforeBlockForward is null
             && DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported
             && !_graphDead && ReferenceEquals(patchLatent, _latentFixed);
         if (!graphMode)
         {
-            Tensor eager = ForwardCore(backend, patchLatent, txt, temb, tembMod, batch, imgSeq, txtSeq, hidden, stepCache);
+            Tensor eager = ForwardCore(backend, patchLatent, txt, temb, tembMod, batch, imgSeq, txtSeq, hidden, stepCache, attnBias);
             tembMod.Dispose();
             temb.Dispose();
             return eager;
@@ -509,7 +509,7 @@ public sealed unsafe class Krea2Transformer : IDisposable
     /// (F32 cast) → final layer. Identical op sequence every step for a given (txt, resolution) — the property
     /// that makes it CUDA-graph-capturable. Caller owns temb/tembMod.</summary>
     private Tensor ForwardCore(IBackend backend, Tensor patchLatent, Tensor txt, Tensor temb, Tensor tembMod,
-        int batch, int imgSeq, int txtSeq, int hidden, Utilities.DeviceFeatureCache? stepCache = null)
+        int batch, int imgSeq, int txtSeq, int hidden, Utilities.DeviceFeatureCache? stepCache = null, Tensor? attnBias = null)
     {
         int jointSeq = txtSeq + imgSeq;
         Tensor joint = ForwardEmbedIn(backend, patchLatent, txt, batch, imgSeq, txtSeq, hidden);
@@ -517,12 +517,13 @@ public sealed unsafe class Krea2Transformer : IDisposable
         // Across-step First-Block cache (QwenImageTransformer wiring; see DeviceFeatureCache): block 0 always
         // runs as the gate indicator; hit ⇒ blocks 1..N−1 replaced by block0 + previous residual; miss ⇒ the
         // anchor survives the loop for the fresh residual. Null stepCache = byte-identical original loop.
+        // attnBias (regional prompting) is per-step-variable — excluded from the cache path same as Flux/Flux.2.
         Tensor? cacheAnchor = null;
         int startBlock = 0;
-        if (stepCache is not null && _blocks.Length > 1)
+        if (stepCache is not null && attnBias is null && _blocks.Length > 1)
         {
             BeforeBlockForward?.Invoke(0);
-            Tensor block0 = _blocks[0].Forward(backend, joint, tembMod, _rope, batch, jointSeq);
+            Tensor block0 = _blocks[0].Forward(backend, joint, tembMod, _rope, batch, jointSeq, attnBias);
             joint.Dispose();
             joint = block0;
             startBlock = 1;
@@ -545,7 +546,7 @@ public sealed unsafe class Krea2Transformer : IDisposable
             // The controller simply keeps whatever it had prefetched (bounded by the prefetch window) and the next
             // miss resumes from there — residency is per-block state, not a position in a sequence.
             BeforeBlockForward?.Invoke(i);
-            Tensor next = _blocks[i].Forward(backend, joint, tembMod, _rope, batch, jointSeq);
+            Tensor next = _blocks[i].Forward(backend, joint, tembMod, _rope, batch, jointSeq, attnBias);
             if (joint != cacheAnchor) joint.Dispose();
             joint = next;
         }

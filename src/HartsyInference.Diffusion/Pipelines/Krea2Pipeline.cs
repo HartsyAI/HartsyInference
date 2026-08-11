@@ -7,6 +7,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
@@ -82,7 +83,8 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         TextToImageRequest request,
         Action<GenerationProgress>? onProgress = null,
         int promptDropIndex = 34,
-        int negativeDropIndex = 34)
+        int negativeDropIndex = 34,
+        RegionalPlan? regionalPlan = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
@@ -168,6 +170,28 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         long phT3 = sw.ElapsedMilliseconds;
         Logs.Verbose($"[krea2-phase] TE preload={phT1 - phT0}ms encode={phT2 - phT1}ms free={phT3 - phT2}ms"
             + (condHit && uncondHit ? " (cache hit)" : ""));
+
+        // ── Regional conditioning (Tier 3.7): append region text streams to the COND stream only — matches
+        // FluxPipeline's precedent (true-CFG's negative pass runs against the unextended stream; regions are a
+        // positive-conditioning-only concept). Image tokens follow text in Krea 2's joint [txt|img] concat
+        // (ForwardEmbedIn: `backend.Concat(joint, new[] { txt, img }, dim: 1)`), same layout Flux/Flux.2 use. ──
+        bool hasRegions = regionalPlan is not null && regionalPlan.Regions.Count > 0;
+        Tensor? extendedCond = null;
+        List<(int Start, int End)>? regionRanges = null;
+        List<float[]>? regionGridMasks = null;
+        float[]? regionWeights = null;
+        int condTxtSeqLen = (int)condHidden.Shape[1];
+        if (hasRegions)
+        {
+            (extendedCond, condTxtSeqLen, regionRanges, regionGridMasks) =
+                RegionalConditioningLayout.BuildTextStream(regionalPlan!, condHidden, hPacked, wPacked);
+            regionWeights = new float[regionalPlan!.Regions.Count];
+            if (DitShardBackend is not null)
+            {
+                Logs.Warning("[Krea2Pipeline] Regional prompting is active — DiT sharding v1 has no attnBias "
+                    + "surface (ForwardPatchedSharded), running this generation unsharded on the primary backend.");
+            }
+        }
 
         // ── scheduler: resolution-aware exp shift (Turbo pins mu=1.15) ──
         FlowMatchEulerDiscreteScheduler scheduler = _config.IsDistilled
@@ -300,7 +324,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // NEVER on the streamed path: the transformer refuses to capture while BeforeBlockForward is hooked (a graph
         // bakes weight pointers that streaming re-points every forward), so it returns a fresh eager velocity — and
         // the graph-mode branch below skips disposing it, which would leak one velocity buffer per step.
-        bool graphMode = fastPath && !useCfg && condCache is null && streamer is null && DitShardBackend is null
+        bool graphMode = fastPath && !useCfg && condCache is null && streamer is null && DitShardBackend is null && !hasRegions
             && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
         Tensor? patchLatent = null;
         if (fastPath)
@@ -330,10 +354,20 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 
             if (fastPath)
             {
+                Tensor? regionBias = null;
+                if (hasRegions)
+                {
+                    regionalPlan!.ResolveStep(i - startStep, regionWeights!);
+                    regionBias = RegionalAttentionBias.Build(
+                        condTxtSeqLen + imageSeqLen, condTxtSeqLen, imageSeqLen, regionRanges!, regionGridMasks!, regionWeights!);
+                }
+
                 Tensor v;
                 if (useCfg)
                 {
-                    Tensor condV = RunForwardPatched(patchLatent!, t, condHidden, hPacked, wPacked, stepCondCache);
+                    // The negative pass runs against the unextended uncondHidden, no bias — same convention
+                    // FluxPipeline uses (regions are a positive-conditioning-only concept).
+                    Tensor condV = RunForwardPatched(patchLatent!, t, hasRegions ? extendedCond! : condHidden, hPacked, wPacked, stepCondCache, regionBias);
                     Tensor uncondV = RunForwardPatched(patchLatent!, t, uncondHidden!, hPacked, wPacked, stepUncondCache);
                     v = CfgHelper.ApplyCfgCondAnchored(condV, uncondV, cfgScale);
                     uncondV.Dispose();
@@ -341,8 +375,9 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                 }
                 else
                 {
-                    v = RunForwardPatched(patchLatent!, t, condHidden, hPacked, wPacked, stepCondCache);
+                    v = RunForwardPatched(patchLatent!, t, hasRegions ? extendedCond! : condHidden, hPacked, wPacked, stepCondCache, regionBias);
                 }
+                regionBias?.Dispose();
 
                 // On-device IN-PLACE Euler step: patchLatent += v·dt via CfgEulerStep with pos=neg=v (the CFG
                 // combine degenerates to identity: g·v + (1−g)·v = v). In-place keeps the latent's device address
@@ -429,6 +464,8 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 
         // condHidden/uncondHidden are owned by the prompt-embedding cache (host-materialized; survive across
         // gens for repeat prompts) — do NOT dispose here. They're released on cache eviction / pipeline Dispose.
+        // extendedCond (region-extended) is rebuilt fresh every generation — always disposed.
+        extendedCond?.Dispose();
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
@@ -519,16 +556,19 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
     /// <summary>Routes one patchified-space denoise step through <see cref="DitShardBackend"/>'s block-range split
     /// when configured, else the normal single-backend path. Sharding excludes step-cache (see
     /// <see cref="Krea2Transformer.ForwardPatchedSharded"/>) — <paramref name="stepCache"/> is only honored on the
-    /// unsharded path; callers still pass it unconditionally, matching the existing call sites.</summary>
+    /// unsharded path; callers still pass it unconditionally, matching the existing call sites. <paramref name="attnBias"/>
+    /// (regional prompting, Tier 3.7) is excluded from sharding the same way — <see cref="Krea2Transformer.ForwardPatchedSharded"/>
+    /// has no bias parameter at all — so a non-null bias forces the unsharded path regardless of <see cref="DitShardBackend"/>;
+    /// callers must log this once per generation (see <c>GenerateFromTokens</c>), not silently drop the conditioning.</summary>
     private Tensor RunForwardPatched(Tensor patchLatent, float t, Tensor encoderHidden, int hPacked, int wPacked,
-        DeviceFeatureCache? stepCache)
+        DeviceFeatureCache? stepCache, Tensor? attnBias = null)
     {
-        if (DitShardBackend is not null)
+        if (DitShardBackend is not null && attnBias is null)
         {
             return _transformer.ForwardPatchedSharded(Backend, DitShardBackend, patchLatent, t, encoderHidden,
                 hPacked, wPacked, DitShardSplitBlock);
         }
-        return _transformer.ForwardPatched(Backend, patchLatent, t, encoderHidden, hPacked, wPacked, stepCache);
+        return _transformer.ForwardPatched(Backend, patchLatent, t, encoderHidden, hPacked, wPacked, stepCache, attnBias);
     }
 
     /// <summary>Pixel-space counterpart of <see cref="RunForwardPatched"/> (img2img / masked-inpaint path).</summary>
@@ -637,6 +677,12 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         _cachedUncond = null;
         _cachedUncondKey = null;
     }
+
+    /// <summary>Encodes one region's prompt text (Tier 3.7) through the SAME tapped-layer encode the base prompt
+    /// uses — the caller (recipe layer) must template + drop-index the region text identically to the base prompt
+    /// (<c>Krea2RecipePipeline.EncodeWithTemplate</c>), since <see cref="EncodeTapped"/> has no template logic of
+    /// its own.</summary>
+    public Tensor EncodeRegionText(int[] tokenIds, int dropIndex) => EncodeTapped(tokenIds, dropIndex);
 
     /// <summary>Encodes a token sequence, stacks the 12 selected layers (tap-major <c>[1, S, 12·2560]</c>) and drops
     /// the first <paramref name="dropIndex"/> token positions (the chat-template system prefix).</summary>
