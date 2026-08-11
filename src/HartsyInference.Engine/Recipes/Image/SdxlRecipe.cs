@@ -24,7 +24,7 @@ public sealed class SdxlRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public ImageFeatures Supports =>
         ImageFeatures.Lora | ImageFeatures.ControlNet | ImageFeatures.IpAdapter | ImageFeatures.Refiner
-        | ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.VariationSeed;
+        | ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.VariationSeed | ImageFeatures.SeamlessTiling;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "sdxl", StringComparison.OrdinalIgnoreCase);

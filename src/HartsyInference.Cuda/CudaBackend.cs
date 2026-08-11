@@ -337,6 +337,14 @@ public sealed class CudaBackend : IBackend
     /// layers/steps (e.g. ACE-Step's 3.5B DiT on a 12 GB 3060).</remarks>
     public bool HighPrecisionGemm { get; set; }
 
+    /// <summary>Opt-in: <see cref="Conv2D"/> pads the width axis of every convolution with wrapped edge pixels
+    /// instead of zeros. Default <c>false</c>. Set for the duration of one generation only — this changes every
+    /// conv's output on the hot path, so it must never leak into a request that didn't ask for it (Tier 3.6).</summary>
+    public bool SeamlessTilingX { get; set; }
+
+    /// <summary>Same as <see cref="SeamlessTilingX"/> for the height axis.</summary>
+    public bool SeamlessTilingY { get; set; }
+
     /// <summary>Route the fp8 GEMM activation cast through F16 (10-bit) instead of BF16 (7-bit).</summary>
     /// <remarks>Safe for GELU-FFN models (Wan); needed for deep fp8 DiTs where BF16's coarser mantissa compounds a
     /// per-step bias into divergence.</remarks>
@@ -1376,6 +1384,20 @@ public sealed class CudaBackend : IBackend
     /// <summary>2D convolution via im2col + cuBLAS SGEMM. Supports arbitrary stride, padding, and kernel sizes.</summary>
     public unsafe void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW)
     {
+        // Seamless tiling (Tier 3.6): neither the cuDNN graph path nor the im2col kernels below take a padding
+        // *mode* — padH/padW is always zero-fill. Rather than touch either path, pre-materialize a wrapped-edge
+        // copy of the input at the request pad size and recurse with pad=0; the recursive call's own output-shape
+        // arithmetic ((inH+2*padH-kH)/stride+1) already matches `output`'s shape since the wrap adds the same
+        // 2*padH/2*padW the caller asked for. Runs on every conv while the flag is set (UNet AND VAE, since both
+        // route through this one method) — a decode-only wrap would leave a seamless latent that decodes with a
+        // seam.
+        if ((SeamlessTilingX || SeamlessTilingY) && (padH > 0 || padW > 0))
+        {
+            using Tensor wrapped = WrapPadForSeamlessTiling(input, padH, padW, wrapH: SeamlessTilingY, wrapW: SeamlessTilingX);
+            Conv2D(output, wrapped, weight, bias, strideH, strideW, 0, 0);
+            return;
+        }
+
         using NvtxRange _nvtx = NvtxRange.Push("Conv2D");
         EnterOp();
         EnsureKernels();
@@ -1577,6 +1599,62 @@ public sealed class CudaBackend : IBackend
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
             if (colBuf != 0) CudaMemory.FreeAsync(colBuf, _stream.Handle);
         }
+    }
+
+    /// <summary>Builds a [B,C,inH+2*padH,inW+2*padW] host copy of <paramref name="input"/> whose border comes from
+    /// the opposite edge of the same tensor (circular/wrap padding) instead of zeros — the source data for
+    /// <see cref="SeamlessTilingX"/>/<see cref="SeamlessTilingY"/>. <paramref name="wrapH"/>/<paramref name="wrapW"/>
+    /// select which axes actually wrap (SwarmUI core's "X-Only"/"Y-Only"/"true" modes); the other axis's border is
+    /// left at its allocated zero (<see cref="Tensor"/>'s lazy host buffer is zeroed on first touch), i.e. an
+    /// ordinary zero-pad — same as passing the request straight through unset. Assumes <c>padH &lt;= inH</c> and
+    /// <c>padW &lt;= inW</c>, true for every real conv kernel pad (1-3px) against any image/latent dimension.
+    /// dtype-generic (raw byte copies keyed off <see cref="DType.SizeInBytes"/>) since UNet convs run F16/BF16
+    /// while VAE convs stay F32.</summary>
+    private static unsafe Tensor WrapPadForSeamlessTiling(Tensor input, int padH, int padW, bool wrapH, bool wrapW)
+    {
+        int batch = (int)input.Shape[0];
+        int channels = (int)input.Shape[1];
+        int inH = (int)input.Shape[2];
+        int inW = (int)input.Shape[3];
+        int outH = inH + 2 * padH;
+        int outW = inW + 2 * padW;
+        int elemSize = input.DType.SizeInBytes;
+
+        Tensor padded = new Tensor(new TensorShape(batch, channels, outH, outW), input.DType);
+        byte* src = (byte*)input.DataPointer;
+        byte* dst = (byte*)padded.DataPointer; // zeroed on first touch above — the fallback for a non-wrapped axis's border.
+
+        for (int b = 0; b < batch; b++)
+        {
+            for (int c = 0; c < channels; c++)
+            {
+                long srcPlane = ((long)b * channels + c) * inH * inW;
+                long dstPlane = ((long)b * channels + c) * outH * outW;
+                for (int oh = 0; oh < outH; oh++)
+                {
+                    bool rowInBounds = oh >= padH && oh < padH + inH;
+                    if (!rowInBounds && !wrapH)
+                    {
+                        continue; // top/bottom border stays zeroed — Y axis not tiling.
+                    }
+                    int ih = wrapH ? ((oh - padH) % inH + inH) % inH : oh - padH;
+                    byte* srcRow = src + (srcPlane + (long)ih * inW) * elemSize;
+                    byte* dstRow = dst + (dstPlane + (long)oh * outW) * elemSize;
+
+                    // Center: straight copy of the source row.
+                    Buffer.MemoryCopy(srcRow, dstRow + (long)padW * elemSize, (long)inW * elemSize, (long)inW * elemSize);
+                    if (padW > 0 && wrapW)
+                    {
+                        // Left border wraps from the row's right edge; right border wraps from its left edge.
+                        Buffer.MemoryCopy(srcRow + (long)(inW - padW) * elemSize, dstRow, (long)padW * elemSize, (long)padW * elemSize);
+                        Buffer.MemoryCopy(srcRow, dstRow + (long)(padW + inW) * elemSize, (long)padW * elemSize, (long)padW * elemSize);
+                    }
+                    // padW > 0 && !wrapW: left/right border stays zeroed — X axis not tiling.
+                }
+            }
+        }
+
+        return padded;
     }
 
     /// <summary>Attempts the cuDNN conv-forward route for <see cref="Conv2D"/>.</summary>

@@ -95,6 +95,10 @@ public sealed class ImagesService : IImagesService
         {
             features |= ImageFeatures.VariationSeed;
         }
+        if (!string.IsNullOrEmpty(request.SeamlessTiling) && request.SeamlessTiling != "false")
+        {
+            features |= ImageFeatures.SeamlessTiling;
+        }
         return features;
     }
 

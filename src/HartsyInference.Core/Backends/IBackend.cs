@@ -20,6 +20,15 @@ public interface IBackend : IDisposable
     /// <summary>When true, F32 GEMMs use full 32-bit compute instead of TF32 (needed by e.g. Zonos); no-op without TF32.</summary>
     bool HighPrecisionGemm { get => false; set { } }
 
+    /// <summary>When true, <see cref="Conv2D"/> pads the width axis with wrapped edge pixels instead of zeros, so
+    /// the model sees a horizontally-continuous canvas — the standard "seamless tiling" trick for textures/
+    /// patterns. Independent of <see cref="SeamlessTilingY"/> (SwarmUI core's "X-Only"/"Y-Only"/"true" modes).
+    /// No-op on backends without a padding intercept (this is a request-scoped opt-in, not a capability).</summary>
+    bool SeamlessTilingX { get => false; set { } }
+
+    /// <summary>Same as <see cref="SeamlessTilingX"/> for the height axis.</summary>
+    bool SeamlessTilingY { get => false; set { } }
+
     /// <summary>Capabilities of this backend.</summary>
     BackendCapabilities Capabilities { get; }
 

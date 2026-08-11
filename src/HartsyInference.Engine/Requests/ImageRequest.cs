@@ -35,6 +35,11 @@ public sealed record ImageRequest
     /// elsewhere.</summary>
     public bool? Tcfg { get; init; }
 
+    /// <summary>Seamless-tileable axis: <c>null</c>/<c>"false"</c> = off, <c>"true"</c> = both axes, <c>"X-Only"</c>/
+    /// <c>"Y-Only"</c> = one axis. Same vocabulary as SwarmUI core's shared <c>SeamlessTileable</c> param. Only
+    /// consumed by recipes that wire it in (SDXL as of 2026-08-11); ignored elsewhere.</summary>
+    public string? SeamlessTiling { get; init; }
+
     /// <summary>RNG seed; negative means a random seed is chosen per request.</summary>
     public long Seed { get; init; } = -1;
 

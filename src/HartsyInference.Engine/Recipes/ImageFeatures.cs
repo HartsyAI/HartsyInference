@@ -39,4 +39,7 @@ public enum ImageFeatures
     /// the reference at full strength and has no such knob. A family declaring only this bit must not silently accept a
     /// creativity value it cannot honour.</para></summary>
     RefEdit = 256,
+
+    /// <summary>Seamless/circularly-tileable output (wrap-pad every conv instead of zero-pad).</summary>
+    SeamlessTiling = 512,
 }
