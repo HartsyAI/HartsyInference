@@ -250,6 +250,185 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         return head;
     }
 
+    /// <summary>Streaming design that avoids <see cref="InferenceChunk"/>'s exposure-bias drift (see its doc
+    /// comment) BY CONSTRUCTION: every call recomputes the FULL target-token history so far, against the
+    /// SAME real, unchanged zero-shot reference prompt (<paramref name="promptSpeechTokens"/>/
+    /// <paramref name="promptMel"/> never change call to call) — <c>cond</c> is NEVER self-generated, so
+    /// there is no feedback loop for errors to compound through across chunks. This is a thin wrapper over
+    /// <see cref="Inference"/> called with a growing <paramref name="tokensSoFar"/> prefix each time (the
+    /// LAST call, with the complete utterance, is by construction the exact same call as a monolithic
+    /// <see cref="Inference"/> — verify this with an md5/byte check before trusting anything else about a
+    /// given streaming setup).
+    ///
+    /// <para><b>Cost — MEASURED DISQUALIFYING for real-time streaming, use <see cref="InferenceGrowingWindowed"/>
+    /// instead (2026-08-11)</b>: O(current-length) attention per call, O(n²) total over an n-chunk utterance
+    /// — each call reprocesses EVERYTHING from the start, not just the new tail. On a real 26.2s utterance
+    /// (656 LM tokens, 15-token chunks): per-call wall-clock grew from 1.66s (first chunk) to 18.6s (last
+    /// chunk) — an 11.24× spread. Total wall clock across 44 calls was 360.69s for 26.2s of audio: a 13.75×
+    /// real-time factor. This method is kept as a correctness reference (its final call is bit-exact to a
+    /// monolithic <see cref="Inference"/> call, useful as a harness sanity check) and as the design this
+    /// session's real measurement is what disqualified — NOT as something to build a pipeline on. Do not
+    /// assume a short test utterance's timing generalizes; this exact mistake (looking fine at 9.36s, badly
+    /// disqualifying at 26.2s) is why this warning exists.</para>
+    ///
+    /// <para><b>Settling margin, measured not guessed (2026-08-11)</b>: because
+    /// <see cref="UpsampleConformerEncoder"/>'s attention is fully bidirectional (see <see cref="InferenceChunk"/>'s
+    /// doc comment), a frame's own encoder output DOES shift slightly when more future tokens are appended in
+    /// a later call — this is NOT a bug, it's the same mechanism that makes the encoder unmaskable. Measured
+    /// via a real two-call experiment (120 vs 234 real LM tokens, same prompt): per-frame max-abs-diff over
+    /// the overlapping range is a modest, non-decaying floor of ~0.1–0.6 through most of the range (5-30%-ish
+    /// relative to typical mel std ~1.5-2.7), escalating sharply to 1.6–4.5 within the last ~20-30 frames
+    /// nearest the shorter call's own live edge. Frames beyond <paramref name="marginFrames"/> from the live
+    /// edge are treated as "settled enough to emit"; frames within it are recomputed (not yet emitted) on the
+    /// NEXT call. Unlike <see cref="InferenceChunk"/>'s drift, this floor does NOT compound across chunks —
+    /// each call is independently grounded in the real prompt, so an early chunk's small settling error
+    /// doesn't feed into and inflate a later chunk's error the way self-conditioning did.</para>
+    ///
+    /// <para><paramref name="fullNoise"/>/<paramref name="fullNoiseFrames"/>: the one-time
+    /// <see cref="ConditionalCfm.DrawFullNoise"/> draw over <c>(promptSpeechTokens.Length + finalTargetLength)
+    /// × <see cref="UpsampleConformerEncoder.TokenMelRatio"/></c> frames — every call slices
+    /// <c>[0, (promptSpeechTokens.Length + tokensSoFar.Length) × ratio)</c> from the SAME start (0), unlike
+    /// <see cref="InferenceChunk"/>'s per-call offset, since every call here spans from the true beginning.
+    /// <paramref name="emittedFrames"/> is the caller's own running cursor (mel frames already returned by a
+    /// previous call) — pass <c>0</c> for the first call, then thread the ref-updated value forward.</para></summary>
+    public Tensor InferenceGrowing(IBackend backend,
+        ReadOnlySpan<int> tokensSoFar, ReadOnlySpan<int> promptSpeechTokens, Tensor promptMel,
+        Tensor speakerEmbed, int seed,
+        Tensor fullNoise, int fullNoiseFrames, int marginFrames,
+        ref int emittedFrames, bool isFinal)
+    {
+        int mel = _cfg.Flow.MelBins;
+        int ratio = UpsampleConformerEncoder.TokenMelRatio;
+        int spanFrames = (promptSpeechTokens.Length + tokensSoFar.Length) * ratio;
+        Tensor x0 = ConditionalCfm.SliceNoise(fullNoise, mel, fullNoiseFrames, 0, spanFrames);
+        Tensor full = Inference(backend, tokensSoFar, promptSpeechTokens, promptMel, speakerEmbed, seed,
+            chunkCausalSize: null, x0Override: x0);
+        x0.Dispose();
+
+        int totalFrames = (int)full.Shape[2];
+        int settledEnd = isFinal ? totalFrames : Math.Max(emittedFrames, totalFrames - marginFrames);
+        if (settledEnd <= emittedFrames)
+        {
+            full.Dispose();
+            return new Tensor(new TensorShape(1, mel, 0), DType.F32);
+        }
+        Tensor newPortion = SliceFrames(full, mel, totalFrames, emittedFrames, settledEnd - emittedFrames);
+        full.Dispose();
+        emittedFrames = settledEnd;
+        return newPortion;
+    }
+
+    /// <summary>Returns a fresh <c>[1, mel, len]</c> holding <c>full[:, :, start..start+len)</c> of a
+    /// channels-first mel.</summary>
+    private static Tensor SliceFrames(Tensor full, int mel, int totalFrames, int start, int len)
+    {
+        Tensor slice = new(new TensorShape(1, mel, len), DType.F32);
+        float* sp = (float*)full.DataPointer;
+        float* dp = (float*)slice.DataPointer;
+        for (int c = 0; c < mel; c++)
+            Buffer.MemoryCopy(sp + (long)c * totalFrames + start, dp + (long)c * len, (long)len * 4, (long)len * 4);
+        return slice;
+    }
+
+    /// <summary>Bounded-window variant of <see cref="InferenceGrowing"/>: fixes the O(n²)-total-cost problem
+    /// measured on that method (see its own remaining doc, and the memory record — 13.75× real-time / an
+    /// 18.6s final call at a 26.2s utterance, disqualifying for real-time streaming) WITHOUT reintroducing
+    /// <see cref="InferenceChunk"/>'s exposure-bias drift. The key structural fact making this safe: in the
+    /// EXISTING, already-verified monolithic <see cref="Inference"/> path, <c>cond</c> is zero for the ENTIRE
+    /// target-token span — <see cref="WritePromptCond"/> only ever writes the real
+    /// <paramref name="promptMel"/> into the reference-clip prefix, nothing else. So a windowed PAST-target-
+    /// token span occupies the exact same zero-cond region here that it would in a monolithic call; there is
+    /// no new self-conditioning channel for drift to compound through, regardless of window size — only the
+    /// ENCODER's attention span (and therefore compute cost) shrinks.
+    ///
+    /// <para><paramref name="windowTokens"/> is a BOUNDED slice of the target-token history — NOT the full
+    /// history from token 0 like <see cref="InferenceGrowing"/> — ending at the current chunk boundary.
+    /// <paramref name="windowStartToken"/> is that slice's absolute start (0-based into the full target-token
+    /// sequence, i.e. the SAME origin as <see cref="InferenceGrowing"/>'s <c>tokensSoFar</c>). Because the
+    /// window's own absolute position is NOT adjacent to the real prompt's absolute position once
+    /// <paramref name="windowStartToken"/> &gt; 0 (there's a gap: the earlier target tokens excluded from this
+    /// call's window), the CFM noise for this call is built from TWO separate slices of
+    /// <paramref name="fullNoise"/> — <c>[0, promptFrames)</c> (always the same, matches the real prompt's
+    /// own fixed absolute position) concatenated with <c>[windowStartToken×ratio&#43;promptFrames,
+    /// …&#43;windowFrames)</c> (the window's own absolute position) — NOT a single contiguous slice like
+    /// <see cref="InferenceGrowing"/> uses. This keeps noise-per-absolute-frame consistent across calls with
+    /// DIFFERENT window starts, isolating the encoder's own windowing effect from noise-seed drift (the same
+    /// discipline established for <see cref="InferenceChunk"/>, applied to a different span layout).</para>
+    ///
+    /// <para><b>Measured result (2026-08-11), windowSizeTokens=150 (~6s), marginFrames=40, same 26.2s test
+    /// utterance as <see cref="InferenceGrowing"/>'s disqualifying measurement — VIABLE, ONE KNOWN ARTIFACT
+    /// NOT YET FIXED, NOT DONE</b>: per-call wall-clock FLATTENS at ~2.8s once the window fills (vs.
+    /// <see cref="InferenceGrowing"/>'s unbounded 1.66s→18.6s growth) — ratio last/first only 1.82×, and
+    /// critically this stays flat rather than continuing to grow for longer utterances. Total wall clock
+    /// 118.63s for 26.2s audio: 4.52× real-time (down from 13.75×, though still not real-time — the
+    /// remaining gap has real, untried tuning knobs: smaller window, larger chunk size to amortize the fixed
+    /// per-call cost, or fewer Euler steps). Quality held: mel relL2 vs monolithic = 5.97% (a bit above the
+    /// unbounded design's 3.6%, expected with less context, not diverging), per-second audio RMS ratio
+    /// stayed in [0.91, 1.29] with no trend over 26s. BUT a real, small, reproducible content artifact
+    /// showed up under Whisper cross-transcript comparison (comparing the chunked transcripts against EACH
+    /// OTHER, not just the target text, is what caught it): "quick brown fox" → "quit brown fox" — one word
+    /// out of ~85, trailing "-ck" clipped, identical in BOTH chunked variants (so a real chunk-boundary
+    /// effect, not ASR noise), everything else transcribes perfectly including a shared mishearing present
+    /// identically in all three files. Needs a fix (larger margin, or boundary-aware chunk sizing) and
+    /// re-verification before this is a finished design — it is the right foundation, not yet done.</para></summary>
+    public Tensor InferenceGrowingWindowed(IBackend backend,
+        ReadOnlySpan<int> windowTokens, int windowStartToken,
+        ReadOnlySpan<int> promptSpeechTokens, Tensor promptMel,
+        Tensor speakerEmbed, int seed,
+        Tensor fullNoise, int fullNoiseFrames, int marginFrames,
+        ref int emittedFrames, bool isFinal)
+    {
+        int mel = _cfg.Flow.MelBins;
+        int ratio = UpsampleConformerEncoder.TokenMelRatio;
+        int promptFrames = promptSpeechTokens.Length * ratio;
+        int windowFrames = windowTokens.Length * ratio;
+        int spanFrames = promptFrames + windowFrames;
+
+        Tensor x0;
+        if (windowStartToken == 0)
+        {
+            // Window starts at token 0 -> contiguous with the prompt region, same as InferenceGrowing.
+            x0 = ConditionalCfm.SliceNoise(fullNoise, mel, fullNoiseFrames, 0, spanFrames);
+        }
+        else
+        {
+            int windowFrameOffset = (promptSpeechTokens.Length + windowStartToken) * ratio;
+            Tensor promptPart = ConditionalCfm.SliceNoise(fullNoise, mel, fullNoiseFrames, 0, promptFrames);
+            Tensor windowPart = ConditionalCfm.SliceNoise(fullNoise, mel, fullNoiseFrames, windowFrameOffset, windowFrames);
+            x0 = new Tensor(new TensorShape(1, mel, spanFrames), DType.F32);
+            float* pp = (float*)promptPart.DataPointer;
+            float* wp = (float*)windowPart.DataPointer;
+            float* xp = (float*)x0.DataPointer;
+            for (int c = 0; c < mel; c++)
+            {
+                Buffer.MemoryCopy(pp + (long)c * promptFrames, xp + (long)c * spanFrames, promptFrames * 4L, promptFrames * 4L);
+                Buffer.MemoryCopy(wp + (long)c * windowFrames, xp + (long)c * spanFrames + promptFrames, windowFrames * 4L, windowFrames * 4L);
+            }
+            promptPart.Dispose();
+            windowPart.Dispose();
+        }
+
+        Tensor full = Inference(backend, windowTokens, promptSpeechTokens, promptMel, speakerEmbed, seed,
+            chunkCausalSize: null, x0Override: x0);
+        x0.Dispose();
+
+        int totalFrames = (int)full.Shape[2];
+        // emittedFrames is a GLOBAL cursor (absolute mel frames emitted so far), but `full` is LOCAL to this
+        // window (starts at windowStartToken's own frame position) -- convert between the two.
+        int windowStartFrame = windowStartToken * ratio;
+        int localEmitted = Math.Max(0, emittedFrames - windowStartFrame);
+        int settledEnd = isFinal ? totalFrames : Math.Max(localEmitted, totalFrames - marginFrames);
+        if (settledEnd <= localEmitted)
+        {
+            full.Dispose();
+            return new Tensor(new TensorShape(1, mel, 0), DType.F32);
+        }
+        Tensor newPortion = SliceFrames(full, mel, totalFrames, localEmitted, settledEnd - localEmitted);
+        full.Dispose();
+        emittedFrames = windowStartFrame + settledEnd;
+        return newPortion;
+    }
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
         Tensor?[] core = [_inputEmbedding, _encoderProjW, _encoderProjB, _spkAffineW, _spkAffineB];
