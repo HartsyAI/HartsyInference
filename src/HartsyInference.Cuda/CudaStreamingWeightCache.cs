@@ -188,23 +188,36 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
     /// <summary>Frees the staging ring (waiting out in-flight uploads first). Safe to call repeatedly.</summary>
     private void ReleaseStaging()
     {
+        List<Exception>? failures = null;
         for (int i = 0; i < StagingSlots; i++)
         {
-            if (_stagingEvents[i] != 0)
-            {
-                if (_stagingUsed[i]) CudaDriverApi.cuEventSynchronize(_stagingEvents[i]);
-                CudaDriverApi.cuEventDestroy(_stagingEvents[i]);
-                _stagingEvents[i] = 0;
-            }
-            if (_stagingPtrs[i] != 0)
-            {
-                CudaDriverApi.cuMemFreeHost(_stagingPtrs[i]);
-                _stagingPtrs[i] = 0;
-            }
+            nint stagingEvent = _stagingEvents[i];
+            nint stagingPtr = _stagingPtrs[i];
+            bool stagingUsed = _stagingUsed[i];
+            _stagingEvents[i] = 0;
+            _stagingPtrs[i] = 0;
             _stagingUsed[i] = false;
+
+            if (stagingEvent != 0)
+            {
+                if (stagingUsed)
+                {
+                    try { CudaDriverApi.cuEventSynchronize(stagingEvent).ThrowOnError(); }
+                    catch (Exception error) { (failures ??= []).Add(error); }
+                }
+                try { CudaDriverApi.cuEventDestroy(stagingEvent).ThrowOnError(); }
+                catch (Exception error) { (failures ??= []).Add(error); }
+            }
+            if (stagingPtr != 0)
+            {
+                try { CudaDriverApi.cuMemFreeHost(stagingPtr).ThrowOnError(); }
+                catch (Exception error) { (failures ??= []).Add(error); }
+            }
         }
         _stagingBytes = 0;
         _stagingIdx = 0;
+        if (failures is not null)
+            throw new AggregateException("One or more CUDA streaming staging resources failed to release.", failures);
     }
 
     /// <inheritdoc/>

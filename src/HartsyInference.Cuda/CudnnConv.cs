@@ -35,10 +35,25 @@ internal sealed class CudnnConv : IDisposable
 
     public CudnnConv(nint stream)
     {
-        int st = cudnnCreate(out _handle);
+        int st = cudnnCreate(out nint handle);
         if (st != CUDNN_STATUS_SUCCESS)
             throw new InvalidOperationException($"cudnnCreate failed: {ErrorString(st)}");
-        Check(cudnnSetStream(_handle, stream), "cudnnSetStream");
+        try
+        {
+            Check(cudnnSetStream(handle, stream), "cudnnSetStream");
+        }
+        catch (Exception setupFailure)
+        {
+            int cleanupStatus = cudnnDestroy(handle);
+            if (cleanupStatus != CUDNN_STATUS_SUCCESS)
+            {
+                throw new AggregateException(
+                    "cuDNN convolution setup and handle rollback both failed.", setupFailure,
+                    new CudnnStatusException(cleanupStatus, "cudnnDestroy after setup failure"));
+            }
+            throw;
+        }
+        _handle = handle;
         _stream = stream;
     }
 

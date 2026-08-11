@@ -262,11 +262,23 @@ public sealed unsafe class ZImageTransformer : IDisposable
         return Unpatchify(tokens, (int)tokens.Shape[0], inChannels, hPacked, wPacked, _config.PatchSize);
     }
 
+    /// <summary>Builds or reuses the timestep-independent refined caption consumed by <see cref="ForwardPacked"/>.
+    /// The returned tensor is transformer-owned cache state; callers must not dispose it. Pipelines call this
+    /// before measuring the denoise loop so the cache miss's intentional host materializations are reported as
+    /// preparation rather than misattributed to a per-step residency failure.</summary>
+    internal Tensor PreparePackedCaption(IBackend backend, Tensor captionEmbeddings)
+    {
+        int capRealLen = (int)captionEmbeddings.Shape[1];
+        int capPaddedLen = PadUpTo(capRealLen, _config.SeqMultiOf);
+        return EnsureRefinedCaption(backend, captionEmbeddings, 1, capRealLen, capPaddedLen,
+            _packedActivationDtype);
+    }
+
     /// <summary>Denoise-step core in packed token space (the Krea2 <c>ForwardPatched</c> pattern): consumes the
     /// <c>[1, imgRealLen, C·p²]</c> token grid (patchify once before the loop) and returns the flow-match velocity
     /// in the SAME packed space — no per-step patchify/unpatchify, no host excursions, so the pipeline's Euler
     /// update can run on-device (<c>CfgEulerStep</c> with <c>delta = −dt</c>, folding Z-Image's velocity negation
-    /// into the sign) and the loop never drains the pipeline. t2i only (no regional plan).
+    /// into the sign) and the loop never drains the pipeline. Used by unmasked t2i/img2img without regional prompts.
     /// <para>With <c>HARTSY_DIT_GRAPH=1</c> and the latent routed through <see cref="PrepareGraphLatent"/>, the
     /// fixed per-step region (<see cref="PackedCore"/>) is CUDA-graph-captured once and replayed per step —
     /// tEmb is refreshed into a fixed buffer, the cached caption is pinned device-resident (a pageable re-upload
@@ -287,7 +299,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
         DType act = _packedActivationDtype;
 
         Tensor tEmb = ComputeTimestepEmbedding(backend, sigma, 1);
-        Tensor refinedCaption = EnsureRefinedCaption(backend, captionEmbeddings, 1, capRealLen, capPaddedLen, act);
+        Tensor refinedCaption = PreparePackedCaption(backend, captionEmbeddings);
         EnsureRefinerRope(hPacked, wPacked, imgPaddedLen);
         EnsureFullRope(hPacked, wPacked, imgPaddedLen, capPaddedLen);
 

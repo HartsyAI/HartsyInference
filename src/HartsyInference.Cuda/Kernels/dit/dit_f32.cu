@@ -861,6 +861,54 @@ extern "C" __global__ void dit_unpatchify_u16(
     dit_unpatchify_words(output, input, channels, hPacked, wPacked, patch, innerChannelFastest, total);
 }
 
+// Copy one arbitrary-axis split chunk from logical [outer,inputDim,inner] storage. Each logical CUDA block
+// owns a contiguous part of one outer slice, so only one 64-bit division is paid per block (not per element),
+// while all payload loads/stores remain coalesced. The capped physical grid strides over logical blocks, which
+// keeps valid 64-bit tensor geometry independent of CUDA's gridDim.x launch limit. Integer words preserve F32,
+// F16, and BF16 payload bits exactly, including NaN payloads and signed zero.
+template <typename Word>
+__device__ __forceinline__ void dit_split_slice_words(
+    Word* __restrict__ output,
+    const Word* __restrict__ input,
+    unsigned long long inputStride,
+    unsigned long long outputStride,
+    unsigned long long sourceOffset,
+    unsigned long long blocksPerOuter,
+    unsigned long long totalBlocks)
+{
+    unsigned long long logicalBlock = (unsigned long long)blockIdx.x;
+    unsigned long long blockStride = (unsigned long long)gridDim.x;
+    for (; logicalBlock < totalBlocks; logicalBlock += blockStride)
+    {
+        unsigned long long outer = logicalBlock / blocksPerOuter;
+        unsigned long long blockWithinOuter = logicalBlock - outer * blocksPerOuter;
+        unsigned long long withinOuter = blockWithinOuter * blockDim.x + threadIdx.x;
+        if (withinOuter < outputStride)
+            output[outer * outputStride + withinOuter] =
+                input[outer * inputStride + sourceOffset + withinOuter];
+    }
+}
+
+extern "C" __global__ void dit_split_slice_u32(
+    unsigned int* output, const unsigned int* input,
+    unsigned long long inputStride, unsigned long long outputStride,
+    unsigned long long sourceOffset, unsigned long long blocksPerOuter,
+    unsigned long long totalBlocks)
+{
+    dit_split_slice_words(
+        output, input, inputStride, outputStride, sourceOffset, blocksPerOuter, totalBlocks);
+}
+
+extern "C" __global__ void dit_split_slice_u16(
+    unsigned short* output, const unsigned short* input,
+    unsigned long long inputStride, unsigned long long outputStride,
+    unsigned long long sourceOffset, unsigned long long blocksPerOuter,
+    unsigned long long totalBlocks)
+{
+    dit_split_slice_words(
+        output, input, inputStride, outputStride, sourceOffset, blocksPerOuter, totalBlocks);
+}
+
 extern "C" {
 
 

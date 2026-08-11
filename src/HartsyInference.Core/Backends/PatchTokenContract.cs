@@ -41,7 +41,10 @@ internal static class PatchTokenContract
             throw new ArgumentException(
                 $"PatchifyTokens requires H and W divisible by patch={patch}; got input {input.Shape}.", nameof(input));
 
-        return ValidateShapes(output, input, batch, channels, height, width, patch, patchify: true);
+        PatchTokenGeometry geometry = ValidateShapes(
+            output, input, batch, channels, height, width, patch, patchify: true);
+        ValidateNoStorageOverlap(output, input, "PatchifyTokens");
+        return geometry;
     }
 
     internal static PatchTokenGeometry ValidateUnpatchify(
@@ -78,7 +81,10 @@ internal static class PatchTokenContract
                 "UnpatchifyTokens spatial geometry exceeds the signed 32-bit indexing contract.");
         }
 
-        return ValidateShapes(output, tokens, batch, channels, height, width, patch, patchify: false);
+        PatchTokenGeometry geometry = ValidateShapes(
+            output, tokens, batch, channels, height, width, patch, patchify: false);
+        ValidateNoStorageOverlap(output, tokens, "UnpatchifyTokens");
+        return geometry;
     }
 
     private static void ValidateCommon(Tensor output, Tensor input, int patch, string operation)
@@ -93,6 +99,15 @@ internal static class PatchTokenContract
         if (input.DType != DType.F32 && input.DType != DType.F16 && input.DType != DType.BF16)
             throw new NotSupportedException(
                 $"{operation} supports the byte-addressable F32, F16, and BF16 dtypes; got {input.DType}.");
+    }
+
+    private static void ValidateNoStorageOverlap(Tensor output, Tensor input, string operation)
+    {
+        // Shape/dtype/byte-span validation has completed before this storage-range query. The helper never
+        // materializes lazy host storage, so contract checking cannot turn a resident CUDA shuffle into a D2H.
+        if (output.HasOverlappingHostStorageWithoutSync(input))
+            throw new ArgumentException(
+                $"{operation} output storage must not overlap its input storage.", nameof(output));
     }
 
     private static PatchTokenGeometry ValidateShapes(

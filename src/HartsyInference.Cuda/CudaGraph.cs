@@ -72,9 +72,17 @@ public sealed class CudaGraph : IDisposable
         {
             // End capture to leave the stream in a clean (non-capturing) state before
             // propagating — otherwise the stream stays poisoned for all later work.
-            CudaDriverApi.cuStreamEndCapture(_stream, out graph);
-            if (graph != 0) CudaDriverApi.cuGraphDestroy(graph);
+            List<Exception> failures = [ex];
+            try { CudaDriverApi.cuStreamEndCapture(_stream, out graph).ThrowOnError(); }
+            catch (Exception cleanup) { failures.Add(cleanup); }
+            if (graph != 0)
+            {
+                try { DestroyGraph(graph, throwOnError: true); }
+                catch (Exception cleanup) { failures.Add(cleanup); }
+            }
             Logs.Error("CUDA graph capture delegate threw; capture aborted.", ex);
+            if (failures.Count > 1)
+                throw new AggregateException("CUDA graph capture and abort both failed.", failures);
             throw;
         }
 
@@ -85,10 +93,16 @@ public sealed class CudaGraph : IDisposable
             DestroyExec();
             CudaDriverApi.cuGraphInstantiate(out _graphExec, graph, _instantiateFlags).ThrowOnError();
         }
-        finally
+        catch (Exception primary)
         {
-            CudaDriverApi.cuGraphDestroy(graph);
+            try { DestroyGraph(graph, throwOnError: true); }
+            catch (Exception cleanup)
+            {
+                throw new AggregateException("CUDA graph instantiation and source-graph cleanup both failed.", primary, cleanup);
+            }
+            throw;
         }
+        DestroyGraph(graph, throwOnError: true);
     }
 
     /// <summary>HARTSY_GRAPH_DUMP=1: logs the captured graph's node count and per-type histogram — the
@@ -141,10 +155,16 @@ public sealed class CudaGraph : IDisposable
                 CudaDriverApi.cuGraphInstantiate(out _graphExec, graph, _instantiateFlags).ThrowOnError();
             }
         }
-        finally
+        catch (Exception primary)
         {
-            CudaDriverApi.cuGraphDestroy(graph);
+            try { DestroyGraph(graph, throwOnError: true); }
+            catch (Exception cleanup)
+            {
+                throw new AggregateException("CUDA graph update and source-graph cleanup both failed.", primary, cleanup);
+            }
+            throw;
         }
+        DestroyGraph(graph, throwOnError: true);
     }
 
     /// <summary>Starts stream capture directly (the open-region twin of <see cref="Capture"/>, for callers whose
@@ -175,18 +195,33 @@ public sealed class CudaGraph : IDisposable
             DestroyExec();
             CudaDriverApi.cuGraphInstantiate(out _graphExec, graph, _instantiateFlags).ThrowOnError();
         }
-        finally
+        catch (Exception primary)
         {
-            CudaDriverApi.cuGraphDestroy(graph);
+            try { DestroyGraph(graph, throwOnError: true); }
+            catch (Exception cleanup)
+            {
+                throw new AggregateException("CUDA graph instantiation and source-graph cleanup both failed.", primary, cleanup);
+            }
+            throw;
         }
+        DestroyGraph(graph, throwOnError: true);
     }
 
     /// <summary>Aborts an open capture region, leaving the stream clean (call from exception handlers between
     /// <see cref="BeginCapture"/> and <see cref="EndCaptureAndInstantiate"/>).</summary>
     public void AbortCapture()
     {
-        CudaDriverApi.cuStreamEndCapture(_stream, out nint graph);
-        if (graph != 0) CudaDriverApi.cuGraphDestroy(graph);
+        List<Exception>? failures = null;
+        nint graph = 0;
+        try { CudaDriverApi.cuStreamEndCapture(_stream, out graph).ThrowOnError(); }
+        catch (Exception error) { (failures ??= []).Add(error); }
+        if (graph != 0)
+        {
+            try { DestroyGraph(graph, throwOnError: true); }
+            catch (Exception error) { (failures ??= []).Add(error); }
+        }
+        if (failures is not null)
+            throw new AggregateException("One or more CUDA graph capture-abort operations failed.", failures);
     }
 
     /// <summary>Drops the captured executable graph (shape/prompt change → recapture needed).</summary>
@@ -201,13 +236,21 @@ public sealed class CudaGraph : IDisposable
         CudaDriverApi.cuGraphLaunch(_graphExec, _stream).ThrowOnError();
     }
 
-    private void DestroyExec()
+    private void DestroyExec(bool throwOnError = true)
     {
-        if (_graphExec != 0)
+        nint graphExec = Interlocked.Exchange(ref _graphExec, 0);
+        if (graphExec != 0)
         {
-            CudaDriverApi.cuGraphExecDestroy(_graphExec);
-            _graphExec = 0;
+            int result = CudaDriverApi.cuGraphExecDestroy(graphExec);
+            if (throwOnError) result.ThrowOnError();
         }
+    }
+
+    private static void DestroyGraph(nint graph, bool throwOnError)
+    {
+        if (graph == 0) return;
+        int result = CudaDriverApi.cuGraphDestroy(graph);
+        if (throwOnError) result.ThrowOnError();
     }
 
     private void ThrowIfDisposed()
@@ -219,13 +262,20 @@ public sealed class CudaGraph : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        DestroyExec();
-        GC.SuppressFinalize(this);
+        try
+        {
+            DestroyExec(throwOnError: true);
+        }
+        finally
+        {
+            GC.SuppressFinalize(this);
+        }
     }
 
     ~CudaGraph()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        DestroyExec();
+        try { DestroyExec(throwOnError: false); }
+        catch { /* Finalizers must never surface native-loader or driver failures. */ }
     }
 }

@@ -69,8 +69,26 @@ public sealed class TensorCoreGemm : IDisposable
     private void EnsureLoaded()
     {
         if (_module is not null) return;
-        _module = CudaModule.LoadFromFile(Path.Combine(_ptxDir, "hgemm_mma_sm80.ptx"));
-        _function = _module.GetFunction("hgemm_mma_sm80");
+        CudaModule module = CudaModule.LoadFromFile(Path.Combine(_ptxDir, "hgemm_mma_sm80.ptx"));
+        nint function;
+        try
+        {
+            function = module.GetFunction("hgemm_mma_sm80");
+        }
+        catch (Exception loadFailure)
+        {
+            try { module.Dispose(); }
+            catch (Exception cleanupFailure)
+            {
+                throw new AggregateException(
+                    "Tensor-core GEMM function lookup and module rollback both failed.", loadFailure, cleanupFailure);
+            }
+            throw;
+        }
+
+        _function = function;
+        _module = module;
+        GC.SuppressFinalize(module);
     }
 
     private void ThrowIfDisposed()
@@ -82,8 +100,22 @@ public sealed class TensorCoreGemm : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        _module?.Dispose();
-        _module = null;
-        GC.SuppressFinalize(this);
+        CudaModule? module = Interlocked.Exchange(ref _module, null);
+        try
+        {
+            module?.Dispose();
+        }
+        finally
+        {
+            GC.SuppressFinalize(this);
+        }
+    }
+
+    ~TensorCoreGemm()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        CudaModule? module = Interlocked.Exchange(ref _module, null);
+        try { module?.DisposeNoThrow(); }
+        catch { /* Finalizers must never surface managed or native teardown failures. */ }
     }
 }

@@ -204,6 +204,15 @@ public sealed unsafe class PatchifyTokensTests
         Assert.Throws<ArgumentException>(() => backend.PatchifyTokens(f16Tokens, validInput, 2, true));
         Assert.Throws<NotSupportedException>(() => backend.PatchifyTokens(i32Tokens, i32Input, 2, true));
 
+        // Distinct borrowed views over overlapping host storage are aliases too. Identity-only validation would
+        // let the host shuffle overwrite unread input and make accelerator behavior diverge from the CPU fallback.
+        using Tensor overlapBacking = new(new TensorShape(validInput.ElementCount + 1), DType.F32);
+        using Tensor overlappingInput = new(overlapBacking.DataPointer, validInput.Shape, DType.F32);
+        using Tensor overlappingTokens = new(
+            (byte*)overlapBacking.DataPointer + sizeof(float), validTokens.Shape, DType.F32);
+        Assert.Throws<ArgumentException>(() =>
+            backend.PatchifyTokens(overlappingTokens, overlappingInput, 2, true));
+
         Assert.Throws<ArgumentException>(() => backend.UnpatchifyTokens(validTokens, validTokens, 3, 3, 5, 2, true));
         Assert.Throws<ArgumentException>(() => backend.UnpatchifyTokens(validOutput, rank4Tokens, 3, 3, 5, 2, true));
         Assert.Throws<ArgumentException>(() => backend.UnpatchifyTokens(wrongOutputBatch, validTokens, 3, 3, 5, 2, true));
@@ -215,6 +224,8 @@ public sealed unsafe class PatchifyTokensTests
         Assert.Throws<ArgumentOutOfRangeException>(() => backend.UnpatchifyTokens(validOutput, validTokens, 3, 3, 5, 0, true));
         Assert.Throws<ArgumentException>(() => backend.UnpatchifyTokens(validOutput, f16Tokens, 3, 3, 5, 2, true));
         Assert.Throws<NotSupportedException>(() => backend.UnpatchifyTokens(i32Output, i32Tokens, 3, 3, 5, 2, true));
+        Assert.Throws<ArgumentException>(() =>
+            backend.UnpatchifyTokens(overlappingInput, overlappingTokens, 3, 3, 5, 2, true));
 
         // Borrowed one-byte sentinels prove oversized contracts fail entirely in validation: no allocation and no
         // pointer dereference are possible. The first crosses a kernel's signed dimension bound; the second makes

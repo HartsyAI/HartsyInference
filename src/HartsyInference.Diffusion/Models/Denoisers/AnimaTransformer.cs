@@ -12,7 +12,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 ///
 /// Forward summary:
 /// <list type="number">
-///   <item>Concat a constant-1 padding-mask channel → <c>[B, 17, H, W]</c>.</item>
+///   <item>Concat a constant-zero padding-mask channel → <c>[B, 17, H, W]</c>.</item>
 ///   <item>Patch embed: gather <c>2×2</c> patches, flatten to 68-dim features per token, then
 ///        <c>x_embedder.proj.1</c> Linear[2048, 68] → <c>[B, S, 2048]</c>. No bias.</item>
 ///   <item>Time embedding: sin/cos timesteps → RMSNorm (<c>t_embedding_norm.weight [2048]</c>) → <c>embedded_timestep [B, 2048]</c>.
@@ -54,6 +54,14 @@ public sealed unsafe class AnimaTransformer : IDisposable
         if (config.PatchSize.T != 1)
             throw new ArgumentException(
                 $"AnimaTransformer is t2i-only; PatchSize.T must be 1 (got {config.PatchSize.T}).",
+                nameof(config));
+        if (config.PatchSize.H <= 0 || config.PatchSize.W <= 0)
+            throw new ArgumentException(
+                $"AnimaTransformer patch dimensions must be positive (got {config.PatchSize.H}x{config.PatchSize.W}).",
+                nameof(config));
+        if (config.PatchSize.H != config.PatchSize.W)
+            throw new ArgumentException(
+                $"AnimaTransformer requires the checkpoint's square image patch (got {config.PatchSize.H}x{config.PatchSize.W}).",
                 nameof(config));
         _config = config;
         _rope = new AnimaRope(config.HeadDim, config.RopeTheta, config.RopeScale);
@@ -105,6 +113,16 @@ public sealed unsafe class AnimaTransformer : IDisposable
             foreach (Tensor w in _blocks[i].EnumerateWeights()) yield return w;
     }
 
+    /// <summary>
+    /// Releases tensors created lazily by this transformer that are not checkpoint weights. Call only after the
+    /// backend stream is synchronized; the next forward recreates and preloads the current grid's tables.
+    /// </summary>
+    public void ReleaseDeviceCache(IBackend backend)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        _rope.ReleaseGpuTables(backend);
+    }
+
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="latent">VAE latent <c>[B, in_channels=16, H, W]</c>.</param>
@@ -118,6 +136,26 @@ public sealed unsafe class AnimaTransformer : IDisposable
             throw new ArgumentException($"Latent must be 4D [B, C, H, W], got {latent.Shape}.", nameof(latent));
         if (textEmbeds.Shape.Rank != 3)
             throw new ArgumentException($"textEmbeds must be 3D [B, T, dim], got {textEmbeds.Shape}.", nameof(textEmbeds));
+        if (latent.DType != DType.F32 || textEmbeds.DType != DType.F32)
+            throw new NotSupportedException(
+                $"AnimaTransformer requires F32 latent/text activations; got latent={latent.DType}, text={textEmbeds.DType}.");
+        if (latent.Shape[0] <= 0 || latent.Shape[1] <= 0 || latent.Shape[2] <= 0 || latent.Shape[3] <= 0
+            || textEmbeds.Shape[0] <= 0 || textEmbeds.Shape[1] <= 0 || textEmbeds.Shape[2] <= 0)
+            throw new ArgumentException($"AnimaTransformer dimensions must be positive; got latent={latent.Shape}, text={textEmbeds.Shape}.");
+        if (latent.Shape[0] != textEmbeds.Shape[0])
+            throw new ArgumentException(
+                $"Latent/text batch dimensions must match; got latent={latent.Shape[0]}, text={textEmbeds.Shape[0]}.",
+                nameof(textEmbeds));
+        if (latent.Shape[1] != _config.InChannels)
+            throw new ArgumentException(
+                $"Latent channel dimension must equal configured InChannels={_config.InChannels}; got {latent.Shape[1]}.",
+                nameof(latent));
+        if (textEmbeds.Shape[2] != _config.LlmAdapter.HiddenSize)
+            throw new ArgumentException(
+                $"Text feature width must equal LLM-adapter hidden size {_config.LlmAdapter.HiddenSize}; got {textEmbeds.Shape[2]}.",
+                nameof(textEmbeds));
+        if (!float.IsFinite(timestep))
+            throw new ArgumentOutOfRangeException(nameof(timestep), "Anima timestep must be finite.");
 
         int batch = (int)latent.Shape[0];
         int latentH = (int)latent.Shape[2];
@@ -137,20 +175,31 @@ public sealed unsafe class AnimaTransformer : IDisposable
         System.Diagnostics.Stopwatch phaseSw = System.Diagnostics.Stopwatch.StartNew();
         // ── 1. Concat padding-mask channel → [B, 17, H, W] ──
         Tensor latentExpanded = _config.ConcatPaddingMask
-            ? AppendPaddingMaskChannel(latent)
+            ? AppendPaddingMaskChannel(backend, latent)
             : latent;
         AnimaDebugDump.Dump("latent_with_mask", latentExpanded);
 
         int totalChannels = (int)latentExpanded.Shape[1];
 
         // ── 2. Patch embed → [B, S, hidden] ──
-        Tensor imgTokens = PatchEmbed(backend, latentExpanded, batch, totalChannels, latentH, latentW, gridH, gridW);
-        if (!ReferenceEquals(latentExpanded, latent)) latentExpanded.Dispose();
+        Tensor imgTokens;
+        try
+        {
+            imgTokens = PatchEmbed(backend, latentExpanded, batch, totalChannels, gridH, gridW);
+        }
+        finally
+        {
+            if (!ReferenceEquals(latentExpanded, latent))
+                DisposeBestEffort(latentExpanded, "expanded latent");
+        }
         AnimaDebugDump.Dump("patch_embed", imgTokens);
 
         long tPatch = phaseSw.ElapsedMilliseconds;
         // ── 3. RoPE table for image self-attn ──
-        (Tensor ropeCos, Tensor ropeSin) = _rope.BuildFreqs(tFrames: 1, hPatched: gridH, wPatched: gridW);
+        // The pair is immutable for a grid and borrowed from _rope's per-backend cache. Explicit preload keeps
+        // all 28 blocks and later denoising steps on the same device addresses.
+        (Tensor ropeCos, Tensor ropeSin) = _rope.GetOrCreateTables(
+            backend, tFrames: 1, hPatched: gridH, wPatched: gridW);
         long tRope = phaseSw.ElapsedMilliseconds;
         AnimaDebugDump.Dump("rope_cos", ropeCos);
         AnimaDebugDump.Dump("rope_sin", ropeSin);
@@ -176,8 +225,6 @@ public sealed unsafe class AnimaTransformer : IDisposable
         }
 
         long tBlocks = phaseSw.ElapsedMilliseconds;
-        ropeCos.Dispose();
-        ropeSin.Dispose();
         crossMask?.Dispose();
 
         // ── 7. Final AdaLN-LoRA (2-chunk) + linear ──
@@ -189,8 +236,15 @@ public sealed unsafe class AnimaTransformer : IDisposable
 
         // ── 8. Unpatchify ──
         long tFinal = phaseSw.ElapsedMilliseconds;
-        Tensor velocity = Unpatchify(projected, batch, gridH, gridW, patchH, patchW, _config.OutChannels);
-        projected.Dispose();
+        Tensor velocity;
+        try
+        {
+            velocity = Unpatchify(backend, projected, batch, gridH, gridW, patchH, patchW, _config.OutChannels);
+        }
+        finally
+        {
+            DisposeBestEffort(projected, "projected patch tokens");
+        }
         AnimaDebugDump.DumpOutput(velocity);
         HartsyInference.Core.Logging.Logs.Verbose($"[anima-phase] patch={tPatch}ms rope={tRope - tPatch}ms blocks={tBlocks - tRope}ms final={tFinal - tBlocks}ms unpatch={phaseSw.ElapsedMilliseconds - tFinal}ms");
 
@@ -203,37 +257,31 @@ public sealed unsafe class AnimaTransformer : IDisposable
     /// it. For unpadded t2i (the only mode we support), the padding mask is all zeros — there's no
     /// padding to ignore. Using a constant <b>0</b> here, not 1, matches what the model was trained
     /// to expect on the extra channel.</summary>
-    private static Tensor AppendPaddingMaskChannel(Tensor latent)
+    private static Tensor AppendPaddingMaskChannel(IBackend backend, Tensor latent)
     {
         int batch = (int)latent.Shape[0];
         int channels = (int)latent.Shape[1];
         int height = (int)latent.Shape[2];
         int width = (int)latent.Shape[3];
-        TensorShape shape = new TensorShape(batch, channels + 1, height, width);
-        Tensor output = new Tensor(shape, DType.F32);
-
-        long spatial = (long)height * width;
-        float* inPtr = (float*)latent.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
+        Tensor mask = new(new TensorShape(batch, 1, height, width), DType.F32);
+        Tensor output = new(new TensorShape(batch, channels + 1, height, width), DType.F32);
+        bool success = false;
+        try
         {
-            for (int c = 0; c < channels; c++)
-            {
-                long inOff = ((long)b * channels + c) * spatial;
-                long outOff = ((long)b * (channels + 1) + c) * spatial;
-                long bytes = spatial * sizeof(float);
-                Buffer.MemoryCopy(inPtr + inOff, outPtr + outOff, bytes, bytes);
-            }
-            // Pad-mask channel = 0 (no padding present for unpadded t2i).
-            long maskOff = ((long)b * (channels + 1) + channels) * spatial;
-            for (long i = 0; i < spatial; i++) outPtr[maskOff + i] = 0.0f;
+            backend.Fill(mask, 0f);
+            backend.Concat(output, [latent, mask], dim: 1);
+            success = true;
+            return output;
         }
-        return output;
+        finally
+        {
+            DisposeBestEffort(mask, "padding mask");
+            if (!success) DisposeBestEffort(output, "expanded latent after failure");
+        }
     }
 
     /// <summary>Patch embed via a single linear projection over the flattened p_t·p_h·p_w-element patch.</summary>
-    private Tensor PatchEmbed(IBackend backend, Tensor latent, int batch, int channels, int latentH, int latentW, int gridH, int gridW)
+    private Tensor PatchEmbed(IBackend backend, Tensor latent, int batch, int channels, int gridH, int gridW)
     {
         int patchH = _config.PatchSize.H;
         int patchW = _config.PatchSize.W;
@@ -242,41 +290,25 @@ public sealed unsafe class AnimaTransformer : IDisposable
 
         TensorShape gatherShape = new TensorShape(batch, gridH * gridW, patchFeat);
         Tensor gathered = new Tensor(gatherShape, DType.F32);
-        float* inPtr = (float*)latent.DataPointer;
-        float* gatherPtr = (float*)gathered.DataPointer;
-
-        for (int b = 0; b < batch; b++)
+        Tensor? output = null;
+        bool success = false;
+        try
         {
-            for (int gh = 0; gh < gridH; gh++)
-            {
-                for (int gw = 0; gw < gridW; gw++)
-                {
-                    long seqIdx = (long)gh * gridW + gw;
-                    long outBase = ((long)b * gridH * gridW + seqIdx) * patchFeat;
-                    int feat = 0;
-                    // Order: (c, ph, pw) — outermost = channel.
-                    for (int c = 0; c < channels; c++)
-                    {
-                        long inChannelBase = ((long)b * channels + c) * latentH * latentW;
-                        for (int ph = 0; ph < patchH; ph++)
-                        {
-                            for (int pw = 0; pw < patchW; pw++)
-                            {
-                                int row = gh * patchH + ph;
-                                int col = gw * patchW + pw;
-                                gatherPtr[outBase + feat++] = inPtr[inChannelBase + (long)row * latentW + col];
-                            }
-                        }
-                    }
-                }
-            }
-        }
+            // Cosmos patch embedding flattens each patch as (channel, ph, pw): channel OUTERMOST.
+            // PatchifyTokens(false) is that exact byte order and keeps the carried latent on the device.
+            backend.PatchifyTokens(gathered, latent, patchH, innerChannelFastest: false);
 
-        TensorShape outShape = new TensorShape(batch, gridH * gridW, _config.HiddenSize);
-        Tensor output = new Tensor(outShape, DType.F32);
-        backend.Linear(output, gathered, _patchEmbedWeight!, null);
-        gathered.Dispose();
-        return output;
+            TensorShape outShape = new TensorShape(batch, gridH * gridW, _config.HiddenSize);
+            output = new Tensor(outShape, DType.F32);
+            backend.Linear(output, gathered, _patchEmbedWeight!, null);
+            success = true;
+            return output;
+        }
+        finally
+        {
+            DisposeBestEffort(gathered, "patch-gather staging tensor");
+            if (!success) DisposeBestEffort(output, "patch-embedding output after failure");
+        }
     }
 
     /// <summary>Time embedding: sin/cos timesteps → MLP produces <c>temb [B, condition_dim=6144]</c>; the raw sin/cos
@@ -393,47 +425,36 @@ public sealed unsafe class AnimaTransformer : IDisposable
     /// flat feature index in each token's <c>p_h*p_w*p_t*C</c>-element vector is:
     /// <code>feat_idx = ph * (p_w * p_t * C) + pw * (p_t * C) + pt * C + c</code>.
     /// For image mode (p_t = 1) this collapses to <c>ph * p_w * C + pw * C + c</c>.</summary>
-    private static Tensor Unpatchify(Tensor packed, int batch, int gridH, int gridW, int patchH, int patchW, int outChannels)
+    private static Tensor Unpatchify(IBackend backend, Tensor packed, int batch, int gridH, int gridW, int patchH, int patchW, int outChannels)
     {
         int height = gridH * patchH;
         int width = gridW * patchW;
-        int seqLen = gridH * gridW;
-        int patchVol = patchH * patchW;
-        int featDim = patchVol * outChannels;
-
         TensorShape shape = new TensorShape(batch, outChannels, height, width);
         Tensor output = new Tensor(shape, DType.F32);
-
-        float* inPtr = (float*)packed.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
+        bool success = false;
+        try
         {
-            for (int c = 0; c < outChannels; c++)
-            {
-                long outChannelBase = ((long)b * outChannels + c) * height * width;
-                for (int gh = 0; gh < gridH; gh++)
-                {
-                    for (int gw = 0; gw < gridW; gw++)
-                    {
-                        int seqIdx = gh * gridW + gw;
-                        long inBase = ((long)b * seqLen + seqIdx) * featDim;
-                        for (int ph = 0; ph < patchH; ph++)
-                        {
-                            for (int pw = 0; pw < patchW; pw++)
-                            {
-                                int row = gh * patchH + ph;
-                                int col = gw * patchW + pw;
-                                // Channel-innermost feature order: feat_idx = ph * (pW * C) + pw * C + c
-                                long featIdx = (long)ph * patchW * outChannels + (long)pw * outChannels + c;
-                                outPtr[outChannelBase + (long)row * width + col] = inPtr[inBase + featIdx];
-                            }
-                        }
-                    }
-                }
-            }
+            // Cosmos final projection is intentionally NOT the inverse of patch embedding: its token
+            // feature order is (ph, pw, channel), i.e. channel INNERMOST.
+            backend.UnpatchifyTokens(
+                output, packed, outChannels, gridH, gridW, patchH, innerChannelFastest: true);
+            success = true;
+            return output;
         }
-        return output;
+        finally
+        {
+            if (!success) DisposeBestEffort(output, "unpatchified output after failure");
+        }
+    }
+
+    private static void DisposeBestEffort(Tensor? tensor, string description)
+    {
+        if (tensor is null) return;
+        try { tensor.Dispose(); }
+        catch (Exception error)
+        {
+            HartsyInference.Core.Logging.Logs.Error($"Failed to release Anima transformer {description}.", error);
+        }
     }
 
     private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)

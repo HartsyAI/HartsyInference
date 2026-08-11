@@ -6,8 +6,10 @@ using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
+using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.Tests.Common;
@@ -52,6 +54,118 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
         // cond-anchored formula; -dt folds in the model-output negation.
         ((IBackend)cpu).CfgEulerStep(actual, cond, uncond, cfg + 1.0f, -dt);
         AssertClose(expected, actual, 2e-6f);
+    }
+
+    [Fact]
+    public void PackedDenoiseEligibility_AllowsPlainImg2ImgButRejectsMasksRegionsAndImg2ImgStepCache()
+    {
+        using Tensor cond = Values([0.25f]);
+        RegionalPlan emptyPlan = new() { BaseCond = cond };
+        RegionalPlan regionalPlan = new()
+        {
+            BaseCond = cond,
+            Regions =
+            [
+                new RegionConditioning(
+                    cond,
+                    RegionMask.FromRect(new RectMask(0, 0, 8, 8), width: 8, height: 8),
+                    Weight: 1.0f,
+                    StartStep: 0,
+                    EndStep: 8),
+            ],
+        };
+
+        Assert.True(ZImagePipeline.CanUsePackedDenoise(isMaskedInpaint: false, regionalPlan: null));
+        Assert.True(ZImagePipeline.CanUsePackedDenoise(isMaskedInpaint: false, emptyPlan));
+        Assert.False(ZImagePipeline.CanUsePackedDenoise(isMaskedInpaint: true, regionalPlan: null));
+        Assert.False(ZImagePipeline.CanUsePackedDenoise(isMaskedInpaint: false, regionalPlan));
+
+        Assert.True(ZImagePipeline.CanUseStepCache(packedDenoise: true, isImg2Img: false, useCfg: false));
+        Assert.False(ZImagePipeline.CanUseStepCache(packedDenoise: true, isImg2Img: true, useCfg: false));
+        Assert.False(ZImagePipeline.CanUseStepCache(packedDenoise: true, isImg2Img: false, useCfg: true));
+        Assert.False(ZImagePipeline.CanUseStepCache(packedDenoise: false, isImg2Img: false, useCfg: false));
+    }
+
+    [Theory]
+    [InlineData(1.0f, 3.0f, 0.375f, 5)]
+    [InlineData(4.0f, 6.0f, 0.625f, 3)]
+    public void PackedImg2Img_FromArbitraryStart_MatchesLegacyPixelLoop(
+        float cfgScale, float shift, float strength, int expectedStartStep)
+    {
+        const int steps = 8;
+        const int channels = 2;
+        const int latentH = 4;
+        const int latentW = 6;
+        const int patch = 2;
+
+        using CpuBackend cpu = new();
+        using Tensor sourceImage = RandomTensor(new TensorShape(1, 3, 32, 48), 1011);
+        float[] sourceBefore = Snapshot(sourceImage);
+        ImageToImageRequest request = new()
+        {
+            Prompt = "img2img packed-path contract",
+            SourceImage = sourceImage,
+            Width = 48,
+            Height = 32,
+            Steps = steps,
+            CfgScale = cfgScale,
+            Strength = strength,
+        };
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height: 32, width: 48, steps);
+        Assert.Equal(expectedStartStep, plan.StartStep);
+        Assert.False(plan.PassThrough);
+        Assert.Null(plan.MaskPixel);
+        AssertClose(sourceBefore, sourceImage, 0f);
+
+        FlowMatchEulerDiscreteScheduler scheduler = new(shift);
+        scheduler.SetTimesteps(steps);
+        using Tensor clean = RandomTensor(new TensorShape(1, channels, latentH, latentW), 1012);
+        using Tensor noise = RandomTensor(new TensorShape(1, channels, latentH, latentW), 1013);
+        Tensor legacy = new(clean.Shape, DType.F32);
+        Tensor? packed = null;
+        try
+        {
+            scheduler.AddNoise(legacy, clean, noise, plan.StartStep);
+            packed = ZImageTransformer.Patchify(legacy, 1, channels, latentH, latentW, patch);
+
+            // Rectangular-grid round trip locks down Z-Image's (patchY, patchX, channel-fastest) layout.
+            using (Tensor roundTrip = ZImageTransformer.Unpatchify(
+                       packed, 1, channels, latentH / patch, latentW / patch, patch))
+            {
+                AssertClose(Snapshot(legacy), roundTrip, 0f);
+            }
+
+            for (int step = plan.StartStep; step < steps; step++)
+            {
+                using Tensor condPixel = FakePrediction(legacy, step, unconditional: false);
+                using Tensor uncondPixel = FakePrediction(legacy, step, unconditional: true);
+                using Tensor legacyVelocity = LegacyNegatedVelocity(condPixel, uncondPixel, cfgScale);
+                Tensor next = new(legacy.Shape, DType.F32);
+                scheduler.Step(next, legacyVelocity, legacy, step);
+                legacy.Dispose();
+                legacy = next;
+
+                using Tensor condPacked = FakePrediction(packed, step, unconditional: false);
+                using Tensor uncondPacked = FakePrediction(packed, step, unconditional: true);
+                bool useCfg = cfgScale > 1.0f;
+                ((IBackend)cpu).CfgEulerStep(
+                    packed,
+                    condPacked,
+                    useCfg ? uncondPacked : condPacked,
+                    guidance: useCfg ? cfgScale + 1.0f : 1.0f,
+                    delta: -scheduler.Dt(step));
+            }
+
+            using Tensor actual = ZImageTransformer.Unpatchify(
+                packed, 1, channels, latentH / patch, latentW / patch, patch);
+            Assert.Equal(new TensorShape(1, channels, latentH, latentW), actual.Shape);
+            AssertClose(Snapshot(legacy), actual, 3e-5f);
+        }
+        finally
+        {
+            packed?.Dispose();
+            legacy.Dispose();
+        }
     }
 
     [Theory]
@@ -145,7 +259,7 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
     }
 
     [Fact]
-    public void AlternatingPackedCaptions_RetainsBothRefinedStreams()
+    public void PreparePackedCaptions_RetainsBothIdentitiesWithoutRecompute()
     {
         using CpuBackend cpu = new();
         ZImageConfig config = TinyConfig();
@@ -157,8 +271,8 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
             using Tensor cond = RandomTensor(new TensorShape(1, 3, config.CapFeatDim), 1102);
             using Tensor uncond = RandomTensor(new TensorShape(1, 2, config.CapFeatDim), 1103);
 
-            Tensor firstCond = EnsureRefinedCaption(transformer, cpu, cond);
-            Tensor firstUncond = EnsureRefinedCaption(transformer, cpu, uncond);
+            Tensor firstCond = transformer.PreparePackedCaption(cpu, cond);
+            Tensor firstUncond = transformer.PreparePackedCaption(cpu, uncond);
             AssertFinite(firstCond);
             AssertFinite(firstUncond);
 
@@ -167,8 +281,8 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
             Tensor condRefined = Assert.Single(firstEntries, entry => ReferenceEquals(entry.Key, cond)).Value;
             Tensor uncondRefined = Assert.Single(firstEntries, entry => ReferenceEquals(entry.Key, uncond)).Value;
 
-            Tensor secondCond = EnsureRefinedCaption(transformer, cpu, cond);
-            Tensor secondUncond = EnsureRefinedCaption(transformer, cpu, uncond);
+            Tensor secondCond = transformer.PreparePackedCaption(cpu, cond);
+            Tensor secondUncond = transformer.PreparePackedCaption(cpu, uncond);
             Assert.Same(firstCond, secondCond);
             Assert.Same(firstUncond, secondUncond);
 
@@ -423,6 +537,43 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
         Assert.Throws<ObjectDisposedException>(() => { _ = (nint)tensor.DataPointer; });
     }
 
+    private static Tensor FakePrediction(Tensor latent, int step, bool unconditional)
+    {
+        Tensor prediction = new(latent.Shape, DType.F32);
+        float* input = (float*)latent.DataPointer;
+        float* output = (float*)prediction.DataPointer;
+        float gain = 0.11f + step * 0.007f;
+        float bias = unconditional ? -0.0125f : 0.01875f;
+        for (long i = 0; i < latent.ElementCount; i++)
+            output[i] = input[i] * gain + bias;
+        return prediction;
+    }
+
+    private static Tensor LegacyNegatedVelocity(Tensor cond, Tensor uncond, float cfgScale)
+    {
+        Assert.Equal(cond.Shape, uncond.Shape);
+        Tensor velocity = new(cond.Shape, DType.F32);
+        float* condData = (float*)cond.DataPointer;
+        float* uncondData = (float*)uncond.DataPointer;
+        float* output = (float*)velocity.DataPointer;
+        for (long i = 0; i < cond.ElementCount; i++)
+        {
+            float guided = cfgScale > 1.0f
+                ? condData[i] + cfgScale * (condData[i] - uncondData[i])
+                : condData[i];
+            output[i] = -guided;
+        }
+        return velocity;
+    }
+
+    private static float[] Snapshot(Tensor tensor)
+    {
+        int count = checked((int)tensor.ElementCount);
+        float[] values = new float[count];
+        new ReadOnlySpan<float>((void*)tensor.DataPointer, count).CopyTo(values);
+        return values;
+    }
+
     private static Tensor Values(float[] values)
     {
         Tensor tensor = new(new TensorShape(values.Length), DType.F32);
@@ -454,9 +605,38 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
 
     private static void AssertFinite(Tensor tensor)
     {
-        float* data = (float*)tensor.DataPointer;
-        for (long i = 0; i < tensor.ElementCount; i++)
-            Assert.True(float.IsFinite(data[i]), $"Non-finite value at element {i}: {data[i]}");
+        if (tensor.DType == DType.F32)
+        {
+            float* data = (float*)tensor.DataPointer;
+            for (long i = 0; i < tensor.ElementCount; i++)
+                Assert.True(float.IsFinite(data[i]), $"Non-finite F32 value at element {i}: {data[i]}");
+            return;
+        }
+
+        if (tensor.DType == DType.F16)
+        {
+            Half* data = (Half*)tensor.DataPointer;
+            for (long i = 0; i < tensor.ElementCount; i++)
+            {
+                float value = (float)data[i];
+                Assert.True(float.IsFinite(value), $"Non-finite F16 value at element {i}: {value}");
+            }
+            return;
+        }
+
+        if (tensor.DType == DType.BF16)
+        {
+            ushort* data = (ushort*)tensor.DataPointer;
+            for (long i = 0; i < tensor.ElementCount; i++)
+            {
+                float value = BitConverter.UInt32BitsToSingle((uint)data[i] << 16);
+                Assert.True(float.IsFinite(value), $"Non-finite BF16 value at element {i}: {value}");
+            }
+            return;
+        }
+
+        throw new NotSupportedException(
+            $"AssertFinite supports F32, F16, and BF16 tensors; got {tensor.DType}.");
     }
 
     private static void DisposeWeights(Dictionary<string, Tensor> weights)

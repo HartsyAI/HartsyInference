@@ -229,19 +229,30 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             Backend.FreeActivations();
 
             // ── 3. Denoising loop (from startStep onward) ──
-            // Plain t2i keeps the latent in packed token space across the WHOLE loop, including Z-Image-Base CFG.
-            // Patchify once, run cond/uncond via ForwardPacked, then fold the model's mandatory velocity negation,
-            // non-standard cond-anchored CFG, and Euler update into one device op. No prediction or latent is read
-            // through DataPointer per step. Img2img/inpaint/regional still require the pixel-space path below.
+            // Unmasked, non-regional t2i/img2img keeps the latent in packed token space across the WHOLE loop,
+            // including Z-Image-Base CFG. Patchify once, run cond/uncond via ForwardPacked, then fold the model's
+            // mandatory velocity negation, non-standard cond-anchored CFG, and Euler update into one device op.
+            // No prediction or latent is read through DataPointer per step. Inpaint/regional still require the
+            // pixel-space path below for source-trajectory blending / spatial conditioning.
             bool useCfg = cfgScale > 1.0f;
-            bool fastPath = !isImg2Img && !isMaskedInpaint
-                && (regionalPlan is null || regionalPlan.Regions.Count == 0);
+            bool fastPath = CanUsePackedDenoise(isMaskedInpaint, regionalPlan);
+            if (fastPath)
+            {
+                long captionPreparationD2hStart = Backend.GetD2hSyncCount();
+                _ = _transformer.PreparePackedCaption(Backend, captionEmbeddings);
+                if (useCfg)
+                    _ = _transformer.PreparePackedCaption(Backend, negativeCaptionEmbeddings!);
+                long captionPreparationD2h = Backend.GetD2hSyncCount() - captionPreparationD2hStart;
+                Logs.Debug($"Z-Image packed-caption preparation D2H syncs: {captionPreparationD2h}.");
+            }
+            long denoiseD2hStart = Backend.GetD2hSyncCount();
             // Default-off across-step First-Block cache (HARTSY_STEP_CACHE / _LATE — fleet knobs, wired on the
-            // fast path only; INFERENCE_ACCEL_GRIND §H1.5). No calibrated profile yet: "=1" resolves to the
-            // generic raw 0.10 until the Z-Image A/B lands. Armed cache forces the eager path (no graph).
+            // packed t2i path only; source-conditioned img2img needs its own quality calibration before this
+            // approximate reuse is admitted. No calibrated profile yet: "=1" resolves to the generic raw 0.10
+            // until the Z-Image A/B lands. Armed cache forces the eager path (no graph).
             (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
                 StepCacheEnv.Resolve(null);
-            if (stepCacheThreshold > 0f && fastPath && !useCfg)
+            if (stepCacheThreshold > 0f && CanUseStepCache(fastPath, isImg2Img, useCfg))
             {
                 if (Backend.SupportsDeviceStepCacheGate)
                 {
@@ -420,6 +431,8 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 Logs.Verbose($"[zimage-phase] unpatchify={sw.ElapsedMilliseconds - phU}ms");
             }
 
+            Logs.Debug($"Z-Image denoise-loop D2H syncs: {Backend.GetD2hSyncCount() - denoiseD2hStart}.");
+
             // Base has historically collapsed to an all-NaN latent on its first denoise step. One scalar device
             // reduction after the complete loop catches any non-finite value before an expensive VAE decode while
             // preserving per-step residency. Turbo skips this gate to keep its established output/perf path exact.
@@ -528,6 +541,17 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             throw;
         }
     }
+
+    /// <summary>Whether the denoise loop can remain in packed token space. The latent's origin is deliberately
+    /// irrelevant: a plain img2img latent has already completed VAE encode + flow-noise mixing before this decision.
+    /// Masks require per-step source blending in pixel latent space; regional prompts require the regional forward.</summary>
+    internal static bool CanUsePackedDenoise(bool isMaskedInpaint, RegionalPlan? regionalPlan) =>
+        !isMaskedInpaint && (regionalPlan is null || regionalPlan.Regions.Count == 0);
+
+    /// <summary>Across-step reuse is currently calibrated only for single-pass packed t2i. Img2img starts from
+    /// a source-conditioned trajectory and remains excluded until a dedicated quality A/B establishes safe gates.</summary>
+    internal static bool CanUseStepCache(bool packedDenoise, bool isImg2Img, bool useCfg) =>
+        packedDenoise && !isImg2Img && !useCfg;
 
     /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: VaeEncoder.Encode(source) combined with fresh noise via flow-matching AddNoise at sigma[startStep].
     /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean source latent is returned alongside the noised latent for per-step blending. Caller disposes both. Source is null for txt2img and plain img2img.</para></summary>

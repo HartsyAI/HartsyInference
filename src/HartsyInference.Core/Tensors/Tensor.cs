@@ -188,25 +188,37 @@ public sealed unsafe class Tensor : IDisposable
     /// in-flight buffer. Drained by the backend on the thread that actually owns the stream (see
     /// <c>CudaContext.EnsureCurrent</c>) so every GPU driver call still comes from one thread.
     ///
-    /// <para>Partitioned by owning-context key (not one global queue): a callback frees against, and mutates the
-    /// unsynchronized per-context state of, exactly one backend. With multiple GPU backends live in one process,
+    /// <para>Partitioned by process-unique owning-backend key (not one global queue): a callback frees against, and
+    /// mutates the unsynchronized State of, exactly one backend. With multiple GPU backends live in one process,
     /// draining every backend's callbacks from any thread let backend B's inference thread mutate backend A's
     /// non-thread-safe state while A's own thread did the same — a data race that leaked VRAM / threw / corrupted
-    /// under concurrent multi-GPU load. Keying by context (bucket per device) means each thread drains only its own
-    /// backend's bucket. Bucket 0 holds context-less callbacks (e.g. Vulkan) and is drained only by the drain-all overload.</para></remarks>
+    /// under concurrent multi-GPU load. Keying by backend registration means each thread drains only its own
+    /// backend's bucket. Same-device CUDA backends still have distinct keys; bucket 0 holds context-less callbacks
+    /// (e.g. Vulkan) and is drained only by the drain-all overload.</para></remarks>
     internal static readonly ConcurrentDictionary<nint, ConcurrentQueue<Action>> PendingFinalizerGpuCleanup = new();
+    private static readonly ConcurrentDictionary<nint, byte> RetiredFinalizerGpuCleanupKeys = new();
 
-    /// <summary>Queues a finalizer GPU-cleanup callback under its owning context's bucket.</summary>
-    internal static void EnqueueFinalizerGpuCleanup(nint contextKey, Action cleanup)
+    /// <summary>Queues a finalizer GPU-cleanup callback under its process-unique owning-backend bucket.</summary>
+    internal static void EnqueueFinalizerGpuCleanup(nint ownerKey, Action cleanup)
     {
-        PendingFinalizerGpuCleanup.GetOrAdd(contextKey, static _ => new ConcurrentQueue<Action>()).Enqueue(cleanup);
+        if (RetiredFinalizerGpuCleanupKeys.ContainsKey(ownerKey)) return;
+        ConcurrentQueue<Action> queue = PendingFinalizerGpuCleanup.GetOrAdd(
+            ownerKey, static _ => new ConcurrentQueue<Action>());
+        // Close the race with backend retirement: if retirement removed the published bucket while this enqueue
+        // held a local reference, dropping the callback is correct (the backend already freed its entire cache).
+        if (RetiredFinalizerGpuCleanupKeys.ContainsKey(ownerKey))
+        {
+            PendingFinalizerGpuCleanup.TryRemove(ownerKey, out _);
+            return;
+        }
+        queue.Enqueue(cleanup);
     }
 
-    /// <summary>Drains and invokes the finalizer GPU-cleanup callbacks owned by <paramref name="contextKey"/> only.</summary>
+    /// <summary>Drains and invokes the finalizer GPU-cleanup callbacks owned by <paramref name="ownerKey"/> only.</summary>
     /// <remarks>Call from the thread that owns that backend's CUDA context/stream — it touches no other backend's state.</remarks>
-    public static void DrainPendingFinalizerGpuCleanup(nint contextKey)
+    public static void DrainPendingFinalizerGpuCleanup(nint ownerKey)
     {
-        if (PendingFinalizerGpuCleanup.TryGetValue(contextKey, out ConcurrentQueue<Action>? queue))
+        if (PendingFinalizerGpuCleanup.TryGetValue(ownerKey, out ConcurrentQueue<Action>? queue))
         {
             while (queue.TryDequeue(out Action? cleanup))
             {
@@ -215,8 +227,8 @@ public sealed unsafe class Tensor : IDisposable
         }
     }
 
-    /// <summary>Drains every context's finalizer GPU-cleanup callbacks, regardless of owner.</summary>
-    /// <remarks>Only safe when the caller can service all live contexts (single-backend / shutdown paths).
+    /// <summary>Drains every backend's finalizer GPU-cleanup callbacks, regardless of owner.</summary>
+    /// <remarks>Only safe when the caller can service all live backends (single-backend / shutdown paths).
     /// Concurrent multi-GPU inference must use the keyed overload so a thread never runs another backend's cleanup.</remarks>
     public static void DrainPendingFinalizerGpuCleanup()
     {
@@ -229,15 +241,23 @@ public sealed unsafe class Tensor : IDisposable
         }
     }
 
-    /// <summary>Drops (without invoking) all queued finalizer GPU-cleanup callbacks for <paramref name="contextKey"/>.</summary>
+    /// <summary>Drops (without invoking) all queued finalizer GPU-cleanup callbacks for <paramref name="ownerKey"/>.</summary>
     /// <remarks>Call at backend teardown AFTER the backend has freed all its cached device memory: the queued
     /// callbacks can only reference caches that were just emptied, so running them is a no-op at best — and the
     /// CUDA driver reuses primary-context handles, so leaving them queued makes the NEXT backend on the same
     /// device drain and execute another backend's stale callbacks during its own construction (the GGUF
     /// model-switch NRE).</remarks>
-    public static void DiscardPendingFinalizerGpuCleanup(nint contextKey)
+    public static void DiscardPendingFinalizerGpuCleanup(nint ownerKey)
     {
-        PendingFinalizerGpuCleanup.TryRemove(contextKey, out _);
+        PendingFinalizerGpuCleanup.TryRemove(ownerKey, out _);
+    }
+
+    /// <summary>Permanently retires a process-unique backend key, dropping its current bucket and suppressing any
+    /// late tensor finalizer that races backend teardown from recreating an undrainable static queue.</summary>
+    internal static void RetireFinalizerGpuCleanup(nint ownerKey)
+    {
+        RetiredFinalizerGpuCleanupKeys[ownerKey] = 0;
+        PendingFinalizerGpuCleanup.TryRemove(ownerKey, out _);
     }
 
     /// <summary>Runs one queued cleanup, containing any failure so it can't take down an unrelated op.</summary>

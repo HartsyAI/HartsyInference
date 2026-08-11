@@ -29,6 +29,7 @@ public sealed class CudaBackend : IBackend
     private Fp8GemmExecutor? _fp8Executor;
     private LtGemmExecutor? _ltGemmExecutor;
     private TensorCoreGemm? _tensorCoreGemm;
+    private readonly object _nativeExecutorLock = new();
     private readonly object _cudnnSdpaLock = new();
     private CudnnSdpa? _cudnnSdpa;
     private volatile bool _cudnnSdpaDead;   // set if cuDNN INIT throws once — never retry, fall back for the session
@@ -117,7 +118,123 @@ public sealed class CudaBackend : IBackend
     /// <summary>True once the cuDNN convolution fast path has run at least once — same diagnostic role as <see cref="CudnnSdpaEngaged"/>.</summary>
     public bool CudnnConvEngaged { get; private set; }
     private readonly string? _ptxDir;
-    private bool _disposed;
+
+    private const int LifecycleActive = 0;
+    private const int LifecycleClaimed = 1;
+    private const int LifecycleCleaned = 2;
+    private int _lifecycleState;
+    private int _cleanupExecutionCount;
+    private int _constructorCompleted;
+    private int _mempoolPolicyAcquired;
+    private Exception? _cleanupFailure;
+    private readonly ManualResetEventSlim _cleanupCompleted = new(initialState: false);
+
+    private static long _abandonedCleanupEnqueuedCount;
+    private static long _abandonedCleanupCompletedCount;
+    private static long _abandonedCleanupFailedCount;
+    private static readonly object _abandonedCleanupProgress = new();
+
+    /// <summary>Dedicated managed worker for abandoned backends. Its type initializer is forced from the constructor,
+    /// never from the finalizer; the finalizer itself performs only an atomic claim and a queue write.</summary>
+    private static class BackendAbandonmentReaper
+    {
+        private static readonly BlockingCollection<CudaBackend> Queue = new();
+        private static readonly Thread Worker = StartWorker();
+
+        internal static void EnsureStarted() => GC.KeepAlive(Worker);
+
+        internal static void Enqueue(CudaBackend backend)
+        {
+            Interlocked.Increment(ref _abandonedCleanupEnqueuedCount);
+            Queue.Add(backend);
+        }
+
+        private static Thread StartWorker()
+        {
+            Thread worker = new(Run)
+            {
+                IsBackground = true,
+                Name = "Hartsy CUDA abandonment reaper",
+            };
+            worker.Start();
+            return worker;
+        }
+
+        private static void Run()
+        {
+            while (true)
+            {
+                CudaBackend? backend = Queue.Take();
+                Process(backend);
+                // Do not let the worker local root the most recently cleaned backend while it waits indefinitely
+                // for its next item (observable as an otherwise permanent managed leak).
+                backend = null;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void Process(CudaBackend backend)
+        {
+            try
+            {
+                Exception? failure = backend.RunClaimedCleanup(abandoned: true);
+                if (failure is not null)
+                {
+                    Interlocked.Increment(ref _abandonedCleanupFailedCount);
+                    SafeLogFailure("[Cuda] Abandoned backend cleanup completed with one or more teardown failures.", failure);
+                }
+            }
+            catch (Exception failure)
+            {
+                // The instance cleanup contains every individual action, but the worker itself must also be
+                // immortal if a future edit accidentally lets an exception escape that boundary.
+                Interlocked.Increment(ref _abandonedCleanupFailedCount);
+                SafeLogFailure("[Cuda] Abandoned backend reaper failed unexpectedly.", failure);
+            }
+            finally
+            {
+                Interlocked.Increment(ref _abandonedCleanupCompletedCount);
+                lock (_abandonedCleanupProgress) Monitor.PulseAll(_abandonedCleanupProgress);
+            }
+        }
+
+        private static void SafeLogFailure(string message, Exception failure)
+        {
+            try { HartsyInference.Core.Logging.Logs.Error(message, failure); }
+            catch { /* A user-supplied logger must never kill the process-wide cleanup worker. */ }
+        }
+    }
+
+    internal int LifecycleStateForTests => Volatile.Read(ref _lifecycleState);
+    internal int CleanupExecutionCount => Volatile.Read(ref _cleanupExecutionCount);
+    internal bool ConstructorCompletedForTests => Volatile.Read(ref _constructorCompleted) != 0;
+    internal static long AbandonedCleanupEnqueuedCount => Interlocked.Read(ref _abandonedCleanupEnqueuedCount);
+    internal static long AbandonedCleanupCompletedCount => Interlocked.Read(ref _abandonedCleanupCompletedCount);
+    internal static long AbandonedCleanupFailedCount => Interlocked.Read(ref _abandonedCleanupFailedCount);
+
+    internal static bool WaitForAbandonedCleanup(long completedTarget, TimeSpan timeout)
+    {
+        if (completedTarget < 0) throw new ArgumentOutOfRangeException(nameof(completedTarget));
+        if (timeout < TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan) throw new ArgumentOutOfRangeException(nameof(timeout));
+        long deadline = timeout == Timeout.InfiniteTimeSpan
+            ? long.MaxValue
+            : Environment.TickCount64 + Math.Max(0L, (long)Math.Ceiling(timeout.TotalMilliseconds));
+        lock (_abandonedCleanupProgress)
+        {
+            while (Interlocked.Read(ref _abandonedCleanupCompletedCount) < completedTarget)
+            {
+                if (deadline == long.MaxValue)
+                {
+                    Monitor.Wait(_abandonedCleanupProgress);
+                    continue;
+                }
+                long remaining = deadline - Environment.TickCount64;
+                if (remaining <= 0) return false;
+                Monitor.Wait(_abandonedCleanupProgress, (int)Math.Min(remaining, int.MaxValue));
+            }
+            return true;
+        }
+    }
 
     /// <summary>The device this backend targets.</summary>
     public DeviceKind Device { get; }
@@ -169,20 +286,97 @@ public sealed class CudaBackend : IBackend
     public bool EnableModulateEmitFp8 { get; set; }
 
     /// <summary>Device-resident copy of a weight's static activation scale, allocated once per weight.</summary>
-    private readonly Dictionary<Tensor, ulong> _fp8InputScaleDev = new();
+    private readonly Dictionary<Tensor, (ulong Pointer, float Scale)> _fp8InputScaleDev = new();
+    private readonly object _fp8InputScaleLock = new();
+    private long _fp8InputScaleAllocationCount;
+    private long _fp8InputScaleFreeCount;
 
     /// <summary>Returns the device pointer holding <paramref name="weight"/>'s static input scale, or 0 if it has none.</summary>
     private unsafe ulong EnsureFp8InputScaleDev(Tensor weight)
     {
         float scale = weight.Fp8InputScaleFactor;
         if (scale <= 0.0f || !float.IsFinite(scale)) return 0;
-        if (_fp8InputScaleDev.TryGetValue(weight, out ulong cached)) return cached;
-        // Persistent, not pool-allocated: it outlives the call and must survive stream-ordered frees. One
-        // synchronous 4-byte upload per weight, once, so it never touches the per-step path.
-        ulong dev = CudaMemory.AllocatePersistent(sizeof(float));
-        CudaMemory.CopyHostToDevice(dev, &scale, sizeof(float));
-        _fp8InputScaleDev[weight] = dev;
-        return dev;
+        lock (_fp8InputScaleLock)
+        {
+            if (_fp8InputScaleDev.TryGetValue(weight, out (ulong Pointer, float Scale) cached))
+            {
+                if (cached.Scale != scale)
+                {
+                    // Scale metadata is mutable. Drain prior readers, then update the existing scalar in place so
+                    // mutation neither serves stale numerics nor churns persistent device allocations.
+                    _stream.Synchronize();
+                    CudaMemory.CopyHostToDevice(cached.Pointer, &scale, sizeof(float));
+                    _fp8InputScaleDev[weight] = (cached.Pointer, scale);
+                }
+                return cached.Pointer;
+            }
+            // Persistent, not pool-allocated: it outlives the call and must survive stream-ordered frees. Serialize
+            // first creation so concurrent Linears cannot leak duplicate four-byte allocations for one weight.
+            ulong dev = CudaMemory.AllocatePersistent(sizeof(float));
+            try
+            {
+                CudaMemory.CopyHostToDevice(dev, &scale, sizeof(float));
+                _fp8InputScaleDev[weight] = (dev, scale);
+                Interlocked.Increment(ref _fp8InputScaleAllocationCount);
+                return dev;
+            }
+            catch
+            {
+                CudaMemory.Free(dev);
+                throw;
+            }
+        }
+    }
+
+    private void FreeFp8InputScale(Tensor weight)
+    {
+        lock (_fp8InputScaleLock)
+        {
+            if (!_fp8InputScaleDev.TryGetValue(weight, out (ulong Pointer, float Scale) entry)) return;
+            CudaMemory.Free(entry.Pointer);
+            _fp8InputScaleDev.Remove(weight);
+            Interlocked.Increment(ref _fp8InputScaleFreeCount);
+        }
+    }
+
+    private void FreeAllFp8InputScales()
+    {
+        // These persistent pointers are read by kernels/GEMMs on the compute stream. Never release them merely
+        // because a broader cache sweep was attempted; independently prove the consuming stream is drained here.
+        if (_stream is not null) _stream.Synchronize();
+        List<Exception>? failures = null;
+        lock (_fp8InputScaleLock)
+        {
+            foreach ((Tensor weight, (ulong Pointer, float Scale) entry) in _fp8InputScaleDev.ToArray())
+            {
+                try
+                {
+                    CudaMemory.Free(entry.Pointer);
+                    _fp8InputScaleDev.Remove(weight);
+                    Interlocked.Increment(ref _fp8InputScaleFreeCount);
+                }
+                catch (Exception error)
+                {
+                    // Keep failed entries registered so a later explicit sweep can retry them.
+                    (failures ??= []).Add(error);
+                }
+            }
+        }
+        if (failures is not null) throw new AggregateException("One or more FP8 input-scale buffers failed to release.", failures);
+    }
+
+    internal int Fp8InputScaleCacheCount
+    {
+        get { lock (_fp8InputScaleLock) return _fp8InputScaleDev.Count; }
+    }
+
+    internal (int Count, long Allocations, long Frees) Fp8InputScaleDiagnostics =>
+        (Fp8InputScaleCacheCount, Interlocked.Read(ref _fp8InputScaleAllocationCount), Interlocked.Read(ref _fp8InputScaleFreeCount));
+
+    internal ulong EnsureFp8InputScaleForTest(Tensor weight)
+    {
+        EnterOp();
+        return EnsureFp8InputScaleDev(weight);
     }
 
     /// <summary>Low-VRAM lever: when <c>true</c> (default) the per-weight fp8/quant→F16 cast is cached resident, not recomputed each GEMM.</summary>
@@ -198,15 +392,25 @@ public sealed class CudaBackend : IBackend
     {
         get
         {
-            _fp8Executor ??= new Fp8GemmExecutor(_context.ComputeCapabilityMajor, _context.ComputeCapabilityMinor);
-            return _fp8Executor;
+            EnsureActiveContextForLazyNativeResource();
+            lock (_nativeExecutorLock)
+            {
+                EnsureActiveContextForLazyNativeResource();
+                if (_fp8Executor is null)
+                {
+                    _fp8Executor = new Fp8GemmExecutor(_context.ComputeCapabilityMajor, _context.ComputeCapabilityMinor);
+                    GC.SuppressFinalize(_fp8Executor);
+                }
+                return _fp8Executor;
+            }
         }
     }
 
-    /// <summary>Opt-in flag for fusing the Linear bias add into the cuBLASLt GEMM epilogue. Defaults to <c>false</c> pending benchmarks.</summary>
-    /// <remarks>Works on every targeted SM, including the RTX 3060. When on, a Linear with bias runs as a single
-    /// <c>cublasLtMatmul</c> instead of <c>cublasGemmEx</c> + a separate <c>BiasAdd</c> launch. The result is
-    /// numerically equivalent to the unfused path.</remarks>
+    /// <summary>Fuses a Linear bias add into the cuBLASLt GEMM epilogue. Enabled by default; set
+    /// <c>HARTSY_EPILOGUE_FUSION=0</c> to disable it.</summary>
+    /// <remarks>Works on every targeted SM, including the RTX 3060. A supported biased Linear runs as one
+    /// <c>cublasLtMatmul</c>; unavailable libraries, unsupported shapes, and no-algorithm results fall back to
+    /// <c>cublasGemmEx</c> plus the existing <c>BiasAdd</c> path with the same resolved precision policy.</remarks>
     public bool EnableEpilogueFusion { get; set; }
 
     /// <summary>int8-activation dp4a decode GEMV for Q4_K/Q6_K/Q8_0 weights (default ON, kill-switch <c>HARTSY_DP4A_ON=0</c>).</summary>
@@ -227,8 +431,17 @@ public sealed class CudaBackend : IBackend
     {
         get
         {
-            _int8Executor ??= new Int8GemmExecutor();
-            return _int8Executor;
+            EnsureActiveContextForLazyNativeResource();
+            lock (_nativeExecutorLock)
+            {
+                EnsureActiveContextForLazyNativeResource();
+                if (_int8Executor is null)
+                {
+                    _int8Executor = new Int8GemmExecutor();
+                    GC.SuppressFinalize(_int8Executor);
+                }
+                return _int8Executor;
+            }
         }
     }
 
@@ -257,35 +470,81 @@ public sealed class CudaBackend : IBackend
     /// equal the weight's K (in-dim).</remarks>
     public unsafe void SetW8A8SmoothingScale(Core.Tensors.Tensor weight, ReadOnlySpan<float> s)
     {
+        EnterOp();
         int k = (int)weight.Shape[1];
         if (s.Length != k)
             throw new ArgumentException($"SmoothQuant scale length {s.Length} != weight K={k}.", nameof(s));
         float[] invScale = new float[k];
-        for (int i = 0; i < k; i++) invScale[i] = s[i] != 0f ? 1f / s[i] : 0f;
-
-        ulong dev = GpuTransferHelper.AllocateDevice((nuint)(k * sizeof(float)));
-        fixed (float* p = invScale)
-            CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)p, (nuint)(k * sizeof(float)), _stream.Handle).ThrowOnError();
-        _stream.Synchronize();
-
-        if (_w8a8SmoothInvScaleDevice.TryGetValue(weight, out ulong old)) GpuTransferHelper.FreeDevice(old);
-        _w8a8SmoothInvScaleDevice[weight] = dev;
-        _w8a8SmoothScaleHost[weight] = s.ToArray();
-
-        if (_w8a8WeightCache.TryGetValue(weight, out ulong cachedQuant))
+        for (int i = 0; i < k; i++)
         {
-            GpuTransferHelper.FreeDevice(cachedQuant);
-            _w8a8WeightCache.Remove(weight);
+            if (!(s[i] > 0f) || !float.IsFinite(s[i]))
+                throw new ArgumentOutOfRangeException(nameof(s), $"SmoothQuant scale s[{i}] must be positive and finite; got {s[i]}.");
+            invScale[i] = 1f / s[i];
+        }
+        float[] hostScale = s.ToArray();
+        _w8a8SmoothInvScaleDevice.EnsureCapacity(_w8a8SmoothInvScaleDevice.Count + 1);
+        _w8a8SmoothScaleHost.EnsureCapacity(_w8a8SmoothScaleHost.Count + 1);
+        ulong dev = GpuTransferHelper.AllocateDevice((nuint)(k * sizeof(float)));
+        bool published = false;
+        try
+        {
+            fixed (float* p = invScale)
+                CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)p, (nuint)(k * sizeof(float)), _stream.Handle).ThrowOnError();
+            _stream.Synchronize();
+
+            // Invalidate the quantized weight while the old smoothing pair is still authoritative. If its
+            // free fails, publication aborts and the cache remains numerically compatible with the old pair.
+            if (_w8a8WeightCache.TryGetValue(weight, out ulong cachedQuant))
+            {
+                GpuTransferHelper.FreeDevice(cachedQuant);
+                _w8a8WeightCache.Remove(weight);
+            }
+
+            if (_w8a8SmoothInvScaleDevice.TryGetValue(weight, out ulong old))
+            {
+                GpuTransferHelper.FreeDevice(old);
+                _w8a8SmoothInvScaleDevice.Remove(weight);
+                _w8a8SmoothScaleHost.Remove(weight);
+            }
+            _w8a8SmoothInvScaleDevice[weight] = dev;
+            _w8a8SmoothScaleHost[weight] = hostScale;
+            published = true;
+        }
+        catch (Exception primary) when (!published)
+        {
+            // An unexpected managed publication failure must not leave a dictionary pointing at the
+            // unpublished device allocation that rollback is about to free.
+            if (_w8a8SmoothInvScaleDevice.TryGetValue(weight, out ulong tracked) && tracked == dev)
+                _w8a8SmoothInvScaleDevice.Remove(weight);
+            if (_w8a8SmoothScaleHost.TryGetValue(weight, out float[]? trackedHost)
+                && ReferenceEquals(trackedHost, hostScale))
+                _w8a8SmoothScaleHost.Remove(weight);
+            try { GpuTransferHelper.FreeDevice(dev); }
+            catch (Exception cleanup)
+            {
+                throw new AggregateException("SmoothQuant scale publication and rollback both failed.", primary, cleanup);
+            }
+            throw;
         }
     }
 
     /// <summary>Frees every SmoothQuant device scale buffer (mirrors FreeW8A8Cache's scope/callers).</summary>
-    private void FreeW8A8SmoothScaleCache()
+    private void FreeW8A8SmoothScaleCache(GpuTransferHelper.State? explicitState = null)
     {
-        foreach (ulong ptr in _w8a8SmoothInvScaleDevice.Values)
-            GpuTransferHelper.FreeDevice(ptr);
-        _w8a8SmoothInvScaleDevice.Clear();
-        _w8a8SmoothScaleHost.Clear();
+        List<Exception>? failures = null;
+        foreach ((Tensor weight, ulong ptr) in _w8a8SmoothInvScaleDevice.ToArray())
+        {
+            try
+            {
+                if (explicitState is null) GpuTransferHelper.FreeDevice(ptr);
+                else GpuTransferHelper.FreeDevice(explicitState, ptr);
+                _w8a8SmoothInvScaleDevice.Remove(weight);
+                _w8a8SmoothScaleHost.Remove(weight);
+            }
+            catch (Exception error) { (failures ??= []).Add(error); }
+        }
+        if (_w8a8SmoothInvScaleDevice.Count == 0) _w8a8SmoothScaleHost.Clear();
+        if (failures is not null) throw new AggregateException("One or more W8A8 SmoothQuant scales failed to release.", failures);
     }
 
     /// <summary>Test-only hook: LinearImpl passes F32 snapshots of pre-quant input/weight of the first W8A8-eligible call, then clears.</summary>
@@ -381,8 +640,17 @@ public sealed class CudaBackend : IBackend
     {
         get
         {
-            _ltGemmExecutor ??= new LtGemmExecutor();
-            return _ltGemmExecutor;
+            EnsureActiveContextForLazyNativeResource();
+            lock (_nativeExecutorLock)
+            {
+                EnsureActiveContextForLazyNativeResource();
+                if (_ltGemmExecutor is null)
+                {
+                    _ltGemmExecutor = new LtGemmExecutor(_context, _stream.Handle, backendAdopted: true);
+                    GC.SuppressFinalize(_ltGemmExecutor);
+                }
+                return _ltGemmExecutor;
+            }
         }
     }
 
@@ -403,11 +671,26 @@ public sealed class CudaBackend : IBackend
     {
         get
         {
-            _tensorCoreGemm ??= new TensorCoreGemm(
-                _ptxDir ?? throw new InvalidOperationException("TensorCoreGemm requires a PTX directory; construct CudaBackend with ptxDir."),
-                _context.ComputeCapabilityMajor);
-            return _tensorCoreGemm;
+            EnsureActiveContextForLazyNativeResource();
+            lock (_nativeExecutorLock)
+            {
+                EnsureActiveContextForLazyNativeResource();
+                if (_tensorCoreGemm is null)
+                {
+                    _tensorCoreGemm = new TensorCoreGemm(
+                        _ptxDir ?? throw new InvalidOperationException("TensorCoreGemm requires a PTX directory; construct CudaBackend with ptxDir."),
+                        _context.ComputeCapabilityMajor);
+                    GC.SuppressFinalize(_tensorCoreGemm);
+                }
+                return _tensorCoreGemm;
+            }
         }
+    }
+
+    private void EnsureActiveContextForLazyNativeResource()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _lifecycleState) != LifecycleActive, this);
+        _context.EnsureCurrent();
     }
 
     /// <summary>Reads a <c>HARTSY_*</c> boolean env var; unset or any non-"1" value is treated as off.</summary>
@@ -469,12 +752,16 @@ public sealed class CudaBackend : IBackend
     /// <summary>Creates a CUDA backend for the specified device ordinal. If ptxDir is provided, loads PTX kernels from that directory.</summary>
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)
     {
+        // Force the managed worker to exist before this finalizable object acquires its first native resource.
+        BackendAbandonmentReaper.EnsureStarted();
         _context = new CudaContext(deviceOrdinal);
+        GC.SuppressFinalize(_context); // adopted: CudaBackend Dispose/reaper is now the sole finalization owner
         // Must use blocking stream (CU_STREAM_DEFAULT) because GpuTransferHelper uses synchronous
         // cuMemcpyHtoD/DtoH which operate on the NULL stream. A non-blocking stream does NOT
         // synchronize with the NULL stream, causing race conditions where kernels read incomplete
         // data from in-progress H2D transfers. Fix: switch to cuMemcpyHtoDAsync on this stream.
         _stream = new CudaStream(nonBlocking: false);
+        GC.SuppressFinalize(_stream);
         // HARTSY_PROFILE_SYNC's per-op GPU-time attribution resolves ITS stream from the ambient backend State
         // (see NvtxRange.Dispose) — no registration needed here.
         // Upload stream is non-blocking so its in-flight work doesn't gate the compute
@@ -482,6 +769,7 @@ public sealed class CudaBackend : IBackend
         // uploads would force compute to wait, defeating overlap. The streaming cache uses
         // explicit cuEventRecord/cuStreamWaitEvent for the parts that *do* need to sync.
         _uploadStream = new CudaStream(nonBlocking: true);
+        GC.SuppressFinalize(_uploadStream);
         _streamingCache = new CudaStreamingWeightCache(_context, _stream.Handle, _uploadStream.Handle);
         _ptxDir = ptxDir;
         Device = DeviceKind.Cuda(deviceOrdinal);
@@ -495,6 +783,7 @@ public sealed class CudaBackend : IBackend
         // demand either way.
         bool mempoolKeep = EnvSwitch.IsEnabled("HARTSY_MEMPOOL_KEEP", defaultOn: true);
         DeviceMempoolPolicy.Acquire(_context.DeviceOrdinal, mempoolKeep);
+        Volatile.Write(ref _mempoolPolicyAcquired, 1);
         // CUDA_VISIBLE_DEVICES defaults to fastest-first ordering, so an ordinal does not identify the card —
         // log the name or every perf/VRAM number gets attributed to the wrong GPU.
         HartsyInference.Core.Logging.Logs.Info($"[Cuda] device {deviceOrdinal}: {_context.DeviceName} "
@@ -611,6 +900,7 @@ public sealed class CudaBackend : IBackend
         if (ptxDir != null && Directory.Exists(ptxDir))
         {
             _kernels = new CudaKernels(ptxDir);
+            GC.SuppressFinalize(_kernels);
         }
 
         Capabilities = new BackendCapabilities
@@ -627,6 +917,7 @@ public sealed class CudaBackend : IBackend
             SupportsFft = false,
             MaxRank = 6,
         };
+        Volatile.Write(ref _constructorCompleted, 1);
     }
 
     /// <summary>This backend's transfer state, for the multi-backend isolation tests.</summary>
@@ -644,6 +935,7 @@ public sealed class CudaBackend : IBackend
 
     private void EnterOp()
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _lifecycleState) != LifecycleActive, this);
         GpuTransferHelper.SetAmbient(_transferState);
         _context.EnsureCurrent();
         Tensor.DrainPendingFinalizerGpuCleanup(_transferState.Key);
@@ -769,10 +1061,22 @@ public sealed class CudaBackend : IBackend
             // fails INVALID_VALUE (bisected 2026-07-23, W8A8ReproTemp). Pool pointers ride the same
             // stream-ordered allocator as every other cache, so ordering is correct by construction.
             ulong dev = GpuTransferHelper.AllocateDevice(totalBytes);
-            CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)dst, totalBytes, _stream.Handle).ThrowOnError();
-            // Host buffer is stack-scoped (fixed byte[]) — drain the async copy before it goes out of scope.
-            _stream.Synchronize();
-            return dev;
+            try
+            {
+                CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)dst, totalBytes, _stream.Handle).ThrowOnError();
+                // Host buffer is stack-scoped (fixed byte[]) — drain the async copy before it goes out of scope.
+                _stream.Synchronize();
+                return dev;
+            }
+            catch (Exception primary)
+            {
+                try { GpuTransferHelper.FreeDevice(dev); }
+                catch (Exception cleanup)
+                {
+                    throw new AggregateException("W8A8 weight upload and rollback both failed.", primary, cleanup);
+                }
+                throw;
+            }
         }
     }
 
@@ -787,12 +1091,22 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>Frees every cached W8A8 int8 weight buffer (model switch / full eviction / dispose).</summary>
-    private void FreeW8A8Cache()
+    private void FreeW8A8Cache(GpuTransferHelper.State? explicitState = null)
     {
-        foreach (ulong ptr in _w8a8WeightCache.Values)
-            GpuTransferHelper.FreeDevice(ptr);
-        _w8a8WeightCache.Clear();
-        FreeW8A8SmoothScaleCache();
+        List<Exception>? failures = null;
+        foreach ((Tensor weight, ulong ptr) in _w8a8WeightCache.ToArray())
+        {
+            try
+            {
+                if (explicitState is null) GpuTransferHelper.FreeDevice(ptr);
+                else GpuTransferHelper.FreeDevice(explicitState, ptr);
+                _w8a8WeightCache.Remove(weight);
+            }
+            catch (Exception error) { (failures ??= []).Add(error); }
+        }
+        try { FreeW8A8SmoothScaleCache(explicitState); }
+        catch (Exception error) { (failures ??= []).Add(error); }
+        if (failures is not null) throw new AggregateException("One or more W8A8 cache buffers failed to release.", failures);
     }
 
     /// <summary>Linear layer via cuBLAS GemmEx with transpose: output = input × weight^T + bias.</summary>
@@ -1257,56 +1571,66 @@ public sealed class CudaBackend : IBackend
             {
                 TensorCoreGemm.Run(a: inputPtr, b: weightPtr, c: pOutput, m: m, n: n, k: k, alpha: alpha, stream: _stream.Handle);
             }
-            // Fused path: fold the bias into the cuBLASLt epilogue, saving a BiasAdd launch
-            // plus an output-sized HBM round-trip. Only worthwhile when there is a bias to fuse.
-            else if (EnableEpilogueFusion && bias is not null && LtGemm.IsSupported && !outNeedsCast)
-            {
-                LtGemm.Run(
-                    weight: weightPtr, input: inputPtr, outPtr: pOutput,
-                    m: m, n: n, k: k, alpha: alpha,
-                    abType: gemmType, dType: outputType,
-                    biasPtr: biasDevicePtr, epilogue: CublasLtApi.CUBLASLT_EPILOGUE_BIAS,
-                    stream: _stream.Handle);
-                ltBiasFused = true;
-            }
             else
             {
-                // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [n,k], op(B)=input [k,m]
-                // Row-major interpretation: output[m,n] = input[m,k] × weight^T[k,n].
-                //
-                // cublasGemmEx supports Ctype ∈ {Atype, F32} only. When the output tensor is a 16-bit type
-                // that differs from the operand gemmDtype — e.g. BF16 operands (fp8/quant weight × F32
-                // activation → BF16, chosen so the F32→16-bit cast can't overflow F16's 65504 in a SwiGLU
-                // MLP) but an F16 output tensor — there is NO BF16→F16 kernel and cuBLAS returns
-                // CUBLAS_STATUS_NOT_SUPPORTED. Run the GEMM into a temp of gemmDtype, then cast to the real
-                // output. (F32 output is always compatible with 16-bit operands, so it skips the temp.)
-                ulong gemmOut = pOutput;
-                int gemmOutType = outputType;
-                ulong pGemmTemp = 0;
-                try
+                // Fused path: fold the bias into the cuBLASLt epilogue, saving a BiasAdd launch plus an
+                // output-sized HBM round-trip. Compute32F is the single precision-policy source for BOTH the
+                // fused and GemmEx paths: HighPrecisionGemm/HARTSY_NO_TF32/HARTSY_GEMM_F16 must not change
+                // semantics merely because this Linear has a bias. A missing Lt algorithm is an ordinary
+                // per-shape capability result, so TryRun returns false and the existing GemmEx+BiasAdd path runs.
+                if (EnableEpilogueFusion && bias is not null && !outNeedsCast)
                 {
-                    if (outNeedsCast)
+                    LtGemmExecutor lt = LtGemm;
+                    if (lt.IsSupported)
                     {
-                        pGemmTemp = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * gemmDtype.SizeInBytes));
-                        gemmOut = pGemmTemp;
-                        gemmOutType = gemmType;
+                        ltBiasFused = lt.TryRun(
+                            weight: weightPtr, input: inputPtr, outPtr: pOutput,
+                            m: m, n: n, k: k, alpha: alpha,
+                            abType: gemmType, dType: outputType, computeType: Compute32F(gemmType),
+                            biasPtr: biasDevicePtr, epilogue: CublasLtApi.CUBLASLT_EPILOGUE_BIAS,
+                            stream: _stream.Handle);
                     }
-                    CublasApi.cublasGemmEx(
-                        _cublasHandle,
-                        CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                        n, m, k,
-                        &alpha,
-                        weightPtr, gemmType, k,
-                        inputPtr, gemmType, k,
-                        &beta,
-                        gemmOut, gemmOutType, n,
-                        Compute32F(gemmType), CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
-                    if (outNeedsCast)
-                        CastOnGpu(pOutput, pGemmTemp, gemmDtype, output.DType, m * n);
                 }
-                finally
+
+                if (!ltBiasFused)
                 {
-                    if (pGemmTemp != 0) GpuTransferHelper.FreeDevice(pGemmTemp);
+                    // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [n,k], op(B)=input [k,m]
+                    // Row-major interpretation: output[m,n] = input[m,k] × weight^T[k,n].
+                    //
+                    // cublasGemmEx supports Ctype ∈ {Atype, F32} only. When the output tensor is a 16-bit type
+                    // that differs from the operand gemmDtype — e.g. BF16 operands (fp8/quant weight × F32
+                    // activation → BF16, chosen so the F32→16-bit cast can't overflow F16's 65504 in a SwiGLU
+                    // MLP) but an F16 output tensor — there is NO BF16→F16 kernel and cuBLAS returns
+                    // CUBLAS_STATUS_NOT_SUPPORTED. Run the GEMM into a temp of gemmDtype, then cast to the real
+                    // output. (F32 output is always compatible with 16-bit operands, so it skips the temp.)
+                    ulong gemmOut = pOutput;
+                    int gemmOutType = outputType;
+                    ulong pGemmTemp = 0;
+                    try
+                    {
+                        if (outNeedsCast)
+                        {
+                            pGemmTemp = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * gemmDtype.SizeInBytes));
+                            gemmOut = pGemmTemp;
+                            gemmOutType = gemmType;
+                        }
+                        CublasApi.cublasGemmEx(
+                            _cublasHandle,
+                            CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                            n, m, k,
+                            &alpha,
+                            weightPtr, gemmType, k,
+                            inputPtr, gemmType, k,
+                            &beta,
+                            gemmOut, gemmOutType, n,
+                            Compute32F(gemmType), CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        if (outNeedsCast)
+                            CastOnGpu(pOutput, pGemmTemp, gemmDtype, output.DType, m * n);
+                    }
+                    finally
+                    {
+                        if (pGemmTemp != 0) GpuTransferHelper.FreeDevice(pGemmTemp);
+                    }
                 }
             }
 
@@ -2818,7 +3142,11 @@ public sealed class CudaBackend : IBackend
         // A still-open capture must abort+purge BEFORE the tracker clear below wipes its alloc records.
         if (_stepGraphCapturing)
             StepGraphReset();
-        _stepGraph ??= new CudaGraph(_stream.Handle, autoFreeAllocationsOnRelaunch: true);
+        if (_stepGraph is null)
+        {
+            _stepGraph = new CudaGraph(_stream.Handle, autoFreeAllocationsOnRelaunch: true);
+            GC.SuppressFinalize(_stepGraph);
+        }
         _stepGraph.Reset();
         lock (_transferState.CaptureAllocs)
         {
@@ -5777,7 +6105,7 @@ public sealed class CudaBackend : IBackend
     {
         lock (_cudnnSdpaLock)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _lifecycleState) != LifecycleActive, this);
 
             // Callers perform this check before entering, but another request can publish a failure while this
             // request waits for the shared cuDNN handle. Recheck under the same lock that serializes attempts so
@@ -8513,12 +8841,118 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>Splits <paramref name="input"/> into <paramref name="outputs"/> along <paramref name="dim"/>. Delegates to the CPU kernel.</summary>
-    /// <remarks>Split is pure memcpy and rare in our pipelines (one call per VAE encode), so the GPU round-trip is
-    /// acceptable. TODO: GPU-native Split via cuMemcpyDtoDAsync.</remarks>
+    /// <summary>
+    /// Splits <paramref name="input"/> into device-resident <paramref name="outputs"/> along
+    /// <paramref name="dim"/>, preserving every F32/F16/BF16 payload bit.
+    /// </summary>
     public void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim)
     {
-        HartsyInference.Cpu.Kernels.ElementWiseKernels.Split(outputs, input, dim);
+        SplitGeometry geometry = SplitContract.Validate(outputs, input, dim);
+        using NvtxRange _nvtx = NvtxRange.Push("Split");
+        EnterOp();
+
+        // Large contiguous outer slices are fastest on the copy engine, but many tiny copies serialize launch
+        // submission (last-dimension split can have millions of outer rows). Cap that path at 16 commands and
+        // require at least 64 KiB per command; the general kernel then handles fragmented geometry in one launch
+        // per output with coalesced reads/writes and a grid-stride loop.
+        bool useDeviceCopies = dim == 0;
+        if (!useDeviceCopies && geometry.Outer <= 16 / outputs.Length)
+        {
+            useDeviceCopies = true;
+            for (int t = 0; t < outputs.Length; t++)
+            {
+                long sliceBytes = checked(outputs[t].Shape[dim] * geometry.Inner * geometry.ElementSize);
+                if (sliceBytes < 64 * 1024)
+                {
+                    useDeviceCopies = false;
+                    break;
+                }
+            }
+        }
+        if (!useDeviceCopies)
+            EnsureKernels();
+
+        ulong pInput = 0;
+        ulong[] pOutputs = new ulong[outputs.Length];
+        nuint[] outputBytes = new nuint[outputs.Length];
+        bool[] cachedOutputs = new bool[outputs.Length];
+        try
+        {
+            pInput = GpuTransferHelper.CopyToDevice(input);
+            for (int t = 0; t < outputs.Length; t++)
+            {
+                outputBytes[t] = checked((nuint)(outputs[t].ElementCount * geometry.ElementSize));
+                pOutputs[t] = GpuTransferHelper.AllocateDevice(outputBytes[t]);
+            }
+
+            long splitOffset = 0;
+            for (int t = 0; t < outputs.Length; t++)
+            {
+                long outputDimension = outputs[t].Shape[dim];
+                if (useDeviceCopies)
+                {
+                    long inputStride = checked(geometry.InputDimension * geometry.Inner);
+                    long outputStride = checked(outputDimension * geometry.Inner);
+                    nuint sliceBytes = checked((nuint)(outputStride * geometry.ElementSize));
+                    for (long outer = 0; outer < geometry.Outer; outer++)
+                    {
+                        ulong sourceOffsetBytes = checked((ulong)(
+                            checked(outer * inputStride + checked(splitOffset * geometry.Inner))
+                            * geometry.ElementSize));
+                        ulong outputOffsetBytes = checked((ulong)(
+                            checked(outer * outputStride) * geometry.ElementSize));
+                        CudaMemory.CopyDeviceToDeviceAsync(
+                            pOutputs[t] + outputOffsetBytes,
+                            pInput + sourceOffsetBytes,
+                            sliceBytes,
+                            _stream.Handle);
+                    }
+                }
+                else
+                {
+                    _kernels!.LaunchSplitSlice(
+                        geometry.ElementSize == sizeof(ushort),
+                        pOutputs[t],
+                        pInput,
+                        geometry.Outer,
+                        geometry.InputDimension,
+                        outputDimension,
+                        geometry.Inner,
+                        splitOffset,
+                        _stream.Handle);
+                }
+                splitOffset = checked(splitOffset + outputDimension);
+            }
+
+            // Publish only after every copy/kernel launch succeeds. If a later binding fails, unpublish every
+            // earlier result before propagating the exception so Split never exposes a partial new result set.
+            try
+            {
+                for (int t = 0; t < outputs.Length; t++)
+                {
+                    GpuTransferHelper.CacheActivation(outputs[t], pOutputs[t], outputBytes[t]);
+                    cachedOutputs[t] = true;
+                }
+            }
+            catch
+            {
+                for (int t = 0; t < outputs.Length; t++)
+                {
+                    if (GpuTransferHelper.TryUncacheActivation(outputs[t], pOutputs[t]))
+                        cachedOutputs[t] = false;
+                }
+                throw;
+            }
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pInput);
+            for (int t = 0; t < pOutputs.Length; t++)
+            {
+                if (!cachedOutputs[t])
+                    GpuTransferHelper.FreeDevice(pOutputs[t]);
+            }
+        }
     }
 
     #endregion
@@ -8822,7 +9256,9 @@ public sealed class CudaBackend : IBackend
     public void FreeWeights(IEnumerable<Tensor> weights)
     {
         EnterOp();
-        GpuTransferHelper.FreeWeights(weights);
+        List<Tensor> materialized = weights as List<Tensor> ?? [.. weights];
+        GpuTransferHelper.FreeWeights(materialized);
+        foreach (Tensor weight in materialized) FreeFp8InputScale(weight);
     }
 
     public void FreeActivations()
@@ -8907,8 +9343,9 @@ public sealed class CudaBackend : IBackend
             Try(conv.Dispose);
         // EvictAll clears weights + casts + activations (syncing the stream first); the trim then returns the
         // stream-ordered pool's reservations so cuMemGetInfo/persistent allocs see the memory as actually free.
-        Try(FreeW8A8Cache);
+        Try(() => FreeW8A8Cache());
         Try(GpuTransferHelper.EvictAll);
+        Try(FreeAllFp8InputScales);
         Try(GpuTransferHelper.TrimPool);
         Try(() => freeAfter = (long)_context.GetMemoryInfo().freeBytes);
         if (freeBefore >= 0 && freeAfter >= 0)
@@ -8937,15 +9374,30 @@ public sealed class CudaBackend : IBackend
     public void FreePreloadedWeights()
     {
         EnterOp();
-        FreeW8A8Cache();
-        GpuTransferHelper.FreeAllCached();
+        FreeAllWeightCachesCore();
     }
 
     /// <summary>Evicts all cached GPU weight buffers. Call between pipeline stages to free VRAM.</summary>
     public void EvictGpuCache()
     {
         EnterOp();
-        GpuTransferHelper.EvictAll();
+        FreeAllWeightCachesCore();
+    }
+
+    private void FreeAllWeightCachesCore()
+    {
+        List<Exception>? failures = null;
+        void Attempt(Action cleanup)
+        {
+            try { cleanup(); }
+            catch (Exception error) { (failures ??= []).Add(error); }
+        }
+        // W8A8 frees are stream ordered; the transfer-cache sweep drains that stream before static FP8 scale
+        // pointers are synchronously released. Every independent owner is attempted even after an earlier error.
+        Attempt(() => FreeW8A8Cache());
+        Attempt(GpuTransferHelper.EvictAll);
+        Attempt(FreeAllFp8InputScales);
+        if (failures is not null) throw new AggregateException("One or more CUDA weight caches failed to release.", failures);
     }
 
     /// <summary>Returns GPU cache stats: (cachedBytes, hits, misses).</summary>
@@ -9026,120 +9478,189 @@ public sealed class CudaBackend : IBackend
 
     #region Disposal
 
+    /// <summary>Releases every resource owned by this backend exactly once.</summary>
+    /// <remarks>Callers must quiesce inference work (the server's DeviceGate/request drain) before disposal. Concurrent
+    /// Dispose callers are supported; Dispose racing an in-flight tensor operation is intentionally not.</remarks>
     public void Dispose()
     {
-        if (!_disposed)
+        Exception? failure = null;
+        int observed = Interlocked.CompareExchange(ref _lifecycleState, LifecycleClaimed, LifecycleActive);
+        if (observed == LifecycleActive)
         {
-            _disposed = true;
-
-            if (NvtxRange.ProfileEnabled)
-                NvtxRange.DumpProfile(Environment.GetEnvironmentVariable("HARTSY_PROFILE_OUT") ?? "/tmp/hartsy_profile.txt");
-
-            // Bind context on the disposing thread so cuMemFree / cublasDestroy /
-            // cuStreamDestroy don't hit CUDA_ERROR_INVALID_CONTEXT. Disposal can run
-            // on the finalizer thread or a different worker than constructed us.
-            EnterOp();
-
-            if (_dp4aScratch != 0) { GpuTransferHelper.FreeDevice(_dp4aScratch); _dp4aScratch = 0; _dp4aScratchBytes = 0; }
-            if (_argmaxScratch != 0) { GpuTransferHelper.FreeDevice(_argmaxScratch); _argmaxScratch = 0; }
-            if (_ssmDeltaScratch != 0) { GpuTransferHelper.FreeDevice(_ssmDeltaScratch); _ssmDeltaScratch = 0; _ssmDeltaScratchBytes = 0; }
-            FreeW8A8Cache();
-            GpuTransferHelper.EvictAll();
-            _streamingCache.UnregisterPinnedSources();
-            lock (_cudnnSdpaLock)
-            {
-                // TryCudnnSdpa holds this lock from lazy construction through enqueue/cache publication. Waiting
-                // here prevents concurrent disposal of the kernel table or cuDNN handle beneath a first call.
-                _kernels?.Dispose();
-                CudnnSdpa? session = _cudnnSdpa;
-                _cudnnSdpa = null;
-                if (session is not null)
-                {
-                    try
-                    {
-                        session.Dispose();
-                        Interlocked.Increment(ref _cudnnSdpaDisposedSessionCount);
-                    }
-                    catch (Exception cleanupError)
-                    {
-                        // Backend disposal must continue through the remaining CUDA handles and context even if a
-                        // native attention allocation reports a teardown error. The session was detached first.
-                        HartsyInference.Core.Logging.Logs.Warning(
-                            $"[CUDA] cuDNN SDPA teardown failed during backend disposal: {cleanupError.Message}");
-                    }
-                }
-            }
-
-            if (_fp8Executor is not null)
-            {
-                _fp8Executor.Dispose();
-                _fp8Executor = null;
-            }
-
-            if (_int8Executor is not null)
-            {
-                _int8Executor.Dispose();
-                _int8Executor = null;
-            }
-
-            if (_ltGemmExecutor is not null)
-            {
-                _ltGemmExecutor.Dispose();
-                _ltGemmExecutor = null;
-            }
-
-            if (_tensorCoreGemm is not null)
-            {
-                _tensorCoreGemm.Dispose();
-                _tensorCoreGemm = null;
-            }
-
-            if (_cudnnConv is not null)
-            {
-                _cudnnConv.Dispose();
-                _cudnnConv = null;
-            }
-
-            if (_stepGraph is not null)
-            {
-                _stepGraph.Dispose();
-                _stepGraph = null;
-            }
-
-            if (_cublasHandle != 0)
-            {
-                CublasApi.cublasDestroy(_cublasHandle);
-                _cublasHandle = 0;
-            }
-
-            // Drop this backend's registration before tearing the context down, so nothing later resolves to
-            // freed stream handles. State keys are per-backend and never reused, so this backend's
-            // finalizer-cleanup bucket is discarded unconditionally (EvictAll above already freed everything
-            // those callbacks could reference) — a live same-device sibling has its own key, bucket, and
-            // stream binding, all untouched by this teardown.
-            GpuTransferHelper.Unregister(_transferState);
-            HartsyInference.Core.Tensors.Tensor.DiscardPendingFinalizerGpuCleanup(_transferState.Key);
-            DeviceMempoolPolicy.Release(_context.DeviceOrdinal);
-
-            // Order: upload stream first (no other code holds events on it after
-            // EvictAll above), then compute stream, then context.
-            _uploadStream.Dispose();
-            _stream.Dispose();
-            _context.Dispose();
+            failure = RunClaimedCleanup(abandoned: false);
+        }
+        else if (observed == LifecycleClaimed)
+        {
+            // Concurrent Dispose callers observe deterministic completion without racing a partially torn-down
+            // native object graph. The winner alone executes cleanup.
+            _cleanupCompleted.Wait();
+            failure = Volatile.Read(ref _cleanupFailure);
         }
         GC.SuppressFinalize(this);
+        if (failure is not null) throw failure;
+    }
+
+    private Exception? RunClaimedCleanup(bool abandoned)
+    {
+        Interlocked.Increment(ref _cleanupExecutionCount);
+        List<Exception>? failures = null;
+        GpuTransferHelper.State? state = _transferState;
+
+        void Attempt(string resource, Action cleanup)
+        {
+            try { cleanup(); }
+            catch (Exception error)
+            {
+                (failures ??= []).Add(new InvalidOperationException($"CUDA cleanup failed for {resource}.", error));
+            }
+        }
+
+        try
+        {
+            // This is deliberately the first cleanup transition. The State remains strongly available through the
+            // local explicit handle, but Resolve/_sole/_byContext/StatesOnDevice can no longer select it while native
+            // streams, caches, and handles are being dismantled. It is inside the terminal try/finally so even an
+            // unexpected managed retirement failure cannot strand LifecycleClaimed or deadlock another Dispose.
+            if (state is not null) Attempt("transfer-state route retirement", () => GpuTransferHelper.BeginRetire(state));
+
+            if (!abandoned && NvtxRange.ProfileEnabled)
+                Attempt("NVTX profile dump", () => NvtxRange.DumpProfile(
+                    Environment.GetEnvironmentVariable("HARTSY_PROFILE_OUT") ?? "/tmp/hartsy_profile.txt"));
+
+            if (_context is not null) Attempt("context binding", _context.EnsureCurrent);
+            CudaGraph? graph = _stepGraph;
+            _stepGraph = null;
+            bool graphCapturing = _stepGraphCapturing;
+            _stepGraphCapturing = false;
+            if (graph is not null && graphCapturing) Attempt("open graph capture abort", graph.AbortCapture);
+            if (state is not null && graphCapturing)
+            {
+                state.TrackCaptureWindow = false;
+                nint captureStream = state.StreamHandle;
+                if (captureStream != 0)
+                    Attempt("aborted graph-private cache purge", () => GpuTransferHelper.PurgeAbortedCaptureAllocs(state, captureStream));
+            }
+            if (graph is not null) Attempt("step graph", graph.Dispose);
+
+            // Synchronizing an actively capturing stream is illegal, so capture is aborted/purged above first.
+            if (_stream is not null) Attempt("compute-stream drain", _stream.Synchronize);
+            if (_uploadStream is not null) Attempt("upload-stream drain", _uploadStream.Synchronize);
+
+            ulong dp4aScratch = _dp4aScratch;
+            _dp4aScratch = 0;
+            _dp4aScratchBytes = 0;
+            ulong argmaxScratch = _argmaxScratch;
+            _argmaxScratch = 0;
+            ulong ssmScratch = _ssmDeltaScratch;
+            _ssmDeltaScratch = 0;
+            _ssmDeltaScratchBytes = 0;
+            if (state is not null)
+            {
+                if (dp4aScratch != 0) Attempt("dp4a scratch", () => GpuTransferHelper.FreeDevice(state, dp4aScratch));
+                if (argmaxScratch != 0) Attempt("argmax scratch", () => GpuTransferHelper.FreeDevice(state, argmaxScratch));
+                if (ssmScratch != 0) Attempt("SSM delta scratch", () => GpuTransferHelper.FreeDevice(state, ssmScratch));
+                Attempt("W8A8 caches", () => FreeW8A8Cache(state));
+            }
+            Attempt("FP8 input-scale cache", FreeAllFp8InputScales);
+            if (state is not null) Attempt("transfer caches", () => GpuTransferHelper.EvictAll(state));
+            if (_streamingCache is not null) Attempt("streaming pinned staging", _streamingCache.UnregisterPinnedSources);
+
+            // The explicit-state frees above can enqueue stream-ordered releases. Drain again before destroying
+            // modules/executors/streams, independently attempting both streams even if one reports an error.
+            if (_stream is not null) Attempt("post-free compute-stream drain", _stream.Synchronize);
+            if (_uploadStream is not null) Attempt("post-free upload-stream drain", _uploadStream.Synchronize);
+
+            if (_kernels is not null)
+                Attempt("kernel modules", () => { lock (_cudnnSdpaLock) _kernels.Dispose(); });
+
+            CudnnSdpa? sdpa = null;
+            Attempt("cuDNN SDPA detach", () =>
+            {
+                lock (_cudnnSdpaLock)
+                {
+                    sdpa = _cudnnSdpa;
+                    _cudnnSdpa = null;
+                }
+            });
+            if (sdpa is not null)
+            {
+                Attempt("cuDNN SDPA session", () =>
+                {
+                    sdpa.Dispose();
+                    Interlocked.Increment(ref _cudnnSdpaDisposedSessionCount);
+                });
+            }
+
+            Fp8GemmExecutor? fp8;
+            Int8GemmExecutor? int8;
+            LtGemmExecutor? lt;
+            TensorCoreGemm? tensorCore;
+            lock (_nativeExecutorLock)
+            {
+                fp8 = _fp8Executor;
+                _fp8Executor = null;
+                int8 = _int8Executor;
+                _int8Executor = null;
+                lt = _ltGemmExecutor;
+                _ltGemmExecutor = null;
+                tensorCore = _tensorCoreGemm;
+                _tensorCoreGemm = null;
+            }
+            if (fp8 is not null) Attempt("FP8 GEMM executor", fp8.Dispose);
+            if (int8 is not null) Attempt("INT8 GEMM executor", int8.Dispose);
+            if (lt is not null) Attempt("cuBLASLt GEMM executor", lt.Dispose);
+            if (tensorCore is not null) Attempt("tensor-core GEMM executor", tensorCore.Dispose);
+            CudnnConv? conv = Interlocked.Exchange(ref _cudnnConv, null);
+            if (conv is not null) Attempt("cuDNN convolution", conv.Dispose);
+
+            nint cublas = Interlocked.Exchange(ref _cublasHandle, 0);
+            if (cublas != 0) Attempt("cuBLAS handle", () => CublasApi.cublasDestroy(cublas).ThrowOnCublasError());
+
+            if (state is not null)
+                Attempt("tensor finalizer-cleanup bucket", () => Tensor.RetireFinalizerGpuCleanup(state.Key));
+
+            if (_context is not null && Interlocked.Exchange(ref _mempoolPolicyAcquired, 0) != 0)
+                Attempt("device mempool policy", () => DeviceMempoolPolicy.Release(_context.DeviceOrdinal));
+
+            // Destroy side stream first, then compute stream, then release the primary-context retain.
+            if (_uploadStream is not null) Attempt("upload stream", _uploadStream.Dispose);
+            if (_stream is not null) Attempt("compute stream", _stream.Dispose);
+            if (_context is not null) Attempt("CUDA context", _context.Dispose);
+        }
+        finally
+        {
+            // CompleteRetire is managed-only and must happen even if a future cleanup edit escapes Attempt.
+            if (state is not null)
+            {
+                try { GpuTransferHelper.CompleteRetire(state); }
+                catch (Exception error)
+                {
+                    (failures ??= []).Add(new InvalidOperationException("CUDA cleanup failed to retire transfer state.", error));
+                }
+            }
+            _cleanupFailure = failures is null
+                ? null
+                : new AggregateException("One or more CUDA backend resources failed to release.", failures);
+            Volatile.Write(ref _lifecycleState, LifecycleCleaned);
+            _cleanupCompleted.Set();
+        }
+
+        return _cleanupFailure;
     }
 
     ~CudaBackend()
     {
-        if (!_disposed)
+        if (Interlocked.CompareExchange(ref _lifecycleState, LifecycleClaimed, LifecycleActive) != LifecycleActive)
+            return;
+        try
         {
-            _disposed = true;
-            if (_cublasHandle != 0)
-            {
-                CublasApi.cublasDestroy(_cublasHandle);
-                _cublasHandle = 0;
-            }
+            BackendAbandonmentReaper.Enqueue(this);
+        }
+        catch
+        {
+            // A finalizer must never terminate the process. No native call is legal here; an enqueue OOM is the
+            // sole case where the process cannot preserve the abandoned instance for managed-worker cleanup.
+            Interlocked.Increment(ref _abandonedCleanupFailedCount);
         }
     }
 

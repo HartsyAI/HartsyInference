@@ -243,18 +243,21 @@ public static class CudaMemory
 
     /// <summary>Frees device memory asynchronously on the given stream.</summary>
     public static void FreeAsync(ulong dptr, nint stream)
+        => FreeAsync(dptr, stream, GpuTransferHelper.CurrentState);
+
+    /// <summary>Explicit-owner variant for teardown after the State has been excluded from implicit routing.</summary>
+    internal static void FreeAsync(ulong dptr, nint stream, GpuTransferHelper.State state)
     {
         if (dptr != 0)
         {
-            GpuTransferHelper.State s = GpuTransferHelper.CurrentState;
-            if (s.TrackCaptureWindow)
+            if (state.TrackCaptureWindow)
             {
-                lock (s.CaptureAllocs)
+                lock (state.CaptureAllocs)
                 {
-                    if (s.CaptureAllocs.Remove(dptr, out (nuint bytes, nint stream) info))
+                    if (state.CaptureAllocs.Remove(dptr, out (nuint bytes, nint stream) info))
                     {
-                        s.CaptureFreeBytes += (long)info.bytes;
-                        s.CaptureFreeCount++;
+                        state.CaptureFreeBytes += (long)info.bytes;
+                        state.CaptureFreeCount++;
                     }
                     else
                     {

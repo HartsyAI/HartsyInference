@@ -2632,13 +2632,12 @@ public sealed class VulkanBackend : IBackend
 
     public unsafe void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim)
     {
+        SplitGeometry geometry = SplitContract.Validate(outputs, input, dim);
         // CPU fallback
-        long elemSize = input.DType.SizeInBytes;
+        long elemSize = geometry.ElementSize;
         byte* inPtr = (byte*)input.DataPointer;
-        long innerStride = 1;
-        for (int d = dim + 1; d < input.Shape.Rank; d++) innerStride *= input.Shape[d];
-        long outerStride = 1;
-        for (int d = 0; d < dim; d++) outerStride *= input.Shape[d];
+        long innerStride = geometry.Inner;
+        long outerStride = geometry.Outer;
 
         long curDimOffset = 0;
         foreach (Tensor t in outputs)

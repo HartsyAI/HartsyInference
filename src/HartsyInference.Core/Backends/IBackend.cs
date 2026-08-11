@@ -2188,7 +2188,12 @@ public interface IBackend : IDisposable
     /// <summary>Concatenate tensors along the specified dimension.</summary>
     void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim);
 
-    /// <summary>Split a tensor into chunks along the specified dimension.</summary>
+    /// <summary>
+    /// Splits a nonempty contiguous F32, F16, or BF16 tensor into nonempty chunks along
+    /// <paramref name="dim"/>. Outputs must have the same dtype and rank as the input, match every
+    /// non-split dimension, exactly partition the split dimension, and share no storage with the input
+    /// or one another. Payload bits are copied unchanged.
+    /// </summary>
     void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim);
 
     // ── Convolution ─────────────────────────────────────────────────────
