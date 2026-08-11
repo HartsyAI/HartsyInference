@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
@@ -91,5 +93,51 @@ public sealed class VideoService : IVideoService
                 return VideoAudioResolver.Resolve(result, resolved, seconds);
             },
             cancel).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc/>
+    public async IAsyncEnumerable<VideoFrame> GenerateFramesAsync(ModelSpec spec, VideoRequest request,
+        IProgress<StepPreview>? progress = null, [EnumeratorCancellation] CancellationToken cancel = default)
+    {
+        RejectUnsupported(spec, request);
+        IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(spec, request);
+        if (!pipeline.SupportsStreaming)
+        {
+            throw new NotSupportedException($"Video model family '{InferenceEngine.FamilyIdFor(spec)}' does not support streaming generation.");
+        }
+        VideoRequest resolved = InferenceEngine.VideoDefaultsFor(spec).Apply(request);
+
+        // Bridges the pipeline's own IAsyncEnumerable (whose first MoveNextAsync blocks synchronously through the
+        // whole denoise loop — there's no await point until the VAE decode phase starts yielding groups) onto a
+        // background thread via a bounded channel, so the calling thread (an ASP.NET request handler when the
+        // extension awaits this) isn't pinned for the denoise duration. Mirrors GenerateAsync's Task.Run, but
+        // needs a channel instead of a single Task<T> because this method yields incrementally rather than once.
+        Channel<VideoFrame> channel = Channel.CreateBounded<VideoFrame>(
+            new BoundedChannelOptions(4) { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
+        Task producer = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (VideoFrame frame in pipeline.GenerateFramesAsync(resolved, progress, cancel).WithCancellation(cancel).ConfigureAwait(false))
+                {
+                    await channel.Writer.WriteAsync(frame, cancel).ConfigureAwait(false);
+                }
+                channel.Writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                channel.Writer.TryComplete(ex);
+            }
+        }, cancel);
+
+        await foreach (VideoFrame frame in channel.Reader.ReadAllAsync(cancel).ConfigureAwait(false))
+        {
+            yield return frame;
+        }
+        // Observes the producer's result: rethrows whatever TryComplete(ex) captured (the channel reader itself
+        // already threw that same exception via ReadAllAsync above, but awaiting here also surfaces a producer-side
+        // failure that happened AFTER the channel completed successfully — there isn't one today, but this is the
+        // same "don't let a background Task's fault go unobserved" discipline as GenerateAsync's Task.Run).
+        await producer.ConfigureAwait(false);
     }
 }

@@ -205,6 +205,89 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
+    public bool SupportsStreaming => true;
+
+    /// <summary>Streaming sibling of <see cref="Generate"/> (Tier 3.5). Scoped tight and honestly: plain T2V only
+    /// today — no init image / end frame (the concat-I2V and TI2V-conditioned paths both add extra
+    /// encode/dispose bookkeeping around the denoise call that hasn't been exercised through this path, so they
+    /// throw rather than silently reusing the buffered branch's logic unverified). Text-encode setup is a
+    /// deliberate near-duplicate of <see cref="Generate"/>'s (not extracted into a shared helper) — the two
+    /// methods' cleanup shapes differ enough (a plain try/finally here vs. <see cref="Generate"/>'s
+    /// multi-tensor try/finally covering branches this method never takes) that a shared helper would need its
+    /// own parameter surface for "which of these five tensors exist," which isn't simpler than the duplication.</summary>
+    public async IAsyncEnumerable<VideoFrame> GenerateFramesAsync(VideoRequest request, IProgress<StepPreview>? progress,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancel)
+    {
+        cancel.ThrowIfCancellationRequested();
+        if (request.InitImage is not null || request.VideoEndFrame is not null)
+        {
+            throw new NotSupportedException(
+                "HartsyInference: streaming generation only supports plain text-to-video for Wan today (no init image / end frame) — use the buffered path.");
+        }
+        if (_config.InChannels > _config.VaeLatentChannels)
+        {
+            throw new NotSupportedException(
+                "HartsyInference: streaming generation is not available for this Wan I2V (concat-conditioned) variant — use the buffered path.");
+        }
+
+        string prompt = request.Prompt;
+        string negative = request.NegativePrompt ?? "";
+        int steps = request.Steps ?? _config.NumInferenceSteps;
+        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 81, step: _config.VaeTemporalCompression);
+        float cfgScale = request.CfgScale ?? _config.GuidanceScale;
+        (int width, int height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
+
+        int[] promptTokens = _tokenizer.Encode(prompt);
+        int[] negTokens = _tokenizer.Encode(negative);
+        Tensor batch = _umt5.Encode(_textBackend, [promptTokens, negTokens],
+            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
+        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
+        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
+        batch.Dispose();
+        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
+        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
+        _textBackend.Sync();
+        _textBackend.FreeWeights(_umt5.EnumerateWeights());
+
+        VideoGenerationRequest inner = new VideoGenerationRequest
+        {
+            Prompt = prompt,
+            NegativePrompt = negative,
+            Width = width,
+            Height = height,
+            Steps = steps,
+            CfgScale = cfgScale,
+            Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            FlowShift = DefaultFlowShift,
+        };
+        Action<GenerationProgress> bridge = p =>
+        {
+            cancel.ThrowIfCancellationRequested();
+            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+        };
+
+        try
+        {
+            int emitted = 0;
+            // _pipeline.GenerateFramesAsync yields HartsyInference.Video.VideoFrame (the low-level decode-side
+            // record) — mapped here into HartsyInference.Engine.Requests.VideoFrame (the native request/result
+            // DTO this interface's callers expect), same field-for-field shape as VideoRecipeUtils.ToVideoFrames
+            // does for the buffered path.
+            await foreach (HartsyInference.Video.VideoFrame frame in _pipeline.GenerateFramesAsync(promptEmbeds, negEmbeds, inner, numFrames, bridge, cancellationToken: cancel).ConfigureAwait(false))
+            {
+                emitted++;
+                yield return new VideoFrame { Rgb = frame.Rgb, Width = frame.Width, Height = frame.Height, Index = frame.Index };
+            }
+            Logs.Info($"[WanVideoRecipePipeline] Streamed {emitted} frames {width}x{height} (T2V).");
+        }
+        finally
+        {
+            promptEmbeds.Dispose();
+            negEmbeds.Dispose();
+        }
+    }
+
+    /// <inheritdoc/>
     public void Dispose()
     {
         _pipeline.Dispose();
