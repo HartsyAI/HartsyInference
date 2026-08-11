@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -204,8 +205,16 @@ public sealed unsafe class HiDreamTransformer : IDisposable
     /// <param name="t5Hidden">T5-XXL hidden states already projected to [B, S_t5, inner_dim] by the pipeline (caption_projection is run inside this method, so pass the raw T5 hidden of shape [B, S_t5, 4096]).</param>
     /// <param name="llamaHiddenLayers">List of Llama hidden states, one per <see cref="HiDreamConfig.LlamaLayers"/> entry. Each tensor is shape [B, S_l, caption_channels[0]] (= 4096). Length must equal NumLayers + NumSingleLayers.</param>
     /// <param name="pooledEmbeds">[B, text_emb_dim=2048] pooled CLIP-L+CLIP-G embedding.</param>
+    /// <param name="stepCache">Optional across-step First-Block cache (docs/Research/STEP_ACCELERATION.md §2;
+    /// same pattern as <see cref="Sd3Transformer.Forward"/>). HiDream is double-stream-then-single-stream, not
+    /// SD3's uniform dual-stream loop, but the image token tensor stays the same shape (<c>[B, imgSeqLen,
+    /// InnerDim]</c>) from the first double block's output through to the final pre-projection <c>imgFinal</c> —
+    /// so the same "cache block 0's image output, skip straight to the final layer on a hit" trick applies across
+    /// the double→single transition unchanged. On a hit, the entire rest of both block stacks is skipped,
+    /// including the per-block Llama-conditioning concat every remaining block would have consumed (those
+    /// projections are computed once up front regardless — this doesn't affect the caption-projection cost).</param>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep,
-        Tensor t5Hidden, IReadOnlyList<Tensor> llamaHiddenLayers, Tensor pooledEmbeds)
+        Tensor t5Hidden, IReadOnlyList<Tensor> llamaHiddenLayers, Tensor pooledEmbeds, DeviceFeatureCache? stepCache = null)
     {
         ThrowIfDisposed();
         int batch = (int)latent.Shape[0];
@@ -272,6 +281,8 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         Tensor curImg = imgTokens;
         Tensor curEncoder = initialEncoder;
         int blockId = 0;
+        Tensor? cacheAnchor = null;
+        Tensor? hitReconstruction = null;
 
         for (int b = 0; b < _doubleBlocks.Length; b++)
         {
@@ -291,7 +302,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             Tensor reslicedEncoder = SliceSeq(backend, newEncoderFull, initialEncoderSeqLen);
             newEncoderFull.Dispose();
 
-            if (!ReferenceEquals(curImg, imgTokens)) curImg.Dispose();
+            if (!ReferenceEquals(curImg, imgTokens) && !ReferenceEquals(curImg, cacheAnchor)) curImg.Dispose();
             if (!ReferenceEquals(curEncoder, initialEncoder)) curEncoder.Dispose();
             curImg = newImg;
             curEncoder = reslicedEncoder;
@@ -300,51 +311,95 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             Probe($"double_{b}_enc", curEncoder);
 
             blockId++;
+
+            // Gate right after the very first block in the whole double+single stack. On a hit, skip
+            // straight past every remaining double block, the double→single transition, AND every single
+            // block — the image token tensor is the same shape ([B, imgSeqLen, InnerDim]) at every one of
+            // those points since InnerDim is constant across both stacks, so the cached residual reconstructs
+            // the final pre-projection state directly. Real-weight confirmed (HiDreamStepCacheRealWeightTests.cs,
+            // 2026-08-10): the anchor/reconstruction shape match holds across the double→single transition —
+            // real reuses fired, no StoreResidual/ApplyResidual shape exception, output visually matched
+            // cache-off. HiDream also needed the late-window gate engaged (threshold alone collapsed the image —
+            // see that test's class doc for the finding), unlike SD3/Chroma/Flux which didn't need it.
+            if (b == 0 && stepCache is not null)
+            {
+                if (stepCache.ShouldCompute(backend, curImg))
+                {
+                    cacheAnchor = curImg;
+                }
+                else
+                {
+                    hitReconstruction = stepCache.ApplyResidual(backend, curImg);
+                    curImg.Dispose();
+                    curEncoder.Dispose();
+                    break;
+                }
+            }
         }
+        bool cacheHit = hitReconstruction is not null;
+        // curEncoder was already reassigned away from initialEncoder in the loop's first iteration (which
+        // always runs before the cache gate can fire), on both the hit and miss path — safe unconditionally.
         if (!ReferenceEquals(curEncoder, initialEncoder)) initialEncoder.Dispose();
         // The first double block replaced curImg; the x_embed output itself was never freed (a ~40 MB/forward
         // VRAM leak at 1024² that compounded across the CFG denoise loop).
         if (!ReferenceEquals(curImg, imgTokens)) imgTokens.Dispose();
 
-        // ── 7. Switch to single-stream: concat current image with the running encoder, then per-block llama ──
-        Tensor jointBeforeSingle = ConcatSeq(backend, curImg, curEncoder);
-        curImg.Dispose();
-        curEncoder.Dispose();
-
-        int singleStreamBaseSeqLen = imgSeqLen + initialEncoderSeqLen;
-        int singleStreamTotalSeqLen = singleStreamBaseSeqLen + perLayerLlamaSeqLen;
-
-        // Same rope table as the double-stream phase (identical args) — EnsureRope no-ops on the sig hit.
-        EnsureRope(imgSeqLen, patH, patW, initialEncoderSeqLen + perLayerLlamaSeqLen);
-
-        Tensor curJoint = jointBeforeSingle;
-        for (int b = 0; b < _singleBlocks.Length; b++)
+        Tensor imgFinal;
+        if (cacheHit)
         {
-            Tensor curLlama = llamaProj[blockId];
-            Tensor blockIn = ConcatSeq(backend, curJoint, curLlama);
-
-            Tensor newJointFull = _singleBlocks[b].ForwardSingle(
-                backend, blockIn, temb, _rope, imgSeqLen, singleStreamTotalSeqLen);
-            blockIn.Dispose();
-
-            // Slice off the appended llama tail.
-            Tensor resliced = SliceSeq(backend, newJointFull, singleStreamBaseSeqLen);
-            newJointFull.Dispose();
-
-            curJoint.Dispose();
-            curJoint = resliced;
-            HiDreamDebugDump.Dump($"single_block_{b}", curJoint);
-            Probe($"single_{b}", curJoint);
-            blockId++;
+            imgFinal = hitReconstruction!;
+            // Single-stream phase never ran — nothing else references these.
+            for (int i = 0; i < llamaProj.Length; i++) llamaProj[i].Dispose();
+            t5Proj.Dispose();
         }
+        else
+        {
+            // ── 7. Switch to single-stream: concat current image with the running encoder, then per-block llama ──
+            Tensor jointBeforeSingle = ConcatSeq(backend, curImg, curEncoder);
+            curImg.Dispose();
+            curEncoder.Dispose();
 
-        // ── 8. Extract image tokens (first imgSeqLen of curJoint) ──
-        Tensor imgFinal = SliceSeq(backend, curJoint, imgSeqLen);
-        curJoint.Dispose();
+            int singleStreamBaseSeqLen = imgSeqLen + initialEncoderSeqLen;
+            int singleStreamTotalSeqLen = singleStreamBaseSeqLen + perLayerLlamaSeqLen;
 
-        // Free per-layer projections.
-        for (int i = 0; i < llamaProj.Length; i++) llamaProj[i].Dispose();
-        t5Proj.Dispose();
+            // Same rope table as the double-stream phase (identical args) — EnsureRope no-ops on the sig hit.
+            EnsureRope(imgSeqLen, patH, patW, initialEncoderSeqLen + perLayerLlamaSeqLen);
+
+            Tensor curJoint = jointBeforeSingle;
+            for (int b = 0; b < _singleBlocks.Length; b++)
+            {
+                Tensor curLlama = llamaProj[blockId];
+                Tensor blockIn = ConcatSeq(backend, curJoint, curLlama);
+
+                Tensor newJointFull = _singleBlocks[b].ForwardSingle(
+                    backend, blockIn, temb, _rope, imgSeqLen, singleStreamTotalSeqLen);
+                blockIn.Dispose();
+
+                // Slice off the appended llama tail.
+                Tensor resliced = SliceSeq(backend, newJointFull, singleStreamBaseSeqLen);
+                newJointFull.Dispose();
+
+                curJoint.Dispose();
+                curJoint = resliced;
+                HiDreamDebugDump.Dump($"single_block_{b}", curJoint);
+                Probe($"single_{b}", curJoint);
+                blockId++;
+            }
+
+            // ── 8. Extract image tokens (first imgSeqLen of curJoint) ──
+            imgFinal = SliceSeq(backend, curJoint, imgSeqLen);
+            curJoint.Dispose();
+
+            // Free per-layer projections.
+            for (int i = 0; i < llamaProj.Length; i++) llamaProj[i].Dispose();
+            t5Proj.Dispose();
+
+            if (cacheAnchor is not null)
+            {
+                stepCache!.StoreResidual(backend, cacheAnchor, imgFinal);
+                cacheAnchor.Dispose();
+            }
+        }
 
         // ── 9. Final layer ──
         Tensor projected = ApplyFinalLayer(backend, imgFinal, temb, batch, imgSeqLen);

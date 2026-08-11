@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -138,7 +139,14 @@ public sealed unsafe class Sd3Transformer : IDisposable
     /// <param name="timestep">Timestep value (sigma * 1000 for flow matching).</param>
     /// <param name="context">Projected context embeddings [B, 154, hidden_size] (already through context_embedder).</param>
     /// <param name="pooled">Pooled text projection [B, 2048].</param>
-    public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor context, Tensor pooled)
+    /// <param name="stepCache">Optional across-step First-Block cache (docs/Research/STEP_ACCELERATION.md §2). SD3
+    /// is a dual-stream (image, context) MMDiT, unlike the packed single-stream DiTs <see cref="DeviceFeatureCache"/>
+    /// was first wired into — but the context stream is never read outside this block loop (the last block's
+    /// context output is even discarded upstream), so only the IMAGE stream needs to be indicator/residual-carried.
+    /// Block 0 always runs; on a hit, blocks 1..Depth-1 are skipped entirely (context along with them — it would
+    /// never be observed) and the cached residual reconstructs the final image directly. The final norm/projection
+    /// always runs. Caller must supply a cache instance PER CFG STREAM (cond/uncond) — see the type's own doc.</param>
+    public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor context, Tensor pooled, DeviceFeatureCache? stepCache = null)
     {
         int batch = (int)latent.Shape[0];
         int height = (int)latent.Shape[2];
@@ -154,12 +162,13 @@ public sealed unsafe class Sd3Transformer : IDisposable
 
         Tensor currentImage = imageTokens;
         Tensor currentContext = context;
+        Tensor? cacheAnchor = null;
 
         for (int i = 0; i < _config.Depth; i++)
         {
             (Tensor newImage, Tensor newContext) = _blocks[i].Forward(backend, currentImage, currentContext, temb);
 
-            if (!ReferenceEquals(currentImage, imageTokens))
+            if (!ReferenceEquals(currentImage, imageTokens) && !ReferenceEquals(currentImage, cacheAnchor))
                 currentImage.Dispose();
             if (!ReferenceEquals(currentContext, context))
                 currentContext.Dispose();
@@ -172,6 +181,33 @@ public sealed unsafe class Sd3Transformer : IDisposable
             // since the diffusers reference doesn't expose it (the hook records None).
             if (i < _config.Depth - 1)
                 Sd3DebugDump.Dump($"block_{i}_context", currentContext);
+
+            // Gate right after block 0: on a miss, keep going and remember this tensor as the cache anchor
+            // (the guard above then keeps it alive through the rest of the loop); on a hit, skip straight
+            // to the final layer — context from here on is never read, so it's fine to drop.
+            if (i == 0 && stepCache is not null && _config.Depth > 1)
+            {
+                if (stepCache.ShouldCompute(backend, currentImage))
+                {
+                    cacheAnchor = currentImage;
+                }
+                else
+                {
+                    Tensor reconstructed = stepCache.ApplyResidual(backend, currentImage);
+                    currentImage.Dispose();
+                    if (!ReferenceEquals(currentContext, context))
+                        currentContext.Dispose();
+                    currentImage = reconstructed;
+                    currentContext = context;
+                    break;
+                }
+            }
+        }
+
+        if (cacheAnchor is not null)
+        {
+            stepCache!.StoreResidual(backend, cacheAnchor, currentImage);
+            cacheAnchor.Dispose();
         }
 
         if (!ReferenceEquals(currentContext, context))

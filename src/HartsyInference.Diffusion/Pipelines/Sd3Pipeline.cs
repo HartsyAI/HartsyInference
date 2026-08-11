@@ -228,6 +228,33 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         if (latentMask is not null) _ = latentMask.DataPointer;
         Backend.FreeActivations();
 
+        // Across-step First-Block cache (docs/Research/STEP_ACCELERATION.md §2; same knobs as ZImagePipeline).
+        // Excluded from img2img/inpaint (block-0 indicator drift semantics haven't been validated against a
+        // partially-noised init latent) and DiT sharding (ForwardSharded has no cache-consuming entry point —
+        // combining the two is out of scope here). SD3 runs true CFG with two independent forward passes per
+        // step, so — unlike ZImagePipeline's fastPath, which only ever runs cache-free CFG — this needs one
+        // DeviceFeatureCache PER STREAM (their hidden states differ, per the type's own doc).
+        bool stepCacheFastPath = !isImg2Img && !isMaskedInpaint && DitShardBackend is null;
+        (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) = StepCacheEnv.Resolve(null);
+        DeviceFeatureCache? stepCacheCond = null;
+        DeviceFeatureCache? stepCacheUncond = null;
+        if (stepCacheThreshold > 0f && stepCacheFastPath)
+        {
+            if (Backend.SupportsDeviceStepCacheGate)
+            {
+                stepCacheCond = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
+                stepCacheUncond = useCfg ? new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile()) : null;
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}"
+                    + (stepCachePoly is not null ? ", poly gate" : "")
+                    + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
+            }
+            else
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    "(stepcache.ptx not compiled?) — running uncached.");
+            }
+        }
+
         Logs.Info("Starting SD3 denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -236,15 +263,19 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
 
+            // Late-window gate: reuse eligible only in the schedule tail (mirrors ZImagePipeline).
+            bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
+
             Tensor noisePred;
             if (useCfg)
             {
                 noisePred = ClassifierFreeGuidanceStep(
-                    latent, t, condProjected, condPooled, uncondProjected!, uncondPooled!, cfgScale);
+                    latent, t, condProjected, condPooled, uncondProjected!, uncondPooled!, cfgScale,
+                    cacheEligible ? stepCacheCond : null, cacheEligible ? stepCacheUncond : null);
             }
             else
             {
-                noisePred = RunForward(latent, t, condProjected, condPooled);
+                noisePred = RunForward(latent, t, condProjected, condPooled, cacheEligible ? stepCacheCond : null);
             }
 
             // Scheduler step
@@ -291,12 +322,22 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             Backend.FreeActivations();
         }
 
+        if (stepCacheCond is not null)
+        {
+            string uncondStats = stepCacheUncond is not null
+                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses"
+                : "";
+            Logs.Info($"Step cache: cond {stepCacheCond.Computes} computes / {stepCacheCond.Reuses} reuses{uncondStats}");
+        }
+
         condProjected.Dispose();
         condPooled.Dispose();
         uncondProjected?.Dispose();
         uncondPooled?.Dispose();
         sourceLatent?.Dispose();
         latentMask?.Dispose();
+        stepCacheCond?.Dispose();
+        stepCacheUncond?.Dispose();
 
         Sd3Transformer.DumpFinalLatent(latent);
 
@@ -413,15 +454,16 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         return (context, pooled);
     }
 
-    /// <summary>Runs classifier-free guidance: noise_pred = uncond + cfg_scale * (cond - uncond).</summary>
+    /// <summary>Runs classifier-free guidance: noise_pred = uncond + cfg_scale * (cond - uncond). <paramref name="stepCacheCond"/>/<paramref name="stepCacheUncond"/> are independent — each CFG stream's hidden states differ, so they must not share one cache instance.</summary>
     private Tensor ClassifierFreeGuidanceStep(
         Tensor latent, float timestep,
         Tensor condContext, Tensor condPooled,
         Tensor uncondContext, Tensor uncondPooled,
-        float cfgScale)
+        float cfgScale,
+        Utilities.DeviceFeatureCache? stepCacheCond = null, Utilities.DeviceFeatureCache? stepCacheUncond = null)
     {
-        Tensor uncondNoise = RunForward(latent, timestep, uncondContext, uncondPooled);
-        Tensor condNoise = RunForward(latent, timestep, condContext, condPooled);
+        Tensor uncondNoise = RunForward(latent, timestep, uncondContext, uncondPooled, stepCacheUncond);
+        Tensor condNoise = RunForward(latent, timestep, condContext, condPooled, stepCacheCond);
         Tensor output = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
         uncondNoise.Dispose();
         condNoise.Dispose();
@@ -429,14 +471,15 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when
-    /// configured, else the normal single-backend path.</summary>
-    private Tensor RunForward(Tensor latent, float timestep, Tensor context, Tensor pooled)
+    /// configured, else the normal single-backend path. <paramref name="stepCache"/> only applies on the
+    /// non-sharded path — <see cref="Sd3Transformer.ForwardSharded"/> has no cache-consuming entry point.</summary>
+    private Tensor RunForward(Tensor latent, float timestep, Tensor context, Tensor pooled, Utilities.DeviceFeatureCache? stepCache = null)
     {
         if (DitShardBackend is not null)
         {
             return _transformer.ForwardSharded(Backend, DitShardBackend, latent, timestep, context, pooled, DitShardSplitBlock);
         }
-        return _transformer.Forward(Backend, latent, timestep, context, pooled);
+        return _transformer.Forward(Backend, latent, timestep, context, pooled, stepCache);
     }
 
     /// <summary>Concatenates two [B, S1, D] and [B, S2, D] tensors along the sequence dimension → [B, S1+S2, D].</summary>

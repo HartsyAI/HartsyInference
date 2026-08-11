@@ -309,12 +309,38 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // (one modulation-table build per step, and — default-on — the per-generation step CUDA graph).
         bool drainFree = !isMaskedInpaint;
 
+        // Across-step First-Block cache (same knobs as Sd3Pipeline/HiDreamPipeline). Only wired onto the
+        // drainFree + non-sharded path — ForwardSharded has no cache-consuming entry point, and masked inpaint
+        // keeps the host branch which never calls ForwardPaired at all. True CFG needs two independent
+        // instances (cond/uncond streams differ); ForwardPaired's own graphMode gate below is what gets
+        // excluded when a cache is armed.
+        bool stepCacheFastPath = drainFree && DitShardBackend is null;
+        (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) = StepCacheEnv.Resolve(null);
+        DeviceFeatureCache? stepCacheCond = null;
+        DeviceFeatureCache? stepCacheUncond = null;
+        if (stepCacheThreshold > 0f && stepCacheFastPath)
+        {
+            if (Backend.SupportsDeviceStepCacheGate)
+            {
+                stepCacheCond = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
+                stepCacheUncond = useCfg ? new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile()) : null;
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}"
+                    + (stepCachePoly is not null ? ", poly gate" : "")
+                    + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
+            }
+            else
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    "(stepcache.ptx not compiled?) — running uncached.");
+            }
+        }
+
         // Step-graph mode: route the latent through the transformer's FIXED buffer so the captured graph's
         // baked address stays valid across steps (CfgEulerStep updates it in place at the same address).
         // The fixed tensor is transformer-owned: never disposed here, never DataPointer-read directly —
         // previews and the final unpack go through SnapshotGraphLatent. DiT sharding excludes the graph:
         // ForwardSharded issues work on two backends and never goes through ForwardPaired's capture path.
-        bool graphMode = drainFree && DitShardBackend is null
+        bool graphMode = drainFree && DitShardBackend is null && stepCacheCond is null
             && Models.Denoisers.DiTBlocks.DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
         if (DitShardBackend is not null
             && Models.Denoisers.DiTBlocks.DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported)
@@ -332,6 +358,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
+            bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
 
             if (drainFree && DitShardBackend is not null)
             {
@@ -354,7 +381,8 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             {
                 (Tensor condNoise, Tensor? uncondNoise, bool callerOwns) = _transformer.ForwardPaired(
                     Backend, packedLatent, condContext, useCfg ? uncondContext : null, sigma,
-                    hPacked, wPacked, condMask, useCfg ? uncondMask : null);
+                    hPacked, wPacked, condMask, useCfg ? uncondMask : null,
+                    cacheEligible ? stepCacheCond : null, cacheEligible ? stepCacheUncond : null);
                 if (useCfg)
                 {
                     Backend.CfgEulerStep(packedLatent, condNoise, uncondNoise!, cfgScale, scheduler.Dt(i));
@@ -449,6 +477,16 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // condContext/condMask/uncond* are cross-generation caches — not disposed here.
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
+
+        if (stepCacheCond is not null)
+        {
+            string uncondStats = stepCacheUncond is not null
+                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses"
+                : "";
+            Logs.Info($"Step cache: cond {stepCacheCond.Computes} computes / {stepCacheCond.Reuses} reuses{uncondStats}");
+        }
+        stepCacheCond?.Dispose();
+        stepCacheUncond?.Dispose();
 
         // Graph mode: swap the transformer-owned fixed latent for a disposable device snapshot. The captured
         // graph itself PERSISTS across generations — this pipeline never calls FreeActivations, so the fixed

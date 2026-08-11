@@ -282,30 +282,57 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         }
         _ditResident = true;
 
+        // Across-step First-Block cache (same pattern/knobs as Sd3Pipeline). Excluded from img2img/inpaint and
+        // DiT sharding (ForwardSharded has no cache-consuming entry point). True CFG here too — two independent
+        // instances (cond/uncond), each stream's hidden states differ. NOTE: the generic uncalibrated threshold
+        // ("1"/"true" -> 0.10) was measured too aggressive for SD3 (visibly degraded output); pass an explicit
+        // conservative HARTSY_STEP_CACHE value (e.g. 0.03) until HiDream gets its own calibration pass.
+        bool stepCacheFastPath = !isImg2Img && !isMaskedInpaint && DitShardBackend is null;
+        (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) = StepCacheEnv.Resolve(null);
+        DeviceFeatureCache? stepCacheCond = null;
+        DeviceFeatureCache? stepCacheUncond = null;
+        if (stepCacheThreshold > 0f && stepCacheFastPath)
+        {
+            if (Backend.SupportsDeviceStepCacheGate)
+            {
+                stepCacheCond = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
+                stepCacheUncond = useCfg ? new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile()) : null;
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}"
+                    + (stepCachePoly is not null ? ", poly gate" : "")
+                    + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
+            }
+            else
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    "(stepcache.ptx not compiled?) — running uncached.");
+            }
+        }
+
         Logs.Info("Starting HiDream denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
+            bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
 
             Tensor noisePred;
             if (useCfg)
             {
-                Tensor condNoise = RunForward(latent, t, condT5, condLlama, condPooled);
+                Tensor condNoise = RunForward(latent, t, condT5, condLlama, condPooled, cacheEligible ? stepCacheCond : null);
                 // Bound the async queue to one forward's transients: with the blocks now fully GPU-resident
                 // (no implicit host-sync throttling), two queued 17B F32-activation forwards overflow the
                 // ~7 GB left beside the resident fp8 weights (measured step-1 OOM at 1024²-CFG). One forward
                 // fits; serialize the pair.
                 Backend.Sync();
-                Tensor uncondNoise = RunForward(latent, t, uncondT5!, uncondLlama!, uncondPooled!);
+                Tensor uncondNoise = RunForward(latent, t, uncondT5!, uncondLlama!, uncondPooled!, cacheEligible ? stepCacheUncond : null);
                 noisePred = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
                 condNoise.Dispose();
                 uncondNoise.Dispose();
             }
             else
             {
-                noisePred = RunForward(latent, t, condT5, condLlama, condPooled);
+                noisePred = RunForward(latent, t, condT5, condLlama, condPooled, cacheEligible ? stepCacheCond : null);
             }
 
             Tensor newLatent = new Tensor(latentShape, DType.F32);
@@ -341,6 +368,16 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         }
 
         // Conditioning tensors are cross-generation cache-owned — NOT disposed here.
+
+        if (stepCacheCond is not null)
+        {
+            string uncondStats = stepCacheUncond is not null
+                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses"
+                : "";
+            Logs.Info($"Step cache: cond {stepCacheCond.Computes} computes / {stepCacheCond.Reuses} reuses{uncondStats}");
+        }
+        stepCacheCond?.Dispose();
+        stepCacheUncond?.Dispose();
 
         HiDreamTransformer.DumpFinalLatent(latent);
         sourceLatent?.Dispose();
@@ -407,14 +444,15 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when
-    /// configured, else the normal single-backend path.</summary>
-    private Tensor RunForward(Tensor latent, float timestep, Tensor t5Hidden, IReadOnlyList<Tensor> llamaHiddenLayers, Tensor pooledEmbeds)
+    /// configured, else the normal single-backend path. <paramref name="stepCache"/> only applies on the
+    /// non-sharded path — <see cref="HiDreamTransformer.ForwardSharded"/> has no cache-consuming entry point.</summary>
+    private Tensor RunForward(Tensor latent, float timestep, Tensor t5Hidden, IReadOnlyList<Tensor> llamaHiddenLayers, Tensor pooledEmbeds, DeviceFeatureCache? stepCache = null)
     {
         if (DitShardBackend is not null)
         {
             return _transformer.ForwardSharded(Backend, DitShardBackend, latent, timestep, t5Hidden, llamaHiddenLayers, pooledEmbeds, DitShardSplitBlock);
         }
-        return _transformer.Forward(Backend, latent, timestep, t5Hidden, llamaHiddenLayers, pooledEmbeds);
+        return _transformer.Forward(Backend, latent, timestep, t5Hidden, llamaHiddenLayers, pooledEmbeds, stepCache);
     }
 
     /// <summary>Disposes the cached positive conditioning (safe mid-session — the context is live at

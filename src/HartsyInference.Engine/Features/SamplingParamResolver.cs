@@ -69,12 +69,13 @@ public static class SamplingParamResolver
         "ddim" => "ddim",
         "dpm++2m" or "dpmpp_2m" or "dpmpp2m" => "dpm++2m",
         "lcm" => "lcm",
+        "tcd" => "tcd",
         _ => LogUnmapped(name),
     };
 
     private static string? LogUnmapped(string name)
     {
-        Logs.Verbose($"[Features][Sampling] Sampler '{name}' isn't available (have: euler, ddim, dpm++2m, lcm) — using Euler.");
+        Logs.Verbose($"[Features][Sampling] Sampler '{name}' isn't available (have: euler, ddim, dpm++2m, lcm, tcd) — using Euler.");
         return null;
     }
 }

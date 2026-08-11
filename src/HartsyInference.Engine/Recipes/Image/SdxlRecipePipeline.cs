@@ -127,7 +127,12 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
     {
         TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative) with
         {
-            Scheduler = request.Scheduler,
+            // request.Sampler is what the "HartsyInference Sampler" param actually populates (euler/ddim/
+            // dpm++2m/lcm/tcd — SchedulerFactory's own domain despite the field name); request.Scheduler is
+            // always null from the extension today ("the Engine resolves the family's canonical schedule").
+            // Reading only Scheduler here made the Sampler param silently inert — found 2026-08-10 chasing an
+            // unrelated "tcd" dropdown fix.
+            Scheduler = request.Sampler ?? request.Scheduler,
             // The plan only resolves variation noise on the text-to-image path, so this is null under img2img.
             InitialNoise = plan.TakeVariationNoise(),
         };

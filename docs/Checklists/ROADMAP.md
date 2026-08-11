@@ -810,12 +810,76 @@ grinds).
 ## 6. Diffusion / accel-grind open levers
 
 - [ ] **Step-cache port to Sdxl/Flux/StableDiffusion15/Sd3/Chroma/HiDream pipelines** — not a checkpoint
-  gap, corrected 2026-08-10: the blocker is transformer-side plumbing, not missing weights. The reference
-  wiring (`ZImagePipeline`/`ZImageTransformer`) threads a `DeviceFeatureCache` into a packed-token forward
-  entry point (`ForwardPacked`/`PackedCore`) that gates block-level compute per step and is mutually
-  exclusive with CUDA-graph capture. None of the six pipelines above have an equivalent cache-consuming
-  forward path today — this needs a design pass sized like a Tier-3 item (add the hook, then call it),
-  not a port of an existing call site; CFG-interval late-band replicate to HiDream / Wan.
+  gap, corrected 2026-08-10: the blocker is transformer-side plumbing, not missing weights, and the six
+  targets are NOT one uniform item — they split by transformer topology (design pass done 2026-08-10,
+  zero code changed):
+  - **DiT-shaped (`Sd3Transformer`/`ChromaTransformer`/`HiDreamTransformer`/`FluxTransformer`)**: all four
+    are a homogeneous iterative block loop, the same shape `ZImageTransformer` already wires
+    `DeviceFeatureCache` into (`ForwardPacked`/`PackedCore` — run block 0, gate on drift, skip 1..Depth-1
+    on a hit via a cached residual, always run the final norm/proj). `DeviceFeatureCache` itself is
+    confirmed generic (backend-op based, no packed-token assumption baked in) — this is a real port here.
+    `FluxPipeline`/`ChromaPipeline` additionally already use `DitStepGraph` (graph capture) and need the
+    same graph-mode mutual-exclusion gate Z-Image has; `Sd3Pipeline`/`HiDreamPipeline` don't, so those two
+    are the cleaner starting point.
+  - **UNet-shaped (`SdxlPipeline`/`StableDiffusion15Pipeline`, sharing `UNet.cs`)**: NOT a port. A UNet's
+    down-block skip connections feed the up blocks directly, so there is no "skip everything after block
+    0" cut point the way a DiT has — the literal `DeviceFeatureCache` pattern applied here means skipping
+    the *entire* rest of the network on a cache hit, not the established DeepCache-for-UNets technique
+    (cache specific down-block features, shorten the up-path). Needs its own algorithm design, sized
+    separately from the DiT group. SDXL's fused batched-CFG loop is also a single in-place device kernel
+    with nothing host-visible to gate a cache on (same reason it falls back to the eager loop for
+    CFG-Rescale). **Deprioritized 2026-08-10 per user judgment** — SDXL/SD1.5 are old enough that a
+    from-scratch caching algorithm may not be worth the design effort; not started, revisit only if asked.
+  - **Progress (2026-08-10)**: `Sd3Transformer`/`Sd3Pipeline` and `ChromaTransformer`/`ChromaPipeline` — DONE,
+    real-weight verified (two independent `DeviceFeatureCache` instances for the true-CFG cond/uncond streams
+    on both; SD3's context stream and Chroma's text stream are both dropped on a cache hit since neither is
+    read outside the block loop). Chroma needed a different mechanical approach than SD3/Flux: its
+    `ForwardDoubleRange`/`ForwardSingleRange` take `ref` params and unconditionally dispose their input on
+    every call (no `ReferenceEquals`-guarded loop to alias), so the cache anchor is an explicit device-copy
+    snapshot of block 0's output rather than a reused reference — block 0 runs alone via
+    `ForwardDoubleRange`'s own partial-range support (the existing DiT-sharding primitive), then the rest of
+    the stack runs or is skipped based on the snapshot's drift. `HiDreamTransformer`/`HiDreamPipeline` — DONE,
+    real-weight verified (double-then-single-stream, image-token stream cached across the whole stack; the
+    text encoders it needs — Llama-3.1-8B, dual CLIP, T5-XXL — turned out to already be present locally from
+    other architectures' prior downloads, only the 17.1GB transformer itself needed fetching, deleted after
+    testing). See the calibration-finding entry below for HiDream's own failure mode — its proven-safe profile
+    needed the late-window gate, not just a threshold, to avoid a real image-collapse failure. `FluxTransformer`/`FluxPipeline` — DONE, real-weight verified. Wired the graph route (forcing
+    it off when a cache is armed, matching `ForwardGraphable`'s own internal exclusion) and the sequential
+    drainFree path (`RunPlainForward`, one instance for the guidance-embedded case, two for sequential
+    true-CFG). Deliberately left the CFG-parallel branch (dual concurrent backends) unwired — its own
+    concurrency hazards deserve dedicated verification, not a bundled change — so a generation using both
+    step-cache and CFG-parallel simply runs uncached on that branch (silent, not incorrect). The host-step
+    branch (ControlNet/Kontext/regional/masked-inpaint) needed no change: the transformer's own `cacheActive`
+    gate already excludes all of it, confirmed by `Flux1RegionalPromptingRealWeightTests` passing unchanged
+    after this wiring. Threshold 0.08 is Flux's own proven-safe value — a THIRD distinct number from SD3
+    (0.03) and Chroma (0.15).
+  - **Calibration finding (2026-08-10, applies fleet-wide, not just the new SD3/Chroma ports)**: step-cache
+    profiles are uncalibrated across every pipeline that has this wired — `ZImagePipeline`'s own comment
+    already says "no calibrated profile yet." Measured on SD3: the generic fallback threshold (env `"1"`/
+    `"true"` → 0.10) reused 13/20 steps and produced a visibly darker, lower-detail image; an explicit
+    `HARTSY_STEP_CACHE=0.03` reused 5/20 steps and stayed visually consistent. **Measured on Chroma: neither
+    SD3's 0.03 nor the generic 0.10 transferred** — 0.03 produced ZERO reuses in 20 steps (Chroma's block-0
+    indicator drifts faster per step than SD3's), 0.3 reused 14/20 but visibly washed out the image (same
+    scene-level-failure signature as SD3's bad case), 0.15 reused 11/20 and stayed visually consistent. Two
+    architectures, two different proven-safe numbers — this is not a one-off SD3 fluke, every pipeline needs
+    its own number. **Measured on Flux: 0.08** (a third distinct value, between SD3's and Chroma's), reused
+    4/20 steps, mean abs diff 6.91 — the cleanest result of the three, visually near-identical to cache-off.
+    **Measured on HiDream: a qualitatively different, worse failure mode, not just another threshold number.**
+    At its native 50-step schedule, threshold 0.08 with the whole schedule eligible didn't just degrade the
+    image (SD3/Chroma/Flux's bad cases stayed recognizable) — it collapsed it into a flat, textureless color
+    field (mean abs diff 77 vs. cache-off). HiDream's block-0 indicator apparently reads as low-drift EARLY in
+    the schedule while the true compositional cost of skipping those blocks is severe — reusing early steps
+    destroys the image before it forms, unlike SD3/Chroma/Flux where early reuse merely blurred detail.
+    Restricting reuse to the back 60% of the schedule (`HARTSY_STEP_CACHE_LATE=0.6` — the late-window mechanism
+    already built for Ideogram 4) fixed it completely: mean abs diff dropped to 3.55, visually near-identical.
+    **Implication for the fleet:** late-window isn't just a nice-to-have knob for some pipelines — for at least
+    one architecture it's the difference between "works" and "destroys the image." Any calibration pass must
+    sweep the late-window dimension too, not just the threshold. Nobody has A/B'd the generic 0.10 default
+    against any of the OTHER pipelines it's wired into (Z-Image, Krea2, QwenImage, Flux2, Ideogram4, Wan, LTX)
+    — it may be silently over-aggressive, or silently collapsing images the way HiDream's did, on some of them.
+    A real calibration pass (per-model `StepCacheProfile`, the mechanism `StepCacheEnv.Resolve` already
+    supports) is real, useful, currently-nonexistent work.
+  - CFG-interval late-band replicate to HiDream / Wan.
 - [ ] F16-ingest / F16-out Sage attention kernel (designed, build next).
 - [ ] Wan2.2-Lightning / LTX-distilled loadable accelerators.
 - [ ] **TensorRT compile support** — zero TRT code anywhere in the engine today; no design started.

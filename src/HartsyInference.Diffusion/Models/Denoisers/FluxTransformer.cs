@@ -4,6 +4,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -267,11 +268,11 @@ public sealed unsafe class FluxTransformer : IDisposable
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor t5Embeddings, float sigma,
         Tensor clipPooled, float guidanceScale, int txtSeqLen, int hPacked, int wPacked, Tensor? attnBias = null,
         int refSeqLen = 0, int refHPacked = 0, int refWPacked = 0,
-        Adapters.FluxControlNetResiduals? controlNetResiduals = null)
+        Adapters.FluxControlNetResiduals? controlNetResiduals = null, DeviceFeatureCache? stepCache = null)
     {
         Tensor tembOuter = ComputeTimestepEmbedding(backend, sigma, clipPooled, guidanceScale, (int)packedLatent.Shape[0]);
         Tensor velocity = ForwardWithTemb(backend, packedLatent, t5Embeddings, tembOuter, txtSeqLen, hPacked, wPacked,
-            attnBias, refSeqLen, refHPacked, refWPacked, controlNetResiduals);
+            attnBias, refSeqLen, refHPacked, refWPacked, controlNetResiduals, stepCache);
         tembOuter.Dispose();
         return velocity;
     }
@@ -430,10 +431,17 @@ public sealed unsafe class FluxTransformer : IDisposable
 
     /// <summary>Forward body with a caller-owned temb (shared by the eager and step-graph paths — the graph
     /// path computes temb inside the capture from fixed device sin buffers). Does NOT dispose temb.</summary>
+    /// <param name="stepCache">Optional across-step First-Block cache (docs/Research/STEP_ACCELERATION.md §2;
+    /// same pattern as <see cref="Sd3Transformer.Forward"/>). Only engages when <paramref name="refSeqLen"/> is 0
+    /// — a Kontext reference-token request has <c>noiseSeqLen != imgSeqLen</c>, so the cached anchor (block 0's
+    /// full image-token output) and the eventual reconstruction target (the noise-only slice) would be different
+    /// shapes; <see cref="DeviceFeatureCache.StoreResidual"/> would throw. Flux.1 is guidance-embedded (no CFG
+    /// pair on this path — see the step-graph comment below), so unlike SD3/HiDream this needs only ONE cache
+    /// instance, not one per stream.</param>
     private Tensor ForwardWithTemb(IBackend backend, Tensor packedLatent, Tensor t5Embeddings, Tensor temb,
         int txtSeqLen, int hPacked, int wPacked, Tensor? attnBias,
         int refSeqLen, int refHPacked, int refWPacked,
-        Adapters.FluxControlNetResiduals? controlNetResiduals = null)
+        Adapters.FluxControlNetResiduals? controlNetResiduals = null, DeviceFeatureCache? stepCache = null)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
@@ -527,9 +535,17 @@ public sealed unsafe class FluxTransformer : IDisposable
         }
         DType act = imgTokens.DType;
 
+        // Only eligible when the anchor (block 0's full image-token output) and the eventual reconstruction
+        // target (imgOut, the noise-only slice) are guaranteed the same shape/dtype, and no per-block side
+        // effect (regional bias, ControlNet residual injection) would be silently skipped along with the
+        // blocks themselves.
+        bool cacheActive = stepCache is not null && refSeqLen == 0 && attnBias is null && controlNetResiduals is null;
+
         // ── 5. Double-stream blocks ──
         Tensor currentImg = imgTokens;
         Tensor currentTxt = txtTokens;
+        Tensor? cacheAnchor = null;
+        Tensor? hitReconstruction = null;
 
         int cnDoubleInterval = cnDoubleResiduals is { Length: > 0 }
             ? (int)Math.Ceiling((double)_config.Depth / cnDoubleResiduals.Length) : 0;
@@ -538,7 +554,7 @@ public sealed unsafe class FluxTransformer : IDisposable
             BeforeBlockForward?.Invoke(i);
             (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, currentImg, currentTxt, temb, _rope, attnBias);
 
-            if (!ReferenceEquals(currentImg, imgTokens))
+            if (!ReferenceEquals(currentImg, imgTokens) && !ReferenceEquals(currentImg, cacheAnchor))
                 currentImg.Dispose();
             if (!ReferenceEquals(currentTxt, txtTokens))
                 currentTxt.Dispose();
@@ -555,70 +571,106 @@ public sealed unsafe class FluxTransformer : IDisposable
                 currentImg.Dispose();
                 currentImg = injected;
             }
-        }
 
-        // ── 6. Concatenate text + image for single-stream processing. B=1: device row-concat (the old
-        //       host Buffer.MemoryCopy read both streams' DataPointer — a full pipeline drain per forward). ──
-        TensorShape concatShape = new TensorShape(batch, totalSeqLen, hidden);
-        Tensor x = new Tensor(concatShape, act);
-        if (batch == 1)
-            backend.Concat(x, new Tensor[] { currentTxt, currentImg }, 1);
-        else
-            ConcatAlongSeqDim3D(x, currentTxt, currentImg, batch, txtSeqLen, imgSeqLen, hidden);
-
-        if (!ReferenceEquals(currentImg, imgTokens))
-            currentImg.Dispose();
-        if (!ReferenceEquals(currentTxt, txtTokens))
-            currentTxt.Dispose();
-        imgTokens.Dispose();
-        txtTokens.Dispose();
-
-        // ── 7. Single-stream blocks ──
-        int cnSingleInterval = cnSinglePadded is { Length: > 0 }
-            ? (int)Math.Ceiling((double)_config.DepthSingleBlocks / cnSinglePadded.Length) : 0;
-        for (int i = 0; i < _config.DepthSingleBlocks; i++)
-        {
-            BeforeBlockForward?.Invoke(_config.Depth + i);
-            Tensor newX = _singleBlocks[i].Forward(backend, x, temb, _rope, attnBias);
-            x.Dispose();
-            x = newX;
-
-            // ControlNet single-block residual: padded with zero text rows, so a plain Add touches only the
-            // image rows (diffusers adds to the image hidden_states only).
-            if (cnSingleInterval > 0)
+            // Gate right after the very first double block: on a hit, skip straight past every remaining
+            // double block, the img/txt concat, AND every single block — imgOut is the same shape at every
+            // one of those points (guaranteed by cacheActive's refSeqLen==0 check above).
+            if (i == 0 && cacheActive)
             {
-                Tensor res = cnSinglePadded![Math.Min(i / cnSingleInterval, cnSinglePadded.Length - 1)];
-                Tensor injected = new Tensor(x.Shape, x.DType);
-                backend.Add(injected, x, res);
-                x.Dispose();
-                x = injected;
+                if (stepCache!.ShouldCompute(backend, currentImg))
+                {
+                    cacheAnchor = currentImg;
+                }
+                else
+                {
+                    hitReconstruction = stepCache.ApplyResidual(backend, currentImg);
+                    currentImg.Dispose();
+                    currentTxt.Dispose();
+                    break;
+                }
             }
         }
+        bool cacheHit = hitReconstruction is not null;
+        // Both branches have already moved past imgTokens/txtTokens by this point (the loop always runs at
+        // least once before the cache gate can fire, hit or miss).
+        if (!ReferenceEquals(currentImg, imgTokens)) imgTokens.Dispose();
+        if (!ReferenceEquals(currentTxt, txtTokens)) txtTokens.Dispose();
 
-        // ControlNet scratch: the damped double-residual copies and the padded single residuals are
-        // transformer-owned; the caller's original residual tensors are untouched.
-        if (ownsCnDoubles)
+        Tensor imgOut;
+        if (cacheHit)
         {
-            foreach (Tensor t in cnDoubleResiduals!) t.Dispose();
+            imgOut = hitReconstruction!;
+            // Skipped the ControlNet single-block-residual list entirely (never entered), but cacheActive
+            // already guarantees controlNetResiduals is null when a hit can happen — nothing to dispose.
         }
-        if (cnSinglePadded is not null)
-        {
-            foreach (Tensor t in cnSinglePadded) t.Dispose();
-        }
-
-        // ── 8. Extract image tokens: discard text tokens (and, for Kontext, the trailing reference tokens).
-        //        B=1: device row slice. ──
-        TensorShape imgOutShape = new TensorShape(batch, noiseSeqLen, hidden);
-        Tensor imgOut = new Tensor(imgOutShape, act);
-        if (batch == 1)
-            backend.SliceRows(imgOut, x, txtSeqLen);
         else
-            ExtractImageTokens(imgOut, x, batch, txtSeqLen, noiseSeqLen, hidden);
-        x.Dispose();
+        {
+            // ── 6. Concatenate text + image for single-stream processing. B=1: device row-concat (the old
+            //       host Buffer.MemoryCopy read both streams' DataPointer — a full pipeline drain per forward). ──
+            TensorShape concatShape = new TensorShape(batch, totalSeqLen, hidden);
+            Tensor x = new Tensor(concatShape, act);
+            if (batch == 1)
+                backend.Concat(x, new Tensor[] { currentTxt, currentImg }, 1);
+            else
+                ConcatAlongSeqDim3D(x, currentTxt, currentImg, batch, txtSeqLen, imgSeqLen, hidden);
+
+            currentImg.Dispose();
+            currentTxt.Dispose();
+
+            // ── 7. Single-stream blocks ──
+            int cnSingleInterval = cnSinglePadded is { Length: > 0 }
+                ? (int)Math.Ceiling((double)_config.DepthSingleBlocks / cnSinglePadded.Length) : 0;
+            for (int i = 0; i < _config.DepthSingleBlocks; i++)
+            {
+                BeforeBlockForward?.Invoke(_config.Depth + i);
+                Tensor newX = _singleBlocks[i].Forward(backend, x, temb, _rope, attnBias);
+                x.Dispose();
+                x = newX;
+
+                // ControlNet single-block residual: padded with zero text rows, so a plain Add touches only the
+                // image rows (diffusers adds to the image hidden_states only).
+                if (cnSingleInterval > 0)
+                {
+                    Tensor res = cnSinglePadded![Math.Min(i / cnSingleInterval, cnSinglePadded.Length - 1)];
+                    Tensor injected = new Tensor(x.Shape, x.DType);
+                    backend.Add(injected, x, res);
+                    x.Dispose();
+                    x = injected;
+                }
+            }
+
+            // ControlNet scratch: the damped double-residual copies and the padded single residuals are
+            // transformer-owned; the caller's original residual tensors are untouched.
+            if (ownsCnDoubles)
+            {
+                foreach (Tensor t in cnDoubleResiduals!) t.Dispose();
+            }
+            if (cnSinglePadded is not null)
+            {
+                foreach (Tensor t in cnSinglePadded) t.Dispose();
+            }
+
+            // ── 8. Extract image tokens: discard text tokens (and, for Kontext, the trailing reference tokens).
+            //        B=1: device row slice. ──
+            TensorShape imgOutShape = new TensorShape(batch, noiseSeqLen, hidden);
+            imgOut = new Tensor(imgOutShape, act);
+            if (batch == 1)
+                backend.SliceRows(imgOut, x, txtSeqLen);
+            else
+                ExtractImageTokens(imgOut, x, batch, txtSeqLen, noiseSeqLen, hidden);
+            x.Dispose();
+
+            if (cacheAnchor is not null)
+            {
+                stepCache!.StoreResidual(backend, cacheAnchor, imgOut);
+                cacheAnchor.Dispose();
+            }
+        }
 
         if (imgOut.DType == DType.F16)
         {
             // Back to F32 for the final norm + proj_out (velocity precision matters across Euler steps).
+            TensorShape imgOutShape = new TensorShape(batch, noiseSeqLen, hidden);
             Tensor imgOutF32 = new Tensor(imgOutShape, DType.F32);
             backend.CastToF32(imgOutF32, imgOut);
             imgOut.Dispose();
@@ -691,14 +743,16 @@ public sealed unsafe class FluxTransformer : IDisposable
     /// rewritten next step. Kontext (refSeqLen>0) and attnBias paths stay eager via <see cref="Forward"/>.</summary>
     public (Tensor velocity, bool callerOwns) ForwardGraphable(IBackend backend, Tensor packedLatent,
         Tensor t5Embeddings, float sigma, Tensor clipPooled, float guidanceScale,
-        int txtSeqLen, int hPacked, int wPacked)
+        int txtSeqLen, int hPacked, int wPacked, DeviceFeatureCache? stepCache = null)
     {
         int batch = (int)packedLatent.Shape[0];
+        // An armed step cache is per-step-variable topology (block count run varies with drift) — a captured
+        // graph bakes one fixed sequence of launches and can't replay that (same exclusion as ZImageTransformer).
         bool graphMode = DitStepGraph.EnabledDefaultOn && backend.StepGraphSupported && !_graphDead
-            && batch == 1 && ReferenceEquals(packedLatent, _latentFixed);
+            && batch == 1 && ReferenceEquals(packedLatent, _latentFixed) && stepCache is null;
         if (!graphMode)
             return (Forward(backend, packedLatent, t5Embeddings, sigma, clipPooled, guidanceScale,
-                txtSeqLen, hPacked, wPacked), true);
+                txtSeqLen, hPacked, wPacked, stepCache: stepCache), true);
 
         // Refresh the fixed timestep-sin buffer — the ONLY per-step-varying content the captured graph reads.
         Tensor sinHost = new Tensor(new TensorShape(1, 256), DType.F32);

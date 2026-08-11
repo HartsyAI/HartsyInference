@@ -622,7 +622,39 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         bool drainFree = !isMaskedInpaint && packedControl is null && packedKontextRef is null
             && !hasFluxCn && !hasRegions && !StatsEnabled
             && (reduxExtendedT5 is null || reduxApplyStartFraction <= 0f);
+
+        // Across-step First-Block cache (same knobs as Sd3/Chroma/HiDream). Only wired onto the drainFree,
+        // non-sharded path — ForwardSharded has no cache-consuming entry point, and the host-step branch
+        // (masked inpaint, ControlNet, Kontext, regional, Redux-mid-stream, stats) is exactly the feature set
+        // the transformer's own cacheActive check already excludes (attnBias/controlNetResiduals/refSeqLen>0),
+        // so wiring it there would be a silent no-op anyway. Deliberately NOT wired into the CFG-parallel
+        // branch below — that already runs cond/uncond concurrently on two backends, and layering a second
+        // form of per-step-variable behavior on top of that concurrency needs its own dedicated verification
+        // pass, not bundled in here; when a cache is armed alongside CFG-parallel, the parallel branch just
+        // runs uncached (silent, not incorrect — Reuses stays 0 for that generation).
+        bool stepCacheFastPath = drainFree && !ditShardActive;
+        (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) = StepCacheEnv.Resolve(null);
+        DeviceFeatureCache? stepCacheCond = null;
+        DeviceFeatureCache? stepCacheUncond = null;
+        if (stepCacheThreshold > 0f && stepCacheFastPath)
+        {
+            if (Backend.SupportsDeviceStepCacheGate)
+            {
+                stepCacheCond = new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile());
+                stepCacheUncond = doTrueCfg ? new DeviceFeatureCache(stepCacheThreshold, stepCacheCap, stepCachePoly, StepCacheEnv.ReadCalibFile()) : null;
+                Logs.Info($"Step cache ON: threshold={stepCacheThreshold}, maxConsecutiveReuse={stepCacheCap}"
+                    + (stepCachePoly is not null ? ", poly gate" : "")
+                    + (stepCacheLate > 0f ? $", lateWindow={stepCacheLate}" : ""));
+            }
+            else
+            {
+                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    "(stepcache.ptx not compiled?) — running uncached.");
+            }
+        }
+
         bool graphRoute = drainFree && !doTrueCfg && packedSourceLatent is null && !ditShardActive
+            && stepCacheCond is null
             && DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
 
         // Mirrors the per-step dispatch condition (loop-invariant), recorded once per generation so operators
@@ -692,6 +724,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f; // Convert timestep back to sigma [0,1]
+            bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
 
             if (graphRoute)
             {
@@ -742,11 +775,13 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                 else
                 {
                     velocityPred = RunPlainForward(ditShardActive, packedLatent, condStream, sigma,
-                        clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked);
+                        clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked,
+                        cacheEligible ? stepCacheCond : null);
                     if (doTrueCfg)
                     {
                         Tensor velocityNeg = RunPlainForward(ditShardActive, packedLatent, negT5Embeddings!, sigma,
-                            negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked);
+                            negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked,
+                            cacheEligible ? stepCacheUncond : null);
                         Backend.CfgEulerStep(packedLatent, velocityPred, velocityNeg, trueCfgScale, scheduler.Dt(i));
                         velocityNeg.Dispose();
                     }
@@ -931,6 +966,16 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         if (graphRoute)
             packedLatent = _transformer.SnapshotGraphLatent(Backend);
 
+        if (stepCacheCond is not null)
+        {
+            string uncondStats = stepCacheUncond is not null
+                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses"
+                : "";
+            Logs.Info($"Step cache: cond {stepCacheCond.Computes} computes / {stepCacheCond.Reuses} reuses{uncondStats}");
+        }
+        stepCacheCond?.Dispose();
+        stepCacheUncond?.Dispose();
+
         // clipPooled / t5Embeddings / negClipPooled / negT5Embeddings are cross-generation cache entries —
         // not disposed here; replacement on a future cache miss owns their lifetime.
         extendedT5?.Dispose();
@@ -1069,13 +1114,14 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     /// sites' comment).</summary>
     /// <summary>Routes a plain-path forward (no attnBias/Kontext/ControlNet, the only calls DiT sharding v1
     /// supports) to <see cref="FluxTransformer.ForwardSharded"/> when this generation's sharding is active.</summary>
+    /// <summary><paramref name="stepCache"/> only applies on the non-sharded path — <see cref="FluxTransformer.ForwardSharded"/> has no cache-consuming entry point.</summary>
     private Tensor RunPlainForward(bool ditShardActive, Tensor packedInput, Tensor condStream, float sigma,
-        Tensor pooled, float guidanceScale, int txtLen, int hPacked, int wPacked) =>
+        Tensor pooled, float guidanceScale, int txtLen, int hPacked, int wPacked, DeviceFeatureCache? stepCache = null) =>
         ditShardActive
             ? _transformer.ForwardSharded(Backend, DitShardBackend!, packedInput, condStream, sigma,
                 pooled, guidanceScale, txtLen, hPacked, wPacked, DitShardSplitBlock)
             : _transformer.Forward(Backend, packedInput, condStream, sigma,
-                pooled, guidanceScale, txtLen, hPacked, wPacked, null, 0, 0, 0);
+                pooled, guidanceScale, txtLen, hPacked, wPacked, null, 0, 0, 0, stepCache: stepCache);
 
     /// <summary>Frees the resident DiT on whichever backend(s) hold it — the whole set on the primary, or the
     /// asymmetric sharded split. The unsharded free would silently no-op on the shard backend's range.</summary>

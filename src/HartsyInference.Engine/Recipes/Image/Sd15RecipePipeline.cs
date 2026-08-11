@@ -100,7 +100,10 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
     {
         TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative) with
         {
-            Scheduler = request.Scheduler,
+            // Same fix as SdxlRecipePipeline: request.Sampler (euler/ddim/dpm++2m/lcm/tcd) is what the
+            // "HartsyInference Sampler" param actually populates; request.Scheduler is always null from the
+            // extension today. Reading only Scheduler made the Sampler param silently inert.
+            Scheduler = request.Sampler ?? request.Scheduler,
             ClipSkip = RecipeRequestMapper.MapClipSkip(request.ClipSkip),
             // The plan only resolves variation noise on the text-to-image path, so this is null under img2img.
             InitialNoise = plan.TakeVariationNoise(),

@@ -3,6 +3,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -421,7 +422,9 @@ public sealed unsafe class ChromaTransformer : IDisposable
         int hPacked,
         int wPacked,
         Tensor? condMask,
-        Tensor? uncondMask)
+        Tensor? uncondMask,
+        DeviceFeatureCache? stepCacheCond = null,
+        DeviceFeatureCache? stepCacheUncond = null)
     {
         int batch = (int)packedLatent.Shape[0];
         int condTxtLen = (int)condContext.Shape[1];
@@ -429,20 +432,21 @@ public sealed unsafe class ChromaTransformer : IDisposable
 
         // FULLY RESIDENT only (BeforeBlockForward null): a captured graph bakes the weight device pointers it was
         // recorded with, and block streaming re-points every block's weights each forward — replaying the graph
-        // would dereference freed addresses (CUDA 700).
+        // would dereference freed addresses (CUDA 700). An armed step cache is excluded the same way ZImage/Flux
+        // are — per-step-variable block count can't be replayed from one captured launch sequence.
         bool graphMode = DitStepGraph.EnabledDefaultOn && backend.StepGraphSupported && !_graphDead
-            && BeforeBlockForward is null
+            && BeforeBlockForward is null && stepCacheCond is null
             && batch == 1 && ReferenceEquals(packedLatent, _latentFixed);
         if (!graphMode)
         {
             Tensor modTable = BuildModTable(backend, timestep, batch);
             Tensor condV = ForwardOnePass(backend, packedLatent, condContext, modTable,
-                condTxtLen, hPacked, wPacked, condMask);
+                condTxtLen, hPacked, wPacked, condMask, stepCacheCond);
             Tensor? uncondV = null;
             if (uncondContext is not null)
             {
                 uncondV = ForwardOnePass(backend, packedLatent, uncondContext, modTable,
-                    uncondTxtLen, hPacked, wPacked, uncondMask);
+                    uncondTxtLen, hPacked, wPacked, uncondMask, stepCacheUncond);
             }
             modTable.Dispose();
             return (condV, uncondV, true);
@@ -592,7 +596,8 @@ public sealed unsafe class ChromaTransformer : IDisposable
         int txtSeqLen,
         int hPacked,
         int wPacked,
-        Tensor? attentionMask)
+        Tensor? attentionMask,
+        DeviceFeatureCache? stepCache = null)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
@@ -605,7 +610,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
         ChromaDebugDump.Dump("img_in", img);
 
         Tensor imgOut = ForwardCore(backend, img, encoderHidden, modTable,
-            txtSeqLen, hPacked, wPacked, attentionMask);
+            txtSeqLen, hPacked, wPacked, attentionMask, stepCache);
 
         // ── Final norm (ChromaAdaLayerNormContinuousPruned) ──
         // temb_final = modTable[:, -2:, :] → row 0 (=-2) = SHIFT, row 1 (=-1) = SCALE (ComfyUI Chroma
@@ -644,7 +649,8 @@ public sealed unsafe class ChromaTransformer : IDisposable
         int txtSeqLen,
         int hPacked,
         int wPacked,
-        Tensor? attentionMask)
+        Tensor? attentionMask,
+        DeviceFeatureCache? stepCache = null)
     {
         int batch = (int)img.Shape[0];
         int imgSeqLen = (int)img.Shape[1];
@@ -702,45 +708,89 @@ public sealed unsafe class ChromaTransformer : IDisposable
             : null;
 
         // ── Double-stream blocks ──
-        ForwardDoubleRange(backend, ref img, ref txt, modTable, rope, sdpaMask, 0, numDoubles);
-
-        // ── Concatenate [txt, img] for single-stream processing. B=1: device row-concat (the old host
-        //    Buffer.MemoryCopy read both streams' DataPointer — a full pipeline drain per forward). ──
-        TensorShape concatShape = new TensorShape(batch, totalSeqLen, hidden);
-        Tensor combined = new Tensor(concatShape, act);
-        if (batch == 1)
+        // Across-step First-Block cache (docs/Research/STEP_ACCELERATION.md §2; same pattern as
+        // Sd3Transformer/FluxTransformer). Run block 0 alone via ForwardDoubleRange's own partial-range support
+        // (the DiT-sharding primitive) — a snapshot copy of its output serves as the indicator/residual anchor
+        // since ForwardDoubleRange unconditionally disposes its `img`/`txt` ref params on every subsequent call,
+        // so the anchor can't just alias the loop's own `img` variable the way Sd3/Flux's guarded-dispose loops
+        // allow. On a hit, skip the remaining double blocks, the concat, AND every single block entirely —
+        // imgOut is the same [B, imgSeqLen, hidden] shape at every one of those points.
+        Tensor? cacheAnchor = null;
+        Tensor? hitReconstruction = null;
+        if (stepCache is not null)
         {
-            backend.Concat(combined, new Tensor[] { txt, img }, dim: 1);
+            ForwardDoubleRange(backend, ref img, ref txt, modTable, rope, sdpaMask, 0, 1);
+            if (stepCache.ShouldCompute(backend, img))
+            {
+                cacheAnchor = new Tensor(img.Shape, img.DType);
+                backend.Scale(cacheAnchor, img, 1.0f);
+                ForwardDoubleRange(backend, ref img, ref txt, modTable, rope, sdpaMask, 1, numDoubles);
+            }
+            else
+            {
+                hitReconstruction = stepCache.ApplyResidual(backend, img);
+                img.Dispose();
+                txt.Dispose();
+            }
         }
         else
         {
-            ConcatTextImage(combined, txt, img, batch, txtSeqLen, imgSeqLen, hidden);
+            ForwardDoubleRange(backend, ref img, ref txt, modTable, rope, sdpaMask, 0, numDoubles);
         }
-        img.Dispose();
-        txt.Dispose();
 
-        // ── Single-stream blocks ──
-        ForwardSingleRange(backend, ref combined, modTable, rope, sdpaMask, 0, numSingles);
-
-        // sdpaMask is owned by the per-generation cache — NOT disposed here.
-
-        // ── Strip text prefix → image tail. B=1: device row slice. ──
-        TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, hidden);
-        Tensor imgOut = new Tensor(imgOutShape, act);
-        if (batch == 1)
+        Tensor imgOut;
+        if (hitReconstruction is not null)
         {
-            backend.SliceRows(imgOut, combined, txtSeqLen);
+            imgOut = hitReconstruction;
         }
         else
         {
-            ExtractImageTokens(imgOut, combined, batch, txtSeqLen, imgSeqLen, hidden);
-        }
-        combined.Dispose();
+            // ── Concatenate [txt, img] for single-stream processing. B=1: device row-concat (the old host
+            //    Buffer.MemoryCopy read both streams' DataPointer — a full pipeline drain per forward). ──
+            TensorShape concatShape = new TensorShape(batch, totalSeqLen, hidden);
+            Tensor combined = new Tensor(concatShape, act);
+            if (batch == 1)
+            {
+                backend.Concat(combined, new Tensor[] { txt, img }, dim: 1);
+            }
+            else
+            {
+                ConcatTextImage(combined, txt, img, batch, txtSeqLen, imgSeqLen, hidden);
+            }
+            img.Dispose();
+            txt.Dispose();
 
+            // ── Single-stream blocks ──
+            ForwardSingleRange(backend, ref combined, modTable, rope, sdpaMask, 0, numSingles);
+
+            // sdpaMask is owned by the per-generation cache — NOT disposed here.
+
+            // ── Strip text prefix → image tail. B=1: device row slice. ──
+            TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, hidden);
+            imgOut = new Tensor(imgOutShape, act);
+            if (batch == 1)
+            {
+                backend.SliceRows(imgOut, combined, txtSeqLen);
+            }
+            else
+            {
+                ExtractImageTokens(imgOut, combined, batch, txtSeqLen, imgSeqLen, hidden);
+            }
+            combined.Dispose();
+
+            if (cacheAnchor is not null)
+            {
+                stepCache!.StoreResidual(backend, cacheAnchor, imgOut);
+                cacheAnchor.Dispose();
+            }
+        }
+
+        // F16 cast-back applies on BOTH paths: hitReconstruction inherits img's dtype at the point it was
+        // cached (F16 under the f16Loop fast path), same as the freshly-computed miss-path imgOut.
         if (imgOut.DType == DType.F16)
         {
             // Back to F32 for the final norm + proj_out (velocity precision matters across Euler steps).
-            Tensor imgOutF32 = new Tensor(imgOutShape, DType.F32);
+            Tensor imgOutF32 = new Tensor(new TensorShape(batch, imgSeqLen, hidden), DType.F32);
             backend.CastToF32(imgOutF32, imgOut);
             imgOut.Dispose();
             imgOut = imgOutF32;
