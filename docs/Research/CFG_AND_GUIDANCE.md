@@ -301,6 +301,26 @@ The mid block and deeper down blocks contain the most structural information, ma
 - [Hugging Face Diffusers — PAG Guide](https://huggingface.co/docs/diffusers/en/using-diffusers/pag)
 - [Hugging Face Diffusers — PAG API](https://huggingface.co/docs/diffusers/main/api/pipelines/pag)
 
+### 2.6 Self-Attention Guidance (SAG) — not PAG, added 2026-08-11
+
+**Paper:** "Self-Attention Guidance: Improving Sample Quality of Diffusion Models Using Self-Attention" — Hong et al., CVPR 2023 ([arXiv:2210.00939](https://arxiv.org/abs/2210.00939))
+
+This section previously didn't exist — this doc's Tier-2.3 framing (in the extension backlog plan) had grouped SAG with PAG as though they were the same mechanism-family with different names. **They aren't.** PAG replaces self-attention with an identity op in selected layers (§2.5); SAG does something structurally different: it uses the self-attention map itself as a saliency signal to **blur the diffusion input**, not the attention computation.
+
+#### Core Mechanism
+
+1. Run a normal forward pass, capturing the self-attention map from one designated layer (usually a mid-resolution layer, analogous to PAG's `["mid"]` default).
+2. Average the attention map over heads, threshold it (e.g. mean + a multiplier) to get a soft mask of "attended-to" (high-saliency) regions of the latent.
+3. Gaussian-blur the **input latent** `x_t` — not the attention output — restricted to (or blended by) that mask, producing `x_t_blurred`.
+4. Run a **second** forward pass on `x_t_blurred` to get `eps_blurred`.
+5. Guide away from the blurred prediction: `eps_sag = eps_theta(x_t) + sag_scale * (eps_theta(x_t) - eps_blurred(x_t_blurred))`.
+
+The self-attention map is only ever *read* (to build the blur mask) — SAG never patches or replaces the attention computation the way PAG does. This means SAG's forward-pass count is 2 without CFG (normal + blurred) or 3 with CFG (uncond + cond + blurred-cond), the same count as PAG, but the *mechanism* needing new engine machinery is different: PAG needs an attention-computation hook (`IAttentionHook`-shaped, §9 below); SAG needs (a) a way to read out an intermediate attention map from a specific block without disrupting the forward pass, and (b) a Gaussian-blur-with-mask operator on a 4D latent tensor. Neither of those exists in the engine today (confirmed: no attention-map-readout parameter on any `Sdpa`-family backend call, no blur kernel outside `HartsyInference.Vision`'s unrelated CV pipelines). Do not assume PAG's hook design (below) covers SAG — it only covers half of this cluster.
+
+**Sources:**
+- [Hong et al., 2023 — Self-Attention Guidance](https://arxiv.org/abs/2210.00939)
+- [Hugging Face Diffusers — SAG Pipeline](https://huggingface.co/docs/diffusers/en/api/pipelines/self_attention_guidance)
+
 ---
 
 ## 3. Key Numbers/Constants
@@ -607,9 +627,10 @@ vec = vec + self.vector_in(y)
 
 ## 8. Open Questions
 
-- [ ] Whether PAG can be applied to Flux DiT architecture (no UNet) — PAG targets self-attention maps which exist in DiT, but the specific layer naming and effectiveness may differ
+- [x] ~~Whether PAG can be applied to Flux DiT architecture (no UNet)~~ — **Answered 2026-08-11**, from direct knowledge of this engine's `FluxTransformer`/`Sd3Transformer`/`ChromaTransformer`/`HiDreamTransformer` (gained wiring step-cache into all four, §6 of `ROADMAP.md`): yes, mechanically simpler here than the UNet case. Every block's self-attention is a single `backend.ScaledDotProductAttention(...)` call site inside that block's class (`FluxDoubleStreamBlock`/`FluxSingleStreamBlock`, `ChromaDoubleStreamBlock`/`ChromaSingleStreamBlock`, `HiDreamBlock`, SD3's `JointBlock`) — there is no equivalent of UNet's named `input_blocks.14.1`-style path to look up; the unit of selection is a numeric block index into a homogeneous loop (`config.Depth` for SD3, `NumLayers`/`NumSingleLayers` for HiDream, double+single counts for Flux/Chroma), the same loop shape the step-cache work already threads a `stepCache` parameter through. See the updated §9 hook sketch below for the concrete fork point.
 - [ ] Optimal `guidance_rescale` values for different models/schedulers — 0.7 is recommended for v-prediction models, but model-specific tuning may be needed
 - [ ] Whether adapter-based guidance distillation (AGD) is practical for arbitrary models — Recent research ([arXiv:2503.07274](https://arxiv.org/abs/2503.07274)) suggests lightweight adapters can simulate CFG in a single pass
+- [ ] **New (2026-08-11): SAG has no engine-side prerequisite machinery at all** — unlike PAG (which only needs a per-block attention-computation branch, mechanically cheap given the single-call-site shape above), SAG needs an attention-map readout path (nothing today lets a caller inspect an intermediate `Sdpa` call's attention weights — the backend call returns only the attended output) and a masked Gaussian-blur op on a 4D latent (doesn't exist outside `HartsyInference.Vision`'s unrelated CV code). Scope SAG as its own estimate, not "PAG's sibling, same size."
 
 ---
 
@@ -705,9 +726,17 @@ static Tensor TimestepEmbedding(Tensor timesteps, int dim)
 }
 ```
 
-#### PAG Hook System
+#### PAG Hook System — design pass, 2026-08-11 (still NOT implemented; see Tier 2.3 in the extension backlog plan, which deliberately scopes this as its own follow-up project rather than bundling it into the guidance-math-param execution pass that shipped CFG-Rescale/TCFG)
 
-PAG requires intercepting self-attention computation in specific layers. For C# implementation:
+The original sketch below (a generic `IAttentionHook` interface) undersold the actual shape of the work in this codebase. Concrete findings from this session's step-cache work (which touched every DiT block loop in `Sd3Transformer`/`ChromaTransformer`/`FluxTransformer`/`HiDreamTransformer`):
+
+- **Fork point.** Self-attention in every one of these four architectures is one call site per block class: `backend.ScaledDotProductAttention(output, q, k, v, attnBias, scale, ...)`. PAG's `PSA(Q,K,V) = V` collapses to: for a perturbed block, skip that call and copy `V` into `output` instead (a single `backend.Copy`/`Scale(v, 1.0f)`-shaped op — cheaper than the attention call it replaces, not more expensive). No new backend primitive is needed for the perturbation itself.
+- **Selection mechanism.** Not named layers (no `input_blocks.14.1`-style path exists in a DiT). The natural C# shape is a block-index set threaded through `Forward`, the same way `DeviceFeatureCache? stepCache` was threaded through this session — e.g. `IReadOnlySet<int>? perturbBlocks`, checked once per block-loop iteration (`if (perturbBlocks?.Contains(i) == true) { /* identity */ } else { /* normal SDPA */ }`). This composes cleanly with the existing loop shape; it does NOT compose for free with step-cache on the same run — a perturbed pass changes block *i*'s output relative to the cached anchor, so a generation using both PAG and step-cache needs the perturbed pass to skip the cache entirely (pass `stepCache: null` on that forward call), not share one.
+- **Which pipeline first.** Follow the step-cache rollout's own lesson: start with the architecture that has the fewest structural complications, not the most requested one. SD3 (`Sd3Transformer`) is again the cleanest candidate — single dual-stream loop, no double→single transition (unlike Flux/Chroma/HiDream) and no F16-cast-back subtlety (unlike Chroma). Prove the block-index-set + identity-passthrough pattern there before touching the double→single architectures, exactly as the step-cache work sequenced SD3 before HiDream.
+- **Blending back.** The 3-pass combine (`eps_pag = eps_cfg + pag_scale * (eps_cond - eps_perturbed)`, §2.5 above) is pure post-hoc tensor math on the three forward passes' outputs — this part reuses `CfgHelper`'s existing shape directly (a new `ApplyPag(Tensor cfgCombined, Tensor cond, Tensor perturbed, float pagScale)` method, same signature style as `ApplyDualCfg`). This half is NOT the hard part of this project; the hard part is the third forward pass's block-selective perturbation above.
+- **Not scoped here:** which block index(es) are "the mid block equivalent" per architecture (SDXL's UNet has a literal middle block; a DiT's `Depth`-deep uniform loop doesn't have one structurally distinguished layer) — this needs its own empirical sweep once the mechanism exists, the same way step-cache needed a per-architecture threshold sweep. Don't guess a default before that data exists.
+
+Original C# sketch (kept for the interface-shape idea, but see the concrete fork point above — a real implementation patches the existing per-block SDPA call, it doesn't wrap it in a new interface):
 
 ```csharp
 public interface IAttentionHook
