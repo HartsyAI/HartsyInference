@@ -14,6 +14,10 @@ namespace HartsyInference.Engine.Services;
 public sealed class ImagesService : IImagesService
 {
     private readonly InferenceEngine _engine;
+    /// <summary>Tier 3.2 segment refinement's CLIPSeg backend — a service-owned cache (mirrors
+    /// <c>VisionService</c>'s own <c>ClipSegSegmenter</c> instance) so a prompt with no <c>&lt;segment:&gt;</c>
+    /// parts never loads it, and a repeat segment query on the same generation reuses the loaded weights.</summary>
+    private readonly Vision.ClipSegSegmenter _clipSeg = new();
 
     /// <summary>Creates the service bound to its owning engine.</summary>
     internal ImagesService(InferenceEngine engine) => _engine = engine;
@@ -32,13 +36,20 @@ public sealed class ImagesService : IImagesService
                 // Resolved first: the crop is scaled to the resolution the model will actually run at, so it has to see
                 // the defaults-filled request rather than the caller's.
                 InpaintOnlyMasked.Plan? cropPlan = InpaintOnlyMasked.Prepare(resolved);
-                if (cropPlan is null)
+                ImageResult result = cropPlan is null
+                    ? _engine.GenerateWithVramCleanup(() => pipeline.Generate(resolved, progress, cancel))
+                    : InpaintOnlyMasked.Composite(
+                        _engine.GenerateWithVramCleanup(() => pipeline.Generate(InpaintOnlyMasked.Apply(resolved, cropPlan), progress, cancel)),
+                        cropPlan);
+
+                // Tier 3.2: <segment:X> runs AFTER pixels exist (it needs to segment the decoded image), so it
+                // composes on top of whatever the ordinary inpaint-only-masked path above already produced —
+                // a request can combine a top-level Inpaint.ShrinkGrow crop with segment refinement.
+                if (SegmentRefinement.HasSegmentParts(resolved.Prompt))
                 {
-                    return _engine.GenerateWithVramCleanup(() => pipeline.Generate(resolved, progress, cancel));
+                    result = SegmentRefinement.Apply(result, resolved, pipeline, _engine.Backend, _clipSeg, progress, cancel);
                 }
-                ImageRequest cropped = InpaintOnlyMasked.Apply(resolved, cropPlan);
-                ImageResult generated = _engine.GenerateWithVramCleanup(() => pipeline.Generate(cropped, progress, cancel));
-                return InpaintOnlyMasked.Composite(generated, cropPlan);
+                return result;
             },
             cancel);
     }
