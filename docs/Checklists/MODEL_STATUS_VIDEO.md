@@ -72,11 +72,24 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   but **stays narrowed** — no local 1.3B checkpoint exists to verify against, and this doc's own verification
   rule is a real generation actually looked at, not "should work by symmetry." Revisit once a 1.3B checkpoint
   is available.
-- [ ] **LTX has no VAE encoder at all** (confirmed — only decoders exist for both LTX-Video and LTX-2), no
-  image-conditioning parameter anywhere in `LtxVideoTransformer`, no image argument on `LtxVideoPipeline`'s
-  methods. LTX image-to-video needs a new VAE encoder class, a transformer-side conditioning input, and
-  pipeline plumbing — genuinely new machinery, use Wan's `Wan22VaeEncoder.EncodeRgbFrame` →
-  `firstFrameLatent` → `GenerateFromEmbeddings` shape as the template, not a shortcut.
+- [ ] **LTX image-to-video (Tier 3.4) — first gate done, transformer/pipeline conditioning still open.**
+  `LtxVideoVaeEncoder` (base LTX-Video 0.9 config) now exists, ported from the actual diffusers source
+  rather than assumed by decoder symmetry — two real divergences found: `AutoencoderKLLTXVideo` defaults
+  `encoder_causal=True`/`decoder_causal=False` (not shared between the checkpoint's two halves), and the
+  base-0.9 downsampler is a plain strided conv at unchanged channel width, with the channel increase
+  happening via a separate resnet AFTER the downsampler (mirror of the decoder's before-the-upsampler
+  ordering). Real-weight verified standalone (encode→decode round trip through the existing
+  `LtxVideoVaeDecoder` on `ltx-video-2b-v0.9.safetensors`): quadrant pattern reconstructs correctly
+  (mean abs diff 1.09/255), `latents_mean`/`latents_std` confirmed present on both sides (not a
+  cancelling-no-op — see `HasLatentStats` on both classes), latent is genuinely unit-scale
+  (mean 0.027/std 1.146) and load-bearing (decoding a zeroed copy of the same latent diverges by
+  47.23 vs 1.09 for the real one). F=1 (single-frame conditioning, the I2V use case) is exercised;
+  the encoder's temporal-downsampling path is NOT — untested at F>1.
+  **Still missing:** no image-conditioning parameter anywhere in `LtxVideoTransformer`'s forward pass,
+  no image argument on any `LtxVideoPipeline` method, no wiring through `LtxVideoRecipePipeline`/
+  `LtxVideoRecipe` to consume `VideoRequest.InitImage`, no `VideoFeatures` bit declared. Use Wan's
+  `Wan22VaeEncoder.EncodeRgbFrame` → `firstFrameLatent` → `GenerateFromEmbeddings` shape as the
+  template for the remaining wiring, not a shortcut.
 
 ### SeedVR2 restoration follow-ups
 - [x] ~~fp32 whole-clip VAE activation ceiling~~ **BF16 VAE activations landed (2026-08-02)** — reference
