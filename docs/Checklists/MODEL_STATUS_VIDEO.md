@@ -60,13 +60,18 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] All models are built structurally; numeric parity vs a Python reference is pending for every one not already ✅ (LTX 0.9 / 0.9.5 / 13B and LTX-2 22B are verified e2e).
 
 ### Wan / LTX open items
-- [ ] **Wan `EndFrame` real wiring on the non-concat path** — `wan-22-5b` (TI2V-5B) and `wan-21-1_3b` had
-  their `Supports`/`SupportsFor` narrowed 2026-08-09 to stop claiming `VideoFeatures.EndFrame` (it was
-  silently no-op'd there, not refused). `GenerateFromEmbeddings`/`GenerateFramesAsync`/the internal
-  `RunDenoise` still have no `lastFrameLatent` parameter on that path at all — needs one, mirroring
-  `MiniMaxH3RecipePipeline`'s symmetric `EncodeKeyframes` (encodes both `InitImage` and `VideoEndFrame`),
-  threaded through the TI2V `expand_timesteps` conditioning path. Once wired, revert the 2026-08-09
-  narrowing for the paths this covers.
+- [x] **Wan `EndFrame` real wiring on the non-concat path — DONE 2026-08-11 for `wan-22-5b`.**
+  `GenerateFromEmbeddings`/`GenerateFramesAsync`/the internal `RunDenoise` now take an optional
+  `lastFrameLatent` alongside `firstFrameLatent`, symmetric per-frame-timestep-0 pinning at latent-frame
+  `T_lat-1` (`WriteLastFrame`, mirroring the existing `WriteFirstFrame`). `WanVideoRecipePipeline` VAE-encodes
+  `VideoRequest.VideoEndFrame` the same way `InitImage` already was. Real-weight verified against the local
+  TI2V-5B checkpoint: solid-red init / solid-blue end synthetic colors, frame 0 and the final decoded frame
+  visually confirmed to match their respective conditioning colors (`WanEndFrameRealWeightTests.cs`). The
+  2026-08-09 `Supports`/`SupportsFor` narrowing is reverted for `wan-22-5b` only. `wan-21-1_3b` shares the
+  identical non-concat code path (same `ResolveConfig` branch shape) so the mechanism should cover it too,
+  but **stays narrowed** — no local 1.3B checkpoint exists to verify against, and this doc's own verification
+  rule is a real generation actually looked at, not "should work by symmetry." Revisit once a 1.3B checkpoint
+  is available.
 - [ ] **LTX has no VAE encoder at all** (confirmed — only decoders exist for both LTX-Video and LTX-2), no
   image-conditioning parameter anywhere in `LtxVideoTransformer`, no image argument on `LtxVideoPipeline`'s
   methods. LTX image-to-video needs a new VAE encoder class, a transformer-side conditioning input, and
