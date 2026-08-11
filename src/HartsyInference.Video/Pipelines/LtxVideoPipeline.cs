@@ -29,12 +29,15 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         _latentChannels = config.InChannels;
     }
 
-    /// <summary>Generates frames from pre-computed T5 features. <paramref name="promptEmbeds"/>/<paramref name="negativeEmbeds"/> are <c>[L, captionChannels]</c>; returns one interleaved-RGB <c>byte[]</c> per frame.</summary>
+    /// <summary>Generates frames from pre-computed T5 features. <paramref name="promptEmbeds"/>/<paramref name="negativeEmbeds"/> are <c>[L, captionChannels]</c>; returns one interleaved-RGB <c>byte[]</c> per frame.
+    /// <para><paramref name="firstFrameLatent"/> (Tier 3.4, I2V) is an optional VAE-encoded single-frame latent
+    /// <c>[1, inChannels, 1, H/32, W/32]</c> (produced by <see cref="Models.Vae.LtxVideoVaeEncoder"/> upstream —
+    /// matches Wan's <c>firstFrameLatent</c> convention: the caller encodes, the pipeline conditions).</para></summary>
     public (byte[][] frames, int width, int height, int seed) GenerateFromEmbeddings(
         Tensor promptEmbeds, Tensor negativeEmbeds, TextToImageRequest request, int numFrames, int frameRate = 25,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null, Tensor? firstFrameLatent = null)
     {
-        Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, frameRate, onProgress, out int seed);
+        Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, frameRate, onProgress, out int seed, firstFrameLatent);
         Tensor rgb;
         try { rgb = DecodeLatent(latent, seed); }
         finally { latent.Dispose(); }
@@ -44,17 +47,17 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         byte[][] frames = new byte[f][];
         for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
         rgb.Dispose();
-        Logs.Info($"LTX-Video T2V complete ({frames.Length} frames, seed={seed})");
+        Logs.Info($"LTX-Video {(firstFrameLatent is null ? "T2V" : "I2V")} complete ({frames.Length} frames, seed={seed})");
         return (frames, request.Width ?? 768, request.Height ?? 512, seed);
     }
 
     /// <summary>Streams decoded frames (pull-based → memory bounded; pair with an <c>IVideoEncoder</c>).</summary>
     public async IAsyncEnumerable<VideoFrame> GenerateFramesAsync(
         Tensor promptEmbeds, Tensor negativeEmbeds, TextToImageRequest request, int numFrames, int frameRate = 25,
-        Action<GenerationProgress>? onProgress = null,
+        Action<GenerationProgress>? onProgress = null, Tensor? firstFrameLatent = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, frameRate, onProgress, out int seed);
+        Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, frameRate, onProgress, out int seed, firstFrameLatent);
         Tensor rgb;
         try { rgb = DecodeLatent(latent, seed); }
         finally { latent.Dispose(); }
@@ -104,7 +107,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
 
     /// <summary>Runs the flow-match denoise loop and returns the VAE-ready latent <c>[1,128,T_lat,H_lat,W_lat]</c>.</summary>
     private Tensor RunDenoise(Tensor promptEmbeds, Tensor negativeEmbeds, TextToImageRequest request, int numFrames, int frameRate,
-        Action<GenerationProgress>? onProgress, out int seed)
+        Action<GenerationProgress>? onProgress, out int seed, Tensor? firstFrameLatent = null)
     {
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
@@ -121,17 +124,40 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
 
+        if (firstFrameLatent is not null &&
+            (firstFrameLatent.Shape.Rank != 5 || firstFrameLatent.Shape[0] != 1 || firstFrameLatent.Shape[1] != _latentChannels
+             || firstFrameLatent.Shape[2] != 1 || firstFrameLatent.Shape[3] != hLat || firstFrameLatent.Shape[4] != wLat))
+            throw new ArgumentException($"firstFrameLatent must be [1,{_latentChannels},1,{hLat},{wLat}]; got {firstFrameLatent.Shape}.", nameof(firstFrameLatent));
+
         // RoPE interpolation scale = (vae_temporal/frame_rate, vae_spatial, vae_spatial).
         (double T, double H, double W) interp = ((double)tp / frameRate, sp, sp);
         // Dynamic flow-match shift: mu = seq·m + b (base_seq 256 → 0.5, max_seq 4096 → 1.16), shift = exp(mu).
         double m = (1.16 - 0.5) / (4096 - 256), bShift = 0.5 - m * 256;
         float shift = (float)Math.Exp(s * m + bShift);
 
-        Logs.Info($"LTX-Video T2V: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, seed={seed} (grid {tLat}x{hLat}x{wLat}, {s} tokens, shift={shift:F3})");
+        Logs.Info($"LTX-Video {(firstFrameLatent is null ? "T2V" : "I2V")}: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, seed={seed} (grid {tLat}x{hLat}x{wLat}, {s} tokens, shift={shift:F3})");
         Logs.Warning("LTX-Video pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape(s, _latentChannels), seed);
+
+        // I2V conditioning (Tier 3.4): diffusers' prepare_latents does
+        //   latents = init_latents * conditioning_mask + noise * (1 - conditioning_mask)
+        // with conditioning_mask = 1.0 at frame 0 only — since the mask is exactly 0/1 (no partial blend), this
+        // reduces to a direct overwrite of the frame-0 tokens with the encoded image latent, no noise mixed in.
+        Tensor? conditioningMask = null;
+        Tensor? packedFirstFrame = null;   // kept alive to re-pin frame-0 tokens every step (see the loop below)
+        int frame0Tokens = hLat * wLat;
+        long frame0Bytes = (long)frame0Tokens * _latentChannels * 4;
+        if (firstFrameLatent is not null)
+        {
+            packedFirstFrame = PackLatents(firstFrameLatent, 1, hLat, wLat, _latentChannels);   // [hLat*wLat, C]
+            Buffer.MemoryCopy((float*)packedFirstFrame.DataPointer, (float*)latents.DataPointer, frame0Bytes, frame0Bytes);
+
+            conditioningMask = new Tensor(new TensorShape(s), DType.F32);
+            float* mp = (float*)conditioningMask.DataPointer;
+            for (int i = 0; i < s; i++) mp[i] = i < frame0Tokens ? 1f : 0f;
+        }
 
         // Default-off perf knob (INFERENCE_ACCEL_GRIND §H1.5; Wan is the video reference wiring +
         // measurement — NOTE its verdict: on 50-step video the plain gate trades per-seed reproducibility
@@ -139,6 +165,11 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         // armed cache forces the eager path — variable per-step topology can't replay the CFG-pair graph,
         // so the latent must NOT be routed into the graph's fixed buffer either.
         float stepCacheThreshold = StepCacheEnv.ReadThreshold();
+        if (conditioningMask is not null && stepCacheThreshold > 0f)
+        {
+            Logs.Warning("LTX I2V conditioning is not compatible with step-cache in this build — running this generation without step-cache.");
+            stepCacheThreshold = 0f;
+        }
         DeviceFeatureCache? condCache = null;
         DeviceFeatureCache? uncondCache = null;
         if (stepCacheThreshold > 0f)
@@ -174,7 +205,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
             float tEmb = t * 1000f;   // DiT timestep scaling (validation-gated)
             (Tensor vCond, Tensor? vUncond, bool callerOwns) = _transformer.ForwardPaired(
                 Backend, stepLatent, promptEmbeds, negativeEmbeds, tEmb, (tLat, hLat, wLat), interp, null,
-                condCache, uncondCache);
+                condCache, uncondCache, conditioningMask);
             if (dbg && (k == 0 || k == steps - 1))
                 Diag($"[LTX-DIAG] step {k}: t={t:F4} dt={dt:F4} tEmb={tEmb:F1} | vCond {Stat(vCond)} | vUncond {Stat(vUncond!)} | diffL2={DiffL2(vCond, vUncond!):F4} | latent {Stat(stepLatent)}");
             if (callerOwns)
@@ -183,6 +214,12 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
                 LancePipelineCommon.EulerCfgStep(stepLatent, vCond, vUncond!, guidance, dt);
                 vCond.Dispose();
                 vUncond!.Dispose();
+                // I2V conditioning: diffusers re-pins frame 0 to the ORIGINAL image latent after every scheduler
+                // step (pipeline_ltx_image2video.py — latents = cat([latents[:,:,:1], pred_latents], dim=2), i.e.
+                // frame 0 never actually receives the Euler update at all, not just "starts there and drifts
+                // slowly because its timestep is near 0"). Mirror that exactly, not just the initial overwrite.
+                if (packedFirstFrame is not null)
+                    Buffer.MemoryCopy((float*)packedFirstFrame.DataPointer, (float*)stepLatent.DataPointer, frame0Bytes, frame0Bytes);
             }
             else
             {
@@ -222,6 +259,8 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         // original noise tensor — the fixed buffer persists for the next generation (freed in the transformer).
         Tensor vaeLatent = UnpackLatents(stepLatent, tLat, hLat, wLat, _latentChannels);   // [1,C,T_lat,H_lat,W_lat]
         latents.Dispose();
+        packedFirstFrame?.Dispose();
+        conditioningMask?.Dispose();
         return vaeLatent;
     }
 
@@ -241,6 +280,26 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
                 for (int c = 0; c < channels; c++)
                     dp[(long)c * h * w + pix] = sp[token * channels + c];
             }
+        return outT;
+    }
+
+    /// <summary>Packs <c>[1, C, T, H, W]</c> → tokens <c>[T·H·W, C]</c> (f,h,w order, channel-last) — the inverse of
+    /// <see cref="UnpackLatents"/>. Used to fold a VAE-encoded conditioning latent (Tier 3.4 I2V) into the same
+    /// token layout the transformer works in.</summary>
+    private static Tensor PackLatents(Tensor latent, int t, int h, int w, int channels)
+    {
+        Tensor outT = new Tensor(new TensorShape((long)t * h * w, channels), DType.F32);
+        float* sp = (float*)latent.DataPointer;
+        float* dp = (float*)outT.DataPointer;
+        long spatial = (long)t * h * w;
+        for (int ti = 0; ti < t; ti++)
+            for (int hi = 0; hi < h; hi++)
+                for (int wi = 0; wi < w; wi++)
+                {
+                    long token = ((long)ti * h + hi) * w + wi;
+                    for (int c = 0; c < channels; c++)
+                        dp[token * channels + c] = sp[(long)c * spatial + token];
+                }
         return outT;
     }
 

@@ -173,6 +173,23 @@ public sealed unsafe class LtxVideoVaeEncoder
         return latent;
     }
 
+    /// <summary>Encodes a raw interleaved RGB24 byte buffer directly (same convention as
+    /// <see cref="Wan22VaeEncoder.EncodeRgbFrame"/> — the Tier 3.4 I2V template this mirrors): builds the
+    /// <c>[1,3,1,H,W]</c> <c>[-1,1]</c> tensor <see cref="Encode"/> expects and disposes it after.</summary>
+    public Tensor EncodeRgbFrame(IBackend backend, ReadOnlySpan<byte> rgb24, int width, int height)
+    {
+        if (rgb24.Length < width * height * 3)
+            throw new ArgumentException($"expected {width * height * 3} bytes; got {rgb24.Length}.", nameof(rgb24));
+        Tensor rgb = new Tensor(new TensorShape([1L, 3, 1, height, width]), DType.F32);
+        float* p = (float*)rgb.DataPointer;
+        long frame = (long)height * width;
+        for (long pix = 0; pix < frame; pix++)
+            for (int c = 0; c < 3; c++)
+                p[c * frame + pix] = rgb24[(int)(pix * 3 + c)] / 127.5f - 1f;
+        try { return Encode(backend, rgb); }
+        finally { rgb.Dispose(); }
+    }
+
     /// <summary>Per-channel latent normalization (in-place): <c>latent[c] = (raw[c] − mean[c]) / std[c]</c> — the
     /// inverse of <see cref="LtxVideoVaeDecoder"/>'s <c>Denormalize</c>. No-op when the checkpoint carries no
     /// stats.</summary>

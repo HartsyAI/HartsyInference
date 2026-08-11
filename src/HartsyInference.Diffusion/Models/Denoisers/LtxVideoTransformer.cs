@@ -72,11 +72,20 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         for (int i = 0; i < _blocks.Length; i++) foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
     }
 
-    /// <summary>Velocity prediction over VAE-latent tokens. <paramref name="latentTokens"/> is <c>[S, inChannels]</c> with <c>S = numFrames·height·width</c> in <c>(f,h,w)</c> order; <paramref name="encoder"/> is raw T5 features <c>[L, captionChannels]</c>; <paramref name="encoderMask"/> is an optional additive cross-attn mask. Returns <c>[S, outChannels]</c>.</summary>
+    /// <summary>Velocity prediction over VAE-latent tokens. <paramref name="latentTokens"/> is <c>[S, inChannels]</c> with <c>S = numFrames·height·width</c> in <c>(f,h,w)</c> order; <paramref name="encoder"/> is raw T5 features <c>[L, captionChannels]</c>; <paramref name="encoderMask"/> is an optional additive cross-attn mask. Returns <c>[S, outChannels]</c>.
+    /// <para>I2V conditioning (Tier 3.4): <paramref name="conditioningMask"/>, when supplied, is F32 <c>[S]</c> with
+    /// 1.0 at conditioned (frame-0) tokens and 0.0 elsewhere — mirrors diffusers'
+    /// <c>timestep.unsqueeze(-1) * (1 - conditioning_mask)</c> (the conditioned tokens denoise at t=0 while the
+    /// rest denoise at the real step timestep). Builds a second timestep embedding at t=0 and threads a per-token
+    /// row-index through every block (see <see cref="LtxVideoBlock.Forward"/>) and the final layer. NOT supported
+    /// together with <paramref name="stepCache"/> (both gate per-step/per-token topology in ways that haven't been
+    /// proven compatible) — throws rather than silently ignoring one.</para></summary>
     public Tensor Forward(IBackend backend, Tensor latentTokens, Tensor encoder, float timestep,
         (int Frames, int Height, int Width) grid, (double T, double H, double W) interpScale, Tensor? encoderMask,
-        Utilities.DeviceFeatureCache? stepCache = null)
+        Utilities.DeviceFeatureCache? stepCache = null, Tensor? conditioningMask = null)
     {
+        if (conditioningMask is not null && stepCache is not null)
+            throw new NotSupportedException("LtxVideoTransformer: I2V conditioningMask + step-cache is not supported in this build — disable one.");
         int s = (int)latentTokens.Shape[0];
         int dim = _config.InnerDim;
 
@@ -87,6 +96,12 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         LtxVideoDebugDump.Dump("proj_in", hidden);
 
         (Tensor temb6, Tensor embedded) = TimeEmbed(backend, timestep);
+        Tensor? temb0 = null, embedded0 = null, modIndex = null;
+        if (conditioningMask is not null)
+        {
+            (temb0, embedded0) = TimeEmbed(backend, 0f);
+            modIndex = BuildModIndex(conditioningMask);
+        }
         Tensor encoderProj = CaptionProject(backend, encoder);
 
         Tensor cur = hidden;
@@ -94,6 +109,8 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         // wiring): block 0 always runs and gates; hit ⇒ blocks 1..N−1 replaced by the cached residual;
         // miss ⇒ the block-0 output anchors StoreResidual. Null ⇒ byte-identical loop. Callers must force
         // the eager path when a cache is armed (variable per-step topology can't replay a step graph).
+        // (conditioningMask+stepCache both non-null already threw above, so temb0/modIndex are null here whenever
+        // stepCache is non-null — the cache path below never needs to thread them.)
         Tensor? cacheAnchor = null;
         int startBlock = 0;
         if (stepCache is not null && _blocks.Length > 1)
@@ -117,7 +134,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         }
         for (int i = startBlock; i < _blocks.Length; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, cur, encoderProj, temb6, _rope, cos, sin, encoderMask);
+            Tensor next = _blocks[i].Forward(backend, cur, encoderProj, temb6, _rope, cos, sin, encoderMask, temb0, modIndex);
             if (!ReferenceEquals(cur, cacheAnchor)) cur.Dispose();
             cur = next;
             LtxVideoDebugDump.Dump($"blocks.{i}", cur);
@@ -129,11 +146,23 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         }
         temb6.Dispose(); encoderProj.Dispose();   // cos/sin are cached (GetCosSin) — not disposed here
 
-        Tensor outVel = FinalLayer(backend, cur, embedded, s, dim);
+        Tensor outVel = FinalLayer(backend, cur, embedded, s, dim, embedded0, modIndex);
         cur.Dispose();
         embedded.Dispose();
+        temb0?.Dispose(); embedded0?.Dispose(); modIndex?.Dispose();
         LtxVideoDebugDump.DumpOutput(outVel);
         return outVel;
+    }
+
+    // 1.0 (conditioned/frame-0 token) → row 0; else → row 1 — matches Modulation2Row's row order.
+    private static Tensor BuildModIndex(Tensor conditioningMask)
+    {
+        int s = (int)conditioningMask.Shape[0];
+        Tensor idx = new Tensor(new TensorShape(s), DType.I32);
+        float* m = (float*)conditioningMask.DataPointer;
+        int* p = (int*)idx.DataPointer;
+        for (int i = 0; i < s; i++) p[i] = m[i] > 0.5f ? 0 : 1;
+        return idx;
     }
 
     /// <summary>Copies the working latent into the transformer-owned fixed buffer the step graph captures against,
@@ -166,19 +195,22 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     public (Tensor condVel, Tensor? uncondVel, bool callerOwns) ForwardPaired(
         IBackend backend, Tensor latentTokens, Tensor condEncoder, Tensor? uncondEncoder, float timestep,
         (int Frames, int Height, int Width) grid, (double T, double H, double W) interpScale, Tensor? encoderMask,
-        Utilities.DeviceFeatureCache? condCache = null, Utilities.DeviceFeatureCache? uncondCache = null)
+        Utilities.DeviceFeatureCache? condCache = null, Utilities.DeviceFeatureCache? uncondCache = null,
+        Tensor? conditioningMask = null)
     {
         // An armed step cache forces eager: cache hits change the per-step block topology, which a captured
-        // graph cannot replay (INFERENCE_ACCEL_GRIND §H1.5 — same rule as Chroma's CFG-pair graph).
-        bool graphMode = condCache is null && uncondCache is null
+        // graph cannot replay (INFERENCE_ACCEL_GRIND §H1.5 — same rule as Chroma's CFG-pair graph). I2V
+        // conditioning forces eager too — the captured-graph body (RunPairIntoFixed/RunOnePassGraph) has no
+        // per-token temb0/modIndex plumbing; wiring it through the fixed-buffer capture path is unbuilt.
+        bool graphMode = condCache is null && uncondCache is null && conditioningMask is null
             && DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead
             && ReferenceEquals(latentTokens, _latentFixed);
         if (!graphMode)
         {
             // Eager path — byte-identical to two calls of the validated Forward.
-            Tensor condV = Forward(backend, latentTokens, condEncoder, timestep, grid, interpScale, encoderMask, condCache);
+            Tensor condV = Forward(backend, latentTokens, condEncoder, timestep, grid, interpScale, encoderMask, condCache, conditioningMask);
             Tensor? uncondV = uncondEncoder is not null
-                ? Forward(backend, latentTokens, uncondEncoder, timestep, grid, interpScale, encoderMask, uncondCache)
+                ? Forward(backend, latentTokens, uncondEncoder, timestep, grid, interpScale, encoderMask, uncondCache, conditioningMask)
                 : null;
             return (condV, uncondV, true);
         }
@@ -392,24 +424,47 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         return outT;
     }
 
-    private Tensor FinalLayer(IBackend backend, Tensor hidden, Tensor embedded, int s, int dim)
+    // embedded0/modIndex non-null (I2V conditioning): per-token final-layer modulation, mirroring diffusers'
+    // scale_shift_table[None,None] + embedded_timestep[:,:,None] (embedded_timestep stays per-token through the
+    // whole model, not just the blocks). Builds a [2,dim] shift/scale-raw table (row 0 = t=0, row 1 = t=t_cur) and
+    // looks it up per token via AffineBroadcastRowIndexed — same primitive the blocks use.
+    private Tensor FinalLayer(IBackend backend, Tensor hidden, Tensor embedded, int s, int dim, Tensor? embedded0 = null, Tensor? modIndex = null)
     {
-        // shift = ss[0]+embedded; (1+scale) = 1+ss[1]+embedded ([dim], broadcast over S). The [dim] build stays host
-        // (tiny), folding the +1 into the scale so the device affine is a single input·scale+shift.
         float* ss = (float*)_finalScaleShift!.DataPointer;
-        float* em = (float*)embedded.DataPointer;
-        Tensor shift = new Tensor(new TensorShape(dim), DType.F32);
-        Tensor scaleP1 = new Tensor(new TensorShape(dim), DType.F32);
-        float* shp = (float*)shift.DataPointer; float* scp = (float*)scaleP1.DataPointer;
-        for (int d = 0; d < dim; d++) { shp[d] = ss[d] + em[d]; scp[d] = 1f + ss[dim + d] + em[d]; }
-
-        // Device LayerNorm + affine → the [s,dim] output stays GPU-resident through the final Linear. Was a host
-        // LayerNorm + a host DataPointer affine loop over [s,dim] per step, which forced a re-upload of `normed`.
         Tensor normed = new Tensor(new TensorShape(s, dim), DType.F32);
         backend.LayerNormNoAffine(normed, hidden, 1e-6f);
         Tensor affined = new Tensor(new TensorShape(s, dim), DType.F32);
-        backend.AffineBroadcastLastDim(affined, normed, scaleP1, shift);
-        normed.Dispose(); shift.Dispose(); scaleP1.Dispose();
+
+        if (embedded0 is not null && modIndex is not null)
+        {
+            float* em0 = (float*)embedded0.DataPointer;
+            float* em1 = (float*)embedded.DataPointer;
+            Tensor shiftTable = new Tensor(new TensorShape(2, dim), DType.F32);
+            Tensor scaleTable = new Tensor(new TensorShape(2, dim), DType.F32);   // RAW scale — RowIndexed adds +1 internally
+            float* shp = (float*)shiftTable.DataPointer; float* scp = (float*)scaleTable.DataPointer;
+            for (int d = 0; d < dim; d++)
+            {
+                shp[d] = ss[d] + em0[d]; scp[d] = ss[dim + d] + em0[d];               // row 0: conditioned (t=0)
+                shp[dim + d] = ss[d] + em1[d]; scp[dim + d] = ss[dim + d] + em1[d];   // row 1: denoising (t=t_cur)
+            }
+            backend.AffineBroadcastRowIndexed(affined, normed, scaleTable, shiftTable, modIndex);
+            shiftTable.Dispose(); scaleTable.Dispose();
+        }
+        else
+        {
+            // shift = ss[0]+embedded; (1+scale) = 1+ss[1]+embedded ([dim], broadcast over S). The [dim] build stays
+            // host (tiny), folding the +1 into the scale so the device affine is a single input·scale+shift.
+            float* em = (float*)embedded.DataPointer;
+            Tensor shift = new Tensor(new TensorShape(dim), DType.F32);
+            Tensor scaleP1 = new Tensor(new TensorShape(dim), DType.F32);
+            float* shp = (float*)shift.DataPointer; float* scp = (float*)scaleP1.DataPointer;
+            for (int d = 0; d < dim; d++) { shp[d] = ss[d] + em[d]; scp[d] = 1f + ss[dim + d] + em[d]; }
+            // Device LayerNorm + affine → the [s,dim] output stays GPU-resident through the final Linear. Was a
+            // host LayerNorm + a host DataPointer affine loop over [s,dim] per step, which forced a re-upload.
+            backend.AffineBroadcastLastDim(affined, normed, scaleP1, shift);
+            shift.Dispose(); scaleP1.Dispose();
+        }
+        normed.Dispose();
 
         Tensor outVel = new Tensor(new TensorShape(s, _config.OutChannels), DType.F32);
         backend.Linear(outVel, affined, _projOutW!, _projOutB);

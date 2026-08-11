@@ -35,6 +35,45 @@ public sealed class LtxVideoRecipe : IVideoRecipe
     /// <c>modelDefault</c> in <see cref="LtxVideoRecipePipeline.Generate"/>).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 3.0f, Width = 704, Height = 480, Frames = 97 };
 
+    /// <summary>Family-level default: no conditioning declared. Narrowed per-checkpoint by <see cref="SupportsFor"/> —
+    /// only the base 0.9 (non-timestep-VAE, non-13B) variant gets <see cref="VideoFeatures.InitImage"/>.</summary>
+    public VideoFeatures Supports => VideoFeatures.None;
+
+    /// <summary>Tier 3.4: <see cref="Models.Vae.LtxVideoVaeEncoder"/> was built and real-weight verified ONLY
+    /// against the base 0.9 VAE config (encoder_causal=true, plain-strided downsamplers, unchanged channel width
+    /// per stage until the post-downsample resnet). 0.9.5/13B use a different config (timestep-conditioned VAE,
+    /// different block widths) the encoder has never been constructed against — declaring <c>InitImage</c> there
+    /// would be exactly the "advertises conditioning it silently drops or crashes on" class of bug 0.2 fixed for
+    /// Wan's <c>EndFrame</c> over-claim. Cheap header-only peek (<see cref="VideoRecipeUtils.PeekSafeTensorKeys"/>)
+    /// mirrors the SAME detection <see cref="Construct"/> runs against the real converted weights, so this stays in
+    /// sync without a full weight load on every capability check.</summary>
+    public VideoFeatures SupportsFor(string? checkpointPath)
+    {
+        if (string.IsNullOrWhiteSpace(checkpointPath))
+        {
+            return Supports;
+        }
+        try
+        {
+            IReadOnlySet<string> keys = VideoRecipeUtils.PeekSafeTensorKeys(checkpointPath);
+            if (keys.Count == 0)
+            {
+                return Supports;
+            }
+            int maxBlock = MaxTransformerBlockIndex(keys);
+            string nameLc = Path.GetFileName(checkpointPath).ToLowerInvariant();
+            bool is13B = maxBlock >= 28 || nameLc.Contains("13b", StringComparison.Ordinal)
+                || nameLc.Contains("0.9.7", StringComparison.Ordinal) || nameLc.Contains("0.9.8", StringComparison.Ordinal);
+            bool timestepVae = is13B || LtxVideoCheckpointConverter.IsTimestepVae(keys) || nameLc.Contains("0.9.5", StringComparison.Ordinal);
+            return !is13B && !timestepVae ? VideoFeatures.InitImage : Supports;
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            Logs.Warning($"[LtxVideoRecipe] Could not peek '{checkpointPath}' for variant-aware features; using family defaults. {ex.Message}");
+            return Supports;
+        }
+    }
+
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
@@ -66,12 +105,23 @@ public sealed class LtxVideoRecipe : IVideoRecipe
 
             LtxVideoTransformer transformer = new LtxVideoTransformer(config);
             transformer.LoadWeights(conv.Transformer);
+            Dictionary<string, Tensor> vaeWeightsF32 = VaePrecisionHelper.CastVaeWeights(conv.Vae, DType.F32);
             LtxVideoVaeDecoder vae = timestepVae
                 ? new LtxVideoVaeDecoder(blockOutChannels: [256, 512, 1024], spatioTemporalScaling: [true, true, true],
                     layersPerBlock: [5, 5, 5, 5], patchSize: 4, isCausal: false, timestepConditioned: true,
                     upsampleFactor: [2, 2, 2], upsampleResidual: [true, true, true])
                 : new LtxVideoVaeDecoder();
-            vae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.Vae, DType.F32));
+            vae.LoadWeights(vaeWeightsF32);
+
+            // Tier 3.4 I2V: encoder only for base 0.9 (SupportsFor gates this the same way — see its doc). Built
+            // from the SAME converted+cast VAE weights the decoder loaded, matching the round-trip test this was
+            // real-weight verified against.
+            LtxVideoVaeEncoder? vaeEncoder = null;
+            if (!is13B && !timestepVae)
+            {
+                vaeEncoder = new LtxVideoVaeEncoder();
+                vaeEncoder.LoadWeights(vaeWeightsF32);
+            }
 
             // 13B fp8 weights stay fp8-resident (~13 GB); caching their F16 casts would roughly double VRAM and OOM a
             // 24 GB card — dequant transiently per GEMM instead (the verified 13B recipe, matching the Wan fp8 path).
@@ -96,8 +146,9 @@ public sealed class LtxVideoRecipe : IVideoRecipe
             {
                 VaeBackend = context.VaeBackendOrDefault,
             };
-            Logs.Info("[LtxVideoRecipe] LTX-Video ready (text-to-video).");
-            return new LtxVideoRecipePipeline(context.Backend, context.TextEncoderBackendOrDefault, pipeline, config, tokenizer, t5, transformer, loaders);
+            Logs.Info($"[LtxVideoRecipe] LTX-Video ready ({(vaeEncoder is null ? "text-to-video only" : "text-to-video + image-to-video")}).");
+            return new LtxVideoRecipePipeline(context.Backend, context.TextEncoderBackendOrDefault, context.VaeBackendOrDefault,
+                pipeline, config, tokenizer, t5, transformer, vaeEncoder, loaders);
         }
         catch (Exception ex)
         {

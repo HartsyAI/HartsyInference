@@ -323,6 +323,7 @@ public sealed class InferenceEngine : IInferenceEngine
         {
             null => VideoFeatures.None,
             Recipes.Video.WanVideoRecipe wan => wan.SupportsFor(spec.LocalPath),
+            Recipes.Video.LtxVideoRecipe ltx => ltx.SupportsFor(spec.LocalPath),
             _ => recipe.Supports,
         };
     }

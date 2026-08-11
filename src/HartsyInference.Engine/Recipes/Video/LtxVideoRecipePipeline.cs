@@ -4,6 +4,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Requests;
@@ -25,25 +26,33 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
     /// embeddings are host-materialized (SliceBatchElementPrefix is a host loop) before the denoiser consumes
     /// them, so moving the ~5 GB encoder off the denoiser GPU costs nothing.</summary>
     private readonly IBackend _textBackend;
+    /// <summary>Backend <see cref="_vaeEncoder"/> (Tier 3.4 I2V) runs on — same device the VAE decoder uses.</summary>
+    private readonly IBackend _vaeBackend;
     private readonly LtxVideoPipeline _pipeline;
     private readonly LtxVideoConfig _config;
     private readonly T5Tokenizer _tokenizer;
     private readonly T5TextEncoder _t5;
     private readonly LtxVideoTransformer _transformer;
+    /// <summary>Null for the 0.9.5/13B variants (Tier 3.4's encoder was built and verified against base 0.9 only —
+    /// see <see cref="LtxVideoRecipe.SupportsFor"/>); <see cref="Generate"/> refuses an init image in that case
+    /// via <c>VideoService.RejectUnsupported</c> before this pipeline is even reached.</summary>
+    private readonly LtxVideoVaeEncoder? _vaeEncoder;
     private readonly List<SafeTensorsLoader> _loaders;
 
     /// <summary>Wraps the constructed LTX-Video pipeline plus its text encoder, taking ownership of every disposable.
-    /// <paramref name="textBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
-    public LtxVideoRecipePipeline(IBackend backend, IBackend textBackend, LtxVideoPipeline pipeline, LtxVideoConfig config, T5Tokenizer tokenizer,
-        T5TextEncoder t5, LtxVideoTransformer transformer, List<SafeTensorsLoader> loaders)
+    /// <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
+    public LtxVideoRecipePipeline(IBackend backend, IBackend textBackend, IBackend vaeBackend, LtxVideoPipeline pipeline, LtxVideoConfig config,
+        T5Tokenizer tokenizer, T5TextEncoder t5, LtxVideoTransformer transformer, LtxVideoVaeEncoder? vaeEncoder, List<SafeTensorsLoader> loaders)
     {
         _backend = backend;
         _textBackend = textBackend;
+        _vaeBackend = vaeBackend;
         _pipeline = pipeline;
         _config = config;
         _tokenizer = tokenizer;
         _t5 = t5;
         _transformer = transformer;
+        _vaeEncoder = vaeEncoder;
         _loaders = loaders;
     }
 
@@ -77,8 +86,25 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
         _textBackend.Sync();
         _textBackend.FreeWeights(_t5.EnumerateWeights());
 
-        // TODO(E-IMG-4/5): image-to-video conditioning (InitImage / VideoEndFrame) is not wired for LTX-Video — the
-        // extension's loader drives text-to-video only.
+        // Tier 3.4 (I2V, base 0.9 only — see LtxVideoRecipe.SupportsFor): VAE-encode the init image into a
+        // single-frame latent, the same firstFrameLatent-in/firstFrameLatent-out shape Wan's I2V path uses.
+        // VideoRequest.VideoEndFrame is still not wired here — LTX's per-token conditioning mechanism (Tier 3.4's
+        // transformer/pipeline change) conditions on a SINGLE mask row (frame 0); extending it to a second,
+        // end-of-clip conditioned token range is unbuilt.
+        Tensor? firstFrameLatent = null;
+        if (request.InitImage is not null)
+        {
+            if (_vaeEncoder is null)
+            {
+                throw new NotSupportedException("This LTX-Video checkpoint's VAE encoder was not built for this variant (0.9.5/13B) — image-to-video is only wired for base 0.9.");
+            }
+            byte[] frameRgb = VideoRecipeUtils.ResizeRgb24(request.InitImage, width, height);
+            _vaeBackend.PreloadWeights(_vaeEncoder.EnumerateWeights());
+            firstFrameLatent = _vaeEncoder.EncodeRgbFrame(_vaeBackend, frameRgb, width, height);
+            _vaeBackend.Sync();
+            _vaeBackend.FreeWeights(_vaeEncoder.EnumerateWeights());
+        }
+
         TextToImageRequest inner = new TextToImageRequest
         {
             Prompt = prompt,
@@ -98,7 +124,7 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
 
         try
         {
-            (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromEmbeddings(promptEmbeds, negEmbeds, inner, numFrames, frameRate, bridge);
+            (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromEmbeddings(promptEmbeds, negEmbeds, inner, numFrames, frameRate, bridge, firstFrameLatent);
             Logs.Info($"[LtxVideoRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH}.");
             return VideoRecipeUtils.ToResult(frames, outW, outH, request);
         }
@@ -111,6 +137,7 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
         {
             promptEmbeds.Dispose();
             negEmbeds.Dispose();
+            firstFrameLatent?.Dispose();
         }
     }
 

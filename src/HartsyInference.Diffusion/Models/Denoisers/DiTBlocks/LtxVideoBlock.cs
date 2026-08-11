@@ -72,18 +72,31 @@ public sealed unsafe class LtxVideoBlock
             if (t is not null) yield return t;
     }
 
-    /// <summary>Forward over <c>[S, dim]</c>. <paramref name="temb"/> is the shared timestep embedding <c>[6, dim]</c> (the block adds its own <c>scale_shift_table</c>). <paramref name="encoder"/> is the projected T5 <c>[L, dim]</c>; <paramref name="encoderMask"/> is an optional additive cross-attn mask <c>[1,1,S,L]</c>/<c>[1,1,1,L]</c> (null = full).</summary>
-    public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, LtxRope rope, Tensor cos, Tensor sin, Tensor? encoderMask)
+    /// <summary>Forward over <c>[S, dim]</c>. <paramref name="temb"/> is the shared timestep embedding <c>[6, dim]</c> (the block adds its own <c>scale_shift_table</c>). <paramref name="encoder"/> is the projected T5 <c>[L, dim]</c>; <paramref name="encoderMask"/> is an optional additive cross-attn mask <c>[1,1,S,L]</c>/<c>[1,1,1,L]</c> (null = full).
+    /// <para>I2V conditioning (Tier 3.4): when <paramref name="temb0"/> (the SAME <c>[6,dim]</c> embedding built at
+    /// timestep 0) and <paramref name="modIndex"/> (I32 <c>[S]</c>, 0 = conditioned/frame-0 token, 1 = denoising
+    /// token) are both supplied, AdaLN modulation is looked up per-token from a 2-row table instead of broadcasting
+    /// one shared vector — mirrors diffusers' per-token <c>embedded_timestep</c> (built from
+    /// <c>timestep.unsqueeze(-1) * (1 - conditioning_mask)</c>) using the SAME row-indexed-table primitive already
+    /// proven by <c>MiniMaxH3Transformer</c>'s multi-segment/multi-timestep modulation — not a new mechanism.</para></summary>
+    public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, LtxRope rope, Tensor cos, Tensor sin, Tensor? encoderMask,
+        Tensor? temb0 = null, Tensor? modIndex = null)
     {
         int s = (int)hidden.Shape[0];
-        // AdaLN: scale_shift_table[6,dim] + temb[6,dim] → 6 vectors [dim].
-        (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor shiftMlp, Tensor scaleMlp, Tensor gateMlp) = Modulation(backend, temb);
+        bool perToken = temb0 is not null && modIndex is not null;
+        // AdaLN: scale_shift_table[6,dim] + temb[6,dim] → 6 vectors [dim] (or, per-token, 6 tables [2,dim]).
+        (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor shiftMlp, Tensor scaleMlp, Tensor gateMlp) =
+            perToken ? Modulation2Row(backend, temb, temb0!) : Modulation(backend, temb);
 
         // ── self-attn ──
-        Tensor n1 = ApplyShiftScale(backend, RmsNoAffine(backend, hidden, s), scaleMsa, shiftMsa, s);
+        Tensor n1 = perToken
+            ? ApplyShiftScaleRowIndexed(backend, RmsNoAffine(backend, hidden, s), scaleMsa, shiftMsa, modIndex!, s)
+            : ApplyShiftScale(backend, RmsNoAffine(backend, hidden, s), scaleMsa, shiftMsa, s);
         Tensor attn1 = Attention(backend, n1, n1, 0, applyRope: true, rope, cos, sin, null, s, s);
         n1.Dispose();
-        Tensor afterAttn1 = GatedAdd(backend, hidden, attn1, gateMsa, s);
+        Tensor afterAttn1 = perToken
+            ? GatedAddRowIndexed(backend, hidden, attn1, gateMsa, modIndex!, s)
+            : GatedAdd(backend, hidden, attn1, gateMsa, s);
         attn1.Dispose();
 
         // ── cross-attn (to T5) ──
@@ -94,10 +107,14 @@ public sealed unsafe class LtxVideoBlock
         attn2.Dispose();
 
         // ── FFN ──
-        Tensor n2 = ApplyShiftScale(backend, RmsNoAffine(backend, afterAttn2, s), scaleMlp, shiftMlp, s);
+        Tensor n2 = perToken
+            ? ApplyShiftScaleRowIndexed(backend, RmsNoAffine(backend, afterAttn2, s), scaleMlp, shiftMlp, modIndex!, s)
+            : ApplyShiftScale(backend, RmsNoAffine(backend, afterAttn2, s), scaleMlp, shiftMlp, s);
         Tensor ff = Ffn(backend, n2, s);
         n2.Dispose();
-        Tensor outT = GatedAdd(backend, afterAttn2, ff, gateMlp, s);
+        Tensor outT = perToken
+            ? GatedAddRowIndexed(backend, afterAttn2, ff, gateMlp, modIndex!, s)
+            : GatedAdd(backend, afterAttn2, ff, gateMlp, s);
         afterAttn2.Dispose();
         ff.Dispose();
 
@@ -171,6 +188,51 @@ public sealed unsafe class LtxVideoBlock
             outs[m] = o;
         }
         return (outs[0], outs[1], outs[2], outs[3], outs[4], outs[5]);
+    }
+
+    // Per-token variant of Modulation: builds 6 x [2, dim] tables instead of 6 x [1, dim] vectors — row 0 = the
+    // conditioned (t=0) embedding, row 1 = the denoising (t=t_cur) embedding, so AffineBroadcastRowIndexed/
+    // GatedResidualRowIndexed can look up the right row per token via modIndex. Same GPU-resident SliceRows/
+    // GatedResidualLastDim build as Modulation, plus one Concat per slot to stack the two rows.
+    private (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) Modulation2Row(IBackend backend, Tensor temb, Tensor temb0)
+    {
+        Tensor ones = OnesRow();
+        Tensor[] outs = new Tensor[6];
+        for (int m = 0; m < 6; m++)
+        {
+            using Tensor ssM = new Tensor(new TensorShape(1, _dim), DType.F32);
+            backend.SliceRows(ssM, _scaleShift!, m);
+            using Tensor tb0M = new Tensor(new TensorShape(1, _dim), DType.F32);
+            backend.SliceRows(tb0M, temb0, m);
+            using Tensor tbM = new Tensor(new TensorShape(1, _dim), DType.F32);
+            backend.SliceRows(tbM, temb, m);
+            using Tensor row0 = new Tensor(new TensorShape(1, _dim), DType.F32);
+            backend.GatedResidualLastDim(row0, tb0M, ssM, ones);
+            using Tensor row1 = new Tensor(new TensorShape(1, _dim), DType.F32);
+            backend.GatedResidualLastDim(row1, tbM, ssM, ones);
+            Tensor table = new Tensor(new TensorShape(2, _dim), DType.F32);
+            backend.Concat(table, [row0, row1], 0);
+            outs[m] = table;
+        }
+        return (outs[0], outs[1], outs[2], outs[3], outs[4], outs[5]);
+    }
+
+    // out[r] = x[r]·(1+scaleTable[modIndex[r]]) + shiftTable[modIndex[r]] — per-token version of ApplyShiftScale.
+    // scaleTable is the RAW (no +1) table; AffineBroadcastRowIndexed applies the +1 internally (see its own doc).
+    private Tensor ApplyShiftScaleRowIndexed(IBackend backend, Tensor x, Tensor scaleTable, Tensor shiftTable, Tensor modIndex, int s)
+    {
+        Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
+        backend.AffineBroadcastRowIndexed(o, x, scaleTable, shiftTable, modIndex);
+        x.Dispose();
+        return o;
+    }
+
+    // out[r] = residual[r] + gateTable[modIndex[r]]·value[r] — per-token version of GatedAdd.
+    private Tensor GatedAddRowIndexed(IBackend backend, Tensor residual, Tensor value, Tensor gateTable, Tensor modIndex, int s)
+    {
+        Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
+        backend.GatedResidualRowIndexed(o, residual, value, gateTable, modIndex);
+        return o;
     }
 
     private Tensor RmsNoAffine(IBackend backend, Tensor x, int s)
