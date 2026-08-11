@@ -137,11 +137,21 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 
 ### Pipeline / plumbing
 - [ ] Quality-preset per-pipeline constructor wiring.
-- [ ] **Regional/bbox-prompting plumbing on Flux.2 and Krea2** — neither `Flux2Transformer.Forward` nor
-  `Krea2Transformer.Forward` accepts any generic attention-bias tensor at all (unlike `FluxTransformer.Forward`'s
-  `attnBias`, which regional prompting, Redux, and other conditioning already share). Needs a bias parameter
-  added to both transformers' forward pass and threaded through `Flux2Pipeline`/`Krea2Pipeline`'s
-  `GenerateFromTokens` before the recipe-layer wiring (Flux.1/Z-Image/Ideogram 4) can be replicated here.
+- [x] **Regional/bbox-prompting plumbing on Flux.2 and Krea2 — DONE 2026-08-11 (Tier 3.7).** Both
+  `Flux2Transformer.Forward`/`ForwardWithTemb` and `Krea2Transformer.Forward`/`ForwardPatched`/`ForwardCore` now
+  accept an `attnBias` tensor threaded down to each block's `ScaledDotProductAttention` call, mirroring
+  `FluxTransformer.Forward`'s existing slot. `Flux2Pipeline`/`Krea2Pipeline.GenerateFromTokens` gained a
+  `regionalPlan` param + an `EncodeRegionText` method (Flux.2: same multi-layer text-encoder taps the base
+  prompt uses; Krea2: wraps the existing `EncodeTapped`), and `Flux2RecipePipeline`/`Krea2RecipePipeline` gained
+  a `BuildRegionalPlan` mirroring `Flux1RecipePipeline`'s. Both recipes now declare `ImageFeatures.Regional`.
+  Krea2-specific risks (GQA head-repeat-before-SDPA, token concat order) were confirmed safe by reading the code
+  before wiring, not assumed by analogy — real-weight verified on both architectures with a two-region
+  red/blue prompt (clean per-half color split, visually confirmed on Flux.2's local GGUF Dev build and Krea2's
+  local fp8 checkpoint). CUDA-graph capture and Flux.2/Krea2's own DiT-sharding routes are excluded when a
+  regional plan is active (mirroring `FluxTransformer`'s cache/graph exclusions) — Krea2's sharded route has no
+  bias parameter at all, so this is a real correctness requirement, not just a perf trade-off; a warning logs
+  once per generation when sharding was configured but overridden, rather than silently dropping the
+  conditioning.
 - [ ] **Recipe/pipeline embedding-delegate boundary** (blocks regional/bbox prompting on Flux.1, Z-Image,
   Ideogram 4 even though all three pipelines already have the attention-bias hook and
   `RegionalPromptResolver.Resolve` exists and is tested) — recipes own the tokenizer, pipelines own the text
