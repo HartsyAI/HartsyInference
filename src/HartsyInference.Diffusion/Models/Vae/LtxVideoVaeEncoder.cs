@@ -52,6 +52,15 @@ public sealed unsafe class LtxVideoVaeEncoder
 
     private Tensor? _latentsMean, _latentsStd;
 
+    /// <summary>True once <see cref="LoadWeights"/> found both normalization stats — false means
+    /// <see cref="Normalize"/> is a no-op (unnormalized-space latent). Test-visibility hook: a checkpoint missing
+    /// these stats and one carrying them both round-trip losslessly through this encoder's own
+    /// <see cref="Normalize"/>/<see cref="LtxVideoVaeDecoder"/>'s <c>Denormalize</c> pair (the same missing scale
+    /// cancels on both sides), so the round-trip test alone cannot distinguish "normalized correctly" from
+    /// "normalization silently skipped on both halves" — this property lets a test assert the stats were actually
+    /// found rather than only asserting the round trip looks right.</summary>
+    public bool HasLatentStats => _latentsMean is not null && _latentsStd is not null;
+
     public LtxVideoVaeEncoder(
         int latentChannels = 128, int inChannels = 3,
         int[]? blockOutChannels = null, bool[]? spatioTemporalScaling = null, int[]? layersPerBlock = null,

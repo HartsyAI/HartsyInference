@@ -40,6 +40,11 @@ public sealed unsafe class LtxVideoVaeDecoder
     // Per-channel latent normalization stats (LTX trains the diffusion model on normalized latents:
     // (raw − mean)/std). The decoder must un-normalize before decode: raw = latent·std + mean. [latentChannels] each.
     private Tensor? _latentsMean, _latentsStd;
+    /// <summary>True once <see cref="LoadWeights"/> found both normalization stats — false means
+    /// <c>Denormalize</c> is a no-op. See <see cref="LtxVideoVaeEncoder.HasLatentStats"/> for why this matters:
+    /// a missing-stats encoder/decoder pair round-trips losslessly (the missing scale cancels on both sides)
+    /// while producing latents in the wrong space for the transformer — the round trip alone can't catch it.</summary>
+    public bool HasLatentStats => _latentsMean is not null && _latentsStd is not null;
     // VALIDATION-PENDING: verify vs diffusers LTXPipeline 0.9.7 — timestep_scale_multiplier registered as 1000.0.
     private const float TimestepScaleMultiplier = 1000.0f;
 

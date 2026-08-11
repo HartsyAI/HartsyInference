@@ -66,6 +66,16 @@ public sealed class LtxVideoVaeEncoderRoundTripRealWeightTests
             LtxVideoVaeDecoder decoder = new LtxVideoVaeDecoder();
             decoder.LoadWeights(vaeF32);
 
+            // Advisor-flagged failure mode this round-trip test alone cannot catch: MapVae only renames
+            // per_channel_statistics.* -> latents_mean/latents_std on original-naming checkpoints. If that
+            // detection ever regressed and the stats went missing, Normalize (encoder) and Denormalize (decoder)
+            // would BOTH silently become no-ops -- the same missing scale cancels on both sides, so a round trip
+            // through this SAME encoder+decoder pair would still look perfect while feeding an un-normalized-space
+            // latent to anything else (e.g. a transformer) that expects the normalized one. Assert the stats were
+            // actually found, not just that the round trip looks right.
+            Assert.True(encoder.HasLatentStats, "Encoder found no latents_mean/latents_std -- normalization is silently a no-op (see LtxVideoVaeEncoder.HasLatentStats doc).");
+            Assert.True(decoder.HasLatentStats, "Decoder found no latents_mean/latents_std -- denormalization is silently a no-op (see LtxVideoVaeDecoder.HasLatentStats doc).");
+
             const int size = 256; // divisible by patch(4)*2^3=32
             byte[] original = SyntheticPattern(size, size);
             Core.Tensors.Tensor rgbIn = RgbToTensor5d(original, size, size);
@@ -73,6 +83,8 @@ public sealed class LtxVideoVaeEncoderRoundTripRealWeightTests
             Core.Tensors.Tensor latent = encoder.Encode(backend, rgbIn);
             rgbIn.Dispose();
             _output.WriteLine($"Latent shape: [{latent.Shape[0]},{latent.Shape[1]},{latent.Shape[2]},{latent.Shape[3]},{latent.Shape[4]}].");
+            (float mean, float std) = LatentMeanStd(latent);
+            _output.WriteLine($"Latent per-element mean={mean:F4}, std={std:F4} (normalized space should be roughly unit-scale, not near-zero/near-input-valued).");
 
             Core.Tensors.Tensor decoded = decoder.Decode(backend, latent);
             byte[] roundTripped = Tensor5dToRgb(decoded, out int outW, out int outH);
@@ -80,6 +92,23 @@ public sealed class LtxVideoVaeEncoderRoundTripRealWeightTests
 
             Assert.Equal(size, outW);
             Assert.Equal(size, outH);
+
+            // Advisor-flagged second check: a mean-abs-diff-of-1.09 round trip is also consistent with a
+            // pass-through bug (encoder/decoder bypassing the latent entirely). Perturb the SAME latent (zero it)
+            // and decode again -- if the decode is actually load-bearing on the latent's content, the output must
+            // change substantially, not reproduce the same quadrant pattern.
+            Core.Tensors.Tensor zeroed = new Core.Tensors.Tensor(latent.Shape, Core.Tensors.DType.F32); // zero-initialized
+            Core.Tensors.Tensor decodedZero = decoder.Decode(backend, zeroed);
+            byte[] fromZero = Tensor5dToRgb(decodedZero, out _, out _);
+            zeroed.Dispose();
+            decodedZero.Dispose();
+            latent.Dispose();
+
+            long zeroDiffSum = 0;
+            for (int i = 0; i < roundTripped.Length; i++) zeroDiffSum += Math.Abs(roundTripped[i] - fromZero[i]);
+            double meanAbsDiffFromZero = zeroDiffSum / (double)roundTripped.Length;
+            _output.WriteLine($"Mean absolute per-byte difference (real latent vs zeroed latent, both decoded): {meanAbsDiffFromZero:F2}.");
+            Assert.True(meanAbsDiffFromZero > 20.0, $"Decoding a zeroed latent produced nearly the same image as the real latent (diff {meanAbsDiffFromZero:F2}) -- the latent may not be load-bearing (encoder/decoder bypass).");
 
             File.WriteAllBytes(Path.Combine(RepoRoot.Path, "ltx_vae_roundtrip_original.rgb"), original);
             File.WriteAllBytes(Path.Combine(RepoRoot.Path, "ltx_vae_roundtrip_decoded.rgb"), roundTripped);
@@ -125,6 +154,17 @@ public sealed class LtxVideoVaeEncoderRoundTripRealWeightTests
             }
         }
         return rgb;
+    }
+
+    private static unsafe (float Mean, float Std) LatentMeanStd(Core.Tensors.Tensor latent)
+    {
+        long n = latent.Shape.ElementCount;
+        float* p = (float*)latent.DataPointer;
+        double sum = 0, sumSq = 0;
+        for (long i = 0; i < n; i++) { double v = p[i]; sum += v; sumSq += v * v; }
+        double mean = sum / n;
+        double variance = sumSq / n - mean * mean;
+        return ((float)mean, (float)Math.Sqrt(Math.Max(0, variance)));
     }
 
     private static unsafe Core.Tensors.Tensor RgbToTensor5d(byte[] rgb, int width, int height)
