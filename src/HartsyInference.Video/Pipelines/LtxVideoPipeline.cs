@@ -221,6 +221,14 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
                 if (packedFirstFrame is not null)
                     Buffer.MemoryCopy((float*)packedFirstFrame.DataPointer, (float*)stepLatent.DataPointer, frame0Bytes, frame0Bytes);
             }
+            else if (packedFirstFrame is not null)
+            {
+                // ForwardPaired forces graphMode off whenever conditioningMask is set (this branch should be
+                // unreachable for I2V today), but that's an invariant held two call frames away — assert it
+                // locally instead of silently skipping the per-step re-pin above, which would reproduce the
+                // exact flat-red bug this file's own comment history already caught once.
+                throw new InvalidOperationException("LTX I2V conditioning reached the step-graph path, which has no per-step frame-0 re-pin wired — this should not be reachable (ForwardPaired forces eager when conditioningMask is set).");
+            }
             else
             {
                 // Graph path — in-place device Euler on the fixed latent; velocities are transformer-owned fixed buffers.

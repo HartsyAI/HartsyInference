@@ -45,6 +45,13 @@ public sealed class LtxVideoI2VRealWeightTests
         const int size = 480;   // divisible by patch(4)*2^3=32
         ImageData redInit = SolidColor(size, size, r: 220, g: 20, b: 20);
 
+        // Frames=25/Steps=20, not a smaller/faster pair: LTX's temporal compression is 8, so
+        // tLat=(numFrames-1)/8+1 — at 9 frames that's ONLY 2 latent frames, meaning frame-0 conditioning pins
+        // half the entire latent and there is no room left to observe denoising progress at all (a real run at
+        // 9f/8 steps produced every output frame identically flat-red — indistinguishable from a conditioning-
+        // leak bug until frames/steps were raised and a genuine progressive trajectory appeared). 25 frames
+        // gives 4 latent frames (3 unconditioned) and 20 steps is enough budget for them to actually denoise.
+        // Lowering either number for speed will likely reproduce the false failure, not a real regression.
         VideoRequest request = new VideoRequest
         {
             Prompt = "a red apple slowly rotating on a wooden table, cinematic lighting",
