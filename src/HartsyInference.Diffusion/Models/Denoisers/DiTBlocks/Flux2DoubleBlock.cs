@@ -157,7 +157,7 @@ public sealed unsafe class Flux2DoubleBlock
     // host fallbacks for RoPE and the split, exactly like the Flux.1 blocks.
     public (Tensor image, Tensor text) Forward(IBackend backend,
         Tensor image, Tensor text,
-        Tensor[] imgMod, Tensor[] txtMod, FluxRope rope)
+        Tensor[] imgMod, Tensor[] txtMod, FluxRope rope, Tensor? attnBias = null)
     {
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
@@ -246,7 +246,7 @@ public sealed unsafe class Flux2DoubleBlock
 
         // ── 7. Scaled dot-product attention ──
         Tensor jointAttnOut = new Tensor(jointMhShape, act);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path
+        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, attnBias, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path (bias rides fp32 in-engine)
         jointQ.Dispose(); jointK.Dispose(); jointV.Dispose();
 
         // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [txt, img] ──

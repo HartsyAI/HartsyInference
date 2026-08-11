@@ -1,7 +1,9 @@
 using System.Globalization;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -77,23 +79,57 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
             progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
         };
 
-        (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
-            tokenIds, inner, guidanceScale: guidance, onProgress: bridge);
-
-        return new ImageResult
+        RegionalPlan? regionalPlan = null;
+        try
         {
-            Rgb = rgb,
-            Width = outW,
-            Height = outH,
-            Seed = usedSeed,
-            Meta = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            regionalPlan = BuildRegionalPlan(prompt, width, height, steps);
+
+            (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
+                tokenIds, inner, guidanceScale: guidance, onProgress: bridge, regionalPlan: regionalPlan);
+
+            return new ImageResult
             {
-                ["arch"] = "flux2",
-                ["size"] = $"{outW}x{outH}",
-                ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
-                ["steps"] = steps.ToString(CultureInfo.InvariantCulture),
-            },
-        };
+                Rgb = rgb,
+                Width = outW,
+                Height = outH,
+                Seed = usedSeed,
+                Meta = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["arch"] = "flux2",
+                    ["size"] = $"{outW}x{outH}",
+                    ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
+                    ["steps"] = steps.ToString(CultureInfo.InvariantCulture),
+                },
+            };
+        }
+        finally
+        {
+            RegionalPromptResolver.DisposeRegions(regionalPlan);
+        }
+    }
+
+    /// <summary>Builds a regional-conditioning plan when the prompt carries <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c>
+    /// parts, null otherwise (Tier 3.7). Mirrors <c>Flux1RecipePipeline.BuildRegionalPlan</c>: each region's text is
+    /// tokenized the SAME way the base prompt was (Klein's chat template vs. Dev's Mistral splice) and encoded
+    /// through <see cref="Flux2Pipeline.EncodeRegionText"/> — the same text-encoder instance + hidden-layer taps
+    /// the base prompt uses. <see cref="RegionalPlan.BaseCond"/> is a required field on the resolver's signature
+    /// that <see cref="Flux2Pipeline.GenerateFromTokens"/>'s regional path never reads (same as Flux.1 — confirmed
+    /// by inspection: the pipeline builds its own background stream from the base <c>textEmbeddings</c>) — a
+    /// throwaway placeholder tensor satisfies it.</summary>
+    private RegionalPlan? BuildRegionalPlan(string prompt, int width, int height, int steps)
+    {
+        if (!RegionalPromptResolver.HasRegionParts(prompt))
+        {
+            return null;
+        }
+        using Tensor baseCondPlaceholder = new Tensor(new TensorShape(1), DType.F32);
+        return RegionalPromptResolver.Resolve(prompt, baseCondPlaceholder, width, height, steps, encodeRegion: text =>
+        {
+            int[] regionTokenIds = _config.TextEncoderType == Flux2TextEncoderType.Mistral
+                ? BuildMistralDevTokenIds(_mistralTokenizer!, text)
+                : _qwenTokenizer!.EncodeChat(text);
+            return _pipeline.EncodeRegionText(regionTokenIds);
+        });
     }
 
     /// <summary>Builds Flux.2 Dev conditioning ids: <c>&lt;s&gt;[SYSTEM_PROMPT]sys[/SYSTEM_PROMPT][INST]prompt[/INST]</c>. Special markers are spliced as raw ids (BOS=1, [SYSTEM_PROMPT]=17, [/SYSTEM_PROMPT]=18, [INST]=3, [/INST]=4) around byte-level BPE segments — special strings are pre-token boundaries in the HF reference, so segment-wise encoding is id-exact. No EOS (ComfyUI <c>has_end_token=False</c>).</summary>

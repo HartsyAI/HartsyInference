@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
@@ -70,6 +71,13 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
             (config.TextEncoderType == Flux2TextEncoderType.Mistral ? [10, 20, 30] : [9, 18, 27]);
     }
 
+    /// <summary>Encodes one region's prompt text with the SAME text encoder + multi-layer hidden-state taps the
+    /// base prompt uses (<see cref="LlamaStyleEncoder.EncodeMultiLayer"/>), so the region conditioning lands at
+    /// the identical raw dim <see cref="Flux2Transformer"/>'s own <c>_contextEmbedWeight</c> Linear projects from.
+    /// Used by the recipe-layer regional-prompting wiring (Tier 3.7).</summary>
+    public Tensor EncodeRegionText(int[] tokenIds) =>
+        _textEncoder.EncodeMultiLayer(Backend, [tokenIds], _hiddenLayers);
+
     /// <summary>Generates an image from pre-tokenized prompt input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
     /// <list type="bullet">
     /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image.</item>
@@ -81,7 +89,8 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         int[] promptTokenIds,
         TextToImageRequest request,
         float guidanceScale = 3.5f,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        RegionalPlan? regionalPlan = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
@@ -158,6 +167,22 @@ _transformer.InvalidateStepGraph(Backend);
         }
         int txtSeqLen = (int)textEmbeddings.Shape[1];
 
+        // ── 1b. Regional conditioning: append region text streams (same layout as FluxPipeline — image tokens
+        // follow text in Flux.2's joint [txt|img] attention, matching the "text first" concat every block already
+        // uses). Collapses to the base path when no plan is given. ──
+        bool hasRegions = regionalPlan is not null && regionalPlan.Regions.Count > 0;
+        Tensor? extendedText = null;
+        List<(int Start, int End)>? regionRanges = null;
+        List<float[]>? regionGridMasks = null;
+        float[]? regionWeights = null;
+        int condTxtSeqLen = txtSeqLen;
+        if (hasRegions)
+        {
+            (extendedText, condTxtSeqLen, regionRanges, regionGridMasks) =
+                RegionalConditioningLayout.BuildTextStream(regionalPlan!, textEmbeddings, patH, patW);
+            regionWeights = new float[regionalPlan!.Regions.Count];
+        }
+
         // ── 2. Set up dynamic-shift flow-match scheduler ──────────────
         TensorShape noiseShape = new TensorShape(1, _config.InChannels, patH, patW);
         TensorShape packedShape = new TensorShape(1, imgSeqLen, _config.InChannels);
@@ -229,7 +254,7 @@ _transformer.InvalidateStepGraph(Backend);
             }
         }
 
-        bool graphRoute = drainFree && packedSourceLatent is null && stepCacheInst is null
+        bool graphRoute = drainFree && packedSourceLatent is null && stepCacheInst is null && !hasRegions
             && _transformer.StepGraphEnabled && Backend.StepGraphSupported;
         if (graphRoute)
         {
@@ -263,9 +288,17 @@ _transformer.InvalidateStepGraph(Backend);
 
             // Late-window cache gate: reuse eligible only in the schedule tail (Ideogram 4 results doc).
             bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
+            Tensor? regionBias = null;
+            if (hasRegions)
+            {
+                regionalPlan!.ResolveStep(i - startStep, regionWeights!);
+                regionBias = RegionalAttentionBias.Build(
+                    condTxtSeqLen + imgSeqLen, condTxtSeqLen, imgSeqLen, regionRanges!, regionGridMasks!, regionWeights!);
+            }
             Tensor velocityPred = _transformer.Forward(
-                Backend, packedLatent, textEmbeddings, sigma, guidanceScale, patH, patW,
-                cacheEligible ? stepCacheInst : null);
+                Backend, packedLatent, hasRegions ? extendedText! : textEmbeddings, sigma, guidanceScale, patH, patW,
+                cacheEligible ? stepCacheInst : null, regionBias);
+            regionBias?.Dispose();
 
             if (drainFree)
             {
@@ -333,7 +366,9 @@ _transformer.InvalidateStepGraph(Backend);
         if (graphRoute)
             packedLatent = _transformer.SnapshotGraphLatent(Backend);
 
-        // textEmbeddings is a cross-generation cache entry — not disposed here.
+        // textEmbeddings is a cross-generation cache entry — not disposed here. extendedText (region-extended)
+        // is rebuilt fresh every generation — always disposed.
+        extendedText?.Dispose();
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
 

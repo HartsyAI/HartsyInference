@@ -102,7 +102,7 @@ public sealed unsafe class Flux2SingleBlock
     // runs as an IBackend op so the activation stays device-resident across the whole block (Flux2SingleBlock
     // cpu=29 in the residency audit). Q/K/V declared [B, S, H, D] so QK-norm's RmsNorm runs over headDim with no
     // reshape; RoPE rotates pre-permute on-device (B=1; host fallback for batch).
-    public Tensor Forward(IBackend backend, Tensor hidden, Tensor[] mod, FluxRope rope)
+    public Tensor Forward(IBackend backend, Tensor hidden, Tensor[] mod, FluxRope rope, Tensor? attnBias = null)
     {
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
@@ -160,7 +160,7 @@ public sealed unsafe class Flux2SingleBlock
 
         // ── 6. SDPA ──
         Tensor attnOutMh = new Tensor(mhShape, act);
-        backend.ScaledDotProductAttention(attnOutMh, qMh, kMh, vMh, null, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path
+        backend.ScaledDotProductAttention(attnOutMh, qMh, kMh, vMh, attnBias, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path (bias rides fp32 in-engine)
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
         // ── 7. Permute attn output back [B, H, S, D] → [B, S, hidden] ──

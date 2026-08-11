@@ -159,10 +159,10 @@ public sealed unsafe class Flux2Transformer : IDisposable
     /// <returns>Predicted velocity <c>[B, imgSeqLen, out_channels=128]</c>.</returns>
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor textEmbeddings,
         float sigma, float guidanceScale, int hPacked, int wPacked,
-        Utilities.DeviceFeatureCache? stepCache = null)
+        Utilities.DeviceFeatureCache? stepCache = null, Tensor? attnBias = null)
     {
         Tensor tembOuter = ComputeTimestepEmbedding(backend, sigma, guidanceScale, (int)packedLatent.Shape[0]);
-        Tensor velocity = ForwardWithTemb(backend, packedLatent, textEmbeddings, tembOuter, hPacked, wPacked, stepCache);
+        Tensor velocity = ForwardWithTemb(backend, packedLatent, textEmbeddings, tembOuter, hPacked, wPacked, stepCache, attnBias);
         tembOuter.Dispose();
         return velocity;
     }
@@ -174,7 +174,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
     /// block0Img + the previous step's img-portion residual (stored against the pre-final-layer img hidden,
     /// which has block0Img's exact shape/dtype). Null = byte-identical uncached forward.</para></summary>
     private Tensor ForwardWithTemb(IBackend backend, Tensor packedLatent, Tensor textEmbeddings, Tensor temb,
-        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null)
+        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null, Tensor? attnBias = null)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
@@ -228,10 +228,12 @@ public sealed unsafe class Flux2Transformer : IDisposable
         int startDouble = 0;
         TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, hidden);
         Tensor imgOut;
-        if (stepCache is not null && _config.Depth > 0)
+        // attnBias (regional prompting) is per-step-variable — same exclusion FluxTransformer applies to its
+        // own cacheActive gate, so a cache hit never reconstructs a residual computed under a different bias.
+        if (stepCache is not null && attnBias is null && _config.Depth > 0)
         {
             (Tensor img0, Tensor txt0) = _doubleBlocks[0].Forward(
-                backend, currentImg, currentTxt, imgMod, txtMod, _rope);
+                backend, currentImg, currentTxt, imgMod, txtMod, _rope, attnBias);
             if (!ReferenceEquals(currentImg, imgTokens)) currentImg.Dispose();
             if (!ReferenceEquals(currentTxt, txtTokens)) currentTxt.Dispose();
             currentImg = img0;
@@ -254,7 +256,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
             for (int i = startDouble; i < _config.Depth; i++)
             {
                 (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(
-                    backend, currentImg, currentTxt, imgMod, txtMod, _rope);
+                    backend, currentImg, currentTxt, imgMod, txtMod, _rope, attnBias);
                 if (!ReferenceEquals(currentImg, imgTokens) && !ReferenceEquals(currentImg, cacheAnchor)) currentImg.Dispose();
                 if (!ReferenceEquals(currentTxt, txtTokens)) currentTxt.Dispose();
                 currentImg = newImg;
@@ -274,7 +276,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
             // ── 7. Single-stream blocks (parallel attn+MLP on full concat sequence) ──
             for (int i = 0; i < _config.DepthSingleBlocks; i++)
             {
-                Tensor newX = _singleBlocks[i].Forward(backend, x, sgMod, _rope);
+                Tensor newX = _singleBlocks[i].Forward(backend, x, sgMod, _rope, attnBias);
                 x.Dispose();
                 x = newX;
             }
