@@ -885,10 +885,21 @@ grinds).
 - [ ] **TensorRT compile support** — zero TRT code anywhere in the engine today; no design started.
 - [ ] **LoRA extraction / checkpoint-diff utility** — zero checkpoint-diff/extraction code anywhere;
   no design started.
-- [ ] **Seamless tiling / circular conv padding** — neither cuDNN's convolution graph API nor the im2col
-  fallback kernel support anything but zero padding, engine-wide (not per-model). Needs a tensor-level
-  wrap-pad utility that copies wrapped edge rows/columns into an explicit padded buffer before calling the
-  existing conv paths with zero additional padding requested.
+- [x] **Seamless tiling / circular conv padding** (2026-08-11) — neither cuDNN's convolution graph API nor
+  the im2col fallback kernel support anything but zero padding, engine-wide. Solved centrally rather than per
+  callsite: `CudaBackend.Conv2D` intercepts at its own top when `SeamlessTilingX`/`SeamlessTilingY`
+  (`IBackend`, default off) are set, wrap-pads a host copy of the input to the requested pad size, and
+  recurses with pad=0 — every conv on the hot path (UNet AND VAE, both route through that one method) gets
+  it with zero changes to `UNet`/`ResNetBlock2D`/etc. themselves. Reads SwarmUI core's existing shared
+  `SeamlessTileable` param end-to-end (`ImageRequest.SeamlessTiling` → `TextToImageRequest.SeamlessTiling`,
+  string vocabulary `"false"`/`"true"`/`"X-Only"`/`"Y-Only"`) rather than a new Hartsy-flagged duplicate —
+  unlike the Tier 2 CFG cluster, that param already carries its own `"seamless"` FeatureFlag, not a
+  Comfy-only one, so no AND-semantics problem exists to work around. SDXL only (`SdxlRecipe.Supports |=
+  ImageFeatures.SeamlessTiling`); `Backend`/`VaeBackend` are try/finally-reset every call since both persist
+  across generations. Real-weight verified: edge discontinuity (mean abs diff, opposite edges) dropped
+  33.55→5.84 on a real SDXL generation, and the 2x2-tiled mosaic was visually inspected — clean tiling, no
+  seam. SD1.5 shares `UNet.cs`/`Conv2D` so it likely comes free, but per this backlog's own verification rule
+  that's not claimed until it's actually run.
 - [ ] **CPU-offloaded activations** — weight offload works because the host `Tensor` is always the
   authoritative copy (`PreloadWeights`/`FreeWeights` just add/drop a GPU-side cache entry); activations have
   no host-authoritative copy today (`FreeActivations` discards the device buffer outright, no D2H anywhere
