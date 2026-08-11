@@ -900,6 +900,45 @@ grinds).
   33.55→5.84 on a real SDXL generation, and the 2x2-tiled mosaic was visually inspected — clean tiling, no
   seam. SD1.5 shares `UNet.cs`/`Conv2D` so it likely comes free, but per this backlog's own verification rule
   that's not claimed until it's actually run.
+- [ ] **Segment-based regional prompting (`<segment:face>` etc., design pass 2026-08-11, zero code)** — the
+  SwarmUI-HartsyInference-Backend backlog's own item 3.2 framed this as "route a mask through the same
+  attention-bias/blend consumers as `<region:>`/`<object:>`." **That's the wrong mechanism, confirmed by
+  reading SwarmUI core's actual reference implementation** (`WorkflowGeneratorSteps.cs`'s
+  `RunSegmentationProcessing`, ComfyUI backend): `<region:>`/`<object:>` are a live per-step attention bias
+  applied WHILE the image denoises (no pixels needed yet). `<segment:>` is a **post-hoc crop-detect-denoise-
+  recomposite pass that only runs after a full base image already exists as pixels** — it cannot be
+  implemented as a pre-generation attention bias at all; there is no image to segment before one exists.
+  The real mechanism, in order: (1) run/finish a normal (or refiner) generation, decode to pixels; (2) for
+  each `<segment:X>` part, run YOLO detection (`X` starts `yolo-`) or CLIPSeg text-match (`X` is free text)
+  on the DECODED image to get a soft mask, OR-composite multiple pipe-separated `X|Y` sub-masks together;
+  (3) optionally invert (negative strength = "everything except this"); (4) blur (`SegmentMaskBlur`, default
+  10px) + grow (`SegmentMaskGrow`, default 16px, tapered corners); (5) crop the image+mask to the mask's
+  bounding box, oversized by `SegmentMaskOversize` (default 16px) — NOT a full-canvas operation, an
+  ADetailer-style small-region crop; (6) VAE-encode just that crop, run a masked/differential denoise on it
+  using the segment's OWN sub-prompt (positive+negative), with `Strength2` (default 0.6) acting as denoise
+  strength (`startStep = round(steps·(1-Strength2))`) and its own optional `SegmentSteps`/`SegmentCFGScale`/
+  per-region LoRA confinement (`ContextID`); (7) decode the crop back to pixels and recomposite it into the
+  full image at the original bounds, blended by the (blurred/grown) mask. Runs either right after base
+  generation or after the refiner pass (`SegmentApplyAfter`). **`<clear:>` (`ClearSegment`) is a separate,
+  simpler, unrelated mechanism** parsed alongside `Segment` but consumed at final save time only: CLIPSeg-
+  match + blur + threshold + `JoinImageWithAlpha` — cuts the matched region into an alpha-transparent hole
+  (text-targeted background removal), no denoise/regeneration involved at all; any implementation of this
+  item must treat it as its own small feature, not a variant of segment refinement.
+  <br>**What already exists in this engine**: `HartsyInference.Vision`'s `YoloSegPipeline`/`ClipSegPipeline`/
+  `SamPipeline` (weights confirmed local: `Models/yolov8/yolov8n-seg-folded.safetensors`,
+  `Models/clipseg/clipseg-rd64-refined-fp16-safetensors`, `Models/sam2/sam2_hiera_tiny.safetensors`), but
+  currently only wired into the standalone `VisionService`, never the image-generation path; per-architecture
+  masked/inpaint denoise (used by ordinary whole-canvas inpainting); `MaskBlendUtilities` for the final
+  masked recomposite. **What's missing**: the crop/bounds/oversize/recomposite orchestration layer itself (no
+  "denoise a masked sub-crop and paste it back" subroutine exists anywhere in the engine today — ordinary
+  inpaint denoises the FULL canvas under a mask, it doesn't crop first); the `SegmentModel`
+  separate-checkpoint-for-refinement path; the `<clear:>` alpha-cutout mechanism. **Dependency on the tiled-
+  VAE-encoder segfault (this doc, `VaeTiledEncoder`/`VaeTiling` item) is CONDITIONAL, not automatic** — the
+  oversized-bbox crop is usually small (face/object-sized), so most real uses would stay on the untiled VAE
+  encode path; only a segment whose bounding box covers most of a large-canvas generation would need the
+  blocked tiled path. Needs its own implementation pass sized like a real feature (crop/recomposite
+  subroutine + vision-pipeline wiring + new per-segment request fields), not a small addition to the existing
+  bbox regional-prompting infra.
 - [ ] **CPU-offloaded activations** — weight offload works because the host `Tensor` is always the
   authoritative copy (`PreloadWeights`/`FreeWeights` just add/drop a GPU-side cache entry); activations have
   no host-authoritative copy today (`FreeActivations` discards the device buffer outright, no D2H anywhere
