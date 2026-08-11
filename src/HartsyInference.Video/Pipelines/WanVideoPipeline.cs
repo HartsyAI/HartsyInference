@@ -104,16 +104,17 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Generates frames from pre-computed umT5 features <c>[L, textDim]</c>. Returns one interleaved-RGB <c>byte[]</c> per frame.
-    /// <para><paramref name="firstFrameLatent"/> switches to the TI2V image-to-video path (diffusers
-    /// <c>expand_timesteps</c>): a <c>[1, 48, 1, H/16, W/16]</c> VAE-encoded <b>and latent-normalized</b>
-    /// (<see cref="Wan22VaeLatentNorm.Normalize"/>) first frame that is re-imposed into the model input each step at
-    /// per-frame timestep 0 while the remaining frames denoise. The Wan2.2 VAE <i>encoder</i> is not built yet —
-    /// produce the conditioning latent offline (validation-gated).</para></summary>
+    /// <para><paramref name="firstFrameLatent"/> and/or <paramref name="lastFrameLatent"/> switch to the TI2V
+    /// image-to-video path (diffusers <c>expand_timesteps</c>): a <c>[1, 48, 1, H/16, W/16]</c> VAE-encoded <b>and
+    /// latent-normalized</b> (<see cref="Wan22VaeLatentNorm.Normalize"/>) frame that is re-imposed into the model
+    /// input each step at per-frame timestep 0 while the remaining frames denoise. Both set together is Wan's
+    /// first-last-frame (FLF2V) mode; either alone conditions only that end. The Wan2.2 VAE <i>encoder</i> is not
+    /// built yet — produce the conditioning latent offline (validation-gated).</para></summary>
     public (byte[][] frames, int width, int height, int seed) GenerateFromEmbeddings(
         Tensor promptEmbeds, Tensor negativeEmbeds, TextToImageRequest request, int numFrames,
-        Action<GenerationProgress>? onProgress = null, Tensor? firstFrameLatent = null)
+        Action<GenerationProgress>? onProgress = null, Tensor? firstFrameLatent = null, Tensor? lastFrameLatent = null)
     {
-        Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, onProgress, firstFrameLatent, out int seed);
+        Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, onProgress, firstFrameLatent, lastFrameLatent, out int seed);
         // LOAD-BEARING for VaeDevice: RunDenoise's latents are already host-current (FlowUniPCMultistepScheduler.Step
         // writes sample.DataPointer host-side every iteration), so no explicit Sync()+DataPointer read is needed
         // before handing off to a VaeBackend on another device — unlike the device-resident-latent pipelines.
@@ -132,13 +133,14 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Streams decoded frames (pull-based → memory bounded; pair with an <c>IVideoEncoder</c>).
-    /// <paramref name="firstFrameLatent"/> enables the TI2V image-to-video path — see <see cref="GenerateFromEmbeddings"/>.</summary>
+    /// <paramref name="firstFrameLatent"/>/<paramref name="lastFrameLatent"/> enable the TI2V image-to-video path —
+    /// see <see cref="GenerateFromEmbeddings"/>.</summary>
     public async IAsyncEnumerable<VideoFrame> GenerateFramesAsync(
         Tensor promptEmbeds, Tensor negativeEmbeds, TextToImageRequest request, int numFrames,
-        Action<GenerationProgress>? onProgress = null, Tensor? firstFrameLatent = null,
+        Action<GenerationProgress>? onProgress = null, Tensor? firstFrameLatent = null, Tensor? lastFrameLatent = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, onProgress, firstFrameLatent, out _);
+        Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, onProgress, firstFrameLatent, lastFrameLatent, out _);
         // Preload the VAE decoder weights onto the GPU. Without this every conv/norm in the decode is a weight
         // cache-miss → SyncStream + re-upload, serializing the whole decode (GPU idle ~79%, ~8 min). RunDenoise
         // ended with ReleaseOrKeepTransformer, which guarantees decode headroom (kept the DiT only if it fits).
@@ -181,11 +183,12 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Runs the flow-match denoise loop in (normalized) latent space and returns <c>[1,48,T_lat,H_lat,W_lat]</c>.
-    /// With <paramref name="firstFrameLatent"/> set, follows the diffusers <c>expand_timesteps</c> I2V path: the model
-    /// input gets the condition imposed on frame 0 with per-frame timestep 0 each step, the evolving latents are
-    /// stepped freely, and the condition is re-imposed once after the loop.</summary>
+    /// With <paramref name="firstFrameLatent"/> and/or <paramref name="lastFrameLatent"/> set, follows the diffusers
+    /// <c>expand_timesteps</c> I2V path: the model input gets each set condition imposed on its latent-frame index
+    /// (0 for first, <c>T_lat-1</c> for last) with that frame's per-frame timestep pinned to 0 each step, the
+    /// evolving latents are stepped freely, and the condition(s) are re-imposed once after the loop.</summary>
     private Tensor RunDenoise(Tensor promptEmbeds, Tensor negativeEmbeds, TextToImageRequest request, int numFrames,
-        Action<GenerationProgress>? onProgress, Tensor? firstFrameLatent, out int seed)
+        Action<GenerationProgress>? onProgress, Tensor? firstFrameLatent, Tensor? lastFrameLatent, out int seed)
     {
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
@@ -202,12 +205,21 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             (firstFrameLatent.Shape.Rank != 5 || firstFrameLatent.Shape[0] != 1 || firstFrameLatent.Shape[1] != _config.InChannels
              || firstFrameLatent.Shape[2] != 1 || firstFrameLatent.Shape[3] != hLat || firstFrameLatent.Shape[4] != wLat))
             throw new ArgumentException($"firstFrameLatent must be [1,{_config.InChannels},1,{hLat},{wLat}]; got {firstFrameLatent.Shape}.", nameof(firstFrameLatent));
+        if (lastFrameLatent is not null &&
+            (lastFrameLatent.Shape.Rank != 5 || lastFrameLatent.Shape[0] != 1 || lastFrameLatent.Shape[1] != _config.InChannels
+             || lastFrameLatent.Shape[2] != 1 || lastFrameLatent.Shape[3] != hLat || lastFrameLatent.Shape[4] != wLat))
+            throw new ArgumentException($"lastFrameLatent must be [1,{_config.InChannels},1,{hLat},{wLat}]; got {lastFrameLatent.Shape}.", nameof(lastFrameLatent));
+        if (lastFrameLatent is not null && tLat < 2)
+            throw new ArgumentException($"lastFrameLatent needs at least 2 latent frames (numFrames={numFrames} → T_lat={tLat}); a single-frame clip has no distinct end.", nameof(lastFrameLatent));
 
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
 
-        string mode = firstFrameLatent is null ? "T2V" : "I2V";
+        string mode = firstFrameLatent is not null && lastFrameLatent is not null ? "FLF2V"
+            : firstFrameLatent is not null ? "I2V"
+            : lastFrameLatent is not null ? "EndFrame-only (unverified — Wan's real usage always pairs an init image)"
+            : "T2V";
         Logs.Info($"Wan-Video {mode}: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, seed={seed} (latent {_config.InChannels}x{tLat}x{hLat}x{wLat}, shift={shift})");
         Logs.Warning("Wan-Video pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
@@ -254,7 +266,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // against diffusers WanPipeline at the configured step count (e.g. 50).
         FlowUniPCMultistepScheduler scheduler = new(solverOrder: int.TryParse(Environment.GetEnvironmentVariable("WAN_SOLVER_ORDER"), out int _so) && _so > 0 ? _so : 2);
         scheduler.SetTimesteps(steps, shift);
-        float[]? frameTs = firstFrameLatent is null ? null : new float[tLat];
+        float[]? frameTs = (firstFrameLatent is null && lastFrameLatent is null) ? null : new float[tLat];
 
         // Default-off perf knobs (Qwen-Image is the reference wiring — INFERENCE_ACCEL_GRIND §H1.5/H2.3):
         // HARTSY_STEP_CACHE = First-Block cache per CFG stream; HARTSY_CFG_INTERVAL = skip the uncond forward
@@ -407,7 +419,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             // share across the two threads (both backends' caches are warm from the preload above), but the
             // per-step latent mutates every iteration and is the one tensor both branches would otherwise touch.
             bool cfgParallel = cfgThisStep && cfgParallelEnabled;
-            if (firstFrameLatent is null)
+            if (firstFrameLatent is null && lastFrameLatent is null)
             {
                 if (cpEnabled)
                 {
@@ -433,15 +445,21 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             }
             else
             {
-                // Model input: condition on frame 0 (timestep 0), evolving noise elsewhere (timestep t).
+                // Model input: condition on frame 0 and/or frame T_lat-1 (timestep 0 each), evolving noise
+                // elsewhere (timestep t). frameTsLocal is a non-null local so the loop body below narrows
+                // cleanly — the null-forgiving `frameTs!` inside a `for` body doesn't otherwise persist the
+                // non-null flow state to the Forward() calls after it.
                 Tensor modelInput = CloneLatents(latents);
-                WriteFirstFrame(modelInput, firstFrameLatent);
-                frameTs![0] = 0f;
-                for (int f = 1; f < tLat; f++) frameTs[f] = tEmb;
+                if (firstFrameLatent is not null) WriteFirstFrame(modelInput, firstFrameLatent);
+                if (lastFrameLatent is not null) WriteLastFrame(modelInput, lastFrameLatent);
+                float[] frameTsLocal = frameTs!;
+                for (int f = 0; f < tLat; f++) frameTsLocal[f] = tEmb;
+                if (firstFrameLatent is not null) frameTsLocal[0] = 0f;
+                if (lastFrameLatent is not null) frameTsLocal[tLat - 1] = 0f;
                 if (cpEnabled)
                 {
-                    vCond = CpForkedForward(modelInput, promptEmbeds, frameTs, tEmb);
-                    if (cfgThisStep) vUncond = CpForkedForward(modelInput, negativeEmbeds, frameTs, tEmb);
+                    vCond = CpForkedForward(modelInput, promptEmbeds, frameTsLocal, tEmb);
+                    if (cfgThisStep) vUncond = CpForkedForward(modelInput, negativeEmbeds, frameTsLocal, tEmb);
                 }
                 else if (cfgParallel)
                 {
@@ -449,15 +467,15 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                     try
                     {
                         (vCond, vUncond) = CfgBranchRunner.Run(
-                            () => expert.Forward(Backend, modelInput, promptEmbeds, frameTs, condCache),
-                            () => expert.Forward(CfgParallelBackend!, uncondModelInput, negativeEmbeds, frameTs, uncondCache));
+                            () => expert.Forward(Backend, modelInput, promptEmbeds, frameTsLocal, condCache),
+                            () => expert.Forward(CfgParallelBackend!, uncondModelInput, negativeEmbeds, frameTsLocal, uncondCache));
                     }
                     finally { uncondModelInput.Dispose(); }
                 }
                 else
                 {
-                    vCond = expert.Forward(Backend, modelInput, promptEmbeds, frameTs, condCache);
-                    if (cfgThisStep) vUncond = expert.Forward(Backend, modelInput, negativeEmbeds, frameTs, uncondCache);
+                    vCond = expert.Forward(Backend, modelInput, promptEmbeds, frameTsLocal, condCache);
+                    if (cfgThisStep) vUncond = expert.Forward(Backend, modelInput, negativeEmbeds, frameTsLocal, uncondCache);
                 }
                 modelInput.Dispose();
             }
@@ -488,6 +506,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         cpExchange?.Dispose();
 
         if (firstFrameLatent is not null) WriteFirstFrame(latents, firstFrameLatent);
+        if (lastFrameLatent is not null) WriteLastFrame(latents, lastFrameLatent);
 
         // Perf-knob accounting for benchmark records (totals include any pre-expert-boundary segments).
         if (condCache is not null)
@@ -831,6 +850,19 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         float* cp = (float*)condition.DataPointer;
         for (int ci = 0; ci < c; ci++)
             Buffer.MemoryCopy(cp + ci * frame, lp + (long)ci * t * frame, frame * 4, frame * 4);
+    }
+
+    /// <summary>Overwrites latent frame <c>T-1</c> (the last frame) of <paramref name="latents"/> <c>[1,C,T,H,W]</c>
+    /// with <paramref name="condition"/> <c>[1,C,1,H,W]</c> — the end-frame symmetric counterpart of
+    /// <see cref="WriteFirstFrame"/>, same per-channel memcpy pattern with the frame offset shifted to <c>T-1</c>.</summary>
+    private static void WriteLastFrame(Tensor latents, Tensor condition)
+    {
+        int c = (int)latents.Shape[1], t = (int)latents.Shape[2];
+        long frame = latents.Shape[3] * latents.Shape[4];
+        float* lp = (float*)latents.DataPointer;
+        float* cp = (float*)condition.DataPointer;
+        for (int ci = 0; ci < c; ci++)
+            Buffer.MemoryCopy(cp + ci * frame, lp + ((long)ci * t + (t - 1)) * frame, frame * 4, frame * 4);
     }
 
     /// <summary>Evicts the (possibly KEEP_MODELS-resident) DiT before a whole-clip VAE encode when measured free VRAM is short of the conv-activation ceiling. Trims the pool first so slack from the previous generation doesn't make the reading pessimistic — that slack, not the DiT, is what the old unconditional path was really evicting for on warm gens. A VAE encoder on its OWN device (<see cref="DiffusionPipelineBase.VaeBackend"/>) never contends with the DiT's VRAM on <see cref="DiffusionPipelineBase.Backend"/>, so the whole fit-check/evict dance is skipped when split.</summary>

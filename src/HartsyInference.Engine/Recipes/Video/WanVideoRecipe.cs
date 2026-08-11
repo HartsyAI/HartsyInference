@@ -47,16 +47,21 @@ public sealed class WanVideoRecipe : IVideoRecipe
 
 
     /// <inheritdoc/>
-    /// <remarks><c>wan-22-5b</c> (TI2V-5B) and <c>wan-21-1_3b</c> are always driven by
-    /// <see cref="WanVideoRecipePipeline"/>'s non-concat path (a VAE-encoded <c>firstFrameLatent</c>, consuming
-    /// only <see cref="VideoRequest.InitImage"/>) — neither compat class ever resolves to a concat-I2V config
-    /// (<see cref="ResolveConfig"/> maps them unconditionally to <c>Ti2V5B</c> / <c>T2V_1_3B</c>), so claiming
-    /// <see cref="VideoFeatures.EndFrame"/> for either would be a lie the pipeline can't back: an end frame
-    /// silently never reaches the denoiser on that path. <c>wan-21-14b</c> stays ambiguous at the family level
-    /// (T2V vs. concat-I2V is a checkpoint property — see <see cref="SupportsFor"/>) and keeps claiming both;
-    /// the generic "wan" catalog slug (weight-derived config, no compat class) does too, for the same reason.</remarks>
+    /// <remarks><b>Updated 2026-08-11 (Tier 3.3 — real end-frame wiring):</b> <see cref="WanVideoRecipePipeline"/>'s
+    /// non-concat path now VAE-encodes <see cref="VideoRequest.VideoEndFrame"/> into a <c>lastFrameLatent</c>
+    /// exactly like <see cref="VideoRequest.InitImage"/>'s <c>firstFrameLatent</c> (see
+    /// <see cref="WanVideoPipeline.RunDenoise"/>'s symmetric per-frame-timestep-pin mechanism), so
+    /// <see cref="VideoFeatures.EndFrame"/> is no longer a lie for <c>wan-22-5b</c> — real-weight verified against
+    /// the locally-available TI2V-5B checkpoint (see the extension backlog memory / plan for the verification
+    /// artifact). <c>wan-21_1_3b</c> shares the identical non-concat code path (same <see cref="ResolveConfig"/>
+    /// branch shape as Ti2V5B) so the mechanism should cover it too, but is left narrowed here deliberately — no
+    /// local 1.3B checkpoint exists to actually run and look at, and this backlog's hard rule is real-checkpoint
+    /// verification, not "should work by symmetry." Revisit once a 1.3B checkpoint is available to test.
+    /// <c>wan-21-14b</c> stays ambiguous at the family level (T2V vs. concat-I2V is a checkpoint property — see
+    /// <see cref="SupportsFor"/>) and keeps claiming both; the generic "wan" catalog slug (weight-derived config,
+    /// no compat class) does too, for the same reason.</remarks>
     public VideoFeatures Supports =>
-        (_familyId is Wan22_5BCompatClassId or Wan21_1_3BCompatClassId
+        (_familyId is Wan21_1_3BCompatClassId
             ? VideoFeatures.InitImage
             : VideoFeatures.InitImage | VideoFeatures.EndFrame) | VideoFeatures.Lora;
 

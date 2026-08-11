@@ -130,6 +130,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
 
         Tensor? imageEmbeds = null;
         Tensor? firstFrameLatent = null;
+        Tensor? lastFrameLatent = null;
         try
         {
             bool isConcatI2V = _config.InChannels > _config.VaeLatentChannels;
@@ -159,15 +160,33 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
                 return VideoRecipeUtils.ToResult(concatFrames, concatW, concatH, request);
             }
 
+            // TI2V expand_timesteps path: encode whichever of InitImage/VideoEndFrame are present, sharing one
+            // weight preload/free pass (both calls hit the same resident VAE encoder weights — freeing after the
+            // first would force a needless reload for the second). Symmetric to MiniMaxH3RecipePipeline's
+            // EncodeKeyframes; unlike the concat-I2V branch above (Wan2.1/14B family), this path has no
+            // model-level requirement that both ends be set together — either alone is a valid TI2V conditioning,
+            // though end-frame-alone is unverified (Wan's real-world usage always pairs an init image).
             if (request.InitImage is not null)
             {
                 byte[] frameRgb = VideoRecipeUtils.ResizeRgb24(request.InitImage, width, height);
                 firstFrameLatent = _vaeEncoder.EncodeRgbFrame(_vaeBackend, frameRgb, width, height);
+            }
+            if (request.VideoEndFrame is not null)
+            {
+                byte[] endRgb = VideoRecipeUtils.ResizeRgb24(request.VideoEndFrame, width, height);
+                lastFrameLatent = _vaeEncoder.EncodeRgbFrame(_vaeBackend, endRgb, width, height);
+            }
+            if (firstFrameLatent is not null || lastFrameLatent is not null)
+            {
                 _vaeBackend.Sync();
                 _vaeBackend.FreeWeights(_vaeEncoder.EnumerateWeights());
             }
-            (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromEmbeddings(promptEmbeds, negEmbeds, inner, numFrames, bridge, firstFrameLatent);
-            Logs.Info($"[WanVideoRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH} ({(firstFrameLatent is null ? "T2V" : "I2V")}).");
+            (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromEmbeddings(promptEmbeds, negEmbeds, inner, numFrames, bridge, firstFrameLatent, lastFrameLatent);
+            string mode = firstFrameLatent is not null && lastFrameLatent is not null ? "FLF2V"
+                : firstFrameLatent is not null ? "I2V"
+                : lastFrameLatent is not null ? "EndFrame-only"
+                : "T2V";
+            Logs.Info($"[WanVideoRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH} ({mode}).");
             return VideoRecipeUtils.ToResult(frames, outW, outH, request);
         }
         catch (Exception ex)
@@ -178,6 +197,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
         finally
         {
             firstFrameLatent?.Dispose();
+            lastFrameLatent?.Dispose();
             imageEmbeds?.Dispose();
             promptEmbeds.Dispose();
             negEmbeds.Dispose();
