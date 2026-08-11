@@ -72,24 +72,32 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   but **stays narrowed** — no local 1.3B checkpoint exists to verify against, and this doc's own verification
   rule is a real generation actually looked at, not "should work by symmetry." Revisit once a 1.3B checkpoint
   is available.
-- [ ] **LTX image-to-video (Tier 3.4) — first gate done, transformer/pipeline conditioning still open.**
-  `LtxVideoVaeEncoder` (base LTX-Video 0.9 config) now exists, ported from the actual diffusers source
-  rather than assumed by decoder symmetry — two real divergences found: `AutoencoderKLLTXVideo` defaults
-  `encoder_causal=True`/`decoder_causal=False` (not shared between the checkpoint's two halves), and the
-  base-0.9 downsampler is a plain strided conv at unchanged channel width, with the channel increase
-  happening via a separate resnet AFTER the downsampler (mirror of the decoder's before-the-upsampler
-  ordering). Real-weight verified standalone (encode→decode round trip through the existing
-  `LtxVideoVaeDecoder` on `ltx-video-2b-v0.9.safetensors`): quadrant pattern reconstructs correctly
-  (mean abs diff 1.09/255), `latents_mean`/`latents_std` confirmed present on both sides (not a
-  cancelling-no-op — see `HasLatentStats` on both classes), latent is genuinely unit-scale
-  (mean 0.027/std 1.146) and load-bearing (decoding a zeroed copy of the same latent diverges by
-  47.23 vs 1.09 for the real one). F=1 (single-frame conditioning, the I2V use case) is exercised;
-  the encoder's temporal-downsampling path is NOT — untested at F>1.
-  **Still missing:** no image-conditioning parameter anywhere in `LtxVideoTransformer`'s forward pass,
-  no image argument on any `LtxVideoPipeline` method, no wiring through `LtxVideoRecipePipeline`/
-  `LtxVideoRecipe` to consume `VideoRequest.InitImage`, no `VideoFeatures` bit declared. Use Wan's
-  `Wan22VaeEncoder.EncodeRgbFrame` → `firstFrameLatent` → `GenerateFromEmbeddings` shape as the
-  template for the remaining wiring, not a shortcut.
+- [x] ~~LTX image-to-video (Tier 3.4)~~ **DONE, real-weight verified end-to-end (2026-08-11), base 0.9
+  only.** `LtxVideoVaeEncoder` (ported from the actual diffusers source, not assumed by decoder symmetry
+  — `encoder_causal=True`/`decoder_causal=False` differ on the same checkpoint, and the base-0.9
+  downsampler is a plain strided conv with the channel-widening resnet AFTER it, mirroring the decoder's
+  before-the-upsampler ordering) round-trips correctly through the existing decoder (mean abs diff
+  1.09/255; `HasLatentStats` confirms `latents_mean`/`latents_std` are real, not a cancelling no-op; the
+  latent is genuinely unit-scale and load-bearing — a zeroed copy decodes to a diff of 47.23 vs 1.09 for
+  the real one). I2V conditioning is a per-token AdaLN modulation (diffusers'
+  `timestep.unsqueeze(-1) * (1 - conditioning_mask)`, re-pinning frame 0 to the encoded latent every
+  denoise step, not just once) — built by reusing `AffineBroadcastRowIndexed`/`GatedResidualRowIndexed`,
+  the same row-indexed-table primitive `MiniMaxH3Transformer` already proved for multi-timestep
+  modulation, threaded as an opt-in `temb0`/`modIndex` pair through `LtxVideoBlock`/`LtxVideoTransformer`
+  (null on every T2V call site — byte-identical, confirmed by all 5 pre-existing LTX tests still
+  passing unchanged). `LtxVideoRecipe.SupportsFor` (checkpoint-aware, mirrors `WanVideoRecipe`'s pattern)
+  declares `VideoFeatures.InitImage` for base 0.9 only — 0.9.5/13B use a different VAE config the
+  encoder was never verified against. Not supported together with step-cache or the step-graph capture
+  path (forces eager / throws rather than silently ignoring one). Real-weight verified through the full
+  `InferenceEngine.Video.GenerateAsync` service path (solid red synthetic init, `ltx-video-2b-v0.9.safetensors`
+  + T5-XXL): frame 0 reads back R=218 (near-exact conditioning match), then a real progressive denoise
+  trajectory (R=218→205→163→110→75 across frames 0/4/8/12/16) into a coherent, correctly-prompted scene
+  — visually confirmed a red apple beside a green pear on a wooden table, cinematic shading, matching
+  the prompt (not color drift with no structure). An earlier version only overwrote frame-0 tokens once
+  before the loop instead of re-pinning every step; a real run at 2 latent frames/8 steps caught it
+  (every output frame looked identically flat-red) before the fix. `VideoEndFrame` is still not wired —
+  the mechanism conditions on a single mask row (frame 0); extending it to a second end-of-clip
+  conditioned range is unbuilt.
 
 ### SeedVR2 restoration follow-ups
 - [x] ~~fp32 whole-clip VAE activation ceiling~~ **BF16 VAE activations landed (2026-08-02)** — reference
