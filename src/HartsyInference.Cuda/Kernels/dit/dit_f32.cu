@@ -473,7 +473,11 @@ __global__ void dit_cfg_normalized_euler_f32(
             __syncthreads();
         }
         if (threadIdx.x == 0)
-            rowRatio = (float)(sqrt(condSums[0]) / (sqrt(guidedSums[0]) + (double)eps));
+        {
+            // Zero denominator (eps=0, all-zero guided row) contributes nothing — ratio=0 avoids 0/0 -> NaN.
+            double denom = sqrt(guidedSums[0]) + (double)eps;
+            rowRatio = denom > 0.0 ? (float)(sqrt(condSums[0]) / denom) : 0.0f;
+        }
         __syncthreads();
 
         float ratio = rowRatio;

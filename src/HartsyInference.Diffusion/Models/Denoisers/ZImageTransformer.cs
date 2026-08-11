@@ -513,6 +513,9 @@ public sealed unsafe class ZImageTransformer : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         Exception? firstError = null;
+        // The captured step graph bakes the device pointers of the caption pins and RoPE tables freed below —
+        // invalidate it FIRST so a later same-signature ForwardPacked cannot replay against freed memory.
+        Try(() => InvalidateStepGraph(backend));
         foreach (RefinedCaptionCacheEntry entry in _refinedCaptionCache)
         {
             if (entry.Value is not null)

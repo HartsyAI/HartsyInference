@@ -510,7 +510,15 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 }
                 tensors.DisposeOwned(hwcU8);
             }
-            ValidateRgbOutput(rgbData);
+            // A uniformly black/white frame is an error only when the decode path itself collapsed (NaN/Inf) —
+            // a legitimate prompt or an inpaint over a solid source can genuinely produce one.
+            string? collapseEndpoint = DetectEndpointCollapse(rgbData);
+            if (collapseEndpoint is not null)
+            {
+                ValidateFiniteTensor(VaeBackend, image, $"decoded frame (uniformly {collapseEndpoint})");
+                Logs.Warning($"[Z-Image] decoded frame is uniformly {collapseEndpoint} but the decode path is " +
+                    "finite — accepting as a legitimate solid-color image.");
+            }
             Logs.Verbose($"[zimage-phase] rgb={sw.ElapsedMilliseconds - phRgb}ms");
             tensors.DisposeOwned(image);
 
@@ -720,10 +728,11 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
     /// per <see cref="DiffusionPipelineBase"/>; <c>ZImageRecipePipeline</c> disposes those host owners afterwards.</summary>
     protected override void DisposeCore() => CleanupFailedGeneration();
 
-    /// <summary>Rejects exact endpoint-saturated output. A healthy decoded image may be very dark or bright, but
-    /// an entire RGB frame at byte 0/255 indicates a non-finite or collapsed latent/VAE path and must not be
-    /// reported as a successful generation.</summary>
-    internal static void ValidateRgbOutput(ReadOnlySpan<byte> rgb)
+    /// <summary>Returns the endpoint label ("black (0)" / "white (255)") when the entire RGB frame sits at a
+    /// single byte endpoint, else null. Endpoint collapse alone is NOT proof of failure — a legitimate prompt or
+    /// an inpaint over a solid source can genuinely produce one — so the caller disambiguates by checking the
+    /// decoded F32 tensor for NaN/Inf before rejecting.</summary>
+    internal static string? DetectEndpointCollapse(ReadOnlySpan<byte> rgb)
     {
         if (rgb.IsEmpty)
             throw new InvalidOperationException("Z-Image produced an empty RGB frame.");
@@ -735,11 +744,9 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             anyNonBlack |= value != 0;
             anyNonWhite |= value != byte.MaxValue;
             if (anyNonBlack && anyNonWhite)
-                return;
+                return null;
         }
-        string endpoint = anyNonBlack ? "white (255)" : "black (0)";
-        throw new InvalidOperationException(
-            $"Z-Image decoded an all-{endpoint} frame. The denoiser or VAE output collapsed/non-finite; generation was rejected.");
+        return anyNonBlack ? "white (255)" : "black (0)";
     }
 
     /// <summary>Rejects a tensor containing NaN/Inf. Device backends with a resident reduction read back only the

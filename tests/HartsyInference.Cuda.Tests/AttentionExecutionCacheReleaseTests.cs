@@ -37,7 +37,11 @@ public sealed unsafe class AttentionExecutionCacheReleaseTests
         const int Heads = 2, Sequence = 32, HeadDim = 64;
         float scale = 1f / MathF.Sqrt(HeadDim);
         string? previous = Environment.GetEnvironmentVariable("HARTSY_SDPA_CUDNN");
+        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
         Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", "1");
+        // Ambient HARTSY_SAGE_ATTN=1 would let Sage claim these calls ahead of cuDNN and break the
+        // exact CudnnSdpaExecutionCount assertions below.
+        Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "0");
         try
         {
             using CudaBackend backend = new(0, ptxDir);
@@ -88,6 +92,7 @@ public sealed unsafe class AttentionExecutionCacheReleaseTests
         finally
         {
             Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", previous);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
         }
     }
 

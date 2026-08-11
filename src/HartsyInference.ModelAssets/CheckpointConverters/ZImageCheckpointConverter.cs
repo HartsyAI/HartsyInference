@@ -114,7 +114,10 @@ public sealed class ZImageCheckpointConverter
     /// <summary>Detects the sampling variant from a standalone filename token. Official Base and Turbo weights are
     /// architecturally indistinguishable. Safetensors metadata is not reliable enough as the sole contract: the
     /// official BF16 Base file has no metadata, while the known FP8 repacks identify themselves in the filename.
-    /// Only the filename (not parent directories) is inspected, and ambiguous/missing tokens remain Unknown.</summary>
+    /// Only the filename (not parent directories) is inspected. The official Base release carries NO variant token
+    /// — it ships under the bare family name (<c>Z-Image.safetensors</c>, <c>z_image_bf16.safetensors</c>) — so a
+    /// name that starts with the family name and lacks a variant token IS the Base checkpoint, not ambiguous.
+    /// Anything else without an unambiguous token remains Unknown.</summary>
     public static CheckpointVariant DetectVariantFromFileName(string checkpointPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
@@ -122,9 +125,17 @@ public sealed class ZImageCheckpointConverter
         string[] tokens = fileName.Split(['-', '_', '.', ' '], StringSplitOptions.RemoveEmptyEntries);
         bool hasBase = tokens.Any(token => token.Equals("base", StringComparison.OrdinalIgnoreCase));
         bool hasTurbo = tokens.Any(token => token.Equals("turbo", StringComparison.OrdinalIgnoreCase));
-        if (hasBase == hasTurbo)
+        if (hasBase && hasTurbo)
             return CheckpointVariant.Unknown;
-        return hasBase ? CheckpointVariant.Base : CheckpointVariant.Turbo;
+        if (hasBase || hasTurbo)
+            return hasBase ? CheckpointVariant.Base : CheckpointVariant.Turbo;
+        bool officialFamilyName = tokens.Any(token => token.Equals("zimage", StringComparison.OrdinalIgnoreCase));
+        for (int i = 0; !officialFamilyName && i < tokens.Length - 1; i++)
+        {
+            officialFamilyName = tokens[i].Equals("z", StringComparison.OrdinalIgnoreCase)
+                && tokens[i + 1].Equals("image", StringComparison.OrdinalIgnoreCase);
+        }
+        return officialFamilyName ? CheckpointVariant.Base : CheckpointVariant.Unknown;
     }
 
     /// <summary>Auto-detects layer counts and FP8 status from a transformer dict.</summary>

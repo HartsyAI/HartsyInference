@@ -68,14 +68,17 @@ public sealed class ZImageRecipe : IArchitectureRecipe
             if (zConv.Transformer.Count == 0)
                 throw new InvalidOperationException("Z-Image checkpoint has no transformer weights.");
 
-            bool isBase = zConv.Variant == ZImageCheckpointConverter.CheckpointVariant.Base;
+            bool isBase = zConv.Variant != ZImageCheckpointConverter.CheckpointVariant.Turbo;
             if (zConv.Variant == ZImageCheckpointConverter.CheckpointVariant.Unknown)
             {
-                // Tensor shapes cannot distinguish distilled Turbo from Base. Preserve the long-standing Turbo
-                // default for an ambiguously renamed file, but say so rather than silently choosing a schedule.
+                // Tensor shapes cannot distinguish distilled Turbo from Base. Default ambiguous files to the Base
+                // policy: it is numerically safe on both weight sets (Base weights under Turbo's F16 attention
+                // produce Inf — a silently corrupted image), while Turbo under Base's F32 policy merely runs
+                // slower with a shifted schedule.
                 Logs.Warning($"[ZImageRecipe] Checkpoint filename '{Path.GetFileName(context.CheckpointPath)}' " +
-                    "contains neither an unambiguous 'base' nor 'turbo' token; defaulting to Turbo shift=3. " +
-                    "Rename the file with its variant token to select the correct schedule.");
+                    "contains neither an unambiguous 'base' nor 'turbo' token; defaulting to the safe Base policy " +
+                    "(F32 attention, shift=6). A Turbo checkpoint will run slower than necessary — rename the " +
+                    "file with its variant token to select the correct schedule.");
             }
             ZImageConfig zConfig = ZImageConfig.FromWeights(zConv.Transformer, isBase);
             Logs.Info($"[ZImageRecipe] Building {zConv.Variant} transformer " +

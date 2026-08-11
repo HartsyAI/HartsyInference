@@ -159,6 +159,13 @@ public static class CudnnRuntime
             string? url = Environment.GetEnvironmentVariable("HARTSY_CUDNN_URL");
             if (string.IsNullOrEmpty(url))
             {
+                // NVIDIA publishes cuDNN 9.21 redist archives for CUDA 12/13 only — the CUDA 11 URL 404s.
+                if (cudaMajor < 12)
+                {
+                    Logs.Warning($"[cuDNN] no public cuDNN 9.21 redist exists for CUDA {cudaMajor} — install " +
+                        "cuDNN 9 manually or point HARTSY_CUDNN_URL/HARTSY_CUDNN_DIR at a compatible build.");
+                    return null;
+                }
                 // NVIDIA redist. Version is pinned but overridable; the redist layout is stable per major.
                 // The custom SDPA graph uses the public softmax operation added in cuDNN 9.21, so older
                 // CUDA-13 redistributables can run convolution but cannot construct this attention graph.

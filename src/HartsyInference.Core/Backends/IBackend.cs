@@ -780,7 +780,10 @@ public interface IBackend : IDisposable
                 guidedSq += (double)guided * guided;
             }
 
-            float ratio = (float)(Math.Sqrt(condSq) / (Math.Sqrt(guidedSq) + eps));
+            // A zero denominator (eps=0 with an all-zero guided row) contributes nothing either way — use
+            // ratio=0 rather than letting 0/0 produce NaN and poison z through 0·NaN.
+            double denom = Math.Sqrt(guidedSq) + eps;
+            float ratio = denom > 0.0 ? (float)(Math.Sqrt(condSq) / denom) : 0f;
             for (long d = 0; d < lastDim; d++)
             {
                 long i = rowOffset + d;

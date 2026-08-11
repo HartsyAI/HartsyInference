@@ -1678,8 +1678,8 @@ $L__BB13_3:
 	.param .u64 dit_cfg_normalized_euler_f32_param_7
 )
 {
-	.reg .pred 	%p<11>;
-	.reg .f32 	%f<17>;
+	.reg .pred 	%p<12>;
+	.reg .f32 	%f<20>;
 	.reg .b32 	%r<14>;
 	.reg .f64 	%fd<30>;
 	.reg .b64 	%rd<43>;
@@ -1689,9 +1689,9 @@ $L__BB13_3:
 	ld.param.u64 	%rd17, [dit_cfg_normalized_euler_f32_param_0];
 	ld.param.u64 	%rd20, [dit_cfg_normalized_euler_f32_param_1];
 	ld.param.u64 	%rd21, [dit_cfg_normalized_euler_f32_param_2];
-	ld.param.f32 	%f2, [dit_cfg_normalized_euler_f32_param_3];
-	ld.param.f32 	%f3, [dit_cfg_normalized_euler_f32_param_4];
-	ld.param.f32 	%f4, [dit_cfg_normalized_euler_f32_param_5];
+	ld.param.f32 	%f4, [dit_cfg_normalized_euler_f32_param_3];
+	ld.param.f32 	%f5, [dit_cfg_normalized_euler_f32_param_4];
+	ld.param.f32 	%f6, [dit_cfg_normalized_euler_f32_param_5];
 	ld.param.u64 	%rd18, [dit_cfg_normalized_euler_f32_param_6];
 	ld.param.u64 	%rd19, [dit_cfg_normalized_euler_f32_param_7];
 	cvta.to.global.u64 	%rd1, %rd20;
@@ -1701,7 +1701,7 @@ $L__BB13_3:
 	mov.u32 	%r5, %ctaid.x;
 	cvt.u64.u32 	%rd40, %r5;
 	setp.ge.u64 	%p1, %rd40, %rd18;
-	@%p1 bra 	$L__BB14_16;
+	@%p1 bra 	$L__BB14_18;
 
 	shl.b64 	%rd22, %rd3, 3;
 	mov.u64 	%rd23, sums;
@@ -1713,7 +1713,7 @@ $L__BB13_3:
 	add.s64 	%rd7, %rd23, %rd24;
 	add.s64 	%rd8, %rd5, %rd24;
 	shr.u32 	%r1, %r6, 1;
-	cvt.f64.f32 	%fd1, %f4;
+	cvt.f64.f32 	%fd1, %f6;
 	mov.u32 	%r8, %nctaid.x;
 	cvt.u64.u32 	%rd9, %r8;
 	cvt.u32.u64 	%r9, %rd6;
@@ -1735,14 +1735,14 @@ $L__BB14_4:
 	shl.b64 	%rd26, %rd25, 2;
 	add.s64 	%rd27, %rd1, %rd26;
 	add.s64 	%rd28, %rd2, %rd26;
-	ld.global.nc.f32 	%f5, [%rd28];
-	ld.global.nc.f32 	%f6, [%rd27];
-	sub.f32 	%f7, %f6, %f5;
-	fma.rn.f32 	%f8, %f7, %f2, %f5;
-	cvt.f64.f32 	%fd12, %f6;
-	fma.rn.f64 	%fd28, %fd12, %fd12, %fd28;
+	ld.global.nc.f32 	%f7, [%rd28];
+	ld.global.nc.f32 	%f8, [%rd27];
+	sub.f32 	%f9, %f8, %f7;
+	fma.rn.f32 	%f10, %f9, %f4, %f7;
 	cvt.f64.f32 	%fd13, %f8;
-	fma.rn.f64 	%fd29, %fd13, %fd13, %fd29;
+	fma.rn.f64 	%fd28, %fd13, %fd13, %fd28;
+	cvt.f64.f32 	%fd14, %f10;
+	fma.rn.f64 	%fd29, %fd14, %fd14, %fd29;
 	add.s64 	%rd41, %rd41, %rd3;
 	setp.lt.u64 	%p3, %rd41, %rd19;
 	@%p3 bra 	$L__BB14_4;
@@ -1763,15 +1763,15 @@ $L__BB14_7:
 	add.s32 	%r11, %r13, %r9;
 	mul.wide.u32 	%rd29, %r11, 8;
 	add.s64 	%rd31, %rd23, %rd29;
-	ld.shared.f64 	%fd14, [%rd7];
-	ld.shared.f64 	%fd15, [%rd31];
-	add.f64 	%fd16, %fd15, %fd14;
-	st.shared.f64 	[%rd7], %fd16;
+	ld.shared.f64 	%fd15, [%rd7];
+	ld.shared.f64 	%fd16, [%rd31];
+	add.f64 	%fd17, %fd16, %fd15;
+	st.shared.f64 	[%rd7], %fd17;
 	add.s64 	%rd33, %rd31, %rd22;
-	ld.shared.f64 	%fd17, [%rd8];
-	ld.shared.f64 	%fd18, [%rd33];
-	add.f64 	%fd19, %fd18, %fd17;
-	st.shared.f64 	[%rd8], %fd19;
+	ld.shared.f64 	%fd18, [%rd8];
+	ld.shared.f64 	%fd19, [%rd33];
+	add.f64 	%fd20, %fd19, %fd18;
+	st.shared.f64 	[%rd8], %fd20;
 
 $L__BB14_9:
 	bar.sync 	0;
@@ -1781,49 +1781,55 @@ $L__BB14_9:
 
 $L__BB14_10:
 	setp.ne.s32 	%p7, %r9, 0;
-	@%p7 bra 	$L__BB14_12;
+	@%p7 bra 	$L__BB14_14;
 
-	ld.shared.f64 	%fd20, [sums];
-	sqrt.rn.f64 	%fd21, %fd20;
-	ld.shared.f64 	%fd22, [%rd5];
-	sqrt.rn.f64 	%fd23, %fd22;
-	add.f64 	%fd24, %fd23, %fd1;
-	div.rn.f64 	%fd25, %fd21, %fd24;
-	cvt.rn.f32.f64 	%f9, %fd25;
-	st.shared.f32 	[_ZZ28dit_cfg_normalized_euler_f32E8rowRatio], %f9;
+	ld.shared.f64 	%fd21, [%rd5];
+	sqrt.rn.f64 	%fd22, %fd21;
+	add.f64 	%fd8, %fd22, %fd1;
+	setp.leu.f64 	%p8, %fd8, 0d0000000000000000;
+	mov.f32 	%f19, 0f00000000;
+	@%p8 bra 	$L__BB14_13;
 
-$L__BB14_12:
-	bar.sync 	0;
-	@%p2 bra 	$L__BB14_15;
+	ld.shared.f64 	%fd23, [sums];
+	sqrt.rn.f64 	%fd24, %fd23;
+	div.rn.f64 	%fd25, %fd24, %fd8;
+	cvt.rn.f32.f64 	%f19, %fd25;
 
-	ld.shared.f32 	%f1, [_ZZ28dit_cfg_normalized_euler_f32E8rowRatio];
-	mov.u64 	%rd42, %rd6;
+$L__BB14_13:
+	st.shared.f32 	[_ZZ28dit_cfg_normalized_euler_f32E8rowRatio], %f19;
 
 $L__BB14_14:
+	bar.sync 	0;
+	@%p2 bra 	$L__BB14_17;
+
+	ld.shared.f32 	%f3, [_ZZ28dit_cfg_normalized_euler_f32E8rowRatio];
+	mov.u64 	%rd42, %rd6;
+
+$L__BB14_16:
 	add.s64 	%rd34, %rd42, %rd11;
 	shl.b64 	%rd35, %rd34, 2;
 	add.s64 	%rd36, %rd2, %rd35;
 	add.s64 	%rd37, %rd1, %rd35;
-	ld.global.nc.f32 	%f10, [%rd37];
-	ld.global.nc.f32 	%f11, [%rd36];
-	sub.f32 	%f12, %f10, %f11;
-	fma.rn.f32 	%f13, %f12, %f2, %f11;
-	mul.f32 	%f14, %f1, %f13;
+	ld.global.nc.f32 	%f12, [%rd37];
+	ld.global.nc.f32 	%f13, [%rd36];
+	sub.f32 	%f14, %f12, %f13;
+	fma.rn.f32 	%f15, %f14, %f4, %f13;
+	mul.f32 	%f16, %f3, %f15;
 	add.s64 	%rd39, %rd38, %rd35;
-	ld.global.f32 	%f15, [%rd39];
-	fma.rn.f32 	%f16, %f14, %f3, %f15;
-	st.global.f32 	[%rd39], %f16;
+	ld.global.f32 	%f17, [%rd39];
+	fma.rn.f32 	%f18, %f16, %f5, %f17;
+	st.global.f32 	[%rd39], %f18;
 	add.s64 	%rd42, %rd42, %rd3;
-	setp.lt.u64 	%p9, %rd42, %rd19;
-	@%p9 bra 	$L__BB14_14;
+	setp.lt.u64 	%p10, %rd42, %rd19;
+	@%p10 bra 	$L__BB14_16;
 
-$L__BB14_15:
+$L__BB14_17:
 	bar.sync 	0;
 	add.s64 	%rd40, %rd40, %rd9;
-	setp.lt.u64 	%p10, %rd40, %rd18;
-	@%p10 bra 	$L__BB14_2;
+	setp.lt.u64 	%p11, %rd40, %rd18;
+	@%p11 bra 	$L__BB14_2;
 
-$L__BB14_16:
+$L__BB14_18:
 	ret;
 
 }

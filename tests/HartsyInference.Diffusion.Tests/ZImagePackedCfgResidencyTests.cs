@@ -172,19 +172,27 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
     [InlineData("z_image_base-bf16.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
     [InlineData("z_image_base-nvfp8-mixed.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
     [InlineData("SwarmUI_Z-Image-Turbo-FP8Mix.safetensors", ZImageCheckpointConverter.CheckpointVariant.Turbo, 3.0f)]
-    [InlineData("renamed.safetensors", ZImageCheckpointConverter.CheckpointVariant.Unknown, 3.0f)]
+    // The official Base release ships under the bare family name with no variant token — it must positively
+    // resolve to Base, not fall through to a policy that produces Inf on Base weights.
+    [InlineData("Z-Image.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
+    [InlineData("z_image_bf16.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
+    [InlineData("SwarmUI_Z-Image-FP8Mix.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
+    [InlineData("ZImage.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
+    // Genuinely ambiguous names stay Unknown; the recipe maps Unknown to the numerically safe Base policy.
+    [InlineData("renamed.safetensors", ZImageCheckpointConverter.CheckpointVariant.Unknown, 6.0f)]
     [InlineData("base/Z-Image-Turbo.safetensors", ZImageCheckpointConverter.CheckpointVariant.Turbo, 3.0f)]
-    [InlineData("Z-Image-base-turbo.safetensors", ZImageCheckpointConverter.CheckpointVariant.Unknown, 3.0f)]
+    [InlineData("Z-Image-base-turbo.safetensors", ZImageCheckpointConverter.CheckpointVariant.Unknown, 6.0f)]
     public void CheckpointVariant_SelectsCorrectSchedulerShift(string path,
         ZImageCheckpointConverter.CheckpointVariant expectedVariant, float expectedShift)
     {
         ZImageCheckpointConverter.CheckpointVariant variant =
             ZImageCheckpointConverter.DetectVariantFromFileName(path);
         Assert.Equal(expectedVariant, variant);
+        // Mirrors ZImageRecipe.Construct: everything except a positively-identified Turbo runs the Base policy.
         ZImageConfig config = ZImageConfig.FromWeights(
-            new Dictionary<string, Tensor>(), variant == ZImageCheckpointConverter.CheckpointVariant.Base);
+            new Dictionary<string, Tensor>(), variant != ZImageCheckpointConverter.CheckpointVariant.Turbo);
         Assert.Equal(expectedShift, config.SchedulerShift);
-        Assert.Equal(variant == ZImageCheckpointConverter.CheckpointVariant.Base, config.IsBase);
+        Assert.Equal(variant != ZImageCheckpointConverter.CheckpointVariant.Turbo, config.IsBase);
 
         GenerationDefaults diffusionDefaults = config.IsBase
             ? GenerationDefaults.ZImageBase
@@ -201,18 +209,21 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
     }
 
     [Fact]
-    public void RgbOutputGuard_RejectsOnlyExactEndpointCollapse()
+    public void RgbOutputGuard_DetectsOnlyExactEndpointCollapse()
     {
-        InvalidOperationException black = Assert.Throws<InvalidOperationException>(
-            () => ZImagePipeline.ValidateRgbOutput(new byte[12]));
-        Assert.Contains("black", black.Message, StringComparison.OrdinalIgnoreCase);
-        InvalidOperationException white = Assert.Throws<InvalidOperationException>(
-            () => ZImagePipeline.ValidateRgbOutput(Enumerable.Repeat(byte.MaxValue, 12).ToArray()));
-        Assert.Contains("white", white.Message, StringComparison.OrdinalIgnoreCase);
+        // Collapse detection is advisory: the pipeline rejects a uniform frame only when the decoded F32
+        // tensor is additionally non-finite, so a legitimate solid-color generation is never failed.
+        string? black = ZImagePipeline.DetectEndpointCollapse(new byte[12]);
+        Assert.NotNull(black);
+        Assert.Contains("black", black, StringComparison.OrdinalIgnoreCase);
+        string? white = ZImagePipeline.DetectEndpointCollapse(Enumerable.Repeat(byte.MaxValue, 12).ToArray());
+        Assert.NotNull(white);
+        Assert.Contains("white", white, StringComparison.OrdinalIgnoreCase);
 
-        ZImagePipeline.ValidateRgbOutput([0, 0, 1]);
-        ZImagePipeline.ValidateRgbOutput([255, 255, 254]);
-        ZImagePipeline.ValidateRgbOutput([0, 255, 0]);
+        Assert.Null(ZImagePipeline.DetectEndpointCollapse([0, 0, 1]));
+        Assert.Null(ZImagePipeline.DetectEndpointCollapse([255, 255, 254]));
+        Assert.Null(ZImagePipeline.DetectEndpointCollapse([0, 255, 0]));
+        Assert.Throws<InvalidOperationException>(() => ZImagePipeline.DetectEndpointCollapse([]));
     }
 
     [Fact]

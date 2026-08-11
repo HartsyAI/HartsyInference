@@ -30,6 +30,32 @@ public sealed class Qwen3Tokenizer : IDisposable
     private readonly int _maxLength;
     private int _disposed;
 
+    // Chat-template special ids resolved from the loaded artifact's added-token table. The canonical
+    // constants describe the embedded Qwen3-4B tokenizer only; a caller-supplied tokenizer.json may lay
+    // its added tokens out differently, and hardcoding would silently emit foreign ids into its stream.
+    private readonly int _bosTokenId = BosTokenId;
+    private readonly int _eosTokenId = EosTokenId;
+    private readonly int _imStartId = ImStartId;
+    private readonly int _imEndId = ImEndId;
+    private readonly int _thinkStartId = ThinkStartId;
+    private readonly int _thinkEndId = ThinkEndId;
+
+    /// <summary>Resolves one chat special id from the exact tokenizer's added-token table, keeping the
+    /// canonical Qwen3 id when the literal is present at its canonical position or the artifact omits it
+    /// (an omission is logged once — the canonical id is then a best-effort guess, not a contract).</summary>
+    private static int ResolveSpecialId(GgufTokenizer exact, string literal, int canonicalId)
+    {
+        int? resolved = exact.SpecialId(literal);
+        if (resolved is null)
+        {
+            HartsyInference.Core.Logging.Logs.Warning(
+                $"[Qwen3Tokenizer] loaded tokenizer.json has no added token '{literal}'; " +
+                $"falling back to the canonical Qwen3 id {canonicalId}, which may not match this vocabulary.");
+            return canonicalId;
+        }
+        return resolved.Value;
+    }
+
     /// <summary>Creates a Qwen3 tokenizer using the canonical <c>Qwen/Qwen3-4B</c>
     /// tokenizer.json embedded in this assembly. This is the right constructor for
     /// Flux.2 Klein and Z-Image text conditioning. Use the path overload only if
@@ -82,6 +108,12 @@ public sealed class Qwen3Tokenizer : IDisposable
         {
             using Stream jsonStream = File.OpenRead(Path.Combine(vocabDirectory, "tokenizer.json"));
             _exactTokenizer = HfTokenizerJson.LoadByteLevelBpe(jsonStream);
+            _bosTokenId = ResolveSpecialId(_exactTokenizer, "<|endoftext|>", BosTokenId);
+            _eosTokenId = ResolveSpecialId(_exactTokenizer, "<|im_end|>", EosTokenId);
+            _imStartId = ResolveSpecialId(_exactTokenizer, "<|im_start|>", ImStartId);
+            _imEndId = _eosTokenId;
+            _thinkStartId = ResolveSpecialId(_exactTokenizer, "<think>", ThinkStartId);
+            _thinkEndId = ResolveSpecialId(_exactTokenizer, "</think>", ThinkEndId);
             return;
         }
 
@@ -103,7 +135,7 @@ public sealed class Qwen3Tokenizer : IDisposable
         // Pad with BOS (Qwen3's <|endoftext|>) — same convention as HF Qwen3 tokenizer when no
         // explicit pad_token is set.
         for (int i = 0; i < _maxLength; i++)
-            result[i] = BosTokenId;
+            result[i] = _bosTokenId;
 
         int reserveForEos = appendEos ? 1 : 0;
         int tokenCount = Math.Min(tokenIds.Count, _maxLength - reserveForEos);
@@ -111,7 +143,7 @@ public sealed class Qwen3Tokenizer : IDisposable
             result[i] = tokenIds[i];
 
         if (appendEos && tokenCount < _maxLength)
-            result[tokenCount] = EosTokenId;
+            result[tokenCount] = _eosTokenId;
 
         return result;
     }
@@ -156,22 +188,22 @@ public sealed class Qwen3Tokenizer : IDisposable
         ThrowIfDisposed();
 
         List<int> ids = new(_maxLength);
-        ids.Add(ImStartId);
+        ids.Add(_imStartId);
         // This is one ordinary-text span in the rendered template. Keeping it whole is load-bearing when
         // the prompt begins with whitespace (for example, "\ncat" must merge the two adjacent newlines to
         // Qwen token 271); separate BPE calls create an artificial pre-tokenization boundary.
         AppendBpe(ids, string.Concat("user\n", prompt));
-        ids.Add(ImEndId);
+        ids.Add(_imEndId);
         AppendBpe(ids, "\n");
-        ids.Add(ImStartId);
+        ids.Add(_imStartId);
         AppendBpe(ids, "assistant\n");
         if (includeThinkBlock)
         {
             // <think> and </think> are added tokens, not entries in the base vocab/merges files. Encoding
             // their literal text as ordinary BPE silently produces multiple punctuation/word tokens.
-            ids.Add(ThinkStartId);
+            ids.Add(_thinkStartId);
             AppendBpe(ids, "\n\n");
-            ids.Add(ThinkEndId);
+            ids.Add(_thinkEndId);
             AppendBpe(ids, "\n\n");
         }
 
@@ -186,7 +218,7 @@ public sealed class Qwen3Tokenizer : IDisposable
 
         int[] result = new int[_maxLength];
         for (int i = 0; i < realLen; i++) result[i] = ids[i];
-        for (int i = realLen; i < _maxLength; i++) result[i] = BosTokenId; // pad with <|endoftext|>
+        for (int i = realLen; i < _maxLength; i++) result[i] = _bosTokenId; // pad with <|endoftext|>
         return (result, realLen);
     }
 

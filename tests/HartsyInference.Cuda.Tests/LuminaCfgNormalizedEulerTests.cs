@@ -118,6 +118,37 @@ public sealed unsafe class LuminaCfgNormalizedEulerTests
     }
 
     [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void ZeroEps_WithAllZeroGuidedRow_DoesNotPoisonZWithNaN()
+    {
+        // eps=0 with an all-zero guided row makes the normalization denominator exactly zero; the ratio must
+        // resolve to 0 (the row contributes nothing either way), not 0/0 -> NaN poisoning z through 0·NaN.
+        TensorShape shape = new(3, 17);
+        float[] initial = RandomValues(51, 733, 1f);
+        using Tensor zCpu = TensorFrom(initial, shape);
+        using Tensor zeroPrediction = TensorFrom(new float[51], shape);
+        using (IBackend cpu = new CpuBackend())
+            cpu.CfgNormalizedEulerStep(zCpu, zeroPrediction, zeroPrediction, 4f, 0.1f, eps: 0f);
+        AssertExact(initial, Snapshot(zCpu), "CPU zero-eps zero-row update");
+
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: CUDA unavailable");
+            return;
+        }
+        using Tensor zCuda = new(shape, DType.F32);
+        using Tensor zeroHost = TensorFrom(new float[51], shape);
+        using Tensor prediction = new(shape, DType.F32);
+        using Tensor initialHost = TensorFrom(initial, shape);
+        using CudaBackend cuda = new(0, PtxDir());
+        cuda.Scale(zCuda, initialHost, 1f);
+        cuda.Scale(prediction, zeroHost, 1f);
+        cuda.CfgNormalizedEulerStep(zCuda, prediction, prediction, 4f, 0.1f, eps: 0f);
+        cuda.Sync();
+        AssertExact(initial, Snapshot(zCuda), "CUDA zero-eps zero-row update");
+    }
+
+    [Fact]
     public void FusedUpdate_MatchesLegacyLuminaNormalizeNegateAndFlowStep()
     {
         TensorShape shape = new(1, 2, 3, 7);
