@@ -14,16 +14,30 @@ stable release will require. Dates are UTC.
   record-shape change for transports that set it; the SwarmUI extension's mapping was removed in the same pass.
 
 ### Added
-- **LTX-2.5 bring-up (partial)** — checkpoint-driven variant selection for the LTX-2 family, replacing the
-  hardcoded `LtxVideo2Config.V23`. `SafeTensorsLoader` now exposes a file's `__metadata__`, and the new
-  `LtxVideo2VariantDetector` resolves a config from it with tensor-key probes as the fallback (key presence wins
-  for the keyframe marker, matching ComfyUI). `LtxVideo2Transformer` gained LTX-2.5's
-  `keyframes_abs_pos_embedding` — applied to the first latent frame's tokens in all three forward paths,
-  including the captured step graph — plus a load-time cross-check that rejects a checkpoint contradicting the
-  detected variant. `LtxVideo2CheckpointConverter` routes the 2.5 diffusion video VAE into its own bucket
-  (identified whole-file by `decoder.conv_in_x_t.weight`, since both decoders share `decoder.conv_in`).
-  Text encoder (Gemma 4 12B), the `NADiffusionDecoder` itself, and distilled sampling are still to come; see
+- **LTX-2.5 support (components complete; end-to-end generation not yet wired).** Every piece is ported and
+  checked against the reference, but the LTX-2 pipeline still constructs the Gemma-3 tower and the
+  convolutional decoder, so a full 2.5 bundle is now refused with a targeted error instead of being
+  mis-decoded. Details and the two open questions are in
   [`docs/Research/LTX_2_5.md`](docs/Research/LTX_2_5.md).
+  - **Variant detection** replaces the hardcoded `LtxVideo2Config.V23`: `SafeTensorsLoader` exposes a file's
+    `__metadata__`, and `LtxVideo2VariantDetector` resolves a config from it with tensor-key probes as the
+    fallback — probing whenever the architecture config did not state a value, since repacks routinely ship
+    metadata with no LTX config, and letting key presence win for the keyframe marker as ComfyUI does.
+  - **Transformer**: `keyframes_abs_pos_embedding` applied to the first latent frame's tokens in all three
+    forward paths including the captured step graph, plus a load-time cross-check that rejects a checkpoint
+    contradicting the detected variant. The 2.3→2.5 architecture diff is only two config keys.
+  - **`IBackend.Na3d`** — 3D neighborhood attention (NATTEN window semantics: the window slides inward at
+    borders rather than truncating), verified against the reference at relL2 < 1e-6.
+  - **`LtxVideo25DiffusionDecoder`** — the new diffusion video decoder, relL2 2.3e-7 on final pixels and a real
+    decode of the shipped checkpoint. Managed-only, so it is a numerical reference rather than a fast path.
+  - **`Gemma4TextEncoder` + `Gemma4Tokenizer`** — per-layer alternating geometry (global layers carry one KV
+    head at a different head dim, no `v_proj`, and a 25% partial rotary), RMS weights stored directly rather
+    than as Gemma 3's `1+w`, and a rank-merge BPE tokenizer that is bit-exact against the HuggingFace library
+    on the real 262k vocab.
+  - **Distilled sampling**: a checkpoint's baked-in sigma schedule replaces the dynamic flow-match shift, and
+    the unconditional branch is skipped when both guidance scales are 1.
+  - **Catalog**: `ltx-2.5` and `ltx-2.5-distilled` as separate ids, because the two checkpoints are
+    byte-indistinguishable and only the id can carry which schedule was intended.
 - **Device-resident CFG+Euler for the image denoise loops** (CUDA image bring-up): Lance, Lumina2, HiDream,
   F-Lite, Kandinsky5, SD3, and Z-Image's fast path now run guidance + the Euler update in-place on device via
   `CfgEulerStep` and the new fused `CfgRenormEulerStep` (Lance renorm), `CfgNormalizedEulerStep` (Lumina2

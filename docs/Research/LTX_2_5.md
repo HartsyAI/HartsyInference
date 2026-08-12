@@ -417,6 +417,48 @@ Restoring the full harness needs either a diffusers build carrying the 2.5 flags
 package installed; neither is present, and `ltx-core` pulls Transformers 5.8+ and CUDA 13.2 wheels that do not
 fit the remaining disk.
 
+## Gemma 4 encoder — settled questions and two live divergences
+
+**RMS-norm storage: DIRECT, not `1 + w`** (the opposite of Gemma 3). Settled by byte-ranging real tensors out
+of the shipped checkpoint: `layers.0.self_attn.q_norm` is a uniform `+1.02344` across all 256 entries — under
+the `1+w` convention it would store `0.02344` — `layers.5.self_attn.k_norm` is a uniform `+0.06055`,
+`model.norm` has mean `+20.13` and max `+600`, and `input_layernorm` spans `[-143, +193]`.
+
+**Tokenizer: rank-merge BPE with byte fallback**, `model.type == "BPE"`, 514,906 merges, `ignore_merges: false`,
+a normalizer rewriting `" "` to `U+2581`, and a `Split(" ")` pre-tokenizer that is vestigial because
+normalization has already consumed every space. Despite the family name it is *not* SentencePiece-scored. That
+rules out all three existing cores — `HfTokenizerJson` and `GgufTokenizer` byte-level-remap through
+`ByteLevelCodec` first, and `SpmGgufTokenizer` merges by score rather than rank — hence a dedicated
+`Gemma4Tokenizer`, verified bit-exact against the HuggingFace `tokenizers` library on the real 262k blob.
+
+**Real `layer_scalar` values are small and load-bearing**: 0.053 at layer 0 and 0.356 at layer 5, the
+counterpart to `model.norm` reaching +600. Dropping the multiply is not a subtle error at real scale.
+
+### Divergence 1 — the 49th state's final norm (UNRESOLVED, affects the shipping Gemma-3 path)
+
+`LlamaStyleEncoder.EncodeMultiLayer` — the method the LTX-2 pipeline calls — contains **no `HasFinalNorm`
+branch and no `RmsNorm` call at all**, while `LlamaStyleEncoderConfig.Gemma3_12B` sets `HasFinalNorm = true`
+and `RmsNormScalePlusOne = true`. So `model.norm.weight` is loaded, `1+w`-adjusted, GPU-uploaded, and never
+used on that path. `Encode` (:179) and `EncodeEmbedsMrope` (:266) *do* apply it — only the all-layers harvest
+skips it. The connector's own `PerTokenRmsNormMasked` does not wash the difference out, since
+`RMS(RMS(x)·w) ≠ RMS(x)` for non-uniform `w`.
+
+Whether that is a bug depends on what the reference does for the all-layers harvest, and the two readings of
+ComfyUI available here disagree — one says states 0..47 raw with state 48 normed, the other that the final norm
+is applied to every intermediate. **Deliberately not changed**: the LTX-2.3 Gemma-3 path is recorded as
+real-weight verified (coherent video plus a decoded 48 kHz waveform), and silently altering verified shipping
+behaviour on an unverified inference is the wrong trade. `Gemma4TextEncoder` defaults to the reference
+behaviour and exposes `Gemma4TextEncoderConfig.ApplyFinalNormToLastState` to switch it. Resolve by dumping the
+reference's 49 states once and diffing, before either path is trusted at full precision.
+
+### Divergence 2 — padding side
+
+ComfyUI left-pads and carries an attention mask, but its position ids are mask-blind, so a real token sits at
+RoPE position `1024-n .. 1023`. This engine right-pads with a causal-only mask, putting the same token at
+`0 .. n-1`. `Gemma4Tokenizer.BuildConditioningSequence` right-pads to match the engine. This is a genuine
+numerical difference from upstream on every prompt shorter than the 1024-token conditioning length, not a
+rounding artefact.
+
 ## Open questions
 
 - **RMS-norm weight storage convention.** ComfyUI's Gemma 4 path uses `rms_norm_add=False` (weights applied

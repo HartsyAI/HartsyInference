@@ -125,6 +125,24 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             LtxVideo2TextConnectors connectors = new LtxVideo2TextConnectors(config);
             connectors.LoadWeights(conv.Connectors);
 
+            // The 2.5 diffusion decoder is ported and parity-checked (LtxVideo25DiffusionDecoder) but not yet on
+            // this pipeline's decode path, and its weights share module names with the conv decoder — loading one
+            // against the other fails deep inside with an unhelpful missing-key error. Say so here instead.
+            if (conv.VaeDiffusionDecoder.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"LTX-2 checkpoint '{context.CheckpointPath}' carries the LTX-2.5 diffusion video VAE "
+                    + $"({conv.VaeDiffusionDecoder.Count} decoder tensors), which this pipeline does not decode with yet. "
+                    + "Supply the convolutional VAE instead (ltx-2.5-video-vae-conv-bf16.safetensors).");
+            }
+            if (conv.TextEncoder.ContainsKey("model.layers.0.layer_scalar"))
+            {
+                throw new InvalidOperationException(
+                    $"LTX-2 checkpoint '{context.CheckpointPath}' bundles a Gemma 4 text tower, which this pipeline "
+                    + "does not encode with yet — it still constructs the Gemma-3-12B tower. Supply a Gemma 3 encoder, "
+                    + "or wait for the Gemma 4 path to be wired.");
+            }
+
             (float[]? videoMean, float[]? videoStd) = ReadStats(conv.Vae, config.InChannels);
             LtxVideo2VaeDecoder vae = new LtxVideo2VaeDecoder(latentsMean: videoMean, latentsStd: videoStd);
             vae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.Vae, DType.F32));
