@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Cuda;
@@ -7,11 +8,7 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>Equivalence of <see cref="IBackend.QkvSplitNormHeadMajor"/> with the composed
-/// <see cref="IBackend.QkvSplitNorm"/> + <see cref="IBackend.Permute0213"/> it replaces. Both do the same
-/// arithmetic in the same order — only the store address differs — so the assertion is BIT-EXACT (any
-/// difference is an addressing bug, not rounding). Covers the CPU host impl (Unit tier) and the CUDA F32 +
-/// F16 kernels; the GPU cases skip cleanly when CUDA is unavailable.</summary>
+/// <summary>Checks QKV split/norm layouts and numerics against an independent scalar RMSNorm oracle.</summary>
 [Collection("CudaSerial")]
 public sealed unsafe class QkvSplitNormHeadMajorTests
 {
@@ -69,11 +66,115 @@ public sealed unsafe class QkvSplitNormHeadMajorTests
         Assert.True(mismatches == 0, $"{name}: {mismatches} of {n} elements differ, first at index {firstBad}");
     }
 
+    private static float ReadValue(Tensor tensor, long index)
+    {
+        return tensor.DType == DType.F32
+            ? ((float*)tensor.DataPointer)[index]
+            : (float)((Half*)tensor.DataPointer)[index];
+    }
+
+    private static void WriteValue(Tensor tensor, long index, float value)
+    {
+        if (tensor.DType == DType.F32)
+            ((float*)tensor.DataPointer)[index] = value;
+        else
+            ((Half*)tensor.DataPointer)[index] = (Half)value;
+    }
+
+    private static void FillOracle(
+        Tensor q,
+        Tensor k,
+        Tensor v,
+        Tensor qkv,
+        Tensor qWeight,
+        Tensor kWeight,
+        int batch,
+        int heads,
+        int seq,
+        int headDim,
+        bool headMajor,
+        float eps)
+    {
+        int width = heads * headDim;
+        int tokens = batch * seq;
+        float* qWeightPointer = (float*)qWeight.DataPointer;
+        float* kWeightPointer = (float*)kWeight.DataPointer;
+        for (int token = 0; token < tokens; token++)
+        {
+            int batchIndex = token / seq;
+            int sequenceIndex = token % seq;
+            long inputTokenOffset = (long)token * 3 * width;
+            for (int head = 0; head < heads; head++)
+            {
+                long qInputOffset = inputTokenOffset + (long)head * headDim;
+                long kInputOffset = inputTokenOffset + width + (long)head * headDim;
+                long vInputOffset = inputTokenOffset + 2L * width + (long)head * headDim;
+                double qSquares = 0.0;
+                double kSquares = 0.0;
+                for (int d = 0; d < headDim; d++)
+                {
+                    double qValue = ReadValue(qkv, qInputOffset + d);
+                    double kValue = ReadValue(qkv, kInputOffset + d);
+                    qSquares += qValue * qValue;
+                    kSquares += kValue * kValue;
+                }
+
+                float qInverseRms = (float)(1.0 / Math.Sqrt(qSquares / headDim + eps));
+                float kInverseRms = (float)(1.0 / Math.Sqrt(kSquares / headDim + eps));
+                long outputOffset = headMajor
+                    ? ((long)batchIndex * heads * seq + (long)head * seq + sequenceIndex) * headDim
+                    : (long)token * width + (long)head * headDim;
+                for (int d = 0; d < headDim; d++)
+                {
+                    WriteValue(q, outputOffset + d, ReadValue(qkv, qInputOffset + d) * qInverseRms * qWeightPointer[d]);
+                    WriteValue(k, outputOffset + d, ReadValue(qkv, kInputOffset + d) * kInverseRms * kWeightPointer[d]);
+                    WriteValue(v, outputOffset + d, ReadValue(qkv, vInputOffset + d));
+                }
+            }
+        }
+    }
+
+    private void AssertClose(Tensor expected, Tensor actual, float absoluteTolerance, float relativeTolerance, string name)
+    {
+        Assert.Equal(expected.DType, actual.DType);
+        Assert.Equal(expected.ElementCount, actual.ElementCount);
+        long mismatches = 0;
+        long firstBad = -1;
+        float largestError = 0f;
+        float firstExpected = 0f;
+        float firstActual = 0f;
+        for (long i = 0; i < expected.ElementCount; i++)
+        {
+            float expectedValue = ReadValue(expected, i);
+            float actualValue = ReadValue(actual, i);
+            float error = MathF.Abs(expectedValue - actualValue);
+            float tolerance = absoluteTolerance + relativeTolerance * MathF.Abs(expectedValue);
+            if (!float.IsFinite(actualValue) || error > tolerance)
+            {
+                mismatches++;
+                if (firstBad < 0)
+                {
+                    firstBad = i;
+                    firstExpected = expectedValue;
+                    firstActual = actualValue;
+                }
+            }
+            largestError = MathF.Max(largestError, error);
+        }
+
+        _output.WriteLine($"{name}: max absolute error {largestError:G9}");
+        Assert.True(mismatches == 0,
+            $"{name}: {mismatches} values exceed tolerance, first at index {firstBad}: expected {firstExpected:G9}, actual {firstActual:G9}");
+    }
+
     /// <summary>Shapes deliberately have batch &gt; 1 and heads != seq so a transposed store cannot hide.</summary>
     public static TheoryData<int, int, int, int> Shapes() => new()
     {
+        { 2, 3, 5, 17 },
         { 2, 3, 5, 64 },
+        { 2, 5, 7, 96 },
         { 1, 4, 7, 128 },
+        { 1, 2, 3, 257 },
         { 3, 8, 16, 64 },
     };
 
@@ -127,6 +228,51 @@ public sealed unsafe class QkvSplitNormHeadMajorTests
         RunCudaCase(b, heads, seq, headDim, DType.F16);
     }
 
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void Cuda_RejectsInvalidDtypesAndShapesBeforeLaunch()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        using Tensor qkv = Random(new TensorShape(2, 3 * 3 * 64), seed: 71);
+        using Tensor qWeight = Random(new TensorShape(64), seed: 72);
+        using Tensor kWeight = Random(new TensorShape(64), seed: 73);
+        using Tensor q = new Tensor(new TensorShape(2, 3, 64), DType.F32);
+        using Tensor k = new Tensor(q.Shape, DType.F32);
+        using Tensor v = new Tensor(q.Shape, DType.F32);
+        using Tensor qF16 = new Tensor(q.Shape, DType.F16);
+        using Tensor malformedQkv = Random(new TensorShape(2, 3 * 3 * 64 - 1), seed: 74);
+        using Tensor indivisibleWidthQkv = Random(new TensorShape(2, 3 * 193), seed: 75);
+        using Tensor wrongOutput = new Tensor(new TensorShape(2, 2, 64), DType.F32);
+        using Tensor wrongWeightDtype = RandomF16(new TensorShape(64), seed: 76);
+
+        Assert.Throws<NotSupportedException>(() => cuda.QkvSplitNorm(qF16, k, v, qkv, qWeight, kWeight, 1e-6f));
+        Assert.Throws<HartsyInferenceException>(() => cuda.QkvSplitNorm(q, k, v, malformedQkv, qWeight, kWeight, 1e-6f));
+        Assert.Throws<HartsyInferenceException>(() => cuda.QkvSplitNorm(q, k, v, indivisibleWidthQkv, qWeight, kWeight, 1e-6f));
+        Assert.Throws<HartsyInferenceException>(() => cuda.QkvSplitNorm(wrongOutput, k, v, qkv, qWeight, kWeight, 1e-6f));
+        Assert.Throws<NotSupportedException>(() => cuda.QkvSplitNorm(q, k, v, qkv, wrongWeightDtype, kWeight, 1e-6f));
+        Assert.Throws<HartsyInferenceException>(() => cuda.QkvSplitNorm(q, k, v, qkv, qWeight, kWeight, 0f));
+    }
+
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void Cuda_RejectsInvalidHeadMajorLayoutBeforeLaunch()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        using Tensor qkv = Random(new TensorShape(10, 3 * 3 * 64), seed: 81);
+        using Tensor qWeight = Random(new TensorShape(64), seed: 82);
+        using Tensor kWeight = Random(new TensorShape(64), seed: 83);
+        using Tensor q = new Tensor(new TensorShape(2, 5, 3, 64), DType.F32);
+        using Tensor k = new Tensor(q.Shape, DType.F32);
+        using Tensor v = new Tensor(q.Shape, DType.F32);
+
+        Assert.Throws<HartsyInferenceException>(() =>
+            cuda.QkvSplitNormHeadMajor(q, k, v, qkv, qWeight, kWeight, 1e-6f));
+    }
+
     private void RunCudaCase(int b, int heads, int seq, int headDim, DType dtype)
     {
         int w = heads * headDim;
@@ -147,6 +293,16 @@ public sealed unsafe class QkvSplitNormHeadMajorTests
         using Tensor qHm = new Tensor(headMajor, dtype);
         using Tensor kHm = new Tensor(headMajor, dtype);
         using Tensor vHm = new Tensor(headMajor, dtype);
+        using Tensor qTokenOracle = new Tensor(tokenMajor, dtype);
+        using Tensor kTokenOracle = new Tensor(tokenMajor, dtype);
+        using Tensor vTokenOracle = new Tensor(tokenMajor, dtype);
+        using Tensor qHeadOracle = new Tensor(headMajor, dtype);
+        using Tensor kHeadOracle = new Tensor(headMajor, dtype);
+        using Tensor vHeadOracle = new Tensor(headMajor, dtype);
+        FillOracle(qTokenOracle, kTokenOracle, vTokenOracle, qkv, qW, kW, b, heads, seq, headDim,
+            headMajor: false, eps: 1e-6f);
+        FillOracle(qHeadOracle, kHeadOracle, vHeadOracle, qkv, qW, kW, b, heads, seq, headDim,
+            headMajor: true, eps: 1e-6f);
 
         using (CudaBackend cuda = new CudaBackend(0, PtxDir()))
         {
@@ -157,7 +313,7 @@ public sealed unsafe class QkvSplitNormHeadMajorTests
             gpu.Permute0213(vRef, vTok, seq, heads, headDim);
             gpu.QkvSplitNormHeadMajor(qHm, kHm, vHm, qkv, qW, kW, 1e-6f);
             cuda.Sync();
-            foreach (Tensor t in new[] { qRef, kRef, vRef, qHm, kHm, vHm })
+            foreach (Tensor t in new[] { qTok, kTok, vTok, qRef, kRef, vRef, qHm, kHm, vHm })
                 _ = *(byte*)t.DataPointer;   // forces the lazy D2H while the context is alive
         }
 
@@ -165,5 +321,12 @@ public sealed unsafe class QkvSplitNormHeadMajorTests
         AssertBitExact(qRef, qHm, $"{tag} q");
         AssertBitExact(kRef, kHm, $"{tag} k");
         AssertBitExact(vRef, vHm, $"{tag} v");
+        float tolerance = dtype == DType.F32 ? 1e-5f : 1e-3f;
+        AssertClose(qTokenOracle, qTok, tolerance, tolerance, $"{tag} token-major q oracle");
+        AssertClose(kTokenOracle, kTok, tolerance, tolerance, $"{tag} token-major k oracle");
+        AssertClose(vTokenOracle, vTok, 0f, 0f, $"{tag} token-major v oracle");
+        AssertClose(qHeadOracle, qHm, tolerance, tolerance, $"{tag} head-major q oracle");
+        AssertClose(kHeadOracle, kHm, tolerance, tolerance, $"{tag} head-major k oracle");
+        AssertClose(vHeadOracle, vHm, 0f, 0f, $"{tag} head-major v oracle");
     }
 }

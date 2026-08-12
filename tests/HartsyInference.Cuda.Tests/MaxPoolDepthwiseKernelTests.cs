@@ -43,7 +43,13 @@ public sealed unsafe class MaxPoolDepthwiseKernelTests
         long n = a.ElementCount;
         for (long i = 0; i < n; i++)
         {
-            double e = Math.Abs(ap[i] - bp[i]);
+            float av = ap[i], bv = bp[i];
+            if (!float.IsFinite(av) || !float.IsFinite(bv))
+            {
+                if (float.IsInfinity(av) && av == bv) continue;
+                return double.PositiveInfinity;
+            }
+            double e = Math.Abs(av - bv);
             if (e > maxErr) maxErr = e;
         }
         return maxErr;
@@ -84,6 +90,61 @@ public sealed unsafe class MaxPoolDepthwiseKernelTests
             _output.WriteLine($"MaxPool2D k={cfg.k} s={cfg.s} p={cfg.p}: max_err={maxErr:E3}");
             Assert.True(maxErr < 1e-5, $"MaxPool2D diverges (k={cfg.k},s={cfg.s},p={cfg.p}): {maxErr:E3}");
         }
+    }
+
+    [Fact]
+    public void MaxPool2D_DistinguishesNegativeInfinityFromEmptyPadding()
+    {
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: CUDA unavailable");
+            return;
+        }
+
+        using Tensor input = new Tensor(new TensorShape(1, 1, 1, 1), DType.F32);
+        *(float*)input.DataPointer = float.NegativeInfinity;
+        using Tensor cpuOut = new Tensor(new TensorShape(1, 1, 3, 3), DType.F32);
+        using (CpuBackend cpu = new CpuBackend())
+            ((IBackend)cpu).MaxPool2D(cpuOut, input, 1, 1, 1, 1, 1, 1);
+
+        using Tensor cudaOut = new Tensor(new TensorShape(1, 1, 3, 3), DType.F32);
+        using (CudaBackend cuda = new CudaBackend(0, PtxDir()))
+        {
+            cuda.MaxPool2D(cudaOut, input, 1, 1, 1, 1, 1, 1);
+            cuda.Sync();
+            _ = *(float*)cudaOut.DataPointer;
+        }
+
+        float* cpuValues = (float*)cpuOut.DataPointer;
+        float* cudaValues = (float*)cudaOut.DataPointer;
+        for (int i = 0; i < 9; i++)
+        {
+            if (i == 4)
+            {
+                Assert.True(float.IsNegativeInfinity(cpuValues[i]));
+                Assert.True(float.IsNegativeInfinity(cudaValues[i]));
+            }
+            else
+            {
+                Assert.Equal(0f, cpuValues[i]);
+                Assert.Equal(0f, cudaValues[i]);
+            }
+        }
+    }
+
+    [Fact]
+    public void MaxPool2D_RejectsIncorrectOutputGeometry()
+    {
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: CUDA unavailable");
+            return;
+        }
+
+        using Tensor input = new Tensor(new TensorShape(1, 2, 8, 8), DType.F32);
+        using Tensor output = new Tensor(new TensorShape(1, 2, 8, 7), DType.F32);
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        Assert.Throws<ArgumentException>(() => cuda.MaxPool2D(output, input, 3, 3, 1, 1, 1, 1));
     }
 
     [Fact]
@@ -161,7 +222,13 @@ public sealed unsafe class MaxPoolDepthwiseKernelTests
         long n = f32.ElementCount;
         for (long i = 0; i < n; i++)
         {
-            double e = Math.Abs((float)hp[i] - fp[i]);
+            float hv = (float)hp[i], fv = fp[i];
+            if (!float.IsFinite(hv) || !float.IsFinite(fv))
+            {
+                if (float.IsInfinity(hv) && hv == fv) continue;
+                return double.PositiveInfinity;
+            }
+            double e = Math.Abs(hv - fv);
             if (e > maxErr) maxErr = e;
         }
         return maxErr;

@@ -150,6 +150,20 @@ public sealed class CudaContext : IDisposable
         _threadCurrentGeneration = _generation;
     }
 
+    /// <summary>Binds an independently-retained handle for this same device primary context. Unlike
+    /// <see cref="EnsureCurrent"/>, this remains valid after this managed owner has been explicitly disposed, so a
+    /// child native resource can release its own primary-context lease without relying on finalizer order.</summary>
+    internal void EnsureRetainedCurrent(nint retainedContext)
+    {
+        if (retainedContext == 0)
+            throw new ObjectDisposedException(nameof(CudaContext), "The retained CUDA context lease was already released.");
+        if (_threadCurrentContext == retainedContext && _threadCurrentGeneration == _generation)
+            return;
+        CudaDriverApi.cuCtxSetCurrent(retainedContext).ThrowOnError();
+        _threadCurrentContext = retainedContext;
+        _threadCurrentGeneration = _generation;
+    }
+
     /// <summary>Synchronizes the entire context (all streams).</summary>
     public void Synchronize()
     {
@@ -244,20 +258,27 @@ public sealed class CudaContext : IDisposable
 
     public void Dispose()
     {
-        ReleasePrimaryContext();
-        GC.SuppressFinalize(this);
+        try
+        {
+            ReleasePrimaryContext(throwOnError: true);
+        }
+        finally
+        {
+            GC.SuppressFinalize(this);
+        }
     }
 
     ~CudaContext()
     {
-        ReleasePrimaryContext();
+        try { ReleasePrimaryContext(throwOnError: false); }
+        catch { /* Finalizers must never surface native-loader or driver failures. */ }
     }
 
     /// <summary>Releases the device's primary context (decrements the refcount). When
     /// the count hits zero, the driver tears the context down. Safe to call from the
     /// finalizer thread because primary-context release isn't thread-bound the way
     /// <c>cuCtxDestroy</c> would be.</summary>
-    private void ReleasePrimaryContext()
+    private void ReleasePrimaryContext(bool throwOnError)
     {
         nint ctx = Interlocked.Exchange(ref _context, 0);
         if (ctx != 0)
@@ -272,7 +293,8 @@ public sealed class CudaContext : IDisposable
                 _threadCurrentContext = 0;
                 _threadCurrentGeneration = 0;
             }
-            CudaDriverApi.cuDevicePrimaryCtxRelease(_deviceHandle);
+            int result = CudaDriverApi.cuDevicePrimaryCtxRelease(_deviceHandle);
+            if (throwOnError) result.ThrowOnError();
         }
     }
 }

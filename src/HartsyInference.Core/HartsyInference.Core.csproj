@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.Cuda" />
+    <InternalsVisibleTo Include="HartsyInference.Cpu" />
     <InternalsVisibleTo Include="HartsyInference.Vulkan" />
     <InternalsVisibleTo Include="HartsyInference.ModelAssets" />
     <InternalsVisibleTo Include="HartsyInference.Core.Tests" />

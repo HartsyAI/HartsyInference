@@ -7,6 +7,10 @@ namespace HartsyInference.Cuda;
 public sealed class CudaModule : IDisposable
 {
     private nint _module;
+    private static long _liveHandleCount;
+
+    /// <summary>Number of module handles currently owned by managed wrappers. Test-only lifecycle diagnostic.</summary>
+    internal static long LiveHandleCountForTests => Interlocked.Read(ref _liveHandleCount);
 
     /// <summary>The underlying CUDA module handle.</summary>
     public nint Handle
@@ -23,6 +27,7 @@ public sealed class CudaModule : IDisposable
     private CudaModule(nint module)
     {
         _module = module;
+        if (module != 0) Interlocked.Increment(ref _liveHandleCount);
     }
 
     /// <summary>Loads a PTX file from disk and JIT-compiles it for the current device.</summary>
@@ -126,20 +131,38 @@ public sealed class CudaModule : IDisposable
 
     public void Dispose()
     {
-        nint m = Interlocked.Exchange(ref _module, 0);
-        if (m != 0)
+        try
         {
-            CudaDriverApi.cuModuleUnload(m);
+            Release(throwOnError: true);
         }
-        GC.SuppressFinalize(this);
+        finally
+        {
+            GC.SuppressFinalize(this);
+        }
     }
 
     ~CudaModule()
     {
+        try { Release(throwOnError: false); }
+        catch { /* Finalizers must never surface native-loader or driver failures. */ }
+    }
+
+    /// <summary>Releases an adopted module from an owning finalizer without allowing a native error to escape.</summary>
+    internal void DisposeNoThrow()
+    {
+        try { Release(throwOnError: false); }
+        catch { /* An owning finalizer cannot safely report a native teardown failure. */ }
+        GC.SuppressFinalize(this);
+    }
+
+    private void Release(bool throwOnError)
+    {
         nint m = Interlocked.Exchange(ref _module, 0);
         if (m != 0)
         {
-            CudaDriverApi.cuModuleUnload(m);
+            Interlocked.Decrement(ref _liveHandleCount);
+            int result = CudaDriverApi.cuModuleUnload(m);
+            if (throwOnError) result.ThrowOnError();
         }
     }
 }

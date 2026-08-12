@@ -316,30 +316,45 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
             float t = timesteps[i];
             bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
 
-            Tensor noisePred;
             if (useCfg)
             {
-                Tensor condNoise = RunForward(latent, t, condT5, condLlama, condPooled, cacheEligible ? stepCacheCond : null);
-                // Bound the async queue to one forward's transients: with the blocks now fully GPU-resident
-                // (no implicit host-sync throttling), two queued 17B F32-activation forwards overflow the
-                // ~7 GB left beside the resident fp8 weights (measured step-1 OOM at 1024²-CFG). One forward
-                // fits; serialize the pair.
-                Backend.Sync();
-                Tensor uncondNoise = RunForward(latent, t, uncondT5!, uncondLlama!, uncondPooled!, cacheEligible ? stepCacheUncond : null);
-                noisePred = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
-                condNoise.Dispose();
-                uncondNoise.Dispose();
+                Tensor? condNoise = null;
+                Tensor? uncondNoise = null;
+                try
+                {
+                    condNoise = RunForward(
+                        latent, t, condT5, condLlama, condPooled,
+                        cacheEligible ? stepCacheCond : null);
+                    // Bound the async queue to one forward's transients: with the blocks now fully GPU-resident
+                    // (no implicit host-sync throttling), two queued 17B F32-activation forwards overflow the
+                    // ~7 GB left beside the resident fp8 weights (measured step-1 OOM at 1024²-CFG). One forward
+                    // fits; serialize the pair.
+                    Backend.Sync();
+                    uncondNoise = RunForward(
+                        latent, t, uncondT5!, uncondLlama!, uncondPooled!,
+                        cacheEligible ? stepCacheUncond : null);
+                    Backend.CfgEulerStep(latent, condNoise, uncondNoise, cfgScale, scheduler.Dt(i));
+                }
+                finally
+                {
+                    uncondNoise?.Dispose();
+                    condNoise?.Dispose();
+                }
             }
             else
             {
-                noisePred = RunForward(latent, t, condT5, condLlama, condPooled, cacheEligible ? stepCacheCond : null);
+                Tensor noisePred = RunForward(
+                    latent, t, condT5, condLlama, condPooled,
+                    cacheEligible ? stepCacheCond : null);
+                try
+                {
+                    Backend.CfgEulerStep(latent, noisePred, noisePred, 1.0f, scheduler.Dt(i));
+                }
+                finally
+                {
+                    noisePred.Dispose();
+                }
             }
-
-            Tensor newLatent = new Tensor(latentShape, DType.F32);
-            scheduler.Step(newLatent, noisePred, latent, i);
-            noisePred.Dispose();
-            latent.Dispose();
-            latent = newLatent;
 
             // Masked-inpaint blend: hold the unmasked region on the source's own flow-matching trajectory by
             // re-noising the source latent at the next step's sigma; the final step blends the clean source.

@@ -322,6 +322,32 @@ public sealed unsafe class MultiBackendIsolationTests
         }
     }
 
+    /// <summary>Pin/unpin must bind the receiver's transfer state even when another backend was the last one used
+    /// on the thread; otherwise sharded exception cleanup can leave the primary backend's carried latent pinned.</summary>
+    [Fact]
+    public void PinAndUnpin_RebindOwningBackendAfterAnotherBackendWasCurrent()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        using Tensor host = RandomF32(new TensorShape(257), 291);
+        using Tensor carried = new(new TensorShape(257), DType.F32);
+        using Tensor other = new(new TensorShape(17), DType.F32);
+        using CudaBackend backendA = new(0, PtxDir());
+        using CudaBackend backendB = new(0, PtxDir());
+
+        backendA.Scale(carried, host, 1f);
+        backendA.PinActivation(carried);
+        Assert.Contains(carried, backendA.TransferState.PinnedActivations);
+
+        // Simulate a sharded forward/exception leaving backend B as the thread's ambient transfer state.
+        backendB.Fill(other, 1f);
+        backendA.UnpinActivation(carried);
+
+        Assert.DoesNotContain(carried, backendA.TransferState.PinnedActivations);
+        backendA.FreeActivations(trimPool: false);
+        Assert.False(backendA.TransferState.ActivationCache.ContainsKey(carried));
+    }
+
     /// <summary>One tensor carrying activation bindings from TWO backends must keep BOTH: with the old single-slot
     /// callbacks, backend B re-binding a tensor backend A had cached silently overwrote A's dispose hook, so A's
     /// device buffer (and cache entry) leaked forever. Multi-slot keyed bindings free both on Dispose.</summary>

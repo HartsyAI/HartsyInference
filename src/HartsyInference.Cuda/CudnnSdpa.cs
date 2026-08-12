@@ -16,27 +16,41 @@ namespace HartsyInference.Cuda;
 /// S/Ss/P are virtual so the engine keeps them in registers/shared memory.
 ///
 /// Execution plans are expensive to build (heuristics + JIT) and cheap to run, so they are cached by
-/// shape. Instances are created per <see cref="CudaBackend"/> (one cuDNN handle bound to the compute stream).</summary>
+/// shape, exact scale bits, and bias layout. Instances are created per <see cref="CudaBackend"/> (one cuDNN
+/// handle bound to the compute stream).</summary>
 internal sealed class CudnnSdpa : IDisposable
 {
     private readonly nint _handle;
-    private readonly ConcurrentDictionary<long, Plan> _plans = new();
+    private readonly ConcurrentDictionary<PlanKey, Lazy<Plan>> _plans = new();
     private bool _disposed;
+
+    /// <summary>Exact identity of a cached execution plan and its immutable device scale scalar.</summary>
+    internal readonly record struct PlanKey(
+        long B, long H, long Sq, long Sk, long D, int ScaleBits, bool HasBias, long BiasB);
 
     private sealed class Plan
     {
         public nint Execution;         // execution-plan descriptor (kept alive; reused every call)
         public ulong Workspace;        // device workspace buffer (0 for the fused engine)
         public long WorkspaceBytes;
-        public ulong ScaleBuf;         // 4-byte device scalar holding attn_scale (constant per shape)
+        public ulong ScaleBuf;         // 4-byte device scalar holding the scale encoded in this plan's key
     }
 
     public CudnnSdpa(nint stream)
     {
-        int st = cudnnCreate(out _handle);
+        int st = cudnnCreate(out nint handle);
         if (st != CUDNN_STATUS_SUCCESS)
             throw new InvalidOperationException($"cudnnCreate failed: {ErrorString(st)}");
-        Check(cudnnSetStream(_handle, stream), "cudnnSetStream");
+        try
+        {
+            Check(cudnnSetStream(handle, stream), "cudnnSetStream");
+        }
+        catch
+        {
+            cudnnDestroy(handle);
+            throw;
+        }
+        _handle = handle;
     }
 
     /// <summary>D values the fused engine may support (head dim): multiples of 8 in [64, 128] (the documented
@@ -56,9 +70,26 @@ internal sealed class CudnnSdpa : IDisposable
                                long b, long h, long sq, long sk, long d, float scale,
                                ulong biasF32 = 0, long biasB = 1)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         bool hasBias = biasF32 != 0;
-        Plan plan = _plans.GetOrAdd(ShapeKey(b, h, sq, sk, d, hasBias, biasB),
-                                    _ => BuildPlan(b, h, sq, sk, d, scale, hasBias, biasB));
+        PlanKey key = new PlanKey(
+            b, h, sq, sk, d, BitConverter.SingleToInt32Bits(scale), hasBias, biasB);
+        Lazy<Plan> candidate = new(
+            () => BuildPlan(b, h, sq, sk, d, scale, hasBias, biasB),
+            LazyThreadSafetyMode.ExecutionAndPublication);
+        Lazy<Plan> cached = _plans.GetOrAdd(key, candidate);
+        Plan plan;
+        try
+        {
+            plan = cached.Value;
+        }
+        catch
+        {
+            // Failed plans must be retryable after transient allocation pressure clears.
+            if (_plans.TryGetValue(key, out Lazy<Plan>? current) && ReferenceEquals(current, cached))
+                _plans.TryRemove(key, out _);
+            throw;
+        }
 
         // Variant pack: bind the actual device pointers to the graph's tensor UIDs, then execute.
         nint vp = 0;
@@ -87,9 +118,6 @@ internal sealed class CudnnSdpa : IDisposable
     // ── graph tensor UIDs ───────────────────────────────────────────────
     private const long UidQ = 1, UidK = 2, UidV = 3, UidO = 4, UidScale = 5, UidBias = 6;
     private const long UidS = 100, UidSS = 101, UidP = 102, UidSB = 103;
-
-    private static long ShapeKey(long b, long h, long sq, long sk, long d, bool bias, long biasB)
-        => ((((b * 97 + h) * 100003 + sq) * 100003 + sk) * 137 + d) * 4 + (bias ? 1 : 0) + (biasB > 1 ? 2 : 0);
 
     private unsafe Plan BuildPlan(long b, long h, long sq, long sk, long d, float scale, bool hasBias, long biasB)
     {
@@ -154,11 +182,22 @@ internal sealed class CudnnSdpa : IDisposable
             {
                 Execution = exec,
                 WorkspaceBytes = wsBytes,
-                Workspace = wsBytes > 0 ? CudaMemory.Allocate((nuint)wsBytes) : 0,
-                ScaleBuf = CudaMemory.Allocate(sizeof(float)),
             };
-            CudaMemory.CopyHostToDevice(plan.ScaleBuf, &scale, sizeof(float));
-            return plan;
+            try
+            {
+                // Plans outlive individual stream operations and DestroyPlan releases these buffers with
+                // synchronous cuMemFree. Keep the allocator pair symmetric: stream-pool allocations must be
+                // paired with FreeAsync, while session-persistent plans use AllocatePersistent + Free.
+                plan.Workspace = wsBytes > 0 ? CudaMemory.AllocatePersistent((nuint)wsBytes) : 0;
+                plan.ScaleBuf = CudaMemory.AllocatePersistent(sizeof(float));
+                CudaMemory.CopyHostToDevice(plan.ScaleBuf, &scale, sizeof(float));
+                return plan;
+            }
+            catch
+            {
+                DestroyPlan(plan);
+                throw;
+            }
         }
         finally
         {
@@ -258,7 +297,17 @@ internal sealed class CudnnSdpa : IDisposable
             return (0, 0, false);
         }
         long ws = 0;
-        Check(cudnnBackendGetAttribute(p, CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, CUDNN_TYPE_INT64, 1, out _, &ws), "workspace size get");
+        try
+        {
+            Check(cudnnBackendGetAttribute(
+                p, CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, CUDNN_TYPE_INT64, 1, out _, &ws),
+                "workspace size get");
+        }
+        catch
+        {
+            cudnnBackendDestroyDescriptor(p);
+            throw;
+        }
         return (p, ws, true);
     }
 
@@ -344,17 +393,64 @@ internal sealed class CudnnSdpa : IDisposable
             throw new CudnnStatusException(st, what);
     }
 
+    private static Exception? DestroyPlan(Plan plan)
+    {
+        Exception? firstError = null;
+        if (plan.ScaleBuf != 0)
+        {
+            try { CudaMemory.Free(plan.ScaleBuf); }
+            catch (Exception error) { firstError ??= error; }
+        }
+        if (plan.Workspace != 0)
+        {
+            try { CudaMemory.Free(plan.Workspace); }
+            catch (Exception error) { firstError ??= error; }
+        }
+        if (plan.Execution != 0)
+        {
+            try
+            {
+                int status = cudnnBackendDestroyDescriptor(plan.Execution);
+                if (status != CUDNN_STATUS_SUCCESS)
+                    throw new CudnnStatusException(status, "execution plan destroy");
+            }
+            catch (Exception error) { firstError ??= error; }
+        }
+        return firstError;
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
-        foreach (Plan p in _plans.Values)
+        Exception? firstError = null;
+        foreach (Lazy<Plan> cached in _plans.Values)
         {
-            if (p.Execution != 0) cudnnBackendDestroyDescriptor(p.Execution);
-            if (p.Workspace != 0) CudaMemory.Free(p.Workspace);
-            if (p.ScaleBuf != 0) CudaMemory.Free(p.ScaleBuf);
+            if (!cached.IsValueCreated) continue;
+            try
+            {
+                Exception? planError = DestroyPlan(cached.Value);
+                firstError ??= planError;
+            }
+            catch (Exception error)
+            {
+                // A faulted Lazy should normally have been removed by Execute. It must not stop teardown of the
+                // other independently owned plans or the cuDNN handle if it is still present here during a race.
+                firstError ??= error;
+            }
         }
         _plans.Clear();
-        if (_handle != 0) cudnnDestroy(_handle);
+        if (_handle != 0)
+        {
+            try
+            {
+                int status = cudnnDestroy(_handle);
+                if (status != CUDNN_STATUS_SUCCESS)
+                    throw new CudnnStatusException(status, "cudnnDestroy");
+            }
+            catch (Exception error) { firstError ??= error; }
+        }
+        if (firstError is not null)
+            throw new InvalidOperationException("One or more cuDNN SDPA resources failed to release.", firstError);
     }
 }

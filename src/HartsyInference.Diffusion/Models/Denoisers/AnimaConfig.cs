@@ -77,7 +77,7 @@ public sealed record AnimaConfig
     /// <summary>RoPE base period before NTK scaling.</summary>
     public float RopeTheta { get; init; } = 10000.0f;
 
-    /// <summary>Whether to concatenate a constant-1 padding-mask channel to the latent before patch embed.
+    /// <summary>Whether to concatenate a constant-zero padding-mask channel to the latent before patch embed.
     /// True in Anima (the <c>x_embedder.proj.1.weight</c> expects 17 input channels = 16 latent + 1 mask).</summary>
     public bool ConcatPaddingMask { get; init; } = true;
 

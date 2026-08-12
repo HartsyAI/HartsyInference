@@ -44,7 +44,10 @@ public sealed unsafe class DeformableAttentionKernelTests
         long n = a.ElementCount;
         for (long i = 0; i < n; i++)
         {
-            double e = Math.Abs(ap[i] - bp[i]);
+            float av = ap[i], bv = bp[i];
+            if (!float.IsFinite(av) || !float.IsFinite(bv))
+                return double.PositiveInfinity;
+            double e = Math.Abs(av - bv);
             if (e > maxErr) maxErr = e;
         }
         return maxErr;
@@ -108,10 +111,72 @@ public sealed unsafe class DeformableAttentionKernelTests
         RunParity(coords, refQueryStride: coords, refLevelStride: 0, refSeed: 202, refLen: nq * coords);
     }
 
+    [Fact]
+    public void DeformableAttention_VeryNegativeFiniteLogit_RemainsFinite()
+    {
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: CUDA unavailable");
+            return;
+        }
+
+        using Tensor value = new Tensor(new TensorShape(1, 1, 1), DType.F32);
+        using Tensor offsets = new Tensor(new TensorShape(1, 1, 2), DType.F32);
+        using Tensor logits = new Tensor(new TensorShape(1, 1, 1), DType.F32);
+        using Tensor refs = new Tensor(new TensorShape(2), DType.F32);
+        *(float*)value.DataPointer = 3.25f;
+        *(float*)logits.DataPointer = -1e35f;
+        ((float*)refs.DataPointer)[0] = 0.5f;
+        ((float*)refs.DataPointer)[1] = 0.5f;
+        int[] shapes = { 1, 1 };
+        int[] starts = { 0 };
+
+        using Tensor output = new Tensor(new TensorShape(1, 1, 1), DType.F32);
+        using (CudaBackend cuda = new CudaBackend(0, PtxDir()))
+        {
+            cuda.DeformableAttention(output, value, offsets, logits, refs, shapes, starts,
+                heads: 1, levels: 1, points: 1, coords: 2, refQueryStride: 2, refLevelStride: 0);
+            cuda.Sync();
+            _ = *(float*)output.DataPointer;
+        }
+
+        float actual = *(float*)output.DataPointer;
+        Assert.True(float.IsFinite(actual));
+        Assert.Equal(3.25f, actual, 5);
+    }
+
+    [Fact]
+    public void DeformableAttention_RejectsInvalidContractsBeforeLaunch()
+    {
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: CUDA unavailable");
+            return;
+        }
+
+        using Tensor value = new Tensor(new TensorShape(1, 4, 8), DType.F32);
+        using Tensor offsets = new Tensor(new TensorShape(1, 2, 8), DType.F32);
+        using Tensor logits = new Tensor(new TensorShape(1, 2, 4), DType.F32);
+        using Tensor refs = new Tensor(new TensorShape(4), DType.F32);
+        using Tensor output = new Tensor(new TensorShape(1, 2, 8), DType.F32);
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+
+        Assert.Throws<ArgumentException>(() => cuda.DeformableAttention(
+            output, value, offsets, logits, refs, new[] { 2, 2 }, new[] { 0 },
+            heads: 0, levels: 1, points: 1, coords: 2, refQueryStride: 2, refLevelStride: 0));
+        Assert.Throws<ArgumentException>(() => cuda.DeformableAttention(
+            output, value, offsets, logits, refs, new[] { 2, 2 }, new[] { 1 },
+            heads: 4, levels: 1, points: 1, coords: 2, refQueryStride: 2, refLevelStride: 0));
+        Assert.Throws<ArgumentException>(() => cuda.DeformableAttention(
+            output, value, offsets, logits, refs, new[] { 2, 2 }, new[] { 0 },
+            heads: 4, levels: 1, points: 1, coords: 2, refQueryStride: 1, refLevelStride: 0));
+    }
+
     /// <summary>Grounding-DINO encoder-scale workload (17821 queries over the real 4-level pyramid) — the
     /// host loop that took ≈11 min/6-layer-encoder on CPU. Confirms GPU parity at scale and logs the
     /// single-op speedup so the win is on the record.</summary>
     [Fact]
+    [Trait("Category", "PerformanceGate")]
     public void DeformableAttention_EncoderScale_MatchesCpu_AndIsFaster()
     {
         if (!CudaContext.IsAvailable())
@@ -149,18 +214,28 @@ public sealed unsafe class DeformableAttentionKernelTests
             cuda.DeformableAttention(cudaOut, value, sampOff, attn, refPoints, shapes, levelStart,
                 heads, levels, points, coords, levels * coords, coords);
             cuda.Sync();
-            System.Diagnostics.Stopwatch swGpu = System.Diagnostics.Stopwatch.StartNew();
-            cuda.DeformableAttention(cudaOut, value, sampOff, attn, refPoints, shapes, levelStart,
-                heads, levels, points, coords, levels * coords, coords);
-            cuda.Sync();
-            swGpu.Stop();
-            gpuMs = swGpu.Elapsed.TotalMilliseconds;
+            const int TimedTrials = 5;
+            double[] trials = new double[TimedTrials];
+            for (int trial = 0; trial < TimedTrials; trial++)
+            {
+                System.Diagnostics.Stopwatch swGpu = System.Diagnostics.Stopwatch.StartNew();
+                cuda.DeformableAttention(cudaOut, value, sampOff, attn, refPoints, shapes, levelStart,
+                    heads, levels, points, coords, levels * coords, coords);
+                cuda.Sync();
+                swGpu.Stop();
+                trials[trial] = swGpu.Elapsed.TotalMilliseconds;
+            }
+            Array.Sort(trials);
+            gpuMs = trials[TimedTrials / 2];
             _ = *(float*)cudaOut.DataPointer;
         }
 
         double maxErr = MaxErr(cpuOut, cudaOut);
+        double speedup = swCpu.Elapsed.TotalMilliseconds / gpuMs;
         _output.WriteLine($"EncoderScale nq={nq}: cpu={swCpu.Elapsed.TotalMilliseconds:F1}ms gpu={gpuMs:F1}ms " +
-            $"speedup={swCpu.Elapsed.TotalMilliseconds / gpuMs:F1}x max_err={maxErr:E3}");
+            $"speedup={speedup:F1}x max_err={maxErr:E3}");
         Assert.True(maxErr < 1e-4, $"EncoderScale diverges: {maxErr:E3}");
+        Assert.True(speedup >= 10.0,
+            $"EncoderScale GPU speedup regressed to {speedup:F2}x (cpu={swCpu.Elapsed.TotalMilliseconds:F1}ms, median GPU={gpuMs:F1}ms).");
     }
 }

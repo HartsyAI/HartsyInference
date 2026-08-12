@@ -136,4 +136,54 @@ public sealed unsafe class StepCacheKernelTests
         _output.WriteLine($"identical-tensor distance = {device:G9}");
         Assert.Equal(0f, device, 3);
     }
+
+    [Fact]
+    public void RelativeL1Distance_NonzeroCurrentAgainstZeroReference_ReturnsInfinity()
+    {
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: CUDA unavailable");
+            return;
+        }
+
+        using Tensor current = new Tensor(new TensorShape(1, 256), DType.F32);
+        using Tensor reference = new Tensor(current.Shape, DType.F32);
+        ((float*)current.DataPointer)[17] = 1f;
+
+        float host;
+        using (CpuBackend cpu = new CpuBackend())
+            host = ((IBackend)cpu).RelativeL1Distance(current, reference);
+
+        float device;
+        using (CudaBackend cuda = new CudaBackend(0, PtxDir()))
+            device = cuda.RelativeL1Distance(current, reference);
+
+        Assert.True(float.IsPositiveInfinity(host));
+        Assert.True(float.IsPositiveInfinity(device));
+    }
+
+    [Fact]
+    public void RelativeL1Distance_NonfiniteReference_ReturnsNaN()
+    {
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: CUDA unavailable");
+            return;
+        }
+
+        using Tensor current = RandomF32(new TensorShape(1, 256), 47);
+        using Tensor reference = RandomF32(current.Shape, 48);
+        ((float*)reference.DataPointer)[31] = float.NaN;
+
+        float host;
+        using (CpuBackend cpu = new CpuBackend())
+            host = ((IBackend)cpu).RelativeL1Distance(current, reference);
+
+        float device;
+        using (CudaBackend cuda = new CudaBackend(0, PtxDir()))
+            device = cuda.RelativeL1Distance(current, reference);
+
+        Assert.True(float.IsNaN(host));
+        Assert.True(float.IsNaN(device));
+    }
 }

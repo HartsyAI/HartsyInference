@@ -29,8 +29,10 @@ public sealed class CudaBackend : IBackend
     private Fp8GemmExecutor? _fp8Executor;
     private LtGemmExecutor? _ltGemmExecutor;
     private TensorCoreGemm? _tensorCoreGemm;
+    private readonly object _nativeExecutorLock = new();
+    private readonly object _cudnnSdpaLock = new();
     private CudnnSdpa? _cudnnSdpa;
-    private bool _cudnnSdpaDead;   // set if cuDNN INIT throws once — never retry, fall back for the session
+    private volatile bool _cudnnSdpaDead;   // set if cuDNN INIT throws once — never retry, fall back for the session
 
     /// <summary>Per-head-dim failure/backoff state — replaces a plain permanent-dead set.</summary>
     /// <remarks>A structural failure (e.g. D=256 on a build whose fused engine tops out at 128 — <see
@@ -41,12 +43,10 @@ public sealed class CudaBackend : IBackend
     /// <c>HashSet</c>) because this backend is a process-wide DI singleton and nothing enforces
     /// <c>InferenceQueue.MaxConcurrency</c> stays at its default of 1 — a plain <c>HashSet</c> was never actually
     /// safe under a higher setting.</remarks>
-    private sealed class DimFailureState
-    {
-        public int ConsecutiveFailures;
-        public long NextRetryAtTicks;   // Environment.TickCount64; 0 = eligible immediately
-        public bool Permanent;
-    }
+    private sealed record DimFailureState(
+        int ConsecutiveFailures,
+        long NextRetryAtTicks,   // Environment.TickCount64; 0 = eligible immediately
+        bool Permanent);
     private readonly ConcurrentDictionary<long, DimFailureState> _cudnnSdpaDimState = new();
 
     /// <summary>Test-only fault hook for <see cref="TryCudnnSdpa"/>: a non-null return from this is thrown instead of the real call.</summary>
@@ -88,13 +88,153 @@ public sealed class CudaBackend : IBackend
     private CudnnConv? _cudnnConv;
     private bool _cudnnConvDead;   // any cuDNN conv failure → session fallback to the im2col path
 
+    private long _cudnnSdpaExecutionCount;
+    private long _cudnnSdpaSessionGeneration;
+    private long _cudnnSdpaDisposedSessionCount;
+
     /// <summary>True once the cuDNN fused-attention fast path has run at least once this session (confirms engagement vs fallback).</summary>
-    public bool CudnnSdpaEngaged { get; private set; }
+    public bool CudnnSdpaEngaged => CudnnSdpaExecutionCount > 0;
+
+    /// <summary>Number of successfully enqueued cuDNN fused-attention executions this session.</summary>
+    public long CudnnSdpaExecutionCount => Interlocked.Read(ref _cudnnSdpaExecutionCount);
+
+    /// <summary>Test diagnostic incremented whenever a new cuDNN SDPA handle/plan cache is constructed.</summary>
+    internal long CudnnSdpaSessionGeneration => Interlocked.Read(ref _cudnnSdpaSessionGeneration);
+
+    /// <summary>Test diagnostic incremented only after a detached cuDNN SDPA session releases all owned resources.</summary>
+    internal long CudnnSdpaDisposedSessionCount => Interlocked.Read(ref _cudnnSdpaDisposedSessionCount);
+
+    /// <summary>True once the opt-in TF32 FlashAttention-v2 path has run at least once this session.</summary>
+    internal bool FlashAttentionV2Engaged { get; private set; }
+
+    private long _sageAttentionExecutionCount;
+
+    /// <summary>True once the SageAttention INT8 fast path has run at least once this session.</summary>
+    public bool SageAttentionEngaged => SageAttentionExecutionCount > 0;
+
+    /// <summary>Number of successfully enqueued SageAttention INT8 executions this session.</summary>
+    public long SageAttentionExecutionCount => Interlocked.Read(ref _sageAttentionExecutionCount);
 
     /// <summary>True once the cuDNN convolution fast path has run at least once — same diagnostic role as <see cref="CudnnSdpaEngaged"/>.</summary>
     public bool CudnnConvEngaged { get; private set; }
     private readonly string? _ptxDir;
-    private bool _disposed;
+
+    private const int LifecycleActive = 0;
+    private const int LifecycleClaimed = 1;
+    private const int LifecycleCleaned = 2;
+    private int _lifecycleState;
+    private int _cleanupExecutionCount;
+    private int _constructorCompleted;
+    private int _mempoolPolicyAcquired;
+    private Exception? _cleanupFailure;
+    private readonly ManualResetEventSlim _cleanupCompleted = new(initialState: false);
+
+    private static long _abandonedCleanupEnqueuedCount;
+    private static long _abandonedCleanupCompletedCount;
+    private static long _abandonedCleanupFailedCount;
+    private static readonly object _abandonedCleanupProgress = new();
+
+    /// <summary>Dedicated managed worker for abandoned backends. Its type initializer is forced from the constructor,
+    /// never from the finalizer; the finalizer itself performs only an atomic claim and a queue write.</summary>
+    private static class BackendAbandonmentReaper
+    {
+        private static readonly BlockingCollection<CudaBackend> Queue = new();
+        private static readonly Thread Worker = StartWorker();
+
+        internal static void EnsureStarted() => GC.KeepAlive(Worker);
+
+        internal static void Enqueue(CudaBackend backend)
+        {
+            Interlocked.Increment(ref _abandonedCleanupEnqueuedCount);
+            Queue.Add(backend);
+        }
+
+        private static Thread StartWorker()
+        {
+            Thread worker = new(Run)
+            {
+                IsBackground = true,
+                Name = "Hartsy CUDA abandonment reaper",
+            };
+            worker.Start();
+            return worker;
+        }
+
+        private static void Run()
+        {
+            while (true)
+            {
+                CudaBackend? backend = Queue.Take();
+                Process(backend);
+                // Do not let the worker local root the most recently cleaned backend while it waits indefinitely
+                // for its next item (observable as an otherwise permanent managed leak).
+                backend = null;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void Process(CudaBackend backend)
+        {
+            try
+            {
+                Exception? failure = backend.RunClaimedCleanup(abandoned: true);
+                if (failure is not null)
+                {
+                    Interlocked.Increment(ref _abandonedCleanupFailedCount);
+                    SafeLogFailure("[Cuda] Abandoned backend cleanup completed with one or more teardown failures.", failure);
+                }
+            }
+            catch (Exception failure)
+            {
+                // The instance cleanup contains every individual action, but the worker itself must also be
+                // immortal if a future edit accidentally lets an exception escape that boundary.
+                Interlocked.Increment(ref _abandonedCleanupFailedCount);
+                SafeLogFailure("[Cuda] Abandoned backend reaper failed unexpectedly.", failure);
+            }
+            finally
+            {
+                Interlocked.Increment(ref _abandonedCleanupCompletedCount);
+                lock (_abandonedCleanupProgress) Monitor.PulseAll(_abandonedCleanupProgress);
+            }
+        }
+
+        private static void SafeLogFailure(string message, Exception failure)
+        {
+            try { HartsyInference.Core.Logging.Logs.Error(message, failure); }
+            catch { /* A user-supplied logger must never kill the process-wide cleanup worker. */ }
+        }
+    }
+
+    internal int LifecycleStateForTests => Volatile.Read(ref _lifecycleState);
+    internal int CleanupExecutionCount => Volatile.Read(ref _cleanupExecutionCount);
+    internal bool ConstructorCompletedForTests => Volatile.Read(ref _constructorCompleted) != 0;
+    internal static long AbandonedCleanupEnqueuedCount => Interlocked.Read(ref _abandonedCleanupEnqueuedCount);
+    internal static long AbandonedCleanupCompletedCount => Interlocked.Read(ref _abandonedCleanupCompletedCount);
+    internal static long AbandonedCleanupFailedCount => Interlocked.Read(ref _abandonedCleanupFailedCount);
+
+    internal static bool WaitForAbandonedCleanup(long completedTarget, TimeSpan timeout)
+    {
+        if (completedTarget < 0) throw new ArgumentOutOfRangeException(nameof(completedTarget));
+        if (timeout < TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan) throw new ArgumentOutOfRangeException(nameof(timeout));
+        long deadline = timeout == Timeout.InfiniteTimeSpan
+            ? long.MaxValue
+            : Environment.TickCount64 + Math.Max(0L, (long)Math.Ceiling(timeout.TotalMilliseconds));
+        lock (_abandonedCleanupProgress)
+        {
+            while (Interlocked.Read(ref _abandonedCleanupCompletedCount) < completedTarget)
+            {
+                if (deadline == long.MaxValue)
+                {
+                    Monitor.Wait(_abandonedCleanupProgress);
+                    continue;
+                }
+                long remaining = deadline - Environment.TickCount64;
+                if (remaining <= 0) return false;
+                Monitor.Wait(_abandonedCleanupProgress, (int)Math.Min(remaining, int.MaxValue));
+            }
+            return true;
+        }
+    }
 
     /// <summary>The device this backend targets.</summary>
     public DeviceKind Device { get; }
@@ -146,20 +286,97 @@ public sealed class CudaBackend : IBackend
     public bool EnableModulateEmitFp8 { get; set; }
 
     /// <summary>Device-resident copy of a weight's static activation scale, allocated once per weight.</summary>
-    private readonly Dictionary<Tensor, ulong> _fp8InputScaleDev = new();
+    private readonly Dictionary<Tensor, (ulong Pointer, float Scale)> _fp8InputScaleDev = new();
+    private readonly object _fp8InputScaleLock = new();
+    private long _fp8InputScaleAllocationCount;
+    private long _fp8InputScaleFreeCount;
 
     /// <summary>Returns the device pointer holding <paramref name="weight"/>'s static input scale, or 0 if it has none.</summary>
     private unsafe ulong EnsureFp8InputScaleDev(Tensor weight)
     {
         float scale = weight.Fp8InputScaleFactor;
         if (scale <= 0.0f || !float.IsFinite(scale)) return 0;
-        if (_fp8InputScaleDev.TryGetValue(weight, out ulong cached)) return cached;
-        // Persistent, not pool-allocated: it outlives the call and must survive stream-ordered frees. One
-        // synchronous 4-byte upload per weight, once, so it never touches the per-step path.
-        ulong dev = CudaMemory.AllocatePersistent(sizeof(float));
-        CudaMemory.CopyHostToDevice(dev, &scale, sizeof(float));
-        _fp8InputScaleDev[weight] = dev;
-        return dev;
+        lock (_fp8InputScaleLock)
+        {
+            if (_fp8InputScaleDev.TryGetValue(weight, out (ulong Pointer, float Scale) cached))
+            {
+                if (cached.Scale != scale)
+                {
+                    // Scale metadata is mutable. Drain prior readers, then update the existing scalar in place so
+                    // mutation neither serves stale numerics nor churns persistent device allocations.
+                    _stream.Synchronize();
+                    CudaMemory.CopyHostToDevice(cached.Pointer, &scale, sizeof(float));
+                    _fp8InputScaleDev[weight] = (cached.Pointer, scale);
+                }
+                return cached.Pointer;
+            }
+            // Persistent, not pool-allocated: it outlives the call and must survive stream-ordered frees. Serialize
+            // first creation so concurrent Linears cannot leak duplicate four-byte allocations for one weight.
+            ulong dev = CudaMemory.AllocatePersistent(sizeof(float));
+            try
+            {
+                CudaMemory.CopyHostToDevice(dev, &scale, sizeof(float));
+                _fp8InputScaleDev[weight] = (dev, scale);
+                Interlocked.Increment(ref _fp8InputScaleAllocationCount);
+                return dev;
+            }
+            catch
+            {
+                CudaMemory.Free(dev);
+                throw;
+            }
+        }
+    }
+
+    private void FreeFp8InputScale(Tensor weight)
+    {
+        lock (_fp8InputScaleLock)
+        {
+            if (!_fp8InputScaleDev.TryGetValue(weight, out (ulong Pointer, float Scale) entry)) return;
+            CudaMemory.Free(entry.Pointer);
+            _fp8InputScaleDev.Remove(weight);
+            Interlocked.Increment(ref _fp8InputScaleFreeCount);
+        }
+    }
+
+    private void FreeAllFp8InputScales()
+    {
+        // These persistent pointers are read by kernels/GEMMs on the compute stream. Never release them merely
+        // because a broader cache sweep was attempted; independently prove the consuming stream is drained here.
+        if (_stream is not null) _stream.Synchronize();
+        List<Exception>? failures = null;
+        lock (_fp8InputScaleLock)
+        {
+            foreach ((Tensor weight, (ulong Pointer, float Scale) entry) in _fp8InputScaleDev.ToArray())
+            {
+                try
+                {
+                    CudaMemory.Free(entry.Pointer);
+                    _fp8InputScaleDev.Remove(weight);
+                    Interlocked.Increment(ref _fp8InputScaleFreeCount);
+                }
+                catch (Exception error)
+                {
+                    // Keep failed entries registered so a later explicit sweep can retry them.
+                    (failures ??= []).Add(error);
+                }
+            }
+        }
+        if (failures is not null) throw new AggregateException("One or more FP8 input-scale buffers failed to release.", failures);
+    }
+
+    internal int Fp8InputScaleCacheCount
+    {
+        get { lock (_fp8InputScaleLock) return _fp8InputScaleDev.Count; }
+    }
+
+    internal (int Count, long Allocations, long Frees) Fp8InputScaleDiagnostics =>
+        (Fp8InputScaleCacheCount, Interlocked.Read(ref _fp8InputScaleAllocationCount), Interlocked.Read(ref _fp8InputScaleFreeCount));
+
+    internal ulong EnsureFp8InputScaleForTest(Tensor weight)
+    {
+        EnterOp();
+        return EnsureFp8InputScaleDev(weight);
     }
 
     /// <summary>Low-VRAM lever: when <c>true</c> (default) the per-weight fp8/quant→F16 cast is cached resident, not recomputed each GEMM.</summary>
@@ -175,15 +392,25 @@ public sealed class CudaBackend : IBackend
     {
         get
         {
-            _fp8Executor ??= new Fp8GemmExecutor(_context.ComputeCapabilityMajor, _context.ComputeCapabilityMinor);
-            return _fp8Executor;
+            EnsureActiveContextForLazyNativeResource();
+            lock (_nativeExecutorLock)
+            {
+                EnsureActiveContextForLazyNativeResource();
+                if (_fp8Executor is null)
+                {
+                    _fp8Executor = new Fp8GemmExecutor(_context.ComputeCapabilityMajor, _context.ComputeCapabilityMinor);
+                    GC.SuppressFinalize(_fp8Executor);
+                }
+                return _fp8Executor;
+            }
         }
     }
 
-    /// <summary>Opt-in flag for fusing the Linear bias add into the cuBLASLt GEMM epilogue. Defaults to <c>false</c> pending benchmarks.</summary>
-    /// <remarks>Works on every targeted SM, including the RTX 3060. When on, a Linear with bias runs as a single
-    /// <c>cublasLtMatmul</c> instead of <c>cublasGemmEx</c> + a separate <c>BiasAdd</c> launch. The result is
-    /// numerically equivalent to the unfused path.</remarks>
+    /// <summary>Fuses a Linear bias add into the cuBLASLt GEMM epilogue. Enabled by default; set
+    /// <c>HARTSY_EPILOGUE_FUSION=0</c> to disable it.</summary>
+    /// <remarks>Works on every targeted SM, including the RTX 3060. A supported biased Linear runs as one
+    /// <c>cublasLtMatmul</c>; unavailable libraries, unsupported shapes, and no-algorithm results fall back to
+    /// <c>cublasGemmEx</c> plus the existing <c>BiasAdd</c> path with the same resolved precision policy.</remarks>
     public bool EnableEpilogueFusion { get; set; }
 
     /// <summary>int8-activation dp4a decode GEMV for Q4_K/Q6_K/Q8_0 weights (default ON, kill-switch <c>HARTSY_DP4A_ON=0</c>).</summary>
@@ -204,8 +431,17 @@ public sealed class CudaBackend : IBackend
     {
         get
         {
-            _int8Executor ??= new Int8GemmExecutor();
-            return _int8Executor;
+            EnsureActiveContextForLazyNativeResource();
+            lock (_nativeExecutorLock)
+            {
+                EnsureActiveContextForLazyNativeResource();
+                if (_int8Executor is null)
+                {
+                    _int8Executor = new Int8GemmExecutor();
+                    GC.SuppressFinalize(_int8Executor);
+                }
+                return _int8Executor;
+            }
         }
     }
 
@@ -234,35 +470,81 @@ public sealed class CudaBackend : IBackend
     /// equal the weight's K (in-dim).</remarks>
     public unsafe void SetW8A8SmoothingScale(Core.Tensors.Tensor weight, ReadOnlySpan<float> s)
     {
+        EnterOp();
         int k = (int)weight.Shape[1];
         if (s.Length != k)
             throw new ArgumentException($"SmoothQuant scale length {s.Length} != weight K={k}.", nameof(s));
         float[] invScale = new float[k];
-        for (int i = 0; i < k; i++) invScale[i] = s[i] != 0f ? 1f / s[i] : 0f;
-
-        ulong dev = GpuTransferHelper.AllocateDevice((nuint)(k * sizeof(float)));
-        fixed (float* p = invScale)
-            CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)p, (nuint)(k * sizeof(float)), _stream.Handle).ThrowOnError();
-        _stream.Synchronize();
-
-        if (_w8a8SmoothInvScaleDevice.TryGetValue(weight, out ulong old)) GpuTransferHelper.FreeDevice(old);
-        _w8a8SmoothInvScaleDevice[weight] = dev;
-        _w8a8SmoothScaleHost[weight] = s.ToArray();
-
-        if (_w8a8WeightCache.TryGetValue(weight, out ulong cachedQuant))
+        for (int i = 0; i < k; i++)
         {
-            GpuTransferHelper.FreeDevice(cachedQuant);
-            _w8a8WeightCache.Remove(weight);
+            if (!(s[i] > 0f) || !float.IsFinite(s[i]))
+                throw new ArgumentOutOfRangeException(nameof(s), $"SmoothQuant scale s[{i}] must be positive and finite; got {s[i]}.");
+            invScale[i] = 1f / s[i];
+        }
+        float[] hostScale = s.ToArray();
+        _w8a8SmoothInvScaleDevice.EnsureCapacity(_w8a8SmoothInvScaleDevice.Count + 1);
+        _w8a8SmoothScaleHost.EnsureCapacity(_w8a8SmoothScaleHost.Count + 1);
+        ulong dev = GpuTransferHelper.AllocateDevice((nuint)(k * sizeof(float)));
+        bool published = false;
+        try
+        {
+            fixed (float* p = invScale)
+                CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)p, (nuint)(k * sizeof(float)), _stream.Handle).ThrowOnError();
+            _stream.Synchronize();
+
+            // Invalidate the quantized weight while the old smoothing pair is still authoritative. If its
+            // free fails, publication aborts and the cache remains numerically compatible with the old pair.
+            if (_w8a8WeightCache.TryGetValue(weight, out ulong cachedQuant))
+            {
+                GpuTransferHelper.FreeDevice(cachedQuant);
+                _w8a8WeightCache.Remove(weight);
+            }
+
+            if (_w8a8SmoothInvScaleDevice.TryGetValue(weight, out ulong old))
+            {
+                GpuTransferHelper.FreeDevice(old);
+                _w8a8SmoothInvScaleDevice.Remove(weight);
+                _w8a8SmoothScaleHost.Remove(weight);
+            }
+            _w8a8SmoothInvScaleDevice[weight] = dev;
+            _w8a8SmoothScaleHost[weight] = hostScale;
+            published = true;
+        }
+        catch (Exception primary) when (!published)
+        {
+            // An unexpected managed publication failure must not leave a dictionary pointing at the
+            // unpublished device allocation that rollback is about to free.
+            if (_w8a8SmoothInvScaleDevice.TryGetValue(weight, out ulong tracked) && tracked == dev)
+                _w8a8SmoothInvScaleDevice.Remove(weight);
+            if (_w8a8SmoothScaleHost.TryGetValue(weight, out float[]? trackedHost)
+                && ReferenceEquals(trackedHost, hostScale))
+                _w8a8SmoothScaleHost.Remove(weight);
+            try { GpuTransferHelper.FreeDevice(dev); }
+            catch (Exception cleanup)
+            {
+                throw new AggregateException("SmoothQuant scale publication and rollback both failed.", primary, cleanup);
+            }
+            throw;
         }
     }
 
     /// <summary>Frees every SmoothQuant device scale buffer (mirrors FreeW8A8Cache's scope/callers).</summary>
-    private void FreeW8A8SmoothScaleCache()
+    private void FreeW8A8SmoothScaleCache(GpuTransferHelper.State? explicitState = null)
     {
-        foreach (ulong ptr in _w8a8SmoothInvScaleDevice.Values)
-            GpuTransferHelper.FreeDevice(ptr);
-        _w8a8SmoothInvScaleDevice.Clear();
-        _w8a8SmoothScaleHost.Clear();
+        List<Exception>? failures = null;
+        foreach ((Tensor weight, ulong ptr) in _w8a8SmoothInvScaleDevice.ToArray())
+        {
+            try
+            {
+                if (explicitState is null) GpuTransferHelper.FreeDevice(ptr);
+                else GpuTransferHelper.FreeDevice(explicitState, ptr);
+                _w8a8SmoothInvScaleDevice.Remove(weight);
+                _w8a8SmoothScaleHost.Remove(weight);
+            }
+            catch (Exception error) { (failures ??= []).Add(error); }
+        }
+        if (_w8a8SmoothInvScaleDevice.Count == 0) _w8a8SmoothScaleHost.Clear();
+        if (failures is not null) throw new AggregateException("One or more W8A8 SmoothQuant scales failed to release.", failures);
     }
 
     /// <summary>Test-only hook: LinearImpl passes F32 snapshots of pre-quant input/weight of the first W8A8-eligible call, then clears.</summary>
@@ -358,8 +640,17 @@ public sealed class CudaBackend : IBackend
     {
         get
         {
-            _ltGemmExecutor ??= new LtGemmExecutor();
-            return _ltGemmExecutor;
+            EnsureActiveContextForLazyNativeResource();
+            lock (_nativeExecutorLock)
+            {
+                EnsureActiveContextForLazyNativeResource();
+                if (_ltGemmExecutor is null)
+                {
+                    _ltGemmExecutor = new LtGemmExecutor(_context, _stream.Handle, backendAdopted: true);
+                    GC.SuppressFinalize(_ltGemmExecutor);
+                }
+                return _ltGemmExecutor;
+            }
         }
     }
 
@@ -380,24 +671,42 @@ public sealed class CudaBackend : IBackend
     {
         get
         {
-            _tensorCoreGemm ??= new TensorCoreGemm(
-                _ptxDir ?? throw new InvalidOperationException("TensorCoreGemm requires a PTX directory; construct CudaBackend with ptxDir."),
-                _context.ComputeCapabilityMajor);
-            return _tensorCoreGemm;
+            EnsureActiveContextForLazyNativeResource();
+            lock (_nativeExecutorLock)
+            {
+                EnsureActiveContextForLazyNativeResource();
+                if (_tensorCoreGemm is null)
+                {
+                    _tensorCoreGemm = new TensorCoreGemm(
+                        _ptxDir ?? throw new InvalidOperationException("TensorCoreGemm requires a PTX directory; construct CudaBackend with ptxDir."),
+                        _context.ComputeCapabilityMajor);
+                    GC.SuppressFinalize(_tensorCoreGemm);
+                }
+                return _tensorCoreGemm;
+            }
         }
+    }
+
+    private void EnsureActiveContextForLazyNativeResource()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _lifecycleState) != LifecycleActive, this);
+        _context.EnsureCurrent();
     }
 
     /// <summary>Reads a <c>HARTSY_*</c> boolean env var; unset or any non-"1" value is treated as off.</summary>
     /// <remarks>Mirrors <see cref="Profiling.NvtxRange.ProfileEnabled"/>.</remarks>
     private static bool EnvFlag(string name) => Environment.GetEnvironmentVariable(name) == "1";
 
-    /// <summary>SageAttention INT8 dispatch preference — DEFAULT ON since 2026-07-23 (kill switch <c>HARTSY_SAGE_ATTN=0</c>).</summary>
-    /// <remarks>E2E gates behind the flip: Wan-14B +4.7%/step, Hunyuan-720p +10.2%/step at 0.15–0.5% pixel drift
-    /// (eyeball-clean, deterministic); micro 1.18× vs cuDNN-F16-fused at 16k²/D=128 and 3–8× vs the F32 paths;
-    /// crossover predictions validated on 5 models (2026-07-22 records). The per-site shape gates keep every
-    /// measured-loss shape (small seq, masked, D∉{64,128}) on its previous-best path — image models are untouched
-    /// by construction (F16-native ≥8192-Skv gate; D=256 excluded).</remarks>
-    private static readonly bool UseSageAttn = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN") != "0";
+    /// <summary>Native-F16 SageAttention policy; enabled by default and disabled with <c>HARTSY_SAGE_ATTN=0</c>.</summary>
+    private static bool UseSageAttn => Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN") != "0";
+
+    private static bool SageExplicitlyEnabled => EnvFlag("HARTSY_SAGE_ATTN");
+
+    /// <summary>True only when the caller explicitly accepts Sage's F32-to-F16 V-storage narrowing.</summary>
+    /// <remarks>The current Sage prologue materializes V as F16, so an F32 value outside the finite F16 range
+    /// becomes infinity. Requiring a second, plainly unsafe opt-in quarantines that path until V is range-safe.</remarks>
+    internal static bool SageF32ValueNarrowingEnabled =>
+        SageExplicitlyEnabled && EnvFlag("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
 
     /// <summary>TF32 tensor-core math for F32-operand GEMMs on Ampere+ (SM ≥ 8.0) — PyTorch's default. Opt out: <c>HARTSY_NO_TF32=1</c>.</summary>
     /// <remarks>Plain-F32 GEMMs have no tensor-core path on consumer Ampere (a 3060 runs them at a fraction of
@@ -443,12 +752,16 @@ public sealed class CudaBackend : IBackend
     /// <summary>Creates a CUDA backend for the specified device ordinal. If ptxDir is provided, loads PTX kernels from that directory.</summary>
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)
     {
+        // Force the managed worker to exist before this finalizable object acquires its first native resource.
+        BackendAbandonmentReaper.EnsureStarted();
         _context = new CudaContext(deviceOrdinal);
+        GC.SuppressFinalize(_context); // adopted: CudaBackend Dispose/reaper is now the sole finalization owner
         // Must use blocking stream (CU_STREAM_DEFAULT) because GpuTransferHelper uses synchronous
         // cuMemcpyHtoD/DtoH which operate on the NULL stream. A non-blocking stream does NOT
         // synchronize with the NULL stream, causing race conditions where kernels read incomplete
         // data from in-progress H2D transfers. Fix: switch to cuMemcpyHtoDAsync on this stream.
         _stream = new CudaStream(nonBlocking: false);
+        GC.SuppressFinalize(_stream);
         // HARTSY_PROFILE_SYNC's per-op GPU-time attribution resolves ITS stream from the ambient backend State
         // (see NvtxRange.Dispose) — no registration needed here.
         // Upload stream is non-blocking so its in-flight work doesn't gate the compute
@@ -456,6 +769,7 @@ public sealed class CudaBackend : IBackend
         // uploads would force compute to wait, defeating overlap. The streaming cache uses
         // explicit cuEventRecord/cuStreamWaitEvent for the parts that *do* need to sync.
         _uploadStream = new CudaStream(nonBlocking: true);
+        GC.SuppressFinalize(_uploadStream);
         _streamingCache = new CudaStreamingWeightCache(_context, _stream.Handle, _uploadStream.Handle);
         _ptxDir = ptxDir;
         Device = DeviceKind.Cuda(deviceOrdinal);
@@ -469,6 +783,7 @@ public sealed class CudaBackend : IBackend
         // demand either way.
         bool mempoolKeep = EnvSwitch.IsEnabled("HARTSY_MEMPOOL_KEEP", defaultOn: true);
         DeviceMempoolPolicy.Acquire(_context.DeviceOrdinal, mempoolKeep);
+        Volatile.Write(ref _mempoolPolicyAcquired, 1);
         // CUDA_VISIBLE_DEVICES defaults to fastest-first ordering, so an ordinal does not identify the card —
         // log the name or every perf/VRAM number gets attributed to the wrong GPU.
         HartsyInference.Core.Logging.Logs.Info($"[Cuda] device {deviceOrdinal}: {_context.DeviceName} "
@@ -514,7 +829,7 @@ public sealed class CudaBackend : IBackend
         // Every cuDNN fast path is AND-gated on availability, so a missing/mismatched cuDNN cleanly stays on the
         // im2col+cuBLAS / custom-flash fallbacks instead of throwing per-op or hanging.
         CudnnRuntime.LogStatus();
-        _sdpaCudnn = CudnnRuntime.Available && EnvSwitch.IsEnabled("HARTSY_SDPA_CUDNN", defaultOn: true);
+        _sdpaCudnn = CudnnRuntime.SupportsSdpa && EnvSwitch.IsEnabled("HARTSY_SDPA_CUDNN", defaultOn: true);
         // cuDNN convolution forward: default ON — replaces im2col→GEMM for F16/BF16 NCHW convs (the SDXL
         // UNet/VAE cost). Same self-disable-on-failure contract as the fused SDPA path.
         _convCudnn = CudnnRuntime.Available && EnvSwitch.IsEnabled("HARTSY_CONV_CUDNN", defaultOn: true);
@@ -585,6 +900,7 @@ public sealed class CudaBackend : IBackend
         if (ptxDir != null && Directory.Exists(ptxDir))
         {
             _kernels = new CudaKernels(ptxDir);
+            GC.SuppressFinalize(_kernels);
         }
 
         Capabilities = new BackendCapabilities
@@ -601,6 +917,7 @@ public sealed class CudaBackend : IBackend
             SupportsFft = false,
             MaxRank = 6,
         };
+        Volatile.Write(ref _constructorCompleted, 1);
     }
 
     /// <summary>This backend's transfer state, for the multi-backend isolation tests.</summary>
@@ -618,6 +935,7 @@ public sealed class CudaBackend : IBackend
 
     private void EnterOp()
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _lifecycleState) != LifecycleActive, this);
         GpuTransferHelper.SetAmbient(_transferState);
         _context.EnsureCurrent();
         Tensor.DrainPendingFinalizerGpuCleanup(_transferState.Key);
@@ -743,10 +1061,22 @@ public sealed class CudaBackend : IBackend
             // fails INVALID_VALUE (bisected 2026-07-23, W8A8ReproTemp). Pool pointers ride the same
             // stream-ordered allocator as every other cache, so ordering is correct by construction.
             ulong dev = GpuTransferHelper.AllocateDevice(totalBytes);
-            CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)dst, totalBytes, _stream.Handle).ThrowOnError();
-            // Host buffer is stack-scoped (fixed byte[]) — drain the async copy before it goes out of scope.
-            _stream.Synchronize();
-            return dev;
+            try
+            {
+                CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)dst, totalBytes, _stream.Handle).ThrowOnError();
+                // Host buffer is stack-scoped (fixed byte[]) — drain the async copy before it goes out of scope.
+                _stream.Synchronize();
+                return dev;
+            }
+            catch (Exception primary)
+            {
+                try { GpuTransferHelper.FreeDevice(dev); }
+                catch (Exception cleanup)
+                {
+                    throw new AggregateException("W8A8 weight upload and rollback both failed.", primary, cleanup);
+                }
+                throw;
+            }
         }
     }
 
@@ -761,12 +1091,22 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>Frees every cached W8A8 int8 weight buffer (model switch / full eviction / dispose).</summary>
-    private void FreeW8A8Cache()
+    private void FreeW8A8Cache(GpuTransferHelper.State? explicitState = null)
     {
-        foreach (ulong ptr in _w8a8WeightCache.Values)
-            GpuTransferHelper.FreeDevice(ptr);
-        _w8a8WeightCache.Clear();
-        FreeW8A8SmoothScaleCache();
+        List<Exception>? failures = null;
+        foreach ((Tensor weight, ulong ptr) in _w8a8WeightCache.ToArray())
+        {
+            try
+            {
+                if (explicitState is null) GpuTransferHelper.FreeDevice(ptr);
+                else GpuTransferHelper.FreeDevice(explicitState, ptr);
+                _w8a8WeightCache.Remove(weight);
+            }
+            catch (Exception error) { (failures ??= []).Add(error); }
+        }
+        try { FreeW8A8SmoothScaleCache(explicitState); }
+        catch (Exception error) { (failures ??= []).Add(error); }
+        if (failures is not null) throw new AggregateException("One or more W8A8 cache buffers failed to release.", failures);
     }
 
     /// <summary>Linear layer via cuBLAS GemmEx with transpose: output = input × weight^T + bias.</summary>
@@ -1231,56 +1571,66 @@ public sealed class CudaBackend : IBackend
             {
                 TensorCoreGemm.Run(a: inputPtr, b: weightPtr, c: pOutput, m: m, n: n, k: k, alpha: alpha, stream: _stream.Handle);
             }
-            // Fused path: fold the bias into the cuBLASLt epilogue, saving a BiasAdd launch
-            // plus an output-sized HBM round-trip. Only worthwhile when there is a bias to fuse.
-            else if (EnableEpilogueFusion && bias is not null && LtGemm.IsSupported && !outNeedsCast)
-            {
-                LtGemm.Run(
-                    weight: weightPtr, input: inputPtr, outPtr: pOutput,
-                    m: m, n: n, k: k, alpha: alpha,
-                    abType: gemmType, dType: outputType,
-                    biasPtr: biasDevicePtr, epilogue: CublasLtApi.CUBLASLT_EPILOGUE_BIAS,
-                    stream: _stream.Handle);
-                ltBiasFused = true;
-            }
             else
             {
-                // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [n,k], op(B)=input [k,m]
-                // Row-major interpretation: output[m,n] = input[m,k] × weight^T[k,n].
-                //
-                // cublasGemmEx supports Ctype ∈ {Atype, F32} only. When the output tensor is a 16-bit type
-                // that differs from the operand gemmDtype — e.g. BF16 operands (fp8/quant weight × F32
-                // activation → BF16, chosen so the F32→16-bit cast can't overflow F16's 65504 in a SwiGLU
-                // MLP) but an F16 output tensor — there is NO BF16→F16 kernel and cuBLAS returns
-                // CUBLAS_STATUS_NOT_SUPPORTED. Run the GEMM into a temp of gemmDtype, then cast to the real
-                // output. (F32 output is always compatible with 16-bit operands, so it skips the temp.)
-                ulong gemmOut = pOutput;
-                int gemmOutType = outputType;
-                ulong pGemmTemp = 0;
-                try
+                // Fused path: fold the bias into the cuBLASLt epilogue, saving a BiasAdd launch plus an
+                // output-sized HBM round-trip. Compute32F is the single precision-policy source for BOTH the
+                // fused and GemmEx paths: HighPrecisionGemm/HARTSY_NO_TF32/HARTSY_GEMM_F16 must not change
+                // semantics merely because this Linear has a bias. A missing Lt algorithm is an ordinary
+                // per-shape capability result, so TryRun returns false and the existing GemmEx+BiasAdd path runs.
+                if (EnableEpilogueFusion && bias is not null && !outNeedsCast)
                 {
-                    if (outNeedsCast)
+                    LtGemmExecutor lt = LtGemm;
+                    if (lt.IsSupported)
                     {
-                        pGemmTemp = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * gemmDtype.SizeInBytes));
-                        gemmOut = pGemmTemp;
-                        gemmOutType = gemmType;
+                        ltBiasFused = lt.TryRun(
+                            weight: weightPtr, input: inputPtr, outPtr: pOutput,
+                            m: m, n: n, k: k, alpha: alpha,
+                            abType: gemmType, dType: outputType, computeType: Compute32F(gemmType),
+                            biasPtr: biasDevicePtr, epilogue: CublasLtApi.CUBLASLT_EPILOGUE_BIAS,
+                            stream: _stream.Handle);
                     }
-                    CublasApi.cublasGemmEx(
-                        _cublasHandle,
-                        CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                        n, m, k,
-                        &alpha,
-                        weightPtr, gemmType, k,
-                        inputPtr, gemmType, k,
-                        &beta,
-                        gemmOut, gemmOutType, n,
-                        Compute32F(gemmType), CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
-                    if (outNeedsCast)
-                        CastOnGpu(pOutput, pGemmTemp, gemmDtype, output.DType, m * n);
                 }
-                finally
+
+                if (!ltBiasFused)
                 {
-                    if (pGemmTemp != 0) GpuTransferHelper.FreeDevice(pGemmTemp);
+                    // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [n,k], op(B)=input [k,m]
+                    // Row-major interpretation: output[m,n] = input[m,k] × weight^T[k,n].
+                    //
+                    // cublasGemmEx supports Ctype ∈ {Atype, F32} only. When the output tensor is a 16-bit type
+                    // that differs from the operand gemmDtype — e.g. BF16 operands (fp8/quant weight × F32
+                    // activation → BF16, chosen so the F32→16-bit cast can't overflow F16's 65504 in a SwiGLU
+                    // MLP) but an F16 output tensor — there is NO BF16→F16 kernel and cuBLAS returns
+                    // CUBLAS_STATUS_NOT_SUPPORTED. Run the GEMM into a temp of gemmDtype, then cast to the real
+                    // output. (F32 output is always compatible with 16-bit operands, so it skips the temp.)
+                    ulong gemmOut = pOutput;
+                    int gemmOutType = outputType;
+                    ulong pGemmTemp = 0;
+                    try
+                    {
+                        if (outNeedsCast)
+                        {
+                            pGemmTemp = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * gemmDtype.SizeInBytes));
+                            gemmOut = pGemmTemp;
+                            gemmOutType = gemmType;
+                        }
+                        CublasApi.cublasGemmEx(
+                            _cublasHandle,
+                            CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                            n, m, k,
+                            &alpha,
+                            weightPtr, gemmType, k,
+                            inputPtr, gemmType, k,
+                            &beta,
+                            gemmOut, gemmOutType, n,
+                            Compute32F(gemmType), CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        if (outNeedsCast)
+                            CastOnGpu(pOutput, pGemmTemp, gemmDtype, output.DType, m * n);
+                    }
+                    finally
+                    {
+                        if (pGemmTemp != 0) GpuTransferHelper.FreeDevice(pGemmTemp);
+                    }
                 }
             }
 
@@ -2391,12 +2741,46 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    public unsafe void UnpatchifyTokens(Tensor output, Tensor tokens, int channels, int hPacked, int wPacked,
+    /// <inheritdoc />
+    public void PatchifyTokens(Tensor output, Tensor input, int patch, bool innerChannelFastest)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("PatchifyTokens");
+        PatchTokenGeometry geometry = PatchTokenContract.ValidatePatchify(output, input, patch);
+        EnterOp();
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            if (input.DType == DType.F32)
+                _kernels!.LaunchDitPatchify(
+                    pOut, pIn, geometry.Batch, geometry.Channels, geometry.Height, geometry.Width,
+                    patch, innerChannelFastest, _stream.Handle);
+            else
+                _kernels!.LaunchDitPatchifyU16(
+                    pOut, pIn, geometry.Batch, geometry.Channels, geometry.Height, geometry.Width,
+                    patch, innerChannelFastest, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <inheritdoc />
+    public void UnpatchifyTokens(Tensor output, Tensor tokens, int channels, int hPacked, int wPacked,
         int patch, bool innerChannelFastest)
     {
         using NvtxRange _nvtx = NvtxRange.Push("UnpatchifyTokens");
-        if (output.DType != DType.F32 || tokens.DType != DType.F32)
-            throw new NotSupportedException("CUDA UnpatchifyTokens supports F32 only.");
+        PatchTokenGeometry geometry = PatchTokenContract.ValidateUnpatchify(
+            output, tokens, channels, hPacked, wPacked, patch);
         EnterOp();
         EnsureKernels();
 
@@ -2407,7 +2791,12 @@ public sealed class CudaBackend : IBackend
             pIn = GpuTransferHelper.CopyToDevice(tokens);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchDitUnpatchify(pOut, pIn, channels, hPacked, wPacked, patch, innerChannelFastest, _stream.Handle);
+            if (tokens.DType == DType.F32)
+                _kernels!.LaunchDitUnpatchify(
+                    pOut, pIn, geometry.Batch, channels, hPacked, wPacked, patch, innerChannelFastest, _stream.Handle);
+            else
+                _kernels!.LaunchDitUnpatchifyU16(
+                    pOut, pIn, geometry.Batch, channels, hPacked, wPacked, patch, innerChannelFastest, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -2481,10 +2870,24 @@ public sealed class CudaBackend : IBackend
     {
         if (z.DType != DType.F32 || pos.DType != DType.F32 || neg.DType != DType.F32)
             throw new NotSupportedException("CUDA CfgEulerStep supports F32 only.");
+        if (!z.Shape.Equals(pos.Shape) || !z.Shape.Equals(neg.Shape))
+            throw new ArgumentException(
+                $"CUDA CfgEulerStep requires identical shapes; got z={z.Shape}, pos={pos.Shape}, neg={neg.Shape}.");
+        if (z.ElementCount <= 0 || z.ElementCount > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(z),
+                $"CUDA CfgEulerStep element count must be in [1,{int.MaxValue}]; got {z.ElementCount}.");
+        if (z.HasOverlappingHostStorageWithoutSync(pos) || z.HasOverlappingHostStorageWithoutSync(neg))
+            throw new ArgumentException(
+                "CUDA CfgEulerStep inputs may alias each other, but neither may alias the in-place z tensor.");
+        if (!float.IsFinite(guidance))
+            throw new ArgumentOutOfRangeException(nameof(guidance), "Guidance must be finite.");
+        if (!float.IsFinite(delta))
+            throw new ArgumentOutOfRangeException(nameof(delta), "Euler delta must be finite.");
         EnterOp();
         EnsureKernels();
 
         ulong pZ = 0, pPos = 0, pNeg = 0;
+        bool cachedZ = false;
         try
         {
             pZ = GpuTransferHelper.CopyToDevice(z);
@@ -2497,11 +2900,206 @@ public sealed class CudaBackend : IBackend
             z._gpuSyncCallback = null;
             z._gpuDisposeCallback = null;
             GpuTransferHelper.CacheActivation(z, pZ, GpuTransferHelper.ByteSize(z));
+            cachedZ = true;
         }
         finally
         {
+            if (!cachedZ) GpuTransferHelper.FreeDevice(pZ);
             GpuTransferHelper.FreeDevice(pPos);
             GpuTransferHelper.FreeDevice(pNeg);
+        }
+    }
+
+    /// <inheritdoc />
+    public void AffineMix(Tensor output, Tensor x, Tensor y, float xScale, float yScale)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("AffineMix");
+        long count = MixContract.ValidateAffineMix(output, x, y, xScale, yScale);
+        EnterOp();
+        EnsureKernels();
+
+        ulong pOutput = 0, pX = 0, pY = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);
+            pY = ReferenceEquals(x, y) ? pX : GpuTransferHelper.CopyToDevice(y);
+            nuint outputBytes = GpuTransferHelper.ByteSize(output);
+            pOutput = GpuTransferHelper.AllocateDevice(outputBytes);
+            _kernels!.LaunchAffineMix(pOutput, pX, pY, xScale, yScale, count, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOutput, outputBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
+            if (pY != pX) GpuTransferHelper.FreeDevice(pY);
+            GpuTransferHelper.FreeDevice(pX);
+        }
+    }
+
+    /// <inheritdoc />
+    public void MaskedAffineMixInPlace(
+        Tensor target,
+        Tensor source,
+        Tensor? noise,
+        Tensor mask,
+        float sourceScale,
+        float noiseScale,
+        MaskBroadcastLayout layout)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("MaskedAffineMixInPlace");
+        MaskedMixGeometry geometry = MixContract.ValidateMaskedAffineMix(
+            target, source, noise, mask, sourceScale, noiseScale, layout);
+        EnterOp();
+        EnsureKernels();
+
+        ulong pTarget = 0, pSource = 0, pNoise = 0, pMask = 0;
+        bool cachedTarget = false;
+        try
+        {
+            pTarget = GpuTransferHelper.CopyToDevice(target);
+            pSource = GpuTransferHelper.CopyToDevice(source);
+            pNoise = noise is null
+                ? 0
+                : ReferenceEquals(noise, source) ? pSource : GpuTransferHelper.CopyToDevice(noise);
+            pMask = GpuTransferHelper.CopyToDevice(mask);
+
+            if (layout == MaskBroadcastLayout.DenseNchwBroadcast)
+            {
+                _kernels!.LaunchMaskedAffineMixDense(
+                    pTarget, pSource, pNoise, pMask, sourceScale, noiseScale,
+                    geometry.Batch, geometry.Channels, geometry.Spatial, _stream.Handle);
+            }
+            else
+            {
+                _kernels!.LaunchMaskedAffineMixPacked(
+                    pTarget, pSource, pNoise, pMask, sourceScale, noiseScale,
+                    geometry.Tokens, geometry.FeatureDimension, geometry.PatchArea,
+                    layout == MaskBroadcastLayout.PackedChannelInner, _stream.Handle);
+            }
+
+            // The target's existing allocation remains authoritative. Remove its stale D2H/free callbacks before
+            // replanting the activation binding so it stays resident for the next denoise step.
+            target._gpuSyncCallback = null;
+            target._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(target, pTarget, GpuTransferHelper.ByteSize(target));
+            cachedTarget = true;
+        }
+        finally
+        {
+            if (!cachedTarget) GpuTransferHelper.FreeDevice(pTarget);
+            GpuTransferHelper.FreeDevice(pMask);
+            if (pNoise != pSource) GpuTransferHelper.FreeDevice(pNoise);
+            GpuTransferHelper.FreeDevice(pSource);
+        }
+    }
+
+    /// <inheritdoc />
+    public void CfgRenormEulerStep(
+        Tensor z, Tensor cond, Tensor uncond, float guidance, float delta, float renormMin)
+    {
+        if (z.DType != DType.F32 || cond.DType != DType.F32 || uncond.DType != DType.F32)
+            throw new NotSupportedException("CUDA CfgRenormEulerStep supports F32 only.");
+        if (!z.Shape.Equals(cond.Shape) || !z.Shape.Equals(uncond.Shape))
+            throw new ArgumentException(
+                $"CUDA CfgRenormEulerStep requires identical shapes; got z={z.Shape}, cond={cond.Shape}, uncond={uncond.Shape}.");
+        if (z.ElementCount <= 0)
+            throw new ArgumentException("CUDA CfgRenormEulerStep requires nonempty tensors.", nameof(z));
+        if (z.HasOverlappingHostStorageWithoutSync(cond) || z.HasOverlappingHostStorageWithoutSync(uncond))
+            throw new ArgumentException(
+                "CUDA CfgRenormEulerStep inputs may alias each other, but neither may alias the in-place z tensor.");
+        if (!float.IsFinite(guidance))
+            throw new ArgumentOutOfRangeException(nameof(guidance), "Guidance must be finite.");
+        if (!float.IsFinite(delta))
+            throw new ArgumentOutOfRangeException(nameof(delta), "Euler delta must be finite.");
+        if (!float.IsFinite(renormMin) || renormMin < 0f || renormMin > 1f)
+            throw new ArgumentOutOfRangeException(nameof(renormMin), "Renorm minimum must be finite and in [0,1].");
+
+        long count = z.ElementCount;
+        if (delta == 0f) return;
+
+        EnterOp();
+        EnsureKernels();
+        const int threads = 256;
+        int partialCount = (int)Math.Min(256L, 1L + (count - 1L) / threads);
+        nuint scratchBytes = checked((nuint)(2L * partialCount * sizeof(double) + sizeof(float)));
+
+        ulong pZ = 0, pCond = 0, pUncond = 0, pScratch = 0;
+        bool cachedZ = false;
+        try
+        {
+            pZ = GpuTransferHelper.CopyToDevice(z);
+            pCond = GpuTransferHelper.CopyToDevice(cond);
+            pUncond = GpuTransferHelper.CopyToDevice(uncond);
+            pScratch = GpuTransferHelper.AllocateDevice(scratchBytes);
+            _kernels!.LaunchCfgRenormEuler(
+                pZ, pCond, pUncond, pScratch, partialCount,
+                guidance, delta, renormMin, count, _stream.Handle);
+
+            // In-place on z: keep its device buffer authoritative and resident after the update.
+            z._gpuSyncCallback = null;
+            z._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(z, pZ, GpuTransferHelper.ByteSize(z));
+            cachedZ = true;
+        }
+        finally
+        {
+            if (!cachedZ) GpuTransferHelper.FreeDevice(pZ);
+            GpuTransferHelper.FreeDevice(pCond);
+            GpuTransferHelper.FreeDevice(pUncond);
+            GpuTransferHelper.FreeDevice(pScratch);
+        }
+    }
+
+    /// <inheritdoc />
+    public void CfgNormalizedEulerStep(
+        Tensor z, Tensor cond, Tensor uncond, float guidance, float delta, float eps = 1e-12f)
+    {
+        if (z.DType != DType.F32 || cond.DType != DType.F32 || uncond.DType != DType.F32)
+            throw new NotSupportedException("CUDA CfgNormalizedEulerStep supports F32 only.");
+        if (!z.Shape.Equals(cond.Shape) || !z.Shape.Equals(uncond.Shape))
+            throw new ArgumentException(
+                $"CUDA CfgNormalizedEulerStep requires identical shapes; got z={z.Shape}, cond={cond.Shape}, uncond={uncond.Shape}.");
+        if (z.Shape.Rank < 1 || z.ElementCount <= 0 || z.Shape[z.Shape.Rank - 1] <= 0)
+            throw new ArgumentException(
+                "CUDA CfgNormalizedEulerStep requires a nonempty tensor with a positive last dimension.", nameof(z));
+        if (z.HasOverlappingHostStorageWithoutSync(cond) || z.HasOverlappingHostStorageWithoutSync(uncond))
+            throw new ArgumentException(
+                "CUDA CfgNormalizedEulerStep inputs may alias each other, but neither may alias the in-place z tensor.");
+        if (!float.IsFinite(guidance))
+            throw new ArgumentOutOfRangeException(nameof(guidance), "Guidance must be finite.");
+        if (!float.IsFinite(delta))
+            throw new ArgumentOutOfRangeException(nameof(delta), "Euler delta must be finite.");
+        if (!float.IsFinite(eps) || eps < 0f)
+            throw new ArgumentOutOfRangeException(nameof(eps), "Normalization epsilon must be finite and nonnegative.");
+        if (delta == 0f) return;
+
+        long lastDim = z.Shape[z.Shape.Rank - 1];
+        long rows = z.ElementCount / lastDim;
+        EnterOp();
+        EnsureKernels();
+
+        ulong pZ = 0, pCond = 0, pUncond = 0;
+        bool cachedZ = false;
+        try
+        {
+            pZ = GpuTransferHelper.CopyToDevice(z);
+            pCond = GpuTransferHelper.CopyToDevice(cond);
+            pUncond = GpuTransferHelper.CopyToDevice(uncond);
+            _kernels!.LaunchCfgNormalizedEuler(
+                pZ, pCond, pUncond, guidance, delta, eps, rows, lastDim, _stream.Handle);
+
+            z._gpuSyncCallback = null;
+            z._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(z, pZ, GpuTransferHelper.ByteSize(z));
+            cachedZ = true;
+        }
+        finally
+        {
+            if (!cachedZ) GpuTransferHelper.FreeDevice(pZ);
+            GpuTransferHelper.FreeDevice(pCond);
+            GpuTransferHelper.FreeDevice(pUncond);
         }
     }
 
@@ -2516,10 +3114,18 @@ public sealed class CudaBackend : IBackend
     public bool SupportsDeviceStepCacheGate => _kernels is not null && _kernels.HasStepCacheKernels;
 
     /// <summary>Marks a tensor's device activation as surviving <see cref="FreeActivations()"/> (see IBackend doc).</summary>
-    public void PinActivation(Tensor tensor) => GpuTransferHelper.PinActivation(tensor);
+    public void PinActivation(Tensor tensor)
+    {
+        EnterOp();
+        GpuTransferHelper.PinActivation(tensor);
+    }
 
     /// <summary>Removes a <see cref="PinActivation"/> mark.</summary>
-    public void UnpinActivation(Tensor tensor) => GpuTransferHelper.UnpinActivation(tensor);
+    public void UnpinActivation(Tensor tensor)
+    {
+        EnterOp();
+        GpuTransferHelper.UnpinActivation(tensor);
+    }
 
     public bool FlashDecodeSupported => true;
 
@@ -2536,7 +3142,11 @@ public sealed class CudaBackend : IBackend
         // A still-open capture must abort+purge BEFORE the tracker clear below wipes its alloc records.
         if (_stepGraphCapturing)
             StepGraphReset();
-        _stepGraph ??= new CudaGraph(_stream.Handle, autoFreeAllocationsOnRelaunch: true);
+        if (_stepGraph is null)
+        {
+            _stepGraph = new CudaGraph(_stream.Handle, autoFreeAllocationsOnRelaunch: true);
+            GC.SuppressFinalize(_stepGraph);
+        }
         _stepGraph.Reset();
         lock (_transferState.CaptureAllocs)
         {
@@ -3429,8 +4039,10 @@ public sealed class CudaBackend : IBackend
         int seq = (int)x.Shape[2];
         int headDim = (int)x.Shape[3];
         // A token-major x is the same element count with heads/seq swapped; only the cos/sin row count catches it.
-        if (cos.ElementCount != x.Shape[0] * seq * headDim)
-            throw new HartsyInferenceException($"ApplyRopeSingleHeadMajor expects cos/sin [B,seq,headDim] for x {x.Shape}, got {cos.Shape}.");
+        long tableElements = x.Shape[0] * seq * headDim;
+        if (cos.ElementCount != tableElements || sin.ElementCount != tableElements)
+            throw new HartsyInferenceException(
+                $"ApplyRopeSingleHeadMajor expects cos/sin [B,seq,headDim] for x {x.Shape}; got cos={cos.Shape}, sin={sin.Shape}.");
         long totalVecs = x.ElementCount / headDim;
 
         ulong pX = 0, pCos = 0, pSin = 0;
@@ -4263,20 +4875,126 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    private static (int Tokens, int Heads, int HeadDim) ValidateQkvSplitNorm(
+        Tensor q,
+        Tensor k,
+        Tensor v,
+        Tensor qkv,
+        Tensor qWeight,
+        Tensor kWeight,
+        float eps,
+        bool headMajor)
+    {
+        string operation = headMajor ? "QkvSplitNormHeadMajor" : "QkvSplitNorm";
+        if (qkv.DType != DType.F32 && qkv.DType != DType.F16)
+            throw new NotSupportedException($"CUDA {operation} supports F32 or F16 activations, got {qkv.DType}.");
+        if (q.DType != qkv.DType || k.DType != qkv.DType || v.DType != qkv.DType)
+            throw new NotSupportedException(
+                $"CUDA {operation} requires q/k/v to match qkv dtype {qkv.DType}, got q={q.DType}, k={k.DType}, v={v.DType}.");
+        if (qWeight.DType != DType.F32 || kWeight.DType != DType.F32)
+            throw new NotSupportedException(
+                $"CUDA {operation} requires F32 norm weights, got qWeight={qWeight.DType}, kWeight={kWeight.DType}.");
+        if (ReferenceEquals(q, k) || ReferenceEquals(q, v) || ReferenceEquals(k, v)
+            || ReferenceEquals(q, qkv) || ReferenceEquals(k, qkv) || ReferenceEquals(v, qkv))
+            throw new HartsyInferenceException($"CUDA {operation} requires distinct q, k, v, and qkv tensors.");
+        if (qkv.Shape.Rank < 2)
+            throw new HartsyInferenceException($"CUDA {operation} requires qkv rank >= 2 with fused QKV in the last dimension, got {qkv.Shape}.");
+        if (qWeight.Shape.Rank < 1 || kWeight.Shape.Rank < 1)
+            throw new HartsyInferenceException(
+                $"CUDA {operation} requires non-empty Q/K norm weight shapes, got qWeight={qWeight.Shape}, kWeight={kWeight.Shape}.");
+        if (!qWeight.Shape.Equals(kWeight.Shape))
+            throw new HartsyInferenceException(
+                $"CUDA {operation} requires identically shaped Q/K norm weights, got qWeight={qWeight.Shape}, kWeight={kWeight.Shape}.");
+        if (!q.Shape.Equals(k.Shape) || !q.Shape.Equals(v.Shape))
+            throw new HartsyInferenceException(
+                $"CUDA {operation} requires identically shaped q/k/v outputs, got q={q.Shape}, k={k.Shape}, v={v.Shape}.");
+        if (!float.IsFinite(eps) || eps <= 0f)
+            throw new HartsyInferenceException($"CUDA {operation} requires a finite positive epsilon, got {eps}.");
+
+        for (int i = 0; i < qWeight.Shape.Rank; i++)
+        {
+            if (qWeight.Shape[i] <= 0)
+                throw new HartsyInferenceException($"CUDA {operation} requires positive norm-weight dimensions, got {qWeight.Shape}.");
+        }
+        long headDimLong = qWeight.Shape[qWeight.Shape.Rank - 1];
+        if (headDimLong <= 0 || headDimLong > int.MaxValue || qWeight.ElementCount != headDimLong)
+            throw new HartsyInferenceException(
+                $"CUDA {operation} requires vector Q/K norm weights, got shape {qWeight.Shape} with {qWeight.ElementCount} elements.");
+
+        long fusedWidth = qkv.Shape[qkv.Shape.Rank - 1];
+        if (fusedWidth <= 0 || fusedWidth > int.MaxValue || fusedWidth % 3 != 0)
+            throw new HartsyInferenceException(
+                $"CUDA {operation} requires qkv last dimension to be a positive 3·W within Int32 range, got {fusedWidth}.");
+        long width = fusedWidth / 3;
+        if (width % headDimLong != 0)
+            throw new HartsyInferenceException(
+                $"CUDA {operation} requires W divisible by headDim, got W={width} and headDim={headDimLong}.");
+        long headsLong = width / headDimLong;
+        if (headsLong <= 0 || headsLong > int.MaxValue)
+            throw new HartsyInferenceException($"CUDA {operation} computed an invalid head count {headsLong}.");
+
+        long tokensLong = 1;
+        for (int i = 0; i < qkv.Shape.Rank - 1; i++)
+        {
+            long dimension = qkv.Shape[i];
+            if (dimension <= 0 || tokensLong > int.MaxValue / dimension)
+                throw new HartsyInferenceException(
+                    $"CUDA {operation} requires positive qkv dimensions with at most {int.MaxValue} tokens, got {qkv.Shape}.");
+            tokensLong *= dimension;
+        }
+        if (qkv.ElementCount != tokensLong * fusedWidth)
+            throw new HartsyInferenceException(
+                $"CUDA {operation} detected qkv shape arithmetic overflow in {qkv.Shape}.");
+        if (tokensLong * headsLong > int.MaxValue)
+            throw new HartsyInferenceException(
+                $"CUDA {operation} launch exceeds the supported grid: tokens={tokensLong}, heads={headsLong}.");
+        long expectedOutputElements = tokensLong * width;
+        long outputElements = 1;
+        for (int i = 0; i < q.Shape.Rank; i++)
+        {
+            long dimension = q.Shape[i];
+            if (dimension <= 0 || outputElements > expectedOutputElements / dimension)
+                throw new HartsyInferenceException(
+                    $"CUDA {operation} output shape must contain exactly {expectedOutputElements} positive-dimension elements, got {q.Shape}.");
+            outputElements *= dimension;
+        }
+        if (outputElements != expectedOutputElements || q.ElementCount != expectedOutputElements)
+            throw new HartsyInferenceException(
+                $"CUDA {operation} output size mismatch: expected {expectedOutputElements} elements, got {q.ElementCount} in {q.Shape}.");
+
+        if (headMajor)
+        {
+            if (q.Shape.Rank != 4 || q.Shape[0] > int.MaxValue || q.Shape[2] > int.MaxValue
+                || q.Shape[1] != headsLong || q.Shape[3] != headDimLong
+                || q.Shape[0] * q.Shape[2] != tokensLong)
+                throw new HartsyInferenceException(
+                    $"CUDA {operation} requires q/k/v [B,heads,seq,headDim] matching qkv; got {q.Shape}, " +
+                    $"heads={headsLong}, headDim={headDimLong}, tokens={tokensLong}.");
+        }
+        else
+        {
+            bool flattenedHeads = q.Shape.Rank >= 1 && q.Shape[q.Shape.Rank - 1] == width;
+            bool explicitHeads = q.Shape.Rank >= 2
+                && q.Shape[q.Shape.Rank - 2] == headsLong
+                && q.Shape[q.Shape.Rank - 1] == headDimLong;
+            if (!flattenedHeads && !explicitHeads)
+                throw new HartsyInferenceException(
+                    $"CUDA {operation} requires output ending in [W] or [heads,headDim], got {q.Shape} " +
+                    $"for W={width}, heads={headsLong}, headDim={headDimLong}.");
+        }
+
+        return ((int)tokensLong, (int)headsLong, (int)headDimLong);
+    }
+
     /// <summary>Fused QKV split + per-head QK-RMSNorm (F32 or F16 activation, F32 weights); writes q/k/v each [., W] laid [token, head, d].</summary>
     /// <remarks>Replaces SliceLastDim×3 + RmsNorm×2 per attention stream.</remarks>
     public void QkvSplitNorm(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
     {
         using NvtxRange _nvtx = NvtxRange.Push("QkvSplitNorm");
+        (int tokens, int heads, int headDim) = ValidateQkvSplitNorm(q, k, v, qkv, qWeight, kWeight, eps, headMajor: false);
         bool f16 = qkv.DType == DType.F16;
-        if (!f16 && qkv.DType != DType.F32)
-            throw new NotSupportedException("CUDA QkvSplitNorm supports F32 or F16 activations.");
         EnterOp();
         EnsureKernels();
-        int headDim = (int)qWeight.Shape[qWeight.Shape.Rank - 1];
-        int w = (int)qkv.Shape[qkv.Shape.Rank - 1] / 3;
-        int heads = w / headDim;
-        int tokens = (int)(qkv.ElementCount / (3L * w));
         ulong pq = 0, pk = 0, pv = 0, pQkv = 0, pQw = 0, pKw = 0; bool cached = false;
         try
         {
@@ -4305,24 +5023,11 @@ public sealed class CudaBackend : IBackend
     public void QkvSplitNormHeadMajor(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
     {
         using NvtxRange _nvtx = NvtxRange.Push("QkvSplitNormHeadMajor");
+        (int tokens, int heads, int headDim) = ValidateQkvSplitNorm(q, k, v, qkv, qWeight, kWeight, eps, headMajor: true);
         bool f16 = qkv.DType == DType.F16;
-        if (!f16 && qkv.DType != DType.F32)
-            throw new NotSupportedException("CUDA QkvSplitNormHeadMajor supports F32 or F16 activations.");
-        if (q.Shape.Rank != 4)
-            throw new HartsyInferenceException($"QkvSplitNormHeadMajor needs q/k/v shaped [B,heads,seq,headDim], got {q.Shape}.");
         EnterOp();
         EnsureKernels();
-        int headDim = (int)qWeight.Shape[qWeight.Shape.Rank - 1];
-        int w = (int)qkv.Shape[qkv.Shape.Rank - 1] / 3;
-        int heads = w / headDim;
-        int tokens = (int)(qkv.ElementCount / (3L * w));
         int seq = (int)q.Shape[2];
-        // A transposed q/k/v would still be the right element count, so check the layout, not just the size.
-        if (q.Shape[1] != heads || q.Shape[3] != headDim || (long)q.Shape[0] * seq != tokens
-            || !k.Shape.Equals(q.Shape) || !v.Shape.Equals(q.Shape))
-            throw new HartsyInferenceException(
-                $"QkvSplitNormHeadMajor layout mismatch: q {q.Shape} k {k.Shape} v {v.Shape} vs qkv {qkv.Shape} " +
-                $"(heads={heads}, headDim={headDim}, tokens={tokens}).");
         ulong pq = 0, pk = 0, pv = 0, pQkv = 0, pQw = 0, pKw = 0; bool cached = false;
         try
         {
@@ -4978,6 +5683,7 @@ public sealed class CudaBackend : IBackend
     public unsafe void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
     {
         using NvtxRange _nvtx = NvtxRange.Push("SDPA");
+        ValidateScaledDotProductAttentionContract(output, query, key, value, mask, scale);
         EnterOp();
         EnsureKernels();
 
@@ -5036,11 +5742,8 @@ public sealed class CudaBackend : IBackend
             // transpose (LaunchSageVF16T). Any architecture whose |V| exceeds F16's 65504 therefore gets INF in
             // V, which softmax·V smears across every query row.
             //
-            // This is deliberately NOT gated on `allowF16`: that parameter DEFAULTS to false, so 33 of the ~80
-            // call sites in this repo are nominally "F16 not allowed" while running Sage happily today. Gating
-            // here would silently disable Sage for all of them — a broad perf regression to fix a hazard that
-            // has bitten exactly one model. The cuDNN branch below can gate on it precisely because its callers
-            // opt IN explicitly.
+            // This path now requires HARTSY_SAGE_UNSAFE_F32_V_NARROW=1 in addition to HARTSY_SAGE_ATTN=1.
+            // allowF16 is not a V-range contract and therefore cannot make this narrowing safe.
             //
             // Diagnostic fingerprint, if a future model renders black/NaN: exactly ONE bad element per token in
             // the SDPA output (a single overflowing (head, dim) column of V, spread over all query rows by the
@@ -5060,7 +5763,7 @@ public sealed class CudaBackend : IBackend
             // path beats the cuDNN-F16-cast branch below at large seq (110.6 vs 130.4 ms at 16384²/D=128,
             // 2026-07-22 BDN A/B) — and unlike it, keeps F32-fidelity accumulation. Gate on Skv ≥ 2048:
             // below that the quant prologue outweighs the win (small-seq shapes measured 0.93× vs cuDNN).
-            if (UseSageAttn && mask is null && (d == 64 || d == 128) && skv >= 2048)
+            if (SageF32ValueNarrowingEnabled && mask is null && (d == 64 || d == 128) && skv >= 2048)
             {
                 EnsureKernels();
                 if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || sq % 32 == 0))
@@ -5091,10 +5794,10 @@ public sealed class CudaBackend : IBackend
 
             // SageAttention-v1 INT8 flash attention (sage_attn_int8*.ptx): K-smoothed per-row INT8 QK^T on
             // the IMMA tensor cores, online softmax + PV in registers (mma.sync v1; wmma v0 fallback needs
-            // Sq%32==0 — its WMMA Q-tile loads are unguarded). Default ON (HARTSY_SAGE_ATTN=0 kills);
+            // Sq%32==0 — its WMMA Q-tile loads are unguarded). F32 V narrowing requires two explicit flags;
             // no-mask MHA, D∈{64,128}, Skv≥1024 (tiny-seq shapes keep the F32 fallback — prologue-bound).
             // Falls through when the PTX isn't built.
-            if (UseSageAttn && (d == 64 || d == 128) && skv >= 1024)
+            if (SageF32ValueNarrowingEnabled && (d == 64 || d == 128) && skv >= 1024)
             {
                 EnsureKernels();
                 if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || sq % 32 == 0))
@@ -5106,7 +5809,8 @@ public sealed class CudaBackend : IBackend
 
             // Fused FlashAttention-2 (TF32 tensor cores, F32 accum, no materialized score matrix). Opt-in while
             // validating (HARTSY_SDPA_V2); MHA only (Hq==Hkv here — single B×H×S×D layout), D∈{64,128}.
-            if (EnvFlag("HARTSY_SDPA_V2") && (d == 64 || d == 128))
+            if (EnvFlag("HARTSY_SDPA_V2")
+                && FlashAttentionV2ContractSatisfied(output, query, key, value, mask, scale, _allowTf32))
             {
                 FlashAttentionV2(output, query, key, value, scale);
                 return;
@@ -5125,7 +5829,7 @@ public sealed class CudaBackend : IBackend
             }
         }
 
-        ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, scoresBuf = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pMaskClamped = 0, pMaskCast = 0, pOut = 0, scoresBuf = 0;
         ulong pQCast = 0, pKCast = 0, pVCast = 0, pOutCast = 0;
         bool cachedOutput = false;
         try
@@ -5189,6 +5893,23 @@ public sealed class CudaBackend : IBackend
 
             bool isF16 = opDtype == DType.F16;
             int elemSize = opDtype.SizeInBytes;
+            ulong opMask = pMask;
+            int maskElemSize = sizeof(float);
+            if (mask is not null && isF16)
+            {
+                // Scores live in F16 on the native-F16/fallback path, while the public additive-mask contract is
+                // F32. Convert once rather than reinterpreting packed float bytes as half values. Clamp before
+                // conversion so common finite hard-mask sentinels such as -1e30 become -65504 rather than -Inf:
+                // an entirely masked row then retains the repository's finite-sentinel/uniform-row convention
+                // instead of evaluating -Inf - -Inf inside softmax and producing NaNs.
+                pMaskClamped = CudaMemory.Allocate((nuint)(mask.ElementCount * sizeof(float)));
+                _kernels!.LaunchClamp(
+                    pMaskClamped, pMask, -65_504f, 65_504f, (int)mask.ElementCount, _stream.Handle);
+                pMaskCast = CudaMemory.Allocate((nuint)(mask.ElementCount * sizeof(ushort)));
+                _kernels!.LaunchCastF32ToF16(pMaskCast, pMaskClamped, (int)mask.ElementCount, _stream.Handle);
+                opMask = pMaskCast;
+                maskElemSize = sizeof(ushort);
+            }
 
             nuint scoresBytes = (nuint)(totalHeads * sq * skv * elemSize);
             scoresBuf = CudaMemory.Allocate(scoresBytes);
@@ -5239,41 +5960,25 @@ public sealed class CudaBackend : IBackend
 
             if (mask is not null)
             {
-                long maskElements = mask.ElementCount;
-                long scoreElements = totalHeads * sq * skv;
-
-                if (maskElements == sq * skv)
+                long maskHeadStride = sq * skv;
+                for (long bh = 0; bh < totalHeads; bh++)
                 {
-                    for (long bh = 0; bh < totalHeads; bh++)
+                    long batchIndex = bh / h;
+                    long headIndex = bh % h;
+                    long maskBlock = mask.Shape.Rank switch
                     {
-                        ulong sPtr = scoresBuf + (ulong)(bh * strideScores * elemSize);
-                        if (isF16)
-                            _kernels!.LaunchAddF16(sPtr, sPtr, pMask, (int)(sq * skv), _stream.Handle);
-                        else
-                            _kernels!.LaunchAdd(sPtr, sPtr, pMask, (int)(sq * skv), _stream.Handle);
-                    }
-                }
-                else if (maskElements == scoreElements)
-                {
+                        2 => 0,
+                        3 => mask.Shape[0] == 1 ? 0 : headIndex,
+                        4 => (mask.Shape[0] == 1 ? 0 : batchIndex) * mask.Shape[1]
+                            + (mask.Shape[1] == 1 ? 0 : headIndex),
+                        _ => throw new InvalidOperationException("Validated SDPA mask rank changed before dispatch."),
+                    };
+                    ulong scorePointer = scoresBuf + (ulong)(bh * strideScores * elemSize);
+                    ulong maskPointer = opMask + (ulong)(maskBlock * maskHeadStride * maskElemSize);
                     if (isF16)
-                        _kernels!.LaunchAddF16(scoresBuf, scoresBuf, pMask, (int)scoreElements, _stream.Handle);
+                        _kernels!.LaunchAddF16(scorePointer, scorePointer, maskPointer, (int)maskHeadStride, _stream.Handle);
                     else
-                        _kernels!.LaunchAdd(scoresBuf, scoresBuf, pMask, (int)scoreElements, _stream.Handle);
-                }
-                else if (maskElements == b * sq * skv && b > 1)
-                {
-                    // [B, 1, Sq, Skv] mask: per-batch, broadcast over heads. Add each batch's [Sq,Skv] block to all H
-                    // head-blocks for that batch. (B=1 is already caught by the Sq*Skv branch above.) One add per (b,h).
-                    for (long bh = 0; bh < totalHeads; bh++)
-                    {
-                        long batchIdx = bh / h;
-                        ulong sPtr = scoresBuf + (ulong)(bh * strideScores * elemSize);
-                        ulong mPtr = pMask + (ulong)(batchIdx * sq * skv * elemSize);
-                        if (isF16)
-                            _kernels!.LaunchAddF16(sPtr, sPtr, mPtr, (int)(sq * skv), _stream.Handle);
-                        else
-                            _kernels!.LaunchAdd(sPtr, sPtr, mPtr, (int)(sq * skv), _stream.Handle);
-                    }
+                        _kernels!.LaunchAdd(scorePointer, scorePointer, maskPointer, (int)maskHeadStride, _stream.Handle);
                 }
             }
 
@@ -5341,6 +6046,8 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pV);
             GpuTransferHelper.FreeDevice(pMask);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            if (pMaskCast != 0) CudaMemory.FreeAsync(pMaskCast, _stream.Handle);
+            if (pMaskClamped != 0) CudaMemory.FreeAsync(pMaskClamped, _stream.Handle);
             if (scoresBuf != 0) CudaMemory.FreeAsync(scoresBuf, _stream.Handle);
             if (pQCast != 0) CudaMemory.FreeAsync(pQCast, _stream.Handle);
             if (pKCast != 0) CudaMemory.FreeAsync(pKCast, _stream.Handle);
@@ -5349,14 +6056,76 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Validates the canonical rank-4 MHA contract shared by every SDPA dispatch branch.</summary>
+    internal static void ValidateScaledDotProductAttentionContract(
+        Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
+    {
+        if (output.Shape.Rank != 4 || query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4)
+            throw new ArgumentException(
+                $"SDPA requires rank-4 [B,H,S,D] tensors; got output={output.Shape}, Q={query.Shape}, K={key.Shape}, V={value.Shape}.");
+        if (!float.IsFinite(scale))
+            throw new ArgumentOutOfRangeException(nameof(scale), "SDPA scale must be finite.");
+        if (query.DType != DType.F32 && query.DType != DType.F16 && query.DType != DType.BF16)
+            throw new NotSupportedException($"SDPA supports F32/F16/BF16 tensors; got {query.DType}.");
+        if (output.DType != query.DType || key.DType != query.DType || value.DType != query.DType)
+            throw new ArgumentException(
+                $"SDPA requires matching output/Q/K/V dtypes; got output={output.DType}, Q={query.DType}, K={key.DType}, V={value.DType}.");
+
+        long b = query.Shape[0], h = query.Shape[1], sq = query.Shape[2], d = query.Shape[3];
+        long skv = key.Shape[2];
+        if (b <= 0 || h <= 0 || sq <= 0 || skv <= 0 || d <= 0)
+            throw new ArgumentException($"SDPA dimensions must be positive; got Q={query.Shape}, K={key.Shape}.");
+        if (b > int.MaxValue || h > int.MaxValue || sq > int.MaxValue || skv > int.MaxValue || d > int.MaxValue)
+            throw new ArgumentException("SDPA dimensions exceed the signed 32-bit CUDA/cuBLAS launch contract.");
+        long totalHeads = b * h;
+        if (totalHeads > int.MaxValue || totalHeads > int.MaxValue / sq)
+            throw new ArgumentException("SDPA head/row products exceed the signed 32-bit CUDA/cuBLAS launch contract.");
+        if (output.Shape != query.Shape)
+            throw new ArgumentException($"SDPA output shape must equal Q; got output={output.Shape}, Q={query.Shape}.");
+        if (key.Shape != value.Shape)
+            throw new ArgumentException($"SDPA K/V shapes must match; got K={key.Shape}, V={value.Shape}.");
+        if (key.Shape[0] != b || key.Shape[1] != h || key.Shape[3] != d)
+            throw new ArgumentException($"SDPA K/V must match Q batch, heads, and head dimension; got Q={query.Shape}, K={key.Shape}.");
+
+        if (output.ElementCount > int.MaxValue || query.ElementCount > int.MaxValue
+            || key.ElementCount > int.MaxValue || value.ElementCount > int.MaxValue)
+            throw new ArgumentException("SDPA tensors currently support at most Int32.MaxValue elements each.");
+
+        if (mask is null) return;
+        if (mask.DType != DType.F32)
+            throw new NotSupportedException($"SDPA additive masks must be F32; got {mask.DType}.");
+        if (mask.ElementCount > int.MaxValue || sq * skv > int.MaxValue)
+            throw new ArgumentException("SDPA mask blocks currently support at most Int32.MaxValue elements.");
+
+        bool validMask = mask.Shape.Rank switch
+        {
+            2 => mask.Shape[0] == sq && mask.Shape[1] == skv,
+            3 => (mask.Shape[0] == 1 || mask.Shape[0] == h)
+                && mask.Shape[1] == sq && mask.Shape[2] == skv,
+            4 => (mask.Shape[0] == 1 || mask.Shape[0] == b)
+                && (mask.Shape[1] == 1 || mask.Shape[1] == h)
+                && mask.Shape[2] == sq && mask.Shape[3] == skv,
+            _ => false,
+        };
+        if (!validMask)
+            throw new ArgumentException(
+                $"SDPA mask {mask.Shape} is not broadcastable to [{b},{h},{sq},{skv}]; "
+                + "expected [Sq,Skv], [1|H,Sq,Skv], or [1|B,1|H,Sq,Skv].");
+    }
+
     /// <summary>Whether a mask can ride the cuDNN fused engine as an additive fp32 bias (no mask, or F32 broadcastable over heads).</summary>
     /// <remarks>Per-head ([B,H,Sq,Skv]) or non-F32 masks fall back to the materialized path.</remarks>
     private static bool CudnnMaskCompatible(Tensor? mask, long b, long sq, long skv)
     {
         if (mask is null) return true;
         if (mask.DType != DType.F32) return false;
-        long n = mask.ElementCount;
-        return n == sq * skv || n == b * sq * skv;
+        if (mask.Shape.Rank == 2)
+            return mask.Shape[0] == sq && mask.Shape[1] == skv;
+        return mask.Shape.Rank == 4
+            && (mask.Shape[0] == 1 || mask.Shape[0] == b)
+            && mask.Shape[1] == 1
+            && mask.Shape[2] == sq
+            && mask.Shape[3] == skv;
     }
 
     /// <summary>cuDNN fused flash-attention fast path for the plain F32/no-mask/MHA case (F16 execute, F32 output).</summary>
@@ -5365,13 +6134,34 @@ public sealed class CudaBackend : IBackend
     /// paths. Q/out [B,H,Sq,D], K/V [B,H,Skv,D].</remarks>
     private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
     {
+        lock (_cudnnSdpaLock)
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _lifecycleState) != LifecycleActive, this);
+
+            // Callers perform this check before entering, but another request can publish a failure while this
+            // request waits for the shared cuDNN handle. Recheck under the same lock that serializes attempts so
+            // a queued request cannot bypass a newly established backoff window.
+            if (_cudnnSdpaDead || !CudnnSdpaDimEligible(query.Shape[3]))
+                return false;
+
+            return TryCudnnSdpaLocked(output, query, key, value, mask, scale);
+        }
+    }
+
+    private unsafe bool TryCudnnSdpaLocked(
+        Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
+    {
         long b = query.Shape[0], h = query.Shape[1], sq = query.Shape[2], d = query.Shape[3];
         long skv = key.Shape[2];
         ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, qF16 = 0, kF16 = 0, vF16 = 0, oF16 = 0;
         bool cachedOutput = false;
         try
         {
-            _cudnnSdpa ??= new CudnnSdpa(_stream.Handle);
+            if (_cudnnSdpa is null)
+            {
+                _cudnnSdpa = new CudnnSdpa(_stream.Handle);
+                Interlocked.Increment(ref _cudnnSdpaSessionGeneration);
+            }
 
             // Checked right after real (or already-cached) engine construction, so an injected failure is
             // classified the same way a real post-init failure (e.g. a BuildPlan/Execute failure) would be
@@ -5415,14 +6205,14 @@ public sealed class CudaBackend : IBackend
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
+            long executionCount = Interlocked.Increment(ref _cudnnSdpaExecutionCount);
             if (_cudnnSdpaDimState.TryRemove(d, out DimFailureState? recovered))
             {
                 HartsyInference.Core.Logging.Logs.Info(
                     $"[cuDNN SDPA] D={d} recovered after {recovered.ConsecutiveFailures} prior failure(s) — fused path re-engaged.");
             }
-            if (!CudnnSdpaEngaged)
+            if (executionCount == 1)
             {
-                CudnnSdpaEngaged = true;
                 HartsyInference.Core.Logging.Logs.Info($"[cuDNN SDPA] fused flash-attention engaged (D={d}, cuDNN {CudnnApi.cudnnGetVersion()})");
             }
             return true;
@@ -5448,18 +6238,22 @@ public sealed class CudaBackend : IBackend
             bool permanent = ex is not CudnnStatusException cse || cse.IsPermanent;
             if (permanent)
             {
-                _cudnnSdpaDimState[d] = new DimFailureState { Permanent = true };
+                _cudnnSdpaDimState[d] = new DimFailureState(0, 0, Permanent: true);
                 HartsyInference.Core.Logging.Logs.Warning(
                     $"[cuDNN SDPA] D={d} permanently disabled (structural failure) — this is the steady " +
                     $"state for the rest of the process: {ex.Message}");
             }
             else
             {
-                DimFailureState state = _cudnnSdpaDimState.AddOrUpdate(d,
-                    _ => new DimFailureState { ConsecutiveFailures = 1 },
-                    (_, existing) => { existing.ConsecutiveFailures++; return existing; });
-                long backoffMs = CudnnSdpaBackoffMs(state.ConsecutiveFailures);
-                state.NextRetryAtTicks = Environment.TickCount64 + backoffMs;
+                int failures = _cudnnSdpaDimState.TryGetValue(d, out DimFailureState? previous)
+                    ? previous.ConsecutiveFailures == int.MaxValue ? int.MaxValue : previous.ConsecutiveFailures + 1
+                    : 1;
+                long backoffMs = CudnnSdpaBackoffMs(failures);
+                DimFailureState state = new(
+                    failures,
+                    Environment.TickCount64 + backoffMs,
+                    Permanent: false);
+                _cudnnSdpaDimState[d] = state;
                 long? ramMb = HostMemoryInfo.AvailableBytes() is { } bytes ? bytes / (1024 * 1024) : null;
                 HartsyInference.Core.Logging.Logs.Warning(
                     $"[cuDNN SDPA] D={d} transient failure #{state.ConsecutiveFailures} " +
@@ -5482,9 +6276,47 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Checks the complete safety contract for the experimental TF32 FlashAttention-v2 kernel.</summary>
+    /// <remarks>The current kernel has no masked or GQA variant and its WMMA query load requires complete
+    /// 32-row tiles. Rejecting a partial query tile prevents the final block from reading beyond Q.</remarks>
+    internal static bool FlashAttentionV2ContractSatisfied(
+        Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool tf32Available)
+    {
+        if (!tf32Available || mask is not null || !float.IsFinite(scale)) return false;
+        if (output.Shape.Rank != 4 || query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4)
+            return false;
+        if (output.DType != DType.F32 || query.DType != DType.F32
+            || key.DType != DType.F32 || value.DType != DType.F32)
+            return false;
+
+        long b = query.Shape[0];
+        long h = query.Shape[1];
+        long sq = query.Shape[2];
+        long d = query.Shape[3];
+        long skv = key.Shape[2];
+        if (b <= 0 || h <= 0 || sq <= 0 || skv <= 0 || d <= 0
+            || !FlashAttentionV2GridDimensionsSupported(b, h) || sq > int.MaxValue
+            || skv > int.MaxValue || d > int.MaxValue)
+            return false;
+        if ((d != 64 && d != 128) || sq % 32 != 0) return false;
+
+        return output.Shape == query.Shape
+            && key.Shape == value.Shape
+            && key.Shape[0] == b
+            && key.Shape[1] == h
+            && key.Shape[3] == d;
+    }
+
+    /// <summary>Validates the CUDA grid Y/Z dimensions used directly for head and batch indices.</summary>
+    internal static bool FlashAttentionV2GridDimensionsSupported(long batch, long heads)
+        => batch is > 0 and <= 65_535 && heads is > 0 and <= 65_535;
+
     /// <summary>Fused FlashAttention-2 (TF32 tensor cores, F32 accumulate) — no-mask MHA, D∈{64,128}; never materializes the score matrix.</summary>
     private unsafe void FlashAttentionV2(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
     {
+        if (!FlashAttentionV2ContractSatisfied(output, query, key, value, null, scale, _allowTf32))
+            throw new HartsyInferenceException("FlashAttention-v2 was invoked outside its F32 MHA, full-query-tile contract.");
+
         EnterOp();
         EnsureKernels();
         long b = query.Shape[0], h = query.Shape[1], sq = query.Shape[2], d = query.Shape[3];
@@ -5499,6 +6331,7 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             _kernels!.LaunchFlashAttentionV2Tf32(pOut, pQ, pK, pV, (int)b, (int)h, (int)sq, (int)skv, (int)d, scale, _stream.Handle);
+            FlashAttentionV2Engaged = true;
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -5581,6 +6414,7 @@ public sealed class CudaBackend : IBackend
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
+            Interlocked.Increment(ref _sageAttentionExecutionCount);
         }
         finally
         {
@@ -5698,8 +6532,27 @@ public sealed class CudaBackend : IBackend
 
     #region Activations
 
+    private static int ValidateUnaryFloatOp(string operation, Tensor output, Tensor input)
+    {
+        if (!output.Shape.Equals(input.Shape))
+            throw new HartsyInferenceException($"CUDA {operation} requires matching shapes; got output={output.Shape}, input={input.Shape}.");
+        if (output.DType != input.DType)
+            throw new NotSupportedException($"CUDA {operation} requires matching dtypes; got output={output.DType}, input={input.DType}.");
+        if (input.DType != DType.F32 && input.DType != DType.F16 && input.DType != DType.BF16)
+            throw new NotSupportedException($"CUDA {operation} supports F32, F16, and BF16; got {input.DType}.");
+        if (input.ElementCount <= 0 || input.ElementCount > int.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(input),
+                $"CUDA {operation} element count must be in [1, {int.MaxValue}]; got {input.ElementCount}.");
+        }
+
+        return (int)input.ElementCount;
+    }
+
     public void Gelu(Tensor output, Tensor input)
     {
+        int count = ValidateUnaryFloatOp(nameof(Gelu), output, input);
         using NvtxRange _nvtx = NvtxRange.Push("Gelu");
         EnterOp();
         EnsureKernels();
@@ -5712,10 +6565,14 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            if (input.DType == DType.F16)
-                _kernels!.LaunchGeluF16(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+            if (input.DType == DType.F32)
+                _kernels!.LaunchGelu(pOut, pIn, count, _stream.Handle);
+            else if (input.DType == DType.F16)
+                _kernels!.LaunchGeluF16(pOut, pIn, count, _stream.Handle);
+            else if (input.DType == DType.BF16)
+                _kernels!.LaunchGeluBf16(pOut, pIn, count, _stream.Handle);
             else
-                _kernels!.LaunchGelu(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+                throw new NotSupportedException($"CUDA Gelu does not have a launcher for {input.DType}.");
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -6120,8 +6977,37 @@ public sealed class CudaBackend : IBackend
     {
         if (output.DType != DType.F32 && output.DType != DType.F16)
             throw new NotSupportedException($"CUDA MaxPool2D supports F32/F16 output — got {output.DType}.");
+        if (input.DType != DType.F32 && input.DType != DType.F16 && input.DType != DType.BF16)
+            throw new NotSupportedException($"CUDA MaxPool2D supports F32/F16/BF16 input — got {input.DType}.");
         if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
             throw new ArgumentException($"MaxPool2D requires [N, C, H, W] tensors; got input {input.Shape} / output {output.Shape}.");
+        for (int dimension = 0; dimension < 4; dimension++)
+        {
+            if (input.Shape[dimension] <= 0 || output.Shape[dimension] <= 0)
+                throw new ArgumentException($"MaxPool2D requires positive dimensions; got input {input.Shape} / output {output.Shape}.");
+        }
+        if (kernelH <= 0 || kernelW <= 0 || strideH <= 0 || strideW <= 0 || padH < 0 || padW < 0)
+            throw new ArgumentException(
+                $"MaxPool2D requires positive kernels/strides and non-negative padding; got kernel={kernelH}x{kernelW}, "
+                + $"stride={strideH}x{strideW}, pad={padH}x{padW}.");
+        if (input.Shape[0] != output.Shape[0] || input.Shape[1] != output.Shape[1])
+            throw new ArgumentException($"MaxPool2D batch/channel mismatch: input {input.Shape}, output {output.Shape}.");
+
+        long paddedH = checked(input.Shape[2] + 2L * padH);
+        long paddedW = checked(input.Shape[3] + 2L * padW);
+        if (paddedH < kernelH || paddedW < kernelW)
+            throw new ArgumentException(
+                $"MaxPool2D kernel exceeds padded input: input {input.Shape}, kernel={kernelH}x{kernelW}, pad={padH}x{padW}.");
+        long expectedH = (paddedH - kernelH) / strideH + 1;
+        long expectedW = (paddedW - kernelW) / strideW + 1;
+        if (output.Shape[2] != expectedH || output.Shape[3] != expectedW)
+            throw new ArgumentException(
+                $"MaxPool2D output shape mismatch: expected [{input.Shape[0]}, {input.Shape[1]}, {expectedH}, {expectedW}], got {output.Shape}.");
+        if (input.Shape[0] > int.MaxValue || input.Shape[1] > int.MaxValue || input.Shape[2] > int.MaxValue
+            || input.Shape[3] > int.MaxValue || output.Shape[2] > int.MaxValue || output.Shape[3] > int.MaxValue)
+            throw new ArgumentException("MaxPool2D dimensions must fit signed 32-bit launch arguments.");
+        if (input.DType != output.DType && input.ElementCount > int.MaxValue)
+            throw new ArgumentException("MaxPool2D dtype conversion currently supports at most Int32.MaxValue input elements.");
         EnterOp();
         EnsureKernels();
 
@@ -6133,7 +7019,9 @@ public sealed class CudaBackend : IBackend
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
-            ulong inTyped = CastIfNeeded(pIn, input.DType, output.DType, (int)input.ElementCount, out inCast);
+            ulong inTyped = input.DType == output.DType
+                ? pIn
+                : CastIfNeeded(pIn, input.DType, output.DType, (int)input.ElementCount, out inCast);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
@@ -6158,8 +7046,62 @@ public sealed class CudaBackend : IBackend
         if (output.DType != DType.F32 || value.DType != DType.F32 || sampOff.DType != DType.F32
             || attnLogits.DType != DType.F32 || refPoints.DType != DType.F32)
             throw new NotSupportedException("CUDA DeformableAttention supports F32 only.");
+        if (output.Shape.Rank != 3 || value.Shape.Rank != 3 || sampOff.Shape.Rank != 3 || attnLogits.Shape.Rank != 3)
+            throw new ArgumentException(
+                $"DeformableAttention expects output/value/offset/logit tensors with rank 3; got "
+                + $"output={output.Shape}, value={value.Shape}, offsets={sampOff.Shape}, logits={attnLogits.Shape}.");
+        if (output.Shape[0] != 1 || value.Shape[0] != 1 || sampOff.Shape[0] != 1 || attnLogits.Shape[0] != 1)
+            throw new ArgumentException("CUDA DeformableAttention currently supports batch size 1 only.");
+        if (heads <= 0 || levels <= 0 || points <= 0)
+            throw new ArgumentException(
+                $"DeformableAttention heads, levels, and points must be positive; got heads={heads}, levels={levels}, points={points}.");
         if (coords != 2 && coords != 4)
             throw new ArgumentException($"DeformableAttention coords must be 2 or 4, got {coords}.");
+        if (refQueryStride < coords || refLevelStride < 0 || (refLevelStride > 0 && refLevelStride < coords))
+            throw new ArgumentException(
+                $"Invalid DeformableAttention reference strides: query={refQueryStride}, level={refLevelStride}, coords={coords}.");
+        if (spatialShapes.Length != checked(levels * 2) || levelStart.Length != levels)
+            throw new ArgumentException(
+                $"DeformableAttention level metadata mismatch: levels={levels}, spatialShapes={spatialShapes.Length}, levelStart={levelStart.Length}.");
+
+        long nqLong = output.Shape[1];
+        long dLong = output.Shape[2];
+        if (nqLong <= 0 || dLong <= 0 || nqLong > int.MaxValue || dLong > int.MaxValue)
+            throw new ArgumentException($"DeformableAttention output dimensions must be in [1, Int32.MaxValue]; got {output.Shape}.");
+        if (dLong % heads != 0)
+            throw new ArgumentException($"DeformableAttention hidden size {dLong} must be divisible by heads {heads}.");
+        if (value.Shape[2] != dLong)
+            throw new ArgumentException($"DeformableAttention value width {value.Shape[2]} must match output width {dLong}.");
+
+        long offsetWidth = checked((long)heads * levels * points * 2);
+        long logitWidth = checked((long)heads * levels * points);
+        if (sampOff.Shape[1] != nqLong || sampOff.Shape[2] != offsetWidth)
+            throw new ArgumentException(
+                $"DeformableAttention offsets must be [1, {nqLong}, {offsetWidth}], got {sampOff.Shape}.");
+        if (attnLogits.Shape[1] != nqLong || attnLogits.Shape[2] != logitWidth)
+            throw new ArgumentException(
+                $"DeformableAttention logits must be [1, {nqLong}, {logitWidth}], got {attnLogits.Shape}.");
+
+        long expectedStart = 0;
+        for (int level = 0; level < levels; level++)
+        {
+            int levelH = spatialShapes[level * 2];
+            int levelW = spatialShapes[level * 2 + 1];
+            if (levelH <= 0 || levelW <= 0)
+                throw new ArgumentException($"DeformableAttention level {level} has invalid shape {levelH}x{levelW}.");
+            if (levelStart[level] != expectedStart)
+                throw new ArgumentException(
+                    $"DeformableAttention level {level} must start at {expectedStart}, got {levelStart[level]}.");
+            expectedStart = checked(expectedStart + (long)levelH * levelW);
+        }
+        if (value.Shape[1] != expectedStart)
+            throw new ArgumentException(
+                $"DeformableAttention value sequence length {value.Shape[1]} does not match spatial total {expectedStart}.");
+
+        long requiredRefs = checked((nqLong - 1) * refQueryStride + (long)(levels - 1) * refLevelStride + coords);
+        if (refPoints.ElementCount < requiredRefs)
+            throw new ArgumentException(
+                $"DeformableAttention reference tensor has {refPoints.ElementCount} values; at least {requiredRefs} are required.");
         EnterOp();
         EnsureKernels();
 
@@ -6445,7 +7387,9 @@ public sealed class CudaBackend : IBackend
 
             float* results = stackalloc float[2];
             CudaDriverApi.cuMemcpyDtoH((nint)results, pSums, 2 * sizeof(float)).ThrowOnError();
-            return results[1] > 0f ? results[0] / results[1] : 0f;
+            if (!float.IsFinite(results[0]) || !float.IsFinite(results[1]))
+                return float.NaN;
+            return results[1] > 0f ? results[0] / results[1] : results[0] > 0f ? float.PositiveInfinity : 0f;
         }
         finally
         {
@@ -6457,6 +7401,9 @@ public sealed class CudaBackend : IBackend
 
     public void Clamp(Tensor output, Tensor input, float min, float max)
     {
+        int count = ValidateUnaryFloatOp(nameof(Clamp), output, input);
+        if (float.IsNaN(min) || float.IsNaN(max) || min > max)
+            throw new ArgumentException($"CUDA Clamp requires ordered, non-NaN bounds; got min={min}, max={max}.");
         EnterOp();
         EnsureKernels();
 
@@ -6468,10 +7415,14 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            if (input.DType == DType.F16)
-                _kernels!.LaunchClampF16(pOut, pIn, min, max, (int)input.ElementCount, _stream.Handle);
+            if (input.DType == DType.F32)
+                _kernels!.LaunchClamp(pOut, pIn, min, max, count, _stream.Handle);
+            else if (input.DType == DType.F16)
+                _kernels!.LaunchClampF16(pOut, pIn, min, max, count, _stream.Handle);
+            else if (input.DType == DType.BF16)
+                _kernels!.LaunchClampBf16(pOut, pIn, min, max, count, _stream.Handle);
             else
-                _kernels!.LaunchClamp(pOut, pIn, min, max, (int)input.ElementCount, _stream.Handle);
+                throw new NotSupportedException($"CUDA Clamp does not have a launcher for {input.DType}.");
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -6862,6 +7813,37 @@ public sealed class CudaBackend : IBackend
     /// <summary>GQA K/V head repeat: [B, Hkv, L, D] → [B, Hkv*groupSize, L, D]. GPU-resident device-to-device gather.</summary>
     public void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize)
     {
+        if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
+            throw new HartsyInferenceException($"CUDA RepeatKvHeads requires rank-4 input/output; got input={input.Shape}, output={output.Shape}.");
+        if (kvHeads <= 0)
+            throw new ArgumentOutOfRangeException(nameof(kvHeads), kvHeads, "KV head count must be positive.");
+        if (groupSize <= 0)
+            throw new ArgumentOutOfRangeException(nameof(groupSize), groupSize, "KV repeat group size must be positive.");
+        if (input.DType != output.DType)
+            throw new NotSupportedException($"CUDA RepeatKvHeads requires matching dtypes; got output={output.DType}, input={input.DType}.");
+        if (input.DType != DType.F32 && input.DType != DType.F16 && input.DType != DType.BF16)
+            throw new NotSupportedException($"CUDA RepeatKvHeads supports F32, F16, and BF16; got {input.DType}.");
+        if (input.Shape[0] <= 0 || input.Shape[1] <= 0 || input.Shape[2] <= 0 || input.Shape[3] <= 0)
+            throw new HartsyInferenceException($"CUDA RepeatKvHeads requires positive input dimensions; got {input.Shape}.");
+        if (input.Shape[1] != kvHeads)
+            throw new HartsyInferenceException($"CUDA RepeatKvHeads kvHeads={kvHeads} does not match input head dimension {input.Shape[1]}.");
+        if (input.Shape[2] > int.MaxValue || input.Shape[3] > int.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(input),
+                $"CUDA RepeatKvHeads sequence/head dimensions exceed the launcher limit: {input.Shape}.");
+        }
+
+        long expandedHeads = (long)kvHeads * groupSize;
+        if (expandedHeads > uint.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(groupSize), groupSize, "Expanded KV head count exceeds the kernel index range.");
+        if (output.Shape[0] != input.Shape[0] || output.Shape[1] != expandedHeads ||
+            output.Shape[2] != input.Shape[2] || output.Shape[3] != input.Shape[3])
+        {
+            throw new HartsyInferenceException(
+                $"CUDA RepeatKvHeads expected output [{input.Shape[0]}, {expandedHeads}, {input.Shape[2]}, {input.Shape[3]}], got {output.Shape}.");
+        }
+
         EnterOp();
         EnsureKernels();
 
@@ -6876,10 +7858,14 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            if (input.DType == DType.F16)
-                _kernels!.LaunchRepeatKvF16(pOut, pIn, kvHeads, groupSize, seqLen, headDim, output.ElementCount, _stream.Handle);
-            else
+            if (input.DType == DType.F32)
                 _kernels!.LaunchRepeatKv(pOut, pIn, kvHeads, groupSize, seqLen, headDim, output.ElementCount, _stream.Handle);
+            else if (input.DType == DType.F16)
+                _kernels!.LaunchRepeatKvF16(pOut, pIn, kvHeads, groupSize, seqLen, headDim, output.ElementCount, _stream.Handle);
+            else if (input.DType == DType.BF16)
+                _kernels!.LaunchRepeatKvBf16(pOut, pIn, kvHeads, groupSize, seqLen, headDim, output.ElementCount, _stream.Handle);
+            else
+                throw new NotSupportedException($"CUDA RepeatKvHeads does not have a launcher for {input.DType}.");
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -6892,21 +7878,20 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>FlashAttention (online-softmax, GQA-aware, no materialized score matrix).</summary>
-    /// <remarks>Requires F32 and a power-of-two head dimension (true for the 64/128 head dims we run); falls back
-    /// to the base CPU reference otherwise.</remarks>
+    /// <remarks>Requires F32 and head dimension in [1, 1024]. The launcher pads small dimensions to a full warp
+    /// so the reduction's full-mask shuffle remains valid. Unsupported inputs fall back to the CPU reference.</remarks>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
+        ValidateFlashAttentionContract(
+            output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
-        // The kernel pads the block to the next power of two >= D, so any D up to 1024 works (Phi-3 D=96 etc.).
         bool kernelOk = d > 0 && d <= 1024;
         // F16-storage KV cache (halved VRAM): key/value are the FixedKvCache buffers, which under kvDtype=F16
         // are __half-typed; Q/out/sink/alibi are unaffected (still F32). v1 scope: monolithic kernel only —
         // the split-K path below is forced off for this case (LaunchFlashAttentionF16Kv has no split variant).
         bool f16Kv = key.DType == DType.F16 && value.DType == DType.F16;
-        bool kvOk = f16Kv || (key.DType == DType.F32 && value.DType == DType.F32);
-        if (query.DType != DType.F32 || !kvOk || output.DType != DType.F32 || !kernelOk
-            || (sink is not null && sink.DType != DType.F32) || (alibiSlopes is not null && alibiSlopes.DType != DType.F32))
+        if (!kernelOk)
         {
             AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
             return;
@@ -7001,6 +7986,7 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pK);
             GpuTransferHelper.FreeDevice(pV);
             if (pSink != 0) GpuTransferHelper.FreeDevice(pSink);
+            if (pAlibi != 0) GpuTransferHelper.FreeDevice(pAlibi);
         }
     }
 
@@ -7091,8 +8077,16 @@ public sealed class CudaBackend : IBackend
     {
         nuint bytes = (nuint)((long)values.Length * sizeof(T));
         ulong dptr = GpuTransferHelper.AllocateDevice(bytes);
-        fixed (T* p = values) CudaDriverApi.cuMemcpyHtoD(dptr, (nint)p, bytes).ThrowOnError();
-        return dptr;
+        try
+        {
+            fixed (T* p = values) CudaDriverApi.cuMemcpyHtoD(dptr, (nint)p, bytes).ThrowOnError();
+            return dptr;
+        }
+        catch
+        {
+            GpuTransferHelper.FreeDevice(dptr);
+            throw;
+        }
     }
 
     // ── Device-side decode position (autoregressive step-graph replay) ──────────────────────────────────────
@@ -7161,6 +8155,19 @@ public sealed class CudaBackend : IBackend
     public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
         float softcap = 0f, int slidingWindow = 0)
     {
+        // Graph decode can keep kvLen/qOffset exclusively on-device. Unsupported storage modes fall back to
+        // eager attention, whose validator requires meaningful host positions; the device path validates the
+        // same buffer/layout/GQA contract without pretending the zero host placeholders are current positions.
+        if (devicePos == 0 || query.DType != DType.F32 || key.DType != DType.F32
+            || value.DType != DType.F32 || output.DType != DType.F32)
+        {
+            FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
+            return;
+        }
+        ValidateFlashAttentionContract(
+            output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap,
+            sink: null, slidingWindow, alibiSlopes: null, positionOnDevice: true);
+
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
         bool kernelOk = d > 0 && d <= 1024;
@@ -7168,10 +8175,9 @@ public sealed class CudaBackend : IBackend
         // through to the eager FlashAttention above, which DOES handle F16 KV (monolithic kernel only, split
         // forced off there too). Intentional, not a gap: same "disable the fast path, not extend it" precedent
         // as Phase 6 disabling CUDA-graph decode when LLM layers are staged across devices.
-        if (devicePos == 0 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32 || !kernelOk)
+        if (!kernelOk)
         {
-            FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
-            return;
+            throw new NotSupportedException("Device-position FlashAttention supports head dimensions up to 1024.");
         }
         EnterOp();
         EnsureKernels();
@@ -7490,14 +8496,33 @@ public sealed class CudaBackend : IBackend
     /// <summary>MoE row-gather: output[m] = input[rowIndices[m]] (collect an expert's routed tokens).</summary>
     public unsafe void GatherRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices)
     {
+        if (ReferenceEquals(output, input))
+            throw new ArgumentException("GatherRows does not support an in-place output.", nameof(output));
         if (output.DType != DType.F32 || input.DType != DType.F32)
         {
             throw new NotSupportedException(
                 $"CUDA GatherRows requires F32 output/input; got output={output.DType}, input={input.DType}.");
         }
+        if (input.Shape.Rank < 1)
+            throw new ArgumentException("GatherRows input must have at least one dimension.", nameof(input));
+        long width = input.Shape[input.Shape.Rank - 1];
+        if (width <= 0 || width > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(input), $"GatherRows row width must be in [1,{int.MaxValue}]; got {width}.");
+        long inputRows = input.ElementCount / width;
+        long requiredOutputElements = checked((long)rowIndices.Length * width);
+        if (output.ElementCount != requiredOutputElements)
+            throw new ArgumentException(
+                $"GatherRows output has {output.ElementCount} elements; {rowIndices.Length} rows of width {width} require {requiredOutputElements}.",
+                nameof(output));
+        for (int i = 0; i < rowIndices.Length; i++)
+        {
+            if (rowIndices[i] < 0 || (long)rowIndices[i] >= inputRows)
+                throw new ArgumentOutOfRangeException(
+                    nameof(rowIndices), rowIndices[i], $"Row index at position {i} is outside [0,{inputRows}).");
+        }
         EnterOp();
         EnsureKernels();
-        int k = (int)input.Shape[input.Shape.Rank - 1];
+        int k = (int)width;
         ulong total = (ulong)rowIndices.Length * (ulong)k;
         ulong pIn = 0, pIdx = 0, pOut = 0;
         bool cachedOutput = false;
@@ -7515,7 +8540,18 @@ public sealed class CudaBackend : IBackend
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIdx);
+            GpuTransferHelper.FreeDevice(pIn);
         }
+    }
+
+    /// <inheritdoc />
+    public bool TryGatherRowsResident(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices)
+    {
+        EnterOp();
+        if (!GpuTransferHelper.IsWeightCached(input) && !GpuTransferHelper.IsActivationCached(input))
+            return false;
+        GatherRows(output, input, rowIndices);
+        return true;
     }
 
     /// <summary>Per-row argmax over the last dim: indices[r] = argmax_c input[r,c]. On-device; only indices sync back, not full logit rows.</summary>
@@ -7545,6 +8581,65 @@ public sealed class CudaBackend : IBackend
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
         }
+    }
+
+    /// <summary>Validates FlashAttention geometry before either the CUDA kernel or CPU reference can index it.</summary>
+    internal static void ValidateFlashAttentionContract(
+        Tensor output, Tensor query, Tensor key, Tensor value,
+        int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap,
+        Tensor? sink, int slidingWindow, Tensor? alibiSlopes, bool positionOnDevice = false)
+    {
+        if (output.Shape.Rank != 4 || query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4)
+            throw new ArgumentException(
+                $"FlashAttention requires rank-4 [B,H,S,D] tensors; got output={output.Shape}, Q={query.Shape}, K={key.Shape}, V={value.Shape}.");
+        if (output.DType != DType.F32 || query.DType != DType.F32)
+            throw new NotSupportedException(
+                $"FlashAttention requires F32 output/Q; got output={output.DType}, Q={query.DType}.");
+        if (key.DType != value.DType || (key.DType != DType.F32 && key.DType != DType.F16))
+            throw new NotSupportedException(
+                $"FlashAttention K/V must both be F32 or both be F16; got K={key.DType}, V={value.DType}.");
+        if (!float.IsFinite(scale))
+            throw new ArgumentOutOfRangeException(nameof(scale), "FlashAttention scale must be finite.");
+        if (!float.IsFinite(softcap) || softcap < 0f)
+            throw new ArgumentOutOfRangeException(nameof(softcap), "FlashAttention softcap must be finite and non-negative.");
+        if (slidingWindow < 0)
+            throw new ArgumentOutOfRangeException(nameof(slidingWindow), "FlashAttention sliding window must be non-negative.");
+
+        long b = query.Shape[0], hq = query.Shape[1], tq = query.Shape[2], d = query.Shape[3];
+        long hkv = key.Shape[1], lk = key.Shape[2];
+        if (b <= 0 || hq <= 0 || tq <= 0 || d <= 0 || hkv <= 0 || lk <= 0)
+            throw new ArgumentException($"FlashAttention dimensions must be positive; got Q={query.Shape}, K={key.Shape}.");
+        if (b > int.MaxValue || hq > int.MaxValue || tq > int.MaxValue || d > int.MaxValue
+            || hkv > int.MaxValue || lk > int.MaxValue)
+            throw new ArgumentException("FlashAttention dimensions exceed the signed 32-bit launch contract.");
+        long headRows = b * hq;
+        if (headRows > int.MaxValue || headRows > int.MaxValue / tq)
+            throw new ArgumentException("FlashAttention batch/head/query products exceed the signed 32-bit launch contract.");
+        if (output.Shape != query.Shape)
+            throw new ArgumentException($"FlashAttention output shape must equal Q; got output={output.Shape}, Q={query.Shape}.");
+        if (key.Shape != value.Shape)
+            throw new ArgumentException($"FlashAttention K/V shapes must match; got K={key.Shape}, V={value.Shape}.");
+        if (key.Shape[0] != b || key.Shape[3] != d)
+            throw new ArgumentException($"FlashAttention K/V must match Q batch and head dimension; got Q={query.Shape}, K={key.Shape}.");
+        if (kvGroup <= 0 || (long)kvGroup * hkv != hq)
+            throw new ArgumentException(
+                $"FlashAttention requires Hq == Hkv * kvGroup with a positive group; got Hq={hq}, Hkv={hkv}, kvGroup={kvGroup}.");
+        if (!positionOnDevice)
+        {
+            if (kvLen <= 0 || kvLen > lk)
+                throw new ArgumentOutOfRangeException(nameof(kvLen), kvLen, $"FlashAttention kvLen must be in [1,{lk}].");
+            if (qOffset < 0 || (causal && (long)qOffset + tq > kvLen))
+                throw new ArgumentOutOfRangeException(
+                    nameof(qOffset), qOffset, "FlashAttention causal query positions must lie inside the valid KV prefix.");
+        }
+        if (key.DType == DType.F16 && d > 1024)
+            throw new NotSupportedException("F16-KV FlashAttention supports head dimensions up to 1024; no F16 CPU fallback exists.");
+
+        if (sink is not null && (sink.DType != DType.F32 || sink.ElementCount != hq))
+            throw new ArgumentException($"FlashAttention sink must be F32 with exactly Hq={hq} elements; got {sink.DType} {sink.Shape}.");
+        if (alibiSlopes is not null && (alibiSlopes.DType != DType.F32 || alibiSlopes.ElementCount != hq))
+            throw new ArgumentException(
+                $"FlashAttention ALiBi slopes must be F32 with exactly Hq={hq} elements; got {alibiSlopes.DType} {alibiSlopes.Shape}.");
     }
 
     /// <summary>MoE weighted scatter-add (in place): output[rowIndices[m]] += scales[m]·input[m].</summary>
@@ -7580,9 +8675,40 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>GEGLU activation: output[i] = input[i] * GELU(input[i + outputElements]) via PTX kernel.</summary>
+    /// <summary>GEGLU activation splitting each logical row as <c>[value | gate]</c> along its last dimension.</summary>
     public void GeGlu(Tensor output, Tensor input)
     {
+        if (input.Shape.Rank == 0 || output.Shape.Rank != input.Shape.Rank)
+        {
+            throw new HartsyInferenceException(
+                $"CUDA GeGlu requires input/output with the same positive rank; got input={input.Shape}, output={output.Shape}.");
+        }
+        if (input.DType != output.DType)
+            throw new NotSupportedException($"CUDA GeGlu requires matching dtypes; got output={output.DType}, input={input.DType}.");
+        if (input.DType != DType.F32 && input.DType != DType.F16 && input.DType != DType.BF16)
+            throw new NotSupportedException($"CUDA GeGlu supports F32, F16, and BF16; got {input.DType}.");
+
+        long inputLastDim = input.Shape[input.Shape.Rank - 1];
+        if (inputLastDim <= 0 || (inputLastDim & 1) != 0)
+            throw new HartsyInferenceException($"CUDA GeGlu requires an even, positive input last dimension; got {inputLastDim} in {input.Shape}.");
+        long expectedInnerDim = inputLastDim / 2;
+        for (int dim = 0; dim < input.Shape.Rank - 1; dim++)
+        {
+            if (output.Shape[dim] != input.Shape[dim])
+                throw new HartsyInferenceException($"CUDA GeGlu output prefix must match input; got input={input.Shape}, output={output.Shape}.");
+        }
+        if (output.Shape[output.Shape.Rank - 1] != expectedInnerDim)
+        {
+            throw new HartsyInferenceException(
+                $"CUDA GeGlu output last dimension must be {expectedInnerDim} for input {input.Shape}; got output={output.Shape}.");
+        }
+        if (expectedInnerDim > int.MaxValue || output.ElementCount <= 0 || output.ElementCount > int.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(output),
+                $"CUDA GeGlu shape exceeds the 32-bit launcher range: input={input.Shape}, output={output.Shape}.");
+        }
+
         EnterOp();
         EnsureKernels();
 
@@ -7595,10 +8721,14 @@ public sealed class CudaBackend : IBackend
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
             int innerDim = (int)output.Shape[output.Shape.Rank - 1];
-            if (input.DType == DType.F16)
-                _kernels!.LaunchGeGluF16(pOut, pIn, innerDim, (int)output.ElementCount, _stream.Handle);
-            else
+            if (input.DType == DType.F32)
                 _kernels!.LaunchGeGlu(pOut, pIn, innerDim, (int)output.ElementCount, _stream.Handle);
+            else if (input.DType == DType.F16)
+                _kernels!.LaunchGeGluF16(pOut, pIn, innerDim, (int)output.ElementCount, _stream.Handle);
+            else if (input.DType == DType.BF16)
+                _kernels!.LaunchGeGluBf16(pOut, pIn, innerDim, (int)output.ElementCount, _stream.Handle);
+            else
+                throw new NotSupportedException($"CUDA GeGlu does not have a launcher for {input.DType}.");
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -7742,12 +8872,118 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>Splits <paramref name="input"/> into <paramref name="outputs"/> along <paramref name="dim"/>. Delegates to the CPU kernel.</summary>
-    /// <remarks>Split is pure memcpy and rare in our pipelines (one call per VAE encode), so the GPU round-trip is
-    /// acceptable. TODO: GPU-native Split via cuMemcpyDtoDAsync.</remarks>
+    /// <summary>
+    /// Splits <paramref name="input"/> into device-resident <paramref name="outputs"/> along
+    /// <paramref name="dim"/>, preserving every F32/F16/BF16 payload bit.
+    /// </summary>
     public void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim)
     {
-        HartsyInference.Cpu.Kernels.ElementWiseKernels.Split(outputs, input, dim);
+        SplitGeometry geometry = SplitContract.Validate(outputs, input, dim);
+        using NvtxRange _nvtx = NvtxRange.Push("Split");
+        EnterOp();
+
+        // Large contiguous outer slices are fastest on the copy engine, but many tiny copies serialize launch
+        // submission (last-dimension split can have millions of outer rows). Cap that path at 16 commands and
+        // require at least 64 KiB per command; the general kernel then handles fragmented geometry in one launch
+        // per output with coalesced reads/writes and a grid-stride loop.
+        bool useDeviceCopies = dim == 0;
+        if (!useDeviceCopies && geometry.Outer <= 16 / outputs.Length)
+        {
+            useDeviceCopies = true;
+            for (int t = 0; t < outputs.Length; t++)
+            {
+                long sliceBytes = checked(outputs[t].Shape[dim] * geometry.Inner * geometry.ElementSize);
+                if (sliceBytes < 64 * 1024)
+                {
+                    useDeviceCopies = false;
+                    break;
+                }
+            }
+        }
+        if (!useDeviceCopies)
+            EnsureKernels();
+
+        ulong pInput = 0;
+        ulong[] pOutputs = new ulong[outputs.Length];
+        nuint[] outputBytes = new nuint[outputs.Length];
+        bool[] cachedOutputs = new bool[outputs.Length];
+        try
+        {
+            pInput = GpuTransferHelper.CopyToDevice(input);
+            for (int t = 0; t < outputs.Length; t++)
+            {
+                outputBytes[t] = checked((nuint)(outputs[t].ElementCount * geometry.ElementSize));
+                pOutputs[t] = GpuTransferHelper.AllocateDevice(outputBytes[t]);
+            }
+
+            long splitOffset = 0;
+            for (int t = 0; t < outputs.Length; t++)
+            {
+                long outputDimension = outputs[t].Shape[dim];
+                if (useDeviceCopies)
+                {
+                    long inputStride = checked(geometry.InputDimension * geometry.Inner);
+                    long outputStride = checked(outputDimension * geometry.Inner);
+                    nuint sliceBytes = checked((nuint)(outputStride * geometry.ElementSize));
+                    for (long outer = 0; outer < geometry.Outer; outer++)
+                    {
+                        ulong sourceOffsetBytes = checked((ulong)(
+                            checked(outer * inputStride + checked(splitOffset * geometry.Inner))
+                            * geometry.ElementSize));
+                        ulong outputOffsetBytes = checked((ulong)(
+                            checked(outer * outputStride) * geometry.ElementSize));
+                        CudaMemory.CopyDeviceToDeviceAsync(
+                            pOutputs[t] + outputOffsetBytes,
+                            pInput + sourceOffsetBytes,
+                            sliceBytes,
+                            _stream.Handle);
+                    }
+                }
+                else
+                {
+                    _kernels!.LaunchSplitSlice(
+                        geometry.ElementSize == sizeof(ushort),
+                        pOutputs[t],
+                        pInput,
+                        geometry.Outer,
+                        geometry.InputDimension,
+                        outputDimension,
+                        geometry.Inner,
+                        splitOffset,
+                        _stream.Handle);
+                }
+                splitOffset = checked(splitOffset + outputDimension);
+            }
+
+            // Publish only after every copy/kernel launch succeeds. If a later binding fails, unpublish every
+            // earlier result before propagating the exception so Split never exposes a partial new result set.
+            try
+            {
+                for (int t = 0; t < outputs.Length; t++)
+                {
+                    GpuTransferHelper.CacheActivation(outputs[t], pOutputs[t], outputBytes[t]);
+                    cachedOutputs[t] = true;
+                }
+            }
+            catch
+            {
+                for (int t = 0; t < outputs.Length; t++)
+                {
+                    if (GpuTransferHelper.TryUncacheActivation(outputs[t], pOutputs[t]))
+                        cachedOutputs[t] = false;
+                }
+                throw;
+            }
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pInput);
+            for (int t = 0; t < pOutputs.Length; t++)
+            {
+                if (!cachedOutputs[t])
+                    GpuTransferHelper.FreeDevice(pOutputs[t]);
+            }
+        }
     }
 
     #endregion
@@ -8051,7 +9287,9 @@ public sealed class CudaBackend : IBackend
     public void FreeWeights(IEnumerable<Tensor> weights)
     {
         EnterOp();
-        GpuTransferHelper.FreeWeights(weights);
+        List<Tensor> materialized = weights as List<Tensor> ?? [.. weights];
+        GpuTransferHelper.FreeWeights(materialized);
+        foreach (Tensor weight in materialized) FreeFp8InputScale(weight);
     }
 
     public void FreeActivations()
@@ -8087,26 +9325,74 @@ public sealed class CudaBackend : IBackend
         GpuTransferHelper.TrimPool();
     }
 
+    /// <inheritdoc/>
+    public void ReleaseAttentionExecutionCache()
+    {
+        EnterOp();
+        ReleaseAttentionExecutionCacheCore();
+    }
+
+    /// <summary>Discards cuDNN SDPA plans/workspaces without touching weights, activations, convolution plans,
+    /// retry state, or cumulative engagement diagnostics. The lock covers both the stream drain and detach so a
+    /// first-call plan build/enqueue cannot race phase-boundary teardown.</summary>
+    private void ReleaseAttentionExecutionCacheCore()
+    {
+        lock (_cudnnSdpaLock)
+        {
+            // The interface promises a phase-boundary drain even when this backend used a custom attention path
+            // and therefore never created a cuDNN session. Holding the same lock as TryCudnnSdpa keeps the drain
+            // and possible session detach atomic with respect to cuDNN plan construction/enqueue.
+            _stream.Synchronize();
+            CudnnSdpa? session = _cudnnSdpa;
+            if (session is null)
+            {
+                return;
+            }
+            // Detach first. If native teardown reports a failure, no later attention call can observe and execute
+            // through the half-disposed session; it will construct a fresh one after this lock is released.
+            _cudnnSdpa = null;
+            session.Dispose();
+            Interlocked.Increment(ref _cudnnSdpaDisposedSessionCount);
+        }
+    }
+
     public void FreeAllDeviceMemory()
     {
         EnterOp();
-        long freeBefore = (long)_context.GetMemoryInfo().freeBytes;
-        StepGraphInvalidateForActivationFree();
+        long freeBefore = -1;
+        long freeAfter = -1;
+        Exception? firstError = null;
+        Try(() => freeBefore = (long)_context.GetMemoryInfo().freeBytes);
+        Try(StepGraphInvalidateForActivationFree);
         // Drop the cuDNN sessions too: their execution-plan + workspace caches held ~4.5 GB after a
         // Z-Image session (measured 2026-07-23 — enough to trip Ideogram's ≥20 GB guard after a model
         // switch). Both instances lazily recreate on next use; the only cost is one plan re-search.
-        _cudnnSdpa?.Dispose();
-        _cudnnSdpa = null;
-        _cudnnConv?.Dispose();
+        Try(ReleaseAttentionExecutionCacheCore);
+        CudnnConv? conv = _cudnnConv;
         _cudnnConv = null;
+        if (conv is not null)
+            Try(conv.Dispose);
         // EvictAll clears weights + casts + activations (syncing the stream first); the trim then returns the
         // stream-ordered pool's reservations so cuMemGetInfo/persistent allocs see the memory as actually free.
-        FreeW8A8Cache();
-        GpuTransferHelper.EvictAll();
-        GpuTransferHelper.TrimPool();
-        long freeAfter = (long)_context.GetMemoryInfo().freeBytes;
-        HartsyInference.Core.Logging.Logs.Info(
-            $"[Cuda] FreeAllDeviceMemory: free {freeBefore >> 20} MB → {freeAfter >> 20} MB");
+        Try(() => FreeW8A8Cache());
+        Try(GpuTransferHelper.EvictAll);
+        Try(FreeAllFp8InputScales);
+        Try(GpuTransferHelper.TrimPool);
+        Try(() => freeAfter = (long)_context.GetMemoryInfo().freeBytes);
+        if (freeBefore >= 0 && freeAfter >= 0)
+        {
+            HartsyInference.Core.Logging.Logs.Info(
+                $"[Cuda] FreeAllDeviceMemory: free {freeBefore >> 20} MB → {freeAfter >> 20} MB");
+        }
+        if (firstError is not null)
+            throw new InvalidOperationException(
+                "One or more CUDA resources failed to release during the full device-memory sweep.", firstError);
+
+        void Try(Action cleanup)
+        {
+            try { cleanup(); }
+            catch (Exception error) { firstError ??= error; }
+        }
     }
 
     public long FreeMemoryBytes()
@@ -8119,28 +9405,52 @@ public sealed class CudaBackend : IBackend
     public void FreePreloadedWeights()
     {
         EnterOp();
-        FreeW8A8Cache();
-        GpuTransferHelper.FreeAllCached();
+        FreeAllWeightCachesCore();
     }
 
     /// <summary>Evicts all cached GPU weight buffers. Call between pipeline stages to free VRAM.</summary>
     public void EvictGpuCache()
     {
         EnterOp();
-        GpuTransferHelper.EvictAll();
+        FreeAllWeightCachesCore();
+    }
+
+    private void FreeAllWeightCachesCore()
+    {
+        List<Exception>? failures = null;
+        void Attempt(Action cleanup)
+        {
+            try { cleanup(); }
+            catch (Exception error) { (failures ??= []).Add(error); }
+        }
+        // W8A8 frees are stream ordered; the transfer-cache sweep drains that stream before static FP8 scale
+        // pointers are synchronously released. Every independent owner is attempted even after an earlier error.
+        Attempt(() => FreeW8A8Cache());
+        Attempt(GpuTransferHelper.EvictAll);
+        Attempt(FreeAllFp8InputScales);
+        if (failures is not null) throw new AggregateException("One or more CUDA weight caches failed to release.", failures);
     }
 
     /// <summary>Returns GPU cache stats: (cachedBytes, hits, misses).</summary>
     public (long cachedBytes, long hits, long misses) GetGpuCacheStats()
     {
+        EnterOp();
         return GpuTransferHelper.GetStats();
     }
 
     /// <summary>Number of lazy D2H syncs since <see cref="ResetD2hSyncCount"/> — each is a full GPU stall plus a copy.</summary>
-    public long GetD2hSyncCount() => GpuTransferHelper.GetSyncCount();
+    public long GetD2hSyncCount()
+    {
+        EnterOp();
+        return GpuTransferHelper.GetSyncCount();
+    }
 
     /// <summary>Resets the device-to-host sync counter (call before a region you want to measure for residency).</summary>
-    public void ResetD2hSyncCount() => GpuTransferHelper.ResetSyncCount();
+    public void ResetD2hSyncCount()
+    {
+        EnterOp();
+        GpuTransferHelper.ResetSyncCount();
+    }
 
     /// <summary>Foundation check for graph-based decode: capture a Scale kernel, replay, change input, replay again.</summary>
     /// <remarks>A working capture/replay returns (input0·3, input1·3) = (6, 15) — proving replay reads live buffer content
@@ -8199,104 +9509,189 @@ public sealed class CudaBackend : IBackend
 
     #region Disposal
 
+    /// <summary>Releases every resource owned by this backend exactly once.</summary>
+    /// <remarks>Callers must quiesce inference work (the server's DeviceGate/request drain) before disposal. Concurrent
+    /// Dispose callers are supported; Dispose racing an in-flight tensor operation is intentionally not.</remarks>
     public void Dispose()
     {
-        if (!_disposed)
+        Exception? failure = null;
+        int observed = Interlocked.CompareExchange(ref _lifecycleState, LifecycleClaimed, LifecycleActive);
+        if (observed == LifecycleActive)
         {
-            _disposed = true;
-
-            if (NvtxRange.ProfileEnabled)
-                NvtxRange.DumpProfile(Environment.GetEnvironmentVariable("HARTSY_PROFILE_OUT") ?? "/tmp/hartsy_profile.txt");
-
-            // Bind context on the disposing thread so cuMemFree / cublasDestroy /
-            // cuStreamDestroy don't hit CUDA_ERROR_INVALID_CONTEXT. Disposal can run
-            // on the finalizer thread or a different worker than constructed us.
-            EnterOp();
-
-            if (_dp4aScratch != 0) { GpuTransferHelper.FreeDevice(_dp4aScratch); _dp4aScratch = 0; _dp4aScratchBytes = 0; }
-            if (_argmaxScratch != 0) { GpuTransferHelper.FreeDevice(_argmaxScratch); _argmaxScratch = 0; }
-            if (_ssmDeltaScratch != 0) { GpuTransferHelper.FreeDevice(_ssmDeltaScratch); _ssmDeltaScratch = 0; _ssmDeltaScratchBytes = 0; }
-            FreeW8A8Cache();
-            GpuTransferHelper.EvictAll();
-            _streamingCache.UnregisterPinnedSources();
-            _kernels?.Dispose();
-
-            if (_fp8Executor is not null)
-            {
-                _fp8Executor.Dispose();
-                _fp8Executor = null;
-            }
-
-            if (_int8Executor is not null)
-            {
-                _int8Executor.Dispose();
-                _int8Executor = null;
-            }
-
-            if (_ltGemmExecutor is not null)
-            {
-                _ltGemmExecutor.Dispose();
-                _ltGemmExecutor = null;
-            }
-
-            if (_tensorCoreGemm is not null)
-            {
-                _tensorCoreGemm.Dispose();
-                _tensorCoreGemm = null;
-            }
-
-            if (_cudnnSdpa is not null)
-            {
-                _cudnnSdpa.Dispose();
-                _cudnnSdpa = null;
-            }
-
-            if (_cudnnConv is not null)
-            {
-                _cudnnConv.Dispose();
-                _cudnnConv = null;
-            }
-
-            if (_stepGraph is not null)
-            {
-                _stepGraph.Dispose();
-                _stepGraph = null;
-            }
-
-            if (_cublasHandle != 0)
-            {
-                CublasApi.cublasDestroy(_cublasHandle);
-                _cublasHandle = 0;
-            }
-
-            // Drop this backend's registration before tearing the context down, so nothing later resolves to
-            // freed stream handles. State keys are per-backend and never reused, so this backend's
-            // finalizer-cleanup bucket is discarded unconditionally (EvictAll above already freed everything
-            // those callbacks could reference) — a live same-device sibling has its own key, bucket, and
-            // stream binding, all untouched by this teardown.
-            GpuTransferHelper.Unregister(_transferState);
-            HartsyInference.Core.Tensors.Tensor.DiscardPendingFinalizerGpuCleanup(_transferState.Key);
-            DeviceMempoolPolicy.Release(_context.DeviceOrdinal);
-
-            // Order: upload stream first (no other code holds events on it after
-            // EvictAll above), then compute stream, then context.
-            _uploadStream.Dispose();
-            _stream.Dispose();
-            _context.Dispose();
+            failure = RunClaimedCleanup(abandoned: false);
+        }
+        else if (observed == LifecycleClaimed)
+        {
+            // Concurrent Dispose callers observe deterministic completion without racing a partially torn-down
+            // native object graph. The winner alone executes cleanup.
+            _cleanupCompleted.Wait();
+            failure = Volatile.Read(ref _cleanupFailure);
         }
         GC.SuppressFinalize(this);
+        if (failure is not null) throw failure;
+    }
+
+    private Exception? RunClaimedCleanup(bool abandoned)
+    {
+        Interlocked.Increment(ref _cleanupExecutionCount);
+        List<Exception>? failures = null;
+        GpuTransferHelper.State? state = _transferState;
+
+        void Attempt(string resource, Action cleanup)
+        {
+            try { cleanup(); }
+            catch (Exception error)
+            {
+                (failures ??= []).Add(new InvalidOperationException($"CUDA cleanup failed for {resource}.", error));
+            }
+        }
+
+        try
+        {
+            // This is deliberately the first cleanup transition. The State remains strongly available through the
+            // local explicit handle, but Resolve/_sole/_byContext/StatesOnDevice can no longer select it while native
+            // streams, caches, and handles are being dismantled. It is inside the terminal try/finally so even an
+            // unexpected managed retirement failure cannot strand LifecycleClaimed or deadlock another Dispose.
+            if (state is not null) Attempt("transfer-state route retirement", () => GpuTransferHelper.BeginRetire(state));
+
+            if (!abandoned && NvtxRange.ProfileEnabled)
+                Attempt("NVTX profile dump", () => NvtxRange.DumpProfile(
+                    Environment.GetEnvironmentVariable("HARTSY_PROFILE_OUT") ?? "/tmp/hartsy_profile.txt"));
+
+            if (_context is not null) Attempt("context binding", _context.EnsureCurrent);
+            CudaGraph? graph = _stepGraph;
+            _stepGraph = null;
+            bool graphCapturing = _stepGraphCapturing;
+            _stepGraphCapturing = false;
+            if (graph is not null && graphCapturing) Attempt("open graph capture abort", graph.AbortCapture);
+            if (state is not null && graphCapturing)
+            {
+                state.TrackCaptureWindow = false;
+                nint captureStream = state.StreamHandle;
+                if (captureStream != 0)
+                    Attempt("aborted graph-private cache purge", () => GpuTransferHelper.PurgeAbortedCaptureAllocs(state, captureStream));
+            }
+            if (graph is not null) Attempt("step graph", graph.Dispose);
+
+            // Synchronizing an actively capturing stream is illegal, so capture is aborted/purged above first.
+            if (_stream is not null) Attempt("compute-stream drain", _stream.Synchronize);
+            if (_uploadStream is not null) Attempt("upload-stream drain", _uploadStream.Synchronize);
+
+            ulong dp4aScratch = _dp4aScratch;
+            _dp4aScratch = 0;
+            _dp4aScratchBytes = 0;
+            ulong argmaxScratch = _argmaxScratch;
+            _argmaxScratch = 0;
+            ulong ssmScratch = _ssmDeltaScratch;
+            _ssmDeltaScratch = 0;
+            _ssmDeltaScratchBytes = 0;
+            if (state is not null)
+            {
+                if (dp4aScratch != 0) Attempt("dp4a scratch", () => GpuTransferHelper.FreeDevice(state, dp4aScratch));
+                if (argmaxScratch != 0) Attempt("argmax scratch", () => GpuTransferHelper.FreeDevice(state, argmaxScratch));
+                if (ssmScratch != 0) Attempt("SSM delta scratch", () => GpuTransferHelper.FreeDevice(state, ssmScratch));
+                Attempt("W8A8 caches", () => FreeW8A8Cache(state));
+            }
+            Attempt("FP8 input-scale cache", FreeAllFp8InputScales);
+            if (state is not null) Attempt("transfer caches", () => GpuTransferHelper.EvictAll(state));
+            if (_streamingCache is not null) Attempt("streaming pinned staging", _streamingCache.UnregisterPinnedSources);
+
+            // The explicit-state frees above can enqueue stream-ordered releases. Drain again before destroying
+            // modules/executors/streams, independently attempting both streams even if one reports an error.
+            if (_stream is not null) Attempt("post-free compute-stream drain", _stream.Synchronize);
+            if (_uploadStream is not null) Attempt("post-free upload-stream drain", _uploadStream.Synchronize);
+
+            if (_kernels is not null)
+                Attempt("kernel modules", () => { lock (_cudnnSdpaLock) _kernels.Dispose(); });
+
+            CudnnSdpa? sdpa = null;
+            Attempt("cuDNN SDPA detach", () =>
+            {
+                lock (_cudnnSdpaLock)
+                {
+                    sdpa = _cudnnSdpa;
+                    _cudnnSdpa = null;
+                }
+            });
+            if (sdpa is not null)
+            {
+                Attempt("cuDNN SDPA session", () =>
+                {
+                    sdpa.Dispose();
+                    Interlocked.Increment(ref _cudnnSdpaDisposedSessionCount);
+                });
+            }
+
+            Fp8GemmExecutor? fp8;
+            Int8GemmExecutor? int8;
+            LtGemmExecutor? lt;
+            TensorCoreGemm? tensorCore;
+            lock (_nativeExecutorLock)
+            {
+                fp8 = _fp8Executor;
+                _fp8Executor = null;
+                int8 = _int8Executor;
+                _int8Executor = null;
+                lt = _ltGemmExecutor;
+                _ltGemmExecutor = null;
+                tensorCore = _tensorCoreGemm;
+                _tensorCoreGemm = null;
+            }
+            if (fp8 is not null) Attempt("FP8 GEMM executor", fp8.Dispose);
+            if (int8 is not null) Attempt("INT8 GEMM executor", int8.Dispose);
+            if (lt is not null) Attempt("cuBLASLt GEMM executor", lt.Dispose);
+            if (tensorCore is not null) Attempt("tensor-core GEMM executor", tensorCore.Dispose);
+            CudnnConv? conv = Interlocked.Exchange(ref _cudnnConv, null);
+            if (conv is not null) Attempt("cuDNN convolution", conv.Dispose);
+
+            nint cublas = Interlocked.Exchange(ref _cublasHandle, 0);
+            if (cublas != 0) Attempt("cuBLAS handle", () => CublasApi.cublasDestroy(cublas).ThrowOnCublasError());
+
+            if (state is not null)
+                Attempt("tensor finalizer-cleanup bucket", () => Tensor.RetireFinalizerGpuCleanup(state.Key));
+
+            if (_context is not null && Interlocked.Exchange(ref _mempoolPolicyAcquired, 0) != 0)
+                Attempt("device mempool policy", () => DeviceMempoolPolicy.Release(_context.DeviceOrdinal));
+
+            // Destroy side stream first, then compute stream, then release the primary-context retain.
+            if (_uploadStream is not null) Attempt("upload stream", _uploadStream.Dispose);
+            if (_stream is not null) Attempt("compute stream", _stream.Dispose);
+            if (_context is not null) Attempt("CUDA context", _context.Dispose);
+        }
+        finally
+        {
+            // CompleteRetire is managed-only and must happen even if a future cleanup edit escapes Attempt.
+            if (state is not null)
+            {
+                try { GpuTransferHelper.CompleteRetire(state); }
+                catch (Exception error)
+                {
+                    (failures ??= []).Add(new InvalidOperationException("CUDA cleanup failed to retire transfer state.", error));
+                }
+            }
+            _cleanupFailure = failures is null
+                ? null
+                : new AggregateException("One or more CUDA backend resources failed to release.", failures);
+            Volatile.Write(ref _lifecycleState, LifecycleCleaned);
+            _cleanupCompleted.Set();
+        }
+
+        return _cleanupFailure;
     }
 
     ~CudaBackend()
     {
-        if (!_disposed)
+        if (Interlocked.CompareExchange(ref _lifecycleState, LifecycleClaimed, LifecycleActive) != LifecycleActive)
+            return;
+        try
         {
-            _disposed = true;
-            if (_cublasHandle != 0)
-            {
-                CublasApi.cublasDestroy(_cublasHandle);
-                _cublasHandle = 0;
-            }
+            BackendAbandonmentReaper.Enqueue(this);
+        }
+        catch
+        {
+            // A finalizer must never terminate the process. No native call is legal here; an enqueue OOM is the
+            // sole case where the process cannot preserve the abandoned instance for managed-worker cleanup.
+            Interlocked.Increment(ref _abandonedCleanupFailedCount);
         }
     }
 

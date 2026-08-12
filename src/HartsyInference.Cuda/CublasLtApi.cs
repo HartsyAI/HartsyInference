@@ -2,9 +2,9 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>P/Invoke bindings for cuBLASLt — the lightweight cuBLAS API that supports FP8 GEMM with per-tensor scale
-/// factors. Only usable on Ada (SM 8.9+) and Hopper (SM 9.0+) GPUs. On Ampere and below, the matrix-mul path falls
-/// back to FP16 cublasGemmEx via <see cref="CudaBackend"/>'s cast-then-GEMM logic.</summary>
+/// <summary>P/Invoke bindings for cuBLASLt. General F32/F16/BF16 matmul and epilogue fusion are available across
+/// the supported CUDA devices; individual low-precision formats such as FP8 still have architecture-specific
+/// requirements enforced by their executors.</summary>
 internal static partial class CublasLtApi
 {
     private const string LibName = "cublasLt";
@@ -79,13 +79,13 @@ internal static partial class CublasLtApi
     internal const int CUBLASLT_MATMUL_DESC_TRANSB = 4;
     internal const int CUBLASLT_MATMUL_DESC_EPILOGUE = 7;
     internal const int CUBLASLT_MATMUL_DESC_BIAS_POINTER = 8;
-    internal const int CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE = 32;
+    internal const int CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE = 26;
     internal const int CUBLASLT_MATMUL_DESC_A_SCALE_POINTER = 17;
     internal const int CUBLASLT_MATMUL_DESC_B_SCALE_POINTER = 18;
     internal const int CUBLASLT_MATMUL_DESC_C_SCALE_POINTER = 19;
     internal const int CUBLASLT_MATMUL_DESC_D_SCALE_POINTER = 20;
     internal const int CUBLASLT_MATMUL_DESC_AMAX_D_POINTER = 21;
-    internal const int CUBLASLT_MATMUL_DESC_FAST_ACCUM = 28;
+    internal const int CUBLASLT_MATMUL_DESC_FAST_ACCUM = 25;
 
     // ── Matrix Layout Attributes ────────────────────────────────────────
 
@@ -95,6 +95,23 @@ internal static partial class CublasLtApi
     // ── Preference Attributes ───────────────────────────────────────────
 
     internal const int CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES = 1;
+    internal const int CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES = 5;
+    internal const int CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES = 6;
+    internal const int CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES = 7;
+    internal const int CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES = 8;
+
+    // cublasStatus_t values used to distinguish an ordinary unsupported-plan fallback from a
+    // broken binding, poisoned context, or failed execution. Keep these beside the Lt bindings so
+    // the executor never has to infer status classes from exception text.
+    internal const int CUBLAS_STATUS_SUCCESS = 0;
+    internal const int CUBLAS_STATUS_NOT_INITIALIZED = 1;
+    internal const int CUBLAS_STATUS_ALLOC_FAILED = 3;
+    internal const int CUBLAS_STATUS_INVALID_VALUE = 7;
+    internal const int CUBLAS_STATUS_ARCH_MISMATCH = 8;
+    internal const int CUBLAS_STATUS_MAPPING_ERROR = 11;
+    internal const int CUBLAS_STATUS_EXECUTION_FAILED = 13;
+    internal const int CUBLAS_STATUS_INTERNAL_ERROR = 14;
+    internal const int CUBLAS_STATUS_NOT_SUPPORTED = 15;
 
     // ── Epilogue values (cublasLtEpilogue_t) ────────────────────────────
     // Fuse bias and/or activation into the GEMM epilogue, removing a separate

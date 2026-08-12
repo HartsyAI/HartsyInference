@@ -65,7 +65,7 @@ public sealed record Lumina2Config
     /// <summary>VAE spatial downscale factor (8 for Flux VAE).</summary>
     public int VaeDownscaleFactor { get; init; } = 8;
 
-    /// <summary>Static shift for FlowMatchEulerDiscreteScheduler. Lumina 2.0's diffusers pipeline computes a dynamic shift based on image sequence length (base=0.5, max=1.15); for fixed-resolution generation we use a static default of 6.0 which matches the Z-Image-Base setting and is a reasonable midpoint for 1024×1024.</summary>
+    /// <summary>Static shift for FlowMatchEulerDiscreteScheduler. The canonical Lumina-Image-2.0 scheduler uses <c>shift=6.0</c> with dynamic shifting disabled.</summary>
     public float SchedulerShift { get; init; } = 6.0f;
 
     /// <summary>Lumina-Image-2.0 (2B) preset — 26 layers, hidden=2304, GQA 24:8, axes [32,32,32], θ=10000. FfnDim=6144 (8/3 * 2304 rounded to multiple of 256). Verified against <c>Alpha-VLLM/Lumina-Image-2.0/transformer/config.json</c>.</summary>

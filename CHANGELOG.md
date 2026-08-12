@@ -14,6 +14,27 @@ stable release will require. Dates are UTC.
   record-shape change for transports that set it; the SwarmUI extension's mapping was removed in the same pass.
 
 ### Added
+- **Device-resident CFG+Euler for the image denoise loops** (CUDA image bring-up): Lance, Lumina2, HiDream,
+  F-Lite, Kandinsky5, SD3, and Z-Image's fast path now run guidance + the Euler update in-place on device via
+  `CfgEulerStep` and the new fused `CfgRenormEulerStep` (Lance renorm), `CfgNormalizedEulerStep` (Lumina2
+  `cfg_normalization`), and `AffineMix`/`MaskedAffineMixInPlace` (SD3 img2img noise + masked-inpaint blend/
+  recomposite) — replacing per-step scalar host loops over `DataPointer`. New `MixContract`/`PatchTokenContract`/
+  `SplitContract` validate the op geometry identically across backends. BF16 elementwise dispatch (Gelu, Clamp,
+  GeGlu, RepeatKvHeads) no longer silently falls through to the F32 kernel — GeGlu gained a real BF16 kernel,
+  RepeatKvHeads a 16-bit bit-copy launcher, and unsupported dtypes now throw.
+- **Z-Image lifecycle hardening**: Base/Turbo checkpoint-variant detection from the filename, two independent
+  prompt-cache layers, a Qwen3 tokenizer rewrite (byte-level encoding gap, `<think>` handling, tokenization-
+  boundary fix) golden-tested against HF tokenizers 0.22.2 output, and a CUDA-graph-captured denoise step for
+  the packed fast path. Scope note: the packed device-resident loop covers t2i, img2img, and CFG; masked
+  inpaint and regional conditioning still run the host-stepped loop (per-step `ApplyZImageCfg`/`scheduler.Step`
+  on the CPU) — porting those onto the SD3 `MaskedAffineMixInPlace` pattern is tracked follow-up work.
+- **Kernel build reproducibility**: `conv/`, `vision/`, and `wan/` gain the same `build.sh` (nvcc, or the
+  committed `nvrtc_compile` fallback) the other kernel domains already had — their shipped PTX previously had
+  no scripted rebuild path at all; `dequant/build.sh` now covers `w8a8` (sm_75) and `fp8_quant` (sm_80, per its
+  shipped target) and gains the nvrtc fallback; `dit/build.sh` covers `mg3_action`. 13 of 16 artifacts
+  reproduce bit-identically from source; `stepcache`/`w8a8`/`wan_vae_norm` are regenerated with the current
+  pinned toolchain (all kernel-family GPU tests pass against the regenerated artifacts).
+
 - **Wan 2.2 A14B dual-expert swap through the native contract** (regression restore): `VideoRequest.VideoSwapModel`
   + `VideoSwapPercent` (fraction of steps for the low-noise expert; null = official 0.875/0.9 boundary) →
   `WanVideoRecipe` loads the second DiT and warps the fraction through the flow shift
@@ -109,6 +130,20 @@ stable release will require. Dates are UTC.
   waveform) via a shared `ProbeTensor` helper.
 
 ### Changed
+- **`LlamaStyleEncoder` attention glue is device-resident** — the per-layer CPU reshape/RoPE/GQA-repeat/merge
+  `float*` loops are replaced with the existing `Permute0213`/`ApplyRopeSingleHeadMajor`/`RepeatKvHeads`
+  kernels (this encoder is shared by Qwen-Image, Z-Image, Krea2, Boogu, Flux.2, Ideogram 4, Lumina2, OmniGen2
+  and others); tests assert the D2H sync count, not just numerics.
+- **Lumina2 sampling schedule corrected — output images change.** The scheduler previously applied Flux-style
+  dynamic shifting derived from the image token count (an experiment its own comment marked VALIDATION-PENDING,
+  using Flux's base/max-shift constants); the official Alpha-VLLM/Lumina-Image-2.0 `scheduler_config.json` is
+  `shift: 6.0` with `use_dynamic_shifting: false`, so the pipeline now uses the checkpoint's static shift. Same
+  seed produces a (correctly) different image than prior releases.
+- **SD3 patchify/final-layer/masked-mix run on device**; `flash_attn_v2_tf32` rejects partial query tiles
+  (OOB read) and zero-fills its shared-memory K/V tail (stale-value poisoning); MaxPool distinguishes an empty
+  window from a valid all-−Inf one; MSDA uses true −Inf softmax init and 64-bit index products; the cuDNN SDPA
+  plan cache is keyed by attention scale; the step-cache treats a zero-denominator relative distance as
+  Infinity (was a false cache HIT); Sage's F32→F16 V-narrowing is opt-in (`HARTSY_SAGE_UNSAFE_F32_V_NARROW`).
 - **SeedVR2 DiT is device-resident** — the bring-up host-math forward (window gather/scatter, rope,
   qk-norm, AdaSingle on CPU spans; ~200 stream drains per forward) is replaced with backend-op
   composition: fused `QkvSplitNorm`, `RowGather`/`RowScatterAdd` window packing over cached per-geometry
@@ -121,6 +156,29 @@ stable release will require. Dates are UTC.
   is logged at Debug level.
 
 ### Fixed
+- **Z-Image Base checkpoints were silently corrupted when the filename carried no variant token.** The official
+  Base release ships under the bare family name (`z_image_bf16.safetensors`); variant detection fell through to
+  Turbo's policy, whose F16 attention narrowing overflows Base's >83k value-projection range into Inf — a
+  garbage image with no error. Bare family naming now positively detects Base, and genuinely ambiguous
+  filenames default to the numerically safe Base policy (F32 attention, shift 6) with a loud warning — a
+  misfiled Turbo merely runs slower, instead of a misfiled Base corrupting. Verified with a real generation
+  from the official Comfy-Org single-file on the exact previously-corrupted filename.
+- **Z-Image `ReleaseDeviceCache` could leave the captured denoise step graph pointing at freed memory** — the
+  graph bakes the caption-pin and RoPE-table device addresses it frees, so a later same-signature forward
+  could replay against freed allocations (CUDA 700 context poison). The release path now invalidates the
+  graph first, keeps an invalidation failure as the first error, and continues the rest of cleanup.
+- **`CfgNormalizedEulerStep`/`ApplyCfgNormalized` produced NaN for `eps=0` with an all-zero guided row**
+  (0/0 in the norm ratio; NaN then poisons `z` through `0·NaN`). A zero denominator now resolves the ratio to
+  0 — exact, since an all-zero row contributes nothing — identically in the IBackend fallback, the CUDA
+  kernel (`dit_f32.ptx` regenerated), and the host helper; new CPU+CUDA regression test.
+- **cuDNN auto-fetch 404'd for CUDA < 12** (NVIDIA publishes no cuDNN 9.21 redist there) — now refused
+  up-front with manual-install guidance instead of attempting the download.
+- **`Qwen3Tokenizer` hardcoded its chat special-token ids** (`<think>`, `<|im_start|>`, pad/EOS), which only
+  fit the embedded artifact — a caller-supplied `tokenizer.json` now has them resolved from its added-token
+  table, with a logged fallback when absent.
+- **Z-Image rejected legitimate solid-color output** — a uniformly black/white frame now only fails the
+  generation when the decoded F32 tensor is actually non-finite; a finite solid frame (valid prompt outcome,
+  inpaint over a solid source) is accepted with a log line.
 - **CUDA BF16/F16 GroupNorm mis-read non-F32 affine weights.** `CastAffineDownIfF32` only converted an
   F32 affine down to the kernel dtype; an F16-checkpoint affine (e.g. the numz SeedVR2 VAE) was passed
   raw to the BF16 kernel — F16 bits reinterpreted as BF16 → garbage scale/shift and flat-gray output.

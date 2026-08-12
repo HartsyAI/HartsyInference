@@ -31,6 +31,10 @@ internal static unsafe class GpuTransferHelper
         /// tensor's GPU bindings, and the finalizer-cleanup buckets.</summary>
         public nint Key;
 
+        /// <summary>Original registry-routing handle. Kept stable until final retirement even if the owning
+        /// CudaContext has already zeroed its native handle during a faulted cleanup path.</summary>
+        public nint RegisteredContextHandle;
+
         /// <summary>Cache mapping Tensor object references to GPU device pointers (weights — permanent).</summary>
         public readonly Dictionary<Tensor, ulong> WeightCache = new(ReferenceEqualityComparer.Instance);
 
@@ -101,12 +105,38 @@ internal static unsafe class GpuTransferHelper
         /// thread that's never bound the context would hit CUDA_ERROR_INVALID_CONTEXT.</summary>
         public CudaContext? Context;
 
-        /// <summary>Set when this state's backend is torn down (<see cref="Unregister"/>). Stale promoted-weight
+        /// <summary>Set at the start of backend teardown. A retiring state remains in the registry only so its
+        /// owner can clean it through explicit-state APIs; it is immediately excluded from ambient, sole-state,
+        /// context-fallback, and same-device routing.</summary>
+        public volatile bool Retiring;
+
+        /// <summary>Set when this state's backend is fully torn down (<see cref="CompleteRetire"/>). Stale promoted-weight
         /// callbacks that survived teardown (queued by tensor finalizers before their callbacks could be detached)
         /// check this FIRST and bail out — reading a bool field is safe on a resurrected object graph, whereas
         /// touching <see cref="UploadTracker"/> is not (a ConditionalWeakTable whose Container was finalized while
         /// the state was unreachable throws NRE from its freed dependent handles — the GGUF model-switch crash).</summary>
         public volatile bool Unregistered;
+
+        private int _activeCallbacks;
+        private readonly ManualResetEventSlim _callbacksDrained = new(initialState: true);
+
+        /// <summary>Claims a tensor lifecycle callback only while this State is routable. The second retirement
+        /// check closes the race where teardown publishes Retiring immediately after the first check.</summary>
+        public bool TryEnterCallback()
+        {
+            if (Retiring || Unregistered) return false;
+            if (Interlocked.Increment(ref _activeCallbacks) == 1) _callbacksDrained.Reset();
+            if (!Retiring && !Unregistered) return true;
+            ExitCallback();
+            return false;
+        }
+
+        public void ExitCallback()
+        {
+            if (Interlocked.Decrement(ref _activeCallbacks) == 0) _callbacksDrained.Set();
+        }
+
+        public void WaitForCallbacksToDrain() => _callbacksDrained.Wait();
 
         public long CachedBytes;
         public long Hits;
@@ -171,7 +201,7 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Monotonic source for <see cref="State.Key"/>. Starts at 1; key 0 is the context-less bucket.</summary>
     private static long _nextKey;
 
-    /// <summary>Serializes Register/Unregister so <see cref="_sole"/> and the indexes stay consistent.</summary>
+    /// <summary>Serializes registration/retirement so <see cref="_sole"/> and the indexes stay consistent.</summary>
     private static readonly object _registryLock = new();
 
     /// <summary>Context handles already warned about ambiguous ambient-less resolution.</summary>
@@ -193,6 +223,7 @@ internal static unsafe class GpuTransferHelper
         State state = new State
         {
             Key = (nint)Interlocked.Increment(ref _nextKey),
+            RegisteredContextHandle = context.Handle,
             Context = context,
             StreamHandle = stream,
             StreamingCache = streamingCache,
@@ -201,34 +232,101 @@ internal static unsafe class GpuTransferHelper
         {
             _states[state.Key] = state;
             _byContext[context.Handle] = state;
-            _sole = _states.Count == 1 ? state : null;
+            RecomputeSoleLocked(excluded: null);
         }
         return state;
     }
 
-    /// <summary>Removes a backend's state at disposal (after <see cref="FreeAllCached"/>). Keys are never reused,
-    /// so the caller may always discard its key's pending-cleanup queue afterwards.</summary>
-    public static void Unregister(State state)
+    private static bool IsResolvable(State state) => !state.Retiring && !state.Unregistered;
+
+    /// <summary>Atomically removes a state from every implicit routing path while retaining its explicit handle
+    /// for owner-driven cleanup. Must run before native teardown starts.</summary>
+    internal static void BeginRetire(State state)
     {
-        // Mark dead BEFORE removal: any promoted-weight callback that still fires (finalizer-queued before
-        // its tensor could be detached) must see the flag and no-op instead of touching this state's caches.
-        state.Unregistered = true;
-        lock (_registryLock)
+        try
         {
-            _states.TryRemove(state.Key, out _);
-            // The context-handle index only drops when it still points at us — a same-device sibling that
-            // registered later keeps its binding.
-            if (_byContext.TryGetValue(state.Context?.Handle ?? 0, out State? current) && ReferenceEquals(current, state))
+            lock (_registryLock)
             {
-                _byContext.TryRemove(state.Context!.Handle, out _);
+                if (!state.Retiring && !state.Unregistered)
+                {
+                    state.Retiring = true;
+                    RebuildRoutes(state.RegisteredContextHandle, state);
+                }
             }
-            _sole = _states.Count == 1 ? Enumerable.First(_states.Values) : null;
         }
-        if (ReferenceEquals(_ambient, state))
+        finally
         {
-            _ambient = null;
+            // Even an unexpected route-rebuild exception cannot leave a claimed callback racing native teardown.
+            if (ReferenceEquals(_ambient, state)) _ambient = null;
+            state.WaitForCallbacksToDrain();
         }
     }
+
+    /// <summary>Removes and inerts a state after all explicit-state cleanup attempts have completed.</summary>
+    internal static void CompleteRetire(State state)
+    {
+        lock (_registryLock)
+        {
+            nint contextHandle = state.RegisteredContextHandle;
+            state.Retiring = true;
+            // Publish the terminal flag before dropping the strong registry root. Stale tensor callbacks can
+            // then bail out without touching finalized ConditionalWeakTable/cache state.
+            state.Unregistered = true;
+            _states.TryRemove(state.Key, out _);
+            RebuildRoutes(contextHandle, state);
+            state.StreamHandle = 0;
+            state.StreamingCache = null;
+            state.Context = null;
+            state.RegisteredContextHandle = 0;
+        }
+        if (ReferenceEquals(_ambient, state)) _ambient = null;
+    }
+
+    /// <summary>Compatibility entry point for callers that have already released the state's resources.</summary>
+    public static void Unregister(State state)
+    {
+        BeginRetire(state);
+        CompleteRetire(state);
+    }
+
+    /// <summary>Recomputes the context fallback and sole-state fast path from resolvable states.</summary>
+    private static void RebuildRoutes(nint contextHandle, State excluded)
+    {
+        if (contextHandle != 0
+            && _byContext.TryGetValue(contextHandle, out State? current)
+            && (ReferenceEquals(current, excluded) || !IsResolvable(current)))
+        {
+            State? replacement = null;
+            foreach (State candidate in _states.Values)
+            {
+                if (!IsResolvable(candidate) || ReferenceEquals(candidate, excluded)
+                    || candidate.RegisteredContextHandle != contextHandle) continue;
+                if (replacement is null || candidate.Key.ToInt64() > replacement.Key.ToInt64()) replacement = candidate;
+            }
+            if (replacement is null) _byContext.TryRemove(contextHandle, out _);
+            else _byContext[contextHandle] = replacement;
+        }
+
+        RecomputeSoleLocked(excluded);
+    }
+
+    private static void RecomputeSoleLocked(State? excluded)
+    {
+        State? sole = null;
+        foreach (State candidate in _states.Values)
+        {
+            if (!IsResolvable(candidate) || ReferenceEquals(candidate, excluded)) continue;
+            if (sole is not null) { sole = null; break; }
+            sole = candidate;
+        }
+        _sole = sole;
+    }
+
+    internal static int RegisteredStateCount => _states.Count;
+    internal static nint[] RegisteredStateKeysForTests => [.. _states.Keys];
+    internal static bool IsStateRegistered(nint key) => _states.ContainsKey(key);
+    internal static nint ContextFallbackKey(nint contextHandle) =>
+        _byContext.TryGetValue(contextHandle, out State? state) && IsResolvable(state) ? state.Key : 0;
 
     /// <summary>Binds <paramref name="state"/> as the calling thread's current backend. Called by
     /// <c>CudaBackend.EnterOp</c> on every op entry; cheap (one thread-static write).</summary>
@@ -240,9 +338,17 @@ internal static unsafe class GpuTransferHelper
     private static State Resolve()
     {
         State? ambient = _ambient;
-        if (ambient is not null && !ambient.Unregistered) return ambient;
+        if (ambient is not null)
+        {
+            if (IsResolvable(ambient)) return ambient;
+            // A backend began teardown after this thread entered an operation. Falling through to _sole or a
+            // same-context sibling would silently route the remainder of B's op through A's caches/stream. Backend
+            // disposal requires externally quiesced requests; make a violation loud and ownership-safe.
+            throw new ObjectDisposedException(nameof(CudaBackend),
+                "The ambient CUDA backend is retiring. Quiesce active operations before disposing the backend.");
+        }
         State? sole = _sole;
-        if (sole is not null) return sole;
+        if (sole is not null && IsResolvable(sole)) return sole;
         if (_states.IsEmpty) return _unregistered;
         if (_assertAmbient)
         {
@@ -250,7 +356,8 @@ internal static unsafe class GpuTransferHelper
                 "GpuTransferHelper.Resolve: no ambient State with multiple backends registered — an op entry point "
                 + "missed the EnterOp transform (HARTSY_ASSERT_AMBIENT=1).");
         }
-        if (CudaDriverApi.cuCtxGetCurrent(out nint current) == 0 && _byContext.TryGetValue(current, out State? state))
+        if (CudaDriverApi.cuCtxGetCurrent(out nint current) == 0
+            && _byContext.TryGetValue(current, out State? state) && IsResolvable(state))
         {
             if (_ambiguityWarned.TryAdd(current, true) && SameContextStateCount(current) > 1)
             {
@@ -268,7 +375,7 @@ internal static unsafe class GpuTransferHelper
         int count = 0;
         foreach (State s in _states.Values)
         {
-            if ((s.Context?.Handle ?? 0) == contextHandle) count++;
+            if (IsResolvable(s) && s.RegisteredContextHandle == contextHandle) count++;
         }
         return count;
     }
@@ -280,7 +387,7 @@ internal static unsafe class GpuTransferHelper
         List<State> result = [];
         foreach (State s in _states.Values)
         {
-            if (!s.Unregistered && s.Context?.DeviceOrdinal == deviceOrdinal) result.Add(s);
+            if (IsResolvable(s) && s.Context?.DeviceOrdinal == deviceOrdinal) result.Add(s);
         }
         return result;
     }
@@ -541,12 +648,17 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Frees a GPU buffer asynchronously on the compute stream. Skips cached pointers (weight + activation) and arena pointers.</summary>
     public static void FreeDevice(ulong gpuPtr)
     {
-        State s = Resolve();
+        FreeDevice(Resolve(), gpuPtr);
+    }
+
+    /// <summary>Explicit-owner variant used after a state has been removed from implicit routing for teardown.</summary>
+    internal static void FreeDevice(State s, ulong gpuPtr)
+    {
         if (gpuPtr != 0 && !s.CachedPointers.Contains(gpuPtr) && !IsArenaPtr(s, gpuPtr))
         {
             // The caller owns this one after all, so SweepOrphans must not free it a second time.
             if (s.PendingOrphans.Count != 0) s.PendingOrphans.Remove(gpuPtr);
-            CudaMemory.FreeAsync(gpuPtr, s.StreamHandle);
+            CudaMemory.FreeAsync(gpuPtr, s.StreamHandle, s);
         }
     }
 
@@ -610,9 +722,9 @@ internal static unsafe class GpuTransferHelper
     {
         if (s.SidecarCache.Remove(tensor, out (ulong xq, ulong xd, ulong xs, int k) sc))
         {
-            if (!IsArenaPtr(s, sc.xq)) CudaMemory.FreeAsync(sc.xq, s.StreamHandle);
-            if (!IsArenaPtr(s, sc.xd)) CudaMemory.FreeAsync(sc.xd, s.StreamHandle);
-            if (!IsArenaPtr(s, sc.xs)) CudaMemory.FreeAsync(sc.xs, s.StreamHandle);
+            if (!IsArenaPtr(s, sc.xq)) CudaMemory.FreeAsync(sc.xq, s.StreamHandle, s);
+            if (!IsArenaPtr(s, sc.xd)) CudaMemory.FreeAsync(sc.xd, s.StreamHandle, s);
+            if (!IsArenaPtr(s, sc.xs)) CudaMemory.FreeAsync(sc.xs, s.StreamHandle, s);
         }
     }
 
@@ -682,45 +794,77 @@ internal static unsafe class GpuTransferHelper
         // the tensor (potentially the GC finalizer thread), which won't have bound the context.
         Action syncCallback = () =>
         {
-            if (s.ActivationCache.Remove(tensor, out (ulong gpuPtr, nuint bytes) cached))
+            if (!s.TryEnterCallback()) return;
+            try
             {
-                s.PinnedActivations.Remove(tensor);
-                s.D2hSyncs++;
-                s.Context?.EnsureCurrent();
-                RemoveSidecar(s, tensor);
-                if (arenaBacked && !IsArenaPtr(s, cached.gpuPtr))
+                if (s.ActivationCache.Remove(tensor, out (ulong gpuPtr, nuint bytes) cached))
                 {
-                    // The owning arena is gone — the device data went with it; reading it would touch freed
-                    // memory. Surface loudly instead of copying garbage.
-                    Logs.Warning("[Cuda] Activation read after its graph arena was freed — returning zeros (read the tensor before DisposeGraph).");
-                    tensor.EnsureHostBuffer();
+                    s.PinnedActivations.Remove(tensor);
+                    s.D2hSyncs++;
+                    s.Context?.EnsureCurrent();
+                    RemoveSidecar(s, tensor);
+                    if (arenaBacked && !IsArenaPtr(s, cached.gpuPtr))
+                    {
+                        // The owning arena is gone — the device data went with it; reading it would touch freed
+                        // memory. Surface loudly instead of copying garbage.
+                        Logs.Warning("[Cuda] Activation read after its graph arena was freed — returning zeros (read the tensor before DisposeGraph).");
+                        tensor.EnsureHostBuffer();
+                        s.CachedPointers.Remove(cached.gpuPtr);
+                        return;
+                    }
+                    CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
+                    // Allocate the host destination only now, on the first real CPU read of this activation.
+                    void* cpuPtr = tensor.EnsureHostBuffer();
+                    CudaMemory.CopyDeviceToHost(cpuPtr, cached.gpuPtr, cached.bytes);
                     s.CachedPointers.Remove(cached.gpuPtr);
-                    return;
+                    if (!arenaBacked && !IsArenaPtr(s, cached.gpuPtr)) CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle, s);
                 }
-                CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
-                // Allocate the host destination only now, on the first real CPU read of this activation.
-                void* cpuPtr = tensor.EnsureHostBuffer();
-                CudaMemory.CopyDeviceToHost(cpuPtr, cached.gpuPtr, cached.bytes);
-                s.CachedPointers.Remove(cached.gpuPtr);
-                if (!arenaBacked && !IsArenaPtr(s, cached.gpuPtr)) CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
             }
+            finally { s.ExitCallback(); }
         };
 
         // On dispose without sync: free GPU memory asynchronously (skip D2H — data not needed)
         Action disposeCallback = () =>
         {
-            if (s.ActivationCache.Remove(tensor, out (ulong gpuPtr, nuint bytes) cached))
+            if (!s.TryEnterCallback()) return;
+            try
             {
-                s.PinnedActivations.Remove(tensor);
-                s.Context?.EnsureCurrent();
-                RemoveSidecar(s, tensor);
-                s.CachedPointers.Remove(cached.gpuPtr);
-                if (!arenaBacked && !IsArenaPtr(s, cached.gpuPtr)) CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
+                if (s.ActivationCache.Remove(tensor, out (ulong gpuPtr, nuint bytes) cached))
+                {
+                    s.PinnedActivations.Remove(tensor);
+                    s.Context?.EnsureCurrent();
+                    RemoveSidecar(s, tensor);
+                    s.CachedPointers.Remove(cached.gpuPtr);
+                    if (!arenaBacked && !IsArenaPtr(s, cached.gpuPtr)) CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle, s);
+                }
             }
+            finally { s.ExitCallback(); }
         };
         // Keyed binding routes this tensor's finalizer cleanup into THIS backend's context bucket so a concurrent
         // backend's drain thread never runs it against the wrong (and unsynchronized) State.
         tensor.SetGpuBinding(s.Key, syncCallback, disposeCallback);
+    }
+
+    /// <summary>
+    /// Removes a just-published activation binding when a multi-output operation fails while publishing a later
+    /// output. The caller retains ownership of <paramref name="expectedGpuPtr"/> and must free it afterward.
+    /// Existing contents displaced by <see cref="CacheActivation"/> follow the normal orphan-sweep lifecycle;
+    /// this helper only prevents a failed operation from exposing a partial new result set.
+    /// </summary>
+    internal static bool TryUncacheActivation(Tensor tensor, ulong expectedGpuPtr)
+    {
+        State s = Resolve();
+        if (!s.ActivationCache.TryGetValue(tensor, out (ulong gpuPtr, nuint bytes) cached)
+            || cached.gpuPtr != expectedGpuPtr)
+        {
+            return false;
+        }
+
+        s.ActivationCache.Remove(tensor);
+        s.PinnedActivations.Remove(tensor);
+        s.CachedPointers.Remove(expectedGpuPtr);
+        tensor.ClearGpuBinding(s.Key);
+        return true;
     }
 
     /// <summary>Frees EVERY cached weight cast (they are pure caches — always rebuildable from the source
@@ -836,33 +980,37 @@ internal static unsafe class GpuTransferHelper
         // Torn-down backend: the caches were already freed wholesale and the state's ConditionalWeakTable may
         // have been finalized while the state was unreachable (resurrected via the finalizer-cleanup queue) —
         // touching it would NRE. The bool read is always safe.
-        if (s.Unregistered)
+        if (!s.TryEnterCallback())
         {
             return;
         }
-        if (!s.UploadTracker.TryGetValue(tensor, out UploadState? state) || !state.Promoted)
+        try
         {
-            return;
-        }
-        state.Promoted = false;
-        s.Context?.EnsureCurrent();
-        if (s.WeightCache.Remove(tensor, out ulong dptr))
-        {
-            state.Blocked = true;
-            s.CachedPointers.Remove(dptr);
-            s.CachedBytes -= (long)ByteSize(tensor);
-            if (s.StreamHandle != 0)
+            if (!s.UploadTracker.TryGetValue(tensor, out UploadState? state) || !state.Promoted)
             {
-                CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
+                return;
             }
-            CudaMemory.Free(dptr);
-            if (s.WeightCastCache.Remove(tensor, out (ulong castPtr, nuint bytes) cast))
+            state.Promoted = false;
+            s.Context?.EnsureCurrent();
+            if (s.WeightCache.Remove(tensor, out ulong dptr))
             {
-                s.CachedPointers.Remove(cast.castPtr);
-                CudaMemory.Free(cast.castPtr);
-                s.CachedBytes -= (long)cast.bytes;
+                state.Blocked = true;
+                s.CachedPointers.Remove(dptr);
+                s.CachedBytes -= (long)ByteSize(tensor);
+                if (s.StreamHandle != 0)
+                {
+                    CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
+                }
+                CudaMemory.Free(dptr);
+                if (s.WeightCastCache.Remove(tensor, out (ulong castPtr, nuint bytes) cast))
+                {
+                    s.CachedPointers.Remove(cast.castPtr);
+                    CudaMemory.Free(cast.castPtr);
+                    s.CachedBytes -= (long)cast.bytes;
+                }
             }
         }
+        finally { s.ExitCallback(); }
     }
 
     /// <summary>Detaches the auto-promotion lifecycle from a tensor whose cached device copy is being freed by a
@@ -971,32 +1119,80 @@ internal static unsafe class GpuTransferHelper
     {
         State s = Resolve();
         s.Context?.EnsureCurrent();
-        // Sync stream before freeing — pending async work may still reference these buffers
-        if (s.StreamHandle != 0)
+        if (s.StreamHandle != 0) CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
+        foreach (Tensor weight in s.WeightCache.Keys) DetachPromotedTensor(s, weight);
+        foreach (Tensor activation in s.ActivationCache.Keys) activation.ClearGpuBinding(s.Key);
+        foreach (ulong dptr in s.CachedPointers)
+            if (!IsArenaPtr(s, dptr)) CudaMemory.Free(dptr);
+        foreach (ulong orphan in s.PendingOrphans)
+            if (!s.CachedPointers.Contains(orphan) && !IsArenaPtr(s, orphan)) CudaMemory.Free(orphan);
+        s.PendingOrphans.Clear();
+        // Sidecars may live inside an arena. Remove them while LiveArenas still describes those address ranges,
+        // otherwise RemoveSidecar would individually free a pointer whose whole arena was already released.
+        foreach (Tensor t in s.SidecarCache.Keys.ToList()) RemoveSidecar(s, t);
+        foreach ((ulong basePtr, nuint _) in s.LiveArenas) CudaMemory.Free(basePtr);
+        ClearCacheBookkeeping(s);
+    }
+
+    /// <summary>Explicit-owner, best-effort full sweep used by backend retirement after implicit routing has been
+    /// disabled. Every independent allocation is attempted even when another free reports an error.</summary>
+    internal static void FreeAllCached(State s)
+    {
+        List<Exception>? failures = null;
+        void Attempt(string resource, Action action)
         {
-            CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
+            try { action(); }
+            catch (Exception error)
+            {
+                (failures ??= []).Add(new InvalidOperationException($"Transfer-cache cleanup failed for {resource}.", error));
+            }
         }
 
-        // Detach promotion callbacks BEFORE clearing: after this wholesale free, a promoted tensor's
-        // Dispose/finalizer must not queue a cleanup against this state (see DetachPromotedTensor).
-        foreach (Tensor weight in s.WeightCache.Keys)
+        if (s.Context is not null) Attempt("context binding", s.Context.EnsureCurrent);
+        if (s.StreamHandle != 0) Attempt("stream drain", () => CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError());
+        foreach (Tensor weight in s.WeightCache.Keys.ToArray())
+            Attempt("promoted-weight binding", () => DetachPromotedTensor(s, weight));
+        foreach (Tensor activation in s.ActivationCache.Keys.ToArray())
+            Attempt("activation binding", () => activation.ClearGpuBinding(s.Key));
+
+        // Sidecars first while arena membership is still knowable. Attempt each component separately so one bad
+        // pointer cannot strand its siblings.
+        foreach ((Tensor tensor, (ulong xq, ulong xd, ulong xs, int k) sidecar) in s.SidecarCache.ToArray())
         {
-            DetachPromotedTensor(s, weight);
+            s.SidecarCache.Remove(tensor);
+            if (!IsArenaPtr(s, sidecar.xq)) Attempt("sidecar xq", () => CudaMemory.FreeAsync(sidecar.xq, s.StreamHandle, s));
+            if (!IsArenaPtr(s, sidecar.xd)) Attempt("sidecar xd", () => CudaMemory.FreeAsync(sidecar.xd, s.StreamHandle, s));
+            if (!IsArenaPtr(s, sidecar.xs)) Attempt("sidecar xs", () => CudaMemory.FreeAsync(sidecar.xs, s.StreamHandle, s));
         }
-        foreach (ulong dptr in s.CachedPointers)
-        {
-            if (!IsArenaPtr(s, dptr)) CudaMemory.Free(dptr);
-        }
-        foreach ((ulong basePtr, nuint _) in s.LiveArenas) CudaMemory.Free(basePtr);
+
+        foreach (ulong dptr in s.CachedPointers.ToArray())
+            if (!IsArenaPtr(s, dptr)) Attempt("cached pointer", () => CudaMemory.Free(dptr));
+        foreach (ulong orphan in s.PendingOrphans.ToArray())
+            if (!s.CachedPointers.Contains(orphan) && !IsArenaPtr(s, orphan))
+                Attempt("orphan pointer", () => CudaMemory.Free(orphan));
+        foreach ((ulong basePtr, nuint _) in s.LiveArenas.ToArray())
+            Attempt("graph arena", () => CudaMemory.Free(basePtr));
+
+        ClearCacheBookkeeping(s);
+        if (failures is not null) throw new AggregateException("One or more transfer-cache resources failed to release.", failures);
+    }
+
+    private static void ClearCacheBookkeeping(State s)
+    {
+        s.PendingOrphans.Clear();
         s.LiveArenas.Clear();
         s.ArenaBase = 0; s.ArenaCapacity = 0; s.ArenaOffset = 0; s.ArenaActive = false;
-        foreach (Tensor t in s.SidecarCache.Keys.ToList())
-            RemoveSidecar(s, t);
+        s.SidecarCache.Clear();
         s.WeightCache.Clear();
         s.ActivationCache.Clear();
         s.WeightCastCache.Clear();
         s.CachedPointers.Clear();
         s.PinnedActivations.Clear();
+        lock (s.CaptureAllocs)
+        {
+            s.CaptureAllocs.Clear();
+            s.TrackCaptureWindow = false;
+        }
         s.CachedBytes = 0;
         s.Hits = 0;
         s.Misses = 0;
@@ -1007,6 +1203,8 @@ internal static unsafe class GpuTransferHelper
     {
         FreeAllCached();
     }
+
+    internal static void EvictAll(State state) => FreeAllCached(state);
 
     /// <summary>Purges cache entries left dangling by an ABORTED step-graph capture. Every alloc issued on the
     /// CAPTURING stream while capture is active becomes a graph memory node; if the capture is aborted before
@@ -1097,8 +1295,8 @@ internal static unsafe class GpuTransferHelper
     /// between denoise steps to deterministically reclaim device memory held by activations that were neither read
     /// back to host (which frees via the sync callback) nor explicitly disposed — those otherwise linger in the
     /// cache until non-deterministic GC finalization and accumulate to OOM over multi-step diffusion. Safe because
-    /// the only cross-step state (the latent) lives on the host; anything still cached here is dead. The per-tensor
-    /// sync/dispose callbacks stay valid: they re-check the activation cache and no-op once the entry is gone.</summary>
+    /// the only cross-step state (the latent) lives on the host; anything still cached here is dead. Bindings are
+    /// detached as entries are reclaimed so late tensor finalizers cannot enqueue obsolete backend callbacks.</summary>
     public static void FreeActivations(bool trimPool = true)
     {
         State s = Resolve();
@@ -1117,6 +1315,9 @@ internal static unsafe class GpuTransferHelper
                 (survivors ??= new List<KeyValuePair<Tensor, (ulong gpuPtr, nuint bytes)>>()).Add(kv);
                 continue;
             }
+            // The allocation is being reclaimed without D2H. Detach its tensor callback now so a much-later
+            // finalizer cannot recreate this backend's already-retired cleanup bucket.
+            kv.Key.ClearGpuBinding(s.Key);
             s.CachedPointers.Remove(kv.Value.gpuPtr);
             if (!IsArenaPtr(s, kv.Value.gpuPtr)) CudaMemory.FreeAsync(kv.Value.gpuPtr, s.StreamHandle);
         }

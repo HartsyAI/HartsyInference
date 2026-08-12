@@ -8,7 +8,7 @@ public static class ActivationKernels
     internal const float Sqrt2OverPi = 0.7978845608028654f; // sqrt(2/pi)
     internal const float GeluCoeff = 0.044715f;
 
-    /// <summary>Applies the Gaussian Error Linear Unit (GELU) activation function. Exact formulation: output = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).</summary>
+    /// <summary>Applies the standard tanh approximation to GELU: output = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).</summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void Gelu(Tensor output, Tensor input)
     {

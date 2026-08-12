@@ -139,33 +139,45 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
 
-            Tensor noisePred;
-            if (useCfg)
+            Tensor? uncond = null;
+            Tensor? cond = null;
+            try
             {
-                Tensor uncond = _transformer.Forward(Backend, latent, t, negQwenEmbeds!, negClipPooled!);
-                Tensor cond = _transformer.Forward(Backend, latent, t, qwenEmbeds, clipPooled);
-                noisePred = CfgHelper.ApplyCfg(uncond, cond, cfgScale);
-                uncond.Dispose();
-                cond.Dispose();
-            }
-            else
-            {
-                noisePred = _transformer.Forward(Backend, latent, t, qwenEmbeds, clipPooled);
-            }
+                if (useCfg)
+                    uncond = _transformer.Forward(Backend, latent, t, negQwenEmbeds!, negClipPooled!);
+                cond = _transformer.Forward(Backend, latent, t, qwenEmbeds, clipPooled);
 
-            if (i == 0 || i == steps / 2 || i == steps - 1)
-                Logs.Info($"[K5DIAG] step {i}: t={t:F2} sigma_idx noisePred.std={StdOf(noisePred):F4} latent.std={StdOf(latent):F4}");
-            if (i == 0)
-            {
-                Models.Denoisers.Kandinsky5DebugDump.Dump("step0_latent", latent);
-                Models.Denoisers.Kandinsky5DebugDump.Dump("step0_velocity", noisePred);
-            }
+                // Tensor statistics and raw dumps intentionally materialize device tensors. Keep those
+                // readbacks behind the existing debug-dump switch; production sampling must not run global
+                // host reductions or materialize device tensors merely to format informational log lines.
+                if (Kandinsky5DebugDump.Enabled && (i == 0 || i == steps / 2 || i == steps - 1))
+                {
+                    Tensor diagnosticPred = useCfg
+                        ? CfgHelper.ApplyCfg(uncond!, cond, cfgScale)
+                        : cond;
+                    try
+                    {
+                        Logs.Info($"[K5DIAG] step {i}: t={t:F2} sigma_idx noisePred.std={StdOf(diagnosticPred):F4} latent.std={StdOf(latent):F4}");
+                        if (i == 0)
+                        {
+                            Kandinsky5DebugDump.Dump("step0_latent", latent);
+                            Kandinsky5DebugDump.Dump("step0_velocity", diagnosticPred);
+                        }
+                    }
+                    finally
+                    {
+                        if (!ReferenceEquals(diagnosticPred, cond)) diagnosticPred.Dispose();
+                    }
+                }
 
-            Tensor newLatent = new Tensor(latentShape, DType.F32);
-            scheduler.Step(newLatent, noisePred, latent, i);
-            noisePred.Dispose();
-            latent.Dispose();
-            latent = newLatent;
+                Backend.CfgEulerStep(latent, cond, useCfg ? uncond! : cond,
+                    useCfg ? cfgScale : 1.0f, scheduler.Dt(i));
+            }
+            finally
+            {
+                cond?.Dispose();
+                uncond?.Dispose();
+            }
 
             // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory
             // by re-noising the source latent at the next step's sigma. Final step blends with the
@@ -197,7 +209,8 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
-        Logs.Info($"[K5DIAG] final latent.std={StdOf(latent):F4}");
+        if (Kandinsky5DebugDump.Enabled)
+            Logs.Info($"[K5DIAG] final latent.std={StdOf(latent):F4}");
         Kandinsky5Transformer.DumpFinalLatent(latent);
 
         // ── 4. Free transformer weights before VAE decode (mirrors AuraFlow / Flux pattern). ──

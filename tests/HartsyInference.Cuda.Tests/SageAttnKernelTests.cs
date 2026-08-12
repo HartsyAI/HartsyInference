@@ -57,6 +57,8 @@ public sealed unsafe class SageAttnKernelTests
         long n = a.ElementCount;
         for (long i = 0; i < n; i++)
         {
+            if (!float.IsFinite(ap[i]) || !float.IsFinite(bp[i]))
+                return (double.PositiveInfinity, double.PositiveInfinity);
             double e = Math.Abs(ap[i] - bp[i]);
             if (e > maxErr) maxErr = e;
             sum += e;
@@ -65,9 +67,9 @@ public sealed unsafe class SageAttnKernelTests
     }
 
     [Theory]
-    [InlineData(128, 256, 256)]
-    [InlineData(128, 256, 250)]   // Skv tail (curBC < BC on the last step)
-    [InlineData(64, 512, 512)]
+    [InlineData(128, 256, 1024)]
+    [InlineData(128, 256, 1025)]   // Skv tail (curBC < BC on the last step)
+    [InlineData(64, 256, 1024)]
     public void SageAttention_MatchesCpuF32_WithKOutliers(int d, int sq, int skv)
     {
         if (!CudaContext.IsAvailable())
@@ -94,11 +96,13 @@ public sealed unsafe class SageAttnKernelTests
 
         using Tensor gpuOut = new Tensor(new TensorShape(B, H, sq, d), DType.F32);
         using Tensor gpuOut2 = new Tensor(new TensorShape(B, H, sq, d), DType.F32);
+        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
+        string? previousUnsafeNarrow = Environment.GetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
         Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
+        Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", "1");
         try
         {
             using CudaBackend cuda = new CudaBackend(0, PtxDir());
-            Assert.True(cuda.SupportsDeviceStepCacheGate || true); // context sanity touch
             cuda.ScaledDotProductAttention(gpuOut, q, k, v, null, scale);
             cuda.Sync();
             _ = *(float*)gpuOut.DataPointer;
@@ -106,10 +110,12 @@ public sealed unsafe class SageAttnKernelTests
             cuda.ScaledDotProductAttention(gpuOut2, q, k, v, null, scale);
             cuda.Sync();
             _ = *(float*)gpuOut2.DataPointer;
+            Assert.True(cuda.SageAttentionEngaged, "SageAttention did not engage; numerical checks would only cover a fallback path.");
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", previousUnsafeNarrow);
         }
 
         (double maxErr, double meanErr) = Compare(gpuOut, cpuOut);
@@ -153,7 +159,11 @@ public sealed unsafe class SageAttnKernelTests
         _ = *(float*)q.DataPointer;   // host-materialize the zero buffers
 
         using Tensor gpuOut = new Tensor(new TensorShape(B, H, Sq, D), DType.F32);
+        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
+        string? previousUnsafeNarrow = Environment.GetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
+        string? previousPv = Environment.GetEnvironmentVariable("HARTSY_SAGE_PV");
         Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
+        Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", "1");
         Environment.SetEnvironmentVariable("HARTSY_SAGE_PV", "f16acc");
         try
         {
@@ -161,11 +171,13 @@ public sealed unsafe class SageAttnKernelTests
             cuda.ScaledDotProductAttention(gpuOut, q, k, v, null, scale);
             cuda.Sync();
             _ = *(float*)gpuOut.DataPointer;
+            Assert.True(cuda.SageAttentionEngaged, "SageAttention did not engage in the overflow-adversarial test.");
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_PV", null);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", previousUnsafeNarrow);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_PV", previousPv);
         }
 
         // Uniform attention over constant V ⇒ output ≡ VConst everywhere.
@@ -220,6 +232,8 @@ public sealed unsafe class SageAttnKernelTests
             ((IBackend)cpu).ScaledDotProductAttention(cpuOut, qRef, kRef, vRef, null, scale);
 
         using Tensor gpuOut16 = new Tensor(new TensorShape(B, H, sq, d), DType.F16);
+        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
+        string? previousMinSkv = Environment.GetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV");
         Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
         Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", "1");   // force dispatch at test sizes
         try
@@ -228,11 +242,12 @@ public sealed unsafe class SageAttnKernelTests
             cuda.ScaledDotProductAttention(gpuOut16, q16, k16, v16, null, scale);
             cuda.Sync();
             _ = *(ushort*)gpuOut16.DataPointer;
+            Assert.True(cuda.SageAttentionEngaged, "Native-F16 SageAttention did not engage; the test only covered a fallback path.");
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", null);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", previousMinSkv);
         }
 
         using Tensor gpuOut = gpuOut16.CastTo(DType.F32);
@@ -258,7 +273,7 @@ public sealed unsafe class SageAttnKernelTests
             return;
         }
 
-        const int B = 1, H = 2, Sq = 256, Skv = 256, D = 128;
+        const int B = 1, H = 2, Sq = 256, Skv = 1024, D = 128;
         float scale = 1.0f / MathF.Sqrt(D);
         using Tensor q = RandomF32(new TensorShape(B, H, Sq, D), 81);
         using Tensor k = RandomF32(new TensorShape(B, H, Skv, D), 82);
@@ -269,17 +284,22 @@ public sealed unsafe class SageAttnKernelTests
             ((IBackend)cpu).ScaledDotProductAttention(cpuOut, q, k, v, null, scale);
 
         using Tensor gpuOut = new Tensor(new TensorShape(B, H, Sq, D), DType.F32);
+        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
+        string? previousUnsafeNarrow = Environment.GetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
         Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
+        Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", "1");
         try
         {
             using CudaBackend cuda = new CudaBackend(0, PtxDir());
             cuda.ScaledDotProductAttention(gpuOut, q, k, v, null, scale);
             cuda.Sync();
             _ = *(float*)gpuOut.DataPointer;
+            Assert.True(cuda.SageAttentionEngaged, "SageAttention did not engage for clean-input parity.");
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", previousUnsafeNarrow);
         }
 
         (double maxErr, double meanErr) = Compare(gpuOut, cpuOut);

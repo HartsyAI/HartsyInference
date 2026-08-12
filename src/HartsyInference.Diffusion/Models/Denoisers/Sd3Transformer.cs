@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Utilities;
@@ -213,16 +214,27 @@ public sealed unsafe class Sd3Transformer : IDisposable
         if (!ReferenceEquals(currentContext, context))
             currentContext.Dispose();
 
-        Tensor output = ApplyFinalLayer(backend, currentImage, temb, batch, imgSeqLen);
-        Sd3DebugDump.Dump("proj_out", output);
-        currentImage.Dispose();
-        temb.Dispose();
-
-        Tensor spatial = _unpatchify.Forward(output, batch, gridH, gridW);
-        output.Dispose();
-        Sd3DebugDump.DumpOutput(spatial);
-
-        return spatial;
+        Tensor? output = null;
+        Tensor? spatial = null;
+        try
+        {
+            output = ApplyFinalLayer(backend, currentImage, temb, batch, imgSeqLen);
+            Sd3DebugDump.Dump("proj_out", output);
+            spatial = _unpatchify.Forward(backend, output, batch, gridH, gridW);
+            Sd3DebugDump.DumpOutput(spatial);
+            return spatial;
+        }
+        catch
+        {
+            DisposeBestEffort(spatial, "unpatchified output after forward failure");
+            throw;
+        }
+        finally
+        {
+            DisposeBestEffort(output, "projected patch tokens");
+            DisposeBestEffort(currentImage, "final image activation");
+            DisposeBestEffort(temb, "timestep embedding");
+        }
     }
 
     /// <summary>Predicts velocity for one denoising step with the <see cref="JointBlock"/> loop split across two
@@ -282,13 +294,25 @@ public sealed unsafe class Sd3Transformer : IDisposable
         backendA.CopyFromPeer(imageFinal, imageFinalB, backendB);
         imageFinalB.Dispose();
 
-        Tensor output = ApplyFinalLayer(backendA, imageFinal, temb, batch, imgSeqLen);
-        imageFinal.Dispose();
-        temb.Dispose();
-
-        Tensor spatial = _unpatchify.Forward(output, batch, gridH, gridW);
-        output.Dispose();
-        return spatial;
+        Tensor? output = null;
+        Tensor? spatial = null;
+        try
+        {
+            output = ApplyFinalLayer(backendA, imageFinal, temb, batch, imgSeqLen);
+            spatial = _unpatchify.Forward(backendA, output, batch, gridH, gridW);
+            return spatial;
+        }
+        catch
+        {
+            DisposeBestEffort(spatial, "sharded unpatchified output after forward failure");
+            throw;
+        }
+        finally
+        {
+            DisposeBestEffort(output, "sharded projected patch tokens");
+            DisposeBestEffort(imageFinal, "sharded final image activation");
+            DisposeBestEffort(temb, "sharded timestep embedding");
+        }
     }
 
     /// <summary>Runs <see cref="JointBlock"/>s <c>[startBlock, endBlock)</c> in order — the seam a block-range
@@ -365,57 +389,69 @@ public sealed unsafe class Sd3Transformer : IDisposable
         return temb;
     }
 
-    /// <summary>Final AdaLN-Continuous: SiLU(temb) → Linear → [scale, shift] modulation, then unparameterized LayerNorm + modulate + proj_out.</summary>
-    private Tensor ApplyFinalLayer(IBackend backend, Tensor hidden, Tensor temb, int batch, int seqLen)
+    /// <summary>Final AdaLN-Continuous: SiLU(temb) → Linear → [shift, scale] modulation, then unparameterized LayerNorm + modulate + proj_out.</summary>
+    internal Tensor ApplyFinalLayer(IBackend backend, Tensor hidden, Tensor temb, int batch, int seqLen)
     {
         int dim = _config.HiddenSize;
         int outDim = _config.PatchSize * _config.PatchSize * _config.InChannels;
         TensorShape hidShape = new TensorShape(batch, seqLen, dim);
 
-        TensorShape tembShape = new TensorShape(batch, dim);
-        Tensor activated = new Tensor(tembShape, DType.F32);
-        backend.Silu(activated, temb);
-
-        TensorShape modParamShape = new TensorShape(batch, dim * 2);
-        Tensor modParams = new Tensor(modParamShape, DType.F32);
-        backend.Linear(modParams, activated, _normOutLinearWeight!, _normOutLinearBias);
-        activated.Dispose();
-
-        // Diffusers SD3 final-layer order: [shift, scale]
-        // (mod[:dim] = shift, mod[dim:] = scale)
-        float* modPtr = (float*)modParams.DataPointer;
-
-        Tensor normed = new Tensor(hidShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, hidden, batch, seqLen, dim);
-
-        Tensor modulated = new Tensor(hidShape, DType.F32);
-        float* normPtr = (float*)normed.DataPointer;
-        float* outModPtr = (float*)modulated.DataPointer;
-
-        for (int b = 0; b < batch; b++)
+        Tensor? activated = null;
+        Tensor? modParams = null;
+        Tensor? shift = null;
+        Tensor? scale = null;
+        Tensor? modulated = null;
+        Tensor? projected = null;
+        try
         {
-            int modBase = b * dim * 2;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int vecOffset = (b * seqLen + s) * dim;
-                for (int d = 0; d < dim; d++)
-                {
-                    float shift = modPtr[modBase + d];
-                    float scale = modPtr[modBase + dim + d];
-                    outModPtr[vecOffset + d] = normPtr[vecOffset + d] * (1.0f + scale) + shift;
-                }
-            }
+            activated = new Tensor(new TensorShape(batch, dim), DType.F32);
+            backend.Silu(activated, temb);
+
+            modParams = new Tensor(new TensorShape(batch, dim * 2), DType.F32);
+            backend.Linear(modParams, activated, _normOutLinearWeight!, _normOutLinearBias);
+
+            // Diffusers SD3 final-layer order: [shift, scale]
+            // (mod[:dim] = shift, mod[dim:] = scale)
+            shift = new Tensor(new TensorShape(batch, dim), DType.F32);
+            backend.SliceLastDim(shift, modParams, 0);
+            scale = new Tensor(new TensorShape(batch, dim), DType.F32);
+            backend.SliceLastDim(scale, modParams, dim);
+
+            // One backend operation preserves the exact AdaLN contract while keeping hidden/modulation device-resident:
+            // modulated = (1 + scale) * LayerNormNoAffine(hidden, eps=1e-6) + shift.
+            modulated = new Tensor(hidShape, DType.F32);
+            backend.LayerNormModulate(modulated, hidden, scale, shift, 1e-6f);
+            Sd3DebugDump.Dump("norm_out", modulated);
+
+            projected = new Tensor(new TensorShape(batch, seqLen, outDim), DType.F32);
+            backend.Linear(projected, modulated, _projOutWeight!, _projOutBias);
+            Tensor result = projected;
+            projected = null; // Ownership passes to the caller only after the projection succeeds.
+            return result;
         }
-        normed.Dispose();
-        modParams.Dispose();
-        Sd3DebugDump.Dump("norm_out", modulated);
+        catch
+        {
+            // Preserve the operation's primary exception even if releasing its partial output also fails.
+            DisposeBestEffort(projected, "partial final projection");
+            throw;
+        }
+        finally
+        {
+            // A successful projection remains a valid result even if an activation's device cleanup faults.
+            // This is the same best-effort ownership policy used by the Llama encoder.
+            DisposeBestEffort(modulated, "final modulation activation");
+            DisposeBestEffort(scale, "final scale slice");
+            DisposeBestEffort(shift, "final shift slice");
+            DisposeBestEffort(modParams, "final modulation parameters");
+            DisposeBestEffort(activated, "final timestep activation");
+        }
+    }
 
-        TensorShape outShape = new TensorShape(batch, seqLen, outDim);
-        Tensor projected = new Tensor(outShape, DType.F32);
-        backend.Linear(projected, modulated, _projOutWeight!, _projOutBias);
-        modulated.Dispose();
-
-        return projected;
+    private static void DisposeBestEffort(Tensor? tensor, string description)
+    {
+        if (tensor is null) return;
+        try { tensor.Dispose(); }
+        catch (Exception error) { Logs.Error($"Failed to release SD3 transformer {description}.", error); }
     }
 
     /// <summary>Pipeline-level debug hook: dumps the post-denoise, pre-VAE latent under <c>$SD3_DEBUG_DIR/final_latent.bin</c> when the env var is set. Used by the layer-by-layer diff harness to capture pipeline state.</summary>
@@ -433,6 +469,9 @@ public sealed unsafe class Sd3Transformer : IDisposable
             _contextEmbedWeight = null; _contextEmbedBias = null;
             _normOutLinearWeight = null; _normOutLinearBias = null;
             _projOutWeight = null; _projOutBias = null;
+
+            try { _patchEmbed.Dispose(); }
+            catch (Exception error) { Logs.Error("Failed to release SD3 patch embedding.", error); }
         }
         GC.SuppressFinalize(this);
     }

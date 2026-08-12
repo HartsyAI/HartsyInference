@@ -121,7 +121,9 @@ public static unsafe class CfgHelper
             }
 
             // Pass 2: rescale guided back to the conditional's L2 norm, broadcast across the last dim.
-            float ratio = (float)(Math.Sqrt(condSq) / (Math.Sqrt(guidedSq) + eps));
+            // Zero denominator (eps=0, all-zero guided row) contributes nothing — ratio=0 avoids 0/0 -> NaN.
+            double denom = Math.Sqrt(guidedSq) + eps;
+            float ratio = denom > 0.0 ? (float)(Math.Sqrt(condSq) / denom) : 0f;
             for (int d = 0; d < lastDim; d++)
                 outPtr[baseOffset + d] *= ratio;
         }

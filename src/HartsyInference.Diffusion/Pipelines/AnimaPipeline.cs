@@ -302,8 +302,19 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         latentMask?.Dispose();
 
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
-        Backend.FreeWeights(_llmAdapter.EnumerateWeights());
+        Exception? phaseCleanupError = null;
+        TryPhaseCleanup(() => _transformer.ReleaseDeviceCache(Backend));
+        TryPhaseCleanup(() => Backend.FreeWeights(_transformer.EnumerateWeights()));
+        TryPhaseCleanup(() => Backend.FreeWeights(_llmAdapter.EnumerateWeights()));
+        if (phaseCleanupError is not null)
+            throw new InvalidOperationException(
+                "Anima could not fully release its denoiser phase before VAE decode.", phaseCleanupError);
+
+        void TryPhaseCleanup(Action cleanup)
+        {
+            try { cleanup(); }
+            catch (Exception error) { phaseCleanupError ??= error; }
+        }
 
         if (DiagnosticStats)
         {
@@ -339,7 +350,25 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
     /// <summary>Releases the negative-conditioning cache (pipeline-internal state; see DiffusionPipelineBase).</summary>
     protected override void DisposeCore()
     {
-        _cachedUncond?.Dispose();
+        // Recipe ownership disposes the pipeline before the transformer and backend. Make the lazily preloaded
+        // RoPE tables follow that lifetime even if a generation failed before the normal VAE phase boundary.
+        try
+        {
+            Backend.Sync();
+            _transformer.ReleaseDeviceCache(Backend);
+        }
+        catch (Exception error)
+        {
+            Logs.Error("[Anima] Failed to release transformer device cache during pipeline disposal.", error);
+        }
+        try
+        {
+            _cachedUncond?.Dispose();
+        }
+        catch (Exception error)
+        {
+            Logs.Error("[Anima] Failed to release cached negative conditioning during pipeline disposal.", error);
+        }
         _cachedUncond = null;
         _cachedUncondKey = null;
     }

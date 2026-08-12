@@ -10,7 +10,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Lumina-Image-2.0 text-to-image and image-to-image pipeline (Alpha-VLLM, Apache 2.0). Accepts pre-computed Gemma-2 caption embeddings (text-encoder forward is owned by a separate component, since HartsyInference's <see cref="Models.TextEncoders.LlamaStyleEncoder"/> does not yet implement Gemma-2-specific features like GeGLU MLP and attention soft-capping) and orchestrates the NextDiT transformer with a dynamic-shift flow-match Euler scheduler (shift derived from the image token count, matching diffusers <c>calculate_shift</c>).
+/// <summary>Lumina-Image-2.0 text-to-image and image-to-image pipeline (Alpha-VLLM, Apache 2.0). Accepts pre-computed Gemma-2 caption embeddings (text-encoder forward is owned by a separate component, since HartsyInference's <see cref="Models.TextEncoders.LlamaStyleEncoder"/> does not yet implement Gemma-2-specific features like GeGLU MLP and attention soft-capping) and orchestrates the NextDiT transformer with the checkpoint's static-shift flow-match Euler scheduler.
 /// <para>The diffusers pipeline (<c>pipeline_lumina2.py</c>) inverts the timestep before feeding it to the transformer (<c>1 - t / num_train_timesteps</c>) and negates the predicted velocity before the scheduler step — both behaviors are replicated here for parity. Default sampling: 30 steps, cfg_scale=4.0 with a negative prompt (matches the diffusers default).</para>
 /// <para>Img2img is selected by passing an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromEmbeddings"/>. Requires a <see cref="VaeEncoder"/> (16-channel Flux VAE, <c>VaeConfig.Flux</c>) on construction. A <c>Mask</c> additionally enables blend-on-vanilla inpaint (per-step latent blend + final pixel recomposite, same pattern as <see cref="ZImagePipeline"/>).</para>
 /// </summary>
@@ -67,6 +67,12 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int width = request.Width ?? GenerationDefaults.Lumina2.Width;
         int height = request.Height ?? GenerationDefaults.Lumina2.Height;
+        int spatialMultiple = checked(_config.VaeDownscaleFactor * _config.PatchSize);
+        if (width <= 0 || height <= 0 || width % spatialMultiple != 0 || height % spatialMultiple != 0)
+            throw new ArgumentException(
+                $"Lumina 2.0 width and height must be positive multiples of {spatialMultiple} " +
+                $"(VAE downscale {_config.VaeDownscaleFactor} × patch size {_config.PatchSize}); got {width}x{height}.",
+                nameof(request));
         int latentH = height / _config.VaeDownscaleFactor;
         int latentW = width / _config.VaeDownscaleFactor;
         int steps = request.Steps ?? GenerationDefaults.Lumina2.Steps;
@@ -88,12 +94,9 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
 
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
 
-        // VALIDATION-PENDING: verify against diffusers Lumina2Pipeline dynamic shift (retrieve_timesteps -> calculate_shift):
-        // base_shift=0.5, max_shift=1.15, base_image_seq_len=256, max_image_seq_len=4096; image_seq_len = (H/patch)*(W/patch);
-        // mu = base + (max-base)*(image_seq_len-256)/(4096-256); shift = exp(mu) feeds the flow-match scheduler.
-        // Replaces the previous static _config.SchedulerShift (~6.0).
-        int imageSeqLen = (latentH / _config.PatchSize) * (latentW / _config.PatchSize);
-        FlowMatchEulerDiscreteScheduler scheduler = FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imageSeqLen);
+        // Alpha-VLLM/Lumina-Image-2.0's scheduler contract is static shift=6 with dynamic shifting disabled.
+        // Flux-style image-sequence-dependent shifting materially changes Lumina's denoise trajectory.
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_config.SchedulerShift);
         scheduler.SetTimesteps(steps);
 
         (Tensor latent, Tensor? sourceLatent) = BuildInitialLatent(request, scheduler, latentShape, seed, plan.StartStep, keepSourceLatent: isMaskedInpaint);
@@ -130,25 +133,31 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
             // skipped and the conditional prediction is used directly (noise_pred = noise_pred_cond). Otherwise CFG is
             // combined and, when cfg_normalization is on, rescaled back to the conditional's per-token L2 norm.
             bool doClassifierFreeTruncation = (float)(i + 1) / steps > cfgTruncRatio;
-            if (cfgScale > 1.0f && !doClassifierFreeTruncation)
+            Tensor? uncondVelocity = null;
+            try
             {
-                Tensor uncondVelocity = RunForward(latent, negativeCaptionEmbeddings!, invertedSigma);
-                Tensor combined = cfgNormalization
-                    ? CfgHelper.ApplyCfgNormalized(uncondVelocity, velocity, cfgScale)
-                    : CfgHelper.ApplyCfg(uncondVelocity, velocity, cfgScale);
-                uncondVelocity.Dispose();
-                velocity.Dispose();
-                velocity = combined;
+                // Lumina negates the model velocity before FlowMatch Euler. Folding that negation into
+                // delta=-dt keeps the carried latent and both predictions device-resident. The normalized
+                // path reduces independently over the last latent dimension, exactly like diffusers.
+                float delta = -scheduler.Dt(i);
+                if (cfgScale > 1.0f && !doClassifierFreeTruncation)
+                {
+                    uncondVelocity = RunForward(latent, negativeCaptionEmbeddings!, invertedSigma);
+                    if (cfgNormalization)
+                        Backend.CfgNormalizedEulerStep(latent, velocity, uncondVelocity, cfgScale, delta);
+                    else
+                        Backend.CfgEulerStep(latent, velocity, uncondVelocity, cfgScale, delta);
+                }
+                else
+                {
+                    Backend.CfgEulerStep(latent, velocity, velocity, 1.0f, delta);
+                }
             }
-
-            // Lumina 2.0 negates the velocity before the scheduler step (pipeline_lumina2.py:771).
-            NegateInPlace(velocity);
-
-            Tensor newLatent = new Tensor(latentShape, DType.F32);
-            scheduler.Step(newLatent, velocity, latent, i);
-            velocity.Dispose();
-            latent.Dispose();
-            latent = newLatent;
+            finally
+            {
+                uncondVelocity?.Dispose();
+                velocity.Dispose();
+            }
 
             // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory
             // by re-noising the source latent at the next step's sigma. Final step blends with the
@@ -249,11 +258,4 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
         return _transformer.Forward(Backend, latent, captionEmbeddings, invertedSigma);
     }
 
-    private static void NegateInPlace(Tensor t)
-    {
-        float* p = (float*)t.DataPointer;
-        long count = t.Shape.ElementCount;
-        for (long i = 0; i < count; i++)
-            p[i] = -p[i];
-    }
 }

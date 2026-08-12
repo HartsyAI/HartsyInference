@@ -212,11 +212,6 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
             _ditResident = true;
         }
 
-        Tensor accumulator = new Tensor(latentShape, DType.F32);
-        Buffer.MemoryCopy((void*)latent.DataPointer, (void*)accumulator.DataPointer,
-            (long)latent.ElementCount * sizeof(float),
-            (long)latent.ElementCount * sizeof(float));
-
         bool useCfg = cfgScale > 1.0f;
         for (int step = startStep; step < steps; step++)
         {
@@ -225,24 +220,37 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
             float tNext = ShiftedTime(step + 1, steps, alpha);
             float dt = t - tNext;
 
-            Tensor velocity;
             if (useCfg)
             {
-                Tensor uncond = _transformer.Forward(Backend, latent, negativeContext, t);
-                Tensor cond = _transformer.Forward(Backend, latent, positiveContext, t);
-                velocity = CfgHelper.ApplyCfg(uncond, cond, cfgScale);
-                uncond.Dispose();
-                cond.Dispose();
+                Tensor? uncond = null;
+                Tensor? cond = null;
+                try
+                {
+                    // Preserve the reference branch order: zero/negative context first, positive second.
+                    uncond = _transformer.Forward(Backend, latent, negativeContext, t);
+                    cond = _transformer.Forward(Backend, latent, positiveContext, t);
+                    Backend.CfgEulerStep(latent, cond, uncond, cfgScale, dt);
+                }
+                finally
+                {
+                    cond?.Dispose();
+                    uncond?.Dispose();
+                }
             }
             else
             {
-                velocity = _transformer.Forward(Backend, latent, positiveContext, t);
+                Tensor velocity = _transformer.Forward(Backend, latent, positiveContext, t);
+                try
+                {
+                    Backend.CfgEulerStep(latent, velocity, velocity, 1.0f, dt);
+                }
+                finally
+                {
+                    velocity.Dispose();
+                }
             }
 
-            ApplyEulerStepInPlace(accumulator, velocity, dt);
-            velocity.Dispose();
-
-            // Masked-inpaint blend directly on the accumulator (the integrator's source of truth): keep the
+            // Masked-inpaint blend directly on the latent (the integrator's source of truth): keep the
             // unmasked region on the source's trajectory by re-mixing the source with fresh noise at tNext.
             // Final step blends with the clean source (tNext ≈ 0) — no further integration follows.
             if (latentMask is not null && sourceLatent is not null)
@@ -259,15 +267,9 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
                 {
                     noisedSource = sourceLatent;
                 }
-                MaskBlendUtilities.BlendChannelsInPlace(accumulator, noisedSource, latentMask);
+                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
                 if (noisedSource != sourceLatent) noisedSource.Dispose();
             }
-
-            latent.Dispose();
-            latent = new Tensor(latentShape, DType.F32);
-            Buffer.MemoryCopy((void*)accumulator.DataPointer, (void*)latent.DataPointer,
-                (long)accumulator.ElementCount * sizeof(float),
-                (long)accumulator.ElementCount * sizeof(float));
 
             stepSw.Stop();
             Logs.Info($"F-Lite step {step + 1}/{steps} (t={t:F3} → {tNext:F3}, dt={dt:F3}) done in {stepSw.ElapsedMilliseconds}ms.");
@@ -277,7 +279,6 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
                 LatentArch = LatentArchitecture.FLite,
             });
         }
-        accumulator.Dispose();
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
@@ -312,17 +313,6 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
     {
         float tNorm = (steps - stepIndex) / (float)steps;
         return tNorm * alpha / (1.0f + (alpha - 1.0f) * tNorm);
-    }
-
-    private static void ApplyEulerStepInPlace(Tensor accumulator, Tensor velocity, float dt)
-    {
-        float* accPtr = (float*)accumulator.DataPointer;
-        float* velPtr = (float*)velocity.DataPointer;
-        long count = accumulator.ElementCount;
-        for (long i = 0; i < count; i++)
-        {
-            accPtr[i] += dt * velPtr[i];
-        }
     }
 
     private void ApplyVaeShiftScale(Tensor latent)

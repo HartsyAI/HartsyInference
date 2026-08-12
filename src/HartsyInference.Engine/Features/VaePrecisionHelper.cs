@@ -15,15 +15,32 @@ public static class VaePrecisionHelper
         return backend.Capabilities.SupportsBF16 ? DType.BF16 : DType.F32;
     }
 
-    /// <summary>Returns a new dictionary with every weight cast to <paramref name="targetDtype"/>; tensors already at the target are referenced, not copied.</summary>
+    /// <summary>Returns a new dictionary with every weight cast to <paramref name="targetDtype"/>; tensors already
+    /// at the target are borrowed from the input, while each cast result is caller-owned. A failed partial cast
+    /// disposes every result it created before propagating the original exception.</summary>
     public static Dictionary<string, Tensor> CastVaeWeights(IReadOnlyDictionary<string, Tensor> weights, DType targetDtype)
     {
         ArgumentNullException.ThrowIfNull(weights);
         Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);
+        HashSet<Tensor> borrowed = new(ReferenceEqualityComparer.Instance);
         foreach (KeyValuePair<string, Tensor> kvp in weights)
+            borrowed.Add(kvp.Value);
+
+        try
         {
-            result[kvp.Key] = kvp.Value.DType == targetDtype ? kvp.Value : kvp.Value.CastTo(targetDtype);
+            foreach (KeyValuePair<string, Tensor> kvp in weights)
+                result[kvp.Key] = kvp.Value.DType == targetDtype ? kvp.Value : kvp.Value.CastTo(targetDtype);
+            return result;
         }
-        return result;
+        catch
+        {
+            HashSet<Tensor> disposed = new(ReferenceEqualityComparer.Instance);
+            foreach (Tensor tensor in result.Values)
+            {
+                if (!borrowed.Contains(tensor) && disposed.Add(tensor))
+                    tensor.Dispose();
+            }
+            throw;
+        }
     }
 }

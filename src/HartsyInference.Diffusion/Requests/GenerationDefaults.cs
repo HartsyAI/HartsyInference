@@ -28,8 +28,11 @@ public readonly record struct GenerationDefaults(int Steps, float CfgScale, int 
     public static GenerationDefaults FluxSchnell => new(4, 3.5f, 1024, 1024);
     /// <summary>Flux.2 dev / Klein: 50 steps, guidance 4.0, 1024².</summary>
     public static GenerationDefaults Flux2 => new(50, 4.0f, 1024, 1024);
-    /// <summary>Z-Image Turbo: 8 steps, cfg 1.0, 1024² (Base wants ~50 / 5.0).</summary>
+    /// <summary>Z-Image Turbo: 8 steps, cfg 1.0, 1024².</summary>
     public static GenerationDefaults ZImageTurbo => new(8, 1.0f, 1024, 1024);
+
+    /// <summary>Z-Image Base: official undistilled CFG sampling defaults.</summary>
+    public static GenerationDefaults ZImageBase => new(50, 5.0f, 1024, 1024);
     /// <summary>Qwen-Image: 50 steps, true-cfg 4.0, 1024².</summary>
     public static GenerationDefaults QwenImage => new(50, 4.0f, 1024, 1024);
     /// <summary>AuraFlow: 50 steps, guidance 3.5, 1024².</summary>

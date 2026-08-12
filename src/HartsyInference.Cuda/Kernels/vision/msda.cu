@@ -42,18 +42,18 @@ __global__ void msda_forward_f32(
     unsigned int h = (unsigned int)(t % heads);
     unsigned int q = (unsigned int)(t / heads);
 
-    unsigned int lp = levels * points;
-    const float* aBase = attn + (unsigned long long)(q * heads + h) * lp;
+    unsigned long long lp = (unsigned long long)levels * points;
+    const float* aBase = attn + ((unsigned long long)q * heads + h) * lp;
 
     // softmax denominator over lp (pass 1)
-    float amax = -1e30f;
-    for (unsigned int i = 0; i < lp; i++) { float v = aBase[i]; if (v > amax) amax = v; }
+    float amax = __int_as_float(0xff800000);
+    for (unsigned long long i = 0; i < lp; i++) { float v = aBase[i]; if (v > amax) amax = v; }
     float asum = 0.0f;
-    for (unsigned int i = 0; i < lp; i++) asum += __expf(aBase[i] - amax);
+    for (unsigned long long i = 0; i < lp; i++) asum += __expf(aBase[i] - amax);
     float invSum = 1.0f / asum;
 
     unsigned long long refBase = (unsigned long long)q * refQueryStride;
-    unsigned int hdHeads = heads * hd;
+    unsigned long long hdHeads = (unsigned long long)heads * hd;
     float acc = 0.0f;
 
     for (unsigned int l = 0; l < levels; l++)
@@ -72,7 +72,7 @@ __global__ void msda_forward_f32(
         }
         for (unsigned int p = 0; p < points; p++)
         {
-            unsigned long long offIdx = ((((unsigned long long)(q * heads + h) * levels + l) * points + p)) * 2;
+            unsigned long long offIdx = (((((unsigned long long)q * heads + h) * levels + l) * points + p)) * 2;
             float ox = sampOff[offIdx + 0], oy = sampOff[offIdx + 1];
             float locX, locY;
             if (coords == 2)
@@ -85,7 +85,7 @@ __global__ void msda_forward_f32(
                 locX = refX + ox / (float)points * refW * 0.5f;
                 locY = refY + oy / (float)points * refH * 0.5f;
             }
-            float weight = __expf(aBase[l * points + p] - amax) * invSum;
+            float weight = __expf(aBase[(unsigned long long)l * points + p] - amax) * invSum;
 
             // grid_sample bilinear, align_corners=false, zero padding
             float gx = 2.0f * locX - 1.0f, gy = 2.0f * locY - 1.0f;
@@ -107,7 +107,7 @@ __global__ void msda_forward_f32(
         }
     }
 
-    out[(unsigned long long)(q * heads + h) * hd + c] = acc;
+    out[((unsigned long long)q * heads + h) * hd + c] = acc;
 }
 
 } // extern "C"

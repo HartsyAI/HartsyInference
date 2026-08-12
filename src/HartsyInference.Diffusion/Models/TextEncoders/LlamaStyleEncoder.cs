@@ -26,6 +26,49 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
     private float[]? _ropeSinLocal;
     private int _ropeBuiltForMaxLen;
 
+    /// <summary>One request's causal mask and full-width RoPE tables. These are ordinary activation tensors, not
+    /// model weights: creating them through a backend copy gives CUDA one resident H2D upload without the synchronous
+    /// teardown semantics of <see cref="IBackend.FreeWeights"/>.</summary>
+    private sealed class ForwardConstants : IDisposable
+    {
+        private readonly Tensor[] _owned;
+        private int _disposed;
+
+        public ForwardConstants(Tensor causalMask, Tensor globalCos, Tensor globalSin, Tensor? localCos, Tensor? localSin)
+        {
+            CausalMask = causalMask;
+            GlobalCos = globalCos;
+            GlobalSin = globalSin;
+            LocalCos = localCos;
+            LocalSin = localSin;
+            _owned = localCos is null
+                ? [causalMask, globalCos, globalSin]
+                : [causalMask, globalCos, globalSin, localCos, localSin!];
+        }
+
+        public Tensor CausalMask { get; }
+        public Tensor GlobalCos { get; }
+        public Tensor GlobalSin { get; }
+        public Tensor? LocalCos { get; }
+        public Tensor? LocalSin { get; }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            foreach (Tensor tensor in _owned)
+            {
+                try { tensor.Dispose(); }
+                catch (Exception error)
+                {
+                    // Request-constant cleanup must not replace a successful encoder result or mask the
+                    // exception that caused an encode to unwind. Tensor.Dispose already attempts all of its
+                    // bindings; record the backend failure and continue releasing the remaining constants.
+                    Logs.Error("Failed to release a Llama encoder request constant.", error);
+                }
+            }
+        }
+    }
+
     private int _disposed;
 
     public LlamaStyleEncoder(LlamaStyleEncoderConfig config)
@@ -52,7 +95,9 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         Logs.Debug($"[TE probe] {label}: absmax={mx:F3}");
     }
 
-    /// <summary>Loads all weights from a HuggingFace-style key dict (keys like <c>model.layers.{i}.self_attn.q_proj.weight</c>). Cast to F32 sites are: token embedding (CPU lookup), RMSNorm scales (CPU pointer code expects float*), per-head q/k norms.</summary>
+    /// <summary>Loads all weights from a HuggingFace-style key dict (keys like
+    /// <c>model.layers.{i}.self_attn.q_proj.weight</c>). Embeddings and norm scales are materialized as F32 to
+    /// match the backend gather/RMSNorm contracts; projection matrices retain their checkpoint dtype.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         // Normalize any ComfyUI quantization companions (fold fp8 weight_scale into Fp8ScaleFactor, drop
@@ -97,45 +142,61 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
     {
         ThrowIfDisposed();
 
-        int batch = tokenIds.Length;
-        int seqLen = tokenIds[0].Length;
+        (int batch, int seqLen) = ValidateTokenBatch(tokenIds);
         if (seqLen > _config.MaxPositionEmbeddings)
             throw new InvalidOperationException(
                 $"Prompt length {seqLen} exceeds MaxPositionEmbeddings ({_config.MaxPositionEmbeddings}).");
 
         EnsureRopeTable(seqLen);
 
-        // 1. Token embedding lookup — CPU code, uses the F32-cast embed table.
-        Tensor hidden = EmbeddingLookup(tokenIds, batch, seqLen);
-
-        // 2. Build a causal mask [seqLen, seqLen] with 0 for allowed positions and -inf (large negative) for masked.
-        // SDPA backends typically add the mask to scaled QK^T before softmax; -inf masks are clamped via softmax.
-        Tensor causalMask = BuildCausalMask(seqLen);
-
-        // 3. Layer loop — each block reads `hidden`, allocates a new tensor, returns it. Old hidden disposed.
-        for (int i = 0; i < _config.NumLayers; i++)
+        Tensor? hidden = null;
+        using ForwardConstants constants = PrepareForwardConstants(
+            backend, batch, seqLen, _ropeCos!, _ropeSin!, _ropeCosLocal, _ropeSinLocal);
+        try
         {
-            (float[] rcos, float[] rsin) = RopeForLayer(i);
-            Tensor next = _blocks[i].Forward(backend, hidden, causalMask, rcos, rsin, seqLen);
-            hidden.Dispose();
-            hidden = next;
+            // 1. Gather token embeddings on the selected backend. This used to be a scalar host loop whose
+            // result had to be uploaded before the first RMSNorm, despite the embedding table already being
+            // resident on CUDA.
+            hidden = EmbeddingLookup(backend, tokenIds, batch, seqLen);
+
+            // 2. Layer loop — each block reads `hidden`, allocates a new tensor, returns it. Old hidden disposed.
+            for (int i = 0; i < _config.NumLayers; i++)
+            {
+                (Tensor rcos, Tensor rsin) = RopeForLayer(i, constants);
+                Tensor next = _blocks[i].Forward(backend, hidden, constants.CausalMask, rcos, rsin, seqLen);
+                Tensor previous = hidden;
+                hidden = next;
+                DisposeBestEffort(previous, "previous layer activation");
+            }
+
+            // 3. Final RMSNorm (skipped for checkpoints that don't ship one — e.g. Mistral-Small-3
+            // distilled for Flux.2 Dev. In that case return the last block's raw output.
+            if (_config.HasFinalNorm)
+            {
+                Tensor output = new(new TensorShape(batch, seqLen, _config.HiddenSize), DType.F32);
+                try
+                {
+                    backend.RmsNorm(output, hidden, _finalNormWeight!, _config.RmsNormEps);
+                }
+                catch
+                {
+                    DisposeBestEffort(output, "final norm output after failure");
+                    throw;
+                }
+                Tensor previous = hidden;
+                hidden = null;
+                DisposeBestEffort(previous, "pre-final-norm activation");
+                return output;
+            }
+
+            Tensor result = hidden!;
+            hidden = null;
+            return result;
         }
-
-        causalMask.Dispose();
-
-        // 4. Final RMSNorm (skipped for checkpoints that don't ship one — e.g. Mistral-Small-3
-        // distilled for Flux.2 Dev. In that case we return the last block's raw output, matching
-        // how the diffusers pipeline treats feature-extractor encoders.)
-        if (_config.HasFinalNorm)
+        finally
         {
-            TensorShape outShape = new TensorShape(batch, seqLen, _config.HiddenSize);
-            Tensor output = new Tensor(outShape, DType.F32);
-            backend.RmsNorm(output, hidden, _finalNormWeight!, _config.RmsNormEps);
-            hidden.Dispose();
-            return output;
+            DisposeBestEffort(hidden, "hidden activation");
         }
-
-        return hidden;
     }
 
     /// <summary>Looks up token embeddings <c>[1, seqLen, hidden]</c> (F32). Exposed so multimodal callers (Qwen3-VL)
@@ -143,7 +204,11 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
     public Tensor LookupEmbeddings(int[] tokenIds)
     {
         ThrowIfDisposed();
-        return EmbeddingLookup([tokenIds], 1, tokenIds.Length);
+        ValidateTokenBatch([tokenIds]);
+        if (tokenIds.Length > _config.MaxPositionEmbeddings)
+            throw new ArgumentOutOfRangeException(
+                nameof(tokenIds), tokenIds.Length, $"Prompt exceeds maximum position {_config.MaxPositionEmbeddings}.");
+        return EmbeddingLookupHost([tokenIds], 1, tokenIds.Length);
     }
 
     /// <summary>Runs the decoder over caller-supplied <c>inputsEmbeds [1, seqLen, hidden]</c> with a precomputed
@@ -158,51 +223,95 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         IReadOnlyList<Tensor>? deepstackFeatures = null, bool[]? visualMask = null)
     {
         ThrowIfDisposed();
-        if (inputsEmbeds.Shape.Rank != 3 || inputsEmbeds.Shape[0] != 1)
-            throw new ArgumentException($"inputsEmbeds must be [1, seqLen, hidden], got {inputsEmbeds.Shape}.", nameof(inputsEmbeds));
+        if (inputsEmbeds.DType != DType.F32 || inputsEmbeds.Shape.Rank != 3 || inputsEmbeds.Shape[0] != 1
+            || inputsEmbeds.Shape[2] != _config.HiddenSize)
+        {
+            throw new ArgumentException(
+                $"inputsEmbeds must be F32 [1, seqLen, {_config.HiddenSize}], got {inputsEmbeds.DType} {inputsEmbeds.Shape}.",
+                nameof(inputsEmbeds));
+        }
         int seqLen = (int)inputsEmbeds.Shape[1];
         int H = _config.HiddenSize;
+        if (seqLen <= 0 || seqLen > _config.MaxPositionEmbeddings)
+            throw new ArgumentOutOfRangeException(
+                nameof(inputsEmbeds), seqLen, $"Sequence length must be in [1,{_config.MaxPositionEmbeddings}].");
+        ValidateAttentionGeometry();
+        if (deepstackFeatures is not null && deepstackFeatures.Count > _config.NumLayers)
+            throw new ArgumentException(
+                $"Deepstack feature count {deepstackFeatures.Count} exceeds decoder depth {_config.NumLayers}.",
+                nameof(deepstackFeatures));
 
-        Tensor hidden = new Tensor(new TensorShape(1, seqLen, H), DType.F32);
-        long bytes = (long)seqLen * H * sizeof(float);
-        Buffer.MemoryCopy((void*)inputsEmbeds.DataPointer, (void*)hidden.DataPointer, bytes, bytes);
-
-        Tensor causalMask = BuildCausalMask(seqLen);
-        for (int i = 0; i < _config.NumLayers; i++)
+        (int[] visualRows, float[] visualScales) = ValidateDeepstack(deepstackFeatures, visualMask, seqLen, H);
+        Tensor? hidden = null;
+        using ForwardConstants constants = PrepareForwardConstants(backend, 1, seqLen, ropeCos, ropeSin);
+        try
         {
-            Tensor next = _blocks[i].Forward(backend, hidden, causalMask, ropeCos, ropeSin, seqLen);
-            hidden.Dispose();
-            hidden = next;
-            if (deepstackFeatures is not null && i < deepstackFeatures.Count && visualMask is not null)
-                InjectDeepstack(hidden, deepstackFeatures[i], visualMask, seqLen, H);
-        }
-        causalMask.Dispose();
+            hidden = new Tensor(new TensorShape(1, seqLen, H), DType.F32);
+            backend.SliceRowsGeneric(hidden, inputsEmbeds, rowOffset: 0);
 
-        if (_config.HasFinalNorm)
-        {
-            Tensor output = new Tensor(new TensorShape(1, seqLen, H), DType.F32);
-            backend.RmsNorm(output, hidden, _finalNormWeight!, _config.RmsNormEps);
-            hidden.Dispose();
-            return output;
+            for (int i = 0; i < _config.NumLayers; i++)
+            {
+                Tensor next = _blocks[i].Forward(
+                    backend, hidden, constants.CausalMask, constants.GlobalCos, constants.GlobalSin, seqLen);
+                Tensor previous = hidden;
+                hidden = next;
+                DisposeBestEffort(previous, "previous M-RoPE layer activation");
+                if (deepstackFeatures is not null && i < deepstackFeatures.Count)
+                    backend.ScatterAddWeightedRows(hidden, deepstackFeatures[i], visualRows, visualScales);
+            }
+
+            if (_config.HasFinalNorm)
+            {
+                Tensor output = new(new TensorShape(1, seqLen, H), DType.F32);
+                try { backend.RmsNorm(output, hidden, _finalNormWeight!, _config.RmsNormEps); }
+                catch { DisposeBestEffort(output, "M-RoPE final norm output after failure"); throw; }
+                Tensor previous = hidden;
+                hidden = null;
+                DisposeBestEffort(previous, "M-RoPE pre-final-norm activation");
+                return output;
+            }
+
+            Tensor result = hidden!;
+            hidden = null;
+            return result;
         }
-        return hidden;
+        finally
+        {
+            DisposeBestEffort(hidden, "M-RoPE hidden activation");
+        }
     }
 
-    /// <summary>Adds <paramref name="features"/> (one row per visual token, in sequence order) to the hidden state at
-    /// the positions flagged by <paramref name="visualMask"/>. Mirrors Qwen3-VL's <c>_deepstack_process</c>.</summary>
-    private static void InjectDeepstack(Tensor hidden, Tensor features, bool[] visualMask, int seqLen, int H)
+    private static (int[] Rows, float[] Scales) ValidateDeepstack(
+        IReadOnlyList<Tensor>? features, bool[]? visualMask, int seqLen, int hiddenSize)
     {
-        float* hp = (float*)hidden.DataPointer;
-        float* fp = (float*)features.DataPointer;
-        int visIdx = 0;
-        for (int s = 0; s < seqLen; s++)
+        if (features is null || features.Count == 0)
         {
-            if (!visualMask[s]) continue;
-            long ho = (long)s * H;
-            long fo = (long)visIdx * H;
-            for (int d = 0; d < H; d++) hp[ho + d] += fp[fo + d];
-            visIdx++;
+            if (visualMask is not null && visualMask.Length != seqLen)
+                throw new ArgumentException($"visualMask length {visualMask.Length} does not match sequence {seqLen}.", nameof(visualMask));
+            return ([], []);
         }
+
+        if (visualMask is null || visualMask.Length != seqLen)
+            throw new ArgumentException(
+                $"Deepstack features require a visualMask of length {seqLen}; got {visualMask?.Length ?? 0}.",
+                nameof(visualMask));
+
+        int[] rows = Enumerable.Range(0, seqLen).Where(i => visualMask[i]).ToArray();
+        if (rows.Length == 0)
+            throw new ArgumentException("Deepstack features were supplied, but visualMask selects no rows.", nameof(visualMask));
+        foreach (Tensor feature in features)
+        {
+            if (feature.DType != DType.F32 || feature.Shape.Rank < 2
+                || feature.Shape[feature.Shape.Rank - 1] != hiddenSize
+                || feature.ElementCount != (long)rows.Length * hiddenSize)
+            {
+                throw new ArgumentException(
+                    $"Each deepstack feature must be F32 [{rows.Length},{hiddenSize}], got {feature.DType} {feature.Shape}.",
+                    nameof(features));
+            }
+        }
+
+        return (rows, Enumerable.Repeat(1f, rows.Length).ToArray());
     }
 
     /// <summary>Encodes a prompt and concatenates hidden states from selected intermediate layers along the feature axis. Used by Flux.2 Klein (layers 9, 18, 27 → 7680 dim for Qwen3-4B). HuggingFace indexing: <c>k=0</c> is the embedding output (pre-layer-0); <c>k=1..N</c> is post-layer-(k−1). Final RMSNorm is NOT applied to intermediate outputs (matches HF — only the last hidden state passes through <c>model.norm</c>).</summary>
@@ -228,8 +337,7 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
                 throw new ArgumentException("Layer indices must be strictly ascending.", nameof(layerIndices));
         }
 
-        int batch = tokenIds.Length;
-        int seqLen = tokenIds[0].Length;
+        (int batch, int seqLen) = ValidateTokenBatch(tokenIds);
         int H = _config.HiddenSize;
         int K = layerIndices.Length;
         if (seqLen > _config.MaxPositionEmbeddings)
@@ -238,78 +346,155 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
 
         EnsureRopeTable(seqLen);
 
-        Tensor hidden = EmbeddingLookup(tokenIds, batch, seqLen);
-        Tensor causalMask = BuildCausalMask(seqLen);
-        if (TeProbe) ProbeAbsmax("embed", hidden);
-
-        // Allocate the output tensor up-front: [B, S, K*H]. We'll scatter each requested layer's
-        // [B, S, H] hidden state into its slice.
-        TensorShape outShape = new TensorShape(batch, seqLen, K * H);
-        Tensor output = new Tensor(outShape, DType.F32);
-        float* outPtr = (float*)output.DataPointer;
-        int requestIdx = 0;
-
-        // Capture layer index 0 (embeddings) before any block runs.
-        if (layerIndices[requestIdx] == 0)
+        Tensor? hidden = null;
+        bool hiddenIsCaptured = false;
+        List<Tensor> captures = new(K);
+        using ForwardConstants constants = PrepareForwardConstants(
+            backend, batch, seqLen, _ropeCos!, _ropeSin!, _ropeCosLocal, _ropeSinLocal);
+        try
         {
-            ScatterLayerSlice(hidden, output, requestIdx, batch, seqLen, H, K, interleavedLayout);
-            requestIdx++;
-        }
+            hidden = EmbeddingLookup(backend, tokenIds, batch, seqLen);
+            if (TeProbe) ProbeAbsmax("embed", hidden);
+            int requestIdx = 0;
 
-        for (int i = 0; i < _config.NumLayers; i++)
-        {
-            (float[] rcos, float[] rsin) = RopeForLayer(i);
-            Tensor next = _blocks[i].Forward(backend, hidden, causalMask, rcos, rsin, seqLen);
-            hidden.Dispose();
-            hidden = next;
-            if (TeProbe) ProbeAbsmax($"layer {i + 1}", hidden);
-
-            // Block i produces hidden_states[i+1] in HF terms.
-            int hfLayerIndex = i + 1;
-            while (requestIdx < K && layerIndices[requestIdx] == hfLayerIndex)
+            // Retain the actual activation object instead of D2H-copying it into a host output. The next block
+            // only reads this tensor, so a requested tap can remain alive until one device-side pack at the end.
+            if (layerIndices[requestIdx] == 0)
             {
-                ScatterLayerSlice(hidden, output, requestIdx, batch, seqLen, H, K, interleavedLayout);
+                captures.Add(hidden);
+                hiddenIsCaptured = true;
                 requestIdx++;
             }
-            if (requestIdx >= K) break; // No more layers to capture — early exit.
-        }
 
-        causalMask.Dispose();
-        hidden.Dispose();
-        return output;
-    }
-
-    /// <summary>Scatters a layer's <c>[B, S, H]</c> hidden state into an output tensor of shape <c>[B, S, K*H]</c>.
-    /// Tap-major (<paramref name="interleaved"/> = false): a contiguous block <c>[layerSlot*H .. layerSlot*H + H)</c>.
-    /// Hidden-major (<paramref name="interleaved"/> = true): strided, channel <c>h*K + layerSlot</c> for each <c>h</c>
-    /// (the layout Ideogram 4's <c>llm_cond_proj</c> expects).</summary>
-    private static void ScatterLayerSlice(Tensor src, Tensor dst, int layerSlot, int batch, int seqLen, int H, int K, bool interleaved)
-    {
-        float* sp = (float*)src.DataPointer;
-        float* dp = (float*)dst.DataPointer;
-        long bytesPerToken = (long)H * sizeof(float);
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
+            for (int i = 0; i < _config.NumLayers && requestIdx < K; i++)
             {
-                long srcOff = ((long)b * seqLen + s) * H;
-                long tokenBase = ((long)b * seqLen + s) * (K * H);
-                if (interleaved)
+                (Tensor rcos, Tensor rsin) = RopeForLayer(i, constants);
+                Tensor next = _blocks[i].Forward(backend, hidden, constants.CausalMask, rcos, rsin, seqLen);
+                Tensor previous = hidden;
+                hidden = next;
+                if (!hiddenIsCaptured) DisposeBestEffort(previous, "previous multi-layer activation");
+                hiddenIsCaptured = false;
+                if (TeProbe) ProbeAbsmax($"layer {i + 1}", hidden);
+
+                // Block i produces hidden_states[i+1] in HF terms. Strictly ascending indices mean at most
+                // one capture per state.
+                if (layerIndices[requestIdx] == i + 1)
                 {
-                    // Hidden-major: dst[h*K + layerSlot] = src[h].
-                    for (int h = 0; h < H; h++)
-                        dp[tokenBase + (long)h * K + layerSlot] = sp[srcOff + h];
-                }
-                else
-                {
-                    // Tap-major: contiguous H-wide block per layer.
-                    Buffer.MemoryCopy(sp + srcOff, dp + tokenBase + (long)layerSlot * H, bytesPerToken, bytesPerToken);
+                    captures.Add(hidden);
+                    hiddenIsCaptured = true;
+                    requestIdx++;
                 }
             }
+
+            if (captures.Count != K)
+                throw new InvalidOperationException($"Captured {captures.Count} of {K} requested Llama hidden states.");
+
+            if (K == 1)
+            {
+                Tensor only = captures[0];
+                captures.Clear();
+                hidden = null;
+                hiddenIsCaptured = false;
+                return only;
+            }
+
+            TensorShape outputShape = new(batch, seqLen, checked(K * H));
+            Tensor tapMajor = new(outputShape, DType.F32);
+            try
+            {
+                backend.Concat(tapMajor, captures.ToArray(), dim: 2);
+                if (!interleavedLayout)
+                {
+                    hidden = null;
+                    hiddenIsCaptured = false;
+                    return tapMajor;
+                }
+
+                Tensor output = new(outputShape, DType.F32);
+                try
+                {
+                    // Physical per-token layout is [K,H]; transpose to [H,K] for Ideogram's hidden-major order.
+                    backend.Transpose2D(output, tapMajor, K, H);
+                }
+                catch
+                {
+                    DisposeBestEffort(output, "interleaved tap output");
+                    throw;
+                }
+                DisposeBestEffort(tapMajor, "tap-major staging output");
+                hidden = null;
+                hiddenIsCaptured = false;
+                return output;
+            }
+            catch
+            {
+                DisposeBestEffort(tapMajor, "tap-major output after pack failure");
+                throw;
+            }
+        }
+        finally
+        {
+            if (!hiddenIsCaptured) DisposeBestEffort(hidden, "multi-layer hidden activation");
+            foreach (Tensor capture in captures)
+                DisposeBestEffort(capture, "captured hidden activation");
         }
     }
 
-    private Tensor EmbeddingLookup(int[][] tokenIds, int batch, int seqLen)
+    private static void DisposeBestEffort(Tensor? tensor, string description)
+    {
+        if (tensor is null) return;
+        try { tensor.Dispose(); }
+        catch (Exception error) { Logs.Error($"Failed to release Llama encoder {description}.", error); }
+    }
+
+    private Tensor EmbeddingLookup(IBackend backend, int[][] tokenIds, int batch, int seqLen)
+    {
+        int rowCount = checked(batch * seqLen);
+        int[] rows = new int[rowCount];
+        int rowIndex = 0;
+        for (int b = 0; b < batch; b++)
+            for (int s = 0; s < seqLen; s++)
+                rows[rowIndex++] = tokenIds[b][s];
+
+        TensorShape shape = new(batch, seqLen, _config.HiddenSize);
+        Tensor gathered = new(shape, DType.F32);
+        try
+        {
+            // Uploading a Qwen/Gemma vocabulary table solely to collect a short prompt can cost 1.5–3.2 GB.
+            // Use the kernel only when the recipe/streamer has already made that table resident; otherwise the
+            // old host gather is both faster and dramatically cheaper in peak VRAM.
+            if (!backend.TryGatherRowsResident(gathered, _embedWeight!, rows))
+            {
+                DisposeBestEffort(gathered, "unused resident-gather output");
+                return EmbeddingLookupHost(tokenIds, batch, seqLen);
+            }
+            if (_config.EmbeddingScale == 1.0f)
+                return gathered;
+
+            Tensor scaled = new(shape, DType.F32);
+            try
+            {
+                backend.Scale(scaled, gathered, _config.EmbeddingScale);
+            }
+            catch
+            {
+                DisposeBestEffort(scaled, "scaled embedding output after failure");
+                throw;
+            }
+            DisposeBestEffort(gathered, "unscaled gathered embedding");
+            return scaled;
+        }
+        catch
+        {
+            DisposeBestEffort(gathered, "gathered embedding after failure");
+            throw;
+        }
+    }
+
+    /// <summary>Host lookup retained for multimodal/audio callers that immediately splice or slice the returned
+    /// buffer on the CPU. Moving those callers to the backend requires porting that adjacent host operation too;
+    /// uploading here only to read straight back would be strictly worse.</summary>
+    private Tensor EmbeddingLookupHost(int[][] tokenIds, int batch, int seqLen)
     {
         TensorShape shape = new TensorShape(batch, seqLen, _config.HiddenSize);
         Tensor output = new Tensor(shape, DType.F32);
@@ -344,6 +529,47 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         return output;
     }
 
+    private (int Batch, int Sequence) ValidateTokenBatch(int[][] tokenIds)
+    {
+        ArgumentNullException.ThrowIfNull(tokenIds);
+        if (tokenIds.Length == 0)
+            throw new ArgumentException("Token batch must contain at least one row.", nameof(tokenIds));
+        if (tokenIds[0] is null || tokenIds[0].Length == 0)
+            throw new ArgumentException("Token rows must be non-null and non-empty.", nameof(tokenIds));
+
+        int seqLen = tokenIds[0].Length;
+        for (int b = 0; b < tokenIds.Length; b++)
+        {
+            int[]? row = tokenIds[b];
+            if (row is null || row.Length != seqLen)
+                throw new ArgumentException(
+                    $"Token batch must be rectangular with sequence length {seqLen}; row {b} has length {row?.Length ?? 0}.",
+                    nameof(tokenIds));
+            for (int s = 0; s < row.Length; s++)
+            {
+                if ((uint)row[s] >= (uint)_config.VocabSize)
+                    throw new ArgumentOutOfRangeException(
+                        nameof(tokenIds), row[s], $"Token id at [{b},{s}] is outside vocabulary size {_config.VocabSize}.");
+            }
+        }
+
+        ValidateAttentionGeometry();
+
+        return (tokenIds.Length, seqLen);
+    }
+
+    private void ValidateAttentionGeometry()
+    {
+        if (_config.NumKvHeads <= 0 || _config.NumQueryHeads <= 0
+            || _config.NumQueryHeads % _config.NumKvHeads != 0)
+        {
+            throw new InvalidOperationException(
+                $"Invalid grouped-query geometry Hq={_config.NumQueryHeads}, Hkv={_config.NumKvHeads}; Hq must be divisible by positive Hkv.");
+        }
+        if (_config.HeadDim <= 0 || (_config.HeadDim & 1) != 0)
+            throw new InvalidOperationException($"Split-half RoPE requires a positive even head dimension; got {_config.HeadDim}.");
+    }
+
     private static Tensor BuildCausalMask(int seqLen)
     {
         // Mask shape [seqLen, seqLen] (broadcast across batch, heads inside SDPA).
@@ -358,6 +584,117 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
                 p[i * seqLen + j] = j > i ? negInf : 0f;
         }
         return mask;
+    }
+
+    /// <summary>Copies a small request constant through the backend once so every layer reuses its device-resident
+    /// activation. A reshape/view is deliberately not used: views have a different tensor identity and therefore
+    /// cannot find the producer's activation-cache entry.</summary>
+    private static Tensor MakeResidentCopy(IBackend backend, Tensor host)
+    {
+        Tensor resident = new(host.Shape, host.DType);
+        try
+        {
+            backend.SliceRowsGeneric(resident, host, rowOffset: 0);
+            return resident;
+        }
+        catch
+        {
+            DisposeBestEffort(resident, "resident request constant after copy failure");
+            throw;
+        }
+        finally
+        {
+            DisposeBestEffort(host, "host request constant");
+        }
+    }
+
+    /// <summary>Expands the cached split-half table <c>[S,D/2]</c> to the backend RoPE contract
+    /// <c>[B,S,D]</c>, duplicating each frequency into both vector halves and each batch row.</summary>
+    private static Tensor BuildFullWidthRopeTable(float[] halfTable, int batch, int seqLen, int headDim)
+    {
+        ArgumentNullException.ThrowIfNull(halfTable);
+        if (batch <= 0) throw new ArgumentOutOfRangeException(nameof(batch), "Batch must be positive.");
+        if (seqLen <= 0) throw new ArgumentOutOfRangeException(nameof(seqLen), "Sequence length must be positive.");
+        if (headDim <= 0 || (headDim & 1) != 0)
+            throw new ArgumentOutOfRangeException(nameof(headDim), "Split-half RoPE requires a positive even head dimension.");
+
+        int half = headDim / 2;
+        int required = checked(seqLen * half);
+        if (halfTable.Length < required)
+            throw new ArgumentException(
+                $"RoPE table has {halfTable.Length} values, but sequence {seqLen} and head dimension {headDim} require at least {required}.",
+                nameof(halfTable));
+
+        Tensor full = new(new TensorShape(batch, seqLen, headDim), DType.F32);
+        float* output = (float*)full.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            for (int s = 0; s < seqLen; s++)
+            {
+                int sourceBase = s * half;
+                long destinationBase = ((long)b * seqLen + s) * headDim;
+                for (int i = 0; i < half; i++)
+                {
+                    float value = halfTable[sourceBase + i];
+                    output[destinationBase + i] = value;
+                    output[destinationBase + half + i] = value;
+                }
+            }
+        }
+        return full;
+    }
+
+    private ForwardConstants PrepareForwardConstants(
+        IBackend backend,
+        int batch,
+        int seqLen,
+        float[] globalCos,
+        float[] globalSin,
+        float[]? localCos = null,
+        float[]? localSin = null)
+    {
+        Tensor? mask = null;
+        Tensor? gCos = null;
+        Tensor? gSin = null;
+        Tensor? lCos = null;
+        Tensor? lSin = null;
+        try
+        {
+            mask = MakeResidentCopy(backend, BuildCausalMask(seqLen));
+            gCos = MakeResidentCopy(backend, BuildFullWidthRopeTable(globalCos, batch, seqLen, _config.HeadDim));
+            gSin = MakeResidentCopy(backend, BuildFullWidthRopeTable(globalSin, batch, seqLen, _config.HeadDim));
+            if (localCos is not null || localSin is not null)
+            {
+                if (localCos is null || localSin is null)
+                    throw new ArgumentException("Local RoPE cosine and sine tables must either both be supplied or both be absent.");
+                lCos = MakeResidentCopy(backend, BuildFullWidthRopeTable(localCos, batch, seqLen, _config.HeadDim));
+                lSin = MakeResidentCopy(backend, BuildFullWidthRopeTable(localSin, batch, seqLen, _config.HeadDim));
+            }
+            return new ForwardConstants(mask, gCos, gSin, lCos, lSin);
+        }
+        catch
+        {
+            // Construction is transactional: a failed later upload must not strand the successfully-created prefix.
+            Tensor?[] created = [mask, gCos, gSin, lCos, lSin];
+            foreach (Tensor? tensor in created)
+            {
+                try { tensor?.Dispose(); }
+                catch (Exception error) { Logs.Error("Failed to release a partially prepared Llama encoder constant.", error); }
+            }
+            throw;
+        }
+    }
+
+    private (Tensor Cos, Tensor Sin) RopeForLayer(int layerIndex, ForwardConstants constants)
+    {
+        if (constants.LocalCos is not null
+            && _config.LayerAttentionTypes is { } types && layerIndex < types.Length
+            && !string.Equals(types[layerIndex], "full", StringComparison.Ordinal)
+            && !string.Equals(types[layerIndex], "full_attention", StringComparison.Ordinal))
+        {
+            return (constants.LocalCos, constants.LocalSin!);
+        }
+        return (constants.GlobalCos, constants.GlobalSin);
     }
 
     /// <summary>Precomputes RoPE cos/sin tables once for any seq_len up to <c>maxLenSeen</c>. Cache grows on demand.</summary>
@@ -398,20 +735,6 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             }
         }
         return (cos, sin);
-    }
-
-    /// <summary>Selects the rope table for layer <paramref name="layerIndex"/>: the LOCAL table for
-    /// non-"full" layers when a local table exists (Gemma 3), else the global table. When
-    /// <see cref="LlamaStyleEncoderConfig.LayerAttentionTypes"/> is unset, every layer uses the global table.</summary>
-    private (float[] Cos, float[] Sin) RopeForLayer(int layerIndex)
-    {
-        if (_ropeCosLocal is not null
-            && _config.LayerAttentionTypes is { } types && layerIndex < types.Length
-            && !string.Equals(types[layerIndex], "full", StringComparison.Ordinal))
-        {
-            return (_ropeCosLocal, _ropeSinLocal!);
-        }
-        return (_ropeCos!, _ropeSin!);
     }
 
     private static Tensor CastToF32IfNeeded(Tensor t) =>
@@ -557,7 +880,7 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         }
 
         public Tensor Forward(IBackend backend, Tensor hidden, Tensor causalMask,
-            float[] ropeCos, float[] ropeSin, int seqLen)
+            Tensor ropeCos, Tensor ropeSin, int seqLen)
         {
             int batch = (int)hidden.Shape[0];
             int H = _config.HiddenSize;
@@ -565,7 +888,6 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             int Hkv = _config.NumKvHeads;
             int D = _config.HeadDim;
             int Qd = _config.QDim;       // Hq * D
-            int Kvd = _config.KvDim;     // Hkv * D
 
             // ── Attention sub-block ──────────────────────────────────────
             // 1. Pre-attention RMSNorm.
@@ -574,11 +896,15 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             backend.RmsNorm(preAttn, hidden, _inputNorm!, _config.RmsNormEps);
 
             // 2. Q/K/V projections.
-            TensorShape qShape = new TensorShape(batch, seqLen, Qd);
-            TensorShape kvShape = new TensorShape(batch, seqLen, Kvd);
-            Tensor qFlat = new Tensor(qShape, DType.F32);
-            Tensor kFlat = new Tensor(kvShape, DType.F32);
-            Tensor vFlat = new Tensor(kvShape, DType.F32);
+            TensorShape qShape = new(batch, seqLen, Qd);
+            // Linear only requires the same contiguous element count; keeping the logical [B,S,H,D]
+            // shape here makes the following device-side permutation explicit without creating a
+            // Reshape view (a distinct Tensor identity would miss the activation cache and force D2H).
+            TensorShape qTokenShape = new TensorShape(batch, seqLen, Hq, D);
+            TensorShape kvTokenShape = new TensorShape(batch, seqLen, Hkv, D);
+            Tensor qFlat = new Tensor(qTokenShape, DType.F32);
+            Tensor kFlat = new Tensor(kvTokenShape, DType.F32);
+            Tensor vFlat = new Tensor(kvTokenShape, DType.F32);
             backend.Linear(qFlat, preAttn, _qProj!, _qBias);
             backend.Linear(kFlat, preAttn, _kProj!, _kBias);
             backend.Linear(vFlat, preAttn, _vProj!, _vBias);
@@ -598,9 +924,9 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             Tensor qMh = new Tensor(qMhShape, DType.F32);
             Tensor kMh = new Tensor(kvMhShape, DType.F32);
             Tensor vMh = new Tensor(kvMhShape, DType.F32);
-            ReshapeFlatToMultiHead(qMh, qFlat, batch, seqLen, Hq, D);
-            ReshapeFlatToMultiHead(kMh, kFlat, batch, seqLen, Hkv, D);
-            ReshapeFlatToMultiHead(vMh, vFlat, batch, seqLen, Hkv, D);
+            backend.Permute0213(qMh, qFlat, seqLen, Hq, D);
+            backend.Permute0213(kMh, kFlat, seqLen, Hkv, D);
+            backend.Permute0213(vMh, vFlat, seqLen, Hkv, D);
             qFlat.Dispose();
             kFlat.Dispose();
             vFlat.Dispose();
@@ -619,8 +945,8 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             }
 
             // 5. Apply RoPE in-place to Q and K (split-half rotation, Llama convention).
-            ApplyRopeSplitHalf(qMh, ropeCos, ropeSin, batch, Hq, seqLen, D);
-            ApplyRopeSplitHalf(kMh, ropeCos, ropeSin, batch, Hkv, seqLen, D);
+            backend.ApplyRopeSingleHeadMajor(qMh, ropeCos, ropeSin, D);
+            backend.ApplyRopeSingleHeadMajor(kMh, ropeCos, ropeSin, D);
 
             // 6. GQA: repeat KV from Hkv heads to Hq heads (KvGroupSize copies of each head).
             Tensor kRepeated = kMh;
@@ -629,8 +955,8 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             {
                 kRepeated = new Tensor(qMhShape, DType.F32);
                 vRepeated = new Tensor(qMhShape, DType.F32);
-                RepeatKvHeads(kRepeated, kMh, batch, Hkv, _config.KvGroupSize, seqLen, D);
-                RepeatKvHeads(vRepeated, vMh, batch, Hkv, _config.KvGroupSize, seqLen, D);
+                backend.RepeatKvHeads(kRepeated, kMh, Hkv, _config.KvGroupSize);
+                backend.RepeatKvHeads(vRepeated, vMh, Hkv, _config.KvGroupSize);
                 kMh.Dispose();
                 vMh.Dispose();
             }
@@ -651,7 +977,8 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
 
             // 8. Reshape multi-head back to flat [B, S, Qd], then o_proj.
             Tensor attnFlat = new Tensor(qShape, DType.F32);
-            ReshapeMultiHeadToFlat(attnFlat, attnOut, batch, seqLen, Hq, D);
+            // permute(0,2,1,3) is its own inverse when the S/H arguments are swapped.
+            backend.Permute0213(attnFlat, attnOut, Hq, seqLen, D);
             attnOut.Dispose();
 
             Tensor attnProj = new Tensor(hShape, DType.F32);
@@ -725,86 +1052,5 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             return result;
         }
 
-        // [B, S, H*D] → [B, H, S, D]
-        private static void ReshapeFlatToMultiHead(Tensor output, Tensor input, int batch, int seqLen, int heads, int headDim)
-        {
-            float* inPtr = (float*)input.DataPointer;
-            float* outPtr = (float*)output.DataPointer;
-            for (int b = 0; b < batch; b++)
-                for (int s = 0; s < seqLen; s++)
-                    for (int h = 0; h < heads; h++)
-                    {
-                        long inOff = ((long)b * seqLen + s) * heads * headDim + (long)h * headDim;
-                        long outOff = (((long)b * heads + h) * seqLen + s) * headDim;
-                        Buffer.MemoryCopy(inPtr + inOff, outPtr + outOff, headDim * sizeof(float), headDim * sizeof(float));
-                    }
-        }
-
-        // [B, H, S, D] → [B, S, H*D]
-        private static void ReshapeMultiHeadToFlat(Tensor output, Tensor input, int batch, int seqLen, int heads, int headDim)
-        {
-            float* inPtr = (float*)input.DataPointer;
-            float* outPtr = (float*)output.DataPointer;
-            for (int b = 0; b < batch; b++)
-                for (int s = 0; s < seqLen; s++)
-                    for (int h = 0; h < heads; h++)
-                    {
-                        long inOff = (((long)b * heads + h) * seqLen + s) * headDim;
-                        long outOff = ((long)b * seqLen + s) * heads * headDim + (long)h * headDim;
-                        Buffer.MemoryCopy(inPtr + inOff, outPtr + outOff, headDim * sizeof(float), headDim * sizeof(float));
-                    }
-        }
-
-        // GQA: replicate each KV head `groupSize` times into Q-head positions.
-        // [B, Hkv, S, D] → [B, Hkv*groupSize=Hq, S, D]
-        private static void RepeatKvHeads(Tensor output, Tensor input, int batch, int kvHeads, int groupSize, int seqLen, int headDim)
-        {
-            float* inPtr = (float*)input.DataPointer;
-            float* outPtr = (float*)output.DataPointer;
-            long perHead = (long)seqLen * headDim;
-            for (int b = 0; b < batch; b++)
-            {
-                for (int h = 0; h < kvHeads; h++)
-                {
-                    long srcOff = ((long)b * kvHeads + h) * perHead;
-                    for (int g = 0; g < groupSize; g++)
-                    {
-                        int qHead = h * groupSize + g;
-                        long dstOff = ((long)b * (kvHeads * groupSize) + qHead) * perHead;
-                        Buffer.MemoryCopy(inPtr + srcOff, outPtr + dstOff, perHead * sizeof(float), perHead * sizeof(float));
-                    }
-                }
-            }
-        }
-
-        /// <summary>Llama-style RoPE (split-half): for each head vector x[0..D] at position p, produce
-        /// y[i] = x[i]*cos[i'] − x[i+D/2]*sin[i'] for i in [0, D/2),
-        /// y[i] = x[i]*cos[i']' + x[i−D/2]*sin[i']'  for i in [D/2, D),
-        /// where cos/sin are duplicated across the half so cos[i] = cos[i'] = cos[(i mod D/2)].</summary>
-        private static void ApplyRopeSplitHalf(Tensor q, float[] cos, float[] sin, int batch, int heads, int seqLen, int headDim)
-        {
-            int half = headDim / 2;
-            float* qPtr = (float*)q.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                for (int h = 0; h < heads; h++)
-                {
-                    for (int s = 0; s < seqLen; s++)
-                    {
-                        long off = (((long)b * heads + h) * seqLen + s) * headDim;
-                        int posOff = s * half;
-                        for (int i = 0; i < half; i++)
-                        {
-                            float c = cos[posOff + i];
-                            float si = sin[posOff + i];
-                            float a = qPtr[off + i];
-                            float b2 = qPtr[off + i + half];
-                            qPtr[off + i] = a * c - b2 * si;
-                            qPtr[off + i + half] = b2 * c + a * si;
-                        }
-                    }
-                }
-            }
-        }
     }
 }
