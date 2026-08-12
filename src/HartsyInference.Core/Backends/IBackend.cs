@@ -43,6 +43,35 @@ public interface IBackend : IDisposable
     /// <summary>Linear layer: output = input × weight^T + bias. [M,K]×[N,K]→[M,N], bias [N] optional; leading batch dims also work.</summary>
     void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias);
 
+    /// <summary>GEMM against a contiguous ROW RANGE of <paramref name="weight"/> — rows <c>[weightRowOffset,
+    /// weightRowOffset + weightRowCount)</c> of a <c>[outDim, inDim]</c> weight, with <paramref name="bias"/> sliced
+    /// to match. Exists so a fused projection can be evaluated in parts WITHOUT materializing a sub-tensor: GPU
+    /// caching is keyed on tensor identity, so a real slice would upload a second copy of an already-resident weight
+    /// (see <c>MiniMaxH3Transformer</c>'s chunked attention). The default fallback copies the rows out; backends that
+    /// can offset a device pointer override it.</summary>
+    unsafe void LinearWeightRows(Tensor output, Tensor input, Tensor weight, Tensor? bias, int weightRowOffset, int weightRowCount)
+    {
+        if (weight.DType.IsQuantized)
+            throw new NotSupportedException($"LinearWeightRows cannot row-slice block-quantized weights (got {weight.DType}).");
+        using Tensor rows = new Tensor(new TensorShape(weightRowCount, weight.Shape[1]), weight.DType)
+        {
+            Fp8ScaleFactor = weight.Fp8ScaleFactor,
+        };
+        SliceRowsGeneric(rows, weight, weightRowOffset);
+        if (bias is null)
+        {
+            Linear(output, input, rows, null);
+            return;
+        }
+        // Bias is 1-D, one value per output channel, so it slices by ELEMENT — SliceRowsGeneric's row stride
+        // (its last dim is the whole vector) would offset by rowOffset*count instead.
+        using Tensor biasRows = new Tensor(new TensorShape(weightRowCount), bias.DType);
+        long biasOffsetBytes = bias.DType.ComputeByteCount(weightRowOffset);
+        long biasBytes = bias.DType.ComputeByteCount(weightRowCount);
+        Buffer.MemoryCopy((byte*)bias.DataPointer + biasOffsetBytes, biasRows.DataPointer, biasBytes, biasBytes);
+        Linear(output, input, rows, biasRows);
+    }
+
     // ── Convolution ─────────────────────────────────────────────────────
 
     /// <summary>2D convolution: output = conv2d(input, weight, bias, stride, padding)</summary>

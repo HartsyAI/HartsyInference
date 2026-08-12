@@ -1127,13 +1127,39 @@ public sealed class CudaBackend : IBackend
         // refused and stays transient). Master kill-switch: CacheWeightCasts=false.
         => LinearImpl(output, input, quantWeight, bias, cacheWeightCast: true);
 
-    private unsafe void LinearImpl(Tensor output, Tensor input, Tensor weight, Tensor? bias, bool cacheWeightCast)
+    /// <summary>GEMM against a contiguous ROW RANGE of <paramref name="weight"/>, sharing the resident weight (and its
+    /// cached dtype cast) rather than materializing a slice. Rows are contiguous in <c>[outDim, inDim]</c>, so this is
+    /// a pointer offset — which is the whole point: a real sub-tensor would be a separate cache identity and would
+    /// upload a second copy of an already-resident weight. Lets a fused projection be evaluated in parts (see
+    /// <c>MiniMaxH3Transformer</c>'s chunked attention, which projects k+v and then q from one packed qkv weight).</summary>
+    public void LinearWeightRows(Tensor output, Tensor input, Tensor weight, Tensor? bias, int weightRowOffset, int weightRowCount)
+        => LinearImpl(output, input, weight, bias, cacheWeightCast: true, weightRowOffset, weightRowCount);
+
+    private unsafe void LinearImpl(Tensor output, Tensor input, Tensor weight, Tensor? bias, bool cacheWeightCast,
+        int weightRowOffset = 0, int weightRowCount = -1)
     {
         using NvtxRange _nvtx = NvtxRange.Push("Linear");
         EnterOp();
         EnsureKernels();
 
-        int n = (int)weight.Shape[0]; // outDim
+        // A row range addresses the weight by byte offset, which block-quantized layouts (super-block scales
+        // interleaved with packed nibbles) cannot express, and it makes the W8A8 int8 cache — keyed on the WHOLE
+        // weight — describe the wrong rows. Both are refused rather than silently mis-slicing; every fused-GEMV
+        // branch below is m<=8 (LLM decode) and so is unreachable from the chunked-DiT callers that need this.
+        bool rowRange = weightRowOffset != 0 || weightRowCount >= 0;
+        if (rowRange)
+        {
+            if (weight.DType.IsQuantized)
+                throw new NotSupportedException($"LinearWeightRows cannot row-slice block-quantized weights (got {weight.DType}).");
+            if (bias is not null && bias.DType != output.DType)
+                throw new NotSupportedException(
+                    $"LinearWeightRows needs bias dtype to match output ({bias.DType} vs {output.DType}) — a cast would rebase the slice.");
+            if (weightRowOffset < 0 || weightRowCount <= 0 || (long)weightRowOffset + weightRowCount > weight.Shape[0])
+                throw new ArgumentOutOfRangeException(nameof(weightRowOffset),
+                    $"LinearWeightRows range [{weightRowOffset}, {weightRowOffset + weightRowCount}) is outside weight rows [0, {weight.Shape[0]}).");
+        }
+
+        int n = rowRange ? weightRowCount : (int)weight.Shape[0]; // outDim (or the requested row count)
         int k = (int)weight.Shape[1]; // inDim
         int m = (int)(input.ElementCount / k); // batch*seqLen
 
@@ -1142,7 +1168,7 @@ public sealed class CudaBackend : IBackend
         // weight.DataPointer BEFORE this call touches the transfer caches (a mid-forward DataPointer read on a
         // device-cached tensor trips the lazy-sync consume and the outer finally would double-free pWeight —
         // bisected 2026-07-23, W8A8ReproTemp).
-        bool w8a8 = EnableW8A8 && _kernels!.HasW8A8Kernels && Int8Gemm.IsSupported && m >= 32
+        bool w8a8 = !rowRange && EnableW8A8 && _kernels!.HasW8A8Kernels && Int8Gemm.IsSupported && m >= 32
             && weight.Shape.Rank == 2 && k % 4 == 0 && n % 4 == 0
             && (weight.DType == DType.F16 || weight.DType == DType.BF16 || weight.DType == DType.F32)
             && (input.DType == DType.F16 || input.DType == DType.F32)
@@ -1180,7 +1206,10 @@ public sealed class CudaBackend : IBackend
             // F16-sized intermediate) then cuBLAS GEMM at m=1", cutting weight traffic ~4× and skipping the
             // temp — the dominant decode cost. k is always a multiple of 256 for Q4_K. Larger m (prefill)
             // falls through to the cuBLAS GEMM, which is efficient at m≥ a few hundred.
-            if (m <= 8 && input.DType == DType.F32 && output.DType == DType.F32)
+            // !rowRange: every fused GEMV below hands the kernel the un-offset pWeight and returns, so a row range
+            // would silently read from row 0. They are decode-shaped (m<=8) and no row-range caller is, so forcing
+            // the general GEMM costs nothing rather than needing an offset threaded through each launcher.
+            if (!rowRange && m <= 8 && input.DType == DType.F32 && output.DType == DType.F32)
             {
                 // dp4a int8-activation paths (standard profile, kill-switch HARTSY_DP4A_ON=0): quantize the
                 // activation to int8
@@ -1397,14 +1426,20 @@ public sealed class CudaBackend : IBackend
                     }
                 }
 
-                Fp8Executor.Run(weight: pWeight, input: inputFp8Ptr, outPtr: pOutput, m: m, n: n, k: k,
+                // This path consumes the PACKED fp8 weight directly and returns before the shared cast-resolution
+                // offset below, so a row range has to be applied here too — fp8 is 1 byte per element, and the
+                // rows of a [outDim, inDim] weight are contiguous.
+                ulong fp8WeightPtr = rowRange
+                    ? pWeight + (ulong)((long)weightRowOffset * k * weight.DType.SizeInBytes)
+                    : pWeight;
+                Fp8Executor.Run(weight: fp8WeightPtr, input: inputFp8Ptr, outPtr: pOutput, m: m, n: n, k: k,
                     weightScale: alpha, stream: _stream.Handle,
                     inputScaleDev: inputScaleDev, outF32: output.DType == DType.F32);
 
                 if (bias is not null)
                 {
                     int totalElementsFp8 = m * n;
-                    ulong biasPtr = pBias;
+                    ulong biasPtr = rowRange ? pBias + (ulong)((long)weightRowOffset * bias!.DType.SizeInBytes) : pBias;
                     if (output.DType != bias!.DType)
                     {
                         pBiasCast = CudaMemory.Allocate((nuint)(bias.ElementCount * output.DType.SizeInBytes));
@@ -1540,6 +1575,14 @@ public sealed class CudaBackend : IBackend
                 weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
             }
 
+            // Every branch above leaves weightPtr addressing gemmDtype elements over the WHOLE weight — casts are
+            // deliberately computed and cached full-size so sibling row ranges share one cast — so the range is a
+            // single offset applied here, after cast resolution rather than inside each branch.
+            if (rowRange)
+            {
+                weightPtr += (ulong)((long)weightRowOffset * k * gemmDtype.SizeInBytes);
+            }
+
             int gemmType = CublasDataTypeForGemm(gemmDtype, input.DType, weight.DType, output.DType, m, n, k);
             int outputType = CublasDataTypeForGemm(output.DType, input.DType, weight.DType, output.DType, m, n, k);
 
@@ -1548,7 +1591,9 @@ public sealed class CudaBackend : IBackend
             ulong biasDevicePtr = 0;
             if (bias is not null)
             {
-                biasDevicePtr = pBias;
+                // Bias is one value per output channel, so it slices with the same row range (guarded above to a
+                // dtype that needs no cast, since casting would rebase off the full-length bias).
+                biasDevicePtr = rowRange ? pBias + (ulong)((long)weightRowOffset * bias.DType.SizeInBytes) : pBias;
                 if (output.DType != bias!.DType)
                 {
                     pBiasCast = CudaMemory.Allocate((nuint)(bias.ElementCount * output.DType.SizeInBytes));
