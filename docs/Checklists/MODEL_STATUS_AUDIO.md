@@ -376,6 +376,12 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] AudioGen duration cap 45s → 30s (unroot-caused).
 - [ ] ZipVoice GPU-residency pass.
 - [ ] Per-provider unload endpoint.
+- [ ] CosyVoice2 streaming real-time-factor pass — currently ~8× real-time end to end, live-verified
+      2026-08-11 (`CosyVoicePipeline.SynthesizeStream`). The flow+vocoder stage alone already tunes to
+      ~3.45× (`CosyVoiceFlow.InferenceGrowingWindowed`, chunkSizeTokens=25/windowSizeTokens=150/
+      marginFrames=40); the LM's own autoregressive speech-token decode is the dominant remaining cost
+      (steady ~7.6-8.2s live per 25-token chunk vs. ~2.8-3.0s for that chunk's flow+vocoder work alone) —
+      that's the next lever, not further flow/vocoder tuning. First-chunk latency 25.7s warm / 36s cold.
 
 ## Details
 
