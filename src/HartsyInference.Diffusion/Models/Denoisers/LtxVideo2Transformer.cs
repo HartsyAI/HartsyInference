@@ -262,12 +262,8 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     public (Tensor Video, Tensor Audio) Forward(IBackend backend, Tensor videoTokens, Tensor audioTokens,
         Tensor encoderVideo, Tensor encoderAudio, float timestep,
         (int Frames, int Height, int Width) grid, int audioFrames, double fps,
-        Tensor? encoderVideoMask, Tensor? encoderAudioMask, float sigma = float.NaN)
+        Tensor? encoderVideoMask, Tensor? encoderAudioMask)
     {
-        // prompt_adaln (text cross-attn KV/Q modulation) is driven by the UNSCALED flow sigma (0..1) in the reference,
-        // NOT the ×1000-scaled timestep the other modulators use. Callers pass the raw sigma; default to
-        // timestep/scale if unset for back-compat.
-        if (float.IsNaN(sigma)) sigma = timestep / _config.TimestepScaleMultiplier;
         int sv = (int)videoTokens.Shape[0], sa = (int)audioTokens.Shape[0];
         int v = _config.InnerDim, a = _config.AudioInnerDim;
 
@@ -284,8 +280,11 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         Tensor? tPromptV = null, tPromptA = null;
         if (_hasPromptMod)
         {
-            (tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, sigma); _pv.Dispose();
-            (tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, sigma); _pa.Dispose();
+            // Same ×1000-scaled timestep as every other modulator; the reference feeds compute_prompt_timestep
+            // its timestep_scaled. The raw sigma lands ~1000x off along the sinusoidal embedding and leaves the
+            // text cross-attn unable to discriminate between prompts.
+            (tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, timestep); _pv.Dispose();
+            (tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, timestep); _pa.Dispose();
         }
         (Tensor tCaVss, Tensor _cv) = _caVideoScaleShift.Forward(backend, timestep); _cv.Dispose();
         (Tensor tCaAss, Tensor _ca) = _caAudioScaleShift.Forward(backend, timestep); _ca.Dispose();
@@ -355,9 +354,8 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     public ((Tensor Video, Tensor Audio) Cond, (Tensor Video, Tensor Audio) Uncond) ForwardCfgPair(
         IBackend backend, Tensor videoTokens, Tensor audioTokens,
         Tensor encoderVideoCond, Tensor encoderAudioCond, Tensor encoderVideoUncond, Tensor encoderAudioUncond,
-        float timestep, (int Frames, int Height, int Width) grid, int audioFrames, double fps, float sigma = float.NaN)
+        float timestep, (int Frames, int Height, int Width) grid, int audioFrames, double fps)
     {
-        if (float.IsNaN(sigma)) sigma = timestep / _config.TimestepScaleMultiplier;
         int sv = (int)videoTokens.Shape[0], sa = (int)audioTokens.Shape[0];
         int v = _config.InnerDim, a = _config.AudioInnerDim;
 
@@ -369,7 +367,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         {
             return ForwardCfgPairGraph(backend, videoTokens, audioTokens,
                 encoderVideoCond, encoderAudioCond, encoderVideoUncond, encoderAudioUncond,
-                timestep, grid, audioFrames, fps, sigma, sv, sa, v, a);
+                timestep, grid, audioFrames, fps, sv, sa, v, a);
         }
 
         Tensor hidC = new Tensor(new TensorShape(sv, v), DType.F32);
@@ -387,8 +385,8 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         Tensor? tPromptV = null, tPromptA = null;
         if (_hasPromptMod)
         {
-            (tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, sigma); _pv.Dispose();
-            (tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, sigma); _pa.Dispose();
+            (tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, timestep); _pv.Dispose();
+            (tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, timestep); _pa.Dispose();
         }
         (Tensor tCaVss, Tensor _cv) = _caVideoScaleShift.Forward(backend, timestep); _cv.Dispose();
         (Tensor tCaAss, Tensor _ca) = _caAudioScaleShift.Forward(backend, timestep); _ca.Dispose();
@@ -458,7 +456,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     private ((Tensor Video, Tensor Audio) Cond, (Tensor Video, Tensor Audio) Uncond) ForwardCfgPairGraph(
         IBackend backend, Tensor videoTokens, Tensor audioTokens,
         Tensor encVCond, Tensor encACond, Tensor encVUncond, Tensor encAUncond,
-        float timestep, (int Frames, int Height, int Width) grid, int audioFrames, double fps, float sigma,
+        float timestep, (int Frames, int Height, int Width) grid, int audioFrames, double fps,
         int sv, int sa, int v, int a)
     {
         // ── Build the per-step timestep tables OUTSIDE the capture; land them in the fixed buffers ──
@@ -470,8 +468,8 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         RefreshFixed(backend, ref _gEmbA, embA);
         if (_hasPromptMod)
         {
-            (Tensor tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, sigma); _pv.Dispose();
-            (Tensor tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, sigma); _pa.Dispose();
+            (Tensor tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, timestep); _pv.Dispose();
+            (Tensor tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, timestep); _pa.Dispose();
             RefreshFixed(backend, ref _gTPromptV, tPromptV);
             RefreshFixed(backend, ref _gTPromptA, tPromptA);
         }

@@ -1,16 +1,14 @@
 # LTX 2.5 — Research Notes
 
-> Status: Components complete, pipeline wiring open | Last Updated: 2026-08-12 | Two open questions below
+> Status: **Runs end-to-end on real weights, prompt-faithful** | Last Updated: 2026-08-12
 
-Every component is built and checked against a reference. What is **not** done is the pipeline: `LtxVideo2Pipeline`
-still constructs the Gemma-3 tower and the convolutional decoder, so `LtxVideo2Recipe` refuses a 2.5 bundle with
-a targeted error rather than mis-decoding it. Wiring needs an `ILtx2TextTower` swap plus a decoder-kind branch,
-and cannot be exercised on the dev box (the text encoder is 26 GB; the decoder is managed-only at ~32 s for the
-smallest possible frame). This doc stays a full research doc rather than a provenance stub until that lands.
+`hartsy video -m ltx-2.5` generates prompt-faithful 704×480×25f clips with a soundtrack on the official
+`int8_lean_convrot` DiT + Gemma-4-12B pair (4090, ~80 s). The whole text path is verified against ComfyUI 0.32
+on the real checkpoints — tokenizer ids byte-exact, Gemma-4 tower cosine 0.9999–1.0000 per layer, connector
+within 0.2–0.6%, `attn2` within 0.07%, and the conditioning's prompt-to-prompt delta at ratio 1.00. The one
+real defect found on the way is written up under "Prompt-independent output" below.
 
-## If you are the one wiring this into the pipeline
-
-Concrete answers to the questions that come up first, so they don't have to be re-derived.
+## Invariants worth not re-deriving
 
 **Ungated conv VAE** (Lightricks 401s even on a byte range; both verified reachable 2026-08-12, `gated: false`):
 
@@ -26,10 +24,6 @@ managed-only — there is no CUDA `Na3d` kernel — and it needs ~32 s for the s
 (`[1,3,1,64,64]`). Real-resolution decoding is out of reach until that kernel exists, and the dominant cost is
 `MatMulKernels.LinearTransB` re-casting a non-F32 weight on every call, not the attention itself.
 
-**The two `LtxVideo2Recipe.Construct` guards** (`"bundles a Gemma 4 text tower"`, `"carries the LTX-2.5
-diffusion video VAE"`) are deliberate placeholders. Delete them as part of wiring rather than routing around
-them.
-
 - Gemma-4 discriminator: `conv.TextEncoder.ContainsKey("model.layers.0.layer_scalar")`. Do **not** probe for a
   missing `v_proj` — layer 0 is a sliding layer and has one.
 - `Gemma4TextEncoder.EncodeMultiLayer` was written to the same signature and layer-outer `[B, seq, K·H]` layout
@@ -41,47 +35,49 @@ them.
   `conv.Vae` as `latents_mean`/`latents_std`, since both decoders un-normalize identically.
 - Distilled vs dev is not detectable from any checkpoint — it arrives via the `ltx-2.5-distilled` catalog id.
 
-**Before chasing output quality, read the two divergences below** (the missing final norm, which affects the
-shipping 2.3 path too, and the padding-side difference). Either can make output subtly wrong in a way that
-looks like a porting bug somewhere else.
+Both of the divergences this doc used to flag as open (the 49th state's final norm and the padding side) are
+settled below — neither was a defect.
 
-### Prompt-independent output — the connector is fed padding the reference never sends it
+### Prompt-independent output — FIXED: prompt_adaln was driven by the raw sigma, not the scaled timestep
 
-Symptom seen on the first real end-to-end run: two unrelated prompts at the same seed produced effectively the
-same image (mean |Δ| ≈ 1%), while merely changing the conditioning length moved it three times more. Output was
-seed-driven, not prompt-driven. The tower was verified innocent independently — it discriminates between
-prompts correctly on real int8 weights.
-
-**Cause: ComfyUI trims the encoder output back to the real tokens before the projection; this engine does not.**
-In `comfy/text_encoders/lt.py`, `LTXAVTEModel.encode_token_weights`:
+**Root cause**: `LtxVideo2Transformer` fed `prompt_adaln_single` / `audio_prompt_adaln_single` the raw flow sigma
+(0..1) instead of the ×1000-scaled timestep every other modulator uses. The reference is explicit
+(`av_model.py::_prepare_timestep`):
 
 ```python
-out, pooled, extra = self.gemma3_12b.encode_token_weights(token_weight_pairs)
-out = out[:, :, -torch.sum(extra["attention_mask"]).item():]   # sequence axis → real tokens only
+timestep_scaled = timestep * self.timestep_scale_multiplier          # sigma * 1000
+v_prompt_timestep = compute_prompt_timestep(self.prompt_adaln_single, timestep_scaled, ...)
+a_prompt_timestep = compute_prompt_timestep(self.audio_prompt_adaln_single, a_timestep_scaled, ...)
 ```
 
-`out` is `[B, layers, seq, hidden]`, so that slice cuts the **sequence** axis down to the real token count, and
-with upstream's left padding those are the trailing positions. It sits above the `single_linear`/`dual_linear`
-branch, so it applies to 2.5's `dual_linear` too. The `min_length` of 1024 exists only so the language model
-sees a consistent length — **no pad position ever reaches the projection or the connector.**
+`prompt_adaln` produces `shift_kv`/`scale_kv`, which modulate the **text keys and values** feeding every block's
+cross-attention (`context * (1 + scale_kv) + shift_kv`). Evaluating a sinusoidal timestep embedding at t≈1
+instead of t≈1000 lands somewhere unrelated on the embedding, so the text K/V were mis-modulated at every block
+and every step. The symptom was not a dead cross-attention — magnitudes looked right — but a cross-attention
+that could not *discriminate*: output followed the seed, and two unrelated prompts differed by ~1% of pixel
+range. A stale comment in the code asserted the opposite convention, which is what made this survive.
 
-This engine instead passes the whole padded sequence to
-`LtxVideo2TextConnectors.Forward(backend, gemmaFeatures[seq, 188160], validMask[seq])` with `seq = 1024`. Pad
-positions are RMS-zeroed and then replaced by learnable registers, so for a short prompt roughly 99% of the
-conditioning is prompt-independent learned content. That is the whole symptom, and it explains why every
-plausible alternative came back negative: conditioning length only shifts the register-to-content ratio, left
-padding merely relocates the registers, and the final norm and output resolution are orthogonal to it.
+**Verification** (ComfyUI 0.32 headless, real int8-convrot checkpoints, same latent + timestep + conditioning):
 
-**Fix**: after encoding at 1024, trim the 49-layer feature stack to the real token count, then pad up to the
-next multiple of 128 to satisfy this engine's register-multiple invariant, then build `validMask` over that. A
-9-token prompt then runs at 128 (~7% real) rather than 1024 (~0.9%) — which is what the 2.3 path already does,
-and why 2.3 works. Note the trim must take the **leading** `n_real` positions here, since this engine
-right-pads; porting upstream's negative slice literally would keep the padding and discard the prompt.
+| quantity | before | after |
+| --- | --- | --- |
+| per-block prompt sensitivity vs reference (blocks 2-47) | 8-13x too weak | **ratio 1.00** |
+| `\|encMod\|` at block 0 (ref 0.3906) | 0.37318 | **0.39131** |
+| two unrelated prompts, one seed | ~1% pixel delta | renders each prompt |
 
-Related but separate: the 128-register-multiple padding has **no counterpart upstream at all** — ComfyUI feeds
-the bare real-token count. So even at 128 this engine is diluted relative to the reference, and the 2.3 path
-always has been. That is an LTX-2 connector deviation rather than a Gemma-4 one, and changing it moves verified
-2.3 output, so it should be treated on its own.
+Everything upstream was verified correct before the DiT was suspected, and none of it needed changing:
+tokenizer ids byte-exact; Gemma-4 tower cosine 0.9999-1.0000 per layer including the global layers; connector
+output within 0.2-0.6%; `attn2` within 0.07%; conditioning prompt-delta ratio 1.00. An earlier commit
+(`5ad864c2`) blamed register padding and prescribed trimming the conditioning to the real token count — that
+diagnosis was wrong and the fix would have moved this engine away from upstream, because
+`Embeddings1DConnector.forward` re-pads to 1024 with tiled registers itself.
+
+**Two traps that cost real time here**, worth knowing for the next parity harness:
+
+- int8 weights live under the *same* `.weight` key as an ordinary tensor. A loader that checks the raw key
+  before its `.weight_scale` sibling silently loads unscaled, un-rotated int8 and produces plausible garbage.
+- `final_layer_norm_intermediate` is `self.layer_norm_hidden_state`, which the LTX path sets to **False** — the
+  final `model.norm` is NOT applied to the 49-layer stack. Applying it makes every layer mismatch.
 
 ### Running the encoder against the int8 text encoder
 
@@ -466,7 +462,7 @@ axis. Reference behavior is `comfy_kitchen.na3d`'s eager backend, described at
   official configurator reads it from metadata only. Follow ComfyUI: key presence wins, because repacks
   routinely strip `__metadata__` while never dropping a weight.
 
-## Validation plan
+## Validation plan (executed 2026-08-12 — see the status banner for results)
 
 | stage | reference to dump | compare | tolerance |
 |---|---|---|---|
@@ -531,7 +527,31 @@ Restoring the full harness needs either a diffusers build carrying the 2.5 flags
 package installed; neither is present, and `ltx-core` pulls Transformers 5.8+ and CUDA 13.2 wheels that do not
 fit the remaining disk.
 
-## Gemma 4 encoder — settled questions and two live divergences
+### The reference harness that does work: headless ComfyUI 0.32
+
+Diffusers is not the only reference. ComfyUI 0.32 loads these exact `int8_lean_convrot` checkpoints through its
+own quant path and runs both the Gemma-4 tower and the AV DiT, which is what every number in the status banner
+was measured against. Setup, without touching the SwarmUI install:
+
+- SwarmUI's bundled ComfyUI is **0.28 and predates the Gemma-4-12B tower** (`Gemma4_12B_Config` does not exist
+  there) — it cannot be used for 2.5. Use a 0.32+ checkout.
+- 0.32 needs `comfy-kitchen==0.2.30`; the 0.28 venv pins 0.2.22. Install the newer one to a scratch directory
+  and shadow it (`pip install --no-deps --target=<dir> comfy-kitchen==0.2.30`, then `PYTHONPATH=<dir>`), reusing
+  the existing venv's torch. Upgrading in place would break the running SwarmUI backend.
+- Point `folder_paths.add_model_folder_path` at `Models/Stable-Diffusion/LTX-2.5`, then
+  `comfy.sd.load_clip([TE])` and `comfy.sd.load_diffusion_model(DIT)`. Model management handles the
+  22 GB + 15 GB on a 24 GB card.
+- To drive the reference DiT with **our** conditioning, pass a `[1, seq, 6144]` tensor as `c_crossattn`:
+  `preprocess_text_embeds` returns it untouched when the last dim is `cross_attention_dim +
+  audio_cross_attention_dim`, which bypasses its connector. `x` must be `comfy.utils.pack_latents([video,
+  audio])` with the matching `latent_shapes`, not a `NestedTensor`.
+- Per-block comparison: `register_forward_hook` on `diffusion_model.transformer_blocks[i]` (output `[0]` is the
+  video stream) against our `LtxVideo2Transformer.OnBlockOutput` (index `-1` is post-`proj_in`).
+- Measure **prompt sensitivity**, not absolute state. Two prompts through each engine, then compare
+  `Δ(A,B)` per block. Absolute states drift a few percent from int8 GEMM ordering and hide the defect; the
+  `Δ(A,B)` ratio pinned it to a factor of 8-13x at every block.
+
+## Gemma 4 encoder — settled questions
 
 **RMS-norm storage: DIRECT, not `1 + w`** (the opposite of Gemma 3). Settled by byte-ranging real tensors out
 of the shipped checkpoint: `layers.0.self_attn.q_norm` is a uniform `+1.02344` across all 256 entries — under
@@ -548,53 +568,42 @@ rules out all three existing cores — `HfTokenizerJson` and `GgufTokenizer` byt
 **Real `layer_scalar` values are small and load-bearing**: 0.053 at layer 0 and 0.356 at layer 5, the
 counterpart to `model.norm` reaching +600. Dropping the multiply is not a subtle error at real scale.
 
-### Divergence 1 — the 49th state's final norm (UNRESOLVED, affects the shipping Gemma-3 path)
+### Settled 1 — the 49th state's final norm: correctly NOT applied (this also clears the 2.3 path)
 
-`LlamaStyleEncoder.EncodeMultiLayer` — the method the LTX-2 pipeline calls — contains **no `HasFinalNorm`
-branch and no `RmsNorm` call at all**, while `LlamaStyleEncoderConfig.Gemma3_12B` sets `HasFinalNorm = true`
-and `RmsNormScalePlusOne = true`. So `model.norm.weight` is loaded, `1+w`-adjusted, GPU-uploaded, and never
-used on that path. `Encode` (:179) and `EncodeEmbedsMrope` (:266) *do* apply it — only the all-layers harvest
-skips it. The connector's own `PerTokenRmsNormMasked` does not wash the difference out, since
-`RMS(RMS(x)·w) ≠ RMS(x)` for non-uniform `w`.
+`LlamaStyleEncoder.EncodeMultiLayer` applies no final `RmsNorm` on the all-layers harvest, which used to read
+like a bug because `HasFinalNorm = true` is set on the config. It is correct. The reference gates that norm on
+`final_layer_norm_intermediate`, which `sd1_clip.SDClipModel` passes as `self.layer_norm_hidden_state` — and
+every LTX text-encoder wrapper (`Gemma3_12BModel` in `lt.py`, `Gemma4Model` in `gemma4.py`) constructs with
+`layer_norm_hidden_state=False`. So `model.norm` is **not** applied to the 49-state stack on either the 2.3
+Gemma-3 path or the 2.5 Gemma-4 path.
 
-Whether that is a bug depends on what the reference does for the all-layers harvest, and the two readings of
-ComfyUI available here disagree — one says states 0..47 raw with state 48 normed, the other that the final norm
-is applied to every intermediate. **Deliberately not changed**: the LTX-2.3 Gemma-3 path is recorded as
-real-weight verified (coherent video plus a decoded 48 kHz waveform), and silently altering verified shipping
-behaviour on an unverified inference is the wrong trade. `Gemma4TextEncoder` defaults to the reference
-behaviour and exposes `Gemma4TextEncoderConfig.ApplyFinalNormToLastState` to switch it. Resolve by dumping the
-reference's 49 states once and diffing, before either path is trusted at full precision.
+Measured, not inferred: our layer 0 equals the reference's at **cosine 1.0000** with the norm skipped, and
+0.3531 with it applied. `Gemma4TextEncoderConfig.ApplyFinalNormToLastState` stays as an escape hatch but the
+default is the verified one. The earlier "two readings of ComfyUI disagree" note was a misreading of the flag,
+not a real ambiguity.
 
-### Divergence 2 — padding side
+### Settled 2 — padding side is numerically equivalent
 
-ComfyUI left-pads and carries an attention mask, but its position ids are mask-blind, so a real token sits at
-RoPE position `1024-n .. 1023`. This engine right-pads with a causal-only mask, putting the same token at
-`0 .. n-1`. `Gemma4Tokenizer.BuildConditioningSequence` right-pads to match the engine. This is a genuine
-numerical difference from upstream on every prompt shorter than the 1024-token conditioning length, not a
-rounding artefact.
+ComfyUI left-pads to 1024 and masks the pads; this engine right-pads with a causal-only mask. The real tokens
+therefore sit at different absolute RoPE positions (`1024-n .. 1023` vs `0 .. n-1`). That is harmless: Gemma
+attention depends only on position *differences*, the masked/never-attended pads contribute nothing either way,
+and the reference trims back to the real tokens before the projection.
+
+Measured end-to-end against comfy's own conditioning for the same prompt: overall cosine **1.0012**, real rows
+0.9992, register rows 1.0011, and — the sensitive test — the prompt-to-prompt delta at **ratio 1.00** on every
+row band. Only row 0 (BOS) differs at cosine 0.96, which does not propagate.
 
 ## Open questions
 
-- **RMS-norm weight storage convention.** ComfyUI's Gemma 4 path uses `rms_norm_add=False` (weights applied
-  directly), the opposite of Gemma 3's `1 + w`. Not yet checked against real Gemma 4 weights — a norm tensor
-  whose mean sits near 1.0 confirms direct storage. Must be settled before trusting encoder parity.
-- **`tokenizer_json` model type.** The 32 MB blob's `model.type` has not been inspected; the engine's
-  `HfTokenizerJson` handles byte-level BPE only, and Gemma tokenizers are SentencePiece-flavored. Decides
-  extend-vs-new-parser in the TE phase.
-- **Conditioning sequence length.** ComfyUI pads Gemma 4 LTX conditioning to `min_length` 1024; the engine
-  currently uses 256 for 2.3. Sequence length is part of the conditioning because of the connector's
-  learnable-register replacement, so 1024 is the parity-correct choice, but the VRAM cost at 22B has not
-  been measured.
-- **End-to-end runnability on this box — the size blocker is gone as of 2026-08-12.** It used to be that
-  bf16 DiT (42 GB) + bf16 TE (26 GB) fit neither the free disk nor the 24 GB + 12 GB of VRAM, and the
-  official small builds were unloadable. The engine now reads `int8_tensorwise` + ConvRot resident
-  ([`QUANTIZATION_COMFY_FORMATS.md`](QUANTIZATION_COMFY_FORMATS.md)), so the official pair is
-  **21.50 GB DiT + 15.37 GB TE** — both fit. What remains is pipeline wiring, not size: the LTX-2 pipeline
-  still constructs the Gemma-3 tower and the convolutional decoder, so a 2.5 bundle is refused rather than
-  mis-decoded.
-  - The official Lightricks files are **gated for download** (401 even on a byte range, though the tree API
-    answers). `DmitryDB/LTX-2.5-ComfyUI-Quants` republishes the same layout ungated — its
-    `int8_lean_convrot` DiT is 21.50 GB with the identical 1440 quantized matrices — and
-    `dummy9996/LTX-2.5-22b-ungate` carries bf16 for reference tensors.
-  - The third-party fp8_e4m3fn distilled repack (`guillaume127/LTX-2.5-FP8`, 23.49 GB) would ride the
-    existing fp8 path unchanged, but it is unofficial and does nothing for the text encoder.
+- **Diffusion video decoder is managed-only.** No CUDA `Na3d` kernel, ~32 s for the smallest legal frame, so
+  generation decodes through the conv VAE. `MatMulKernels.LinearTransB` re-casting a non-F32 weight per call is
+  the dominant cost and the first thing to fix.
+- **Encoder parity was measured on F32/CPU weights** (3.9e-7 sliding / 1.1e-6 global on a tiny config). The
+  resident-int8 projection path is now exercised end-to-end and matches the reference tower at cosine
+  0.9999-1.0000 per layer on real weights, so this is closed for practical purposes; a formal per-layer relL2
+  ladder against the BF16 tower is still absent.
+- **`LtxVideo2Recipe.TokenLength` is an `internal const` at 256**, while the 2.5 path conditions at 1024. It has
+  to stay per-branch: bumping it globally would change the Gemma-3 conditioning length and silently alter
+  verified 2.3 output.
+- **LoRA, image-to-video conditioning, and component overrides** are deferred (`TODO(E-IMG-4/5)` in
+  `LtxVideo2Recipe`).

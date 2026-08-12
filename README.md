@@ -91,7 +91,7 @@ Full guide: **[`docs/MULTI_GPU.md`](docs/MULTI_GPU.md)**.
 | | Models |
 |---|---|
 | **Image** | **Krea 2** (Turbo + Base), Flux.1/.2, Qwen-Image (+Edit), Z-Image, Chroma, SD1.5, SDXL, SD3.5, HiDream, AuraFlow, Lumina 2, ERNIE, Kandinsky 5, OmniGen 2, Ideogram 4 |
-| **Video** | **MiniMax-H3** (video + native stereo audio), Wan 2.1/2.2, HunyuanVideo 13B, LTX-Video + LTX-2.3, Kandinsky 5, Lance — plus **SeedVR2** video/image restoration |
+| **Video** | **MiniMax-H3** (video + native stereo audio), Wan 2.1/2.2, HunyuanVideo 13B, LTX-Video + LTX-2.3/2.5, Kandinsky 5, Lance — plus **SeedVR2** video/image restoration |
 | **LLM** | Llama, Qwen2/3, Gemma 2/3/4, Phi, Mistral, MoE giants (Mixtral, DeepSeek-V3, Kimi-K2, GPT-OSS), Mamba/RWKV, VLMs, embeddings and rerankers — GGUF quantized throughout |
 | **Audio** | Whisper + Moonshine (STT); Kokoro, Piper, StyleTTS2, F5-TTS, CosyVoice, VibeVoice, Spark-TTS, Bark (TTS); ACE-Step, MusicGen, YuE, HeartMuLa (music); 9 neural codecs; voice conversion, stem separation, speech enhancement |
 | **Vision** | CLIP / SigLIP / DINOv2 embeddings, YOLOv8/11, RT-DETR, Grounding DINO, SAM 2, Depth-Anything-V2, face detection |

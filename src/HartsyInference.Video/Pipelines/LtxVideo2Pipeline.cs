@@ -15,19 +15,17 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Video.Pipelines;
 
-/// <summary>LTX-2.3 (Lightricks, 22B) text-to-video+audio pipeline. Drives the dual-stream
-/// <see cref="LtxVideo2Transformer"/> end-to-end: Gemma-3-12B all-49-layer features → per-modality
-/// <see cref="LtxVideo2TextConnectors"/> → flow-match Euler denoise of the interleaved video+audio latent streams
-/// (2-way text CFG) → <see cref="LtxVideo2VaeDecoder"/> for RGB and <see cref="LtxAudioVaeDecoder"/> +
-/// <see cref="LtxAudioVocoder"/> for the waveform.
+/// <summary>LTX-2.3 / LTX-2.5 (Lightricks, 22B) text-to-video+audio pipeline. Drives the dual-stream
+/// <see cref="LtxVideo2Transformer"/> end-to-end: the all-49-layer text-tower features (Gemma-3-12B on 2.3,
+/// Gemma-4-12B on 2.5) → per-modality <see cref="LtxVideo2TextConnectors"/> → flow-match Euler denoise of the
+/// interleaved video+audio latent streams (2-way text CFG) → <see cref="LtxVideo2VaeDecoder"/> for RGB and
+/// <see cref="LtxAudioVaeDecoder"/> + <see cref="LtxAudioVocoder"/> for the waveform.
 ///
 /// <para>Token packing follows LTX patch-1: the video latent <c>[1,128,T,H,W]</c> packs to <c>[T·H·W, 128]</c> in
 /// (f,h,w) order and the audio latent <c>[1,8,L,16]</c> packs to <c>[L, 128]</c> (channel·16+mel). The dual-stream
 /// DiT consumes both each step and returns both velocities; CFG is standard velocity-space (the reference's
 /// velocity→x0→delta→velocity round-trip reduces to this when guidance-rescale / STG / modality-isolation are off,
-/// which are the defaults). <b>Status: built end-to-end, first-run numeric validation pending</b> — the flow-match
-/// shift, DiT timestep scaling, and audio latent sizing are validation-gated, consistent with the other LTX
-/// pipelines.</para></summary>
+/// which are the defaults).</para></summary>
 public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 {
     private const int GemmaCaptionChannels = 3840;
@@ -150,7 +148,6 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 
         Logs.Info($"LTX-2 T2V+A: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, " +
             $"seed={seed} (video {tLat}x{hLat}x{wLat}={sv} tokens, audio {audioFrames} tokens, shift={shift:F3})");
-        Logs.Warning("LTX-2 pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
         // 1. Text conditioning: Gemma 49-layer features → per-modality connector embeddings. Cached across
         // generations keyed on the token ids (the FLite/Flux2 prompt-cache pattern) — a hit skips the whole
@@ -325,8 +322,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         {
             Stopwatch sw = Stopwatch.StartNew();
             float dt = tsteps[k] - tsteps[k + 1];
-            float sigma = tsteps[k];                                    // raw flow sigma (≈1..0), for prompt_adaln
-            float tEmb = sigma * _config.TimestepScaleMultiplier;       // ≈0..1000, for the other modulators
+            float tEmb = tsteps[k] * _config.TimestepScaleMultiplier;   // flow sigma (≈1..0) scaled to ≈0..1000
 
             Tensor vCondV, vCondA, vUncondV, vUncondA;
             bool paired = !unguided;
@@ -336,7 +332,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                 // waste — half the DiT work per step, which is most of the step. The distilled schedule always
                 // lands here.
                 (vCondV, vCondA) = _transformer.Forward(Backend, videoLat, audioLat, encVideoPos, encAudioPos,
-                    tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null, sigma);
+                    tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null);
                 vUncondV = vCondV;
                 vUncondA = vCondA;
             }
@@ -346,7 +342,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                 // weight traffic of two sequential forwards.
                 ((vCondV, vCondA), (vUncondV, vUncondA)) = _transformer.ForwardCfgPair(
                     Backend, videoLat, audioLat, encVideoPos, encAudioPos, encVideoNeg, encAudioNeg,
-                    tEmb, (tLat, hLat, wLat), audioFrames, frameRate, sigma);
+                    tEmb, (tLat, hLat, wLat), audioFrames, frameRate);
             }
 
             // Device CFG+Euler, in-place on the resident latents: z += (g·cond + (1−g)·uncond)·(−dt) ≡ z −= v·dt.
@@ -510,7 +506,6 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         sub.Restart();
 
         (Tensor video, Tensor audio) = _connectors.Forward(TextEncoderBackend, feats, validMask);
-        DumpTextDebug(feats, video, real, seq);
         feats.Dispose();
         Logs.Info($"[ltx2-phase]   connectors: {sub.ElapsedMilliseconds} ms");
         return (video, audio);
@@ -558,37 +553,6 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Logs min/max/mean/rms for a stage output under <c>HARTSY_LTX2_PROBE=1</c>; no-op otherwise.</summary>
-    private static int _textDumpIndex;
-
-    /// <summary>TEMPORARY diagnostic: dumps the pre-connector Gemma features and the post-connector video embedding
-    /// so a two-prompt A/B can tell a tower failure from a connector-broadcast failure. Set HARTSY_LTX2_DUMP_TEXT
-    /// to an output directory.</summary>
-    private static void DumpTextDebug(Tensor feats, Tensor video, int real, int seq)
-    {
-        string? dir = Environment.GetEnvironmentVariable("HARTSY_LTX2_DUMP_TEXT");
-        if (string.IsNullOrEmpty(dir))
-        {
-            return;
-        }
-        Directory.CreateDirectory(dir);
-        int idx = _textDumpIndex++;
-        void Write(string name, Tensor t)
-        {
-            Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-            long n = f32.ElementCount;
-            byte[] buf = new byte[n * 4];
-            fixed (byte* bp = buf)
-            {
-                Buffer.MemoryCopy((void*)f32.DataPointer, bp, buf.LongLength, n * 4);
-            }
-            File.WriteAllBytes(Path.Combine(dir, name), buf);
-        }
-        Write($"feats_{idx}.bin", feats);
-        Write($"video_{idx}.bin", video);
-        File.WriteAllText(Path.Combine(dir, $"meta_{idx}.txt"), $"real={real} seq={seq} videoDim={video.Shape[1]}\n");
-        Logs.Info($"[ltx2-dump] wrote text dump {idx}: real={real} seq={seq}");
-    }
-
     private static void ProbeTensor(string label, Tensor tensor)
     {
         if (Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") != "1")

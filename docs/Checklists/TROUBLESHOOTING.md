@@ -35,6 +35,22 @@ vs weights/converter); dump the preprocessed input to disk so C# reads identical
 layer-by-layer; **check actual checkpoint tensor shapes against assumed shapes** before debugging
 numerics (channel-width assumptions are where it breaks).
 
+**Conditioning-inert output (well-formed but off-prompt): bisect the DIFFERENCE, not the state.**
+When output is sharp and coherent but ignores the prompt, comparing absolute per-layer states against a
+reference will not find it — on a quantized checkpoint those drift a few percent from GEMM ordering alone, which
+swamps the signal. Instead run **two different prompts through each engine** and compare the per-layer
+`Δ(A,B)`. A block where the reference's `Δ` is large and yours is small is the defect, and the ratio is readable
+even when absolute states differ. (LTX-2.5, 2026-08-12: absolute states, gate, `q_shift`, `q_scale` and
+`|attn2|` all matched the reference at block 0, while `Δ(A,B)` was 8–13× too weak at every block — the bug was a
+timestep fed to the cross-attention's K/V modulation at the wrong scale.)
+
+Partition it first, cheaply, before touching the model:
+- Zero the **whole** conditioning. If the output barely changes, the conditioning is inert — the fault is in how
+  it is consumed, not in the text encoder.
+- Ablate halves of the conditioning (real tokens vs learned registers/padding) to see which half carries.
+- Sweep guidance to 1 and to 10. Identical output at both rules out CFG wiring.
+- Change the seed. A completely different scene confirms the model is sampling from its prior.
+
 **Higher-order lessons:**
 - A passing **synthetic-weight** parity harness proves the backbone MATH, not the encoder or the
   real-weight load. Math-proven but image wrong ⇒ suspect encoder concat/tap order → tokenizer/chat

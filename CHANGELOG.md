@@ -233,6 +233,22 @@ stable release will require. Dates are UTC.
   is logged at Debug level.
 
 ### Fixed
+- **LTX-2.5 ignored the prompt entirely — `prompt_adaln` was driven by the raw flow sigma.** Output was sharp
+  and temporally coherent but followed the seed, not the text: two unrelated prompts at one seed differed by
+  1.28% of pixel range, guidance 1 and guidance 10 behaved identically, and zeroing the *entire* 1024-row
+  conditioning changed nothing. `LtxVideo2Transformer` passed the unscaled sigma (0..1) to
+  `prompt_adaln_single` / `audio_prompt_adaln_single`, where the reference passes the same ×1000-scaled
+  timestep every other modulator gets. Those modules emit the `shift_kv`/`scale_kv` that modulate the **text
+  keys and values** into every block's cross-attention, so evaluating a sinusoidal timestep embedding at t≈1
+  instead of t≈1000 left the cross-attention with the right magnitude but no ability to discriminate between
+  prompts. A code comment stated the wrong convention as fact, which is what kept it alive. Fixed at all six
+  call sites (video + audio); per-block prompt sensitivity against ComfyUI 0.32 went from 8–13× too weak to
+  **ratio 1.00**. LTX-2.5 now generates prompt-faithful 704×480×25f clips with a soundtrack in ~80 s on a 4090.
+  The whole text path was verified against the reference on the real `int8_lean_convrot` checkpoints on the way
+  (tokenizer ids byte-exact, Gemma-4 tower cosine 0.9999–1.0000 per layer, connector within 0.2–0.6%, `attn2`
+  within 0.07%) and needed no changes; two research items previously flagged as open — the 49-state stack's
+  final norm and the left-vs-right padding side — were both settled as **not** defects, the first of which also
+  clears the shipping LTX-2.3 Gemma-3 path.
 - **Z-Image Base checkpoints were silently corrupted when the filename carried no variant token.** The official
   Base release ships under the bare family name (`z_image_bf16.safetensors`); variant detection fell through to
   Turbo's policy, whose F16 attention narrowing overflows Base's >83k value-projection range into Inf — a
