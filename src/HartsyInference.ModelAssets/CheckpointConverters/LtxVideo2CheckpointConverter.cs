@@ -118,6 +118,10 @@ public sealed class LtxVideo2CheckpointConverter
         return false;
     }
 
+    /// <summary>Whether a raw checkpoint key belongs to the DiT, used to pick which file of a split bundle carries
+    /// the architecture metadata.</summary>
+    public static bool IsTransformerKey(string key) => RouteKey(key).Bucket == Ltx2Bucket.Transformer;
+
     /// <summary>Pure key routing (testable without files): returns the destination bucket and the mapped key.</summary>
     public static (Ltx2Bucket Bucket, string? MappedKey) RouteKey(string key)
     {

@@ -1628,6 +1628,24 @@ public static class ModelCatalog
                         Sha256 = "f0b8f92f8a33daf7e7f508878db6d6f25f9c8bc7b90fcb5650fb402a9d9e9f13" },
                 },
             },
+            // LTX-2.5. Only two config keys separate its DiT from 2.3 (ff_bias off, keyframes marker on), both
+            // detected from the checkpoint, but it pairs with a Gemma 4 12B text tower rather than Gemma 3 and can
+            // decode through either a conv VAE or the new diffusion decoder. No Assets yet: every published build is
+            // bf16 (42 GB DiT, 26 GB text encoder) or an int8-convrot repack the engine cannot read, so there is no
+            // pinned download that fits a 24 GB card. Point --model-path at a checkpoint until an fp8/GGUF pair lands.
+            new CatalogEntry
+            {
+                Id = "ltx-2.5", Modality = vid, DisplayName = "LTX-2.5 (22B dev, video + audio)",
+                Architecture = "dual-stream DiT + video/audio VAE + Gemma-4-12B", Status = vp, CliDrivable = true,
+            },
+            // Separate id because the distilled and dev checkpoints are byte-indistinguishable — same model_version,
+            // same architecture config, same tensor keys — so picking this id is the only way to ask for the baked-in
+            // 8-step unguided schedule.
+            new CatalogEntry
+            {
+                Id = "ltx-2.5-distilled", Modality = vid, DisplayName = "LTX-2.5 (22B distilled, 8-step)",
+                Architecture = "dual-stream DiT + video/audio VAE + Gemma-4-12B", Status = vp, CliDrivable = true,
+            },
             // Cosmos-Predict1 Video2World — discrete-token autoregressive video continuation (T5-11B cross-attn +
             // DV8x16x16 tokenizer + AR backbone). Engine-only; run via the sample invocation in VideoCommand help.
             E("cosmos-predict1-5b-v2w", vid, "Cosmos-Predict1 5B Video2World", "AR discrete-token transformer", vp),

@@ -36,6 +36,9 @@ public static class VideoRecipeRegistry
         new Video.WanS2VRecipe(),
         new Video.LtxVideoRecipe(),
         new Video.LtxVideo2Recipe(),
+        // Separate registration because the distilled 2.5 sampling contract is indistinguishable from dev in the
+        // checkpoint — the model id is the only thing carrying that intent.
+        new Video.LtxVideo2Recipe(distilled: true),
         new Video.LanceVideoRecipe(),
         new Video.Kandinsky5VideoRecipe(),
         new Video.HunyuanVideoRecipe(),

@@ -26,21 +26,49 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// <summary>Gemma context length fed to the connectors (padded to a register multiple inside the pipeline).</summary>
     internal const int TokenLength = 256;
 
-    /// <inheritdoc/>
-    public string Name => "ltx-video-2";
+    private readonly bool _distilled;
+
+    /// <summary>Constructs the recipe for the dev/base LTX-2 families.</summary>
+    public LtxVideo2Recipe() : this(distilled: false) { }
+
+    /// <summary>Constructs the recipe. <paramref name="distilled"/> selects the 2.5 distilled sampling contract,
+    /// which cannot be detected from a checkpoint — the dev and distilled 2.5 transformers share a model version,
+    /// architecture config and tensor keys, so the choice has to arrive as user intent via the model id.</summary>
+    public LtxVideo2Recipe(bool distilled)
+    {
+        _distilled = distilled;
+        if (distilled)
+        {
+            Defaults = new VideoDefaults
+            {
+                Steps = LtxVideo2Config.V25Distilled.NumInferenceSteps,
+                CfgScale = LtxVideo2Config.V25Distilled.GuidanceScale,
+                Width = 512,
+                Height = 320,
+                Frames = 25,
+                Fps = 24,
+            };
+        }
+    }
 
     /// <inheritdoc/>
-    public bool Matches(string familyId) =>
-        string.Equals(familyId, "ltx-video-2", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "ltx-video2", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "lightricks-ltx-video-2", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "ltx-2", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "ltx-2.3", StringComparison.OrdinalIgnoreCase);
+    public string Name => _distilled ? "ltx-2.5-distilled" : "ltx-video-2";
+
+    /// <inheritdoc/>
+    public bool Matches(string familyId) => _distilled
+        ? string.Equals(familyId, "ltx-2.5-distilled", StringComparison.OrdinalIgnoreCase)
+        : string.Equals(familyId, "ltx-video-2", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(familyId, "ltx-video2", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(familyId, "lightricks-ltx-video-2", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(familyId, "ltx-2", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(familyId, "ltx-2.3", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(familyId, "ltx-2.5", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>LTX-Video 2's official sampling settings: 50 steps at guidance 3.0, 512x320, 25 frames @ 24fps —
     /// the geometry <c>LtxVideo2GenerationTests</c> verified coherent, 22B being too heavy to sample at full 704x480
-    /// in a reasonable CLI turnaround (<c>LtxVideo2Config.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 3.0f, Width = 512, Height = 320, Frames = 25, Fps = 24 };
+    /// in a reasonable CLI turnaround (<c>LtxVideo2Config.NumInferenceSteps</c>/<c>GuidanceScale</c>). The distilled
+    /// 2.5 variant instead runs its baked-in 8-step schedule unguided.</summary>
+    public VideoDefaults Defaults { get; private init; } = new VideoDefaults { Steps = 50, CfgScale = 3.0f, Width = 512, Height = 320, Frames = 25, Fps = 24 };
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
@@ -78,7 +106,20 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             Logs.Info($"[LtxVideo2Recipe] Converted {conv.Transformer.Count} DiT, {conv.Connectors.Count} connector, {conv.Vae.Count} VAE, "
                 + $"{conv.AudioVae.Count} audio-VAE, {conv.Vocoder.Count} vocoder, {conv.TextEncoder.Count} text-encoder keys.");
 
-            LtxVideo2Config config = LtxVideo2Config.V23;
+            // Metadata from the file that actually carried the DiT; a split bundle's side files have their own.
+            IReadOnlyDictionary<string, string>? metadata = loaders
+                .FirstOrDefault(l => l.Descriptors.Keys.Any(LtxVideo2CheckpointConverter.IsTransformerKey))?.Metadata;
+            LtxVideo2Config config = LtxVideo2VariantDetector.Detect(metadata, conv.Transformer.ContainsKey);
+            if (_distilled)
+            {
+                config = config with
+                {
+                    FixedSigmas = LtxVideo2Config.Ltx25DistilledSigmas,
+                    NumInferenceSteps = LtxVideo2Config.V25Distilled.NumInferenceSteps,
+                    GuidanceScale = LtxVideo2Config.V25Distilled.GuidanceScale,
+                };
+                Logs.Info("[LtxVideo2Recipe] Distilled variant selected by model id — 8-step baked schedule, guidance 1.");
+            }
             LtxVideo2Transformer transformer = new LtxVideo2Transformer(config);
             transformer.LoadWeights(conv.Transformer);
             LtxVideo2TextConnectors connectors = new LtxVideo2TextConnectors(config);
