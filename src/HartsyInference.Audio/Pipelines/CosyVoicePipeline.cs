@@ -217,7 +217,23 @@ public sealed class CosyVoicePipeline : IDisposable
     /// bounded window/margin/chunk-size combination tested (only a full-history unbounded design avoids it,
     /// at prohibitive cost — see <see cref="CosyVoiceFlow.InferenceGrowingWindowed"/>'s doc comment for the
     /// full 5-way sweep and the decisive discriminating experiment). Callers needing a different
-    /// quality/latency/cost tradeoff can override these.</para></summary>
+    /// quality/latency/cost tradeoff can override these.</para>
+    ///
+    /// <para><b>The 3.45× figure above is flow+vocoder ONLY — verified live through the actual running
+    /// service, real end-to-end (including LM speech-token generation) runs ~8× real-time, not 3.45×</b>
+    /// (2026-08-11, two live WebSocket calls through `swarmui.service`'s real `GenerateText2ImageWS`
+    /// endpoint with `streamchunksize: sentence`, a real zero-shot reference clip, real Whisper-verified
+    /// correct content, zero errors, 8-9 real incremental chunks delivered before the final result each
+    /// time). Per-chunk interval was a steady ~7.6-8.2s live, vs. the ~2.8-3.0s the flow+vocoder-only
+    /// scratch harnesses measured in isolation — the LM's own autoregressive token decode for each
+    /// <see cref="SynthesizeStreamCore"/>'s chunk-sized token batch is a REAL, substantial additional cost
+    /// this pipeline's own tuning sweep never isolated (those harnesses called
+    /// <c>GenerateSpeechTokens</c> once, up front, outside the timed loop — this method calls it inline,
+    /// as it must for genuine incremental token-arrival streaming). First-chunk latency was 36s cold
+    /// (includes first-request model/weight loading) and 25.7s warm (second call, same session) — still
+    /// real LM-decode-dominated latency, not a bug, but the honest number for anyone deciding whether this
+    /// meets a real-time bar: it does not, today, end to end. The chunked delivery itself is correct and
+    /// real (content, boundaries, no errors) — this is a latency finding, not a correctness one.</para></summary>
     public async IAsyncEnumerable<AudioChunk> SynthesizeStream(IBackend backend,
         int[] textTokenIds,
         float[]? referenceAudio,
