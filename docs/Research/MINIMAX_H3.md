@@ -522,10 +522,14 @@ pre-existing kernel's PTX is byte-identical too (the only delta outside the new 
 > *only when the GPU is otherwise idle*. Three separate 141f@512x288 measurements of identical code gave
 > three different hashes because other work (a concurrent `dotnet test`, another agent's run) was sharing
 > the GPU; with the GPU quiet, four runs across two different builds agreed exactly. Something in the
-> setup path is free-VRAM-dependent — the weight-cast cache's headroom gate
-> (`CacheWeightCasts` → `_castTransientGated` vs `_castCachedNew`) is the prime suspect, since it changes
-> per-weight behaviour on live free VRAM. **Stop every other GPU tenant before any A/B, and run each side
-> twice** — a single run per side cannot tell a real regression from tenancy noise.
+> setup path is free-VRAM-dependent. The weight-cast headroom gate (`CacheWeightCasts` →
+> `_castTransientGated` vs `_castCachedNew`) is the obvious candidate since it branches on live free VRAM,
+> but **this is still unconfirmed**: `HARTSY_CAST_STATS=1` alone emits nothing (`DumpCastStats` only logs
+> when a caller invokes it, and nothing on the H3 path does), so that probe is inconclusive rather than
+> supporting. Confirming it needs a `DumpCastStats` call added at the end of a generation, or an A/B under
+> deliberate VRAM pressure. Don't repeat the bare env-var probe.
+> **Stop every other GPU tenant before any A/B, and run each side twice** — a single run per side cannot
+> tell a real regression from tenancy noise. Five clean runs across three builds all agree (`064e5da1`).
 
 **Recorded before-state (4090, 2026-08-12):** resident DiT 19,988 MB, 22,634 MB free → 2,646 MB for
 activations. `56f@768x768` (seq 10,490) needed 2,771 MB — **refused, 125 MB short**. Predicted post-fix
