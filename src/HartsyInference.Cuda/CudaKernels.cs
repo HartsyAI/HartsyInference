@@ -302,6 +302,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditLayerNormModulateF32;
     private readonly nint _ditQkvSplitNormF32;
     private readonly nint _ditQkvSplitNormHeadMajorF32;
+    private readonly nint _ditQkvSplitNormHeadMajorSubsetF32;
     private readonly nint _fourierEmbedF32;
     private readonly nint _conv3dF32;
     private readonly nint _sparseScatterToGridF32;
@@ -326,6 +327,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditLayerNormModulateF16;
     private readonly nint _ditQkvSplitNormF16;
     private readonly nint _ditQkvSplitNormHeadMajorF16;
+    private readonly nint _ditQkvSplitNormHeadMajorSubsetF16;
     private readonly nint _ditRepeatKvF16;
     private readonly nint _ditSliceRowsF16;
     private readonly nint _ditChwToHwcU8;
@@ -741,6 +743,7 @@ public sealed class CudaKernels : IDisposable
         _ditLayerNormModulateF32 = _ditF32Module.GetFunction("dit_layernorm_modulate_f32");
         _ditQkvSplitNormF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_f32");
         _ditQkvSplitNormHeadMajorF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_head_major_f32");
+        _ditQkvSplitNormHeadMajorSubsetF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_head_major_subset_f32");
         _fourierEmbedF32 = _ditF32Module.GetFunction("fourier_embed_f32");
         _conv3dF32 = _ditF32Module.GetFunction("conv3d_f32");
         _sparseScatterToGridF32 = _ditF32Module.GetFunction("sparse_scatter_to_grid_f32");
@@ -772,6 +775,7 @@ public sealed class CudaKernels : IDisposable
         _ditLayerNormModulateF16 = _ditF16Module.GetFunction("dit_layernorm_modulate_f16");
         _ditQkvSplitNormF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_f16");
         _ditQkvSplitNormHeadMajorF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_head_major_f16");
+        _ditQkvSplitNormHeadMajorSubsetF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_head_major_subset_f16");
         _ditRepeatKvF16 = _ditF16Module.GetFunction("dit_repeat_kv_f16");
         _ditSliceRowsF16 = _ditF16Module.GetFunction("dit_slice_rows_f16");
         _ditChwToHwcU8 = _ditF16Module.GetFunction("dit_chw_f32_to_hwc_u8");
@@ -3405,19 +3409,31 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Head-major twin of <see cref="LaunchQkvSplitNorm"/>: q/k/v come out as [batch, heads, seq, headDim].</summary>
+    /// <remarks><paramref name="packStride"/> is how many <c>heads*headDim</c>-wide segments the packed source holds
+    /// and the slot arguments say which segment each output reads; a negative slot skips that output (its pointer may
+    /// be 0). The full fused call is <c>packStride: 3, qSlot: 0, kSlot: 1, vSlot: 2</c>.</remarks>
     public unsafe void LaunchQkvSplitNormHeadMajor(bool f16, ulong q, ulong k, ulong v, ulong qkv, ulong qW, ulong kW,
-        int tokens, int heads, int headDim, int seq, float eps, nint stream)
+        int tokens, int heads, int headDim, int seq, float eps, nint stream,
+        int packStride = 3, int qSlot = 0, int kSlot = 1, int vSlot = 2)
     {
         ulong qArg = q, kArg = k, vArg = v, qkvArg = qkv, qwArg = qW, kwArg = kW;
         uint tArg = (uint)tokens, hArg = (uint)heads, hdArg = (uint)headDim, sArg = (uint)seq; float epsArg = eps;
-        void** args = stackalloc void*[11];
+        uint psArg = (uint)packStride; int qsArg = qSlot, ksArg = kSlot, vsArg = vSlot;
+        // The fused call goes to the ORIGINAL kernel with its original argument list. Routing it through the
+        // subset twin instead moved real generation output: the slot guards change that kernel's codegen, and
+        // the sub-chunkRows dispatch exists precisely to keep this path bit-identical.
+        bool full = packStride == 3 && qSlot == 0 && kSlot == 1 && vSlot == 2;
+        void** args = stackalloc void*[15];
         args[0] = &qArg; args[1] = &kArg; args[2] = &vArg; args[3] = &qkvArg; args[4] = &qwArg; args[5] = &kwArg;
         args[6] = &tArg; args[7] = &hArg; args[8] = &hdArg; args[9] = &sArg; args[10] = &epsArg;
+        if (!full) { args[11] = &psArg; args[12] = &qsArg; args[13] = &ksArg; args[14] = &vsArg; }
         uint grid = (uint)((long)tokens * heads);
         uint block = QkvNormBlockSize(headDim);
         uint sharedMem = 2u * block * sizeof(float);
-        CudaDriverApi.cuLaunchKernel(f16 ? _ditQkvSplitNormHeadMajorF16 : _ditQkvSplitNormHeadMajorF32,
-            grid, 1, 1, block, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
+        nint fn = full
+            ? (f16 ? _ditQkvSplitNormHeadMajorF16 : _ditQkvSplitNormHeadMajorF32)
+            : (f16 ? _ditQkvSplitNormHeadMajorSubsetF16 : _ditQkvSplitNormHeadMajorSubsetF32);
+        CudaDriverApi.cuLaunchKernel(fn, grid, 1, 1, block, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>FourierEmbedder over device coords [count,3] → dst [count, 3·(2·bands+1)] (one thread per point·coord).</summary>

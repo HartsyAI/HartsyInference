@@ -264,7 +264,7 @@ public sealed unsafe class BooguImageTransformer : IDisposable
             }
             if (_captionCache.Count > 8) SweepCaptionCache();
             // Host-materialize so a later FreeActivations can't revert the cache to stale host memory.
-            _ = caption.DataPointer;
+            backend.OffloadActivation(caption);
             _captionCache[instructionHidden] = caption;
             cachedCaption = caption;
         }

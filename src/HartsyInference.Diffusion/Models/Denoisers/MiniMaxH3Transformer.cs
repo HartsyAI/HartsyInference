@@ -475,7 +475,10 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         Tensor? qkvB = Optional($"{prefix}.qkv_proj.bias");
         int? rotary = cos is not null && sin is not null ? MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen) : null;
 
-        List<Tensor> qChunks = new List<Tensor>();
+        // Pass 1 projects ONLY k+v — rows [inner, 3*inner) of the packed qkv weight, via LinearWeightRows so the
+        // resident weight is shared rather than sliced into a second copy. q is re-projected per chunk in pass 2
+        // from rows [0, inner): the SAME total GEMM work, just split across the passes, which is what drops the
+        // peak from 3x to 2x seq*inner*F32 — a full-sequence q no longer stays resident while k/v are built.
         Tensor kFull = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
         Tensor vFull = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
         try
@@ -485,13 +488,12 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 int c = Math.Min(chunkRows, seq - r0);
                 using Tensor xChunk = new Tensor(WithFirstDim(x.Shape, c), x.DType) { Fp8ScaleFactor = x.Fp8ScaleFactor };
                 backend.SliceRowsGeneric(xChunk, x, r0);
-                Tensor qc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
                 using Tensor kc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
                 using Tensor vc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
-                using (Tensor qkvChunk = new Tensor(new TensorShape(c, inner * 3), DType.F32))
+                using (Tensor kvChunk = new Tensor(new TensorShape(c, inner * 2), DType.F32))
                 {
-                    backend.Linear(qkvChunk, xChunk, qkvW, qkvB);
-                    backend.QkvSplitNormHeadMajor(qc, kc, vc, qkvChunk, qNormW, kNormW, _config.QkNormEps);
+                    backend.LinearWeightRows(kvChunk, xChunk, qkvW, qkvB, inner, inner * 2);
+                    backend.QkvSplitNormHeadMajor(null, kc, vc, kvChunk, qNormW, kNormW, _config.QkNormEps);
                 }
                 if (rotary is int rot)
                 {
@@ -499,7 +501,6 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                     using Tensor sinChunk = new Tensor(new TensorShape(c, sin!.Shape[sin.Shape.Rank - 1]), DType.F32);
                     backend.SliceRows(cosChunk, cos, r0);
                     backend.SliceRows(sinChunk, sin, r0);
-                    backend.ApplyRopeSingleHeadMajor(qc, cosChunk, sinChunk, rot);
                     backend.ApplyRopeSingleHeadMajor(kc, cosChunk, sinChunk, rot);
                 }
                 // k/v land straight in their full buffers and the chunk dies here; holding them in lists to Concat
@@ -507,7 +508,6 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 // instead of 3x — the 2 GB that OOMed a 141-frame sharded run on the 12 GB card).
                 backend.ScatterSeqHeadMajor(kFull, kc, r0);
                 backend.ScatterSeqHeadMajor(vFull, vc, r0);
-                qChunks.Add(qc);
             }
             ProbeV(vFull, prefix);
 
@@ -517,21 +517,34 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             Tensor outT = new Tensor(x.Shape, BodyDType);
             try
             {
-                int outRow = 0;
-                for (int i = 0; i < qChunks.Count; i++)
+                for (int r0 = 0; r0 < seq; r0 += chunkRows)
                 {
-                    int c = (int)qChunks[i].Shape[2];
+                    int c = Math.Min(chunkRows, seq - r0);
+                    // Project THIS chunk's q now instead of having kept every chunk's q alive through pass 1.
+                    using Tensor qc = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
+                    using (Tensor xChunk = new Tensor(WithFirstDim(x.Shape, c), x.DType) { Fp8ScaleFactor = x.Fp8ScaleFactor })
+                    using (Tensor qChunk = new Tensor(new TensorShape(c, inner), DType.F32))
+                    {
+                        backend.SliceRowsGeneric(xChunk, x, r0);
+                        backend.LinearWeightRows(qChunk, xChunk, qkvW, qkvB, 0, inner);
+                        backend.QkvSplitNormHeadMajor(qc, null, null, qChunk, qNormW, kNormW, _config.QkNormEps);
+                    }
+                    if (rotary is int rot2)
+                    {
+                        using Tensor cosChunk = new Tensor(new TensorShape(c, cos!.Shape[cos.Shape.Rank - 1]), DType.F32);
+                        using Tensor sinChunk = new Tensor(new TensorShape(c, sin!.Shape[sin.Shape.Rank - 1]), DType.F32);
+                        backend.SliceRows(cosChunk, cos, r0);
+                        backend.SliceRows(sinChunk, sin, r0);
+                        backend.ApplyRopeSingleHeadMajor(qc, cosChunk, sinChunk, rot2);
+                    }
                     using Tensor attnChunk = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
-                    backend.ScaledDotProductAttention(attnChunk, qChunks[i], kFull, vFull, null, 1f / MathF.Sqrt(hd));
-                    qChunks[i].Dispose();
+                    backend.ScaledDotProductAttention(attnChunk, qc, kFull, vFull, null, 1f / MathF.Sqrt(hd));
                     using Tensor merged = new Tensor(new TensorShape(c, inner), DType.F32);
                     backend.Permute0213(merged, attnChunk, heads, c, hd);
                     using Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
                     backend.Linear(outChunk, merged, Require($"{prefix}.out_proj.weight"), Optional($"{prefix}.out_proj.bias"));
-                    backend.ScatterRowsGeneric(outT, outChunk, outRow);
-                    outRow += c;
+                    backend.ScatterRowsGeneric(outT, outChunk, r0);
                 }
-                qChunks.Clear();
                 return outT;
             }
             catch
@@ -542,7 +555,6 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
         finally
         {
-            foreach (Tensor t in qChunks) t.Dispose();
             kFull.Dispose();
             vFull.Dispose();
         }

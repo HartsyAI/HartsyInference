@@ -159,7 +159,7 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
             {
                 if (_textProjCache.Count > 8) SweepTextProjCache();
                 // Host-materialize so a later FreeActivations can't revert the cache to stale host memory.
-                _ = textProjected.DataPointer;
+                backend.OffloadActivation(textProjected);
                 _textProjCache[textEmbeds] = textProjected;
             }
             else if (cacheable)
@@ -276,8 +276,8 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         backend.SliceLastDim(cos, freqs, 0);
         backend.SliceLastDim(sin, freqs, headDim);
         // Host-materialize so a later FreeActivations can't revert cached copies to stale host memory.
-        _ = cos.DataPointer;
-        _ = sin.DataPointer;
+        backend.OffloadActivation(cos);
+        backend.OffloadActivation(sin);
         freqs.Dispose();
         return (cos, sin);
     }

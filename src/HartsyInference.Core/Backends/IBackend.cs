@@ -249,30 +249,67 @@ public interface IBackend : IDisposable
 
     /// <summary>Head-major <see cref="QkvSplitNorm"/>: same split + per-head QK-RMSNorm, but q/k/v come out <c>[B, heads, seq, headDim]</c>.</summary>
     /// <remarks>Lets the attention caller skip the q/k/v <see cref="Permute0213"/>; RMSNorm is over headDim, the last dim in either layout.</remarks>
-    unsafe void QkvSplitNormHeadMajor(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
+    /// <remarks>Any of <paramref name="q"/>/<paramref name="k"/>/<paramref name="v"/> may be null to emit only a
+    /// SUBSET. A 3-wide packed source keeps the canonical q=0,k=1,v=2 segments even then; a narrowed <c>[k|v]</c> or
+    /// <c>[q]</c> source carries only what it names, numbered in q,k,v order. That is what lets
+    /// <c>MiniMaxH3Transformer</c>'s chunked attention project k+v in one pass and q in the next, so a full-sequence
+    /// q never stays resident across the pass boundary.</remarks>
+    unsafe void QkvSplitNormHeadMajor(Tensor? q, Tensor? k, Tensor? v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
     {
-        if (q.DType != DType.F32 || qkv.DType != DType.F32) throw new NotSupportedException("QkvSplitNormHeadMajor default fallback only supports F32.");
-        if (q.Shape.Rank != 4) throw new ArgumentException($"QkvSplitNormHeadMajor needs q/k/v shaped [B,heads,seq,headDim], got {q.Shape}.", nameof(q));
-        if (!k.Shape.Equals(q.Shape) || !v.Shape.Equals(q.Shape))
-            throw new ArgumentException($"QkvSplitNormHeadMajor needs q/k/v identically shaped, got q {q.Shape} k {k.Shape} v {v.Shape}.", nameof(k));
+        Tensor shapeRef = q ?? k ?? v ?? throw new ArgumentException("QkvSplitNormHeadMajor needs at least one of q/k/v.", nameof(q));
+        if (shapeRef.DType != DType.F32 || qkv.DType != DType.F32) throw new NotSupportedException("QkvSplitNormHeadMajor default fallback only supports F32.");
+        if (shapeRef.Shape.Rank != 4) throw new ArgumentException($"QkvSplitNormHeadMajor needs q/k/v shaped [B,heads,seq,headDim], got {shapeRef.Shape}.", nameof(q));
+        foreach (Tensor? other in new[] { q, k, v })
+            if (other is not null && !other.Shape.Equals(shapeRef.Shape))
+                throw new ArgumentException($"QkvSplitNormHeadMajor needs the emitted q/k/v identically shaped, got q {q?.Shape} k {k?.Shape} v {v?.Shape}.", nameof(k));
         int headDim = (int)qWeight.Shape[qWeight.Shape.Rank - 1];
-        int w = (int)qkv.Shape[qkv.Shape.Rank - 1] / 3;
-        int heads = w / headDim;
-        int seq = (int)q.Shape[2];
-        long tok = qkv.ElementCount / (3L * w);
-        float* pq = (float*)q.DataPointer, pk = (float*)k.DataPointer, pv = (float*)v.DataPointer;
+        int heads = (int)shapeRef.Shape[1];
+        int w = heads * headDim;
+        int packStride = (int)qkv.Shape[qkv.Shape.Rank - 1] / w;
+        int qSlot, kSlot, vSlot;
+        if (packStride == 3)
+        {
+            qSlot = q is null ? -1 : 0; kSlot = k is null ? -1 : 1; vSlot = v is null ? -1 : 2;
+        }
+        else
+        {
+            int next = 0;
+            qSlot = q is null ? -1 : next++; kSlot = k is null ? -1 : next++; vSlot = v is null ? -1 : next++;
+            if (next != packStride)
+                throw new ArgumentException($"QkvSplitNormHeadMajor: a {packStride}-wide packed source must carry exactly the requested outputs.", nameof(qkv));
+        }
+        int seq = (int)shapeRef.Shape[2];
+        long tok = qkv.ElementCount / ((long)packStride * w);
+        float* pq = q is null ? null : (float*)q.DataPointer;
+        float* pk = k is null ? null : (float*)k.DataPointer;
+        float* pv = v is null ? null : (float*)v.DataPointer;
         float* pqkv = (float*)qkv.DataPointer, pqw = (float*)qWeight.DataPointer, pkw = (float*)kWeight.DataPointer;
         for (long t = 0; t < tok; t++)
         {
-            float* baseP = pqkv + t * 3L * w;
+            float* baseP = pqkv + t * (long)packStride * w;
             long b = t / seq, s = t % seq;
             for (int h = 0; h < heads; h++)
             {
-                float* qs = baseP + h * headDim; float* ks = baseP + w + h * headDim; float* vs = baseP + 2 * w + h * headDim;
                 long outOff = ((b * heads + h) * seq + s) * headDim;
-                double qss = 0, kss = 0; for (int d = 0; d < headDim; d++) { qss += (double)qs[d] * qs[d]; kss += (double)ks[d] * ks[d]; }
-                float qInv = (float)(1.0 / Math.Sqrt(qss / headDim + eps)), kInv = (float)(1.0 / Math.Sqrt(kss / headDim + eps));
-                for (int d = 0; d < headDim; d++) { pq[outOff + d] = qs[d] * qInv * pqw[d]; pk[outOff + d] = ks[d] * kInv * pkw[d]; pv[outOff + d] = vs[d]; }
+                if (pq is not null)
+                {
+                    float* qs = baseP + (long)qSlot * w + h * headDim;
+                    double qss = 0; for (int d = 0; d < headDim; d++) qss += (double)qs[d] * qs[d];
+                    float qInv = (float)(1.0 / Math.Sqrt(qss / headDim + eps));
+                    for (int d = 0; d < headDim; d++) pq[outOff + d] = qs[d] * qInv * pqw[d];
+                }
+                if (pk is not null)
+                {
+                    float* ks = baseP + (long)kSlot * w + h * headDim;
+                    double kss = 0; for (int d = 0; d < headDim; d++) kss += (double)ks[d] * ks[d];
+                    float kInv = (float)(1.0 / Math.Sqrt(kss / headDim + eps));
+                    for (int d = 0; d < headDim; d++) pk[outOff + d] = ks[d] * kInv * pkw[d];
+                }
+                if (pv is not null)
+                {
+                    float* vs = baseP + (long)vSlot * w + h * headDim;
+                    for (int d = 0; d < headDim; d++) pv[outOff + d] = vs[d];
+                }
             }
         }
     }
@@ -1970,6 +2007,18 @@ public interface IBackend : IDisposable
 
     /// <summary>Removes a <see cref="PinActivation"/> mark. No-op on host backends.</summary>
     void UnpinActivation(Tensor tensor) { }
+
+    /// <summary>Materializes a cached activation to host and releases its device copy; the tensor reloads on its next
+    /// use, so this is the named spelling of the <c>_ = t.DataPointer</c> host-materialize idiom (it also clears the
+    /// <see cref="PinActivation"/> mark, since after a real D2H the host copy is authoritative). No-op on host
+    /// backends.</summary>
+    void OffloadActivation(Tensor tensor) { }
+
+    /// <summary>Offloads cached activations largest-first until <paramref name="targetBytes"/> of device memory is
+    /// released, returning the bytes actually freed. Safe points only, on the owning thread — never mid-op, and never
+    /// while a step graph is live (a captured graph bakes activation pointers and a reload returns a new one). See
+    /// docs/Research/MEMORY_SCHEDULING_SERVING.md §9. Returns 0 on host backends.</summary>
+    long OffloadActivations(long targetBytes) => 0;
 
     /// <summary>
     /// Relative-L1 distance <c>Σ|a−b| / Σ|b|</c>; zero when both tensors are zero, positive infinity

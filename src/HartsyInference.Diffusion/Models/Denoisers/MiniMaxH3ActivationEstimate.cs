@@ -46,15 +46,17 @@ public static class MiniMaxH3ActivationEstimate
         // AttentionChunked's two passes peak at different things and are separated in time, so the floor is the worse
         // of the two rather than their sum — summing them false-refused a 39-frame geometry that had already been
         // proven to complete on real hardware (see MiniMaxH3ActivationEstimateTests' measured calibration).
-        // Pass 1 ends holding kFull + vFull + every q chunk, three full [1, H, seq, hd] F32 buffers at once, plus the
-        // chunk in flight. This is the dominant term at long sequences and the one that OOMed a 141-frame sharded run
-        // on the 12 GB card: at seq=38325 each buffer is 1047.9 MB, and the failing allocation was exactly that size.
-        long passOneBytes = 3L * fullSeqInnerBytes + chunkScratchBytes;
+        // Pass 1 holds kFull + vFull, two full [1, H, seq, hd] F32 buffers, plus the chunk in flight. It used to hold
+        // a third — every chunk's q, kept alive for pass 2 — which is what OOMed a 141-frame sharded run on the 12 GB
+        // card (at seq=38325 each buffer is 1047.9 MB, exactly the failing allocation). The projection is now split
+        // across the passes (k+v here, q re-projected per chunk in pass 2, same total GEMM work), so q never spans
+        // the pass boundary and this term is 2x rather than 3x.
+        long passOneBytes = 2L * fullSeqInnerBytes + chunkScratchBytes;
 
-        // Pass 2 has released the q chunks it consumes but still holds kFull + vFull for every SDPA call, and its own
-        // outChunks list is never trimmed until the final Concat — so a full [seq, hidden] of chunks is live
-        // alongside the concatenated result it is about to produce.
-        long passTwoBytes = 2L * fullSeqInnerBytes + 2L * (long)seq * hidden * bodyBytes;
+        // Pass 2 still holds kFull + vFull for every SDPA call, alongside the [seq, hidden] result it scatters each
+        // chunk into. It used to ALSO hold an outChunks list of the same total size awaiting a final Concat; chunks
+        // now go straight into their rows of the result, so only the one full-size buffer is live.
+        long passTwoBytes = 2L * fullSeqInnerBytes + (long)seq * hidden * bodyBytes;
 
         return residualBytes + Math.Max(passOneBytes, passTwoBytes) + FudgeBytes;
     }

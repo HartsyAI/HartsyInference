@@ -3172,6 +3172,25 @@ public sealed class CudaBackend : IBackend
         GpuTransferHelper.UnpinActivation(tensor);
     }
 
+    /// <summary>Materializes a cached activation to host and frees its device copy (see IBackend doc).</summary>
+    public void OffloadActivation(Tensor tensor)
+    {
+        EnterOp();
+        // Same hazard as FreeActivations: a captured graph bakes this activation's device pointer and the reload
+        // hands back a different one. Gated on there being something to free so a no-op offload can't kill a graph.
+        if (GpuTransferHelper.HasCachedActivation(tensor)) StepGraphInvalidateForActivationFree();
+        GpuTransferHelper.OffloadActivation(tensor);
+    }
+
+    /// <summary>Offloads cached activations largest-first until <paramref name="targetBytes"/> is freed (see IBackend doc).</summary>
+    public long OffloadActivations(long targetBytes)
+    {
+        EnterOp();
+        if (targetBytes <= 0 || GpuTransferHelper.CachedActivationCount == 0) return 0;
+        StepGraphInvalidateForActivationFree();
+        return GpuTransferHelper.OffloadActivations(targetBytes);
+    }
+
     public bool FlashDecodeSupported => true;
 
     public bool StepGraphSupported => true;
@@ -5065,28 +5084,65 @@ public sealed class CudaBackend : IBackend
 
     /// <summary>Head-major <see cref="QkvSplitNorm"/> (F32 or F16 activation, F32 weights): q/k/v come out [B, heads, seq, headDim].</summary>
     /// <remarks>Replaces SliceLastDim×3 + RmsNorm×2 + Permute0213×3 per attention stream — SDPA consumes the result directly.</remarks>
-    public void QkvSplitNormHeadMajor(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
+    public void QkvSplitNormHeadMajor(Tensor? q, Tensor? k, Tensor? v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
     {
         using NvtxRange _nvtx = NvtxRange.Push("QkvSplitNormHeadMajor");
-        (int tokens, int heads, int headDim) = ValidateQkvSplitNorm(q, k, v, qkv, qWeight, kWeight, eps, headMajor: true);
+        Tensor shapeRef = q ?? k ?? v
+            ?? throw new HartsyInferenceException("QkvSplitNormHeadMajor needs at least one of q/k/v.");
+        int tokens, heads, headDim, packStride, qSlot, kSlot, vSlot;
+        if (q is not null && k is not null && v is not null
+            && (int)qkv.Shape[qkv.Shape.Rank - 1] == 3 * (int)shapeRef.Shape[1] * (int)qWeight.Shape[qWeight.Shape.Rank - 1])
+        {
+            // Full fused call — unchanged, including its stricter validation, so it stays bit-exact.
+            (tokens, heads, headDim) = ValidateQkvSplitNorm(q, k, v, qkv, qWeight, kWeight, eps, headMajor: true);
+            packStride = 3; qSlot = 0; kSlot = 1; vSlot = 2;
+        }
+        else
+        {
+            // packStride comes from the SOURCE width, not from how many outputs were asked for: a full [q|k|v]
+            // buffer can be read for only k and v, while a narrowed [k|v] or [q] carries only what it names.
+            headDim = (int)qWeight.Shape[qWeight.Shape.Rank - 1];
+            heads = (int)shapeRef.Shape[1];
+            int w = heads * headDim;
+            packStride = (int)qkv.Shape[qkv.Shape.Rank - 1] / w;
+            if (packStride == 3)
+            {
+                qSlot = q is null ? -1 : 0; kSlot = k is null ? -1 : 1; vSlot = v is null ? -1 : 2;
+            }
+            else
+            {
+                int next = 0;
+                qSlot = q is null ? -1 : next++; kSlot = k is null ? -1 : next++; vSlot = v is null ? -1 : next++;
+                if (next != packStride)
+                    throw new HartsyInferenceException(
+                        $"QkvSplitNormHeadMajor: a {packStride}-wide packed source must carry exactly the requested "
+                        + $"outputs, got q={q is not null} k={k is not null} v={v is not null}.");
+            }
+            tokens = (int)(qkv.ElementCount / ((long)packStride * w));
+            if (shapeRef.Shape.Rank != 4 || shapeRef.Shape[3] != headDim || (long)shapeRef.Shape[0] * shapeRef.Shape[2] != tokens)
+                throw new HartsyInferenceException(
+                    $"QkvSplitNormHeadMajor layout mismatch: q {q?.Shape} k {k?.Shape} v {v?.Shape} vs qkv {qkv.Shape} "
+                    + $"(packStride={packStride}, heads={heads}, headDim={headDim}, tokens={tokens}).");
+        }
         bool f16 = qkv.DType == DType.F16;
         EnterOp();
         EnsureKernels();
-        int seq = (int)q.Shape[2];
+        int seq = (int)shapeRef.Shape[2];
         ulong pq = 0, pk = 0, pv = 0, pQkv = 0, pQw = 0, pKw = 0; bool cached = false;
         try
         {
             pQkv = GpuTransferHelper.CopyToDevice(qkv);
             pQw = GpuTransferHelper.CopyToDevice(qWeight);
             pKw = GpuTransferHelper.CopyToDevice(kWeight);
-            nuint bytes = GpuTransferHelper.ByteSize(q);
-            pq = GpuTransferHelper.AllocateDevice(bytes);
-            pk = GpuTransferHelper.AllocateDevice(bytes);
-            pv = GpuTransferHelper.AllocateDevice(bytes);
-            _kernels!.LaunchQkvSplitNormHeadMajor(f16, pq, pk, pv, pQkv, pQw, pKw, tokens, heads, headDim, seq, eps, _stream.Handle);
-            GpuTransferHelper.CacheActivation(q, pq, bytes);
-            GpuTransferHelper.CacheActivation(k, pk, bytes);
-            GpuTransferHelper.CacheActivation(v, pv, bytes);
+            nuint bytes = GpuTransferHelper.ByteSize(shapeRef);
+            if (q is not null) pq = GpuTransferHelper.AllocateDevice(bytes);
+            if (k is not null) pk = GpuTransferHelper.AllocateDevice(bytes);
+            if (v is not null) pv = GpuTransferHelper.AllocateDevice(bytes);
+            _kernels!.LaunchQkvSplitNormHeadMajor(f16, pq, pk, pv, pQkv, pQw, pKw, tokens, heads, headDim, seq, eps,
+                _stream.Handle, packStride, qSlot, kSlot, vSlot);
+            if (q is not null) GpuTransferHelper.CacheActivation(q, pq, bytes);
+            if (k is not null) GpuTransferHelper.CacheActivation(k, pk, bytes);
+            if (v is not null) GpuTransferHelper.CacheActivation(v, pv, bytes);
             cached = true;
         }
         finally

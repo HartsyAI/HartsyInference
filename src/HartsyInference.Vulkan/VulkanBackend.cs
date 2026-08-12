@@ -207,6 +207,16 @@ public sealed class VulkanBackend : IBackend
 
     public void FreeWeights(IEnumerable<Tensor> weights) => _xfer.FreeWeights(weights);
 
+    /// <summary>Materializes a cached activation to host and releases its device buffer, by firing the lazy sync
+    /// callback <c>VulkanGpuTransferHelper.CacheActivation</c> plants. Overridden rather than left as the interface
+    /// no-op because Vulkan has its own lazy activation cache: the callers of this are cross-model caches that used
+    /// to spell it <c>_ = t.DataPointer</c>, and a no-op here would silently leave them device-only.</summary>
+    public unsafe void OffloadActivation(Tensor tensor)
+    {
+        ArgumentNullException.ThrowIfNull(tensor);
+        _ = tensor.DataPointer;
+    }
+
     #region Helpers
 
     private const uint LocalX1D = 256;

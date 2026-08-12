@@ -1497,6 +1497,90 @@ __global__ void dit_qkv_split_norm_head_major_f32(
 // c∈{0,1,2}: out[i, c] = x; out[i, 3 + c·bands + band] = sin(x·2^band); out[i, 3 + 3·bands + c·bands + band] =
 // cos(x·2^band). One thread per (point, coord). Replaces the host trig loop in the ShapeVAE geo-decoder query
 // (kept feat on device → no per-chunk H2D of the Fourier features). dim = 3·(2·bands + 1).
+
+// Subset-emitting twin of dit_qkv_split_norm_head_major_f32. SEPARATE kernel on purpose: the fused call above must stay
+// byte-for-byte the shipped kernel, and folding slot guards into it changed its codegen enough to move
+// real generation output. packStride is how many W-wide segments the packed source holds; qSlot/kSlot/
+// vSlot say which segment each output reads, negative meaning "not produced" (that pointer may be null).
+// MiniMaxH3Transformer's chunked attention uses it to project k+v in pass 1 and q in pass 2, so a
+// full-sequence q never stays resident across the pass boundary.
+__global__ void dit_qkv_split_norm_head_major_subset_f32(
+    float* __restrict__ q, float* __restrict__ k, float* __restrict__ v,
+    const float* __restrict__ qkv, const float* __restrict__ qW, const float* __restrict__ kW,
+    unsigned int tokens, unsigned int heads, unsigned int headDim, unsigned int seq, float eps,
+    unsigned int packStride, int qSlot, int kSlot, int vSlot)
+{
+    extern __shared__ float sred[];
+    float* qred = sred;
+    float* kred = sred + blockDim.x;
+    unsigned long long g = (unsigned long long)blockIdx.x;   // group = token*heads + head
+    if (g >= (unsigned long long)tokens * heads) return;
+    unsigned int h = (unsigned int)(g % heads);
+    unsigned long long token = g / heads;
+    unsigned int W = heads * headDim;
+    unsigned int d = threadIdx.x;
+    const float* base = qkv + token * (unsigned long long)packStride * W;
+    unsigned long long b = token / seq, s = token % seq;
+    unsigned long long outOff = ((b * heads + h) * seq + s) * headDim;
+    unsigned long long qBase = (unsigned long long)(qSlot < 0 ? 0 : qSlot) * W + (unsigned long long)h * headDim;
+    unsigned long long kBase = (unsigned long long)(kSlot < 0 ? 0 : kSlot) * W + (unsigned long long)h * headDim;
+    unsigned long long vBase = (unsigned long long)(vSlot < 0 ? 0 : vSlot) * W + (unsigned long long)h * headDim;
+
+    float qv = 0.0f;
+    float kv = 0.0f;
+    if (d < headDim)
+    {
+        if (qSlot >= 0) qv = base[qBase + d];
+        if (kSlot >= 0) kv = base[kBase + d];
+    }
+    float qsum = qv * qv;
+    float ksum = kv * kv;
+    for (unsigned int i = d + blockDim.x; i < headDim; i += blockDim.x)
+    {
+        float qi = qSlot >= 0 ? base[qBase + i] : 0.0f;
+        float ki = kSlot >= 0 ? base[kBase + i] : 0.0f;
+        qsum += qi * qi;
+        ksum += ki * ki;
+    }
+    qred[d] = qsum;
+    kred[d] = ksum;
+    __syncthreads();
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1)
+    {
+        if (d < stride)
+        {
+            qred[d] += qred[d + stride];
+            kred[d] += kred[d + stride];
+        }
+        __syncthreads();
+    }
+    if (d == 0)
+    {
+        float invDim = 1.0f / (float)headDim;
+        qred[0] = rsqrtf(qred[0] * invDim + eps);
+        kred[0] = rsqrtf(kred[0] * invDim + eps);
+    }
+    __syncthreads();
+
+    if (d < headDim)
+    {
+        if (qSlot >= 0) q[outOff + d] = qv * qred[0] * qW[d];
+        if (kSlot >= 0) k[outOff + d] = kv * kred[0] * kW[d];
+        if (vSlot >= 0) v[outOff + d] = base[vBase + d];
+    }
+    for (unsigned int i = d + blockDim.x; i < headDim; i += blockDim.x)
+    {
+        if (qSlot >= 0) q[outOff + i] = base[qBase + i] * qred[0] * qW[i];
+        if (kSlot >= 0) k[outOff + i] = base[kBase + i] * kred[0] * kW[i];
+        if (vSlot >= 0) v[outOff + i] = base[vBase + i];
+    }
+}
+
+// FourierEmbedder (num_freqs bands, freqs 2^i, include_input=true, include_pi=false): for each point i and coord
+// c∈{0,1,2}: out[i, c] = x; out[i, 3 + c·bands + band] = sin(x·2^band); out[i, 3 + 3·bands + c·bands + band] =
+// cos(x·2^band). One thread per (point, coord). Replaces the host trig loop in the ShapeVAE geo-decoder query
+// (kept feat on device → no per-chunk H2D of the Fourier features). dim = 3·(2·bands + 1).
+
 __global__ void fourier_embed_f32(
     float* __restrict__ dst, const float* __restrict__ coords,
     unsigned int count, unsigned int bands, unsigned int dim)

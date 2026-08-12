@@ -491,9 +491,13 @@ blocks through a pageable, synchronous path — the wrong mechanism (§9).
 
 **The fix: split the fused projection across the two passes.** Pass 1 projects k+v only (2/3 of the
 GEMM), pass 2 re-projects q per chunk (1/3). Identical total FLOPs; pass-1 peak 3x → 2x. Enabled by the
-packing being `[q(inner) | k(inner) | v(inner)]` per token, so both weight slices are contiguous row
-ranges of `qkv_proj.weight` (see `QkvSplitNormHeadMajor`'s indexing). The fused split/norm/head-major op
-is generalized to emit a subset rather than gaining two near-duplicate siblings. Separately, both
+packing being `[q(inner) | k(inner) | v(inner)]` per token. The weight is NOT sliced into sub-tensors --
+GPU caching is keyed on tensor identity, so a slice would upload a second copy of an already-resident
+weight (~5.8 GB across 50 blocks); `LinearWeightRows` offsets into the resident weight instead.
+<br>Subset emission is a SEPARATE kernel (`dit_qkv_split_norm_head_major_subset_*`), not a generalization
+of the fused one. Folding slot guards into the shipped kernel changed its codegen enough to move real
+generation output on the legacy path, which must stay bit-identical -- the same trade `ForwardBlock`'s
+sub-`chunkRows` dispatch already makes. The launcher sends full q+k+v calls to the original kernel. Separately, both
 `AttentionChunked` pass 2 and `MlpChunked` stop accumulating output chunks for a final `Concat` and
 scatter each chunk into the destination instead (`ScatterRowsGeneric` — the byte-offset inverse of
 `SliceRowsGeneric`, a plain D2D copy with no kernel).

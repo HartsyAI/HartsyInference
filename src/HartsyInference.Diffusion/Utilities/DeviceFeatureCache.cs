@@ -21,6 +21,13 @@ namespace HartsyInference.Diffusion.Utilities;
 /// stream's native dtype (F32/F16 — Scale/Add/RelativeL1Distance all dispatch per dtype).</para></summary>
 public sealed class DeviceFeatureCache : IDisposable
 {
+    /// <summary>Last-resort lowvram lever: <c>HARTSY_STEP_CACHE_OFFLOAD=1</c> pages the cross-step residual and
+    /// indicator snapshot to host as they are produced, trading one PCIe round trip per step for their full device
+    /// size. Off by default. Defensible only because both are read at most ONCE PER STEP — the same treatment applied
+    /// to a per-block tensor loses outright (docs/Research/MEMORY_SCHEDULING_SERVING.md §9).</summary>
+    private static readonly bool OffloadEnabled =
+        Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_OFFLOAD") == "1";
+
     private readonly float _threshold;
     private readonly int _maxConsecutiveReuse;
     private readonly float[]? _polyCoeffs;      // TeaCache-style gate calibration: drift ← Σ cᵢ·relⁱ (c0 first)
@@ -149,6 +156,7 @@ public sealed class DeviceFeatureCache : IDisposable
         // Cross-step state: the residual's only copy is on-device — survive the video pipelines' per-step
         // FreeActivations (its own Dispose still reclaims it; pin is a no-op on host backends).
         backend.PinActivation(_cachedResidual);
+        OffloadIfEnabled(backend, _cachedResidual);
     }
 
     /// <summary>Reconstructs the cached-region output on a hit: returns a new tensor = <paramref name="input"/> +
@@ -200,6 +208,20 @@ public sealed class DeviceFeatureCache : IDisposable
         backend.PinActivation(snapshot);   // cross-step gate state — survive per-step FreeActivations
         _prevIndicator?.Dispose();
         _prevIndicator = snapshot;
+        OffloadIfEnabled(backend, snapshot);
+    }
+
+    /// <summary>Pages <paramref name="justProduced"/> out to host under <see cref="OffloadEnabled"/>, sized so the
+    /// bulk walk frees roughly this one tensor. The walk is largest-first (pinned first within a size class), so an
+    /// equally large live activation can be taken instead — bounded to one tensor's worth per call, and the entry
+    /// point is deliberately the bulk one so the policy stays in one place.</summary>
+    private static void OffloadIfEnabled(IBackend backend, Tensor justProduced)
+    {
+        if (!OffloadEnabled) return;
+        // A captured step graph bakes activation pointers and a reload returns a new one — which is exactly why the
+        // HunyuanVideo/Kandinsky5 pipelines suppress their per-step FreeActivations while their graph is live.
+        if (backend.StepGraphReady || backend.StepGraphOwner is not null) return;
+        backend.OffloadActivations(justProduced.DType.ComputeByteCount(justProduced.ElementCount));
     }
 
     private void ThrowIfDisposed()

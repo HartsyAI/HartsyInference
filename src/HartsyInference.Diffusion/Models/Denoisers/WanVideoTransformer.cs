@@ -258,7 +258,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable
             textProj.Dispose();
         }
         WanVideoDebugDump.Dump("cond_encoderProj", encoderProj);
-        _ = (nint)encoderProj.DataPointer;   // host-materialize (see cache note above)
+        backend.OffloadActivation(encoderProj);   // host-materialize (see cache note above)
         if (_ctxCache.Count >= 4)   // cap: prompts/images changed across gens; drop the stale contexts
         {
             foreach ((Tensor ctx, _, _) in _ctxCache.Values) ctx.Dispose();
