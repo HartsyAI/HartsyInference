@@ -535,6 +535,82 @@ $L__BB4_8:
 	ret;
 
 }
+	// .globl	dit_geglu_bf16
+.visible .entry dit_geglu_bf16(
+	.param .u64 dit_geglu_bf16_param_0,
+	.param .u64 dit_geglu_bf16_param_1,
+	.param .u32 dit_geglu_bf16_param_2,
+	.param .u32 dit_geglu_bf16_param_3
+)
+{
+	.reg .pred 	%p<2>;
+	.reg .b16 	%rs<4>;
+	.reg .f32 	%f<18>;
+	.reg .b32 	%r<11>;
+	.reg .b64 	%rd<14>;
+
+
+	ld.param.u64 	%rd1, [dit_geglu_bf16_param_0];
+	ld.param.u64 	%rd2, [dit_geglu_bf16_param_1];
+	ld.param.u32 	%r2, [dit_geglu_bf16_param_2];
+	ld.param.u32 	%r3, [dit_geglu_bf16_param_3];
+	mov.u32 	%r4, %ntid.x;
+	mov.u32 	%r5, %ctaid.x;
+	mov.u32 	%r6, %tid.x;
+	mad.lo.s32 	%r1, %r5, %r4, %r6;
+	setp.ge.u32 	%p1, %r1, %r3;
+	@%p1 bra 	$L__BB5_2;
+
+	cvta.to.global.u64 	%rd3, %rd1;
+	div.u32 	%r7, %r1, %r2;
+	shl.b32 	%r8, %r2, 1;
+	mul.wide.u32 	%rd4, %r7, %r8;
+	mul.lo.s32 	%r9, %r7, %r2;
+	sub.s32 	%r10, %r1, %r9;
+	cvt.u64.u32 	%rd5, %r10;
+	add.s64 	%rd6, %rd4, %rd5;
+	cvta.to.global.u64 	%rd7, %rd2;
+	shl.b64 	%rd8, %rd6, 1;
+	add.s64 	%rd9, %rd7, %rd8;
+	ld.global.nc.u16 	%rs1, [%rd9];
+	// begin inline asm
+	{ mov.b32 %f1, {0,%rs1};}
+
+	// end inline asm
+	mul.wide.u32 	%rd10, %r2, 2;
+	add.s64 	%rd11, %rd9, %rd10;
+	ld.global.nc.u16 	%rs2, [%rd11];
+	// begin inline asm
+	{ mov.b32 %f2, {0,%rs2};}
+
+	// end inline asm
+	mul.f32 	%f4, %f2, 0f3D372713;
+	mul.f32 	%f5, %f2, %f4;
+	fma.rn.f32 	%f6, %f2, %f5, %f2;
+	mul.f32 	%f7, %f6, 0f3F4C422A;
+	mul.f32 	%f8, %f7, 0fC0000000;
+	mul.f32 	%f9, %f8, 0f3FB8AA3B;
+	ex2.approx.f32 	%f10, %f9;
+	add.f32 	%f11, %f10, 0f3F800000;
+	mov.f32 	%f12, 0f3F800000;
+	div.approx.f32 	%f13, %f12, %f11;
+	mul.f32 	%f14, %f2, 0f3F000000;
+	fma.rn.f32 	%f15, %f13, 0f40000000, 0fBF800000;
+	add.f32 	%f16, %f15, 0f3F800000;
+	mul.f32 	%f17, %f14, %f16;
+	mul.f32 	%f3, %f1, %f17;
+	// begin inline asm
+	{  cvt.rn.bf16.f32 %rs3, %f3;}
+
+	// end inline asm
+	mul.wide.u32 	%rd12, %r1, 2;
+	add.s64 	%rd13, %rd3, %rd12;
+	st.global.u16 	[%rd13], %rs3;
+
+$L__BB5_2:
+	ret;
+
+}
 	// .globl	dit_glu_act_bf16
 .visible .entry dit_glu_act_bf16(
 	.param .u64 dit_glu_act_bf16_param_0,
@@ -565,18 +641,18 @@ $L__BB4_8:
 	cvt.u64.u32 	%rd2, %r3;
 	mul.wide.u32 	%rd13, %r3, %r2;
 	setp.ge.u64 	%p1, %rd1, %rd13;
-	@%p1 bra 	$L__BB5_8;
+	@%p1 bra 	$L__BB6_8;
 
 	and.b64  	%rd14, %rd1, -4294967296;
 	setp.eq.s64 	%p2, %rd14, 0;
-	@%p2 bra 	$L__BB5_3;
+	@%p2 bra 	$L__BB6_3;
 
 	div.u64 	%rd28, %rd1, %rd2;
 	mul.lo.s64 	%rd15, %rd28, %rd2;
 	sub.s64 	%rd29, %rd1, %rd15;
-	bra.uni 	$L__BB5_4;
+	bra.uni 	$L__BB6_4;
 
-$L__BB5_3:
+$L__BB6_3:
 	cvt.u32.u64 	%r7, %rd2;
 	cvt.u32.u64 	%r8, %rd1;
 	div.u32 	%r9, %r8, %r7;
@@ -585,7 +661,7 @@ $L__BB5_3:
 	cvt.u64.u32 	%rd28, %r9;
 	cvt.u64.u32 	%rd29, %r11;
 
-$L__BB5_4:
+$L__BB6_4:
 	and.b64  	%rd16, %rd28, 4294967295;
 	mul.lo.s64 	%rd17, %rd16, %rd2;
 	shl.b64 	%rd18, %rd17, 1;
@@ -606,7 +682,7 @@ $L__BB5_4:
 
 	// end inline asm
 	setp.eq.s32 	%p3, %r1, 0;
-	@%p3 bra 	$L__BB5_6;
+	@%p3 bra 	$L__BB6_6;
 
 	mul.f32 	%f8, %f6, 0f3D372713;
 	mul.f32 	%f9, %f6, %f8;
@@ -622,9 +698,9 @@ $L__BB5_4:
 	add.f32 	%f19, %f18, 0f3F800000;
 	mul.f32 	%f20, %f6, 0f3F000000;
 	mul.f32 	%f27, %f20, %f19;
-	bra.uni 	$L__BB5_7;
+	bra.uni 	$L__BB6_7;
 
-$L__BB5_6:
+$L__BB6_6:
 	mul.f32 	%f21, %f6, 0fBFB8AA3B;
 	ex2.approx.f32 	%f22, %f21;
 	add.f32 	%f23, %f22, 0f3F800000;
@@ -632,7 +708,7 @@ $L__BB5_6:
 	div.approx.f32 	%f25, %f24, %f23;
 	mul.f32 	%f27, %f6, %f25;
 
-$L__BB5_7:
+$L__BB6_7:
 	mul.f32 	%f26, %f7, %f27;
 	// begin inline asm
 	{  cvt.rn.bf16.f32 %rs3, %f26;}
@@ -643,7 +719,7 @@ $L__BB5_7:
 	add.s64 	%rd27, %rd25, %rd26;
 	st.global.u16 	[%rd27], %rs3;
 
-$L__BB5_8:
+$L__BB6_8:
 	ret;
 
 }

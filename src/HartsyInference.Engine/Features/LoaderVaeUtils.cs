@@ -96,16 +96,18 @@ public static class LoaderVaeUtils
     }
 
     /// <summary>Loads a FLUX.1-family VAE file and returns diffusers-keyed F32 weights; keys already in diffusers naming
-    /// pass through (ConvertVaeKey is identity-tolerant) and unknown keys are dropped. The returned loader owns the
-    /// tensor memory — keep it alive as long as the weights are used.</summary>
+    /// pass through (ConvertVaeKey is identity-tolerant) and unknown keys are dropped. F32 tensors borrow their
+    /// mapped storage from the returned loader; upcast tensors are caller-owned. Keep the loader alive while any
+    /// borrowed tensor is used and dispose the distinct upcast tensors when their model owner is released.</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadFluxVaeF32(string filePath)
     {
         ArgumentException.ThrowIfNullOrEmpty(filePath);
         SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(filePath);
+        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>();
+        List<Tensor> ownedCasts = [];
         try
         {
-            Dictionary<string, Tensor> result = new Dictionary<string, Tensor>();
+            loader.Load(filePath);
             foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
             {
                 string? diffusersKey = CheckpointConvertUtils.ConvertVaeKey(kvp.Key);
@@ -114,13 +116,20 @@ public static class LoaderVaeUtils
                     continue;
                 }
                 DType dt = kvp.Value.DType;
-                result[diffusersKey] = (dt == DType.F16 || dt == DType.BF16) ? kvp.Value.CastTo(DType.F32) : kvp.Value;
+                Tensor staged = (dt == DType.F16 || dt == DType.BF16) ? kvp.Value.CastTo(DType.F32) : kvp.Value;
+                if (!ReferenceEquals(staged, kvp.Value))
+                    ownedCasts.Add(staged);
+                if (result.TryGetValue(diffusersKey, out Tensor? replaced) && ownedCasts.Remove(replaced))
+                    replaced.Dispose();
+                result[diffusersKey] = staged;
             }
             return (result, loader);
         }
         catch (Exception ex)
         {
             HartsyInference.Core.Logging.Logs.Error($"[Features][VAE] Failed to stage Flux VAE weights from '{filePath}'.", ex);
+            foreach (Tensor tensor in ownedCasts)
+                tensor.Dispose();
             loader.Dispose();
             throw;
         }

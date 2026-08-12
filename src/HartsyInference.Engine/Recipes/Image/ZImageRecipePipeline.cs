@@ -1,7 +1,10 @@
 using System.Globalization;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
@@ -17,28 +20,58 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <summary>A constructed Z-Image pipeline driven against the native <see cref="ImageRequest"/>. Owns the Qwen3-4B encoder + tokenizer (the text-encoder forward lives outside <see cref="ZImagePipeline"/>): it encodes the prompt (and, for CFG, the negative) into caption embeddings, then runs <see cref="ZImagePipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>ZImageLoader.Generate</c> drive path. Z-Image's non-standard CFG combine and mandatory velocity negation are encoded inside the pipeline; this just calls it with the right cfg + embeddings.</summary>
 public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
 {
-    /// <summary>Qwen3 right-pads EncodeChat output with BosTokenId (151643); the real length ends at the first such pad.</summary>
-    private const int Qwen3PadTokenId = 151643;
-
     private readonly ZImagePipeline _pipeline;
     private readonly LlamaStyleEncoder _qwen;
     private readonly Qwen3Tokenizer _tokenizer;
+    private readonly ZImageTransformer _transformer;
+    private readonly VaeDecoder _vae;
+    private readonly VaeEncoder _vaeEncoder;
+    private readonly Tensor[] _transformerWeightTensors;
+    private readonly Tensor[] _qwenWeightTensors;
+    private readonly Tensor[] _ownedVaeWeights;
     private readonly IBackend _backend;
+    private readonly IBackend _textBackend;
+    private readonly ImageDefaults _variantDefaults;
     private readonly SafeTensorsLoader _checkpointLoader;
     private readonly SafeTensorsLoader _qwenLoader;
     private readonly SafeTensorsLoader _vaeLoader;
+    private int _disposed;
+
+    // Last-used prompt embeddings. They are host-materialized before the Qwen phase is reclaimed and retain the
+    // same object identity across cache hits, which also keeps ZImageTransformer's reference-keyed refined-caption
+    // cache warm. The exact unpadded token sequence is the cache key, including any legitimate end-of-text ID.
+    private int[]? _cachedPositiveKey;
+    private Tensor? _cachedPositive;
+    private int[]? _cachedNegativeKey;
+    private Tensor? _cachedNegative;
 
     /// <summary>Wraps the constructed Z-Image pipeline plus its text stack, taking ownership of every disposable.</summary>
-    public ZImageRecipePipeline(ZImagePipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, IBackend backend, SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, SafeTensorsLoader vaeLoader)
+    public ZImageRecipePipeline(ZImagePipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer,
+        ZImageTransformer transformer, VaeDecoder vae, VaeEncoder vaeEncoder,
+        Tensor[] transformerWeightTensors, Tensor[] qwenWeightTensors, Tensor[] ownedVaeWeights,
+        IBackend backend, IBackend textBackend,
+        ImageDefaults variantDefaults,
+        SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, SafeTensorsLoader vaeLoader)
     {
         _pipeline = pipeline;
         _qwen = qwen;
         _tokenizer = tokenizer;
+        _transformer = transformer;
+        _vae = vae;
+        _vaeEncoder = vaeEncoder;
+        _transformerWeightTensors = transformerWeightTensors;
+        _qwenWeightTensors = qwenWeightTensors;
+        _ownedVaeWeights = ownedVaeWeights;
         _backend = backend;
+        _textBackend = textBackend;
+        _variantDefaults = variantDefaults;
         _checkpointLoader = checkpointLoader;
         _qwenLoader = qwenLoader;
         _vaeLoader = vaeLoader;
     }
+
+    /// <inheritdoc/>
+    public ImageDefaults? VariantDefaults => _variantDefaults;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
@@ -46,50 +79,13 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? ZImageRecipe.FamilyDefaults.Steps;
+        int steps = request.Steps ?? _variantDefaults.Steps;
         // Z-Image CFG: <=0 (or 1) means Turbo (no CFG, single forward). >1 is Base and requires a negative encode.
-        float cfg = request.CfgScale ?? ZImageRecipe.FamilyDefaults.CfgScale;
+        float cfg = request.CfgScale ?? _variantDefaults.CfgScale;
         bool needNegative = cfg > 1.0f;
         int penultimateIdx = _qwen.NumLayers - 1;
 
-        // Bulk-upload the Qwen3 weights, encode, then free them — their ~8 GB is the headroom the VAE full-res decode needs.
-        _backend.PreloadWeights(_qwen.EnumerateWeights());
-
-        int[] tokenIds = _tokenizer.EncodeChat(prompt);
-        int realLen = ComputeRealLength(tokenIds);
-        Tensor encodedFull = _qwen.EncodeMultiLayer(_backend, new[] { tokenIds }, new[] { penultimateIdx });
-        Tensor positiveEmbeddings = SliceFirstSeqF32(encodedFull, realLen);
-        encodedFull.Dispose();
-
-        Tensor? negativeEmbeddings = null;
-        if (needNegative)
-        {
-            // Encode even an empty negative — the reference passes "" through the encoder, yielding the short but
-            // valid unconditional embedding CFG needs.
-            int[] negTokens = _tokenizer.EncodeChat(negative);
-            int negRealLen = ComputeRealLength(negTokens);
-            Tensor negEncodedFull = _qwen.EncodeMultiLayer(_backend, new[] { negTokens }, new[] { penultimateIdx });
-            negativeEmbeddings = SliceFirstSeqF32(negEncodedFull, negRealLen);
-            negEncodedFull.Dispose();
-        }
-
-        // Regional/object prompt parts, encoded via the SAME Qwen3 encoder + penultimate layer as the base
-        // prompt above — must happen before FreeWeights below, while the encoder is still resident.
-        (int reqW, int reqH) = RecipeRequestMapper.Size(request);
-        RegionalPlan? regionalPlan = RegionalPromptResolver.HasRegionParts(prompt)
-            ? RegionalPromptResolver.Resolve(prompt, positiveEmbeddings, reqW, reqH, steps, encodeRegion: text =>
-            {
-                int[] regionTokens = _tokenizer.EncodeChat(text);
-                int regionRealLen = ComputeRealLength(regionTokens);
-                Tensor regionEncodedFull = _qwen.EncodeMultiLayer(_backend, new[] { regionTokens }, new[] { penultimateIdx });
-                Tensor regionEmbeddings = SliceFirstSeqF32(regionEncodedFull, regionRealLen);
-                regionEncodedFull.Dispose();
-                return regionEmbeddings;
-            })
-            : null;
-
-        _backend.FreeWeights(_qwen.EnumerateWeights());
-
+        // Validate/map every request-level input before a cache miss can evict the resident DiT and run Qwen.
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
@@ -104,8 +100,30 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
             },
             img2img);
 
+        // Upstream Z-Image requests enable_thinking=true. Qwen's template then stops at the assistant prefix;
+        // includeThinkBlock is deliberately inverse-named because the empty block is emitted only when thinking
+        // is disabled.
+        (int[] paddedTokenIds, int tokenCount) =
+            _tokenizer.EncodeChatWithLength(prompt, includeThinkBlock: false);
+        int[] tokenIds = paddedTokenIds[..tokenCount];
+        int[]? negTokens = null;
+        if (needNegative)
+        {
+            // Encode even an empty negative — the reference passes "" through the encoder, yielding the short but
+            // valid unconditional embedding CFG needs.
+            (int[] paddedNegativeIds, int negativeCount) =
+                _tokenizer.EncodeChatWithLength(negative, includeThinkBlock: false);
+            negTokens = paddedNegativeIds[..negativeCount];
+        }
+
+        RegionalPlan? regionalPlan = null;
         try
         {
+            regionalPlan = EnsurePromptCache(
+                tokenIds, negTokens, needNegative, penultimateIdx, prompt, reqWidth, reqHeight, steps);
+            Tensor positiveEmbeddings = _cachedPositive!;
+            Tensor? negativeEmbeddings = needNegative ? _cachedNegative : null;
+
             Action<GenerationProgress> bridge = p =>
             {
                 cancel.ThrowIfCancellationRequested();
@@ -139,64 +157,219 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         finally
         {
             RegionalPromptResolver.DisposeRegions(regionalPlan);
-            positiveEmbeddings.Dispose();
-            negativeEmbeddings?.Dispose();
         }
     }
 
-    /// <summary>The real token count: Qwen3's EncodeChat right-pads with <see cref="Qwen3PadTokenId"/>, so the length is the index of the first pad token (or the full array when there is none).</summary>
-    private static int ComputeRealLength(int[] tokenIds)
+    private RegionalPlan? EnsurePromptCache(
+        int[] positiveTokens,
+        int[]? negativeTokens,
+        bool needNegative,
+        int layerIndex,
+        string rawPrompt,
+        int width,
+        int height,
+        int steps)
     {
-        for (int i = 0; i < tokenIds.Length; i++)
+        bool needRegions = RegionalPromptResolver.HasRegionParts(rawPrompt);
+        bool positiveHit = _cachedPositive is not null && _cachedPositiveKey is not null
+            && _cachedPositiveKey.AsSpan().SequenceEqual(positiveTokens);
+        bool negativeHit = !needNegative || (_cachedNegative is not null && _cachedNegativeKey is not null
+            && _cachedNegativeKey.AsSpan().SequenceEqual(negativeTokens!));
+        if (positiveHit && negativeHit && !needRegions)
         {
-            if (tokenIds[i] == Qwen3PadTokenId)
+            Logs.Info("[Z-Image] prompt-embedding cache hit — Qwen phase skipped");
+            return null;
+        }
+
+        // On a dedicated TE device, Qwen does not contend with the primary DiT. On the common same-device path,
+        // evict only Z-Image's promoted weights and SDPA workspaces before asking the card for the 8 GB encoder.
+        if (ReferenceEquals(_textBackend, _backend))
+            _pipeline.EvictResidentWeights();
+        // On the primary card the DiT eviction above leaves enough room for the 8.0 GB Qwen checkpoint plus the
+        // 335 MB decoder (verified on the 12 GB production floor), so retain that warm decoder. A shared secondary
+        // TE/VAE card has no corresponding DiT eviction and must reclaim the prior VAE phase before Qwen preload.
+        if (!ReferenceEquals(_textBackend, _backend)
+            && ReferenceEquals(_textBackend, _pipeline.VaeBackend))
+            _pipeline.EvictVaeDeviceState();
+
+        Tensor? newPositive = null;
+        Tensor? newNegative = null;
+        int[]? newPositiveKey = null;
+        int[]? newNegativeKey = null;
+        RegionalPlan? regionalPlan = null;
+        List<Tensor>? regionalCandidates = needRegions ? [] : null;
+        Exception? phaseError = null;
+        try
+        {
+            try
             {
-                return i;
+                _textBackend.PreloadWeights(_qwen.EnumerateWeights());
+                if (!positiveHit)
+                {
+                    newPositive = EncodePrompt(positiveTokens, layerIndex);
+                    _ = newPositive.DataPointer;
+                    newPositiveKey = (int[])positiveTokens.Clone();
+                }
+                if (needNegative && !negativeHit)
+                {
+                    newNegative = EncodePrompt(negativeTokens!, layerIndex);
+                    _ = newNegative.DataPointer;
+                    newNegativeKey = (int[])negativeTokens!.Clone();
+                }
+                if (needRegions)
+                {
+                    // Region captions share the exact tokenizer/template, tapped Qwen layer, placement backend,
+                    // and weight-residency phase used by the cached global captions.
+                    Tensor baseConditioning = newPositive ?? _cachedPositive!;
+                    regionalPlan = RegionalPromptResolver.Resolve(
+                        rawPrompt, baseConditioning, width, height, steps, encodeRegion: text =>
+                        {
+                            (int[] paddedRegionIds, int regionCount) =
+                                _tokenizer.EncodeChatWithLength(text, includeThinkBlock: false);
+                            Tensor region = EncodePrompt(paddedRegionIds[..regionCount], layerIndex);
+                            regionalCandidates!.Add(region);
+                            _ = region.DataPointer;
+                            return region;
+                        });
+                }
+            }
+            catch (Exception ex)
+            {
+                phaseError = ex;
+                throw;
+            }
+            finally
+            {
+                Exception? cleanupError = CleanupTextEncoderPhase();
+                if (cleanupError is not null)
+                {
+                    if (phaseError is null)
+                    {
+                        throw new InvalidOperationException(
+                            "Z-Image text encoding completed, but its device phase could not be reclaimed.", cleanupError);
+                    }
+                    Logs.Warning($"[Z-Image] Text-encoder cleanup also failed while propagating " +
+                        $"'{phaseError.Message}': {cleanupError.Message}");
+                }
+            }
+
+            // Transactional cache replacement: neither prior slot is touched until every required encode and the
+            // phase cleanup have succeeded. A failed negative encode therefore cannot destroy a valid positive hit.
+            if (newPositive is not null)
+            {
+                _cachedPositive?.Dispose();
+                _cachedPositive = newPositive;
+                _cachedPositiveKey = newPositiveKey;
+                newPositive = null;
+            }
+            if (newNegative is not null)
+            {
+                _cachedNegative?.Dispose();
+                _cachedNegative = newNegative;
+                _cachedNegativeKey = newNegativeKey;
+                newNegative = null;
+            }
+            return regionalPlan;
+        }
+        catch
+        {
+            if (regionalPlan is not null)
+            {
+                RegionalPromptResolver.DisposeRegions(regionalPlan);
+            }
+            else if (regionalCandidates is not null)
+            {
+                // Resolve can fail after one or more callback results were produced but before returning a plan.
+                foreach (Tensor candidate in regionalCandidates)
+                    candidate.Dispose();
+            }
+            newPositive?.Dispose();
+            newNegative?.Dispose();
+            throw;
+        }
+    }
+
+    private Tensor EncodePrompt(int[] tokenIds, int layerIndex)
+    {
+        if (tokenIds.Length <= 0)
+            throw new InvalidOperationException("Z-Image's chat template produced no real prompt tokens.");
+
+        // With batch one and causal attention, right-padding cannot affect any real-token hidden state. Avoid
+        // running Qwen over hundreds of future pad positions, and return the already correctly sized output rather
+        // than forcing a device-to-host slice after the encoder.
+        return _qwen.EncodeMultiLayer(_textBackend, new[] { tokenIds }, new[] { layerIndex });
+    }
+
+    private Exception? CleanupTextEncoderPhase()
+    {
+        Exception? first = null;
+        Try(() => _textBackend.Sync());
+        // Qwen's fused-attention plans can retain several GB of per-shape workspace after its weights are gone.
+        // Conditioning is cached on the host, so keeping those plans buys nothing on a repeat prompt and can starve
+        // the following DiT/VAE phase (including when TE and VAE share a non-primary placement device).
+        Try(() => _textBackend.ReleaseAttentionExecutionCache());
+        Try(() => _textBackend.FreeWeights(_qwen.EnumerateWeights()));
+        Try(() => _textBackend.FreeActivations(trimPool: true));
+        return first;
+
+        void Try(Action cleanup)
+        {
+            try
+            {
+                cleanup();
+            }
+            catch (Exception ex)
+            {
+                first ??= ex;
             }
         }
-        return tokenIds.Length;
-    }
-
-    /// <summary>Slices a [batch, fullLen, hidden] F32 tensor down to [batch, realLen, hidden], copying the leading real tokens of each batch row (drops the Qwen3 right-padding before the transformer sees the caption embeddings).</summary>
-    private static Tensor SliceFirstSeqF32(Tensor source, int realLen)
-    {
-        if (source.Shape.Rank != 3)
-        {
-            throw new ArgumentException($"Expected 3D tensor, got rank {source.Shape.Rank}.");
-        }
-        if (source.DType != DType.F32)
-        {
-            throw new ArgumentException($"SliceFirstSeqF32 expects F32, got {source.DType}.");
-        }
-        long batch = source.Shape[0];
-        long fullLen = source.Shape[1];
-        long hidden = source.Shape[2];
-        if (realLen <= 0 || realLen > fullLen)
-        {
-            throw new ArgumentOutOfRangeException(nameof(realLen), $"realLen {realLen} out of range [1..{fullLen}].");
-        }
-        TensorShape outShape = new TensorShape(batch, realLen, hidden);
-        Tensor result = new Tensor(outShape, source.DType);
-        long elemSize = source.DType.SizeInBytes;
-        long fullRowBytes = fullLen * hidden * elemSize;
-        long sliceRowBytes = realLen * hidden * elemSize;
-        byte* src = (byte*)source.DataPointer;
-        byte* dst = (byte*)result.DataPointer;
-        for (long b = 0; b < batch; b++)
-        {
-            Buffer.MemoryCopy(src + b * fullRowBytes, dst + b * sliceRowBytes, sliceRowBytes, sliceRowBytes);
-        }
-        return result;
     }
 
     /// <inheritdoc/>
     public void Dispose()
     {
-        _pipeline.Dispose();
-        _qwen.Dispose();
-        _tokenizer.Dispose();
-        _checkpointLoader.Dispose();
-        _qwenLoader.Dispose();
-        _vaeLoader.Dispose();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
+        void TryDispose(string resource, Action cleanup)
+        {
+            try
+            {
+                cleanup();
+            }
+            catch (Exception ex)
+            {
+                Logs.Warning($"[Z-Image] Failed to release {resource} during disposal: {ex.Message}");
+            }
+        }
+
+        if (_cachedPositive is not null)
+            TryDispose("cached positive embedding", _cachedPositive.Dispose);
+        _cachedPositive = null;
+        _cachedPositiveKey = null;
+        if (_cachedNegative is not null)
+            TryDispose("cached negative embedding", _cachedNegative.Dispose);
+        _cachedNegative = null;
+        _cachedNegativeKey = null;
+
+        // The diffusion pipeline releases its DiT/VAE device state but deliberately does not own the injected
+        // component objects. This wrapper is their recipe-level owner and tears them down before the mmap loaders.
+        TryDispose("pipeline state", _pipeline.Dispose);
+        TryDispose("text-encoder device weights", () => _textBackend.FreeWeights(_qwen.EnumerateWeights()));
+        TryDispose("transformer device weights", () => _backend.FreeWeights(_transformer.EnumerateWeights()));
+        TryDispose("VAE-decoder device weights", () => _pipeline.VaeBackend.FreeWeights(_vae.EnumerateWeights()));
+        TryDispose("VAE-encoder device weights", () => _pipeline.VaeBackend.FreeWeights(_vaeEncoder.EnumerateWeights()));
+        TryDispose("text encoder", _qwen.Dispose);
+        TryDispose("transformer", _transformer.Dispose);
+        TryDispose("tokenizer", _tokenizer.Dispose);
+        foreach (Tensor weight in _qwenWeightTensors)
+            TryDispose("text-encoder host weight", weight.Dispose);
+        foreach (Tensor weight in _transformerWeightTensors)
+            TryDispose("transformer host weight", weight.Dispose);
+        foreach (Tensor weight in _ownedVaeWeights)
+            TryDispose("VAE host weight", weight.Dispose);
+        TryDispose("checkpoint loader", _checkpointLoader.Dispose);
+        TryDispose("text-encoder loader", _qwenLoader.Dispose);
+        TryDispose("VAE loader", _vaeLoader.Dispose);
     }
 }

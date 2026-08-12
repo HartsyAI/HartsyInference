@@ -104,19 +104,21 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
             float t = tsteps[k];
             float dt = t - tsteps[k + 1];
 
-            Tensor vCond = _transformer.Forward(Backend, cond.TextTokenIds, latents, latentPosIds, t,
-                cond.PositionIds, cond.UndIdx, cond.GenIdx, cond.AttentionMask);
-            // Upstream cfg_interval=[0.4,1]: late low-noise steps run cond-only (skips the uncond forward entirely).
-            if (cfg > 1f && t > _config.CfgIntervalMin)
             {
-                Tensor vUncond = _transformer.Forward(Backend, uncond.TextTokenIds, latents, latentPosIds, t,
-                    uncond.PositionIds, uncond.UndIdx, uncond.GenIdx, uncond.AttentionMask);
-                LancePipelineCommon.CfgRenormGlobalInPlace(vCond, vUncond, cfg, _config.CfgRenormMin);
-                vUncond.Dispose();
+                using Tensor vCond = _transformer.Forward(Backend, cond.TextTokenIds, latents, latentPosIds, t,
+                    cond.PositionIds, cond.UndIdx, cond.GenIdx, cond.AttentionMask);
+                // Upstream cfg_interval=[0.4,1]: late low-noise steps run cond-only (skips the uncond forward entirely).
+                if (cfg > 1f && t > _config.CfgIntervalMin)
+                {
+                    using Tensor vUncond = _transformer.Forward(Backend, uncond.TextTokenIds, latents, latentPosIds, t,
+                        uncond.PositionIds, uncond.UndIdx, uncond.GenIdx, uncond.AttentionMask);
+                    Backend.CfgRenormEulerStep(latents, vCond, vUncond, cfg, -dt, _config.CfgRenormMin);
+                }
+                else
+                {
+                    Backend.CfgEulerStep(latents, vCond, vCond, 1f, -dt);
+                }
             }
-            LancePipelineCommon.EulerStep(latents, vCond, dt);
-            vCond.Dispose();
-
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }

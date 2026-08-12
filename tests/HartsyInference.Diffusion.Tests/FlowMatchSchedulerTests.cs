@@ -107,6 +107,32 @@ public sealed class FlowMatchSchedulerTests
         Assert.InRange(lastTs, 99.0f, 101.0f);
     }
 
+    [Fact]
+    public void SetTimesteps_Shift6_MatchesLuminaStaticScheduleAndInversion()
+    {
+        // Alpha-VLLM/Lumina-Image-2.0: shift=6.0, use_dynamic_shifting=false.
+        // Four inference steps evaluate the raw linear schedule at t=[1,.75,.5,.25,0].
+        float[] expectedSigmas = [1.0f, 0.9473684f, 0.8571429f, 0.6666667f, 0.0f];
+        FlowMatchEulerDiscreteScheduler scheduler = new(shift: 6.0f);
+        scheduler.SetTimesteps(4);
+
+        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+        Assert.Equal(4, timesteps.Length);
+        for (int i = 0; i < timesteps.Length; i++)
+        {
+            float sigma = timesteps[i] / 1000.0f;
+            Assert.InRange(sigma, expectedSigmas[i] - 1e-6f, expectedSigmas[i] + 1e-6f);
+            Assert.InRange(
+                scheduler.Dt(i),
+                expectedSigmas[i + 1] - expectedSigmas[i] - 1e-6f,
+                expectedSigmas[i + 1] - expectedSigmas[i] + 1e-6f);
+
+            // Lumina feeds 1-sigma into the transformer; lock that inversion to the same reference vector.
+            float expectedInverted = 1.0f - expectedSigmas[i];
+            Assert.InRange(1.0f - sigma, expectedInverted - 1e-6f, expectedInverted + 1e-6f);
+        }
+    }
+
     // ── Euler Step Tests ──────────────────────────────────────────────────
 
     [Fact]

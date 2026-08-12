@@ -46,6 +46,8 @@ public sealed unsafe class SageSdpaMicroBench
     public void SageInt8_Vs_CudnnF16(int b, int h, int s, int d)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        CudnnRuntime.EnsureProbed();
+        if (!CudnnRuntime.SupportsSdpa) { _output.WriteLine($"SKIPPED: {CudnnRuntime.Reason}"); return; }
         if (!File.Exists(Path.Combine(PtxDir(), "sage_attn_int8_v1.ptx"))) { _output.WriteLine("SKIPPED: no sage ptx"); return; }
 
         float scale = 1.0f / MathF.Sqrt(d);
@@ -60,7 +62,12 @@ public sealed unsafe class SageSdpaMicroBench
 
         double[] Run(Tensor outT, bool sage)
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", sage ? "1" : null);
+            string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
+            string? previousUnsafeNarrow = Environment.GetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", sage ? "1" : "0");
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", sage ? "1" : "0");
+            long sageBefore = cuda.SageAttentionExecutionCount;
+            long cudnnBefore = cuda.CudnnSdpaExecutionCount;
             try
             {
                 cuda.ScaledDotProductAttention(outT, q, k, v, null, scale, allowF16: true);
@@ -75,11 +82,14 @@ public sealed unsafe class SageSdpaMicroBench
                     sw.Stop();
                     times[t] = sw.Elapsed.TotalMilliseconds;
                 }
+                Assert.Equal(sage ? Trials + 1L : 0L, cuda.SageAttentionExecutionCount - sageBefore);
+                Assert.Equal(sage ? 0L : Trials + 1L, cuda.CudnnSdpaExecutionCount - cudnnBefore);
                 return times;
             }
             finally
             {
-                Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
+                Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
+                Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", previousUnsafeNarrow);
             }
         }
 
@@ -101,6 +111,8 @@ public sealed unsafe class SageSdpaMicroBench
     public void SageF16Ingest_Vs_CudnnF16Native(int b, int h, int s, int d)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        CudnnRuntime.EnsureProbed();
+        if (!CudnnRuntime.SupportsSdpa) { _output.WriteLine($"SKIPPED: {CudnnRuntime.Reason}"); return; }
         if (!File.Exists(Path.Combine(PtxDir(), "sage_attn_int8_v1.ptx"))) { _output.WriteLine("SKIPPED: no sage ptx"); return; }
 
         float scale = 1.0f / MathF.Sqrt(d);
@@ -124,8 +136,12 @@ public sealed unsafe class SageSdpaMicroBench
 
         double[] Run(Tensor outT, bool sage)
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", sage ? "1" : null);
+            string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
+            string? previousMinSkv = Environment.GetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV");
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", sage ? "1" : "0");
             Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", sage ? "1" : null);
+            long sageBefore = cuda.SageAttentionExecutionCount;
+            long cudnnBefore = cuda.CudnnSdpaExecutionCount;
             try
             {
                 cuda.ScaledDotProductAttention(outT, q, k, v, null, scale);
@@ -140,12 +156,14 @@ public sealed unsafe class SageSdpaMicroBench
                     sw.Stop();
                     times[t] = sw.Elapsed.TotalMilliseconds;
                 }
+                Assert.Equal(sage ? Trials + 1L : 0L, cuda.SageAttentionExecutionCount - sageBefore);
+                Assert.Equal(sage ? 0L : Trials + 1L, cuda.CudnnSdpaExecutionCount - cudnnBefore);
                 return times;
             }
             finally
             {
-                Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
-                Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", null);
+                Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
+                Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", previousMinSkv);
             }
         }
 
@@ -177,7 +195,11 @@ public sealed unsafe class SageSdpaMicroBench
 
         double[] Run(Tensor outT, bool sage)
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", sage ? "1" : null);
+            string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
+            string? previousUnsafeNarrow = Environment.GetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", sage ? "1" : "0");
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", sage ? "1" : "0");
+            long sageBefore = cuda.SageAttentionExecutionCount;
             try
             {
                 cuda.ScaledDotProductAttention(outT, q, k, v, null, scale);   // warmup (JIT, pools)
@@ -192,11 +214,13 @@ public sealed unsafe class SageSdpaMicroBench
                     sw.Stop();
                     times[t] = sw.Elapsed.TotalMilliseconds;
                 }
+                Assert.Equal(sage ? Trials + 1L : 0L, cuda.SageAttentionExecutionCount - sageBefore);
                 return times;
             }
             finally
             {
-                Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
+                Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
+                Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", previousUnsafeNarrow);
             }
         }
 

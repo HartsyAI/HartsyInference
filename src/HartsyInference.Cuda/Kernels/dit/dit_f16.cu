@@ -417,27 +417,65 @@ __global__ void dit_qkv_split_norm_f16(
     unsigned int tokens, unsigned int heads, unsigned int headDim, float eps)
 {
     extern __shared__ float sred[];
+    float* qred = sred;
+    float* kred = sred + blockDim.x;
     unsigned long long g = (unsigned long long)blockIdx.x;
     if (g >= (unsigned long long)tokens * heads) return;
     unsigned int h = (unsigned int)(g % heads);
     unsigned long long token = g / heads;
-    unsigned int W = heads * headDim, d = threadIdx.x;
+    unsigned int W = heads * headDim;
+    unsigned int d = threadIdx.x;
     const __half* base = qkv + token * 3ULL * W;
     unsigned long long outOff = token * W + (unsigned long long)h * headDim;
 
-    float qv = __half2float(base[(unsigned long long)h * headDim + d]);
-    sred[d] = qv * qv; __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (d < s) sred[d] += sred[d + s]; __syncthreads(); }
-    float qInv = rsqrtf(sred[0] / (float)headDim + eps); __syncthreads();
+    float qv = 0.0f;
+    float kv = 0.0f;
+    if (d < headDim)
+    {
+        qv = __half2float(base[(unsigned long long)h * headDim + d]);
+        kv = __half2float(base[W + (unsigned long long)h * headDim + d]);
+    }
+    float qsum = qv * qv;
+    float ksum = kv * kv;
+    for (unsigned int i = d + blockDim.x; i < headDim; i += blockDim.x)
+    {
+        float qi = __half2float(base[(unsigned long long)h * headDim + i]);
+        float ki = __half2float(base[W + (unsigned long long)h * headDim + i]);
+        qsum += qi * qi;
+        ksum += ki * ki;
+    }
+    qred[d] = qsum;
+    kred[d] = ksum;
+    __syncthreads();
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1)
+    {
+        if (d < stride)
+        {
+            qred[d] += qred[d + stride];
+            kred[d] += kred[d + stride];
+        }
+        __syncthreads();
+    }
+    if (d == 0)
+    {
+        float invDim = 1.0f / (float)headDim;
+        qred[0] = rsqrtf(qred[0] * invDim + eps);
+        kred[0] = rsqrtf(kred[0] * invDim + eps);
+    }
+    __syncthreads();
 
-    float kv = __half2float(base[W + (unsigned long long)h * headDim + d]);
-    sred[d] = kv * kv; __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (d < s) sred[d] += sred[d + s]; __syncthreads(); }
-    float kInv = rsqrtf(sred[0] / (float)headDim + eps);
-
-    q[outOff + d] = __float2half(qv * qInv * qW[d]);
-    k[outOff + d] = __float2half(kv * kInv * kW[d]);
-    v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+    if (d < headDim)
+    {
+        q[outOff + d] = __float2half(qv * qred[0] * qW[d]);
+        k[outOff + d] = __float2half(kv * kred[0] * kW[d]);
+        v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+    }
+    for (unsigned int i = d + blockDim.x; i < headDim; i += blockDim.x)
+    {
+        q[outOff + i] = __float2half(__half2float(base[(unsigned long long)h * headDim + i]) * qred[0] * qW[i]);
+        k[outOff + i] = __float2half(__half2float(base[W + (unsigned long long)h * headDim + i]) * kred[0] * kW[i]);
+        v[outOff + i] = base[2u * W + (unsigned long long)h * headDim + i];
+    }
 }
 
 // Head-major twin (F16 activation I/O, F32 weights + accumulate). See dit_qkv_split_norm_head_major_f32.
@@ -447,28 +485,66 @@ __global__ void dit_qkv_split_norm_head_major_f16(
     unsigned int tokens, unsigned int heads, unsigned int headDim, unsigned int seq, float eps)
 {
     extern __shared__ float sred[];
+    float* qred = sred;
+    float* kred = sred + blockDim.x;
     unsigned long long g = (unsigned long long)blockIdx.x;
     if (g >= (unsigned long long)tokens * heads) return;
     unsigned int h = (unsigned int)(g % heads);
     unsigned long long token = g / heads;
-    unsigned int W = heads * headDim, d = threadIdx.x;
+    unsigned int W = heads * headDim;
+    unsigned int d = threadIdx.x;
     const __half* base = qkv + token * 3ULL * W;
     unsigned long long b = token / seq, s = token % seq;
     unsigned long long outOff = ((b * heads + h) * seq + s) * headDim;
 
-    float qv = __half2float(base[(unsigned long long)h * headDim + d]);
-    sred[d] = qv * qv; __syncthreads();
-    for (unsigned int t = blockDim.x >> 1; t > 0; t >>= 1) { if (d < t) sred[d] += sred[d + t]; __syncthreads(); }
-    float qInv = rsqrtf(sred[0] / (float)headDim + eps); __syncthreads();
+    float qv = 0.0f;
+    float kv = 0.0f;
+    if (d < headDim)
+    {
+        qv = __half2float(base[(unsigned long long)h * headDim + d]);
+        kv = __half2float(base[W + (unsigned long long)h * headDim + d]);
+    }
+    float qsum = qv * qv;
+    float ksum = kv * kv;
+    for (unsigned int i = d + blockDim.x; i < headDim; i += blockDim.x)
+    {
+        float qi = __half2float(base[(unsigned long long)h * headDim + i]);
+        float ki = __half2float(base[W + (unsigned long long)h * headDim + i]);
+        qsum += qi * qi;
+        ksum += ki * ki;
+    }
+    qred[d] = qsum;
+    kred[d] = ksum;
+    __syncthreads();
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1)
+    {
+        if (d < stride)
+        {
+            qred[d] += qred[d + stride];
+            kred[d] += kred[d + stride];
+        }
+        __syncthreads();
+    }
+    if (d == 0)
+    {
+        float invDim = 1.0f / (float)headDim;
+        qred[0] = rsqrtf(qred[0] * invDim + eps);
+        kred[0] = rsqrtf(kred[0] * invDim + eps);
+    }
+    __syncthreads();
 
-    float kv = __half2float(base[W + (unsigned long long)h * headDim + d]);
-    sred[d] = kv * kv; __syncthreads();
-    for (unsigned int t = blockDim.x >> 1; t > 0; t >>= 1) { if (d < t) sred[d] += sred[d + t]; __syncthreads(); }
-    float kInv = rsqrtf(sred[0] / (float)headDim + eps);
-
-    q[outOff + d] = __float2half(qv * qInv * qW[d]);
-    k[outOff + d] = __float2half(kv * kInv * kW[d]);
-    v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+    if (d < headDim)
+    {
+        q[outOff + d] = __float2half(qv * qred[0] * qW[d]);
+        k[outOff + d] = __float2half(kv * kred[0] * kW[d]);
+        v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+    }
+    for (unsigned int i = d + blockDim.x; i < headDim; i += blockDim.x)
+    {
+        q[outOff + i] = __float2half(__half2float(base[(unsigned long long)h * headDim + i]) * qred[0] * qW[i]);
+        k[outOff + i] = __float2half(__half2float(base[W + (unsigned long long)h * headDim + i]) * kred[0] * kW[i]);
+        v[outOff + i] = base[2u * W + (unsigned long long)h * headDim + i];
+    }
 }
 
 // ── Gated-FFN activation epilogue (F16 I/O, F32 compute) ───────────────────

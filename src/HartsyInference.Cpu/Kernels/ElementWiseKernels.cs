@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cpu.Kernels;
@@ -226,61 +227,54 @@ public static class ElementWiseKernels
         }
     }
 
-    /// <summary>Splits a tensor into multiple output tensors along the specified dimension. Currently optimized for dim 0 (batch splitting) using block memory copies.</summary>
+    /// <summary>Splits a tensor into multiple output tensors along the specified dimension, preserving payload bits.</summary>
     public static unsafe void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim)
     {
+        SplitGeometry geometry = SplitContract.Validate(outputs, input, dim);
+        byte* pIn = (byte*)input.DataPointer;
+
         if (dim == 0)
         {
-            float* pIn = (float*)input.DataPointer;
-            long offset = 0;
+            long byteOffset = 0;
 
             for (int t = 0; t < outputs.Length; t++)
             {
-                float* pOut = (float*)outputs[t].DataPointer;
-                long elementCount = outputs[t].ElementCount;
-                long byteCount = elementCount * sizeof(float);
+                byte* pOut = (byte*)outputs[t].DataPointer;
+                long byteCount = checked(outputs[t].ElementCount * geometry.ElementSize);
 
-                Buffer.MemoryCopy(pIn + offset, pOut, byteCount, byteCount);
-                offset += elementCount;
+                Buffer.MemoryCopy(pIn + byteOffset, pOut, byteCount, byteCount);
+                byteOffset += byteCount;
             }
         }
         else
         {
-            long outerSize = 1;
-            for (int d = 0; d < dim; d++)
-            {
-                outerSize *= input.Shape[d];
-            }
+            long inputStrideBytes = checked(geometry.InputDimension * geometry.Inner * geometry.ElementSize);
 
-            long innerSize = 1;
-            for (int d = dim + 1; d < input.Shape.Rank; d++)
+            for (long outer = 0; outer < geometry.Outer; outer++)
             {
-                innerSize *= input.Shape[d];
-            }
-
-            float* pIn = (float*)input.DataPointer;
-            long inDimStride = input.Shape[dim] * innerSize;
-
-            for (long outer = 0; outer < outerSize; outer++)
-            {
-                long inOffset = outer * inDimStride;
-                long dimOffset = 0;
+                long inputOuterOffsetBytes = checked(outer * inputStrideBytes);
+                long splitOffsetBytes = 0;
 
                 for (int t = 0; t < outputs.Length; t++)
                 {
                     long outputDimSize = outputs[t].Shape[dim];
-                    long sliceSize = outputDimSize * innerSize;
-                    float* pOut = (float*)outputs[t].DataPointer;
+                    long sliceBytes = checked(outputDimSize * geometry.Inner * geometry.ElementSize);
+                    byte* pOut = (byte*)outputs[t].DataPointer;
+                    long outputOffsetBytes = checked(outer * sliceBytes);
 
-                    long outDimStride = outputDimSize * innerSize;
-                    long outOffset = outer * outDimStride;
+                    Buffer.MemoryCopy(
+                        pIn + inputOuterOffsetBytes + splitOffsetBytes,
+                        pOut + outputOffsetBytes,
+                        sliceBytes,
+                        sliceBytes);
 
-                    long byteCount = sliceSize * sizeof(float);
-                    Buffer.MemoryCopy(pIn + inOffset + dimOffset, pOut + outOffset, byteCount, byteCount);
-
-                    dimOffset += sliceSize;
+                    splitOffsetBytes += sliceBytes;
                 }
             }
         }
+
+        GC.KeepAlive(input);
+        for (int t = 0; t < outputs.Length; t++)
+            GC.KeepAlive(outputs[t]);
     }
 }

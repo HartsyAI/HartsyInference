@@ -24,7 +24,7 @@
 
 #define INF_F 3.402823466e+38f
 
-// One block per (idx, g): blockIdx.x = idx*G + g. blockDim.x = next pow2 >= D (thread t owns dim t).
+// One block per (idx, g): blockIdx.x = idx*G + g. blockDim.x = next pow2 >= max(D,32).
 extern "C" __global__ void lm_flash_attn_f32_split(
     float* __restrict__ partialM,
     float* __restrict__ partialL,
@@ -113,7 +113,7 @@ extern "C" __global__ void lm_flash_attn_f32_split(
     if (tid < D) partialAcc[pBase * D + tid] = acc;
 }
 
-// One block per idx = (b*Hq + h)*Tq + r. blockDim.x = next pow2 >= D (thread t owns dim t). Merges the
+// One block per idx = (b*Hq + h)*Tq + r. blockDim.x = next pow2 >= max(D,32). Merges the
 // G chunk partials via online softmax: m* = max m_g, l* = Σ l_g·e^{m_g-m*}, acc*[d] = Σ acc_g[d]·e^{m_g-m*}.
 extern "C" __global__ void lm_flash_attn_f32_combine(
     float* __restrict__ out,

@@ -50,20 +50,29 @@ public sealed class CudaStream : IDisposable
 
     public void Dispose()
     {
-        nint h = Interlocked.Exchange(ref _handle, 0);
-        if (h != 0)
+        try
         {
-            CudaDriverApi.cuStreamDestroy(h);
+            Release(throwOnError: true);
         }
-        GC.SuppressFinalize(this);
+        finally
+        {
+            GC.SuppressFinalize(this);
+        }
     }
 
     ~CudaStream()
     {
+        try { Release(throwOnError: false); }
+        catch { /* Finalizers must never surface native-loader or driver failures. */ }
+    }
+
+    private void Release(bool throwOnError)
+    {
         nint h = Interlocked.Exchange(ref _handle, 0);
         if (h != 0)
         {
-            CudaDriverApi.cuStreamDestroy(h);
+            int result = CudaDriverApi.cuStreamDestroy(h);
+            if (throwOnError) result.ThrowOnError();
         }
     }
 }

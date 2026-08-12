@@ -209,4 +209,96 @@ public sealed unsafe class CudaFlashAttentionTests
         _output.WriteLine($"hq={hq} d={d} lk={lk} window={window} softcap={softcap}: max |mono - split| = {maxDiff:E3}");
         Assert.True(maxDiff <= 2e-3f, $"split-K windowed/softcap attention diverges from monolithic by {maxDiff:E3}");
     }
+
+    /// <summary>Head dimensions below one warp are padded to 32 threads so the full-mask shuffle stays valid.</summary>
+    [Fact]
+    public void Flash_SmallHeadDim_MatchesReference()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+
+        const int Heads = 2, Sq = 3, Skv = 5, D = 16;
+        float scale = 1f / MathF.Sqrt(D);
+        using Tensor q = Rnd(1, Heads, Sq, D);
+        using Tensor k = Rnd(1, Heads, Skv, D);
+        using Tensor v = Rnd(1, Heads, Skv, D);
+        using Tensor expected = new Tensor(q.Shape, DType.F32);
+        using Tensor actual = new Tensor(q.Shape, DType.F32);
+        AttentionReference.FlashAttention(expected, q, k, v, Skv, 1, causal: false, qOffset: 0, scale);
+
+        using CudaBackend backend = new CudaBackend(0, ptxDir);
+        backend.FlashAttention(actual, q, k, v, Skv, 1, causal: false, qOffset: 0, scale);
+        backend.Sync();
+
+        float* ep = (float*)expected.DataPointer;
+        float* ap = (float*)actual.DataPointer;
+        float maxDiff = 0f;
+        for (long i = 0; i < actual.ElementCount; i++)
+        {
+            Assert.True(float.IsFinite(ap[i]), $"Small-D FlashAttention produced a non-finite value at {i}: {ap[i]}");
+            maxDiff = MathF.Max(maxDiff, MathF.Abs(ep[i] - ap[i]));
+        }
+        _output.WriteLine($"D={D}: max |reference - Flash| = {maxDiff:E3}");
+        Assert.True(maxDiff <= 2e-3f, $"Small-D FlashAttention diverges by {maxDiff:E3}.");
+    }
+
+    /// <summary>The v2 K/V WMMA staging buffer must be zero-filled for the final partial 16-key tile.</summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(15)]
+    [InlineData(17)]
+    [InlineData(33)]
+    public void FlashV2_KvTail_MatchesReference(int skv)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+
+        const int Heads = 2, Sq = 32, D = 64;
+        float scale = 1f / MathF.Sqrt(D);
+        using Tensor q = Rnd(1, Heads, Sq, D);
+        using Tensor k = Rnd(1, Heads, skv, D);
+        using Tensor v = Rnd(1, Heads, skv, D);
+        using Tensor expected = new Tensor(q.Shape, DType.F32);
+        using Tensor actual = new Tensor(q.Shape, DType.F32);
+        AttentionReference.FlashAttention(expected, q, k, v, skv, 1, causal: false, qOffset: 0, scale);
+
+        string? previousV2 = Environment.GetEnvironmentVariable("HARTSY_SDPA_V2");
+        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
+        try
+        {
+            Environment.SetEnvironmentVariable("HARTSY_SDPA_V2", "1");
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
+            using CudaBackend backend = new CudaBackend(0, ptxDir);
+            if (backend.Context.ComputeCapabilityMajor < 8)
+            {
+                _output.WriteLine("SKIPPED: FlashAttention-v2 requires SM 8.0+");
+                return;
+            }
+
+            backend.ScaledDotProductAttention(actual, q, k, v, null, scale);
+            backend.Sync();
+            Assert.True(backend.FlashAttentionV2Engaged, "FlashAttention-v2 did not engage for a valid contract.");
+            _ = *(float*)actual.DataPointer;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HARTSY_SDPA_V2", previousV2);
+            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
+        }
+
+        float* ep = (float*)expected.DataPointer;
+        float* ap = (float*)actual.DataPointer;
+        float maxDiff = 0f;
+        for (long i = 0; i < actual.ElementCount; i++)
+        {
+            Assert.True(float.IsFinite(ap[i]), $"FlashAttention-v2 produced a non-finite value at {i}: {ap[i]}");
+            maxDiff = MathF.Max(maxDiff, MathF.Abs(ep[i] - ap[i]));
+        }
+        _output.WriteLine($"Skv={skv}: max |reference - Flash-v2| = {maxDiff:E3}");
+        Assert.True(maxDiff <= 5e-3f, $"FlashAttention-v2 K/V tail diverges by {maxDiff:E3}.");
+    }
 }

@@ -27,6 +27,8 @@ public sealed unsafe class ZImageBlock
     private readonly int _headDim;
     private readonly int _ffnDim;
     private readonly float _eps;
+    private readonly bool _useF16SandwichDamp;
+    private readonly bool _allowF16Attention;
 
     private readonly QkNorm _normQ;
     private readonly QkNorm _normK;
@@ -54,13 +56,16 @@ public sealed unsafe class ZImageBlock
     private Tensor? _w2Weight;
     private Tensor? _w3Weight;
 
-    public ZImageBlock(int hiddenSize, int numHeads, int ffnDim, float eps = 1e-5f)
+    public ZImageBlock(int hiddenSize, int numHeads, int ffnDim, float eps = 1e-5f,
+        bool? useF16SandwichDamp = null, bool allowF16Attention = true)
     {
         _hiddenSize = hiddenSize;
         _numHeads = numHeads;
         _headDim = hiddenSize / numHeads;
         _ffnDim = ffnDim;
         _eps = eps;
+        _useF16SandwichDamp = useF16SandwichDamp ?? DitDtype.Act == DType.F16;
+        _allowF16Attention = allowF16Attention;
 
         _normQ = new QkNorm(_headDim, eps);
         _normK = new QkNorm(_headDim, eps);
@@ -78,7 +83,7 @@ public sealed unsafe class ZImageBlock
         // F16 mode: damp the two RmsNorm-sandwiched projections so their raw outputs fit F16 range (see
         // F16SandwichDamp). Applied once per weight (LoadWeights runs once per transformer instance); the F32
         // path is untouched when the flag is off so the baseline stays bit-identical.
-        if (DitDtype.Act == DType.F16)
+        if (_useF16SandwichDamp)
         {
             _attnOutWeight.Fp8ScaleFactor *= F16SandwichDamp;
         }
@@ -97,7 +102,7 @@ public sealed unsafe class ZImageBlock
         _w1Weight = weights[$"{prefix}.feed_forward.w1.weight"];
         _w2Weight = weights[$"{prefix}.feed_forward.w2.weight"];
         _w3Weight = weights[$"{prefix}.feed_forward.w3.weight"];
-        if (DitDtype.Act == DType.F16)
+        if (_useF16SandwichDamp)
         {
             // Damps silu(w1·x)·(w3·x) AND the w2 output linearly; ffn_norm2 cancels the factor exactly.
             _w3Weight.Fp8ScaleFactor *= F16SandwichDamp;
@@ -218,11 +223,13 @@ public sealed unsafe class ZImageBlock
             rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
         }
 
-        // allowF16: Q/K are RMS-normed above → pre-softmax scores bounded → the F16/cuDNN fused SDPA path is
-        // numerically safe (same condition as Krea2/Wan/LTX).
+        // Q/K RMS normalization bounds the scores, but that alone does NOT bound V. Base has produced V values
+        // above F16's 65504 ceiling in late main blocks, so its variant policy disables the internal F16 SDPA
+        // narrowing even though this tensor stream is F32. Turbo retains the validated fused F16 path.
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, act);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale, allowF16: true);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale,
+            allowF16: _allowF16Attention);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();

@@ -39,8 +39,17 @@ internal static partial class CudnnApi
 
     internal static string ErrorString(int status)
     {
-        nint p = cudnnGetErrorString(status);
-        return p == 0 ? $"cudnn status {status}" : (Marshal.PtrToStringAnsi(p) ?? $"cudnn status {status}");
+        try
+        {
+            nint p = cudnnGetErrorString(status);
+            return p == 0 ? $"cudnn status {status}" : (Marshal.PtrToStringAnsi(p) ?? $"cudnn status {status}");
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            // Status classification and diagnostic construction are pure managed logic and remain usable on
+            // CPU-only hosts. Native callers still surface their original load/entry-point exception separately.
+            return $"cudnn status {status}";
+        }
     }
 
     // ── Backend enum constants (ABI-stable across cuDNN 9.x; values from cudnn_graph_v9.h 9.24) ──

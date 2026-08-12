@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Compiles all dequant CUDA kernels to PTX and copies into the HartsyInference.Cuda Ptx folder.
-# Requires nvcc (CUDA 13.x) on PATH. Target SM 7.5 — Turing (RTX 20xx) onward.
+# Compiles all dequant/quant CUDA kernels to PTX and copies into the HartsyInference.Cuda Ptx folder.
+# Uses nvcc (CUDA 13.x) when it is on PATH, else the committed ../nvrtc_compile frontend.
+# GGUF dequant + W8A8 target SM 7.5 — Turing (RTX 20xx) onward; fp8_quant targets SM 8.0 (Ampere+),
+# matching its shipped artifact.
 #
 # Why sm_75 and not sm_70: CUDA 13.x dropped Volta, so `-arch=sm_70` is rejected outright ("invalid value
 # for --gpu-architecture"). sm_75 keeps every consumer GPU from the RTX 20xx generation on and drops only
@@ -16,14 +18,21 @@ set -euo pipefail
 
 THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 PTX_OUT="${THIS_DIR}/../../Ptx"
+NVRTC="${THIS_DIR}/../nvrtc_compile"
+CUDA_LIB="${CUDA_LIB:-${HOME}/.local/lib/cuda13}"
+CUDA_INC="${CUDA_INC:-${CUDA_LIB}/include}"
 
-KERNELS=(
+KERNELS_SM75=(
     "dequant_q8_0_to_f16"
     "dequant_q4_0_to_f16"
     "dequant_q5_0_to_f16"
     "dequant_q4_k_to_f16"
     "dequant_q5_k_to_f16"
     "dequant_q6_k_to_f16"
+    "w8a8"
+)
+KERNELS_SM80=(
+    "fp8_quant"
 )
 
 INSTALL=true
@@ -31,15 +40,25 @@ if [[ "${1:-}" == "--no-install" ]]; then
     INSTALL=false
 fi
 
-for kernel in "${KERNELS[@]}"; do
-    src="${THIS_DIR}/${kernel}.cu"
-    ptx="${THIS_DIR}/${kernel}.ptx"
+compile_one() {
+    local kernel="$1" sm="$2"
+    local src="${THIS_DIR}/${kernel}.cu"
+    local ptx="${THIS_DIR}/${kernel}.ptx"
     if [[ ! -f "$src" ]]; then
         echo "missing source: $src" >&2
         exit 1
     fi
-    echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_75 ${kernel}.cu"
-    nvcc -ptx -arch=sm_75 "$src" -o "$ptx"
+    if command -v nvcc >/dev/null 2>&1; then
+        echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_${sm} ${kernel}.cu"
+        nvcc -ptx -arch="sm_${sm}" "$src" -o "$ptx"
+    else
+        if [[ ! -x "$NVRTC" ]]; then
+            echo "no nvcc on PATH and no nvrtc helper — build it: cc -O2 -o $NVRTC ${NVRTC}.c -ldl" >&2
+            exit 1
+        fi
+        echo "[$(date +%H:%M:%S)] nvrtc_compile compute_${sm} ${kernel}.cu"
+        LD_LIBRARY_PATH="$CUDA_LIB" "$NVRTC" "$src" "$ptx" "compute_${sm}" "$CUDA_INC"
+    fi
     if ! head -20 "$ptx" | grep -q '^\.version 9\.0$'; then
         echo "ERROR: ${kernel}.ptx is not PTX ISA 9.0 (driver JIT ceiling) — check toolchain pin." >&2
         exit 1
@@ -48,6 +67,9 @@ for kernel in "${KERNELS[@]}"; do
         cp "$ptx" "${PTX_OUT}/${kernel}.ptx"
         echo "  → ${PTX_OUT}/${kernel}.ptx"
     fi
-done
+}
+
+for kernel in "${KERNELS_SM75[@]}"; do compile_one "$kernel" 75; done
+for kernel in "${KERNELS_SM80[@]}"; do compile_one "$kernel" 80; done
 
 echo "done."

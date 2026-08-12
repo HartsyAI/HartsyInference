@@ -5,6 +5,11 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>Configuration for Z-Image transformers (Tongyi Lab, Apache 2.0). Lumina2/NextDiT architecture: 30 main DiT layers + 2 noise refiner blocks + 2 context refiner blocks. RMSNorm everywhere, multi-axis RoPE [32,48,48] θ=256, AdaLN with 4 outputs, SwiGLU FFN. See docs/Research/Z_IMAGE_ARCHITECTURE.md.</summary>
 public sealed record ZImageConfig
 {
+    /// <summary>Whether these are the undistilled Base weights. Base uses the official shift=6 schedule and keeps
+    /// its transformer token stream in F32: its wider activation range is not covered by Turbo's F16 sandwich
+    /// damping audit.</summary>
+    public bool IsBase { get; init; }
+
     /// <summary>Hidden dimension (3840 for Z-Image-Turbo and Base).</summary>
     public required int HiddenSize { get; init; }
 
@@ -65,7 +70,7 @@ public sealed record ZImageConfig
     /// <summary>VAE spatial downscale factor (8 for Flux VAE).</summary>
     public int VaeDownscaleFactor { get; init; } = 8;
 
-    /// <summary>Static shift for FlowMatchEulerDiscreteScheduler (3.0 for Z-Image; no dynamic shifting).</summary>
+    /// <summary>Static shift for FlowMatchEulerDiscreteScheduler (3.0 for Turbo, 6.0 for Base; no dynamic shifting).</summary>
     public float SchedulerShift { get; init; } = 3.0f;
 
     /// <summary>Z-Image-Turbo preset (6B, 8-NFE distilled, no CFG). Recommended sampling: 8 steps at <c>cfgScale=1.0</c>. FfnDim verified from Tongyi-MAI/Z-Image-Turbo transformer/config.json (= 10240). SchedulerShift=3.0.</summary>
@@ -77,6 +82,7 @@ public sealed record ZImageConfig
         NumLayers = 30,
         NumRefinerLayers = 2,
         FfnDim = 10240,
+        IsBase = false,
         SchedulerShift = 3.0f,
     };
 
@@ -89,11 +95,12 @@ public sealed record ZImageConfig
         NumLayers = 30,
         NumRefinerLayers = 2,
         FfnDim = 10240,
+        IsBase = true,
         SchedulerShift = 6.0f,
     };
 
     /// <summary>Auto-detects depth and FFN dim from a transformer weight dict using Z-Image's diffusers/single-file naming.</summary>
-    public static ZImageConfig FromWeights(IReadOnlyDictionary<string, Tensor> weights)
+    public static ZImageConfig FromWeights(IReadOnlyDictionary<string, Tensor> weights, bool isBase = false)
     {
         int maxLayer = -1;
         foreach (string key in weights.Keys)
@@ -126,6 +133,8 @@ public sealed record ZImageConfig
             HeadDim = 128,
             NumLayers = numLayers > 0 ? numLayers : 30,
             FfnDim = ffnDim,
+            IsBase = isBase,
+            SchedulerShift = isBase ? 6.0f : 3.0f,
         };
     }
 }

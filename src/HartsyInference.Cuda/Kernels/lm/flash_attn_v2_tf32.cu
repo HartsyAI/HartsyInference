@@ -6,7 +6,8 @@
 // unbounded-score archs (fp8) — this is the safety fix for the F16 blackout. All softmax state (m,l,O,S) is F32.
 //
 // Layout: Q,out [B, Hq, Sq, D] row-major; K,V [B, Hq, Skv, D] row-major. One block per (batch, head, query-tile).
-// Grid = (ceil(Sq/BR), Hq, B). Block = 128 threads (4 warps). BR=64 query rows, BC=32 key cols per step.
+// Sq must be a multiple of BR: the host contract rejects partial query tiles because WMMA Q loads are unguarded.
+// Grid = (Sq/BR, Hq, B). Block = 64 threads (2 warps). BR=32 query rows, BC=16 key cols per step.
 //
 // Build (no nvcc on this box — use nvrtc):
 //   TINC=".../triton/backends/nvidia/include"
@@ -16,14 +17,13 @@
 #include <cuda_fp16.h>
 using namespace nvcuda;
 
-// M2 occupancy: BR=32/BC=16 (D=128) → smem = K(8KB)+V(8KB)+S(2KB)+O(16KB) = 34KB < 48KB default → 2 blocks/SM
-// (vs 72KB/1-block at BR=64/BC=32). BR=32 = 2 warps × 16 rows; block = 64 threads.
+// BR=32/BC=16 at D=128 uses K(8KB)+V(8KB)+S(2KB)+O(16KB) = 34KB shared memory per block.
+// BR=32 maps two 16-row WMMA tiles to two warps (64 threads).
 #define BR 32          // query rows per block
 #define BC 16          // key/value columns per K/V step
-#define WARPS 2        // 64 threads
 #define NEG_INF (-3.402823466e+38f)
 
-// WMMA tile: 16x16x8 TF32. BR=64 = 4 row-tiles (one per warp). BC=32 = 2 col-tiles. D contracted in steps of 8.
+// WMMA tile: 16x16x8 TF32. BR=32 = 2 row-tiles (one per warp). BC=16 = 1 col-tile. D contracted in steps of 8.
 // Each warp owns 16 query rows (rows [warp*16, warp*16+16)). For S = Q@K^T [16 x BC] it accumulates over D.
 // For O += P@V [16 x D] it accumulates over BC.
 
@@ -38,8 +38,7 @@ extern "C" __global__ void lm_flash_attn_v2_tf32(
     const unsigned int qtile = blockIdx.x;   // which BR-row query tile
     const unsigned int h     = blockIdx.y;
     const unsigned int b     = blockIdx.z;
-    const unsigned int warp  = threadIdx.x >> 5;   // 0..3
-    const unsigned int lane  = threadIdx.x & 31;
+    const unsigned int warp  = threadIdx.x >> 5;   // 0..1
 
     const unsigned int q0 = qtile * BR;            // first query row of this tile
     if (q0 >= Sq) return;
@@ -61,16 +60,12 @@ extern "C" __global__ void lm_flash_attn_v2_tf32(
     // This warp owns 16 query rows: rows [warp*16 .. warp*16+16) within the tile.
     const unsigned int rowBase = warp * 16;
 
-    // Online-softmax state per query row, kept in F32 registers. 16 rows/warp, one lane-strided owner:
-    // lane l owns rows where (row % 32)... simpler: keep m/l per-row in shared? For clarity use per-warp smem arrays.
+    // Online-softmax max and denominator per query row, kept in shared memory.
     __shared__ float m_state[BR];    // running max
     __shared__ float l_state[BR];    // running sum
     for (unsigned int i = threadIdx.x; i < BR; i += blockDim.x) { m_state[i] = NEG_INF; l_state[i] = 0.0f; }
 
-    // O accumulator [BR][D] in shared memory (BR*D floats). Init 0.
-    // NOTE: BR*D = 64*128 = 8192 floats = 32KB — with K/V/S tiles this exceeds 48KB, so O lives in GLOBAL out and we
-    // accumulate there via read-modify-write per K/V step is too slow. Instead: keep O in shared, and shrink other
-    // tiles. Budget (D=128): K 16KB + V 16KB + S 8KB + O 32KB = 72KB -> needs cuFuncSetAttribute opt-in (99KB avail).
+    // O accumulator [BR][D] in shared memory. At D=128, K/V/S/O consume 34KB total.
     float* Osh = Ssh + (size_t)BR * BC;      // BR*D
     for (unsigned int i = threadIdx.x; i < (unsigned int)BR * D; i += blockDim.x) Osh[i] = 0.0f;
     __syncthreads();
@@ -85,15 +80,22 @@ extern "C" __global__ void lm_flash_attn_v2_tf32(
         const unsigned int c0 = kc * BC;
         const unsigned int curBC = min((unsigned int)BC, Skv - c0);
 
-        // Stage K,V [curBC x D] into shared (coalesced).
-        for (unsigned int i = threadIdx.x; i < curBC * D; i += blockDim.x)
+        // Stage K,V [BC x D] into shared (coalesced), zero-filling the final partial tile. WMMA always consumes
+        // all BC rows, so leaving the tail uninitialized would feed stale values (including NaNs) into PV.
+        const unsigned int validElems = curBC * D;
+        for (unsigned int i = threadIdx.x; i < validElems; i += blockDim.x)
         {
-            Ksh[i] = Kh[(size_t)(c0) * D + i];
-            Vsh[i] = Vh[(size_t)(c0) * D + i];
+            Ksh[i] = Kh[(size_t)c0 * D + i];
+            Vsh[i] = Vh[(size_t)c0 * D + i];
+        }
+        for (unsigned int i = validElems + threadIdx.x; i < (unsigned int)BC * D; i += blockDim.x)
+        {
+            Ksh[i] = 0.0f;
+            Vsh[i] = 0.0f;
         }
         __syncthreads();
 
-        // S[16 x BC] = scale * Q[16 x D] @ K[BC x D]^T, per warp (its 16 rows). BC=32 = two 16-col fragments.
+        // S[16 x BC] = scale * Q[16 x D] @ K[BC x D]^T, one 16-column fragment per warp.
         for (unsigned int ct = 0; ct < BC; ct += 16)
         {
             wmma::fill_fragment(sf, 0.0f);

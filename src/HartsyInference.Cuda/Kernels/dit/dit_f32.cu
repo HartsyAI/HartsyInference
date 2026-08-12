@@ -193,6 +193,304 @@ __global__ void dit_cfg_euler_f32(
     z[i] = z[i] + v * delta;
 }
 
+// ── Generic affine and mask-broadcast affine mixes ─────────────────────────
+// These are the shared image-pipeline glue primitives: scheduler AddNoise is a plain affine mix, while masked
+// inpaint replaces the preserved region with the source's affine noise trajectory. All sizes are 64-bit and all
+// grid dimensions are bounded by the launcher; grid-stride loops cover the remainder.
+__global__ void dit_affine_mix_f32(
+    float* __restrict__ output,
+    const float* __restrict__ x,
+    const float* __restrict__ y,
+    float xScale,
+    float yScale,
+    unsigned long long count)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
+    for (; i < count; i += stride)
+        output[i] = xScale * x[i] + yScale * y[i];
+}
+
+__device__ __forceinline__ float dit_affine_replacement(
+    const float* __restrict__ source,
+    const float* __restrict__ noise,
+    unsigned long long i,
+    float sourceScale,
+    float noiseScale)
+{
+    float replacement = sourceScale * source[i];
+    if (noise != nullptr)
+        replacement += noiseScale * noise[i];
+    return replacement;
+}
+
+// NCHW target/source/noise [B,C,H,W], mask [B,1,H,W]. The launch maps x to spatial tiles and y to
+// batches, so each thread walks channels with coalesced accesses and reuses one mask load without integer div/mod.
+__global__ void dit_masked_affine_mix_dense_f32(
+    float* __restrict__ target,
+    const float* __restrict__ source,
+    const float* __restrict__ noise,
+    const float* __restrict__ mask,
+    float sourceScale,
+    float noiseScale,
+    unsigned long long batch,
+    unsigned long long channels,
+    unsigned long long spatial)
+{
+    unsigned long long spatialStart = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long spatialStride = (unsigned long long)gridDim.x * blockDim.x;
+    for (unsigned long long b = blockIdx.y; b < batch; b += gridDim.y)
+    {
+        unsigned long long maskBase = b * spatial;
+        unsigned long long targetBatchBase = b * channels * spatial;
+        for (unsigned long long p = spatialStart; p < spatial; p += spatialStride)
+        {
+            float maskValue = mask[maskBase + p];
+            float inverseMask = 1.0f - maskValue;
+            for (unsigned long long c = 0; c < channels; c++)
+            {
+                unsigned long long i = targetBatchBase + c * spatial + p;
+                float replacement = dit_affine_replacement(source, noise, i, sourceScale, noiseScale);
+                target[i] = target[i] * maskValue + replacement * inverseMask;
+            }
+        }
+    }
+}
+
+__device__ __forceinline__ void dit_masked_affine_mix_packed(
+    float* __restrict__ target,
+    const float* __restrict__ source,
+    const float* __restrict__ noise,
+    const float* __restrict__ mask,
+    float sourceScale,
+    float noiseScale,
+    unsigned long long tokens,
+    unsigned long long featureDimension,
+    unsigned long long patchArea,
+    bool channelInner)
+{
+    unsigned long long channels = featureDimension / patchArea;
+    for (unsigned long long token = blockIdx.x; token < tokens; token += gridDim.x)
+    {
+        unsigned long long featureBase = token * featureDimension;
+        unsigned long long maskBase = token * patchArea;
+        for (unsigned long long feature = threadIdx.x; feature < featureDimension; feature += blockDim.x)
+        {
+            unsigned long long patchIndex = channelInner ? feature / channels : feature % patchArea;
+            unsigned long long i = featureBase + feature;
+            float maskValue = mask[maskBase + patchIndex];
+            float replacement = dit_affine_replacement(source, noise, i, sourceScale, noiseScale);
+            target[i] = target[i] * maskValue + replacement * (1.0f - maskValue);
+        }
+    }
+}
+
+// Packed channel-outer feature order f=c*P+p (Flux/Chroma/Flux.2).
+__global__ void dit_masked_affine_mix_packed_outer_f32(
+    float* __restrict__ target,
+    const float* __restrict__ source,
+    const float* __restrict__ noise,
+    const float* __restrict__ mask,
+    float sourceScale,
+    float noiseScale,
+    unsigned long long tokens,
+    unsigned long long featureDimension,
+    unsigned long long patchArea)
+{
+    dit_masked_affine_mix_packed(
+        target, source, noise, mask, sourceScale, noiseScale, tokens, featureDimension, patchArea, false);
+}
+
+// Packed channel-inner feature order f=p*C+c (Ideogram 4).
+__global__ void dit_masked_affine_mix_packed_inner_f32(
+    float* __restrict__ target,
+    const float* __restrict__ source,
+    const float* __restrict__ noise,
+    const float* __restrict__ mask,
+    float sourceScale,
+    float noiseScale,
+    unsigned long long tokens,
+    unsigned long long featureDimension,
+    unsigned long long patchArea)
+{
+    dit_masked_affine_mix_packed(
+        target, source, noise, mask, sourceScale, noiseScale, tokens, featureDimension, patchArea, true);
+}
+
+// ── Global-renormalized CFG + Euler step ───────────────────────────────────
+// Stage 1 computes block partials for ||cond||² and ||uncond + guidance*(cond-uncond)||².
+// Double accumulation matches the host reference's global norm without sacrificing the parallel update.
+__global__ void dit_cfg_renorm_reduce_f32(
+    const float* __restrict__ cond,
+    const float* __restrict__ uncond,
+    double* __restrict__ condPartials,
+    double* __restrict__ guidedPartials,
+    float guidance,
+    unsigned long long count)
+{
+    extern __shared__ double sums[];
+    double* condSums = sums;
+    double* guidedSums = sums + blockDim.x;
+
+    double condSq = 0.0;
+    double guidedSq = 0.0;
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
+    for (; i < count; i += stride)
+    {
+        float c = cond[i];
+        float u = uncond[i];
+        float guided = u + guidance * (c - u);
+        condSq += (double)c * (double)c;
+        guidedSq += (double)guided * (double)guided;
+    }
+
+    condSums[threadIdx.x] = condSq;
+    guidedSums[threadIdx.x] = guidedSq;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1)
+    {
+        if (threadIdx.x < offset)
+        {
+            condSums[threadIdx.x] += condSums[threadIdx.x + offset];
+            guidedSums[threadIdx.x] += guidedSums[threadIdx.x + offset];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+    {
+        condPartials[blockIdx.x] = condSums[0];
+        guidedPartials[blockIdx.x] = guidedSums[0];
+    }
+}
+
+// Stage 2 reduces the small partial arrays and writes one device scalar. Branch clamps intentionally preserve
+// NaN, matching Math.Clamp: fmin/fmax would silently replace NaN with a clamp endpoint.
+__global__ void dit_cfg_renorm_finalize_f32(
+    float* __restrict__ scale,
+    const double* __restrict__ condPartials,
+    const double* __restrict__ guidedPartials,
+    unsigned int partialCount,
+    float renormMin)
+{
+    extern __shared__ double sums[];
+    double* condSums = sums;
+    double* guidedSums = sums + blockDim.x;
+    double condSq = 0.0;
+    double guidedSq = 0.0;
+    for (unsigned int i = threadIdx.x; i < partialCount; i += blockDim.x)
+    {
+        condSq += condPartials[i];
+        guidedSq += guidedPartials[i];
+    }
+    condSums[threadIdx.x] = condSq;
+    guidedSums[threadIdx.x] = guidedSq;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1)
+    {
+        if (threadIdx.x < offset)
+        {
+            condSums[threadIdx.x] += condSums[threadIdx.x + offset];
+            guidedSums[threadIdx.x] += guidedSums[threadIdx.x + offset];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+    {
+        double ratio = sqrt(condSums[0]) / (sqrt(guidedSums[0]) + 1.0e-8);
+        if (ratio < (double)renormMin) ratio = (double)renormMin;
+        else if (ratio > 1.0) ratio = 1.0;
+        scale[0] = (float)ratio;
+    }
+}
+
+// Stage 3 recomputes the cheap guided value and folds scale + Euler into the latent write. Inputs are read-only.
+__global__ void dit_cfg_renorm_euler_f32(
+    float* __restrict__ z,
+    const float* __restrict__ cond,
+    const float* __restrict__ uncond,
+    const float* __restrict__ scale,
+    float guidance,
+    float delta,
+    unsigned long long count)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
+    float s = scale[0];
+    for (; i < count; i += stride)
+    {
+        float guided = uncond[i] + guidance * (cond[i] - uncond[i]);
+        guided *= s;
+        z[i] += guided * delta;
+    }
+}
+
+// ── Last-dimension-normalized CFG + Euler step ───────────────────────────
+// One cooperative block handles each logical row (all dimensions except the last are flattened).
+// The grid-stride row loop keeps launch geometry bounded while still covering arbitrarily many rows.
+// Double accumulation mirrors CfgHelper.ApplyCfgNormalized's host reference; guided values and the
+// broadcast ratio remain float, matching the tensor's F32 storage and the subsequent Euler update.
+__global__ void dit_cfg_normalized_euler_f32(
+    float* __restrict__ z,
+    const float* __restrict__ cond,
+    const float* __restrict__ uncond,
+    float guidance,
+    float delta,
+    float eps,
+    unsigned long long rows,
+    unsigned long long lastDim)
+{
+    extern __shared__ double sums[];
+    double* condSums = sums;
+    double* guidedSums = sums + blockDim.x;
+    __shared__ float rowRatio;
+
+    for (unsigned long long row = blockIdx.x; row < rows; row += gridDim.x)
+    {
+        unsigned long long base = row * lastDim;
+        double condSq = 0.0;
+        double guidedSq = 0.0;
+        for (unsigned long long d = threadIdx.x; d < lastDim; d += blockDim.x)
+        {
+            unsigned long long i = base + d;
+            float c = cond[i];
+            float u = uncond[i];
+            float guided = u + guidance * (c - u);
+            condSq += (double)c * (double)c;
+            guidedSq += (double)guided * (double)guided;
+        }
+
+        condSums[threadIdx.x] = condSq;
+        guidedSums[threadIdx.x] = guidedSq;
+        __syncthreads();
+        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1)
+        {
+            if (threadIdx.x < offset)
+            {
+                condSums[threadIdx.x] += condSums[threadIdx.x + offset];
+                guidedSums[threadIdx.x] += guidedSums[threadIdx.x + offset];
+            }
+            __syncthreads();
+        }
+        if (threadIdx.x == 0)
+        {
+            // Zero denominator (eps=0, all-zero guided row) contributes nothing — ratio=0 avoids 0/0 -> NaN.
+            double denom = sqrt(guidedSums[0]) + (double)eps;
+            rowRatio = denom > 0.0 ? (float)(sqrt(condSums[0]) / denom) : 0.0f;
+        }
+        __syncthreads();
+
+        float ratio = rowRatio;
+        for (unsigned long long d = threadIdx.x; d < lastDim; d += blockDim.x)
+        {
+            unsigned long long i = base + d;
+            float guided = uncond[i] + guidance * (cond[i] - uncond[i]);
+            z[i] += delta * (guided * ratio);
+        }
+        __syncthreads();
+    }
+}
+
 // ── Tanh (general elementwise) ──────────────────────────────────────────────
 __global__ void dit_tanh_f32(
     float* __restrict__ output,
@@ -448,12 +746,66 @@ __global__ void ltx2_split_rope_f32(
 }
 
 
-// ── Unpatchify: token grid [hP·wP, C·p²] → pixel latent [C, H, W] (B=1) ─────
+// ── Patchify / unpatchify: NCHW pixels ↔ token grid (bit-preserving shuffle) ─────
 // innerChannelFastest=1 → token inner order (ph, pw, c) (Z-Image / Lumina2 patchify);
 // 0 → channel-outer (c, ph, pw) (Krea2 / diffusers view+permute+reshape).
-__global__ void dit_unpatchify_f32(
-    float* __restrict__ output,
-    const float* __restrict__ input,
+// Integer payloads keep every F32/F16/BF16 bit pattern intact (including signed zero and NaN payloads): these
+// are address permutations, not arithmetic. Grid-stride loops avoid imposing gridDim.x limits on valid tensors.
+} // extern "C" — templates cannot have C linkage
+
+template <typename Word>
+__device__ __forceinline__ void dit_patchify_words(
+    Word* __restrict__ output,
+    const Word* __restrict__ input,
+    unsigned int channels,
+    unsigned int height,
+    unsigned int width,
+    unsigned int patch,
+    unsigned int innerChannelFastest,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
+    unsigned int hPacked = height / patch;
+    unsigned int wPacked = width / patch;
+    unsigned long long seqLen = (unsigned long long)hPacked * wPacked;
+    unsigned long long patchVol = (unsigned long long)channels * patch * patch;
+    for (; i < total; i += stride)
+    {
+        unsigned long long inner = i % patchVol;
+        unsigned long long token = i / patchVol;
+        unsigned long long seq = token % seqLen;
+        unsigned long long b = token / seqLen;
+        unsigned int hp = (unsigned int)(seq / wPacked);
+        unsigned int wp = (unsigned int)(seq % wPacked);
+
+        unsigned int c, ph, pw;
+        if (innerChannelFastest)
+        {
+            c = (unsigned int)(inner % channels);
+            unsigned long long pixel = inner / channels;
+            ph = (unsigned int)(pixel / patch);
+            pw = (unsigned int)(pixel % patch);
+        }
+        else
+        {
+            pw = (unsigned int)(inner % patch);
+            unsigned long long t = inner / patch;
+            ph = (unsigned int)(t % patch);
+            c = (unsigned int)(t / patch);
+        }
+
+        unsigned int y = hp * patch + ph;
+        unsigned int x = wp * patch + pw;
+        unsigned long long src = ((b * channels + c) * height + y) * width + x;
+        output[i] = input[src];
+    }
+}
+
+template <typename Word>
+__device__ __forceinline__ void dit_unpatchify_words(
+    Word* __restrict__ output,
+    const Word* __restrict__ input,
     unsigned int channels,
     unsigned int hPacked,
     unsigned int wPacked,
@@ -462,22 +814,106 @@ __global__ void dit_unpatchify_f32(
     unsigned long long total)
 {
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
+    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
     unsigned int W = wPacked * patch;
     unsigned int H = hPacked * patch;
-    unsigned int x = (unsigned int)(i % W);
-    unsigned long long t = i / W;
-    unsigned int y = (unsigned int)(t % H);
-    unsigned int c = (unsigned int)(t / H);
-    unsigned int hp = y / patch, ph = y % patch;
-    unsigned int wp = x / patch, pw = x % patch;
-    unsigned long long seq = (unsigned long long)hp * wPacked + wp;
-    unsigned int patchVol = channels * patch * patch;
-    unsigned long long inner = innerChannelFastest
-        ? ((unsigned long long)(ph * patch + pw) * channels + c)
-        : (((unsigned long long)c * patch + ph) * patch + pw);
-    output[i] = input[seq * patchVol + inner];
+    unsigned long long seqLen = (unsigned long long)hPacked * wPacked;
+    unsigned long long patchVol = (unsigned long long)channels * patch * patch;
+    for (; i < total; i += stride)
+    {
+        unsigned int x = (unsigned int)(i % W);
+        unsigned long long t = i / W;
+        unsigned int y = (unsigned int)(t % H);
+        t /= H;
+        unsigned int c = (unsigned int)(t % channels);
+        unsigned long long b = t / channels;
+        unsigned int hp = y / patch, ph = y % patch;
+        unsigned int wp = x / patch, pw = x % patch;
+        unsigned long long seq = (unsigned long long)hp * wPacked + wp;
+        unsigned long long inner = innerChannelFastest
+            ? (((unsigned long long)ph * patch + pw) * channels + c)
+            : (((unsigned long long)c * patch + ph) * patch + pw);
+        output[i] = input[(b * seqLen + seq) * patchVol + inner];
+    }
 }
+
+extern "C" __global__ void dit_patchify_f32(
+    unsigned int* output, const unsigned int* input, unsigned int channels, unsigned int height,
+    unsigned int width, unsigned int patch, unsigned int innerChannelFastest, unsigned long long total)
+{
+    dit_patchify_words(output, input, channels, height, width, patch, innerChannelFastest, total);
+}
+
+extern "C" __global__ void dit_patchify_u16(
+    unsigned short* output, const unsigned short* input, unsigned int channels, unsigned int height,
+    unsigned int width, unsigned int patch, unsigned int innerChannelFastest, unsigned long long total)
+{
+    dit_patchify_words(output, input, channels, height, width, patch, innerChannelFastest, total);
+}
+
+extern "C" __global__ void dit_unpatchify_f32(
+    unsigned int* output, const unsigned int* input, unsigned int channels, unsigned int hPacked,
+    unsigned int wPacked, unsigned int patch, unsigned int innerChannelFastest, unsigned long long total)
+{
+    dit_unpatchify_words(output, input, channels, hPacked, wPacked, patch, innerChannelFastest, total);
+}
+
+extern "C" __global__ void dit_unpatchify_u16(
+    unsigned short* output, const unsigned short* input, unsigned int channels, unsigned int hPacked,
+    unsigned int wPacked, unsigned int patch, unsigned int innerChannelFastest, unsigned long long total)
+{
+    dit_unpatchify_words(output, input, channels, hPacked, wPacked, patch, innerChannelFastest, total);
+}
+
+// Copy one arbitrary-axis split chunk from logical [outer,inputDim,inner] storage. Each logical CUDA block
+// owns a contiguous part of one outer slice, so only one 64-bit division is paid per block (not per element),
+// while all payload loads/stores remain coalesced. The capped physical grid strides over logical blocks, which
+// keeps valid 64-bit tensor geometry independent of CUDA's gridDim.x launch limit. Integer words preserve F32,
+// F16, and BF16 payload bits exactly, including NaN payloads and signed zero.
+template <typename Word>
+__device__ __forceinline__ void dit_split_slice_words(
+    Word* __restrict__ output,
+    const Word* __restrict__ input,
+    unsigned long long inputStride,
+    unsigned long long outputStride,
+    unsigned long long sourceOffset,
+    unsigned long long blocksPerOuter,
+    unsigned long long totalBlocks)
+{
+    unsigned long long logicalBlock = (unsigned long long)blockIdx.x;
+    unsigned long long blockStride = (unsigned long long)gridDim.x;
+    for (; logicalBlock < totalBlocks; logicalBlock += blockStride)
+    {
+        unsigned long long outer = logicalBlock / blocksPerOuter;
+        unsigned long long blockWithinOuter = logicalBlock - outer * blocksPerOuter;
+        unsigned long long withinOuter = blockWithinOuter * blockDim.x + threadIdx.x;
+        if (withinOuter < outputStride)
+            output[outer * outputStride + withinOuter] =
+                input[outer * inputStride + sourceOffset + withinOuter];
+    }
+}
+
+extern "C" __global__ void dit_split_slice_u32(
+    unsigned int* output, const unsigned int* input,
+    unsigned long long inputStride, unsigned long long outputStride,
+    unsigned long long sourceOffset, unsigned long long blocksPerOuter,
+    unsigned long long totalBlocks)
+{
+    dit_split_slice_words(
+        output, input, inputStride, outputStride, sourceOffset, blocksPerOuter, totalBlocks);
+}
+
+extern "C" __global__ void dit_split_slice_u16(
+    unsigned short* output, const unsigned short* input,
+    unsigned long long inputStride, unsigned long long outputStride,
+    unsigned long long sourceOffset, unsigned long long blocksPerOuter,
+    unsigned long long totalBlocks)
+{
+    dit_split_slice_words(
+        output, input, inputStride, outputStride, sourceOffset, blocksPerOuter, totalBlocks);
+}
+
+extern "C" {
 
 
 // ── MoE top-k gate weights (HiDream MoEGate) ────────────────────────────────
@@ -916,68 +1352,145 @@ __global__ void dit_layernorm_modulate_f32(
 
 // Fused QKV split + per-head QK-RMSNorm: from a fused qkv[token, 3·W] (W = heads·headDim), writes q,k,v each
 // [token, W] laid [token, head, d], applying RMSNorm(·)·weight over each head's headDim slice to q and k (v copied).
-// Replaces SliceLastDim×3 + RmsNorm×2 (5 → 1) per attention stream. One block per (token, head); blockDim = headDim
-// (power of two — tree reduction). Activation follows the qkv dtype; the norm weights stay F32.
+// Replaces SliceLastDim×3 + RmsNorm×2 (5 → 1) per attention stream. One power-of-two block per
+// (token, head); threads stride across headDim, so non-power-of-two and large head dimensions are exact.
+// Activation follows the qkv dtype; the norm weights stay F32.
 __global__ void dit_qkv_split_norm_f32(
     float* __restrict__ q, float* __restrict__ k, float* __restrict__ v,
     const float* __restrict__ qkv, const float* __restrict__ qW, const float* __restrict__ kW,
     unsigned int tokens, unsigned int heads, unsigned int headDim, float eps)
 {
     extern __shared__ float sred[];
+    float* qred = sred;
+    float* kred = sred + blockDim.x;
     unsigned long long g = (unsigned long long)blockIdx.x;   // group = token*heads + head
     if (g >= (unsigned long long)tokens * heads) return;
     unsigned int h = (unsigned int)(g % heads);
     unsigned long long token = g / heads;
-    unsigned int W = heads * headDim, d = threadIdx.x;
+    unsigned int W = heads * headDim;
+    unsigned int d = threadIdx.x;
     const float* base = qkv + token * 3ULL * W;
     unsigned long long outOff = token * W + (unsigned long long)h * headDim;
 
-    float qv = base[(unsigned long long)h * headDim + d];
-    sred[d] = qv * qv; __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (d < s) sred[d] += sred[d + s]; __syncthreads(); }
-    float qInv = rsqrtf(sred[0] / (float)headDim + eps); __syncthreads();
+    float qv = 0.0f;
+    float kv = 0.0f;
+    if (d < headDim)
+    {
+        qv = base[(unsigned long long)h * headDim + d];
+        kv = base[W + (unsigned long long)h * headDim + d];
+    }
+    float qsum = qv * qv;
+    float ksum = kv * kv;
+    for (unsigned int i = d + blockDim.x; i < headDim; i += blockDim.x)
+    {
+        float qi = base[(unsigned long long)h * headDim + i];
+        float ki = base[W + (unsigned long long)h * headDim + i];
+        qsum += qi * qi;
+        ksum += ki * ki;
+    }
+    qred[d] = qsum;
+    kred[d] = ksum;
+    __syncthreads();
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1)
+    {
+        if (d < stride)
+        {
+            qred[d] += qred[d + stride];
+            kred[d] += kred[d + stride];
+        }
+        __syncthreads();
+    }
+    if (d == 0)
+    {
+        float invDim = 1.0f / (float)headDim;
+        qred[0] = rsqrtf(qred[0] * invDim + eps);
+        kred[0] = rsqrtf(kred[0] * invDim + eps);
+    }
+    __syncthreads();
 
-    float kv = base[W + (unsigned long long)h * headDim + d];
-    sred[d] = kv * kv; __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (d < s) sred[d] += sred[d + s]; __syncthreads(); }
-    float kInv = rsqrtf(sred[0] / (float)headDim + eps);
-
-    q[outOff + d] = qv * qInv * qW[d];
-    k[outOff + d] = kv * kInv * kW[d];
-    v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+    if (d < headDim)
+    {
+        q[outOff + d] = qv * qred[0] * qW[d];
+        k[outOff + d] = kv * kred[0] * kW[d];
+        v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+    }
+    for (unsigned int i = d + blockDim.x; i < headDim; i += blockDim.x)
+    {
+        q[outOff + i] = base[(unsigned long long)h * headDim + i] * qred[0] * qW[i];
+        k[outOff + i] = base[W + (unsigned long long)h * headDim + i] * kred[0] * kW[i];
+        v[outOff + i] = base[2u * W + (unsigned long long)h * headDim + i];
+    }
 }
 
 // Head-major twin of dit_qkv_split_norm_f32: identical math, writes q/k/v as [batch, heads, seq, headDim]
 // instead of [token, head, d], so the attention caller feeds SDPA with no Permute0213. Same grid mapping
-// (one block per (token, head), blockDim = headDim) — only the output address changes.
+// (one block per (token, head)) — only the output address changes.
 __global__ void dit_qkv_split_norm_head_major_f32(
     float* __restrict__ q, float* __restrict__ k, float* __restrict__ v,
     const float* __restrict__ qkv, const float* __restrict__ qW, const float* __restrict__ kW,
     unsigned int tokens, unsigned int heads, unsigned int headDim, unsigned int seq, float eps)
 {
     extern __shared__ float sred[];
+    float* qred = sred;
+    float* kred = sred + blockDim.x;
     unsigned long long g = (unsigned long long)blockIdx.x;   // group = token*heads + head
     if (g >= (unsigned long long)tokens * heads) return;
     unsigned int h = (unsigned int)(g % heads);
     unsigned long long token = g / heads;
-    unsigned int W = heads * headDim, d = threadIdx.x;
+    unsigned int W = heads * headDim;
+    unsigned int d = threadIdx.x;
     const float* base = qkv + token * 3ULL * W;
     unsigned long long b = token / seq, s = token % seq;
     unsigned long long outOff = ((b * heads + h) * seq + s) * headDim;
 
-    float qv = base[(unsigned long long)h * headDim + d];
-    sred[d] = qv * qv; __syncthreads();
-    for (unsigned int t = blockDim.x >> 1; t > 0; t >>= 1) { if (d < t) sred[d] += sred[d + t]; __syncthreads(); }
-    float qInv = rsqrtf(sred[0] / (float)headDim + eps); __syncthreads();
+    float qv = 0.0f;
+    float kv = 0.0f;
+    if (d < headDim)
+    {
+        qv = base[(unsigned long long)h * headDim + d];
+        kv = base[W + (unsigned long long)h * headDim + d];
+    }
+    float qsum = qv * qv;
+    float ksum = kv * kv;
+    for (unsigned int i = d + blockDim.x; i < headDim; i += blockDim.x)
+    {
+        float qi = base[(unsigned long long)h * headDim + i];
+        float ki = base[W + (unsigned long long)h * headDim + i];
+        qsum += qi * qi;
+        ksum += ki * ki;
+    }
+    qred[d] = qsum;
+    kred[d] = ksum;
+    __syncthreads();
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1)
+    {
+        if (d < stride)
+        {
+            qred[d] += qred[d + stride];
+            kred[d] += kred[d + stride];
+        }
+        __syncthreads();
+    }
+    if (d == 0)
+    {
+        float invDim = 1.0f / (float)headDim;
+        qred[0] = rsqrtf(qred[0] * invDim + eps);
+        kred[0] = rsqrtf(kred[0] * invDim + eps);
+    }
+    __syncthreads();
 
-    float kv = base[W + (unsigned long long)h * headDim + d];
-    sred[d] = kv * kv; __syncthreads();
-    for (unsigned int t = blockDim.x >> 1; t > 0; t >>= 1) { if (d < t) sred[d] += sred[d + t]; __syncthreads(); }
-    float kInv = rsqrtf(sred[0] / (float)headDim + eps);
-
-    q[outOff + d] = qv * qInv * qW[d];
-    k[outOff + d] = kv * kInv * kW[d];
-    v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+    if (d < headDim)
+    {
+        q[outOff + d] = qv * qred[0] * qW[d];
+        k[outOff + d] = kv * kred[0] * kW[d];
+        v[outOff + d] = base[2u * W + (unsigned long long)h * headDim + d];
+    }
+    for (unsigned int i = d + blockDim.x; i < headDim; i += blockDim.x)
+    {
+        q[outOff + i] = base[(unsigned long long)h * headDim + i] * qred[0] * qW[i];
+        k[outOff + i] = base[W + (unsigned long long)h * headDim + i] * kred[0] * kW[i];
+        v[outOff + i] = base[2u * W + (unsigned long long)h * headDim + i];
+    }
 }
 
 // FourierEmbedder (num_freqs bands, freqs 2^i, include_input=true, include_pi=false): for each point i and coord

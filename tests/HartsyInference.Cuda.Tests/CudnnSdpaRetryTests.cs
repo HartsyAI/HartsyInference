@@ -56,6 +56,8 @@ public sealed unsafe class CudnnSdpaRetryTests
     public void TransientFailure_BacksOffThenRecovers()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        CudnnRuntime.EnsureProbed();
+        if (!CudnnRuntime.SupportsSdpa) { _output.WriteLine($"SKIPPED: {CudnnRuntime.Reason}"); return; }
         string ptxDir = System.IO.Path.Combine(AppContext.BaseDirectory, "Ptx");
 
         const int d = 64, heads = 4, s = 32;
@@ -127,6 +129,8 @@ public sealed unsafe class CudnnSdpaRetryTests
     public void PermanentFailure_NeverRetries()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        CudnnRuntime.EnsureProbed();
+        if (!CudnnRuntime.SupportsSdpa) { _output.WriteLine($"SKIPPED: {CudnnRuntime.Reason}"); return; }
         string ptxDir = System.IO.Path.Combine(AppContext.BaseDirectory, "Ptx");
 
         const int d = 128, heads = 4, s = 32;

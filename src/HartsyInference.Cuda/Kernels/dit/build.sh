@@ -22,6 +22,7 @@ KERNELS=(
     "stepcache"
     "dit_rope"
     "dit_fp8emit"
+    "mg3_action"
 )
 
 INSTALL=true

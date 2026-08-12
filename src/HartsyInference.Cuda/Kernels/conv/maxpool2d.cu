@@ -1,7 +1,6 @@
 // MaxPool2D: explicit kernel/stride/zero-pad 2D max-pooling over NCHW tensors. One thread per output
-// element; the receptive field is scanned with bounds checks so padded taps never contribute. Matches
-// the CPU reference in IBackend.MaxPool2D exactly, including the "entire window out-of-bounds → 0"
-// fallback (unreachable for YOLO's SPPF k=5,s=1,p=2 but defined for arbitrary configs).
+// element; the receptive field is scanned with bounds checks so padded taps never contribute. Empty
+// padded windows emit zero; a valid negative-infinity input remains negative infinity.
 //
 //   out[n,c,oy,ox] = max over (ky,kw) of in[n,c, oy*strideH+ky-padH, ox*strideW+kw-padW]
 //
@@ -26,21 +25,23 @@ extern "C" {
     t /= outH;                                                                                       \
     unsigned int c = (unsigned int)(t % channels);                                                  \
     unsigned int b = (unsigned int)(t / channels);                                                  \
-    const T* plane = input + ((size_t)(b * channels + c)) * inH * inW;                              \
-    int iy0 = (int)(oy * strideH) - (int)padH;                                                       \
-    int ix0 = (int)(ox * strideW) - (int)padW;                                                       \
+    const T* plane = input + ((size_t)b * channels + c) * (size_t)inH * inW;                         \
+    long long iy0 = (long long)oy * strideH - padH;                                                  \
+    long long ix0 = (long long)ox * strideW - padW;                                                  \
     float maxVal = __int_as_float(0xff800000);  /* -inf, no math_constants.h dependency */          \
+    bool hasValue = false;                                                                          \
     for (unsigned int ky = 0; ky < kernelH; ky++) {                                                 \
-        int iy = iy0 + (int)ky;                                                                      \
-        if (iy < 0 || iy >= (int)inH) continue;                                                      \
+        long long iy = iy0 + ky;                                                                     \
+        if (iy < 0 || iy >= (long long)inH) continue;                                                \
         for (unsigned int kx = 0; kx < kernelW; kx++) {                                              \
-            int ix = ix0 + (int)kx;                                                                  \
-            if (ix < 0 || ix >= (int)inW) continue;                                                  \
-            float v = (float)plane[(size_t)iy * inW + (unsigned int)ix];                             \
+            long long ix = ix0 + kx;                                                                 \
+            if (ix < 0 || ix >= (long long)inW) continue;                                            \
+            hasValue = true;                                                                         \
+            float v = (float)plane[(size_t)iy * inW + (size_t)ix];                                  \
             if (v > maxVal) maxVal = v;                                                              \
         }                                                                                            \
     }                                                                                                \
-    output[idx] = (T)(isinf(maxVal) && maxVal < 0.0f ? 0.0f : maxVal);
+    output[idx] = (T)(hasValue ? maxVal : 0.0f);
 
 __global__ void maxpool2d_f32(
     float* __restrict__ output, const float* __restrict__ input,

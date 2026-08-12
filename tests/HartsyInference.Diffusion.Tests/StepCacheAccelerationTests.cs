@@ -55,7 +55,7 @@ public sealed unsafe class StepCacheAccelerationTests
     }
 
     [Fact]
-    public void RelativeL1Distance_ZeroReference_ReturnsZero()
+    public void RelativeL1Distance_NonzeroAgainstZeroReference_ReturnsInfinity()
     {
         using CpuBackend backend = new CpuBackend();
         using Tensor a = MakeF32(new TensorShape(1, 8), seed: 1);
@@ -63,7 +63,19 @@ public sealed unsafe class StepCacheAccelerationTests
         float* bp = (float*)b.DataPointer;
         for (int i = 0; i < 8; i++) bp[i] = 0f;
 
-        Assert.Equal(0f, ((IBackend)backend).RelativeL1Distance(a, b));
+        Assert.True(float.IsPositiveInfinity(((IBackend)backend).RelativeL1Distance(a, b)));
+        Assert.Equal(0f, ((IBackend)backend).RelativeL1Distance(b, b));
+    }
+
+    [Fact]
+    public void RelativeL1Distance_NonfiniteReference_ReturnsNaN()
+    {
+        using CpuBackend backend = new CpuBackend();
+        using Tensor current = MakeF32(new TensorShape(1, 8), seed: 94);
+        using Tensor reference = MakeF32(current.Shape, seed: 95);
+        ((float*)reference.DataPointer)[3] = float.NaN;
+
+        Assert.True(float.IsNaN(((IBackend)backend).RelativeL1Distance(current, reference)));
     }
 
     [Fact]
@@ -151,6 +163,46 @@ public sealed unsafe class StepCacheAccelerationTests
         backend.Scale(doubled, indicator, 2.0f);
         Assert.True(cache.ShouldCompute(backend, doubled));
         Assert.Equal(2, cache.Computes);
+    }
+
+    [Fact]
+    public void DeviceFeatureCache_NonzeroAfterZeroIndicator_ForcesRecomputeWithPolynomial()
+    {
+        using CpuBackend backend = new CpuBackend();
+        using DeviceFeatureCache cache = new DeviceFeatureCache(
+            threshold: 100f,
+            maxConsecutiveReuse: 10,
+            polyCoeffs: [0f, 1f, -1f]);
+        using Tensor input = MakeF32(new TensorShape(1, 8), seed: 91);
+        using Tensor output = MakeF32(new TensorShape(1, 8), seed: 92);
+        using Tensor zeroIndicator = new Tensor(new TensorShape(1, 8), DType.F32);
+        using Tensor nonzeroIndicator = MakeF32(zeroIndicator.Shape, seed: 93);
+
+        Assert.True(cache.ShouldCompute(backend, zeroIndicator));
+        cache.StoreResidual(backend, input, output);
+
+        Assert.True(cache.ShouldCompute(backend, nonzeroIndicator));
+        Assert.Equal(2, cache.Computes);
+        Assert.Equal(0, cache.Reuses);
+    }
+
+    [Fact]
+    public void DeviceFeatureCache_NonfinitePreviousIndicator_ForcesRecompute()
+    {
+        using CpuBackend backend = new CpuBackend();
+        using DeviceFeatureCache cache = new DeviceFeatureCache(threshold: 100f, maxConsecutiveReuse: 10);
+        using Tensor input = MakeF32(new TensorShape(1, 8), seed: 96);
+        using Tensor output = MakeF32(input.Shape, seed: 97);
+        using Tensor nonfiniteIndicator = MakeF32(input.Shape, seed: 98);
+        using Tensor finiteIndicator = MakeF32(input.Shape, seed: 99);
+        ((float*)nonfiniteIndicator.DataPointer)[4] = float.NaN;
+
+        Assert.True(cache.ShouldCompute(backend, nonfiniteIndicator));
+        cache.StoreResidual(backend, input, output);
+
+        Assert.True(cache.ShouldCompute(backend, finiteIndicator));
+        Assert.Equal(2, cache.Computes);
+        Assert.Equal(0, cache.Reuses);
     }
 
     [Fact]
