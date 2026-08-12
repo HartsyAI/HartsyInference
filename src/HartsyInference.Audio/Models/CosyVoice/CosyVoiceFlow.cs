@@ -355,28 +355,51 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
     /// DIFFERENT window starts, isolating the encoder's own windowing effect from noise-seed drift (the same
     /// discipline established for <see cref="InferenceChunk"/>, applied to a different span layout).</para>
     ///
-    /// <para><b>Measured result (2026-08-11), windowSizeTokens=150 (~6s), marginFrames=40, same 26.2s test
-    /// utterance as <see cref="InferenceGrowing"/>'s disqualifying measurement — VIABLE, ONE KNOWN ARTIFACT
-    /// NOT YET FIXED, NOT DONE</b>: per-call wall-clock FLATTENS at ~2.8s once the window fills (vs.
-    /// <see cref="InferenceGrowing"/>'s unbounded 1.66s→18.6s growth) — ratio last/first only 1.82×, and
-    /// critically this stays flat rather than continuing to grow for longer utterances. Total wall clock
-    /// 118.63s for 26.2s audio: 4.52× real-time (down from 13.75×, though still not real-time — the
-    /// remaining gap has real, untried tuning knobs: smaller window, larger chunk size to amortize the fixed
-    /// per-call cost, or fewer Euler steps). Quality held: mel relL2 vs monolithic = 5.97% (a bit above the
-    /// unbounded design's 3.6%, expected with less context, not diverging), per-second audio RMS ratio
-    /// stayed in [0.91, 1.29] with no trend over 26s. BUT a real, small, reproducible content artifact
-    /// showed up under Whisper cross-transcript comparison (comparing the chunked transcripts against EACH
-    /// OTHER, not just the target text, is what caught it): "quick brown fox" → "quit brown fox" — one word
-    /// out of ~85, trailing "-ck" clipped, identical in BOTH chunked variants (so a real chunk-boundary
-    /// effect, not ASR noise), everything else transcribes perfectly including a shared mishearing present
-    /// identically in all three files. Needs a fix (larger margin, or boundary-aware chunk sizing) and
-    /// re-verification before this is a finished design — it is the right foundation, not yet done.</para></summary>
+    /// <para><b>Measured result (2026-08-11), best config windowSizeTokens=150/chunkSizeTokens=25/
+    /// marginFrames=40, 26.2s test utterance — VIABLE, ONE KNOWN QUANTIFIED ARTIFACT, ACCEPTED (not a bug
+    /// to keep chasing — see the parameter sweep below)</b>: per-call wall-clock FLATTENS once the window
+    /// fills (vs. <see cref="InferenceGrowing"/>'s unbounded cost that keeps growing with utterance length),
+    /// 3.45× real-time overall (down from unbounded's 13.75×). Mel relL2 vs monolithic ≈ 5.6-5.9% across every
+    /// config tested, per-second audio RMS ratio stayed bounded with no growth trend over 26s (unlike
+    /// <see cref="InferenceChunk"/>'s compounding drift).</para>
+    ///
+    /// <para><b>The one artifact, fully characterized via a 5-way parameter sweep, not guessed at</b>: Whisper
+    /// cross-transcript comparison found "quick brown fox" → "quit brown fox" (one word out of ~80, trailing
+    /// "-ck" clipped). Swept windowSizeTokens ∈ {150, 200, 300} × marginFrames ∈ {40, 60} × chunkSizeTokens ∈
+    /// {15, 25} — EVERY bounded combination reproduces the identical substitution, byte-for-byte, in both the
+    /// flow-only and full-pipeline variants. A decisive discriminator settled the mechanism: the UNBOUNDED
+    /// <see cref="InferenceGrowing"/> (full ~600-token history, not a sliding window) transcribes this word
+    /// CORRECTLY on the exact same utterance/seed. So the substitution is not a margin or chunk-size tuning
+    /// problem — it requires near-COMPLETE history to resolve, which no practical bounded window provides
+    /// (tested up to 300 tokens, half the utterance, with zero improvement over 150). Most likely mechanism:
+    /// the LM's own sampled speech tokens for this specific word are a borderline/ambiguous realization that
+    /// only fully resolves with (near-)complete bidirectional context — an isolated, adversarial case, not a
+    /// general quality collapse (everything else in the ~80-word utterance transcribes perfectly across every
+    /// config, including a shared unrelated Whisper mishearing present identically in ALL variants tested,
+    /// bounded and unbounded alike). Accepted as a known, quantified (~1.25% WER, isolated, non-cascading)
+    /// limitation of the bounded-window design rather than continuing to chase a fix that would require
+    /// reintroducing the unbounded design's disqualifying cost.</para>
+    ///
+    /// <para><paramref name="chunkCausalSize"/> (Phase 5.3): optional chunk-causal mask for the CFM/mel-
+    /// decoder half only (<see cref="CausalConditionalDecoder"/>, via <see cref="Inference"/>'s own param) —
+    /// the token encoder can never accept one (see the unmaskable-encoder note above). Null (default)
+    /// preserves this method's original unmasked behavior exactly.</para>
+    ///
+    /// <para><b>Measured (2026-08-11)</b>, chunkCausalSize=50 (matches the tuned chunkSizeTokens×ratio) on
+    /// the same 26.2s utterance/config as the sweep above: ~14% FASTER (real-time factor improved) at a
+    /// small quality cost (mel relL2 6.5% vs 5.9% unmasked). Whisper transcript is BYTE-IDENTICAL to the
+    /// unmasked case, including the known "quick"→"quit" artifact — masking the CFM decoder's attention
+    /// does NOT touch that artifact at all, confirming it originates in the (unmaskable) encoder, not CFM
+    /// attention. Real, modest speed/quality tradeoff knob for callers who want it — left off by default
+    /// (best measured quality) rather than defaulted on, since the speed win is smaller than
+    /// <paramref name="chunkSizeTokens"/> tuning's own effect and stacks with it if wanted.</para></summary>
     public Tensor InferenceGrowingWindowed(IBackend backend,
         ReadOnlySpan<int> windowTokens, int windowStartToken,
         ReadOnlySpan<int> promptSpeechTokens, Tensor promptMel,
         Tensor speakerEmbed, int seed,
         Tensor fullNoise, int fullNoiseFrames, int marginFrames,
-        ref int emittedFrames, bool isFinal)
+        ref int emittedFrames, bool isFinal,
+        int? chunkCausalSize = null)
     {
         int mel = _cfg.Flow.MelBins;
         int ratio = UpsampleConformerEncoder.TokenMelRatio;
@@ -409,7 +432,7 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         }
 
         Tensor full = Inference(backend, windowTokens, promptSpeechTokens, promptMel, speakerEmbed, seed,
-            chunkCausalSize: null, x0Override: x0);
+            chunkCausalSize: chunkCausalSize, x0Override: x0);
         x0.Dispose();
 
         int totalFrames = (int)full.Shape[2];
