@@ -185,6 +185,9 @@ public static class TestPaths
         public static string SingleFile     => Resolve("LTX2_PATH",            Path.Combine(ModelsDir, "Stable-Diffusion", "LtxVideo2", "ltx-2.3-22b-dev-fp8.safetensors"));
         public static string GemmaEncoder   => Resolve("LTX2_GEMMA_PATH",      Path.Combine(ModelsDir, "text_encoders", "gemma_3_12B_it_fp8_scaled.safetensors"));
         public static string GemmaTokenizer => Resolve("LTX2_GEMMA_TOKENIZER", Path.Combine(ModelsDir, "Tokenizers", "Gemma", "tokenizer.model"));
+        /// <summary>Standalone LTX-2.5 video VAE — the diffusion (<c>NADiffusionDecoder</c>) decoder, not the
+        /// convolutional one bundled with 2.3. Override with LTX25_VIDEO_VAE_PATH.</summary>
+        public static string VideoVae25     => Resolve("LTX25_VIDEO_VAE_PATH",  Path.Combine(ModelsDir, "VAE", "LTX-2", "ltx-2.5-video-vae-bf16.safetensors"));
     }
 
     /// <summary>HunyuanVideo (Tencent 13B T2V) paths. The DiT single-file is the Comfy-Org repacked bf16 (original
