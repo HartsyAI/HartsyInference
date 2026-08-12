@@ -33,19 +33,30 @@ public sealed class ImagesService : IImagesService
                 IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request);
                 ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);
 
-                // Resolved first: the crop is scaled to the resolution the model will actually run at, so it has to see
+                // Base-prompt tag-leak fix: <segment:>/<clear:> text must not reach the BASE (full-canvas) pass's
+                // text encoder — a segment's own sub-prompt is meant for its own later masked denoise only. Gated
+                // on hasSegments so a segment-free prompt takes the identity path (basePass IS resolved, not a
+                // re-serialized copy) — zero behavior change for every request without a <segment:>/<clear:> tag.
+                bool hasSegments = SegmentRefinement.HasSegmentParts(resolved.Prompt);
+                ImageRequest basePass = hasSegments
+                    ? resolved with { Prompt = SegmentRefinement.StripSegmentText(resolved.Prompt) }
+                    : resolved;
+
+                // basePass first: the crop is scaled to the resolution the model will actually run at, so it has to see
                 // the defaults-filled request rather than the caller's.
-                InpaintOnlyMasked.Plan? cropPlan = InpaintOnlyMasked.Prepare(resolved);
+                InpaintOnlyMasked.Plan? cropPlan = InpaintOnlyMasked.Prepare(basePass);
                 ImageResult result = cropPlan is null
-                    ? _engine.GenerateWithVramCleanup(() => pipeline.Generate(resolved, progress, cancel))
+                    ? _engine.GenerateWithVramCleanup(() => pipeline.Generate(basePass, progress, cancel))
                     : InpaintOnlyMasked.Composite(
-                        _engine.GenerateWithVramCleanup(() => pipeline.Generate(InpaintOnlyMasked.Apply(resolved, cropPlan), progress, cancel)),
+                        _engine.GenerateWithVramCleanup(() => pipeline.Generate(InpaintOnlyMasked.Apply(basePass, cropPlan), progress, cancel)),
                         cropPlan);
 
                 // Tier 3.2: <segment:X> runs AFTER pixels exist (it needs to segment the decoded image), so it
                 // composes on top of whatever the ordinary inpaint-only-masked path above already produced —
-                // a request can combine a top-level Inpaint.ShrinkGrow crop with segment refinement.
-                if (SegmentRefinement.HasSegmentParts(resolved.Prompt))
+                // a request can combine a top-level Inpaint.ShrinkGrow crop with segment refinement. Passes the
+                // ORIGINAL resolved (tags intact), not basePass — SegmentRefinement.Apply re-parses resolved.Prompt
+                // itself to find each segment's own sub-prompt/geometry.
+                if (hasSegments)
                 {
                     result = SegmentRefinement.Apply(result, resolved, pipeline, _engine.Backend, _clipSeg, progress, cancel);
                 }

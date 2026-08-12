@@ -911,9 +911,11 @@ grinds).
   path, since `<segment:>` needs pixels that don't exist yet at request-build time. Uses
   `PromptRegionParser`'s existing `Segment` parts + `ClipSegSegmenter` (source-resolution
   thresholded mask) + `InpaintOnlyMasked`'s crop/generate/composite cycle verbatim. Real-weight
-  verified on Flux.1 Schnell: same-seed baseline vs. `<segment:the red apple,0.95,0.5>a bright blue
-  apple`, `Meta["segments_refined"] == 1`, diff confined to the apple region (pear/table
-  unchanged), visually inspected.
+  verified on Flux.1 Schnell (direct-engine test), then live-verified a second time through the
+  actual running SwarmUI service: same-seed baseline vs. `<segment:the red apple,0.95,0.5>a bright
+  blue apple`, log-confirmed `CLIPSeg 'the red apple': matched 71186 px (27.2% of image)`,
+  `Meta["segments_refined"] == 1`, the recomposited region visually and dramatically changed
+  (apple → blue) while the pear stayed recognizably the pear.
   <br>**Still missing (deliberately out of scope for this slice)**: YOLO detector path (`yolo-`
   prefix parses but is skipped with a warning, not wired); pipe-separated `X|Y` OR-composite masks;
   `<clear:>` (`ClearSegment`) alpha-cutout — a separate, simpler, unrelated mechanism (CLIPSeg-match
@@ -921,6 +923,18 @@ grinds).
   path; `SegmentSortOrder` (parsed into `Regional` but never consumed — segments always apply in
   parse order today). Dependency on the tiled-VAE-encoder segfault is still conditional, not
   automatic, for the same reason as before (oversized-bbox crops are usually small).
+  <br>**Base-prompt tag-leak, confirmed real via the live test's own numbers, not just theoretical**
+  (documented in `SegmentRefinement.cs`'s class doc, but not previously quantified): no recipe
+  pipeline strips `<segment:X>...</>` tag text from what it sends to its own text encoder for the
+  BASE (full-canvas) pass — same pre-existing gap `<region:>`/`<object:>` already have. Measuring
+  the live A/B pair's mean-abs-diff on a crop that's pure untouched background (no apple, no pear)
+  found ~40-47/255, not near-zero as a clean isolation would predict — the literal segment tag text
+  is reaching the tokenizer and lightly steering the WHOLE base image, not just the masked region.
+  The masked region's own diff (~55-83/255) is real and dominant, so the feature still visibly does
+  its job, but the "confined to the segment" claim from the first verification pass undersold this.
+  Fix (not built): make `ImagesService` tokenize `PromptRegionParser.GlobalPrompt` (tags already
+  stripped) for the base pass instead of the raw prompt, same fix needed for `<region:>`/`<object:>`
+  — one shared fix, not three.
   <br>**Syntax note, easy to get backwards**: `<segment:query,Strength2,Strength>` — the mask
   threshold (`Strength`, default 0.5) comes LAST, the denoise/creativity strength (`Strength2`,
   default 0.6) comes second. There is no `<segment:end>` closer (unlike `<region:end>`) — writing
