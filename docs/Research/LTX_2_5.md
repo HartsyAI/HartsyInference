@@ -8,6 +8,43 @@ a targeted error rather than mis-decoding it. Wiring needs an `ILtx2TextTower` s
 and cannot be exercised on the dev box (the text encoder is 26 GB; the decoder is managed-only at ~32 s for the
 smallest possible frame). This doc stays a full research doc rather than a provenance stub until that lands.
 
+## If you are the one wiring this into the pipeline
+
+Concrete answers to the questions that come up first, so they don't have to be re-derived.
+
+**Ungated conv VAE** (Lightricks 401s even on a byte range; both verified reachable 2026-08-12, `gated: false`):
+
+```
+https://huggingface.co/ChrisColeTech/LTX-2.5-turbo-GGUF/resolve/main/split/vae/ltx-2.5-video-vae-conv-bf16.safetensors
+https://huggingface.co/dummy9996/LTX-2.5-22b-ungate/resolve/main/ltx-2.5-video-vae-conv-bf16.safetensors
+```
+
+The first is where the staged diffusion VAE came from, and that file was header-identical to the original.
+
+**Decode through the conv VAE, not the diffusion decoder.** The diffusion decoder is parity-checked but
+managed-only — there is no CUDA `Na3d` kernel — and it needs ~32 s for the smallest legal frame
+(`[1,3,1,64,64]`). Real-resolution decoding is out of reach until that kernel exists, and the dominant cost is
+`MatMulKernels.LinearTransB` re-casting a non-F32 weight on every call, not the attention itself.
+
+**The two `LtxVideo2Recipe.Construct` guards** (`"bundles a Gemma 4 text tower"`, `"carries the LTX-2.5
+diffusion video VAE"`) are deliberate placeholders. Delete them as part of wiring rather than routing around
+them.
+
+- Gemma-4 discriminator: `conv.TextEncoder.ContainsKey("model.layers.0.layer_scalar")`. Do **not** probe for a
+  missing `v_proj` — layer 0 is a sliding layer and has one.
+- `Gemma4TextEncoder.EncodeMultiLayer` was written to the same signature and layer-outer `[B, seq, K·H]` layout
+  as `LlamaStyleEncoder`, so the tower swap is meant to be a one-line change.
+- Conditioning length: the recipe's `TokenLength` is 256, but ComfyUI pads Gemma-4 LTX conditioning to
+  **1024**, and sequence length is part of the conditioning because of the connector's learnable-register
+  replacement. `Gemma4Tokenizer.BuildConditioningSequence` already right-pads to 1024.
+- `conv.VaeDiffusionDecoder` holds the `decoder.*` keys with the prefix kept; the latent statistics stay in
+  `conv.Vae` as `latents_mean`/`latents_std`, since both decoders un-normalize identically.
+- Distilled vs dev is not detectable from any checkpoint — it arrives via the `ltx-2.5-distilled` catalog id.
+
+**Before chasing output quality, read the two divergences below** (the missing final norm, which affects the
+shipping 2.3 path too, and the padding-side difference). Either can make output subtly wrong in a way that
+looks like a porting bug somewhere else.
+
 ## Summary
 
 LTX 2.5 (Lightricks, released 2026-08-11) is a point release of the same dual-stream audio-video DiT the
@@ -477,8 +514,16 @@ rounding artefact.
   currently uses 256 for 2.3. Sequence length is part of the conditioning because of the connector's
   learnable-register replacement, so 1024 is the parity-correct choice, but the VRAM cost at 22B has not
   been measured.
-- **End-to-end runnability on this box.** bf16 DiT (42 GB) + bf16 TE (26 GB) neither fit the ~30 GB free
-  disk nor the 24 GB + 12 GB of VRAM. An fp8_e4m3fn distilled repack exists at 23.49 GB
-  (`guillaume127/LTX-2.5-FP8`) and GGUF repacks are appearing, but there is no small Gemma 4 TE repack yet.
-  Real generation stays deferred until a matched pair exists; int8-convrot support is explicitly a separate
-  work item.
+- **End-to-end runnability on this box — the size blocker is gone as of 2026-08-12.** It used to be that
+  bf16 DiT (42 GB) + bf16 TE (26 GB) fit neither the free disk nor the 24 GB + 12 GB of VRAM, and the
+  official small builds were unloadable. The engine now reads `int8_tensorwise` + ConvRot resident
+  ([`QUANTIZATION_COMFY_FORMATS.md`](QUANTIZATION_COMFY_FORMATS.md)), so the official pair is
+  **21.50 GB DiT + 15.37 GB TE** — both fit. What remains is pipeline wiring, not size: the LTX-2 pipeline
+  still constructs the Gemma-3 tower and the convolutional decoder, so a 2.5 bundle is refused rather than
+  mis-decoded.
+  - The official Lightricks files are **gated for download** (401 even on a byte range, though the tree API
+    answers). `DmitryDB/LTX-2.5-ComfyUI-Quants` republishes the same layout ungated — its
+    `int8_lean_convrot` DiT is 21.50 GB with the identical 1440 quantized matrices — and
+    `dummy9996/LTX-2.5-22b-ungate` carries bf16 for reference tensors.
+  - The third-party fp8_e4m3fn distilled repack (`guillaume127/LTX-2.5-FP8`, 23.49 GB) would ride the
+    existing fp8 path unchanged, but it is unofficial and does nothing for the text encoder.
