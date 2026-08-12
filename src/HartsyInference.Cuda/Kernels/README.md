@@ -39,3 +39,28 @@ cp out.ptx src/HartsyInference.Cuda/Ptx/
 Target `sm_80` minimum (forward-JIT-compatible). Verify every emitted PTX starts `.version 9.0` — the driver
 JIT caps there (see `docs/Checklists/TROUBLESHOOTING.md` § CUDA toolchain). Validate a new/changed kernel
 against the CPU reference within tolerance before shipping (`docs/Agents/KERNEL.md`).
+
+### The shipped PTX must reproduce from source — check it
+
+Every `build.sh` falls back to `../nvrtc_compile` when nvcc is absent, so **all eight domains build on a box
+with no CUDA toolkit**. They did not always: `attention/`, `audio/` and `lm/` were nvcc-only, so on a
+toolkit-less box they failed outright — and because nobody could rebuild them, their shipped PTX silently
+drifted from their `.cu`. Eight kernels were found compiled from sources up to five weeks older than the
+committed source, including `flash_attn_f32`/`_split` (source a week newer than the PTX) and both
+`sage_attn_int8` variants. Editing a `.cu` and not shipping the `.ptx` is invisible at runtime — the old
+kernel just keeps running — so treat a rebuild that changes `../Ptx/` as a bug report, not noise:
+
+```bash
+md5sum src/HartsyInference.Cuda/Ptx/*.ptx > /tmp/ptx.md5
+for d in src/HartsyInference.Cuda/Kernels/*/; do (cd "$d" && ./build.sh); done
+md5sum -c /tmp/ptx.md5 | grep -v ': OK'      # anything listed is stale or compiler drift
+```
+
+`CUDA_INC` must point at a **complete** header set — `mma.h` (attention) includes `crt/mma.h`, which the
+`lib/cuda13/include` set lacks. The scripts auto-pick the first candidate that has it; override `CUDA_INC`
+explicitly for a different toolkit.
+
+Two kernels, `lm_f32` and `mul_mat_vec_q6k_q8_1`, are **nvcc-built and do not reproduce under nvrtc** — the
+sources are current, only register allocation differs. They are deliberately left as-is: both are LLM-decode
+hot paths whose throughput was tuned against llama.cpp, and swapping codegen without a decode benchmark
+would risk that silently. Regenerate them only alongside a perf run.

@@ -20,7 +20,15 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 PTX_OUT="${THIS_DIR}/../../Ptx"
 NVRTC="${THIS_DIR}/../nvrtc_compile"
 CUDA_LIB="${CUDA_LIB:-${HOME}/.local/lib/cuda13}"
-CUDA_INC="${CUDA_INC:-${CUDA_LIB}/include}"
+# The headers must be a COMPLETE set: mma.h (attention) pulls crt/mma.h, which the lib-adjacent
+# include dir lacks — that is why attention/audio/lm silently could not rebuild here. Prefer the first
+# candidate that actually has it, so a partial set degrades to a clear error rather than a stale PTX.
+if [[ -z "${CUDA_INC:-}" ]]; then
+    for _cand in "${HOME}/.local/cuda-tools/nvidia/cu13/include" "${CUDA_LIB}/include"; do
+        if [[ -f "${_cand}/crt/mma.h" ]]; then CUDA_INC="$_cand"; break; fi
+    done
+    CUDA_INC="${CUDA_INC:-${CUDA_LIB}/include}"
+fi
 
 KERNELS_SM75=(
     "dequant_q8_0_to_f16"

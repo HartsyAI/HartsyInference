@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Compiles the custom attention kernels to PTX and copies them into the HartsyInference.Cuda Ptx folder.
-# Requires nvcc (CUDA 11+) on PATH. Target SM 8.0 (Ampere+); PTX is JIT-forward-compatible.
+# Uses nvcc (CUDA 11+) when it is on PATH, else the committed ../nvrtc_compile frontend,
+# which needs the CUDA headers ($CUDA_INC). Target SM 8.0 (Ampere+); PTX is JIT-forward-compatible.
 # NOTE: the emitted PTX must say ".version 9.0" — newer nvcc emits 9.3 which the fleet driver refuses to
 # JIT (see INFERENCE_ACCEL_GRIND §H1.1: pin nvidia-nvvm alongside nvidia-cuda-nvcc).
 #
@@ -11,6 +12,17 @@ set -euo pipefail
 
 THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 PTX_OUT="${THIS_DIR}/../../Ptx"
+NVRTC="${THIS_DIR}/../nvrtc_compile"
+CUDA_LIB="${CUDA_LIB:-${HOME}/.local/lib/cuda13}"
+# The headers must be a COMPLETE set: mma.h (attention) pulls crt/mma.h, which the lib-adjacent
+# include dir lacks — that is why attention/audio/lm silently could not rebuild here. Prefer the first
+# candidate that actually has it, so a partial set degrades to a clear error rather than a stale PTX.
+if [[ -z "${CUDA_INC:-}" ]]; then
+    for _cand in "${HOME}/.local/cuda-tools/nvidia/cu13/include" "${CUDA_LIB}/include"; do
+        if [[ -f "${_cand}/crt/mma.h" ]]; then CUDA_INC="$_cand"; break; fi
+    done
+    CUDA_INC="${CUDA_INC:-${CUDA_LIB}/include}"
+fi
 
 KERNELS=(
     "sage_attn_int8"
@@ -29,8 +41,17 @@ for kernel in "${KERNELS[@]}"; do
         echo "missing source: $src" >&2
         exit 1
     fi
-    echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_80 ${kernel}.cu"
-    nvcc -ptx -arch=sm_80 "$src" -o "$ptx"
+    if command -v nvcc >/dev/null 2>&1; then
+        echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_80 ${kernel}.cu"
+        nvcc -ptx -arch=sm_80 "$src" -o "$ptx"
+    else
+        if [[ ! -x "$NVRTC" ]]; then
+            echo "no nvcc on PATH and no nvrtc helper — build it: cc -O2 -o $NVRTC ${NVRTC}.c -ldl" >&2
+            exit 1
+        fi
+        echo "[$(date +%H:%M:%S)] nvrtc_compile compute_80 ${kernel}.cu"
+        LD_LIBRARY_PATH="$CUDA_LIB" "$NVRTC" "$src" "$ptx" compute_80 "$CUDA_INC"
+    fi
     if ! head -20 "$ptx" | grep -q '^\.version 9\.0$'; then
         echo "ERROR: ${kernel}.ptx is not PTX ISA 9.0 (driver JIT ceiling) — check toolchain pin." >&2
         exit 1
