@@ -6,7 +6,7 @@ using HartsyInference.ModelAssets.TextEncoders;
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 
 /// <summary>Llama-family decoder transformer used as a text encoder for diffusion conditioning. Supports GQA, RMSNorm, RoPE (theta-configurable), SwiGLU MLP, and optional per-head Q/K RMSNorm (Qwen3). Runs as an encoder: single forward pass returning <c>last_hidden_state</c> as <c>[B, seqLen, hiddenSize]</c>; causal attention mask matches how the model was trained.</summary>
-public sealed unsafe class LlamaStyleEncoder : IDisposable
+public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 {
     private readonly LlamaStyleEncoderConfig _config;
     private readonly LlamaBlock[] _blocks;

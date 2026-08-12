@@ -34,12 +34,16 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     private const int GemmaLayers = 49;             // 48 transformer layers + 1 embedding
     private const int ConnectorRegisters = 128;     // text seq is padded to a multiple of this
 
+    /// <summary>Shortest conditioning sequence to pad to, whatever the prompt length; 0 uses only the register
+    /// multiple. LTX-2.5's Gemma 4 conditions at 1024; LTX-2.3 leaves this 0 and is unaffected.</summary>
+    public int MinimumTextConditioningLength { get; init; }
+
     private readonly LtxVideo2Transformer _transformer;
     private readonly LtxVideo2TextConnectors _connectors;
     private readonly LtxVideo2VaeDecoder _vae;
     private readonly LtxAudioVaeDecoder? _audioVae;
     private readonly LtxAudioVocoder? _vocoder;
-    private readonly LlamaStyleEncoder _gemma;
+    private readonly ILtx2TextTower _gemma;
     private readonly LtxVideo2Config _config;
     private readonly float[]? _audioLatentsMean, _audioLatentsStd;
 
@@ -65,7 +69,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     private long _gemmaWeightBytes = -1;
 
     public LtxVideo2Pipeline(IBackend backend, LtxVideo2Transformer transformer, LtxVideo2TextConnectors connectors,
-        LtxVideo2VaeDecoder vae, LlamaStyleEncoder gemma, LtxVideo2Config config,
+        LtxVideo2VaeDecoder vae, ILtx2TextTower gemma, LtxVideo2Config config,
         LtxAudioVaeDecoder? audioVae = null, LtxAudioVocoder? vocoder = null,
         float[]? audioLatentsMean = null, float[]? audioLatentsStd = null)
         : base(backend)
@@ -467,6 +471,12 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         int real = tokens.Length;
         int seq = ((real + ConnectorRegisters - 1) / ConnectorRegisters) * ConnectorRegisters;
         if (seq == 0) seq = ConnectorRegisters;
+        // Some families condition at a fixed length regardless of prompt (Gemma 4 at 1024). Length is part of the
+        // conditioning because the connector replaces learnable registers positionally, so it is padded UP to that
+        // here — where validMask still marks only the real tokens. Padding upstream in the tokenizer instead would
+        // make `real` count the pad tokens and present them to the connector as content.
+        if (seq < MinimumTextConditioningLength)
+            seq = ((MinimumTextConditioningLength + ConnectorRegisters - 1) / ConnectorRegisters) * ConnectorRegisters;
 
         // Right-pad to a register multiple. The Gemma encoder applies only a causal mask (no padding mask), so
         // padding on the right keeps real tokens (at the front) from attending to pad tokens; validMask marks them.
@@ -500,6 +510,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         sub.Restart();
 
         (Tensor video, Tensor audio) = _connectors.Forward(TextEncoderBackend, feats, validMask);
+        DumpTextDebug(feats, video, real, seq);
         feats.Dispose();
         Logs.Info($"[ltx2-phase]   connectors: {sub.ElapsedMilliseconds} ms");
         return (video, audio);
@@ -547,6 +558,37 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Logs min/max/mean/rms for a stage output under <c>HARTSY_LTX2_PROBE=1</c>; no-op otherwise.</summary>
+    private static int _textDumpIndex;
+
+    /// <summary>TEMPORARY diagnostic: dumps the pre-connector Gemma features and the post-connector video embedding
+    /// so a two-prompt A/B can tell a tower failure from a connector-broadcast failure. Set HARTSY_LTX2_DUMP_TEXT
+    /// to an output directory.</summary>
+    private static void DumpTextDebug(Tensor feats, Tensor video, int real, int seq)
+    {
+        string? dir = Environment.GetEnvironmentVariable("HARTSY_LTX2_DUMP_TEXT");
+        if (string.IsNullOrEmpty(dir))
+        {
+            return;
+        }
+        Directory.CreateDirectory(dir);
+        int idx = _textDumpIndex++;
+        void Write(string name, Tensor t)
+        {
+            Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+            long n = f32.ElementCount;
+            byte[] buf = new byte[n * 4];
+            fixed (byte* bp = buf)
+            {
+                Buffer.MemoryCopy((void*)f32.DataPointer, bp, buf.LongLength, n * 4);
+            }
+            File.WriteAllBytes(Path.Combine(dir, name), buf);
+        }
+        Write($"feats_{idx}.bin", feats);
+        Write($"video_{idx}.bin", video);
+        File.WriteAllText(Path.Combine(dir, $"meta_{idx}.txt"), $"real={real} seq={seq} videoDim={video.Shape[1]}\n");
+        Logs.Info($"[ltx2-dump] wrote text dump {idx}: real={real} seq={seq}");
+    }
+
     private static void ProbeTensor(string label, Tensor tensor)
     {
         if (Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") != "1")

@@ -96,6 +96,20 @@ public sealed class LtxVideo2CheckpointConverter
         key.Contains("embeddings_connector", StringComparison.Ordinal)
         || key.Contains("text_embedding_projection", StringComparison.Ordinal);
 
+    /// <summary>Whether a bare key belongs to a standalone Gemma 4 text tower (LTX-2.5's <c>gemma4-12b-with-proj</c>
+    /// file) rather than to the DiT.</summary>
+    /// <remarks>The multimodal heads (<c>vision_model</c>, <c>audio_projector</c>, <c>multi_modal_projector</c>) ride
+    /// along in that file and are unused for LTX conditioning; they route here so they land somewhere the tower
+    /// ignores instead of being mistaken for DiT weights.</remarks>
+    private static bool IsGemma4TowerKey(string key) =>
+        key.StartsWith("model.layers.", StringComparison.Ordinal)
+        || key.StartsWith("model.embed_tokens.", StringComparison.Ordinal)
+        || key.StartsWith("model.norm.", StringComparison.Ordinal)
+        || key.StartsWith("multi_modal_projector.", StringComparison.Ordinal)
+        || key.StartsWith("audio_projector.", StringComparison.Ordinal)
+        || key.StartsWith("vision_model.", StringComparison.Ordinal)
+        || key == "tokenizer_json";
+
     /// <summary>Key whose presence identifies an LTX-2.5 diffusion video VAE — the noised-pixel input projection,
     /// which the convolutional decoder has no counterpart for. Same signature ComfyUI selects on.</summary>
     public const string DiffusionDecoderSignatureKey = "decoder.conv_in_x_t.weight";
@@ -127,6 +141,10 @@ public sealed class LtxVideo2CheckpointConverter
     {
         if (key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || key == "scaled_fp8")
             return (Ltx2Bucket.Drop, null);
+        // Packagers embed side files (chat template, generation/processor/tokenizer config) as U8 tensors under
+        // this prefix. They are not weights; without dropping them they fall through to the DiT mapper.
+        if (key.StartsWith("hf_asset__", StringComparison.Ordinal))
+            return (Ltx2Bucket.Drop, null);
 
         // Vocoder/audio VAE prefixes are matched before the bare "vae." so "audio_vae." never falls through to it.
         if (key.StartsWith(VocoderPrefix, StringComparison.Ordinal))
@@ -149,6 +167,12 @@ public sealed class LtxVideo2CheckpointConverter
         // Bare keys (diffusers folder shards) routed by module root.
         if (IsConnectorKey(key))
             return (Ltx2Bucket.Connectors, key);
+        // LTX-2.5 ships its Gemma 4 tower as its own file with BARE `model.layers.*` keys — no `text_encoder.`
+        // prefix — so without this they fall through to MapTransformer below and are loaded as DiT weights. The
+        // DiT's own keys carry `model.diffusion_model.`, a different prefix, so it is unaffected. Checked after
+        // IsConnectorKey because `text_embedding_projection.*` lives in the same file but belongs to the connectors.
+        if (IsGemma4TowerKey(key))
+            return (Ltx2Bucket.TextEncoder, key);
         if (key.StartsWith("decoder.", StringComparison.Ordinal) || key.StartsWith("encoder.", StringComparison.Ordinal)
             || key.StartsWith("latents_", StringComparison.Ordinal)
             || key.StartsWith("per_channel_statistics", StringComparison.Ordinal))
@@ -213,9 +237,14 @@ public sealed class LtxVideo2CheckpointConverter
     private static (Ltx2Bucket, string?) MapAudioVae(string key) => (Ltx2Bucket.AudioVae, key);
 
     /// <summary>Routes a flat weight dictionary (single file or merged shards) into the per-component buckets.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <param name="residentNvfp4">Keep an nvfp4 build packed instead of unpacking it to BF16 at load. Only a caller
+    /// whose backend can consume a packed weight may ask for it — the official 18.72 GB LTX-2.5 distilled nvfp4 DiT
+    /// unpacks to 42 GB, so this is the difference between fitting a 24 GB card and not.</param>
+    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights, bool residentNvfp4 = false)
     {
-        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
+        // Folds every quantized build's companions onto the weight before routing: the LTX-2.5 comfy-int8-convrot DiT
+        // keeps its I8 bytes with the row scale on Tensor.QuantInfo, fp8 builds get Fp8ScaleFactor.
+        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights, residentNvfp4: residentNvfp4);
 
         Dictionary<string, Tensor> transformer = new(allWeights.Count);
         Dictionary<string, Tensor> connectors = new(256);

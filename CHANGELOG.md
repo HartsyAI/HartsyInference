@@ -14,6 +14,59 @@ stable release will require. Dates are UTC.
   record-shape change for transports that set it; the SwarmUI extension's mapping was removed in the same pass.
 
 ### Added
+- **ComfyUI `int8_tensorwise` quantization, resident (± the `convrot` Hadamard rotation).** This is the format
+  the *official* Lightricks LTX 2.5 and Comfy-Org MiniMax-H3 quantized releases ship in, and it was previously
+  rejected by name at load. Weights now stay int8 on the device at 1 byte/param instead of expanding to BF16,
+  so a 21 GB DiT fits a 24 GB card. Format notes:
+  [`docs/Research/QUANTIZATION_COMFY_FORMATS.md`](docs/Research/QUANTIZATION_COMFY_FORMATS.md).
+  - **`Tensor.QuantInfo`** (`QuantWeightInfo`) carries a packed weight's companions — per-output-row scale,
+    ConvRot group size, `full_precision_matrix_mult` — the way `Fp8ScaleFactor` already carried fp8's scalar.
+    Attaching them to the weight rather than to a per-model linear wrapper is what lets one backend branch
+    serve every model that loads such a checkpoint, with no change to any model's code.
+  - **`CudaBackend.Linear`** gained a resident-int8 branch reusing the existing W8A8 chain: activation ConvRot
+    (`convrot.ptx`, a radix-4 butterfly — `H` is `kron(h4, …)`, so no matrix is materialized), per-row dynamic
+    int8 quant, cuBLASLt IMMA, then the `rowScale·wScale + bias` epilogue. Chunked over rows against live free
+    VRAM, because the int32 accumulator is 4 bytes per output element and the weights have already filled the
+    card. Short sequences pad to the 32-row IMMA granularity rather than falling back, matching comfy-kitchen.
+  - **`Int8ConvRotCodec`** provides the un-rotating dequant for the CPU/Vulkan backends and for layers tagged
+    `full_precision_matrix_mult`. Verified against comfy-kitchen's eager reference at **relL2 5.1e-8–2.7e-7**
+    with F32 activations; `H` itself matches bit-exactly.
+  - **`ComfyQuantDescriptor`** replaces three divergent private copies of the `.comfy_quant` blob parser. The
+    per-layer blob is now authoritative over the file-level `_quantization_metadata` mirror, which re-quants of
+    the same model disagree with.
+  - MiniMax-H3's `int8_convrot` rejection is deleted; `MiniMaxH3Assets` no longer sinks `convrot` filenames.
+- **ComfyUI `nvfp4` weights stay resident too.** They were unpacked to BF16 at load, which turned the official
+  18.72 GB LTX-2.5 distilled nvfp4 DiT into 42 GB. `Nvfp4Codec.TryAttachResident` now relabels the packed
+  weight to `DType.F4E2M1 [N, K]` — the dtype already existed for exactly this — and `CudaBackend` dequantizes
+  it in-kernel per GEMM under the existing `CacheWeightCasts` budget. Bit-exact against the host reference on
+  real `qwen3vl_32b_minimax_h3_nvfp4_awq` layers. A **VRAM** win only: no consumer GPU here has FP4 tensor
+  cores, so the GEMM still runs in F16. Opt-in per caller, since the eager unpack is what CPU/Vulkan need and
+  AWQ layers with `pre_quant_scale` must take it regardless.
+- **`Tensor.ReinterpretAs`** — a byte-count-validated, keep-alive-rooted dtype/shape view. `Reshape` could not
+  serve: it holds element count fixed, and the whole point here is that one U8 byte becomes two F4E2M1 elements.
+- **LTX-2.5 pipeline wiring — the Gemma 4 tower is now driven, not just built.** `Gemma4TextEncoder` and
+  `Gemma4Tokenizer` existed and were parity-checked but had no consumers; `LtxVideo2Recipe` still constructed the
+  Gemma-3 tower and refused a 2.5 bundle with a targeted error.
+  - **`ILtx2TextTower` / `ILtx2PromptTokenizer`** name the contract the pipeline was already relying on
+    structurally. Both encoders already exposed `EncodeMultiLayer`/`EnumerateWeights`/`NumLayers` with identical
+    signatures, so neither implementation changed. `LtxVideo2Pipeline`'s 3840 caption channels and 49 harvested
+    states hold for both families.
+  - The recipe branches on `model.layers.0.layer_scalar` — **not** on a missing `v_proj`, which would misclassify
+    every Gemma 4 checkpoint, since layer 0 is a sliding layer and has one. Gemma 4 conditions at 1024 tokens
+    against Gemma 3's 256; that length is part of the conditioning, because the connector replaces learnable
+    registers positionally.
+  - The tokenizer is built from the `tokenizer_json` U8 tensor LTX-2.5 embeds **inside** its text encoder — there
+    is no side file anywhere to fall back to.
+  - **Converter routing**: a standalone Gemma 4 tower ships bare `model.layers.*` keys with no `text_encoder.`
+    prefix and was falling through to the DiT mapper. Those now route to the text-encoder bucket, checked after
+    the connector rule because `text_embedding_projection.*` lives in the same file but belongs to the connectors.
+    Packager-embedded `hf_asset__*` side files (chat template, tokenizer/processor config) are dropped — they are
+    not weights. Verified on the real 15.37 GB checkpoint: 328 packed int8 tower weights, zero leaking into the DiT.
+  - Real-weight verified: the int8-convrot Gemma 4 encoder produces finite, deterministic, prompt-discriminating
+    conditioning on a 4090 — identical tokens give bit-identical states, differing tokens diverge.
+  - Unchanged on purpose: the diffusion-decoder guard (decode through the conv VAE — the diffusion decoder is
+    managed-only), and both documented divergences from upstream (the 49th state's final norm, and padding side),
+    which also affect the shipping 2.3 path.
 - **LTX-2.5 support (components complete; end-to-end generation not yet wired).** Every piece is ported and
   checked against the reference, but the LTX-2 pipeline still constructs the Gemma-3 tower and the
   convolutional decoder, so a full 2.5 bundle is now refused with a targeted error instead of being

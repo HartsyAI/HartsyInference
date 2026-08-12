@@ -17,7 +17,7 @@ namespace HartsyInference.Diffusion.Models.TextEncoders;
 /// <c>1/sqrt(head_dim)</c>. V additionally passes through a weightless RMS norm on <b>both</b> layer kinds, each
 /// block ends with a scalar <c>layer_scalar</c> multiply, and the four sandwich norms store their scales directly
 /// (verified against the real checkpoint's bf16 bytes — this is <b>not</b> Gemma 3's <c>1 + w</c> convention).</remarks>
-public sealed unsafe class Gemma4TextEncoder : IDisposable
+public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
 {
     private readonly Gemma4TextEncoderConfig _config;
     private readonly Gemma4Block[] _blocks;

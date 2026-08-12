@@ -78,8 +78,11 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(StringComparer.Ordinal);
         try
         {
+            // An nvfp4 build only stays packed where the backend can consume a packed weight; CPU and Vulkan need the
+            // eager unpack. SupportsQuantized is that line — it is exactly "this backend has a packed-weight GEMM path".
+            bool residentNvfp4 = context.Backend.Capabilities.SupportsQuantized;
             AddFile(context.CheckpointPath, loaders, merged);
-            LtxVideo2CheckpointConverter.ConvertedWeights conv = LtxVideo2CheckpointConverter.Convert(merged);
+            LtxVideo2CheckpointConverter.ConvertedWeights conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
 
             if (conv.Vae.Count == 0)
             {
@@ -87,7 +90,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23VideoVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
                 AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23AudioVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
                 AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23TextProjection, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
-                conv = LtxVideo2CheckpointConverter.Convert(merged);
+                conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
             }
 
             if (conv.Transformer.Count == 0)
@@ -135,13 +138,10 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                     + $"({conv.VaeDiffusionDecoder.Count} decoder tensors), which this pipeline does not decode with yet. "
                     + "Supply the convolutional VAE instead (ltx-2.5-video-vae-conv-bf16.safetensors).");
             }
-            if (conv.TextEncoder.ContainsKey("model.layers.0.layer_scalar"))
-            {
-                throw new InvalidOperationException(
-                    $"LTX-2 checkpoint '{context.CheckpointPath}' bundles a Gemma 4 text tower, which this pipeline "
-                    + "does not encode with yet — it still constructs the Gemma-3-12B tower. Supply a Gemma 3 encoder, "
-                    + "or wait for the Gemma 4 path to be wired.");
-            }
+            // Gemma 4 (LTX-2.5) vs Gemma 3 (LTX-2.3). `layer_scalar` is the discriminator because it is per-block
+            // and Gemma 3 has no counterpart; do NOT probe for a missing v_proj — layer 0 is a sliding layer and
+            // has one, so that test would misclassify every Gemma 4 checkpoint as Gemma 3.
+            bool isGemma4 = conv.TextEncoder.ContainsKey("model.layers.0.layer_scalar");
 
             (float[]? videoMean, float[]? videoStd) = ReadStats(conv.Vae, config.InChannels);
             LtxVideo2VaeDecoder vae = new LtxVideo2VaeDecoder(latentsMean: videoMean, latentsStd: videoStd);
@@ -167,27 +167,55 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             }
 
             // The standalone Gemma safetensors stays mapped for the pipeline's lifetime: its tensors are mmap views.
-            LlamaStyleEncoder gemma = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Gemma3_12B);
+            ILtx2TextTower gemma;
+            ILtx2PromptTokenizer tokenizer;
             string? gemmaSidePath = null;
-            if (conv.TextEncoder.Count > 0)
+            if (isGemma4)
             {
-                gemma.LoadWeights(conv.TextEncoder);
-                Logs.Info("[LtxVideo2Recipe] Gemma-3-12B text tower loaded (bundled).");
+                // The 49-state harvest's final norm is an unresolved divergence (docs/Research/LTX_2_5.md
+                // "Divergence 1"): `model.norm.weight` measures max 600 / mean 20 on the real checkpoint, so
+                // norming ONLY the last state makes it outweigh the other 48 by that factor. The verified
+                // LTX-2.3 path norms no state and drives the SAME connector, so this matches it.
+                Gemma4TextEncoder gemma4 = new Gemma4TextEncoder(
+                    Gemma4TextEncoderConfig.Gemma4_12B with { ApplyFinalNormToLastState = false });
+                gemma4.LoadWeights(conv.TextEncoder);
+                gemma = gemma4;
+                // Gemma 4 ships its own tokenizer INSIDE the encoder safetensors as a U8 `tokenizer_json` tensor,
+                // so unlike Gemma 3 there is no side file to locate.
+                if (!conv.TextEncoder.TryGetValue("tokenizer_json", out Tensor? tokenizerJson))
+                {
+                    throw new InvalidOperationException(
+                        $"LTX-2.5 checkpoint '{context.CheckpointPath}' has a Gemma 4 text tower but no embedded "
+                        + "'tokenizer_json' tensor; the Gemma 4 vocabulary ships only inside that file.");
+                }
+                tokenizer = ReadGemma4Tokenizer(tokenizerJson);
+                Logs.Info($"[LtxVideo2Recipe] Gemma-4-12B text tower loaded ({conv.TextEncoder.Count} keys), "
+                    + $"conditioning length {Gemma4Tokenizer.LtxMinLength}.");
             }
             else
             {
-                gemmaSidePath = ModelDownloader.EnsureSideModelAsync(SideModels.GemmaLtx2, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-                SafeTensorsLoader gemmaLoader = new SafeTensorsLoader();
-                gemmaLoader.Load(gemmaSidePath);
-                loaders.Add(gemmaLoader);
-                gemma.LoadWeights(gemmaLoader.GetAllTensors());
-                Logs.Info($"[LtxVideo2Recipe] Gemma-3-12B text tower loaded (standalone: {Path.GetFileName(gemmaSidePath)}).");
+                LlamaStyleEncoder gemma3 = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Gemma3_12B);
+                if (conv.TextEncoder.Count > 0)
+                {
+                    gemma3.LoadWeights(conv.TextEncoder);
+                    Logs.Info("[LtxVideo2Recipe] Gemma-3-12B text tower loaded (bundled).");
+                }
+                else
+                {
+                    gemmaSidePath = ModelDownloader.EnsureSideModelAsync(SideModels.GemmaLtx2, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                    SafeTensorsLoader gemmaLoader = new SafeTensorsLoader();
+                    gemmaLoader.Load(gemmaSidePath);
+                    loaders.Add(gemmaLoader);
+                    gemma3.LoadWeights(gemmaLoader.GetAllTensors());
+                    Logs.Info($"[LtxVideo2Recipe] Gemma-3-12B text tower loaded (standalone: {Path.GetFileName(gemmaSidePath)}).");
+                }
+                gemma = gemma3;
+                tokenizer = new GemmaTokenizer(LocateGemmaTokenizer(context.CheckpointPath, gemmaSidePath), maxLength: TokenLength);
             }
-
-            GemmaTokenizer tokenizer = new GemmaTokenizer(LocateGemmaTokenizer(context.CheckpointPath, gemmaSidePath), maxLength: TokenLength);
 
             LtxVideo2Pipeline pipeline = new LtxVideo2Pipeline(context.Backend, transformer, connectors, vae, gemma, config, audioVae, vocoder, audioMean, audioStd)
             {
+                MinimumTextConditioningLength = tokenizer.MinimumConditioningLength,
                 TextEncoderBackend = context.TextEncoderBackendOrDefault,
                 VaeBackend = context.VaeBackendOrDefault,
             };
@@ -283,6 +311,19 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
 
     /// <summary>Finds the Gemma SentencePiece model next to the checkpoint, or next to the standalone Gemma tower —
     /// Gemma ships no embedded tokenizer in the engine.</summary>
+    /// <summary>Builds the Gemma 4 tokenizer from the <c>tokenizer_json</c> U8 tensor LTX-2.5 embeds in its text
+    /// encoder — a ~32 MB HuggingFace <c>tokenizer.json</c> with no side file anywhere to fall back to.</summary>
+    private static unsafe Gemma4Tokenizer ReadGemma4Tokenizer(Tensor tokenizerJson)
+    {
+        if (tokenizerJson.DType != DType.U8)
+        {
+            throw new InvalidOperationException(
+                $"'tokenizer_json' must be a U8 blob; got {tokenizerJson.DType}.");
+        }
+        return Gemma4Tokenizer.FromTokenizerJson(
+            new ReadOnlySpan<byte>(tokenizerJson.DataPointer, (int)tokenizerJson.ElementCount));
+    }
+
     private static string LocateGemmaTokenizer(string checkpointPath, string? gemmaSidePath)
     {
         List<string> dirs = new List<string>();

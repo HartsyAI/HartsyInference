@@ -13,7 +13,7 @@ namespace HartsyInference.ModelAssets.Tokenizers;
 /// <c>Split(" ")</c> pre-tokenizer that is vestigial (normalization already consumed every space), so BPE runs
 /// over the whole normalized string as a single word. <c>ignore_merges</c> is false and there is no
 /// continuing-subword prefix or end-of-word suffix.</remarks>
-public sealed class Gemma4Tokenizer
+public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
 {
     /// <summary>Padding token id (<c>&lt;pad&gt;</c>).</summary>
     public const int PadTokenId = 0;
@@ -160,6 +160,13 @@ public sealed class Gemma4Tokenizer
     public int[] EncodeForConditioning(string text, int minLength = LtxMinLength) =>
         BuildConditioningSequence(Encode(text), minLength);
 
+    /// <summary>RAW ids — BOS + content, NO padding. The pipeline pads to <see cref="LtxMinLength"/> and marks
+    /// which positions are real; padding here instead would hand the connector 1000+ pad tokens as content.</summary>
+    int[] ILtx2PromptTokenizer.EncodeForConditioning(string text) => EncodeForConditioning(text, minLength: 0);
+
+    /// <summary>ComfyUI conditions Gemma 4 at 1024 tokens, and length is part of the conditioning.</summary>
+    int ILtx2PromptTokenizer.MinimumConditioningLength => LtxMinLength;
+
     /// <summary>Prepends BOS unless <paramref name="ids"/> already starts with it (upstream both dropped and
     /// duplicated it at different times), never appends EOS, and right-pads to <paramref name="minLength"/>.
     /// Sequences already longer than <paramref name="minLength"/> are returned unpadded — the reference caps
@@ -171,6 +178,10 @@ public sealed class Gemma4Tokenizer
         bool hasBos = ids.Length > 0 && ids[0] == bosId;
         int contentLength = hasBos ? ids.Length : ids.Length + 1;
         int[] output = new int[Math.Max(contentLength, minLength)];
+        // Right-padded, matching the rest of the engine. Upstream LEFT-pads and masks, which puts a real token at
+        // RoPE position `len-n .. len-1` rather than `0 .. n-1`; that divergence is real on any prompt shorter than
+        // the conditioning length and is recorded in docs/Research/LTX_2_5.md, but switching sides was measured NOT
+        // to change prompt adherence, so the engine's existing side stands.
         int cursor = 0;
         if (!hasBos) output[cursor++] = bosId;
         for (int i = 0; i < ids.Length; i++) output[cursor++] = ids[i];
