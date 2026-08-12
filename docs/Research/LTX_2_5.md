@@ -370,6 +370,23 @@ Locally staged for this work: `Models/VAE/LTX-2/ltx-2.5-video-vae-bf16.safetenso
 (sha256 `847e14ca7f3355debca0cea4eaa24ac0fbcdf0061da054ac89ca638a869ddba3`, 1472223346 bytes, from
 `ChrisColeTech/LTX-2.5-turbo-GGUF` `split/vae/`, header-verified identical to the Lightricks original).
 
+## Diffusion decoder — bring-up notes
+
+Verified against the reference at relL2 3.978e-7 (stage-1..4 context) and 2.345e-7 (final pixels), plus a real
+decode of the shipped checkpoint at the smallest legal latent (309 of 310 `decoder.*` tensors consumed).
+
+- **Make the parity fixture asymmetric.** The first one used square kernels and a cubic latent, where a T/H/W
+  transposition is invisible. The committed generator uses per-axis-different kernels
+  `((3,3,5),(3,5,3),(3,3,5),(3,5,3),(5,3,3))` and a `2×4×5` latent so an axis swap cannot pass.
+- **`default_rope_dim_split(8)` returns `(0, 4, 4)` in the ComfyUI reference, with no assert** — a head_dim of 8
+  silently drops temporal RoPE entirely. Only bites at toy sizes (the real head_dim is 64), but it makes a tiny
+  test config quietly non-representative. The C# `RopeDimSplit` throws instead.
+- **`MatMulKernels.LinearTransB` re-casts a non-F32 weight to F32 on every call.** Against the BF16 checkpoint
+  that churns roughly 1.5 GB of transient casts per decode and is why the smallest possible frame costs 32 s.
+  This, not the neighborhood attention itself, is the first thing to fix for a usable decode path.
+- Regenerating the fixture needs three things absent from the repo: torch from the ComfyUI venv, comfy-kitchen's
+  eager `na3d` (via `NA_EAGER_DIR`), and ltx-core's `rope_math.py` (via `LTX_ROPE_MATH`).
+
 ## Selecting the distilled variant
 
 The dev and distilled 2.5 transformers are **indistinguishable from the checkpoint**: identical
