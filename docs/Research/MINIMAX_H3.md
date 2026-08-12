@@ -401,6 +401,72 @@ existing architecture: dual-stream video+audio DiT with separate video and audio
 vocoder. Whatever H3 turns out to be, that pipeline is the nearest template and its
 `Ltx2Result`-shaped return is the natural model for the widened contract.
 
+## Open design: region-targeted reference conditioning (Tier 3.8, 2026-08-11)
+
+The SwarmUI extension backlog's own item 3.8 asked whether `<segment:>`-style masked refinement
+(Tier 3.2, `Engine/Features/SegmentRefinement.cs`) should extend to H3's reference-image conditioning
+— "condition on only the face region of this reference image" instead of the whole asset. It doesn't
+extend as a code path (3.2 is a post-hoc pass on the DECODED CANVAS after generation; a reference
+image is an INPUT the model conditions on before generation starts — different point in the pipeline
+entirely), but the underlying idea (auto-crop a reference to a text-matched region before it's
+encoded) is real and worth scoping properly. This section is that scoping pass — findings below,
+current status: **design mostly clears, one real blocker, not implemented.**
+
+**Say the honest baseline first**: this feature is a convenience, not a capability unlock. A user can
+already crop the reference image themselves before uploading it — H3's own reference encode
+(`EncodeReferenceImage` below) has no canvas requirement to work around. The value is "point at what
+you mean in text" instead of "open an image editor," nothing more. Worth building if the DTO/grammar
+question below has a clean answer; not worth forcing one.
+
+**Mechanical question, resolved — no aspect-ratio padding needed.** Read
+`MiniMaxH3RecipePipeline.EncodeReferenceImage` (`.cs:585-606`) directly rather than assuming: it scales
+a reference DOWN ONLY to fit the generation's pixel budget and keeps the reference's OWN aspect ratio
+— no squash, no letterbox, no forced canvas match ("a reference is not the canvas, so it keeps its
+shape rather than being stretched," per the method's own doc comment). A CLIPSeg-cropped face/object
+region has whatever aspect ratio its bounding box happens to be, and this encode path already handles
+arbitrary aspect ratios by design. So a cropped reference needs ZERO new handling here — it's just a
+smaller/differently-shaped `ImageData` fed into the exact same call. This also means the crop doesn't
+touch `MiniMaxH3RefBlock` packing or the timestep-row conditioning at all: `LatentH`/`LatentW` are
+already computed FROM the encoded image's own dimensions post-encode, not from a fixed expectation.
+
+**Mask→bbox reuse, partial.** `ClipSegSegmenter.Segment(backend, modelDirectory, image, query,
+threshold)` is already generic — it takes any standalone `ImageData`, not something tied to a
+generation request, so running it against a reference image directly (not the canvas) needs no
+change. `InpaintOnlyMasked`'s crop/bbox math (reused verbatim by 3.2) is NOT similarly reusable as a
+drop-in: `InpaintOnlyMasked.Prepare` takes a whole `ImageRequest` and is wired to the generation-canvas
+flow, not a standalone image+mask pair. A real implementation needs a small (~20-line) standalone
+mask→bbox-with-oversize helper, not a call into the existing one. Small, not a blocker.
+
+**The real blocker: no channel exists to carry "which reference, what crop query."**
+`VideoRequest.ReferenceImages` is a bare `IReadOnlyList<ImageData>` (`VideoRequest.cs:63`) — no room
+for a per-reference query string. And unlike `<region:>`/`<segment:>`, which are structural tags
+SwarmUI core strips before the prompt reaches the model, reference images today are addressed by the
+MODEL's OWN inline `<Picture N>` tags in the free-text prompt (confirmed in the extension:
+`HartsyInferenceBackend.BuildReferenceImages`'s own doc comment — "Swarm never parses those tags — it
+just supplies the ordered list, which is exactly what the MiniMax-H3 reference node consumes, index
+for index"). There is no existing syntax anywhere in this stack for "crop reference 2 to the region
+matching 'the red hat.'" Adding one is genuinely new user-facing grammar — either a new prompt tag
+(e.g. `<refcrop:N,query,strength>`) parsed engine-side before references reach `EncodeReferenceImage`,
+or a new param carrying a per-index query list. Per this backlog's own convention (Tier 2's explicit
+user sign-off before adding new Hartsy-flagged surface), **this is a decision for the user to make,
+not one to invent silently** — it changes what users type/see, unlike 3.1's PostApply work, which
+reused entirely-internal machinery with zero new surface area.
+
+**If/when this gets picked up**: reference images only, CLIPSeg free-text matching only (YOLO stays
+unwired, matching 3.2's own scope), an empty CLIPSeg match warns and falls back to the whole
+uncropped reference (3.2's tolerance, not an error) — reference video/audio explicitly out of scope
+(video references would need per-frame or per-clip mask consistency, a materially bigger problem).
+Verification shape once built: a two-subject synthetic reference image (two distinct colored objects),
+query one of them, dump the cropped reference PNG and actually look at it (crop correctness is the
+cheap direct check — get this right before spending GPU time on a generation), then a same-seed A/B
+(cropped reference vs. whole reference) confirming the generated output actually differs.
+
+**Naming trap, still true, worth repeating for whoever picks this up**:
+`MiniMaxH3SegmentKind` (`Diffusion/Models/Denoisers/MiniMaxH3SegmentKind.cs`) is an unrelated packed-
+sequence bookkeeping enum (`Text, Cond, RefImage, RefAudio, Audio, Video` — which token-range a block
+occupies), not connected to `<segment:>` prompt syntax at all. A grep for "Segment" near MiniMaxH3
+will hit this and can mislead.
+
 ## Sources
 
 - [MiniMax H3 announcement blog](https://www.minimax.io/blog/minimax-h3)
