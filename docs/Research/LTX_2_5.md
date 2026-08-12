@@ -45,6 +45,44 @@ them.
 shipping 2.3 path too, and the padding-side difference). Either can make output subtly wrong in a way that
 looks like a porting bug somewhere else.
 
+### Prompt-independent output — the connector is fed padding the reference never sends it
+
+Symptom seen on the first real end-to-end run: two unrelated prompts at the same seed produced effectively the
+same image (mean |Δ| ≈ 1%), while merely changing the conditioning length moved it three times more. Output was
+seed-driven, not prompt-driven. The tower was verified innocent independently — it discriminates between
+prompts correctly on real int8 weights.
+
+**Cause: ComfyUI trims the encoder output back to the real tokens before the projection; this engine does not.**
+In `comfy/text_encoders/lt.py`, `LTXAVTEModel.encode_token_weights`:
+
+```python
+out, pooled, extra = self.gemma3_12b.encode_token_weights(token_weight_pairs)
+out = out[:, :, -torch.sum(extra["attention_mask"]).item():]   # sequence axis → real tokens only
+```
+
+`out` is `[B, layers, seq, hidden]`, so that slice cuts the **sequence** axis down to the real token count, and
+with upstream's left padding those are the trailing positions. It sits above the `single_linear`/`dual_linear`
+branch, so it applies to 2.5's `dual_linear` too. The `min_length` of 1024 exists only so the language model
+sees a consistent length — **no pad position ever reaches the projection or the connector.**
+
+This engine instead passes the whole padded sequence to
+`LtxVideo2TextConnectors.Forward(backend, gemmaFeatures[seq, 188160], validMask[seq])` with `seq = 1024`. Pad
+positions are RMS-zeroed and then replaced by learnable registers, so for a short prompt roughly 99% of the
+conditioning is prompt-independent learned content. That is the whole symptom, and it explains why every
+plausible alternative came back negative: conditioning length only shifts the register-to-content ratio, left
+padding merely relocates the registers, and the final norm and output resolution are orthogonal to it.
+
+**Fix**: after encoding at 1024, trim the 49-layer feature stack to the real token count, then pad up to the
+next multiple of 128 to satisfy this engine's register-multiple invariant, then build `validMask` over that. A
+9-token prompt then runs at 128 (~7% real) rather than 1024 (~0.9%) — which is what the 2.3 path already does,
+and why 2.3 works. Note the trim must take the **leading** `n_real` positions here, since this engine
+right-pads; porting upstream's negative slice literally would keep the padding and discard the prompt.
+
+Related but separate: the 128-register-multiple padding has **no counterpart upstream at all** — ComfyUI feeds
+the bare real-token count. So even at 128 this engine is diluted relative to the reference, and the 2.3 path
+always has been. That is an LTX-2 connector deviation rather than a Gemma-4 one, and changing it moves verified
+2.3 output, so it should be treated on its own.
+
 ### Running the encoder against the int8 text encoder
 
 `Gemma4TextEncoder`'s embedding gather reads the weight as a raw `float*` after `CastToF32IfNeeded`, so a
