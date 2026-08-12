@@ -370,6 +370,36 @@ Locally staged for this work: `Models/VAE/LTX-2/ltx-2.5-video-vae-bf16.safetenso
 (sha256 `847e14ca7f3355debca0cea4eaa24ac0fbcdf0061da054ac89ca638a869ddba3`, 1472223346 bytes, from
 `ChrisColeTech/LTX-2.5-turbo-GGUF` `split/vae/`, header-verified identical to the Lightricks original).
 
+## Selecting the distilled variant
+
+The dev and distilled 2.5 transformers are **indistinguishable from the checkpoint**: identical
+`model_version` (`2.5.0`), zero differences across the whole `config.transformer` object, and the same 4349
+tensor keys. Nothing in the file says which schedule the weights were distilled onto.
+
+So the sampling contract cannot be detected — it must arrive as user intent. The engine exposes two catalog
+ids, `ltx-2.5` (dev: 50 steps, guidance 3.0) and `ltx-2.5-distilled` (8 steps, guidance 1.0, the fixed sigma
+list), each backed by its own `LtxVideo2Recipe` instance. A filename containing `distilled` may be logged as a
+hint but must never silently switch the schedule, because repacks rename freely.
+
+## Verification status of the DiT-flag work
+
+The repo's LTX-2 DiT parity harness (`tests/HartsyInference.Video.Tests/Parity/ltx2_transformer_parity_dump.py`)
+depends on a diffusers install in `/home/hartsy/hfvenv`, **which no longer exists on this machine**, so it is
+dormant for reasons predating this work. The two 2.5 transformer deltas are instead covered by targeted tests
+that do not need it, each pinned against an independently computed expectation rather than against the
+implementation's own behaviour:
+
+- `ff_bias: false` — a bias-free video FFN is asserted to produce bit-identical output to the same weights with
+  an explicitly zeroed bias, so "it loaded" is not mistaken for "it computes the right thing".
+- `use_keyframes_abs_pos_embedding` — the marker's exact value is asserted on exactly the first latent frame's
+  token rows and nowhere else, read from the pre-block state via the `OnBlockOutput(-1)` hook. It has to be read
+  there: self-attention propagates a frame-0 change to every token within a single block, so an assertion on the
+  final velocity cannot localise the mask at all.
+
+Restoring the full harness needs either a diffusers build carrying the 2.5 flags or the official `ltx-core`
+package installed; neither is present, and `ltx-core` pulls Transformers 5.8+ and CUDA 13.2 wheels that do not
+fit the remaining disk.
+
 ## Open questions
 
 - **RMS-norm weight storage convention.** ComfyUI's Gemma 4 path uses `rms_norm_add=False` (weights applied
