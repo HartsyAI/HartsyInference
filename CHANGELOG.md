@@ -14,6 +14,16 @@ stable release will require. Dates are UTC.
   record-shape change for transports that set it; the SwarmUI extension's mapping was removed in the same pass.
 
 ### Added
+- **LTX-2.5 bring-up (partial)** — checkpoint-driven variant selection for the LTX-2 family, replacing the
+  hardcoded `LtxVideo2Config.V23`. `SafeTensorsLoader` now exposes a file's `__metadata__`, and the new
+  `LtxVideo2VariantDetector` resolves a config from it with tensor-key probes as the fallback (key presence wins
+  for the keyframe marker, matching ComfyUI). `LtxVideo2Transformer` gained LTX-2.5's
+  `keyframes_abs_pos_embedding` — applied to the first latent frame's tokens in all three forward paths,
+  including the captured step graph — plus a load-time cross-check that rejects a checkpoint contradicting the
+  detected variant. `LtxVideo2CheckpointConverter` routes the 2.5 diffusion video VAE into its own bucket
+  (identified whole-file by `decoder.conv_in_x_t.weight`, since both decoders share `decoder.conv_in`).
+  Text encoder (Gemma 4 12B), the `NADiffusionDecoder` itself, and distilled sampling are still to come; see
+  [`docs/Research/LTX_2_5.md`](docs/Research/LTX_2_5.md).
 - **Device-resident CFG+Euler for the image denoise loops** (CUDA image bring-up): Lance, Lumina2, HiDream,
   F-Lite, Kandinsky5, SD3, and Z-Image's fast path now run guidance + the Euler update in-place on device via
   `CfgEulerStep` and the new fused `CfgRenormEulerStep` (Lance renorm), `CfgNormalizedEulerStep` (Lumina2

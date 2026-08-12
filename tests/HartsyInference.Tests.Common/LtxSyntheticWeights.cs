@@ -86,6 +86,102 @@ public static unsafe class LtxSyntheticWeights
     private static int[] Rev(int[] a) { int[] r = (int[])a.Clone(); Array.Reverse(r); return r; }
     private static bool[] Rev(bool[] a) { bool[] r = (bool[])a.Clone(); Array.Reverse(r); return r; }
 
+    /// <summary>Builds a full <see cref="LtxVideo2Transformer"/> weight dict for the given (tiny) dual-stream config.
+    /// Mirrors what the shipped checkpoints carry: the video FFN bias follows <see cref="LtxVideo2Config.FfBias"/>,
+    /// while the audio and connector FFN biases and the prompt-AdaLN subtrees are present in every released LTX-2
+    /// generation. <paramref name="keyframesValue"/>, when given, fills <c>keyframes_abs_pos_embedding</c> with a
+    /// constant instead of noise so a test can predict its contribution.</summary>
+    public static Dictionary<string, Tensor> BuildTransformer2(LtxVideo2Config c, float? keyframesValue = null)
+    {
+        int v = c.InnerDim, a = c.AudioInnerDim;
+        int vFf = c.FfnMultiplier * v, aFf = c.FfnMultiplier * a;
+        Dictionary<string, Tensor> w = new()
+        {
+            ["proj_in.weight"] = R([v, c.InChannels]), ["proj_in.bias"] = R([v]),
+            ["audio_proj_in.weight"] = R([a, c.AudioInChannels]), ["audio_proj_in.bias"] = R([a]),
+            ["proj_out.weight"] = R([c.OutChannels, v]), ["proj_out.bias"] = R([c.OutChannels]),
+            ["audio_proj_out.weight"] = R([c.AudioOutChannels, a]), ["audio_proj_out.bias"] = R([c.AudioOutChannels]),
+            ["scale_shift_table"] = R([c.OutputModParams, v]),
+            ["audio_scale_shift_table"] = R([c.OutputModParams, a]),
+        };
+
+        AddAdaLn(w, "time_embed", v, c.SelfAttnModParams);
+        AddAdaLn(w, "audio_time_embed", a, c.SelfAttnModParams);
+        AddAdaLn(w, "prompt_adaln", v, 2);
+        AddAdaLn(w, "audio_prompt_adaln", a, 2);
+        AddAdaLn(w, "av_cross_attn_video_scale_shift", v, 4);
+        AddAdaLn(w, "av_cross_attn_audio_scale_shift", a, 4);
+        AddAdaLn(w, "av_cross_attn_video_a2v_gate", v, 1);
+        AddAdaLn(w, "av_cross_attn_audio_v2a_gate", a, 1);
+
+        if (c.UseKeyframesAbsPosEmbedding)
+        {
+            w["keyframes_abs_pos_embedding"] = keyframesValue is float kv ? Const([1, v], kv) : R([1, v]);
+        }
+
+        for (int i = 0; i < c.NumLayers; i++)
+        {
+            string p = $"transformer_blocks.{i}";
+            AddAttn(w, $"{p}.attn1", v, v, v, c.NumHeads);
+            AddAttn(w, $"{p}.attn2", v, c.CrossAttentionDim, v, c.NumHeads);
+            AddAttn(w, $"{p}.audio_attn1", a, a, a, c.AudioNumHeads);
+            AddAttn(w, $"{p}.audio_attn2", a, c.AudioCrossAttentionDim, a, c.AudioNumHeads);
+            // a2v: query is video-width, KV audio-width, output video-width (and the reverse for v2a).
+            AddAttn(w, $"{p}.audio_to_video_attn", v, a, v, c.AudioNumHeads, queryOut: a);
+            AddAttn(w, $"{p}.video_to_audio_attn", a, v, a, c.AudioNumHeads, queryOut: a);
+
+            w[$"{p}.scale_shift_table"] = R([c.SelfAttnModParams, v]);
+            w[$"{p}.audio_scale_shift_table"] = R([c.SelfAttnModParams, a]);
+            w[$"{p}.prompt_scale_shift_table"] = R([2, v]);
+            w[$"{p}.audio_prompt_scale_shift_table"] = R([2, a]);
+            w[$"{p}.scale_shift_table_a2v_ca_video"] = R([5, v]);
+            w[$"{p}.scale_shift_table_a2v_ca_audio"] = R([5, a]);
+
+            w[$"{p}.ff.net.0.proj.weight"] = R([vFf, v]);
+            w[$"{p}.ff.net.2.weight"] = R([v, vFf]);
+            if (c.FfBias)
+            {
+                w[$"{p}.ff.net.0.proj.bias"] = R([vFf]);
+                w[$"{p}.ff.net.2.bias"] = R([v]);
+            }
+            w[$"{p}.audio_ff.net.0.proj.weight"] = R([aFf, a]); w[$"{p}.audio_ff.net.0.proj.bias"] = R([aFf]);
+            w[$"{p}.audio_ff.net.2.weight"] = R([a, aFf]); w[$"{p}.audio_ff.net.2.bias"] = R([a]);
+        }
+        return w;
+    }
+
+    private static void AddAdaLn(Dictionary<string, Tensor> w, string p, int dim, int numParams)
+    {
+        w[$"{p}.emb.timestep_embedder.linear_1.weight"] = R([dim, 256]);
+        w[$"{p}.emb.timestep_embedder.linear_1.bias"] = R([dim]);
+        w[$"{p}.emb.timestep_embedder.linear_2.weight"] = R([dim, dim]);
+        w[$"{p}.emb.timestep_embedder.linear_2.bias"] = R([dim]);
+        w[$"{p}.linear.weight"] = R([numParams * dim, dim]);
+        w[$"{p}.linear.bias"] = R([numParams * dim]);
+    }
+
+    private static void AddAttn(Dictionary<string, Tensor> w, string p, int queryIn, int kvIn, int outDim,
+        int heads, int? queryOut = null)
+    {
+        int qOut = queryOut ?? outDim;
+        w[$"{p}.to_q.weight"] = R([qOut, queryIn]); w[$"{p}.to_q.bias"] = R([qOut]);
+        w[$"{p}.to_k.weight"] = R([qOut, kvIn]); w[$"{p}.to_k.bias"] = R([qOut]);
+        w[$"{p}.to_v.weight"] = R([qOut, kvIn]); w[$"{p}.to_v.bias"] = R([qOut]);
+        w[$"{p}.to_out.0.weight"] = R([outDim, qOut]); w[$"{p}.to_out.0.bias"] = R([outDim]);
+        w[$"{p}.q_norm.weight"] = R([qOut]);
+        w[$"{p}.k_norm.weight"] = R([qOut]);
+        w[$"{p}.to_gate_logits.weight"] = R([heads, queryIn]); w[$"{p}.to_gate_logits.bias"] = R([heads]);
+    }
+
+    private static Tensor Const(int[] dims, float value)
+    {
+        long[] d = Array.ConvertAll(dims, x => (long)x);
+        Tensor t = new Tensor(new TensorShape(d), DType.F32);
+        float* p = (float*)t.DataPointer;
+        for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = value;
+        return t;
+    }
+
     private static Tensor R(int[] dims)
     {
         long[] d = Array.ConvertAll(dims, x => (long)x);

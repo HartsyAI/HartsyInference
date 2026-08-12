@@ -88,5 +88,40 @@ public sealed record LtxVideo2Config
     /// leaves the audio latent ~2.5x over-dispersed and the soundtrack ~30 dB down.</summary>
     public float AudioGuidanceRescale { get; init; } = 1.0f;
 
+    // ── Generation deltas (2.5) ──
+
+    /// <summary>Whether the video-branch FFN Linears carry biases. LTX-2.5 ships <c>ff_bias=false</c>; the audio and
+    /// connector FFNs keep theirs in every released checkpoint. Nothing branches on this — a bias-free FFN already
+    /// works by key absence — it exists so loading can fail loudly when the checkpoint disagrees with the variant.</summary>
+    public bool FfBias { get; init; } = true;
+
+    /// <summary>Whether the checkpoint carries <c>keyframes_abs_pos_embedding</c>, a learned marker added to the
+    /// tokens whose temporal position starts at 0. LTX-2.5 sets this; it affects ordinary text-to-video, not only
+    /// multi-shot generation.</summary>
+    public bool UseKeyframesAbsPosEmbedding { get; init; }
+
+    /// <summary>Sigma schedule the distilled checkpoints were trained against, replacing the dynamic flow-match
+    /// shift when set. Distillation baked these values in, so a different step count is not a valid schedule.</summary>
+    public float[]? FixedSigmas { get; init; }
+
+    /// <summary>Distilled 2.5 schedule (8 steps: 9 sigmas ending at 0), from the reference pipeline's
+    /// <c>DISTILLED_SIGMA_VALUES</c>. A fresh array per call — a shared instance would let one in-place edit
+    /// anywhere corrupt every config built afterwards.</summary>
+    public static float[] Ltx25DistilledSigmas =>
+        [1.0f, 0.99375f, 0.9875f, 0.98125f, 0.975f, 0.909375f, 0.725f, 0.421875f, 0.0f];
+
     public static LtxVideo2Config V23 => new();
+
+    /// <summary>LTX-2.5 dev. Differs from <see cref="V23"/> in exactly the two keys the shipped checkpoints'
+    /// metadata differ in — every other dimension, rope and modulation setting is identical.</summary>
+    public static LtxVideo2Config V25 => new() { FfBias = false, UseKeyframesAbsPosEmbedding = true };
+
+    /// <summary>LTX-2.5 distilled. Architecturally indistinguishable from <see cref="V25"/> — the checkpoints share
+    /// a model version, config and tensor keys — so this is selected by the caller's intent, never by inspection.</summary>
+    public static LtxVideo2Config V25Distilled => V25 with
+    {
+        FixedSigmas = Ltx25DistilledSigmas,
+        NumInferenceSteps = 8,
+        GuidanceScale = 1.0f,
+    };
 }

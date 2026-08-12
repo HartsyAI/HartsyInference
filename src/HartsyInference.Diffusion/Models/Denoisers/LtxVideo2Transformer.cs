@@ -31,6 +31,8 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     private int _disposed;
 
     private Tensor? _projInW, _projInB, _audioProjInW, _audioProjInB;
+    private Tensor? _keyframesAbsPos;
+    private Tensor? _keyframesOnes;
     private Tensor? _projOutW, _projOutB, _audioProjOutW, _audioProjOutB;
     private Tensor? _scaleShift, _audioScaleShift;          // [2, inner]
 
@@ -151,15 +153,77 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         _caVideoGate.LoadWeights(w, "av_cross_attn_video_a2v_gate");
         _caAudioGate.LoadWeights(w, "av_cross_attn_audio_v2a_gate");
 
+        // LTX-2.5's absolute marker for the tokens at temporal position 0.
+        if (w.TryGetValue(LtxVideo2VariantDetector.KeyframesEmbeddingKey, out Tensor? keyframes))
+        {
+            _keyframesAbsPos = keyframes.DType == DType.F32 ? keyframes : keyframes.CastTo(DType.F32);
+            _keyframesOnes = OnesRow(_config.InnerDim);
+        }
+
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"transformer_blocks.{i}");
+
+        VerifyVariant(w);
+    }
+
+    /// <summary>Fails a load whose weights contradict the detected variant, so a mis-detected checkpoint stops here
+    /// instead of generating quietly wrong output.</summary>
+    private void VerifyVariant(IReadOnlyDictionary<string, Tensor> w)
+    {
+        bool hasKeyframes = _keyframesAbsPos is not null;
+        if (hasKeyframes != _config.UseKeyframesAbsPosEmbedding)
+        {
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                $"LTX-2 config/checkpoint mismatch: UseKeyframesAbsPosEmbedding={_config.UseKeyframesAbsPosEmbedding} " +
+                $"but '{LtxVideo2VariantDetector.KeyframesEmbeddingKey}' is {(hasKeyframes ? "present" : "absent")}.");
+        }
+
+        bool hasFfBias = w.ContainsKey("transformer_blocks.0.ff.net.0.proj.bias");
+        if (hasFfBias != _config.FfBias)
+        {
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                $"LTX-2 config/checkpoint mismatch: FfBias={_config.FfBias} but the video FFN bias is " +
+                $"{(hasFfBias ? "present" : "absent")}.");
+        }
+    }
+
+    private static Tensor OnesRow(int n)
+    {
+        Tensor t = new Tensor(new TensorShape(1, n), DType.F32);
+        float* p = (float*)t.DataPointer;
+        for (int i = 0; i < n; i++) p[i] = 1f;
+        return t;
+    }
+
+    /// <summary>Adds the LTX-2.5 keyframe marker to the tokens whose temporal position starts at 0. Video tokens are
+    /// laid out <c>(frame, height, width)</c>-major and <see cref="DiTBlocks.LtxVideo2Rope"/> clamps the causal
+    /// temporal start at 0, which only the first latent frame reaches — so those tokens are the leading
+    /// <c>height·width</c> rows. Revisit alongside any work that appends i2v guide tokens, which the reference
+    /// excludes from this mask.</summary>
+    private void ApplyKeyframesAbsPos(IBackend backend, Tensor hidden, (int Frames, int Height, int Width) grid)
+    {
+        if (_keyframesAbsPos is null) return;
+        int rows = grid.Height * grid.Width;
+        // A grid that can't address the first latent frame is a caller bug, and skipping the marker would generate
+        // silently un-marked video — the exact failure VerifyVariant exists to stop.
+        if (rows <= 0 || rows > (int)hidden.Shape[0])
+        {
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                $"LTX-2.5 keyframe marker: grid {grid.Height}x{grid.Width} needs {rows} token rows but the video " +
+                $"stream has {hidden.Shape[0]}.");
+        }
+        using Tensor firstFrame = new Tensor((void*)hidden.DataPointer, new TensorShape(rows, (int)hidden.Shape[1]), DType.F32);
+        backend.AffineBroadcastLastDim(firstFrame, firstFrame, _keyframesOnes!, _keyframesAbsPos);
     }
 
     /// <summary>Always-resident (non-block) weights — proj_in/out, the global AdaLN-Single modulation tables. Touched
     /// every step regardless of the executing block, so the streaming controller doesn't manage them; preload eagerly.</summary>
     public IEnumerable<Tensor> EnumerateSharedWeights()
     {
+        // The keyframe marker and its companion ones-row are read on every step and by the captured step graph,
+        // which bakes pointers — so they belong with the eagerly-preloaded set, not the streamed blocks.
         foreach (Tensor? t in new[] { _projInW, _projInB, _audioProjInW, _audioProjInB,
-            _projOutW, _projOutB, _audioProjOutW, _audioProjOutB, _scaleShift, _audioScaleShift })
+            _projOutW, _projOutB, _audioProjOutW, _audioProjOutB, _scaleShift, _audioScaleShift,
+            _keyframesAbsPos, _keyframesOnes })
             if (t is not null) yield return t;
         AdaLnSingle[] adalns = _hasPromptMod
             ? new[] { _timeEmbed, _audioTimeEmbed, _promptAdaln, _audioPromptAdaln, _caVideoScaleShift, _caAudioScaleShift, _caVideoGate, _caAudioGate }
@@ -210,6 +274,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         // proj_in patchify projections.
         Tensor hidden = new Tensor(new TensorShape(sv, v), DType.F32);
         backend.Linear(hidden, videoTokens, _projInW!, _projInB);
+        ApplyKeyframesAbsPos(backend, hidden, grid);
         Tensor audioHidden = new Tensor(new TensorShape(sa, a), DType.F32);
         backend.Linear(audioHidden, audioTokens, _audioProjInW!, _audioProjInB);
 
@@ -309,6 +374,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
 
         Tensor hidC = new Tensor(new TensorShape(sv, v), DType.F32);
         backend.Linear(hidC, videoTokens, _projInW!, _projInB);
+        ApplyKeyframesAbsPos(backend, hidC, grid);
         Tensor audC = new Tensor(new TensorShape(sa, a), DType.F32);
         backend.Linear(audC, audioTokens, _audioProjInW!, _audioProjInB);
         Tensor hidU = new Tensor(new TensorShape(sv, v), DType.F32);
@@ -477,13 +543,13 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         if (capture) { backend.TrimMemoryPool(); backend.StepGraphBegin(); }
         try
         {
-            RunCfgPairIntoFixed(backend, videoTokens, audioTokens, ctxC, ctxU, sv, sa, v, a);
+            RunCfgPairIntoFixed(backend, videoTokens, audioTokens, ctxC, ctxU, sv, sa, v, a, grid);
         }
         catch (Exception ex) when (capture)
         {
             backend.StepGraphReset(); _graphDead = true;
             HartsyInference.Core.Logging.Logs.Warning($"[LTX-2 graph] capture invalidated — falling back to eager: {ex.Message}");
-            RunCfgPairIntoFixed(backend, videoTokens, audioTokens, ctxC, ctxU, sv, sa, v, a);
+            RunCfgPairIntoFixed(backend, videoTokens, audioTokens, ctxC, ctxU, sv, sa, v, a, grid);
             return ((_gVCondV!, _gVCondA!), (_gVUncondV!, _gVUncondA!));
         }
         if (capture)
@@ -497,7 +563,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
             {
                 backend.StepGraphReset(); _graphDead = true;
                 HartsyInference.Core.Logging.Logs.Warning($"[LTX-2 graph] capture failed — falling back to eager: {ex.Message}");
-                RunCfgPairIntoFixed(backend, videoTokens, audioTokens, ctxC, ctxU, sv, sa, v, a);
+                RunCfgPairIntoFixed(backend, videoTokens, audioTokens, ctxC, ctxU, sv, sa, v, a, grid);
             }
         }
         return ((_gVCondV!, _gVCondA!), (_gVUncondV!, _gVUncondA!));
@@ -530,10 +596,12 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     /// → 4 output layers, landing the velocities in the fixed buffers. All device ops; reads only fixed/pinned/
     /// resident tensors.</summary>
     private void RunCfgPairIntoFixed(IBackend backend, Tensor videoTokens, Tensor audioTokens,
-        LtxVideo2BlockContext ctxC, LtxVideo2BlockContext ctxU, int sv, int sa, int v, int a)
+        LtxVideo2BlockContext ctxC, LtxVideo2BlockContext ctxU, int sv, int sa, int v, int a,
+        (int Frames, int Height, int Width) grid)
     {
         Tensor hidC = new Tensor(new TensorShape(sv, v), DType.F32);
         backend.Linear(hidC, videoTokens, _projInW!, _projInB);
+        ApplyKeyframesAbsPos(backend, hidC, grid);
         Tensor audC = new Tensor(new TensorShape(sa, a), DType.F32);
         backend.Linear(audC, audioTokens, _audioProjInW!, _audioProjInB);
         Tensor hidU = new Tensor(new TensorShape(sv, v), DType.F32);
@@ -612,6 +680,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
             _vCosC = _vSinC = _aCosC = _aSinC = _cvCosC = _cvSinC = null;
             _projInW = _projInB = _audioProjInW = _audioProjInB = null;
             _projOutW = _projOutB = _audioProjOutW = _audioProjOutB = _scaleShift = _audioScaleShift = null;
+            _keyframesAbsPos = _keyframesOnes = null;
         }
         GC.SuppressFinalize(this);
     }

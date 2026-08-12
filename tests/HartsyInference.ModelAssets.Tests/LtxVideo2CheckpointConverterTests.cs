@@ -94,6 +94,67 @@ public class LtxVideo2CheckpointConverterTests
         Assert.True(c.Vocoder.ContainsKey("vocoder.vocoder.conv_pre.weight"));
     }
 
+    [Fact]
+    public void KeyframesEmbeddingReachesTheTransformerUnrenamed()
+    {
+        // LTX-2.5's marker carries no rename pattern, so it must survive both the prefixed and bare spellings.
+        Assert.Equal((B.Transformer, "keyframes_abs_pos_embedding"),
+            LtxVideo2CheckpointConverter.RouteKey("model.diffusion_model.keyframes_abs_pos_embedding"));
+        Assert.Equal((B.Transformer, "keyframes_abs_pos_embedding"),
+            LtxVideo2CheckpointConverter.RouteKey("keyframes_abs_pos_embedding"));
+    }
+
+    [Fact]
+    public void DiffusionVaeIsIdentifiedByItsNoisedPixelProjection()
+    {
+        Assert.True(LtxVideo2CheckpointConverter.IsDiffusionVideoVae(
+            ["decoder.conv_in.weight", "decoder.conv_in_x_t.weight", "encoder.conv_in.conv.weight"]));
+        Assert.True(LtxVideo2CheckpointConverter.IsDiffusionVideoVae(["vae.decoder.conv_in_x_t.weight"]));
+        // The convolutional decoder shares conv_in/conv_out, so those alone must not trigger it.
+        Assert.False(LtxVideo2CheckpointConverter.IsDiffusionVideoVae(
+            ["decoder.conv_in.conv.weight", "decoder.conv_out.conv.weight", "decoder.up_blocks.0.res_blocks.0.conv1.conv.weight"]));
+    }
+
+    [Fact]
+    public void DiffusionDecoderKeysSplitOffButLatentStatsStay()
+    {
+        Dictionary<string, Core.Tensors.Tensor> w = new()
+        {
+            ["decoder.conv_in_x_t.weight"] = Stub(),
+            ["decoder.conv_in.weight"] = Stub(),
+            ["decoder.diff_blocks.0.scale_shift_table"] = Stub(),
+            ["decoder.det_stages.0.0.attn.qkv.weight"] = Stub(),
+            ["encoder.conv_in.conv.weight"] = Stub(),
+            ["per_channel_statistics.mean-of-means"] = Stub(),
+            ["per_channel_statistics.std-of-means"] = Stub(),
+        };
+        LtxVideo2CheckpointConverter.ConvertedWeights c = LtxVideo2CheckpointConverter.Convert(w);
+
+        Assert.True(c.VaeDiffusionDecoder.ContainsKey("decoder.conv_in_x_t.weight"));
+        Assert.True(c.VaeDiffusionDecoder.ContainsKey("decoder.conv_in.weight"));
+        Assert.True(c.VaeDiffusionDecoder.ContainsKey("decoder.diff_blocks.0.scale_shift_table"));
+        Assert.DoesNotContain(c.VaeDiffusionDecoder.Keys, k => !k.StartsWith("decoder.", StringComparison.Ordinal));
+
+        // Both decoders un-normalize the latent identically, so the stats and the encoder stay put.
+        Assert.True(c.Vae.ContainsKey("latents_mean"));
+        Assert.True(c.Vae.ContainsKey("latents_std"));
+        Assert.True(c.Vae.ContainsKey("encoder.conv_in.conv.weight"));
+    }
+
+    [Fact]
+    public void ConvolutionalVaeLeavesTheDiffusionBucketEmpty()
+    {
+        Dictionary<string, Core.Tensors.Tensor> w = new()
+        {
+            ["vae.decoder.conv_in.conv.weight"] = Stub(),
+            ["vae.per_channel_statistics.mean-of-means"] = Stub(),
+        };
+        LtxVideo2CheckpointConverter.ConvertedWeights c = LtxVideo2CheckpointConverter.Convert(w);
+
+        Assert.Empty(c.VaeDiffusionDecoder);
+        Assert.True(c.Vae.ContainsKey("decoder.conv_in.conv.weight"));
+    }
+
     private static Core.Tensors.Tensor Stub() =>
         new Core.Tensors.Tensor(new Core.Tensors.TensorShape(1), Core.Tensors.DType.F32);
 }

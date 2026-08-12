@@ -64,6 +64,9 @@ public sealed class LtxVideo2CheckpointConverter
         Connectors,
         /// <summary>Video VAE decoder weights (<c>decoder.*</c> + <c>latents_mean</c>/<c>latents_std</c>).</summary>
         Vae,
+        /// <summary>LTX-2.5 <c>NADiffusionDecoder</c> weights, kept apart because it shares module names
+        /// (<c>decoder.conv_in</c>, <c>decoder.conv_out</c>) with the convolutional decoder it replaces.</summary>
+        VaeDiffusionDecoder,
         /// <summary>Audio VAE decoder weights.</summary>
         AudioVae,
         /// <summary>Vocoder weights (prefix kept — consumer reads <c>vocoder.*</c>).</summary>
@@ -80,6 +83,8 @@ public sealed class LtxVideo2CheckpointConverter
         public required Dictionary<string, Tensor> Transformer { get; init; }
         public required Dictionary<string, Tensor> Connectors { get; init; }
         public required Dictionary<string, Tensor> Vae { get; init; }
+        /// <summary>Populated only for an LTX-2.5 diffusion video VAE; empty for the convolutional decoder.</summary>
+        public Dictionary<string, Tensor> VaeDiffusionDecoder { get; init; } = [];
         public required Dictionary<string, Tensor> AudioVae { get; init; }
         public required Dictionary<string, Tensor> Vocoder { get; init; }
         public required Dictionary<string, Tensor> TextEncoder { get; init; }
@@ -90,6 +95,28 @@ public sealed class LtxVideo2CheckpointConverter
     private static bool IsConnectorKey(string key) =>
         key.Contains("embeddings_connector", StringComparison.Ordinal)
         || key.Contains("text_embedding_projection", StringComparison.Ordinal);
+
+    /// <summary>Key whose presence identifies an LTX-2.5 diffusion video VAE — the noised-pixel input projection,
+    /// which the convolutional decoder has no counterpart for. Same signature ComfyUI selects on.</summary>
+    public const string DiffusionDecoderSignatureKey = "decoder.conv_in_x_t.weight";
+
+    /// <summary>Whether these keys belong to a diffusion video VAE rather than a convolutional one. This has to be a
+    /// whole-file question: the two decoders share <c>decoder.conv_in</c>/<c>decoder.conv_out</c>, so no single key
+    /// answers it.</summary>
+    public static bool IsDiffusionVideoVae(IEnumerable<string> keys)
+    {
+        ArgumentNullException.ThrowIfNull(keys);
+        foreach (string key in keys)
+        {
+            if (key == DiffusionDecoderSignatureKey
+                || key.EndsWith($".{DiffusionDecoderSignatureKey}", StringComparison.Ordinal)
+                || key == $"{VaePrefix}{DiffusionDecoderSignatureKey}")
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /// <summary>Pure key routing (testable without files): returns the destination bucket and the mapped key.</summary>
     public static (Ltx2Bucket Bucket, string? MappedKey) RouteKey(string key)
@@ -192,15 +219,25 @@ public sealed class LtxVideo2CheckpointConverter
         Dictionary<string, Tensor> audioVae = new(256);
         Dictionary<string, Tensor> vocoder = new(256);
         Dictionary<string, Tensor> textEncoder = new(1024);
+        Dictionary<string, Tensor> diffusionDecoder = [];
+
+        // The latent statistics stay in the VAE bucket for either decoder — both un-normalize the latent the same way.
+        bool diffusionVae = IsDiffusionVideoVae(allWeights.Keys);
 
         foreach (KeyValuePair<string, Tensor> kvp in allWeights)
         {
             (Ltx2Bucket bucket, string? mapped) = RouteKey(kvp.Key);
+            if (diffusionVae && bucket == Ltx2Bucket.Vae && mapped is not null
+                && mapped.StartsWith("decoder.", StringComparison.Ordinal))
+            {
+                bucket = Ltx2Bucket.VaeDiffusionDecoder;
+            }
             switch (bucket)
             {
                 case Ltx2Bucket.Transformer: transformer[mapped!] = kvp.Value; break;
                 case Ltx2Bucket.Connectors: connectors[mapped!] = kvp.Value; break;
                 case Ltx2Bucket.Vae: vae[mapped!] = kvp.Value; break;
+                case Ltx2Bucket.VaeDiffusionDecoder: diffusionDecoder[mapped!] = kvp.Value; break;
                 case Ltx2Bucket.AudioVae: audioVae[mapped!] = kvp.Value; break;
                 case Ltx2Bucket.Vocoder: vocoder[mapped!] = kvp.Value; break;
                 case Ltx2Bucket.TextEncoder: textEncoder[mapped!] = kvp.Value; break;
@@ -212,6 +249,7 @@ public sealed class LtxVideo2CheckpointConverter
             Transformer = transformer,
             Connectors = connectors,
             Vae = vae,
+            VaeDiffusionDecoder = diffusionDecoder,
             AudioVae = audioVae,
             Vocoder = vocoder,
             TextEncoder = textEncoder,

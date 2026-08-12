@@ -13,6 +13,9 @@ public sealed class SafeTensorsLoader : IDisposable
     /// <summary>Tensor name → descriptor mapping from the parsed header.</summary>
     public IReadOnlyDictionary<string, SafeTensorDescriptor> Descriptors { get; private set; } = new Dictionary<string, SafeTensorDescriptor>();
 
+    /// <summary>String entries of the header's <c>__metadata__</c> object, or null when the file has none. Values that are themselves JSON (e.g. LTX's <c>config</c>) are returned verbatim for the caller to parse.</summary>
+    public IReadOnlyDictionary<string, string>? Metadata { get; private set; }
+
     /// <summary>File path of the loaded safetensors file.</summary>
     public string FilePath { get; private set; } = string.Empty;
 
@@ -40,8 +43,9 @@ public sealed class SafeTensorsLoader : IDisposable
 
         // Parse JSON header
         ReadOnlySpan<byte> headerJson = new ReadOnlySpan<byte>(basePtr + 8, (int)headerLength);
-        Dictionary<string, SafeTensorDescriptor> descriptors = ParseHeader(headerJson, dataOffset);
+        Dictionary<string, SafeTensorDescriptor> descriptors = ParseHeader(headerJson, dataOffset, out Dictionary<string, string>? metadata);
         Descriptors = descriptors;
+        Metadata = metadata;
     }
 
     /// <summary>Returns a tensor backed by memory-mapped data for the given tensor name. The returned tensor borrows memory from the mmap — do not dispose the loader while using it.</summary>
@@ -77,16 +81,25 @@ public sealed class SafeTensorsLoader : IDisposable
         return tensors;
     }
 
-    private static Dictionary<string, SafeTensorDescriptor> ParseHeader(ReadOnlySpan<byte> headerJson, long dataBaseOffset)
+    private static Dictionary<string, SafeTensorDescriptor> ParseHeader(ReadOnlySpan<byte> headerJson, long dataBaseOffset, out Dictionary<string, string>? metadata)
     {
         Dictionary<string, SafeTensorDescriptor> descriptors = [];
+        metadata = null;
         using JsonDocument doc = JsonDocument.Parse(headerJson.ToArray());
 
         foreach (JsonProperty prop in doc.RootElement.EnumerateObject())
         {
-            // Skip __metadata__ key
             if (prop.Name == "__metadata__")
+            {
+                // The spec restricts __metadata__ to string values; ignore anything else rather than fail the load.
+                metadata = [];
+                foreach (JsonProperty entry in prop.Value.EnumerateObject())
+                {
+                    if (entry.Value.ValueKind == JsonValueKind.String)
+                        metadata[entry.Name] = entry.Value.GetString()!;
+                }
                 continue;
+            }
 
             JsonElement value = prop.Value;
 
