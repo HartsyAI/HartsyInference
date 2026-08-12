@@ -957,12 +957,21 @@ grinds).
   schedule at the default `Strength2=0.6` only runs `steps - round(steps·0.6)` = 2 real denoise
   steps — enough to shift texture but not color; this reads as "wiring broken" but isn't, it's
   scheduling.
-- [ ] **CPU-offloaded activations** — weight offload works because the host `Tensor` is always the
-  authoritative copy (`PreloadWeights`/`FreeWeights` just add/drop a GPU-side cache entry); activations have
-  no host-authoritative copy today (`FreeActivations` discards the device buffer outright, no D2H anywhere
-  in that path). Needs a genuine materialize-to-host-then-reload path, plus interaction with the CUDA
-  step-graph invalidation that already exists for the weight-free case (`StepGraphInvalidateForActivationFree`)
-  — a captured graph bakes activation pointers, so offloading mid-graph needs the same invalidation treatment.
+- [x] **CPU-offloaded activations** — done 2026-08-12, but **this entry's premise was wrong** and the
+  resolution is not what it describes. The materialize-to-host-then-reload path already EXISTED per-tensor:
+  `CacheActivation`'s lazy sync callback does stream-sync → `EnsureHostBuffer` → D2H → free-device, and four
+  transformers already drove it via a bare `_ = t.DataPointer`. Only a named, bulk, policy-level entry point
+  was missing — now `IBackend.OffloadActivation` / `OffloadActivations(targetBytes)`, with the step-graph
+  invalidation this entry correctly anticipated, plus arena skipping, pin clearing, and (the non-obvious one)
+  blocking weight auto-promotion, which otherwise silently re-residents an offloaded tensor on its second
+  re-upload. Wired to `DeviceFeatureCache` behind `HARTSY_STEP_CACHE_OFFLOAD`, off by default.
+  <br>**Paging is the wrong mechanism for the engine's one measured activation OOM** (MiniMax-H3 chunked
+  attention): the host path is pageable and synchronous (~3-6 GB/s, nothing overlapped), and the same bytes
+  come off structurally for free. That peak instead went 3x → 2x `seq·inner·F32` by splitting the fused qkv
+  projection across the two passes (k+v in pass 1, q re-projected per chunk in pass 2 — identical total GEMM
+  work), which needed a new `LinearWeightRows` GEMM entry point because a weight *slice* would be a separate
+  GPU cache identity and upload a second copy of an already-resident weight. See
+  `docs/Research/MEMORY_SCHEDULING_SERVING.md` §9 for the full reasoning and the invariants.
 - [ ] **PAG / SAG attention-hook infrastructure** — no self-attention substitution/introspection mechanism
   exists anywhere (confirmed zero hits for any `AttentionHook`-shaped primitive); `FluxTransformer`'s
   ControlNet residual-injection points are an external-adapter residual-add, not reusable as-is for a

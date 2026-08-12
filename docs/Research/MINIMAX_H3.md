@@ -512,6 +512,21 @@ half *is* bit-identical. Gate on a real generation, not byte-equality.
 this config, slope `107520·seq` → `78848·seq` bytes, a **+36% sequence-length ceiling**. It must change
 in the same commit or the pre-flight keeps refusing exactly the geometries the fix enables.
 
+**Verified 2026-08-12 (all from a worktree pinned at the shipped commit).** `56f@768x768`, refused by
+125 MB before, completes with clean coherent output. The legacy unchunked path is **bit-identical** across
+the change: `141f@512x288` seed 1 gives the same aggregate md5 pre- and post-change, twice each. Every
+pre-existing kernel's PTX is byte-identical too (the only delta outside the new subset kernel is
+`fourier_embed_f32`'s `__local_depot` counter renumbering, which H3 never calls).
+
+> **Verification trap, cost several bogus results here.** H3 output on this box is deterministic
+> *only when the GPU is otherwise idle*. Three separate 141f@512x288 measurements of identical code gave
+> three different hashes because other work (a concurrent `dotnet test`, another agent's run) was sharing
+> the GPU; with the GPU quiet, four runs across two different builds agreed exactly. Something in the
+> setup path is free-VRAM-dependent — the weight-cast cache's headroom gate
+> (`CacheWeightCasts` → `_castTransientGated` vs `_castCachedNew`) is the prime suspect, since it changes
+> per-weight behaviour on live free VRAM. **Stop every other GPU tenant before any A/B, and run each side
+> twice** — a single run per side cannot tell a real regression from tenancy noise.
+
 **Recorded before-state (4090, 2026-08-12):** resident DiT 19,988 MB, 22,634 MB free → 2,646 MB for
 activations. `56f@768x768` (seq 10,490) needed 2,771 MB — **refused, 125 MB short**. Predicted post-fix
 floor 2,484 MB (~161 MB margin). Note the refusal threshold moves with whatever else holds VRAM
