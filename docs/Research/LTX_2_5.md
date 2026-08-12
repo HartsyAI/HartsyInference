@@ -45,6 +45,39 @@ them.
 shipping 2.3 path too, and the padding-side difference). Either can make output subtly wrong in a way that
 looks like a porting bug somewhere else.
 
+### Running the encoder against the int8 text encoder
+
+`Gemma4TextEncoder`'s embedding gather reads the weight as a raw `float*` after `CastToF32IfNeeded`, so a
+packed embedding table would yield silent garbage. It does not happen: the int8-convrot TE quantizes **only the
+projection matrices**. From its header,
+
+```
+model.embed_tokens.weight                               BF16  [262144, 3840]
+model.norm.weight                                       BF16  [3840]
+model.layers.0.layer_scalar                             BF16  [1]
+text_embedding_projection.video_aggregate_embed.weight  BF16  [4096, 188160]
+model.layers.0.self_attn.q_proj.weight                  I8    [4096, 3840]
+dtype histogram: F32 328, BF16 353, I8 328, U8 333
+```
+
+Embeddings, norms, `layer_scalar` and the connector projection all stay BF16, so the gather and the norms are
+safe as written and the int8 path is confined to `Linear`.
+
+The residual caveat is that the encoder's parity (3.9e-7 sliding / 1.1e-6 global) was measured on **F32 weights
+on CPU**. Resident-int8 projections are an untested combination — not suspected broken, just unverified. Check
+a couple of hidden states against the BF16 tower before treating a poor generation as a wiring bug.
+
+### Raising the conditioning length to 1024
+
+The pipeline was tuned at 256 tokens, so this is not a free change:
+
+- The 49-layer feature stack is ~771 MB in F32 at 1024 tokens (`1024 × 3840 × 49 × 4`), and the prompt cache
+  holds both the positive and the negative, so budget roughly 1.5 GB. The resident-prefix VRAM headroom in
+  `LtxVideo2Pipeline` was sized against 256 — re-check it rather than assuming it scales.
+- 1024 is a clean multiple of the connector's 128 learnable registers, so register replacement is unaffected.
+- `LtxVideo2Recipe.TokenLength` is an `internal const` at 256. It has to become per-branch: bumping it globally
+  changes the Gemma-3 conditioning length too, silently altering the verified 2.3 output.
+
 ## Summary
 
 LTX 2.5 (Lightricks, released 2026-08-11) is a point release of the same dual-stream audio-video DiT the
