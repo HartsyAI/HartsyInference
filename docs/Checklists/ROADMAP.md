@@ -925,16 +925,31 @@ grinds).
   automatic, for the same reason as before (oversized-bbox crops are usually small).
   <br>**Base-prompt tag-leak, confirmed real via the live test's own numbers, not just theoretical**
   (documented in `SegmentRefinement.cs`'s class doc, but not previously quantified): no recipe
-  pipeline strips `<segment:X>...</>` tag text from what it sends to its own text encoder for the
-  BASE (full-canvas) pass — same pre-existing gap `<region:>`/`<object:>` already have. Measuring
-  the live A/B pair's mean-abs-diff on a crop that's pure untouched background (no apple, no pear)
-  found ~40-47/255, not near-zero as a clean isolation would predict — the literal segment tag text
-  is reaching the tokenizer and lightly steering the WHOLE base image, not just the masked region.
-  The masked region's own diff (~55-83/255) is real and dominant, so the feature still visibly does
-  its job, but the "confined to the segment" claim from the first verification pass undersold this.
-  Fix (not built): make `ImagesService` tokenize `PromptRegionParser.GlobalPrompt` (tags already
-  stripped) for the base pass instead of the raw prompt, same fix needed for `<region:>`/`<object:>`
-  — one shared fix, not three.
+  pipeline stripped `<segment:X>...` tag text from what it sent to its own text encoder for the
+  BASE (full-canvas) pass. Measuring the live A/B pair's mean-abs-diff on a crop that's pure
+  untouched background (no apple, no pear) found ~40-47/255, not near-zero as a clean isolation
+  would predict — the literal segment tag text was reaching the tokenizer and lightly steering the
+  WHOLE base image, not just the masked region.
+  <br>**FIXED, real-weight + live re-verified (2026-08-11, same day).** `SegmentRefinement.StripSegmentText`
+  mirrors `PromptRegionParser`'s own split/accumulate grammar (not a regex — "what belongs to a
+  segment" is defined by the accumulator rebinding the parser itself uses) to drop
+  `<segment:>`/`<clear:>` tags and their accumulated text while preserving everything else —
+  `<region:>`/`<object:>` tags included — byte-for-byte. `ImagesService.GenerateAsync` tokenizes the
+  stripped prompt for the base pass, gated on `HasSegmentParts` so a segment-free request is
+  byte-identical to before (identity path, not re-serialization). Re-ran the exact same live A/B:
+  background-corner diff dropped from ~40-47/255 to **exactly 0.0**, masked-region diff (the
+  feature's actual job) still dominant and visually unchanged. 10 parser-level unit tests
+  (`SegmentRefinementStripTests.cs`) lock in the grammar edge cases (segment-then-region survives
+  the region tag verbatim, embed-inside-segment dropped, `//cid=N` suffix, the `<segment:end>`
+  literal-text quirk, no-op on a tag-free prompt). Commit `31ac81ed`.
+  <br>**`<region:>`/`<object:>` have the same class of leak — deliberately NOT fixed by this
+  change.** Those pipelines each re-parse `request.Prompt` raw themselves
+  (`RegionalPromptResolver.HasRegionParts`) to build their own live per-step attention-bias plan —
+  handing them a pre-stripped prompt would make that check return false and silently break regional
+  prompting on all five already-shipped architectures (1.4's Flux.1/Z-Image/Ideogram4, 3.7's
+  Flux.2/Krea2). The real fix there is per-pipeline (tokenize `PromptRegionParser.GlobalPrompt` for
+  the base stream while still handing `Resolve` the raw prompt) and needs its own re-verification
+  pass across all five — a separate, larger item, not bundled here.
   <br>**Syntax note, easy to get backwards**: `<segment:query,Strength2,Strength>` — the mask
   threshold (`Strength`, default 0.5) comes LAST, the denoise/creativity strength (`Strength2`,
   default 0.6) comes second. There is no `<segment:end>` closer (unlike `<region:end>`) — writing
