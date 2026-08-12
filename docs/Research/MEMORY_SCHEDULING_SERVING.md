@@ -127,7 +127,29 @@ C# implementability (KV cache): the same engineering an LLM KV-cache needs. Per 
 - *DeepCache (arXiv:2312.00858)*, *TeaCache (arXiv:2411.19108)*, *FBCache (ParaAttention)* — https://github.com/chengzeyi/ParaAttention
 - *CausVid (arXiv:2412.07772)* , *Self-Forcing (arXiv:2506.08009)* , *Diffusion Forcing (arXiv:2407.01392)*
 
----
+## 9. CPU-offloaded activations — what exists, and why paging usually loses to fixing the peak
+
+**The materialize→reload mechanism already exists per-tensor.** `GpuTransferHelper.CacheActivation` plants a lazy sync callback (`GpuTransferHelper.cs`) that does stream-sync → `Tensor.EnsureHostBuffer()` → D2H → free-device; reload is simply the next `CopyToDevice` cache miss re-uploading from host data. Touching `DataPointer` fires it, which is why several transformers "host-materialize" a cross-step tensor with a bare `_ = t.DataPointer` so a later `FreeActivations` cannot revert them to stale host memory (`BooguImageTransformer`, `ErnieImageTransformer`, `WanVideoTransformer`). What the engine lacked was a *named, bulk, policy-level* entry point — `IBackend.OffloadActivation` / `OffloadActivations(targetBytes)` — not the transfer path. `FreeActivations` itself does no D2H by design: it reclaims buffers that are provably dead.
+
+**Why bulk paging is not a general lowvram lever here.** Under eager execution intermediates are already freed at their point of last use, so there is no large pool of idle-but-resident activations to page. The activations that *are* long-lived are long-lived because something reads them repeatedly — and the read frequency decides everything:
+
+- **Per-block-per-step tensors: offload always loses.** The host path is *pageable* (`EnsureHostBuffer` is `NativeMemory.AlignedAlloc`, not `cuMemHostAlloc`) and *synchronous* (blocking `cuStreamSynchronize` then a blocking copy, nothing overlapped), so real throughput is ~3-6 GB/s, well under the ~12-13 GB/s a pinned async path reaches on PCIe 3.0 x16. Paging one full-sequence tensor per block per step across a 50-block DiT is hundreds of GB of round trips per step. Making it competitive would need pinned staging rings + async D2H on a separate stream + prefetch (§4), and it would *still* lose to simply not holding the tensor (below).
+- **Per-step tensors: offload is defensible as a last resort.** A step-cache residual (`DeviceFeatureCache`) is latent-sized and read at most once per step, so paging costs one round trip per step to free its full size. That is a real latency-vs-VRAM lever, unlike the per-block case.
+
+**Case study — MiniMax-H3 chunked attention (the engine's one measured activation OOM).** `MiniMaxH3Transformer.AttentionChunked` runs two passes: pass 1 projects q/k/v per row-chunk, scatters k/v into full `[1, heads, seq, hd]` buffers, and holds every q chunk for pass 2 — three full-sequence F32 buffers live at once. Paging q would be the per-block-per-step case above. Two structural fixes remove the same bytes at no transfer cost:
+
+- **Split the projection across the passes.** Pass 1 projects k+v only (2/3 of the fused GEMM); pass 2 re-projects q per chunk (1/3). Total FLOPs are unchanged — it is a redistribution, not a recompute — and the pass-1 peak drops from 3x to 2x `seq·inner·4`. The fused qkv weight is packed `[q | k | v]` contiguously, so both slices are borrowed row ranges. Not bit-identical: q's GEMM narrows, so cuBLASLt picks a different algorithm (the same divergence class already documented for chunked-vs-unchunked).
+- **Scatter outputs into their destination instead of listing + `Concat`.** Both `AttentionChunked` pass 2 and `MlpChunked` accumulated every output chunk in a list, keeping a full `[seq, hidden]` live alongside the concatenated result. Writing each chunk straight into the destination at its row offset (`ScatterRowsGeneric`, the byte-offset inverse of `SliceRowsGeneric`) removes that copy and is bit-identical. Same argument as the existing `ScatterSeqHeadMajor`, which fixed the identical mistake for k/v.
+
+Together these take the per-block floor from `residual + 3·fullSeqInner + chunkScratch` to `residual + 2·fullSeqInner + chunkScratch`, i.e. slope `107520·seq` → `78848·seq` bytes for this config — a **+36% sequence-length ceiling** at fixed VRAM. Measured on the 4090 (resident DiT 19,988 MB, 22,634 MB free → 2,646 MB for activations): 56 frames @ 768x768 (seq 10,490) needed 2,771 MB and was refused by 125 MB before the change.
+
+**Invariants for any bulk offload path** (learned from the sibling free paths, all enforced in `GpuTransferHelper`):
+
+- **Safe points only, on the owning thread.** `State`'s caches are non-concurrent dictionaries, and nothing distinguishes an idle cached activation from a live kernel argument — which is why `FreeActivations` is documented "called between pipeline stages, never mid-op". In particular **do not hook offload into the allocator's OOM retry**: that fires mid-op by construction. The typed `OutOfVramException` exists so stage-boundary callers can degrade instead.
+- **Skip arena-backed pointers** — graph-arena allocations are never freed individually.
+- **Invalidate the step graph**, exactly as `FreeActivations` does: a captured graph bakes activation pointers, and a reload returns a *new* device pointer even though host data is intact. Callers must also skip offload while a step graph is live (the video pipelines already suppress their per-step `FreeActivations` for this reason).
+- **Clear the pin.** `PinActivation` exists because the host copy was never materialized; after a real D2H the host *is* authoritative, so a pinned tensor becomes offloadable.
+- **Block weight auto-promotion for anything offloaded**, or the lever silently undoes itself: the reload path re-uploads unchanged host data every read, and `TryAutoPromote` promotes a >=1 MB tensor into the *weight* cache on its second upload — quietly making it device-resident again.
 
 ## Ranked impact vs effort (12 GB RTX 3060)
 
@@ -146,6 +168,7 @@ C# implementability (KV cache): the same engineering an LLM KV-cache needs. Per 
 | 11 | Batched-vs-two-pass CFG toggle | Medium | Low | Latency-vs-peak-VRAM lever. |
 | 12 | Multi-stream concurrency for kernels / serving | Low (single req) | Medium-high | No denoise-loop speedup (GPU already saturated); serving-only, VRAM-bound on 3060. |
 | 13 | Attention slicing | ~Zero w/ flash attn | Low | Only for a non-flash fallback path; otherwise skip. |
+| 14 | CPU-offloaded activations (bulk paging) | Low, situational | Low (mechanism exists) | §9. Per-tensor D2H/reload already exists; only a policy entry point was missing. Loses to removing the peak for per-block tensors; defensible only for per-step ones (step-cache residual). |
 
 ## Top recommendations for a 12 GB RTX 3060 running 12B+ models
 

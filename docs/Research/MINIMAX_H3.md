@@ -477,6 +477,44 @@ sequence bookkeeping enum (`Text, Cond, RefImage, RefAudio, Audio, Video` — wh
 occupies), not connected to `<segment:>` prompt syntax at all. A grep for "Segment" near MiniMaxH3
 will hit this and can mislead.
 
+## Chunked-attention activation peak (Tier 3.9) — design pass 2026-08-12
+
+The roadmap's "CPU-offloaded activations" item resolves here rather than as a paging feature; the
+general reasoning is in [`MEMORY_SCHEDULING_SERVING.md`](MEMORY_SCHEDULING_SERVING.md) §9. H3 is the
+engine's one *measured* activation OOM, so it is the case that decides the mechanism.
+
+`AttentionChunked` pass 1 holds q + k + v full-sequence simultaneously (3x `seq·inner·4`). q cannot be
+scattered away like k/v were — the `qChunks` list is already exactly one full-size buffer, not the
+redundant second copy that the `ScatterSeqHeadMajor` fix removed for k/v. So the only ways down are
+paging q to host or not holding it. Paging costs ~2 GB of round trip **per block per step** across 50
+blocks through a pageable, synchronous path — the wrong mechanism (§9).
+
+**The fix: split the fused projection across the two passes.** Pass 1 projects k+v only (2/3 of the
+GEMM), pass 2 re-projects q per chunk (1/3). Identical total FLOPs; pass-1 peak 3x → 2x. Enabled by the
+packing being `[q(inner) | k(inner) | v(inner)]` per token, so both weight slices are contiguous row
+ranges of `qkv_proj.weight` (see `QkvSplitNormHeadMajor`'s indexing). The fused split/norm/head-major op
+is generalized to emit a subset rather than gaining two near-duplicate siblings. Separately, both
+`AttentionChunked` pass 2 and `MlpChunked` stop accumulating output chunks for a final `Concat` and
+scatter each chunk into the destination instead (`ScatterRowsGeneric` — the byte-offset inverse of
+`SliceRowsGeneric`, a plain D2D copy with no kernel).
+
+**Not bit-identical.** q's GEMM narrows from `[c,hidden]x[hidden,inner·3]` to `[hidden,inner]`, so
+cuBLASLt selects a different algorithm — the same divergence class as chunked-vs-unchunked, which is
+why the sub-`chunkRows` dispatch deliberately keeps the legacy `Attention` path untouched. The scatter
+half *is* bit-identical. Gate on a real generation, not byte-equality.
+
+**Floor math.** `EstimateFloorBytes` goes from `residual + 3·fullSeqInner + chunkScratch + fudge` to
+`residual + max(2·fullSeqInner + chunkScratch, 2·fullSeqInner + seq·hidden·bodyBytes) + fudge` — for
+this config, slope `107520·seq` → `78848·seq` bytes, a **+36% sequence-length ceiling**. It must change
+in the same commit or the pre-flight keeps refusing exactly the geometries the fix enables.
+
+**Recorded before-state (4090, 2026-08-12):** resident DiT 19,988 MB, 22,634 MB free → 2,646 MB for
+activations. `56f@768x768` (seq 10,490) needed 2,771 MB — **refused, 125 MB short**. Predicted post-fix
+floor 2,484 MB (~161 MB margin). Note the refusal threshold moves with whatever else holds VRAM
+(an idle RustDesk process held 424 MB during this measurement), so re-measure rather than reusing
+these numbers; `MiniMaxH3ActivationEstimateTests`' class-comment floors are themselves stale, fitting
+an older `100352·seq` slope that the current code no longer computes.
+
 ## Sources
 
 - [MiniMax H3 announcement blog](https://www.minimax.io/blog/minimax-h3)
