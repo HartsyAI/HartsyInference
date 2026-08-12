@@ -1,4 +1,3 @@
-using System.Text;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -27,8 +26,9 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 ///
 /// <para>The pruned release swaps the time embedder for an <c>adaln_t_table</c> curve basis (supported — the config
 /// detects it and the transformer implements the lerp) and quantizes the four block linears to int8 with a
-/// block-diagonal input rotation (<c>convrot</c>). The rotation is not implemented: those tensors route to
-/// <see cref="MiniMaxH3Bucket.Int8Quant"/> and <see cref="Convert"/> throws naming them.</para></summary>
+/// block-diagonal input rotation (<c>convrot</c>). Those weights stay packed: their <c>.weight_scale</c> and
+/// <c>.comfy_quant</c> companions are folded onto <see cref="Tensor.QuantInfo"/> by
+/// <see cref="CheckpointConvertUtils.AttachInt8QuantInfo"/> and the backend consumes the int8 bytes directly.</para></summary>
 public sealed class MiniMaxH3CheckpointConverter
 {
     private const string DiffusionPrefix = "model.diffusion_model.";
@@ -38,12 +38,6 @@ public sealed class MiniMaxH3CheckpointConverter
     private const string VideoVaePrefix = "video_vae.";
     private const string TextEncodersPrefix = "text_encoders.qwen3vl_32b.transformer.";
     private const string TextEncoderPrefix = "text_encoder.";
-
-    /// <summary>Suffix of the per-linear JSON quantization descriptor; the authoritative int8-convrot signal.</summary>
-    private const string QuantDescriptorSuffix = ".comfy_quant";
-
-    /// <summary>Suffix of the per-output-channel int8 dequant scale that accompanies each quantized linear.</summary>
-    private const string QuantScaleSuffix = ".weight_scale";
 
     /// <summary>Destination bucket for a checkpoint key.</summary>
     public enum MiniMaxH3Bucket
@@ -56,9 +50,8 @@ public sealed class MiniMaxH3CheckpointConverter
         AudioVae,
         /// <summary>Qwen3-VL-32B conditioning tower weights (<c>model.*</c> + <c>visual.*</c>).</summary>
         TextEncoder,
-        /// <summary>int8-convrot companions of the pruned release; unimplemented, <see cref="Convert"/> throws on them.</summary>
-        Int8Quant,
-        /// <summary>Unused (fp8 scale markers).</summary>
+        /// <summary>Unused (fp8 scale markers). Quantization companions never reach routing — <see cref="Convert"/>
+        /// folds them onto their weight and drops them first.</summary>
         Drop,
     }
 
@@ -85,9 +78,6 @@ public sealed class MiniMaxH3CheckpointConverter
         ArgumentNullException.ThrowIfNull(key);
         if (key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || key == "scaled_fp8")
             return (MiniMaxH3Bucket.Drop, null);
-        if (key.EndsWith(QuantDescriptorSuffix, StringComparison.Ordinal)
-            || key.EndsWith(QuantScaleSuffix, StringComparison.Ordinal))
-            return (MiniMaxH3Bucket.Int8Quant, key);
 
         // Dotted-prefix order is load-bearing: "audio_vae." before "vae.", and the diffusion prefix before the bare
         // "model.*" text-encoder test, or "audio_patch_proj"/"model.diffusion_model" would fall into the wrong bucket.
@@ -129,9 +119,8 @@ public sealed class MiniMaxH3CheckpointConverter
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights, bool castToF32 = true)
     {
         ArgumentNullException.ThrowIfNull(allWeights);
-        ThrowIfInt8Convrot(allWeights);
-        // Comfy-Org's *_pruned_fp8_scaled repack is the only H3 variant that fits a 24 GB card, so fold its
-        // per-tensor .scale_weight companions before routing or those keys look like unknown weights.
+        // Folds BOTH quantized builds' companions before routing (int8_tensorwise row scales onto Tensor.QuantInfo,
+        // fp8 per-tensor scalars onto Fp8ScaleFactor) — left in place those keys look like unknown weights.
         allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
 
         Dictionary<string, Tensor> transformer = new Dictionary<string, Tensor>(allWeights.Count);
@@ -148,7 +137,6 @@ public sealed class MiniMaxH3CheckpointConverter
                 case MiniMaxH3Bucket.VideoVae: videoVae[mapped!] = kvp.Value; break;
                 case MiniMaxH3Bucket.AudioVae: audioVae[mapped!] = kvp.Value; break;
                 case MiniMaxH3Bucket.TextEncoder: textEncoder[mapped!] = kvp.Value; break;
-                case MiniMaxH3Bucket.Int8Quant: break;
                 case MiniMaxH3Bucket.Drop: break;
             }
         }
@@ -159,48 +147,6 @@ public sealed class MiniMaxH3CheckpointConverter
             AudioVae = audioVae,
             TextEncoder = textEncoder,
         };
-    }
-
-    /// <summary>Rejects the pruned release's int8-convrot linears before anything is materialized, naming the tensors
-    /// found and the descriptor they carry.</summary>
-    public static void ThrowIfInt8Convrot(IReadOnlyDictionary<string, Tensor> allWeights)
-    {
-        ArgumentNullException.ThrowIfNull(allWeights);
-        List<string> quantized = new List<string>();
-        string? descriptor = null;
-        foreach (KeyValuePair<string, Tensor> kvp in allWeights)
-        {
-            if (RouteKey(kvp.Key).Bucket != MiniMaxH3Bucket.Int8Quant) continue;
-            quantized.Add(kvp.Key);
-            if (descriptor is null && kvp.Key.EndsWith(QuantDescriptorSuffix, StringComparison.Ordinal))
-                descriptor = ReadDescriptor(kvp.Value);
-        }
-        if (quantized.Count == 0) return;
-        // Comfy tags EVERY quantized build with the same companion suffixes; only the descriptor distinguishes them.
-        // The fp8_scaled repack says {"format": "float8_e4m3fn"} and is handled by the shared scale fold — rejecting
-        // on the companions alone locks out the one variant that fits a 24 GB card.
-        if (descriptor is not null && !descriptor.Contains("int8", StringComparison.OrdinalIgnoreCase)
-            && !descriptor.Contains("convrot", StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        quantized.Sort(StringComparer.Ordinal);
-        throw new NotSupportedException(
-            $"MiniMax-H3 int8-convrot checkpoints are not supported: {quantized.Count} quantization companion "
-            + $"tensors found (e.g. '{quantized[0]}'), descriptor {descriptor ?? "<absent>"}. Loading them needs the "
-            + "block-diagonal convrot rotation to be undone (or applied to activations at runtime), which is not "
-            + "implemented. Use the BF16 checkpoint (minimax_h3_fl2va_bf16.safetensors) instead.");
-    }
-
-    /// <summary>Decodes a <c>*.comfy_quant</c> U8 descriptor tensor as its ASCII JSON text.</summary>
-    private static string? ReadDescriptor(Tensor tensor)
-    {
-        if (tensor.DType != DType.U8 || tensor.ElementCount is <= 0 or > 4096) return null;
-        ReadOnlySpan<byte> bytes = tensor.AsReadOnlySpan<byte>();
-        int end = bytes.Length;
-        while (end > 0 && bytes[end - 1] == 0) end--;
-        return Encoding.ASCII.GetString(bytes[..end]);
     }
 
     /// <summary>F32 is required by the transformer; quantized and already-F32 tensors pass through untouched.</summary>

@@ -1,6 +1,6 @@
-using System.Text.Json;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Quant;
 
 namespace HartsyInference.ModelAssets.TextEncoders;
 
@@ -10,6 +10,9 @@ namespace HartsyInference.ModelAssets.TextEncoders;
 ///   <item>Folds per-tensor fp8 <c>.weight_scale</c> / <c>.scale_weight</c> scalars into
 ///   <see cref="Tensor.Fp8ScaleFactor"/> (applied for free as the cuBLAS GEMM alpha), via
 ///   <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>.</item>
+///   <item>Folds <c>int8_tensorwise</c>'s per-output-row <c>.weight_scale</c> and its <c>.comfy_quant</c> descriptor
+///   onto <see cref="Tensor.QuantInfo"/>, leaving the weight packed at 1 byte/param (the Gemma 4 12B LTX 2.5 encoder
+///   is 15.4 GB int8 against 26 GB BF16), via <see cref="CheckpointConvertUtils.AttachInt8QuantInfo"/>.</item>
 ///   <item>Drops the <c>.comfy_quant</c> / <c>*_scale</c> companion tensors so they never reach the model.</item>
 ///   <item>Leaves plain BF16/F16/F32 checkpoints untouched (no copy when there are no companions).</item>
 /// </list>
@@ -30,20 +33,20 @@ public static unsafe class TextEncoderQuantNormalizer
     public static Dictionary<string, Tensor> Normalize(IReadOnlyDictionary<string, Tensor> weights)
     {
         // Capture the comfy_quant format declarations before ApplyFp8ScaledDequant drops them, so an
-        // unsupported-format error below can name the actual format (e.g. "nvfp4", "mxfp4").
+        // unsupported-format error below can name the actual format (e.g. "mxfp4", "svdquant").
         Dictionary<string, string> formats = new();
         foreach (KeyValuePair<string, Tensor> kvp in weights)
         {
-            if (!kvp.Key.EndsWith(".comfy_quant", StringComparison.Ordinal))
+            if (!kvp.Key.EndsWith(ComfyQuantDescriptor.Suffix, StringComparison.Ordinal))
                 continue;
-            string baseKey = kvp.Key[..^".comfy_quant".Length];
-            string? format = TryReadComfyQuantFormat(kvp.Value);
-            if (format is not null)
-                formats[baseKey] = format;
+            ComfyQuantDescriptor? descriptor = CheckpointConvertUtils.TryReadComfyQuant(kvp.Value);
+            if (descriptor is not null)
+                formats[kvp.Key[..^ComfyQuantDescriptor.Suffix.Length]] = descriptor.Format;
         }
 
-        // fp8_scaled: fold weight_scale into Fp8ScaleFactor and drop comfy_quant / *_scale companions.
-        // Plain checkpoints (no companions) are returned as-is by the util.
+        // int8_tensorwise: move the row scale + rotation onto the weight (it stays packed). fp8_scaled: fold
+        // weight_scale into Fp8ScaleFactor. Both then drop their comfy_quant / *_scale companions. Plain
+        // checkpoints (no companions) are returned as-is by the util.
         Dictionary<string, Tensor> normalized = CheckpointConvertUtils.ApplyFp8ScaledDequant(new Dictionary<string, Tensor>(weights));
 
         // Anything still U8-packed is a quant format we don't dequantize yet. Fail clearly here rather than
@@ -61,23 +64,5 @@ public static unsafe class TextEncoderQuantNormalizer
         }
 
         return normalized;
-    }
-
-    /// <summary>Reads the <c>format</c> string out of a ComfyUI <c>.comfy_quant</c> blob (a tiny U8 tensor
-    /// holding UTF-8 JSON like <c>{"format": "float8_e4m3fn"}</c>). Returns null if it can't be parsed.</summary>
-    private static string? TryReadComfyQuantFormat(Tensor blob)
-    {
-        if (blob.DType != DType.U8 || blob.ElementCount <= 0 || blob.ElementCount > 4096)
-            return null;
-        try
-        {
-            ReadOnlySpan<byte> json = new(blob.DataPointer, (int)blob.ElementCount);
-            using JsonDocument doc = JsonDocument.Parse(System.Text.Encoding.UTF8.GetString(json));
-            return doc.RootElement.TryGetProperty("format", out JsonElement fmt) ? fmt.GetString() : null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 }

@@ -111,8 +111,15 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                 ditWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
             }
             (long primaryFreeBytes, _) = context.Backend.GetVramInfo();
+            long activationReserveBytes = MinimumActivationReserveBytes(config);
             bool fitsResidentSingleBackend = !ditIsHugeBf16Build && (primaryFreeBytes <= 0
-                || primaryFreeBytes >= ditWeightBytes + MinimumActivationReserveBytes(config));
+                || primaryFreeBytes >= ditWeightBytes + activationReserveBytes);
+            // Streaming costs a full re-upload of the DiT every step, so when it is chosen the operator needs the
+            // three numbers that chose it — otherwise "too large to stay resident" reads as a property of the build
+            // when it is usually a property of what else is on the card.
+            Logs.Info($"[MiniMaxH3Recipe] DiT residency: weights {ditWeightBytes / 1e9:F2} GB + activation reserve "
+                + $"{activationReserveBytes / 1e9:F2} GB vs {primaryFreeBytes / 1e9:F2} GB free → "
+                + (fitsResidentSingleBackend ? "resident" : "streaming"));
 
             // DiT sharding: fp8 build only — the bf16 blocks alone (~64 GB) exceed any 2-consumer-card pool, so
             // sharding buys nothing there and the streaming path stands. 50 homogeneous blocks → the
@@ -214,7 +221,6 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         loader.Load(file);
         loaders.Add(loader);
         Dictionary<string, Tensor> raw = new Dictionary<string, Tensor>(loader.GetAllTensors());
-        MiniMaxH3CheckpointConverter.ThrowIfInt8Convrot(raw);
         // The bf16 DiT is larger than host RAM, so it stays bf16 and the backend casts per call.
         MiniMaxH3CheckpointConverter.ConvertedWeights converted =
             MiniMaxH3CheckpointConverter.Convert(raw, castToF32: false);

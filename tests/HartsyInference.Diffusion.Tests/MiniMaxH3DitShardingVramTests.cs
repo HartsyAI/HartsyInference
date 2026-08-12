@@ -39,7 +39,6 @@ public sealed unsafe class MiniMaxH3DitShardingVramTests
         using SafeTensorsLoader loader = new SafeTensorsLoader();
         loader.Load(checkpoint);
         Dictionary<string, Tensor> raw = new Dictionary<string, Tensor>(loader.GetAllTensors());
-        MiniMaxH3CheckpointConverter.ThrowIfInt8Convrot(raw);
         MiniMaxH3CheckpointConverter.ConvertedWeights converted = MiniMaxH3CheckpointConverter.Convert(raw, castToF32: false);
         Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>(converted.Transformer);
         foreach (string key in weights.Keys.ToList())

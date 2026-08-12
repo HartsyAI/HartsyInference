@@ -123,4 +123,28 @@ public sealed unsafe class SwiGluFusionTests
         Assert.True(weights.ContainsKey("layers.0.feed_forward.w3.weight"));
         Assert.False(weights.ContainsKey("layers.0.feed_forward.w13.weight"));
     }
+
+    /// <summary>Once the int8 companions have been folded onto <see cref="Tensor.QuantInfo"/> their KEYS are gone, so
+    /// the comfy_quant key guard no longer sees the pair; concatenating would drop both row scales silently.</summary>
+    [Fact]
+    public void Int8PairWithQuantInfo_LeftUnfused()
+    {
+        Tensor rowScale = new Tensor(new TensorShape(4), DType.F32);
+        Dictionary<string, Tensor> weights = new()
+        {
+            ["layers.0.feed_forward.w1.weight"] = new Tensor(new TensorShape(4, 8), DType.I8),
+            ["layers.0.feed_forward.w3.weight"] = new Tensor(new TensorShape(4, 8), DType.I8),
+        };
+        foreach (Tensor t in weights.Values)
+            t.QuantInfo = new QuantWeightInfo { Format = "int8_tensorwise", RowScale = rowScale };
+
+        (int fused, _) = CheckpointConvertUtils.FuseSwiGluPairs(
+            weights, ".feed_forward.w1.weight", ".feed_forward.w3.weight", ".feed_forward.w13.weight");
+
+        Assert.Equal(0, fused);
+        Assert.True(weights.ContainsKey("layers.0.feed_forward.w1.weight"));
+        Assert.False(weights.ContainsKey("layers.0.feed_forward.w13.weight"));
+        rowScale.Dispose();
+        foreach (Tensor t in weights.Values) t.Dispose();
+    }
 }

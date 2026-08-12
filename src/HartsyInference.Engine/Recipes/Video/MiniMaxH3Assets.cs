@@ -173,16 +173,14 @@ public sealed record MiniMaxH3Assets
         return null;
     }
 
-    /// <summary>Prefers formats the engine can actually load. Comfy stages several variants of the same component
-    /// side by side, and <c>int8_convrot</c> is unimplemented — picking purely by size would choose it over bf16.</summary>
+    /// <summary>Prefers the quantized variants over BF16 when Comfy stages several side by side.</summary>
+    /// <remarks><c>int8_convrot</c> used to rank last because the engine could not load it at all; it is now a
+    /// first-class resident format (<c>CudaBackend</c>'s int8 IMMA path), so it ranks with the other quantized
+    /// builds and the size tie-break below decides between them.</remarks>
     private static int FormatRank(string name)
     {
         string lower = name.ToLowerInvariant();
-        if (lower.Contains("convrot"))
-        {
-            return 3;
-        }
-        return lower.Contains("nvfp4") || lower.Contains("fp8") ? 0 : 1;
+        return lower.Contains("nvfp4") || lower.Contains("fp8") || lower.Contains("int8") ? 0 : 1;
     }
 
     private static bool Matches(string name, string[] hints)

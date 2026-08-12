@@ -9,12 +9,14 @@ namespace HartsyInference.ModelAssets.Tests;
 /// loaded straight from safetensors without the per-tensor fp8 scale handling every backbone converter does.</summary>
 public sealed unsafe class TextEncoderQuantNormalizerTests
 {
-    private static Tensor ComfyQuantBlob(string format)
+    private static Tensor ComfyQuantBlob(string format) => ComfyQuantJson($"{{\"format\": \"{format}\"}}");
+
+    private static Tensor ComfyQuantJson(string json)
     {
-        byte[] json = Encoding.UTF8.GetBytes($"{{\"format\": \"{format}\"}}");
-        Tensor t = new(new TensorShape(json.Length), DType.U8);
+        byte[] bytes = Encoding.UTF8.GetBytes(json);
+        Tensor t = new(new TensorShape(bytes.Length), DType.U8);
         byte* p = (byte*)t.DataPointer;
-        for (int i = 0; i < json.Length; i++) p[i] = json[i];
+        for (int i = 0; i < bytes.Length; i++) p[i] = bytes[i];
         return t;
     }
 
@@ -50,6 +52,34 @@ public sealed unsafe class TextEncoderQuantNormalizerTests
         Assert.DoesNotContain("model.layers.0.self_attn.q_proj.weight_scale", result.Keys);
         Assert.DoesNotContain("model.layers.0.self_attn.q_proj.comfy_quant", result.Keys);
         Assert.True(result.ContainsKey("model.embed_tokens.weight"));
+    }
+
+    /// <summary>The U8 guard below never saw an I8 weight, so an int8 encoder (the 15.4 GB Gemma 4 LTX 2.5 build)
+    /// used to slip through unscaled. It must come out packed with its row scale on <c>QuantInfo</c>.</summary>
+    [Fact]
+    public void Normalize_Int8Convrot_AttachesQuantInfoAndKeepsWeightPacked()
+    {
+        const string key = "model.layers.0.self_attn.q_proj.weight";
+        Tensor rowScale = new(new TensorShape(8, 1), DType.F32);
+        Dictionary<string, Tensor> weights = new()
+        {
+            [key] = new Tensor(new TensorShape(8, 256), DType.I8),
+            ["model.layers.0.self_attn.q_proj.weight_scale"] = rowScale,
+            ["model.layers.0.self_attn.q_proj.comfy_quant"] = ComfyQuantJson(
+                "{\"format\": \"int8_tensorwise\", \"convrot\": true, \"convrot_groupsize\": 256}"),
+            ["model.embed_tokens.weight"] = new Tensor(new TensorShape(4, 4), DType.BF16),
+        };
+
+        Dictionary<string, Tensor> result = TextEncoderQuantNormalizer.Normalize(weights);
+
+        Tensor weight = result[key];
+        Assert.Equal(DType.I8, weight.DType);
+        Assert.Equal("int8_tensorwise", weight.QuantInfo!.Format);
+        Assert.Equal(256, weight.QuantInfo.ConvRotGroupSize);
+        Assert.Same(rowScale, weight.QuantInfo.RowScale);
+        Assert.DoesNotContain("model.layers.0.self_attn.q_proj.weight_scale", result.Keys);
+        Assert.DoesNotContain("model.layers.0.self_attn.q_proj.comfy_quant", result.Keys);
+        Assert.Equal(DType.BF16, result["model.embed_tokens.weight"].DType);
     }
 
     [Fact]

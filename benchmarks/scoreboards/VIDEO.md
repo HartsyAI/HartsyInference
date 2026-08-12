@@ -51,6 +51,30 @@ pipeline-only C# time at this shape is ~52.7 s *including first CUDA touch*; the
 are enumerated in `MODEL_STATUS_VIDEO.md` §SeedVR2 follow-ups. Matrix-scale numbers (25f, 960×540-area):
 ~14 s/frame, 17.1 GB peak, 7/7 clips green.
 
+## MiniMax-H3 fl2va — DiT quantization builds (2026-08-12)
+
+Not a T2V row: in-engine **step time**, not SwarmUI e2e. Same weights published at three precisions by
+Comfy-Org, so this is a build-vs-build comparison, not an engine-vs-engine one. Workload is
+`benchmarks/minimax_h3/h3_bench.sh`'s gold baseline — 141 frames @ 512×288, seed 1, 4090 (nvidia-smi
+index 1), SwarmUI stopped, mean of steps 4..N.
+
+| DiT build | File | Step time | Residency | Date |
+|---|---|---:|---|---|
+| `pruned_int8_convrot` | 20.97 GB | **5.807 s** (n=27, 5.781–5.868) | fully resident, 20.96 GB weights + 1.78 GB reserve vs 24.22 GB free | 2026-08-12 |
+| `pruned_fp8_scaled` | 20.96 GB | 8.6 s | fully resident, 22.5 GB | 2026-08-05 |
+| `fl2va_bf16` | 66.28 GB | ~90 s | streams per call | 2026-08-05 |
+
+**Caveat on the fp8 row:** it is carried forward from its own bring-up session, not re-measured beside the
+int8 run. Both used the same script and gold workload, but not the same day or the same driver/VRAM state,
+so read the int8-vs-fp8 gap as indicative until the two are run back to back.
+
+The int8 build is INT8 tensor-core (IMMA) work — activation ConvRot, per-row dynamic int8 quant, cuBLASLt
+IMMA, dequant epilogue — against a weight that never leaves int8. Correctness is settled separately: the
+GEMM chain matches comfy-kitchen's eager reference at relL2 5.1e-8–2.7e-7 with F32 activations
+(`Int8ConvRotCudaParityTests`), and the generation's frames were inspected. Note that step time is
+**insensitive to the row-chunk size** the path picks from free VRAM: int32 accumulation is exact and
+order-independent, so chunking changes neither the result nor the arithmetic, only the transient footprint.
+
 ## Notes
 
 - **Wan 2.1 T2V 14B is the only video model at parity with ComfyUI** (30.58 s vs 30.62 s) — first video

@@ -1,3 +1,5 @@
+using HartsyInference.Core.Tensors;
+
 namespace HartsyInference.ModelAssets.BlockScale;
 
 /// <summary>Index math for NVIDIA's "blocked" block-scale layout (the cuBLAS d-block-scaling-factors
@@ -21,16 +23,9 @@ public static class BlockScaleSwizzle
     /// <param name="row">Logical output-row index (the weight's out dimension).</param>
     /// <param name="blockColumn">Logical block-column index (input position / group size).</param>
     /// <param name="paddedCols">Stored scale tensor's last-dim length (already a multiple of 4).</param>
+    /// <remarks>Forwards to <see cref="Nvfp4ResidentCodec.SwizzledScaleIndex"/> so the permutation has exactly one
+    /// definition. It lives in Core because the resident nvfp4 path needs it there and Core cannot reference
+    /// ModelAssets; this type stays as the name every existing caller already knows.</remarks>
     public static long SwizzledIndex(long row, long blockColumn, long paddedCols)
-    {
-        long ncb = paddedCols / 4;
-        long rb = row / 128;
-        long r128 = row % 128;
-        long a = r128 / 32;
-        long b = r128 % 32;
-        long cb = blockColumn / 4;
-        long d = blockColumn % 4;
-        long g = rb * ncb + cb;
-        return (g * 32 + b) * 16 + a * 4 + d;
-    }
+        => Nvfp4ResidentCodec.SwizzledScaleIndex(row, blockColumn, paddedCols);
 }

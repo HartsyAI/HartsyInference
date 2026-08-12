@@ -17,7 +17,9 @@ HEIGHT=${6:-288}
 
 REPO=/home/hartsy/Desktop/HartsyInference
 OUT=${H3_BENCH_OUT:-$REPO/benchmarks/results/h3}
-CKPT=$REPO/Models/Stable-Diffusion/MiniMaxH3/flat/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors
+# H3_BENCH_CKPT swaps the DiT build without moving files around — the point of the same-seed A/B
+# between the fp8_scaled and int8_convrot releases, which are the same weights at different precision.
+CKPT=${H3_BENCH_CKPT:-$REPO/Models/Stable-Diffusion/MiniMaxH3/flat/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors}
 PROMPT_FILE=$REPO/Models/bench-comfy/prompt.txt
 
 # The 4090 is nvidia-smi index 1 (PCI 04:00.0); the 3060 is index 0. CUDA_VISIBLE_DEVICES alone

@@ -1,6 +1,8 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.Nvfp4;
+using HartsyInference.ModelAssets.Quant;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
@@ -277,6 +279,127 @@ public static unsafe class CheckpointConvertUtils
     }
 
 
+    // ── ComfyUI int8_tensorwise ──────────────────────────────────────────
+
+    /// <summary>Suffix of ComfyUI's per-output-row int8 dequant scale (the same suffix fp8 builds use for their
+    /// per-tensor scalar; the weight's dtype is what tells the two apart).</summary>
+    private const string WeightScaleSuffix = ".weight_scale";
+
+    /// <summary>Parses a <c>.comfy_quant</c> descriptor tensor, tolerating the trailing NUL padding a fixed-width U8
+    /// tensor can carry. Returns null when the tensor is not a descriptor or its JSON is unreadable.</summary>
+    public static ComfyQuantDescriptor? TryReadComfyQuant(Tensor blob)
+    {
+        ArgumentNullException.ThrowIfNull(blob);
+        if (blob.DType != DType.U8 || blob.ElementCount is <= 0 or > 4096)
+            return null;
+        ReadOnlySpan<byte> bytes = blob.AsReadOnlySpan<byte>();
+        int end = bytes.Length;
+        while (end > 0 && bytes[end - 1] == 0) end--;
+        return ComfyQuantDescriptor.TryParse(bytes[..end]);
+    }
+
+    /// <summary>Moves ComfyUI's <c>int8_tensorwise</c> companions — the <c>.weight_scale</c> per-output-row scale and
+    /// the <c>.comfy_quant</c> descriptor — onto <see cref="Tensor.QuantInfo"/> of the I8 weight they belong to, and
+    /// returns a dictionary without those companion keys. The weight itself is left <b>packed</b>: dequantizing here
+    /// would turn LTX 2.5's 21.5 GB int8 DiT back into 42 GB, which is the whole reason the format exists.</summary>
+    /// <remarks><para><see cref="ApplyFp8ScaledDequant"/> calls this first, because that pass drops
+    /// <c>.weight_scale</c>/<c>.comfy_quant</c> unconditionally — an int8 weight that skipped this step would reach
+    /// the backend as raw int8 with no scale at all. Every converter funnels through it, so no caller can lose the
+    /// companions by forgetting a call.</para>
+    /// <para>Idempotent: a weight that already carries <see cref="Tensor.QuantInfo"/> is skipped. The companion
+    /// tensors are <b>borrowed</b> — the loader that produced them still owns their lifetime.</para></remarks>
+    public static Dictionary<string, Tensor> AttachInt8QuantInfo(Dictionary<string, Tensor> source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        List<string>? int8Weights = null;
+        foreach (KeyValuePair<string, Tensor> kvp in source)
+        {
+            if (kvp.Value.DType == DType.I8 && kvp.Value.QuantInfo is null
+                && kvp.Key.EndsWith(".weight", StringComparison.Ordinal))
+            {
+                (int8Weights ??= new List<string>()).Add(kvp.Key);
+            }
+        }
+        if (int8Weights is null)
+            return source;
+
+        HashSet<string> companions = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string key in int8Weights)
+        {
+            string baseKey = key[..^".weight".Length];
+            string scaleKey = baseKey + WeightScaleSuffix;
+            string descriptorKey = baseKey + ComfyQuantDescriptor.Suffix;
+            Tensor weight = source[key];
+            if (weight.Shape.Rank != 2)
+            {
+                throw new NotSupportedException(
+                    $"int8 weight '{key}' has shape {weight.Shape}; only rank-2 int8_tensorwise Linear weights are supported.");
+            }
+            if (!source.TryGetValue(scaleKey, out Tensor? rowScale))
+            {
+                throw new NotSupportedException(
+                    $"int8 weight '{key}' has no '{scaleKey}' companion, so its dequant scale is unrecoverable. Every "
+                    + "ComfyUI int8_tensorwise build ships one per quantized Linear — re-download the checkpoint, or "
+                    + "use a BF16/fp8_scaled build instead.");
+            }
+            // A BF16 scalar read through (float*) is garbage, and a silently wrong scale is far worse than a refusal;
+            // no shipped int8 build stores anything but F32 here.
+            if (rowScale.DType != DType.F32)
+                throw new NotSupportedException($"'{scaleKey}' must be F32; got {rowScale.DType}.");
+            long rows = weight.Shape[0];
+            if (rowScale.ElementCount != rows && rowScale.ElementCount != 1)
+            {
+                throw new NotSupportedException(
+                    $"'{scaleKey}' must hold {rows} per-row scales or a single per-tensor scale; got {rowScale.ElementCount}.");
+            }
+
+            ComfyQuantDescriptor? descriptor = source.TryGetValue(descriptorKey, out Tensor? blob)
+                ? TryReadComfyQuant(blob) : null;
+            // Only the per-layer descriptor says whether the rows were ConvRot-rotated (the file-level
+            // __metadata__ mirror can't be trusted — re-quants skip different layers), and consuming a rotated
+            // weight as unrotated produces plausible-looking garbage instead of an error.
+            if (descriptor is null)
+            {
+                throw new NotSupportedException(
+                    $"int8 weight '{key}' has no readable '{descriptorKey}' descriptor, so whether it was ConvRot-rotated "
+                    + "is unknowable and the weight cannot be consumed safely.");
+            }
+            int groupSize = descriptor.ConvRotGroupSize;
+            if (groupSize > 0)
+            {
+                if (!Int8ConvRotCodec.IsValidGroupSize(groupSize))
+                {
+                    throw new NotSupportedException(
+                        $"'{descriptorKey}' declares ConvRot group size {groupSize}, which is not a power of four.");
+                }
+                if (weight.Shape[1] % groupSize != 0)
+                {
+                    throw new NotSupportedException(
+                        $"'{key}' has in_features {weight.Shape[1]}, which ConvRot group size {groupSize} does not divide.");
+                }
+            }
+
+            weight.QuantInfo = new QuantWeightInfo
+            {
+                Format = descriptor.Format,
+                RowScale = rowScale,
+                ConvRotGroupSize = groupSize,
+                FullPrecisionMatMul = descriptor.FullPrecisionMatMul,
+            };
+            companions.Add(scaleKey);
+            companions.Add(descriptorKey);
+        }
+
+        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(source.Count);
+        foreach (KeyValuePair<string, Tensor> kvp in source)
+        {
+            if (!companions.Contains(kvp.Key))
+                result[kvp.Key] = kvp.Value;
+        }
+        return result;
+    }
+
+
     // ── FP8 Scaled ──────────────────────────────────────────
 
     /// <summary>Folds per-tensor FP8 scale companions into <see cref="Tensor.Fp8ScaleFactor"/> on the matching weight tensors and drops the companions. Supports three companion formats:
@@ -294,8 +417,17 @@ public static unsafe class CheckpointConvertUtils
     /// DiTs, 35.9 GB at F16 → 18.6 GB at fp8, the difference between "won't fit a 24 GB card" and "fits"). Leave
     /// false for small nvfp4 text encoders (Z-Image's Qwen3-4B) where F16 is free and avoids fp8's smaller range.</param>
     /// <returns>A new dictionary without companion keys, with <c>Fp8ScaleFactor</c> populated on FP8 weights.</returns>
-    public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source, bool nvfp4ToFp8 = false)
+    /// <param name="residentNvfp4">Keep nvfp4 weights PACKED — relabelled <c>F4E2M1 [N, K]</c> with their scales on
+    /// <see cref="Tensor.QuantInfo"/> — instead of unpacking them here. Opt-in, unlike int8: the eager path works and
+    /// is what the CPU/Vulkan backends need, so only a caller that knows a CUDA backend will consume the weights
+    /// should ask for it. AWQ layers carrying <c>pre_quant_scale</c> refuse and take the eager path regardless.</param>
+    public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source,
+        bool nvfp4ToFp8 = false, bool residentNvfp4 = false)
     {
+        // int8_tensorwise uses the same companion suffixes this pass drops, so its scales have to move onto the
+        // weight before anything here can strip them.
+        source = AttachInt8QuantInfo(source);
+
         // First pass: gather scale companions keyed by the base name (the part before the suffix).
         // `.weight_scale_2` is nvfp4's global scalar (block scales live in `.weight_scale`); note that
         // ".weight_scale_2".EndsWith(".weight_scale") is FALSE, so the two never collide in the buckets.
@@ -407,6 +539,15 @@ public static unsafe class CheckpointConvertUtils
                     && blockScales.Shape.Rank == 2
                     && weightScale2s.TryGetValue(baseKey, out Tensor? scale2T) && scale2T.DType == DType.F32)
                 {
+                    // Resident: relabel to F4E2M1 [N, K] and hang the scales off QuantInfo rather than unpacking.
+                    // Refuses AWQ pre_quant_scale layers, which fall through to the eager dequant below.
+                    if (residentNvfp4 && Nvfp4Codec.TryAttachResident(kvp.Value, blockScales, scale2T,
+                            source.ContainsKey($"{baseKey}.pre_quant_scale"), out Tensor residentWeight))
+                    {
+                        result[key] = residentWeight;
+                        continue;
+                    }
+
                     float globalScale = ((float*)scale2T.DataPointer)[0];
                     result[key] = nvfp4ToFp8
                         ? DequantNvfp4ToFp8(kvp.Value, blockScales, globalScale)
@@ -922,6 +1063,9 @@ public static unsafe class CheckpointConvertUtils
             string w1Head = w1Key.Substring(0, w1Key.Length - ".weight".Length);
             if (weights.ContainsKey(w1Head + ".comfy_quant") || weights.ContainsKey(w1Head + ".weight_scale")) continue;
             Tensor w1 = weights[w1Key];
+            // Once AttachInt8QuantInfo has consumed the companion KEYS the check above can't see an int8 pair any
+            // more; the row scale and rotation now ride on the tensor, and a concat would silently drop both.
+            if (w1.QuantInfo is not null || w3.QuantInfo is not null) continue;
             if (w1.DType != w3.DType || w1.Shape.Rank != 2 || w3.Shape.Rank != 2 || w1.Shape[1] != w3.Shape[1]) continue;
 
             float err = 0f;

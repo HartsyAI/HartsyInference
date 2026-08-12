@@ -384,6 +384,10 @@ public sealed unsafe class Tensor : IDisposable
     /// Same units as <see cref="Fp8ScaleFactor"/>: real value = <c>fp8_byte_decoded * scale</c>.</remarks>
     public float Fp8InputScaleFactor { get; set; }
 
+    /// <summary>Packed-quantization companions (per-row scales, ConvRot group size) when this tensor is a weight the
+    /// backend consumes without dequantizing; null for dense and <c>fp8_scaled</c> weights.</summary>
+    public QuantWeightInfo? QuantInfo { get; set; }
+
     /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first; otherwise
     /// the owned host buffer is allocated (zeroed) on first access.</summary>
     public void* DataPointer
@@ -443,6 +447,29 @@ public sealed unsafe class Tensor : IDisposable
         return view;
     }
 
+    /// <summary>Creates a view over the same bytes under a different dtype and shape — no copy, no reinterpretation
+    /// of the bytes themselves, only of what they are declared to mean.</summary>
+    /// <remarks>The case this exists for is a sub-byte packed weight arriving under a storage dtype: nvfp4 ships as
+    /// U8 <c>[N, K/2]</c>, and every consumer that derives <c>K</c> from <c>Shape[1]</c> — <c>IBackend.Linear</c>
+    /// first among them — would then run the whole GEMM at half the true inner dimension. Relabelling it
+    /// <see cref="DType.F4E2M1"/> <c>[N, K]</c> makes shape and byte math honest at once. <see cref="Reshape"/>
+    /// cannot serve: it holds ELEMENT count fixed, and the point here is that the element count changes while the
+    /// byte count does not. The view roots this tensor for the same reason <see cref="Reshape"/> does.</remarks>
+    public Tensor ReinterpretAs(DType newDType, TensorShape newShape)
+    {
+        void* ptr = DataPointer;
+
+        long sourceBytes = DType.ComputeByteCount(Shape.ElementCount);
+        long viewBytes = newDType.ComputeByteCount(newShape.ElementCount);
+        if (sourceBytes != viewBytes)
+            throw new HartsyInferenceException(
+                $"Cannot reinterpret {Shape} {DType} ({sourceBytes} bytes) as {newShape} {newDType} ({viewBytes} bytes).");
+
+        Tensor view = new(ptr, newShape, newDType, Device);
+        view.SetKeepAlive(this);
+        return view;
+    }
+
     /// <summary>Creates a contiguous copy on the specified device. Cross-device requires IBackend.CopyTo.</summary>
     public Tensor To(DeviceKind targetDevice)
     {
@@ -456,6 +483,7 @@ public sealed unsafe class Tensor : IDisposable
             // A byte-identical copy of an fp8_scaled tensor is still scaled — dropping the factor here would
             // silently rescale the weight by 1/scale at the next GEMM.
             copy.Fp8ScaleFactor = Fp8ScaleFactor;
+            copy.QuantInfo = QuantInfo;
             return copy;
         }
 

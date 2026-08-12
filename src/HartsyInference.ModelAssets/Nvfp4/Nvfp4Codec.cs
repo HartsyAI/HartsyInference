@@ -35,6 +35,59 @@ public static unsafe class Nvfp4Codec
         -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
     ];
 
+    /// <summary>Relabels a packed NVFP4 Linear weight so a backend can keep it RESIDENT — U8 <c>[N, K/2]</c> becomes a
+    /// <see cref="DType.F4E2M1"/> <c>[N, K]</c> view over the same bytes with its scale companions attached through
+    /// <see cref="Tensor.QuantInfo"/>. Returns false, writing <paramref name="packed"/> straight through, when the
+    /// weight is not one this can serve; the caller then falls back to an eager dequant.
+    ///
+    /// <para>This is the memory lever for nvfp4 DiTs: unpacked at load, the official 18.72 GB LTX-2.5 distilled
+    /// transformer is 42 GB and cannot be placed on a 24 GB card at all. Resident it stays at 0.5 byte/param and each
+    /// GEMM unpacks one weight transiently. It is <b>not</b> a speed win — no consumer Ada or Ampere part has FP4
+    /// tensor cores, so the GEMM still runs in F16/BF16 off the unpacked copy.</para>
+    ///
+    /// <para><b>Relabelling is not cosmetic.</b> <c>IBackend.Linear</c> derives <c>K</c> from <c>Shape[1]</c>; left as
+    /// U8 <c>[N, K/2]</c> the whole GEMM would silently run at half the true inner dimension.</para>
+    ///
+    /// <para><b>Lifetime.</b> The view borrows the packed tensor's bytes and roots it, and the returned
+    /// <see cref="QuantWeightInfo"/> roots the two companions — so a converter may drop the companion KEYS from its
+    /// output dictionary, but must not dispose the packed weight or the companions, and must store the view (not the
+    /// original) under the weight's key.</para></summary>
+    /// <param name="hasPreQuantScale">True when the weight ships an AWQ <c>pre_quant_scale</c> over the input dim.
+    /// Those are refused: the scale has to multiply the ACTIVATION (<c>x·Wᵀ = (x⊙s)·(W/s)ᵀ</c>) and no backend Linear
+    /// path applies one, so such a layer must take the eager dequant that folds it in.</param>
+    public static bool TryAttachResident(Tensor packed, Tensor blockScale, Tensor globalScale, bool hasPreQuantScale,
+        out Tensor resident)
+    {
+        ArgumentNullException.ThrowIfNull(packed);
+        ArgumentNullException.ThrowIfNull(blockScale);
+        ArgumentNullException.ThrowIfNull(globalScale);
+        resident = packed;
+        if (hasPreQuantScale) return false;
+        if (packed.DType != DType.U8 || packed.Shape.Rank != 2) return false;
+        if (blockScale.DType != DType.F8E4M3 || blockScale.Shape.Rank != 2) return false;
+        if (globalScale.DType != DType.F32 || globalScale.ElementCount != 1) return false;
+
+        long outFeatures = packed.Shape[0];
+        long inFeatures = packed.Shape[1] * 2;
+        if (inFeatures % GroupSize != 0) return false;
+        // Rows pad up to 128 and block columns up to 4 in the blocked layout, so the stored scale tensor is never
+        // smaller than the logical one; smaller means these companions do not describe this weight.
+        if (blockScale.Shape[0] < outFeatures || blockScale.Shape[1] < inFeatures / GroupSize
+            || blockScale.Shape[1] % 4 != 0)
+        {
+            return false;
+        }
+
+        resident = packed.ReinterpretAs(DType.F4E2M1, new TensorShape(outFeatures, inFeatures));
+        resident.QuantInfo = new QuantWeightInfo
+        {
+            Format = "nvfp4",
+            BlockScale = blockScale,
+            GlobalScale = globalScale
+        };
+        return true;
+    }
+
     /// <summary>Dequantizes one NVFP4 expert bank to F32 <c>[E, in, out]</c> (dequant of the on-disk
     /// <c>[E, out, in]</c> per-expert matrices plus the runtime transpose).
     /// <para><b>Memory note:</b> materializes the WHOLE bank at F32 — for the 20B GPT-OSS encoder that is

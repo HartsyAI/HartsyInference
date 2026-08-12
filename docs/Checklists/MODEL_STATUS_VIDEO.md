@@ -373,15 +373,15 @@ though the level defect is now traced upstream of them.
       confirmed correct, then a same-seed A/B (cropped vs. whole reference) showing a measurable and
       visually confirmed difference in the output. Full design/syntax rationale:
       [`docs/Research/MINIMAX_H3.md`](../Research/MINIMAX_H3.md#region-targeted-reference-conditioning-tier-38--done-real-weight-verified-2026-08-11).
-- [ ] **int8 `convrot` is the last unsupported variant that matters.** Comfy-Org publishes **five DiT builds per task**
+- [x] **int8 `convrot` DONE 2026-08-12 — real-weight verified.** Comfy-Org publishes **five DiT builds per task**
       (ten total — `bf16`, `int8_convrot`, `pruned_bf16`, `pruned_fp8_scaled`, `pruned_int8_convrot`, for each of fl2va
-      and ref2va), not four; the
-      engine loads bf16 (66 GB) and **`pruned_fp8_scaled` (21 GB), both verified on real weights** — the fp8 build
-      is the production choice at **8.6 s/step / 22.5 GB fully resident on a 4090 vs ~90 s/step for bf16**, and its
-      run is also the only exercise of the pruned `adaln_t_table` curve path (`curves=True`);
-      `MiniMaxH3Assets` ranks formats so an
-      unloadable `int8_convrot` file never wins over a loadable sibling. The two `int8_convrot` DiTs (34/21 GB) and
-      the `int8_convrot` text encoder still throw.
+      and ref2va), not four. The engine now loads **all** of them: `pruned_int8_convrot` (21 GB) rides the resident
+      INT8 IMMA path (`CudaBackend` `int8Resident` branch, activation ConvRot via `convrot.ptx`), and
+      `MiniMaxH3Assets.FormatRank` no longer sinks `convrot` filenames. Verified by a real fl2va generation on the
+      4090 — inspected frames, fully resident. Per-step figures live in
+      [`benchmarks/scoreboards/VIDEO.md`](../../benchmarks/scoreboards/VIDEO.md). The `bf16` build (66 GB) still
+      streams per call, and its run remains the only exercise of the pruned `adaln_t_table` curve path
+      (`curves=True`). Format details: [`QUANTIZATION_COMFY_FORMATS.md`](../Research/QUANTIZATION_COMFY_FORMATS.md).
 - [ ] **SwarmUI path: extension side done, blocked only on the engine NuGet publish.** SwarmUI core added native
       H3 support (`T2IModelClassSorter`, PR #1469): it owns the `minimax-h3` compat class AND the `minimax-h3`,
       `minimax-h3/vae`, `minimax-h3/audio-vae` model classes, detected on `video_patch_proj`+`audio_patch_proj`.

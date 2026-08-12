@@ -462,6 +462,20 @@ public sealed class CudaBackend : IBackend
     private readonly Dictionary<Core.Tensors.Tensor, ulong> _w8a8SmoothInvScaleDevice = new();
     private readonly Dictionary<Core.Tensors.Tensor, float[]> _w8a8SmoothScaleHost = new();
 
+    // Per-weight F32 wScale[N] for a RESIDENT int8 weight (ComfyUI int8_tensorwise). Unlike the W8A8 cache above
+    // there is no quantized-weight buffer to hold: the checkpoint's own int8 bytes are the weight, uploaded by the
+    // ordinary GpuTransferHelper path. Only the scale needs a device home, and a per-tensor scale is expanded to
+    // N entries here so the shared dequant epilogue never needs a broadcast variant. Freed by FreeW8A8Cache.
+    private readonly Dictionary<Core.Tensors.Tensor, ulong> _int8RowScaleDevice = new();
+    private readonly object _int8RowScaleLock = new();
+
+    // Per-weight companions for a RESIDENT nvfp4 weight (ComfyUI `nvfp4`): the swizzled E4M3 block-scale bytes on the
+    // device plus the two host scalars the dequant kernel folds in. One sixteenth of the weight's size, and unlike a
+    // dtype cast it is part of the resident representation — keeping it is what makes the weight usable at all, so it
+    // is not subject to the cast budget gate. Freed by FreeW8A8Cache.
+    private readonly Dictionary<Core.Tensors.Tensor, Nvfp4WeightScales> _nvfp4ScaleDevice = new();
+    private readonly object _nvfp4ScaleLock = new();
+
     /// <summary>Sets (or replaces) the SmoothQuant per-input-channel scale s[K] for <paramref name="weight"/>: X_hat = X/s, W_hat = W*s.</summary>
     /// <remarks>Product-preserving pre-quantization — migrates activation outlier difficulty into the weight (see
     /// src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu's invScale param). Must be called BEFORE the weight's first W8A8 use to take
@@ -545,6 +559,214 @@ public sealed class CudaBackend : IBackend
         }
         if (_w8a8SmoothInvScaleDevice.Count == 0) _w8a8SmoothScaleHost.Clear();
         if (failures is not null) throw new AggregateException("One or more W8A8 SmoothQuant scales failed to release.", failures);
+    }
+
+    /// <summary>Rows a resident-int8 GEMM chunk covers, bounded by what is actually free on the device.</summary>
+    /// <remarks><para>The int32 accumulator is 4 bytes per output element and the ConvRot scratch another
+    /// <c>k · activation bytes</c> per row, so an unchunked video-length GEMM against a wide projection asks for
+    /// gigabytes of transient device memory.</para>
+    /// <para>A fixed budget is not enough: the whole point of a resident int8 DiT is that the weights fill the card,
+    /// which leaves the transients competing with the activations for what little is left. A 256 MB fixed budget
+    /// OOM'd MiniMax-H3's <c>mlp.fc1</c> (n=28672) with a 21 GB DiT resident on a 24 GB card. Taking an eighth of
+    /// free VRAM keeps the chunk large where there is room and shrinks it rather than failing where there is not;
+    /// <c>cuMemGetInfo</c> is a cheap driver query with no stream sync, which is why the H3 transformer already
+    /// polls it per forward.</para></remarks>
+    private int Int8ResidentRowChunk(int m, int n, int k, int activationBytes)
+    {
+        const long CeilingBytes = 256L << 20;
+        const long FloorBytes = 8L << 20;
+        (long freeBytes, _) = CudaMemory.GetMemInfo();
+        long budget = Math.Clamp(freeBytes / 8, FloorBytes, CeilingBytes);
+        long perRowBytes = (long)n * sizeof(int) + k + (long)k * activationBytes;
+        return (int)Math.Min(m, Math.Max(1, budget / Math.Max(1, perRowBytes)));
+    }
+
+    /// <summary>Rounds a row count up to what cuBLASLt's int8 TN kernels want, matching comfy-kitchen's own padding.</summary>
+    private static int PadInt8Rows(int rows) => (Math.Max(rows, 32) + 31) & ~31;
+
+    /// <summary>Whether the IMMA chain can serve this resident int8 weight; false routes it through the dequant fallback.</summary>
+    private bool CanRunResidentInt8(Tensor output, Tensor input, Tensor weight, QuantWeightInfo info,
+        int weightRowOffset, int weightRowCount)
+    {
+        // A future format that also stores I8 with a per-row scale must not silently inherit this chain's
+        // int8_tensorwise-specific dequant arithmetic.
+        if (info.Format != "int8_tensorwise") return false;
+        if (info.FullPrecisionMatMul || weightRowOffset != 0 || weightRowCount >= 0) return false;
+        if (_kernels is null || !_kernels.HasW8A8Kernels || !Int8Gemm.IsSupported) return false;
+        if (info.ConvRotGroupSize > 0 && !_kernels.HasConvRotKernels) return false;
+        // Above ~16384 the rotation kernel's dynamic shared memory exceeds the 64 KB opt-out ceiling and the launch
+        // fails opaquely; refuse well short of it so the layer falls back to the dequant path instead.
+        if (info.ConvRotGroupSize > 4096) return false;
+        if (weight.Shape.Rank != 2) return false;
+
+        int n = (int)weight.Shape[0];
+        int k = (int)weight.Shape[1];
+        // K and N multiples of 4 are the cuBLASLt int8 TN lda/ldc requirement (see Int8GemmExecutor).
+        if (k % 4 != 0 || n % 4 != 0) return false;
+        if (info.ConvRotGroupSize > 0
+            && (!Int8ConvRotCodec.IsValidGroupSize(info.ConvRotGroupSize) || k % info.ConvRotGroupSize != 0))
+        {
+            return false;
+        }
+        if (info.RowScale!.DType != DType.F32) return false;
+        if (info.RowScale.ElementCount != n && info.RowScale.ElementCount != 1) return false;
+        return (input.DType == DType.F16 || input.DType == DType.F32)
+            && (output.DType == DType.F16 || output.DType == DType.F32);
+    }
+
+    /// <summary>Frees every resident-int8 device wScale buffer (mirrors FreeW8A8Cache's scope/callers).</summary>
+    private void FreeInt8RowScaleCache(GpuTransferHelper.State? explicitState = null)
+    {
+        List<Exception>? failures = null;
+        lock (_int8RowScaleLock)
+        {
+            foreach ((Tensor weight, ulong ptr) in _int8RowScaleDevice.ToArray())
+            {
+                try
+                {
+                    if (explicitState is null) GpuTransferHelper.FreeDevice(ptr);
+                    else GpuTransferHelper.FreeDevice(explicitState, ptr);
+                    _int8RowScaleDevice.Remove(weight);
+                }
+                catch (Exception error) { (failures ??= []).Add(error); }
+            }
+        }
+        if (failures is not null) throw new AggregateException("One or more resident-int8 weight scales failed to release.", failures);
+    }
+
+    /// <summary>Uploads (once) the F32 <c>wScale[n]</c> the dequant epilogue indexes per output column.</summary>
+    /// <remarks>A checkpoint may ship the scale as <c>[N, 1]</c>, <c>[N]</c>, or a single per-tensor value; all three
+    /// land here as a dense N-entry buffer. Persistent, not pool-allocated: it outlives the call and is read by the
+    /// epilogue on the compute stream.</remarks>
+    private unsafe ulong EnsureInt8RowScaleDev(Tensor weight, int n)
+    {
+        lock (_int8RowScaleLock)
+        {
+            if (_int8RowScaleDevice.TryGetValue(weight, out ulong cached)) return cached;
+
+            Tensor rowScale = weight.QuantInfo!.RowScale!;
+            float[] scales = new float[n];
+            ReadOnlySpan<float> source = rowScale.AsReadOnlySpan<float>();
+            if (source.Length == 1) scales.AsSpan().Fill(source[0]);
+            else source[..n].CopyTo(scales);
+
+            ulong dev = GpuTransferHelper.AllocateDevice((nuint)(n * sizeof(float)));
+            try
+            {
+                fixed (float* p = scales)
+                    CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)p, (nuint)(n * sizeof(float)), _stream.Handle).ThrowOnError();
+                _stream.Synchronize();
+                _int8RowScaleDevice[weight] = dev;
+                return dev;
+            }
+            catch
+            {
+                GpuTransferHelper.FreeDevice(dev);
+                throw;
+            }
+        }
+    }
+
+    /// <summary>Whether the transient-dequant path can serve this resident nvfp4 weight; false routes it through the host dequant fallback.</summary>
+    /// <remarks>Deliberately does NOT consult <see cref="QuantWeightInfo.FullPrecisionMatMul"/>. That flag means "this
+    /// layer must run a real GEMM rather than a quantized one", which is exactly what this path does — the weight is
+    /// unpacked to F16/BF16 and handed to cuBLAS. Every nvfp4 layer in the Qwen3-VL AWQ encoder carries the flag, so
+    /// honouring it the way the int8 IMMA gate does would disable the resident path wholesale.</remarks>
+    private bool CanRunResidentNvfp4(Tensor weight, QuantWeightInfo info, int weightRowOffset, int weightRowCount)
+    {
+        if (info.Format != "nvfp4") return false;
+        if (weightRowOffset != 0 || weightRowCount >= 0) return false;
+        if (_kernels is null || !_kernels.HasNvfp4Kernels) return false;
+        if (weight.Shape.Rank != 2) return false;
+
+        Tensor blockScale = info.BlockScale!;
+        if (blockScale.DType != DType.F8E4M3 || blockScale.Shape.Rank != 2) return false;
+        if (info.GlobalScale!.DType != DType.F32 || info.GlobalScale.ElementCount != 1) return false;
+
+        long n = weight.Shape[0];
+        long k = weight.Shape[1];
+        if (k % Nvfp4ResidentCodec.GroupSize != 0) return false;
+        // Rows are padded up to 128 and block columns up to 4 by the blocked layout, so the stored scale tensor is
+        // never smaller than the logical one; smaller means the companion does not belong to this weight.
+        return blockScale.Shape[0] >= n && blockScale.Shape[1] >= k / Nvfp4ResidentCodec.GroupSize
+            && blockScale.Shape[1] % 4 == 0;
+    }
+
+    /// <summary>Frees every resident-nvfp4 device block-scale buffer (mirrors FreeW8A8Cache's scope/callers).</summary>
+    private void FreeNvfp4ScaleCache(GpuTransferHelper.State? explicitState = null)
+    {
+        List<Exception>? failures = null;
+        lock (_nvfp4ScaleLock)
+        {
+            foreach ((Tensor weight, Nvfp4WeightScales scales) in _nvfp4ScaleDevice.ToArray())
+            {
+                try
+                {
+                    if (explicitState is null) GpuTransferHelper.FreeDevice(scales.BlockScaleDevice);
+                    else GpuTransferHelper.FreeDevice(explicitState, scales.BlockScaleDevice);
+                    _nvfp4ScaleDevice.Remove(weight);
+                }
+                catch (Exception error) { (failures ??= []).Add(error); }
+            }
+        }
+        if (failures is not null) throw new AggregateException("One or more resident-nvfp4 weight scales failed to release.", failures);
+    }
+
+    /// <summary>Uploads (once) the swizzled E4M3 block scales the dequant kernel indexes, and reads the two host scalars.</summary>
+    /// <remarks>Persistent, not pool-allocated: it outlives the call and is read on the compute stream every GEMM.
+    /// The two scalars are captured here rather than at launch time because reading them means touching
+    /// <c>DataPointer</c> on the host, which must happen before the call reaches the transfer caches.</remarks>
+    private unsafe Nvfp4WeightScales EnsureNvfp4Scales(Tensor weight)
+    {
+        lock (_nvfp4ScaleLock)
+        {
+            if (_nvfp4ScaleDevice.TryGetValue(weight, out Nvfp4WeightScales cached)) return cached;
+
+            Tensor blockScale = weight.QuantInfo!.BlockScale!;
+            nuint byteSize = (nuint)blockScale.DType.ComputeByteCount(blockScale.ElementCount);
+            ulong dev = GpuTransferHelper.AllocateDevice(byteSize);
+            try
+            {
+                CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)blockScale.DataPointer, byteSize, _stream.Handle).ThrowOnError();
+                _stream.Synchronize();
+                Nvfp4WeightScales scales = new Nvfp4WeightScales(dev, blockScale.Fp8ScaleFactor,
+                    ((float*)weight.QuantInfo.GlobalScale!.DataPointer)[0], (int)blockScale.Shape[1]);
+                _nvfp4ScaleDevice[weight] = scales;
+                return scales;
+            }
+            catch
+            {
+                GpuTransferHelper.FreeDevice(dev);
+                throw;
+            }
+        }
+    }
+
+    /// <summary>Weight-side dtype materialization, substituting the nvfp4 block-scaled unpack for the plain cast.</summary>
+    /// <remarks>Two allocator flavours exist at the call site — the cached cast owns its buffer through
+    /// <see cref="GpuTransferHelper"/>, the transient one through <see cref="CudaMemory"/> — so this pair mirrors
+    /// <see cref="CastOnGpu"/> and <see cref="CastIfNeeded"/> rather than replacing either.</remarks>
+    private void MaterializeWeight(ulong destination, ulong source, Tensor weight, DType gemmDtype, in Nvfp4WeightScales nvfp4)
+    {
+        if (nvfp4.BlockScaleDevice == 0)
+        {
+            CastOnGpu(destination, source, weight.DType, gemmDtype, (int)weight.ElementCount);
+            return;
+        }
+        _kernels!.LaunchNvfp4Dequant(destination, source, nvfp4.BlockScaleDevice,
+            (int)weight.Shape[0], (int)(weight.Shape[1] / 2), nvfp4.PaddedCols,
+            nvfp4.ScaleFactor, nvfp4.GlobalScale, _stream.Handle, outBf16: gemmDtype == DType.BF16);
+    }
+
+    /// <summary>Transient-buffer form of <see cref="MaterializeWeight"/>; <paramref name="castOut"/> is the caller's to free.</summary>
+    private unsafe ulong MaterializeWeightIfNeeded(ulong source, Tensor weight, DType gemmDtype, out ulong castOut,
+        in Nvfp4WeightScales nvfp4)
+    {
+        if (nvfp4.BlockScaleDevice == 0)
+            return CastIfNeeded(source, weight.DType, gemmDtype, (int)weight.ElementCount, out castOut);
+        castOut = CudaMemory.Allocate((nuint)(weight.ElementCount * gemmDtype.SizeInBytes));
+        MaterializeWeight(castOut, source, weight, gemmDtype, nvfp4);
+        return castOut;
     }
 
     /// <summary>Test-only hook: LinearImpl passes F32 snapshots of pre-quant input/weight of the first W8A8-eligible call, then clears.</summary>
@@ -1106,6 +1328,10 @@ public sealed class CudaBackend : IBackend
         }
         try { FreeW8A8SmoothScaleCache(explicitState); }
         catch (Exception error) { (failures ??= []).Add(error); }
+        try { FreeInt8RowScaleCache(explicitState); }
+        catch (Exception error) { (failures ??= []).Add(error); }
+        try { FreeNvfp4ScaleCache(explicitState); }
+        catch (Exception error) { (failures ??= []).Add(error); }
         if (failures is not null) throw new AggregateException("One or more W8A8 cache buffers failed to release.", failures);
     }
 
@@ -1141,6 +1367,45 @@ public sealed class CudaBackend : IBackend
         using NvtxRange _nvtx = NvtxRange.Push("Linear");
         EnterOp();
         EnsureKernels();
+
+        // A resident int8 weight has no dtype cast the generic path below could take — CastOnGpu has no I8 source —
+        // so a layer the IMMA chain cannot serve (an explicit full_precision_matrix_mult, a shape the cuBLASLt int8
+        // TN config rejects, a row range) has to be un-rotated and dequantized here or it cannot run at all.
+        if (weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null } int8Info
+            && !CanRunResidentInt8(output, input, weight, int8Info, weightRowOffset, weightRowCount))
+        {
+            using Tensor dequantized = Int8ConvRotCodec.DequantToBf16(weight, int8Info.RowScale, int8Info.ConvRotGroupSize);
+            try
+            {
+                LinearImpl(output, input, dequantized, bias, cacheWeightCast: false, weightRowOffset, weightRowCount);
+            }
+            finally
+            {
+                // Drops the device copy keyed by this tensor (draining the stream first) before the bytes go away.
+                FreeWeights([dequantized]);
+            }
+            return;
+        }
+
+        // A resident nvfp4 weight is 4 bits per element with its scales in a separate swizzled tensor, so the generic
+        // CastOnGpu path cannot touch it (that helper is pointer-level and never sees the companions). A layer the
+        // dequant kernel cannot serve — no PTX, a row range, a companion that does not describe this weight — is
+        // unpacked on the host here or it cannot run at all.
+        if (weight.DType == DType.F4E2M1 && weight.QuantInfo is { BlockScale: not null, GlobalScale: not null } nvfp4Info
+            && !CanRunResidentNvfp4(weight, nvfp4Info, weightRowOffset, weightRowCount))
+        {
+            using Tensor dequantized = Nvfp4ResidentCodec.DequantToBf16(weight, nvfp4Info.BlockScale, nvfp4Info.GlobalScale);
+            try
+            {
+                LinearImpl(output, input, dequantized, bias, cacheWeightCast: false, weightRowOffset, weightRowCount);
+            }
+            finally
+            {
+                // Drops the device copy keyed by this tensor (draining the stream first) before the bytes go away.
+                FreeWeights([dequantized]);
+            }
+            return;
+        }
 
         // A row range addresses the weight by byte offset, which block-quantized layouts (super-block scales
         // interleaved with packed nibbles) cannot express, and it makes the W8A8 int8 cache — keyed on the WHOLE
@@ -1182,6 +1447,21 @@ public sealed class CudaBackend : IBackend
         {
             _w8a8WeightCache[weight] = QuantizeWeightForW8A8(weight, n, k);
         }
+
+        // Resident int8: the checkpoint's own weight bytes ARE the operand, so unlike w8a8 there is nothing to
+        // quantize here — only the eligibility answer, already settled by the fallback gate above. The scale upload
+        // reads the companion on the HOST, so it happens before this call touches the transfer caches, for the same
+        // reason the W8A8 host quant above does.
+        bool int8Resident = weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null };
+        ulong int8RowScaleDev = int8Resident ? EnsureInt8RowScaleDev(weight, n) : 0;
+
+        // Same ordering rule for nvfp4: the block-scale upload and the two scalar reads are HOST reads of the
+        // companions, so they happen before the transfer caches are touched. Eligibility was already settled by the
+        // fallback gate above, so reaching here with an F4E2M1 weight means the kernel can serve it.
+        Nvfp4WeightScales nvfp4Scales = weight.DType == DType.F4E2M1
+            && weight.QuantInfo is { BlockScale: not null, GlobalScale: not null }
+                ? EnsureNvfp4Scales(weight)
+                : default;
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pInputCast = 0, pWeightCast = 0, pBiasCast = 0;
         ulong pInputFp8 = 0, pFp8Scratch = 0;
@@ -1497,6 +1777,72 @@ public sealed class CudaBackend : IBackend
                 return;
             }
 
+            // Resident int8 (ComfyUI `int8_tensorwise`, ± `convrot`) — how the official LTX 2.5 and MiniMax-H3
+            // quantized releases are shipped. Same IMMA chain as the W8A8 branch above, with two differences: the
+            // weight arrives ALREADY quantized (its per-output-row scale comes from the file rather than a host
+            // quant pass), so a 22B DiT stays at 1 byte/param instead of expanding to BF16; and when the quantizer
+            // rotated the weight (W @ Hᵀ) the activation owes an x @ H first, which is what makes the product come
+            // back out as x·Wᵀ — H is its own inverse.
+            //
+            // Chunked over rows because the int32 accumulator is 4 bytes per output element: at video token counts
+            // a single unchunked m·n·4 buffer runs to gigabytes (H3's mlp.fc1 is n=28672). Each chunk is padded up
+            // to the 32-row granularity cuBLASLt's int8 TN kernels want, exactly as comfy-kitchen's own
+            // _int8_matmul_accumulate does — 31 wasted rows of int8 compute beats materializing the weight.
+            if (int8Resident)
+            {
+                int group = weight.QuantInfo!.ConvRotGroupSize;
+                ulong wScaleDev = int8RowScaleDev;
+                ulong biasF32 = bias is null
+                    ? 0
+                    : CastIfNeeded(pBias, bias!.DType, DType.F32, (int)bias.ElementCount, out pBiasCast);
+                bool srcF16 = input.DType == DType.F16;
+                int inputElementBytes = input.DType.SizeInBytes;
+                int rowChunk = Int8ResidentRowChunk(m, n, k, group > 0 ? inputElementBytes : 0);
+                int paddedChunk = PadInt8Rows(rowChunk);
+
+                ulong pRot = 0, pAct8 = 0, pRowScale = 0, pOut32 = 0;
+                try
+                {
+                    if (group > 0)
+                        pRot = GpuTransferHelper.AllocateDevice((nuint)((long)rowChunk * k * inputElementBytes));
+                    pAct8 = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * k));
+                    pRowScale = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * sizeof(float)));
+                    pOut32 = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * n * sizeof(int)));
+                    // The pad rows are deliberately left unwritten rather than zeroed: every byte is a valid int8,
+                    // k·127² stays an order of magnitude inside int32 for any shape here (2.48e8 at k=15360 against
+                    // int32's 2.15e9), and the epilogue below is launched with `rows`, so those accumulators are
+                    // never read. A memset would cost a full-stream sync (cuMemsetD8 runs on the legacy null
+                    // stream) on every single Linear.
+
+                    for (int firstRow = 0; firstRow < m; firstRow += rowChunk)
+                    {
+                        int rows = Math.Min(rowChunk, m - firstRow);
+                        ulong inputChunk = pInput + (ulong)((long)firstRow * k * inputElementBytes);
+                        ulong quantSource = inputChunk;
+                        if (group > 0)
+                        {
+                            _kernels!.LaunchConvRotRotate(pRot, inputChunk, (long)rows * k, group, _stream.Handle, srcF16);
+                            quantSource = pRot;
+                        }
+                        _kernels!.LaunchW8A8QuantRowwise(pAct8, pRowScale, quantSource, rows, k, _stream.Handle, srcF16);
+                        Int8Gemm.Run(pWeight, pAct8, pOut32, PadInt8Rows(rows), n, k, _stream.Handle);
+                        ulong outputChunk = pOutput + (ulong)((long)firstRow * n * output.DType.SizeInBytes);
+                        _kernels!.LaunchW8A8DequantBias(outputChunk, pOut32, pRowScale, wScaleDev, biasF32,
+                            rows, n, _stream.Handle, outF16: output.DType == DType.F16);
+                    }
+                }
+                finally
+                {
+                    if (pRot != 0) GpuTransferHelper.FreeDevice(pRot);
+                    if (pAct8 != 0) GpuTransferHelper.FreeDevice(pAct8);
+                    if (pRowScale != 0) GpuTransferHelper.FreeDevice(pRowScale);
+                    if (pOut32 != 0) GpuTransferHelper.FreeDevice(pOut32);
+                }
+                GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                cachedOutput = true;
+                return;
+            }
+
             // A pre-quantized fp8 caller input (Modulate-emitted e4m3, stored value = real/scale) is dequantized
             // SCALE-BLIND by CastIfNeeded below — fold its per-tensor scale into alpha exactly like the native
             // fp8 branch above (and Conv2D) do. Without this, every GEMM consuming such an input is off by that
@@ -1550,13 +1896,13 @@ public sealed class CudaBackend : IBackend
                     if (freeBytes > 0 && freeBytes - (long)castBytes < headroom)
                     {
                         System.Threading.Interlocked.Increment(ref _castTransientGated);
-                        weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
+                        weightPtr = MaterializeWeightIfNeeded(pWeight, weight, gemmDtype, out pWeightCast, nvfp4Scales);
                     }
                     else
                     {
                         System.Threading.Interlocked.Increment(ref _castCachedNew);
                         weightPtr = GpuTransferHelper.AllocateDevice(castBytes);
-                        CastOnGpu(weightPtr, pWeight, weight.DType, gemmDtype, (int)weight.ElementCount);
+                        MaterializeWeight(weightPtr, pWeight, weight, gemmDtype, nvfp4Scales);
                         GpuTransferHelper.CacheWeightCast(weight, weightPtr, castBytes);
                     }
                 }
@@ -1572,7 +1918,7 @@ public sealed class CudaBackend : IBackend
                             $"hip={hipUpcast} weightCached={GpuTransferHelper.IsWeightCached(weight)} " +
                             $"dtype={weight.DType} gemmDtype={gemmDtype} M={m} N={n} K={k}");
                 }
-                weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
+                weightPtr = MaterializeWeightIfNeeded(pWeight, weight, gemmDtype, out pWeightCast, nvfp4Scales);
             }
 
             // Every branch above leaves weightPtr addressing gemmDtype elements over the WHOLE weight — casts are
@@ -9797,4 +10143,9 @@ public sealed class CudaBackend : IBackend
     }
 
     #endregion
+
+    /// <summary>Everything the nvfp4 dequant kernel needs about one resident weight beyond its packed bytes.</summary>
+    /// <param name="BlockScaleDevice">Device copy of the swizzled E4M3 scales; 0 means the weight is not nvfp4.</param>
+    /// <param name="PaddedCols">Stored last-dim length of the scale tensor, which is the swizzle's stride.</param>
+    private readonly record struct Nvfp4WeightScales(ulong BlockScaleDevice, float ScaleFactor, float GlobalScale, int PaddedCols);
 }

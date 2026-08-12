@@ -8,7 +8,7 @@ using B = HartsyInference.ModelAssets.CheckpointConverters.MiniMaxH3CheckpointCo
 namespace HartsyInference.ModelAssets.Tests;
 
 /// <summary>Tests the pure key routing of <see cref="MiniMaxH3CheckpointConverter.RouteKey"/> and the int8-convrot
-/// rejection. Every "real header" key below was read from the actual 535-tensor DiT header
+/// companion fold. Every "real header" key below was read from the actual 535-tensor DiT header
 /// (<c>MiniMaxH3/FL2VA/transformer/minimax_h3_fl2va_bf16.safetensors</c>) and the 902-tensor text-encoder header
 /// (<c>.../text_encoder/qwen3vl_32b_minimax_h3_bf16.safetensors</c>); no checkpoint files are needed to run them.</summary>
 public class MiniMaxH3CheckpointConverterTests
@@ -106,38 +106,31 @@ public class MiniMaxH3CheckpointConverterTests
         Assert.Equal(mapped, m);
     }
 
-    [Theory]
-    [InlineData("blocks.0.attn.qkv_proj.comfy_quant")]
-    [InlineData("blocks.0.attn.qkv_proj.weight_scale")]
-    [InlineData("blocks.49.mlp.fc2.comfy_quant")]
-    [InlineData("blocks.49.mlp.fc2.weight_scale")]
-    [InlineData("blocks.12.attn.out_proj.weight_scale")]
-    [InlineData("blocks.12.mlp.fc1.comfy_quant")]
-    public void RouteKey_Int8ConvrotCompanionsAreIsolated(string key)
-    {
-        Assert.Equal(B.Int8Quant, MiniMaxH3CheckpointConverter.RouteKey(key).Bucket);
-    }
-
+    /// <summary>The pruned int8-convrot build must land in the Transformer bucket <b>still I8</b> — dequantizing it
+    /// would take the DiT back to its BF16 size, which is the whole reason the build exists.</summary>
     [Fact]
-    public void Convert_ThrowsNamingInt8Convrot()
+    public void Convert_Int8Convrot_KeepsWeightPackedAndAttachesQuantInfo()
     {
         Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>
         {
             ["video_patch_proj.weight"] = new Tensor(new TensorShape(2, 2), DType.F32),
             ["audio_patch_proj.weight"] = new Tensor(new TensorShape(2, 2), DType.F32),
-            ["blocks.0.attn.qkv_proj.weight"] = new Tensor(new TensorShape(4, 4), DType.I8),
+            ["blocks.0.attn.qkv_proj.weight"] = new Tensor(new TensorShape(4, 256), DType.I8),
             ["blocks.0.attn.qkv_proj.weight_scale"] = new Tensor(new TensorShape(4, 1), DType.F32),
             ["blocks.0.attn.qkv_proj.comfy_quant"] = Descriptor(),
             ["adaln_t_table"] = new Tensor(new TensorShape(1025, 8), DType.F32),
         };
         try
         {
-            NotSupportedException ex = Assert.Throws<NotSupportedException>(
-                () => MiniMaxH3CheckpointConverter.Convert(weights));
-            Assert.Contains("convrot", ex.Message, StringComparison.Ordinal);
-            Assert.Contains("int8_tensorwise", ex.Message, StringComparison.Ordinal);
-            Assert.Contains("convrot_groupsize", ex.Message, StringComparison.Ordinal);
-            Assert.Contains("blocks.0.attn.qkv_proj.comfy_quant", ex.Message, StringComparison.Ordinal);
+            MiniMaxH3CheckpointConverter.ConvertedWeights converted = MiniMaxH3CheckpointConverter.Convert(weights);
+            Tensor weight = converted.Transformer["blocks.0.attn.qkv_proj.weight"];
+            Assert.Equal(DType.I8, weight.DType);
+            Assert.NotNull(weight.QuantInfo);
+            Assert.Equal("int8_tensorwise", weight.QuantInfo!.Format);
+            Assert.Equal(256, weight.QuantInfo.ConvRotGroupSize);
+            Assert.Same(weights["blocks.0.attn.qkv_proj.weight_scale"], weight.QuantInfo.RowScale);
+            Assert.DoesNotContain("blocks.0.attn.qkv_proj.weight_scale", converted.Transformer.Keys);
+            Assert.DoesNotContain("blocks.0.attn.qkv_proj.comfy_quant", converted.Transformer.Keys);
         }
         finally
         {

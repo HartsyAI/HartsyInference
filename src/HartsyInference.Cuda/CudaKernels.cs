@@ -37,6 +37,18 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _w8a8DequantBiasF16;
     private readonly nint _w8a8DequantBiasF32;
 
+    // Optional: ConvRot activation rotation (convrot.ptx, src/HartsyInference.Cuda/Kernels/dequant) — the x @ H a
+    // ComfyUI int8_tensorwise+convrot weight owes its GEMM. Null when not compiled.
+    private readonly CudaModule? _convRotModule;
+    private readonly nint _convRotRotateF16;
+    private readonly nint _convRotRotateF32;
+
+    // Optional: NVFP4 packed-weight dequant (dequant_nvfp4_to_f16.ptx, src/HartsyInference.Cuda/Kernels/dequant) — the
+    // per-GEMM unpack that lets a ComfyUI nvfp4 checkpoint stay resident at 0.5 byte/param. Null when not compiled.
+    private readonly CudaModule? _nvfp4Module;
+    private readonly nint _nvfp4DequantF16;
+    private readonly nint _nvfp4DequantBf16;
+
     // Optional: SageAttention-v1 INT8 flash attention (sage_attn_int8.ptx, src/HartsyInference.Cuda/Kernels/attention). Null when
     // not compiled — CudaBackend.ScaledDotProductAttention gates on HasSageAttentionKernels and falls through.
     private readonly CudaModule? _sageAttnModule;
@@ -558,6 +570,24 @@ public sealed class CudaKernels : IDisposable
             _w8a8QuantRowwiseF32 = _w8a8Module.GetFunction("w8a8_quant_rowwise_f32");
             _w8a8DequantBiasF16 = _w8a8Module.GetFunction("w8a8_dequant_bias_f16");
             _w8a8DequantBiasF32 = _w8a8Module.GetFunction("w8a8_dequant_bias_f32");
+        }
+
+        // Optional module: ConvRot rotation (src/HartsyInference.Cuda/Kernels/dequant/convrot.cu). Absence is not an error.
+        string convRotPath = Path.Combine(ptxDir, "convrot.ptx");
+        if (File.Exists(convRotPath))
+        {
+            _convRotModule = LoadOwnedModule(convRotPath);
+            _convRotRotateF16 = _convRotModule.GetFunction("convrot_rotate_f16");
+            _convRotRotateF32 = _convRotModule.GetFunction("convrot_rotate_f32");
+        }
+
+        // Optional module: NVFP4 dequant (src/HartsyInference.Cuda/Kernels/dequant/dequant_nvfp4_to_f16.cu). Absence is not an error.
+        string nvfp4Path = Path.Combine(ptxDir, "dequant_nvfp4_to_f16.ptx");
+        if (File.Exists(nvfp4Path))
+        {
+            _nvfp4Module = LoadOwnedModule(nvfp4Path);
+            _nvfp4DequantF16 = _nvfp4Module.GetFunction("dequant_nvfp4_to_f16");
+            _nvfp4DequantBf16 = _nvfp4Module.GetFunction("dequant_nvfp4_to_bf16");
         }
 
         // Optional module: SageAttention INT8 (src/HartsyInference.Cuda/Kernels/attention/build.sh). Absence is not an error.
@@ -1928,6 +1958,59 @@ public sealed class CudaKernels : IDisposable
         uint grid = (uint)Math.Min((n + 255) / 256, 65535);
         CudaDriverApi.cuLaunchKernel(outF16 ? _w8a8DequantBiasF16 : _w8a8DequantBiasF32,
             grid, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the optional convrot.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant/convrot.cu).</summary>
+    public bool HasConvRotKernels => _convRotModule is not null;
+
+    /// <summary>ConvRot rotation — out = x @ H per contiguous <paramref name="group"/>-wide slice, over <c>count</c>
+    /// elements (a multiple of <paramref name="group"/>). Out-of-place; <paramref name="output"/> may not alias x.</summary>
+    public unsafe void LaunchConvRotRotate(ulong output, ulong x, long count, int group, nint stream, bool srcF16)
+    {
+        if (_convRotModule is null) throw new InvalidOperationException("convrot.ptx not present in the Ptx folder.");
+        if (group < 4 || count % group != 0)
+            throw new ArgumentException($"ConvRot needs count ({count}) to be a multiple of group ({group}).", nameof(count));
+
+        // 1024 shared floats per block regardless of group size, so a small group just packs more groups per block.
+        uint quarter = (uint)(group >> 2);
+        uint groupsPerBlock = quarter >= 256 ? 1u : Math.Max(1u, 256u / quarter);
+        ulong totalGroups = (ulong)(count / group);
+        uint sharedBytes = (uint)((long)groupsPerBlock * group * sizeof(float));
+
+        ulong xArg = x, oArg = output;
+        uint groupArg = (uint)group, gpbArg = groupsPerBlock;
+        ulong totalArg = totalGroups;
+        void** args = stackalloc void*[5];
+        args[0] = &xArg; args[1] = &oArg; args[2] = &groupArg; args[3] = &gpbArg; args[4] = &totalArg;
+        ulong blocks = (totalGroups + groupsPerBlock - 1) / groupsPerBlock;
+        CudaDriverApi.cuLaunchKernel(srcF16 ? _convRotRotateF16 : _convRotRotateF32,
+            (uint)blocks, 1, 1, 256, 1, 1, sharedBytes, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the optional dequant_nvfp4_to_f16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>
+    public bool HasNvfp4Kernels => _nvfp4Module is not null;
+
+    /// <summary>NVFP4 unpack — packed <c>[rows, halfCols]</c> E2M1 bytes × swizzled E4M3 block scales × the two
+    /// scalars → dense F16 or BF16 <c>[rows, 2·halfCols]</c>.</summary>
+    /// <param name="paddedCols">Last-dim length of the stored block-scale tensor (its swizzle stride).</param>
+    /// <param name="scaleFactor">The block-scale tensor's own <c>Fp8ScaleFactor</c>; passed separately from
+    /// <paramref name="globalScale"/> so the product is formed in the host reference's order.</param>
+    public unsafe void LaunchNvfp4Dequant(ulong output, ulong weight, ulong blockScale,
+        int rows, int halfCols, int paddedCols, float scaleFactor, float globalScale, nint stream, bool outBf16)
+    {
+        if (_nvfp4Module is null) throw new InvalidOperationException("dequant_nvfp4_to_f16.ptx not present in the Ptx folder.");
+        ulong wArg = weight, sArg = blockScale, oArg = output;
+        uint rowsArg = (uint)rows, halfColsArg = (uint)halfCols, paddedArg = (uint)paddedCols;
+        float sfArg = scaleFactor, gsArg = globalScale;
+        void** args = stackalloc void*[8];
+        args[0] = &wArg; args[1] = &sArg; args[2] = &oArg;
+        args[3] = &rowsArg; args[4] = &halfColsArg; args[5] = &paddedArg;
+        args[6] = &sfArg; args[7] = &gsArg;
+        const uint BlockSize = 256;
+        uint gridX = (uint)(((long)halfCols + BlockSize - 1) / BlockSize);
+        uint gridY = (uint)Math.Min(rows, 65535);
+        CudaDriverApi.cuLaunchKernel(outBf16 ? _nvfp4DequantBf16 : _nvfp4DequantF16,
+            gridX, gridY, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Whether the optional sage_attn_int8.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/attention).</summary>
