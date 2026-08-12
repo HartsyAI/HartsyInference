@@ -112,6 +112,16 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         int audioChannels = _config.AudioInChannels;   // 8 latent ch × 16 mel-latent bins (patch-1 pack)
 
         int steps = request.Steps ?? _config.NumInferenceSteps;
+        if (_config.FixedSigmas is { Length: > 1 } fixedSigmas)
+        {
+            int distilledSteps = fixedSigmas.Length - 1;
+            if (steps != distilledSteps)
+            {
+                Logs.Warning($"LTX-2 distilled: ignoring the requested {steps} steps — this checkpoint was distilled " +
+                    $"onto a fixed {distilledSteps}-step schedule, and any other count is a different schedule.");
+                steps = distilledSteps;
+            }
+        }
         float guidance = request.CfgScale ?? _config.GuidanceScale;
         // The reference carries a separate audio CFG scale; unset follows the video scale.
         float audioGuidance = _config.AudioGuidanceScale ?? guidance;
@@ -120,6 +130,9 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         {
             audioGuidance = parsedAudioCfg;
         }
+        // Both scales must be 1 to skip the unconditional branch: the single-branch path has no unconditional
+        // velocity to give the audio Euler step, so a guided audio stream still needs the pair.
+        bool unguided = guidance == 1f && audioGuidance == 1f;
         float audioRescale = _config.AudioGuidanceRescale;
         if (Environment.GetEnvironmentVariable("HARTSY_LTX2_AUDIO_RESCALE") is { Length: > 0 } rescaleOverride
             && float.TryParse(rescaleOverride, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedRescale))
@@ -299,7 +312,9 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         }
         Tensor videoLat = SeedGenerator.CreateNoise(new TensorShape(sv, videoChannels), seed);
         Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioFrames, audioChannels), seed ^ 0x5D2B);
-        float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+        // Distilled checkpoints baked their sigma schedule in, so it replaces the dynamic flow-match shift outright
+        // and a different step count is not a valid schedule for them.
+        float[] tsteps = _config.FixedSigmas ?? LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
         Logs.Info($"[ltx2-phase] DiT preload+prime: {phase.ElapsedMilliseconds} ms");
 
         for (int k = 0; k < steps; k++)
@@ -309,19 +324,41 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             float sigma = tsteps[k];                                    // raw flow sigma (≈1..0), for prompt_adaln
             float tEmb = sigma * _config.TimestepScaleMultiplier;       // ≈0..1000, for the other modulators
 
-            // CFG-paired forward: both branches share each block's (streamed) weights within the step — half the
-            // weight traffic of two sequential forwards.
-            ((Tensor vCondV, Tensor vCondA), (Tensor vUncondV, Tensor vUncondA)) = _transformer.ForwardCfgPair(
-                Backend, videoLat, audioLat, encVideoPos, encAudioPos, encVideoNeg, encAudioNeg,
-                tEmb, (tLat, hLat, wLat), audioFrames, frameRate, sigma);
+            Tensor vCondV, vCondA, vUncondV, vUncondA;
+            bool paired = !unguided;
+            if (unguided)
+            {
+                // At guidance 1 the pair reduces to the conditional branch, so running the unconditional one is pure
+                // waste — half the DiT work per step, which is most of the step. The distilled schedule always
+                // lands here.
+                (vCondV, vCondA) = _transformer.Forward(Backend, videoLat, audioLat, encVideoPos, encAudioPos,
+                    tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null, sigma);
+                vUncondV = vCondV;
+                vUncondA = vCondA;
+            }
+            else
+            {
+                // CFG-paired forward: both branches share each block's (streamed) weights within the step — half the
+                // weight traffic of two sequential forwards.
+                ((vCondV, vCondA), (vUncondV, vUncondA)) = _transformer.ForwardCfgPair(
+                    Backend, videoLat, audioLat, encVideoPos, encAudioPos, encVideoNeg, encAudioNeg,
+                    tEmb, (tLat, hLat, wLat), audioFrames, frameRate, sigma);
+            }
 
             // Device CFG+Euler, in-place on the resident latents: z += (g·cond + (1−g)·uncond)·(−dt) ≡ z −= v·dt.
             // The latents stay GPU-resident across the whole loop; the final host read (UnpackVideoLatents) syncs.
+            // With guidance 1 the cond tensor is passed for both operands, which the op collapses to plain Euler.
             Backend.CfgEulerStep(videoLat, vCondV, vUncondV, guidance, -dt);
             AudioCfgEulerStep(audioLat, vCondA, vUncondA, audioGuidance, audioRescale, -dt);
             // On the step-graph path the four velocities are transformer-owned fixed buffers (rewritten next step) —
-            // don't dispose them; on the eager path they're fresh and must be freed.
-            if (!_transformer.StepGraphActive) { vCondV.Dispose(); vCondA.Dispose(); vUncondV.Dispose(); vUncondA.Dispose(); }
+            // don't dispose them; on the eager path they're fresh and must be freed. The unguided path aliases the
+            // cond tensors into the uncond slots, so it must not double-free them.
+            if (!_transformer.StepGraphActive)
+            {
+                vCondV.Dispose();
+                vCondA.Dispose();
+                if (paired) { vUncondV.Dispose(); vUncondA.Dispose(); }
+            }
 
             Backend.Sync();
             sw.Stop();
