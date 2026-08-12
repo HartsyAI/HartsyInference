@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Compiles the DiT glue kernels to PTX and copies them into the HartsyInference.Cuda Ptx folder.
+# Compiles the Wan VAE/RoPE kernels to PTX and copies them into the HartsyInference.Cuda Ptx folder.
 # Uses nvcc (CUDA 11+) when it is on PATH, else the committed ../nvrtc_compile frontend, which needs
-# the CUDA headers ($CUDA_INC) because dit_bf16.cu includes cuda_bf16.h.
+# the CUDA headers ($CUDA_INC) because wan_vae_conv3d.cu/wan_vae_frames.cu include cuda_fp16.h/cuda_bf16.h.
 # Target SM 8.0 (Ampere+); PTX is JIT-forward-compatible.
 #
 # Usage:  ./build.sh              # compile + install
@@ -16,13 +16,10 @@ CUDA_LIB="${CUDA_LIB:-${HOME}/.local/lib/cuda13}"
 CUDA_INC="${CUDA_INC:-${CUDA_LIB}/include}"
 
 KERNELS=(
-    "dit_f32"
-    "dit_f16"
-    "dit_bf16"
-    "stepcache"
-    "dit_rope"
-    "dit_fp8emit"
-    "mg3_action"
+    "wan_rope"
+    "wan_vae_conv3d"
+    "wan_vae_frames"
+    "wan_vae_norm"
 )
 
 INSTALL=true

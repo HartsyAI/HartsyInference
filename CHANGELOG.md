@@ -25,7 +25,15 @@ stable release will require. Dates are UTC.
 - **Z-Image lifecycle hardening**: Base/Turbo checkpoint-variant detection from the filename, two independent
   prompt-cache layers, a Qwen3 tokenizer rewrite (byte-level encoding gap, `<think>` handling, tokenization-
   boundary fix) golden-tested against HF tokenizers 0.22.2 output, and a CUDA-graph-captured denoise step for
-  the packed fast path.
+  the packed fast path. Scope note: the packed device-resident loop covers t2i, img2img, and CFG; masked
+  inpaint and regional conditioning still run the host-stepped loop (per-step `ApplyZImageCfg`/`scheduler.Step`
+  on the CPU) — porting those onto the SD3 `MaskedAffineMixInPlace` pattern is tracked follow-up work.
+- **Kernel build reproducibility**: `conv/`, `vision/`, and `wan/` gain the same `build.sh` (nvcc, or the
+  committed `nvrtc_compile` fallback) the other kernel domains already had — their shipped PTX previously had
+  no scripted rebuild path at all; `dequant/build.sh` now covers `w8a8` (sm_75) and `fp8_quant` (sm_80, per its
+  shipped target) and gains the nvrtc fallback; `dit/build.sh` covers `mg3_action`. 13 of 16 artifacts
+  reproduce bit-identically from source; `stepcache`/`w8a8`/`wan_vae_norm` are regenerated with the current
+  pinned toolchain (all kernel-family GPU tests pass against the regenerated artifacts).
 
 - **Wan 2.2 A14B dual-expert swap through the native contract** (regression restore): `VideoRequest.VideoSwapModel`
   + `VideoSwapPercent` (fraction of steps for the low-noise expert; null = official 0.875/0.9 boundary) →
@@ -126,6 +134,11 @@ stable release will require. Dates are UTC.
   `float*` loops are replaced with the existing `Permute0213`/`ApplyRopeSingleHeadMajor`/`RepeatKvHeads`
   kernels (this encoder is shared by Qwen-Image, Z-Image, Krea2, Boogu, Flux.2, Ideogram 4, Lumina2, OmniGen2
   and others); tests assert the D2H sync count, not just numerics.
+- **Lumina2 sampling schedule corrected — output images change.** The scheduler previously applied Flux-style
+  dynamic shifting derived from the image token count (an experiment its own comment marked VALIDATION-PENDING,
+  using Flux's base/max-shift constants); the official Alpha-VLLM/Lumina-Image-2.0 `scheduler_config.json` is
+  `shift: 6.0` with `use_dynamic_shifting: false`, so the pipeline now uses the checkpoint's static shift. Same
+  seed produces a (correctly) different image than prior releases.
 - **SD3 patchify/final-layer/masked-mix run on device**; `flash_attn_v2_tf32` rejects partial query tiles
   (OOB read) and zero-fills its shared-memory K/V tail (stale-value poisoning); MaxPool distinguishes an empty
   window from a valid all-−Inf one; MSDA uses true −Inf softmax init and 64-bit index products; the cuDNN SDPA
