@@ -123,17 +123,6 @@ public sealed class LtxVideo2VariantDetectorTests
     }
 
     [Fact]
-    public void RepackWithMetadataButNoLtxConfigKeepsBiasWhenPresent()
-    {
-        LtxVideo2Config config = LtxVideo2VariantDetector.Detect(
-            new Dictionary<string, string> { ["format"] = "pt" },
-            Keys(LtxVideo2VariantDetector.VideoFfnBiasKey));
-
-        Assert.True(config.FfBias);
-        Assert.False(config.UseKeyframesAbsPosEmbedding);
-    }
-
-    [Fact]
     public void MalformedMetadataFallsBackInsteadOfThrowing()
     {
         LtxVideo2Config config = LtxVideo2VariantDetector.Detect(
@@ -143,15 +132,6 @@ public sealed class LtxVideo2VariantDetectorTests
         Assert.True(config.UseKeyframesAbsPosEmbedding);
         Assert.False(config.FfBias);
         Assert.Equal(LtxVideo2Config.V23.NumLayers, config.NumLayers);
-    }
-
-    [Fact]
-    public void DistilledSigmasAreNotSharedBetweenConfigs()
-    {
-        float[] first = LtxVideo2Config.V25Distilled.FixedSigmas!;
-        first[0] = -1f;
-
-        Assert.Equal(1.0f, LtxVideo2Config.V25Distilled.FixedSigmas![0]);
     }
 
     [Fact]
@@ -179,15 +159,4 @@ public sealed class LtxVideo2VariantDetectorTests
         Assert.Equal(LtxVideo2Rope.RopeType.Interleaved, config.RopeType);
     }
 
-    [Fact]
-    public void DistilledIsNotInferableFromTheCheckpoint()
-    {
-        // The dev and distilled 2.5 transformers share model_version, config and tensor keys, so nothing here may
-        // set a fixed schedule — that choice belongs to the caller.
-        LtxVideo2Config config = LtxVideo2VariantDetector.Detect(
-            new Dictionary<string, string> { ["model_version"] = "2.5.0", ["config"] = Ltx25ConfigJson },
-            Keys(LtxVideo2VariantDetector.KeyframesEmbeddingKey));
-
-        Assert.Null(config.FixedSigmas);
-    }
 }

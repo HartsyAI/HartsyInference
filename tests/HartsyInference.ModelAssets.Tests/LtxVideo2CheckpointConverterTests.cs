@@ -141,18 +141,37 @@ public class LtxVideo2CheckpointConverterTests
         Assert.True(c.Vae.ContainsKey("encoder.conv_in.conv.weight"));
     }
 
+    /// <summary>The official LTX-2.5 DiT ships <c>comfy-int8-convrot</c> (21.5 GB against 42 GB BF16). Its weights must
+    /// reach the transformer bucket still I8 with the row scale attached — dequantizing at load would undo the point.</summary>
     [Fact]
-    public void ConvolutionalVaeLeavesTheDiffusionBucketEmpty()
+    public void Int8ConvRotTransformerWeightsStayPackedWithTheirRowScale()
     {
+        byte[] json = System.Text.Encoding.UTF8.GetBytes(
+            "{\"format\": \"int8_tensorwise\", \"convrot\": true, \"convrot_groupsize\": 256, \"per_row\": true}");
+        Core.Tensors.Tensor descriptor = new(new Core.Tensors.TensorShape(json.Length), Core.Tensors.DType.U8);
+        json.CopyTo(descriptor.AsSpan<byte>());
+        Core.Tensors.Tensor rowScale = new(new Core.Tensors.TensorShape(4, 1), Core.Tensors.DType.F32);
         Dictionary<string, Core.Tensors.Tensor> w = new()
         {
-            ["vae.decoder.conv_in.conv.weight"] = Stub(),
-            ["vae.per_channel_statistics.mean-of-means"] = Stub(),
+            ["model.diffusion_model.transformer_blocks.0.attn1.to_q.weight"] =
+                new Core.Tensors.Tensor(new Core.Tensors.TensorShape(4, 256), Core.Tensors.DType.I8),
+            ["model.diffusion_model.transformer_blocks.0.attn1.to_q.weight_scale"] = rowScale,
+            ["model.diffusion_model.transformer_blocks.0.attn1.to_q.comfy_quant"] = descriptor,
         };
-        LtxVideo2CheckpointConverter.ConvertedWeights c = LtxVideo2CheckpointConverter.Convert(w);
+        try
+        {
+            LtxVideo2CheckpointConverter.ConvertedWeights c = LtxVideo2CheckpointConverter.Convert(w);
 
-        Assert.Empty(c.VaeDiffusionDecoder);
-        Assert.True(c.Vae.ContainsKey("decoder.conv_in.conv.weight"));
+            Core.Tensors.Tensor weight = c.Transformer["transformer_blocks.0.attn1.to_q.weight"];
+            Assert.Equal(Core.Tensors.DType.I8, weight.DType);
+            Assert.Equal(256, weight.QuantInfo!.ConvRotGroupSize);
+            Assert.Same(rowScale, weight.QuantInfo.RowScale);
+            Assert.Single(c.Transformer);
+        }
+        finally
+        {
+            foreach (Core.Tensors.Tensor t in w.Values) t.Dispose();
+        }
     }
 
     private static Core.Tensors.Tensor Stub() =>

@@ -1,6 +1,12 @@
 # LTX 2.5 — Research Notes
 
-> Status: In progress | Last Updated: 2026-08-12 | Needed before: `LtxVideo2Config` variant detection, `Gemma4TextEncoder`, `LtxVideo25DiffusionDecoder`
+> Status: Components complete, pipeline wiring open | Last Updated: 2026-08-12 | Two open questions below
+
+Every component is built and checked against a reference. What is **not** done is the pipeline: `LtxVideo2Pipeline`
+still constructs the Gemma-3 tower and the convolutional decoder, so `LtxVideo2Recipe` refuses a 2.5 bundle with
+a targeted error rather than mis-decoding it. Wiring needs an `ILtx2TextTower` swap plus a decoder-kind branch,
+and cannot be exercised on the dev box (the text encoder is 26 GB; the decoder is managed-only at ~32 s for the
+smallest possible frame). This doc stays a full research doc rather than a provenance stub until that lands.
 
 ## Summary
 

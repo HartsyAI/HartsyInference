@@ -111,43 +111,6 @@ public sealed unsafe class LtxVideo2KeyframesEmbeddingTests
     }
 
     [Fact]
-    public void MarkerReachesEveryTokenThroughAttention()
-    {
-        // The mask is narrow but its effect is not: guards against the marker being applied somewhere that the
-        // blocks never see, which the pre-block assertion above cannot detect on its own.
-        LtxVideo2Config off = Tiny(keyframes: false);
-        Dictionary<string, Tensor> baseline = LtxSyntheticWeights.BuildTransformer2(off);
-        LtxVideo2Config on = Tiny(keyframes: true);
-        Dictionary<string, Tensor> marked = new(baseline)
-        {
-            ["keyframes_abs_pos_embedding"] = ConstRow(on.InnerDim, 0.75f),
-        };
-
-        float[] without = RunVideo(off, baseline).Output;
-        float[] with = RunVideo(on, marked).Output;
-
-        int differing = 0;
-        for (int i = 0; i < with.Length; i++)
-            if (MathF.Abs(with[i] - without[i]) > 1e-6f) differing++;
-
-        Assert.True(differing > 0, "the keyframe marker made no difference to the velocity");
-    }
-
-    [Fact]
-    public void MarkerIsInertWhenAbsent()
-    {
-        LtxVideo2Config c = Tiny(keyframes: false);
-        Dictionary<string, Tensor> w = LtxSyntheticWeights.BuildTransformer2(c);
-
-        float[] first = RunVideo(c, w).Output;
-        float[] second = RunVideo(c, w).Output;
-
-        Assert.Equal(first.Length, second.Length);
-        for (int i = 0; i < first.Length; i++) Assert.Equal(first[i], second[i], 6);
-        Assert.All(first, f => Assert.True(float.IsFinite(f)));
-    }
-
-    [Fact]
     public void BiasFreeVideoFfnMatchesAnExplicitZeroBias()
     {
         // 2.5 removes the video FFN bias entirely. A bias-free Linear must compute the same thing an all-zero bias

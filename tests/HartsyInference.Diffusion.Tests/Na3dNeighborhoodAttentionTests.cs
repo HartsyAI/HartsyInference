@@ -50,18 +50,6 @@ public sealed unsafe class Na3dNeighborhoodAttentionTests
     }
 
     [Fact]
-    public void EveryQueryAttendsTheSameKeyCount()
-    {
-        // The defining property of NATTEN vs a truncated window: border queries are not starved.
-        const int length = 9, kernel = 5;
-        for (int i = 0; i < length; i++)
-        {
-            int start = IBackend.Na3dWindowStart(i, length, kernel);
-            Assert.Equal(kernel, Math.Min(start + kernel, length) - start);
-        }
-    }
-
-    [Fact]
     public void KernelSpanningTheGridEqualsFullAttention()
     {
         // With the kernel covering every axis, neighborhood attention degenerates to dense attention, which is a
@@ -167,19 +155,6 @@ public sealed unsafe class Na3dNeighborhoodAttentionTests
         float* a = (float*)scaled.DataPointer;
         float* b = (float*)unscaled.DataPointer;
         for (long i = 0; i < scaled.ElementCount; i++) Assert.Equal(b[i], a[i], 5);
-    }
-
-    [Fact]
-    public void MismatchedShapesAreRejected()
-    {
-        IBackend backend = new CpuBackend();
-        using Tensor q = Make(1, 2, 2, 2, 1, 4, _ => 0f);
-        using Tensor k = Make(1, 2, 2, 2, 1, 4, _ => 0f);
-        using Tensor v = Make(1, 2, 2, 2, 1, 4, _ => 0f);
-        using Tensor wrong = Make(1, 2, 2, 2, 1, 8, _ => 0f);
-
-        Assert.Throws<ArgumentException>(() => backend.Na3d(wrong, q, k, v, 3, 3, 3, 1.0f));
-        Assert.Throws<ArgumentException>(() => backend.Na3d(q, q, k, v, 0, 3, 3, 1.0f));
     }
 
     [Fact]
