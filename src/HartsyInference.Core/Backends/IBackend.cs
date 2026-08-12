@@ -1074,6 +1074,9 @@ public interface IBackend : IDisposable
     /// <c>kernelT×kernelH×kernelW</c> window instead of the whole grid. Used by the LTX-2.5 diffusion video decoder.</summary>
     /// <param name="scale">Applied to the scores; pass 1.0 when the caller has already folded it into Q (the decoder
     /// folds it into the query RMS-norm weight, which commutes with the rotation).</param>
+    /// <remarks>This managed implementation is the numerical reference, not a performance path — it is a plain
+    /// six-deep loop and allocates one score buffer per call. <paramref name="output"/> must not alias any input:
+    /// it is zeroed and accumulated into while neighbouring queries still read the originals.</remarks>
     unsafe void Na3d(Tensor output, Tensor q, Tensor k, Tensor v, int kernelT, int kernelH, int kernelW, float scale)
     {
         if (output.DType != DType.F32 || q.DType != DType.F32 || k.DType != DType.F32 || v.DType != DType.F32)
@@ -1084,6 +1087,13 @@ public interface IBackend : IDisposable
             throw new ArgumentException($"Na3d requires identical shapes; got q={q.Shape}, k={k.Shape}, v={v.Shape}, output={output.Shape}.");
         if (kernelT <= 0 || kernelH <= 0 || kernelW <= 0)
             throw new ArgumentException($"Na3d kernel must be positive; got ({kernelT}, {kernelH}, {kernelW}).");
+        // The output is zeroed and accumulated into while other queries still read the inputs, so an aliased buffer
+        // would corrupt keys/values mid-pass. Inputs may alias each other freely.
+        if (output.HasOverlappingHostStorageWithoutSync(q) || output.HasOverlappingHostStorageWithoutSync(k)
+            || output.HasOverlappingHostStorageWithoutSync(v))
+        {
+            throw new ArgumentException("Na3d output must not alias q, k or v.", nameof(output));
+        }
 
         int batch = (int)q.Shape[0], dimT = (int)q.Shape[1], dimH = (int)q.Shape[2], dimW = (int)q.Shape[3];
         int heads = (int)q.Shape[4], headDim = (int)q.Shape[5];

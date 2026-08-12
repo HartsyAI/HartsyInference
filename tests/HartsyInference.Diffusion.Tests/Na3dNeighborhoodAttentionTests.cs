@@ -181,4 +181,20 @@ public sealed unsafe class Na3dNeighborhoodAttentionTests
         Assert.Throws<ArgumentException>(() => backend.Na3d(wrong, q, k, v, 3, 3, 3, 1.0f));
         Assert.Throws<ArgumentException>(() => backend.Na3d(q, q, k, v, 0, 3, 3, 1.0f));
     }
+
+    [Fact]
+    public void AliasedOutputIsRejected()
+    {
+        // The output is zeroed then accumulated into while neighbouring queries still read the inputs, so aliasing
+        // would silently corrupt keys/values mid-pass. The decoder's memory-bounded streaming style is exactly the
+        // caller that would try it.
+        IBackend backend = new CpuBackend();
+        using Tensor q = Make(1, 2, 2, 2, 1, 4, i => i * 0.1f);
+        using Tensor k = Make(1, 2, 2, 2, 1, 4, i => i * 0.2f);
+        using Tensor v = Make(1, 2, 2, 2, 1, 4, i => i * 0.3f);
+
+        Assert.Throws<ArgumentException>(() => backend.Na3d(q, q, k, v, 3, 3, 3, 1.0f));
+        Assert.Throws<ArgumentException>(() => backend.Na3d(k, q, k, v, 3, 3, 3, 1.0f));
+        Assert.Throws<ArgumentException>(() => backend.Na3d(v, q, k, v, 3, 3, 3, 1.0f));
+    }
 }

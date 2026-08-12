@@ -160,8 +160,25 @@ vestigial and ignore it, but do not silently drop it without noting the divergen
 out subtly wrong, this is the first thing to re-examine.
 
 Derived: temporal upscale = ∏ stride[0] = 8, spatial upscale = ∏ stride[1] × `patch_size` = 8 × 4 = 32.
-Frame count out = `8t − 7`. Trailing-pad for the NATTEN border: replicate the last latent frame
-`(stage_kernels[0][0] // 2) * 2 = 2` times through stages 1-4, crop the appendix off the context after.
+
+**Frame-count composition — verify this before porting; an off-by-one here is a subtly wrong video, not a
+crash.** `LinearPixelShuffleUpsample` drops the duplicated leading frame whenever the temporal stride is 2
+(the causal temporal pixel-shuffle emits it twice). Three of the four stages have `p1 == 2`, so from `t` latent
+frames:
+
+```
+stage 0  p1=1  ->  t                (no drop)
+stage 1  p1=2  ->  2t - 1
+stage 2  p1=2  ->  4t - 3
+stage 3  p1=2  ->  8t - 7
+```
+
+which is exactly ComfyUI's `upscale_ratio = (lambda a: max(0, a * 8 - 7), 32, 32)` in `comfy/sd.py`, and is why
+valid frame counts are `num_frames % 8 == 1` (t=1 → 1, t=2 → 9, t=3 → 17, t=4 → 25).
+
+Trailing-pad for the NATTEN border: replicate the last latent frame `(stage_kernels[0][0] // 2) * 2 = 2` times
+through stages 1-4, then crop the appendix off the context. Those 2 extra latent frames become `2 × 8 = 16`
+extra output frames to remove (e.g. t=3 padded to 5 yields 33, crop 16 back to 17).
 
 ### Duration head (`ltx-2.5-duration-head-bf16.safetensors`)
 
