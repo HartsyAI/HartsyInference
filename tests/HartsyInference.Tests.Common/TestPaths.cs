@@ -327,6 +327,10 @@ public static class TestPaths
     {
         public static string DitFp8 => Resolve("MINIMAX_H3_DIT", Path.Combine(ModelsDir, "Stable-Diffusion", "MiniMaxH3", "flat", "diffusion_models", "minimax_h3_fl2va_pruned_fp8_scaled.safetensors"));
 
+        /// <summary>The ref2va checkpoint (reference-image/video/audio conditioning, no start/end-frame support —
+        /// the two H3 tasks are separate checkpoints). Override with MINIMAX_H3_DIT_REF2VA.</summary>
+        public static string DitRef2VaFp8 => Resolve("MINIMAX_H3_DIT_REF2VA", Path.Combine(ModelsDir, "Stable-Diffusion", "MiniMaxH3", "flat", "diffusion_models", "minimax_h3_ref2va_pruned_fp8_scaled.safetensors"));
+
         /// <summary>The video VAE, whose one file carries BOTH the ViT3D decoder and the 3D CNN encoder that supplies
         /// keyframe and reference latents. Override with MINIMAX_H3_VIDEO_VAE.</summary>
         public static string VideoVae => Resolve("MINIMAX_H3_VIDEO_VAE", Path.Combine(ModelsDir, "Stable-Diffusion", "MiniMaxH3", "flat", "vae", "MiniMaxH3", "minimax_h3_video_vae_fp16.safetensors"));

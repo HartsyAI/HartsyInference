@@ -9,8 +9,10 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Engine.Audio;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.Engine.Vision;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Video.Encoding;
 using HartsyInference.Video.Pipelines;
@@ -64,6 +66,11 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         _loraStack = loraStack;
     }
 
+    /// <summary>Tier 3.8's <c>&lt;refcrop:&gt;</c> backend — a pipeline-owned cache (mirrors
+    /// <c>ImagesService</c>'s own <c>ClipSegSegmenter</c> instance) so a prompt with no <c>&lt;refcrop:&gt;</c>
+    /// tags never loads it.</summary>
+    private readonly ClipSegSegmenter _clipSeg = new();
+
     /// <summary>One keyframe resolved into everything the two conditioning paths need: the DiT's packed rows, the
     /// anchor that pins it to the clip's first or last frame, and the RGB the vision tower presents.</summary>
     private readonly record struct Keyframe(int FrameIndex, Tensor Rows, Tensor Rgb, int VisionTokens);
@@ -89,6 +96,11 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
+        // Tier 3.8: <refcrop:N,query[,threshold]> auto-crops reference image N to a CLIPSeg-matched region before
+        // it reaches EncodeReferences below. Must run before request.Prompt is read anywhere (line ~191's text
+        // encode) — an un-stripped tag left in the prompt is exactly the base-prompt tag-leak class of bug Tier
+        // 3.2 fixed. Identity path (same request instance) when the prompt carries no <refcrop:> tags at all.
+        request = ReferenceCropResolver.Apply(request, _backend, _clipSeg, cancel);
         if (request.Fps is int requestedFps && requestedFps != MiniMaxH3Geometry.Fps)
         {
             // The model always denoises at MiniMaxH3Geometry.Fps — VideoService.GenerateAsync resolves the final
@@ -778,6 +790,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         }
         _pipeline.Dispose();
         _textEncoder.Dispose();
+        _clipSeg.Dispose();
         // After the transformer that reads them: the merged tensors are the DiT's weights, not copies.
         _loraStack?.Dispose();
         foreach (SafeTensorsLoader loader in _loaders)
