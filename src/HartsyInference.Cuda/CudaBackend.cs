@@ -4636,6 +4636,37 @@ public sealed class CudaBackend : IBackend
         output.Fp8ScaleFactor = input.Fp8ScaleFactor;
     }
 
+    public void ScatterRowsGeneric(Tensor output, Tensor input, int rowOffset)
+    {
+        if (output.DType != input.DType)
+            throw new ArgumentException($"CUDA ScatterRowsGeneric requires matching dtypes, got output {output.DType} vs input {input.DType}.");
+        if (output.DType.IsQuantized)
+            throw new NotSupportedException("CUDA ScatterRowsGeneric does not support block-quantized dtypes.");
+        EnterOp();
+        int dim = (int)input.Shape[input.Shape.Rank - 1];
+        long byteOffset = (long)rowOffset * input.DType.ComputeByteCount(dim);
+        nuint inBytes = GpuTransferHelper.ByteSize(input);
+        ulong pIn = 0;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            // The destination persists across calls — the first chunk allocates it and every later one writes into
+            // the same buffer, which is the whole point (a per-call allocate-and-recache would be a Concat again).
+            if (!GpuTransferHelper.IsActivationCached(output))
+            {
+                nuint outBytes = GpuTransferHelper.ByteSize(output);
+                GpuTransferHelper.CacheActivation(output, GpuTransferHelper.AllocateDevice(outBytes), outBytes);
+            }
+            ulong pOut = GpuTransferHelper.CopyToDevice(output);
+            // Rows are contiguous, so unlike ScatterSeqHeadMajor's per-head loop this is one stream-ordered DtoD.
+            CudaMemory.CopyDeviceToDeviceAsync(pOut + (ulong)byteOffset, pIn, inBytes, _stream.Handle);
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
     public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
     {
         if (input.DType != DType.F32 || gamma.DType != DType.F32 || beta.DType != DType.F32)

@@ -1692,6 +1692,24 @@ public interface IBackend : IDisposable
         output.Fp8ScaleFactor = input.Fp8ScaleFactor;
     }
 
+    /// <summary>Writes <paramref name="input"/>'s rows into <paramref name="output"/> starting at row
+    /// <paramref name="rowOffset"/>, in place and accumulating across calls — the byte-offset inverse of
+    /// <see cref="SliceRowsGeneric"/>. Same bytes to the same offsets as concatenating every chunk along dim 0, but
+    /// without holding the whole chunk list alive alongside the result, which is what makes long-sequence chunked
+    /// attention/MLP fit (see <c>MiniMaxH3Transformer</c>; the head-major sibling is
+    /// <see cref="ScatterSeqHeadMajor"/>).</summary>
+    unsafe void ScatterRowsGeneric(Tensor output, Tensor input, int rowOffset)
+    {
+        if (output.DType != input.DType)
+            throw new ArgumentException($"ScatterRowsGeneric requires matching dtypes, got output {output.DType} vs input {input.DType}.");
+        if (output.DType.IsQuantized)
+            throw new NotSupportedException("ScatterRowsGeneric does not support block-quantized dtypes.");
+        int dim = (int)input.Shape[input.Shape.Rank - 1];
+        long byteOffset = (long)rowOffset * input.DType.ComputeByteCount(dim);
+        long totalBytes = input.DType.ComputeByteCount(input.ElementCount);
+        Buffer.MemoryCopy(input.DataPointer, (byte*)output.DataPointer + byteOffset, totalBytes, totalBytes);
+    }
+
     /// <summary>Fused quantized matmul: <c>output = input @ quantWeight^T (+ bias)</c>, dequantized in-kernel (Q8_0/Q4_K/Q5_K/Q6_K).</summary>
     void QuantizedMatMul(Tensor output, Tensor input, Tensor quantWeight, Tensor? bias)
         => throw new NotSupportedException(

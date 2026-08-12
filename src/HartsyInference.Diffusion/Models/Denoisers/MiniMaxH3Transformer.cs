@@ -511,9 +511,13 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             }
             ProbeV(vFull, prefix);
 
-            List<Tensor> outChunks = new List<Tensor>(qChunks.Count);
+            // Each chunk's output goes straight into its rows of the result. Collecting them for a final Concat
+            // instead kept a whole second [seq, hidden] alive alongside the concatenated output at the exact moment
+            // kFull/vFull are still resident — the same redundant full-size copy ScatterSeqHeadMajor removed for k/v.
+            Tensor outT = new Tensor(x.Shape, BodyDType);
             try
             {
+                int outRow = 0;
                 for (int i = 0; i < qChunks.Count; i++)
                 {
                     int c = (int)qChunks[i].Shape[2];
@@ -522,18 +526,18 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                     qChunks[i].Dispose();
                     using Tensor merged = new Tensor(new TensorShape(c, inner), DType.F32);
                     backend.Permute0213(merged, attnChunk, heads, c, hd);
-                    Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
+                    using Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
                     backend.Linear(outChunk, merged, Require($"{prefix}.out_proj.weight"), Optional($"{prefix}.out_proj.bias"));
-                    outChunks.Add(outChunk);
+                    backend.ScatterRowsGeneric(outT, outChunk, outRow);
+                    outRow += c;
                 }
                 qChunks.Clear();
-                Tensor outT = new Tensor(x.Shape, BodyDType);
-                backend.Concat(outT, CollectionsMarshal.AsSpan(outChunks), 0);
                 return outT;
             }
-            finally
+            catch
             {
-                foreach (Tensor t in outChunks) t.Dispose();
+                outT.Dispose();
+                throw;
             }
         }
         finally
@@ -575,7 +579,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         Tensor fc2W = Require($"{prefix}.fc2.weight");
         Tensor? fc2B = Optional($"{prefix}.fc2.bias");
 
-        List<Tensor> outChunks = new List<Tensor>();
+        // Scatter each chunk into the result rather than collecting for a final Concat — see AttentionChunked.
+        Tensor outT = new Tensor(x.Shape, BodyDType);
         try
         {
             for (int r0 = 0; r0 < seq; r0 += chunkRows)
@@ -587,17 +592,16 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 backend.Linear(gateUpChunk, xChunk, fc1W, fc1B);
                 using Tensor actChunk = new Tensor(new TensorShape(c, ffn), DType.F32);
                 backend.GluActivate(actChunk, gateUpChunk, ffn, gelu: false);
-                Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
+                using Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
                 backend.Linear(outChunk, actChunk, fc2W, fc2B);
-                outChunks.Add(outChunk);
+                backend.ScatterRowsGeneric(outT, outChunk, r0);
             }
-            Tensor outT = new Tensor(x.Shape, BodyDType);
-            backend.Concat(outT, CollectionsMarshal.AsSpan(outChunks), 0);
             return outT;
         }
-        finally
+        catch
         {
-            foreach (Tensor t in outChunks) t.Dispose();
+            outT.Dispose();
+            throw;
         }
     }
 
