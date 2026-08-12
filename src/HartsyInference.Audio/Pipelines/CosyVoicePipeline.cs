@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using HartsyInference.Audio.Models.CosyVoice;
+using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -192,6 +194,181 @@ public sealed class CosyVoicePipeline : IDisposable
         sw.Stop();
         Logs.Info($"CosyVoice synthesis complete: {audio.Length} samples ({audio.Length / (double)_cfg.SampleRate:F2}s) in {sw.ElapsedMilliseconds}ms.");
         return audio;
+    }
+
+    /// <summary>Streaming counterpart to <see cref="Synthesize"/>: runs the identical LM→flow→vocoder pipeline
+    /// on a background thread, but hands each newly-settled PCM chunk to the caller as soon as it's ready
+    /// instead of buffering to the end. Mirrors <c>VibeVoicePipeline.SynthesizeStream</c>'s shape exactly
+    /// (producer on <see cref="Task.Run(Action)"/>, consumer drains an <see cref="AudioStreamer"/>, the
+    /// producer <see cref="Task"/> is awaited in a <c>finally</c> so a fault always surfaces to the caller).
+    ///
+    /// <para>Zero-shot mode ONLY (<paramref name="referenceAudio"/> required) — unlike <see cref="Synthesize"/>,
+    /// which also accepts a precomputed <paramref name="speakerEmbed"/> with no reference clip.
+    /// <see cref="CosyVoiceFlow.InferenceGrowingWindowed"/>'s <c>cond</c>-pinning design (the mechanism that
+    /// avoids <see cref="CosyVoiceFlow.InferenceChunk"/>'s exposure-bias drift — see that method's doc
+    /// comment) needs a REAL reference mel to pin every windowed call to; this matches how CosyVoice2 is
+    /// actually registered in the engine catalog (<c>CosyVoiceModel.cs</c> already requires a reference clip
+    /// for the non-streaming path too, so this isn't a new restriction in practice).</para>
+    ///
+    /// <para><paramref name="chunkSizeTokens"/>/<paramref name="windowSizeTokens"/>/<paramref name="marginFrames"/>
+    /// default to the best config found by a 2026-08-11 parameter sweep: 3.45× real-time, bounded (flat, not
+    /// growing with utterance length) rather than real-time. ONE known, quantified, ACCEPTED limitation: an
+    /// isolated single-word mispronunciation under adversarial content, present identically across every
+    /// bounded window/margin/chunk-size combination tested (only a full-history unbounded design avoids it,
+    /// at prohibitive cost — see <see cref="CosyVoiceFlow.InferenceGrowingWindowed"/>'s doc comment for the
+    /// full 5-way sweep and the decisive discriminating experiment). Callers needing a different
+    /// quality/latency/cost tradeoff can override these.</para>
+    ///
+    /// <para><b>The 3.45× figure above is flow+vocoder ONLY — verified live through the actual running
+    /// service, real end-to-end (including LM speech-token generation) runs ~8× real-time, not 3.45×</b>
+    /// (2026-08-11, two live WebSocket calls through `swarmui.service`'s real `GenerateText2ImageWS`
+    /// endpoint with `streamchunksize: sentence`, a real zero-shot reference clip, real Whisper-verified
+    /// correct content, zero errors, 8-9 real incremental chunks delivered before the final result each
+    /// time). Per-chunk interval was a steady ~7.6-8.2s live, vs. the ~2.8-3.0s the flow+vocoder-only
+    /// scratch harnesses measured in isolation — the LM's own autoregressive token decode for each
+    /// <see cref="SynthesizeStreamCore"/>'s chunk-sized token batch is a REAL, substantial additional cost
+    /// this pipeline's own tuning sweep never isolated (those harnesses called
+    /// <c>GenerateSpeechTokens</c> once, up front, outside the timed loop — this method calls it inline,
+    /// as it must for genuine incremental token-arrival streaming). First-chunk latency was 36s cold
+    /// (includes first-request model/weight loading) and 25.7s warm (second call, same session) — still
+    /// real LM-decode-dominated latency, not a bug, but the honest number for anyone deciding whether this
+    /// meets a real-time bar: it does not, today, end to end. The chunked delivery itself is correct and
+    /// real (content, boundaries, no errors) — this is a latency finding, not a correctness one.</para></summary>
+    public async IAsyncEnumerable<AudioChunk> SynthesizeStream(IBackend backend,
+        int[] textTokenIds,
+        float[]? referenceAudio,
+        int referenceSampleRate,
+        int[]? referenceTextTokens = null,
+        int seed = 0,
+        int chunkSizeTokens = 25,
+        int windowSizeTokens = 150,
+        int marginFrames = 40,
+        int maxTokens = 750,
+        int? chunkCausalSize = null,
+        [EnumeratorCancellation] CancellationToken cancel = default)
+    {
+        ThrowIfDisposed();
+        if (referenceAudio is null || referenceAudio.Length == 0)
+            throw new ArgumentException("CosyVoice 2 streaming is zero-shot — provide referenceAudio.", nameof(referenceAudio));
+
+        List<(IBackend Backend, bool Prev)> saved = new(4) { (backend, backend.HighPrecisionGemm) };
+        backend.HighPrecisionGemm = true;
+        if (_lm.Placement is { IsSingle: false } lmPlacement)
+        {
+            foreach (LlmStage stage in lmPlacement.Stages)
+            {
+                IBackend sb = stage.Backend;
+                bool seen = false;
+                for (int i = 0; i < saved.Count && !seen; i++) seen = ReferenceEquals(saved[i].Backend, sb);
+                if (seen) continue;
+                saved.Add((sb, sb.HighPrecisionGemm));
+                sb.HighPrecisionGemm = true;
+            }
+        }
+
+        using AudioStreamer streamer = new();
+        long sampleOffset = 0;
+
+        Task producer = Task.Run(() =>
+        {
+            try
+            {
+                PreloadWeights(backend);
+                SynthesizeStreamCore(backend, textTokenIds, referenceAudio, referenceSampleRate,
+                    referenceTextTokens, seed, chunkSizeTokens, windowSizeTokens, marginFrames, maxTokens,
+                    chunkCausalSize,
+                    onChunk: chunk =>
+                    {
+                        streamer.Put(new AudioChunk(chunk, _cfg.SampleRate, 1, sampleOffset), cancel).AsTask().GetAwaiter().GetResult();
+                        sampleOffset += chunk.Length;
+                    });
+            }
+            finally
+            {
+                streamer.Complete();
+            }
+        }, cancel);
+
+        try
+        {
+            await foreach (AudioChunk chunk in streamer.ReadAllAsync(cancel).ConfigureAwait(false))
+            {
+                yield return chunk;
+            }
+        }
+        finally
+        {
+            await producer.ConfigureAwait(false);
+            for (int i = saved.Count - 1; i >= 0; i--) saved[i].Backend.HighPrecisionGemm = saved[i].Prev;
+        }
+    }
+
+    /// <summary>The streaming generation loop: LM speech tokens arrive via <c>onToken</c>; every
+    /// <paramref name="chunkSizeTokens"/> new tokens (plus a final flush once the LM stops), a windowed flow
+    /// call (<see cref="CosyVoiceFlow.InferenceGrowingWindowed"/>) turns the newly-available tokens into mel,
+    /// and the HIFT vocoder's own streaming state (<see cref="HiFTStreamState"/>) turns that into PCM.
+    /// <paramref name="onChunk"/> is called synchronously, once per non-empty PCM chunk, on this method's own
+    /// calling thread (the background producer thread from <see cref="SynthesizeStream"/>, never a request
+    /// thread).</summary>
+    private void SynthesizeStreamCore(IBackend backend,
+        int[] textTokenIds, float[] referenceAudio, int referenceSampleRate,
+        int[]? referenceTextTokens, int seed, int chunkSizeTokens, int windowSizeTokens, int marginFrames,
+        int maxTokens, int? chunkCausalSize, Action<float[]> onChunk)
+    {
+        if (referenceSampleRate <= 0)
+            throw new ArgumentException("referenceSampleRate must be set when referenceAudio is provided.", nameof(referenceSampleRate));
+        if (_s3 is null || _speakerEncoder is null)
+            throw new InvalidOperationException("Zero-shot streaming requires both an S3Tokenizer and a CamPlusSpeakerEncoder.");
+
+        float[] audio16k = S3GenReference.Resample(referenceAudio, referenceSampleRate, 16_000);
+        float[] audio24k = S3GenReference.Resample(referenceAudio, referenceSampleRate, 24_000);
+        int[] promptSpeechTokens = S3GenReference.SpeechTokens(backend, _s3, audio16k);
+        Tensor spk = S3GenReference.SpeakerEmbedding(backend, _speakerEncoder, audio16k);
+        Tensor promptMel = S3GenReference.FlowMel(audio24k);
+        Logs.Info($"CosyVoice (stream): reference → {promptSpeechTokens.Length} prompt speech tokens + speaker embedding.");
+
+        int[] refText = referenceTextTokens ?? [];
+        int melBins = _cfg.Flow.MelBins;
+        int ratio = UpsampleConformerEncoder.TokenMelRatio;
+        // Pre-drawn once at maxTokens scale, since the LM's actual final token count isn't known until it stops
+        // (EOS-terminated) — DeterministicRng's sequential draw is prefix-stable, so drawing MORE than needed and
+        // slicing the used prefix is bit-identical to drawing exactly the right amount (see ConditionalCfm.DrawFullNoise).
+        int fullNoiseFrames = (promptSpeechTokens.Length + maxTokens) * ratio;
+        Tensor fullNoise = ConditionalCfm.DrawFullNoise(melBins, fullNoiseFrames, seed);
+
+        List<int> allTokens = new(256);
+        int emittedFrames = 0;
+        int lastFlushedCount = 0;
+        using HiFTStreamState hiftState = new();
+
+        void FlushChunk(bool isFinal)
+        {
+            int end = allTokens.Count;
+            if (end == lastFlushedCount && !isFinal) return;
+            int windowStart = Math.Max(0, end - windowSizeTokens);
+            int[] windowTokens = allTokens.GetRange(windowStart, end - windowStart).ToArray();
+            Tensor chunkMel = _flow.InferenceGrowingWindowed(backend, windowTokens, windowStart, promptSpeechTokens,
+                promptMel, spk, seed, fullNoise, fullNoiseFrames, marginFrames, ref emittedFrames, isFinal, chunkCausalSize);
+            lastFlushedCount = end;
+            if (chunkMel.Shape[2] > 0)
+            {
+                float[] audio = _vocoder.ForwardStreaming(backend, chunkMel, hiftState, isFinal);
+                if (audio.Length > 0) onChunk(audio);
+            }
+            chunkMel.Dispose();
+        }
+
+        _lm.GenerateSpeechTokens(backend, textTokenIds, refText, promptSpeechTokens, maxTokens: maxTokens, seed: seed,
+            onToken: tok =>
+            {
+                allTokens.Add(tok);
+                if (allTokens.Count - lastFlushedCount >= chunkSizeTokens) FlushChunk(isFinal: false);
+            });
+        FlushChunk(isFinal: true);
+
+        fullNoise.Dispose();
+        spk.Dispose();
+        promptMel.Dispose();
     }
 
     public void Dispose()

@@ -21,14 +21,14 @@ namespace HartsyInference.Engine.Features;
 /// <see cref="ImageRequest"/> that mask feeds into. Segments are applied sequentially, each seeing the previous
 /// segment's composited result, so overlapping segments compose left-to-right in prompt order.</para>
 ///
-/// <para><b>Known limitation, not fixed here</b>: the BASE (full-canvas) generation still tokenizes the raw prompt
-/// including every <c>&lt;segment:X&gt;...&lt;segment:end&gt;</c> substring verbatim — the same pre-existing behavior
-/// <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c> tags already have (no recipe pipeline strips region/segment tag text
-/// from what it sends to its own text encoder; each only reads <see cref="Regional"/> field
-/// data or thread its own <c>RegionalPlan</c> attention bias on top). A prompt with a large segment sub-prompt will
-/// lightly influence the base image too, not just the masked region. Fixing that is a separate, smaller item (make
-/// every regional-capable recipe pipeline tokenize <see cref="Engine.Features.PromptRegionParser.GlobalPrompt"/>
-/// instead of the raw prompt) — out of scope for landing the segment mechanism itself.</para>
+/// <para><b>Base-prompt tag-leak — fixed for segment/clear text (2026-08-11), see <see cref="StripSegmentText"/>.</b>
+/// <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c> still have the same class of leak (no recipe pipeline tokenizes
+/// <see cref="Engine.Features.PromptRegionParser.GlobalPrompt"/> for its base pass, each re-parses
+/// <c>request.Prompt</c> raw via <c>RegionalPromptResolver.HasRegionParts</c>) — that is a DIFFERENT fix, not
+/// covered here: those pipelines need the raw prompt string (region tags intact) to re-parse themselves, so
+/// stripping at <see cref="Services.ImagesService"/> the way this class does for segments would silently break
+/// five already-verified architectures (1.4's Flux.1/Z-Image/Ideogram4, 3.7's Flux.2/Krea2). Left as a separate,
+/// documented gap in <c>ROADMAP.md</c>.</para>
 ///
 /// <para>Covers CLIPSeg free-text matching only (<c>X</c> not starting with <c>yolo-</c>) — the YOLO closed-vocab
 /// detection path (<see cref="Vision.Detection"/>-shaped output, needs its own box→mask rasterization before this
@@ -42,6 +42,83 @@ public static class SegmentRefinement
     /// and 0 padding would crop exactly to the mask's raw bounds with no margin for the blurred edge to blend into.
     /// Matches SwarmUI core's own <c>SegmentMaskOversize</c> default.</summary>
     private const int DefaultMaskOversize = 16;
+
+    /// <summary>Tag prefixes that <see cref="PromptRegionParser.Parse"/> treats as opening a recognized section
+    /// other than segment/clear — mirrored here (not shared via the parser) so this stays a narrow, low-risk
+    /// addition rather than a change to the shared parser class the five already-verified regional architectures
+    /// depend on.</summary>
+    private static readonly string[] _otherRecognizedPrefixes =
+        ["region", "object", "extend", "base", "refiner", "pixeldecoder", "video", "videoswap"];
+
+    /// <summary>Returns <paramref name="prompt"/> with every <c>&lt;segment:X&gt;</c>/<c>&lt;clear:X&gt;</c> tag AND
+    /// the text that accumulates into it (up to whichever tag reopens a different recognized section, or the end
+    /// of the prompt) removed — everything else, including <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c> tags and
+    /// their own content, is preserved byte-for-byte so a pipeline that re-parses the result on its own (e.g.
+    /// <c>RegionalPromptResolver.HasRegionParts</c>) sees exactly what it would have seen from the untouched
+    /// prompt. Mirrors <see cref="PromptRegionParser.Parse"/>'s own split/accumulate loop rather than a regex,
+    /// because "what belongs to a segment" is defined by that accumulator rebinding, not by the tag's own span —
+    /// text after <c>&lt;segment:X&gt;</c> up to the next tag is the segment's sub-prompt, not the base prompt.
+    /// Case-sensitive prefix match, same as the parser itself (a stray-cased <c>&lt;Segment:&gt;</c> is untouched
+    /// here for the same reason <see cref="PromptRegionParser"/> would fall through and treat it as ordinary
+    /// prompt text, not a tag).</summary>
+    public static string StripSegmentText(string? prompt)
+    {
+        string text = prompt ?? "";
+        if (!text.Contains('<', StringComparison.Ordinal))
+        {
+            return text;
+        }
+        string[] pieces = text.Split('<');
+        System.Text.StringBuilder result = new();
+        bool skip = false; // true while accumulating inside a segment/clear section
+        bool first = true;
+        foreach (string piece in pieces)
+        {
+            if (first)
+            {
+                first = false;
+                result.Append(piece);
+                continue;
+            }
+            int end = piece.IndexOf('>', StringComparison.Ordinal);
+            if (end == -1)
+            {
+                // Unterminated "<...": the parser appends it to whichever section is currently accumulating.
+                if (!skip)
+                {
+                    result.Append('<').Append(piece);
+                }
+                continue;
+            }
+            string tag = piece[..end];
+            int cidAt = tag.LastIndexOf("//cid=", StringComparison.Ordinal);
+            if (cidAt >= 0)
+            {
+                tag = tag[..cidAt];
+            }
+            int colon = tag.IndexOf(':', StringComparison.Ordinal);
+            string prefix = colon < 0 ? tag : tag[..colon];
+            if (prefix is "segment" or "clear")
+            {
+                skip = true; // drop the tag itself and everything until the next recognized section
+                continue;
+            }
+            if (Array.IndexOf(_otherRecognizedPrefixes, prefix) >= 0)
+            {
+                skip = false;
+                result.Append('<').Append(piece); // preserve verbatim, including any //cid= suffix
+                continue;
+            }
+            // Unrecognized tag (weighting, <break>, <embed:...>): belongs to whichever section is active.
+            if (!skip)
+            {
+                result.Append('<').Append(piece);
+            }
+        }
+        // A trailing space left where a segment tag was cut out would tokenize differently from a prompt that
+        // never had one — trim so a segment-free vs. stripped-segment prompt encode identically.
+        return result.ToString().TrimEnd();
+    }
 
     /// <summary>True when <paramref name="prompt"/> carries at least one <c>&lt;segment:&gt;</c> part — cheap
     /// pre-check so a request with no segments never pays for a <see cref="PromptRegionParser"/> parse plus a

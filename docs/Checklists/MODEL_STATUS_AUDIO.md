@@ -269,7 +269,7 @@ section below; bring-up debugging notes live in [TROUBLESHOOTING.md](TROUBLESHOO
 |---|---|---|
 | **GPT-SoVITS v2** | ✅ | HuBERT 1.07e-5, s1 GPT + s2 SoVITS verified, EN end-to-end → 32 kHz on real `lj1995` weights. |
 | **Chatterbox** (ResembleAI) | ✅ | Full S3Gen rewrite (== CosyVoice2); enc 2.6e-6 / dec 4.4e-5 / vocoder 1.6e-5; end-to-end on CUDA. |
-| **CosyVoice 2** | ✅ | Full zero-shot clone e2e on real weights (Qwen LM `llm.pt` + OT-CFM `flow.pt` + HiFTNet `hift.pt`, default key maps correct); S3 tokenizer + CAM++ loaded from chatterbox `s3gen.safetensors` (frozen, identical — CosyVoice's own ONNX fuses Conv+BN / mangles names). Swarm-deployed + whisper word-perfect 2026-07-17. |
+| **CosyVoice 2** | ✅ | Full zero-shot clone e2e on real weights (Qwen LM `llm.pt` + OT-CFM `flow.pt` + HiFTNet `hift.pt`, default key maps correct); S3 tokenizer + CAM++ loaded from chatterbox `s3gen.safetensors` (frozen, identical — CosyVoice's own ONNX fuses Conv+BN / mangles names). Swarm-deployed + whisper word-perfect 2026-07-17. **Streaming DONE + Swarm-deployed 2026-08-11** (`CosyVoicePipeline.SynthesizeStream`, `tts_streaming` flag, native incremental `GenerateText2ImageWS` path — verified live through `swarmui.service`: cold+warm calls, 8-9 real chunks each, whisper-correct content, zero errors). True end-to-end real-time factor is ~8× (LM decode dominates, not the flow/vocoder stage, which alone tunes to ~3.45×). One accepted small artifact: an isolated single-word mispronunciation under adversarial content (~1.25% WER on the test utterance, non-cascading) inherent to the bounded-context-window design — confirmed via a parameter sweep + a decisive discriminator (an unbounded full-history variant avoids it, at disqualifying cost) that only full history resolves it, not a fixable tuning knob. |
 | **Qwen3-TTS** | ✅ | Bit-exact (RoPE split-half + byte-level tokenizer fixes). |
 | **Piper** (VITS) | ✅ | corr 0.9998 vs onnxruntime; 7 VITS bugs fixed (affect all VITS). **Swarm e2e word-correct 2026-07-13** — fixed the espeak language default (`en` British → the voice's `en-us` American; it was mispronouncing vowels). |
 | **Kokoro** (StyleTTS2) | ✅ | ~1e-4 on the CUDA path (added `audio_leaky_relu` / `audio_adain1d` kernels). **Swarm e2e word-correct 2026-07-13** — misaki-phoneme g2p + punctuation fix (was silently dropping words); canonical-`.pth` download fallback (was install-401). |
@@ -376,6 +376,12 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] AudioGen duration cap 45s → 30s (unroot-caused).
 - [ ] ZipVoice GPU-residency pass.
 - [ ] Per-provider unload endpoint.
+- [ ] CosyVoice2 streaming real-time-factor pass — currently ~8× real-time end to end, live-verified
+      2026-08-11 (`CosyVoicePipeline.SynthesizeStream`). The flow+vocoder stage alone already tunes to
+      ~3.45× (`CosyVoiceFlow.InferenceGrowingWindowed`, chunkSizeTokens=25/windowSizeTokens=150/
+      marginFrames=40); the LM's own autoregressive speech-token decode is the dominant remaining cost
+      (steady ~7.6-8.2s live per 25-token chunk vs. ~2.8-3.0s for that chunk's flow+vocoder work alone) —
+      that's the next lever, not further flow/vocoder tuning. First-chunk latency 25.7s warm / 36s cold.
 
 ## Details
 

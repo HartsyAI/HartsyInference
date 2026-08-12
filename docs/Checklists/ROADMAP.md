@@ -900,45 +900,63 @@ grinds).
   33.55→5.84 on a real SDXL generation, and the 2x2-tiled mosaic was visually inspected — clean tiling, no
   seam. SD1.5 shares `UNet.cs`/`Conv2D` so it likely comes free, but per this backlog's own verification rule
   that's not claimed until it's actually run.
-- [ ] **Segment-based regional prompting (`<segment:face>` etc., design pass 2026-08-11, zero code)** — the
-  SwarmUI-HartsyInference-Backend backlog's own item 3.2 framed this as "route a mask through the same
-  attention-bias/blend consumers as `<region:>`/`<object:>`." **That's the wrong mechanism, confirmed by
-  reading SwarmUI core's actual reference implementation** (`WorkflowGeneratorSteps.cs`'s
-  `RunSegmentationProcessing`, ComfyUI backend): `<region:>`/`<object:>` are a live per-step attention bias
-  applied WHILE the image denoises (no pixels needed yet). `<segment:>` is a **post-hoc crop-detect-denoise-
-  recomposite pass that only runs after a full base image already exists as pixels** — it cannot be
-  implemented as a pre-generation attention bias at all; there is no image to segment before one exists.
-  The real mechanism, in order: (1) run/finish a normal (or refiner) generation, decode to pixels; (2) for
-  each `<segment:X>` part, run YOLO detection (`X` starts `yolo-`) or CLIPSeg text-match (`X` is free text)
-  on the DECODED image to get a soft mask, OR-composite multiple pipe-separated `X|Y` sub-masks together;
-  (3) optionally invert (negative strength = "everything except this"); (4) blur (`SegmentMaskBlur`, default
-  10px) + grow (`SegmentMaskGrow`, default 16px, tapered corners); (5) crop the image+mask to the mask's
-  bounding box, oversized by `SegmentMaskOversize` (default 16px) — NOT a full-canvas operation, an
-  ADetailer-style small-region crop; (6) VAE-encode just that crop, run a masked/differential denoise on it
-  using the segment's OWN sub-prompt (positive+negative), with `Strength2` (default 0.6) acting as denoise
-  strength (`startStep = round(steps·(1-Strength2))`) and its own optional `SegmentSteps`/`SegmentCFGScale`/
-  per-region LoRA confinement (`ContextID`); (7) decode the crop back to pixels and recomposite it into the
-  full image at the original bounds, blended by the (blurred/grown) mask. Runs either right after base
-  generation or after the refiner pass (`SegmentApplyAfter`). **`<clear:>` (`ClearSegment`) is a separate,
-  simpler, unrelated mechanism** parsed alongside `Segment` but consumed at final save time only: CLIPSeg-
-  match + blur + threshold + `JoinImageWithAlpha` — cuts the matched region into an alpha-transparent hole
-  (text-targeted background removal), no denoise/regeneration involved at all; any implementation of this
-  item must treat it as its own small feature, not a variant of segment refinement.
-  <br>**What already exists in this engine**: `HartsyInference.Vision`'s `YoloSegPipeline`/`ClipSegPipeline`/
-  `SamPipeline` (weights confirmed local: `Models/yolov8/yolov8n-seg-folded.safetensors`,
-  `Models/clipseg/clipseg-rd64-refined-fp16-safetensors`, `Models/sam2/sam2_hiera_tiny.safetensors`), but
-  currently only wired into the standalone `VisionService`, never the image-generation path; per-architecture
-  masked/inpaint denoise (used by ordinary whole-canvas inpainting); `MaskBlendUtilities` for the final
-  masked recomposite. **What's missing**: the crop/bounds/oversize/recomposite orchestration layer itself (no
-  "denoise a masked sub-crop and paste it back" subroutine exists anywhere in the engine today — ordinary
-  inpaint denoises the FULL canvas under a mask, it doesn't crop first); the `SegmentModel`
-  separate-checkpoint-for-refinement path; the `<clear:>` alpha-cutout mechanism. **Dependency on the tiled-
-  VAE-encoder segfault (this doc, `VaeTiledEncoder`/`VaeTiling` item) is CONDITIONAL, not automatic** — the
-  oversized-bbox crop is usually small (face/object-sized), so most real uses would stay on the untiled VAE
-  encode path; only a segment whose bounding box covers most of a large-canvas generation would need the
-  blocked tiled path. Needs its own implementation pass sized like a real feature (crop/recomposite
-  subroutine + vision-pipeline wiring + new per-segment request fields), not a small addition to the existing
-  bbox regional-prompting infra.
+- [x] **Segment-based regional prompting (`<segment:face>` etc.) — CLIPSeg free-text slice DONE
+  2026-08-11, real-weight verified.** The design pass above correctly identified the mechanism
+  (post-hoc crop-detect-denoise-recomposite on decoded pixels, not a pre-generation attention bias)
+  but was wrong about what was missing: **the crop/bounds/oversize/recomposite orchestration layer
+  already existed** — `InpaintOnlyMasked.Prepare/Apply/Composite` (built for ordinary "inpaint only
+  masked") is exactly a "denoise a masked sub-crop and paste it back" subroutine; it just had no
+  caller for segment parts. Shipped: `Engine/Features/SegmentRefinement.cs` — `HasSegmentParts`/
+  `Apply`, wired into `Services/ImagesService.GenerateAsync` after the ordinary generate/inpaint
+  path, since `<segment:>` needs pixels that don't exist yet at request-build time. Uses
+  `PromptRegionParser`'s existing `Segment` parts + `ClipSegSegmenter` (source-resolution
+  thresholded mask) + `InpaintOnlyMasked`'s crop/generate/composite cycle verbatim. Real-weight
+  verified on Flux.1 Schnell (direct-engine test), then live-verified a second time through the
+  actual running SwarmUI service: same-seed baseline vs. `<segment:the red apple,0.95,0.5>a bright
+  blue apple`, log-confirmed `CLIPSeg 'the red apple': matched 71186 px (27.2% of image)`,
+  `Meta["segments_refined"] == 1`, the recomposited region visually and dramatically changed
+  (apple → blue) while the pear stayed recognizably the pear.
+  <br>**Still missing (deliberately out of scope for this slice)**: YOLO detector path (`yolo-`
+  prefix parses but is skipped with a warning, not wired); pipe-separated `X|Y` OR-composite masks;
+  `<clear:>` (`ClearSegment`) alpha-cutout — a separate, simpler, unrelated mechanism (CLIPSeg-match
+  + blur + threshold + alpha-hole, no denoise); `SegmentModel` separate-checkpoint-for-refinement
+  path; `SegmentSortOrder` (parsed into `Regional` but never consumed — segments always apply in
+  parse order today). Dependency on the tiled-VAE-encoder segfault is still conditional, not
+  automatic, for the same reason as before (oversized-bbox crops are usually small).
+  <br>**Base-prompt tag-leak, confirmed real via the live test's own numbers, not just theoretical**
+  (documented in `SegmentRefinement.cs`'s class doc, but not previously quantified): no recipe
+  pipeline stripped `<segment:X>...` tag text from what it sent to its own text encoder for the
+  BASE (full-canvas) pass. Measuring the live A/B pair's mean-abs-diff on a crop that's pure
+  untouched background (no apple, no pear) found ~40-47/255, not near-zero as a clean isolation
+  would predict — the literal segment tag text was reaching the tokenizer and lightly steering the
+  WHOLE base image, not just the masked region.
+  <br>**FIXED, real-weight + live re-verified (2026-08-11, same day).** `SegmentRefinement.StripSegmentText`
+  mirrors `PromptRegionParser`'s own split/accumulate grammar (not a regex — "what belongs to a
+  segment" is defined by the accumulator rebinding the parser itself uses) to drop
+  `<segment:>`/`<clear:>` tags and their accumulated text while preserving everything else —
+  `<region:>`/`<object:>` tags included — byte-for-byte. `ImagesService.GenerateAsync` tokenizes the
+  stripped prompt for the base pass, gated on `HasSegmentParts` so a segment-free request is
+  byte-identical to before (identity path, not re-serialization). Re-ran the exact same live A/B:
+  background-corner diff dropped from ~40-47/255 to **exactly 0.0**, masked-region diff (the
+  feature's actual job) still dominant and visually unchanged. 10 parser-level unit tests
+  (`SegmentRefinementStripTests.cs`) lock in the grammar edge cases (segment-then-region survives
+  the region tag verbatim, embed-inside-segment dropped, `//cid=N` suffix, the `<segment:end>`
+  literal-text quirk, no-op on a tag-free prompt). Commit `31ac81ed`.
+  <br>**`<region:>`/`<object:>` have the same class of leak — deliberately NOT fixed by this
+  change.** Those pipelines each re-parse `request.Prompt` raw themselves
+  (`RegionalPromptResolver.HasRegionParts`) to build their own live per-step attention-bias plan —
+  handing them a pre-stripped prompt would make that check return false and silently break regional
+  prompting on all five already-shipped architectures (1.4's Flux.1/Z-Image/Ideogram4, 3.7's
+  Flux.2/Krea2). The real fix there is per-pipeline (tokenize `PromptRegionParser.GlobalPrompt` for
+  the base stream while still handing `Resolve` the raw prompt) and needs its own re-verification
+  pass across all five — a separate, larger item, not bundled here.
+  <br>**Syntax note, easy to get backwards**: `<segment:query,Strength2,Strength>` — the mask
+  threshold (`Strength`, default 0.5) comes LAST, the denoise/creativity strength (`Strength2`,
+  default 0.6) comes second. There is no `<segment:end>` closer (unlike `<region:end>`) — writing
+  one parses as a harmless second segment matching the literal text "end". Schnell's 4-step
+  schedule at the default `Strength2=0.6` only runs `steps - round(steps·0.6)` = 2 real denoise
+  steps — enough to shift texture but not color; this reads as "wiring broken" but isn't, it's
+  scheduling.
 - [ ] **CPU-offloaded activations** — weight offload works because the host `Tensor` is always the
   authoritative copy (`PreloadWeights`/`FreeWeights` just add/drop a GPU-side cache entry); activations have
   no host-authoritative copy today (`FreeActivations` discards the device buffer outright, no D2H anywhere
@@ -958,6 +976,32 @@ grinds).
   1536x1536 SDXL img2img; crash site is the driver itself, not managed code — this dtype-correctness fix is
   the first caller to ever feed the encoder a dtype-matched, BF16, tile). The wiring was reverted pending a
   dedicated CUDA-driver-level investigation; the class itself has zero production callers today.
+- [x] **SDXL hires-fix / 2-pass upscale (`RefinerUpscale != 1`, PostApply hand-off) — DONE 2026-08-11 for
+  the official-refiner-checkpoint case, real-weight verified.** Was tracked as "blocked" on the
+  `VaeTiledEncoder` segfault directly above — that assumption was wrong: the crash is specifically the
+  BF16 cuDNN conv fast path engaging on a dtype-matched TILED tile; SDXL's VAE was never in the BF16-
+  adoption list (still runs F32), and PostApply uses the SAME untiled `VaeEncoder.Encode` ordinary
+  SDXL img2img has used since Tier 0 — outside the crash's trigger condition entirely. `SdxlRecipePipeline`
+  previously downgraded every refiner request to StepSwap (mid-loop UNet swap, same resolution
+  throughout) regardless of the resolved method — `PostApply` is the resolver's own default and was
+  silently never served. Turned out to need no new denoise-loop code: `SdxlRefinerPipeline` (a full
+  pixel-roundtrip CLIP-G-only/aesthetic-score refiner pass) already existed with zero callers and zero
+  test coverage anywhere in the repo. Wired: base pass runs to completion → resize via
+  `TorchResize.BicubicAntialiasChw` (rounded to the nearest multiple of 8) → `SdxlRefinerPipeline.RefineFromTokens`
+  redenoises the whole refiner schedule. **Found and fixed a real, pre-existing bug along the way**:
+  `SdxlRefinerLoader` was converting the refiner checkpoint through the BASE `SdxlCheckpointConverter`
+  instead of the dedicated `SdxlRefinerCheckpointConverter` (the refiner UNet has a genuinely different
+  4-level block layout) — a bug that predates this change and affected StepSwap too, just never caught
+  since neither hand-off had any real-weight test before this. Real-weight verified on the official
+  `stabilityai/stable-diffusion-xl-refiner-1.0` checkpoint: 512→768 (1.5x, exact) and 512→664 (1.3x,
+  exercises the rounding path), both visually confirmed same composition at higher resolution with
+  refined structural detail, not degraded. **Not supported yet**: a base-architecture checkpoint as
+  the refiner model (the common "same checkpoint, just upscale" hires-fix case) now fails with a clear
+  `NotSupportedException` instead of a cryptic shape-mismatch — that needs a different mechanism (a
+  second `GenerateFromTokens` img2img call on the base pipeline's own UNet, no refiner UNet load at
+  all), not built in this slice. `refinerupscalemethod` stays unconsumed (extension's own
+  `HonoredComfyParams` comment) — this hardcodes one resize algorithm rather than reading a
+  user-selectable one.
 
 ## 7. Robotics models (new modality — greenfield)
 

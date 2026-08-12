@@ -363,6 +363,15 @@ though the level defect is now traced upstream of them.
       *Landmine:* `Fp8InputScaleFactor` must be carried onto the merged tensor or the weight silently drops off the
       static-input-scale fast path (~188 ms/step). *Landmine:* merged weights are written back at the checkpoint dtype,
       so a BF16 base resolves only ~0.4% of magnitude — a probe delta below ~1e-3 rounds away entirely.
+- [x] **Region-targeted reference conditioning — DONE 2026-08-11.** `<refcrop:N,query[,threshold]>`
+      auto-crops reference image N (1-based, matching H3's own `<Picture N>` numbering) to a
+      CLIPSeg-matched region before `EncodeReferenceImage`. No packing/timestep changes needed —
+      `EncodeReferenceImage` already preserves the reference's own aspect ratio (scales down-only, no
+      canvas match), so a cropped region is just a differently-shaped `ImageData` into the same call.
+      Real-weight verified on the ref2va checkpoint: a synthetic reference cropped and visually
+      confirmed correct, then a same-seed A/B (cropped vs. whole reference) showing a measurable and
+      visually confirmed difference in the output. Full design/syntax rationale:
+      [`docs/Research/MINIMAX_H3.md`](../Research/MINIMAX_H3.md#region-targeted-reference-conditioning-tier-38--done-real-weight-verified-2026-08-11).
 - [ ] **int8 `convrot` is the last unsupported variant that matters.** Comfy-Org publishes **five DiT builds per task**
       (ten total — `bf16`, `int8_convrot`, `pruned_bf16`, `pruned_fp8_scaled`, `pruned_int8_convrot`, for each of fl2va
       and ref2va), not four; the

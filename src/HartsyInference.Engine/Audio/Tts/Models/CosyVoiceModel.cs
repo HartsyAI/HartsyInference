@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Audio.Pipelines;
+using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -65,7 +66,7 @@ internal static class CosyVoiceModel
                 + $"{(lm.Placement is not null ? ", layer-split across " + lm.Placement.Stages.Count + " GPUs" : "")}.");
 
             IDisposable?[] keep = [pipeline, llmLoader, flowLoader, hiftLoader, s3genLoader];
-            return new TtsRunner(config.SampleRate, (backend, job) =>
+            float[] Synth(IBackend backend, TtsJob job)
             {
                 if (job.ReferenceMono24k is null || job.ReferenceMono24k.Length == 0)
                 {
@@ -77,7 +78,20 @@ internal static class CosyVoiceModel
                 // The pipeline derives the S3 mel, CAM++ fbank, and flow mel from the raw reference itself.
                 return pipeline.Synthesize(backend, textTokenIds, referenceAudio: job.ReferenceMono24k,
                     referenceSampleRate: 24_000, referenceTextTokens: referenceTextTokens, seed: job.Seed);
-            }, keep);
+            }
+            IAsyncEnumerable<AudioChunk> Stream(IBackend backend, TtsJob job, CancellationToken cancel)
+            {
+                if (job.ReferenceMono24k is null || job.ReferenceMono24k.Length == 0)
+                {
+                    throw new InvalidOperationException(
+                        "CosyVoice 2 is zero-shot — it needs a voice reference. Supply a short WAV clip as the request's reference.");
+                }
+                int[] textTokenIds = [.. tokenizer.EncodeRawByteLevel(job.Text)];
+                int[] referenceTextTokens = string.IsNullOrWhiteSpace(job.RefText) ? [] : [.. tokenizer.EncodeRawByteLevel(job.RefText)];
+                return pipeline.SynthesizeStream(backend, textTokenIds, referenceAudio: job.ReferenceMono24k,
+                    referenceSampleRate: 24_000, referenceTextTokens: referenceTextTokens, seed: job.Seed, cancel: cancel);
+            }
+            return new StreamingTtsRunner(config.SampleRate, Synth, Stream, keep);
         },
     };
 
