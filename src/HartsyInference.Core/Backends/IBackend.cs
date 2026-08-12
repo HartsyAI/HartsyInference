@@ -1057,6 +1057,100 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>Start of the attended window along one axis, using NATTEN's rule: the window is always exactly
+    /// <paramref name="kernel"/> wide and slides inward at the borders rather than being truncated or zero-padded,
+    /// so every query attends the same number of keys. Callers must pre-clamp <paramref name="kernel"/> to
+    /// <paramref name="length"/>.</summary>
+    static int Na3dWindowStart(int index, int length, int kernel)
+    {
+        int start = index - kernel / 2;
+        int last = length - kernel;
+        if (start < 0) start = 0;
+        if (start > last) start = last;
+        return start;
+    }
+
+    /// <summary>3D neighborhood attention over <c>[batch, T, H, W, heads, headDim]</c> — each query attends a local
+    /// <c>kernelT×kernelH×kernelW</c> window instead of the whole grid. Used by the LTX-2.5 diffusion video decoder.</summary>
+    /// <param name="scale">Applied to the scores; pass 1.0 when the caller has already folded it into Q (the decoder
+    /// folds it into the query RMS-norm weight, which commutes with the rotation).</param>
+    unsafe void Na3d(Tensor output, Tensor q, Tensor k, Tensor v, int kernelT, int kernelH, int kernelW, float scale)
+    {
+        if (output.DType != DType.F32 || q.DType != DType.F32 || k.DType != DType.F32 || v.DType != DType.F32)
+            throw new NotSupportedException($"Na3d default fallback only supports F32 — got output={output.DType}, q={q.DType}, k={k.DType}, v={v.DType}.");
+        if (q.Shape.Rank != 6)
+            throw new ArgumentException($"Na3d expects [batch, T, H, W, heads, headDim]; got {q.Shape}.", nameof(q));
+        if (!q.Shape.Equals(k.Shape) || !q.Shape.Equals(v.Shape) || !q.Shape.Equals(output.Shape))
+            throw new ArgumentException($"Na3d requires identical shapes; got q={q.Shape}, k={k.Shape}, v={v.Shape}, output={output.Shape}.");
+        if (kernelT <= 0 || kernelH <= 0 || kernelW <= 0)
+            throw new ArgumentException($"Na3d kernel must be positive; got ({kernelT}, {kernelH}, {kernelW}).");
+
+        int batch = (int)q.Shape[0], dimT = (int)q.Shape[1], dimH = (int)q.Shape[2], dimW = (int)q.Shape[3];
+        int heads = (int)q.Shape[4], headDim = (int)q.Shape[5];
+        // An axis shorter than its kernel collapses to the whole axis, matching the reference.
+        int kt = Math.Min(kernelT, dimT), kh = Math.Min(kernelH, dimH), kw = Math.Min(kernelW, dimW);
+
+        float* qp = (float*)q.DataPointer, kp = (float*)k.DataPointer;
+        float* vp = (float*)v.DataPointer, op = (float*)output.DataPointer;
+        long headStride = headDim, wStride = (long)heads * headDim;
+        long hStride = dimW * wStride, tStride = (long)dimH * hStride, bStride = (long)dimT * tStride;
+        float[] scores = new float[kt * kh * kw];
+
+        for (int b = 0; b < batch; b++)
+        for (int it = 0; it < dimT; it++)
+        {
+            int t0 = Na3dWindowStart(it, dimT, kt);
+            for (int ih = 0; ih < dimH; ih++)
+            {
+                int h0 = Na3dWindowStart(ih, dimH, kh);
+                for (int iw = 0; iw < dimW; iw++)
+                {
+                    int w0 = Na3dWindowStart(iw, dimW, kw);
+                    long qBase = b * bStride + it * tStride + ih * hStride + iw * wStride;
+                    for (int head = 0; head < heads; head++)
+                    {
+                        long qOff = qBase + head * headStride;
+                        float max = float.NegativeInfinity;
+                        int n = 0;
+                        for (int wt = 0; wt < kt; wt++)
+                        for (int wh = 0; wh < kh; wh++)
+                        for (int ww = 0; ww < kw; ww++)
+                        {
+                            long kOff = b * bStride + (t0 + wt) * tStride + (h0 + wh) * hStride
+                                + (w0 + ww) * wStride + head * headStride;
+                            float dot = 0f;
+                            for (int d = 0; d < headDim; d++) dot += qp[qOff + d] * kp[kOff + d];
+                            dot *= scale;
+                            scores[n++] = dot;
+                            if (dot > max) max = dot;
+                        }
+
+                        float sum = 0f;
+                        for (int i = 0; i < n; i++)
+                        {
+                            float e = MathF.Exp(scores[i] - max);
+                            scores[i] = e;
+                            sum += e;
+                        }
+                        float inv = sum > 0f ? 1f / sum : 0f;
+
+                        for (int d = 0; d < headDim; d++) op[qOff + d] = 0f;
+                        n = 0;
+                        for (int wt = 0; wt < kt; wt++)
+                        for (int wh = 0; wh < kh; wh++)
+                        for (int ww = 0; ww < kw; ww++)
+                        {
+                            float weight = scores[n++] * inv;
+                            long vOff = b * bStride + (t0 + wt) * tStride + (h0 + wh) * hStride
+                                + (w0 + ww) * wStride + head * headStride;
+                            for (int d = 0; d < headDim; d++) op[qOff + d] += weight * vp[vOff + d];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// <summary>LTX-2 "split" rotary (rotate-half, per-head cos), in-place on <c>x [seqLen,dim]</c>; matches <c>LtxVideo2Rope</c>.</summary>
     unsafe void Ltx2SplitRope(Tensor x, Tensor cos, Tensor sin, int seqLen, int numHeads, int headDim)
     {
