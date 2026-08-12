@@ -72,6 +72,11 @@ public static class TestPaths
             Path.Combine(ModelsDir, "Stable-Diffusion", "SDXL", "Juggernaut_XL_-_Ragnarok_by_RunDiffusion.safetensors"),
             Path.Combine(ModelsDir, "Stable-Diffusion", "SDXL", "sd_xl_base_1.0.safetensors"));
         public static string DiffusersDir => Resolve("SDXL_MODEL_DIR",         Path.Combine(ModelsDir, "Stable-Diffusion", "SDXL"));
+        /// <summary>Official <c>stabilityai/stable-diffusion-xl-refiner-1.0</c> UNet checkpoint (CLIP-G-only,
+        /// aesthetic-score ADM conditioning). Not bundled by default (~6 GB); download temporarily for refiner
+        /// tests, delete after (this repo's own disk-budget convention). Override with SDXL_REFINER_SINGLE_FILE_PATH.</summary>
+        public static string RefinerSingleFile => Resolve("SDXL_REFINER_SINGLE_FILE_PATH",
+            Path.Combine(ModelsDir, "Stable-Diffusion", "SDXL", "sd_xl_refiner_1.0.safetensors"));
     }
 
     /// <summary>SD3 paths. Assets are not bundled — tests skip when missing.</summary>

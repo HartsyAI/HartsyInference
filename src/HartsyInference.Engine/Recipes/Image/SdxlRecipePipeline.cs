@@ -1,11 +1,13 @@
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Adapters;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -94,7 +96,14 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
             CacheIpAdapter,
             cancel);
 
-        RefinerSwapConfig? refiner = ResolveRefiner(request);
+        // Two hand-off methods, resolved once: "StepSwap" stays a single GenerateFromTokens call (base+refiner
+        // share one in-flight latent, same resolution throughout); anything else — "PostApply" is the resolver's
+        // own default — runs the base pass alone here, then ApplyPostRefiner does a full pixel-space roundtrip
+        // afterward, which is what lets it change resolution (Tier 3.1 hires-fix).
+        RefinerResolver.RefinerSpec? refinerSpec = RefinerResolver.Resolve(
+            request.Refiner, request.Steps ?? SdxlRecipe.FamilyDefaults.Steps, request.CfgScale ?? SdxlRecipe.FamilyDefaults.CfgScale);
+        bool postApply = refinerSpec is not null && !string.Equals(refinerSpec.Method, "StepSwap", StringComparison.OrdinalIgnoreCase);
+        RefinerSwapConfig? stepSwapRefiner = postApply ? null : BuildStepSwapConfig(refinerSpec);
         TextToImageRequest inner = BuildInner(request, negative, plan);
 
         int totalSteps = request.Steps ?? SdxlRecipe.FamilyDefaults.Steps;
@@ -102,9 +111,24 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
             tokensL, negL, tokensG, negG, eosG, negEosG, inner,
             p => progress?.Report(new StepPreview { Step = p.Step, TotalSteps = totalSteps }),
             controlNets: plan.ControlNets?.Conditionings,
-            refiner: refiner,
+            refiner: stepSwapRefiner,
             ipAdapters: plan.IpAdapters?.Conditionings,
             conditioningSchedule: plan.Conditioning);
+
+        Dictionary<string, string> meta = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["arch"] = "sdxl",
+            ["size"] = $"{width}x{height}",
+            ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
+            ["steps"] = totalSteps.ToString(CultureInfo.InvariantCulture),
+        };
+
+        if (postApply && refinerSpec is not null)
+        {
+            (rgb, width, height) = ApplyPostRefiner(refinerSpec, rgb, width, height, strippedPrompt, strippedNegative, tokensG, negG, eosG, negEosG, usedSeed);
+            meta["refiner_post_apply"] = refinerSpec.Model;
+            meta["size"] = $"{width}x{height}";
+        }
 
         return new ImageResult
         {
@@ -112,13 +136,7 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
             Width = width,
             Height = height,
             Seed = usedSeed,
-            Meta = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ["arch"] = "sdxl",
-                ["size"] = $"{width}x{height}",
-                ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
-                ["steps"] = totalSteps.ToString(CultureInfo.InvariantCulture),
-            },
+            Meta = meta,
         };
     }
 
@@ -139,29 +157,116 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         return RecipeImg2ImgBinder.Apply(inner, plan.Img2Img);
     }
 
-    /// <summary>Resolves the refiner request into a mid-loop StepSwap config, loading (and caching) the refiner UNet.
-    /// PostApply — the VAE-round-trip variant — is not wired; the request is served as StepSwap with a log note.</summary>
-    private RefinerSwapConfig? ResolveRefiner(ImageRequest request)
+    /// <summary>Builds the mid-loop StepSwap config for a "StepSwap"-method refiner spec, loading (and caching)
+    /// the refiner UNet. Returns null for a null spec (no refiner) — the PostApply case never reaches here, its
+    /// spec is handled by <see cref="ApplyPostRefiner"/> after the base pass instead.</summary>
+    private RefinerSwapConfig? BuildStepSwapConfig(RefinerResolver.RefinerSpec? spec)
     {
-        RefinerResolver.RefinerSpec? spec = RefinerResolver.Resolve(request.Refiner, request.Steps ?? SdxlRecipe.FamilyDefaults.Steps, request.CfgScale ?? SdxlRecipe.FamilyDefaults.CfgScale);
         if (spec is null)
         {
             return null;
         }
-        if (!string.Equals(spec.Method, "StepSwap", StringComparison.OrdinalIgnoreCase))
-        {
-            Logs.Info($"[SdxlRecipePipeline] Refiner method '{spec.Method}' is served as StepSwap (mid-loop UNet swap); PostApply is not wired.");
-        }
         if (spec.Upscale is > 1f)
         {
-            Logs.Warning($"[SdxlRecipePipeline] Refiner upscale {spec.Upscale} is ignored — StepSwap keeps the base latent resolution.");
+            Logs.Warning($"[SdxlRecipePipeline] Refiner upscale {spec.Upscale} is ignored — StepSwap keeps the base latent resolution. Use RefinerMethod=PostApply for hires-fix.");
         }
-        if (!_refinerCache.TryGetValue(spec.Model, out SdxlRefinerEntry? entry))
-        {
-            entry = SdxlRefinerLoader.Load(spec.Model);
-            _refinerCache[spec.Model] = entry;
-        }
+        SdxlRefinerEntry entry = LoadRefinerEntry(spec.Model);
         return new RefinerSwapConfig { RefinerUnet = entry.Unet, Strength = spec.Strength };
+    }
+
+    /// <summary>Tier 3.1 hires-fix: the PostApply hand-off. Resizes the base pass's decoded pixels (only when
+    /// <see cref="RefinerResolver.RefinerSpec.Upscale"/> != 1 — same tensor, no-op resize otherwise), VAE-encodes
+    /// the result through the SAME untiled encoder ordinary img2img already uses (SDXL's VAE runs F32 — outside
+    /// the BF16 cuDNN fast-path the tiled encoder's segfault requires, see ROADMAP.md), and redenoises the WHOLE
+    /// refiner schedule (<see cref="SdxlRefinerPipeline"/>, <c>Strength</c> = the resolved Control fraction) with
+    /// the refiner UNet's own CLIP-G-only/aesthetic-score conditioning. Reuses the base pass's own CLIP-G tokens
+    /// (no separate <c>&lt;refiner&gt;</c> prompt support in this first slice — StepSwap's
+    /// <see cref="RefinerSwapConfig.RefinerConditioning"/> override has no PostApply equivalent yet).</summary>
+    private (byte[] rgb, int width, int height) ApplyPostRefiner(
+        RefinerResolver.RefinerSpec spec, byte[] baseRgb, int baseWidth, int baseHeight,
+        string strippedPrompt, string strippedNegative, int[] tokensG, int[] negG, int eosG, int negEosG, int seed)
+    {
+        SdxlRefinerEntry entry = LoadRefinerEntry(spec.Model);
+        int newWidth = spec.Upscale is > 0f and not 1f ? RoundToMultipleOf8(baseWidth * spec.Upscale) : baseWidth;
+        int newHeight = spec.Upscale is > 0f and not 1f ? RoundToMultipleOf8(baseHeight * spec.Upscale) : baseHeight;
+        Tensor resized = ResizeRgbToSourceTensor(baseRgb, baseWidth, baseHeight, newWidth, newHeight);
+
+        // VaeEncoder is guaranteed non-null: SdxlRecipe always constructs the base pipeline with one (SDXL img2img
+        // has been supported since Tier 0), so every SdxlRecipePipeline instance has it.
+        SdxlRefinerPipeline refinerPipeline = new SdxlRefinerPipeline(
+            _backend, _clipG, entry.Unet, _pipeline.VaeEncoder!, _pipeline.VaeDecoder);
+        SdxlRefinerRequest refinerRequest = new SdxlRefinerRequest
+        {
+            Prompt = strippedPrompt,
+            NegativePrompt = strippedNegative,
+            SourceImage = resized,
+            Strength = spec.Strength,
+            Steps = spec.Steps,
+            CfgScale = spec.CfgScale,
+            Width = newWidth,
+            Height = newHeight,
+            Seed = seed,
+        };
+        Logs.Info($"[SdxlRecipePipeline] PostApply refiner: {baseWidth}x{baseHeight} -> {newWidth}x{newHeight}, strength={spec.Strength:F2}.");
+        (byte[] rgb, int width, int height, int _) = refinerPipeline.RefineFromTokens(tokensG, negG, eosG, negEosG, refinerRequest);
+        resized.Dispose();
+        return (rgb, width, height);
+    }
+
+    /// <summary>Loads (and caches) the refiner UNet for <paramref name="model"/> — shared by both hand-off methods.</summary>
+    private SdxlRefinerEntry LoadRefinerEntry(string model)
+    {
+        if (!_refinerCache.TryGetValue(model, out SdxlRefinerEntry? entry))
+        {
+            entry = SdxlRefinerLoader.Load(model);
+            _refinerCache[model] = entry;
+        }
+        return entry;
+    }
+
+    /// <summary>Nearest multiple of 8, minimum 8 — SDXL's VAE downsamples by 8x, so both dimensions must divide
+    /// evenly for the latent shape to be exact.</summary>
+    private static int RoundToMultipleOf8(double v) => Math.Max(8, (int)(Math.Round(v / 8.0) * 8.0));
+
+    /// <summary>Resizes RGB bytes to a new resolution and converts to a VAE-input tensor <c>[1,3,dstH,dstW]</c> in
+    /// <c>[-1,1]</c>. Same-size case skips the resize pass entirely (byte-identical to
+    /// <see cref="Diffusion.Utilities.ImagePostProcessor.RgbBytesToTensor"/>). The resize itself mirrors
+    /// <c>SeedVr2Preprocess</c>'s own <c>TorchResize.BicubicAntialiasChw</c> usage: build [0,1] CHW planes, resize,
+    /// then map to [-1,1] — this hardcodes one resize algorithm rather than reading a user-selectable one (Comfy's
+    /// <c>refinerupscalemethod</c> stays unconsumed for that reason, see <c>HonoredComfyParams</c>'s own comment
+    /// in the extension repo).</summary>
+    private static Tensor ResizeRgbToSourceTensor(byte[] rgb, int srcW, int srcH, int dstW, int dstH)
+    {
+        if (srcW == dstW && srcH == dstH)
+        {
+            return ImagePostProcessor.RgbBytesToTensor(rgb, srcW, srcH);
+        }
+        float[] srcPlanes = new float[3 * srcH * srcW];
+        for (int y = 0; y < srcH; y++)
+        {
+            int rowBase = y * srcW;
+            for (int x = 0; x < srcW; x++)
+            {
+                int px = (rowBase + x) * 3;
+                int planeIdx = rowBase + x;
+                srcPlanes[planeIdx] = rgb[px] * (1f / 255f);
+                srcPlanes[srcH * srcW + planeIdx] = rgb[px + 1] * (1f / 255f);
+                srcPlanes[2 * srcH * srcW + planeIdx] = rgb[px + 2] * (1f / 255f);
+            }
+        }
+        float[] dstPlanes = new float[3 * dstH * dstW];
+        TorchResize.BicubicAntialiasChw(srcPlanes, 3, srcH, srcW, dstPlanes, dstH, dstW);
+
+        Tensor image = new Tensor(new TensorShape(1, 3, dstH, dstW), DType.F32);
+        Span<float> dst = image.AsSpan<float>();
+        for (int i = 0; i < dstPlanes.Length; i++)
+        {
+            // Clamp then map [0,1] -> [-1,1], matching ImagePostProcessor.RgbBytesToTensor's convention. Bicubic
+            // overshoot is real (TorchResize's own doc: PyTorch keeps it) — clamp here the same way the source
+            // byte path implicitly does (a byte is already clamped to [0,255] before this method ever sees it).
+            dst[i] = Math.Clamp(dstPlanes[i], 0f, 1f) * 2f - 1f;
+        }
+        return image;
     }
 
     /// <summary>Cached IP-Adapter entry for <paramref name="path"/>, or null when not loaded yet.</summary>

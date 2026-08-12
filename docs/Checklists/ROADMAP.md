@@ -976,6 +976,32 @@ grinds).
   1536x1536 SDXL img2img; crash site is the driver itself, not managed code — this dtype-correctness fix is
   the first caller to ever feed the encoder a dtype-matched, BF16, tile). The wiring was reverted pending a
   dedicated CUDA-driver-level investigation; the class itself has zero production callers today.
+- [x] **SDXL hires-fix / 2-pass upscale (`RefinerUpscale != 1`, PostApply hand-off) — DONE 2026-08-11 for
+  the official-refiner-checkpoint case, real-weight verified.** Was tracked as "blocked" on the
+  `VaeTiledEncoder` segfault directly above — that assumption was wrong: the crash is specifically the
+  BF16 cuDNN conv fast path engaging on a dtype-matched TILED tile; SDXL's VAE was never in the BF16-
+  adoption list (still runs F32), and PostApply uses the SAME untiled `VaeEncoder.Encode` ordinary
+  SDXL img2img has used since Tier 0 — outside the crash's trigger condition entirely. `SdxlRecipePipeline`
+  previously downgraded every refiner request to StepSwap (mid-loop UNet swap, same resolution
+  throughout) regardless of the resolved method — `PostApply` is the resolver's own default and was
+  silently never served. Turned out to need no new denoise-loop code: `SdxlRefinerPipeline` (a full
+  pixel-roundtrip CLIP-G-only/aesthetic-score refiner pass) already existed with zero callers and zero
+  test coverage anywhere in the repo. Wired: base pass runs to completion → resize via
+  `TorchResize.BicubicAntialiasChw` (rounded to the nearest multiple of 8) → `SdxlRefinerPipeline.RefineFromTokens`
+  redenoises the whole refiner schedule. **Found and fixed a real, pre-existing bug along the way**:
+  `SdxlRefinerLoader` was converting the refiner checkpoint through the BASE `SdxlCheckpointConverter`
+  instead of the dedicated `SdxlRefinerCheckpointConverter` (the refiner UNet has a genuinely different
+  4-level block layout) — a bug that predates this change and affected StepSwap too, just never caught
+  since neither hand-off had any real-weight test before this. Real-weight verified on the official
+  `stabilityai/stable-diffusion-xl-refiner-1.0` checkpoint: 512→768 (1.5x, exact) and 512→664 (1.3x,
+  exercises the rounding path), both visually confirmed same composition at higher resolution with
+  refined structural detail, not degraded. **Not supported yet**: a base-architecture checkpoint as
+  the refiner model (the common "same checkpoint, just upscale" hires-fix case) now fails with a clear
+  `NotSupportedException` instead of a cryptic shape-mismatch — that needs a different mechanism (a
+  second `GenerateFromTokens` img2img call on the base pipeline's own UNet, no refiner UNet load at
+  all), not built in this slice. `refinerupscalemethod` stays unconsumed (extension's own
+  `HonoredComfyParams` comment) — this hardcodes one resize algorithm rather than reading a
+  user-selectable one.
 
 ## 7. Robotics models (new modality — greenfield)
 

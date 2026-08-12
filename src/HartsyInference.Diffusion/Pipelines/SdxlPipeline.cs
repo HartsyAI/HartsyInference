@@ -40,6 +40,15 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
     private Tensor? _cachedTextEmb;
     private Tensor? _cachedPooled;
 
+    /// <summary>The VAE encoder, when constructed with one — null for the text-to-image-only overload. Exposed
+    /// (by convention this pipeline does not own it, see <see cref="DiffusionPipelineBase"/>'s class doc) so a
+    /// caller can build a cross-pipeline PostApply refiner (<see cref="SdxlRefinerPipeline"/>) that reuses these
+    /// already-loaded weights instead of loading its own copy of the SDXL VAE.</summary>
+    public VaeEncoder? VaeEncoder => _vaeEncoder;
+
+    /// <summary>The VAE decoder. Exposed for the same cross-pipeline-reuse reason as <see cref="VaeEncoder"/>.</summary>
+    public VaeDecoder VaeDecoder => _vaeDecoder;
+
     /// <summary>Creates a new SDXL pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     public SdxlPipeline(IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG, UNet unet, VaeDecoder vaeDecoder, float vaeScalingFactor = 0.13025f)
         : this(backend, clipL, clipG, unet, vaeDecoder, vaeEncoder: null, vaeScalingFactor)

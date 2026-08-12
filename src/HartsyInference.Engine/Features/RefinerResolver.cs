@@ -30,7 +30,9 @@ public static class RefinerResolver
         /// <summary>Latent upscale factor applied before the refiner pass (1 = none).</summary>
         public required float Upscale { get; init; }
 
-        /// <summary>Hand-off method; "PostApply" is the only one supported — StepSwap variants are refused upfront.</summary>
+        /// <summary>Hand-off method: <c>"StepSwap"</c> (mid-loop UNet swap, same resolution throughout) or
+        /// <c>"PostApply"</c> (full pixel-space roundtrip, the resolver's own default below — the only one that
+        /// can change resolution, Tier 3.1 hires-fix). Both are wired in <see cref="Recipes.Image.SdxlRecipePipeline"/>.</summary>
         public required string Method { get; init; }
     }
 
