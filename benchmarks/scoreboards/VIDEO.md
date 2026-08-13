@@ -32,6 +32,14 @@ how to reproduce these numbers. Standard workload (unless noted): 25 frames, 512
 Row count: 8. Bold marks the faster (lower-wall-clock) side of each head-to-head comparison; rows with no
 ComfyUI baseline are left unbolded.
 
+The LTX-2.5 row is the last SwarmUI-warm measurement. Two changes have landed since, both measured on the CLI
+harness with interleaved 4-rep campaigns: **grouped Linear −41.6 ms/step** and the **fused int8 mma GEMM −10.5
+ms/step** (1459.6 → 1406.8 ms/step, ≈ −1.6 s over 30 steps). Neither is folded into the row: extrapolating one
+harness's delta onto another's wall clock is how a scoreboard starts lying. Re-run `bench_ltx25.py` (after
+checking the deployed extension DLL against engine HEAD) to refresh it.
+
+**Before adding or trusting any row or delta here, read "The harness's noise floor" below.**
+
 ## LTX-2.5 22B dev — first Comfy-vs-Hartsy head-to-head (2026-08-12)
 
 † Off-standard workload, not the table's usual 25f/512×320/20-step smoke test — LTX-2.5 is a 22B model
@@ -291,6 +299,315 @@ mma), register double-buffering of fragments, and per-shape tile tuning.
 **The kernel is left in the tree but is NOT wired into any inference path** (nothing calls
 `LaunchInt8MmaGemmDequant`) — it is a correct, unit-pinned foundation for that work, not a regression risk.
 Anyone resuming: the target to beat is the *pair*, not the bare GEMM.
+
+### What is actually inside `Linear` — measured, and the next lever (2026-08-13)
+
+`Linear` is one profiler label over FOUR kernels (ConvRot → per-row int8 quant → cuBLASLt IMMA → dequant
+epilogue), which is why every estimate of its internals this session was guesswork. `Int8.Quant` /
+`Int8.Gemm` / `Int8.Dequant` sub-scopes now exist (`HARTSY_PROFILE_FINE=1`; thousands of pushes per step, so
+they are off in a normal profile run). Measured per step (sync-inflated 1.23×; deflated in the last column):
+
+| sub-op | calls/step | ms/step | deflated |
+|---|---:|---:|---:|
+| `Int8.Gemm` | 3021 | 586.8 | ~477 |
+| `Int8.Dequant` | 3021 | 202.8 | ~165 |
+| `Int8.Quant` | 3021 | 199.9 | ~162 |
+
+`Int8.Dequant` at 202.8 ms independently confirms the 203 GB/step int32 round-trip model, and `Int8.Gemm` at
+~477 ms matches 283 TFLOP/step ÷ 545 TOPS. The GEMM is at the hardware wall; the other ~327 ms is scaffolding.
+
+### The fused mma GEMM: three limiter hypotheses tested and refuted (2026-08-13)
+
+Target, from the isolated timings (`Int8MmaGemmTests`, min-of-batches):
+
+| shape | fused mma | pair total | cuBLASLt GEMM alone | dequant share of pair |
+|---|---:|---:|---:|---:|
+| ffn_up 4992×16384×4096 | 288 | 398 | **565** | 0.50 of 1.69 ms (30%) |
+| ffn_down 4992×4096×16384 | 316 | 596 | **642** | 0.08 of 1.12 ms (7%) |
+| attn_qkvo 4992×4096×4096 | 287 | 392 | **569** | 0.13 of 0.43 ms (31%) |
+
+The prize is ~30% on the two shapes that matter, but only if the fused kernel MATCHES cuBLASLt's ~569 TOPS —
+the epilogue saving is worth nothing while the mainloop runs at half speed. (`ffn_down` is not worth chasing at
+all: its GEMM is already at 642 TOPS and the dequant is only 7% of the pair.) Every change below stayed
+bit-exact against cuBLASLt+dequant (max abs 0), so this is purely a throughput story.
+
+- **Pipeline depth — refuted.** STAGES 2→3 moved attn_qkvo 288→297 and made ffn_down *worse*, 316→284: 3 stages
+  is 60 KB of shared, which drops the block count per SM from two to one. Reverted to 2.
+- **Shared-load instruction count — refuted.** `ldmatrix.x4`/`.x2` replaced the scalar `ld.shared.b32` fragment
+  loads, 24 per k-step down to 8, and bought 1–6%. At peak the LSU is only ~9% of the issue budget, so the
+  48-loads-against-32-mma ratio was never the constraint. Kept anyway: bit-exact, fewer instructions, no cost.
+- **Occupancy — refuted.** 120 registers/thread, zero spill, and **two blocks per SM** by both registers and
+  shared. It was already fine.
+
+**Measurement traps hit while establishing that, both worth remembering.** (1) `CU_FUNC_ATTRIBUTE_NUM_REGS` is
+**4**; attribute **0** is `MAX_THREADS_PER_BLOCK`. Reading 0 returns 256 for any 256-thread kernel, which reads
+exactly like "the compiler took all 256 registers" and supported a completely wrong occupancy diagnosis for
+several experiments. The tell was that forcing `CU_JIT_MAX_REGISTERS=32` changed nothing and still reported zero
+spill — impossible if the cap were real. (2) `cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES, 99 KB)` "to leave
+room" is not free: that budget is what the driver sizes occupancy against, so it forces one block per SM. Ask for
+exactly what the kernel uses (`CudaKernels.Int8MmaSharedBytes`).
+
+### The rewrite: 128×256 tile + shared-memory epilogue — the fused GEMM now WINS (2026-08-13)
+
+Two changes, both taken from comfy-kitchen's shipped configuration, each verified bit-exact (max abs 0) against
+cuBLASLt+dequant at every shape including ragged-M:
+
+1. **128×256×64 block tile** (warp tile 64×64, 4×8 mma tiles, 128 accumulator registers, 195 regs/thread with no
+   spill, one block/SM). Arithmetic intensity was the limiter, as predicted: 288→325, 316→417, 287→341 TOPS.
+2. **Shared-memory epilogue.** mma's fragment layout scatters the output — a warp covered 8 rows × 16 contiguous
+   bytes per store, half of a 32-byte sector. Staging a 16×256 slab through shared (8 KB, reusing the dead
+   mainloop buffer) and re-emitting it as 32 bytes per lane makes every store fully coalesced: 341→**413 TOPS**
+   on attn_qkvo.
+
+| shape | before | **after** | vs pair (3 runs) |
+|---|---:|---:|---|
+| attn_qkvo 4992×4096×4096 | 288 | **413** | **+5.2 / +5.3 / +5.2%** |
+| ffn_up 4992×16384×4096 | 288 | **402** | +2.6 / +4.2 / +0.2% |
+| ffn_down 4992×4096×16384 | 316 | **436** | −27.1 / −25.8 / −26.2% |
+
+**The store pattern mattered and I argued it wouldn't.** The reasoning that deferred it — "cuBLASLt writes twice
+these bytes as int32 and is still faster, so stores cannot be the gap" — compared *bytes moved* when the right
+comparison is *sectors touched*: cuBLASLt's int32 store is perfectly coalesced, this one was not. Between the
+two epilogue changes it was worth ~20% on attn_qkvo, more than the tile rewrite.
+
+Also: pipeline depth was re-tested at the new tile and is still not a limiter (2 stages 331/410/343 vs 3 stages
+325/417/341, a wash), so the XOR swizzle that 4 stages would have required is not worth building. Shipping at
+2 stages, 60 KB.
+
+The gate is `m >= 1024 && k <= 2n && n <= 2k` (`HARTSY_INT8_FUSED_MMA=0` reverts). The K/N split: the fused kernel's win is
+the int32 round trip it deletes, which scales with the OUTPUT, while its mainloop still runs ~30% behind
+cuBLASLt's — so a deep-K shape spends all its time in the part we are worse at and has almost nothing to save
+(ffn_down's dequant is 11% of the pair against attn's 31%). This is a throughput crossover, not an invariant;
+re-measure it on a different card.
+
+#### …and end-to-end it is a REGRESSION (2026-08-13)
+
+| | mean ms/step | median | range | spread |
+|---|---:|---:|---:|---:|
+| `HARTSY_INT8_FUSED_MMA=0` | **1417.8** | 1418.0 | 1409.4–1425.7 | 16.3 |
+| `HARTSY_INT8_FUSED_MMA=1` | 1456.4 | 1457.2 | 1442.9–1468.4 | 25.5 |
+
+**+38.7 ms/step SLOWER**, all four paired reps negative (+36.4, +27.2, +33.5, +57.6) — outside the spread, so
+real. A kernel that is +5.2% on three hand-picked shapes made the model 2.7% slower.
+
+**A microbenchmark over selected shapes is not evidence about the workload.** The `k <= 2n` gate also admits
+every SMALL-m call — audio attention, audio FFN, the text-side k/v projections — where m is a few hundred rather
+than 4992. Measured directly rather than assumed:
+
+| shape | m | fused | pair | vs pair |
+|---|---:|---:|---:|---|
+| audio_attn 256×2048×2048 | 256 | 51.6 | 173.3 | **−70.2%** |
+| text_kv 512×4096×4096 | 512 | 219.6 | 331.6 | **−33.8%** |
+| audio_ffn_up 256×8192×2048 | 256 | 204.8 | 266.3 | **−23.1%** |
+| attn_qkvo | 4992 | 412.1 | 393.5 | +4.7% |
+| ffn_up | 4992 | 405.7 | 396.8 | +2.2% |
+
+`audio_attn` is **3.5× slower per call** (0.042 vs 0.012 ms). A 128×256 block tile at m=256 launches two
+M-blocks, so the grid covers a fraction of one wave across 128 SMs — structurally the wrong shape for a big-tile
+kernel, while cuBLASLt's heuristic picks a small-m tile. Those calls are numerous enough per step to swamp the
+video-width gain. This is the scoreboard's own "don't extrapolate one regime's delta onto another" rule,
+violated by the gate rather than by the harness.
+
+Fix: `FusedMmaMinRows = 1024` on `UseFusedMmaGemm`, admitting only the regime actually measured (every win is at
+m ≥ 1543 — ffn_up's smaller row chunk; audio and text sit at 256–512).
+
+#### With the floor: the regression is gone, and it still does not pay
+
+| | mean ms/step | median | range | spread |
+|---|---:|---:|---:|---:|
+| fused off | **1410.6** | 1408.4 | 1404.1–1421.6 | 17.5 |
+| fused on, m ≥ 1024 | 1417.5 | 1416.3 | 1409.6–1427.9 | 18.3 |
+
+**+6.9 ms/step**, all four pairs same-sign (+5.5, +6.7, +9.1, +6.3). The floor recovered 32 of the 38.7 ms, so
+the small-m diagnosis was right — but +4.7%/+2.2% on the eligible shapes should have netted roughly −10 ms/step,
+and it nets +7. That gap is what sent the harness to cold L2 (below), which found the remaining bad shape.
+
+#### With the symmetric gate: −10.5 ms/step, and it SHIPS ON
+
+| | mean ms/step | median | range | spread |
+|---|---:|---:|---:|---:|
+| fused off | 1417.4 | 1417.2 | 1407.7–1427.4 | 19.7 |
+| **fused on** (`m ≥ 1024`, `k ≤ 2n && n ≤ 2k`) | **1406.8** | 1403.0 | 1401.3–1419.9 | 18.6 |
+
+**−10.5 ms/step**, all four pairs same-sign (−7.5, −6.1, −17.5, −11.1), **paired t = 4.15**. Default ON;
+`HARTSY_INT8_FUSED_MMA=0` reverts.
+
+**Read the arc, not just the result** — the same kernel measured +38.7 / +6.9 / −10.5 ms/step under three gates.
+The kernel never changed; what changed was which shapes it was allowed to serve, and each correction came from
+measuring a regime instead of extrapolating into it. The final win is also smaller than the ~14 ms predicted from
+per-call microbenchmark deltas, so even the corrected harness still over-predicts in situ.
+
+**Why isolated and deployed disagreed, and the harness fix.** `BestMs` reran the kernel against the SAME resident
+operands, so the weight stayed hot in the 4090's 72 MB L2 across every rep — and this kernel is precisely the
+more L2-hungry one, which was the whole arithmetic-intensity diagnosis. A real step touches each weight once,
+cold. The harness now rotates over enough weight buffers to exceed L2 (`ColdBuffers`, ≥192 MB working set), and
+that immediately changed a conclusion:
+
+| shape | warm | **cold** |
+|---|---|---|
+| attn_qkvo 4992×4096×4096 | +4.7% | **+6.1%** |
+| **ffn_up 4992×16384×4096** | **+2.2%** | **−7.0%** |
+| ffn_down | −26.8% | −28.1% |
+| audio_attn / text_kv / audio_ffn_up | −70 / −34 / −23% | −69 / −33 / −23% |
+
+**ffn_up flipped from a win to a loss** — its 64 MB weight is the one warm L2 flattered most, and it accounts
+for the +6.9 ms/step: the gate was admitting a loser. **Min-of-batches over fixed buffers systematically
+flatters cache-hungry kernels.** Only the roughly-square attn shape survives cold, so the gate became symmetric
+(`k <= 2n && n <= 2k`): a wide-N shape carries proportionally more weight traffic, which is what this kernel is
+worst at. It also sharpens the bar for the mainloop — cuBLASLt's ~569 TOPS under COLD L2, not 413 under warm.
+The upside if it gets there is the full ~30% dequant share, which is why the kernel is kept.
+
+**A bug the bit-exactness gate caught, worth repeating:** the first shared-epilogue draft was *faster* (attn
+422 TOPS) and wrong — `int4` is 8 halves, and the write-out loop gave each thread a 16-half span, so one `int4`
+store silently left half of every slab row unwritten. It would have shipped as subtly corrupted video. Always
+gate a kernel rewrite on exact agreement, not on a tolerance.
+
+**And a second one only the Linear-level test could catch.** `Int8MmaGemmTests` calls the kernel directly and
+never passed a bias, so it reported max abs 0 at 20M elements while the two paths actually disagreed whenever
+bias was present: nvrtc contracted `v = d·rowScale·wScale; v += bias` into an FMA differently in each kernel,
+giving 1 ulp in F32 and flipping ~2 outputs per 500k across an F16 rounding boundary. Spelling the epilogue as
+an explicit `fmaf(acc·rowScale, wScale, bias)` matches the reference's contraction and restores exact equality.
+Two lessons: **test the path the caller takes, not just the kernel**, and **identical source-level operator
+order does not imply identical floating point across separately compiled kernels.**
+
+**Verified end-to-end:** with the fused path forced on, all 97 frames and `audio.wav` are byte-identical to the
+control run — which covers every shape the unit tests do not enumerate. Frames inspected (coherent lighthouse
+at sunset, waves progressing, no artifacts); audio 4.04 s, peak 1.2% FS, −54.1 dBFS, 0 clipped, matching every
+other run today.
+
+### Host-side overhead is real, measured, and does not reach the wall clock (2026-08-13)
+
+Timing the driver calls the resident-int8 chain makes per `Linear`, in isolation (`Int8ResidentHostCostTests`):
+`cuMemGetInfo` **5.229 µs/call** and a pool alloc+free pair **1.208 µs**. At ~2,700 resident-int8 Linears per
+step that is ~14 ms/step of `cuMemGetInfo` and ~16 ms/step of pool churn — apparently free money.
+
+It is not. Caching cuBLASLt's descriptor, layouts and heuristic pick (a bigger target: ~45k host calls/step)
+measured, 4 interleaved reps per arm:
+
+| | mean ms/step | median | range | sd |
+|---|---:|---:|---:|---:|
+| per-call objects (as shipped) | 1428.5 | 1427.7 | 1410.3–1448.3 | 15.5 |
+| cached descriptors | 1428.4 | 1432.3 | 1408.0–1440.9 | 14.3 |
+
+**Paired mean +0.1 ms, t = 0.02.** A dead null, and the mechanism explains it: `nvidia-smi dmon` has always shown
+SM at 99–100% on this path, so host time spent *queuing* work is hidden behind GPU execution and never reaches
+the wall clock. The cache was reverted rather than carried — it added a lock, two dictionaries and object
+lifetime management for zero gain. The free-VRAM coast and the persistent-scratch idea (the other two legs of the
+same plan) were dropped unbuilt for the same reason.
+
+**Do not re-chase host-side launch/allocation cost on this path while SM occupancy is saturated.** The way to
+falsify this conclusion is to show occupancy is *not* saturated, not to re-measure a different host call. Note
+also that an earlier do-not-re-chase note in `Int8GemmExecutor` asserted this same null from one run per arm —
+which established nothing. The table above is the evidence.
+
+### comfy-kitchen's int8 GEMM, read off its shipped binary (2026-08-13)
+
+The gap on `Linear` has been attributed to "their CUTLASS beats our cuBLASLt" without knowing *what* they run.
+It is knowable: `comfy_kitchen/backends/cuda/_C.abi3.so` (in the ComfyUI venv) exports 1,169 symbols from
+`cutlass_gemm_int8.cu`, and the mangled names carry the whole template configuration. Demangled, the LTX shapes
+route to:
+
+```
+cutlass::gemm::kernel::DefaultGemmWithVisitor<
+  int8_t, RowMajor, align 16,  int8_t, ColumnMajor, align 16,  bf16|half|float, RowMajor, align 8,
+  int32_t accum, float compute, OpClassTensorOp, Sm80,
+  ThreadblockShape<128,256,64> | <128,128,64>,  WarpShape<64,64,64>,  InstructionShape<16,8,32>,
+  epilogue::threadblock::TreeVisitor2x< VisitorAuxStore, VisitorCompute<plus>,
+      VisitorCompute<multiplies>, VisitorAccFetch, VisitorColBroadcast, VisitorRowBroadcast >,
+  ThreadblockSwizzleLeanStreamK,  Stages = 3 | 4,  OpMultiplyAddSaturate >
+```
+
+Everything we inferred is confirmed, and the remaining unknowns are now specifics rather than guesses:
+- **The dequant IS the epilogue.** `VisitorColBroadcast` is the per-output-column weight scale,
+  `VisitorRowBroadcast` the per-row activation scale, `VisitorCompute<multiplies>` then `<plus>` the bias, and
+  `VisitorAuxStore` writes bf16/half/float straight out. **The int32 accumulator never reaches HBM** — which is
+  precisely the ~165 ms/step round trip we cannot remove with cuBLASLt.
+- **The same `mma.m16n8k32` instruction** our own kernel already uses. The instruction is not the gap.
+- **Where our kernel actually differs**: they run **3–4 pipeline stages** (ours: 2), a **128×256×64** tile as
+  well as 128×128×64 (ours: 128×128×64 only), **`ThreadblockSwizzleLeanStreamK`** (ours: default swizzle), and
+  **alignment-16 vectorized operand loads**. They also ship a full tile ladder — 16×64×64, 16×128×64, 32×64×64,
+  32×128×64, 64×64×64, 64×128×64, 64×256×64, 128×128×64, 128×256×64, 64×64×128, 128×256×128 — and select per
+  shape, where ours has one tile for everything.
+
+That is the roadmap for `Kernels/dequant/int8_mma_gemm.cu` (currently 268 TOPS, wired to nothing, needs ~383 to
+beat the cuBLASLt+dequant pair and ~550 to match them). Stream-K in particular matters at LTX's shapes: with
+m=4992 padded and n=4096, a fixed swizzle leaves SMs idle on the tail wave.
+
+### ⚠️ The harness's noise floor — read before trusting any delta in this file (2026-08-13)
+
+**The same build, same seed, run back to back, spreads ~25 ms/step; sd across 4 reps is 17–20 ms.** Measured
+directly: two consecutive ungrouped runs gave 1459.6 and 1435.2, and a 4-rep arm ranged 1437.7–1473.7.
+
+The variance is **per-process, not thermal**: steps *within* one run vary by only ~±5 ms (1452/1453/1456/1460/1461
+in sequence), so it is not drift during a run — each process settles into its own level and stays there. Prime
+suspect is transient-pool address layout changing L2 set conflicts for the big activations; cuBLASLt algo choice
+is ruled out, since the heuristic never sees pointers and is deterministic for a shape.
+
+Consequences, which apply retroactively:
+- **A single run per arm cannot resolve anything under ~50 ms.** Several deltas recorded earlier in this file
+  were accepted on one run per arm — notably fused ConvRot+quant (−14 ms) and the F16 rope tables (−5 ms), both
+  of which are *inside* the noise band and are therefore unestablished, not disproven. Token-major (−39.5 ms) is
+  marginal at n=1; grouped Linear re-measured at n=4 came out **larger** than its n=1 estimate, not smaller.
+- **`ltx25_ab.sh` now exists** and is the way to measure a change: alternating arms, N reps each, reporting
+  mean/median/range per arm so the delta can be compared against the spread. It also holds `swarmui.service`
+  down for the whole campaign — restarting it per rep costs ~40 s each and left the unit `failed` when systemd's
+  stop timeout fired while the GPU was busy.
+- Budget accordingly: a credible 4-rep campaign is ~20 minutes. Do not spend it on a change predicted to be
+  worth less than the spread.
+
+### Grouped Linear — the redundant quantize pass, collected (2026-08-13)
+
+The quantize pass was structurally redundant, not inefficient: `LtxVideo2Attention` issued `to_gate_logits`,
+`to_q`, `to_k` and `to_v` as four separate `Linear` calls, and in SELF-attention all four take the *same*
+`qInput`, so the same `[4992, 4096]` activation was ConvRot'd and row-quantized **four times** for one answer.
+
+**Shipped:** `IBackend.LinearMulti(input, ops)` — several projections of one input. The CUDA override resolves
+every op's device pointers up front, runs the rotate+quant **once** per row chunk, then loops GEMM+dequant per
+weight against the shared `(pAct8, pRowScale)`. `LtxVideo2Attention` groups by input: self-attention takes all
+four in one group, cross-attention (text, a2v/v2a) still shares gate+q and k+v. Ops the resident int8 chain
+cannot serve — an F16 weight, a different ConvRot group, a different k — fall out to an ordinary `Linear` each,
+so a mixed group is partitioned, never refused. Kill switch `HARTSY_GROUPED_LINEAR=0`.
+
+Measured with the interleaved protocol (`ltx25_ab.sh`, 4 reps per arm, arms alternating), NOT one run per arm:
+
+| | mean ms/step | median | range | sd |
+|---|---:|---:|---:|---:|
+| ungrouped (`HARTSY_GROUPED_LINEAR=0`) | 1463.3 | 1470.9 | 1437.7–1473.7 | 17.1 |
+| grouped | **1421.7** | 1420.3 | 1401.4–1444.7 | 20.4 |
+
+**−41.6 ms/step (2.8%)**, and all four paired reps favour grouped (+38.5, +29.0, +69.2, +29.7; paired t = 4.4).
+Quant launches/step 3021 → 2243 (−26%), and `Int8.Quant` 199.9 → 165 ms/step in the sync-inflated profile, so
+the win lands exactly where predicted and by the predicted mechanism.
+
+An earlier revision of this section reported **−31 ms** from one run per arm. That was not wrong so much as
+unresolvable: the harness's between-run spread is larger than the effect (see below). The projection was still
+optimistic — ~65 ms predicted against 41.6 delivered — because the saved passes are on average narrower than
+the ones kept (audio- and text-width groups are cheap), so counting redundant *launches* overstates redundant
+*bytes*. Treat a launch count as an upper bound and a byte count as the real one.
+
+Route note: the two candidates written up before implementation were a quantize-once cache and QKV weight
+fusion at load. **Weight fusion was killed by traffic arithmetic before any code was written** — the three
+outputs of a fused `to_q|to_k|to_v` need a split copy (read 123 MB + write 123 MB per self-attention) to save
+122 MB of quant traffic, a net loss. Grouping by input keeps the whole win with no weight-layout change, no
+output slicing, and no cache-invalidation hazard, since the shared buffer lives exactly as long as the call.
+
+Verified bit-exact, twice over: `GroupedLinearTests` asserts byte-identical F16 outputs against per-op `Linear`
+(including a mixed group and the n=32 gate shape), and the end-to-end control run is byte-identical too — all
+97 PNG frames and `audio.wav` md5-match the ungrouped run. Frames re-inspected: coherent lighthouse at sunset,
+keeper visible, waves progressing naturally, no artifacts.
+
+The kill-switch control shares the refactored `RunResidentInt8`, so it does not by itself prove the *refactor*
+byte-exact against pre-refactor code. It is covered transitively: the run's `audio.wav` md5 (`2c7a96c6`) matches
+the `frames_tokenmajor` run from before the refactor, and audio and video decode from the same joint latent.
+
+**This was the last INPUT-side lever inside `Linear`** — the redundancy that remained was in the activation
+preprocessing, and it is now collected. What remains is ~477 ms of GEMM at the hardware wall, ~165 ms of dequant
+(the int32 round trip, cuBLASLt-blocked), and ~137 ms of quant that is no longer redundant. Output-side fusion
+is still open and is NOT cuBLASLt-blocked, because the dequant epilogue is our own kernel: it writes
+`[s, inner]` f16 to HBM and `Ltx2QkNormRopeTokenMajor` reads it straight back for q and k, so folding norm+rope
+into the epilogue would delete that round trip (~80 MB per tensor per attention). Feasible only while N-tiling
+stays off, since RMSNorm needs a whole row. Size it at ~30 ms by traffic and then halve it — every projection
+in this pass ran 2-3× optimistic.
 
 ### Two more int32-round-trip attacks, both refuted (2026-08-13)
 

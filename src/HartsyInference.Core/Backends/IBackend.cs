@@ -2,6 +2,10 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
+/// <summary>One projection in an <see cref="IBackend.LinearMulti"/> group: <c>Output = input × Weight^T + Bias</c>.
+/// The input is the group's, not the op's — that shared input is the whole reason the grouping exists.</summary>
+public readonly record struct LinearOp(Tensor Output, Tensor Weight, Tensor? Bias);
+
 /// <summary>Backend interface all model code programs against (CPU SIMD, CUDA PTX/cuBLAS); operations are eager, returning when complete.</summary>
 public interface IBackend : IDisposable
 {
@@ -2159,6 +2163,17 @@ public interface IBackend : IDisposable
     {
         Linear(output, input, weight, bias);
         Gelu(output, output);
+    }
+
+    /// <summary>Several projections of the SAME <paramref name="input"/>, so a backend whose Linear preprocesses the
+    /// activation can do that once for the group instead of once per weight. Results are identical to calling
+    /// <see cref="Linear"/> per op — this only moves shared work, it does not change arithmetic. Default: exactly
+    /// that loop.</summary>
+    /// <remarks>Written for the int8 chain, where every Linear rotates and row-quantizes its activation before the
+    /// GEMM: an attention that projects gate/q/k/v from one tensor pays that pass four times for one answer.</remarks>
+    unsafe void LinearMulti(Tensor input, ReadOnlySpan<LinearOp> ops)
+    {
+        foreach (LinearOp op in ops) Linear(op.Output, input, op.Weight, op.Bias);
     }
 
     /// <summary>LTX-2 block norm+modulate in one pass: <c>out[r,d] = rms(in[r,:])[d] * (1+scale[d]) + shift[d]</c>,

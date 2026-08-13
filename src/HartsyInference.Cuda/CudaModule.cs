@@ -31,17 +31,28 @@ public sealed class CudaModule : IDisposable
     }
 
     /// <summary>Loads a PTX file from disk and JIT-compiles it for the current device.</summary>
-    public static CudaModule LoadFromFile(string ptxPath)
+    /// <param name="maxRegisters">Per-thread register cap for the JIT (0 = let it choose). See
+    /// <see cref="LoadFromBytes"/> for why a kernel might need this.</param>
+    public static CudaModule LoadFromFile(string ptxPath, int maxRegisters = 0)
     {
         if (!File.Exists(ptxPath))
             throw new FileNotFoundException($"PTX file not found: {ptxPath}", ptxPath);
 
         byte[] ptxBytes = File.ReadAllBytes(ptxPath);
-        return LoadFromBytes(ptxBytes);
+        return LoadFromBytes(ptxBytes, maxRegisters);
     }
 
     /// <summary>Loads PTX from a byte array (must be null-terminated UTF-8 or will be null-terminated automatically).</summary>
-    public static unsafe CudaModule LoadFromBytes(byte[] ptxBytes)
+    /// <param name="maxRegisters">Per-thread register cap for the JIT (0 = let it choose).</param>
+    /// <remarks>The cap exists because the driver's PTX JIT does NOT honour a kernel's own
+    /// <c>.minnctapersm</c> directive — a <c>__launch_bounds__(threads, blocksPerSM)</c> that ptxas would respect
+    /// when compiling to cubin is silently ignored here, and a register-hungry kernel gets all 256 registers and
+    /// therefore one block per SM. <c>CU_JIT_MAX_REGISTERS</c> is the only way to ask for the occupancy the
+    /// source already asked for. Applies to every kernel in the module, so use it on single-kernel modules.
+    /// <para>No caller sets it today — the one kernel that wanted it (the fused int8 mma GEMM) ended up at a tile
+    /// whose 90 KB of shared already pins it to one block per SM. Kept because the finding is not rediscoverable
+    /// from the source: a launch-bounds directive that looks honoured simply is not, on this path.</para></remarks>
+    public static unsafe CudaModule LoadFromBytes(byte[] ptxBytes, int maxRegisters = 0)
     {
         // Ensure null terminator
         byte[] terminated;
@@ -77,21 +88,25 @@ public sealed class CudaModule : IDisposable
                 new Span<byte>((void*)errorLog, logSize).Clear();
                 new Span<byte>((void*)infoLog, logSize).Clear();
 
-                int* options = stackalloc int[4];
+                const int CU_JIT_MAX_REGISTERS = 0;
+
+                int* options = stackalloc int[5];
                 options[0] = CU_JIT_INFO_LOG_BUFFER;
                 options[1] = CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES;
                 options[2] = CU_JIT_ERROR_LOG_BUFFER;
                 options[3] = CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES;
+                options[4] = CU_JIT_MAX_REGISTERS;
 
-                nint* optionValues = stackalloc nint[4];
+                nint* optionValues = stackalloc nint[5];
                 optionValues[0] = infoLog;
                 optionValues[1] = (nint)logSize;
                 optionValues[2] = errorLog;
                 optionValues[3] = (nint)logSize;
+                optionValues[4] = (nint)maxRegisters;
 
                 int result = CudaDriverApi.cuModuleLoadDataEx(
                     out nint module, pinned,
-                    4, (nint)options, (nint)optionValues);
+                    maxRegisters > 0 ? 5u : 4u, (nint)options, (nint)optionValues);
 
                 if (result != 0)
                 {

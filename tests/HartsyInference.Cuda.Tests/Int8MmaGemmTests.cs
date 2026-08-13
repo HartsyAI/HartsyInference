@@ -43,9 +43,12 @@ public sealed unsafe class Int8MmaGemmTests
     }
 
     [Theory]
+    // N must be a whole multiple of the 256-wide block tile (only M is predicated), so these shapes changed with
+    // the tile: 384 is no longer expressible.
     [InlineData(256, 256, 128, 0u, "small")]
     [InlineData(200, 256, 192, 0u, "raggedM")]        // M not a multiple of 128 -> epilogue predication
-    [InlineData(256, 384, 128, 1u, "gelu")]
+    [InlineData(256, 512, 128, 1u, "gelu")]
+    [InlineData(129, 768, 64, 0u, "raggedM_wideN")]   // one k-tile, 3 N tiles, ragged M
     [InlineData(4992, 4096, 4096, 0u, "attn_qkvo")]
     public void FusedMmaGemm_MatchesCublasLtPlusDequant(int m, int n, int k, uint actMode, string label)
     {
@@ -93,12 +96,60 @@ public sealed unsafe class Int8MmaGemmTests
         }
     }
 
+    /// <summary>Times <paramref name="body"/> as the BEST of several batches rather than one batch's mean.
+    /// A single 20-rep batch of these kernels runs 10-50 ms — too short for the GPU to leave its idle clock
+    /// state, which made the invariant reference arm swing 393 -> 322 TOPS between runs and would have had this
+    /// harness attribute clock noise to kernel edits. Min-of-batches after a long warmup is the robust estimator:
+    /// contention and clock ramp only ever ADD time, so the floor is the real cost.</summary>
+    private static double BestMs(Action<int> body, int warmup = 32, int batches = 3, int reps = 32)
+    {
+        for (int i = 0; i < warmup; i++) body(i);
+        CudaDriverApi.cuStreamSynchronize(0);
+        double best = double.MaxValue;
+        for (int b = 0; b < batches; b++)
+        {
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int i = 0; i < reps; i++) body(i);
+            CudaDriverApi.cuStreamSynchronize(0);
+            double ms = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds / reps;
+            if (ms < best) best = ms;
+        }
+        return best;
+    }
+
+    /// <summary>Round-robin set of weight buffers, sized so the working set cannot sit in L2.</summary>
+    /// <remarks>Re-running a GEMM against ONE resident weight leaves it hot in the 4090's 72 MB L2 for every rep
+    /// after the first, which flatters exactly the kernels that are bandwidth-hungry — and the fused mma kernel is
+    /// the bandwidth-hungry one here (its whole 128×256 tile choice was an arithmetic-intensity argument). Measured
+    /// that way it beat the cuBLASLt pair by +4.7%, and wiring it in made the model SLOWER. A real step touches
+    /// each weight once, cold. Rotating over enough copies to exceed L2 is what makes this harness predictive.</remarks>
+    private sealed class ColdBuffers : IDisposable
+    {
+        private readonly List<ulong> _buffers = [];
+        public int Count => _buffers.Count;
+        public ulong this[int i] => _buffers[i % _buffers.Count];
+
+        public ColdBuffers(nuint bytesEach, long targetTotalBytes = 192L << 20)
+        {
+            int copies = (int)Math.Clamp(targetTotalBytes / (long)Math.Max(bytesEach, 1), 2, 24);
+            for (int i = 0; i < copies; i++) _buffers.Add(GpuTransferHelper.AllocateDevice(bytesEach));
+        }
+
+        public void Dispose() { foreach (ulong p in _buffers) GpuTransferHelper.FreeDevice(p); }
+    }
+
     /// <summary>Head-to-head at LTX-2.5's real shapes: fused kernel vs the cuBLASLt GEMM + dequant pair it
     /// would replace, both timed end-to-end. Diagnostic — it prints, it does not gate.</summary>
     [Theory]
     [InlineData(4992, 16384, 4096, "ffn_up")]
     [InlineData(4992, 4096, 16384, "ffn_down")]
     [InlineData(4992, 4096, 4096, "attn_qkvo")]
+    // Small-m shapes the `k <= 2n` gate also admits: audio attention/FFN and the text-side k/v projections.
+    // A 128x256 block tile at m=256 launches 2 M-blocks, so the whole grid can be a fraction of one wave — the
+    // regime where a big-tile kernel is structurally wrong and cuBLASLt's small-m heuristic wins.
+    [InlineData(256, 2048, 2048, "audio_attn")]
+    [InlineData(256, 8192, 2048, "audio_ffn_up")]
+    [InlineData(512, 4096, 4096, "text_kv")]
     public void FusedMmaGemm_VersusCublasLtPair_Throughput(int m, int n, int k, string label)
     {
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
@@ -106,46 +157,43 @@ public sealed unsafe class Int8MmaGemmTests
         using Int8GemmExecutor gemm = new Int8GemmExecutor();
 
         ulong dA = GpuTransferHelper.AllocateDevice((nuint)((long)m * k));
-        ulong dB = GpuTransferHelper.AllocateDevice((nuint)((long)n * k));
         ulong dAS = GpuTransferHelper.AllocateDevice((nuint)(m * 4));
         ulong dWS = GpuTransferHelper.AllocateDevice((nuint)(n * 4));
         ulong dOut = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * 2));
         ulong dAcc = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * 4));
+        using ColdBuffers weights = new ColdBuffers((nuint)((long)n * k));
         try
         {
-            const int Reps = 20;
             double flop = 2.0 * m * n * k;
 
-            for (int i = 0; i < 3; i++) ker.LaunchInt8MmaGemmDequant(dOut, dA, dB, dAS, dWS, 0, m, n, k, 0u, 0);
-            CudaDriverApi.cuStreamSynchronize(0);
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int i = 0; i < Reps; i++) ker.LaunchInt8MmaGemmDequant(dOut, dA, dB, dAS, dWS, 0, m, n, k, 0u, 0);
-            CudaDriverApi.cuStreamSynchronize(0);
-            double mmaMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds / Reps;
+            // Occupancy diagnostic: at 128x128x64 with STAGES shared stages, whether TWO blocks fit per SM is
+            // decided by registers and shared bytes together, and it is the difference between 8 and 16 warps
+            // of latency hiding. CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK = 0, LOCAL_SIZE_BYTES = 3, NUM_REGS = 4.
+            CudaDriverApi.cuFuncGetAttribute(out int numRegs, 4, ker.Int8MmaGemmFunction);
+            CudaDriverApi.cuFuncGetAttribute(out int spillBytes, 3, ker.Int8MmaGemmFunction);
+            _output.WriteLine($"  kernel: {numRegs} regs/thread, {spillBytes} B local (spill), "
+                + $"{CudaKernels.Int8MmaSharedBytes} B dynamic -> regs cap {65536 / Math.Max(1, numRegs * 256)} blocks/SM, "
+                + $"shared caps {100 * 1024 / CudaKernels.Int8MmaSharedBytes} blocks/SM");
 
-            for (int i = 0; i < 3; i++)
+            double mmaMs = BestMs(r => ker.LaunchInt8MmaGemmDequant(dOut, dA, weights[r], dAS, dWS, 0, m, n, k, 0u, 0));
+            double pairMs = BestMs(r =>
             {
-                gemm.Run(dB, dA, dAcc, m, n, k, 0);
+                gemm.Run(weights[r], dA, dAcc, m, n, k, 0);
                 ker.LaunchW8A8DequantBias(dOut, dAcc, dAS, dWS, 0, m, n, 0, outF16: true, actMode: 0u);
-            }
-            CudaDriverApi.cuStreamSynchronize(0);
-            t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int i = 0; i < Reps; i++)
-            {
-                gemm.Run(dB, dA, dAcc, m, n, k, 0);
-                ker.LaunchW8A8DequantBias(dOut, dAcc, dAS, dWS, 0, m, n, 0, outF16: true, actMode: 0u);
-            }
-            CudaDriverApi.cuStreamSynchronize(0);
-            double pairMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds / Reps;
+            });
+            // The pair is INVARIANT across kernel edits — if its TOPS moves between runs, the measurement is
+            // drifting and the fused arm's number is not comparable either.
+            double gemmOnlyMs = BestMs(r => gemm.Run(weights[r], dA, dAcc, m, n, k, 0));
 
             _output.WriteLine($"{label,-10} m={m} n={n} k={k}   fused-mma {mmaMs:F3} ms = {flop / (mmaMs * 1e-3) / 1e12:F1} TOPS" +
-                $"   |  cuBLASLt+dequant {pairMs:F3} ms = {flop / (pairMs * 1e-3) / 1e12:F1} TOPS" +
-                $"   |  {(pairMs / mmaMs - 1) * 100:+0.0;-0.0}% vs pair");
+                $"   |  pair {pairMs:F3} ms = {flop / (pairMs * 1e-3) / 1e12:F1} TOPS" +
+                $"   (gemm alone {flop / (gemmOnlyMs * 1e-3) / 1e12:F1} TOPS, dequant {pairMs - gemmOnlyMs:F3} ms)" +
+                $"   |  {(pairMs / mmaMs - 1) * 100:+0.0;-0.0}% vs pair  [{weights.Count} cold weight buffers]");
             Assert.True(mmaMs > 0);
         }
         finally
         {
-            foreach (ulong p in new[] { dA, dB, dAS, dWS, dOut, dAcc }) GpuTransferHelper.FreeDevice(p);
+            foreach (ulong p in new[] { dA, dAS, dWS, dOut, dAcc }) GpuTransferHelper.FreeDevice(p);
         }
     }
 }

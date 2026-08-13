@@ -10,21 +10,52 @@
 //   A [M,K] row-major int8 (per-row dynamically quantized activation)
 //   B [N,K] row-major int8 (the stored weight; row-major [N,K] IS mma's ".col" B operand)
 //
-// Tiling: block 128(M) x 128(N) x 64(K), 8 warps as 2(M) x 4(N), warp tile 64 x 32 = 4x4 mma m16n8k32 tiles
-// (64 int32 accumulator registers/thread). Two shared-memory stages, filled with cp.async.
+// Tiling: block 128(M) x 256(N) x 64(K), 8 warps as 2(M) x 4(N), warp tile 64 x 64 = 4x8 mma m16n8k32 tiles
+// (128 int32 accumulator registers/thread). STAGES shared-memory stages, filled with cp.async.
+//
+// Measured on a 4090 against cuBLASLt-GEMM + w8a8_dequant_bias, bit-exact throughout, COLD L2 (see ColdBuffers
+// in Int8MmaGemmTests — reusing one resident weight flatters this kernel and inverted a conclusion once):
+// attn_qkvo 4992x4096x4096 413 TOPS = +6.1% vs the pair, ffn_up 4992x16384x4096 -7.0%, ffn_down
+// 4992x4096x16384 -28%. CudaBackend.UseFusedMmaGemm admits only the winning regime.
+//
+// WHY 128x256 AND NOT 128x128 — arithmetic intensity, and it was the single biggest win (288 -> 341 TOPS).
+// A 128x128 block reads 16 KB of operands per k-tile to do 2.1 MFLOP — 131 flop/byte — so sustaining the 4090's
+// 660 TOPS would demand ~5 TB/s out of L2, at its ceiling and far past HBM. 128x256 reads 24 KB for 4.2 MFLOP,
+// and per unit of OUTPUT the A tile is reused twice as much. This is comfy-kitchen's shipped tile for these
+// shapes. The cost is that 128 accumulator registers (195 total, no spill) force one block per SM.
+//
+// RULED OUT as limiters, each measured, so do not re-chase:
+//   - Pipeline depth. At this tile, 2 stages vs 3 is a wash (331/410/343 vs 325/417/341 TOPS). At the old
+//     128x128 tile 3 stages was WORSE, because 60 KB of shared cost the second block per SM. Shipping 2.
+//   - Shared-load instruction count. ldmatrix cut 24 fragment loads per k-step to 8 and bought 1-6%; at peak
+//     the LSU is only ~9% of the issue budget. Kept because it is free, not because it mattered.
+//   - Occupancy. 195 registers, zero spill; shared and registers both pin this to one block per SM by design.
+//
+// The epilogue, by contrast, was worth ~20% and was nearly skipped on the reasoning that "cuBLASLt writes twice
+// these bytes as int32 and is still faster". That compares bytes moved; the right metric is SECTORS TOUCHED —
+// its int32 store is perfectly coalesced and mma's fragment layout is not. See the epilogue for the fix.
+//
+// STAGES > 2 needs more than the 48 KB default of dynamic shared, so the launcher must opt in via
+// CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES — and must ask for EXACTLY what is used, never the SM ceiling,
+// or the driver sizes occupancy against the ceiling and silently drops a block per SM. Keep STAGES and
+// CudaKernels.Int8MmaSharedBytes in step.
 //
 // Shared row stride is padded to BK+16: at the natural 64-byte stride the 8 rows a warp reads for one A
 // fragment land on only 8 distinct banks (row*16+tig mod 32 repeats every 2 rows), a 4-way conflict on every
 // fragment load. 80 bytes makes the 8 rows hit 8 distinct bank groups, and keeps the 16-byte cp.async
-// alignment.
+// alignment. It is not perfect — ldmatrix rows 0 and 8 still share a bank — but among 16-byte-aligned strides
+// (64/80/96/112/128) 80 already gives the longest conflict-free run; going further needs an XOR swizzle, worth
+// low single digits given ldmatrix itself bought 1-6%.
 
 #include <cuda_fp16.h>
 
 #define BM 128
-#define BN 128
+#define BN 256
 #define BK 64
-#define SMEM_STRIDE (BK + 16)          // 80 B, see note above
-#define STAGE_BYTES (BM * SMEM_STRIDE) // per stage, per operand
+#define STAGES 2
+#define SMEM_STRIDE (BK + 16)             // 80 B, see note above
+#define STAGE_A_BYTES (BM * SMEM_STRIDE)  // A and B stages differ in size now that BN != BM
+#define STAGE_B_BYTES (BN * SMEM_STRIDE)
 
 __device__ __forceinline__ unsigned smem_u32(const void* p)
 {
@@ -40,20 +71,47 @@ __device__ __forceinline__ void cp_async16(unsigned dst, const void* src, bool p
         asm volatile("st.shared.v4.u32 [%0], {0,0,0,0};\n" ::"r"(dst));   // OOB rows contribute zeros
 }
 
-// Stages one 128x64 int8 tile of a [rows, K] row-major matrix into shared. 128 rows x 4 chunks of 16 B,
-// 256 threads => 2 chunks each.
+// Stages one TILE_ROWS x 64 int8 tile of a [rows, K] row-major matrix into shared. Each row is 4 chunks of
+// 16 B, so 256 threads cover TILE_ROWS*4/256 chunks each — 2 for the 128-row A tile, 4 for the 256-row B tile.
+template <int TILE_ROWS>
 __device__ __forceinline__ void load_tile(unsigned sBase, const signed char* g, int row0, int rows,
                                           int k0, int K, int tid)
 {
     #pragma unroll
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < TILE_ROWS / 64; i++)
     {
         int idx = tid + i * 256;
-        int r = idx >> 2;                 // 0..127
+        int r = idx >> 2;                 // 0..TILE_ROWS-1
         int c = (idx & 3) * 16;           // 0,16,32,48
         int gr = row0 + r;
         cp_async16(sBase + r * SMEM_STRIDE + c, g + (size_t)gr * K + k0 + c, gr < rows);
     }
+}
+
+// ── ldmatrix fragment loads ────────────────────────────────────────────────
+// One `ldmatrix.x4` replaces the 4 scalar ld.shared.b32 an A fragment needed, and one `.x2` the 2 a B fragment
+// needed: 24 shared loads per k-step become 8. That ratio is the mainloop's problem — 48 ld.shared against 32
+// mma per k-tile leaves the tensor cores waiting on the LSU.
+//
+// ldmatrix moves 8x8 tiles of 16-bit elements, i.e. 8 rows x 16 BYTES, which is exactly how m16n8k32 wants its
+// int8 operands laid out, so no repack is needed — only the right per-lane address. Lane L addresses row L%8 of
+// matrix L/8; mapping that onto mma's operand layout gives:
+//   A (16 rows x 32 int8): matrices are (rows 0-7, bytes 0-15), (rows 8-15, bytes 0-15), (rows 0-7, bytes
+//   16-31), (rows 8-15, bytes 16-31) -> addr = base + (L%16)*stride + (L/16)*16, and {r0..r3} land directly in
+//   mma's {a0..a3}.
+//   B (8 rows x 32 int8): two matrices, bytes 0-15 then 16-31 -> addr = base + (L%8)*stride + ((L/8)&1)*16.
+// The existing 80-byte row stride is already conflict-free for this access: 8 rows step 20 banks apart, which
+// visits 8 distinct banks before repeating.
+__device__ __forceinline__ void ldmatrix_x4(unsigned addr, unsigned& r0, unsigned& r1, unsigned& r2, unsigned& r3)
+{
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(addr));
+}
+
+__device__ __forceinline__ void ldmatrix_x2(unsigned addr, unsigned& r0, unsigned& r1)
+{
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+                 : "=r"(r0), "=r"(r1) : "r"(addr));
 }
 
 __device__ __forceinline__ float gelu_tanh(float x)
@@ -74,69 +132,83 @@ extern "C" __global__ __launch_bounds__(256, 1) void int8_mma_gemm_dequant_f16(
 {
     extern __shared__ char smem[];
     unsigned sA0 = smem_u32(smem);
-    unsigned sB0 = sA0 + 2 * STAGE_BYTES;
+    unsigned sB0 = sA0 + STAGES * STAGE_A_BYTES;
 
     const int tid = threadIdx.x;
     const int warp = tid >> 5, lane = tid & 31;
     const int gid = lane >> 2, tig = lane & 3;      // mma fragment addressing
-    const int warpM = warp >> 2, warpN = warp & 3;  // 2 x 4 warps
+    const int warpM = warp >> 2, warpN = warp & 3;  // 2 x 4 warps -> 2*64 = BM, 4*64 = BN
 
     const int m0 = blockIdx.y * BM;
     const int n0 = blockIdx.x * BN;
 
-    int acc[4][4][4];
+    int acc[4][8][4];
     #pragma unroll
     for (int i = 0; i < 4; i++)
         #pragma unroll
-        for (int j = 0; j < 4; j++)
+        for (int j = 0; j < 8; j++)
             #pragma unroll
             for (int r = 0; r < 4; r++) acc[i][j][r] = 0;
 
     const int kTiles = K / BK;
 
-    load_tile(sA0, A, m0, M, 0, K, tid);
-    load_tile(sB0, B, n0, N, 0, K, tid);
-    asm volatile("cp.async.commit_group;\n" ::);
+    // Prologue: fill STAGES-1 stages so the mainloop always has a tile in flight behind the one it computes.
+    #pragma unroll
+    for (int s = 0; s < STAGES - 1; s++)
+    {
+        if (s < kTiles)
+        {
+            load_tile<BM>(sA0 + s * STAGE_A_BYTES, A, m0, M, s * BK, K, tid);
+            load_tile<BN>(sB0 + s * STAGE_B_BYTES, B, n0, N, s * BK, K, tid);
+        }
+        asm volatile("cp.async.commit_group;\n" ::);
+    }
 
     for (int kt = 0; kt < kTiles; kt++)
     {
-        int cur = kt & 1, nxt = cur ^ 1;
-        if (kt + 1 < kTiles)
-        {
-            load_tile(sA0 + nxt * STAGE_BYTES, A, m0, M, (kt + 1) * BK, K, tid);
-            load_tile(sB0 + nxt * STAGE_BYTES, B, n0, N, (kt + 1) * BK, K, tid);
-            asm volatile("cp.async.commit_group;\n" ::);
-            asm volatile("cp.async.wait_group 1;\n" ::);
-        }
-        else asm volatile("cp.async.wait_group 0;\n" ::);
+        int cur = kt % STAGES;
+        // Leaves STAGES-2 groups outstanding, i.e. waits for exactly the group holding tile kt.
+        asm volatile("cp.async.wait_group %0;\n" ::"n"(STAGES - 2));
+        // Also the barrier that makes it safe to overwrite the stage read STAGES-1 iterations ago, which is
+        // the one the prefetch below targets.
         __syncthreads();
 
-        unsigned aStage = sA0 + cur * STAGE_BYTES;
-        unsigned bStage = sB0 + cur * STAGE_BYTES;
+        int fetch = kt + STAGES - 1;
+        if (fetch < kTiles)
+        {
+            int fs = fetch % STAGES;
+            load_tile<BM>(sA0 + fs * STAGE_A_BYTES, A, m0, M, fetch * BK, K, tid);
+            load_tile<BN>(sB0 + fs * STAGE_B_BYTES, B, n0, N, fetch * BK, K, tid);
+        }
+        // Committed unconditionally: the wait above counts groups, so a skipped tail fetch still needs one.
+        asm volatile("cp.async.commit_group;\n" ::);
+
+        unsigned aStage = sA0 + cur * STAGE_A_BYTES;
+        unsigned bStage = sB0 + cur * STAGE_B_BYTES;
 
         #pragma unroll
         for (int kk = 0; kk < BK; kk += 32)
         {
-            unsigned bfrag[4][2];
+            unsigned bfrag[8][2];
             #pragma unroll
-            for (int j = 0; j < 4; j++)
+            for (int j = 0; j < 8; j++)
             {
-                unsigned base = bStage + (warpN * 32 + j * 8 + gid) * SMEM_STRIDE + kk + tig * 4;
-                asm volatile("ld.shared.b32 %0, [%1];\n" : "=r"(bfrag[j][0]) : "r"(base));
-                asm volatile("ld.shared.b32 %0, [%1];\n" : "=r"(bfrag[j][1]) : "r"(base + 16));
+                unsigned base = bStage + (warpN * 64 + j * 8 + (lane & 7)) * SMEM_STRIDE + kk + ((lane >> 3) & 1) * 16;
+                ldmatrix_x2(base, bfrag[j][0], bfrag[j][1]);
+            }
+            unsigned afrag[4][4];
+            #pragma unroll
+            for (int i = 0; i < 4; i++)
+            {
+                unsigned base = aStage + (warpM * 64 + i * 16 + (lane & 15)) * SMEM_STRIDE + kk + (lane >> 4) * 16;
+                ldmatrix_x4(base, afrag[i][0], afrag[i][1], afrag[i][2], afrag[i][3]);
             }
             #pragma unroll
             for (int i = 0; i < 4; i++)
             {
-                unsigned rowA = aStage + (warpM * 64 + i * 16 + gid) * SMEM_STRIDE + kk + tig * 4;
-                unsigned rowB = rowA + 8 * SMEM_STRIDE;
-                unsigned a0, a1, a2, a3;
-                asm volatile("ld.shared.b32 %0, [%1];\n" : "=r"(a0) : "r"(rowA));
-                asm volatile("ld.shared.b32 %0, [%1];\n" : "=r"(a1) : "r"(rowB));
-                asm volatile("ld.shared.b32 %0, [%1];\n" : "=r"(a2) : "r"(rowA + 16));
-                asm volatile("ld.shared.b32 %0, [%1];\n" : "=r"(a3) : "r"(rowB + 16));
+                unsigned a0 = afrag[i][0], a1 = afrag[i][1], a2 = afrag[i][2], a3 = afrag[i][3];
                 #pragma unroll
-                for (int j = 0; j < 4; j++)
+                for (int j = 0; j < 8; j++)
                 {
                     asm volatile(
                         "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
@@ -146,32 +218,66 @@ extern "C" __global__ __launch_bounds__(256, 1) void int8_mma_gemm_dequant_f16(
                 }
             }
         }
-        __syncthreads();
+        // No trailing barrier: the next iteration's top-of-loop __syncthreads() is what protects this stage
+        // from the prefetch that overwrites it, and a second barrier here would only serialize the mainloop.
     }
 
     // ── Fused dequant epilogue: the int32 accumulator never leaves registers ──
+    // THE STORE PATTERN IS WORTH REAL TIME HERE — measured, against expectation. Packing the two results a thread
+    // holds into one 4-byte __half2 instead of two 2-byte stores took attn_qkvo 343 -> 390 TOPS and ffn_up
+    // 331 -> 376. The reasoning that talked me out of trying it first ("cuBLASLt writes twice these bytes as int32
+    // and is still faster, so stores cannot be the gap") was wrong: its int32 store is perfectly coalesced while
+    // this fragment layout scatters, so bytes moved is the wrong comparison — sectors touched is the right one.
+    //
+    // mma leaves each thread holding COLUMN PAIRS (tig*2, tig*2+1) of a row, adjacent in the row-major output.
+    // N is a multiple of the 256-wide block tile, so a pair never straddles the edge and needs no per-element
+    // bound check; only M is predicated. Still not ideal: a warp covers 8 rows x 16 contiguous bytes per store,
+    // half of a 32-byte sector. Staging the tile through shared to emit fully coalesced rows is the next step.
+    // Staged through shared one 16-row x 256-col slab at a time (8 KB, reusing the mainloop's stage buffer, which
+    // is dead by now): threads scatter their fragment-shaped pieces into the slab, then the block re-reads it and
+    // writes 16 contiguous BYTES per lane, so a warp emits 512 contiguous bytes per instruction instead of eight
+    // 16-byte pieces. The 16 rows of a slab are two groups of 8 (warpM splits them 64 apart), so the slab is
+    // indexed [warpM*8 + gid] and the writer re-derives the real row from that.
+    __half* slab = (__half*)smem;
     #pragma unroll
     for (int i = 0; i < 4; i++)
     {
         #pragma unroll
-        for (int j = 0; j < 4; j++)
+        for (int half = 0; half < 2; half++)
         {
+            int row = m0 + warpM * 64 + i * 16 + gid + half * 8;
+            float as = row < (int)M ? actScale[row] : 0.0f;
+            int slabRow = warpM * 8 + gid;
+            __syncthreads();   // previous slab fully drained before overwriting it
             #pragma unroll
-            for (int half = 0; half < 2; half++)
+            for (int j = 0; j < 8; j++)
             {
-                int row = m0 + warpM * 64 + i * 16 + gid + half * 8;
-                if (row >= (int)M) continue;
-                float as = actScale[row];
-                #pragma unroll
-                for (int t = 0; t < 2; t++)
-                {
-                    int col = n0 + warpN * 32 + j * 8 + tig * 2 + t;
-                    if (col >= (int)N) continue;
-                    float v = (float)acc[i][j][half * 2 + t] * as * wScale[col];
-                    if (bias) v += bias[col];
-                    if (actMode == 1u) v = gelu_tanh(v);
-                    D[(size_t)row * N + col] = __float2half(v);
-                }
+                int cs = warpN * 64 + j * 8 + tig * 2;
+                int col = n0 + cs;
+                // Spelled as an explicit fma over (acc*rowScale) so the contraction matches what nvrtc emits for
+                // w8a8_dequant_bias's `v = (float)d * rowScale * wScale; v += bias`. Left to the compiler the two
+                // kernels contract differently and the F32 results diverge by 1 ulp, which lands ~2 outputs per
+                // 500k on the far side of an F16 rounding boundary — enough to break an exact-equality gate.
+                float t0 = (float)acc[i][j][half * 2 + 0] * as;
+                float t1 = (float)acc[i][j][half * 2 + 1] * as;
+                float v0 = bias ? fmaf(t0, wScale[col], bias[col]) : t0 * wScale[col];
+                float v1 = bias ? fmaf(t1, wScale[col + 1], bias[col + 1]) : t1 * wScale[col + 1];
+                if (actMode == 1u) { v0 = gelu_tanh(v0); v1 = gelu_tanh(v1); }
+                *(__half2*)(slab + slabRow * BN + cs) = __halves2half2(__float2half(v0), __float2half(v1));
+            }
+            __syncthreads();
+            // 16 rows x 256 halves; 256 threads each take 16 halves = 32 B, emitted as two 16-byte int4 stores
+            // (int4 is 8 halves — covering a 16-half span with ONE of them silently leaves half the slab
+            // unwritten, which is exactly the bug the bit-exactness gate caught here).
+            int wr = tid >> 4;                 // 0..15  slab row
+            int wc = (tid & 15) * 16;          // 0..240 column within the slab
+            int outRow = m0 + (wr >> 3) * 64 + i * 16 + half * 8 + (wr & 7);
+            if (outRow < (int)M)
+            {
+                __half* dst = D + (size_t)outRow * N + n0 + wc;
+                const __half* src = slab + wr * BN + wc;
+                *(int4*)dst = *(const int4*)src;
+                *(int4*)(dst + 8) = *(const int4*)(src + 8);
             }
         }
     }

@@ -72,18 +72,27 @@ public sealed unsafe class LtxVideo2Attention
 
         // Gate logits on the (modulated, normed) query input — one logit per head. Absent on ungated (pre-2.3) checkpoints.
         Tensor? gateLogits = null;
-        if (_gateW is not null)
-        {
-            gateLogits = new(new TensorShape(sq, _heads), act);
-            backend.Linear(gateLogits, qInput, _gateW!, _gateB);
-        }
+        if (_gateW is not null) gateLogits = new(new TensorShape(sq, _heads), act);
 
         Tensor q = new(new TensorShape(sq, _inner), act);
-        backend.Linear(q, qInput, _qW!, _qB);
         Tensor k = new(new TensorShape(sk, _inner), kvInput.DType);
-        backend.Linear(k, kvInput, _kW!, _kB);
         Tensor v = new(new TensorShape(sk, _inner), kvInput.DType);
-        backend.Linear(v, kvInput, _vW!, _vB);
+        // Grouped by INPUT, not by role: on an int8 backend each Linear rotates and row-quantizes its activation
+        // before the GEMM, so four projections of one tensor otherwise derive the same int8 bytes four times. Self-
+        // attention shares all four; cross-attention (text, a2v/v2a) still shares gate+q and k+v.
+        if (ReferenceEquals(qInput, kvInput))
+        {
+            backend.LinearMulti(qInput, gateLogits is null
+                ? [new(q, _qW!, _qB), new(k, _kW!, _kB), new(v, _vW!, _vB)]
+                : [new(gateLogits, _gateW!, _gateB), new(q, _qW!, _qB), new(k, _kW!, _kB), new(v, _vW!, _vB)]);
+        }
+        else
+        {
+            backend.LinearMulti(qInput, gateLogits is null
+                ? [new LinearOp(q, _qW!, _qB)]
+                : [new(gateLogits, _gateW!, _gateB), new(q, _qW!, _qB)]);
+            backend.LinearMulti(kvInput, [new LinearOp(k, _kW!, _kB), new(v, _vW!, _vB)]);
+        }
 
         // Full-width QK-RMSNorm (across heads) -> optional RoPE, fused into ONE pass per tensor. The unfused
         // sequence read and wrote each [S, inner] tensor three times (RmsNorm, then in-place rope, then

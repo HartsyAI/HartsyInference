@@ -462,11 +462,11 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Loads a module and transfers its finalization ownership to this kernel table. CudaKernels Dispose/
     /// finalizer releases every adopted module, preventing independently queued child finalizers from unloading
     /// modules before their owning kernel table is cleaned.</summary>
-    private CudaModule LoadOwnedModule(string path)
+    private CudaModule LoadOwnedModule(string path, int maxRegisters = 0)
     {
         Exception? injectedFailure = Volatile.Read(ref _moduleLoadFailureForTests)?.Invoke(path);
         if (injectedFailure is not null) throw injectedFailure;
-        CudaModule module = CudaModule.LoadFromFile(path);
+        CudaModule module = CudaModule.LoadFromFile(path, maxRegisters);
         try
         {
             _ownedModules.Add(module);
@@ -610,8 +610,20 @@ public sealed class CudaKernels : IDisposable
         string mmaPath = Path.Combine(ptxDir, "int8_mma_gemm.ptx");
         if (File.Exists(mmaPath))
         {
+            // No register cap: at 128x256 the accumulator alone is 128 registers and 90 KB of shared already pins
+            // the kernel to one block per SM, so capping could only force spills. Verify with NUM_REGS (attribute
+            // 4) and LOCAL_SIZE_BYTES (3) after any tile change — CudaModule.LoadFromFile takes a cap if a future
+            // smaller tile wants two blocks per SM, since the driver's PTX JIT ignores `.minnctapersm`.
             _int8MmaModule = LoadOwnedModule(mmaPath);
             _int8MmaGemmF16 = _int8MmaModule.GetFunction("int8_mma_gemm_dequant_f16");
+            // Opt in to EXACTLY the mainloop's shared footprint, and only when it exceeds the 48 KB default —
+            // never to the SM ceiling. This budget is what the driver uses to decide blocks-per-SM, so asking for
+            // 99 KB "to leave room" makes two blocks arithmetically impossible, which silently overrides the
+            // kernel's own `.minnctapersm 2` and lets ptxas spend all 256 registers per thread.
+            // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8.
+            uint mmaShared = Int8MmaSharedBytes;
+            if (mmaShared > 48 * 1024)
+                CudaDriverApi.cuFuncSetAttribute(_int8MmaGemmF16, 8, (int)mmaShared);
         }
 
         // Optional module: NVFP4 dequant (src/HartsyInference.Cuda/Kernels/dequant/dequant_nvfp4_to_f16.cu). Absence is not an error.
@@ -2082,8 +2094,19 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Whether the fused-dequant int8 mma GEMM can serve this shape. The kernel tiles 128x128x64 with
     /// no N/K remainder handling (M is predicated), so K and N must be whole multiples; every LTX-2.5 DiT shape
     /// is. Callers fall back to <see cref="Int8GemmExecutor"/> + the separate dequant kernel otherwise.</summary>
+    /// <summary>The fused mma GEMM's CUfunction, for occupancy/register diagnostics. 0 when the module is absent.</summary>
+    internal nint Int8MmaGemmFunction => _int8MmaGemmF16;
+
+    /// <summary>Dynamic shared bytes the fused mma GEMM needs: STAGES × (BM + BN) rows × SMEM_STRIDE.
+    /// MUST track <c>int8_mma_gemm.cu</c> — it is both the launch argument and the occupancy budget the driver
+    /// reasons about, so an over-estimate here costs registers, not just address space.</summary>
+    internal const uint Int8MmaSharedBytes = 2u * (128u + 256u) * 80u;
+
+    /// <summary>N tile of the fused mma GEMM; N must be a whole multiple (M is predicated, N and K are not).</summary>
+    private const int Int8MmaTileN = 256;
+
     public bool HasInt8MmaGemm(int m, int n, int k) =>
-        _int8MmaModule is not null && m > 0 && n % 128 == 0 && k % 64 == 0;
+        _int8MmaModule is not null && m > 0 && n % Int8MmaTileN == 0 && k % 64 == 0;
 
     /// <summary>Fused int8 GEMM + W8A8 dequant: <c>D[M,N] = act(actScale[m]·wScale[n]·(A·Bᵀ) + bias[n])</c>,
     /// F16 out. Replaces the cuBLASLt GEMM + <c>w8a8_dequant_bias</c> pair, so the int32 accumulator never
@@ -2098,9 +2121,8 @@ public sealed class CudaKernels : IDisposable
         void** args = stackalloc void*[10];
         args[0] = &dA; args[1] = &aA; args[2] = &bA; args[3] = &asA; args[4] = &wsA; args[5] = &biA;
         args[6] = &mA; args[7] = &nA; args[8] = &kA; args[9] = &actA;
-        // 2 stages x 2 operands x 128 rows x 80 B.
-        uint shared = 4u * 128u * 80u;
-        uint gridX = (uint)(n / 128), gridY = (uint)((m + 127) / 128);
+        uint shared = Int8MmaSharedBytes;
+        uint gridX = (uint)(n / Int8MmaTileN), gridY = (uint)((m + 127) / 128);
         CudaDriverApi.cuLaunchKernel(_int8MmaGemmF16, gridX, gridY, 1, 256, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
     }
 

@@ -88,6 +88,15 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuFuncSetAttribute(nint function, int attrib, int value);
 
+    // Read a function attribute. Registers and shared bytes together decide how many blocks fit per SM, which
+    // explains a hand-written GEMM's achieved throughput far more often than its instruction mix does.
+    // MIND THE ENUM: MAX_THREADS_PER_BLOCK = 0, SHARED_SIZE_BYTES = 1, CONST_SIZE_BYTES = 2, LOCAL_SIZE_BYTES = 3,
+    // NUM_REGS = 4. Reading 0 expecting NUM_REGS returns the BLOCK SIZE, which for a 256-thread kernel reads as a
+    // perfectly plausible "256 registers/thread" and supported a completely wrong occupancy diagnosis for several
+    // experiments before a forced CU_JIT_MAX_REGISTERS=32 failed to change it.
+    [LibraryImport(LibName)]
+    internal static partial int cuFuncGetAttribute(out int value, int attrib, nint function);
+
     // ── Memory Management ───────────────────────────────────────────────
 
     [LibraryImport(LibName, EntryPoint = "cuMemAlloc_v2")]

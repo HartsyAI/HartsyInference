@@ -597,6 +597,10 @@ public sealed class CudaBackend : IBackend
         // round trip costs in HBM traffic. Do not re-chase L2 sizing here.
         const long CeilingBytes = 256L << 20;
         const long FloorBytes = 8L << 20;
+        // Polled per call, and that is fine: cuMemGetInfo measures 5.2 µs (Int8ResidentHostCostTests), ~14 ms/step
+        // across ~2,700 resident-int8 Linears — but caching it buys nothing, because this path is GPU-bound at
+        // 99-100% SM and host queuing time never reaches the wall clock. See Int8GemmExecutor's remarks for the
+        // interleaved 4-rep campaign that measured the same null on a 45k-call-per-step version of this idea.
         (long freeBytes, _) = CudaMemory.GetMemInfo();
         long budget = Math.Clamp(freeBytes / 8, FloorBytes, CeilingBytes);
         long perRowBytes = (long)n * sizeof(int) + k + (long)k * activationBytes;
@@ -1357,6 +1361,155 @@ public sealed class CudaBackend : IBackend
         if (failures is not null) throw new AggregateException("One or more W8A8 cache buffers failed to release.", failures);
     }
 
+    /// <summary>Kill switch for the fused GEMM+dequant mma kernel (<c>HARTSY_INT8_FUSED_MMA=0</c>). ON by default:
+    /// −10.5 ms/step end-to-end (4 interleaved reps, all pairs same-sign, paired t = 4.15). It only got there once
+    /// <see cref="UseFusedMmaGemm"/> was narrowed to the shapes it actually wins on — wired in less carefully it
+    /// measured +38.7 ms/step, and +6.9 with only a row floor.</summary>
+    internal static bool FusedMmaGemm = Environment.GetEnvironmentVariable("HARTSY_INT8_FUSED_MMA") != "0";
+
+    /// <summary>Rows below which the fused mma GEMM is not used. Its block tile is 128×256, so a few hundred rows
+    /// is two M-blocks — a grid that covers a fraction of one wave across 128 SMs, where cuBLASLt's small-m
+    /// heuristic wins outright. Every measured win is at m ≥ 1543 (ffn_up's smaller row chunk); everything below
+    /// this floor — audio attention and FFN, the text-side k/v projections — was never measured and must not be
+    /// assumed. Wiring the fused path in WITHOUT this floor cost +38.7 ms/step end-to-end while winning +5.2% on
+    /// the three shapes the microbenchmark covered.</summary>
+    private const int FusedMmaMinRows = 1024;
+
+    /// <summary>Whether the fused mma GEMM beats the cuBLASLt-GEMM + separate-dequant pair for this shape.</summary>
+    /// <remarks><para>Measured on a 4090 (<c>Int8MmaGemmTests</c>, min-of-batches, 3 runs each): attn_qkvo
+    /// 4992×4096×4096 **+5.2%** and ffn_up 4992×16384×4096 **+2%**, but ffn_down 4992×4096×16384 **−26%**. The
+    /// split is K against N: the fused kernel's win is the int32 round trip it deletes, which scales with the
+    /// OUTPUT, while its mainloop still runs ~30% behind cuBLASLt's — so a deep-K shape spends all its time in
+    /// the part we are worse at and has almost no accumulator traffic to save (ffn_down's dequant is 11% of the
+    /// pair, attn's is 31%).</para>
+    /// <para>The N bound is symmetric — roughly square, not just <c>k &lt;= 2n</c> — because a wide-N shape has
+    /// proportionally more WEIGHT traffic, and this kernel is the bandwidth-hungry one. Measured against COLD L2
+    /// (rotating weight buffers, see <c>ColdBuffers</c>), ffn_up 4992×16384×4096 is **−7.0%**, not the +2.2% the
+    /// warm harness reported; only the square attn shape survives, at +6.1%.</para>
+    /// <para>Every bound exists because a per-shape microbenchmark is NOT evidence about the workload: this gate
+    /// must admit only the regime actually measured, under conditions that resemble a real step. Re-measure
+    /// end-to-end, not per shape, before widening it — and on a different card before trusting it there.</para></remarks>
+    private bool UseFusedMmaGemm(bool outF16, int rows, int n, int k) =>
+        FusedMmaGemm && outF16 && rows >= FusedMmaMinRows
+        && k <= 2L * n && n <= 2L * k && _kernels!.HasInt8MmaGemm(rows, n, k);
+
+    /// <summary>One resident-int8 projection for <see cref="RunResidentInt8"/>: device pointers already resolved,
+    /// so the helper never touches the transfer caches (see the prologue ordering note in <c>LinearImpl</c>).</summary>
+    private readonly record struct Int8ResidentTarget(
+        ulong Weight, ulong Output, ulong BiasF32, ulong RowScaleDev, int N, bool OutF16, bool FuseGelu);
+
+    /// <summary>The resident int8 chain — ConvRot, per-row quant, IMMA GEMM, dequant epilogue — over one activation
+    /// and one or more weights. Every target shares the quantized activation, which is the point: the rotate+quant
+    /// pass is ~40% of the LTX-2.5 step's quant traffic precisely because an attention re-derived it per projection.
+    /// Bit-identical to running the targets one at a time (same pointer, same k, same kernel).</summary>
+    /// <remarks>Chunked over rows because the int32 accumulator is 4 bytes per output element: at video token counts
+    /// a single unchunked m·n·4 buffer runs to gigabytes (H3's mlp.fc1 is n=28672). Each chunk is padded up to the
+    /// 32-row granularity cuBLASLt's int8 TN kernels want, exactly as comfy-kitchen's own _int8_matmul_accumulate
+    /// does — 31 wasted rows of int8 compute beats materializing the weight.</remarks>
+    private unsafe void RunResidentInt8(ulong pInput, DType inputDType, int m, int k, int group,
+        ReadOnlySpan<Int8ResidentTarget> targets)
+    {
+        bool srcF16 = inputDType == DType.F16;
+        int inputElementBytes = inputDType.SizeInBytes;
+        int nMax = 0;
+        foreach (Int8ResidentTarget t in targets) nMax = Math.Max(nMax, t.N);
+        int colChunk = Int8ResidentColChunk(nMax);
+        // Sized by the WIDEST target so one accumulator serves the group; a narrower target just leaves it partly unused.
+        int rowChunk = Int8ResidentRowChunk(m, Math.Min(nMax, colChunk), k, group > 0 ? inputElementBytes : 0);
+        int paddedChunk = PadInt8Rows(rowChunk);
+        int accCols = Math.Min(nMax, colChunk);
+
+        ulong pRot = 0, pAct8 = 0, pRowScale = 0, pOut32 = 0;
+        try
+        {
+            if (group > 0)
+                pRot = GpuTransferHelper.AllocateDevice((nuint)((long)rowChunk * k * inputElementBytes));
+            pAct8 = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * k));
+            pRowScale = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * sizeof(float)));
+            pOut32 = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * accCols * sizeof(int)));
+            // The pad rows are deliberately left unwritten rather than zeroed: every byte is a valid int8,
+            // k·127² stays an order of magnitude inside int32 for any shape here (2.48e8 at k=15360 against
+            // int32's 2.15e9), and the epilogue below is launched with `rows`, so those accumulators are
+            // never read. A memset would cost a full-stream sync (cuMemsetD8 runs on the legacy null
+            // stream) on every single Linear.
+
+            for (int firstRow = 0; firstRow < m; firstRow += rowChunk)
+            {
+                int rows = Math.Min(rowChunk, m - firstRow);
+                ulong inputChunk = pInput + (ulong)((long)firstRow * k * inputElementBytes);
+                ulong quantSource = inputChunk;
+                // Sub-scopes: "Linear" is FOUR kernels (rotate, quant, GEMM, dequant) and the whole-chain
+                // label cannot say which one costs. HARTSY_PROFILE_FINE only — thousands of pushes per step.
+                using (NvtxRange.PushFine("Int8.Quant"))
+                if (group > 0 && _kernels!.HasFusedConvRotQuant(k, group))
+                {
+                    // Rotation + per-row quant in one pass: the split pair wrote a full-width rotated
+                    // activation to HBM only for the quantizer to read it straight back.
+                    _kernels.LaunchConvRotQuantRowwise(pAct8, pRowScale, inputChunk, rows, k, group, _stream.Handle, srcF16);
+                }
+                else
+                {
+                    if (group > 0)
+                    {
+                        _kernels!.LaunchConvRotRotate(pRot, inputChunk, (long)rows * k, group, _stream.Handle, srcF16);
+                        quantSource = pRot;
+                    }
+                    _kernels!.LaunchW8A8QuantRowwise(pAct8, pRowScale, quantSource, rows, k, _stream.Handle, srcF16);
+                }
+                int padded = PadInt8Rows(rows);
+                foreach (Int8ResidentTarget t in targets)
+                {
+                    int n = t.N;
+                    int outElementBytes = t.OutF16 ? 2 : 4;
+                    ulong outputChunk = t.Output + (ulong)((long)firstRow * n * outElementBytes);
+                    uint actMode = t.FuseGelu ? 1u : 0u;
+                    if (colChunk >= n)
+                    {
+                        // One kernel for GEMM + dequant, so the [rows, n] int32 accumulator never reaches HBM.
+                        // Only where it actually WINS — see UseFusedMmaGemm; elsewhere the cuBLASLt pair is faster.
+                        // It takes `rows`, not `padded`: M is predicated inside, so the pad rows cost nothing.
+                        if (UseFusedMmaGemm(t.OutF16, rows, n, k))
+                        {
+                            using (NvtxRange.PushFine("Int8.GemmDequant"))
+                                _kernels!.LaunchInt8MmaGemmDequant(outputChunk, pAct8, t.Weight, pRowScale,
+                                    t.RowScaleDev, t.BiasF32, rows, n, k, actMode, _stream.Handle);
+                            continue;
+                        }
+                        using (NvtxRange.PushFine("Int8.Gemm"))
+                            Int8Gemm.Run(t.Weight, pAct8, pOut32, padded, n, k, _stream.Handle);
+                        using (NvtxRange.PushFine("Int8.Dequant"))
+                            _kernels!.LaunchW8A8DequantBias(outputChunk, pOut32, pRowScale, t.RowScaleDev, t.BiasF32,
+                                rows, n, _stream.Handle, outF16: t.OutF16, actMode: actMode);
+                        continue;
+                    }
+                    // Tile over N so the int32 accumulator is a small slice consumed by the dequant while
+                    // it is still in L2, instead of a full [rows, n] buffer streamed out to HBM and read
+                    // straight back. The weight is [N, K] row-major, so a column slice of the output is a
+                    // contiguous ROW range of the weight — just a pointer offset, no repack.
+                    for (int firstCol = 0; firstCol < n; firstCol += colChunk)
+                    {
+                        int cols = Math.Min(colChunk, n - firstCol);
+                        Int8Gemm.Run(t.Weight + (ulong)((long)firstCol * k), pAct8, pOut32, padded, cols, k, _stream.Handle);
+                        _kernels!.LaunchW8A8DequantBiasStrided(
+                            outputChunk + (ulong)((long)firstCol * outElementBytes),
+                            pOut32, pRowScale,
+                            t.RowScaleDev + (ulong)((long)firstCol * sizeof(float)),
+                            t.BiasF32 == 0 ? 0 : t.BiasF32 + (ulong)((long)firstCol * sizeof(float)),
+                            rows, cols, n, _stream.Handle,
+                            outF16: t.OutF16, actMode: actMode);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            if (pRot != 0) GpuTransferHelper.FreeDevice(pRot);
+            if (pAct8 != 0) GpuTransferHelper.FreeDevice(pAct8);
+            if (pRowScale != 0) GpuTransferHelper.FreeDevice(pRowScale);
+            if (pOut32 != 0) GpuTransferHelper.FreeDevice(pOut32);
+        }
+    }
+
     /// <summary>Linear layer via cuBLAS GemmEx with transpose: output = input × weight^T + bias.</summary>
     /// <remarks>Supports mixed F32/F16/F8 dtypes. For a quantized weight the dequantized F16 cast is cached per
     /// preloaded weight (fast, but the cast occupies F16-sized VRAM).</remarks>
@@ -1393,6 +1546,138 @@ public sealed class CudaBackend : IBackend
             && CanRunResidentInt8(output, input, weight, qi, 0, -1);
         LinearImpl(output, input, weight, bias, cacheWeightCast: true, fuseGelu: fused);
         if (!fused) Gelu(output, output);
+    }
+
+    /// <summary>Kill switch for grouped resident-int8 Linears (<c>HARTSY_GROUPED_LINEAR=0</c>). Also the seam the
+    /// bit-identity test flips to run the grouped and per-op routes against one another on one backend.</summary>
+    internal static bool GroupedLinear = Environment.GetEnvironmentVariable("HARTSY_GROUPED_LINEAR") != "0";
+
+    /// <summary>Projections sharing one input, sharing one activation rotate+quant pass. Ops the resident int8 chain
+    /// cannot serve — or that disagree on k or on the ConvRot group, since those decide the quantized bytes — fall
+    /// out to an ordinary <see cref="Linear"/> each, so a mixed group is served, not refused.</summary>
+    public unsafe void LinearMulti(Tensor input, ReadOnlySpan<LinearOp> ops)
+    {
+        if (ops.Length == 0) return;
+        EnterOp();
+        EnsureKernels();
+
+        int k = 0, group = 0, grouped = 0;
+        Span<bool> eligible = ops.Length <= 16 ? stackalloc bool[ops.Length] : new bool[ops.Length];
+        for (int i = 0; i < ops.Length; i++)
+        {
+            LinearOp op = ops[i];
+            eligible[i] = GroupedLinear
+                && op.Weight.DType == DType.I8 && op.Weight.QuantInfo is { RowScale: not null } qi
+                && CanRunResidentInt8(op.Output, input, op.Weight, qi, 0, -1)
+                && (k == 0 || ((int)op.Weight.Shape[1] == k && qi.ConvRotGroupSize == group));
+            if (!eligible[i]) continue;
+            k = (int)op.Weight.Shape[1];
+            group = op.Weight.QuantInfo!.ConvRotGroupSize;
+            grouped++;
+        }
+        // One eligible op is just a Linear; grouping it would only duplicate that method's prologue.
+        if (grouped < 2)
+        {
+            foreach (LinearOp op in ops) Linear(op.Output, input, op.Weight, op.Bias);
+            return;
+        }
+
+        int m = (int)(input.ElementCount / k);
+        Int8ResidentTarget[] targets = new Int8ResidentTarget[grouped];
+        ulong[] pOutputs = new ulong[grouped];
+        nuint[] outputBytes = new nuint[grouped];
+        bool[] cachedOutputs = new bool[grouped];
+        // Every host companion read happens BEFORE the first CopyToDevice below: a mid-forward DataPointer read on a
+        // device-cached tensor trips the lazy-sync consume and the outer finally would then double-free (bisected
+        // 2026-07-23, W8A8ReproTemp). With a group that loop runs once, up front, for all of them.
+        int slot = 0;
+        for (int i = 0; i < ops.Length; i++)
+        {
+            if (!eligible[i]) continue;
+            targets[slot++] = new(0, 0, 0, EnsureInt8RowScaleDev(ops[i].Weight, (int)ops[i].Weight.Shape[0]),
+                (int)ops[i].Weight.Shape[0], ops[i].Output.DType == DType.F16, false);
+        }
+
+        ulong pInput = 0;
+        ulong[] pWeights = new ulong[grouped];
+        ulong[] pBiases = new ulong[grouped];
+        ulong[] biasCasts = new ulong[grouped];
+        // Scoped as "Linear" so a grouped step's profile stays comparable with an ungrouped one; the ineligible
+        // stragglers below push their own, outside this scope, so nothing is counted twice.
+        using (NvtxRange.Push("Linear"))
+        try
+        {
+            pInput = GpuTransferHelper.CopyToDevice(input);
+            slot = 0;
+            for (int i = 0; i < ops.Length; i++)
+            {
+                if (!eligible[i]) continue;
+                LinearOp op = ops[i];
+                outputBytes[slot] = GpuTransferHelper.ByteSize(op.Output);
+                pOutputs[slot] = GpuTransferHelper.AllocateDevice(outputBytes[slot]);
+                pWeights[slot] = GpuTransferHelper.CopyToDevice(op.Weight);
+                ulong biasF32 = 0;
+                if (op.Bias is not null)
+                {
+                    pBiases[slot] = GpuTransferHelper.CopyToDevice(op.Bias);
+                    biasF32 = CastIfNeeded(pBiases[slot], op.Bias.DType, DType.F32,
+                        (int)op.Bias.ElementCount, out biasCasts[slot]);
+                }
+                targets[slot] = targets[slot] with
+                {
+                    Weight = pWeights[slot],
+                    Output = pOutputs[slot],
+                    BiasF32 = biasF32,
+                };
+                slot++;
+            }
+
+            RunResidentInt8(pInput, input.DType, m, k, group, targets);
+
+            // Publish only after every launch succeeds, and unpublish on a partial failure — same rule as Split.
+            try
+            {
+                for (int t = 0; t < grouped; t++)
+                {
+                    GpuTransferHelper.CacheActivation(GetGroupedOutput(ops, eligible, t), pOutputs[t], outputBytes[t]);
+                    cachedOutputs[t] = true;
+                }
+            }
+            catch
+            {
+                for (int t = 0; t < grouped; t++)
+                {
+                    if (GpuTransferHelper.TryUncacheActivation(GetGroupedOutput(ops, eligible, t), pOutputs[t]))
+                        cachedOutputs[t] = false;
+                }
+                throw;
+            }
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pInput);
+            for (int t = 0; t < grouped; t++)
+            {
+                GpuTransferHelper.FreeDevice(pWeights[t]);
+                GpuTransferHelper.FreeDevice(pBiases[t]);
+                if (biasCasts[t] != 0) CudaMemory.FreeAsync(biasCasts[t], _stream.Handle);
+                if (!cachedOutputs[t]) GpuTransferHelper.FreeDevice(pOutputs[t]);
+            }
+        }
+
+        for (int i = 0; i < ops.Length; i++)
+        {
+            if (!eligible[i]) Linear(ops[i].Output, input, ops[i].Weight, ops[i].Bias);
+        }
+    }
+
+    private static Tensor GetGroupedOutput(ReadOnlySpan<LinearOp> ops, ReadOnlySpan<bool> eligible, int slot)
+    {
+        for (int i = 0; i < ops.Length; i++)
+        {
+            if (eligible[i] && slot-- == 0) return ops[i].Output;
+        }
+        throw new ArgumentOutOfRangeException(nameof(slot));
     }
 
     private unsafe void LinearImpl(Tensor output, Tensor input, Tensor weight, Tensor? bias, bool cacheWeightCast,
@@ -1816,96 +2101,14 @@ public sealed class CudaBackend : IBackend
             // weight arrives ALREADY quantized (its per-output-row scale comes from the file rather than a host
             // quant pass), so a 22B DiT stays at 1 byte/param instead of expanding to BF16; and when the quantizer
             // rotated the weight (W @ Hᵀ) the activation owes an x @ H first, which is what makes the product come
-            // back out as x·Wᵀ — H is its own inverse.
-            //
-            // Chunked over rows because the int32 accumulator is 4 bytes per output element: at video token counts
-            // a single unchunked m·n·4 buffer runs to gigabytes (H3's mlp.fc1 is n=28672). Each chunk is padded up
-            // to the 32-row granularity cuBLASLt's int8 TN kernels want, exactly as comfy-kitchen's own
-            // _int8_matmul_accumulate does — 31 wasted rows of int8 compute beats materializing the weight.
+            // back out as x·Wᵀ — H is its own inverse. See RunResidentInt8 for the chain itself.
             if (int8Resident)
             {
-                int group = weight.QuantInfo!.ConvRotGroupSize;
-                ulong wScaleDev = int8RowScaleDev;
-                ulong biasF32 = bias is null
-                    ? 0
-                    : CastIfNeeded(pBias, bias!.DType, DType.F32, (int)bias.ElementCount, out pBiasCast);
-                bool srcF16 = input.DType == DType.F16;
-                int inputElementBytes = input.DType.SizeInBytes;
-                int colChunk = Int8ResidentColChunk(n);
-                int rowChunk = Int8ResidentRowChunk(m, Math.Min(n, colChunk), k, group > 0 ? inputElementBytes : 0);
-                int paddedChunk = PadInt8Rows(rowChunk);
-                int accCols = Math.Min(n, colChunk);
-
-                ulong pRot = 0, pAct8 = 0, pRowScale = 0, pOut32 = 0;
-                try
-                {
-                    if (group > 0)
-                        pRot = GpuTransferHelper.AllocateDevice((nuint)((long)rowChunk * k * inputElementBytes));
-                    pAct8 = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * k));
-                    pRowScale = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * sizeof(float)));
-                    pOut32 = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * accCols * sizeof(int)));
-                    // The pad rows are deliberately left unwritten rather than zeroed: every byte is a valid int8,
-                    // k·127² stays an order of magnitude inside int32 for any shape here (2.48e8 at k=15360 against
-                    // int32's 2.15e9), and the epilogue below is launched with `rows`, so those accumulators are
-                    // never read. A memset would cost a full-stream sync (cuMemsetD8 runs on the legacy null
-                    // stream) on every single Linear.
-
-                    for (int firstRow = 0; firstRow < m; firstRow += rowChunk)
-                    {
-                        int rows = Math.Min(rowChunk, m - firstRow);
-                        ulong inputChunk = pInput + (ulong)((long)firstRow * k * inputElementBytes);
-                        ulong quantSource = inputChunk;
-                        if (group > 0 && _kernels!.HasFusedConvRotQuant(k, group))
-                        {
-                            // Rotation + per-row quant in one pass: the split pair wrote a full-width rotated
-                            // activation to HBM only for the quantizer to read it straight back.
-                            _kernels.LaunchConvRotQuantRowwise(pAct8, pRowScale, inputChunk, rows, k, group, _stream.Handle, srcF16);
-                        }
-                        else
-                        {
-                            if (group > 0)
-                            {
-                                _kernels!.LaunchConvRotRotate(pRot, inputChunk, (long)rows * k, group, _stream.Handle, srcF16);
-                                quantSource = pRot;
-                            }
-                            _kernels!.LaunchW8A8QuantRowwise(pAct8, pRowScale, quantSource, rows, k, _stream.Handle, srcF16);
-                        }
-                        ulong outputChunk = pOutput + (ulong)((long)firstRow * n * output.DType.SizeInBytes);
-                        int padded = PadInt8Rows(rows);
-                        if (colChunk >= n)
-                        {
-                            Int8Gemm.Run(pWeight, pAct8, pOut32, padded, n, k, _stream.Handle);
-                            _kernels!.LaunchW8A8DequantBias(outputChunk, pOut32, pRowScale, wScaleDev, biasF32,
-                                rows, n, _stream.Handle, outF16: output.DType == DType.F16, actMode: fuseGelu ? 1u : 0u);
-                        }
-                        else
-                        {
-                            // Tile over N so the int32 accumulator is a small slice consumed by the dequant while
-                            // it is still in L2, instead of a full [rows, n] buffer streamed out to HBM and read
-                            // straight back. The weight is [N, K] row-major, so a column slice of the output is a
-                            // contiguous ROW range of the weight — just a pointer offset, no repack.
-                            for (int firstCol = 0; firstCol < n; firstCol += colChunk)
-                            {
-                                int cols = Math.Min(colChunk, n - firstCol);
-                                Int8Gemm.Run(pWeight + (ulong)((long)firstCol * k), pAct8, pOut32, padded, cols, k, _stream.Handle);
-                                _kernels!.LaunchW8A8DequantBiasStrided(
-                                    outputChunk + (ulong)((long)firstCol * output.DType.SizeInBytes),
-                                    pOut32, pRowScale,
-                                    wScaleDev + (ulong)((long)firstCol * sizeof(float)),
-                                    biasF32 == 0 ? 0 : biasF32 + (ulong)((long)firstCol * sizeof(float)),
-                                    rows, cols, n, _stream.Handle,
-                                    outF16: output.DType == DType.F16, actMode: fuseGelu ? 1u : 0u);
-                            }
-                        }
-                    }
-                }
-                finally
-                {
-                    if (pRot != 0) GpuTransferHelper.FreeDevice(pRot);
-                    if (pAct8 != 0) GpuTransferHelper.FreeDevice(pAct8);
-                    if (pRowScale != 0) GpuTransferHelper.FreeDevice(pRowScale);
-                    if (pOut32 != 0) GpuTransferHelper.FreeDevice(pOut32);
-                }
+                Int8ResidentTarget target = new(pWeight, pOutput, bias is null
+                        ? 0
+                        : CastIfNeeded(pBias, bias!.DType, DType.F32, (int)bias.ElementCount, out pBiasCast),
+                    int8RowScaleDev, n, output.DType == DType.F16, fuseGelu);
+                RunResidentInt8(pInput, input.DType, m, k, weight.QuantInfo!.ConvRotGroupSize, [target]);
                 GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                 cachedOutput = true;
                 return;

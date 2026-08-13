@@ -42,11 +42,21 @@ public sealed unsafe class Int8GemmExecutor : IDisposable
 
     /// <summary>Runs <c>D_i32[M, N] = input_i8[M, K] · weight_i8^T[N, K]</c> (alpha=1, beta=0, int32
     /// accumulate). All pointers are device pointers; <paramref name="outPtr"/> must hold M·N int32.</summary>
-    /// <remarks>MEASURED 2026-08-13, do not re-chase: caching the descriptors + the heuristic result per shape
-    /// (removing ~45k redundant host cuBLASLt calls per step) is within run noise, and autotuning the 16
-    /// heuristic candidates on real buffers is WORSE (1543 vs 1510 ms/step) because a 3-rep timing is noisy
-    /// enough to lock in a bad algo permanently. cuBLASLt's first heuristic pick is already its best; its
-    /// int8 ceiling here is ~385 TOPS against comfy-kitchen's CUTLASS at 496-538.</remarks>
+    /// <remarks><para>The five per-call cuBLASLt object creations below look like obvious waste and are not.
+    /// Caching the descriptor, the layouts and the heuristic pick — removing ~45k host cuBLASLt calls per LTX-2.5
+    /// step — was built and measured on 2026-08-13 with 4 interleaved reps per arm: <b>1428.5 vs 1428.4 ms/step,
+    /// paired mean +0.1, t = 0.02</b>. A dead null, so the cache was reverted rather than carried. The reason is
+    /// structural and applies to every host-side optimization on this path: the GPU runs at 99-100% SM occupancy,
+    /// so host time spent queuing work is hidden behind execution and never reaches the wall clock. The driver
+    /// calls really are slow in isolation (<c>Int8ResidentHostCostTests</c> measures <c>cuMemGetInfo</c> at 5.2 µs
+    /// and a pool alloc/free pair at 1.2 µs); that is simply not where the time goes.</para>
+    /// <para>An earlier version of this note reported the same conclusion from a single run per arm, before the
+    /// harness's ~25 ms/step between-run spread was quantified — which established nothing. The numbers above
+    /// replace it.</para>
+    /// <para>Also do-not-re-chase: autotuning the 16 heuristic candidates on real buffers is WORSE (1543 vs
+    /// 1510 ms/step) because a 3-rep timing is noisy enough to lock in a bad algo permanently. cuBLASLt's first
+    /// heuristic pick is already its best; its int8 ceiling here is ~385 TOPS against comfy-kitchen's CUTLASS at
+    /// 496-538 — that gap is a KERNEL problem (see VIDEO.md for their exact CUTLASS config), not a host one.</para></remarks>
     public void Run(ulong weight, ulong input, ulong outPtr, int m, int n, int k, nint stream)
     {
         if (!IsSupported)
