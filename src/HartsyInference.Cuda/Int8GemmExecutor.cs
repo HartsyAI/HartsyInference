@@ -42,6 +42,11 @@ public sealed unsafe class Int8GemmExecutor : IDisposable
 
     /// <summary>Runs <c>D_i32[M, N] = input_i8[M, K] · weight_i8^T[N, K]</c> (alpha=1, beta=0, int32
     /// accumulate). All pointers are device pointers; <paramref name="outPtr"/> must hold M·N int32.</summary>
+    /// <remarks>MEASURED 2026-08-13, do not re-chase: caching the descriptors + the heuristic result per shape
+    /// (removing ~45k redundant host cuBLASLt calls per step) is within run noise, and autotuning the 16
+    /// heuristic candidates on real buffers is WORSE (1543 vs 1510 ms/step) because a 3-rep timing is noisy
+    /// enough to lock in a bad algo permanently. cuBLASLt's first heuristic pick is already its best; its
+    /// int8 ceiling here is ~385 TOPS against comfy-kitchen's CUTLASS at 496-538.</remarks>
     public void Run(ulong weight, ulong input, ulong outPtr, int m, int n, int k, nint stream)
     {
         if (!IsSupported)

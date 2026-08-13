@@ -24,9 +24,13 @@ internal sealed class CudnnSdpa : IDisposable
     private readonly ConcurrentDictionary<PlanKey, Lazy<Plan>> _plans = new();
     private bool _disposed;
 
+    /// <summary>Memory layout of the Q/K/V/O device buffers. <c>TokenMajor</c> is [b,s,h,d] addressed purely by
+    /// strides — what a fused QKV projection already produces, so callers can skip the permute on both sides.</summary>
+    internal enum SdpaLayout { HeadMajor, TokenMajor }
+
     /// <summary>Exact identity of a cached execution plan and its immutable device scale scalar.</summary>
     internal readonly record struct PlanKey(
-        long B, long H, long Sq, long Sk, long D, int ScaleBits, bool HasBias, long BiasB);
+        long B, long H, long Sq, long Sk, long D, int ScaleBits, bool HasBias, long BiasB, SdpaLayout Layout);
 
     private sealed class Plan
     {
@@ -69,13 +73,19 @@ internal sealed class CudnnSdpa : IDisposable
     public unsafe void Execute(ulong qF16, ulong kF16, ulong vF16, ulong oF16,
                                long b, long h, long sq, long sk, long d, float scale,
                                ulong biasF32 = 0, long biasB = 1)
+        => Execute(qF16, kF16, vF16, oF16, b, h, sq, sk, d, scale, SdpaLayout.HeadMajor, biasF32, biasB);
+
+    /// <summary>Same as the head-major overload but lets the caller pick the Q/K/V/O buffer layout.</summary>
+    internal unsafe void Execute(ulong qF16, ulong kF16, ulong vF16, ulong oF16,
+                                 long b, long h, long sq, long sk, long d, float scale,
+                                 SdpaLayout layout, ulong biasF32 = 0, long biasB = 1)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         bool hasBias = biasF32 != 0;
         PlanKey key = new PlanKey(
-            b, h, sq, sk, d, BitConverter.SingleToInt32Bits(scale), hasBias, biasB);
+            b, h, sq, sk, d, BitConverter.SingleToInt32Bits(scale), hasBias, biasB, layout);
         Lazy<Plan> candidate = new(
-            () => BuildPlan(b, h, sq, sk, d, scale, hasBias, biasB),
+            () => BuildPlan(b, h, sq, sk, d, scale, hasBias, biasB, layout),
             LazyThreadSafetyMode.ExecutionAndPublication);
         Lazy<Plan> cached = _plans.GetOrAdd(key, candidate);
         Plan plan;
@@ -119,24 +129,28 @@ internal sealed class CudnnSdpa : IDisposable
     private const long UidQ = 1, UidK = 2, UidV = 3, UidO = 4, UidScale = 5, UidBias = 6;
     private const long UidS = 100, UidSS = 101, UidP = 102, UidSB = 103;
 
-    private unsafe Plan BuildPlan(long b, long h, long sq, long sk, long d, float scale, bool hasBias, long biasB)
+    private unsafe Plan BuildPlan(
+        long b, long h, long sq, long sk, long d, float scale, bool hasBias, long biasB, SdpaLayout layout)
     {
         List<nint> owned = new();   // build-time descriptors to destroy once the plan is finalized
         try
         {
-            // ── tensors (4D [b,h,s,d]); contiguous row-major strides computed inline ──
+            // ── tensors (4D [b,h,s,d]); only the head/sequence strides differ between the two layouts ──
+            bool tokenMajor = layout == SdpaLayout.TokenMajor;
+            long qHeadStr = tokenMajor ? d : sq * d, qSeqStr = tokenMajor ? h * d : d;
+            long kHeadStr = tokenMajor ? d : sk * d, kSeqStr = tokenMajor ? h * d : d;
             long* qDim = stackalloc long[4] { b, h, sq, d };
-            long* qStr = stackalloc long[4] { h * sq * d, sq * d, d, 1 };
+            long* qStr = stackalloc long[4] { h * sq * d, qHeadStr, qSeqStr, 1 };
             nint tQ = Tensor(owned, UidQ, qDim, qStr, CUDNN_DATA_HALF, false);
             // Kᵀ: view the [b,h,sk,d] buffer as [b,h,d,sk] by swapping the last two dims/strides.
             long* ktDim = stackalloc long[4] { b, h, d, sk };
-            long* ktStr = stackalloc long[4] { h * sk * d, sk * d, 1, d };
+            long* ktStr = stackalloc long[4] { h * sk * d, kHeadStr, 1, kSeqStr };
             nint tKt = Tensor(owned, UidK, ktDim, ktStr, CUDNN_DATA_HALF, false);
             long* vDim = stackalloc long[4] { b, h, sk, d };
-            long* vStr = stackalloc long[4] { h * sk * d, sk * d, d, 1 };
+            long* vStr = stackalloc long[4] { h * sk * d, kHeadStr, kSeqStr, 1 };
             nint tV = Tensor(owned, UidV, vDim, vStr, CUDNN_DATA_HALF, false);
             long* oDim = stackalloc long[4] { b, h, sq, d };
-            long* oStr = stackalloc long[4] { h * sq * d, sq * d, d, 1 };
+            long* oStr = stackalloc long[4] { h * sq * d, qHeadStr, qSeqStr, 1 };
             nint tO = Tensor(owned, UidO, oDim, oStr, CUDNN_DATA_HALF, false);
             long* one = stackalloc long[4] { 1, 1, 1, 1 };
             nint tScale = Tensor(owned, UidScale, one, one, CUDNN_DATA_FLOAT, false);

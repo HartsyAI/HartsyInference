@@ -1758,6 +1758,64 @@ extern "C" __global__ void ltx2_qk_norm_rope_headmajor_f32(
     }
 }
 
+// ── LTX-2 fused QK-norm + split-RoPE, TOKEN-MAJOR emit (F32 twin) ──────────
+// See the f16 twin in dit_f16.cu: identical math, contiguous store instead of the scattered head-major one.
+extern "C" __global__ void ltx2_qk_norm_rope_tokenmajor_f32(
+    float* __restrict__ out,
+    const float* __restrict__ in,
+    const float* __restrict__ normW,
+    const float* __restrict__ cosT,
+    const float* __restrict__ sinT,
+    unsigned int seq, unsigned int heads, unsigned int headDim, float eps)
+{
+    extern __shared__ float smemTm32[];
+    float* sred = smemTm32;
+    float* srow = smemTm32 + blockDim.x;
+    unsigned int W = heads * headDim;
+    unsigned int s = blockIdx.x;
+    if (s >= seq) return;
+    const float* inRow = in + (size_t)s * W;
+    float* outRow = out + (size_t)s * W;
+
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < W; i += blockDim.x)
+    {
+        float v = inRow[i];
+        srow[i] = v;
+        partial += v * v;
+    }
+    sred[threadIdx.x] = partial;
+    __syncthreads();
+    for (unsigned int st = blockDim.x >> 1; st > 0; st >>= 1)
+    {
+        if (threadIdx.x < st) sred[threadIdx.x] += sred[threadIdx.x + st];
+        __syncthreads();
+    }
+    float inv = rsqrtf(sred[0] / (float)W + eps);
+    for (unsigned int i = threadIdx.x; i < W; i += blockDim.x)
+        srow[i] = srow[i] * inv * (normW ? normW[i] : 1.0f);
+    __syncthreads();
+
+    unsigned int r = headDim >> 1;
+    unsigned int halfW = W >> 1;
+    for (unsigned int i = threadIdx.x; i < W; i += blockDim.x)
+    {
+        unsigned int h = i / headDim;
+        unsigned int d = i - h * headDim;
+        float val;
+        if (cosT != 0)
+        {
+            unsigned int lane = h * r + (d < r ? d : d - r);
+            float c = cosT[(size_t)s * halfW + lane];
+            float sn = sinT[(size_t)s * halfW + lane];
+            if (d < r) { float a = srow[i], b = srow[i + r]; val = a * c - b * sn; }
+            else       { float a = srow[i - r], b = srow[i]; val = b * c + a * sn; }
+        }
+        else val = srow[i];
+        outRow[i] = val;
+    }
+}
+
 // ── LTX-2 fused per-head output gate, in place (F32 twin) ──────────────────
 // x[s, h*headDim + d] *= 2 * sigmoid(logits[s, h]). Sign-aware expf, matching dit_sigmoid_f32's form.
 extern "C" __global__ void ltx2_head_gate_f32(

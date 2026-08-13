@@ -36,12 +36,18 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _w8a8QuantRowwiseF32;
     private readonly nint _w8a8DequantBiasF16;
     private readonly nint _w8a8DequantBiasF32;
+    private readonly nint _w8a8DequantBiasStridedF16;
+    private readonly nint _w8a8DequantBiasStridedF32;
 
     // Optional: ConvRot activation rotation (convrot.ptx, src/HartsyInference.Cuda/Kernels/dequant) — the x @ H a
     // ComfyUI int8_tensorwise+convrot weight owes its GEMM. Null when not compiled.
     private readonly CudaModule? _convRotModule;
     private readonly nint _convRotRotateF16;
     private readonly nint _convRotRotateF32;
+    private readonly nint _convRotQuantF16;
+    private readonly nint _convRotQuantF32;
+    private readonly CudaModule? _int8MmaModule;
+    private readonly nint _int8MmaGemmF16;
 
     // Optional: NVFP4 packed-weight dequant (dequant_nvfp4_to_f16.ptx, src/HartsyInference.Cuda/Kernels/dequant) — the
     // per-GEMM unpack that lets a ComfyUI nvfp4 checkpoint stay resident at 0.5 byte/param. Null when not compiled.
@@ -295,8 +301,12 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ltx2SplitRopeF32;
     private readonly nint _ltx2SplitRopeF16;
     private readonly nint _ltx2QkNormRopeHeadMajorF16;
+    private readonly nint _ltx2QkNormRopeTokenMajorF16;
+    private readonly nint _ltx2QkNormRopeHeadMajorRopeF16;
+    private readonly nint _ltx2QkNormRopeTokenMajorRopeF16;
     private readonly nint _ltx2HeadGateF16;
     private readonly nint _ltx2QkNormRopeHeadMajorF32;
+    private readonly nint _ltx2QkNormRopeTokenMajorF32;
     private readonly nint _ltx2HeadGateF32;
     private readonly nint _ltx2RmsModulateF16;
     private readonly nint _ltx2RmsModulateF32;
@@ -581,6 +591,8 @@ public sealed class CudaKernels : IDisposable
             _w8a8QuantRowwiseF32 = _w8a8Module.GetFunction("w8a8_quant_rowwise_f32");
             _w8a8DequantBiasF16 = _w8a8Module.GetFunction("w8a8_dequant_bias_f16");
             _w8a8DequantBiasF32 = _w8a8Module.GetFunction("w8a8_dequant_bias_f32");
+            _w8a8DequantBiasStridedF16 = _w8a8Module.GetFunction("w8a8_dequant_bias_strided_f16");
+            _w8a8DequantBiasStridedF32 = _w8a8Module.GetFunction("w8a8_dequant_bias_strided_f32");
         }
 
         // Optional module: ConvRot rotation (src/HartsyInference.Cuda/Kernels/dequant/convrot.cu). Absence is not an error.
@@ -590,6 +602,16 @@ public sealed class CudaKernels : IDisposable
             _convRotModule = LoadOwnedModule(convRotPath);
             _convRotRotateF16 = _convRotModule.GetFunction("convrot_rotate_f16");
             _convRotRotateF32 = _convRotModule.GetFunction("convrot_rotate_f32");
+            _convRotQuantF16 = _convRotModule.GetFunction("convrot_quant_rowwise_f16");
+            _convRotQuantF32 = _convRotModule.GetFunction("convrot_quant_rowwise_f32");
+        }
+
+        // Optional module: fused-dequant int8 mma GEMM (Kernels/dequant/int8_mma_gemm.cu). Absence is not an error.
+        string mmaPath = Path.Combine(ptxDir, "int8_mma_gemm.ptx");
+        if (File.Exists(mmaPath))
+        {
+            _int8MmaModule = LoadOwnedModule(mmaPath);
+            _int8MmaGemmF16 = _int8MmaModule.GetFunction("int8_mma_gemm_dequant_f16");
         }
 
         // Optional module: NVFP4 dequant (src/HartsyInference.Cuda/Kernels/dequant/dequant_nvfp4_to_f16.cu). Absence is not an error.
@@ -762,6 +784,7 @@ public sealed class CudaKernels : IDisposable
         }
         _ltx2SplitRopeF32 = _ditF32Module.GetFunction("ltx2_split_rope_f32");
         _ltx2QkNormRopeHeadMajorF32 = _ditF32Module.GetFunction("ltx2_qk_norm_rope_headmajor_f32");
+        _ltx2QkNormRopeTokenMajorF32 = _ditF32Module.GetFunction("ltx2_qk_norm_rope_tokenmajor_f32");
         _ltx2HeadGateF32 = _ditF32Module.GetFunction("ltx2_head_gate_f32");
         _ltx2RmsModulateF32 = _ditF32Module.GetFunction("ltx2_rms_modulate_f32");
         _ditSliceLastDimF32 = _ditF32Module.GetFunction("dit_slice_lastdim_f32");
@@ -815,6 +838,9 @@ public sealed class CudaKernels : IDisposable
         _ditRopeInterleavedF16 = _ditF16Module.GetFunction("dit_rope_interleaved_f16");
         _ltx2SplitRopeF16 = _ditF16Module.GetFunction("ltx2_split_rope_f16");
         _ltx2QkNormRopeHeadMajorF16 = _ditF16Module.GetFunction("ltx2_qk_norm_rope_headmajor_f16");
+        _ltx2QkNormRopeTokenMajorF16 = _ditF16Module.GetFunction("ltx2_qk_norm_rope_tokenmajor_f16");
+        _ltx2QkNormRopeHeadMajorRopeF16 = _ditF16Module.GetFunction("ltx2_qk_norm_rope_headmajor_rf16_f16");
+        _ltx2QkNormRopeTokenMajorRopeF16 = _ditF16Module.GetFunction("ltx2_qk_norm_rope_tokenmajor_rf16_f16");
         _ltx2HeadGateF16 = _ditF16Module.GetFunction("ltx2_head_gate_f16");
         _ltx2RmsModulateF16 = _ditF16Module.GetFunction("ltx2_rms_modulate_f16");
         _ditRopeF16 = _ditF16Module.GetFunction("dit_rope_f16");
@@ -1978,6 +2004,24 @@ public sealed class CudaKernels : IDisposable
             grid, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Dequant epilogue writing a column SLICE into a wider destination row. <paramref name="d32"/> is
+    /// a contiguous <c>[rows, cols]</c> int32 tile; <paramref name="wScale"/>/<paramref name="bias"/> must be
+    /// pre-offset to that slice. Lets the caller tile the GEMM over N so the accumulator stays in L2.</summary>
+    public unsafe void LaunchW8A8DequantBiasStrided(ulong output, ulong d32, ulong rowScale, ulong wScale, ulong bias,
+        int rows, int cols, int outStride, nint stream, bool outF16, uint actMode = 0)
+    {
+        if (_w8a8Module is null) throw new InvalidOperationException("w8a8.ptx not present in the Ptx folder.");
+        ulong dArg = d32, rsArg = rowScale, wsArg = wScale, bArg = bias, oArg = output;
+        uint rowsArg = (uint)rows, colsArg = (uint)cols, strideArg = (uint)outStride, actArg = actMode;
+        void** args = stackalloc void*[9];
+        args[0] = &dArg; args[1] = &rsArg; args[2] = &wsArg; args[3] = &bArg; args[4] = &oArg;
+        args[5] = &rowsArg; args[6] = &colsArg; args[7] = &strideArg; args[8] = &actArg;
+        long n = (long)rows * cols;
+        uint grid = (uint)Math.Min((n + 255) / 256, 65535);
+        CudaDriverApi.cuLaunchKernel(outF16 ? _w8a8DequantBiasStridedF16 : _w8a8DequantBiasStridedF32,
+            grid, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Whether the optional convrot.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant/convrot.cu).</summary>
     public bool HasConvRotKernels => _convRotModule is not null;
 
@@ -2003,6 +2047,61 @@ public sealed class CudaKernels : IDisposable
         ulong blocks = (totalGroups + groupsPerBlock - 1) / groupsPerBlock;
         CudaDriverApi.cuLaunchKernel(srcF16 ? _convRotRotateF16 : _convRotRotateF32,
             (uint)blocks, 1, 1, 256, 1, 1, sharedBytes, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Shared-memory floats the fused ConvRot+quant kernel may use for one row. 8192 floats = 32 KB,
+    /// which keeps several blocks per SM on Ada; wider rows keep the two-kernel path.</summary>
+    private const int FusedConvRotMaxCols = 8192;
+
+    /// <summary>Whether <see cref="LaunchConvRotQuantRowwise"/> can serve this row width — the fused kernel
+    /// stages the whole row in shared memory, so <paramref name="cols"/> is bounded and must divide by group.</summary>
+    /// <remarks><paramref name="group"/> must be a power of FOUR: the Hadamard is kron(h4, ..., h4), so the
+    /// rotation is exactly log4(group) radix-4 stages and a group like 128 has no valid decomposition.</remarks>
+    public bool HasFusedConvRotQuant(int cols, int group) =>
+        _convRotModule is not null && cols > 0 && cols <= FusedConvRotMaxCols
+        && group >= 4 && cols % group == 0
+        && (group & (group - 1)) == 0 && (group & 0x55555554) != 0;
+
+    /// <summary>Fused ConvRot rotation + per-row dynamic int8 quantization: replaces
+    /// <see cref="LaunchConvRotRotate"/> followed by <see cref="LaunchW8A8QuantRowwise"/>, dropping the
+    /// full-width rotated intermediate (7 bytes/element of traffic down to 3). Bit-identical to that pair.</summary>
+    public unsafe void LaunchConvRotQuantRowwise(ulong q, ulong rowScale, ulong x, int rows, int cols,
+        int group, nint stream, bool srcF16)
+    {
+        if (!HasFusedConvRotQuant(cols, group))
+            throw new InvalidOperationException($"fused ConvRot+quant unavailable for cols={cols}, group={group}.");
+        ulong xArg = x, qArg = q, sArg = rowScale;
+        uint colsArg = (uint)cols, groupArg = (uint)group;
+        void** args = stackalloc void*[5];
+        args[0] = &xArg; args[1] = &qArg; args[2] = &sArg; args[3] = &colsArg; args[4] = &groupArg;
+        uint sharedBytes = (uint)((long)cols * sizeof(float));
+        CudaDriverApi.cuLaunchKernel(srcF16 ? _convRotQuantF16 : _convRotQuantF32,
+            (uint)rows, 1, 1, 256, 1, 1, sharedBytes, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the fused-dequant int8 mma GEMM can serve this shape. The kernel tiles 128x128x64 with
+    /// no N/K remainder handling (M is predicated), so K and N must be whole multiples; every LTX-2.5 DiT shape
+    /// is. Callers fall back to <see cref="Int8GemmExecutor"/> + the separate dequant kernel otherwise.</summary>
+    public bool HasInt8MmaGemm(int m, int n, int k) =>
+        _int8MmaModule is not null && m > 0 && n % 128 == 0 && k % 64 == 0;
+
+    /// <summary>Fused int8 GEMM + W8A8 dequant: <c>D[M,N] = act(actScale[m]·wScale[n]·(A·Bᵀ) + bias[n])</c>,
+    /// F16 out. Replaces the cuBLASLt GEMM + <c>w8a8_dequant_bias</c> pair, so the int32 accumulator never
+    /// reaches HBM. <paramref name="actMode"/> matches that kernel's (0 none, 1 gelu-tanh).</summary>
+    public unsafe void LaunchInt8MmaGemmDequant(ulong d, ulong a, ulong b, ulong actScale, ulong wScale,
+        ulong bias, int m, int n, int k, uint actMode, nint stream)
+    {
+        if (!HasInt8MmaGemm(m, n, k))
+            throw new InvalidOperationException($"fused int8 mma GEMM unavailable for {m}x{n}x{k}.");
+        ulong dA = d, aA = a, bA = b, asA = actScale, wsA = wScale, biA = bias;
+        uint mA = (uint)m, nA = (uint)n, kA = (uint)k, actA = actMode;
+        void** args = stackalloc void*[10];
+        args[0] = &dA; args[1] = &aA; args[2] = &bA; args[3] = &asA; args[4] = &wsA; args[5] = &biA;
+        args[6] = &mA; args[7] = &nA; args[8] = &kA; args[9] = &actA;
+        // 2 stages x 2 operands x 128 rows x 80 B.
+        uint shared = 4u * 128u * 80u;
+        uint gridX = (uint)(n / 128), gridY = (uint)((m + 127) / 128);
+        CudaDriverApi.cuLaunchKernel(_int8MmaGemmF16, gridX, gridY, 1, 256, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Whether the optional dequant_nvfp4_to_f16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>
@@ -3872,9 +3971,10 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>Fused LTX-2 QK path: full-row RMS norm -> optional split RoPE -> head-major emit, one pass.
     /// <paramref name="normW"/>/<paramref name="cos"/>/<paramref name="sin"/> may be 0. Shared memory is
-    /// <c>(BlockSize + heads*headDim)</c> floats, so the caller must keep that under the 48 KB static limit.</summary>
+    /// <c>(BlockSize + heads*headDim)</c> floats, so the caller must keep that under the 48 KB static limit.
+    /// <paramref name="ropeF16"/> selects the F16-cos/sin variant (F32 activation has none — see the dispatch).</summary>
     public unsafe void LaunchLtx2QkNormRopeHeadMajor(ulong outp, ulong x, ulong normW, ulong cos, ulong sin,
-        int seq, int heads, int headDim, float eps, nint stream, bool f16)
+        int seq, int heads, int headDim, float eps, nint stream, bool f16, bool ropeF16 = false)
     {
         ulong oA = outp, xA = x, nA = normW, cA = cos, sA = sin;
         uint sqA = (uint)seq, hA = (uint)heads, dA = (uint)headDim; float eA = eps;
@@ -3882,7 +3982,23 @@ public sealed class CudaKernels : IDisposable
         args[0] = &oA; args[1] = &xA; args[2] = &nA; args[3] = &cA; args[4] = &sA;
         args[5] = &sqA; args[6] = &hA; args[7] = &dA; args[8] = &eA;
         uint shared = (uint)((BlockSize + heads * headDim) * sizeof(float));
-        CudaDriverApi.cuLaunchKernel(f16 ? _ltx2QkNormRopeHeadMajorF16 : _ltx2QkNormRopeHeadMajorF32, (uint)seq, 1, 1, BlockSize, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
+        nint fn = f16 ? (ropeF16 ? _ltx2QkNormRopeHeadMajorRopeF16 : _ltx2QkNormRopeHeadMajorF16) : _ltx2QkNormRopeHeadMajorF32;
+        CudaDriverApi.cuLaunchKernel(fn, (uint)seq, 1, 1, BlockSize, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Token-major twin of <see cref="LaunchLtx2QkNormRopeHeadMajor"/>: same math, output stays
+    /// <c>[seq, heads*headDim]</c> so the row is written where it was read (no scattered head-plane store).</summary>
+    public unsafe void LaunchLtx2QkNormRopeTokenMajor(ulong outp, ulong x, ulong normW, ulong cos, ulong sin,
+        int seq, int heads, int headDim, float eps, nint stream, bool f16, bool ropeF16 = false)
+    {
+        ulong oA = outp, xA = x, nA = normW, cA = cos, sA = sin;
+        uint sqA = (uint)seq, hA = (uint)heads, dA = (uint)headDim; float eA = eps;
+        void** args = stackalloc void*[9];
+        args[0] = &oA; args[1] = &xA; args[2] = &nA; args[3] = &cA; args[4] = &sA;
+        args[5] = &sqA; args[6] = &hA; args[7] = &dA; args[8] = &eA;
+        uint shared = (uint)((BlockSize + heads * headDim) * sizeof(float));
+        nint fn = f16 ? (ropeF16 ? _ltx2QkNormRopeTokenMajorRopeF16 : _ltx2QkNormRopeTokenMajorF16) : _ltx2QkNormRopeTokenMajorF32;
+        CudaDriverApi.cuLaunchKernel(fn, (uint)seq, 1, 1, BlockSize, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Fused LTX-2 RMS-norm + AdaLN shift/scale: <c>out = norm(in)*(1+scale)+shift</c>, one pass.</summary>

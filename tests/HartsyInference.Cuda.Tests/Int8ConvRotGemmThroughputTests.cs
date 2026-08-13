@@ -59,6 +59,10 @@ public sealed unsafe class Int8ConvRotGemmThroughputTests
     [InlineData(9984, 16384, 4096, "ffn_up_cfg2")]
     [InlineData(9984, 4096, 16384, "ffn_down_cfg2")]
     [InlineData(9984, 4096, 4096, "attn_qkvo_cfg2")]
+    // Big square: maximum arithmetic intensity, so the ConvRot + per-row quant + dequant passes amortize to
+    // nothing and what is left is essentially the raw IMMA rate. This is the shape that separates "our chain
+    // has overhead" from "the card will not go faster".
+    [InlineData(8192, 8192, 8192, "square8k_max")]
     public void ResidentInt8Linear_AchievedThroughput(int m, int n, int k, string label)
     {
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
@@ -81,6 +85,39 @@ public sealed unsafe class Int8ConvRotGemmThroughputTests
         double tops = flop / (perCallMs * 1e-3) / 1e12;
         _output.WriteLine($"{label,-10} m={m} n={n} k={k}  {perCallMs:F3} ms/call  {tops:F1} TOPS " +
             $"({tops / 330.0 * 100:F0}% of the 4090's ~330 TOPS dense INT8 peak)");
+        Assert.True(perCallMs > 0);
+    }
+
+    /// <summary>Same shapes, same harness, plain F16 weights — the control the int8 numbers were missing. The
+    /// 4090's FP16 tensor rate with FP32 accumulate is ~165 TFLOPS (half its 330 FP16-accumulate rate, the
+    /// GeForce Ada limiter); its dense INT8 rate is 2x the 330 = ~660 TOPS, NOT 330. Running both through the
+    /// SAME Linear says whether the int8 chain is near ITS peak or merely near the F16 path's.</summary>
+    [Theory]
+    [InlineData(4992, 16384, 4096, "ffn_up_f16")]
+    [InlineData(4992, 4096, 16384, "ffn_down_f16")]
+    [InlineData(4992, 4096, 4096, "attn_qkvo_f16")]
+    public void F16Linear_AchievedThroughput_Control(int m, int n, int k, string label)
+    {
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        using Tensor w32 = Act(n, k, DType.F32, seed: 7);
+        using Tensor w = w32.CastTo(DType.F16);
+        using Tensor x = Act(m, k, DType.F16, seed: 11);
+        using Tensor y = new Tensor(new TensorShape(m, n), DType.F16);
+
+        cuda.PreloadWeights([w]);
+        for (int i = 0; i < 3; i++) cuda.Linear(y, x, w, null);
+        cuda.Sync();
+
+        const int Reps = 20;
+        System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < Reps; i++) cuda.Linear(y, x, w, null);
+        cuda.Sync();
+        sw.Stop();
+
+        double perCallMs = sw.Elapsed.TotalMilliseconds / Reps;
+        double tflops = 2.0 * m * n * k / (perCallMs * 1e-3) / 1e12;
+        _output.WriteLine($"{label,-14} m={m} n={n} k={k}  {perCallMs:F3} ms/call  {tflops:F1} TFLOPS " +
+            $"({tflops / 165.2 * 100:F0}% of the 4090's ~165 TFLOPS FP16/FP32-accum peak)");
         Assert.True(perCallMs > 0);
     }
 

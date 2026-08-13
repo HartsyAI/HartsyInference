@@ -711,15 +711,22 @@ __global__ void dit_glu_act_f16(
 // partner lane in a register and dropping the 17 KB shared request bought only 7% here and 0 ms of step time —
 // the limiter is the SCATTERED WRITE below, which sprays 32 separate 256 B regions across a 40 MB tensor per
 // token. Fixing that needs a tiled (token x head) transpose through shared memory, not a cheaper norm.
-extern "C" __global__ void ltx2_qk_norm_rope_headmajor_f16(
+// The cos/sin tables come in F32 or F16 (`_rf16` suffix). At LTX-2.5's video shape they are ~2 x 40.9 MB of
+// F32 against a 40 MB activation — about half this kernel's traffic, and it runs at ~840 GB/s of the 4090's
+// ~1008. Compute stays FP32 on both: the table value is widened on load.
+__device__ __forceinline__ float ltx2_rope_tbl(const float* __restrict__ p, size_t i) { return p[i]; }
+__device__ __forceinline__ float ltx2_rope_tbl(const __half* __restrict__ p, size_t i) { return __half2float(p[i]); }
+
+template <typename TabT, bool HeadMajor>
+__device__ __forceinline__ void ltx2_qk_norm_rope_body(
     __half* __restrict__ out,
     const __half* __restrict__ in,
     const float* __restrict__ normW,
-    const float* __restrict__ cosT,
-    const float* __restrict__ sinT,
-    unsigned int seq, unsigned int heads, unsigned int headDim, float eps)
+    const TabT* __restrict__ cosT,
+    const TabT* __restrict__ sinT,
+    unsigned int seq, unsigned int heads, unsigned int headDim, float eps,
+    float* smem)
 {
-    extern __shared__ float smem[];
     float* sred = smem;
     float* srow = smem + blockDim.x;
     unsigned int W = heads * headDim;
@@ -756,14 +763,69 @@ extern "C" __global__ void ltx2_qk_norm_rope_headmajor_f16(
         if (cosT != 0)
         {
             unsigned int lane = h * r + (d < r ? d : d - r);
-            float c = cosT[(size_t)s * halfW + lane];
-            float sn = sinT[(size_t)s * halfW + lane];
+            float c = ltx2_rope_tbl(cosT, (size_t)s * halfW + lane);
+            float sn = ltx2_rope_tbl(sinT, (size_t)s * halfW + lane);
             if (d < r) { float a = srow[i], b = srow[i + r]; val = a * c - b * sn; }
             else       { float a = srow[i - r], b = srow[i]; val = b * c + a * sn; }
         }
         else val = srow[i];
-        out[((size_t)h * seq + s) * headDim + d] = __float2half(val);
+        if (HeadMajor) out[((size_t)h * seq + s) * headDim + d] = __float2half(val);
+        else           out[(size_t)s * W + i] = __float2half(val);
     }
+}
+
+extern "C" __global__ void ltx2_qk_norm_rope_headmajor_f16(
+    __half* __restrict__ out,
+    const __half* __restrict__ in,
+    const float* __restrict__ normW,
+    const float* __restrict__ cosT,
+    const float* __restrict__ sinT,
+    unsigned int seq, unsigned int heads, unsigned int headDim, float eps)
+{
+    extern __shared__ float smem[];
+    ltx2_qk_norm_rope_body<float, true>(out, in, normW, cosT, sinT, seq, heads, headDim, eps, smem);
+}
+
+extern "C" __global__ void ltx2_qk_norm_rope_headmajor_rf16_f16(
+    __half* __restrict__ out,
+    const __half* __restrict__ in,
+    const float* __restrict__ normW,
+    const __half* __restrict__ cosT,
+    const __half* __restrict__ sinT,
+    unsigned int seq, unsigned int heads, unsigned int headDim, float eps)
+{
+    extern __shared__ float smem[];
+    ltx2_qk_norm_rope_body<__half, true>(out, in, normW, cosT, sinT, seq, heads, headDim, eps, smem);
+}
+
+// ── LTX-2 fused QK-norm + split-RoPE, TOKEN-MAJOR emit ─────────────────────
+// Same math as the head-major twin above; the store is contiguous (the row lands where it was read from)
+// instead of scattered across 32 head planes. cuDNN accepts BSHD strides for the fused attention at zero
+// throughput cost, so the head-major layout — and the Permute0213 pairs that fed it — is not required.
+//
+// in/out: [seq, heads*headDim]  token-major
+extern "C" __global__ void ltx2_qk_norm_rope_tokenmajor_f16(
+    __half* __restrict__ out,
+    const __half* __restrict__ in,
+    const float* __restrict__ normW,
+    const float* __restrict__ cosT,
+    const float* __restrict__ sinT,
+    unsigned int seq, unsigned int heads, unsigned int headDim, float eps)
+{
+    extern __shared__ float smem[];
+    ltx2_qk_norm_rope_body<float, false>(out, in, normW, cosT, sinT, seq, heads, headDim, eps, smem);
+}
+
+extern "C" __global__ void ltx2_qk_norm_rope_tokenmajor_rf16_f16(
+    __half* __restrict__ out,
+    const __half* __restrict__ in,
+    const float* __restrict__ normW,
+    const __half* __restrict__ cosT,
+    const __half* __restrict__ sinT,
+    unsigned int seq, unsigned int heads, unsigned int headDim, float eps)
+{
+    extern __shared__ float smem[];
+    ltx2_qk_norm_rope_body<__half, false>(out, in, normW, cosT, sinT, seq, heads, headDim, eps, smem);
 }
 
 // ── LTX-2 fused per-head output gate (in place) ─────────────────────────────

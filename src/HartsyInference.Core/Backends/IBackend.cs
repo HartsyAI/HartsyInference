@@ -2115,6 +2115,17 @@ public interface IBackend : IDisposable
     /// RMS/L2-normalized (Wan) — since unbounded scores (some fp8 archs) overflow F16 and produce black output.</param>
     void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false);
 
+    /// <summary>Whether <see cref="ScaledDotProductAttentionTokenMajor"/> is served; false means the caller must
+    /// build head-major <c>[B,H,S,D]</c> tensors and use <see cref="ScaledDotProductAttention"/> instead.</summary>
+    bool SupportsTokenMajorAttention => false;
+
+    /// <summary>SDPA whose Q/K/V/output are TOKEN-MAJOR rank-2 <c>[S, heads*headDim]</c> — the layout a Linear
+    /// already emits and <c>to_out</c> already wants, so the caller pays no permute on either side. Semantics are
+    /// otherwise identical to <see cref="ScaledDotProductAttention"/>.</summary>
+    void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
+        int heads, int headDim, float scale, bool allowF16 = false)
+        => throw new NotSupportedException($"{GetType().Name} does not serve token-major attention; check SupportsTokenMajorAttention first.");
+
     /// <summary>LTX-2 attention QK path in one pass: full-row RMS norm over <c>heads*headDim</c>, then optional
     /// SPLIT RoPE, then a head-major emit — <c>input [seq, heads*headDim]</c> to <c>output [1, heads, seq, headDim]</c>.
     /// Pass <paramref name="cos"/>/<paramref name="sin"/> null to skip the rotation (text cross-attention).
@@ -2131,6 +2142,15 @@ public interface IBackend : IDisposable
             Permute0213(output, normed, seq, heads, headDim);
         }
         finally { normed.Dispose(); }
+    }
+
+    /// <summary>Token-major twin of <see cref="Ltx2QkNormRopeHeadMajor"/> — <c>output</c> keeps the input's
+    /// <c>[seq, heads*headDim]</c> shape. Default: composes the two ops it replaces.</summary>
+    unsafe void Ltx2QkNormRopeTokenMajor(Tensor output, Tensor input, Tensor normWeight, Tensor? cos, Tensor? sin,
+        int seq, int heads, int headDim, float eps)
+    {
+        RmsNorm(output, input, normWeight, eps);
+        if (cos is not null && sin is not null) Ltx2SplitRope(output, cos, sin, seq, heads, headDim);
     }
 
     /// <summary>Linear immediately followed by GELU. Backends may fold the activation into the GEMM epilogue;

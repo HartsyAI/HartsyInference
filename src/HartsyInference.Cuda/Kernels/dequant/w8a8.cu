@@ -156,3 +156,40 @@ extern "C" __global__ void w8a8_dequant_bias_f32(
         out[i] = w8a8_apply_act(v, actMode);
     }
 }
+
+// ── 2c. Dequant epilogue with an output ROW STRIDE ──────────────────────────────────────────
+// Same math as w8a8_dequant_bias_*, but the int32 source is a narrow [rows, cols] column SLICE while the
+// destination row is `outStride` wide. That lets the caller tile the GEMM over N so the int32 accumulator
+// tile stays resident in L2 and is consumed before it can be evicted, instead of streaming a full
+// [M, N] int32 buffer out to HBM and straight back (~203 GB/step at LTX-2.5's shapes).
+// wScale/bias are expected PRE-OFFSET to the slice by the caller.
+#define W8A8_DEQUANT_STRIDED_BODY(STORE)                                                       \
+    unsigned long long n = (unsigned long long)rows * cols;                                    \
+    for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;      \
+         i < n; i += (unsigned long long)gridDim.x * blockDim.x)                               \
+    {                                                                                          \
+        unsigned int r = (unsigned int)(i / cols);                                             \
+        unsigned int c = (unsigned int)(i - (unsigned long long)r * cols);                     \
+        float v = (float)d[i] * rowScale[r] * wScale[c];                                       \
+        if (bias) v += bias[c];                                                                \
+        v = w8a8_apply_act(v, actMode);                                                        \
+        STORE;                                                                                 \
+    }
+
+extern "C" __global__ void w8a8_dequant_bias_strided_f16(
+    const int* __restrict__ d, const float* __restrict__ rowScale,
+    const float* __restrict__ wScale, const float* __restrict__ bias,
+    __half* __restrict__ out, unsigned int rows, unsigned int cols,
+    unsigned int outStride, unsigned int actMode)
+{
+    W8A8_DEQUANT_STRIDED_BODY(out[(unsigned long long)r * outStride + c] = __float2half(v))
+}
+
+extern "C" __global__ void w8a8_dequant_bias_strided_f32(
+    const int* __restrict__ d, const float* __restrict__ rowScale,
+    const float* __restrict__ wScale, const float* __restrict__ bias,
+    float* __restrict__ out, unsigned int rows, unsigned int cols,
+    unsigned int outStride, unsigned int actMode)
+{
+    W8A8_DEQUANT_STRIDED_BODY(out[(unsigned long long)r * outStride + c] = v)
+}

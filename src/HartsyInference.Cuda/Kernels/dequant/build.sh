@@ -43,6 +43,7 @@ KERNELS_SM75=(
 )
 KERNELS_SM80=(
     "fp8_quant"
+    "int8_mma_gemm"   # cp.async + mma.m16n8k32.s8 are Ampere+
 )
 
 INSTALL=true

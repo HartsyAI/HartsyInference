@@ -307,16 +307,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
         if (_ropeKey != ropeKey)
         {
-            DisposeRopeCache(backend);
-            (_vCosC, _vSinC) = _videoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
-            (_aCosC, _aSinC) = _audioRope.BuildAudio(audioFrames);
-            (_cvCosC, _cvSinC) = _caVideoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
-            // PIN them on the device. These are built on the HOST, so they are neither a preloaded weight nor any
-            // device op's output — every attention that consumes one takes a cache miss and re-uploads it, then
-            // frees it again. The big video tables are large enough for auto-promote to rescue; the audio pair
-            // ([Sa, audioInner/2], ~0.4 MB) is not, and it was being re-uploaded 1536 times per step — ~620 MB of
-            // pure PCIe traffic for tables that never change within a generation.
-            backend.PreloadWeights(EnumerateRopeTables());
+            BuildRopeTables(backend, grid, audioFrames, fps);
             _ropeKey = ropeKey;
         }
         (Tensor vCos, Tensor vSin) = (_vCosC!, _vSinC!);
@@ -418,16 +409,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
         if (_ropeKey != ropeKey)
         {
-            DisposeRopeCache(backend);
-            (_vCosC, _vSinC) = _videoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
-            (_aCosC, _aSinC) = _audioRope.BuildAudio(audioFrames);
-            (_cvCosC, _cvSinC) = _caVideoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
-            // PIN them on the device. These are built on the HOST, so they are neither a preloaded weight nor any
-            // device op's output — every attention that consumes one takes a cache miss and re-uploads it, then
-            // frees it again. The big video tables are large enough for auto-promote to rescue; the audio pair
-            // ([Sa, audioInner/2], ~0.4 MB) is not, and it was being re-uploaded 1536 times per step — ~620 MB of
-            // pure PCIe traffic for tables that never change within a generation.
-            backend.PreloadWeights(EnumerateRopeTables());
+            BuildRopeTables(backend, grid, audioFrames, fps);
             _ropeKey = ropeKey;
         }
 
@@ -514,16 +496,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
         if (_ropeKey != ropeKey)
         {
-            DisposeRopeCache(backend);
-            (_vCosC, _vSinC) = _videoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
-            (_aCosC, _aSinC) = _audioRope.BuildAudio(audioFrames);
-            (_cvCosC, _cvSinC) = _caVideoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
-            // PIN them on the device. These are built on the HOST, so they are neither a preloaded weight nor any
-            // device op's output — every attention that consumes one takes a cache miss and re-uploads it, then
-            // frees it again. The big video tables are large enough for auto-promote to rescue; the audio pair
-            // ([Sa, audioInner/2], ~0.4 MB) is not, and it was being re-uploaded 1536 times per step — ~620 MB of
-            // pure PCIe traffic for tables that never change within a generation.
-            backend.PreloadWeights(EnumerateRopeTables());
+            BuildRopeTables(backend, grid, audioFrames, fps);
             _ropeKey = ropeKey;
             _graphPinned = false;
         }
@@ -689,6 +662,29 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         backend.Linear(outVel, modded, projW, projB);
         modded.Dispose();
         return outVel;
+    }
+
+    /// <summary>Rebuilds and pins the per-generation RoPE tables. They depend only on (grid, fps, audioFrames), so
+    /// every forward flavor shares this one site rather than keeping three copies that can drift.</summary>
+    private void BuildRopeTables(IBackend backend, (int Frames, int Height, int Width) grid, int audioFrames, double fps)
+    {
+        DisposeRopeCache(backend);
+        // F16 cos/sin halve the fused rope kernel's traffic, of which the tables are about half. Only the fused
+        // SPLIT path reads them, and an F16 activation implies the backend that serves it.
+        DType tables = LtxVideo2Rope.F16Tables && backend.SupportsF16Activations && DiTBlocks.DitDtype.Act == DType.F16
+            && _videoRope.Flavor == LtxVideo2Rope.RopeType.Split ? DType.F16 : DType.F32;
+        _videoRope.TableDType = tables;
+        _audioRope.TableDType = tables;
+        _caVideoRope.TableDType = tables;
+        (_vCosC, _vSinC) = _videoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+        (_aCosC, _aSinC) = _audioRope.BuildAudio(audioFrames);
+        (_cvCosC, _cvSinC) = _caVideoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+        // PIN them on the device. These are built on the HOST, so they are neither a preloaded weight nor any
+        // device op's output — every attention that consumes one takes a cache miss and re-uploads it, then
+        // frees it again. The big video tables are large enough for auto-promote to rescue; the audio pair
+        // ([Sa, audioInner/2], ~0.4 MB) is not, and it was being re-uploaded 1536 times per step — ~620 MB of
+        // pure PCIe traffic for tables that never change within a generation.
+        backend.PreloadWeights(EnumerateRopeTables());
     }
 
     /// <summary>The per-generation RoPE tables, for pinning as resident weights (they are grid-invariant for the

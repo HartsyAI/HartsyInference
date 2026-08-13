@@ -144,9 +144,9 @@ public sealed class AttentionDispatchContractTests
     public void CudnnSdpaPlanKey_DistinguishesScaleBits()
     {
         CudnnSdpa.PlanKey first = new CudnnSdpa.PlanKey(
-            1, 4, 256, 256, 64, BitConverter.SingleToInt32Bits(0.125f), false, 1);
+            1, 4, 256, 256, 64, BitConverter.SingleToInt32Bits(0.125f), false, 1, CudnnSdpa.SdpaLayout.HeadMajor);
         CudnnSdpa.PlanKey second = new CudnnSdpa.PlanKey(
-            1, 4, 256, 256, 64, BitConverter.SingleToInt32Bits(4.0f), false, 1);
+            1, 4, 256, 256, 64, BitConverter.SingleToInt32Bits(4.0f), false, 1, CudnnSdpa.SdpaLayout.HeadMajor);
 
         Assert.NotEqual(first, second);
     }

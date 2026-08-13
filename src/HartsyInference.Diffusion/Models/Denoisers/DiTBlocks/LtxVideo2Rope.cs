@@ -27,6 +27,12 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// reference's per-head apply).</para></summary>
 public sealed unsafe class LtxVideo2Rope
 {
+    /// <summary>F16 cos/sin tables, OPT-IN via <c>HARTSY_LTX2_ROPEF16=1</c>. Off by default: measured 2026-08-13
+    /// it takes the fused QK kernel 0.189 -> 0.156 ms (-17.5%) but only 1461.0 -> 1456.0 ms/step end-to-end,
+    /// because that kernel is just ~2.5% of the step — and it costs a real output change (SSIM 0.9956 across the
+    /// clip). Not a trade worth taking by default; the seam stays so the experiment is repeatable.</summary>
+    internal static bool F16Tables = Environment.GetEnvironmentVariable("HARTSY_LTX2_ROPEF16") == "1";
+
     public enum Modality { Video, Audio }
 
     /// <summary>Rotary apply convention. <see cref="Split"/> is LTX-2.3 (22B checkpoint <c>rope_type=split</c>);
@@ -39,6 +45,12 @@ public sealed unsafe class LtxVideo2Rope
     /// <summary>Which apply flavor this rope uses. The fused QK-norm+rope+head-major backend op only serves
     /// <see cref="RopeType.Split"/>; an interleaved rope must keep the unfused sequence.</summary>
     public RopeType Flavor => _ropeType;
+
+    /// <summary>Storage dtype of the cos/sin tables <see cref="BuildVideo"/>/<see cref="BuildAudio"/> emit. At the
+    /// LTX-2.5 video shape the pair is ~2×40.9 MB of F32 against a 40 MB activation — about half the fused rope
+    /// kernel's traffic, and that kernel is bandwidth-bound. <see cref="DType.F16"/> halves it; the kernel still
+    /// computes in F32. Only the fused split-RoPE path reads F16 tables, so the caller gates on it.</summary>
+    public DType TableDType { get; set; } = DType.F32;
     private readonly bool _temporalOnly;    // video cross-attn: use only the temporal axis (1-axis rope)
     private readonly int _dim;              // full inner dim (Q/K width the rope is applied to)
     private readonly int _numHeads, _headDim;   // head layout (split mode pairs the two halves within each head)
@@ -166,7 +178,7 @@ public sealed unsafe class LtxVideo2Rope
                 }
             }
         }
-        return (cos, sin);
+        return ToTableDType(cos, sin);
     }
 
     /// <summary>Builds audio cos/sin <c>[numFrames, cosWidth]</c>; coordinates are patch-midpoint timestamps in seconds.</summary>
@@ -187,7 +199,17 @@ public sealed unsafe class LtxVideo2Rope
             double norm = ((startMel * melToSec + endMel * melToSec) / 2.0) / _baseFrames;
             WriteToken(cp, sp, fi, [norm]);
         }
-        return (cos, sin);
+        return ToTableDType(cos, sin);
+    }
+
+    /// <summary>Narrows a freshly built F32 pair to <see cref="TableDType"/>. The phase math stays in double →
+    /// F32 and is only rounded at the end, so the table is as accurate as its storage allows.</summary>
+    private (Tensor Cos, Tensor Sin) ToTableDType(Tensor cos, Tensor sin)
+    {
+        if (TableDType == DType.F32) return (cos, sin);
+        Tensor c = cos.CastTo(TableDType), s = sin.CastTo(TableDType);
+        cos.Dispose(); sin.Dispose();
+        return (c, s);
     }
 
     /// <summary>Video temporal patch-midpoint coordinate (pixel bounds, causal shift+clamp, ÷ fps), base-normalized.</summary>

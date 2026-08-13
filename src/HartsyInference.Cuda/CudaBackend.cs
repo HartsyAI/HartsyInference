@@ -571,6 +571,24 @@ public sealed class CudaBackend : IBackend
     /// free VRAM keeps the chunk large where there is room and shrinks it rather than failing where there is not;
     /// <c>cuMemGetInfo</c> is a cheap driver query with no stream sync, which is why the H3 transformer already
     /// polls it per forward.</para></remarks>
+    /// <summary>Output-column tile for the resident int8 GEMM, in units of N. Tiling over N (not over M, which
+    /// the row chunk above already showed is monotonically worse — it shrinks the GEMM's m) keeps the int32
+    /// accumulator small enough to be consumed by the dequant epilogue while still in L2, instead of streamed
+    /// to HBM and read straight back. 0 or >= n disables tiling. Override with HARTSY_INT8_N_CHUNK.</summary>
+    private static int Int8ResidentColChunk(int n)
+    {
+        if (int.TryParse(Environment.GetEnvironmentVariable("HARTSY_INT8_N_CHUNK"), out int env))
+            return env <= 0 ? int.MaxValue : env;
+        return DefaultInt8ColChunk;
+    }
+
+    // OFF. MEASURED 2026-08-13 at LTX-2.5 768x512x97f: no tiling 1457.2 ms/step, 2048 -> 1474.0, 1024 -> 1596.3
+    // — monotonically worse, the same shape of result as the row chunk's own L2 experiment. Making the int32
+    // accumulator L2-resident does not pay for the extra launches and the smaller-n GEMM. The accumulator round
+    // trip is only recoverable by an epilogue fused INTO the GEMM, which cuBLASLt refuses (see
+    // Int8GemmEpilogueProbeTests) and which our own mma kernel is not yet fast enough to justify.
+    private const int DefaultInt8ColChunk = int.MaxValue;
+
     private int Int8ResidentRowChunk(int m, int n, int k, int activationBytes)
     {
         // 256 MB is the measured optimum, not a guess: shrinking the chunk so the int32 IMMA accumulator becomes
@@ -1813,8 +1831,10 @@ public sealed class CudaBackend : IBackend
                     : CastIfNeeded(pBias, bias!.DType, DType.F32, (int)bias.ElementCount, out pBiasCast);
                 bool srcF16 = input.DType == DType.F16;
                 int inputElementBytes = input.DType.SizeInBytes;
-                int rowChunk = Int8ResidentRowChunk(m, n, k, group > 0 ? inputElementBytes : 0);
+                int colChunk = Int8ResidentColChunk(n);
+                int rowChunk = Int8ResidentRowChunk(m, Math.Min(n, colChunk), k, group > 0 ? inputElementBytes : 0);
                 int paddedChunk = PadInt8Rows(rowChunk);
+                int accCols = Math.Min(n, colChunk);
 
                 ulong pRot = 0, pAct8 = 0, pRowScale = 0, pOut32 = 0;
                 try
@@ -1823,7 +1843,7 @@ public sealed class CudaBackend : IBackend
                         pRot = GpuTransferHelper.AllocateDevice((nuint)((long)rowChunk * k * inputElementBytes));
                     pAct8 = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * k));
                     pRowScale = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * sizeof(float)));
-                    pOut32 = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * n * sizeof(int)));
+                    pOut32 = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * accCols * sizeof(int)));
                     // The pad rows are deliberately left unwritten rather than zeroed: every byte is a valid int8,
                     // k·127² stays an order of magnitude inside int32 for any shape here (2.48e8 at k=15360 against
                     // int32's 2.15e9), and the epilogue below is launched with `rows`, so those accumulators are
@@ -1835,16 +1855,48 @@ public sealed class CudaBackend : IBackend
                         int rows = Math.Min(rowChunk, m - firstRow);
                         ulong inputChunk = pInput + (ulong)((long)firstRow * k * inputElementBytes);
                         ulong quantSource = inputChunk;
-                        if (group > 0)
+                        if (group > 0 && _kernels!.HasFusedConvRotQuant(k, group))
                         {
-                            _kernels!.LaunchConvRotRotate(pRot, inputChunk, (long)rows * k, group, _stream.Handle, srcF16);
-                            quantSource = pRot;
+                            // Rotation + per-row quant in one pass: the split pair wrote a full-width rotated
+                            // activation to HBM only for the quantizer to read it straight back.
+                            _kernels.LaunchConvRotQuantRowwise(pAct8, pRowScale, inputChunk, rows, k, group, _stream.Handle, srcF16);
                         }
-                        _kernels!.LaunchW8A8QuantRowwise(pAct8, pRowScale, quantSource, rows, k, _stream.Handle, srcF16);
-                        Int8Gemm.Run(pWeight, pAct8, pOut32, PadInt8Rows(rows), n, k, _stream.Handle);
+                        else
+                        {
+                            if (group > 0)
+                            {
+                                _kernels!.LaunchConvRotRotate(pRot, inputChunk, (long)rows * k, group, _stream.Handle, srcF16);
+                                quantSource = pRot;
+                            }
+                            _kernels!.LaunchW8A8QuantRowwise(pAct8, pRowScale, quantSource, rows, k, _stream.Handle, srcF16);
+                        }
                         ulong outputChunk = pOutput + (ulong)((long)firstRow * n * output.DType.SizeInBytes);
-                        _kernels!.LaunchW8A8DequantBias(outputChunk, pOut32, pRowScale, wScaleDev, biasF32,
-                            rows, n, _stream.Handle, outF16: output.DType == DType.F16, actMode: fuseGelu ? 1u : 0u);
+                        int padded = PadInt8Rows(rows);
+                        if (colChunk >= n)
+                        {
+                            Int8Gemm.Run(pWeight, pAct8, pOut32, padded, n, k, _stream.Handle);
+                            _kernels!.LaunchW8A8DequantBias(outputChunk, pOut32, pRowScale, wScaleDev, biasF32,
+                                rows, n, _stream.Handle, outF16: output.DType == DType.F16, actMode: fuseGelu ? 1u : 0u);
+                        }
+                        else
+                        {
+                            // Tile over N so the int32 accumulator is a small slice consumed by the dequant while
+                            // it is still in L2, instead of a full [rows, n] buffer streamed out to HBM and read
+                            // straight back. The weight is [N, K] row-major, so a column slice of the output is a
+                            // contiguous ROW range of the weight — just a pointer offset, no repack.
+                            for (int firstCol = 0; firstCol < n; firstCol += colChunk)
+                            {
+                                int cols = Math.Min(colChunk, n - firstCol);
+                                Int8Gemm.Run(pWeight + (ulong)((long)firstCol * k), pAct8, pOut32, padded, cols, k, _stream.Handle);
+                                _kernels!.LaunchW8A8DequantBiasStrided(
+                                    outputChunk + (ulong)((long)firstCol * output.DType.SizeInBytes),
+                                    pOut32, pRowScale,
+                                    wScaleDev + (ulong)((long)firstCol * sizeof(float)),
+                                    biasF32 == 0 ? 0 : biasF32 + (ulong)((long)firstCol * sizeof(float)),
+                                    rows, cols, n, _stream.Handle,
+                                    outF16: output.DType == DType.F16, actMode: fuseGelu ? 1u : 0u);
+                            }
+                        }
                     }
                 }
                 finally
@@ -3930,10 +3982,13 @@ public sealed class CudaBackend : IBackend
         if ((input.DType != DType.F32 && !f16) || output.DType != input.DType)
             throw new NotSupportedException(
                 $"CUDA Ltx2QkNormRopeHeadMajor needs matching F32 or F16 input/output, got in={input.DType}, out={output.DType}.");
+        bool ropeF16 = cos is not null && cos.DType == DType.F16;
         // Dynamic shared is (256 + heads*headDim) floats (256 = CudaKernels.BlockSize); past the 48 KB static limit the launch would fail,
         // so hand those shapes back to the composed path rather than silently mis-sizing.
         if ((256L + (long)heads * headDim) * sizeof(float) > 48 * 1024)
         {
+            if (ropeF16)
+                throw new NotSupportedException($"F16 RoPE tables need the fused kernel, but heads*headDim={heads * headDim} exceeds its shared-memory budget.");
             Tensor normed = new Tensor(input.Shape, input.DType);
             try
             {
@@ -3956,7 +4011,52 @@ public sealed class CudaBackend : IBackend
             if (sin is not null) pSin = GpuTransferHelper.CopyToDevice(sin);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchLtx2QkNormRopeHeadMajor(pOut, pIn, pW, pCos, pSin, seq, heads, headDim, eps, _stream.Handle, f16);
+            _kernels!.LaunchLtx2QkNormRopeHeadMajor(pOut, pIn, pW, pCos, pSin, seq, heads, headDim, eps, _stream.Handle, f16, ropeF16);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pW);
+            if (pCos != 0) GpuTransferHelper.FreeDevice(pCos);
+            if (pSin != 0) GpuTransferHelper.FreeDevice(pSin);
+        }
+    }
+
+    /// <summary>Fused LTX-2 QK path, token-major — see <see cref="IBackend.Ltx2QkNormRopeTokenMajor"/>. Same
+    /// shared-memory ceiling and composed fallback as the head-major twin.</summary>
+    public unsafe void Ltx2QkNormRopeTokenMajor(Tensor output, Tensor input, Tensor normWeight, Tensor? cos, Tensor? sin,
+        int seq, int heads, int headDim, float eps)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("Ltx2QkNormRopeTokenMajor");
+        bool f16 = input.DType == DType.F16;
+        if ((input.DType != DType.F32 && !f16) || output.DType != input.DType)
+            throw new NotSupportedException(
+                $"CUDA Ltx2QkNormRopeTokenMajor needs matching F32 or F16 input/output, got in={input.DType}, out={output.DType}.");
+        bool ropeF16 = cos is not null && cos.DType == DType.F16;
+        if ((256L + (long)heads * headDim) * sizeof(float) > 48 * 1024)
+        {
+            if (ropeF16)
+                throw new NotSupportedException($"F16 RoPE tables need the fused kernel, but heads*headDim={heads * headDim} exceeds its shared-memory budget.");
+            RmsNorm(output, input, normWeight, eps);
+            if (cos is not null && sin is not null) Ltx2SplitRope(output, cos, sin, seq, heads, headDim);
+            return;
+        }
+        EnterOp();
+        EnsureKernels();
+        ulong pOut = 0, pIn = 0, pW = 0, pCos = 0, pSin = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pW = GpuTransferHelper.CopyToDevice(normWeight);
+            if (cos is not null) pCos = GpuTransferHelper.CopyToDevice(cos);
+            if (sin is not null) pSin = GpuTransferHelper.CopyToDevice(sin);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchLtx2QkNormRopeTokenMajor(pOut, pIn, pW, pCos, pSin, seq, heads, headDim, eps, _stream.Handle, f16, ropeF16);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -6657,6 +6757,92 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Always true: the cuDNN fused engine takes BSHD strides directly, and anything it declines is
+    /// served by permuting into the head-major path, so the caller never has to carry a second layout.</summary>
+    public bool SupportsTokenMajorAttention => true;
+
+    /// <summary>Token-major SDPA — see <see cref="IBackend.ScaledDotProductAttentionTokenMajor"/>. cuDNN reads the
+    /// <c>[S, heads*headDim]</c> buffers through BSHD strides at no throughput cost, which is what lets the LTX-2
+    /// caller drop the permute pair around attention. Anything cuDNN declines (wrong head dim, mask shape, a dead
+    /// session) is permuted into the head-major dispatch so correctness never depends on the fast path.</summary>
+    public unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
+        Tensor? mask, int heads, int headDim, float scale, bool allowF16 = false)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("SDPA-TM");
+        ValidateTokenMajorAttentionContract(output, query, key, value, mask, heads, headDim, scale);
+        long sq = query.Shape[0], skv = key.Shape[0], d = headDim;
+        if (CudnnMaskCompatible(mask, 1, sq, skv)
+            && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(d) && CudnnSdpa.ShapeSupported(d)
+            && (query.DType == DType.F16 || (query.DType == DType.F32 && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled)))
+        {
+            EnterOp();
+            EnsureKernels();
+            if (TryCudnnSdpa(output, query, key, value, mask, scale, CudnnSdpa.SdpaLayout.TokenMajor,
+                    1, heads, sq, skv, d))
+            {
+                return;
+            }
+        }
+        Tensor qMh = new Tensor(new TensorShape(1, heads, sq, headDim), query.DType);
+        Tensor kMh = new Tensor(new TensorShape(1, heads, skv, headDim), key.DType);
+        Tensor vMh = new Tensor(new TensorShape(1, heads, skv, headDim), value.DType);
+        Tensor oMh = new Tensor(new TensorShape(1, heads, sq, headDim), output.DType);
+        try
+        {
+            Permute0213(qMh, query, (int)sq, heads, headDim);
+            Permute0213(kMh, key, (int)skv, heads, headDim);
+            Permute0213(vMh, value, (int)skv, heads, headDim);
+            ScaledDotProductAttention(oMh, qMh, kMh, vMh, mask, scale, allowF16);
+            Permute0213(output, oMh, heads, (int)sq, headDim);
+        }
+        finally { qMh.Dispose(); kMh.Dispose(); vMh.Dispose(); oMh.Dispose(); }
+    }
+
+    /// <summary>Validates the rank-2 <c>[S, heads*headDim]</c> contract of the token-major SDPA entry point.</summary>
+    internal static void ValidateTokenMajorAttentionContract(Tensor output, Tensor query, Tensor key, Tensor value,
+        Tensor? mask, int heads, int headDim, float scale)
+    {
+        if (heads <= 0 || headDim <= 0)
+            throw new ArgumentException($"Token-major SDPA needs positive heads/headDim; got heads={heads}, headDim={headDim}.");
+        long inner = (long)heads * headDim;
+        if (output.Shape.Rank != 2 || query.Shape.Rank != 2 || key.Shape.Rank != 2 || value.Shape.Rank != 2)
+            throw new ArgumentException(
+                $"Token-major SDPA requires rank-2 [S, heads*headDim] tensors; got output={output.Shape}, Q={query.Shape}, K={key.Shape}, V={value.Shape}.");
+        if (query.Shape[1] != inner || key.Shape[1] != inner || value.Shape[1] != inner || output.Shape[1] != inner)
+            throw new ArgumentException(
+                $"Token-major SDPA rows must be heads*headDim={inner}; got Q={query.Shape}, K={key.Shape}, V={value.Shape}, output={output.Shape}.");
+        if (output.Shape[0] != query.Shape[0])
+            throw new ArgumentException($"Token-major SDPA output must have Q's row count; got output={output.Shape}, Q={query.Shape}.");
+        if (key.Shape[0] != value.Shape[0])
+            throw new ArgumentException($"Token-major SDPA K/V row counts must match; got K={key.Shape}, V={value.Shape}.");
+        long sq = query.Shape[0], skv = key.Shape[0];
+        if (sq <= 0 || skv <= 0)
+            throw new ArgumentException($"Token-major SDPA dimensions must be positive; got Q={query.Shape}, K={key.Shape}.");
+        if (!float.IsFinite(scale))
+            throw new ArgumentOutOfRangeException(nameof(scale), "SDPA scale must be finite.");
+        if (query.DType != DType.F32 && query.DType != DType.F16 && query.DType != DType.BF16)
+            throw new NotSupportedException($"SDPA supports F32/F16/BF16 tensors; got {query.DType}.");
+        if (output.DType != query.DType || key.DType != query.DType || value.DType != query.DType)
+            throw new ArgumentException(
+                $"SDPA requires matching output/Q/K/V dtypes; got output={output.DType}, Q={query.DType}, K={key.DType}, V={value.DType}.");
+        if (sq * skv > int.MaxValue || query.ElementCount > int.MaxValue || key.ElementCount > int.MaxValue)
+            throw new ArgumentException("SDPA tensors currently support at most Int32.MaxValue elements each.");
+        if (mask is null) return;
+        if (mask.DType != DType.F32)
+            throw new NotSupportedException($"SDPA additive masks must be F32; got {mask.DType}.");
+        bool validMask = mask.Shape.Rank switch
+        {
+            2 => mask.Shape[0] == sq && mask.Shape[1] == skv,
+            3 => (mask.Shape[0] == 1 || mask.Shape[0] == heads) && mask.Shape[1] == sq && mask.Shape[2] == skv,
+            4 => mask.Shape[0] == 1 && (mask.Shape[1] == 1 || mask.Shape[1] == heads)
+                && mask.Shape[2] == sq && mask.Shape[3] == skv,
+            _ => false,
+        };
+        if (!validMask)
+            throw new ArgumentException(
+                $"SDPA mask {mask.Shape} is not broadcastable to [1,{heads},{sq},{skv}].");
+    }
+
     /// <summary>Validates the canonical rank-4 MHA contract shared by every SDPA dispatch branch.</summary>
     internal static void ValidateScaledDotProductAttentionContract(
         Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
@@ -6734,6 +6920,12 @@ public sealed class CudaBackend : IBackend
     /// permanently disables cuDNN for the session) on any failure so the caller falls through to the materialized/tiled
     /// paths. Q/out [B,H,Sq,D], K/V [B,H,Skv,D].</remarks>
     private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
+        => TryCudnnSdpa(output, query, key, value, mask, scale, CudnnSdpa.SdpaLayout.HeadMajor,
+            query.Shape[0], query.Shape[1], query.Shape[2], key.Shape[2], query.Shape[3]);
+
+    /// <summary>Layout-explicit form: the token-major caller's tensors are rank-2, so the dims cannot be read off the shapes.</summary>
+    private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
+        CudnnSdpa.SdpaLayout layout, long b, long h, long sq, long skv, long d)
     {
         lock (_cudnnSdpaLock)
         {
@@ -6742,18 +6934,17 @@ public sealed class CudaBackend : IBackend
             // Callers perform this check before entering, but another request can publish a failure while this
             // request waits for the shared cuDNN handle. Recheck under the same lock that serializes attempts so
             // a queued request cannot bypass a newly established backoff window.
-            if (_cudnnSdpaDead || !CudnnSdpaDimEligible(query.Shape[3]))
+            if (_cudnnSdpaDead || !CudnnSdpaDimEligible(d))
                 return false;
 
-            return TryCudnnSdpaLocked(output, query, key, value, mask, scale);
+            return TryCudnnSdpaLocked(output, query, key, value, mask, scale, layout, b, h, sq, skv, d);
         }
     }
 
     private unsafe bool TryCudnnSdpaLocked(
-        Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
+        Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
+        CudnnSdpa.SdpaLayout layout, long b, long h, long sq, long skv, long d)
     {
-        long b = query.Shape[0], h = query.Shape[1], sq = query.Shape[2], d = query.Shape[3];
-        long skv = key.Shape[2];
         ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, qF16 = 0, kF16 = 0, vF16 = 0, oF16 = 0;
         bool cachedOutput = false;
         try
@@ -6788,7 +6979,7 @@ public sealed class CudaBackend : IBackend
             if (query.DType == DType.F16)
             {
                 // Native F16 Q/K/V/output — the engine's fp16 I/O dtype already; execute directly, zero casts.
-                _cudnnSdpa.Execute(pQ, pK, pV, pOut, b, h, sq, skv, d, scale, pMask, biasB);
+                _cudnnSdpa.Execute(pQ, pK, pV, pOut, b, h, sq, skv, d, scale, layout, pMask, biasB);
             }
             else
             {
@@ -6800,7 +6991,7 @@ public sealed class CudaBackend : IBackend
                 _kernels!.LaunchCastF32ToF16(kF16, pK, (int)key.ElementCount, _stream.Handle);
                 _kernels!.LaunchCastF32ToF16(vF16, pV, (int)value.ElementCount, _stream.Handle);
 
-                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, b, h, sq, skv, d, scale, pMask, biasB);
+                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, b, h, sq, skv, d, scale, layout, pMask, biasB);
 
                 _kernels!.LaunchCastF16ToF32(pOut, oF16, (int)output.ElementCount, _stream.Handle);
             }
