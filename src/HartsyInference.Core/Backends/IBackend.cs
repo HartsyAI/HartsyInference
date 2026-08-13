@@ -1217,9 +1217,11 @@ public interface IBackend : IDisposable
             }
     }
 
-    /// <summary>Builds the padded input for BATCHED CausalConv3d: transpose + temporal pad + cache prepend + edge-replicate pad.</summary>
+    /// <summary>Builds the padded input for BATCHED CausalConv3d: transpose + temporal pad + cache prepend + spatial
+    /// pad. <paramref name="reflectSpatial"/> mirrors the H/W borders (<c>F.pad(mode="reflect")</c>, the LTX-2 VAE's
+    /// default) instead of edge-clamping them.</summary>
     unsafe void BuildPaddedFrames(Tensor padded, Tensor input, Tensor? cache, int zeroPad,
-        bool replicateFirst = false, int padH = 0, int padW = 0)
+        bool replicateFirst = false, int padH = 0, int padW = 0, bool reflectSpatial = false)
     {
         int paddedT = (int)padded.Shape[0], cIn = (int)padded.Shape[1];
         int h = (int)input.Shape[3], w = (int)input.Shape[4];
@@ -1249,14 +1251,27 @@ public interface IBackend : IDisposable
                 }
                 for (int y = 0; y < hp; y++)
                 {
-                    int sy = Math.Clamp(y - padH, 0, h - 1);
+                    int sy = PadIndex(y - padH, h, reflectSpatial);
                     for (int x = 0; x < wp; x++)
                     {
-                        int sx = Math.Clamp(x - padW, 0, w - 1);
+                        int sx = PadIndex(x - padW, w, reflectSpatial);
                         pp[dst + (long)y * wp + x] = src[(long)sy * w + sx];
                     }
                 }
             }
+    }
+
+    /// <summary>Maps an out-of-range spatial index to its source index — mirrored (<c>-1 → 1</c>, <c>len → len-2</c>,
+    /// no edge repeat) when <paramref name="reflect"/>, else edge-clamped. The trailing clamp only bites when the pad
+    /// exceeds <c>len-1</c>, where reflection has no defined answer.</summary>
+    private static int PadIndex(int i, int len, bool reflect)
+    {
+        if (reflect)
+        {
+            if (i < 0) i = -i;
+            else if (i >= len) i = 2 * (len - 1) - i;
+        }
+        return Math.Clamp(i, 0, len - 1);
     }
 
     /// <summary>Fills <paramref name="output"/> <c>[1,cOut,tout,H,W]</c> with per-channel bias (or 0 when null).</summary>
@@ -2099,6 +2114,69 @@ public interface IBackend : IDisposable
     /// traffic + F16 tensor cores). Callers pass true ONLY when pre-softmax scores are bounded — e.g. Q/K are
     /// RMS/L2-normalized (Wan) — since unbounded scores (some fp8 archs) overflow F16 and produce black output.</param>
     void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false);
+
+    /// <summary>LTX-2 attention QK path in one pass: full-row RMS norm over <c>heads*headDim</c>, then optional
+    /// SPLIT RoPE, then a head-major emit — <c>input [seq, heads*headDim]</c> to <c>output [1, heads, seq, headDim]</c>.
+    /// Pass <paramref name="cos"/>/<paramref name="sin"/> null to skip the rotation (text cross-attention).
+    /// INTERLEAVED rope is not served here; that caller must keep the unfused sequence.
+    /// Default: composes the three ops it replaces, which is exactly what the unfused path did.</summary>
+    unsafe void Ltx2QkNormRopeHeadMajor(Tensor output, Tensor input, Tensor normWeight, Tensor? cos, Tensor? sin,
+        int seq, int heads, int headDim, float eps)
+    {
+        Tensor normed = new Tensor(input.Shape, input.DType);
+        try
+        {
+            RmsNorm(normed, input, normWeight, eps);
+            if (cos is not null && sin is not null) Ltx2SplitRope(normed, cos, sin, seq, heads, headDim);
+            Permute0213(output, normed, seq, heads, headDim);
+        }
+        finally { normed.Dispose(); }
+    }
+
+    /// <summary>Linear immediately followed by GELU. Backends may fold the activation into the GEMM epilogue;
+    /// the default runs the two ops in sequence, which is what every caller did before.</summary>
+    unsafe void LinearGelu(Tensor output, Tensor input, Tensor weight, Tensor? bias)
+    {
+        Linear(output, input, weight, bias);
+        Gelu(output, output);
+    }
+
+    /// <summary>LTX-2 block norm+modulate in one pass: <c>out[r,d] = rms(in[r,:])[d] * (1+scale[d]) + shift[d]</c>,
+    /// where the RMS carries no affine weight. Replaces RmsNorm-then-AddScalar-then-AffineBroadcastLastDim, which
+    /// walked the activation twice. Default: composes exactly those ops.</summary>
+    unsafe void Ltx2RmsModulate(Tensor output, Tensor input, Tensor onesWeight, Tensor scale, Tensor? shift, float eps)
+    {
+        int dim = (int)scale.Shape[scale.Shape.Rank - 1];
+        Tensor normed = new Tensor(input.Shape, input.DType);
+        Tensor scale1 = new Tensor(new TensorShape(dim), scale.DType);
+        try
+        {
+            RmsNorm(normed, input, onesWeight, eps);
+            AddScalar(scale1, scale, 1f);
+            AffineBroadcastLastDim(output, normed, scale1, shift);
+        }
+        finally { normed.Dispose(); scale1.Dispose(); }
+    }
+
+    /// <summary>LTX-2 per-head output gate, IN PLACE: <c>x[s, h*headDim+d] *= 2*sigmoid(logits[s,h])</c>.
+    /// Replaces expanding the per-(token,head) scalar to a full <c>[seq, heads*headDim]</c> tensor through a
+    /// constant 0/1 GEMM and then multiplying.</summary>
+    unsafe void Ltx2HeadGate(Tensor x, Tensor logits, int seq, int heads, int headDim)
+    {
+        if (x.DType != DType.F32 || logits.DType != DType.F32)
+            throw new NotSupportedException($"Ltx2HeadGate default fallback only supports F32, got x={x.DType}, logits={logits.DType}.");
+        float* p = (float*)x.DataPointer;
+        float* g = (float*)logits.DataPointer;
+        int w = heads * headDim;
+        for (int s = 0; s < seq; s++)
+            for (int h = 0; h < heads; h++)
+            {
+                float lg = g[(long)s * heads + h];
+                float sig = lg >= 0f ? 1f / (1f + MathF.Exp(-lg)) : MathF.Exp(lg) / (1f + MathF.Exp(lg));
+                long baseIdx = (long)s * w + (long)h * headDim;
+                for (int d = 0; d < headDim; d++) p[baseIdx + d] *= 2f * sig;
+            }
+    }
 
     /// <summary>True when the backend has F16-activation kernels (Linear/Gelu/norms/cast); DiT F16 fast paths must gate on this.</summary>
     bool SupportsF16Activations => false;

@@ -1697,3 +1697,121 @@ __global__ void row_scatter_add_f32(
 }
 
 } // extern "C"
+
+// ── LTX-2 fused QK-norm + split-RoPE + head-major emit (F32 twin) ───────────
+// F32 counterpart of ltx2_qk_norm_rope_headmajor_f16 in dit_f16.cu — see that file for the layout
+// contract. Exists so HARTSY_DIT_F16=0 keeps the same op graph (and stays on-device) instead of
+// falling back to the three-pass sequence.
+extern "C" __global__ void ltx2_qk_norm_rope_headmajor_f32(
+    float* __restrict__ out,
+    const float* __restrict__ in,
+    const float* __restrict__ normW,
+    const float* __restrict__ cosT,
+    const float* __restrict__ sinT,
+    unsigned int seq, unsigned int heads, unsigned int headDim, float eps)
+{
+    // See the f16 twin in dit_f16.cu for the profiled note on why this stays shared-memory-staged.
+    extern __shared__ float smem32[];
+    float* sred = smem32;
+    float* srow = smem32 + blockDim.x;
+    unsigned int W = heads * headDim;
+    unsigned int s = blockIdx.x;
+    if (s >= seq) return;
+    const float* inRow = in + (size_t)s * W;
+
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < W; i += blockDim.x)
+    {
+        float v = inRow[i];
+        srow[i] = v;
+        partial += v * v;
+    }
+    sred[threadIdx.x] = partial;
+    __syncthreads();
+    for (unsigned int st = blockDim.x >> 1; st > 0; st >>= 1)
+    {
+        if (threadIdx.x < st) sred[threadIdx.x] += sred[threadIdx.x + st];
+        __syncthreads();
+    }
+    float inv = rsqrtf(sred[0] / (float)W + eps);
+    for (unsigned int i = threadIdx.x; i < W; i += blockDim.x)
+        srow[i] = srow[i] * inv * (normW ? normW[i] : 1.0f);
+    __syncthreads();
+
+    unsigned int r = headDim >> 1;
+    unsigned int halfW = W >> 1;
+    for (unsigned int i = threadIdx.x; i < W; i += blockDim.x)
+    {
+        unsigned int h = i / headDim;
+        unsigned int d = i - h * headDim;
+        float val;
+        if (cosT != 0)
+        {
+            unsigned int lane = h * r + (d < r ? d : d - r);
+            float c = cosT[(size_t)s * halfW + lane];
+            float sn = sinT[(size_t)s * halfW + lane];
+            if (d < r) { float a = srow[i], b = srow[i + r]; val = a * c - b * sn; }
+            else       { float a = srow[i - r], b = srow[i]; val = b * c + a * sn; }
+        }
+        else val = srow[i];
+        out[((size_t)h * seq + s) * headDim + d] = val;
+    }
+}
+
+// ── LTX-2 fused per-head output gate, in place (F32 twin) ──────────────────
+// x[s, h*headDim + d] *= 2 * sigmoid(logits[s, h]). Sign-aware expf, matching dit_sigmoid_f32's form.
+extern "C" __global__ void ltx2_head_gate_f32(
+    float* __restrict__ x,
+    const float* __restrict__ logits,
+    unsigned int seq, unsigned int heads, unsigned int headDim)
+{
+    unsigned int W = heads * headDim;
+    unsigned long long total = (unsigned long long)seq * W;
+    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    unsigned int i = (unsigned int)(idx % W);
+    unsigned long long s = idx / W;
+    unsigned int h = i / headDim;
+    float g = logits[s * heads + h];
+    float sig = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
+    x[idx] = x[idx] * 2.0f * sig;
+}
+
+// ── LTX-2 fused RMS-norm + AdaLN shift/scale (F32 twin) ────────────────────
+// See ltx2_rms_modulate_f16 in dit_f16.cu for the contract.
+extern "C" __global__ void ltx2_rms_modulate_f32(
+    float* __restrict__ out,
+    const float* __restrict__ in,
+    const float* __restrict__ scale,
+    const float* __restrict__ shift,
+    unsigned int dim,
+    unsigned int rows,
+    float eps)
+{
+    extern __shared__ float sredm[];
+    unsigned int r = blockIdx.x;
+    if (r >= rows) return;
+    const float* inRow = in + (size_t)r * dim;
+    float* outRow = out + (size_t)r * dim;
+
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+    {
+        float v = inRow[i];
+        partial += v * v;
+    }
+    sredm[threadIdx.x] = partial;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) sredm[threadIdx.x] += sredm[threadIdx.x + s];
+        __syncthreads();
+    }
+    float inv = rsqrtf(sredm[0] / (float)dim + eps);
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+    {
+        float v = inRow[i] * inv * (1.0f + scale[i]);
+        if (shift != 0) v += shift[i];
+        outRow[i] = v;
+    }
+}

@@ -478,8 +478,10 @@ internal static unsafe class GpuTransferHelper
         TrimPool();
     }
 
-    // Diagnostic: HARTSY_H2D_TRACE=1 logs the first big cache misses with shape/dtype so a re-uploaded weight set
-    // is distinguishable from ordinary activation traffic.
+    // Diagnostic: HARTSY_H2D_TRACE=1 logs the first cache misses with shape/dtype so a re-uploaded weight set is
+    // distinguishable from ordinary activation traffic. Small misses are logged too — a DiT that re-uploads a
+    // handful of tiny per-channel vectors every block hides thousands of them per step behind a trace that only
+    // showed the megabyte-scale ones.
     private static readonly bool _traceBigMisses = Environment.GetEnvironmentVariable("HARTSY_H2D_TRACE") == "1";
     private static int _bigMissTraceCount;
 
@@ -526,10 +528,10 @@ internal static unsafe class GpuTransferHelper
         // correctness dependency on the copy completing before this returns — only stream order, which holds.
         // HARTSY_PROFILE visibility into miss H2D volume.
         using Profiling.NvtxRange _miss = Profiling.NvtxRange.Push(byteSize > (1u << 20) ? "H2D_MISS_BIG" : "H2D_MISS_SMALL");
-        if (byteSize > (1u << 20) && _traceBigMisses && Interlocked.Increment(ref _bigMissTraceCount) <= _traceBigMissLimit)
+        if (_traceBigMisses && Interlocked.Increment(ref _bigMissTraceCount) <= _traceBigMissLimit)
         {
             string shape = string.Join("x", Enumerable.Range(0, cpuTensor.Shape.Rank).Select(i => cpuTensor.Shape[i]));
-            Logs.Info($"[h2d-trace] MISS [{shape}] {cpuTensor.DType} {byteSize >> 20} MB "
+            Logs.Info($"[h2d-trace] MISS [{shape}] {cpuTensor.DType} {byteSize} B "
                 + $"cachedWeights={s.WeightCache.Count} hits={s.Hits} misses={s.Misses}");
         }
         // A miss during graph capture bakes a per-replay H2D memcpy node into the graph — always worth

@@ -573,6 +573,10 @@ public sealed class CudaBackend : IBackend
     /// polls it per forward.</para></remarks>
     private int Int8ResidentRowChunk(int m, int n, int k, int activationBytes)
     {
+        // 256 MB is the measured optimum, not a guess: shrinking the chunk so the int32 IMMA accumulator becomes
+        // L2-resident (64/32/16 MB) is monotonically SLOWER on LTX-2.5 at 768x512x97f — 1768/1854/1920/2070 ms per
+        // step — because the extra chunks cost more in launches and smaller-m GEMM efficiency than the accumulator
+        // round trip costs in HBM traffic. Do not re-chase L2 sizing here.
         const long CeilingBytes = 256L << 20;
         const long FloorBytes = 8L << 20;
         (long freeBytes, _) = CudaMemory.GetMemInfo();
@@ -1361,8 +1365,20 @@ public sealed class CudaBackend : IBackend
     public void LinearWeightRows(Tensor output, Tensor input, Tensor weight, Tensor? bias, int weightRowOffset, int weightRowCount)
         => LinearImpl(output, input, weight, bias, cacheWeightCast: true, weightRowOffset, weightRowCount);
 
+    /// <summary>Linear whose GELU is folded into the GEMM's dequant epilogue where the path allows it (the
+    /// resident int8-ConvRot chain), else a plain Linear followed by <see cref="Gelu"/>. A DiT feed-forward's
+    /// up-projection is always immediately GELU'd, and that intermediate is the widest tensor in the block —
+    /// writing it once instead of writing, re-reading and re-writing it is worth a full pass over ~328 MB per call.</summary>
+    public unsafe void LinearGelu(Tensor output, Tensor input, Tensor weight, Tensor? bias)
+    {
+        bool fused = weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi
+            && CanRunResidentInt8(output, input, weight, qi, 0, -1);
+        LinearImpl(output, input, weight, bias, cacheWeightCast: true, fuseGelu: fused);
+        if (!fused) Gelu(output, output);
+    }
+
     private unsafe void LinearImpl(Tensor output, Tensor input, Tensor weight, Tensor? bias, bool cacheWeightCast,
-        int weightRowOffset = 0, int weightRowCount = -1)
+        int weightRowOffset = 0, int weightRowCount = -1, bool fuseGelu = false)
     {
         using NvtxRange _nvtx = NvtxRange.Push("Linear");
         EnterOp();
@@ -1828,7 +1844,7 @@ public sealed class CudaBackend : IBackend
                         Int8Gemm.Run(pWeight, pAct8, pOut32, PadInt8Rows(rows), n, k, _stream.Handle);
                         ulong outputChunk = pOutput + (ulong)((long)firstRow * n * output.DType.SizeInBytes);
                         _kernels!.LaunchW8A8DequantBias(outputChunk, pOut32, pRowScale, wScaleDev, biasF32,
-                            rows, n, _stream.Handle, outF16: output.DType == DType.F16);
+                            rows, n, _stream.Handle, outF16: output.DType == DType.F16, actMode: fuseGelu ? 1u : 0u);
                     }
                 }
                 finally
@@ -3095,6 +3111,7 @@ public sealed class CudaBackend : IBackend
 
     public void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("ModulationSplit4");
         if (proj.DType != DType.F32)
             throw new NotSupportedException("CUDA ModulationSplit4 supports F32 only.");
         EnterOp();
@@ -3259,6 +3276,7 @@ public sealed class CudaBackend : IBackend
 
     public void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("CfgEulerStep");
         if (z.DType != DType.F32 || pos.DType != DType.F32 || neg.DType != DType.F32)
             throw new NotSupportedException("CUDA CfgEulerStep supports F32 only.");
         if (!z.Shape.Equals(pos.Shape) || !z.Shape.Equals(neg.Shape))
@@ -3656,6 +3674,7 @@ public sealed class CudaBackend : IBackend
 
     public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("ApplyRope");
         // F32, or F16 q/k with F32 cos/sin (DiT F16 recipe — cos/sin are tiny and precision-sensitive).
         bool f16 = q.DType == DType.F16;
         if ((!f16 && q.DType != DType.F32) || k.DType != q.DType || cos.DType != DType.F32 || sin.DType != DType.F32)
@@ -3819,6 +3838,7 @@ public sealed class CudaBackend : IBackend
     public unsafe void ConvTranspose2d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int strideH, int strideW, int padH, int padW)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("ConvTranspose2d");
         if (input.DType != DType.F32 || output.DType != DType.F32 || weight.DType != DType.F32)
             throw new NotSupportedException("CUDA ConvTranspose2d supports F32 only.");
         int n = (int)input.Shape[0], cIn = (int)input.Shape[1], iH = (int)input.Shape[2], iW = (int)input.Shape[3];
@@ -3847,6 +3867,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GEGLU with exact erf gate (device): output[rows,inner] = proj[:,:inner]·gelu_erf(proj[:,inner:]).</summary>
     public unsafe void GegluErf(Tensor output, Tensor proj, long rows, int inner)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("GegluErf");
         if (output.DType != DType.F32 || proj.DType != DType.F32)
             throw new NotSupportedException("CUDA GegluErf supports F32 only.");
         EnterOp(); EnsureKernels();
@@ -3865,6 +3886,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Exact (erf) GELU, elementwise on device — PyTorch's default <c>nn.GELU()</c> (DINOv2 MLPs).</summary>
     public unsafe void GeluErf(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("GeluErf");
         if (output.DType != DType.F32 || input.DType != DType.F32)
             throw new NotSupportedException("CUDA GeluErf supports F32 only.");
         EnterOp(); EnsureKernels();
@@ -3897,13 +3919,127 @@ public sealed class CudaBackend : IBackend
         finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
     }
 
+    /// <summary>Fused LTX-2 QK path — see <see cref="IBackend.Ltx2QkNormRopeHeadMajor"/>. Falls back to the
+    /// three-op sequence when the row is too wide to stage in shared memory; every LTX-2 geometry shipped today
+    /// (inner 4096 video / 2048 audio) fits comfortably.</summary>
+    public unsafe void Ltx2QkNormRopeHeadMajor(Tensor output, Tensor input, Tensor normWeight, Tensor? cos, Tensor? sin,
+        int seq, int heads, int headDim, float eps)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("Ltx2QkNormRopeHeadMajor");
+        bool f16 = input.DType == DType.F16;
+        if ((input.DType != DType.F32 && !f16) || output.DType != input.DType)
+            throw new NotSupportedException(
+                $"CUDA Ltx2QkNormRopeHeadMajor needs matching F32 or F16 input/output, got in={input.DType}, out={output.DType}.");
+        // Dynamic shared is (256 + heads*headDim) floats (256 = CudaKernels.BlockSize); past the 48 KB static limit the launch would fail,
+        // so hand those shapes back to the composed path rather than silently mis-sizing.
+        if ((256L + (long)heads * headDim) * sizeof(float) > 48 * 1024)
+        {
+            Tensor normed = new Tensor(input.Shape, input.DType);
+            try
+            {
+                RmsNorm(normed, input, normWeight, eps);
+                if (cos is not null && sin is not null) Ltx2SplitRope(normed, cos, sin, seq, heads, headDim);
+                Permute0213(output, normed, seq, heads, headDim);
+            }
+            finally { normed.Dispose(); }
+            return;
+        }
+        EnterOp();
+        EnsureKernels();
+        ulong pOut = 0, pIn = 0, pW = 0, pCos = 0, pSin = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pW = GpuTransferHelper.CopyToDevice(normWeight);
+            if (cos is not null) pCos = GpuTransferHelper.CopyToDevice(cos);
+            if (sin is not null) pSin = GpuTransferHelper.CopyToDevice(sin);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchLtx2QkNormRopeHeadMajor(pOut, pIn, pW, pCos, pSin, seq, heads, headDim, eps, _stream.Handle, f16);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pW);
+            if (pCos != 0) GpuTransferHelper.FreeDevice(pCos);
+            if (pSin != 0) GpuTransferHelper.FreeDevice(pSin);
+        }
+    }
+
+    /// <summary>Fused LTX-2 norm+modulate — see <see cref="IBackend.Ltx2RmsModulate"/>. The RMS weight is a ones
+    /// vector at every call site, so it folds away rather than being read per element.</summary>
+    public unsafe void Ltx2RmsModulate(Tensor output, Tensor input, Tensor onesWeight, Tensor scale, Tensor? shift, float eps)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("Ltx2RmsModulate");
+        bool f16 = input.DType == DType.F16;
+        if ((input.DType != DType.F32 && !f16) || output.DType != input.DType || scale.DType != DType.F32
+            || (shift is not null && shift.DType != DType.F32))
+            throw new NotSupportedException(
+                $"CUDA Ltx2RmsModulate needs matching F32/F16 in/out with F32 scale+shift, got in={input.DType}, out={output.DType}, scale={scale.DType}.");
+        int dim = (int)scale.Shape[scale.Shape.Rank - 1];
+        int rows = (int)(input.ElementCount / dim);
+        EnterOp();
+        EnsureKernels();
+        ulong pOut = 0, pIn = 0, pScale = 0, pShift = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pScale = GpuTransferHelper.CopyToDevice(scale);
+            if (shift is not null) pShift = GpuTransferHelper.CopyToDevice(shift);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchLtx2RmsModulate(pOut, pIn, pScale, pShift, dim, rows, eps, _stream.Handle, f16);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pScale);
+            if (pShift != 0) GpuTransferHelper.FreeDevice(pShift);
+        }
+    }
+
+    /// <summary>Fused LTX-2 per-head output gate — see <see cref="IBackend.Ltx2HeadGate"/>.</summary>
+    /// <remarks>In-place: x's device buffer is mutated and re-cached to the SAME pointer, the
+    /// <see cref="Ltx2SplitRope"/> pattern. Allocating a fresh output here would leave the mutation in a buffer
+    /// nothing reads.</remarks>
+    public unsafe void Ltx2HeadGate(Tensor x, Tensor logits, int seq, int heads, int headDim)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("Ltx2HeadGate");
+        bool f16 = x.DType == DType.F16;
+        if ((x.DType != DType.F32 && !f16) || logits.DType != x.DType)
+            throw new NotSupportedException(
+                $"CUDA Ltx2HeadGate needs matching F32 or F16 x/logits, got x={x.DType}, logits={logits.DType}.");
+        EnterOp();
+        EnsureKernels();
+        ulong pX = 0, pLogits = 0;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);          // in-place target (cached activation)
+            pLogits = GpuTransferHelper.CopyToDevice(logits);
+            _kernels!.LaunchLtx2HeadGate(pX, pLogits, seq, heads, headDim, _stream.Handle, f16);
+            GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));   // in-place: re-assert x -> pX
+        }
+        finally { GpuTransferHelper.FreeDevice(pLogits); }
+    }
+
     /// <summary>Wan-Video interleaved in-place RoPE (shared cos/sin) — keeps q/k resident so RmsNorm→RoPE→SDPA never leaves the device.</summary>
     /// <remarks>In-place: x's device buffer is rotated and re-cached to the same pointer (no reallocation, no host round-trip).</remarks>
     public unsafe void Ltx2SplitRope(Tensor x, Tensor cos, Tensor sin, int seqLen, int numHeads, int headDim)
     {
         using NvtxRange _nvtx = NvtxRange.Push("Ltx2SplitRope");
-        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
-            throw new NotSupportedException("CUDA Ltx2SplitRope supports F32 only.");
+        // F32, or F16 activation x with F32 cos/sin (DiT F16 recipe), same as WanRopeInterleaved below.
+        bool f16 = x.DType == DType.F16;
+        if ((x.DType != DType.F32 && !f16) || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException(
+                $"CUDA Ltx2SplitRope supports F32, or F16 x with F32 cos/sin — got x={x.DType}, cos={cos.DType}, sin={sin.DType}.");
         EnterOp();
         EnsureKernels();
         ulong pX = 0, pCos = 0, pSin = 0;
@@ -3912,7 +4048,7 @@ public sealed class CudaBackend : IBackend
             pX = GpuTransferHelper.CopyToDevice(x);       // in-place target (cached activation)
             pCos = GpuTransferHelper.CopyToDevice(cos);
             pSin = GpuTransferHelper.CopyToDevice(sin);
-            _kernels!.LaunchLtx2SplitRope(pX, pCos, pSin, seqLen, numHeads, headDim, _stream.Handle);
+            _kernels!.LaunchLtx2SplitRope(pX, pCos, pSin, seqLen, numHeads, headDim, _stream.Handle, f16);
             GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));   // in-place: re-assert x → pX
         }
         finally
@@ -4083,6 +4219,7 @@ public sealed class CudaBackend : IBackend
 
     public unsafe void ExtractVaeFrame(Tensor output, Tensor src, int ti)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("ExtractVaeFrame");
         EnterOp();
         EnsureKernels();
         int b = (int)output.Shape[0], c = (int)output.Shape[1];
@@ -4111,6 +4248,7 @@ public sealed class CudaBackend : IBackend
     /// <remarks>Writes one slot of <paramref name="output"/>'s device buffer; accumulates CausalConv3d frames without leaving the device.</remarks>
     public unsafe void WriteVaeFrame(Tensor output, Tensor acc, Tensor? bias, int to)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("WriteVaeFrame");
         EnterOp();
         EnsureKernels();
         int b = (int)acc.Shape[0], c = (int)acc.Shape[1];
@@ -4136,8 +4274,9 @@ public sealed class CudaBackend : IBackend
 
     /// <summary>GPU build of the frame-major padded input for batched CausalConv3d: kt Conv2D calls, not tout·kt tiny ones.</summary>
     public unsafe void BuildPaddedFrames(Tensor padded, Tensor input, Tensor? cache, int zeroPad,
-        bool replicateFirst = false, int padH = 0, int padW = 0)
+        bool replicateFirst = false, int padH = 0, int padW = 0, bool reflectSpatial = false)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("BuildPaddedFrames");
         EnterOp();
         EnsureKernels();
         int paddedT = (int)padded.Shape[0], cIn = (int)padded.Shape[1];
@@ -4154,7 +4293,7 @@ public sealed class CudaBackend : IBackend
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             _kernels!.LaunchWanVaeBuildPadded(pOut, pIn, pCache, paddedT, cIn, Tin, cacheLen, zeroPad, h, w,
                 padH, padW, replicateFirst, _stream.Handle,
-                bf16: RequireVaeFrameDtype(padded.DType, input.DType));
+                bf16: RequireVaeFrameDtype(padded.DType, input.DType), reflectSpatial: reflectSpatial);
             GpuTransferHelper.CacheActivation(padded, pOut, outBytes);
             cachedOutput = true;
         }
@@ -4170,6 +4309,7 @@ public sealed class CudaBackend : IBackend
     /// that forced a multi-GB D2H+H2D round trip per upsampler.</summary>
     public unsafe void SeedVr2PixelShuffle(Tensor output, Tensor input, int spatialRatio, int temporalRatio)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("SeedVr2PixelShuffle");
         EnterOp();
         EnsureKernels();
         bool bf16 = RequireVaeFrameDtype(output.DType, input.DType);
@@ -4223,6 +4363,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GPU fill of the conv output with per-channel bias (init for the temporal accumulate).</summary>
     public unsafe void FillBias(Tensor output, Tensor? bias)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("FillBias");
         EnterOp();
         EnsureKernels();
         int cOut = (int)output.Shape[1], tout = (int)output.Shape[2];
@@ -4249,6 +4390,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GPU temporal gather-sum (in place): output += the dt-shifted frames of convDt.</summary>
     public unsafe void AccumulateTap(Tensor output, Tensor convDt, int dt, int strideT)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("AccumulateTap");
         EnterOp();
         EnsureKernels();
         int cOut = (int)output.Shape[1], tout = (int)output.Shape[2];
@@ -4271,6 +4413,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GPU channel-wise RMS norm for the Wan2.2 VAE (one thread per <c>[B, spatial]</c> position reduces over C).</summary>
     public unsafe void WanRmsNormChannel(Tensor output, Tensor input, Tensor? gamma, float eps)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("WanRmsNormChannel");
         EnterOp();
         EnsureKernels();
         int b = (int)input.Shape[0], c = (int)input.Shape[1];
@@ -4285,7 +4428,8 @@ public sealed class CudaBackend : IBackend
             if (gamma is not null) pGamma = GpuTransferHelper.CopyToDevice(gamma);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchWanVaeRmsNormChannel(pOut, pIn, pGamma, c, spatial, eps, sqrtC, numPos, _stream.Handle);
+            _kernels!.LaunchWanVaeRmsNormChannel(pOut, pIn, pGamma, c, spatial, eps, sqrtC, numPos, _stream.Handle,
+                bf16: RequireVaeFrameDtype(output.DType, input.DType, gamma));
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -4324,6 +4468,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GPU Wan2.2 VAE unpatchify (pixel-shuffle), one thread per output element.</summary>
     public unsafe void UnpatchifyVae(Tensor output, Tensor input, int patchSize)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("UnpatchifyVae");
         EnterOp();
         EnsureKernels();
         int b = (int)input.Shape[0], packedC = (int)input.Shape[1], t = (int)input.Shape[2], h = (int)input.Shape[3], w = (int)input.Shape[4];
@@ -4336,7 +4481,8 @@ public sealed class CudaBackend : IBackend
             pIn = GpuTransferHelper.CopyToDevice(input);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchWanVaeUnpatchify(pOut, pIn, b, c, t, h, w, p, numOut, _stream.Handle);
+            _kernels!.LaunchWanVaeUnpatchify(pOut, pIn, b, c, t, h, w, p, numOut, _stream.Handle,
+                bf16: RequireVaeFrameDtype(output.DType, input.DType));
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -5166,6 +5312,7 @@ public sealed class CudaBackend : IBackend
 
     public void MaskRows(Tensor output, Tensor input, Tensor rowMask)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("MaskRows");
         if (output.DType != DType.F32 || input.DType != DType.F32 || rowMask.DType != DType.F32)
             throw new NotSupportedException("CUDA MaskRows supports F32 only.");
         EnterOp();
@@ -5619,6 +5766,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Row scatter-add (in-place accumulate): output[indices[j]] += input[j] — see IBackend.RowScatterAdd.</summary>
     public unsafe void RowScatterAdd(Tensor output, Tensor input, Tensor indices, int m, int channels)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("RowScatterAdd");
         if (indices.DType != DType.I32) throw new NotSupportedException("RowScatterAdd requires I32 indices.");
         EnterOp(); EnsureKernels();
         ulong pOut = 0, pIn = 0, pIdx = 0;
@@ -5634,6 +5782,7 @@ public sealed class CudaBackend : IBackend
 
     public void IndexAddRows(Tensor h, Tensor table, Tensor indices)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("IndexAddRows");
         if (h.DType != DType.F32 || table.DType != DType.F32)
             throw new NotSupportedException("CUDA IndexAddRows supports F32 only.");
         if (indices.DType != DType.I32)
@@ -5726,6 +5875,7 @@ public sealed class CudaBackend : IBackend
 
     public void SliceRows(Tensor output, Tensor input, int rowOffset)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("SliceRows");
         if (input.DType != output.DType || (output.DType != DType.F32 && output.DType != DType.F16 && output.DType != DType.BF16))
             throw new NotSupportedException("CUDA SliceRows supports F32, F16 or BF16 (matching input/output dtype).");
         EnterOp();
@@ -5760,6 +5910,7 @@ public sealed class CudaBackend : IBackend
     /// guard. Carries <see cref="Tensor.Fp8ScaleFactor"/> onto the sliced chunk.</summary>
     public void SliceRowsGeneric(Tensor output, Tensor input, int rowOffset)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("SliceRowsGeneric");
         if (output.DType != input.DType)
             throw new ArgumentException($"CUDA SliceRowsGeneric requires matching dtypes, got output {output.DType} vs input {input.DType}.");
         if (output.DType.IsQuantized)
@@ -5790,6 +5941,7 @@ public sealed class CudaBackend : IBackend
 
     public void ScatterRowsGeneric(Tensor output, Tensor input, int rowOffset)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("ScatterRowsGeneric");
         if (output.DType != input.DType)
             throw new ArgumentException($"CUDA ScatterRowsGeneric requires matching dtypes, got output {output.DType} vs input {input.DType}.");
         if (output.DType.IsQuantized)
@@ -6030,6 +6182,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Dequantizes a GGUF weight (Q4_K/Q5_K/Q6_K/Q8_0/fp8) to F32 via <see cref="CastOnGpu"/>; test/tooling hook, not a hot path.</summary>
     public Tensor DequantizeToF32(Tensor quant)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("DequantizeToF32");
         EnterOp();
         EnsureKernels();
         int count = (int)quant.ElementCount;
@@ -6086,6 +6239,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GPU cast → BF16 via PTX kernel; routes non-F32 input through an F16→F32 cast first.</summary>
     public void CastToBf16(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("CastToBf16");
         EnterOp();
         EnsureKernels();
 
@@ -7033,6 +7187,7 @@ public sealed class CudaBackend : IBackend
 
     public void Sigmoid(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("Sigmoid");
         if (input.DType != DType.F32 && !(input.DType == DType.F16 && output.DType == DType.F16))
             throw new NotSupportedException($"CUDA Sigmoid supports F32 or F16 — got {input.DType}.");
         EnterOp();
@@ -7061,6 +7216,7 @@ public sealed class CudaBackend : IBackend
 
     public void Tanh(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("Tanh");
         if (input.DType != DType.F32)
             throw new NotSupportedException($"CUDA Tanh currently supports F32 only — got {input.DType}.");
         EnterOp();
@@ -7201,6 +7357,7 @@ public sealed class CudaBackend : IBackend
     public void Conv1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int stride, int padLeft, int padRight, int dilation, int groups)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("Conv1d");
         if (output.DType != DType.F32)
             throw new NotSupportedException($"CUDA Conv1d writes F32 output — got output {output.DType}.");
         EnterOp();
@@ -7598,6 +7755,7 @@ public sealed class CudaBackend : IBackend
     public unsafe void Conv2dDepthwise(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int strideH, int strideW, int padH, int padW)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("Conv2dDepthwise");
         if (output.DType != DType.F32 && output.DType != DType.F16)
             throw new NotSupportedException($"CUDA Conv2dDepthwise supports F32/F16 output — got {output.DType}.");
         if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
@@ -7707,6 +7865,7 @@ public sealed class CudaBackend : IBackend
 
     public void Add(Tensor output, Tensor a, Tensor b)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("Add");
         EnterOp();
         EnsureKernels();
 
@@ -7741,6 +7900,7 @@ public sealed class CudaBackend : IBackend
 
     public void Mul(Tensor output, Tensor a, Tensor b)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("Mul");
         EnterOp();
         EnsureKernels();
 
@@ -7776,6 +7936,7 @@ public sealed class CudaBackend : IBackend
 
     public void Scale(Tensor output, Tensor input, float scalar)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("Scale");
         EnterOp();
         EnsureKernels();
 
@@ -7848,6 +8009,7 @@ public sealed class CudaBackend : IBackend
 
     public void Clamp(Tensor output, Tensor input, float min, float max)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("Clamp");
         int count = ValidateUnaryFloatOp(nameof(Clamp), output, input);
         if (float.IsNaN(min) || float.IsNaN(max) || min > max)
             throw new ArgumentException($"CUDA Clamp requires ordered, non-NaN bounds; got min={min}, max={max}.");
@@ -8129,6 +8291,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Implements CastF8E4M3ToF16 using the PTX cast kernel on GPU.</summary>
     public void CastF8E4M3ToF16(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("CastF8E4M3ToF16");
         EnterOp();
         EnsureKernels();
         ulong pIn = 0, pOut = 0;
@@ -8152,6 +8315,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Implements CastF16ToF8E4M3 using the PTX cast kernel on GPU.</summary>
     public void CastF16ToF8E4M3(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("CastF16ToF8E4M3");
         EnterOp();
         EnsureKernels();
         ulong pIn = 0, pOut = 0;
@@ -8198,6 +8362,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Batched 2D transpose: [B, D1, D2] -> [B, D2, D1] via PTX kernel.</summary>
     public void Transpose2D(Tensor output, Tensor input, int d1, int d2)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("Transpose2D");
         EnterOp();
         EnsureKernels();
 
@@ -8260,6 +8425,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GQA K/V head repeat: [B, Hkv, L, D] → [B, Hkv*groupSize, L, D]. GPU-resident device-to-device gather.</summary>
     public void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("RepeatKvHeads");
         if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
             throw new HartsyInferenceException($"CUDA RepeatKvHeads requires rank-4 input/output; got input={input.Shape}, output={output.Shape}.");
         if (kvHeads <= 0)
@@ -8943,6 +9109,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>MoE row-gather: output[m] = input[rowIndices[m]] (collect an expert's routed tokens).</summary>
     public unsafe void GatherRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("GatherRows");
         if (ReferenceEquals(output, input))
             throw new ArgumentException("GatherRows does not support an in-place output.", nameof(output));
         if (output.DType != DType.F32 || input.DType != DType.F32)
@@ -9125,6 +9292,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GEGLU activation splitting each logical row as <c>[value | gate]</c> along its last dimension.</summary>
     public void GeGlu(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("GeGlu");
         if (input.Shape.Rank == 0 || output.Shape.Rank != input.Shape.Rank)
         {
             throw new HartsyInferenceException(
@@ -9190,6 +9358,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Broadcast add: hidden[b,c,s] += bias[b,c] in-place via PTX kernel.</summary>
     public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("BroadcastAdd");
         EnterOp();
         EnsureKernels();
 
@@ -9439,6 +9608,7 @@ public sealed class CudaBackend : IBackend
 
     public void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("UpsampleNearest2D");
         EnterOp();
         EnsureKernels();
 
@@ -9485,6 +9655,7 @@ public sealed class CudaBackend : IBackend
 
     public void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("UpsampleBilinear2D");
         throw new NotImplementedException("CUDA UpsampleBilinear2D not yet implemented");
     }
 
@@ -9633,6 +9804,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Fills a tensor with a constant float value. Works on CPU tensors directly.</summary>
     public unsafe void Fill(Tensor tensor, float value)
     {
+        using NvtxRange _nvtxProf = NvtxRange.Push("Fill");
         // CPU-side fill — DataPointer access syncs the GPU copy out (if cached) and
         // disposes its dptr, so the next op will re-upload from the just-written CPU
         // buffer. Dtype-aware so VAE F16 codepaths can use this for shift/scale broadcasts.

@@ -144,8 +144,14 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             bool isGemma4 = conv.TextEncoder.ContainsKey("model.layers.0.layer_scalar");
 
             (float[]? videoMean, float[]? videoStd) = ReadStats(conv.Vae, config.InChannels);
-            LtxVideo2VaeDecoder vae = new LtxVideo2VaeDecoder(latentsMean: videoMean, latentsStd: videoStd);
-            vae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.Vae, DType.F32));
+            // BF16 where the backend has it (the engine-wide VAE policy — never F16, see VaePrecisionHelper).
+            // At 768x512x97f the decode's peak transient set is several full-output-grid tensors; halving their
+            // width is what keeps it under the VRAM the DiT's resident prefix leaves behind, so the prefix no
+            // longer has to be evicted and re-uploaded around every decode.
+            DType vaeDtype = VaePrecisionHelper.PreferredVaeDtype(context.Backend);
+            LtxVideo2VaeDecoder vae = new LtxVideo2VaeDecoder(latentsMean: videoMean, latentsStd: videoStd,
+                computeDtype: vaeDtype);
+            vae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.Vae, vaeDtype));
 
             LtxAudioVaeDecoder? audioVae = null;
             LtxAudioVocoder? vocoder = null;

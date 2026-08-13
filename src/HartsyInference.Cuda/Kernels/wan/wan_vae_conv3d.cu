@@ -6,13 +6,14 @@
 // + optional cache [1,cIn,cacheLen,H,W]. Frames: [zeroPad pad-frames] + [cache] + [input] (+ trailing clamp).
 // Transpose (cIn<->T) + temporal pad + cache prepend + optional spatial edge-replicate pad, in one pass.
 // replicateFirst=0: pad frames are zeros (Wan). replicateFirst=1: pad frames replicate the first content frame
-// (HunyuanVideo/LTX F.pad mode="replicate"). padH/padW>0 emit spatially edge-clamped frames so the caller runs
-// Conv2D with zero padding disabled (replicate spatial pad, F.pad mode="replicate").
+// (HunyuanVideo/LTX F.pad mode="replicate"). padH/padW>0 emit spatially padded frames so the caller runs
+// Conv2D with zero padding disabled: edge-clamped (F.pad mode="replicate") when reflectSpatial=0, mirrored
+// (F.pad mode="reflect", the LTX-2 VAE's default) when reflectSpatial=1.
 extern "C" __global__ void wan_vae_build_padded(
     float* __restrict__ padded, const float* __restrict__ input, const float* __restrict__ cache,
     unsigned int paddedT, unsigned int cIn, unsigned int Tin, unsigned int cacheLen,
     unsigned int zeroPad, unsigned int H, unsigned int W,
-    unsigned int padH, unsigned int padW, unsigned int replicateFirst)
+    unsigned int padH, unsigned int padW, unsigned int replicateFirst, unsigned int reflectSpatial)
 {
     unsigned int Hp = H + 2u * padH, Wp = W + 2u * padW;
     unsigned long long HWp = (unsigned long long)Hp * Wp;
@@ -25,8 +26,17 @@ extern "C" __global__ void wan_vae_build_padded(
     unsigned int t  = (unsigned int)(tc / cIn);
     int sy = (int)(hw / Wp) - (int)padH;
     int sx = (int)(hw % Wp) - (int)padW;
-    if (sy < 0) sy = 0; else if (sy >= (int)H) sy = (int)H - 1;
-    if (sx < 0) sx = 0; else if (sx >= (int)W) sx = (int)W - 1;
+    if (reflectSpatial != 0u) {
+        // PyTorch F.pad(mode="reflect"): the border pixel is NOT repeated (-1 -> 1, H -> H-2).
+        if (sy < 0) sy = -sy; else if (sy >= (int)H) sy = 2 * ((int)H - 1) - sy;
+        if (sx < 0) sx = -sx; else if (sx >= (int)W) sx = 2 * ((int)W - 1) - sx;
+        // Reflection only stays in range while pad <= len-1; clamp so a degenerate axis cannot read OOB.
+        if (sy < 0) sy = 0; else if (sy >= (int)H) sy = (int)H - 1;
+        if (sx < 0) sx = 0; else if (sx >= (int)W) sx = (int)W - 1;
+    } else {
+        if (sy < 0) sy = 0; else if (sy >= (int)H) sy = (int)H - 1;
+        if (sx < 0) sx = 0; else if (sx >= (int)W) sx = (int)W - 1;
+    }
     unsigned long long srcHW = (unsigned long long)sy * W + sx;
     unsigned long long HW = (unsigned long long)H * W;
     float v;
@@ -78,7 +88,7 @@ extern "C" __global__ void wan_vae_build_padded_bf16(
     __nv_bfloat16* __restrict__ padded, const __nv_bfloat16* __restrict__ input, const __nv_bfloat16* __restrict__ cache,
     unsigned int paddedT, unsigned int cIn, unsigned int Tin, unsigned int cacheLen,
     unsigned int zeroPad, unsigned int H, unsigned int W,
-    unsigned int padH, unsigned int padW, unsigned int replicateFirst)
+    unsigned int padH, unsigned int padW, unsigned int replicateFirst, unsigned int reflectSpatial)
 {
     unsigned int Hp = H + 2u * padH, Wp = W + 2u * padW;
     unsigned long long HWp = (unsigned long long)Hp * Wp;
@@ -91,8 +101,17 @@ extern "C" __global__ void wan_vae_build_padded_bf16(
     unsigned int t  = (unsigned int)(tc / cIn);
     int sy = (int)(hw / Wp) - (int)padH;
     int sx = (int)(hw % Wp) - (int)padW;
-    if (sy < 0) sy = 0; else if (sy >= (int)H) sy = (int)H - 1;
-    if (sx < 0) sx = 0; else if (sx >= (int)W) sx = (int)W - 1;
+    if (reflectSpatial != 0u) {
+        // PyTorch F.pad(mode="reflect"): the border pixel is NOT repeated (-1 -> 1, H -> H-2).
+        if (sy < 0) sy = -sy; else if (sy >= (int)H) sy = 2 * ((int)H - 1) - sy;
+        if (sx < 0) sx = -sx; else if (sx >= (int)W) sx = 2 * ((int)W - 1) - sx;
+        // Reflection only stays in range while pad <= len-1; clamp so a degenerate axis cannot read OOB.
+        if (sy < 0) sy = 0; else if (sy >= (int)H) sy = (int)H - 1;
+        if (sx < 0) sx = 0; else if (sx >= (int)W) sx = (int)W - 1;
+    } else {
+        if (sy < 0) sy = 0; else if (sy >= (int)H) sy = (int)H - 1;
+        if (sx < 0) sx = 0; else if (sx >= (int)W) sx = (int)W - 1;
+    }
     unsigned long long srcHW = (unsigned long long)sy * W + sx;
     unsigned long long HW = (unsigned long long)H * W;
     __nv_bfloat16 v;

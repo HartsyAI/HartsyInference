@@ -34,7 +34,7 @@ public sealed unsafe class CausalConv3d
     private readonly Tensor? _bias;
     private readonly DType _computeDtype; // activation + conv-weight dtype (F32 default; BF16 = SeedVR2 memory mode, batched path only)
 
-    /// <summary>Builds the op from a 5-D conv weight <c>[cOut, cIn, kt, kh, kw]</c> and optional bias, pre-slicing the kt temporal taps into 2-D conv weights. <paramref name="padT"/>/<paramref name="padH"/>/<paramref name="padW"/> are the nn.Conv3d <c>padding</c> values (temporal becomes <c>2·padT</c> causal-left). <paramref name="replicateFirstPad"/> fills the leading causal frames with copies of the input's first frame (LTX-Video, HunyuanVideo) instead of zeros (Wan2.2). <paramref name="spatialReplicatePad"/> pads H/W borders by edge replication (HunyuanVideo <c>F.pad(mode="replicate")</c>) instead of zeros. <paramref name="spatialReflectPad"/> pads H/W borders by mirror-reflection (LTX-2 <c>F.pad(mode="reflect")</c>) instead of zeros — mutually exclusive with <paramref name="spatialReplicatePad"/>, and only supported on the batch-1 fast path with no streaming cache.</summary>
+    /// <summary>Builds the op from a 5-D conv weight <c>[cOut, cIn, kt, kh, kw]</c> and optional bias, pre-slicing the kt temporal taps into 2-D conv weights. <paramref name="padT"/>/<paramref name="padH"/>/<paramref name="padW"/> are the nn.Conv3d <c>padding</c> values (temporal becomes <c>2·padT</c> causal-left). <paramref name="replicateFirstPad"/> fills the leading causal frames with copies of the input's first frame (LTX-Video, HunyuanVideo) instead of zeros (Wan2.2). <paramref name="spatialReplicatePad"/> pads H/W borders by edge replication (HunyuanVideo <c>F.pad(mode="replicate")</c>) instead of zeros. <paramref name="spatialReflectPad"/> pads H/W borders by mirror-reflection (LTX-2 <c>F.pad(mode="reflect")</c>) instead of zeros — mutually exclusive with <paramref name="spatialReplicatePad"/>, and only supported on the batch-1 fast path.</summary>
     public CausalConv3d(Tensor weight5d, Tensor? bias,
         int strideT = 1, int strideH = 1, int strideW = 1,
         int padT = 0, int padH = 0, int padW = 0, bool replicateFirstPad = false, bool causal = true,
@@ -140,31 +140,24 @@ public sealed unsafe class CausalConv3d
         // matching the per-frame skip; replicate-pad frames contribute exactly like F.pad(mode="replicate").
         if (batch == 1 && !DisableBatchedPath)
         {
+            // Both spatial pad modes are folded into BuildPaddedFrames' single pass — reflect used to run as a
+            // host scalar loop (ReflectPadSpatial5D) ahead of this, which D2H-drained the whole activation and
+            // re-uploaded it, and cost ~28 s of the LTX-2.5 VAE decode's 38 s at 768x512x97f.
             bool reflectPre = _spatialReflectPad && (_padH > 0 || _padW > 0);
-            if (reflectPre && cacheFrames is not null)
-                throw new NotSupportedException("CausalConv3d spatialReflectPad does not support a streaming cacheFrames prepend (LTX-2 decode is one-shot, non-streaming).");
-            Tensor? reflectPadded = reflectPre ? ReflectPadSpatial5D(input, batch, tin, h, w) : null;
-            Tensor convInput = reflectPadded ?? input;
-            int hSrc = reflectPre ? h + 2 * _padH : h;
-            int wSrc = reflectPre ? w + 2 * _padW : w;
-
             bool spatialPre = !reflectPre && _spatialReplicatePad && (_padH > 0 || _padW > 0);
-            int convPadH = spatialPre || reflectPre ? 0 : _padH;
-            int convPadW = spatialPre || reflectPre ? 0 : _padW;
-            // `padded`'s allocated size must match what BuildPaddedFrames' kernel actually writes: reflectPre
-            // pre-pads BEFORE this point (hSrc already includes it, BuildPaddedFrames gets padH=0), but spatialPre
-            // asks BuildPaddedFrames to pad INTERNALLY (padH=_padH passed below) — hp/wp must include that
-            // padding too, or the kernel's Hp/Wp (H+2*padH) exceeds the buffer it writes into. Using hSrc here
-            // for the spatialPre case under-sized the buffer (hSrc==h when reflectPre is false) — confirmed via
-            // compute-sanitizer memcheck as an out-of-bounds write in wan_vae_build_padded (2026-07-23), the root
-            // cause of the CausalConv3d batched-path e2e crash on HunyuanVideo/Kandinsky5's replicate-pad VAE
-            // convs (LTX's reflectPre path and Wan's zero-pad path were never affected).
-            int hp = reflectPre ? hSrc : spatialPre ? h + 2 * _padH : h;
-            int wp = reflectPre ? wSrc : spatialPre ? w + 2 * _padW : w;
+            bool prePad = reflectPre || spatialPre;
+            int convPadH = prePad ? 0 : _padH;
+            int convPadW = prePad ? 0 : _padW;
+            // `padded`'s allocated size must match what BuildPaddedFrames' kernel actually writes: when the kernel
+            // pads INTERNALLY (padH=_padH passed below), hp/wp must include that padding, or the kernel's Hp/Wp
+            // (H+2*padH) exceeds the buffer it writes into — confirmed via compute-sanitizer memcheck as an
+            // out-of-bounds write in wan_vae_build_padded (2026-07-23), the root cause of the CausalConv3d
+            // batched-path e2e crash on HunyuanVideo/Kandinsky5's replicate-pad VAE convs.
+            int hp = prePad ? h + 2 * _padH : h;
+            int wp = prePad ? w + 2 * _padW : w;
             using Tensor padded = new Tensor(new TensorShape(paddedT, _cIn, hp, wp), _computeDtype);
-            backend.BuildPaddedFrames(padded, convInput, cacheFrames, zeroPad, _replicateFirstPad,
-                spatialPre ? _padH : 0, spatialPre ? _padW : 0);
-            reflectPadded?.Dispose();
+            backend.BuildPaddedFrames(padded, input, cacheFrames, zeroPad, _replicateFirstPad,
+                prePad ? _padH : 0, prePad ? _padW : 0, reflectPre);
             Tensor fastOut = new Tensor(new TensorShape([1L, _cOut, tout, hOut, wOut]), _computeDtype);
             backend.FillBias(fastOut, _bias);
             for (int dt = 0; dt < _kt; dt++)
@@ -246,48 +239,6 @@ public sealed unsafe class CausalConv3d
         return outF;
     }
 
-    /// <summary>Mirror-reflect pads a <c>[B, cIn, T, H, W]</c> tensor's H/W borders to <c>[B, cIn, T, H+2·padH, W+2·padW]</c>
-    /// (PyTorch <c>F.pad(mode="reflect")</c>: the border pixel itself is NOT repeated — index <c>-1</c> maps to source
-    /// index <c>1</c>, not <c>0</c> — unlike <see cref="ReplicatePadSpatial"/>'s edge-clamp). Used by the LTX-2 VAE decoder,
-    /// whose diffusers reference (<c>LTX2VideoDecoder3d</c>) defaults every conv to <c>spatial_padding_mode="reflect"</c>.</summary>
-    private Tensor ReflectPadSpatial5D(Tensor input, int batch, int t, int h, int w)
-    {
-        int hp = h + 2 * _padH, wp = w + 2 * _padW;
-        Tensor outF = new Tensor(new TensorShape([(long)batch, _cIn, t, hp, wp]), DType.F32);
-        Tensor inF32 = input.DType == DType.F32 ? input : input.CastTo(DType.F32);
-        float* sp = (float*)inF32.DataPointer;
-        float* dp = (float*)outF.DataPointer;
-        long frame = (long)h * w;
-        long frameP = (long)hp * wp;
-        for (int b = 0; b < batch; b++)
-            for (int ci = 0; ci < _cIn; ci++)
-                for (int ti = 0; ti < t; ti++)
-                {
-                    long srcBase = (((long)b * _cIn + ci) * t + ti) * frame;
-                    long dstBase = (((long)b * _cIn + ci) * t + ti) * frameP;
-                    for (int y = 0; y < hp; y++)
-                    {
-                        int sy = ReflectIndex(y - _padH, h);
-                        for (int x = 0; x < wp; x++)
-                        {
-                            int sx = ReflectIndex(x - _padW, w);
-                            dp[dstBase + (long)y * wp + x] = sp[srcBase + (long)sy * w + sx];
-                        }
-                    }
-                }
-        if (!ReferenceEquals(inF32, input)) inF32.Dispose();
-        return outF;
-    }
-
-    /// <summary>Maps an out-of-range index to its PyTorch <c>reflect</c>-mode source index (no edge repeat):
-    /// <c>-1 → 1</c>, <c>-2 → 2</c>, <c>len → len-2</c>, etc. Only correct for pad ≤ len-1 (true here: pad is always 1).</summary>
-    private static int ReflectIndex(int i, int len)
-    {
-        if (i < 0) return -i;
-        if (i >= len) return 2 * (len - 1) - i;
-        return i;
-    }
-
     /// <summary>Edge-replicate pads a <c>[B, cIn, H, W]</c> frame to <c>[B, cIn, H+2·padH, W+2·padW]</c> (HunyuanVideo <c>F.pad(mode="replicate")</c>).</summary>
     private Tensor ReplicatePadSpatial(Tensor frame, int batch, int h, int w)
     {
@@ -313,11 +264,5 @@ public sealed unsafe class CausalConv3d
         return outF;
     }
 
-    private static void AddInPlace(Tensor acc, Tensor add)
-    {
-        long n = acc.Shape.ElementCount;
-        float* a = (float*)acc.DataPointer;
-        float* b = (float*)add.DataPointer;
-        for (long i = 0; i < n; i++) a[i] += b[i];
-    }
+
 }

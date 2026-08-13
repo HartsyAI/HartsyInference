@@ -113,10 +113,19 @@ extern "C" __global__ void w8a8_quant_rowwise_f32(
 // ── 2a. Dequant epilogue → F16 ──────────────────────────────────────────────────────────────
 // d [rows, cols] int32 row-major, rowScale [rows] F32, wScale [cols] F32 (per-output-channel),
 // bias [cols] F32 or null → out [rows, cols] F16: out = d·rowScale[r]·wScale[c] (+ bias[c]).
+// actMode 1 applies the tanh-approximation GELU in the same pass. A DiT feed-forward's up-projection is
+// immediately followed by GELU over a [tokens, 4·dim] intermediate; running it here saves a full read AND
+// write of that tensor, which at 4992×16384 F16 is ~328 MB per call.
+__device__ __forceinline__ float w8a8_apply_act(float v, unsigned int actMode)
+{
+    if (actMode != 1u) return v;
+    float x3 = v * v * v;
+    return 0.5f * v * (1.0f + tanhf(0.7978845608028654f * (v + 0.044715f * x3)));
+}
 extern "C" __global__ void w8a8_dequant_bias_f16(
     const int* __restrict__ d, const float* __restrict__ rowScale,
     const float* __restrict__ wScale, const float* __restrict__ bias,
-    __half* __restrict__ out, unsigned int rows, unsigned int cols)
+    __half* __restrict__ out, unsigned int rows, unsigned int cols, unsigned int actMode)
 {
     unsigned long long n = (unsigned long long)rows * cols;
     for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
@@ -126,7 +135,7 @@ extern "C" __global__ void w8a8_dequant_bias_f16(
         unsigned int c = (unsigned int)(i - (unsigned long long)r * cols);
         float v = (float)d[i] * rowScale[r] * wScale[c];
         if (bias) v += bias[c];
-        out[i] = __float2half(v);
+        out[i] = __float2half(w8a8_apply_act(v, actMode));
     }
 }
 
@@ -134,7 +143,7 @@ extern "C" __global__ void w8a8_dequant_bias_f16(
 extern "C" __global__ void w8a8_dequant_bias_f32(
     const int* __restrict__ d, const float* __restrict__ rowScale,
     const float* __restrict__ wScale, const float* __restrict__ bias,
-    float* __restrict__ out, unsigned int rows, unsigned int cols)
+    float* __restrict__ out, unsigned int rows, unsigned int cols, unsigned int actMode)
 {
     unsigned long long n = (unsigned long long)rows * cols;
     for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
@@ -144,6 +153,6 @@ extern "C" __global__ void w8a8_dequant_bias_f32(
         unsigned int c = (unsigned int)(i - (unsigned long long)r * cols);
         float v = (float)d[i] * rowScale[r] * wScale[c];
         if (bias) v += bias[c];
-        out[i] = v;
+        out[i] = w8a8_apply_act(v, actMode);
     }
 }

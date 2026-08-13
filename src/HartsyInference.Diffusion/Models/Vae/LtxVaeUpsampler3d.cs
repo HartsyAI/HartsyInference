@@ -12,10 +12,13 @@ public sealed unsafe class LtxVaeUpsampler3d
     private readonly bool _residual;
     private readonly bool _isCausal;
     private readonly bool _spatialReflectPad;
+    private readonly DType _computeDtype;
     private CausalConv3d? _conv;
 
-    public LtxVaeUpsampler3d(int inC, (int T, int H, int W) stride, int upscaleFactor, bool residual, bool isCausal = true, bool spatialReflectPad = false)
+    public LtxVaeUpsampler3d(int inC, (int T, int H, int W) stride, int upscaleFactor, bool residual, bool isCausal = true,
+        bool spatialReflectPad = false, DType? computeDtype = null)
     {
+        _computeDtype = computeDtype ?? DType.F32;
         _inC = inC;
         _stride = stride;
         _upscale = upscaleFactor;
@@ -27,7 +30,7 @@ public sealed unsafe class LtxVaeUpsampler3d
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         _conv = new CausalConv3d(w[$"{prefix}.conv.conv.weight"], Bias(w, $"{prefix}.conv.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad, computeDtype: _computeDtype);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -100,7 +103,7 @@ public sealed unsafe class LtxVaeUpsampler3d
             cur = PermuteStep(backend, cur, true, xOut, f * st0, rest, new TensorShape([(long)f * st0, xOut, rest]));
             owned = true;
             // (d) drop the leading (st0−1) temporal-pad frames of the fused (F·s0) axis
-            Tensor sliced = new Tensor(new TensorShape([(long)outF, xOut, (long)sg * h, w]), DType.F32);
+            Tensor sliced = new Tensor(new TensorShape([(long)outF, xOut, (long)sg * h, w]), cur.DType);
             backend.SliceRows(sliced, cur, (st0 - 1) * xOut * sg * h);
             cur.Dispose();
             cur = sliced;
@@ -128,7 +131,7 @@ public sealed unsafe class LtxVaeUpsampler3d
         if (!owned)
         {
             // Identity stride (1,1,1): flat device copy so the caller can dispose uniformly.
-            Tensor copyT = new Tensor(finalShape, DType.F32);
+            Tensor copyT = new Tensor(finalShape, cur.DType);
             backend.SliceRows(copyT, cur, 0);
             cur = copyT;
         }
@@ -138,7 +141,7 @@ public sealed unsafe class LtxVaeUpsampler3d
     /// <summary>Allocates <paramref name="outShape"/> and runs one <c>[B, s, h, d] → [B, h, s, d]</c> group swap, disposing the previous intermediate when owned.</summary>
     private static Tensor PermuteStep(IBackend backend, Tensor cur, bool ownCur, int s, int h, int d, TensorShape outShape)
     {
-        Tensor next = new Tensor(outShape, DType.F32);
+        Tensor next = new Tensor(outShape, cur.DType);
         backend.Permute0213(next, cur, s, h, d);
         if (ownCur) cur.Dispose();
         return next;
@@ -149,12 +152,12 @@ public sealed unsafe class LtxVaeUpsampler3d
     {
         if (repeats == 1)
         {
-            Tensor copyT = new Tensor(x.Shape, DType.F32);
+            Tensor copyT = new Tensor(x.Shape, x.DType);
             backend.SliceRows(copyT, x, 0);
             return copyT;
         }
         long c = x.Shape[1];
-        Tensor outT = new Tensor(new TensorShape([x.Shape[0], c * repeats, x.Shape[2], x.Shape[3], x.Shape[4]]), DType.F32);
+        Tensor outT = new Tensor(new TensorShape([x.Shape[0], c * repeats, x.Shape[2], x.Shape[3], x.Shape[4]]), x.DType);
         Tensor[] reps = new Tensor[repeats];
         Array.Fill(reps, x);
         backend.Concat(outT, reps, dim: 1);

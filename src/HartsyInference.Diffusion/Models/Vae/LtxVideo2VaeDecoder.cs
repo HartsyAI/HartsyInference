@@ -41,6 +41,10 @@ public sealed unsafe class LtxVideo2VaeDecoder
     private readonly bool[] _residualRev;        // reversed upsample_residual
     private readonly float[]? _latentsMean;      // [latentChannels], pre-cast to F32
     private readonly float[]? _latentsStd;       // [latentChannels], pre-cast to F32
+    // Activation width for the whole decode. BF16 halves the peak transient set (a handful of full-output-grid
+    // tensors), which is what decides whether the DiT's resident prefix has to be evicted to make room. Never
+    // F16 — a VAE's resnet activations exceed F16's 65504 (the SDXL rule in VaePrecisionHelper).
+    private readonly DType _computeDtype;
 
     private CausalConv3d? _convIn, _convOut;
     private LtxVaeResnetBlock3d[] _midResnets = [];
@@ -52,8 +56,9 @@ public sealed unsafe class LtxVideo2VaeDecoder
         int[]? blockOutChannels = null, bool[]? spatioTemporalScaling = null, int[]? layersPerBlock = null,
         int[]? upsampleFactor = null, bool[]? upsampleResidual = null,
         int patchSize = 4, bool isCausal = false,
-        float[]? latentsMean = null, float[]? latentsStd = null)
+        float[]? latentsMean = null, float[]? latentsStd = null, DType? computeDtype = null)
     {
+        _computeDtype = computeDtype ?? DType.F32;
         _latentChannels = latentChannels;
         _outChannels = outChannels;
         _patch = patchSize;
@@ -88,14 +93,14 @@ public sealed unsafe class LtxVideo2VaeDecoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], Bias(w, "decoder.conv_in.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: true);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
         int output = (int)w["decoder.conv_in.conv.weight"].Shape[0];   // mid / conv_in output channels
 
         int nMid = CountResnets(w, "decoder.mid_block");
         _midResnets = new LtxVaeResnetBlock3d[nMid];
         for (int j = 0; j < nMid; j++)
         {
-            _midResnets[j] = new LtxVaeResnetBlock3d(output, output, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true);
+            _midResnets[j] = new LtxVaeResnetBlock3d(output, output, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
             _midResnets[j].LoadWeights(w, $"decoder.mid_block.resnets.{j}");
         }
 
@@ -121,7 +126,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
                 int upscale = convIn / outNom;                 // diffusers: convIn  = outNom · upscale
                 (int T, int H, int W) stride = StrideFromProduct(strideProd);
                 stage.Upsampler = new LtxVaeUpsampler3d(convIn, stride, upscaleFactor: upscale,
-                    residual: true, isCausal: _isCausal, spatialReflectPad: true);
+                    residual: true, isCausal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
                 stage.Upsampler.LoadWeights(w, $"{p}.upsamplers.0");
                 temporal.Add(stride.T == 2);
             }
@@ -130,7 +135,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
                 outNom = (int)w[$"{p}.resnets.0.conv1.conv.weight"].Shape[0];
                 if (output != outNom)
                 {
-                    stage.ConvIn = new LtxVaeResnetBlock3d(output, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true);
+                    stage.ConvIn = new LtxVaeResnetBlock3d(output, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
                     stage.ConvIn.LoadWeights(w, $"{p}.conv_in");
                 }
                 temporal.Add(false);
@@ -139,7 +144,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
             stage.Resnets = new LtxVaeResnetBlock3d[nRes];
             for (int j = 0; j < nRes; j++)
             {
-                stage.Resnets[j] = new LtxVaeResnetBlock3d(outNom, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true);
+                stage.Resnets[j] = new LtxVaeResnetBlock3d(outNom, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
                 stage.Resnets[j].LoadWeights(w, $"{p}.resnets.{j}");
             }
             stages.Add(stage);
@@ -149,7 +154,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
         _temporalScaleInferred = [.. temporal];
 
         _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], Bias(w, "decoder.conv_out.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: true);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
     }
 
     /// <summary>Counts the contiguous <c>{prefix}.resnets.{j}.conv1.conv.weight</c> entries present in the dict.</summary>
@@ -187,6 +192,10 @@ public sealed unsafe class LtxVideo2VaeDecoder
     /// <summary>Decodes a latent <c>[1, latentChannels, T_lat, H, W]</c> to RGB <c>[1, 3, (T_lat−1)·8+1,
     /// H·32, W·32]</c> in [-1,1]. Applies per-channel latent un-normalization (<c>z = latent·std + mean</c>)
     /// first when stats are present (diffusers <c>_denormalize_latents</c>, scaling_factor 1.0).</summary>
+    /// <summary>Activation width the decode runs at. The caller sizes its VRAM reserve off this: the peak is a
+    /// fixed number of full-output-grid tensors, so it scales linearly with the element width.</summary>
+    public DType ComputeDtype => _computeDtype;
+
     public Tensor Decode(IBackend backend, Tensor latent)
     {
         if ((int)latent.Shape[1] != _latentChannels)
@@ -195,6 +204,15 @@ public sealed unsafe class LtxVideo2VaeDecoder
         bool probe = Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") == "1";
         Tensor denorm = Denormalize(latent);
         if (probe) ProbeStats("denorm", denorm);
+        // The latent is tiny (one stage-0 grid) so un-normalizing on the host stays cheap; widen to the decode's
+        // activation dtype here so every stage below runs in it.
+        if (_computeDtype != DType.F32)
+        {
+            Tensor cast = new Tensor(denorm.Shape, _computeDtype);
+            backend.CastToBf16(cast, denorm);
+            denorm.Dispose();
+            denorm = cast;
+        }
         Tensor h = _convIn!.Forward(backend, denorm);
         denorm.Dispose();
         if (probe) ProbeStats("conv_in", h);
@@ -214,7 +232,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
         // norm_out + final pixel-unshuffle run on-device: the host loops here D2H-drained the full-res tensor
         // twice (the literal Krea2-VAE pattern). WanRmsNormChannel is the same channel-RMS math; UnpatchifyVae's
         // channel unpack (oc = c·p² + r·p + q, q→H, r→W) is exactly this decoder's (c·p + pa)·p + pb layout.
-        Tensor normed = new Tensor(h.Shape, DType.F32);
+        Tensor normed = new Tensor(h.Shape, h.DType);
         backend.WanRmsNormChannel(normed, h, null, 1e-8f);
         h.Dispose();
         if (probe) ProbeStats("norm_out", normed);
@@ -225,9 +243,19 @@ public sealed unsafe class LtxVideo2VaeDecoder
         int pb = (int)patched.Shape[0], pc = (int)patched.Shape[1], pf = (int)patched.Shape[2];
         int ph = (int)patched.Shape[3], pw = (int)patched.Shape[4];
         int oc = pc / (_patch * _patch);
-        Tensor rgb = new Tensor(new TensorShape([(long)pb, oc, pf, (long)ph * _patch, (long)pw * _patch]), DType.F32);
+        Tensor rgb = new Tensor(new TensorShape([(long)pb, oc, pf, (long)ph * _patch, (long)pw * _patch]), patched.DType);
         backend.UnpatchifyVae(rgb, patched, _patch);
         patched.Dispose();
+        // The decode's INTERNAL width is _computeDtype, but the returned RGB is always F32: every consumer
+        // (VideoRgbFrames.ExtractFrame, ProbeStats, the restore chain) reads it as raw floats. Widening here
+        // rather than earlier keeps the BF16 saving across the stages, where the big tensors are.
+        if (rgb.DType != DType.F32)
+        {
+            Tensor rgbF32 = new Tensor(rgb.Shape, DType.F32);
+            backend.CastToF32(rgbF32, rgb);
+            rgb.Dispose();
+            rgb = rgbF32;
+        }
         if (probe) ProbeStats("unpatchify", rgb);
         return rgb;
     }

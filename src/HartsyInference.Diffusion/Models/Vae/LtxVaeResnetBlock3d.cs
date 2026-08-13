@@ -13,13 +13,16 @@ public sealed unsafe class LtxVaeResnetBlock3d
     private readonly bool _timestepCond;
     private readonly bool _isCausal;
     private readonly bool _spatialReflectPad;
+    private readonly DType _computeDtype;
 
     private CausalConv3d? _conv1, _conv2, _convShortcut;
     private Tensor? _norm3W, _norm3B;          // LayerNorm affine (shortcut), only when in != out
     private Tensor? _scaleShift;               // [4, C], only when timestep-conditioned
 
-    public LtxVaeResnetBlock3d(int inC, int outC, bool timestepCond, bool isCausal = true, bool spatialReflectPad = false)
+    public LtxVaeResnetBlock3d(int inC, int outC, bool timestepCond, bool isCausal = true, bool spatialReflectPad = false,
+        DType? computeDtype = null)
     {
+        _computeDtype = computeDtype ?? DType.F32;
         _inC = inC;
         _outC = outC;
         _timestepCond = timestepCond;
@@ -32,15 +35,15 @@ public sealed unsafe class LtxVaeResnetBlock3d
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         _conv1 = new CausalConv3d(w[$"{prefix}.conv1.conv.weight"], Bias(w, $"{prefix}.conv1.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad, computeDtype: _computeDtype);
         _conv2 = new CausalConv3d(w[$"{prefix}.conv2.conv.weight"], Bias(w, $"{prefix}.conv2.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad, computeDtype: _computeDtype);
         if (_inC != _outC)
         {
             _norm3W = LoadF32(w, $"{prefix}.norm3.weight");
             w.TryGetValue($"{prefix}.norm3.bias", out _norm3B);
             _convShortcut = new CausalConv3d(w[$"{prefix}.conv_shortcut.conv.weight"], Bias(w, $"{prefix}.conv_shortcut.conv.bias"),
-                padT: 0, padH: 0, padW: 0, replicateFirstPad: true, causal: _isCausal);
+                padT: 0, padH: 0, padW: 0, replicateFirstPad: true, causal: _isCausal, computeDtype: _computeDtype);
         }
         if (_timestepCond) _scaleShift = LoadF32(w, $"{prefix}.scale_shift_table");
     }
@@ -91,7 +94,7 @@ public sealed unsafe class LtxVaeResnetBlock3d
             residual = x;
         }
 
-        Tensor outT = new Tensor(c2.Shape, DType.F32);
+        Tensor outT = new Tensor(c2.Shape, c2.DType);
         backend.Add(outT, c2, residual);
         c2.Dispose();
         if (_convShortcut is not null) residual.Dispose();
@@ -116,7 +119,7 @@ public sealed unsafe class LtxVaeResnetBlock3d
     /// <summary>Device channel RMS via the shared <see cref="IBackend.WanRmsNormChannel"/> op (same math to float rounding: <c>x·sqrt(C)/max(L2_C, eps)</c> vs <c>x/sqrt(mean_C(x²)+eps)</c>), keeping the activation GPU-resident between the convs. The timestep-conditioned path stays on the host loop because <see cref="ApplyShiftScale"/> mutates the host buffer in place — done to a GPU-cached tensor that would leave the device copy stale.</summary>
     private static Tensor ChannelRmsDevice(IBackend backend, Tensor x)
     {
-        Tensor outT = new Tensor(x.Shape, DType.F32);
+        Tensor outT = new Tensor(x.Shape, x.DType);
         backend.WanRmsNormChannel(outT, x, null, NormEps);
         return outT;
     }

@@ -62,6 +62,10 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     // beside it (decided from measured free VRAM, logged either way).
     private static readonly bool KeepModelsResident = EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _prefixResident;
+    // Set when the VAE decode freed only the prefix's tail: the pin still stands, so the next generation tops the
+    // tail back up rather than re-uploading all 48 blocks — but it must trim first to hand the pool's decode
+    // transients back to the allocator that re-upload draws on.
+    private bool _prefixTailEvicted;
     private int _residentPrefixBlocks = -1;
     private long _prefixSizedTokens = -1;
     private long _gemmaWeightBytes = -1;
@@ -264,6 +268,14 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                 _residentPrefixBlocks = -1;
                 Logs.Info($"[ltx2-phase] resident prefix released for re-size (token load {tokenLoad} > sized {_prefixSizedTokens}).");
             }
+            // Both sizings below read FreeMemoryBytes, which counts pool-retained blocks as USED. Without this trim
+            // the figure still carries the previous generation's VAE-decode transients (~5 GB) and the Gemma
+            // encode's, so the prefix gets sized against phantom pressure. That produced a two-generation
+            // ping-pong through the SwarmUI API: a 48-block generation evicts for the decode, the next one
+            // measures the un-trimmed pool, pins only ~22 blocks and streams the other 26 (~30 s slower), and
+            // because it never fills VRAM it does not evict — so the cycle repeats. Pool slack is not spendable
+            // on a 369 MB weight upload anyway, so trimming costs nothing real.
+            if (!_prefixResident || _prefixTailEvicted) { Backend.TrimMemoryPool(); _prefixTailEvicted = false; }
             if (_residentPrefixBlocks < 0 || tokenLoad > _prefixSizedTokens)
             {
                 // With the TE on its own device (TextEncoderBackend) the Gemma phase never touched this GPU, so
@@ -412,17 +424,54 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             _prefixResident = false;
         }
         // The persistent prefix must never starve the decode: the GPU-ported video VAE peaks at a handful of
-        // full-output-grid F32 stages plus conv workspace — if free VRAM is short of that, drop the prefix for
+        // full-output-grid stages plus conv workspace — if free VRAM is short of that, drop the prefix for
         // this generation (an OOM is worse than one re-upload). A VAE on its OWN device (VaeBackend) never
         // contends with the prefix, so the evict is skipped when split.
-        long decodeNeed = Math.Max(3L << 30, (long)numFrames * height * width * 160);
+        //
+        // Per output pixel, scaled by the decode's activation width — the peak is a fixed COUNT of full-grid
+        // tensors, so it is linear in the element size (F32 keeps the measured 160 B/px; BF16 halves it).
+        // MEASURED, not derived: a BF16 decode at 768x512x97f OOMs with 2486 MB free, so the reserve must stay
+        // well above the ~2.5 GB a naive count of the stage tensors suggests — conv workspace and pool
+        // fragmentation are real. At this geometry BF16 still evicts the prefix; the saving it buys is decode
+        // TIME (3.9 s -> 2.8 s) and headroom at smaller geometries, not the eviction.
+        // Not simply halved for BF16: the fixed conv workspace and pool fragmentation do not scale with the
+        // element width. Bracketed by experiment at 768x512x97f — BF16 OOMs outright at 2486 MB free and only
+        // squeaks through on allocator retries at ~3.05 GB, so 104 B/px (~4.0 GB here) is the first reserve with
+        // real margin.
+        long perPixel = _vae.ComputeDtype == DType.F32 ? 160L : 104L;
+        long decodeNeed = Math.Max(3L << 30, (long)numFrames * height * width * perPixel);
         if (_prefixResident && ReferenceEquals(VaeBackend, Backend) && Backend.FreeMemoryBytes() < decodeNeed)
         {
-            Logs.Info($"[ltx2-phase] evicting resident prefix for VAE decode " +
+            // Free only the TAIL of the prefix the decode is actually short of, from the end so the pin at
+            // _residentPrefixBlocks still describes the survivors. Dropping all 48 blocks to reclaim a ~400 MB
+            // deficit cost a full 21.5 GB re-preload on the next generation (3.5 s) to buy one block's worth.
+            long blockBytes = Math.Max(_transformer.GetBlock(0).EstimatedWeightBytes, 1);
+            // One block of MARGIN on top of the deficit. decodeNeed's 104 B/px is a bracket, and the full-prefix
+            // eviction used to hide its error under ~21 GB of slack: freeing exactly the deficit reproduced
+            // "OOM on async first attempt (free 42.9 MB)" allocator retries mid-decode that this workload had
+            // never logged before. A block is the natural granularity and costs ~90 ms of re-preload.
+            long deficit = decodeNeed - Backend.FreeMemoryBytes();
+            int toFree = (int)Math.Min(residentBlocks, (deficit + blockBytes - 1) / blockBytes + 1);
+            int keep = residentBlocks - toFree;
+            IEnumerable<Tensor> EvictedTail()
+            {
+                for (int b = keep; b < residentBlocks; b++)
+                    foreach (Tensor t in _transformer.GetBlock(b).EnumerateWeights()) yield return t;
+            }
+            Logs.Info($"[ltx2-phase] evicting {toFree} of {residentBlocks} resident blocks for VAE decode " +
                 $"(free {Backend.FreeMemoryBytes() >> 20} MB < ~{decodeNeed >> 20} MB estimated decode peak).");
-            Backend.FreeWeights(_transformer.EnumerateWeights());
+            Backend.FreeWeights(EvictedTail());
             Backend.TrimMemoryPool();
-            _prefixResident = false;
+            // The estimate is a bracket, not an allocator model, so verify rather than assume: if the tail was not
+            // enough, drop the whole prefix — an OOM in the decode is worse than the re-upload this exists to avoid.
+            if (Backend.FreeMemoryBytes() < decodeNeed)
+            {
+                Logs.Info($"[ltx2-phase] tail eviction left only {Backend.FreeMemoryBytes() >> 20} MB — dropping the whole prefix.");
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                Backend.TrimMemoryPool();
+                _prefixResident = false;
+            }
+            else _prefixTailEvicted = true;
         }
         // The four text embeddings are NOT disposed — they are the cross-generation prompt cache (tiny,
         // host-materialized; freed on the next cache miss or by the finalizer drain).

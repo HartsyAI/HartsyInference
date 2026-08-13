@@ -593,6 +593,26 @@ Measured end-to-end against comfy's own conditioning for the same prompt: overal
 0.9992, register rows 1.0011, and — the sensitive test — the prompt-to-prompt delta at **ratio 1.00** on every
 row band. Only row 0 (BOS) differs at cosine 0.96, which does not propagate.
 
+## Performance (2026-08-12 pass — numbers and do-not-retry list live in `benchmarks/scoreboards/VIDEO.md`)
+
+56.62 s warm through the SwarmUI API at 768×512×97f/30 steps against ComfyUI's 42.25 s, down from 117.13 s.
+Four things did it, in descending order: a GPU reflect spatial pad in `wan_vae_build_padded` (the VAE decode
+was 38 s, ~28 s of it a scalar host loop in `CausalConv3d.ReflectPadSpatial5D` that D2H-drained and
+re-uploaded the activation on all 42 conv forwards); F16 block activations via `DitDtype.Act` plus a new
+`ltx2_split_rope_f16` kernel (LTX-2.5 had hardcoded F32 everywhere and never opted in); `ApplyKeyframesAbsPos`
+moved on-device; and a pool trim before the resident prefix is sized.
+
+Three things worth not re-deriving:
+
+- **The keyframe marker was silently dropped on CUDA.** `ApplyKeyframesAbsPos` aliased `hidden`'s HOST buffer,
+  so the affine's result landed in the alias tensor's own device cache, which `Dispose` frees with no D2H
+  write-back. It worked on the CPU backend, which is why it survived its test.
+- **The step is GPU-bound, not host-launch-bound** — SM 99–100%, memory controller 78–80% under
+  `nvidia-smi dmon`. CUDA graphs and launch-overhead work are not the lever for this model.
+- **`Linear` is near its structural floor** (~62% of a 1.756 s step): ~0.80 s of unavoidable int8 GEMM plus
+  ~0.27 s of int32 IMMA-accumulator round trip. Shrinking the row chunk to make that accumulator L2-resident
+  is monotonically *slower*; the only real fix is a fused-dequant IMMA kernel.
+
 ## Open questions
 
 - **Diffusion video decoder is managed-only.** No CUDA `Na3d` kernel, ~32 s for the smallest legal frame, so

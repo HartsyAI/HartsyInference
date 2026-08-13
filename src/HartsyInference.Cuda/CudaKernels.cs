@@ -243,7 +243,9 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _seedVr2PadBr;
     private readonly nint _seedVr2PadBrBf16;
     private readonly nint _wanVaeRmsNormChannel;
+    private readonly nint _wanVaeRmsNormChannelBf16;
     private readonly nint _wanVaeUnpatchify;
+    private readonly nint _wanVaeUnpatchifyBf16;
     private readonly nint _wanVaeSplitQkv;
     private readonly nint _wanVaeTokensToFrame;
 
@@ -291,6 +293,13 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditRopeHeadMajorV2F32;
     private readonly nint _ditAffineBroadcastRowIndexedToFp8F32;
     private readonly nint _ltx2SplitRopeF32;
+    private readonly nint _ltx2SplitRopeF16;
+    private readonly nint _ltx2QkNormRopeHeadMajorF16;
+    private readonly nint _ltx2HeadGateF16;
+    private readonly nint _ltx2QkNormRopeHeadMajorF32;
+    private readonly nint _ltx2HeadGateF32;
+    private readonly nint _ltx2RmsModulateF16;
+    private readonly nint _ltx2RmsModulateF32;
     private readonly nint _ditSliceLastDimF32;
     private readonly nint _ditRowScaleF32;
     private readonly nint _ditAddScalarF32;
@@ -541,7 +550,9 @@ public sealed class CudaKernels : IDisposable
 
         _wanVaeNormModule = LoadOwnedModule(Path.Combine(ptxDir, "wan_vae_norm.ptx"));
         _wanVaeRmsNormChannel = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel");
+        _wanVaeRmsNormChannelBf16 = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel_bf16");
         _wanVaeUnpatchify = _wanVaeNormModule.GetFunction("wan_vae_unpatchify");
+        _wanVaeUnpatchifyBf16 = _wanVaeNormModule.GetFunction("wan_vae_unpatchify_bf16");
         _wanVaeSplitQkv = _wanVaeNormModule.GetFunction("wan_vae_split_qkv");
         _wanVaeTokensToFrame = _wanVaeNormModule.GetFunction("wan_vae_tokens_to_frame");
 
@@ -750,6 +761,9 @@ public sealed class CudaKernels : IDisposable
                 _ditFp8EmitModule.GetFunction("dit_affine_broadcast_rowindexed_to_fp8_f32");
         }
         _ltx2SplitRopeF32 = _ditF32Module.GetFunction("ltx2_split_rope_f32");
+        _ltx2QkNormRopeHeadMajorF32 = _ditF32Module.GetFunction("ltx2_qk_norm_rope_headmajor_f32");
+        _ltx2HeadGateF32 = _ditF32Module.GetFunction("ltx2_head_gate_f32");
+        _ltx2RmsModulateF32 = _ditF32Module.GetFunction("ltx2_rms_modulate_f32");
         _ditSliceLastDimF32 = _ditF32Module.GetFunction("dit_slice_lastdim_f32");
         _ditRowScaleF32 = _ditF32Module.GetFunction("dit_row_scale_f32");
         _ditAddScalarF32 = _ditF32Module.GetFunction("dit_add_scalar_f32");
@@ -799,6 +813,10 @@ public sealed class CudaKernels : IDisposable
         _ditAddScalarF16 = _ditF16Module.GetFunction("dit_add_scalar_f16");
         _ditSigmoidF16 = _ditF16Module.GetFunction("dit_sigmoid_f16");
         _ditRopeInterleavedF16 = _ditF16Module.GetFunction("dit_rope_interleaved_f16");
+        _ltx2SplitRopeF16 = _ditF16Module.GetFunction("ltx2_split_rope_f16");
+        _ltx2QkNormRopeHeadMajorF16 = _ditF16Module.GetFunction("ltx2_qk_norm_rope_headmajor_f16");
+        _ltx2HeadGateF16 = _ditF16Module.GetFunction("ltx2_head_gate_f16");
+        _ltx2RmsModulateF16 = _ditF16Module.GetFunction("ltx2_rms_modulate_f16");
         _ditRopeF16 = _ditF16Module.GetFunction("dit_rope_f16");
         _ditSliceLastDimF16 = _ditF16Module.GetFunction("dit_slice_lastdim_f16");
         _ditConcat2F16 = _ditF16Module.GetFunction("dit_concat2_f16");
@@ -1946,14 +1964,14 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>W8A8 epilogue — dequants the int32 GEMM result with rowScale·wScale (+ optional bias) into F16 or F32.</summary>
     public unsafe void LaunchW8A8DequantBias(ulong output, ulong d32, ulong rowScale, ulong wScale, ulong bias,
-        int rows, int cols, nint stream, bool outF16)
+        int rows, int cols, nint stream, bool outF16, uint actMode = 0)
     {
         if (_w8a8Module is null) throw new InvalidOperationException("w8a8.ptx not present in the Ptx folder.");
         ulong dArg = d32, rsArg = rowScale, wsArg = wScale, bArg = bias, oArg = output;
-        uint rowsArg = (uint)rows, colsArg = (uint)cols;
-        void** args = stackalloc void*[7];
+        uint rowsArg = (uint)rows, colsArg = (uint)cols, actArg = actMode;
+        void** args = stackalloc void*[8];
         args[0] = &dArg; args[1] = &rsArg; args[2] = &wsArg; args[3] = &bArg; args[4] = &oArg;
-        args[5] = &rowsArg; args[6] = &colsArg;
+        args[5] = &rowsArg; args[6] = &colsArg; args[7] = &actArg;
         long n = (long)rows * cols;
         uint grid = (uint)Math.Min((n + 255) / 256, 65535);
         CudaDriverApi.cuLaunchKernel(outF16 ? _w8a8DequantBiasF16 : _w8a8DequantBiasF32,
@@ -3840,7 +3858,7 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>LTX-2 split (rotate-half, per-head cos) rotary. x [S, numHeads*headDim] in-place; cos/sin [S, dim/2].</summary>
-    public unsafe void LaunchLtx2SplitRope(ulong x, ulong cos, ulong sin, int S, int numHeads, int headDim, nint stream)
+    public unsafe void LaunchLtx2SplitRope(ulong x, ulong cos, ulong sin, int S, int numHeads, int headDim, nint stream, bool f16 = false)
     {
         ulong xA = x, cA = cos, sA = sin;
         uint sArg = (uint)S, hArg = (uint)numHeads, dArg = (uint)headDim;
@@ -3848,7 +3866,47 @@ public sealed class CudaKernels : IDisposable
         args[0] = &xA; args[1] = &cA; args[2] = &sA; args[3] = &sArg; args[4] = &hArg; args[5] = &dArg;
         long total = (long)S * numHeads * (headDim / 2);
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_ltx2SplitRopeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(f16 ? _ltx2SplitRopeF16 : _ltx2SplitRopeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+
+    /// <summary>Fused LTX-2 QK path: full-row RMS norm -> optional split RoPE -> head-major emit, one pass.
+    /// <paramref name="normW"/>/<paramref name="cos"/>/<paramref name="sin"/> may be 0. Shared memory is
+    /// <c>(BlockSize + heads*headDim)</c> floats, so the caller must keep that under the 48 KB static limit.</summary>
+    public unsafe void LaunchLtx2QkNormRopeHeadMajor(ulong outp, ulong x, ulong normW, ulong cos, ulong sin,
+        int seq, int heads, int headDim, float eps, nint stream, bool f16)
+    {
+        ulong oA = outp, xA = x, nA = normW, cA = cos, sA = sin;
+        uint sqA = (uint)seq, hA = (uint)heads, dA = (uint)headDim; float eA = eps;
+        void** args = stackalloc void*[9];
+        args[0] = &oA; args[1] = &xA; args[2] = &nA; args[3] = &cA; args[4] = &sA;
+        args[5] = &sqA; args[6] = &hA; args[7] = &dA; args[8] = &eA;
+        uint shared = (uint)((BlockSize + heads * headDim) * sizeof(float));
+        CudaDriverApi.cuLaunchKernel(f16 ? _ltx2QkNormRopeHeadMajorF16 : _ltx2QkNormRopeHeadMajorF32, (uint)seq, 1, 1, BlockSize, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Fused LTX-2 RMS-norm + AdaLN shift/scale: <c>out = norm(in)*(1+scale)+shift</c>, one pass.</summary>
+    public unsafe void LaunchLtx2RmsModulate(ulong outp, ulong x, ulong scale, ulong shift,
+        int dim, int rows, float eps, nint stream, bool f16)
+    {
+        ulong oA = outp, xA = x, scA = scale, shA = shift;
+        uint dA = (uint)dim, rA = (uint)rows; float eA = eps;
+        void** args = stackalloc void*[7];
+        args[0] = &oA; args[1] = &xA; args[2] = &scA; args[3] = &shA; args[4] = &dA; args[5] = &rA; args[6] = &eA;
+        uint shared = BlockSize * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(f16 ? _ltx2RmsModulateF16 : _ltx2RmsModulateF32, (uint)rows, 1, 1, BlockSize, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Fused LTX-2 per-head output gate, in place: <c>x[s, h*headDim+d] *= 2*sigmoid(logits[s,h])</c>.</summary>
+    public unsafe void LaunchLtx2HeadGate(ulong x, ulong logits, int seq, int heads, int headDim, nint stream, bool f16)
+    {
+        ulong xA = x, lA = logits;
+        uint sA = (uint)seq, hA = (uint)heads, dA = (uint)headDim;
+        void** args = stackalloc void*[5];
+        args[0] = &xA; args[1] = &lA; args[2] = &sA; args[3] = &hA; args[4] = &dA;
+        long total = (long)seq * heads * headDim;
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(f16 ? _ltx2HeadGateF16 : _ltx2HeadGateF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Extracts temporal frame <paramref name="ti"/> of a 5D <c>[B,C,Tsrc,H,W]</c> tensor into a 4D
@@ -3879,14 +3937,15 @@ public sealed class CudaKernels : IDisposable
     /// zero/replicate-first pad + cache + spatial edge-replicate pad) for batched CausalConv3d.
     /// <paramref name="cache"/>=0 for none.</summary>
     public unsafe void LaunchWanVaeBuildPadded(ulong padded, ulong input, ulong cache, int paddedT, int cIn, int Tin, int cacheLen, int zeroPad,
-        int H, int W, int padH, int padW, bool replicateFirst, nint stream, bool bf16 = false)
+        int H, int W, int padH, int padW, bool replicateFirst, nint stream, bool bf16 = false, bool reflectSpatial = false)
     {
         ulong pA = padded, iA = input, cA = cache;
         uint ptA = (uint)paddedT, ciA = (uint)cIn, tiA = (uint)Tin, clA = (uint)cacheLen, zpA = (uint)zeroPad;
         uint hA = (uint)H, wA = (uint)W, phA = (uint)padH, pwA = (uint)padW, rfA = replicateFirst ? 1u : 0u;
-        void** args = stackalloc void*[13];
+        uint rsA = reflectSpatial ? 1u : 0u;
+        void** args = stackalloc void*[14];
         args[0] = &pA; args[1] = &iA; args[2] = &cA; args[3] = &ptA; args[4] = &ciA; args[5] = &tiA; args[6] = &clA; args[7] = &zpA;
-        args[8] = &hA; args[9] = &wA; args[10] = &phA; args[11] = &pwA; args[12] = &rfA;
+        args[8] = &hA; args[9] = &wA; args[10] = &phA; args[11] = &pwA; args[12] = &rfA; args[13] = &rsA;
         long total = (long)paddedT * cIn * (H + 2L * padH) * (W + 2L * padW);
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeBuildPaddedBf16 : _wanVaeBuildPadded, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
@@ -3895,23 +3954,23 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Per-channel RMS norm: out[c] = x[c] * (sqrtC / max(||x||_2, eps)) * gamma[c], over the C axis at each spatial position.</summary>
     public unsafe void LaunchWanVaeRmsNormChannel(
         ulong outp, ulong x, ulong gamma, int c, long spatial, float eps, float sqrtC,
-        long numPos, nint stream)
+        long numPos, nint stream, bool bf16 = false)
     {
         ulong oA = outp, xA = x, gA = gamma; int cA = c; long spA = spatial, npA = numPos; float eA = eps, scA = sqrtC;
         void** args = stackalloc void*[8];
         args[0] = &oA; args[1] = &xA; args[2] = &gA; args[3] = &cA; args[4] = &spA; args[5] = &eA; args[6] = &scA; args[7] = &npA;
         uint gridDim = (uint)((numPos + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_wanVaeRmsNormChannel, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeRmsNormChannelBf16 : _wanVaeRmsNormChannel, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Unpatchifies [b, c*p*p, t, h, w] into [b, c, t, h*p, w*p] via pixel-shuffle.</summary>
-    public unsafe void LaunchWanVaeUnpatchify(ulong outp, ulong x, int b, int c, int t, int h, int w, int p, long numOut, nint stream)
+    public unsafe void LaunchWanVaeUnpatchify(ulong outp, ulong x, int b, int c, int t, int h, int w, int p, long numOut, nint stream, bool bf16 = false)
     {
         ulong oA = outp, xA = x; int bA = b, cA = c, tA = t, hA = h, wA = w, pA = p; long nA = numOut;
         void** args = stackalloc void*[9];
         args[0] = &oA; args[1] = &xA; args[2] = &bA; args[3] = &cA; args[4] = &tA; args[5] = &hA; args[6] = &wA; args[7] = &pA; args[8] = &nA;
         uint gridDim = (uint)((numOut + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_wanVaeUnpatchify, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeUnpatchifyBf16 : _wanVaeUnpatchify, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Splits fused attention input [bt, 3c, h, w] into q, k, v, each [bt, 1, hw, c].</summary>

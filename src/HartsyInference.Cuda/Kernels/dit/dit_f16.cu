@@ -247,6 +247,36 @@ __global__ void dit_rope_interleaved_f16(
     x[xoff + 1] = __float2half(re * sn + im * c);
 }
 
+// ── LTX-2 split (half-rotate) RoPE, in place (F16 twin of ltx2_split_rope_f32) ──
+// Pairs lane i with lane i+headDim/2 instead of the interleaved 2i/2i+1 above; cos/sin are laid out
+// [S, heads*headDim/2], per-head (NOT shared across heads like dit_rope_interleaved_f16's table).
+__global__ void ltx2_split_rope_f16(
+    __half* __restrict__ x,
+    const float* __restrict__ cos,
+    const float* __restrict__ sin,
+    unsigned int seqLen,
+    unsigned int numHeads,
+    unsigned int headDim)
+{
+    unsigned int r = headDim >> 1;
+    unsigned int dim = numHeads * headDim;
+    unsigned int cosWidth = dim >> 1;            // = numHeads * r
+    unsigned long long total = (unsigned long long)seqLen * numHeads * r;
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+    unsigned int i = (unsigned int)(gid % r);
+    unsigned long long t = gid / r;
+    unsigned int h = (unsigned int)(t % numHeads);
+    unsigned int s = (unsigned int)(t / numHeads);
+    size_t headBase = (size_t)s * dim + (size_t)h * headDim;
+    size_t cosBase = (size_t)s * cosWidth + (size_t)h * r;
+    float a = __half2float(x[headBase + i]);
+    float b = __half2float(x[headBase + i + r]);
+    float c = cos[cosBase + i], sn = sin[cosBase + i];
+    x[headBase + i]     = __float2half(a * c - b * sn);
+    x[headBase + i + r] = __float2half(b * c + a * sn);
+}
+
 // ── Slice a contiguous row block (F16, pure copy) ───────────────────────────
 // output[i] = input[elemOffset + i]. Extracts the image-token rows from the joint [text,image] sequence.
 __global__ void dit_slice_rows_f16(
@@ -662,3 +692,142 @@ __global__ void dit_glu_act_f16(
 }
 
 } // extern "C"
+
+// ── LTX-2 fused QK-norm + split-RoPE + head-major emit ──────────────────────
+// Collapses RmsNorm -> Ltx2SplitRope -> Permute0213 into ONE pass over the tensor. The three-op version
+// read and wrote the full [seq, heads*headDim] activation three times; this reads it once and writes the
+// head-major result once. Distinct from dit_qkv_split_norm_head_major_f16 above, which RMS-norms PER HEAD
+// against a fused qkv buffer — LTX-2 normalizes across the WHOLE row (all heads) with a [heads*headDim]
+// weight, so that kernel's math does not apply here.
+//
+// in:    [seq, heads*headDim]        token-major (a Linear output)
+// out:   [1, heads, seq, headDim]    head-major (what SDPA consumes)
+// normW: [heads*headDim] or null     full-row RMS weight
+// cos/sin: [seq, heads*headDim/2] or null (null => no rotation, e.g. text cross-attention)
+// Split RoPE pairs lane (h*headDim + i) with (h*headDim + i + headDim/2) against cos/sin lane h*(headDim/2)+i.
+// One block per token; the normalized row is staged in shared memory because the rotation reads its partner
+// lane. Dynamic shared = (blockDim.x + heads*headDim) floats.
+// PROFILED 2026-08-13: this is NOT bandwidth-bound (~428 GB/s of the 4090's ~1008). A rewrite holding the
+// partner lane in a register and dropping the 17 KB shared request bought only 7% here and 0 ms of step time —
+// the limiter is the SCATTERED WRITE below, which sprays 32 separate 256 B regions across a 40 MB tensor per
+// token. Fixing that needs a tiled (token x head) transpose through shared memory, not a cheaper norm.
+extern "C" __global__ void ltx2_qk_norm_rope_headmajor_f16(
+    __half* __restrict__ out,
+    const __half* __restrict__ in,
+    const float* __restrict__ normW,
+    const float* __restrict__ cosT,
+    const float* __restrict__ sinT,
+    unsigned int seq, unsigned int heads, unsigned int headDim, float eps)
+{
+    extern __shared__ float smem[];
+    float* sred = smem;
+    float* srow = smem + blockDim.x;
+    unsigned int W = heads * headDim;
+    unsigned int s = blockIdx.x;
+    if (s >= seq) return;
+    const __half* inRow = in + (size_t)s * W;
+
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < W; i += blockDim.x)
+    {
+        float v = __half2float(inRow[i]);
+        srow[i] = v;
+        partial += v * v;
+    }
+    sred[threadIdx.x] = partial;
+    __syncthreads();
+    for (unsigned int st = blockDim.x >> 1; st > 0; st >>= 1)
+    {
+        if (threadIdx.x < st) sred[threadIdx.x] += sred[threadIdx.x + st];
+        __syncthreads();
+    }
+    float inv = rsqrtf(sred[0] / (float)W + eps);
+    for (unsigned int i = threadIdx.x; i < W; i += blockDim.x)
+        srow[i] = srow[i] * inv * (normW ? normW[i] : 1.0f);
+    __syncthreads();
+
+    unsigned int r = headDim >> 1;
+    unsigned int halfW = W >> 1;
+    for (unsigned int i = threadIdx.x; i < W; i += blockDim.x)
+    {
+        unsigned int h = i / headDim;
+        unsigned int d = i - h * headDim;
+        float val;
+        if (cosT != 0)
+        {
+            unsigned int lane = h * r + (d < r ? d : d - r);
+            float c = cosT[(size_t)s * halfW + lane];
+            float sn = sinT[(size_t)s * halfW + lane];
+            if (d < r) { float a = srow[i], b = srow[i + r]; val = a * c - b * sn; }
+            else       { float a = srow[i - r], b = srow[i]; val = b * c + a * sn; }
+        }
+        else val = srow[i];
+        out[((size_t)h * seq + s) * headDim + d] = __float2half(val);
+    }
+}
+
+// ── LTX-2 fused per-head output gate (in place) ─────────────────────────────
+// x[s, h*headDim + d] *= 2 * sigmoid(logits[s, h]).
+// Replaces Sigmoid -> Scale -> Linear-against-a-constant-0/1-expansion-matrix -> Mul: the expansion GEMM
+// materialized a full [seq, heads*headDim] gate tensor purely to broadcast one scalar per (token, head),
+// so the old chain moved 4x this tensor's bytes and burned a GEMM to do a copy.
+extern "C" __global__ void ltx2_head_gate_f16(
+    __half* __restrict__ x,
+    const __half* __restrict__ logits,
+    unsigned int seq, unsigned int heads, unsigned int headDim)
+{
+    unsigned int W = heads * headDim;
+    unsigned long long total = (unsigned long long)seq * W;
+    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    unsigned int i = (unsigned int)(idx % W);
+    unsigned long long s = idx / W;
+    unsigned int h = i / headDim;
+    float g = __half2float(logits[s * heads + h]);
+    // Sign-aware form, matching dit_sigmoid_f16 — the gate is bounded [0,2] either way, but keeping one
+    // convention means a future A/B against the unfused chain is not chasing last-ulp differences.
+    float sig = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
+    x[idx] = __float2half(__half2float(x[idx]) * 2.0f * sig);
+}
+
+// ── LTX-2 fused RMS-norm + AdaLN shift/scale ────────────────────────────────
+// out[r,d] = in[r,d] * rsqrt(mean_d(in[r,:]^2) + eps) * (1 + scale[d]) + shift[d]
+// Replaces RmsNorm (weight = a ones vector, so it folds away) followed by AddScalar(scale, +1) and
+// AffineBroadcastLastDim: two full passes over a [rows, dim] activation become one. Every LTX-2 block runs
+// this pair six times (video/audio x self-attn/cross-attn/FFN). scale/shift are F32 [dim] vectors.
+extern "C" __global__ void ltx2_rms_modulate_f16(
+    __half* __restrict__ out,
+    const __half* __restrict__ in,
+    const float* __restrict__ scale,
+    const float* __restrict__ shift,
+    unsigned int dim,
+    unsigned int rows,
+    float eps)
+{
+    extern __shared__ float sred2[];
+    unsigned int r = blockIdx.x;
+    if (r >= rows) return;
+    const __half* inRow = in + (size_t)r * dim;
+    __half* outRow = out + (size_t)r * dim;
+
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+    {
+        float v = __half2float(inRow[i]);
+        partial += v * v;
+    }
+    sred2[threadIdx.x] = partial;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) sred2[threadIdx.x] += sred2[threadIdx.x + s];
+        __syncthreads();
+    }
+    float inv = rsqrtf(sred2[0] / (float)dim + eps);
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+    {
+        float v = __half2float(inRow[i]) * inv * (1.0f + scale[i]);
+        if (shift != 0) v += shift[i];
+        outRow[i] = __float2half(v);
+    }
+}

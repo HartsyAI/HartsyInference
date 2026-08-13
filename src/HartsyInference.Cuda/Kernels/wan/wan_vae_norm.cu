@@ -80,3 +80,59 @@ extern "C" __global__ void wan_vae_tokens_to_frame(
     int ci = (int)(tmp % c);     int i = (int)(tmp / c);
     out[((long)i * c + ci) * hw + token] = a[((long)i * hw + token) * c + ci];
 }
+
+// ── BF16 twins (BF16 I/O, F32/F64 compute) ──────────────────────────────────
+// Added for the LTX-2 conv video VAE's BF16 decode path: the decode's peak transient set is a handful of
+// full-output-grid tensors, so halving their width is what keeps the DiT's resident prefix from having to be
+// evicted for the decode. BF16 not F16 — a VAE's resnet activations exceed F16's 65504 (the SDXL rule in
+// VaePrecisionHelper). Accumulation stays double/float exactly as above, so only the I/O width changes.
+#include <cuda_bf16.h>
+
+extern "C" __global__ void wan_vae_rms_norm_channel_bf16(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ x,
+    const float* __restrict__ gamma,
+    int C, long spatial, float eps, float sqrtC, long numPos)
+{
+    long pos = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (pos >= numPos) return;
+    long b = pos / spatial;
+    long s = pos % spatial;
+    long baseB = b * (long)C * spatial;
+
+    double sumSq = 0.0;
+    for (int ci = 0; ci < C; ci++)
+    {
+        float v = __bfloat162float(x[baseB + (long)ci * spatial + s]);
+        sumSq += (double)v * (double)v;
+    }
+    float denom = fmaxf((float)sqrt(sumSq), eps);
+    float scale = sqrtC / denom;
+
+    for (int ci = 0; ci < C; ci++)
+    {
+        long off = baseB + (long)ci * spatial + s;
+        float gv = gamma ? gamma[ci] : 1.0f;
+        out[off] = __float2bfloat16(__bfloat162float(x[off]) * scale * gv);
+    }
+}
+
+// Address permutation only — the BF16 payload is copied, never arithmetic, so this is bit-preserving.
+extern "C" __global__ void wan_vae_unpatchify_bf16(
+    __nv_bfloat16* __restrict__ out, const __nv_bfloat16* __restrict__ x,
+    int b, int c, int t, int h, int w, int p, long numOut)
+{
+    long idx = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (idx >= numOut) return;
+    int outW = w * p, outH = h * p;
+    int ow = (int)(idx % outW); long tmp = idx / outW;
+    int oh = (int)(tmp % outH); tmp /= outH;
+    int ti = (int)(tmp % t);    tmp /= t;
+    int ci = (int)(tmp % c);    tmp /= c;
+    int bi = (int)tmp;
+    int hh = oh / p, q = oh % p, ww = ow / p, r = ow % p;
+    int packedC = c * p * p;
+    int oc = ci * p * p + r * p + q;
+    long srcOff = ((((long)bi * packedC + oc) * t + ti) * h + hh) * (long)w + ww;
+    out[idx] = x[srcOff];
+}

@@ -125,6 +125,10 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         foreach (Tensor? t in new[] { _ssVideo, _ssAudio, _promptVideo, _promptAudio, _caVideo, _caAudio,
             _ffW0, _ffB0, _ffW2, _ffB2, _aFfW0, _aFfB0, _aFfW2, _aFfB2 })
             if (t is not null) yield return t;
+        // HOST-built, so without this they are neither a preloaded weight nor any device op's output: the norms
+        // read them 8x per block per CFG branch and each read took a cache miss + re-upload (595 H2D/step).
+        yield return _onesV;
+        yield return _onesA;
     }
 
     /// <summary>Forward both streams. Returns the updated (video, audio) hidden states; the inputs are consumed.</summary>
@@ -144,28 +148,24 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         Tensor[] aCaGate = Modulation(backend, _caAudio!, 4, ctx.TembCaAudioGate, 1, _aDim);     // v2a_gate
 
         // ── 1. Self-attention ──
-        Tensor n1 = RmsNoAffine(backend, hidden, _onesV, _vDim);
-        n1 = ShiftScale(backend, n1, vMod[1], vMod[0]);
+        Tensor n1 = NormModulate(backend, hidden, _onesV, vMod[1], vMod[0], _vDim);
         Tensor attn1 = _attn1.Forward(backend, n1, n1, ctx.VideoRope, ctx.VideoCos, ctx.VideoSin, ctx.VideoRope, ctx.VideoCos, ctx.VideoSin, null);
         n1.Dispose();
         hidden = GatedAddInto(backend, hidden, attn1, vMod[2]); attn1.Dispose();
 
-        Tensor an1 = RmsNoAffine(backend, audioHidden, _onesA, _aDim);
-        an1 = ShiftScale(backend, an1, aMod[1], aMod[0]);
+        Tensor an1 = NormModulate(backend, audioHidden, _onesA, aMod[1], aMod[0], _aDim);
         Tensor aAttn1 = _aAttn1.Forward(backend, an1, an1, ctx.AudioRope, ctx.AudioCos, ctx.AudioSin, ctx.AudioRope, ctx.AudioCos, ctx.AudioSin, null);
         an1.Dispose();
         audioHidden = GatedAddInto(backend, audioHidden, aAttn1, aMod[2]); aAttn1.Dispose();
 
         // ── 2. Text cross-attention (Q: stream; K,V: text) ──
-        Tensor n2 = RmsNoAffine(backend, hidden, _onesV, _vDim);
-        n2 = ShiftScale(backend, n2, vMod[7], vMod[6]);                     // scale_text_q, shift_text_q
+        Tensor n2 = NormModulate(backend, hidden, _onesV, vMod[7], vMod[6], _vDim);   // scale_text_q, shift_text_q
         Tensor encMod = vPrompt is not null ? ModulateRows(backend, ctx.Encoder, vPrompt[1], vPrompt[0], _vDim) : ctx.Encoder;   // enc·(1+scale_kv)+shift_kv
         Tensor attn2 = _attn2.Forward(backend, n2, encMod, null, null, null, null, null, null, ctx.EncoderMask);
         n2.Dispose(); if (vPrompt is not null) encMod.Dispose();
         hidden = GatedAddInto(backend, hidden, attn2, vMod[8]); attn2.Dispose();   // gate_text_q
 
-        Tensor an2 = RmsNoAffine(backend, audioHidden, _onesA, _aDim);
-        an2 = ShiftScale(backend, an2, aMod[7], aMod[6]);
+        Tensor an2 = NormModulate(backend, audioHidden, _onesA, aMod[7], aMod[6], _aDim);
         Tensor aEncMod = aPrompt is not null ? ModulateRows(backend, ctx.AudioEncoder, aPrompt[1], aPrompt[0], _aDim) : ctx.AudioEncoder;
         Tensor aAttn2 = _aAttn2.Forward(backend, an2, aEncMod, null, null, null, null, null, null, ctx.AudioEncoderMask);
         an2.Dispose(); if (aPrompt is not null) aEncMod.Dispose();
@@ -191,14 +191,12 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         ncaV.Dispose(); ncaA.Dispose();
 
         // ── 4. Feed-forward ──
-        Tensor n3 = RmsNoAffine(backend, hidden, _onesV, _vDim);
-        n3 = ShiftScale(backend, n3, vMod[4], vMod[3]);                     // scale_mlp, shift_mlp
+        Tensor n3 = NormModulate(backend, hidden, _onesV, vMod[4], vMod[3], _vDim);   // scale_mlp, shift_mlp
         Tensor ff = Ffn(backend, n3, _ffW0!, _ffB0, _ffW2!, _ffB2, _vDim);
         n3.Dispose();
         hidden = GatedAddInto(backend, hidden, ff, vMod[5]); ff.Dispose();
 
-        Tensor an3 = RmsNoAffine(backend, audioHidden, _onesA, _aDim);
-        an3 = ShiftScale(backend, an3, aMod[4], aMod[3]);
+        Tensor an3 = NormModulate(backend, audioHidden, _onesA, aMod[4], aMod[3], _aDim);
         Tensor aFf = Ffn(backend, an3, _aFfW0!, _aFfB0, _aFfW2!, _aFfB2, _aDim);
         an3.Dispose();
         audioHidden = GatedAddInto(backend, audioHidden, aFf, aMod[5]); aFf.Dispose();
@@ -231,9 +229,20 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         return outs;
     }
 
+    /// <summary>Affine-free RMS norm and the AdaLN shift/scale in ONE pass — the pair the block runs six times
+    /// (video/audio x self-attn/cross-attn/FFN). The separate ops walked the activation twice.</summary>
+    private Tensor NormModulate(IBackend backend, Tensor x, Tensor ones, Tensor scale, Tensor shift, int dim)
+    {
+        Tensor o = new(new TensorShape((int)x.Shape[0], dim), x.DType);
+        backend.Ltx2RmsModulate(o, x, ones, scale, shift, _normEps);
+        return o;
+    }
+
     private Tensor RmsNoAffine(IBackend backend, Tensor x, Tensor ones, int dim)
     {
-        Tensor o = new(new TensorShape((int)x.Shape[0], dim), DType.F32);
+        // Activation dtype follows the stream (see LtxVideo2Attention.Forward); `ones` stays F32 — the F16
+        // RmsNorm kernel takes an F16 activation with an F32 weight and rejects an F16 weight.
+        Tensor o = new(new TensorShape((int)x.Shape[0], dim), x.DType);
         backend.RmsNorm(o, x, ones, _normEps);
         return o;
     }
@@ -242,9 +251,11 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
     private static Tensor ShiftScale(IBackend backend, Tensor x, Tensor scale, Tensor shift)
     {
         int dim = (int)scale.Shape[scale.Shape.Rank - 1];
+        // The modulation vectors stay F32 — they are tiny per-channel vectors, AddScalar is F32-only, and the
+        // F16 AffineBroadcastLastDim kernel requires exactly this shape (F16 activation, F32 scale/shift).
         Tensor scale1 = new(new TensorShape(dim), DType.F32);
         backend.AddScalar(scale1, scale, 1f);
-        Tensor o = new(x.Shape, DType.F32);
+        Tensor o = new(x.Shape, x.DType);
         backend.AffineBroadcastLastDim(o, x, scale1, shift);
         scale1.Dispose();
         x.Dispose();
@@ -257,7 +268,7 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
     {
         Tensor scale1 = new(new TensorShape(dim), DType.F32);
         backend.AddScalar(scale1, scale, 1f);
-        Tensor o = new(new TensorShape((int)x.Shape[0], dim), DType.F32);
+        Tensor o = new(new TensorShape((int)x.Shape[0], dim), x.DType);
         backend.AffineBroadcastLastDim(o, x, scale1, shift);
         scale1.Dispose();
         return o;
@@ -266,7 +277,9 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
     /// <summary><c>residual + gate · value</c> into a fresh tensor; disposes the residual.</summary>
     private static Tensor GatedAddInto(IBackend backend, Tensor residual, Tensor value, Tensor gate)
     {
-        Tensor o = new(residual.Shape, DType.F32);
+        // GatedResidualLastDim requires residual/value/output to share a dtype (gate stays F32); the value is an
+        // attention or FFN output, which inherited the residual's dtype upstream.
+        Tensor o = new(residual.Shape, residual.DType);
         backend.GatedResidualLastDim(o, residual, value, gate);
         residual.Dispose();
         return o;
@@ -276,12 +289,14 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
     {
         int s = (int)x.Shape[0];
         int inner = (int)w0.Shape[0];
-        Tensor proj = new(new TensorShape(s, inner), DType.F32);
-        backend.Linear(proj, x, w0, b0);
-        Tensor act = new(proj.Shape, DType.F32);
-        backend.Gelu(act, proj);   // gelu-approximate (tanh)
-        proj.Dispose();
-        Tensor o = new(new TensorShape(s, dim), DType.F32);
+        // The 4096->16384 GELU intermediate is the F16 overflow risk site (65504 ceiling). Verified empirically on
+        // the real int8-convrot checkpoint rather than assumed: incoherent frames here would mean overflow, and the
+        // fix would be to pin `proj`/`act` to F32 while the rest of the block stays F16.
+        // gelu-approximate (tanh) folded into the up-projection's dequant epilogue where the backend supports
+        // it — this intermediate is [tokens, 4*dim], the widest tensor in the block.
+        Tensor act = new(new TensorShape(s, inner), x.DType);
+        backend.LinearGelu(act, x, w0, b0);
+        Tensor o = new(new TensorShape(s, dim), x.DType);
         backend.Linear(o, act, w2, b2);
         act.Dispose();
         return o;

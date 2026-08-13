@@ -78,18 +78,22 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     }
 
     // Diagnostic (HARTSY_LTX2_PROBE=1): per-block residual-stream absmax/rms on the FIRST forward only — the
-    // mandatory F16-activation go/no-go probe (streams riding >60k overflow F16). Host sync per probe, debug only.
+    // F16-activation headroom probe (streams riding >60k overflow F16). Host sync per probe, debug only.
+    // Reads whichever dtype the stream is in: since the block path went F16 this must decode halves, and the
+    // old raw-float read would have reported nonsense at exactly the moment the probe is worth running.
     private static readonly bool Ltx2Probe = Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") == "1";
     private static bool _probedOnce;
 
     private static void Probe(string label, Tensor t)
     {
-        float* p = (float*)t.DataPointer;
+        Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+        float* p = (float*)f32.DataPointer;
         float mx = 0f;
         double ss = 0;
-        long n = t.ElementCount;
+        long n = f32.ElementCount;
         for (long e = 0; e < n; e++) { float av = MathF.Abs(p[e]); if (av > mx) mx = av; ss += (double)p[e] * p[e]; }
-        HartsyInference.Core.Logging.Logs.Info($"[ltx2-probe] {label}: absmax={mx:F2} rms={Math.Sqrt(ss / n):F4}");
+        HartsyInference.Core.Logging.Logs.Info($"[ltx2-probe] {label}: absmax={mx:F2} rms={Math.Sqrt(ss / n):F4} ({t.DType})");
+        if (!ReferenceEquals(f32, t)) f32.Dispose();
     }
 
     public LtxVideo2Transformer(LtxVideo2Config config)
@@ -211,8 +215,14 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
                 $"LTX-2.5 keyframe marker: grid {grid.Height}x{grid.Width} needs {rows} token rows but the video " +
                 $"stream has {hidden.Shape[0]}.");
         }
-        using Tensor firstFrame = new Tensor((void*)hidden.DataPointer, new TensorShape(rows, (int)hidden.Shape[1]), DType.F32);
+        // Slice/affine/scatter rather than aliasing hidden's HOST buffer: reading DataPointer drains the whole
+        // [tokens, dim] stream D2H and frees its device copy, and the affine's result then lives only in the alias
+        // tensor's own device cache — which Dispose frees WITHOUT a write-back, so the marker never reached the
+        // hidden that the next op re-uploads. On the CPU backend the aliasing worked, which is why this survived.
+        using Tensor firstFrame = new Tensor(new TensorShape(rows, (int)hidden.Shape[1]), hidden.DType);
+        backend.SliceRowsGeneric(firstFrame, hidden, 0);
         backend.AffineBroadcastLastDim(firstFrame, firstFrame, _keyframesOnes!, _keyframesAbsPos);
+        backend.ScatterRowsGeneric(hidden, firstFrame, 0);
     }
 
     /// <summary>Always-resident (non-block) weights — proj_in/out, the global AdaLN-Single modulation tables. Touched
@@ -267,11 +277,12 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         int sv = (int)videoTokens.Shape[0], sa = (int)audioTokens.Shape[0];
         int v = _config.InnerDim, a = _config.AudioInnerDim;
 
-        // proj_in patchify projections.
-        Tensor hidden = new Tensor(new TensorShape(sv, v), DType.F32);
+        // proj_in patchify projections. Same activation-dtype choice as ForwardCfgPair — see the note there.
+        DType act = backend.SupportsF16Activations ? DiTBlocks.DitDtype.Act : DType.F32;
+        Tensor hidden = new Tensor(new TensorShape(sv, v), act);
         backend.Linear(hidden, videoTokens, _projInW!, _projInB);
         ApplyKeyframesAbsPos(backend, hidden, grid);
-        Tensor audioHidden = new Tensor(new TensorShape(sa, a), DType.F32);
+        Tensor audioHidden = new Tensor(new TensorShape(sa, a), act);
         backend.Linear(audioHidden, audioTokens, _audioProjInW!, _audioProjInB);
 
         // Global modulation tables + the two embedded-timesteps used by the output layer.
@@ -296,10 +307,16 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
         if (_ropeKey != ropeKey)
         {
-            DisposeRopeCache();
+            DisposeRopeCache(backend);
             (_vCosC, _vSinC) = _videoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
             (_aCosC, _aSinC) = _audioRope.BuildAudio(audioFrames);
             (_cvCosC, _cvSinC) = _caVideoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+            // PIN them on the device. These are built on the HOST, so they are neither a preloaded weight nor any
+            // device op's output — every attention that consumes one takes a cache miss and re-uploads it, then
+            // frees it again. The big video tables are large enough for auto-promote to rescue; the audio pair
+            // ([Sa, audioInner/2], ~0.4 MB) is not, and it was being re-uploaded 1536 times per step — ~620 MB of
+            // pure PCIe traffic for tables that never change within a generation.
+            backend.PreloadWeights(EnumerateRopeTables());
             _ropeKey = ropeKey;
         }
         (Tensor vCos, Tensor vSin) = (_vCosC!, _vSinC!);
@@ -370,14 +387,19 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
                 timestep, grid, audioFrames, fps, sv, sa, v, a);
         }
 
-        Tensor hidC = new Tensor(new TensorShape(sv, v), DType.F32);
+        // proj_in is where the block stream's activation dtype is CHOSEN; every block/attention helper below
+        // inherits it from its input, and OutputLayer converts back to F32 for the pipeline's F32-only Euler step.
+        // The latent in, the connector encoder, the AdaLN modulation vectors and every norm/rope parameter stay F32.
+        // Gated on the backend: the CPU backend's Linear is F32-only, so it keeps the F32 path.
+        DType act = backend.SupportsF16Activations ? DiTBlocks.DitDtype.Act : DType.F32;
+        Tensor hidC = new Tensor(new TensorShape(sv, v), act);
         backend.Linear(hidC, videoTokens, _projInW!, _projInB);
         ApplyKeyframesAbsPos(backend, hidC, grid);
-        Tensor audC = new Tensor(new TensorShape(sa, a), DType.F32);
+        Tensor audC = new Tensor(new TensorShape(sa, a), act);
         backend.Linear(audC, audioTokens, _audioProjInW!, _audioProjInB);
-        Tensor hidU = new Tensor(new TensorShape(sv, v), DType.F32);
+        Tensor hidU = new Tensor(new TensorShape(sv, v), act);
         backend.CopyInto(hidU, hidC);
-        Tensor audU = new Tensor(new TensorShape(sa, a), DType.F32);
+        Tensor audU = new Tensor(new TensorShape(sa, a), act);
         backend.CopyInto(audU, audC);
 
         (Tensor tVideo, Tensor embV) = _timeEmbed.Forward(backend, timestep);
@@ -396,10 +418,16 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
         if (_ropeKey != ropeKey)
         {
-            DisposeRopeCache();
+            DisposeRopeCache(backend);
             (_vCosC, _vSinC) = _videoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
             (_aCosC, _aSinC) = _audioRope.BuildAudio(audioFrames);
             (_cvCosC, _cvSinC) = _caVideoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+            // PIN them on the device. These are built on the HOST, so they are neither a preloaded weight nor any
+            // device op's output — every attention that consumes one takes a cache miss and re-uploads it, then
+            // frees it again. The big video tables are large enough for auto-promote to rescue; the audio pair
+            // ([Sa, audioInner/2], ~0.4 MB) is not, and it was being re-uploaded 1536 times per step — ~620 MB of
+            // pure PCIe traffic for tables that never change within a generation.
+            backend.PreloadWeights(EnumerateRopeTables());
             _ropeKey = ropeKey;
         }
 
@@ -486,10 +514,16 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
         if (_ropeKey != ropeKey)
         {
-            DisposeRopeCache();
+            DisposeRopeCache(backend);
             (_vCosC, _vSinC) = _videoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
             (_aCosC, _aSinC) = _audioRope.BuildAudio(audioFrames);
             (_cvCosC, _cvSinC) = _caVideoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+            // PIN them on the device. These are built on the HOST, so they are neither a preloaded weight nor any
+            // device op's output — every attention that consumes one takes a cache miss and re-uploads it, then
+            // frees it again. The big video tables are large enough for auto-promote to rescue; the audio pair
+            // ([Sa, audioInner/2], ~0.4 MB) is not, and it was being re-uploaded 1536 times per step — ~620 MB of
+            // pure PCIe traffic for tables that never change within a generation.
+            backend.PreloadWeights(EnumerateRopeTables());
             _ropeKey = ropeKey;
             _graphPinned = false;
         }
@@ -597,14 +631,15 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         LtxVideo2BlockContext ctxC, LtxVideo2BlockContext ctxU, int sv, int sa, int v, int a,
         (int Frames, int Height, int Width) grid)
     {
-        Tensor hidC = new Tensor(new TensorShape(sv, v), DType.F32);
+        DType act = backend.SupportsF16Activations ? DiTBlocks.DitDtype.Act : DType.F32;
+        Tensor hidC = new Tensor(new TensorShape(sv, v), act);
         backend.Linear(hidC, videoTokens, _projInW!, _projInB);
         ApplyKeyframesAbsPos(backend, hidC, grid);
-        Tensor audC = new Tensor(new TensorShape(sa, a), DType.F32);
+        Tensor audC = new Tensor(new TensorShape(sa, a), act);
         backend.Linear(audC, audioTokens, _audioProjInW!, _audioProjInB);
-        Tensor hidU = new Tensor(new TensorShape(sv, v), DType.F32);
+        Tensor hidU = new Tensor(new TensorShape(sv, v), act);
         backend.CopyInto(hidU, hidC);
-        Tensor audU = new Tensor(new TensorShape(sa, a), DType.F32);
+        Tensor audU = new Tensor(new TensorShape(sa, a), act);
         backend.CopyInto(audU, audC);
 
         for (int i = 0; i < _blocks.Length; i++)
@@ -643,9 +678,11 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         Tensor scale1p = new Tensor(new TensorShape(dim), DType.F32);
         backend.AddScalar(scale1p, scale1, 1f);
         scale1.Dispose();
-        Tensor normed = new Tensor(new TensorShape(s, dim), DType.F32);
+        // LayerNormNoAffine and AffineBroadcastLastDim both reject a mixed input/output pair, so these follow the
+        // stream; the final proj_out writes F32 because the pipeline's CfgEulerStep is F32-only.
+        Tensor normed = new Tensor(new TensorShape(s, dim), hidden.DType);
         backend.LayerNormNoAffine(normed, hidden, 1e-6f);
-        Tensor modded = new Tensor(new TensorShape(s, dim), DType.F32);
+        Tensor modded = new Tensor(new TensorShape(s, dim), hidden.DType);
         backend.AffineBroadcastLastDim(modded, normed, scale1p, shift);
         normed.Dispose(); scale1p.Dispose(); shift.Dispose();
         Tensor outVel = new Tensor(new TensorShape(s, outChannels), DType.F32);
@@ -654,8 +691,19 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         return outVel;
     }
 
-    private void DisposeRopeCache()
+    /// <summary>The per-generation RoPE tables, for pinning as resident weights (they are grid-invariant for the
+    /// whole generation) and for releasing on the next re-size.</summary>
+    private IEnumerable<Tensor> EnumerateRopeTables()
     {
+        foreach (Tensor? t in new[] { _vCosC, _vSinC, _aCosC, _aSinC, _cvCosC, _cvSinC })
+            if (t is not null) yield return t;
+    }
+
+    /// <summary>Releases the per-generation RoPE tables. <paramref name="backend"/> must be supplied whenever they
+    /// were pinned (every path that built them), or their weight-cache entries outlive the tensors.</summary>
+    private void DisposeRopeCache(IBackend? backend = null)
+    {
+        if (backend is not null) backend.FreeWeights(EnumerateRopeTables());
         foreach (Tensor? t in new[] { _vCosC, _vSinC, _aCosC, _aSinC, _cvCosC, _cvSinC })
             t?.Dispose();
         _vCosC = _vSinC = _aCosC = _aSinC = _cvCosC = _cvSinC = null;

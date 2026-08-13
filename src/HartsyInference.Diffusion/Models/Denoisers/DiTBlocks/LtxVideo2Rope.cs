@@ -35,6 +35,10 @@ public sealed unsafe class LtxVideo2Rope
 
     private readonly Modality _modality;
     private readonly RopeType _ropeType;
+
+    /// <summary>Which apply flavor this rope uses. The fused QK-norm+rope+head-major backend op only serves
+    /// <see cref="RopeType.Split"/>; an interleaved rope must keep the unfused sequence.</summary>
+    public RopeType Flavor => _ropeType;
     private readonly bool _temporalOnly;    // video cross-attn: use only the temporal axis (1-axis rope)
     private readonly int _dim;              // full inner dim (Q/K width the rope is applied to)
     private readonly int _numHeads, _headDim;   // head layout (split mode pairs the two halves within each head)

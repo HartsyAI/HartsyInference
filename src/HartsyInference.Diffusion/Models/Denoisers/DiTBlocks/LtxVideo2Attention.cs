@@ -60,67 +60,80 @@ public sealed unsafe class LtxVideo2Attention
     {
         int sq = (int)qInput.Shape[0];
         int sk = (int)kvInput.Shape[0];
+        // Activation dtype FOLLOWS THE INPUT (the Krea2 pattern) rather than being hardcoded, so the block decides
+        // once and the text-connector path — whose surrounding ops are F32 and which runs once per prompt — keeps the
+        // F32 baseline. Parameters stay F32 throughout: the F16 RmsNorm/RoPE/Sigmoid kernels take an F16 activation
+        // with F32 per-channel params, and SDPA requires an F32 additive mask on either path.
+        DType act = qInput.DType;
 
         // Gate logits on the (modulated, normed) query input — one logit per head. Absent on ungated (pre-2.3) checkpoints.
         Tensor? gateLogits = null;
         if (_gateW is not null)
         {
-            gateLogits = new(new TensorShape(sq, _heads), DType.F32);
+            gateLogits = new(new TensorShape(sq, _heads), act);
             backend.Linear(gateLogits, qInput, _gateW!, _gateB);
         }
 
-        Tensor q = new(new TensorShape(sq, _inner), DType.F32);
+        Tensor q = new(new TensorShape(sq, _inner), act);
         backend.Linear(q, qInput, _qW!, _qB);
-        Tensor k = new(new TensorShape(sk, _inner), DType.F32);
+        Tensor k = new(new TensorShape(sk, _inner), kvInput.DType);
         backend.Linear(k, kvInput, _kW!, _kB);
-        Tensor v = new(new TensorShape(sk, _inner), DType.F32);
+        Tensor v = new(new TensorShape(sk, _inner), kvInput.DType);
         backend.Linear(v, kvInput, _vW!, _vB);
 
-        // Full-width QK-RMSNorm (across heads), then optional interleaved RoPE before the head split.
-        Tensor qn = new(q.Shape, DType.F32); backend.RmsNorm(qn, q, _nq!, _qkEps); q.Dispose();
-        Tensor kn = new(k.Shape, DType.F32); backend.RmsNorm(kn, k, _nk!, _qkEps); k.Dispose();
-        if (qRope is not null) qRope.ApplyRotary(backend, qn, qCos!, qSin!);
-        if (kRope is not null) kRope.ApplyRotary(backend, kn, kCos!, kSin!);
-
-        Tensor qMh = ToBhsd(backend, qn, sq); qn.Dispose();
-        Tensor kMh = ToBhsd(backend, kn, sk); kn.Dispose();
-        Tensor vMh = ToBhsd(backend, v, sk); v.Dispose();
+        // Full-width QK-RMSNorm (across heads) -> optional RoPE -> head-major, fused into ONE pass per tensor.
+        // The unfused sequence read and wrote each [S, inner] tensor three times (RmsNorm, then in-place rope,
+        // then Permute0213); at 4992 tokens x 4096 inner that was the single largest non-GEMM cost in the step.
+        // SDPA requires output/K/V to share Q's dtype, and a cross-attention K/V stream can arrive F32 (F32 text
+        // connectors) against an F16 query — reconcile onto Q's dtype here rather than at each call site.
+        Tensor qMh = NormRopeHeadMajor(backend, q, _nq!, qRope, qCos, qSin, sq, act);
+        Tensor kMh = NormRopeHeadMajor(backend, k, _nk!, kRope, kCos, kSin, sk, act);
+        Tensor vMh = ToBhsd(backend, v, sk, act); v.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attn = new(new TensorShape(1, _heads, sq, _headDim), DType.F32);
+        Tensor attn = new(new TensorShape(1, _heads, sq, _headDim), act);
         // allowF16: Q and K are RMS-normed above → bounded pre-softmax scores → F16 attention is safe and halves the
-        // (dominant) score-matrix traffic. Engine keeps F32 when a mask is present.
+        // (dominant) score-matrix traffic. Engine keeps F32 when a mask is present. Redundant once act is F16 (the
+        // native-F16 branch is cast-free and needs no gate), but load-bearing on the F32 connector path.
         backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, scale, allowF16: true);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
-        Tensor flat = FromBhsd(backend, attn, sq); attn.Dispose();   // [Sq, inner]
-        if (gateLogits is not null) { flat = ApplyGate(backend, flat, gateLogits, sq); gateLogits.Dispose(); }
+        Tensor flat = FromBhsd(backend, attn, sq, act); attn.Dispose();   // [Sq, inner]
+        if (gateLogits is not null)
+        {
+            backend.Ltx2HeadGate(flat, gateLogits, sq, _heads, _headDim);
+            gateLogits.Dispose();
+        }
 
-        Tensor outT = new(new TensorShape(sq, _outDim), DType.F32);
+        Tensor outT = new(new TensorShape(sq, _outDim), act);
         backend.Linear(outT, flat, _oW!, _oB);
         flat.Dispose();
         return outT;
     }
 
-    /// <summary>Per-head output gating on-device: each head's slice scaled by <c>2·sigmoid(logit_head)</c>. The
-    /// per-(row,head) gate is expanded to <c>[Sq, inner]</c> via a constant 0/1 block matrix GEMM (exact copy — one
-    /// term per output element), then applied with an elementwise multiply. Was a host <c>DataPointer</c> loop that
-    /// drained the SDPA output mid-chain, 6×/block.</summary>
-    private Tensor ApplyGate(IBackend backend, Tensor flat, Tensor gateLogits, int sq)
+    /// <summary>Norm + optional RoPE + head-major in one backend op. Falls back to the explicit three-op
+    /// sequence for an INTERLEAVED rope, which the fused op does not serve (LTX-0.9 lineage; LTX-2.x is Split),
+    /// and widens an F32 cross-attention K/V stream onto the query's dtype first, since SDPA requires the pair
+    /// to match and the fused op emits its input's dtype.</summary>
+    private Tensor NormRopeHeadMajor(IBackend backend, Tensor x, Tensor normW,
+        LtxVideo2Rope? rope, Tensor? cos, Tensor? sin, int s, DType act)
     {
-        Tensor sig = new(new TensorShape(sq, _heads), DType.F32);
-        backend.Sigmoid(sig, gateLogits);
-        Tensor sig2 = new(new TensorShape(sq, _heads), DType.F32);
-        backend.Scale(sig2, sig, 2f);
-        sig.Dispose();
-        Tensor expand = HeadExpandWeights.GetOrAdd((_heads, _headDim), BuildHeadExpand);
-        Tensor gateFull = new(new TensorShape(sq, _inner), DType.F32);
-        backend.Linear(gateFull, sig2, expand, null);
-        sig2.Dispose();
-        Tensor o = new(new TensorShape(sq, _inner), DType.F32);
-        backend.Mul(o, flat, gateFull);
-        gateFull.Dispose();
-        flat.Dispose();
+        Tensor src = x.DType == act ? x : Cast(backend, x, act);
+        if (!ReferenceEquals(src, x)) x.Dispose();
+        if (rope is not null && rope.Flavor == LtxVideo2Rope.RopeType.Interleaved)
+        {
+            Tensor normed = new(src.Shape, src.DType);
+            backend.RmsNorm(normed, src, normW, _qkEps);
+            src.Dispose();
+            rope.ApplyRotary(backend, normed, cos!, sin!);
+            Tensor mh = ToBhsd(backend, normed, s, act);
+            normed.Dispose();
+            return mh;
+        }
+        Tensor o = new(new TensorShape(1, _heads, s, _headDim), act);
+        backend.Ltx2QkNormRopeHeadMajor(o, src, normW, rope is null ? null : cos, rope is null ? null : sin,
+            s, _heads, _headDim, _qkEps);
+        src.Dispose();
         return o;
     }
 
@@ -143,17 +156,32 @@ public sealed unsafe class LtxVideo2Attention
 
     // [s, inner]=[s, heads, headDim] → [1, heads, s, headDim], GPU-resident via Permute0213 (was a host DataPointer
     // loop = a D2H sync + host copy + H2D per call, ×3/attention — the same host-excursion that dominated Wan/Flux).
-    private Tensor ToBhsd(IBackend backend, Tensor x, int s)
+    private Tensor ToBhsd(IBackend backend, Tensor x, int s, DType act)
     {
-        Tensor o = new(new TensorShape(1, _heads, s, _headDim), DType.F32);
-        backend.Permute0213(o, x, s, _heads, _headDim);
+        // Permute0213 is a pure address shuffle with no dtype guard, so it cannot convert: cast first when the
+        // stream's dtype differs from the attention's, then shuffle.
+        Tensor src = x.DType == act ? x : Cast(backend, x, act);
+        Tensor o = new(new TensorShape(1, _heads, s, _headDim), act);
+        backend.Permute0213(o, src, s, _heads, _headDim);
+        if (!ReferenceEquals(src, x)) src.Dispose();
+        return o;
+    }
+
+    /// <summary>Widens an F32 cross-attention K/V stream to the query's F16. Only this direction occurs: the block
+    /// streams share one dtype, and the only mismatch is an F32 text connector feeding an F16 block.</summary>
+    private static Tensor Cast(IBackend backend, Tensor x, DType target)
+    {
+        if (target != DType.F16 || x.DType != DType.F32)
+            throw new NotSupportedException($"LTX-2 attention only widens an F32 K/V stream to F16, got {x.DType} to {target}.");
+        Tensor o = new(x.Shape, target);
+        backend.CastToF16(o, x);
         return o;
     }
 
     // [1, heads, s, headDim] → [s, inner] (inverse of ToBhsd), GPU-resident via Permute0213.
-    private Tensor FromBhsd(IBackend backend, Tensor x, int s)
+    private Tensor FromBhsd(IBackend backend, Tensor x, int s, DType act)
     {
-        Tensor o = new(new TensorShape(s, _inner), DType.F32);
+        Tensor o = new(new TensorShape(s, _inner), act);
         backend.Permute0213(o, x, _heads, s, _headDim);
         return o;
     }
