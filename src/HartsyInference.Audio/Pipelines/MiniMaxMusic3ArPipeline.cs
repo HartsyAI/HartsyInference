@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -73,6 +75,9 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
         using IKvCache unconditionalCache = _languageModel.CreateCache(cacheLength);
 
         uint rng = DeterministicRng.Seed(seed);
+        // Phase attribution for the perf grind. CUDA launches are async, so each phase is billed at the next host
+        // read that forces a sync -- good enough to rank the phases, not to trust to the millisecond.
+        long lmTicks = 0, depthTicks = 0, sampleTicks = 0, feedbackTicks = 0;
         int codebooks = MiniMaxMusic3DepthDecoder.NumCodebooks;
         int hidden = MiniMaxMusic3GlobalLm.HiddenSize;
         List<float[]> frames = new List<float[]>(Math.Min(frameLimit, 1024));
@@ -95,17 +100,21 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
             for (int frameIndex = 0; frameIndex <= frameLimit; frameIndex++)
             {
                 cancel.ThrowIfCancellationRequested();
+                long phase = Stopwatch.GetTimestamp();
                 int semanticCode = forcedCodes is not null
                     ? (frameIndex < forcedCodes.Count ? forcedCodes[frameIndex][0] : MiniMaxMusic3GlobalLm.AudioEndLogitIndex)
                     : SampleSemantic(backend, conditionalHidden, unconditionalHidden, ref rng);
+                sampleTicks += Stopwatch.GetTimestamp() - phase;
                 if (semanticCode == MiniMaxMusic3GlobalLm.AudioEndLogitIndex)
                 {
                     break;
                 }
 
                 frameCodes[0] = semanticCode;
+                phase = Stopwatch.GetTimestamp();
                 float[] depthHidden = DecodeDepth(backend, conditionalHidden, unconditionalHidden, frameCodes,
                     ref rng, forcedCodes is not null ? forcedCodes[frameIndex] : null);
+                depthTicks += Stopwatch.GetTimestamp() - phase;
 
                 if (frameIndex > 0)
                 {
@@ -120,9 +129,13 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
                     }
                 }
 
+                phase = Stopwatch.GetTimestamp();
                 using Tensor feedback = BuildFeedback(frameCodes);
+                feedbackTicks += Stopwatch.GetTimestamp() - phase;
+                phase = Stopwatch.GetTimestamp();
                 Tensor nextConditional = _languageModel.Forward(backend, feedback, conditionalCache);
                 Tensor nextUnconditional = _languageModel.Forward(backend, feedback, unconditionalCache);
+                lmTicks += Stopwatch.GetTimestamp() - phase;
                 conditionalHidden.Dispose();
                 unconditionalHidden.Dispose();
                 conditionalHidden = nextConditional;
@@ -135,6 +148,10 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
             unconditionalHidden.Dispose();
         }
 
+        double ms = 1000.0 / Stopwatch.Frequency;
+        Logs.Info($"[Audio][MiniMaxMusic3] AR phases over {frames.Count} frames — language model {lmTicks * ms / 1000:0.0}s, "
+            + $"depth decoder {depthTicks * ms / 1000:0.0}s, sampling {sampleTicks * ms / 1000:0.0}s, "
+            + $"feedback embed {feedbackTicks * ms / 1000:0.0}s.");
         if (frames.Count == 0)
         {
             throw new InvalidOperationException(
