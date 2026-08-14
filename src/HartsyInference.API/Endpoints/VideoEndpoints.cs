@@ -71,11 +71,9 @@ public static class VideoEndpoints
             byte[][] rgb = new byte[result.Frames.Count][];
             for (int i = 0; i < result.Frames.Count; i++)
                 rgb[i] = result.Frames[i].Rgb;
-            string dir = FrameWriter.WriteFrames(rgb, first.Width, first.Height,
-                OutputWriter.ResolveDir(req.OutputDir), req.Request.Prompt);
-            if (result.Audio is not null && !result.Audio.IsEmpty)
-                File.WriteAllBytes(Path.Combine(dir, "audio.wav"), AudioClipCodec.EncodeWav(result.Audio));
-            return dir;
+            return VideoOutputWriter.Write(rgb, first.Width, first.Height,
+                OutputWriter.ResolveDir(req.OutputDir), req.Request.Prompt,
+                result.Audio, result.Fps ?? 24).Directory;
         }
         catch (Exception ex)
         {

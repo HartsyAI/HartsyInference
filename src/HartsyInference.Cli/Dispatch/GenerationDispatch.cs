@@ -460,7 +460,7 @@ public static class GenerationDispatch
             }
             frames = restored;
         }
-        return FrameArtifact(frames, outputDir, prompt, "video", soundtrack);
+        return FrameArtifact(frames, outputDir, prompt, "video", soundtrack, generated.Fps ?? 24);
     }
 
     /// <summary>Image-to-3D through <see cref="IMeshService"/>; the CLI's "prompt" is the input image path.</summary>
@@ -611,35 +611,8 @@ public static class GenerationDispatch
         }
 
         string slug = Path.GetFileNameWithoutExtension(inputPath);
-        GeneratedArtifact artifact = FrameArtifact(frames, outputDir, slug, "restore");
-        if (!isImage && frames.Count > 1)
-        {
-            double fps = request.Fps ?? sourceFps;
-            string mp4Path = Path.Combine(outputDir ?? RepoPaths.OutputRoot(), $"{Slug.Make(slug)}-restored.mp4");
-            try
-            {
-                await new HartsyInference.Video.Encoding.FfmpegProcessEncoder().EncodeAsync(
-                    ToEncoderFrames(frames), mp4Path, (int)Math.Round(fps), cancel).ConfigureAwait(false);
-                artifact.Meta["mp4"] = mp4Path;
-                GeneratedArtifact withMp4 = new GeneratedArtifact
-                {
-                    Kind = artifact.Kind,
-                    Extension = artifact.Extension,
-                    Text = $"{artifact.Text} + {mp4Path}",
-                    PreviewRgb = artifact.PreviewRgb,
-                    PreviewWidth = artifact.PreviewWidth,
-                    PreviewHeight = artifact.PreviewHeight,
-                    SelfWritten = artifact.SelfWritten,
-                };
-                foreach ((string key, string value) in artifact.Meta)
-                    withMp4.Meta[key] = value;
-                artifact = withMp4;
-            }
-            catch (InvalidOperationException ex)
-            {
-                Logs.Error("MP4 remux skipped (ffmpeg unavailable?) — PNG frames were written.", ex);
-            }
-        }
+        GeneratedArtifact artifact = FrameArtifact(frames, outputDir, slug, "restore", null,
+            (int)Math.Round(request.Fps ?? sourceFps));
         return artifact;
     }
 
@@ -654,7 +627,7 @@ public static class GenerationDispatch
     }
 
     private static GeneratedArtifact FrameArtifact(IReadOnlyList<VideoFrame> frames, string? outputDir, string slug, string label,
-        AudioBuffer? audio = null)
+        AudioBuffer? audio = null, int fps = 24)
     {
         if (frames.Count == 0)
         {
@@ -667,21 +640,16 @@ public static class GenerationDispatch
         {
             pixels[i] = frames[i].Rgb;
         }
-        string dir = FrameWriter.WriteFrames(pixels, width, height, outputDir ?? RepoPaths.OutputRoot(), slug);
-        // The CLI writes a frame directory, not a container, so the soundtrack lands beside it for the muxer of choice.
-        string? audioPath = null;
-        if (audio is not null && !audio.IsEmpty)
-        {
-            audioPath = Path.Combine(dir, "audio.wav");
-            File.WriteAllBytes(audioPath, AudioClipCodec.EncodeWav(audio));
-        }
+        VideoOutputWriter.Written written = VideoOutputWriter.Write(
+            pixels, width, height, outputDir ?? RepoPaths.OutputRoot(), slug, audio, fps);
 
         GeneratedArtifact artifact = new GeneratedArtifact
         {
             Kind = ArtifactKind.Video,
             Extension = "png",
-            Text = $"{frames.Count} frames ({width}x{height}) → {dir}"
-                + (audioPath is null ? "" : $" + {audio!.Seconds:0.0}s audio.wav"),
+            Text = $"{frames.Count} frames ({width}x{height}) → {written.Directory}"
+                + (written.AudioPath is null ? "" : $" + {audio!.Seconds:0.0}s audio.wav")
+                + (written.Mp4Path is null ? "" : " + video.mp4"),
             PreviewRgb = frames[0].Rgb,
             PreviewWidth = width,
             PreviewHeight = height,
@@ -689,6 +657,10 @@ public static class GenerationDispatch
         };
         artifact.Meta["frames"] = frames.Count.ToString(CultureInfo.InvariantCulture);
         artifact.Meta["size"] = $"{width}x{height}";
+        if (written.Mp4Path is not null)
+        {
+            artifact.Meta["mp4"] = written.Mp4Path;
+        }
         return artifact;
     }
 

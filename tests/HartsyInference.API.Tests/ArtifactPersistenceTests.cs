@@ -1,6 +1,7 @@
 using System.Text.Json;
 using HartsyInference.API.Endpoints;
 using HartsyInference.Engine;
+using HartsyInference.Engine.Requests;
 using Xunit;
 
 namespace HartsyInference.API.Tests;
@@ -110,6 +111,35 @@ public sealed class ArtifactPersistenceTests
         Assert.NotNull(req);
         Assert.False(req!.Save);
         Assert.Equal("/tmp/somewhere", req.OutputDir);
+    }
+
+    /// <summary>A video generation must leave something playable behind, not just a folder of PNGs. Skips the
+    /// container assertion when ffmpeg is absent, since the frames are the durable output either way.</summary>
+    [Fact]
+    public void VideoOutputWriter_WritesFrames_Soundtrack_AndAPlayableContainer()
+    {
+        string dir = NewTempDir();
+        try
+        {
+            const int w = 32, h = 16;
+            byte[][] frames = [new byte[w * h * 3], new byte[w * h * 3], new byte[w * h * 3]];
+            frames[1].AsSpan().Fill(200);
+            AudioBuffer audio = AudioBuffer.FromChannels([new float[48000], new float[48000]], 48000);
+
+            VideoOutputWriter.Written written = VideoOutputWriter.Write(frames, w, h, dir, "a test clip", audio, 24);
+
+            Assert.Equal(3, Directory.GetFiles(written.Directory, "frame_*.png").Length);
+            Assert.NotNull(written.AudioPath);
+            Assert.True(File.Exists(written.AudioPath));
+            if (written.Mp4Path is not null)
+            {
+                Assert.True(new FileInfo(written.Mp4Path).Length > 0);
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     private static string NewTempDir()

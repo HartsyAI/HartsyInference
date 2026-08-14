@@ -93,8 +93,9 @@ public static class RestoreEndpoints
             byte[][] rgb = new byte[frames.Count][];
             for (int i = 0; i < frames.Count; i++)
                 rgb[i] = frames[i].Rgb;
-            return FrameWriter.WriteFrames(rgb, frames[0].Width, frames[0].Height,
-                OutputWriter.ResolveDir(req.OutputDir), "restored");
+            return VideoOutputWriter.Write(rgb, frames[0].Width, frames[0].Height,
+                OutputWriter.ResolveDir(req.OutputDir), "restored", audio: null,
+                req.Request.Fps is { } f ? (int)Math.Round(f) : 24).Directory;
         }
         catch (Exception ex)
         {
