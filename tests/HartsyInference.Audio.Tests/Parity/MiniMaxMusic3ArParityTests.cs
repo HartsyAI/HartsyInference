@@ -1,8 +1,10 @@
 using HartsyInference.Audio.Frontends;
 using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Pipelines;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
+using HartsyInference.Cuda;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Tests.Common;
@@ -21,6 +23,29 @@ public sealed unsafe class MiniMaxMusic3ArParityTests(ITestOutputHelper output)
 {
     private const double HiddenTolerance = 2e-2;
     private const double FrameHiddenTolerance = 2e-2;
+
+    /// <summary>CUDA when a device is present. This test ran CPU-only until 2026-08-14, which is why it stayed green
+    /// through a depth-decoder bug that only manifests on the GPU.</summary>
+    private static IBackend CreateBackend()
+    {
+        if (Environment.GetEnvironmentVariable("HARTSY_MM3_FORCE_CPU") == "1")
+        {
+            return new CpuBackend();   // tier-lint: guarded
+        }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+        {
+            return new CpuBackend();   // tier-lint: guarded
+        }
+        try
+        {
+            return new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
+        }
+        catch (Exception)
+        {
+            return new CpuBackend();   // tier-lint: guarded
+        }
+    }
 
     [Fact]
     public void Generate_MatchesDiffusersReferenceUnderTeacherForcing()
@@ -85,8 +110,10 @@ public sealed unsafe class MiniMaxMusic3ArParityTests(ITestOutputHelper output)
 
             int frames = reference.Meta("ar_frames").GetInt32();
             using MiniMaxMusic3ArPipeline pipeline = new MiniMaxMusic3ArPipeline(languageModel, depthDecoder);
+            IBackend backend = CreateBackend();
+            output.WriteLine($"[MiniMaxMusic3Ar] backend={backend.GetType().Name}");
             (float[] frameHiddens, int produced) = pipeline.Generate(
-                new CpuBackend(), conditional, unconditional, frames, seed: 0, forcedCodes: forced);
+                backend, conditional, unconditional, frames, seed: 0, forcedCodes: forced);
 
             Assert.Equal(frames, produced);
             float[] expected = reference.Read("ar_frame_hiddens");
