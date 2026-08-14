@@ -144,15 +144,33 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   layer-diff against ComfyUI**, which decodes this exact VAE at `dlbackend/ComfyUI` — the repo's established
   technique, rather than guessing at conventions from a noise field. Iterating is now ~10 s a decode, not 22
   minutes; that is what the kernel work bought.
-- [ ] **Open question for the scoreboard, PARTLY resolved:** which video VAE ComfyUI decoded with in the
-  2026-08-12 **42.76 s** head-to-head. The later ComfyUI comparison run was passed
-  `ltx-2.5-video-vae-conv-bf16.safetensors` explicitly, so **that** one is conv-vs-conv and like-for-like. The
-  earlier 42.76 s row cannot be settled the same way: Lightricks' templates load the **diffusion** VAE, and no
-  LTX-2.5 VAE remains in the SwarmUI models tree (that benchmark's repack was temporary and reverted). It
-  matters more than it used to now that both decoders are timed — the diffusion decode is ~10 s where conv is
-  ~0.4 s at the same geometry, so if Comfy ever decoded with the diffusion VAE that row **understates Comfy
-  substantially** and our 1.18× is optimistic. Mark it unresolved rather than guessing; settling it needs the
-  repack rebuilt, not an inspection.
+- [x] ~~Open question: which video VAE ComfyUI decoded with in the 2026-08-12 42.76 s row.~~ **RESOLVED — it was
+  conv.** `Data/Logs/2026-08/13-09-56.log` holds exactly that campaign's 6 generations, all at 768×512×97f/30
+  steps, all on `ltx-2.5-video-vae-conv-bf16`. So that row was conv-vs-conv and like-for-like; the 2026-08-14
+  re-measurement confirms it rather than replacing it.
+- [ ] **CURRENT STANDING vs ComfyUI (2026-08-14), and a retraction.** Both engines through the SwarmUI API,
+  768×512×97f/30 steps, VAE identity read out of the submitted workflow JSON on both sides:
+
+  | path | Hartsy | ComfyUI | |
+  |---|---:|---:|---|
+  | conv decoder (ships today) | 47.40 s | 42.48 s | **1.12× slower** |
+  | diffusion decoder (quality) | 60 s | 42.1 s | **1.43× slower** |
+
+  **We are slower on both.** An earlier claim in this session that we were ~2.2× *faster* on the diffusion
+  decoder was **wrong**: it differenced ComfyUI's **cold** diffusion run (68.92 s, including loading the 1.5 GB
+  VAE) against its **warm** conv run (41.47 s), inflating Comfy's decode cost by about a whole model load.
+  Warm-vs-warm, Comfy's diffusion decode costs it almost nothing over conv (42.1 vs 41.5). The decoder work was
+  still large and real — decode 79.2 → 12.9 s, geometry ceiling gone, visibly cleaner output — it closed a far
+  worse gap without closing it. **Never difference a cold arm against a warm one.**
+
+  The remaining deficit is the **denoise**: ~266 ms/step, of which ~83% is `Linear`, and the biggest single item
+  is the INT32 accumulator round trip that `cuBLASLt` provably cannot fuse (probe test: every output config
+  except INT32-D-with-scalar-alpha returns rc=15). Work to close it is tracked in `benchmarks/scoreboards/VIDEO.md`.
+- [ ] **MANDATORY CONTROL for any SwarmUI-measured row: log DiT residency.** A run whose log does not say
+  `resident prefix 48, streamed 0` is **void**. Measured 2026-08-14: an identical 768×512×97f generation read
+  **68.8 s** decode with the DiT streaming (`resident prefix 18, streamed 30`) versus **12.9 s** fully resident —
+  streaming starves the decode's free-VRAM-derived chunk budget *and* cripples the denoise, and nothing in the
+  harness flags it. Rows taken before this control existed may be affected.
 - [x] ~~BLOCKER: the neighborhood attention runs ENTIRELY ON THE HOST.~~ **DONE — kept for the diagnosis.**
   `backend.Na3d` had **no CUDA override** — it resolved to the `IBackend` default (`IBackend.cs:1084`), whose own
   doc says *"This managed implementation is the numerical reference, not a performance path"*: a plain six-deep
