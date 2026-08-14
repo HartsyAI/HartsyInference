@@ -313,7 +313,7 @@ section below; bring-up debugging notes live in [TROUBLESHOOTING.md](TROUBLESHOO
 | **MusicGen / AudioGen** | ✅ | T5-base corr 1.0 + decoder logits corr 0.999999 + EnCodec-32k decode corr 1.0; e2e on CUDA writes music-like audio. 5 bugs fixed (T5/EnCodec). |
 | **YuE** (music, Stage-1) | ✅ | Stage-1 7B LM corr 1.0 (argmax 8/8) + XCodec (SoundStream) decode corr 1.0 → generates 16 kHz vocal audio. ([details](#yue)) |
 | **HeartMuLa** (oss-3B) | ✅ | LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). ([details](#heartmula)) |
-| **MiniMax Music 3** | 🔬 | Prompt ids exact; condition encoder, DiT block 0 and the full 36-layer DiT match diffusers (meanAbs < 1e-3); vocoder maxAbs 1e-4 with a distinct stereo fold; window/crop geometry reproduces the reference's 529408-sample stitch. Generates real 44.1 kHz stereo on CUDA. AR teacher-forced parity corr 1.0; flow parity corr 0.999996 — but both use forced inputs, so end-to-end audio quality is UNVERIFIED and was reported as noise before the depth-decoder fix. ([details](#minimax-music-3)) |
+| **MiniMax Music 3** | ✅ | Prompt ids exact; condition encoder, DiT block 0 and the full 36-layer DiT match diffusers (meanAbs < 1e-3); vocoder maxAbs 1e-4 with a distinct stereo fold; window/crop geometry reproduces the reference's 529408-sample stitch. Generates real 44.1 kHz stereo on CUDA. AR parity corr 0.9999989 on CUDA, flow parity corr 0.999996, and end-to-end output confirmed by ear as real music with intelligible sung lyrics. ([details](#minimax-music-3)) |
 | **RVC** (voice conversion) | 🔬 | RMVPE front-end wired as the default F0 estimator (`VcCatalog.ConvertRvc`), corr 1.000000/maxAbs 9.5e-8 vs real `rmvpe.pt` ([details](../Checklists/PARITY_VERIFICATION.md)). YIN remains selectable via `f0_method`. RVC flow/decoder + index/protect/rms_mix_rate still pending. |
 | **Demucs** (separation) | 🔧 | Built; parity pending. |
 | **CSM** (Sesame) | ✅ | Fixed 2026-07-21 (unsloth/csm-1b key remap + bundled 32-cb Mimi + I32 codes dtype + real all-zero EOS + `[speaker]text` prompt template); Whisper word-perfect on two independent sentences. `hartsy speak -m csm`. |
@@ -451,7 +451,11 @@ Lyrics + caption → 44.1 kHz stereo, up to six minutes. Qwen3-8B global LM (one
 | Vocoder | maxAbs < 1e-4; left/right provably distinct |
 | Window/crop geometry | reproduces the reference's 529408-sample two-window stitch |
 
-**Both gates now pass.** `MiniMaxMusic3ArParityTests` (teacher-forced, 8 frames) reaches corr 1.00000000 at
+**Verified end to end**: a 25 s generation with the model card's Structured Caption was confirmed by listening —
+real music with intelligible sung lyrics. That listening check is the gate that matters here; the numbers below
+each cover one stage under forced inputs and, on their own, never distinguished music from noise.
+
+**Both stage gates pass.** `MiniMaxMusic3ArParityTests` (teacher-forced, 8 frames) reaches corr 1.00000000 at
 meanAbs 6.8e-7, and its frame-0 assertion confirms the skip rule directly. `MiniMaxMusic3FlowParityTests` runs the
 whole flow stage from the reference's frame hiddens and forced noise across two windows: per-window latents
 corr 0.9999990, stitched audio corr 0.9999963.

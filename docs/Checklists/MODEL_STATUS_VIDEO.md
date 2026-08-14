@@ -66,10 +66,65 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   ever made went through the conv decoder. Lightricks' own shipped ComfyUI templates
   (`video_ltx2_5_{t2v,i2v}.json`) load `ltx-2.5-video-vae-bf16.safetensors`, and the model card credits that
   decoder by name with *"sharper faces, legible text, fewer smears in fast motion"* — the exact softness a user
-  reported. Selection is by which video VAE file the model directory carries; `HARTSY_LTX2_CONV_VAE=1` forces the
-  conv path for a bundled checkpoint holding both.
-- [ ] **BLOCKER before it can be the default: the neighborhood attention runs ENTIRELY ON THE HOST.**
-  `backend.Na3d` has **no CUDA override** — it resolves to the `IBackend` default (`IBackend.cs:1084`), whose own
+  reported. **It is OPT-IN ONLY (`HARTSY_LTX2_DIFFUSION_VAE=1`), because its output is not yet correct** — the
+  composition is right but every frame carries dense full-frame noise (verified by eye at 512x320x25f; hi-frequency
+  energy ~11.8 vs the conv decode's ~3.1 on the same latent). Without the flag, a checkpoint carrying both decoders
+  uses conv, and one carrying only the diffusion decoder is refused with an actionable message rather than silently
+  decoding wrong. **Next step for the numerics: layer-diff against the ComfyUI reference**, which decodes this exact
+  VAE — not guessing conventions off a noise field. A `Reshape`-view bug in the decoder's own q/k RMS-norm (the
+  `ApplyKeyframesAbsPos` class: result lands in the view's device cache and is freed without write-back, so CUDA got
+  un-normalized q/k while CpuBackend passed) has already been found and fixed, and was NOT the main defect.
+- [x] **The host-attention blocker is CLEARED (2026-08-13).** `Kernels/ltx25vae/ltx25_na_decoder.cu` ships
+  `ltx25_na3d_f32` (one block per `(b,t,h,w,head)`; window scores in dynamic shared memory; the score pass splits
+  the window across threads and the value pass splits `head_dim`, so both stay coalesced) and `ltx25_na_rope3d_f32`
+  (one thread per `(token,head,pair)`, host-built tables uploaded so the F32 angle rounding still matches
+  `BuildTable`). `Na3d` gained a `CudaBackend` override; the rope gained `IBackend.Ltx25NaRope3d`. Both fall back
+  to the managed reference when the PTX is absent, so a deployment that forgets to copy it degrades instead of
+  throwing. Measured, 4090, `ltx25_bench.sh`, 30 steps, seed 1:
+
+  | geometry | decode before | decode after |
+  |---|---:|---:|
+  | 512×320×25f | **>22 min, never finished** | **12.89 s** |
+  | 256×160×9f | 173.22 s | **1.45 s** (119.9×) |
+
+  DiT step time is unchanged (262.8 vs 264.6 ms/step), and the shipping conv-decoder path is untouched
+  (decode 376 ms). Correctness: `Ltx25NaDecoderKernelTests` (11 cases) diffs both kernels against the managed
+  reference on non-square shapes, on every face of the volume, against an independently computed dense attention,
+  and with identity rope tables; each case asserts the PTX actually loaded, so the file cannot pass vacuously by
+  comparing the reference against itself — verified by hiding the PTX and watching all 11 fail. End-to-end,
+  CUDA vs the managed fallback at 256×160×9f agree to **mean |Δ| 0.0023/255, max 1 LSB** across all 9 frames.
+- [x] **Found and fixed on the way: q/k reached attention UN-NORMALIZED on CUDA.** `Forward` RMS-normed them
+  through a `[tokens·heads, head_dim]` `Reshape` view inside a `using` block. That is the `ApplyKeyframesAbsPos`
+  defect class from this same model: the in-place result lands in the *view's* device cache, which `Dispose`
+  frees without a write-back, so it passes on `CpuBackend` and drops silently on CUDA. The view bought nothing —
+  `RmsNorm` already rows by the last dim — so it now norms the rank-6 tensor directly. Decode 12.89 → 10.24 s as
+  a side effect. `Ltx25NaRmsNormViewTests` pins the fixed form *and* asserts the view hazard is still live, so
+  the comment explaining why the view is gone cannot rot.
+- [ ] **BLOCKER, NEW and unrelated to speed: the diffusion decoder's OUTPUT IS STILL WRONG.** At 512×320×25f it
+  returns the right composition — lighthouse, horizon, sunset, matching the conv decode of the same latent —
+  buried in heavy full-frame noise: high-frequency energy **11.78 vs the conv decode's 3.10** on the same frame.
+  The q/k fix above moved that only 12.02 → 11.78, so **more defects remain and that one was not the main one.**
+  Scope the evidence carefully: removing the new PTX makes the two arms agree to 1 LSB, which exonerates **the
+  two new kernels** but *not* the decoder's other CUDA ops — those ran in both arms. Nothing establishes that
+  this decoder was ever numerically right on any backend; the 1×2×2 real-checkpoint test asserts key mapping and
+  geometry, never output values. Structure surviving means `EncodeContext` and the stage-1..4 trunk are broadly
+  right, so suspect the stage-5 denoise: `model_output_type = "x0"` at `NumInferenceSteps = 1` should make one
+  pass *be* the image, so a `signal + noise` output points at the noise scaling, the timestep feeding
+  `Modulation` (`timestep: 1f`, then ×1000), or patchify/unpatchify channel order. **Best method available: a
+  layer-diff against ComfyUI**, which decodes this exact VAE at `dlbackend/ComfyUI` — the repo's established
+  technique, rather than guessing at conventions from a noise field. Iterating is now ~10 s a decode, not 22
+  minutes; that is what the kernel work bought.
+- [ ] **Open question for the scoreboard, PARTLY resolved:** which video VAE ComfyUI decoded with in the
+  2026-08-12 **42.76 s** head-to-head. The later ComfyUI comparison run was passed
+  `ltx-2.5-video-vae-conv-bf16.safetensors` explicitly, so **that** one is conv-vs-conv and like-for-like. The
+  earlier 42.76 s row cannot be settled the same way: Lightricks' templates load the **diffusion** VAE, and no
+  LTX-2.5 VAE remains in the SwarmUI models tree (that benchmark's repack was temporary and reverted). It
+  matters more than it used to now that both decoders are timed — the diffusion decode is ~10 s where conv is
+  ~0.4 s at the same geometry, so if Comfy ever decoded with the diffusion VAE that row **understates Comfy
+  substantially** and our 1.18× is optimistic. Mark it unresolved rather than guessing; settling it needs the
+  repack rebuilt, not an inspection.
+- [x] ~~BLOCKER: the neighborhood attention runs ENTIRELY ON THE HOST.~~ **DONE — kept for the diagnosis.**
+  `backend.Na3d` had **no CUDA override** — it resolved to the `IBackend` default (`IBackend.cs:1084`), whose own
   doc says *"This managed implementation is the numerical reference, not a performance path"*: a plain six-deep
   scalar loop. At 512×320×25f that is ~256k tokens × 4 heads × an 11×11×11 = 1331-element window × headDim 64,
   i.e. ~349 GFLOP per stage-5 block and ~2.8 TFLOP over the eight of them, single-threaded and strided. A
@@ -78,16 +133,10 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   through `x.DataPointer`), but it is the minor term — ~8.4 GB of q+k PCIe traffic across the blocks, seconds not
   minutes. **The timeout is the proof: had the rope been the cost, the decode would have completed.** Fixing the
   rope alone would move ~22 minutes to ~21 and read as a failed fix.
-  Both are needed, as one work item:
-  - **`Na3d`** — a real windowed-attention kernel; the managed version stays as the parity reference. Mind
-    `IBackend.Na3dWindowStart`'s slide-inward window rule at the volume edges.
-  - **the rope** — a **new kernel modelled on `IBackend.OasisRopeInterleaved`**, NOT a port of the DiT's
-    `ltx2_qk_norm_rope_headmajor_*`: this one is *interleaved* (pairs `2i, 2i+1`) where the DiT's is *split*
-    (pairs `i, i+headDim/2`), and it rotates three contiguous per-axis chunks each indexed by that token's own
-    t / h / w (`_ropeSplit.(T,H,W)` at offsets 0 / T / T+H). Embarrassingly parallel; keep the host-built cos/sin
-    tables so the F32 angle rounding still matches `BuildTable`.
   The parity tests only ever ran a **1×2×2 latent**, where both costs are invisible — that is how a decoder with
-  no attention kernel at all passed as "ported and parity-checked".
+  no attention kernel at all passed as "ported and parity-checked". **Keep that lesson:** a check that is real but
+  runs at a size where the thing it should catch costs nothing is not a check. The same session also found the
+  decoder's *output* was wrong (above) — which the same 1×2×2 test also could not see.
 - [ ] **Memory is unmodelled at scale.** The stage-5 trunk is a transformer over patchified pixels: at
   768×512×97f the context is ~2.4M tokens (~5 GB per activation). A too-small VRAM bracket is worse than none —
   it silently skips the prefix eviction and OOMs mid-decode — so this path now drops the whole resident prefix
