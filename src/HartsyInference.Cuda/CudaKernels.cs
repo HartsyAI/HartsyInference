@@ -2129,7 +2129,7 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Dynamic shared bytes the fused mma GEMM needs: STAGES × (BM + BN) rows × SMEM_STRIDE.
     /// MUST track <c>int8_mma_gemm.cu</c> — it is both the launch argument and the occupancy budget the driver
     /// reasons about, so an over-estimate here costs registers, not just address space.</summary>
-    internal const uint Int8MmaSharedBytes = 2u * (128u + 256u) * 80u;
+    internal const uint Int8MmaSharedBytes = 3u * (128u + 256u) * 80u;
 
     /// <summary>N tile of the fused mma GEMM; N must be a whole multiple (M is predicated, N and K are not).</summary>
     private const int Int8MmaTileN = 256;

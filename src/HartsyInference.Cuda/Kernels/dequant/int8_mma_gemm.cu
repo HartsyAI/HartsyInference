@@ -24,12 +24,37 @@
 // and per unit of OUTPUT the A tile is reused twice as much. This is comfy-kitchen's shipped tile for these
 // shapes. The cost is that 128 accumulator registers (195 total, no spill) force one block per SM.
 //
+// THE LIMITER IS L2 BANDWIDTH — measured with Nsight Compute, not inferred. At attn_qkvo:
+//   Memory (L2) throughput 85.2%, Compute (SM) throughput 57.6%, DRAM only 17.9%, zero spilling.
+// So this kernel goes faster only by moving FEWER BYTES THROUGH L2. Instruction mix, occupancy and pipeline
+// depth are all secondary, which is why every attempt at them landed in the 1-6% band.
+//
+// AND THE WASTE IS LOCALISED: global STORES average 32.0 of 32 bytes per sector (optimal, after the epilogue
+// fix below), while global LOADS average **21.33 of 32** — exactly 32 x 2/3, the signature of a 64-byte run
+// landing across THREE 32-byte sectors instead of two. Those loads are the cp.async operand fetches, they are
+// 97.5% L2 hits, and they are the traffic saturating the bottleneck. Ideal operand traffic is 981 MB against
+// 47.4M sectors measured versus 31.9M ideal — 491 MB of pure waste, and that waste IS the remaining gap to
+// cuBLASLt (removing it at constant bandwidth lands ~620 TOPS against its 569).
+//
+// The run length per row is exactly BK bytes, so with BK=64 a row contributes only 64 contiguous bytes before
+// jumping K. NEXT EXPERIMENT (untested, and this file's history says test before believing): BK=128 with an
+// XOR-swizzled unpadded shared layout — 128-byte runs, and (128+256)*128*2 stages = 98,304 B still fits the
+// 99 KB opt-in, where the padded BK=128 layout does not. It would also fix the 8-way shared-store bank conflict
+// ncu reports, though that one is NOT on the critical path (L1/TEX is only 32-34% busy against L2's 85%).
+//
+// Occupancy is 16.7% (8 warps, one block/SM) and ncu flags an "83% local speedup" against it — IGNORE THAT
+// for this kernel. The 128 accumulator registers that force one block per SM are the same thing that buys the
+// arithmetic intensity; raising occupancy means a smaller tile, which raises L2 traffic, which is the actual
+// constraint. ncu's occupancy advice does not know that.
+//
 // RULED OUT as limiters, each measured, so do not re-chase:
-//   - Pipeline depth. At this tile, 2 stages vs 3 is a wash (331/410/343 vs 325/417/341 TOPS). At the old
-//     128x128 tile 3 stages was WORSE, because 60 KB of shared cost the second block per SM. Shipping 2.
-//   - Shared-load instruction count. ldmatrix cut 24 fragment loads per k-step to 8 and bought 1-6%; at peak
-//     the LSU is only ~9% of the issue budget. Kept because it is free, not because it mattered.
-//   - Occupancy. 195 registers, zero spill; shared and registers both pin this to one block per SM by design.
+//   - Shared-load instruction count. ldmatrix cut 24 fragment loads per k-step to 8 and bought 1-6%.
+//   - Occupancy per the paragraph above.
+//   - Shared-memory bank conflicts. ncu reports 45% excessive shared wavefronts, and fixing them is NOT the
+//     win it looks like: L1/TEX throughput is only 32.9% against L2's 85.2%, so the shared path has headroom
+//     to spare. An earlier version of this comment claimed the 80-byte stride was "conflict-free" and sized an
+//     XOR swizzle at "low single digits" — the first half was wrong (rows 0 and 8 do collide) and the second
+//     half is right, but for a reason that only a profiler could establish.
 //
 // The epilogue, by contrast, was worth ~20% and was nearly skipped on the reasoning that "cuBLASLt writes twice
 // these bytes as int32 and is still faster". That compares bytes moved; the right metric is SECTORS TOUCHED —
@@ -52,7 +77,7 @@
 #define BM 128
 #define BN 256
 #define BK 64
-#define STAGES 2
+#define STAGES 3
 #define SMEM_STRIDE (BK + 16)             // 80 B, see note above
 #define STAGE_A_BYTES (BM * SMEM_STRIDE)  // A and B stages differ in size now that BN != BM
 #define STAGE_B_BYTES (BN * SMEM_STRIDE)
@@ -266,18 +291,21 @@ extern "C" __global__ __launch_bounds__(256, 1) void int8_mma_gemm_dequant_f16(
                 *(__half2*)(slab + slabRow * BN + cs) = __halves2half2(__float2half(v0), __float2half(v1));
             }
             __syncthreads();
-            // 16 rows x 256 halves; 256 threads each take 16 halves = 32 B, emitted as two 16-byte int4 stores
-            // (int4 is 8 halves — covering a 16-half span with ONE of them silently leaves half the slab
-            // unwritten, which is exactly the bug the bit-exactness gate caught here).
-            int wr = tid >> 4;                 // 0..15  slab row
-            int wc = (tid & 15) * 16;          // 0..240 column within the slab
-            int outRow = m0 + (wr >> 3) * 64 + i * 16 + half * 8 + (wr & 7);
-            if (outRow < (int)M)
+            // 16 rows x 256 halves, emitted as TWO passes of one 16-byte int4 per lane — NOT one pass of two
+            // int4s per lane. Both move the same bytes; only this one is coalesced. With 16 lanes per row each
+            // writing 32 B as two 16-B stores, every store instruction strides 32 B and touches each 32-byte
+            // sector half-used — ncu measured 16.6M excessive sectors, 34% of all global sectors, on a kernel
+            // that is L2-bandwidth bound at 84%. Here a warp's 32 lanes cover one whole 512-byte output row in
+            // a single instruction.
+            #pragma unroll
+            for (int p = 0; p < 2; p++)
             {
-                __half* dst = D + (size_t)outRow * N + n0 + wc;
-                const __half* src = slab + wr * BN + wc;
-                *(int4*)dst = *(const int4*)src;
-                *(int4*)(dst + 8) = *(const int4*)(src + 8);
+                int slot = tid + p * 256;          // 0..511
+                int wr = slot >> 5;                // 0..15  slab row, 32 lanes per row
+                int wc = (slot & 31) * 8;          // 0..248 halves — 16 B per lane, contiguous across the warp
+                int outRow = m0 + (wr >> 3) * 64 + i * 16 + half * 8 + (wr & 7);
+                if (outRow < (int)M)
+                    *(int4*)(D + (size_t)outRow * N + n0 + wc) = *(const int4*)(slab + wr * BN + wc);
             }
         }
     }

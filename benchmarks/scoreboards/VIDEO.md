@@ -533,6 +533,56 @@ That is the roadmap for `Kernels/dequant/int8_mma_gemm.cu` (currently 268 TOPS, 
 beat the cuBLASLt+dequant pair and ~550 to match them). Stream-K in particular matters at LTX's shapes: with
 m=4992 padded and n=4096, a fixed swizzle leaves SMs idle on the tail wave.
 
+### Profiling the fused GEMM: the limiter is L2 BANDWIDTH, not compute (2026-08-13)
+
+**Nsight Compute is installed on this box** — `~/.local/cuda-tools/nsight-compute/opt/nvidia/nsight-compute/2026.2.1/ncu`,
+not on PATH — and profiling counters are already unlocked for non-root (`/etc/modprobe.d/nvidia-profiling.conf`
+sets `NVreg_RestrictProfilingToAdminUsers=0`; `/proc/driver/nvidia/params` shows `RmProfilingAdminOnly: 0`). No
+sudo, no install. Several hours of this file's guesswork could have been one profiling run.
+
+At attn_qkvo (4992×4096×4096):
+
+| metric | value |
+|---|---:|
+| Memory (L2) throughput | **85.2%** |
+| Compute (SM) throughput | 57.6% |
+| DRAM throughput | 17.9% |
+| L1/TEX throughput | 33.7% |
+| register / shared spilling | 0 |
+
+**The kernel is L2-bandwidth bound.** That single fact retroactively explains why every instruction-level and
+occupancy change in this file's history came back at 1–6%: they were all secondary to a constraint nobody had
+measured. It goes faster only by moving fewer bytes through L2.
+
+**The traffic accounting closes exactly**, and it says where the remaining gap is:
+
+| | sectors | bytes |
+|---|---:|---:|
+| ideal operands (A read by N/BN blocks, B by M/BM) | 30.7M | 981 MB |
+| ideal output | 1.3M | 41 MB |
+| **ideal total** | **31.9M** | |
+| **measured** | **47.4M** | |
+| **excessive (uncoalesced)** | **15.3M** | **491 MB wasted** |
+
+Two consequences. First, **the tile is already at the hardware ceiling**: 256×256 would cut ideal traffic to
+663 MB, but it needs 256 accumulator registers per thread, and at 512 threads the register file caps you at 128
+— the accumulators alone are 128. 128×256 at 256 threads is the maximum, so the 981 MB floor cannot be lowered
+by tiling. Second, that makes the **491 MB of *wasted* traffic the entire remaining gap** — eliminating it at
+constant bandwidth lands near 620 TOPS, past cuBLASLt's 569.
+
+**Two claims in the kernel's own comments were wrong, and only the profiler could show it.** The header asserted
+the 80-byte shared stride was "conflict-free" for ldmatrix (it is not — 45% of shared wavefronts are excessive)
+and that the epilogue was "fully coalesced" (it was writing 32 B per lane as two 16-byte stores at 32-byte
+stride, half-using every sector). Fixing the epilogue to one `int4` per lane, with a warp covering a whole
+512-byte output row, is bit-exact and moved **attn_qkvo 413.5 → 422.4 TOPS (+6.1% → +8.0% vs the pair)** and
+**ffn_up 367.7 → 384.9 (−7.0% → −1.3%)**. It removed only 1.3M of the 16.6M excessive sectors though — a real
+instance, not the main one, which is still unlocalised.
+
+**Also do NOT act on ncu's occupancy advice here.** It reports 16.7% occupancy and an "83% local speedup"
+against it. The 128 accumulator registers that pin this to one block per SM are the same thing that buys the
+arithmetic intensity; raising occupancy means a smaller tile, which raises L2 traffic, which is the actual
+constraint. A profiler names the limiter — it does not know the design.
+
 ### The per-head gate, folded into the activation quantization (2026-08-13) — SHIPPED, e2e UNMEASURED
 
 `Ltx2HeadGate` was a full read AND write of an attention output — 81.8 MB per video-width call at ~581 calls
@@ -546,12 +596,25 @@ construction and deliberately fragile-looking: the fused kernel reproduces the s
 keeps its `(x · 2) · sig` multiply association rather than the algebraically equal `x · (2 · sig)`. Either
 shortcut would silently change every attention output in the model.
 
-**The end-to-end campaign never completed** — a concurrent session working the audio bug was rebuilding the
-shared `bin/Release` output mid-run and competing for the 4090. The one pair that did complete was
-1422.2 vs 1422.7 ms/step, i.e. **null**. Traffic arithmetic says ~23 GB/step ≈ 15–23 ms, but this file's own
-history says arithmetic over-predicts, and one pair establishes nothing either way. **Treat this as unverified
-and re-run `ltx25_ab.sh HARTSY_LTX2_GATEFUSE 0 1 4` on a quiet GPU.** It ships on because it is bit-identical
-and strictly deletes a kernel and a memory pass, not because it was shown to be faster.
+**CONFIRMED −21.6 ms/step** (4 interleaved reps, all pairs same-sign: +16.0, +22.3, +23.1, +25.1; **paired
+t = 11.0**), which matches the traffic argument of ~23 GB/step almost exactly — the rare case this file's
+arithmetic did NOT over-predict.
+
+| | mean ms/step | median | range | spread |
+|---|---:|---:|---:|---:|
+| `HARTSY_LTX2_GATEFUSE=0` | 1427.6 | 1428.2 | 1410.9–1443.3 | 32.4 |
+| **fused** | **1406.0** | 1405.5 | 1394.9–1418.2 | 23.3 |
+
+**The first attempt at this campaign reported it as null**, from the single pair that completed before a
+concurrent session rebuilding the shared `bin/Release` mid-run corrupted it. The change was shipped as
+explicitly UNVERIFIED rather than claimed, and the re-run against a private CLI snapshot
+(`LTX25_BENCH_CLI`) is what recovered the real result. Two lessons: a corrupted campaign can produce a
+plausible null as easily as a plausible win, and "ship it but say it is unmeasured" was the right call over
+both "claim the win" and "drop the change".
+
+⚠️ These absolute numbers sit on a working tree carrying another session's uncommitted `AudioCfgEulerStep`
+edit, so they are **not continuous** with the 1417.4 / 1410.6 baselines earlier in this file. Both arms share
+it, so the delta is clean; the absolutes are not comparable across those campaigns.
 
 **Concurrent-session hazard, now closed.** Two sessions sharing this repo collide on BUILD OUTPUT as well as on
 the GPU, and the build collision is the quieter one: `HartsyInference.Video.dll` was rebuilt between rep 1 and
