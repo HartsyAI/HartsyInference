@@ -40,6 +40,102 @@ checking the deployed extension DLL against engine HEAD) to refresh it.
 
 **Before adding or trusting any row or delta here, read "The harness's noise floor" below.**
 
+## LTX-2.5 diffusion VAE decoder on the GPU (2026-08-13)
+
+The `NADiffusionDecoder` — the decoder Lightricks' own templates use, credited with "sharper faces, legible
+text, fewer smears" — was unusable: **`IBackend.Na3d` had no CUDA override on any backend**, so its 3D
+neighborhood attention ran as a six-deep scalar host loop. At 512×320×25f that is ~2.8 TFLOP single-threaded
+(256k stage-5 tokens × 4 heads × an 11×11×11 = 1331 window × head_dim 64, over 8 diff blocks). The rope was
+host-side too, but it is the minor term (~8.4 GB of PCIe, seconds). Two new kernels in
+`Kernels/ltx25vae/ltx25_na_decoder.cu`; workload `ltx25_bench.sh`, 4090, 30 steps, seed 1.
+
+**To reproduce you must set `HARTSY_LTX2_DIFFUSION_VAE=1`** — the decoder is opt-in (`e3e702a8`) precisely
+because its output is still wrong, and a model directory carrying only the diffusion VAE is otherwise refused.
+Both arms of that gate were verified by generation: without the flag the refusal fires and names the conv file;
+with it the run logs `output is KNOWN NOT CORRECT` and decodes in 9.67 s.
+
+| geometry | decode, host | decode, CUDA | speedup |
+|---|---:|---:|---:|
+| 512×320×25f | **>22 min — timed out, never finished** | **9.67–10.24 s** | ≥100× |
+| 256×160×9f | 173.22 s | **1.45 s** | **119.9×** |
+
+The 512×320×25f decode has now been measured four times across two sessions and two builds — 12.89 s before the
+q/k fix below, then 10.24 / 9.8 / 9.67 s after it, the 9.8 s on an independent run by another session at a
+different seed. Read the post-fix figure as ~10 s, not as a number resolved to 0.1 s.
+
+DiT step time is unchanged (262.8 vs 264.6 ms/step at 512×320×25f — within this harness's ~17-20 ms noise
+floor), and the shipping conv-decoder path is untouched (decode 376 ms), as expected since it uses no NA.
+
+**The decode is now fast AND correct (2026-08-14).** It first came back fast and wrong — right composition
+under heavy full-frame noise — and a ComfyUI layer-diff found three separate defects. High-frequency energy
+on the same frame: **11.8 (broken) → 2.06, against the conv decoder's 3.10**, so the diffusion decode is now
+the cleaner of the two, which is what the model card claims for it.
+
+### The three defects, and how they were found (2026-08-14)
+
+Structural inspection found **none** of them. Block wiring, AdaLN chunk order, `scale_shift_table`, patchify
+channel packing (`c·16 + r·4 + q`, W-sub outer — the unusual bit), pixel-shuffle grouping, the timestep
+embedding (4e-5 vs the reference), and the NATTEN window rule (~1e-7 vs `comfy_kitchen.na3d` in every sliding
+and clamped regime) were all read and all correct. What found the bugs was a **numerical layer-diff against
+ComfyUI's `NADiffusionDecoder`** — `LtxVideo25ReferenceLayerDiffTests` plus `scratchpad/ref_dump.py`, both
+sides consuming the same file-supplied latent and noise so the pipeline is out of the picture.
+
+1. **q/k reached attention un-normalized on CUDA.** `Forward` RMS-normed them through a `Reshape` view in a
+   `using` block; the result landed in the view's device cache, which `Dispose` frees without write-back. Passes
+   on `CpuBackend`. Fixed by norming the rank-6 tensor directly — `RmsNorm` already rows by the last dim, so the
+   view bought nothing. **Real, but not the main one:** hi-freq noise moved only 12.02 → 11.78.
+2. **The AdaLN modulation was ALL ZEROS.** Same defect class, other direction: `Linear` writing *into* a
+   `Reshape` view of `modulation`. Every diff block's scale/shift degenerated to its `scale_shift_table` alone,
+   so the stage-5 denoise was effectively untimed. The layer-diff caught it instantly — `modulation` ref std
+   12.26 against ours **0.00000** — where no amount of code reading had.
+3. **The one that mattered, and it is NOT an LTX bug — see the core section below.**
+
+**Why the no-PTX A/B proved less than it looked like.** Running the same geometry with the new PTX removed puts
+`Na3d` and the rope back on the managed reference, and the arms agree to mean |Δ| 0.0023/255. That exonerates
+**the two new kernels** — not the decoder's other CUDA ops, which ran identically in *both* arms. Nothing ever
+established this decoder was numerically right on any backend: the prior 1×2×2 test asserts key mapping and
+geometry, never output values. Bugs 1–3 all sat in that blind spot.
+
+### ⚠️ CORE BUG, all models: a device write to an auto-promoted tensor was silently discarded
+
+`GpuTransferHelper.CopyToDevice` auto-promotes a host tensor to a **resident weight** on its second upload once
+it is ≥ `AutoPromoteMinBytes` (1 MB), on the assumption that a tensor uploaded twice unchanged is a weight. The
+weight cache is checked **before** the activation cache. `CacheActivation` did demote a promoted tensor, but
+only when the op wrote *through* the promoted pointer (`promotedPtr == gpuPtr`). An op that writes a **fresh**
+buffer and rebinds the tensor — the normal `Linear`/`Add` shape — left the stale promotion in place, so every
+later read returned the **pre-op value and the device write vanished**.
+
+In this decoder that hit `x` in `LtxVideo25NaBlock.Forward`: `RmsNorm(norm1)` uploads `x` (miss 1),
+`Add(x, x, attended)` uploads it again (miss 2 → promoted), the add's result is cached as an activation, and
+the *second* `RmsNorm` then read the promoted pre-add copy. Reproduced with no LTX code at all in
+`Ltx25InPlaceAddThenNormTests`: `RmsNorm → in-place Add → RmsNorm`, CPU-vs-CUDA relL2 **0.335 at 160 rows and
+clean at 80** — because 160×2048×4 = 1.25 MB crosses the 1 MB promote threshold and 80 rows (0.64 MB) does not.
+
+**Fixed** in `CacheActivation`: a device write demotes the promotion regardless of which buffer it lands in.
+The demoted buffer comes from `cuMemAlloc`, so it cannot be parked in `PendingOrphans` (that frees against the
+async pool) — it goes to a new `PendingPersistentFrees`, swept with `cuMemFree` by the next op, because freeing
+it inline double-frees: it is usually that same op's input, whose `finally` still has to run.
+
+**This was silently corrupting any model whose ≥1 MB activation is read twice from host and then written
+on-device.** It is size-gated, which is why it hid: the same code is correct at smaller shapes. Kill switch
+`HARTSY_NO_AUTOPROMOTE=1` disables promotion entirely and was used to prove the pre-existing test failures
+below are unrelated to this fix.
+
+**Regression evidence.** The shipping conv-decoder generation is **byte-identical** across the fix — all 25
+frames and `audio.wav` md5-match — and its step time is unchanged. 544/550 CUDA tests pass; the 6 that fail are
+this session's own diagnostics with a 1e-4 threshold below the TF32 GEMM floor (relaxed to 1e-3, all pass).
+In the Diffusion suite, `MiniMaxH3Assets`, `VideoFeatureDeclaration` and `QwenImageVaeParity` fail **identically
+with `HARTSY_NO_AUTOPROMOTE=1`**, i.e. with the new code path unreachable, so they are pre-existing; the two
+step-cache real-weight failures are the documented `CUDA_DEVICE_ORDER=PCI_BUS_ID` landmine.
+
+Verification: `Ltx25NaDecoderKernelTests` diffs both kernels against the managed reference (the declared
+numerical authority) on non-square shapes, on every face of the volume — `Na3dWindowStart`'s slide-inward rule
+is exactly where a window kernel diverges and an interior-only test would miss it — against an independently
+computed dense attention, and with identity rope tables. **Every case asserts the PTX actually loaded.** That
+guard matters here more than usual: both entry points fall back to the managed reference when the PTX is
+missing, and the reference is what the tests compare against, so without it the whole file would pass
+vacuously. Confirmed by hiding the PTX and watching all 11 fail, then restoring it and watching all 11 pass.
+
 ## LTX-2.5 22B dev — first Comfy-vs-Hartsy head-to-head (2026-08-12)
 
 † Off-standard workload, not the table's usual 25f/512×320/20-step smoke test — LTX-2.5 is a 22B model

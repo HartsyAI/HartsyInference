@@ -100,7 +100,26 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `RmsNorm` already rows by the last dim — so it now norms the rank-6 tensor directly. Decode 12.89 → 10.24 s as
   a side effect. `Ltx25NaRmsNormViewTests` pins the fixed form *and* asserts the view hazard is still live, so
   the comment explaining why the view is gone cannot rot.
-- [ ] **BLOCKER, NEW and unrelated to speed: the diffusion decoder's OUTPUT IS STILL WRONG.** At 512×320×25f it
+- [x] **The output blocker is CLEARED (2026-08-14) — the diffusion decoder now decodes correctly.** A numerical
+  layer-diff against ComfyUI's `NADiffusionDecoder` (`LtxVideo25ReferenceLayerDiffTests`, both sides fed the same
+  file-supplied latent and noise) passes at **every** stage: conv_in, all four deterministic stages and their
+  upsamples, context, `conv_in_x_t`, modulation, all eight diff blocks, `norm_out`, `conv_out`, pixels. Real
+  generation at 512×320×25f is a clean, sharp lighthouse at sunset — high-frequency energy **2.06 vs the conv
+  decoder's 3.10** on the same frame (it was 11.78 when broken), so this decoder is now the cleaner of the two,
+  which is what the model card claims for it. Decode 9.83 s. Three defects, none of which structural inspection
+  found — the block wiring, AdaLN chunk order, `scale_shift_table`, patchify packing, pixel-shuffle grouping,
+  timestep embedding and the NATTEN window rule were all read and all correct:
+  1. q/k reached attention **un-normalized** on CUDA (RmsNorm through a `Reshape` view — the
+     `ApplyKeyframesAbsPos` class). Real, but only moved the noise 12.02 → 11.78.
+  2. The AdaLN **modulation was all zeros** — `Linear` writing *into* a `Reshape` view, same defect the other
+     way round, so every diff block ran on its `scale_shift_table` alone. The layer-diff showed it as ref std
+     12.26 vs ours 0.00000.
+  3. **A core `GpuTransferHelper` bug affecting every model**, not an LTX bug — see `benchmarks/scoreboards/VIDEO.md`.
+     A device write to a ≥1 MB auto-promoted tensor was silently discarded because the weight cache is consulted
+     before the activation cache. Reproduced with no LTX code in `Ltx25InPlaceAddThenNormTests`.
+  **Take the lesson:** two of three were the *same* aliasing defect this model had already been bitten by once,
+  and reading the code found none of them. The layer-diff found all three in one run.
+- [ ] ~~BLOCKER: the diffusion decoder's OUTPUT IS WRONG.~~ **FIXED — kept for the diagnosis.** At 512×320×25f it
   returns the right composition — lighthouse, horizon, sunset, matching the conv decode of the same latent —
   buried in heavy full-frame noise: high-frequency energy **11.78 vs the conv decode's 3.10** on the same frame.
   The q/k fix above moved that only 12.02 → 11.78, so **more defects remain and that one was not the main one.**

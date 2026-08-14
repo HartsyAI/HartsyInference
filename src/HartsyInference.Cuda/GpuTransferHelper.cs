@@ -61,6 +61,13 @@ internal static unsafe class GpuTransferHelper
         /// <see cref="FreeDevice"/>; whatever is still here when the next op starts had no owner and is freed.</summary>
         public readonly HashSet<ulong> PendingOrphans = new();
 
+        /// <summary>Auto-promoted weight buffers demoted mid-op because a device write rebound their tensor to a
+        /// different buffer. They come from <c>cuMemAlloc</c> (<see cref="CudaMemory.AllocatePersistent"/>), so they
+        /// must be released with <c>cuMemFree</c> and NOT parked in <see cref="PendingOrphans"/>, which frees against
+        /// the async pool. Freed by the next op's sweep, after the current op's finally blocks have run — freeing
+        /// inline would double-free, since the demoted buffer is usually that same op's input.</summary>
+        public readonly HashSet<ulong> PendingPersistentFrees = new();
+
         /// <summary>Graph-capture arenas: while a decode-step graph is being captured
         /// (<see cref="BeginGraphArena"/>), <see cref="AllocateDevice"/> bump-allocates from a per-capture
         /// pre-reserved buffer instead of the stream-ordered pool — so the captured graph contains ZERO
@@ -677,6 +684,7 @@ internal static unsafe class GpuTransferHelper
     {
         if (!OrphanSweepEnabled) return;
         State s = Resolve();
+        if (s.PendingPersistentFrees.Count != 0) SweepPersistentFrees(s);
         if (s.PendingOrphans.Count == 0) return;
         // cuMemFreeAsync on a buffer allocated BEFORE the capture began is rejected outright
         // (CUDA_ERROR_INVALID_VALUE, which aborted all three CudaGraphTests). Leave them parked; the first
@@ -695,6 +703,24 @@ internal static unsafe class GpuTransferHelper
             }
         }
         s.PendingOrphans.Clear();
+    }
+
+    /// <summary>Releases demoted auto-promoted weight buffers with <c>cuMemFree</c>, the allocator they came from.
+    /// Runs a stream sync first: the op that demoted them may still have had them queued as an input.</summary>
+    private static void SweepPersistentFrees(State s)
+    {
+        if (s.StreamHandle != 0)
+        {
+            CudaDriverApi.cuStreamIsCapturing(s.StreamHandle, out int captureStatus).ThrowOnError();
+            if (captureStatus != 0) return;
+            CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
+        }
+        foreach (ulong ptr in s.PendingPersistentFrees)
+        {
+            s.CachedPointers.Remove(ptr);
+            CudaMemory.Free(ptr);
+        }
+        s.PendingPersistentFrees.Clear();
     }
 
     /// <summary>Registers a Q8_1 sidecar (from a quantize-at-producer kernel) for an activation tensor.
@@ -760,13 +786,23 @@ internal static unsafe class GpuTransferHelper
         // kernel wrote through it). The buffer's contents no longer match host data, so it can't stay a cached
         // weight: hand ownership to the activation cache (registered below) and block re-promotion. Any cached
         // dtype-cast of the old contents is stale — free it.
-        if (gpuPtr != 0 && s.WeightCache.TryGetValue(tensor, out ulong promotedPtr) && promotedPtr == gpuPtr
+        if (gpuPtr != 0 && s.WeightCache.TryGetValue(tensor, out ulong promotedPtr)
             && s.UploadTracker.TryGetValue(tensor, out UploadState? promoState) && promoState.Promoted)
         {
             promoState.Promoted = false;
             promoState.Blocked = true;
             s.WeightCache.Remove(tensor);
             s.CachedBytes -= (long)byteSize;
+            if (promotedPtr != gpuPtr)
+            {
+                // The op did NOT write through the promoted buffer — it produced a fresh one and is rebinding the
+                // tensor to it. The promoted copy is now stale, and because CopyToDevice checks WeightCache BEFORE
+                // ActivationCache, leaving it there makes every later read of this tensor return the pre-op value:
+                // the device write is silently discarded. Nothing else references the promoted buffer, so free it.
+                // Defer the free: this buffer is usually the current op's own input, whose `finally` still runs.
+                // It stays in CachedPointers so FreeDevice keeps skipping it until the next op sweeps it.
+                s.PendingPersistentFrees.Add(promotedPtr);
+            }
             if (s.WeightCastCache.Remove(tensor, out (ulong castPtr, nuint bytes) staleCast))
             {
                 s.CachedPointers.Remove(staleCast.castPtr);

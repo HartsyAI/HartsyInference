@@ -4027,6 +4027,91 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>3D neighborhood attention for the LTX-2.5 diffusion video decoder. Falls back to the managed reference
+    /// when <c>ltx25_na_decoder.ptx</c> has not been deployed, or when the window's scores would not fit the 48 KB
+    /// static shared-memory limit.</summary>
+    public void Na3d(Tensor output, Tensor q, Tensor k, Tensor v, int kernelT, int kernelH, int kernelW, float scale)
+    {
+        if (output.DType != DType.F32 || q.DType != DType.F32 || k.DType != DType.F32 || v.DType != DType.F32)
+            throw new NotSupportedException($"CUDA Na3d supports F32 only — got output={output.DType}, q={q.DType}, k={k.DType}, v={v.DType}.");
+        if (q.Shape.Rank != 6)
+            throw new ArgumentException($"Na3d expects [batch, T, H, W, heads, headDim]; got {q.Shape}.", nameof(q));
+        if (!q.Shape.Equals(k.Shape) || !q.Shape.Equals(v.Shape) || !q.Shape.Equals(output.Shape))
+            throw new ArgumentException($"Na3d requires identical shapes; got q={q.Shape}, k={k.Shape}, v={v.Shape}, output={output.Shape}.");
+        if (kernelT <= 0 || kernelH <= 0 || kernelW <= 0)
+            throw new ArgumentException($"Na3d kernel must be positive; got ({kernelT}, {kernelH}, {kernelW}).");
+        if (ReferenceEquals(output, q) || ReferenceEquals(output, k) || ReferenceEquals(output, v))
+            throw new ArgumentException("Na3d output must not alias q, k or v.", nameof(output));
+
+        int batch = (int)q.Shape[0], dimT = (int)q.Shape[1], dimH = (int)q.Shape[2], dimW = (int)q.Shape[3];
+        int heads = (int)q.Shape[4], headDim = (int)q.Shape[5];
+        // An axis shorter than its kernel collapses to the whole axis, matching the reference.
+        int kt = Math.Min(kernelT, dimT), kh = Math.Min(kernelH, dimH), kw = Math.Min(kernelW, dimW);
+
+        EnsureKernels();
+        if (_kernels is null || !_kernels.HasLtx25NaKernels
+            || CudaKernels.Ltx25Na3dSharedBytes(headDim, kt, kh, kw) > 48 * 1024)
+        {
+            IBackend.Na3dReference(output, q, k, v, kernelT, kernelH, kernelW, scale);
+            return;
+        }
+
+        EnterOp();
+        ulong pOut = 0, pQ = 0, pK = 0, pV = 0; bool cached = false;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(q);
+            pK = GpuTransferHelper.CopyToDevice(k);
+            pV = GpuTransferHelper.CopyToDevice(v);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels.LaunchLtx25Na3d(pOut, pQ, pK, pV, batch, dimT, dimH, dimW, heads, headDim,
+                kt, kh, kw, scale, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
+        }
+        finally
+        {
+            if (!cached) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pQ); GpuTransferHelper.FreeDevice(pK); GpuTransferHelper.FreeDevice(pV);
+        }
+    }
+
+    /// <summary>LTX-2.5 NA-decoder 3-axis interleaved rope, in place on x[1,T,H,W,heads,headDim].</summary>
+    public void Ltx25NaRope3d(Tensor x, Tensor cosT, Tensor sinT, Tensor cosH, Tensor sinH, Tensor cosW, Tensor sinW,
+        int splitT, int splitH)
+    {
+        IBackend.Ltx25NaRope3dGeometry(x, splitT, splitH, out int dimT, out int dimH, out int dimW, out int heads,
+            out int headDim, out int pairsT, out int pairsH, out int pairsW);
+
+        EnsureKernels();
+        if (_kernels is null || !_kernels.HasLtx25NaKernels)
+        {
+            IBackend.Ltx25NaRope3dReference(x, cosT, sinT, cosH, sinH, cosW, sinW, splitT, splitH);
+            return;
+        }
+
+        EnterOp();
+        ulong pX = 0, pCt = 0, pSt = 0, pCh = 0, pSh = 0, pCw = 0, pSw = 0;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);
+            pCt = GpuTransferHelper.CopyToDevice(cosT); pSt = GpuTransferHelper.CopyToDevice(sinT);
+            pCh = GpuTransferHelper.CopyToDevice(cosH); pSh = GpuTransferHelper.CopyToDevice(sinH);
+            pCw = GpuTransferHelper.CopyToDevice(cosW); pSw = GpuTransferHelper.CopyToDevice(sinW);
+            _kernels.LaunchLtx25NaRope3d(pX, pCt, pSt, pCh, pSh, pCw, pSw, dimT, dimH, dimW, heads, headDim,
+                pairsT, pairsH, pairsW, splitT, splitT + splitH, _stream.Handle);
+            // In-place on x: clear stale callbacks before re-caching (pitfall #17).
+            x._gpuSyncCallback = null; x._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pCt); GpuTransferHelper.FreeDevice(pSt);
+            GpuTransferHelper.FreeDevice(pCh); GpuTransferHelper.FreeDevice(pSh);
+            GpuTransferHelper.FreeDevice(pCw); GpuTransferHelper.FreeDevice(pSw);
+        }
+    }
+
     /// <summary>Oasis head split: frame-major qkv[token,3·dim] → out[b,heads,seq,headDim] (device port of the host loop).</summary>
     public void OasisSplitHeads(Tensor output, Tensor qkv, int frames, int sp, int heads, int headDim, int part, bool temporal)
     {

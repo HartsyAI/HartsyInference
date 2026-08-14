@@ -1082,6 +1082,11 @@ public interface IBackend : IDisposable
     /// six-deep loop and allocates one score buffer per call. <paramref name="output"/> must not alias any input:
     /// it is zeroed and accumulated into while neighbouring queries still read the originals.</remarks>
     unsafe void Na3d(Tensor output, Tensor q, Tensor k, Tensor v, int kernelT, int kernelH, int kernelW, float scale)
+        => Na3dReference(output, q, k, v, kernelT, kernelH, kernelW, scale);
+
+    /// <summary>The managed <see cref="Na3d"/> body, callable directly so a device backend can fall back to it and a
+    /// test can diff against it without going through interface dispatch.</summary>
+    static unsafe void Na3dReference(Tensor output, Tensor q, Tensor k, Tensor v, int kernelT, int kernelH, int kernelW, float scale)
     {
         if (output.DType != DType.F32 || q.DType != DType.F32 || k.DType != DType.F32 || v.DType != DType.F32)
             throw new NotSupportedException($"Na3d default fallback only supports F32 — got output={output.DType}, q={q.DType}, k={k.DType}, v={v.DType}.");
@@ -1163,6 +1168,71 @@ public interface IBackend : IDisposable
                 }
             }
         }
+    }
+
+    /// <summary>LTX-2.5 NA-decoder rotary, in-place on <c>x [1,T,H,W,heads,headDim]</c>. Each head's channels split into
+    /// three contiguous chunks — T at 0, H at <paramref name="splitT"/>, W at <c>splitT+splitH</c> — each rotated over
+    /// interleaved <c>(2i, 2i+1)</c> pairs by that token's own t / h / w coordinate. The cos/sin tables are
+    /// <c>[axisLength, pairs]</c> and are built by the caller so the F32 angle rounding stays identical everywhere.</summary>
+    unsafe void Ltx25NaRope3d(Tensor x, Tensor cosT, Tensor sinT, Tensor cosH, Tensor sinH, Tensor cosW, Tensor sinW,
+        int splitT, int splitH)
+        => Ltx25NaRope3dReference(x, cosT, sinT, cosH, sinH, cosW, sinW, splitT, splitH);
+
+    /// <summary>The managed <see cref="Ltx25NaRope3d"/> body — see <see cref="Na3dReference"/> for why it is separate.</summary>
+    static unsafe void Ltx25NaRope3dReference(Tensor x, Tensor cosT, Tensor sinT, Tensor cosH, Tensor sinH,
+        Tensor cosW, Tensor sinW, int splitT, int splitH)
+    {
+        Ltx25NaRope3dGeometry(x, splitT, splitH, out int dimT, out int dimH, out int dimW, out int heads,
+            out int headDim, out int pairsT, out int pairsH, out int pairsW);
+        int offsetH = splitT, offsetW = splitT + splitH;
+        float* p = (float*)x.DataPointer;
+        float* ct = (float*)cosT.DataPointer, st = (float*)sinT.DataPointer;
+        float* ch = (float*)cosH.DataPointer, sh = (float*)sinH.DataPointer;
+        float* cw = (float*)cosW.DataPointer, sw = (float*)sinW.DataPointer;
+
+        for (int ti = 0; ti < dimT; ti++)
+        for (int hi = 0; hi < dimH; hi++)
+        for (int wi = 0; wi < dimW; wi++)
+        {
+            long tokenBase = (((long)ti * dimH + hi) * dimW + wi) * heads * headDim;
+            for (int head = 0; head < heads; head++)
+            {
+                float* row = p + tokenBase + (long)head * headDim;
+                RotateInterleaved(row, pairsT, ct, st, ti * pairsT);
+                RotateInterleaved(row + offsetH, pairsH, ch, sh, hi * pairsH);
+                RotateInterleaved(row + offsetW, pairsW, cw, sw, wi * pairsW);
+            }
+        }
+
+        static void RotateInterleaved(float* row, int pairs, float* cos, float* sin, long tableOffset)
+        {
+            for (int i = 0; i < pairs; i++)
+            {
+                float even = row[2 * i], odd = row[2 * i + 1];
+                float c = cos[tableOffset + i], s = sin[tableOffset + i];
+                row[2 * i] = even * c - odd * s;
+                row[2 * i + 1] = even * s + odd * c;
+            }
+        }
+    }
+
+    /// <summary>Validates an LTX-2.5 NA rope call and unpacks the grid and per-axis pair counts both the managed and
+    /// the device path need.</summary>
+    static void Ltx25NaRope3dGeometry(Tensor x, int splitT, int splitH, out int dimT, out int dimH, out int dimW,
+        out int heads, out int headDim, out int pairsT, out int pairsH, out int pairsW)
+    {
+        if (x.DType != DType.F32)
+            throw new NotSupportedException($"Ltx25NaRope3d supports F32 only — got {x.DType}.");
+        if (x.Shape.Rank != 6 || x.Shape[0] != 1)
+            throw new ArgumentException($"Ltx25NaRope3d expects [1, T, H, W, heads, headDim]; got {x.Shape}.", nameof(x));
+        dimT = (int)x.Shape[1]; dimH = (int)x.Shape[2]; dimW = (int)x.Shape[3];
+        heads = (int)x.Shape[4]; headDim = (int)x.Shape[5];
+        int splitW = headDim - splitT - splitH;
+        if (splitT <= 0 || splitH <= 0 || splitW <= 0 || splitT % 2 != 0 || splitH % 2 != 0 || splitW % 2 != 0)
+            throw new ArgumentException(
+                $"Ltx25NaRope3d needs a positive even 3-way split of head_dim {headDim}; got ({splitT}, {splitH}, {splitW}).",
+                nameof(splitT));
+        pairsT = splitT / 2; pairsH = splitH / 2; pairsW = splitW / 2;
     }
 
     /// <summary>LTX-2 "split" rotary (rotate-half, per-head cos), in-place on <c>x [seqLen,dim]</c>; matches <c>LtxVideo2Rope</c>.</summary>

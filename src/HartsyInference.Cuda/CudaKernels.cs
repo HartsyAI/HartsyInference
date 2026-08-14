@@ -29,6 +29,13 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _stepCacheRelL1F32;
     private readonly nint _stepCacheRelL1F16;
 
+    // Optional: LTX-2.5 NA diffusion-decoder kernels (ltx25_na_decoder.ptx, src/HartsyInference.Cuda/Kernels/ltx25vae) —
+    // 3D neighborhood attention + its 3-axis interleaved rope. Null when the PTX has not been deployed; the
+    // backend then falls through to the managed reference rather than failing.
+    private readonly CudaModule? _ltx25NaModule;
+    private readonly nint _ltx25Na3dF32;
+    private readonly nint _ltx25NaRope3dF32;
+
     // Optional: W8A8 IMMA chain kernels (w8a8.ptx, src/HartsyInference.Cuda/Kernels/dequant) — per-row INT8 activation quant +
     // int32→F16/F32 dequant epilogue around Int8GemmExecutor. Null when not compiled.
     private readonly CudaModule? _w8a8Module;
@@ -581,6 +588,16 @@ public sealed class CudaKernels : IDisposable
             _stepCacheModule = LoadOwnedModule(stepCachePath);
             _stepCacheRelL1F32 = _stepCacheModule.GetFunction("stepcache_rel_l1_f32");
             _stepCacheRelL1F16 = _stepCacheModule.GetFunction("stepcache_rel_l1_f16");
+        }
+
+        // Optional module: LTX-2.5 NA diffusion decoder (src/HartsyInference.Cuda/Kernels/ltx25vae/ltx25_na_decoder.cu).
+        // Absence is not an error — the decoder falls back to the managed reference.
+        string ltx25NaPath = Path.Combine(ptxDir, "ltx25_na_decoder.ptx");
+        if (File.Exists(ltx25NaPath))
+        {
+            _ltx25NaModule = LoadOwnedModule(ltx25NaPath);
+            _ltx25Na3dF32 = _ltx25NaModule.GetFunction("ltx25_na3d_f32");
+            _ltx25NaRope3dF32 = _ltx25NaModule.GetFunction("ltx25_na_rope3d_f32");
         }
 
         // Optional module: W8A8 IMMA chain (src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu). Absence is not an error.
@@ -1982,6 +1999,73 @@ public sealed class CudaKernels : IDisposable
         nint func = isF16 ? _stepCacheRelL1F16 : _stepCacheRelL1F32;
         CudaDriverApi.cuLaunchKernel(
             func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the optional ltx25_na_decoder.ptx module was found and loaded
+    /// (src/HartsyInference.Cuda/Kernels/ltx25vae/ltx25_na_decoder.cu).</summary>
+    public bool HasLtx25NaKernels => _ltx25NaModule is not null;
+
+    /// <summary>Shared-memory bytes <see cref="LaunchLtx25Na3d"/> needs: the q row plus one score per window position.</summary>
+    public static int Ltx25Na3dSharedBytes(int headDim, int kt, int kh, int kw) => (headDim + kt * kh * kw) * sizeof(float);
+
+    /// <summary>3D neighborhood attention over [batch,T,H,W,heads,headDim]; one block per (batch,t,h,w,head) query.
+    /// Kernel extents must already be clamped to their axis length, as the managed reference does.</summary>
+    public unsafe void LaunchLtx25Na3d(ulong output, ulong q, ulong k, ulong v,
+        int batch, int dimT, int dimH, int dimW, int heads, int headDim,
+        int kt, int kh, int kw, float scale, nint stream)
+    {
+        if (_ltx25NaModule is null)
+            throw new InvalidOperationException("ltx25_na_decoder.ptx is not loaded; gate on HasLtx25NaKernels first.");
+
+        ulong outArg = output, qArg = q, kArg = k, vArg = v;
+        uint bArg = (uint)batch, tArg = (uint)dimT, hArg = (uint)dimH, wArg = (uint)dimW;
+        uint headsArg = (uint)heads, hdArg = (uint)headDim;
+        uint ktArg = (uint)kt, khArg = (uint)kh, kwArg = (uint)kw;
+        float scaleArg = scale;
+
+        void** args = stackalloc void*[14];
+        args[0] = &outArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
+        args[4] = &bArg; args[5] = &tArg; args[6] = &hArg; args[7] = &wArg;
+        args[8] = &headsArg; args[9] = &hdArg;
+        args[10] = &ktArg; args[11] = &khArg; args[12] = &kwArg; args[13] = &scaleArg;
+
+        // One block per query·head. Threads split the window in the score pass and head_dim in the value pass,
+        // so a block wider than either is wasted; 256 covers head_dim 64 and keeps 8 warps on the window.
+        uint blockDim = 256;
+        uint gridDim = (uint)((long)batch * dimT * dimH * dimW * heads);
+        uint sharedBytes = (uint)Ltx25Na3dSharedBytes(headDim, kt, kh, kw);
+        CudaDriverApi.cuLaunchKernel(_ltx25Na3dF32, gridDim, 1, 1, blockDim, 1, 1,
+            sharedBytes, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>3-axis interleaved rope on x[1,t,h,w,heads,headDim], in place. cos/sin tables are per axis,
+    /// laid out [axisLength, pairs]; the three head chunks sit at offsets 0 / offsetH / offsetW.</summary>
+    public unsafe void LaunchLtx25NaRope3d(ulong x,
+        ulong cosT, ulong sinT, ulong cosH, ulong sinH, ulong cosW, ulong sinW,
+        int dimT, int dimH, int dimW, int heads, int headDim,
+        int pairsT, int pairsH, int pairsW, int offsetH, int offsetW, nint stream)
+    {
+        if (_ltx25NaModule is null)
+            throw new InvalidOperationException("ltx25_na_decoder.ptx is not loaded; gate on HasLtx25NaKernels first.");
+
+        ulong xArg = x, ctArg = cosT, stArg = sinT, chArg = cosH, shArg = sinH, cwArg = cosW, swArg = sinW;
+        uint tArg = (uint)dimT, hArg = (uint)dimH, wArg = (uint)dimW;
+        uint headsArg = (uint)heads, hdArg = (uint)headDim;
+        uint ptArg = (uint)pairsT, phArg = (uint)pairsH, pwArg = (uint)pairsW;
+        uint ohArg = (uint)offsetH, owArg = (uint)offsetW;
+
+        void** args = stackalloc void*[17];
+        args[0] = &xArg;
+        args[1] = &ctArg; args[2] = &stArg; args[3] = &chArg; args[4] = &shArg; args[5] = &cwArg; args[6] = &swArg;
+        args[7] = &tArg; args[8] = &hArg; args[9] = &wArg;
+        args[10] = &headsArg; args[11] = &hdArg;
+        args[12] = &ptArg; args[13] = &phArg; args[14] = &pwArg;
+        args[15] = &ohArg; args[16] = &owArg;
+
+        long threads = (long)dimT * dimH * dimW * heads * (pairsT + pairsH + pairsW);
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_ltx25NaRope3dF32, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
