@@ -119,6 +119,17 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
      before the activation cache. Reproduced with no LTX code in `Ltx25InPlaceAddThenNormTests`.
   **Take the lesson:** two of three were the *same* aliasing defect this model had already been bitten by once,
   and reading the code found none of them. The layer-diff found all three in one run.
+- [ ] **DECISION OPEN: it is still gated OFF (`HARTSY_LTX2_DIFFUSION_VAE=1`), and that gate's warning text is now
+  stale.** A 4-prompt quality pass (both decoders from the same prompt+seed, so the latent is identical) is in
+  `benchmarks/scoreboards/VIDEO.md`: grain is 7–43% lower on the diffusion decode in every scene, and the scene
+  with the *smallest* grain delta (neon, 7.5%) has the *largest* visual difference — the conv decode renders a
+  shop sign as illegible smear and cross-hatches a desert frame, the diffusion decode does neither, and smearing
+  is precisely what a grain metric cannot see. Judge it on the frames. Against that,
+  it costs **~9.3 s** per 25-frame generation versus ~0.35 s. **Two things to settle before flipping the
+  default**, neither of which this session measured: (1) the decode drops the whole resident DiT prefix, so in a
+  long-lived SwarmUI process the *next* generation pays a re-preload — the CLI harness runs one generation per
+  process and cannot see it; (2) the geometry ceiling below is still unaddressed, so the default must not be
+  flipped for resolutions this decoder cannot tile through.
 - [ ] ~~BLOCKER: the diffusion decoder's OUTPUT IS WRONG.~~ **FIXED — kept for the diagnosis.** At 512×320×25f it
   returns the right composition — lighthouse, horizon, sunset, matching the conv decode of the same latent —
   buried in heavy full-frame noise: high-frequency energy **11.78 vs the conv decode's 3.10** on the same frame.

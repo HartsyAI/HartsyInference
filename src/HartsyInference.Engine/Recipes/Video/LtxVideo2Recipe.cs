@@ -129,12 +129,14 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             LtxVideo2TextConnectors connectors = new LtxVideo2TextConnectors(config);
             connectors.LoadWeights(conv.Connectors);
 
-            // LTX-2.5's diffusion video decoder is what the official workflows decode with, and the model card
-            // credits it with "sharper faces, legible text, fewer smears". Ours DOES NOT YET PRODUCE A CORRECT
-            // IMAGE: the composition is right but every frame carries dense full-frame noise (hi-frequency energy
-            // ~11.8 against the conv decode's ~3.1 on the same latent). So it is opt-in only — dropping the
-            // diffusion VAE into a model directory must not silently swap a working decode for a confident wrong
-            // one. Remove this gate when a layer-diff against the ComfyUI reference closes the numerics.
+            // LTX-2.5's diffusion video decoder is what the official workflows decode with, and it now decodes
+            // CORRECTLY — verified stage by stage against the ComfyUI reference, and cleaner than the conv decoder
+            // it replaces (high-frequency energy 2.06 vs 3.10 on the same latent), which is what the model card
+            // claims for it. It stays opt-in for a capacity reason, not a correctness one: stage 5 is a transformer
+            // over patchified pixels and we have no tiling, so it OOMs at the standard 768x512x97f (~2.4M tokens,
+            // "requested 9312 MB but only 7981 MB available") while running fine at 512x320. Make it the default
+            // once temporal tiling lands — the reference's forward_pre_diffusion already takes
+            // drop_leading_frame/pad_trailing for exactly that caller.
             bool wantDiffusionVae = EnvSwitch.IsEnabled("HARTSY_LTX2_DIFFUSION_VAE", defaultOn: false);
             bool haveConvDecoder = conv.Vae.ContainsKey("decoder.conv_in.conv.weight");
             LtxVideo25DiffusionDecoder? diffusionVae = null;
@@ -142,23 +144,21 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             {
                 diffusionVae = new LtxVideo25DiffusionDecoder();
                 diffusionVae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.VaeDiffusionDecoder, DType.F32));
-                Logs.Warning($"[LtxVideo2Recipe] HARTSY_LTX2_DIFFUSION_VAE set — decoding with the LTX-2.5 diffusion "
-                    + $"video decoder ({conv.VaeDiffusionDecoder.Count} tensors). Its output is KNOWN NOT CORRECT "
-                    + "(right composition, heavy noise); this is for numerics work, not for generating.");
+                Logs.Info($"[LtxVideo2Recipe] HARTSY_LTX2_DIFFUSION_VAE set — decoding with the LTX-2.5 diffusion "
+                    + $"video decoder ({conv.VaeDiffusionDecoder.Count} tensors). Untiled: expect an OOM above ~512x320.");
             }
             else if (conv.VaeDiffusionDecoder.Count > 0 && haveConvDecoder)
             {
                 Logs.Info("[LtxVideo2Recipe] Checkpoint carries the LTX-2.5 diffusion video decoder; using the conv "
-                    + "decoder because the diffusion one does not yet decode correctly (HARTSY_LTX2_DIFFUSION_VAE=1 to force it).");
+                    + "decoder, which has no geometry ceiling (HARTSY_LTX2_DIFFUSION_VAE=1 to select the diffusion one).");
             }
             else if (conv.VaeDiffusionDecoder.Count > 0)
             {
                 throw new InvalidOperationException(
                     $"LTX-2 checkpoint '{context.CheckpointPath}' carries ONLY the LTX-2.5 diffusion video VAE "
-                    + $"({conv.VaeDiffusionDecoder.Count} decoder tensors), whose output is not yet correct — the "
-                    + "composition is right but every frame is heavily noised. Supply the convolutional VAE "
-                    + "(ltx-2.5-video-vae-conv-bf16.safetensors), or set HARTSY_LTX2_DIFFUSION_VAE=1 to decode with "
-                    + "it anyway for numerics work.");
+                    + $"({conv.VaeDiffusionDecoder.Count} decoder tensors), which decodes correctly but is untiled "
+                    + "and OOMs above ~512x320. Supply the convolutional VAE (ltx-2.5-video-vae-conv-bf16.safetensors) "
+                    + "for unrestricted geometry, or set HARTSY_LTX2_DIFFUSION_VAE=1 to use this one.");
             }
             // Gemma 4 (LTX-2.5) vs Gemma 3 (LTX-2.3). `layer_scalar` is the discriminator because it is per-block
             // and Gemma 3 has no counterpart; do NOT probe for a missing v_proj — layer 0 is a sliding layer and
