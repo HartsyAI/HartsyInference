@@ -451,9 +451,20 @@ Lyrics + caption → 44.1 kHz stereo, up to six minutes. Qwen3-8B global LM (one
 | Vocoder | maxAbs < 1e-4; left/right provably distinct |
 | Window/crop geometry | reproduces the reference's 529408-sample two-window stitch |
 
-**Open**: the teacher-forced AR parity and the multi-window flow parity (both written, both `Slow`-tiered) had not
-finished a run at the time of writing. Until they do, the AR loop and the overlap/carry logic are covered only by
-their component pieces and by listening.
+**Open**: `MiniMaxMusic3ArParityTests` (teacher-forced) fails at its current tolerance and the divergence is not yet
+characterized; `MiniMaxMusic3FlowParityTests` (reference frame hiddens + forced noise across two windows) is the
+experiment that isolates whether the AR stage is the only thing wrong. Until both pass, the AR loop and the
+overlap/carry logic are covered only by their component pieces and by listening.
+
+**Levels**: a 17.8 s multi-window clip (3060, `:q4`) measures -19.5 dBFS peak 0.60 against the official 32 kHz
+asset's -16.6, with no level step at either window seam (0.97 ratio at 5.0 s and 12.0 s). Clips under ~10 s measure
+20 dB quieter — that is intro material, not a decode bug, and it is the third short-clip level scare on this
+machine. Do not "fix" it with normalization.
+
+**Measured VRAM** (3060, `:q4`, 17.8 s): 10.3 GB peak, dropping to 7.3 GB at the AR-to-flow handoff. Undisposed
+`Tensor.Reshape` views in the DiT's attention path used to grow the activation cache per denoising step and could
+exhaust even a 24 GB card on a long generation; they are disposed now, and the fingerprint of that class of bug is
+VRAM climbing with the number of forwards rather than with tensor size.
 
 **Usage**: the caption goes in `--genre`, the lyrics in the prompt (the ACE-Step mapping the CLI already speaks).
 `-m minimaxmusic3` is the BF16 parity baseline and wants a 24 GB card; `:q8`/`:q4` quantize the language model into
