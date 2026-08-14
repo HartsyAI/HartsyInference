@@ -260,25 +260,29 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
             using (Tensor normed = new Tensor(hidden.Shape, DType.F32))
             {
                 backend.RmsNorm(normed, hidden, _inputNorm!, RmsNormEps);
-                using Tensor query = new Tensor(hidden.Shape, DType.F32);
-                using Tensor key = new Tensor(hidden.Shape, DType.F32);
-                using Tensor value = new Tensor(hidden.Shape, DType.F32);
+                using Tensor query = new Tensor(new TensorShape(batch, steps, NumHeads, HeadDim), DType.F32);
+                using Tensor key = new Tensor(new TensorShape(batch, steps, NumHeads, HeadDim), DType.F32);
+                using Tensor value = new Tensor(new TensorShape(batch, steps, NumHeads, HeadDim), DType.F32);
                 backend.Linear(query, normed, _toQ!, null);
                 backend.Linear(key, normed, _toK!, null);
                 backend.Linear(value, normed, _toV!, null);
 
+                // Allocated at rank 4 rather than reshaped into it: Tensor.Reshape reads DataPointer, which syncs
+                // a device tensor to the host and returns a HOST pointer, so the view has no GPU residency. The
+                // `merged` write target was the damaging one — the permute wrote host memory and the projection
+                // below then read a device copy nothing had written, corrupting every depth hidden state on CUDA.
                 TensorShape tokenMajor = new TensorShape(batch, steps, NumHeads, HeadDim);
                 TensorShape headMajor = new TensorShape(batch, NumHeads, steps, HeadDim);
                 using Tensor q = new Tensor(headMajor, DType.F32);
                 using Tensor k = new Tensor(headMajor, DType.F32);
                 using Tensor v = new Tensor(headMajor, DType.F32);
-                backend.Permute0213(q, query.Reshape(tokenMajor), steps, NumHeads, HeadDim);
-                backend.Permute0213(k, key.Reshape(tokenMajor), steps, NumHeads, HeadDim);
-                backend.Permute0213(v, value.Reshape(tokenMajor), steps, NumHeads, HeadDim);
+                backend.Permute0213(q, query, steps, NumHeads, HeadDim);
+                backend.Permute0213(k, key, steps, NumHeads, HeadDim);
+                backend.Permute0213(v, value, steps, NumHeads, HeadDim);
                 using Tensor attention = new Tensor(headMajor, DType.F32);
                 backend.ScaledDotProductAttention(attention, q, k, v, mask, 1f / MathF.Sqrt(HeadDim));
-                using Tensor merged = new Tensor(hidden.Shape, DType.F32);
-                backend.Permute0213(merged.Reshape(tokenMajor), attention, NumHeads, steps, HeadDim);
+                using Tensor merged = new Tensor(tokenMajor, DType.F32);
+                backend.Permute0213(merged, attention, NumHeads, steps, HeadDim);
                 backend.Linear(result, merged, _toOut!, null);
             }
             backend.Add(result, result, hidden);
