@@ -57,6 +57,7 @@ internal static class MusicCatalog
         [AudioWeightsCatalog.AceStepId] = AceStepMusicModel.Descriptor,
         [AudioWeightsCatalog.YueId] = YueMusicModel.Descriptor,
         ["heartmula"] = HeartMulaMusicModel.Descriptor,
+        ["minimaxmusic3"] = MiniMaxMusic3MusicModel.Descriptor,
         ["stableaudio"] = StableAudioMusicModel.Descriptor,
     };
 

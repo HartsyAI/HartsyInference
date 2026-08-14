@@ -1276,6 +1276,11 @@ public static class ModelCatalog
                 Id = "heartmula", Modality = mus, DisplayName = "HeartMuLa (oss-3B)", Architecture = "CSM-LM + flow-match HeartCodec", Status = ok,
                 CliDrivable = true, // `hartsy music -m heartmula` — MusicCatalog "heartmula"; 48 kHz, real-weight verified (see MODEL_STATUS_AUDIO.md)
             },
+            new CatalogEntry
+            {
+                Id = "minimaxmusic3", Modality = mus, DisplayName = "MiniMax Music 3", Architecture = "Qwen3-8B + RVQ depth decoder + flow-match DiT + DAC vocoder", Status = ok,
+                CliDrivable = true, // `hartsy music -m minimaxmusic3` (bf16, needs 24 GB) or `-m minimaxmusic3:q8`/`:q4` for smaller cards; 44.1 kHz stereo, lyrics in the prompt and the caption in --genre
+            },
 
             // Voice conversion — VcCatalog (src/HartsyInference.Engine/Audio/Vc/**). Via `hartsy convert`.
             new CatalogEntry

@@ -6,14 +6,14 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Native audio routes: speech synthesis, transcription, voice conversion, and fx (stem separation /
+/// <summary>Native audio routes: speech synthesis, music generation, transcription, voice conversion, and fx (stem separation /
 /// enhancement). All one-shot (no step-preview progress, unlike image/video), so none of these have a <c>/stream</c>
 /// variant. <see cref="AudioResult"/>/<see cref="TranscriptResult"/>/<see cref="StemsResult"/> already carry encoded
 /// bytes (or plain text/timestamps) — no PNG-style re-encoding step needed, just pass the native result straight
 /// through as JSON.</summary>
 public static class AudioEndpoints
 {
-    /// <summary>Maps <c>/v1/native/speech</c>, <c>/transcribe</c>, <c>/voice-convert</c>, and <c>/fx/*</c>.</summary>
+    /// <summary>Maps <c>/v1/native/speech</c>, <c>/music</c>, <c>/transcribe</c>, <c>/voice-convert</c>, and <c>/fx/*</c>.</summary>
     public static void MapAudioEndpoints(this WebApplication app)
     {
         app.MapPost("/v1/native/speech", async (NativeSpeechRequest req, IInferenceEngine engine, InferenceQueue queue, CancellationToken ct) =>
@@ -23,6 +23,22 @@ public static class AudioEndpoints
             {
                 AudioResult result = await queue.EnqueueAsync(() => engine.Speech.SynthesizeAsync(spec, req.Request, ct), ct);
                 return Results.Ok(WithSavedPath(result, ArtifactPersistence.Save(req, result.Data, req.Request.Text, result.Format)));
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
+        // Music had no native route until MiniMax Music 3 landed: every music model was reachable from the CLI
+        // and the SwarmUI extension but not over HTTP.
+        app.MapPost("/v1/native/music", async (NativeMusicRequest req, IInferenceEngine engine, InferenceQueue queue, CancellationToken ct) =>
+        {
+            ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Music);
+            try
+            {
+                AudioResult result = await queue.EnqueueAsync(() => engine.Music.GenerateAsync(spec, req.Request, null, ct), ct);
+                return Results.Ok(WithSavedPath(result, ArtifactPersistence.Save(req, result.Data, req.Request.Prompt, result.Format)));
             }
             catch (Exception ex)
             {

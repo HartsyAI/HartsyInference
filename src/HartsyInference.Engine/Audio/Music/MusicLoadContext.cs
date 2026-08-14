@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Audio;
 
@@ -20,6 +21,9 @@ internal sealed record MusicLoadContext
     /// <summary>Resolved precision for the big codec-token LMs (YuE); other families ignore it.</summary>
     internal AudioLmQuant LmQuant { get; init; } = AudioLmQuant.Q4K;
 
+    /// <summary>LoRAs to merge at load. Null for a plain run.</summary>
+    internal LoraStack? Loras { get; init; }
+
     /// <summary>True when a layer-split placement is available to loaders.</summary>
     internal bool IsSharded => ShardStages is { Count: >= 2 };
 
@@ -27,11 +31,14 @@ internal sealed record MusicLoadContext
     /// single-device Q4_K default, keeping existing cache keys byte-identical.</summary>
     internal string CacheSuffix()
     {
-        if (!IsSharded && LmQuant == AudioLmQuant.Q4K)
+        if (!IsSharded && LmQuant == AudioLmQuant.Q4K && Loras is null or { Entries.Count: 0 })
         {
             return "";
         }
+        string loras = Loras is null or { Entries.Count: 0 }
+            ? ""
+            : "|lora=" + string.Join("+", Loras.Entries.Select(entry => $"{entry.Model}@{entry.Weight}"));
         string shard = IsSharded ? string.Join("+", ShardStages!.Select(s => s.Selector)) : "";
-        return $"|lmq={LmQuant}|shard={shard}";
+        return $"|lmq={LmQuant}|shard={shard}{loras}";
     }
 }

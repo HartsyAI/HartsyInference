@@ -1,0 +1,236 @@
+using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Frontends;
+using HartsyInference.Audio.Models.Music;
+using HartsyInference.Audio.Pipelines;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Music;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Engine.Requests;
+using HartsyInference.ModelAssets.Tokenizers;
+
+namespace HartsyInference.Engine.Audio;
+
+/// <summary>MiniMax Music 3 — lyrics- and caption-conditioned song generation up to six minutes, 44.1 kHz stereo.
+/// An 8B Qwen3 emits one semantic RVQ code per 25 Hz frame while a 0.6B depth decoder fills in the seven residual
+/// codebooks; the two models' hidden states (not their discrete codes) condition a flow-matching transformer whose
+/// latents a DAC-style vocoder turns into audio.
+///
+/// <para>Only the diffusers-format subfolders are fetched. The repo also carries the SGLang-native format
+/// (<c>qwen_7B/</c>, <c>flowmatching_vae.pth</c>, <c>dav.pth</c>) — another 28 GB the engine never reads.</para>
+///
+/// <para>The two stages never need to be resident together, so the language model's weights are freed before the
+/// flow stage is preloaded. That is what lets the quantized variants run on a 12 GB card.</para></summary>
+internal static class MiniMaxMusic3MusicModel
+{
+    private const string DefaultRepo = "MiniMaxAI/MiniMax-Music3";
+    private const string Category = "music";
+
+    /// <summary>The MiniMax Music 3 descriptor.</summary>
+    internal static MusicModelDescriptor Descriptor { get; } = new MusicModelDescriptor
+    {
+        ManagesOwnWeights = true,
+        CacheKey = selector => $"{ResolveRepo(selector.Variant)}|{ResolveQuant(selector.Variant) ?? "bf16"}",
+        LoadAsync = (context, selector, cancel) =>
+            LoadAsync(context, ResolveRepo(selector.Variant), ResolveQuant(selector.Variant), cancel),
+    };
+
+    /// <summary>A bare id is the released checkpoint; an <c>org/repo</c> variant passes through so a future official
+    /// release needs no code change. The precision suffix does not affect repo selection.</summary>
+    private static string ResolveRepo(string variant)
+    {
+        string id = (variant ?? string.Empty).Trim();
+        return id.Contains('/', StringComparison.Ordinal) ? id.Split(':')[0] : DefaultRepo;
+    }
+
+    /// <summary>Maps a variant's precision suffix to a quant mode for the global language model: <c>-q8</c>/<c>:q8</c>
+    /// → q8_0, <c>-q4</c>/<c>:q4</c> → q4_k, else null (the checkpoint's BF16).</summary>
+    private static string? ResolveQuant(string variant)
+    {
+        string lower = (variant ?? string.Empty).Trim().ToLowerInvariant();
+        if (lower.EndsWith("q8", StringComparison.Ordinal) || lower.EndsWith("q8_0", StringComparison.Ordinal))
+        {
+            return "q8_0";
+        }
+        return lower.EndsWith("q4", StringComparison.Ordinal) || lower.EndsWith("q4_k", StringComparison.Ordinal) ? "q4_k" : null;
+    }
+
+    private static async Task<IMusicRunner> LoadAsync(MusicLoadContext context, string repo, string? quant, CancellationToken cancel)
+    {
+        string tokenizerPath = await AudioModelCache.GetAsync(repo, "tokenizer/tokenizer.json", Category, ct: cancel).ConfigureAwait(false);
+        (IReadOnlyDictionary<string, Tensor> languageWeights, IDisposable[] languageLoaders) =
+            await AudioCheckpoints.LoadSubfolderAsync(repo, "language_model", Category, cancel).ConfigureAwait(false);
+        (IReadOnlyDictionary<string, Tensor> depthWeights, IDisposable[] depthLoaders) =
+            await AudioCheckpoints.LoadSubfolderAsync(repo, "rvq_depth_decoder", Category, cancel).ConfigureAwait(false);
+        (IReadOnlyDictionary<string, Tensor> conditionWeights, IDisposable[] conditionLoaders) =
+            await AudioCheckpoints.LoadSubfolderAsync(repo, "condition_encoder", Category, cancel).ConfigureAwait(false);
+        (IReadOnlyDictionary<string, Tensor> ditWeights, IDisposable[] ditLoaders) =
+            await AudioCheckpoints.LoadSubfolderAsync(repo, "transformer", Category, cancel).ConfigureAwait(false);
+        (IReadOnlyDictionary<string, Tensor> vocoderWeights, IDisposable[] vocoderLoaders) =
+            await AudioCheckpoints.LoadSubfolderAsync(repo, "vocoder", Category, cancel).ConfigureAwait(false);
+
+        IReadOnlyDictionary<string, Tensor> preparedLanguage =
+            MiniMaxMusic3WeightPolicy.PrepareLanguageModel(languageWeights, repo, quant, out IDisposable? quantCache);
+        IReadOnlyDictionary<string, Tensor> preparedDit =
+            MiniMaxMusic3WeightPolicy.PrepareTransformer(ditWeights, quant, out IDisposable? ditCast);
+        ModelAssets.Lora.LoraStack? loras = ApplyLoras(context, ref preparedLanguage, ref preparedDit);
+
+        // The quantized variants are the small-card path, where an F32 KV cache is the difference between
+        // a five-minute song fitting and not.
+        MiniMaxMusic3GlobalLm languageModel = new MiniMaxMusic3GlobalLm(halfPrecisionKv: quant is not null && context.Backend.Device.IsCuda);
+        languageModel.LoadWeights(preparedLanguage);
+        MiniMaxMusic3DepthDecoder depthDecoder = new MiniMaxMusic3DepthDecoder();
+        depthDecoder.LoadWeights(depthWeights);
+        MiniMaxMusic3ConditionEncoder conditionEncoder = new MiniMaxMusic3ConditionEncoder();
+        conditionEncoder.LoadWeights(conditionWeights);
+        MiniMaxMusic3Dit dit = new MiniMaxMusic3Dit();
+        dit.LoadWeights(preparedDit);
+        MiniMaxMusic3Vocoder vocoder = new MiniMaxMusic3Vocoder();
+        vocoder.LoadWeights(vocoderWeights);
+
+        using FileStream tokenizerJson = File.OpenRead(tokenizerPath);
+        GgufTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerJson);
+
+        MiniMaxMusic3ArPipeline autoregressive = new MiniMaxMusic3ArPipeline(languageModel, depthDecoder);
+        MiniMaxMusic3FlowPipeline flow = new MiniMaxMusic3FlowPipeline(context.Backend, conditionEncoder, dit);
+        Logs.Info($"[Audio][MiniMaxMusic3] Loaded {repo} ({(quant is null ? "bf16" : quant)} language model, "
+            + $"{vocoder.SampleRate} Hz stereo).");
+
+        MusicAudio Synth(IBackend backend, MusicRequest request, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            // ACE-Step's mapping, which the CLI and the request DTO already speak: the style/description rides in
+            // Genre and the lyrics in Prompt.
+            string caption = string.IsNullOrWhiteSpace(request.Genre)
+                ? "A warm instrumental track."
+                : request.Genre;
+            string lyrics = string.IsNullOrWhiteSpace(request.Prompt) ? "[instrumental]" : request.Prompt;
+            (int[] conditional, int[] unconditional) = MiniMaxMusic3Prompt.Tokenize(tokenizer, caption, lyrics);
+
+            int frames = (int)Math.Clamp(
+                Math.Round(request.Duration * MiniMaxMusic3ArPipeline.FrameRate), 1, MiniMaxMusic3ArPipeline.MaxAudioFrames);
+            int steps = request.InferSteps is > 0 ? request.InferSteps.Value : MiniMaxMusic3FlowPipeline.DefaultSteps;
+            float cfgScale = request.CfgScale is > 0
+                ? (float)request.CfgScale.Value
+                : MiniMaxMusic3FlowPipeline.DefaultCfgScale;
+
+            backend.PreloadWeights(languageModel.EnumerateWeights());
+            backend.PreloadWeights(depthDecoder.EnumerateWeights());
+            float[] frameHiddens;
+            int produced;
+            try
+            {
+                (frameHiddens, produced) = autoregressive.Generate(backend, conditional, unconditional, frames,
+                    request.Seed, OnFrame, ct);
+            }
+            finally
+            {
+                backend.Sync();
+                backend.FreeWeights(languageModel.EnumerateWeights());
+                backend.FreeWeights(depthDecoder.EnumerateWeights());
+            }
+            Logs.Info($"[Audio][MiniMaxMusic3] Autoregressive stage produced {produced} frames "
+                + $"({produced / MiniMaxMusic3ArPipeline.FrameRate:0.0}s of audio); flow-matching {steps} steps per window.");
+
+            backend.PreloadWeights(conditionEncoder.EnumerateWeights());
+            backend.PreloadWeights(dit.EnumerateWeights());
+            Tensor[] chunks;
+            try
+            {
+                chunks = flow.Denoise(frameHiddens, produced, steps, cfgScale, request.Seed, OnStep, ct);
+            }
+            finally
+            {
+                backend.Sync();
+                backend.FreeWeights(dit.EnumerateWeights());
+                backend.FreeWeights(conditionEncoder.EnumerateWeights());
+            }
+
+            backend.PreloadWeights(vocoder.EnumerateWeights());
+            Tensor[] waveforms = new Tensor[chunks.Length];
+            try
+            {
+                for (int i = 0; i < chunks.Length; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    waveforms[i] = vocoder.Decode(backend, chunks[i]);
+                }
+                (float[] left, float[] right) = MiniMaxMusic3FlowPipeline.Stitch(waveforms, MiniMaxMusic3Vocoder.LatentHopLength);
+                return MusicAudio.Stereo(left, right);
+            }
+            finally
+            {
+                foreach (Tensor waveform in waveforms)
+                {
+                    waveform?.Dispose();
+                }
+                foreach (Tensor chunk in chunks)
+                {
+                    chunk.Dispose();
+                }
+                backend.Sync();
+                backend.FreeWeights(vocoder.EnumerateWeights());
+            }
+        }
+
+        IDisposable?[] keep =
+        [
+            autoregressive, flow, languageModel, depthDecoder, conditionEncoder, dit, vocoder, quantCache, ditCast, loras,
+            .. languageLoaders, .. depthLoaders, .. conditionLoaders, .. ditLoaders, .. vocoderLoaders,
+        ];
+        return new MusicRunner(vocoder.SampleRate, Synth, keep);
+    }
+
+    /// <summary>Merges the request's LoRAs into the language model and the transformer before either is loaded, the
+    /// same weight-space merge the diffusion pipelines use. Both dictionaries are offered to the stack under
+    /// <see cref="ModelAssets.Lora.LoraTarget.Transformer"/> and each layer lands wherever its key exists — no MiniMax Music 3 LoRAs
+    /// have been published yet, so which component a real one targets is not yet known.</summary>
+    private static ModelAssets.Lora.LoraStack? ApplyLoras(MusicLoadContext context,
+        ref IReadOnlyDictionary<string, Tensor> languageWeights, ref IReadOnlyDictionary<string, Tensor> ditWeights)
+    {
+        if (context.Loras is null or { Entries.Count: 0 })
+        {
+            return null;
+        }
+        ModelAssets.Lora.LoraStack stack = new ModelAssets.Lora.LoraStack();
+        foreach (LoraEntry lora in context.Loras.Entries)
+        {
+            stack.AddFromPath(lora.Model, (float)lora.Weight);
+        }
+        Dictionary<string, Tensor> language = new Dictionary<string, Tensor>(languageWeights, StringComparer.Ordinal);
+        Dictionary<string, Tensor> transformer = new Dictionary<string, Tensor>(ditWeights, StringComparer.Ordinal);
+        int merged = stack.ApplyTo(language, ModelAssets.Lora.LoraTarget.Transformer, context.Backend)
+            + stack.ApplyTo(transformer, ModelAssets.Lora.LoraTarget.Transformer, context.Backend);
+        if (merged == 0)
+        {
+            Logs.Warning($"[Audio][MiniMaxMusic3] None of the {context.Loras.Entries.Count} supplied LoRA(s) matched a weight "
+                + "in the language model or the transformer — the generation will be unchanged.");
+        }
+        else
+        {
+            Logs.Info($"[Audio][MiniMaxMusic3] Merged {merged} weight(s) from {context.Loras.Entries.Count} LoRA(s).");
+        }
+        languageWeights = language;
+        ditWeights = transformer;
+        return stack;
+    }
+
+    /// <summary>The autoregressive stage is the long pole — silence in the log reads as a hang.</summary>
+    private static void OnFrame(int done, int total)
+    {
+        if (done <= 3 || done % 100 == 0 || done == total)
+        {
+            Logs.Info($"[Audio][MiniMaxMusic3] Frame {done}/{total} ({done / MiniMaxMusic3ArPipeline.FrameRate:0.0}s of audio).");
+        }
+    }
+
+    private static void OnStep(int done, int total)
+    {
+        if (done <= 2 || done % 10 == 0 || done == total)
+        {
+            Logs.Info($"[Audio][MiniMaxMusic3] Flow-matching step {done}/{total}.");
+        }
+    }
+}

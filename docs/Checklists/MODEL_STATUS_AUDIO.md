@@ -313,6 +313,7 @@ section below; bring-up debugging notes live in [TROUBLESHOOTING.md](TROUBLESHOO
 | **MusicGen / AudioGen** | ✅ | T5-base corr 1.0 + decoder logits corr 0.999999 + EnCodec-32k decode corr 1.0; e2e on CUDA writes music-like audio. 5 bugs fixed (T5/EnCodec). |
 | **YuE** (music, Stage-1) | ✅ | Stage-1 7B LM corr 1.0 (argmax 8/8) + XCodec (SoundStream) decode corr 1.0 → generates 16 kHz vocal audio. ([details](#yue)) |
 | **HeartMuLa** (oss-3B) | ✅ | LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). ([details](#heartmula)) |
+| **MiniMax Music 3** | 🔬 | Prompt ids exact; condition encoder, DiT block 0 and the full 36-layer DiT match diffusers (meanAbs < 1e-3); vocoder maxAbs 1e-4 with a distinct stereo fold; window/crop geometry reproduces the reference's 529408-sample stitch. Generates real 44.1 kHz stereo on CUDA. AR teacher-forced parity and the multi-window flow parity are the open gates. ([details](#minimax-music-3)) |
 | **RVC** (voice conversion) | 🔬 | RMVPE front-end wired as the default F0 estimator (`VcCatalog.ConvertRvc`), corr 1.000000/maxAbs 9.5e-8 vs real `rmvpe.pt` ([details](../Checklists/PARITY_VERIFICATION.md)). YIN remains selectable via `f0_method`. RVC flow/decoder + index/protect/rms_mix_rate still pending. |
 | **Demucs** (separation) | 🔧 | Built; parity pending. |
 | **CSM** (Sesame) | ✅ | Fixed 2026-07-21 (unsloth/csm-1b key remap + bundled 32-cb Mimi + I32 codes dtype + real all-zero EOS + `[speaker]text` prompt template); Whisper word-perfect on two independent sentences. `hartsy speak -m csm`. |
@@ -431,6 +432,38 @@ DiT/cond-encoder/8-step loop all corr 1.0 (~1e-6) vs torch oracle on the real Co
 ### YuE
 
 Stage-1 7B LM corr 1.0 (argmax 8/8) + XCodec (SoundStream) decode corr 1.0 → generates 16 kHz vocal audio. **2026-08-05: full pipeline now ACTIVE** — Stage-2 (m-a-p/YuE-s2-1B-general) + per-stem Vocos vocoders added to the weights catalog, vocoder `.pth`→safetensors auto-converts on first load (`EnsureVocoders`), Stage-1 precision is a policy (`HARTSY_AUDIO_LM_QUANT`, un-quantized bf16 when layer-split across GPUs). Verified perceptually + via Whisper STT (sung lyrics transcribe intelligibly; the old cb0-only 16 kHz draft transcribed as NOTHING — that path was the "garbled" mode and is now only a fallback when s2/vocoders are absent). **2026-08-05: the sharded-YuE Whisper check is now a committed regression test**, not a manual session — `YueLmShardingEngineTests.LmSharding_RealEngine_UnquantizedStage1_PooledAcrossGpus_ProducesAudio` generates real `[verse]/[chorus]` lyrics through the bf16 layer-split path and asserts >=50% Whisper content-word recall (real run: heard "Golden morning breaks across the ocean" for an 8.0s/400-frame clip, 2/4 target words hit — the clip length only reached the verse, not the chorus, so recall is duration-bound, not a quality ceiling). Stage-2/vocoder numerical parity vs the Python reference NOT yet run — STT + listening evidence only.
+
+### MiniMax Music 3
+
+Lyrics + caption → 44.1 kHz stereo, up to six minutes. Qwen3-8B global LM (one 25 Hz semantic RVQ code per frame)
++ 0.6B depth decoder (seven residual codebooks) → the two models' **hidden states**, not their codes, condition a
+2.4B flow-matching DiT whose latents a DAC-style vocoder decodes. See
+`docs/Research/MINIMAX_MUSIC3_ARCHITECTURE.md` for the constants and the traps.
+
+**Verified against diffusers PR #14456** (dump script: `tests/python-reference/dump_minimax_music3_reference.py`):
+
+| Component | Result |
+|---|---|
+| Prompt assembly + token ids | exact (6 string cases + the README example's 58 ids) |
+| Condition encoder | meanAbs < 1e-5 |
+| DiT block 0 | meanAbs < 1e-4 |
+| Full 36-layer DiT | meanAbs < 1e-3 at t=0 cond, t=0 uncond and t=0.5 |
+| Vocoder | maxAbs < 1e-4; left/right provably distinct |
+| Window/crop geometry | reproduces the reference's 529408-sample two-window stitch |
+
+**Open**: the teacher-forced AR parity and the multi-window flow parity (both written, both `Slow`-tiered) had not
+finished a run at the time of writing. Until they do, the AR loop and the overlap/carry logic are covered only by
+their component pieces and by listening.
+
+**Usage**: the caption goes in `--genre`, the lyrics in the prompt (the ACE-Step mapping the CLI already speaks).
+`-m minimaxmusic3` is the BF16 parity baseline and wants a 24 GB card; `:q8`/`:q4` quantize the language model into
+a disk-cached GGUF, cast the DiT to BF16 and switch the KV cache to F16, which is the 12 GB path. Two bugs the first
+real generation found that no shape check would have: the depth decoder's BF16 embedding tables and the DiT's
+`time_proj` are read host-side as raw floats and must be widened at load.
+
+**LoRA**: `MusicRequest.Loras` merges into the language model and the DiT before load (`LoraStack.ApplyTo`), and the
+set is part of the runner cache key. Entries must be absolute **paths** — `AddFromPath` does not resolve ids. No
+MiniMax Music 3 LoRAs have been published, so this path has never been exercised against a real adapter.
 
 ### HeartMuLa
 

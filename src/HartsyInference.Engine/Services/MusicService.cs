@@ -29,7 +29,7 @@ public sealed class MusicService : IMusicService
         ValidateEditingModes(request, selector.Id);
         MusicModelDescriptor descriptor = MusicCatalog.Resolve(selector.Id);
         IBackend backend = _engine.Backend;
-        MusicLoadContext loadContext = BuildLoadContext(backend);
+        MusicLoadContext loadContext = BuildLoadContext(backend, request);
         string key = descriptor.CacheKey(selector) + loadContext.CacheSuffix();
 
         return _engine.AudioRuntime.RunAsync(backend, $"music:{key}", async ct =>
@@ -65,7 +65,7 @@ public sealed class MusicService : IMusicService
     /// <summary>Builds the load-time context: single-device Q4_K (byte-identical to pre-placement behavior)
     /// unless the engine placement has ≥2 <c>ShardDevices</c>, in which case the big-LM loaders (YuE) get the
     /// resolved shard backends and default to un-quantized weights pooled across them.</summary>
-    private MusicLoadContext BuildLoadContext(IBackend primary)
+    private MusicLoadContext BuildLoadContext(IBackend primary, MusicRequest request)
     {
         IReadOnlyList<string> shardDevices = _engine.Placement.ShardDevices;
         bool sharded = shardDevices.Count >= 2;
@@ -84,6 +84,7 @@ public sealed class MusicService : IMusicService
             ShardStages = stages,
             ShardRatios = sharded ? _engine.Placement.ShardRatios : null,
             LmQuant = AudioLmQuantPolicy.Resolve(sharded),
+            Loras = request.Loras,
         };
     }
 
@@ -120,7 +121,7 @@ public sealed class MusicService : IMusicService
         {
             throw new NotSupportedException(
                 $"Music '{mode.ToLowerInvariant()}' is an ACE-Step-only editing mode; the '{modelId}' family "
-                + "(MusicGen / AudioGen / YuE / HeartMuLa) has no audio-conditioned edit path in this engine. "
+                + "(MusicGen / AudioGen / YuE / HeartMuLa / MiniMax Music 3) has no audio-conditioned edit path in this engine. "
                 + "Drop the Continuation/Repaint/Cover input or select 'acestep'.");
         }
     }

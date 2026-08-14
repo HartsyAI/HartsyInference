@@ -84,6 +84,11 @@ public sealed record MusicRequest
     /// <summary>LM planner negative prompt.</summary>
     public string LmNegativePrompt { get; init; } = "";
 
+    /// <summary>LoRAs to merge into the model's weights before loading, the same stack the image and video requests
+    /// take. Changing the set reloads the model, so it is part of the runner cache key. Only MiniMax Music 3
+    /// consumes these today.</summary>
+    public LoraStack? Loras { get; init; }
+
     /// <summary>Continuation seed audio: extend this clip forward. Null for none.</summary>
     public AudioClip? Continuation { get; init; }
 

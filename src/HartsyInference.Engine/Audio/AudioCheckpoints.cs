@@ -56,6 +56,61 @@ internal static class AudioCheckpoints
         return (pickle.GetAllTensors(), [pickle]);
     }
 
+    /// <summary>Loads one SUBFOLDER of a repo, fetching only that subfolder's files. Multi-component checkpoints
+    /// (diffusers-style: <c>transformer/</c>, <c>vocoder/</c>, …) have no weights at the repo root, and pulling the
+    /// whole repo would drag in every sibling component — for MiniMax Music 3 that is tens of gigabytes of formats
+    /// the engine never reads.</summary>
+    internal static async Task<(IReadOnlyDictionary<string, Tensor> Dict, IDisposable[] Loaders)> LoadSubfolderAsync(
+        string repo, string subfolder, string category, CancellationToken cancel)
+    {
+        // diffusers components ship diffusion_pytorch_model.*; transformers ones ship model.*.
+        string[] singleFiles = ["diffusion_pytorch_model.safetensors", "model.safetensors"];
+        foreach (string name in singleFiles)
+        {
+            try
+            {
+                string path = await AudioModelCache.GetAsync(repo, $"{subfolder}/{name}", category, ct: cancel).ConfigureAwait(false);
+                SafeTensorsLoader loader = new SafeTensorsLoader();
+                loader.Load(path);
+                return (loader.GetAllTensors(), [loader]);
+            }
+            catch (FileNotFoundException ex)
+            {
+                Logs.Debug($"[Audio] '{repo}/{subfolder}' has no {name} ({ex.Message}); trying the next layout.");
+            }
+        }
+
+        foreach (string name in singleFiles)
+        {
+            string indexName = $"{name}.index.json";
+            string indexPath;
+            try
+            {
+                indexPath = await AudioModelCache.GetAsync(repo, $"{subfolder}/{indexName}", category, ct: cancel).ConfigureAwait(false);
+            }
+            catch (FileNotFoundException ex)
+            {
+                Logs.Debug($"[Audio] '{repo}/{subfolder}' has no {indexName} ({ex.Message}); trying the next layout.");
+                continue;
+            }
+            Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(StringComparer.Ordinal);
+            List<IDisposable> loaders = [];
+            foreach (string shard in ReadShardNames(indexPath))
+            {
+                string shardPath = await AudioModelCache.GetAsync(repo, $"{subfolder}/{shard}", category, ct: cancel).ConfigureAwait(false);
+                SafeTensorsLoader shardLoader = new SafeTensorsLoader();
+                shardLoader.Load(shardPath);
+                loaders.Add(shardLoader);
+                foreach (KeyValuePair<string, Tensor> entry in shardLoader.GetAllTensors())
+                {
+                    merged[entry.Key] = entry.Value;
+                }
+            }
+            return (merged, [.. loaders]);
+        }
+        throw new FileNotFoundException($"'{repo}/{subfolder}' has no safetensors weights (single-file or sharded).");
+    }
+
     /// <summary>Loads a local checkpoint by extension: safetensors (mmap) or a PyTorch pickle.</summary>
     internal static (IReadOnlyDictionary<string, Tensor> Tensors, IDisposable Loader) LoadFile(string path)
     {
