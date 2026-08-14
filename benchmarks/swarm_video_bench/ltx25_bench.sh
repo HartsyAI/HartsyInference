@@ -25,7 +25,10 @@ REPO=/home/hartsy/Desktop/HartsyInference
 CLI=${LTX25_BENCH_CLI:-$REPO/src/HartsyInference.Cli/bin/Release/net10.0/HartsyInference.Cli.dll}
 MODEL_DIR=${LTX25_BENCH_MODEL:-$REPO/Models/Stable-Diffusion/LTX-2.5}
 OUT=${LTX25_BENCH_OUT:-/tmp/ltx25_bench}
-PROMPT=${LTX25_BENCH_PROMPT:-"a lone lighthouse keeper walking along a rocky coastline at sunset, waves crashing, cinematic wide shot, volumetric light, highly detailed, 35mm film look"}
+# `-` not `:-` on purpose: an EXPLICITLY EMPTY LTX25_BENCH_PROMPT must stay empty, because the empty prompt is
+# the unconditional-prior control for conditioning experiments. With `:-` it silently fell back to the default
+# below, so an "empty prompt" run generated a normal prompt and any prior measured from it was meaningless.
+PROMPT=${LTX25_BENCH_PROMPT-"a lone lighthouse keeper walking along a rocky coastline at sunset, waves crashing, cinematic wide shot, volumetric light, highly detailed, 35mm film look"}
 
 # The 4090 is nvidia-smi index 1 (PCI 04:00.0); the 3060 is index 0. CUDA_VISIBLE_DEVICES alone defaults to
 # fastest-first, so it and nvidia-smi disagree about what "1" means. CUDA_DEVICE_ORDER=PCI_BUS_ID makes them
