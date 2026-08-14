@@ -640,3 +640,32 @@ Work top to bottom; each step is independent and none requires a rebuild.
 `CommonModels.cs`, the `Models/VAE/LTX-2/` files themselves, `Data/Settings.fds`, the systemd unit file, and
 the SwarmUI binary. That is deliberate — every change in this runbook is a symlink, a drop-in file, an API
 parameter, or a UI toggle.
+
+---
+
+## Independent re-verification of the `vae` param override (2026-08-14)
+
+The whole ComfyUI arm rests on one claim — that a per-generation `vae` param beats the known-models table — so it
+was checked a second time, by a different reader, against the source rather than the doc.
+
+**Confirmed, with the guard the first pass did not mention.** `ModelLoadHelpers.DoVaeLoader`
+(`WorkflowGeneratorModelSupport.cs:527-541`) reads:
+
+```csharp
+if (!g.NoVAEOverride && g.UserInput.TryGet(T2IParamTypes.VAE, out T2IModel vaeModel))
+{ vaeFile = vaeModel.Name; nodeId = "11"; }
+...
+if (string.IsNullOrWhiteSpace(vaeFile) && knownFile is not null && ...) { vaeFile = knownFile.FileName; }
+```
+
+The user param wins, and `CommonModels.Known[...]` is only consulted when it is empty — but the whole branch is
+gated on `!g.NoVAEOverride`, which the first pass did not check. **`NoVAEOverride = true` is set in exactly two
+places** (`WorkflowGenerator.cs:2732` and `:2750`), both on the **PiD pixel-decoder** paths
+(`CreatePidCompatLatent`, `CreatePixelDecode`). Neither is on a plain text-to-video decode, so for this benchmark
+the flag is false and the override applies.
+
+Worth restating because it is the failure mode that would waste a campaign: if `NoVAEOverride` *were* set, the
+`vae` param would be **silently ignored** and Comfy would decode with the conv VAE from the registry while the
+run looked entirely healthy — producing a "diffusion-vs-diffusion" row that was really conv-vs-diffusion. So the
+runbook's instruction to read the VAE path out of the logged workflow JSON is not belt-and-braces; it is the only
+thing that distinguishes those two outcomes. Do not skip it.
