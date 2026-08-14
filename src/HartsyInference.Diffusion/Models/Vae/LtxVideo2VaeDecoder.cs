@@ -282,10 +282,15 @@ public sealed unsafe class LtxVideo2VaeDecoder
 
     /// <summary>Per-channel latent un-normalization <c>z[b,c,t,h,w] = latent·std[c] + mean[c]</c> over the
     /// 5-D latent. Returns a clone when no stats are configured.</summary>
-    private Tensor Denormalize(Tensor latent)
+    private Tensor Denormalize(Tensor latent) => DenormalizeLatent(latent, _latentsMean, _latentsStd);
+
+    /// <summary>Per-channel <c>x·std + mean</c> into a fresh F32 tensor (a plain copy when either stat is absent).
+    /// Public because the LTX-2.5 diffusion decoder takes an already-un-normalized latent, so its caller has to do
+    /// this step itself and must do it identically.</summary>
+    public static Tensor DenormalizeLatent(Tensor latent, float[]? latentsMean, float[]? latentsStd)
     {
         Tensor latF32 = latent.DType == DType.F32 ? latent : latent.CastTo(DType.F32);
-        if (_latentsMean is null || _latentsStd is null)
+        if (latentsMean is null || latentsStd is null)
         {
             Tensor clone = new Tensor(latF32.Shape, DType.F32);
             Buffer.MemoryCopy((void*)latF32.DataPointer, (void*)clone.DataPointer,
@@ -301,7 +306,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
         for (int bi = 0; bi < b; bi++)
             for (int ci = 0; ci < c; ci++)
             {
-                float std = _latentsStd[ci], mean = _latentsMean[ci];
+                float std = latentsStd[ci], mean = latentsMean[ci];
                 long basePos = ((long)bi * c + ci) * spatial;
                 for (long s = 0; s < spatial; s++) op[basePos + s] = xp[basePos + s] * std + mean;
             }

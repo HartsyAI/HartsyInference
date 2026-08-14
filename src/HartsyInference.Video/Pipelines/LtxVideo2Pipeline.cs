@@ -39,6 +39,10 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     private readonly LtxVideo2Transformer _transformer;
     private readonly LtxVideo2TextConnectors _connectors;
     private readonly LtxVideo2VaeDecoder _vae;
+    // LTX-2.5's diffusion video decoder, when the checkpoint ships it. Takes an ALREADY-un-normalized latent plus
+    // injected noise, so the denormalization the conv decoder does internally happens at the call site instead.
+    private readonly LtxVideo25DiffusionDecoder? _diffusionVae;
+    private readonly float[]? _videoLatentsMean, _videoLatentsStd;
     private readonly LtxAudioVaeDecoder? _audioVae;
     private readonly LtxAudioVocoder? _vocoder;
     private readonly ILtx2TextTower _gemma;
@@ -73,7 +77,9 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     public LtxVideo2Pipeline(IBackend backend, LtxVideo2Transformer transformer, LtxVideo2TextConnectors connectors,
         LtxVideo2VaeDecoder vae, ILtx2TextTower gemma, LtxVideo2Config config,
         LtxAudioVaeDecoder? audioVae = null, LtxAudioVocoder? vocoder = null,
-        float[]? audioLatentsMean = null, float[]? audioLatentsStd = null)
+        float[]? audioLatentsMean = null, float[]? audioLatentsStd = null,
+        LtxVideo25DiffusionDecoder? diffusionVae = null,
+        float[]? videoLatentsMean = null, float[]? videoLatentsStd = null)
         : base(backend)
     {
         _transformer = transformer;
@@ -85,6 +91,9 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         _vocoder = vocoder;
         _audioLatentsMean = audioLatentsMean;
         _audioLatentsStd = audioLatentsStd;
+        _diffusionVae = diffusionVae;
+        _videoLatentsMean = videoLatentsMean;
+        _videoLatentsStd = videoLatentsStd;
     }
 
     /// <summary>Result of a text-to-video generation: interleaved-RGB frames plus the (optional) decoded stereo
@@ -440,7 +449,18 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         // real margin.
         long perPixel = _vae.ComputeDtype == DType.F32 ? 160L : 104L;
         long decodeNeed = Math.Max(3L << 30, (long)numFrames * height * width * perPixel);
-        if (_prefixResident && ReferenceEquals(VaeBackend, Backend) && Backend.FreeMemoryBytes() < decodeNeed)
+        // The diffusion decoder's stage-5 trunk is a transformer over patchified pixels, and nothing here models its
+        // windowed-attention workspaces — a bracket that is merely too small silently skips eviction and OOMs mid
+        // decode. Give it everything the prefix is holding instead and pay the re-preload.
+        if (_diffusionVae is not null && _prefixResident && ReferenceEquals(VaeBackend, Backend))
+        {
+            Logs.Info($"[ltx2-phase] dropping the resident prefix for the diffusion VAE decode "
+                + $"(free {Backend.FreeMemoryBytes() >> 20} MB before).");
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            Backend.TrimMemoryPool();
+            _prefixResident = false;
+        }
+        else if (_prefixResident && ReferenceEquals(VaeBackend, Backend) && Backend.FreeMemoryBytes() < decodeNeed)
         {
             // Free only the TAIL of the prefix the decode is actually short of, from the end so the pin at
             // _residentPrefixBlocks still describes the survivors. Dropping all 48 blocks to reclaim a ~400 MB
@@ -483,7 +503,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         Logs.Info($"[ltx2-phase] latent unpack (host): {phase.ElapsedMilliseconds} ms");
         phase.Restart();
         ProbeTensor("pre-decode videoVaeLatent", videoVaeLatent);
-        Tensor rgb = _vae.Decode(VaeBackend, videoVaeLatent);
+        Tensor rgb = DecodeVideo(videoVaeLatent, tLat, hLat, wLat, seed);
         videoVaeLatent.Dispose();
         if (!ReferenceEquals(VaeBackend, Backend)) VaeBackend.Sync();
         Backend.Sync();
@@ -594,6 +614,29 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         double factor = Math.Sqrt(varC / n) / Math.Max(Math.Sqrt(varG / n), 1e-8);
         double a = rescale * factor + (1f - rescale);
         Backend.CfgEulerStep(z, cond, uncond, guidance, (float)(a * delta));
+    }
+
+    /// <summary>Decodes the unpacked video latent to RGB through whichever decoder the checkpoint shipped. The
+    /// conv decoder un-normalizes internally; the diffusion decoder does not, and needs injected noise — seeded off
+    /// the generation seed so a repeated generation still reproduces.</summary>
+    private Tensor DecodeVideo(Tensor videoVaeLatent, int tLat, int hLat, int wLat, int seed)
+    {
+        if (_diffusionVae is null)
+        {
+            return _vae.Decode(VaeBackend, videoVaeLatent);
+        }
+        Tensor denorm = LtxVideo2VaeDecoder.DenormalizeLatent(videoVaeLatent, _videoLatentsMean, _videoLatentsStd);
+        ProbeTensor("diffusion-decoder latent (denormalized)", denorm);
+        Tensor noise = SeedGenerator.CreateNoise(_diffusionVae.NoiseShape(tLat, hLat, wLat), seed ^ 0x2D5B);
+        try
+        {
+            return _diffusionVae.Decode(VaeBackend, denorm, noise);
+        }
+        finally
+        {
+            denorm.Dispose();
+            noise.Dispose();
+        }
     }
 
     /// <summary>Writes a stage tensor as raw little-endian F32 + a shape sidecar into

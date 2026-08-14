@@ -1,4 +1,5 @@
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -128,15 +129,23 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             LtxVideo2TextConnectors connectors = new LtxVideo2TextConnectors(config);
             connectors.LoadWeights(conv.Connectors);
 
-            // The 2.5 diffusion decoder is ported and parity-checked (LtxVideo25DiffusionDecoder) but not yet on
-            // this pipeline's decode path, and its weights share module names with the conv decoder — loading one
-            // against the other fails deep inside with an unhelpful missing-key error. Say so here instead.
-            if (conv.VaeDiffusionDecoder.Count > 0)
+            // LTX-2.5's diffusion video decoder ("sharper faces, legible text, fewer smears" per the model card) is
+            // what the official workflows decode with. Its weights share module names with the conv decoder, so the
+            // converter keeps them in their own bucket and only one of the two is ever present.
+            // Its stage-5 trunk runs a transformer over patchified PIXELS, so its peak scales with output area far
+            // more steeply than the conv stack's — hence the escape hatch when a geometry does not fit.
+            bool forceConvVae = EnvSwitch.IsEnabled("HARTSY_LTX2_CONV_VAE", defaultOn: false);
+            LtxVideo25DiffusionDecoder? diffusionVae = null;
+            if (conv.VaeDiffusionDecoder.Count > 0 && forceConvVae)
             {
-                throw new InvalidOperationException(
-                    $"LTX-2 checkpoint '{context.CheckpointPath}' carries the LTX-2.5 diffusion video VAE "
-                    + $"({conv.VaeDiffusionDecoder.Count} decoder tensors), which this pipeline does not decode with yet. "
-                    + "Supply the convolutional VAE instead (ltx-2.5-video-vae-conv-bf16.safetensors).");
+                Logs.Info("[LtxVideo2Recipe] HARTSY_LTX2_CONV_VAE set — ignoring the diffusion video decoder.");
+            }
+            else if (conv.VaeDiffusionDecoder.Count > 0)
+            {
+                diffusionVae = new LtxVideo25DiffusionDecoder();
+                diffusionVae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.VaeDiffusionDecoder, DType.F32));
+                Logs.Info($"[LtxVideo2Recipe] LTX-2.5 diffusion video decoder loaded "
+                    + $"({conv.VaeDiffusionDecoder.Count} tensors); the conv decoder is bypassed.");
             }
             // Gemma 4 (LTX-2.5) vs Gemma 3 (LTX-2.3). `layer_scalar` is the discriminator because it is per-block
             // and Gemma 3 has no counterpart; do NOT probe for a missing v_proj — layer 0 is a sliding layer and
@@ -151,7 +160,17 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             DType vaeDtype = VaePrecisionHelper.PreferredVaeDtype(context.Backend);
             LtxVideo2VaeDecoder vae = new LtxVideo2VaeDecoder(latentsMean: videoMean, latentsStd: videoStd,
                 computeDtype: vaeDtype);
-            vae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.Vae, vaeDtype));
+            // A diffusion-decoder checkpoint carries no conv decoder keys, so only load one when they are there.
+            if (conv.Vae.ContainsKey("decoder.conv_in.conv.weight"))
+            {
+                vae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.Vae, vaeDtype));
+            }
+            else if (diffusionVae is null)
+            {
+                throw new InvalidOperationException(
+                    $"LTX-2 checkpoint '{context.CheckpointPath}' has no usable video decoder: no conv decoder keys "
+                    + "and no diffusion decoder (or it was disabled via HARTSY_LTX2_CONV_VAE).");
+            }
 
             LtxAudioVaeDecoder? audioVae = null;
             LtxAudioVocoder? vocoder = null;
@@ -219,7 +238,8 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 tokenizer = new GemmaTokenizer(LocateGemmaTokenizer(context.CheckpointPath, gemmaSidePath), maxLength: TokenLength);
             }
 
-            LtxVideo2Pipeline pipeline = new LtxVideo2Pipeline(context.Backend, transformer, connectors, vae, gemma, config, audioVae, vocoder, audioMean, audioStd)
+            LtxVideo2Pipeline pipeline = new LtxVideo2Pipeline(context.Backend, transformer, connectors, vae, gemma, config,
+                audioVae, vocoder, audioMean, audioStd, diffusionVae, videoMean, videoStd)
             {
                 MinimumTextConditioningLength = tokenizer.MinimumConditioningLength,
                 TextEncoderBackend = context.TextEncoderBackendOrDefault,

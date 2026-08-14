@@ -60,6 +60,31 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 ### Numeric validation
 - [ ] All models are built structurally; numeric parity vs a Python reference is pending for every one not already ✅ (LTX 0.9 / 0.9.5 / 13B and LTX-2 22B are verified e2e).
 
+### LTX-2.5 diffusion video decoder — wired 2026-08-13, NOT yet the default
+- [x] **`LtxVideo25DiffusionDecoder` is on the pipeline's decode path.** `LtxVideo2Recipe` used to *refuse* it
+  ("this pipeline does not decode with yet — supply the convolutional VAE instead"), so every LTX-2.5 generation
+  ever made went through the conv decoder. Lightricks' own shipped ComfyUI templates
+  (`video_ltx2_5_{t2v,i2v}.json`) load `ltx-2.5-video-vae-bf16.safetensors`, and the model card credits that
+  decoder by name with *"sharper faces, legible text, fewer smears in fast motion"* — the exact softness a user
+  reported. Selection is by which video VAE file the model directory carries; `HARTSY_LTX2_CONV_VAE=1` forces the
+  conv path for a bundled checkpoint holding both.
+- [ ] **BLOCKER before it can be the default: `LtxVideo25NeighborhoodAttention3d.ApplyRope` runs on the HOST.**
+  It rotates every `(t,h,w,head)` position through `x.DataPointer`, dragging q and k off the GPU and back on every
+  NA block (16 of them). The attention itself is already a device kernel (`backend.Na3d`); it is only the rope.
+  At 512×320×25f — ~256k token positions, ~0.5 GB of q+k per round trip — the decode runs for many minutes at
+  ~30% GPU utilization. The parity tests only ever ran a **1×2×2 latent**, where that cost is invisible, which is
+  why it was never noticed.
+  Scope it as a **new kernel modelled on `IBackend.OasisRopeInterleaved`**, NOT a port of the DiT's
+  `ltx2_qk_norm_rope_headmajor_*`: this rope is *interleaved* (pairs `2i, 2i+1`) where the DiT's is *split*
+  (pairs `i, i+headDim/2`), and it rotates three contiguous per-axis chunks with a different coordinate each
+  (`_ropeSplit.(T,H,W)` at offsets 0 / T / T+H, indexed by the token's t / h / w). Embarrassingly parallel —
+  one thread per (token, head, pair), no reductions.
+- [ ] **Memory is unmodelled at scale.** The stage-5 trunk is a transformer over patchified pixels: at
+  768×512×97f the context is ~2.4M tokens (~5 GB per activation). A too-small VRAM bracket is worse than none —
+  it silently skips the prefix eviction and OOMs mid-decode — so this path now drops the whole resident prefix
+  unconditionally. The official templates decode it **tiled** (`VAEDecodeTiled [512, 64, 64, 16]`); we have no
+  tiling for it, so expect a geometry ceiling well below the official 0.9 MP default.
+
 ### Wan / LTX open items
 - [x] **Wan `EndFrame` real wiring on the non-concat path — DONE 2026-08-11 for `wan-22-5b`.**
   `GenerateFromEmbeddings`/`GenerateFramesAsync`/the internal `RunDenoise` now take an optional
