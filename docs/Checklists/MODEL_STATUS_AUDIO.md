@@ -456,6 +456,17 @@ characterized; `MiniMaxMusic3FlowParityTests` (reference frame hiddens + forced 
 experiment that isolates whether the AR stage is the only thing wrong. Until both pass, the AR loop and the
 overlap/carry logic are covered only by their component pieces and by listening.
 
+**Flow-stage divergence (measured, 2026-08-13)**: with the reference's own `flow_frame_hiddens` and forced noise,
+window 0 comes out `meanAbs 0.395 / maxAbs 2.57 / corr 0.870`. Window 0 has no overlap, so the blend, splice and
+carry logic are NOT implicated — the divergence is in the per-step loop itself. Two things are already ruled out:
+the full 36-layer DiT matches a single forward at <1e-3, and the schedule is confirmed correct (the checkpoint's
+`invert_sigmas` config really does yield timesteps `[0, .25, .5, .75]` with sigmas `[0, .25, .5, .75, 1.0]`, i.e.
+a uniform `1/N` Euler walk — verified by instantiating the reference scheduler). The live hypothesis is the
+guidance convention: the reference routes through diffusers' `ClassifierFreeGuidance` guider at scale 1.7, and if
+that is cond-anchored (`cond + s·(cond − uncond)`) rather than uncond-anchored, this port's `CfgHelper.ApplyCfg`
+is off by exactly one unit of `(cond − uncond)` — which is the right shape of error for corr 0.87 at the right
+magnitude. `CfgHelper.ApplyCfgCondAnchored` already exists. Check the guider's source before changing anything.
+
 **Levels**: a 17.8 s multi-window clip (3060, `:q4`) measures -19.5 dBFS peak 0.60 against the official 32 kHz
 asset's -16.6, with no level step at either window seam (0.97 ratio at 5.0 s and 12.0 s). Clips under ~10 s measure
 20 dB quieter — that is intro material, not a decode bug, and it is the third short-clip level scare on this
