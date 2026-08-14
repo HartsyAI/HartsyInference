@@ -461,11 +461,16 @@ window 0 comes out `meanAbs 0.395 / maxAbs 2.57 / corr 0.870`. Window 0 has no o
 carry logic are NOT implicated — the divergence is in the per-step loop itself. Two things are already ruled out:
 the full 36-layer DiT matches a single forward at <1e-3, and the schedule is confirmed correct (the checkpoint's
 `invert_sigmas` config really does yield timesteps `[0, .25, .5, .75]` with sigmas `[0, .25, .5, .75, 1.0]`, i.e.
-a uniform `1/N` Euler walk — verified by instantiating the reference scheduler). The live hypothesis is the
-guidance convention: the reference routes through diffusers' `ClassifierFreeGuidance` guider at scale 1.7, and if
-that is cond-anchored (`cond + s·(cond − uncond)`) rather than uncond-anchored, this port's `CfgHelper.ApplyCfg`
-is off by exactly one unit of `(cond − uncond)` — which is the right shape of error for corr 0.87 at the right
-magnitude. `CfgHelper.ApplyCfgCondAnchored` already exists. Check the guider's source before changing anything.
+a uniform `1/N` Euler walk — verified by instantiating the reference scheduler). **The guidance convention is also ruled out** — I checked the guider
+rather than assuming: diffusers' `ClassifierFreeGuidance` defaults to `use_original_formulation=False`, i.e.
+`uncond + s·(cond − uncond)` with `guidance_rescale=0.0`, which is exactly `CfgHelper.ApplyCfg`. Do NOT switch to
+`ApplyCfgCondAnchored`.
+
+So the cause is still unlocated. What remains inside window 0's loop: the condition tensor actually handed to the
+DiT (the encoder passed at <1e-5 on a 40-frame case, but the flow test slices a 300-frame dump to 200), the
+Fourier/timestep embedding at non-zero `t` (the DiT parity probed t=0 and t=0.5 and passed, so this is unlikely),
+and the forced-noise layout. The cheapest next probe is to dump the reference's post-step-0 latents and compare a
+SINGLE Euler step — that separates "one step is wrong" from "the steps compound wrong".
 
 **Levels**: a 17.8 s multi-window clip (3060, `:q4`) measures -19.5 dBFS peak 0.60 against the official 32 kHz
 asset's -16.6, with no level step at either window seam (0.97 ratio at 5.0 s and 12.0 s). Clips under ~10 s measure
